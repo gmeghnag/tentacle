@@ -71,6 +71,11 @@ function fakeHop(opts: { fail?: string } = {}) {
   // OD6's pending line, as the cli feed keeps it: set by a settled hop, CONSUMED by
   // the next real prompt (the App takes it in `run`).
   let pending: string | null = null;
+  // The fact the last `takeLine` handed out, so a failed send can put it back
+  // (`restoreLine`) — the cli feed's own behaviour, mirrored here.
+  let taken: string | null = null;
+  /** How many times the App handed the line back (the driver's failure path). */
+  let restored = 0;
   const feed: HopFeed = {
     label: (spec) => (spec.target === "local" ? "local" : "docker:box"),
     start(spec) {
@@ -101,14 +106,25 @@ function fakeHop(opts: { fail?: string } = {}) {
     takeLine(ctx) {
       const line = pending;
       pending = null;
+      taken = line;
       return line === null ? null : `${line} [auto-accept ${ctx.autoAccept ? "on" : "off"}]`;
+    },
+    restoreLine() {
+      restored += 1;
+      if (taken !== null && pending === null) {
+        pending = taken;
+      }
+      taken = null;
     },
     clearPending() {
       pending = null;
+      taken = null;
     },
   };
   return {
     feed,
+    /** How many times the App handed a consumed line back (`restoreLine`). */
+    restored: () => restored,
     /** What the next prompt will carry (a settled hop sets it, as the feed does). */
     setPending: (line: string | null) => {
       pending = line;
@@ -666,6 +682,87 @@ describe("OD6 a /move typed at rest waits for the user; the line rides their nex
     expect(log.sends).toHaveLength(1);
     expect(log.sends[0]?.startsWith("[session moved to docker:box")).toBe(true);
     expect(log.sends[0]?.endsWith("hello there")).toBe(true);
+    app.unmount();
+  });
+});
+
+// docs/feat/session-hop-ux, failure mode "Wake prompt fails to send": a send that
+// throws must not eat the line — the next real prompt carries it.
+describe("a WAKE whose send fails gives the line back (review round 1, MEDIUM 3)", () => {
+  /**
+   * A session whose SECOND send throws (a link down on the wake) and whose third
+   * works. The first is the long turn the `/move` was typed during (D4): that is
+   * what makes the hop's origin `queued`, the origin that wakes.
+   */
+  function flakySession(log: { sends: string[] }, wait: { release: () => void }) {
+    let call = 0;
+    return {
+      async *send(prompt: string) {
+        call += 1;
+        log.sends.push(prompt);
+        if (call === 1) {
+          yield { type: "text", delta: "working" };
+          await new Promise<void>((resolve) => {
+            wait.release = resolve;
+          });
+          yield { type: "turn_end", reason: "end_turn" };
+          return;
+        }
+        if (call === 2) {
+          throw new Error("the link is down");
+        }
+        yield { type: "text", delta: "ok" };
+        yield { type: "turn_end", reason: "end_turn" };
+      },
+      watch() {
+        return () => {};
+      },
+      async openForReset() {},
+    } satisfies SessionController;
+  }
+
+  test("the failed wake's line rides the NEXT typed prompt instead of vanishing", async () => {
+    // RED before the fix: `takeLine` consumed the fact and the send threw, so the
+    // model never learned the session had moved. Mutation: drop
+    // `hopTurn?.restoreLine?.()` from the driver's catch → the second send carries
+    // no `[session moved to` at all (and `restored()` is 0).
+    const log = { sends: [] as string[] };
+    const wait = { release: () => {} };
+    const hop = fakeHop();
+    const app = render(
+      <App
+        createSession={() => flakySession(log, wait)}
+        model="m"
+        cwd="/tmp/work"
+        hop={hop.feed}
+        columns={80}
+      />,
+    );
+    await delay(40);
+    await type(app.stdin, "a long turn", 60);
+    expect(log.sends).toEqual(["a long turn"]);
+    // A `/move` typed MID-TASK: queued (D4), and its origin is `queued` — the
+    // origin that wakes the model once the hop settles.
+    await type(app.stdin, "/move container", 60);
+    expect(hop.started).toEqual([]);
+    wait.release();
+    await delay(160);
+    expect(hop.started).toEqual(["container"]);
+    // The hop settles with a line for the model: the wake fires at once.
+    hop.setPending("[session moved to docker:box");
+    hop.settle({ failed: "not moved: nope" });
+    await delay(150);
+    // The wake was attempted ONCE, with the line in front…
+    expect(log.sends).toHaveLength(2);
+    expect(log.sends[1]?.startsWith("[session moved to docker:box")).toBe(true);
+    expect(log.sends[1]?.endsWith("Continue the task from here.")).toBe(true);
+    // …and its failure handed the line back rather than burning it.
+    expect(hop.restored()).toBe(1);
+    // The user tries again: the line is there, once.
+    await type(app.stdin, "still there?", 150);
+    expect(log.sends).toHaveLength(3);
+    expect(log.sends[2]?.startsWith("[session moved to docker:box")).toBe(true);
+    expect(log.sends[2]?.endsWith("still there?")).toBe(true);
     app.unmount();
   });
 });

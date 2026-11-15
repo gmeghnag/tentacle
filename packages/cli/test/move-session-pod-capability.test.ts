@@ -39,7 +39,10 @@ beforeAll(async () => {
     configDir: join(dir, "config"),
     cwd: dir,
     scaffold: false,
-    env: { HOME: dir, TENTACLE_MODEL_API_KEY: "k" },
+    // OD8 (fix round 1): the tool is OFF by default, so this rig OPT IN — the
+    // two rows below are about the CLIENT CAPABILITY, not the setting, and with
+    // the setting off both would pass for the wrong reason (non-vacuity).
+    env: { HOME: dir, TENTACLE_MODEL_API_KEY: "k", TENTACLE_SESSION_HOP_TOOL: "true" },
   });
 });
 
@@ -97,6 +100,9 @@ describe("H5 review 1: a pod session is offered `move_session` only where a hop 
     expect(names).not.toContain("move_session");
     // Non-vacuity: the registry really is populated (other tools are offered).
     expect(names.length).toBeGreaterThan(0);
+    // …and the SETTING is on in this rig (OD8), so the absence above is the
+    // capability's doing, not the default's.
+    expect(config.sessionHop.tool).toBe(true);
   });
 
   test("a hop-capable client (a hop target's own spawn) IS offered it", async () => {

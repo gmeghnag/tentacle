@@ -3,7 +3,7 @@
 > **Status:** approved (Implementation revised to the owner's complete decisions, 2026-11-14 23:40)
 > **Branch:** `feat/session-hop-ux`
 > **Size:** M (slices M · S · M) · **Blast:** load-bearing (slice 3 changes what auto-accept may answer on the single broker and adds an automatic prompt after a move, AGENTS §7 "a pod is not trusted"; slice 1 changes the `kubernetes:` grammar and what a pod-supplied proposal can target) · **Suited:** slices 1–2 DeepSeek; slice 3 a strong model + **mandatory fresh-context Opus review** red-teaming §7 (single broker, pod not trusted)
-> **Changelog:** `changelog.d/session-hop-ux.fixed.md` (namespace default + one progress line) and `changelog.d/session-hop-ux.changed.md` (`kubernetes:<ns>/<pod>[/<container>]`; auto-accept answers model moves except toward local from a workload, and survives a hop; the session continues by itself after a move; new `move_session` description)
+> **Changelog:** `changelog.d/session-hop-ux-namespace.changed.md`, `-live-line.fixed.md`, `-autoaccept.changed.md`, `-survives.changed.md`, `-wake.changed.md`, `-description.changed.md` and (OD8, fix round 1) `-tool-off.changed.md`
 
 ## Context
 
@@ -510,9 +510,9 @@ In dependency order:
 | **Auto-accept toggled between proposal and turn end** | The gate reads `autoApproveRef` at request time (`permission-ui.ts:424`), like every tool. |
 | **Forged `session_hop`/`hopAuto` from a daemon** | Impossible: `toPermissionRequest` allowlist; test asserts it. |
 | **Wake loop** (model proposes → fails/declined → wake → proposes again …) | `HOP_WAKE_CHAIN_MAX = 3` consecutive wakes without a user prompt ⇒ hold + one notice; the line rides the next real prompt. The declined hint still says not to repeat. |
-| **Wake when not idle** (foreign turn, queued rows, compaction, user prompt sent during the hop) | `hopReady` false ⇒ hold; the line is consumed by the next real prompt. Never two copies (`takeLine` consumes once). |
+| **Wake when not idle** (foreign turn, queued rows, compaction, user prompt sent during the hop) | `hopReady` false ⇒ hold (`hopWakeStep`'s `ready` input); the line is consumed by the next real prompt. Never two copies (`takeLine` consumes once). Tested at both layers: the pure rule and `useHop`'s two call sites (fix round 1, MEDIUM 2). |
 | **Wake after quit / during `/clear`** | `exitPendingRef` path wakes nothing (`useTurnDriver.ts:672-676`); a `/clear` drops the session view ⇒ the pending fact is cleared with it (`takeLine` on the new session would carry a stale place — the executor clears `pending` on swap-by-clear; test). |
-| **Wake prompt fails to send** (link down) | Same as any prompt: an error row; the line was consumed into that failed prompt's text — the executor must restore it on a send failure, as `restoreChips` does for images (test). |
+| **Wake prompt fails to send** (link down) | Same as any prompt: an error row; the line was consumed into that failed prompt's text, so the driver HANDS IT BACK (`hop.restoreLine`) whenever the turn never streamed — the next real prompt carries it, exactly as `restoreChips` restores images. A newer fact wins over the restored one. Tested at the feed and at the frame (fix round 1, MEDIUM 3). |
 
 ### Tests
 
@@ -531,6 +531,10 @@ Each red-first on today's code; **mutation** named where it proves non-vacuity.
   description ≤ 600 chars and contains `kubectl`, `namespace`, `auto-accept`,
   `end of`/`ends`, `reset`, NOT `turned off` (**red**: today 1 100+ chars and says
   "turned off"). **Mutation:** append the old paragraph ⇒ fails.
+- `cli/test/move-session-wiring.test.ts` — **OD8**: a default config's
+  `sessionHop.tool` is `false` and the tool is ABSENT from the model's tool list;
+  `sessionHop.tool: true` offers it (**red**: the default was `true`).
+  **Mutation:** restore the default ⇒ both rows fail.
 - `cli/test/hop-proposal.test.ts` — `hopSpecOf` carries ns; detail shows
   `kubernetes:openshift-etcd/etcd-0/etcdctl` and the provenance.
 - `cli/test/hop-feed-turn.test.ts` — **pin property:** `pinNamespace` returns
@@ -539,7 +543,11 @@ Each red-first on today's code; **mutation** named where it proves non-vacuity.
   request.
 - `cli/test/session-hop-targets.test.ts` — attach calls `host("kubernetes",
   { namespace: "ns-A" })`; a `WorkloadNotFoundError` ⇒ `kubernetes:<ns>/<pod>`
-  advice, never `--namespace`.
+  advice, never `--namespace`. OD3's visibility where NO prompt exists (fix round
+  1, MEDIUM 4): the attach's FIRST status line carries the provenance, a miss
+  repeats `(from <source>)`, a typed `kubernetes:<pod>` gets the namespace the
+  host dialled in its built place, and `session-hop.test.ts` pins the same trace
+  on the outcome's `note` (the record under auto-accept).
 
 **Slice 2:**
 - `cli/test/hop-live-line.test.ts` (fake clock/timers): leading emit; ≤ 1 per
@@ -564,12 +572,15 @@ Each red-first on today's code; **mutation** named where it proves non-vacuity.
   place and cwd, and states `auto-accept on|off` from `ctx`.
 - `tui/test/hop-wake.test.ts` — `hopWakeStep` table: proposal×{moved, failed,
   declined} ⇒ wake; queued×{moved, failed} ⇒ wake; idle×any ⇒ hold; chain 3 ⇒
-  hold. **Mutation:** wake on `idle` ⇒ fails.
+  hold; **`ready: false` ⇒ hold for every origin that would wake** (fix round 1,
+  MEDIUM 2). **Mutation:** wake on `idle` ⇒ fails; drop the `!ready` guard ⇒
+  fails.
 - `cli/test/hop-feed-turn.test.ts` — broker whose requester applies the real
   `autoApproves` with auto ON: a local-origin attach proposal ⇒ approved, no
   dialog, `autoAccepted`; a workload-origin `local` proposal ⇒ reaches the
   dialog (`SpyBroker` sees it). A failed proposed run ⇒ `takeLine` yields
-  `[move failed: …]` (**red**: today null).
+  `[move failed: …]` (**red**: today null). `restoreLine` hands a consumed line
+  back, and never overwrites a newer fact (fix round 1, MEDIUM 3).
 - `client/test/permission-router.test.ts` — `send` has only
   `optionId`/`message` (`auto` never on the wire); `toPermissionRequest` never
   yields `kind`/`hopAuto`.
@@ -791,3 +802,84 @@ Attacks tried with no finding: a forged `hopAuto`/`kind` from a daemon (allowlis
 Executor: careful and well documented, and its mutation log is honest. But it missed the binding OD8 and marked two planned failure-mode tests as covered when they are not. This reviewer is the same model family as the plan's author (Opus); the executor was different.
 
 *— claude-opus-5-5, 2026-11-15*
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-15*
+
+Findings from the Review above, in order. Every fix is red-first and
+mutation-checked; the mutations are pasted below.
+
+**1 (HIGH) OD8 — `move_session` off by default. FIXED.**
+`DEFAULT_SESSION_HOP_TOOL` → `false` (`config/src/defaults.ts:62`), and the
+`key-docs` card rewritten: the summary says "OFF by default", `sample` flips to
+`on` (it must be a VALID env value, T3), and the false claim "never answered by
+auto-accept" is replaced by the real rule (auto-accept answers a proposed move
+except toward local from a workload). `README.md`'s generated table was
+regenerated with `bun run docs:config` (never hand-edited). `docs/feat/session-hop.md`
+D9 got a dated amendment (d) and its "default on" sentence corrected.
+New changelog fragment `changelog.d/session-hop-ux-tool-off.changed.md`.
+Tests: `cli/test/move-session-wiring.test.ts` gained an OD8 describe (default is
+off; a default config does NOT offer the tool; `TENTACLE_SESSION_HOP_TOOL=true`
+does), and the two existing rows that assumed the old default now resolve the
+env explicitly (without that they would have been vacuous).
+
+**2 (MEDIUM) the wake ignored idle. FIXED.**
+`hopWakeStep` gained a `ready` input, checked after the origin/outcome rules: a
+hop that settles while this TUI's turn runs or a row is queued HOLDS, and the line
+rides the next real prompt. Both call sites in `useHop.ts` (the settle's `after()`
+and `wakeSettled`) feed it `hopReady(boundary(...))` — the same reader the queued
+hop uses, so no third definition of "idle" appears.
+
+**3 (MEDIUM) a failed wake send lost the line. FIXED.**
+New `HopFeed.restoreLine` (`tui/src/app-types.ts`, wired through `hopTurnPort` in
+`App.tsx`). The cli feed records what `takeLine` handed out and puts it back — and
+a fact recorded SINCE wins over the restored one, so a stale place is never
+delivered. The driver's `streamTurn` catch calls it when the prompt never streamed
+(`opts.own.hopLine === true && !streamed`): a turn that DID stream carried the
+line inside its user message, so restoring there would say it twice.
+`clearPending` now clears the taken fact too.
+
+**4 (MEDIUM) the OD3 trace was invisible where no prompt is shown. FIXED (three
+parts).**
+- `HopEngineHost.namespace?: KubeNamespace` — the host reports what it really
+  dialled and why. `main.ts`'s `hopEngineHost` resolves `kubeNamespace` ONCE and
+  pins that value into `buildEngineHost`, so the trace and the dialled place
+  cannot come from two different reads.
+- `attachTarget`'s FIRST status line carries `namespaceTrace` (design 1) and a
+  k8s miss now repeats `(from <source>)` (design 7).
+- The typed `/move attach kubernetes:<pod>` case: `dialledWorkload` writes the
+  host's namespace into the built place, so the badge, the moved line and the
+  wake line print `kubernetes:<ns>/<pod>`, never `kubernetes:<pod>`.
+- `HopBuilt.trace` carries the provenance into the outcome's `note`, which is the
+  record that survives under auto-accept (no prompt) and after a typed `/move`.
+
+No drift from the plan otherwise; the plan's failure-mode rows for "wake when not
+idle" and "wake prompt fails to send" (which the review found unimplemented) are
+now implemented and their rows updated, and the Tests section names the new rows.
+
+**Mutations run (each pasted result, then reverted).**
+
+| Target | Mutation | Result |
+|---|---|---|
+| OD8 default | `DEFAULT_SESSION_HOP_TOOL = true` | 2 fails in `move-session-wiring` ("default is off", "does not offer it") |
+| `hopWakeStep` idle guard | dropped the `!ready` branch | `hop-wake.test`'s "NOT idle ⇒ hold" row fails |
+| `useHop` wiring | `ready: hopReady(...)` → `ready: true` | 3 fails in `use-hop.test.tsx` (running turn, queued row, `wakeSettled`) |
+| `useHop` wiring | dropped both `ready:` lines entirely | the same 3 + the idle control (compile-driven; reverted to the `true` mutation for the clean signal) |
+| `restoreLine` in the feed | removed the `pending = taken` restore | `hop-feed-turn`'s "hands the line back" row fails |
+| driver's catch | dropped `hopTurn?.restoreLine?.()` | `session-hop.test.tsx`'s "line rides the NEXT typed prompt" row fails (`restored() === 0`) |
+| `session-hop` outcome trace | dropped the `target.trace` step | the OD3 outcome row fails (no `from context`) |
+| attach provenance | (pure function, asserted directly) | — the two `session-hop-targets` OD3 rows fail without the fix (shown red first) |
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (1383 files, 0 errors,
+0 warnings — the §6 baseline) · `bun test`: **10041 pass / 4 skip / 0 fail**
+(10045, 722 files; the 4 skips are the three opt-in ones of §6 plus the
+environment-gated 4th the review also saw — no new or non-opt-in skip).
+
+One pre-existing test needed its rig to opt in, and it is honest that it did:
+`cli/test/move-session-pod-capability.test.ts` drives the REAL pod host through a
+default config, and with OD8 that default no longer offers the tool — so its two
+rows about the CLIENT CAPABILITY would both have passed for the wrong reason. Its
+`beforeAll` now sets `TENTACLE_SESSION_HOP_TOOL=true` (with an assertion in the
+negative row that the setting really is on), which keeps the row about the
+capability and the OD8 tests about the default.

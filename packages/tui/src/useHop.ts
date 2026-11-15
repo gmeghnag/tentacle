@@ -224,7 +224,15 @@ export function useHop(host: HopHost): HopLayer {
         note?: string,
         autoAccepted = false,
       ): void => {
-        const step = hopWakeStep({ origin, outcome, chain: wakeChainRef.current });
+        const step = hopWakeStep({
+          origin,
+          outcome,
+          chain: wakeChainRef.current,
+          // Never two turns at once (review round 1, MEDIUM 2): a job wake fired
+          // by `wakeIfPending`, or a foreign turn `drainHeld` started, owns the
+          // slot by now — the line then waits for the next real prompt.
+          ready: hopReady(boundary(stateRef, rowsRef, daemonQueueRef)),
+        });
         const continues = step === "wake" && sendWake !== undefined;
         if (continues) {
           wakeChainRef.current += 1;
@@ -278,7 +286,19 @@ export function useHop(host: HopHost): HopLayer {
         },
       );
     },
-    [flushNow, hop, permission, pushNotice, sendWake, sessionRef, swapSession, switchingRef],
+    [
+      daemonQueueRef,
+      flushNow,
+      hop,
+      permission,
+      pushNotice,
+      rowsRef,
+      sendWake,
+      sessionRef,
+      stateRef,
+      swapSession,
+      switchingRef,
+    ],
   );
   startHopRef.current = startHop;
 
@@ -350,14 +370,22 @@ export function useHop(host: HopHost): HopLayer {
    */
   const wakeSettled = useCallback(
     (outcome: "declined" | "failed"): void => {
-      const step = hopWakeStep({ origin: "proposal", outcome, chain: wakeChainRef.current });
+      const step = hopWakeStep({
+        origin: "proposal",
+        outcome,
+        chain: wakeChainRef.current,
+        // Same rule as `after()`: the settle is asynchronous (the ask can wait on
+        // a human), so by now a job wake or a drained foreign turn may own the
+        // slot — the line is then carried by the next real prompt.
+        ready: hopReady(boundary(stateRef, rowsRef, daemonQueueRef)),
+      });
       if (step !== "wake" || sendWake === undefined) {
         return;
       }
       wakeChainRef.current += 1;
       sendWake(HOP_WAKE_ROW);
     },
-    [sendWake],
+    [daemonQueueRef, rowsRef, sendWake, stateRef],
   );
   wakeAfterHopRef.current = wakeSettled;
 

@@ -93,6 +93,14 @@ export function createHopFeed(deps: HopFeedDeps): HopFeedView {
    */
   let turnWatch: HopTurnWatch = NO_HOP_TURN;
   let pending: HopWakeFact | null = null;
+  /**
+   * The fact the LAST `takeLine` handed out, kept so a prompt that never ran can
+   * put it back (`restoreLine`): otherwise a send failure (a link down, a lost
+   * slot) would destroy the only record that the session moved, and the model
+   * would go on assuming it had not (docs/feat/session-hop-ux, failure mode
+   * "Wake prompt fails to send").
+   */
+  let taken: HopWakeFact | null = null;
   const hop: HopFeed = {
     label: (spec) => hopLabel(spec),
     // --- H5: the model's proposal, and the ONE prompt it becomes -----------
@@ -155,12 +163,24 @@ export function createHopFeed(deps: HopFeedDeps): HopFeedView {
       // TUI's live value, so the line can never state a stale mode.
       const fact = pending;
       pending = null;
+      taken = fact;
       return fact === null ? null : hopWakeLine(fact, ctx);
+    },
+    restoreLine: () => {
+      // That prompt never ran (its send failed): the fact goes back, so the NEXT
+      // real prompt carries it. A fact recorded since is the newer truth (it
+      // describes where the session is NOW) and wins — the old one is dropped
+      // rather than delivered as a stale place.
+      if (taken !== null && pending === null) {
+        pending = taken;
+      }
+      taken = null;
     },
     clearPending: () => {
       // A `/clear` swaps the session: a fact about the OLD one (its place, its
       // cwd) would be a lie in the new one's first prompt.
       pending = null;
+      taken = null;
     },
     start: (spec, sessionId, opts) => {
       const mine = listeners;

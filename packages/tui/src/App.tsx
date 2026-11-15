@@ -432,6 +432,9 @@ export function App({
     // OD6: the line is rendered from the TUI's LIVE auto-accept mode, so a moved
     // line never states a stale `on|off`.
     takeLine: (ctx) => hop?.takeLine?.(ctx) ?? null,
+    // The prompt that consumed it never ran (its send failed): hand it back, so
+    // the next real prompt carries it (OD6's failure mode).
+    restoreLine: () => hop?.restoreLine?.(),
     // An approved proposal is an approved `/move`: the ONE place the view moves
     // starts it (D3), through the ref so no dependency cycle is created. OD6: the
     // origin is a MODEL's proposal, which is what lets the session wake afterwards.

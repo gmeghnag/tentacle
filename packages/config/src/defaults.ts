@@ -53,8 +53,13 @@ export const DEFAULT_CONTEXT_STEP_PERCENT = 1;
 /** The model may renew its own context with `context_reset` (docs/feat/context-reset-refresh.md). */
 export const DEFAULT_CONTEXT_RESET_ENABLED = true;
 
-/** `sessionHop.tool`: the agent may PROPOSE moving its session (docs/feat/session-hop.md D9). */
-export const DEFAULT_SESSION_HOP_TOOL = true;
+/**
+ * `sessionHop.tool`: the agent may PROPOSE moving its session (docs/feat/session-hop.md
+ * D9). OFF by default (session-hop-ux OD8, owner 2026-11-15, reversing that doc's
+ * "default on"): a fresh install never offers the tool, and the only way to move is
+ * a `/move` you type. Opt in with `sessionHop.tool: true`.
+ */
+export const DEFAULT_SESSION_HOP_TOOL = false;
 /** Resets allowed per user message; `-1` = unlimited. */
 export const DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE = -1;
 /** Max characters of a tool result kept inline before it is spilled to a file. */

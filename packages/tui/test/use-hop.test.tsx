@@ -27,6 +27,7 @@ import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import { createElement } from "react";
 import type { SessionController } from "../src/app-types.ts";
+import type { HopRun } from "../src/app-types.ts";
 import type { HopSpec } from "../src/hop-command.ts";
 import { HOP_QUEUED_NOTICE } from "../src/hop-command.ts";
 import type { PermissionController } from "../src/permission-ui.ts";
@@ -49,6 +50,10 @@ interface Boundary {
 function harness(opts: Boundary = {}) {
   const notices: string[] = [];
   const started: string[] = [];
+  /** OD6: what the host's `sendWake` was asked to start (one entry per self-continue). */
+  const wakes: string[] = [];
+  /** Every hop's `done`, so a test can settle the hop it started. */
+  const settles: Array<(outcome: Awaited<HopRun["done"]>) => void> = [];
   const layer: { current: HopLayer | null } = { current: null };
   const host = {
     sessionRef: { current: null },
@@ -56,13 +61,17 @@ function harness(opts: Boundary = {}) {
     rowsRef: { current: (opts.rows ?? []) as QueuedRows },
     daemonQueueRef: { current: opts.daemonQueue },
     switchingRef: { current: false },
-    startHopRef: { current: null },
-    wakeAfterHopRef: { current: null },
+    startHopRef: { current: null as ((spec: HopSpec) => void) | null },
+    wakeAfterHopRef: { current: null as ((outcome: "declined" | "failed") => void) | null },
+    sendWake: (text: string) => wakes.push(text),
     hop: {
       label: (spec: HopSpec) => (spec.target === "local" ? "local" : "docker:box"),
       start(spec: HopSpec) {
         started.push(spec.target);
-        return { onStatus: () => () => {}, done: new Promise<never>(() => {}) };
+        const done = new Promise<Awaited<HopRun["done"]>>((resolve) => {
+          settles.push(resolve);
+        });
+        return { onStatus: () => () => {}, done };
       },
     },
     permission: {
@@ -88,6 +97,16 @@ function harness(opts: Boundary = {}) {
     hop: current,
     notices,
     started,
+    wakes,
+    /** Settle the hop started last, as the host's `done` does (then let its `.then` run). */
+    settle: async (outcome: Awaited<HopRun["done"]>) => {
+      const last = settles.at(-1);
+      if (last === undefined) {
+        throw new Error("no hop was started");
+      }
+      last(outcome);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    },
     host,
     /** Commit a render and read what the hook NOW returns (its state, not its refs). */
     show: (): HopLayer | null => {
@@ -132,6 +151,59 @@ describe("S11 freshness: two `/move`s with NO render between them", () => {
     h.hop.requestHop("/move local");
     expect(h.notices).toEqual([HOP_QUEUED_NOTICE]);
     expect(h.started).toEqual([]);
+    h.app.unmount();
+  });
+});
+
+describe("OD6: a hop settles into an IDLE session or it does not wake (review round 1, MEDIUM 2)", () => {
+  /** Start a MODEL-proposed hop through the hook's own entry point, and return it. */
+  function startProposal(h: ReturnType<typeof harness>): void {
+    h.hop.hopOriginRef.current = "proposal";
+    h.host.startHopRef.current?.({ target: "local", keep: true });
+  }
+
+  test("the control: idle at the settle ⇒ ONE wake send", async () => {
+    const h = harness({ running: false });
+    startProposal(h);
+    await h.settle({ failed: "not moved: nope" });
+    expect(h.wakes).toHaveLength(1);
+    h.app.unmount();
+  });
+
+  test("a turn of ours running at the settle ⇒ HOLD: no second concurrent own turn", async () => {
+    // The reviewer's scenario: the hop settles while something else already owns
+    // the turn (a job wake started by `wakeIfPending`, a foreign turn `drainHeld`
+    // started). RED before the fix: `useHop` called `sendWake` with no `hopReady`
+    // check, so the wake began a SECOND own turn on top of the running one.
+    // Mutation: drop `ready:` from `after()`'s `hopWakeStep` call → `wakes` has 1.
+    const h = harness({ running: false });
+    startProposal(h);
+    h.host.stateRef.current = { running: true } as DisplayState;
+    await h.settle({ failed: "not moved: nope" });
+    expect(h.wakes).toEqual([]);
+    h.app.unmount();
+  });
+
+  test("a queued row at the settle ⇒ HOLD (the messages run first, D4)", async () => {
+    // Mutation: same as above; the `queued` half of `hopReady` is what fails here.
+    const h = harness({ running: false });
+    startProposal(h);
+    h.host.daemonQueueRef.current = { entries: [{ id: "q1", text: "next" }] };
+    await h.settle({ failed: "not moved: nope" });
+    expect(h.wakes).toEqual([]);
+    h.app.unmount();
+  });
+
+  test("a DECLINED proposal settling into a busy session ⇒ HOLD too (`wakeSettled`)", () => {
+    // The other `hopWakeStep` call site: a decline arrives asynchronously (the ask
+    // can wait on a human), so it is the one that most easily lands on a busy
+    // session. Mutation: drop `ready:` from `wakeSettled` → `wakes` has 1.
+    const h = harness({ running: false });
+    h.host.wakeAfterHopRef.current?.("declined");
+    expect(h.wakes).toHaveLength(1);
+    h.host.stateRef.current = { running: true } as DisplayState;
+    h.host.wakeAfterHopRef.current?.("declined");
+    expect(h.wakes).toHaveLength(1);
     h.app.unmount();
   });
 });

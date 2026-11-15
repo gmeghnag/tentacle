@@ -24,34 +24,61 @@ import { HOP_WAKE_CHAIN_MAX, HOP_WAKE_ROW, HOP_WAKE_TEXT, hopWakeStep } from "..
 describe("hopWakeStep", () => {
   test("proposal × {moved, failed, declined} ⇒ wake", () => {
     for (const outcome of ["moved", "failed", "declined"] as const) {
-      expect(hopWakeStep({ origin: "proposal", outcome, chain: 0 })).toBe("wake");
+      expect(hopWakeStep({ origin: "proposal", outcome, chain: 0, ready: true })).toBe("wake");
     }
   });
 
   test("queued (a /move typed mid-task) moved/failed ⇒ wake; declined ⇒ hold", () => {
     // A REFUSED typed hop is the owner's own doing and they are looking at it.
-    expect(hopWakeStep({ origin: "queued", outcome: "moved", chain: 0 })).toBe("wake");
-    expect(hopWakeStep({ origin: "queued", outcome: "failed", chain: 0 })).toBe("wake");
-    expect(hopWakeStep({ origin: "queued", outcome: "declined", chain: 0 })).toBe("hold");
+    expect(hopWakeStep({ origin: "queued", outcome: "moved", chain: 0, ready: true })).toBe("wake");
+    expect(hopWakeStep({ origin: "queued", outcome: "failed", chain: 0, ready: true })).toBe(
+      "wake",
+    );
+    expect(hopWakeStep({ origin: "queued", outcome: "declined", chain: 0, ready: true })).toBe(
+      "hold",
+    );
   });
 
   test("idle (a /move typed with nothing pending) ⇒ hold, whatever happened", () => {
     // Mutation: wake on `idle` → this whole row fails (and a plain `/move` at
     // rest would start a turn nobody asked for).
     for (const outcome of ["moved", "failed", "declined"] as const) {
-      expect(hopWakeStep({ origin: "idle", outcome, chain: 0 })).toBe("hold");
+      expect(hopWakeStep({ origin: "idle", outcome, chain: 0, ready: true })).toBe("hold");
+    }
+  });
+
+  test("NOT idle ⇒ hold, even for the origins that wake (review round 1, MEDIUM 2)", () => {
+    // The failure this closes: a hop settles while a turn of ours runs already
+    // (a job wake started by `wakeIfPending`, or a foreign turn `drainHeld`
+    // started), and the wake would begin a SECOND concurrent own turn.
+    // Mutation: drop the `!ready` guard → every row here says `wake`.
+    for (const outcome of ["moved", "failed", "declined"] as const) {
+      expect(hopWakeStep({ origin: "proposal", outcome, chain: 0, ready: false })).toBe("hold");
+      expect(hopWakeStep({ origin: "queued", outcome, chain: 0, ready: false })).toBe("hold");
     }
   });
 
   test("the chain cap: the Nth consecutive wake still fires, the next holds", () => {
     // Mutation: drop the cap → `chain: 3` wakes and a bad model can loop forever.
     expect(
-      hopWakeStep({ origin: "proposal", outcome: "moved", chain: HOP_WAKE_CHAIN_MAX - 1 }),
+      hopWakeStep({
+        origin: "proposal",
+        outcome: "moved",
+        chain: HOP_WAKE_CHAIN_MAX - 1,
+        ready: true,
+      }),
     ).toBe("wake");
-    expect(hopWakeStep({ origin: "proposal", outcome: "moved", chain: HOP_WAKE_CHAIN_MAX })).toBe(
+    expect(
+      hopWakeStep({
+        origin: "proposal",
+        outcome: "moved",
+        chain: HOP_WAKE_CHAIN_MAX,
+        ready: true,
+      }),
+    ).toBe("hold");
+    expect(hopWakeStep({ origin: "proposal", outcome: "moved", chain: 99, ready: true })).toBe(
       "hold",
     );
-    expect(hopWakeStep({ origin: "proposal", outcome: "moved", chain: 99 })).toBe("hold");
   });
 
   test("the wake prompt and the row it paints are one short line each", () => {

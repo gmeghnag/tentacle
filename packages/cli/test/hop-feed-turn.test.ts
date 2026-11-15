@@ -176,6 +176,31 @@ describe("H5: a proposal becomes ONE session_hop request at the turn's end", () 
     expect(r.feed.takeLine?.({ autoAccept: false })).toBeNull();
   });
 
+  test("`restoreLine` hands the line back: a send that failed must not eat it", async () => {
+    // docs/feat/session-hop-ux, failure mode "Wake prompt fails to send". RED on
+    // the pre-fix code (no `restoreLine` at all): the fact was consumed by the
+    // failed prompt and the model never learned the session had moved.
+    // Mutation: `restoreLine` → `{}` (or `takeLine` not recording `taken`) ⇒ null.
+    const r = rig({ answer: { allowed: true, scope: "once" } });
+    await r.feed.start({ target: "local", keep: true }, "uid-1").done;
+    expect(r.feed.takeLine?.({ autoAccept: false })).toContain("[session moved to local");
+    r.feed.restoreLine?.();
+    expect(r.feed.takeLine?.({ autoAccept: false })).toContain("[session moved to local");
+  });
+
+  test("`restoreLine` never overwrites a NEWER fact (it describes where we are now)", async () => {
+    const r = rig({ answer: { allowed: true, scope: "once" } });
+    await r.feed.start({ target: "local", keep: true }, "uid-1").done;
+    expect(r.feed.takeLine?.({ autoAccept: false })).toContain("[session moved to local");
+    // A second hop settles before the restore arrives: its fact is the truth.
+    await r.feed.start({ target: "local", keep: true }, "uid-1").done;
+    r.feed.restoreLine?.();
+    const line = r.feed.takeLine?.({ autoAccept: false });
+    expect(line).toContain("[session moved to local");
+    // Still exactly ONE line for the next prompt, not two.
+    expect(r.feed.takeLine?.({ autoAccept: false })).toBeNull();
+  });
+
   test("the mode is rendered at TAKE time, so it is never stale", async () => {
     const r = rig({ answer: { allowed: true, scope: "once" } });
     await r.feed.start({ target: "local", keep: true }, "uid-1").done;

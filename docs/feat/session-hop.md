@@ -308,12 +308,17 @@ table to two rows.
 > (`hopWakeLine`), except a `/move` typed at rest — capped at 3 consecutive wakes.
 > The paragraphs below describe the pre-amendment shape where they differ.
 
+> **Amended 2026-11-15** (`docs/feat/session-hop-ux.md` OD8, owner): **(d) the tool
+> is now DISABLED by default** — `sessionHop.tool` is the opt-in, reversing D9's
+> "default on". A `/move` you type is unaffected.
+
 **D9 — The agent tool `move_session`** (`tools/src/move-session.ts`). Input:
 `{target: "local" | "container" | "attach", image?, workload?: {engine, name,
 container?}, keep?: boolean, reason}`. It has NO daemon-side effect and needs
 no daemon-side ask. It returns "Proposed; the user will be asked when this
 turn ends. Do not assume the move happened." It is registered only in worker
-and pod-bridge daemons, behind config `sessionHop.tool` (default on), at the
+and pod-bridge daemons, behind config `sessionHop.tool` (default OFF since
+2026-11-15, see amendment (d)), at the
 `contextReset` registration site (`wiring.ts:608-624`). `BuildAgentOptions`
 (`wiring.ts:321`) has no field that says which kind of daemon is building
 (review M5). So add `BuildAgentOptions.moveSession?: true`. Only the worker

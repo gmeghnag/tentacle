@@ -56,6 +56,13 @@ export interface HopBuilt {
    * one notice, not a second failure of the hop.
    */
   readonly rollback: () => Promise<void>;
+  /**
+   * OD3: the k8s namespace's PROVENANCE (`namespace ns (from context; …)`) when
+   * the build resolved one. It rides the outcome line because under auto-accept
+   * NO prompt is shown and a typed `/move` never asks — the transcript is then
+   * the only place the owner can read why that namespace was dialled.
+   */
+  readonly trace?: string;
 }
 
 export type HopBuild =
@@ -284,7 +291,11 @@ export async function hopSession(
     notes.push(errorText(error, "the old place could not be tidied"));
   }
   const notice = [`moved to ${placeText(target.place)}`, ...notes].join(" — ");
-  const note = notes.join(" — ");
+  // OD3: the provenance rides the outcome too (a hop shows no prompt when
+  // auto-accept answered it, and a typed `/move` never shows one at all), so a
+  // live test reads "why that namespace" from the line it already keeps.
+  const trace = target.trace === undefined ? [] : [target.trace];
+  const note = [...notes, ...trace].join(" — ");
   return { kind: "moved", built: target, controller, notice, ...(note === "" ? {} : { note }) };
 }
 

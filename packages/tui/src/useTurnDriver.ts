@@ -141,6 +141,12 @@ export interface HopTurnPort {
    * the TUI's LIVE mode, which a moved line states (docs/feat/session-hop-ux OD6).
    */
   takeLine(ctx: { readonly autoAccept: boolean }): string | null;
+  /**
+   * The prompt that consumed the line never ran (its send failed): put it back,
+   * so the next real prompt carries it (docs/feat/session-hop-ux, failure mode
+   * "Wake prompt fails to send"). Absent when the host cannot restore.
+   */
+  restoreLine?(): void;
   /** OD6: a real user prompt breaks the consecutive-wake chain. */
   onUserPrompt?(): void;
   /**
@@ -168,6 +174,13 @@ export interface StreamOpts {
     readonly images?: readonly string[];
     /** The chips whose refs this prompt named: put back if the daemon refuses them. */
     readonly restoreChips?: readonly AttachedImage[];
+    /**
+     * This prompt consumed the hop's pending line (`hopTurn.takeLine`), so a
+     * failure that means it never ran must hand the line back (docs/feat/
+     * session-hop-ux, failure mode "Wake prompt fails to send"): the next real
+     * prompt carries it, and the model still learns where the session is.
+     */
+    readonly hopLine?: true;
   };
 }
 
@@ -626,6 +639,16 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         const failed = opts.successor
           ? onSuccessorError(error, rowsRef.current)
           : ({ kind: "fail" } as const);
+        // A prompt that never RAN must not burn the hop's line (docs/feat/
+        // session-hop-ux, failure mode "Wake prompt fails to send"): its text —
+        // the moved/declined/failed line included — never reached the daemon, so
+        // the line goes back and the next real prompt carries it, exactly as
+        // `restoreChips` gives an image prompt its images back. A turn that DID
+        // stream carried the line inside its user message, so nothing is restored
+        // then: it was delivered, and saying it twice would be a lie.
+        if (opts.own?.hopLine === true && !streamed) {
+          hopTurn?.restoreLine?.();
+        }
         if (opts.own && lostSlot(error, streamed)) {
           // Another device's turn took the slot first: my prompt never ran.
           // Its bubble goes and its text is back in the input — never lost
@@ -877,6 +900,9 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
             ...(opts?.images !== undefined && opts.images.length > 0
               ? { restoreChips: opts.images }
               : {}),
+            // A line was CONSUMED for this prompt: if it never runs, it must go
+            // back (see the driver's catch) rather than die with the send.
+            ...(line === "" ? {} : { hopLine: true as const }),
           },
         },
       );

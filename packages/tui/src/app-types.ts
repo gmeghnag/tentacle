@@ -363,6 +363,15 @@ export interface HopFeed {
    */
   takeLine?(ctx: { readonly autoAccept: boolean }): string | null;
   /**
+   * Hand the line taken by the last `takeLine` BACK: the prompt that consumed it
+   * never ran (its send failed — a link down, a lost slot), so the line must not
+   * die with it (docs/feat/session-hop-ux, failure mode "Wake prompt fails to
+   * send"). The next real prompt carries it instead, so the model still learns
+   * that the session moved. A no-op when nothing was taken or a NEWER fact has
+   * arrived since (that one describes the world better).
+   */
+  restoreLine?(): void;
+  /**
    * Forget the pending fact: a `/clear` swaps the session, so a fact about the OLD
    * one (its place, its cwd) must not ride the new one's first prompt (OD6).
    */

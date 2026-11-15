@@ -46,6 +46,7 @@ import type {
 } from "../src/engine-host.ts";
 import { WorkloadNotFoundError } from "../src/engine-host.ts";
 import type { EngineRuntime } from "../src/engine-runtime.ts";
+import type { KubeNamespace } from "../src/engine-select.ts";
 import { type HopLeaveDeps, createHopLeave } from "../src/hop-leave.ts";
 import { type HopEngineHost, createHopTargets, hopBuilder } from "../src/hop-targets.ts";
 import { readKept, recordKept } from "../src/kept-index.ts";
@@ -1061,7 +1062,7 @@ describe("H6 an attach leaves a user-owned workload alone, even with `keep: fals
 
 describe("OD1 a hop dials the namespace it was TOLD, and a miss names the hop's own grammar", () => {
   /** A host fake that records WHAT it was built for (the `where` a build passes). */
-  function whereRig(error?: Error) {
+  function whereRig(error?: Error, resolved?: KubeNamespace) {
     const host = fakeHost({ calls: [], ...(error === undefined ? {} : {}) });
     const asked: Array<{ engine: string; where: unknown }> = [];
     const statuses: string[] = [];
@@ -1076,7 +1077,13 @@ describe("OD1 a hop dials the namespace it was TOLD, and a miss names the hop's 
       notify: () => {},
       host: (engine, where) => {
         asked.push({ engine, where });
-        return { host, locators: {} };
+        // The namespace the host REALLY resolved (a `buildEngineHost`'s answer),
+        // with its provenance: what a build must report and dial.
+        return {
+          host,
+          locators: resolved === undefined ? {} : { namespace: resolved.namespace },
+          ...(resolved === undefined ? {} : { namespace: resolved }),
+        };
       },
     });
     return { build, asked, statuses };
@@ -1131,6 +1138,79 @@ describe("OD1 a hop dials the namespace it was TOLD, and a miss names the hop's 
     expect(built.notice).toContain("openshift-etcd");
     expect(built.notice).toContain("/move attach kubernetes:<namespace>/etcd-0");
     expect(built.notice).not.toContain("--namespace");
+  });
+
+  test("the PROVENANCE rides the live row and the miss (design 7: `(from <source>)`)", async () => {
+    // OD3's trace must be visible where there is NO prompt at all: an auto-accepted
+    // proposal shows none, and a typed `/move` never does. Design 1 puts it on the
+    // hop's first phase (the live row) and design 7 repeats it in a miss.
+    // RED before the fix: neither carried `(from …)`, so the owner's live test could
+    // not answer "why THAT namespace" at all.
+    // Mutation: drop `namespaceTrace` from the status line → the row has no `from`.
+    const resolved = {
+      namespace: "ns-ctx",
+      source: "context" as const,
+      kubeconfig: "/home/me/.kube/config",
+      context: "ctx-1",
+    };
+    const r = whereRig(
+      new WorkloadNotFoundError(
+        `pod "web-0" not found in namespace "ns-ctx"`,
+        "pod",
+        "in namespace ns-ctx",
+      ),
+      resolved,
+    );
+    const built = await r.build(
+      { target: "attach", workload: { engine: "kubernetes", name: "web-0" }, keep: true },
+      "uid-1",
+    );
+    if (built.kind !== "failed") {
+      throw new Error("expected the attach to fail");
+    }
+    // The live row said WHY before it dialled…
+    expect(r.statuses.join("\n")).toContain("namespace ns-ctx (from context; context ctx-1");
+    expect(r.statuses.join("\n")).toContain("/home/me/.kube/config");
+    // …and the miss repeats it, so the transcript answers the question too.
+    expect(built.notice).toContain("(from context");
+  });
+
+  test("a TYPED `/move attach kubernetes:<pod>` names the namespace the host dialled (OD1)", async () => {
+    // The reviewer's third case: the parse cannot know the namespace (OD2 decides
+    // it), so the spec carries none and the built place used to be labelled
+    // `kubernetes:web-0` — a name that now READS as `ns/pod` and is simply wrong.
+    // RED before the fix: the place (and so the badge, the moved line and the wake
+    // line) had no namespace at all. Mutation: drop the `target.namespace` step →
+    // `built.built.place.namespace` is undefined again.
+    const resolved = {
+      namespace: "ns-ctx",
+      source: "context" as const,
+      kubeconfig: "/home/me/.kube/config",
+      context: "ctx-1",
+    };
+    const host = fakeHost({ calls: [] });
+    const pair = sharedPair();
+    const build = createHopTargets({
+      config: config(dir),
+      shared: pair,
+      status: () => {},
+      notify: () => {},
+      host: () => ({ host, locators: {}, namespace: resolved }),
+    });
+    const built = await build(
+      { target: "attach", workload: { engine: "kubernetes", name: "web-0" }, keep: true },
+      "uid-1",
+    );
+    if (built.kind !== "built") {
+      throw new Error(`expected a build, got ${built.notice}`);
+    }
+    expect(built.built.place).toEqual({
+      kind: "workload",
+      engine: "kubernetes",
+      name: "web-0",
+      namespace: "ns-ctx",
+    });
+    await built.built.runtime.dispose();
   });
 });
 

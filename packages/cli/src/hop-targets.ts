@@ -26,11 +26,12 @@ import type { TentacleConfig } from "./config.ts";
 import { WorkloadNotFoundError } from "./engine-host.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { attachEngineRuntime, startEngineRuntime } from "./engine-runtime.ts";
-import { engineNoun, laptopWorkspaceInput } from "./engine-select.ts";
+import { type KubeNamespace, engineNoun, laptopWorkspaceInput } from "./engine-select.ts";
 import { type HopLiveLine, createHopLiveLine } from "./hop-live-line.ts";
 import { type AttachVerdict, attachVerdict } from "./hop-plan.ts";
 import type { HopPlace } from "./hop-plan.ts";
 import type { HopPromptEngine, HopPromptFacts } from "./hop-proposal.ts";
+import { namespaceTrace } from "./hop-proposal.ts";
 import type { HopRuntimeDeps, HopShared } from "./hop-runtime.ts";
 import type { HopFolderFate } from "./hop-turn.ts";
 import { removeVerifiedKept } from "./kept-cmd.ts";
@@ -72,6 +73,14 @@ export interface HopEngineHost {
     readonly namespace?: string;
     readonly insecureTcp?: boolean;
   };
+  /**
+   * k8s only: the namespace this host really dialled, WITH its provenance (OD3).
+   * A build reports it so the live row and a miss can say why, and so a place
+   * knows the namespace it is IN — which the spec of a typed `/move attach
+   * kubernetes:<pod>` cannot (`kubeNamespace` decides it, OD2). Absent: not k8s,
+   * or a test's fake (which then simply shows no provenance).
+   */
+  readonly namespace?: KubeNamespace;
 }
 
 /** What a factory may not invent: the config, the sinks, the shared pair, the host. */
@@ -402,7 +411,19 @@ async function attachTarget(
   } catch (error) {
     return { kind: "failed", notice: `not moved: ${errorText(error, "no engine")}` };
   }
-  deps.status(`moving to ${workloadText(workload)} — attaching`);
+  // OD1/OD3: the workload the host REALLY dialled. A typed `/move attach
+  // kubernetes:<pod>` cannot name its namespace (OD2 decides it), so without this
+  // the row, the badge, the moved line and the miss would all print
+  // `kubernetes:<pod>` — a name that now READS as `ns/pod`, and a trace nobody
+  // sees under auto-accept (no prompt is shown then).
+  const dialled = dialledWorkload(workload, target);
+  // Design 1/OD3: the FIRST phase carries the provenance, so a live test answers
+  // "why that namespace" from the row it is watching.
+  deps.status(
+    target.namespace === undefined
+      ? `moving to ${workloadText(dialled)} — attaching`
+      : `moving to ${workloadText(dialled)} — attaching (${namespaceTrace(target.namespace)})`,
+  );
   let runtime: LocalRuntime | undefined;
   try {
     runtime = await attachEngineRuntime(config, {
@@ -441,18 +462,24 @@ async function attachTarget(
   }
   return {
     kind: "built",
-    built: builtOf(
-      runtime,
-      {
-        kind: "workload",
-        engine: workload.engine,
-        name: workload.name,
-        ...(workload.namespace === undefined ? {} : { namespace: workload.namespace }),
-        ...(workload.container === undefined ? {} : { container: workload.container }),
-      },
-      // An existing daemon may already hold our uid: D1 step 4(a) applies.
-      { preexisting: true, daemonInPod: true },
-    ),
+    built: {
+      ...builtOf(
+        runtime,
+        {
+          kind: "workload",
+          engine: workload.engine,
+          name: workload.name,
+          ...(dialled.namespace === undefined ? {} : { namespace: dialled.namespace }),
+          ...(workload.container === undefined ? {} : { container: workload.container }),
+        },
+        // An existing daemon may already hold our uid: D1 step 4(a) applies.
+        { preexisting: true, daemonInPod: true },
+      ),
+      // OD3: the provenance the outcome line states. Under auto-accept NO prompt
+      // is shown and a typed `/move` never asks, so the recorded line is the only
+      // place a live test can read WHY this namespace was dialled.
+      ...(target.namespace === undefined ? {} : { trace: namespaceTrace(target.namespace) }),
+    },
   };
 }
 
@@ -472,10 +499,34 @@ function d7Refusal(verdict: AttachVerdict): HopBuild | null {
  */
 function attachMissNotice(workload: HopWorkload, target: HopEngineHost, error: unknown): string {
   if (workload.engine === "kubernetes" && error instanceof WorkloadNotFoundError) {
-    const namespace = workload.namespace ?? target.locators.namespace ?? "default";
-    return `not moved: no pod "${untrustedText(workload.name)}" in namespace "${untrustedText(namespace)}" — name its namespace: /move attach kubernetes:<namespace>/${untrustedText(workload.name)}`;
+    const namespace = workload.namespace ?? target.namespace?.namespace ?? "default";
+    // Design 7: the miss repeats OD3's provenance (`(from <source>)`), so the
+    // transcript explains a wrong default even when nothing was prompted for.
+    const from =
+      workload.namespace !== undefined || target.namespace === undefined
+        ? ""
+        : ` (from ${namespaceSource(target.namespace)})`;
+    return `not moved: no pod "${untrustedText(workload.name)}" in namespace "${untrustedText(namespace)}"${from} — name its namespace: /move attach kubernetes:<namespace>/${untrustedText(workload.name)}`;
   }
   return `not moved: ${errorText(error, "the workload could not be joined")}`;
+}
+
+/**
+ * The workload as the host REALLY dialled it (OD1/OD3): the spec's own namespace
+ * when it named one (a pinned proposal, or a typed `ns/pod`), else the one the
+ * host's resolution reports. A `kubernetes:<pod>` typed `/move` therefore gets the
+ * namespace OD2 decided, so its label is `kubernetes:<ns>/<pod>`.
+ */
+function dialledWorkload(workload: HopWorkload, target: HopEngineHost): HopWorkload {
+  const namespace = workload.namespace ?? target.namespace?.namespace;
+  return namespace === undefined || workload.engine !== "kubernetes"
+    ? workload
+    : { ...workload, namespace };
+}
+
+/** OD3's short form for a miss: WHICH fact decided the namespace. */
+function namespaceSource(namespace: KubeNamespace): string {
+  return namespace.source;
 }
 
 /**

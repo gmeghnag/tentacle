@@ -1572,6 +1572,59 @@ describe("fix1 MEDIUM: a throw before the commit still rolls the target back", (
     );
     await hop.dispose();
   });
+
+  test("OD3: the k8s provenance rides the outcome's line, not only a prompt", async () => {
+    // Under auto-accept NO prompt is shown, and a typed `/move` never asks: the
+    // outcome line is then the only durable record of WHY that namespace. RED
+    // before the fix: the trace lived in `hopPromptDetail` alone, so the owner's
+    // live test could read it nowhere. Mutation: drop the `target.trace` step in
+    // `session-hop.ts` → `note` has no `from context`.
+    const store = storeIn(dir);
+    const shared = sharedOn(store);
+    const initial = await runtimeOn(rig(new Reply("reply-A")), shared, null);
+    const ctl = initial.createSession();
+    await drain(ctl.send("first"));
+    await ctl.flushed();
+    await shared.saver.drain();
+    await store.drain();
+    const uid = ctl.sessionId;
+    if (!uid) throw new Error("no uid");
+
+    const hop = createHopRuntime({
+      initial,
+      startup: { place: { kind: "local" }, daemonInPod: false },
+      shared,
+      build: async (_spec, _shared, id): Promise<HopBuild> => {
+        const loaded = await store.load(id);
+        return {
+          kind: "built",
+          built: {
+            runtime: await runtimeOn(
+              rig(new Reply("reply-B")),
+              shared,
+              loaded.status === "ok" ? loaded.record : null,
+              id,
+            ),
+            place: { kind: "workload", engine: "kubernetes", name: "web-0", namespace: "ns-ctx" },
+            folder: "not shared",
+            daemonInPod: true,
+            preexisting: false,
+            rollback: async () => {},
+            trace: "namespace ns-ctx (from context; context ctx-1, /home/me/.kube/config)",
+          },
+        };
+      },
+      load: (id) => store.load(id),
+    });
+    const outcome = await hop.hop(
+      { target: "attach", workload: { engine: "kubernetes", name: "web-0" }, keep: true },
+      uid,
+    );
+    expect(outcome.kind).toBe("moved");
+    const note = outcome.kind === "moved" ? (outcome.note ?? "") : "";
+    expect(note).toContain("namespace ns-ctx (from context; context ctx-1");
+    await hop.dispose();
+  });
 });
 
 /** A runtime whose job feeds are driven by hand, plus the trigger for each. */

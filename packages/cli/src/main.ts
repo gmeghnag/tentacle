@@ -1230,14 +1230,19 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
    * locators its kept entry records (D5).
    */
   const hopEngineHost = (engine: EngineKind, where?: HopHostWhere): HopEngineHost => {
+    // OD3: resolve ONCE here, with its provenance, and pin that namespace into the
+    // builder — so the trace the row/miss report and the place that is dialled
+    // cannot come from two different reads of a kubeconfig.
+    const namespace = engine === "kubernetes" ? kubeNamespace(where ?? {}) : undefined;
     const built = buildEngineHost(
       engine,
-      where?.namespace === undefined ? {} : { namespace: where.namespace },
+      namespace === undefined ? {} : { namespace: namespace.namespace },
     );
     return {
       host: built.host,
       ...(built.endpoint === undefined ? {} : { endpoint: built.endpoint }),
       locators: keptLocation(engine, built, { context: undefined, insecureTcp: false }),
+      ...(namespace === undefined ? {} : { namespace }),
     };
   };
 
