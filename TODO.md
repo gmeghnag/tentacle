@@ -18,6 +18,8 @@ the rest are "value-add" improvements layered on the harness.
   - Earlier owner answers: `docs/feat/mobile-session-view.md` (12, "all +
     images"), `docs/feat/sibling-discovery.md` (10, "all").
 
+- [ ] **feat/per-session-model** (owner 2026-11-15: later — "per ora lasciamo fuori") — `serve` is bound to ONE model (its `--profile` at start); no `session/set_model`; the TUI `/model` only SHOWS the model. Idea: `serve` exposes its config profile NAMES and a session picks one at creation or with a real `/model <profile>` (TUI + app), as a phone/Mac parity step. Origin: docs/feat/serve-mcp.md Owner Q3.
+
 ## v0.1.0 stabilization review (in progress)
 
 Full code review, hot-path → polish, to stabilize a v0.1.0. Findings recorded
