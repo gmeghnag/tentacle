@@ -362,3 +362,9 @@ Red first (§9); each is shown failing on a stub, then green, and the named muta
 ## Review
 
 *(empty)*
+
+#### Owner answers (2026-11-15, batch 1)
+
+- Q1 order: **yes** — spike now, code after V1 (`feat/voice-dictation`) and `feat/mobile-voice` merge; a language with no on-device recognizer has no voice mode, never cloud.
+- Q2 reasoning off for voice turns: **yes, as a user-settable switch, also settable from the mobile app** (not hard-wired) — C3 + a settings row on both edges; mandatory fresh-context review.
+- Q3 auto-send at end of utterance: **yes, conversation mode only** (Ctrl+R dictation never auto-sends).
