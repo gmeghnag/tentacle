@@ -18,6 +18,7 @@ import {
   type DaemonRecord,
   DeviceAuthority,
   HandshakeLimiter,
+  type HooksTrustPrecheck,
   LogSessionStore,
   type ModelLink,
   ProxyModelProvider,
@@ -704,9 +705,10 @@ function listen(
   afterListen?: () => void,
   /**
    * This host's own project-hooks answer (S4): its trust file decides before any
-   * client is asked, so a phone turn in a folder trusted HERE runs the hooks.
+   * client is asked, so a phone turn in a folder trusted HERE runs the hooks —
+   * on BOTH remote paths, the direct route and the relay.
    */
-  hooksTrustPrecheck?: (params: { readonly folder: string; readonly hash: string }) => boolean,
+  hooksTrustPrecheck?: HooksTrustPrecheck,
 ): ServeHandle {
   const server = startWsServer({
     host: options.host,
@@ -781,6 +783,9 @@ function listen(
           sessionHost,
           limiter: server.limiter,
           dial: bunRelayDialer(),
+          // S4 review 1 finding 1: the relay IS the usual remote path, so the
+          // host's own hooks-trust answer must reach the accept legs it builds.
+          ...(hooksTrustPrecheck ? { hooksTrustPrecheck } : {}),
           ...(options.onAudit ? { onAudit: options.onAudit } : {}),
           ...(options.onError ? { onError: options.onError } : {}),
         })

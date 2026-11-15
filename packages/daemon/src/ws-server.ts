@@ -8,9 +8,8 @@
  * bridges Bun's socket callbacks to the channel interface and enforces exposure.
  */
 import { timingSafeEqual } from "node:crypto";
-import type { HooksTrustParams } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
-import { Connection } from "./connection.ts";
+import { Connection, type HooksTrustPrecheck } from "./connection.ts";
 import { DEFAULT_MAX_FRAME_BYTES, acceptDevice } from "./device-accept.ts";
 import type { DeviceAuthority } from "./device-authority.ts";
 import { type HandshakeLimitOptions, HandshakeLimiter } from "./handshake-limit.ts";
@@ -42,7 +41,7 @@ export interface WsServerOptions {
    * The host's own project-hooks answer, checked before the prompting client is
    * asked (docs/feat/serve-mcp.md S4). Every connection this server opens gets it.
    */
-  readonly hooksTrustPrecheck?: (request: Pick<HooksTrustParams, "folder" | "hash">) => boolean;
+  readonly hooksTrustPrecheck?: HooksTrustPrecheck;
   /**
    * Bytes queued for one socket before the server CLOSES it (default 16 MiB).
    * Bun would otherwise drop frames silently and keep a frozen client's socket

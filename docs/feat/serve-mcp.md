@@ -423,6 +423,62 @@ of the resolver only; how RN draws the ask is out of this repo's test reach (the
 sheet is unchanged and already routes `hooks_trust` to a person). Verify by
 running the app against a `serve` whose project is untrusted.
 
+### Fix round 1
+
+Both Review findings fixed, red before green, each proven by mutation.
+
+**Finding 1 (HIGH) — the precheck now reaches the RELAY route.** It was a
+pole apart that needed the same fact on the second `acceptDevice` site, so I
+threaded the option rather than duplicating the check: `relay-link.ts:109`
+(`RelayLinkOptions.hooksTrustPrecheck`) and its `acceptDevice` call at
+`relay-link.ts:693`; fed from `serve.ts:788`, where `listen` already holds
+the precheck for `startWsServer`. No new decision logic, no second path — the
+link only forwards what `serve` decided. The pod/worker sites
+(`serve.ts:1113` stdio, `pod-resident.ts:303`, `worker.ts:191`) still get
+nothing, correctly (a pod is not trusted, AGENTS §7).
+
+**Finding 2 (MEDIUM) — a host `never` is now honoured, not re-asked.** The
+precheck was a `boolean` ("trusted?"), which cannot express "this host already
+said no", so `never` collapsed into "ask". It is now the three-way
+`HooksTrustPrecheck` (`connection.ts:140`): `hooksTrustPrecheck` returns
+`"declined"` for a `never` entry for any hash (`serve-hooks-trust.ts:33-36`,
+matching the TUI's own `trustPrecheck`, `hooks-trust.ts:34`), and
+`Connection.askHooksTrust` (`connection.ts:942-954`) answers `false` without a
+prompt. Still read-only: it answers early, it never grants.
+
+**Drift from the Implementation.** None in behaviour; the precheck's TYPE
+changed (`boolean` → `"trusted" | "declined" | "ask"`) across its five sites,
+which is the shape finding 2 asked for. `ws-server.ts` and `device-accept.ts`
+lost their now-unused `HooksTrustParams` import (Biome's organizeImports on
+`relay-link.ts` was the only lint trip).
+
+**Tests (red before green).** Two added at
+`packages/cli/test/serve-hooks-trust.test.ts`:
+- **T13e** — host trusted, a phone turn **through the relay**: `asked` is empty
+  and the hook ran.
+- **T13f** — host `never`, a phone turn **through the relay** answering
+  `trusted: true`: `asked` is empty and the hook did **not** run.
+- The pure test gained the `declined`-for-any-hash case; `never → "ask"` is no
+  longer asserted (it was the bug).
+
+Both integration tests wait on the turn's `turn_end`: `session/prompt` acks at
+once, so asserting right after it would pass before anything was decided
+(observed — the first draft asserted a hook marker that had not run yet).
+
+**Mutations (each reverted; `git diff` restored byte-for-byte and re-verified).**
+
+| Mutation | Red |
+|---|---|
+| M1: drop `hooksTrustPrecheck` from `startRelayLink` (`serve.ts:788`) | T13e, T13f |
+| M2: `never` → `"ask"` in `serve-hooks-trust.ts:35` | the pure `declined` test, T13f |
+| M3: drop the `"declined"` return in `Connection.askHooksTrust` | T13f |
+
+**Gate (run here).** `bunx tsc --noEmit` clean · `bun run lint` clean (1506
+files, 0 errors / 0 warnings) · `bun test` **10844 pass, 5 skip, 0 fail**
+(785 files) — the same 5 opt-in/pre-existing skips the Execution records.
+
+*— claude-opus-5-5 (executor), 2026-11-15*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES**

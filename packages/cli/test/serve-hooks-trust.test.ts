@@ -19,11 +19,19 @@ import { join } from "node:path";
 import { RemoteClient, connectWebSocket } from "@tentacle/client";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
+import { addDevice, readIdentity } from "@tentacle/daemon";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import type { HooksTrustParams, HooksTrustResult } from "@tentacle/protocol";
+import { RpcPeer } from "@tentacle/transport";
+import { noiseInitiator, publicKeyOf, systemRandom } from "@tentacle/transport/noise";
+import { startRelay } from "../../../apps/relay/src/server.ts";
 import { loadConfig } from "../src/config.ts";
 import { fileTrustStore } from "../src/hooks-trust.ts";
 import { hooksTrustPrecheck, serveHooksTrustPrecheck } from "../src/serve-hooks-trust.ts";
 import { daemonStoreDir, startDaemon } from "../src/serve.ts";
+
+/** The paired phone's Noise key (a fixed one: pairing is the registry, not the test). */
+const DEVICE_KEY = new Uint8Array(32).fill(2);
 
 const roots: string[] = [];
 const stops: (() => Promise<void> | void)[] = [];
@@ -67,6 +75,99 @@ class QuietModel implements ModelProvider {
   }
 }
 
+/**
+ * A `serve` WITH the device route and a REAL local relay: the usual remote path
+ * (S4 review 1, finding 1). Only this route proves the precheck reaches the
+ * relay's accept legs — the direct route would pass with it wired to ws-server
+ * alone.
+ */
+async function serveOverRelay(where: ReturnType<typeof rig>) {
+  const relay = startRelay({ host: "127.0.0.1", port: 0, sweepMs: 10, onLog: () => {} });
+  stops.push(() => relay.stop());
+  const added = addDevice(where.configDir, {
+    publicKey: publicKeyOf(DEVICE_KEY),
+    name: "iPhone",
+    now: 2_000,
+  });
+  if (!added.ok) throw new Error(added.reason);
+  const config = await loadConfig({
+    configDir: where.configDir,
+    cwd: where.cwd,
+    scaffold: false,
+    env: { HOME: where.root, TENTACLE_MODEL_API_KEY: "k" },
+  });
+  const handle = await startDaemon(config, {
+    host: "127.0.0.1",
+    port: 0,
+    discovery: false,
+    relay: { noRelay: false, flagUrl: `ws://127.0.0.1:${relay.port}` },
+    createProvider: () => new QuietModel(),
+  });
+  stops.push(() => handle.stop());
+  const address = handle.relay?.address ?? "";
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && handle.relay?.isConnected() !== true) await Bun.sleep(5);
+  if (handle.relay?.isConnected() !== true) throw new Error("the relay link never registered");
+  return { config, handle, address };
+}
+
+/** The phone, over the relay: Noise against the computer key, then RPC. Asks recorded. */
+async function phoneOverRelay(address: string, configDir: string, answer: boolean) {
+  const identity = readIdentity(configDir);
+  if (!identity.ok) throw new Error(identity.reason);
+  const ws = new WebSocket(address);
+  let onMessage: ((data: string) => void) | undefined;
+  let onClose: (() => void) | undefined;
+  ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+  ws.addEventListener("close", () => onClose?.());
+  await new Promise<void>((resolve, reject) => {
+    ws.addEventListener("open", () => resolve());
+    ws.addEventListener("error", () => reject(new Error("phone socket error")));
+  });
+  stops.push(() => ws.close());
+  const channel = {
+    send: (data: string) => ws.send(data),
+    close: () => ws.close(),
+    setOnMessage: (h: (data: string) => void) => {
+      onMessage = h;
+    },
+    setOnClose: (h: () => void) => {
+      onClose = h;
+    },
+  };
+  const secure = await noiseInitiator(channel, {
+    staticKey: DEVICE_KEY,
+    remoteStatic: identity.identity.publicKey,
+    random: systemRandom,
+  });
+  const asked: unknown[] = [];
+  let turnEnded: () => void = () => {};
+  const ended = new Promise<void>((resolve) => {
+    turnEnded = resolve;
+  });
+  const peer = new RpcPeer(secure, {
+    onNotification: (method: string, params: unknown) => {
+      if (method !== "session/update") return;
+      const frame = params as { update?: { type?: string } };
+      if (frame.update?.type === "turn_end") turnEnded();
+    },
+    onRequest: async (method, params) => {
+      if (method !== "hooks/trust") {
+        throw new Error(`unexpected request ${method}`);
+      }
+      asked.push(params);
+      return { trusted: answer };
+    },
+  });
+  stops.push(() => peer.close());
+  await peer.request("initialize", {
+    protocolVersion: PROTOCOL_VERSION,
+    clientCapabilities: {},
+    clientInfo: { name: "phone", version: "0" },
+  });
+  return { peer, asked, ended };
+}
+
 async function serveAt(where: ReturnType<typeof rig>) {
   const config = await loadConfig({
     configDir: where.configDir,
@@ -92,14 +193,22 @@ describe("hooksTrustPrecheck (pure)", () => {
     expect(hooksTrustPrecheck(() => entry, "/p", "abc")).toBe("trusted");
   });
 
-  test("a different hash, no entry, or a `never` decision is NOT trusted", () => {
+  test("a different hash or no entry is NOT trusted (the client is asked)", () => {
     const trusted = { hash: "abc", decision: "trusted" as const };
     const never = { hash: "abc", decision: "never" as const };
     const get = (f: string) => (f === "/p" ? trusted : f === "/n" ? never : undefined);
     // Mutation: `hash` ignored → "trusted" for a changed hooks file.
     expect(hooksTrustPrecheck(get, "/p", "different")).toBe("ask");
     expect(hooksTrustPrecheck(get, "/unknown", "abc")).toBe("ask");
-    expect(hooksTrustPrecheck(get, "/n", "abc")).toBe("ask");
+  });
+
+  test("a `never` decision DECLINES for any hash, so no client is asked (finding 2)", () => {
+    const never = { hash: "abc", decision: "never" as const };
+    // The host was told "never" once; it is a decision about the FOLDER, like the
+    // TUI's own `trustPrecheck` (hooks-trust.ts:34). Mutation: `never` mapped to
+    // "ask" → the phone re-asks a refusal this machine already made.
+    expect(hooksTrustPrecheck(() => never, "/n", "abc")).toBe("declined");
+    expect(hooksTrustPrecheck(() => never, "/n", "a-DIFFERENT-hash")).toBe("declined");
   });
 });
 
@@ -111,7 +220,7 @@ describe("the serve host's own hooks trust", () => {
     const { handle } = await serveAt(where);
     const precheck = serveHooksTrustPrecheck(where.configDir);
     // Exactly what the daemon wraps `askHooksTrust` with.
-    expect(precheck(params(where.cwd, hash))).toBe(true);
+    expect(precheck(params(where.cwd, hash))).toBe("trusted");
 
     // And the RPC itself: a client whose resolver records every ask is never
     // reached, because the precheck answers first.
@@ -163,7 +272,7 @@ describe("the serve host's own hooks trust", () => {
     // Nothing is trusted on this host, so the daemon ASKED the client (never a
     // silent decline); the client said yes and the hook ran.
     expect(asked).toHaveLength(1);
-    expect(precheck(asked[0] ?? params("", ""))).toBe(false);
+    expect(precheck(asked[0] ?? params("", ""))).toBe("ask");
     expect(existsSync(marker)).toBe(true);
     // The serve host stores NOTHING from a client's answer: the next turn asks again.
     expect(fileTrustStore(where.configDir).get(where.cwd)).toBeUndefined();
@@ -252,5 +361,71 @@ describe("project hooks in a serve turn", () => {
     // Mutation: no precheck → the client is asked, answers false, the hook is skipped.
     expect(asked).toEqual([]);
     expect(existsSync(marker)).toBe(true);
+  }, 60_000);
+});
+
+describe("S4 review round 1: the relay route and the host's `never`", () => {
+  /** A folder whose hooks file exists, so a turn has something to decide about. */
+  function withHooks(where: ReturnType<typeof rig>): string {
+    const marker = join(where.root, "hook-ran");
+    mkdirSync(join(where.cwd, ".agents"), { recursive: true });
+    writeFileSync(
+      join(where.cwd, ".agents", "hooks.json"),
+      `${JSON.stringify({ hooks: [{ event: "turn_start", command: `touch ${marker}` }] })}\n`,
+    );
+    return marker;
+  }
+
+  async function trustFolderHere(where: ReturnType<typeof rig>, decision: "trusted" | "never") {
+    const { discoverProjectHooks } = await import("@tentacle/config");
+    const found = await discoverProjectHooks(where.cwd, where.root);
+    const hooks = found.projectHooks;
+    if (!hooks) throw new Error("the test's hooks file was not discovered");
+    fileTrustStore(where.configDir).set(hooks.folder, { hash: hooks.hash, decision });
+    return hooks;
+  }
+
+  async function turnOverRelay(peer: RpcPeer, ended: Promise<void>): Promise<void> {
+    await peer.request("session/open", { sessionId: "S", create: true });
+    await peer.request("session/prompt", {
+      sessionId: "S",
+      turnId: "t1",
+      content: [{ type: "text", text: "hello" }],
+    });
+    // `session/prompt` acks at once: the DECISION (and the hook) happen during
+    // the turn, so every assertion below waits for its `turn_end` — else they
+    // would pass before anything was decided.
+    await ended;
+  }
+
+  test("T13e: TRUSTED on this host, a phone turn THROUGH THE RELAY asks nobody (finding 1)", async () => {
+    // The remote path that matters: `--relay` is how a phone reaches a `serve`
+    // away from home. With the precheck wired to ws-server only, the relay's
+    // accept legs built a Connection without it, so the phone was asked every
+    // session about a folder this Mac had already trusted.
+    const where = rig();
+    const marker = withHooks(where);
+    await trustFolderHere(where, "trusted");
+    const { address } = await serveOverRelay(where);
+    const { peer, asked, ended } = await phoneOverRelay(address, where.configDir, false);
+    await turnOverRelay(peer, ended);
+    // Mutation: no `hooksTrustPrecheck` in `startRelayLink` → this is 1, not 0.
+    expect(asked).toEqual([]);
+    expect(existsSync(marker)).toBe(true);
+  }, 60_000);
+
+  test("T13f: `never` on this host DECLINES a phone turn over the relay, unasked (finding 2)", async () => {
+    // The host said "never" for this repo. One tap on a phone prompt must not
+    // run those hooks: the decision belongs where the folder is.
+    const where = rig();
+    const marker = withHooks(where);
+    await trustFolderHere(where, "never");
+    const { address } = await serveOverRelay(where);
+    const { peer, asked, ended } = await phoneOverRelay(address, where.configDir, true);
+    await turnOverRelay(peer, ended);
+    // Mutation: `never` mapped to "ask" (serve-hooks-trust.ts) → asked is 1 and
+    // the phone's `true` runs the hooks the host refused.
+    expect(asked).toEqual([]);
+    expect(existsSync(marker)).toBe(false);
   }, 60_000);
 });
