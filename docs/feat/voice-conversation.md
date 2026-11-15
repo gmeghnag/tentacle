@@ -445,3 +445,10 @@ Red first (§9); each is shown failing on a stub, then green, and the named muta
 - Q5 TTS: **system voice on Mac and iPhone**; Kokoro an opt-in on the Mac only if the spike proves it.
 - Q6 iPhone background / screen locked: **in v1 scope — "background subito"** (overrides the recommendation): the phone loop must keep listening and speaking with the app backgrounded and the screen locked. The plan must be revised: background audio mode, AVAudioSession lifetime, interruptions, App Review risk, and E11 becomes a design input, not a gate.
 - Q7 two edges on one session: **only the edge that started the turn speaks**; the other shows text.
+
+#### Owner answers (2026-11-15, batch 3 — on the mockups)
+
+- Q8 activation, Mac: **B** — `/voice` or Ctrl+R pressed twice (once stays dictation); in conversation the input row becomes the voice bar.
+- Q8 activation, iPhone: **B** — with the field empty, Send becomes the voice button; in conversation a voice bar replaces the composer.
+
+**Implementation APPROVED by the owner (2026-11-15).** Code slices start after `feat/voice-dictation` and `feat/mobile-voice` merge; the spikes (Mac C1, iPhone P1 — owner-assisted on the device) may run now.
