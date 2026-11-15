@@ -45,6 +45,11 @@ export interface Palette {
   readonly glass: string;
   readonly glassBorder: string;
   readonly shadowOpacity: number;
+  /**
+   * The dim behind a sheet or an action sheet: the mockups' 0.35 on light; on
+   * the black dark page 0.6, so the sheet separates (visual review N12).
+   */
+  readonly scrim: string;
   /** The camera's own chrome, always dark (Pair scanner). */
   readonly camera: string;
   readonly cameraAccent: string;
@@ -85,6 +90,7 @@ const light: Palette = {
   glass: "rgba(255,255,255,0.82)",
   glassBorder: "rgba(0,0,0,0.08)",
   shadowOpacity: 0.12,
+  scrim: "rgba(0,0,0,0.35)",
   camera: "#000000",
   cameraAccent: "#22D3EE",
   kw: "#9B2393",
@@ -124,6 +130,7 @@ const dark: Palette = {
   glass: "rgba(44,44,46,0.82)",
   glassBorder: "rgba(255,255,255,0.12)",
   shadowOpacity: 0.5,
+  scrim: "rgba(0,0,0,0.6)",
   camera: "#000000",
   cameraAccent: "#22D3EE",
   kw: "#FF7AB2",
@@ -217,6 +224,14 @@ export const size = {
   grabberWidth: 36,
   grabberHeight: 5,
   viewfinder: 240,
+} as const;
+
+/**
+ * The glass shadow: the mockups' `0 6px 20px rgba(0,0,0,0.12)` — a 20 px CSS
+ * blur is a 10 pt `shadowRadius`. The opacity is the palette's (`shadowOpacity`).
+ */
+export const shadow = {
+  glass: { shadowColor: "#000000", shadowOffset: { width: 0, height: 6 }, shadowRadius: 10 },
 } as const;
 
 export const space = {

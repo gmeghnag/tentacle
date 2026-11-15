@@ -10,7 +10,7 @@
  */
 import type { JSX } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import { type Palette, size, typography } from "../theme.ts";
+import { type Palette, shadow, size, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
 
 export type ComposerButton = "send" | "queue" | "send-later" | "stop" | "disabled";
@@ -153,9 +153,7 @@ const styles = StyleSheet.create({
     borderRadius: size.composer / 2,
     borderWidth: StyleSheet.hairlineWidth * 2,
     paddingHorizontal: 6,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 6 },
-    shadowRadius: 20,
+    ...shadow.glass,
   },
   photo: {
     width: 36,

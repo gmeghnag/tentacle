@@ -48,3 +48,13 @@ export function sessionMeta(row: SessionRow): string {
   parts.push(row.subtitle);
   return parts.join(" · ");
 }
+
+/**
+ * The VISIBLE line: under an "Idle" or "Archived" header the state word only
+ * repeats the header (visual review N8), so it is dropped there; "Running" stays,
+ * next to its accent dot. VoiceOver keeps the full `sessionMeta`.
+ */
+export function sessionLine(row: SessionRow): string {
+  const meta = sessionMeta(row);
+  return row.running && !row.archived ? meta : meta.slice(meta.indexOf(" · ") + 3);
+}

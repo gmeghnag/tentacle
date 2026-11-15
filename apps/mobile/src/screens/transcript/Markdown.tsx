@@ -14,6 +14,7 @@ import type { JSX } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { inlineCodeLook } from "../../code-block.ts";
 import { type MdBlock, type MdInline, type Parsed, flatten } from "../../markdown.ts";
+import { columnAlign } from "../../table-layout.ts";
 import { MONO, type Palette, radius, typography } from "../../theme.ts";
 import { CodeBlock } from "../../ui/CodeBlock.tsx";
 
@@ -120,19 +121,23 @@ function codeBlock(
 
 /**
  * A table as a real grid (mockup `Conversation`), column by column so every cell
- * of a row lines up without measuring: cells are one line each, and the grid
- * scrolls sideways like a code block.
+ * of a row lines up without measuring: cells are one line each. The columns
+ * share the bordered box's full width, so the row lines run edge to edge
+ * (visual review V4); a table wider than the screen scrolls inside the border.
+ * Numeric columns are right-aligned (`table-layout.ts`).
  */
 function tableGrid(block: Extract<MdBlock, { kind: "table" }>, ctx: Ctx, id: string): JSX.Element {
-  const columns = block.header.map((_cell, at) => at);
+  const align = columnAlign(block);
   return (
     <ScrollView
       key={id}
       horizontal
       showsHorizontalScrollIndicator={false}
       style={[styles.table, { borderColor: ctx.palette.sep }]}
+      contentContainerStyle={styles.tableContent}
     >
-      {columns.map((column) => (
+      {align.map((textAlign, column) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: a column's place is its identity
         <View key={`${id}-c${column}`} style={styles.column}>
           {[block.header, ...block.rows].map((row, at) => (
             <Text
@@ -145,7 +150,7 @@ function tableGrid(block: Extract<MdBlock, { kind: "table" }>, ctx: Ctx, id: str
                 at === 0 ? styles.headerCell : undefined,
                 at === 0 ? undefined : { borderTopColor: ctx.palette.sep },
                 at === 0 ? undefined : styles.bodyCell,
-                { color: ctx.palette.label },
+                { color: ctx.palette.label, textAlign },
               ]}
             >
               {row[column] ?? ""}
@@ -288,7 +293,9 @@ const styles = StyleSheet.create({
   bullet: { ...typography.transcript, minWidth: 18, textAlign: "right" },
   listBody: { flex: 1, gap: 6 },
   table: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.tile },
-  column: { minWidth: 72 },
+  // At least the box's width; the columns split what is left over.
+  tableContent: { flexGrow: 1 },
+  column: { minWidth: 72, flexGrow: 1 },
   cell: { ...typography.subhead, paddingHorizontal: 12, paddingVertical: 8 },
   headerCell: { fontWeight: "600" },
   bodyCell: { borderTopWidth: StyleSheet.hairlineWidth },

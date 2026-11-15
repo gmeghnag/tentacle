@@ -62,3 +62,16 @@ export function codeBlockView(text: string, lang: string | null | undefined): Co
     wrap: false,
   };
 }
+
+/**
+ * The 16 pt trailing fade on a code block's scroller (visual review N11): on
+ * while a line runs past the right edge, off when everything fits or the
+ * scroller is at its end (1 pt slack for sub-point rounding).
+ */
+export function trailingFade(widths: {
+  readonly content: number;
+  readonly viewport: number;
+  readonly offset: number;
+}): boolean {
+  return widths.viewport > 0 && widths.offset + widths.viewport < widths.content - 1;
+}

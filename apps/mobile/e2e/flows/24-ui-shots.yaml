@@ -90,6 +90,18 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "24-sessions"
+# The search with no hit: its own designed state (visual review V5).
+- tapOn:
+    id: "sessions-search"
+- inputText: "nothing like this"
+- assertVisible:
+    id: "sessions-no-match"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-sessions-no-match"
+- eraseText: 30
+- hideKeyboard
 - tapOn:
     id: "session-${SHOTS_ID}"
 - assertVisible:

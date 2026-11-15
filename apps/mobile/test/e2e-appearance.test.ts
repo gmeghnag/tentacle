@@ -36,6 +36,15 @@ describe("appearance hook", () => {
     expect(shot.lastIndexOf('NAME: "light"')).toBeGreaterThan(at("takeScreenshot: ${SHOT}-dark"));
   });
 
+  test("`_shot` lets the screen come to rest before the light shot (visual review V2)", () => {
+    // `05-computers-light.png` caught the push animation mid-way: the Pair
+    // screen's edge on the left, Computers cut off on the right.
+    const shot = readFileSync(join(flows, "_shot.yaml"), "utf8");
+    const wait = shot.indexOf("- waitForAnimationToEnd");
+    expect(wait).toBeGreaterThan(-1);
+    expect(wait).toBeLessThan(shot.indexOf("takeScreenshot: ${SHOT}-light"));
+  });
+
   test("flow 24 shoots only through `_shot`, starts light and ends light", () => {
     const flow = readFileSync(join(flows, "24-ui-shots.yaml"), "utf8");
     expect(flow).not.toContain("takeScreenshot");

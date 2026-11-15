@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type Palette, darkPalette, lightPalette } from "../src/theme.ts";
+import { type Palette, darkPalette, lightPalette, shadow } from "../src/theme.ts";
 
 /**
  * The readability gate for the phone's tokens (docs/feat/mobile-ui-polish.md
@@ -106,5 +106,22 @@ describe("the dark palette can be reached on a device", () => {
       expo?: { userInterfaceStyle?: unknown };
     };
     expect(config.expo?.userInterfaceStyle).toBe("automatic");
+  });
+});
+
+describe("the glass shadow (visual review N10)", () => {
+  // CSS `0 6px 20px rgba(0,0,0,0.12)`: a 20 px CSS blur is a 10 pt iOS
+  // shadowRadius. At 20 the light page showed a grey smudge round each button.
+  test("one token: offset y 6, radius 10; light opacity 0.12", () => {
+    expect(shadow.glass.shadowOffset).toEqual({ width: 0, height: 6 });
+    expect(shadow.glass.shadowRadius).toBe(10);
+    expect(lightPalette.shadowOpacity).toBe(0.12);
+  });
+  test("the glass button and the composer read the token, not their own radius", () => {
+    for (const file of ["GlassButton.tsx", "Composer.tsx"]) {
+      const src = readFileSync(join(import.meta.dir, "..", "src", "ui", file), "utf8");
+      expect(src).toContain("shadow.glass");
+      expect(src).not.toMatch(/shadowRadius:\s*20/);
+    }
   });
 });

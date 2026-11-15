@@ -14,6 +14,7 @@ import { ScrollView, StyleSheet, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
 import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
 import { Banner } from "../ui/Banner.tsx";
+import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
 import { GlassButton } from "../ui/GlassButton.tsx";
 import { GroupedCard } from "../ui/GroupedCard.tsx";
 import { Icon } from "../ui/Icon.tsx";
@@ -65,124 +66,131 @@ export function SettingsScreen({
   canExport,
   onBack,
 }: SettingsScreenProps): JSX.Element {
+  const compact = useCompactTitle();
   return (
-    <ScrollView
-      testID="settings"
-      style={{ backgroundColor: palette.bg }}
-      contentContainerStyle={styles.content}
-    >
-      <ScreenHeader
-        palette={palette}
-        title="Settings"
-        left={
-          onBack === undefined ? undefined : (
-            <GlassButton
-              palette={palette}
-              testID="settings-back"
-              icon="chevron.left"
-              accessibilityLabel="Back"
-              onPress={onBack}
-            />
-          )
-        }
-      />
-      <View style={styles.body}>
-        <View style={styles.section}>
-          <SectionHeader palette={palette} title="App lock" />
-          {notice === "no-passcode" ? (
-            <Banner
-              palette={palette}
-              flush
-              tone="error"
-              icon="lock.fill"
-              testID="lock-notice"
-              title="tentacle cannot lock"
-              body="This iPhone has no passcode. Add one in Settings → Face ID & Passcode."
-            />
-          ) : null}
-          <GroupedCard palette={palette}>
-            {DELAY_ROWS.map((row, index) => {
-              const selected = setting === row.value;
-              const asked = pending === row.value && !selected;
-              return (
-                <Row
-                  key={row.value}
-                  testID={`lock-delay-${row.value}`}
-                  palette={palette}
-                  first={index === 0}
-                  minHeight={size.rowSetting}
-                  title={row.label}
-                  accessibilityLabel={row.label}
-                  onPress={() => onSelectDelay(row.value)}
-                  trailing={
-                    selected ? (
-                      <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
-                    ) : asked ? (
-                      // Owner Q6: asked for, not yet in force — no silent change.
-                      <Text
-                        testID={`lock-delay-pending-${row.value}`}
-                        maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                        style={[typography.footnote, { color: palette.sec }]}
-                      >
-                        Unlock to apply
-                      </Text>
-                    ) : undefined
-                  }
-                />
-              );
-            })}
-          </GroupedCard>
-          <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
-            How long tentacle may stay in the background before it asks for Face ID again.
-          </Text>
-          {error === undefined ? null : (
-            <Banner
-              palette={palette}
-              flush
-              tone="error"
-              icon="exclamationmark.triangle"
-              testID="settings-error"
-              body={error}
-            />
-          )}
+    <View style={[styles.root, { backgroundColor: palette.bg }]}>
+      <ScrollView
+        testID="settings"
+        style={{ backgroundColor: palette.bg }}
+        contentContainerStyle={styles.content}
+        onScroll={compact.onScroll}
+        scrollEventThrottle={compact.scrollEventThrottle}
+      >
+        <ScreenHeader
+          palette={palette}
+          title="Settings"
+          left={
+            onBack === undefined ? undefined : (
+              <GlassButton
+                palette={palette}
+                testID="settings-back"
+                icon="chevron.left"
+                accessibilityLabel="Back"
+                onPress={onBack}
+              />
+            )
+          }
+        />
+        <View style={styles.body}>
+          <View style={styles.section}>
+            <SectionHeader palette={palette} title="App lock" />
+            {notice === "no-passcode" ? (
+              <Banner
+                palette={palette}
+                tone="error"
+                icon="lock.fill"
+                testID="lock-notice"
+                title="tentacle cannot lock"
+                body="This iPhone has no passcode. Add one in Settings → Face ID & Passcode."
+              />
+            ) : null}
+            <GroupedCard palette={palette}>
+              {DELAY_ROWS.map((row, index) => {
+                const selected = setting === row.value;
+                const asked = pending === row.value && !selected;
+                return (
+                  <Row
+                    key={row.value}
+                    testID={`lock-delay-${row.value}`}
+                    palette={palette}
+                    first={index === 0}
+                    minHeight={size.rowSetting}
+                    title={row.label}
+                    accessibilityLabel={row.label}
+                    onPress={() => onSelectDelay(row.value)}
+                    trailing={
+                      selected ? (
+                        <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
+                      ) : asked ? (
+                        // Owner Q6: asked for, not yet in force — no silent change.
+                        <Text
+                          testID={`lock-delay-pending-${row.value}`}
+                          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                          style={[typography.footnote, { color: palette.sec }]}
+                        >
+                          Unlock to apply
+                        </Text>
+                      ) : undefined
+                    }
+                  />
+                );
+              })}
+            </GroupedCard>
+            <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
+              How long tentacle may stay in the background before it asks for Face ID again.
+            </Text>
+            {error === undefined ? null : (
+              <Banner
+                palette={palette}
+                tone="error"
+                icon="exclamationmark.triangle"
+                testID="settings-error"
+                body={error}
+              />
+            )}
+          </View>
+          <View style={styles.section}>
+            <SectionHeader palette={palette} title="Diagnostics" />
+            <GroupedCard palette={palette}>
+              <Row
+                testID="export-logs"
+                palette={palette}
+                first
+                minHeight={size.rowSetting}
+                title="Export logs"
+                tone={canExport ? "accent" : "default"}
+                dimmed={!canExport}
+                {...(canExport ? { onPress: onExportLogs } : {})}
+              />
+            </GroupedCard>
+            <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
+              Logs hold connection state, errors and timings — never message content or keys. You
+              choose where to share the file.
+            </Text>
+            {exportError === undefined ? null : (
+              <Banner
+                palette={palette}
+                tone="error"
+                icon="exclamationmark.triangle"
+                testID="export-error"
+                body={exportError}
+              />
+            )}
+          </View>
         </View>
-        <View style={styles.section}>
-          <SectionHeader palette={palette} title="Diagnostics" />
-          <GroupedCard palette={palette}>
-            <Row
-              testID="export-logs"
-              palette={palette}
-              first
-              minHeight={size.rowSetting}
-              title="Export logs"
-              tone={canExport ? "accent" : "default"}
-              dimmed={!canExport}
-              {...(canExport ? { onPress: onExportLogs } : {})}
-            />
-          </GroupedCard>
-          <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
-            Logs hold connection state, errors and timings — never message content or keys. You
-            choose where to share the file.
-          </Text>
-          {exportError === undefined ? null : (
-            <Banner
-              palette={palette}
-              flush
-              tone="error"
-              icon="exclamationmark.triangle"
-              testID="export-error"
-              body={exportError}
-            />
-          )}
-        </View>
-      </View>
-    </ScrollView>
+      </ScrollView>
+      <CompactBar palette={palette} title="Settings" shown={compact.shown} />
+    </View>
   );
 }
 
+// ONE left edge (visual review V3/N13): the cards sit on the page margin (their
+// own `marginHorizontal`), headers AND footers 16 inside the card edge, banners
+// on the page margin; the first group as far under the title as between groups.
 const styles = StyleSheet.create({
+  root: { flex: 1 },
   content: { paddingBottom: 40 },
-  body: { paddingHorizontal: space.inset, gap: space.sectionComputers, paddingTop: 8 },
+  body: { gap: space.sectionComputers, paddingTop: space.sectionSessions },
   section: { gap: 8 },
-  footnote: { paddingHorizontal: space.inset },
+  footnote: { paddingHorizontal: space.inset + space.cardInner },
 });

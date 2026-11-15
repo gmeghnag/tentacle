@@ -30,6 +30,7 @@ import { computerStatus, menuActions } from "../computer-status.ts";
 import { DENSE_FONT_SCALE, type Palette, size as SIZE, space, typography } from "../theme.ts";
 import { ActionSheet, type SheetAction } from "../ui/ActionSheet.tsx";
 import { Banner } from "../ui/Banner.tsx";
+import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
 import { GlassButton } from "../ui/GlassButton.tsx";
 import { GroupedCard } from "../ui/GroupedCard.tsx";
 import { Icon } from "../ui/Icon.tsx";
@@ -84,12 +85,15 @@ export function ComputersScreen({
   onOpenSettings,
 }: ComputersScreenProps): JSX.Element {
   const insets = useSafeAreaInsets();
+  const compact = useCompactTitle();
   return (
     <View style={[styles.root, { backgroundColor: palette.bg }]}>
       <ScrollView
         testID="computers-list"
         style={{ backgroundColor: palette.bg }}
         contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
+        onScroll={compact.onScroll}
+        scrollEventThrottle={compact.scrollEventThrottle}
       >
         <ScreenHeader
           palette={palette}
@@ -119,7 +123,7 @@ export function ComputersScreen({
             <Banner
               palette={palette}
               tone="error"
-              title="Can't show your computers"
+              title="Can’t show your computers"
               body={error}
               bodyTestID="computers-error"
             />
@@ -162,6 +166,7 @@ export function ComputersScreen({
           </Text>
         </View>
       </ScrollView>
+      <CompactBar palette={palette} title="Computers" shown={compact.shown} />
       <ActionSheet
         palette={palette}
         visible={removing !== undefined || menu !== undefined}

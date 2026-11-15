@@ -33,9 +33,11 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { CameraView } from "../camera-access.ts";
 import { sasGroups } from "../computer-status.ts";
 import { FIELD_REVEAL_IDLE, type FieldRevealEvent, revealStep } from "../field-reveal.ts";
+import { PAIR_COPY, pairSheetHeading } from "../pair-copy.ts";
 import type { PairingView } from "../pairing-flow.ts";
 import { type Palette, size as SIZE, radius, space, typography } from "../theme.ts";
 import { Banner } from "../ui/Banner.tsx";
+import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
 import { GlassButton } from "../ui/GlassButton.tsx";
 import { GroupedCard } from "../ui/GroupedCard.tsx";
 import { Icon } from "../ui/Icon.tsx";
@@ -94,6 +96,9 @@ export function PairScreen({
 }: PairScreenProps): JSX.Element {
   const insets = useSafeAreaInsets();
   const inSheet = view.stage !== "intake";
+  const compact = useCompactTitle();
+  const title = againName === undefined ? "Pair a computer" : "Pair again";
+  const heading = pairSheetHeading(view);
   // Keep the paste field and Continue above the keyboard (`field-reveal.ts`):
   // the avoiding view shrinks the screen, the list keeps its offset, so the
   // field — the last card — would sit under the keyboard.
@@ -121,7 +126,7 @@ export function PairScreen({
         tone="error"
         flush
         testID={`pair-error-${view.failure.reason}`}
-        title="Pairing didn't work"
+        title={PAIR_COPY.failedTitle}
         body={
           view.failure.mayStillPrompt === true
             ? `${view.failure.message} If the computer is asking, answer n there.`
@@ -152,6 +157,11 @@ export function PairScreen({
       <ScrollView
         ref={list}
         onContentSizeChange={() => feed("content-resized")}
+        onScroll={compact.onScroll}
+        scrollEventThrottle={compact.scrollEventThrottle}
+        // Behind a sheet the intake is only scenery under the scrim.
+        accessibilityElementsHidden={inSheet}
+        importantForAccessibility={inSheet ? "no-hide-descendants" : "auto"}
         style={styles.root}
         contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
         keyboardShouldPersistTaps="handled"
@@ -159,7 +169,7 @@ export function PairScreen({
       >
         <ScreenHeader
           palette={palette}
-          title={againName === undefined ? "Pair a computer" : "Pair again"}
+          title={title}
           left={
             onBack === undefined ? undefined : (
               <GlassButton
@@ -173,7 +183,8 @@ export function PairScreen({
           }
         />
 
-        {view.stage === "intake" ? (
+        {/* The intake stays rendered behind a sheet, under the scrim (N1). */}
+        {view.stage === "intake" || inSheet ? (
           <>
             <View style={styles.block}>
               <GroupedCard palette={palette}>
@@ -196,7 +207,7 @@ export function PairScreen({
                       testID="pair-again-name"
                       style={[typography.footnote, styles.center, { color: palette.sec }]}
                     >
-                      Pairing again replaces this phone's entry for '{againName}'.
+                      {PAIR_COPY.again(againName)}
                     </Text>
                   )}
                   {camera.scan !== "none" ? (
@@ -236,7 +247,7 @@ export function PairScreen({
               </View>
             )}
 
-            {failureBlock === null ? null : (
+            {failureBlock === null || inSheet ? null : (
               <View style={[styles.block, styles.insetBlock]}>{failureBlock}</View>
             )}
 
@@ -258,7 +269,6 @@ export function PairScreen({
                     style={[
                       typography.mono,
                       styles.field,
-                      styles.pasteField,
                       { color: palette.label, backgroundColor: palette.fill },
                     ]}
                   />
@@ -277,8 +287,36 @@ export function PairScreen({
         ) : null}
       </ScrollView>
 
+      <CompactBar palette={palette} title={title} shown={compact.shown && !inSheet} />
+
       {inSheet ? (
-        <Sheet palette={palette} {...sheetTitle(view)}>
+        // The scrim: dims the intake and swallows its touches.
+        <View
+          style={[styles.scrim, { backgroundColor: palette.scrim }]}
+          onStartShouldSetResponder={() => true}
+        />
+      ) : null}
+
+      {inSheet ? (
+        <Sheet
+          palette={palette}
+          floating
+          {...(heading.title === undefined ? {} : { title: heading.title })}
+          {...(heading.centred === true ? { centred: true } : {})}
+          subtitle={
+            view.stage === "compare" ? (
+              <>
+                {PAIR_COPY.compareBefore}
+                <InlineMono palette={palette} size={typography.subhead.fontSize}>
+                  {PAIR_COPY.compareKey}
+                </InlineMono>
+                {PAIR_COPY.compareAfter}
+              </>
+            ) : (
+              heading.subtitle
+            )
+          }
+        >
           {view.stage === "review" && view.review !== undefined ? (
             <View testID="pair-review" style={styles.sheetBody}>
               {view.review.existing === undefined ? null : (
@@ -286,8 +324,7 @@ export function PairScreen({
                   testID="pair-already-paired"
                   style={[typography.subhead, { color: palette.orange }]}
                 >
-                  Already paired with '{view.review.existing.name}' — pairing again replaces this
-                  phone's key for it.
+                  {PAIR_COPY.already(view.review.existing.name)}
                 </Text>
               )}
               <Text style={[typography.footnote, styles.label, { color: palette.sec }]}>
@@ -328,9 +365,9 @@ export function PairScreen({
           {view.stage === "connecting" ? (
             <View style={styles.sheetBody}>
               <View style={styles.waiting}>
-                <ActivityIndicator color={palette.sec} />
+                <ActivityIndicator color={palette.accent} />
                 <Text testID="pair-connecting" style={[typography.subhead, { color: palette.sec }]}>
-                  Connecting…
+                  {PAIR_COPY.connecting}
                 </Text>
               </View>
               <PillButton
@@ -359,16 +396,16 @@ export function PairScreen({
                 ))}
               </View>
               <View style={styles.waiting}>
-                <ActivityIndicator color={palette.sec} />
+                <ActivityIndicator color={palette.accent} />
                 <Text style={[typography.subhead, { color: palette.sec }]}>
-                  Waiting for your answer on the computer…
+                  {PAIR_COPY.waiting}
                 </Text>
               </View>
               <PillButton
                 testID="pair-cancel"
                 palette={palette}
                 kind="neutral"
-                label="Codes don't match"
+                label={PAIR_COPY.mismatch}
                 onPress={onCancel}
               />
             </View>
@@ -380,7 +417,7 @@ export function PairScreen({
                 <Icon name="checkmark" color={palette.green} size={28} />
               </View>
               <Text style={[typography.subhead, styles.center, { color: palette.sec }]}>
-                You can now use this computer from this phone.
+                {PAIR_COPY.done}
               </Text>
             </View>
           ) : null}
@@ -414,32 +451,6 @@ export function PairScreen({
   );
 }
 
-/** The sheet's heading for each stage (the copy is presentation, the stage the model's). */
-function sheetTitle(view: PairingView): { title?: string; subtitle?: string } {
-  switch (view.stage) {
-    case "review":
-      return view.review === undefined
-        ? {}
-        : {
-            title: `Pair with '${view.review.computerName}'?`,
-            subtitle: `It answers on ${view.review.addressCount} ${
-              view.review.addressCount === 1 ? "address" : "addresses"
-            }.`,
-          };
-    case "connecting":
-      return { title: "Connecting" };
-    case "compare":
-      return {
-        title: "Compare the code",
-        subtitle: "Check that your computer shows the same code, then answer y there.",
-      };
-    case "done":
-      return { title: `Paired with '${view.computerName ?? ""}'` };
-    default:
-      return { title: "Pairing didn't work" };
-  }
-}
-
 const styles = StyleSheet.create({
   root: { flex: 1 },
   block: { marginTop: space.sectionSessions },
@@ -459,18 +470,19 @@ const styles = StyleSheet.create({
   },
   paste: { padding: space.cardInner, gap: 12 },
   field: { borderRadius: radius.tile, paddingHorizontal: 14, minHeight: 48, paddingVertical: 13 },
-  pasteField: { minHeight: 72, textAlignVertical: "top" },
   label: { marginTop: 4, letterSpacing: -0.08 },
   sheetBody: { gap: 12, marginTop: 4 },
   doneBody: { alignItems: "center" },
   waiting: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10 },
-  sasRow: { flexDirection: "row", gap: 12, justifyContent: "center", marginVertical: 4 },
+  // The chips hug their digits, centred (mockup `Pair` compare: 6/14, gap 14).
+  sasRow: { flexDirection: "row", gap: 14, justifyContent: "center", marginVertical: 4 },
   sasBox: {
-    flex: 1,
     borderRadius: radius.tile,
-    paddingVertical: 14,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
     alignItems: "center",
   },
   scanner: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
+  scrim: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
   scannerBar: { position: "absolute", left: space.inset },
 });

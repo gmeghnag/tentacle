@@ -7,7 +7,7 @@
 import * as Clipboard from "expo-clipboard";
 import { type JSX, useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { codeBlockView } from "../code-block.ts";
+import { codeBlockView, trailingFade } from "../code-block.ts";
 import { playHaptic } from "../haptics.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
@@ -50,6 +50,8 @@ export function CodeBlock({
   testID,
 }: CodeBlockProps): JSX.Element {
   const view = codeBlockView(text, lang);
+  // The scroller's widths, for the overflow cue (`trailingFade`).
+  const [widths, setWidths] = useState({ content: 0, viewport: 0, offset: 0 });
   // "Copied" for a moment after a tap: presentation state only.
   const [copied, setCopied] = useState(false);
   useEffect(() => {
@@ -94,30 +96,59 @@ export function CodeBlock({
       </View>
       {/* Clipped 12 pt inside the block on BOTH sides (owner feedback #3: a
         line ran to the block's very edge), with the native indicator. */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator
-        style={styles.scroller}
-        contentContainerStyle={styles.lines}
-      >
-        <View>
-          {view.lines.map((line) => (
-            <Text key={line.key} style={[typography.monoCode, { color: palette.label }]}>
-              {line.spans.map((span, at) => (
-                <Text
-                  // A span's position within its line is its identity (the line
-                  // re-renders as a whole when its text changes).
-                  // biome-ignore lint/suspicious/noArrayIndexKey: spans are positional
-                  key={at}
-                  style={{ color: scopeColor(span.scope, palette) }}
-                >
-                  {span.text}
-                </Text>
-              ))}
-            </Text>
-          ))}
-        </View>
-      </ScrollView>
+      <View style={styles.scroller}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator
+          contentContainerStyle={styles.lines}
+          scrollEventThrottle={32}
+          onLayout={(e) => setWidths((w) => ({ ...w, viewport: e.nativeEvent.layout.width }))}
+          onContentSizeChange={(content) => setWidths((w) => ({ ...w, content }))}
+          onScroll={(e) => {
+            const offset = e.nativeEvent.contentOffset.x;
+            setWidths((w) => (w.offset === offset ? w : { ...w, offset }));
+          }}
+        >
+          <View>
+            {view.lines.map((line) => (
+              <Text key={line.key} style={[typography.monoCode, { color: palette.label }]}>
+                {line.spans.map((span, at) => (
+                  <Text
+                    // A span's position within its line is its identity (the line
+                    // re-renders as a whole when its text changes).
+                    // biome-ignore lint/suspicious/noArrayIndexKey: spans are positional
+                    key={at}
+                    style={{ color: scopeColor(span.scope, palette) }}
+                  >
+                    {span.text}
+                  </Text>
+                ))}
+              </Text>
+            ))}
+          </View>
+        </ScrollView>
+        {trailingFade(widths) ? <TrailingFade color={background} /> : null}
+      </View>
+    </View>
+  );
+}
+
+const FADE_STEPS = 8;
+
+/**
+ * The block's fill fading in over the last 16 pt (no gradient library: 8
+ * strips of rising opacity read as one ramp at this size).
+ */
+function TrailingFade({ color }: { readonly color: string }): JSX.Element {
+  return (
+    <View pointerEvents="none" style={styles.fade}>
+      {Array.from({ length: FADE_STEPS }, (_, at) => (
+        <View
+          // biome-ignore lint/suspicious/noArrayIndexKey: fixed positional strips
+          key={at}
+          style={{ flex: 1, backgroundColor: color, opacity: (at + 1) / FADE_STEPS }}
+        />
+      ))}
     </View>
   );
 }
@@ -136,4 +167,12 @@ const styles = StyleSheet.create({
   copy: { width: 44, height: 34, alignItems: "center", justifyContent: "center" },
   scroller: { marginHorizontal: 12, marginBottom: 12 },
   lines: { paddingBottom: 6 },
+  fade: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 6,
+    width: 16,
+    flexDirection: "row",
+  },
 });

@@ -8,7 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { INLINE_CHIP_MAX, codeBlockView, inlineCodeLook } from "../src/code-block.ts";
+import { INLINE_CHIP_MAX, codeBlockView, inlineCodeLook, trailingFade } from "../src/code-block.ts";
 
 const text = (line: { readonly spans: readonly { readonly text: string }[] }): string =>
   line.spans.map((span) => span.text).join("");
@@ -104,5 +104,25 @@ describe("CodeBlock.tsx wiring (B6)", () => {
   test("Markdown routes every fenced block through CodeBlock", () => {
     expect(markdown).toMatch(/<CodeBlock\b/);
     expect(markdown).not.toContain("highlight(");
+  });
+});
+
+describe("trailingFade (visual review N11: a cut line gave no cue that it scrolls)", () => {
+  test("shown while content runs past the right edge", () => {
+    expect(trailingFade({ content: 600, viewport: 300, offset: 0 })).toBe(true);
+    expect(trailingFade({ content: 600, viewport: 300, offset: 200 })).toBe(true);
+  });
+  test("hidden when everything fits, and once scrolled to the end", () => {
+    expect(trailingFade({ content: 280, viewport: 300, offset: 0 })).toBe(false);
+    expect(trailingFade({ content: 600, viewport: 300, offset: 300 })).toBe(false);
+    // Sub-point rounding at the end does not leave it on.
+    expect(trailingFade({ content: 600.4, viewport: 300, offset: 300 })).toBe(false);
+  });
+  test("hidden before the first layout (no widths yet)", () => {
+    expect(trailingFade({ content: 0, viewport: 0, offset: 0 })).toBe(false);
+  });
+  test("CodeBlock draws the fade from this rule", () => {
+    const source = readFileSync(join(import.meta.dir, "../src/ui/CodeBlock.tsx"), "utf8");
+    expect(source).toMatch(/trailingFade\(widths\) \? <TrailingFade/);
   });
 });

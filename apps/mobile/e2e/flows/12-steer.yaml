@@ -36,6 +36,10 @@ appId: so.tentacle.app
 # clear, so a double tap cannot queue twice) and the row is what carries the text.
 - assertNotVisible:
     id: "composer-filled"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "12-queue"
 # No id on the row itself (its id is a daemon-side key): the LAST step is the
 # daemon's own truth, which is what this flow actually asserts.
 - runScript:

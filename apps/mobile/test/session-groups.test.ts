@@ -5,7 +5,7 @@
  * list on the phone. A pure regroup of `session-list.ts`'s rows — no new data.
  */
 import { describe, expect, test } from "bun:test";
-import { groupSessions, sessionMeta } from "../src/session-groups.ts";
+import { groupSessions, sessionLine, sessionMeta } from "../src/session-groups.ts";
 import type { SessionRow } from "../src/session-list.ts";
 
 const row = (over: Partial<SessionRow> & { sessionId: string }): SessionRow => ({
@@ -59,5 +59,18 @@ describe("sessionMeta (the inline line under a title)", () => {
   });
   test("archived", () => {
     expect(sessionMeta(z)).toBe("Archived · 3d ago");
+  });
+});
+
+describe("sessionLine (the row's visible line, under its section header)", () => {
+  test("Running keeps its state word (the accent dot carries meaning)", () => {
+    expect(sessionLine(a)).toBe("Running · 2 attached · 5m ago");
+  });
+  test("an Idle row does not repeat its section's name", () => {
+    expect(sessionLine(row({ sessionId: "x", attached: 1 }))).toBe("1 attached · 5m ago");
+    expect(sessionLine(b)).toBe("5m ago");
+  });
+  test("an Archived row does not repeat its section's name", () => {
+    expect(sessionLine(z)).toBe("3d ago");
   });
 });
