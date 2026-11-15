@@ -9,6 +9,15 @@ import { z } from "zod";
 import { modelRefIssues } from "./models.ts";
 
 /**
+ * The largest `liveActivity.startAfterSeconds` (one hour) and its default (20 s,
+ * the plan's Owner Q3). Copies of the rules module's own numbers, pinned by a
+ * test in `cli/test/live-activity-config.test.ts` (this package depends on zod
+ * alone, so it cannot import them).
+ */
+export const LIVE_ACTIVITY_START_AFTER_MAX_SECONDS = 3600;
+export const DEFAULT_LIVE_ACTIVITY_START_AFTER_SECONDS = 20;
+
+/**
  * The largest `push.graceSeconds` (one hour). The same NUMBER is
  * `@tentacle/protocol`'s `PUSH_GRACE_MAX_SECONDS`, which this package cannot
  * import (it depends on zod alone); `config/test/push-config.test.ts` pins the
@@ -502,6 +511,29 @@ const settingsShape = {
       // agreement is PINNED by a test (`config/test/push-config.test.ts`), not
       // left to two files to drift.
       graceSeconds: z.number().int().min(0).max(PUSH_GRACE_MAX_SECONDS).optional(),
+    })
+    .strict()
+    .optional(),
+  /**
+   * Live Activities (docs/feat/mobile-live-activity.md Design 3): `enabled`
+   * (default true) lets a `serve` start a lock-screen activity for a paired
+   * phone that is NOT attached to the session; `startAfterSeconds` (default 20,
+   * range 0–3600) is how long a turn must run before it may. LAPTOP-ONLY: never
+   * carried to a pod (a pod daemon holds no device route), and it needs the
+   * relay link — `--no-relay` / `relay.enabled: false` mean no activity at all.
+   */
+  liveActivity: z
+    .object({
+      enabled: z.boolean().optional(),
+      // The bounds are `@tentacle/daemon`'s rules module's own; this package
+      // depends on zod only, so the numbers are repeated here and the agreement is
+      // PINNED by a test (`cli/test/live-activity-config.test.ts`).
+      startAfterSeconds: z
+        .number()
+        .int()
+        .min(0)
+        .max(LIVE_ACTIVITY_START_AFTER_MAX_SECONDS)
+        .optional(),
     })
     .strict()
     .optional(),

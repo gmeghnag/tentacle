@@ -207,10 +207,13 @@ function firstAsk(updates: readonly PermissionRequestUpdate[]): PermissionReques
   return first;
 }
 
-describe("the hook sees exactly the four updates, in emit order", () => {
+describe("the hook sees exactly the watched updates, in emit order", () => {
   test("open → ask → resolve → turn_end, and NOTHING else the session emits", async () => {
-    // Mutation: forward every update (drop the four-type filter in `offerPush`)
-    // → the list gains `turn_start`/`tool_call_update`/… and this fails.
+    // Mutation: forward every update (drop the type filter in `offerPush`) → the
+    // list gains `tool_call_update`/`turn_progress`/… and this fails. Since task
+    // 18 the watched set is seven (task 16's four + `turn_start`, `tool_call`,
+    // `session_title`), so the assertion below names what must NOT appear rather
+    // than pinning a count that the widening legitimately changed.
     const spy = new SpyObserver();
     const d = daemon({ script: oneAsk, observer: spy });
     const a = await d.connect();
@@ -220,18 +223,33 @@ describe("the hook sees exactly the four updates, in emit order", () => {
     const ask = firstAsk(a.of("permission_request"));
     await a.resolve("S", ask.requestId, "allow_once");
     await flush();
+    // The watched set, in emit order (task 16's four plus task 18's three; the
+    // ask's turn also emits a `turn_start` and the tool call that raised it).
     expect(spy.types()).toEqual([
       "attachment",
+      "turn_start",
+      "tool_call",
       "permission_request",
       "permission_resolved",
       "turn_end",
     ]);
+    // What must NEVER be watched: the high-frequency display classes.
+    expect(spy.types()).not.toContain("tool_call_update");
+    expect(spy.types()).not.toContain("turn_progress");
     // The HOOK's order is the clients' order: same seq, same moment.
-    const emitted = a.updates
-      .map((u) => u.update.type)
-      .filter((t) => ["permission_request", "permission_resolved", "turn_end"].includes(t));
+    const watched = [
+      "permission_request",
+      "permission_resolved",
+      "turn_end",
+      "turn_start",
+      "tool_call",
+    ];
+    const emitted = a.updates.map((u) => u.update.type).filter((t) => watched.includes(t));
     expect(spy.types().filter((t) => t !== "attachment")).toEqual(emitted);
-    expect(spy.updates()[1]).toMatchObject({
+    // By TYPE, not by index: the watched set grew in task 18, so a positional
+    // lookup would silently start asserting about `tool_call` instead.
+    const resolved = spy.updates().find((update) => update.type === "permission_resolved");
+    expect(resolved).toMatchObject({
       type: "permission_resolved",
       requestId: ask.requestId,
       outcome: { outcome: "selected", optionId: "allow_once" },
@@ -467,5 +485,70 @@ describe("device/push_register is a DEVICE's method only", () => {
       .catch((e: { code?: number }) => e);
     expect(error?.code).toBe(-32602);
     expect(readPushRegistration(dir, "0123456789abcdef").ok).toBe(false);
+  });
+});
+
+// --- the hook's widened kind filter (docs/feat/mobile-live-activity.md L7) ---
+/**
+ * The observer task 16 added sees four kinds. A Live Activity needs three more
+ * — `turn_start` (the elapsed timer's origin and the start threshold),
+ * `tool_call` (the current tool) and `session_title` — and the ONLY change this
+ * task makes to `HostedSession` is that filter growing.
+ *
+ * The load-bearing property is unchanged and is re-pinned here: the hook is
+ * called synchronously, in `emit`'s own order, and nothing is awaited
+ * (AGENTS §7, the steering no-wait window).
+ */
+describe("the observer sees the Live Activity kinds too (L7)", () => {
+  test("turn_start, tool_call and session_title reach the observer, in emit order", async () => {
+    const seen: string[] = [];
+    const spy: SessionPushObserver = {
+      onPushEvent(_sessionId, event) {
+        if (event.type === "update") {
+          seen.push(event.update.type);
+        }
+      },
+    };
+    // `oneAsk` makes a real tool call (and raises an ask), so `tool_call` is
+    // genuinely emitted rather than assumed.
+    const d = daemon({ script: oneAsk, observer: spy });
+    const a = await d.connect();
+    await a.open({ sessionId: "S", create: true });
+    await a.prompt("S", "t1");
+    await flush();
+
+    // The three NEW kinds are observed...
+    expect(seen).toContain("turn_start");
+    expect(seen).toContain("tool_call");
+    // ...and `turn_start` precedes both the tool call and the ask it raised (the
+    // turn then waits on the ask, so no `turn_end` is expected yet).
+    const startAt = seen.indexOf("turn_start");
+    const toolAt = seen.indexOf("tool_call");
+    expect(startAt).toBeGreaterThanOrEqual(0);
+    expect(toolAt).toBeGreaterThan(startAt);
+    expect(seen.indexOf("permission_request")).toBeGreaterThan(toolAt);
+    expect(seen).not.toContain("turn_end");
+    // Nothing else was added to the filter: a `tool_call_update` (display-class,
+    // high frequency) is still NOT watched — the filter widened by three, not by
+    // "everything".
+    expect(seen).not.toContain("tool_call_update");
+  });
+
+  test("`session_title` is observed when the session is named", async () => {
+    const seen: string[] = [];
+    const spy: SessionPushObserver = {
+      onPushEvent(_sessionId, event) {
+        if (event.type === "update") {
+          seen.push(event.update.type);
+        }
+      },
+    };
+    const d = daemon({ script: noTools, observer: spy });
+    const a = await d.connect();
+    await a.open({ sessionId: "S", create: true });
+    // Renaming makes the daemon emit `session_title`.
+    await a.client.request("session/rename", { sessionId: "S", title: "named by the test" });
+    await flush();
+    expect(seen).toContain("session_title");
   });
 });

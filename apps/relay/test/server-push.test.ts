@@ -245,8 +245,8 @@ async function waitFor(check: () => boolean, what: string, timeoutMs = 2_000): P
   throw new Error(`timed out waiting for ${what}`);
 }
 
-describe("ready.features — `push` only when this relay can deliver", () => {
-  test("with a working APNs path, ready announces exactly `push`", async () => {
+describe("ready.features — `push`/`liveactivity` only when this relay can deliver", () => {
+  test("with a working APNs path, ready announces exactly `push` and `liveactivity`", async () => {
     const { server } = pushRelay();
     const socket = await open(`${server.url}/v1/daemon`);
     socket.send({ t: "hello", v: 1, secret: SECRET });
@@ -254,7 +254,7 @@ describe("ready.features — `push` only when this relay can deliver", () => {
       t: "ready",
       v: 1,
       id: ID,
-      features: ["push"],
+      features: ["push", "liveactivity"],
     });
     socket.close();
   });
@@ -729,5 +729,293 @@ describe("a `push` frame — who may send one, and what it becomes", () => {
     const leg = await open(`${server.url}/v1/accept`);
     leg.send(pushFrame(1));
     expect((await leg.closed()).code).toBe(1008);
+  });
+});
+
+// --- Live Activity pushes at the relay core (Design 5, L4) ------------------
+/**
+ * The LA decision, which is a DIFFERENT budget from a banner push's and has one
+ * rule banners do not: an excess of priority-10 activity pushes is DOWNGRADED to
+ * priority 5, never dropped (F19). A dropped `asking` is a missed approval; a
+ * downgraded one still lands, and the next state supersedes it anyway.
+ */
+describe("RelayCore.liveActivity — the decision, in isolation", () => {
+  function core(
+    features: RelayFeature[] = ["push", "liveactivity"],
+    limits: Partial<RelayLimits> = {},
+  ) {
+    let at = 1_000_000;
+    const instance = new RelayCore({
+      now: () => at,
+      features,
+      ...(Object.keys(limits).length === 0 ? {} : { limits }),
+    });
+    instance.hello({ socket: "d1", ip: "203.0.113.9", v: 1, secret: SECRET });
+    return {
+      core: instance,
+      advance: (ms: number) => {
+        at += ms;
+      },
+    };
+  }
+
+  const laState = { v: 1 as const, e: "B".repeat(43), c: "C".repeat(704) };
+  const frame = (overrides: Record<string, unknown> = {}) => ({
+    socket: "d1",
+    n: 1,
+    token: TOKEN,
+    env: "sandbox" as const,
+    priority: 10 as const,
+    la: { event: "update" as const, timestamp: 1_700_000_001, contentState: laState },
+    payloadBytes: 900,
+    ...overrides,
+  });
+
+  test("a registered socket's activity push is handed on, priority intact", () => {
+    const { core: instance } = core();
+    const decision = instance.liveActivity(frame({ n: 7 }));
+    expect(decision.ok).toBe(true);
+    if (decision.ok) {
+      expect(decision.request).toMatchObject({ socket: "d1", n: 7, token: TOKEN, priority: 10 });
+    }
+  });
+
+  test("a relay that did not announce `liveactivity` refuses (never sends)", () => {
+    // Defence in depth: a correct daemon checks `features` first, so this is the
+    // hand-written-frame case — and it must be a status, not a close (F4).
+    const { core: instance } = core(["push"]);
+    const decision = instance.liveActivity(frame());
+    expect(decision.ok).toBe(false);
+    if (!decision.ok) {
+      expect(decision.reason).toBe("no-liveactivity");
+      // Not a close: one over-eager daemon must not lose its reachability.
+      expect(decision.effects.every((effect) => effect.kind === "send")).toBe(true);
+    }
+  });
+
+  test("an unregistered socket is refused AND closed (as a push is)", () => {
+    const instance = new RelayCore({ now: () => 1_000_000, features: ["push", "liveactivity"] });
+    const decision = instance.liveActivity(frame());
+    expect(decision.ok).toBe(false);
+    if (!decision.ok) {
+      expect(decision.reason).toBe("unregistered");
+      expect(decision.effects).toContainEqual({ kind: "close", target: "d1", code: 1008 });
+    }
+  });
+
+  test("the priority-10 budget DOWNGRADES to 5 at N+1 — it never drops (F19)", () => {
+    const { core: instance } = core(["push", "liveactivity"], { laPriority10PerHourPerToken: 2 });
+    // Two 10s are honoured.
+    expect(instance.liveActivity(frame()).ok && instance.liveActivity(frame()).ok).toBe(true);
+    // The next 10 becomes a 5, and is still SENT.
+    const third = instance.liveActivity(frame());
+    expect(third.ok).toBe(true);
+    if (third.ok) {
+      expect(third.request.priority).toBe(5);
+    }
+    // A downgraded one does not itself consume the scarce budget: a 5 stays a 5.
+    const fifth = instance.liveActivity(frame({ priority: 5 as const }));
+    expect(fifth.ok).toBe(true);
+    if (fifth.ok) {
+      expect(fifth.request.priority).toBe(5);
+    }
+  });
+
+  test("the per-token hourly cap is a refusal, and it rolls over", () => {
+    const { core: instance, advance } = core(["push", "liveactivity"], {
+      laPushesPerHourPerToken: 2,
+    });
+    expect(instance.liveActivity(frame({ priority: 5 as const })).ok).toBe(true);
+    expect(instance.liveActivity(frame({ priority: 5 as const })).ok).toBe(true);
+    const third = instance.liveActivity(frame({ priority: 5 as const }));
+    expect(third.ok).toBe(false);
+    if (!third.ok) {
+      expect(third.reason).toBe("capped");
+    }
+    // An hour later the window is empty again.
+    advance(60 * 60_000);
+    expect(instance.liveActivity(frame({ priority: 5 as const })).ok).toBe(true);
+  });
+
+  test("the LA window is HOURLY, not a push's minute (the distinction this budget exists for)", () => {
+    // Apple's Live Activity budget is per-hour. A minute-based window would give
+    // 60× the pushes and pass a test that only ever advanced a full hour — so
+    // this one stops 5 minutes in and requires the cap to STILL hold.
+    const { core: instance, advance } = core(["push", "liveactivity"], {
+      laPushesPerHourPerToken: 2,
+    });
+    expect(instance.liveActivity(frame({ priority: 5 as const })).ok).toBe(true);
+    expect(instance.liveActivity(frame({ priority: 5 as const })).ok).toBe(true);
+    advance(5 * 60_000);
+    const stillCapped = instance.liveActivity(frame({ priority: 5 as const }));
+    expect(stillCapped.ok).toBe(false);
+    if (!stillCapped.ok) {
+      expect(stillCapped.reason).toBe("capped");
+    }
+  });
+
+  test("the 4096-byte bound is enforced on the relay, not only the schema", () => {
+    const { core: instance } = core();
+    const decision = instance.liveActivity(frame({ payloadBytes: APNS_MAX_PAYLOAD_BYTES + 1 }));
+    expect(decision.ok).toBe(false);
+    if (!decision.ok) {
+      expect(decision.reason).toBe("payload");
+    }
+  });
+
+  test("a push result still carries the daemon's `n`, for an activity too", () => {
+    const { core: instance, advance } = core(["push", "liveactivity"], {
+      laPushesPerHourPerToken: 1,
+    });
+    instance.liveActivity(frame({ n: 3 }));
+    advance(0);
+    const second = instance.liveActivity(frame({ n: 4 }));
+    expect(second.ok).toBe(false);
+    if (!second.ok) {
+      expect(second.effects).toContainEqual({
+        kind: "send",
+        target: "d1",
+        frame: { t: "push-result", n: 4, status: "throttled", reason: "capped" },
+      });
+    }
+  });
+});
+
+// --- a `liveactivity` frame over a real socket and a real fake APNs ---------
+/**
+ * The end-to-end property L4 exists for: a registered daemon's activity push
+ * reaches APNs as an ACTIVITY request (not a banner), and the daemon is answered
+ * with the same `n`. Every difference from a banner is asserted on the wire, so
+ * a wrong topic suffix or a missing `content-state` cannot pass.
+ */
+describe("a `liveactivity` frame — end to end", () => {
+  const laState = { v: 1 as const, e: "B".repeat(43), c: "C".repeat(704) };
+  const attributes = { v: 1 as const, k: "A".repeat(12), slot: "00112233445566778899aabb" };
+
+  function laFrame(n = 1, over: Record<string, unknown> = {}) {
+    return {
+      t: "liveactivity",
+      n,
+      token: TOKEN,
+      env: "sandbox",
+      priority: 10,
+      la: { event: "start", timestamp: 1_700_000_001, contentState: laState, attributes },
+      ...over,
+    };
+  }
+
+  /** A relay whose APNs key exists, so it announces BOTH features. */
+  function laRelay() {
+    const apns = fakeApns();
+    const lines: string[] = [];
+    const client: ApnsClient = createApnsClient({
+      topic: "so.tentacle.app",
+      jwtSource: fakeJwt,
+      origins: { sandbox: apns.origin, production: apns.origin },
+    });
+    const server = startRelay({
+      host: "127.0.0.1",
+      port: 0,
+      sweepMs: 10,
+      onLog: (line) => lines.push(line),
+      apns: { client, jwtSource: fakeJwt, topic: "so.tentacle.app" },
+    });
+    return { server, apns, lines };
+  }
+
+  test("the relay announces `liveactivity` with a key, and not without one (F4)", async () => {
+    const { server } = laRelay();
+    const socket = await open(`${server.url}/v1/daemon`);
+    socket.send({ t: "hello", v: 1, secret: SECRET });
+    const ready = JSON.parse(await socket.next()) as { features: string[] };
+    expect(ready.features).toContain("liveactivity");
+    expect(ready.features).toContain("push");
+    socket.close();
+
+    // No APNs key -> no feature at all, so a daemon sends nothing (never a close).
+    const bare = bareRelay();
+    const bared = await open(`${bare.server.url}/v1/daemon`);
+    bared.send({ t: "hello", v: 1, secret: SECRET });
+    expect((JSON.parse(await bared.next()) as { features: string[] }).features).toEqual([]);
+    bared.close();
+  });
+
+  test("a start reaches APNs as an ACTIVITY request, and answers `push-result sent`", async () => {
+    const { server, apns } = laRelay();
+    const socket = await control(server.url);
+    socket.send(laFrame(9));
+    expect(JSON.parse(await socket.next())).toEqual({ t: "push-result", n: 9, status: "sent" });
+    await waitFor(() => apns.seen.length === 1, "the LA request");
+    const [seen] = apns.seen;
+    expect(seen?.path).toBe(`/3/device/${TOKEN}`);
+    // The topic suffix and the push type: what makes Apple treat it as an activity.
+    expect(seen?.headers["apns-push-type"]).toBe("liveactivity");
+    expect(seen?.headers["apns-topic"]).toBe("so.tentacle.app.push-type.liveactivity");
+    expect(seen?.headers["apns-priority"]).toBe("10");
+    // No banner keys at all.
+    expect(seen?.headers["apns-collapse-id"]).toBeUndefined();
+    expect(seen?.headers["apns-expiration"]).toBeUndefined();
+    const body = JSON.parse(seen?.body ?? "{}") as {
+      aps: Record<string, unknown> & { alert?: { title: string } };
+      tp?: unknown;
+    };
+    expect(body.aps.event).toBe("start");
+    expect(body.aps["attributes-type"]).toBe("TentacleActivityAttributes");
+    expect(body.aps["content-state"]).toEqual(laState);
+    expect(body.aps.alert?.title).toBe("tentacle");
+    // A notification's key must never appear in an activity's body.
+    expect(body.tp).toBeUndefined();
+    socket.close();
+  });
+
+  test("an update and an end carry no alert (only a start does)", async () => {
+    const { server, apns } = laRelay();
+    const socket = await control(server.url);
+    socket.send(laFrame(1, { la: { event: "update", timestamp: 2, contentState: laState } }));
+    await waitFor(() => apns.seen.length === 1, "the update");
+    const updateBody = JSON.parse(apns.seen[0]?.body ?? "{}") as { aps: Record<string, unknown> };
+    expect(updateBody.aps.event).toBe("update");
+    expect(updateBody.aps.alert).toBeUndefined();
+    expect(updateBody.aps["attributes-type"]).toBeUndefined();
+
+    socket.send(
+      laFrame(2, {
+        la: { event: "end", timestamp: 3, dismissalDate: Math.floor(Date.now() / 1000) + 60 },
+      }),
+    );
+    await waitFor(() => apns.seen.length === 2, "the end");
+    const endBody = JSON.parse(apns.seen[1]?.body ?? "{}") as { aps: Record<string, unknown> };
+    expect(endBody.aps.event).toBe("end");
+    expect(endBody.aps["content-state"]).toBeUndefined();
+    expect(endBody.aps.alert).toBeUndefined();
+    socket.close();
+  });
+
+  test("a relay with no key refuses the frame instead of dropping it (F4)", async () => {
+    const { server } = bareRelay();
+    const socket = await control(server.url);
+    socket.send(laFrame(4));
+    expect(JSON.parse(await socket.next())).toEqual({
+      t: "push-result",
+      n: 4,
+      status: "rejected",
+      reason: "no-liveactivity",
+    });
+    // The socket stays OPEN: a refusal is never a close.
+    expect(server.core.registeredCount).toBe(1);
+    socket.close();
+  });
+
+  test("the log line carries no token and no state (canaries, as for a push)", async () => {
+    const { server, apns, lines } = laRelay();
+    const socket = await control(server.url);
+    socket.send(laFrame(5));
+    await waitFor(() => lines.some((line) => line.startsWith("liveactivity ")), "the LA log line");
+    const joined = lines.join("\n");
+    expect(joined).not.toContain(TOKEN);
+    expect(joined).toContain(TOKEN.slice(0, 8));
+    expect(joined).not.toContain(laState.c);
+    socket.close();
+    apns.seen.length = 0;
   });
 });

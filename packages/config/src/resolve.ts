@@ -217,6 +217,16 @@ export interface ResolvedConfig {
     readonly enabled?: boolean | undefined;
     readonly graceSeconds?: number | undefined;
   };
+  /**
+   * Live Activities (docs/feat/mobile-live-activity.md Design 3): `enabled`
+   * (default true) and `startAfterSeconds` (default 20, range 0–3600 — `serve`
+   * applies both, so a value nobody reads never refuses a start). Absent when the
+   * file omits the section.
+   */
+  readonly liveActivity?: {
+    readonly enabled?: boolean | undefined;
+    readonly startAfterSeconds?: number | undefined;
+  };
   /** User hooks (file-only, no env form); empty when unset. */
   readonly hooks: readonly HookSpecConfig[];
   /** MCP servers to connect to (from the config file), keyed by name. */
@@ -706,6 +716,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(fileConfig.voice !== undefined ? { voice: fileConfig.voice } : {}),
     ...(fileConfig.relay !== undefined ? { relay: fileConfig.relay } : {}),
     ...(fileConfig.push !== undefined ? { push: fileConfig.push } : {}),
+    ...(fileConfig.liveActivity !== undefined ? { liveActivity: fileConfig.liveActivity } : {}),
     ...(fileConfig.mount !== undefined ? { mount: fileConfig.mount } : {}),
     hooks: fileConfig.hooks ?? [],
     // MCP servers are file-only (no env form); empty when unset.

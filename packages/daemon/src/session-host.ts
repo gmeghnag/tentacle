@@ -25,9 +25,16 @@ import type {
 } from "@tentacle/core";
 import {
   type DaemonDiscovery,
+  type DeviceLiveActivityEndedParams,
+  type DeviceLiveActivityEndedResult,
+  type DeviceLiveActivityRegisterParams,
+  type DeviceLiveActivityRegisterResult,
+  type DeviceLiveActivityTokenParams,
+  type DeviceLiveActivityTokenResult,
   type DevicePushRegisterParams,
   type DevicePushRegisterResult,
   JsonRpcErrorCode,
+  type LiveActivityStatus,
   type McpServerStatus,
   type OpenParams,
   type PushRegisterStatus,
@@ -53,6 +60,7 @@ import {
   type SessionPushObserver,
   type TurnErrorPolicy,
 } from "./hosted-session.ts";
+import { forgetLiveRegistration, writeLiveRegistration } from "./live-store.ts";
 import { toSessionSkills } from "./mapping.ts";
 import {
   type ClearForkCapture,
@@ -237,6 +245,14 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    */
   readonly push?: PushObserverOptions;
   /**
+   * `serve` only: the Live Activity side (docs/feat/mobile-live-activity.md
+   * Design 4, slice L8). Absent everywhere else — a pod daemon and the in-process
+   * worker have no device route, so nothing can be started there (The
+   * Preconditions). It carries the same `SessionPushObserver` the push side uses:
+   * ONE hook, two subscribers.
+   */
+  readonly liveActivity?: LiveActivityOptions;
+  /**
    * `serve` only: every session writes itself here, `close` (and the reaper,
    * the detached cap) keeps it ARCHIVED, `delete` removes its file, `restore`
    * reloads one. Pod daemons and the worker never pass it: there, a close
@@ -336,6 +352,37 @@ export interface PushObserverOptions {
   readonly graceSeconds: number;
   /** What to say about delivery right now (`on` / `relay-off` / `relay-no-push`); `enabled` is this source's own. */
   readonly status: () => Exclude<PushRegisterStatus, "off">;
+}
+
+/**
+ * The Live Activity surface a `serve` hands the host (docs/feat/mobile-live-activity.md
+ * Design 4, slice L8): the observer every session reports to, the store the
+ * three device methods write/read, and what this daemon can actually deliver.
+ */
+export interface LiveActivityOptions {
+  /** The notifier (L7), or a fan-out that includes it: one hook, two subscribers. */
+  readonly observer: SessionPushObserver;
+  /** `<configDir>/devices/live/…` (L5's store). */
+  readonly storeDir: string;
+  /** The update-token table and the ended-report path (Owner Q8: memory only). */
+  readonly notifier: {
+    setUpdateToken(slot: string, token: string, deviceId: string): boolean;
+    reportEnded(slot: string, reason: "dismissed" | "ended" | "stale"): boolean;
+    /**
+     * A registration was written: read the store again and re-decide now (fix
+     * round 1, R2). Optional so a test's stub need not implement it, and for the
+     * same reason as `onNotice` elsewhere: an absent one changes nothing about
+     * correctness, only how soon a late registration is seen.
+     */
+    registrationChanged?: () => void;
+  };
+  /**
+   * What to say about a start right now: `relay-off` when there is no link,
+   * `relay-no-la` when the relay announced no `liveactivity`, `unsupported` when
+   * the phone says it cannot (iPad, the system setting). `off`/`on` come from
+   * the person's own switch, which the store holds.
+   */
+  readonly status: () => Exclude<LiveActivityStatus, "off" | "on"> | undefined;
 }
 
 /** What `open` did: the session, whether it was built now, and the replay verdict. */ export interface OpenOutcome {
@@ -576,6 +623,100 @@ export class SessionHost {
   }
 
   /**
+   * `device/live_activity_register`: where to START an activity for this device,
+   * and whether the person wants one (docs/feat/mobile-live-activity.md Design 4,
+   * L7). Device principal only — a `token`/`pairing` connection is refused at
+   * the gate, so a pod-facing client can never name a token this computer would
+   * light a lock screen with.
+   *
+   * Synchronous (one atomic rename, no lock): a registration must never queue
+   * behind a long `session/prompt` (AGENTS §7 "don't serialize the RPC peer").
+   * The result says WHY an activity will or will not appear, so Settings can be
+   * honest instead of showing a switch that does nothing.
+   */
+  registerLiveActivity(
+    deviceId: string,
+    params: DeviceLiveActivityRegisterParams,
+  ): DeviceLiveActivityRegisterResult {
+    const la = this.opts.liveActivity;
+    if (!la) {
+      throw new RpcError(
+        JsonRpcErrorCode.MethodNotFound,
+        "live activities are not available on this daemon",
+      );
+    }
+    // `enabled: false` still writes (or keeps) the record: the token is worth
+    // having the moment the person turns the switch back on, and `off` must be a
+    // stated answer, not a deleted file.
+    const written = writeLiveRegistration(la.storeDir, {
+      deviceId,
+      startToken: params.startToken,
+      env: params.env,
+      enabled: params.enabled,
+      registeredAt: this.now(),
+    });
+    if (!written.ok) {
+      throw new RpcError(
+        DomainErrorCode.PushStoreFailed,
+        `cannot store this device's live activity registration: ${written.reason}`,
+      );
+    }
+    // The observer's registrations changed: a device that just registered must be
+    // a start candidate from the next tick on, without waiting for a hook event.
+    // R2 (fix round 1): say so, or a phone that registers after `serve`'s first
+    // session event waits for a daemon restart — this comment promised it while
+    // the notifier read the store exactly once.
+    la.notifier.registrationChanged?.();
+    const unavailable = la.status();
+    if (unavailable !== undefined) {
+      return { status: unavailable };
+    }
+    return { status: params.enabled ? "on" : "off" };
+  }
+
+  /**
+   * `device/live_activity_token`: one activity's UPDATE token, keyed on the slot
+   * this daemon chose (Owner Q8). A slot it never started is `known:false`, not
+   * an error (F25) — the table is memory-only, so a daemon restart makes every
+   * old slot unknown, and the activities go stale until the app reconciles.
+   */
+  setLiveActivityToken(
+    deviceId: string,
+    params: DeviceLiveActivityTokenParams,
+  ): DeviceLiveActivityTokenResult {
+    const la = this.opts.liveActivity;
+    if (!la) {
+      throw new RpcError(
+        JsonRpcErrorCode.MethodNotFound,
+        "live activities are not available on this daemon",
+      );
+    }
+    return { known: la.notifier.setUpdateToken(params.slot, params.token, deviceId) };
+  }
+
+  /**
+   * `device/live_activity_ended`: the app reports an activity over, so it is never
+   * restarted for that turn (F17) and its update token dies with it. `false` means
+   * this daemon has no such slot (already ended, or a restart): still a success,
+   * because the phone's view and the daemon's have simply converged.
+   */
+  endLiveActivity(
+    deviceId: string,
+    params: DeviceLiveActivityEndedParams,
+  ): DeviceLiveActivityEndedResult {
+    const la = this.opts.liveActivity;
+    if (!la) {
+      throw new RpcError(
+        JsonRpcErrorCode.MethodNotFound,
+        "live activities are not available on this daemon",
+      );
+    }
+    void deviceId;
+    la.notifier.reportEnded(params.slot, params.reason);
+    return {};
+  }
+
+  /**
    * `device/push_unregister`: this device asked to stop being notified (the
    * Settings toggle). Removes its registration, and says so even when there was
    * none — an unregister is idempotent, and an `ENOENT` is success.
@@ -588,6 +729,11 @@ export class SessionHost {
     // The device's OWN instruction, so there is no token to compare against (a
     // `gone` from Apple is the compare-and-delete path, F11).
     forgetPushRegistration(push.storeDir, deviceId);
+    // The LIVE registration goes with it: a phone that turned notifications off
+    // asked not to be reached, and a lock-screen activity is reaching it.
+    if (this.opts.liveActivity !== undefined) {
+      forgetLiveRegistration(this.opts.liveActivity.storeDir, deviceId);
+    }
   }
 
   /**
@@ -1263,7 +1409,12 @@ export class SessionHost {
     // The push observer (docs/feat/mobile-push.md P7): `serve` with push on
     // only. A pod daemon and the worker pass no `push`, so nothing observes
     // there — a pod never sees a token and never pushes (AGENTS §7).
-    hosted.pushObserver = this.opts.push?.observer;
+    // ONE hook per session (AGENTS §7): the push side's observer when this daemon
+    // pushes, else the Live Activity side's. `serve` passes a FAN-OUT when both
+    // exist, so this is one object either way — and a daemon with `push.enabled:
+    // false` still has NO `push` option, so `device/push_register` stays
+    // `MethodNotFound` there (task 16's contract) while activities still run.
+    hosted.pushObserver = this.opts.push?.observer ?? this.opts.liveActivity?.observer;
     return hosted;
   }
 
