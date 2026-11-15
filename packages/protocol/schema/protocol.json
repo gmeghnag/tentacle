@@ -195,6 +195,26 @@
       "minItems": 1,
       "type": "array"
     },
+    "AutoAcceptUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "by": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "on": {
+          "type": "boolean"
+        },
+        "type": {
+          "const": "auto_accept",
+          "type": "string"
+        }
+      },
+      "required": ["on", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "BackgroundExit": {
       "additionalProperties": true,
       "properties": {
@@ -347,6 +367,9 @@
     "ClientCapabilities": {
       "additionalProperties": true,
       "properties": {
+        "hop": {
+          "type": "boolean"
+        },
         "streaming": {
           "default": true,
           "type": "boolean"
@@ -367,6 +390,11 @@
     "ClientInfo": {
       "additionalProperties": true,
       "properties": {
+        "host": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
         "name": {
           "pattern": "^[a-z][a-z0-9-]{0,31}$",
           "type": "string"
@@ -566,6 +594,49 @@
         }
       },
       "required": ["computer", "deviceId"],
+      "type": "object"
+    },
+    "DevicePushRegisterParams": {
+      "additionalProperties": true,
+      "properties": {
+        "env": {
+          "$ref": "#/$defs/PushEnvironment"
+        },
+        "key": {
+          "pattern": "^[A-Za-z0-9_-]{43}$",
+          "type": "string"
+        },
+        "token": {
+          "pattern": "^[0-9a-f]{64,200}$",
+          "type": "string"
+        }
+      },
+      "required": ["env", "key", "token"],
+      "type": "object"
+    },
+    "DevicePushRegisterResult": {
+      "additionalProperties": true,
+      "properties": {
+        "graceSeconds": {
+          "maximum": 3600,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "push": {
+          "$ref": "#/$defs/PushRegisterStatus"
+        }
+      },
+      "required": ["graceSeconds", "push"],
+      "type": "object"
+    },
+    "DevicePushUnregisterParams": {
+      "additionalProperties": true,
+      "properties": {},
+      "type": "object"
+    },
+    "DevicePushUnregisterResult": {
+      "additionalProperties": true,
+      "properties": {},
       "type": "object"
     },
     "DiscoveredDaemon": {
@@ -2072,6 +2143,9 @@
     "OpenParams": {
       "additionalProperties": true,
       "properties": {
+        "autoAccept": {
+          "type": "boolean"
+        },
         "create": {
           "type": "boolean"
         },
@@ -2121,6 +2195,9 @@
     "OpenResult": {
       "additionalProperties": true,
       "properties": {
+        "autoAccept": {
+          "type": "boolean"
+        },
         "created": {
           "type": "boolean"
         },
@@ -2258,6 +2335,12 @@
           },
           "required": ["description", "type"],
           "type": "object"
+        },
+        "askedOn": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "explanation": {
           "type": "string"
@@ -2503,6 +2586,201 @@
       "required": ["model", "type"],
       "type": "object"
     },
+    "PushAsk": {
+      "additionalProperties": true,
+      "properties": {
+        "more": {
+          "maximum": 999,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/PushAskOption"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "type": "array"
+        },
+        "preview": {
+          "maxLength": 500,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "reply": {
+          "additionalProperties": true,
+          "properties": {
+            "maxChars": {
+              "maximum": 100000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": ["maxChars"],
+          "type": "object"
+        },
+        "requestId": {
+          "$ref": "#/$defs/PermissionRequestId"
+        },
+        "title": {
+          "maxLength": 300,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "tool": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["options", "requestId", "title", "tool"],
+      "type": "object"
+    },
+    "PushAskOption": {
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PermissionOptionKind"
+        },
+        "name": {
+          "maxLength": 120,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "optionId": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["kind", "name", "optionId"],
+      "type": "object"
+    },
+    "PushDeliveryStatus": {
+      "enum": ["sent", "gone", "rejected", "throttled", "unavailable"],
+      "type": "string"
+    },
+    "PushEnvelope": {
+      "additionalProperties": true,
+      "properties": {
+        "c": {
+          "pattern": "^(?:[A-Za-z0-9_-]{704}|[A-Za-z0-9_-]{1387}|[A-Za-z0-9_-]{2752})$",
+          "type": "string"
+        },
+        "e": {
+          "pattern": "^[A-Za-z0-9_-]{43}$",
+          "type": "string"
+        },
+        "k": {
+          "pattern": "^[A-Za-z0-9_-]{12}$",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "type": "number"
+        }
+      },
+      "required": ["c", "e", "k", "v"],
+      "type": "object"
+    },
+    "PushEnvironment": {
+      "enum": ["sandbox", "production"],
+      "type": "string"
+    },
+    "PushKind": {
+      "enum": ["ask", "ask_resolved", "turn_done", "turn_failed"],
+      "type": "string"
+    },
+    "PushMessage": {
+      "additionalProperties": true,
+      "properties": {
+        "ask": {
+          "$ref": "#/$defs/PushAsk"
+        },
+        "at": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "computer": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "cwd": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PushKind"
+        },
+        "sessionId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "turn": {
+          "$ref": "#/$defs/PushTurn"
+        },
+        "v": {
+          "const": 1,
+          "type": "number"
+        }
+      },
+      "required": ["at", "computer", "cwd", "id", "kind", "sessionId", "title", "v"],
+      "type": "object"
+    },
+    "PushPayload": {
+      "additionalProperties": true,
+      "properties": {
+        "tp": {
+          "$ref": "#/$defs/PushEnvelope"
+        }
+      },
+      "required": ["tp"],
+      "type": "object"
+    },
+    "PushRegisterStatus": {
+      "enum": ["on", "off", "relay-off", "relay-no-push"],
+      "type": "string"
+    },
+    "PushTurn": {
+      "additionalProperties": true,
+      "properties": {
+        "error": {
+          "maxLength": 300,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "turnId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["turnId"],
+      "type": "object"
+    },
     "QueueState": {
       "additionalProperties": true,
       "properties": {
@@ -2585,6 +2863,338 @@
       "additionalProperties": true,
       "properties": {},
       "type": "object"
+    },
+    "RelayCollapseId": {
+      "pattern": "^[A-Za-z0-9_-]{1,64}$",
+      "type": "string"
+    },
+    "RelayControlFrame": {
+      "discriminator": {
+        "mapping": {
+          "accept": "#/$defs/RelayControlFrameAccept",
+          "error": "#/$defs/RelayControlFrameError",
+          "hello": "#/$defs/RelayControlFrameHello",
+          "open": "#/$defs/RelayControlFrameOpen",
+          "ping": "#/$defs/RelayControlFramePing",
+          "pong": "#/$defs/RelayControlFramePong",
+          "push": "#/$defs/RelayPushFrame",
+          "push-result": "#/$defs/RelayPushResultFrame",
+          "ready": "#/$defs/RelayControlFrameReady",
+          "replaced": "#/$defs/RelayControlFrameReplaced"
+        },
+        "propertyName": "t"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RelayControlFrameHello"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameAccept"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFramePing"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameReady"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameError"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameOpen"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameReplaced"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFramePong"
+        },
+        {
+          "$ref": "#/$defs/RelayPushFrame"
+        },
+        {
+          "$ref": "#/$defs/RelayPushResultFrame"
+        }
+      ]
+    },
+    "RelayControlFrameAccept": {
+      "additionalProperties": true,
+      "properties": {
+        "stream": {
+          "$ref": "#/$defs/RelayStreamToken"
+        },
+        "t": {
+          "const": "accept",
+          "type": "string"
+        },
+        "v": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["stream", "t", "v"],
+      "type": "object"
+    },
+    "RelayControlFrameError": {
+      "additionalProperties": true,
+      "properties": {
+        "code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "supported": {
+          "items": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "t": {
+          "const": "error",
+          "type": "string"
+        }
+      },
+      "required": ["code", "supported", "t"],
+      "type": "object"
+    },
+    "RelayControlFrameHello": {
+      "additionalProperties": true,
+      "properties": {
+        "secret": {
+          "$ref": "#/$defs/RelaySecretText"
+        },
+        "t": {
+          "const": "hello",
+          "type": "string"
+        },
+        "v": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["secret", "t", "v"],
+      "type": "object"
+    },
+    "RelayControlFrameOpen": {
+      "additionalProperties": true,
+      "properties": {
+        "ip": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "stream": {
+          "$ref": "#/$defs/RelayStreamToken"
+        },
+        "t": {
+          "const": "open",
+          "type": "string"
+        }
+      },
+      "required": ["ip", "stream", "t"],
+      "type": "object"
+    },
+    "RelayControlFramePing": {
+      "additionalProperties": true,
+      "properties": {
+        "t": {
+          "const": "ping",
+          "type": "string"
+        }
+      },
+      "required": ["t"],
+      "type": "object"
+    },
+    "RelayControlFramePong": {
+      "additionalProperties": true,
+      "properties": {
+        "t": {
+          "const": "pong",
+          "type": "string"
+        }
+      },
+      "required": ["t"],
+      "type": "object"
+    },
+    "RelayControlFrameReady": {
+      "additionalProperties": true,
+      "properties": {
+        "features": {
+          "default": [],
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/RelayId"
+        },
+        "t": {
+          "const": "ready",
+          "type": "string"
+        },
+        "v": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["id", "t", "v"],
+      "type": "object"
+    },
+    "RelayControlFrameReplaced": {
+      "additionalProperties": true,
+      "properties": {
+        "t": {
+          "const": "replaced",
+          "type": "string"
+        }
+      },
+      "required": ["t"],
+      "type": "object"
+    },
+    "RelayDaemonFrame": {
+      "discriminator": {
+        "mapping": {
+          "accept": "#/$defs/RelayControlFrameAccept",
+          "hello": "#/$defs/RelayControlFrameHello",
+          "ping": "#/$defs/RelayControlFramePing",
+          "push": "#/$defs/RelayPushFrame"
+        },
+        "propertyName": "t"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RelayControlFrameHello"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameAccept"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFramePing"
+        },
+        {
+          "$ref": "#/$defs/RelayPushFrame"
+        }
+      ]
+    },
+    "RelayId": {
+      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "type": "string"
+    },
+    "RelayPushFrame": {
+      "additionalProperties": true,
+      "properties": {
+        "collapse": {
+          "$ref": "#/$defs/RelayCollapseId"
+        },
+        "env": {
+          "enum": ["sandbox", "production"],
+          "type": "string"
+        },
+        "n": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "properties": {
+            "tp": {
+              "$ref": "#/$defs/PushEnvelope"
+            }
+          },
+          "required": ["tp"],
+          "type": "object"
+        },
+        "t": {
+          "const": "push",
+          "type": "string"
+        },
+        "token": {
+          "$ref": "#/$defs/RelayPushToken"
+        },
+        "ttl": {
+          "maximum": 86400,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["collapse", "env", "n", "payload", "t", "token", "ttl"],
+      "type": "object"
+    },
+    "RelayPushResultFrame": {
+      "additionalProperties": true,
+      "properties": {
+        "n": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "status": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "t": {
+          "const": "push-result",
+          "type": "string"
+        }
+      },
+      "required": ["n", "status", "t"],
+      "type": "object"
+    },
+    "RelayPushToken": {
+      "pattern": "^[0-9a-f]{64,200}$",
+      "type": "string"
+    },
+    "RelaySecretText": {
+      "pattern": "^[A-Za-z0-9_-]{43}$",
+      "type": "string"
+    },
+    "RelayStreamToken": {
+      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "type": "string"
+    },
+    "RelayToDaemonFrame": {
+      "discriminator": {
+        "mapping": {
+          "error": "#/$defs/RelayControlFrameError",
+          "open": "#/$defs/RelayControlFrameOpen",
+          "pong": "#/$defs/RelayControlFramePong",
+          "push-result": "#/$defs/RelayPushResultFrame",
+          "ready": "#/$defs/RelayControlFrameReady",
+          "replaced": "#/$defs/RelayControlFrameReplaced"
+        },
+        "propertyName": "t"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RelayControlFrameReady"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameError"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameOpen"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameReplaced"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFramePong"
+        },
+        {
+          "$ref": "#/$defs/RelayPushResultFrame"
+        }
+      ]
     },
     "RenameParams": {
       "additionalProperties": true,
@@ -3202,6 +3812,7 @@
           "agent_message_chunk": "#/$defs/AgentMessageChunk",
           "agent_thought_chunk": "#/$defs/AgentThoughtChunk",
           "agent_usage": "#/$defs/AgentUsage",
+          "auto_accept": "#/$defs/AutoAcceptUpdate",
           "background_exit": "#/$defs/BackgroundExit",
           "context_note": "#/$defs/ContextNote",
           "dsml_leak": "#/$defs/DsmlLeakUpdate",
@@ -3314,6 +3925,9 @@
         },
         {
           "$ref": "#/$defs/SessionSettingsUpdate"
+        },
+        {
+          "$ref": "#/$defs/AutoAcceptUpdate"
         }
       ]
     },
@@ -3347,6 +3961,29 @@
         }
       },
       "required": ["seq", "sessionId", "update"],
+      "type": "object"
+    },
+    "SetAutoAcceptParams": {
+      "additionalProperties": true,
+      "properties": {
+        "on": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["on", "sessionId"],
+      "type": "object"
+    },
+    "SetAutoAcceptResult": {
+      "additionalProperties": true,
+      "properties": {
+        "on": {
+          "type": "boolean"
+        }
+      },
+      "required": ["on"],
       "type": "object"
     },
     "SkillListEntry": {
@@ -4346,6 +4983,7 @@
     "PairingRefused": -32017,
     "ParseError": -32700,
     "PermissionNotPending": -32013,
+    "PushStoreFailed": -32019,
     "SessionArchived": -32014,
     "SessionDeleted": -32015,
     "StaleCursor": -32011,
@@ -4387,6 +5025,22 @@
       },
       "result": {
         "$ref": "#/$defs/DevicePairResult"
+      }
+    },
+    "device/push_register": {
+      "params": {
+        "$ref": "#/$defs/DevicePushRegisterParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DevicePushRegisterResult"
+      }
+    },
+    "device/push_unregister": {
+      "params": {
+        "$ref": "#/$defs/DevicePushUnregisterParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DevicePushUnregisterResult"
       }
     },
     "hooks/trust": {
@@ -4579,6 +5233,14 @@
       },
       "result": {
         "$ref": "#/$defs/PromptResult"
+      }
+    },
+    "session/set_auto_accept": {
+      "params": {
+        "$ref": "#/$defs/SetAutoAcceptParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SetAutoAcceptResult"
       }
     },
     "session/skills": {

@@ -37,6 +37,7 @@ import type { PermissionRequest } from "@tentacle/core";
  * | `paletteOpen` / `paletteNames` / `commandSel` | render (3757-3791) | value |
  * | `fieldValue` | render `field.value` (3705) | value |
  * | `permission.pending` / `.choices` / `.selected` | render (3870) | value |
+ * | `permission.shownAt` | `permission.shownAt()` — a ref, the window is real time | getter |
  * | `replyMaxChars` | render `replyMax` (3519) | value |
  * | `sessions` | render prop (3638) | value |
  * | `detachOnQuit` | prop closure (3565) | value |
@@ -51,6 +52,7 @@ import type { QuitConfirmFacts } from "../commands.ts";
 import type { OpenPanel } from "../panel.ts";
 import type { ReplyMode } from "../permission-reply.ts";
 import type { PermissionChoice } from "../permission-ui.ts";
+import type { VoicePhase } from "../voice-session.ts";
 
 /** The permission dialog, as the router reads it (render values + a live mode). */
 export interface KeyPermission {
@@ -59,6 +61,11 @@ export interface KeyPermission {
   readonly selected: number;
   /** The mode AS OF NOW (a ref: keys between renders compose, as before). */
   mode(): ReplyMode;
+  /**
+   * When the dialog was first drawn (`Date.now()`, null if not committed yet):
+   * the arming window's stamp, read live (docs/fix/quit-enter-ask.md).
+   */
+  shownAt(): number | null;
 }
 
 /** Everything one chunk's decision may read. See the file header for SOURCES. */
@@ -103,4 +110,11 @@ export interface KeySnapshot {
   /** Absent when the runtime has no session directory (`/sessions` unavailable). */
   readonly sessions: SessionDirectory | undefined;
   readonly detachOnQuit: boolean;
+  /**
+   * The dictation's phase, read live (an event between two chunks can move it):
+   * what the voice layer decides Esc/Enter/the key from (F6/F7).
+   */
+  voice(): VoicePhase;
+  /** The configured voice key (`voice.key`), a render value. */
+  voiceKey(): string;
 }

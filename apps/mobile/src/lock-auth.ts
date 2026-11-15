@@ -11,6 +11,7 @@
  */
 import * as LocalAuthentication from "expo-local-authentication";
 import type { AuthResult, Capability } from "./app-lock.ts";
+import { type Biometry, biometryFrom } from "./lock-screen.ts";
 
 /** The prompt's own copy (decision 14's wording; it is the system sheet's title). */
 export const UNLOCK_PROMPT = "Unlock tentacle";
@@ -29,6 +30,27 @@ export async function capability(): Promise<Capability> {
     // A device that cannot answer is treated as able to lock: fail-closed (the
     // person can always tap Unlock, and the passcode sheet is the OS's).
     return "ok";
+  }
+}
+
+/**
+ * The enrolled sensor, for the Lock screen's button label only (never a lock
+ * decision). Any failure reads `none`: the button then says plain "Unlock",
+ * which is true whatever the device has.
+ */
+export async function biometry(): Promise<Biometry> {
+  try {
+    const [level, types] = await Promise.all([
+      LocalAuthentication.getEnrolledLevelAsync(),
+      LocalAuthentication.supportedAuthenticationTypesAsync(),
+    ]);
+    return biometryFrom({
+      enrolled: level >= LocalAuthentication.SecurityLevel.BIOMETRIC_WEAK,
+      face: types.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION),
+      touch: types.includes(LocalAuthentication.AuthenticationType.FINGERPRINT),
+    });
+  } catch {
+    return "none";
   }
 }
 
@@ -57,10 +79,17 @@ export function mapError(error: string | undefined): AuthResult {
 }
 
 /** One evaluation: the lock's own prompt copy, with the passcode fallback. */
-export async function authenticate(): Promise<AuthResult> {
+export async function authenticate(
+  /**
+   * The sentence the system sheet shows. Defaults to the lock's own
+   * (`UNLOCK_PROMPT`); a notification's Approve says WHAT it is approving
+   * (docs/feat/mobile-notifications.md decision 14 / N6).
+   */
+  prompt: string = UNLOCK_PROMPT,
+): Promise<AuthResult> {
   try {
     const result = await LocalAuthentication.authenticateAsync({
-      promptMessage: UNLOCK_PROMPT,
+      promptMessage: prompt,
       // Decision 14's fallback: Face ID, then the device passcode. Never `true`:
       // a device with no face enrolled would then be unlockable only by Face ID.
       disableDeviceFallback: false,

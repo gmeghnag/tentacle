@@ -1,45 +1,24 @@
 import { homedir } from "node:os";
-import { Session } from "@tentacle/agent";
 import {
   type AttachmentRef,
   DISMISSED,
   type WakeModel,
   initialWake,
-  wakeDue,
   wakeStep,
 } from "@tentacle/core";
-import { Box, Text, useApp, useInput, useStdout } from "ink";
+import { useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
-import {
-  type AttachDraft,
-  EMPTY_DRAFT,
-  NOT_AN_IMAGE_NOTICE,
-  attachErrorText,
-  attachRowRows,
-  attachRowView,
-  removeLastChip,
-  uploadDone,
-} from "./attach-draft.ts";
+import { AppView } from "./AppView.tsx";
+import { frameLayout } from "./app-layout.ts";
+import { type AttachDraft, EMPTY_DRAFT, removeLastChip, uploadDone } from "./attach-draft.ts";
 import { type AttachedImage, type FileProbe, nodeFileProbe } from "./attach-files.ts";
 import {
   type DockOutcome,
   applyLateOutcome,
   clickDock,
-  dockKindOf,
-  downEntersList,
   downToDock,
-  noteSent,
   reconcile,
-  resetDock,
 } from "./background-focus.ts";
-import {
-  backgroundListView,
-  dockRows,
-  drawerView,
-  inputTitle,
-  jobDrawerView,
-  listVisible,
-} from "./background-list.ts";
 import {
   BLINK_HALF_MS,
   BLINK_IDLE,
@@ -51,152 +30,70 @@ import {
 } from "./blink.ts";
 import { idleChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
-import {
-  type QuitConfirmFacts,
-  matchCommands,
-  paletteWindow,
-  quitConfirmText,
-} from "./commands.ts";
+import { type QuitConfirmFacts, oneLine, paletteStep } from "./commands.ts";
 import { dispatchCommand } from "./commands/dispatch.ts";
-import { BackgroundList, JobDrawer, SubagentDrawer } from "./components/BackgroundList.tsx";
-import { CommandPalette } from "./components/CommandPalette.tsx";
-import { LineInput } from "./components/LineInput.tsx";
-import { ListPanel } from "./components/ListPanel.tsx";
-import { PermissionPrompt, permissionPromptRows } from "./components/PermissionPrompt.tsx";
-import { QueuedMessages } from "./components/QueuedMessages.tsx";
-import { QUIT_CONFIRM_ROWS, QuitConfirm } from "./components/QuitConfirm.tsx";
-import { StatusBar } from "./components/StatusBar.tsx";
-import { Thinking } from "./components/Thinking.tsx";
-import { recall } from "./history.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
-import { HOP_QUEUED_NOTICE, type HopSpec, hopStep, parseHopCommand } from "./hop-command.ts";
-import { hopFailureText, hopMovedNotice, hopPlaceText, hopStatusRow } from "./hop-status.ts";
+import type { HopNamespace, HopSpec } from "./hop-command.ts";
+import { hopShownCwd, hopStatusRow } from "./hop-status.ts";
+import { HOP_WAKE_TEXT } from "./hop-wake.ts";
 import { startIdleWarm } from "./idle-warm.ts";
-import { resolveLineInput } from "./input-actions.ts";
-import { inputRowCount } from "./input-view.ts";
-import { JOB_REFRESH_MS, JOB_TAIL_SHOWN, jobOutcome, refreshDue } from "./job-drawer.ts";
+import { JOB_TAIL_SHOWN, exitOutcome, jobOutputEntry, refreshDue } from "./job-drawer.ts";
 import { type KeyHost, executeEffects } from "./keys/execute.ts";
 import { PURE_LAYERS } from "./keys/layers.ts";
+import { resolveLineEffects } from "./keys/line-layer.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
-import { modelErrorNotice } from "./model-error.ts";
-import { type OpenPanel, panelClick, panelView } from "./panel.ts";
-import { sanitizePasted } from "./paste.ts";
-import { insertReply, orphanNotice, replyView } from "./permission-reply.ts";
+import { localSession } from "./local-session.ts";
+import { type OpenPanel, panelClick } from "./panel.ts";
+import { pasteTarget, sanitizePasted } from "./paste.ts";
+import { insertReply, orphanNotice } from "./permission-reply.ts";
 import {
   type AutoAcceptFeed,
+  type AutoAcceptSharedFeed,
   type DraftBack,
   autoAcceptTest,
-  permissionAgentLine,
-  permissionDetailLines,
-  permissionShowsCwd,
   usePermissionBroker,
 } from "./permission-ui.ts";
 import { useAttachments } from "./useAttachments.ts";
 import { useDock } from "./useDock.ts";
+import { useHop } from "./useHop.ts";
 import { useMouse } from "./useMouse.ts";
 import { usePanels } from "./usePanels.ts";
 import { useQuitClear } from "./useQuitClear.ts";
-import { useTurnDriver } from "./useTurnDriver.ts";
+import { useSessionLink } from "./useSessionLink.ts";
+import { type HopTurnPort, useTurnDriver } from "./useTurnDriver.ts";
+import { useVoice } from "./useVoice.ts";
+import { VOICE_DEFAULTS, dictationInsertion } from "./voice-session.ts";
+import { voiceStripView } from "./voice-view.ts";
+import { tryWake } from "./wake-gate.ts";
 
-export type { AutoAcceptFeed };
-import { CLEARED_ELSEWHERE_NOTICE, CLEARED_NOTICE } from "./clear-command.ts";
-import {
-  type DaemonQueue,
-  type QueuedRows,
-  addRow,
-  handBackRows,
-  markAcked,
-  onReject,
-  onSteer,
-  rowTexts,
-  shownRows,
-  takeAll,
-  takeForSendNow,
-} from "./queued.ts";
-import {
-  type RenderOptions,
-  layoutTranscript,
-  sliceLaid,
-  stripAnsi,
-  warmRowsChunk,
-} from "./render-lines.ts";
+export type { AutoAcceptFeed, AutoAcceptSharedFeed };
+
+import { type DaemonQueue, type QueuedRows, handBackRows } from "./queued.ts";
+import { type RenderOptions, layoutTranscript, sliceLaid, warmRowsChunk } from "./render-lines.ts";
 import { runChunked } from "./run-chunked.ts";
-import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
-import { type Selection, rowSelectionRange } from "./selection.ts";
-import {
-  COMPACTING_NO_TURN,
-  type CompactionResult,
-  NOTHING_TO_SEND,
-  SEND_NOW_HINT,
-  SendNowErrorCode,
-  afterCompactionUnsupported,
-  compactionWaitNotice,
-  errorCode,
-  fallbackNotice,
-  onSuccessorError,
-  withRestored,
-} from "./send-now.ts";
-import {
-  openFailedNotice,
-  sessionsChoose,
-  stayingNotice,
-  switchRefusedNotice,
-  switchingRefusal,
-} from "./sessions-panel.ts";
+import { anchorOffset, applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
+import type { Selection } from "./selection.ts";
+import { withRestored } from "./send-now.ts";
 import { SkillsSync } from "./skills-sync.ts";
 import {
   type DisplayItem,
   type DisplayState,
   type SessionEvent,
   appendBackgroundExit,
-  appendHistory,
   appendNotice,
-  applySessionEvent,
   backgroundExitNotice,
-  endWithoutOutcome,
-  failTurn,
-  forgetContextFill,
   initialState,
   pushNoticeItem,
-  replaceWithNotices,
-  resetHistory,
-  startContinuation,
-  startTurn,
-  withdrawUserTurn,
 } from "./state.ts";
-import { inputRuleText } from "./status-line.ts";
-import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
-import { subagentNotifyNotice, userToSubagentNotice } from "./subagent-notify.ts";
-import { dimProps, palette } from "./theme.ts";
-import { panelHeight, panelMaxBody } from "./tree-panel.ts";
-import {
-  FOREIGN_COMPACTED_NOTICE,
-  SLOT_LOST_NOTICE,
-  type SessionActivity,
-  closedNotice,
-  commitWarmed,
-  historyAction,
-  loadingLabel,
-  lostSlot,
-  needsWarm,
-  nextStep,
-  refusedBeforeStart,
-  warmFailureNotice,
-} from "./turn-feed.ts";
+import type { ContextOpen } from "./status-view.ts";
 
-// `AppProps`/`SessionController`/`SettingsNoticeLine` are used here; the rest are
-// re-exported so every existing importer (`../src/App.tsx`) keeps working.
-import type {
-  AppProps,
-  HopFeed,
-  HopPlaceView,
-  HopRun,
-  HopTargetView,
-  SessionController,
-  SettingsNoticeLine,
-  TargetFeed,
-} from "./app-types.ts";
+import { type SessionActivity, warmFailureNotice } from "./turn-feed.ts";
+
+// `AppProps`/`SessionController`/`HopTargetView` are used here; the rest are
+// re-exported below so every existing importer (`../src/App.tsx`) keeps working —
+// a `from` re-export publishes the module's export, not this import.
+import type { AppProps, HopTargetView, SessionController } from "./app-types.ts";
 
 export type {
   AppProps,
@@ -214,26 +111,18 @@ export type {
 // for every importer that names `../src/App.tsx` (the test boundary).
 export type { RunQuit } from "./useQuitClear.ts";
 
-// Rows reserved below the transcript viewport: a blank spacer, the input/thinking
-// line, the status bar, plus one slack row so the frame never overflows the
-// terminal (which, on the alternate screen, has no scrollback to absorb it).
-const RESERVED_ROWS = 4;
 const FRAME_MS = 33; // ~30fps streaming throttle
 // If a bracketed paste's closing marker never arrives, recover this long after
 // the last paste chunk: flush what we captured and leave paste mode, so input
 // is never frozen. Real pastes stream their chunks within one pty read window,
 // far faster than this, so a legitimate paste never trips it.
 const PASTE_TIMEOUT_MS = 250;
-// Max content lines the input box shows before it windows around the cursor.
-const MAX_INPUT_ROWS = 10;
 
 const WELCOME = "Tentacle ready. Type a task, or `/help` for commands.";
 
 // Clipboard reads are trimmed: copied terminal output often has a trailing
 // newline that would otherwise land as a stray blank line.
 const flattenPasted = (text: string): string => sanitizePasted(text).trim();
-
-const INPUT_PLACEHOLDER = "Type a task or /command";
 
 /** The real file seam and the laptop's own paths (a test injects all three). */
 const defaultFileProbe: FileProbe = nodeFileProbe();
@@ -320,10 +209,15 @@ export function App({
   sessions,
   runQuit,
   autoAccept,
+  autoAcceptShared,
   hop,
   targetFeed,
   columns: fixedColumns,
   jobRefreshMs,
+  voice: voiceConfig = VOICE_DEFAULTS,
+  voiceConfigDir,
+  voiceSpawner,
+  voiceHost,
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -521,19 +415,55 @@ export function App({
   const ownClearsRef = useRef(0);
   const clearAfterTurnRef = useRef(false);
   const runClearRef = useRef<(() => void) | null>(null);
-  // A `/move` (docs/feat/session-hop.md D3): the hop running NOW (its phase row
-  // is STATE, the handle is a ref so a queued hop can start it from the turn's
-  // end), the spec a `/move` typed mid-turn left for the first true idle (D4),
-  // and the live place (`targetFeed`) so the badge and `daemonInPod` follow a move.
-  const [hopRun, setHopRun] = useState<{ target: string; phase: string | null } | null>(null);
-  const hopRef = useRef<HopRun | null>(null);
-  // A `/move` that waits for the turn boundary (D4). It is STATE, so the effect
-  // below re-runs when it changes; the ref is what a command reads synchronously.
-  const [hopQueued, setHopQueued] = useState<HopSpec | null>(null);
-  const hopQueuedRef = useRef<HopSpec | null>(null);
-  const startHopRef = useRef<((spec: HopSpec) => void) | null>(null);
-  /** The queued-hop driver, read from the effect below (a ref: no dependency cycle). */
-  const hopIfQueuedRef = useRef<(() => void) | null>(null);
+  // A `/move` (docs/feat/session-hop.md D3): its state and its three drivers
+  // (`startHop`/`requestHop`/`hopIfQueued`) live in `useHop.ts` (S11), called
+  // below. Two things stay here, because App declares them ABOVE that hook: the
+  // forward ref an approved proposal starts through (assigned by the hook), and
+  // the live place (`targetFeed`), so the badge and `daemonInPod` follow a move.
+  const startHopRef = useRef<
+    | ((
+        spec: HopSpec,
+        opts?: { gateAnswered?: true; autoAccepted?: true; namespace?: HopNamespace },
+      ) => void)
+    | null
+  >(null);
+  // OD6: the same late binding for a proposal that ended with nothing to build
+  // (`useHop` assigns it; the port above reads it).
+  const wakeAfterHopRef = useRef<((outcome: "declined" | "failed") => void) | null>(null);
+  /**
+   * The host's view of this TUI's own turns (docs/feat/session-hop.md D9, slice
+   * H5): it folds each event (`hop.turn`), asks the owner at the turn's end
+   * (`hop.turnEnd`), and hands back the line the next prompt must carry
+   * (`hop.takeLine`). Nothing is decided here — the fold, the prompt's text and
+   * the `once`-only rule all live in the cli's pure modules.
+   *
+   * A ref, not state: the driver reads it, the frame never renders it.
+   */
+  const hopTurnPort: HopTurnPort = {
+    event: (event, own) => hop?.turn?.(event, own),
+    end: async (own) => (await hop?.turnEnd?.(own)) ?? { kind: "none" },
+    // OD6: the line is rendered from the TUI's LIVE auto-accept mode, so a moved
+    // line never states a stale `on|off`.
+    takeLine: (ctx) => hop?.takeLine?.(ctx) ?? null,
+    // The prompt that consumed it never ran (its send failed): hand it back, so
+    // the next real prompt carries it (OD6's failure mode).
+    restoreLine: () => hop?.restoreLine?.(),
+    // An approved proposal is an approved `/move`: the ONE place the view moves
+    // starts it (D3), through the ref so no dependency cycle is created. OD6: the
+    // origin is a MODEL's proposal, which is what lets the session wake afterwards.
+    approved: (spec, opts) => {
+      hopOriginRef.current = "proposal";
+      startHopRef.current?.(spec, opts);
+    },
+    // OD6: a fact about the OLD session must not ride the new one's first prompt.
+    clearPending: () => hop?.clearPending?.(),
+    // OD6: one user word restarts the consecutive-wake count.
+    onUserPrompt: () => noteUserPrompt(),
+    // OD6: a proposal that ended without a spec to build (refused, or unaskable)
+    // wakes the model to read the line — when the rule allows it (the App's own
+    // `hopWake` firing below is the ONE send path).
+    wake: (outcome) => wakeAfterHopRef.current?.(outcome),
+  };
   const [targetView, setTargetView] = useState<HopTargetView | null>(() =>
     targetFeed ? targetFeed.current() : null,
   );
@@ -544,14 +474,21 @@ export function App({
   const shownTarget = targetFeed ? (targetView?.badge ?? null) : (target ?? null);
   /** A fact of the place the session is at now: a spilled file lives in the pod. */
   const shownInPod = targetFeed ? (targetView?.daemonInPod ?? false) : daemonInPod;
+  /** The footer's and a tool ask's cwd: the hop target's own when it reports one (D4). */
+  const shownCwd = hopShownCwd(targetFeed ? targetView : null, cwd);
   // A long history is being warmed before it is committed (C8): activities wait.
   const warmingRef = useRef(false);
   const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
   // The daemon's queue (every writer's waiting rows), as last reported (C7).
-  const [daemonQueue, setDaemonQueue] = useState<DaemonQueue | undefined>(undefined);
+  const [daemonQueue, setDaemonQueueState] = useState<DaemonQueue | undefined>(undefined);
   // The same list for the callbacks that must not re-create themselves on every
-  // frame (a `/move`'s turn-boundary read, D4): a ref, updated where it is set.
+  // frame (a `/move`'s turn-boundary read, D4): a ref, updated where it is set —
+  // here, the ONE setter `useSessionLink` (S9b) calls for every report and reset.
   const daemonQueueRef = useRef<DaemonQueue | undefined>(undefined);
+  const setDaemonQueue = useCallback((next: DaemonQueue | undefined) => {
+    daemonQueueRef.current = next;
+    setDaemonQueueState(next);
+  }, []);
   // ── the dock (S5 — docs/feat/app-decomposition.md) ─────────────────────────
   // The background rows, the dock's focus/drafts/`sent`, the per-job output
   // cache and the four dock actions live in `useDock`. Its EFFECTS stay here, in
@@ -614,6 +551,8 @@ export function App({
           skill?: string;
           attachments?: readonly AttachmentRef[];
           images?: readonly AttachedImage[];
+          /** OD6: a hop's own wake — the pending hop line, and the dim continuing row. */
+          hopWake?: boolean;
         },
       ) => void)
     | null
@@ -626,7 +565,7 @@ export function App({
     if (!agent) {
       throw new Error("App requires either `agent` or `createSession`");
     }
-    return new Session(agent);
+    return localSession(agent);
   }, [createSession, agent]);
   if (sessionRef.current === null) {
     sessionRef.current = makeSession();
@@ -678,15 +617,16 @@ export function App({
       wakeIfPendingRef.current?.();
       return;
     }
-    const gate = {
+    // The GATE and the step are `tryWake`'s (S13): `idle` is the negation of the
+    // live `running` ref, `blocked` is the `/clear` latch — derived in ONE place,
+    // so this path and `wakeIfPending` cannot disagree about either (review H2).
+    const attempt = tryWake(wakeRef.current, {
       enabled: autoWakeOnJobExit,
-      idle: !stateRef.current.running,
-      // A `/clear` in flight: its history has not been applied yet, a turn
-      // now would be wiped by it (review H2). `wakeIfPending` runs again then.
-      blocked: clearingRef.current,
-    };
-    if (wakeDue(wakeRef.current, gate)) {
-      wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
+      running: stateRef.current.running,
+      clearing: clearingRef.current,
+    });
+    wakeRef.current = attempt.model;
+    if (attempt.wake) {
       runRef.current?.("", { continuation: true });
     }
   }, [autoWakeOnJobExit]);
@@ -699,25 +639,11 @@ export function App({
       return;
     }
     return jobs.onExit((job) => {
-      // A sub-agent's exit carries its own stop reason (`end_turn` = a clean
-      // finish): the dock's frozen drawer says which (docs/feat/subagent-panel.md).
-      const outcome: DockOutcome =
-        job.agent !== undefined
-          ? job.agent.stopReason === "end_turn"
-            ? { kind: "finished" }
-            : { kind: "stopped" }
-          : // A SHELL JOB (docs/feat/shell-jobs-panel.md, owner B): the drawer's
-            // outcome comes from THIS record — the code the daemon reported, and
-            // whether the stop was the dock's own (`dockStoppedRef`).
-            jobOutcome({
-              status: job.status,
-              exitCode: job.exitCode,
-              byDock: dockStoppedRef.current.has(job.id),
-              // Fix round 2: the ONE instant the run ended, stamped ONCE here (this
-              // handler runs once per exit) — the drawer's duration is the job's
-              // total run time, so a frozen drawer must not keep measuring to `now`.
-              endedAt: Date.now(),
-            });
+      // The outcome's RULE is `exitOutcome`'s (S13): a child's own stop reason, or
+      // the shell job's record. `endedAt` is stamped ONCE here — this handler runs
+      // once per exit, and the drawer's duration is the job's total run time, so a
+      // frozen drawer must not keep measuring to `now` (fix round 2).
+      const outcome: DockOutcome = exitOutcome(job, dockStoppedRef.current.has(job.id), Date.now());
       dockOutcomeRef.current[job.id] = outcome;
       // An open drawer may already have frozen on the `stopped` fallback (its row
       // left before this record arrived — review 3): the record is the truth, so
@@ -741,11 +667,41 @@ export function App({
   }, [jobs, flushNow, armWake, setDock, dockFinishedRef, dockOutcomeRef, dockStoppedRef]);
 
   // --- host notices ----------------------------------------------------------
+  // ONE effect for everything that appends a notice from outside a turn: the
+  // host feed, and (below) the session's auto-accept when another DEVICE flips
+  // it (docs/feat/session-auto-accept.md D5). App keeps exactly its pinned
+  // effect count (the structural tests), so a second notice source joins this
+  // one rather than adding an effect.
+  const autoAcceptSeenRef = useRef<boolean | null>(null);
   useEffect(() => {
-    if (!notices) {
-      return;
+    const announceAutoAccept = (on: boolean): void => {
+      const was = autoAcceptSeenRef.current;
+      autoAcceptSeenRef.current = on;
+      if (was === null || was === on) {
+        // `null` at a mount: the state a TUI starts in is never "news".
+        return;
+      }
+      if (!(autoAcceptShared?.remote() ?? false)) {
+        // THIS TUI's own flip (or its echo): no notice — the status bar says it.
+        return;
+      }
+      // The setter's label is daemon-supplied text: sanitized, never rendered raw.
+      const by = autoAcceptShared?.lastBy();
+      const who = by === undefined ? "another device" : oneLine(by);
+      stateRef.current = appendNotice(
+        stateRef.current,
+        `auto-accept turned ${on ? "on" : "off"} from ${who}`,
+      );
+      setScrollOffset(0);
+      flushNow();
+    };
+    let offAutoAccept: (() => void) | undefined;
+    if (autoAcceptShared) {
+      // The value it starts in is never news; only a LATER flip is.
+      announceAutoAccept(autoAcceptShared.current());
+      offAutoAccept = autoAcceptShared.onChange(announceAutoAccept);
     }
-    return notices.onNotice((text, hint) => {
+    const offNotices = notices?.onNotice((text, hint) => {
       // `host`: an attach's notice outlives the history that follows it (A6).
       stateRef.current = appendNotice(stateRef.current, text, {
         host: true,
@@ -754,7 +710,11 @@ export function App({
       setScrollOffset(0);
       flushNow();
     });
-  }, [notices, flushNow]);
+    return () => {
+      offAutoAccept?.();
+      offNotices?.();
+    };
+  }, [notices, autoAcceptShared, flushNow]);
 
   // --- a link stop's full reason (the StatusBar row truncates it) -------------
   useEffect(() => {
@@ -816,135 +776,76 @@ export function App({
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on field.value
   useEffect(() => setCommandIndex(0), [field.value]);
 
-  // --- derived layout (recomputed each render) -----------------------------
-  const st = stateRef.current;
-  const tokensShown = statusTokens(st);
-  const ctxShown = contextShown(tokensShown.context, contextOpen);
-  const columns = Math.max(20, size.columns);
-  const termRows = Math.max(8, size.rows);
-  // Slash-command autocomplete: open only while idle and typing a `/command`.
-  const paletteCommands =
-    !permission.pending && !st.running && !panel ? matchCommands(field.value, skills()) : [];
-  const paletteOpen = paletteCommands.length > 0;
-  const commandSel = paletteOpen
-    ? Math.min(Math.max(0, commandIndex), paletteCommands.length - 1)
-    : 0;
-  // With many skills a bare "/" lists them all: show a window around the selection.
-  const paletteWin = paletteWindow(paletteCommands.length, commandSel);
-  const paletteRows = paletteCommands.slice(paletteWin.start, paletteWin.end);
-  // The input box grows with a multi-line prompt (paste / `\`-continuation),
-  // (and with a soft-wrapped long line), capped at MAX_INPUT_ROWS content rows;
-  // +2 for its top/bottom borders.
-  const inputContentLines = inputRowCount(field.value, field.cursor, columns, MAX_INPUT_ROWS);
-  // One more row while the draft holds chips or an upload: the attach row sits
-  // INSIDE the input box and is counted HERE, once — so the viewport shrinks by
-  // one and the frame's height never changes (P8).
-  const attachRow = attachRowView(attach, Math.max(1, columns - 2));
-  const inputBoxRows = inputContentLines + 2 + attachRowRows(attach, Math.max(1, columns - 2));
-  const listView = panel
-    ? panelView(panel, columns, panelMaxBody(termRows), sessionRef.current?.sessionId ?? null)
-    : null;
-  // Rows above the input/panel while a turn runs: the thinking line + the
-  // queued-message lines (each one row: `wrap="truncate-end"`) + the send-now
-  // hint row under them + one blank row between the hint and the thinking line.
-  // The rows shown: the daemon's list (every writer's) + my rows not acked yet (C7).
-  const shown = shownRows(queued, daemonQueue);
-  const runningRows =
-    (st.running || loading ? 1 : 0) +
-    (st.running || compacting ? shown.length + (shown.length > 0 ? 1 : 0) : 0) +
-    (st.running && shown.length > 0 ? 1 : 0);
-  // Rows the bottom area occupies: the permission dialog; or the running rows,
-  // then the list panel or the input box (plus any open palette rows, which
-  // only open while idle).
-  //
-  // The dock's view-models (pure; the components only paint them) are computed
-  // HERE, before the layout, because their height feeds `activeRows` (Review H3:
-  // they used to be built after it, so the frame was taller than the terminal).
+  // --- the frame's view-model (S10 — docs/feat/app-decomposition.md) --------
+  // Every row derived below used to be inline here, from `activeRows` down to the
+  // status bar's position; they are `app-layout.ts`'s `frameLayout` now (AGENTS §7:
+  // computation and branching in a pure module, the component only paints the
+  // result). The ONE hook the rows need stays HERE — `useDockClock` owns an
+  // effect, and App's effect list keeps its order (Fable H1) — at its old place.
   const dockNow = useDockClock(dock.focus.kind !== "input" || dockVisible());
-  // The DROPDOWN is shown only when the focus reached it: DOWN focuses the pill,
-  // Enter opens the dropdown — at rest nothing is listed at all (the owner: "no
-  // permanent list anywhere"). A quit confirm owns the screen. A PERMISSION PROMPT
-  // does not take the dropdown away: the prompt may be a background child's ask,
-  // and its row says `⚠ needs your permission` — hiding the list there made that
-  // row unreachable (Review M1).
-  const dockListVisible =
-    dock.focus.kind === "list" && listVisible(subagents, jobRows) && quitConfirm === null;
-  const dockView = dockListVisible
-    ? backgroundListView({
-        rows: subagentsRef.current,
-        jobs: jobRowsRef.current,
-        askingId: permission.pendingAgent?.id ?? null,
-        focus: dock.focus,
-        width: columns,
-        now: dockNow,
-      })
-    : null;
-  // The drawer: a child's (its tools and messages), or a job's (its output tail).
-  const drawerOpen =
-    dock.focus.kind === "open" && quitConfirm === null && !permission.pending
-      ? { id: dock.focus.id, ended: dock.focus.ended }
-      : null;
-  const jobOutput = drawerOpen === null ? undefined : jobOutputRef.current[drawerOpen.id];
-  const drawer =
-    drawerOpen === null
-      ? null
-      : drawerJob !== null
-        ? jobDrawerView({
-            row: drawerJob,
-            output: jobOutput?.output,
-            ...(jobOutput?.truncated !== undefined ? { truncated: jobOutput.truncated } : {}),
-            ...(jobOutput?.exitCode !== undefined ? { exitCode: jobOutput.exitCode } : {}),
-            outcome: drawerOpen.ended,
-            width: columns,
-            now: dockNow,
-            // Review 4 (fix round 1): the drawer used to be a fixed 14 rows, so on
-            // a short terminal (80×20, 80×16) the frame was TALLER than the screen
-            // and Ink re-cleared it on every repaint. The budget is what the
-            // layout has left once the transcript's floor, the running rows and
-            // the input+status block are reserved — the same parts `activeRows`
-            // sums below, so `dockRows` can never reserve more than this.
-            maxRows: Math.max(1, termRows - (RESERVED_ROWS - 1) - inputBoxRows - runningRows - 3),
-          })
-        : drawerRow !== null
-          ? drawerView({
-              row: drawerRow,
-              sent: dock.sent[drawerOpen.id] ?? [],
-              outcome: drawerOpen.ended,
-              width: columns,
-              now: dockNow,
-            })
-          : null;
-  /** The rows the dock takes ABOVE the input: the dropdown's, or the drawer's. */
-  // A permission prompt REPLACES the whole bottom area (it is the input, as
-  // today), so nothing of the dock paints under it and it reserves no rows. The
-  // "who is asking" the dropdown's ⚠ row used to carry is now the PILL's job —
-  // the pill paints under the prompt (`▲ sa-1 asks`), which is strictly better:
-  // it is visible with the dock closed too (docs/feat/subagent-panel.md).
-  const dockHeight = permission.pending ? 0 : dockRows(dockView, drawer);
-  // The status bar's pill (docs/feat/subagent-panel.md, UI revision): ONE control
-  // for the background work, its words and state decided by the pure view-model.
-  const pill = pillView({
-    agents: subagents?.length ?? 0,
-    jobs: jobRows?.length ?? 0,
-    askingId: permission.pendingAgent?.id ?? null,
-    finished: dockFinishedRef.current,
-    now: dockNow,
-    focus:
-      dock.focus.kind === "pill"
-        ? "pill"
-        : dock.focus.kind === "list"
-          ? "dropdown"
-          : dock.focus.kind === "open"
-            ? "open"
-            : "input",
-    width: columns,
+  /** The transcript's state this frame paints (`stateRef` is the truth; this reads it). */
+  const st = stateRef.current;
+  // Voice dictation (docs/feat/voice-dictation.md §5): the hook owns the helper
+  // child and drives the pure reducer; the App only gives it the two things it
+  // can do to the screen — insert text at the cursor, and say one thing. It is
+  // declared HERE, above `frameLayout`, because the strip's rows are part of the
+  // layout's row budget (`app-layout.ts` counts them once); `pushNotice` is
+  // declared below, so it travels as the ref every other late caller already
+  // uses (`pushNoticeRef`, set at its definition).
+  const voice = useVoice({
+    config: voiceConfig,
+    // The transcript is INSERTED at the cursor, so what goes to `field.insert` is
+    // the appended part only (Review round 1, HIGH 1: passing the WHOLE joined
+    // field duplicated everything already typed).
+    insert: (text: string) => field.insert(dictationInsertion(field.value, text)),
+    notice: (text: string) => pushNoticeRef.current(text),
+    // The world the availability check reads. Passed explicitly so a test pins it
+    // instead of inheriting the host's (Review MEDIUM 6: T7 failed over SSH).
+    platform: voiceHost?.platform ?? process.platform,
+    env: voiceHost?.env ?? process.env,
+    ...(voiceConfigDir === undefined ? {} : { configDir: voiceConfigDir }),
+    ...(voiceSpawner === undefined ? {} : { spawner: voiceSpawner }),
   });
-  // The reply field's view while it is open (its rows feed the viewport maths).
-  const replyMax = permission.pending?.reply?.maxChars ?? 0;
-  const replyShown =
-    permission.pending && permission.mode.mode === "reply"
-      ? replyView(permission.mode, columns, replyMax)
-      : undefined;
+  // The phase the key layer reads (`voice()`), as a ref so a key mid-dictation
+  // sees the LIVE phase, not this render's.
+  const voicePhaseRef = useRef(voice.model.phase);
+  voicePhaseRef.current = voice.model.phase;
+
+  const view = frameLayout({
+    state: st,
+    permission,
+    dock,
+    dockNow,
+    subagents,
+    subagentsRef,
+    jobRows,
+    jobRowsRef,
+    drawerRow,
+    drawerJob,
+    jobOutput: jobOutputRef.current,
+    dockFinished: dockFinishedRef.current,
+    quitConfirm,
+    panel,
+    sessionId: sessionRef.current?.sessionId ?? null,
+    field,
+    attach,
+    skills: skills(),
+    commandIndex,
+    sizeColumns: size.columns,
+    sizeRows: size.rows,
+    contextOpen,
+    queued,
+    daemonQueue,
+    loading,
+    compacting,
+    // The strip's contents, computed by the pure view-model; `null` = no rows.
+    voiceStrip: voiceStripView(voice.model, { columns: size.columns }),
+  });
+  const frame = { ...view, st };
+  // The rows App itself still reads (the key path's snapshot, the mouse layer's
+  // snapshot, the effect deps, and the model it hands `AppView`).
+  const { columns, paletteCommands, paletteOpen, commandSel } = view;
+  const { listView, shown, viewport, panelBodyTop, dockTop, dockView, replyMax } = view;
   const replyMaxRef = useRef(0);
   replyMaxRef.current = replyMax;
   const { readMode: readReplyMode, setMode: setReplyMode } = permission;
@@ -960,43 +861,12 @@ export function App({
     },
     [readReplyMode, setReplyMode],
   );
-  const activeRows =
-    quitConfirm !== null
-      ? QUIT_CONFIRM_ROWS
-      : permission.pending
-        ? permissionPromptRows(
-            permission.choices.length,
-            permissionDetailLines(permission.pending).length,
-            permissionShowsCwd(permission.pending),
-            replyShown?.rows.length,
-            permission.pendingAgent !== null,
-          ) + dockHeight
-        : runningRows +
-          (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length) +
-          dockHeight;
-  const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
-  // Terminal row (1-based) of the panel's first body row: the transcript
-  // viewport, the bottom area's marginTop row, the running rows, the title rule.
-  const panelBodyTop = viewport + 1 + runningRows + 2;
-  /**
-   * Where the DOCK's first row sits on screen (1-based), or `null` when it paints
-   * nothing. Derived from the same parts `activeRows` sums, in the order the
-   * tree paints them: the transcript viewport, the `marginTop` spacer, the running
-   * rows, then the dock (the dropdown's rule + rows, or the drawer's block) — the
-   * input rule, the input and the status bar come after it.
-   *
-   * A panel, the palette, a quit confirm and a permission prompt each own that
-   * slot instead, and none of them paints the dock.
-   */
-  const dockTop =
-    dockHeight === 0 || listView || paletteOpen || quitConfirm !== null || permission.pending
-      ? null
-      : viewport + 1 + runningRows + 1;
   // Where the STATUS BAR's row is on screen, and the pill's cells on it, as the
   // last render reported them (docs/feat/subagent-panel.md: "a click on the
   // pill's cells opens the dropdown"). `StatusBar` computes the row's layout and
   // reports the range; the App must not re-derive either (AGENTS §7: one source
-  // of truth — the component paints and reports, it decides nothing).
+  // of truth — the component paints and reports, it decides nothing). The ROW is
+  // `frame.statusRowY` (the same arithmetic, in the view-model's one place).
   const statusRowRef = useRef<{
     readonly y: number;
     readonly pill: { readonly start: number; readonly end: number } | null;
@@ -1065,9 +935,18 @@ export function App({
   useEffect(() => {
     const prev = prevRowsRef.current;
     if (prev !== total) {
-      const selecting = selectionRef.current !== null;
-      if (total > prev && (scrollOffset > 0 || selecting)) {
-        setScrollOffset((o) => clampOffset(o + (total - prev), total, viewport));
+      // The RULE is `anchorOffset`'s (S13). The guard reads THIS render's offset
+      // and the updater's arithmetic reads the commit value, as before: the two
+      // disagree inside one batched tick, and that window is the point (H3).
+      const updater = anchorOffset({
+        prevTotal: prev,
+        total,
+        rendered: scrollOffset,
+        selecting: selectionRef.current !== null,
+        viewport,
+      });
+      if (updater !== null) {
+        setScrollOffset(updater);
       }
       prevRowsRef.current = total;
     }
@@ -1137,17 +1016,13 @@ export function App({
       jobReadAtRef.current = { id: jobTargetId, at: Date.now() };
       void read(jobTargetId, { lines: JOB_TAIL_SHOWN, maxChars: 8192 }).then(
         (result) => {
-          if (cancelled || result.found !== true) {
+          // ONE rule for a read's cache entry (S13): the polling read and the
+          // final on-exit read below are the same record, built once.
+          const entry = jobOutputEntry(result);
+          if (cancelled || entry === null) {
             return;
           }
-          jobOutputRef.current = {
-            ...jobOutputRef.current,
-            [jobTargetId]: {
-              output: result.output ?? [],
-              ...(result.truncated !== undefined ? { truncated: result.truncated } : {}),
-              ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
-            },
-          };
+          jobOutputRef.current = { ...jobOutputRef.current, [jobTargetId]: entry };
           setJobOutputGen((n) => n + 1);
         },
         () => {
@@ -1190,17 +1065,11 @@ export function App({
     let cancelled = false;
     void read(jobTargetId, { lines: JOB_TAIL_SHOWN, maxChars: 8192 }).then(
       (result) => {
-        if (cancelled || result.found !== true) {
+        const entry = jobOutputEntry(result);
+        if (cancelled || entry === null) {
           return;
         }
-        jobOutputRef.current = {
-          ...jobOutputRef.current,
-          [jobTargetId]: {
-            output: result.output ?? [],
-            ...(result.truncated !== undefined ? { truncated: result.truncated } : {}),
-            ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
-          },
-        };
+        jobOutputRef.current = { ...jobOutputRef.current, [jobTargetId]: entry };
         setJobOutputGen((n) => n + 1);
       },
       () => {},
@@ -1291,32 +1160,22 @@ export function App({
       return;
     }
     setTimeout(() => {
-      // A turn running by now keeps it pending: that turn's end asks again.
-      const gate = {
+      // A turn running by now keeps it pending: that turn's end asks again. The
+      // same `tryWake` as the live path (S13) — one gate, one step.
+      const attempt = tryWake(wakeRef.current, {
         enabled: autoWakeOnJobExit,
-        idle: !stateRef.current.running,
-        // A `/clear` in flight (review H2): its history is applied first, and
-        // `wakeIfPending` is asked again from there (or from a refused clear).
-        blocked: clearingRef.current,
-      };
-      if (wakeDue(wakeRef.current, gate)) {
-        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
+        running: stateRef.current.running,
+        clearing: clearingRef.current,
+      });
+      wakeRef.current = attempt.model;
+      if (attempt.wake) {
         runRef.current?.("", { continuation: true });
       }
     }, 0);
   }, [autoWakeOnJobExit]);
   wakeIfPendingRef.current = wakeIfPending;
 
-  // the held ones, and the handler starts streams (C2).
   const onActivityRef = useRef<((activity: SessionActivity) => void) | null>(null);
-  // `swapSession`, through a ref: the activity handler (closed elsewhere) is defined before it.
-  const swapRef = useRef<
-    | ((
-        next: SessionController,
-        opts?: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void },
-      ) => void)
-    | null
-  >(null);
   // A `/sessions` switch is in flight (its detach, then the target's open):
   // `switchingRefusal` / `sessionsChoose` refuse what would act on the old
   // session until it settles (Review R1). Cleared on every outcome.
@@ -1365,12 +1224,6 @@ export function App({
   }, [wakeIfPending]);
 
   /**
-   * One activity of the session that this TUI did not start (C1/C2/C6): the
-   * decision is `turn-feed.ts`'s; this executes it. A foreign turn streams
-   * through the SAME loop as an own one; its controller's abort cancels it
-   * (Esc / Ctrl+C stop what runs, whoever started it — owner Q2).
-   */
-  /**
    * Ask the daemon for the session's context (never awaited by render). An
    * answer for a session the view has since left is dropped; a failure leaves
    * the figure as it was (`ctx –/max` until something measures).
@@ -1393,7 +1246,8 @@ export function App({
   // ALSO read or written by a driver that stays here (the activity handler and
   // `swapSession`, the clear's arm, the key snapshot, the frame), so they are
   // PASSED IN and each use site keeps its identifier and its source (Fable
-  // M1/H3). It declares no effect, so the 20 below keep their indices (H1), and
+  // M1/H3). It declares no effect, so the 22 below keep their indices (H1) —
+  // the original 20 plus session-hop's `targetFeed` and idle `hopIfQueued` — and
   // it is called before `onActivity`/`watchSession` because they START what it
   // streams (`streamTurn`) — `onActivityRef` is how the driver reaches back.
   const { run, commitHistory, streamTurn, sendNow, submit, startCompaction, drainHeld } =
@@ -1452,208 +1306,86 @@ export function App({
       wakeIfPending,
       exit,
       runRef,
+      // The hop's view of this TUI's turns (D9/H5): absent where no `hop` prop is,
+      // i.e. exactly the origins where the model is not offered the tool (D8).
+      ...(hop ? { hopTurn: hopTurnPort } : {}),
     });
   // The forward reference the jobs subscription, the initial prompt and the
   // wake read (they are declared and run outside the driver).
   runRef.current = run;
-  const onActivity = useCallback(
-    (activity: SessionActivity): void => {
-      const inFlight =
-        streamCtrlRef.current !== null || sendNowRef.current !== null || warmingRef.current;
-      const step = nextStep({ inFlight, activity });
-      if (step === "hold") {
-        heldRef.current.push(activity);
-        return;
-      }
-      if (activity.kind === "closed" && runQuit) {
-        // A run's session closed by another TUI's `/quit` (A2): this one
-        // leaves; never a fresh session in a resident being removed.
-        runQuit.closedElsewhere(activity.reason);
-        setQuitConfirm(null);
-        exit();
-        return;
-      }
-      if (activity.kind === "closed") {
-        // Ended on another device (live, or refused on reconnect): say so, and
-        // hand the next prompt to a fresh session — the transcript stays as
-        // scrollback (docs/feat/connect-sessions.md).
-        pushNotice(closedNotice(activity.reason, sessions !== undefined));
-        swapRef.current?.(makeSession(), { keepTranscript: true });
-        return;
-      }
-      if (activity.kind === "history") {
-        const own = ownCompactionsRef.current > 0;
-        const action = historyAction({ reason: activity.reason, ownCompaction: own });
-        if (activity.reason === "compact" && own) {
-          ownCompactionsRef.current -= 1;
-        }
-        // A cleared chat is a new one: nothing of the old is expanded. The
-        // wake state, the sub-agent list and queued rows are the SESSION's and
-        // stay (the same session goes on).
-        const cleared = activity.reason === "clear";
-        const ownClear = cleared && ownClearsRef.current > 0;
-        if (ownClear) {
-          ownClearsRef.current -= 1;
-        }
-        if (cleared) {
-          setExpandAll(false);
-          setExpandedIds([]);
-        }
-        // The history a `/clear` waits for (or a snapshot, which also stands in
-        // for one a dropped link lost): the latch lets go, so the stack cannot
-        // be left "clearing" (review H2c). A snapshot also settles the count of
-        // my clears whose history never came (L6a).
-        if (clearingRef.current && (cleared || activity.reason === null)) {
-          clearingRef.current = false;
-        }
-        if (activity.reason === null) {
-          ownClearsRef.current = 0;
-        }
-        if (action === "notice") {
-          pushNotice(FOREIGN_COMPACTED_NOTICE);
-        } else if (action === "replace" || action === "append") {
-          const apply = action === "append" ? appendHistory : resetHistory;
-          void commitHistory((s) => apply(s, activity.messages)).then(() => {
-            setScrollOffset(0);
-            if (cleared) {
-              // After the replace: it would wipe a notice pushed before it. This
-              // TUI's own `/clear` said nothing at all under `connect` — the
-              // cleared transcript just vanished (docs/fix/connect-functest-batch.md
-              // item E); another device's clear already has its own words.
-              pushNotice(ownClear ? CLEARED_NOTICE : CLEARED_ELSEWHERE_NOTICE);
-            }
-            flushNow();
-            drainHeld();
-            // The meter must follow a REPLACED history at once: its figure came
-            // from the chat this clear just dropped, and waiting for the next
-            // turn's usage left it stale on screen (docs/fix/connect-functest-batch.md
-            // item E). The measured fill is forgotten, then the daemon is asked
-            // to count what the session holds now.
-            if (cleared || action === "replace") {
-              stateRef.current = forgetContextFill(stateRef.current);
-              askContext(sessionRef.current);
-            }
-            // A wake the latch held back: the cleared chat is on screen now.
-            wakeIfPending();
-          });
-        }
-        return;
-      }
-      const controller = new AbortController();
-      controller.signal.addEventListener("abort", () => activity.cancel(), { once: true });
-      abortRef.current = controller;
-      stoppedHereRef.current = false;
-      // No local bubble: its `user_message` (the daemon's prompt) draws it.
-      stateRef.current = startContinuation(stateRef.current, Date.now());
-      setScrollOffset(0);
-      flushNow();
-      void streamTurn(() => activity.events, controller, { foreign: true });
-    },
-    [
-      commitHistory,
-      drainHeld,
-      exit,
-      flushNow,
-      makeSession,
-      pushNotice,
-      runQuit,
-      sessions,
-      setQuitConfirm,
-      streamTurn,
-      wakeIfPending,
-      askContext,
-    ],
-  );
+
+  // ── the session link (S9b — docs/feat/app-decomposition.md) ────────────────
+  // How this TUI follows a session — the activity feed it streams, the
+  // subscriptions a follow installs, the ONE way the view moves to another
+  // session, a `/sessions` switch — lives in `useSessionLink.ts`. The hook owns
+  // no state and no effect: every ref below is shared with a driver this slice
+  // does not own (the turn driver's, the clear's, the key snapshot's, the
+  // frame's), so they are PASSED IN and each use site keeps its identifier and
+  // its source (Fable M1/H3). It declares no effect, so the 22 below keep their
+  // indices (H1: the original 20 plus session-hop's two); it is called AFTER
+  // `useTurnDriver` because `onActivity` starts what that driver streams
+  // (`streamTurn`), and BEFORE the mount effect below,
+  // which calls `watchSession`. `armWake`/`wakeIfPending`/`askContext`/
+  // `watchReturned` stay here: each is read by an effect (or a port) declared
+  // before this point, so moving one would move an effect's index (drift 1).
+  const { onActivity, watchSession, swapSession, switchTo } = useSessionLink({
+    sessionRef,
+    stateRef,
+    rowsRef,
+    setRows,
+    setScrollOffset,
+    setExpandAll,
+    setExpandedIds,
+    activitySubRef,
+    queueSubRef,
+    agentsSubRef,
+    jobsSubRef,
+    notifySubRef,
+    dockMsgSubRef,
+    heldRef,
+    abortRef,
+    streamCtrlRef,
+    sendNowRef,
+    warmingRef,
+    stoppedHereRef,
+    clearingRef,
+    ownCompactionsRef,
+    ownClearsRef,
+    clearAfterTurnRef,
+    sendNowUnsupportedRef,
+    fallbackNoticedRef,
+    wakeRef,
+    handedWakeRef,
+    switchingRef,
+    onActivityRef,
+    watchReturned,
+    flushNow,
+    pushNotice,
+    restoreInput,
+    setCompacting,
+    skillsSync,
+    setContextOpen,
+    setDaemonQueue,
+    askContext,
+    streamTurn,
+    commitHistory,
+    drainHeld,
+    setAgents,
+    setJobs,
+    setDock,
+    jobOutputRef,
+    touchPanel,
+    setQuitConfirm,
+    runQuit,
+    sessions,
+    makeSession,
+    wakeIfPending,
+    armWake,
+    subagentsTwoWay,
+    exit,
+  });
   onActivityRef.current = onActivity;
 
-  /**
-   * Follow `session` (C9): its activities and the daemon's queue — watch
-   * FIRST, then the eager open (a fresh session's is a no-op), so its first
-   * history is never missed. The previous session's subscriptions end, and
-   * what was held for it is dropped.
-   */
-  const watchSession = useCallback(
-    (session: SessionController | null, onOpened?: (ok: boolean) => void) => {
-      activitySubRef.current?.();
-      queueSubRef.current?.();
-      agentsSubRef.current?.();
-      jobsSubRef.current?.();
-      notifySubRef.current?.();
-      dockMsgSubRef.current?.();
-      heldRef.current = [];
-      setDaemonQueue(undefined);
-      setAgents(undefined);
-      setJobs(undefined);
-      jobOutputRef.current = {};
-      // The dock belongs to a session: a switch starts it over (its drafts and
-      // its `sent` are per session, docs/feat/subagent-panel.md).
-      setDock(resetDock());
-      // Its own skills (a remote session waits for its eager open first).
-      skillsSync.use(session);
-      // The context at open (never awaited by render): an answer for a session
-      // the view has since left is dropped.
-      setContextOpen(null);
-      askContext(session);
-      activitySubRef.current = session?.watch?.((a) => onActivityRef.current?.(a)) ?? null;
-      queueSubRef.current =
-        session?.onQueued?.((q) => {
-          daemonQueueRef.current = q;
-          setDaemonQueue(q);
-        }) ?? null;
-      agentsSubRef.current = session?.onSubagents?.((rows) => setAgents(rows)) ?? null;
-      jobsSubRef.current = session?.onJobs?.((report) => setJobs(report.rows)) ?? null;
-      // A RUNNING background child's message to the agent
-      // (docs/feat/agent-message-two-way.md): the notice at once, and — when it
-      // asks for one and this laptop allows two-way — the same wake an exit arms.
-      notifySubRef.current =
-        session?.onSubagentNotify?.((n) => {
-          stateRef.current = appendNotice(stateRef.current, subagentNotifyNotice(n));
-          setScrollOffset(0);
-          flushNow();
-          if (n.wake && subagentsTwoWay) {
-            armWake();
-          }
-        }) ?? null;
-      // The USER's own message to a child (`session/subagent_message`): ONE live
-      // notice — the daemon broadcasts it, so the sender's own TUI and every
-      // other one agree — and the drawer keeps its last three as `you → sa-N`.
-      dockMsgSubRef.current =
-        session?.onSubagentMessage?.((m) => {
-          stateRef.current = appendNotice(stateRef.current, userToSubagentNotice(m));
-          setScrollOffset(0);
-          flushNow();
-          setDock((prev) => noteSent(prev, m.agentId, m.text, m.n));
-        }) ?? null;
-      const opening = session?.open?.();
-      if (!opening) {
-        onOpened?.(true); // nothing to open (a local session)
-        return;
-      }
-      opening.then(
-        () => onOpened?.(true),
-        (error: unknown) => {
-          if (sessionRef.current === session) {
-            pushNotice(openFailedNotice(error));
-          }
-          onOpened?.(false);
-        },
-      );
-    },
-    [
-      pushNotice,
-      skillsSync,
-      askContext,
-      setAgents,
-      setJobs,
-      flushNow,
-      armWake,
-      subagentsTwoWay,
-      setDock,
-      // The dock's own refs (S5): STABLE `useRef` objects, so naming them keeps
-      // the identity rule of Fable H2 ("deps name the fields") without a churn.
-      jobOutputRef,
-    ],
-  );
   useEffect(() => {
     watchSession(sessionRef.current);
     watchedRef.current = true;
@@ -1670,57 +1402,6 @@ export function App({
       notifySubRef.current = null;
     };
   }, [watchSession]);
-
-  /**
-   * The ONE way the view moves to another session (`/clear`, a `/sessions`
-   * switch, a session closed elsewhere; docs/feat/connect-sessions.md): follow
-   * `next` (returned rows, activities, then its eager open), drop the old
-   * session's per-session latches, put rows queued during a compaction back in
-   * the input. The transcript is reset unless `keepTranscript` (closed
-   * elsewhere: it stays as scrollback). What happens to the OLD session (close,
-   * detach, nothing) is the caller's.
-   */
-  const swapSession = useCallback(
-    (
-      next: SessionController,
-      opts: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void } = {},
-    ): void => {
-      sessionRef.current = next;
-      // An open `/sessions` panel marks the live session as current, and must be
-      // re-read at the next render: its "current" row is read live (Review R2-1,
-      // R3-1). The rule is the `/sessions` kind's own (`panels/sessions.ts`).
-      touchPanel();
-      watchReturned(next);
-      watchSession(next, opts.onOpened);
-      ownCompactionsRef.current = 0;
-      clearingRef.current = false;
-      ownClearsRef.current = 0;
-      clearAfterTurnRef.current = false;
-      // The send-now latches are per session: the new one asks (and says) afresh.
-      sendNowUnsupportedRef.current = false;
-      fallbackNoticedRef.current = false;
-      // A wake deferred during the old session's compaction is that
-      // session's: it must not fire in the new one.
-      wakeRef.current = wakeStep(wakeRef.current, { type: "reset" });
-      handedWakeRef.current = false;
-      if (opts.keepTranscript !== true) {
-        stateRef.current = initialState;
-        setExpandAll(false);
-        setExpandedIds([]);
-      }
-      setScrollOffset(0);
-      // Rows queued during the old session's compaction never reach the
-      // new one: back to the input field, visibly (never sent by itself).
-      setCompacting(false);
-      if (rowsRef.current.length > 0) {
-        restoreInput(takeAll(rowsRef.current).text, "_your queued messages are back in the input_");
-        setRows(() => []);
-      }
-      flushNow();
-    },
-    [flushNow, restoreInput, setCompacting, setRows, touchPanel, watchReturned, watchSession],
-  );
-  swapRef.current = swapSession;
 
   // --- quit and clear (S8) --------------------------------------------------
   // The three executors live in `useQuitClear.ts`. The hook owns no state and no
@@ -1746,132 +1427,46 @@ export function App({
     setQuitConfirm,
     runQuit,
     detachOnQuit,
-    makeSession,
-    swapSession,
     pushNotice,
     wakeIfPending,
     exit,
+    // OD6: a `/clear` drops the pending hop fact with the conversation it belonged
+    // to (`hop?.clearPending`, a ref read at call time — no dep cycle).
+    clearHopPending: () => hopTurnPort.clearPending?.(),
   });
   runClearRef.current = runClear;
 
-  /**
-   * Start one hop (docs/feat/session-hop.md D3/D4), and be the ONLY place the
-   * view moves for one: `switchingRef` goes up while it runs (a typed prompt
-   * goes back to the input, P3), the phase row is the host's own words, and the
-   * view swaps with `keepTranscript` — the transcript rows must land exactly
-   * where they were, only the badge and the one notice differ. Everything
-   * effectful is the host's (`HopFeed`): the App never builds a runtime.
-   */
-  const startHop = useCallback(
-    (spec: HopSpec): void => {
-      if (!hop) {
-        return;
-      }
-      const run = hop.start(spec, sessionRef.current?.sessionId ?? null);
-      hopRef.current = run;
-      setHopRun({ target: hop.label(spec), phase: null });
-      switchingRef.current = true;
-      const stopStatus = run.onStatus((line) => {
-        setHopRun({ target: hop.label(spec), phase: line });
-        flushNow();
-      });
-      const settle = (): void => {
-        stopStatus();
-        hopRef.current = null;
-        hopQueuedRef.current = null;
-        setHopQueued(null);
-        switchingRef.current = false;
-        setHopRun(null);
-        flushNow();
-      };
-      void run.done.then(
-        (outcome) => {
-          if ("moved" in outcome) {
-            // D9: a hop never inherits an approval — auto-accept goes off with
-            // the move, said in the same notice (the feed, or this TUI's own).
-            // `clearAutoApprove`, never `autoAccept.set`: the feed's `set` only
-            // publishes the flip for the OTHER terminals, so this one's state
-            // (and its status bar) would still say "auto-accept on" while the
-            // notice claims otherwise.
-            const wasOn = permission.autoApprove;
-            if (wasOn) {
-              permission.clearAutoApprove();
-            }
-            swapSession(outcome.moved, { keepTranscript: true });
-            settle();
-            pushNotice(hopMovedNotice(hopPlaceText(outcome.view.place), wasOn));
-            return;
-          }
-          // A failed hop changes nothing: same session, same badge, same rows.
-          settle();
-          pushNotice(`_${outcome.failed}_`);
-        },
-        (error: unknown) => {
-          // `HopRun.done` never rejects by contract; a host that does anyway is
-          // still one notice, and the latch must not stay up.
-          settle();
-          pushNotice(`_${hopFailureText(error)}_`);
-        },
-      );
-    },
-    [flushNow, hop, permission, pushNotice, swapSession],
-  );
-  startHopRef.current = startHop;
-
-  /**
-   * `/move`'s machinery (docs/feat/session-hop.md D3): the grammar, the turn
-   * boundary decision (`hopStep`, pure), then start it now or leave it for the
-   * first true idle. The draft field is never touched — a `/move` is a command,
-   * and a hop that fails leaves everything as it was.
-   */
-  const requestHop = useCallback(
-    (raw: string): void => {
-      const step = hopStep({
-        parse: parseHopCommand(raw),
-        available: hop !== undefined,
-        hopping: hopRef.current !== null,
-        hopQueued: hopQueuedRef.current !== null,
-        running: stateRef.current.running,
-        queued: shownRows(rowsRef.current, daemonQueueRef.current).length,
-      });
-      if (step.kind === "notice") {
-        pushNotice(`_${step.text}_`);
-        return;
-      }
-      if (step.kind === "cancel") {
-        hopQueuedRef.current = null;
-        setHopQueued(null);
-        hop?.cancel?.();
-        pushNotice("_Move cancelled._");
-        return;
-      }
-      if (step.kind === "queue") {
-        hopQueuedRef.current = step.spec;
-        setHopQueued(step.spec);
-        pushNotice(HOP_QUEUED_NOTICE);
-        return;
-      }
-      startHopRef.current?.(step.spec);
-    },
-    [hop, pushNotice],
-  );
-
-  /** Run a `/move` that waited for the turn boundary (D4): the first true idle. */
-  const hopIfQueued = useCallback((): void => {
-    const spec = hopQueued;
-    if (spec === null || hopRef.current !== null) {
-      return;
-    }
-    // Still busy: it stays queued, and the next idle asks again — never two
-    // hops, and never one forgotten.
-    if (stateRef.current.running || shownRows(rowsRef.current, daemonQueueRef.current).length > 0) {
-      return;
-    }
-    hopQueuedRef.current = null;
-    setHopQueued(null);
-    startHopRef.current?.(spec);
-  }, [hopQueued]);
-  hopIfQueuedRef.current = hopIfQueued;
+  // ── the hop (S11 — docs/feat/app-decomposition.md) ────────────────────────
+  // `/move`'s three drivers — `startHop` (the ONE place the view moves), the
+  // typed `/move` (`requestHop`) and the queued hop's start (`hopIfQueued`) —
+  // live in `useHop.ts`, with the state they own (`hopRun`, `hopQueued`) and
+  // their refs. Every decision they execute is still a pure module's
+  // (`parseHopCommand`/`hopStep`/`hopReady`, `hopStatusRow`/`hopMovedNotice`/
+  // `hopFailureText`). It declares no effect, so the 22 below keep their indices
+  // (H1: the original 20 plus session-hop's `targetFeed` and idle `hopIfQueued`);
+  // the idle effect itself stays HERE, because its deps are this render's values
+  // (`hopQueued`, `st.running`, `shown.length`) — that is the whole mechanism
+  // (D4), and moving it into the hook would make its trigger a callback's
+  // identity instead of the render that made the session idle.
+  const { hopRun, hopQueued, hopIfQueuedRef, requestHop, hopOriginRef, noteUserPrompt } = useHop({
+    sessionRef,
+    stateRef,
+    rowsRef,
+    daemonQueueRef,
+    switchingRef,
+    startHopRef,
+    hop,
+    permission,
+    swapSession,
+    pushNotice,
+    flushNow,
+    // OD6: the ONE way a turn starts without typing (the driver's `run`), so a
+    // settled hop can continue the session by itself. `runRef` (not `run`) because
+    // `useHop` is declared ABOVE the driver that assigns it. The driver prepends the
+    // laptop's wake line and paints its own dim row (`hopWake`).
+    sendWake: () => runRef.current?.(HOP_WAKE_TEXT, { hopWake: true }),
+    wakeAfterHopRef,
+  });
   // A `/move` that waited for a boundary (D4) starts at the first TRUE idle: the
   // own turn over, the daemon's queue empty. This ONE effect is the whole
   // mechanism — every fact D4 names is a dependency, so the render that makes
@@ -1961,60 +1556,6 @@ export function App({
   );
   handleCommandRef.current = handleCommand;
 
-  /**
-   * Switch the view to session `id` (a `/sessions` row; the panel already
-   * decided it may): stop following the current one — detach FIRST, then open
-   * (the other order would hold two attachments and route prompts twice) — and
-   * swap to a NEW attach-only controller. A detach the daemon refuses (an
-   * older one) changes nothing: the current session is followed again. A
-   * target that fails to open hands the view to a fresh session.
-   */
-  const switchTo = useCallback(
-    (id: string, reopen: boolean): void => {
-      const old = sessionRef.current;
-      if (!sessions || !old?.detach) {
-        pushNotice(switchRefusedNotice(id));
-        return;
-      }
-      const staying = stayingNotice(old.stayingRows?.() ?? 0);
-      // Latched until the switch settles, whatever the outcome (Review R1).
-      switchingRef.current = true;
-      // In the same step: the old session's activities stop reaching the view.
-      watchSession(null);
-      watchReturned(null);
-      old.detach().then(
-        () => {
-          let target: SessionController;
-          try {
-            target = sessions.open(id, reopen);
-          } catch (error) {
-            pushNotice(openFailedNotice(error));
-            swapSession(makeSession(), { keepTranscript: true });
-            switchingRef.current = false;
-            return;
-          }
-          swapSession(target, {
-            onOpened: (ok) => {
-              if (!ok && sessionRef.current === target) {
-                swapSession(makeSession(), { keepTranscript: true });
-              }
-              switchingRef.current = false;
-            },
-          });
-          // After the swap (it resets the transcript): said in the new view.
-          if (staying) pushNotice(staying);
-        },
-        () => {
-          watchReturned(old);
-          watchSession(old);
-          pushNotice(switchRefusedNotice(id));
-          switchingRef.current = false;
-        },
-      );
-    },
-    [makeSession, pushNotice, sessions, swapSession, watchReturned, watchSession],
-  );
-
   // All line editing lives in `useLineEditor` (pure `editor.ts` ops), so no
   // control key — Ctrl+O, mouse reports, escapes — can ever be echoed into the
   // buffer, independent of input-handler ordering.
@@ -2074,13 +1615,21 @@ export function App({
       pasteBufRef.current = null;
       if (buf) {
         const clean = sanitizePasted(buf);
-        // An open reply field takes it, never the hidden main field.
-        if (clean && !insertIntoReply(clean) && !panelRef.current) {
+        // WHERE it lands is `pasteTarget`'s rule (S13): an open reply field takes
+        // it, never the hidden main field; a panel swallows it; else an attachment.
+        const target = pasteTarget({
+          clean,
+          replyOpen: readReplyMode().mode === "reply",
+          panelOpen: panelRef.current !== null,
+        });
+        if (target === "reply") {
+          insertIntoReply(clean);
+        } else if (target === "attach") {
           routeAttachRef.current(clean);
         }
       }
     }, PASTE_TIMEOUT_MS);
-  }, [clearPasteTimeout, insertIntoReply]);
+  }, [clearPasteTimeout, insertIntoReply, readReplyMode]);
   useEffect(() => {
     return () => clearPasteTimeout();
   }, [clearPasteTimeout]);
@@ -2158,13 +1707,50 @@ export function App({
     setDock,
     toggleAgents,
     toggleExpandAll: () => setExpandAll((v) => !v),
-    moveCommandSel: (step) =>
-      setCommandIndex((i) => {
-        const n = paletteCommands.length;
-        return step === -1 ? (Math.min(i, n - 1) - 1 + n) % n : (Math.min(i, n - 1) + 1) % n;
-      }),
+    moveCommandSel: (step) => setCommandIndex((i) => paletteStep(i, paletteCommands.length, step)),
     runCommand: (name) => handleCommand(name),
     pushNotice,
+    // --- the line-editing tail (S12): each one call, decided by `line-layer.ts`.
+    fieldInsert: (text) => field.insert(text),
+    fieldDeleteBack: () => field.deleteBack(),
+    fieldDeleteWord: (dir) => field.deleteWord(dir),
+    fieldMoveCursor: (delta, extend) => field.moveCursor(delta, extend),
+    fieldMoveWord: (dir, extend) => field.moveWord(dir, extend),
+    fieldMoveLine: (edge, extend) => field.moveLine(edge, extend),
+    fieldMoveVertical: (dir, extend) => field.moveVertical(dir, extend),
+    setHistoryCursor: (index, draft) => {
+      histIndexRef.current = index;
+      draftRef.current = draft;
+    },
+    dockDown: () => setDock((prev) => downToDock(prev, dockIds())),
+    scroll: (dir) => setScrollOffset((o) => applyScroll(o, dir, total, viewport)),
+    pasteClipboard: () => {
+      // Ctrl+V: read the OS clipboard and insert at the cursor. (The terminal's
+      // own paste — Cmd+V on macOS — never reaches us as a key; it arrives as a
+      // text chunk, routed to an "insert" action instead.)
+      void paste().then(
+        (text) => {
+          const clean = flattenPasted(text);
+          // `pasteTarget`'s rule again (S13), with no reply to consider: this
+          // path is the MAIN input's Ctrl+V — the dialog layer already turned a
+          // reply-field Ctrl+V into `pasteReply`, so only the panel can veto it.
+          if (
+            pasteTarget({ clean, replyOpen: false, panelOpen: panelRef.current !== null }) ===
+            "attach"
+          ) {
+            routeAttachRef.current(clean);
+          }
+        },
+        () => pushNotice("_Clipboard unavailable._"),
+      );
+    },
+    submit: (text) => submit(text),
+    removeLastChip: () => setAttach((draft) => removeLastChip(draft)),
+    // Voice dictation (docs/feat/voice-dictation.md): the hook owns the child and
+    // the reducer; the layer only decided WHICH intent this chunk was.
+    voiceToggle: voice.toggle,
+    voiceFinish: voice.finish,
+    voiceCancel: voice.cancel,
   };
 
   useInput((char, key) => {
@@ -2202,7 +1788,7 @@ export function App({
         jobRows: () => jobRowsRef.current ?? [],
         panel,
         paletteOpen,
-        paletteNames: paletteCommands.map((c) => c.name),
+        paletteNames: paletteCommands.map((c: { readonly name: string }) => c.name),
         commandSel,
         fieldValue: field.value,
         permission: {
@@ -2210,9 +1796,13 @@ export function App({
           choices: permission.choices,
           selected: permission.selected,
           mode: () => permission.readMode(),
+          shownAt: () => permission.shownAt(),
         },
         sessions,
         detachOnQuit,
+        // Live reads: the phase can move between two chunks in one tick.
+        voice: () => voicePhaseRef.current,
+        voiceKey: () => voiceConfig.key,
       },
       PURE_LAYERS,
     );
@@ -2244,307 +1834,73 @@ export function App({
       return;
     }
 
-    // Line editing works while idle AND while a turn runs (so a task can be
-    // typed and queued for steering). The routing decision is pure
-    // (`resolveLineInput`); here we only execute it. History recall is
-    // inherently stateful (session refs + the live draft), so it stays a local
-    // closure the "history" action calls into.
-    const historyStep = (dir: -1 | 1): void => {
-      // On the draft slot the live value IS the draft (saved by the first Up);
-      // inside history the saved draft is what a Down past the newest restores.
-      const onDraftSlot = histIndexRef.current >= historyRef.current.length;
-      const prevIndex = histIndexRef.current;
-      const res = recall(
-        { items: historyRef.current, index: prevIndex },
-        dir,
-        onDraftSlot ? field.value : draftRef.current,
-      );
-      histIndexRef.current = res.index;
-      draftRef.current = res.draft;
-      // A no-op recall (e.g. Up with an empty history) must not touch the
-      // field, or a mid-buffer cursor would jump to the end.
-      if (res.value === field.value && res.index === prevIndex) {
-        return;
-      }
-      // Shell convention: the cursor lands at the end of the recalled entry.
-      field.set(res.value);
-    };
-
-    const action = resolveLineInput(char, key, { value: field.value, cursor: field.cursor });
-    // DOWN's fourth meaning (mockup 02's table): on the draft slot, with nothing
-    // below to move to and no history walk left, it walks into the list. The
-    // decision is pure (`downEntersList`); this only executes it.
-    if (
-      key.downArrow &&
-      !key.shift &&
-      (action.kind === "history" || action.kind === "moveVertical") &&
-      downEntersList({
-        action: action.kind,
-        onDraftSlot: histIndexRef.current >= historyRef.current.length,
+    // The LINE-EDITING tail (S12): the terminal consumer, reached only when the
+    // 13 pure layers and the mouse layer all passed. Its decisions (history
+    // recall and its no-op guard, DOWN's walk into the dock, Backspace's chip
+    // rule) are `keys/line-layer.ts`'s, pure; here we only read the sources the
+    // inline tail read, at the same moment, and execute them through the port.
+    executeEffects(
+      resolveLineEffects({
+        char,
+        key,
+        value: field.value,
+        cursor: field.cursor,
+        history: {
+          items: historyRef.current,
+          index: histIndexRef.current,
+          draft: draftRef.current,
+        },
         paletteOpen,
-        visible: dockVisible(),
-        focus: dockRef.current.focus,
-      })
-    ) {
-      setDock((prev) => downToDock(prev, dockIds()));
-      return;
-    }
-    switch (action.kind) {
-      case "moveVertical":
-        field.moveVertical(action.dir, action.extend);
-        return;
-      case "history":
-        historyStep(action.dir);
-        return;
-      case "scroll":
-        setScrollOffset((o) => applyScroll(o, action.dir, total, viewport));
-        return;
-      case "pasteClipboard":
-        // Ctrl+V: read the OS clipboard and insert at the cursor. (The terminal's
-        // own paste — Cmd+V on macOS — never reaches us as a key; it arrives as a
-        // text chunk, routed to an "insert" action instead.)
-        void paste().then(
-          (text) => {
-            const clean = flattenPasted(text);
-            if (clean && !panelRef.current) {
-              routeAttachRef.current(clean);
-            }
-          },
-          () => pushNotice("_Clipboard unavailable._"),
-        );
-        return;
-      case "newline":
-        // A trailing `\` before the cursor is a line continuation, not a submit.
-        field.deleteBack();
-        field.insert("\n");
-        return;
-      case "submit":
-        submit(field.value);
-        return;
-      case "moveWord":
-        field.moveWord(action.dir, action.extend);
-        return;
-      case "moveCursor":
-        field.moveCursor(action.delta, action.extend);
-        return;
-      case "moveLine":
-        field.moveLine(action.edge, action.extend);
-        return;
-      case "deleteBack":
-        // Backspace on an EMPTY input with chips removes the last one
-        // (docs/feat/attachments-tui.md decision 13): the smallest control.
-        if (field.value === "" && field.cursor === 0 && attachRef.current.chips.length > 0) {
-          setAttach((draft) => removeLastChip(draft));
-          return;
-        }
-        field.deleteBack();
-        return;
-      case "deleteWord":
-        field.deleteWord(action.dir);
-        return;
-      case "insert":
-        field.insert(action.text);
-        return;
-      case "none":
-        return;
-    }
+        dockVisible: dockVisible(),
+        dockFocus: dockRef.current.focus,
+        chipCount: attachRef.current.chips.length,
+      }),
+      keyHost,
+    );
   });
 
-  // --- the dock's other view-models (pure; the components only paint them) --
-  // `openTitle`: the input's rule says `→ sa-N` while a child is open (P2 (a)).
-  const openTitle = dock.focus.kind === "open" ? inputTitle(dock.focus) : null;
+  // --- the frame (S10) ------------------------------------------------------
+  // The tree itself left `App.tsx` for `AppView.tsx` — a verbatim move (the
+  // plan's M3: "no prop re-plumbing"), so `git diff --color-moved` shows an
+  // unchanged tree. Everything it paints is the view-model computed above; the
+  // App still owns the state, the effects and the one `useInput` behind it.
   // What Enter does while a child is open lives on the INPUT RULE
   // (`→ sa-1 · enter sends · esc back`), never in the status bar: the bar's
   // right slot is `auto-accept`'s, and a hint there replaced it (round 3 M1).
-
   return (
-    <Box flexDirection="column">
-      <Box flexDirection="column" height={viewport}>
-        {selection ? (
-          visible.map((row, i) => {
-            const absRow = win.start + i;
-            const plain = stripAnsi(row);
-            // Ink measures an empty <Text> as 0x0, so blank separator rows
-            // would collapse and shift the transcript up. A single space keeps
-            // every row at height 1 (the grid trimEnd()s it back to "").
-            const display = row === "" ? " " : row;
-            const line = row === "" ? " " : plain;
-            const range = rowSelectionRange(selection, absRow, plain.length);
-            if (!range) {
-              return <Text key={i}>{display}</Text>;
-            }
-            const [c0, c1] = range;
-            return (
-              <Text key={i}>
-                {line.slice(0, c0)}
-                <Text inverse>{line.slice(c0, c1)}</Text>
-                {line.slice(c1)}
-              </Text>
-            );
-          })
-        ) : (
-          <Text>{visible.join("\n")}</Text>
-        )}
-      </Box>
-
-      <Box marginTop={1}>
-        {quitConfirm !== null ? (
-          <QuitConfirm text={quitConfirmText(quitConfirm)} columns={columns} />
-        ) : permission.pending ? (
-          <PermissionPrompt
-            req={permission.pending}
-            options={permission.choices.map((c) => c.label)}
-            selected={permission.selected}
-            cwd={cwd}
-            columns={columns}
-            {...(replyShown ? { reply: replyShown } : {})}
-            replyable={permission.choices.some((c) => c.reply === true)}
-            {...(permission.pendingAgent
-              ? { agentLine: permissionAgentLine(permission.pendingAgent, columns) }
-              : {})}
-          />
-        ) : (
-          <Box flexDirection="column" width={columns}>
-            {/* Queued messages sit where a sent message would (right under the
-                conversation); the thinking/working line stays just above the
-                input, under them (owner, 2026-10-25). */}
-            {st.running || compacting ? (
-              <QueuedMessages queued={rowTexts(shown)} hint={SEND_NOW_HINT} columns={columns} />
-            ) : null}
-            {/* One blank row between the send-now hint and the thinking line. */}
-            {st.running && shown.length > 0 ? <Text> </Text> : null}
-            {loading ? (
-              <Text {...dimProps()}>{loadingLabel(loading.done, loading.total)}</Text>
-            ) : st.running ? (
-              <Thinking
-                since={
-                  st.reasoning && st.reasoningStartedAt !== null
-                    ? st.reasoningStartedAt
-                    : (st.turnStartedAt ?? Date.now())
-                }
-                label={st.reasoning ? "Thinking…" : "Working…"}
-              />
-            ) : null}
-            {listView ? (
-              <ListPanel view={listView} columns={columns} />
-            ) : (
-              <>
-                {paletteOpen ? (
-                  <CommandPalette
-                    commands={paletteRows}
-                    selected={commandSel - paletteWin.start}
-                    columns={columns}
-                  />
-                ) : null}
-                {/* The dock ABOVE the input (docs/feat/subagent-panel.md, UI
-                    revision): the dropdown, or the one child opened. Everything
-                    it shows is a precomputed view-model — these components only
-                    paint segments (AGENTS §7). Its rows are reserved in
-                    `activeRows`, so the input and the status bar never move. */}
-                {dockView !== null ? <BackgroundList view={dockView} columns={columns} /> : null}
-                {drawer !== null && drawerJob !== null ? (
-                  <JobDrawer
-                    head={drawer.head}
-                    hidden={drawer.hidden}
-                    tail={drawer.tail}
-                    columns={columns}
-                  />
-                ) : drawer !== null ? (
-                  <SubagentDrawer
-                    head={drawer.head}
-                    hidden={drawer.hidden}
-                    tail={drawer.tail}
-                    sent={drawer.sent}
-                    columns={columns}
-                  />
-                ) : null}
-                {/* The input's top edge, which says ONE thing depending on the
-                    dock: `── <model> ─` at rest, a PLAIN line under the
-                    dropdown (its bottom edge), or `─ → sa-N · enter sends ·
-                    esc back ───` while a child is open. Never two labelled
-                    rules stacked, and never the model while the dock shows
-                    anything (owner). */}
-                <Text color={palette().border}>
-                  {inputRuleText(
-                    // A JOB's drawer is read-only and the input stays on the main
-                    // agent: a PLAIN rule, no `→ bg-3` (owner Q1 (a)).
-                    dock.focus.kind === "open" && drawerJob === null
-                      ? { kind: "target", id: dock.focus.id, ended: dock.focus.ended !== null }
-                      : dock.focus.kind === "list" || dock.focus.kind === "open"
-                        ? { kind: "plain" }
-                        : { kind: "model" },
-                    shownModel,
-                    columns,
-                  )}
-                </Text>
-                <Box
-                  width={columns}
-                  borderStyle="round"
-                  borderColor={palette().border}
-                  borderTop={false}
-                  borderLeft={false}
-                  borderRight={false}
-                  flexDirection="column"
-                >
-                  {attachRow === null ? null : (
-                    // ONE row, above the input: the chips (`name size`, +N) or
-                    // the upload in flight. Colours and the glyph only — the
-                    // text is `attach-draft.ts`'s (docs/feat/attachments-tui.md D8).
-                    <Text color={palette().subtle} wrap="truncate-end">
-                      {attachRow.kind === "upload"
-                        ? `  ${attachRow.text}`
-                        : `  📎 ${attachRow.items.join("  ")}${attachRow.more > 0 ? `  +${attachRow.more}` : ""}`}
-                    </Text>
-                  )}
-                  <LineInput
-                    value={field.value}
-                    cursor={field.cursor}
-                    anchor={field.anchor}
-                    placeholder={st.running ? "Queue a task…" : INPUT_PLACEHOLDER}
-                    maxRows={MAX_INPUT_ROWS}
-                    width={columns}
-                  />
-                </Box>
-              </>
-            )}
-          </Box>
-        )}
-      </Box>
-
-      {hopRow === null ? (
-        <StatusBar
-          cwd={cwd}
-          target={shownTarget}
-          tokens={tokensShown.totals}
-          contextTokens={ctxShown.used}
-          contextApprox={ctxShown.approx}
-          contextWindow={contextWindow}
-          columns={columns}
-          scrolledUp={scrolledUp}
-          hiddenAbove={hiddenAbove}
-          expandAll={expandAll}
-          autoApprove={permission.autoApprove}
-          pill={pill}
-          onPillRange={(range) => {
-            // The row the bar paints on: the frame's own rows, derived exactly as
-            // the tree lays them out (the transcript viewport, the spacer, the
-            // running rows, the dock, the input box), plus the bar's own one.
-            statusRowRef.current = {
-              y: viewport + 1 + runningRows + dockHeight + inputBoxRows + 1,
-              pill: range,
-            };
-          }}
-          link={linkView}
-        />
-      ) : (
-        // A hop in flight owns the status row (D3): same ONE row, so the frame
-        // never changes height and the transcript keeps its position.
-        <Box width={columns}>
-          <Text color={palette().accent} wrap="truncate-end">
-            {hopRow}
-          </Text>
-        </Box>
-      )}
-    </Box>
+    <AppView
+      model={{
+        ...frame,
+        st,
+        field,
+        permission,
+        dock,
+        drawerJob,
+        linkView,
+        shownModel,
+        shownTarget,
+        cwd: shownCwd,
+        contextWindow,
+        expandAll,
+        selection,
+        quitConfirm,
+        hopRow,
+        loading,
+        compacting,
+        win,
+        visible,
+        scrolledUp,
+        hiddenAbove,
+        onPillRange: (range: { readonly start: number; readonly end: number } | null) => {
+          // The row the bar paints on: the frame's own rows, derived exactly as
+          // the tree lays them out (the transcript viewport, the spacer, the
+          // running rows, the dock, the input box), plus the bar's own one. The
+          // arithmetic is `app-layout.ts`'s (`statusRowY`), so the row a click
+          // is matched against and the rows the viewport reserved cannot drift
+          // apart (S0b's pill-click pins are the behavioural half).
+          statusRowRef.current = { y: frame.statusRowY, pill: range };
+        },
+      }}
+    />
   );
 }

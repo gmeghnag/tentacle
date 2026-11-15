@@ -11,7 +11,8 @@
  *   the frame reads them (`listView`, the palette gate) and `panelRef` is assigned
  *   IN RENDER, above every executor — a paste, a timer-flushed paste and a held
  *   `[` read it. They stay `App`'s, and arrive here as port fields.
- * - **no effect**: `App` declares its 20 effects in today's order and this hook
+ * - **no effect**: `App` declares its 22 effects in today's order (the original
+ *   20 + session-hop's 2) and this hook
  *   declares none, so the effect list is untouched.
  * - every returned identifier keeps the name `App` already used (`closePanel`,
  *   `openPanel`, `sessionsDelete`, …), so no use site changed.

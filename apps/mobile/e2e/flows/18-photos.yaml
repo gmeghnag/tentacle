@@ -19,15 +19,24 @@ appId: so.tentacle.app
 - hideKeyboard
 - tapOn:
     id: "composer-photo"
+# The alert's button reads "Photo Library" (`SessionScreen`'s `Alert.alert`);
+# Maestro's text is a FULL regex match, so "Library" alone finds nothing.
 - tapOn:
-    text: "Library"
-# PHPicker: the two fixtures, then Add.
+    text: "Photo Library"
+# PHPicker: the two fixtures, then confirm. iOS 26's picker names a cell
+# "Photo, <date>, <time>", not by its file name, so the flow takes the two
+# NEWEST cells: this run's `addmedia` pair (one PNG + one JPEG, one timestamp).
+# The regex is a full match with exactly two commas, so the grid's container
+# (every cell's label joined) never matches. The confirm is "Done" on iOS 26
+# (a checkmark) and "Add" on iOS 18.
 - tapOn:
-    text: "PNG fixture"
+    text: "Photo, [^,]+, [^,]+"
+    index: 0
 - tapOn:
-    text: "JPEG fixture"
+    text: "Photo, [^,]+, [^,]+"
+    index: 1
 - tapOn:
-    text: "Add"
+    text: "Done|Add"
 - extendedWaitUntil:
     visible:
       id: "chip-0-ready"

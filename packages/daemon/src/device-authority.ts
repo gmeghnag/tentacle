@@ -179,6 +179,44 @@ export class DeviceAuthority {
     return false;
   }
 
+  /**
+   * Does anything want this daemon REACHABLE right now — a paired device, or an
+   * open pairing window? The mobile relay link dials out only while this is true
+   * (docs/feat/mobile-relay.md R4, Owner Q1: a user who never pairs never
+   * contacts the relay).
+   *
+   * READ-ONLY and side-effect free, like `authorize`: it re-reads the store
+   * (a device paired a second ago counts immediately) and writes nothing — no
+   * `seen/`, no audit. A broken store answers `false`: with nothing readable
+   * there is nobody to be reachable for, and the link must not stay dialled out
+   * on a guess.
+   */
+  wantsReachability(): boolean {
+    if (this.stopped) {
+      return false;
+    }
+    this.refreshIfChanged();
+    if (this.snapshot.broken) {
+      return false;
+    }
+    return this.snapshot.devices.size > 0 || this.hasWindow();
+  }
+
+  /**
+   * Does the authority's snapshot list this device right now? The push-time
+   * check (docs/feat/mobile-push.md F14): a device a revoke removed is not
+   * pushed to, even if a daemon re-wrote its registration in a race. Read-only
+   * and side-effect free, like `authorize` (a fresh read, so a revoke counts
+   * at once).
+   */
+  knows(id: string): boolean {
+    if (this.stopped) {
+      return false;
+    }
+    this.refreshIfChanged();
+    return !this.snapshot.broken && this.snapshot.devices.has(id);
+  }
+
   /** Track a live connection so a revoke can close it. Returns the inverse of `unregister`. */
   register(id: string, close: DeviceClose): void {
     const set = this.live.get(id);

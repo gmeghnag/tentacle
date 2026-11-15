@@ -17,6 +17,7 @@ import { describe, expect, test } from "bun:test";
 import type { AgentEvent } from "@tentacle/agent";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -25,6 +26,7 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * does: text, the notice of this fix, then `turn_end`.
  */
 const sessionOf = (events: readonly AgentEvent[]) => () => ({
+  ...inertSession(),
   async *send(): AsyncGenerator<AgentEvent> {
     for (const event of events) {
       yield event;
@@ -240,6 +242,7 @@ describe("a stream cut with no stop reason (case 2) fails the turn loudly", () =
     // The agent loop throws `ModelStreamCutError`; the App's own error path
     // renders it (as it does for any failed turn — `app.test.tsx` pins that).
     const createSession = () => ({
+      ...inertSession(),
       async *send(): AsyncGenerator<AgentEvent> {
         yield { type: "text", delta: "la vera" };
         yield { type: "truncated_reply", reason: "cut", retrying: false };

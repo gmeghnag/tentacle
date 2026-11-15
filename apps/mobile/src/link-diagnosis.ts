@@ -95,7 +95,10 @@ export function diagnosisMessage(diagnosis: LinkDiagnosis, computerName: string)
       return `'${computerName}' may have been reset (\`tentacle devices reset\`) — pair again`;
     case "unreachable":
       // Covers F23 (an older tentacle has no `/e2e`): its 401/refused upgrade is
-      // a dial that never opened, and "update it" is the fix.
-      return `Can't reach '${computerName}' — same network or Tailscale? \`tentacle serve --host 0.0.0.0\` running and up to date?`;
+      // a dial that never opened, and "update it" is the fix. The relay is named
+      // because it IS a path a phone can take (docs/feat/mobile-relay.md R6):
+      // with one paired, "nowhere to go" usually means the daemon's relay is off
+      // (`serve --no-relay`, an unreadable `relay.json`) rather than no network.
+      return `Can't reach '${computerName}' — same network, Tailscale, or the relay? \`tentacle serve --host 0.0.0.0\` running and up to date?`;
   }
 }

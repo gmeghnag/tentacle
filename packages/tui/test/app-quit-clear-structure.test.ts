@@ -8,7 +8,7 @@
  *     `clearCommandStep`/`clearErrorNotice`/`clearNoopNotice`, `backgroundCount`/
  *     `backgroundNames`): they are CALLED by the hook, never re-implemented in
  *     `App.tsx` and never inlined into the hook;
- *   - the hook owns NO state and NO effect (H1: App's 20 effects stay App's, in
+ *   - the hook owns NO state and NO effect (H1: App's 22 effects stay App's, in
  *     today's order) — every ref is a port field, i.e. the App's own object;
  *   - the frozen identifiers survive (`requestQuit`, `runClear`, `requestClear`),
  *     so no use-site changed;
@@ -66,9 +66,18 @@ describe("S8: the quit and clear executors leave App.tsx", () => {
       expect(app).not.toContain(`${name}(`);
     }
     // `quitConfirmText` is NOT one of them: it formats the dialog's one line, and
-    // the dialog is still App's to render (a component renders an already-made
-    // view-model; the wrapper `QuitConfirm` only draws it).
-    expect(importSpecs(app, "./commands.ts")).toContain("quitConfirmText");
+    // the dialog still renders an already-made view-model (the wrapper
+    // `QuitConfirm` only draws it). S10 moved that JSX — and its one formatting
+    // call — verbatim into `AppView.tsx`, so the locator follows the declaration
+    // (the plan's Preconditions rule: "no test changes EXCEPT a source-locator
+    // that must follow the code"); the property is unchanged.
+    expect(importSpecs(readSrc("AppView.tsx"), "./commands.ts")).toContain("quitConfirmText");
+    expect(countOf(readSrc("AppView.tsx"), "quitConfirmText(")).toBe(1);
+    // …and App no longer formats it, which is the move itself.
+    expect(countOf(app, "quitConfirmText(")).toBe(0);
+    // Non-vacuity: `quitConfirmText` is still exported from the module the view
+    // imports it from (a dead re-export would make the two scans above pass).
+    expect(readSrc("commands.ts")).toContain("export function quitConfirmText(");
   });
 
   test("the hook itself calls those decisions (they moved, they were not dropped)", () => {
@@ -97,7 +106,7 @@ describe("S8: the quit and clear executors leave App.tsx", () => {
   });
 
   // H1: no hook owns an effect here, so an effect's index cannot shift.
-  test("App still declares its 20 effects, and the hook declares none", () => {
+  test("App still declares its 22 effects (the original 20 + session-hop's 2)", () => {
     expect(countOf(readSrc("App.tsx"), "\n  useEffect(")).toBe(22);
     expect(readSrc("useQuitClear.ts")).not.toContain("useEffect");
   });

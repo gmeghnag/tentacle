@@ -3,6 +3,7 @@ import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import type { SessionEvent } from "../src/state.ts";
 import { queuedRow } from "./queued-row.ts";
+import { inertSession } from "./session-stub.ts";
 
 // The PC half of "a queued message goes back to whoever wrote it"
 // (docs/feat/queued-broadcast.md): the TUI puts MY returned rows in the input
@@ -19,6 +20,7 @@ function stub() {
   let end = (): void => {};
   let give: ((rows: Back) => void) | null = null;
   const controller: SessionController = {
+    ...inertSession(),
     async *send(prompt: string, signal?: AbortSignal) {
       sent.push(prompt);
       if (sent.length > 1) {
@@ -120,6 +122,7 @@ function chordStub() {
   let settle = (): void => {};
   let give: ((rows: Back) => void) | null = null;
   const controller: SessionController = {
+    ...inertSession(),
     async *send(prompt: string) {
       sent.push(prompt);
       if (prompt !== "go") {

@@ -188,3 +188,74 @@ export function refreshDue(
   }
   return now - lastAt >= intervalMs;
 }
+
+/**
+ * The exit an `onExit` listener gets, as this module needs it: a background job's
+ * own record, with a sub-agent's `agent` block when the exit is a CHILD's.
+ * Structural, so the reader keeps its source (the TUI mirrors wire/session types
+ * rather than depending on `@tentacle/protocol`).
+ */
+export interface JobExitRecord {
+  readonly id: string;
+  readonly status: string;
+  readonly exitCode: number | null;
+  /** Set on a sub-agent's exit event, never on a shell job. */
+  readonly agent?: { readonly stopReason: string };
+}
+
+/** A finished item's dock outcome: a child's own verdict, or the job's record. */
+export type JobExitOutcome = { readonly kind: "finished" } | JobEnd;
+
+/**
+ * The dock's outcome for ONE exit (`App.tsx`'s `jobs.onExit` handler, S13).
+ *
+ * A sub-agent's exit carries its own stop reason (`end_turn` = a clean finish).
+ * A SHELL job's outcome comes from THIS record — the code the daemon reported
+ * and whether the stop was the dock's own (`byDock`) — never from a later read.
+ *
+ * `endedAt` is the ONE instant the caller stamps (its handler runs once per
+ * exit): `jobEndView`'s duration is the job's TOTAL run time, so a frozen drawer
+ * must not keep measuring to `now`.
+ */
+export function exitOutcome(job: JobExitRecord, byDock: boolean, endedAt: number): JobExitOutcome {
+  if (job.agent !== undefined) {
+    return job.agent.stopReason === "end_turn" ? { kind: "finished" } : { kind: "stopped" };
+  }
+  return jobOutcome({ status: job.status, exitCode: job.exitCode, byDock, endedAt });
+}
+
+/** One job's cached output tail, as the drawer paints it (`jobOutputRef`). */
+export interface JobOutputEntry {
+  readonly output: readonly string[];
+  readonly truncated?: boolean;
+  readonly exitCode?: number | null;
+}
+
+/** A `session/job_output` answer, structurally (the client bounds it; the TUI reads it). */
+export interface JobOutputRead {
+  readonly found: boolean;
+  readonly output?: readonly string[];
+  readonly truncated?: boolean;
+  readonly exitCode?: number;
+}
+
+/**
+ * The cache entry a read produces, or `null` for "the drawer learns nothing" (a
+ * refusal, or a daemon that does not know the job).
+ *
+ * This is the SAME record the App used to build in two places (the polling read
+ * and the one final read on exit) — one rule now, so the two can never disagree
+ * about what a tail means. An absent field stays ABSENT (`exitCode` while
+ * running, `truncated` when nothing was dropped) rather than becoming `undefined`
+ * as a value: the drawer's "was it cut?" reading distinguishes the two.
+ */
+export function jobOutputEntry(result: JobOutputRead): JobOutputEntry | null {
+  if (result.found !== true) {
+    return null;
+  }
+  return {
+    output: result.output ?? [],
+    ...(result.truncated !== undefined ? { truncated: result.truncated } : {}),
+    ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+  };
+}

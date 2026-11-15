@@ -30,6 +30,14 @@ export interface ComputerMemory<Link> {
   readonly diagnoses: Forgetful;
   /** The cached records (the sessions screen reads a computer's name from here). */
   readonly records: Forgetful;
+  /**
+   * Rebuild the push notification directory after a store change
+   * (docs/feat/mobile-notifications.md Design 6 / N4): the extension's copy of the
+   * paired computers and their PINNED keys must follow a pair, a re-pair and a
+   * removal — a stale peer lets the NSE render a push it can no longer
+   * authenticate (F9). Injected, so nothing here imports the Keychain.
+   */
+  readonly pushDirectory?: () => Promise<unknown>;
 }
 
 /**
@@ -65,5 +73,9 @@ export async function withForgottenRecord<Link, R>(
   then: () => Promise<R>,
 ): Promise<R> {
   await forgetComputer(memory, id);
+  // The push directory follows the store (N4): after the record changed, and
+  // before the caller re-reads the computer — a failed rewrite is not a reason to
+  // fail the pairing (the extension then shows placeholders, which is safe).
+  await memory.pushDirectory?.().catch(() => undefined);
   return then();
 }

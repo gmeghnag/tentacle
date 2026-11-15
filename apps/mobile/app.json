@@ -2,15 +2,24 @@
   "expo": {
     "name": "tentacle",
     "slug": "tentacle",
+    "scheme": "tentacle",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "so.tentacle.app",
+      "appleTeamId": "8L24B2DUU2",
       "supportsTablet": true,
+      "entitlements": {
+        "keychain-access-groups": [
+          "$(AppIdentifierPrefix)so.tentacle.app",
+          "$(AppIdentifierPrefix)so.tentacle.app.push"
+        ],
+        "com.apple.developer.usernotifications.time-sensitive": true
+      },
       "infoPlist": {
         "NSLocalNetworkUsageDescription": "tentacle connects to your computers on the local network",
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
-        },
-        "NSCameraUsageDescription": "take a photo to send with your message"
+        }
       }
     },
     "plugins": [
@@ -18,7 +27,9 @@
         "expo-build-properties",
         {
           "ios": {
-            "deploymentTarget": "18.0"
+            "deploymentTarget": "18.0",
+            "usePrecompiledModules": false,
+            "buildReactNativeFromSource": true
           }
         }
       ],
@@ -26,17 +37,35 @@
         "expo-image-picker",
         {
           "photosPermission": "choose a photo to send with your message",
-          "cameraPermission": "take a photo to send with your message",
-          "microphonePermission": false
+          "cameraPermission": "tentacle uses the camera to scan the pairing code shown by `tentacle pair`, and to take a photo you send with a message",
+          "microphonePermission": "tentacle uses the microphone only while you dictate a message; audio stays on this iPhone"
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "tentacle uses the camera to scan the pairing code shown by `tentacle pair`, and to take a photo you send with a message",
+          "microphonePermission": "tentacle uses the microphone only while you dictate a message; audio stays on this iPhone",
+          "recordAudioAndroid": false
         }
       ],
       "expo-secure-store",
+      "./modules/tentacle-speech/app.plugin.js",
       [
         "expo-local-authentication",
         {
           "faceIDPermission": "tentacle uses Face ID to unlock the app"
         }
-      ]
-    ]
+      ],
+      [
+        "expo-notifications",
+        {
+          "mode": "development",
+          "enableBackgroundRemoteNotifications": false
+        }
+      ],
+      "@bacons/apple-targets"
+    ],
+    "icon": "./assets/icon.png"
   }
 }

@@ -14,6 +14,7 @@ import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import type { FileProbe, ProbedFile } from "../src/attach-files.ts";
 import type { SessionEvent } from "../src/state.ts";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const ENTER = "\r";
@@ -69,6 +70,7 @@ function fakeSession(opts: {
   const uploaded: { bytes: Uint8Array; meta: { mimeType: string; name?: string } }[] = [];
   const mode = opts.mode ?? "upload";
   return {
+    ...inertSession(),
     sent,
     uploaded,
     send(prompt, _signal, o) {
@@ -282,6 +284,7 @@ describe("T8g: Enter with chips mid-turn refuses, keeps both, and sends nothing"
   test("a running turn blocks the image prompt; the text and chip stay", async () => {
     const released: (() => void)[] = [];
     const session: SessionController = {
+      ...inertSession(),
       send() {
         return (async function* (): AsyncIterable<SessionEvent> {
           await new Promise<void>((resolve) => released.push(resolve));
@@ -384,6 +387,7 @@ describe("T8i: the daemon refusing the refs withdraws the bubble and restores ev
     // read as an autonomous WAKE and its bubble/text/chips vanished.
     let wakes = 0;
     const session: SessionController = {
+      ...inertSession(),
       send(prompt) {
         if (prompt === "") wakes += 1;
         return (async function* (): AsyncIterable<SessionEvent> {
@@ -433,6 +437,7 @@ describe("T8k: another client's image prompt shows its row", () => {
   test("a user_message with refs renders `[image: x.png]`", async () => {
     let push: ((event: SessionEvent) => void) | null = null;
     const session: SessionController = {
+      ...inertSession(),
       async *send() {
         // biome-ignore lint/correctness/useYield: the test pushes its own events
         throw new Error("unused");
@@ -752,6 +757,7 @@ describe("fix round 1, finding 3: the first Esc after an image prompt stops the 
   test("a finished upload leaves no controller for Esc to swallow", async () => {
     let aborted = 0;
     const session: SessionController = {
+      ...inertSession(),
       send(_prompt, signal) {
         return (async function* (): AsyncIterable<SessionEvent> {
           // A turn that only ends when it is aborted.

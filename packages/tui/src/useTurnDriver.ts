@@ -22,10 +22,10 @@ import { type AttachmentRef, DISMISSED, type WakeModel, wakeStep } from "@tentac
  * Three constraints from the plan shape the file:
  *
  * 1. **Effects stay in `App`** (Fable H1): this hook declares NO `useEffect`, so
- *    `App`'s 20 keep their order and every index. The effects that DRIVE this
- *    code remain `App`'s — the initial prompt and the wake (`runRef`,
- *    `wakeIfPending`), the jobs subscription — and they reach the driver through
- *    the same identifiers they already used.
+ *    `App`'s 22 keep their order and every index (the original 20 + session-hop's
+ *    2). The effects that DRIVE this code remain `App`'s — the initial prompt and
+ *    the wake (`runRef`, `wakeIfPending`), the jobs subscription — and they reach
+ *    the driver through the same identifiers they already used.
  * 2. **A shared latch is passed in, never re-created** (Fable M1/H3). Every ref
  *    below is ALSO read or written by a driver this slice does not own — the
  *    activity handler and `swapSession` (S9b), `useQuitClear`'s settle, the key
@@ -44,12 +44,13 @@ import { type AttachmentRef, DISMISSED, type WakeModel, wakeStep } from "@tentac
  *    watch effect does not re-subscribe (S0b's identity test still holds).
  */
 import { type MutableRefObject, useCallback, useRef } from "react";
-import type { SessionController } from "./app-types.ts";
+import type { HopProposalView, SessionController } from "./app-types.ts";
 import type { AttachDraft, AttachMode } from "./attach-draft.ts";
 import { attachErrorText, enterConvertsToChips, imageRowText, submitPlan } from "./attach-draft.ts";
 import type { AttachedImage } from "./attach-files.ts";
 import { pushHistory } from "./history.ts";
 import type { LineEditor } from "./hooks.ts";
+import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import { modelErrorNotice } from "./model-error.ts";
 import type { PermissionController } from "./permission-ui.ts";
 import {
@@ -91,6 +92,7 @@ import {
   endWithoutOutcome,
   failTurn,
   startContinuation,
+  startHopWake,
   startTurn,
   withdrawUserTurn,
 } from "./state.ts";
@@ -104,11 +106,65 @@ import {
 } from "./turn-feed.ts";
 
 /**
+ * `text` with the hop's pending line in front (review M7). The line is the laptop's
+ * own (`[move declined]`, `[session moved to …]`) and becomes part of the USER
+ * message, so the model reads it in the history rather than as a passing notice.
+ */
+export function hopWithLine(line: string, text: string): string {
+  return line === "" ? text : `${line}\n\n${text}`;
+}
+
+/** A hop's view of one turn (docs/feat/session-hop.md D9, slice H5): report events, ask at the end. */
+export interface HopTurnPort {
+  /** One event of the turn, `own` telling an own turn from another device's. */
+  event(event: SessionEvent, own: boolean): void;
+  /** The turn is over: the host asks the owner and says what it means. */
+  end(own: boolean): Promise<HopProposalView>;
+  /**
+   * The owner APPROVED a proposed move: the host hands the spec over, and the
+   * App starts it exactly as a typed `/move` (one path to the view's move, D3).
+   */
+  approved(
+    spec: HopSpec,
+    opts?: {
+      readonly gateAnswered?: true;
+      readonly autoAccepted?: true;
+      readonly namespace?: HopNamespace;
+    },
+  ): void;
+  /**
+   * Forget the pending fact: a `/clear` swaps the session, so a fact about the OLD
+   * one (its place, its cwd) must not ride the new one's first prompt (OD6).
+   */
+  clearPending?(): void;
+  /**
+   * The line the model must read at the start of its next REAL prompt — `[move
+   * declined]` after a refusal, `[session moved to …]` after a commit (review M7)
+   * — CONSUMED by this read: it belongs to exactly one prompt, so it can neither
+   * be lost nor repeated. `null` when there is nothing to say. `ctx.autoAccept` is
+   * the TUI's LIVE mode, which a moved line states (docs/feat/session-hop-ux OD6).
+   */
+  takeLine(ctx: { readonly autoAccept: boolean }): string | null;
+  /**
+   * The prompt that consumed the line never ran (its send failed): put it back,
+   * so the next real prompt carries it (docs/feat/session-hop-ux, failure mode
+   * "Wake prompt fails to send"). Absent when the host cannot restore.
+   */
+  restoreLine?(): void;
+  /** OD6: a real user prompt breaks the consecutive-wake chain. */
+  onUserPrompt?(): void;
+  /**
+   * OD6: a MODEL's proposal settled without a spec to build (refused, or unaskable):
+   * continue the session so the model reads the line, if the rule allows it.
+   */
+  wake?(outcome: "declined" | "failed"): void;
+}
+
+/**
  * What a streamed turn is (`streamTurn`).
  */
 export interface StreamOpts {
-  /** A send-now's new turn: the rows hand off on its first event. */
-  readonly successor?: boolean;
+  /** A send-now's new turn: the rows hand off on its first event. */ readonly successor?: boolean;
   /** Another device's turn (or one running when this TUI attached). */
   readonly foreign?: boolean;
   /**
@@ -122,6 +178,13 @@ export interface StreamOpts {
     readonly images?: readonly string[];
     /** The chips whose refs this prompt named: put back if the daemon refuses them. */
     readonly restoreChips?: readonly AttachedImage[];
+    /**
+     * This prompt consumed the hop's pending line (`hopTurn.takeLine`), so a
+     * failure that means it never ran must hand the line back (docs/feat/
+     * session-hop-ux, failure mode "Wake prompt fails to send"): the next real
+     * prompt carries it, and the model still learns where the session is.
+     */
+    readonly hopLine?: true;
   };
 }
 
@@ -262,6 +325,12 @@ export interface TurnHost {
   readonly sendWithImages: (text: string, chips: readonly AttachedImage[]) => void;
   readonly submitToTarget: (value: string) => boolean;
   readonly restoreChips: (chips: readonly AttachedImage[] | undefined) => void;
+  /**
+   * A hop's view of this TUI's turns (docs/feat/session-hop.md D9, slice H5): the
+   * host folds each OWN turn's events for a `move_session` proposal and asks the
+   * owner at the turn's end. Absent where no `hop` prop is (D8's other origins).
+   */
+  readonly hopTurn?: HopTurnPort;
   /** The model name the error hint reads (`remote` means the daemon's model). */
   readonly model: string;
   /** A `context_reset` re-reads the skills (`skills-sync.ts`'s one settle). */
@@ -359,6 +428,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     wakeIfPending,
     exit,
     runRef,
+    hopTurn,
   } = host;
 
   // The ids a send-now ever took: a late enqueue refusal of one says nothing.
@@ -378,15 +448,12 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
   }, [stateRef, streamCtrlRef]);
 
   /** The fallback's notice, once per App (it does not repeat on later chords). */
-  const noticeFallback = useCallback(
-    (who: "daemon" | "session") => {
-      if (!fallbackNoticedRef.current) {
-        fallbackNoticedRef.current = true;
-        pushNotice(fallbackNotice(who));
-      }
-    },
-    [fallbackNoticedRef, pushNotice],
-  );
+  const noticeFallback = useCallback(() => {
+    if (!fallbackNoticedRef.current) {
+      fallbackNoticedRef.current = true;
+      pushNotice(fallbackNotice());
+    }
+  }, [fallbackNoticedRef, pushNotice]);
 
   // `streamTurn`, through a ref: it and `settleSendNow` call each other.
   const streamTurnRef = useRef<
@@ -529,6 +596,11 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
           if (event.type === "context_reset") {
             reset = true;
           }
+          // A hop's proposal is watched HERE (docs/feat/session-hop.md D9, slice
+          // H5): the host folds the events of THIS TUI's own turn (`own`, never a
+          // foreign one — its owner is asked on their own terminal) and asks at the
+          // turn's end. Nothing is decided in this component.
+          hopTurn?.event(event, opts.own !== undefined && opts.foreign !== true);
           if (!handedOff && event.type !== "unsupported") {
             handedOff = true;
             setRows(handOff); // the sent texts are its prompt now
@@ -568,6 +640,16 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         const failed = opts.successor
           ? onSuccessorError(error, rowsRef.current)
           : ({ kind: "fail" } as const);
+        // A prompt that never RAN must not burn the hop's line (docs/feat/
+        // session-hop-ux, failure mode "Wake prompt fails to send"): its text —
+        // the moved/declined/failed line included — never reached the daemon, so
+        // the line goes back and the next real prompt carries it, exactly as
+        // `restoreChips` gives an image prompt its images back. A turn that DID
+        // stream carried the line inside its user message, so nothing is restored
+        // then: it was delivered, and saying it twice would be a lie.
+        if (opts.own?.hopLine === true && !streamed) {
+          hopTurn?.restoreLine?.();
+        }
         if (opts.own && lostSlot(error, streamed)) {
           // Another device's turn took the slot first: my prompt never ran.
           // Its bubble goes and its text is back in the input — never lost
@@ -637,6 +719,42 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         } else if (!(pending && settleSendNow(pending))) {
           setRows(onTurnEnd); // the turn is over; nothing stays queued
           flushNow();
+          // The model proposed a move and this turn is now over: the owner is
+          // asked, ONCE, through the single broker (D9/H5). A yes arrives as an
+          // approved spec; the App starts it exactly as a typed `/move` (one path
+          // to the view's move, D3). Never awaited by the frame: the ask can wait
+          // on a human. A refusal keeps the `[move declined]` line for the next
+          // prompt (M7), which `takeLine` hands over.
+          if (opts.own !== undefined && opts.foreign !== true) {
+            void hopTurn?.end(true).then(
+              (outcome) => {
+                if (outcome.kind === "approved") {
+                  // OD3: the pin's provenance rides the SAME hand-over as the
+                  // gate's answer, so the build states WHY that namespace
+                  // instead of re-resolving it (`explicit`, fix round 2).
+                  const opts = {
+                    ...(outcome.gateAnswered === true ? { gateAnswered: true as const } : {}),
+                    ...(outcome.autoAccepted === true ? { autoAccepted: true as const } : {}),
+                    ...(outcome.namespace === undefined ? {} : { namespace: outcome.namespace }),
+                  };
+                  hopTurn.approved(outcome.spec, Object.keys(opts).length === 0 ? undefined : opts);
+                  return;
+                }
+                // OD6: a refusal, or a move that could not even be asked about,
+                // leaves a line for the model — and a MODEL's proposal is one of
+                // the origins allowed to continue the session by itself, so it is
+                // woken to read it (`hopWakeStep` decides; the App fires).
+                if (outcome.kind === "declined" || outcome.kind === "failed") {
+                  hopTurn.wake?.(outcome.kind);
+                }
+              },
+              () => {
+                // A host that rejected is a host bug: the turn is over either
+                // way, and nothing moved (the broker's own refusal path is the
+                // one that answers a human).
+              },
+            );
+          }
           // A foreign turn (or history) held while this ran comes now (C2).
           drainHeld();
           if (clearNow) {
@@ -680,6 +798,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       streamCtrlRef,
       wakeIfPending,
       wakeRef,
+      hopTurn,
     ],
   );
   streamTurnRef.current = streamTurn;
@@ -695,6 +814,12 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         attachments?: readonly AttachmentRef[];
         /** The chips whose refs those are: their `[image: …]` rows and a restore. */
         images?: readonly AttachedImage[];
+        /**
+         * docs/feat/session-hop-ux OD6: the turn is a hop's OWN wake — it carries
+         * the pending hop line and paints the dim `↻ continuing after the move` row
+         * instead of a user bubble, so the frame says why a turn started by itself.
+         */
+        hopWake?: boolean;
       },
     ) => {
       const session = sessionRef.current;
@@ -717,9 +842,18 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         pushNotice(COMPACTING_NO_TURN);
         return;
       }
-      if (!continuation) {
+      // OD6: a hop's wake is a REAL prompt (it carries the hop line, and it is saved
+      // as conversation) that shows NO user bubble — the dim row below says why a
+      // turn started by itself. It is not a continuation: a continuation takes no
+      // hop line at all, and this one exists to carry one.
+      const hopWake = opts?.hopWake === true;
+      const noBubble = continuation || hopWake;
+      if (!noBubble) {
         lastUserRef.current = text;
         lastHadImagesRef.current = (opts?.images?.length ?? 0) > 0;
+        // OD6: a typed prompt breaks the wake chain (HOP_WAKE_CHAIN_MAX counts
+        // CONSECUTIVE self-continues, so one user word starts the count over).
+        hopTurn?.onUserPrompt?.();
       }
       const images = (opts?.images ?? []).map((chip) => imageRowText(chip.ref));
       const controller = new AbortController();
@@ -727,12 +861,21 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       stoppedHereRef.current = false;
       stateRef.current = continuation
         ? startContinuation(stateRef.current, Date.now())
-        : startTurn(stateRef.current, text, Date.now(), images.length > 0 ? images : undefined);
+        : hopWake
+          ? startHopWake(stateRef.current, Date.now())
+          : startTurn(stateRef.current, text, Date.now(), images.length > 0 ? images : undefined);
       setScrollOffset(0);
       flushNow();
       // The bubble `startTurn` appended (none for a continuation): withdrawn by
       // identity if the prompt loses the slot (C3).
-      const item = continuation ? undefined : stateRef.current.items.at(-1);
+      const item = noBubble ? undefined : stateRef.current.items.at(-1);
+      // The one line the model reads at the start of a real prompt (M7): CONSUMED,
+      // so it is neither lost nor repeated. A continuation prompt takes none. The
+      // mode is the TUI's LIVE one (OD6), so a moved line never states a stale
+      // `auto-accept on|off`.
+      const line = continuation
+        ? ""
+        : (hopTurn?.takeLine({ autoAccept: permission.autoApprove }) ?? "");
       const sendOpts = {
         ...(opts?.skill !== undefined ? { skill: opts.skill } : {}),
         ...(opts?.attachments !== undefined && opts.attachments.length > 0
@@ -742,7 +885,10 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       await streamTurn(
         () =>
           session.send(
-            continuation ? "" : text,
+            // A REAL prompt (not a continuation) carries the pending hop line:
+            // `[move declined]`, or `[session moved to …]` (review M7). It is part
+            // of the user message, so it is saved as conversation. Taken ONCE.
+            continuation ? "" : hopWithLine(line, text),
             controller.signal,
             Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
           ),
@@ -755,6 +901,9 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
             ...(opts?.images !== undefined && opts.images.length > 0
               ? { restoreChips: opts.images }
               : {}),
+            // A line was CONSUMED for this prompt: if it never runs, it must go
+            // back (see the driver's catch) rather than die with the send.
+            ...(line === "" ? {} : { hopLine: true as const }),
           },
         },
       );
@@ -772,6 +921,10 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       stoppedHereRef,
       streamTurn,
       wakeRef,
+      hopTurn,
+      // OD6: the hop's wake line states the auto-accept mode, so `run` must be
+      // rebuilt when the mode changes (`permission` is the render's live object).
+      permission,
     ],
   );
   // NOTE: `App` installs this into its own `runRef` right after the hook returns
@@ -791,7 +944,6 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       running: stateRef.current.running && streamCtrlRef.current !== null,
       compacting: compactingRef.current,
       pending: sendNowRef.current !== null,
-      canSendNow: ctrl?.sendNow !== undefined,
       latchedUnsupported: sendNowUnsupportedRef.current,
     });
     if (plan.kind === "none" || !ctrl) {
@@ -799,7 +951,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     }
     if (plan.kind === "wait") {
       // No way to cancel the compaction: the rows stay, its end sends them.
-      pushNotice(compactionWaitNotice(ctrl.sendNow ? "daemon" : "session"));
+      pushNotice(compactionWaitNotice());
       return true;
     }
     const taken = takeForSendNow(rowsRef.current);
@@ -807,14 +959,14 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     for (const m of taken.messages) {
       ownedIdsRef.current.add(m.id);
     }
-    if (plan.kind === "fallback" || !ctrl.sendNow) {
+    if (plan.kind === "fallback") {
       // The fallback stops the turn itself, for sure: like Ctrl+C, dismissed
       // (not denied) — the turn's cancel settles the ask.
       if (permission.pending) {
         permission.answer(DISMISSED);
       }
       sendNowRef.current = { mode: "fallback", next: null, successor: null, resetSeen: false };
-      noticeFallback(ctrl.sendNow ? "daemon" : "session");
+      noticeFallback();
       streamCtrlRef.current?.abort();
       return true;
     }
@@ -870,7 +1022,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
           setRows(() => after.rows);
           showIdle();
           drainHeld();
-          pushNotice(compactionWaitNotice("daemon"));
+          pushNotice(compactionWaitNotice());
           if (after.send !== null) {
             wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
             void runRef.current?.(after.send, { fallback: true });
@@ -897,7 +1049,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         }
         pending.mode = "fallback";
         sendNowUnsupportedRef.current = true;
-        noticeFallback("daemon");
+        noticeFallback();
         if (old) {
           // As the latched fallback: it stops the turn itself, so an open
           // dialog (that turn's ask) is dismissed — not denied — at once; an

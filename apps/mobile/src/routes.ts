@@ -39,6 +39,14 @@ export interface PairRouteParam {
   readonly again?: string;
   /** That computer's name, for the review card (nothing is read from the store to show it). */
   readonly againName?: string;
+  /**
+   * The pairing text an incoming `tentacle://pair?…` link carried (11b.2, Owner
+   * Q6). It enters the SAME intake as a paste and is therefore only PARSED on
+   * the way in: the review card follows, and nothing is dialled until the person
+   * taps Pair (F-P17). `link` names it so the screen can tell a link from a paste
+   * (a link is submitted once, on arrival — never re-submitted on a re-render).
+   */
+  readonly linkText?: string;
 }
 
 /** The stack's route table (`@react-navigation/native-stack` params). */

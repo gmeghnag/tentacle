@@ -1,0 +1,63 @@
+appId: so.tentacle.app
+---
+# `22-notify-approve` (docs/feat/mobile-notifications.md N8): a notification's
+# Approve asks Face ID ALWAYS — then sends `allow_once` on the computer's ONE link.
+#
+# WHAT THIS PROVES: the app's action path end to end. The response is injected
+# (Owner Q7: Maestro cannot long-press a system banner), and everything after it is
+# the real code: the seal is RE-OPENED and authenticated against the pinned
+# computer key (`notification-action.ts`), Face ID is REQUIRED even though the app
+# is foreground and unlocked (decision 14), the gate is held, the session is
+# attached on the computer's one link, and the keyed `session/resolve_permission`
+# is sent (N1). The last step reads the DAEMON (its pending-ask list), never a
+# screen.
+#
+# WHAT IT CANNOT: the button drawn on the SYSTEM banner, and the NSE that would
+# draw it — both need a device build (D3a) and are on the real-iPhone checklist
+# (`apps/mobile/e2e/README.md`).
+- runFlow: _pair.yaml
+- assertVisible:
+    id: "computers-list"
+- tapOn:
+    id: "computer-${output.computerId}"
+- extendedWaitUntil:
+    visible:
+      id: "sessions-list"
+    timeout: 30000
+# A REAL pending ask on a real session (flow 08's `EDIT`): the daemon's own
+# `permission_request`, which the notification below is about.
+- tapOn:
+    id: "session-${ASK1_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "EDIT a.txt"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+# Find that ask's `requestId` and seal a notification about it.
+- runScript:
+    file: "22-notify-seal-ask.js"
+# Approve: the injected response names `tentacle.approve`.
+- runScript:
+    file: "faceid-enroll.js"
+- runScript:
+    file: "22-notify-respond.js"
+    env:
+      MAESTRO_NOTIFY_ACTION: "approve"
+# The Face ID sheet comes up — decision 14: ALWAYS, even unlocked and in front.
+- extendedWaitUntil:
+    visible: "tentacle"
+    timeout: 15000
+- runScript:
+    file: "faceid-match.js"
+# DAEMON truth: the ask is gone, because the answer landed.
+- runScript:
+    file: "22-notify-assert.js"
+    env:
+      MAESTRO_NOTIFY_EXPECT: "answered"

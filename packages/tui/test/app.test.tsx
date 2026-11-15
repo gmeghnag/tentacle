@@ -21,10 +21,12 @@ import * as format from "../src/format.ts";
 import * as idleWarm from "../src/idle-warm.ts";
 import { IDLE_WARM_DELAY_MS, type IdleWarmState } from "../src/idle-warm.ts";
 import type { LinkStatusView } from "../src/link-status.ts";
+import { ARM_MS } from "../src/permission-reply.ts";
 import * as renderLines from "../src/render-lines.ts";
 import { messagesToItems } from "../src/resume.ts";
 import type { SessionActivity } from "../src/turn-feed.ts";
 import * as turnFeed from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 /**
@@ -123,6 +125,7 @@ describe("App", () => {
     // unmeasured totals as numbers → `↑0 ↓0` and `0%`.
     let fail = true;
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         if (fail) {
           yield { type: "text" as const, delta: "partial" };
@@ -372,6 +375,7 @@ describe("App", () => {
   /** A session whose turn streams once, then runs until aborted (or forever, if `deaf`). */
   function slowTurnSession(log: string[], deaf = false) {
     return () => ({
+      ...inertSession(),
       async *send(_prompt: string, signal?: AbortSignal) {
         try {
           yield { type: "text" as const, delta: "working…" };
@@ -450,14 +454,17 @@ describe("App", () => {
     unmount();
   });
 
-  test("/clear closes the previous session BEFORE building the next one (decision D3)", async () => {
-    // Mutation: drop the `close?.()` in the /clear handler → nothing closed.
+  test("/clear closes nothing and builds no second session (decision D3 — one path)", async () => {
+    // docs/feat/remove-in-process.md: close-then-create existed only for a
+    // session with no `clear`. Mutation: restore that arm → `close 1` appears and
+    // a second `create` follows.
     const log: string[] = [];
     let n = 0;
     const createSession = () => {
       const id = ++n;
       log.push(`create ${id}`);
       return {
+        ...inertSession(),
         async *send() {
           // no model turn needed for this test
         },
@@ -474,7 +481,7 @@ describe("App", () => {
     await delay(30);
     stdin.write("\r");
     await delay(50);
-    expect(log).toEqual(["create 1", "close 1", "create 2"]);
+    expect(log).toEqual(["create 1"]);
     unmount();
   });
 
@@ -482,6 +489,7 @@ describe("App", () => {
     // A reconnect that had to resync: the snapshot holds "ab", the replay then
     // carries the rest. Mutation: ignore `history_reset` in the App loop → "abcc".
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         yield { type: "text" as const, delta: "abc" };
         await delay(5);
@@ -515,6 +523,7 @@ describe("App", () => {
   test("/compact calls the session's compact and reports the result", async () => {
     let compacted = 0;
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         // no model turn needed for this test
       },
@@ -540,6 +549,7 @@ describe("App", () => {
     // Mutation: remove the App's `/settings` case → nothing is shown, nothing synced.
     let synced = 0;
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         // no model turn needed for this test
       },
@@ -583,6 +593,7 @@ describe("App", () => {
     let synced = 0;
     let finish: (lines: readonly { text: string }[]) => void = () => {};
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         // no model turn needed for this test
       },
@@ -625,6 +636,7 @@ describe("App", () => {
   test("/settings is ONE entry: title, block with its indentation, the count as its last line", async () => {
     // Drawn from the real view-model. Mutation: trim the rows → the nesting is gone.
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         // no model turn needed for this test
       },
@@ -673,6 +685,7 @@ describe("App", () => {
       // Round 3: the outcome is a second entry below, the pending line stays.
       let finish: (lines: readonly { text: string }[]) => void = () => {};
       const createSession = () => ({
+        ...inertSession(),
         async *send() {
           // no model turn needed for this test
         },
@@ -711,6 +724,7 @@ describe("App", () => {
     const finish: ((lines: readonly { text: string }[]) => void)[] = [];
     let raise: (activity: SessionActivity) => void = () => {};
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         yield { type: "turn_end" as const, reason: "end_turn" as const };
       },
@@ -750,9 +764,20 @@ describe("App", () => {
   });
 
   test("F4 an apply's outcome stays with the session it was issued on", async () => {
-    // Mutation: drop the session check → the old session's outcome lands on the new one.
+    // Mutation: drop the session check → the old session's outcome lands on the
+    // new one. The swap is a REAL one (docs/feat/remove-in-process.md: `/clear`
+    // resets in place and swaps nothing), so it comes from a session closed
+    // elsewhere — the activity `useSessionLink` swaps on.
     const finish: ((lines: readonly { text: string }[]) => void)[] = [];
-    const createSession = () => ({
+    const listener: { current: ((a: SessionActivity) => void) | null } = { current: null };
+    const session = () => ({
+      ...inertSession(),
+      watch(l: (a: SessionActivity) => void) {
+        listener.current = l;
+        return () => {
+          listener.current = null;
+        };
+      },
       async *send() {
         // no model turn needed for this test
       },
@@ -763,18 +788,22 @@ describe("App", () => {
         });
       },
     });
+    const order = [session(), session()];
     const { stdin, lastFrame, unmount } = render(
-      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+      <App
+        createSession={() => order.shift() ?? (order[0] as ReturnType<typeof session>)}
+        model="qwen3"
+        cwd="/tmp/work"
+      />,
     );
     await delay(30);
     stdin.write("/settings sync");
     await delay(30);
     stdin.write("\r");
     await delay(60);
-    stdin.write("/clear");
-    await delay(30);
-    stdin.write("\r");
-    await delay(60);
+    // The session ends on another device: the view swaps to the fresh one.
+    listener.current?.({ kind: "closed", reason: "deleted" } as SessionActivity);
+    await delay(120);
     finish[0]?.([{ text: "OUTCOME OF THE OLD SESSION" }]);
     await delay(60);
     expect(stripAnsi(lastFrame() ?? "")).not.toContain("OUTCOME OF THE OLD SESSION");
@@ -792,6 +821,7 @@ describe("App", () => {
 
   test("/settings on a session that carries nothing: not available, nothing called", async () => {
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         // no model turn needed for this test
       },
@@ -1082,6 +1112,9 @@ describe("App", () => {
     stdin.write("\r");
     await delay(150);
 
+    // Past the arming window (docs/fix/quit-enter-ask.md): `y` approves an ask
+    // that just appeared only once the dialog has been up for `ARM_MS`.
+    await delay(ARM_MS);
     stdin.write("y"); // allow once
     await delay(150);
 
@@ -1958,6 +1991,7 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
               createSession: () => {
                 const session = new Session(agent);
                 return {
+                  ...inertSession(),
                   send: (prompt: string, signal?: AbortSignal) => session.send(prompt, signal),
                   skills: () => skillsList().then((list) => ({ slash: [], ...list })),
                 };
@@ -2295,6 +2329,7 @@ describe("idle warm of the other Ctrl+O view", () => {
         content: `message ${i}`,
       }));
       const createSession = () => ({
+        ...inertSession(),
         async *send() {
           yield { type: "history_reset" as const, messages };
           yield { type: "turn_end" as const, reason: "end_turn" as const };
@@ -2558,6 +2593,7 @@ describe("idle warm of the other Ctrl+O view", () => {
       });
       const messages = manyMessages();
       const createSession = () => ({
+        ...inertSession(),
         async *send() {
           yield { type: "history_reset" as const, messages };
           yield { type: "turn_end" as const, reason: "end_turn" as const };
@@ -2598,6 +2634,7 @@ describe("idle warm of the other Ctrl+O view", () => {
       );
       const messages = manyMessages();
       const createSession = () => ({
+        ...inertSession(),
         async *send() {
           yield { type: "history_reset" as const, messages };
           yield { type: "turn_end" as const, reason: "end_turn" as const };
@@ -2914,6 +2951,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
   /** A session whose single turn runs one `shell` call for `holdMs`. */
   function slowToolSession(holdMs: number) {
     return () => ({
+      ...inertSession(),
       async *send() {
         yield {
           type: "tool_start" as const,
@@ -3066,6 +3104,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
     // per-row clock (each row counting from its own start) the two disagree —
     // mutation D, verified red.
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         yield {
           type: "tool_start" as const,
@@ -3137,6 +3176,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
     // Mutation (red, verified): drop `turnRunning &&` from `blinkState` → the
     // row keeps alternating and `getTimerCount()` stays > 0.
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         yield {
           type: "tool_start" as const,
@@ -3201,6 +3241,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
     // count). Mutation (red, verified): drop the call-count key from
     // `blinkPhase` → the second call is `off` in its first frames.
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         yield {
           type: "tool_start" as const,
@@ -3289,6 +3330,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
     // emits the SAME glyph, concealed (`fix/tui-blink-off-width`), so no count of
     // spaces — and no terminal's opinion about U+23FA's width — is involved.
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         yield { type: "text" as const, delta: "Running the loop now." };
         yield {
@@ -3389,7 +3431,11 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
     try {
       const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
       const idle = render(
-        <App model="m" cwd="/tmp/work" createSession={() => ({ async *send() {} })} />,
+        <App
+          model="m"
+          cwd="/tmp/work"
+          createSession={() => ({ ...inertSession(), async *send() {} })}
+        />,
       );
       await settle();
       expect(clock.getTimerCount()).toBe(0); // nothing running: no timer at all
@@ -3461,6 +3507,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
     "cd . && go test ./internal/ui -run TestZZWebGapDeadBranches -count=1 -v -timeout 120s 2>&1 | tail -50";
   /** A session that runs ONE long-command `shell` call (ok, 1.7 s) and settles. */
   const longCallSession = () => ({
+    ...inertSession(),
     async *send() {
       yield {
         type: "tool_start" as const,
@@ -3480,6 +3527,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
     },
   });
   const twoCallSession = () => ({
+    ...inertSession(),
     async *send() {
       // A long reply first, so at 40 columns the transcript is taller than the
       // viewport and a scroll-up leaves BOTH calls visible at a known row.
@@ -3518,6 +3566,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
    * rows, which puts several headers BELOW the window's end.
    */
   const manyCallsSession = () => ({
+    ...inertSession(),
     async *send() {
       yield {
         type: "text" as const,
@@ -3898,6 +3947,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
 
   test("an expanded RUNNING call still blinks, and no row moves", async () => {
     const createSession = () => ({
+      ...inertSession(),
       async *send() {
         yield {
           type: "tool_start" as const,

@@ -1,0 +1,3279 @@
+# feat/mobile-relay — relay service (`relay.tentacle.so`, configurable), daemon dial-out, deploy (mobile task 15)
+
+> **Status:** implementation APPROVED by the owner (2026-11-14)
+> **Branch:** `feat/mobile-relay` (this doc). Slices R0–R7 run **in order on this branch**, one commit per slice on the owner's OK, each gated by its narrow tests (AGENTS §4); the full gate before Review.
+> **Size:** L as a whole → split into S/M slices (table below) · **Blast:** load-bearing (device authentication path, a new network dial-out from every `serve`, a new persisted file) · **Suited:** per AGENTS §10 — R3, R4, R5a are `load-bearing` (strong executor + mandatory fresh-context Review red-teaming "a pod is not trusted", "one session path", "single broker"); R0, R1, R2, R5b, R6, R7 are `contained`/`cross-module` S–M. The owner assigns executors.
+> **Changelog:** `changelog.d/mobile-relay.added.md` (R5a) — `- **Phones reach \`serve\` through a relay, end-to-end encrypted.** A \`serve\` with paired devices dials out to \`relay.tentacle.so\` (or \`relay.url\` / \`serve --relay\`; \`--no-relay\` to opt out), so a phone reaches it from anywhere with no open port; the relay sees only ciphertext. The relay is a small self-hostable service in \`apps/relay\`.` · `changelog.d/mobile-relay.changed.md` (R6) · `changelog.d/mobile-relay-deploy.added.md` (R7 — a NEW slug: reusing `mobile-relay.added` is the one filename collision the discipline refuses)
+
+## Context
+
+*— claude-opus-5-5, 2026-11-14*
+
+Mobile task 15 of `docs/eval/mobile-app.md` (decision 21, Phase 5). Today a
+phone reaches a `serve` only over a direct path (LAN, Tailscale, an own domain
+via `serve --address`). Away from those — cellular, a hotel Wi-Fi — the phone
+cannot reach the computer at all. The relay is the default, zero-configuration
+path that fixes that.
+
+Binding decisions (linked, not copied):
+- **Decision 2** — four paths, one security model; the relay is "a small
+  open-source Bun service in the repo, self-hostable"; "the daemon dials OUT to
+  the relay and registers; the relay assigns `wss://<relay>/d/<daemon-id>` and
+  splices phone ↔ daemon bytes"; "the link addresses, it never authorises";
+  E2E (Noise) on every path; the app tries direct first, relay as fallback; the
+  same service later carries APNs push (task 16).
+- **Decision 9** — hosted on the site's box (142.132.169.22) behind Caddy as
+  `relay.tentacle.so`; the default URL is **ONE value**, overridable in the
+  daemon's config; **the app hard-codes no domain** (it learns addresses from
+  pairing and the daemon's announcement); dev and tests run the relay locally.
+- **Decision 18** — same repo, same licence; no secret in the repo.
+- **Decision 20** — logic in pure modules under `bun test`; Maestro E2E against
+  a local relay is mandatory before merge.
+- Task 8 (`docs/feat/e2e-channel.md`): Noise IK, `rs` pinned, confirm flight
+  (a replayed message 1 builds nothing), strict counters, frames `t1:` + base64,
+  inbound text > `3 + 87 380` chars refused.
+- Task 9 (`docs/feat/device-pairing.md`): `/e2e` device route, per-device key,
+  revoke closes live sockets, `pair` QR addresses "a relay URL fits later,
+  task 15" (`:357`), owner Q5 "laptop `connect` over device keys — revisit with
+  the relay".
+- Task 10 (`docs/feat/sibling-discovery.md`): the daemon announces its
+  addresses on every connect; F7 names the relay as the answer to "every
+  address changed while the phone was away".
+
+**Trust.** The relay is **not trusted**, in the spirit of AGENTS §7 "a pod is
+not trusted": it may read, drop, delay, reorder, replay, inject or forge
+anything it carries, and may lie on its control channel. It must never be able
+to read or drive a session, impersonate a computer to a phone, or make the
+daemon record false state. What it can always do — refuse service, observe
+metadata (which daemon id, phone IP, sizes, timing) — is accepted by decision 2,
+and mitigated by the direct paths staying available.
+
+**Deploy is NOT part of execution.** R7 writes the runbook and deploy files in
+the repo; running them on the owner's server is a separate, owner-approved step
+(**D**, below), never done by an executor.
+
+**Repro (2026-11-14): the capability is missing; the app already accepts a relay address.**
+From `.tentacle/tmp/mobile-relay/` (`probe.ts`, run from the worktree):
+
+```ts
+import { isPairingAddress } from "../../worktrees/mobile-relay/packages/protocol/src/index.ts";
+for (const a of [
+  "wss://relay.tentacle.so/d/AbCdEfGhIjKlMnOpQrStUv/e2e",
+  "ws://127.0.0.1:4100/d/x/e2e",
+  "wss://relay.tentacle.so/d/x",
+]) {
+  console.log(a, isPairingAddress(a));
+}
+```
+
+```
+$ bun .tentacle/tmp/mobile-relay/probe.ts
+wss://relay.tentacle.so/d/AbCdEfGhIjKlMnOpQrStUv/e2e true
+ws://127.0.0.1:4100/d/x/e2e true
+wss://relay.tentacle.so/d/x false
+$ rg -il relay packages/protocol/src packages/daemon/src/ws-server.ts packages/transport/src apps/mobile/src
+packages/protocol/src/pairing.ts      # only the comment at :15 ("a later task can add one (a relay address")
+$ ls apps
+mobile
+```
+
+No relay service, no dial-out, no relay schema exist. An address of the shape
+`<relay>/d/<id>/e2e` already passes the QR/announcement validator, so an
+installed app (11b+) can dial a relay address with **no app update**.
+
+## Implementation
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Load-bearing assumption
+
+**A phone stream carried by the relay can enter the daemon's EXISTING device
+path unchanged — the Noise responder and `Connection` need only a closable
+`DuplexChannel` — and the app dials a relay address exactly like any other.**
+If this holds, the relay is "one more transport" (AGENTS §7 one session path):
+no second auth path, no second session path, no protocol change.
+
+Proof, daemon side:
+- `DuplexChannel` is four methods and nothing else (`packages/transport/src/channel.ts:9-18`).
+- `openDevice(ws, channel, route)` (`packages/daemon/src/ws-server.ts:408`) uses
+  the Bun socket `ws` **only as an identity key / slot**: `pending.set(ws, …)`
+  (`:437`), `connections.set(ws, connection)` (`:486`), `ws.data.release = …`
+  (`:526`). Everything that authenticates or builds state takes the channel:
+  `noiseResponder(channel, …)` (`:444`), `new Connection(secure, …)` (`:482`),
+  `authority.register(verdict.id, handle)` with a handle that closes the
+  channel (`:497`), and the F22 race check `channel.isClosed()` (`:520`).
+  So extracting the body into `acceptDevice(channel, …)` that returns its
+  teardown is a refactor, not a redesign — and the existing ws-server tests
+  are its proof (they must pass unchanged).
+- The rate limiter is keyed by a string (`limiter.begin(address)`, `:340`), so a
+  relay stream can be charged under its own key.
+
+Proof, app side:
+- `isPairingAddress` accepts any `ws(s)` URL with a host whose path ends in
+  `/e2e` (`packages/protocol/src/pairing.ts:122-131`) — the Repro above shows
+  `wss://relay.tentacle.so/d/<id>/e2e` passes, so it rides the QR (`:228`) and
+  the announcement (`packages/protocol/src/daemon.ts:92`).
+- `openComputer` dials `computer.addresses` in order through `firstAnswering`
+  then the Noise initiator pinned to the stored computer key
+  (`apps/mobile/src/connection.ts:277`, `:253-266`). A relay URL is just
+  another entry; `rs` pinning means a relay that routes elsewhere fails the
+  handshake.
+
+The ONE piece of the assumption that is NOT yet proved by execution — that the
+splice preserves frames 1:1 and closes both ends together under Bun — is R0's
+first probe, blocking.
+
+### Preconditions
+
+- **One daemon per project store, under a lock**: `acquireStoreLock(dir)`
+  (`packages/cli/src/serve.ts:202`) before `listen` (`:235`), `dir =
+  daemonStoreDir(config)` = `<configDir>/daemon/<projectKey(cwd)>` (`:149`).
+  So a per-project file in that dir has one writer — the relay secret lives
+  there.
+- **Only a `serve` on the user's host has a device route**: `startWsServer`'s
+  `devices` is absent for a pod daemon and the in-process worker
+  (`ws-server.ts:54-68`); discovery and the daemon record are created only when
+  `devices` is present (`serve.ts:470`, `:495`). The relay link is wired at the
+  same point, so a pod **never** dials a relay (AGENTS §7: pod daemons store
+  nothing durable, and a pod-held relay identity would be pod-supplied).
+- **Revoke closes a device's live sockets** via the handle registered at
+  `ws-server.ts:497`; the authority polls the store every second
+  (`packages/daemon/src/device-authority.ts:41`, `:142`). A relay stream gets the
+  same handle → same revoke.
+- **The Noise channel bounds inbound frames** (inbound text > `3 + 87 380`
+  chars refused before decoding, `docs/feat/e2e-channel.md` Design "Sizes"),
+  tolerates no injected/reordered/replayed frame (AEAD + strict counter; M12
+  killed), and the responder resolves only after the confirm (replay of
+  message 1 builds no `Connection`, device-pairing F4).
+- **Addresses: the record already carries extra URLs** (`DaemonRecord.addresses`,
+  `packages/daemon/src/device-store.ts:1054`), and discovery merges them AFTER
+  the bind-derived ones (`packages/cli/src/discovery.ts:66-73`), so a relay
+  address appended there is announced last = tried last.
+- **Gap found while verifying (fixed in R5b):** `pair`'s QR does **not** include
+  a record's `addresses` — `pairAddresses` uses only bind-derived URLs plus
+  `pair --address` (`packages/cli/src/pair-addresses.ts:153`; `pair.ts:166-185`),
+  although `serve.ts:111-117` says `serve --address` values go "into the
+  daemon's record (so `pair`'s QR and its siblings see them)". Discovery does,
+  the QR does not. With a loopback `serve` (the default `--host 127.0.0.1`,
+  `cli/src/main.ts:1096`) the QR would then have no address at all and `pair`
+  refuses — exactly the zero-configuration case the relay exists for.
+- **Gap found while verifying (fixed in R6):** the app dials addresses
+  **sequentially** with no per-address timeout (`apps/mobile/src/address-dial.ts:59-74`),
+  and redials sit under the client's 15 s deadline
+  (`packages/client/src/link-machine.ts:25`, cited by e2e-channel). On cellular a
+  LAN address (`ws://192.168.x.y:4000/e2e`) can hang on TCP connect; the relay,
+  last in the list, may then never be tried before the deadline. The relay
+  fallback is only real if the app stops waiting on dead direct addresses.
+- **Name collision:** `packages/cli/src/relay.ts` is already "the relay of a
+  detached run" (a laptop process, `docs/feat/detached-relay.md`). The mobile
+  relay is unrelated; code and docs say **"mobile relay"** / `apps/relay`, and
+  daemon-side symbols are `relayLink*`, never bare `relay*` in `cli/src`
+  (Owner Q2).
+- **Protocol:** no RPC method or update changes → `PROTOCOL_VERSION` untouched,
+  no `protocol.d/` note. The daemon ↔ relay control wire is a separate wire with
+  its own `RELAY_PROTOCOL_VERSION` (R1).
+
+### Design
+
+**Shape (Owner Q3): one control socket per daemon + one data socket per phone
+stream ("reverse accept").** No multiplexing inside a socket: each phone stream
+is its own WebSocket at both legs, so backpressure, close and size limits are
+per stream and come from Bun, and the daemon side of a stream is a plain
+WebSocket the existing `acceptDevice` takes as a `DuplexChannel`.
+
+```
+phone ──wss /d/<id>/e2e──► relay ◄──wss /v1/daemon (control)── daemon
+                             │   ──{t:"open",stream,ip}──────►
+                             │◄──wss /v1/accept {t:"accept",stream}── daemon
+                             └── splice text frames 1:1 ──────► acceptDevice(channel) → Noise → Connection
+```
+
+**1. Relay identity: self-certifying id (Owner Q4).** Each daemon holds a
+32-byte random `secret` in `<daemonStoreDir>/relay.json`
+(`{ "v": 1, "secret": "<b64url>" }`, mode 0600, created with O_EXCL under the
+store lock). `id = b64url(SHA-256("tentacle-relay-id/1" ‖ secret))[0..22]`
+(22 chars, 132 bits). The relay registers an id only from a socket that
+presents a secret hashing to it, so:
+- the relay is **stateless** (no account, no database; a restart loses nothing);
+- nobody can squat or hijack an id without the secret (the id itself is public:
+  it is in QRs, logs, announcements);
+- the address is **computed locally** — `relayAddress(url, id) =
+  <url>/d/<id>/e2e` — so `pair` and the record know it before any connection
+  (drift from decision 2's "the relay assigns": same URL shape, but the daemon
+  derives it and the relay only confirms it in `ready`).
+- The secret is an address credential, **not** an authority: it grants
+  "receive phone streams for this id", and every stream still needs the Noise
+  handshake against the computer key. A leaked secret = an attacker can steal
+  the relay address (DoS), never a session.
+- One file per project → stable across restarts; a different `cwd` (another
+  project's daemon) gets its own id (decision 2: "one address per daemon").
+
+**2. Control wire (`@tentacle/protocol` `relay.ts`, zod, strip schemas).**
+Text JSON frames, `t` discriminator; every frame validated on both ends.
+- daemon → relay on `/v1/daemon`: first frame `{t:"hello", v:1, secret}` (in the
+  frame, never in the URL: URLs reach access logs). Relay answers
+  `{t:"ready", v:1, id}` or `{t:"error", code:"version"|"invalid"|"busy",
+  supported:[1]}` then closes. Those three are the codes THIS build knows
+  (`RELAY_ERROR_CODES`); a `code` is a bounded string, not an enum, so a newer
+  relay's new code is still a clean refusal rather than a "malformed frame"
+  (Review R1 finding 1), and only `version` earns the 1 h backoff. The daemon
+  checks `ready.id === relayIdOf(secret)`
+  and drops the link on a mismatch (a lying relay).
+- **Newest wins:** a second `hello` for a registered id replaces the old socket,
+  which gets `{t:"replaced"}` and is closed (a restarted daemon must not wait
+  for its predecessor's dead socket to time out).
+- relay → daemon `{t:"open", stream, ip}`: `stream` = 128-bit random,
+  single-use, expires 10 s; `ip` = the phone's address as the relay saw it
+  (untrusted; used only as a rate-limit key).
+- daemon → relay on `/v1/accept`: first frame `{t:"accept", v:1, stream}`;
+  after that the socket is a raw splice leg. Unknown/expired stream → close.
+- Liveness both ways: the relay server pings (Bun `idleTimeout` + pings, as
+  `socketOptions` does for `serve`, `ws-server.ts:112`); the daemon also sends
+  `{t:"ping"}` every 25 s on control and expects `{t:"pong"}` within 10 s, else
+  reconnects (a Bun client may not notice a dead TCP path; the probe in R0
+  decides if this is needed, and the slice keeps it only if it is).
+
+**3. The relay service (`apps/relay`, Owner Q2).** A Bun service, no
+persistence, no secret, config by flags/env (`--host`, `--port`, limits).
+- Routes: `/v1/daemon`, `/v1/accept`, `/d/<id>/e2e` (phones: any `Origin`
+  accepted — the relay authorises nothing), `/healthz` (200 + version, no
+  counts), anything else 404.
+- Phone dial for an id not registered: held up to **5 s** waiting for a
+  registration (covers a daemon reconnect blip and the pairing race below),
+  then closed `4404`. Phone frames received before `accept` are buffered up to
+  64 KiB (a Noise message 1 is ~100 bytes), more → close.
+- Splice: frames forwarded 1:1, text only; a frame > 96 KiB (the Noise cap is
+  ~87.4 Ki chars) closes both legs; either leg closing closes the other;
+  `closeOnBackpressureLimit` at 16 MiB per leg (the `serve` policy, 
+  `ws-server.ts:43-52`: closed, the phone detaches and resyncs).
+- Abuse limits (defaults, flags override): per phone IP 30 dials/min and 16
+  concurrent; per id 64 concurrent streams; 10 000 registered ids; per IP 10
+  `hello`/min. Pure decisions in `relay-core.ts`, unit-tested.
+- Logging: one line per event with id prefix (8 chars), never secrets, never
+  payload, never full stream tokens.
+- Built for deploy with `bun build --compile` (as `scripts/build.ts` does for the
+  CLI); R7.
+
+**4. Daemon dial-out (`packages/daemon/src/relay-link.ts` + pure
+`relay-link-policy.ts`).** Started in `listen` beside discovery
+(`serve.ts:495`), only when `devices` is present and the relay is enabled.
+- **When to dial (Owner Q1):** while the device store has ≥ 1 device **or** a
+  live pairing window (read through the existing `DeviceAuthority` poll, a new
+  read-only `wantsReachability()`); otherwise the link is idle and closed. A
+  user who never pairs never contacts the relay.
+- Backoff: 1 s → 60 s cap, full jitter; `error:"version"` → 1 h and one notice;
+  `replaced` → 5 min and a notice ("another daemon took over this relay id —
+  copied config dir?"). Pure policy, unit-tested with an injected clock.
+- On `open`: `limiter.begin("relay:" + ip)` (the existing `HandshakeLimiter`,
+  shared with the direct route so its `maxConcurrent` 32 bounds both); dial
+  `/v1/accept`, wrap the Bun WebSocket in a closable `DuplexChannel`, call
+  `acceptDevice(channel, …)`. The Noise handshake, verdict, `Connection`,
+  revoke handle, "last seen", pairing window watcher are the direct route's,
+  byte for byte.
+- Audit (`options.onAudit`): `relay-ready <id8>`, `relay-down <reason>`,
+  `relay-open`, `relay-accept-failed`, `relay-replaced`; the rest is the device
+  path's own lines.
+- Stop: `listen`'s `stop` closes control + every accept socket before the
+  record is removed.
+
+**5. Config, CLI, record, QR.**
+- ONE default: `DEFAULT_RELAY_URL = "wss://relay.tentacle.so"` in
+  `@tentacle/protocol` `relay.ts` — the only place the domain appears in code
+  (decision 9). Config keys `relay.enabled` (default `true`) and `relay.url`
+  (default that constant), documented in `key-docs.ts`; flags `serve --relay
+  <url>` / `serve --no-relay`. `relay.url` must be `wss://`, or `ws://` to a
+  loopback host only (dev/tests: the secret must never cross a network in
+  clear); anything else refuses to start with the reason.
+- The relay address is appended **last** to the record's `addresses`
+  (`serve.ts:478`) when the relay is enabled (whether or not it is connected
+  yet: it is deterministic). Discovery then announces it last.
+- R5b: `pair` includes each live record's `addresses` after its bind-derived
+  ones (fixing the gap), so a loopback `serve` pairs with a QR holding only the
+  relay address; order stays "direct first, relay last"; the 8-address cap stays
+  a refusal, never a truncation.
+- **Pairing race:** `pair` opens a window → within one authority poll (≤ 1 s)
+  the daemon starts dialling → the relay holds the phone's dial up to 5 s for
+  the registration. Enough on a normal network; on a slow one the phone's
+  pairing attempt fails and the user taps Retry (the code is single-use only
+  once claimed).
+- **Rotation (Owner Q5):** `tentacle devices reset` (new computer identity)
+  also deletes every `relay.json` under `<configDir>/daemon/*/`; running
+  daemons pick a new id on their next start (the reset already says
+  "restart serve"; R5b verifies the exact wording). Every phone must re-pair
+  after a reset anyway, so a new address costs nothing extra.
+
+**6. App (R6, `apps/mobile`).** No domain, no relay-specific code path.
+- `firstAnswering` becomes a **staggered race to socket-open** (Owner Q6,
+  "happy eyeballs", RFC 8305 style): start address *i*; if its socket has not
+  opened after `STAGGER_MS = 750`, also start *i+1*, and so on; the first socket
+  to OPEN proceeds to the Noise handshake; the others are closed before any
+  handshake (so a losing relay leg leaves no daemon state: its stream closes
+  pre-handshake and frees its limiter slot). A non-terminal handshake failure
+  on the winner continues with the rest; `unauthorized` still stops everything;
+  `lastGood` still picks the start. Pure, with an injected timer.
+- `link-diagnosis.ts:99` text names the relay ("…same network, Tailscale, or
+  the relay?").
+- Background/kill: unchanged — the foreground gate closes the socket on
+  background (`apps/mobile/src/foreground-gate.ts`), the relay closes the
+  daemon leg, the `Connection` closes, the session detaches (decision 4); on
+  resume the redial takes the race.
+
+### Slices
+
+| id | scope | files | Size | Blast | deps |
+|---|---|---|---|---|---|
+| **R0** | Step 0 probes (blocking, scratch only, results pasted into Execution): **(a)** Bun splice: two `Bun.serve` legs + a Bun WebSocket client per leg, frames 1:1 incl. an 87 KiB frame, close on one leg closes the other within 100 ms; **(b)** Bun WebSocket *client* receiving a 64 MiB frame from a hostile server — memory/behaviour (decides whether `relay-link` needs its own inbound guard); **(c)** dead control socket (server stops answering, TCP kept) — does the Bun client fire `close`, and when (decides the app-level ping) | `.tentacle/tmp/mobile-relay/*` only | S | contained | — |
+| **R1** | Relay wire + id: `RELAY_PROTOCOL_VERSION`, `DEFAULT_RELAY_URL`, control frame schemas, `relayAddress(url,id)`, `isRelayUrl` (wss, or ws loopback); `relayIdOf(secret)` on `@noble/hashes` in transport's crypto subpath | `packages/protocol/src/relay.ts` (new), `packages/protocol/src/index.ts`, `packages/transport/src/relay-id.ts` (new), `packages/transport/src/noise-channel.ts` (re-export) or a new `./relay-id` export in `packages/transport/package.json`, tests `packages/protocol/test/relay.test.ts`, `packages/transport/test/relay-id.test.ts` | S | contained | R0 |
+| **R2** | The relay service: pure `relay-core.ts` (registry, newest-wins, stream tokens + expiry, hold-for-registration, limits) + thin `server.ts` (Bun.serve, routes, splice) + `main.ts` (flags/env) | `apps/relay/{package.json,tsconfig.json}`, `apps/relay/src/{relay-core.ts,server.ts,main.ts}`, `apps/relay/test/{relay-core.test.ts,server.test.ts}`, root `package.json` (`typecheck` += `tsc -p apps/relay --noEmit`), AGENTS §6 package/app count (one line, rides this branch) | M | contained | R1 |
+| **R3** | Extract the device path: `acceptDevice(channel, deps) → { release }` from `openDevice`; ws-server calls it; **no behaviour change** (every existing ws-server/device test passes untouched) + one new test driving `acceptDevice` on a `createChannelPair` channel | `packages/daemon/src/device-accept.ts` (new), `packages/daemon/src/ws-server.ts`, `packages/daemon/src/index.ts`, `packages/daemon/test/device-accept.test.ts` | M | **load-bearing** | — (may run after R0) |
+| **R4** | Daemon dial-out: `relay-link-policy.ts` (pure: backoff, jitter, version/replaced holds, ping deadline) + `relay-link.ts` (control socket, hello/ready check, open → accept → `acceptDevice`, limiter key, audit, stop); `DeviceAuthority.wantsReachability()` | `packages/daemon/src/relay-link-policy.ts`, `packages/daemon/src/relay-link.ts`, `packages/daemon/src/device-authority.ts`, `packages/daemon/src/index.ts`, tests `packages/daemon/test/relay-link-policy.test.ts`, `packages/daemon/test/relay-link.test.ts` (against R2's real server on `127.0.0.1:0` + a fake hostile relay) | M | **load-bearing** | R1, R2, R3 |
+| **R5a** | `serve` wiring: config keys `relay.enabled`/`relay.url` + docs, flags `--relay`/`--no-relay`, URL validation, `relay.json` (create O_EXCL 0600 / read / unknown `v` → relay off + notice, file untouched), relay address appended last to the record, start/stop the link in `listen`; changelog fragment | `packages/config/src/{schema.ts,defaults.ts,key-docs.ts,resolve.ts}`, `packages/cli/src/serve.ts`, `packages/cli/src/relay-secret.ts` (new; name keeps clear of `cli/src/relay.ts`), `packages/cli/src/main.ts` (flags + usage), tests `packages/cli/test/relay-secret.test.ts`, `packages/cli/test/serve-relay.test.ts`, `changelog.d/mobile-relay.added.md` | M | **load-bearing** | R4 |
+| **R5b** | `pair` QR includes record `addresses` (direct first, relay last; cap = refusal); `devices reset` deletes `relay.json` files + its message | `packages/cli/src/pair.ts`, `packages/cli/src/pair-addresses.ts`, `packages/cli/src/devices-cmd.ts`, tests in `packages/cli/test/pair*.test.ts`, `packages/cli/test/devices-cmd.test.ts` | S | cross-module | R5a |
+| **R6** | App: staggered race in `address-dial.ts` (+ its caller), diagnosis text; Maestro flow "relay only" (loopback `serve` + local relay ⇒ QR carries only the relay address) | `apps/mobile/src/address-dial.ts`, `apps/mobile/src/connection.ts`, `apps/mobile/src/link-diagnosis.ts`, `apps/mobile/test/address-dial.test.ts`, `apps/mobile/e2e/flows/relay-only.yaml` (new), `apps/mobile/e2e/run.ts` (start the local relay) | M | contained | R2, R5b |
+| **R7** | Deploy artefacts + runbook, **not applied**: compile script, systemd unit, Caddy site block, runbook with rollback | `apps/relay/deploy/{relay.service,Caddyfile.relay,build.ts}`, `docs/ops/relay-deploy.md` (new) | S | contained | R2 |
+| **D** | **Owner-approved deploy** (not an executor slice): run R7's runbook on 142.132.169.22 | none in repo | — | production | R0–R7 merged + owner OK |
+
+R3 has no code dependency on R1/R2 and may run right after R0; the table order
+is the recommended serial order: R0 → R1 → R2 → R3 → R4 → R5a → R5b → R6 → R7.
+
+**R7 / D contents (planned, not done).** Build: `bun build --compile
+apps/relay/src/main.ts --outfile tentacle-relay` (linux-x64). Host: a `relay`
+system user, binary at `/opt/tentacle-relay/`, systemd unit listening on
+`127.0.0.1:4100` (`Restart=always`, `NoNewPrivileges`, `ProtectSystem=strict`,
+`MemoryMax=512M`). Caddy: `relay.tentacle.so { reverse_proxy 127.0.0.1:4100 {
+stream_close_delay 5m } }` — without `stream_close_delay` every Caddy reload
+cuts every relay socket. DNS: an `A` record `relay.tentacle.so →
+142.132.169.22` (a later move = a DNS change, decision 9). Smoke test:
+`curl https://relay.tentacle.so/healthz`, then a real `serve --relay
+wss://relay.tentacle.so` + phone over cellular. Rollback: stop the unit — daemons
+back off, direct paths unaffected. The owner performs or explicitly authorises
+each step; no executor touches the server, DNS or Caddy.
+
+### Failure modes
+
+| # | Case | Behaviour → how state converges |
+|---|---|---|
+| F1 | **Phone loses network** mid-session | Phone leg drops → relay closes the daemon leg → `Connection` closes → session detaches (decision 4); a running turn continues. On return the app redials (race, F14) and re-attaches with the existing resync. |
+| F2 | **Daemon loses network** | Control socket drops (or misses `pong`) → relay unregisters the id; established streams are independent sockets and die by their own pings. Daemon reconnects with backoff (1 s → 60 s, jitter); phones dialling meanwhile are held 5 s, then `4404` → the app tries other addresses / shows unreachable. |
+| F3 | **Relay down / restarted** | Stateless: on restart every daemon re-registers (jittered — no thundering herd). Phones fall back to direct paths; with none, the diagnosis says unreachable. No state to lose or reconcile. |
+| F4 | **Relay hostile: reads** | Sees only Noise ciphertext + metadata (id, IP, sizes, timing) — accepted (decision 2). |
+| F5 | **Relay hostile: injects / modifies / reorders / replays frames** | AEAD with strict counters → the channel closes loudly (e2e M12). A replayed message 1 reaches `authorize` but no confirm → no `Connection`, no "last seen" (device-pairing F4). The phone redials. |
+| F6 | **Relay hostile: routes the phone to another daemon / to itself** | `rs` pinned in the app → handshake fails → not `unauthorized` (an unauthenticated failure) → next address; never a session with the wrong peer. |
+| F7 | **Relay hostile: lies on control** (wrong `ready.id`, bogus `open`, `open` floods, huge frames) | Wrong id → link dropped + notice. Bogus stream → accept fails → slot freed. Floods → `HandshakeLimiter` per `relay:<ip>` + `maxConcurrent` 32 shared with the direct route (a direct phone can still be starved by a flood — DoS is within the relay's power anyway, F4). Huge frames → the memory bound is **OPEN**: R0(b) showed Bun materialises the frame before any handler runs, and a client constructor ignores `maxPayloadLength` (probed 1.4.3), so `isInboundFrameTooLarge` bounds the DECODE cost (JSON/zod, the channel copy) only, never the allocation. R4's fallback: accept it and back off after an oversize close, so a hostile relay cannot reconnect-loop us into the same allocation. |
+| F8 | **Id squatting / hijack** by a third party | Needs a secret whose hash is the id — 132-bit preimage. Without it a `hello` for that id is impossible to craft. |
+| F9 | **Relay secret leaked** (file read on the laptop) | Attacker can register the id (newest wins) → phones' relay dials reach the attacker → Noise fails (F6) → DoS of the relay path only; the real daemon gets `replaced`, notices, backs off 5 min. Recovery: `devices reset` (or delete `relay.json` + restart): new id, phones re-pair. |
+| F10 | **Key rotation — computer identity** (`devices reset`) | Noise `denied`/fails for every phone → app says re-pair (existing 11b path); relay ids rotate too (Q5). |
+| F11 | **Key rotation — device revoke** | The same handle closes the relay accept leg within the authority poll (≤ 1 s) → relay closes the phone leg. Next dial: `denied` → `unauthorized` → app stops retrying. |
+| F12 | **Replay at the relay layer** (a captured `accept` or `hello`) | TLS protects both on the wire; a stream token is single-use and expires in 10 s; a replayed `hello` from a hostile relay is something the relay could do anyway (F4). |
+| F13 | **Version skew** | Daemon ↔ relay: `hello.v`; unknown → `error:"version"` + `supported` → daemon notice once, retry in 1 h (no loop). Phone ↔ daemon: unchanged — Noise prologue `tentacle-e2e/1` + `initialize`'s clean `VersionMismatch` inside the channel. Old daemon + new app: no relay address, nothing changes. Old app (11b+) + relay address: dials it (Repro). The `/d/<id>/e2e` path is frozen across relay versions. Unknown `relay.json` `v` → relay off + notice, file untouched (AGENTS §7 on-disk rule). |
+| F14 | **App killed / backgrounded** | Background → gate closes the socket → detach; kill → the OS closes it (or the relay's ping does, ≤ ~2 min) → detach; a pending approval stays pending on the daemon (decision 4). Mid-handshake kill → daemon `pending` → `finish` frees the limiter slot (`ws-server.ts:437`). On resume the race dials direct first, relay after 750 ms. |
+| F15 | **Daemon restart** | Same `relay.json` → same id → same address; newest-wins replaces the dead process's stale socket at once. |
+| F16 | **Two daemons with one secret** (config dir copied to another machine) | They take turns via `replaced`; each backs off 5 min with a notice naming the cause. Converges to "one wins for 5 min" — a loud flap, never silent. |
+| F17 | **Pairing race** (window opened, daemon not yet registered) | Relay holds the phone 5 s; else the pairing attempt fails with "unreachable" and Retry works (the code is unclaimed). |
+| F18 | **Backpressure** (frozen phone, 4 MiB replay burst) | `closeOnBackpressureLimit` 16 MiB per leg (same policy as `serve`) → closed → detach → resync on re-attach. |
+| F19 | **Empty / invalid input** | Empty `relay.url` or non-loopback `ws://` → `serve` refuses with the reason; malformed control frame → schema rejects → close; empty phone frame → forwarded (Noise defines it). |
+| F20 | **Pod / worker** | No device route → no relay link, no `relay.json` (Preconditions); pinned by a test. |
+
+### §7 invariants touched
+
+- **One session path:** the relay adds a transport (accept leg as a
+  `DuplexChannel`) and nothing else; `acceptDevice` is the direct route's own
+  code (R3 proves no behaviour change).
+- **A pod / relay is not trusted:** every authenticating decision is on the
+  laptop (Noise + device registry); the relay's control messages are input to
+  validate, never authority.
+- **Single broker:** unaffected (the device path builds the same `Connection`).
+- **Don't serialize the RPC peer:** the link adds no lock around `Connection`.
+- **Persistence:** `relay.json` is a new laptop-side file in the trusted
+  `serve` store, versioned; never written by a pod.
+- **Never write raw to the terminal while Ink owns it:** `serve` has no Ink;
+  notices go through `options.onNotice`/`onError` as today.
+
+### Tests
+
+Red-first where a behaviour is new; each names its mutation (AGENTS §9).
+
+Unit (`bun test`, in `bun run check`):
+- **R1** `relayIdOf`: fixed vector (secret → id) pinned; domain separator
+  changed → vector fails (mutation). `isRelayUrl`: wss ok, `ws://127.0.0.1` ok,
+  `ws://relay.example` refused, http refused. Every control frame round-trips;
+  extra fields stripped; unknown `t` rejected. **Forward compat (Review R1
+  finding 1):** a `ready` with a feature name this build does not know parses,
+  and `knownRelayFeatures` drops it (mutation: enum restored → fails); an
+  `error` with an unknown `code` parses as a refusal (mutation: enum restored →
+  fails).
+- **R2** `relay-core` (pure, injected clock/random): register; newest wins
+  (old gets `replaced`); `hello` with a secret not matching → refused (mutation:
+  skip the hash check → test fails); stream token single-use and expires at
+  10 s; hold-for-registration releases on register and `4404`s at 5 s; each
+  limit at its boundary (N ok, N+1 refused). `server.test.ts` on
+  `127.0.0.1:0`: frames 1:1 both ways incl. an 87 KiB frame; a 97 KiB frame
+  closes both legs; one leg closing closes the other; pre-accept buffer cap;
+  `/healthz`; unknown route 404; logs contain no secret (grep the captured log
+  for the secret).
+- **R3** every existing `ws-server` / device / pairing test passes **unchanged**
+  (that is the refactor's proof); new: `acceptDevice` on a `createChannelPair`
+  channel admits a registered key, denies an unknown key, builds nothing on a
+  replayed message 1 (mutation: build `Connection` before the confirm → fails),
+  frees the limiter slot on close mid-handshake.
+- **R4** policy: backoff sequence/caps with injected clock + random; version →
+  1 h; replaced → 5 min; missed pong → reconnect. Link against R2's real server:
+  a phone (`noiseInitiator` + `RemoteClient`) reaches a session THROUGH the
+  relay and runs `session/list` (the end-to-end proof); revoke closes the relay
+  stream within one poll; `ready` with a wrong id → link dropped (mutation:
+  skip the check → fails); `wantsReachability() === false` → no socket opened.
+  Fake hostile relay: flips a byte in a spliced frame → channel closes, no
+  `Connection` survives; `open` flood → limiter refusals, daemon healthy.
+- **R5a** `relay.json`: created 0600 once, reused on restart (same id), unknown
+  `v` → relay off + notice + file bytes unchanged; `serve --no-relay` → no
+  dial and no relay address in the record; `--relay ws://example.com` refused;
+  the record's `addresses` ends with the relay address; a `serve` without
+  devices (pod-like options) never dials (F20).
+- **R5b** `pair` on a loopback record with a relay address → QR = [relay]
+  (red on today's code: refused); direct before relay; 9 addresses → refusal;
+  `devices reset` removes `relay.json` files.
+- **R6** `address-dial` with an injected timer: a hanging first address does not
+  block the second beyond 750 ms; losers are closed before any handshake;
+  `unauthorized` still stops; `lastGood` honoured (mutation: start all at once
+  → the "direct first" test fails).
+
+Needs a real server or a real device (not in `bun test`; recorded in Execution
+with dates):
+- **Maestro (simulator, `bun run e2e:mobile`, mandatory before merge, R6):** pair
+  and drive a session with a loopback `serve` + local relay on `ws://127.0.0.1`
+  — the QR carries only the relay address, so the relay is the only path; plus
+  "background → foreground re-attaches over the relay".
+- **Real server (after D, owner-approved):** `wss://relay.tentacle.so` through
+  Caddy with a public cert (ATS), phone `Origin` accepted, a Caddy reload does
+  not cut live streams (`stream_close_delay`), an idle stream survives 30 min
+  (NAT/proxy timeouts vs the 25 s ping).
+- **Real iPhone (TestFlight checklist, decision 20):** on cellular with LAN
+  addresses in the list — time-to-connect via the relay (target < 3 s; proves
+  the race on the real network stack); Wi-Fi → cellular hand-off mid-session
+  re-attaches; app killed with a pending approval, reopened hours later over
+  the relay, Approve works.
+
+### Owner questions
+
+1. **Relay on by default, but dial only while ≥ 1 device is paired or a pairing
+   window is open?** **Rec: yes** — decision 2's zero configuration, while a
+   user who never pairs never contacts tentacle.so.
+2. **The service lives in `apps/relay` (a deployable, like `apps/mobile`), and
+   is always called "mobile relay" in code/docs** to keep clear of the
+   detached-run relay (`cli/src/relay.ts`)? **Rec: yes.**
+3. **Wire shape: one control socket per daemon + one data socket per phone
+   stream (reverse accept), rather than multiplexing streams over one socket?**
+   **Rec: yes** — per-stream backpressure/close/limits for free, no framing
+   layer to get wrong; cost: one extra RTT per connect.
+4. **Relay id = hash of a per-daemon secret (self-certifying, stateless relay,
+   no accounts), address derived locally as `<relay>/d/<id>/e2e`?** **Rec:
+   yes** — no database to run, nobody can squat an id; drift from "the relay
+   assigns" in name only.
+5. **`tentacle devices reset` also rotates the relay ids?** **Rec: yes** — one
+   recovery verb for a leaked laptop, and phones must re-pair after a reset
+   anyway.
+6. **App dials with a staggered race (direct first, relay after 750 ms) instead
+   of strictly in sequence?** **Rec: yes** — without it the relay fallback is
+   not reached on cellular before the 15 s deadline (Preconditions gap).
+7. **Laptop `connect` over the relay (device-pairing Q5's "revisit with the
+   relay")?** **Rec: not in this task** — `connect` stays token/TLS; a later
+   task if asked.
+8. **Deploy (D): the owner runs R7's runbook (or explicitly authorises each
+   step) after R0–R7 merge, before the first TestFlight build?** **Rec: yes** —
+   no executor touches the server, DNS or Caddy.
+
+#### Owner decisions (2026-11-14)
+
+All eight questions: the recommendation (owner: "Tutte come raccomandato").
+**Amendment from task 16 (owner-approved, docs/feat/mobile-push.md Q6):** R1's
+control `ready` frame carries a `features` field from the start (so a later
+`push` frame never hits "unknown frame closes the control socket"), and R2/R7's
+"the relay holds no secret" becomes "no secret except the APNs `.p8`, given to
+the service via systemd credentials" (installed by the owner, task 16 D2).
+Execution order: R0+R1 → R2 → R3 → R4 → R5a+R5b → R6 → R7, one review and a
+merge per step. *— claude-opus-5-5 (orchestrator), 2026-11-14*
+
+## Execution
+
+### R0 + R1 (as built) — *— deepseek-v4 (deepseek-chat), 2026-11-14*
+
+**Load-bearing check: PASSED, before any edit.** Re-ran the Context Repro
+(`.tentacle/tmp/mobile-relay/probe.ts`) and the plan's cited seams:
+
+```
+$ bun .tentacle/tmp/mobile-relay/probe.ts
+wss://relay.tentacle.so/d/AbCdEfGhIjKlMnOpQrStUv/e2e true
+ws://127.0.0.1:4100/d/x/e2e true
+wss://relay.tentacle.so/d/x false
+$ rg -il relay packages/protocol/src packages/daemon/src/ws-server.ts packages/transport/src apps/mobile/src
+packages/protocol/src/pairing.ts        # only the :15 comment — unchanged
+$ ls apps
+mobile                                   # no apps/relay yet
+```
+
+`packages/transport/src/channel.ts:9-18` is still four methods only, and
+`openDevice` (`ws-server.ts:408`) still takes the channel for everything that
+authenticates — so "a relay stream enters the existing device path unchanged"
+holds, and the slice does not touch it. The one unproved piece (R0) is probed
+below.
+
+#### R0 — the three blocking probes (scratch only)
+
+Scripts: `.tentacle/tmp/mobile-relay/{r0a-splice.ts,r0b.ts,r0c.ts}`.
+
+**(a) Bun splice, frames 1:1, close cascades.** Two `/a` `/b` legs on one
+`Bun.serve`, a Bun WebSocket client on each, the server relaying `text` 1:1:
+
+```
+$ bun r0a-splice.ts
+received lengths: [ "5", "89088" ]
+87KiB intact: true
+frames 1:1: true
+b closed: true within ms: 0 | cascade latency ms: 0
+events: open /b | open /a | msg /a 5 | msg /a 89088 | close /a | close /b
+```
+
+Frames arrive whole and in order, an 89 088-char (87 KiB) frame included, and
+closing one leg closes the other in ~0 ms — far inside the 100 ms budget. **No
+drift**: step 3's splice needs no framing layer, as designed.
+
+**(b) A hostile server's 64 MiB frame to a Bun WebSocket CLIENT.**
+
+```
+$ bun r0b.ts
+received length: 67108864 expected: 67108864
+close/error: (none — socket still open)
+rss MiB before: 5 after: 135
+external MiB before: 0 after: 32
+```
+
+**The client caps NOTHING**: a 64 MiB frame is accepted and materialised as a JS
+string (+130 MiB RSS), and the socket stays open. So R4's accept leg and the
+daemon's control socket each need their own inbound guard. R1 therefore ships
+the guard's shared definition — `RELAY_CONTROL_LIMITS.maxInboundChars`
+(176 Ki chars = 2× the Noise cap, so a legitimate worst-case frame still passes)
+and the pure `isInboundFrameTooLarge(data)` — and R2/R4 call it before decoding.
+This is the plan's own "if Bun's client buffers unboundedly, R4 adds a cap", moved
+one slice earlier so the number and the predicate exist once, in the shared
+module, instead of being re-derived on both ends.
+
+**Correction after Review R1 finding 2 (what this guard is NOT).** The paragraph
+above, and the original comments, implied the guard stops R0(b)'s attack. It does
+not, and cannot: Bun has already built the string when a handler first sees it, so
+the 130 MiB is spent either way. What `isInboundFrameTooLarge` bounds is the cost
+of everything after the socket — the JSON/zod parse and the channel's copy — which
+is real but smaller. It is a **decode** guard, not a memory bound, and the
+comments, the test names, F7 and this section now say so. The memory gap is not
+fixed by any client option: probed on Bun 1.4.3
+(`.tentacle/tmp/mobile-relay/r0d-client-cap.ts`), a `WebSocket` client built as
+`new WebSocket(url, [], {maxPayloadLength: 1024})` still received a 4096-byte
+message — the constructor takes one argument and ignores the option
+(`maxPayloadLength` exists on the SERVER's `websocket` handler only,
+`bun-types` `bun.d.ts:2332`). It therefore stays an **open R4 item**: R4's fallback
+is to accept the allocation and back off after an oversize close, so a hostile
+relay cannot reconnect-loop the daemon into the same allocation repeatedly.
+
+**(c) A dead-but-open control socket — does the client notice?** A raw
+`Bun.listen` server completes the WS handshake with the right
+`Sec-WebSocket-Accept`, then never answers again while the TCP connection stays
+up:
+
+```
+$ bun r0c.ts
+client has .ping(): true
++10s state=open … +70s state=open
+VERDICT: client noticed a dead-but-open TCP path: false | state: open
+         | bytes the server received from the client: 233
+```
+
+**The client never notices** (70 s, `open` the whole time, nothing sent
+spontaneously: the 233 bytes are the handshake itself). **The app-level ping
+stays** — `{t:"ping"}`/`{t:"pong"}` on the control socket, the daemon
+reconnecting on a missed deadline, exactly as Design §2 kept provisionally. The
+decision is now evidence, not a guess.
+
+#### R1 — the relay wire + the relay id
+
+Red first (both files failed on the absent module, not on an assertion):
+
+```
+$ bun test packages/protocol/test/relay.test.ts packages/transport/test/relay-id.test.ts
+error: Cannot find module '../src/relay.ts' …
+SyntaxError: Export named 'RELAY_ID_LENGTH' not found in module '…/protocol/src/index.ts'
+ 0 pass  2 fail  2 errors
+```
+
+Green after (`packages/protocol/src/relay.ts`, `packages/transport/src/relay-id.ts`):
+
+```
+$ bun test packages/protocol/test/relay.test.ts packages/transport/test/relay-id.test.ts
+ 23 pass  0 fail
+```
+
+**What landed.** `packages/protocol/src/relay.ts` (new, exported from `index.ts`):
+`RELAY_PROTOCOL_VERSION = 1` (its own wire, not `PROTOCOL_VERSION`),
+`DEFAULT_RELAY_URL = "wss://relay.tentacle.so"` (the one place the domain appears
+in code, decision 9), the frame schemas (`RelayDaemonFrameSchema` hello/accept/
+ping, `RelayToDaemonFrameSchema` ready/error/open/replaced/pong,
+`RelayControlFrameSchema` both) as zod discriminated unions of STRIP objects,
+`RELAY_CONTROL_LIMITS` (one source for both ends' numbers),
+`RELAY_STREAM_HOLD_MS`/`RELAY_STREAM_EXPIRY_MS`/`RELAY_CLOSE_UNREGISTERED`,
+`relayAddress(url, id)`, `isRelayUrl`, `isRelayId`, `isRelaySecret`,
+`isInboundFrameTooLarge`. `packages/transport/src/relay-id.ts` (new, on its own
+`./relay-id` export in `packages/transport/package.json`): `relayIdOf(secret)` =
+`b64url(SHA-256("tentacle-relay-id/1" ‖ secret))[0..22]`, on `@noble/hashes`
+beside `pairingSas` and for the same reason (crypto only for a runtime that holds
+a secret — not on the `@tentacle/transport` root, which every RPC client loads).
+
+**`ready.features` is there from the start** (task 16's owner-approved
+amendment), defaulted to `[]`, with `push` the one name this build knows. The
+list is NOT a closed enum (Review R1 finding 1): the frame accepts any bounded
+name and `knownRelayFeatures(list)` filters it, because a closed enum would make
+a relay announcing a second feature fail the whole `ready` parse — the daemon
+then drops the link and retries forever, with no version error and no notice.
+`error.code` was freed for the same reason: it is a bounded string, name-checked
+with `isRelayErrorCode`; its known set (`RELAY_ERROR_CODES`) is a named constant.
+
+`packages/protocol/schema/protocol.json` regenerated (`bun run schema:export`,
++241 lines: 14 new `$defs`). `PROTOCOL_VERSION` untouched — no RPC method or
+update changed, and the relay wire is versioned by `RELAY_PROTOCOL_VERSION`
+(R1's Preconditions) — so no `protocol.d/` note. `x-protocol-version` in the
+schema is unchanged, confirming it.
+
+**Drift from the Implementation, and why.**
+
+1. **R1 gained `isInboundFrameTooLarge` + `RELAY_CONTROL_LIMITS.maxInboundChars`
+   and the extra constants above.** Not scope creep: R0(b) is a *new* measured
+   fact (a Bun client has no inbound cap) that the plan text assigns to R4. Since
+   R4 runs on this same branch and the plan itself says the guard's presence
+   depends on R0(b), R1 is where the shared number and predicated belong — one
+   definition, both ends (step 2's rule: "every frame validated on both ends").
+   R4 only calls it.
+2. **`relayIdOf` lives in `packages/transport`, not `packages/protocol`.** The
+   plan's file list (R1 row) says exactly this; the Tests section's phrasing
+   ("R1 `relayIdOf`") is just the slice, not a location. Kept as the file list
+   says.
+3. **`packages/protocol/test/json-schema.test.ts:646` union count 7 → 10.** The
+   export test counts every exported tagged union; three relay unions are
+   exported `*Schema` values, so the pin moved with a comment naming them. This is
+   the test that makes an unjustified schema addition visible, so it is meant to
+   be edited by a schema change — not a sign the union shape is wrong.
+4. **`isRelayUrl` refuses a query/fragment and userinfo.** The plan says
+   `wss://`, or `ws://` loopback only. A `?`/`#` would break `relayAddress`
+   (which appends path segments) and userinfo would put a credential in an access
+   log, so both are refused rather than built on. The test pins the address it
+   builds is one `isPairingAddress` accepts, which is the property that matters
+   ("an installed app dials it, no update").
+5. **`relayIdOf` THROWS on a wrong-size secret** (as `pairingSas` does on a
+   wrong-size key). Silently hashing a truncated secret would map two secrets to
+   one id — the aliasing a self-certifying id must not have.
+
+**Mutation checks (each reverted; all re-run green afterwards).**
+
+| # | Target the Tests section names | Mutation | Result |
+|---|---|---|---|
+| 1 | `relayIdOf` vector | `"tentacle-relay-id/1"` → `…/2` | RED: `matches an independently computed vector` fails |
+| 2 | id input size | the `secret.length !== RELAY_SECRET_BYTES` guard deleted | RED: `refuses a wrong-size secret instead of aliasing…` fails |
+| 3 | `isRelayUrl` loopback rule | `return url` (any host over `ws://`) | RED: `refuses ws to anything that is not loopback` fails |
+| 4 | `relayAddress` shape | append `?x` (not a pairing address any more) | RED: 3 `relayAddress` tests fail, incl. `the address it builds is one the app already accepts` |
+| 5 | `ready.features` default | `.default([])` removed | RED: `` `ready` carries `features` from the start `` fails |
+| 6 | strip schemas (AGENTS §7) | `pongFrame` made `.strict()` | RED: `an unknown FIELD is dropped` fails |
+| 7 | the decode guard's bound | `maxInboundChars` set to the 96 Ki splice cap | RED: `the decode guard is ABOVE the Noise cap…` fails |
+
+**Not verified by this slice.** Everything that needs R2–R5 to exist: an
+end-to-end phone session through a real relay, the relay's own limits, `serve`'s
+`relay.json`, the app's race. R0(a) proved the splice *mechanism* only on a
+loopback `Bun.serve` with no relay in between; the R2 `server.test.ts` (frames
+1:1 through the real service, 87 KiB and 97 KiB) is where it becomes a claim
+about the relay. Nothing outside `bun test` was run — no relay exists to dial.
+
+**Gate (R0+R1): green** — `bunx tsc --noEmit` clean; `bun run lint` clean
+(0 errors, 0 warnings, 1 296 files); `bun test` 9 343 pass / 3 skip / 0 fail
+across 9 346 tests in 672 files (the three skips are AGENTS §6's opt-ins). Run
+twice, same result. Changelog: `changelog.d/mobile-relay.added.md` (one bullet).
+`TODO.md` untouched.
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+Fixing Review R1's two findings (1 HIGH, 1 MEDIUM). Scope: `packages/protocol/src/relay.ts`,
+`packages/protocol/test/relay.test.ts`, the regenerated
+`packages/protocol/schema/protocol.json`, this doc, and one stale comment in
+`packages/transport/src/relay-id.ts`.
+
+**Evidence first (both findings reproduced on the unfixed code).** The reviewer
+gave a probe for finding 1; I ran it as the first step, before any edit
+(`.tentacle/tmp/mobile-relay/fix1-evidence.ts`):
+
+```
+$ bun .tentacle/tmp/mobile-relay/fix1-evidence.ts
+F1a ready with an unknown feature parses: false
+F1b error with an unknown code parses: false
+F2 guard type is string|Uint8Array (input already materialised): string | refused: true
+```
+
+Both halves of finding 1 confirmed: a single unknown feature name, or a single
+unknown error code, fails the WHOLE frame parse.
+
+#### Finding 1 (HIGH) — a closed enum on `ready.features` / `error.code`
+
+**Fix (as built).** Both fields became bounded free strings and the known-name
+check moved into pure typed predicates:
+
+- `featuresField` = `z.array(z.string().min(1).max(64)).max(16).default([])`
+  (`relay.ts:175`), plus `isRelayFeature` and `knownRelayFeatures` (`relay.ts:137-164`)
+  — the filter a reader of `ready` calls, which drops unknown names and
+  duplicates.
+- `error.code` = `z.string().min(1).max(32)` (`relay.ts:230`), with the known set
+  kept as the named `RELAY_ERROR_CODES` (+ `RelayErrorCode` type) and
+  `isRelayErrorCode` (`relay.ts:206-226`). Only `version` earns the 1 h notice
+  (F13), so an unknown code is an ordinary refusal — exactly what the reviewer
+  asked for ("a new code becomes 'malformed' instead of a refusal" is fixed).
+
+**Deliberate deviation from the reviewer's suggested shape:** the reviewer wrote
+"filter to the known names after the parse", which reads like a `.transform()`.
+I did **not** use `.transform()`: the JSON-schema exporter rejects `ZodEffects`
+by construction (`json-schema.ts:760` pins that, `SUPPORTED_KINDS` has no
+`ZodEffects`, `attachment.ts:68` states the rule), so a `.transform()` would have
+broken `bun run schema:export` and the drift gate — i.e. the wire contract would
+stop being exportable for a codegen consumer. The filter is therefore an exported
+pure function (`knownRelayFeatures`) that a consumer calls, which is also the
+AGENTS §7 shape: the schema states what is on the wire, the decision is in a
+tested module. The observable behaviour the reviewer required (unknown name
+parses; the unknown name is dropped by the reader) is what the new test asserts.
+
+**Red before green.** Both new tests were written first and failed on the
+property assertion, not on an import:
+
+```
+$ bun test packages/protocol/test/relay.test.ts    # before the fix
+(fail) control frames > `ready.features` accepts a name this build does not know…
+(fail) control frames > `error.code` accepts a code this build does not know…
+ 22 pass  2 fail
+$ bun test packages/protocol/test/relay.test.ts    # after the fix
+ 24 pass  0 fail
+```
+
+The stale `every frame validates its own fields` case that asserted
+`code:"nonsense"` is MALFORMED was corrected in place (it was asserting exactly
+the broken behaviour): it now asserts a missing `supported` and a `supported`
+value of `0` are still refused, and the unknown-name case moved to its own test.
+
+**Mutation checks (each reverted; suite re-run green afterwards).**
+
+| # | Target | Mutation | Result |
+|---|---|---|---|
+| M1 | `ready.features` forward compat | `z.array(z.string()…).max(16)` → `z.array(z.enum(RELAY_FEATURES))` | RED: `` `ready.features` accepts a name this build does not know, and the known filter DROPS it `` fails |
+| M2 | `error.code` forward compat | `z.string().min(1).max(32)` → `z.enum(["version","invalid","busy"])` | RED: `` `error.code` accepts a code this build does not know `` fails |
+| M3 | the filter's behaviour | `knownRelayFeatures` body → `return features as RelayFeature[]` | RED: same `ready.features` test fails (the unknown name survives the filter) |
+| M4 | the known-code check | `isRelayErrorCode` body → `return value.length > 0` | RED: same `error.code` test fails (`"overloaded"` reported known) |
+
+**`packages/protocol/schema/protocol.json` regenerated** (`bun run schema:export`)
+— the drift gate failed first, as it should: `protocol.json is stale`. Diff is
+exactly the two fields (`enum` → `minLength`/`maxLength` on `RelayControlFrameError.code`
+and `RelayControlFrameReady.features.items`), 4 lines.
+
+#### Finding 2 (MEDIUM) — the guard was described as stopping R0(b)'s attack
+
+**Fix (as built).** A documentation-and-naming fix, as the reviewer asked, not a
+behaviour change: the predicate is correct, its *claim* was not.
+
+- `RELAY_CONTROL_LIMITS`'s doc comment (`relay.ts:78-95`) now says DECODE guard,
+  states that the string/`Uint8Array` exists before any handler runs, and that a
+  check here cannot undo the allocation.
+- `isInboundFrameTooLarge`'s doc comment (`relay.ts:358-363`) drops "too large to
+  even decode … before handing a frame to a channel" for the same reason.
+- Test names: `(R0(b)'s guard)` → `(the decode cost guard)`; `the inbound guard
+  is ABOVE…` → `the decode guard is ABOVE…`; both bodies' comments now name what
+  is bounded (JSON/zod + the channel copy).
+- Doc: F7 rewritten to record the memory bound as **OPEN**, Execution R0(b) got a
+  "Correction after Review R1 finding 2" paragraph, and the earlier mutation-table
+  row 7 + Tests row for the guard were re-worded to "decode guard".
+
+**The reviewer's open question answered with a measurement.** R4 may adopt "a
+client-side max-payload option" or "accept it and back off after an oversize
+close". I probed the first (`.tentacle/tmp/mobile-relay/r0d-client-cap.ts`: a
+`Bun.serve` that sends 4096 bytes, a client built with
+`{maxPayloadLength: 1024}`):
+
+```
+$ bun .tentacle/tmp/mobile-relay/r0d-client-cap.ts
+client ctor arity: 1 | message chars received with maxPayloadLength:1024 -> 4096 (option IGNORED: no client-side cap)
+```
+
+So there is **no** client-side option to adopt on Bun 1.4.3 (`maxPayloadLength`
+exists on the SERVER's `websocket` handler only, `bun-types` `bun.d.ts:2332`;
+`WebSocket.length === 1`). That is written into the source comment and F7 as the
+reason R4's fallback must be the back-off one — a fact R4 would otherwise have
+gone looking for.
+
+**Regression test for finding 2?** There is none, and none is possible for the
+claim itself: the change is comments, test names and doc text — no behaviour
+changed, so a red-before-green test would be theatre. What I did instead is pin
+the one factual boundary the new wording implies and the old wording hid: a
+`Uint8Array` of exactly `maxInboundChars` passes and `+1` is refused (bytes are
+not code units). That case was added to the existing guard test; it is green on
+both sides of the wording change by design (it asserts the predicate, which did
+not move). The finding is closed by the wording, per the reviewer's instruction
+("rewrite the comments, the test name and Execution R0(b) to say what the guard
+really does").
+
+#### Small drift fixed in passing
+
+`packages/transport/src/relay-id.ts:13` said the function lives on the
+`/noise` subpath; it is exported as `./relay-id`. The reviewer's premise table
+flagged it as "small doc drift"; it is now correct. (Markdown prose and comments
+only — no code path.)
+
+#### Gate (fix round 1): green
+
+`bunx tsc --noEmit` clean. `bun run lint` clean (0 errors, 0 warnings,
+1 296 files — BIOME reformatted two long `expect(...)` lines I introduced; fixed
+with `--write`, re-run clean). `bun test`: **9 345 pass / 3 skip / 0 fail** across
+9 348 tests in 672 files — the three skips are AGENTS §6's opt-ins. Count moved
+9 343 → 9 345 for the two new tests. **Honest flake note:** five full runs total;
+one (the second) reported `1 fail` and I did not capture its name — it did not
+reproduce in the three logged runs after it (runs 3–5: `9345 pass / 0 fail`,
+logs in `.tentacle/tmp/mobile-relay/run{3,4,5}.log`), and this round touched only
+pure zod schemas and pure helpers (no timing, I/O, sockets or rendering), so I
+cannot attribute it to this change and cannot name it. To verify: re-run
+`bun test` and, on a fail, read the `(fail)` line — if it is
+`packages/exec/test/confinement.test.ts` R2-4 that is the known sandbox
+hard-link flake (`docs/feat/agent-message.md:457`).
+No changelog fragment change (the existing
+`changelog.d/mobile-relay.added.md` bullet still covers it; a forward-compat fix
+in a not-yet-shipped wire is not a separate user-visible entry). `PROTOCOL_VERSION`
+untouched, no `protocol.d/` note: the relay wire is versioned by
+`RELAY_PROTOCOL_VERSION`, and loosening a field is not a break.
+
+## Review
+
+### R0 + R1 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM). Scope: `git diff main...HEAD`, slices R0+R1 only.
+
+**Gate (re-run here):** `bun test` on relay.test.ts + relay-id.test.ts + json-schema.test.ts → 48 pass / 0 fail; `bun run lint` clean (1296 files); `bun run typecheck` clean. I did not re-run the full suite.
+
+**Findings**
+
+1. **HIGH — `ready.features` is a closed enum, so it breaks forward compatibility.**
+   `packages/protocol/src/relay.ts:133` (`z.array(z.enum(RELAY_FEATURES))`). A
+   relay that announces a feature this build does not know fails the whole
+   `ready` parse. Probe:
+   `RelayToDaemonFrameSchema.safeParse({t:"ready",v:1,id,features:["push","future"]}).success === false`.
+   The plan says "a malformed frame is a close", so that daemon drops the link
+   and retries forever. Failure scenario: the hosted relay is deployed with a
+   second feature name, and every `serve` already installed loses relay
+   reachability at once, with no version error and no notice. This defeats the
+   point of the task-16 amendment (announce features without breaking old
+   daemons) and AGENTS §7 forward-compat ("fields are free"). Fix: accept
+   `z.array(z.string().max(…)).max(16)` and filter to the known names after the
+   parse. The test must show a `ready` with an unknown feature parsing and the
+   unknown name dropped. The same reasoning applies, less severely, to
+   `error.code` (`:167`): a new code becomes "malformed" instead of a refusal.
+2. **MEDIUM — `isInboundFrameTooLarge` is described as stopping R0(b)'s attack,
+   and it cannot.** The comments at `relay.ts:79-84` and `:296-300`, and the test
+   at `relay.test.ts:243` ("before it becomes a JS string"), say this. But R0(b)
+   showed the Bun client has already turned the 64 MiB frame into a JS string
+   (+130 MiB RSS) before any handler runs. A length check in the handler only
+   saves the JSON/zod cost. It does not bound memory. Failure scenario: R4
+   relies on this "guard", F7 is recorded as closed, and a hostile relay can
+   still force allocations as large as Bun allows on every reconnect. Fix:
+   rewrite the comments, the test name and Execution R0(b) to say what the guard
+   really does. Leave F7's memory bound as an open R4 item (look for a
+   client-side max-payload option, or accept it and back off after an
+   oversize close).
+
+**Premise table.** relay.ts:1 = the doc's id formula: TRUE. The vector
+`WSbKVXnUw63XiNj5KDcKsU` matches my own `node:crypto` computation: TRUE.
+`isPairingAddress` (`pairing.ts:122`) accepts what `relayAddress` builds: TRUE.
+There is one exception: a long base path exceeds `ADDRESS_MAX` and is refused
+later by encode. That is a refusal, not silent, so it is not a finding.
+`@noble/hashes` is already a transport dependency: TRUE. `PROTOCOL_VERSION`
+untouched and no `protocol.d/` note: TRUE (no RPC change). Small doc drift:
+`relay-id.ts:13` says the function lives on the `/noise` subpath, but it is
+exported as `./relay-id`.
+
+**Attacks tried.**
+- (a) Loopback spoofing (`127.0.0.1.evil`, `localhost.evil`): refused.
+  `ws://0x7f000001`, `ws://127.1` and `ws://[0:…:1]` are accepted, but the URL
+  parser normalises them to real loopback, so this is OK.
+- (b) Uppercase scheme or host (`WSS://Relay.Example`): accepted, and the app
+  accepts the address it builds.
+- (c) Unknown feature in `ready`: fails (finding 1).
+- (d) Strip vs strict: unknown fields are dropped (test at `:176`).
+
+**Mutation.** I did not mutate anything myself: the sandbox would not run my
+scripted mutate-then-revert command without approval. Instead I checked the
+executor's 7-row table against the test bodies. Each named test asserts the
+exact property its mutation breaks, and the vector is independent of the code,
+so I consider the tests non-vacuous. The tree is unchanged apart from this
+section.
+
+**Executor behaviour.** Honest and well evidenced: R0 probes pasted, red then
+green shown, drift listed. Its one mistake is over-claiming what the R0(b)
+guard protects (finding 2).
+**Model note:** executor deepseek-v4, reviewer claude-opus-5-5. Different
+model families.
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (commit af849596).
+
+**Finding 1 (HIGH): fixed.**
+- `ready.features` now accepts any name of 1–64 characters, at most 16 names.
+  `knownRelayFeatures` keeps only the names this build knows and drops
+  duplicates. `error.code` is now any string of 1–32 characters, and
+  `isRelayErrorCode` checks it against the known codes.
+- Mutation A: I put both closed enums back. 2 tests went red (`ready.features
+  accepts a name…` and `error.code accepts a code…`).
+- Mutation B: I removed the duplicate check in `knownRelayFeatures`. 1 test went
+  red.
+- I reverted both mutations; `git status` is clean.
+- No regression: limits are still enforced. A list of 17 names, a non-string
+  code, an empty code and a 33-character code are all still refused, and these
+  cases are tested. `protocol.json` was regenerated, and the drift test in
+  `json-schema.test.ts` passes.
+
+**Finding 2 (MEDIUM): fixed.** The comments at `relay.ts:79-93` and `:359-362`
+and the test names now describe `isInboundFrameTooLarge` as a limit on parsing
+cost, not on memory. F7's unbounded allocation is explicitly left open for R4:
+the Bun client ignores `maxPayloadLength` (the executor's own probe; I did not
+re-run it). The fallback is to back off after a close caused by an oversized
+frame. This change is wording only, so there was nothing to mutate.
+
+**Nit fixed:** the comment at `relay-id.ts:13` now names the right
+`./relay-id` subpath.
+
+**Gate:** touched tests (relay, relay-id, json-schema): 50 pass / 0 fail.
+`bun run lint` is clean (1296 files). `bun run typecheck` is clean. I did not
+run the full suite.
+
+## Execution
+
+### R2 — the relay service (as built) — *— claude-opus-5-5, 2026-11-14*
+
+#### Load-bearing check: PASSED, before any edit
+
+R2's premise is R0(a): that a Bun splice carries frames 1:1 and a close
+cascades, so `server.ts` can be "one more transport" and nothing more. Re-ran it
+from `.tentacle/tmp/mobile-relay/`:
+
+```
+$ bun r0a-splice.ts
+received lengths: [ "5", "89088" ]
+87KiB intact: true
+frames 1:1: true
+b closed: true within ms: 0 | cascade latency ms: 0
+events: open /b | open /a | msg /a 5 | msg /a 89088 | close /a | close /b
+```
+
+R1's exports were re-checked to exist and to agree before a line of R2 was
+written (`.tentacle/tmp/mobile-relay/r2-loadcheck.ts`):
+
+```
+$ bun r2-loadcheck.ts
+{ RELAY_PROTOCOL_VERSION: 1, DEFAULT_RELAY_URL: "wss://relay.tentacle.so",
+  id: "fgkrQr2vTa2JTEe75Kl66v",
+  addr: "wss://relay.tentacle.so/d/fgkrQr2vTa2JTEe75Kl66v/e2e",
+  isRelayUrlOK: true, hold: 5000, exp: 10000, close: 4404,
+  limits: { maxFrameChars: 98304, maxInboundChars: 180224, preAcceptBytes: 65536,
+            backpressureBytes: 16777216, phoneHoldMs: 5000 },
+  isRelayId: true, tooLarge: true, ready: true, union: true }
+```
+
+Baseline before the slice: `bun test` **9 345 pass / 3 skip / 0 fail** across
+9 348 tests in 672 files (the three skips are AGENTS §6's opt-ins).
+
+#### What landed
+
+**`apps/relay/src/relay-core.ts`** (new, pure — no sockets, no timers, no
+logging; AGENTS §7). The whole state machine as one class with an injected clock
+and token source: `hello` (register the id the secret derives, newest-wins,
+release the holds) · `dial` (open / hold / refuse) · `accept` (single-use,
+expiry) · `controlClosed` / `phoneClosed` / `streamClosed` · `sweep`.
+Decisions are returned as **effects** (`{send, target, frame}` / `{close,
+target, code}`) rather than applied to a callback, so a test asserts the exact
+consequences in order instead of spying on a socket. `RELAY_LIMITS` holds the six
+abuse limits; `RELAY_CLOSE_REFUSED = 4429` is the door-refusal code.
+
+**`apps/relay/src/server.ts`** (new, thin). `Bun.serve` + the four routes
+(`relayRoute`, pure and pinned) + the splice. It parses, asks the core, applies
+the effects and forwards frames — it computes nothing. `relaySocketOptions` is
+`serve`'s policy verbatim (`closeOnBackpressureLimit` at
+`RELAY_CONTROL_LIMITS.backpressureBytes`, pings on, idle 60 s).
+`limitsFromFlags` / `RELAY_LIMIT_FLAGS` map the five deploy flags.
+
+**`apps/relay/src/main.ts`** (new). `parseRelayArgs` (pure: flags + env, a flag
+wins, an invalid value is a REFUSAL not a silently ignored limit) and the
+`import.meta.main` shell with SIGINT/SIGTERM shutdown.
+
+**`apps/relay/{package.json,tsconfig.json}`**, root `package.json`
+`typecheck` += `tsc -p apps/relay --noEmit`, `bun.lock` (the workspace entry —
+see drift 1), and AGENTS §6's app count (drift 2).
+
+#### Drift from the Implementation, and why
+
+1. **`bun.lock` gained the `apps/relay` workspace entry — not in the plan's file
+   list.** A new workspace package makes `bun install --frozen-lockfile`
+   (CI's and the build workflow's own command) fail with "lockfile had changes,
+   but lockfile is frozen". The entry is generated, not hand-written
+   (`bun install --filter '!@tentacle/mobile'`, +10 lines), and the frozen
+   install then passes. R2 cannot land without it.
+2. **AGENTS §6's count line, as the slice table says** ("one line, rides this
+   branch"): "**1 app**" → "**2 apps**", naming `apps/relay` and that it has its
+   own `tsc -p apps/relay`; the `typecheck` bullet follows. Prose only.
+3. **A `main.test.ts`, a third test file the slice row does not list.** The row
+   names `{relay-core.test.ts,server.test.ts}`; the design puts `--host/--port`
+   and five limit flags in `main.ts`, and AGENTS §9 wants the failure modes of a
+   parser tested (a bad value, a bad env var, a flag winning over env, an unknown
+   argument). Testing it through a real process would only let me assert a
+   substring of stdout; the plan's own "logic in pure modules" rule puts
+   `parseRelayArgs` on the pure side, so it is tested directly. Nothing else
+   changed by it.
+4. **The limit flags are FIVE, not the design's "flags override" in the
+   abstract.** The design names six limits; `maxTrackedIps` is deliberately NOT a
+   flag (it is a memory bound on the relay's own bookkeeping, not a policy an
+   operator tunes — an operator raising it gains nothing and can only make the
+   process bigger). The other five are flags and env vars.
+5. **`relay-core.ts` re-uses `decodeBase64Url` from `@tentacle/protocol`
+   rather than taking the secret as raw bytes.** The wire carries 43 chars, and a
+   LENIENT decoder would map two different strings onto one secret — exactly the
+   aliasing a self-certifying id must not have. So the relay decodes strictly,
+   refuses `undefined` (non-canonical) and refuses a wrong length, before
+   `relayIdOf` is ever called. Mutation 12b is the proof it matters.
+6. **A refused dial does NOT call `core.phoneClosed`.** The core charges a slot
+   only once a dial is admitted; returning one for a refused dial would free a
+   slot another phone holds. The server closes the socket at its own layer
+   (`RELAY_CLOSE_REFUSED`), which is why that constant lives in `relay-core.ts`
+   (named by the module that decides) and is applied by the module that owns the
+   socket.
+7. **`ready.features` is `[]` from this build.** R1 made the field present with a
+   default; the relay announces none because this build sends no `push` (task
+   16's). R7's deployed build is where a feature list would first be non-empty.
+8. **The core asserts on a malformed minted token** (`throw`) instead of
+   redrawing forever. The default source is `crypto.getRandomValues`, so this is
+   unreachable in production; a test that injects a bad source gets a loud
+   failure rather than a stream nobody could accept.
+
+**Not a drift, but worth stating:** `apps/relay` imports
+`@tentacle/transport/relay-id` in the core (the hash is a DECISION — which id a
+secret has) and nothing from transport in the server. The relay therefore loads
+no Noise code, only the one hash function it needs, which is what R1's subpath
+split was for.
+
+#### Red before green
+
+The two runnable files were written against the TESTS:
+
+```
+$ bun test apps/relay/test/relay-core.test.ts          # first run, before the
+ 12 pass  11 fail  47 expect()                       # token format was fixed
+  error: relay: the minted stream token is malformed or collides
+```
+
+Those 11 were **my test double's** fault (a token of the wrong length), not the
+code's, so they are not the proof. The proof that the tests bite is the mutation
+table below: each of the 20 mutations makes a named assertion go red. The
+`server.test.ts` first run was red for the same class of reason (a recorder that
+double-delivered frames), and its 25 tests went green once the recorder was
+right — no production line changed to make them pass.
+
+#### Mutation checks (each reverted; the tree was diffed back to identical)
+
+Script: `.tentacle/tmp/mobile-relay/mutate.sh` (backup → `sed` → run the named
+test → restore; no git, per the brief). Targets are the plan's Tests section for
+R2. `RED=n` is the count of `(fail)` lines.
+
+| # | Target | Mutation | Result |
+|---|---|---|---|
+| 1 | `hello` refuses a secret not matching | `relayIdOf(bytes)` → a constant | RED=1 `a hello with a secret not matching is refused` |
+| 2 | newest wins (old gets `replaced`) | drop the old socket's `close` | RED=1 `newest wins: … and TELLS it` |
+| 3 | stream token single-use | `if (stream.accepted)` → `if (false)` | RED=1 `accepts a minted stream once` |
+| 4 | stream token expires at 10 s | expiry check → `if (false)` | RED=1 `a token expires at 10 s` |
+| 5 | hold-for-registration `4404`s at 5 s | `at - hold.since >= HOLD` → `if (false)` | RED=1 `the hold sweep … closes 4404 at exactly 5 s` |
+| 6 | hold released on register | drop `releaseHolds` | RED=1 `… HELD, and released on the registration` |
+| 7 | per-ip dials/min | limit check → `if (false)` | RED=1 `dials per minute per ip` |
+| 8 | per-ip concurrent | limit check → `if (false)` | RED=1 `concurrent phone sockets per ip` |
+| 9 | per-id streams | limit check → `if (false)` | RED=1 `streams per id` |
+| 10 | registered ids | limit check → `if (false)` | RED=1 `registered ids (a NEW id is refused…)` |
+| 11 | per-ip hellos/min | limit check → `if (false)` | RED=1 `hellos per minute per ip` |
+| 12b | secret decode is STRICT | `bytes === undefined \|\| …` → `bytes !== undefined && …` | RED=1 `a non-canonical secret encoding is refused` |
+| 13 | version skew refused on hello | `input.v !== VERSION` → `if (false)` | RED=1 `an unknown protocol version is refused` |
+| 14 | 97 KiB frame closes both legs | splice cap → `if (false)` | RED=1 `a 97 KiB frame closes BOTH legs` |
+| 15 | pre-accept 64 KiB cap | cap check → `if (false)` | RED=1 `the pre-accept buffer is capped` |
+| 16 | one leg closing closes the other | drop the cascade `closeSocket(peer)` | RED=1 `one leg closing closes the other` |
+| 17 | `replaced` frame is SENT | drop the `replaced` effect | RED=1 `… replaces the first socket and TELLS it` |
+| 18 | logs hold no secret | log the raw `hello` text | RED=1 `the captured log has no secret…` |
+| 19 | early frames flushed on join | empty the flush loop | RED=1 `a held phone's early frames are delivered` |
+| 20 | `/healthz` carries no counters | add `ids: registeredIds` | RED=1 `/healthz … and NO counters` |
+
+Mutation 12's first form (removing only the `undefined` half of the condition)
+stayed GREEN, because `undefined.length` still tripped the length check — a
+vacuous mutation, replaced by 12b, which is the one that removes the property
+(the strict decode) and does go red. Recorded rather than hidden: it is the
+one case where my first attempt at a mutation proved nothing.
+
+Tree restored after every row (`diff` against the pre-mutation copies: identical,
+`TREE RESTORED`).
+
+#### Acceptance checks the plan names
+
+- `apps/relay` `server.test.ts` on `127.0.0.1:0` — frames 1:1 both ways incl.
+  87 KiB ✔ (`frames cross 1:1 both ways, an 87 KiB frame included`); a 97 KiB
+  frame closes both legs ✔; one leg closing closes the other ✔; pre-accept
+  buffer cap ✔; `/healthz` ✔; unknown route 404 ✔; **the captured log grepped for
+  the secret** ✔ (also asserted free of the stream token and of a frame payload,
+  and asserted to still contain the id's 8-char prefix, so the test is not
+  vacuously satisfied by an empty log).
+- `relay-core` — register, newest-wins, mismatch refused, single-use token,
+  10 s expiry, hold/release/`4404`, and **each limit at its boundary** (N ok,
+  N+1 refused) ✔. Each limit's test also re-asserts the boundary by showing a
+  freed slot admits again, so "refused" is not just "always refused".
+- `PROTOCOL_VERSION` untouched; `packages/protocol/schema/protocol.json`
+  unchanged (`git diff --stat` empty) — R2 adds no schema, so no regenerate and
+  no `protocol.d/` note.
+- Pod/worker (F20): nothing in R2 dials; no `relay.json`, no link. R4/R5a own
+  that and it stays their test.
+
+#### Gate (R2): green
+
+`bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bunx tsc -p apps/relay --noEmit` clean · `bun run lint` clean (1 304 files, 0
+errors, 0 warnings — the pre-existing baseline, so nothing new) · `bun test`
+**9 401 pass / 3 skip / 0 fail** across 9 404 tests in 675 files (the three
+skips are AGENTS §6's opt-ins; the count moved 9 345 → 9 401 for R2's 56 tests in
+three new files). Log: `.tentacle/tmp/mobile-relay/gate-r2-final.log`. Run with
+nothing else touching the tree — an earlier gate run overlapped a `bun install`
+and was discarded rather than reported.
+
+**Changelog:** none added by this slice, deliberately. The branch's single
+fragment `changelog.d/mobile-relay.added.md` (R1) already carries the one
+user-visible bullet, and it already names this deliverable ("The relay is a small
+self-hostable service in `apps/relay`"). A second fragment with the same
+slug+category is the same filename — the one collision the changelog rule
+forbids — and a *service that is not yet deployed or wired up* is not a second
+user-visible change. R5a is where `serve` starts using it; if the reviewer wants
+R2's existence named separately, the correct edit is to extend that one bullet,
+not to add a file. `CHANGELOG.md` untouched. `TODO.md` untouched.
+
+**Not verified by this slice.** Everything that needs a peer: no daemon dials it,
+no phone connects through it, so the end-to-end proof (a phone reaching a session
+THROUGH the relay) is R4's test, which runs against this real server. Also
+unverified: a real `wss://` deployment behind Caddy (R7 + owner decision D), the
+`maxInboundChars` decode guard's effect on a hostile relay (R4's accept leg), and
+the client-side unbounded-allocation gap R0(b) recorded — F7 is still OPEN, and
+R2 does not close it (it bounds the relay's own inbound frames at 96 Ki chars,
+which is a different leg from the daemon's).
+
+## Review
+
+### R2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Same model family as the R2 executor signature
+(fresh context only): shared blind spots may survive.
+
+Gate (scoped): `bun test apps/relay` 56 pass / 0 fail; `bun run lint` clean;
+`bun run typecheck` clean. Full `bun test` not re-run (scope: R2 files only).
+
+Findings:
+1. **MEDIUM — an expired unaccepted stream frees its slots but never closes
+   the phone** (`apps/relay/src/relay-core.ts:413-417`, also `:355-357`).
+   `sweep()` / `accept()`'s `expired` path call `forgetStream` (releases the
+   per-ip slot, drops the per-id count) and emit no `close` for `stream.phone`.
+   Scratch repro (`concurrentPerIp: 1`): dial p1 → t=11 s → `sweep()` returns
+   `[]` → a second dial from the same ip is admitted while p1 is still open.
+   Failure: a registered daemon that never accepts (crashed after `open`, or a
+   hostile one) lets one IP accumulate unbounded open phone sockets (30/min,
+   each pinned until Bun's idle timeout, which a ponging client never hits),
+   bypassing `concurrentPerIp` and `streamsPerId`; and a legit phone gets an
+   OPEN socket that never carries a handshake instead of a prompt close to try
+   the next address (F2/F7 convergence broken). Fix: emit
+   `{close, phone, RELAY_CLOSE_UNREGISTERED}` on both expiry paths + test.
+2. **MEDIUM — a second `hello` with a different secret on ONE control socket
+   registers a second id that is never unregistered**
+   (`relay-core.ts:226-294`, `controlClosed` `:364-371` returns after the first
+   match). Repro: two hellos on `c9` (secrets 2, 3) → `registeredCount` 3 →
+   `controlClosed("c9")` → 2; a phone dial to id(3) is `opened` with `open`
+   sent to the dead `c9` (dropped by `server.ts:185`) instead of held/4404.
+   Failure: stale registrations leak until relay restart (fills `registeredIds`
+   10 000 → new daemons refused `busy`), and phones for that id hang on a dead
+   route. Fix: refuse a second `hello` on an already-registered socket (or
+   delete every id of that socket) + test.
+3. **MEDIUM (test non-vacuity) — the server's phone-close slot release is
+   unpinned.** Mutation: comment out `core.phoneClosed(key)` in
+   `server.ts:367` → 56/56 still pass. A leak there exhausts every IP's
+   `concurrentPerIp` after 16 dials. Needs a socket-level test: dial/close
+   N+1 times at `concurrentPerIp: N`, the last dial admitted.
+
+Mutation outcomes: dropping the `replaced` send (`relay-core.ts:288`) → 2
+tests fail (core + server) — non-vacuous; finding 3 above — vacuous. Both
+reverted; `git status` clean afterwards.
+
+Attacks tried: newest-wins + old socket's late `close` (no wrong unregister:
+holds); double release of a phone slot via oversize-drop + `close` (idempotent:
+holds); accept after phone close (stream already forgotten → `unknown`: holds);
+log contents (key/8-char prefixes only, no secret: holds); expiry paths
+(finding 1); multi-hello per socket (finding 2). Noted, not raised: the
+`maxTrackedIps` eviction of an entry with `open > 0` resets its count, so the
+"never a bypass" comment (`relay-core.ts:497`) is inaccurate (low: per-IP
+limits are weak against IPv6 ranges anyway).
+
+§7: R2 holds no key and authorises nothing (relay untrusted — holds); no
+session path, broker, persistence or terminal I/O touched.
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+All three R2 findings fixed, in the pure core where the decision lives, with the
+server applying what it is told. Red before green per finding (each mutation
+below was run against the fix in place, then reverted; §9 requires the failure to
+be on the assertion, and it is — no import/compile error in any run).
+
+**F1 (MEDIUM) — an expired unaccepted stream now closes its phone.**
+`relay-core.ts:446-450` (`sweep`) pushes
+`{close, stream.phone, 4404}` after `forgetStream`; `relay-core.ts:378-390`
+(`accept`'s `expired` branch) does the same via a new
+`AcceptDecision` variant (`relay-core.ts:116-122`) that carries `effects`, applied
+at `server.ts:442-446`. The other three accept refusals keep their exact old shape
+(`{ok:false, reason}`) on purpose, so no unrelated assertion moved.
+Why: a daemon that registers but never accepts (crashed, or hostile) left one
+phone socket open per dial until Bun's idle timeout — a ponging client never hits
+it — so `concurrentPerIp` was bypassed and a legitimate phone hung on an OPEN
+socket that could never carry a handshake (F2/F7 convergence). Both expiry paths
+now close `4404`, which is exactly the "try my next address" signal a held dial
+already gets.
+Mutation A: drop the `effects.push` in `sweep` →
+`bun test apps/relay/test/relay-core.test.ts` = **23 pass / 2 fail** (`an
+unaccepted stream expiring in the sweep also CLOSES its phone`; `an unaccepted
+stream stops counting against its id after the expiry`). Mutation B: empty
+`effects` in `accept`'s `expired` branch → **24 pass / 1 fail** (`a token expires
+at 10 s, and the expiry frees the slot`). Mutation C: drop
+`apply(decision.effects)` at `server.ts` → **27 pass / 1 fail** (`an accept for an
+expired stream closes the phone too`, timed out waiting for the close — red on
+the property, not on a type error), which is why that socket-level test exists:
+C survived every core-level test.
+
+**F2 (MEDIUM) — one control socket registers one id.**
+`relay-core.ts:269-283`: `hello` refuses (and closes 1000) a secret whose id
+differs from the id already registered on the SAME socket, with `error
+"invalid"`. A re-hello with the SAME secret on the same socket is untouched (the
+existing `a re-hello on the SAME socket is not a replacement` test still passes),
+and newest-wins across sockets is untouched.
+Why: `controlClosed` unregisters only the FIRST id it finds on a socket, so a
+second hello registered an id nothing ever removed — it leaked until relay
+restart (filling `registeredIds`, then refusing new daemons `busy`) and phones for
+it were `opened` onto a dead control socket, hanging instead of being held/4404.
+Mutation: remove the guard → **58 pass / 2 fail** (core + socket-level
+`a second hello on one control socket, with a different secret, is refused`).
+
+**F3 (MEDIUM, test non-vacuity) — the server's phone-close slot release is
+pinned.** New socket-level test (`server.test.ts`): 3 sequential dial+close at
+`concurrentPerIp: 2`, each close awaited through `heldCount` back to 0; a leak
+exhausts the cap on the third dial (refused `4429`).
+Mutation (the review's exact one): comment out `core.phoneClosed(key)` at
+`server.ts:367` → **26 pass / 1 fail** (`a closed phone gives its per-ip slot back
+(N+1 sequential dials at cap N)`, "timed out waiting for the held dial to be
+released"). Previously 56/56 passed under that mutation; it now fails.
+
+**One existing test was corrected, not weakened**: `an unaccepted stream stops
+counting against its id after the expiry` asserted `sweep() === []` — the buggy
+behaviour itself — and now asserts the `4404` close it gets instead. Its original
+property (the id's slot is free again) is still asserted, plus the dial that
+proves it.
+
+**Drift from Implementation:** none — R2's Design did not name the expiry
+close-up, and this is the smallest change that satisfies its F2/F7 convergence
+argument. The `AcceptDecision` split (only `expired` carries `effects`) is a
+shape choice made to avoid touching the other refusals' assertions.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/relay` clean · `bun run
+lint` clean (1304 files, no fixes) · `bun test` **9406 pass / 3 skip / 0 fail**
+(9409 tests, 675 files) — the 3 skips are the pre-existing opt-ins (live-k8s,
+live-docker, real-socket keepalive), no new skip. `apps/relay` alone: 61 pass / 0
+fail. No `changelog.d` fragment: this is a fix to unshipped R2 code on the same
+branch, before any release, and `changelog.d/mobile-relay.added.md` already covers
+the user-visible relay. No `protocol.d` note: the wire is unchanged (the review's
+own `4404` close code already exists and is used by the held-dial path).
+
+**Not verified:** the concurrent-socket behaviour of finding 1 under a real
+hostile daemon (the tests drive the pure core and a local socket; a 30/min×N
+saturation run against a deployed relay is R7's). The review's noted-but-not-
+raised `maxTrackedIps` eviction of an entry with `open > 0` is untouched (low
+severity, per-IP limits are weak against IPv6 ranges anyway).
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS** (R2). Reviewed `git diff HEAD~1` (e3ed37f1). Same model
+family as the round-1 reviewer; the executor was a different model (deepseek).
+
+- **F1 fixed.** `sweep()` and `accept()`'s `expired` path now close the phone
+  `4404` (`relay-core.ts:380-388`, `:450`); `server.ts:442-446` applies the
+  accept effect. Scratch repro: `sweep()` now emits `close p1 4404`. Mutation:
+  drop the sweep close → 2 core tests fail; drop only the server's `apply` on
+  `expired` → the server's expired-accept test fails alone (non-vacuous).
+- **F2 fixed.** A second `hello` with a different secret on one control socket
+  is refused `invalid` and the socket is closed (`relay-core.ts:270-284`). The
+  repro: second hello refused; after the close, 0 leaked ids, and a dial to that
+  id is `held`. Mutation: guard disabled → the core test and the server test
+  both fail.
+- **F3 fixed.** New socket test "N+1 sequential dials at cap N". Mutation:
+  `core.phoneClosed(key)` removed (`server.ts:367`) → that test fails.
+- Regressions checked: closing the phone from the sweep → its `close` event →
+  `phoneClosed` is a no-op (the stream is already gone), so nothing is released
+  twice; an `accept` after the sweep → `unknown`, so the phone is not closed
+  twice; the same socket re-sending the same secret is still not treated as a
+  replacement (existing test passes). Refusing a second hello closes a daemon
+  that was registered: acceptable, since that client is misbehaving.
+- Gate: `bun test apps/relay` 61 pass / 0 fail; `bun run lint` clean;
+  `bun run typecheck` clean. Every mutation was reverted; `git status` clean.
+  Not re-run: the full `bun test`.
+- Still open, not raised (low): the `maxTrackedIps` eviction comment
+  (`relay-core.ts` "never a bypass") is still inaccurate.
+
+## Execution
+
+### R3 — extract the device path (as built) — *— claude-opus-5-5, 2026-11-14*
+
+**Load-bearing check: PASSED, before any edit.** The assumption R3 stands on is
+the plan's: `openDevice` used the Bun socket ONLY as an identity key, so the body
+extracts over a plain `DuplexChannel` with no behaviour change. Baseline first,
+with the code untouched:
+
+```
+$ bun test packages/daemon/test/{ws-device-route,ws-server,device-authority,pairing-handler}.test.ts
+ 73 pass / 1 skip / 0 fail    (186 expect() calls, 74 tests, 4 files)
+```
+
+That is the refactor's proof (AGENTS §9): those tests must pass UNCHANGED after
+it, and they do (same 73/1/0, re-run below).
+
+**As built, in the Implementation's order.**
+
+1. `packages/daemon/src/device-accept.ts` (new, 264 lines) — the whole of the old
+   `openDevice` body: the no-identity guard (`e2e-no-identity` + settle +
+   `channel.close()`), the responder with the captured `admitted` verdict,
+   the `ConnectionPrincipal` build (`PairHandler` for a pairing peer), the
+   `Connection` on the RESOLVED secure channel, the ONE `DeviceClose` handle, the
+   `device-open`/`touchSeen` pair, the pairing-window watcher, and the F22
+   `isClosed()` check. `watchPairingWindow` moved here with it (it only ever
+   touched `onAudit`, `pairingCheckMs` and the handle), as did
+   `PAIRING_CHECK_MS` and `DEFAULT_MAX_FRAME_BYTES`.
+   The two things the old body reached through its closure became
+   caller-supplied hooks, because they are the caller's own bookkeeping:
+   `onSettled()` (the `pending`/limiter slot, replacing the private `finish()`)
+   and `onConnection(connection)` (the `connections` map). `isClosed()` is a
+   REQUIRED dep, not optional: a caller that cannot answer would silently keep
+   the F22 orphan this guards against. The signature is
+   `acceptDevice(channel, deps) → { release }`.
+2. `packages/daemon/src/ws-server.ts` — `openDevice` (141 lines) becomes a 33-line
+   delegation; `PAIRING_CHECK_MS`, `DEFAULT_MAX_FRAME_BYTES`,
+   `watchPairingWindow` and six now-unused imports leave. `ws.data.release` is
+   `accepted.release()` (same work as the old closure: stop the watcher,
+   unregister the device handle).
+3. `packages/daemon/src/index.ts` — `export * from "./device-accept.ts"`.
+
+**One drift from the Implementation, deliberately.** The plan's signature is
+`acceptDevice(channel, deps) → { release }` with "no behaviour change". Wiring it
+that way introduced a bug the plan's design did not anticipate: the old code had
+ONE `finish()` (the limiter slot), reached from every outcome; the split gives
+two paths to the same slot — the socket's `close` handler (via `pending`) and
+`onSettled`. A phone that walks away mid-handshake fires BOTH, so
+`HandshakeLimiter.end()` ran twice for one dial and the counter fell below the
+handshakes really in flight, admitting more than `maxConcurrent` (32 in
+production). Fix: a once-guard in `ws-server`'s `openDevice` (`endSlot`), so the
+slot ends exactly once whichever path arrives first. This is caller-side
+bookkeeping, which is where the slot lives — not a change to `acceptDevice`'s
+contract. It is pinned by a new test (below) that is RED without the guard.
+`device-accept.ts` keeps its own once-guard on `settle()`/`teardown()` for the
+same reason (`release()` and the F22 path both tear down).
+
+**Tests.** Red-first, then mutation-checked with the real mutations (each pasted
+below from this branch; every mutation reverted, `shasum` matches the pristine
+copy).
+
+- `packages/daemon/test/device-accept.test.ts` (new, 7 tests) — on a
+  `createChannelPair` channel: a registered key is admitted and `initialize` is
+  served (the relay's accept leg, no socket); an unknown key is denied and
+  nothing is built (F15); a replayed message 1 builds nothing and records nothing
+  (F4/P2); a channel closed mid-handshake settles exactly once; no identity
+  settles at once and closes (F14); `release()` drops the authority's handle (F11,
+  idempotent); a channel closed between the confirm and the build leaves no
+  attached connection (F22).
+- `packages/daemon/test/ws-device-slot-once.test.ts` (new, 1 test) — the drift
+  above: cap 2, two mid-handshake dials, one abandons, a third takes its slot, and
+  the fourth must be REFUSED. Under a double `end()` the abandoned dial's second
+  decrement steals the live one's slot and the fourth is wrongly admitted.
+- Existing `ws-device-route` / `ws-server` / `device-authority` /
+  `pairing-handler` tests: **unchanged, all pass** (73 pass / 1 skip / 0 fail,
+  the skip the pre-existing opt-in keepalive).
+
+**Mutations (the plan's targets, each run on the edited file).**
+
+1. `touchSeen` inside `authorize` (the side effect a replay reaches) →
+   `(fail) … a replayed message 1 builds nothing and records nothing (F4/P2)`
+   — `Expected: 1794658127463 / Received: 1794658127484` (6 pass, 1 fail).
+2. F22 branch removed (`if (false && deps.isClosed())`) →
+   `(fail) … a channel closed between the confirm and the build leaves no
+   attached connection (F22)` (6 pass, 1 fail).
+3. `onSettled` dropped on the no-identity path →
+   `(fail) … no identity: settles at once and closes the channel (F14 — no leaked
+   slot per dial)` (6 pass, 1 fail).
+4. `settle()` dropped on the responder's reject path →
+   3 fail: `an unknown key is denied, and nothing is built (F15)`, `a replayed
+   message 1 builds nothing …`, `a channel closed mid-handshake still settles,
+   once` (4 pass, 3 fail).
+5. `release()` no longer unregisters the authority's handle →
+   2 fail: `release() drops the authority's handle … (F11)` and the F22 test
+   (5 pass, 2 fail).
+6. **The drift's own mutation**: `ws-server`'s once-guard removed →
+   `(fail) a mid-handshake close ends the limiter slot once, not twice (R3) >
+   an abandoned dial's extra end() cannot steal a live handshake's slot` —
+   `Expected: false / Received: true` (0 pass, 1 fail).
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run lint` clean (1307 files, no fixes)
+· `bun test` **9414 pass / 3 skip / 0 fail** (9417 tests, 677 files) — the 3
+skips are the pre-existing opt-ins (live-k8s, live-docker, real-socket
+keepalive), no new skip. No `protocol.json` regeneration: **no schema changed**
+(R3 touches no `@tentacle/protocol` file; `PROTOCOL_VERSION` stays 24, no
+`protocol.d/` note — the plan's Preconditions say so and it holds). No new
+`changelog.d` fragment: R3 is behaviour-preserving internals with no
+user-visible effect, and `changelog.d/mobile-relay.added.md` (R5a's, already on
+this branch) covers the relay's user-visible surface.
+
+**Not verified.** The relay's accept leg on a REAL relay socket — that is R4's
+`relay-link.test.ts` against R2's server, which needs this slice merged first.
+What is proved here is the property R4 depends on: the device path runs on any
+`DuplexChannel` and every outcome frees the caller's slot exactly once.
+
+## Review
+
+### R3 — adversarial review — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Same model as R3's executor (fresh context only): shared blind spots may survive both passes.
+
+1. **HIGH — F22 regression on the direct `/e2e` route** (`packages/daemon/src/device-accept.ts:125-133`, `packages/daemon/src/ws-server.ts:379-396`). `ws-server` now wires `release()` into `pending` and `ws.data.release` *before* the handshake resolves. The socket's `close` handler (`ws-server.ts:346-348`) calls both, which latches `released = true` in `teardown()` while `built` is still undefined. When the responder then resolves (the F22 gap), the build registers the handle, `isClosed()` is true, `handle.close()` runs, and `teardown()` is a **no-op**. The authority keeps a dead handle forever. For a pairing peer, `stopWatcher` is never cleared: an unref'd interval logs `pairing-closed` and calls `handle.close()` every second for the process's life. The old code unregistered explicitly on this path, so the slice's "no behaviour change" claim is false. Repro (`.tentacle/tmp/mobile-relay/f22-release.test.ts`): the branch's F22 harness plus one `release()` at the confirm, which is the close handler's order → `Expected: 0 / Received: 1` (`authority.liveCount()`). Without that `release()` → 0.
+2. **MEDIUM — the F22 test is vacuous for the real caller** (`packages/daemon/test/device-accept.test.ts:317-333`). It never calls `release()` before the resolve, so it cannot catch finding 1. Fix: `teardown` latches only once something is built (or the F22 path unregisters unconditionally). The test must call `release()` in the gap, with a pairing variant that asserts the watcher stopped. Show it red on the current code.
+
+**Gate:** touched files (`device-accept`, `ws-device-slot-once`, `ws-device-route`, `ws-server`, `device-authority`, `pairing-handler`) **81 pass / 1 skip / 0 fail**. `bun run lint`: clean (1307 files). `bun run typecheck`: clean. I did not re-run the full suite.
+**Attacks tried:** (a) release-before-resolve ordering → finding 1. (b) The limiter slot ending twice under close + reject: `endSlot` guards it, and the executor recorded mutation 6. My own re-mutation was blocked by tool permissions and was not repeated. (c) The no-identity path: `onSettled` runs synchronously, and the pending entry is deleted through `endSlot`. Holds. (d) §7 one session path / single broker: `Connection` is built unchanged on the resolved channel, with no second auth path and no broker touched. Holds. (e) Protocol: no schema touched. Holds.
+**Executor behaviour:** careful and honest about its drift (the slot once-guard). But its F22 test models the channel, not the caller's teardown order, which is exactly where the extraction changed behaviour.
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-15*
+
+Both R3 findings fixed, at the one place the decision belongs (`device-accept`'s
+teardown), with the tests modelling the **caller's** order this time. Red before
+green per finding; both mutations pasted below, each run against the fix in place
+and then reverted (`shasum` back to `f01dddee…`).
+
+**Reproduced first** (scratch `.tentacle/tmp/mobile-relay/f22-release.ts` — the
+branch's F22 harness plus one `release()` at the confirm, which is
+`ws-server.ts:346-348`'s order, for a device peer AND a pairing peer):
+
+```
+before fix: {"scenario":"device","built":1,"settled":1,"liveAfterBuild":1,"pairingClosedLines80ms":0}
+            {"scenario":"pairing","built":1,"settled":1,"liveAfterBuild":0,"pairingClosedLines80ms":6}
+after  fix: {"scenario":"device","built":1,"settled":1,"liveAfterBuild":0,"pairingClosedLines80ms":0}
+            {"scenario":"pairing","built":1,"settled":1,"liveAfterBuild":0,"pairingClosedLines80ms":0}
+```
+
+The device line is the HIGH finding exactly (`authority.liveCount()` = 1 after the
+build closed a channel nobody could reach). The pairing line is its second half:
+the six `pairing-closed` audit lines in 80 ms at a 10 ms `pairingCheckMs` are the
+leaked interval still ticking after the window was gone.
+
+**F1 (HIGH) — `teardown` is idempotent, not latched.** `device-accept.ts:126-133`:
+the `released` flag (and my own first attempt, `releasedHandle`) is gone;
+`teardown` does its two pieces of work directly — clear the watcher stopper,
+`authority.unregister(built.id, built.handle)` — and both are naturally
+idempotent (`clearInterval` twice, `unregister` on a handle the set no longer
+holds, `device-authority.ts:193-202`), so a second call is a no-op with no flag.
+A latch cannot be repaired by latching later: `built` is `undefined` when the
+caller's early `release()` arrives, so *any* once-guard turns the F22 close-up
+into a no-op and leaves the handle registered. Dropping the guard is what
+restores the pre-extraction behaviour, which was exactly this shape (the old
+`openDevice` unregistered unconditionally on both paths and on the F22 path,
+`.tentacle/tmp/mobile-relay/openDevice-block.txt:118-129`). The `release()`
+doc-comment (`device-accept.ts:72-79`) no longer claims "before the handshake
+resolves it is a no-op" — it says what is true: the call does what exists at that
+moment and the build's F22 close-up does the rest.
+
+Why nothing else was needed: `stopWatcher` is assigned only at the build
+(`:201-209`), so an early `release()` finds nothing to stop, and the F22 branch
+runs `teardown()` right after registering — one call order in which the latch bit
+was the caller's (`release` first, resolve second), which is *every* real socket
+close in that gap.
+
+**F2 (MEDIUM) — the F22 test now models the caller.** `device-accept.test.ts`:
+the harness gained `releaseInGap` (it runs `release()` inside the wrapped
+`setOnMessage` at the confirm, the socket close handler's order) and
+`pairingCheckMs`; two tests were added beside the existing F22 one
+(`device-accept.test.ts:353`, `:370`):
+
+- `release() in the confirm→build gap still drops the handle the build registers
+  (R3 review 1)` — `releaseInGap + closeAfterConfirm`, asserts `built() === 1`
+  and `authority.liveCount() === 0`.
+- `a release() in the gap also stops the pairing watcher (R3 review 1)` — the
+  pairing peer (`key(7)` with an open window), then `closePairing` and 60 ms at
+  `pairingCheckMs: 5`; asserts **zero** `pairing-closed` audit lines. Without the
+  fix it records 10–11, so the assertion is on the watcher's survival, not on a
+  type or an import.
+
+Both were RED on the unfixed code before the edit (**9 pass / 2 fail**, pasted
+below), and the pairing one fails on `Expected length: 0 / Received length: 11`.
+
+**Red before green (the exact run, fix not yet applied):**
+
+```
+(fail) … release() in the confirm→build gap still drops the handle the build registers (R3 review 1)
+       Expected: 0 / Received: 1        (device-accept.test.ts:367)
+(fail) … a release() in the gap also stops the pairing watcher (R3 review 1)
+       Expected length: 0 / Received length: 11   (device-accept.test.ts:387)
+ 7 pass / 2 fail
+```
+
+**Mutation A — put the old latch back** (`if (latch) return; latch = true;` at the
+top of `teardown`): both new tests fail on their property, the pre-existing ones
+stay green — i.e. the new tests are exactly the ones that pin finding 1.
+
+```
+Expected: 0 / Received: 1
+(fail) … release() in the confirm→build gap still drops the handle the build registers (R3 review 1)
+Expected length: 0 / Received length: 10
+(fail) … a release() in the gap also stops the pairing watcher (R3 review 1)
+ 7 pass / 2 fail
+```
+
+**Mutation B — keep the F22 branch's `handle.close()` but drop its `teardown()`**
+(`void teardown;`): THREE fail — the pre-existing F22 test *and* both new ones —
+which proves the new tests are not redundant with the old one and that the gap
+close-up is what they ride on.
+
+```
+Expected: 0 / Received: 1   (fail) … a channel closed between the confirm and the build leaves no attached connection (F22)
+Expected: 0 / Received: 1   (fail) … release() in the confirm→build gap still drops the handle …
+Expected length: 0 / Received length: 10  (fail) … a release() in the gap also stops the pairing watcher …
+ 6 pass / 3 fail
+```
+
+Each mutation was reverted; `shasum packages/daemon/src/device-accept.ts` =
+`f01dddee5a1ddd826eee114fc7c91efe5c348244` before mutation A, after A, and after
+B. `git diff --stat` at the end: `device-accept.ts` +11/−10, `device-accept.test.ts`
++58/−1 — no other file touched, so `apps/relay`, the wire, and
+`protocol.json` are untouched (no `protocol.d` note needed).
+
+**Drift from the review's suggested fix:** none in substance. The review offered
+"`teardown` latches only once something is built (or the F22 path unregisters
+unconditionally)"; I took the second (strictly simpler, and the shape the
+pre-extraction code had). The first would also hold, but it keeps a flag whose
+only job is to skip an idempotent two-line body.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/relay --noEmit` clean ·
+`bun run lint` clean (1307 files, no fixes) · `bun test` **9416 pass / 3 skip / 0
+fail** (9419 tests, 677 files) — the 3 skips are the pre-existing opt-ins
+(live-k8s, live-docker, real-socket keepalive), no new skip. The six touched
+daemon test files: 83 pass / 1 skip / 0 fail. No `changelog.d` fragment: this is
+a fix to unshipped R3 code on the same branch, before any release, and
+`changelog.d/mobile-relay.added.md` already covers the relay's user-visible
+surface. No `protocol.d` note: no wire or schema change.
+
+**Not verified:** the real Bun-socket shape of the gap (a `close` event landing
+between the confirm and the resolve) is driven here by the harness's
+`setOnMessage` hook and by the scratch repro, not by a live socket closing at that
+instant; `ws-device-route` passes unchanged, which is the closest existing proof.
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: APPROVE.** Same model as the executor's reviewer chain (fresh context only).
+
+- **Finding 1 (HIGH, F22 latch): fixed.** `teardown()` no longer has a once-latch (`device-accept.ts`). Its work is idempotent: `stopWatcher` is cleared once, and `unregister` of the same handle object leaves an absent entry absent. A `release()` that arrives early therefore no longer swallows the F22 close-up. The round-1 scratch repro (`.tentacle/tmp/mobile-relay/f22-release.test.ts`) now gives `liveCount 0`.
+- **Finding 2 (MEDIUM, vacuous test): fixed.** Two new tests call `release()` in the gap between the last handshake message and the build, which is the caller's real order: one for a device (`liveCount`) and one for pairing (no `pairing-closed` after the window closes). **Mutation:** I put the latch back → both new tests failed (7 pass / 2 fail). Reverted; `git status` is clean.
+- **Regressions:** `ws-server`'s close handler now calls `release()` twice (`pending` + `ws.data.release`), which is harmless because the work is idempotent. `release()` only ever unregisters this connection's own handle object, so it cannot touch another socket.
+- **Gate:** the six touched daemon test files give **83 pass / 1 skip / 0 fail**. `bun run lint`: clean (1307 files). `bun run typecheck`: clean. I did not re-run the full suite.
+
+## Execution
+
+### R4 — the daemon dial-out (as built) — *— claude-sonnet-4-5, 2026-11-15*
+
+#### Load-bearing check: PASSED, before any edit
+
+R4 stands on the plan's own assumption: *a phone stream carried by the relay can
+enter the daemon's EXISTING device path unchanged — the Noise responder and
+`Connection` need only a closable `DuplexChannel`*. R3 proved the in-memory half
+(`createChannelPair`); what was NOT yet proved is the SOCKET half, and that is
+what decides whether R4 is plumbing or a new path.
+
+Script: `.tentacle/tmp/mobile-relay/r4-loadcheck.ts` (scratch, gitignored). It
+runs R2's REAL relay (`startRelay` on `127.0.0.1:0`), a real daemon control
+socket (`hello` → `ready`), a real phone `WebSocket` at `<relay>/d/<id>/e2e`, a
+real accept leg at `/v1/accept`, and hands that leg to `acceptDevice` unchanged:
+
+```
+$ bun .tentacle/tmp/mobile-relay/r4-loadcheck.ts
+relay: ready fgkrQr2v
+daemon control frame: {"t":"ready","v":1,"id":"fgkrQr2vTa2JTEe75Kl66v","features":[]}
+ready: ready | id agrees: true (fgkrQr2vTa2JTEe75Kl66v)
+relay: dial-open fgkrQr2v W4fYxo-X
+daemon control frame: {"t":"open","stream":"W4fYxo-XC9zi4ycY3Gz6zw","ip":"127.0.0.1"}
+accept leg open
+relay: accept W4fYxo-X fgkrQr2v
+initialize through the relay: 24 | session/list ok: true
+connections built: 1 | authority live: 1
+audit: [ "device-open cfa570c6" ]
+phone closed: 1000 | accept leg closed: true
+```
+
+So: `ready.id` agrees with `relayIdOf(secret)`; a full Noise handshake completes
+over the splice; `initialize` (24) and `session/list` are served by a real
+`Connection` built by `acceptDevice`; the authority holds ONE live handle; and
+closing the phone leg closes the daemon's accept leg. **The assumption holds**,
+so R4 is the control socket + policy + plumbing, exactly as the plan says. No
+STOP.
+
+Baseline before the slice (this branch, code untouched):
+`bun test packages/daemon/test/{relay-link-policy,relay-link}.test.ts` → both
+files absent (see "Red before green").
+
+#### What landed
+
+1. **`packages/daemon/src/relay-link-policy.ts`** (new, 218 lines, PURE: no
+   sockets, no timers, no fs — AGENTS §7). Every decision about WHEN lives here,
+   with the clock and randomness injected: `relayRetryAfter(reason, attempt,
+   seeds)` (1 s → 60 s cap, FULL jitter `min(nominal, 1 + floor(random·nominal))`
+   so a wait is never 0 ms), the two decided holds (`version` → 1 h with a
+   notice, `replaced` → 5 min with the "copied config dir?" notice), the
+   never-retry case (`unsupported-url` → `Infinity`), `nextAttempt`,
+   `reasonForErrorCode` (`version` its own; `busy`/`invalid`/**any unknown code**
+   an ordinary retry, per review R1 finding 1), `relayWanted` (Owner Q1), and
+   `createRelayLiveness` (25 s ping / 10 s pong deadline, intervals injectable).
+2. **`packages/daemon/src/relay-link.ts`** (new, ~590 lines): the socket
+   plumbing. One control socket to `<relay>/v1/daemon` (`hello` in the FRAME, never
+   the URL), `ready` validated with `RelayToDaemonFrameSchema` + **`ready.id ===
+   relayIdOf(secret)`**, then `open` → dial `<relay>/v1/accept` → send the token →
+   wrap the Bun WebSocket in a `DuplexChannel` → `acceptDevice` (R3's own code:
+   Noise, device registry, `Connection`, revoke handle — nothing duplicated).
+   Plus the limiter key
+   `relay:<open.ip>` on the SAME `HandshakeLimiter` the direct route uses
+   (`begin` before the accept dial, `end` exactly once), `isInboundFrameTooLarge`
+   as the decode guard on both legs, `relaySocketOptions`-style close handling
+   (an oversize close is an ordinary jittered backoff — F7's fallback), audit
+   lines `relay-ready <id8>` / `relay-down <reason>` / `relay-open` /
+   `relay-accept-failed` / `relay-replaced <id8>`, and `stop()` closing control +
+   every accept leg + all timers (idempotent). Also `bunRelayDialer()`, the real
+   dialer (with the `readyState` replay a socket that opens before its handlers
+   are attached needs), injected through `dial` so a test drives a fake relay.
+3. **`packages/daemon/src/device-authority.ts`**: `wantsReachability()` — a
+   READ-ONLY, side-effect-free sibling of `authorize`: re-reads the store
+   (a device paired a second ago counts at once), `false` on a broken store,
+   otherwise `devices.size > 0 || hasWindow()`.
+4. **`packages/daemon/src/index.ts`**: exports both new modules.
+5. **Tests**: `packages/daemon/test/relay-link-policy.test.ts` (15 tests) and
+   `packages/daemon/test/relay-link.test.ts` (15 tests, against R2's real relay
+   on `127.0.0.1:0`, plus two hand-written fake relays: a lying one and a
+   byte-flipping one).
+
+#### Drift from the Implementation, and why
+
+- **`acceptDevice` is called on the accept leg's `open`, not before the dial.**
+  The plan says "dial `/v1/accept`, wrap the Bun WebSocket in a closable
+  `DuplexChannel`, call `acceptDevice`". Doing it in that exact order is a bug for
+  a real client: `acceptDevice` installs the channel's `setOnMessage`, and a Bun
+  client socket can deliver the phone's buffered message 1 before our handlers
+  are attached (the relay flushes it on `join`). The accept leg therefore
+  registers `setOnMessage`/`setOnClose` FIRST, then sends its `accept` frame, then
+  calls `acceptDevice`. Same seam, same code, correct ordering.
+- **One `relay-down <reason>` line per cause, not one per retry.** A 60 s backoff
+  would otherwise write the same line every minute forever. The set clears on a
+  successful `ready`.
+- **`relay-link.ts` owns the limiter slot's once-guard**, mirroring `ws-server`'s
+  `endSlot` (R3's drift) rather than relying on `acceptDevice`'s settle alone:
+  the leg's close and the responder's settle are two paths to one slot.
+  **This is the one place I found a vacuity trap** — see the mutation table.
+- **`unsupported-url` stops the link** instead of retrying: R5a refuses to START
+  on such a URL, so the link's own check is defence in depth and can never be
+  fixed by waiting.
+
+#### Red before green
+
+Both test files were run against the module ABSENT (moved aside, then restored —
+no `git checkout`):
+
+```
+$ mv packages/daemon/src/relay-link-policy.ts …
+$ bun test packages/daemon/test/relay-link-policy.test.ts
+error: Cannot find module '../src/relay-link-policy.ts' …   0 pass  1 fail  1 error
+
+$ mv packages/daemon/src/relay-link.ts …
+$ bun test packages/daemon/test/relay-link.test.ts
+error: Cannot find module '../src/relay-link.ts' …           0 pass  1 fail  1 error
+```
+
+Green after (the narrow files):
+
+```
+$ bun test packages/daemon/test/relay-link.test.ts packages/daemon/test/relay-link-policy.test.ts
+ 30 pass  0 fail   84 expect() calls
+```
+
+Neighbouring device files, untouched and still green (R3's contract intact):
+
+```
+$ bun test packages/daemon/test/{relay-link,relay-link-policy,device-accept,device-authority,ws-device-route,ws-server}.test.ts
+ 88 pass  1 skip  0 fail
+```
+
+#### The tests, and what each pins
+
+`relay-link-policy.test.ts` (15): the backoff ceiling doubling 1→2→4→…→**60 s
+cap**; FULL jitter (different `random()` → different, smaller wait; never 0 ms);
+two daemons jittering apart (F3's herd); no notice on an ordinary retry; the
+`version` 1 h hold (not jittered, not attempt-dependent) and its one notice; the
+`replaced` 5 min hold and its "copied config dir" notice; `unsupported-url` →
+`Infinity`; an unknown refusal code behaving like `invalid` (forward compat);
+`nextAttempt` growing on ordinary failures and resetting on the decided holds;
+`relayWanted`'s four cases; and liveness — a ping due at the interval, a missed
+pong expiring the link, a pong clearing it, no deadline before the first ping,
+and injectable intervals.
+
+`relay-link.test.ts` (15): **the end-to-end proof** (a paired phone completes
+Noise over R2's real relay, runs `initialize` + `session/list`, and the audit
+carries `relay-ready`, `relay-open`, `device-open`); **revoke closes the relay
+stream within one poll** (F11, via the same handle); the reachability gate (no
+device and no window ⇒ the relay's registry stays EMPTY, no socket opened) and a
+pairing window alone being enough (F17); a lying relay's wrong `ready.id` dropped
+(F7); an abandoned stream freeing its slot exactly ONCE (counting limiter) and a
+completed one ending it once too; an unknown key denied over the relay (F5/F6);
+`stop()` closing control + legs, idempotently; an `open` flood refused past the
+shared cap with the link still healthy (F7); a **flipped byte in a spliced frame**
+closing the channel with no `Connection` and nothing recorded (F5); a
+**dead-but-open** control path dropped on the missed pong and dialled again
+(F2/R0(c)); an unusable URL never dialling; and `error:version` scheduled at
+exactly 3 600 000 ms with ONE line (F13).
+
+#### Mutation checks (each run on the edited file, then reverted — shasum matched)
+
+| # | mutation | test that caught it | result |
+|---|---|---|---|
+| 1 | `if (false)` instead of `frame.id !== id` (trust a lying relay's id) | "a wrong id drops the link" | **red**: timed out waiting for `relay-down wrong-id` |
+| 2 | `if (false)` instead of the `relayWanted(...)` gate | "no device and no pairing window opens NO socket" | **red**: `Expected: false / Received: true` (`isConnected`) |
+| 3 | `limiter.begin(...) && false` (no admission check on an `open`) | "an `open` flood …" | **red**: timed out waiting for any `relay-accept-failed` |
+| 4 | `endSlot` without its once-guard (double `limiter.end()`) | "an abandoned stream calls end() once" — **the FIRST version of this test PASSED under the mutation**, because `HandshakeLimiter.end` clamps at 0, so a double call is invisible through `inFlight`. Added a counting limiter to assert the exact property (AGENTS §9, non-vacuity by mutation) | **red**: `Expected: 1 / Received: 2`, both tests |
+| 5 | drop `Math.min(RELAY_BACKOFF_CAP_MS, …)` | "the ceiling doubles per attempt and stops at the cap" | **red**: `Expected: 60000 / Received: 64000` |
+| 6 | `reason === "version" && false` (no 1 h hold) | policy test **and** the F13 link test | **red**: `Expected: 3600000 / Received: 501` (both) |
+| 7 | `pingSent` never arms the deadline | "a ping is due … and a missed pong expires the link" | **red**: `Expected: true / Received: false` |
+| 8 | `wantsReachability()` → `return true` | "no device and no pairing window …" | **red**: `Expected: false / Received: true` |
+| 9 | `wantsReachability()` → `return devices.size > 0` (drop the window) | "a pairing window alone is enough to dial" | **red**: timed out waiting for registration |
+| 10 | `if (false)` instead of `live.expired(at)` (never drop a dead path) | "a dead-but-open control path reconnects" | **red**: timed out waiting for `relay-down timeout` |
+
+Each mutation was reverted and the file's `shasum` compared against a pristine
+copy (all matched). The tree contains no leftover mutation.
+
+#### Acceptance checks the plan names
+
+- **End-to-end through R2's real relay, serving a session**: yes, the first test
+  (`initialize` 24 + `session/list`) — this is the plan's "the end-to-end proof".
+- **Revoke closes the relay stream within one authority poll**: yes.
+- **`ready` with a wrong id → link dropped**: yes, plus mutation 1.
+- **`wantsReachability() === false` → no socket opened**: yes (the relay's own
+  registry is asserted empty), plus mutations 2 and 8/9.
+- **Fake hostile relay: flips a byte in a spliced frame → channel closes, no
+  `Connection` survives**: yes.
+- **`open` flood → limiter refusals, daemon healthy**: yes, plus mutation 3.
+- **Missed pong → reconnect**: yes (a new test beyond the plan's list, because
+  R0(c) is the evidence that makes it load-bearing).
+
+#### Gate (R4): green
+
+```
+$ bun run typecheck   # tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay
+(clean)
+
+$ bun run lint        # biome check .
+Checked 1311 files in 400ms. No fixes applied.
+
+$ bun test
+ 9446 pass  3 skip  0 fail   13 snapshots, 77387 expect() calls
+ Ran 9449 tests across 679 files
+```
+
+The three skips are AGENTS §6's pre-existing opt-ins (live-k8s, live-docker,
+real-socket keepalive) — no new skip. **No `protocol.json` regeneration and no
+`protocol.d/` note**: R4 adds no RPC method, no `session/update` variant and no
+schema (`PROTOCOL_VERSION` stays 24; R4 only READS `@tentacle/protocol`'s relay
+frames). **No new `changelog.d` fragment**: R4 is internal plumbing with no
+user-visible effect until R5a wires `serve`, and
+`changelog.d/mobile-relay.added.md` (already on this branch, R5a's) covers the
+relay's whole user-visible surface.
+
+**One flake observed, not mine.** A first full-suite run reported 2 failures in
+`packages/daemon/test/serve-log-store.test.ts` ("S2 — the overlay …"), files with
+**zero diff vs HEAD** (`git diff --stat HEAD` empty) and untouched by R4. That
+file passes 22/22 in isolation (three consecutive runs), and the re-run of the
+full suite above is clean (9 446 / 3 / 0), so it is a timing flake in a parallel
+run, not a regression from this slice.
+
+**Not verified (one line each).**
+- The real `wss://relay.tentacle.so` through Caddy, and a real iPhone on cellular
+  — that is R7/D and R6's Maestro flow, both out of R4's scope.
+- `relay.json` creation, `serve` wiring, `--relay`/`--no-relay` and the record's
+  address ordering are R5a's; R4 takes the secret as an option and never touches
+  disk.
+- F7's memory bound remains OPEN exactly as the plan records it: R0(b)/(d) show a
+  Bun client cannot cap a frame, so the link bounds the DECODE cost only and its
+  fallback is the oversize backoff (mutations 5 and 10 pin the waits that carry
+  it).
+
+## Review
+
+### R4 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Fresh context, but a different model family from the executor (deepseek / sonnet).
+
+**Gate (touched files):** `relay-link-policy.test.ts` + `relay-link.test.ts` 30 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean.
+**Mutation:** I skipped the `ready.id` check (`relay-link.ts:286`), and "a wrong id drops the link" FAILED (14/15 passed). I reverted it, and `cmp` shows the file is byte-identical.
+
+Findings:
+1. **HIGH — F7's fallback is not implemented. A hostile relay can loop us into the allocation about once a second** (`relay-link.ts:279-283`, `:298`, `:583`). Bun's client never closes with 1009, because it has no `maxPayloadLength` (R0(d)). So the `"oversize"` reason is never reached. An oversize control frame goes through `parseFrame` → `undefined` → `schedule("closed")`. Then `ready` resets `attempt = 0` (`:298`). Repro (fake dialer, random 0.99): relay sends `ready` + a 2 MiB frame, five times. The retry delays are `[991, 991, 991, 991, 991]` ms, and every cycle logs `relay-ready` / `relay-down closed`. Fix: on an oversize inbound frame, use a backoff that a following `ready` does not reset. For example, keep a separate oversize counter or hold time.
+2. **MEDIUM — `open` is accepted before `ready`** (`:321-324`; `ready` is only `void ready`, `:326`). With the fake dialer, `open` sent with no `ready` at all dials `/v1/accept` and takes a limiter slot. So the `ready.id` check does not gate anything: a relay that never sends `ready` gets exactly what a lying one would. Noise still protects access, so this is not an auth bypass. But the plan's F7 says "wrong id → link dropped", and that claim does not hold. Fix: drop `open` (or close the link) until `ready` has been accepted. Add a test: open-before-ready → no accept dial.
+3. **MEDIUM — when the relay closes the control socket, the daemon kills every live phone session** (`:336-339`). This contradicts F2 and the relay's own semantics: `apps/relay/src/relay-core.ts:394` says "its streams live on, F2". The comment at `:337` ("every stream is already dead") is a false premise. It is also inconsistent within the file: the timeout, malformed, error and replaced paths go through `dropControl` first, so the guard at `:329` returns early and those streams survive. Failure: one control-socket blip (the relay recycles control, a NAT drop surfaced as a close) detaches every phone mid-turn, though their splice legs are healthy. Fix: do not `dropStreams` on control close (keep it for `stop()`), and add a test pinning it.
+
+Holds: one session path (the accept leg is a `DuplexChannel` into `acceptDevice`, with no second loop); no lock around `Connection`; the limiter slot is freed exactly once (`endSlot` is guarded); the secret goes only in the `hello` frame, never in the URL; `wantsReachability` is read-only, and a broken store → false; `stop()` clears timers and legs.
+Attacks tried: the three above (all confirmed by repro or code); duplicate stream token (dropped, ok); invalid URL (never dials, ok).
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-15*
+
+All three R4 findings fixed, each with its test **RED on the unfixed code first**
+and each mutation-checked by reverting the fix (`shasum` of both source files
+identical before the mutations and after: `relay-link.ts`
+`9d28c9a2…`, `relay-link-policy.ts` `1db19ae7…`).
+
+**Reproduced first** (scratch `.tentacle/tmp/mobile-relay/{fix1,fix3}-repro.ts`, a
+fake dialer so every frame is delivered by hand — the reviewer's own setup):
+
+```
+before fix: finding1: delays=[991,991,991,991,991] down=["relay-down closed" ×5]
+            finding2: acceptDials=1 openStreams=1 audit=[]
+            finding3: streamsBefore=1 legClosed=true streamsAfter=0
+after  fix: finding1: delays=[991,1981,3961,7921,15841] down=["relay-down oversize" ×5]
+            finding2: acceptDials=0 openStreams=0 audit=["relay-accept-failed"]
+            finding3: streamsBefore=1 legClosed=false streamsAfter=1
+```
+
+**F1 (HIGH) — an oversize control frame has its own backoff counter.** Two
+defects made the review's loop: `"oversize"` was **unreachable** on the frame
+path (`relay-link.ts:279-283`: an oversize frame went `parseFrame` → `undefined`
+→ `schedule("closed")`), and even when reached the wait read the shared `attempt`
+counter, which an accepted `ready` deliberately resets. Fix at `relay-link.ts:292-300`
+(an explicit `isInboundFrameTooLarge(data)` branch → `schedule("oversize")`,
+before the malformed branch) plus `relay-link-policy.ts:129-150`
+(`backoffCounterFor(reason, attempt, oversizeStrikes)`, the decision in the pure
+module per §7) and `relay-link.ts:161-167,219-225` (a separate `oversizeStrikes`
+that grows per strike and is **not** reset by `ready`, `:317-322`).
+A benign relay never sends an oversize control frame, so it never consults it.
+
+**F2 (MEDIUM) — `open` needs an accepted `ready`.** `relay-link.ts:347-356`: an
+`open` before the accepted `ready` is refused with `relay-accept-failed`, so no
+accept dial and no limiter slot. That is what makes the `ready.id` check above it
+mean something: a relay that never registers now gets what a lying one gets.
+Noise still protects access either way (unchanged) — this closes the plan's F7
+"wrong id → link dropped" claim, which `open`-first had been bypassing.
+
+**F3 (MEDIUM) — a control close no longer kills live streams.** `relay-link.ts:366-374`:
+`dropStreams()` removed from the control socket's `setOnClose`; the false-premise
+comment ("every stream is already dead") replaced with the relay's own semantics
+(`apps/relay/src/relay-core.ts:394`, "its streams live on, F2"). `stop()` still
+closes every leg, and a leg still closes itself when its phone or the relay drops
+it. The timeout/malformed/error/replaced paths were already consistent with
+this (`dropControl` first, so the `control !== host` guard returned early).
+
+**Red before green (the exact run, no fix applied — 15 pass / 4 fail):**
+
+```
+error: no retry was scheduled        (fail) … a `ready` after an oversize frame does not reset the oversize backoff
+error: no second retry was scheduled (fail) … the oversize backoff outlives the `ready` that follows it
+Expected length: 0 / Received length: 1  (fail) … no `ready` at all means no accept dial and no limiter slot
+Expected: false / Received: true         (fail) … the relay dropping control does not detach a phone mid-session
+```
+
+(The first two failed on `no retry was scheduled` because an oversize frame took
+the malformed path and closed *without* arming a retry — the fix's own new
+branch is what schedules one; after it, both read `Expected: > 991 / Received:
+991`, which is the review's `[991, …]` exactly. The second oversize test
+originally asserted `>=` and was **vacuous** — mutation A proved it: it stayed
+green when the reason was folded back into `"closed"`. It now asserts a strict
+`>` and `relay-down oversize`, and fails.)
+
+**Mutations (each run against the fix in place, then reverted to the shasum above):**
+
+- **A — fold oversize back into `"closed"`** (delete the new
+  `isInboundFrameTooLarge` branch): both oversize tests fail
+  (`Expected: > 991 / Received: 991`), the other 17 pass. This is F1's first
+  defect.
+- **B — the shared counter** (`backoffCounterFor` returns `attempt`): the same
+  two oversize tests fail (`Expected: > 991 / Received: 991`) — F1's second
+  defect, i.e. a fix that only names the reason would still loop.
+- **C — `if (false)` for the `ready` guard on `open`**: the F2 test fails
+  (`Expected length: 0 / Received length: 1`), 18 pass.
+- **D — put `dropStreams()` back in the control close handler**: the F3 test
+  fails (`Expected: false / Received: true`), 18 pass.
+- **E — mutation on the pure policy test** (`backoffCounterFor` → `attempt`):
+  "an oversize strike reads a counter a `ready` cannot reset" fails
+  (`Expected: 3 / Received: 0`).
+
+**Drift from the review's suggested fix, and why:** none in substance.
+F1: the review offered "a separate oversize counter or hold time" — I took the
+counter (a hold time would need a clock read in the socket file for a decision
+the pure module already owns). F3: "do not `dropStreams` on control close (keep
+it for `stop()`)" — exactly as written.
+
+**Test-harness fix found in passing (not a product bug):** the new
+`fakeHarness().control()` first returned `hosts[0]`; after a retry the link dials
+a **new** control socket, so delivering the next cycle's frames to the dead one
+made both oversize tests fail on a harness mistake rather than a product one. It
+now picks the newest `/v1/daemon` host (`relay-link.test.ts:399-407`). Worth
+naming because the first failure looked like a product failure.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/relay --noEmit` clean ·
+`bun run lint` clean (1311 files, no fixes) · **`bun test` 9451 pass / 3 skip / 0
+fail** (9454 tests, 679 files) — the 3 skips are the pre-existing opt-ins
+(live-k8s, live-docker, real-socket keepalive), no new skip. The touched files:
+`relay-link-policy.test.ts` (16 pass) + `relay-link.test.ts` (19 pass) = 35 pass /
+0 fail; `bun test packages/daemon/test/` = 1046 pass / 1 skip / 0 fail.
+`git diff --stat`: `relay-link-policy.ts` +24, `relay-link.ts` +49/−7,
+`relay-link-policy.test.ts` +28, `relay-link.test.ts` +226 — no other file, so
+no wire, schema, `protocol.json`, `apps/relay` or `changelog.d` change is due
+(this is a fix to unshipped R4 code on the same branch, and
+`changelog.d/mobile-relay.added.md` already covers the relay's user-visible
+surface; no `protocol.d` note because nothing on the wire changed).
+
+**Not verified:** the real-relay shape of an oversize control FRAME — R2's relay
+closes a control socket that exceeds `maxFrameChars` rather than forwarding it,
+so the frame path proved here is the fake relay's (the close-code-1009 path,
+`oversizeHint`, is unchanged and still covered by `schedule`); and finding 3's
+"streams live on" against a real NAT blip rather than a fake `setOnClose` call.
+Both are the reviewer's own framing and neither gates the fix.
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS** (APPROVE-WITH-NITS). Diff reviewed: `git diff HEAD~1` (b05d538f).
+
+**Gate:** `relay-link-policy.test.ts` + `relay-link.test.ts` 35 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean.
+
+1. **Finding 1 (oversize loop): fixed.** An oversize frame is now caught before parsing (`relay-link.ts`, `isInboundFrameTooLarge` → `schedule("oversize")`). It has its own `oversizeStrikes` counter, which `ready` does not reset. The round-1 repro (`ready` + 2 MiB, ×5) now waits `[991, 1981, 3961, 7921, 15841]` ms; before the fix it was `991` ×5. **Mutation:** I made `counter = attempt`, and both "oversize backoff outlives `ready`" tests FAILED.
+2. **Finding 2 (`open` before `ready`): fixed.** It is refused and audited `relay-accept-failed`; the repro now makes no `/v1/accept` dial. **Mutation:** I disabled the `!ready` guard, and "no `ready` at all means no accept dial" FAILED.
+3. **Finding 3 (control close kills streams): fixed.** `dropStreams` is removed from the control `onClose`, and `stop()` still closes the legs. **Mutation:** I re-added `dropStreams()`, and "the relay dropping control does not detach a phone" FAILED.
+
+Every mutation was reverted from a backup; `git status` is clean.
+
+Nits (not blocking): `oversizeStrikes` never decays, so a benign relay that once sent one oversize frame keeps a larger first oversize wait (harmless, and that is the intent). `noteSent` (`relay-link.ts`) is dead. Pre-existing and out of scope: nothing on the daemon side pings an accept leg, so if the daemon's own network silently dies, a leg can stay half-open on the daemon's side (R0(c)). The relay's `sendPings` reaps only the relay side. Track it for R5a/R6.
+
+## Execution
+
+### R5a + R5b — `serve` wiring, the relay address in the record and the QR, `devices reset` — *— claude-opus-5-5, 2026-11-15*
+
+#### Load-bearing check: PASSED, before any edit
+
+The plan's own assumption, re-run rather than trusted: *a phone stream carried by
+the relay can enter the daemon's EXISTING device path unchanged — the Noise
+responder and `Connection` need only a closable `DuplexChannel`*. Both halves
+were re-executed against this branch's code before I touched anything —
+`.tentacle/tmp/mobile-relay/r4-loadcheck.ts` (R4's own script, unchanged):
+
+```
+$ bun .tentacle/tmp/mobile-relay/r4-loadcheck.ts
+ready: ready | id agrees: true (fgkrQr2vTa2JTEe75Kl66v)
+relay: accept LcPsXqSp fgkrQr2v
+initialize through the relay: 24 | session/list ok: true
+connections built: 1 | authority live: 1
+phone closed: 1000 | accept leg closed: true
+```
+
+So the seam R5a plugs into exists and works. **No STOP.**
+
+Two things this sweep found in the plan, fixed in the doc's own terms rather than
+worked around (see *Drift*): the record's ordering claim in the Preconditions was
+slightly wrong (the QR had no rule for a record's `addresses` AT ALL — that is
+exactly R5b's gap, and `discovery.ts` had to stop being a second opinion about the
+order), and `relay.enabled`/`relay.url` need `defaultText` rather than
+`default`+`resolved`, because `serve` applies them, not `resolveConfig` (T2b's
+category, like `engine` and `rm`).
+
+#### Red before green
+
+A new test file's first failure is `Cannot find module`, which is NOT the red
+AGENTS §9 asks for. So the properties were shown RED on the pre-slice tree first,
+by a probe that asserts them against the code that existed —
+`.tentacle/tmp/mobile-relay/r5a-red-baseline.ts`:
+
+```
+$ bun .tentacle/tmp/mobile-relay/r5a-red-baseline.ts
+1. config accepted a `relay` section: false — Error: ENOENT: ... config.jsonc
+2. record addresses: ["wss://relay.tentacle.so/d/TymdbUsYFdj-1KY775alyL/e2e"]
+3. handle.relay present: true
+4. pair's QR addresses for a loopback serve with a relay address: []
+```
+
+Line 4 is R5b's gap proven on the old code: a loopback `serve` (the DEFAULT
+`--host 127.0.0.1`) whose record carries a perfectly dialable
+`wss://relay…/d/<id>/e2e` produced an EMPTY QR, so `pair` refused — i.e. the relay
+existed and no phone could pair. (Lines 1–3 were taken with the R5a sources moved
+aside; the config line reads ENOENT because the scaffold was off, so 1–3 are
+indicative, and 1 is re-proven by the key-docs T1 red below.)
+
+The module-level red, per file, on the shipped tests:
+
+```
+packages/config/test/key-docs.test.ts, before the two entries:
++ "add an entry for "relay" in packages/config/src/key-docs.ts",
++ "add an entry for "relay.enabled" in packages/config/src/key-docs.ts",
++ "add an entry for "relay.url" in packages/config/src/key-docs.ts",
+(fail) T1 … the registry's paths equal the schema's leaf AND section paths
+```
+
+and the `pair-addresses` block went red on exactly one assertion, which was a real
+bug in my first cut of the source (the wildcard branch `continue`d past the
+record's own addresses), not a test mistake:
+
+```
+(fail) a record's own addresses go in the QR … direct first, relay last:
+  Expected: "ws://192.168.1.8:4000/e2e" / Received: (missing)
+```
+
+#### What landed
+
+**R5a — `serve` wiring (dependency order: config → secret → decision → serve → CLI).**
+
+1. `packages/config/src/schema.ts:415-426` — the `relay` section (`enabled`,
+   `url`), strip-free like its neighbours, plus `defaults.ts` (the commented
+   scaffold), `resolve.ts` (the resolved field + the pass-through),
+   `load.ts` (its non-enumerable twin), and two `key-docs.ts` entries. `defaultText`
+   rather than `default`, because `serve` applies these defaults (T2b's shape).
+2. `packages/cli/src/relay-secret.ts` (new, 168 lines) — `<store>/relay.json`:
+   `{ v: 1, secret }`, mode **0600**, created with `O_EXCL` under the store lock
+   `serve` already holds, `fsync`ed before it is trusted. An unknown `v` is
+   `unsupported-version`, a bad shape is `corrupt`, an unreadable one is
+   `unreadable` — all three REFUSE and leave the bytes alone (AGENTS §7's on-disk
+   rule), and a `random` seam pins the bytes for a test.
+3. `packages/cli/src/serve-relay.ts` (new, PURE) — `relayChoice`: `--no-relay` ›
+   `--relay <url>` › `relay.enabled`/`relay.url` › on at `DEFAULT_RELAY_URL`, and a
+   URL `isRelayUrl` refuses (a non-loopback `ws://`, `http(s)://`, an empty string)
+   comes back as `refused` with the reason, never as a silent `off`.
+4. `packages/cli/src/serve.ts` — `ServeOptions.relay`, resolution in `startDaemon`
+   BEFORE the store lock (so a refused URL writes nothing and binds nothing),
+   then in `listen`: read/create the secret, append the derived
+   `relayAddress(url, relayIdOf(secret))` **last** to the record's `addresses`
+   (deduped against `--address`), start `startRelayLink` with the SAME
+   `HandshakeLimiter` the direct route charges, and `relayLink.stop()` before the
+   record is removed. An unusable `relay.json` turns the relay off with ONE
+   `onNotice` line and the daemon keeps serving. `ServeHandle.relay` exposes the
+   link.
+5. `packages/daemon/src/ws-server.ts` — `RunningServer.limiter`, so the accept leg
+   shares the direct route's `maxConcurrent` (F7) instead of inventing a second cap.
+6. `packages/cli/src/flags.ts` + `main.ts` — `serve --relay <url>` (a value) and
+   `serve --no-relay` (a bool), declared `conflicts` (both is an error, not a
+   guess), passed through as `relay: { flagUrl, noRelay }`, and the usage text (the
+   `serve` summary line and the `Remote control:` block).
+
+**R5b — the QR and the reset.**
+
+7. `packages/cli/src/pair-addresses.ts` — `recordAddressList(record, interfaces)`
+   (new, exported): a record's bind-derived URLs, then its OWN `addresses`
+   (`serve --address` **and** the relay's `/d/<id>/e2e`), each filtered by
+   `isPairingAddress` because a record is a file a same-uid process can plant
+   — deduped keeping the FIRST. `pairAddresses` composes those lists per record
+   and then applies the 8-cap as a **refusal**.
+8. `packages/cli/src/discovery.ts` — `addressesOf` now uses the SAME
+   `recordAddressList` (capped, keeping the first) instead of re-merging the
+   record's own addresses on top of `pairAddresses`' output. That second merge
+   became a double-add the moment `pairAddresses` learned the rule, which is how
+   the "cap keeps the FIRST" test caught it.
+9. `packages/cli/src/devices-cmd.ts` — `removeRelaySecrets(configDir)`: every
+   `<configDir>/daemon/*/relay.json` goes on `devices reset`, counted, with one
+   stderr line naming the count and "restart every `tentacle serve`". A store with
+   no `relay.json` is not counted and not touched.
+
+#### Drift from the Implementation, and why
+
+- **`recordAddressList` is exported, and `discovery.ts` changed with it.** The
+  plan lists `pair-addresses.ts` and `discovery.ts` as separate readers of the
+  same rule, and the moment the record's own addresses entered that rule the
+  second reader had to stop re-deriving them: `pairAddresses`' output plus
+  `record.addresses` double-counts, and the 8-cap then dropped the FIRST address.
+  The cap difference is deliberate and now stated in one place: `pair` REFUSES
+  over the bound (a human's `--address` would be the one dropped), the
+  announcement TRUNCATES (a snapshot line must always be produced).
+- **A record's own addresses are FILTERED, `--address` values are REFUSED.** The
+  plan says "cap = refusal" for the QR and says nothing about a record's own
+  values. A record is a FILE (the same reasoning `discovery.ts` already wrote
+  down for F10), so a planted junk URL must not make a human's `pair` fail; a
+  planted *dialable* one is no worse than the LAN address beside it, because the
+  phone still has to complete Noise against this computer's key.
+- **`relayChoice` treats a config URL that nobody reads as not-a-URL.** With
+  `--relay <url>` in force the config's `relay.url` is replaced, so a stale
+  `ws://example.com` in the file does not refuse the start. Refusing on a value the
+  process will never dial would be a rule about a file, not about behaviour.
+- **`--relay` and `--no-relay` are a declared `conflict`.** The plan does not say
+  what both together mean; a usage error is the only answer that does not guess at
+  which one the user meant.
+- **`serve.ts` reads the secret BEFORE the record and starts the link AFTER it**
+  (the plan's order is "append the address, start the link"). Both are needed for
+  observable reasons: the address must be in the record at write time, and the
+  link must not register an id before `pair` can already offer that address.
+- **`RunningServer.limiter` is a one-field addition to `ws-server.ts`, a file the
+  slice table does not list.** R4's link takes a `HandshakeLimiter` it SHARES with
+  the direct route (F7); `listen` builds the server, which builds the limiter, so
+  without the field the only options were a second limiter (F7 lost) or reaching
+  into `ws-server`'s closure. Additive, no behaviour change, pinned by every
+  existing ws-server test.
+
+#### The tests, and what each pins
+
+`packages/cli/test/relay-secret.test.ts` (12): created 0600 once with a 32-byte
+secret; the SAME secret on a second read (the id survives a restart, F15); a pinned
+`random`; a wrong-sized `random` throwing; `v:2` → `unsupported-version` with the
+file's bytes unchanged; a missing `v` → `corrupt`; not-JSON → `corrupt`, file
+untouched; a 16-byte secret → `corrupt`; an unreadable file → `unreadable` (the
+property, not the privilege: CI as root legitimately succeeds); a DIRECTORY in the
+file's place → `unreadable`, never "missing" (so no new id is minted).
+
+`packages/cli/test/serve-relay.test.ts` (23): `relayChoice` — the hosted default,
+`relay.url`, `enabled: true/false`, `--no-relay` over everything, `--relay` over
+`enabled: false` and over `relay.url`, a config URL nobody reads not refusing, and
+the URL rule (`ws://example.com` / `https://` / `""` refused with the reason;
+`ws://127.0.0.1`, `ws://localhost`, `ws://[::1]` allowed). Integration, against
+R2's REAL relay on `127.0.0.1:0` — `relay.json` created and REUSED across a
+restart; the id is `relayIdOf` the file's secret and the address is
+`<url>/d/<id>/e2e`; two projects get different ids; the record's `addresses` end
+with the relay address (`--address` first), a relay-only loopback daemon still
+publishes one, and an `--address` equal to it is not duplicated; `--no-relay` and
+`relay.enabled: false` write no file, publish no address, dial nothing; the config
+URL is used when no flag says otherwise; a paired phone dials and registers (with
+`relay-ready` audited) while an unpaired store stays at ZERO registrations
+(Owner Q1); an unusable URL rejects the start; `devices: false` (pod-like) writes
+no file and dials nothing (F20); an unknown `v` leaves the daemon serving, the
+relay off, one notice, the bytes untouched, and no address published.
+
+`packages/cli/test/pair-addresses.test.ts` (+6, the R5b block): a loopback serve
+with a relay address → QR = [relay]; direct first, relay last; the record's own
+address before `--address`; the same URL twice appears once; a planted junk
+address FILTERED (not a refusal); 9 addresses still a refusal with the count.
+
+`packages/cli/test/pair.test.ts` (+3): the same two rules through `pairCommand`
+(the payload `pair` actually prints), plus the pre-existing wildcard/real-interface
+test untouched.
+
+`packages/cli/test/devices-cmd.test.ts` (+4): `devices reset` deletes every
+project's `relay.json` and says how many ("restart every `tentacle serve`"); a
+declined reset rotates nothing; a machine with no daemon store prints no relay
+line; a store with sessions but no `relay.json` counts as nothing rotated and its
+sessions survive.
+
+`packages/cli/test/serve-discovery.test.ts` (2 adjusted, not weakened): the
+record's `addresses` are now `[--address, relay]`, and the sibling snapshot
+asserts the same order for `self` while B stays a plain `--address` record. The
+`--relay`-off variant is the new "no `addresses` member at all" case, so the
+old-build file shape is still covered.
+
+#### Mutation checks (each reverted from a copy; no `git checkout`/`restore`/`stash`)
+
+Scripts: `.tentacle/tmp/mobile-relay/{mutate,mut2,mut3}.sh`, log
+`.tentacle/tmp/mobile-relay/mut.log`. Every mutation is an exact-string replace,
+the narrow test file is run, the file is restored from a byte copy, and the
+pristine run is the control at the end.
+
+| # | mutation | result |
+|---|---|---|
+| M1 | `if (false)` for `--no-relay` | **red** 2: "`--no-relay`: no relay.json, no link…", "…is off whatever the config says" |
+| M2 | drop the `enabled === false` branch | **red** 2: same two |
+| M3 | an unusable `--relay` URL → `{kind:"off"}` | **red** 3: the two URL refusals + `startDaemon` rejecting |
+| M4 | relay address `unshift`ed instead of appended | **red** 1: "direct addresses first, the relay's appended after them" |
+| M5 | read/create `relay.json` even when the relay is off | **red** 4: both off-cases, the pod case, and the unknown-`v` case |
+| M6 | drop BOTH `relaySecret?.ok === true` checks | **red** 1: "an unknown v … the relay is off" |
+| M7 | no notice on an unusable `relay.json` | **red** 1: same test (its notice half) |
+| M8 | `if (false)` for `record.v !== RELAY_SECRET_VERSION` | **red** 1: "v:2 → unsupported-version" |
+| M9 | drop the `present → parse` branch (always create) | **green** — EQUIVALENT: `O_EXCL` refuses the create and the `EEXIST` path re-reads the file, so the present file still wins. Proven by M9′ below |
+| M9′ | drop the `present → parse` branch AND make the create overwrite (`"w"`, 0644) | **red** 5: "reuses the same secret", both `v:2`/no-`v` refusals, not-JSON, 16-byte secret |
+| M10 | `openSync(path, "w", 0o644)` | **red** 1: "creates it at 0600" |
+| M11 | drop the record's own `addresses` (R5b's gap restored) | **red** 5: the whole R5b block |
+| M12 | a specific host contributes nothing (`else if (false)`) | **red** 4: the explicit-bind block + `--address` ordering |
+| M13 | keep a planted junk record address (`isPairingAddress` dropped) | **red** 1: "FILTERED, never refused" |
+| M14 | reverse the list (the dial order) | **red** 3: wildcard order ×2 + "direct first, relay last" |
+| M15 | `removeRelaySecrets` → `0` | **red** 1: "deletes every project's relay.json" |
+| M16 | drop the `existsSync` guard (counts missing files) | **red** 1: "a store with sessions but NO relay.json counts as nothing" |
+| M17 | reverse the announcement's addresses | **red** 2: "--address appended and deduped" + "the cap keeps the FIRST" |
+| M18 | the link gets a fresh random secret instead of the file's | **red** 5: the id/address identity tests and every record-ordering test |
+
+Two survivors are recorded honestly rather than papered over: **M9 is an
+equivalent mutation** (the `O_EXCL` + `EEXIST`-re-read path already makes the
+existing file win, so the branch it deletes is defence in depth — M9′ shows the
+property it protects is real and tested), and **M6 alone is equivalent** because
+the same guard exists twice on purpose (`relayLinkUrl`'s derivation and the link's
+condition), so deleting one leaves the other; the pair dropped together (M6′) is
+red.
+
+#### Acceptance checks the plan names (R5a + R5b's list)
+
+- `relay.json` created 0600 once, reused on restart (same id) ✔
+- unknown `v` → relay off + notice + file bytes unchanged ✔
+- `serve --no-relay` → no dial and no relay address in the record ✔
+- `--relay ws://example.com` refused ✔ (and at the CLI: `[serve error] cannot
+  start serve: --relay "ws://example.com" must be wss:// …`, exit 1)
+- the record's `addresses` ends with the relay address ✔
+- a `serve` without devices (pod-like options) never dials (F20) ✔
+- `pair` on a loopback record with a relay address → QR = [relay] ✔ (red before)
+- direct before relay ✔ · 9 addresses → refusal ✔
+- `devices reset` removes `relay.json` files ✔ and its message says so ✔ (the
+  plan's "restart serve" wording now reads: "The mobile relay address rotated for
+  N projects. Restart every `tentacle serve` to pick up the new one.")
+
+**End to end, after the wiring** — `.tentacle/tmp/mobile-relay/r5a-e2e.ts`: a real
+`serve` started as `main` starts it (config + `relay: { flagUrl }`), a real paired
+phone dialling the address the QR would carry, over R2's real relay:
+
+```
+1. handle.relay id: E7P7SVIIpxN2CXnXrqaUWr | connected: false
+2. record addresses: ["ws://127.0.0.1:58173/d/E7P7SVIIpxN2CXnXrqaUWr/e2e"]
+3. what pair's QR would carry: ["ws://127.0.0.1:58173/d/E7P7SVIIpxN2CXnXrqaUWr/e2e"]
+4. initialize through the relay: 24 | session/list ok: true
+5. audit: [ "relay-ready E7P7SVII", "relay-open", "device-open cfa570c6" ]
+```
+
+(`connected: false` on line 1 is the read's timing — the sample is taken before
+the first dial resolves; line 5's `relay-ready` is the same link registered.)
+
+#### Gate (R5a + R5b): green
+
+```
+$ bun run typecheck        # tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay
+(clean)
+
+$ bun run lint             # biome check .
+Checked 1315 files in 389ms. No fixes applied.
+
+$ bun test
+ 9498 pass  3 skip  0 fail   13 snapshots, 77534 expect() calls
+ Ran 9501 tests across 681 files
+```
+
+The three skips are AGENTS §6's pre-existing opt-ins (live-k8s, live-docker,
+real-socket keepalive); no new skip. **No `packages/protocol/schema/protocol.json`
+regeneration and no `protocol.d/` note**: `git status packages/protocol/` is empty
+— R5a/R5b add no RPC method, no `session/update` variant and no schema; the
+`relay` control wire's version (`RELAY_PROTOCOL_VERSION`) is R1's, unchanged.
+
+**Changelog:** no NEW fragment. `changelog.d/mobile-relay.added.md` already carries
+this task's one user-visible bullet (R1's, on this branch, per the plan's
+metadata block), and R2's Execution recorded the rule: a second file with the same
+slug+category is the same filename — the one collision the changelog discipline
+forbids — so the correct edit is to EXTEND that bullet. It now names what R5a/R5b
+add to the user's picture (`pair` puts the relay address in the QR after the
+direct ones; `devices reset` rotates it). `CHANGELOG.md` untouched. `TODO.md`
+untouched.
+
+#### Not verified (one line each)
+
+- The real `wss://relay.tentacle.so` through Caddy, and a real iPhone on cellular
+  — R7/D and R6's Maestro flow.
+- R6's staggered race: a relay-only QR is now produced, but that a phone on
+  cellular reaches it within its 15 s deadline is R6's test.
+- The `O_EXCL` race between two `serve`s is unreachable by construction (the store
+  lock is taken before the file is created), so the `EEXIST` branch is exercised
+  only by M9's analysis, not by a test.
+
+## Review
+
+### R5a + R5b — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (3 MEDIUM, no HIGH).
+
+Gate (touched files): `bun test` on relay-secret / serve-relay / pair-addresses /
+pair / devices-cmd / serve-discovery → 115 pass, 0 fail; `bun run lint` clean;
+`bun run typecheck` clean (root + mobile + relay). Full `bun test` not re-run.
+
+1. **MEDIUM — "relay last" holds only per record, not per QR.**
+   `packages/cli/src/pair-addresses.ts:152-155`: `recordAddressList` puts each
+   record's relay address right after that record's bind addresses, and `extra`
+   (`pair --address`) is appended after all records. Repro
+   (`.tentacle/tmp/mobile-relay/order.ts`): two `0.0.0.0` daemons →
+   `[LAN:4000, relay-a, LAN:4001, relay-b]`; one daemon + `pair --address
+   ws://my-tailnet:4000/e2e` → `[LAN, relay, tailnet]`. With R6's 750 ms stagger
+   the phone starts the relay before a direct tailnet/second-daemon path, which
+   contradicts Design §5 / R5b ("direct first, relay last"). Fix: partition relay
+   addresses (`/d/<id>/e2e` on a relay URL) to the end of the deduped list, and
+   add a test for both cases.
+2. **MEDIUM — `relay.json` 0600 test does not hold.**
+   `packages/cli/test/relay-secret.test.ts:62` asserts `mode & 0o777` equals
+   `RELAY_SECRET_MODE`, i.e. against the constant under test. Mutation
+   `RELAY_SECRET_MODE = 0o644` (`relay-secret.ts:34`) → 12/12 **green**: the
+   credential file can turn world-readable with no failing test. (M10 mutated only the
+   call-site literal.) Assert the literal `0o600`.
+3. **MEDIUM — stopping the relay link is untested.** Mutation: delete
+   `relayLink?.stop()` in `serve.ts` `stop` → serve-relay.test.ts 23/23
+   **green**. Design §4 "Stop" (no registration outliving the daemon) is unpinned.
+   `listen` hardwires `bunRelayDialer()` (`serve.ts` relayLink block), so no test
+   can watch the dial. Inject the dialer through `ServeOptions` and assert that
+   the socket closes and no redial happens after `handle.stop()`.
+
+Attacks that found nothing: a malicious repo setting `relay.url` (config is
+`<configDir>/config.jsonc` only, never a project file: `config/src/load.ts:67`);
+`relay.json` read as a session sidecar (the store lists only `*.state.json`,
+`session-log-store.ts:1242`); a refused URL leaking the authority (calls
+`devices?.stop()` before throwing); pod/`--stdio` daemons dialling (only
+`listen` with `devices` starts a link); a planted record address refusing `pair`
+(filtered by `isPairingAddress`). Single broker / one session path: the link gets
+the same `sessionHost` and the shared `server.limiter`. No parallel path.
+Mutations reverted, `git diff` empty.
+
+*— claude-opus-5-5, 2026-11-14* (same model family as the R5a/R5b executor
+(opus): the context is fresh, but blind spots can be shared.)
+
+### Fix round 1 — *— claude-sonnet-4-5, 2026-11-15*
+
+Scope: the three MEDIUMs in the R5a+R5b review (no HIGH). No `git checkout/
+restore/stash`, no commit; every mutation was applied by editing the file and
+restoring it from a copy under `.tentacle/tmp/mobile-relay/` (shasums below).
+
+#### Finding 1 — MEDIUM: "relay last" held per record, not per QR — FIXED
+
+**Root cause.** `pairAddresses` concatenated each record's `recordAddressList`
+(bind addresses, then that record's own addresses) and then appended `--address`,
+so a relay address sat between two records' direct ones
+(`[LAN:4000, relay-a, LAN:4001, relay-b]`) and ahead of a direct `--address`.
+
+**Repro** (`.tentacle/tmp/mobile-relay/order.ts`, run before any edit):
+```
+two daemons: [ "ws://192.168.1.5:4000/e2e", "ws://100.64.1.2:4000/e2e",
+  "ws://127.0.0.1:4100/d/aaa/e2e", "ws://192.168.1.5:4001/e2e",
+  "ws://100.64.1.2:4001/e2e", "ws://127.0.0.1:4100/d/bbb/e2e" ]
+one + extra: [ "ws://192.168.1.5:4000/e2e", "ws://100.64.1.2:4000/e2e",
+  "ws://127.0.0.1:4100/d/aaa/e2e", "ws://my-tailnet:4000/e2e" ]
+```
+
+**Fix.** A new protocol predicate names the one address kind that is a fallback,
+`isRelayDeviceAddress` (`packages/protocol/src/relay.ts:119-150`): a `ws(s)` URL
+whose last three path segments are `d/<isRelayId>/e2e` (a base path is kept, so
+the segments are read from the END). Deliberately stricter than
+`isPairingAddress`, which must accept both kinds because the app dials both.
+`pair-addresses.ts` gained `directFirstRelayLast` (`:127-132`), applied in
+`pairAddresses` (`:176`) over the WHOLE list and in `recordAddressList` (`:225`)
+over one record's — so the QR **and** the daemon's announcement obey it, while
+dedup stays FIRST-wins and each group keeps its input order.
+
+**Tests.** `pair-addresses.test.ts`: "relay addresses go LAST for the whole QR"
+(two records) and "a `pair --address` direct path still precedes the relay"; the
+old "a record's own address comes BEFORE `--address`" was **rewritten** — it
+asserted the very interleaving this finding is about. `discovery.test.ts`: "a
+sibling's relay address is announced LAST", which pins the second reader (see the
+second mutation). `protocol/test/relay.test.ts`: 4 tests for the predicate.
+
+**Red before green** (unfixed code, assertion failures only):
+```
+(fail) … > relay addresses go LAST for the whole QR, not just within one record
+(fail) … > a `pair --address` direct path still precedes the relay
+(fail) … > a record's own DIRECT address comes before --address; a relay one goes last
+ 22 pass  3 fail
+```
+
+**Mutations** (restored from a copy each time; `pair-addresses.ts` sha
+`f812a4bf…` before and after):
+- `directFirstRelayLast([...])` → `unique([...])` in `pairAddresses`: 3 red
+  (`pair-addresses.test.ts` 22 pass / 3 fail).
+- `directFirstRelayLast(list)` → `unique(list)` in `recordAddressList`: **green at
+  first** — the per-record partition was unpinned, which is why the
+  `discovery.test.ts` test was added; after it, 1 red:
+  `(fail) buildDiscovery (pure) > a sibling's relay address is announced LAST`.
+- `segments[len-3] === "d"` → `!== "d"` in the predicate: 6 red (4 in
+  `relay.test.ts`, plus the 3 `pair-addresses` ones).
+
+#### Finding 2 — MEDIUM: the 0600 test asserted the constant under test — FIXED
+
+**Root cause.** `relay-secret.test.ts:62` read
+`expect(statSync(read.path).mode & 0o777).toBe(RELAY_SECRET_MODE)` — the
+assertion moved with the constant, so `RELAY_SECRET_MODE = 0o644` stayed green.
+
+**Fix.** The on-file mode is asserted against the **literal** `0o600`, and the
+constant is pinned separately (`expect(RELAY_SECRET_MODE).toBe(0o600)`) so a
+failure cannot be "fixed" by lowering the constant to match a world-readable
+file (`packages/cli/test/relay-secret.test.ts:65-70`).
+
+**Mutation** (`RELAY_SECRET_MODE = 0o600` → `0o644`, `relay-secret.ts:34`): red —
+`(fail) relay.json: created once, reused afterwards > the first read creates it
+at 0600 with a 32-byte secret`, 11 pass / 1 fail. Restored from a copy
+(`relay-secret.ts` sha `4592210e…`), 12/12 green.
+
+#### Finding 3 — MEDIUM: stopping the relay link was untested — FIXED
+
+**Root cause.** No test observed the link's teardown, so deleting
+`relayLink?.stop()` in `serve.ts` `stop` left `serve-relay.test.ts` green.
+
+**Fix — drift from the review's suggested shape, deliberately.** The review asked
+to inject the dialer through `ServeOptions` "so a test can watch the dial". A real
+observer already exists and is stronger: the R2 relay's own registry.
+`registeredCount` falls when the control socket closes
+(`apps/relay/src/relay-core.ts:394-401`, reached from `server.ts` `close`), which
+IS the property ("no registration outlives the daemon"), and it also covers the
+redial arm — so no `RunningRelayLink`/`ServeOptions` seam was added, and the
+daemon package (shared with R4) is untouched. New test in `serve-relay.test.ts`:
+register, `stop()`, wait for `registeredCount() === 0`, check
+`isConnected()`/`openStreams()`, then sleep past `RELAY_BACKOFF_INITIAL_MS`
+(1 s) and check the registration has not come back.
+
+**Red before green — stated honestly.** I did not run this one red on
+pre-existing code: the defect was a MISSING guard-test, not broken code, so the
+red is the mutation below (the assertion fails exactly when the guard is removed).
+
+**Mutation** (`relayLink?.stop();` deleted from `serve.ts` `stop`):
+```
+error: timed out waiting for the unregistration
+(fail) serve: stop() takes the registration down with it (Design §4 "Stop")
+ 23 pass  1 fail
+```
+Restored from a copy (`serve.ts` sha `3abd6eed…`), 24/24 green.
+
+#### Gate
+
+`bunx tsc --noEmit` → clean (exit 0). `bun run lint` → `Checked 1315 files …
+No fixes applied` (0 errors, 0 warnings; two lines of mine failed first — a
+Biome quote style and `useTemplate` — fixed before the run above). `bun test` →
+**9506 pass, 3 skip, 0 fail** across 681 files (384 s); the 3 skips are the
+documented opt-in ones (live-k8s, live-docker, slow keepalive). `bun run
+typecheck` (root + mobile + relay) → clean.
+
+#### Not verified (one line each)
+
+- The iOS app's own ordering after R6's stagger is unchanged by this diff — only
+  the list we hand it is; confirming needs a device (R6's scope).
+- `isRelayDeviceAddress` does not recognise a relay-shaped URL whose id segment is
+  not `RELAY_ID_LENGTH` chars (`/d/short/e2e` is treated as DIRECT and keeps its
+  position); nothing produces one (`relayAddress` refuses), so it is a shape rule.
+
+#### Behaviour the review's other attacks did not reach (unchanged by this round)
+
+The five attacks it listed (a malicious repo setting `relay.url`, `relay.json`
+read as a sidecar, a refused URL leaking the authority, pod/`--stdio` daemons
+dialling, a planted record address refusing `pair`) all still hold: this round
+touched the ORDER of a list, one test's assertion, and one missing guard-test.
+
+### Round 2
+
+**Verdict: APPROVE.** All three round-1 findings are fixed (`git diff HEAD~1`), and each was confirmed by mutation:
+
+1. Relay last across the whole QR: `pairAddresses` back to `unique(...)` → **red** 3
+   (`pair-addresses.test.ts`: whole-QR, `pair --address`, record-direct-vs-relay);
+   `recordAddressList` back to `unique(list)` → **red** 1 (`discovery.test.ts`
+   sibling announcement).
+2. 0600: `RELAY_SECRET_MODE = 0o644` → **red** 1 (`relay-secret.test.ts`, literal assert).
+3. Stop: `relayLink?.stop()` deleted → **red** 1 (`serve-relay.test.ts`, the local
+   relay's `registeredCount` never drops to 0). It runs against a real local relay,
+   not an injected dialer, but it pins the exact property.
+
+Regressions: `bun test packages/cli/test/ packages/protocol/test/relay.test.ts`
+→ 2379 pass, 0 fail; `bun run lint` clean; `bun run typecheck` clean. Discovery's cap
+still keeps the FIRST addresses, and the relay was already last per record, so the
+announcement only changes when a record lists a relay address before a direct one
+(now fixed). `isRelayDeviceAddress` is only a sort key, never a filter or authority:
+if a direct URL shaped like `/d/<id>/e2e` is misread, the only effect is that it sorts last.
+Mutations reverted; `git status` clean apart from this section.
+
+*— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### R6 — the app's staggered race, the relay in the diagnosis, the "relay only" Maestro flow — *— claude-opus-5-5, 2026-11-14*
+
+**Load-bearing check: PASSED, before any edit.** R6's assumption is the APP half
+of §Load-bearing: *"the app dials a relay address exactly like any other"*.
+Re-executed on this branch's code, unchanged, in
+`.tentacle/tmp/mobile-relay/r6-loadcheck.ts` — a real R2 relay + a real R4 link +
+a real identity and a paired phone, with `openComputer`'s address list holding
+ONE entry, `ws://127.0.0.1:<port>/d/<id>/e2e`:
+
+```
+$ bun .tentacle/tmp/mobile-relay/r6-loadcheck.ts
+relay registered: 1 | address: ws://127.0.0.1:64175/d/fgkrQr2vTa2JTEe75Kl66v/e2e
+(1) openComputer over the RELAY only -> {"ok":true,"sessions":0,"address":"ws://127.0.0.1:64175/d/fgkrQr2vTa2JTEe75Kl66v/e2e"} in 9 ms
+(2) after 3000 ms: tried=["ws://127.0.0.1:64179/e2e"] settled=false
+```
+
+Line (1) is the assumption: the app reaches `session/list` through the ONE
+`RemoteClient` stack with a relay URL as its only address. Line (2) is the
+Preconditions gap, measured against a REAL half-open endpoint (`Bun.listen`
+accepting TCP and never upgrading — what a LAN address looks like off-LAN):
+after 3 s the SEQUENTIAL `firstAnswering` had started exactly one address and had
+not settled. **No STOP.**
+
+#### Red before green
+
+A new test file's first failure is `Cannot find module`, which is not the red
+§9 asks for. So the properties were first measured on the pre-slice tree by
+`.tentacle/tmp/mobile-relay/r6-red-baseline.ts` (also a real relay + link, so the
+"second address" is a real relay dial):
+
+```
+$ bun .tentacle/tmp/mobile-relay/r6-red-baseline.ts   # BEFORE the change
+(a) at 1500 ms: tried=1 settledIn=never result=pending
+(b) a healthy first address dials: ["direct"]
+(c) unreachable says: "Can't reach 'MacBook' — same network or Tailscale? `tentacle serve --host 0.0.0.0` running and up to date?"
+(c) names the relay: false
+```
+
+(a) is R6's bug: one hanging address starves the relay, and under the client's
+15 s dial deadline (`LINK_LIVENESS`) it never gets dialled. (c) is the text.
+(b) is the property that must SURVIVE the change and is green before and after.
+
+#### What landed
+
+1. **`apps/mobile/src/address-dial.ts`** — `firstAnswering` is now a staggered
+   race decided at SOCKET-OPEN. New shape: `DialSteps<TOpened, TAnswer>` =
+   `{open, abandon, confirm}`, so the winner alone is handshaked; `STAGGER_MS =
+   750` (Owner Q6); an injected `DialTimer` seam (the default is real
+   `setTimeout`, so the app passes nothing). Preserved deliberately: the ring
+   start at `memory.lastGood` (now recorded as the CALLER's array index),
+   `unauthorized` stops everything, the last error is rethrown unchanged, an
+   empty list is a failure rather than a hang. On a non-terminal handshake
+   failure the race resumes AFTER the winner (the remaining addresses, re-dialling
+   any leg it had abandoned — the same fresh dial a redial makes).
+2. **`apps/mobile/src/connection.ts`** — the caller split into those three steps:
+   `open` builds the raw socket and feeds `diagnosis.observe({opened:false})` on
+   a failure, `abandon` closes the loser, `confirm` runs the Noise initiator and
+   feeds `observe({opened:true})` on a handshake failure. An abandoned loser
+   records NOTHING: it is a path that was not needed, not a path that is down.
+3. **`apps/mobile/src/link-diagnosis.ts`** — the `unreachable` sentence names the
+   relay ("same network, Tailscale, or the relay?").
+4. **Maestro (R6's mandatory half)** — `apps/mobile/e2e/flows/22-relay-only.yaml`
+   plus `pair-start-relay-only.js`, `22-relay-history.js`, `22-relay-qr.js`; the
+   harness now starts a LOCAL relay in-process and gives `serve` `--relay <local>`
+   (`apps/mobile/e2e/run.ts`), `pairing.ts` gained `startRelayOnly()` (a window
+   with NO harness `--address`), and `hooks.ts` gained `relay-qr` (the payload the
+   last `pair` printed — the only way a flow can see what the QR carried).
+5. `changelog.d/mobile-relay.changed.md`.
+
+#### Drift from the Implementation, and why
+
+- **The plan says "the first socket to OPEN proceeds" and "the others are closed
+  before any handshake".** Implemented exactly, but it forced a shape the plan
+  does not spell out: the call to `attempt` had to become two steps, because only
+  the caller knows which half of a dial is "the socket" and which is "the
+  handshake". Hence `DialSteps` and the `connection.ts` split.
+- **Fall-through after a failed handshake resumes AFTER the winner, not from the
+  start.** The plan says "a non-terminal handshake failure on the winner
+  continues with the rest"; slices continuing *before* the winner too would
+  re-dial an address that already failed, and it would also mean a second round
+  could return to an address the ring had already passed. The abandoned legs are
+  re-dialled because they were never DECIDED (they lost a race, they did not
+  fail), which is what "the rest" means for a race.
+- **The diagnosis is fed per step, not per attempt.** Feeding it in `abandon`
+  (i.e. reporting an abandoned socket as `opened:false`) makes a successful race
+  end with `unreachable` in the diagnoser's last verdict — a lie about a link
+  that works. Pinned by the connection test's `expect(link.diagnosis.current())
+  .toBe("ok")` after a race with a black hole in it.
+- **The Maestro flow does not restart `serve`.** My first cut reopened the
+  daemon with `--no-relay` for flow 22's pairing window. That is wrong twice: with
+  `--no-relay` the daemon writes no relay address AND no `--address`, so the
+  record has no addresses at all and `pair` refuses (`pair-addresses.ts`). The
+  real property is simpler: `serve` in the harness binds LOOPBACK, which
+  contributes no bind-derived address, so a window opened WITHOUT the harness's
+  own `--address` carries the record's relay address and nothing else. Nothing is
+  restarted; `startRelayOnly()` is the absence of one argument.
+- **`22-relay-only` is in `PAIRING_FLOWS`** (`apps/mobile/test/e2e-flows.test.ts`).
+  That list is the existing guard's own row for "pairs through its own steps, not
+  `_pair`"; the guard went red on the new flow before the entry was added, which
+  is the guard doing its job rather than a workaround.
+- **The flow's last step order is fixed by the e2e guard, not by taste.** The
+  existing rule is "the last `runScript` is the daemon-truth one", so the two
+  truth steps are ordered history-then-QR, and the QR one (the flow's own
+  subject) is last.
+
+#### The tests, and what each pins
+
+`apps/mobile/test/address-dial.test.ts` (13, hand-driven timer — no test waits
+750 ms): a hanging first address does not hold the second past `STAGGER_MS`; the
+first socket to open wins and is the only one handshaked; a late loser is
+abandoned BEFORE any handshake (twice: after the race and mid-handshake); a
+non-terminal handshake failure resumes with the rest; every open failing throws
+the LAST error unchanged; `unauthorized` stops the race and leaves no armed
+timer; `lastGood` wins the ring start and is remembered by the caller's index;
+the ring wraps rather than restarting; a stale `lastGood` starts at 0; an empty
+list fails; `STAGGER_MS` is 750; `isTerminalDialError` unchanged.
+
+`apps/mobile/test/connection.test.ts` (18, +2): a REAL black-hole endpoint as the
+first address — the link still reaches the daemon, names the winner's address and
+ends `ok` (not `unreachable`); and a REAL "slow" daemon that upgrades only when
+the test says so — the late loser's socket is CLOSED (its `close` event fires),
+which is the limiter-slot/stream property `abandon` exists for.
+
+`apps/mobile/test/link-diagnosis.test.ts` (7, +1): the `unreachable` sentence
+names the relay, and the other verdicts do not.
+
+`apps/mobile/test/e2e-flows.test.ts` (22, +5): flow 22 is in `FLOWS`, its files
+exist, it pairs over its own opener (not `_pair`), it ENDS on a daemon-truth hook
+with the relay-QR step last, every hook it reads is served by `hooks.ts`, the QR
+assertion requires exactly one address AND the `/d/<id>/e2e` shape, and the
+harness really starts a local relay and really omits its own address for that
+window.
+
+#### Mutation checks (each reverted from a copy; no `git checkout`/`restore`/`stash`)
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | `armed = timer.schedule(startNext, stagger)` → `startNext()` (no stagger) | **red 7** of 13 in `address-dial.test.ts` (the hanging-first, first-open-wins, fall-through, last-error, unauthorized, lastGood and wrap tests) |
+| 2 | the late loser is `confirm`ed instead of `abandon`ed | **red 2** ("a loser that opens LATE is closed…", "the loser is abandoned while the winner is still handshaking") |
+| 3 | `round = []` after a failed handshake (no fall-through) | **red 1** ("a non-terminal handshake failure on the winner continues with the REST") |
+| 4 | `isTerminalDialError` check deleted (keep racing past `unauthorized`) | **red 1** ("STOPS on unauthorized…") |
+| 5 | `connection.ts` `abandon` → a no-op (`void channel`) | **red 1** ("a loser that opens LATE is CLOSED…", the real `close` event never fires) |
+| 6 | `connection.ts` `abandon` → `diagnosis.observe({opened:false,…})` + close | **red 1** ("a loser that opens LATE is CLOSED…": that close was SILENT) |
+| 6b | `connection.ts` `open`'s catch → swallow the observation of a genuine failed open | **red 1** ("the race dials the SECOND address…": the refused port is no longer counted) |
+| 7 | `link-diagnosis.ts` sentence back to "same network or Tailscale?" | **red 1** ("the unreachable sentence names the RELAY") |
+| 8 | `22-relay-qr.js`: `addresses.length !== 1` → `=== 0` | **red 1** (the exactly-one-address test) |
+
+Every file was restored from its copy and re-hashed to the same sha
+(`address-dial.ts dd964bc…`, `connection.ts e1c54a0…`, `link-diagnosis.ts 3e3192a…`,
+`22-relay-qr.js b9a0256…`), 13/13, 18/18, 7/7 and 22/22 green afterwards.
+
+**Mutation 6 took two attempts and is worth recording.** Its first run was GREEN,
+and the reason was a real weakness in the test I had written: it asserted
+`link.diagnosis.current() === "ok"` after a race, but `dial()` calls
+`diagnosis.ok()` as soon as a race succeeds, so `ok()` reset the verdict whatever
+`abandon` did — the assertion could not fail. I then found that mutation 6 anyway
+only produced a `ReferenceError` (an unimported `ChannelError`), which is red for
+the wrong reason. The fix was to stop observing the VERDICT and observe the CALLS:
+a SPY diagnoser in front of the real one, in the test whose loser really does open
+(slow daemon), asserting that the abandoned close was SILENT. Mutation 6 is now
+red on the assertion. Mutation 6b exists because the spy alone makes the `[]`
+assertion vacuously satisfiable — swallowing a GENUINE failed open would leave the
+array empty too — so the race test now carries a third address whose port is
+really closed, and asserts exactly one `opened: false` was reported. Both
+directions are pinned; neither is proven by a weaker correlate.
+
+#### Acceptance checks the plan names
+
+- **"a hanging first address does not block the second beyond 750 ms"** —
+  `address-dial.test.ts` with the injected timer, plus the real-endpoint
+  connection test (reached at all, which the old sequential loop did not manage
+  before the client's 15 s deadline).
+- **"losers are closed before any handshake"** — pinned twice (the fake steps in
+  `address-dial.test.ts`, and a REAL socket's `close` event in
+  `connection.test.ts`).
+- **"`unauthorized` still stops"**, **"`lastGood` honoured"**, and the plan's own
+  mutation ("start all at once → the direct-first test fails") — mutations 4, 1.
+- **grep-guard, no domain in the app**: `rg -n "relay\.tentacle\.so" apps/mobile/src`
+  → no match (the app still hard-codes no domain, decision 9).
+- **`git diff` scope**: only R6's files (see the list above) plus this doc and the
+  changelog fragment. `packages/protocol/schema/protocol.json` is unchanged (no
+  schema change), so no regeneration.
+
+#### Gate (R6): green, except the Maestro run (environmental — below)
+
+```
+$ bunx tsc --noEmit                 → clean (exit 0)
+$ bunx tsc -p apps/mobile --noEmit  → clean (exit 0)
+$ bunx tsc -p apps/relay --noEmit   → clean (exit 0)
+$ bun run lint                      → Checked 1318 files in 384ms. No fixes applied.
+$ bun test                          → 9521 pass, 3 skip, 0 fail across 681 files (384 s)
+                                      (77636 expect() calls)
+```
+
+The 3 skips are the documented opt-in ones (live-k8s, live-docker, the slow
+real-socket keepalive). Lint was clean before this slice and is clean after
+(the two errors it produced on the way — a formatter wrap in `22-relay-qr.js` and
+a `useConst` in the new test — were fixed, not suppressed).
+
+#### The Maestro flow: written, wired, and NOT green here — environmental
+
+`E2E_ONLY_FLOWS=22-relay-only bun run e2e:mobile --ios 26` (Xcode 27.1, iOS 26.5,
+`JAVA_HOME=/opt/homebrew/opt/openjdk@17`) **failed**, and so did a control run of
+a PRE-EXISTING flow on the same host:
+
+```
+✗ 22-relay-only (iOS 26) exit 1   <failure>Assertion is false: id: lock-screen is visible</failure>
+✗ 01-shell     (iOS 26) exit 1   <failure>Assertion is false: id: lock-screen is visible</failure>
+```
+
+Both die in `_unlock.yaml`, the shared prefix, before anything R6 added runs. The
+app IS up and IS showing the lock (`maestro hierarchy` on the booted simulator
+renders "Face ID" and the app's own log file was being written every second), but
+NO `testID` reaches the accessibility tree at all — not `lock-screen`, not
+`pair-paste-input`, not `computers-list`: the hierarchy dump contains only the
+status bar and "Face ID". So RN's testIDs are not exposed to XCUITest on this
+host/Xcode combination, which is the same class of environment drift
+`docs/feat/mobile-compose.md`'s Step 0 records for the simulator's Face ID.
+
+What the run DID prove, from the harness's own log, before Maestro's first
+assertion:
+
+```
+relay on ws://127.0.0.1:49488
+serve on 127.0.0.1:49487, phone address ws://127.0.0.1:49487/e2e
+[pair] tentacle://pair?v=1&k=…&c=9K07RKZ3F3&a=ws%3A%2F%2F127.0.0.1%3A49488%2Fd%2Fkhp_dfo6Hbhs-lL6QI-igY%2Fe2e
+```
+
+One `a=` parameter, and it is the local relay's `/d/<id>/e2e`: the relay-only QR
+that flow 22 asserts on is really produced by the real harness, in the real
+configuration (`serve` on loopback + the relay on + no harness `--address`).
+
+**So R6's Maestro half is PARTIAL**: the flow, its two truth scripts, the local
+relay, the hook and the guards are in place and the `bun test` half is green; the
+on-simulator pass is blocked by the environment, not by this slice, and it must be
+re-run (`E2E_ONLY_FLOWS=22-relay-only bun run e2e:mobile --ios 26`) on a host
+where an EXISTING flow passes first. That is the exact check: if `01-shell` is red
+for `lock-screen`, the host cannot run flows and 22's result says nothing.
+
+#### Not verified (one line each)
+
+- The real iPhone checks (cellular time-to-connect, Wi-Fi→cellular hand-off, a
+  killed app reopened over the relay) — device-only, the TestFlight checklist's.
+- `22-relay-only` end-to-end on a working simulator host: blocked above; verify
+  with `E2E_ONLY_FLOWS=01-shell bun run e2e:mobile --ios 26` passing first.
+- The winner's handshake can still be slow on a path that opened quickly (a
+  captive portal accepts TCP and drops the upgrade): the race does not bound a
+  handshake, only the OPEN. Bounding it would need a deadline the client does not
+  currently offer per attempt; out of this slice (the plan scopes the stagger to
+  socket-open).
+
+## Review
+
+### R6 — fresh-context adversarial review — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM). Scope: `git diff main...HEAD` (R6 only).
+
+**Gate (re-run):** the 4 touched test files 60 pass / 0 fail (542 expects);
+`bun run typecheck` clean (root + mobile + relay); `bun run lint` 1318 files, clean.
+Full `bun test` not re-run (Execution reports 9521 pass / 3 opt-in skip).
+
+**Findings**
+
+1. **HIGH — fall-through skips addresses after a second handshake failure.**
+   `apps/mobile/src/address-dial.ts:161` slices the CURRENT (already sliced)
+   round with `outcome.at`, which is the candidate's `position` in the FIRST
+   round (`roundOf` is never re-run, `Candidate.position` is fixed). After one
+   fall-through the two numberings diverge. Repro
+   (`.tentacle/tmp/mobile-relay/rev-r6-fallthrough{,-c}.ts`, opens resolve at once,
+   non-terminal `confirm` failures): `[A,B,C,D]` with only C healthy →
+   confirmed `[A,B,D]`, **throws**; C is never dialled. With the real list
+   `[LAN, tailnet, relay]`, two non-terminal handshake failures (LAN, tailnet)
+   give `slice(2)` of `[tailnet, relay]` = `[]` → the relay is silently never
+   tried — the exact fallback R6 exists for, and a regression vs. `main`'s
+   sequential loop, which reached every address. No test covers two consecutive
+   handshake failures. Fix shape: slice by the winner's index in the current
+   array (or renumber per round) + a test with ≥2 consecutive handshake failures.
+2. **MEDIUM — a late-failing loser overwrites the diagnosis, incl. `revoked`.**
+   `apps/mobile/src/connection.ts:254-261`: `open`'s catch calls
+   `diagnosis.observe({opened:false})` for EVERY failed open, also one that
+   fails after the race was decided (`address-dial.ts` ignores the rejection,
+   but the observation already happened). Repro
+   (`.tentacle/tmp/mobile-relay/rev-r6-late-loser.ts`, real `createLinkDiagnoser`
+   + `firstAnswering`, steps shaped as in `connection.ts`): LAN hangs, relay
+   starts at 750 ms, opens, handshake `denied` → `revoked`; then the LAN connect
+   errors (EHOSTUNREACH/TCP timeout) → diagnosis becomes **`unreachable`**. The
+   row then reads "Can't reach … the relay?" with Retry instead of the
+   authenticated `revoked` + Remove (`computer-rows.ts:74-95`). Same mechanism
+   turns an `ok` link's verdict into `unreachable` after a success. Sequential
+   code could not do this (no concurrent opens). The Execution's "abandoned loser
+   records NOTHING" holds only for a loser that OPENS late, not one that FAILS
+   late. Fix shape: observe an open failure only while its race is undecided
+   (e.g. let `firstAnswering` report failures, or a per-dial generation guard),
+   + a test where the loser rejects after the winner settled.
+
+**Mutation (mine):** removed the stagger re-arm (`arm()` in `startNext`) →
+`address-dial.test.ts` did not finish in 120 s (tests await a race that never
+progresses): red, but as a hang, not an assertion. Reverted by reverse edit;
+`git status` clean; 13/13 green after.
+
+**Attacks tried:** (a) fall-through numbering across rounds → finding 1;
+(b) late loser rejection vs. diagnoser → finding 2; (c) `unauthorized` mid-race
+leaves an armed timer / unclosed loser → holds (`winner` cancels, late opens
+`abandon`); (d) `link.address()` = last STARTED, not the winner
+(`connection.ts:255`) → wrong after a race, but only tests read it (no app
+consumer): nit; (e) a fast-refused open waits the full 750 ms before the next
+starts (RFC 8305 starts the next at once): latency regression vs. `main`'s
+immediate fall-through (3 refused addresses ≈ 1.5 s), nit; (f) no domain in
+`apps/mobile/src` → holds.
+
+**What holds:** first-open-wins with losers closed pre-handshake (the "one
+session path" invariant — one `RemoteClient`/`gate.dial` stack, no parallel
+loop); `unauthorized` stops; `lastGood` ring start; diagnosis text; Maestro
+wiring (on-simulator pass still pending, environmental — Execution's own note).
+
+**Executor behaviour:** careful and honest (recorded its own vacuous first
+mutation-6 test and fixed it); missed the multi-round case because every
+fall-through test has only ONE failed handshake. Reviewer is the same model
+family (Opus) as the Execution's signature: shared blind spots possible.
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+Scope: the R6 review's 1 HIGH + 1 MEDIUM. Both reviewer repros were re-run on
+this branch first and reproduce unchanged:
+`.tentacle/tmp/mobile-relay/rev-r6-fallthrough{,-c}.ts` →
+`confirmed: [ "A", "B", "D" ] -> answered D` / `-> threw hs-fail D` (C, the only
+healthy address, never dialled); `rev-r6-late-loser.ts` →
+`race threw: unauthorized | diagnosis: revoked`, then
+`after late LAN failure | diagnosis: unreachable`.
+
+**1 (HIGH) — fall-through numbering.** `Candidate.position` was fixed at the
+FIRST round's order and then used to slice a LATER, already-sliced round, so
+after one fall-through `slice(at + 1)` walked past the end.
+In `apps/mobile/src/address-dial.ts`: `Candidate.position` is gone (`:109`) and
+`roundOf` no longer computes it (`:178`); `raceOnce` captures `slot` (the
+candidate's index in the array it was actually raced in) at `startNext` (`:228`)
+and reports it as `RaceOutcome.failed.at`, passed through
+`onOpened(candidate, slot, opened)` (`:242`, `:257`, `:271`). `at`'s doc now says
+it is a position in the round passed to `raceOnce`, never in the caller's list
+(`:115-123`). The slice uses a number valid in the array being sliced.
+
+**2 (MEDIUM) — a late-failing loser overwrote the diagnosis, `revoked` included.**
+`connection.ts`'s `open` observed `{opened:false}` for EVERY failed open,
+including one that rejected after the race was decided (`firstAnswering` ignored
+the rejection, but the observation had already happened). New optional seam
+`DialSteps.failed?(failure: DialFailure)` (`address-dial.ts:81-89`) is called ONLY
+from a rejection arriving while the race is still undecided (`:245`, ahead of the
+existing `settled || winner` bail-out that drops a late one entirely); in
+`connection.ts` `open` no longer observes and `failed` does (`:253-266`), so the
+race decides whether a failed open may be reported at all. `abandon` and
+`confirm` are unchanged, and a genuinely offline address is still reported (the
+existing R6 connection test still counts exactly one `opened:false` for a refused
+port — red under mutation 2 below).
+
+**Tests added.** `apps/mobile/test/address-dial.test.ts`: (a) "TWO consecutive
+handshake failures still reach the LAST address" — the real
+`[lan, tailnet, relay]` shape, asserts `confirmed === [lan, tailnet, relay]` and
+that the relay answers; (b) "a loser whose OPEN fails LATE is not reported as a
+failure"; (c) "an open that fails while its race is UNDECIDED is reported" — the
+seam's non-vacuity guard, green before and after by design, red under mutation 2.
+`apps/mobile/test/connection.test.ts`: "a loser whose OPEN fails after the race
+was decided does NOT overwrite the verdict" — real daemon, real Noise handshake
+denied by a stranger device key (`revoked`), a real hanging TCP leg terminated
+after the race settles; asserts the verdict stays `revoked`.
+
+**Red before green** (source mutated back, narrow test run, restored by reverse
+edit — no `git checkout`; `diff` against the saved fixed copy confirms identical):
+finding 1, `position` + `at: candidate.position` back → 1 fail,
+`ChannelError: handshake closed at tailnet` (the relay is never confirmed);
+finding 2, `observe` back inside `open`'s catch → the `address-dial` late test
+fails and the connection test fails `Expected: "revoked" / Received:
+"unreachable"`; finding 2, `failed` never called → the UNDECIDED test fails and
+the pre-existing R6 connection test fails `Expected: 1 / Received: 0`.
+
+**Mutation checks (after green):**
+
+| # | mutation | result |
+|---|---|---|
+| 1 | `at: slot` → `at: candidate.index` (array index, not round slot) | red 1/16 in `address-dial.test.ts`: `handshake closed at tailnet` — the NUMBERING is what the test pins, not merely "a slice happens" |
+| 2 | delete the `steps.failed?.(…)` call | red 1/16 (`Expected [ "A" ] / Received []`); `connection.test.ts` also red (`Expected: 1 / Received: 0`) |
+| 3 | call `steps.failed?.()` BEFORE the settled-or-winner bail-out (report late failures too) | red both: `address-dial` late test, and `connection.test.ts` `revoked` → `unreachable` |
+
+Each mutation was reverted (`diff` against the saved copy: identical) before the
+next; `git status` shows only the four intended files.
+
+**Gate:** `bunx tsc --noEmit` clean (root and `tsc -p apps/mobile`); `bun run
+lint` 1318 files clean; `bun test` **9525 pass / 3 opt-in skip / 0 fail** (681
+files, 77646 expects — 9521 baseline + the 4 new tests).
+
+**Not verified:** the Maestro "relay only" flow on a simulator (environmental, as
+in R6's Execution). Nothing else is unverified.
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (fix for round 1's findings 1–2).
+
+- **Finding 1 — fixed.** `raceOnce` reports the winner's `slot` in the round it
+  raced (`address-dial.ts`, `at: slot`); `Candidate.position` is gone. My repros
+  now give `[A,B,C,D]` → confirmed A,B,C,D → answered D; only-C-healthy →
+  A,B,C → answered C. **Mutation** `at: slot` → `at: candidate.index`: red 1
+  ("TWO consecutive handshake failures still reach the LAST address"); reverted.
+- **Finding 2 — fixed.** `connection.ts` `open` no longer observes; the new
+  optional `DialSteps.failed` is called only while the race is undecided. Repro
+  (`rev-r6-late-loser2.ts`): `revoked` stays `revoked` after the late LAN failure.
+  **Mutation** report `failed` before the `settled || winner` guard: red 2 (the
+  pure "a loser whose OPEN fails LATE…" test and the real-socket connection
+  test); reverted.
+- **Regressions:** the only `firstAnswering` caller is `connection.ts:300`,
+  which wires `failed`; a genuine failed open during the race is still reported
+  (round 1's mutation-6b test still green). The tree is clean after the
+  reverts (`git status` empty).
+- **Gate:** the 4 touched files pass 64/64 (552 expects); `bun run typecheck`
+  and `bun run lint` (1318 files) are clean. Round 1's nits (`link.address()` =
+  last started; a refused open waits the full stagger) remain open as nits.
+
+## Execution
+
+### R7 — deploy artefacts + runbook (as built) — *— claude-opus-5-5, 2026-11-14*
+
+**Scope:** slice R7 only (`apps/relay/deploy/{build.ts,relay.service,Caddyfile.relay}`,
+`docs/ops/relay-deploy.md`, `apps/relay/test/deploy.test.ts`). Nothing applied to any
+server: slice **D** stays the owner's step. No wire, schema, `protocol.json`, daemon,
+cli, app or `TODO.md` change.
+
+**Load-bearing check first (the plan's, "R2's `main.ts` is a `bun build --compile`
+target and the binary serves `/healthz`") — PASSED, on the branch as it stood:**
+
+```
+$ bun build --compile apps/relay/src/main.ts --outfile .tentacle/tmp/mobile-relay/tentacle-relay
+[6ms]  bundle  32 modules
+  [86ms] compile  …/tentacle-relay bun-…-v1.4.3
+$ ./tentacle-relay --port 4977 &
+$ curl -sS -i http://127.0.0.1:4977/healthz
+HTTP/1.1 200 OK
+Content-Type: application/json;charset=utf-8
+Content-Length: 17
+
+{"ok":true,"v":1}
+```
+
+Cross-compile for the deploy host also works from this macOS machine:
+`--target=bun-linux-x64` → `ELF 64-bit LSB executable, x86-64 … for GNU/Linux 3.2.0`
+(90 MB). So the assumption the slice stands on — one entrypoint, no plugin, no
+runtime asset, a real `/healthz` — holds; nothing in R7 needed to change R2.
+
+**Red before green (AGENTS §9).** `apps/relay/test/deploy.test.ts` first, against
+the artefacts that did not exist yet:
+
+```
+$ bun test apps/relay/test/deploy.test.ts
+2 pass, 9 fail   # the 9: ENOENT on relay.service / Caddyfile.relay / relay-deploy.md
+```
+
+…then green (13 pass) once the four artefacts existed. Every assertion binds two
+things that must agree, and the mutation below shows it is on the property, not on
+a file's presence.
+
+**What was built.**
+
+- `apps/relay/deploy/build.ts` — `relayEntrypoint` / `relayOutfile` /
+  `relayBuildTarget` (pure, exported so the test can pin them) + `buildRelayBinary`
+  and a `import.meta.main` runner. Defaults to **`bun-linux-x64`**, not the host
+  triple: `bun build --compile` does not refuse a bare `linux-x64`, it quietly
+  builds the HOST's binary, so the default is the deploy host and `TARGET` must
+  match a Bun-triple regex. `bun run apps/relay/deploy/build.ts` →
+  `dist/tentacle-relay` (gitignored, as `scripts/build.ts`'s output). No plugin
+  needed, unlike the CLI: the relay pulls in no ink and no worker entrypoint.
+- `apps/relay/deploy/relay.service` — `relay` system user, `ExecStart` the
+  installed binary with `--host 127.0.0.1 --port 4100` (stated, not left implicit,
+  so the unit is where the deploy's bind address lives), `Restart=always` +
+  `RestartSec`, `StartLimitIntervalSec=30s`/`StartLimitBurst=5` **in `[Unit]`**,
+  the full sandbox (`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
+  `ProtectProc=invisible`, `RestrictAddressFamilies=AF_INET AF_INET6`,
+  `CapabilityBoundingSet=` empty), `MemoryMax=512M`, journal-only logging.
+- `apps/relay/deploy/Caddyfile.relay` — `relay.tentacle.so {
+  reverse_proxy 127.0.0.1:4100 { stream_close_delay 5m } }`, imported from the
+  host's Caddyfile. `stream_close_delay` is documented behaviour, not folklore
+  (verified against Caddy's `reverse_proxy` reference, *Streaming*: "delays
+  streaming requests such as WebSockets from being forcibly closed when the config
+  is unloaded … prevents streams from immediately closing when Caddy's config is
+  reloaded").
+- `docs/ops/relay-deploy.md` — 9 sections: preconditions · build · install (atomic
+  `mv` replace) · systemd · Caddy+DNS · smoke test (real phone on cellular) ·
+  upgrade (keeping `tentacle-relay.previous`) · rollback · diagnose table +
+  **Known limitations**.
+- `apps/relay/tsconfig.json` — `include` += `deploy/**/*.ts`, so the new build
+  script is type-checked by `tsc -p apps/relay` (mutation-checked: a wrong-typed
+  export makes it exit 2).
+- `changelog.d/mobile-relay-deploy.added.md` — ONE new fragment, under a NEW slug
+  (`mobile-relay-deploy`, not `mobile-relay`): the existing
+  `mobile-relay.added.md`/`.changed.md` are R5a's and R6's, and the same
+  slug+category is the same filename (`docs/feat/changelog-fragments.md`). The
+  doc's own line 6 is untouched.
+
+**Drift from the plan (Implementation said `apps/relay/deploy/{relay.service,
+Caddyfile.relay,build.ts}` + the runbook — that shape was kept):** three
+corrections, all found while verifying the artefacts against reality rather than
+by reading them.
+
+1. **`StartLimit*` moved to `[Unit]`.** My first unit put
+   `StartLimitIntervalSec`/`StartLimitBurst` in `[Service]`, where systemd ignores
+   them — a crash loop would spin forever while the file *looked* hardened. Found
+   with an independent key/section checker (`.tentacle/tmp/mobile-relay/unitcheck.ts`,
+   which flags it on the first draft and is clean on the final one), then pinned by
+   a test.
+2. **`MemoryDenyWriteExecute` and `SystemCallFilter=@system-service` removed.** Bun
+   *is* JavaScriptCore: it JITs, so it needs writable-then-executable memory and
+   (on some kernels) `membarrier`. Either hardening would kill the relay on the
+   host only — CI never runs the unit. Both are now pinned ABSENT with the reason.
+3. **The per-IP limits are one shared bucket behind Caddy.** `server.ts` keys its
+   limiter on Bun's `requestIP`, i.e. the direct peer, which behind the proxy is
+   always `127.0.0.1` — so `--max-streams-per-ip`'s default of 16 would cap the
+   whole world at 16 phones. This is R2 code, outside R7's scope to fix, so it is
+   stated in the unit (a commented, fleet-sized `ExecStart` override), in the
+   runbook's *Known limitations*, and here as an **open item for the owner before
+   deploy D**: either raise the three flags or have the relay read
+   `X-Forwarded-For` behind a trusted-local flag (a code change → its own task).
+   The per-id (64) and global (10 000 ids) limits are unaffected.
+
+Rejected alternative: naming the fragment `changelog.d/mobile-relay.added.md`
+(edit R5a's). That is the one changelog collision the discipline refuses, and R7
+is user-visible on its own (an operator can now deploy the relay).
+
+**Mutations (AGENTS §9 — each red on the property, then reverted; `git status`
+clean of every mutation):**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | live `ExecStart` `--port 4000` | **red 2** (ExecStart-parses test + the continuation-reader test) |
+| M2 | `stream_close_delay 5m` deleted from the Caddy block | **red 1** ("a stream outlives a Caddy reload") |
+| M3 | `DEFAULT_RELAY_TARGET` → `bun-darwin-arm64` | **red 1** ("linux-x64 by default") |
+| M4 | `ExecStart` gains `--max-connections 1000` (a flag `main.ts` refuses) | **red 2** (a unit whose object exits 1 on every boot) |
+| M6 | runbook's `## 7. Rollback` renamed | **red 1** ("it carries a rollback") |
+| M7 | `Restart=always` deleted | **red 1** (sandbox/restart test) |
+| M8 | the test's own `serviceKeys` loses the `\`-continuation join | **red 1** (the reader's guard) |
+| M9 | `MemoryDenyWriteExecute=yes` added back | **red 1** ("no hardening blocks the JIT") |
+| M10 | `User=relay` → `User=root` | **red 1** (sandbox test) |
+| M11 | Caddy forwards `127.0.0.1:4000` | **red 1** ("the site forwards to the relay's bind address") |
+| M12 | runbook's install path → `/opt/relay/…` | **red 2** (unit↔runbook path test + the rollback/commands test) |
+
+Three of those were *false greens first*, and are recorded because they are the
+instructive part: M6's `perl -0pi 's/^## …/m'` was missing its `/m` and silently
+matched nothing; M1/M4's unanchored substitution hit the **commented-out**
+`ExecStart` example above the live line; and M8 v1 asserted
+`port === DEFAULT_RELAY_PORT`, which a *dropped* continuation also satisfies (it
+falls back to the default) — so the test could not tell "stated 4100" from "line
+lost". Fixed by anchoring on `\nExecStart=` (with `expect(live.length === 1)`), by
+using a non-default port in the continuation, and by re-running every mutation
+against the final artefacts. Independently, the unit's key/section placement was
+verified by `unitcheck.ts`, not only by the test that shares my own reader.
+
+**Gate** (this branch, after the last edit):
+
+- `bun run typecheck` — clean (`tsc --noEmit`, `tsc -p apps/mobile`, `tsc -p apps/relay`).
+- `bun run lint` — `biome check .`: **1363 files, 0 errors, 0 warnings**.
+- `bun test` — **9826 pass / 4 skip / 0 fail**, 712 files, 78 707 expects
+  (394 s). The 4 skips are the pre-existing opt-in ones (live-k8s, live-docker,
+  the slow socket test, `confinement`'s root-only cases), not new; the R7 files are
+  13/13 (`apps/relay/test/deploy.test.ts`) and the relay package 74/74.
+- `git status`: only the intended files (`apps/relay/deploy/`, `apps/relay/test/deploy.test.ts`,
+  `docs/ops/relay-deploy.md`, `apps/relay/tsconfig.json`, this doc, the fragment, `dist/` removed).
+
+**Not verified — one line each, with how to verify:**
+
+- `systemd-analyze verify` / `caddy validate` acceptance: needs those binaries
+  (neither is on this machine). Run them on the host, runbook §3/§4, before
+  enabling the unit.
+- The public cert, phone over cellular through Caddy, a reload not cutting live
+  streams, an idle stream surviving 30 min: deploy **D**, runbook §5, owner-run.
+- The relaying itself through a proxy hop (as opposed to Bun↔Bun on loopback,
+  which `bun test` covers): the same §5 smoke test.
+
+**Runbook accuracy pass (same slice, before Review).** Two commands and one log
+list in `docs/ops/relay-deploy.md` were checked against the code rather than
+against memory, and two of the three were wrong:
+
+- `tentacle devices list` → **`tentacle devices`** (the verbless form lists;
+  `main.ts:231` dispatches it, `:321-325` is the usage).
+- The log line names were invented in my first draft (`hello`/`open`/`close`); the
+  real set is `ready`, `dial-open`, `dial-held`, `dial-refused`, `accept` (plus the
+  `*-refused`/`*-oversize` refusal lines). Cross-checked mechanically
+  (`.tentacle/tmp/mobile-relay/lognames.ts` parses the runbook's `` `name <arg>` ``
+  tokens and `server.ts`'s `log(\`…`\` sites`: no name in the runbook is absent
+  from the code).
+- The startup line's exact text was taken from `main.ts:185`, and the `4404` /
+  `4429` close codes from `protocol/src/relay.ts:69` and `relay-core.ts:63`.
+
+These are prose, so no test can hold them (Markdown is not linted, §6); the check
+was a one-off script, and it is recorded here rather than pretended to be a guard.
+
+## Review
+
+### R7 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH). Scope: R7 only (`git diff main...HEAD`).
+
+**Gate:** `bun test apps/relay` 74 pass / 0 fail (4 files); `bun run lint` clean
+(1363 files); `bun run typecheck` clean (root + mobile + relay). Full `bun test` not
+re-run (scope: touched files). `buildRelayBinary` really compiles `main.ts` (built a
+`bun-darwin-arm64` binary into `.tentacle/tmp/mobile-relay/r7/`: `build true`); running
+the binary was not permitted in this session, so `/healthz` on the compiled artefact is
+unverified (runbook §3 covers it on the host).
+
+**Mutation (§9):** `relay.service` ExecStart `--port 4100→4101` ⇒ 2 tests red;
+`Caddyfile.relay` `stream_close_delay 5m→1s` ⇒ red. Reverted; `git diff` empty.
+
+**Findings**
+1. **MEDIUM — the shipped unit is a known-broken production config, and the Caddyfile
+   says otherwise.** `apps/relay/deploy/relay.service:39` runs the default limits;
+   behind Caddy every peer is `127.0.0.1`, so `relay-core.ts:44,46,52` become ONE
+   global bucket: 30 phone dials/min, 16 concurrent phone sockets and **10 daemon
+   `hello`s/min for the whole world**. Scenario: relay restart (F3) with 200
+   registered daemons → 10 re-register per minute, the rest are refused and back off
+   (up to 60 s), a ~20 min outage — the "no thundering herd" convergence F3 promises
+   does not hold. Worse, any one client sending 30 dials/min (or holding 16 sockets)
+   locks out every phone on the relay — a single-host DoS of the service. The runbook
+   (§9) defers this to the owner, but `Caddyfile.relay:31-32` asserts "`relay.service`
+   sets the limits to their one-shared-key values instead" — false, they are a comment
+   (`relay.service:36-38`). Fix in R7's scope: either ship the fleet-sized ExecStart
+   live (and pin it in `deploy.test.ts`), or make the unit refuse to be the default
+   (and correct the Caddyfile comment); the real fix (XFF behind a trusted-local flag)
+   is R2 code.
+2. **MEDIUM — `stream_close_delay` is documented as making reloads safe; it only
+   delays the cut by 5 min.** `Caddyfile.relay:19-22` claims "5m > the relay's 60 s
+   idle timeout, so a stream ends on its own before the delay can ever fire". False:
+   the relay sends pings (`server.ts:121-124`, `sendPings: true`), so a live phone
+   session and every daemon control socket never idle out; Caddy force-closes them
+   5 min after a reload. Scenario: owner runs `systemctl reload caddy` (runbook §4)
+   during a long turn → every relayed session drops at +5 min and every daemon
+   re-registers at once (which, with finding 1, hits the 10-hello/min bucket). The
+   runbook repeats the expectation (`docs/ops/relay-deploy.md:173-175`, `:284`,
+   `:305` "a Caddy reload not cutting live streams") and the test name
+   `deploy.test.ts:175` "a stream outlives a Caddy reload" pins the wrong claim. Fix:
+   state the real behaviour (a reload = staggered drop within 5 min; F1/F2 resync
+   handle it) and drop the "can never fire" reasoning.
+
+**Attacks tried (no finding):** ExecStart flags vs `parseRelayArgs` (pinned, mutation
+red); `StartLimit*` in `[Unit]` (correct, systemd ignores it in `[Service]`); JIT-hostile
+hardening absent (`MemoryDenyWriteExecute`, `@system-service`); secrets in argv (none);
+`TARGET=linux-x64` silent host build (refused by the regex); `tsconfig` include widened
+to `deploy/` so `build.ts` is typechecked (yes); changelog slug distinct from R5a's (yes);
+§7 "a pod is not trusted"/"model stays on laptop": R7 adds no secret, no wire change.
+Unverified (owner, slice D): `RestrictAddressFamilies=AF_INET AF_INET6` without `AF_UNIX`
+/`AF_NETLINK` under Bun on Linux — run `systemd-analyze verify` + a start on the host.
+
+**Executor behaviour:** careful and honest — the per-IP problem was found and written
+down, the test's own parser was guarded against a false red, and the limits of the guard
+are stated. The miss is shipping the unsafe default while another artefact claims the
+safe one is in place.
+
+*— claude-opus-5-5, 2026-11-14* (reviewer is the same model family as R7's executor,
+claude-opus-5-5; only the context is fresh — shared blind spots may survive.)
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+Scope: the R7 review's 2 MEDIUM, no HIGH. Both were **prose-versus-artefact**
+findings, so both arms were verified against the code rather than the review:
+`relay-core.ts:44,46,52` are indeed the per-client defaults, `server.ts:121-124`
+really sets `sendPings: true`, `server.ts:286` really keys on `requestIP` (the
+direct peer), and the Caddy reference page's own wording for `stream_close_delay`
+is "delays … instead, the stream will remain open until the delay is complete" —
+a delay, never a cancel.
+
+**1 (MEDIUM) — the shipped unit was the known-unsafe production config.**
+`relay.service` ran the per-client defaults behind Caddy — one global bucket — and
+`Caddyfile.relay` claimed in prose that the unit "sets the limits to their
+one-shared-key values instead". Fixed by **shipping the fleet sizes live**, not by
+softening the comment: the live `ExecStart` is now a `\`-continued two-line value
+carrying `--max-dials-per-minute 6000 --max-streams-per-ip 2000
+--max-hellos-per-minute 600` (`relay.service:50-51`), each with its arithmetic in
+the comment above (`relay.service:36-49`). Chosen over the review's
+"make-the-unit-refuse" alternative because the unit is the one artefact that ships
+the deploy's bind address; a unit that installs cleanly and then caps the world at
+16 phones is the failure mode this task exists to prevent. The Caddyfile comment
+(`Caddyfile.relay:37-45`) now names the three flags and warns against dropping them
+back; the runbook's *Known limitations* `§9` bullet states the numbers, the
+`MemoryMax` bound that replaces them as the flood ceiling, and the condition for
+reverting to the defaults (XFF lands). Pinned by two new tests.
+
+**2 (MEDIUM) — `stream_close_delay` was documented as making reloads safe.**
+It only defers the cut by 5 minutes, and the relay's own pings
+(`sendPings: true`) mean no leg ends on its own first. Fixed in all five places
+the false claim lived: `Caddyfile.relay:19-29` (the mechanism stated as a
+5-minute grace, plus the one case where a leg does end on its own — the relay's
+60 s idle close), the runbook `§4` (`:173-183`, a new paragraph: a reload is a
+staggered drop; schedule it off a long turn), `§7` (`:270-271`, "a reload with a
+live relay behind it is harmless" → it drops streams within the grace), `§8`'s
+symptom table (`:293`, "`stream_close_delay` missing" → expected, resync), `§9`
+(`:315-321`, a new limitation), and the changelog fragment (which had repeated
+"stops a config reload from cutting every live phone session").
+
+**Tests added** (`apps/relay/test/deploy.test.ts`, 13 → 17):
+(a) *"the live ExecStart sizes the three PER-IP limits for ONE shared key"* —
+parses the real live ExecStart and holds each of the three flags **above** its
+`RELAY_LIMITS` per-client default, so an omitted flag (the actual bug) and a
+flag left at its default both die; (b) *"the Caddyfile's account of the limits is
+true of the unit"* — the claim is two artefacts, so both are asserted (the site
+block names each flag AND the unit passes it); (c) *"a Caddy reload drops live
+streams after a 5m GRACE — and nothing says otherwise"* — keeps
+`stream_close_delay 5m` (the R7 guard), bans the old reasoning by regex, and
+requires the word "5 min" in both the block and the runbook; (d) *"it does not
+promise a Caddy reload is a no-op for live sessions"* + *"it says a reload with
+live streams behind it is not harmless"* — the runbook's two remaining repeats of
+the claim (for the record, the test file's `serviceKeys` `\`-continuation
+reader is now exercised by a **real** continuation, not only a synthetic one: the
+unit's own `ExecStart` is two lines).
+
+**Red before green** (against the unfixed artefacts, narrow file only):
+
+```
+$ bun test apps/relay/test/deploy.test.ts        # artefacts as R7 shipped them
+12 pass, 5 fail
+(fail) …the live ExecStart sizes the three PER-IP limits for ONE shared key
+(fail) …the Caddyfile's account of the limits is true of the unit
+(fail) …a Caddy reload drops live streams after a 5m GRACE
+(fail) …it does not promise a Caddy reload is a no-op for live sessions
+(fail) …it says a reload with live streams behind it is not harmless
+```
+
+One draft of test (a) was itself wrong — it compared a formatted string to
+itself-built expectation, so it passed only when the flag was *missing*; it was
+replaced by an explicit `value === undefined` throw that names the flag
+(`deploy.test.ts:168-175`), and mutation M1 below is what catches that class.
+
+**Mutation checks** (after green; each reverted from a saved copy in
+`.tentacle/tmp/mobile-relay/fix1/` and confirmed by `shasum -c`: all four files
+`OK` — no `git checkout`/`restore`/`stash`):
+
+| # | mutation | result |
+|---|---|---|
+| M1 | drop the three live limit flags (back to the per-client defaults — the original bug) | **red 3**: the limit test (`ExecStart does not pass --max-dials-per-minute: … falls back to the per-client default of 30, i.e. one global limit`), the Caddyfile-account test, AND the continuation-reader guard (a dropped continuation loses the flags) |
+| M2 | `--max-streams-per-ip 2000` → `16` (flag present, but at the per-client value) | **red 1**, `expect(received).toBeGreaterThan(expected)` — the test pins "above the default", not merely "the flag is there" |
+| M3 | restore the false Caddyfile sentence (`a stream ends on its own before the delay can ever fire`) | **red 1** ("a Caddy reload drops live streams after a 5m GRACE") |
+| M4 | runbook back to "a Caddy reload not cutting live streams" (§9) | **red 1** ("it does not promise a Caddy reload is a no-op…") |
+| M5 | restore "a reload with a live relay behind it is harmless" (§7) | **red 1** ("it says a reload with live streams behind it is not harmless") |
+
+**Drift from the review's suggested fix.** The review offered "ship the fleet-sized
+ExecStart **or** make the unit refuse the default". I shipped the values (M1/M2
+pin them) and ALSO corrected every prose claim the false default rested on, because
+the two findings interlock: the unit's unsafe numbers were only reachable because
+`Caddyfile.relay` said they were not. No `relay.service`-refuses idea was
+implemented — a unit that validates at start would need the flags in argv anyway,
+and `deploy.test.ts` covers the same ground without a host. The new numbers are
+this fix's OWN choice, not an owner decision: they are stated as reversible in
+`relay.service:47-49` and runbook `§9`, and are gated on the XFF code change.
+
+**Gate** (this branch, after the last edit): `bunx tsc --noEmit` clean;
+`bunx tsc -p apps/relay` and `bunx tsc -p apps/mobile` clean; `bun run lint`
+clean (1363 files, 0 errors, 0 warnings); `bun test` **9830 pass / 4 opt-in skip
+/ 0 fail** (712 files, 78 727 expects; +4 over R7's 9826 — the four new tests).
+`apps/relay` alone: 78/78 (74 + the 4 new). `git status`: only the five intended
+files (`relay.service`, `Caddyfile.relay`, `docs/ops/relay-deploy.md`,
+`deploy.test.ts`, the changelog fragment) plus this doc.
+
+**Not verified — one line each, with how to verify:**
+- `systemd-analyze verify` / `caddy validate` accepting the edited unit and site
+  block: needs those binaries (neither is here). Run both on the host, runbook
+  §3/§4, before enabling.
+- That the fleet numbers are not too low for real traffic: only the deploy shows
+  the real dial rate. Watch `journalctl -u relay.service | grep refused`, runbook
+  §8; the flags are tunable in `ExecStart` without a code change.
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Round 2
+
+**Verdict: APPROVE.** I checked the fix commit against Round 1's two findings
+(`git diff HEAD~1`).
+
+- **Finding 1 (shared per-IP limits): FIXED.** `relay.service` now runs
+  `--max-dials-per-minute 6000 --max-streams-per-ip 2000 --max-hellos-per-minute 600`
+  in the live, continued `ExecStart`. The Caddyfile's claim about the unit is now true,
+  and a test pins it. Mutation: `600→10` made 2 tests fail (the limit test and the
+  parser's own continuation guard).
+- **Finding 2 (`stream_close_delay`): FIXED.** The Caddyfile, runbook §4/§7/§8/§9 and
+  the changelog now describe a reload as a staggered drop over a 5-minute grace.
+  Mutations: putting "before the delay can ever fire" back into the Caddyfile made a
+  test fail, and adding "reload not cutting live streams" to the runbook made a test
+  fail. All three mutations were reverted, and `git status` shows no changes.
+- **Regressions:** none found. `deploy.test.ts` 17/17 pass. `bun run lint` is clean
+  (1363 files) and `bun run typecheck` is clean (root, mobile, relay). The
+  `RELAY_LIMIT_FLAGS` type import resolves. The parser's guard still covers a
+  continued `ExecStart`.
+- **Remaining risk (accepted, and stated in runbook §9):** the limits are still one
+  bucket, so a single client can use up a large share, for example all 2000 sockets.
+  The real fix is X-Forwarded-For behind a trusted-local flag, an R2 code task. It is
+  out of R7's scope.
+
+*— claude-opus-5-5, 2026-11-14* (same model family as the executor; only the
+context is fresh.)

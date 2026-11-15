@@ -52,6 +52,24 @@ export const DEFAULT_CONTEXT_AWARENESS = true;
 export const DEFAULT_CONTEXT_STEP_PERCENT = 1;
 /** The model may renew its own context with `context_reset` (docs/feat/context-reset-refresh.md). */
 export const DEFAULT_CONTEXT_RESET_ENABLED = true;
+
+/**
+ * `sessionHop.tool`: the agent may PROPOSE moving its session (docs/feat/session-hop.md
+ * D9). OFF by default (session-hop-ux OD8, owner 2026-11-15, reversing that doc's
+ * "default on"): a fresh install never offers the tool, and the only way to move is
+ * a `/move` you type. Opt in with `sessionHop.tool: true`.
+ */
+export const DEFAULT_SESSION_HOP_TOOL = false;
+/**
+ * `workloadShell.tool`: offer the agent `workload_shell` — a stateful `sh` on
+ * ANOTHER workload, reached with the laptop's own engine credentials
+ * (docs/fix/workload-shell-live.md, owner decision 1).
+ *
+ * **Default: off.** `move_session` only PROPOSES (nothing happens without the
+ * owner's answer); `workload_shell` runs commands elsewhere at once, so it is
+ * opt-in rather than opt-out.
+ */
+export const DEFAULT_WORKLOAD_SHELL_TOOL = false;
 /** Resets allowed per user message; `-1` = unlimited. */
 export const DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE = -1;
 /** Max characters of a tool result kept inline before it is spilled to a file. */
@@ -181,6 +199,16 @@ export const DEFAULT_CONFIG_JSONC = `{
   // set false to require a manual prompt instead.
   // "autoWake": ${DEFAULT_AUTO_WAKE},
 
+  // Session hop: may the agent PROPOSE moving this session to another target
+  // (another container, or back to this machine) with the \`move_session\` tool?
+  // It only proposes: you are asked, in this terminal, when the turn ends.
+  // "sessionHop": { "tool": ${DEFAULT_SESSION_HOP_TOOL} },
+
+  // Workload shell: may the agent open a stateful \`sh\` on ANOTHER workload
+  // (a pod or container) with \`workload_shell\`? It dials with YOUR kubeconfig /
+  // docker endpoint, so it is off unless you turn it on.
+  // "workloadShell": { "tool": ${DEFAULT_WORKLOAD_SHELL_TOOL} },
+
   // Default engine of \`tentacle run\` / \`tentacle attach\`: "kubernetes" (a pod),
   // "docker" or "podman" (a container). --engine and TENTACLE_ENGINE win.
   // "engine": "kubernetes",
@@ -203,6 +231,22 @@ export const DEFAULT_CONFIG_JSONC = `{
   // history a compaction or a context reset replaced in the file too (resume still
   // shows the current context). Default false: superseded history is not kept.
   // "sessions": { "keepSuperseded": false },
+
+  // The mobile relay (docs/feat/mobile-relay.md): a \`serve\` with paired devices
+  // dials OUT to it, so a phone reaches this computer from anywhere with no open
+  // port (the relay carries Noise ciphertext only). "enabled": false, or
+  // \`serve --no-relay\`, turns it off; \`serve --relay <url>\` names another
+  // instance. "url" must be wss:// — or ws:// to a loopback host (dev/tests),
+  // because the daemon's relay secret travels on that socket.
+  // "relay": { "enabled": true, "url": "wss://relay.tentacle.so" },
+
+  // Push notifications (docs/feat/mobile-push.md): a \`serve\` pushes to its paired
+  // phones when a permission request has waited \`graceSeconds\` unanswered (0 = at
+  // once, max 3600) or a turn ends while nobody is watching. Apple and the relay
+  // carry only an opaque, sealed blob. "enabled": false turns it off; it needs
+  // the relay, so \`--no-relay\` means no push either. \`serve --push-grace <s>\`
+  // overrides graceSeconds.
+  // "push": { "enabled": true, "graceSeconds": 30 },
 
   // \`tentacle run --engine docker|podman\` mounts the current folder into the
   // container; these paths (dirs or files, "~/…" or absolute) are hidden when

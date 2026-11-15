@@ -1,17 +1,29 @@
 /**
- * Settings (docs/feat/mobile-lock.md D6; mockup: a native inset grouped list, not
- * custom controls — mobile decision 13). A dumb renderer: which delay is
- * selected, whether the device can lock, and what the export did all arrive
- * precomputed.
+ * Settings (docs/feat/mobile-lock.md D6; no mockup — the system of
+ * docs/feat/mobile-ui-polish.md applied: large title + glass back, 26 pt grouped
+ * cards, 44 pt rows, an SF Symbol checkmark, `Banner` for notices). A dumb
+ * renderer: which delay is selected, whether the device can lock, and what the
+ * export did all arrive precomputed.
  *
  * The four delay rows are `lock-delay-<v>` and the export row is `export-logs`,
  * because those are the only values a Maestro flow can assert (P9: RN's new
  * architecture shows XCUITest no text).
  */
 import type { JSX } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
-import type { Palette } from "../theme.ts";
+import type { SpeechRate } from "../read-aloud.ts";
+import type { LanguageSetting } from "../speech-locale.ts";
+import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
+import { Banner } from "../ui/Banner.tsx";
+import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
+import { GlassButton } from "../ui/GlassButton.tsx";
+import { GroupedCard } from "../ui/GroupedCard.tsx";
+import { Icon } from "../ui/Icon.tsx";
+import { Row } from "../ui/Row.tsx";
+import { ScreenHeader } from "../ui/ScreenHeader.tsx";
+import { SectionHeader } from "../ui/SectionHeader.tsx";
+import type { VoiceSettings } from "../voice-settings-store.ts";
 
 /** The rows, weakest lock last, with the copy the mockup uses. */
 export const DELAY_ROWS: readonly { readonly value: LockDelay; readonly label: string }[] = [
@@ -20,6 +32,16 @@ export const DELAY_ROWS: readonly { readonly value: LockDelay; readonly label: s
   { value: "1h", label: "After 1 hour" },
   { value: "never", label: "Never" },
 ];
+
+/** What the Notifications row shows: precomputed by `push-registration.ts`. */
+export interface NotificationsRow {
+  /** The person's toggle. */
+  readonly enabled: boolean;
+  /** Why it is or is not on, for the sub-line (never a bare "off"). */
+  readonly detail: string;
+  /** False when nothing can be done from here (`daemon too old`, no permission). */
+  readonly switchable: boolean;
+}
 
 export interface SettingsScreenProps {
   readonly palette: Palette;
@@ -41,7 +63,34 @@ export interface SettingsScreenProps {
   readonly onExportLogs: () => void;
   /** False while an export is in flight (a double tap must not write twice). */
   readonly canExport: boolean;
+  /** The voice settings (docs/feat/mobile-voice.md Design §5); absent = no Voice card. */
+  readonly voice?: VoiceSettings;
+  /** A voice write that did not stick. */
+  readonly voiceError?: string;
+  readonly onVoice?: (next: VoiceSettings) => void;
+  /** Present only when the stack can go back. */
+  readonly onBack?: () => void;
+  /**
+   * The Notifications row (docs/feat/mobile-push.md P9, Owner Q7): on/off plus the
+   * reason, next to the lock settings. ONE row for the phone (the toggle reaches
+   * every paired computer), so it is always present — with nothing paired it says
+   * what to do about it, and its switch is disabled.
+   */
+  readonly notifications?: NotificationsRow;
+  readonly onToggleNotifications?: (enabled: boolean) => void;
 }
+
+export const LANGUAGE_ROWS: readonly { readonly value: LanguageSetting; readonly label: string }[] =
+  [
+    { value: "auto", label: "Auto" },
+    { value: "it-IT", label: "Italiano" },
+    { value: "en-US", label: "English" },
+  ];
+
+export const RATE_ROWS: readonly { readonly value: SpeechRate; readonly label: string }[] = [
+  { value: "normal", label: "Normal" },
+  { value: "fast", label: "Fast" },
+];
 
 export function SettingsScreen({
   palette,
@@ -53,100 +102,241 @@ export function SettingsScreen({
   onSelectDelay,
   onExportLogs,
   canExport,
+  voice,
+  voiceError,
+  onVoice,
+  onBack,
+  notifications,
+  onToggleNotifications,
 }: SettingsScreenProps): JSX.Element {
+  const compact = useCompactTitle();
+  // A voice choice as a checkmark list, the lock rows' look (render only).
+  const choice = <T extends string>(
+    rows: readonly { readonly value: T; readonly label: string }[],
+    selected: T,
+    id: string,
+    pick: (value: T) => void,
+  ) =>
+    rows.map((row, index) => (
+      <Row
+        key={row.value}
+        testID={`${id}-${row.value}`}
+        palette={palette}
+        first={index === 0}
+        minHeight={size.rowSetting}
+        title={row.label}
+        accessibilityLabel={row.label}
+        onPress={() => pick(row.value)}
+        trailing={
+          selected === row.value ? (
+            <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
+          ) : undefined
+        }
+      />
+    ));
   return (
-    <ScrollView
-      testID="settings"
-      style={{ backgroundColor: palette.groupedBackground }}
-      contentContainerStyle={styles.content}
-    >
-      <Text style={[styles.sectionHeader, { color: palette.secondaryLabel }]}>App lock</Text>
-      <View style={[styles.group, { backgroundColor: palette.card }]}>
-        {notice === "no-passcode" ? (
-          <Text testID="lock-notice" style={[styles.notice, { color: palette.danger }]}>
-            This iPhone has no passcode, so tentacle cannot lock. Add one in Settings → Face ID &
-            Passcode.
-          </Text>
-        ) : null}
-        {DELAY_ROWS.map((row, index) => {
-          const selected = setting === row.value;
-          return (
-            <View key={row.value}>
-              {index === 0 ? null : (
-                <View style={[styles.separator, { backgroundColor: palette.separator }]} />
-              )}
-              <Pressable
-                testID={`lock-delay-${row.value}`}
-                accessibilityRole="button"
-                accessibilityState={{ selected }}
-                onPress={() => onSelectDelay(row.value)}
-                style={styles.row}
+    <View style={[styles.root, { backgroundColor: palette.bg }]}>
+      <ScrollView
+        testID="settings"
+        style={{ backgroundColor: palette.bg }}
+        contentContainerStyle={styles.content}
+        onScroll={compact.onScroll}
+        scrollEventThrottle={compact.scrollEventThrottle}
+      >
+        <ScreenHeader
+          palette={palette}
+          title="Settings"
+          left={
+            onBack === undefined ? undefined : (
+              <GlassButton
+                palette={palette}
+                testID="settings-back"
+                icon="chevron.left"
+                accessibilityLabel="Back"
+                onPress={onBack}
+              />
+            )
+          }
+        />
+        <View style={styles.body}>
+          <View style={styles.section}>
+            <SectionHeader palette={palette} title="App lock" />
+            {notice === "no-passcode" ? (
+              <Banner
+                palette={palette}
+                tone="error"
+                icon="lock.fill"
+                testID="lock-notice"
+                title="tentacle cannot lock"
+                body="This iPhone has no passcode. Add one in Settings → Face ID & Passcode."
+              />
+            ) : null}
+            <GroupedCard palette={palette}>
+              {DELAY_ROWS.map((row, index) => {
+                const selected = setting === row.value;
+                const asked = pending === row.value && !selected;
+                return (
+                  <Row
+                    key={row.value}
+                    testID={`lock-delay-${row.value}`}
+                    palette={palette}
+                    first={index === 0}
+                    minHeight={size.rowSetting}
+                    title={row.label}
+                    accessibilityLabel={row.label}
+                    onPress={() => onSelectDelay(row.value)}
+                    trailing={
+                      selected ? (
+                        <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
+                      ) : asked ? (
+                        // Owner Q6: asked for, not yet in force — no silent change.
+                        <Text
+                          testID={`lock-delay-pending-${row.value}`}
+                          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                          style={[typography.footnote, { color: palette.sec }]}
+                        >
+                          Unlock to apply
+                        </Text>
+                      ) : undefined
+                    }
+                  />
+                );
+              })}
+            </GroupedCard>
+            <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
+              How long tentacle may stay in the background before it asks for Face ID again.
+            </Text>
+            {error === undefined ? null : (
+              <Banner
+                palette={palette}
+                tone="error"
+                icon="exclamationmark.triangle"
+                testID="settings-error"
+                body={error}
+              />
+            )}
+          </View>
+          <View style={styles.section}>
+            <SectionHeader palette={palette} title="Notifications" />
+            <GroupedCard palette={palette}>
+              {/* P9: ONE row for the phone. With nothing paired the switch is
+                  disabled and the detail says what to do about it. */}
+              <Row
+                palette={palette}
+                first
+                minHeight={size.rowSetting}
+                title="Notifications"
+                dimmed={notifications === undefined}
+                trailing={
+                  <Switch
+                    testID="notifications-toggle"
+                    accessibilityLabel="Notifications"
+                    value={notifications?.enabled === true}
+                    disabled={notifications === undefined || !notifications.switchable}
+                    trackColor={{ false: palette.fill, true: palette.green }}
+                    onValueChange={(enabled) => onToggleNotifications?.(enabled)}
+                  />
+                }
               >
-                <Text style={[styles.rowLabel, { color: palette.label }]}>{row.label}</Text>
-                {selected ? <Text style={[styles.check, { color: palette.accent }]}>✓</Text> : null}
-                {pending === row.value && !selected ? (
-                  // Owner Q6: asked for, not yet in force — no silent change.
-                  <Text testID={`lock-delay-pending-${row.value}`} style={styles.pending}>
-                    Unlock to apply
-                  </Text>
-                ) : null}
-              </Pressable>
+                <Text
+                  testID="notifications-detail"
+                  numberOfLines={3}
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  style={[typography.footnote, { color: palette.sec }]}
+                >
+                  {notifications === undefined
+                    ? "Pair a computer first to get notified when it needs you"
+                    : notifications.detail}
+                </Text>
+              </Row>
+            </GroupedCard>
+          </View>
+          {voice === undefined || onVoice === undefined ? null : (
+            <View style={styles.section}>
+              <SectionHeader palette={palette} title="Voice" />
+              <GroupedCard palette={palette}>
+                <Row
+                  palette={palette}
+                  first
+                  minHeight={size.rowSetting}
+                  title="Read replies aloud"
+                  trailing={
+                    <Switch
+                      testID="voice-read-aloud"
+                      accessibilityLabel="Read replies aloud"
+                      value={voice.readAloud}
+                      trackColor={{ false: palette.fill, true: palette.green }}
+                      onValueChange={(readAloud) => onVoice({ ...voice, readAloud })}
+                    />
+                  }
+                />
+              </GroupedCard>
+              <SectionHeader palette={palette} title="Language" />
+              <GroupedCard palette={palette}>
+                {choice(LANGUAGE_ROWS, voice.language, "voice-language", (language) =>
+                  onVoice({ ...voice, language }),
+                )}
+              </GroupedCard>
+              <SectionHeader palette={palette} title="Speaking rate" />
+              <GroupedCard palette={palette}>
+                {choice(RATE_ROWS, voice.rate, "voice-rate", (rate) => onVoice({ ...voice, rate }))}
+              </GroupedCard>
+              <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
+                Dictation and speech run on this iPhone. Audio never leaves it and is never saved.
+              </Text>
+              {voiceError === undefined ? null : (
+                <Banner
+                  palette={palette}
+                  tone="error"
+                  icon="exclamationmark.triangle"
+                  testID="voice-error"
+                  body={voiceError}
+                />
+              )}
             </View>
-          );
-        })}
-      </View>
-      {error === undefined ? null : (
-        <Text testID="settings-error" style={[styles.notice, { color: palette.danger }]}>
-          {error}
-        </Text>
-      )}
-      <Text style={[styles.sectionHeader, { color: palette.secondaryLabel }]}>Diagnostics</Text>
-      <View style={[styles.group, { backgroundColor: palette.card }]}>
-        <Pressable
-          testID="export-logs"
-          accessibilityRole="button"
-          disabled={!canExport}
-          onPress={onExportLogs}
-          style={styles.row}
-        >
-          <Text
-            style={[
-              styles.rowLabel,
-              { color: canExport ? palette.accent : palette.secondaryLabel },
-            ]}
-          >
-            Export logs
-          </Text>
-        </Pressable>
-      </View>
-      <Text style={[styles.footnote, { color: palette.secondaryLabel }]}>
-        Logs hold connection state, errors and timings — never message content or keys. You choose
-        where to share the file.
-      </Text>
-      {exportError === undefined ? null : (
-        <Text testID="export-error" style={[styles.notice, { color: palette.danger }]}>
-          {exportError}
-        </Text>
-      )}
-    </ScrollView>
+          )}
+          <View style={styles.section}>
+            <SectionHeader palette={palette} title="Diagnostics" />
+            <GroupedCard palette={palette}>
+              <Row
+                testID="export-logs"
+                palette={palette}
+                first
+                minHeight={size.rowSetting}
+                title="Export logs"
+                tone={canExport ? "accent" : "default"}
+                dimmed={!canExport}
+                {...(canExport ? { onPress: onExportLogs } : {})}
+              />
+            </GroupedCard>
+            <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
+              Logs hold connection state, errors and timings — never message content or keys. You
+              choose where to share the file.
+            </Text>
+            {exportError === undefined ? null : (
+              <Banner
+                palette={palette}
+                tone="error"
+                icon="exclamationmark.triangle"
+                testID="export-error"
+                body={exportError}
+              />
+            )}
+          </View>
+        </View>
+      </ScrollView>
+      <CompactBar palette={palette} title="Settings" shown={compact.shown} />
+    </View>
   );
 }
 
+// ONE left edge (visual review V3/N13): the cards sit on the page margin (their
+// own `marginHorizontal`), headers AND footers 16 inside the card edge, banners
+// on the page margin; the first group as far under the title as between groups.
 const styles = StyleSheet.create({
-  content: { padding: 16 },
-  sectionHeader: { fontSize: 13, textTransform: "uppercase", marginBottom: 6, marginTop: 16 },
-  group: { borderRadius: 10, overflow: "hidden" },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-  rowLabel: { fontSize: 16 },
-  check: { fontSize: 16, fontWeight: "600" },
-  pending: { fontSize: 12, color: "#8E8E93" },
-  separator: { height: StyleSheet.hairlineWidth, marginLeft: 16 },
-  notice: { fontSize: 13, padding: 16 },
-  footnote: { fontSize: 12, marginTop: 8, paddingHorizontal: 4 },
+  root: { flex: 1 },
+  content: { paddingBottom: 40 },
+  body: { gap: space.sectionComputers, paddingTop: space.sectionSessions },
+  section: { gap: 8 },
+  footnote: { paddingHorizontal: space.inset + space.cardInner },
 });

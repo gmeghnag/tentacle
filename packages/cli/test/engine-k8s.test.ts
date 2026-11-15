@@ -10,6 +10,7 @@ import {
   type ExecTarget,
   KubeApiError,
   type Pod,
+  type RawExec,
   type RunExecOptions,
   type RunExecResult,
   type WaitForReadyOptions,
@@ -17,7 +18,7 @@ import {
 import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 import type { TentacleConfig } from "../src/config.ts";
 import { RefusalError, WorkloadNotFoundError } from "../src/engine-host.ts";
-import { type PodCluster, kubeEngineHost } from "../src/engine-k8s.ts";
+import { type PodCluster, kubeEngineHost, pickExecContainer } from "../src/engine-k8s.ts";
 import { attachEngineRuntime, startEngineRuntime } from "../src/engine-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 
@@ -66,6 +67,11 @@ class StubCluster implements PodCluster {
       `runexec:${target.pod}:${target.container ?? "-"}:${options?.timeoutMs ?? "-"}`,
     );
     return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+  }
+  // Not exercised here (the raw exec has its own suite, docs/feat/workload-shell.md
+  // WS1); a call would be a test mistake, so it throws instead of faking bytes.
+  openRawExec(_target: ExecTarget): RawExec {
+    throw new Error("openRawExec is not used in this test");
   }
 }
 
@@ -366,5 +372,118 @@ describe("kubeEngineHost", () => {
     );
     const other = new Error("other");
     expect(host.execError(other, { name: "p" })).toBe(other);
+  });
+
+  // docs/fix/workload-shell-live.md D2: `kubectl exec`'s own container rule,
+  // available to `workload_shell` as an explicit OPTION of the shared `inspect`
+  // so `attach`'s behaviour cannot move with it.
+  describe("pickExecContainer", () => {
+    const NAMES = ["etcdctl", "etcd", "etcd-metrics"] as const;
+
+    test("kubectl-exec mode: kubectl's rule — annotation, else the first container", () => {
+      expect(pickExecContainer(NAMES, "etcd", undefined, "kubectl-exec", "p")).toEqual({
+        container: "etcd",
+        how: "annotation",
+      });
+      expect(pickExecContainer(NAMES, undefined, undefined, "kubectl-exec", "p")).toEqual({
+        container: "etcdctl",
+        how: "first",
+      });
+      // An annotation naming a container the pod does not have is IGNORED by
+      // kubectl, so it must not win here either.
+      expect(pickExecContainer(NAMES, "ghost", undefined, "kubectl-exec", "p")).toEqual({
+        container: "etcdctl",
+        how: "first",
+      });
+      expect(pickExecContainer(["only"], "ghost", undefined, "kubectl-exec", "p")).toEqual({
+        container: "only",
+        how: "only",
+      });
+    });
+
+    test("kubectl-exec mode: an explicit container wins; an absent one is a refusal listing the pod's", () => {
+      expect(pickExecContainer(NAMES, "etcd", "etcd-metrics", "kubectl-exec", "p")).toEqual({
+        container: "etcd-metrics",
+        how: "named",
+      });
+      const refusal = pickExecContainer(NAMES, "etcd", "nope", "kubectl-exec", "p");
+      expect(refusal).toBeInstanceOf(RefusalError);
+      const text = (refusal as Error).message;
+      expect(text).toContain('container "nope" is not valid for pod p');
+      expect(text).toContain("[etcdctl etcd etcd-metrics]");
+      expect(text).toContain("target.container");
+    });
+
+    test("default mode (attach) is UNCHANGED: annotation, else refuse — no first-container fallback", () => {
+      expect(pickExecContainer(NAMES, "etcd", undefined, "attach", "p")).toEqual({
+        container: "etcd",
+        how: "annotation",
+      });
+      const refusal = pickExecContainer(NAMES, undefined, undefined, "attach", "p");
+      expect(refusal).toBeInstanceOf(RefusalError);
+      expect((refusal as Error).message).toBe(
+        `a container name must be specified for pod p, choose one of: [${NAMES.join(" ")}] · pass --container <c>`,
+      );
+      // A pod with one container needs no rule at all; and an explicit one wins.
+      expect(pickExecContainer(["only"], undefined, undefined, "attach", "p")).toEqual({
+        container: "only",
+        how: "only",
+      });
+      expect(pickExecContainer(NAMES, "etcd", "etcd-metrics", "attach", "p")).toEqual({
+        container: "etcd-metrics",
+        how: "named",
+      });
+    });
+  });
+
+  test("inspect with pick: 'kubectl-exec' resolves a multi-container pod with no annotation; without it, still refuses", async () => {
+    const kube = new StubCluster();
+    const host = kubeEngineHost(kube, "openshift-etcd");
+    const names = ["etcdctl", "etcd", "etcd-metrics", "etcd-readyz", "etcd-rev"];
+    kube.pod = {
+      metadata: { name: "p" },
+      spec: { containers: names.map((name) => ({ name })) },
+      status: { phase: "Running", conditions: [{ type: "Ready", status: "True" }] },
+    };
+    // Mutation: ignore `pick` (use attach's rule) → this rejects instead.
+    expect(await host.inspect("p", { pick: "kubectl-exec" })).toEqual({
+      kind: "ready",
+      container: "etcdctl",
+      inUse: "etcdctl",
+      containers: names,
+      how: "first",
+    });
+    // The SAME pod, unchanged call (attach): the refusal, byte for byte.
+    const refusal = await host.inspect("p").catch((e) => e);
+    expect(refusal).toBeInstanceOf(RefusalError);
+    expect((refusal as Error).message).toBe(
+      `a container name must be specified for pod p, choose one of: [${names.join(" ")}] · pass --container <c>`,
+    );
+    // An explicit container wins in both modes (the badge stays `inUse`).
+    expect(await host.inspect("p", { container: "etcd-rev" })).toEqual({
+      kind: "ready",
+      inUse: "etcd-rev",
+    });
+  });
+
+  test("execRefusal: the host asks the cluster, and says nothing when it cannot", async () => {
+    // A `PodCluster` WITHOUT the optional `execRefusal` (every pre-existing
+    // fake): the host still answers — with no reason, never a throw.
+    const bare = new StubCluster();
+    expect(await kubeEngineHost(bare, "dev").execRefusal?.({ name: "p" })).toBeUndefined();
+
+    const asked: ExecTarget[] = [];
+    const withRefusal: PodCluster = Object.assign(new StubCluster(), {
+      execRefusal(target: ExecTarget): Promise<string | undefined> {
+        asked.push(target);
+        return Promise.resolve('pods "p" is forbidden: cannot create "pods/exec"');
+      },
+    });
+    const host = kubeEngineHost(withRefusal, "dev");
+    expect(await host.execRefusal?.({ name: "p", container: "etcd" })).toBe(
+      'pods "p" is forbidden: cannot create "pods/exec"',
+    );
+    // The pod and the RESOLVED container are what gets asked about.
+    expect(asked[0]).toMatchObject({ pod: "p", container: "etcd" });
   });
 });

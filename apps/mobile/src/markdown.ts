@@ -63,6 +63,24 @@ export type Parsed =
       readonly hidden: number;
     };
 
+/**
+ * Undo the HTML escaping `marked@12`'s LEXER applies to inline text, code spans,
+ * image alt text and table cells (v12 escapes in the tokenizer, not the renderer,
+ * so its tokens carry `&#39;`/`&quot;`/`&amp;`/`&lt;`/`&gt;`). Exactly the set it
+ * produces, `&amp;` LAST so `&amp;lt;` stays the text `&lt;` (B3).
+ */
+export function decodeEntities(text: string): string {
+  if (!text.includes("&")) {
+    return text;
+  }
+  return text
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&amp;", "&");
+}
+
 function inline(tokens: readonly Token[] | undefined): readonly MdInline[] {
   const out: MdInline[] = [];
   for (const token of tokens ?? []) {
@@ -74,12 +92,12 @@ function inline(tokens: readonly Token[] | undefined): readonly MdInline[] {
         if (children.length > 0) {
           out.push(...children);
         } else {
-          out.push({ kind: "text", text: (token as Tokens.Text).text });
+          out.push({ kind: "text", text: decodeEntities((token as Tokens.Text).text) });
         }
         break;
       }
       case "codespan":
-        out.push({ kind: "code", text: (token as Tokens.Codespan).text });
+        out.push({ kind: "code", text: decodeEntities((token as Tokens.Codespan).text) });
         break;
       case "strong":
         out.push({ kind: "strong", children: inline((token as Tokens.Strong).tokens) });
@@ -105,7 +123,10 @@ function inline(tokens: readonly Token[] | undefined): readonly MdInline[] {
       case "image": {
         // An image in markdown is a URL this app would have to fetch: it stays text.
         const image = token as Tokens.Image;
-        out.push({ kind: "text", text: image.text !== "" ? image.text : image.href });
+        out.push({
+          kind: "text",
+          text: image.text !== "" ? decodeEntities(image.text) : image.href,
+        });
         break;
       }
       default: {

@@ -10,13 +10,14 @@
  *
  * That is the §7 split, and it is why this hook holds NO state of its own: every
  * ref these three bodies touch is ALSO written or read by a driver this slice
- * does not own (Fable H1 — the 20 effects stay in `App`, in today's order):
+ * does not own (Fable H1 — the 22 effects stay in `App`, in today's order: the
+ * original 20 plus session-hop's 2):
  *
  * - `exitPendingRef` — read by the turn's settle (`App`'s `streamTurn`: a quit
  *   asked for mid-turn exits there) and by the key snapshot (S3);
  * - `clearingRef` / `ownClearsRef` — written by the `watch` activity effect (a
  *   `history{clear}` releases the latch and zeroes the own count) and by
- *   `swapSession`;
+ *   `swapSession` (a session-link swap);
  * - `clearAfterTurnRef` — written here, taken by the turn's settle;
  * - `runClearRef` — the forward reference the turn's settle calls (stop-then-
  *   clear), assigned by `App` right after this hook returns;
@@ -59,12 +60,6 @@ export interface RunQuit {
   closedElsewhere(reason: "closed" | "deleted" | "gone"): void;
 }
 
-/** `swapSession`, as this hook needs it (`App`'s own signature, unchanged). */
-export type QuitSwap = (
-  next: SessionController,
-  opts?: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void },
-) => void;
-
 /**
  * The narrow port the quit and the clear execute through: the App's own state,
  * setters, refs and callbacks. A port FIELD keeps its current identity rule
@@ -73,7 +68,7 @@ export type QuitSwap = (
  * the fields and name them in deps, never `host`.
  */
 export interface QuitClearHost {
-  /** The live session (a clear's reset, a legacy close) and the display state. */
+  /** The live session (a clear's reset, a swap's target) and the display state. */
   readonly sessionRef: MutableRefObject<SessionController | null>;
   readonly stateRef: MutableRefObject<DisplayState>;
   /** What Esc/Ctrl+C aborts: the streamed turn's controller. */
@@ -103,13 +98,16 @@ export interface QuitClearHost {
   readonly runQuit: RunQuit | undefined;
   /** `connect`: quitting only detaches, so a job or a turn is not lost. */
   readonly detachOnQuit: boolean;
-  /** A session without `clear`: the legacy close-and-replace needs a fresh one. */
-  readonly makeSession: () => SessionController;
-  readonly swapSession: QuitSwap;
   readonly pushNotice: (text: string) => void;
   readonly wakeIfPending: () => void;
   /** Quit the TUI (Ink's `useApp().exit`). */
   readonly exit: () => void;
+  /**
+   * docs/feat/session-hop-ux OD6: the session is being REPLACED, so a hop fact
+   * about the old one (its place, its cwd) is dropped instead of riding the new
+   * conversation's first prompt. Absent: nothing to drop.
+   */
+  readonly clearHopPending?: () => void;
 }
 
 /** What `App` names from this feature. The identifiers are the pre-S8 ones. */
@@ -141,9 +139,8 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
     setQuitConfirm,
     runQuit,
     detachOnQuit,
-    makeSession,
-    swapSession,
     pushNotice,
+    clearHopPending,
     wakeIfPending,
     exit,
   } = host;
@@ -216,7 +213,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
    */
   const runClear = useCallback((): void => {
     const session = sessionRef.current;
-    if (!session?.clear) {
+    if (!session) {
       return;
     }
     // Called ON the session: under `connect` this is the `RemoteSession` CLASS
@@ -225,6 +222,10 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
     // (docs/fix/clear-connect-unbound.md).
     const clear = session.clear.bind(session);
     clearingRef.current = true;
+    // OD6: the conversation being dropped may have had a hop fact pending; the
+    // new one must not be told "you are in <the old place>". (A ref read at call
+    // time, like every other seam here: it is not a render value.)
+    clearHopPending?.();
     // The open a reset needs comes FIRST (review M1): it can ATTACH a session
     // another device keeps live, and that attach's snapshot is a
     // `history{reason: null}` — which releases the latch and zeroes the
@@ -319,28 +320,21 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
         }
       },
     );
-  }, [clearingRef, ownClearsRef, pushNotice, sessionRef, stateRef, wakeIfPending]);
+  }, [clearingRef, clearHopPending, ownClearsRef, pushNotice, sessionRef, stateRef, wakeIfPending]);
 
   /**
    * `/clear`'s step (docs/feat/app-decomposition.md M5): the refusals, the
-   * latch, the stop-then-clear hand-off and the legacy close-and-replace. The
-   * decision is `clearCommandStep`'s; this only carries it out.
+   * latch and the stop-then-clear hand-off. The decision is
+   * `clearCommandStep`'s; this only carries it out.
    */
   const requestClear = useCallback((): void => {
     const step = clearCommandStep({
-      canClear: typeof sessionRef.current?.clear === "function",
       running: stateRef.current.running,
       ownTurn: foreignRef.current === null,
       compacting: compactingRef.current,
       clearing: clearingRef.current,
     });
-    if (step === "legacy") {
-      // A session without `clear` (the in-process fallback): the old
-      // session ends (with its jobs) before the fresh one starts
-      // (decision D3).
-      sessionRef.current?.close?.();
-      swapSession(makeSession());
-    } else if (step === "busy") {
+    if (step === "busy") {
       pushNotice("_A /clear is already running._");
     } else if (step === "compacting") {
       pushNotice("_Can't clear while a compaction is running._");
@@ -359,13 +353,10 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
     clearingRef,
     compactingRef,
     foreignRef,
-    makeSession,
     pushNotice,
     runClearRef,
-    sessionRef,
     stateRef,
     stoppedHereRef,
-    swapSession,
   ]);
 
   return { requestQuit, runClear, requestClear };

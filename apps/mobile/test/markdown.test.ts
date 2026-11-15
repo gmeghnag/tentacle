@@ -174,3 +174,40 @@ describe("the parse cache", () => {
     expect(cache.size).toBe(3);
   });
 });
+
+describe("entities (B3: marked@12's lexer HTML-escapes inline text)", () => {
+  const one = (text: string): string => plainText(parse(text));
+
+  test("prose shows the characters, not their entities", () => {
+    expect(one(`It's "x" & <y>`)).toBe(`It's "x" & <y>`);
+  });
+
+  test("a code span shows the characters", () => {
+    const [para] = blocksOf("Use `a < b && c` here.");
+    expect(para).toEqual({
+      kind: "paragraph",
+      children: [
+        { kind: "text", text: "Use " },
+        { kind: "code", text: "a < b && c" },
+        { kind: "text", text: " here." },
+      ],
+    });
+  });
+
+  test("a table cell shows the characters", () => {
+    const [table] = blocksOf("| a | b |\n|---|---|\n| x's | 1 |");
+    expect(table).toEqual({ kind: "table", header: ["a", "b"], rows: [["x's", "1"]] });
+  });
+
+  test("a literal `&amp;` in the source decodes to `&`, as any renderer shows it", () => {
+    expect(one("Tom &amp; Jerry")).toBe("Tom & Jerry");
+  });
+
+  test("`&amp;` is decoded last: `&amp;lt;` is the text `&lt;`, not `<`", () => {
+    expect(one("a &amp;lt; b")).toBe("a &lt; b");
+  });
+
+  test("link text and image alt text are decoded too", () => {
+    expect(one(`[it's](https://x.test) ![a "b"](https://x.test/i.png)`)).toBe(`it's a "b"`);
+  });
+});

@@ -81,6 +81,12 @@ export type TranscriptInput =
   | { readonly type: "closed"; readonly reason: EndReason }
   | { readonly type: "link"; readonly status: "up" | "down" };
 
+/** A turn's token figures (the TUI's shape, `state.ts`'s `TokenTotals`). */
+export interface TokenTotals {
+  readonly prompt: number;
+  readonly completion: number;
+}
+
 /**
  * The fold's state. `rows` is the transcript (oldest first; the last row may
  * still be streaming); `turn` is the running bracket, which the screen draws as
@@ -95,6 +101,18 @@ export interface State {
   readonly closed: EndReason | null;
   /** Update kinds already reported (one notice per kind, ever). */
   readonly unsupported: readonly string[];
+  /**
+   * This session's token totals as its turns measured them (`agent_usage`).
+   * They are the SESSION's, not this history's: a replaced history keeps them
+   * (docs/feat/mobile-session-info.md, the TUI's `sessionTokens`).
+   */
+  readonly sessionTokens: TokenTotals;
+  /**
+   * The last measured turn's figures — its `prompt` is the CONTEXT FILL, which is
+   * what the header's bar shows. `null` until a turn measures one, and after a
+   * replaced history (it described the chat that was dropped).
+   */
+  readonly lastTurnTokens: TokenTotals | null;
   /** Row-key counter: monotonic, never reused. */
   readonly seq: number;
 }
@@ -105,6 +123,8 @@ export const initialState: State = {
   link: "up",
   closed: null,
   unsupported: [],
+  sessionTokens: { prompt: 0, completion: 0 },
+  lastTurnTokens: null,
   seq: 0,
 };
 
@@ -185,7 +205,12 @@ export function apply(state: State, input: TranscriptInput): State {
     case "link":
       return state.link === input.status ? state : { ...state, link: input.status };
     case "history_reset":
-      return withHistory(state, input.messages);
+      // A reset REPLACED the history (the branch below appends): the measured
+      // fill goes with it, the session's totals stay.
+      return apply(
+        { ...state, lastTurnTokens: null },
+        { type: "history", messages: input.messages, reason: null },
+      );
     case "user_message":
       return push(state, (key) => ({
         kind: "user",
@@ -247,7 +272,12 @@ function appendHistory(state: State, messages: readonly ChatMessage[]): State {
 
 /** The daemon's history replaced what is shown (a resync, `/clear`, a fresh attach). */
 function withHistory(state: State, messages: readonly ChatMessage[]): State {
-  return append({ ...state, rows: [] }, (nextKey) => historyRows(messages, nextKey));
+  // The measured fill described the chat this replace just dropped: forgotten,
+  // or the header's bar would sit at the old conversation's figure for ever
+  // (the TUI's `forgetContextFill`, `packages/tui/src/state.ts:645-654`).
+  return append({ ...state, rows: [], lastTurnTokens: null }, (nextKey) =>
+    historyRows(messages, nextKey),
+  );
 }
 
 function applyHistory(state: State, input: Extract<TranscriptInput, { type: "history" }>): State {
@@ -360,15 +390,32 @@ function applyAgentEvent(state: State, event: StreamEvent): State {
     case "history_commit":
       // A bookkeeping marker: nothing to show.
       return state;
+    case "usage": {
+      // The turn's token figures (docs/feat/mobile-session-info.md Owner
+      // decision 4): the header's context bar shows the FILL (`prompt`), and the
+      // session's counters accumulate — the same rule as the TUI's fold
+      // (`packages/tui/src/state.ts:485-497`), pinned by `transcript-parity`.
+      return {
+        ...state,
+        sessionTokens: {
+          prompt: state.sessionTokens.prompt + event.usage.promptTokens,
+          completion: state.sessionTokens.completion + event.usage.completionTokens,
+        },
+        lastTurnTokens: {
+          prompt: event.usage.promptTokens,
+          completion: event.usage.completionTokens,
+        },
+      };
+    }
     case "context_reset":
       // The model renewed its context mid-turn: the old transcript stays, the
       // new history follows it.
       return appendHistory(state, event.messages);
     default:
-      // `usage`, sub-agent progress, background exits, `turn_end`: the phone has
-      // no meter, no nested panel and no job dock in this slice (12c's screen
-      // and later tasks decide those) — and none of them is a silent drop, since
-      // each is either a counter or (for `turn_end`) the turn bracket's job.
+      // Sub-agent progress, background exits, `turn_end`: the phone has no nested
+      // panel and no job dock in this slice (12c's screen and later tasks decide
+      // those) — and none of them is a silent drop, since each is either a
+      // counter or (for `turn_end`) the turn bracket's job.
       return state;
   }
 }

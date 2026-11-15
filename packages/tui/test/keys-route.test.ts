@@ -8,72 +8,16 @@
  * by the S0/S0b nets, which this slice must leave green and unedited.
  */
 import { describe, expect, test } from "bun:test";
-import type { Key } from "ink";
 import type { DockState } from "../src/background-focus.ts";
 import { LAYER_ORDER, PURE_LAYERS } from "../src/keys/layers.ts";
 import { routeKey } from "../src/keys/route.ts";
 import type { KeySnapshot } from "../src/keys/snapshot.ts";
-
-const NO_KEY: Key = {
-  upArrow: false,
-  downArrow: false,
-  leftArrow: false,
-  rightArrow: false,
-  pageDown: false,
-  pageUp: false,
-  return: false,
-  escape: false,
-  ctrl: false,
-  shift: false,
-  tab: false,
-  backspace: false,
-  delete: false,
-  meta: false,
-};
-
-/** A snapshot of a quiet App: idle, no panel, no dialog, nothing running. */
-function snap(over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}): KeySnapshot {
-  return {
-    char,
-    key: { ...NO_KEY, ...key },
-    quitConfirm: () => null,
-    dock: () => ({ focus: { kind: "input" }, drafts: {}, sent: {} }),
-    chord: () => ({ armedAt: null }),
-    running: () => false,
-    compacting: () => false,
-    pasteBuffer: () => null,
-    replyMaxChars: 0,
-    dockIds: () => [],
-    othersOnSession: () => 0,
-    sessionId: () => "s1",
-    switching: () => false,
-    panelGen: () => 0,
-    abortable: () => false,
-    uploadInFlight: () => false,
-    exitPending: () => false,
-    subagents: () => [],
-    jobRows: () => [],
-    panel: null,
-    paletteOpen: false,
-    paletteNames: [],
-    commandSel: 0,
-    fieldValue: "",
-    permission: {
-      pending: null,
-      choices: [],
-      selected: 0,
-      mode: () => ({ mode: "menu" }),
-    },
-    sessions: undefined,
-    detachOnQuit: false,
-    ...over,
-  } as KeySnapshot;
-}
+import { NO_KEY, snap } from "./key-snapshot.ts";
 
 const route = (s: KeySnapshot) => routeKey(s, PURE_LAYERS);
 
 describe("the layer list", () => {
-  test("is the documented 14, in the documented order, and the walk is its first 13", () => {
+  test("is the documented 15, in the documented order, and the walk is its first 14", () => {
     // The order IS the safety property (AGENTS §7): a reordering must be red
     // here, not a subtle behaviour change in a frame diff.
     expect(LAYER_ORDER).toEqual([
@@ -83,6 +27,10 @@ describe("the layer list", () => {
       "permission",
       "ctrlC",
       "paste",
+      // `voice` sits after `paste` and BEFORE the Esc pair: while a dictation is
+      // running Esc must cancel it, not abort the agent's turn
+      // (docs/feat/voice-dictation.md F7). Moving it after `escAbort` is red here.
+      "voice",
       "sessions",
       "tree",
       "dock",
@@ -126,6 +74,7 @@ describe("the walk", () => {
             choices: [],
             selected: 0,
             mode: () => ({ mode: "menu" }),
+            shownAt: () => 0,
           },
         },
         "y",

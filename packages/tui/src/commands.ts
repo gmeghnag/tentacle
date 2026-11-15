@@ -156,6 +156,21 @@ export function paletteWindow(
   return { start, end: start + rows };
 }
 
+/**
+ * The palette highlight after one Up (`-1`) or Down (`1`) over `n` rows: the
+ * index is clamped into the list first (it may point past a list that shrank
+ * since), then moved by one, wrapping at both ends. An empty list has no row
+ * to move to: the index is 0, never `NaN` (`% 0`), so a later open starts at
+ * the top instead of on a poisoned index.
+ */
+export function paletteStep(i: number, n: number, dir: -1 | 1): number {
+  if (n <= 0) {
+    return 0;
+  }
+  const at = Math.min(i, n - 1);
+  return (at + dir + n) % n;
+}
+
 // Commands that start a new turn or swap/mutate the session's history. Running
 // one mid-turn is unsafe: `/retry` would start a *second* concurrent `send` on
 // the same session (both mutate its messages/steering) and clobber the abort
@@ -430,7 +445,7 @@ export function helpText(skills: readonly SlashSkill[] = []): string {
     skillRows.length + shadowed.length > 0
       ? `\n\n**Skills** (load the skill, then do the task)\n${[...skillRows, ...shadowed].join("\n")}`
       : "";
-  return `**Commands**\n${rows}${skillBlock}\n\n**Keys**: Shift+Tab auto-accept tools · \\+Enter newline · Ctrl+C stop/quit · Ctrl+X Ctrl+S send queued now · Option+Backspace/Ctrl+W delete previous word · Alt+D delete next word`;
+  return `**Commands**\n${rows}${skillBlock}\n\n**Keys**: Shift+Tab auto-accept tools (whole session) · \\+Enter newline · Ctrl+C stop/quit · Ctrl+X Ctrl+S send queued now · Option+Backspace/Ctrl+W delete previous word · Alt+D delete next word`;
 }
 
 /** A daemon-supplied string, safe inside a Markdown code span or after a colon. */

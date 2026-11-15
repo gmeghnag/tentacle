@@ -29,6 +29,40 @@ const show = (actions: readonly RouterAction[]): string[] =>
       : `${a.kind} ${a.sessionId}/${a.requestId}`,
   );
 
+// docs/feat/session-hop-ux: the load-bearing wire property. `kind` and `hopAuto`
+// are LAPTOP-INTERNAL — a daemon cannot forge either, and `auto` never travels
+// back — which is what lets auto-accept answer a move from facts only the laptop
+// holds (AGENTS §7, single broker + "a pod is not trusted").
+describe("the hop's laptop-internal fields never cross the wire", () => {
+  test("toPermissionRequest yields no `kind` and no `hopAuto`, whatever the update says", () => {
+    const r = new PermissionRouter();
+    // A hostile update that TRIES to carry them (an unknown field is stripped).
+    const [action] = r.request(
+      "S",
+      req("r1", { kind: "session_hop", hopAuto: true } as Partial<PermissionRequestUpdate>),
+    );
+    const request = action?.kind === "prompt" ? action.request : undefined;
+    expect(request).toBeDefined();
+    expect(request?.kind).toBeUndefined();
+    expect(request?.hopAuto).toBeUndefined();
+  });
+
+  test("an answer's `send` carries only optionId and message — `auto` never leaves", () => {
+    const r = new PermissionRouter();
+    r.request("S", req("r1"));
+    const sent = r
+      .answered("S", "r1", { allowed: true, scope: "once", auto: true })
+      .filter((a) => a.kind === "send");
+    expect(sent).toHaveLength(1);
+    const action = sent[0];
+    if (action?.kind !== "send") {
+      throw new Error("expected a send");
+    }
+    // The WHOLE shape: a new field here would be a wire (and protocol) change.
+    expect(Object.keys(action).sort()).toEqual(["kind", "optionId", "requestId", "sessionId"]);
+  });
+});
+
 describe("a background child's ask names its spawning turn (T34)", () => {
   test("the update's turnId wins over the stream's; the agent id rides through", () => {
     const r = new PermissionRouter();
@@ -246,5 +280,115 @@ describe("PermissionRouter — the sub-agent a request comes from", () => {
     expect(seen?.description.startsWith("a b")).toBe(true);
     expect(seen?.description.length).toBe(200);
     expect(seen?.description.endsWith("…")).toBe(true);
+  });
+});
+
+// docs/feat/mobile-notifications.md Design 5: an answer given OUTSIDE the prompt
+// (an iPhone notification's Approve / Deny / Reply) settles a request BY ID.
+// `answered` cannot serve it: it accepts only the request that is `current`, and
+// the phone's notification path never shows a prompt at all.
+describe("PermissionRouter.answerById (a notification's answer)", () => {
+  const sends = (actions: readonly RouterAction[]) => actions.filter((a) => a.kind === "send");
+
+  test("a QUEUED request is answered; the one on screen is untouched", () => {
+    // Mutation: implement it as `answered` (only `current`) → red: no send.
+    const r = new PermissionRouter();
+    r.request("S", req("r1"));
+    r.request("S", req("r2"));
+    expect(sends(r.answerById("S", "r2", { allowed: true, scope: "once" }))).toEqual([
+      { kind: "send", sessionId: "S", requestId: "r2", optionId: "allow_once" },
+    ]);
+    // r1 is still the prompt, and answering it later still works.
+    expect(sends(r.answered("S", "r1", { allowed: false }))).toEqual([
+      { kind: "send", sessionId: "S", requestId: "r1", optionId: "reject_once" },
+    ]);
+  });
+
+  test("the CURRENT request: the open prompt is withdrawn first, then the send", () => {
+    // Mutation: drop the `abort` → the prompt stays on screen after the answer,
+    // and its late DISMISSED would be the only thing left to act on.
+    const r = new PermissionRouter();
+    r.request("S", req("r1"));
+    expect(r.answerById("S", "r1", { allowed: true, scope: "once" })).toEqual([
+      { kind: "abort", sessionId: "S", requestId: "r1" },
+      { kind: "send", sessionId: "S", requestId: "r1", optionId: "allow_once" },
+    ]);
+    // The prompt's late DISMISSED lands AFTER the answer: nothing is sent.
+    expect(r.answered("S", "r1", { dismissed: true, allowed: false })).toEqual([]);
+  });
+
+  test("an UNOFFERED option settles nothing: the request stays held (mutation: consume it → red)", () => {
+    const r = new PermissionRouter();
+    r.request(
+      "S",
+      req("r1", { options: [{ optionId: "allow_once", name: "A", kind: "allow_once" }] }),
+    );
+    expect(r.answerById("S", "r1", { allowed: false })).toEqual([
+      { kind: "unoffered", sessionId: "S", requestId: "r1", optionId: "reject_once" },
+    ]);
+    // Still answerable in the app: a scope-less approval is offered.
+    expect(sends(r.answerById("S", "r1", { allowed: true, scope: "once" }))).toEqual([
+      { kind: "send", sessionId: "S", requestId: "r1", optionId: "allow_once" },
+    ]);
+  });
+
+  test("a reply rides only where the daemon takes one", () => {
+    const r = new PermissionRouter();
+    r.request("S", req("r1", { reply: { maxChars: 100 } }));
+    expect(sends(r.answerById("S", "r1", { allowed: false, message: " use bun " }))).toEqual([
+      {
+        kind: "send",
+        sessionId: "S",
+        requestId: "r1",
+        optionId: "reject_once",
+        message: "use bun",
+      },
+    ]);
+    const r2 = new PermissionRouter();
+    r2.request("S", req("r1"));
+    expect(r2.answerById("S", "r1", { allowed: false, message: "no" })).toEqual([
+      { kind: "unreplyable", sessionId: "S", requestId: "r1" },
+    ]);
+    // …and it is still answerable (never a bare No behind the person's back).
+    expect(sends(r2.answerById("S", "r1", { allowed: false }))).toEqual([
+      { kind: "send", sessionId: "S", requestId: "r1", optionId: "reject_once" },
+    ]);
+  });
+
+  test("unknown, resolved, or already answered here: nothing is sent", () => {
+    // Mutation: drop the `answeredIds` check → a duplicate tap sends twice
+    // (harmless daemon-side, but the phone would report a false failure).
+    const r = new PermissionRouter();
+    r.request("S", req("r1"));
+    expect(r.answerById("S", "nope", { allowed: true })).toEqual([]);
+    r.request("S", req("r2"));
+    r.resolved("S", "r2");
+    expect(r.answerById("S", "r2", { allowed: true })).toEqual([]);
+    r.answerById("S", "r1", { allowed: true, scope: "once" });
+    expect(r.answerById("S", "r1", { allowed: true, scope: "once" })).toEqual([]);
+  });
+});
+
+// docs/feat/mobile-notifications.md N1/N8: what the router HOLDS (read-only), so
+// the notification path can name an ask it means to settle.
+describe("PermissionRouter.heldIds", () => {
+  test("the prompted ask first, then the queued ones, per session", () => {
+    const r = new PermissionRouter();
+    r.request("S", req("r1"));
+    r.request("S", req("r2"));
+    r.request("T", req("t1"));
+    expect(r.heldIds("S")).toEqual(["r1", "r2"]);
+    expect(r.heldIds("T")).toEqual(["t1"]);
+    expect(r.heldIds("X")).toEqual([]);
+  });
+
+  test("an answered or resolved ask leaves the list; a queued answer promotes the next", () => {
+    const r = new PermissionRouter();
+    r.request("S", req("r1"));
+    r.request("S", req("r2"));
+    r.answered("S", "r1", { allowed: true, scope: "once" });
+    expect(r.heldIds("S")).toEqual(["r2"]);
+    r.resolved("S", "r2");
+    expect(r.heldIds("S")).toEqual([]);
   });
 });

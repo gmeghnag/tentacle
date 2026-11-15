@@ -15,17 +15,19 @@
  *   EMPTY list (mutation: replace the identity but keep the devices).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   addDevice,
   deviceIdOf,
   loadOrCreateIdentity,
+  readPushRegistrations,
   readRegistry,
   readSeen,
   replaceIdentity,
   touchSeen,
+  writePushRegistration,
   writeRegistry,
 } from "@tentacle/daemon";
 import {
@@ -161,6 +163,111 @@ describe("devices", () => {
   });
 });
 
+/**
+ * The push column (docs/feat/mobile-push.md Design 6, P5): `on` for a device
+ * whose registration is usable, `off` otherwise. Read from `devices/push/`, so
+ * it says what the DAEMON will do, not what the phone believes.
+ *
+ * Mutation: print `on` from the registry alone (drop the push read) → a phone
+ * that never registered notifications looks like one that did, which is exactly
+ * the support question this column answers.
+ */
+describe("the push column", () => {
+  const pushKey = (fill: number): string => Buffer.from(key(fill)).toString("base64url");
+
+  const register = (configDir: string, deviceId: string, token = "a".repeat(64)): void => {
+    const written = writePushRegistration(configDir, {
+      deviceId,
+      token,
+      env: "sandbox",
+      key: pushKey(1),
+      registeredAt: 5,
+    });
+    if (!written.ok) throw new Error(written.reason);
+  };
+
+  test("renders `off` for a device that never registered, and `on` for one that did", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone", "iPad"]);
+    const [iphone, ipad] = ["iPhone", "iPad"].map((name) => {
+      const registry = readRegistry(configDir);
+      return registry.ok ? registry.registry.devices.find((d) => d.name === name)?.id : undefined;
+    });
+    if (iphone === undefined || ipad === undefined) throw new Error("fixture");
+    register(configDir, iphone);
+    const lines = renderDevices(
+      (() => {
+        const registry = readRegistry(configDir);
+        return registry.ok ? registry.registry.devices : [];
+      })(),
+      new Map(),
+      Date.now(),
+      readPushRegistrations(configDir).registrations,
+    );
+    expect(lines[0]).toContain("PUSH");
+    const rowOf = (name: string) => lines.find((line) => line.startsWith(name)) ?? "";
+    expect(rowOf("iPhone")).toEndWith("on");
+    expect(rowOf("iPad")).toEndWith("off");
+  });
+
+  test("an unreadable registration reads `off`, never `on` (fail closed)", () => {
+    const configDir = newDir();
+    mkdirSync(join(configDir, "devices", "push"), { recursive: true });
+    writeFileSync(
+      join(configDir, "devices", "push", `${"a".repeat(16)}.json`),
+      JSON.stringify({ v: 9 }),
+    );
+    const lines = renderDevices(
+      [{ id: "a".repeat(16), name: "iPhone", publicKey: key(1), pairedAt: 0 }],
+      new Map(),
+      0,
+      readPushRegistrations(configDir).registrations,
+    );
+    expect(lines[1]).toEndWith("off");
+  });
+
+  test("`devices` prints the column for a real store", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const id = deviceIdOf(key(1));
+    register(configDir, id);
+    const result = await run(configDir, devicesCommand);
+    expect(result.code).toBe(0);
+    expect(result.out.join("")).toContain("PUSH");
+    expect(result.out.join("").trimEnd().split("\n")[1]).toEndWith("on");
+  });
+});
+
+describe("reset and push registrations", () => {
+  test("`devices reset` empties `push/` too, including a file whose device is GONE (F13)", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const id = deviceIdOf(key(1));
+    const pushKey = (fill: number): string => Buffer.from(key(fill)).toString("base64url");
+    for (const [deviceId, token] of [
+      [id, "a".repeat(64)],
+      // A registration left behind by a device revoked by hand (no registry
+      // entry), so `removeDevices` cannot reach it: this is the file that only a
+      // directory-wide clear takes. Mutation: drop `clearPushRegistrations` from
+      // `reset` → this one survives the reset and a reset machine keeps a token.
+      ["9".repeat(16), "b".repeat(64)],
+    ] as const) {
+      const written = writePushRegistration(configDir, {
+        deviceId,
+        token,
+        env: "production",
+        key: pushKey(2),
+        registeredAt: 7,
+      });
+      if (!written.ok) throw new Error(written.reason);
+    }
+    expect(readPushRegistrations(configDir).registrations.size).toBe(2);
+    const result = await run(configDir, resetCommand, { yes: true });
+    expect(result.code).toBe(0);
+    expect(readPushRegistrations(configDir).registrations.size).toBe(0);
+  });
+});
+
 describe("resolveDevice", () => {
   const devices = [
     { id: "aaaaaaaaaaaaaaaa", name: "iPhone", publicKey: key(1), pairedAt: 0 },
@@ -256,6 +363,68 @@ describe("revoke", () => {
 });
 
 describe("reset", () => {
+  /**
+   * The mobile relay's ids rotate with the identity (docs/feat/mobile-relay.md
+   * Q5): ONE recovery verb for a leaked laptop, and the phones must re-pair
+   * after a reset anyway — so a new relay address costs nothing extra.
+   *
+   * Mutation: skip `removeRelaySecrets` → every `relay.json` survives, and a
+   * leaked relay address keeps routing phones at the machine it was leaked for.
+   */
+  test("deletes every project's relay.json, and says so", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const storeA = join(configDir, "daemon", "proj-a");
+    const storeB = join(configDir, "daemon", "proj-b");
+    mkdirSync(storeA, { recursive: true });
+    mkdirSync(storeB, { recursive: true });
+    writeFileSync(join(storeA, "relay.json"), `{ "v": 1, "secret": "a" }\n`);
+    writeFileSync(join(storeB, "relay.json"), `{ "v": 1, "secret": "b" }\n`);
+    const result = await run(configDir, resetCommand, { yes: true });
+    expect(result.code).toBe(0);
+    expect(existsSync(join(storeA, "relay.json"))).toBe(false);
+    expect(existsSync(join(storeB, "relay.json"))).toBe(false);
+    expect(result.err.join("")).toContain("relay address rotated for 2 projects");
+    expect(result.err.join("")).toContain("Restart every");
+  });
+
+  test("a declined or unconfirmed reset rotates NOTHING", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const store = join(configDir, "daemon", "proj-a");
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, "relay.json"), `{ "v": 1, "secret": "a" }\n`);
+    const result = await run(configDir, resetCommand, { answer: "n" });
+    expect(result.code).toBe(1);
+    expect(existsSync(join(store, "relay.json"))).toBe(true);
+  });
+
+  test("a machine whose daemons never ran needs no relay line", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const result = await run(configDir, resetCommand, { yes: true });
+    expect(result.code).toBe(0);
+    expect(result.err.join("")).not.toContain("relay address rotated");
+  });
+
+  test("a store with sessions but NO relay.json counts as nothing rotated", async () => {
+    // A project store exists from the moment a daemon ran — but a daemon that
+    // never had the relay on wrote no `relay.json`. Counting it would tell the
+    // user an address changed when none did (mutation: no `existsSync` guard →
+    // `rmSync` on a missing file is a silent success, so it is counted).
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const store = join(configDir, "daemon", "proj-a");
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, "some-session.jsonl"), "{}\n");
+    const result = await run(configDir, resetCommand, { yes: true });
+    expect(result.code).toBe(0);
+    expect(result.err.join("")).not.toContain("relay address rotated");
+    // And the store's own files are untouched: a reset rotates identities, it
+    // does not delete sessions.
+    expect(existsSync(join(store, "some-session.jsonl"))).toBe(true);
+  });
+
   test("needs a y: 'n' changes nothing", async () => {
     const configDir = newDir();
     pairDevices(configDir, ["iPhone"]);

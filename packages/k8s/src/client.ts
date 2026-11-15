@@ -17,6 +17,7 @@ import {
   execChannel,
   execSubprotocols,
 } from "./exec-channel.ts";
+import { type RawExec, type RawExecHandlers, rawExec } from "./exec-raw.ts";
 import { type RunExecOptions, type RunExecResult, runExecOverWebSocket } from "./exec-run.ts";
 import { type PodTls, spawnPodDelete } from "./pod-cleanup.ts";
 import { type Pod, TERMINAL_PHASES, podIsReady } from "./types.ts";
@@ -50,6 +51,12 @@ export interface KubeClientOptions {
   readonly fetch?: typeof fetch;
   /** Injectable WebSocket factory, for tests. Defaults to the global `WebSocket`. */
   readonly makeWebSocket?: (url: string, protocols: string[]) => WebSocketLike;
+  /**
+   * How long `execRefusal` waits for the apiserver's reason before giving up
+   * (default below; a test seam). It runs on a failure path, so it must never
+   * hang the error report (review round 1, MEDIUM 3).
+   */
+  readonly refusalTimeoutMs?: number;
 }
 
 export interface WaitForReadyOptions {
@@ -60,6 +67,9 @@ export interface WaitForReadyOptions {
   /** Abort the wait (also aborts the in-flight poll). */
   readonly signal?: AbortSignal;
 }
+
+/** `execRefusal`'s deadline: enough for a healthy apiserver, never a hang. */
+export const REFUSAL_TIMEOUT_MS = 5_000;
 
 /** Resolve after `ms`, or reject if `signal` aborts first. */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -87,6 +97,8 @@ export class KubeClient {
   private readonly tls?: PodTls;
   private readonly doFetch: typeof fetch;
   private readonly makeWebSocket: (url: string, protocols: string[]) => WebSocketLike;
+  /** How long `execRefusal` waits before giving up on the apiserver's reason. */
+  private readonly refusalTimeoutMs: number;
 
   constructor(options: KubeClientOptions) {
     this.server = options.server.replace(/\/+$/, "");
@@ -95,6 +107,7 @@ export class KubeClient {
       this.token = options.token;
     }
     this.doFetch = options.fetch ?? fetch;
+    this.refusalTimeoutMs = options.refusalTimeoutMs ?? REFUSAL_TIMEOUT_MS;
     this.tls = options.tls;
     this.makeWebSocket =
       options.makeWebSocket ??
@@ -229,6 +242,94 @@ export class KubeClient {
       options,
     );
   }
+
+  /**
+   * Open a **raw byte** exec to `target` for a long-lived, non-interactive
+   * process (a `sh` that `workload_shell` drives): stdout/stderr as bytes, stdin
+   * written raw. Unlike `openExec` (JSON-line RPC frames) there is no framing
+   * beyond the channel byte; unlike `runExec` the stream stays open and its end
+   * is a callback, not a resolved promise
+   * (docs/feat/workload-shell.md D1).
+   */
+  openRawExec(target: ExecTarget, handlers: RawExecHandlers = {}): RawExec {
+    const url = buildExecUrl(this.server, this.namespace, target);
+    const ws = this.makeWebSocket(url, execSubprotocols(this.token));
+    return rawExec(ws, handlers);
+  }
+
+  /**
+   * Ask the apiserver WHY it refused an exec upgrade, over plain HTTP
+   * (docs/fix/workload-shell-live.md D3).
+   *
+   * Bun's WebSocket drops both the HTTP status and the body of a refused upgrade
+   * (only `error "Expected 101 status code"` + `close 1002` reach us), so the
+   * only way to read the real reason is to re-ask. The apiserver checks
+   * authentication, authorization (RBAC, SCC admission) and the target
+   * `container` BEFORE it demands the upgrade, so a non-2xx answer here carries
+   * the same `Status` the upgrade was refused with. The same URL, the same auth,
+   * no upgrade — and no process ever runs.
+   *
+   * Never throws; `undefined` means "no reason available": 2xx (nothing to
+   * explain), the generic `Upgrade request required` (the URL was ACCEPTABLE, so
+   * the refusal was something else), a body that is not a k8s `Status`, or a
+   * network failure.
+   */
+  async execRefusal(target: ExecTarget): Promise<string | undefined> {
+    const url = buildExecUrl(this.server, this.namespace, target).replace(/^ws/, "http");
+    let res: Response;
+    // BOUNDED. This runs on the FAILURE path, where something is already wrong
+    // (an apiserver or a proxy that accepts the POST and never answers), and
+    // `explain` awaits it with nothing else to race against — an unbounded
+    // fetch would hang the tool's error report forever (review round 1, MEDIUM 3).
+    const timeoutMs = this.refusalTimeoutMs;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      res = await this.doFetch(url, {
+        method: "POST",
+        headers: this.headers(),
+        signal: controller.signal,
+      });
+    } catch {
+      return undefined; // unreachable, or timed out: nothing to report
+    } finally {
+      clearTimeout(timer);
+    }
+    if (res.ok) {
+      return undefined;
+    }
+    const body = await safeText(res);
+    const message = statusMessage(body);
+    if (message === undefined) {
+      return undefined;
+    }
+    // `Upgrade request required` is the apiserver SAYING the request was fine
+    // apart from the missing upgrade: it explains nothing about our failure.
+    if (/upgrade request required/i.test(message)) {
+      return undefined;
+    }
+    return message;
+  }
+}
+
+/** A k8s `Status` body's `message`, when the body is one. */
+function statusMessage(body: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  const shape = parsed as { kind?: unknown; status?: unknown; message?: unknown } | null;
+  if (shape === null || typeof shape !== "object" || typeof shape.message !== "string") {
+    return undefined;
+  }
+  // A `Status` names itself (`kind: "Status"`) or at least carries `status`;
+  // anything else (an HTML error page, a proxy's JSON) is not ours to read.
+  if (shape.kind !== "Status" && typeof shape.status !== "string") {
+    return undefined;
+  }
+  return shape.message === "" ? undefined : shape.message;
 }
 
 async function safeText(res: Response): Promise<string> {

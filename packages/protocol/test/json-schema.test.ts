@@ -145,6 +145,8 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1compact/result": [{ before: 10, after: 2 }],
   "methods/session~1clear/params": [{ sessionId: "s" }],
   "methods/session~1clear/result": [{ before: 10, after: 1 }],
+  "methods/session~1set_auto_accept/params": [{ sessionId: "s", on: true }],
+  "methods/session~1set_auto_accept/result": [{ on: true }, { on: false }],
   "methods/session~1update_settings/params": [
     { sessionId: "s", id: "a1", settings: { maxIterations: 3, toolExecution: "parallel" } },
   ],
@@ -330,6 +332,18 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/device~1pair/result": [
     { deviceId: "0123456789abcdef", computer: { id: "fedcba9876543210", name: "gabriel-mac" } },
   ],
+  // Push registration (docs/feat/mobile-push.md Design 3, P2): the token is a
+  // raw APNs token in lowercase hex, the key a 32-byte X25519 public key.
+  "methods/device~1push_register/params": [
+    { token: "a".repeat(64), env: "sandbox", key: "k".repeat(43) },
+    { token: "b".repeat(200), env: "production", key: `${"-_".repeat(21)}-` },
+  ],
+  "methods/device~1push_register/result": [
+    { graceSeconds: 30, push: "on" },
+    { graceSeconds: 0, push: "relay-no-push" },
+  ],
+  "methods/device~1push_unregister/params": [{}],
+  "methods/device~1push_unregister/result": [{}],
   "methods/daemon~1session_ttl/params": [{}, { idleTtlMs: 3600000 }, { idleTtlMs: "never" }],
   "methods/daemon~1session_ttl/result": [
     { idleTtlMs: "never", persisted: false },
@@ -511,6 +525,8 @@ const FIXTURES: Record<string, Json[]> = {
       settings: { carried: { maxIterations: 3 }, overridden: {} },
       id: "a1",
     }),
+    update({ type: "auto_accept", on: true }),
+    update({ type: "auto_accept", on: false, by: "laptop" }),
     update({ type: "queued", entries: [], returned: [] }),
     update({
       type: "queued",
@@ -643,7 +659,11 @@ describe("tagged-union shape (what codegen needs)", () => {
     }
     // +1: `KnownLogEntry` (session/log, protocol 17).
     // +1: `PromptContentBlock` (prompt-only attachment block, attachments-prompt).
-    expect(unions).toBe(7);
+    // +3: the mobile relay's control frames — `RelayDaemonFrame`,
+    //     `RelayToDaemonFrame`, `RelayControlFrame` (docs/feat/mobile-relay.md
+    //     R1). Not RPC (they have their own `RELAY_PROTOCOL_VERSION`), but the
+    //     same `*Schema`/tagged-union shape, so codegen sees them too.
+    expect(unions).toBe(10);
   });
 
   test("every $ref names a $def", () => {

@@ -11,7 +11,7 @@
  *     (`attach-draft.ts`), `switchingRefusal` (`sessions-panel.ts`), the queue's
  *     (`queued.ts`), `turn-feed.ts`'s, `state.ts`'s — they are CALLED by the
  *     hook, never re-implemented in `App.tsx`;
- *   - the hook owns NO effect (H1: App's 20 effects keep their order and index)
+ *   - the hook owns NO effect (H1: App's 22 effects keep their order and index)
  *     and creates ONLY the refs nothing outside it writes (M1/H3);
  *   - the frozen identifiers survive (`run`, `commitHistory`, `streamTurn`,
  *     `sendNow`, `submit`, `startCompaction`, `drainHeld`), so no use site in
@@ -122,15 +122,23 @@ describe("S9a: the turn driver leaves App.tsx", () => {
     expect(app).toMatch(
       /const \{ run, commitHistory, streamTurn, sendNow, submit, startCompaction, drainHeld \} =\s*\n?\s*useTurnDriver\(\{/,
     );
-    // The identifiers are still read at their old call sites, unchanged.
+    // The identifiers are still read at their call sites, unchanged. Since S9b
+    // moved `onActivity` (their only caller here) into `useSessionLink.ts`, the
+    // locator follows the code: the CALLS are there, and App still hands the
+    // same three to that hook by name. Same property, new location — the plan's
+    // Preconditions rule for a source-locator.
     expect(app).toContain("runRef.current = run;");
-    expect(countOf(app, "streamTurn(")).toBeGreaterThanOrEqual(1);
-    expect(countOf(app, "commitHistory(")).toBeGreaterThanOrEqual(1);
-    expect(countOf(app, "drainHeld(")).toBeGreaterThanOrEqual(1);
+    const link = readSrc("useSessionLink.ts");
+    expect(countOf(link, "streamTurn(")).toBeGreaterThanOrEqual(1);
+    expect(countOf(link, "commitHistory(")).toBeGreaterThanOrEqual(1);
+    expect(countOf(link, "drainHeld(")).toBeGreaterThanOrEqual(1);
+    expect(app).toContain("streamTurn,\n");
+    expect(app).toContain("commitHistory,\n");
+    expect(app).toContain("drainHeld,\n");
   });
 
   // H1: no hook owns an effect here, so an effect's index cannot shift.
-  test("App still declares its 20 effects, and the hook declares none", () => {
+  test("App still declares its 22 effects (the original 20 + session-hop's 2)", () => {
     expect(countOf(readSrc("App.tsx"), "\n  useEffect(")).toBe(22);
     // A real use, not the word: the hook's header explains WHY there is none.
     const hook = readSrc("useTurnDriver.ts");
@@ -205,7 +213,10 @@ describe("S9a: the turn driver leaves App.tsx", () => {
     const app = readSrc("App.tsx");
     // The key host still calls `sendNow` and `submit` by those names.
     expect(app).toContain("sendNow();");
-    expect(app).toContain("submit(field.value);");
+    // S12: the line tail's Enter is the `submit` effect, whose text is the line
+    // snapshot's `value: field.value`; the port hands it to the hook's `submit`.
+    expect(app).toContain("submit: (text) => submit(text),");
+    expect(app).toContain("value: field.value,");
     // The command port still names `run` and `startCompaction`.
     expect(app).toContain("startCompaction,");
     expect(app).toContain("run,");

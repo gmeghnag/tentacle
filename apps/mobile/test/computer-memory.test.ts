@@ -139,3 +139,44 @@ describe("forgetComputer", () => {
     expect(a.closed).toEqual([]);
   });
 });
+
+// docs/feat/mobile-notifications.md Design 6 / N4: the extension's copy of the
+// paired computers follows every store change.
+describe("the push directory follows the store (N4)", () => {
+  test("withForgottenRecord rewrites it once the record changed, BEFORE the caller re-reads", async () => {
+    // Mutation: drop the hook → the NSE keeps a peer whose pinned key is stale,
+    // so a re-paired computer's pushes render as unverifiable (F9).
+    const store = { id: "c1", deviceKey: "OLD-KEY" };
+    const a = app(store);
+    const steps: string[] = [];
+    const memory = {
+      ...a.memory,
+      pushDirectory: async () => {
+        steps.push("directory");
+        return "written";
+      },
+    };
+    await withForgottenRecord(memory, store.id, async () => {
+      steps.push("then");
+      return undefined;
+    });
+    expect(steps).toEqual(["directory", "then"]);
+  });
+
+  test("a failing rewrite never fails the pairing (the extension then shows placeholders)", async () => {
+    const store = { id: "c1", deviceKey: "OLD-KEY" };
+    const a = app(store);
+    const memory = {
+      ...a.memory,
+      pushDirectory: async () => {
+        throw new Error("keychain locked");
+      },
+    };
+    expect(await withForgottenRecord(memory, store.id, async () => "done")).toBe("done");
+  });
+
+  test("a memory without the hook is unchanged (every other caller)", async () => {
+    const a = app({ id: "c1", deviceKey: "KEY" });
+    expect(await withForgottenRecord(a.memory, "c1", async () => 1)).toBe(1);
+  });
+});

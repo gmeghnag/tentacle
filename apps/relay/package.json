@@ -1,0 +1,15 @@
+{
+  "name": "@tentacle/relay",
+  "version": "0.6.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/server.ts",
+    "./core": "./src/relay-core.ts"
+  },
+  "dependencies": {
+    "@tentacle/protocol": "workspace:*",
+    "@tentacle/transport": "workspace:*"
+  }
+}

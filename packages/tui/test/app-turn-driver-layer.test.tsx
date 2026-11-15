@@ -29,6 +29,7 @@ import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import type { SessionEvent } from "../src/state.ts";
 import type { SessionActivity } from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const strip = (s: string | undefined) =>
@@ -54,6 +55,7 @@ function rig(opts: { compactHangs?: boolean } = {}) {
   let listener: ((a: SessionActivity) => void) | null = null;
   let release: () => void = () => {};
   const ctrl = {
+    ...inertSession(),
     async *send(prompt: string, signal?: AbortSignal) {
       log.sends.push(prompt);
       if (prompt === "hold") {
@@ -139,6 +141,7 @@ describe("S9a: a turn streams, and the settle is the one place its fate is decid
     const r = rig();
     r.app.unmount();
     const ctrl = {
+      ...inertSession(),
       async *send(_prompt: string, signal?: AbortSignal) {
         yield { type: "text", delta: "working" };
         await new Promise<void>((resolve) =>
@@ -223,6 +226,7 @@ describe("S9a: `run` and its late-bound callers", () => {
     // Mutation: `run` not installed into `runRef` → an `initialPrompt` never sends.
     const sends: string[] = [];
     const ctrl = {
+      ...inertSession(),
       async *send(prompt: string) {
         sends.push(prompt);
         yield { type: "text", delta: "hi" };

@@ -7,10 +7,13 @@ import {
   type PermissionResponse,
 } from "@tentacle/core";
 import { render } from "ink-testing-library";
-import { App, type SessionController } from "../src/App.tsx";
+import { App, type AppProps, type SessionController } from "../src/App.tsx";
+import { ARM_MS } from "../src/permission-reply.ts";
 import { SEND_NOW_HINT } from "../src/send-now.ts";
 import type { SessionEvent } from "../src/state.ts";
+import type { SessionActivity } from "../src/turn-feed.ts";
 import { queuedRow } from "./queued-row.ts";
+import { inertSession } from "./session-stub.ts";
 
 // The `Ctrl+X Ctrl+S` chord over a fake controller (docs/feat/send-now-c.md).
 const CTRL_X = "\x18";
@@ -48,7 +51,15 @@ function fakeSession(script: {
     aborted: [] as string[],
   };
   let release: Release = () => {};
+  let listener: ((a: SessionActivity) => void) | null = null;
   const ctrl: SessionController = {
+    ...inertSession(),
+    watch(l) {
+      listener = l;
+      return () => {
+        listener = null;
+      };
+    },
     async *send(prompt, signal) {
       log.sends.push(prompt);
       yield { type: "text", delta: `reply to ${prompt}` };
@@ -93,6 +104,8 @@ function fakeSession(script: {
     ctrl,
     log,
     release: (o?: { steers?: readonly string[]; reset?: boolean }) => release(o),
+    /** Another device ended this session: the activity that swaps the view. */
+    raiseClosed: () => listener?.({ kind: "closed", reason: "deleted" } as SessionActivity),
   };
 }
 
@@ -109,8 +122,15 @@ const rejecting = (error: Error): AsyncIterable<SessionEvent> => ({
 });
 
 /** Start a held turn ("go"), queue `rows`, return the app. */
-async function startWithRows(ctrl: SessionController, rows: readonly string[], extra = {}) {
-  const app = render(<App createSession={() => ctrl} model="m" cwd="/tmp/work" {...extra} />);
+async function startWithRows(
+  ctrl: SessionController,
+  rows: readonly string[],
+  extra: { readonly createSession?: () => SessionController } & Partial<AppProps> = {},
+) {
+  const { createSession } = extra;
+  const app = render(
+    <App createSession={createSession ?? (() => ctrl)} model="m" cwd="/tmp/work" {...extra} />,
+  );
   await delay(30);
   app.stdin.write("go");
   await delay(20);
@@ -122,7 +142,7 @@ async function startWithRows(ctrl: SessionController, rows: readonly string[], e
     app.stdin.write("\r");
     await delay(30);
   }
-  return app;
+  return { ...app, frame: () => app.lastFrame() ?? "" };
 }
 
 async function chord(stdin: { write(data: string): void }) {
@@ -267,6 +287,8 @@ describe("Ctrl+X Ctrl+S — send the queued messages now", () => {
     expect(log.sendNows).toHaveLength(1);
     expect(answered.response).toBeUndefined();
     expect(lastFrame() ?? "").toContain("Run a shell command");
+    // Past the arming window (docs/fix/quit-enter-ask.md): `y` is an approval.
+    await delay(ARM_MS + 100);
     stdin.write("y");
     await delay(30);
     expect(answered.response).toEqual({ allowed: true, scope: "once" });
@@ -428,58 +450,54 @@ describe("Ctrl+X Ctrl+S — send the queued messages now", () => {
     unmount();
   });
 
-  test("T-C5b: a controller with no sendNow (in-process session) takes the fallback", async () => {
-    const { ctrl, log } = fakeSession({});
-    const { stdin, lastFrame, unmount } = await startWithRows(ctrl, ["alpha"]);
-    await chord(stdin);
-    await delay(60);
-    expect(log.aborted).toEqual(["go"]);
-    expect(log.sends).toEqual(["go", "alpha"]);
-    expect(lastFrame() ?? "").toContain("this session can't send-now atomically");
-    unmount();
-  });
-
-  test("T-C5c: the fallback notice is once per SESSION — a /clear's new session says it again", async () => {
-    const { ctrl, log } = fakeSession({});
-    const saved: string[] = [];
-    const saveFile = async (_path: string, content: string) => {
-      saved.push(content);
-    };
-    const { stdin, unmount } = await startWithRows(ctrl, ["alpha"], { saveFile });
-    await chord(stdin);
-    await delay(60);
-    for (const keys of ["/clear", "go2"]) {
-      stdin.write(keys);
-      await delay(20);
-      stdin.write("\r");
-      await delay(60);
-    }
-    stdin.write("charlie");
-    await delay(20);
-    stdin.write("\r");
-    await delay(30);
-    await chord(stdin);
-    await delay(60);
-    expect(log.sends).toEqual(["go", "alpha", "go2", "charlie"]);
-    stdin.write("/save");
-    await delay(20);
-    stdin.write("\r");
-    await delay(40);
-    // The transcript after /clear: the new session's own notice.
-    expect(count(saved[0] ?? "", "can't send-now atomically")).toBe(1);
-    unmount();
-  });
-
-  test("T-C5d: the MethodNotFound latch is per session — a /clear's new session asks the daemon again", async () => {
+  test("T-C5b: a daemon that answers MethodNotFound takes the fallback", async () => {
+    // The only fallback left (docs/feat/remove-in-process.md: a controller with no
+    // `sendNow` is impossible — the member is required). Mutation: drop the
+    // `latchedUnsupported` arm of `planSendNow` → no abort, no notice.
     const { ctrl, log } = fakeSession({
       sendNow: async () => {
         throw rpcError(METHOD_NOT_FOUND, "method not found");
       },
     });
-    const { stdin, unmount } = await startWithRows(ctrl, ["alpha"]);
+    const { stdin, lastFrame, unmount } = await startWithRows(ctrl, ["alpha"]);
     await chord(stdin);
     await delay(60);
-    for (const keys of ["/clear", "go2", "charlie"]) {
+    expect(log.aborted).toEqual(["go"]);
+    expect(log.sends).toEqual(["go", "alpha"]);
+    expect(lastFrame() ?? "").toContain("this daemon can't send-now atomically");
+    unmount();
+  });
+
+  test("T-C5c: the fallback notice is once per SESSION — the session after a swap says it again", async () => {
+    // The swap that resets this latch is a REAL one (`useSessionLink.ts:530-531`):
+    // since docs/feat/remove-in-process.md a `/clear` resets in place and swaps
+    // nothing, so the activity that moves the view is a session closed elsewhere.
+    // Mutation: drop `fallbackNoticedRef.current = false` in `swapSession` → the
+    // second session stays silent (`count` becomes 0).
+    const first = fakeSession({
+      sendNow: async () => {
+        throw rpcError(METHOD_NOT_FOUND, "method not found");
+      },
+    });
+    const second = fakeSession({
+      sendNow: async () => {
+        throw rpcError(METHOD_NOT_FOUND, "method not found");
+      },
+    });
+    const order = [second.ctrl, first.ctrl];
+    const { stdin, frame, unmount } = await startWithRows(first.ctrl, ["alpha"], {
+      createSession: () => order.pop() ?? second.ctrl,
+    });
+    await chord(stdin);
+    await delay(60);
+    expect(first.log.sends).toEqual(["go", "alpha"]);
+    const beforeSwap = count(frame(), "can't send-now atomically");
+    expect(beforeSwap).toBe(1);
+    // Another device ended the session: the view swaps to a fresh one (the
+    // transcript is kept as scrollback, so the old notice stays on screen).
+    first.raiseClosed();
+    await delay(120);
+    for (const keys of ["go2", "charlie"]) {
       stdin.write(keys);
       await delay(20);
       stdin.write("\r");
@@ -487,8 +505,40 @@ describe("Ctrl+X Ctrl+S — send the queued messages now", () => {
     }
     await chord(stdin);
     await delay(60);
-    expect(log.sendNows).toHaveLength(2);
-    expect(log.sends).toEqual(["go", "alpha", "go2", "charlie"]);
+    expect(second.log.sends).toEqual(["go2", "charlie"]);
+    // The NEW session said it too — proof the latch reset with the swap.
+    // Mutation: drop `fallbackNoticedRef.current = false` → this stays at 1.
+    expect(count(frame(), "can't send-now atomically")).toBe(beforeSwap + 1);
+    unmount();
+  });
+
+  test("T-C5d: the MethodNotFound latch is per session — the session after a swap asks the daemon again", async () => {
+    // Mutation: drop `sendNowUnsupportedRef.current = false` in `swapSession` →
+    // the second session never asks (sendNows stays 1).
+    const fail = () => {
+      throw rpcError(METHOD_NOT_FOUND, "method not found");
+    };
+    const first = fakeSession({ sendNow: async () => fail() });
+    const second = fakeSession({ sendNow: async () => fail() });
+    const order = [second.ctrl, first.ctrl];
+    const { stdin, unmount } = await startWithRows(first.ctrl, ["alpha"], {
+      createSession: () => order.pop() ?? second.ctrl,
+    });
+    await chord(stdin);
+    await delay(60);
+    expect(first.log.sendNows).toHaveLength(1);
+    first.raiseClosed();
+    await delay(120);
+    for (const keys of ["go2", "charlie"]) {
+      stdin.write(keys);
+      await delay(20);
+      stdin.write("\r");
+      await delay(60);
+    }
+    await chord(stdin);
+    await delay(60);
+    expect(second.log.sendNows).toHaveLength(1);
+    expect(second.log.sends).toEqual(["go2", "charlie"]);
     unmount();
   });
 
@@ -987,7 +1037,11 @@ describe("D3c — queue while /compact runs (docs/feat/send-now-d.md)", () => {
     unmount();
   });
 
-  test("T-D9: /clear during a compaction → its rows come back to the input, never sent to the new session", async () => {
+  test("T-D9: /clear during a compaction is refused → its rows stay queued, never lost, then go out", async () => {
+    // docs/feat/remove-in-process.md removed the swap, so a `/clear` during a
+    // compaction no longer has a "new session" to be sent to: `clearCommandStep`
+    // refuses it (`compacting`), and the rows are untouched. Mutation: drop that
+    // arm → the clear runs and the queued row is lost with the transcript.
     const c = heldCompaction();
     const { ctrl, log } = fakeSession({ compact: c.compact });
     const { stdin, lastFrame, unmount } = await compactingWithRows(ctrl, ["A"]);
@@ -995,13 +1049,11 @@ describe("D3c — queue while /compact runs (docs/feat/send-now-d.md)", () => {
     await delay(20);
     stdin.write("\r");
     await delay(40);
-    expect(lastFrame() ?? "").not.toMatch(queuedRow("A"));
+    expect(lastFrame() ?? "").toContain("Can't clear while a compaction is running");
+    expect(lastFrame() ?? "").toMatch(queuedRow("A"));
     c.resolve();
     await delay(80);
-    expect(log.sends).toEqual(["first"]);
-    expect(lastFrame() ?? "").toContain("your queued messages are back in the input");
-    stdin.write("\r");
-    await delay(60);
+    // Nothing was sent DURING the compaction; its end sends the row, as before.
     expect(log.sends).toEqual(["first", "A"]);
     unmount();
   });
@@ -1149,7 +1201,10 @@ describe("D3c follow-up 1 — no turn of ours during our compaction; a stale set
     app.unmount();
   });
 
-  test("T-D11 (review F2): /compact → /clear → /compact; the OLD settle leaves the new compaction alone", async () => {
+  test("T-D11 (review F2): /compact → a swap → /compact; the OLD settle leaves the new compaction alone", async () => {
+    // The swap that reaches the second session is a real one (docs/feat/
+    // remove-in-process.md: `/clear` resets in place and swaps nothing), so the
+    // activity that moves the view is a session closed elsewhere.
     const c1 = heldCompaction();
     const c2 = heldCompaction();
     const one = fakeSession({ compact: c1.compact });
@@ -1159,7 +1214,10 @@ describe("D3c follow-up 1 — no turn of ours during our compaction; a stale set
       <App createSession={() => sessions.shift() ?? two.ctrl} model="m" cwd="/tmp/work" />,
     );
     await delay(30);
-    await typeLines(app.stdin, ["first", "/compact", "/clear", "/compact", "B"]);
+    await typeLines(app.stdin, ["first", "/compact"]);
+    one.raiseClosed();
+    await delay(120);
+    await typeLines(app.stdin, ["/compact", "B"]);
     expect(c2.state.started).toBe(1);
     c1.resolve();
     await delay(80);
@@ -1171,7 +1229,7 @@ describe("D3c follow-up 1 — no turn of ours during our compaction; a stale set
     app.unmount();
   });
 
-  test("T-D12 (review F5): a wake deferred during our compaction does not survive /clear into the new session", async () => {
+  test("T-D12 (review F5): a wake deferred during our compaction does not survive a SWAP into a new session", async () => {
     const one = fakeSession({ compact: heldCompaction().compact });
     const two = fakeSession({});
     const sessions = [one.ctrl, two.ctrl];
@@ -1188,7 +1246,9 @@ describe("D3c follow-up 1 — no turn of ours during our compaction; a stale set
     await typeLines(app.stdin, ["first", "/compact"]);
     jobs.fire(jobExit);
     await delay(40);
-    await typeLines(app.stdin, ["/clear", "hello"]);
+    one.raiseClosed();
+    await delay(120);
+    await typeLines(app.stdin, ["hello"]);
     await delay(150);
     expect(one.log.sends).toEqual(["first"]);
     expect(two.log.sends).toEqual(["hello"]); // no unasked "" continuation

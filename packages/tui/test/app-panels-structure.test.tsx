@@ -8,7 +8,8 @@
  *     in either, and the three App-side `/sessions` writes are the kind's own
  *     functions (`panels/sessions.ts`), not inline tests;
  *   - `usePanels.ts` is an EXECUTOR: it declares no `useEffect` (Fable H1 — the
- *     effect list stays App's), and `App` still has 20 effects;
+ *     effect list stays App's), and `App` still has 22 effects (the original 20
+ *     + session-hop's 2);
  *   - an open panel's answer that arrives after the panel CLOSED or was REPLACED
  *     is still dropped (the generation rule did not die in the move);
  *   - the `kind ===` that must now answer for a NEW panel is the registry's, and
@@ -19,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
+import { inertSession } from "./session-stub.ts";
 
 const SRC = join(import.meta.dir, "..", "src");
 const readSrc = (name: string): string => readFileSync(join(SRC, name), "utf8");
@@ -28,6 +30,7 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** The smallest session an App needs to mount (these cases never send a prompt). */
 const idleSession = (): SessionController =>
   ({
+    ...inertSession(),
     async *send() {
       yield { type: "turn_end", reason: "end_turn" };
     },
@@ -87,16 +90,19 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
   });
 
   test("the `/sessions` repaint on a swap is the kind's rule, called once", () => {
-    const app = readSrc("App.tsx");
-    // `swapSession` repaints the open `/sessions` panel through the rule that owns
-    // it — never by rebuilding the panel inline (the pre-S7 shape).
-    expect(countOf(app, "touchPanel()")).toBe(1);
-    expect(app).not.toContain('(p) => (p?.kind === "sessions" ? { ...p } : p)');
+    // Since S9b, `swapSession` (the ONE caller of this repaint) lives in
+    // `useSessionLink.ts`: the locator follows the declaration (the plan's
+    // Preconditions rule), and the property is unchanged — the rule that owns
+    // the repaint is called exactly once, and never rebuilt inline.
+    const link = readSrc("useSessionLink.ts");
+    expect(countOf(link, "touchPanel()")).toBe(1);
+    expect(countOf(readSrc("App.tsx"), "touchPanel()")).toBe(0);
+    expect(link).not.toContain('(p) => (p?.kind === "sessions" ? { ...p } : p)');
     const hook = readSrc("usePanels.ts");
     expect(countOf(hook, "touchPanel(p)")).toBe(1);
   });
 
-  test("usePanels is an EXECUTOR: it declares no effect, and App keeps its 20", () => {
+  test("usePanels is an EXECUTOR: it declares no effect, and App keeps its 22", () => {
     const hook = readSrc("usePanels.ts");
     expect(hook).not.toContain("useEffect");
     expect(hook).toContain("useCallback");

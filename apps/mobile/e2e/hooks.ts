@@ -39,7 +39,53 @@ export type HookName =
   /** A NON-matching face (real device only: the simulator's promise hangs — Step 0). */
   | "faceid-nomatch"
   /** Read the app container's log file, so flow 09 asserts what was really written. */
-  | "log-file";
+  | "log-file"
+  /**
+   * The PAYLOAD the last `pair` printed (docs/feat/mobile-relay.md R6): flow 22's
+   * daemon-truth step. A flow cannot see inside a pasted QR, and "the app paired"
+   * is true for every path — so the harness answers what the `pair` line actually
+   * carried, and the flow throws unless the relay is its ONLY address.
+   */
+  | "relay-qr"
+  /**
+   * docs/feat/mobile-push.md P10: hand the simulator the daemon's OWN sealed
+   * push, exactly as APNs would deliver it, so the banner the flow asserts is
+   * the real chain's output and not a hand-written payload.
+   */
+  | "push-payload"
+  /**
+   * docs/feat/mobile-push.md P10: register + push + place, in ONE step, so the
+   * flow does not have to orchestrate three hooks around a 30 s deadline.
+   */
+  | "push-place"
+  /**
+   * Flip the simulator to `?name=light|dark` (mobile-ui-polish slice 6): flow 24
+   * shoots every screen in both appearances in one walk.
+   */
+  | "appearance"
+  /**
+   * docs/feat/mobile-notifications.md N8: seal one `PushMessage` of the flow's
+   * choosing to the simulator's push key and place it (`simctl push`), so a flow
+   * can exercise an ask it can reply to — or a forged one — on cue.
+   * `?kind=ask|ask_resolved|turn_done|turn_failed&forged=1&reply=1&hostile-aps=1`.
+   */
+  | "seal-push"
+  /**
+   * docs/feat/mobile-notifications.md N8 (Owner Q7): inject a notification
+   * RESPONSE into the app's dispatcher (a dev-build-only hook — Maestro cannot
+   * long-press a system banner). `?action=approve|deny|reply|open&text=…&forged=1`
+   * acts on the LAST `seal-push` the flow placed; the app then runs the real
+   * path (Face ID prompt included).
+   */
+  | "notify-respond"
+  /**
+   * docs/feat/mobile-notifications.md N8: the asks the daemon has PENDING on a
+   * session (`?session=…`), read from the harness's own client. A notification
+   * flow names one of these so its injected action answers the daemon's real ask.
+   */
+  | "pending-ask"
+  /** docs/feat/mobile-notifications.md N8: the payload the last `seal-push` placed. */
+  | "notify-payload";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -53,6 +99,18 @@ export interface HookQuery {
   readonly ttlMs?: string;
   /** `pair-revoke`'s device name (what `tentacle devices revoke` matches). */
   readonly name?: string;
+  /** `seal-push`: which plaintext to seal (`ask` by default). */
+  readonly kind?: string;
+  /** `seal-push`/`notify-respond`: seal with a NON-pinned sender key (F4/F5). */
+  readonly forged?: string;
+  /** `seal-push`: an ask that offers a reply (the reply flow). */
+  readonly reply?: string;
+  /** `seal-push`: a rewritten outer `aps` (F5). */
+  readonly "hostile-aps"?: string;
+  /** `notify-respond`: the action to inject (`approve`/`deny`/`reply`/`open`). */
+  readonly action?: string;
+  /** `seal-push`: the REAL pending ask's `requestId`. */
+  readonly request?: string;
 }
 
 export interface Hooks {
@@ -86,6 +144,8 @@ export interface HookActions {
     readonly attached: number;
     readonly running: boolean;
     readonly archived: boolean;
+    /** The daemon's title now (flow 25: the phone's rename reached the computer). */
+    readonly title: string;
   } | null>;
   /** Every message of the session, oldest first, with the refs each one names. */
   readonly history: (sessionId: string) => Promise<{
@@ -107,8 +167,10 @@ export interface HookActions {
       readonly cause: string;
     }[];
   }>;
-  /** A LAPTOP steer into the session's RUNNING turn (flow 15's another-device row). */
-  readonly laptopEnqueue: (sessionId: string, text: string) => Promise<{ readonly id: string }>;
+  /** A LAPTOP steer into the session's RUNNING turn (flow 15's another-device row). */ readonly laptopEnqueue: (
+    sessionId: string,
+    text: string,
+  ) => Promise<{ readonly id: string }>;
   /** The LAPTOP stops the running turn (flow 14: my queued row comes back). */
   readonly laptopCancel: (sessionId: string) => Promise<void>;
   /** The LAPTOP detaches (flow 15: the writer goes away, its row stays returned). */
@@ -117,6 +179,13 @@ export interface HookActions {
   readonly pairStart: (options: { readonly ttlMs?: number }) => Promise<{
     readonly payload: string;
     readonly computerId: string;
+    /**
+     * Set by the harness when this window is the RELAY-ONLY one (flow 22): `serve`
+     * is restarted with `--no-relay` for the flow's duration, so the record has the
+     * relay address and NO bind-derived one (`pair-addresses.ts`: a loopback bind
+     * contributes none). The flow can then prove the relay is the only path.
+     */
+    readonly relayOnly: boolean;
   }>;
   /** Wait for the phone's claim and return the compare code the terminal shows. */
   readonly pairConfirm: () => Promise<{ readonly sas: string }>;
@@ -138,6 +207,68 @@ export interface HookActions {
   readonly faceIdNoMatch: () => Promise<void>;
   /** The app's log file text from its container (`""` when there is none). */
   readonly logFile: () => Promise<string>;
+  /**
+   * The pairing PAYLOAD the last `pair` printed (flow 22): the harness knows what
+   * the QR carried, and a phone cannot show a URL. Throws when no window has
+   * printed one yet, so a flow cannot read a stale run's line.
+   */
+  readonly relayQr: () => Promise<{ readonly payload: string }>;
+  /**
+   * The LAST push the daemon sent through the relay, as the APNs payload its
+   * delivery would carry — plus the alarm's `deviceToken`. `undefined` = no
+   * push has been sent yet, which a flow must distinguish from an empty one.
+   */
+  readonly pushPayload: () => Promise<{
+    readonly payload: { readonly aps: unknown; readonly tp: unknown };
+    readonly token: string;
+  }>;
+  /**
+   * Register a push key for the paired device, make the daemon push once and
+   * place that envelope on the simulator (docs/feat/mobile-push.md P10).
+   */
+  readonly pushPlace: () => Promise<{
+    readonly payload: { readonly aps: unknown; readonly tp: unknown };
+    readonly token: string;
+  }>;
+  /** Set THIS simulator's appearance (`simctl ui <udid> appearance …`). */
+  readonly appearance: (name: Appearance) => Promise<void>;
+  /**
+   * Seal one plaintext to the paired device's push key and place it
+   * (docs/feat/mobile-notifications.md N8). Returns the payload it placed.
+   */
+  readonly sealPush: (options: {
+    readonly kind: string;
+    readonly forged?: boolean;
+    readonly reply?: boolean;
+    readonly hostileAps?: boolean;
+    /** The REAL session the plaintext names (so an injected action answers it). */
+    readonly session?: string;
+    /** The REAL pending ask's `requestId` (from `laptop.pendingAsks`). */
+    readonly request?: string;
+  }) => Promise<{ readonly payload: { readonly aps: unknown; readonly tp: unknown } }>;
+  /**
+   * Inject a notification response for the last placed push (N8, Owner Q7). The
+   * app runs the real dispatcher: Face ID, the answer, the fallback.
+   */
+  /** What the last `seal-push` placed, so a flow can end on the real payload. */
+  readonly notifyPayload: () => Promise<{
+    readonly payload: { readonly aps: unknown; readonly tp: unknown };
+  }>;
+  /** The real pending asks on a session, oldest first (a flow names one). */
+  readonly pendingAsk: (sessionId: string) => Promise<readonly string[]>;
+  readonly notifyRespond: (options: {
+    readonly action: string;
+    readonly text?: string;
+    readonly forged?: boolean;
+  }) => Promise<{ readonly accepted: boolean }>;
+}
+
+/** The simulator appearances the `appearance` hook sets. */
+export type Appearance = "light" | "dark";
+
+/** `light` / `dark`, or undefined for anything else (the hook then answers 400). */
+export function appearanceOf(value: string | undefined): Appearance | undefined {
+  return value === "light" || value === "dark" ? value : undefined;
 }
 
 /** What a laptop requester answers: `allow` (once) or `deny`. */
@@ -170,6 +301,20 @@ export function hookFor(path: string): HookName | undefined {
     case "faceid-match":
     case "faceid-nomatch":
     case "log-file":
+    case "relay-qr":
+    case "appearance":
+      return name;
+    case "push-payload":
+      return name;
+    case "push-place":
+      return name;
+    case "seal-push":
+      return name;
+    case "notify-respond":
+      return name;
+    case "pending-ask":
+      return name;
+    case "notify-payload":
       return name;
     default:
       return undefined;
@@ -338,6 +483,67 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             return Response.json({ ok: true, hook });
           case "log-file":
             return Response.json({ ok: true, hook, text: await deps.actions.logFile() });
+          case "relay-qr": {
+            return Response.json({ ok: true, hook, ...(await deps.actions.relayQr()) });
+          }
+          case "push-payload": {
+            return Response.json({ ok: true, hook, ...(await deps.actions.pushPayload()) });
+          }
+          case "push-place": {
+            return Response.json({ ok: true, hook, ...(await deps.actions.pushPlace()) });
+          }
+          case "seal-push": {
+            const payload = await deps.actions.sealPush({
+              kind: query.kind ?? "ask",
+              ...(query.session !== undefined ? { session: query.session } : {}),
+              ...(query.request !== undefined ? { request: query.request } : {}),
+              ...(query.forged !== undefined ? { forged: query.forged !== "0" } : {}),
+              ...(query.reply !== undefined ? { reply: query.reply !== "0" } : {}),
+              ...(query["hostile-aps"] !== undefined
+                ? { hostileAps: query["hostile-aps"] !== "0" }
+                : {}),
+            });
+            return Response.json({ ok: true, hook, ...payload });
+          }
+          case "notify-payload":
+            return Response.json({ ok: true, hook, ...(await deps.actions.notifyPayload()) });
+          case "pending-ask": {
+            const session = query.session;
+            if (session === undefined) {
+              return Response.json({ ok: false, error: "session is required" }, { status: 400 });
+            }
+            return Response.json({
+              ok: true,
+              hook,
+              requests: await deps.actions.pendingAsk(session),
+            });
+          }
+          case "notify-respond": {
+            const action = query.action;
+            if (action === undefined) {
+              return Response.json(
+                { ok: false, error: "action is required (approve|deny|reply|open)" },
+                { status: 400 },
+              );
+            }
+            const result = await deps.actions.notifyRespond({
+              action,
+              ...(query.text !== undefined ? { text: query.text } : {}),
+              ...(query.forged !== undefined ? { forged: query.forged !== "0" } : {}),
+            });
+            return Response.json({ ok: true, hook, ...result });
+          }
+          case "appearance": {
+            const name = appearanceOf(query.name);
+            if (name === undefined) {
+              return Response.json(
+                { ok: false, error: "name must be light or dark" },
+                { status: 400 },
+              );
+            }
+            await deps.actions.appearance(name);
+            return Response.json({ ok: true, hook, name });
+          }
         }
         return Response.json({ error: "unknown hook" }, { status: 404 });
       } catch (error) {

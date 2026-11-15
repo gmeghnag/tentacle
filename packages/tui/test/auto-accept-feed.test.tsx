@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PermissionBroker, type PermissionResponse } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type AutoAcceptFeed, type SessionController } from "../src/App.tsx";
+import { inertSession } from "./session-stub.ts";
 
 // docs/fix/detach-live.md B3: a detached run's auto-accept is per SESSION,
 // shared by every TUI on it, held on the laptop. The App gets it as a feed:
@@ -12,6 +13,7 @@ const SHIFT_TAB = "\x1b[Z";
 
 /** A session whose own turns are `own…` (the adopted run's turn included), others foreign. */
 const session = (): SessionController => ({
+  ...inertSession(),
   async *send() {
     yield { type: "turn_end", reason: "end_turn" };
   },

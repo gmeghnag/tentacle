@@ -57,6 +57,19 @@ function spyHost(): { host: KeyHost; calls: string[] } {
     moveCommandSel: rec("moveCommandSel"),
     runCommand: rec("runCommand"),
     pushNotice: rec("pushNotice"),
+    fieldInsert: rec("fieldInsert"),
+    fieldDeleteBack: rec("fieldDeleteBack"),
+    fieldDeleteWord: rec("fieldDeleteWord"),
+    fieldMoveCursor: rec("fieldMoveCursor"),
+    fieldMoveWord: rec("fieldMoveWord"),
+    fieldMoveLine: rec("fieldMoveLine"),
+    fieldMoveVertical: rec("fieldMoveVertical"),
+    setHistoryCursor: rec("setHistoryCursor"),
+    dockDown: rec("dockDown"),
+    scroll: rec("scroll"),
+    pasteClipboard: rec("pasteClipboard"),
+    submit: rec("submit"),
+    removeLastChip: rec("removeLastChip"),
   } as unknown as KeyHost;
   return { host, calls };
 }
@@ -105,6 +118,20 @@ const TABLE: readonly (readonly [KeyEffect, string])[] = [
   [{ kind: "moveCommandSel", step: -1 }, "moveCommandSel(-1)"],
   [{ kind: "runCommand", name: "/help" }, 'runCommand("/help")'],
   [{ kind: "pushNotice", text: "_x_" }, 'pushNotice("_x_")'],
+  // The line-editing tail (S12): every argument reaches the host in order.
+  [{ kind: "fieldInsert", text: "ab" }, 'fieldInsert("ab")'],
+  [{ kind: "fieldDeleteBack" }, "fieldDeleteBack()"],
+  [{ kind: "fieldDeleteWord", dir: 1 }, "fieldDeleteWord(1)"],
+  [{ kind: "fieldMoveCursor", delta: -1, extend: true }, "fieldMoveCursor(-1,true)"],
+  [{ kind: "fieldMoveWord", dir: 1, extend: false }, "fieldMoveWord(1,false)"],
+  [{ kind: "fieldMoveLine", edge: "start", extend: true }, 'fieldMoveLine("start",true)'],
+  [{ kind: "fieldMoveVertical", dir: -1, extend: false }, "fieldMoveVertical(-1,false)"],
+  [{ kind: "setHistoryCursor", index: 2, draft: "d" }, 'setHistoryCursor(2,"d")'],
+  [{ kind: "dockDown" }, "dockDown()"],
+  [{ kind: "scroll", dir: "pageUp" }, 'scroll("pageUp")'],
+  [{ kind: "pasteClipboard" }, "pasteClipboard()"],
+  [{ kind: "submit", text: "go" }, 'submit("go")'],
+  [{ kind: "removeLastChip" }, "removeLastChip()"],
 ];
 
 describe("executeEffect", () => {

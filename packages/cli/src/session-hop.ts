@@ -17,8 +17,10 @@
  */
 import type { LoadResult, SessionRecord } from "@tentacle/agent";
 import type { HopSpec } from "@tentacle/tui";
+import type { KubeNamespace } from "./engine-select.ts";
 import { type HopPlace, ownUidVerdict, placeText } from "./hop-plan.ts";
-import type { LocalRuntime } from "./local-runtime.ts";
+import type { HopFolderFate } from "./hop-turn.ts";
+import type { LocalRuntime, PersistingController } from "./local-runtime.ts";
 
 /** How long the commit lets the old runtime close before it gives up (D1 step 5). */
 export const HOP_DISPOSE_TIMEOUT_MS = 3_000;
@@ -33,6 +35,14 @@ export interface HopBuilt {
   readonly runtime: LocalRuntime;
   /** The badge's facts after the hop (`local` has no badge: D3). */
   readonly place: HopPlace;
+  /**
+   * Whether the laptop's folder is visible in the new place (docs/feat/session-hop-ux
+   * OD6): `shared` (a container built WITH the mount), `not shared` (a pod, or an
+   * existing workload nobody mounted for), `local` (it IS the laptop's). The one
+   * fact the wake-up message could not otherwise state, since it comes from the
+   * container build's plan (`plan.kind === "mount"`), which is not on `HopPlace`.
+   */
+  readonly folder: HopFolderFate;
   /** The daemon runs in a pod: spilled output is "saved in the pod". */
   readonly daemonInPod: boolean;
   /**
@@ -47,6 +57,13 @@ export interface HopBuilt {
    * one notice, not a second failure of the hop.
    */
   readonly rollback: () => Promise<void>;
+  /**
+   * OD3: the k8s namespace's PROVENANCE (`namespace ns (from context; …)`) when
+   * the build resolved one. It rides the outcome line because under auto-accept
+   * NO prompt is shown and a typed `/move` never asks — the transcript is then
+   * the only place the owner can read why that namespace was dialled.
+   */
+  readonly trace?: string;
 }
 
 export type HopBuild =
@@ -61,6 +78,19 @@ export interface HopRequest {
    * laptop's `<uid>.jsonl` continues (never a new session).
    */
   readonly sessionId: string | null;
+  /**
+   * The owner's approval already carried the mount gate's warning (a PROPOSED
+   * move's prompt merged it, D9/M6): the build must not ask a second time
+   * (H5 review finding 2). A typed `/move` never sets it.
+   */
+  readonly gateAnswered?: true;
+  /**
+   * OD3: the PROVENANCE of the namespace the spec was PINNED with (a proposal's
+   * turn-end resolution). It rides the request so the build states WHY, instead
+   * of re-resolving the value the pin already wrote — a re-resolution always
+   * answers `explicit`, which hid the real source (fix round 2, finding 1).
+   */
+  readonly namespace?: KubeNamespace;
 }
 
 export interface HopDeps {
@@ -70,7 +100,11 @@ export interface HopDeps {
    * carries it when something was persisted, and it must still be the SAME uid
    * when nothing was (D1 step 3: `resume: null` PLUS the minted uid).
    */
-  readonly build: (spec: HopSpec, sessionId: string) => Promise<HopBuild>;
+  readonly build: (
+    spec: HopSpec,
+    sessionId: string,
+    opts: { readonly gateAnswered?: true; readonly namespace?: KubeNamespace },
+  ) => Promise<HopBuild>;
   /** The laptop record of a uid — the seed (`LogSessionStore.load`). */
   readonly load: (uid: string) => Promise<LoadResult>;
   /** A phase line (`moving to docker:box — saving the session`). Never the terminal (D6). */
@@ -82,7 +116,7 @@ export interface HopDeps {
    * above is not a comment. A throw here does NOT roll back (the target holds
    * the session): it becomes the notice, and the old runtime is still disposed.
    */
-  readonly onCommit?: (built: HopBuilt) => void | Promise<void>;
+  readonly onCommit?: (built: HopBuilt, facts: { readonly cwd?: string }) => void | Promise<void>;
   /**
    * After the old runtime was disposed: the D5 decision for the place we left
    * (D1 step 5). Resolves an optional notice (a kept workload, a delete that
@@ -95,8 +129,19 @@ export type HopOutcome =
   | {
       readonly kind: "moved";
       readonly built: HopBuilt;
-      /** The one line the TUI shows (`moved to docker:box`). */
+      /**
+       * The session on the target, opened seeded under the SAME uid: the one
+       * controller the TUI takes (never the target's `createSession`, F2).
+       */
+      readonly controller: PersistingController;
+      /** The whole outcome in one line (`moved to docker:box — …`). */
       readonly notice: string;
+      /**
+       * Only the suffixes of `notice` (`the old session did not close`, a leave
+       * notice): the TUI's own moved line carries them (D2 of
+       * docs/fix/session-hop-live.md). Absent when the hop was clean.
+       */
+      readonly note?: string;
     }
   /** Nothing moved: the old runtime is live and saving, the notice says why. */
   | { readonly kind: "failed"; readonly notice: string };
@@ -140,7 +185,10 @@ export async function hopSession(
   // again AFTER the freeze, which is what heals it (review H2 round 2, HIGH).
   const holdsIt = old.holdsSession(sessionId);
   deps.status?.(`moving to ${targetText(spec)} — preparing the target`);
-  const built = await deps.build(spec, sessionId);
+  const built = await deps.build(spec, sessionId, {
+    ...(request.gateAnswered === true ? { gateAnswered: true as const } : {}),
+    ...(request.namespace === undefined ? {} : { namespace: request.namespace }),
+  });
   if (built.kind === "failed") {
     return { kind: "failed", notice: built.notice };
   }
@@ -204,15 +252,17 @@ export async function hopSession(
 
   // ---- step 4(b): open on the target, then require its save ---------------
   deps.status?.(`moving to ${targetText(spec)} — opening the session`);
+  let controller: PersistingController;
   try {
     // `openSeeded(null)` would CLEAR the runtime's own seed: the
-    // nothing-persisted case passes no argument at all, so the factory's
-    // `resume: null` + the uid it was given is what opens (M2).
-    if (seed === null) {
-      await target.runtime.openSeeded();
-    } else {
-      await target.runtime.openSeeded(seed);
-    }
+    // nothing-persisted case passes `undefined`, so the factory's
+    // `resume: null` + the uid it was given is what opens (M2). `claim`: the
+    // seeded controller is handed over only through the outcome — a
+    // `createSession` racing in (a TUI's foreign-close path, a `/clear`) gets
+    // a fresh session and can never steal it (docs/fix/session-hop-live.md F2).
+    controller = await target.runtime.openSeeded(seed === null ? undefined : seed, {
+      claim: true,
+    });
   } catch (error) {
     return failed(errorText(error, "the session could not be opened there"));
   }
@@ -221,32 +271,41 @@ export async function hopSession(
     // not the truth and the move would lose this turn.
     return failed("the session could not be saved there");
   }
+  // D4 (docs/fix/session-hop-live.md): where the session's tools now run, as
+  // the target daemon reports it. Cosmetic: a miss (`null`) keeps the laptop's.
+  const cwd = await target.runtime.sessionCwd(sessionId).catch(() => null);
 
   // ---- step 5: commit — from here NOTHING rolls back (review M3) ----------
-  let notice = `moved to ${placeText(target.place)}`;
+  const notes: string[] = [];
   try {
     // Seal BEFORE the swap and only after the target holds the session: a read
     // of the old runtime still in flight reports nothing from here on.
     old.sealSessions();
-    await deps.onCommit?.(target);
+    await deps.onCommit?.(target, cwd === null ? {} : { cwd });
   } catch (error) {
-    notice = `${notice} — ${errorText(error, "the view could not be switched")}`;
+    notes.push(errorText(error, "the view could not be switched"));
   }
   // Bounded: a hung daemon must not freeze the TUI on a hop it already made.
   if (!(await closesWithin(old, HOP_DISPOSE_TIMEOUT_MS))) {
-    notice = `${notice} — the old session did not close`;
+    notes.push("the old session did not close");
   }
   try {
     const left = await deps.afterLeave?.(spec);
     if (left !== null && left !== undefined) {
-      notice = `${notice} — ${left}`;
+      notes.push(left);
     }
   } catch (error) {
     // The session IS on the target: a cleanup that threw is one notice, not a
     // `moved` hop turned into a rejection (review H2 round 2, MEDIUM).
-    notice = `${notice} — ${errorText(error, "the old place could not be tidied")}`;
+    notes.push(errorText(error, "the old place could not be tidied"));
   }
-  return { kind: "moved", built: target, notice };
+  const notice = [`moved to ${placeText(target.place)}`, ...notes].join(" — ");
+  // OD3: the provenance rides the outcome too (a hop shows no prompt when
+  // auto-accept answered it, and a typed `/move` never shows one at all), so a
+  // live test reads "why that namespace" from the line it already keeps.
+  const trace = target.trace === undefined ? [] : [target.trace];
+  const note = [...notes, ...trace].join(" — ");
+  return { kind: "moved", built: target, controller, notice, ...(note === "" ? {} : { note }) };
 }
 
 /** The target as the status row and the refusals say it (D3's badge wording, in words). */

@@ -60,9 +60,18 @@ function snap(over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}
     paletteNames: [],
     commandSel: 0,
     fieldValue: "",
-    permission: { pending: null, choices: [], selected: 0, mode: () => ({ mode: "menu" }) },
+    permission: {
+      pending: null,
+      choices: [],
+      selected: 0,
+      mode: () => ({ mode: "menu" }),
+      // `0` = long armed: the arming window has passed (docs/fix/quit-enter-ask.md).
+      shownAt: () => 0,
+    },
     sessions: undefined,
     detachOnQuit: false,
+    voice: () => "idle",
+    voiceKey: () => "ctrl+r",
     ...over,
   } as KeySnapshot;
 }
@@ -189,6 +198,7 @@ describe("the permission dialog", () => {
         ] as never,
         selected: 0,
         mode: () => ({ mode: "menu" }),
+        shownAt: () => 0,
       },
       ...over,
     });
@@ -227,6 +237,7 @@ describe("the permission dialog", () => {
         choices: [],
         selected: 0,
         mode: () => ({ mode: "reply", editor: { value: "", cursor: 0, anchor: null } }),
+        shownAt: () => 0,
       },
       replyMaxChars: 100,
       pasteBuffer: () => null,
@@ -368,6 +379,7 @@ describe("ordering invariants (the reason this is ONE list)", () => {
           choices: [],
           selected: 0,
           mode: () => ({ mode: "menu" }),
+          shownAt: () => 0,
         },
       },
       {

@@ -12,9 +12,13 @@ appId: so.tentacle.app
 # RN's new architecture gives XCUITest no alert text, so its wording and its effect
 # could never be asserted — see the task doc's Execution).
 - runFlow: _pair.yaml
+# Remove lives in the computer's menu (mobile-ui-polish Owner Q5: long-press or
+# its "…"); the menu is an in-app action sheet, so its buttons carry testIDs.
+- tapOn:
+    id: "computer-menu-${output.computerId}"
 - tapOn:
     id: "computer-remove-${output.computerId}"
-# The confirmation (an in-app card: an `Alert` would expose no text to XCUITest,
+# The confirmation (an in-app sheet: an `Alert` would expose no text to XCUITest,
 # so a flow could not prove Remove's wording or its effect), then its Remove.
 - assertVisible:
     id: "computer-remove-confirm-${output.computerId}"

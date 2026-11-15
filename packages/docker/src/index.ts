@@ -14,6 +14,7 @@ export * from "./http-conn.ts";
 export * from "./stdcopy.ts";
 export * from "./ssh-dialer.ts";
 export * from "./exec-channel.ts";
+export * from "./exec-raw.ts";
 export * from "./exec-run.ts";
 export * from "./client.ts";
 export * from "./engine-dialer.ts";

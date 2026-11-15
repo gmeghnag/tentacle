@@ -23,26 +23,34 @@ export * from "./link-status.ts";
 export {
   HOP_ATTACH_USAGE,
   HOP_ENGINES,
+  HOP_K8S_FORM,
   HOP_NAME_USAGE,
+  HOP_NAMESPACE_USAGE,
   HOP_QUEUED_NOTICE,
   HOP_USAGE,
   HOP_WORKLOAD_PART_MAX,
   type HopEngine,
+  type HopNamespace,
   type HopParse,
   type HopSpec,
   type HopStep,
   type HopWorkload,
   type HopWorkloadCheck,
   type HopWorkloadProblem,
+  hopNamespaceOk,
   hopStep,
   hopWorkload,
   parseHopCommand,
+  workloadText,
 } from "./hop-command.ts";
 export { hopStatusRow } from "./hop-status.ts";
+/** The one place the hop line joins a prompt (review M7): exported so a test pins it. */
+export { hopWithLine } from "./useTurnDriver.ts";
 export { App, type AutoAcceptFeed } from "./App.tsx";
 export type {
   AppProps,
   HopFeed,
+  HopProposalView,
   HopPlaceView,
   HopRun,
   HopTargetView,
@@ -57,6 +65,13 @@ export type { RunQuit } from "./useQuitClear.ts";
 export { autoAcceptTest, autoApproves, ownRequest } from "./permission-ui.ts";
 export type { SessionsEntry, SessionsView } from "./sessions-panel.ts";
 export { startTui, type TuiOptions } from "./run.tsx";
+// Voice dictation (docs/feat/voice-dictation.md): the pure modules plus the two
+// the CLI's `tentacle voice` needs (the helper lookup and the settings type).
+export * from "./voice-protocol.ts";
+export * from "./voice-endpoint.ts";
+export * from "./voice-session.ts";
+export * from "./voice-view.ts";
+export { helperPathCandidates } from "./voice-spawn.ts";
 export type { ThemeSetting } from "./theme.ts";
 export type { TargetBadge } from "./target-view.ts";
 export type { ContextOpen } from "./status-view.ts";

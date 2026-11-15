@@ -26,8 +26,13 @@ import {
   type DetachResult,
   type DevicePairParams,
   type DevicePairResult,
+  type DevicePushRegisterParams,
+  type DevicePushRegisterResult,
+  type DevicePushUnregisterParams,
+  type DevicePushUnregisterResult,
   type EnqueueParams,
   type EnqueueResult,
+  type HooksTrustParams,
   type HooksTrustResult,
   type InitializeParams,
   type InitializeResult,
@@ -59,6 +64,7 @@ import {
   type SessionSkillsParams,
   type SessionSkillsResult,
   type SessionTtlParams,
+  type SetAutoAcceptParams,
   type SnapshotParams,
   type SnapshotResult,
   type SubagentMessageParams,
@@ -120,7 +126,27 @@ export interface ConnectionOptions {
    * handler is per connection: the attempt cap belongs to the socket.
    */
   readonly principal?: ConnectionPrincipal;
+  /**
+   * The HOST's own answer for project hooks, checked BEFORE the prompting
+   * client is asked (docs/feat/serve-mcp.md S4): `trusted` = this folder and
+   * this hooks hash are already trusted on the machine the daemon runs on, so
+   * no client is bothered and no lasting approval is created from a remote's
+   * answer; `declined` = that machine's own explicit `never`, which is a
+   * decision about the FOLDER and is not overridable from a phone ("ask" is
+   * what the prompting client sees). Read-only: it answers early, it never
+   * grants (AGENTS §7, never let a pod-originated prompt create a lasting
+   * approval).
+   */
+  readonly hooksTrustPrecheck?: HooksTrustPrecheck;
 }
+
+/**
+ * A host's own project-hooks answer before any client is asked (S4):
+ * `trusted` / `declined` are the host's decisions, `ask` defers to the client.
+ */
+export type HooksTrustPrecheck = (
+  request: Pick<HooksTrustParams, "folder" | "hash">,
+) => "trusted" | "declined" | "ask";
 
 /**
  * A connection's authenticated role, decided once at the handshake — never
@@ -163,9 +189,30 @@ export class Connection {
   /** The `daemon/discovery` subscription of THIS connection (at most one, F13). */
   private discoveryUnsubscribe: (() => void) | undefined;
   private readonly servesModel: boolean;
+  /** The host's own project-hooks answer, before any client is asked (S4). */
+  private readonly hooksTrustPrecheck: HooksTrustPrecheck | undefined;
   private initialized = false;
   /** The update types the client declared at `initialize`; undefined = the v10 base set. */
   private updateTypes: readonly string[] | undefined;
+  /**
+   * This connection's client declared `hop` (D8/D9): it can ask its owner about a
+   * `move_session` proposal. Read once at `initialize`; a session this connection
+   * CREATES is offered the tool only then, so a pod daemon serving a `run`/`attach`
+   * TUI never lets the model propose a move nobody is asked about.
+   */
+  private hop = false;
+  /**
+   * The label `auto_accept` carries as `by`: this connection's declared host
+   * (slice 6) or else its `clientInfo.name`, read once at `initialize` — never
+   * client-chosen per call, so the text a client shows is the daemon's own
+   * reading of who set the switch (display only, untrusted).
+   */
+  private autoAcceptBy: string | undefined;
+  /**
+   * This connection's declared device name (`ClientInfo.host`), stamped into
+   * every ask's `askedOn` (docs/feat/session-auto-accept.md D7). Display only.
+   */
+  private clientHost: string | undefined;
 
   constructor(
     channel: DuplexChannel,
@@ -176,6 +223,7 @@ export class Connection {
     this.host = host;
     this.servesModel = options.servesModel === true;
     this.principal = options.principal ?? { kind: "token" };
+    this.hooksTrustPrecheck = options.hooksTrustPrecheck;
     this.peer = new RpcPeer(channel, {
       onRequest: (method, params, context) => this.onRequest(method, params, context),
       onNotification: (method, params) => this.onNotification(method, params),
@@ -332,6 +380,12 @@ export class Connection {
         const { sessionId, id, settings } = params as UpdateSettingsParams;
         return this.host.updateSettings(this.lookup(sessionId), id, settings);
       }
+      // Synchronous, holds no lock (AGENTS §7): it never awaits a turn, and the
+      // fan-out is synchronous, so two sets keep one total order (P2).
+      case Method.SetAutoAccept: {
+        const { sessionId, on } = params as SetAutoAcceptParams;
+        return this.lookup(sessionId).setAutoAccept(on, this.autoAcceptBy);
+      }
       case Method.Snapshot:
         return this.snapshot(params as SnapshotParams);
       // Synchronous, served from the derived log: no lock, no await (AGENTS §7).
@@ -413,6 +467,37 @@ export class Connection {
       // then snapshot, nothing awaited (AGENTS §7).
       case Method.DaemonDiscover:
         return this.discover();
+      // Push registration (docs/feat/mobile-push.md Design 3, slice P7): a DEVICE's
+      // own business — the token and the push key are its, and the connection's
+      // principal is what names it. A `token` or `pairing` connection gets the
+      // usual refusal (the gate above), so a pod-facing plain client can never
+      // register a token this computer would push to.
+      //
+      // Both are synchronous (one atomic rename / one unlink) and hold no lock:
+      // a registration must never queue behind a long `session/prompt` (AGENTS §7
+      // "don't serialize the RPC peer").
+      case Method.DevicePushRegister: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may register for push",
+          );
+        }
+        return this.host.registerPush(
+          this.principal.id,
+          params as DevicePushRegisterParams,
+        ) satisfies DevicePushRegisterResult;
+      }
+      case Method.DevicePushUnregister: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may unregister for push",
+          );
+        }
+        this.host.unregisterPush(this.principal.id);
+        return {} satisfies DevicePushUnregisterResult;
+      }
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
     }
@@ -590,6 +675,16 @@ export class Connection {
     if (params.clientCapabilities.updates) {
       this.updateTypes = params.clientCapabilities.updates;
     }
+    // D8/D9: this client can put a `move_session` proposal to its owner, so a
+    // session IT creates may be offered the tool. Per connection (a pod daemon
+    // serves a `run`, an `attach` and a hop target alike), and absent = no hop.
+    this.hop = params.clientCapabilities.hop === true;
+    // The label an `auto_accept` update carries: this connection's declared
+    // device name (`clientInfo.host`, which only a TRUSTED daemon is ever given
+    // one for), else its `clientInfo.name`. Picked ONCE, here, so a later frame
+    // cannot claim another device's name.
+    this.autoAcceptBy = params.clientInfo?.host ?? params.clientInfo?.name;
+    this.clientHost = params.clientInfo?.host;
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: {
@@ -746,7 +841,13 @@ export class Connection {
     const attachment: Attachment = {
       send: (update) => this.peer.notify(Notification.SessionUpdate, update),
       ...(this.updateTypes ? { updates: this.updateTypes } : {}),
+      ...(this.hop ? { hop: true } : {}),
       ...(this.servesModel ? { model: this } : {}),
+      ...(this.clientHost !== undefined ? { host: this.clientHost } : {}),
+      // The socket's own principal names the device (never a frame's claim): the
+      // push rules exclude a device attached to this session — it is showing the
+      // sheet already (docs/feat/mobile-push.md Design 1).
+      ...(this.principal.kind === "device" ? { deviceId: this.principal.id } : {}),
     };
     const { hosted, created, resync, epoch } = this.host.open(params, attachment, prepared);
     this.attached.set(hosted.id, { hosted, attachment });
@@ -756,6 +857,9 @@ export class Connection {
       created,
       resync,
       ...(hosted.settingsReport ? { settings: hosted.settingsReport } : {}),
+      // Present iff THIS daemon shares auto-accept (docs/feat/session-auto-accept.md
+      // D2): a pod omits it, so no laptop client reads or sets it there.
+      ...(this.host.sharedAutoAccept ? { autoAccept: hosted.autoAccept } : {}),
       // Read in this same synchronous segment as the replay: omitted when 0.
       ...(hosted.unflushedExits > 0 ? { unflushedExits: hosted.unflushedExits } : {}),
     };
@@ -835,10 +939,23 @@ export class Connection {
     return hosted.sendNow(params.turnId, params.interrupt, params.messages, this.askHooksTrust);
   }
 
-  private readonly askHooksTrust: AskHooksTrust = (request, signal) =>
-    this.peer
+  private readonly askHooksTrust: AskHooksTrust = (request, signal) => {
+    // The host's own store first (a `serve` on the machine the folder lives on):
+    // already trusted there = no prompt, and nothing to store from a remote. A
+    // `declined` is that host's own "never" — a decision about the FOLDER, so a
+    // remote does not get to re-ask it (S4 review 1, finding 2).
+    const mine = this.hooksTrustPrecheck?.(request);
+    if (mine === "trusted") {
+      return Promise.resolve(true);
+    }
+    if (mine === "declined") {
+      return Promise.resolve(false);
+    }
+    // Otherwise the PROMPTING client decides (it has the human behind this turn).
+    return this.peer
       .request(Method.HooksTrust, request, signal ? { signal } : undefined)
       .then((result) => (result as HooksTrustResult).trusted === true);
+  };
 
   private onNotification(method: string, params: unknown): void {
     if (method === Notification.Cancel) {

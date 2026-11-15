@@ -1,0 +1,96 @@
+appId: so.tentacle.app
+---
+# 22 (docs/feat/mobile-relay.md R6): "relay only". The phone is paired over a
+# loopback `serve` whose record carries NOTHING but the mobile-relay address, so
+# the relay is the only path it has — and then drives a session over it.
+#
+# Why this flow exists: R5b proved `pair` now puts a record's own `addresses` in
+# the QR, but "a phone on another network reaches it" is the property, and only a
+# real app on a real socket can show it. Here the relay is local and the daemon
+# dials OUT to it, so what is proved is the FULL path (`/d/<id>/e2e` → relay →
+# the daemon's `/v1/accept` → the existing device route) through the app's own
+# stagger, `firstAnswering`, Noise initiator and `RemoteClient`.
+#
+# `_pair` cannot be reused: it passes the harness's own loopback address to
+# `pair`, so its QR always has a direct entry. `pair-start-relay-only.js` opens
+# the window WITHOUT that address instead — nothing is restarted, the daemon,
+# its relay registration and its record are the same ones every other flow uses.
+- runScript:
+    file: "pair-start-relay-only.js"
+- launchApp:
+    clearState: true
+- clearKeychain
+# docs/feat/mobile-lock.md: the shipped default LOCKS AT COLD START (Owner Q1).
+- runFlow: _unlock.yaml
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 30000
+- tapOn:
+    id: "pair-paste-input"
+- inputText: ${output.payload}
+- tapOn:
+    id: "pair-paste-submit"
+# The review says how many addresses it will try — one, and it is the relay.
+- assertVisible:
+    id: "pair-review"
+- tapOn:
+    id: "pair-confirm"
+- runScript:
+    file: "pair-confirm.js"
+# The two ends agree on the compare code: the relay carried a real pairing claim
+# to the daemon's own device route (nothing about that route is relay-specific).
+- assertVisible:
+    id: "pair-sas-${output.sas}"
+- runScript:
+    file: "pair-answer.js"
+- assertVisible:
+    id: "computers-list"
+- assertVisible:
+    id: "computer-${output.computerId}"
+# The phone opens the computer: `session/list` over the relay (the link is up
+# only if a Noise handshake completed THROUGH it).
+- tapOn:
+    id: "computer-${output.computerId}"
+- extendedWaitUntil:
+    visible:
+      id: "sessions-list"
+    timeout: 30000
+# A session, a prompt, and the mock model's answer: a full round trip whose bytes
+# only ever went through the relay.
+- tapOn:
+    id: "session-${ALPHA_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "relay only"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 40000
+# Background → foreground: the gate drops the socket, and the redial takes the
+# race again — over the relay, since that is the only address the phone has.
+# `launchApp` relaunches onto `Computers`, so the flow walks back in.
+- pressKey: home
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: "computers-list"
+    timeout: 30000
+- tapOn:
+    id: "computer-${output.computerId}"
+- extendedWaitUntil:
+    visible:
+      id: "sessions-list"
+    timeout: 40000
+# The last two steps are TRUTH, not screens (e2e-flows: an id only says what was
+# drawn). First that the prompt really reached the daemon and the mock answered it
+# (over the relay), then that the pairing payload carried the relay address alone.
+- runScript:
+    file: "22-relay-history.js"
+- runScript:
+    file: "22-relay-qr.js"

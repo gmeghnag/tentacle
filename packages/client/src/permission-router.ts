@@ -39,6 +39,13 @@ export type RouterAction =
         /** A BACKGROUND child's `sa-N`. */
         readonly id?: string;
       };
+      /**
+       * The other devices this ask was raised to, by their declared labels
+       * (`ClientInfo.host`, docs/feat/session-auto-accept.md D7). Display only,
+       * bounded and sanitized here (a pod could forge one), and still each
+       * surface's OWN label: `otherDevicesAsked` drops it.
+       */
+      readonly askedOn?: readonly string[];
     }
   | { readonly kind: "abort"; readonly sessionId: string; readonly requestId: string }
   | {
@@ -68,6 +75,25 @@ interface Entry {
   readonly update: PermissionRequestUpdate;
   readonly turnId: string | null;
 }
+
+/** A `send` action (narrowed out for the callers that only send). */
+export type PermissionSendAction = Extract<RouterAction, { kind: "send" }>;
+
+/**
+ * What a keyed `session/resolve_permission` came to (docs/feat/mobile-notifications.md
+ * Design 5): `sent` (the daemon took it), `not-pending` (answered elsewhere, or
+ * gone — first-wins, no effect), `session-lost` (the session was recreated
+ * mid-send: it MAY have arrived), `failed` (not delivered).
+ */
+export type PermissionAnswerOutcome = "sent" | "not-pending" | "session-lost" | "failed";
+
+/**
+ * What a notification's answer came to: the outcome of the send, or the reason
+ * nothing was sent — `unoffered` (the option is not one this request offers),
+ * `unreplyable` (a reply for a request that takes none), `not-pending` (no such
+ * ask is held: unknown, resolved, or already answered).
+ */
+export type NotificationAnswerOutcome = PermissionAnswerOutcome | "unoffered" | "unreplyable";
 
 const is = (entry: Entry | null, sessionId: string, requestId: string): boolean =>
   entry !== null && entry.sessionId === sessionId && entry.update.requestId === requestId;
@@ -146,18 +172,89 @@ export class PermissionRouter {
       return []; // withdrawn meanwhile: its answer must not be sent
     }
     this.current = null;
+    return [...this.decide(entry, response), ...this.next()];
+  }
+
+  /**
+   * The asks this router is HOLDING for a session: the one on screen and the
+   * queued ones, oldest first. Read-only and display-only — a caller may look
+   * (to name an ask it means to settle, or to show what is waiting), never
+   * decide from it: `answerById` re-validates everything (N1).
+   */
+  heldIds(sessionId: string): readonly string[] {
+    const ids: string[] = [];
+    const current = this.current;
+    if (current?.sessionId === sessionId) {
+      ids.push(current.update.requestId);
+    }
+    for (const entry of this.queue) {
+      if (entry.sessionId === sessionId) {
+        ids.push(entry.update.requestId);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * An answer given OUTSIDE the prompt (docs/feat/mobile-notifications.md
+   * Design 5, owner decision 8: Approve / Deny / Reply from a notification).
+   * The ask is settled whether or not it is the one on screen, and no broker
+   * requester is involved: the phone's notification path never shows a prompt,
+   * so `answered` (which accepts only `current`) cannot serve it.
+   *
+   * - `current`: the same validation as `answered`, plus an `abort` for the
+   *   open prompt — its late `DISMISSED` then finds nothing to settle (the
+   *   "withdrawn meanwhile" branch of `answered`), so no second answer is sent.
+   * - queued: dropped from the queue and settled the same way.
+   * - unknown / already resolved / already answered here: `[]` (nothing is
+   *   sent: a stale notification must never decide anything).
+   */
+  answerById(sessionId: string, requestId: string, response: PermissionResponse): RouterAction[] {
+    const entry = this.current;
+    const isCurrent = is(entry, sessionId, requestId);
+    const queued = isCurrent ? undefined : this.queue.find((e) => is(e, sessionId, requestId));
+    const held = isCurrent ? entry : queued;
+    if (!held) {
+      return [];
+    }
+    const decided = this.decide(held, response);
+    if (!decided.some((a) => a.kind === "send")) {
+      // Nothing was sent (an unoffered option, a reply the daemon takes
+      // nowhere, a withdrawn/no decision): the ask stays HELD — still pending
+      // daemon-side, so the sheet (or a later tap) must still be able to answer
+      // it. A stale notification settles nothing.
+      return decided;
+    }
+    if (isCurrent) {
+      this.current = null;
+      // The prompt on screen (if any) is withdrawn: its late `DISMISSED` then
+      // finds nothing to settle (`answered`'s withdrawn branch), so no second
+      // answer is sent.
+      return [{ kind: "abort", sessionId, requestId }, ...decided, ...this.next()];
+    }
+    this.queue = this.queue.filter((e) => e !== queued);
+    return decided;
+  }
+
+  /**
+   * What one answer means for one held request: nothing (a withdrawn prompt, or
+   * an outcome that is no decision), the refusal to send it (`unoffered`,
+   * `unreplyable`), or the `send` — the person's reply only where the daemon
+   * takes one. Shared by `answered` (the prompt) and `answerById` (a
+   * notification), so both validate a decision the same way.
+   */
+  private decide(entry: Entry, response: PermissionResponse): RouterAction[] {
+    const { sessionId } = entry;
+    const requestId = entry.update.requestId;
     if (response.dismissed) {
-      return this.next();
+      return [];
     }
     const outcome = responseToOutcome(response);
     if (outcome.outcome !== "selected") {
-      return this.next();
+      return [];
     }
     if (!entry.update.options.some((o) => o.optionId === outcome.optionId)) {
-      return [
-        { kind: "unoffered", sessionId, requestId, optionId: outcome.optionId },
-        ...this.next(),
-      ];
+      return [{ kind: "unoffered", sessionId, requestId, optionId: outcome.optionId }];
     }
     // A reply goes only with a refusal (an approval's is ignored), and only
     // where the daemon said it takes one.
@@ -168,9 +265,13 @@ export class PermissionRouter {
         ? normalizePermissionReply(response.message, reply?.maxChars ?? Number.POSITIVE_INFINITY)
         : null;
     if (message !== null && !reply) {
-      return [{ kind: "unreplyable", sessionId, requestId }, ...this.next()];
+      return [{ kind: "unreplyable", sessionId, requestId }];
     }
-    let answered = this.answeredIds.get(sessionId);
+    const answeredIds = this.answeredIds.get(sessionId);
+    if (answeredIds?.has(requestId)) {
+      return []; // already answered here: a duplicate tap decides nothing
+    }
+    let answered = answeredIds;
     if (!answered) {
       answered = new Set();
       this.answeredIds.set(sessionId, answered);
@@ -184,7 +285,6 @@ export class PermissionRouter {
         optionId: outcome.optionId,
         ...(message !== null ? { message } : {}),
       },
-      ...this.next(),
     ];
   }
 
@@ -270,6 +370,13 @@ export class PermissionRouter {
                   ? { id: progressText(entry.update.agent.id) }
                   : {}),
               },
+            }
+          : {}),
+        ...(entry.update.askedOn !== undefined && entry.update.askedOn.length > 0
+          ? {
+              askedOn: entry.update.askedOn
+                .map((label) => progressText(label))
+                .filter((l) => l !== ""),
             }
           : {}),
       },

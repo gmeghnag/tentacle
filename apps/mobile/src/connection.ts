@@ -29,11 +29,12 @@ import { PermissionBroker } from "@tentacle/core";
 import { type InitializeResult, decodeBase64Url } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import type { Random } from "@tentacle/transport/noise";
-import { type DialMemory, firstAnswering } from "./address-dial.ts";
+import { type DialFailure, type DialMemory, firstAnswering } from "./address-dial.ts";
 import { type AppLog, type AppLogField, createAppLog, errorShape } from "./app-log.ts";
 import type { StoredComputer } from "./computers.ts";
 import { createForegroundGate } from "./foreground-gate.ts";
 import { sha256Hex } from "./hash.ts";
+import { phoneHooksTrust } from "./hooks-trust.ts";
 import { type LinkDiagnoser, createLinkDiagnoser } from "./link-diagnosis.ts";
 import type { RNWebSocketCtor } from "./rn-websocket.ts";
 import { rnWebSocketCtor } from "./rn-websocket.ts";
@@ -48,7 +49,15 @@ import { rnWebSocketCtor } from "./rn-websocket.ts";
  * so a second construction site cannot quietly forget it (AGENTS §7: one
  * session path, one set of options).
  */
-export const APP_CLIENT_OPTIONS = { sha256Bytes: sha256Hex } as const;
+export const APP_CLIENT_OPTIONS = {
+  sha256Bytes: sha256Hex,
+  // The phone reaches a `serve` on the user's own host and nothing else
+  // (docs/feat/mobile-relay.md: "Only a `serve` on the user's host has a device
+  // route"), so the session's auto-accept is SHARED with it — the same TRUST
+  // bit a `connect` TUI sets (docs/feat/session-auto-accept.md D4/D6). A pod is
+  // never reachable from here, and the bit fails closed anyway.
+  sharedAutoAccept: true,
+} as const;
 
 export interface OpenComputerDeps {
   /** React Native's global `WebSocket` (injected: this module imports no RN). */
@@ -102,6 +111,13 @@ export interface ComputerLink {
   readonly address: () => string;
   /** Holds the redial and drops the live socket while the app is in the background (iOS suspends JS). */
   suspend(): void;
+  /**
+   * Let ONE dial through while the app is suspended, for up to `ms`
+   * (docs/feat/mobile-notifications.md Design 4: a notification's Deny/Reply).
+   * The SAME gate the app's own suspend/resume drives — never a second one, or a
+   * background answer would dial around the gate that exists to bound it.
+   */
+  hold(ms: number): () => void;
   /** The app is active again: let the client redial (its own re-attach does the rest). */
   resume(): void;
   /**
@@ -243,20 +259,40 @@ export async function openComputer(
   const diagnosis = deps.diagnosis ?? createLinkDiagnoser();
   let current = computer.addresses[0] ?? "";
 
-  /** One address: the raw socket (tracked for the diagnosis), then the Noise handshake. */
-  const dialOne = (address: string): (() => Promise<DuplexChannel>) => {
-    const raw = webSocketChannelFactory(address, {}, factoryDeps);
-    return async () => {
-      let opened = false;
-      let channel: DuplexChannel;
-      try {
-        channel = await raw();
-        opened = true;
-      } catch (error) {
-        // The socket never opened: this attempt proves nothing about identity.
-        diagnosis.observe({ opened: false, error });
-        throw error;
-      }
+  /**
+   * One address, in the two steps R6's race needs: OPEN the raw socket (that,
+   * and only that, decides the race), then the Noise handshake on the winner.
+   * The diagnosis is fed per STEP, and only for steps the RACE still owned: an
+   * abandoned loser records nothing (`abandon` is silent), and a loser whose OPEN
+   * fails after the race was decided records nothing either — `firstAnswering`
+   * drops it (`steps.failed`, review round 1 finding 2). Otherwise a LAN connect
+   * error arriving behind an authenticated `denied` would overwrite `revoked`
+   * with `unreachable`, and the row would lose its Remove action.
+   */
+  const steps = {
+    open: async (address: string): Promise<DuplexChannel> => {
+      current = address;
+      // No `observe` here: whether this failure may be reported at all is the
+      // race's call (`failed` below), because only the race knows if it had
+      // already been decided when the rejection arrived.
+      return await webSocketChannelFactory(address, {}, factoryDeps)();
+    },
+    /**
+     * An `open` that failed while its race was still undecided: a path that is
+     * down, which says nothing about identity.
+     */
+    failed: (failure: DialFailure): void => {
+      diagnosis.observe({ opened: false, error: failure.error });
+    },
+    /**
+     * A loser of the race, closed BEFORE any handshake: the relay's stream closes
+     * pre-handshake (its limiter slot and per-ip stream go back with it), and no
+     * daemon-side state is created — the reason the race is decided at open.
+     */
+    abandon: (channel: DuplexChannel): void => {
+      channel.close();
+    },
+    confirm: async (channel: DuplexChannel): Promise<DuplexChannel> => {
       try {
         // `secureChannelFactory` maps a failed handshake itself (`denied` →
         // `unauthorized`, the authenticated verdict the diagnosis reads).
@@ -269,19 +305,15 @@ export async function openComputer(
         diagnosis.observe({ opened: true, error });
         throw error;
       }
-    };
+    },
   };
 
-  /** The factory the client redials with: address order, remembered good one. */
+  /**
+   * The factory the client redials with: the staggered race over the address list
+   * (R6), starting at the remembered good one.
+   */
   const dial = async (): Promise<DuplexChannel> => {
-    const channel = await firstAnswering(
-      computer.addresses,
-      async (address) => {
-        current = address;
-        return dialOne(address)();
-      },
-      memory,
-    );
+    const channel = await firstAnswering(computer.addresses, steps, memory);
     diagnosis.ok();
     return channel;
   };
@@ -295,6 +327,27 @@ export async function openComputer(
   const broker = createLinkBroker();
   const client = new RemoteClient(channel, broker, undefined, {
     ...APP_CLIENT_OPTIONS,
+    // Project hooks (docs/feat/serve-mcp.md S4): a phone turn in a project with
+    // hooks must be able to run them. The ask goes through THIS link's broker to
+    // a person, never auto-accepted, and nothing is stored here — the folder is
+    // on the computer (`serve-hooks-trust.ts` checks its own trust file first).
+    // It is per link because it needs the broker, so it is not in
+    // `APP_CLIENT_OPTIONS` (which carries only broker-free bits).
+    hooksTrust: phoneHooksTrust(broker),
+    // This phone's own label, so the daemon can stamp an ask's `askedOn` and an
+    // `auto_accept` update's `by` with it (docs/feat/session-auto-accept.md
+    // D7). The name this phone PAIRED under — what the computer lists it as, so
+    // the label matches on both ends (a record an older build wrote has none,
+    // and then this phone simply sends no label). `node:os` is NOT how this is
+    // read: the phone has no such module (Review round 1, HIGH 2).
+    hostLabel: () => computer.thisDeviceName,
+    // …and the handshake that carries it. The daemon reads `host` from
+    // `initialize` alone (picked once, `connection.ts:627`), so without a
+    // `clientInfo` the seam above never reaches the wire — D7's phone half. The
+    // `host` itself is NOT set here: `wireClientInfo` adds it from `hostLabel`,
+    // which is what keeps the trust bit the ONE gate (a `host` written here
+    // would ride an untrusted client's frame too).
+    clientInfo: { name: "tentacle-app", version: "0" },
     channelFactory: gate.dial,
     onError: (error) => {
       // P4/F16: a client error message is daemon text (an endpoint body, a frame,
@@ -314,6 +367,7 @@ export async function openComputer(
       address: () => current,
       suspend: () => gate.suspend(),
       resume: () => gate.resume(),
+      hold: (ms: number) => gate.hold(ms),
       // DETACH, never close (12a.2; see `leaveComputer`).
       close: () => leaveComputer(client),
     };

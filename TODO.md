@@ -3,6 +3,29 @@
 Running backlog of planned work. The near-term roadmap is **skills support** next;
 the rest are "value-add" improvements layered on the harness.
 
+## Owner review queue
+
+- [ ] **review/mobile-decisions** — the owner wants to re-read every mobile
+  decision taken on 13–14/11 (owner 2026-11-14). Each doc has the questions with
+  the recommendation and the chosen answer:
+  - **Decided by the orchestrator** (night delegation, `#### Orchestrator
+    decisions (owner night delegation 2026-11-14)`): `docs/feat/mobile-compose.md`
+    (13), `docs/feat/mobile-lock.md` (14), `docs/feat/mobile-pairing-screen.md`
+    (11b) — plus `docs/feat/session-hop.md` (not mobile, same night).
+  - **Approved by the owner "all as recommended"** (`#### Owner decisions`):
+    `docs/feat/mobile-relay.md` (15), `docs/feat/mobile-push.md` (16),
+    `docs/feat/mobile-notifications.md` (17), `docs/feat/mobile-live-activity.md` (18).
+  - Earlier owner answers: `docs/feat/mobile-session-view.md` (12, "all +
+    images"), `docs/feat/sibling-discovery.md` (10, "all").
+
+- [ ] **feat/voice-conversation** (owner 2026-11-15, plan APPROVED) — hands-free voice conversation on the Mac and the iPhone (realtime-voice V2 + phone edge, background/locked screen in v1). Doc: `docs/feat/voice-conversation.md`. `Type: feat · Size: L (10 S/M slices) · Blast: load-bearing (C3 voice-turn profile) · Suited: Opus plan, DeepSeek slices, mandatory fresh review`. Code after `feat/voice-dictation` + `feat/mobile-voice` merge; spikes C1 (Mac) and P1 (iPhone, owner-assisted) can run now.
+
+- [ ] **feat/session-capabilities** (owner 2026-11-15) — enable/disable individual MCP servers and skills DURING a session, so the model does not see them when they are not needed ("se devo giocarci a dama non mi serve fargli vedere mcp o skill su k8s"). Per session, from the TUI and the iPhone app (Session info already lists MCP servers + skills — parity rule). Hidden = absent from the tool list and the skills index sent to the model (not merely denied), effective from the next model call; persisted with the session. Doc: `docs/feat/session-capabilities.md` (to plan: Opus, load-bearing — agent loop tool set, protocol, persistence). Mobile UI → mockups first, in the feat/mobile-chrome style.
+
+- [ ] **feat/per-session-model** (owner 2026-11-15: later — "per ora lasciamo fuori") — `serve` is bound to ONE model (its `--profile` at start); no `session/set_model`; the TUI `/model` only SHOWS the model. Idea: `serve` exposes its config profile NAMES and a session picks one at creation or with a real `/model <profile>` (TUI + app), as a phone/Mac parity step. Origin: docs/feat/serve-mcp.md Owner Q3.
+
+- [ ] **eval/mobile-native-swiftui** (owner 2026-11-15, low priority) — could the iOS app be even smoother/more beautiful with native Swift? Stance: stay on React Native/Expo (native UIKit components already) and adopt SwiftUI only where it pays: (1) MEASURE first — the conversation with thousands of streamed rows on the owner's iPhone 12 Pro (frame drops, scroll, memory); (2) candidates: a high-performance virtualized (or native) transcript list, real system sheets/menus, iOS 26 materials (Liquid Glass) via Expo UI / a local Swift module, interactive sheet gestures; widgets/Live Activity are Swift anyway (task 18). A full Swift rewrite is out (Android lost, two codebases) unless the measurements say otherwise.
+
 ## v0.1.0 stabilization review (in progress)
 
 Full code review, hot-path → polish, to stabilize a v0.1.0. Findings recorded

@@ -144,6 +144,15 @@ export const ClientCapabilitiesSchema = z.object({
     )
     .max(256)
     .optional(),
+  /**
+   * This client can put a session's `move_session` PROPOSAL to its owner: it has
+   * a `/move` feed and a broker prompt to raise (docs/feat/session-hop.md D8/D9).
+   * A daemon offers the tool only to a session whose creating client says so, so a
+   * `run`/`attach` TUI — which has no `hop` prop — never reaches a model that
+   * proposes a move nobody is asked about. Absent = no hop, the safe direction,
+   * and an older daemon simply drops it.
+   */
+  hop: z.boolean().optional(),
 });
 export type ClientCapabilities = z.infer<typeof ClientCapabilitiesSchema>;
 
@@ -177,6 +186,15 @@ export type AgentCapabilities = z.infer<typeof AgentCapabilitiesSchema>;
 export const ClientInfoSchema = z.object({
   name: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),
   version: z.string().regex(/^[0-9A-Za-z.+-]{1,64}$/),
+  /**
+   * A short device name for DISPLAY (docs/feat/session-auto-accept.md D7): this
+   * laptop's hostname when its daemon shares auto-accept, or the phone's own
+   * name. Sent ONLY to a daemon the client trusts (`sharedAutoAccept`) — never
+   * to a pod, which would learn the laptop's hostname for nothing. The daemon
+   * echoes it as an ask's `askedOn` and as an `auto_accept` update's `by`;
+   * display only, never a decision, and untrusted text wherever it is shown.
+   */
+  host: z.string().min(1).max(64).optional(),
 });
 export type ClientInfo = z.infer<typeof ClientInfoSchema>;
 
@@ -887,6 +905,13 @@ export const OpenParamsSchema = z.object({
   logBase: z
     .object({ seq: z.number().int().positive(), id: z.string().min(1).max(256) })
     .optional(),
+  /**
+   * The session's initial auto-accept, for a session this open CREATES
+   * (ignored otherwise, exactly like `settings`): how a new session, a
+   * `/clear` fork and a hop target carry the value a person already set
+   * (docs/feat/session-auto-accept.md D2). Absent → off.
+   */
+  autoAccept: z.boolean().optional(),
 });
 export type OpenParams = z.infer<typeof OpenParamsSchema>;
 
@@ -905,6 +930,15 @@ export const OpenResultSchema = z.object({
    * attach-unflushed-exits.md). Omitted when 0, and by an older daemon.
    */
   unflushedExits: z.number().int().nonnegative().optional(),
+  /**
+   * The session's auto-accept now (docs/feat/session-auto-accept.md D2):
+   * **present ⇔ this daemon SHARES auto-accept** for the session, so it is the
+   * snapshot every open/attach/re-attach adopts. Absent (an older daemon, a pod
+   * daemon after a build that does not share it) → the client keeps a local
+   * feed for that session. Only a client that knows its daemon is trusted reads
+   * it (`RemoteClientOptions.sharedAutoAccept`, AGENTS §7).
+   */
+  autoAccept: z.boolean().optional(),
 });
 export type OpenResult = z.infer<typeof OpenResultSchema>;
 
@@ -938,6 +972,31 @@ export const UpdateSettingsResultSchema = z.object({
   settings: SessionSettingsReportSchema.optional(),
 });
 export type UpdateSettingsResult = z.infer<typeof UpdateSettingsResultSchema>;
+
+// --- session/set_auto_accept --------------------------------------------
+// Open or close the session's auto-accept (docs/feat/session-auto-accept.md D2).
+// It is the SESSION's state, held by a daemon that SHARES it (the worker, a
+// trusted `serve` — never a pod, AGENTS §7) and broadcast to every attached
+// client, so a terminal's Shift+Tab and the phone's sheet switch change it for
+// everyone. The daemon holds and broadcasts it; it never ANSWERS an ask with it
+// (owner Q1: each attached device decides, through its own broker's requester).
+// Idempotent: setting the value it already has returns without an emit. A
+// `serve` keeps it across a restart (its sidecar); an ARCHIVED session reopens
+// OFF. Additive: an older daemon answers `MethodNotFound`, and the client then
+// keeps a local feed for that session.
+
+export const SetAutoAcceptParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  /** The value to apply, the whole state (not a toggle). */
+  on: z.boolean(),
+});
+export type SetAutoAcceptParams = z.infer<typeof SetAutoAcceptParamsSchema>;
+
+export const SetAutoAcceptResultSchema = z.object({
+  /** The session's value AFTER applying (a losing race reads the winner's). */
+  on: z.boolean(),
+});
+export type SetAutoAcceptResult = z.infer<typeof SetAutoAcceptResultSchema>;
 
 // --- session/close ------------------------------------------------------
 // End the session for everyone: abort its turn, stop its background jobs, tell

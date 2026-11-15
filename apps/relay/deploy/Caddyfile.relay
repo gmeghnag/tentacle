@@ -1,0 +1,61 @@
+# Caddy site block for the mobile relay — relay.tentacle.so
+# (docs/feat/mobile-relay.md R7; runbook: docs/ops/relay-deploy.md)
+#
+# NOT APPLIED by any executor. Include it from the host's main Caddyfile:
+#
+#   # /etc/caddy/Caddyfile
+#   import /etc/caddy/relay.tentacle.so.caddy
+#
+# Caddy gets the certificate on its own (ACME/Let's Encrypt); there is no key to
+# install. The relay itself speaks plain ws:// on loopback and knows nothing
+# about TLS, so this file is the only place the public name appears.
+#
+# This proxy is also the reason the relay runs with `--trust-proxy`: it is the
+# ONLY hop in front of the relay, it sends `X-Forwarded-For` explicitly below,
+# and the relay reads that header only from a loopback peer. That is what makes
+# the per-IP abuse limits per CLIENT instead of one bucket keyed on 127.0.0.1
+# (`apps/relay/src/client-ip.ts`).
+
+relay.tentacle.so {
+	# Metadata hygiene (L2): HSTS for this name only (no includeSubDomains, no
+	# preload — this box serves one name and the owner must be able to move it),
+	# and no `Server:` banner. A `-` removal is deferred by Caddy until after the
+	# proxy has run, so the upstream cannot re-add it.
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	# Only the relay's four routes; everything else is a 404 here, so a path probe
+	# never reaches the process. The regex MUST match `relayRoute` in
+	# `apps/relay/src/server.ts` exactly (22 base64url chars in the phone segment)
+	# — `apps/relay/test/deploy.test.ts` pins the two against each other, path by
+	# path, so this copy cannot drift silently.
+	@unknown not path_regexp ^/(healthz|v1/daemon|v1/accept|d/[A-Za-z0-9_-]{22}/e2e)$
+	respond @unknown 404
+
+	reverse_proxy 127.0.0.1:4100 {
+		# REPLACE the client's own header rather than appending to it: the relay
+		# takes the right-most hop, so either way the answer is the real client,
+		# but replacing also keeps a client's forged hop out of the journal-adjacent
+		# metadata entirely. `{remote_host}` is the address Caddy actually saw.
+		header_up X-Forwarded-For {remote_host}
+
+		# A config RELOAD does not cut live sockets AT ONCE: without this, `caddy
+		# reload` would close every relayed session immediately (a phone dropping
+		# mid-turn). With it the cut is DELAYED, not cancelled — the relay pings
+		# its legs (`server.ts` sets `sendPings: true`), so a live phone session
+		# and every daemon control socket never idle out on their own and Caddy
+		# force-closes them 5 minutes after the reload. So plan a reload as a
+		# STAGGERED drop spread over those 5 minutes, not as a no-op: F1/F2 resync
+		# the phones that drop, and F3's jittered re-registration covers the
+		# daemons. (The duration must stay ≥ the 60 s idle timeout: a leg with
+		# nothing left to say is closed by the relay itself, which is the only
+		# case where it ends "on its own".)
+		stream_close_delay 5m
+	}
+
+	# No CORS, no Origin check, no admin path: the app is a native client, the
+	# relay authorises nobody (AGENTS §7 "not trusted" — Noise authenticates
+	# both ends), and the only non-socket route is /healthz.
+}

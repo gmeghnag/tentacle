@@ -14,6 +14,7 @@ import type { LoadResult } from "@tentacle/agent";
 import type { JobController, PermissionBroker } from "@tentacle/core";
 import type { McpServerStatus } from "@tentacle/protocol";
 import type { HopSpec, LinkStatusView, SessionController, TargetBadge } from "@tentacle/tui";
+import type { KubeNamespace } from "./engine-select.ts";
 import { type HopPlace, placeText } from "./hop-plan.ts";
 import type { LocalRuntime } from "./local-runtime.ts";
 import { type HopBuild, type HopBuilt, type HopOutcome, hopSession } from "./session-hop.ts";
@@ -30,6 +31,8 @@ export interface HopTargetView {
   readonly place: HopPlace;
   readonly badge?: TargetBadge;
   readonly daemonInPod: boolean;
+  /** The daemon session's own cwd after a hop (D4 of docs/fix/session-hop-live.md). */
+  readonly cwd?: string;
 }
 
 export interface HopRuntimeDeps {
@@ -44,13 +47,16 @@ export interface HopRuntimeDeps {
    * returns the runtime plus how to undo it (D1 step 2, D5). `sessionId` is the
    * uid the target must take (D1 step 3: `resume: null` plus the minted uid).
    */
-  readonly build: (spec: HopSpec, shared: HopShared, sessionId: string) => Promise<HopBuild>;
+  readonly build: (
+    spec: HopSpec,
+    shared: HopShared,
+    sessionId: string,
+    opts: { readonly gateAnswered?: true; readonly namespace?: KubeNamespace },
+  ) => Promise<HopBuild>;
   /** The laptop's record of a uid (`LogSessionStore.load`): the seed (D1 step 3/4b). */
   readonly load: (uid: string) => Promise<LoadResult>;
   /** A phase line while a hop runs; `null` clears it (the TUI's status row). */
   readonly status?: (line: string | null) => void;
-  /** One notice (never the terminal while Ink owns it, AGENTS §7). */
-  readonly notify?: (text: string) => void;
   /**
    * The TUI's half of the commit: swap to `built`'s controller with
    * `keepTranscript`, turn auto-accept off (D3, D9). Awaited, and its throw is
@@ -76,7 +82,11 @@ export interface HopRuntime {
    * Move this session to `spec`'s target (D1). One at a time: the caller holds
    * the `hopping` latch (`hopPlan`), so a second call would be a second build.
    */
-  hop(spec: HopSpec, sessionId: string | null): Promise<HopOutcome>;
+  hop(
+    spec: HopSpec,
+    sessionId: string | null,
+    opts?: { readonly gateAnswered?: true; readonly namespace?: KubeNamespace },
+  ): Promise<HopOutcome>;
   /** Dispose the current runtime: after the TUI has unmounted. */
   dispose(): Promise<void>;
 }
@@ -178,18 +188,23 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
         listeners.delete(listener);
       };
     },
-    hop: async (spec, sessionId) => {
+    hop: async (spec, sessionId, opts) => {
       // ONE at a time: the caller holds the `hopping` latch (`hopPlan`), so a
       // second `/move` while this runs is refused before it reaches here.
       const old = current;
       const outcome = await hopSession(
         old,
-        { spec, sessionId },
         {
-          build: (target, id) => deps.build(target, deps.shared, id),
+          spec,
+          sessionId,
+          ...(opts?.gateAnswered ? { gateAnswered: true as const } : {}),
+          ...(opts?.namespace === undefined ? {} : { namespace: opts.namespace }),
+        },
+        {
+          build: (target, id, buildOpts) => deps.build(target, deps.shared, id, buildOpts),
           load: deps.load,
           ...(deps.status ? { status: deps.status } : {}),
-          onCommit: async (built) => {
+          onCommit: async (built, facts) => {
             // The facade moves FIRST: a listener swapped after the runtime would
             // paint a status from a runtime nobody is on any more.
             current = built.runtime;
@@ -200,6 +215,8 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
               place: built.place,
               ...(badge ? { badge } : {}),
               daemonInPod: built.daemonInPod,
+              // D4: the session's own cwd on the target (absent → the laptop's).
+              ...(facts.cwd === undefined ? {} : { cwd: facts.cwd }),
             });
             await deps.onSwap?.(built);
           },
@@ -209,7 +226,8 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
         },
       );
       deps.status?.(null);
-      deps.notify?.(outcome.notice);
+      // The outcome is NOT notified here: the TUI owns its one line, moved or
+      // failed (`hopMovedNotice` + the feed's `note`; docs/fix/session-hop-live.md D2).
       // A failed hop leaves the old runtime where it was: the badge does not move.
       return outcome;
     },

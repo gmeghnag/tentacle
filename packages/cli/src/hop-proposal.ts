@@ -1,3 +1,4 @@
+import { MOVE_SESSION_DECLINED_HINT } from "@tentacle/tools";
 /**
  * The move a TOOL proposed (docs/feat/session-hop.md D9), pure: watch our own
  * turn's events for a `move_session` call that succeeded, and turn its
@@ -10,9 +11,10 @@
  * out loud (`notice`), never silently dropped.
  */
 import type { SessionEvent } from "@tentacle/tui";
-import type { HopSpec } from "@tentacle/tui";
-import { hopWorkload } from "@tentacle/tui";
+import type { HopSpec, HopWorkload } from "@tentacle/tui";
+import { hopWorkload, workloadText } from "@tentacle/tui";
 import { z } from "zod";
+import type { KubeNamespace } from "./engine-select.ts";
 import { untrustedText } from "./untrusted-text.ts";
 
 /** The tool whose success proposes a hop (D9). */
@@ -23,6 +25,8 @@ const workloadSchema = z.object({
   engine: engineSchema,
   name: z.string().min(1),
   container: z.string().min(1).optional(),
+  /** OD1: k8s only, a DNS-1123 label (re-checked by `hopWorkload` below). */
+  namespace: z.string().min(1).optional(),
 });
 
 /**
@@ -138,11 +142,13 @@ export function hopSpecOf(
     }
     // The SAME workload validator the typed `/move attach` uses, so the two
     // paths cannot accept different grammars (and a pod-supplied `:`,`/` or
-    // control byte never reaches a badge or an engine call).
+    // control byte never reaches a badge or an engine call). The namespace (OD1)
+    // is checked by that same call, so a bad one is null here too.
     const checked = hopWorkload(
       input.workload.engine,
       input.workload.name,
       input.workload.container,
+      input.workload.namespace,
     );
     if (checked.kind !== "ok") {
       return null;
@@ -179,9 +185,7 @@ export function hopSpecOf(
 export function proposalNotice(spec: HopSpec, reason?: string): string {
   const where =
     spec.target === "attach"
-      ? `${spec.workload.engine}:${untrustedText(spec.workload.name)}${
-          spec.workload.container ? `/${untrustedText(spec.workload.container)}` : ""
-        }`
+      ? workloadText(spec.workload)
       : spec.target === "container"
         ? spec.image === undefined
           ? "a container (the default image)"
@@ -191,3 +195,142 @@ export function proposalNotice(spec: HopSpec, reason?: string): string {
   const remove = spec.keep ? "" : " (and remove the workload this hop created)";
   return `_the model proposes moving this session to ${where}${remove}${why}_`;
 }
+
+/** The title of the prompt a proposed move raises (D9). The laptop's words only. */
+export function hopPromptTitle(): string {
+  return "Move this session?";
+}
+
+/** What D9's `session_hop` detail is built from — facts, never the model's prose. */
+export interface HopPromptFacts {
+  /** The container engine a `container` hop would build. Default `docker` (the local default). */
+  readonly engine?: HopPromptEngine;
+  /** The host folder `planWorkspace` would bind-mount. Absent: nothing is mounted. */
+  readonly mount?: string;
+  /** The workload this session LEAVES, when a hop back would decide its fate (`delete`/`kept`). */
+  readonly workload?: string;
+  /**
+   * OD3: the k8s namespace's PROVENANCE (which fact decided it), so a live test
+   * answers "why that namespace" from the prompt itself. The name is already in
+   * the label (`workloadText`); this is the `(from …)` half.
+   */
+  readonly namespace?: KubeNamespace;
+  /**
+   * D6's mount-gate `ask` text. Merged into THIS detail (review M6): the owner
+   * answers one question, not two, and the gate's warning cannot be missed
+   * because it arrived as a second prompt while this one was open. Set ONLY for
+   * an `ask`: a Yes here also answers the gate, so the build does not re-ask
+   * (`mountConfirmed`, H5 review finding 2).
+   */
+  readonly gate?: string;
+  /**
+   * The gate's `proceed` WARNINGS (a case-reachable mask). Shown here so the owner
+   * is not surprised later; nothing to answer, so no build-time prompt follows.
+   */
+  readonly gateWarnings?: string;
+  /** The model's own reason (D9). POD-SUPPLIED: sanitized, and always LAST. */
+  readonly reason?: string;
+}
+
+/**
+ * The `session_hop` prompt's detail (D9, review M6): the FULL text the owner
+ * reads before a proposed move is built. The laptop writes every line that
+ * decides anything — the engine, the complete image reference, the host mount
+ * path (read-write), the inject, the delete intent — and the only daemon-supplied
+ * text (`reason`, a workload name, an image) reaches it through `untrustedText`,
+ * the reason last and labelled as the model's words. It is the SAME prompt the
+ * mount gate's `ask` uses, merged, so a hop never asks twice.
+ */
+export function hopPromptDetail(spec: HopSpec, facts: HopPromptFacts = {}): string {
+  const lines: string[] = [];
+  if (spec.target === "local") {
+    // The one thing a hop to local means, and the reason it needs a yes at all:
+    // after it, the agent's shell commands run on THIS machine, not in a box.
+    lines.push("local — the agent will run commands on this machine");
+  } else if (spec.target === "container") {
+    lines.push(`a ${facts.engine ?? "docker"} container`);
+    lines.push(
+      spec.image === undefined ? "image: the default image" : `image: ${untrustedText(spec.image)}`,
+    );
+    if (facts.mount !== undefined) {
+      // Read-write, and the HOST path: what becomes reachable from the image.
+      lines.push(`mount: ${untrustedText(facts.mount)} (read-write)`);
+    }
+  } else {
+    lines.push(`attach to ${workloadName(spec.workload)} — tentacle is injected into it`);
+    if (spec.workload.engine === "kubernetes") {
+      lines.push("your folder is NOT shared with this pod");
+    }
+  }
+  // OD3: WHICH fact decided the namespace, right after the place it belongs to.
+  if (facts.namespace !== undefined) {
+    lines.push(namespaceTrace(facts.namespace));
+  }
+  if (facts.gate !== undefined && facts.gate !== "") {
+    lines.push(untrustedText(facts.gate));
+  }
+  if (facts.gateWarnings !== undefined && facts.gateWarnings !== "") {
+    lines.push(untrustedText(facts.gateWarnings));
+  }
+  // The fate of what we leave: said OUT LOUD both ways, because silence reads as
+  // a delete — and a hop back is the only place a delete can happen (D5).
+  if (facts.workload !== undefined) {
+    lines.push(
+      spec.keep
+        ? `${untrustedText(facts.workload)} is kept (tentacle attach to return)`
+        : `${untrustedText(facts.workload)} will be DELETED`,
+    );
+  }
+  lines.push(
+    "background jobs, MCP servers and session approvals are reset (auto-accept survives the move)",
+  );
+  if (facts.reason !== undefined && facts.reason !== "") {
+    // LAST, and labelled: it is the model's own words, not a fact of the plan.
+    lines.push(`the model's reason: ${untrustedText(facts.reason)}`);
+  }
+  return lines.join("\n");
+}
+
+/** The container engine a hop would build (docker is the local default; `podman` a config's). */
+export type HopPromptEngine = "docker" | "podman";
+
+/**
+ * OD1/OD2: a PROPOSAL's namespace, resolved at the turn's end. `pinned` carries
+ * the spec to show and build (its `workload.namespace` written in) plus the
+ * provenance the prompt states; `failed` is a resolution that could not be made —
+ * nothing is asked and nothing is built, and the model is told why (OD6).
+ */
+export type HopNamespacePin =
+  | { readonly kind: "pinned"; readonly spec: HopSpec; readonly namespace?: KubeNamespace }
+  /** `line`: the REASON (no brackets) — `hopWakeLine` renders `[move failed: …]`. */
+  | { readonly kind: "failed"; readonly line: string };
+
+/**
+ * `<engine>:<ns>/<name>[/<container>]`, sanitized: names may be pod-supplied. ONE
+ * label function (`workloadText`), so this prompt, the live row, the outcome and
+ * the wake-up line cannot print the same workload differently (OD1).
+ */
+function workloadName(workload: HopWorkload): string {
+  return workloadText(workload);
+}
+
+/**
+ * OD3's provenance line: `namespace <ns> (from <source>; context <c>, <path>)`.
+ * The kubeconfig path and context are named only when one was really consulted,
+ * so a server/env/explicit answer never claims a file it did not read.
+ */
+export function namespaceTrace(namespace: KubeNamespace): string {
+  const extra = [
+    ...(namespace.context === undefined ? [] : [`context ${namespace.context}`]),
+    ...(namespace.kubeconfig === undefined ? [] : [namespace.kubeconfig]),
+  ];
+  const from = extra.length === 0 ? namespace.source : `${namespace.source}; ${extra.join(", ")}`;
+  return `namespace ${untrustedText(namespace.namespace)} (from ${from})`;
+}
+
+/**
+ * D9's "the model is told": the refused proposal's line, prepended to the NEXT
+ * prompt. It is conversation (saved with the message), so the model reads it in
+ * the history and does not propose the same move again as if unanswered.
+ */
+export const MOVE_DECLINED_LINE = MOVE_SESSION_DECLINED_HINT;

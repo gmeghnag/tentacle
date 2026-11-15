@@ -7,9 +7,10 @@
  * to the terminal width here — an image ref can be long and a hop must never
  * widen the frame.
  */
-import type { HopPlaceView } from "./app-types.ts";
+import type { HopPlaceView, HopTargetView } from "./app-types.ts";
 import { truncateCells } from "./cells.ts";
 import { oneLine } from "./commands.ts";
+import { workloadText } from "./hop-command.ts";
 
 /** The row while a hop has no phase yet (`moving to docker:box`). */
 export function hopStatusLabel(target: string): string {
@@ -32,27 +33,63 @@ export function hopStatusRow(
   return truncateCells(oneLine(text), Math.max(10, columns));
 }
 
-/** The place as one line (`local`, `docker:box`, `kubernetes:web-0/app`). */
+/**
+ * The cwd the footer and a tool ask show: the daemon session's OWN cwd after
+ * a hop (`/` in an attached pod whose folder is not shared), else the laptop's
+ * (docs/fix/session-hop-live.md D4). A relative `/attach` path still means the
+ * laptop's — that one never comes from here.
+ */
+export function hopShownCwd(view: HopTargetView | null, laptopCwd: string): string {
+  return view?.cwd ?? laptopCwd;
+}
+
+/** The place as one line (`local`, `docker:box`, `kubernetes:<ns>/web-0/app`). */
 export function hopPlaceText(place: HopPlaceView): string {
   if (place.kind === "local") {
     return "local";
   }
-  const name = oneLine(place.name);
-  const container = place.container === undefined ? "" : `/${oneLine(place.container)}`;
-  return `${place.engine}:${name}${container}`;
+  // ONE label (OD1): the badge, the notices and the prompt cannot disagree, and a
+  // k8s pod is never printed as `kubernetes:<pod>/<container>` (which now reads as
+  // `ns/pod`). A pod-supplied name is one line inside it (`workloadText`).
+  return workloadText(place);
 }
 
 /**
- * The one line a finished hop leaves in the transcript (D3/D9): where the
- * session is now, and — because a hop resets it — that auto-accept is off. The
- * words are the App's, never the engine's: `place` is the host's own text for
- * the resolved target.
+ * The one line a finished hop leaves in the transcript (D3/D9, docs/feat/session-hop-ux
+ * OD5/OD6): where the session is now, and what happens next. OD5 reversed D9 —
+ * auto-accept SURVIVES a move — so this line no longer claims it is off; instead
+ * it says whether the session CONTINUES by itself (OD6's wake) or waits for the
+ * user to send a message. The words are the App's, never the engine's: `place` is
+ * the host's own text for the resolved target.
  */
-export function hopMovedNotice(place: string, autoAcceptWasOn: boolean): string {
-  const where = oneLine(place);
-  return autoAcceptWasOn
-    ? `_Moved to ${where} — auto-accept is off; send a message to continue._`
-    : `_Moved to ${where} — send a message to continue._`;
+export function hopMovedNotice(
+  place: string,
+  autoAcceptWasOn: boolean,
+  note?: string,
+  continues = false,
+  autoAccepted = false,
+): string {
+  const where = noticeText(oneLine(place));
+  // OD4: logged allow-once — no prompt was shown, so the record says it.
+  const how = autoAccepted ? " (auto-accepted)" : "";
+  const after =
+    note === undefined || note.trim() === "" ? how : `${how} — ${noticeText(oneLine(note))}`;
+  // OD5: the MODE is a fact of the TUI, not of the hop; naming it keeps the
+  // status bar and the transcript from ever disagreeing (a moved TUI keeps it on).
+  const mode = autoAcceptWasOn ? "auto-accept on" : "auto-accept off";
+  return continues
+    ? `_Moved to ${where}${after} — continuing (${mode})._`
+    : `_Moved to ${where}${after} — send a message to continue (${mode})._`;
+}
+
+/**
+ * Text that goes inside the App's `_…_` notice, escaped so it renders
+ * literally: it may be an engine's (`Docker API GET /_ping failed`), and an
+ * unescaped `_`/`*`/`` ` ``/`[` would be read as markdown
+ * (docs/fix/session-hop-live.md D2). The identity on text without them.
+ */
+export function noticeText(raw: string): string {
+  return raw.replace(/[\\_*`[\]]/g, (c) => `\\${c}`);
 }
 
 /**

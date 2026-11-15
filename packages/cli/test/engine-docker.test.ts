@@ -23,6 +23,7 @@ import {
   type EngineEndpoint,
   type EngineInfo,
   type ExecChannelOptions,
+  type RawExec,
   type RemoveContainerOptions,
   type RunExecOptions,
   type RunExecResult,
@@ -225,6 +226,11 @@ class FakeDockerClient implements DockerClientLike {
       return Promise.resolve({ exitCode: 0, stdout: '{"resident":false}\n', stderr: "" });
     }
     return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+  }
+  // Not exercised here (the raw exec has its own suite, docs/feat/workload-shell.md
+  // WS1); a call would be a test mistake, so it throws instead of faking bytes.
+  openRawExec(_target: DockerExecTarget): RawExec {
+    throw new Error("openRawExec is not used in this test");
   }
 }
 
@@ -724,6 +730,20 @@ describe("dockerEngineHost", () => {
     expect(host.noun).toBe("container");
     expect(host.defaultContainer).toBeUndefined();
     expect(host.where).toBe('unix:///var/run/docker.sock (context "default")');
+  });
+
+  test("engineArch (session-hop-live D3): GET /info Architecture; unknown → null; a failed info rejects", async () => {
+    // Mutation: return null from the host's `engineArch` → the aarch64 row fails.
+    const client = new FakeDockerClient(new ScriptedProvider([]));
+    const host = hostFor(client);
+    client.infoResult = { Architecture: "aarch64" };
+    expect(await host.engineArch?.()).toBe("arm64");
+    client.infoResult = { Architecture: "x86_64" };
+    expect(await host.engineArch?.()).toBe("x64");
+    client.infoResult = {};
+    expect(await host.engineArch?.()).toBeNull();
+    client.infoResult = new Error("GET /info failed");
+    await expect(host.engineArch?.() ?? Promise.resolve(null)).rejects.toThrow("GET /info failed");
   });
 
   test("removeBestEffort never throws, even if the spawner does", () => {

@@ -58,6 +58,38 @@ export function sanitizeInsert(char: string): string {
     : sanitizePasted(stripPasteMarkers(char));
 }
 
+/** Where a paste that arrived OUTSIDE the key path lands (`pasteTarget`). */
+export type PasteTarget = "reply" | "attach";
+
+/**
+ * Where pasted text goes when it arrives with no key to route it — the App's
+ * bracketed-paste timeout (`App.tsx`: a paste whose closing marker never came).
+ *
+ * The rule, in order (S13): an open REPLY field takes it, never the hidden main
+ * field; with no reply, an open PANEL swallows it (the panel owns the screen, so
+ * text must not silently become an attachment behind it); otherwise it is an
+ * attachment on the main input. `null` = nothing to do (no text, or the panel).
+ *
+ * The caller supplies the two facts — it is the one holding the refs — and the
+ * order of the checks lives here, in one testable place.
+ */
+export function pasteTarget(opts: {
+  /** The pasted text after `sanitizePasted`; empty means there is nothing to place. */
+  readonly clean: string;
+  /** A reply field is open (`readReplyMode().mode === "reply"`). */
+  readonly replyOpen: boolean;
+  /** A panel is open (`panelRef.current !== null`). */
+  readonly panelOpen: boolean;
+}): PasteTarget | null {
+  if (opts.clean === "") {
+    return null;
+  }
+  if (opts.replyOpen) {
+    return "reply";
+  }
+  return opts.panelOpen ? null : "attach";
+}
+
 /** Feed one input chunk through the bracketed-paste state machine. */
 export function stepPaste(
   buffer: string | null,

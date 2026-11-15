@@ -21,6 +21,23 @@ appId: so.tentacle.app
     end: "50%, 80%"
 - assertVisible:
     id: "sessions-stale"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "05-sessions-stale"
+# The computer, offline, on Computers (visual review V5) — then back in.
+- tapOn:
+    id: "sessions-back"
+- assertVisible:
+    id: "computers-list"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "05-computers-offline"
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
 - runScript:
     file: "05-start-serve.js"
 - swipe:

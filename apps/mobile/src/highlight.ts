@@ -195,11 +195,16 @@ function pushText(into: Span[], text: string, stack: readonly string[]): void {
   into.push({ text, scope });
 }
 
-/** The entities highlight.js escapes (`escapeHTML`): `&`, `<`, `>`, `"`. */
+/**
+ * The entities highlight.js escapes (`escapeHTML`): `&`, `<`, `>`, `"`, `'`
+ * (as `&#x27;` — owner B7: it was missing and showed raw). `&amp;` last, so a
+ * literal `&amp;` in the source comes back as `&amp;`.
+ */
 export function unescapeHtml(text: string): string {
   return text
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
     .replace(/&amp;/g, "&");
 }

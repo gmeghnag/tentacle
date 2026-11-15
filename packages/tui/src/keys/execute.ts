@@ -60,6 +60,11 @@ export interface KeyHost {
   fieldReset(): void;
   cancelUpload(): void;
 
+  // --- voice dictation (docs/feat/voice-dictation.md): the hook's three intents
+  voiceToggle(): void;
+  voiceFinish(): void;
+  voiceCancel(): void;
+
   // --- panels, sessions, dock
   closePanel(): void;
   panelApply(action: TreeAction): void;
@@ -76,6 +81,21 @@ export interface KeyHost {
   moveCommandSel(step: -1 | 1): void;
   runCommand(name: string): void;
   pushNotice(text: string): void;
+
+  // --- the line-editing tail (S12, `line-layer.ts`)
+  fieldInsert(text: string): void;
+  fieldDeleteBack(): void;
+  fieldDeleteWord(dir: -1 | 1): void;
+  fieldMoveCursor(delta: -1 | 1, extend: boolean): void;
+  fieldMoveWord(dir: -1 | 1, extend: boolean): void;
+  fieldMoveLine(edge: "start" | "end", extend: boolean): void;
+  fieldMoveVertical(dir: -1 | 1, extend: boolean): void;
+  setHistoryCursor(index: number, draft: string): void;
+  dockDown(): void;
+  scroll(dir: "pageUp" | "pageDown"): void;
+  pasteClipboard(): void;
+  submit(text: string): void;
+  removeLastChip(): void;
 }
 
 /** Apply ONE effect. Never returns a verdict: the router already decided. */
@@ -183,6 +203,54 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "pushNotice":
       host.pushNotice(effect.text);
+      return;
+    case "fieldInsert":
+      host.fieldInsert(effect.text);
+      return;
+    case "voiceToggle":
+      host.voiceToggle();
+      return;
+    case "voiceFinish":
+      host.voiceFinish();
+      return;
+    case "voiceCancel":
+      host.voiceCancel();
+      return;
+    case "fieldDeleteBack":
+      host.fieldDeleteBack();
+      return;
+    case "fieldDeleteWord":
+      host.fieldDeleteWord(effect.dir);
+      return;
+    case "fieldMoveCursor":
+      host.fieldMoveCursor(effect.delta, effect.extend);
+      return;
+    case "fieldMoveWord":
+      host.fieldMoveWord(effect.dir, effect.extend);
+      return;
+    case "fieldMoveLine":
+      host.fieldMoveLine(effect.edge, effect.extend);
+      return;
+    case "fieldMoveVertical":
+      host.fieldMoveVertical(effect.dir, effect.extend);
+      return;
+    case "setHistoryCursor":
+      host.setHistoryCursor(effect.index, effect.draft);
+      return;
+    case "dockDown":
+      host.dockDown();
+      return;
+    case "scroll":
+      host.scroll(effect.dir);
+      return;
+    case "pasteClipboard":
+      host.pasteClipboard();
+      return;
+    case "submit":
+      host.submit(effect.text);
+      return;
+    case "removeLastChip":
+      host.removeLastChip();
       return;
   }
 }

@@ -22,6 +22,8 @@ import { describe, expect, test } from "bun:test";
 import { PermissionBroker, type PermissionRequest } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
+import { ARM_MS } from "../src/permission-reply.ts";
+import { inertSession } from "./session-stub.ts";
 import type { DockTestRow } from "./subagent-row.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -65,6 +67,7 @@ function fake(opts: { agents?: readonly DockTestRow[] } = {}): Fake {
   const prompts: string[] = [];
   const stopped: string[] = [];
   const session = {
+    ...inertSession(),
     async *send(prompt: string, signal?: AbortSignal) {
       prompts.push(prompt);
       yield { type: "text", delta: "working" };
@@ -178,8 +181,10 @@ describe("S0b freshness: inside one macrotask the handler sees the ref, not the 
     // "allow"). A slice that turned `pending` into a ref read approves here.
     expect(answers).toEqual([]);
     expect(frame()).toContain("Run a shell command");
-    // The very next `y` approves it — the dialog owns the keys as soon as it is
-    // rendered, so the assertion above pins the WINDOW, not a broken key.
+    // The very next `y`, once the arming window has passed (docs/fix/quit-enter-ask.md),
+    // approves it — the dialog owns the keys as soon as it is rendered, so the
+    // assertion above pins the SOURCE, and this one pins the WINDOW.
+    await delay(ARM_MS + 100);
     app.stdin.write("y");
     await delay(120);
     expect(answers).toEqual([{ allowed: true, scope: "once" }]);

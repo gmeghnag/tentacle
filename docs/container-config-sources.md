@@ -103,9 +103,8 @@ Glossario breve:
 
 ### 2.3 Server MCP
 
-- Avviati **solo** nelle sessioni locali: worker (`worker.ts:74-93`),
-  in-process (`main.ts:1606-1614`), one-shot (`main.ts:1662`). Config:
-  `mcpServers` del laptop (+ pacchetti, `load.ts:524-528`).
+- Avviati **solo** nelle sessioni locali: worker (`worker.ts:74-93`), one-shot
+  (`main.ts:1662`). Config: `mcpServers` del laptop (+ pacchetti, `load.ts:524-528`).
 - `serve` e pod daemon **non avviano MCP** (`packages/daemon/src/session-host.ts:125-128`;
   nessuna chiamata in `serve.ts` / `pod-resident.ts`). I `mcpServers` del
   laptop non vanno nel pod, e quelli del pod non vengono usati.

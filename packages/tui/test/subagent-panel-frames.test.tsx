@@ -10,8 +10,10 @@ import { describe, expect, test } from "bun:test";
 import { PermissionBroker } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
+import { ARM_MS } from "../src/permission-reply.ts";
 import { resetThemeForTest, setThemeMode } from "../src/theme.ts";
 import { renderAt } from "./real-term.tsx";
+import { inertSession } from "./session-stub.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
@@ -65,6 +67,7 @@ function fake(steps: {
   const prompts: string[] = [];
   let aborts = 0;
   const session = {
+    ...inertSession(),
     async *send(text: string) {
       prompts.push(text);
       // A REAL AgentEvent stream: a turn that answers at once, and — with
@@ -435,7 +438,9 @@ describe("F9 (design B): a permission prompt while `open` owns the keys, and the
     );
     await delay(50);
     expect(stripAnsi(app.lastFrame() ?? "")).toContain("run bun test");
-    // A key that would act on the dock answers the prompt instead.
+    // A key that would act on the dock answers the prompt instead — once the
+    // arming window has passed (docs/fix/quit-enter-ask.md).
+    await delay(ARM_MS + 100);
     app.stdin.write("y");
     await delay(50);
     await asked;

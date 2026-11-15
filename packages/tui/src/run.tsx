@@ -4,6 +4,7 @@ import { render } from "ink";
 import {
   App,
   type AutoAcceptFeed,
+  type AutoAcceptSharedFeed,
   type HopFeed,
   type NoticeFeed,
   type RunQuit,
@@ -24,6 +25,7 @@ import {
   restoreTerminalOnExit,
 } from "./terminal.ts";
 import { type ThemeSetting, themeProbeWasLate } from "./theme.ts";
+import type { VoiceConfig } from "./voice-session.ts";
 
 export interface TuiOptions {
   readonly model: string;
@@ -66,10 +68,27 @@ export interface TuiOptions {
   readonly detachOnQuit?: boolean;
   /** The daemon's sessions for `/sessions` (`connect` only). */
   readonly sessions?: SessionDirectory;
+  /**
+   * Voice dictation settings (docs/feat/voice-dictation.md). Absent: the TUI's
+   * own defaults (`VOICE_DEFAULTS`) — enabled, Ctrl+R, no auto-stop.
+   */
+  readonly voice?: VoiceConfig;
+  /**
+   * Where the helper's log and `<configDir>/voice/bin` live. The CLI passes its
+   * config dir; absent, no log is opened and only the binary's sibling is tried.
+   */
+  readonly voiceConfigDir?: string;
   /** A detached run's TUI (`attach <name>`): `/quit` closes the session for all. */
   readonly runQuit?: RunQuit;
-  /** A detached run's TUI: its session's shared auto-accept. */
+  /** The session's auto-accept feed: a detached run's shared file, or the routing feed (docs/feat/session-auto-accept.md D5). */
   readonly autoAccept?: AutoAcceptFeed;
+  /**
+   * The session's shared auto-accept, when the feed routes to one (the worker,
+   * `connect`): a flip from ANOTHER device adds one transcript notice naming
+   * it (docs/feat/session-auto-accept.md D5). Absent → the feed has no remote
+   * flips to report.
+   */
+  readonly autoAcceptShared?: AutoAcceptSharedFeed;
   /** `/move` (docs/feat/session-hop.md D3): present only on a hop-capable origin (D8). */
   readonly hop?: HopFeed;
   /** Where the session is, live (the badge and `daemonInPod` follow a hop). */
@@ -173,8 +192,11 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         {...(options.daemonInPod ? { daemonInPod: true } : {})}
         {...(options.detachOnQuit ? { detachOnQuit: true } : {})}
         {...(options.sessions ? { sessions: options.sessions } : {})}
+        {...(options.voice ? { voice: options.voice } : {})}
+        {...(options.voiceConfigDir ? { voiceConfigDir: options.voiceConfigDir } : {})}
         {...(options.runQuit ? { runQuit: options.runQuit } : {})}
         {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
+        {...(options.autoAcceptShared ? { autoAcceptShared: options.autoAcceptShared } : {})}
         {...(options.hop ? { hop: options.hop } : {})}
         {...(options.targetFeed ? { targetFeed: options.targetFeed } : {})}
         {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
