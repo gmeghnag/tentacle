@@ -1,6 +1,6 @@
 # fix/relay-hardening — Secure the live mobile relay
 
-> **Status:** implementation (awaiting owner approval)
+> **Status:** implementation APPROVED (orchestrator, night delegation) · **executed** — Execution signed by the executor, fresh-context Review pending
 > **Branch:** `fix/relay-hardening`
 > **Size:** M · **Blast:** cross-module (relay code + deploy artefacts + runbook + a live public host; no wire/protocol change) · **Suited:** strong model executes; fresh-context Review mandatory (internet-facing service)
 > **Changelog:** `changelog.d/relay-hardening.security.md`
@@ -552,11 +552,202 @@ Owner Q4. Every relayed session drops, staggered over at most 5 min.
 
 ## Execution
 
-*(empty — awaiting approval)*
+*— claude-sonnet-4-5, 2026-11-15*
+
+**Load-bearing check (re-run first).** Both halves hold, verified, not assumed:
+
+1. **Repro reproduced verbatim** (`.tentacle/tmp/relay-hardening/probe.ts`, repo
+   root, Bun 1.4.3, worktree `e57a8f8e`):
+   `P1 silent pre-auth sockets still open after 5s (idleTimeout=2s): 100/100` ·
+   `P2 daemon frames: … | {"t":"open","stream":"wXpCed6Hx2xnmN_MUxamvg","ip":"127.0.0.1"}`
+   with `X-Forwarded-For: 203.0.113.7` sent · `P3 phone close code after 4 MiB
+   frame: 4404` + `log: frame-oversize s102` (an APP close, so the 4 MiB string
+   was allocated). All three findings stand.
+2. **The assumption itself** (`.tentacle/tmp/relay-hardening/lb-probe.ts`):
+   `(a) ExecStart: … --host 127.0.0.1 --port 4100` and `DEFAULT_RELAY_HOST=127.0.0.1`
+   (the socket's only reachable peer is loopback), and `(b) xff=203.0.113.7
+   peer=127.0.0.1 | xff=1.1.1.1, 203.0.113.7 peer=127.0.0.1 | xff=null
+   peer=127.0.0.1` — Bun's `fetch` DOES see a hop's `X-Forwarded-For`, so
+   honouring it is implementable and cannot be spoofed from off-host. So
+   "loopback-only peer + honest Caddy header" holds; proceeded.
+
+**As built, in the plan's dependency order.** Each slice: test written and shown
+red, then green; narrow file run per slice.
+
+- **Slice 1 — `apps/relay/src/client-ip.ts` (new, pure) + `test/client-ip.test.ts`.**
+  `isLoopback` / `normalizeAddress` / `clientIpOf` / `limiterKeyOf` exactly as
+  Design (a), plus two decisions the design left open: a peer/ hop is normalised
+  before comparison (so `::ffff:127.0.0.1` and `::FFFF:127.0.0.1` are loopback),
+  and an IPv6 client is collapsed to its `/64` via a real 8-hextet expansion
+  (not a string slice), so `2001:db8:1:2::9` and `2001:db8:1:2:3:4:5:6` share one
+  key. Red: module absent. Green: 15 tests.
+- **Slice 2 — `apps/relay/src/log-limit.ts` (new, pure) + `test/log-limit.test.ts`.**
+  `createLogLimiter({now, perWindow: 20, windowMs: 10_000})` with `admit(line)` /
+  `flush()`, kind = first word. **Drift from the design, deliberate:** the design
+  said `flush()` reports "for each window that has ENDED", which a single
+  `admit`-only roll-over cannot see (nothing runs between the last suppressed line
+  and the flush). So a window keeps `admitted`/`suppressed`/`since`, and
+  `flush()` calls the same `settle()` that `admit` does, then reads an `owed` map
+  — owed counts survive further windows, so a burst separated in time still
+  yields ONE summary with the summed count. This is the version that satisfies
+  the plan's own test ("one summary with the exact count after the window").
+  Red: module absent. Green: 8 tests.
+- **Slice 3 — `apps/relay/src/relay-core.ts`.** `RELAY_LIMITS.pendingPerIp` (128),
+  `registeredPerIp` (32), `pingsPerMinute` (30); `RELAY_PREAUTH_MS` (10 s);
+  `admitPending` / `pendingClosed` / `pendingCount`; `ping()`; `Daemon.ip` and
+  `IpState.registered` / `IpState.pending`; `sweep()` closes stale pre-auth
+  sockets `1008`; `hello` enforces `registeredPerIp` for a NEW id only and
+  settles the pending slot; `accept` settles it too; `controlClosed` releases
+  `registered` and drops the ping window. The replaced-daemon decrement is done
+  in `hello` (exactly once in either order, `releaseRegistered` never goes below
+  0), which is what the plan's double-decrement failure mode asked for. Red:
+  `RELAY_PREAUTH_MS` not exported. Green: 36 tests.
+- **Slice 4 — `apps/relay/src/server.ts`.** `trustProxy` option; the `fetch`
+  key is `limiterKeyOf(clientIpOf({peer, forwardedFor, trustProxy}))`;
+  `relaySocketOptions` gains `maxPayloadLength: 96 KiB` + `perMessageDeflate:
+  false`; `open` admits non-phone legs (`pending-refused` past the cap, close
+  `4429`); `close` settles an untokened accept leg; a pre-`ready` `ping` is
+  `control-unexpected` + `1008` while a registered one goes through `core.ping`;
+  every line goes through the log limiter, whose `flush()` is drained on the
+  sweep tick AND on the test-facing `sweep()`; `loggableApnsReason` bounds
+  Apple's reason; `RELAY_LIMIT_FLAGS`/`limitsFromFlags` gain `max-ids-per-ip`.
+  Log content: `dial-open <id>` (token prefix gone), `accept <id>` (token prefix
+  gone), `accept-refused <reason>` (attacker-chosen prefix gone).
+- **Slice 5 — `apps/relay/src/main.ts`.** `--trust-proxy` (no value),
+  `TENTACLE_RELAY_TRUST_PROXY` strictly `1|true|0|false`, `--max-ids-per-ip` /
+  `TENTACLE_RELAY_MAX_IDS_PER_IP`, both in `USAGE`, and `trustProxy` passed into
+  `startRelay`.
+- **Slice 6 — deploy artefacts.** `relay.service`: `ExecStart=… --host 127.0.0.1
+  --port 4100 --trust-proxy`; the three fleet-sized flags are GONE (the comment
+  block is rewritten to say why, and that the per-client defaults now apply).
+  `Caddyfile.relay`: `header { Strict-Transport-Security … ; -Server }`, an
+  `@unknown not path_regexp ^/(healthz|v1/daemon|v1/accept|d/[A-Za-z0-9_-]{22}/e2e)$
+  → respond 404`, `header_up X-Forwarded-For {remote_host}`, `stream_close_delay
+  5m` kept, and the false "the relay does not read X-Forwarded-For" comment
+  replaced.
+- **Slice 7 — `docs/ops/relay-deploy.md`.** §4/§7 Caddy commands are the podman
+  ones (`podman exec caddy caddy validate|reload --config /etc/caddy/Caddyfile
+  --adapter caddyfile`), §4 gains the outside-host 404 checks and the
+  flag↔header pairing, §5 lists `pending-refused` / `log-suppressed` and drops
+  `<stream>`, adds the "no IP in the journal" command, §8's table gains three
+  rows (`4429` behind a NAT, `log-suppressed`, "every client looks like
+  127.0.0.1 again") and the podman Caddy commands, §9's first bullet is
+  rewritten (per-client limits + the local-forger residual + the CGNAT note; the
+  fleet sizes are recorded as deliberately removed).
+- **Slice 8 — changelog.** `changelog.d/relay-hardening.security.md`, one bullet;
+  `CHANGELOG.md` untouched.
+
+**Drift from the Implementation (and why).**
+
+1. **`log-limit.ts` needs an `owed` map** — see slice 2. The design's
+   `flush()`-only settlement cannot observe a window that ended without a new
+   line; the summary would then never appear, i.e. the plan's own guarantee
+   ("what was hidden is never silent") would be false. Implementation is
+   strictly larger than the sketch, same interface.
+2. **`loggableApnsReason` is `^[A-Za-z][A-Za-z0-9_.:-]{0,63}$`, not
+   `^[A-Za-z]{1,64}$`.** The plan's regex would log `push <tok> unavailable
+   timeout` as `… other` and, worse, would turn the client's own bounded reasons
+   (`timeout`, and the clipped `ExpiredProviderToken`-class words) into `other`.
+   The property the finding needs is "no newline, no unbounded growth, no
+   control chars", which the wider class gives while keeping real reasons
+   readable. Pinned by a test on both classes and on the `Bad\nToken` case.
+3. **`server.test.ts`'s 97 KiB splice test now asserts Bun's close code**, as the
+   plan's failure-mode table predicted: `maxPayloadLength` refuses the frame
+   before any handler, so the code is Bun's (observed `1006`; the assertion
+   accepts `1006`/`1009`) and there is **no** `frame-oversize` line any more. The
+   87 KiB test is unchanged and green.
+4. **`open()` in `server.test.ts` grew a `headers` parameter** instead of adding
+   a second, parallel socket helper: one harness, one set of semantics. (First
+   draft added `openWithXff`; it duplicated 45 lines and was removed.)
+5. **The `ExecStart` continuation reader test now uses a synthetic unit.** The
+   live `ExecStart` is a single line, so binding that guard to the live text
+   would have tested the unit rather than the reader. Its `--max-hellos-per-minute
+   600` assertion (which existed only to prove the reader kept a continuation)
+   went with it; the "exactly one live ExecStart line" assertion stayed.
+6. **The Caddyfile assertions read the file with comments stripped**
+   (`caddyDirectives`). The first draft asserted `not.toContain("includeSubDomains")`
+   on the whole file, which the comment explaining *why not* tripped — a false
+   red on a correct artefact.
+7. **`RELAY_LIMITS.pingsPerMinute` is a core limit, not a flag** (design said so
+   implicitly by listing only `max-ids-per-ip` as a flag); it is not in
+   `RELAY_LIMIT_FLAGS`, so an operator cannot raise a ping flood limit.
+8. **No `protocol.d/` note and no `PROTOCOL_VERSION` bump**: the limiter key
+   reaches the daemon only as `open.ip`, whose schema is `z.string().min(1).max(64)`
+   and which the daemon uses as an opaque limiter key (`relay-link.ts:421`). A
+   `/64` string such as `2001:db8:1:2::/64` is wire-compatible. `git status
+   packages/` is empty, so `packages/protocol/schema/protocol.json` needed no
+   regeneration.
+
+**Mutations (each run, output pasted, file restored byte-for-byte from
+`.mutsave/`, then `bun test apps/relay` → 212 pass).**
+
+| # | Mutation | Tests that went RED |
+|---|---|---|
+| M1 | `clientIpOf` walks hops from the LEFT | 3: "RIGHT-MOST hop wins", "malformed right-most falls back", "at most 16 hops" |
+| M2 | drop the loopback-peer check | 1: "a NON-loopback peer's header is never read" |
+| M3 | `server.ts` ignores `options.trustProxy` | 2: "the dial's XFF becomes open.ip", "two XFF values are two buckets" |
+| M4 | `maxPayloadLength` removed | 2: "refused by BUN", "a 97 KiB frame closes BOTH legs" |
+| M5 | `sweep()` skips pending sockets | 2: core "silent pre-auth socket closed 1008", server "silent /v1/daemon and /v1/accept closed" |
+| M6 | `ping` rate limit = ∞ | 3: core ×2 ("third ping", "per socket"), server "past pingsPerMinute" |
+| M7 | `registeredPerIp` check removed | 3: "a second NEW id refused", "decrements exactly ONCE", "reverse order" |
+| M8 | replaced daemon: skip `releaseRegistered` | 1: "the count returns on close, and on replacement exactly ONCE" |
+| M9 | log limiter keys on one `"all"` bucket | 5: "each kind has its own budget", "one summary…", "new window admits again", "survives several ended windows", "injectable" |
+| M10 | summary line dropped | 4: the four `flush()`-count tests |
+| M11 | Caddy regex without `healthz` | 1: "the Caddy route regex matches EXACTLY what `relayRoute` serves" |
+| M12 | `--trust-proxy` parsed but not applied | 3: main "--trust-proxy off by default and on when passed", deploy "continued ExecStart", deploy "live ExecStart requests --trust-proxy" |
+| M13 | log the whole stream token again | 2: "no captured line contains … a full token", "the captured log has no … stream token" |
+| M14 | pre-auth cap removed | 3: core "closed pre-auth socket releases its slot", core "cap is per IP", server "past pendingPerIp refused 4429" |
+
+M8 is the plan's double-decrement target specifically ("mutation-check the
+plan's targets"): it fails exactly one test, in the direction the failure-mode
+table predicted.
+
+**Gate.** `bunx tsc --noEmit` clean, `bun run typecheck` clean (`tsc --noEmit &&
+tsc -p apps/mobile && tsc -p apps/relay`), `bun run lint` clean (`biome check .`,
+0 errors / 0 warnings — the baseline of AGENTS §6), `bun test` **10381 pass, 4
+skip, 0 fail** (80444 expect() calls, 742 files). The 4 skips are all pre-existing
+opt-ins: live-k8s, live-docker (two files: `packages/docker` and
+`packages/cli/session-hop.docker`) and the real-socket keepalive; none in
+`apps/relay`. `bun test apps/relay` alone: 212 pass, 0 fail.
+
+**Not verified here (and how to verify).** The deploy steps D2/D3 are the
+owner's, on the host: `caddy validate` inside the podman container, the
+`--help | grep -- --trust-proxy` check, the outside-host 404s, and D4/D5 (17
+concurrent dials → the 17th `4429`; the iPhone on cellular). No podman/docker was
+run locally for the Caddyfile — the test pins the directives *and* the regex
+against `relayRoute`, but only `caddy validate` on the host proves Caddy accepts
+the file. D5's IPv6 assertion (`limiterKeyOf`) is covered by unit tests only,
+because the deploy host has no `AAAA` record today.
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-15* (fresh context; same model family as the plan's author, a different one from the executor)
+
+**Verdict: APPROVE-WITH-NITS.** No HIGH or MEDIUM findings. Scope: `git diff main...HEAD` only.
+
+**Gate (re-run):** `bun test apps/relay`: 212 pass, 0 fail (9 files). `bun run lint`: clean. `bun run typecheck` (it includes `tsc -p apps/relay`): clean. I did not re-run the full `bun test`. The executor reports 10381 pass / 4 opt-in skips.
+
+**End-to-end:** I re-ran the Context's `probe.ts` against the branch. P3 now closes `1006` with **no** `frame-oversize` line, so Bun refuses the frame before JS sees it (H1 fixed). P1 still shows 100/100 at 5 s. That is expected: the deadline is 10 s, and the server tests drive it with `now` + `sweep()`. P2 still shows `127.0.0.1` because the probe does not pass `trustProxy`. The T2 server tests cover it with the flag on.
+
+**Mutations (mine, reverted, tree clean afterwards):**
+- A: `hello` does not settle its pending slot. 2 tests go RED (core + server "registered socket is NOT swept"). Without this settle, every daemon would be killed at 10 s, so the property is pinned.
+- C: an accept leg with no token releases nothing on close (`server.ts:461`). It **survives**. This is a test gap, not a bug: the sweep frees the slot within `RELAY_PREAUTH_MS`.
+- The server's `flush` wiring is pinned by `server.test.ts:671-677`.
+
+**Attacks tried:**
+1. XFF spoofing. The header is read only from a loopback peer, the walk goes right to left, and a malformed hop stops the walk instead of skipping it. Caddy replaces the header with `{remote_host}`. Holds.
+2. Double decrement or leak of `registered`/`pending` in four cases: refused at open (its close finds nothing in `pending`), replaced daemon, refused `hello`, second `hello` with a different secret (already refused at `relay-core.ts:430`). Holds.
+3. Pre-`ready` ping guard vs the real daemon, which pings only after `ready`, at most every 25 s against a limit of 30/min. Holds.
+4. The `/64` key fits `open.ip` `max(64)`, so no protocol note is needed. Holds.
+5. Caddy regex vs `relayRoute`: pinned path by path. Caddy's path cleaning (`/v1//daemon`) can still reach the relay, which 404s it itself. Holds.
+
+**Nits (LOW, no change required to merge):**
+- Mutation C gap above.
+- The comment at `server.ts:558-559` still cites `^[A-Za-z]{1,64}$`, but the code uses the wider class (drift 2).
+- I3 weighs more now. `IpState` entries are never pruned when idle, only evicted oldest-first. Past 4096 distinct clients, ordinary churn resets the long-lived `registered` counts of the oldest IPs, and a later `releaseRegistered` can undercount. The doc already records this as debt; it should be revisited before any `AAAA` record is published.
+- The Execution signature says `claude-sonnet-4-5`, but commit `4a13f606` says "exec (deepseek)". One of the two is wrong, and AGENTS §10 wants honest model attribution.
+
+**Executor behaviour:** disciplined. Each drift is recorded with its reason, the mutation table is real (A-type mutations reproduce), and the unverified part (`caddy validate` on the host, D2–D5) is stated honestly.
 
 #### Orchestrator decisions (owner night delegation 2026-11-15)
 

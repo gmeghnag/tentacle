@@ -12,6 +12,7 @@ describe("parseRelayArgs — flags", () => {
         host: DEFAULT_RELAY_HOST,
         port: DEFAULT_RELAY_PORT,
         limits: {},
+        trustProxy: false,
         apns: {},
         help: false,
       },
@@ -49,6 +50,7 @@ describe("parseRelayArgs — flags", () => {
           "max-ids": 8,
           "max-hellos-per-minute": 9,
         },
+        trustProxy: false,
         apns: {},
         help: false,
       },
@@ -84,6 +86,73 @@ describe("parseRelayArgs — flags", () => {
   });
 });
 
+describe("parseRelayArgs — the real-client-IP flag (H3) and the per-IP id cap (M2)", () => {
+  test("--trust-proxy is off by default and on when passed", () => {
+    // Off by default: without the flag the relay behaves exactly as it did and
+    // `X-Forwarded-For` is not read at all, so an existing deploy is unchanged.
+    const off = parseRelayArgs([]);
+    expect(off.ok).toBe(true);
+    if (off.ok) {
+      expect(off.args.trustProxy).toBe(false);
+    }
+    const on = parseRelayArgs(["--trust-proxy"]);
+    expect(on.ok).toBe(true);
+    if (on.ok) {
+      expect(on.args.trustProxy).toBe(true);
+      // The flag takes no value: it must not swallow the next argument.
+      expect(on.args.host).toBe(DEFAULT_RELAY_HOST);
+    }
+    // `--trust-proxy` has nothing to take, so a value after it is a stranger arg.
+    expect(parseRelayArgs(["--trust-proxy", "yes"]).ok).toBe(false);
+  });
+
+  test("TENTACLE_RELAY_TRUST_PROXY accepts 1/true/0/false only", () => {
+    for (const [raw, expected] of [
+      ["1", true],
+      ["true", true],
+      ["TRUE", true],
+      ["0", false],
+      ["false", false],
+    ] as const) {
+      const parsed = parseRelayArgs([], { TENTACLE_RELAY_TRUST_PROXY: raw });
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) {
+        expect(parsed.args.trustProxy).toBe(expected);
+      }
+    }
+    // Anything else refuses to start, naming the variable: a flag that
+    // half-applies is worse than a relay that did not start.
+    expect(parseRelayArgs([], { TENTACLE_RELAY_TRUST_PROXY: "yes" })).toEqual({
+      ok: false,
+      error: "TENTACLE_RELAY_TRUST_PROXY must be 1, true, 0 or false",
+    });
+  });
+
+  test("--max-ids-per-ip parses, and maps onto the core's registeredPerIp", () => {
+    const parsed = parseRelayArgs(["--max-ids-per-ip", "5"]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.args.limits["max-ids-per-ip"]).toBe(5);
+      expect(limitsFromFlags(parsed.args.limits)).toEqual({ registeredPerIp: 5 });
+    }
+    expect(parseRelayArgs(["--max-ids-per-ip", "0"]).ok).toBe(false);
+    // The env spelling follows the others.
+    const fromEnv = parseRelayArgs([], { TENTACLE_RELAY_MAX_IDS_PER_IP: "7" });
+    expect(fromEnv.ok).toBe(true);
+    if (fromEnv.ok) {
+      expect(fromEnv.args.limits["max-ids-per-ip"]).toBe(7);
+    }
+  });
+
+  test("--help names both new flags and their environment variables", () => {
+    const usage = relayUsage();
+    expect(usage).toContain("--trust-proxy");
+    expect(usage).toContain("--max-ids-per-ip");
+    expect(usage).toContain("TENTACLE_RELAY_TRUST_PROXY");
+    expect(usage).toContain("_MAX_IDS_PER_IP");
+  });
+});
+
 describe("parseRelayArgs — env (a flag wins)", () => {
   test("the environment is read when no flag names the value", () => {
     const parsed = parseRelayArgs([], {
@@ -97,6 +166,7 @@ describe("parseRelayArgs — env (a flag wins)", () => {
         host: "10.0.0.1",
         port: 9999,
         limits: { "max-streams-per-id": 3 },
+        trustProxy: false,
         apns: {},
         help: false,
       },
