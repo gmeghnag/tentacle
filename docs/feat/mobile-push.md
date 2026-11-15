@@ -2685,3 +2685,156 @@ shape-checked before it is sent. The access group is passed on get, set and dele
 drift (D1–D8) and about a mutation that first looked like a survivor. But the
 toggle's lifecycle (persistence, and unregister when there is no link) was
 tested only on the phone side, so findings 1 and 2 got through.
+## Execution
+
+### Fix round 1
+
+*— claude-opus-5-5 (the model id this environment reports for me), 2026-11-16*
+
+Scope: the four findings of *Review — P9* (2 HIGH, 2 MEDIUM). All four reproduced
+on the reviewed code before any edit; all four fixed red-before-green; every fix
+mutation-checked (§9), with one mutation (M2) first surviving and answered with a
+test rather than a shrug. Scratch (gitignored, inside THIS worktree — the write
+guard refuses the repo root, as P9's notes found):
+`.tentacle/tmp/mobile-push/fixr1b/` — `mut.sh`, `mut-store.sh`,
+`review-repro.test.ts`.
+
+**Repro before the fix (reviewer's `.tentacle/tmp/mobile-push/p9-review.test.ts`,
+repo root, on the reviewed code — 0 pass / 3 fail):**
+
+```
+(fail) H1: toggle OFF survives an app relaunch
+   Received: [ "register", "unregister", "register" ]
+(fail) H2: toggle OFF while computer not linked unregisters on next connect
+   Expected to contain: "unregister"   Received: [ "register" ]
+(fail) M: toggle back ON with link up registers without a reconnect
+   Expected: [ "register", "unregister", "register" ]   Received: [ "register", "unregister" ]
+```
+
+**After the fix**, the same three shapes (re-expressed in
+`fixr1b/review-repro.test.ts` with the one new REQUIRED dep, `toggle` — that
+requirement IS finding 1's fix) plus H4 pass: `4 pass, 0 fail`.
+
+**H1 (HIGH) — the switch is persisted, so off survives a relaunch.**
+Root cause: `enabled` lived only in a registrar's memory, and the off path cleared
+the stored fingerprint, so a new manager started `enabled: true, last: undefined`
+and re-registered on the next link-up.
+- New `src/push-toggle-store.ts`: ONE versioned Keychain record
+  (`{v:1, enabled}` under `tentacle.push-enabled`), with `lock-settings-store.ts`'s
+  three rules applied to the one item whose DEFAULT decides whether a phone buzzes
+  — absent/unreadable/unknown-version reads **on** (never a silent mute), an
+  unknown `v` is never overwritten, and a write error **rejects** so the caller
+  keeps the decision in memory for the session.
+- `push-manager.ts:195-256`: `deps.toggle` is REQUIRED (no caller can forget it);
+  `ready()` reads it once and every method awaits it (`enabled` is then
+  authoritative for the session); `initialState()` is what each registrar starts
+  from, so the start state is the *phone's* decision, not a hardcoded `true`;
+  `setEnabled`/`setEnabledForAll` call `rememberEnabled` (a failed write is not
+  re-read, exactly like the app-lock setting's preserved-record rule).
+- `App.tsx:979,994-999,1282,1414`: `PUSH.ready()` gates the row
+  (`notificationsForSettings` = `pushReady ? notificationsRow : undefined`), so
+  no first frame claims `on` to someone who turned it off.
+- Also fixed in passing: `viewForAll` reported `enabled` from
+  `states.some(…)`, so a stable "on" for a computer whose link never came up
+  (`initialPushState()`) — it now reports the phone's own decision.
+
+**H2 (HIGH) — an unregister that could not be sent is a DEBT, not a success.**
+Root cause: `linkPushSink.unregister` was `await link()?.pushUnregister()`, which
+*resolves* with no client, and the registrar swallowed every error
+(`.catch(() => {})`); the fingerprint was then cleared, so nothing later told the
+daemon and it kept pushing.
+- `push-manager.ts:82-92`: `unregister` THROWS when there is no client, like
+  `register` already did.
+- `push-registration.ts`: `PushRegistration.off?: true` is the debt record
+  (empty `hash`, so turning it back on still registers); `settleOff`
+  (:331-361) sends the unregister when a sink exists and writes the debt when it
+  does not or the call failed; `settleDebt` (:367-380) drains it on the next
+  connect and clears it **only** once the daemon really was told; `syncOnce`
+  (:382-401) drains the debt FIRST and then carries on, so a person who turned it
+  back on while the computer was away gets their registration in that same
+  connect. A `MethodNotFound` settles the debt (an older daemon never accepted a
+  registration — no loop, F16).
+- `push-manager.ts:261-268`: `toggleSink` passes `undefined` to a toggle when no
+  client is dialable, so a toggle-ON with no link stays `unknown` (not `failed`,
+  which would outrank a genuinely `on` computer in the one row) and a toggle-OFF
+  takes the debt path.
+
+**H3 (MEDIUM) — turning it back on registers at once.**
+`push-registration.ts:425-436`: `setEnabled(true, sink)` now runs `syncOnce(sink)`
+when a sink is present, so with the link already up the row gets the daemon's real
+answer in the same tap instead of "Not checked yet" for the rest of the session.
+With no link it still only records the decision (`unknown`) — nothing was read.
+
+**H4 (MEDIUM) — one old daemon no longer locks the phone's switch.**
+`push-manager.ts:335-345`: `viewForAll` computes `switchable` itself — only the
+OS's own refusal (`denied` / `unavailable`) disables the phone-wide row — instead
+of reusing `notificationsView`'s one-computer `daemon-too-old` rule, which applied
+to the single Settings row made the switch inoperable so the person could not turn
+notifications off for the computers that DO deliver. The detail line still names
+the computer to update, and `notificationsView` is unchanged for the per-computer
+caller (pinned by a positive control).
+
+**Tests (red before green, §9).** `test/push-manager.test.ts` gains
+`H1`/`H2`/`H3`/`H4` blocks (11 tests, plus a new `fakeToggle()` seam);
+`test/push-toggle-store.test.ts` is new (7 tests); two pre-existing tests in
+`test/push-registration.test.ts` pinned the OLD contract and were updated with
+their intent kept ("off with no link still forgets the fingerprint" → "…keeps a
+DEBT, and forgets the fingerprint"; "back on registers on the NEXT sync" → "at once
+with a live link, `unknown` with none"); `test/push-wiring-guards.test.ts` now
+pins the new prop name and the readiness gate.
+
+**Mutations (§9 — each breaks ONE fix; the named test went RED, restored after).**
+
+```
+M1  no toggle write (push-manager.ts:248)         1 fail  H1 "off is PERSISTED…"
+M1b registrar starts ON (…:240 initial)            2 fail  H1 both
+M1c stored value ignored (…:213)                   2 fail  H1 both
+M2  swallowed unregister (…:86 `await link()?.…`)  1 fail  H2 "a link that is GONE at drain time…"
+M2b debt not written (push-registration.ts:338)    4 fail  H2 ×3 + H3-adjacent
+M2c failed call not a debt (…:355)                 1 fail  H2 "a FAILED unregister is a debt too"
+M3  ON does not sync (…:431)                       1 fail  H3 "the ON toggle syncs with the live link"
+M4  one-computer switchable rule (push-manager:342) 1 fail H4 "the phone-wide row stays switchable"
+S1  unknown version overwritten (toggle-store)      2 fail  the record is left untouched
+S2  `off` does not round-trip                       1 fail  "off round-trips, so a relaunch sees it"
+S3  read error reads OFF                            1 fail  "a READ error reads ON"
+S4  write error swallowed                           1 fail  "the rejection reaches the caller"
+```
+
+**M2 first survived, and that is the interesting part.** Mutating
+`linkPushSink.unregister` back to `await link()?.pushUnregister()` left all 25
+manager tests GREEN, because `toggleSink` had already turned "no client" into
+`undefined` before `linkPushSink` was ever called — the manager path could not
+reach the throwing branch. But `sync`'s debt drain DOES call
+`linkPushSink(link)` directly, over a link that may be gone by then, so the hole
+was real: the debt would be cleared un-sent. I added *"a link that is GONE at
+drain time keeps the debt (it is not cleared un-sent)"*, and M2 now fails on it.
+(A mutation that survives is a missing test, not a proof of safety.)
+
+**Gate (this worktree, after the fixes).**
+
+```
+bunx tsc --noEmit                 exit 0
+bunx tsc -p apps/mobile --noEmit  exit 0
+bunx tsc -p apps/relay --noEmit   exit 0
+bun run lint                      Checked 1399 files — clean (0 errors, 0 warnings)
+bun test                          10215 pass, 4 skip, 0 fail  (734 files, 410 s)
+```
+
+The 4 skips are the pre-existing opt-ins (live k8s, live docker, live
+docker session-hop, the slow real-socket test) — none in a touched file.
+
+**Drift from the review's suggested shape.** (a) The switch lives in its OWN
+Keychain item (`tentacle.push-enabled`) rather than in each computer's record: it
+is the phone's decision (`setEnabledForAll`), and a re-pair replaces a computer's
+record wholesale (`computer-store.ts:305-309`), which would silently resurrect the
+switch. (b) It is built over `secure-kv.ts`'s exported `keychainKV` instead of a
+third adapter file, because `pairing-guards.test.ts` pins exactly two importers of
+`expo-secure-store`. (c) The debt record is a field on `PushRegistration`
+(`off: true`) rather than a separate key, so it rides the same per-computer
+read/write the registrar already owns — and `computer-store.ts` drops a malformed
+`push` field, so a debt written by a future build cannot cost a person a re-pair.
+
+**Unverified (one line).** The Keychain item's real durability across a device
+relaunch — `createPushToggleStore`'s underlying `SecureStore.setItemAsync` — needs
+ a simulator/device; everything above is a fake `SecureKV` (the same seam
+`lock-settings-store.ts` is tested through).

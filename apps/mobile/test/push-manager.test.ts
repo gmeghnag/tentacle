@@ -17,6 +17,7 @@ import {
   notificationsView,
 } from "../src/push-manager.ts";
 import type { PushFacts, PushPermission } from "../src/push-registration.ts";
+import type { PushToggleStore } from "../src/push-toggle-store.ts";
 
 const TOKEN = "a".repeat(64);
 const KEY = "k".repeat(43);
@@ -24,9 +25,9 @@ const facts = (): PushFacts => ({ token: TOKEN, env: "sandbox", key: KEY });
 
 /** A Keychain store with push items only (the rest of a record is not this test's). */
 function fakeStore(): PushMemoryStore & {
-  readonly items: Map<string, { hash: string; registeredAt: number }>;
+  readonly items: Map<string, { hash: string; registeredAt: number; off?: true }>;
 } {
-  const items = new Map<string, { hash: string; registeredAt: number }>();
+  const items = new Map<string, { hash: string; registeredAt: number; off?: true }>();
   return {
     items,
     get: async (id) => {
@@ -53,6 +54,28 @@ function fakeStore(): PushMemoryStore & {
       items.set(id, value);
     },
   };
+}
+
+/**
+ * The phone-wide switch, in a variable: the Keychain item `push-toggle-store.ts`
+ * owns in the app. `undefined` initial = a fresh install (nothing stored).
+ */
+function fakeToggle(
+  initial?: boolean,
+): PushToggleStore & { readonly stored: () => boolean | undefined; failWrite?: boolean } {
+  let value = initial;
+  const fake = {
+    stored: () => value,
+    failWrite: false,
+    read: async () => ({ enabled: value ?? true, writable: true }),
+    write: async (enabled: boolean) => {
+      if (fake.failWrite) {
+        throw new Error("disk full");
+      }
+      value = enabled;
+    },
+  };
+  return fake;
 }
 
 function platform(over: Partial<PushPlatform> = {}): PushPlatform & { requests: () => number } {
@@ -106,7 +129,12 @@ describe("the manager registers through the link it is given", () => {
   test("one sync registers; a second sync with the same facts sends nothing", async () => {
     const store = fakeStore();
     const platformFake = platform();
-    const manager = createPushManager({ store, platform: platformFake, now: () => 1 });
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platformFake,
+      now: () => 1,
+    });
     const client = fakeClient();
     await manager.sync("c1", () => client);
     await manager.sync("c1", () => client);
@@ -116,18 +144,33 @@ describe("the manager registers through the link it is given", () => {
 
   test("the fingerprint survives a NEW manager (it lives in the Keychain, not in memory)", async () => {
     const store = fakeStore();
-    const first = createPushManager({ store, platform: platform(), now: () => 1 });
+    const first = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 1,
+    });
     const client = fakeClient();
     await first.sync("c1", () => client);
     // A relaunch: a fresh manager, the same store.
-    const second = createPushManager({ store, platform: platform(), now: () => 2 });
+    const second = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 2,
+    });
     await second.sync("c1", () => client);
     expect(client.registers.length).toBe(1);
   });
 
   test("two computers do not share a registrar or a fingerprint", async () => {
     const store = fakeStore();
-    const manager = createPushManager({ store, platform: platform(), now: () => 1 });
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 1,
+    });
     const one = fakeClient();
     const two = fakeClient();
     await manager.sync("c1", () => one);
@@ -138,14 +181,24 @@ describe("the manager registers through the link it is given", () => {
   });
 
   test("a link that went away is not an exception the caller sees (the next connect retries)", async () => {
-    const manager = createPushManager({ store: fakeStore(), platform: platform(), now: () => 1 });
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store: fakeStore(),
+      platform: platform(),
+      now: () => 1,
+    });
     await manager.sync("c1", () => undefined);
     expect(manager.stateOf("c1")?.phase).toBe("failed");
   });
 
   test("the toggle off asks the computer to forget this device", async () => {
     const store = fakeStore();
-    const manager = createPushManager({ store, platform: platform(), now: () => 1 });
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 1,
+    });
     const client = fakeClient();
     await manager.sync("c1", () => client);
     await manager.setEnabled("c1", false, () => client);
@@ -180,6 +233,7 @@ describe("the Settings row", () => {
 
   test("the manager answers a row even before any link came up (nothing is claimed as `on`)", () => {
     const manager = createPushManager({
+      toggle: fakeToggle(),
       store: fakeStore(),
       platform: platform(),
       now: () => 1,
@@ -200,7 +254,12 @@ describe("the permission prompt", () => {
         return "granted";
       },
     });
-    const manager = createPushManager({ store: fakeStore(), platform: platformFake, now: () => 1 });
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store: fakeStore(),
+      platform: platformFake,
+      now: () => 1,
+    });
     await manager.paired("c1", true);
     await manager.paired("c1", true);
     // Once: the second call sees a permission that is no longer undetermined.
@@ -209,11 +268,21 @@ describe("the permission prompt", () => {
 
   test("never asked when there is no computer stored, or the permission is already decided", async () => {
     const undetermined = platform({ permission: async () => "undetermined" });
-    const manager = createPushManager({ store: fakeStore(), platform: undetermined, now: () => 1 });
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store: fakeStore(),
+      platform: undetermined,
+      now: () => 1,
+    });
     await manager.paired("c1", false);
     expect(undetermined.requests()).toBe(0);
     const decided = platform({ permission: async () => "denied" });
-    const second = createPushManager({ store: fakeStore(), platform: decided, now: () => 1 });
+    const second = createPushManager({
+      toggle: fakeToggle(),
+      store: fakeStore(),
+      platform: decided,
+      now: () => 1,
+    });
     await second.paired("c1", true);
     expect(decided.requests()).toBe(0);
   });
@@ -221,7 +290,12 @@ describe("the permission prompt", () => {
 
 describe("the ONE Settings row, over every paired computer", () => {
   test("no computer: the row is on by default and says nothing was checked", () => {
-    const manager = createPushManager({ store: fakeStore(), platform: platform(), now: () => 1 });
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store: fakeStore(),
+      platform: platform(),
+      now: () => 1,
+    });
     const view = manager.viewForAll([], "granted");
     expect(view.enabled).toBe(true);
     expect(view.detail).toContain("Not checked yet");
@@ -231,7 +305,12 @@ describe("the ONE Settings row, over every paired computer", () => {
 
   test("a computer that cannot deliver OUTRANKS one that can (it is why nothing arrives)", async () => {
     const store = fakeStore();
-    const manager = createPushManager({ store, platform: platform(), now: () => 1 });
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 1,
+    });
     const good: PushClient = {
       pushRegister: async () => ({ push: "on", graceSeconds: 30 }),
       pushUnregister: async () => {},
@@ -260,7 +339,12 @@ describe("the ONE Settings row, over every paired computer", () => {
 
   test("the toggle reaches EVERY computer, so turning it off really stops them all", async () => {
     const store = fakeStore();
-    const manager = createPushManager({ store, platform: platform(), now: () => 1 });
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 1,
+    });
     const one = fakeClient();
     const two = fakeClient();
     const links = new Map([
@@ -284,6 +368,269 @@ describe("the ONE Settings row, over every paired computer", () => {
         ],
         "granted",
       ).enabled,
+    ).toBe(false);
+  });
+});
+
+/**
+ * Review round 1 (§9: each of these was RED on the reviewed code — see Execution
+ * "Fix round 1" for the runs, and the mutation that must keep it red).
+ */
+describe("H1: turning notifications off survives a relaunch", () => {
+  test("off is PERSISTED, so a new manager registers nothing (mutation: drop the toggle write → red)", async () => {
+    const store = fakeStore();
+    const toggle = fakeToggle();
+    const first = createPushManager({ toggle, store, platform: platform(), now: () => 1 });
+    const client = fakeClient();
+    await first.sync("c1", () => client);
+    await first.setEnabledForAll([{ id: "c1" }], false, () => () => client);
+    expect(toggle.stored()).toBe(false);
+
+    // A relaunch: a fresh manager AND a fresh registrar over the same Keychain.
+    const calls: string[] = [];
+    const spying: PushClient = {
+      pushRegister: async () => {
+        calls.push("register");
+        return { push: "on", graceSeconds: 30 };
+      },
+      pushUnregister: async () => {
+        calls.push("unregister");
+      },
+    };
+    const relaunched = createPushManager({ toggle, store, platform: platform(), now: () => 2 });
+    await relaunched.ready();
+    // The row says off BEFORE any link comes up — the first frame a relaunch shows.
+    expect(relaunched.viewForAll([{ id: "c1", name: "Mac" }], "granted").enabled).toBe(false);
+    await relaunched.sync("c1", () => spying);
+    expect(calls).toEqual([]);
+  });
+
+  test("a stored OFF is the registrar's start state, not just the row's", async () => {
+    const manager = createPushManager({
+      toggle: fakeToggle(false),
+      store: fakeStore(),
+      platform: platform(),
+      now: () => 1,
+    });
+    await manager.ready();
+    const client = fakeClient();
+    await manager.sync("c1", () => client);
+    expect(client.registers).toEqual([]);
+    expect(manager.stateOf("c1")?.enabled).toBe(false);
+  });
+});
+
+describe("H2: off with no link is a DEBT, drained on the next connect", () => {
+  test("no connection → the unregister is sent on the next sync, before anything else (mutation: `await link()?.…` → red)", async () => {
+    const store = fakeStore();
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 1,
+    });
+    const calls: string[] = [];
+    const live: PushClient = {
+      pushRegister: async () => {
+        calls.push("register");
+        return { push: "on", graceSeconds: 30 };
+      },
+      pushUnregister: async () => {
+        calls.push("unregister");
+      },
+    };
+    await manager.sync("c1", () => live);
+    // The computer is not connected: `CLIENTS.get(id)` is undefined.
+    await manager.setEnabledForAll([{ id: "c1" }], false, () => () => undefined);
+    expect(calls).toEqual(["register"]);
+    // The link comes back: the debt is settled, and the toggle is off, so the
+    // registration is NOT renewed.
+    await manager.sync("c1", () => live);
+    expect(calls).toEqual(["register", "unregister"]);
+    // And it is settled exactly once.
+    await manager.sync("c1", () => live);
+    expect(calls).toEqual(["register", "unregister"]);
+    expect(store.items.get("c1")).toBeUndefined();
+  });
+
+  test("a FAILED unregister is a debt too (the error is not swallowed as success)", async () => {
+    const store = fakeStore();
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 1,
+    });
+    await manager.sync("c1", () => fakeClient());
+    const broken: PushClient = {
+      pushRegister: async () => ({ push: "on", graceSeconds: 30 }),
+      pushUnregister: async () => {
+        throw new Error("connection closed");
+      },
+    };
+    await manager.setEnabledForAll([{ id: "c1" }], false, () => () => broken);
+    // Still owed: the record says so instead of being forgotten.
+    expect(store.items.get("c1")?.off).toBe(true);
+    let sent = 0;
+    await manager.sync("c1", () => ({
+      pushRegister: async () => ({ push: "on", graceSeconds: 30 }),
+      pushUnregister: async () => {
+        sent += 1;
+      },
+    }));
+    expect(sent).toBe(1);
+    expect(store.items.get("c1")).toBeUndefined();
+  });
+
+  test("a link that is GONE at drain time keeps the debt (it is not cleared un-sent)", async () => {
+    // The narrow case `toggleSink` cannot protect: `sync` hands the registrar a
+    // live sink wrapper over a link that has ALREADY gone away, so the debt path
+    // calls `unregister()` on nothing. `linkPushSink` must throw there, or the
+    // debt is silently cleared and the daemon keeps pushing (mutation:
+    // `await link()?.pushUnregister()` → red).
+    const store = fakeStore();
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 1,
+    });
+    await manager.sync("c1", () => fakeClient());
+    await manager.setEnabledForAll([{ id: "c1" }], false, () => () => undefined);
+    expect(store.items.get("c1")?.off).toBe(true);
+    // The connect happens but the client is gone by the time it runs.
+    await manager.sync("c1", () => undefined);
+    expect(store.items.get("c1")?.off).toBe(true);
+    // The next connect that really has a client settles it.
+    let sent = 0;
+    await manager.sync("c1", () => ({
+      pushRegister: async () => ({ push: "on", graceSeconds: 30 }),
+      pushUnregister: async () => {
+        sent += 1;
+      },
+    }));
+    expect(sent).toBe(1);
+    expect(store.items.get("c1")).toBeUndefined();
+  });
+
+  test("a debt left while ON does not suppress the registration turn-on asks for", async () => {
+    const store = fakeStore();
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 1,
+    });
+    await manager.sync("c1", () => fakeClient());
+    await manager.setEnabledForAll([{ id: "c1" }], false, () => () => undefined);
+    await manager.setEnabledForAll([{ id: "c1" }], true, () => () => undefined);
+    const calls: string[] = [];
+    await manager.sync("c1", () => ({
+      pushRegister: async () => {
+        calls.push("register");
+        return { push: "on", graceSeconds: 30 };
+      },
+      pushUnregister: async () => {
+        calls.push("unregister");
+      },
+    }));
+    expect(calls).toEqual(["unregister", "register"]);
+  });
+});
+
+describe("H3: turning it back on registers without waiting for a reconnect", () => {
+  test("the ON toggle syncs with the live link (mutation: only set `unknown` → red)", async () => {
+    const store = fakeStore();
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 1,
+    });
+    const calls: string[] = [];
+    const live: PushClient = {
+      pushRegister: async () => {
+        calls.push("register");
+        return { push: "on", graceSeconds: 30 };
+      },
+      pushUnregister: async () => {
+        calls.push("unregister");
+      },
+    };
+    await manager.sync("c1", () => live);
+    await manager.setEnabledForAll([{ id: "c1" }], false, () => () => live);
+    await manager.setEnabledForAll([{ id: "c1" }], true, () => () => live);
+    expect(calls).toEqual(["register", "unregister", "register"]);
+    // The row tells the daemon's real answer, not "Not checked yet".
+    expect(manager.viewForAll([{ id: "c1", name: "Mac" }], "granted").detail).toContain("On");
+  });
+
+  test("with no link it stays `unknown` for the next connect, not `failed`", async () => {
+    const store = fakeStore();
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store,
+      platform: platform(),
+      now: () => 1,
+    });
+    await manager.sync("c1", () => fakeClient());
+    await manager.setEnabledForAll([{ id: "c1" }], false, () => () => undefined);
+    await manager.setEnabledForAll([{ id: "c1" }], true, () => () => undefined);
+    // A disconnected computer must not outrank one that IS on in the one row.
+    expect(manager.stateOf("c1")?.phase).toBe("unknown");
+  });
+});
+
+describe("H4: one old daemon does not lock the phone's switch", () => {
+  const old: PushClient = {
+    pushRegister: async () => {
+      throw Object.assign(new Error("MethodNotFound"), { code: -32601 });
+    },
+    pushUnregister: async () => {},
+  };
+
+  test("the phone-wide row stays switchable so the other computers can be turned off", async () => {
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store: fakeStore(),
+      platform: platform(),
+      now: () => 1,
+    });
+    await manager.sync("new", () => fakeClient());
+    await manager.sync("old", () => old);
+    const view = manager.viewForAll(
+      [
+        { id: "new", name: "Mac A" },
+        { id: "old", name: "Mac B" },
+      ],
+      "granted",
+    );
+    // The copy still says which computer has to be updated…
+    expect(view.detail).toContain("Update tentacle on Mac B");
+    expect(view.enabled).toBe(true);
+    // …but the switch works: the person must be able to stop notifications for
+    // the computer that DOES deliver (mutation: reuse notificationsView's
+    // one-computer `switchable` → red).
+    expect(view.switchable).toBe(true);
+  });
+
+  test("the OS's own refusal still disables it (that is the one thing the app cannot flip)", () => {
+    const manager = createPushManager({
+      toggle: fakeToggle(),
+      store: fakeStore(),
+      platform: platform(),
+      now: () => 1,
+    });
+    for (const permission of ["denied", "unavailable"] as const) {
+      expect(manager.viewForAll([{ id: "c1", name: "Mac" }], permission).switchable).toBe(false);
+    }
+  });
+
+  test("a single computer's row keeps the one-computer rule (`notificationsView` is unchanged)", () => {
+    // The fix is scoped to the PHONE-wide row: with one computer the two views
+    // agree, so this is a positive control, not a second rule.
+    expect(
+      notificationsView({ enabled: true, phase: "daemon-too-old" }, "Mac", "granted").switchable,
     ).toBe(false);
   });
 });

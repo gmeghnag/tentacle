@@ -22,7 +22,12 @@
  *   answers every attempt the same way, so the phone says "update tentacle on
  *   <computer>" and stops asking until the app is relaunched;
  * - **the toggle off UNREGISTERS** (and clears the fingerprint), so a later ask
- *   reaches no banner here, while turning it back on registers at once.
+ *   reaches no banner here, while turning it back on registers at once;
+ * - **an unregister that could not be sent is a DEBT, not a silent success**
+ *   (review round 1, H2): turning the toggle off while the computer is not
+ *   connected persists `off: true` beside the fingerprint, and the next connect
+ *   drops the daemon's registration before anything else. A swallowed failure
+ *   is exactly how a phone keeps getting buzzed after the person said stop.
  */
 import {
   PUSH_ENVIRONMENTS,
@@ -44,6 +49,13 @@ export interface PushRegistration {
   /** The fingerprint last ACCEPTED by that computer (`pushFactsHash`). */
   readonly hash: string;
   readonly registeredAt: number;
+  /**
+   * The person turned notifications OFF while this computer was not connected,
+   * so the request to forget the registration never reached it: the next connect
+   * sends it (H2). `hash` is empty in that record, so turning the toggle back on
+   * still registers rather than matching a fingerprint nobody kept.
+   */
+  readonly off?: true;
 }
 
 /**
@@ -284,6 +296,8 @@ export function createPushRegistrar(deps: PushRegistrarDeps): PushRegistrar {
       // stored DAEMON-side, but remembering it here would mute the phone forever
       // after the computer's config changed (F3/F4): the next connect asks again.
       if (phase === "on") {
+        // A fresh registration replaces whatever the daemon held, so it also
+        // settles any outstanding `off` debt for this computer (H2).
         await deps.memory
           .write(deps.computerId, { hash, registeredAt: deps.now() })
           .catch(() => {});
@@ -303,40 +317,120 @@ export function createPushRegistrar(deps: PushRegistrarDeps): PushRegistrar {
     }
   }
 
+  /**
+   * The toggle-off, end to end: tell the daemon to forget this device, then
+   * forget the fingerprint — in that order, so a crash between the two leaves a
+   * stale file (harmless: the toggle is off, so nothing asks it to push) instead
+   * of a phone that believes it is unregistered while the daemon still buzzes it.
+   *
+   * With NO link, or a call that failed, the request becomes a DEBT written
+   * beside the fingerprint (`off: true`) that the next connect drains (H2).
+   * Treating an unsent request as sent is exactly how a phone keeps getting
+   * buzzed after the person said stop, which is what this fixes.
+   */
+  async function settleOff(sink: PushSink | undefined, last: PushRegistration | undefined) {
+    const keepDebt = async (): Promise<void> => {
+      await deps.memory
+        .write(deps.computerId, {
+          // The fingerprint is deliberately NOT kept: turning the toggle back on
+          // must register again, not match a hash nobody holds a registration for.
+          hash: "",
+          registeredAt: deps.now(),
+          off: true,
+        })
+        .catch(() => {});
+    };
+    if (sink === undefined) {
+      // Nothing to send it to. With no registration on file there is no debt.
+      if (last !== undefined) {
+        await keepDebt();
+      }
+      return;
+    }
+    try {
+      await sink.unregister();
+    } catch (error) {
+      // An older daemon (F16) never accepted a registration, so it has none to
+      // forget: the debt is settled, and nothing loops.
+      if (!isDaemonTooOld(error)) {
+        await keepDebt();
+        return;
+      }
+    }
+    await deps.memory.write(deps.computerId, undefined).catch(() => {});
+  }
+
+  /**
+   * A debt left by an earlier toggle-off: send the unregister the person asked
+   * for, and clear it only once the daemon really was told.
+   */
+  async function settleDebt(sink: PushSink, debt: PushRegistration): Promise<void> {
+    try {
+      await sink.unregister();
+    } catch (error) {
+      if (!isDaemonTooOld(error)) {
+        // Still owed: keep it, and say so (the next connect tries again).
+        await deps.memory.write(deps.computerId, debt).catch(() => {});
+        set({ ...state, phase: "failed" });
+        return;
+      }
+    }
+    await deps.memory.write(deps.computerId, undefined).catch(() => {});
+  }
+
+  /** One registration attempt, unserialised: `sync` and `setEnabled` both wrap it. */
+  async function syncOnce(sink: PushSink): Promise<void> {
+    const permission = await deps.permission();
+    let last = await deps.memory.read(deps.computerId).catch(() => undefined);
+    // H2 first, and regardless of the permission or the toggle: a `off` debt
+    // means the daemon may still hold this device's registration, and the only
+    // correct thing to do on the next connect is to drop it. Reading `last`
+    // first is what lets this happen at all — the debt lives there.
+    if (last?.off === true) {
+      await settleDebt(sink, last);
+      // …and then carry on as usual: the person may have turned the toggle back
+      // on while this computer was away, and that decision is honoured in THIS
+      // connect (a fresh registration replaces whatever the daemon holds, so
+      // settling and registering are not in tension).
+      last = await deps.memory.read(deps.computerId).catch(() => undefined);
+    }
+    const enabledFacts = state.enabled && permission === "granted" ? await deps.facts() : undefined;
+    const plan = planPushRegistration({ state, permission, facts: enabledFacts, last });
+    if (plan.kind === "skip") {
+      if (plan.reason === "no-permission" && state.phase !== "daemon-too-old") {
+        set({ ...state, phase: "notifications-off" });
+      }
+      return;
+    }
+    if (enabledFacts === undefined) {
+      return;
+    }
+    await register(sink, enabledFacts, plan.hash);
+  }
+
   return {
     state: () => state,
 
     sync(sink: PushSink): Promise<void> {
-      return serialise(async () => {
-        const permission = await deps.permission();
-        const last = await deps.memory.read(deps.computerId).catch(() => undefined);
-        const enabledFacts =
-          state.enabled && permission === "granted" ? await deps.facts() : undefined;
-        const plan = planPushRegistration({ state, permission, facts: enabledFacts, last });
-        if (plan.kind === "skip") {
-          if (plan.reason === "no-permission" && state.phase !== "daemon-too-old") {
-            set({ ...state, phase: "notifications-off" });
-          }
-          return;
-        }
-        if (enabledFacts === undefined) {
-          return;
-        }
-        await register(sink, enabledFacts, plan.hash);
-      });
+      return serialise(() => syncOnce(sink));
     },
 
     setEnabled(enabled: boolean, sink: PushSink | undefined): Promise<void> {
       return serialise(async () => {
         if (enabled) {
-          // On: register on the next sync. `unknown`, because the row must not
-          // claim `on` before the daemon agreed (and it does not claim `off`
-          // either: the toggle is the person's, the phase is the computer's).
+          // On: register on the next sync, and do it NOW when the link is up
+          // (H3) — the person is looking at the row, and "Not checked yet" for
+          // the rest of the session is not an answer. The fingerprint was
+          // cleared on the off path, so this is a real registration, not a
+          // repeat of one the daemon already holds.
           set({
             enabled: true,
             phase: "unknown",
             ...(state.registeredHash === undefined ? {} : { registeredHash: state.registeredHash }),
           });
+          if (sink !== undefined) {
+            await syncOnce(sink);
+          }
           return;
         }
         // Off: the daemon forgets THIS device's registration, then the phone
@@ -345,11 +439,13 @@ export function createPushRegistrar(deps: PushRegistrarDeps): PushRegistrar {
         // push) instead of a phone that believes it is unregistered while the
         // daemon still buzzes it.
         //
-        // Best effort both ways: with no link the daemon keeps the file until the
-        // next connect (a pod/daemon restart), and the phone must still stop
-        // showing the row as `on` — the person's decision is the phone's.
-        await sink?.unregister().catch(() => {});
-        await deps.memory.write(deps.computerId, undefined).catch(() => {});
+        // With NO link there is nothing to send the request to, so it becomes a
+        // DEBT written beside the fingerprint (`off: true`) and drained by the
+        // next connect (H2). Writing `undefined` there instead — what this did
+        // before — lost the only record that the daemon still had to be told, so
+        // the phone kept being buzzed. A failed call is the same debt.
+        const last = await deps.memory.read(deps.computerId).catch(() => undefined);
+        await settleOff(sink, last);
         set({ enabled: false, phase: "off" });
       });
     },

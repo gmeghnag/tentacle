@@ -70,9 +70,16 @@ describe("Settings has the row, as a dumb renderer", () => {
   });
 
   test("App passes the phone-wide row and the toggle", () => {
-    expect(app).toContain("notifications={notificationsRow}");
+    expect(app).toContain("notifications={notificationsForSettings}");
     expect(app).toContain("PUSH.viewForAll(pairedComputers, pushPermission)");
     expect(app).toContain("PUSH.setEnabledForAll(");
+  });
+
+  test("the row is withheld until the stored switch is read (H1: no frame claims `on` blind)", () => {
+    // `PUSH.ready()` resolves the Keychain read every manager method awaits, and
+    // the prop is `undefined` (Settings' "nothing to show") until it lands.
+    expect(app).toContain("PUSH.ready()");
+    expect(app).toContain("pushReady ? notificationsRow : undefined");
   });
 });
 

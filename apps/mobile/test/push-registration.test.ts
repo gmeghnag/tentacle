@@ -343,24 +343,29 @@ describe("the Settings toggle", () => {
     expect(sink.calls.length).toBe(1);
   });
 
-  test("off with no link still forgets the fingerprint (a later connect must re-register on)", async () => {
+  test("off with no link keeps a DEBT for the next connect, and forgets the fingerprint", async () => {
     const { created, store } = registrar({
       last: { hash: pushFactsHash(facts()), registeredAt: 1 },
     });
     await created.setEnabled(false, undefined);
-    expect(store.written()).toBeUndefined();
+    // Review round 1 (H2): the OLD fingerprint is gone (so turning it back on
+    // registers), but the daemon still had to be told — that debt is written.
+    expect(store.written()).toEqual({ hash: "", registeredAt: 1_000, off: true });
   });
 
-  test("back on registers on the NEXT sync, and does not claim `on` before the daemon agrees", async () => {
+  test("back on with a live link registers AT ONCE; with none it stays `unknown` (H3)", async () => {
     const { created } = registrar();
     const sink = spySink();
     await created.sync(sink);
     await created.setEnabled(false, sink);
-    await created.setEnabled(true, sink);
+    // No link: no claim about the daemon, just the person's decision.
+    await created.setEnabled(true, undefined);
     expect(created.state().phase).toBe("unknown");
-    await created.sync(sink);
-    expect(sink.calls.length).toBe(2);
+    // A live link: the toggle registers now (H3), so the row gets the real answer
+    // instead of `unknown` for the rest of the session.
+    await created.setEnabled(true, sink);
     expect(created.state().phase).toBe("on");
+    expect(sink.calls.length).toBe(2);
   });
 });
 

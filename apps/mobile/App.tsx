@@ -84,6 +84,7 @@ import { pickFromLibrary, takePhoto } from "./src/photo-source.ts";
 import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
 import { createPushManager } from "./src/push-manager.ts";
 import type { PushPermission } from "./src/push-registration.ts";
+import { createPushToggleStore } from "./src/push-toggle-store.ts";
 import { type RootStackParams, initialRoute } from "./src/routes.ts";
 import { QrScanner, usePairingCamera } from "./src/scanner.tsx";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
@@ -92,7 +93,7 @@ import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
-import { KEYCHAIN_STORE } from "./src/secure-kv.ts";
+import { KEYCHAIN_ACCESSIBLE, KEYCHAIN_STORE, keychainKV } from "./src/secure-kv.ts";
 import { createSessionController } from "./src/session-controller.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
 import { type SessionListState, type SessionRow, initialSessionList } from "./src/session-list.ts";
@@ -122,6 +123,10 @@ const RECORDS = new Map<string, PairedComputer>();
  */
 const PUSH = createPushManager({
   store: KEYCHAIN_STORE,
+  // The ONE Keychain adapter (`secure-kv.ts`), so the push switch adds no second
+  // place an accessibility class can be dropped (`pairing-guards.test.ts` pins
+  // that there are two importers of `expo-secure-store`, and no third).
+  toggle: createPushToggleStore({ kv: keychainKV, keychainAccessible: KEYCHAIN_ACCESSIBLE }),
   platform: {
     permission: readPermission,
     request: requestPermission,
@@ -964,6 +969,14 @@ export default function App(): JSX.Element {
   // yet", which is the truth, rather than showing a spinner over a toggle.
   const [pushPermission, setPushPermission] = useState<PushPermission>("undetermined");
   const [pushEpoch, setPushEpoch] = useState(0);
+  /**
+   * H1: the phone-wide switch is read from the Keychain before the row is trusted.
+   * `false` until the read lands, and Settings renders the row only then — a first
+   * frame that said "on" to a person who turned notifications off would be a
+   * claim this app has no evidence for (and the same frame is what a relaunch
+   * shows).
+   */
+  const [pushReady, setPushReady] = useState(false);
   //
   // ONE refresh: re-read the OS permission (a person may have changed it in iOS's
   // own Settings and come back) and re-render the row. Bumping the epoch is not
@@ -978,6 +991,13 @@ export default function App(): JSX.Element {
   useEffect(() => {
     refreshPush();
   }, [refreshPush]);
+  // The stored switch, once: `PUSH.ready()` is the same read every manager method
+  // awaits, so this cannot race a registration. After it lands the row renders.
+  useEffect(() => {
+    void PUSH.ready().then(() => {
+      setPushReady(true);
+    });
+  }, []);
   // The manager's own signal (a registration landed, a refusal, "daemon too
   // old"): one re-render of the Settings row, and nothing else. Installed here
   // and cleared on unmount, so a hot reload cannot leave two.
@@ -1254,7 +1274,12 @@ export default function App(): JSX.Element {
   // refusal) is what re-renders this row with the new state. Cheap to recompute.
   const notificationsRow = PUSH.viewForAll(pairedComputers, pushPermission);
   void pushEpoch;
-
+  /**
+   * H1: no row until the stored switch has been read. `notifications={undefined}`
+   * is the state Settings already handles ("nothing to show"); the alternative is
+   * a first frame that says "on" to someone who turned it off.
+   */
+  const notificationsForSettings = pushReady ? notificationsRow : undefined;
   // The lock wraps EVERYTHING (D5/D8): a loading spinner or a store error must
   // not be the one thing visible above the lock. `LockGate` covers the first
   // frame before the setting is known (F10).
@@ -1386,8 +1411,13 @@ export default function App(): JSX.Element {
                 // P9: ONE row for the phone, over every paired computer. A
                 // computer that cannot deliver outranks one that can — it is the
                 // reason nothing arrives — and the toggle reaches all of them.
-                notifications={notificationsRow}
+                notifications={notificationsForSettings}
                 onToggleNotifications={(enabled) => {
+                  // Turning it back ON registers with the computers that are
+                  // connected NOW, not at some later reconnect (review round 1,
+                  // H3): the registrar syncs as part of `setEnabled`, so the row's
+                  // detail line becomes the daemon's real answer instead of
+                  // "Not checked yet" for the rest of the session.
                   void PUSH.setEnabledForAll(
                     pairedComputers,
                     enabled,

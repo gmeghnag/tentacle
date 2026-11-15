@@ -28,10 +28,10 @@ import {
   type PushSink,
   type PushState,
   createPushRegistrar,
-  initialPushState,
   pushPhaseText,
   shouldAskNotificationPermission,
 } from "./push-registration.ts";
+import type { PushToggleStore } from "./push-toggle-store.ts";
 
 /** The store calls the memory needs (`KEYCHAIN_STORE` and its `setPush`). */
 export interface PushMemoryStore {
@@ -80,7 +80,16 @@ export function linkPushSink(link: () => PushClient | undefined): PushSink {
       return client.pushRegister(facts);
     },
     unregister: async () => {
-      await link()?.pushUnregister();
+      // A missing link THROWS, exactly like `register` (review round 1, H2). It
+      // used to be `await link()?.pushUnregister()`, which resolves when there is
+      // no client: the registrar then believed the daemon had been told, forgot
+      // its fingerprint, and the phone kept being pushed to. A throw is what
+      // makes the toggle-off leave a debt for the next connect instead.
+      const client = link();
+      if (client === undefined) {
+        throw new Error("no link to unregister with");
+      }
+      await client.pushUnregister();
     },
   };
 }
@@ -161,11 +170,22 @@ export interface PushManager {
   paired(computerId: string, hasComputer: boolean): Promise<void>;
   /** Forget a computer's registrar (Remove / a re-pair). */
   forget(computerId: string): void;
+  /**
+   * The phone-wide switch has been read from the Keychain. `App` awaits it before
+   * it trusts the row's `enabled` (H1); every method below awaits it too.
+   */
+  ready(): Promise<void>;
 }
 
 export interface PushManagerDeps {
   readonly store: PushMemoryStore;
   readonly platform: PushPlatform;
+  /**
+   * The phone-wide switch, on disk (review round 1, H1). REQUIRED: leaving it out
+   * is what made "off" last only until the app was relaunched, so no caller gets
+   * to forget it.
+   */
+  readonly toggle: PushToggleStore;
   readonly now?: () => number;
   /** Re-render hook: called with the computer whose state changed. */
   readonly onChange?: (computerId: string, state: PushState) => void;
@@ -174,7 +194,37 @@ export interface PushManagerDeps {
 export function createPushManager(deps: PushManagerDeps): PushManager {
   const registrars = new Map<string, PushRegistrar>();
   const now = deps.now ?? Date.now;
+  /**
+   * The phone-wide decision, as last read from (or written to) the Keychain. It
+   * is the row's `enabled` for every computer, including one whose link has never
+   * come up — otherwise a relaunch would show "on" to a person who turned it off.
+   */
+  let enabled = true;
+  let hydration: Promise<void> | undefined;
 
+  /**
+   * Read the switch ONCE, and never again: after that the memory is authoritative
+   * (a write that failed is the session's decision, exactly like the app-lock
+   * setting's preserved-record rule), so one unreadable Keychain cannot flip a
+   * person's toggle back on mid-session.
+   */
+  const ready = (): Promise<void> => {
+    hydration ??= (async () => {
+      const read = await deps.toggle.read().catch(() => undefined);
+      if (read !== undefined) {
+        enabled = read.enabled;
+      }
+    })();
+    return hydration;
+  };
+  // Fired at creation so the first render (which is synchronous) sees the stored
+  // value as soon as it can, and every operation below awaits it before acting.
+  void ready();
+
+  /** The state a computer starts from: the PHONE's decision, nothing read yet. */
+  const initialState = (): PushState => ({ enabled, phase: enabled ? "unknown" : "off" });
+
+  /** One registrar per computer, created on first use with the phone's switch. */
   const registrarOf = (computerId: string): PushRegistrar => {
     const known = registrars.get(computerId);
     if (known !== undefined) {
@@ -187,32 +237,63 @@ export function createPushManager(deps: PushManagerDeps): PushManager {
       facts: () => deps.platform.facts(),
       now,
       onChange: (state) => deps.onChange?.(computerId, state),
+      initial: initialState(),
     });
     registrars.set(computerId, created);
     return created;
   };
 
+  /** Persist the switch. A failure keeps the session's decision (the next launch
+   * reads what is on disk, which is the honest thing to say). */
+  const rememberEnabled = async (next: boolean): Promise<void> => {
+    enabled = next;
+    await deps.toggle.write(next).catch(() => {});
+  };
+
+  /**
+   * The sink for a toggle, but ONLY when a client is dialable now.
+   *
+   * A toggle-off with no link must take the debt path rather than pretending it
+   * sent something (H2), and a toggle-on with no link must stay `unknown` for the
+   * next connect instead of turning a disconnected computer's row into `failed`
+   * (which would also outrank a genuinely `on` computer in the one Settings row).
+   */
+  const toggleSink = (link: () => PushClient | undefined): PushSink | undefined => {
+    const client = link();
+    return client === undefined ? undefined : linkPushSink(() => client);
+  };
+
   return {
+    ready,
+
     async sync(computerId, link) {
+      await ready();
       await registrarOf(computerId).sync(linkPushSink(link));
     },
 
-    async setEnabled(computerId, enabled, link) {
-      await registrarOf(computerId).setEnabled(enabled, linkPushSink(link));
+    async setEnabled(computerId, next, link) {
+      await ready();
+      await registrarOf(computerId).setEnabled(next, toggleSink(link));
+      await rememberEnabled(next);
     },
 
     view(computerId, computerName, permission) {
       const registrar = registrars.get(computerId);
       // No registrar = no link has come up yet for this computer: the row says
-      // what the TOGGLE is (default on) without claiming a status nobody read.
-      const state = registrar?.state() ?? initialPushState();
+      // what the TOGGLE is (the stored decision) without claiming a status nobody
+      // read.
+      const state = registrar?.state() ?? initialState();
       return notificationsView(state, computerName, permission);
     },
 
-    async setEnabledForAll(computers, enabled, linkOf) {
+    async setEnabledForAll(computers, next, linkOf) {
+      await ready();
       for (const computer of computers) {
-        await registrarOf(computer.id).setEnabled(enabled, linkPushSink(linkOf(computer.id)));
+        await registrarOf(computer.id).setEnabled(next, toggleSink(linkOf(computer.id)));
       }
+      // Persisted ONCE for the phone, after the computers were told: the switch is
+      // one decision, not one per computer (H1).
+      await rememberEnabled(next);
     },
 
     viewForAll(computers, permission) {
@@ -220,7 +301,7 @@ export function createPushManager(deps: PushManagerDeps): PushManager {
         // Nothing to register WITH: the switch is shown (it explains why) and is
         // not operable — a tap would have no computer to reach.
         return {
-          ...notificationsView(initialPushState(), "this computer", permission),
+          ...notificationsView(initialState(), "this computer", permission),
           switchable: false,
         };
       }
@@ -238,19 +319,28 @@ export function createPushManager(deps: PushManagerDeps): PushManager {
         on: 0,
       };
       // Read-ONLY: a view never creates a registrar (a render is not the place to
-      // start one), so a computer whose link never came up reads as `unknown` —
-      // which is the truth, not a claim that nothing will arrive.
+      // start one), so a computer whose link never came up reads as the phone's
+      // own decision, with no status claimed.
       const states = computers.map(
-        (computer) => registrars.get(computer.id)?.state() ?? initialPushState(),
+        (computer) => registrars.get(computer.id)?.state() ?? initialState(),
       );
       const worst = states.reduce((a, b) => ((rank[b.phase] ?? 0) > (rank[a.phase] ?? 0) ? b : a));
       const name =
         computers.find((_, index) => states[index] === worst)?.name ??
         computers[0]?.name ??
         "this computer";
-      const enabled = states.some((state) => state.enabled);
-      const view = notificationsView(worst, name, permission);
-      return { ...view, enabled };
+      // The row speaks for the PHONE: while the switch is off it says off, not
+      // the status of a computer nothing is being sent to.
+      const shown = enabled ? worst : { enabled: false, phase: "off" as const };
+      const view = notificationsView(shown, name, permission);
+      // `notificationsView`'s `daemon-too-old` rule is a ONE-computer rule ("the
+      // switch would be a lie: nothing changes until it updates"). Applied to the
+      // phone's single row it is a trap — one old daemon would make the row
+      // unswitchable, so a person could not turn notifications off for the
+      // computers that DO deliver (review round 1, H4). The phone-wide switch can
+      // always be flipped; only the OS's own refusal stops it.
+      const switchable = !(permission === "denied" || permission === "unavailable");
+      return { ...view, enabled, switchable };
     },
 
     stateOf(computerId) {
