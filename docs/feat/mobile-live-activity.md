@@ -485,4 +485,103 @@ claude-opus-5-5 (orchestrator), 2026-11-14*
 
 ## Execution
 
+### Blocked at the load-bearing check — no slice executed
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: STOP, per the executor brief ("First re-run its load-bearing check;
+if it fails STOP") and AGENTS §0.** The plan's own precondition is not met on
+this branch, so L0(a) and every daemon slice would be checked against code that
+does not exist here. Nothing was implemented, nothing mutated.
+
+**What the re-run says.** Probe output:
+`.tentacle/tmp/mobile-live-activity/precondition-probe.txt`.
+
+1. **The branch does not contain task 16 or task 17.** `feat/mobile-live-activity`
+   is cut at `88f5a8f9` — the exact commit the Context calls out as the branch's
+   base — and carries exactly one change over it: this doc (`git diff --stat
+   88f5a8f9 HEAD` → `docs/feat/mobile-live-activity.md | 488 +++++`, nothing
+   else). `main` is at `b44766f8` ("Merge branch 'feat/mobile-notifications'",
+   i.e. task 17 merged) and the branch is **305 commits behind it**.
+2. **Every file the Implementation builds on is absent here and present on
+   `main`:**
+
+   | file (plan slice) | on branch | on `main` |
+   |---|---|---|
+   | `packages/transport/src/push-seal.ts` (L1: "beside `sealPush`") | **missing** | yes |
+   | `packages/daemon/src/push-notifier.ts` (L7: "beside `PushNotifier`") | **missing** | yes |
+   | `packages/daemon/src/push-rules.ts`, `push-store.ts` (task 16) | **missing** | yes |
+   | `packages/daemon/src/relay-link.ts` (L8) | **missing** | yes |
+   | `packages/protocol/src/relay.ts` (L3: the `push` frame) | **missing** | yes |
+   | `apps/mobile/targets/notification-service` (task 17's NSE) | **missing** | yes |
+   | `apps/mobile/native-tests/PushCoreTests` (L10 extends it) | **missing** | yes |
+
+   Also absent on the branch: `onPushEvent` / `PushHookEvent` / `PushNotifier`
+   (no match in `packages/daemon/src`), the `push` / `push-result` relay frames,
+   and `apps/mobile/modules`.
+3. **The load-bearing assumption cannot be checked against the cited code.**
+   It rests on "task 16's `onPushEvent` sits right there" in
+   `hosted-session.ts:1948-1963`. That hook does not exist on this branch: the
+   cited range is `emit()` and `finishTurn` is at `:2505`, and `ask.shown`
+   does sit at `:921` / `:1032` — but `grep -c onPushEvent
+   packages/daemon/src/hosted-session.ts` → **0**. The line numbers happen to
+   match while the hook the assumption rests on is simply not there, which is
+   the dangerous case: a check that reads "citations line up ⇒ plan verified"
+   would have passed. So the daemon half of the load-bearing assumption is
+   unverifiable on this branch, not merely off by a few lines.
+4. **Two more preconditions fail outright.** `apps/mobile/src/secure-kv.ts`
+   exists but `gate.hold(ms)` does not: on the branch `hold()` takes no budget
+   (`foreground-gate.ts:68`), and task 17 is what gives it one (Preconditions
+   cite it as `gate.hold(ms)`). Task 17's answer coordinator
+   (`answerById` / `RemoteClient.answerPermission`) is likewise absent, so
+   L11's action path has nothing to hand to.
+5. **The capability repro is still true** (the Context's search over
+   `{packages,apps}/**/*.{ts,tsx,json,swift,js}` → no files), but for the wrong
+   reason: this branch predates the push stack the feature is supposed to sit
+   on. A feat repro that passes because its foundation is missing is not
+   evidence of the gap the plan is about.
+
+**Environment, since it bounds what L0 could ever do here.** Xcode 27.1
+(27A9275) is installed, but only the **iOS 26.5** simulator runtime is — the
+iOS 18 simulator the Tests section requires ("iOS 18 and 26 simulators") is not
+present. L0(a)–(g) and every subsequent device/`simctl` step also need the D4a
+Apple-console work (widget App ID, keychain sharing group) first. The repo gate
+itself runs on this branch (`bunx tsc --noEmit` → exit 0), so the branch is
+coherent — it is the prerequisites that are missing, not a broken tree.
+
+**Drift from the Implementation: none — the Implementation is unreachable, not
+wrong.** One thing *is* now wrong in the doc and should be fixed by whoever
+re-issues the task, not silently by me: the Context's "Resume on `main` @
+`88f5a8f`" instruction reads as if 88f5a8f were current `main`; current `main`
+is `b44766f8` and the branch was never re-based or re-created after task 17
+merged. Per AGENTS §10 this doc rides the code branch, so a re-cut of the branch
+also has to carry this doc across (or the branch needs `main` merged **into**
+it before L0 — the substantive re-base is the one thing I ran out of standing
+to do here).
+
+**The one decision needed.** How to get task 16 + task 17's code under this
+branch, then who re-issues. Any of these unblocks L0 onward; all of them are the
+orchestrator's call, not an executor's:
+
+- (a) **Re-cut the branch off current `main`** (`b44766f8`) and re-apply this
+  doc — cleanest, and what "Starts only after task 17 is merged (Owner Q9)"
+  assumes; the plan's `file:line` citations then apply as written.
+- (b) `git merge main` into this branch (305 commits; I am forbidden from
+  `checkout`/`restore`/`stash`/`commit`, and a conflict-resolving merge of 305
+  commits is not an executor's unilateral call).
+- (c) Execute L0's probes only (scratch, no code) if the owner wants the
+  device questions answered while the branch question is settled — but (a) must
+  still happen before L1, and L0(b)'s iOS 18 half needs that runtime installed.
+
+Until then: **L0–L12 all PARTIAL (0 of 13 slices), 0 mutations run.** The gate
+was run anyway so the claim is measured, not assumed — `bunx tsc --noEmit`
+exit 0 · `bun run lint` "Checked 1292 files … No fixes applied", 0 errors
+(baseline-clean, AGENTS §6) · `bun test` **9317 pass, 3 skip, 0 fail** (9320
+tests / 670 files, 373 s; the 3 skips are the three opt-in ones). This is the
+branch's pre-existing state and says nothing about the feature — it is reported
+so a later round can tell "green because untouched" from "green after work". No
+changelog fragment was written, because there is no user-visible change to
+announce; no `protocol.d/` note, because no schema changed; `protocol.json` was
+not regenerated, because nothing it is derived from moved.
+
 ## Review
