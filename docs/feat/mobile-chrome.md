@@ -242,6 +242,67 @@ Dynamic Type sizes), value `flex: 1` right-aligned with its own ellipsis —
 (not under it). `Sheet.tsx` uses `radius.sheet` 14 and a smaller 18 pt close
 glyph. E2 (if chosen) = the same primitive with a `band` surface — one prop.
 
+**5. Activity (Owner Q-F; rec F1).** ONE sheet, "Activity", for everything
+that runs beside the conversation, grouped by kind, running first.
+
+*What exists daemon- and client-side today (no new protocol for sub-agents
+or shell jobs):*
+
+| Need | Exists | Where |
+|---|---|---|
+| Live list of background sub-agents (id `sa-N`, `agentType`, `description`, `state`, `toolUses`, `tokens`, `startedAt`, last 8 step labels `tail`, `model` only if it differs, `userRead`) | yes — full-state `subagents` display update, also in the open snapshot | `protocol/src/updates.ts` `SubagentsUpdateSchema`; `protocol/src/session.ts:546-580` `SubagentRowSchema`; snapshot `:734` |
+| Foreground sub-agent progress (start / step / usage / end, `agentId` when it moves to background) | yes — `tool_progress` keyed by the `agent_task` call | `protocol/src/updates.ts:195-225` |
+| Message a running child | yes — `session/subagent_message` → `{ok, reason?}`; echo `subagent_message{agentId, text, n}` | `protocol/src/session.ts:584-612`; `methods.ts:116` |
+| Stop a child | yes — `session/agent_kill` → `{killed}` | `session.ts:615-624`; `methods.ts:118` |
+| Child → agent notes | yes — `subagent_notify` | `updates.ts` `SubagentNotifySchema` |
+| The report | yes — in the conversation, as the note message (`note{kind, id: "sa-N"}`) the agent receives | `session.ts:42-49` `MessageNoteSchema`; `docs/eval/subagent-live.md` M3 |
+| Client API | yes — `RemoteSession.subagents`, `onSubagents`, `onSubagentMessage`, `messageSubagent`, `killSubagent`, `onJobs`, `jobOutput`, `killJob` | `client/src/remote-session.ts:586-735` |
+| Background shell jobs (`bg-N`, command, `startedAt`, `status`; output on demand; kill) | yes — `jobs` update + `session/job_output` + `session/job_kill` | `updates.ts` `JobsUpdateSchema`; `session.ts:636-716`; `docs/feat/shell-jobs-panel.md` |
+| "Waiting for your permission" as a child state | **no** — `state` is always `"running"` (`docs/feat/subagent-panel.md:97`); the ask arrives as the normal permission sheet, which names `sa-N` | — |
+| Finished children with their report, kept in a list | **no** — a finished child LEAVES the list at once (owner P5); the phone keeps its own memory (below), no protocol | — |
+| **Cron / scheduled jobs** | **no** — nothing in the protocol or daemon | needs its own task + new protocol (a list update + methods) |
+
+So the phone's gap is purely app-side: the reducer drops these frames
+(`transcript.ts:414-419`) and `SendableHandle` (`session-screen-controller.ts:66`,
+over `SessionHandle`, `session-controller.ts:44`) does not expose the members
+above. The handle type is widened with the eight `RemoteSession` members —
+`App.tsx:235-238` already builds a `RemoteSession`, so no adapter.
+
+*Entry point (F1, rec):* a pill in the session header — spinner glyph + the
+running count, `tint`/`accent`, between the title and the context ring — shown
+only while something runs or a finished report is unread; tap → Activity.
+The `agent_task` card in the transcript (replacing today's teal block) is
+the second, in-context entry: tap → that child's detail (or, while it is
+still foreground, its live steps). F2 (the draggable floating button) is
+mocked and interactive; its costs are listed under Q-F.
+
+*Sheet:* medium detent, expandable. Sections: **Sub-agents · n running**
+(spinner, description, `sa-N · type · [model] · steps · elapsed`, the latest
+step in mono); **Finished** (this attach only: the last row of each child that
+left the list, joined with its report note by `sa-N`; "Report ›"); then the
+**Shell jobs** and **Scheduled** groups, greyed "soon" in v1 (Q-F (b)); a
+group with nothing in it is hidden once live. Elapsed is the client's clock
+from `startedAt` (the protocol's accepted skew).
+
+*Detail:* title = description; meta line state · `sa-N` · type · steps ·
+elapsed · tokens. Running: **Latest steps** — the row's `tail` (5 shown,
+owner Q17; "… n earlier" from `toolUses`), the newest with a spinner, the
+user's own messages inline with "read" once `userRead ≥ n`; a bottom field
+"Message sa-N…" (`messageSubagent`; a refusal's `reason` shown as a notice,
+the draft kept) and **Stop** (confirm, then `killSubagent`; `{killed:false}`
+→ "already finished"). Finished: **Report** (the note's markdown, rendered
+by the transcript's renderer), Copy, Show in chat (scrolls to the note);
+no message field.
+
+*Pure modules (§7):* `activity.ts` — `activityView(subagents, jobs,
+finished, now) → { count, groups[] }` (kind, rows, ghost) and the badge
+rule; `activity-memory.ts` — a reducer that turns a `subagents` replace
+into "left the list" events, keeps the last row + its outcome, and joins
+the report note from transcript rows by `note.id` (bounded to the last 20);
+`subagent-detail.ts` — `detailView(row|finished, messages, now)` (steps
+window, read marks, which actions are allowed). Components: `ui/ActivityBadge.tsx`,
+`screens/ActivitySheet.tsx`, `screens/SubagentDetail.tsx` — render only.
+
 ### Files
 
 Dependency order (all in `apps/mobile`; no protocol, daemon, client change —
@@ -270,7 +331,16 @@ slice 4 adds one if its verification fails, then splits out):
    `src/session-controller.ts` `openNew` if needed.
 10. `e2e/flows/` — new `26-drawer.yaml` (+ `.js` seed), updated
     `24-ui-shots.yaml`, `05-daemon-down.yaml` (both tap `session-back`).
-11. `changelog.d/mobile-chrome.changed.md`; this doc.
+11. Activity (slices 5–6): `src/session-screen-controller.ts` (widen
+    `SendableHandle`; subscribe `onSubagents`/`onSubagentMessage`/`onJobs`);
+    `src/transcript.ts` (keep the `agent_task` card's progress instead of
+    dropping it at `:414-419`); `src/activity.ts`, `src/activity-memory.ts`,
+    `src/subagent-detail.ts` (new, pure); `src/ui/ActivityBadge.tsx`,
+    `src/screens/ActivitySheet.tsx`, `src/screens/SubagentDetail.tsx` (new);
+    `src/ui/ToolRow.tsx` (the agent card); `SessionScreen.tsx` (badge slot,
+    sheet mount); `e2e/flows/27-activity.yaml` (+ `.js` driving a
+    background child through the mock model).
+12. `changelog.d/mobile-chrome.changed.md`, `changelog.d/mobile-activity.added.md`; this doc.
 
 ### Failure modes
 
@@ -316,6 +386,26 @@ slice 4 adds one if its verification fails, then splits out):
   (Row's wrap rule, pure `rowLayout(fontScale)` if needed).
 - **F11 · Reduce Motion / VoiceOver** — fade-only drawer; modal panel;
   hamburger labelled "Sessions"; ring labelled "Context 34%".
+- **F13 · Activity on attach / reconnect.** The open snapshot carries
+  `subagents` and `jobs` (`session.ts:734-736`), so the badge is right on the
+  first frame; a reconnect re-reads them. The phone's Finished memory is
+  per attach and is NOT persisted (the report itself stays in the
+  conversation, so nothing is lost — only the shortcut).
+- **F14 · Message / Stop races the child's end.** `messageSubagent` →
+  `{ok:false, reason}` (not running, inbox full, finishing): shown, draft
+  kept; `killSubagent` → `{killed:false}`: "already finished", the detail
+  flips to Finished on the next `subagents` replace. Never a throw at the UI.
+- **F15 · Older daemon** (`MethodNotFound` for the two methods, no
+  `subagents` frames): the badge never shows, the card stays a plain tool
+  row; message/stop report a typed refusal.
+- **F16 · Untrusted text.** Descriptions, step labels and reports come from a
+  daemon that may be a pod (§7 "a pod is not trusted"): rendered as plain
+  text / the transcript's sanitised markdown, never as links that act, never
+  interpreted. A message to a child is the user's own typed text only.
+- **F17 · Stop is destructive.** One confirm ("Stop sa-2? Its work so far is
+  lost to the agent") — the TUI's `x` then `y` (P4) on the phone.
+- **F18 · Many children.** `subagents.maxParallel` bounds the running group;
+  Finished is capped at 20 per attach; the sheet scrolls.
 - **F12 · Parallel branch.** `fix/mobile-chat-glitches` edits the same
   screen; this branch starts after it merges (§10), so no merge splice.
 
@@ -338,8 +428,20 @@ Pure (bun test, `apps/mobile/test/`), red first:
 - Slice 4 — with the mock daemon (`e2e/mock-model.ts` pattern / client
   fakes): a fresh phone handle creates on first send and appears in
   `session/list`; offline → send fails into the outbox (F8).
+- `activity.test.ts` — count = running sub-agents (+ live jobs if Q-F (b)
+  = live); badge hidden at zero with nothing unread; groups ordered running
+  first; empty groups hidden; ghost groups only while flagged; elapsed from
+  `startedAt` with an injected clock; unknown `state` shown as is.
+- `activity-memory.test.ts` — a row that leaves the `subagents` list becomes
+  Finished with its last row; the report joins by `note.id`, also when the
+  note arrives BEFORE the list update (either order); cap 20; a reconnect's
+  snapshot does not duplicate.
+- `subagent-detail.test.ts` — steps window (5 of `tail`, "n earlier" from
+  `toolUses`), read marks from `userRead` vs `n`, actions: running →
+  message+stop, finished → copy+show; message refusal keeps the draft
+  (F14); kill `{killed:false}` → "already finished".
 - Mutation check (§9): swap `replace`/`reset` in `drawerTarget`, drop the
-  `currentId` match → the tests above fail.
+  `currentId` match, break the `note.id` join → the tests above fail.
 
 Maestro (`apps/mobile/e2e/flows/`, simulator, light AND dark via
 `appearance.js`):
@@ -354,6 +456,11 @@ Maestro (`apps/mobile/e2e/flows/`, simulator, light AND dark via
   chosen mockups.
 - `05-daemon-down.yaml` — replace the `session-back` tap; drawer on a
   daemon-down computer shows the error + Retry (F2).
+- `27-activity.yaml` — the mock model launches a background `agent_task`:
+  the badge shows `1`; tap → Activity lists it with its latest step; open →
+  steps advance; send "salta i test" → it shows "read"; Stop → confirm → the
+  child leaves Running and appears under Finished; a second child ends on
+  its own → its report opens from Finished; badge hidden at zero.
 
 ### Slices
 
@@ -367,9 +474,21 @@ Maestro (`apps/mobile/e2e/flows/`, simulator, light AND dark via
    wiring, rename from the drawer, flow 26 (minus New session).
 4. **New session from the phone** (S/M, strong model) — verify lazy create
    first; split out if it needs daemon work.
-5. **Maestro shots + visual review** (S) — flows 24/05/26, both themes.
-6. **Review** — fresh-context `/code-review` + visual comparison with the
+5. **Activity, read-only** (M, strong model) — widen `SendableHandle`, keep
+   the agent card's progress in `transcript.ts`, `activity.ts` +
+   `activity-memory.ts`, badge, sheet, detail (steps + report). No new
+   protocol.
+6. **Activity, message + stop** (S, strong model) — `subagent-detail.ts`
+   actions, the field and the confirm; flow 27. (Shell jobs live in the same
+   sheet here if Q-F (b) says so: `onJobs`/`jobOutput`/`killJob` already
+   exist.)
+7. **Maestro shots + visual review** (S) — flows 24/05/26/27, both themes.
+8. **Review** — fresh-context `/code-review` (red-team F13–F18 and "a pod is
+   not trusted" for the rendered sub-agent text) + visual comparison with the
    mockups.
+
+Cron / scheduled jobs are NOT a slice: they need daemon work and new
+protocol first (their own task); this sheet only reserves the group.
 
 ### Notes / debt
 
@@ -407,6 +526,19 @@ Each question maps to one mockup row of
   *Recommendation:* **E1** — the most minimal, the label never truncates,
   and the same grammar carries Settings, Computers and Sessions; E2 if the
   owner wants a little more structure.
+- **Q-F · Activity entry point.** (a) F1 — a "⟳ n" pill in the header, shown
+  only while something runs (plus the tappable agent cards in the
+  transcript), or F2 — a draggable floating button that snaps to an edge
+  (try it in the page)? And (b): shell jobs — greyed "soon" as mocked, or
+  live in v1 (the daemon already exposes them)? *Recommendation:* **F1**
+  and **jobs live in v1**. F1 follows iOS conventions, never covers the text
+  you are reading, stays in VoiceOver order and needs no physics; its one
+  weak point (top of the screen, far from the thumb) is covered by the cards
+  in the transcript. F2 is fun but it covers code and buttons exactly where
+  you read, fights the edge back-swipe, is an Android idiom and needs
+  position memory and Reduce Motion handling. Jobs: they cost one more group
+  over APIs that already exist (and fulfil TUI Q15, "one background list");
+  cron stays greyed until its own task adds the protocol.
 
 ## Execution
 
