@@ -322,3 +322,15 @@ assertion was shown red under a mutation. Not re-done: no device/simulator run
 (still true of the task as a whole, unchanged by this round). Review's attack (f)
 (SessionScreen's subscribe-in-an-effect window on a cold-start deep link) stayed
 below MEDIUM and was left alone, as the Review ranked it.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16* (same reviewer context as round 1; same model family as the executor)
+
+**Verdict: PASS.**
+
+- **Finding 1 (the `stopRequested` coverage gap) is fixed.** The round's diff (`git diff HEAD~1`) adds tests only and leaves the source alone. It adds a `stopRequested in every pending state` block to `apps/mobile/test/dictation.test.ts`, covering `asking`, `preparing{starting}`, `preparing{downloading}`, and a late `started` after the stop. It also adds an end-to-end controller test in `voice-controller.test.ts`: a download finishing after the switch went off starts no recognizer and leaves no timers.
+- **Re-ran my two surviving mutations.** R2 (`stopRequested` removed from `preparing`) → **4 RED**: 3 reducer tests and the controller test. R3 (removed from `asking`) → **1 RED**. Both reverted; `git status` is empty.
+- **Regressions:** the fixture sanity test confirms each fixture really is in the state it claims, so the tests cannot pass vacuously. No source changed in this round, so there is no new behaviour to attack.
+- **Gate:** `apps/mobile/test` → 1761 pass / 0 fail; `bun run lint` → 1661 files, clean; `bun run typecheck` (root + mobile + relay) → clean. Full `bun test` not re-run (the round changes only mobile tests).
+- Still open, unchanged: the `TODO.md` entry (orchestrator, direct to `main`) and a device run by the owner.
