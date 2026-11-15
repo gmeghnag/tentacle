@@ -160,6 +160,13 @@ const id8 = (id: string): string => id.slice(0, 8);
 export interface LiveActivityNotifier extends SessionPushObserver {
   /** Arm the timer for the rules' next deadline (a no-op when nothing is pending). */
   arm(): void;
+  /**
+   * The registrations changed (a `device/live_activity_register` landed, a
+   * device was revoked): read them again and re-decide NOW, without waiting for
+   * the next hook event (fix round 1, R2 — the promise `session-host.ts`'s
+   * `registerLiveActivity` comment already made).
+   */
+  registrationChanged(): void;
   /** Stop observing: the timer cleared, nothing in flight awaited. Idempotent. */
   stop(): void;
   /**
@@ -198,14 +205,26 @@ export function createLiveActivityNotifier(
       : {}),
     ...(options.newSlot !== undefined ? { newSlot: options.newSlot } : {}),
   });
-  /** Whether the rules know the current registrations (set on the first event and on `arm`). */
-  let registrationsLoaded = false;
   /**
-   * `slot → {deviceId, token, sessionId}`: the per-activity UPDATE tokens (Owner
-   * Q8, memory only). A slot leaves when the activity ends, is dismissed or is
+   * `${deviceId}\u0000${startToken}` pairs APNs refused with `gone` (R3): that
+   * token cannot reach the phone at all, so the device is not a start candidate
+   * while it is still the registration's token. Cleared when a device
+   * re-registers (a new token), and bounded by the devices a `serve` knows.
+   */
+  const deadStartTokens = new Set<string>();
+  /**
+   * `slot → {deviceId, token}`: the per-activity UPDATE tokens (Owner Q8,
+   * memory only). A slot leaves when the activity ends, is dismissed or is
    * rolled over.
    */
   const updateTokens = new Map<string, { readonly deviceId: string; readonly token: string }>();
+  /**
+   * `slot → has a delivery for it ever been CONFIRMED by the sink` (R4). A slot
+   * the phone has never acknowledged must be pushed as a `start`: an `update` to
+   * a push-to-START token creates nothing, so a resync that sent one leaves the
+   * turn invisible on that phone for its whole life.
+   */
+  const confirmed = new Set<string>();
   /**
    * `sessionId → the turn id it is on`. `tool_call` carries none, and the rules
    * need one to tell two turns apart; one entry per session (replaced by its next
@@ -226,12 +245,28 @@ export function createLiveActivityNotifier(
     const map = new Map<string, LaRegistration>();
     for (const deviceId of options.registrations.registered()) {
       const registration = options.registrations.read(deviceId);
-      if (registration !== undefined) {
-        map.set(deviceId, { enabled: registration.enabled });
+      if (registration === undefined) {
+        continue;
+      }
+      // R3: a token APNs already called `gone` reaches nothing, so this device is
+      // not a start candidate while it is still the token on the record. A
+      // re-registration (a NEW token) clears the mark below, and the entry is
+      // pruned here so the set cannot grow with every device ever seen.
+      const deadKey = `${deviceId}\u0000${registration.startToken}`;
+      if (deadStartTokens.has(deadKey)) {
+        continue;
+      }
+      map.set(deviceId, { enabled: registration.enabled });
+    }
+    for (const key of [...deadStartTokens]) {
+      const [deviceId, token] = key.split("\u0000");
+      const current =
+        deviceId === undefined ? undefined : options.registrations.read(deviceId)?.startToken;
+      if (current !== token) {
+        deadStartTokens.delete(key);
       }
     }
     rules.setRegistrations(map);
-    registrationsLoaded = true;
     return map;
   };
 
@@ -269,8 +304,23 @@ export function createLiveActivityNotifier(
       return;
     }
     const updateToken = updateTokens.get(command.slot)?.token;
+    /**
+     * R4 (F3 convergence): an `update` for a slot the sink never CONFIRMED has
+     * nothing to update on the phone — an update to a push-to-START token creates
+     * nothing — so it goes out as a `start`, and a turn the relay dropped (or
+     * dropped before iOS reported a token) still appears.
+     *
+     * An `end` for such a slot is DROPPED instead: there is nothing on the phone
+     * to dismiss, and a start would create an activity for a turn already over.
+     */
+    const neverDelivered = !confirmed.has(command.slot);
+    if (command.kind === "end" && neverDelivered) {
+      updateTokens.delete(command.slot);
+      audit(`la-dropped never-started ${id8(command.deviceId)}`);
+      return;
+    }
+    const event = command.kind === "update" && neverDelivered ? "start" : command.kind;
     const token = updateToken ?? registration.startToken;
-    const event = command.kind;
     let contentState: ActivityContentState | undefined;
     let attributes: ActivityAttributes | undefined;
     if (event !== "end") {
@@ -307,11 +357,17 @@ export function createLiveActivityNotifier(
       token,
       env: registration.env,
       event,
-      priority: command.priority,
+      // A push that CREATES the activity is a start, whatever the rules called
+      // it (R4): iOS may defer a priority-5 push, and a start must not be
+      // deferred or the turn never appears.
+      priority: event === "start" ? 10 : command.priority,
       contentState,
       attributes,
-      staleDate: command.kind === "end" ? undefined : command.staleAt,
-      dismissalDate: command.kind === "end" ? command.dismissAt : undefined,
+      // Both follow the EVENT that actually goes out, not the command the rules
+      // wrote (R4): a command re-sent as a `start` must lose the end's dismissal
+      // date, or the phone drops the activity it just created.
+      staleDate: event === "end" || command.kind === "end" ? undefined : command.staleAt,
+      dismissalDate: event === "end" && command.kind === "end" ? command.dismissAt : undefined,
     };
     deliveries.push(delivery);
     let status: string;
@@ -322,7 +378,10 @@ export function createLiveActivityNotifier(
       return;
     }
     if (status === "sent") {
-      audit(`la-sent ${command.kind} ${id8(command.deviceId)}`);
+      // The phone took it: from now on this slot exists there, so its next push
+      // is an `update` (R4's whole point).
+      confirmed.add(command.slot);
+      audit(`la-sent ${event} ${id8(command.deviceId)}`);
       return;
     }
     if (status === "gone") {
@@ -330,8 +389,32 @@ export function createLiveActivityNotifier(
       // not muted by a late answer.
       options.registrations.forget(command.deviceId, token);
       audit(`la-gone ${id8(command.deviceId)}`);
-      if (command.kind === "end") {
-        updateTokens.delete(command.slot);
+      // A push-to-START token APNs refuses reaches nothing at all: the device is
+      // not a start candidate until it re-registers (R3, F13).
+      if (updateToken === undefined) {
+        deadStartTokens.add(`${command.deviceId}\u0000${token}`);
+      }
+      // R3: the RULES must hear it too. `gone` is the system saying the activity
+      // is no longer there (the person dismissed it, iOS ended it at its cap, or
+      // the token rotated) — without this the slot stayed "live" for ever and the
+      // 10-minute heartbeat kept knocking on a dead token, and F17 (never
+      // restarted after a dismissal) / F18 (ONE continuation after a system end)
+      // could not exist. `command.kind === "end"` has nothing left to end.
+      confirmed.delete(command.slot);
+      updateTokens.delete(command.slot);
+      if (command.kind !== "end") {
+        consume(
+          rules.apply({
+            type: "ended",
+            sessionId: command.sessionId,
+            slot: command.slot,
+            // A `gone` on an UPDATE/START is the SYSTEM's ending, not the
+            // person's gesture: the phone never told us which, and restarting a
+            // turn the system cut is right (F18) while restarting a dismissed one
+            // is not (F17). The app's own `_ended` is what reports a dismissal.
+            reason: "ended",
+          }),
+        );
       }
       return;
     }
@@ -409,14 +492,28 @@ export function createLiveActivityNotifier(
     handle = timers.setTimeout(tick, Math.max(0, due - now()));
   };
 
-  /** The rules' deadline arrived: decide, act, and re-arm for the next one. */
+  /**
+   * The rules' deadline arrived: decide, act, and re-arm for the next one.
+   */
   const tick = (): void => {
     handle = undefined;
     armedAt = undefined;
     if (stopped) {
       return;
     }
-    consume(rules.apply({ type: "tick", attached: new Set() }));
+    // The registrations are read HERE, at the decision, not once at the first
+    // event (R2): a phone that registers after `serve` has already seen an event
+    // — or turns its switch back on — must be a start candidate without a
+    // restart. The source is a directory read, and a deadline is a minute apart
+    // at worst, so this is not a hot path.
+    refreshRegistrations();
+    consume(
+      rules.apply(
+        // The clock decides; the attached set is standing state the rules
+        // already hold per session (R1) — this call must never invent one.
+        { type: "tick" },
+      ),
+    );
     arm();
   };
 
@@ -426,6 +523,14 @@ export function createLiveActivityNotifier(
     for (const slot of [...updateTokens.keys()]) {
       if (!live.has(slot)) {
         updateTokens.delete(slot);
+      }
+    }
+    // Same for R4's confirmed set: a slot the rules forgot can never be pushed
+    // again, so its entry is dead weight (and an unbounded set on a long-lived
+    // `serve` is a leak).
+    for (const slot of [...confirmed]) {
+      if (!live.has(slot)) {
+        confirmed.delete(slot);
       }
     }
   };
@@ -441,7 +546,12 @@ export function createLiveActivityNotifier(
     attached: { readonly clients: number; readonly devices: readonly string[] },
   ): LaCommand[] => {
     if (event.type === "attachment") {
-      return rules.apply({ type: "tick", attached: new Set(attached.devices) });
+      // The attached set is STANDING state, per session (R1): recorded, and the
+      // clock asked to look again at once — a detach can make a start due this
+      // instant, and an attach can cancel one.
+      const devices = new Set(attached.devices);
+      rules.setAttached(sessionId, devices);
+      return rules.apply({ type: "tick" });
     }
     const update = event.update;
     const facts = options.describe(sessionId);
@@ -517,9 +627,11 @@ export function createLiveActivityNotifier(
         return;
       }
       try {
-        if (!registrationsLoaded) {
-          refreshRegistrations();
-        }
+        // The SAME refresh as `tick` (R2), and for the same reason: an ASK is a
+        // decision about WHO to start for, so it cannot run on a snapshot taken
+        // hours ago. This is what the comment on `refreshRegistrations` has
+        // claimed since L7; until fix round 1 it was only done once.
+        refreshRegistrations();
         const commands = translate(sessionId, event, attached);
         consume(commands);
         pruneTokens();
@@ -533,6 +645,23 @@ export function createLiveActivityNotifier(
 
     /** One hook event, translated into the rules' own vocabulary. */
     arm,
+
+    registrationChanged() {
+      if (stopped) {
+        return;
+      }
+      try {
+        refreshRegistrations();
+        // A registration can make a start due this instant (a phone that was not
+        // a candidate a second ago) or cancel one (its switch went off): decide
+        // now, then re-arm for whatever deadline the new set implies.
+        consume(rules.apply({ type: "tick" }));
+        pruneTokens();
+        arm();
+      } catch (error) {
+        audit(`la-dropped internal ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
 
     setUpdateToken(slot, token, deviceId) {
       const known = rules.liveSlots().some((entry) => entry.slot === slot);
@@ -552,6 +681,7 @@ export function createLiveActivityNotifier(
       // that turn — F17), and its token dies with it.
       consume(rules.apply({ type: "ended", sessionId: known.sessionId, slot, reason }));
       updateTokens.delete(slot);
+      confirmed.delete(slot);
       return true;
     },
 
@@ -571,6 +701,8 @@ export function createLiveActivityNotifier(
         armedAt = undefined;
       }
       updateTokens.clear();
+      confirmed.clear();
+      deadStartTokens.clear();
       turnIds.clear();
     },
   };

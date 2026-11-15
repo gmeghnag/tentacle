@@ -141,8 +141,16 @@ export type LaEvent =
       readonly slot: string;
       readonly reason: LiveActivityEndReason;
     }
-  /** The clock has reached `nextDeadlineAt`, or simply "look again now". */
-  | { readonly type: "tick"; readonly attached: ReadonlySet<string> };
+  /**
+   * The clock has reached `nextDeadlineAt`, or simply "look again now".
+   *
+   * It carries NO attached set: who is watching a session is a STANDING fact
+   * about that session, not a property of one event, and it arrives on its own
+   * through {@link LiveActivityRules.setAttached} (fix round 1, R1 — a tick that
+   * took the set as an argument could only ever be as fresh as its caller, and
+   * the shell's own timer had no set to pass).
+   */
+  | { readonly type: "tick" };
 
 /**
  * What the shell must do, in order. `start` and `end` name the activity by
@@ -239,6 +247,12 @@ export interface LiveActivityRulesOptions {
 export interface LiveActivityRules {
   /** The registration for each device (the store's records, as the shell read them). */
   setRegistrations(registrations: ReadonlyMap<string, LaRegistration>): void;
+  /**
+   * The devices attached (app foreground) to ONE session, as the session's own
+   * hook just reported them. Standing state, per session: the start rule reads
+   * it at the deadline, on an ask, and on every other decision (F16, R1).
+   */
+  setAttached(sessionId: string, attached: ReadonlySet<string>): void;
   /** Override the slot source (a test pins it; the shell leaves it alone). */
   setSlotSource(newSlot: () => string): void;
   /** Feed one event; get the commands it implies, in order. */
@@ -256,6 +270,9 @@ export interface LiveActivityRules {
 }
 
 const keyOf = (sessionId: string, deviceId: string): string => `${sessionId}\u0000${deviceId}`;
+
+/** The set a session nobody is attached to reports: allocated once, never mutated. */
+const EMPTY_ATTACHED: ReadonlySet<string> = new Set<string>();
 
 /**
  * The turn's outcome as the activity's kind. `end_turn` and `max_tokens` are both
@@ -285,6 +302,17 @@ export function createLiveActivityRules(options: LiveActivityRulesOptions): Live
   /** Turns whose activity the person dismissed: never restarted until the next turn. */
   const dismissedTurns = new Set<string>();
   let registrations: ReadonlyMap<string, LaRegistration> = new Map();
+  /**
+   * `sessionId → the devices attached to it` (app foreground). Standing state,
+   * written by the session's own `attachment` hook event and read at every
+   * decision (F16, R1). Bounded by the sessions this daemon holds: an entry goes
+   * with `session_closed`.
+   */
+  const attachedBySession = new Map<string, ReadonlySet<string>>();
+
+  /** The devices attached to one session (empty when the session reported none). */
+  const attachedTo = (sessionId: string): ReadonlySet<string> =>
+    attachedBySession.get(sessionId) ?? EMPTY_ATTACHED;
 
   const nowMs = (): number => options.now();
 
@@ -354,7 +382,9 @@ export function createLiveActivityRules(options: LiveActivityRulesOptions): Live
 
   /**
    * The start command for one (session, device), or a `la-capped` note when the
-   * device already has the maximum and nothing `done` to evict.
+   * device already has the maximum and nothing `done` to evict. A device
+   * attached to THAT session is never started for — the person is looking at it
+   * — and the check lives here so no caller can forget it (R1).
    */
   const startFor = (
     turn: TurnState,
@@ -362,6 +392,9 @@ export function createLiveActivityRules(options: LiveActivityRulesOptions): Live
     kind: ActivityKind,
     at: number,
   ): LaCommand[] => {
+    if (attachedTo(turn.sessionId).has(deviceId)) {
+      return [];
+    }
     const live = liveFor(deviceId);
     const commands: LaCommand[] = [];
     if (live.length >= LA_MAX_LIVE_PER_DEVICE) {
@@ -616,6 +649,7 @@ export function createLiveActivityRules(options: LiveActivityRulesOptions): Live
       }
       case "session_closed": {
         turns.delete(event.sessionId);
+        attachedBySession.delete(event.sessionId);
         const commands: LaCommand[] = [];
         for (const state of activitiesOfSession(event.sessionId)) {
           // An activity already ENDED by its turn's `turn_end` is done: re-ending
@@ -657,13 +691,13 @@ export function createLiveActivityRules(options: LiveActivityRulesOptions): Live
         return [];
       }
       case "tick": {
-        return tick(event.attached, at);
+        return tick(at);
       }
     }
   };
 
   /** Everything the clock decides: start, heartbeat, rollover, and eviction. */
-  function tick(attached: ReadonlySet<string>, at: number): LaCommand[] {
+  function tick(at: number): LaCommand[] {
     const commands: LaCommand[] = [];
     for (const turn of turns.values()) {
       if (turn.stopReason !== undefined) {
@@ -672,6 +706,9 @@ export function createLiveActivityRules(options: LiveActivityRulesOptions): Live
       const running = at - turn.startedAt;
       const live = activitiesOfSession(turn.sessionId);
       const liveDevices = new Set(live.map((state) => state.deviceId));
+      // Who is watching THIS session, as it last reported (R1): standing state,
+      // never an argument of this call, so the shell's own timer cannot lose it.
+      const attached = attachedTo(turn.sessionId);
 
       for (const [deviceId, registration] of registrations) {
         if (!registration.enabled) {
@@ -740,6 +777,11 @@ export function createLiveActivityRules(options: LiveActivityRulesOptions): Live
   return {
     setRegistrations(next) {
       registrations = next;
+    },
+    setAttached(sessionId, attached) {
+      // Copy at the boundary: the caller's set is a per-event snapshot it may
+      // reuse, and this one is read at deadlines much later.
+      attachedBySession.set(sessionId, new Set(attached));
     },
     setSlotSource(next) {
       newSlot = next;

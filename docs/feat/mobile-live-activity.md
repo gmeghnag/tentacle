@@ -1445,6 +1445,126 @@ text is unchanged. L0–L12 are still 0 of 13.
   stale each time. Merging or re-cutting is the only step that ends the loop
   (AGENTS §0, "escalate, don't spin").
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Scope: the four numbered findings of the code Review (`de134ba5`), HIGH/HIGH/
+MEDIUM/MEDIUM. No slice was reopened and no plan line was changed.** All four
+were reproduced against the REAL `createLiveActivityNotifier` before any edit;
+the repro is pasted below with its before/after output.
+
+**Repro** (`.tentacle/tmp/mobile-live-activity/fix1/repro.ts`, run from the repo
+root, importing the branch's `packages/daemon/src/live-activity-notifier.ts` and
+`packages/transport/src/push-seal.ts` directly). Output, before → after:
+
+```
+F1a attached phone: after attachment event=0, after tick=1  →  0 / 0
+F1b attached phone on an ASK:                        1      →  0
+F2  starts after a late registration:                0      →  1
+F3  deliveries after gone=1, +10min=2               →  1 / 1
+F4a first delivery: event=start                     →  start
+F4b resend after a dropped start: event=update      →  start
+```
+
+**Root causes, one sentence each, and the fix**
+
+1. **HIGH — R1, the start rule ignored the attached set.** The set existed only
+   as `tick`'s ARGUMENT: `live-activity-rules.ts` kept no per-session state, the
+   shell's own timer (`live-activity-notifier.ts`) passed `new Set()`, and
+   `permission_request` called `startFor` with no attached check at all.
+   *Fix:* the attached set is now STANDING state in the rules
+   (`setAttached(sessionId, set)`, `attachedBySession`, dropped with
+   `session_closed`), `LaEvent`'s `tick` no longer carries a set at all, and the
+   check moved INSIDE `startFor` so no caller can forget it
+   (`live-activity-rules.ts:255`, `:311`, `:395`, `:652`, `:711`, `:781`). The
+   notifier records the set on the `attachment` hook event and asks for a tick
+   (`live-activity-notifier.ts:553-554`), and its own timer passes nothing
+   (`:514`). One tick now reads EVERY session's own set.
+2. **HIGH — R2, registrations were read once.** `registrationsLoaded` was set on
+   the first event and never cleared, and `registerLiveActivity`
+   (`session-host.ts`) did not notify the notifier although its comment said it
+   did. *Fix:* that flag is gone; `refreshRegistrations()` runs at EVERY
+   decision — the timer's tick and every hook event
+   (`live-activity-notifier.ts:509`, `:634`) — and a new
+   `LiveActivityNotifier.registrationChanged()` re-reads and re-decides at once,
+   called by `registerLiveActivity` (`session-host.ts:669`, optional on
+   `LiveActivityOptions.notifier` at `:377` so a stub need not implement it). The
+   comment at `:223` is now true, and the store read is one directory scan on a
+   path that runs at most once per minute.
+3. **MEDIUM — R3, an APNs `gone` never reached the rules.** Only the file was
+   compare-and-deleted, so the rules counted the slot live for ever: the
+   10-minute heartbeat kept going to a dead token, and F17/F18 had nowhere to
+   start. *Fix:* on `gone` the notifier now (a) marks a refused push-to-START
+   token dead (`deadStartTokens`, pruned when the record's token changes, and
+   filtered out of the candidate set — R3/F13), and (b) feeds the rules
+   `{type:"ended", reason:"ended"}` for the slot, then re-decides in the same
+   microtask (`live-activity-notifier.ts:387-421`, `:250-270`). `reason` is
+   `ended`, not `dismissed`: `gone` is the SYSTEM's ending, so F18's one
+   continuation start still applies; a person's dismissal is the app's own
+   `device/live_activity_ended`, unchanged (F17).
+4. **MEDIUM — R4, F3 did not converge for a dropped start.** The rules counted a
+   slot as live although the sink answered `unavailable`, so `resendAll` sent
+   `event:"update"` to a push-to-START token — which creates nothing.
+   *Fix:* a per-slot `confirmed` set, added only when the sink answers `sent`
+   (pruned with the slot, cleared by `reportEnded`/`stop`). A push for an
+   unconfirmed slot is a `start` at priority 10, whatever the rules called it;
+   an `end` for one is DROPPED (nothing on the phone to dismiss) with an audit
+   line (`live-activity-notifier.ts:306-322`, `:355-364`).
+
+**Tests (all written RED first, on the unfixed code, then green)**
+- `packages/daemon/test/live-activity-rules.test.ts`: the REMEMBERED set, an ask
+  while attached, and the per-session isolation (`s1` attached → only `s2`
+  starts). The three `tick` call sites that used to pass a set now use
+  `setAttached`, so the rules' own table reads in the new vocabulary.
+- `packages/daemon/test/live-activity-notifier.test.ts`: **13** new tests — R1 ×3
+  (timer, ask, and per-session through the real notifier, asserting the OPENED
+  content's `turnId`), R2 ×3 (late registration, switch back on, and the
+  `registerLiveActivity` → `registrationChanged` call over a real `Connection`),
+  R3 ×2 (no heartbeat to a dead token; a `gone` on an update → exactly one
+  continuation start, to the start token), R4 ×5 (dropped start resent as a
+  start; end-for-unconfirmed-slot dropped; re-sent start at priority 10; no
+  update before a token). The helper gained `status`/`registered`/`read` seams.
+  The per-session test failed twice more while I wrote it (a shared slot, then a
+  weak assertion) before it proved the right property.
+
+**Mutations (§9 non-vacuity, each applied to the finished code, run, reverted;
+`git status` clean afterwards)**
+
+| id | mutation | result |
+|---|---|---|
+| M1 | `setAttached` made a no-op (the old argument-only behaviour) | 7 fail: both rules attached tests, the REMEMBERED test, the per-session test, and **all three** notifier R1 tests |
+| M2 | `refreshRegistrations` returns early after the first call (the old flag) | 3 fail: both R2 tests + R3's dead-token test |
+| M3a | `gone` never fed to the rules | 1 fail: R3 continuation |
+| M3b | `gone` fed as `reason:"dismissed"` (F17 instead of F18) | 1 fail: R3 continuation |
+| M3c | M3a **and** the dead-token filter off | 2 fail: both R3 tests |
+| M4 | `neverDelivered` ignored (`event = command.kind`) | 3 fail: all three R4 tests that reach it |
+| M5 | `registerLiveActivity` does not call `registrationChanged` | 1 fail: the RPC-level R2 test |
+
+This is the mutation the review itself ran (its own `:444` → `new Set()`) and
+the one it reported as invisible (31/31 green): under M1 the same property is
+now caught at three levels — rules, shell, and the per-session isolation.
+
+**Drift from the Implementation.** None in Design. Two additions the plan did
+not spell out, both forced by a finding: `LiveActivityRules.setAttached` (the
+plan assumed `tick`'s argument was enough) and
+`LiveActivityNotifier.registrationChanged` (the plan assumed the comment was
+enough). `session-host.ts`'s `LiveActivityOptions.notifier` gained the second,
+optional. No protocol, persistence, wire or `changelog.d` change: this is a fix
+round on an unreleased feature, and `mobile-live-activity.added.md` already
+exists.
+
+**Gate (measured on the finished tree):** `bunx tsc --noEmit` → **exit 0** ·
+`bun run lint` → "Checked 1627 files in 490ms. No fixes applied" (0 errors, 0
+warnings — the §6 baseline) · `bun test` → **11645 pass, 5 skip, 0 fail**
+(11650 tests / 836 files, 422 s). The 5 skips are opt-in or root-only:
+`TENTACLE_K8S_SERVER` ×2, `TENTACLE_DOCKER_TESTS=1` ×2, `TENTACLE_SLOW_TESTS=1`
+×1, plus `packages/exec`'s `skipIf(isRoot)` set which does not run as non-root
+here — i.e. the documented baseline, no new skip.
+
+**Not verified by me:** the Swift/Maestro/device checks (L0, L10–L12) are
+unchanged by this round and still open per the Execution above.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-15*

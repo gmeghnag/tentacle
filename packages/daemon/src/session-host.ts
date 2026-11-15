@@ -368,6 +368,13 @@ export interface LiveActivityOptions {
   readonly notifier: {
     setUpdateToken(slot: string, token: string, deviceId: string): boolean;
     reportEnded(slot: string, reason: "dismissed" | "ended" | "stale"): boolean;
+    /**
+     * A registration was written: read the store again and re-decide now (fix
+     * round 1, R2). Optional so a test's stub need not implement it, and for the
+     * same reason as `onNotice` elsewhere: an absent one changes nothing about
+     * correctness, only how soon a late registration is seen.
+     */
+    registrationChanged?: () => void;
   };
   /**
    * What to say about a start right now: `relay-off` when there is no link,
@@ -656,6 +663,10 @@ export class SessionHost {
     }
     // The observer's registrations changed: a device that just registered must be
     // a start candidate from the next tick on, without waiting for a hook event.
+    // R2 (fix round 1): say so, or a phone that registers after `serve`'s first
+    // session event waits for a daemon restart — this comment promised it while
+    // the notifier read the store exactly once.
+    la.notifier.registrationChanged?.();
     const unavailable = la.status();
     if (unavailable !== undefined) {
       return { status: unavailable };

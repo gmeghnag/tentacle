@@ -89,7 +89,7 @@ describe("start: only a registered, NON-attached device, after the threshold", (
       const commands: LaCommand[] = [];
       commands.push(...feed(instance, turnStart()));
       advance(ms);
-      commands.push(...feed(instance, { type: "tick", attached: new Set() }));
+      commands.push(...feed(instance, { type: "tick" }));
       return commands.filter((c) => c.kind === "start");
     };
     expect(run(19_900)).toHaveLength(0);
@@ -97,7 +97,7 @@ describe("start: only a registered, NON-attached device, after the threshold", (
     const { instance: second, advance: adv2 } = rules();
     feed(second, turnStart());
     adv2(20_000);
-    const started = feed(second, { type: "tick", attached: new Set() });
+    const started = feed(second, { type: "tick" });
     expect(started.filter((c) => c.kind === "start")).toHaveLength(1);
   });
 
@@ -107,20 +107,77 @@ describe("start: only a registered, NON-attached device, after the threshold", (
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    const commands = feed(instance, { type: "tick", attached: new Set([DEVICE]) });
+    instance.setAttached(SESSION, new Set([DEVICE]));
+    const commands = feed(instance, { type: "tick" });
     expect(commands.filter((c) => c.kind === "start")).toHaveLength(0);
     // Excluded ONLY for that session's activity: the device is not attached to
     // anything else, so another session's start would still fire (not asserted
     // here; the per-(session, device) key is what the next test pins).
   });
 
+  test("the attached set is REMEMBERED per session, so a later tick still excludes it (R1)", () => {
+    // The bug (Review round 1, finding 1): the attached set existed only as
+    // `tick`'s argument, and the shell's own timer passed `new Set()` — so the
+    // start that the DEADLINE produced knew nothing about who was attached. The
+    // rules now remember what each session last reported.
+    const { instance, advance } = rules({ startAfterSeconds: 0 });
+    feed(instance, turnStart());
+    // The phone is attached to this session; the set arrives as its own event.
+    instance.setAttached(SESSION, new Set([DEVICE]));
+    advance(20_000);
+    expect(feed(instance, { type: "tick" }).filter((c) => c.kind === "start")).toHaveLength(0);
+    // …and the moment it detaches, the next tick starts one.
+    instance.setAttached(SESSION, new Set());
+    expect(feed(instance, { type: "tick" }).filter((c) => c.kind === "start")).toHaveLength(1);
+  });
+
+  test("an ask while the device is ATTACHED to that session starts nothing (R1)", () => {
+    // The mutation this kills: `permission_request` calling `startFor` with no
+    // attached check at all — the phone in the person's hand lights up for a
+    // sheet it is already showing (F16).
+    const { instance, advance } = rules();
+    feed(instance, turnStart());
+    advance(1_000);
+    instance.setAttached(SESSION, new Set([DEVICE]));
+    const commands = feed(instance, {
+      type: "permission_request",
+      sessionId: SESSION,
+      requestId: "req-1",
+      tool: "Shell",
+      preview: "rm -rf build",
+      options: [{ optionId: "allow_once", kind: "allow_once" }],
+    });
+    expect(commands.filter((c) => c.kind === "start")).toHaveLength(0);
+  });
+
+  test("the attached set is PER SESSION: session X's devices do not silence session Y (R1)", () => {
+    // The other half of finding 1: an `attachment` event from session X must not
+    // apply X's attached devices to every session's turns.
+    const { instance, advance } = rules({ startAfterSeconds: 0 });
+    feed(instance, turnStart());
+    feed(instance, {
+      type: "turn_start",
+      sessionId: "s2",
+      turnId: "t2",
+      computer: "mac-mini",
+      project: "tentacle",
+      title: "other session",
+      at: T0,
+    });
+    advance(1);
+    // D is attached to s1 only: s1 starts nothing, s2 still starts one.
+    instance.setAttached(SESSION, new Set([DEVICE]));
+    const starts = feed(instance, { type: "tick" }).filter(
+      (c) => c.kind === "start" && "sessionId" in c,
+    );
+    expect(starts.map((c) => ("sessionId" in c ? c.sessionId : ""))).toEqual(["s2"]);
+  });
+
   test("a device with no registration is never started for", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0, registered: false });
     feed(instance, turnStart());
     advance(1);
-    expect(
-      feed(instance, { type: "tick", attached: new Set() }).filter((c) => c.kind === "start"),
-    ).toHaveLength(0);
+    expect(feed(instance, { type: "tick" }).filter((c) => c.kind === "start")).toHaveLength(0);
   });
 
   test("a registered device whose switch is OFF is never started for", () => {
@@ -129,9 +186,7 @@ describe("start: only a registered, NON-attached device, after the threshold", (
     instance.setRegistrations(new Map([[DEVICE, { enabled: false }]]));
     feed(instance, turnStart());
     advance(1);
-    expect(
-      feed(instance, { type: "tick", attached: new Set() }).filter((c) => c.kind === "start"),
-    ).toHaveLength(0);
+    expect(feed(instance, { type: "tick" }).filter((c) => c.kind === "start")).toHaveLength(0);
   });
 
   test("an ask starts one IMMEDIATELY, even well before the threshold", () => {
@@ -166,14 +221,10 @@ describe("start: only a registered, NON-attached device, after the threshold", (
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    const first = feed(instance, { type: "tick", attached: new Set() }).filter(
-      (c) => c.kind === "start",
-    );
+    const first = feed(instance, { type: "tick" }).filter((c) => c.kind === "start");
     expect(first).toHaveLength(1);
     advance(1);
-    const second = feed(instance, { type: "tick", attached: new Set() }).filter(
-      (c) => c.kind === "start",
-    );
+    const second = feed(instance, { type: "tick" }).filter((c) => c.kind === "start");
     expect(second).toHaveLength(0);
   });
 });
@@ -183,7 +234,7 @@ describe("update: coalescing, and the states that move the view", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    feed(instance, { type: "tick", attached: new Set() }); // the start
+    feed(instance, { type: "tick" }); // the start
     const tool = (tool: string, ms: number): LaCommand[] => {
       advance(ms);
       return feed(instance, { type: "tool_call", sessionId: SESSION, turnId: "t1", tool }).filter(
@@ -212,7 +263,7 @@ describe("update: coalescing, and the states that move the view", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    feed(instance, { type: "tick", attached: new Set() });
+    feed(instance, { type: "tick" });
     const asking = feed(instance, {
       type: "permission_request",
       sessionId: SESSION,
@@ -245,7 +296,7 @@ describe("update: coalescing, and the states that move the view", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    feed(instance, { type: "tick", attached: new Set() });
+    feed(instance, { type: "tick" });
     // The START is a push and already carries the title, so a title change
     // 1 ms later is inside the window (the same rule as a tool call).
     advance(1);
@@ -274,16 +325,12 @@ describe("update: coalescing, and the states that move the view", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    feed(instance, { type: "tick", attached: new Set() });
+    feed(instance, { type: "tick" });
     // Nothing happens for 9m59s.
     advance(LA_HEARTBEAT_MS - 1);
-    expect(
-      feed(instance, { type: "tick", attached: new Set() }).filter((c) => c.kind === "update"),
-    ).toHaveLength(0);
+    expect(feed(instance, { type: "tick" }).filter((c) => c.kind === "update")).toHaveLength(0);
     advance(1);
-    const beat = feed(instance, { type: "tick", attached: new Set() }).filter(
-      (c) => c.kind === "update",
-    );
+    const beat = feed(instance, { type: "tick" }).filter((c) => c.kind === "update");
     expect(beat).toHaveLength(1);
     const command = beat[0];
     if (command?.kind === "update") {
@@ -314,7 +361,7 @@ describe("end: done / failed / cancelled, and the dismissal", () => {
       const { instance, advance } = rules({ startAfterSeconds: 0 });
       feed(instance, turnStart());
       advance(1);
-      feed(instance, { type: "tick", attached: new Set() });
+      feed(instance, { type: "tick" });
       advance(5_000);
       const ends = feed(instance, endOf(stopReason)).filter((c) => c.kind === "end");
       expect(ends).toHaveLength(1);
@@ -332,7 +379,7 @@ describe("end: done / failed / cancelled, and the dismissal", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    feed(instance, { type: "tick", attached: new Set() });
+    feed(instance, { type: "tick" });
     const ends = feed(instance, endOf("error", "the model returned 500")).filter(
       (c) => c.kind === "end",
     );
@@ -348,7 +395,7 @@ describe("end: done / failed / cancelled, and the dismissal", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    feed(instance, { type: "tick", attached: new Set() });
+    feed(instance, { type: "tick" });
     const ends = feed(instance, { type: "session_closed", sessionId: SESSION }).filter(
       (c) => c.kind === "end",
     );
@@ -366,7 +413,7 @@ describe("end: done / failed / cancelled, and the dismissal", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    feed(instance, { type: "tick", attached: new Set() });
+    feed(instance, { type: "tick" });
     expect(feed(instance, endOf("end_turn")).filter((c) => c.kind === "end")).toHaveLength(1);
     expect(
       feed(instance, { type: "session_closed", sessionId: SESSION }).filter(
@@ -389,9 +436,7 @@ describe("the 8 h cap (Owner Q5): rollover at 7 h 45 min", () => {
     });
     feed(instance, turnStart());
     advance(1);
-    const start = feed(instance, { type: "tick", attached: new Set() }).filter(
-      (c) => c.kind === "start",
-    );
+    const start = feed(instance, { type: "tick" }).filter((c) => c.kind === "start");
     expect(start).toHaveLength(1);
     const originalSlot = start[0]?.kind === "start" ? start[0].slot : "";
     expect(originalSlot).not.toBe("");
@@ -400,12 +445,12 @@ describe("the 8 h cap (Owner Q5): rollover at 7 h 45 min", () => {
     // Just before the rollover: no end and no start (heartbeats are expected —
     // 7h45m of silence produces plenty, and that is the feature working).
     advance(LA_ROLLOVER_MS - 2);
-    const beforeRollover = feed(instance, { type: "tick", attached: new Set() });
+    const beforeRollover = feed(instance, { type: "tick" });
     expect(beforeRollover.filter((c) => c.kind === "end" || c.kind === "start")).toHaveLength(0);
 
     // At the rollover: an end, then a start with a DIFFERENT slot.
     advance(2);
-    const commands = feed(instance, { type: "tick", attached: new Set() });
+    const commands = feed(instance, { type: "tick" });
     const ends = commands.filter((c) => c.kind === "end");
     const starts = commands.filter((c) => c.kind === "start");
     expect(ends).toHaveLength(1);
@@ -434,11 +479,11 @@ describe("the 8 h cap (Owner Q5): rollover at 7 h 45 min", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    feed(instance, { type: "tick", attached: new Set() });
+    feed(instance, { type: "tick" });
     advance(LA_ROLLOVER_MS - 10);
     feed(instance, { type: "turn_end", sessionId: SESSION, turnId: "t1", stopReason: "end_turn" });
     advance(20);
-    expect(feed(instance, { type: "tick", attached: new Set() })).toHaveLength(0);
+    expect(feed(instance, { type: "tick" })).toHaveLength(0);
   });
 });
 
@@ -447,15 +492,13 @@ describe("dismissed: never restarted for that turn", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    const starts = feed(instance, { type: "tick", attached: new Set() }).filter(
-      (c) => c.kind === "start",
-    );
+    const starts = feed(instance, { type: "tick" }).filter((c) => c.kind === "start");
     const slot = starts[0]?.kind === "start" ? starts[0].slot : "";
     feed(instance, { type: "ended", sessionId: SESSION, slot, reason: "dismissed" });
     advance(60_000);
     // Mutation: forget the dismissal → this starts a second activity the person
     // just swiped away.
-    expect(feed(instance, { type: "tick", attached: new Set() })).toHaveLength(0);
+    expect(feed(instance, { type: "tick" })).toHaveLength(0);
     // The NEXT turn may start one: the dismissal is per turn, not per session.
     feed(instance, {
       type: "turn_start",
@@ -467,26 +510,20 @@ describe("dismissed: never restarted for that turn", () => {
       at: T0 + 61_000,
     });
     advance(1);
-    expect(
-      feed(instance, { type: "tick", attached: new Set() }).filter((c) => c.kind === "start"),
-    ).toHaveLength(1);
+    expect(feed(instance, { type: "tick" }).filter((c) => c.kind === "start")).toHaveLength(1);
   });
 
   test("a system end (`ended` / `stale`) does not block the next start either", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());
     advance(1);
-    const starts = feed(instance, { type: "tick", attached: new Set() }).filter(
-      (c) => c.kind === "start",
-    );
+    const starts = feed(instance, { type: "tick" }).filter((c) => c.kind === "start");
     const slot = starts[0]?.kind === "start" ? starts[0].slot : "";
     feed(instance, { type: "ended", sessionId: SESSION, slot, reason: "stale" });
     advance(1);
     // `stale` is not a dismissal: the rules may start a fresh one for the SAME
     // turn (F18's "one continuation start" after iOS ended it first).
-    const again = feed(instance, { type: "tick", attached: new Set() }).filter(
-      (c) => c.kind === "start",
-    );
+    const again = feed(instance, { type: "tick" }).filter((c) => c.kind === "start");
     expect(again).toHaveLength(1);
   });
 });
@@ -506,7 +543,7 @@ describe(`the per-device cap (${LA_MAX_LIVE_PER_DEVICE} live, Owner Q3)`, () => 
         at: T0 + index,
       });
       advance(1);
-      feed(instance, { type: "tick", attached: new Set() });
+      feed(instance, { type: "tick" });
       advance(5_000);
       feed(instance, {
         type: "turn_end",
@@ -517,7 +554,7 @@ describe(`the per-device cap (${LA_MAX_LIVE_PER_DEVICE} live, Owner Q3)`, () => 
     }
     feed(instance, turnStart());
     advance(1);
-    const commands = feed(instance, { type: "tick", attached: new Set() });
+    const commands = feed(instance, { type: "tick" });
     const starts = commands.filter((c) => c.kind === "start");
     const ends = commands.filter((c) => c.kind === "end");
     // The new one starts AND the oldest done one is ended to make room.
@@ -543,11 +580,11 @@ describe(`the per-device cap (${LA_MAX_LIVE_PER_DEVICE} live, Owner Q3)`, () => 
         at: T0,
       });
       advance(1);
-      feed(instance, { type: "tick", attached: new Set() });
+      feed(instance, { type: "tick" });
     }
     feed(instance, turnStart());
     advance(1);
-    const commands = feed(instance, { type: "tick", attached: new Set() });
+    const commands = feed(instance, { type: "tick" });
     expect(commands.filter((c) => c.kind === "start")).toHaveLength(0);
     // The note is how it is never silent (F20).
     expect(commands.filter((c) => c.kind === "note")).toHaveLength(1);
@@ -566,7 +603,7 @@ describe("nextDeadlineAt: the one timer the shell owns", () => {
     // The threshold is the first deadline.
     expect(instance.nextDeadlineAt()).toBe(T0 + DEFAULT_LA_START_AFTER_SECONDS * 1_000);
     advance(DEFAULT_LA_START_AFTER_SECONDS * 1_000 + 1);
-    feed(instance, { type: "tick", attached: new Set() });
+    feed(instance, { type: "tick" });
     // Then the heartbeat, 10 min after the start.
     expect(instance.nextDeadlineAt()).toBe(
       T0 + DEFAULT_LA_START_AFTER_SECONDS * 1_000 + 1 + LA_HEARTBEAT_MS,
