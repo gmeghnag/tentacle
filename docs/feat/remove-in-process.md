@@ -734,3 +734,21 @@ behavioural gain; `localSession` is where its compatibility now lives);
 (b) the mid-turn refused set is now two commands, so that test's derived-expectation
 line asserts two plus "`/clear` is still in `SESSION_MUTATING`", rather than
 three.
+
+### Round 2
+
+**Verdict: PASS (APPROVE-WITH-NITS)** — diff `HEAD~1` (`11984995`).
+
+Gate: `bun run typecheck` clean; `bun run lint` clean (1377 files). Tree byte-clean after every mutation (`git status` empty).
+
+- **R1 finding 1 (TUI slice) — fixed.** `clear`/`sendNow`/`attachImage`/`imageInput` are required (`app-types.ts:66-118`). The `legacy` clear branch, `canSendNow`, `makeSession`/`swapSession` plumbing and the `--in-process` mention (`useDock.ts:411`) are gone. Production `startTui` callers (`main.ts:2145`, `connect.ts:223`) both pass `null` + `createSession`, so `localSession` is reached only by the test-only `agent` prop.
+- **R1 finding 2 (Goal untested) — fixed.** New `CliIO.startWorkerRuntime` seam (`main.ts:2081`). My mutation `return 1` → `return 0` (`main.ts:2091`) now **fails** the new `main.test.ts` row. Reverted.
+- **R1 finding 3 (compiled binary) — addressed by the executor's evidence.** It reports a pty session of `dist/tentacle` with 5 ready frames and 0 `in-process` lines. I did not re-run it.
+
+Nits (not blocking):
+
+1. `main.test.ts`'s "Ink is never mounted" check (`tuiStarted === false`) is vacuous. The local path calls the imported `startTui` directly (`main.ts:2145`), not `io.startTui`, so the injected spy can never be reached. The exit-1 check is what actually holds.
+2. `packages/tui/src/local-session.ts` has no direct test. My mutation of its `sendNow` refusal (`code: METHOD_NOT_FOUND` → `0`, `:55`) **survived** `send-now-app`/`app`/`clear`/`queue` (173 pass). This doesn't block because the adapter is dead in production (nit 1 of `Drift` (a)). It needs a test or deletion when the `agent` prop goes.
+
+Not done: no full `bun test` re-run (the executor reports 9939 pass / 4 opt-in skips). The executor's M2–M6 were not re-run. I tried to make `clear`/`sendNow` optional again to check `tsc` rejects it, but that command was blocked by the permission prompt, so it was not run.
+*— claude-opus-5-5, 2026-11-15*
