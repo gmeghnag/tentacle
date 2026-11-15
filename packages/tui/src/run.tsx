@@ -70,7 +70,7 @@ export interface TuiOptions {
   readonly sessions?: SessionDirectory;
   /**
    * Voice dictation settings (docs/feat/voice-dictation.md). Absent: the TUI's
-   * own defaults (`VOICE_DEFAULTS`) — enabled, Ctrl+R, no auto-stop.
+   * own defaults (`VOICE_DEFAULTS`) — OFF, Ctrl+R, no auto-stop.
    */
   readonly voice?: VoiceConfig;
   /**

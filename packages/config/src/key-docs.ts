@@ -876,15 +876,16 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     carried: "no",
   },
   "voice.enabled": {
-    summary: "Whether Ctrl+R dictates at all.",
+    summary:
+      "Whether the terminal's voice features (Ctrl+R dictation; conversation mode later) are on. Off by default.",
     kind: "leaf",
     type: "boolean",
     scope: "both",
     carried: "no",
-    default: () => true,
+    default: () => false,
     details:
-      "Off: the key shows a one-line notice and the helper is never spawned (no mic is opened). A local input device of this Mac — never carried to a pod.",
-    example: "false",
+      'Off by default: set `voice: { "enabled": true }` to turn it on, and the key (Ctrl+R unless rebound) dictates. While off the key shows a one-line notice and the helper is never spawned (no mic is opened). A local input device of this Mac — never carried to a pod.',
+    example: "true",
   },
   "voice.key": {
     summary: "The key that starts and finishes a dictation.",

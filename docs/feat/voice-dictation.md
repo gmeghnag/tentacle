@@ -90,6 +90,8 @@ The threshold sweep that S1 runs is pasted in the Appendix (`sweep.py`). It coul
 | listening or transcribing | **Esc** | cancel and discard; nothing is inserted |
 | listening | typing | allowed; the transcript is inserted at the cursor when it arrives |
 
+Voice ships **off by default** (`feat/voice-off-by-default`): the key is live only with `voice.enabled: true` in the config, and while off it shows `voice is off — set "voice": { "enabled": true } in the config` instead of opening the mic.
+
 While dictating, the field shows a one-line voice strip: `● listening 0:07 ▁▃▅ [it]` → `… transcribing`, plus the partial preview dimmed. Rendering it is presentation only (`voice-view.ts` computes it).
 
 **2. Helper: `tentacle-voice`, one Swift binary** (`native/voice-mac/`, SwiftPM), macOS 14+, Apple Silicon:
@@ -192,7 +194,7 @@ Not found → a notice naming the build command. A signed and notarised download
 
    ```ts
    voice: {
-     enabled?: boolean;          // default true on darwin
+     enabled?: boolean;          // default FALSE (feat/voice-off-by-default)
      key?: "ctrl+r" | …;
      language?: "auto" | "it" | "en";
      autoStop?: boolean;         // default false
