@@ -395,7 +395,9 @@ describe("OD1: a proposal's namespace is pinned before the owner is asked", () =
     // What the owner read: `ns/pod/container` and WHY that namespace.
     expect(asked[0]?.detail).toContain("kubernetes:ns-A/etcd-0/etcdctl");
     expect(asked[0]?.detail).toContain("namespace ns-A (from context; context c, /k)");
-    // What would be BUILT: the very spec that was shown (the pin, not a re-read).
+    // What would be BUILT: the very spec that was shown (the pin, not a re-read),
+    // AND the pin's provenance — the build must state WHY that namespace, and it
+    // cannot re-resolve it (that answers `explicit`; fix round 2, finding 1).
     expect(outcome).toEqual({
       kind: "approved",
       spec: {
@@ -403,7 +405,64 @@ describe("OD1: a proposal's namespace is pinned before the owner is asked", () =
         workload: { engine: "kubernetes", namespace: "ns-A", name: "etcd-0", container: "etcdctl" },
         keep: true,
       },
+      namespace: pinned,
     });
+  });
+
+  test("the pin's provenance really reaches `facade.hop` (feed → facade)", async () => {
+    // The App's ONE path from an approval to a build is `HopFeed.start`; the fact
+    // has to survive it, and a lambda with fewer parameters type-checks while
+    // silently dropping it (the `hopBuilder` lesson, H5 round 2). So this row reads
+    // what the FACADE was told.
+    // RED before the fix: the approved outcome carried no `namespace` at all.
+    // Mutation: drop the `opts?.namespace` step in `HopFeed.start` → the facade
+    // sees `{}` here.
+    const pinned = {
+      namespace: "openshift-etcd",
+      source: "context" as const,
+      kubeconfig: "/k",
+      context: "c",
+    };
+    const handed: Array<{ gateAnswered?: true; namespace?: unknown }> = [];
+    const view = createHopFeed({
+      facade: {
+        current: () => ({}) as never,
+        target: () => ({ place: { kind: "local" }, daemonInPod: false }),
+        onTarget: () => () => {},
+        createSession: () => ({}) as never,
+        hop: async (_spec: HopSpec, _id: string | null, opts: never) => {
+          handed.push(opts);
+          return MOVED_LOCAL;
+        },
+      } as never,
+      place: () => ({ kind: "local" }),
+      permissions: { request: async () => ({ allowed: true, scope: "once" }) } as never,
+      pinNamespace: (spec) =>
+        spec.target === "attach"
+          ? {
+              kind: "pinned",
+              spec: { ...spec, workload: { ...spec.workload, namespace: "openshift-etcd" } },
+              namespace: pinned,
+            }
+          : { kind: "pinned", spec },
+      promptFacts: () => ({}),
+    });
+    const { start: s, done: d } = call();
+    view.hop.turn?.(s, true);
+    view.hop.turn?.(d, true);
+    const outcome = await view.hop.turnEnd?.(true);
+    if (outcome?.kind !== "approved") {
+      throw new Error(`expected an approval, got ${outcome?.kind}`);
+    }
+    // The approval carries it, and `start` hands it on (the App passes exactly
+    // this shape: `useTurnDriver` → `useHop.startHop` → here).
+    expect(outcome.namespace).toEqual(pinned);
+    await view.hop.start(outcome.spec, "uid-1", {
+      ...(outcome.gateAnswered === true ? { gateAnswered: true as const } : {}),
+      ...(outcome.namespace === undefined ? {} : { namespace: outcome.namespace }),
+    }).done;
+    // No gate facts in this rig, so `gateAnswered` is absent — the pin rides alone.
+    expect(handed).toEqual([{ namespace: pinned }]);
   });
 
   test("a pin that FAILS asks nothing, and TELLS the model (failure mode 1, OD6)", async () => {

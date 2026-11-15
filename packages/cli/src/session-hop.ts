@@ -17,6 +17,7 @@
  */
 import type { LoadResult, SessionRecord } from "@tentacle/agent";
 import type { HopSpec } from "@tentacle/tui";
+import type { KubeNamespace } from "./engine-select.ts";
 import { type HopPlace, ownUidVerdict, placeText } from "./hop-plan.ts";
 import type { HopFolderFate } from "./hop-turn.ts";
 import type { LocalRuntime, PersistingController } from "./local-runtime.ts";
@@ -83,6 +84,13 @@ export interface HopRequest {
    * (H5 review finding 2). A typed `/move` never sets it.
    */
   readonly gateAnswered?: true;
+  /**
+   * OD3: the PROVENANCE of the namespace the spec was PINNED with (a proposal's
+   * turn-end resolution). It rides the request so the build states WHY, instead
+   * of re-resolving the value the pin already wrote — a re-resolution always
+   * answers `explicit`, which hid the real source (fix round 2, finding 1).
+   */
+  readonly namespace?: KubeNamespace;
 }
 
 export interface HopDeps {
@@ -95,7 +103,7 @@ export interface HopDeps {
   readonly build: (
     spec: HopSpec,
     sessionId: string,
-    opts: { readonly gateAnswered?: true },
+    opts: { readonly gateAnswered?: true; readonly namespace?: KubeNamespace },
   ) => Promise<HopBuild>;
   /** The laptop record of a uid — the seed (`LogSessionStore.load`). */
   readonly load: (uid: string) => Promise<LoadResult>;
@@ -179,6 +187,7 @@ export async function hopSession(
   deps.status?.(`moving to ${targetText(spec)} — preparing the target`);
   const built = await deps.build(spec, sessionId, {
     ...(request.gateAnswered === true ? { gateAnswered: true as const } : {}),
+    ...(request.namespace === undefined ? {} : { namespace: request.namespace }),
   });
   if (built.kind === "failed") {
     return { kind: "failed", notice: built.notice };

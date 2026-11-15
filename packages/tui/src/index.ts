@@ -30,6 +30,7 @@ export {
   HOP_USAGE,
   HOP_WORKLOAD_PART_MAX,
   type HopEngine,
+  type HopNamespace,
   type HopParse,
   type HopSpec,
   type HopStep,

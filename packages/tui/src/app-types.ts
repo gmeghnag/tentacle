@@ -10,7 +10,7 @@ import type { JobOutputResult, JobRow } from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
-import type { HopSpec } from "./hop-command.ts";
+import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import type { AutoAcceptFeed } from "./permission-ui.ts";
@@ -329,7 +329,11 @@ export interface HopFeed {
    * owner approved a PROPOSAL whose prompt already carried the mount gate's
    * warning (D9/M6), so the build must not ask a second time.
    */
-  start(spec: HopSpec, sessionId: string | null, opts?: { gateAnswered?: true }): HopRun;
+  start(
+    spec: HopSpec,
+    sessionId: string | null,
+    opts?: { gateAnswered?: true; namespace?: HopNamespace },
+  ): HopRun;
   /**
    * Abort the hop in flight (D3's `/move cancel`). Optional: a host that cannot
    * stop a build half-way leaves it to its own failure path, and the App then
@@ -387,12 +391,17 @@ export type HopProposalView =
   /**
    * `gateAnswered`: the prompt this Yes answered already carried the mount gate's
    * warning. `autoAccepted`: NO prompt was shown (auto-accept answered it, OD4).
+   * `namespace`: k8s only, the pin's PROVENANCE (OD3) — the answer the turn end
+   * resolved, carried to the build so the row and the outcome state WHY that
+   * namespace instead of re-resolving (a re-resolution always says `explicit`,
+   * fix round 2 finding 1).
    */
   | {
       readonly kind: "approved";
       readonly spec: HopSpec;
       readonly gateAnswered?: true;
       readonly autoAccepted?: true;
+      readonly namespace?: HopNamespace;
     }
   | { readonly kind: "declined" }
   /** The pin or the ask could not be made at all (a kubeconfig with no context): nothing moved. */

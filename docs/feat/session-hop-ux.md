@@ -903,3 +903,77 @@ Remaining finding:
 Regressions checked, none found: auto-accept/broker paths are unchanged by this diff. `restoreLine` keeps a newer pending fact rather than overwriting it, and `/clear` clears `taken`. `hopReady` is read at settle time, so a held line still rides the next real prompt.
 
 *— claude-opus-5-5, 2026-11-15*
+
+### Fix round 2
+
+Round 1 fixed findings 1–3 and only partly fixed 4; round 2's review of that
+work reduced it to ONE remaining MEDIUM. It is fixed here, and the round-1
+residual is closed.
+
+*— claude-opus-5-5, 2026-11-15*
+
+**1 (MEDIUM) the pin's provenance was re-resolved into `explicit` — FIXED.**
+
+*Root cause (one sentence).* `pinNamespace` resolved the namespace at the turn's
+end and wrote the VALUE into the spec, but the PROVENANCE was dropped at the
+turn's end — so `hopEngineHost` had nothing to report and called
+`kubeNamespace({namespace: <the pin's value>})` again, and that function answers
+`explicit` for any value handed to it (`engine-select.ts:530-532`). A pinned spec
+then said `from explicit` on the row and the outcome, and a miss printed no
+`(from …)` at all, because `attachMissNotice` skipped it whenever
+`workload.namespace` was set — which a pin always sets.
+
+*Mechanical proof of the trap* (`.tentacle/tmp/session-hop-ux/r2/pin2.ts`, run on
+this branch):
+
+```
+pin:                         {"namespace":"openshift-etcd","source":"context","kubeconfig":"…/kc.yaml","context":"c"}
+build (re-resolve the pin):  {"namespace":"openshift-etcd","source":"explicit"}
+```
+
+*Fix — carry the pin, never re-resolve it.* The provenance now travels the SAME
+way the spec does, as one typed fact:
+
+| Seam | Change |
+|---|---|
+| `tui/src/hop-command.ts` | new `HopNamespace` (source/context/kubeconfig). `cli/src/engine-select.ts`'s `KubeNamespace` is now an ALIAS of it, so the two cannot drift |
+| `cli/src/hop-feed.ts` | the `approved` view carries `pin.namespace`; `HopFeed.start` forwards `opts.namespace` to `facade.hop` |
+| `tui/src/app-types.ts` | `HopProposalView.approved.namespace?`; `HopFeed.start(…, opts.namespace?)` |
+| `tui/src/useTurnDriver.ts`, `useHop.ts`, `App.tsx` | the approval's opts object is built ONCE and forwarded (the `hopBuilder` lesson: a narrower lambda type-checks and silently drops it) |
+| `cli/src/hop-runtime.ts`, `session-hop.ts` | `opts.namespace` → `HopRequest.namespace` → the build's opts |
+| `cli/src/hop-targets.ts` | `HopBuildOpts.namespace`; `attachTarget` takes it, and new `dialledProvenance` = `opts.namespace ?? target.namespace`. `HopHostWhere.provenance` rides to the host builder; `attachMissNotice` now takes the PROVENANCE (not the target) and prints `(from …)` whenever one exists |
+| `cli/src/main.ts` | `hopEngineHost` delegates the decision to the new pure `hopHostNamespace` |
+
+*Why `hopHostNamespace` is a separate function.* `main.hopEngineHost` is
+unreachable from a test, and a mutation of its `where.provenance` branch survived
+the WHOLE narrow suite — the exact reason AGENTS §7 wants this kind of decision in
+a pure, tested module. It is now `hopTargets.ts`'s, with a table row.
+
+**Tests (each shown RED on the buggy code first, then green).**
+
+| Where | Property | RED evidence |
+|---|---|---|
+| `cli/test/session-hop-targets.test.ts` — "a PINNED proposal keeps the pin's provenance" | the build is TOLD the pin, and BOTH the row and the miss say `(from context …)`, never `explicit` | mutation `dialledProvenance` → `target.namespace`: `Received: "moving to kubernetes:openshift-etcd/etcd-0 — attaching (namespace openshift-etcd (from explicit))"` |
+| `cli/test/session-hop-targets.test.ts` — "hopHostNamespace: a pin's provenance WINS" | the pure decision: a pin is used as it is (the kubeconfig is not even read); nothing pinned ⇒ resolve; not k8s ⇒ none | mutation `return where.provenance` → `undefined`: FAIL |
+| `cli/test/hop-feed-turn.test.ts` — "the request AND the approved spec carry the resolved namespace" | the approval now also carries `namespace` (the existing row tightened to `toEqual`) | it failed on the un-annotated outcome before the fix |
+| `cli/test/hop-feed-turn.test.ts` — "the pin's provenance really reaches `facade.hop`" | feed → facade: `HopFeed.start` hands it on | mutation: drop the `opts?.namespace` step in `hop-feed.ts` ⇒ FAIL |
+| `cli/test/session-hop.test.ts` — "OD3: the k8s provenance…" (extended) | facade → `hopSession` → the factory: the factory's `opts.namespace` is the pin | mutations: drop `request.namespace` (`session-hop.ts`) ⇒ FAIL; drop `opts?.namespace` (`hop-runtime.ts`) ⇒ FAIL |
+| `cli/test/hop-proposal-app.test.tsx` — "the pin's provenance reaches the build from a REAL App turn" | the TUI half end to end (`useTurnDriver` → `useHop.startHop` → `hop.start`), driven by a real App turn | mutations: drop it in `useTurnDriver`'s approved branch ⇒ FAIL; drop it in `startHop` ⇒ FAIL |
+
+*Drift from the Implementation.* None of the Design's decisions changed; this is
+plumbing the Design left unnamed (it said the pin "is written into
+`spec.workload.namespace`" and never said where the SOURCE goes). Two choices are
+worth recording: (a) `HopBuildOpts.namespace` is the PROVENANCE, not a second copy
+of the value — the value stays in the spec (OD1's "dial what was shown"), and the
+build must not invent either; (b) `HopHostWhere.provenance` means `hopEngineHost`
+does not read the kubeconfig at all for a pinned proposal, which is strictly
+stronger than OD1 (a kubeconfig edited mid-hop cannot even change the WORDING).
+
+*Unverified.* Same as round 1: no live OpenShift cluster here. What would be seen
+there is now pinned by fakes: a model that omits `namespace` under auto-accept
+produces a row and a wake line reading `namespace openshift-etcd (from context;
+context <ctx>, <path>)`, and a 404 repeats `(from context)`.
+
+*Gate.* `bunx tsc --noEmit` clean · `bun run lint` clean (1383 files, 0 errors /
+0 warnings — the §6 baseline) · `bun test` **10045 pass, 4 skip, 0 fail** (the 4
+skips are the documented opt-ins: live-k8s, live-docker ×2, slow-socket).

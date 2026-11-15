@@ -39,6 +39,7 @@ import { type MutableRefObject, useCallback, useRef, useState } from "react";
 import type { HopFeed, HopPlaceView, SessionController } from "./app-types.ts";
 import {
   HOP_QUEUED_NOTICE,
+  type HopNamespace,
   type HopSpec,
   hopReady,
   hopStep,
@@ -86,7 +87,11 @@ export interface HopHost {
    * App declares it above this hook, and this hook assigns it.
    */
   readonly startHopRef: MutableRefObject<
-    ((spec: HopSpec, opts?: { gateAnswered?: true; autoAccepted?: true }) => void) | null
+    | ((
+        spec: HopSpec,
+        opts?: { gateAnswered?: true; autoAccepted?: true; namespace?: HopNamespace },
+      ) => void)
+    | null
   >;
   /**
    * OD6: the ONE way a turn starts without typing (`run`, the driver's), used to
@@ -181,7 +186,10 @@ export function useHop(host: HopHost): HopLayer {
    * host's (`HopFeed`): the App never builds a runtime.
    */
   const startHop = useCallback(
-    (spec: HopSpec, opts?: { gateAnswered?: true; autoAccepted?: true }): void => {
+    (
+      spec: HopSpec,
+      opts?: { gateAnswered?: true; autoAccepted?: true; namespace?: HopNamespace },
+    ): void => {
       if (!hop) {
         return;
       }

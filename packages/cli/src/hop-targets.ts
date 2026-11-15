@@ -26,7 +26,12 @@ import type { TentacleConfig } from "./config.ts";
 import { WorkloadNotFoundError } from "./engine-host.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { attachEngineRuntime, startEngineRuntime } from "./engine-runtime.ts";
-import { type KubeNamespace, engineNoun, laptopWorkspaceInput } from "./engine-select.ts";
+import {
+  type KubeNamespace,
+  engineNoun,
+  kubeNamespace,
+  laptopWorkspaceInput,
+} from "./engine-select.ts";
 import { type HopLiveLine, createHopLiveLine } from "./hop-live-line.ts";
 import { type AttachVerdict, attachVerdict } from "./hop-plan.ts";
 import type { HopPlace } from "./hop-plan.ts";
@@ -112,6 +117,39 @@ export interface HopTargetDeps {
 export interface HopHostWhere {
   /** k8s only: the namespace a `pinNamespace`/typed `/move` resolved and the owner saw. */
   readonly namespace?: string;
+  /**
+   * OD3: the PROVENANCE of `namespace` when a `pinNamespace` resolved it — the
+   * host is built from THIS rather than by re-resolving, which would answer
+   * `explicit` and present OD2's decision as the owner's own namespace (fix
+   * round 2, finding 1). Absent: nothing pinned it, so the host resolves it.
+   */
+  readonly provenance?: KubeNamespace;
+}
+
+/**
+ * OD3: the namespace to pin into a hop's engine host, with its provenance — the
+ * ONE decision `main.hopEngineHost` makes (extracted so it is testable at all;
+ * `main` is dispatch, not logic).
+ *
+ * A namespace a `pinNamespace` already resolved MUST NOT be re-resolved here:
+ * `kubeNamespace({ namespace })` answers `explicit` for any value handed to it, so
+ * re-resolving the pinned value turns OD2's decision into "the owner typed this",
+ * and a miss then has no `(from …)` to show (fix round 2, finding 1). The pin's
+ * own `KubeNamespace` therefore wins outright; only a hop that pinned nothing
+ * resolves, exactly as `run`/`attach` do.
+ */
+export function hopHostNamespace(
+  engine: EngineKind,
+  where: HopHostWhere | undefined,
+  resolve: (options: HopHostWhere) => KubeNamespace = kubeNamespace,
+): KubeNamespace | undefined {
+  if (engine !== "kubernetes") {
+    return undefined;
+  }
+  if (where?.provenance !== undefined) {
+    return where.provenance;
+  }
+  return resolve(where ?? {});
 }
 
 /**
@@ -123,6 +161,15 @@ export interface HopHostWhere {
 export interface HopBuildOpts {
   /** The owner approved a prompt that already showed this gate's warning. */
   readonly gateAnswered?: true;
+  /**
+   * OD3: k8s only — the PROVENANCE (source/context/kubeconfig) of the namespace
+   * this spec was pinned with. The spec's own `workload.namespace` is the VALUE
+   * to dial (OD1); this is only how it is said. Without it the build would have
+   * to re-resolve, and `kubeNamespace({namespace})` always answers `explicit` —
+   * the trace would then name the pin as if the owner had typed it (fix round 2,
+   * finding 1).
+   */
+  readonly namespace?: KubeNamespace;
 }
 
 /**
@@ -130,8 +177,9 @@ export interface HopBuildOpts {
  * ONE place the hop's `opts` is carried from the owner's answer to the factory
  * (H5 review round 2, finding 1). Written here, not as a lambda at the call
  * site, because this forwarding is INVISIBLE to the compiler — a lambda with
- * fewer parameters type-checks and then silently drops `gateAnswered`, which
- * costs the owner a second prompt for a gate they already answered.
+ * fewer parameters type-checks and then silently drops `gateAnswered` (or the
+ * pin's `namespace`, fix round 2 finding 1), which costs the owner a second
+ * prompt for a gate they already answered, or a trace that lies.
  */
 export function hopBuilder(deps: Omit<HopTargetDeps, "shared">): HopRuntimeDeps["build"] {
   return (spec, shared, sessionId, opts) =>
@@ -149,7 +197,7 @@ export function createHopTargets(deps: HopTargetDeps) {
       return workerTarget(deps, sessionId);
     }
     if (spec.target === "attach") {
-      return attachTarget(deps, spec.workload, sessionId);
+      return attachTarget(deps, spec.workload, sessionId, opts);
     }
     return containerTarget(deps, spec.image, sessionId, opts);
   };
@@ -388,6 +436,7 @@ async function attachTarget(
   deps: HopTargetDeps,
   workload: HopWorkload,
   sessionId: string,
+  opts: HopBuildOpts = {},
 ): Promise<HopBuild> {
   const { config } = deps;
   // D7(a) BEFORE any dial (nothing is inspected, nothing injected into a
@@ -404,10 +453,13 @@ async function attachTarget(
   try {
     // OD1: dial the namespace that was SHOWN, never a fresh resolution — a
     // kubeconfig that changed since the prompt approved a place cannot move it.
-    target = deps.host(
-      workload.engine,
-      workload.namespace === undefined ? {} : { namespace: workload.namespace },
-    );
+    // OD3: and when a PIN resolved it, hand its provenance over too, so the host
+    // reports where it came from instead of re-resolving the pinned value (which
+    // answers `explicit` — fix round 2, finding 1).
+    target = deps.host(workload.engine, {
+      ...(workload.namespace === undefined ? {} : { namespace: workload.namespace }),
+      ...(opts.namespace === undefined ? {} : { provenance: opts.namespace }),
+    });
   } catch (error) {
     return { kind: "failed", notice: `not moved: ${errorText(error, "no engine")}` };
   }
@@ -416,13 +468,18 @@ async function attachTarget(
   // the row, the badge, the moved line and the miss would all print
   // `kubernetes:<pod>` — a name that now READS as `ns/pod`, and a trace nobody
   // sees under auto-accept (no prompt is shown then).
-  const dialled = dialledWorkload(workload, target);
+  const provenance = dialledProvenance(workload, target, opts);
+  const dialled = dialledWorkload(workload, provenance);
+  // OD3 (fix round 2, finding 1): WHERE that namespace came from. A pinned
+  // proposal arrives with the pin's own provenance; re-resolving the value the
+  // pin wrote would say `explicit`, i.e. name the model's omission as if the
+  // owner had typed a namespace.
   // Design 1/OD3: the FIRST phase carries the provenance, so a live test answers
   // "why that namespace" from the row it is watching.
   deps.status(
-    target.namespace === undefined
+    provenance === undefined
       ? `moving to ${workloadText(dialled)} — attaching`
-      : `moving to ${workloadText(dialled)} — attaching (${namespaceTrace(target.namespace)})`,
+      : `moving to ${workloadText(dialled)} — attaching (${namespaceTrace(provenance)})`,
   );
   let runtime: LocalRuntime | undefined;
   try {
@@ -447,7 +504,7 @@ async function attachTarget(
     // A user-owned workload is never deleted, and nothing was created here.
     return {
       kind: "failed",
-      notice: attachMissNotice(workload, target, error),
+      notice: attachMissNotice(workload, provenance, error),
     };
   }
   // D7(b): the handshake is done and NOTHING is open yet (a runtime opens its
@@ -478,7 +535,7 @@ async function attachTarget(
       // OD3: the provenance the outcome line states. Under auto-accept NO prompt
       // is shown and a typed `/move` never asks, so the recorded line is the only
       // place a live test can read WHY this namespace was dialled.
-      ...(target.namespace === undefined ? {} : { trace: namespaceTrace(target.namespace) }),
+      ...(provenance === undefined ? {} : { trace: namespaceTrace(provenance) }),
     },
   };
 }
@@ -497,18 +554,44 @@ function d7Refusal(verdict: AttachVerdict): HopBuild | null {
  * own grammar is the fix, `kubernetes:<namespace>/<pod>`, and the namespace is
  * named so a wrong default is obvious. Everything else keeps its own message.
  */
-function attachMissNotice(workload: HopWorkload, target: HopEngineHost, error: unknown): string {
+function attachMissNotice(
+  workload: HopWorkload,
+  provenance: KubeNamespace | undefined,
+  error: unknown,
+): string {
   if (workload.engine === "kubernetes" && error instanceof WorkloadNotFoundError) {
-    const namespace = workload.namespace ?? target.namespace?.namespace ?? "default";
+    const namespace = workload.namespace ?? provenance?.namespace ?? "default";
     // Design 7: the miss repeats OD3's provenance (`(from <source>)`), so the
-    // transcript explains a wrong default even when nothing was prompted for.
-    const from =
-      workload.namespace !== undefined || target.namespace === undefined
-        ? ""
-        : ` (from ${namespaceSource(target.namespace)})`;
+    // transcript explains a wrong default even when nothing was prompted for —
+    // and it says it for a PINNED spec too (fix round 2, finding 1: the pin used
+    // to arrive as `explicit`, which read as the owner's own choice).
+    const from = provenance === undefined ? "" : ` (from ${namespaceSource(provenance)})`;
     return `not moved: no pod "${untrustedText(workload.name)}" in namespace "${untrustedText(namespace)}"${from} — name its namespace: /move attach kubernetes:<namespace>/${untrustedText(workload.name)}`;
   }
   return `not moved: ${errorText(error, "the workload could not be joined")}`;
+}
+
+/**
+ * OD3: the PROVENANCE of the namespace an attach dials, or `undefined` when there
+ * is nothing honest to say (not k8s, or a host that resolved none).
+ *
+ * The build does NOT re-resolve it: the spec of a pinned proposal already carries
+ * the value, and `kubeNamespace({ namespace })` answers `explicit` for it — the
+ * trace would then present OD2's decision as the owner's own namespace, and a
+ * miss would show no `(from …)` at all (fix round 2, finding 1). So the pin's own
+ * `KubeNamespace` rides `opts.namespace` (a proposal, `session-hop` → this build)
+ * and the host's own answer covers a typed `/move`. A workload that NAMED its
+ * namespace is `explicit` by definition — that one the host may say.
+ */
+function dialledProvenance(
+  workload: HopWorkload,
+  target: HopEngineHost,
+  opts: HopBuildOpts,
+): KubeNamespace | undefined {
+  if (workload.engine !== "kubernetes") {
+    return undefined;
+  }
+  return opts.namespace ?? target.namespace;
 }
 
 /**
@@ -517,8 +600,11 @@ function attachMissNotice(workload: HopWorkload, target: HopEngineHost, error: u
  * host's resolution reports. A `kubernetes:<pod>` typed `/move` therefore gets the
  * namespace OD2 decided, so its label is `kubernetes:<ns>/<pod>`.
  */
-function dialledWorkload(workload: HopWorkload, target: HopEngineHost): HopWorkload {
-  const namespace = workload.namespace ?? target.namespace?.namespace;
+function dialledWorkload(
+  workload: HopWorkload,
+  provenance: KubeNamespace | undefined,
+): HopWorkload {
+  const namespace = workload.namespace ?? provenance?.namespace;
   return namespace === undefined || workload.engine !== "kubernetes"
     ? workload
     : { ...workload, namespace };

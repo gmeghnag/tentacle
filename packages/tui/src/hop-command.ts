@@ -26,6 +26,24 @@ export interface HopWorkload {
 }
 
 /**
+ * OD3: WHERE a k8s namespace came from, so a hop can say why it dialled that one
+ * (`namespace <ns> (from <source>; context <c>, <path>)`) even where no prompt is
+ * shown — under auto-accept, and for a miss. The SAME shape as the cli's
+ * `KubeNamespace` (which aliases it): it must ride the hop's own plumbing
+ * (`HopProposalView` → `HopFeed.start`), because a build that RE-resolves it
+ * would report `explicit` — its input is the value the pin wrote into the spec
+ * (fix round 2, finding 1).
+ */
+export interface HopNamespace {
+  readonly namespace: string;
+  readonly source: "explicit" | "env" | "context" | "default" | "server";
+  /** The kubeconfig consulted, when one was (never with an `explicit`/`env` answer). */
+  readonly kubeconfig?: string;
+  /** The context consulted, when one was. */
+  readonly context?: string;
+}
+
+/**
  * One hop, with every default resolved (`keep` defaults to true, decision 5).
  * The shape is the `move_session` tool's input after parsing (D9), so a typed
  * `/move` and a proposed move are the same thing everywhere downstream.

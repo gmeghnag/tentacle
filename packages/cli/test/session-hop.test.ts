@@ -1590,11 +1590,22 @@ describe("fix1 MEDIUM: a throw before the commit still rolls the target back", (
     const uid = ctl.sessionId;
     if (!uid) throw new Error("no uid");
 
+    const pin = {
+      namespace: "ns-ctx",
+      source: "context" as const,
+      kubeconfig: "/home/me/.kube/config",
+      context: "ctx-1",
+    };
     const hop = createHopRuntime({
       initial,
       startup: { place: { kind: "local" }, daemonInPod: false },
       shared,
-      build: async (_spec, _shared, id): Promise<HopBuild> => {
+      build: async (_spec, _shared, id, opts): Promise<HopBuild> => {
+        // Fix round 2: the PIN's provenance must reach the factory, or the build
+        // re-resolves the pinned value and reports `explicit`. Mutation: drop the
+        // `request.namespace` step in `session-hop.ts` or the `opts?.namespace`
+        // one in `hop-runtime.ts` → this is undefined and the row fails.
+        expect(opts.namespace).toEqual(pin);
         const loaded = await store.load(id);
         return {
           kind: "built",
@@ -1619,6 +1630,7 @@ describe("fix1 MEDIUM: a throw before the commit still rolls the target back", (
     const outcome = await hop.hop(
       { target: "attach", workload: { engine: "kubernetes", name: "web-0" }, keep: true },
       uid,
+      { namespace: pin },
     );
     expect(outcome.kind).toBe("moved");
     const note = outcome.kind === "moved" ? (outcome.note ?? "") : "";

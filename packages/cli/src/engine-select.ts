@@ -39,6 +39,7 @@ import {
   loadKubeClientOptions,
   parseKubeconfig,
 } from "@tentacle/k8s";
+import type { HopNamespace } from "@tentacle/tui";
 import { type DockerClientLike, dockerEngineHost } from "./engine-docker.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { type PodCluster, kubeEngineHost } from "./engine-k8s.ts";
@@ -492,14 +493,13 @@ function nodeCaseFs(): CaseFs {
  * repeat, so a live test can answer "why THAT namespace" from the transcript
  * (docs/feat/session-hop-ux design 1, OD3).
  */
-export interface KubeNamespace {
-  readonly namespace: string;
-  readonly source: "explicit" | "env" | "context" | "default" | "server";
-  /** The kubeconfig consulted, when one was (never with an `explicit`/`env` answer). */
-  readonly kubeconfig?: string;
-  /** The context consulted, when one was. */
-  readonly context?: string;
-}
+/**
+ * THE namespace rule's answer, with its provenance (OD3). The shape lives in
+ * `@tentacle/tui` (`HopNamespace`) because it rides the hop's TUI-facing
+ * plumbing too (`HopProposalView` → `HopFeed.start` → the build); this is the
+ * same type under the cli's own name, never a second copy.
+ */
+export type KubeNamespace = HopNamespace;
 
 /** The kubeconfig path `@tentacle/k8s` would read (KUBECONFIG's first entry, else `~/.kube/config`). */
 function kubeconfigPath(env: EngineHostIO["env"], homeDir: string): string {

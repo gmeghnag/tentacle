@@ -48,7 +48,12 @@ import { WorkloadNotFoundError } from "../src/engine-host.ts";
 import type { EngineRuntime } from "../src/engine-runtime.ts";
 import type { KubeNamespace } from "../src/engine-select.ts";
 import { type HopLeaveDeps, createHopLeave } from "../src/hop-leave.ts";
-import { type HopEngineHost, createHopTargets, hopBuilder } from "../src/hop-targets.ts";
+import {
+  type HopEngineHost,
+  createHopTargets,
+  hopBuilder,
+  hopHostNamespace,
+} from "../src/hop-targets.ts";
 import { readKept, recordKept } from "../src/kept-index.ts";
 import { KEPT_LABEL, KEPT_SCHEMA_VERSION } from "../src/kept.ts";
 import { type LocalRuntime, createLocalRuntime } from "../src/local-runtime.ts";
@@ -1173,6 +1178,107 @@ describe("OD1 a hop dials the namespace it was TOLD, and a miss names the hop's 
     expect(r.statuses.join("\n")).toContain("/home/me/.kube/config");
     // …and the miss repeats it, so the transcript answers the question too.
     expect(built.notice).toContain("(from context");
+  });
+
+  test("hopHostNamespace: a pin's provenance WINS over re-resolving (fix round 2)", () => {
+    // `main.hopEngineHost`'s one decision, extracted so it can be tested (it was
+    // untestable inside the dispatcher, and a mutation there survived every row).
+    // The trap: `kubeNamespace({namespace})` always answers `explicit`, so
+    // re-resolving a pinned value silently rewrites the provenance.
+    // Mutation: `return resolve(where ?? {})` always → the first row fails.
+    const pin = {
+      namespace: "openshift-etcd",
+      source: "context" as const,
+      kubeconfig: "/k",
+      context: "ctx-1",
+    };
+    let resolved = 0;
+    const resolve = (): KubeNamespace => {
+      resolved += 1;
+      return { namespace: pin.namespace, source: "explicit" as const };
+    };
+    // A pin is used as it is — the kubeconfig is not read at all.
+    expect(
+      hopHostNamespace("kubernetes", { namespace: pin.namespace, provenance: pin }, resolve),
+    ).toEqual(pin);
+    expect(resolved).toBe(0);
+    // Nothing pinned (a typed `/move`): resolve, exactly as `run`/`attach` do.
+    expect(hopHostNamespace("kubernetes", {}, resolve)).toEqual({
+      namespace: pin.namespace,
+      source: "explicit",
+    });
+    expect(resolved).toBe(1);
+    // Not k8s: no namespace at all, and nothing is resolved.
+    expect(hopHostNamespace("docker", {})).toBeUndefined();
+  });
+
+  test("a PINNED proposal keeps the pin's provenance — never `explicit` (fix round 2)", async () => {
+    // The owner's scenario: the model omits `namespace`, auto-accept is ON, so no
+    // prompt is shown. `pinNamespace` resolved `openshift-etcd` from the kubeconfig
+    // CONTEXT and wrote it into the spec; the build used to re-resolve that value
+    // and report `explicit` — so the row, the outcome and the miss all named the
+    // model's omission as if the owner had typed a namespace (the trace said
+    // `from explicit`, and the miss said no `(from …)` at all, because the spec has
+    // a namespace). RED before the fix: both lines say `explicit`.
+    // Mutation: drop the `opts.namespace` step in `dialledProvenance` → the host's
+    // own answer (`resolved` below) is used, i.e. `explicit` again.
+    const pinned = {
+      namespace: "openshift-etcd",
+      source: "context" as const,
+      kubeconfig: "/home/me/.kube/config",
+      context: "ctx-1",
+    };
+    const host = fakeHost({ calls: [] });
+    const asked: unknown[] = [];
+    const statuses: string[] = [];
+    host.inspect = async () => {
+      throw new WorkloadNotFoundError(
+        `pod "etcd-0" not found in namespace "openshift-etcd"`,
+        "pod",
+        "in namespace openshift-etcd",
+      );
+    };
+    const build = createHopTargets({
+      config: config(dir),
+      shared: sharedPair(),
+      status: (line) => statuses.push(line),
+      notify: () => {},
+      // The host is built from the PINNED value, so its own answer is `explicit`
+      // (this is the mechanical trap: `kubeNamespace({namespace})` always is).
+      host: (engine, where) => {
+        asked.push(where);
+        return {
+          host,
+          locators: {},
+          namespace: { namespace: "openshift-etcd", source: "explicit" as const },
+        };
+      },
+    });
+    const built = await build(
+      {
+        target: "attach",
+        workload: { engine: "kubernetes", namespace: "openshift-etcd", name: "etcd-0" },
+        keep: true,
+      },
+      "uid-1",
+      { namespace: pinned },
+    );
+    if (built.kind !== "failed") {
+      throw new Error("expected the attach to fail");
+    }
+    // The build was TOLD the provenance (one fact, from the pin)…
+    expect(asked[0]).toEqual({
+      namespace: "openshift-etcd",
+      provenance: pinned,
+    });
+    // …so the live row names the real source of the namespace.
+    expect(statuses.join("\n")).toContain(
+      "namespace openshift-etcd (from context; context ctx-1, /home/me/.kube/config)",
+    );
+    expect(statuses.join("\n")).not.toContain("from explicit");
+    // …and so does the miss (it used to say nothing at all).
+    expect(built.notice).toContain("(from context)");
+    expect(built.notice).not.toContain("(from explicit)");
   });
 
   test("a TYPED `/move attach kubernetes:<pod>` names the namespace the host dialled (OD1)", async () => {

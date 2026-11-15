@@ -148,6 +148,10 @@ export function createHopFeed(deps: HopFeedDeps): HopFeedView {
           spec: outcome.spec,
           ...(outcome.gateAnswered ? { gateAnswered: true as const } : {}),
           ...(outcome.autoAccepted ? { autoAccepted: true as const } : {}),
+          // OD3: the pin's provenance, resolved ONCE at the turn's end, rides the
+          // approval to the build (else the build re-resolves the value the pin
+          // wrote and reports `explicit` — fix round 2, finding 1).
+          ...(pin.namespace === undefined ? {} : { namespace: pin.namespace }),
         };
       }
       if (outcome.kind === "declined") {
@@ -189,6 +193,7 @@ export function createHopFeed(deps: HopFeedDeps): HopFeedView {
         try {
           const outcome = await deps.facade.hop(spec, sessionId, {
             ...(opts?.gateAnswered === true ? { gateAnswered: true as const } : {}),
+            ...(opts?.namespace === undefined ? {} : { namespace: opts.namespace }),
           });
           if (outcome.kind === "failed") {
             // OD6: the model never has to guess — a move it proposed that could

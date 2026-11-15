@@ -108,6 +108,7 @@ import {
   type HopEngineHost,
   type HopHostWhere,
   hopBuilder,
+  hopHostNamespace,
   hopPromptFacts,
 } from "./hop-targets.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
@@ -1232,8 +1233,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const hopEngineHost = (engine: EngineKind, where?: HopHostWhere): HopEngineHost => {
     // OD3: resolve ONCE here, with its provenance, and pin that namespace into the
     // builder — so the trace the row/miss report and the place that is dialled
-    // cannot come from two different reads of a kubeconfig.
-    const namespace = engine === "kubernetes" ? kubeNamespace(where ?? {}) : undefined;
+    // cannot come from two different reads of a kubeconfig. The choice itself is
+    // `hopHostNamespace` (pure, tested): a namespace a PIN already resolved must
+    // not be re-resolved, which would answer `explicit` and present OD2's decision
+    // as the owner's own namespace (fix round 2, finding 1).
+    const namespace = hopHostNamespace(engine, where);
     const built = buildEngineHost(
       engine,
       namespace === undefined ? {} : { namespace: namespace.namespace },

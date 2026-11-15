@@ -19,7 +19,7 @@
 import { describe, expect, test } from "bun:test";
 import type { PermissionRequest, PermissionResponse } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
-import { App, type SessionController } from "@tentacle/tui";
+import { App, type HopSpec, type SessionController } from "@tentacle/tui";
 import { render } from "ink-testing-library";
 import { createHopFeed } from "../src/hop-feed.ts";
 import type { HopOutcome } from "../src/session-hop.ts";
@@ -129,6 +129,37 @@ class SpyBroker extends PermissionBroker {
     this.asked.push(req);
     return this.answer;
   }
+}
+
+/**
+ * The same as `proposingSession`, but the model proposes an ATTACH with no
+ * namespace — the owner's scenario in fix round 2: the model omits the namespace,
+ * the pin resolves it, and the build must state WHY that one.
+ */
+function proposingAttach(log: { sends: string[] }): SessionController {
+  const base = proposingSession(log);
+  return {
+    ...base,
+    async *send(prompt) {
+      log.sends.push(prompt);
+      yield {
+        type: "tool_start",
+        id: "c1",
+        name: "move_session",
+        arguments: JSON.stringify({
+          target: "attach",
+          workload: { engine: "kubernetes", name: "etcd-0" },
+        }),
+      };
+      yield {
+        type: "tool_result",
+        id: "c1",
+        name: "move_session",
+        result: { content: "Proposed", isError: false },
+      };
+      yield { type: "turn_end", reason: "end_turn" };
+    },
+  } as SessionController;
 }
 
 /** The REAL feed over a fake facade: the same broker the App's prompt lands on. */
@@ -313,6 +344,66 @@ describe("session-hop-ux: auto-accept answers a move, survives it, and the sessi
     // No user bubble for the wake: the dim row says why the turn ran.
     const frame = strip(app.lastFrame());
     expect(frame).toContain("continuing after the move");
+    app.unmount();
+  });
+
+  test("OD3: the pin's provenance reaches the build from a REAL App turn (TUI half)", async () => {
+    // The finding (fix round 2): under auto-accept no prompt is shown, so the row
+    // and the outcome were the only record of WHY a namespace — and they said
+    // `explicit`, because the build re-resolved the value the pin wrote. This drives
+    // the whole App chain (turn events → the port → `startHop` → `hop.start`) and
+    // asserts what the FEED was handed: the pin, untouched.
+    // Mutation: drop `outcome.namespace` in `useTurnDriver`'s approved branch, or
+    // the `namespace` field on `startHop`'s opts → the feed sees `{}`.
+    const pin = {
+      namespace: "openshift-etcd",
+      source: "context" as const,
+      kubeconfig: "/k",
+      context: "c",
+    };
+    const handed: Array<{ gateAnswered?: true; namespace?: unknown }> = [];
+    // The owner's YES, on the one broker (the App installs its own requester on it).
+    const real = new SpyBroker();
+    real.answer = { allowed: true, scope: "once" };
+    const view = createHopFeed({
+      facade: {
+        current: () => ({}) as never,
+        target: () => ({ place: { kind: "local" }, daemonInPod: false }),
+        onTarget: () => () => {},
+        createSession: () => proposingAttach({ sends: [] }),
+        hop: async (_spec: HopSpec, _id: string | null, opts: never) => {
+          handed.push(opts);
+          return MOVED;
+        },
+      } as never,
+      place: () => ({ kind: "local" }),
+      notify: () => {},
+      permissions: real,
+      pinNamespace: (spec) =>
+        spec.target === "attach"
+          ? {
+              kind: "pinned",
+              spec: { ...spec, workload: { ...spec.workload, namespace: "openshift-etcd" } },
+              namespace: pin,
+            }
+          : { kind: "pinned", spec },
+      promptFacts: () => ({}),
+    });
+    const log = { sends: [] as string[] };
+    const app = render(
+      <App
+        createSession={() => proposingAttach(log)}
+        model="m"
+        cwd="/tmp/work"
+        hop={view.hop}
+        permissions={real}
+        columns={80}
+      />,
+    );
+    await delay(60);
+    await type(app.stdin, "please move me", 300);
+    expect(handed).toHaveLength(1);
+    expect(handed[0]?.namespace).toEqual(pin);
     app.unmount();
   });
 

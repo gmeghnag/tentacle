@@ -50,7 +50,7 @@ import { attachErrorText, enterConvertsToChips, imageRowText, submitPlan } from 
 import type { AttachedImage } from "./attach-files.ts";
 import { pushHistory } from "./history.ts";
 import type { LineEditor } from "./hooks.ts";
-import type { HopSpec } from "./hop-command.ts";
+import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import { modelErrorNotice } from "./model-error.ts";
 import type { PermissionController } from "./permission-ui.ts";
 import {
@@ -126,7 +126,11 @@ export interface HopTurnPort {
    */
   approved(
     spec: HopSpec,
-    opts?: { readonly gateAnswered?: true; readonly autoAccepted?: true },
+    opts?: {
+      readonly gateAnswered?: true;
+      readonly autoAccepted?: true;
+      readonly namespace?: HopNamespace;
+    },
   ): void;
   /**
    * Forget the pending fact: a `/clear` swaps the session, so a fact about the OLD
@@ -728,15 +732,15 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
             void hopTurn?.end(true).then(
               (outcome) => {
                 if (outcome.kind === "approved") {
-                  hopTurn.approved(
-                    outcome.spec,
-                    outcome.gateAnswered === true || outcome.autoAccepted === true
-                      ? {
-                          ...(outcome.gateAnswered === true ? { gateAnswered: true as const } : {}),
-                          ...(outcome.autoAccepted === true ? { autoAccepted: true as const } : {}),
-                        }
-                      : undefined,
-                  );
+                  // OD3: the pin's provenance rides the SAME hand-over as the
+                  // gate's answer, so the build states WHY that namespace
+                  // instead of re-resolving it (`explicit`, fix round 2).
+                  const opts = {
+                    ...(outcome.gateAnswered === true ? { gateAnswered: true as const } : {}),
+                    ...(outcome.autoAccepted === true ? { autoAccepted: true as const } : {}),
+                    ...(outcome.namespace === undefined ? {} : { namespace: outcome.namespace }),
+                  };
+                  hopTurn.approved(outcome.spec, Object.keys(opts).length === 0 ? undefined : opts);
                   return;
                 }
                 // OD6: a refusal, or a move that could not even be asked about,

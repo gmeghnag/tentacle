@@ -34,7 +34,7 @@ import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import { type QuitConfirmFacts, paletteStep } from "./commands.ts";
 import { dispatchCommand } from "./commands/dispatch.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
-import type { HopSpec } from "./hop-command.ts";
+import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import { hopShownCwd, hopStatusRow } from "./hop-status.ts";
 import { HOP_WAKE_TEXT } from "./hop-wake.ts";
 import { startIdleWarm } from "./idle-warm.ts";
@@ -411,9 +411,13 @@ export function App({
   // below. Two things stay here, because App declares them ABOVE that hook: the
   // forward ref an approved proposal starts through (assigned by the hook), and
   // the live place (`targetFeed`), so the badge and `daemonInPod` follow a move.
-  const startHopRef = useRef<((spec: HopSpec, opts?: { gateAnswered?: true }) => void) | null>(
-    null,
-  );
+  const startHopRef = useRef<
+    | ((
+        spec: HopSpec,
+        opts?: { gateAnswered?: true; autoAccepted?: true; namespace?: HopNamespace },
+      ) => void)
+    | null
+  >(null);
   // OD6: the same late binding for a proposal that ended with nothing to build
   // (`useHop` assigns it; the port above reads it).
   const wakeAfterHopRef = useRef<((outcome: "declined" | "failed") => void) | null>(null);
