@@ -264,11 +264,10 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
     liveness = undefined;
   };
 
-  /** Send one push frame NOW (the link is ready and carries `push`). */
   /**
-   * Send one push frame NOW. The ONLY caller is `push()`, which has already
-   * checked the `features` gate — so there is one gate, not two, and a reader
-   * never wonders which one is load-bearing. `host === undefined` here means the
+   * Send one push frame NOW. Its callers — `push()` and `flushHeldPushes()` —
+   * have each checked the `features` gate first, so no frame can reach a relay
+   * that did not announce `"push"` (C1). `host === undefined` here means the
    * socket went away between the check and this call (a `dropControl` in the
    * same tick): `unavailable`, never a throw.
    */
@@ -341,11 +340,24 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
     // decided during a reconnect still lands (F2). They keep their own timer.
   };
 
-  /** The link is ready again: flush what was held (in order, the oldest first). */
+  /**
+   * The link is ready again: flush what was held (in order, the oldest first).
+   *
+   * A hold survives the reconnect it was waiting for, so this is the ONE place a
+   * frame could otherwise reach a relay that announced no `"push"` — the same
+   * relay answered `ready` without it (C1/F4). Re-checking `features` HERE is
+   * what makes the gate hold across a reconnect: a held push that cannot be sent
+   * is refused, never put on the wire.
+   */
   const flushHeldPushes = (): void => {
+    const pushable = readyControl !== undefined && features.includes("push");
     for (const entry of heldPushes.splice(0)) {
       timers.clearTimeout(entry.handle);
-      sendPush(entry.frame, entry.resolve);
+      if (pushable) {
+        sendPush(entry.frame, entry.resolve);
+        continue;
+      }
+      entry.resolve("unavailable");
     }
   };
 
@@ -713,10 +725,15 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
      *
      * Refused WITHOUT a frame when the relay announced no `"push"`: an older
      * relay closes the control socket on an unknown frame (C1), so sending one
-     * is what would cost reachability, never the push. While the link is
-     * CONNECTING the frame is held (F2), which is what makes a push decided
-     * during a reconnect land instead of being dropped on the floor. Never
-     * rejects: a push is best-effort, and the ask stays pending (F1).
+     * is what would cost reachability, never the push. A relay that IS
+     * registered and lacks `"push"` is refused AT ONCE, never held: holding it
+     * would hand the frame to the next `ready` (which is how a re-registered
+     * no-push relay used to get one), and it would make every device wait out
+     * the whole hold for a `push-dropped link-down` that names the wrong cause.
+     * While the link is CONNECTING the frame is held (F2), which is what makes
+     * a push decided during a reconnect land instead of being dropped on the
+     * floor. Never rejects: a push is best-effort, and the ask stays pending
+     * (F1).
      */
     push(delivery) {
       return new Promise<RelayPushStatus>((resolve) => {
@@ -724,8 +741,15 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
           resolve("unavailable");
           return;
         }
-        if (readyControl !== undefined && features.includes("push")) {
-          sendPush(delivery, resolve);
+        if (readyControl !== undefined) {
+          if (features.includes("push")) {
+            sendPush(delivery, resolve);
+            return;
+          }
+          // Registered, and not push-capable: the answer is known now, and it
+          // is `unavailable` with no frame (the `relay-no-push` notice already
+          // said why once per start: F4 never repeats itself per push).
+          resolve("unavailable");
           return;
         }
         holdPush(delivery, resolve);

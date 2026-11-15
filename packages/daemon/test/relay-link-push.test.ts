@@ -279,6 +279,55 @@ describe("the `features` gate (C1: an older relay must never see a `push`)", () 
     expect(await h.link.push(delivery("a".repeat(64)))).toBe("unavailable");
     expect(h.link.isConnected()).toBe(true);
   });
+
+  test("a HELD push is refused, not flushed, when the reconnect announces no `push`", async () => {
+    // The bug this pins (Review round 1, finding 1): a push decided while the
+    // link is CONNECTING is held, and the hold survives a control blip by design
+    // (F2). `ready` then flushes it — so a relay that re-registers WITHOUT
+    // `"push"` used to get the frame anyway, and an older relay closes the
+    // control socket on it (`control-unexpected`): the exact loss of
+    // reachability C1 exists to prevent, on every push. Mutation: flush without
+    // re-reading `features` → the no-push relay sees a `push` frame, and this
+    // fails on `frames`.
+    let hellos = 0;
+    const frames: string[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req, srv) {
+        if (srv.upgrade(req)) return undefined;
+        return new Response("no", { status: 400 });
+      },
+      websocket: {
+        message(ws, raw) {
+          const frame = JSON.parse(String(raw)) as { t?: string };
+          if (frame.t === "hello") {
+            hellos++;
+            // NEVER a `features` list: an older relay that carries no push at all.
+            ws.send(JSON.stringify({ t: "ready", v: RELAY_PROTOCOL_VERSION, id: ID }));
+            // One drop, so the push below is HELD and then meets a fresh `ready`.
+            if (hellos === 1) setTimeout(() => ws.close(), 150);
+            return;
+          }
+          if (frame.t === "push") frames.push(String(raw));
+        },
+      },
+    });
+    cleanups.push(() => server.stop(true));
+    const h = harness({ url: `ws://127.0.0.1:${server.port}`, holdMs: 3_000 });
+    await waitFor(() => h.link.isConnected(), "the link to register");
+    const pending = h.link.push(delivery("a".repeat(64)));
+    // The reconnect lands (a second `hello`), and the hold's deadline is still
+    // ahead: whatever happens to the frame happens through `flushHeldPushes`.
+    await waitFor(() => hellos >= 2, "the relay to be re-registered");
+    await Bun.sleep(200);
+    // The frame is what must not exist. (Asserted BEFORE the promise, so a
+    // mutation fails here — on the property — instead of on a test timeout.)
+    expect(frames).toEqual([]);
+    expect(h.link.isConnected()).toBe(true);
+    const race = await Promise.race([pending, Bun.sleep(1_000).then(() => "still-held" as const)]);
+    expect(race).toBe("unavailable");
+  });
 });
 
 describe("a push decided during a reconnect is held, then dropped (F2)", () => {

@@ -165,6 +165,12 @@ export interface PushNotifier extends SessionPushObserver {
   arm(): void;
   /** Stop observing: the timer cleared, nothing in flight awaited. Idempotent. */
   stop(): void;
+  /**
+   * How many facts this notifier is still holding, by source (a copy, read-only,
+   * for tests/diagnostics). Both are bounded by the work in flight: a `serve`
+   * outlives every turn it pushes for, so a count that only ever grows is a leak.
+   */
+  retained(): { readonly asks: number; readonly turnErrors: number };
 }
 
 export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
@@ -188,7 +194,13 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
    * Bounded by the asks in flight — an entry goes when its settle is reported.
    */
   const asks = new Map<string, Extract<PushHookEvent, { type: "update" }>>();
-  /** The `error` line of the last `turn_end` per turn id, for `turn_failed`'s message. */
+  /**
+   * The `error` line of the last `turn_end` per turn id, for `turn_failed`'s
+   * message. Bounded the way `asks` is: the entry goes once the command it was
+   * recorded for has been built, or at once when the rules decided not to push
+   * that turn. A `serve` runs for weeks, so without this the map would hold one
+   * entry per turn of every session for the life of the process.
+   */
   const turnErrors = new Map<string, string | undefined>();
 
   /** Map one `PushNote` to one audit line. A refusal is never silent (F20). */
@@ -246,15 +258,15 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
   };
 
   /**
-   * Seal `message` for one device and hand it to the sink. `undefined` = that
-   * device is not pushed this time (no registration, an unusable key): one
-   * audit line says so, and the other devices are unaffected.
+   * Seal one already-built plaintext for one device and hand it to the sink.
+   * `undefined` = that device is not pushed this time (no registration, an
+   * unusable key): one audit line says so, and the other devices are unaffected.
    */
   const deliverOne = async (
     command: PushCommand,
     deviceId: string,
     computer: { readonly privateKey: Uint8Array; readonly name: string },
-    facts: PushSessionFacts,
+    plaintext: Uint8Array,
   ): Promise<void> => {
     const registration = options.registrations.read(deviceId);
     if (registration === undefined) {
@@ -267,12 +279,7 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
     }
     let sealed: SealedPush;
     try {
-      sealed = sealPush(
-        fitPushMessage(buildMessage(command, facts, computer.name)),
-        computer.privateKey,
-        recipient,
-        random,
-      );
+      sealed = sealPush(plaintext, computer.privateKey, recipient, random);
     } catch {
       // A key this build cannot use (a low-order or foreign one): that device is
       // not pushed, the rest still are.
@@ -311,7 +318,39 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
     audit(`push-dropped ${status} ${id8(deviceId)}`);
   };
 
-  /** One command's whole fan-out, for every device the rules named. */
+  /**
+   * The plaintext ONE command is sealed from, built once for all its devices.
+   * `undefined` = nothing can be built (no identity, the session gone, a message
+   * the fitter cannot shrink): the reason is audited, and no device is pushed.
+   */
+  const plaintextOf = (
+    command: PushCommand,
+    computer: { readonly privateKey: Uint8Array; readonly name: string },
+  ): Uint8Array | undefined => {
+    const facts = options.describe(command.sessionId);
+    if (facts === undefined) {
+      // The session ended between the deadline and this microtask.
+      audit("push-dropped session-gone");
+      return undefined;
+    }
+    try {
+      return fitPushMessage(buildMessage(command, facts, computer.name));
+    } catch {
+      // `fitPushMessage` gives up only on a message it cannot shrink: nothing is
+      // sent, and the turn/hook that produced it never sees the throw (F24).
+      audit(`push-dropped message ${command.kind}`);
+      return undefined;
+    }
+  };
+
+  /**
+   * One command's whole fan-out, for every device the rules named.
+   *
+   * The message is built ONCE, BEFORE the first `await` — `consume`'s `after`
+   * (the settle's `asks.delete`, the turn's `turnErrors.delete`) runs right after
+   * these deliveries are queued, so a build inside the per-device loop would find
+   * the ask gone for every device but the first: `tool:""`, `options:[]`.
+   */
   const deliver = async (command: PushCommand): Promise<void> => {
     if (stopped) {
       return;
@@ -321,14 +360,12 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
       audit("push-dropped no-identity");
       return;
     }
-    const facts = options.describe(command.sessionId);
-    if (facts === undefined) {
-      // The session ended between the deadline and this microtask.
-      audit("push-dropped session-gone");
+    const plaintext = plaintextOf(command, computer);
+    if (plaintext === undefined) {
       return;
     }
     for (const deviceId of command.devices) {
-      await deliverOne(command, deviceId, computer, facts);
+      await deliverOne(command, deviceId, computer, plaintext);
     }
   };
 
@@ -433,6 +470,9 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
               stopReason: update.stopReason,
               attached,
             }),
+            // Its message has been built by now (or there was no command to build
+            // one for): either way this turn's line is dead weight from here on.
+            () => turnErrors.delete(update.turnId),
           );
         } else {
           // `session_closed`: its asks were settled `cancelled` (so any banner was
@@ -447,6 +487,7 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
       }
     },
     arm,
+    retained: () => ({ asks: asks.size, turnErrors: turnErrors.size }),
     stop() {
       stopped = true;
       if (handle !== undefined) {

@@ -2145,3 +2145,99 @@ and it found and fixed a real defect (relay-leg `release` not closing the `Conne
 `sendPush`'s inner gate "because unreachable" was wrong: it was reachable via `flushHeldPushes`, so the
 surviving mutation was a signal about a missing test, not about redundant code. Same model family as
 the executor (Claude): shared blind spots are possible.
+
+## Execution
+
+### Fix round 1
+
+Scope: the three findings of *Review — P7 + P8*. All three reproduced on the branch before any edit,
+all three fixed red-before-green, each fix mutation-checked. Scratch (gitignored, inside THIS
+worktree): `.tentacle/tmp/mobile-push/fixr1/` — `mut.sh`, `m1.log`/`m2.log`/`m3.log`,
+`full.log`, and the `*.bak` restore baselines. The reviewer's own probe is at the repo root's
+`.tentacle/tmp/mobile-push/review-flush.test.ts` and was re-run against the fix.
+
+**Repro before the fix (the reviewer's `review-flush.test.ts` on the unfixed branch):**
+
+```
+connected true status relay-no-push
+hellos 2 PUSH FRAMES SEEN BY NO-PUSH RELAY: 1 [ "{\"t\":\"push\",\"n\":1,\"token\":\"aaaaaaaaaaaaa" ]
+  [ "relay-no-push", "relay-ready fgkrQr2v", "relay-down closed", "relay-ready fgkrQr2v" ]
+error: expect(received).toBe(expected)  Expected: 0  Received: 1
+```
+
+After the fix the same file prints `PUSH FRAMES SEEN BY NO-PUSH RELAY: 0 []` and **1 pass**.
+
+**F1 (HIGH) — the `features` gate now holds across a reconnect** (`relay-link.ts:352-364`, `:741-756`).
+Root cause: `push()` *held* a frame for any link without `"push"` instead of refusing it, and
+`flushHeldPushes()` put every held frame on the wire without re-reading `features` — so the gate was
+only ever checked at the moment of the hold, not at the moment of the send.
+- `push()` now splits on `readyControl`: registered **and** push-capable → send; registered **without**
+  `"push"` → `resolve("unavailable")` at once, no frame, no hold (the `relay-no-push` line already said
+  why once per start, so this stays quiet per push: F4); not registered (CONNECTING) → hold, unchanged (F2).
+- `flushHeldPushes()` computes `pushable = readyControl !== undefined && features.includes("push")` and
+  resolves `unavailable` for every held entry when it is false. `sendPush`'s doc now names both of its
+  callers as gate-checkers (the reviewer's nit 3, fixed in passing: the duplicated stale JSDoc is gone).
+- Regression test: `relay-link-push.test.ts` *"a HELD push is refused, not flushed, when the reconnect
+  announces no `push`"* — a fake relay answers `ready` with no `features`, drops the control socket once,
+  and the push issued while CONNECTING is asserted to never reach the wire.
+
+**F2 (MEDIUM) — one message per command, built before the first `await`**
+(`push-notifier.ts:321-371`, `:258-282`).
+Root cause: `deliverOne` built the message *inside* the per-device loop, and `consume`'s `after`
+(`asks.delete`) runs as soon as the deliveries are queued — so from device 2 on, the ask was already
+gone and the banner was blank (`tool:""`, `options:[]`). Fix: the build + `fitPushMessage` moved into
+`plaintextOf()`, called once in `deliver()` before the loop; `deliverOne` now takes the fitted
+plaintext. A `fitPushMessage` throw is audited (`push-dropped message <kind>`) and pushes to nobody —
+previously it was caught per device by the `seal` catch, which mislabelled it as a bad key.
+- Tests: *"EVERY device of a fan-out gets the ask's content, not just the first"* (device 1's sink held
+  open while the ask settles, so the old loop would resume onto a deleted ask) and *"ask_resolved
+  carries the ask's content to EVERY device of the fold"*.
+- Honest note: the first version of the fan-out test was **vacuous** — it passed under the mutation,
+  because a plain `ask` fan-out never deletes the ask mid-loop. Only the stalled-sink shape above and
+  the `ask_resolved` test go red; both are kept.
+
+**F3 (MEDIUM) — `turnErrors` is pruned** (`push-notifier.ts:194-202`, `:470-476`).
+Root cause: one entry per `turn_end` of every session, cleared only by `stop()`, in a `serve` that runs
+for weeks. Fix: the `turn_end` handler passes `consume`'s `after` a `() => turnErrors.delete(turnId)`,
+which runs whether or not the rules produced a command (a turn nobody is pushed for leaves nothing).
+- To make the leak observable, `PushNotifier` gained `retained(): { asks, turnErrors }`
+  (`:168-174`, `:490`), a read-only count in the style of `Connection.watchedSessionIds`.
+- Tests: *"a turn end's error line is released once its command is built"* (also asserts the message
+  still CARRIED the error, so pruning cannot be "fixed" by dropping the content) and *"a turn the rules
+  do not push at all also releases its error line"*.
+
+**Mutations (each fix broken in place, then restored and `cmp`-verified).**
+
+```
+m1  push() re-collapsed to the old `&&` gate + flushHeldPushes `pushable = true`
+    (fail) the `features` gate … > a HELD push is refused, not flushed, when the reconnect
+           announces no `push` [760.90ms]      → 10 pass, 1 fail     RESTORED-OK m1
+m2  sealPush rebuilt the plaintext per device (`plaintextOf(command, computer) ?? plaintext`)
+    (fail) … > EVERY device of a fan-out gets the ask's content, not just the first [9.08ms]
+    (fail) … > ask_resolved carries the ask's content to EVERY device of the fold [8.78ms]
+                                                 → 21 pass, 2 fail     RESTORED-OK m2
+m3  the `after` that deletes the turnErrors entry removed
+    (fail) … > a turn end's error line is released once its command is built [2.72ms]
+    (fail) … > a turn the rules do not push at all also releases its error line [0.33ms]
+                                                 → 21 pass, 2 fail     RESTORED-OK m3
+```
+
+Red is on the ASSERTION in every case. My first m1 attempt was red on a TypeScript error and my first
+m1/m2 test drafts were red on a timeout or vacuous — all three variants were discarded and re-shaped
+until the red landed on the property (the m1 test now asserts `frames` before awaiting the promise, and
+its hold is 3 s so the flush cannot be confused with the drop).
+
+**Reviewed nits.** `relay-link.ts:267` (the duplicated stale JSDoc above `sendPush`): fixed in passing,
+with a `flushHeldPushes` note replacing it. The `session-host.ts` one-line `OpenOutcome` and the fused
+`serve.ts` comment were left alone: they are not this round's findings, and touching them would be
+unrelated churn.
+
+**Gate.** `bunx tsc --noEmit` exit 0. `bun run lint`: 1387 files, no fixes (the §6 baseline, 0/0).
+`bun test` (full): **10119 pass, 4 skip, 0 fail** — the 4 skips are the opt-in ones (live k8s,
+live docker, the real-socket keepalive, and their group), no new skip.
+
+**Unverified (one line).** P7 has not yet wired the `attachment` event from `HostedSession` all the way
+to a real relay reconnect, so the reviewer's residual LOW (a fold's banner still naming the answered
+ask) is unchanged and still P7's to test.
+
+*— claude-opus-5-5 (executor, fix round 1 of P7 + P8), 2026-11-15*

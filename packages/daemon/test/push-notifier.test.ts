@@ -200,7 +200,6 @@ function open(delivery: PushDelivery): PushMessage {
 async function settled(rounds = 50): Promise<void> {
   for (let i = 0; i < rounds; i++) await Promise.resolve();
 }
-
 describe("the sealed envelope opens with the device key + the computer key", () => {
   test("an unanswered ask reaches the registered device, and it OPENS", async () => {
     // Mutation: seal to the COMPUTER's key instead of the device's, or drop
@@ -365,6 +364,110 @@ describe("who is pushed to (the authority's snapshot at push time)", () => {
     );
     await settled();
     expect(r.deliveries.map((d) => d.deviceId).sort()).toEqual([DEVICE_A, DEVICE_B]);
+  });
+
+  test("EVERY device of a fan-out gets the ask's content, not just the first", async () => {
+    // The bug this pins (Review round 1, finding 2): `deliver` awaited each
+    // device's sink in turn and built the message INSIDE that loop, while
+    // `consume`'s `after` deletes the ask once the deliveries are queued. So a
+    // fan-out is only safe while no ask is deleted before its LAST device is
+    // built. Here device 1's sink is held open while the ask is answered: the
+    // settle's `after` runs, and device 2 must still get `tool:"shell"`.
+    // Mutation: build the message per device → device B's ask is blank.
+    const configDir = mkdtempSync(join(tmpdir(), "push-notifier-"));
+    dirs.push(configDir);
+    for (const deviceId of [DEVICE_A, DEVICE_B]) {
+      writePushRegistration(configDir, {
+        deviceId,
+        token: "a".repeat(64),
+        env: "sandbox",
+        key: encodeBase64Url(publicKeyOf(DEVICE)),
+        registeredAt: 1,
+      });
+    }
+    const deliveries: PushDelivery[] = [];
+    let open1: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      open1 = () => resolve();
+    });
+    let first = true;
+    const notifier = createPushNotifier({
+      now: () => 1_000,
+      registrations: storeSource(configDir, () => [DEVICE_A, DEVICE_B]),
+      describe: () => ({ title: "t", cwd: "/p" }),
+      computer: () => ({ privateKey: COMPUTER, name: "c" }),
+      sink: async (delivery) => {
+        deliveries.push(delivery);
+        if (first) {
+          first = false;
+          await held; // device 1's sink is in flight while the ask settles
+        }
+        return "sent";
+      },
+      onAudit: () => {},
+      timers: manualTimers(),
+      graceMs: 0,
+      random: (length) => new Uint8Array(length).fill(7),
+    });
+    notifier.onPushEvent("S", { type: "update", update: askUpdate("r1") }, NOBODY);
+    await settled();
+    // The fan-out is stuck on device 1, exactly where the old loop would resume.
+    expect(deliveries.map((d) => d.deviceId)).toEqual([DEVICE_A]);
+    notifier.onPushEvent(
+      "S",
+      {
+        type: "update",
+        update: {
+          type: "permission_resolved",
+          requestId: "r1",
+          outcome: { outcome: "selected", optionId: "allow_once" },
+        },
+      },
+      NOBODY,
+    );
+    await settled();
+    open1();
+    await settled();
+    const asks = deliveries
+      .map((d) => ({ deviceId: d.deviceId, message: open(d) }))
+      .filter((entry) => entry.message.kind === "ask");
+    expect(asks.map((entry) => entry.deviceId).sort()).toEqual([DEVICE_A, DEVICE_B]);
+    for (const entry of asks) {
+      expect(entry.message.ask).toMatchObject({ requestId: "r1", tool: "shell" });
+      expect(entry.message.ask?.options).toHaveLength(2);
+    }
+    notifier.stop();
+  });
+
+  test("ask_resolved carries the ask's content to EVERY device of the fold", async () => {
+    // Same root cause, on the settle path: the `ask` push is fine (it is built at
+    // the deadline), but `ask_resolved` names the request a banner refers to, so
+    // a blank one leaves every phone but the first unable to place it.
+    const r = rig({ graceMs: 0, registrations: [DEVICE_A, DEVICE_B] });
+    r.allow(DEVICE_A, DEVICE_B);
+    r.notifier.onPushEvent("S", { type: "update", update: askUpdate("r1") }, NOBODY);
+    await settled();
+    r.notifier.onPushEvent(
+      "S",
+      {
+        type: "update",
+        update: {
+          type: "permission_resolved",
+          requestId: "r1",
+          outcome: { outcome: "selected", optionId: "allow_once" },
+        },
+      },
+      NOBODY,
+    );
+    await settled();
+    const resolved = r.deliveries
+      .map((d) => ({ deviceId: d.deviceId, message: open(d) }))
+      .filter((entry) => entry.message.kind === "ask_resolved");
+    expect(resolved.map((entry) => entry.deviceId).sort()).toEqual([DEVICE_A, DEVICE_B]);
+    for (const entry of resolved) {
+      expect(entry.message.ask).toMatchObject({ requestId: "r1", tool: "shell" });
+      expect(entry.message.ask?.options).toHaveLength(2);
+    }
   });
 });
 
@@ -573,6 +676,56 @@ describe("the notifier's own failure modes", () => {
     expect(deliveries).toEqual([]);
     expect(audit).toContain("push-dropped session-gone");
     notifier.stop();
+  });
+
+  test("a turn end's error line is released once its command is built (no leak over a long serve)", async () => {
+    // The bug this pins: `turnErrors` got one entry per `turn_end` of every
+    // session and only `stop()` cleared it. A `serve` runs for weeks, so that is
+    // unbounded growth. Mutation: drop the `after` that deletes the entry → the
+    // count stays at 1 after the push, and this fails.
+    const r = rig({ graceMs: 0, registrations: [DEVICE_A] });
+    r.allow(DEVICE_A);
+    r.notifier.onPushEvent(
+      "S",
+      {
+        type: "update",
+        update: {
+          type: "turn_end",
+          turnId: "t1",
+          stopReason: "error",
+          error: { message: "provider exploded" },
+        },
+      },
+      NOBODY,
+    );
+    await settled();
+    // The message was built WITH the error line before the entry went away.
+    const message = open(r.deliveries[0] as PushDelivery);
+    expect(message.turn).toEqual({ turnId: "t1", error: "provider exploded" });
+    expect(r.notifier.retained().turnErrors).toBe(0);
+  });
+
+  test("a turn the rules do not push at all also releases its error line", async () => {
+    // The other half: no device registered means NO command, so nothing would
+    // ever have read the entry — it still must not stay (this is the common case
+    // on a serve nobody paired a phone to yet).
+    const r = rig({ graceMs: 0 });
+    r.notifier.onPushEvent(
+      "S",
+      {
+        type: "update",
+        update: {
+          type: "turn_end",
+          turnId: "t1",
+          stopReason: "error",
+          error: { message: "provider exploded" },
+        },
+      },
+      NOBODY,
+    );
+    await settled();
+    expect(r.deliveries).toEqual([]);
+    expect(r.notifier.retained().turnErrors).toBe(0);
   });
 
   test("stop() clears the timer: nothing fires afterwards", async () => {
