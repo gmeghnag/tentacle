@@ -1402,3 +1402,20 @@ lifecycle plus its tests.
 - Subagents are not offered the tool.
 
 **Executor:** thorough and honest about drift (keepalive dropped, live suites not added, k8s unverified live). It missed the lifecycle edges of `open` itself.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15* (reviewed `git diff HEAD~1`, commit `9c3fd17e`)
+
+**Verdict: PASS.** All three round-1 findings are fixed. Each fix was confirmed by a mutation, and no regression was found.
+
+- **F1 (dispose during open):** `refuseIfDisposed()` after `prime`, plus a close-and-refuse after ready (`workload-shell.ts`, `openReserved`). The round-1 repro now prints `threw … already disposed, opened:0`.
+  - Mutation: removing the post-prime check → "an open still priming…" goes red.
+  - Mutation: disabling the post-ready block → "an open that turns ready AFTER…" goes red (5 s timeout).
+- **F2 (a failed open leaks its exec):** `abandon(shell)` (EOF + close) in the ready-failure path.
+  - Mutation: removing it → "a shell that never becomes ready…" goes red.
+- **F3 (cap bypass):** `pendingOpens` is reserved before the first await and released in `finally`.
+  - Mutation: dropping it from the cap check → "refuses the 5th CONCURRENT open" goes red.
+- **Extra, a good catch by the executor:** `closeShell` skips the kill script when `pid <= 0`. In sh, `kill -KILL 0` targets the caller's whole process group. That path was reachable in round 1 when dispose hit an unready shell.
+- **Regressions checked:** `pendingOpens` cannot leak when `prime` throws (released in `finally`). Calling `abandon` after dispose has already closed the shell is harmless (close is idempotent). The `forget`/`refuse` ordering leaves no entry behind.
+- **Gate:** tools, grants, teardown and wiring tests: 363 pass, 0 fail (20 files). `bun run lint`: clean (1391 files). `bun run typecheck`: clean. `git status` is clean after every mutation was reverted.
