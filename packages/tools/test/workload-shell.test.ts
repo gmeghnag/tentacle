@@ -745,12 +745,14 @@ describe("what the plan's §4 pin requires", () => {
   });
 });
 
-// docs/fix/workload-shell-live.md, owner decision 3: the owner's live failure
-// was a FRESH shell whose FIRST command came back truncated — `hostname` gave
-// `guard-3a6ec321…-end` instead of `etcd-guard-3a6ec321…-end`. The cause is the
-// ready handshake: the pod's first bytes (a profile's echo, the entrypoint's
-// banner, and sometimes the head of that command's own output) arrive in the
-// SAME read as the ready marker, and the ready handler used to drop them.
+// docs/fix/workload-shell-live.md, owner decision 3: the owner saw a FRESH
+// shell's FIRST command come back as `guard-3a6ec321…-end` instead of
+// `etcd-guard-3a6ec321…-end`. What is PROVEN here is the mechanism these rows
+// cover — the ready handshake dropped the bytes that rode the same read as the
+// marker, and its tail cut disagreed with the ready parser about where the
+// marker ended. What is NOT proven is that this was the owner's live cause:
+// with a real `sh` the command line goes out after `await readyDone`, so a
+// real shell cannot print `hostname` before it receives `hostname`.
 describe("the first command on a fresh shell keeps its head (owner decision 3)", () => {
   test("a banner that rides the ready read is the first command's output, not lost", async () => {
     const backend = new FakeBackend();
@@ -778,7 +780,7 @@ describe("the first command on a fresh shell keeps its head (owner decision 3)",
     await shells.dispose();
   });
 
-  test("a HEAD split across the ready read is rejoined, exactly as the owner's `hostname`", async () => {
+  test("a HEAD split across the ready read is rejoined (the `guard-…-end` shape)", async () => {
     const HOST = "etcd-guard-3a6ec32139722234d98bed4f29e301189cef109a-end";
     const backend = new FakeBackend();
     backend.openImpl = (exec) => {
@@ -807,6 +809,42 @@ describe("the first command on a fresh shell keeps its head (owner decision 3)",
     // leaked into it (owner decision 3's own assertion).
     expect(result.content).toContain(HOST);
     expect(result.content).not.toContain("__TNT_");
+    await shells.dispose();
+  });
+
+  test("a pod line that contains the READY end sequence does not put the delimiter in the body", async () => {
+    // Found in fix round 2: `parseReady` scans from the ready PREFIX, but the
+    // tail cut used to scan from byte 0. A pod that prints `__TNT__E` BEFORE
+    // the marker (an odd startup banner, a logging wrapper — and a pod is not
+    // trusted, AGENTS §7) made the two disagree, so the cut landed on the banner's
+    // sequence and handed the READY MARKER itself — delimiter and all — to the
+    // first command's parser as its output. This is the only reachable way the
+    // delimiter gets into a body, and it respects the write order (the banner
+    // is written before the marker, the command line after `execute` arms).
+    const backend = new FakeBackend();
+    backend.openImpl = (exec) => {
+      const original = exec.stdout.bind(exec);
+      exec.stdout = (text: string): void => {
+        if (text.startsWith(READY_PREFIX)) {
+          original(`container says __TNT__E hello\n${text}`);
+          return;
+        }
+        original(text);
+      };
+      exec.behaviour = () => ({ out: "hostname-output" });
+    };
+    const shells = new WorkloadShells(backend, { readyTimeoutMs: 2_000, killGraceMs: 60 });
+    const tool = createWorkloadShellTool(shells);
+
+    const promise = run(tool, { target, command: "hostname" });
+    await tick();
+    const result = await promise;
+
+    // The banner is data, so it may be echoed — but never our framing, and
+    // never the ready marker we generated ourselves.
+    expect(result.content).toContain("hostname-output");
+    expect(result.content).not.toContain("__TNT_");
+    expect(result.content).not.toContain("__TNT__R_");
     await shells.dispose();
   });
 

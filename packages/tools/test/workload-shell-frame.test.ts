@@ -13,6 +13,7 @@ import {
   OUTPUT_TAIL_BYTES,
   READY_PREFIX,
   bootstrapLine,
+  bytesAfterReady,
   commandLine,
   escapeSingleQuoted,
   formatBody,
@@ -89,6 +90,31 @@ describe("parseReady", () => {
   });
   test("nothing ready yet", () => {
     expect(parseReady("starting up\n", 0)).toBeNull();
+  });
+});
+
+describe("bytesAfterReady", () => {
+  const ready = `${READY_PREFIX}4242_/home/app__TNT__E\n`;
+  const show = (bytes: Uint8Array<ArrayBuffer> | null): string | null =>
+    bytes === null ? null : dec.decode(bytes);
+
+  test("is the tail after the marker, without the newline our own printf adds", () => {
+    expect(show(bytesAfterReady(enc.encode(`${ready}banner line\n`)))).toBe("banner line\n");
+  });
+
+  test("is empty when the marker ends the read, and null before the marker is whole", () => {
+    expect(show(bytesAfterReady(enc.encode(ready)))).toBe("");
+    expect(show(bytesAfterReady(enc.encode("starting up\n")))).toBeNull();
+    expect(show(bytesAfterReady(enc.encode(ready.slice(0, 20))))).toBeNull();
+  });
+
+  test("a pod line holding the END sequence BEFORE the marker cannot move the cut", () => {
+    // The two halves of this handshake must agree: `parseReady` scans from the
+    // ready PREFIX, so this cut does too. Cutting at the first `__TNT__E` found
+    // anywhere would hand the ready marker itself (delimiter and all) to the
+    // first command's scanner as its output — fix round 2's HIGH finding.
+    const body = `container says __TNT__E hello\n${ready}real output\n`;
+    expect(show(bytesAfterReady(enc.encode(body)))).toBe("real output\n");
   });
 });
 

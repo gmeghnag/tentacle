@@ -3,7 +3,7 @@
 > **Status:** implementation (awaiting approval)
 > **Branch:** `fix/workload-shell-live`
 > **Size:** M · **Blast:** cross-module · **Suited:** executor assigned by the owner; standard Review that also re-runs the session-hop `attach` rows (`engine-runtime.test.ts`, `engine-k8s.test.ts`), because `EngineHost.inspect` is shared with `attach`
-> **Changelog:** `changelog.d/workload-shell-live.fixed.md` + three fragments from fix round 1 (`workload-shell-default-off.added.md`, `workload-shell-first-output.fixed.md`, `workload-shell-cwd-restore.added.md`)
+> **Changelog:** `changelog.d/workload-shell-live.fixed.md` + three fragments from fix round 1 (`workload-shell-default-off.added.md`, `workload-shell-first-output.fixed.md`, `workload-shell-cwd-restore.added.md`). The first-output fragment was **rewritten in fix round 2** — it no longer claims the owner's live `hostname` symptom.
 
 ## Context
 
@@ -646,7 +646,12 @@ load), and the final full-suite run is green.
 
 ### Fix round 1
 
-*— claude-opus-5-5, 2026-11-15*
+*— claude-opus-5-5, 2026-11-15* (**signature unresolved in Fix round 2**: the
+commit `f2a9538e` is labelled `(deepseek)` and this section claims
+`claude-opus-5-5`. Which model actually wrote it cannot be recovered from the
+repository, so the signature stays as written and the table row claiming this
+finding was FIXED is itself the second occurrence of the mismatch — see Fix
+round 2, finding 2)**
 
 Round 1's Review raised four findings. All four are addressed, and each fix
 carries a regression test shown **red** under a mutation of the fix (AGENTS §9),
@@ -668,31 +673,43 @@ pasted below under **Mutations**.
     `key-docs`'s T1 (every schema path documented, both directions) and T4 (the
     README table is the registry's) make a schema key without them a gate failure.
     Not optional plumbing.
-- **Decision 3, the sentinel/head leak.** Reproduced first, on the branch — and
-  it is **not** a parser bug. The pure scanner (`CaptureWindow`) survives *every*
-  2- and 3-chunk split of a command's stream, and a real `sh` driven through the
-  real `rawExec` at chunk sizes 1/2/5/7/41/42/100/4096 is byte-correct
-  (`.tentacle/tmp/workload-shell-live/{fuzz,real,tool-real,ws-real}.ts`). The leak
-  is in the **ready handshake**: `openReserved`'s ready handler returned as soon
-  as it parsed the marker and **discarded every byte after it in the same read**.
-  On a fresh shell that read carries the pod's first output — a profile's echo, an
-  entrypoint's banner, and often the head of the *first command's* output.
-  Reproduced with the owner's own string (`head-loss.ts`): a ready read ending
-  `…__TNT__E\n` + `etcd-` returned
-  **`guard-3a6ec32139722234d98bed4f29e301189cef109a-end`** — byte for byte the
-  owner's live bug.
-  - *Fix*: new pure `bytesAfterReady(bytes)` (`workload-shell-frame.ts`) cuts the
-    tail byte-exactly from the ACCUMULATED bytes (the marker's own end can straddle
-    two reads) and strips the one `\n` our own `printf` adds; `Shell.pendingBytes`
-    holds it, bytes arriving in the window *after* ready but *before* the first
-    parser exists accumulate there too instead of being dropped, and `execute`
-    feeds them through that command's scanner before the command line goes out.
-  - Three new rows in `packages/tools/test/workload-shell.test.ts` ("the first
-    command on a fresh shell keeps its head"): the banner survives, the split head
-    is rejoined whole, and no result ever contains `__TNT_`.
-  - `echo.ts` (a shell that echoes stdin, `set -v`) shows the delimiter CAN reach
-    the body — because the shell echoed our own input line. That is the shell's
-    doing and is correct-by-design: the body is DATA, never re-parsed as a marker.
+- **Decision 3, the sentinel/head leak.** Two things were established in round
+  1; round 2's Review showed the *causal claim* was overreached, and it is now
+  corrected (see **Fix round 2** for the corrected account and the extra bug
+  it turned up).
+  - *Not a parser bug.* The pure scanner (`CaptureWindow`) survives *every* 2-
+    and 3-chunk split of a command's stream, and a real `sh` driven through the
+    real `rawExec` at chunk sizes 1/2/5/7/41/42/100/4096 is byte-correct
+    (`.tentacle/tmp/workload-shell-live/{fuzz,real,tool-real,ws-real}.ts`).
+  - *One real bug in the ready handshake, fixed (plus a second found in round 2):*
+    `openReserved`'s ready handler
+    returned as soon as it parsed the marker and **discarded every byte after it
+    in the same read** — the pod's startup output. `bytesAfterReady(bytes)`
+    (`workload-shell-frame.ts`) now cuts that tail byte-exactly from the
+    ACCUMULATED bytes (the marker's own end can straddle two reads) and strips
+    the one `\n` our own `printf` adds; `Shell.pendingBytes` holds it, bytes
+    arriving in the window *after* ready but *before* the first parser exists
+    accumulate there too instead of being dropped, and `execute` feeds them
+    through that command's scanner before the command line goes out. Round 2
+    found that same cut scanning for the END sequence **from byte 0** while
+    `parseReady` scans from the ready **prefix**, so a pod printing `__TNT__E`
+    before the marker got the ready marker (delimiter and all) handed to the
+    first command as output; `bytesAfterReady` now finds its marker first.
+  - **The owner's live `hostname` symptom is NOT explained by that fix**, and the
+    earlier claim that a repro was "byte for byte the owner's live bug" is
+    withdrawn. Write order rules it out: `openReserved` writes the bootstrap and
+    awaits `readyDone` before `execute` writes the command line, so a real `sh`
+    cannot print `hostname`'s output before receiving `hostname`. A real `sh`
+    driven through the real registry (`.tentacle/tmp/workload-shell-live/
+    realwrap*.ts`, incl. a `set -v`/`set -x` environment and a startup banner)
+    returns the hostname whole, delimiter-free. **Cause unknown, not fixed** —
+    the changelog fragment no longer claims it. What WOULD settle it: a live
+    capture on an `etcd-guard-…` pod (the truncated string is consistent with
+    the *result text* having been truncated somewhere other than the frame
+    scanner, e.g. the model's own read of a long line, or a pod-side echo).
+  - Rows in `packages/tools/test/workload-shell.test.ts`: the banner survives,
+    the split head is rejoined whole, and no result carries `__TNT_` — plus a
+    pure `bytesAfterReady` row in `workload-shell-frame.test.ts`.
 - **Decision 4, restore the cwd on reconnect.** `WorkloadShells` records each
   shell's own `$PWD` after every run (`lastCwd`), and a **fresh** shell gets a
   framed `cd <last>` through the shell itself (a one-shot would `cd` another
@@ -756,15 +773,16 @@ one apiserver fact — a plain `POST …/exec` returns the `a container name mus
 specified …` `Status` — is still unproven live; same command as before
 (`NODE_EXTRA_CA_CERTS=… TENTACLE_K8S_SERVER=… TENTACLE_K8S_TOKEN=… bun test
 packages/cli/test/workload-shell-live.k8s.test.ts`). Also unverified live: the
-head-loss fix against a real multi-container pod whose image prints at startup —
-the fake repro is byte-exact on the owner's symptom, but a live pod is what would
-confirm the read coalescing happens there too.
+head-loss fix against a real multi-container pod whose image prints at startup.
+(**Corrected in Fix round 2**: this paragraph's "byte-exact on the owner's
+symptom" is withdrawn — see Fix round 2, finding 1. The fix covers the pod's
+startup output, not the owner's truncated `hostname`.)
 
 **Per finding:**
 
 | finding | verdict |
 |---|---|
-| 1 (HIGH) — owner decisions 1, 3, 4 unimplemented | **FIXED** (all three; decisions 1/3/4 built + pinned, mutations 1, 2a, 4a/4b/4c red) |
+| 1 (HIGH) — owner decisions 1, 3, 4 unimplemented | **FIXED** for 1 and 4; **PARTIAL/overclaimed** for 3 — the handshake bug is real and fixed, but the owner's live symptom is not explained and the repro claim is withdrawn (see Fix round 2) |
 | 2 (MEDIUM) — `prime`'s container cache never invalidates | **FIXED** (always re-reads; map kept for `explain` only; mutation 3 red twice) |
 | 3 (MEDIUM) — `execRefusal` has no timeout | **FIXED** (5 s `AbortController`; mutation 5 hangs the file, so the guard is real) |
 | 4 (MEDIUM, process) — wrong Execution signature | **FIXED** (old signature marked mis-signed; this section signed `claude-opus-5-5`) |
@@ -773,3 +791,107 @@ confirm the read coalescing happens there too.
 `bun run lint` clean (`Checked 1433 files`); `bun test` **10362 pass, 5 skip, 0 fail**.
 
 
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-15*
+
+Round 2's Review raised two findings (1 HIGH, 1 MEDIUM). Both are addressed
+below; each code change carries a regression test shown **red** on the buggy
+code first (AGENTS §9), and each is **mutation-checked** (fix reverted, test
+re-run, restore) with the result pasted.
+
+**1 (HIGH) — the decision-3 repro was causally impossible, so the owner's bug is
+still undiagnosed.** The Review is right, and the overclaim is withdrawn rather
+than re-argued. Two separate outcomes:
+
+- **(a) The claim is corrected everywhere it was made.** `docs/fix/workload-shell-live.md`'s
+  decision-3 block above, its "Not verified here" paragraph, the code comments
+  in `workload-shell.ts` (`Shell.pendingBytes`, the ready handler, `execute`) and
+  `workload-shell-frame.ts` (`bytesAfterReady`'s docblock), the test block's own
+  comment, and **`changelog.d/workload-shell-first-output.fixed.md`** (rewritten:
+  it no longer mentions `hostname`, `etcd-guard-…`, or losing a head). The state
+  is now stated plainly: **the owner's live `hostname` symptom is cause-unknown,
+  not fixed.**
+  - Evidence for that verdict (all on the branch, in
+    `.tentacle/tmp/workload-shell-live/`): the write order rules the old story
+    out — `openReserved` writes the bootstrap and `await readyDone` before
+    `execute` writes the command line (`workload-shell.ts:741`, `:743`, `:467`).
+    `realwrap.ts` / `realwrap2.ts` drive a **real** `sh` through the **real**
+    `WorkloadShells`, plain and with `set -v` / `set -x` in the environment and
+    with a startup banner: the body is the hostname, whole and delimiter-free
+    (`body="gmeghnag-mac\n"` in every case). `echo-check.ts` shows a shell's
+    `set -v` echo of our bootstrap prints it as the literal
+    `__TNT_%s_R_…`, i.e. **not** the `__TNT__E` end sequence — so the bug below
+    needs a pod that emits that sequence itself, not a shell echoing our input.
+- **(b) Chasing the actual mechanism found a REAL bug on the same surface, and
+  it is fixed.** The owner's requirement was "a command's output must never
+  contain the delimiter", and round 1 shipped that assertion with no reachable
+  way to violate it — `parseReady` and `bytesAfterReady` disagreed about where
+  the ready marker ends: `parseReady` scans from the ready **prefix**
+  (`workload-shell-frame.ts:184`), the tail cut scanned from **byte 0**
+  (round 1's `:155`). A pod that prints `__TNT__E` itself — an odd startup
+  banner, a logging wrapper, or a hostile pod (a pod is not trusted, AGENTS §7) —
+  moved the cut onto *its* sequence, so
+  `bytesAfterReady` returned the ready marker (delimiter and all) as the first
+  command's *output*. This respects the write order the Review insisted on: the
+  banner is written before the marker, the command line after `execute` arms.
+  - *Fix*: `bytesAfterReady` finds the marker first, then its end **from there**
+    (`workload-shell-frame.ts:157-173`) — the same two-step `parseReady` uses.
+  - *Repro on the buggy code* (`.tentacle/tmp/workload-shell-live/leak2.ts`,
+    a banner carrying `__TNT__E` before the marker):
+    `bannerFirst=true body=" hello\n__TNT__R_4242_/home/app__TNT__E\nhostname-output\n" -> DELIMITER LEAKED`
+    → after the fix: `body="hostname-output\n" -> clean`.
+  - *Rows*: one integration row in `workload-shell.test.ts` ("a pod line that
+    contains the READY end sequence does not put the delimiter in the body",
+    asserting `not.toContain("__TNT_")` **and** `not.toContain("__TNT__R_")`),
+    and one pure row in `workload-shell-frame.test.ts` (`bytesAfterReady` › "a pod
+    line holding the END sequence BEFORE the marker cannot move the cut").
+  - *Drift*: one extra test file touched (`workload-shell-frame.test.ts`) beyond
+    round 1's three rows — the bug is a pure-function bug, so its cheapest exact
+    test lives with the other pure rows.
+  - `head-loss.ts` (round 1's "byte for byte" repro) is **kept in the scratch
+    folder as the record of the wrong claim**, and is no longer cited as proof.
+
+**2 (MEDIUM, process) — the signing is still inconsistent.** The mismatch is
+real and I will not paper over it by asserting a fact I cannot recover. What the
+repository shows: `f2a9538e`'s subject says `(deepseek)`, its "Fix round 1"
+section says `claude-opus-5-5`. Which model wrote that section is **not
+determinable from the tree** (git records `Gabriel Meghnagi` as author and
+committer; there is no per-turn model record outside the assistant's own
+transcripts). So the section is left as written with an explicit
+**"signature unresolved"** note above it, and round 1's per-finding table row
+that claimed finding 4 was FIXED is corrected to say the mismatch is itself the
+second occurrence. This section is signed with the model id of the model that
+actually wrote it (read from this session's own record):
+`claude-opus-5-5`.
+  - The process fix that IS in my power: every signature I add is the id I can
+    read back from the session, and the doc now states the rule violation
+    rather than a claim. A durable fix (a commit trailer or a hook that stamps
+    the model id) is a separate task, not this one.
+
+**Mutations (each shown red on the fix, then restored; `git diff` re-checked
+clean after each restore):**
+
+| # | mutation | result |
+|---|---|---|
+| 1 | `bytesAfterReady` cut from byte 0 again (round-1 code), integration row | **1 red**: "a pod line that contains the READY end sequence does not put the delimiter in the body" — `Received: "… hello\\n__TNT__R_4242_/home/app__TNT__E\\nhostname-output\\n"` → 34 pass / 1 fail |
+| 2 | same mutation, pure row | **1 red**: `bytesAfterReady` › "a pod line holding the END sequence BEFORE the marker cannot move the cut" → 31 pass / 1 fail |
+
+**Gate:** `bunx tsc --noEmit` clean (exit 0); `bun run lint` clean
+(`Checked 1433 files`, 0 errors/warnings — the §6 baseline); `bun test`
+**10366 pass, 5 skip, 0 fail** (742 files) — 10362 + the 4 new rows, the 5 skips
+being the documented opt-ins.
+
+**Per finding:**
+
+| finding | verdict |
+|---|---|
+| 1 (HIGH) — decision-3 repro causally impossible, owner's bug undiagnosed | **FIXED** — the overclaim is withdrawn in the doc, the code comments, the test comment **and** the changelog (owner's symptom now recorded as cause-unknown), and the reachable delimiter leak the investigation found is fixed and pinned (mutations 1 and 2 red, at both levels) |
+| 2 (MEDIUM, process) — signing still inconsistent | **PARTIAL** — the mismatch is documented as unresolved instead of re-asserted (the writing model is not recoverable from the tree), and this section is signed with a model id read back from the session; a durable stamping mechanism is out of scope for this fix |
+
+**Not verified:** the live-k8s opt-in row (no cluster here), and the owner's
+original symptom — no live capture on an `etcd-guard-…` pod was possible, so
+"cause unknown" stands. To verify: re-run the owner's `hostname` call on
+`etcd-guard-…` with `TENTACLE_LOG` on and compare the raw stdout bytes with the
+result text.

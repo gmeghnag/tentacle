@@ -206,9 +206,8 @@ interface Shell {
   stderr: string;
   /**
    * Bytes that arrived AFTER the ready marker but before the first command's own
-   * parser existed — the pod's first output, and sometimes the head of that
-   * command's output. They are fed to the first parser instead of being dropped
-   * (docs/fix/workload-shell-live.md, owner decision 3).
+   * parser existed — the pod's startup banner. They are fed to the first parser
+   * instead of being dropped (docs/fix/workload-shell-live.md, owner decision 3).
    */
   pendingBytes: Uint8Array;
   /** Notified when the stream ends, so a waiting run stops at once. */
@@ -429,9 +428,8 @@ export class WorkloadShells {
     shell.exec.setOnStderr((bytes) => {
       shell.stderr += new TextDecoder().decode(bytes, { stream: true });
     });
-    // Bytes the pod wrote between the ready marker and this parser (the shell's
-    // first line) go through the SAME scanner, ahead of the command's own — the
-    // command line is written below, so they really are its first output.
+    // Bytes the pod wrote between the ready marker and this parser (its startup
+    // banner) go through the SAME scanner, ahead of the command's own.
     const pending = shell.pendingBytes;
     shell.pendingBytes = new Uint8Array(0);
     if (pending.length > 0) {
@@ -707,10 +705,10 @@ export class WorkloadShells {
         if (seen === null) {
           return;
         }
-        // Whatever rode the SAME read as the ready marker is not garbage: the
-        // pod's own first line, and often the head of the first command's
-        // output. Keep it for that command's parser (owner decision 3) —
-        // dropping it here is what cut `etcd-guard-…` down to `guard-…`.
+        // Whatever rode the SAME read as the ready marker is the pod's startup
+        // output, not garbage. Keep it for the first command's parser (owner
+        // decision 3); dropping it here loses the banner and, when a pod
+        // coalesces further downstream, can cut that command's head as well.
         const after = bytesAfterReady(readyBytes);
         shell.pendingBytes = after ?? new Uint8Array(0);
         settled = true;

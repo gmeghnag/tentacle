@@ -140,19 +140,31 @@ const decoder = new TextDecoder();
  * The bytes that followed the ready marker in `bytes`, or `null` when the ready
  * marker is not (yet, or wholly) there.
  *
- * They are NOT garbage: the pod's first output — a profile's echo, a container
- * entrypoint's banner, and on a busy image the beginning of the FIRST command's
- * output — arrives in the same read as the ready marker, because nothing forces
- * the kubelet to flush the two separately. Discarding the tail therefore cuts
- * the head off whatever the shell says next, which is exactly the owner's live
- * `hostname` returning `guard-3a6ec32…-end` instead of the whole hostname
- * (docs/fix/workload-shell-live.md, owner decision 3).
+ * They are NOT garbage: the pod's first output — a profile's echo, an
+ * entrypoint's banner — can arrive in the same read as the ready marker, because
+ * nothing forces the kubelet to flush the two separately. Discarding the tail
+ * therefore loses whatever the shell said at startup, and (because the tail is
+ * handed to the FIRST command's scanner) can also cut the head off that
+ * command's own output if the pod coalesces the two further downstream.
+ *
+ * It cuts from OUR marker, not from byte 0: a pod that prints `__TNT__E` before
+ * the marker would otherwise move the cut, and the ready marker itself would be
+ * handed to the first command as output (fix round 2).
  *
  * Byte-exact on purpose: re-encoding the decoded text would mangle a multi-byte
  * character the decoder happened to hold across a chunk boundary.
  */
 export function bytesAfterReady(bytes: Uint8Array): Uint8Array<ArrayBuffer> | null {
-  const end = indexOfBytes(bytes, readyEnd());
+  // Find OUR marker first, then its end from there — exactly as `parseReady`
+  // does. Scanning from byte 0 would find any `__TNT__E` the pod printed
+  // BEFORE the marker (an odd startup banner, a logging wrapper, or a hostile
+  // pod — a pod is not trusted, AGENTS §7) and cut there instead, handing the
+  // ready marker itself to the first command's parser as output (fix round 2).
+  const start = indexOfBytes(bytes, readyBegin());
+  if (start === -1) {
+    return null;
+  }
+  const end = indexOfBytes(bytes, readyEnd(), start);
   if (end === -1) {
     return null;
   }
