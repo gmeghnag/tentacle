@@ -425,7 +425,22 @@ running the app against a `serve` whose project is untrusted.
 
 ## Review
 
-*(empty)*
+**Verdict: REQUEST-CHANGES**
+
+1. **HIGH — S4 precheck is not wired on the relay path.** `packages/daemon/src/relay-link.ts:681-689` builds the phone's `acceptDevice` deps without `hooksTrustPrecheck`. Only `ws-server.ts` (direct WS and `/e2e`) gets it. *Scenario:* the user trusts the project on the Mac and then drives `serve` from the phone over the relay (the usual remote path). `Connection.askHooksTrust` has no precheck, so the phone is asked every session, which is exactly what owner decision Q2(a) ruled out. No test covers the relay route: T13 uses ws-server only. Fix: thread the precheck through the relay-link options (`serve.ts` `listen` → relay link) and add a relay-route test.
+2. **MEDIUM — a host `never` decision can be overridden from the phone.** `packages/cli/src/serve-hooks-trust.ts:329` maps `decision:"never"` to `"ask"`. The TUI's own `trustPrecheck` (`hooks-trust.ts:34`) treats `never` as declined for any hash. *Scenario:* on the Mac the user picks "never" for a repo's hooks. A phone turn then asks again, and one tap runs those hooks in that session. The host's explicit refusal stops being the decision "where the folder is". Either honour `never` (return declined without asking) or record why not.
+
+**Gate (run here):** touched files (`mcp-hub`, `serve-mcp`, `serve-hooks-trust`, `packages/mcp/test`, daemon `connection`, mobile `hooks-trust`, `worker`): 157 pass / 0 fail. `bun run typecheck` is clean. `bun run lint`: 1506 files, clean. I did not re-run the full suite.
+
+**Mutations (each reverted; `git status` was clean after):** `permission:"none"` in `tool-adapter.ts:79` → T6 red. `Connection` precheck short-circuits to `true` whenever a precheck is present → T13b and T13c red.
+
+**Attacks tried:** (a) relay versus direct accept paths → finding 1. (b) `never` and `canAllow` in the host store → finding 2. `canAllow` is not part of the hash, but the TUI already behaves the same way, so that is not new. (c) The pod path (`serve.ts:1108`, `pod-resident.ts:303`) gets no precheck. That is correct: a pod is not trusted. (d) The exit handler during an in-flight handshake: the children are not tracked yet, so they rely on stdin EOF. This is narrow and I'm not raising it. (e) The supervisor's crash counting and its dispose during a respawn: these hold. (f) The child env scrub and the token: T11 holds.
+
+**What holds:** one connection set per daemon, built on `config.cwd`. MCP tools still require a permission ask (shown by mutation). The hub's dispose-before-settle. Peer concurrency is untouched. No wire change, so no `protocol.d` note is needed.
+
+**Executor behaviour:** thorough, with honest drift notes and real mutation evidence. It missed the second `acceptDevice` call site.
+
+*— claude-opus-5-5, 2026-11-15* (same model family as the plan's author; only the context is fresh)
 
 #### Owner decisions (2026-11-15 11:10)
 
