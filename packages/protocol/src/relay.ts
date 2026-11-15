@@ -29,6 +29,7 @@
  * `pairing.ts`), which is the whole point of the shape.
  */
 import { z } from "zod";
+import { ActivityAttributesSchema, ActivityContentStateSchema } from "./live-activity.ts";
 import { PushEnvelopeSchema } from "./push.ts";
 
 /**
@@ -162,8 +163,8 @@ export function isRelaySecret(value: string): boolean {
   return SECRET_RE.test(value);
 }
 
-/** The features this build knows; `push` is task 16's (owner-approved amendment). */
-export const RELAY_FEATURES = ["push"] as const;
+/** The features this build knows; `push` is task 16's, `liveactivity` task 18's (both owner-approved amendments). */
+export const RELAY_FEATURES = ["push", "liveactivity"] as const;
 export type RelayFeature = (typeof RELAY_FEATURES)[number];
 
 /** `true` iff `value` is a feature name this build knows. */
@@ -341,6 +342,67 @@ export function isRelayPushFrame(frame: { t: string }): frame is RelayPushFrame 
 }
 
 /**
+ * The CLEAR fields of an activity update (docs/feat/mobile-live-activity.md
+ * Design 4): the ActivityKit template the relay builds `aps` from, and NOTHING a
+ * daemon could turn into content. `contentState` is the sealed blob; `attributes`
+ * exist only on `start` (Apple requires them for push-to-start, and a
+ * push-started activity has no activity to inherit them from).
+ *
+ * Why the dates live here rather than in the relay's own template: they are the
+ * daemon's intent ("stale after 15 min of silence", "done stays 5 min"), so
+ * moving them into the relay would put a policy the caller owns out of its
+ * reach — but they are BOUNDED, so a daemon cannot make an activity live forever.
+ */
+const activityLa = z.object({
+  event: z.enum(["start", "update", "end"]),
+  /** Apple's `aps.timestamp`, in seconds since the epoch (it subtracts nothing; we send absolute). */
+  timestamp: z.number().int().min(0),
+  /** When the view should say "may be out of date" (`stale-date`), seconds. */
+  staleDate: z.number().int().min(0).optional(),
+  /** When it should disappear (`dismissal-date`), seconds. */
+  dismissalDate: z.number().int().min(0).optional(),
+  /** The sealed state. Absent on `end`. */
+  contentState: ActivityContentStateSchema.optional(),
+  /** Push-to-start only. Never on `update`/`end` (Apple ignores it, and it would re-name the activity). */
+  attributes: ActivityAttributesSchema.optional(),
+});
+
+/**
+ * daemon → relay: deliver one Live Activity push (docs/feat/mobile-live-activity.md
+ * Design 4). Same shape as a `push` — `n`, `token`, `env` — because it is the SAME
+ * transport (decision 2: one relay for streams and push), plus the `la` block.
+ *
+ * No `collapse` and no `ttl`: an activity is not a banner to replace, and its
+ * lifetime is `dismissalDate`, not `apns-expiration` — a `ttl` here would be a
+ * second, contradicting source of truth.
+ *
+ * `priority` is Apple's LA priority, not a push's: 10 for start / asking /
+ * resolved / end, 5 for a tool or title update. The relay degrades an excess of
+ * 10s to 5 (never drops) — the budget belongs to it, since it is the one that
+ * sees all tokens.
+ *
+ * Only to a relay that announced `"liveactivity"` in `ready.features`: an older
+ * relay closes the control socket on an unknown frame (C1).
+ */
+const liveActivityFrame = z.object({
+  t: z.literal("liveactivity"),
+  n: z.number().int().nonnegative(),
+  token: RelayPushTokenSchema,
+  env: z.enum(["sandbox", "production"]),
+  priority: z.union([z.literal(5), z.literal(10)]),
+  la: activityLa,
+});
+export type RelayLiveActivityFrame = z.infer<typeof liveActivityFrame>;
+
+/** The schema alone, for a caller that validates a frame it is about to send. */
+export const RelayLiveActivityFrameSchema = liveActivityFrame;
+
+/** `true` iff `frame` is a `liveactivity` — the gate a daemon applies before sending one. */
+export function isRelayLiveActivityFrame(frame: { t: string }): frame is RelayLiveActivityFrame {
+  return frame.t === "liveactivity";
+}
+
+/**
  * relay → daemon: what became of a `push` — `sent`, `gone`, `rejected`,
  * `throttled` or `unavailable` (the vocabulary P2 owns,
  * `PUSH_DELIVERY_STATUSES`, which the daemon reads it through).
@@ -373,6 +435,7 @@ export const RelayDaemonFrameSchema = z.discriminatedUnion("t", [
   acceptFrame,
   pingFrame,
   pushFrame,
+  liveActivityFrame,
 ]);
 export type RelayDaemonFrame = z.infer<typeof RelayDaemonFrameSchema>;
 
@@ -399,6 +462,7 @@ export const RelayControlFrameSchema = z.discriminatedUnion("t", [
   pongFrame,
   pushFrame,
   pushResultFrame,
+  liveActivityFrame,
 ]);
 export type RelayControlFrame = z.infer<typeof RelayControlFrameSchema>;
 

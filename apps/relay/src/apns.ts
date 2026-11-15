@@ -345,3 +345,143 @@ export function decodeApnsKeyPem(
     return { kind: "error", error: "the apns key file is not base64 PEM" };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Live Activities (docs/feat/mobile-live-activity.md Design 5, L4)
+// ---------------------------------------------------------------------------
+
+/**
+ * The alert a push-to-start carries. L0(d): APNs REFUSES a `start` with no
+ * alert, so one is required; it is a fixed constant (the banner rule, F9) — the
+ * content is sealed, so the only text iOS may show before the widget opens is
+ * this. Task 16's notification stays the rich, actionable channel.
+ */
+export const APNS_LA_ALERT = { title: "tentacle", body: "A turn is running" } as const;
+
+/**
+ * The furthest any `stale-date` / `dismissal-date` may sit past now, in seconds
+ * (12 h). The daemon's own policy is minutes (stale 15 min, done 5 min); this is
+ * the RELAY's backstop so neither a bug nor a hostile daemon can pin an activity
+ * on the lock screen past iOS's 8 h cap (Design 3, Owner Q5).
+ */
+export const APNS_LA_MAX_AHEAD_SECONDS = 12 * 60 * 60;
+
+/**
+ * The `attributes-type` Apple requires on a `start`. It must equal the widget's
+ * Swift type name EXACTLY (it is how iOS links an incoming activity to the type
+ * it decodes `attributes` into), so it is a constant here and never a frame
+ * field: a daemon-supplied name would silently break the widget.
+ */
+export const APNS_LA_ATTRIBUTES_TYPE = "TentacleActivityAttributes";
+
+/**
+ * The `liveactivity` half of an `apns-topic`. Apple routes by it, so a wrong
+ * suffix is a 400 for every activity — which no other test would notice.
+ */
+export const APNS_LA_TOPIC_SUFFIX = ".push-type.liveactivity";
+
+/** The `la` block as the relay received it — the clear fields only (L3's frame). */
+export interface ApnsLiveActivity {
+  readonly event: "start" | "update" | "end";
+  readonly timestamp: number;
+  readonly staleDate?: number | undefined;
+  readonly dismissalDate?: number | undefined;
+  readonly contentState?: { readonly v: 1; readonly e: string; readonly c: string } | undefined;
+  readonly attributes?: { readonly v: 1; readonly k: string; readonly slot: string } | undefined;
+}
+
+/**
+ * The LA request body: a FIXED template plus the daemon's clear fields. Pure and
+ * total — every field it emits is either a constant or one of the bounded values
+ * L3's schema already checked, so there is no path by which text reaches `aps`.
+ *
+ * `now` (ms) bounds the dates. Throws when a date is past the bound or the event
+ * is unknown: the caller turns that into a `rejected` result, never a send.
+ */
+export function liveActivityPayloadOf(la: ApnsLiveActivity, now: number): string {
+  const nowSeconds = Math.floor(now / 1000);
+  const bounded = (value: number | undefined, what: string): number | undefined => {
+    if (value === undefined) {
+      return undefined;
+    }
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`${what} must be a non-negative integer of seconds`);
+    }
+    if (value > nowSeconds + APNS_LA_MAX_AHEAD_SECONDS) {
+      throw new Error(`${what} must be at most ${APNS_LA_MAX_AHEAD_SECONDS}s past now`);
+    }
+    return value;
+  };
+
+  const aps: Record<string, unknown> = { timestamp: la.timestamp, event: la.event };
+  if (la.event === "start") {
+    // A start NEEDS attributes (there is no activity to inherit them from) and,
+    // per L0(d), an alert.
+    if (la.attributes === undefined) {
+      throw new Error("a live activity start must carry attributes");
+    }
+    aps["attributes-type"] = APNS_LA_ATTRIBUTES_TYPE;
+    aps.attributes = la.attributes;
+    aps.alert = APNS_LA_ALERT;
+  }
+  if (la.event === "start" || la.event === "update") {
+    if (la.contentState === undefined) {
+      throw new Error(`a live activity ${la.event} must carry a content-state`);
+    }
+    aps["content-state"] = la.contentState;
+  }
+  const staleDate = bounded(la.staleDate, "stale-date");
+  if (staleDate !== undefined) {
+    aps["stale-date"] = staleDate;
+  }
+  const dismissalDate = bounded(la.dismissalDate, "dismissal-date");
+  if (dismissalDate !== undefined) {
+    aps["dismissal-date"] = dismissalDate;
+  }
+  if (la.event !== "start" && la.event !== "update" && la.event !== "end") {
+    throw new Error("a live activity event must be start, update or end");
+  }
+  return JSON.stringify({ aps });
+}
+
+/**
+ * One activity push as the HTTP/2 request APNs expects. The differences from a
+ * banner push are all Apple's: the push type, the topic's suffix, the priority
+ * (the daemon's 5|10 rather than a constant) and the ABSENCE of `apns-expiration`
+ * / `apns-collapse-id` — an activity's lifetime is `dismissal-date`, and there is
+ * nothing to collapse.
+ */
+export function liveActivityRequestOf(input: {
+  readonly token: string;
+  readonly topic: string;
+  readonly jwt: string;
+  readonly priority: 5 | 10;
+  readonly now: number;
+  readonly la: ApnsLiveActivity;
+}): { readonly path: string; readonly headers: Record<string, string> } {
+  const path = `/3/device/${input.token}`;
+  return {
+    path,
+    headers: {
+      ":method": "POST",
+      ":path": path,
+      "apns-push-type": "liveactivity",
+      "apns-priority": String(input.priority),
+      "apns-topic": `${input.topic}${APNS_LA_TOPIC_SUFFIX}`,
+      authorization: `bearer ${input.jwt}`,
+    },
+  };
+}
+
+/**
+ * The per-token LA push budgets. `priority 10` is the scarce one (Apple's LA
+ * budget is ~2-4× a normal push's), so an excess is DOWNGRADED to 5, never
+ * dropped: a throttled update is superseded by the next state anyway, but a
+ * dropped `asking` would be a missed approval (F19).
+ */
+export const APNS_LA_LIMITS = {
+  /** LA pushes per hour, per token. */
+  pushesPerHourPerToken: 60,
+  /** Priority-10 pushes per hour, per token; past it a 10 becomes a 5. */
+  priority10PerHourPerToken: 20,
+} as const;

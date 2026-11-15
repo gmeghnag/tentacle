@@ -344,6 +344,26 @@ const FIXTURES: Record<string, Json[]> = {
   ],
   "methods/device~1push_unregister/params": [{}],
   "methods/device~1push_unregister/result": [{}],
+  // Live Activity registration (docs/feat/mobile-live-activity.md Design 4, L2):
+  // the push-to-start token, its env, the person's switch; then the per-activity
+  // update token, keyed by the daemon-chosen slot (24 hex characters).
+  "methods/device~1live_activity_register/params": [
+    { startToken: "a".repeat(64), env: "sandbox", enabled: true },
+    { startToken: "c".repeat(200), env: "production", enabled: false },
+  ],
+  "methods/device~1live_activity_register/result": [
+    { status: "on" },
+    { status: "relay-no-la" },
+    { status: "unsupported" },
+  ],
+  "methods/device~1live_activity_token/params": [
+    { slot: "00112233445566778899aabb", token: "d".repeat(64) },
+  ],
+  "methods/device~1live_activity_token/result": [{ known: true }, { known: false }],
+  "methods/device~1live_activity_ended/params": [
+    { slot: "00112233445566778899aabb", reason: "dismissed" },
+  ],
+  "methods/device~1live_activity_ended/result": [{}],
   "methods/daemon~1session_ttl/params": [{}, { idleTtlMs: 3600000 }, { idleTtlMs: "never" }],
   "methods/daemon~1session_ttl/result": [
     { idleTtlMs: "never", persisted: false },

@@ -26,6 +26,7 @@ import {
   RELAY_STREAM_HOLD_MS,
   RELAY_STREAM_TEXT_LENGTH,
   type RelayFeature,
+  type RelayLiveActivityFrame,
   type RelayToDaemonFrame,
   decodeBase64Url,
   encodeBase64Url,
@@ -83,6 +84,19 @@ export const RELAY_LIMITS = {
    * laundered by reconnecting one (F10).
    */
   pushesPerMinutePerToken: 30,
+  /**
+   * `liveactivity` frames per HOUR, per device token (docs/feat/mobile-live-activity.md
+   * F19). Apple's Live Activity budget is per-hour, not per-minute, so this is a
+   * different window from `push`'s — the two budgets are separate on Apple's
+   * side too, which is why an activity can never eat a notification's budget.
+   */
+  laPushesPerHourPerToken: 60,
+  /**
+   * Priority-10 activity pushes per hour, per token. Past it a `10` becomes a
+   * `5` — DOWNGRADED, never dropped (F19): a dropped `asking` is a missed
+   * approval, a downgraded one still lands and the next state supersedes it.
+   */
+  laPriority10PerHourPerToken: 20,
 } as const;
 
 export type RelayLimits = { -readonly [K in keyof typeof RELAY_LIMITS]: number };
@@ -183,8 +197,43 @@ export interface RelayPushRequest {
   readonly payload: unknown;
 }
 
+/**
+ * One Live Activity push as the relay hands it on: the SAME `n`/`token`/`env` as
+ * a banner push (one transport, decision 2), plus the `la` block and the
+ * priority the relay decided — which may be LOWER than the one asked for (F19).
+ */
+export interface RelayLiveActivityRequest {
+  readonly socket: string;
+  readonly n: number;
+  readonly token: string;
+  readonly env: "sandbox" | "production";
+  /** What the relay will actually send: `5` after a downgrade, else the asked-for one. */
+  readonly priority: 5 | 10;
+  readonly la: RelayLiveActivityFrame["la"];
+}
+
+/** The same three-way shape as `PushDecision`, for the activity path. */
+export type LiveActivityDecision =
+  | { readonly ok: true; readonly request: RelayLiveActivityRequest }
+  | {
+      readonly ok: false;
+      readonly status: "rejected" | "throttled" | "unavailable";
+      readonly reason: string;
+      readonly effects: readonly RelayEffect[];
+    };
+
 interface PushWindow {
   readonly id: Window;
+}
+
+/**
+ * An LA token's two hourly windows: everything it sent, and the priority-10
+ * subset (the scarce one). Separate counters because a 10 that was DOWNGRADED
+ * must not consume the scarce budget it was refused (F19).
+ */
+interface LaWindow {
+  readonly all: Window;
+  readonly priority10: Window;
 }
 
 /** What `/v1/accept` concluded. */ export type AcceptDecision =
@@ -283,6 +332,28 @@ function usedInWindow(window: Window, at: number): number {
   return at - window.since >= MINUTE_MS ? 0 : window.count;
 }
 
+const HOUR_MS = 60 * MINUTE_MS;
+
+/**
+ * The HOUR twin of {@link chargeWindow}: the LA budgets are per-hour on Apple's
+ * side (F19), so reusing the minute window would grant 60× the pushes. Kept as a
+ * separate pair rather than a `duration` parameter so neither window's length can
+ * be changed by editing a call site.
+ */
+function chargeHourWindow(window: Window, at: number): number {
+  if (at - window.since >= HOUR_MS) {
+    window.count = 0;
+    window.since = at;
+  }
+  window.count += 1;
+  return window.count;
+}
+
+/** How many are charged in the HOUR window `at` falls in (0 once it has rolled over). */
+function usedInHourWindow(window: Window, at: number): number {
+  return at - window.since >= HOUR_MS ? 0 : window.count;
+}
+
 /**
  * The relay's whole state machine. One instance per relay process (a restart
  * loses it by design: every daemon re-registers, F3).
@@ -306,6 +377,13 @@ export class RelayCore {
    * tiply by registering ids or by reconnecting one.
    */
   private readonly pushTokens = new Map<string, Window>();
+  /**
+   * The LA per-token windows (F19), keyed by the UPDATE token. An activity has
+   * its OWN budget: Apple keeps notification and Live Activity budgets apart, so
+   * an activity must never eat a notification's — and the relay is where every
+   * token's total is visible.
+   */
+  private readonly laTokens = new Map<string, LaWindow>();
   /**
    * Per-id push windows, keyed by id and NOT by socket: a reconnect of the same id
    * resumes its minute instead of laundering it.
@@ -660,6 +738,87 @@ export class RelayCore {
     };
   }
 
+  /**
+   * A daemon's `liveactivity` frame: may this id push an activity to this token
+   * now, and at what priority (docs/feat/mobile-live-activity.md Design 5, F19)?
+   *
+   * Deliberately a SIBLING of {@link push}, not a branch inside it: the two have
+   * different budgets (Apple keeps notification and Live Activity budgets apart,
+   * so an activity must never eat a notification's), different windows (per-hour
+   * vs per-minute) and one rule banners do not have — a priority-10 excess is
+   * dropped to 5 rather than refused.
+   *
+   * The refusal vocabulary matches `push`'s (`rejected` / `throttled`, plus a
+   * close only for a socket that never said `hello`), so a daemon's audit line
+   * reads the same for both.
+   */
+  liveActivity(input: {
+    socket: string;
+    n: number;
+    token: string;
+    env: "sandbox" | "production";
+    priority: 5 | 10;
+    la: RelayLiveActivityFrame["la"];
+    /** The request body's size, so the 4096-byte bound is checked on the RELAY. */
+    payloadBytes: number;
+  }): LiveActivityDecision {
+    const at = this.now();
+    const id = this.idOfControl(input.socket);
+    const refuse = (
+      status: "rejected" | "throttled" | "unavailable",
+      reason: string,
+      close = false,
+    ): LiveActivityDecision => ({
+      ok: false,
+      status,
+      reason,
+      effects: close
+        ? [
+            this.pushResult(input.socket, { n: input.n, status, reason }),
+            { kind: "close", target: input.socket, code: 1008 },
+          ]
+        : [this.pushResult(input.socket, { n: input.n, status, reason })],
+    });
+    if (id === undefined) {
+      // Before `hello`: not a daemon socket yet. Named and closed, exactly as a
+      // pre-registration `push` is.
+      return refuse("rejected", "unregistered", true);
+    }
+    if (!this.features.includes("liveactivity")) {
+      // A correct daemon checks `features` first, so this is a bug or a
+      // hand-written frame. A status (never a close): the link stays up.
+      return refuse("rejected", "no-liveactivity");
+    }
+    if (input.payloadBytes > APNS_MAX_PAYLOAD_BYTES) {
+      return refuse("rejected", "payload");
+    }
+    const window = this.laTokenWindow(input.token, at);
+    if (usedInHourWindow(window.all, at) >= this.limits.laPushesPerHourPerToken) {
+      return refuse("throttled", "capped");
+    }
+    // F19: the scarce budget degrades the PRIORITY, it never refuses the push.
+    const priority: 5 | 10 =
+      input.priority === 10 &&
+      usedInHourWindow(window.priority10, at) >= this.limits.laPriority10PerHourPerToken
+        ? 5
+        : input.priority;
+    chargeHourWindow(window.all, at);
+    if (priority === 10) {
+      chargeHourWindow(window.priority10, at);
+    }
+    return {
+      ok: true,
+      request: {
+        socket: input.socket,
+        n: input.n,
+        token: input.token,
+        env: input.env,
+        priority,
+        la: input.la,
+      },
+    };
+  }
+
   /** The `push-result` frame for one request (`n` echoes the daemon's counter). */
   pushResult(
     socket: string,
@@ -926,6 +1085,31 @@ export class RelayCore {
       const oldest = this.pushTokens.keys().next();
       if (!oldest.done) {
         this.pushTokens.delete(oldest.value);
+      }
+    }
+    return fresh;
+  }
+
+  /**
+   * The LA per-token hourly windows, bounded like every other map: past
+   * `maxTrackedPushTokens` the stalest token is forgotten and starts fresh — a
+   * fairness reset that bypasses nothing, since the per-id `push` limits still
+   * bound each daemon's total.
+   */
+  private laTokenWindow(token: string, at: number): LaWindow {
+    const existing = this.laTokens.get(token);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const fresh: LaWindow = {
+      all: { count: 0, since: at },
+      priority10: { count: 0, since: at },
+    };
+    this.laTokens.set(token, fresh);
+    if (this.laTokens.size > this.limits.maxTrackedPushTokens) {
+      const oldest = this.laTokens.keys().next();
+      if (!oldest.done) {
+        this.laTokens.delete(oldest.value);
       }
     }
     return fresh;

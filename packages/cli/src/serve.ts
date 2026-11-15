@@ -12,6 +12,7 @@ import type { AttachmentSource } from "@tentacle/core";
 import {
   type AgentReuse,
   Connection,
+  DEFAULT_LA_START_AFTER_SECONDS,
   DEFAULT_MAX_DETACHED_SESSIONS,
   DEFAULT_MAX_SESSIONS,
   DEFAULT_SESSION_TTL_MS,
@@ -19,6 +20,8 @@ import {
   DeviceAuthority,
   HandshakeLimiter,
   type HooksTrustPrecheck,
+  type LaRegistrationsSource,
+  type LiveActivityNotifier,
   LogSessionStore,
   type ModelLink,
   ProxyModelProvider,
@@ -30,15 +33,20 @@ import {
   SessionHost,
   type SessionHostOptions,
   SessionPersister,
+  type SessionPushObserver,
   type SessionTtlControl,
   TombstoneFile,
   acquireStoreLock,
   bunRelayDialer,
+  createLiveActivityNotifier,
   createPushNotifier,
+  deleteLiveRegistration,
   deletePushRegistration,
   isLoopbackHost,
   loadOrCreateIdentity,
   readIdentity,
+  readLiveRegistration,
+  readLiveRegistrations,
   readPushRegistration,
   readPushRegistrations,
   removeDaemonRecord,
@@ -344,6 +352,156 @@ function buildPush(
 }
 
 /**
+ * The Live Activity wiring for a `serve` (docs/feat/mobile-live-activity.md
+ * Design 4, L8), or `undefined` when this daemon must not start one.
+ *
+ * The same three gates as push, for the same reasons (Design 4's statuses):
+ * `liveActivity.enabled` (default true), the relay being on (`relay-off`), and
+ * the relay carrying activities (`relay-no-la`). `unsupported` is the DEVICE's
+ * own answer and is decided on the phone, not here.
+ *
+ * One hook, two subscribers: the sessions' observer is a FAN-OUT of the push
+ * notifier and this one, so `HostedSession` still has exactly one observer and
+ * neither side can observe the other's absence (`SessionHostOptions.push`).
+ */
+/**
+ * F3's wiring, extracted so it is a thing a test can CALL rather than a pair of
+ * lines it has to re-implement: on every `ready` that carries `"liveactivity"`,
+ * the notifier resends the current state of each live slot (convergence by
+ * state, never by replaying the events the link missed).
+ *
+ * Mutation: delete the `bindLiveActivityReady` call → no resend ever happens, and
+ * an activity whose state changed during an outage stays wrong on the phone.
+ */
+export function bindLiveActivityResend(
+  link: { bindLiveActivityReady(callback: () => void): void } | undefined,
+  notifier: { resendAll(): void },
+): void {
+  link?.bindLiveActivityReady(() => notifier.resendAll());
+}
+
+interface ServeLiveActivity {
+  readonly hostOptions: SessionHostOptions["liveActivity"];
+  readonly notifier: LiveActivityNotifier;
+  /** Called by `listen` once the link exists (or not, when the relay is off). */
+  bindLink(link: RunningRelayLink | undefined): void;
+  /** Called by `listen` once the host exists: the title/cwd a content needs. */
+  bindHost(host: SessionHost): void;
+  /** Stop the notifier with the daemon (its timer must not outlive it). */
+  stop(): void;
+}
+
+function buildLiveActivity(
+  config: TentacleConfig,
+  options: ServeOptions,
+  devices: DeviceAuthority,
+): ServeLiveActivity | undefined {
+  const settings = config.liveActivity;
+  if (settings?.enabled === false) {
+    return undefined;
+  }
+  const relayEnabled =
+    relayChoice({
+      flagUrl: options.relay?.flagUrl,
+      noRelay: options.relay?.noRelay,
+      config: options.relay?.config ?? config.relay,
+    }).kind === "on";
+  const startAfterSeconds = settings?.startAfterSeconds ?? DEFAULT_LA_START_AFTER_SECONDS;
+  const storeDir = devices.configDir;
+  let link: RunningRelayLink | undefined;
+  let host: SessionHost | undefined;
+  const registrations: LaRegistrationsSource = {
+    registered: () =>
+      // The same double gate as push: a usable file AND the authority's snapshot,
+      // so a revoke that landed but whose file survived is never started for (F12).
+      [...readLiveRegistrations(storeDir).registrations.keys()].filter((id) => devices.knows(id)),
+    read: (deviceId) => {
+      const read = readLiveRegistration(storeDir, deviceId);
+      return read.ok ? read.registration : undefined;
+    },
+    pushKeyOf: (deviceId) => {
+      // The seal's recipient key is task 16's per-device push key: the SAME key
+      // the phone already opens a notification with, so the widget needs no
+      // second Keychain item. No banner registration → no key → the delivery is
+      // dropped with a line (never silently).
+      const read = readPushRegistration(storeDir, deviceId);
+      return read.ok ? read.registration.key : undefined;
+    },
+    forget: (deviceId, token) => {
+      deleteLiveRegistration(storeDir, deviceId, token);
+    },
+  };
+  const notifier = createLiveActivityNotifier({
+    now: Date.now,
+    startAfterSeconds,
+    registrations,
+    describe: (sessionId) => {
+      const live = host?.get(sessionId);
+      return live === undefined
+        ? undefined
+        : { title: live.summary(config.cwd).title, cwd: config.cwd };
+    },
+    computer: () => {
+      const identity = devices.identity();
+      return identity === undefined
+        ? undefined
+        : { privateKey: identity.privateKey, name: identity.name };
+    },
+    sink: (delivery) =>
+      link === undefined
+        ? Promise.resolve("unavailable")
+        : link.liveActivity({
+            token: delivery.token,
+            env: delivery.env,
+            priority: delivery.priority,
+            la: {
+              event: delivery.event,
+              // Apple's `aps.timestamp` is SECONDS; the rules carry ms.
+              timestamp: Math.floor(Date.now() / 1_000),
+              ...(delivery.staleDate === undefined ? {} : { staleDate: delivery.staleDate }),
+              ...(delivery.dismissalDate === undefined
+                ? {}
+                : { dismissalDate: delivery.dismissalDate }),
+              ...(delivery.contentState === undefined
+                ? {}
+                : { contentState: delivery.contentState }),
+              ...(delivery.attributes === undefined ? {} : { attributes: delivery.attributes }),
+            },
+          }),
+    ...(options.onAudit ? { onAudit: options.onAudit } : {}),
+  });
+  return {
+    hostOptions: {
+      // The observer is filled in by `reloadedHost` (the ONE fan-out of this and
+      // the push notifier): the two must share it, or a session would report to
+      // only one of them. Everything else here is this side's own.
+      observer: notifier,
+      storeDir,
+      notifier,
+      // `on`/`off` are the person's switch (the store holds it); this reports what
+      // the DAEMON cannot do, which the register result layers under it.
+      status: () =>
+        !relayEnabled || link === undefined
+          ? "relay-off"
+          : link.liveActivityStatus() === "on"
+            ? undefined
+            : "relay-no-la",
+    },
+    notifier,
+    bindLink(next) {
+      link = next;
+      bindLiveActivityResend(next, notifier);
+    },
+    bindHost(next) {
+      host = next;
+    },
+    stop() {
+      notifier.stop();
+    },
+  };
+}
+
+/**
  * The long-lived daemon: sessions outlive connections here, so this is where
  * they are bounded — daemon-wide limits on `SessionHost` and the idle-TTL
  * reaper, owned with the registry and stopped with the server — and where they
@@ -429,6 +587,9 @@ export async function startDaemon(
     // afterwards — so the sink reads a handle `listen` fills in. `push.enabled`
     // false, or no device route, means no notifier at all.
     const push = devices ? buildPush(config, options, devices) : undefined;
+    // Live Activities (docs/feat/mobile-live-activity.md L8): a SIBLING of push,
+    // fed by the same session hook (one observer, fanned out below).
+    const liveActivity = devices ? buildLiveActivity(config, options, devices) : undefined;
     const sessionHost = await reloadedHost(
       config,
       options,
@@ -439,6 +600,7 @@ export async function startDaemon(
       tombstones,
       mcpHub,
       push?.hostOptions,
+      liveActivity?.hostOptions,
     );
     return listen(
       sessionHost,
@@ -450,6 +612,7 @@ export async function startDaemon(
         mcpHub.dispose();
         process.off("exit", exitDispose);
         push?.notifier.stop();
+        liveActivity?.stop();
         await persister?.stop();
         devices?.stop();
         lock.release();
@@ -458,6 +621,7 @@ export async function startDaemon(
       config.cwd,
       relay.kind === "on" ? { url: relay.url, storeDir: dir } : undefined,
       push,
+      liveActivity,
       // The connect starts only once the listener exists: a start that fails
       // spawns nothing (docs/feat/serve-mcp.md, "Per daemon, eager").
       () => mcpHub.start(),
@@ -528,12 +692,34 @@ async function reloadedHost(
   mcpHub: McpHub,
   /** The push wiring (docs/feat/mobile-push.md P8), when this daemon has it. */
   push?: SessionHostOptions["push"],
+  /** The Live Activity wiring (docs/feat/mobile-live-activity.md L8), same shape. */
+  liveActivity?: SessionHostOptions["liveActivity"],
 ): Promise<SessionHost> {
   // One skill scan for every session and for a session not created yet
   // (docs/feat/skills-hot-reload.md).
   const skillScan = createSkillScan(config); // The lock is held: this is THE daemon of the store. Silent, not awaited.
   sweepToolOutput(config);
   const images = daemonImagePolicy(config);
+  /**
+   * The ONE hook every session reports to: the push notifier and the activity
+   * notifier, in that order, each isolated. A throw from either is already
+   * caught inside it (F23/F24); this wrapper is the second net and, more
+   * importantly, keeps ONE of them failing from starving the other.
+   */
+  const observer: SessionPushObserver = {
+    onPushEvent(sessionId, event, attached) {
+      for (const target of [push?.observer, liveActivity?.observer]) {
+        if (target === undefined) {
+          continue;
+        }
+        try {
+          target.onPushEvent(sessionId, event, attached);
+        } catch {
+          // Each notifier reports its own bugs; this only keeps the sibling fed.
+        }
+      }
+    },
+  };
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
     // A deleted session takes its spilled tool output with it.
@@ -579,11 +765,35 @@ async function reloadedHost(
     // This daemon runs its own config's model, so it holds the bytes
     // (docs/feat/attachments-prompt.md D4); `undefined` = no image input at all.
     ...(images ? { images } : {}),
-    // Push (docs/feat/mobile-push.md P8): the OBSERVER every session gets, the
-    // store its registrations live in, and what the RPC answers. Absent = no push
-    // (a pod daemon never reaches here, and `push.enabled: false` removes it
-    // before this call) — structurally, nothing to observe.
-    ...(push ? { push } : {}),
+    // Push (docs/feat/mobile-push.md P8) and Live Activities (task 18) both
+    // observe the SAME session hook. ONE observer is registered — a fan-out of
+    // whichever of the two exist — so `HostedSession.pushObserver` stays a single
+    // object, `offerPush` stays O(1) and synchronous (AGENTS §7's steering
+    // no-wait window), and neither side can observe the other's absence.
+    //
+    // Each option is passed ONLY when its own wiring exists: `push.enabled:
+    // false` must still answer `MethodNotFound` to `device/push_register` (task
+    // 16's contract), and a pod daemon passes neither.
+    ...(push === undefined
+      ? {}
+      : {
+          push: {
+            storeDir: push.storeDir,
+            graceSeconds: push.graceSeconds,
+            status: push.status,
+            observer,
+          },
+        }),
+    ...(liveActivity === undefined
+      ? {}
+      : {
+          liveActivity: {
+            storeDir: liveActivity.storeDir,
+            notifier: liveActivity.notifier,
+            status: liveActivity.status,
+            observer,
+          },
+        }),
   });
   const notice = options.onNotice ?? (() => {});
   let restored = 0;
@@ -699,6 +909,11 @@ function listen(
   /** The push wiring (docs/feat/mobile-push.md P8), when this daemon has it. */
   push?: ServePush,
   /**
+   * The Live Activity wiring (docs/feat/mobile-live-activity.md L8), when this
+   * daemon has it. Its SINK is the same relay link, bound below.
+   */
+  liveActivity?: ServeLiveActivity,
+  /**
    * Run once the listener is up (the MCP connect, docs/feat/serve-mcp.md): a
    * start that fails inside `startWsServer` spawns no server process.
    */
@@ -726,6 +941,7 @@ function listen(
   // dials only while the authority wants reachability, and the notifier reads
   // titles through the host).
   push?.bindHost(sessionHost);
+  liveActivity?.bindHost(sessionHost);
   // The mobile relay's identity, BEFORE the record so the address can go in it:
   // `/d/<id>/e2e` is computed locally (`relayAddress`), so `pair` and the
   // announcement know it before any connection (Design §1). A store that cannot
@@ -795,6 +1011,9 @@ function listen(
   // transport. With no link the sink answers `unavailable` and the register
   // result says `relay-off` — the app's honest answer, never a silent drop.
   push?.bindLink(relayLink);
+  // The activity notifier's sink IS the same link (one relay for streams and
+  // push, decision 2): bound now, and it also registers the `ready` resend (F3).
+  liveActivity?.bindLink(relayLink);
   // Sibling discovery (docs/feat/sibling-discovery.md): ONE driver per process,
   // started with the listener (it needs the BOUND port) and stopped with it,
   // before the record is removed — a stopping daemon must not heartbeat a file
