@@ -3,11 +3,8 @@
  * Design 1). Colours are the approved mockups' `renderVals()` tables, light and
  * dark; type, radii, sizes and spacing are the mockups' measures. The screen
  * picks a palette by `useColorScheme`; every primitive takes it as a prop.
- *
- * The 11 names the screens used before the restyle (`background`,
- * `groupedBackground`, `secondaryLabel`, `separator`, `running`, `badgeText`,
- * `danger`) stay as ALIASES of the new tokens until Slice 6 removes them, so a
- * screen not restyled yet already shows the new values.
+ * (The pre-restyle alias names — `groupedBackground`, `secondaryLabel`, … — were
+ * removed in Slice 6: every screen now reads the tokens.)
  */
 
 export interface Palette {
@@ -61,40 +58,9 @@ export interface Palette {
   readonly delText: string;
   readonly dash: string;
   readonly switchOff: string;
-
-  // --- Aliases (removed in Slice 6) ---
-  readonly background: string;
-  readonly groupedBackground: string;
-  readonly separator: string;
-  readonly secondaryLabel: string;
-  readonly running: string;
-  readonly badgeText: string;
-  readonly danger: string;
 }
 
-type Base = Omit<
-  Palette,
-  | "background"
-  | "groupedBackground"
-  | "separator"
-  | "secondaryLabel"
-  | "running"
-  | "badgeText"
-  | "danger"
->;
-
-const withAliases = (base: Base): Palette => ({
-  ...base,
-  background: base.bg,
-  groupedBackground: base.bg,
-  separator: base.sep,
-  secondaryLabel: base.sec,
-  running: base.accent,
-  badgeText: base.onAccent,
-  danger: base.red,
-});
-
-const light: Palette = withAliases({
+const light: Palette = {
   bg: "#F2F2F7",
   page: "#FFFFFF",
   card: "#FFFFFF",
@@ -131,9 +97,9 @@ const light: Palette = withAliases({
   delText: "#9F1020",
   dash: "#8E8E93",
   switchOff: "#C7C7CC",
-});
+};
 
-const dark: Palette = withAliases({
+const dark: Palette = {
   bg: "#000000",
   page: "#000000",
   card: "#1C1C1E",
@@ -170,7 +136,7 @@ const dark: Palette = withAliases({
   delText: "#FFA3A8",
   dash: "#636366",
   switchOff: "#39393D",
-});
+};
 
 /** The palette for a scheme; an unknown/null scheme is the light one. */
 export function paletteFor(scheme: "light" | "dark" | null | undefined): Palette {
@@ -189,8 +155,12 @@ export interface TextStyleToken {
   readonly fontFamily?: string;
 }
 
-/** The mono family: `Menlo` ships on every iOS (SF Mono is not exposed by name to apps). */
-export const MONO = "Menlo";
+/**
+ * The mono family: SF Mono, the mockups' `ui-monospace`. RN 0.88 maps the name to
+ * `UIFontDescriptorSystemDesignMonospaced` (`RCTFontUtils.mm`); Menlo — wider,
+ * heavier — read as oversized code on the owner's iPhone (feedback #3).
+ */
+export const MONO = "ui-monospace";
 
 export const typography = {
   largeTitle: { fontSize: 34, lineHeight: 41, fontWeight: "700", letterSpacing: 0.37 },

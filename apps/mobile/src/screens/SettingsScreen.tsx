@@ -1,17 +1,25 @@
 /**
- * Settings (docs/feat/mobile-lock.md D6; mockup: a native inset grouped list, not
- * custom controls — mobile decision 13). A dumb renderer: which delay is
- * selected, whether the device can lock, and what the export did all arrive
- * precomputed.
+ * Settings (docs/feat/mobile-lock.md D6; no mockup — the system of
+ * docs/feat/mobile-ui-polish.md applied: large title + glass back, 26 pt grouped
+ * cards, 44 pt rows, an SF Symbol checkmark, `Banner` for notices). A dumb
+ * renderer: which delay is selected, whether the device can lock, and what the
+ * export did all arrive precomputed.
  *
  * The four delay rows are `lock-delay-<v>` and the export row is `export-logs`,
  * because those are the only values a Maestro flow can assert (P9: RN's new
  * architecture shows XCUITest no text).
  */
 import type { JSX } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
-import type { Palette } from "../theme.ts";
+import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
+import { Banner } from "../ui/Banner.tsx";
+import { GlassButton } from "../ui/GlassButton.tsx";
+import { GroupedCard } from "../ui/GroupedCard.tsx";
+import { Icon } from "../ui/Icon.tsx";
+import { Row } from "../ui/Row.tsx";
+import { ScreenHeader } from "../ui/ScreenHeader.tsx";
+import { SectionHeader } from "../ui/SectionHeader.tsx";
 
 /** The rows, weakest lock last, with the copy the mockup uses. */
 export const DELAY_ROWS: readonly { readonly value: LockDelay; readonly label: string }[] = [
@@ -41,6 +49,8 @@ export interface SettingsScreenProps {
   readonly onExportLogs: () => void;
   /** False while an export is in flight (a double tap must not write twice). */
   readonly canExport: boolean;
+  /** Present only when the stack can go back. */
+  readonly onBack?: () => void;
 }
 
 export function SettingsScreen({
@@ -53,100 +63,126 @@ export function SettingsScreen({
   onSelectDelay,
   onExportLogs,
   canExport,
+  onBack,
 }: SettingsScreenProps): JSX.Element {
   return (
     <ScrollView
       testID="settings"
-      style={{ backgroundColor: palette.groupedBackground }}
+      style={{ backgroundColor: palette.bg }}
       contentContainerStyle={styles.content}
     >
-      <Text style={[styles.sectionHeader, { color: palette.secondaryLabel }]}>App lock</Text>
-      <View style={[styles.group, { backgroundColor: palette.card }]}>
-        {notice === "no-passcode" ? (
-          <Text testID="lock-notice" style={[styles.notice, { color: palette.danger }]}>
-            This iPhone has no passcode, so tentacle cannot lock. Add one in Settings → Face ID &
-            Passcode.
+      <ScreenHeader
+        palette={palette}
+        title="Settings"
+        left={
+          onBack === undefined ? undefined : (
+            <GlassButton
+              palette={palette}
+              testID="settings-back"
+              icon="chevron.left"
+              accessibilityLabel="Back"
+              onPress={onBack}
+            />
+          )
+        }
+      />
+      <View style={styles.body}>
+        <View style={styles.section}>
+          <SectionHeader palette={palette} title="App lock" />
+          {notice === "no-passcode" ? (
+            <Banner
+              palette={palette}
+              flush
+              tone="error"
+              icon="lock.fill"
+              testID="lock-notice"
+              title="tentacle cannot lock"
+              body="This iPhone has no passcode. Add one in Settings → Face ID & Passcode."
+            />
+          ) : null}
+          <GroupedCard palette={palette}>
+            {DELAY_ROWS.map((row, index) => {
+              const selected = setting === row.value;
+              const asked = pending === row.value && !selected;
+              return (
+                <Row
+                  key={row.value}
+                  testID={`lock-delay-${row.value}`}
+                  palette={palette}
+                  first={index === 0}
+                  minHeight={size.rowSetting}
+                  title={row.label}
+                  accessibilityLabel={row.label}
+                  onPress={() => onSelectDelay(row.value)}
+                  trailing={
+                    selected ? (
+                      <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
+                    ) : asked ? (
+                      // Owner Q6: asked for, not yet in force — no silent change.
+                      <Text
+                        testID={`lock-delay-pending-${row.value}`}
+                        maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                        style={[typography.footnote, { color: palette.sec }]}
+                      >
+                        Unlock to apply
+                      </Text>
+                    ) : undefined
+                  }
+                />
+              );
+            })}
+          </GroupedCard>
+          <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
+            How long tentacle may stay in the background before it asks for Face ID again.
           </Text>
-        ) : null}
-        {DELAY_ROWS.map((row, index) => {
-          const selected = setting === row.value;
-          return (
-            <View key={row.value}>
-              {index === 0 ? null : (
-                <View style={[styles.separator, { backgroundColor: palette.separator }]} />
-              )}
-              <Pressable
-                testID={`lock-delay-${row.value}`}
-                accessibilityRole="button"
-                accessibilityState={{ selected }}
-                onPress={() => onSelectDelay(row.value)}
-                style={styles.row}
-              >
-                <Text style={[styles.rowLabel, { color: palette.label }]}>{row.label}</Text>
-                {selected ? <Text style={[styles.check, { color: palette.accent }]}>✓</Text> : null}
-                {pending === row.value && !selected ? (
-                  // Owner Q6: asked for, not yet in force — no silent change.
-                  <Text testID={`lock-delay-pending-${row.value}`} style={styles.pending}>
-                    Unlock to apply
-                  </Text>
-                ) : null}
-              </Pressable>
-            </View>
-          );
-        })}
-      </View>
-      {error === undefined ? null : (
-        <Text testID="settings-error" style={[styles.notice, { color: palette.danger }]}>
-          {error}
-        </Text>
-      )}
-      <Text style={[styles.sectionHeader, { color: palette.secondaryLabel }]}>Diagnostics</Text>
-      <View style={[styles.group, { backgroundColor: palette.card }]}>
-        <Pressable
-          testID="export-logs"
-          accessibilityRole="button"
-          disabled={!canExport}
-          onPress={onExportLogs}
-          style={styles.row}
-        >
-          <Text
-            style={[
-              styles.rowLabel,
-              { color: canExport ? palette.accent : palette.secondaryLabel },
-            ]}
-          >
-            Export logs
+          {error === undefined ? null : (
+            <Banner
+              palette={palette}
+              flush
+              tone="error"
+              icon="exclamationmark.triangle"
+              testID="settings-error"
+              body={error}
+            />
+          )}
+        </View>
+        <View style={styles.section}>
+          <SectionHeader palette={palette} title="Diagnostics" />
+          <GroupedCard palette={palette}>
+            <Row
+              testID="export-logs"
+              palette={palette}
+              first
+              minHeight={size.rowSetting}
+              title="Export logs"
+              tone={canExport ? "accent" : "default"}
+              dimmed={!canExport}
+              {...(canExport ? { onPress: onExportLogs } : {})}
+            />
+          </GroupedCard>
+          <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
+            Logs hold connection state, errors and timings — never message content or keys. You
+            choose where to share the file.
           </Text>
-        </Pressable>
+          {exportError === undefined ? null : (
+            <Banner
+              palette={palette}
+              flush
+              tone="error"
+              icon="exclamationmark.triangle"
+              testID="export-error"
+              body={exportError}
+            />
+          )}
+        </View>
       </View>
-      <Text style={[styles.footnote, { color: palette.secondaryLabel }]}>
-        Logs hold connection state, errors and timings — never message content or keys. You choose
-        where to share the file.
-      </Text>
-      {exportError === undefined ? null : (
-        <Text testID="export-error" style={[styles.notice, { color: palette.danger }]}>
-          {exportError}
-        </Text>
-      )}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  content: { padding: 16 },
-  sectionHeader: { fontSize: 13, textTransform: "uppercase", marginBottom: 6, marginTop: 16 },
-  group: { borderRadius: 10, overflow: "hidden" },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-  rowLabel: { fontSize: 16 },
-  check: { fontSize: 16, fontWeight: "600" },
-  pending: { fontSize: 12, color: "#8E8E93" },
-  separator: { height: StyleSheet.hairlineWidth, marginLeft: 16 },
-  notice: { fontSize: 13, padding: 16 },
-  footnote: { fontSize: 12, marginTop: 8, paddingHorizontal: 4 },
+  content: { paddingBottom: 40 },
+  body: { paddingHorizontal: space.inset, gap: space.sectionComputers, paddingTop: 8 },
+  section: { gap: 8 },
+  footnote: { paddingHorizontal: space.inset },
 });

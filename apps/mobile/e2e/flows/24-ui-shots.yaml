@@ -1,0 +1,54 @@
+appId: so.tentacle.app
+---
+# 24 (docs/feat/mobile-ui-polish.md Slice 6): the screenshot walk. Every screen
+# the restyle touched, in the order a person meets them, one `takeScreenshot`
+# each — Computers, Settings, Sessions, the Conversation with the mock model's
+# `SHOWCASE` answer (inline code chip + run, a code block with quotes/<>/& —
+# owner B7 —, a table, a list), and the header's "…" menu. Run it twice, after
+# `xcrun simctl ui booted appearance light|dark`, for the light/dark pairs.
+# It asserts each screen's own ids, so a screenshot of the wrong screen fails.
+- runFlow: _pair.yaml
+- assertVisible:
+    id: "computer-${output.computerId}"
+- takeScreenshot: 24-computers
+- tapOn:
+    id: "open-settings"
+- assertVisible:
+    id: "lock-delay-immediately"
+- assertVisible:
+    id: "export-logs"
+- takeScreenshot: 24-settings
+- tapOn:
+    id: "settings-back"
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-search"
+- takeScreenshot: 24-sessions
+- tapOn:
+    id: "session-${SHOTS_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "SHOWCASE"
+- pressKey: Enter
+- extendedWaitUntil:
+    visible:
+      id: "code-2-copy"
+    timeout: 20000
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+- hideKeyboard
+- takeScreenshot: 24-conversation
+- tapOn:
+    id: "session-menu"
+- assertVisible:
+    id: "session-menu-copy-last"
+- takeScreenshot: 24-session-menu
+- tapOn:
+    id: "session-menu-cancel"
+- assertNotVisible:
+    id: "session-menu-copy-last"

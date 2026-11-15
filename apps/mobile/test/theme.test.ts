@@ -72,16 +72,19 @@ for (const [mode, palette] of [
   });
 }
 
-describe("theme aliases (until Slice 6)", () => {
-  test("every old name shows the new token's value", () => {
+describe("theme tokens (aliases removed in Slice 6)", () => {
+  test("no pre-restyle alias name is left on the palette", () => {
+    const aliases = [
+      "background",
+      "groupedBackground",
+      "secondaryLabel",
+      "separator",
+      "danger",
+      "running",
+      "badgeText",
+    ];
     for (const palette of [lightPalette, darkPalette]) {
-      expect(palette.groupedBackground).toBe(palette.bg);
-      expect(palette.background).toBe(palette.bg);
-      expect(palette.secondaryLabel).toBe(palette.sec);
-      expect(palette.separator).toBe(palette.sep);
-      expect(palette.danger).toBe(palette.red);
-      expect(palette.running).toBe(palette.accent);
-      expect(palette.badgeText).toBe(palette.onAccent);
+      expect(Object.keys(palette).filter((key) => aliases.includes(key))).toEqual([]);
     }
   });
 

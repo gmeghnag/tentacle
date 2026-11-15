@@ -14,6 +14,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { DiffLine, DiffView as DiffModel } from "../../diff-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, typography } from "../../theme.ts";
 import { Icon } from "../../ui/Icon.tsx";
+import { animateNextLayout } from "../../ui/animate.ts";
 
 /** `+n −m` for a diff (the same numbers `countDiff` gave the row). */
 export function diffCounts(view: DiffModel): string {
@@ -52,7 +53,10 @@ export function DiffView({ view, palette, callId, initiallyOpen }: DiffViewProps
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
         accessibilityLabel={`${view.path}, ${view.added} added, ${view.removed} removed`}
-        onPress={() => setOpen((was) => !was)}
+        onPress={() => {
+          animateNextLayout();
+          setOpen((was) => !was);
+        }}
         style={styles.header}
       >
         <Icon name="doc.on.doc" color={palette.sec} size={15} />

@@ -12,8 +12,9 @@
  */
 import type { JSX } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { inlineCodeLook } from "../../code-block.ts";
 import { type MdBlock, type MdInline, type Parsed, flatten } from "../../markdown.ts";
-import { type Palette, radius, typography } from "../../theme.ts";
+import { MONO, type Palette, radius, typography } from "../../theme.ts";
 import { CodeBlock } from "../../ui/CodeBlock.tsx";
 
 /** Sizes a heading's depth renders at (a phone has no `h1`–`h6`). */
@@ -46,8 +47,21 @@ function inline(items: readonly MdInline[], ctx: Ctx, key: string): JSX.Element[
       case "text":
         return <Text key={id}>{item.text}</Text>;
       case "code":
-        return (
-          <Text key={id} style={[styles.inlineCode, { backgroundColor: ctx.codeBackground }]}>
+        // Owner feedback #3: a nested Text's background fills the whole line
+        // height (a strip, ragged when it wraps) and takes no padding or radius.
+        // A short span is an inline VIEW (a padded rounded chip); a long one
+        // wraps like text, mono, with no strip (`inlineCodeLook`).
+        return inlineCodeLook(item.text) === "chip" ? (
+          <View
+            key={id}
+            style={[styles.chip, { backgroundColor: ctx.codeBackground }]}
+            accessible
+            accessibilityLabel={item.text}
+          >
+            <Text style={[styles.chipText, { color: ctx.palette.label }]}>{item.text}</Text>
+          </View>
+        ) : (
+          <Text key={id} style={styles.inlineRun}>
             {item.text}
           </Text>
         );
@@ -246,7 +260,8 @@ export function Markdown({ parsed, palette, onLink, codeBackground }: MarkdownPr
       </View>
     );
   }
-  return <View>{blocks(parsed.blocks, ctx, "md")}</View>;
+  // The mockup's paragraph rhythm: 10 pt between blocks.
+  return <View style={styles.blocks}>{blocks(parsed.blocks, ctx, "md")}</View>;
 }
 
 const styles = StyleSheet.create({
@@ -254,9 +269,17 @@ const styles = StyleSheet.create({
   bold: { fontWeight: "600" },
   italic: { fontStyle: "italic" },
   strike: { textDecorationLine: "line-through" },
-  // A nested Text cannot take padding or a radius on iOS reliably: the pill is
-  // the background colour alone, with a hair of horizontal room from spaces.
-  inlineCode: { ...typography.monoInline, borderRadius: radius.inlineCode },
+  // The mockup's `padding: 1px 5px; border-radius: 5px`. An inline view sits ON
+  // the baseline; the shift puts its text's baseline back on the line's.
+  chip: {
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: radius.inlineCode,
+    transform: [{ translateY: 4 }],
+  },
+  chipText: { fontFamily: MONO, fontSize: 14, lineHeight: 18 },
+  inlineRun: { fontFamily: MONO, fontSize: 14 },
+  blocks: { gap: 10 },
   code: { ...typography.monoCode },
   rule: { height: StyleSheet.hairlineWidth, marginVertical: 8 },
   quote: { borderLeftWidth: 3, paddingLeft: 12, gap: 8 },
