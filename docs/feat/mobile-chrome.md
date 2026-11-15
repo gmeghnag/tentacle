@@ -1183,3 +1183,57 @@ after the script names only the intended files.
 - **`Icon`'s `thin` weight is unused by S2.** A1's header glyphs are `light`; the
   union carries `thin` from S1 for the drawer's future glyphs. No call site uses
   it, so nothing pins it beyond S1's union test — stated rather than implied.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16 · slice S2 only, fresh context. The Execution
+section above is also signed claude-opus-5-5, so the shared-blind-spot caveat
+(AGENTS §10) applies.*
+
+**Verdict: REQUEST-CHANGES** (two MEDIUM test-coverage gaps; no HIGH, no code bug found).
+
+**Gate (scoped, as asked):** `bun test chat-header.test.ts header-wiring.test.ts`
+gave 20 pass / 0 fail; `bun run lint` is clean; `bun run typecheck` is green.
+The full `bun run check` was not run. Maestro flow 24 (screenshots) was not run
+because there is no simulator, so the pixels are still unseen.
+
+**Findings**
+1. MEDIUM: the "tap the ring → Session info" wiring is not pinned
+   (`SessionScreen.tsx:401`, `header-wiring.test.ts:752`). Mutation: deleting
+   `onPress={() => setInfoOpen(true)}` from the `<ContextRing>` call site leaves
+   all 20 tests green. The test only checks that `ContextRing` *declares*
+   `onPress?`. Failure scenario: a refactor drops the prop, the ring shows up as a
+   non-interactive `progressbar` (the `onPress === undefined` branch), and Design
+   2 / F11's tap target silently disappears. Fix: assert `onPress=` inside the
+   guarded `<ContextRing` slice that the test already takes.
+2. MEDIUM: the arc's border sides are not pinned (`ContextRing.tsx:387-388`).
+   `ringHalfRotation`'s bases (315/135) are correct ONLY for a
+   `borderTop`+`borderLeft` arc (centred at 10:30). Mutation: `borderLeftColor` →
+   `borderRightColor` leaves all tests green and moves the arc's centre to 1:30.
+   Neither half then starts empty at 0%: the ring shows a phantom 90° at 0% and a
+   wrong sweep everywhere. The executor's "verified numerically" claim covers the
+   pure function, not this coupling. Fix: assert both `borderTopColor: tone` and
+   `borderLeftColor: tone` (or move the side choice into the pure module next to
+   the bases).
+
+**Mutations:** swapping the right base 315→135 fails as expected. So does a
+hairline coloured `sep` instead of `sepChat`. #1 and #2 above survive. All edits
+were reverted, and `git status --porcelain` is empty.
+
+**Attacks tried (nothing found):**
+- Geometry, re-derived by hand: 0/25/50/75/100% gives 0/90/180/270/360°,
+  clockwise from 12.
+- The relative `left:-10` offset inside the 10 pt window keeps the rotation
+  centre on the ring's centre.
+- Typecheck covers the `GlassButton`→`HeaderIcon` prop compatibility.
+- The Pair "Cancel" header is not over the camera. The scanner's close button
+  keeps `GlassButton onDark` (`PairScreen.tsx:440`).
+- Flow 25 still finds `session-header-context` by id.
+- The ring and "…" hit slops (10 + 4 against a 10 pt gap) do not overlap either
+  box.
+- No `react-native-svg` dependency.
+- No §7 invariant is touched (render-only, geometry in the pure module).
+
+**Executor behaviour:** in scope (S3–S10 untouched), honest about the unseen
+pixels, and the geometry is pinned in the pure module as §7 asks. But two
+mutations on the slice's own load-bearing couplings were not tried.
