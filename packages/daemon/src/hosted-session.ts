@@ -382,7 +382,15 @@ export type PushWatchedUpdate =
   | UpdateOf<"permission_request">
   | UpdateOf<"permission_resolved">
   | UpdateOf<"turn_end">
-  | UpdateOf<"session_closed">;
+  | UpdateOf<"session_closed">
+  // Task 18's Live Activity needs three more (docs/feat/mobile-live-activity.md
+  // L7): a turn's start (the elapsed timer's origin and the 20 s threshold), each
+  // tool call (the current tool), and the title. Still display-class kinds only:
+  // a `tool_call_update` (high frequency, and its result rides `tool_call`) is
+  // deliberately NOT watched.
+  | UpdateOf<"turn_start">
+  | UpdateOf<"tool_call">
+  | UpdateOf<"session_title">;
 
 /**
  * What a push observer is told, when (`PushEvent` in `push-rules.ts` is the
@@ -2119,7 +2127,13 @@ export class HostedSession {
       update.type !== "permission_request" &&
       update.type !== "permission_resolved" &&
       update.type !== "turn_end" &&
-      update.type !== "session_closed"
+      update.type !== "session_closed" &&
+      // Task 18 (L7): the Live Activity's three extra kinds. Widening this filter
+      // is the WHOLE daemon change this task makes here — the observer stays out
+      // of `attachments`, stays synchronous, and is still never awaited.
+      update.type !== "turn_start" &&
+      update.type !== "tool_call" &&
+      update.type !== "session_title"
     ) {
       return;
     }

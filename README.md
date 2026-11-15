@@ -380,6 +380,8 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `detach.keepAwake` | — | true | Hold a macOS sleep assertion while a turn of a detached run runs. |
 | `engine` | `TENTACLE_ENGINE` | "kubernetes" | Default engine of `run`/`attach`: kubernetes, docker or podman; `--engine` wins, unknown refused. |
 | `hooks` | — | — | Shell commands run on agent events, with a JSON input on stdin. |
+| `liveActivity.enabled` | — | `true` | Whether a `serve` starts a live activity at all. |
+| `liveActivity.startAfterSeconds` | — | `20` | How long a turn must run before a phone that is not watching it gets an activity. |
 | `loadAgentsMd` | `TENTACLE_NO_AGENTS_MD` (inverted) | true | Auto-load a per-repo `AGENTS.md` into the system prompt. |
 | `loadSkills` | `TENTACLE_NO_SKILLS` (inverted) | true | Discover Agent Skills and offer the `skill` tool. |
 | `maxIterations` | `TENTACLE_MAX_ITERATIONS` | 16 | Max model/tool iterations per turn. |

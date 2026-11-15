@@ -19,10 +19,13 @@
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
+  type LiveRegistration,
   type PairedDevice,
   type PushRegistration,
+  clearLiveRegistrations,
   clearPushRegistrations,
   deviceIdOf,
+  readLiveRegistrations,
   readPushRegistrations,
   readRegistry,
   readSeen,
@@ -50,7 +53,7 @@ export interface DevicesDeps {
   readonly name?: string;
 }
 
-const HEADER = ["NAME", "ID", "PAIRED", "LAST SEEN", "PUSH"] as const;
+const HEADER = ["NAME", "ID", "PAIRED", "LAST SEEN", "PUSH", "LIVE"] as const;
 
 /** `2m`, `3h`, `5d`, and `—` for a device no daemon has ever seen. */
 export function formatSeen(nowMs: number, seenMs: number | undefined): string {
@@ -89,12 +92,18 @@ function formatDate(ms: number): string {
  * unreadable one, because the column answers "will this phone be notified?" and
  * an unreadable record means no. It is a map, not a set, so the column can gain
  * the environment/age later without changing the callers.
+ *
+ * `live` is `devices/live/` the same way (docs/feat/mobile-live-activity.md
+ * Design 4): `on` for a usable registration whose switch is ON, `off` otherwise.
+ * The two columns are separate channels with separate switches, so a phone can
+ * legitimately be `PUSH on / LIVE off` (task 16's notification still arrives).
  */
 export function renderDevices(
   devices: readonly PairedDevice[],
   seen: ReadonlyMap<string, number>,
   nowMs: number,
   push: ReadonlyMap<string, PushRegistration> = new Map(),
+  live: ReadonlyMap<string, LiveRegistration> = new Map(),
 ): string[] {
   const cells = devices.map((device) => [
     untrustedText(device.name),
@@ -102,6 +111,9 @@ export function renderDevices(
     formatDate(device.pairedAt),
     formatSeen(nowMs, seen.get(device.id)),
     push.has(device.id) ? "on" : "off",
+    // The switch is part of the answer: a record with `enabled: false` sends
+    // nothing, so reading it `on` would misdescribe the phone's behaviour.
+    live.get(device.id)?.enabled === true ? "on" : "off",
   ]);
   const all = [[...HEADER], ...cells];
   const widths = HEADER.map((_, i) => Math.max(...all.map((row) => (row[i] ?? "").length)));
@@ -204,6 +216,7 @@ export function devicesCommand(deps: DevicesDeps): number {
     readSeen(deps.configDir),
     deps.now(),
     readPushRegistrations(deps.configDir).registrations,
+    readLiveRegistrations(deps.configDir).registrations,
   )) {
     deps.out(`${line}\n`);
   }
@@ -292,6 +305,9 @@ export async function resetCommand(
     // ever receive placeholders. `removeDevices` already dropped the paired ones;
     // this catches a file whose device was revoked by hand.
     clearPushRegistrations(deps.configDir);
+    // The LIVE registrations go for the same reason (mobile-live-activity F11):
+    // a surviving start token could only ever light up a placeholder activity.
+    clearLiveRegistrations(deps.configDir);
     deps.out("Reset. Every phone must pair again.\n");
     if (rotated > 0) {
       deps.err(

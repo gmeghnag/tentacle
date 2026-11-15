@@ -25,13 +25,15 @@ import {
   RELAY_CONTROL_LIMITS,
   RELAY_PROTOCOL_VERSION,
   RelayDaemonFrameSchema,
+  type RelayFeature,
+  type RelayLiveActivityFrame,
   type RelayPushFrame,
   type RelayToDaemonFrame,
   isInboundFrameTooLarge,
   isRelayId,
 } from "@tentacle/protocol";
 import type { ApnsClient } from "./apns-client.ts";
-import { type ApnsJwtSource, apnsPayloadBytesOf } from "./apns.ts";
+import { type ApnsJwtSource, apnsPayloadBytesOf, liveActivityPayloadOf } from "./apns.ts";
 import { clientIpOf, limiterKeyOf } from "./client-ip.ts";
 import { createLogLimiter } from "./log-limit.ts";
 import {
@@ -81,6 +83,14 @@ export interface RelayServerOptions {
         readonly topic: string;
       }
     | undefined;
+  /**
+   * Which features to announce, overriding the "everything the APNs path can do"
+   * default. A DEPLOY knob: it is how the relay is rolled out in two steps (push
+   * first, Live Activities once Apple's console is ready — task 18's D4a), so no
+   * daemon is invited to send a frame the deployed relay would not carry. `undefined`
+   * = announce every feature the APNs path enables (the usual case).
+   */
+  readonly features?: readonly RelayFeature[];
 }
 
 export interface RunningRelay {
@@ -230,9 +240,9 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     ...(options.now ? { now: options.now } : {}),
     ...(options.mintToken ? { mintToken: options.mintToken } : {}),
     ...(options.limits ? { limits: options.limits } : {}),
-    // `"push"` is announced only when the delivery path exists: a daemon sends a
-    // `push` frame only to a relay that said so (C1).
-    features: options.apns === undefined ? [] : ["push"],
+    // `"push"` / `"liveactivity"` are announced only when the delivery path
+    // exists: a daemon sends such a frame only to a relay that said so (C1).
+    features: options.features ?? (options.apns === undefined ? [] : ["push", "liveactivity"]),
   });
 
   let counter = 0;
@@ -497,6 +507,10 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
       onPush(ws, parsed);
       return;
     }
+    if (parsed.t === "liveactivity") {
+      onLiveActivity(ws, parsed);
+      return;
+    }
     if (parsed.t !== "hello") {
       // `accept` belongs on `/v1/accept` (which carries no other frame): a frame
       // on the wrong socket is a client bug, and closing names it.
@@ -561,6 +575,61 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
       // is logged as `other`, never at its own length.
       log(
         `push ${logPrefix(decision.request.token)} ${outcome.status}${
+          outcome.reason === undefined ? "" : ` ${loggableApnsReason(outcome.reason)}`
+        }`,
+      );
+      apply([
+        core.pushResult(key, {
+          n: decision.request.n,
+          status: outcome.status,
+          ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+        }),
+      ]);
+    });
+  }
+
+  /**
+   * A daemon's `liveactivity` frame (docs/feat/mobile-live-activity.md L4): the
+   * core decides whether this socket may push an activity and at what priority;
+   * this delivers it through the APNs client and answers `push-result` with the
+   * same `n` — the SAME answer vocabulary as a push, so a daemon audits both the
+   * same way.
+   *
+   * The body's size is measured HERE, before the core records anything, exactly
+   * as a push's is: an oversized activity is refused, never truncated. Runs
+   * concurrently with every other push for the same reason.
+   */
+  function onLiveActivity(ws: RelaySocket, frame: RelayLiveActivityFrame): void {
+    const key = ws.data.key;
+    let payloadBytes: number;
+    try {
+      payloadBytes = new TextEncoder().encode(liveActivityPayloadOf(frame.la, Date.now())).length;
+    } catch {
+      // An unbounded date or a missing content-state: refused, never sent.
+      log(`liveactivity-rejected ${logPrefix(key)} payload`);
+      apply([core.pushResult(key, { n: frame.n, status: "rejected", reason: "payload" })]);
+      return;
+    }
+    const decision = core.liveActivity({ socket: key, ...frame, payloadBytes });
+    if (!decision.ok) {
+      log(`liveactivity-refused ${logPrefix(key)} ${decision.status} ${decision.reason}`);
+      apply(decision.effects);
+      return;
+    }
+    const apns = options.apns;
+    if (apns === undefined) {
+      // Unreachable (the core refuses without the feature), kept honest.
+      apply([
+        core.pushResult(key, { n: frame.n, status: "unavailable", reason: "no-liveactivity" }),
+      ]);
+      return;
+    }
+    void apns.client.sendLiveActivity(decision.request).then((outcome) => {
+      // No token beyond 8 chars and no payload: an activity's `content-state` is
+      // sealed content-adjacent bytes, so logging it would archive them (L5's
+      // canary rule, as for a push).
+      log(
+        `liveactivity ${logPrefix(decision.request.token)} ${outcome.status}${
           outcome.reason === undefined ? "" : ` ${loggableApnsReason(outcome.reason)}`
         }`,
       );

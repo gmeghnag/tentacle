@@ -655,3 +655,116 @@ describe("the relay's own `push-result` vocabulary is not trusted blindly", () =
     expect(link.isConnected()).toBe(true);
   });
 });
+
+// --- the link's LIVE ACTIVITY half (docs/feat/mobile-live-activity.md L8) ----
+/**
+ * `relayLink.liveActivity` is the SAME machinery as `push` (one `n` correlation,
+ * one answer vocabulary, one hold while reconnecting), with one difference that
+ * is the whole point: a relay that has not announced `"liveactivity"` must get NO
+ * frame, because an older relay closes the control socket on an unknown one and
+ * that costs every phone its reachability (F4/C1).
+ *
+ * This block pins the gate and the topic/type Apple requires. Mutation: ignore
+ * `features` in `liveActivity()` → the R2 relay closes the socket, the link goes
+ * down, and the follow-up `liveActivityStatus()` assertion fails.
+ */
+describe("relayLink.liveActivity against the real relay + a fake APNs", () => {
+  const laDelivery = (token: string) => ({
+    token,
+    env: "sandbox" as const,
+    priority: 10 as const,
+    la: {
+      event: "start" as const,
+      timestamp: 1_700_000_000,
+      staleDate: 1_700_000_900,
+      contentState: { v: 1 as const, e: "A".repeat(43), c: "B".repeat(704) },
+      attributes: { v: 1 as const, k: "tzHqlSe8ME5A", slot: "00112233445566778899aabb" },
+    },
+  });
+
+  test("`sent`, and Apple received it as an ACTIVITY (push type + topic suffix)", async () => {
+    const r = relay({ push: true });
+    const h = harness({ url: r.url });
+    await waitFor(() => h.link.liveActivityStatus() === "on", "the relay to announce liveactivity");
+    expect(await h.link.liveActivity(laDelivery("a".repeat(64)))).toBe("sent");
+    await waitFor(() => (r.apns?.seen.length ?? 0) === 1, "APNs to receive the activity");
+    const seen = r.apns?.seen[0];
+    const body = JSON.parse(seen?.body ?? "{}") as {
+      aps: Record<string, unknown> & { event?: string; alert?: unknown };
+    };
+    expect(body.aps.event).toBe("start");
+    expect(body.aps["attributes-type"]).toBe("TentacleActivityAttributes");
+    // An activity is not a banner: no `tp`, and an alert only on a start.
+    expect(body).not.toHaveProperty("tp");
+    expect(body.aps.alert).toBeDefined();
+  });
+
+  test("a relay WITHOUT the feature gets no frame, and the status says `relay-no-la` (F4)", async () => {
+    // A relay with no APNs key announces no features at all.
+    const r = relay({ push: false });
+    const h = harness({ url: r.url });
+    await waitFor(() => h.link.liveActivityStatus() === "relay-no-la", "the feature's absence");
+    // Refused WITHOUT a frame: the answer is `unavailable`, and the socket lives.
+    expect(await h.link.liveActivity(laDelivery("b".repeat(64)))).toBe("unavailable");
+    // One audit line said why, once per start (never one per push).
+    expect(h.audit.filter((line) => line === "relay-no-la")).toHaveLength(1);
+    // The link is still up: a refusal is never a close. (Mutation: ignore the gate
+    // in `liveActivity()` → an unknown frame reaches the R2 relay, which closes
+    // the control socket, so this status check times out or flips.)
+    await Bun.sleep(30);
+    expect(h.link.liveActivityStatus()).toBe("relay-no-la");
+    expect(h.link.isConnected()).toBe(true);
+  });
+
+  test("with no feature, NOTHING is sent to Apple — the frame never exists (F4)", async () => {
+    // The gate's real property, stated directly: a relay that did not announce
+    // `liveactivity` must not cause a single APNs request. Mutation: drop the
+    // `features.includes("liveactivity")` check in `liveActivity()` → the frame is
+    // sent anyway, the relay (which does have an APNs key here, but announced
+    // only `"push"` because LA was disabled) delivers it, and `seen` is non-empty.
+    const apns = fakeApns();
+    cleanups.push(apns.stop);
+    const client: ApnsClient = createApnsClient({
+      topic: "so.tentacle.app",
+      jwtSource: fakeJwt,
+      origins: { sandbox: apns.origin, production: apns.origin },
+    });
+    // A relay with an APNs key that announces ONLY `"push"`: exactly what a
+    // relay deployed before task 18's D4a says. `features` is the deploy knob a
+    // two-step rollout uses, so this is the real "old relay" case (F4), not a
+    // test-only backdoor.
+    const server = startRelay({
+      host: "127.0.0.1",
+      port: 0,
+      sweepMs: 10,
+      onLog: () => {},
+      apns: { client, jwtSource: fakeJwt, topic: "so.tentacle.app" },
+      features: ["push"],
+    });
+    cleanups.push(() => {
+      void server.stop();
+      client.close();
+    });
+    const h = harness({ url: server.url });
+    await waitFor(() => h.link.isConnected(), "the link");
+    expect(await h.link.liveActivity(laDelivery("c".repeat(64)))).toBe("unavailable");
+    await Bun.sleep(60);
+    expect(apns.seen).toHaveLength(0);
+  });
+
+  test("`bindLiveActivityReady` fires on a `ready` that carries the feature (F3's resend)", async () => {
+    const r = relay({ push: true });
+    // Bind BEFORE the link can have completed `ready`: the harness returns as
+    // soon as `startRelayLink` is called, and the relay's answer arrives on a
+    // later tick, so this is the first ready and nothing else.
+    const h = harness({ url: r.url });
+    let readies = 0;
+    h.link.bindLiveActivityReady(() => {
+      readies += 1;
+    });
+    await waitFor(() => h.link.liveActivityStatus() === "on", "the first ready");
+    // The hook is what a `serve` wires to `notifier.resendAll` (L8). Mutation:
+    // drop the `onLaReady?.()` call in the `ready` arm → this stays 0.
+    expect(readies).toBe(1);
+  });
+});

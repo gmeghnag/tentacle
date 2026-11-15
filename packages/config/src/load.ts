@@ -228,6 +228,8 @@ export interface TentacleConfig {
   readonly relay?: ResolvedConfig["relay"];
   /** Push notifications (file or profile); absent = enabled, a 30 s grace. */
   readonly push?: ResolvedConfig["push"];
+  /** Live Activities (file or profile); absent = enabled, a 20 s threshold. */
+  readonly liveActivity?: ResolvedConfig["liveActivity"];
   /**
    * The configured `apiKeyCommand` (the command, never its output): the CLI
    * hides the key FILE it reads from a workspace mount.
@@ -907,6 +909,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.sessions !== undefined ? { sessions: resolved.sessions } : {}),
     ...(resolved.relay !== undefined ? { relay: resolved.relay } : {}),
     ...(resolved.push !== undefined ? { push: resolved.push } : {}),
+    ...(resolved.liveActivity !== undefined ? { liveActivity: resolved.liveActivity } : {}),
     ...(resolved.apiKeyCommand !== undefined ? { apiKeyCommand: resolved.apiKeyCommand } : {}),
     hooks: contributed.hooks,
     mcpServers: contributed.mcpServers,

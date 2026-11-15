@@ -22,11 +22,13 @@ import {
   addDevice,
   deviceIdOf,
   loadOrCreateIdentity,
+  readLiveRegistrations,
   readPushRegistrations,
   readRegistry,
   readSeen,
   replaceIdentity,
   touchSeen,
+  writeLiveRegistration,
   writePushRegistration,
   writeRegistry,
 } from "@tentacle/daemon";
@@ -206,8 +208,10 @@ describe("the push column", () => {
     );
     expect(lines[0]).toContain("PUSH");
     const rowOf = (name: string) => lines.find((line) => line.startsWith(name)) ?? "";
-    expect(rowOf("iPhone")).toEndWith("on");
-    expect(rowOf("iPad")).toEndWith("off");
+    // `PUSH` then `LIVE` (task 18 added the second), read as the last TWO cells
+    // so the column padding is not what the assertion depends on.
+    expect(columnsOf(rowOf("iPhone")).slice(-2)).toEqual(["on", "off"]);
+    expect(columnsOf(rowOf("iPad")).slice(-2)).toEqual(["off", "off"]);
   });
 
   test("an unreadable registration reads `off`, never `on` (fail closed)", () => {
@@ -234,7 +238,10 @@ describe("the push column", () => {
     const result = await run(configDir, devicesCommand);
     expect(result.code).toBe(0);
     expect(result.out.join("")).toContain("PUSH");
-    expect(result.out.join("").trimEnd().split("\n")[1]).toEndWith("on");
+    expect(result.out.join("")).toContain("LIVE");
+    // `on` for the registered device's PUSH, then `off` for LIVE (no record).
+    const row = result.out.join("").trimEnd().split("\n")[1] ?? "";
+    expect(columnsOf(row).slice(-2)).toEqual(["on", "off"]);
   });
 });
 
@@ -510,5 +517,115 @@ describe("the store's own guarantees still hold here", () => {
       }).ok,
     ).toBe(false);
     expect(replaceIdentity(configDir, { name: "n" }).ok).toBe(true);
+  });
+});
+
+// --- the `LIVE` column and a reset that clears `devices/live/` (L5) ----------
+/**
+ * `tentacle devices` gains a `LIVE` column (docs/feat/mobile-live-activity.md
+ * Design 4), and `devices reset` clears `devices/live/` beside `devices/push/`.
+ *
+ * The column answers the same question as `PUSH` does for notifications — "will
+ * this phone light up?" — and fails closed for the same reason: an unreadable
+ * record means no. The reset's directory-wide clear is what catches a record
+ * left behind by a device revoked by hand (F11/F12).
+ */
+/** A rendered row's cells, with the padding collapsed (the table pads columns). */
+function columnsOf(row: string): string[] {
+  return row.trim().split(/\s{2,}/);
+}
+
+describe("the LIVE column and live registrations", () => {
+  const liveKey = () => "a".repeat(64);
+
+  test("a device with a usable live registration reads `on`, another `off`", () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone", "iPad"]);
+    const iphone = readRegistry(configDir);
+    if (!iphone.ok) throw new Error("registry");
+    const id = iphone.registry.devices[0]?.id;
+    if (id === undefined) throw new Error("fixture");
+    const written = writeLiveRegistration(configDir, {
+      deviceId: id,
+      startToken: liveKey(),
+      env: "sandbox",
+      registeredAt: 1,
+    });
+    if (!written.ok) throw new Error(written.reason);
+    const lines = renderDevices(
+      iphone.registry.devices,
+      new Map(),
+      Date.now(),
+      readPushRegistrations(configDir).registrations,
+      readLiveRegistrations(configDir).registrations,
+    );
+    expect(lines[0]).toContain("LIVE");
+    const rowOf = (name: string) => lines.find((line) => line.startsWith(name)) ?? "";
+    // `iPhone` is last (the LIVE column), and `iPad` fails closed.
+    expect(rowOf("iPhone")).toEndWith("on");
+    expect(rowOf("iPad")).toEndWith("off");
+  });
+
+  test("the switch OFF reads `off` even with a usable record (the person's choice)", () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const registry = readRegistry(configDir);
+    if (!registry.ok) throw new Error("registry");
+    const id = registry.registry.devices[0]?.id;
+    if (id === undefined) throw new Error("fixture");
+    const written = writeLiveRegistration(configDir, {
+      deviceId: id,
+      startToken: liveKey(),
+      env: "sandbox",
+      registeredAt: 1,
+      enabled: false,
+    });
+    if (!written.ok) throw new Error(written.reason);
+    const lines = renderDevices(
+      registry.registry.devices,
+      new Map(),
+      0,
+      new Map(),
+      readLiveRegistrations(configDir).registrations,
+    );
+    expect(lines[1]).toEndWith("off");
+  });
+
+  test("an unreadable live record reads `off`, never `on` (fail closed, F22)", () => {
+    const configDir = newDir();
+    mkdirSync(join(configDir, "devices", "live"), { recursive: true });
+    writeFileSync(
+      join(configDir, "devices", "live", `${"a".repeat(16)}.json`),
+      JSON.stringify({ v: 99 }),
+    );
+    const lines = renderDevices(
+      [{ id: "a".repeat(16), name: "iPhone", publicKey: key(1), pairedAt: 0 }],
+      new Map(),
+      0,
+      new Map(),
+      readLiveRegistrations(configDir).registrations,
+    );
+    expect(lines[1]).toEndWith("off");
+  });
+
+  test("`devices reset` empties `live/` too, including a file whose device is GONE", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const id = deviceIdOf(key(1));
+    for (const deviceId of [id, "9".repeat(16)] as const) {
+      const written = writeLiveRegistration(configDir, {
+        deviceId,
+        startToken: liveKey(),
+        env: "sandbox",
+        registeredAt: 7,
+      });
+      if (!written.ok) throw new Error(written.reason);
+    }
+    expect(readLiveRegistrations(configDir).registrations.size).toBe(2);
+    const result = await run(configDir, resetCommand, { yes: true });
+    expect(result.code).toBe(0);
+    // Mutation: drop `clearLiveRegistrations` from `reset` -> one survives, and a
+    // reset machine keeps a start token for a key it no longer holds.
+    expect(readLiveRegistrations(configDir).registrations.size).toBe(0);
   });
 });

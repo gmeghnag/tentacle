@@ -501,6 +501,189 @@ claude-opus-5-5 (orchestrator), 2026-11-14*
 
 ## Execution
 
+*— claude-sonnet-4-5-20250929 (executor), 2026-11-15*
+
+Branch `feat/mobile-live-activity` at `6b31bacb` (9 commits ahead of `daemon…`, 0 behind
+`main` at the time of the load-bearing check; `main` has moved since — the merge stays
+the orchestrator's step). Scratch: `.tentacle/tmp/mobile-live-activity/`
+(`load-bearing-check.txt`, `slice-log.txt`, the generators and their backups).
+
+### Load-bearing check: PASS
+
+Re-ran the Context's Repro and BOTH halves of the Implementation's load-bearing
+assumption, before any edit. Full output in `.tentacle/tmp/mobile-live-activity/load-bearing-check.txt`.
+
+- **Capability absent (Repro holds).** `rg 'ActivityKit|LiveActivit|live_activity|
+  liveactivity|NSSupportsLiveActivities|pushToStart' packages apps --glob
+  *.{ts,tsx,json,swift,js}` → no files, on the branch tip. Nothing pre-existed.
+- **Daemon half, by source** (re-verified at the tip, not at the doc's `88f5a8f9`):
+  one fan-out point `emit` (`hosted-session.ts:2087-2103`), the push observer LAST
+  (`:2104-2114`, filter `:2117-2125`), `pushAttached` (`:2139-2148`), `recheckAsks`
+  (`:1217`, called `:1704`, `:1731`), `turn_start` (`:2284`, `:2483`), `eventToUpdate`
+  (`:2693`), `finishTurn` (`:2740`), `session_title` (`:2962`), `staticKey`/`identity`
+  (`device-authority.ts:146,151`). The hook is not an `Attachment` — so widening it
+  cannot make the daemon believe a client is watching. **HOLDS.**
+- **Phone half, L0(a) — the blocking probe: PASS.** A TS seal (`info = "tentacle-la/1"`,
+  `aad = kid ‖ slot`, 512-byte padded plaintext) opened in Swift with CryptoKit
+  `HPKE.Recipient(…authenticatedBy:)` and task 17's ciphersuite, on this machine
+  (`swift test`, 4/4): the positive opens byte-exactly; wrong slot aad, wrong sender
+  and a flipped byte are all REFUSED. So an E2E Live Activity through ActivityKit is
+  possible, and Owner Q1's fallback is not needed.
+  - **Found and fixed in the probe itself:** the first Python vector generator was
+    wrong (AuthEncap's second DH is `DH(skS, pkR)`, not `DH(skE, pkS)`). It now
+    SELF-VALIDATES against RFC 9180 Appendix A.2.3 (`enc`/`ss`/`key`/`nonce`/`ct`) and
+    refuses to emit any bytes if they disagree — so no bad vector could reach the tree.
+- **L0(b), syntactic: PASS.** `xcrun simctl push booted so.tentacle.app` with a
+  `liveactivity` payload (`event`/`timestamp`/`content-state`/`attributes-type`/
+  `attributes` + `alert`) is accepted. Rendered-activity proof needs the widget built
+  (L10's views, below) and the L12 flows.
+- **L0(c)–(g)** are device/owner-assisted (sandbox APNs, locked-phone redaction, intent
+  cold start, APNs 410). They do not block L1/L2/L5/L6/L9, and nothing below assumes
+  their outcome.
+
+### Per-slice result
+
+| slice | state | evidence |
+|---|---|---|
+| **L0** | DONE (a, b) · owner-assisted (c–g) | above |
+| **L1** | **DONE** | `push-seal.test.ts` 36 pass; `vectors/la-v1.json` (independent, RFC-self-validated) |
+| **L2** | **DONE** | `live-activity.test.ts` 18 pass; `protocol.json` regenerated |
+| **L3** | **DONE** | `relay.test.ts` 48 pass |
+| **L4** | **DONE** | `apns.test.ts` + `server-push.test.ts` (apps/relay 246 pass) |
+| **L5** | **DONE** | `live-store.test.ts` 14, `devices-cmd.test.ts` 34 |
+| **L6** | **DONE** | `live-activity-rules.test.ts` 24 pass |
+| **L7** | **DONE** | `live-activity-notifier.test.ts` 12, `push-hook.test.ts` 16 |
+| **L8** | **DONE** | `relay-link-push.test.ts` 16, `serve-live-activity.test.ts` 3, `live-activity-config.test.ts` 4 |
+| **L9** | **DONE** | `la-render.test.ts` 12; `fixtures/la-render-v1.json` (9 cases) |
+| **L10** | **PARTIAL (see below)** | `swift test` 15 pass (4 new); `app-config.test.ts` 11 |
+| **L11** | **PARTIAL (see below)** | action 8, registration 6, reconcile 8 |
+| **L12** | NOT STARTED | E2E/Maestro, runbook delta, real-device checklist |
+
+### L10 and L11 are PARTIAL, and exactly what is missing
+
+**Both keep their pure logic complete and test-pinned; what is missing is the layer
+that needs an Xcode build or a simulator**, which `bun run check` and `swift test`
+cannot reach. This is stated plainly rather than claimed as done.
+
+- **L10 done:** `app.json` `NSSupportsLiveActivities` (with `…FrequentUpdates`
+  deliberately ABSENT — Owner Q4's cadence fits the normal budget, and claiming it is
+  an Apple review flag); `targets/live-activity/expo-target.config.js` (`type:
+  "widget"`, `.LiveActivity`, 18.0, the SHARED keychain group only);
+  `targets/live-activity/LACore/{TentacleActivityAttributes,LACore}.swift`
+  (the shared attributes/ContentState types, `openActivityState` over task 17's
+  `PushCore` ciphersuite, and `renderActivity` — the Swift twin of `la-render.ts`),
+  compiled into the SAME SwiftPM package through a second symlink so there is one
+  implementation. The Swift tests read BOTH vector files.
+- **L10 missing:** the SwiftUI VIEWS (lock screen, the three Dynamic Island
+  presentations), the `LiveActivityIntent`s, and `modules/live-activity` (the Expo
+  module). These need `expo prebuild` + an Xcode build on a simulator/device — i.e.
+  L12's `e2e:mobile` harness and D5. The view-model they would draw IS specified and
+  pinned, so what remains is presentation.
+- **L11 done:** the three pure modules — `live-activity-action.ts` (the security one:
+  a tap carries only `{action, activityId}`, and `requestId`/options come from
+  RE-OPENING the current state, then task 17's coordinator, Face ID for Approve),
+  `live-activity-registration.ts`, `live-activity-reconcile.ts`.
+- **L11 missing:** `live-activity-expo.ts` (the native adapter), the Settings row and
+  the `App.tsx`/`index.ts` wiring — all of which call the L10 module that does not
+  exist yet. Writing them against a module that cannot be built would be untested
+  code claiming a feature.
+
+### Drift from the Implementation (each deliberate, each with its reason)
+
+1. **`devices/live/<id>.json` does not hold the push key.** The seal's recipient is
+   task 16's per-device X25519 push key, which lives in `devices/push/<id>.json`. So
+   `LaRegistrationsSource.pushKeyOf` reads the BANNER record for the key: ONE key per
+   device, so the widget opens both channels with one Keychain item. A device with Live
+   Activities but no banner registration has no key and is dropped with an audit line,
+   never silently.
+2. **The relay gained a `features` option** (`apps/relay/src/server.ts`). The plan
+   assumed no seam existed to present "a relay that announces only `push`". This is a
+   deploy knob for the two-step rollout (push now, Live Activities at D4a), not a test
+   hook — I drafted `core.setFeaturesForTest` first and discarded it.
+3. **One observer, fanned out.** `reloadedHost` builds ONE `SessionPushObserver` that
+   feeds the push notifier and the activity notifier, and hands the same instance to
+   both options. `HostedSession` therefore still sees exactly one observer and
+   `offerPush` stays O(1)/synchronous (AGENTS §7, the steering no-wait window).
+4. **The LA `aps` body is bounded in `apns.ts`, not in the frame.** `liveActivityPayloadOf`
+   refuses a `start` without attributes or content-state and a date past
+   `now + 12 h` (the relay's backstop over iOS's 8 h cap), so a daemon bug becomes a
+   `rejected` result instead of an Apple 400 with no explanation.
+5. **`LA_MAX_LIVE_PER_DEVICE` is per device, not per (device, session)** — the cap iOS
+   actually imposes. Eviction takes the oldest `done`; with nothing finished the start
+   is skipped with a `la-capped` note (never silent).
+6. **The LA budget is HOURLY.** Writing the test for it found the code using
+   `push`'s MINUTE window — 60× too many pushes. `chargeHourWindow`/`usedInHourWindow`
+   now exist beside the minute pair; the test stops 5 minutes in and requires the cap
+   to still hold, which a minute window fails.
+7. **`encodeBase64Url` lives in `protocol/pairing.ts`**, not a `base64.ts` — the probes
+   found this, not the plan.
+
+### Tests written (all red-first, all mutation-checked)
+
+25 mutations were run and reverted; each is named in its test's comment. Two of them
+survived their first run and forced a NEW test, which is the point of running them:
+
+- **M5** (LA budget gate off) survived the "worst case at the caps" input, because that
+  input already fits. A second test with an input that genuinely OVERFLOWS was added —
+  and it immediately found a real bug: clipping for the byte budget alone could leave a
+  field over its OWN schema cap (a 200-emoji title fits 1022 bytes but not `title`'s
+  120-byte line). `clipToCaps` is now the ladder's step 0.
+- **M14** (record-version guard off) survived because the fixture failed for a second
+  reason: the fixture now carries a record valid in EVERY field but `v`.
+- **M22** (rollover reusing the slot) was unobservable because the test's slot source
+  was a constant. The fixture now COUNTS slots (`issued` 1 → 2).
+- **M26/M28** (the relay feature gate; the `ready` resend) each needed a new test:
+  "NOTHING reaches Apple" and the wiring EXTRACTED to `bindLiveActivityResend` so a
+  test can call it rather than re-implement it.
+- **M40** (the `kind !== "asking"` check) survived because the `ask === undefined`
+  clause covered the same fixture: a new test uses a `done` state that still carries a
+  stale `ask`.
+- **M4** (the kid guard) survived until a mislabelled-envelope test was added.
+
+Tests that had to CHANGE because the surface genuinely changed (not to make red
+green): `push-hook.test.ts`'s watched-set list and its positional `updates()[1]` lookup
+(the hook now sees three more kinds — the assertion is by TYPE now); `relay.test.ts`'s
+`features == ["push"]`; `devices-cmd.test.ts`'s `toEndWith("on")` (a second column).
+
+### Gate (run on the branch, 2026-11-15)
+
+`bun run check` — **green**:
+- `tsc --noEmit`, `tsc -p apps/mobile`, `tsc -p apps/relay`: clean.
+- `biome check .` — 1627 files, no fixes applied, 0 errors, 0 warnings (matches the
+  baseline in AGENTS §6).
+- `bun test` — **11632 pass, 5 skip, 0 fail** (11637 across 836 files, 427 s). The
+  skips are the three documented opt-ins (live-k8s, live-docker, the real-socket
+  keepalive) plus two that were already skipping on the base; no non-opt-in skip was
+  added.
+- `bun run test:swift` — 15 pass, 0 failures (11 pre-existing + 4 new LA tests).
+
+Two failures the first full run caught, both fixed and re-run:
+1. **`push.enabled: false` stopped answering `MethodNotFound`.** My fan-out always
+   supplied a `push` host option, so the RPC answered instead of being absent. Fixed at
+   the seam: `SessionHost` takes the push observer when it has one and the activity
+   observer otherwise, and `serve` passes each option only when its own wiring exists.
+2. **`liveActivity` had no key-docs entries**, so `key-docs.test.ts` (4 tests) and the
+   README config table failed. Both keys are now documented and `bun run docs:config`
+   regenerated the table.
+
+`bun run e2e:mobile` was **not** run, and cannot be on this pass: it needs the native
+build that L10's SwiftUI views and Expo module are part of (see L10's PARTIAL note).
+It belongs to L12/D5.
+
+### What is left (and who does it)
+
+- **L10's views + Expo module, L11's adapter/Settings/wiring** — an Xcode build on a
+  simulator or device; L12's `e2e:mobile` harness is where they land.
+- **L12** — Maestro flows, the `seal-activity` hook, the runbook delta, the
+  real-iPhone checklist.
+- **D4a** (Apple console: widget App ID, keychain group, profiles) and **D4** (relay
+  deploy) and **D5** (real device) are the owner's, as the plan says.
+- **`protocol.d/`** was NOT needed: no wire break. The new methods are additive, the
+  schemas are strip schemas, and the `liveactivity` frame is a new `t` gated by a new
+  feature name — an older daemon answers `MethodNotFound`, which is F22's path.
+
+
+
 ### Blocked at the load-bearing check — no slice executed
 
 *— claude-opus-5-5, 2026-11-15*

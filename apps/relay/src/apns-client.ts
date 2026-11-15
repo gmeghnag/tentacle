@@ -16,10 +16,13 @@ import {
   APNS_REQUEST_TIMEOUT_MS,
   APNS_TIMEOUT_OUTCOME,
   type ApnsJwtSource,
+  type ApnsLiveActivity,
   type ApnsOutcome,
   apnsOutcomeOf,
   apnsPayloadOf,
   apnsRequestOf,
+  liveActivityPayloadOf,
+  liveActivityRequestOf,
 } from "./apns.ts";
 
 /** What the relay asks the client to deliver: one sealed push to one device. */
@@ -53,8 +56,22 @@ export interface ApnsClientOptions {
 export interface ApnsClient {
   /** Deliver one push. Never throws: every failure is an `ApnsOutcome`. */
   send(input: ApnsSendInput): Promise<ApnsOutcome>;
+  /** Deliver one Live Activity push (docs/feat/mobile-live-activity.md L4). Never throws. */
+  sendLiveActivity(input: ApnsLiveActivitySendInput): Promise<ApnsOutcome>;
   /** Drop both sessions (the relay's shutdown path). */
   close(): void;
+}
+
+/**
+ * One activity push to deliver: the update token, its environment, the priority
+ * the core decided (already downgraded if the scarce budget was spent) and the
+ * clear `la` block. There is no `collapse`/`ttl` — an activity is not a banner.
+ */
+export interface ApnsLiveActivitySendInput {
+  readonly token: string;
+  readonly env: PushEnvironment;
+  readonly priority: 5 | 10;
+  readonly la: ApnsLiveActivity;
 }
 
 /** A session's key: the origin it dials (one per environment, per Design 4). */
@@ -223,6 +240,51 @@ export function createApnsClient(options: ApnsClientOptions): ApnsClient {
       : outcome;
   };
 
+  /**
+   * One activity push. The same session, the same JWT and the same single retry
+   * as `attempt`, because it is the same Apple endpoint — only the request
+   * builder and the body differ. The body is built HERE so an unbounded date (a
+   * daemon bug, or a hostile one) becomes a `rejected` result instead of a
+   * request Apple would 400 with no explanation to the daemon.
+   */
+  const attemptLiveActivity = async (input: ApnsLiveActivitySendInput): Promise<ApnsOutcome> => {
+    const origin = origins[input.env];
+    const jwt = await options.jwtSource.jwt();
+    let body: string;
+    try {
+      body = liveActivityPayloadOf(input.la, now());
+    } catch {
+      return { status: "rejected", reason: "payload" };
+    }
+    const request = liveActivityRequestOf({
+      token: input.token,
+      topic: options.topic,
+      jwt,
+      priority: input.priority,
+      now: now(),
+      la: input.la,
+    });
+    const first = await requestOnce(origin, request.headers, body);
+    if (first.retry !== true) {
+      return first;
+    }
+    // The 403 `ExpiredProviderToken` path, exactly as the banner push handles it.
+    options.jwtSource.invalidate(jwt);
+    const fresh = await options.jwtSource.jwt();
+    const retried = liveActivityRequestOf({
+      token: input.token,
+      topic: options.topic,
+      jwt: fresh,
+      priority: input.priority,
+      now: now(),
+      la: input.la,
+    });
+    const outcome = await requestOnce(origin, retried.headers, body);
+    return outcome.retry === true
+      ? { status: "rejected", reason: "ExpiredProviderToken" }
+      : outcome;
+  };
+
   return {
     async send(input: ApnsSendInput): Promise<ApnsOutcome> {
       try {
@@ -230,6 +292,14 @@ export function createApnsClient(options: ApnsClientOptions): ApnsClient {
       } catch {
         // Nothing here may throw into the frame loop: a relay that crashes on
         // one push loses every daemon on it (F2's convergence, not a silent drop).
+        return { status: "unavailable" };
+      }
+    },
+    async sendLiveActivity(input: ApnsLiveActivitySendInput): Promise<ApnsOutcome> {
+      try {
+        return await attemptLiveActivity(input);
+      } catch {
+        // Same rule as `send`: one bad activity must not take the relay down.
         return { status: "unavailable" };
       }
     },

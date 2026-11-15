@@ -1057,6 +1057,38 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "0 pushes at once; the maximum is 3600 (one hour). At the desk you answer and the phone stays silent: the timer is cancelled the moment the ask settles. Expressed as whole seconds; `serve --push-grace <seconds>` beats this key. Read by the pure rules module, so it is table-tested (`docs/feat/mobile-push.md` Design 1).",
     example: "60",
   },
+  liveActivity: {
+    summary: "Whether this `serve` shows a live activity for a running turn on a paired phone.",
+    kind: "section",
+    type: "object",
+    scope: "both",
+    carried: "no",
+    details:
+      'A lock-screen / Dynamic Island banner for a turn your phone is NOT currently showing: the project, the current tool and a running timer, an approval waiting with Approve / Deny, and "done" for a few minutes after. The content is sealed end-to-end to each phone, so Apple and the relay carry only opaque bytes. LAPTOP-ONLY, and it needs the relay. Absent, both keys take their defaults.',
+    example: '{ "startAfterSeconds": 30 }',
+  },
+  "liveActivity.enabled": {
+    summary: "Whether a `serve` starts a live activity at all.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    defaultText: "`true`",
+    details:
+      "Off, `device/live_activity_register` answers `off` and no activity is ever started — the person's own switch on the phone is a second, independent control (Settings on the device). It needs the relay: `--no-relay` / `relay.enabled: false` answer `relay-off`, and a relay deployed without Live Activity support answers `relay-no-la`. A LAPTOP-ONLY setting: never carried to a pod.",
+    example: "false",
+  },
+  "liveActivity.startAfterSeconds": {
+    summary: "How long a turn must run before a phone that is not watching it gets an activity.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    defaultText: "`20`",
+    details:
+      "0 starts one at once; the maximum is 3600 (one hour). The threshold is what keeps short Q&A from lighting a phone at your desk; a permission request starts one immediately whatever this says, because an approval waiting is the one thing worth a lock-screen light. A device already attached to the session is never started for. Read by the pure rules module, so it is table-tested (`docs/feat/mobile-live-activity.md` Design 3).",
+    example: "30",
+  },
   mount: {
     summary: "What a docker/podman run hides from the container's workspace mount.",
     kind: "section",
