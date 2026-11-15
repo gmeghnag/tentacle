@@ -37,6 +37,15 @@ export const WireChatRequestSchema = z.object({
   tools: z.array(WireToolDefinitionSchema).optional(),
   temperature: z.number().optional(),
   maxTokens: z.number().int().positive().optional(),
+  /**
+   * The requesting turn is a voice turn with reasoning off
+   * (docs/feat/voice-conversation.md §4, C3): a pod (`run`/`attach`) runs the
+   * agent loop but the model call comes back HERE, so the daemon's wish not to
+   * reason must ride the wire. Optional: an older laptop drops it (the turn
+   * reasons as configured — a slower reply, never a failed one), an older pod
+   * never sends it (AGENTS §7: additive, no `protocol.d` note).
+   */
+  reasoning: z.literal("off").optional(),
 });
 export type WireChatRequest = z.infer<typeof WireChatRequestSchema>;
 

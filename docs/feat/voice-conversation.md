@@ -796,6 +796,262 @@ not a per-chunk limit.
 - the Kokoro build (`git clone` approval);
 - a stop run at the AGC-on gate with louder injection (permissions closed).
 
+### C3 — voice-turn profile (§4) · *— Claude, 2026-11-15 (Anthropic model id not exposed to this session; executor: tentacle)*
+
+**Scope.** Slice C3 only: §4's per-turn voice profile, on both ends of the wire
+and at the provider. Nothing of C1/C1b/C4/C5 (Mac helper, TUI) or P1–P4
+(the phone) was touched, and no other slice's behaviour changed.
+
+**Load-bearing check (run FIRST, per the brief).** §4's assumption: "the agent
+loop builds one turn's `ChatRequest` in one place, so (a)/(b) need no history
+change." Re-run on this branch (`.tentacle/tmp/voice-conversation/c3/load-bearing.txt`):
+every `ChatRequest` construction site is `agent.ts:1281` (a turn's rounds),
+`agent.ts:1607` (that same turn's exhausted-budget report), and
+`compact.ts:118,160` (compaction, not a turn). Every `config.model.stream(`
+call site is `agent.ts:1301,1619`. **PASSES** — and the builder at 1281 is fed
+by `modelView(messages)`, already a COPY of the history, which is exactly what
+F10 needs: the profile is added to that copy and the history is never touched.
+
+**As built, in dependency order.**
+
+1. **Protocol** (`packages/protocol/src/session.ts`, `model.ts`):
+   `VoiceTurnSchema = { reasoning: "off" | "keep" }`, `voice?:` on
+   `PromptParamsSchema` and `EnqueueParamsSchema`, and
+   `reasoning?: "off"` on `WireChatRequestSchema`. All three stay strip schemas
+   (re-checked: no `.strict()`, and the regenerated JSON schema shows
+   `additionalProperties: true`), so **no `protocol.d/` note and no
+   `PROTOCOL_VERSION` edit** — an older daemon drops `voice` (a normal turn),
+   an older pod never sends `reasoning`.
+2. **Core** (`packages/core/src/model.ts`): `VoiceReasoning`, `VoiceTurn`, and
+   `ChatRequest.reasoning?: "off"`. The pure rule lives in the new
+   `packages/core/src/voice/turn-profile.ts` — `voiceReasoning` (the window:
+   `off` until the turn's FIRST tool call) and `withSpokenLine` (the line goes
+   after the leading system prompt, is never added twice, and never mutates its
+   input).
+3. **Agent loop** (`packages/agent/src/agent.ts`): `RunOptions.voice` +
+   `RunOptions.voiceMark`, a per-turn `voice`/`toolCalled` pair in
+   `runMessages`, `voiceRequest()` applied at the one round builder (`:1281`)
+   and the forced report (`:1607` — the line only: that call exists because the
+   turn spent its rounds on tool calls, so the reasoning window is closed),
+   and `toolCalled = true` at the round's first tool call.
+4. **Session** (`packages/agent/src/session.ts`): `SendOptions.voice`,
+   `enqueue(text, voice?)`, and the mark queue (`voiceMarks`/`pendingVoice`,
+   drained in step with the steer texts by `drainSteering`, read once per round
+   by `takeVoice`). A voice steer re-marks the REST of its turn and REOPENS the
+   reasoning window at that round, as §4 says. `resume` drains through the same
+   helper (a resumed turn's own profile is not restored: nothing transient is
+   stored — the first drift below).
+5. **Daemon** (`packages/daemon/src/{connection,hosted-session}.ts`): both
+   handlers pass `params.voice` through to `HostedSession.prompt/enqueue` and on
+   to `Session.send/enqueue`. Nothing else in the daemon learned about voice —
+   no persistence path sees it, by construction.
+6. **Providers** (`packages/providers/src/openai-provider.ts`): for
+   `reasoning: "off"`, `reasoning_effort: "none"` + `chat_template_kwargs:
+   { enable_thinking: false }`, both built in ONE place (`buildPayload`); a 400
+   → exactly one retry without them, latched per provider instance (F9).
+   Anthropic is unchanged.
+7. **Tunnel + client** (`packages/daemon/src/proxy-model.ts`,
+   `packages/client/src/{remote-client,remote-session}.ts`): `toWireRequest`
+   copies `reasoning` (the pod runs the loop but the laptop owns the model);
+   `RemoteClient.prompt/enqueue` take an optional `voice` and spread it ONLY
+   when given; `RemoteSession.send/enqueue` carry it, and the turn stores it
+   for keyed re-sends after a drop.
+
+**Drift from the Implementation (and why).**
+
+- **§4 says the profile rides the turn; a RESTARTED turn has none.** `resume`
+  deliberately does not reconstruct it: the daemon stores nothing
+  (`Preconditions`), so a turn cut by a `serve` restart resumes as an ordinary
+  turn unless a voice steer re-marks it. Recorded here rather than papered over;
+  it is the honest consequence of the no-persistence rule, and the alternative
+  (persisting the profile) would violate F10.
+- **The line is a `system` message placed after the leading system prompt**,
+  not "appended". Same bytes every round of the turn, so the provider's prompt
+  cache still holds the turn's prefix; the plan did not pin the position.
+- **`voiceRestart` was dropped** from the loop's state: `restarted` is acted on
+  where it is read (reopen the window), so a second flag was dead weight.
+
+**Tests (T6–T8), all red-first by mutation (`.tentacle/tmp/voice-conversation/c3/mutations.txt`).**
+
+- `packages/protocol/test/voice-turn.test.ts` — both fields parse, both values
+  survive, and an ordinary payload still parses.
+- `packages/core/test/voice/turn-profile.test.ts` — the pure rule: the window
+  closes at the first tool call, `keep` never emits, the line's position, the
+  no-mutation and no-duplicate properties.
+- `packages/daemon/test/voice-turn.test.ts` — the loop: `off` before the first
+  tool call with the line on both rounds and `reasoning` gone after it; `keep`
+  → line, no field; an ordinary turn → neither; a voice `enqueue` marks the rest
+  of the turn. Plus two WIRE tests over a real `Connection` frame.
+- `packages/cli/test/voice-turn-f10.test.ts` — **F10 on real files**: a real
+  `startDaemon`, a real `<configDir>/daemon/…/<uid>.jsonl` store and a real
+  `session/log`, neither carrying the line while the user's words are there.
+- `packages/daemon/test/voice-turn-tunnel.test.ts` — `reasoning` survives
+  both hops of the pod tunnel (`toWireRequest` and the loop that sets it).
+- `packages/client/test/voice-turn-client.test.ts` — `prompt`/`enqueue` put
+  `voice` on the FRAME only when asked, and an ordinary frame is byte-for-byte
+  what it was.
+- `packages/providers/test/reasoning-off.test.ts` — the OpenAI payload with and
+  without the switches, one retry on a 400 then remembered, no retry on a 500,
+  and Anthropic byte-identical.
+
+**Mutation results (each reverted; suite green after every revert).**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `voiceReasoning` ignores `toolCalled` | 3 red (loop T6, F10, unit) |
+| M2 | push the line onto the LOOP's `messages` | 2 red on the real `serve` store + `session/log` |
+| M3 | ignore `keep`, always emit `off` | 2 red |
+| M4 | drop `params.voice` in `Connection.prompt` | 1 red |
+| M5 | drop `reasoning` in `toWireRequest` | 2 red |
+
+M2 is worth one line: a first attempt appended to `view.messages` and stayed
+**green — correctly**, because that is `modelView`'s copy, not the history. The
+mutation only means anything at the history array, and there it is caught by
+both the in-memory snapshot and the on-disk store.
+
+**Gate.** `bunx tsc --noEmit` (plus `apps/mobile` and `apps/relay`) clean; `bun
+run lint` clean (1634 files, 0 findings, matching the §6 baseline); `bun test`
+**11714 pass, 5 skip, 0 fail** (845 files, 424 s) — the 5 skips are the
+documented opt-in ones (§6 lint/test baseline). `packages/protocol/schema/protocol.json`
+regenerated (`bun run schema:export`): +21 lines, the new `VoiceTurn` def and
+the three field additions.
+
+One flake seen and cleared, reported honestly: `packages/agent/test/resume.test.ts`
+S1 failed once with `durationMs: 0` vs `1`. It is **pre-existing and unrelated**
+— it fails identically with this slice's changes to `Session.resume` reverted,
+and passed in the full run above; it is a wall-clock assertion in a test this
+slice did not touch.
+
+**Changelog.** `changelog.d/voice-turn-profile.changed.md`, its own file: the
+guard requires one bullet per fragment, and C2's
+`changelog.d/voice-conversation.changed.md` stays byte-identical to HEAD.
+
+**Unverified.** The provider's exact wire strings (`reasoning_effort: "none"`,
+`chat_template_kwargs.enable_thinking`) are what the plan names; no live
+OpenAI-compatible or llama.cpp endpoint was called from this slice. The F9
+fallback is proven only against injected `fetch` (a scripted 400), so a real
+endpoint that rejects them differently (a 422, or a 200 that ignores them) is
+untested — verify by pointing a voice turn at a thinking-enabled llama.cpp and
+reading the request body it logs.
+
+### C3 second pass — concurrent-worker audit + independent verification · *— deepseek-v4-flash (tentacle CLI, `--profile deepseek`), 2026-11-15*
+
+**Why this section exists.** A second executor was spawned for `feat/voice-conversation`
+C3 while a first one was already running it **in the same worktree**
+(`.tentacle/worktrees/voice-conversation`). `ps` at 21:48 showed both
+(`tentacle --profile deepseek`, PIDs 45102 started 21:05 and 46122 at 21:09) with
+this exact prompt. So this worktree's C3 state was produced by **two writers
+interleaving**: the section above (`### C3 — voice-turn profile`) is the other
+worker's, written at 21:44, and it is accurate about the tree it saw. This
+section records what a second pair of eyes re-ran independently, and the drift
+between the two passes.
+
+**What I re-verified from scratch (not trusting the section above).**
+
+- **Load-bearing check, re-run first** (`.tentacle/tmp/voice-conversation/c3-load-bearing.txt`):
+  the ONE turn-round `ChatRequest` builder is `packages/agent/src/agent.ts:1217`
+  (1281 after this pass's edits), with the forced final report at `:1536` and
+  `compact.ts:118,160` (compaction, not a turn); every `config.model.stream(`
+  call site is those two loop sites plus `compact.ts:71`. `rg '.strict()'` in
+  `packages/protocol/src` matches **comments only** (0 schemas), so adding
+  optional fields needs no `protocol.d/` note. **PASSED** — the slice proceeded.
+- **Independently written tests, all red-first:**
+  - `packages/protocol/test/voice-turn.test.ts` — both fields on `prompt`/`enqueue`,
+    both values, absence stays absent, an unknown reasoning value is refused
+    (never coerced), `WireChatRequest.reasoning` round-trips.
+  - `packages/core/test/voice/turn-profile.test.ts` — the window closes at the
+    first tool call; `keep` never emits; the line's position after the leading
+    system prompt; added once; **the input history is never mutated**.
+  - `packages/daemon/test/voice-turn.test.ts` — `off` → field + line before the
+    tool call and no field after (line stays); `keep` → line, no field; a typed
+    turn → neither; a voice `enqueue` re-marks the rest of the turn and reopens
+    the window; **plus two WIRE tests** over a real `Connection` proving
+    `session/prompt{voice}` and `session/enqueue{voice}` are not stripped.
+  - `packages/daemon/test/voice-turn-tunnel.test.ts` — `toWireRequest` carries
+    `reasoning`; an ordinary turn sends no such key; the pod's own loop sets it
+    only for a voice turn.
+  - `packages/client/test/voice-turn-client.test.ts` — the FRAME carries `voice`
+    only when the caller asks (the daemon parses strip schemas, so a forgotten
+    field would be silent).
+  - `packages/providers/test/reasoning-off.test.ts` — both switches present with
+    `off`, absent otherwise; a 400 costs exactly one retry **and is remembered**;
+    a 400 on the plain body too is the turn's real failure (no loop); a 500 is
+    never retried (that is the retry layer's); Anthropic byte-identical.
+  - `packages/cli/test/voice-turn-f10.test.ts` — **F10 over real files**: a real
+    `startDaemon`, its real `<configDir>/daemon/…/<uid>.jsonl` and its
+    `session/log`, neither carrying the transient line while the user's words are
+    present (so a "nothing was written" pass cannot fool it).
+
+**Mutations I ran (real files, byte-exact restore, never `git checkout`).**
+Script `.tentacle/tmp/voice-conversation/mutations-c3.ts`.
+
+```
+MUTATION T6 daemon drops params.voice (Connection.prompt): RED (1 fail)
+MUTATION T6 ignore `keep` (agent always emits reasoning off): RED (3 fail)
+MUTATION T6 never close the window at the first tool call: RED (1 fail)
+MUTATION F10 the line into the HISTORY instead of the request: RED (2 fail)
+MUTATION T7 toWireRequest drops reasoning (pod half): RED (2 fail)
+MUTATION T7 client drops voice in prompt: RED (1 fail)
+MUTATION T7 client drops voice in enqueue: RED (1 fail)
+MUTATION T8 provider omits the reasoning switches: RED (2 fail)
+MUTATION T8 F9 no retry on a 400: RED (2 fail)
+MUTATION T8 F9 not remembered (retries every turn): RED (1 fail)
+----
+ALL MUTATIONS RED (every target test is non-vacuous)
+```
+
+**A plan target that had to be replaced, and why** (AGENTS §8: fix the plan, do
+not force the code). **T7's "spread `voice` unconditionally" is unobservable:**
+`{voice: undefined}` and `{}` serialise to the SAME frame, because JSON drops
+`undefined` members, so that mutation proved **GREEN/vacuous** on its first run.
+Replaced with the two properties that are real and both go red — *drop `voice` in
+`prompt`* and *drop `voice` in `enqueue`*. The plan's §Tests bullet names the
+unobservable form and should be corrected. The other pass hit the same class
+from the other side (its M2: appending to `view.messages` stays green because
+that is already `modelView`'s copy, not the history). Same lesson: **mutate the
+history array, not the request's copy.**
+
+**Gate, re-run on the combined tree by this pass.** `bunx tsc --noEmit` clean
+(exit 0); `bun run lint` clean (`biome check .`, 1634 files, 0 findings, matching
+the AGENTS §6 baseline); `bun test` **11715 pass, 5 skip, 0 fail** across 846
+files — the 5 skips are exactly the opt-in baselines (2 docker, 2 k8s,
+`ws-server` `skipIf(!SLOW)`), no new skip and no new failure. The C3 tests alone:
+**28 pass, 0 fail** over 7 files. `bun run schema:export` regenerated
+`packages/protocol/schema/protocol.json` (+21 lines, the `VoiceTurn` def and
+three field additions); idempotent, so `json-schema.test.ts` shows no drift.
+
+**Changelog: two fragments exist, one too many (an orchestrator call).**
+`changelog.d/voice-conversation.changed.md` is the plan's whole-task fragment
+(C2's pass). This slice is user-visible too, and the other worker added
+`changelog.d/voice-turn-profile.changed.md` for it. This task's prompt asked for
+`changelog.d/voice-conversation.<category>.md`, which the tree already has, so I
+added **no third** and deleted nothing (the other worker's documents the same
+slice from its pass). Keep exactly one at merge.
+
+**Unverified / open.**
+
+- The provider's exact wire strings (`reasoning_effort:"none"`,
+  `chat_template_kwargs.enable_thinking:false`) never reached a live
+  OpenAI-compatible or llama.cpp endpoint: F9 is proven only against injected
+  `fetch`. Verify by pointing one voice turn at a thinking-enabled llama.cpp and
+  reading the body it logs (a server rejecting them as 422, or
+  accepting-and-ignoring them, is untested).
+- A voice turn cut by a `serve` restart resumes as an ordinary turn: nothing
+  transient is persisted, which is F10, and persisting it would break F10.
+  Recorded, not fixed.
+- This slice says nothing about the TUI/phone wiring that CONSUMES the profile
+  (reading the edge's setting and passing `voice` at send time): that is C4/P3.
+
+**Concurrency caveat, stated plainly.** Three executors shared this worktree, so
+"DONE" below means *the tree as verified at 21:50 by this pass*. A concurrent
+writer changing these files afterwards would invalidate it. That is a process
+problem (one worktree per executor), not a code problem — escalated, not solved
+here.
+
+**Per-slice status: C3 DONE** (as verified above), PARTIAL against two of its own
+plan details: (i) T7's stated client mutation replaced with a real one, and (ii)
+the concurrency caveat — the tree is only as trustworthy as the last writer.
+
 ## Review
 
 ### C2 review · *— claude-opus-5-5, 2026-11-15*

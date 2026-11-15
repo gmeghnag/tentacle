@@ -574,7 +574,7 @@ export class Connection {
   // write does not fail the ack — the steer is queued; the daemon log has it.
   private async enqueue(params: EnqueueParams): Promise<EnqueueResult> {
     const hosted = this.lookup(params.sessionId);
-    hosted.enqueue(params.id, params.turnId, params.text);
+    hosted.enqueue(params.id, params.turnId, params.text, params.voice);
     await hosted.persisted();
     return {};
   }
@@ -928,7 +928,13 @@ export class Connection {
     // with a human behind this turn (docs/feat/hooks-project-trust.md). The
     // laptop decides; a rejection (an old laptop's `MethodNotFound`, a drop)
     // is "declined" in the runner.
-    return hosted.prompt(params.turnId, params.content, params.skill, this.askHooksTrust);
+    return hosted.prompt(
+      params.turnId,
+      params.content,
+      params.skill,
+      this.askHooksTrust,
+      params.voice,
+    );
   }
 
   // Acks at once, like `prompt`: the cancel and the new turn happen daemon-side

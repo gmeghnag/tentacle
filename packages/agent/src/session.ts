@@ -9,6 +9,7 @@ import {
   type AttachmentRef,
   type ChatMessage,
   NOTE_KIND,
+  type VoiceTurn,
   checkAttachmentRefs,
 } from "@tentacle/core";
 import {
@@ -17,6 +18,7 @@ import {
   type BeforeResumedCall,
   type BeforeRun,
   UnknownSkillError,
+  type VoiceMark,
 } from "./agent.ts";
 import {
   type CompactResult,
@@ -54,6 +56,12 @@ export interface SendOptions {
    * prompt is a prompt, not a continuation).
    */
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3);
+   * see `RunOptions.voice`. A voice `enqueue` (`enqueueVoice`) marks the rest of
+   * the turn too.
+   */
+  readonly voice?: VoiceTurn;
 }
 
 /** Per-turn options of `resume`. */
@@ -80,6 +88,18 @@ export class Session {
   private readonly onPersist?: (snapshot: SessionSnapshot) => void;
   /** User messages queued mid-turn, drained into the loop at each boundary. */
   private steering: string[] = [];
+  /**
+   * The voice profile a queued steer carries, if any (docs/feat/voice-conversation.md
+   * §4): `null` = the steer is not a voice one, so it never re-marks the turn.
+   * Drained in step with `steering` (the loop asks for it once per round).
+   */
+  private voiceMarks: (VoiceTurn | null)[] = [];
+  /**
+   * The voice mark handed to the loop at the next round: `taken` at the turn's
+   * first round and again after every steer drain, then cleared by the loop's
+   * own read (`takeVoice` is idempotent per round).
+   */
+  private pendingVoice: VoiceMark | null = null;
 
   constructor(agent: Agent, id?: string, options: SessionOptions = {}) {
     this.agent = agent;
@@ -158,6 +178,8 @@ export class Session {
     // A fresh turn starts with its seed only (abort may have left undrained
     // items from a previous turn; a caller that keeps them passes them).
     this.steering = [...(opts.steering ?? [])];
+    this.voiceMarks = this.steering.map(() => null);
+    this.pendingVoice = null;
     // What this turn adds starts here (its context line may ride on it).
     const newFrom = this.messages.length;
     if (pushed) {
@@ -168,12 +190,14 @@ export class Session {
       });
     }
     try {
-      yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0), {
+      yield* this.agent.runMessages(this.messages, this.id, signal, () => this.drainSteering(), {
         newFrom,
         userMessage: pushed,
         ...(opts.skill !== undefined ? { skill: opts.skill } : {}),
         ...(opts.askHooksTrust !== undefined ? { askHooksTrust: opts.askHooksTrust } : {}),
         ...(opts.beforeRun !== undefined ? { beforeRun: opts.beforeRun } : {}),
+        ...(opts.voice !== undefined ? { voice: opts.voice } : {}),
+        voiceMark: () => this.takeVoice(),
       });
     } finally {
       // Persist once the turn settles (normal end, error, or abort), so a
@@ -236,12 +260,18 @@ export class Session {
     opts: ResumeOptions = {},
   ): AsyncGenerator<AgentEvent> {
     try {
-      yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0), {
+      // As `send`: the steers a suspended turn had accepted come back through
+      // `enqueue`, so their voice marks must be drained in step with them. The
+      // TURN's own profile is not restored — nothing transient is stored
+      // (AGENTS §7), so a turn cut by a restart resumes as an ordinary one
+      // unless a voice steer re-marks it.
+      yield* this.agent.runMessages(this.messages, this.id, signal, () => this.drainSteering(), {
         resumeFrom: toolCallId,
         ...(opts.beforeRun !== undefined ? { beforeRun: opts.beforeRun } : {}),
         ...(opts.beforeResumedCall !== undefined
           ? { beforeResumedCall: opts.beforeResumedCall }
           : {}),
+        voiceMark: () => this.takeVoice(),
       });
     } finally {
       this.persist();
@@ -252,14 +282,47 @@ export class Session {
    * Queue a user message to be injected into the turn currently running, at the
    * next model-round boundary ("steering"). A no-op shape when nothing is
    * running — the message simply waits in the queue until the next `send`.
+   *
+   * `voice` (docs/feat/voice-conversation.md §4): a voice STEER, which marks the
+   * rest of its turn a voice turn with its own `reasoning`.
    */
-  enqueue(text: string): void {
+  enqueue(text: string, voice?: VoiceTurn): void {
     this.steering.push(text);
+    this.voiceMarks.push(voice ?? null);
   }
 
   /** The messages queued and not yet drained, in order (a copy, for persisting). */
   pendingSteering(): readonly string[] {
     return [...this.steering];
+  }
+
+  /**
+   * The loop's drain: takes the queued texts AND their voice marks, in order, so
+   * a mark can never be applied to a round that did not carry its steer. The
+   * mark in force is a voice steer's `reasoning` (the last one wins, as the
+   * history order does), and it REOPENS the reasoning-off window: the steer is
+   * the next thing the person said, out loud.
+   */
+  private drainSteering(): readonly string[] {
+    const marks = this.voiceMarks.splice(0);
+    const texts = this.steering.splice(0);
+    for (const mark of marks) {
+      if (mark !== null) {
+        this.pendingVoice = { reasoning: mark.reasoning, restarted: true };
+      }
+    }
+    return texts;
+  }
+
+  /**
+   * The voice mark the loop consumes at a round: what it must apply to THIS
+   * round's request, then forget. `undefined` → nothing changed since the last
+   * round (the loop keeps what it has).
+   */
+  private takeVoice(): VoiceMark | undefined {
+    const mark = this.pendingVoice;
+    this.pendingVoice = null;
+    return mark ?? undefined;
   }
 
   /**
