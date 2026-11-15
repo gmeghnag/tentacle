@@ -911,6 +911,88 @@ mutations then fail. Re-run: `round2/mut2.txt`.
 report: if an edge raises it for a seq the mode never spoke, the state follows.
 That is round 1's contract (the edge owns playback), unchanged here.
 
+### Fix round 3 — the review's finding 1 · *— claude-opus-5-5 (tentacle), 2026-11-15*
+
+**Scope.** Round 3's one MEDIUM, in `packages/core/src/voice/conversation.ts`.
+No other file, no protocol/wire/on-disk change (`PROTOCOL_VERSION` untouched, no
+`protocol.d/` note, no changelog fragment: internal reducer bookkeeping).
+
+**Reproduced first (before any edit).** The reviewer's own script, re-run on this
+branch (`.tentacle/tmp/voice-conversation/review/r3.ts`), scenario N:
+
+```
+turnEnded->speaking inFlight=[0,1,2] [{"cmd":"speak","text":"And more tail","seq":2}]
+turnStarted->speaking inFlight=[] []
+spoken->listening  inFlight=[]
+```
+
+The comment in `turnEnded` says `inFlight` is the MODE's, but the reset that
+follows invented an empty one — round 2's `M`, one event later.
+
+**Red before green.** New file
+`packages/core/test/voice/conversation-fix3.test.ts` (2 tests). First run on the
+unmodified reducer: **2 fail / 0 pass**, each on the assertion of the property:
+
+```
+(fail) N3: turnStarted keeps the previous turn's tail in flight
+        expect(next.speech.inFlight).toEqual([0, 1])   → received []
+(fail) N3b: the per-turn reset inside a delta keeps the tail too
+        expect(next.model.speech.inFlight).toEqual([0, 1, 2]) → received [0, 1]
+```
+
+**As built.** The carry is on the PROPERTY ("`inFlight` outlives a turn"), not on
+the one event the review named — there are exactly two places that build a fresh
+per-turn pipeline, and both lost it:
+
+- `turnStarted` (`:389-393`) spreads `emptySpeech(model.speech.seq)` and now sets
+  `inFlight: model.speech.inFlight` beside it, keeping `seq` (finding 3) and
+  `inFlight` (this finding) while resetting the pipeline and F5's budget.
+- `textDelta`'s own reset (`:738-747`, taken whenever `speech.turnId !== turnId`,
+  which is the state `turnStarted` leaves behind) carries the same two fields.
+
+**Drift from the review's letter:** none. The review asked for "carry
+`model.speech.inFlight` through both resets, and add test N" — that is what was
+done, with two tests instead of one because the two resets are independently
+removable (see the mutation table).
+
+**Mutations (`.tentacle/tmp/voice-conversation/f3/mut.ts`; the original bytes are
+written back after each, and the harness ends with `restored byte-identical:
+true`; `git status` shows only the intended two files).** Each mutation removes
+one carry:
+
+| Mutation | Result |
+|---|---|
+| `turnStarted`'s reset does not carry `inFlight` (the round-3 bug) | 2 fail (N3, N3b) |
+| `textDelta`'s reset does not carry `inFlight` | 1 fail (N3b) |
+
+The first mutation fails N3b as well because its first event is a `turnStarted`;
+the second is killed ONLY by N3b, which is why both tests are kept — a
+single-test suite would have left the `textDelta` carry unpinned. That is the
+non-vacuity check from §9, done by mutation rather than by argument.
+
+**Gate (this branch, on the FINAL tree).**
+
+- `bunx tsc --noEmit` → clean (exit 0, no output).
+- `bun run lint` → `Checked 1598 files in 446ms. No fixes applied.` (0 errors,
+  0 warnings — the §6 clean baseline; one file more than round 2's 1597 for the
+  new test file).
+- `bun test` → **11458 pass, 5 skip, 0 fail** across 825 files (424 s). The 5
+  skips are the documented opt-in ones (live k8s ×3, live docker ×2) — no new
+  skip. Narrow: `packages/core/test/voice packages/tui/test/voice` → 284 pass,
+  0 fail.
+- No protocol file touched, `CHANGELOG.md` untouched, no changelog fragment.
+
+**Considered and left alone (not a regression, but worth stating).** Entries
+leave `inFlight` only through `spoken{seq}`, so carrying them further widens one
+existing trust assumption: a seq the edge never reports now holds the mic shut
+across turn boundaries too. Every path that stops audio resets the pipeline
+without them (`linkDown`, `resumeFailed`, `recognitionFailed`, `thermal`,
+`askPending`, `turnOff`/`turnOn`, the idle `tick`), so the mode cannot wedge that
+way — and a `hush` the edge honours reports nothing further by design. The
+residual is the same round-1 contract as above: the edge owns playback.
+(Round 3's non-blocking notes O and P were left untouched, as the review said
+they do not block.)
+
 #### Owner answers (2026-11-15, batch 1)
 
 - Q1 order: **yes** — spike now, code after V1 (`feat/voice-dictation`) and `feat/mobile-voice` merge; a language with no on-device recognizer has no voice mode, never cloud.

@@ -380,9 +380,15 @@ export function conversationReducer(
           turnId: event.turnId,
           ownTurnId: event.own ? event.turnId : model.ownTurnId,
           // A new turn resets the PIPELINE and F5's budget — but not `seq`, which
-          // is the edge's one counter for the whole mode (finding 3).
+          // is the edge's one counter for the whole mode (finding 3), and not
+          // `inFlight`, which is the MODE's: a tail flushed at the previous turn's
+          // end is still playing when the next turn starts at once (a queued
+          // steer, an auto-sent prompt), and dropping it makes `spoken{seq}`
+          // return the mode to `listening` over its own audio (review round 3,
+          // finding 1 — round 2's `M`, one event later).
           speech: {
             ...emptySpeech(model.speech.seq),
+            inFlight: model.speech.inFlight,
             speakable: speakableFilter.init(langOf(model)),
           },
         },
@@ -729,11 +735,16 @@ function textDelta(
   // refused resume, and none of it may be spoken (P-F1, F4's spirit).
   if (model.ask !== null || model.linkDown || !isOn(model)) return { model, commands: [] };
 
-  // `seq` is the MODE's counter, so it is carried over when the pipeline resets.
+  // `seq` and `inFlight` are the MODE's, so they are carried over when the
+  // pipeline resets: the previous turn's tail is still the edge's audio
+  // (review round 3, finding 1).
   const pipeline =
     model.speech.turnId === turnId
       ? model.speech
-      : emptySpeech(model.speech.seq, model.maxSpokenChars);
+      : {
+          ...emptySpeech(model.speech.seq, model.maxSpokenChars),
+          inFlight: model.speech.inFlight,
+        };
   const speakable = speakableFilter.step(pipeline.speakable, text);
   const chunked = chunkFilter.step(pipeline.chunks, speakable.text);
   const spoken = speakWithinBudget(
