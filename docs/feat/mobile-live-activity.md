@@ -1820,3 +1820,51 @@ registration, so none of round 1's fixes regressed.
 **Not verified by me:** the Swift/Maestro/device checks (L0, L10–L12) are
 unchanged by this round and still open per the Execution above; nothing in this
 round touches Apple's behaviour, only which pushes the daemon emits.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: PASS** for the daemon-side L1–L9 and the pure L11 modules that this
+review covers. As Execution says, L10–L12 (SwiftUI views, the Expo module, the
+adapter and wiring, Maestro, the real device) are still partial or not started,
+and the owner has to accept that scope before merge.
+
+**Gate.** `bun run lint`: 1627 files, clean. `bun run typecheck`: clean. The
+notifier, rules, serve-live-activity and push-hook tests: 78 pass, 0 fail.
+After all mutations were reverted, `git status --porcelain` was empty.
+
+**Round-2 findings: both fixed.** Re-running `repro2.ts`:
+- **R5, in-flight start:** `["start/aa", "update/aa"]`. Only one start goes
+  out, and the ask held during the round trip follows it as an update.
+- **R6, dismissal:** `["start/aa", "update/upd"]`. After `gone` on the update
+  token, the turn does not start again.
+
+| fix | mutation | result |
+|---|---|---|
+| R5 | no in-flight hold (`inFlight.has(...) && false`) | 4 fail |
+| R5 | the held intent is never replayed | 2 fail |
+| R6 | `gone` on the update token treated as `ended` | 2 fail |
+| R6 | rules ignore the per-device dismissal key | 4 fail |
+
+**Regressions checked, none found:**
+- A start that resolves to anything other than `sent` clears `inFlight` and
+  drops the held intent. The next resync then rebuilds it as a start (R4 still
+  holds).
+- A sink that throws clears both sets.
+- `inFlight` and `pendingStarts` are pruned with the rules' live slots and
+  cleared on `stop`.
+- A held `end` is replayed once the start lands, so the activity is not left
+  orphaned until the 8 h cap.
+- The hook stays synchronous: all the new work is in `deliverOne`, after the
+  microtask.
+
+**Nit (not blocking):** since `gone` on an update token now means `dismissed`,
+an activity that iOS itself ended (F18, clock skew before the 7 h 45 rollover)
+gets no continuation. That is the side effect of choosing F17. It is rare,
+because the rollover fires 15 minutes before iOS's 8 h cap. It should be
+written down in the doc's F18 row.
+
+**Executor.** It fixed both findings with red-first tests. Keying dismissals by
+device as well is a correct improvement it found on its own. This round brought
+no plan drift.
