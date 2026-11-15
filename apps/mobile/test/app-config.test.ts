@@ -18,7 +18,7 @@
  *     build expands `$(AppIdentifierPrefix)` (fix round 1, finding #4).
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
 const appJson = JSON.parse(readFileSync(new URL("../app.json", import.meta.url), "utf8")) as {
   expo: {
@@ -138,5 +138,21 @@ describe("the Notification Service Extension target (N5)", () => {
     // generate an app with no extension, and every push shows the relay's text.
     const plugins = JSON.stringify(appJson.expo.plugins);
     expect(plugins).toContain("@bacons/apple-targets");
+  });
+});
+
+describe("PushCore sources compile inside the extension, not only in SwiftPM", () => {
+  // The same files build twice: as the SwiftPM module `PushCore`
+  // (native-tests/PushCoreTests) and as part of the extension's OWN module. A
+  // `PushCore.` qualifier resolves only in the first, so `swift test` passed
+  // while the device archive failed ("cannot find 'PushCore' in scope").
+  test("no source qualifies a name with the SwiftPM module name", () => {
+    const dir = new URL("../targets/notification-service/PushCore/", import.meta.url);
+    const offenders = readdirSync(dir)
+      .filter((f) => f.endsWith(".swift"))
+      .filter((f) =>
+        /\bPushCore\.\w/.test(readFileSync(new URL(f, dir), "utf8").replace(/\/\/.*$/gm, "")),
+      );
+    expect(offenders).toEqual([]);
   });
 });

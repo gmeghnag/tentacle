@@ -164,7 +164,7 @@ final class PushCoreTests: XCTestCase {
             let peerJSON = try XCTUnwrap(testCase["peer"] as? [String: Any])
             let peer = RenderPeer(computerName: try XCTUnwrap(peerJSON["computerName"] as? String))
             let expected = try XCTUnwrap(testCase["expected"] as? [String: Any], name)
-            let rendered = render(message, peer: peer)
+            let rendered = renderMessage(message, peer: peer)
             XCTAssertEqual(rendered.title, expected["title"] as? String, "\(name).title")
             XCTAssertEqual(rendered.subtitle, expected["subtitle"] as? String, "\(name).subtitle")
             XCTAssertEqual(rendered.body, expected["body"] as? String, "\(name).body")
