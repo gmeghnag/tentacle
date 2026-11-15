@@ -1472,6 +1472,32 @@ final report (`agent.ts:1590`) is not consumed by `markVoice`. On a non-voice
 turn, that report therefore lacks the spoken line. The first 400 response body
 is never read or cancelled.
 
+### C3 review, round 2 · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: PASS (APPROVE)**: no HIGH or MEDIUM. Scope: C3, `git diff main...HEAD`,
+focused on commit `879be7ea` (the round-1 fixes). The reviewer is the same model as
+round 1, in a fresh context, and a different family from the deepseek executor.
+
+- **Finding 1 (F9 latch) is fixed.** `openai-provider.ts:232` is now
+  `reasoningSwitchesRefused = res.ok`, set after the switch-free retry. The
+  rejected body is cancelled (`discardBody`, `:228`).
+- **The LOW is fixed.** `markVoice()` is called before the hand-built
+  `max_iterations` report (`agent.ts:1597`). The spoken line rides only on
+  `finalMessages`, never on `messages`, so F10 holds.
+- **Gate.** The 7 C3 test files: 31 pass, 0 fail. `bun run lint`: 1634 files, 0
+  findings. `bun run typecheck`: clean. Full `bun test` was not re-run here.
+- **Mutations** (each reverted from a scratch copy; `git status` clean afterwards):
+  - Latch back to `true`: RED, 1 fail (`reasoning-off.test.ts`).
+  - Drop `discardBody`: RED, 1 fail.
+  - Drop only the report's `markVoice()`: RED, 1 fail (`voice-turn.test.ts`).
+- **Attacks that found nothing.**
+  - A retry that answers 5xx leaves the latch false, so the next turn tries the
+    switches again. Correct.
+  - The latch is written only when `wantOff` was true, so it can never be reset
+    from a state that was already latched.
+  - Every `steering` mutation still drains `voiceMarks` in step
+    (`session.ts:180-181,290-291,307-308`).
+
 #### Owner answers (2026-11-15, batch 1)
 
 - Q1 order: **yes** — spike now, code after V1 (`feat/voice-dictation`) and `feat/mobile-voice` merge; a language with no on-device recognizer has no voice mode, never cloud.
