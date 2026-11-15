@@ -1444,3 +1444,72 @@ text is unchanged. L0–L12 are still 0 of 13.
   identified. Each round is accurate, but `main` keeps moving and the count goes
   stale each time. Merging or re-cutting is the only step that ends the loop
   (AGENTS §0, "escalate, don't spin").
+
+## Review
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES.** This is the first review of the code (`de134ba5`).
+The earlier rounds reviewed only the doc. The crypto, protocol, relay, store and
+pure rules look sound. But the daemon wiring that feeds the rules (L7, which is
+load-bearing) breaks the start rule's attached-device condition and never
+reloads registrations. A scratch repro (`.tentacle/tmp/mobile-live-activity/review/repro.ts`,
+real `createLiveActivityNotifier`) showed both.
+
+**Gate (narrow + static).** `bun run lint`: 1627 files, clean. `bun run typecheck`:
+clean. The 26 touched test files: 538 pass, 0 fail. I did not re-run the full
+`bun test`.
+
+**Findings**
+1. **HIGH: the start rule ignores whether a device is attached**
+   (`packages/daemon/src/live-activity-notifier.ts:419`, `:444`;
+   `live-activity-rules.ts:553`). The rules store no attached set. The timer's
+   `tick` passes `new Set()`. An `attachment` event from session X applies X's
+   attached devices to every session's turns. `permission_request` calls
+   `startFor` with no attached check at all. Repro: device D is attached to S;
+   after 21 s the timer ticks and D gets `["start"]`. An ask while D is attached
+   also gives `["start"]`. This violates the start rule and F16: the phone that
+   is open on the session still gets a lock-screen activity.
+2. **HIGH: registrations are read once, then never again**
+   (`live-activity-notifier.ts:202`, `:520`). `registrationsLoaded` is never
+   reset, and `registerLiveActivity` (`session-host.ts:655`) does not notify the
+   notifier, even though its comment says it does. Repro: an event fires before
+   the phone registers, the phone then registers, and the turn passes 21 s:
+   0 deliveries. In practice, a phone that registers after `serve`'s first
+   session event never gets an activity until the daemon restarts. Turning the
+   switch back on is also never seen. The comment at `:223` ("read … at every
+   decision") is false.
+3. **MEDIUM: an APNs `gone` is not passed to the rules**
+   (`live-activity-notifier.ts:328-337`). Only the registration file is
+   compare-and-deleted. The rules never receive an `ended` event, so F17 (gone →
+   never restarted) and F18 (gone → one continuation start) are not built. After
+   the person dismisses an activity, heartbeats keep going to the dead token
+   every 10 min until the turn ends.
+4. **MEDIUM: F3 does not converge for a start that was dropped**
+   (`live-activity-notifier.ts:583-611`). The rules count the slot as live even
+   when the sink answered `unavailable`. `resendAll` then sends `event: "update"`
+   to the push-to-start token (`:272`). No activity ever appears for that turn on
+   that phone. The same thing happens to every update sent before an update
+   token is reported.
+
+**Mutation (§9).** I changed the `attachment` translation (`:444`) to pass
+`new Set()`. `live-activity-notifier`, `serve-live-activity` and `push-hook`
+still pass, 31/31. So no test checks finding 1 through the notifier (the rules
+test passes the attached set in by hand). I reverted it, and
+`git status --porcelain` is empty.
+
+**Attacks tried**
+- Device-method gate: `token`/`pairing` principals are refused
+  (`connection.ts:512-546`). Holds.
+- The hook stays synchronous: there is still ONE observer (the fan-out in
+  `serve.ts`), and the I/O runs in `queueMicrotask`. Holds.
+- `push.enabled:false` still answers `MethodNotFound`: the option is passed only
+  when its wiring exists. Holds.
+- The three findings above.
+- Minor (no effect on the verdict): `setLiveActivityToken` and `endLiveActivity`
+  do not check that the slot belongs to the calling device (`void deviceId`).
+
+**Executor.** It reported honestly that L10, L11 and L12 are PARTIAL or not
+started. Its Execution section is signed `claude-sonnet-4-5`, but the commit
+says "exec (deepseek)", so §10's attribution is unclear again. The reviewer and
+the plan author are the same model family.
