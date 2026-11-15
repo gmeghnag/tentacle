@@ -1,18 +1,21 @@
 /**
- * `Session` — the transcript screen (docs/feat/mobile-session-view.md 12c): a
- * virtualised `FlatList` of rows, the running indicator, the banners, a bottom
- * comma bar and the permission sheet (a native page-sheet `Modal`).
+ * `Session` — the chat (mockup `Conversation`, docs/feat/mobile-session-view.md
+ * 12c): a compact header (glass back, title, status line), a virtualised
+ * `FlatList` of rows that FOLLOWS the stream (B5), the banners, the queue and
+ * the composer, and the permission sheet (a native page-sheet `Modal`).
  *
  * A DUMB renderer over `session-view.ts`'s value and `session-screen-controller.ts`'s
  * controller (AGENTS §7): every decision — the banner's text, whether Reopen or
- * Retry is offered, what the one button does, the age guard on the sheet — lives
- * in those modules, which are unit-tested without a simulator.
+ * Retry is offered, what the one button does, the age guard on the sheet, the
+ * header's status word (`chat-header.ts`), whether the list follows
+ * (`follow.ts`) — lives in those modules, unit-tested without a simulator.
  *
  * `testID`s are the contract the Maestro flows assert on (text is invisible to
  * XCUITest under RN's new architecture, plan P9): `session-view`, `row-<key>`,
  * `tool-<callId>-<status>`, `diff-<callId>`, `turn-running`, `turn-idle`,
  * `composer-input`, `composer-send`, `composer-stop`, `banner-<kind>`,
- * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`.
+ * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`, `session-back`,
+ * `jump-latest`.
  */
 import { type ComponentRef, type JSX, useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -21,19 +24,29 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   Linking,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   Platform,
   Pressable,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { chatStatus } from "../chat-header.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
+import { type Follow, contentGrew, initialFollow, jumpPill, jumped, scrolled } from "../follow.ts";
 import { linkPrompt } from "../links.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
-import type { Palette } from "../theme.ts";
+import { DENSE_FONT_SCALE, type Palette, typography } from "../theme.ts";
 import type { Row } from "../transcript-rows.ts";
+import { Banner } from "../ui/Banner.tsx";
+import { Composer } from "../ui/Composer.tsx";
+import { EmptyState } from "../ui/EmptyState.tsx";
+import { GlassButton } from "../ui/GlassButton.tsx";
+import { Icon, type IconName } from "../ui/Icon.tsx";
+import { ScreenHeader } from "../ui/ScreenHeader.tsx";
+import { StatusDot } from "../ui/StatusDot.tsx";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
@@ -42,9 +55,35 @@ import { TranscriptRow } from "./transcript/TranscriptRow.tsx";
 export interface SessionScreenProps {
   readonly palette: Palette;
   readonly controller: SessionScreenController;
+  /** The session's title (the compact header). */
+  readonly title: string;
+  /** Present only when the stack can go back. */
+  readonly onBack?: () => void;
 }
 
-export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.Element {
+/** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
+const BANNER_LOOK: Readonly<
+  Record<
+    NonNullable<SessionScreenState["view"]["banner"]>["kind"],
+    { readonly tone: "warn" | "info" | "error"; readonly icon: IconName }
+  >
+> = {
+  reconnecting: { tone: "warn", icon: "wifi.slash" },
+  failed: { tone: "error", icon: "exclamationmark.triangle" },
+  timeout: { tone: "error", icon: "exclamationmark.triangle" },
+  "too-many": { tone: "error", icon: "exclamationmark.triangle" },
+  archived: { tone: "info", icon: "archivebox" },
+  deleted: { tone: "info", icon: "trash" },
+  ended: { tone: "info", icon: "checkmark.circle" },
+  "too-old": { tone: "info", icon: "clock" },
+};
+
+export function SessionScreen({
+  palette,
+  controller,
+  title,
+  onBack,
+}: SessionScreenProps): JSX.Element {
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
 
@@ -89,10 +128,50 @@ export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.
     },
   ).current;
 
-  // B1(b): `KeyboardAvoidingView` measures its frame relative to its PARENT, so
-  // under the native header it under-pads by the screen's distance from the
-  // window top. That distance is its `keyboardVerticalOffset`, measured here
-  // (it is 0 once the screen starts at the window top).
+  // B5: follow the stream. `follow.ts` decides; the screen only reports the
+  // scroll metrics (a DRAG is the person's) and performs `scrollToEnd`.
+  const list = useRef<FlatList<Row>>(null);
+  const followRef = useRef<Follow>(initialFollow);
+  const [follow, setFollow] = useState<Follow>(initialFollow);
+  const dragging = useRef(false);
+  const setFollowState = useCallback((next: Follow) => {
+    if (next !== followRef.current) {
+      followRef.current = next;
+      setFollow(next);
+    }
+  }, []);
+  const onScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+      setFollowState(
+        scrolled(
+          followRef.current,
+          {
+            offset: contentOffset.y,
+            content: contentSize.height,
+            viewport: layoutMeasurement.height,
+          },
+          dragging.current,
+        ),
+      );
+    },
+    [setFollowState],
+  );
+  const onContentSize = useCallback(() => {
+    const step = contentGrew(followRef.current);
+    setFollowState(step.state);
+    if (step.scrollToEnd) {
+      list.current?.scrollToEnd({ animated: true });
+    }
+  }, [setFollowState]);
+  const onJump = useCallback(() => {
+    setFollowState(jumped());
+    list.current?.scrollToEnd({ animated: true });
+  }, [setFollowState]);
+
+  // B1(b): `KeyboardAvoidingView` measures its frame relative to its PARENT. The
+  // screen now starts at the window top (no native header), so this offset is
+  // 0 — measured anyway, so a container that ever adds chrome above it stays right.
   const frame = useRef<ComponentRef<typeof View>>(null);
   const [offsetTop, setOffsetTop] = useState(0);
   const measureTop = useCallback(() => {
@@ -116,82 +195,167 @@ export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.
   const banner = state.view.banner;
   const rows = state.view.rows;
   const compose = state.compose;
+  const status = chatStatus({
+    phase: state.status.phase,
+    link: state.transcript.link,
+    running: state.view.composer.running,
+    closed: state.transcript.closed,
+  });
   // The decision sheet's own state (which item the person tapped, and why).
   const [deciding, setDeciding] = useState<string | null>(null);
   const decision =
     deciding === null ? null : (compose.outbox.find((r) => r.itemId === deciding) ?? null);
   return (
-    <View ref={frame} style={styles.screen} onLayout={measureTop}>
+    <View
+      ref={frame}
+      style={[styles.screen, { backgroundColor: palette.page }]}
+      onLayout={measureTop}
+    >
       <KeyboardAvoidingView
         testID="session-view"
-        style={[styles.screen, { backgroundColor: palette.groupedBackground }]}
+        style={styles.screen}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         keyboardVerticalOffset={offsetTop}
       >
-        {banner === null ? null : (
-          <View
-            testID={`banner-${banner.kind}`}
-            style={[styles.banner, { backgroundColor: palette.card }]}
-          >
-            <Text style={[styles.bannerText, { color: palette.secondaryLabel }]}>
-              {banner.text}
-            </Text>
-            {state.view.retry ? (
-              <Pressable
-                testID="banner-retry"
-                accessibilityRole="button"
-                onPress={() => controller.retry()}
+        <ScreenHeader
+          palette={palette}
+          variant="compact"
+          title={title}
+          left={
+            onBack === undefined ? undefined : (
+              <GlassButton
+                palette={palette}
+                testID="session-back"
+                icon="chevron.left"
+                accessibilityLabel="Back"
+                onPress={onBack}
+              />
+            )
+          }
+          subtitle={
+            <View style={styles.status} accessibilityLabel={status.text}>
+              <StatusDot palette={palette} tone={status.tone} size={6} />
+              <Text
+                maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                style={[typography.caption, { color: palette.sec }]}
               >
-                <Text style={[styles.bannerAction, { color: palette.accent }]}>Retry</Text>
-              </Pressable>
-            ) : null}
-            {state.view.reopen ? (
-              <Pressable
-                testID="reopen"
-                accessibilityRole="button"
-                onPress={() => controller.reopen()}
-              >
-                <Text style={[styles.bannerAction, { color: palette.accent }]}>Reopen</Text>
-              </Pressable>
-            ) : null}
-          </View>
-        )}
-        <FlatList
-          testID="transcript"
-          data={rows}
-          keyExtractor={(row: Row) => row.key}
-          renderItem={({ item }) => (
-            <TranscriptRow
-              row={item}
-              palette={palette}
-              onLink={onLink}
-              thumbnails={state.thumbnails}
-            />
-          )}
-          onViewableItemsChanged={onViewable}
-          viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
-          contentContainerStyle={styles.list}
-          ListEmptyComponent={
-            <Text
-              testID="transcript-empty"
-              style={[styles.empty, { color: palette.secondaryLabel }]}
-            >
-              {state.status.phase === "open" ? "Nothing here yet — say something below." : ""}
-            </Text>
+                {status.text}
+              </Text>
+            </View>
           }
         />
+        {banner === null ? null : (
+          <View testID={`banner-${banner.kind}`}>
+            <Banner
+              palette={palette}
+              {...BANNER_LOOK[banner.kind]}
+              body={banner.text}
+              {...(state.view.retry
+                ? {
+                    action: {
+                      label: "Retry",
+                      onPress: () => controller.retry(),
+                      testID: "banner-retry",
+                    },
+                  }
+                : state.view.reopen
+                  ? {
+                      action: {
+                        label: "Reopen",
+                        onPress: () => controller.reopen(),
+                        testID: "reopen",
+                      },
+                    }
+                  : {})}
+            />
+          </View>
+        )}
+        <View style={styles.screen}>
+          <FlatList
+            ref={list}
+            testID="transcript"
+            data={rows}
+            keyExtractor={(row: Row) => row.key}
+            renderItem={({ item }) => (
+              <TranscriptRow
+                row={item}
+                palette={palette}
+                onLink={onLink}
+                thumbnails={state.thumbnails}
+              />
+            )}
+            onViewableItemsChanged={onViewable}
+            viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
+            contentContainerStyle={rows.length === 0 ? styles.emptyList : styles.list}
+            keyboardDismissMode="interactive"
+            keyboardShouldPersistTaps="handled"
+            onScroll={onScroll}
+            scrollEventThrottle={32}
+            onScrollBeginDrag={() => {
+              dragging.current = true;
+            }}
+            onScrollEndDrag={() => {
+              dragging.current = false;
+            }}
+            onMomentumScrollBegin={() => {
+              dragging.current = true;
+            }}
+            onMomentumScrollEnd={() => {
+              dragging.current = false;
+            }}
+            onContentSizeChange={onContentSize}
+            ListEmptyComponent={
+              <View testID="transcript-empty">
+                {state.status.phase === "open" ? (
+                  <EmptyState
+                    palette={palette}
+                    icon="bubble.left"
+                    title="Nothing here yet"
+                    body="Say something below."
+                  />
+                ) : state.status.phase === "opening" ? (
+                  <EmptyState palette={palette} loading title="Opening the session…" />
+                ) : null}
+              </View>
+            }
+          />
+          {jumpPill(follow) ? (
+            <Pressable
+              testID="jump-latest"
+              accessibilityRole="button"
+              accessibilityLabel="Jump to latest"
+              onPress={onJump}
+              style={[
+                styles.jump,
+                {
+                  backgroundColor: palette.glass,
+                  borderColor: palette.glassBorder,
+                  shadowOpacity: palette.shadowOpacity,
+                },
+              ]}
+            >
+              <Icon name="arrow.down" color={palette.accent} size={14} weight="bold" />
+              <Text style={[typography.footnote, { color: palette.accent, fontWeight: "600" }]}>
+                {follow.unseen ? "New messages" : "Jump to latest"}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
         {/* ONE element, two ids: `turn-running` while a turn streams (own or
-          another device's) and `turn-idle` otherwise. It is always on screen —
-          `display: none` would make it invisible to XCUITest and the flows could
-          not use the flip as an observable (plan P9). */}
+          another device's) and `turn-idle` otherwise. It is always on screen as
+          a zero-size observable — `display: none` would hide it from XCUITest
+          (plan P9); the visible "running" cue is the header's status line. */}
         <Text
           testID={state.view.composer.running ? "turn-running" : "turn-idle"}
-          style={[styles.indicator, { color: palette.running }]}
+          style={styles.observable}
         >
-          {state.view.composer.running ? "working…" : " "}
+          {" "}
         </Text>
         {state.notice === null ? null : (
-          <Text testID="composer-notice" style={[styles.notice, { color: palette.danger }]}>
+          <Text
+            testID="composer-notice"
+            style={[typography.footnote, styles.notice, { color: palette.red }]}
+          >
             {state.notice}
           </Text>
         )}
@@ -205,6 +369,8 @@ export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.
           view={{ queued: compose.queued, returnedOthers: compose.returnedOthers }}
           palette={palette}
           onTake={(id) => void controller.take(id)}
+          sendNow={compose.sendNow}
+          onSendNow={() => void controller.sendNow()}
         />
         <OutboxRows rows={compose.outbox} palette={palette} onDecide={setDeciding} />
         <Chips
@@ -212,93 +378,35 @@ export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.
           palette={palette}
           onRemove={(key) => void controller.removeChip(key)}
         />
-        <View
-          style={[
-            styles.composer,
-            {
-              backgroundColor: palette.card,
-              borderTopColor: palette.separator,
-              paddingBottom: bottomPadding,
-            },
-          ]}
-        >
-          <Pressable
-            testID="composer-photo"
-            accessibilityRole="button"
-            accessibilityLabel="Add a photo"
-            onPress={() =>
-              Alert.alert("Add a photo", undefined, [
-                { text: "Cancel", style: "cancel" },
-                { text: "Library", onPress: () => void controller.pickPhoto("library") },
-                { text: "Camera", onPress: () => void controller.pickPhoto("camera") },
-              ])
-            }
-            style={styles.sideButton}
-          >
-            <Text style={[styles.sideLabel, { color: palette.accent }]}>＋</Text>
-          </Pressable>
-          <TextInput
-            testID="composer-input"
-            style={[styles.input, { color: palette.label }]}
-            value={state.draft}
-            onChangeText={(text) => controller.setDraft(text)}
-            placeholder={state.view.editable ? "Message tentacle" : "This session has ended"}
-            placeholderTextColor={palette.secondaryLabel}
-            editable={state.view.editable}
-            multiline
-            // B2 (owner Q1): Return SENDS — the key reads "Send"; a newline only by
-            // pasting. What it does is `returnKeyAction`'s (never a Stop).
-            submitBehavior="submit"
-            returnKeyType="send"
-            onSubmitEditing={() => controller.pressReturn()}
-          />
-          {/* Maestro cannot read the field's text (P9): this is how a flow proves
-            the field is NOT empty (a hand-back, a Take, an Edit). */}
-          {state.draft === "" ? null : (
-            <Text testID="composer-filled" style={styles.hidden}>
-              {""}
-            </Text>
-          )}
-          {compose.sendNow ? (
-            <Pressable
-              testID="composer-send-now"
-              accessibilityRole="button"
-              onPress={() => void controller.sendNow()}
-              style={styles.sideButton}
-            >
-              <Text style={[styles.sideLabel, { color: palette.accent }]}>⇥</Text>
-            </Pressable>
-          ) : null}
-          <Pressable
-            testID={
-              state.view.composer.button === "stop"
-                ? "composer-stop"
-                : state.view.composer.button === "send-later"
-                  ? "composer-send-later"
-                  : "composer-send"
-            }
-            accessibilityRole="button"
-            disabled={state.view.composer.button === "disabled"}
-            onPress={() => controller.press()}
-            style={[
-              styles.button,
-              { backgroundColor: palette.accent },
-              state.view.composer.button === "disabled" ? styles.dimmed : undefined,
-            ]}
-          >
-            <Text style={[styles.buttonLabel, { color: palette.onAccent }]}>
-              {state.view.composer.button === "stop"
-                ? "■"
-                : state.view.composer.button === "queue"
-                  ? "↳"
-                  : "↑"}
-            </Text>
-          </Pressable>
-        </View>
+        <Composer
+          palette={palette}
+          draft={state.draft}
+          editable={state.view.editable}
+          placeholder={state.view.editable ? "Message tentacle" : "This session has ended"}
+          button={state.view.composer.button}
+          onChange={(text) => controller.setDraft(text)}
+          // Acting from the composer is looking at the end: follow again (B5).
+          onReturn={() => {
+            setFollowState(jumped());
+            controller.pressReturn();
+          }}
+          onPress={() => {
+            setFollowState(jumped());
+            controller.press();
+          }}
+          onPhoto={() =>
+            Alert.alert("Add a photo", undefined, [
+              { text: "Cancel", style: "cancel" },
+              { text: "Photo Library", onPress: () => void controller.pickPhoto("library") },
+              { text: "Camera", onPress: () => void controller.pickPhoto("camera") },
+            ])
+          }
+          bottomPadding={bottomPadding}
+        />
         {state.view.composer.photosNotice === null ? null : (
           <Text
             testID="composer-photos-notice"
-            style={[styles.notice, { color: palette.secondaryLabel }]}
+            style={[typography.footnote, styles.notice, { color: palette.sec }]}
           >
             {state.view.composer.photosNotice}
           </Text>
@@ -322,46 +430,25 @@ export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
-  list: { paddingVertical: 8, paddingBottom: 24 },
-  banner: {
+  list: { paddingTop: 8, paddingBottom: 16 },
+  emptyList: { flexGrow: 1, justifyContent: "center" },
+  status: { flexDirection: "row", alignItems: "center", gap: 5 },
+  jump: {
+    position: "absolute",
+    alignSelf: "center",
+    bottom: 12,
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-  },
-  bannerText: { flex: 1, fontSize: 13 },
-  bannerAction: { fontSize: 15, fontWeight: "600" },
-  empty: { padding: 24, textAlign: "center", fontSize: 14 },
-  indicator: { paddingHorizontal: 16, paddingBottom: 4, fontSize: 12, minHeight: 16 },
-  notice: { paddingHorizontal: 16, paddingBottom: 4, fontSize: 12 },
-  composer: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  input: { flex: 1, fontSize: 16, maxHeight: 120, minHeight: 36, paddingVertical: 6 },
-  button: {
-    width: 36,
-    height: 36,
+    gap: 6,
+    minHeight: 36,
+    paddingHorizontal: 14,
     borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
+    borderWidth: StyleSheet.hairlineWidth * 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowRadius: 12,
   },
-  dimmed: { opacity: 0.4 },
-  buttonLabel: { fontSize: 18, fontWeight: "600" },
-  sideButton: {
-    width: 28,
-    height: 36,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  sideLabel: { fontSize: 20 },
-  // `composer-filled` is an OBSERVABLE, not decoration: zero-size keeps the row
-  // where it was (an empty <Text> would measure 0×0 and shift nothing, but a
-  // visible glyph would move the field — P9's contract needs the id only).
-  hidden: { width: 0, height: 0, fontSize: 0 },
+  notice: { paddingHorizontal: 16, paddingBottom: 6 },
+  // The turn observable: on screen (XCUITest sees it), takes no room.
+  observable: { width: 0, height: 0, fontSize: 0 },
 });

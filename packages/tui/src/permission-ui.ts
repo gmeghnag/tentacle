@@ -48,17 +48,21 @@ export interface PermissionChoice {
 /**
  * Whether auto-accept (Shift+Tab) may answer `req`. Never a project-hooks
  * trust request (docs/feat/hooks-project-trust.md): trusting a repo's code is
- * a human decision, not a tool call to wave through. Never a session-hop
- * request either (docs/feat/session-hop.md D9/H2): a move is the owner's
- * decision, and its whole point is that no standing approval carries across it.
- * Never a request of a
+ * a human decision, not a tool call to wave through. Never a request of a
  * turn that is not `own` — another device's turn (owner Q3,
  * docs/feat/tui-foreign-turns.md C5), or, on a trusted `serve` daemon, one of
  * the session's own wake turns, which `autoAcceptsTurn` accepts
  * (docs/fix/autoaccept-wake-turns.md).
+ *
+ * A session-hop request: ONLY when the laptop's own rule marked it `hopAuto`
+ * (docs/feat/session-hop-ux OD4, which supersedes session-hop D9). The marker is
+ * set by `hopPromptRequest` from `hopAutoAcceptable` — never by a daemon, and
+ * never for the mount gate's own `ask` — so the ONE exception (a move TOWARD
+ * LOCAL proposed from a pod/container, AGENTS §7) still reaches a human, and
+ * everything else moves without a prompt, logged `(auto-accepted)`.
  */
 export function autoApproves(req: PermissionRequest, own = true): boolean {
-  return own && req.kind !== "hooks_trust" && req.kind !== "session_hop";
+  return own && req.kind !== "hooks_trust" && (req.kind !== "session_hop" || req.hopAuto === true);
 }
 
 /**
@@ -206,6 +210,29 @@ export function buildPermissionChoices(req: PermissionRequest): PermissionChoice
   }
   if (req.kind === "session_hop") {
     return hopChoices(req);
+  }
+  // `workload_shell`'s "always" is scoped to the SINGLE workload
+  // (docs/feat/workload-shell.md D6), so its label says so — and with no
+  // derivable prefix there is nothing to scope, so no "always" is offered at
+  // all. Offering the session-wide wording here would read as broader than the
+  // rule; the rule being narrower than the label is the safe direction, but a
+  // label that is simply WRONG is not.
+  if (req.tool === "workload_shell") {
+    return [
+      { label: "Yes", response: { allowed: true, scope: "once" } },
+      ...(req.suggestion
+        ? [
+            {
+              label: `Yes, and don't ask again for \`${req.suggestion.prefix}\` commands on this workload`,
+              response: { allowed: true, scope: "session" as const },
+            },
+          ]
+        : []),
+      { label: "No", response: { allowed: false } },
+      ...(req.reply
+        ? [{ label: "No, let's talk about it", response: { allowed: false }, reply: true as const }]
+        : []),
+    ];
   }
   const always = req.suggestion
     ? `Yes, and don't ask again for \`${req.suggestion.prefix}\` commands`
@@ -422,8 +449,17 @@ export function usePermissionBroker(
       }
       const own = ownRequest(options?.turnId, ownsTurnRef.current?.());
       // Auto-accept mode: grant without prompting (not remembered — scope once).
+      // A HOP answer also carries `auto: true`, saying no human was asked, so the
+      // outcome line can say `(auto-accepted)` (docs/feat/session-hop-ux OD4) —
+      // and ONLY a hop: every other tool's answer keeps its long-standing shape
+      // (the tests, and the runtimes, compare it whole). Process-internal either
+      // way: the router sends only `optionId`/`message`.
       if (autoApproveRef.current && autoApproves(req, own)) {
-        return Promise.resolve({ allowed: true, scope: "once" });
+        return Promise.resolve({
+          allowed: true,
+          scope: "once",
+          ...(req.kind === "session_hop" ? { auto: true as const } : {}),
+        });
       }
       return new Promise<PermissionResponse>((resolve) => {
         const onAbort = (): void => {

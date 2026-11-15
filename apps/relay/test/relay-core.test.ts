@@ -8,6 +8,7 @@ import {
 import {
   RELAY_CLOSE_REFUSED,
   RELAY_LIMITS,
+  RELAY_PREAUTH_MS,
   RelayCore,
   type RelayEffect,
   type RelayLimits,
@@ -437,6 +438,150 @@ describe("RelayCore limits — each at its boundary (N ok, N+1 refused)", () => 
     // intact (the cap that matters is the id's, and the ip's is re-checked).
     clock.core.dial({ socket: "p4", ip: "198.51.100.4", id: ID });
     expect(clock.core.streamCount).toBe(4);
+  });
+});
+
+describe("RelayCore.admitPending — pre-auth sockets are capped and DIE (H2)", () => {
+  const ID = "fgkrQr2vTa2JTEe75Kl66v";
+
+  test("a silent pre-auth socket is closed 1008 after RELAY_PREAUTH_MS", () => {
+    // Today a pre-auth socket never expires: `sendPings: true` means a client
+    // that only answers pings is never idle, so it lives forever holding an fd
+    // and up to the backpressure buffer (repro P1: 100/100 still open).
+    const clock = makeCore();
+    expect(clock.core.admitPending({ socket: "c1", ip: "203.0.113.9" }).ok).toBe(true);
+    expect(clock.core.admitPending({ socket: "a1", ip: "203.0.113.9" }).ok).toBe(true);
+    // Not yet: the deadline is generous (the first frame goes out on open).
+    clock.advance(RELAY_PREAUTH_MS - 1);
+    expect(closes(clock.core.sweep())).toEqual([]);
+    clock.advance(1);
+    expect(closes(clock.core.sweep())).toEqual([
+      ["c1", 1008],
+      ["a1", 1008],
+    ]);
+    // Swept once: a second sweep does not close them again.
+    expect(closes(clock.core.sweep())).toEqual([]);
+  });
+
+  test("a socket that registered is NOT swept (a daemon lives forever)", () => {
+    const clock = makeCore();
+    expect(clock.core.admitPending({ socket: "c1", ip: "203.0.113.9" }).ok).toBe(true);
+    expect(clock.core.hello({ socket: "c1", ip: "203.0.113.9", v: 1, secret: secret(7) }).ok).toBe(
+      true,
+    );
+    clock.advance(RELAY_PREAUTH_MS * 10);
+    expect(closes(clock.core.sweep())).toEqual([]);
+  });
+
+  test("an accepted stream leg is settled too (its socket is no longer pre-auth)", () => {
+    const clock = makeCore();
+    clock.core.hello({ socket: "d1", ip: "203.0.113.5", v: 1, secret: secret(7) });
+    const dial = clock.core.dial({ socket: "p1", ip: "198.51.100.9", id: ID });
+    const stream = dial.ok && dial.state === "opened" ? dial.stream : "";
+    expect(clock.core.admitPending({ socket: "a1", ip: "198.51.100.9" }).ok).toBe(true);
+    expect(clock.core.accept({ socket: "a1", token: stream, v: 1 }).ok).toBe(true);
+    clock.advance(RELAY_PREAUTH_MS * 10);
+    expect(closes(clock.core.sweep())).toEqual([]);
+  });
+
+  test("a closed pre-auth socket releases its slot at once (no leak)", () => {
+    const clock = makeCore({ limits: { pendingPerIp: 1 } });
+    expect(clock.core.admitPending({ socket: "c1", ip: "203.0.113.9" }).ok).toBe(true);
+    expect(clock.core.admitPending({ socket: "c2", ip: "203.0.113.9" }).ok).toBe(false);
+    clock.core.pendingClosed("c1");
+    expect(clock.core.admitPending({ socket: "c3", ip: "203.0.113.9" }).ok).toBe(true);
+  });
+
+  test("the cap is per IP: a full bucket on one address does not refuse another", () => {
+    const clock = makeCore({ limits: { pendingPerIp: 1 } });
+    expect(clock.core.admitPending({ socket: "c1", ip: "203.0.113.9" }).ok).toBe(true);
+    expect(clock.core.admitPending({ socket: "c2", ip: "203.0.113.9" }).ok).toBe(false);
+    expect(clock.core.admitPending({ socket: "c3", ip: "198.51.100.4" }).ok).toBe(true);
+  });
+
+  test("a full 64-accept burst from ONE ip is admitted at the defaults", () => {
+    // A daemon that re-registers releases up to `streamsPerId` (64) held phones
+    // at once, so its accept legs arrive as one burst from one address — and
+    // none of them may be refused (`pendingPerIp` is 2× that by design).
+    const clock = makeCore();
+    clock.core.hello({ socket: "d1", ip: "203.0.113.5", v: 1, secret: secret(7) });
+    for (let i = 0; i < RELAY_LIMITS.streamsPerId; i++) {
+      clock.core.dial({ socket: `p${i}`, ip: `10.0.0.${i + 1}`, id: ID });
+    }
+    const admitted = Array.from(
+      { length: RELAY_LIMITS.streamsPerId },
+      (_, i) => clock.core.admitPending({ socket: `a${i}`, ip: "198.51.100.9" }).ok,
+    );
+    expect(admitted.filter(Boolean)).toHaveLength(RELAY_LIMITS.streamsPerId);
+    expect(RELAY_LIMITS.pendingPerIp).toBeGreaterThanOrEqual(2 * RELAY_LIMITS.streamsPerId);
+  });
+});
+
+describe("RelayCore.ping — a rate limit after ready, nothing before it (M1)", () => {
+  test("the third ping in the minute closes the socket (a pong is not free)", () => {
+    const clock = makeCore({ limits: { pingsPerMinute: 2 } });
+    clock.core.hello({ socket: "d1", ip: "203.0.113.5", v: 1, secret: secret(7) });
+    expect(sent(clock.core.ping({ socket: "d1" }))).toEqual([{ t: "pong" }]);
+    expect(sent(clock.core.ping({ socket: "d1" }))).toEqual([{ t: "pong" }]);
+    expect(closes(clock.core.ping({ socket: "d1" }))).toEqual([["d1", 1008]]);
+    // Past its minute, the socket may ping again (a real daemon pings at 25 s).
+    clock.advance(60_000);
+    expect(sent(clock.core.ping({ socket: "d1" }))).toEqual([{ t: "pong" }]);
+  });
+
+  test("the window is per socket: one flooding daemon does not silence another", () => {
+    const clock = makeCore({ limits: { pingsPerMinute: 1 } });
+    clock.core.hello({ socket: "d1", ip: "203.0.113.5", v: 1, secret: secret(7) });
+    clock.core.hello({ socket: "d2", ip: "203.0.113.6", v: 1, secret: secret(8) });
+    expect(sent(clock.core.ping({ socket: "d1" }))).toEqual([{ t: "pong" }]);
+    expect(closes(clock.core.ping({ socket: "d1" }))).toEqual([["d1", 1008]]);
+    expect(sent(clock.core.ping({ socket: "d2" }))).toEqual([{ t: "pong" }]);
+  });
+});
+
+describe("RelayCore.hello — registered ids per IP (M2)", () => {
+  test("a second NEW id from one ip is refused `busy`; an existing one may return", () => {
+    // `registeredIds` is GLOBAL (10 000). With real per-client IPs one address
+    // can fill it in ~17 h at the per-IP rate, and a few hundred addresses in
+    // minutes — after which every new daemon gets `busy`.
+    const clock = makeCore({ limits: { registeredPerIp: 1, hellosPerMinutePerIp: 99 } });
+    expect(clock.core.hello({ socket: "d1", ip: "203.0.113.5", v: 1, secret: secret(7) }).ok).toBe(
+      true,
+    );
+    const second = clock.core.hello({ socket: "d2", ip: "203.0.113.5", v: 1, secret: secret(8) });
+    expect(second.ok).toBe(false);
+    expect(sent(second.effects)).toEqual([{ t: "error", code: "busy", supported: [1] }]);
+    // A different address is unaffected.
+    expect(clock.core.hello({ socket: "d3", ip: "198.51.100.4", v: 1, secret: secret(9) }).ok).toBe(
+      true,
+    );
+    // The SAME id coming back is always admitted (F15: a restart is never locked out).
+    expect(clock.core.hello({ socket: "d1b", ip: "203.0.113.5", v: 1, secret: secret(7) }).ok).toBe(
+      true,
+    );
+  });
+
+  test("the count returns on close, and on replacement exactly ONCE (either order)", () => {
+    const clock = makeCore({ limits: { registeredPerIp: 1, hellosPerMinutePerIp: 99 } });
+    const ip = "203.0.113.5";
+    expect(clock.core.hello({ socket: "a1", ip, v: 1, secret: secret(7) }).ok).toBe(true);
+    // Replace: a1 is closed by the relay, a2 now owns the id.
+    expect(clock.core.hello({ socket: "a2", ip, v: 1, secret: secret(7) }).ok).toBe(true);
+    // a1's own close arrives late and must not decrement a second time.
+    clock.core.controlClosed("a1");
+    expect(clock.core.hello({ socket: "b1", ip, v: 1, secret: secret(8) }).ok).toBe(false);
+    // The real close of the live socket DOES give the slot back.
+    clock.core.controlClosed("a2");
+    expect(clock.core.hello({ socket: "b1", ip, v: 1, secret: secret(8) }).ok).toBe(true);
+  });
+
+  test("the reverse order (old socket closes first) also decrements once", () => {
+    const clock = makeCore({ limits: { registeredPerIp: 1, hellosPerMinutePerIp: 99 } });
+    const ip = "203.0.113.5";
+    expect(clock.core.hello({ socket: "a1", ip, v: 1, secret: secret(7) }).ok).toBe(true);
+    clock.core.controlClosed("a1");
+    expect(clock.core.hello({ socket: "b1", ip, v: 1, secret: secret(8) }).ok).toBe(true);
+    expect(clock.core.hello({ socket: "b2", ip, v: 1, secret: secret(9) }).ok).toBe(false);
   });
 });
 

@@ -329,7 +329,9 @@ suite DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305, single-shot:
   429 → `throttled`. Other 4xx → `rejected` + reason. 5xx/timeout →
   `unavailable`. 403 `ExpiredProviderToken` → refresh the JWT and retry once.
 - Abuse limits (pure, in `relay-core.ts`, defaults overridable): per relay id
-  120 pushes/min, per token 30/min, payload ≤ 4096 bytes after templating. A
+  120 pushes/min, **relay-wide** per device token 30/min (one token has one
+  budget, whatever id pushes to it or reconnects), payload ≤ 4096 bytes after
+  templating. A
   `push` from a socket that has not completed `hello` is refused (only a
   registered id may push, as only it may receive streams).
 
@@ -341,6 +343,12 @@ suite DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305, single-shot:
   synchronous, wrapped in `try/catch` (a bug is reported, never thrown into the
   turn), and never awaited. `Attachment.deviceId?` is set by `Connection` from
   its principal. Absent option = today's behaviour exactly.
+  **It is also called on attach and detach** (from `attach` / `detach`, next to
+  `removeAttachment`, `hosted-session.ts:1538` / `:1602`) and the notifier feeds
+  that in as `PushEvent {type:"attachment"}`. The exclusion is read at the
+  DEADLINE, so without this event a phone locked mid-grace still looks attached
+  and the ask is never pushed (F17, fix round 1). The event carries no ask and
+  pushes nothing itself.
 - **`PushNotifier`** (one per `serve`, given through `SessionHostOptions` like
   the persister; absent elsewhere). It feeds the hook into `push-rules`, owns
   the timers (an injected `setTimeout` for tests), and builds a `PushMessage`.
@@ -436,16 +444,16 @@ merges, if the owner wants overlap (one branch at a time still holds: they ride
 | F7 | **Relay hostile: replays an old push** | The plaintext `id` is deduped by the NSE (seen-set in the app group), and `at` older than 24 h is discarded (task 17). An `ask` replayed after it was answered: Approve hits `PermissionNotPending` (`hosted-session.ts:1112-1117`). No effect. |
 | F8 | **Relay hostile: drops / delays** | Undetectable by design (APNs gives no delivery receipt either). Bounded by `apns-expiration`. The pending ask is the source of truth. |
 | F9 | **Relay hostile: tampers with `aps`** (alert text, removes `mutable-content`) | Without `mutable-content` the NSE does not run and iOS shows the relay's text. A malicious relay can show arbitrary text under the app's name, which it could do anyway with the APNs key. **No action is possible**: actions come from the category the NSE sets after a successful open (task 17). Recorded as accepted metadata/UX risk. |
-| F10 | **Third party abuses the relay to spam a token** | It needs a registered relay id (any secret will do) AND the device token. The token only travels phone → paired daemon (inside Noise) → relay. Bounded by per-token 30/min and per-id 120/min, and content is only placeholders. Accepted. |
+| F10 | **Third party abuses the relay to spam a token** | It needs a registered relay id (any secret will do) AND the device token. The token only travels phone → paired daemon (inside Noise) → relay. Bounded by per-token 30/min (**relay-wide**: registering more ids or reconnecting one buys no extra budget) and per-id 120/min, and content is only placeholders. Accepted. |
 | F11 | **APNs token rotates / app reinstalled** | The app re-registers on the next connect (hash differs). A stale token → APNs 410 → `gone` → compare-and-delete. Converges on the current token. |
 | F12 | **Device push key rotation** | Re-register with the new key. The file is replaced atomically. Pushes sealed to the old key in flight fail to open (placeholder only). |
 | F13 | **Computer identity reset** (`devices reset`) | The registry is emptied and `push/` too. No pushes. Phones re-pair and re-register (and the relay id rotates, task 15 Q5). |
 | F14 | **Device revoked** | `removeDevices` deletes `push/<id>.json`. The push-time authority check also filters it within ≤ 1 s, even if a daemon re-wrote the file in a race (register on a socket that revoke is closing). |
 | F15 | **APNs key rotation on the relay** (owner revokes/replaces `.p8`) | Runbook: install the new key, restart. In-flight requests fail `rejected`/`unavailable`. The daemon audits and drops (F2 path). JWT refresh every 40 min, and a forced refresh on `ExpiredProviderToken`. |
 | F16 | **Version skew** | Old daemon + new app: `MethodNotFound` → Settings says "update tentacle on <computer>". New daemon + old app: never registers → no push. New daemon + old relay: F4. NSE older than the daemon's `v`/`kind`: placeholder (task 17). No `PROTOCOL_VERSION` move (additive). Unknown `push/<id>.json` `v`: that device is not pushed, the file is untouched, one audit line. |
-| F17 | **App backgrounded** | The foreground gate closes the socket → detach → the device is no longer "attached". Pushes now reach it. Correct by construction: "attached" = foreground on that session. |
+| F17 | **App backgrounded** | The foreground gate closes the socket → detach. The daemon reports attach/detach to the rules as their own event (`PushEvent{type:"attachment"}`), so "attached" is read at the DEADLINE and a phone locked mid-grace is pushed to (fix round 1 finding 1; a detach carried no event before, and the ask ended `push-empty` and never pushed). |
 | F18 | **App killed** | The OS closes the socket (or the relay ping does). Same as F17. APNs delivery does not need the app running. The NSE runs on its own (task 17). |
-| F19 | **Ask answered exactly at grace expiry** | `settle` and the timer callback both run on the event loop. Whichever runs first wins. If the timer ran first and pushed, the settle sends `ask_resolved` with the same collapse id, which replaces the banner. Never a stale actionable banner left behind. |
+| F19 | **Ask answered exactly at grace expiry** | `settle` and the timer callback both run on the event loop. Whichever runs first wins. If the timer ran first and pushed, the settle sends `ask_resolved` with the same collapse id, which replaces the banner — but only when it is the LAST ask under that banner (fix round 1 finding 2): a fold puts several asks under one id, and resolving on the first settle told the phone "answered on another device" while a sibling still blocked the turn. So: never a stale actionable banner left behind, and never a false "answered". |
 | F20 | **Many asks / a loop** | Folding plus caps (Design 1). At most one push per session per 10 s per device, with "+N more". `push-capped` is audited. |
 | F21 | **Daemon restart with an ask pending** | Timers are not persisted. The reload re-asks (a new `requestId`, `docs/feat/suspended-turn-resume.md`), which starts a fresh grace and may push again. Accepted: a new ask is a new notification. |
 | F22 | **Two daemons on one computer** | Each pushes only its own sessions' events, through its own relay link. Registrations are shared through `push/` (one file per device). |
@@ -907,6 +915,130 @@ load. To verify, run `bun test` a few times on a clean `main` worktree.
 
 *— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, fix round 1), 2026-11-14*
 
+### P2 + P3 — protocol: push wire + relay frames (DONE)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, P2 + P3), 2026-11-14*
+
+**Load-bearing check, re-run first: PASS.** Every `hosted-session.ts` citation
+still resolves, at the line numbers the P0 run recorded. `blockingUnsupported`
+returns `undefined` when `this.attachments.size === 0` (`:1084`); `recheckAsks`
+(`:1100`) is called from `attach` (`:1581`) and `detach` (`:1604`); `emit`
+(`:1960`) fans out to a copy of `attachments` and then calls
+`this.watchers.offer(params)` (`:1974`); `settle` (`:1148`) deletes, emits
+`permission_resolved` for a shown ask, and wakes the gate in a `finally`;
+`finishTurn` (`:2517`) sets state before its emit. Unchanged since P0, so the
+plan's central assumption holds and P2/P3 (pure protocol, which touch none of
+it) were implemented as written.
+
+**Files.** `packages/protocol/src/push.ts` (new, the whole P2 wire);
+`packages/protocol/src/methods.ts` (`Method.DevicePushRegister`,
+`Method.DevicePushUnregister` + their two registry entries);
+`packages/protocol/src/index.ts` (`export * from "./push.ts"`);
+`packages/protocol/schema/protocol.json` (regenerated, not hand-edited);
+`packages/protocol/test/push.test.ts` (new, 15 tests);
+`packages/protocol/test/json-schema.test.ts` (4 fixture entries — the export's
+"every method has a fixture" gate); `packages/protocol/src/relay.ts` (`push` /
+`push-result` frames + their schemas in all three unions, and the shared
+`RelayPushTokenSchema` / `RelayCollapseIdSchema`);
+`packages/protocol/test/relay.test.ts` (a new `describe("push frames")`, 9 tests);
+`changelog.d/mobile-push-protocol.added.md` (new).
+
+**P3 is smaller than planned, because R1 already stores what it needed.** The
+slice's own text allows this ("`ready.features` … skip `features` if R1 already
+has it"): task 15 shipped `features` on `ready` **and** `knownRelayFeatures` /
+`isRelayFeature` with `"push"` already in `RELAY_FEATURES`
+(`relay.ts:196-238`). So P3 adds only the two frames and the schemas that gate
+them. No `RELAY_PROTOCOL_VERSION` move: a `push` is gated by `features`, so an
+R2 relay never sees one.
+
+**Drift from the Implementation, and why.**
+1. **`fitPushMessage` is new, and it is the load-bearing addition of this
+   slice.** The plan said the schema's per-field caps plus "clip before
+   sealing" keep a push inside 4096 bytes; they do not — a worst-case message
+   with every field at its cap is ~14 KiB of UTF-8, which no 2048-byte bucket
+   can hold. So the wire gained one producer-side gate: `fitPushMessage`
+   returns the encoded plaintext, clipping through a 9-rung ladder (preview
+   first, ids last) until it fits `PUSH_PLAINTEXT_MAX_BYTES`. The plan's
+   worst-case test is therefore a property of the CODE, not of a comment.
+   `clipPushText` walks code points and drops lone surrogates and control
+   characters, so a clip can never produce something Swift's decoder refuses.
+2. **`PushEnvelope.c` is a regex alternation, not `.refine()`.** The exporter
+   rejects `ZodEffects` (`json-schema.ts`'s `SUPPORTED_KINDS`), and this
+   schema is on the exported wire, so the three-length bound had to be a plain
+   string constraint (`PUSH_CIPHERTEXT_RE`, pinned by
+   `PUSH_ENVELOPE_CIPHERTEXT_LENGTHS`).
+3. **`push-result.status` is a bounded FREE string, not the five-value enum.**
+   Same reason R1's review fixed `error.code` (`relay.ts:257-273`): a closed
+   enum makes a newer relay's new status a "malformed frame", which closes the
+   whole control socket — one unknown word would cost every push in flight and
+   the link's reachability with it. The daemon refuses the VALUE through P2's
+   `isPushDeliveryStatus`, so an unknown status drops one push. Pinned by a
+   dedicated test (mutation M7 below).
+4. **The token rule is written twice** (`PUSH_TOKEN_RE` in `push.ts`,
+   `RelayPushTokenSchema` in `relay.ts`) because the relay must not load the
+   RPC schemas. A test pins the two against one shared sample, so the
+   duplication cannot drift silently (mutation M9).
+5. **No `relayPushFrameOf` builder.** I drafted one, then dropped it: the
+   daemon's relay link (P8) owns `n`, the timeout and the `features` gate, and a
+   builder here would have been an unused second seam. The frames are plain
+   objects validated by their schemas.
+6. **`PUSH_PAD_BUCKETS` is declared in `push.ts`, not imported from
+   `push-seal.ts`** — the dependency runs transport → protocol, so importing it
+   would be a cycle. The duplication is pinned by a test
+   (`PUSH_PLAINTEXT_MAX_BYTES === maxPushPlaintextBytes()`), which is a stronger
+   guarantee than a comment.
+7. **The changelog is `changelog.d/mobile-push-protocol.added.md`, not
+   `mobile-push.added.md`.** One bullet per file is enforced by
+   `scripts/changelog.ts:120`; P1 already owns `mobile-push.added.md`, so a
+   second bullet there fails the guard (I hit exactly this in the first full
+   gate run, and split it).
+
+**Red before green.** `bun test packages/protocol/test/push.test.ts` on the
+unimplemented tree: `SyntaxError: Export named 'DEFAULT_PUSH_GRACE_SECONDS' not
+found` — 0 pass, 1 error. `bun test packages/protocol/test/relay.test.ts` after
+the P3 test and before the frames: `Export named 'RelayCollapseIdSchema' not
+found` — 0 pass, 1 error. Both are the assertion-bearing tests of the property
+(missing capability), not an incidental import typo: the exports are exactly the
+capability the slice adds.
+
+**Mutations (§9 non-vacuity — each applied to `src`, run, reverted; `git diff`
+empty afterwards, backups in `.tentacle/tmp/mobile-push/`):**
+
+| # | mutation | result |
+|---|---|---|
+| M1 | `clipPushText` cuts by UTF-16 `slice` instead of code points | **RED** "clipPushText cuts on code-point boundaries" (14 pass / 1 fail) |
+| M2 | `fitPushMessage` returns the message unclipped | **RED** (whole file fails: the thrown oversize error) |
+| M3 | `PushPayloadSchema` gains an `aps` field | **RED** "the payload is `{tp}`, and an `aps` … is STRIPPED" |
+| M4 | the register result's `graceSeconds` loses its 0..3600 bound | **RED** "the result says WHY, and the grace the daemon uses" |
+| M5 | `PUSH_TOKEN_RE` loosened to `/^.{64,200}$/` | **RED** "a bad token, env or key is InvalidParams" |
+| M6 | `push` dropped from `RelayControlFrameSchema` | **RED** "daemon → relay `push` round-trips through both unions" |
+| M7 | `push-result.status` becomes a closed 5-value enum | **RED** "an unknown `status` PARSES but is not a known one" |
+| M8 | `push`'s `payload` gains `aps` | **RED** "an unknown field is stripped; `aps` … NOT fields at all" (after M8 first SURVIVED — see below) |
+| M9 | `RelayPushTokenSchema` loosened to `/^.{64,200}$/` | **RED** "every field is validated" + "the token and collapse-id schemas agree" |
+| M10 | `pushCollapseIdOf` ignores its `key` | **RED** "a collapse id is opaque, header-safe and ≤ 64 bytes" |
+| M11 | `pushCollapseIdOf` does not truncate to 64 | **RED** same test + "every field is validated" |
+
+**M8 first SURVIVED, and that is the useful result: the test was weak.** It
+sent `aps` at the frame's top level only — the tempting place is
+*inside* `payload`, which is exactly where an APNs payload keeps its banner
+text. Strengthened to assert both levels; the mutation now goes RED. (M9's
+survival on its own was the same class: only a dedicated cross-layer test made
+it bite.)
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` → clean, exit 0.
+`bun run lint` → `Checked 1372 files in 397ms. No fixes applied.` (baseline
+clean, exit 0). `bun run schema:export` → regenerated `protocol.json` (never
+hand-edited). `bun test` → **9930 pass, 4 skip, 0 fail, 717 files**. The 4 skips
+are the documented opt-ins (live-k8s, live-docker, the ~12 s real-socket
+keepalive, and `confinement.test.ts`'s root-only case); this round adds none —
+checked with `rg 'test\.skip|\.skipIf'` and by running those three files alone
+(46 pass / 2 skip).
+
+**Unverified:** P8's end-to-end proof (a sealed envelope actually reaching a
+fake APNs through the relay link) and P4's `aps` template are other slices; the
+4096-byte joint bound here is pinned with the template inlined as a literal, so
+if P4's template differs in size that test must be re-derived against it.
+
 ## Review
 
 ### P0 + P1 (scope: `git diff main...HEAD`)
@@ -973,3 +1105,742 @@ load. To verify, run `bun test` a few times on a clean `main` worktree.
 
 *— claude-opus-5-5, 2026-11-14*
 
+
+### Review — P2 + P3 (fresh context)
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM finding; scope `git diff main...HEAD`, slices P2 + P3 only).
+
+**Gate (narrow).** `bun test` push/relay/json-schema/version tests: 78 pass / 0 fail. `bun run lint`: clean (1372 files). `bun run typecheck` (root + mobile + relay): clean.
+
+**Attacks tried.**
+1. *Ladder truncates ids* — `fitPushMessage` rungs 7–9 clip `sessionId` (32/16 B), `requestId` (24 B) and `optionId` (16 B), which would point a push at a wrong session or ask without any error. Probe (`.tentacle/tmp/mobile-push/ladder.ts`: every field at its cap, as `"` (JSON doubles them) and as 4-byte emoji, 8 options, real UUIDs) never got past rung 6: max 2012 B, ids intact, output passes `PushMessageSchema`. Unreachable with daemon-made UUIDs → nit N1, not a finding.
+2. *A `push` reaching an R2 relay / a `push-result` reaching an R4 daemon* — `server.ts:395` still closes on `push` (`control-unexpected`). `relay-link.ts` ignores a parsed `push-result` (it falls through). Both are gated by `ready.features` (P8). No regression.
+3. *Frame size* — the worst push frame is about 3.1 Ki chars, far below `RELAY_CONTROL_LIMITS.maxFrameChars` (96 Ki). No oversize close.
+4. *Strict vs strip / forward compat* — every new payload is a strip object. `push-result.status` is a free bounded string, refused by value (`isPushDeliveryStatus`). Matches the v10 rule.
+5. *Mutation non-vacuity* — this session's permissions blocked my own mutation runs (the in-place edit script). Static check instead: tests pin the ciphertext length (`push.test.ts:238,242`, `relay.test.ts:564`), the ttl bounds (`relay.test.ts:554-557`) and control-char clipping (`push.test.ts:118`). The executor's M1–M10 table is accepted but **not re-run by me**. To verify: run `.tentacle/tmp/mobile-push/rv3-mut.sh` from the worktree root.
+
+**Nits (LOW).**
+- N1 `packages/protocol/src/push.ts:405-440` (rungs 8–9): clipping an id gives a *wrong* id, not a shorter one. Better to fail loud (throw, or drop `ask`) than to clip `requestId`/`sessionId`/`optionId`.
+- N2 `packages/protocol/src/relay.ts:295-300` gives a false reason for duplicating the token regex ("the relay must not load the RPC schemas"). `relay.ts` now imports `push.ts`, and `apps/relay` imports the whole `@tentacle/protocol` index (`server.ts:31`). The pin test holds, so the duplication is harmless, but the comment is wrong.
+- N3 `packages/protocol/test/push.test.ts:193`: `APS.slice(7)` keeps the outer `}`, so `body` is not valid JSON. It is one byte over, so the ≤ 4096 bound still holds, but the check would be stronger with `JSON.parse(body)`.
+
+**Executor behaviour.** The drift is documented honestly and justified (`fitPushMessage`, the regex instead of `.refine`, the free `status`). Red-first is recorded. No out-of-scope edits in P2/P3.
+
+*Same model family as some earlier reviews, but a different family from the executor (DeepSeek).*
+
+*— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### P4 — relay APNs (`apns.ts` + `apns-client.ts` + core limits + `push` handling) — DONE
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, P4), 2026-11-14*
+
+**Load-bearing check, re-run first: PASS.** `.tentacle/tmp/mobile-push/p4-load-bearing.ts`
+(scratch, in this worktree) answers the three questions this slice stands on,
+before any edit:
+
+```
+Q1 push parses: true | push-result parses: true | RELAY_FEATURES: ["push"]
+Q2 ready: {"t":"ready","v":1,"id":"9TZTY3XSDgiwBf8BTxauNJ","features":[]} | after a push frame: closed 1008 | log: ["ready 9TZTY3XS","control-unexpected s1 push"]
+Q3 concurrent on one session: [200,200,200] sessions: 1
+Q3 410: 410 | 403: 403
+Q3 timeout: timeout
+Q3 request on a GOAWAY'd session: threw: New streams cannot be created after receiving a GOAWAY
+Q3 fresh session works: 200 | connects: 2
+```
+
+1. **P3 is really in the tree**: both frames parse, `RelayFeature` already
+   includes `"push"`. So P4 needed no protocol change at all — and
+   `packages/protocol/schema/protocol.json` is untouched (verified: `git diff`
+   on it is empty), so no `schema:export` was needed.
+2. **The capability is missing, as the plan says**: today's relay closes the
+   control socket on a `push` (`control-unexpected … push`, 1008) and announces
+   `features: []`. That close is this slice's red baseline: the new tests fail
+   on the old code by never seeing a `push-result`.
+3. **Bun's HTTP/2 client covers Design 4's needs**: concurrent streams on one
+   session, real `GOAWAY` (after which `request()` throws, so recovery must be
+   explicit), `410`/`403` bodies, and a working per-request deadline. This is
+   what makes `apns-client.ts` testable against a local h2c fake, with no TLS
+   and no secret.
+
+**Files (P4's list, nothing else).** `apps/relay/src/apns.ts` (new, pure);
+`apps/relay/src/apns-client.ts` (new, sockets); `apps/relay/src/relay-core.ts`
+(push limits + the `push` decision + `features`); `apps/relay/src/server.ts`
+(`apns` option, `features`, `push` handling, two limit flags);
+`apps/relay/src/main.ts` (four `--apns-*` flags + env, `apnsSetupOf`);
+`apps/relay/test/{apns,apns-client,server-push}.test.ts` (new, 63 tests);
+`apps/relay/test/main.test.ts` (extended: the flags, `apnsSetupOf`, the help
+text); `changelog.d/mobile-push-relay-apns.added.md` (new).
+
+**As built, in Design 4's order.**
+- `apns.ts` is pure and holds every decision: `APNS_APS_TEMPLATE` (the one
+  banner), `apnsPayloadOf` (which re-parses through P2's STRIP payload schema, so
+  a daemon's `aps` cannot reach a banner — belt *and* braces with the frame
+  schema), `apnsRequestOf`, `createApnsJwtSource` (ES256 via WebCrypto, 40-minute
+  cache, injected clock), `apnsOutcomeOf` (the whole status table),
+  `readApnsKeySource` / `decodeApnsKeyPem` (all four `--apns-*` values or none).
+- `apns-client.ts` is sockets only: one session per environment, lazily dialed,
+  retired on `goaway`/`close`/`error`, a 10 s deadline per request, `ExpiredProviderToken`
+  → invalidate + retry exactly once. `send` never throws.
+- `relay-core.ts`: `pushesPerMinutePerId: 120` / `pushesPerMinutePerToken: 30`
+  in `RELAY_LIMITS` (so a flag can override them), `push()` returning a
+  `PushDecision`, `pushResult()` building the frame, and per-id windows dropped in
+  `controlClosed`. A `push` from a socket with no `hello` is refused **and**
+  closed.
+- `server.ts`: the `apns` option is the *only* thing that puts `"push"` in
+  `ready.features`; a `push` frame measures its body (`apnsPayloadBytesOf`)
+  before the core's caps, delivers through the client, and answers on the socket
+  that asked. Delivery is `void`-dispatched, so pushes are concurrent and can
+  answer out of order.
+- `main.ts`: the four flags/env values, `--max-pushes-per-minute` /
+  `--max-pushes-per-token-per-minute`, and `apnsSetupOf`, which turns a key into
+  a delivery path or logs one `push off: …` line and starts **without** push.
+
+**Drift from the Implementation, and why.**
+1. **A refusal is a `push-result`, not a close — except before `hello`.** The
+   design says limits "refuse"; it does not say how. A cap refusal that closed
+   the socket would cost the daemon its reachability (and every other push in
+   flight) over one over-eager minute, so caps answer `throttled`, an
+   unconfigured relay answers `rejected`/`no-push`, and only the
+   pre-registration case closes (a socket that is not a daemon has no business
+   on the route).
+2. **`payloadBytes` is passed into the core.** The 4096-byte bound is the
+   relay's own ceiling on what it hands Apple, and it cannot be checked by a strip
+   schema (which bounds `c`'s length, not the assembled body). `server.ts`
+   measures and the core refuses, so the bound is one pure decision rather than
+   an `if` in the socket code.
+3. **Two extra pure helpers beyond the plan's list**: `apnsPayloadBytesOf`
+   (the measurement `server.ts` and the tests share) and `apnsSetupOf` in
+   `main.ts` (the key → path decision, async because importing the key is, and
+   injectable so "no key" and "unreadable key" are tests, not process spawns).
+4. **`readApnsKeySource` requires a reader to be injected.** A source built with
+   four values and no reader is an `error`, not a silent "pem with empty string":
+   the process passes `readFileSync`, a test passes a function.
+5. **`features` is an option on `RelayCore`, not a constant.** The relay build
+   announces `"push"` *iff* `startRelay` was given an `apns` path; a test can
+   build a core with `[]` to pin the "hand-written frame" refusal.
+
+**Red before green.** The new behaviour's red baseline is the load-bearing
+probe's Q2 (above): on the old code a `push` frame is closed 1008 and no
+`push-result` ever exists. Test-file-level red is recorded honestly as what it
+was: running the new `server-push.test.ts` against the old sources fails at the
+module boundary (`Cannot find module '../src/apns-client.ts'`), which §9 says is
+not a property-bearing red — so the property evidence is the mutation table
+below, each mutation applied to `src`, run against the narrow files, and restored
+from a scratch backup under `.tentacle/tmp/mobile-push/p4-mut-backup/` (**never**
+git). The restore check is the script's last step: `diff` against the backup is
+empty and the suite is green again.
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | JWT cache never expires (`&& true`) | **RED** "reused at 39 minutes…" |
+| M2 | JWT cache never reused (`if (false)`) | **RED** same |
+| M3 | `APNS_JWT_REUSE_MS` 60 min instead of 40 | **RED** same |
+| M4 | 410 → `rejected` instead of `gone` | **RED** "410 and a 400 BadDeviceToken… → gone" |
+| M5 | `ExpiredProviderToken` no longer asks for a retry | **RED** 3 (table + both client retry tests) |
+| M6 | the retry loops (a second request ignores `retry`) | **RED** "does not retry a third time" |
+| M7 | `aps` taken from the daemon's payload (no template) | **RED** 4 (incl. the `rm -rf` body test) |
+| M8 | topic hard-coded instead of from config | **RED** "the topic is the config's" |
+| M9 | a `push` before `hello` is allowed | **RED** 2 (refusal + close) |
+| M10 | per-token cap off by one | **RED** 2 |
+| M11 | per-id cap off by one | **RED** 2 |
+| M12 | the payload byte bound is not enforced | **RED** "the body's byte bound…" |
+| M13 | `features` always announce `"push"` | **RED** 2 (bare relay's `ready`, `no-push`) |
+| M14 | GOAWAY'd/closed/errored sessions are all reused **and** the state check is off (4 one-line edits together) | **RED** "GOAWAY → the next push dials a fresh session" |
+| M15 | timeout ignores the injected `timeoutMs` | **RED** "a hung request times out" |
+| M16 | the response body is read at header time | **RED** 4 (every reason-carrying outcome) |
+| M17 | the log line carries the whole token | **RED** "no log line carries…" |
+| M18 | the log line carries the sealed payload | **RED** same |
+| M19 | an unregistered socket's push is refused but not closed | **RED** 2 |
+| M20 | the push window is not dropped on unregister | **RED** "unregistering an id forgets its windows" |
+| M21 | half-configured APNs keys are accepted | **RED** 2 (pure + `apnsSetupOf`) |
+| M22 | an unreadable key file falls through | **RED** 2 |
+
+**M14 is the one honest gap, and it is stated rather than hidden.** The
+retirement is deliberately redundant (`goaway`, `close`, `error` handlers *and*
+`sessionFor`'s `closed`/`destroyed` re-check), so no SINGLE layer's removal makes
+the test red — I verified each in isolation (M14a: `goaway` handler off → 15/15
+survive; M14b: the state check off → 15/15 survive). Removing all of them
+together is RED. So the test pins "a GOAWAY'd client recovers", not "this
+particular line does it", which is the property Design 4 asks for; a reviewer
+wanting line-level pinning would have to accept a redundancy being tested by
+behaviour instead.
+
+**Failure modes covered by this slice.** F2/F3 (a hung or unreachable APNs →
+`unavailable`, never a throw into the frame loop), F4/C1 (`features` empty
+without a key, the frame refused), F5 (only the token prefix, Apple's own reason
+word and the three sizes reach a log — M17/M18), F10 (per-id + per-token caps,
+each with a status; a second id and a second token each have their own budget),
+F11 (`gone` on 410 / `BadDeviceToken` / `DeviceTokenNotForTopic`), F15 (JWT
+refreshed at 40 min and forced once on `ExpiredProviderToken`, never a storm),
+F19 (out-of-order `push-result`s), F25's analogue (an unreadable key is a relay
+that starts without push, not one that fails), a malformed frame or an
+out-of-range ttl is a close (the schema), and a `push` on a `/v1/accept` leg is
+still malformed there. F1/F8/F9's content boundary is pinned by M7: the banner
+is a constant.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` → clean, exit 0.
+`bun run typecheck` (root + `apps/mobile` + `apps/relay`) → exit 0.
+`bun run lint` → `Checked 1377 files in 393ms. No fixes applied.` (baseline:
+clean, 0 errors / 0 warnings). `bun test` → **10000 pass, 4 skip, 0 fail**
+(10004 tests / 720 files); the 4 skips are the documented opt-ins, and this slice
+adds none. No wire change, so no `protocol.d/` note and no `PROTOCOL_VERSION`
+move; `protocol.json` untouched.
+
+**Not done, by instruction:** P5–P10 (`push-store.ts`, `push-rules.ts`,
+`push-notifier.ts`, the `HostedSession` hook, `relayLink.push`, `serve`'s config,
+the app, the Maestro flow and the runbook) are untouched. In particular the
+daemon side that *sends* `push` frames, and the end-to-end test that proves a
+sealed envelope reaches this fake APNs through the relay link, are P7/P8's.
+`--apns-*` in `apps/relay/deploy/relay.service` is P10's (the deploy test that
+pins ExecStart still passes, and correctly asserts no secret in argv).
+
+**Unverified:** real APNs (D2a + D2, owner-approved) — nothing here has talked to
+Apple. The transport facts it relies on are P0(b)'s sandbox probe and this
+slice's h2c fake; the `.p8` → WebCrypto import is proved with a generated key
+(`apnsSetupOf` test), not with an Apple-issued file.
+
+## Review
+
+### Review — P4 (fresh context, scope `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES.**
+
+1. **MEDIUM — the per-token cap is per (id, token) and resets on reconnect** (`apps/relay/src/relay-core.ts:514,521,720` scopes `tokenWindow` inside the id's `PushWindow`; `relay-core.ts:560` `this.pushes.delete(id)` on `controlClosed`). The design (Design 4, F10) and the code's own comment (`relay-core.ts:59`, "per DEVICE token — the one a third party could spray") mean a global per-token bound. Probe (`.tentacle/tmp/mobile-push/rev-p4-probe.ts`, `RelayCore` direct, same minute): 3 ids → **90** pushes accepted to one token (cap 30); the same id after close + re-`hello` → **30 more** in the same minute. F10's bound becomes `30 × ids` (with any secret being an id) and reconnecting launders both windows. Not recorded as drift. Fix: a relay-wide token map (bounded), keep per-id windows across a reconnect of the same id (or until the minute ends); add tests at N/N+1 across two ids and across a reconnect.
+2. **MEDIUM — JWT minting is not single-flight** (`apps/relay/src/apns.ts:169` `createApnsJwtSource.jwt()`: check `cached`, then `await mint()`). Probe: 5 concurrent cold `jwt()` → **5 distinct tokens**. Same at every 40-min boundary, and on an `ExpiredProviderToken` burst each in-flight push calls `invalidate()` + mints (`apps/relay/src/apns-client.ts` `attempt`). Apple answers frequent token changes with 429 `TooManyProviderTokenUpdates` → `throttled` for real pushes. F15 says "never a storm"; this is a small one. Fix: memoise the in-flight mint promise; make `invalidate` a no-op for a token already replaced (compare the JWT that failed). Test: concurrent `jwt()` → one `sign` call.
+3. **MEDIUM (plausible, not reproduced) — a timeout never retires the session** (`apps/relay/src/apns-client.ts:135`: `req.close()` only). A half-open connection (idle NAT drop, no GOAWAY/error) makes every push `unavailable/timeout` until the kernel gives up on the socket (minutes). Fix: retire the session on a timeout (or ping before reuse); test with an h2c fake that accepts streams and never answers, then answers on a fresh session.
+
+**Gate (this worktree).** `bun test apps/relay` → 148 pass, 0 fail (7 files). `bun run lint` → clean, 1377 files. `bun run typecheck` → exit 0. Full `bun test` not re-run (scope: P4 files).
+
+**Mutation (own).** `clipApnsReason` returns the raw reason → RED ("a reason is clipped to a header-safe, bounded word"); restored from a scratch copy, `git status` clean. Executor's M1–M22 table not re-run.
+
+**Attacks tried.** (a) push before `hello` → closed 1008, holds. (b) daemon-supplied `aps` → stripped by `PushPayloadSchema` re-parse, template constant, holds. (c) topic from config only, holds. (d) cross-id / reconnect cap bypass → finding 1. (e) concurrent JWT mint → finding 2. (f) dead-but-open session → finding 3. (g) logs: token prefix + Apple's clipped reason only; key-file error message names the path, never key bytes — holds. (h) `void client.send(...)` keeps the peer unserialized; `send` never throws — holds.
+
+**§7.** No protocol/persistence change; `protocol.json` untouched; "relay not trusted" boundary intact (content opaque, banner constant).
+
+**Executor behaviour.** Thorough, honest about M14's redundancy gap and the module-level red; findings 1–2 are spec drift not flagged in Drift.
+
+*— claude-opus-5-5, 2026-11-15* (different model family from the executor, DeepSeek)
+
+## Execution
+
+### Fix round 1
+
+**Scope.** The three HIGH/MEDIUM findings of the P4 review (scope `git diff
+main...HEAD`, slice P4). Nits were left alone; the review raised none that block.
+
+**Reproduced first, before any edit** (`.tentacle/tmp/mobile-push/fix1-probe.ts`,
+`RelayCore` direct + the real `createApnsJwtSource`, one injected clock):
+
+```
+F1a 3 ids -> 90 accepted to ONE token (cap 30)
+F1b close + re-hello -> 60 accepted to ONE token (cap 30)
+F2 4 concurrent cold jwt() -> 4 distinct token(s)
+```
+
+Finding 3 is not reproducible without a fake that can go half-open; it is pinned
+by a test instead (below), since the review itself marked it "plausible, not
+reproduced".
+
+**1. MEDIUM — the per-token cap was per (id, token) and reset on reconnect. FIXED.**
+`relay-core.ts`: the per-token window moved OUT of the id's bookkeeping into one
+**relay-wide** map (`pushTokens`), so one device token has one budget whatever id
+pushes to it. The per-id window is now keyed by the ID (not by the socket) and
+**kept** across `controlClosed`, so reconnecting the same id resumes its minute
+instead of laundering it. Both maps are bounded exactly as `ips` is — the oldest
+entry is evicted at `maxTrackedPushTokens` / `maxTrackedPushIds` (a fairness
+reset, not a bypass: the other bound still applies) — because "kept across
+reconnects" must not become "one entry per id forever". Design 4 and F10's
+wording now say "relay-wide", which is what they always meant (`relay-core.ts`'s
+own comment: "per DEVICE token — the one a third party could spray").
+Tests: `the per-TOKEN cap is relay-wide…` (core), `a second ID does NOT get its
+own per-token budget` (end-to-end over real sockets), `a reconnect of the SAME id
+does not launder its per-ID window`, and one bound test per map.
+
+*A first attempt expired an idle id's window after 2 minutes instead of bounding
+the map. The mutation run showed the difference is unobservable — a
+fixed one-minute window resets itself first — i.e. the test would have been
+vacuous, so it was replaced with the eviction the IP map already uses.*
+
+**2. MEDIUM — JWT minting was not single-flight. FIXED.** `apns.ts`:
+`createApnsJwtSource` memoises the **in-flight** mint promise, so N concurrent
+callers on a cold cache (or at a 40-minute boundary) share ONE signature; the
+promise is cleared in a `finally`, so a failed mint does not wedge the cache.
+`invalidate(jwt?)` now takes the token that failed and is a **no-op when the
+cache already holds a different one** — an `ExpiredProviderToken` burst reaches
+every in-flight push with the same stale JWT, and each was wiping the fresh token
+a sibling had just minted, minting once per push (`apns-client.ts` passes `jwt`).
+Tests: `concurrent calls mint ONE token`, `invalidate(staleJwt) does not drop a
+token a sibling already replaced`, `a mint that fails does not wedge the cache`,
+and the client-side `an ExpiredProviderToken retry names the FAILED token`.
+
+**3. MEDIUM — a timeout never retired the session. FIXED.** `apns-client.ts`: on
+the deadline the client now closes the stream, **drops the session from the map
+and destroys it**, so a half-open connection (an idle NAT drop sends no GOAWAY and
+no error) costs exactly one push and the next one dials fresh. In-flight siblings
+on that session settle on their own timers — they were dead anyway.
+Test: `a timeout RETIRES the session, so a half-open connection costs one push`
+(the fake makes the *existing* session deaf — it keeps accepting streams and
+never answers — while a new session still answers, which is the property: the same
+client recovers with no restart and no second timeout).
+
+**Mutations.** `sh .tentacle/tmp/mobile-push/fix1-mut.sh` — one edit at a time,
+each run against the three narrow test files, restored from a scratch backup under
+`.tentacle/tmp/mobile-push/fix1-backup/` (**never** git); the script ends with a
+`diff` against the backups (empty) and a green re-run. `R*` restore the ORIGINAL
+bug (red-first evidence, §9); `M*` break a line of the fix.
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| R1 | the per-token window scoped per id, again | **RED** 2 (core cross-id + the end-to-end cross-id test) |
+| R2 | `controlClosed` drops the per-id window, again | **RED** "a reconnect of the SAME id…" |
+| R3 | no single-flight mint | **RED** "concurrent calls mint ONE token" |
+| R4 | `invalidate()` drops the cache unconditionally | **RED** "invalidate(staleJwt) does not drop…" |
+| R5 | a timeout no longer retires the session | **RED** "a timeout RETIRES the session…" |
+| M1 | the per-token window is never charged | **RED** 5 |
+| M2 | the per-id map is unbounded | **RED** "the per-id push windows are bounded…" |
+| M3 | the relay-wide token map is unbounded | **RED** "the relay-wide token windows are bounded too…" |
+| M4 | `invalidate()` never drops anything | **RED** "invalidate(staleJwt)…" |
+| M5 | the in-flight promise is never cleared | **RED** 4 (incl. "a mint that fails does not wedge…") |
+| M6 | the timeout retires without settling the stream | survives — **stated, not hidden**: the property M6 would break (a timed-out stream that is never `close()`d) is subsumed by `session.destroy()`, which kills every stream on the session anyway; the explicit `req.close()` is defensive, so no single-line removal is observable |
+| M1–M3 first run | (as found) | R2 and M2 **survived** the first draft — that is what moved the reconnect test to a per-ID-only limit and the expiry into a bounded map. Recorded rather than quietly fixed. |
+
+**Drift from the Implementation.** One, deliberate: the review's "keep per-id
+windows across a reconnect *or until the minute ends*" is implemented as
+"keep them, bounded by `maxTrackedPushIds`" — an idle-expiry variant was tried
+first and could not be kept honest (see finding 1's note).
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` → exit 0.
+`bun run typecheck` (root + `apps/mobile` + `apps/relay`) → exit 0. `bun run lint`
+→ `Checked 1377 files in 471ms. No fixes applied.` (baseline clean, 0/0).
+`bun test` → **10009 pass, 4 skip, 0 fail** (10013 tests / 720 files; the 4
+skips are the documented opt-ins and this round adds none). No wire change, so no
+`protocol.d/` note and no `PROTOCOL_VERSION` move; `protocol.json` untouched.
+
+*— claude-opus-5-5 (executor, fix round 1), 2026-11-16*
+
+### Round 2 (scope `git diff HEAD~1`, commit `ecb2a50e`)
+
+**Verdict: APPROVE.** All three findings fixed; each fix pinned by a test shown RED under mutation (applied to `src`, restored from a scratch copy, `git status` clean after each).
+
+| Finding | Fix | Mutation → result |
+|---|---|---|
+| 1 per-token cap per id / reset on reconnect | relay-wide `pushTokens` (`relay-core.ts:522`, `tokenWindow`); `controlClosed` keeps windows (`relay-core.ts:573`) | key token window by `${id}:token` → **RED** 2 (core + server); re-add `pushes.delete` + `pushTokens.clear()` on close → **RED** 1 |
+| 2 JWT not single-flight | `inFlight` promise (`apns.ts:181`); `invalidate(failedJwt)` compare (`apns.ts:206`) | drop `return await inFlight` → **RED** "concurrent calls mint ONE token"; make invalidate unconditional → **RED** "invalidate(staleJwt) does not drop…" |
+| 3 timeout keeps a dead session | `retire` + `session.destroy()` on timeout (`apns-client.ts:141-143`) | both removed → **RED** "a timeout RETIRES the session" |
+
+**Regression attacks (nothing at MEDIUM+).** Mint rejection clears `inFlight` in `finally` (no wedge); concurrent `invalidate(old)` after a sibling's mint is a no-op. A timeout now also errors sibling streams on that session → `unavailable/stream` (accepted: 10 s with no answer means the session is suspect). Nit: `tokenWindow`'s eviction is insertion-order, not "stalest" as its comment says; harmless (per-id cap bounds a flush). A relay-wide token cap lets a holder of the victim's token spend that device's budget — it already needs the token (F10), accepted.
+
+**Gate.** `bun test apps/relay` → 157 pass, 0 fail. `bun run lint` → clean (1377 files). `bun run typecheck` → exit 0. Full `bun test` not re-run.
+
+*— claude-opus-5-5, 2026-11-15* (different model family from the executor, DeepSeek)
+
+## Execution
+
+### P5 (push registration store) — DONE
+
+*— claude-opus-5-5 (executor, P5 + P6), 2026-11-24*
+
+**Load-bearing check, re-run first: PASS.** `.tentacle/tmp/mobile-push/p56-load-bearing.ts`
+(scratch, in this worktree) — 25 checks, all PASS:
+
+```
+PASS emit() — hosted-session.ts:1960
+PASS watchers.offer AFTER the attachment fan-out — :1963 < :1974
+PASS blockingUnsupported: no attachment ⇒ undefined
+PASS recheckAsks() — :1100
+PASS finishTurn emits turn_end
+PASS Attachment interface — :191
+PASS push-store.ts absent (P5 adds it)
+PASS push-rules.ts absent (P6 adds it)
+PASS protocol exports pushCollapseIdOf | PushMessageSchema | DevicePushRegisterParamsSchema
+     | PushEnvironmentSchema | DEFAULT_PUSH_GRACE_SECONDS | PUSH_GRACE_MAX_SECONDS
+     | PUSH_COLLAPSE_ID_MAX | fitPushMessage
+PASS collapseId is header-safe ≤64 (20B) and keyed
+PASS device-store exports deviceDir | removeDevices | readSeen | SEEN_DIR | DEVICE_DIR
+PASS writeAtomic is NOT exported (push-store needs its own writer)
+PASS a malformed register payload is refused | a well-formed one parses
+PASS DEFAULT_PUSH_GRACE_SECONDS = 30
+
+LOAD-BEARING: PASS
+```
+
+Every `hosted-session.ts` citation still resolves at the line P2/P3 recorded, and
+both slices' capability is absent (neither module exists). What the plan did not
+say, and the probe found: `device-store.ts`'s atomic writer is **private**, so
+`push-store.ts` carries its own (`writeAtomic`, tmp + `rename`) — a two-line
+duplication rather than exporting a store-internal helper for one caller.
+
+**Files (P5's list, nothing else).** `packages/daemon/src/push-store.ts` (new);
+`packages/daemon/src/device-store.ts` (`PUSH_DIR` +2 lines in `removeDevices`);
+`packages/daemon/src/index.ts` (one export line); `packages/cli/src/devices-cmd.ts`
+(the `PUSH` column + `clearPushRegistrations` in `reset`);
+`packages/daemon/test/push-store.test.ts` (new, 15 tests);
+`packages/cli/test/devices-cmd.test.ts` (+5 tests);
+`changelog.d/mobile-push-rules.added.md` (new, one bullet for P5+P6).
+
+**As built.** `<configDir>/devices/push/<id>.json` = `{v:1, token, env, key,
+registeredAt}`, 0600, tmp + rename, validated through **P2's own
+`DevicePushRegisterParamsSchema`** (one definition of a good token/env/key, so a
+hand-edited file cannot smuggle in what the RPC refuses). `readPushRegistrations`
+returns a map plus the `skipped` list; an unknown `v`, malformed JSON or a bad
+field yields a skip and **the bytes are never touched**. `deletePushRegistration`
+is compare-and-delete (`deleted` / `absent` / `kept-newer-token` / `unreadable`).
+`PUSH_DIR` sits in `device-store.ts` with `SEEN_DIR`, so `removeDevices` drops
+`push/<id>.json` without importing the store that writes it. `reset` calls
+`clearPushRegistrations` **after** `removeDevices`, and that is the case the test
+pins: a registration whose device is no longer in the registry is reachable by
+neither `removeDevices` nor anything else but a directory-wide clear.
+
+**Drift from the Implementation, and why.**
+1. **`clearPushRegistrations` is an addition beyond "+2 lines in `removeDevices`".**
+   The plan has `devices reset` "empty `push/`" but no function for it, and
+   `reset` runs `removeDevices` over the registry it just read — which cannot see a
+   file a hand-revoked device left. The clear is directory-wide and idempotent.
+2. **`renderDevices`'s `push` is a `ReadonlyMap<string, PushRegistration>`, not a
+   `Set<string>`.** A set would have been enough for `on`/`off` today, but the
+   column exists to answer "will this phone be notified?" and the environment/age
+   is the obvious next question; a map is the same call at every site and does not
+   need a second signature then. It is **optional with a default**, so the three
+   pre-existing `renderDevices` test calls are unchanged.
+3. **The `PUSH` column is last, after `LAST SEEN`**, so the existing "the widest
+   name sets the column" and `toStartWith("NAME")` assertions keep their meaning.
+
+**Red before green.** `bun test packages/daemon/test/push-store.test.ts` before the
+module existed fails at the module boundary (not property-bearing, §9). The
+property-bearing red is the CLI half, which compiles against the new store and
+fails on the assertion: `expected "iPhone  aaaa…  1970-01-01  never" to end with
+"off"` and `Expected to contain: "PUSH"` — 27 pass, **3 fail**. Non-vacuity is the
+mutation table below.
+
+**Mutations (`sh .tentacle/tmp/mobile-push/p5-mut.sh` — one edit at a time, run
+against both narrow files, restored from `.tentacle/tmp/mobile-push/p5-mut-backup/`,
+never git; the script ends with `diff -q` against the backups and a green re-run):**
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | compare-and-delete's token compare dropped (unconditional delete) | **RED** "KEEPS a newer token" |
+| M2 | any record version accepted (`value.v !== v` → `false`) | **RED** "an unknown `v` is SKIPPED, and its bytes are untouched" |
+| M3 | an unknown record is `rm`'d instead of left alone | **RED** 3 (both "bytes untouched" tests + "not deleted out from under a human") |
+| M4 | `removeDevices` no longer drops `push/<id>.json` | **RED** 2 |
+| M5 | the record is written 0644 | **RED** "round-trips, 0600" |
+| M6 | `reset` no longer clears `push/` | **RED** (first draft **SURVIVED** — see below) |
+| M7 | the column prints `on` unconditionally | **RED** 2 |
+| M8 | an unreadable record counts as registered (fail open) | **RED** 4 |
+| M9 | the store skips the wire's own schema | **RED** "a malformed one writes NOTHING" |
+
+**M6 first SURVIVED, and that is the useful result.** The reset test only covered
+a *paired* device, whose file `removeDevices` already removes — so the test proved
+the wrong function. Strengthened it with a **second registration whose device is
+not in the registry** (a hand-revoked one), which only a directory-wide clear
+reaches; M6 now goes RED on exactly that test. Recorded rather than quietly fixed,
+per §9.
+
+### P6 (push rules) — DONE
+
+*— claude-opus-5-5 (executor), 2026-11-24*
+
+**Files (P6's list).** `packages/daemon/src/push-rules.ts` (new, pure);
+`packages/daemon/test/push-rules.test.ts` (new, 28 tests); plus the export line in
+`packages/daemon/src/index.ts` (shared with P5's diff).
+
+**As built.** `createPushRules({now, registered, graceMs?, askWindowMs?,
+maxPerMinute?})` returns `{apply, nextDeadlineAt, trackedAsks}`. It takes
+**events plus the explicit `tick`** — it owns no timer and no clock, and
+`nextDeadlineAt()` tells the shell (P7) when to call `tick`, so the one real timer
+lives in one place. `apply` returns `{commands, notes}`: `PushCommand` (kind,
+sessionId, sorted devices, collapseId, requestId/turnId/more, at) and `PushNote`
+(`push-folded` / `push-capped` / `push-empty`) — a refusal is a note, so the caller
+maps it to an audit line and nothing is ever silent (F20).
+
+Rules as implemented: the grace (`graceMs`, default P2's
+`DEFAULT_PUSH_GRACE_SECONDS`); exclusion of the devices attached **at the
+deadline**, read fresh, from `registered()` (which P7 feeds from P5's store
+filtered by the authority snapshot); a re-offer of the same `requestId` never
+restarts the timer; `ask_resolved` under the **same** collapse id to exactly the
+devices told (and **never** capped); the turn rule (`turn_done` / `turn_failed`
+only with `clients === 0`, `cancelled` never); `session_closed` drops the
+session's state; one `ask` push per session per 10 s with the extras counted as
+`more`; a rolling-60-minute cap of 60.
+
+**Drift from the Implementation, and why.**
+1. **Time-driven work is an explicit `tick` event, not a `deadline` callback.**
+   The plan says the rules own "the timers (an injected `setTimeout` for tests)".
+   Inverting it (rules say WHEN, shell owns the ONE timer) removes the seam a test
+   would have to fake, and it makes `grace 0` and the window/cap boundaries run
+   through the *same* path as any other tick instead of a second code path.
+2. **The folding is one banner per session, not one per device.** The design's
+   "1 `ask` push per session per 10 s **per device**" is implemented as a
+   per-session window, and the reason is the `more` count: "+N more waiting" is a
+   fact about the session's pending asks, so it is one number for the banner. A
+   per-device window would need one count per device while the phone shows one
+   banner, and could not reduce the banner rate below the session's.
+3. **`push-empty` is an addition to the design's note vocabulary.** The design
+   lists `push-folded` and `push-capped`; "the grace ended and every registered
+   device is attached to this session" is a third, and it must be said for the same
+   reason (a silent drop is a bug). The asks are then marked decided, so they are
+   not retried forever and a later settle stays silent.
+4. **The ask is marked pushed even when zero devices were told**, with an empty
+   set — which is what makes the "every device attached" case terminate, and makes
+   its `ask_resolved` a no-op rather than a banner for a push nobody got.
+
+**Red before green.** The property-bearing red is the CLI/daemon pair above plus
+the module-boundary failure (`Cannot find module '../src/push-rules.ts'`, 0 pass /
+1 error), which §9 says is not property evidence; the mutation table is.
+
+**Mutations (`sh .tentacle/tmp/mobile-push/p6-mut.sh` + `p6-mut2.sh`, same
+pattern: one edit, narrow file, restore from `p6-mut-backup/`, never git):**
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | the grace is ignored (`deadlineAt: at`) | **RED** 3 grace tests |
+| M2 | attached devices are not excluded | **RED** 3 |
+| M3 | `ask_resolved` gets a fresh collapse id | **RED** 2 (incl. F19 both-ways) |
+| M4 | a re-offer restarts the grace | **RED** "the same requestId does NOT restart the timer" |
+| M5 | the turn rule ignores `attached.clients` | **RED** "a TUI at the desk silences it" |
+| M6 | `cancelled` pushes | **RED** "`error` → `turn_failed`; `cancelled` → nothing" |
+| M7 | the per-session ask window is not enforced | **RED** "at most ONE ask push per session per window" |
+| M8 | the storm cap is not enforced (turn path) | **RED** 2 (N/N+1 + the rolling minute) |
+| M9 | `session_closed` keeps its timers | **RED** 2 |
+| M10 | an already-pushed ask is pushed again on every tick | **RED** "at most ONE ask push per session" |
+| M11 | *control:* `ask_resolved` becomes capped | **RED** "an `ask_resolved` is NEVER capped" |
+| M12 | folding loses its `more` count | **RED** the fold test |
+
+Two of the tests were **wrong on their first draft, and the code was right**:
+`more` counts asks already DUE (so a 29 s+1 s pair folds as `more: 1` only once
+both graces ended, not before), and a device attached at the ask but *not* at the
+deadline is pushed to (the attachment set is read at the deadline). Both were
+rewritten to state the property they meant, and the rewritten ones are what the
+table above bites on.
+
+**Gate (this worktree, this branch, uncommitted — see the note below).**
+`bunx tsc --noEmit` → exit 0. `bunx tsc -p apps/mobile` and `-p apps/relay` →
+exit 0. `bun run lint` → `Checked 1381 files in 523ms. No fixes applied.` (0/0,
+baseline clean). `bun test` → **10055 pass, 4 skip, 1 fail**, 10060 tests / 722
+files, 393 s. The one fail is `packages/daemon/test/serve-log-store.test.ts`'s
+"S11 — a real SIGKILL at random points" (`expect(loads).toBeGreaterThan(100)` saw
+`0`) — the documented load-flaky test (`docs/feat/images-off-reason.md:553-555`,
+`docs/fix/reask-budget-and-compact-length.md:420`), in a file this diff does not
+touch; alone it is **22 pass / 0 fail**. No wire change, so no `protocol.d/` note,
+no `PROTOCOL_VERSION` move and `protocol.json` untouched (`git status` has no
+`protocol.json`) — no `schema:export` needed.
+
+**Unverified.** P7's use of `nextDeadlineAt`/`tick` from a real `setTimeout`, and
+the audit mapping of `PushNote.code` → a line, are P7's (the shell does not exist
+yet). The one assumption to re-check there: a `tick` arriving slightly LATE must
+still push (the rules compare `deadlineAt <= at`, so it does) — no drift is
+possible in the other direction.
+
+**Branch note.** The task prompt says "branch here", but this worktree is on
+`feat/mobile-push`, already merged into `main` (`git rev-list --count main..HEAD`
+= 0, `HEAD..main` = 17), and I am told never to `checkout`/`commit`. So P5/P6 are
+**uncommitted working-tree edits on `feat/mobile-push`**, listed in `git status`;
+the orchestrator decides where they land.
+
+## Review
+
+### Review — P5 + P6 (fresh context, scope `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM; P5 clean).
+
+**Gate.** Narrow files (`push-rules`, `push-store`, `devices-cmd` tests): 73 pass / 0
+fail. `bun run lint`: 1381 files, 0/0. `bun run typecheck` (all three tsc): exit 0.
+Full suite not re-run (out of the requested scope).
+
+**Findings.**
+1. **HIGH — a detach is invisible to the rules, so F17 fails and the ask is never
+   pushed.** `push-rules.ts:210-213` excludes `state.attached`, which is updated only
+   by `ask` / `ask_settled` / `turn_end` events (`:186-200`, `:405`, `:415`); `tick`
+   carries no attachment and `PushEvent` (`:100-121`) has no attach/detach variant.
+   Execution's claim "the attachment set is read at the deadline" is false: it is
+   the set at the LAST event. Scenario (scratch `.tentacle/tmp/mobile-push/rev-p6.ts`):
+   phone attached when the ask arrives, user locks the phone at +5 s without
+   answering → at +30 s the phone is still "attached" → `push-empty`, the ask is
+   marked decided (`:244-246`) → `nextDeadlineAt()` = `undefined`, no push ever
+   (output: `push-empty`, later tick `[]`, next `undefined`). This is the core use
+   case and the plan's F17 ("backgrounded → pushes now reach it"). The test
+   `push-rules.test.ts:194` only covers attach (via a re-offered `ask`), never
+   detach. Fix shape: an `attachment` event (or `attached()` read fresh like
+   `registered()`), plus a red test for detach-during-grace.
+2. **MEDIUM — folded asks share the primary's collapse id, so answering ANY one
+   replaces the banner while others are still pending.** `push-rules.ts:268-273`
+   gives every folded ask `collapseId` = the primary's; `resolveAsk` (`:289-301`)
+   then sends `ask_resolved` under it on the first settle. Scenario (same script):
+   r1+r2 folded (`more: 1`), user approves r2 at the desk → `ask_resolved` with
+   r1's id → the phone shows "answered on another device" while r1 still blocks
+   the turn, and r1 is never re-pushed (`pushedTo` set). The test at
+   `push-rules.test.ts:293-298` encodes this (settles r1 first, asserts nothing
+   about it). Fix shape: `ask_resolved` only when the LAST ask sharing a collapse
+   id settles (or re-push the survivor under the same id).
+
+**Mutation (mine).** Dropped the exclusion filter in `candidates` (`:212`) → 4 tests
+RED (incl. "attached device is EXCLUDED"); restored by `cp` from a scratch backup,
+`cmp` identical, `git status` clean. Executor's P5/P6 mutation tables not re-run.
+
+**Attacks tried.** (a) detach during grace → finding 1. (b) settle one of a fold →
+finding 2. (c) P5: unknown `v` / malformed file left untouched, compare-and-delete
+keeps a newer token, `removeDevices` + `reset` clear `push/` — hold (read + tests).
+(d) Re-offer does not restart grace; `ask_resolved` uncapped; `cancelled` silent —
+hold. (e) P5 `reset` race with a daemon re-writing a file afterwards — deferred to
+P7's push-time authority filter (F14), acceptable for P5.
+
+**Holds.** P5 store (0600, tmp+rename, wire-schema validation, skip-never-rewrite),
+the `PUSH` column, P6 purity (no timers/fs), turn rule, caps. §7: no wire change,
+no pod path, nothing in `emit` yet (P7).
+
+**Executor behaviour.** Honest mutation tables and a self-reported vacuous first
+draft (M6). But one stated property (deadline-fresh attachment) was asserted without
+a test that could falsify it. Doc drift: the Branch note says "uncommitted", but
+P5/P6 are committed (`7fd2ae60`). Out of scope, noted for P2's owner:
+`pushCollapseIdOf` (`protocol/src/push.ts:293`) is a reversible base64 of
+`requestId\0sessionId` truncated to 64 chars, not a keyed hash, so it shows ids to
+the relay/Apple in clear.
+
+Same model family as the executor (Opus, fresh context only): shared blind spots
+may survive.
+
+*— claude-opus-5-5, 2026-11-15*
+
+## Execution
+
+### Fix round 1
+
+Scope: the two findings of *Review — P5 + P6*. Both reproduced first, both fixed
+red-before-green, both mutation-checked. Scratch: `.tentacle/tmp/mobile-push/fix1r-probe.ts`,
+`fix1r-fallback.ts`, `fix1r-mut.sh`, `fix1r-full.log`.
+
+**Repro on the buggy code** (`bun run .tentacle/tmp/mobile-push/fix1r-probe.ts`):
+
+```
+F1 at 30s: ["ask"] notes: [] next: undefined     # ← after the fix
+F2 push: [{"kind":"ask","id":"r1","more":1}]
+F2 settle r2 first: [] tracked: 1                # ← after the fix
+```
+
+Before the fix the same script printed `F1 at 30s: [] notes: ["push-empty"] next:
+undefined` (the phone stayed "attached", the ask was marked decided, no push ever —
+the Review's exact output) and `F2 settle r2 first: [{"kind":"ask_resolved","id":"r2"}]
+tracked: 1` (a `ask_resolved` claiming a banner whose r1 still blocked the turn).
+
+**F1 (HIGH) — a detach is now an event (`push-rules.ts:100-112`, `:419-429`).**
+Root cause: `state.attached` moved only on `ask`/`ask_settled`/`turn_end`, so the
+exclusion was read at the *last event*, not at the deadline, and a phone locked
+mid-grace still counted as attached (F17 inverts).
+- New `PushEvent` variant `{type:"attachment", sessionId, attached}`; a new arm
+  records `state.attached` and returns `NONE` — it carries no ask and pushes
+  nothing.
+- It deliberately does **not** create state (`sessions.get`, not `stateOf`): a
+  detach of a session with no ask has no deadline to wake, and `nextDeadlineAt`
+  walks every tracked session, so creating state would leave a ghost timer.
+- Consequence for P7 (a **drift from the Implementation**, recorded here so the
+  plan stays the truth): the hook must now also fire on attach/detach —
+  `hosted-session.ts:1538` / `:1602` — not only from `emit`. Without that the
+  rules never learn about a detach and F17 regresses. I updated Design §5
+  (*Hook*) and the F17 row to say so; I did **not** wire it (that is P7's file set
+  and P7's slice), so the seam is spec'd, not built.
+
+**F2 (MEDIUM) — `ask_resolved` only when the banner is fully answered
+(`push-rules.ts:317-338`, `:460-468`).** Root cause: every ask of a fold took the
+primary's `collapseId`, and `resolveAsk` fired on the first settle, so the phone
+was told "answered on another device" while a sibling still blocked the turn (and
+the survivor, already in `pushedTo`, was never re-pushed). Fix: `bannerAnswered`
+skips the replacement while any still-tracked ask of that session shares the
+collapse id; the rest of `resolveAsk` is unchanged, so `ask_resolved` stays
+uncapped (F19) and a solo ask resolves exactly as before. Grouping is by **id**,
+not by session — a survivor pushed on its own later goes out under its own id,
+and its settle replaces only its own banner (pinned by
+"a survivor later pushed on its own keeps its OWN banner").
+
+**Tests (`packages/daemon/test/push-rules.test.ts`).** Five added/changed, each
+RED on the buggy code before the fix:
+- `a device DETACHED during the grace is pushed to (F17: locking the phone)` —
+  RED on the assertion `expect(...) .toEqual(["ask"])`, and now also asserts the
+  attachment event itself emits nothing (see the honesty note below).
+- `a device ATTACHED during the grace is not pushed to (the inverse)`.
+- `an attachment for a session the rules do not track is dropped`.
+- `settling ONE of a fold does not claim the banner is answered (finding 2)`.
+- `a survivor later pushed on its own keeps its OWN banner (finding 2)`.
+- The pre-existing fold test had encoded the bug (`settle r1 → nothing`, `settle
+  r2 → ask_resolved`) and was rewritten to the property: the FIRST settle is
+  silent, the LAST replaces the banner.
+
+**Honesty note (a vacuity I caught, §9).** My first draft of the two detach tests
+was **green on the buggy code** and proved nothing: an untyped `{type:"attachment"}`
+fell through `apply`'s final arm to `stateOf(event.sessionId, attached)` *plus*
+`turnCommand`, so it updated the attachment set by accident **and** pushed a bogus
+`turn_done` (pasted from `.tentacle/tmp/mobile-push/fix1r-fallback.ts`:
+`attachment event emitted: [{"kind":"turn_done",…}]`). The fix was to assert the
+event's own contract — it emits **nothing** — which is what mutation M2 below
+bites on. Without that assertion the finding-1 tests would have been theatre.
+
+**Mutations** (`sh .tentacle/tmp/mobile-push/fix1r-mut.sh`; source restored by
+`cp` from a scratch backup, `cmp` identical, `git status` back to the three
+intended files):
+
+| # | mutation | result |
+|---|---|---|
+| M1 | the `attachment` arm no longer records the set | **RED 2** — the detach test + the attach inverse |
+| M2 | the `attachment` arm falls through to `turnCommand` (the old unknown-event path) | **RED 1** — the detach test (`turn_done` emitted) |
+| M3 | resolve on ANY settle (drop `bannerAnswered`) | **RED 2** — the fold test + "settling ONE of a fold…" |
+| M4 | *over-correction:* `bannerAnswered` always `false` | **RED 6** — every replacement test (a stale banner would stay) |
+
+M4 is the control that the finding-2 fix did not simply stop resolving: it proves
+the *last* settle still replaces the banner.
+
+**Gate (this worktree, this branch, uncommitted).**
+`bunx tsc --noEmit` → **exit 0**. `bun run lint` → `Checked 1381 files in 446ms.
+No fixes applied.` (0/0, matches the §6 baseline; Biome reformatted two of my new
+test lines, applied with `biome check --write`). `bun test` → **10061 pass, 4
+skip, 0 fail**, 10065 tests / 722 files, 395 s (`.tentacle/tmp/mobile-push/fix1r-full.log`).
+Three of the four skips are the documented opt-ins (live-k8s, live-docker, the
+real-socket keepalive); the fourth is
+`packages/cli/test/session-hop.docker.test.ts:248` (`test.skipIf(!ENABLED)`), also
+an opt-in and pre-existing on `main` — not a new skip, and this diff does not
+touch that file.
+
+**Also updated.** `changelog.d/mobile-push-rules.added.md` (the bullet now states
+the deadline-fresh exclusion and the last-ask rule — no new fragment, the existing
+P5/P6 entry is still the right one); Design §5 *Hook*; failure-mode rows F17 and
+F19. No wire change, so no `protocol.d/` note.
+
+**Unverified.** P7 has not been wired, so the new `attachment` event is exercised
+only through the rules' own unit tests: the hook calling it on attach/detach
+(and the resulting F17 in a real `serve`) is verified when P7 lands. The cheap
+test there is a `push-hook.test.ts` case: attach a phone, lock it (detach), let
+the grace expire → a push to that device.
+
+*— claude-opus-5-5, 2026-11-15*
+
+## Review
+
+### Round 2 — P5 + P6 (scope `git diff HEAD~1`, commit `9715fe08`)
+
+**Verdict: PASS.** Both round-1 findings are fixed, and a mutation catches each fix.
+
+- **Finding 1 (detach invisible) — FIXED.** A new `attachment` event
+  (`push-rules.ts:103-113`, handled `:419-429`) updates `state.attached` for a
+  tracked session, so the exclusion uses the set at the deadline. Mutation:
+  the handler skips the update → **RED** 2 ("a device DETACHED during the grace is
+  pushed to (F17)", "a device ATTACHED during the grace is not pushed to").
+- **Finding 2 (fold banner replaced early) — FIXED.** `bannerAnswered`
+  (`:327-338`, used `:462`) sends `ask_resolved` only when the LAST ask under a
+  shared collapse id settles. Mutation: bypass the guard → **RED** 2 ("settling
+  ONE of a fold does not claim the banner is answered", the fold test).
+- Restored by Edit; `cmp` against a scratch backup is identical; `git status` is clean.
+- **Regressions.** An `attachment` for an untracked session creates no state,
+  so there is no ghost deadline. The next `ask` event carries `attached`
+  anyway, so nothing is lost. `session_closed` and the caps are unchanged.
+  A survivor of a fold keeps the primary's collapse id, so its own settle
+  replaces the right banner.
+- **Gate.** Narrow files: 78 pass / 0 fail. `bun run lint` 1381 files 0/0.
+  `bun run typecheck` (all three tsc) exit 0. I did not re-run the full suite.
+- **Residual (LOW, not blocking).** After the fold's primary is answered, the
+  banner still names that answered ask. Approving it hits `PermissionNotPending`
+  (F7), so it has no effect, and the survivor shows on app open (F1). Wiring the
+  `attachment` event from `HostedSession` is P7's, and P7 must test it, as
+  the executor notes.
+
+Same model family as the executor's earlier slices (fresh context only).
+
+*— claude-opus-5-5, 2026-11-15*

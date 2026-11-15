@@ -125,6 +125,17 @@ export interface AgentReuse {
   /** The background sub-agent runtime (docs/feat/subagent-background.md). */
   readonly agentJobs?: AgentJobs;
   readonly grants?: SessionGrants;
+  /**
+   * The session's shells (docs/feat/workload-shell.md D4): carried across a
+   * rebuild next to `jobs`, so a settings sync does not silently drop the open
+   * shells (and their remote state) on the floor.
+   */
+  readonly workloadShells?: WorkloadShellsLike;
+}
+
+/** The teardown half of `@tentacle/tools`' `WorkloadShells` (no daemon-side import). */
+export interface WorkloadShellsLike {
+  dispose(): Promise<void>;
 }
 
 export type AgentFactory = (
@@ -140,6 +151,12 @@ export type AgentFactory = (
    * (ids, markers, exits, the ask) and disposes it at close.
    */
   agentJobs?: AgentJobs;
+  /**
+   * Optional: the session's shells (docs/feat/workload-shell.md D4). The hosted
+   * session disposes them at close, and hands them to the next agent on a
+   * rebuild.
+   */
+  workloadShells?: WorkloadShellsLike;
   /**
    * Optional: the provider that names the session after its first exchange
    * (docs/feat/session-titles.md). On a pod daemon it is the model proxy, so
@@ -411,7 +428,7 @@ export class SessionHost {
     seed?: readonly ChatMessage[],
     settings?: SessionSettings,
   ): Promise<SessionContextResult> {
-    const { agent, jobs, agentJobs } = this.opts.createAgent(this.opts.defaultCwd, {
+    const { agent, jobs, agentJobs, workloadShells } = this.opts.createAgent(this.opts.defaultCwd, {
       modelLink: () => link,
       ...(settings ? { settings } : {}),
     });
@@ -429,6 +446,8 @@ export class SessionHost {
     } finally {
       jobs?.dispose();
       agentJobs?.dispose();
+      // The probe's shells are not the session's (docs/feat/workload-shell.md D4).
+      await workloadShells?.dispose();
     }
   }
 
@@ -1076,16 +1095,24 @@ export class SessionHost {
     // (docs/feat/attachments-durable.md D2); every other host: memory only.
     const disk = this.opts.persister?.blobs(id);
     const uploads = new AttachmentStore(this.uploadBudget, disk ? { disk } : {});
-    const { agent, permissions, jobs, agentJobs, titleModel, settingsReport, grants } =
-      this.opts.createAgent(this.opts.defaultCwd, {
-        modelLink: () => bound.hosted?.modelLink() ?? null,
-        ...(settings ? { settings } : {}),
-        ...(this.opts.images?.source === "store" ? { attachments: uploads } : {}),
-        // D8/D9: the client that CREATED this session can ask its owner about a
-        // `move_session` proposal, so this factory may offer the tool. Unset →
-        // never offered (a `run`/`attach` TUI has no `/move` feed).
-        ...(hop ? { hop: true as const } : {}),
-      });
+    const {
+      agent,
+      permissions,
+      jobs,
+      agentJobs,
+      titleModel,
+      settingsReport,
+      grants,
+      workloadShells,
+    } = this.opts.createAgent(this.opts.defaultCwd, {
+      modelLink: () => bound.hosted?.modelLink() ?? null,
+      ...(settings ? { settings } : {}),
+      ...(this.opts.images?.source === "store" ? { attachments: uploads } : {}),
+      // D8/D9: the client that CREATED this session can ask its owner about a
+      // `move_session` proposal, so this factory may offer the tool. Unset →
+      // never offered (a `run`/`attach` TUI has no `/move` feed).
+      ...(hop ? { hop: true as const } : {}),
+    });
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
     const { exposeTurnErrors, onTurnError } = this.opts;
@@ -1124,6 +1151,7 @@ export class SessionHost {
     hosted.settingsReport = settingsReport;
     hosted.imagesPolicy = this.opts.images;
     hosted.grants = grants;
+    hosted.workloadShells = workloadShells;
     hosted.hop = hop === true;
     return hosted;
   }
@@ -1159,7 +1187,8 @@ export class SessionHost {
     const foreign =
       next.permissions !== reuse.permissions ||
       next.jobs !== reuse.jobs ||
-      next.agentJobs !== reuse.agentJobs;
+      next.agentJobs !== reuse.agentJobs ||
+      next.workloadShells !== reuse.workloadShells;
     if (!next.settingsReport || foreign) {
       // It leaves the session's jobs; jobs of its own (a factory that ignored
       // `reuse`) go with it.
@@ -1169,6 +1198,12 @@ export class SessionHost {
       }
       if (next.agentJobs && next.agentJobs !== reuse.agentJobs) {
         next.agentJobs.dispose();
+      }
+      // A rebuilt agent that is discarded leaves the SESSION's shells alone: they
+      // are not the agent's, and the next agent takes them over (D4). Only a
+      // factory that IGNORED `reuse` and built its own is closed here.
+      if (next.workloadShells && next.workloadShells !== reuse.workloadShells) {
+        void next.workloadShells.dispose();
       }
       if (!next.settingsReport) {
         return { applied: false };

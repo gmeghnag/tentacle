@@ -11,10 +11,10 @@
  *   parse, and raw HTML is shown as its own text — never executed.
  */
 import type { JSX } from "react";
-import { StyleSheet, Text, View } from "react-native";
-import { highlight } from "../../highlight.ts";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { type MdBlock, type MdInline, type Parsed, flatten } from "../../markdown.ts";
-import type { Palette } from "../../theme.ts";
+import { type Palette, radius, typography } from "../../theme.ts";
+import { CodeBlock } from "../../ui/CodeBlock.tsx";
 
 /** Sizes a heading's depth renders at (a phone has no `h1`–`h6`). */
 const HEADING_SIZE: Readonly<Record<number, number>> = { 1: 22, 2: 20, 3: 18, 4: 17 };
@@ -27,7 +27,8 @@ export interface MarkdownProps {
   /**
    * The fill behind code (inline and blocks): it must differ from the surface
    * the text sits on (B4 — `card` inside the `card`-coloured user bubble was
-   * invisible). Default `card`, for text on the page background.
+   * invisible). Default `code`, which differs from both `page` and the
+   * `fill` user bubble (`theme.test.ts` pins `code ≠ fill`).
    */
   readonly codeBackground?: string;
 }
@@ -85,52 +86,61 @@ function inline(items: readonly MdInline[], ctx: Ctx, key: string): JSX.Element[
   });
 }
 
+/** A fenced block: lines never wrap, the block scrolls sideways (B6, `CodeBlock`). */
 function codeBlock(
   block: Extract<MdBlock, { kind: "code" }>,
   ctx: Ctx,
   index: number,
 ): JSX.Element {
-  const highlighted = highlight(block.text, block.lang);
   return (
-    <View
+    <CodeBlock
       key={`code-${index}`}
       testID={`code-${index}`}
-      style={[styles.codeBlock, { backgroundColor: ctx.codeBackground }]}
-    >
-      {/* One Text per span, on one line each: highlight.js preserves newlines in
-          its spans, so the block reads exactly as written. */}
-      <Text style={[styles.code, { color: ctx.palette.label }]}>
-        {highlighted.spans.map((span) => (
-          // A span's offset within the block is its identity: the spans are the
-          // same list until the text changes, and the block re-renders then.
-          <Text
-            key={`s${span.scope}-${span.text.length}-${span.text.charCodeAt(0)}`}
-            style={scopeColor(span.scope, ctx.palette)}
-          >
-            {span.text}
-          </Text>
-        ))}
-      </Text>
-    </View>
+      text={block.text}
+      lang={block.lang}
+      palette={ctx.palette}
+      background={ctx.codeBackground}
+    />
   );
 }
 
-/** The few `hljs-*` scopes the palette colours; anything else stays the text colour. */
-function scopeColor(scope: string, palette: Palette): { readonly color: string } | undefined {
-  switch (scope) {
-    case "keyword":
-    case "built_in":
-      return { color: palette.accent };
-    case "comment":
-    case "quote":
-      return { color: palette.secondaryLabel };
-    case "string":
-      return { color: palette.running };
-    case "number":
-      return { color: palette.danger };
-    default:
-      return undefined;
-  }
+/**
+ * A table as a real grid (mockup `Conversation`), column by column so every cell
+ * of a row lines up without measuring: cells are one line each, and the grid
+ * scrolls sideways like a code block.
+ */
+function tableGrid(block: Extract<MdBlock, { kind: "table" }>, ctx: Ctx, id: string): JSX.Element {
+  const columns = block.header.map((_cell, at) => at);
+  return (
+    <ScrollView
+      key={id}
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={[styles.table, { borderColor: ctx.palette.sep }]}
+    >
+      {columns.map((column) => (
+        <View key={`${id}-c${column}`} style={styles.column}>
+          {[block.header, ...block.rows].map((row, at) => (
+            <Text
+              // A cell's place in the grid IS its identity (rows are never reordered).
+              // biome-ignore lint/suspicious/noArrayIndexKey: positional grid cell
+              key={`${id}-c${column}-r${at}`}
+              numberOfLines={1}
+              style={[
+                styles.cell,
+                at === 0 ? styles.headerCell : undefined,
+                at === 0 ? undefined : { borderTopColor: ctx.palette.sep },
+                at === 0 ? undefined : styles.bodyCell,
+                { color: ctx.palette.label },
+              ]}
+            >
+              {row[column] ?? ""}
+            </Text>
+          ))}
+        </View>
+      ))}
+    </ScrollView>
+  );
 }
 
 /** A list item's text, for its key (content, never a position). */
@@ -180,10 +190,10 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
       case "code":
         return codeBlock(block, ctx, index);
       case "rule":
-        return <View key={id} style={[styles.rule, { backgroundColor: ctx.palette.separator }]} />;
+        return <View key={id} style={[styles.rule, { backgroundColor: ctx.palette.sep }]} />;
       case "quote":
         return (
-          <View key={id} style={[styles.quote, { borderLeftColor: ctx.palette.separator }]}>
+          <View key={id} style={[styles.quote, { borderLeftColor: ctx.palette.sep }]}>
             {blocks(block.children, ctx, id)}
           </View>
         );
@@ -196,7 +206,7 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
               const itemKey = `${id}-${itemText(item)}`;
               return (
                 <View key={itemKey} style={styles.listItem}>
-                  <Text style={[styles.bullet, { color: ctx.palette.secondaryLabel }]}>
+                  <Text style={[styles.bullet, { color: ctx.palette.sec }]}>
                     {block.ordered ? `${(block.start ?? 1) + at}.` : "•"}
                   </Text>
                   <View style={styles.listBody}>{blocks(item, ctx, itemKey)}</View>
@@ -206,26 +216,11 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
           </View>
         );
       case "table":
-        // Flattened, as `markdown.ts` documents: a phone has no column grid.
-        return (
-          <View key={id} style={styles.table}>
-            {[block.header, ...block.rows].map((row, at) => (
-              <Text
-                key={`${id}-${row.join("|")}`}
-                style={[
-                  styles.code,
-                  { color: at === 0 ? ctx.palette.label : ctx.palette.secondaryLabel },
-                ]}
-              >
-                {row.join("  ·  ")}
-              </Text>
-            ))}
-          </View>
-        );
+        return tableGrid(block, ctx, id);
       case "literal":
         // Raw markup: the model's own text, shown as data and never parsed.
         return (
-          <Text key={id} style={[styles.code, { color: ctx.palette.secondaryLabel }]}>
+          <Text key={id} style={[styles.code, { color: ctx.palette.sec }]}>
             {block.text}
           </Text>
         );
@@ -240,12 +235,12 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
  * shown as plain text with what was held back (plan F21).
  */
 export function Markdown({ parsed, palette, onLink, codeBackground }: MarkdownProps): JSX.Element {
-  const ctx: Ctx = { palette, onLink, codeBackground: codeBackground ?? palette.card };
+  const ctx: Ctx = { palette, onLink, codeBackground: codeBackground ?? palette.code };
   if (parsed.kind === "chunked") {
     return (
       <View testID="md-chunked">
         <Text style={[styles.paragraph, { color: palette.label }]}>{parsed.shown}</Text>
-        <Text testID="md-hidden" style={[styles.paragraph, { color: palette.secondaryLabel }]}>
+        <Text testID="md-hidden" style={[styles.paragraph, { color: palette.sec }]}>
           {`[+${parsed.hidden} more characters]`}
         </Text>
       </View>
@@ -255,18 +250,23 @@ export function Markdown({ parsed, palette, onLink, codeBackground }: MarkdownPr
 }
 
 const styles = StyleSheet.create({
-  paragraph: { fontSize: 15, lineHeight: 21 },
+  paragraph: { ...typography.transcript },
   bold: { fontWeight: "600" },
   italic: { fontStyle: "italic" },
   strike: { textDecorationLine: "line-through" },
-  inlineCode: { fontFamily: "Menlo", fontSize: 13 },
-  code: { fontFamily: "Menlo", fontSize: 13, lineHeight: 19 },
-  codeBlock: { borderRadius: 8, padding: 8 },
+  // A nested Text cannot take padding or a radius on iOS reliably: the pill is
+  // the background colour alone, with a hair of horizontal room from spaces.
+  inlineCode: { ...typography.monoInline, borderRadius: radius.inlineCode },
+  code: { ...typography.monoCode },
   rule: { height: StyleSheet.hairlineWidth, marginVertical: 8 },
-  quote: { borderLeftWidth: 3, paddingLeft: 8, gap: 6 },
-  list: { gap: 4 },
-  listItem: { flexDirection: "row", gap: 6 },
-  bullet: { fontSize: 15, lineHeight: 21, minWidth: 16, textAlign: "right" },
-  listBody: { flex: 1, gap: 4 },
-  table: { paddingVertical: 4, gap: 2 },
+  quote: { borderLeftWidth: 3, paddingLeft: 12, gap: 8 },
+  list: { gap: 6 },
+  listItem: { flexDirection: "row", gap: 8 },
+  bullet: { ...typography.transcript, minWidth: 18, textAlign: "right" },
+  listBody: { flex: 1, gap: 6 },
+  table: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.tile },
+  column: { minWidth: 72 },
+  cell: { ...typography.subhead, paddingHorizontal: 12, paddingVertical: 8 },
+  headerCell: { fontWeight: "600" },
+  bodyCell: { borderTopWidth: StyleSheet.hairlineWidth },
 });

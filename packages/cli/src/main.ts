@@ -28,6 +28,7 @@ import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { DuplexChannel } from "@tentacle/transport";
 import {
   type AutoAcceptFeed,
+  type HopSpec,
   type HopWorkload,
   type SessionController,
   pickSession,
@@ -68,6 +69,7 @@ import {
   engineNoun,
   hostOptionsFor,
   keptLocation,
+  kubeNamespace,
   laptopWorkspaceInput,
   resolveRm,
   setupFailureLine,
@@ -101,8 +103,15 @@ import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./ho
 import { createHopFeed } from "./hop-feed.ts";
 import { createHopLeave } from "./hop-leave.ts";
 import type { HopPlace } from "./hop-plan.ts";
+import type { HopNamespacePin } from "./hop-proposal.ts";
 import { createHopRuntime } from "./hop-runtime.ts";
-import { type HopEngineHost, hopBuilder, hopPromptFacts } from "./hop-targets.ts";
+import {
+  type HopEngineHost,
+  type HopHostWhere,
+  hopBuilder,
+  hopHostNamespace,
+  hopPromptFacts,
+} from "./hop-targets.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
 import {
   forgetKept,
@@ -1204,8 +1213,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const context = flags.get("context");
     try {
       return buildEngineHost(kind, {
-        ...(kind === "kubernetes"
-          ? { namespace: flags.get("namespace") ?? process.env.TENTACLE_POD_NAMESPACE }
+        // OD2: the env step (`TENTACLE_POD_NAMESPACE`) moved INTO
+        // `buildEngineHost` (`kubeNamespace`), so a hop's `buildEngineHost(engine, {})`
+        // resolves exactly what `run`/`attach` do — one rule, one place.
+        ...(kind === "kubernetes" && flags.get("namespace") !== undefined
+          ? { namespace: flags.get("namespace") }
           : {}),
         ...(context !== undefined ? { context } : {}),
         allowInsecureTcp: bools.has("insecure-docker-tcp"),
@@ -1225,13 +1237,58 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
    * (`buildEngineHost`, no flag overrides — a hop has no `--engine`), with the
    * locators its kept entry records (D5).
    */
-  const hopEngineHost = (engine: EngineKind): HopEngineHost => {
-    const built = buildEngineHost(engine, {});
+  const hopEngineHost = (engine: EngineKind, where?: HopHostWhere): HopEngineHost => {
+    // OD3: resolve ONCE here, with its provenance, and pin that namespace into the
+    // builder — so the trace the row/miss report and the place that is dialled
+    // cannot come from two different reads of a kubeconfig. The choice itself is
+    // `hopHostNamespace` (pure, tested): a namespace a PIN already resolved must
+    // not be re-resolved, which would answer `explicit` and present OD2's decision
+    // as the owner's own namespace (fix round 2, finding 1).
+    const namespace = hopHostNamespace(engine, where);
+    const built = buildEngineHost(
+      engine,
+      namespace === undefined ? {} : { namespace: namespace.namespace },
+    );
     return {
       host: built.host,
       ...(built.endpoint === undefined ? {} : { endpoint: built.endpoint }),
       locators: keptLocation(engine, built, { context: undefined, insecureTcp: false }),
+      ...(namespace === undefined ? {} : { namespace }),
     };
+  };
+
+  /**
+   * OD1/OD3: a PROPOSAL's k8s namespace, resolved at the turn's end so the owner is
+   * asked about the place that will really be dialled (and shown WHY it is that
+   * one). An explicit `namespace` on the workload is what the model named; every
+   * other fact (`TENTACLE_POD_NAMESPACE`, the context) is the laptop's. A
+   * resolution that THROWS is the model's news, not a crash: nothing is asked.
+   */
+  const pinNamespace = (spec: HopSpec): HopNamespacePin => {
+    if (spec.target !== "attach" || spec.workload.engine !== "kubernetes") {
+      return { kind: "pinned", spec };
+    }
+    try {
+      const namespace = kubeNamespace(
+        spec.workload.namespace === undefined ? {} : { namespace: spec.workload.namespace },
+      );
+      return {
+        kind: "pinned",
+        spec: {
+          target: "attach",
+          workload: { ...spec.workload, namespace: namespace.namespace },
+          keep: spec.keep,
+        },
+        namespace,
+      };
+    } catch (error) {
+      // The REASON only: `hopWakeLine` wraps it in `[move failed: …]` when the
+      // line is rendered (`hop-turn.ts`), so the brackets are never doubled.
+      return {
+        kind: "failed",
+        line: error instanceof Error ? error.message : String(error),
+      };
+    }
   };
 
   /**
@@ -2113,7 +2170,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         // while Ink owns the terminal (AGENTS §7, P8).
         status: (line) => hopStatus(line),
         notify: (text) => sessions.notices.notify(text),
-        host: (engine) => hopEngineHost(engine),
+        // OD1/OD2: the namespace the build dials is the one the owner SAW — a
+        // typed `/move`'s build resolves it once here, a proposal's at its
+        // turn's end (`pinNamespace`) — never a fresh read at build time.
+        host: (engine, where) => hopEngineHost(engine, where),
         defaultImage: () => process.env.TENTACLE_POD_IMAGE,
         // D7(a): a workload a laptop detached run owns is not a hop's to join.
         detachedRun: (workload) => hopDetachedRun(workload),
@@ -2133,6 +2193,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       // auto-approve it daemon-side. The prompt's facts come from the plan the
       // target would use, so the owner reads the real image and mount.
       permissions,
+      // OD1/OD3: a PROPOSAL's namespace is resolved at the turn's end and
+      // written into the spec the owner is shown (and the build dials), with
+      // its provenance — so the prompt answers "why that namespace" itself.
+      pinNamespace,
       promptFacts: (spec) =>
         hopPromptFacts({ config, host: (engine) => hopEngineHost(engine) }, spec, place.current),
     });

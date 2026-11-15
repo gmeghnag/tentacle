@@ -568,6 +568,7 @@ fail; for `returnKeyAction`, map `stop` to press and see the test fail.
 1. Return **sends** (key labelled Send; queues while a turn runs; never stops a turn) — as recommended.
 2. Sessions: **search now**; "New session" and the "…" menu are a separate task — as recommended.
 3. **NOT as recommended: the permission sheet gets the "Auto-accept" switch and the "Also asked on <computer>" note NOW.** Wire the switch to the session's EXISTING shared auto-accept (the same flag the TUIs share and Shift+Tab flips; find its protocol method and cite it), visible state on every client; laptop-side gating unchanged (AGENTS §7: a phone toggle sets the policy the laptop enforces, never a lasting approval). If a protocol/daemon change is needed, name it and keep it minimal; a `protocol.d/` note if breaking.
+   > **Plan correction (executor, Slice 4, 2026-11-15) — this decision's premise does not hold; STOPPED, owner decision needed.** There is no shared auto-accept: it is each TUI's own local state (`packages/tui/src/permission-ui.ts:47-60`, `autoApproves(req, own)`; `StatusBar.tsx:110`), no protocol method or field carries it (`rg -i "autoaccept|auto_accept|permission_mode" packages/protocol/src` → only the wake-turn notes), and it deliberately never answers another device's turn (owner Q3, `docs/feat/tui-foreign-turns.md` C5). A phone switch would need a NEW session-level policy on the wire and on the daemon, i.e. its own `feat` with a security design (§7 "a pod is not trusted", single broker). The "Also asked on <computer>" note has no data on the phone either (an ask carries no list of the other clients asked). Neither was built.
 4. **SF Symbols + haptics + copy-on-code AND real iOS blur** (`expo-blur` for the glass buttons/bars/sheets, with the mockups' translucent colours as the fallback where blur is off, e.g. Reduce Transparency).
 5. Computers: long-press + iOS action sheet ("…" button too); Remove asks for confirmation — as recommended.
 
@@ -705,6 +706,518 @@ full e2e run for the other flows (flow 07's `hideKeyboard` is still valid).
 (1377 files) · `bun test` 9946 pass, 4 skip (all opt-in: k8s, docker ×2,
 slow socket), 0 fail.
 
+### Slices 1–2 — tokens + primitives, Computers + Pair
+
+*— claude-opus-5-5, 2026-11-14*
+
+**Load-bearing check, re-run first (holds).** `ComputersScreen.tsx:1-18`,
+`PairScreen.tsx:1-15` and `scanner.tsx:1-15` are still dumb renderers over
+`computer-rows.ts` / `pairing-flow.ts` / `camera-access.ts` + `scan-session.ts`;
+the restyle changed no view-model, and every existing test stayed green
+unchanged (`bun test apps/mobile`: 935 pass after both slices).
+
+**As built, in order.**
+1. `src/theme.ts` — `Palette` grows to the mockups' table (`bg page card sheet
+   fill code codeOnSheet label sec sep sepChat sepSheet accent accentFill
+   onAccent tint green orange red warnBg warnText glass glassBorder
+   shadowOpacity camera cameraAccent kw com add* del* dash switchOff`); the 7 old
+   names are aliases built FROM the new tokens (`withAliases`), so unrestyled
+   screens already show the new values. Plus `typography`, `radius`, `size`,
+   `space`, `MONO`, `DENSE_FONT_SCALE`.
+2. `test/theme.test.ts` (66) — WCAG ≥ 4.5 for `label/sec/accent` on
+   `bg/card/page/fill/sheet/code`, both modes, plus accent-on-tint,
+   onAccent-on-accentFill, status/warn/diff/syntax pairs; aliases equal their
+   tokens; `code ≠ fill` (B4 stays fixed once bubbles move to `fill`).
+3. `src/ui/` — `Icon`, `GlassButton`, `ScreenHeader`, `GroupedCard`, `Row`,
+   `SectionHeader`, `StatusDot`, `Pill`, `Banner`, `EmptyState`, `Sheet`, and
+   two not in the plan's list: `PillButton` (the Sheet's 50 pt buttons, also
+   needed by Pair now and Lock later) and `ActionSheet` (Owner Q5's menu).
+4. `src/computer-status.ts` (+ `test/computer-status.test.ts`, 10) —
+   `computerStatus(row)` → `{tone, text, detail?, pairAgain}`, `menuActions(row)`,
+   `sasGroups(sas)`.
+5. `ComputersScreen.tsx` — large title + glass Settings (`open-settings`) and
+   accent "+" (`computers-add`); per computer a 20/25 header (device icon,
+   `StatusDot`, short status) with a "…" (`computer-menu-<id>`), a 26 pt card with
+   the project row (`computer-<id>`, dashed/dimmed tile when not ok, the honest
+   reason under it keeping `computer-state-<id>-<state>`), an inline "Pair again"
+   row for attention states (`computer-pair-again-<id>`); the bottom "Pair a
+   computer" card (`computers-pair-card`) + hint; errors as `Banner`
+   (`computers-error`). Long-press or "…" opens the in-app `ActionSheet`
+   (`computer-menu-pair-again-<id>`, `computer-remove-<id>`), which turns into the
+   Remove confirmation in place (`computer-remove-confirm/yes/cancel-<id>`).
+6. `PairScreen.tsx` + `scanner.tsx` — large-title intake: a hero card (Scan as
+   the primary pill, `pair-scan`), camera problems as a `Banner`
+   (`pair-camera-<card>`, `pair-camera-settings`), "Or paste the line it prints"
+   card (`pair-paste-input`, `pair-paste-submit`). The live camera covers the
+   screen (`pair-scanner`) with the viewfinder (240 pt, accent corners — drawn in
+   `scanner.tsx`) and a dark glass Cancel (`pair-scan-close`). review /
+   connecting / compare / done / failed render in a bottom `Sheet`; compare shows
+   the SAS in two mono 40/48 `fill` boxes, a waiting row and "Codes don't match"
+   (`pair-cancel`). Every testID kept; the scanner block keeps the exact
+   `scanner === undefined || view.stage !== "intake"` gate the wiring test pins.
+7. `App.tsx` — `Computers` and `Pair` get `headerShown: false` (Pair's back is
+   the screen's glass Cancel, `pair-back`, only when the stack can go back);
+   `ComputersRoute` holds the menu state next to `removing`.
+8. `e2e/flows/16-remove-computer.yaml` — taps `computer-menu-<id>` before
+   `computer-remove-<id>` (Owner Q5: "the tests are updated to open the menu
+   first"). Flow 15 unchanged (Pair again stays visible on the row).
+9. `changelog.d/mobile-ui-polish.changed.md`.
+
+**Red before green (pasted).** `computer-status` against a stub reproducing
+today's screen (Pair again only when `row.action === "pair-again"`, status text =
+the long reason, SAS one string):
+```
+(fail) a computer that answered is Online, green, with no detail line
+(fail) an unreachable one is Offline (ring) … Expected: "Offline"  Received: "dial failed"
+(fail) revoked: needs attention … Expected: "attention"  Received: "offline"
+(fail) maybe-reset / broken: … Expected: "attention"  Received: "offline"
+(fail) every state has a non-empty short status word … Expected: not ""
+(fail) menuActions … every row can be paired again or removed
+(fail) sasGroups > six digits split in two groups of three
+(fail) sasGroups > an already-grouped code is regrouped the same way
+ 1 pass  9 fail
+```
+The contrast test is new coverage of new values; its non-vacuity is the plan's
+mutation below.
+
+**Mutations (each run, then reverted from a scratch copy; suite green after):**
+| Mutation | Caught by |
+|---|---|
+| light `sec` → `#AEAEB2` (the plan's named one) | 6 `sec on … ≥ 4.5:1` (light) |
+| `computerStatus.pairAgain` → `row.action === "pair-again"` (today's rule) | "revoked: … offers Pair again inline" |
+| `sasGroups` splits 2/4 | both 6-digit `sasGroups` cases |
+| PairScreen scanner gate without `view.stage !== "intake"` | `scan-session-wiring` "mounts it ONLY at the intake" |
+
+**Drift from Implementation (and why).**
+- **Native add-ons NOT installed (BLOCKED, Slice 1 `package.json` step).**
+  `expo-symbols`, `expo-haptics`, `expo-clipboard`, `expo-blur` need a registry
+  fetch (`npm view` / `bun add` were refused: this session cannot approve network
+  commands) and a dev-client rebuild. So `Icon` draws the chrome glyphs (chevrons,
+  plus, xmark, ellipsis, checkmark, arrow up, stop) from views and the rest from
+  system-font glyphs, behind the one `IconName` = SF Symbol name API — swapping in
+  `<SymbolView>` is a change to `Icon.tsx` alone. `GlassButton` uses the
+  translucent `glass` colours (the owner's named fallback for blur-off). **To
+  finish:** `cd apps/mobile && bunx expo install expo-symbols expo-haptics
+  expo-clipboard expo-blur`, then wire `SymbolView` in `Icon.tsx` and `BlurView`
+  in `GlassButton.tsx`, and rebuild the dev client.
+- **`type` → `typography`.** `import { type, … }` reads as a type-only import
+  modifier to humans and some tooling (Babel/Metro); same table, other name.
+- **Mono family = `Menlo`.** No simulator screenshot was possible to test
+  `ui-monospace`; RN on iOS does not resolve that CSS alias, and Menlo is what
+  the app already used.
+- **`computerStatus` returns `detail` and `pairAgain` too, plus `menuActions`.**
+  The short word ("Online") replaces the long reason in the header, so the reason
+  needs its own field (it keeps the `computer-state-*` testID); the inline-Pair-
+  again and menu decisions belong in the pure module, not the component (§7).
+- **A `revoked` row now shows "Pair again" inline.** Before, the screen offered
+  it only for `action === "pair-again"`, so a revoked row had only Remove — while
+  `computer-rows.ts:12-16` says every such state offers Pair again and flow 15
+  asserts `computer-pair-again-<id>` on a revoked row (by reading, that flow could
+  not have passed; not run). `computerStatus.pairAgain` = every attention state.
+- **Menu and confirmation are an in-app `ActionSheet`, not `ActionSheetIOS` /
+  `Alert`** — same reason as the existing in-app confirmation (no testIDs for
+  XCUITest under the new architecture); it is drawn as an iOS action sheet. One
+  `Modal` stays mounted while the menu becomes the confirmation (no present-
+  while-dismissing). The menu offers Pair again for every computer (a re-pair
+  keeps the id, Q7).
+- **Remove's wording** is a title "Remove '<name>'?" plus a body without
+  backticks (they showed literally).
+- **No "Code found" chip, "seen 2 h ago", "direct/relay" or trailing "1
+  running"/"Idle" pill** — the row has none of those facts (no invented data);
+  the device-name field stays on the review sheet (it is entered before
+  connecting; the mockup's single sheet merges two stages the flow keeps apart).
+- **`may-still-ask`** is now part of the failure banner's body (the
+  `pair-may-still-ask` testID moves to that text; no flow asserts it).
+
+**NOT verified (simulator).** No screenshots under
+`/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/slice-1/` / `slice-2/` and no
+e2e run (`xcrun simctl` / `bun run e2e:mobile` need approvals this session cannot
+give), so the visual gate (Fable review vs the mockups, light + dark) is still
+open, as are flows 15/16 and the pairing flows on the new layout. To verify:
+`E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close
+bun run e2e:mobile --ios 18`, then the screenshot pass.
+
+**Gate:** `bun run typecheck` clean · `bun run lint` 0 errors/0 warnings
+(1393 files) · `bun test` 10022 pass, 4 skip (opt-in), 0 fail. No schema change
+(no `protocol.json` regen, no `protocol.d/` note).
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14*
+
+Scope: the two MEDIUM findings of "Slices 1–2 — adversarial review". Neither is
+a code defect: both need access this session does not have. **No code was
+changed.**
+
+- **Finding 1 (Unicode icons, no `expo-blur`) — BLOCKED, not fixed.**
+  `npm view expo-symbols@58 version` → "This command requires approval" (refused).
+  None of `expo-{symbols,blur,haptics,clipboard}` is in
+  `~/.bun/install/cache`, so no offline install is possible. Wiring `SymbolView`
+  / `BlurView` without the packages cannot typecheck, and a guessed-API shim
+  would be invented code (EXECUTOR-BRIEF). To unblock, someone with network
+  access runs: `cd apps/mobile && bunx expo install expo-symbols expo-haptics
+  expo-clipboard expo-blur`, then the `Icon.tsx` / `GlassButton.tsx` swap
+  (both behind their existing APIs), then a dev-client rebuild.
+- **Finding 2 (no screenshots / e2e on the new layout) — BLOCKED, not fixed.**
+  `xcrun simctl list devices booted` → "This command requires approval"
+  (refused). `.tentacle/tmp/mobile-ui/` has no PNGs. Still needed:
+  `E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close
+  bun run e2e:mobile --ios 18`, then light/dark screenshots into
+  `.tentacle/tmp/mobile-ui/slice-1|slice-2/` and the Fable visual review.
+
+**Red/green, mutations:** none. No fix was made, so there was nothing to turn
+red and then green, or to mutation-check.
+
+**Gate (unchanged tree, re-run):** `bunx tsc --noEmit` clean · `bun run lint`
+1393 files, 0 issues · `bun test` 10022 pass, 4 skip (opt-in), 0 fail.
+
+### Fix round 1 (after review round 3)
+
+*— claude-opus-5-5, 2026-11-15*
+
+Scope: the two MEDIUMs of "Slices 1–2 — adversarial review, round 3". This
+session had registry access (`npm view expo-symbols@58 version` → 58.0.0–58.0.5)
+and a booted simulator (`xcrun simctl list devices booted` → iPhone 17 Pro,
+iOS 26.5). The e2e runner was still refused.
+
+- **Finding 1 (Unicode icons, no blur) — FIXED (code); not seen on a device yet.**
+  - `apps/mobile/package.json` + `bun.lock`: `bunx expo install expo-symbols expo-blur`
+    → `expo-symbols ~58.0.5`, `expo-blur ~58.0.6` (SDK 58 pins).
+  - `apps/mobile/src/ui/Icon.tsx`: the whole stroke/glyph renderer (with the
+    `GLYPH` table `☰ ▭ ⌨ …`) is replaced by `<SymbolView name={name} tintColor size weight>`.
+    The `IconName` union and `IconProps` are unchanged, so no caller changed. `IconName`
+    now has to fit `SFSymbol`, so a misspelt name fails `tsc -p apps/mobile` (it passes).
+    The fallback for non-iOS platforms is an empty box of the same size, not a glyph.
+  - `apps/mobile/src/ui/GlassButton.tsx`: a `BlurView` (`systemUltraThinMaterial`,
+    or `…Dark` with `onDark`, intensity 60) clipped to the circle, then the `glass`
+    tint as an overlay above it. The shadow stays on the unclipped `Pressable`.
+  - `expo-haptics` / `expo-clipboard` are not installed. No code uses them yet;
+    they belong to the slice that adds Copy/haptics (Owner Q4).
+  - Still Unicode, but on screens that are not restyled yet (later slices):
+    `SettingsScreen.tsx:86` `✓` and `ComposeBar.tsx:137,172,177` `⏳ 🖼 ⚠ ◷`.
+  - **Regression test** `apps/mobile/test/icon-glass-wiring.test.ts`, which pins
+    the wiring from the source (the `.tsx` files cannot be imported by Bun). It checks:
+    both packages are dependencies; `Icon` imports `SymbolView` and passes
+    `name={name}`; `GlassButton` imports and renders `BlurView`; and no
+    non-comment line of `Icon`/`GlassButton`/`ScreenHeader`/`ComputersScreen`/`PairScreen`
+    contains a pictograph (U+2190–U+2BFF, U+1F000–U+1FAFF).
+    - **RED** on the pre-fix tree: `0 pass · 5 fail`, every failure on its property
+      assertion (`expo-symbols`/`expo-blur` undefined, no `SymbolView`/`BlurView`,
+      glyph hits such as `"checkmark.circle": "✓"`).
+    - **GREEN** after the fix: `5 pass · 0 fail`.
+    - One test bug was found and fixed: the glyph scan flagged a `/** 123456 → 123 456 */`
+      doc comment in `PairScreen.tsx`. The comment filter now also skips `/*` lines.
+  - **Mutations** (the original files were copied to `.tentacle/tmp/mobile-ui-polish/`
+    and put back for each run; afterwards each restored file was `cmp`-identical to the fix):
+
+    | Mutation | Result |
+    |---|---|
+    | M1: the old glyph `Icon.tsx` | `3 pass · 2 fail`: "`Icon` renders a `SymbolView`…", "no restyled surface draws a Unicode glyph…" |
+    | M2: the old `GlassButton.tsx` (no blur) | `4 pass · 1 fail`: "`GlassButton` puts a `BlurView` behind its content" |
+
+- **Finding 2 (no simulator evidence) — BLOCKED, not fixed.**
+  `E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close bun run e2e:mobile --ios 26`
+  → "This command requires approval" (refused, both with and without output
+  redirection). Screenshots of the build currently installed on the simulator would
+  show the pre-fix app: the new native modules need a rebuild, and the runner does
+  that rebuild (a Release build). So no PNGs were taken.
+  - Still needed: that command (plus `--ios 18`) approved, then light/dark
+    screenshots into `.tentacle/tmp/mobile-ui/slice-1|slice-2/`, then the Fable
+    visual review.
+  - On device this run also proves that `SymbolView`/`BlurView` render at all
+    (the source-level test cannot).
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean · `bun run lint` 1394 files,
+0 issues · `bun test` 10027 pass, 4 skip (opt-in), 0 fail.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-15*
+
+Scope: the latest Review ("Round 2", after review round 3). Finding 1 was FIXED
+there. Its only open item is MEDIUM finding 2. **No code was changed.**
+
+- **Finding 2 (no simulator evidence) — BLOCKED, not fixed.** A simulator is
+  booted (`xcrun simctl list devices booted` → iPhone 17 Pro, iOS 26.5).
+  `E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close bun run e2e:mobile --ios 26`
+  → "This command requires approval" (refused). The command was not retried in
+  another form (§0). No screenshots were taken. The installed build predates
+  `expo-symbols`/`expo-blur`, and only the runner rebuilds it, so screenshots
+  now would show the old app and prove nothing. `.tentacle/tmp/mobile-ui/slice-2/`
+  is still empty, and `slice-1/` does not exist.
+  - Still needed (owner/orchestrator): approve that command, plus `--ios 18`.
+    Then take light/dark screenshots into `.tentacle/tmp/mobile-ui/slice-1|slice-2/`
+    and run the Fable visual review.
+
+**Red/green, mutations:** none. No fix was made, so there was nothing to turn
+red, then green, or to mutate.
+
+**Gate (unchanged tree):** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean ·
+`bun run lint` 1394 files, 0 issues · `bun test` 10027 pass, 4 skip (opt-in), 0 fail.
+
+### Fix round 3
+
+*— claude-opus-5-5, 2026-11-15*
+
+Scope: Review "Round 3". It has one open item, MEDIUM finding 2. It has no
+HIGH item. **No code was changed.**
+
+- **Finding 2 (no simulator evidence) — BLOCKED, not fixed.** A simulator is
+  still booted (iPhone 17 Pro, iOS 26.5). I ran
+  `E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close bun run e2e:mobile --ios 26`
+  once. The harness answered "This command requires approval" (refused). I did
+  not retry it in another form (§0). There are no screenshots and no flow
+  results, for the same reason as Fix round 2: only the runner rebuilds the
+  client with `expo-symbols`/`expo-blur`.
+  - Unblock (owner/orchestrator): approve that command and its `--ios 18` twin.
+    Then take light/dark screenshots and run the Fable visual review. Another
+    executor round cannot close this.
+
+**Red/green, mutations:** none. No fix was made, so there was nothing to make
+red, then green, or to mutate.
+
+**Gate (unchanged tree):** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean ·
+`bun run lint` 1394 files, 0 issues · `bun test` 10027 pass, 4 skip (opt-in), 0 fail.
+
+### Visual fix round 1
+
+*— claude-opus-5-5, 2026-11-15*
+
+Scope: `.tentacle/tmp/mobile-ui/slice-2/visual-review-1.md` (verdict REVISE).
+
+- **Blocking 1–2 (no slice-2 screenshots) — BLOCKED, not fixed.**
+  `bun run e2e:mobile --ios 26` was refused again with "This command requires
+  approval". I tried it twice: once with the output redirected to a log, which
+  was refused because of a variable check, and once bare. No PNGs exist and no
+  flows were written. To unblock, the owner approves that command (or
+  allowlists `Bash(bun run e2e:mobile:*)`), and then the executor follows the
+  screenshot recipe at the end of Review.
+- **Side note (Lock screen reads as a draft) — fixed in code, not yet seen on a
+  device.** This is the Slice 5 Lock item from Design 5, done early because the
+  visual review asked for it:
+  - `src/lock-screen.ts` (new, pure) holds the view-model:
+    - the copy from the mockup;
+    - the unlock label names only an **enrolled** sensor ("Unlock with Face
+      ID" / "Unlock with Touch ID" on an iPhone SE class device / a plain
+      "Unlock" when there is none or it is not known yet);
+    - "Use Passcode" shows only next to a biometric button. It runs the same
+      action, because `lock-auth.ts` already falls back to the passcode in the
+      same call (Design 5's rule);
+    - the footnote states the delay actually chosen (`immediately` / `5m` /
+      `1h`). There is none for `never` or while the setting is still loading.
+  - `src/lock-auth.ts`: `biometry()` reads `getEnrolledLevelAsync` +
+    `supportedAuthenticationTypesAsync` and maps them through `biometryFrom`.
+    Any failure gives `none`. It only sets the label and never takes part in a
+    lock decision.
+  - `src/screens/LockGate.tsx` renders the result:
+    - a 96 pt accent app mark (22 radius, `lock.shield.fill`; the repo has no
+      app-icon asset yet);
+    - the title in `lockTitle` 28/34, the subtitle 16/22 `sec`;
+    - at the bottom, a full-width 54 pt pill `accentFill` button with the
+      sensor glyph, then "Use Passcode", then the footnote, all inside the safe
+      areas;
+    - the `no-passcode` notice is now a `Banner`.
+    The Modal, the F14 hiding and every testID (`lock-screen`, `lock-unlock`,
+    `lock-notice`) are unchanged. A new testID is added: `lock-passcode`.
+  - `src/ui/Icon.tsx`: `touchid`, `lock.fill`, `lock.shield.fill`.
+  - `App.tsx`: passes `biometry` into `LockGate`.
+
+**Red/green, mutations:** `test/lock-screen.test.ts` (7 tests) was red before
+the fix because the module did not exist. As a mutation, I removed the
+enrolled-gate in `biometryFrom`: "sensor present but nothing enrolled" failed,
+and it passed again after the revert.
+
+**Gate:** `bunx tsc -p apps/mobile` clean · `bun run lint` 1396 files, 0 issues ·
+`bun test apps/mobile` 947 pass, 0 fail.
+
+**Unverified:** none of this has been seen on screen yet (the same block as
+above). That includes the Lock screen in light, dark and on a small device.
+
+### Slices 3–4 — Sessions + Conversation, Diff + Compose + Approval (+ owner bugs B4–B6)
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Load-bearing check, re-run first (holds, with one exception found).**
+`SessionsScreen.tsx`, `SessionScreen.tsx`, `TranscriptRow.tsx`, `Markdown.tsx`,
+`DiffView.tsx`, `ComposeBar.tsx`, `PermissionSheet.tsx` were still dumb renderers
+over `session-list.ts` / `session-view.ts` / `session-screen-controller.ts` /
+`permission-sheet.ts`, and every existing test stayed green through the restyle.
+The exception is not a screen: owner bug B4 was in the **wiring**
+(`App.tsx` `composeWiring`), see below.
+
+**B4 — a message sent from the phone did nothing. Root cause (two defects, both
+reproduced).** The send path is `Composer` → `controller.press()`
+(`session-screen-controller.ts` `press`) → `void compose.press(action)` →
+`compose-controller.ts` `press`, which clears the field (F4) and then awaits
+`basis()` → `handle.port.facts()` → `driver.enqueue` → `claim` → `deps.prompt`
+(the screen's `promptWithRefs` → `RemoteSession.send` → `session/prompt`).
+1. `App.tsx:333-341` (before) built `port` with
+   `outboxSessionOf({ get sessionId() {…} } as never, …)`, so `facts()` threw
+   `TypeError: session.snapshot is not a function` right after the field was
+   cleared, and the `void` call dropped the rejection: nothing sent, nothing
+   shown. (Also: `sessionHandle.current` was never assigned, so every
+   `withSession` would have opened a SECOND handle of the same id, which replaces
+   the client's stream listener and steals the screen's turn.)
+2. Once sent, the person's own prompt was never drawn: `RemoteSession` does not
+   re-deliver the sender's prompt (`remote-session.ts` "Our own prompt is already
+   on screen"), and `session-feed.ts` `foldStream` folded only the stream.
+   The fakes in `session-screen*.test.ts` yield a `user_message` themselves,
+   which is why no test saw it.
+
+Red, against a real in-process daemon with a laptop client attached
+(`outbox-link.test.ts` "owner B4", the app's own handle wired as `App.tsx` does):
+```
+TypeError: session.snapshot is not a function.
+      at facts (src/outbox-session.ts:75:39)
+      at basis (src/compose-controller.ts:370:51)
+      at press (src/compose-controller.ts:634:30)
+(fail) owner B4: a send from the phone's composer … [9.33ms]
+-- after fix 1 only --
+expect(userRows(screen)).toContain("hello from the phone")   Received: [ "hi" ]
+(fail) owner B4: … [3017.56ms]
+```
+Fix, in order:
+1. `src/compose-handle.ts` (new) — `composeHandleOf({sessionId, client,
+   session, mint})`, the `ComposeHandle` moved out of `App.tsx` (testable), built
+   over the SCREEN's own attach handle; `port: outboxSessionOf(session, …)`.
+   `ComposeWiring.handle` now takes that handle (`session-screen-controller.ts`
+   passes `result.session` / `handle`); `App.tsx` calls `composeHandleOf`, and the
+   dead `sessionHandle`/`withSession` are gone (no second handle is ever opened).
+2. `src/session-feed.ts` — `ownTurn(turnId, events, prompt?)`: the own prompt is
+   folded as a `user_message` at the stream's FIRST event (= the daemon took it;
+   a refusal before the ack leaves no row and gives the words back), not doubled
+   when that first event is the same `user_message` (a reset replay). Both
+   `send` and `promptWithRefs` pass it. Red: `test/session-feed.test.ts` +4
+   (2 fail before: "shows the prompt as a user row", "image-only prompt").
+3. `src/compose-controller.ts` — `createdOrGiveBack`: a failure while creating
+   the item for words already taken from the field (facts, store write) puts the
+   words back with "that message was not sent — it is back in the field" (send
+   and queue paths). Red: `session-screen-compose.test.ts` "owner B4: a send that
+   fails AFTER the field cleared…" — `Expected: "my words"  Received: ""`.
+Green: the real-daemon test proves `userTexts(daemon) == ["hi","hello from the
+phone"]`, the screen's rows contain the user row, and the field is empty.
+
+**B5 — autoscroll.** `src/follow.ts` (new, pure): `scrolled(state, metrics,
+byPerson)`, `contentGrew`, `jumped`, `jumpPill`; only a DRAG (or its momentum)
+stops following, reaching the bottom resumes it. `SessionScreen.tsx` feeds
+`onScroll`/drag events and `onContentSizeChange`, performs `scrollToEnd`, shows a
+glass "Jump to latest" / "New messages" pill (`jump-latest`), and a send/Return
+resumes following. Red (stub = today, never follows): `test/follow.test.ts` 6/8
+fail → 8/8 green.
+
+**B6 — code blocks wrap.** `src/code-block.ts` (new, pure): `codeBlockView` →
+per-line spans (a span across a newline is cut, scope kept; empty line = " ";
+label = fence language or `code`). `src/ui/CodeBlock.tsx`: 34 pt header + the
+lines in a horizontal `ScrollView`, one `Text` per line. `Markdown.tsx` routes
+every fenced block through it. Red (stub = one wrapping run): 6/6 fail; the
+wiring part of `test/code-block.test.ts` (source-level: horizontal ScrollView,
+`view.lines.map`, no `flexShrink`/`flexWrap`, Markdown uses `<CodeBlock`) failed
+with ENOENT until `CodeBlock.tsx` existed → 9/9 green.
+
+**Slice 3 as built.**
+- `src/session-groups.ts` (+ `test/session-groups.test.ts`, 7; red 7/7 on a
+  stub): Running / Idle / Archived, the search filter (owner decision 2), the
+  inline meta line. `SessionRow` gains `running` and `attached` (additive, from
+  the entry).
+- `SessionsScreen.tsx`: large title + glass back (`sessions-back`), search field
+  (`sessions-search`), sections as `SectionHeader` + `GroupedCard` + `Row`
+  (status dot, terminal icon, meta line, archived icon/dimmed), `Banner` for
+  stale/error (`sessions-stale`, `sessions-error`, `sessions-retry`),
+  `EmptyState` (mono `tentacle`, no backticks), "No matches". `section-active`
+  now wraps Running+Idle (flow 02 unchanged).
+- `src/tool-summary.ts` `toolMeta` (+4 tests, red 4/4 on a stub): tone + trailing
+  (`+3 −5` / `denied` / duration). No exit code — `ToolResult` has none
+  (`packages/core/src/tool.ts:48-70`), so none is invented.
+- `src/chat-header.ts` (+ `test/chat-header.test.ts`, 4): the header's status word.
+  New coverage written with the module (no stub red); non-vacuity by mutation M8.
+- `src/ui/ToolRow.tsx`, `src/ui/CodeBlock.tsx`, `src/ui/Composer.tsx` (new).
+- `TranscriptRow.tsx`: right-aligned `fill` bubble (77 %, radius 20, code on
+  `code`), full-width answer, reasoning collapsed ("Thinking", chevron), tool as
+  `ToolRow` with output opening below on `code` (`tool-<id>-output`), notices
+  centred. `Markdown.tsx`: 16/23 text, `CodeBlock`, tables as a real grid
+  (column-major, one-line cells, horizontal scroll).
+- `SessionScreen.tsx`: compact `ScreenHeader` (glass back `session-back`, title,
+  status dot + word), `page` background, `Banner` (kind → tone/icon table;
+  `banner-<kind>`, `banner-retry`, `reopen` kept), `EmptyState`, `Composer`, B5.
+  `turn-running`/`turn-idle` is now a zero-size observable (the
+  `composer-filled` pattern); the visible cue is the header's "Running".
+- `App.tsx`: `Sessions` and `Session` get `headerShown: false` (+ `onBack` when
+  the stack can go back); the dialling placeholder has the same header.
+
+**Slice 4 as built.**
+- `DiffView.tsx`: a header (path, green `+n`, red `−m`, chevron) always on
+  screen, carrying `diff-<callId>` (flow 08 asserts it without tapping); the
+  hunks open on tap (`diff-<callId>-toggle`): hunk heading on `code`, two 30 pt
+  gutters, sign column, `addBg`/`delBg` rows with `addText`/`delText`, horizontal
+  scroll. No word highlights (`diff-view.ts` yields none).
+- `ComposeBar.tsx`: notices as tinted rows with icons; the queue as a `fill`
+  card "Queued · the agent reads these at its next step", clock rows, Take, and
+  **Send now** as a 44 pt `accentFill` pill with `bolt.fill` (`composer-send-now`,
+  moved here from the composer); `composer-queue` stays on the rows only (flows
+  12–15 still wait for a real queued row). Chips: capsules with photo icon /
+  spinner / warning + ×. `OutboxRows` untouched (Slice 5).
+- `src/permission-sheet.ts` `optionStyle` + `labelRuns` (+7 tests, red 4 fail on
+  a stub): allow once primary, allow always tinted, deny destructive, reply
+  neutral + `bubble.left`, unknown id neutral (shown, never dropped); a label's
+  paired backticks become a mono run (no literal `` ` `` on screen).
+- `PermissionSheet.tsx`: native `pageSheet` kept; content scrolls
+  (`keyboardShouldPersistTaps`), grabber, 44 pt `tint` tile + title 22 bold, the
+  detail in a `codeOnSheet` box (mono 14), 50 pt answer pills with a REAL
+  `disabled` during the age guard (`PillButton` only dims, so the sheet draws its
+  own), reply field on `fill`, every testID kept.
+- `src/ui/Icon.tsx`: `arrow.down`, `photo`, `hand.raised`.
+- `changelog.d/mobile-ui-polish.fixed.md`: the existing bullet extended with
+  B4–B6 (one file, one bullet).
+
+**Mutations (each run, then restored from
+`/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui-polish/mut/`; `diff -rq` clean
+after):**
+| # | Mutation | Caught by |
+|---|---|---|
+| M1 | `compose-handle.ts` port back to `outboxSessionOf({ sessionId } as never, …)` | `outbox-link` "owner B4" (real daemon) |
+| M2 | `session-feed.ts` never draws the own prompt | "owner B4" (real daemon) + 2 `session-feed` cases |
+| M3 | `createdOrGiveBack` rethrows | `session-screen-compose` "owner B4: … gives the words back" (send) |
+| M3b | queue path calls the creator unguarded | same test, queue iteration (`Received: ""`) |
+| M4 | `follow.scrolled` lets the list's own scroll stop following | "the list's OWN scroll … never stops following" |
+| M5 | `codeBlockView` does not split on `\n` | 5 `code-block` cases |
+| M6 | unknown option id → `primary` | "an id this build does not know is drawn neutral" |
+| M7 | Running needs `attached > 0` | "active rows split into Running and Idle" |
+| M8 | `chatStatus`: link down does not win over running | "the link down wins over a running turn" |
+
+**Drift from Implementation (and why).**
+- **B4 needed a wiring + feed fix, not a restyle** (above). `ComposeWiring.handle`
+  changed signature (takes the screen's handle); internal to the app.
+- **Owner decision 3 (auto-accept switch, "Also asked on") — STOPPED.** The
+  premise (a shared, wire-level auto-accept) is false; the plan is corrected
+  inline under *Owner decisions*. Nothing built; needs an owner decision and its
+  own task.
+- **Not built, no data or no package:** the code block's Copy button and the
+  haptics (`expo-clipboard` / `expo-haptics` not installed; adding them needs a
+  native rebuild — same block as Slice 1); the Sessions subtitle
+  "MacBook Pro · ~/path" (the route has only the name); "Thought for 4 s" (a
+  reasoning row has no duration → "Thinking"); the running-tool row pinned above
+  the composer with its own Stop pill and elapsed time (no controller `stop()`
+  separate from `press()`, which queues when the field has text, and no ticking
+  clock in the view-model — the composer's Stop stays the way to stop).
+- **`OUTPUT_PREVIEW_LINES` 6 → 12**: the output now opens on tap in its own
+  panel, so the first view of it shows more.
+- **Diff collapsed by default**, with the testID on the always-visible header,
+  instead of "keep the newest expanded" (the plan's fallback): satisfies flow 08
+  without tapping.
+
+**NOT verified (simulator).** No e2e run or screenshot was attempted in this
+session (same block as earlier rounds: `bun run e2e:mobile` needs approval). In
+particular unseen on device: B4 on a real `serve` + TUI (the real-daemon unit
+test is the evidence), B5's follow/jump behaviour with real scroll events, B6's
+horizontal scroll, the zero-size `turn-running` observable for XCUITest (same
+pattern as `composer-filled`), flows 02/07/08/12–15 on the new layout. To verify:
+`bun run e2e:mobile --ios 26` then the screenshot recipe below (Sessions,
+Conversation with code/table/tool/diff, Compose with queue, Approval; light+dark).
+
+**Gate:** `bun run typecheck` clean (root + `apps/mobile` + `apps/relay`) ·
+`bun run lint` 1408 files, 0 issues · `bun test` 10079 pass, 4 skip (opt-in),
+0 fail. No schema change (no `protocol.json` regen, no `protocol.d/` note).
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)
@@ -738,3 +1251,128 @@ slow socket), 0 fail.
 *— claude-opus-5-5, 2026-11-14* (same model as the executor/planner, fresh context only — shared blind spots possible)
 
 **Screenshots (orchestrator, binding):** every slice ends by saving simulator screenshots of each screen it touched, light AND dark, as PNG under `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/slice-<n>/` (`<screen>-light.png`, `<screen>-dark.png`; Slice 0 also `<bug>-before.png`/`-after.png`). A fresh Fable visual review gates the merge of every slice against the mockups and the quality bar.
+
+### Slices 1–2 — adversarial review (fresh context)
+
+**Verdict: REQUEST-CHANGES (merge-gating, no code defect found in the logic).** Scope: `git diff main...HEAD`, Slices 1–2 only.
+
+**Gate (re-run):** touched tests (`theme`, `computer-status`, `scan-session-wiring`, `e2e-flows`) 103 pass / 0 fail · `bun run typecheck` clean · `bun run lint` 1393 files, 0 issues. Full `bun test` not re-run (Execution reports 10022 pass / 4 opt-in skip).
+
+**Findings (HIGH/MEDIUM):**
+1. **MEDIUM — Owner decision 4 not met: icons are still Unicode glyphs.** `apps/mobile/src/ui/Icon.tsx:48-66` draws `☰ ▭ ⌨ ⌗ ☺ ⊘ ◷ ⚡︎ ⌫ …` for every non-chrome icon; the Computers screen uses three of them on every view (`slider.horizontal.3`, `laptopcomputer`, `folder`, `qrcode.viewfinder`: `ComputersScreen.tsx`). Failure scenario: the owner opens the app and sees the same "strange characters" class they reported (B3, Context) and the Design's "replaces every emoji/Unicode glyph" is false; no `expo-blur` either. Executor flagged it as BLOCKED (network); merge needs `expo install expo-symbols expo-haptics expo-clipboard expo-blur` + `SymbolView`/`BlurView` wiring + dev-client rebuild.
+2. **MEDIUM — no executed evidence for the restyle or the changed flow.** No screenshots in `.tentacle/tmp/mobile-ui/slice-1|slice-2/`, no Fable visual review (orchestrator's binding gate), and flow `16-remove-computer.yaml` (now taps `computer-menu-<id>` → in-app `Modal`) plus pairing flows 12/13/20 were never run on the new layout. Failure scenario: a Modal/XCUITest visibility or layout problem (e.g. Pair's sheet under the keyboard, `pair-back` in a scroll view) ships behind a green unit suite. Precondition: `E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close bun run e2e:mobile --ios 18` green, then the light/dark screenshot pass.
+
+**Mutations (each run, then restored from a scratch copy; `git status` clean):**
+| Mutation | Caught by |
+|---|---|
+| `computerStatus`: `unreachable` → `attention` tone | "an unreachable one is Offline (ring)…" |
+| dark `accent` → `#0E7490` | 7 dark `accent on … ≥ 4.5:1` cases |
+
+**Attacks tried:**
+- *testID contract*: every `pair-*`/`computer-*`/`open-settings` id referenced by `e2e/flows` exists in the new screens; `pair-may-still-ask` moved to the Banner body (no flow asserts it). Holds.
+- *Menu → confirmation*: `ComputersRoute` sets `menu=undefined` + `removing=row` in one batch, so the single `ActionSheet` `Modal` stays visible (no dismiss/present race); Pair again from the menu is a stack push, not a modal presentation. Holds.
+- *`computer-state-<id>-<state>` render gate* now `status.detail !== undefined`: every non-ok row has a non-empty `status` (`computer-rows.ts:58,88`). Holds.
+- *Alias regression on unrestyled screens*: aliases are built from the new tokens; `running`/`badgeText` = `accent`/`onAccent` (dark `#22D3EE` on `#00191F`, high contrast); Slice 0's B4 (`groupedBackground` ≠ `card`) still holds. Holds.
+- *Failure dead end*: a `retry: "no"` failure on a root Pair screen has no button — same as `main`, not a regression.
+- *§7*: no protocol/persistence/daemon touch; decisions (`computerStatus`, `menuActions`, `sasGroups`) in a pure tested module; screens render. Holds.
+
+**Executor behaviour:** honest — the blocked add-ons and unrun simulator work are stated plainly; the `revoked` → inline "Pair again" drift is justified by `computer-rows.ts` and flow 15.
+
+*— claude-opus-5-5, 2026-11-14* (same model as the executor, fresh context only — shared blind spots possible)
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES (both findings still open; executor blocked, not at fault).** Scope: `git diff HEAD~1` = `docs/feat/mobile-ui-polish.md` only (+30 lines, "Fix round 1"); no file under `apps/` changed (`git diff HEAD~1 --quiet -- apps` ⇒ empty).
+
+- **Finding 1 (Unicode icons, no `expo-blur`) — OPEN.** `Icon.tsx` still has the glyph table (`☰ ▭ ⌨` present); `apps/mobile/package.json` has none of `expo-{symbols,blur,haptics,clipboard}`. The doc's BLOCKED claim is consistent with the tree.
+- **Finding 2 (no simulator evidence) — OPEN.** No PNG under `.tentacle/tmp/mobile-ui/`; flows 12/13/15/16/20 still unrun on the new layout.
+- **Mutation:** not applicable. There is no new code or test to mutate; the round-1 mutations (computer-status, dark accent) still apply to an unchanged tree.
+- **Regressions:** none possible from a docs-only diff. Gate: `bun run typecheck` clean · `bun run lint` 1393 files, 0 issues.
+- **Executor behaviour:** honest. It changed no code and did not invent shims; it states the refused commands and the exact unblock steps. Unblocking needs the owner/orchestrator: network access for `bunx expo install …`, plus simulator approval for e2e and screenshots.
+
+*— claude-opus-5-5, 2026-11-14* (same model family as the executor's doc author, fresh context only)
+
+### Slices 1–2 — adversarial review, round 3 (fresh context)
+
+**Verdict: REQUEST-CHANGES (merge-gating; no new code defect).** Scope: `git diff main...HEAD`, Slices 1–2.
+
+**Gate (re-run):** touched tests (`theme`, `computer-status`, `scan-session-wiring`, `e2e-flows`) 103 pass / 0 fail · `bun run typecheck` clean · `bun run lint` 1393 files, 0 issues.
+
+**Findings (HIGH/MEDIUM):**
+1. **MEDIUM — still open: Owner decision 4 (SF Symbols) not met.** `apps/mobile/src/ui/Icon.tsx:48-50` still maps `slider.horizontal.3`/`folder`/`laptopcomputer` to `☰ ▭ ⌨`, shown on every Computers view (`ComputersScreen.tsx:99,147,193,224`); `apps/mobile/package.json` has no `expo-symbols`/`expo-blur`. Scenario: the owner sees the "strange characters" class they reported. Needs network for `bunx expo install …` + dev-client rebuild.
+2. **MEDIUM — still open: no executed evidence.** `.tentacle/tmp/mobile-ui/slice-2/` (and `slice-0/`) exist but are empty; flows 12/13/15/16/20 unrun on the new layout (16 now goes through an in-app `Modal`, `ActionSheet.tsx:46`). Scenario: a Modal/XCUITest or keyboard-over-review-sheet (`PairScreen.tsx:249`, non-scroll `Sheet` with `pair-device-name`) problem ships behind a green unit suite.
+
+**Mutation (restored from scratch copy; `git status` clean):** `computerStatus.pairAgain` → `tone !== "online"` ⇒ caught by "an unreachable one is Offline (ring)…".
+
+**Attacks tried:** menu→Remove/Pair-again state handoff (`App.tsx:732-745`, one Modal stays mounted; Pair-again is a stack push and Pair's `Sheet` is not a Modal, so no present-while-dismissing) — holds; bad/duplicate QR decode under the full-screen scanner (`scanner.tsx:100-107` dispatches `scanned` → camera ends before the intake shows the failure) — holds; header safe-area with `headerShown: false` (`ScreenHeader.tsx:38-61`) — holds; §7: no protocol/persistence/daemon touch, decisions in `computer-status.ts` — holds.
+
+**Executor behaviour:** honest; blockers stated, no invented shims.
+
+*— claude-opus-5-5, 2026-11-15* (same model family as the planner/prior reviewers; executor was deepseek — fresh context only)
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES (finding 1 fixed; finding 2 still open — executor blocked, not at fault).** Scope: `git diff HEAD~1` (`a4f82ce2`).
+
+- **Finding 1 (Unicode icons, no blur) — FIXED.** `Icon.tsx:50-62` renders `<SymbolView name={name} …>`; the `GLYPH` table is gone; `GlassButton.tsx:66-81` puts a clipped `BlurView` under the `glass` tint; `package.json` pins `expo-symbols ~58.0.5`, `expo-blur ~58.0.6` (both present in `apps/mobile/node_modules`). Mutations (each restored from a scratch copy; `git status` clean after): `IconName` member `trash` → `trashx` ⇒ `tsc -p apps/mobile` fails at `Icon.tsx:53` (the `SFSymbol` typing claim holds); `<BlurView` → `<View` ⇒ `icon-glass-wiring` "puts a `BlurView` behind its content" fails (4 pass / 1 fail) and tsc fails. The test is source-level only: it cannot prove the native views render.
+- **Finding 2 (no simulator evidence) — OPEN.** `.tentacle/tmp/mobile-ui/slice-2/` is empty and there is no `slice-1/`; flows 12/13/15/16/20 are unrun. This now matters more, because two new native modules need a dev-client/Release rebuild before `SymbolView`/`BlurView` can be seen at all.
+- **Regressions:** none found. Callers are unchanged (same `IconName`/`IconProps`); the shadow stays on the unclipped `Pressable`; the glyph regex (U+2190–U+2BFF, U+1F000+) does not catch `…`/`–`/curly quotes in the restyled files. Still Unicode on unrestyled screens (`SettingsScreen.tsx`, `ComposeBar.tsx`) — later slices, as the doc says.
+- **Gate:** `bun run typecheck` clean · `bun run lint` 1394 files, 0 issues · `icon-glass-wiring` + `theme` + `computer-status` 81 pass / 0 fail.
+- **Executor behaviour:** honest. It fixed what network access allowed, showed red→green plus two mutations, and stated plainly that the refused e2e/screenshot step is still owed.
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; executor was a different model)
+
+### Round 3
+
+**Verdict: REQUEST-CHANGES (finding 2 still open; executor blocked, not at fault).** Scope: `git diff HEAD~1` (`d0c4349d`), which touches only `docs/feat/mobile-ui-polish.md` (+25, "Fix round 2"); `git diff HEAD~1 --quiet -- apps` shows no change.
+
+- **Finding 2 (no simulator evidence) — OPEN.** There is no PNG in `.tentacle/tmp/mobile-ui/slice-2/`, and `slice-1/` does not exist. The only file there is `screens.log`, a tool-call transcript from another session that started an `e2e-mobile` iOS 26 build. It holds no flow result and no screenshot, so it is not evidence. Flows 12/13/15/16/20 have not run, and `SymbolView`/`BlurView` have not been seen rendering on a rebuilt client.
+- **Finding 1:** still fixed (no code changed since Round 2).
+- **Mutation:** not applicable. The diff is docs-only, so there is no new code or test to mutate.
+- **Regressions:** none possible from a docs-only diff. Gate: `bun run typecheck` clean · `bun run lint` 1394 files, 0 issues.
+- **Executor behaviour:** honest. It changed no code, did not retry the refused command in another form (§0), and states the exact unblock steps: approve `E2E_ONLY_FLOWS=… bun run e2e:mobile --ios 26` (and `--ios 18`), then take light/dark screenshots and run the Fable visual review. This needs the owner or orchestrator, not another executor round.
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; executor was a different model)
+
+### Round 4
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff HEAD~1` (`0dc925e9`). It changes no code (`git diff HEAD~1 --quiet -- apps packages` reports nothing). It adds "Fix round 3" to this doc and 12 untracked-tool artefacts.
+
+1. **MEDIUM (new regression) — stray Playwright artefacts committed at the repo root.** `.playwright-mcp/` holds `p1.png` (2.8 MB), `now.png`, `p2.png`, `probe-*.png`, `v1.png` and five `page-*.yml` snapshots. One snapshot is an HTTP 404 page; the others are empty. That is about 3.8 MB of binaries unrelated to the task, and `.gitignore` has no `playwright` entry. Failure scenario: merging puts them permanently into `main`'s history (a later delete does not shrink the repo), and they look like task evidence when they are not. Fix: remove `.playwright-mcp/` from the branch, and add it to `.gitignore` (or keep such output under `.tentacle/tmp/`, §6).
+2. **MEDIUM — finding 2 (no simulator evidence) still OPEN.** No PNG under `.tentacle/tmp/mobile-ui/slice-1|slice-2/` (only another session's `screens.log`). The committed `.playwright-mcp` images are browser probes, not simulator screenshots of the app or e2e flow results. Owner/orchestrator approval of the e2e run is still required.
+
+- **Mutation:** not applicable. No code or test changed.
+- **Gate:** `bun run typecheck` clean · `bun run lint` 1394 files, 0 issues.
+- **Executor behaviour:** the doc is honest about the block. But the commit swept in unrelated tool output, which suggests `git add -A` without checking the staged files.
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; executor was a different model)
+
+**How to take the screenshots (orchestrator, 2026-11-15 — the sandbox allows exactly these):** build + install with `bun run e2e:mobile --ios 26` (no env prefix: `E2E_ONLY_FLOWS=…` is refused); then write small Maestro flows under `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/flows/` that navigate to each screen and `takeScreenshot` into `.tentacle/tmp/mobile-ui/slice-<n>/`, run them with `maestro test <file>`, switch appearance with `xcrun simctl ui booted appearance dark|light`. Never a browser/Playwright, never files at the repo root.
+
+#### Owner bug report #2 (2026-11-15 ~01:15, real iPhone, build of 876a7cc7) — MUST be fixed in slices 3+4 (Conversation/Compose), each with a red-first test, and checked by the review
+
+- **B4 (HIGH):** a message sent from the phone does NOTHING: it does not appear in the conversation and the model does not receive it (session on a local `tentacle serve`, connected TUI on the laptop). Trace the send path (composer → client `session/prompt` or enqueue → daemon) end to end with file:line; prove the fix with a test that the daemon receives the prompt and the transcript shows the user row.
+- **B5:** the view does not follow the streaming text: the user has to scroll down by hand. Auto-scroll to the bottom while new content arrives, unless the user has scrolled up (then show a "jump to latest" pill).
+- **B6:** code blocks must NOT wrap: keep each line intact and scroll the block horizontally (monospace, horizontal ScrollView), as in the Conversation mockup.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+## Review — Slices 3–4 (fresh context)
+
+**Verdict: APPROVE (code); no HIGH/MEDIUM finding.** Scope: `git diff main...HEAD` (c9d70aca), Slices 3–4 + B4–B6 only.
+
+**Gate (re-run):** `bun run typecheck` clean (root + mobile + relay) · `bun run lint` 1408 files, 0 issues · touched tests (9 files) 120 pass / 0 fail. Full `bun test` not re-run here.
+
+**Attacks tried:**
+1. *B4 give-back ⇒ double send?* `createdOrGiveBack` (`compose-controller.ts:433`) returns the words if `driver.enqueue` throws; a duplicate would need the item to be in the store as well. `enqueue` (`outbox-driver.ts:406-414`) → `save` → `store.setItems` → `write` (`outbox-store.ts:302`) → `persist`, which catches and returns `false` (`:290-299`): the store never throws, so only `basis()`/`createItem` can throw, and both run before an item exists. Holds. (The doc's "the store write throws" is not a real path; harmless.)
+2. *Own row drawn AND words given back?* The row is drawn at the first streamed event (`session-feed.ts` `drawPrompt`); words come back only when `!streamed` (`session-screen-controller.ts:520-536`). These two cannot both happen. Holds.
+3. *Second handle / §7 one session path:* `composeHandleOf` uses the screen's own `RemoteSession`; `handle()` is gated on `phase === "open" && handle !== null` (`session-screen-controller.ts:278`); no frame is built in the app. Holds.
+4. *B5 stale closure / throttle:* `followRef` + `dragging` refs, `scrollEventThrottle={32}` (`SessionScreen.tsx:134-170, 292-306`). Holds (not checked on a device).
+5. *Approval sheet:* `sheet.answer(optionId)` is unchanged, the guard is a real `disabled`, unknown ids are drawn neutral. Single broker untouched. Holds.
+
+**Mutations (mine; restored from `.tentacle/tmp/mobile-ui-polish/rev34/`, `git status` clean):** dedupe of a re-delivered prompt removed → 3 fail (`session-feed` "not doubled", `session-screen` own/foreign identical rows, send folds); `contentGrew` always scrolls → `follow` "scrolls UP … pill shows" fails. The executor's M1–M8 were not re-run.
+
+**LOW (not gating):** `contentGrew` treats any size change as growth. While scrolled up, a shrink (collapsing a tool output) shows "New messages". While following, expanding a row jumps to the end.
+
+**Executor behaviour:** stopped on the false auto-accept premise instead of building a fake one (good). Every gap that needs a simulator is listed as NOT verified. The commit is titled "exec (deepseek)" but the Execution section is signed claude-opus-5-5, so the attribution should be reconciled. This reviewer is the same model family as that signature: shared blind spots possible. Simulator/e2e (flows 02/07/08/12–15, B5/B6 on a device) remain unverified.
+
+*— claude-opus-5-5, 2026-11-15*

@@ -19,6 +19,156 @@ const shell: Tool = {
 };
 const edit: Tool = { ...shell, name: "fs_edit", inputSchema: z.object({ path: z.string() }) };
 
+/**
+ * `workload_shell`'s "always" is keyed on the WORKLOAD, never on the command
+ * alone (docs/feat/workload-shell.md D6; the owner's decision). An "always
+ * `rm -rf build`" in a dev container must never cover a prod pod — that is the
+ * bleed this suite pins, and the reason the tool never falls through to the
+ * session-wide `grantedTools`.
+ */
+const workloadShell: Tool = {
+  name: "workload_shell",
+  description: "workload_shell",
+  inputSchema: z.object({
+    action: z.string(),
+    target: z.object({
+      engine: z.string(),
+      name: z.string(),
+      container: z.string().optional(),
+      namespace: z.string().optional(),
+    }),
+    command: z.string().optional(),
+  }),
+  permission: "ask",
+  async execute() {
+    return { content: "" };
+  },
+};
+
+const devA = { engine: "kubernetes", namespace: "dev", name: "api-0" } as const;
+const devAOtherContainer = { ...devA, container: "sidecar" } as const;
+const prodA = { engine: "kubernetes", namespace: "prod", name: "api-0" } as const;
+const devB = { engine: "kubernetes", namespace: "dev", name: "web-0" } as const;
+const dockerBox = { engine: "docker", name: "box" } as const;
+
+function workloadRun(target: object, command: string) {
+  return { action: "run", target, command };
+}
+
+/** An "always" for `command` on `target`, as the gate would build it. */
+function alwaysOn(target: object, command: string, prefix = command.split(" ")[0] as string) {
+  return {
+    tool: "workload_shell",
+    level: "ask" as const,
+    input: workloadRun(target, command),
+    title: "Run a command in a workload",
+    detail: `${command}`,
+    suggestion: { prefix },
+  };
+}
+
+describe("workload_shell approvals are scoped to the workload", () => {
+  test("always `ls` on one workload covers `ls -la` there — and nothing else", () => {
+    const grants = new SessionGrants();
+    grants.remember(workloadShell, alwaysOn(devA, "ls"));
+
+    expect(grants.covers(workloadShell, workloadRun(devA, "ls -la"))).toBe(true);
+    // Another NAME, another NAMESPACE, another CONTAINER: all refused.
+    expect(grants.covers(workloadShell, workloadRun(devB, "ls"))).toBe(false);
+    expect(grants.covers(workloadShell, workloadRun(prodA, "ls"))).toBe(false);
+    expect(grants.covers(workloadShell, workloadRun(devAOtherContainer, "ls"))).toBe(false);
+    expect(grants.covers(workloadShell, workloadRun(dockerBox, "ls"))).toBe(false);
+    // And a different command on the SAME workload is still asked.
+    expect(grants.covers(workloadShell, workloadRun(devA, "rm -rf /"))).toBe(false);
+  });
+
+  test("an always for another workload's identical command does not carry over", () => {
+    const grants = new SessionGrants();
+    grants.remember(workloadShell, alwaysOn(prodA, "kubectl delete"));
+    expect(grants.covers(workloadShell, workloadRun(prodA, "kubectl delete pod x"))).toBe(true);
+    expect(grants.covers(workloadShell, workloadRun(devA, "kubectl delete pod x"))).toBe(false);
+  });
+
+  test("an always with NO suggestion grants nothing (it never falls through to grantedTools)", () => {
+    const grants = new SessionGrants();
+    const request = { ...alwaysOn(devA, "make deploy"), suggestion: undefined };
+    grants.remember(workloadShell, request as never);
+
+    // Not even the same command on the same workload: without a derivable
+    // prefix there is no rule to store, and inventing "all commands on this
+    // workload" is the broader thing the owner ruled out.
+    expect(grants.covers(workloadShell, workloadRun(devA, "make deploy"))).toBe(false);
+    expect(grants.covers(workloadShell, workloadRun(devA, "anything"))).toBe(false);
+
+    // And crucially: no OTHER tool's road is opened either. A fall-through would
+    // have put "workload_shell" in the session-wide set, which is the bleed.
+    const unrelated = new SessionGrants();
+    unrelated.remember(workloadShell, request as never);
+    // A close is covered (it never asks); a run on ANY target must still ask,
+    // including one with no `command` at all (a malformed call).
+    expect(unrelated.covers(workloadShell, { action: "run", target: devA })).toBe(false);
+    expect(unrelated.covers(workloadShell, workloadRun(prodA, "make deploy"))).toBe(false);
+    expect(unrelated.covers(workloadShell, workloadRun(devA, "make deploy"))).toBe(false);
+  });
+
+  test("no remember() path can ever put workload_shell in the session-wide set", () => {
+    // The bleed needs BOTH halves, so pin the pair: an "always" that stores a
+    // rule AND one that stores nothing, then prove the tool is still not
+    // session-wide anywhere. (Mutating either half alone is invisible — which is
+    // exactly why the test drives the real sequence: ask, remember, ask again.)
+    const grants = new SessionGrants();
+    grants.remember(workloadShell, alwaysOn(devA, "ls"));
+    grants.remember(workloadShell, {
+      ...alwaysOn(devA, "make deploy"),
+      suggestion: undefined,
+    } as never);
+
+    // A workload the first rule was NOT granted for still asks, for every shape
+    // of input — a command, no command, a malformed target, a close-less action.
+    for (const input of [
+      workloadRun(prodA, "ls"),
+      workloadRun(devB, "make deploy"),
+      { action: "run", target: prodA },
+      { action: "run", target: {} },
+      { action: "run" },
+      {},
+    ]) {
+      expect(grants.covers(workloadShell, input), JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  test("it never widens the SHELL tool, and shell rules never cover it", () => {
+    const grants = new SessionGrants();
+    grants.remember(workloadShell, alwaysOn(devA, "ls"));
+    // A workload "always ls" must not make a host `shell` call free.
+    expect(grants.covers(shell, { command: "ls" })).toBe(false);
+
+    const other = new SessionGrants();
+    other.remember(shell, {
+      tool: "shell",
+      level: "ask",
+      input: { command: "ls" },
+      title: "Run a shell command",
+      suggestion: { prefix: "ls" },
+    });
+    expect(other.covers(workloadShell, workloadRun(devA, "ls"))).toBe(false);
+  });
+
+  test("close never needs an approval; run still asks", () => {
+    const grants = new SessionGrants();
+    expect(grants.covers(workloadShell, { action: "close", target: devA })).toBe(true);
+    expect(grants.covers(workloadShell, workloadRun(devA, "ls"))).toBe(false);
+  });
+
+  test("clear() resets the workload rules too", () => {
+    const grants = new SessionGrants();
+    grants.remember(workloadShell, alwaysOn(devA, "ls"));
+    expect(grants.covers(workloadShell, workloadRun(devA, "ls"))).toBe(true);
+    grants.clear();
+    expect(grants.covers(workloadShell, workloadRun(devA, "ls"))).toBe(false);
+  });
+});
+
 interface Deferred<T> {
   readonly promise: Promise<T>;
   resolve(value: T): void;

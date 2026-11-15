@@ -23,7 +23,7 @@ import {
 import { CONTEXT_RESET_TOOL_NAME } from "@tentacle/tools";
 import type { HookRunner } from "./hooks.ts";
 import { ABORTED, SessionGrants } from "./session-grants.ts";
-import { suggestShellPrefix } from "./shell-prefix.ts";
+import { commandCoveredByPrefixes, suggestShellPrefix } from "./shell-prefix.ts";
 
 function asRecord(input: unknown): Record<string, unknown> {
   return input && typeof input === "object" ? (input as Record<string, unknown>) : {};
@@ -64,6 +64,35 @@ export function describeToolCall(tool: Tool, input: unknown): PermissionRequest 
         title: "Reset the context (the model restarts from its prompt)",
         ...detail(str("prompt")),
       };
+    // A command on a workload (docs/feat/workload-shell.md D6): the prompt names
+    // WHERE as well as WHAT, because the approval is scoped to that workload —
+    // "always `ls`" on a dev container must not read as covering a prod pod.
+    case "workload_shell": {
+      const command = str("command");
+      if (obj.action === "close") {
+        return { ...base, title: "Close the shell on a workload" };
+      }
+      const target = asRecord(obj.target);
+      const engine = typeof target.engine === "string" ? target.engine : "";
+      const name = typeof target.name === "string" ? target.name : "";
+      const ns = typeof target.namespace === "string" ? `${target.namespace}/` : "";
+      const container = typeof target.container === "string" ? `[${target.container}]` : "";
+      const where = `${engine} ${ns}${name}${container}`.trim();
+      // Only suggest a rule that would ACTUALLY cover this very command
+      // (`commandCoveredByPrefixes` refuses anything with a command
+      // substitution, where a hidden command could ride along). A suggestion the
+      // rule could never honour is a label that promises nothing.
+      const prefix = command !== undefined ? suggestShellPrefix(command) : "";
+      const usable = prefix !== "" && commandCoveredByPrefixes(command as string, [prefix]);
+      return {
+        ...base,
+        title: "Run a command in a workload",
+        ...(command !== undefined && command !== ""
+          ? { detail: `${where} $ ${command}` }
+          : detail(where)),
+        ...(usable ? { suggestion: { prefix } } : {}),
+      };
+    }
     default:
       return { ...base, title: `Run ${toolLabel(tool.name)}` };
   }

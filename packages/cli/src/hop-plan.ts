@@ -5,6 +5,7 @@
  * engine: the orchestrator (`session-hop.ts`) only executes what is decided here.
  */
 import type { HopSpec, HopWorkload } from "@tentacle/tui";
+import { workloadText as hopWorkloadText } from "@tentacle/tui";
 import type { OwnUse, ResidentUse } from "./relay-state.ts";
 import { untrustedText } from "./untrusted-text.ts";
 
@@ -16,6 +17,8 @@ export type HopPlace =
       readonly engine: HopWorkload["engine"];
       readonly name: string;
       readonly container?: string;
+      /** k8s only (OD1): the namespace the session's pod is in. */
+      readonly namespace?: string;
     };
 
 export interface HopPlanInput {
@@ -49,14 +52,12 @@ export type HopPlan =
   | { readonly kind: "notice"; readonly text: string };
 
 /**
- * `docker:box`, `kubernetes:web-0/app` — the workload as the badge and every
- * notice say it. Names go through `untrustedText` by default: a proposed
- * `move_session` supplies them, and a notice is a terminal (AGENTS §7).
+ * `docker:box`, `kubernetes:<ns>/web-0/app` — the workload as the badge and every
+ * notice say it. ONE label function (OD1, `workloadText`), whose names go through
+ * `oneLine` because a proposed `move_session` supplies them (AGENTS §7).
  */
 export function workloadText(workload: HopWorkload): string {
-  const name = untrustedText(workload.name);
-  const container = workload.container === undefined ? "" : `/${untrustedText(workload.container)}`;
-  return `${workload.engine}:${name}${container}`;
+  return hopWorkloadText(workload);
 }
 
 /** Purely structural: is this the same workload, byte for byte? */

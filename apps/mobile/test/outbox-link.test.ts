@@ -38,6 +38,7 @@ import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 // give a row back once after a kill — the app never registers `onReturned`.
 import { handBack } from "../../../packages/client/src/hand-back.ts";
 import { SpyDaemonStore } from "../../../packages/daemon/test/support/daemon-store-spy.ts";
+import { composeHandleOf } from "../src/compose-handle.ts";
 import { leaveComputer } from "../src/connection.ts";
 import {
   type OutboxDriver,
@@ -46,9 +47,11 @@ import {
   createOutboxDriver,
 } from "../src/outbox-driver.ts";
 import { outboxSessionOf, unavailableSessionPort } from "../src/outbox-session.ts";
+import { type OutboxFs, createOutboxStore, outboxPaths } from "../src/outbox-store.ts";
 import type { ComposeInput, OutboxItem, SessionFacts } from "../src/outbox.ts";
 import { addOwnIds, pruneOwnIds } from "../src/outbox.ts";
 import { createSessionController } from "../src/session-controller.ts";
+import { type SendableHandle, createSessionScreen } from "../src/session-screen-controller.ts";
 
 const CWD = "/tmp/mobile-outbox-link";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -841,6 +844,106 @@ describe("the outbox over a real daemon", () => {
     const texts = await userTexts(d, sid);
     expect(texts).toEqual(["hi", "hold please", "hold second"]);
     await stale.close();
+    laptop.close();
+  }, 20000);
+});
+
+/** An in-memory `OutboxFs` (the file itself is `outbox-store.test.ts`'s subject). */
+function memoryFs(): OutboxFs {
+  const files = new Map<string, string>();
+  return {
+    read: async (path) => files.get(path) ?? null,
+    write: async (path, text) => {
+      files.set(path, text);
+    },
+    rename: async (from, to) => {
+      const text = files.get(from);
+      if (text === undefined) {
+        throw new Error("missing");
+      }
+      files.delete(from);
+      files.set(to, text);
+    },
+    remove: async (path) => {
+      files.delete(path);
+    },
+    list: async (dir) => [...files.keys()].filter((path) => path.startsWith(`${dir}/`)),
+  };
+}
+
+/**
+ * The phone's session SCREEN over a real client, its compose half wired the way
+ * `App.tsx`'s `composeWiring` wires it: the handle is the APP's own
+ * `composeHandleOf`, given the screen's attach handle.
+ */
+function screenOn(phone: App, sid: string) {
+  const store = createOutboxStore(memoryFs(), outboxPaths("file:///o", "phone"), () => 1);
+  return createSessionScreen({
+    sessionId: sid,
+    archived: false,
+    title: "t",
+    project: "p",
+    controller: createSessionController<SendableHandle>({
+      newSession: (sessionId, options) =>
+        phone.client.newSession(undefined, sessionId, undefined, {
+          attach: options.reopen === true ? { reopen: true } : {},
+        }) as unknown as SendableHandle,
+    }),
+    broker: new PermissionBroker(),
+    now: () => Date.now(),
+    compose: {
+      computerId: "phone",
+      store,
+      driver: (folding) =>
+        createOutboxDriver(async () => null, {
+          persistence: {
+            items: () => store.data.items,
+            save: (items) => store.setItems(items),
+            finish: (itemId) => store.removeItem(itemId),
+          },
+          readPhoto: async () => new Uint8Array(),
+          mint: () => crypto.randomUUID(),
+          onDraft: folding.onDraft,
+        }),
+      photos: { pickFromLibrary: async () => [], takePhoto: async () => [] },
+      handle: (session) =>
+        composeHandleOf({
+          sessionId: sid,
+          client: phone.client,
+          session: session as unknown as RemoteSession,
+          mint: () => crypto.randomUUID(),
+        }),
+      draft: () => {},
+      mint: () => crypto.randomUUID(),
+    },
+  });
+}
+
+const userRows = (screen: ReturnType<typeof screenOn>): readonly string[] =>
+  screen
+    .state()
+    .view.rows.flatMap((row) => (row.kind === "user" ? [(row as { text: string }).text] : []));
+
+describe("owner B4: a send from the phone's composer, over the APP's compose handle", () => {
+  test("reaches the daemon and shows the user row, with a laptop client attached (mutation: the id-only port → its facts throw after the field cleared → nothing sent, no row)", async () => {
+    const d = daemon();
+    const laptop = await dial(d);
+    const sid = await seeded(laptop);
+    const phone = await dial(d);
+    const screen = screenOn(phone, sid);
+    await screen.open();
+    await until(() => screen.state().status.phase === "open");
+    expect(screen.state().status.phase).toBe("open");
+    screen.setDraft("hello from the phone");
+    screen.press();
+    await until(async () => (await userTexts(d, sid)).includes("hello from the phone"));
+    expect(await userTexts(d, sid)).toEqual(["hi", "hello from the phone"]);
+    await until(() => userRows(screen).includes("hello from the phone"));
+    expect(userRows(screen)).toContain("hello from the phone");
+    expect(screen.state().draft).toBe("");
+    await screen.leave();
+    screen.dispose();
+    phone.close();
     laptop.close();
   }, 20000);
 });

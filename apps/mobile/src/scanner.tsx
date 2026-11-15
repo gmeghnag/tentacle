@@ -24,7 +24,7 @@ import {
 } from "./camera-access.ts";
 import type { PairingStage } from "./scan-session.ts";
 import { INITIAL_SCAN_SESSION, scanReduce, scannerLive } from "./scan-session.ts";
-import type { Palette } from "./theme.ts";
+import { MONO, type Palette, size as SIZE, typography } from "./theme.ts";
 
 /** What the `Pair` screen needs from the camera (no native type escapes this file). */
 export interface PairingCamera {
@@ -151,15 +151,85 @@ export function QrScanner({
         }}
         onMountError={onMountError}
       />
-      <Text style={[styles.hint, { color: palette.onAccent }]}>
-        Point the camera at the QR code `tentacle pair` printed
-      </Text>
+      {/* The viewfinder (mobile-ui-polish Slice 2, mockup `Pair`): four rounded
+          corners in the camera accent, the instruction under it. Drawing only. */}
+      <View style={styles.center} pointerEvents="none">
+        <View style={styles.viewfinder}>
+          {CORNERS.map((corner) => (
+            <View
+              key={corner.key}
+              style={[styles.corner, corner.style, { borderColor: palette.cameraAccent }]}
+            />
+          ))}
+        </View>
+        <Text style={[typography.headline, styles.hint]}>Scan the code on your computer</Text>
+        <Text style={[typography.subhead, styles.subhint]}>
+          The QR code that <Text style={{ fontFamily: MONO }}>tentacle pair</Text> printed
+        </Text>
+      </View>
     </View>
   );
 }
 
+const CORNER = 36;
+const CORNER_STROKE = 4;
+const CORNERS = [
+  {
+    key: "tl",
+    style: {
+      top: 0,
+      left: 0,
+      borderTopWidth: CORNER_STROKE,
+      borderLeftWidth: CORNER_STROKE,
+      borderTopLeftRadius: 22,
+    },
+  },
+  {
+    key: "tr",
+    style: {
+      top: 0,
+      right: 0,
+      borderTopWidth: CORNER_STROKE,
+      borderRightWidth: CORNER_STROKE,
+      borderTopRightRadius: 22,
+    },
+  },
+  {
+    key: "bl",
+    style: {
+      bottom: 0,
+      left: 0,
+      borderBottomWidth: CORNER_STROKE,
+      borderLeftWidth: CORNER_STROKE,
+      borderBottomLeftRadius: 22,
+    },
+  },
+  {
+    key: "br",
+    style: {
+      bottom: 0,
+      right: 0,
+      borderBottomWidth: CORNER_STROKE,
+      borderRightWidth: CORNER_STROKE,
+      borderBottomRightRadius: 22,
+    },
+  },
+] as const;
+
 const styles = StyleSheet.create({
-  frame: { height: 280, justifyContent: "flex-end" },
+  frame: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
   camera: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
-  hint: { padding: 12, fontSize: 13, textAlign: "center" },
+  center: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  viewfinder: { width: SIZE.viewfinder, height: SIZE.viewfinder },
+  corner: { position: "absolute", width: CORNER, height: CORNER },
+  hint: { color: "#FFFFFF", marginTop: 32, textAlign: "center" },
+  subhint: { color: "rgba(255,255,255,0.72)", marginTop: 4, textAlign: "center" },
 });

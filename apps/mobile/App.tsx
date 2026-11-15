@@ -49,7 +49,8 @@ import { APP_LOG_FILES } from "./src/app-log-fs-expo.ts";
 import { createAppLogFile } from "./src/app-log-fs.ts";
 import { type AppLog, createAppLog, errorShape } from "./src/app-log.ts";
 import { exportFileName, exportText } from "./src/app-log.ts";
-import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
+import type { PickedPhoto } from "./src/compose-controller.ts";
+import { composeHandleOf } from "./src/compose-handle.ts";
 import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
 import { type ComputerRow, computerRows, probeComputer } from "./src/computer-rows.ts";
 import {
@@ -64,7 +65,7 @@ import { createDraftScheduler } from "./src/drafts.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
-import { authenticate, capability } from "./src/lock-auth.ts";
+import { authenticate, biometry, capability } from "./src/lock-auth.ts";
 import { LOCK_SETTING_STORE } from "./src/lock-settings-expo.ts";
 import { createDraftStore } from "./src/outbox-drafts.ts";
 import { createOutboxDriver } from "./src/outbox-driver.ts";
@@ -103,6 +104,8 @@ import {
 } from "./src/session-screen-controller.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
 import { type Palette, paletteFor } from "./src/theme.ts";
+import { GlassButton } from "./src/ui/GlassButton.tsx";
+import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
 
 const Stack = createNativeStackNavigator<RootStackParams>();
 
@@ -268,23 +271,8 @@ function outboxOf(computerId: string): OutboxRuntime {
  * never a frame built in the app (AGENTS §7 "one session path"). What each act
  * DOES is `compose-controller.ts`'s (or, for an offline item, 13b's driver's).
  */
-function composeWiring(
-  computerId: string,
-  sessionId: string,
-  link: ComputerLink,
-  session: () => RemoteSession | null,
-): ComposeWiring {
+function composeWiring(computerId: string, sessionId: string, link: ComputerLink): ComposeWiring {
   const outbox = outboxOf(computerId);
-  /** The session the acts go through; `session()` is the screen's own handle. */
-  async function withSession<T>(run: (handle: RemoteSession) => Promise<T>): Promise<T> {
-    const handle = session();
-    if (handle !== null) {
-      return run(handle);
-    }
-    const created = link.client.newSession(undefined, sessionId, undefined, { attach: {} });
-    await created.open();
-    return run(created);
-  }
   return {
     computerId,
     store: outbox.store,
@@ -293,53 +281,16 @@ function composeWiring(
       pickFromLibrary: async (taken) => adaptPick(await pickFromLibrary(taken)),
       takePhoto: async (taken) => adaptPick(await takePhoto(taken)),
     },
-    handle: (): ComposeHandle | null => ({
-      sessionId,
-      attachImage: async (bytes, meta) => withSession((handle) => handle.attachImage(bytes, meta)),
-      // A photo prompt carries its refs and its key: the same method the TUI
-      // calls, so a retry is free at the daemon's ledger (13b's T1).
-      send: async (text, refs) => {
-        await withSession(async (handle) => {
-          for await (const _event of handle.send(text, undefined, {
-            turnId: crypto.randomUUID(),
-            attachments: refs,
-          })) {
-            // drain: the driver needs the daemon's ack only
-          }
-        });
-      },
-      steer: async (text, id, turnId) => {
-        await link.client.enqueue(sessionId, id, turnId, text);
-      },
-      sendNow: async (messages) => {
-        await withSession(async (handle) => {
-          for await (const _event of await handle.sendNow(messages, "turn", undefined)) {
-            // drain: the daemon's own turn runs; the screen follows it by its feed
-          }
-        });
-      },
-      onQueued: (listener) =>
-        link.client.onSessionQueued((notice) => {
-          if (notice.sessionId === sessionId) {
-            listener(notice.state);
-          }
-        }),
-      // The queue as the client holds it now (a relaunch's snapshot lands before
-      // the compose half subscribes — 13d's flow 14).
-      queued: () => link.client.queuedOf(sessionId),
-      reclaim: async (ids) => {
-        await link.client.reclaim(sessionId, ids);
-      },
-      port: outboxSessionOf(
-        {
-          get sessionId() {
-            return sessionId;
-          },
-        } as never,
-        link.client,
-        () => null,
-      ),
-    }),
+    // The screen's OWN attach handle (owner B4): the port reads its facts, and no
+    // second handle of this id is ever opened (it would steal the screen's stream).
+    // App's session controller builds `RemoteSession`s (cast to `SendableHandle`).
+    handle: (session) =>
+      composeHandleOf({
+        sessionId,
+        client: link.client,
+        session: session as unknown as RemoteSession,
+        mint: () => crypto.randomUUID(),
+      }),
     draft: (text, photoFiles) => {
       outbox.drafts.force(computerId, sessionId, { text, photos: photoFiles });
     },
@@ -484,6 +435,7 @@ function PairRoute({
   linkText,
   onDone,
   onCancel,
+  onBack,
 }: {
   readonly palette: Palette;
   readonly againId?: string;
@@ -492,6 +444,8 @@ function PairRoute({
   readonly linkText?: string;
   readonly onDone: (computerId: string) => void;
   readonly onCancel: () => void;
+  /** Leave the screen (the header's Cancel) — absent when Pair is the root. */
+  readonly onBack?: () => void;
 }): JSX.Element {
   const [state, setState] = useState<PairingState>(initialState);
   const abort = useRef<AbortController | null>(null);
@@ -616,6 +570,7 @@ function PairRoute({
       onConfirm={confirm}
       onCancel={cancel}
       onFailureAction={failureAction}
+      {...(onBack === undefined ? {} : { onBack })}
       {...(againId === undefined ? {} : { againId })}
       {...(againName === undefined ? {} : { againName })}
       camera={camera.view}
@@ -689,8 +644,10 @@ function ComputersRoute({
 }): JSX.Element {
   const [rows, setRows] = useState<readonly ComputerRow[]>([]);
   const [error, setError] = useState<string | undefined>(undefined);
-  /** The computer whose Remove confirmation is showing (an in-app card, never `Alert`). */
+  /** The computer whose Remove confirmation is showing (an in-app sheet, never `Alert`). */
   const [removing, setRemoving] = useState<ComputerRow | undefined>(undefined);
+  /** The computer whose menu (long-press / "…", Owner Q5) is showing. */
+  const [menu, setMenu] = useState<ComputerRow | undefined>(undefined);
 
   useFocusEffect(
     useCallback(() => {
@@ -723,10 +680,20 @@ function ComputersRoute({
       error={error}
       onOpen={onOpen}
       onAdd={onAdd}
-      onPairAgain={onPairAgain}
-      onRemove={setRemoving}
+      onPairAgain={(row) => {
+        setMenu(undefined);
+        onPairAgain(row);
+      }}
+      onMenu={setMenu}
+      onMenuClosed={() => setMenu(undefined)}
+      {...(menu === undefined ? {} : { menu })}
+      onRemove={(row) => {
+        // The menu turns into the confirmation (one sheet: `ComputersScreen`).
+        setMenu(undefined);
+        setRemoving(row);
+      }}
       onRemoveCancelled={() => setRemoving(undefined)}
-      removing={removing}
+      {...(removing === undefined ? {} : { removing })}
       onOpenSettings={onOpenSettings}
       onRemoveConfirmed={(row) => {
         setRemoving(undefined);
@@ -740,11 +707,15 @@ function ComputersRoute({
 function SessionsRoute({
   palette,
   computerId,
+  title,
   onOpen,
+  onBack,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
+  readonly title: string;
   readonly onOpen: (row: SessionRow) => void;
+  readonly onBack?: () => void;
 }): JSX.Element {
   const [snapshot, setSnapshot] = useState<SessionListState>(initialSessionList);
   const [now, setNow] = useState(() => Date.now());
@@ -811,11 +782,13 @@ function SessionsRoute({
     <SessionsScreen
       palette={palette}
       view={viewModel(snapshot, now)}
+      title={title}
       refreshing={snapshot.status === "loading"}
       onRefresh={() => void controller.refresh()}
       onLoadMore={() => void controller.more()}
       onRetry={() => void controller.refresh()}
       onOpen={onOpen}
+      {...(onBack === undefined ? {} : { onBack })}
     />
   );
 }
@@ -832,12 +805,14 @@ function SessionRoute({
   sessionId,
   title,
   archived,
+  onBack,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
   readonly sessionId: string;
   readonly title: string;
   readonly archived: boolean;
+  readonly onBack?: () => void;
 }): JSX.Element {
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -846,8 +821,6 @@ function SessionRoute({
     let live = true;
     let created: SessionScreenController | null = null;
     let unsubscribe: (() => void) | null = null;
-    /** The screen's own attach handle (13c's): the compose acts reuse it. */
-    const sessionHandle: { current: RemoteSession | null } = { current: null };
     void (async () => {
       let link: ComputerLink;
       try {
@@ -872,7 +845,7 @@ function SessionRoute({
         // The compose half (13d): one outbox per computer (its store, driver and
         // drafts shared for the app's lifetime), and the session's own client
         // methods — no frame built here (AGENTS §7 "one session path").
-        compose: composeWiring(computerId, sessionId, link, () => sessionHandle.current),
+        compose: composeWiring(computerId, sessionId, link),
       });
       // The link's own status: the banner's `reconnecting` (F8/F9).
       unsubscribe = link.onStatus((status) => created?.link(status.state === "up"));
@@ -889,24 +862,46 @@ function SessionRoute({
     // Dialling the computer: the screen's own id is present, so a flow (and a
     // person) sees the session screen's frame while the socket comes up.
     return (
-      <View
-        testID="session-view"
-        style={[styles.connecting, { backgroundColor: palette.groupedBackground }]}
-      >
-        {error === undefined ? (
-          <ActivityIndicator color={palette.accent} />
-        ) : (
-          <Text
-            testID="session-connect-error"
-            style={[styles.connectingText, { color: palette.danger }]}
-          >
-            {error}
-          </Text>
-        )}
+      <View testID="session-view" style={[styles.screen, { backgroundColor: palette.page }]}>
+        <ScreenHeader
+          palette={palette}
+          variant="compact"
+          title={title}
+          left={
+            onBack === undefined ? undefined : (
+              <GlassButton
+                palette={palette}
+                testID="session-back"
+                icon="chevron.left"
+                accessibilityLabel="Back"
+                onPress={onBack}
+              />
+            )
+          }
+        />
+        <View style={styles.connecting}>
+          {error === undefined ? (
+            <ActivityIndicator color={palette.accent} />
+          ) : (
+            <Text
+              testID="session-connect-error"
+              style={[styles.connectingText, { color: palette.red }]}
+            >
+              {error}
+            </Text>
+          )}
+        </View>
       </View>
     );
   }
-  return <SessionScreen palette={palette} controller={controller} />;
+  return (
+    <SessionScreen
+      palette={palette}
+      controller={controller}
+      title={title}
+      {...(onBack === undefined ? {} : { onBack })}
+    />
+  );
 }
 
 /**
@@ -1057,6 +1052,7 @@ function AppShell(): JSX.Element {
     lock: lockInstance,
     authenticate,
     capability,
+    biometry,
     setting: lockSetting,
     onEvent: (event: AppLockEvent, view: LockView) => {
       // Only the interesting transitions reach the ring: a tick every second
@@ -1213,19 +1209,14 @@ function AppShell(): JSX.Element {
         >
           <Stack.Screen
             name="Pair"
-            options={({ navigation }) => ({
-              title: "tentacle",
-              headerLeft: () =>
-                navigation.canGoBack() ? (
-                  <Pressable testID="pair-back" onPress={() => navigation.goBack()}>
-                    <Text style={{ color: palette.accent }}>Back</Text>
-                  </Pressable>
-                ) : null,
-            })}
+            // The screen draws its own header (glass Cancel, `pair-back`): the
+            // mockups' chrome is not the iOS 18 nav bar (mobile-ui-polish Design 4).
+            options={{ title: "Pair a computer", headerShown: false }}
           >
             {({ navigation, route }) => (
               <PairRoute
                 palette={palette}
+                {...(navigation.canGoBack() ? { onBack: () => navigation.goBack() } : {})}
                 {...(route.params?.again === undefined ? {} : { againId: route.params.again })}
                 {...(route.params?.againName === undefined
                   ? {}
@@ -1254,7 +1245,7 @@ function AppShell(): JSX.Element {
               />
             )}
           </Stack.Screen>
-          <Stack.Screen name="Computers" options={{ title: "Computers" }}>
+          <Stack.Screen name="Computers" options={{ title: "Computers", headerShown: false }}>
             {({ navigation }) => (
               <ComputersRoute
                 palette={palette}
@@ -1300,11 +1291,16 @@ function AppShell(): JSX.Element {
               />
             )}
           </Stack.Screen>
-          <Stack.Screen name="Sessions" options={({ route }) => ({ title: route.params.name })}>
+          <Stack.Screen
+            name="Sessions"
+            options={({ route }) => ({ title: route.params.name, headerShown: false })}
+          >
             {({ navigation, route }) => (
               <SessionsRoute
                 palette={palette}
                 computerId={route.params.computerId}
+                title={route.params.name}
+                {...(navigation.canGoBack() ? { onBack: () => navigation.goBack() } : {})}
                 onOpen={(row) =>
                   navigation.navigate("Session", {
                     computerId: route.params.computerId,
@@ -1319,15 +1315,17 @@ function AppShell(): JSX.Element {
               />
             )}
           </Stack.Screen>
-          {/* A compact bar on the chat (B1c): the inherited large title made the
-              header ~96 pt, wasting chat space and enlarging the keyboard offset. */}
+          {/* The chat draws its own compact header (mockup `Conversation`): the
+              screen then starts at the window top, so the KAV's parent-relative
+              frame IS the window frame (B1(b) removed structurally). */}
           <Stack.Screen
             name="Session"
-            options={({ route }) => ({ title: route.params.title, headerLargeTitle: false })}
+            options={({ route }) => ({ title: route.params.title, headerShown: false })}
           >
-            {({ route }) => (
+            {({ navigation, route }) => (
               <SessionRoute
                 palette={palette}
+                {...(navigation.canGoBack() ? { onBack: () => navigation.goBack() } : {})}
                 computerId={route.params.computerId}
                 sessionId={route.params.sessionId}
                 title={route.params.title}
@@ -1349,6 +1347,7 @@ function AppShell(): JSX.Element {
 }
 
 const styles = StyleSheet.create({
+  screen: { flex: 1 },
   connecting: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
   connectingText: { fontSize: 14, textAlign: "center" },
   storeError: { padding: 12 },

@@ -102,6 +102,12 @@ export interface QuitClearHost {
   readonly wakeIfPending: () => void;
   /** Quit the TUI (Ink's `useApp().exit`). */
   readonly exit: () => void;
+  /**
+   * docs/feat/session-hop-ux OD6: the session is being REPLACED, so a hop fact
+   * about the old one (its place, its cwd) is dropped instead of riding the new
+   * conversation's first prompt. Absent: nothing to drop.
+   */
+  readonly clearHopPending?: () => void;
 }
 
 /** What `App` names from this feature. The identifiers are the pre-S8 ones. */
@@ -134,6 +140,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
     runQuit,
     detachOnQuit,
     pushNotice,
+    clearHopPending,
     wakeIfPending,
     exit,
   } = host;
@@ -215,6 +222,10 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
     // (docs/fix/clear-connect-unbound.md).
     const clear = session.clear.bind(session);
     clearingRef.current = true;
+    // OD6: the conversation being dropped may have had a hop fact pending; the
+    // new one must not be told "you are in <the old place>". (A ref read at call
+    // time, like every other seam here: it is not a render value.)
+    clearHopPending?.();
     // The open a reset needs comes FIRST (review M1): it can ATTACH a session
     // another device keeps live, and that attach's snapshot is a
     // `history{reason: null}` — which releases the latch and zeroes the
@@ -309,7 +320,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
         }
       },
     );
-  }, [clearingRef, ownClearsRef, pushNotice, sessionRef, stateRef, wakeIfPending]);
+  }, [clearingRef, clearHopPending, ownClearsRef, pushNotice, sessionRef, stateRef, wakeIfPending]);
 
   /**
    * `/clear`'s step (docs/feat/app-decomposition.md M5): the refusals, the

@@ -60,6 +60,7 @@ import {
   SKILL_TOOL_NAME,
   type SkillBodyReader,
   ToolRegistry,
+  WorkloadShells,
   builtinTools,
   createAgentControlTool,
   createContextResetTool,
@@ -67,6 +68,7 @@ import {
   createSkillActivator,
   createSkillTool,
   createTaskTool,
+  createWorkloadShellTool,
   subagentExtraTools,
 } from "@tentacle/tools";
 import { logDaemonError } from "./daemon-log.ts";
@@ -263,6 +265,11 @@ export interface WiredAgent {
   readonly grants: SessionGrants;
   /** The provider a daemon asks for the session's title (`AgentFactory.titleModel`); absent with `autoTitle` off. */
   readonly titleModel?: ModelProvider;
+  /**
+   * The session's shells (docs/feat/workload-shell.md D4): present only when
+   * this build offered `workload_shell`, and disposed next to `jobs`.
+   */
+  readonly workloadShells?: { dispose(): Promise<void> };
 }
 
 /**
@@ -402,6 +409,19 @@ export interface BuildAgentOptions {
    * and only the last has a `/move` feed to ask through.
    */
   readonly moveSession?: true;
+  /**
+   * Offer this agent `workload_shell` (docs/feat/workload-shell.md D3): a
+   * stateful, non-interactive `sh` on a workload, opened through this backend.
+   *
+   * Set ONLY where the daemon runs on the user's own host — the local worker and
+   * `serve` — because it reads the user's kubeconfig / docker endpoint there. A
+   * POD daemon never sets it: its own `shell` already IS in its workload, and
+   * reaching other workloads would need cluster credentials inside the pod
+   * (AGENTS §7, "a pod is not trusted").
+   */
+  readonly workloadShell?:
+    | { readonly backend: import("@tentacle/tools").WorkloadShellBackend }
+    | undefined;
 }
 
 /** `agent_task`'s model list over the tunnel: the laptop's selectable names, with their text. */
@@ -650,6 +670,19 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   if (options.moveSession === true && config.sessionHop.tool) {
     tools.register(createMoveSessionTool());
   }
+  // `workload_shell` (docs/feat/workload-shell.md D3): a stateful, non-interactive
+  // `sh` reached through the LAPTOP's engine credentials. Offered only when the
+  // caller passes a backend — the local worker and `serve`; never a pod daemon
+  // (its own `shell` is already in its workload, and it may not hold cluster
+  // credentials: AGENTS §7). The registry is session-owned and disposed beside
+  // `jobs`.
+  const workloadShells =
+    options.workloadShell !== undefined
+      ? new WorkloadShells(options.workloadShell.backend)
+      : undefined;
+  if (workloadShells !== undefined) {
+    tools.register(createWorkloadShellTool(workloadShells));
+  }
 
   const agent = new Agent({
     model,
@@ -702,6 +735,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     tools,
     grants,
     ...(titleModel ? { titleModel } : {}),
+    ...(workloadShells !== undefined ? { workloadShells } : {}),
   };
 }
 

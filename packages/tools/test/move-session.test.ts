@@ -38,8 +38,26 @@ describe("H5: the `move_session` tool", () => {
     expect(MOVE_SESSION_DESCRIPTION).toContain("local");
     expect(MOVE_SESSION_DESCRIPTION).toContain("container");
     expect(MOVE_SESSION_DESCRIPTION).toContain("attach");
-    // It is a `container` with an image; never `kubernetes` by name (attach only).
-    expect(MOVE_SESSION_DESCRIPTION).not.toContain("kubernetes");
+  });
+
+  // OD7: the description is the model's ONE briefing — rewritten to the owner's
+  // words (< 600 chars), so it stays readable in a tool list and cannot re-grow
+  // the stale "auto-accept is turned off" (D9 reversed by OD5).
+  test("OD7: <= 600 chars, names the k8s namespace form and what resets", () => {
+    const text = MOVE_SESSION_DESCRIPTION;
+    // Mutation: append the old paragraph ⇒ this row fails.
+    expect(text.length).toBeLessThanOrEqual(600);
+    for (const fact of ["kubectl", "namespace", "auto-accept", "reset"]) {
+      expect(text).toContain(fact);
+    }
+    // Applied at the END of the turn, and the model is woken up afterwards.
+    expect(text).toMatch(/end of (this|the) turn|turn ends/i);
+    expect(text).toMatch(/message/i);
+    // The stale claim is gone (auto-accept now ANSWERS a move, slice 3).
+    expect(text).not.toContain("turned off");
+    // A one-off check stays a single kubectl/oc exec: the guidance the owner asked
+    // for, so the model does not hop to run one command.
+    expect(text).toContain("oc");
   });
 
   test("a local move is accepted, and the answer forbids assuming it happened", async () => {
@@ -83,6 +101,43 @@ describe("H5: the `move_session` tool", () => {
     expect(docker.isError).toBe(true);
   });
 
+  // OD1: the tool takes the STRUCTURED `namespace`, the same shape `/move` parses
+  // to, and only kubernetes has one — the model reads the error, not a silent drop.
+  test("a k8s attach takes a namespace; docker/podman have none", async () => {
+    const k8s = await run({
+      target: "attach",
+      workload: { engine: "kubernetes", namespace: "openshift-etcd", name: "etcd-0" },
+    });
+    expect(k8s.isError).toBeUndefined();
+    expect(k8s.content).toBe(MOVE_SESSION_PROPOSED);
+    const docker = await run({
+      target: "attach",
+      workload: { engine: "docker", name: "box", namespace: "ns1" },
+    });
+    expect(docker.isError).toBe(true);
+    if (docker.isError === true) {
+      expect(docker.content).toContain("only a kubernetes workload names a namespace");
+    }
+  });
+
+  test("a namespace that is not a DNS-1123 label is refused here", async () => {
+    for (const namespace of ["Bad_NS", "a".repeat(64), "-lead", "trail-", "a.b"]) {
+      const result = await run({
+        target: "attach",
+        workload: { engine: "kubernetes", namespace, name: "web-0" },
+      });
+      expect(result.isError).toBe(true);
+    }
+    expect(
+      (
+        await run({
+          target: "attach",
+          workload: { engine: "kubernetes", namespace: "ns-1", name: "web-0" },
+        })
+      ).isError,
+    ).toBeUndefined();
+  });
+
   test("a malformed input is refused by the SCHEMA, and the model is told why", async () => {
     // The tool never sees a bad input in production (the loop validates first),
     // but its own `execute` must not answer "proposed" to one either: a direct
@@ -110,6 +165,14 @@ describe("H5: the `move_session` tool", () => {
   test("a `reason` is capped, so a pod cannot paste a page into the owner's prompt", async () => {
     const result = await run({ target: "local", reason: "x".repeat(5_000) });
     expect(result.isError).toBe(true);
+  });
+
+  test("the answer says the user is asked only when auto-accept is off (OD4/OD5)", () => {
+    // The proposal's own words: it is applied at the turn's end, the user is asked
+    // UNLESS auto-accept answers it, and a message tells the model the result.
+    expect(MOVE_SESSION_PROPOSED).toContain("Do not assume the move happened");
+    expect(MOVE_SESSION_PROPOSED).toMatch(/turns? end/i);
+    expect(MOVE_SESSION_PROPOSED).toContain("next turn");
   });
 
   test("the declined hint is one line about a move the owner refused", () => {

@@ -141,7 +141,7 @@ import {
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
 import { forkableMessages } from "./session-fork.ts";
-import type { ImagePolicy } from "./session-host.ts";
+import type { ImagePolicy, WorkloadShellsLike } from "./session-host.ts";
 import type { SessionSummary } from "./session-list.ts";
 import { type LogBase, SessionLog, replayFromBase } from "./session-log.ts";
 import type { SessionPersister } from "./session-persister.ts";
@@ -457,6 +457,13 @@ export class HostedSession {
   imagesPolicy: ImagePolicy | undefined;
   /** The session's approvals (the factory's), handed to the next agent on a settings sync. */
   grants: SessionGrants | undefined;
+  /**
+   * The session's shells (docs/feat/workload-shell.md D4), when this build
+   * offered `workload_shell`. Disposed at the session's END, beside `jobs` —
+   * this is the "no leftovers" site: the remote shell and its children go, and
+   * nothing is left in the workload.
+   */
+  workloadShells: WorkloadShellsLike | undefined = undefined;
   /**
    * The client that CREATED this session declared `hop` (D8/D9): it can put a
    * `move_session` proposal to its owner, so this session's agent may be offered
@@ -2329,12 +2336,14 @@ export class HostedSession {
     readonly jobs?: JobController;
     readonly agentJobs?: AgentJobs;
     readonly grants?: SessionGrants;
+    readonly workloadShells?: WorkloadShellsLike;
   } {
     return {
       permissions: this.permissions,
       ...(this.jobs ? { jobs: this.jobs } : {}),
       ...(this.agentRuntime ? { agentJobs: this.agentRuntime } : {}),
       ...(this.grants ? { grants: this.grants } : {}),
+      ...(this.workloadShells ? { workloadShells: this.workloadShells } : {}),
     };
   }
 
@@ -3055,6 +3064,9 @@ export class HostedSession {
     this.unsubscribeExit?.();
     this.unsubscribeStart?.();
     this.jobs?.dispose();
+    // The session is ENDing: close every shell (EOF + kill tree), best effort and
+    // bounded, so nothing is left running in the workload (D4).
+    void this.workloadShells?.dispose();
     // Children abort (their signal settles a pending ask); no `end`, no exit
     // frame: at a reopen the `bg` without an `end` gives the lost note.
     this.unsubscribeAgentExit?.();

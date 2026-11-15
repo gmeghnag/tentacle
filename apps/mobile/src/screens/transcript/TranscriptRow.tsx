@@ -3,23 +3,30 @@
  * row kind (AGENTS §7). Every string is daemon-supplied data — plain `Text`,
  * never executed, never a link unless the markdown tree says so.
  *
+ * Look (mockup `Conversation`): the person's message is a right-aligned `fill`
+ * bubble; the answer is full-width text on the page; reasoning is one collapsed
+ * line; a tool call is a `ToolRow` whose output opens below it.
+ *
  * The `testID`s are the contract the Maestro flows assert on (text is invisible
  * to XCUITest under RN's new architecture, plan P9):
- * `row-<key>`, `tool-<callId>-<status>`, `diff-<callId>`, `image-<imageId>`.
+ * `row-<key>`, `tool-<callId>-<status>`, `tool-<callId>-output`,
+ * `tool-<callId>-reply`, `diff-<callId>`, `image-<imageId>`.
  */
 import { type JSX, type ReactNode, useState } from "react";
 import { Image, Pressable, StyleSheet, Text, View } from "react-native";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
-import type { Palette } from "../../theme.ts";
+import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
-import { toolSummary } from "../../tool-summary.ts";
+import { toolMeta, toolSummary } from "../../tool-summary.ts";
 import { type Row, imageRowText } from "../../transcript-rows.ts";
+import { Icon } from "../../ui/Icon.tsx";
+import { ToolRow } from "../../ui/ToolRow.tsx";
 import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
 
 /** Lines of a tool's output shown before "show more" (plan F21's bound on screen). */
-export const OUTPUT_PREVIEW_LINES = 6;
+export const OUTPUT_PREVIEW_LINES = 12;
 
 export interface RowProps {
   readonly row: Row;
@@ -32,19 +39,9 @@ export interface RowProps {
 function Shell({
   row,
   children,
-  palette,
-  background,
-}: {
-  readonly row: Row;
-  readonly children: ReactNode;
-  readonly palette: Palette;
-  readonly background?: string;
-}): JSX.Element {
+}: { readonly row: Row; readonly children: ReactNode }): JSX.Element {
   return (
-    <View
-      testID={`row-${row.key}`}
-      style={[styles.row, background === undefined ? undefined : { backgroundColor: background }]}
-    >
+    <View testID={`row-${row.key}`} style={styles.row}>
       {children}
     </View>
   );
@@ -58,30 +55,37 @@ function parsedOf(text: string): Parsed {
 function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Element {
   const user = row as Extract<Row, { kind: "user" }>;
   return (
-    <Shell row={user} palette={palette}>
-      <View style={[styles.bubble, { backgroundColor: palette.card }]}>
+    <Shell row={user}>
+      <View style={[styles.bubble, { backgroundColor: palette.fill }]}>
         {user.restart === true ? (
-          <Text style={[styles.caption, { color: palette.secondaryLabel }]}>restart prompt</Text>
+          <Text style={[typography.caption, { color: palette.sec }]}>restart prompt</Text>
         ) : null}
-        {/* The bubble IS `card`: code inside it takes the page colour (B4). */}
+        {/* The bubble is `fill`; code inside it is `code`, which differs (B4). */}
         <Markdown
           parsed={parsedOf(user.text)}
           palette={palette}
           onLink={onLink}
-          codeBackground={palette.groupedBackground}
+          codeBackground={palette.code}
         />
         {user.images.length > 0 ? (
           <View style={styles.images}>
             {user.images.map((image) => {
               const thumb = thumbnailFor(thumbnails, image.id);
               return (
-                <View key={image.id} testID={`image-${image.id}`} style={styles.image}>
+                <View
+                  key={image.id}
+                  testID={`image-${image.id}`}
+                  style={[styles.image, { backgroundColor: palette.code }]}
+                >
                   {thumb === undefined ? (
                     // No bytes reachable yet (no read-back method exists): the
                     // label is what this build can honestly show (12b Drift 1).
-                    <Text style={[styles.caption, { color: palette.secondaryLabel }]}>
-                      {imageRowText(image)}
-                    </Text>
+                    <View style={styles.imageLabel}>
+                      <Icon name="photo" color={palette.sec} size={18} />
+                      <Text numberOfLines={2} style={[typography.caption, { color: palette.sec }]}>
+                        {imageRowText(image)}
+                      </Text>
+                    </View>
                   ) : (
                     <Image
                       source={{ uri: thumb.uri }}
@@ -102,76 +106,87 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
 function AssistantRowView({ row, palette, onLink }: RowProps): JSX.Element {
   const assistant = row as Extract<Row, { kind: "assistant" }>;
   return (
-    <Shell row={assistant} palette={palette}>
+    <Shell row={assistant}>
       <Markdown parsed={parsedOf(assistant.text)} palette={palette} onLink={onLink} />
     </Shell>
   );
 }
 
+/** Reasoning: one collapsed `sec` line that opens on tap (presentation state). */
 function ReasoningRowView({ row, palette, onLink }: RowProps): JSX.Element {
   const reasoning = row as Extract<Row, { kind: "reasoning" }>;
+  const [open, setOpen] = useState(false);
   return (
-    <Shell row={reasoning} palette={palette}>
-      <View style={[styles.reasoning, { borderLeftColor: palette.separator }]}>
-        <Text style={[styles.caption, { color: palette.secondaryLabel }]}>thinking</Text>
-        <Markdown parsed={parsedOf(reasoning.text)} palette={palette} onLink={onLink} />
-      </View>
+    <Shell row={reasoning}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        onPress={() => setOpen((was) => !was)}
+        hitSlop={8}
+        style={styles.reasoningHead}
+      >
+        <Text
+          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+          style={[typography.subhead, { color: palette.sec }]}
+        >
+          Thinking
+        </Text>
+        <Icon name={open ? "chevron.down" : "chevron.right"} color={palette.sec} size={12} />
+      </Pressable>
+      {open ? (
+        <View style={[styles.reasoning, { borderLeftColor: palette.sep }]}>
+          <Markdown parsed={parsedOf(reasoning.text)} palette={palette} onLink={onLink} />
+        </View>
+      ) : null}
     </Shell>
   );
 }
 
-function ToolRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Element {
+function ToolRowView({ row, palette }: RowProps): JSX.Element {
   const tool = row as Extract<Row, { kind: "tool" }>;
-  const [expanded, setExpanded] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [all, setAll] = useState(false);
   const summary = toolSummary(tool);
-  const output = summary.output;
-  const lines = output === "" ? [] : output.split("\n");
+  const meta = toolMeta(tool);
+  const lines = summary.output === "" ? [] : summary.output.split("\n");
   const hidden = Math.max(0, lines.length - OUTPUT_PREVIEW_LINES);
-  const shown = expanded ? lines : lines.slice(0, OUTPUT_PREVIEW_LINES);
+  const shown = all ? lines : lines.slice(0, OUTPUT_PREVIEW_LINES);
   const view = tool.diff === undefined ? null : diffView(tool.diff);
   return (
-    <Shell row={tool} palette={palette}>
-      <View style={[styles.bubble, { backgroundColor: palette.card }]}>
-        <View style={styles.toolHead}>
-          <Text
-            testID={`tool-${tool.id}-${tool.status}`}
-            style={[styles.toolLabel, { color: palette.label }]}
-            numberOfLines={1}
-          >
-            {`${summary.label} · ${tool.status}`}
-          </Text>
-          {tool.durationMs === undefined ? null : (
-            <Text style={[styles.caption, { color: palette.secondaryLabel }]}>
-              {`${Math.round(tool.durationMs)} ms`}
-            </Text>
-          )}
-        </View>
-        {summary.subtitle !== "" ? (
-          <Text style={[styles.args, { color: palette.secondaryLabel }]} numberOfLines={2}>
-            {summary.subtitle}
-          </Text>
-        ) : null}
+    <Shell row={tool}>
+      <View style={styles.tool}>
+        <ToolRow
+          palette={palette}
+          label={summary.label}
+          subtitle={summary.subtitle}
+          trailing={meta.trailing}
+          tone={meta.tone}
+          expandable={lines.length > 0}
+          expanded={open}
+          onPress={() => setOpen((was) => !was)}
+          labelTestID={`tool-${tool.id}-${tool.status}`}
+        />
         {tool.denialReply !== undefined ? (
           <Text
             testID={`tool-${tool.id}-reply`}
-            style={[styles.caption, { color: palette.danger }]}
+            style={[typography.footnote, { color: palette.red }]}
           >
-            {`your reply: ${tool.denialReply}`}
+            {`Your reply: ${tool.denialReply}`}
           </Text>
         ) : null}
         {view === null ? null : <DiffView view={view} palette={palette} callId={tool.id} />}
-        {shown.length > 0 ? (
+        {open && shown.length > 0 ? (
           <Pressable
             testID={`tool-${tool.id}-output`}
             accessibilityRole="button"
-            onPress={() => setExpanded((was) => !was)}
+            disabled={hidden === 0}
+            onPress={() => setAll((was) => !was)}
+            style={[styles.output, { backgroundColor: palette.code }]}
           >
-            <Text style={[styles.output, { color: palette.secondaryLabel }]}>
-              {shown.join("\n")}
-            </Text>
-            {hidden > 0 && !expanded ? (
-              <Text style={[styles.caption, { color: palette.accent }]}>
-                {`[${hidden} more lines]`}
+            <Text style={[typography.monoCode, { color: palette.label }]}>{shown.join("\n")}</Text>
+            {hidden > 0 && !all ? (
+              <Text style={[typography.footnote, { color: palette.accent }]}>
+                {`Show ${hidden} more lines`}
               </Text>
             ) : null}
           </Pressable>
@@ -184,16 +199,20 @@ function ToolRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
 function NoticeRowView({ row, palette }: RowProps): JSX.Element {
   const notice = row as Extract<Row, { kind: "notice" }>;
   return (
-    <Shell row={notice} palette={palette}>
+    <Shell row={notice}>
       {notice.separator === true ? (
-        <View style={[styles.rule, { backgroundColor: palette.separator }]} />
+        <View style={[styles.rule, { backgroundColor: palette.sep }]} />
       ) : null}
-      <Text style={[styles.caption, { color: palette.secondaryLabel }]}>{notice.text}</Text>
+      <Text style={[typography.footnote, styles.notice, { color: palette.sec }]}>
+        {notice.text}
+      </Text>
       {notice.body === undefined ? null : (
-        <Text style={[styles.caption, { color: palette.secondaryLabel }]}>{notice.body}</Text>
+        <Text style={[typography.footnote, styles.notice, { color: palette.sec }]}>
+          {notice.body}
+        </Text>
       )}
       {notice.separator === true ? (
-        <View style={[styles.rule, { backgroundColor: palette.separator }]} />
+        <View style={[styles.rule, { backgroundColor: palette.sep }]} />
       ) : null}
     </Shell>
   );
@@ -218,16 +237,30 @@ export function TranscriptRow(props: RowProps): JSX.Element | null {
 }
 
 const styles = StyleSheet.create({
-  row: { paddingHorizontal: 12, paddingVertical: 6 },
-  bubble: { borderRadius: 10, padding: 10, gap: 6 },
+  row: { paddingHorizontal: space.inset, paddingVertical: space.transcript / 2 },
+  bubble: {
+    alignSelf: "flex-end",
+    maxWidth: "77%",
+    borderRadius: radius.bubble,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    gap: 6,
+  },
   images: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
-  image: { borderRadius: 6, overflow: "hidden" },
+  image: { borderRadius: 12, overflow: "hidden" },
+  imageLabel: {
+    width: 96,
+    height: 96,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    padding: 6,
+  },
   thumb: { width: 96, height: 96 },
-  caption: { fontSize: 12 },
-  reasoning: { borderLeftWidth: 2, paddingLeft: 8, gap: 4 },
-  toolHead: { flexDirection: "row", justifyContent: "space-between", gap: 8 },
-  toolLabel: { fontSize: 14, fontWeight: "600", flexShrink: 1 },
-  args: { fontFamily: "Menlo", fontSize: 12 },
-  output: { fontFamily: "Menlo", fontSize: 12, lineHeight: 17 },
+  reasoningHead: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 28 },
+  reasoning: { borderLeftWidth: 2, paddingLeft: 12, marginTop: 4 },
+  tool: { gap: 8 },
+  output: { borderRadius: radius.tile, padding: 12, gap: 6 },
+  notice: { textAlign: "center" },
   rule: { height: StyleSheet.hairlineWidth, marginVertical: 6 },
 });

@@ -423,6 +423,28 @@ export function createCompose(deps: ComposeDeps): Compose {
     refresh();
   };
 
+  /**
+   * Create the item for words ALREADY taken from the field (F4 clears first).
+   * Owner B4: if that fails (the facts cannot be read, the store write throws),
+   * nothing was created and nothing was sent — so the words go back to the field
+   * with a notice. Before, the rejection died in the screen's `void` call and the
+   * message silently vanished.
+   */
+  const createdOrGiveBack = async <T>(
+    text: string,
+    create: () => Promise<T>,
+  ): Promise<T | null> => {
+    try {
+      return await create();
+    } catch {
+      deps.setDraft(restoreAfterFailure(deps.draft(), text));
+      saveDraft(deps.draft());
+      deps.notify("that message was not sent — it is back in the field");
+      refresh();
+      return null;
+    }
+  };
+
   /** A steered item's refusal, as the ROW is settled (13b settled the item). */
   const steerRefused = async (
     id: string,
@@ -576,15 +598,19 @@ export function createCompose(deps: ComposeDeps): Compose {
         deps.setDraft("");
         saveDraft("");
         refresh();
-        const basisNow = await basis();
-        const item = await deps.driver.enqueue(handle.port, {
-          computerId: deps.computerId,
-          sessionId: deps.sessionId,
-          kind: "steer",
-          steerTurnId: turnId,
-          text,
-          basis: basisNow,
-        });
+        const item = await createdOrGiveBack(text, async () =>
+          deps.driver.enqueue(handle.port, {
+            computerId: deps.computerId,
+            sessionId: deps.sessionId,
+            kind: "steer",
+            steerTurnId: turnId,
+            text,
+            basis: await basis(),
+          }),
+        );
+        if (item === null) {
+          return;
+        }
         state = enqueueStarted(state, item.enqueueId, text);
         await persistOwn();
         refresh();
@@ -631,14 +657,18 @@ export function createCompose(deps: ComposeDeps): Compose {
       deps.setDraft("");
       saveDraft("");
       refresh();
-      const basisNow = await basis();
-      const item = await deps.driver.enqueue(handle.port, {
-        computerId: deps.computerId,
-        sessionId: deps.sessionId,
-        kind: "prompt",
-        text,
-        basis: basisNow,
-      });
+      const item = await createdOrGiveBack(text, async () =>
+        deps.driver.enqueue(handle.port, {
+          computerId: deps.computerId,
+          sessionId: deps.sessionId,
+          kind: "prompt",
+          text,
+          basis: await basis(),
+        }),
+      );
+      if (item === null) {
+        return;
+      }
       const claimed = await deps.driver.claim(item.itemId);
       if (claimed === null) {
         return;

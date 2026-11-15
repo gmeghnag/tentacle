@@ -10,7 +10,7 @@ import type { JobOutputResult, JobRow } from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
-import type { HopSpec } from "./hop-command.ts";
+import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import type { AutoAcceptFeed } from "./permission-ui.ts";
@@ -286,6 +286,8 @@ export type HopPlaceView =
       readonly engine: "kubernetes" | "docker" | "podman";
       readonly name: string;
       readonly container?: string;
+      /** k8s only (OD1): the namespace, printed as `kubernetes:<ns>/<pod>[/<c>]`. */
+      readonly namespace?: string;
     };
 
 /** The place the session is at NOW, and every later move (`AppProps.targetFeed`). */
@@ -332,7 +334,11 @@ export interface HopFeed {
    * owner approved a PROPOSAL whose prompt already carried the mount gate's
    * warning (D9/M6), so the build must not ask a second time.
    */
-  start(spec: HopSpec, sessionId: string | null, opts?: { gateAnswered?: true }): HopRun;
+  start(
+    spec: HopSpec,
+    sessionId: string | null,
+    opts?: { gateAnswered?: true; namespace?: HopNamespace },
+  ): HopRun;
   /**
    * Abort the hop in flight (D3's `/move cancel`). Optional: a host that cannot
    * stop a build half-way leaves it to its own failure path, and the App then
@@ -350,7 +356,8 @@ export interface HopFeed {
   turn?(event: SessionEvent, own: boolean): void;
   /**
    * The turn is over: ask the owner, if the model proposed a move (D9). The host
-   * puts ONE `session_hop` request through the single broker — never auto-accept —
+   * puts ONE `session_hop` request through the single broker (auto-accept answers
+   * it only when the laptop's own rule marked it, docs/feat/session-hop-ux OD4),
    * and resolves with what its answer means for the App: an approved spec to move
    * (the App starts it as if it had been typed), or nothing. It never rejects: an
    * unaskable prompt is a refusal, and the model is told.
@@ -358,10 +365,26 @@ export interface HopFeed {
   turnEnd?(own: boolean): Promise<HopProposalView>;
   /**
    * The line the next REAL prompt must carry, CONSUMED by this read (review M7):
-   * `[move declined]` after a refusal, `[session moved to …]` after a commit. It
-   * belongs to exactly one prompt, so it can neither be lost nor repeated.
+   * `[move declined]`, `[session moved to …]`, `[move failed: …]`. It belongs to
+   * exactly one prompt, so it can neither be lost nor repeated. `ctx.autoAccept`
+   * is the TUI's LIVE mode: the host renders the line from it at this moment, so a
+   * moved line never states a stale `auto-accept on|off` (OD6).
    */
-  takeLine?(): string | null;
+  takeLine?(ctx: { readonly autoAccept: boolean }): string | null;
+  /**
+   * Hand the line taken by the last `takeLine` BACK: the prompt that consumed it
+   * never ran (its send failed — a link down, a lost slot), so the line must not
+   * die with it (docs/feat/session-hop-ux, failure mode "Wake prompt fails to
+   * send"). The next real prompt carries it instead, so the model still learns
+   * that the session moved. A no-op when nothing was taken or a NEWER fact has
+   * arrived since (that one describes the world better).
+   */
+  restoreLine?(): void;
+  /**
+   * Forget the pending fact: a `/clear` swaps the session, so a fact about the OLD
+   * one (its place, its cwd) must not ride the new one's first prompt (OD6).
+   */
+  clearPending?(): void;
 }
 
 /**
@@ -370,9 +393,24 @@ export interface HopFeed {
  */
 export type HopProposalView =
   | { readonly kind: "none" }
-  /** `gateAnswered`: the prompt this Yes answered already carried the mount gate's warning. */
-  | { readonly kind: "approved"; readonly spec: HopSpec; readonly gateAnswered?: true }
-  | { readonly kind: "declined" };
+  /**
+   * `gateAnswered`: the prompt this Yes answered already carried the mount gate's
+   * warning. `autoAccepted`: NO prompt was shown (auto-accept answered it, OD4).
+   * `namespace`: k8s only, the pin's PROVENANCE (OD3) — the answer the turn end
+   * resolved, carried to the build so the row and the outcome state WHY that
+   * namespace instead of re-resolving (a re-resolution always says `explicit`,
+   * fix round 2 finding 1).
+   */
+  | {
+      readonly kind: "approved";
+      readonly spec: HopSpec;
+      readonly gateAnswered?: true;
+      readonly autoAccepted?: true;
+      readonly namespace?: HopNamespace;
+    }
+  | { readonly kind: "declined" }
+  /** The pin or the ask could not be made at all (a kubeconfig with no context): nothing moved. */
+  | { readonly kind: "failed" };
 
 export interface AppProps {
   /** A local agent; used to build sessions unless `createSession` is given. */

@@ -188,3 +188,58 @@ describe("createSessionFeed", () => {
     expect(h.states().link).toBe("up");
   });
 });
+
+describe("owner B4: this phone's OWN prompt is a user row", () => {
+  // The real client never re-delivers the sender's own prompt (`remote-session.ts`:
+  // "Our own prompt is already on screen"), so the feed shows it — at the FIRST
+  // event, i.e. once the daemon took the prompt: a refusal before the ack gives
+  // the words back to the field and must leave no row behind.
+  const userTexts = (state: State): readonly string[] =>
+    state.rows.flatMap((r) => (r.kind === "user" ? [(r as { text: string }).text] : []));
+
+  test("an own turn that streams shows the prompt as a user row, before the answer", async () => {
+    const h = harness();
+    await h.feed.ownTurn(
+      "t1",
+      gen([
+        { type: "text", delta: "hi back" },
+        { type: "turn_end", reason: "end_turn" },
+      ] as SessionEvent[]),
+      { text: "hello from the phone" },
+    );
+    expect(userTexts(h.states())).toEqual(["hello from the phone"]);
+    expect(h.states().rows[0]?.kind).toBe("user");
+  });
+
+  test("a refusal before any event leaves NO user row (the words go back to the field)", async () => {
+    const h = harness();
+    const refusal = new Error("turn in progress");
+    const broken: AsyncIterable<SessionEvent> = {
+      [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(refusal) }),
+    };
+    await expect(h.feed.ownTurn("t1", broken, { text: "hello" })).rejects.toBe(refusal);
+    expect(userTexts(h.states())).toEqual([]);
+  });
+
+  test("a stream that re-delivers the prompt itself is not doubled", async () => {
+    const h = harness();
+    await h.feed.ownTurn(
+      "t1",
+      gen([
+        { type: "user_message", text: "same" },
+        { type: "turn_end", reason: "end_turn" },
+      ] as SessionEvent[]),
+      { text: "same" },
+    );
+    expect(userTexts(h.states())).toEqual(["same"]);
+  });
+
+  test("an image-only prompt still shows its row (the refs say what was asked)", async () => {
+    const h = harness();
+    await h.feed.ownTurn("t1", gen([{ type: "turn_end", reason: "end_turn" }] as SessionEvent[]), {
+      text: "",
+      attachments: [{ id: "b", mimeType: "image/png", size: 3 }],
+    });
+    expect(h.states().rows.filter((r) => r.kind === "user")).toHaveLength(1);
+  });
+});
