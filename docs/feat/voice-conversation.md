@@ -684,6 +684,118 @@ re-arms it from the setting. (c) F5's cap counts characters of what is
 actually spoken, so the model's `maxSpokenChars` is a ceiling over the reply,
 not a per-chunk limit.
 
+### Spike C1 (Mac) — unattended part
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Setup.** MacBook Pro (Apple Silicon), macOS 27.2, Swift 6.4. Built-in speakers and built-in mic; nobody in the room (the household ambient was not controlled). All code is scratch in `.tentacle/tmp/voice-conversation/c1/`: `c1probe.swift` (one voice-processing `AVAudioEngine`; `AVSpeechSynthesizer.write` buffers → one `AVAudioPlayerNode` per language → main mixer → the VP output, so the TTS is the AEC reference), `analyze.py`, `keyprobe/`, `sinkprobe.swift`, `owner-run.sh`. Every timestamp is the host clock (`mach_absolute_time`), shared across processes. Raw logs are in `c1/out/*.jsonl`.
+- **TCC:** mic permission was already granted (`authorizationStatus` = 3). It was not a blocker.
+- **The output was MUTED** (volume 12.5 %). The brief asks for playback through the speakers, so each run cleared the mute and left the volume at the owner's 12.5 %. **The final re-mute did not happen.** Permissions changed when the run resumed after the account limit, and every command then needed an approval nobody was there to give. The Mac is now **unmuted at 12.5 %**, and nothing is playing. To restore: `swift .tentacle/tmp/voice-conversation/c1/mute.swift 1`.
+- **Consequence of 12.5 %:** the TTS echo at the raw mic (VP off) peaks at only ≈ −48 dBFS (floor −67). The TTS peaks at 0.78–0.99 full scale, so a digital make-up gain would clip, and none was applied. All echo numbers below are for a *quiet* speaker. The owner's run uses their real volume.
+- **Voices:** the system default per language is `com.apple.voice.compact.it-IT.Alice` and `…en-US.Samantha` (compact, 22.05 kHz Float32).
+- **Capture finding (new; it matters for C1b):** with VP on, `installTap` delivers **fixed 4410-frame blocks (100 ms)**, with delivery delay p50 8.6 / p95 14.7 ms, and it ignores `bufferSize`. **`AVAudioSinkNode` on the same input delivers 511–513-frame blocks (11.6 ms)**, delay p50 2.1–2.7 / p95 2.5–4.4 ms (`sinkprobe.swift`). A 100 ms tap alone makes stop < 100 ms impossible, so C1b must capture with a sink node: copy channel 0 on the IO thread, then detect and `hush` on a serial queue. `AVAudioIONode.presentationLatency` reads 0.02 ms with VP on and is useless for latency budgets.
+
+**(1) TTS in the engine: first audio.** 30 warm runs per cell, VP on, alternating order. Sentences:
+- short: "Fatto, i test passano." / "Done, the tests pass.";
+- long: 25 words, "Ho controllato il parser e il typecheck: …".
+
+*Acoustic* = a second process (plain engine, VP off) listening on the mic; the onset is the first 10 ms window > its 300 ms floor + 10 dB.
+
+| ms, p50 / p95 | synth first buffer | first non-silent sample scheduled | acoustic first audio |
+|---|---|---|---|
+| it short | 11 / 15 | 26 / 31 | 192 / 202 (n=27) |
+| it long | 22 / 26 | 25 / 29 | 114 / 291 (n=24) |
+| en short | 14 / 19 | 15 / 20 | 108 / 227 (n=28) |
+| en long | 24 / 33 | 29 / 38 | 132 / 1173 (n=28) |
+
+- **Cold** (first utterance of a voice in the process): first buffer it 196 ms, en 335 ms. **C1b must warm each voice at helper start** with one silent `write`.
+- Sentence length barely matters: `write` streams its buffers.
+- The acoustic p95s, and 13 of 120 missed onsets, come from soft first syllables at 12.5 % volume against a +10 dB detector. **Read the p50s.**
+- The ≈ 90–165 ms gap between "scheduled" and "acoustic" is the output path: VP IO, speaker, the listener's own input path and detector margin. It is the same path that delays an audible stop (below).
+- **Verdict:** the system voice is effectively free (≤ 38 ms p95 synth, ≈ 110–190 ms to sound). It is not a factor in the 1.2 s / 2.0 s targets.
+
+**(2) False barge-in, built-in speakers, nobody talking.** The assistant spoke 14 realistic it/en replies in a loop.
+- Gate: post-AEC level, 10 ms windows; a trigger is level ≥ threshold for ≥ `minms`, while speaking, with 1 s debounce. The thresholds were swept offline on the same trace.
+- Result columns are "lowest threshold with zero false barge-ins".
+
+| VP config | speech analysed | residual while speaking: p50 / p99.9 / max | silence: p50 / max | 10 ms | 30 ms | 60 ms | 100 ms | 150 ms |
+|---|---|---|---|---|---|---|---|---|
+| AGC **on** (V1 helper today) | 6.3 min | −69.2 / −40.7 / −35.1 dBFS | −77.9 / −39.3 | −34 | −36 | −40 | −42 | −46 |
+| AGC **off** | 5.2 min | −79.1 / −47.3 / −40.6 dBFS | −86.7 / −63.2 | −40 | −44 | **−48** | −50 | — |
+
+- **The V1 placeholder would false-trigger constantly.** Its gate is −45 dBFS on 100 ms tap buffers, which gives **44.5 false barge-ins / 5 min** (AGC on, same trace); −40 gives 1.6 / 5 min, and −35 gives 0.
+- **AGC off lowers the echo residual by ≈ 7 dB and the floor by ≈ 9 dB**, so it allows an 8 dB lower gate.
+- Each "zero" sits *at* the edge of 5–6 min of data, with no measured margin. Treat it as the floor, not the setting.
+
+**(3) Stop latency with a simulated user.** A second process (`afplay`) played 10 "user" interruptions in other system voices (Rocko/Eddy/Grandpa it, Daniel/Reed/Eddy en, `out/users/`), 1.5–3.5 s into each reply.
+
+| run | gate | detected | false | onset → decision p50 | decision → `player.stop()` returned p50 | onset → stopped (engine) p50 |
+|---|---|---|---|---|---|---|
+| AGC on, user ×1 | −40 / 60 ms | 1 / 7 | 0 | 65 ms | 15 ms | 80 ms |
+| AGC on, user ×4 | −40 / 60 ms | 1 / 6 | 1 | 74 ms | 35 ms | 108 ms |
+| AGC off, user ×4 | −48 / 60 ms | **0 / 32** | 0 | — | — | — |
+| AGC off, user ×4, TTS −12 dB | −48 / 60 ms | 3 / 23 | 0 | 87 ms | 11 ms | 159 ms |
+
+- **This is not a valid stop-latency measurement.** The "user" comes out of the same speaker at the same level as the assistant: raw-mic peaks −46…−50 dBFS vs the TTS echo at −48, so SNR ≈ 0 dB before AEC. With no assistant speaking, VP's AGC compresses it to −39…−49 dBFS whatever its loudness (×1 and ×4 measured the same). During double-talk its peaks reach only −52…−43 dBFS, against an echo residual of −57…−45 in the 1.5 s before. That is ≈ 3 dB of separation, and a 60 ms level gate cannot use it.
+- A person at 50 cm is much louder than a 12.5 % laptop speaker, so this is a worst case, not the real one.
+- **What it does establish:** a *level* gate cannot hear a talker who is as loud as the assistant. The engine-side budget is ≈ `minms` + 12 ms block + 3 ms delivery to decide, plus 11–35 ms for `player.stop()` to return. On top of that comes the output path, ≈ 90 ms or more by (1).
+- So with a level gate and a 60 ms hold, the audible stop is likely ≈ **170–250 ms** on built-in speakers, and **≤ 100 ms p50 is unlikely there**. Only the owner's real-voice run (below) settles it.
+
+**(4) Kokoro in Swift: feasibility.** It could not be built here: `git clone` needed an approval nobody was there to give. The facts below come from the projects' own pages.
+
+| path | license (code / weights / G2P) | Italian | streaming | notes |
+|---|---|---|---|---|
+| `soniqo/speech-swift` `KokoroTTS` (CoreML) | Apache-2.0 / Apache-2.0 (hexgrad/Kokoro-82M, CoreML conversion) / Apache-2.0, "no GPL" (own claim) | voices `if_sara`, `im_nicola`; a rule-based `LatinPhonemizer.swift` (Italian quality unverified) | not documented | macOS 15+, ≈ 170 MB (≈ 80 MB INT8) |
+| `FluidInference/FluidAudio` (CoreML) | Apache-2.0 / Apache-2.0 / **eSpeak-NG, GPL-3.0** | via eSpeak | **no** ("generates all frames at once") | **excluded: GPL** |
+| `mlalma/kokoro-ios` (MLX Swift) | MIT / Apache-2.0 / MisakiSwift (English); eSpeak commented out | **no** | — | excluded for it-IT |
+
+- First-audio reference (V0, Kokoro ONNX on CPU, short clause): it 290 ms, en 237 ms p50, non-streaming. The system voice takes 11–14 ms to its first buffer.
+- **Verdict:** not in v1 (consistent with Owner Q5). The only license-clean Italian path is speech-swift, and its Italian G2P is unproven. Revisit as a Mac opt-in only after an owner listening test of `im_nicola`/`if_sara` through that phonemizer. To try it: `git clone https://github.com/soniqo/speech-swift && cd speech-swift && make build`.
+
+**(5) Ctrl+R twice: key delivery.** The probe drives a real pty (`keyprobe/drive.py`) into an Ink 5.0.1 app that uses the TUI's raw path: `useInput` plus `isVoiceKey` from `packages/tui/src/keys/layer-voice.ts`.
+- Terminal.app, iTerm2 (default) and Ghostty in legacy keyboard mode all send Ctrl+R as one `0x12` byte per press. The probe reproduces exactly that. The real terminal apps were not driven.
+
+| case | events seen |
+|---|---|
+| two presses, gap 1 / 5 / 20 / 50 / 80 / 120 / 200 / 300 / 450 / 600 ms | **2** each (measured gaps 0.2 … 611 ms) |
+| two presses, loop busy 150 ms *after* the first | 2 |
+| both bytes in **one** read (one write, or loop busy 200 ms *before* the first press with a gap of 20 or 80 ms) | **1**: Ink parses `\x12\x12` as a *single* `ctrl+r`, indistinguishable from one press |
+| loop busy 200 ms before, gap 250 ms | 2 |
+| iTerm2 opt-in "Report modifiers using CSI u" (`ESC[114;5u`) | 0 voice-key events, even for a *single* press (`char="[114;5u"`, `ctrl=false`); this already affects V1's Ctrl+R |
+
+- **Verdict:** the double press is distinguishable whenever the TUI's event loop is not blocked for longer than the gap. A coalesced chunk silently turns into one press.
+- **C4 should:**
+  1. count `0x12` bytes in the raw chunk before Ink collapses it. Ink's `keypress.sequence` is lost, so this needs an stdin `data` pre-listener or a parse of the raw chunk.
+  2. use a ≈ 400 ms window, and defer the single-press (dictation) action until the window closes, or make the second press "upgrade" an already started dictation.
+  3. optionally accept `ESC[114;5u` as `ctrl+r`.
+
+**Mac full/half-duplex recommendation.**
+- **Built-in speakers: half-duplex by default.** The mic is gated while the assistant speaks; Esc stops speech.
+  - The zero-false gate sits exactly on the echo-residual tail, with no margin.
+  - VP's AGC compresses near speech into the same range.
+  - The 100 ms tap and the output path push the audible stop above 100 ms.
+  - Full-duplex on speakers becomes the default only if `owner-run.sh` shows, at the owner's real volume, all of: 0 false barge-ins in the soak, ≥ 90 % real-voice detection, and onset → stopped (engine) ≤ 60 ms p50, which leaves ≈ 90 ms for the output path.
+- **AirPods (in and out): expected full-duplex.** The echo path is acoustically separated; the owner verifies.
+- **Mac mic + AirPods output: expected full-duplex.** There is no speaker echo; the owner verifies.
+- **C1b changes regardless of the outcome:**
+  - capture with `AVAudioSinkNode`, not `installTap`;
+  - VP AGC **off** (`isVoiceProcessingAGCEnabled = false`);
+  - the barge-in gate is **Silero VAD on the post-AEC signal**, not the −45 dBFS placeholder, with the level gate ≥ −48 dBFS / 60 ms as a pre-filter (the raised-threshold fallback of `realtime-media.md:540-541`);
+  - warm each voice at start.
+
+**For the owner (≈ 10 min):** `cd .tentacle/tmp/voice-conversation/c1 && sh owner-run.sh`. The script prompts per route and prints the numbers.
+1. Volume at your normal level, not muted. Close music and calls.
+2. **Route 1 — built-in speakers + mic:** interrupt the assistant 8 times in your normal voice, with short sentences.
+3. **Route 2 — AirPods in your ears (input and output):** stay silent 3 min, then 8 interruptions.
+4. **Route 3 — AirPods output + "MacBook Pro Microphone" input** (System Settings › Sound): stay silent 3 min, then 8 interruptions.
+5. Paste the three blocks (or say "done": the logs are in `c1/out/owner-*.jsonl`), then re-mute if you want (`swift mute.swift 1`).
+
+**Not done, and why:**
+- the real-voice stop latency and the AirPods routes (they need a human);
+- Silero on the post-AEC audio (the WAV dump was dropped when capture moved to the sink node, then permissions closed);
+- the Kokoro build (`git clone` approval);
+- a stop run at the AGC-on gate with louder injection (permissions closed).
+
 ## Review
 
 ### C2 review · *— claude-opus-5-5, 2026-11-15*
