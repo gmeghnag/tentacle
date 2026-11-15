@@ -368,3 +368,10 @@ Red first (§9); each is shown failing on a stub, then green, and the named muta
 - Q1 order: **yes** — spike now, code after V1 (`feat/voice-dictation`) and `feat/mobile-voice` merge; a language with no on-device recognizer has no voice mode, never cloud.
 - Q2 reasoning off for voice turns: **yes, as a user-settable switch, also settable from the mobile app** (not hard-wired) — C3 + a settings row on both edges; mandatory fresh-context review.
 - Q3 auto-send at end of utterance: **yes, conversation mode only** (Ctrl+R dictation never auto-sends).
+
+#### Owner answers (2026-11-15, batch 2)
+
+- Q4 barge-in: **stop the speech + steer**, never cancel; Esc stops speech, a second Esc aborts the turn.
+- Q5 TTS: **system voice on Mac and iPhone**; Kokoro an opt-in on the Mac only if the spike proves it.
+- Q6 iPhone background / screen locked: **in v1 scope — "background subito"** (overrides the recommendation): the phone loop must keep listening and speaking with the app backgrounded and the screen locked. The plan must be revised: background audio mode, AVAudioSession lifetime, interruptions, App Review risk, and E11 becomes a design input, not a gate.
+- Q7 two edges on one session: **only the edge that started the turn speaks**; the other shows text.
