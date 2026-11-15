@@ -295,6 +295,12 @@ Dependency order: protocol → agent → daemon → client → cli → tui → m
   skill guard), `packages/agent/src/subagent.ts` (live parent state),
   `packages/agent/src/compact.ts` (`carryOverSkills` filter),
   `packages/agent/test/agent-capabilities.test.ts` (new).
+  *As built:* also `packages/agent/src/session.ts` (the `/compact` call site of
+  `carryOverSkills` passes the disabled set) and `packages/cli/src/wiring.ts`
+  (the sub-agent runner gets `capabilities: () => agent.capabilities()` — the
+  runner is built before the agent, so the live source is a closure). The
+  step-limit final request (`agent.ts` "final") sends the stored history,
+  system message included, so its catalog is projected too.
 - **S3a** (M · load-bearing · strong model): `packages/protocol/src/session.ts`
   (request/result, `OpenParams`/`OpenResult` field), `updates.ts` (update +
   `UPDATE_CLASS` display), `skills.ts` (`disabled?`), `methods.ts`;
@@ -745,3 +751,347 @@ ran it knows.
 - **Regression attacks:** names are scanned only after the LAST header, so an AGENTS.md block is never read. A description cannot forge a `<name>` tag (it is escaped). Hiding a skill cannot uncover a 101st one (the composed set is already capped). All three hold.
 - **Gate:** the two touched test files pass, 30 pass / 0 fail. `bun run lint` is clean (1657 files). `bun run typecheck` is clean.
 - **Note:** the doc diff also removes one mockup bullet (T1), outside S1's code. Confirm it was intentional.
+
+## Execution — S2
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Slice S2 only** (the agent loop: projection, execution guard, sub-agents,
+carry-over). No protocol, daemon, client, persistence or UI change; S3a–S5
+untouched.
+
+### Load-bearing check (re-run first)
+
+Passed, with one correction to S1's note. `rg "definitions\(\)|ChatRequest = \{|modelView\("`
+in `packages/agent/src` (before any edit):
+
+- The round: `definitions()` `agent.ts:1274` + `modelView(messages)` `:1279`,
+  inside the loop head — rebuilt every round. `contextUsage`: `:1758`/`:1764`.
+- The step-limit final request (`:1599`/`:1611`): no `tools`, **but it does
+  send the system prompt** — its messages are `modelView(messages)`, history[0]
+  included. S1's Execution said "no `systemPrompt`"; that is wrong. It now goes
+  through the same system projection.
+- Compaction (`compact.ts:118`, `:160`): its own `COMPACT_SYSTEM`, `tools: []`,
+  and the transcript drops the system message (`m.role === "system" ? []`). No
+  bypass.
+- A sub-agent: its own `Agent` (`subagent.ts:422`), whose registry copies the
+  parent's tools (MCP and `skill` included). Its prompt is `type.prompt` (no
+  catalog), so only its tool list needs the projection — through a live
+  capabilities source.
+- `refreshUserSkills` (`:907`) and the reset (`:2394`) call `definitions()` to
+  read the model's offered set, not to build a request. Unchanged.
+
+### Repro
+
+Behavioural, the Context's shape — `.tentacle/tmp/session-capabilities/s2-repro.ts`:
+real `startDaemon`, the stdio fixture `packages/cli/test/fixtures/mcp-stdio-server.ts`
+as server `echo`, a recorder `createProvider`, one prompt:
+
+```ts
+const config = { ...base, mcpServers: { echo: { type: "stdio" as const, command: process.execPath, args: [fixture] } } };
+const handle = await startDaemon(config, { host: "127.0.0.1", port: 0, devices: false, discovery: false,
+  relay: { noRelay: true }, onNotice: () => {}, createProvider: () => model });
+// … wait for mcp/status to settle, newSession().send("hi")
+console.log("tools:", JSON.stringify((requests.at(-1)?.tools ?? []).map((t) => t.name)));
+console.log("capability methods:", JSON.stringify(Object.values(Method).filter((m) => /capabilit/.test(m))));
+```
+
+```
+tools: ["fs_read","fs_write","fs_edit","fs_multi_edit","shell","shell_output","shell_kill","agent_task","agent_control","context_reset","mcp__echo__echo"]
+capability methods: []
+```
+
+`mcp__echo__echo` reaches the model, and no session RPC can remove it. I ran it
+on the S2 tree. S2 adds no wire (that is S3a), so this daemon-level observable
+is the same before and after S2. S2's own before/after is the red → green run
+below.
+
+### As built, in order
+
+1. **API surface first, no behaviour** (so the tests go red on assertions, not
+   on compile errors):
+   - `AgentConfig.capabilities?: SessionCapabilities | (() => SessionCapabilities)`
+     (`agent.ts:592`). A value is the initial state. A function is a live source.
+   - `Agent.capabilities()` / `setCapabilities(state)` (`:922`, `:932`).
+   - `SubagentDeps.capabilities?: () => SessionCapabilities` (`subagent.ts:338`),
+     passed to the child (`:434`).
+   - `carryOverSkills(…, disabled = [])` (`compact.ts`).
+2. **The test file** `packages/agent/test/agent-capabilities.test.ts` (11
+   tests). Red output below.
+3. **Projection** (`agent.ts:937-975`):
+   - `serverOf` reads the registry's `mcpServer` tag.
+   - `projectedTools(caps)` = `projectTools(definitions(), serverOf, caps)`.
+   - `projectedHistory(messages, caps)` replaces only history[0]'s content with
+     `projectSystem(…)`. It returns a copy, so the stored array is never touched.
+     Every other message keeps its identity, so a context anchor still matches.
+   - `catalogSkills` (`:799`) holds the descriptions the catalog is re-rendered
+     from. It is set from the listing's `model: true` entries in the
+     constructor and in `installSkills`, which are the moments the prompt and
+     the `skill` enum are composed. It is not set at a user rescan.
+     `catalogOf` (`:3029`) maps them to `SkillInfo`; only name and description
+     reach the renderer.
+4. **Round snapshot** (`:1372`): `const caps = this.capabilities()` is read
+   ONCE per round. The tools, `noteContextUsage` and the view come from it, and
+   it rides `RoundHooks.capabilities` into `runToolCalls` (`:1650`).
+5. **Execution guard**:
+   - `authorizeCall` (`:2879`) checks `hiddenCallRefusal(call, caps)` before the
+     gate. A hidden server's tool gives `"<tool> is turned off for this session"`.
+     `skill{name}` of a disabled skill gives `skill "<name>" is turned off for
+     this session`. Either way `isError`, no prompt, never run.
+   - Both call sites pass the snapshot: a call alone `:2036`, a group `:2172`.
+   - A resumed round (`:1109`) passes none, on purpose: its calls were issued
+     when they were visible (F2).
+6. **Final request** (`:1700`) and **`contextUsage`** (`:1861-1882`, both the
+   exact count and the estimate) use the same projection.
+   `noteContextUsage` estimates over the projected history.
+7. **Carry-over**:
+   - `carryOverSkills` drops disabled names from both `kept` and `dropped`
+     (`compact.ts:233`). A dropped name is told to the model as "loadable
+     again", so it must not name a hidden skill either.
+   - The callers pass the disabled set: the reset `agent.ts:2489`, `/compact`
+     `session.ts:346`.
+8. **Wiring**: `cli/src/wiring.ts:610` gives the runner
+   `capabilities: () => agent.capabilities()`.
+
+### Drift from the Implementation (and why)
+
+- **Two files not in the Files list**: `session.ts` (the `/compact` call site;
+  the plan named only `compact.ts`, but the filter needs the caller's state) and
+  `cli/src/wiring.ts` (the only production `createSubagentRunner`, built before
+  the agent). Both are recorded in Files *As built*.
+- **The final request is projected**: S1's load-bearing note had wrongly
+  cleared it (above).
+- **The `skill` guard is generic**: it lives in `authorizeCall`, keyed on
+  `call.name === SKILL_TOOL_NAME`, not inside the `skill` tool. The tool stays
+  pure, and the round's snapshot is only known to the loop. The user's `/name`
+  goes through `runUserSkill`, which never reaches `authorizeCall`, so F15
+  holds by construction (pinned by a test).
+- **Catalog descriptions come from the listing captured at compose time**,
+  not from `this.listing`, which a user rescan replaces. This closes the drift
+  the S1 Review flagged from the agent's side too.
+
+### F3 — providers and history calls to a tool no longer offered
+
+`.tentacle/tmp/session-capabilities/s2-f3-shape.ts` runs both REAL providers
+with an injected `fetch` (nothing leaves the machine). The history holds a
+`mcp__echo__echo` call and its result:
+
+```
+anthropic projected (echo hidden): tools=["fs_read"] history-call-kept=true
+anthropic final (no tools, today): tools=[] history-call-kept=true
+openai projected (echo hidden): tools=["fs_read"] history-call-kept=true
+openai final (no tools, today): tools=[] history-call-kept=true
+```
+
+The projected shape is the history's calls plus a smaller `tools`. Production
+already sends a strictly harder shape on every step-limit final request:
+history calls with no `tools` at all (`agent.ts` final request). Neither
+provider rewrites history by `tools`. **Unverified:** live acceptance by the
+real endpoints, which I did not call (no key, and it is an external call).
+To verify: one `anthropic` and one `openai` request of the "projected" shape
+against the real API. If one returns 400, F3's fallback applies (project past
+calls to hidden tools in `modelView`). I did not improvise it.
+
+### Red before green (§9)
+
+All tests were written against the stub surface (step 1), and they failed on
+assertions:
+
+```
+$ bun test packages/agent/test/agent-capabilities.test.ts
+(fail) … F1/F2: a mid-stream toggle leaves the in-flight request and its calls alone; the NEXT request is projected
+(fail) … skill{name} of a disabled skill is answered 'turned off', never read
+(fail) … F11: everything off → no `skill` tool, no catalog, built-ins only
+(fail) … F13: an MCP server's tools registered AFTER the toggle are hidden by their tag
+(fail) … the step-limit final request's system prompt is projected too
+(fail) sub-agents follow the parent's live switches > a child's request lacks the hidden server's tools
+(fail) contextUsage counts what is really sent > the exact count is asked for the projected request
+(fail) contextUsage counts what is really sent > the estimate is smaller with things hidden
+(fail) F12: … > the restart request is projected and holds no k8s body
+(fail) F12: … > carryOverSkills drops a disabled skill from both kept and dropped
+ 1 pass
+ 10 fail
+```
+
+The one pass is F15 (the user's `/name` of a disabled skill runs). It is a
+regression guard: it already held, and it must keep holding. After the
+implementation: **11 pass / 0 fail**.
+
+### Mutation checks (§9)
+
+The runner is `.tentacle/tmp/session-capabilities/s2-mut.ts`. Each mutation is
+one string replacement, then the S2 test file runs, then the original is
+written back. Afterwards `cmp` against `.tentacle/tmp/session-capabilities/s2bak/`
+showed agent.ts, compact.ts and subagent.ts byte-identical.
+
+| # | Mutation | Result |
+|---|----------|--------|
+| M1 | the guard reads the LIVE state instead of the round's snapshot (the plan's "snapshot read after the call") | **RED** 9/2 — F1/F2 (the in-flight call `c1` is refused) + the sub-agent case |
+| M2 | round tools unprojected (`definitions()`) | **RED** 6/5 |
+| M3 | round system message unprojected | **RED** 8/3 — F1/F2, F11, F12 |
+| M4 | step-limit final request unprojected | **RED** 10/1 |
+| M5 | execution guard disabled | **RED** 9/2 — F3 echo call executed; `skill{k8s}` read |
+| M6 | `carryOverSkills` filter removed | **RED** 9/2 — F12 restart holds `BODY:k8s`; unit |
+| M7 | child not given the capabilities source | **RED** 10/1 |
+| M8 | `contextUsage` counts the unprojected history | **RED** 10/1 |
+| M9 | child given a one-time copy `deps.capabilities()` instead of the live source | first **survived** (the test toggled before spawn) → test tightened to toggle during the child's first stream → **RED** 10/1 |
+
+### Failure modes covered by S2
+
+- **F1**: in-flight request unchanged.
+- **F2**: a call visible in its round's snapshot runs.
+- **F3**: a hidden call is refused and never executed (the fixture log stays
+  `["one"]`). The provider half is above.
+- **F11**: everything off.
+- **F12**: reset projection plus no carried body. `/compact` uses the same
+  `carryOverSkills` path, unit-pinned.
+- **F13**: tools registered after the toggle are hidden by tag.
+- **F15**: the user's own `/name` runs.
+- **Not S2's**: F4–F10 and F14 (wire, persistence, pods: S3a/S3b).
+
+### Notes / debt
+
+- **The daemon does not carry the state yet.** S3a must call `setCapabilities`
+  on the session's agent. It must also re-apply it when `update_settings`
+  rebuilds the agent: `buildAgent` makes a fresh `Agent` with everything on.
+- **`/compact`'s summary transcript still includes a disabled skill's body**,
+  in summarised form. Only verbatim carry-over is filtered, which is what the
+  Design names. A follow-up could leave such bodies out of `renderMessage`.
+
+### Gate
+
+- `bunx tsc --noEmit` → clean.
+- `bun run lint` → `Checked 1658 files in 536ms. No fixes applied.` That is 0
+  errors and 0 warnings, the §6 baseline.
+- `bun test` → **11934 pass, 5 skip, 0 fail**, `84926 expect() calls`,
+  `Ran 11939 tests across 857 files. [437.67s]`.
+  - 11934 = the post-fix-1 11923 plus the 11 new tests.
+  - The 5 skips are the pre-existing opt-in guards.
+  - This run started only after the last mutation pass had restored the
+    sources (`cmp` clean). An earlier run overlapped a mutation pass, so I
+    discarded it.
+- Narrow: `bun test packages/agent/test/agent-capabilities.test.ts` → 11 pass /
+  0 fail.
+- No schema changed, so `protocol.json` was not regenerated. No `protocol.d/`
+  note.
+- The changelog fragment `changelog.d/session-capabilities.added.md` already
+  exists, its text matching the doc's metadata line, so S2 added none.
+
+**S2: DONE.** S3a/S3b/S4/S5: not started (out of scope).
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16*
+
+Both S2 Review findings were test gaps. The code was right, so no source
+changed. Two tests were added to `packages/agent/test/agent-capabilities.test.ts`.
+
+1. **Grouped guard (finding 1): FIXED.** The test is "a GROUPED round (read-only
+   mode) still refuses the hidden server's call".
+   - Setup: `toolExecution {mode:"read-only", maxParallel:2}`. Two read-class
+     MCP calls in one round: `mcp__echo__echo` (server hidden) and
+     `mcp__other__x`.
+   - It asserts the round went through `runGroup`: a `tool_phase` for `g2`,
+     which only `runGroup` yields.
+   - It asserts the hidden call is answered "turned off" and never runs, and
+     the visible call runs.
+   - **Drift from the Review's scenario.** `skill` beside `fs_read` never
+     groups: the `skill` tool declares no `concurrency`, so `classOf` makes it
+     `exclusive`. The reachable hidden-in-a-group case is a read-only MCP tool,
+     which the adapter tags `concurrency: () => [{read, mcp:<server>}]`
+     (`mcp/src/tool-adapter.ts:83`).
+2. **`/compact` call site (finding 2): FIXED.** The test is "/compact
+   (Session.compact) carries no disabled skill's body into the new history".
+   - It loads `k8s` and `damajs`, disables `k8s`, then calls
+     `session.compact()`.
+   - It asserts the new history holds `SUMMARY` and `BODY:damajs`, and holds no
+     `BODY:k8s`.
+
+**Red before green.** Both tests are green on the current code, because the
+code was already right. Red is shown by mutating the code each test pins. The
+runner is `.tentacle/tmp/session-capabilities/fr1-mut.ts`: one replacement, then
+the S2 file runs, then the original is written back. `cmp` against `fr1bak/`
+was clean afterwards.
+
+```
+== MB (group authorizeCall without the snapshot)
+(fail) … a GROUPED round (read-only mode) still refuses the hidden server's call
+ 12 pass
+ 1 fail
+== ME (/compact passes [] instead of the disabled set)
+(fail) F12: … > /compact (Session.compact) carries no disabled skill's body into the new history
+ 12 pass
+ 1 fail
+RESTORED
+```
+
+These are the Review's own MB and ME, which both survived before. Now each
+turns exactly its new test red. With the sources restored, the narrow run is
+13 pass / 0 fail.
+
+The LOW nit (the estimate reuses the anchor's `promptTokens`) is not addressed.
+It is not HIGH or MEDIUM.
+
+**Gate**
+- `bunx tsc --noEmit` → clean.
+- `bun run lint` → `Checked 1658 files … No fixes applied.` (the §6 baseline).
+- `bun test` → **11936 pass, 5 skip, 0 fail** (11941 tests, 857 files, 443s).
+  That is the S2 count of 11934 plus the 2 new tests. The 5 skips are the
+  opt-in guards.
+- **Flake.** The first full run had **2 fails**. One of them was in
+  `packages/cli/test/serve-autowake.test.ts` (T3/C5), a file this branch does
+  not touch. The pass count was 11934, which means 2 tests that passed before
+  had failed. Re-run alone, that file passed 5/5. A second full run was clean
+  (above). I did not identify the second failing test: the first run was not
+  logged.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; same model as the S2 executor, so shared blind spots may survive. Scope: S2, `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES.** Both findings are test gaps on a guard path. The code is right; nothing pins two of its sites.
+
+1. **MEDIUM: the execution guard in `runGroup` is unpinned** (`packages/agent/src/agent.ts:2170-2172`). Mutation MB dropped `capabilities: hooks.capabilities` from the group `authorizeCall`, and all **11/11 tests stayed green**. That path is the production default: `DEFAULT_TOOL_EXECUTION = "read-only"` with `maxParallel 8` (`packages/config/src/defaults.ts:88-90`), so read-class calls in one round are grouped. Scenario: the model sends `skill{name:"k8s"}` (disabled) next to an `fs_read`. If someone drops that line later, the hidden skill's body loads with no red test. Fix: add a test with `toolExecution: {mode:"read-only", maxParallel:2}` and two calls in one round. One is hidden, and it must come back "turned off" and never run.
+2. **MEDIUM: the `/compact` call site of the carry-over filter is unpinned** (`packages/agent/src/session.ts:343-347`). Mutation ME passed `[]` instead of `disabledSkills`, and the S2 file plus `session.test.ts` stayed **22/22 green**. Execution says "`/compact` uses the same `carryOverSkills` path, unit-pinned", but only the function is pinned, not the caller. Scenario: a regression there carries a disabled skill's full body verbatim into the compacted history (F12). Fix: drive `Session.compact()` once with `k8s` active and disabled, and assert that `BODY:k8s` is not in the new history.
+
+**Gate (narrow, as scoped):**
+- `bun test` on `agent-capabilities` + `capabilities` + `compact`: 62 pass / 0 fail.
+- `bun run lint`: 1658 files, no fixes (baseline clean).
+- `bun run typecheck`: clean.
+- I did not re-run the full suite.
+
+**Mutations, each reverted with the Edit tool** (`cmp` against the backups is identical, `git status` clean):
+- MB: survived (finding 1).
+- MC (no snapshot on the single-call path): RED 9/2.
+- ME: survived (finding 2).
+- The executor's M1–M9 are not re-run.
+
+**Attacks tried:**
+- Another request builder that bypasses the projection: none. Grep `.stream(`/`definitions()`. The step-limit final request is projected. Compaction sends `tools: []` and no system message. The title request runs daemon-side with no tools.
+- Is the catalog drift after a user rescan closed? Yes: `catalogSkills` is set only in the constructor and `installSkills`.
+- Is the anchor identity broken by `projectedHistory`? No, only index 0 is copied.
+- Do sub-agents follow the parent live? Yes: the wiring passes the closure `agent.capabilities()`.
+- Does a resumed round skip the guard? Yes, on purpose (F2), and the plan agrees.
+
+**Nit, not blocking:** `estimateUsed` with a valid anchor reuses its `promptTokens` (`context-awareness.ts:111-113`). The estimate does not drop after a toggle until the next real request reports usage. The exact count path is right.
+
+**Executor behaviour:** it was disciplined. It corrected S1's wrong "no system prompt" note, mutation-tested nine properties and tightened M9 after it survived. It overstated one coverage claim (finding 2).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16* (fresh context, same model as before; scope `git diff HEAD~1`, test-only plus doc)
+
+**Verdict: APPROVE.** Both findings are closed. The diff changes no production code.
+
+1. **Finding 1 (`runGroup` guard): closed.** New test "a GROUPED round (read-only mode) still refuses the hidden server's call". I re-applied MB (drop `capabilities: hooks.capabilities` at `agent.ts:2172`), and that test goes **RED**. The test also checks that `g2` actually ran in the group (`tool_phase` for `g2`), so it truly goes through `runGroup`.
+   - Correction to my Round 1 example: the `skill` tool declares no `concurrency`, so `classOf` makes it `"exclusive"` (`round-plan.ts:28-29`, nothing in `tools/src/skill.ts`). It never joins a group.
+   - The real grouped case is a read-keyed MCP tool, which is what the new test uses.
+2. **Finding 2 (`/compact` call site): closed.** New test "/compact (Session.compact) carries no disabled skill's body". I re-applied ME (`[]` at `session.ts:346`), and that test goes **RED**. It also asserts that `BODY:damajs` is still carried, so the filter cannot pass by dropping everything.
+
+**Gate:**
+- `agent-capabilities` + `session` tests: 24 pass / 0 fail.
+- `bun run lint`: clean, 1658 files.
+- `bun run typecheck`: clean.
+- Restore after the mutations: `cmp` identical, `git status` clean.
+
+**Regressions on the diff:** none. The two tests are added, no existing assertion changed, and they use the existing harness and fakes.

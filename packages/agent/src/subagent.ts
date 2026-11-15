@@ -37,6 +37,7 @@ import {
   createAgentNotifyTool,
 } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
+import type { SessionCapabilities } from "./capabilities.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
 import { classOf, isReadClass } from "./round-plan.ts";
@@ -329,6 +330,12 @@ export interface SubagentDeps {
    * Absent (`subagents.twoWay` off) → no child is offered `agent_notify`.
    */
   readonly notify?: (agentId: string, text: string) => AgentNotifyResult;
+  /**
+   * The parent session's capability switches, LIVE (docs/feat/session-capabilities.md):
+   * each child round reads them, so a server or skill the user hides is hidden
+   * from every child too, from its next model call. Absent → everything on.
+   */
+  readonly capabilities?: () => SessionCapabilities;
 }
 
 /** Build a sub-agent runner plus the agent types it exposes. */
@@ -424,6 +431,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
       tools: childTools,
       env: deps.env,
       systemPrompt: type.prompt,
+      ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
       ...(deps.maxTokens !== undefined ? { maxTokens: deps.maxTokens } : {}),
       ...(deps.requestPermission

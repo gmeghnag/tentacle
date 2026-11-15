@@ -1,3 +1,4 @@
+import type { SkillInfo } from "@tentacle/config";
 /**
  * The agent loop.
  *
@@ -38,6 +39,7 @@ import {
   type Tool,
   type ToolCall,
   type ToolContext,
+  type ToolDefinition,
   type ToolProgressEvent,
   type ToolResult,
   type Usage,
@@ -59,6 +61,14 @@ import {
   skillContentName,
   userSkillCall,
 } from "@tentacle/tools";
+import {
+  NO_CAPABILITIES,
+  type SessionCapabilities,
+  isHidden,
+  isSkillHidden,
+  projectSystem,
+  projectTools,
+} from "./capabilities.ts";
 import { type CarriedSkill, carryOverSkills, summarizeConversation } from "./compact.ts";
 import {
   type ContextAnchor,
@@ -573,6 +583,14 @@ export interface AgentConfig {
   /** The listing of the skill set at the start (`skills` and the `skill` tool's). Absent → empty. */
   readonly skillListing?: SkillListing;
   /**
+   * The session's capability switches (docs/feat/session-capabilities.md):
+   * the MCP servers and skills hidden from the model. A value is the initial
+   * state (`setCapabilities` replaces it); a function is a LIVE source, read
+   * once per round — a sub-agent follows its parent's switches this way.
+   * Absent → everything on.
+   */
+  readonly capabilities?: SessionCapabilities | (() => SessionCapabilities);
+  /**
    * Re-read the skill folders into a full fresh set (docs/feat/skills-hot-reload.md):
    * `refreshUserSkills` installs its activator and listing, never its tool.
    * It may throw (nothing is installed). Absent → the installed set is
@@ -652,6 +670,12 @@ type RoundOutcome = "context_reset" | undefined;
 interface RoundHooks {
   readonly beforeRun?: BeforeRun | undefined;
   readonly beforeResumedCall?: BeforeResumedCall | undefined;
+  /**
+   * The capability snapshot the round's request was built from: a call to a
+   * tool or skill hidden in it is answered "turned off", never run. Absent (a
+   * resumed round: its calls were issued when they were visible) → no guard.
+   */
+  readonly capabilities?: SessionCapabilities | undefined;
 }
 
 /** What a group's phase 2 runs under: its lane's cap and dependency rule. */
@@ -763,11 +787,24 @@ export class Agent {
    */
   private resetsThisMessage = 0;
   private otherCallSinceReset = true;
+  /** Where the capability switches are read from (`capabilities()`), once per round. */
+  private readCapabilities: () => SessionCapabilities;
+  /**
+   * The descriptions the system prompt's skills catalog is re-rendered from
+   * when a skill is hidden: the listing's model-offered skills at the start
+   * and at every `installSkills` (a context reset) — the moments the prompt
+   * and the `skill` enum are composed — never at a user rescan, which leaves
+   * the model's catalog as it is.
+   */
+  private catalogSkills: readonly SkillInfo[];
 
   constructor(config: AgentConfig) {
     this.config = config;
     this.activator = config.skills;
     this.listing = config.skillListing ?? EMPTY_SKILL_LISTING;
+    const initial = config.capabilities ?? NO_CAPABILITIES;
+    this.readCapabilities = typeof initial === "function" ? initial : () => initial;
+    this.catalogSkills = catalogOf(this.listing);
     this.gate = new PermissionGate(
       config.requestPermission ?? allowAll,
       config.hooks,
@@ -872,12 +909,69 @@ export class Agent {
     this.config.tools.replace(SKILL_TOOL_NAME, skills.tool);
     this.activator = skills.activator;
     this.listing = skills.listing ?? EMPTY_SKILL_LISTING;
+    this.catalogSkills = catalogOf(this.listing);
     this.skillsGeneration++;
   }
 
   /** The installed skill set's listing: what `/name` may activate now, and who else may. */
   skillListing(): SkillListing {
     return this.listing;
+  }
+
+  /** The session's capability switches now (what the NEXT model call will be projected with). */
+  capabilities(): SessionCapabilities {
+    return this.readCapabilities();
+  }
+
+  /**
+   * Replace the session's capability switches. Synchronous and allowed
+   * mid-turn: it takes effect from the next model call — a round already
+   * streaming keeps the snapshot it was built with, and its calls are judged
+   * against that snapshot (F1/F2).
+   */
+  setCapabilities(state: SessionCapabilities): void {
+    this.readCapabilities = () => state;
+  }
+
+  /** A tool's MCP server, from the adapter's tag (never parsed from the name). */
+  private readonly serverOf = (toolName: string): string | undefined =>
+    this.config.tools.get(toolName)?.mcpServer;
+
+  /** The tool list a request built under `caps` advertises (the registry is never mutated). */
+  private projectedTools(caps: SessionCapabilities): readonly ToolDefinition[] {
+    return projectTools(this.config.tools.definitions(), this.serverOf, caps);
+  }
+
+  /**
+   * `messages` as a request built under `caps` sends them: the system message's
+   * skills catalog re-rendered without the hidden skills. A copy when it
+   * differs; the stored history is never touched. Every other message is the
+   * same object, so a context anchor still matches it.
+   */
+  private projectedHistory(
+    messages: readonly ChatMessage[],
+    caps: SessionCapabilities,
+  ): readonly ChatMessage[] {
+    const first = messages[0];
+    if (first?.role !== "system" || typeof first.content !== "string") {
+      return messages;
+    }
+    const content = projectSystem(first.content, this.catalogSkills, caps);
+    return content === first.content ? messages : [{ ...first, content }, ...messages.slice(1)];
+  }
+
+  /** Why a call is refused under the round's `caps`: a hidden server's tool or skill; else undefined. */
+  private hiddenCallRefusal(call: ToolCall, caps: SessionCapabilities): ToolResult | undefined {
+    if (isHidden(call.name, this.serverOf, caps)) {
+      return { content: `${call.name} is turned off for this session`, isError: true };
+    }
+    if (call.name === SKILL_TOOL_NAME) {
+      const name = (parseArguments(call.arguments) as { name?: unknown } | null)?.name;
+      if (typeof name === "string" && isSkillHidden(name, caps)) {
+        return { content: `skill "${name}" is turned off for this session`, isError: true };
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -1271,12 +1365,17 @@ export class Agent {
         }
       }
 
-      const tools = this.config.tools.definitions();
-      this.noteContextUsage(messages, unseen, tools);
+      // The round's capability snapshot (docs/feat/session-capabilities.md),
+      // read ONCE: the request is built from it and this round's calls are
+      // judged against it, so a toggle while it streams applies from the next
+      // round (F1/F2) and rapid toggles coalesce.
+      const caps = this.capabilities();
+      const tools = this.projectedTools(caps);
+      this.noteContextUsage(messages, unseen, tools, caps);
       // The model's copy: stored context lines rendered into `content`, always
       // (enabled or not), so every request repeats the same bytes for a
       // message an earlier one sent — the provider's prompt cache holds.
-      const view = modelView(messages);
+      const view = modelView(this.projectedHistory(messages, caps));
       const voiceTurn = voiceRequest(view.messages);
       const request: ChatRequest = {
         messages: voiceTurn.messages,
@@ -1548,6 +1647,7 @@ export class Agent {
       if (
         (yield* this.runToolCalls(toolCalls, messages, toolContext, signal, {
           beforeRun: opts.beforeRun,
+          capabilities: caps,
         })) === "context_reset"
       ) {
         budgetFrom = iteration + 1;
@@ -1596,7 +1696,8 @@ export class Agent {
       // builds by hand, and skipping it answered a spoken person unspeakably.
       markVoice();
       try {
-        const view = modelView(messages);
+        // No tools are sent, but the system prompt is: its catalog is projected.
+        const view = modelView(this.projectedHistory(messages, this.capabilities()));
         if (view.repairs !== null) {
           yield { type: "history_repaired", ...view.repairs };
         }
@@ -1681,6 +1782,7 @@ export class Agent {
     messages: ChatMessage[],
     unseen: number,
     tools: NonNullable<ChatRequest["tools"]>,
+    caps: SessionCapabilities,
   ): void {
     const awareness = this.config.contextAwareness;
     if (!awareness) {
@@ -1700,7 +1802,7 @@ export class Agent {
     }
     const current: ContextUsage = {
       used: estimateUsed(
-        messages,
+        this.projectedHistory(messages, caps),
         tools,
         this.anchors.get(messages),
         awareness.counter ?? DEFAULT_COUNTER,
@@ -1755,13 +1857,16 @@ export class Agent {
     signal?: AbortSignal,
     timeoutMs: number = CONTEXT_COUNT_TIMEOUT_MS,
   ): Promise<{ readonly used: number; readonly exact: boolean }> {
-    const tools = this.config.tools.definitions();
+    // What the next request would really send: the same projection as a round.
+    const caps = this.capabilities();
+    const tools = this.projectedTools(caps);
+    const sent = this.projectedHistory(messages, caps);
     // Bounded and silent (`countTokensBounded`): a count that cannot, fails or
     // is slow falls through to the estimate.
     const exact = await countTokensBounded(
       this.config.model,
       {
-        messages: modelView(messages).messages,
+        messages: modelView(sent).messages,
         tools,
         ...(this.config.attachments ? { attachments: this.config.attachments } : {}),
       },
@@ -1772,7 +1877,9 @@ export class Agent {
       return { used: exact, exact: true };
     }
     return {
-      used: estimateUsed(messages, tools, this.anchors.get(messages), DEFAULT_COUNTER),
+      // `sent` keeps every stored message but the system one by identity, so
+      // the anchor (keyed by the stored array) still matches past index 0.
+      used: estimateUsed(sent, tools, this.anchors.get(messages), DEFAULT_COUNTER),
       exact: false,
     };
   }
@@ -1926,6 +2033,7 @@ export class Agent {
         };
         const prepared = await this.authorizeCall(call, ctx, {
           beforeStart: hooks.beforeResumedCall,
+          capabilities: hooks.capabilities,
         });
         let run: ToolRun & { input: unknown };
         if (prepared.kind === "done") {
@@ -2061,6 +2169,7 @@ export class Agent {
         };
         const prepared = await this.authorizeCall(call, ctx, {
           ...(head !== undefined ? { groupStart: head } : {}),
+          capabilities: hooks.capabilities,
         });
         if (prepared.kind === "done") {
           yield answer(index, call, await this.finishCall(call, prepared, toolContext));
@@ -2375,6 +2484,9 @@ export class Agent {
           signal,
           fresh.skills.activator ?? null,
         ),
+        undefined,
+        // The fresh history must not re-introduce what the user hid (F12).
+        this.capabilities().disabledSkills,
       );
     } catch (error) {
       if (signal?.aborted) {
@@ -2754,10 +2866,20 @@ export class Agent {
   private async authorizeCall(
     call: ToolCall,
     ctx: ToolContext,
-    opts: { readonly groupStart?: string; readonly beforeStart?: BeforeResumedCall | undefined },
+    opts: {
+      readonly groupStart?: string;
+      readonly beforeStart?: BeforeResumedCall | undefined;
+      readonly capabilities?: SessionCapabilities | undefined;
+    },
   ): Promise<Prepared> {
     const tool = this.config.tools.get(call.name);
     const input = parseArguments(call.arguments);
+    // Hidden in the round's snapshot: the model called it from memory of older
+    // history. Refused before the gate — no prompt, never run (F3).
+    const hidden = opts.capabilities && this.hiddenCallRefusal(call, opts.capabilities);
+    if (hidden) {
+      return { kind: "done", result: hidden, input };
+    }
     if (!tool) {
       // Unknown: the registry answers it (an error result), timed like a run.
       return { kind: "run", call, args: call.arguments, input };
@@ -2897,6 +3019,28 @@ function keepDenialReply(raw: ToolResult, transformed: ToolResult): ToolResult {
 /** The line after a denial's reply: what the model should do with it. */
 const REPLY_GUIDANCE =
   "Answer the user or change your approach; request this tool again only if you still need it.";
+
+/**
+ * The skills a listing offers the model now, in the renderer's shape. Only
+ * `name` and `description` reach the catalog (`renderSkillsCatalog`); the
+ * rest is filler. `projectSystem` re-renders only names the composed catalog
+ * already holds, so this can never advertise a skill the `skill` tool lacks.
+ */
+function catalogOf(listing: SkillListing): readonly SkillInfo[] {
+  return listing.skills
+    .filter((s) => s.model)
+    .map((s) => ({
+      name: s.name,
+      description: s.description,
+      location: s.location,
+      dir: "",
+      scope: s.scope,
+      files: [],
+      filesTruncated: false,
+      modelInvocable: true,
+      userInvocable: s.user,
+    }));
+}
 
 /** A call's parsed arguments; `{}` when empty or malformed (the registry reports those). */
 function parseArguments(args: string): unknown {
