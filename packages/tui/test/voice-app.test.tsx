@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { Agent } from "@tentacle/agent";
 import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
@@ -7,6 +7,7 @@ import { ToolRegistry } from "@tentacle/tools";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
 import { VOICE_DEFAULTS, type VoiceConfig } from "../src/voice-session.ts";
+import { openVoiceLog } from "../src/voice-spawn.ts";
 import type { VoiceChild, VoiceSpawnSpec } from "../src/voice-spawn.ts";
 
 /** A provider that never answers: a dictation must not start a turn. */
@@ -222,6 +223,69 @@ describe("T7: Ctrl+R dictates, and the transcript lands in the field", () => {
     unmount();
     await delay(120);
     expect(helper.wasEnded()).toBe(true);
+  });
+});
+
+/**
+ * Fix round 2 (NEW-2): a spawn that cannot start used to be a bare notice, so the
+ * reducer was never told — the strip sat on `● starting` for ever, with no child
+ * and no mic, and the message blamed a missing binary even when the real failure
+ * was an unopenable log file. It now goes through the reducer (`spawnFailed`).
+ */
+describe("Fix round 2 (NEW-2): a spawn that fails leaves the TUI idle, with the real reason", () => {
+  test("the strip does not stay on `starting` and the notice names the cause", async () => {
+    const agent = new Agent({
+      model: new SilentProvider(),
+      tools: new ToolRegistry(),
+      env: noopEnv,
+    });
+    const dir = `${tmpdir()}/tentacle-voice-new2-${String(Date.now())}`;
+    mkdirSync(dir, { recursive: true });
+    try {
+      const { stdin, frames, unmount } = render(
+        <App
+          agent={agent}
+          model="qwen3"
+          cwd="/tmp/work"
+          voice={{ ...VOICE_DEFAULTS, helperPath: `${dir}/nope/tentacle-voice` }}
+          voiceConfigDir={dir}
+          // The spawner fails the way a real one does when the log cannot be
+          // opened: `spawnVoiceHelper` propagates it.
+          voiceSpawner={() => {
+            throw new Error("ENOENT: no such file or directory, open '.../voice/helper.log'");
+          }}
+          voiceHost={{ platform: "darwin", env: {} }}
+        />,
+      );
+      await delay(40);
+      stdin.write("\u0012");
+      await delay(120);
+      const last = frames.at(-1) ?? "";
+      // Mutation: `options.notice(...)` beside the catch (no `spawnFailed` event)
+      // → the strip is still `● starting` and this fails.
+      expect(last).not.toContain("starting");
+      expect(frames.join("\n")).toContain("could not start");
+      // The cause is the spawn's, not a canned "not found".
+      expect(frames.join("\n")).toContain("ENOENT");
+      unmount();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the real spawner creates `<configDir>/voice/` before opening the log", async () => {
+    // The other half of NEW-2: `openSync` on a missing directory was the whole
+    // failure. Mutation: drop the `mkdir` in `realLogFs` → this throws.
+    const dir = `${tmpdir()}/tentacle-voice-log-${String(Date.now())}`;
+    mkdirSync(dir, { recursive: true });
+    try {
+      const fd = openVoiceLog(`${dir}/voice/helper.log`);
+      expect(typeof fd).toBe("number");
+      if (fd !== null) closeSync(fd);
+      expect(existsSync(`${dir}/voice/helper.log`)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

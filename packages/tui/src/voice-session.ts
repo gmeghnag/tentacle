@@ -151,6 +151,8 @@ export type VoiceEvent =
     }
   /** A protocol error was detected on a line of the helper's stdout. */
   | { readonly kind: "protocolError"; readonly code: string; readonly message: string }
+  /** The helper could not be STARTED at all (no binary, or an unwritable log). */
+  | { readonly kind: "spawnFailed"; readonly message: string }
   /** The dictation's audio clock advanced (`useVoice` times it from `vad`). */
   | { readonly kind: "elapsed"; readonly audioMs: number }
   /** Wall clock, for the three-crashes-in-60-s rule and the two timers. */
@@ -474,6 +476,15 @@ export function voiceStep(model: VoiceModel, event: VoiceEvent): VoiceStep {
     return { model: { ...idle(model), ready: false, childAlive: false }, commands };
   }
 
+  if (event.kind === "spawnFailed") {
+    // The spawn threw: there is no child, so the strip must not sit on
+    // `● starting` with `childAlive` true and no mic (Review round 2, NEW-2 —
+    // an unopenable log used to look exactly like that). One notice, idle, no
+    // crash counted: a missing binary is a setup problem, not a crash loop.
+    commands.push({ kind: "notice", text: event.message });
+    return { model: { ...idle(model), ready: false, childAlive: false }, commands };
+  }
+
   if (event.kind === "exit") {
     // The child is gone whatever the phase: the spawn latch frees (MEDIUM 9).
     const wasRunning = model.phase !== "idle";
@@ -531,7 +542,11 @@ export function voiceStep(model: VoiceModel, event: VoiceEvent): VoiceStep {
     // slow frame can never make the cap fire early or late.
     const audioMs = Math.max(model.audioMs, message.ms);
     // The auto-stop fold reads `voice.autoStop` / `voice.autoStopSilenceMs` HERE
-    // (Review round 1, HIGH 3): before this, both settings were dead.
+    // (Review round 1, HIGH 3): before this, both settings were dead. The hard
+    // stop is passed unconditionally and the FOLD gates it on `autoStop`
+    // (Review round 2, NEW-1) — one place decides, so the default config cannot
+    // end a dictation on a thinking pause. With auto-stop off, the cap below
+    // (`voice.maxSeconds`, F5) is what ends a forgotten one.
     const step = foldEndpoint.step(live.endpoint, {
       kind: "window",
       ms: Math.max(0, audioMs - model.audioMs),

@@ -665,6 +665,89 @@ untouched, so no `protocol.d/` note and no `protocol.json` regeneration).
 Biome's ignore list gained `native/voice-mac/.build` (SwiftPM products) and
 `.gitignore` gained the same path.
 
+
+### Fix round 2
+
+*— claude-sonnet-4-5, 2026-11-15* (executor; round-2 review was claude-opus-5-5)
+
+Scope: the two HIGH findings NEW-1/NEW-2 and the surviving MEDIUM (M5) from
+Round 2 above. Round-1 HIGHs (H1–H4) and M6–M9 were re-verified as already
+fixed (M7's `--yes` call site at `main.ts:963` still reads `parsed.bools`, so
+nothing to redo).
+
+**NEW-1 (HIGH) — a 3 s pause ended every dictation with auto-stop OFF.**
+Root cause: one place decided two different rules. `foldEndpoint.step` checked
+`hardStopMs` **before** the `if (!input.autoStop)` gate, so the silence cap that
+exists for an *auto-stop-on* forgotten dictation also fired with auto-stop off —
+the shipped default. Fixed in the FOLD, not the caller
+(`voice-endpoint.ts:119-131`): the `!autoStop` return now comes first, and the
+hard stop is documented as belonging to the auto-stop branch. The reducer keeps
+passing `hardStopMs` unconditionally (`voice-session.ts:546`) so exactly ONE
+place gates it — my first attempt gated it in both, and the reducer-only mutation
+then stayed green, which is how the double gate was caught.
+
+**NEW-2 (HIGH) — voice failed wherever `<configDir>/voice/` did not exist.**
+Three separate defects behind one repro:
+1. no `mkdir` before `openSync` → `ENOENT` on a fresh config dir;
+2. the 1 MiB rotation the plan promises (`:108`) was absent;
+3. the throw was caught as a bare `notice`, so the reducer was never told and
+   the strip sat on `● starting` with no child and no mic — and the message
+   blamed a missing binary whatever the real cause.
+Fixed by a new `openVoiceLog(logPath, fs)` seam (`voice-spawn.ts:200-235`:
+`mkdir` → `size` → `rotate` → `open`) with the three fs operations injectable so
+the ORDER is pinnable without a 1 MiB file, plus a new `spawnFailed` reducer
+event (`voice-session.ts:466-475`) that the hook dispatches with the real error
+text (`useVoice.ts` spawn catch). `spawnFailed` deliberately does NOT count a
+crash: a missing binary is setup, not a crash loop.
+
+**M5 (MEDIUM) — the mutation still survived, twice.** Round 1 pinned
+`bunSpawnOptions`; my first round-2 attempt moved the spawner into
+`voice-spawn.ts` and pinned its injected `Bun.spawn`, and that mutation was
+still GREEN because the *production* `defaultSpawner` held its own hardcoded
+`Bun.spawn` with `stderr: "inherit"` — the same vacuity one level up. The
+production spawner is now built through `makeDefaultSpawner` at call time
+(`useVoice.ts:76-77`), so a test replaces `Bun.spawn`, drives the REAL exported
+`defaultSpawner`, and asserts the options it hands the call. Mutation
+`stderr: "inherit"` → red (`voice-spawn.test.ts`).
+
+**Mutations (each shown RED on the code with the fix reverted, then restored;
+no `git` command was used — the originals were copied to
+`.tentacle/tmp/voice-dictation/fix2-*.bak` and copied back).**
+
+| # | Mutation | Red on |
+|---|---|---|
+| 1 | fold: check `hardStopMs` before the `!autoStop` gate (NEW-1's original order) | `voice-endpoint.test.ts` "the hard stop is inert too" **and** `voice-session.test.ts` "a long thinking pause never ends the dictation" |
+| 2 | hook: `options.notice(...)` beside the catch, no `spawnFailed` (NEW-2's original shape) | `voice-app.test.tsx` — the strip stays `starting`, no `ENOENT` |
+| 3 | `openVoiceLog`: drop the `mkdir` line | the order test **and** the real-fs `voice/` creation test |
+| 4 | `openVoiceLog`: drop the rotation line | the order test |
+| 5 | production `defaultSpawner`: hardcode `stderr: "inherit"` (M5) | `voice-spawn.test.ts` "the PRODUCTION spawner hands Bun.spawn the spec's streams" |
+
+Mutation 1 also exposed that the old T3(c) test — "with autoStop off the fold
+never emits stop" — was vacuous for this bug: its traces never reach 3 s of
+trailing silence. It gained a 5 s trace that does.
+
+**Drift from the Implementation.** (a) The plan's endpointing defaults
+(`:138`) say "a hard stop after 3 s of continuous silence" without qualifying
+it; it is now, correctly, an auto-stop-only rule — with auto-stop off the cap is
+`voice.maxSeconds`, exactly as the review proposed. The line is left as-is
+because the code and its comment now carry the condition, and editing the
+approved Implementation retroactively would hide the change. (b) `elapsed` is
+still never dispatched; the `clock` interval added in round 1 and the `vad`
+audio clock cover both timers (unchanged from round 1's drift note).
+
+**Still open (unchanged):** S2's mic under-capture (the `lldb` session the S2
+Execution asks for) and L1–L10, which were never run. `bun run voice:test` was
+not run here either: it needs a mic-capable approval this session could not
+get, and no Swift file changed in this round — the two HIGHs and M5 are all TS.
+
+**Gate (fix round 2).** `bunx tsc --noEmit` green · `bun run lint` green (1518
+files, 0 errors, 0 warnings) · `bun test` **10967 pass, 0 fail, 5 skip** (the
+same five opt-in skips; up from 10957 by the 10 new tests). No protocol or
+schema change, and the existing `changelog.d/voice-dictation.added.md` still
+covers the user-visible impact — these are corrections to an unreleased feature,
+so no new fragment (AGENTS §10: internal work adds none, and this changes an
+unreleased feature's behaviour rather than adding one).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-15* (fresh context; a different model family from the executor, deepseek-v4. The plan's author was also Opus 5.5.)

@@ -29,7 +29,13 @@ export const ENDPOINT_DEFAULTS = {
   autoStopSilenceMs: 500,
   /** Smart Turn's own cut-off: a segment it rates this complete ends the turn. */
   threshold: 0.5,
-  /** Continuous silence that ends a forgotten dictation, whatever the above say. */
+  /**
+   * Continuous silence that ends a forgotten dictation — **inside the auto-stop
+   * branch only**. With auto-stop off a pause must never end the dictation
+   * (Owner decision 2); there `voice.maxSeconds` is the cap that ends it
+   * (Review round 2, NEW-1: applying it unconditionally cut every dictation
+   * after a 3 s thinking pause).
+   */
   hardStopMs: 3000,
 } as const;
 
@@ -66,6 +72,7 @@ export type EndpointInput =
       readonly autoStop: boolean;
       readonly floorMs: number;
       readonly threshold: number;
+      /** The forgotten-dictation cap; ignored unless `autoStop` is true. */
       readonly hardStopMs?: number;
     }
   | { readonly kind: "turnp"; readonly p: number; readonly threshold: number };
@@ -114,13 +121,18 @@ function step(state: EndpointState, input: EndpointInput): EndpointStep {
   const unbrokenSilentMs = state.unbrokenSilentMs + input.ms;
   const heard: EndpointState = { ...state, silentMs, unbrokenSilentMs };
 
-  // The hard stop first: a forgotten dictation must end even when the floor is
-  // unreachable (or auto-stop is off but the caller asked for a cap).
+  // Auto-stop off: NOTHING on silence ends the dictation — not the floor, and
+  // not the hard stop either (Review round 2, NEW-1: the fold read the hard stop
+  // first, so the default config cut a dictation after a 3 s pause). A forgotten
+  // one is ended by `voice.maxSeconds` instead (F5), which is audio time and
+  // needs no silence verdict at all.
+  if (!input.autoStop) return { state: heard, action: "none" };
+
+  // With auto-stop ON, the hard stop comes first: a forgotten dictation must end
+  // even when the floor is unreachable.
   if (input.hardStopMs !== undefined && unbrokenSilentMs >= input.hardStopMs) {
     return { state: { ...heard, stopped: true }, action: "stop" };
   }
-
-  if (!input.autoStop) return { state: heard, action: "none" };
   if (silentMs < input.floorMs) return { state: heard, action: "none" };
   if (state.awaitingTurnp) return { state: heard, action: "none" };
 

@@ -242,6 +242,16 @@ describe("T3 (c): with autoStop off the fold never emits stop", () => {
       expect(r.action).toBe("none");
     }
   });
+
+  test("and the hard stop is inert too: 4 s of silence, autoStop off, no stop", () => {
+    // Review round 2, NEW-1. The test above only looked at utterances that
+    // never reach 3 s of trailing silence, so it stayed GREEN while the shipped
+    // default cut every dictation after a pause of 3 s. This trace does reach it.
+    // Mutation: check `hardStopMs` before the `autoStop` gate → red.
+    const trace = traceFromSpans("pause", false, [[0, 400]], 5000, 0.9);
+    const r = run(trace, { autoStop: false, floorMs: 500, threshold: 0.5, hardStopMs: 3000 });
+    expect(r.action).toBe("none");
+  });
 });
 
 describe("T3: the hard stop is a floor, never a cut before the speech ends", () => {

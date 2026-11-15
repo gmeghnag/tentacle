@@ -488,6 +488,46 @@ describe("Fix 3 (HIGH 3): the helper's vad/turnp/clock drive the cap, auto-stop 
     expect(r.model.phase).toBe("listening");
   });
 
+  test("auto-stop OFF: a long thinking pause never ends the dictation (round 2, NEW-1)", () => {
+    // Review round 2, NEW-1: the fold read the 3 s hard stop BEFORE the
+    // `autoStop` gate, so the DEFAULT config cut a dictation after a pause to
+    // think — contradicting Owner decision 2 and the Context's "a pause can
+    // never end it". `voice.maxSeconds` is what ends a forgotten one.
+    // Mutation: pass `hardStopMs` unconditionally (or check it before the
+    // auto-stop gate in the fold) → `stop` goes out after 3 s here.
+    const events: VoiceEvent[] = [
+      at(T0, "toggle"),
+      helper(ready),
+      helper({ t: "listening", id: 1, device: "mic" }),
+      helper({ t: "vad", id: 1, ms: 1000, p: 0.98 }),
+    ];
+    // 4 s of continuous silence: past the 3 s hard stop, well inside maxSeconds.
+    for (let i = 0; i < 40; i++) {
+      events.push(helper({ t: "vad", id: 1, ms: 1000 + (i + 1) * 100, p: 0.02 }));
+    }
+    const r = drive(events);
+    expect(r.model.phase).toBe("listening");
+    expect(r.commands.filter((c) => c.kind === "send")).toEqual([
+      { kind: "send", command: { t: "start", id: 1, lang: "auto" } },
+    ]);
+  });
+
+  test("auto-stop ON still has the hard stop for a forgotten dictation", () => {
+    // The other half of NEW-1's fix: gating the hard stop must not delete it.
+    const config = cfg({ autoStop: true, autoStopSilenceMs: 100_000 });
+    const events: VoiceEvent[] = [
+      at(T0, "toggle"),
+      helper(ready),
+      helper({ t: "listening", id: 1, device: "mic" }),
+      helper({ t: "vad", id: 1, ms: 1000, p: 0.98 }),
+    ];
+    for (let i = 0; i < 40; i++) {
+      events.push(helper({ t: "vad", id: 1, ms: 1000 + (i + 1) * 100, p: 0.02 }));
+    }
+    const r = drive(events, config);
+    expect(r.model.phase).toBe("transcribing");
+  });
+
   test("a hung `stop` does not freeze the phase: the clock says so and frees the child", () => {
     // Mutation: no transcribingAt → the TUI stays `transcribing` for ever.
     const r = drive([

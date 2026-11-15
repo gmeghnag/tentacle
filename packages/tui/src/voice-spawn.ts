@@ -12,6 +12,7 @@
  * stdout are pipes (the protocol), and stderr goes to a FILE. `"inherit"` is not
  * merely unused — `spawnVoiceHelper` never produces it, and a test pins that.
  */
+import { closeSync, mkdirSync, openSync, renameSync, statSync, writeSync } from "node:fs";
 import { resolve } from "node:path";
 import { type HelperCommand, encodeHelperLine } from "./voice-protocol.ts";
 import type { VoiceConfig } from "./voice-session.ts";
@@ -134,6 +135,175 @@ export function bunSpawnOptions(
     stderr: logFd ?? spec.stdio.stderr,
     env: { ...process.env, ...spec.env },
   };
+}
+
+/** The log is rotated (kept as `.1`) once it passes this size (plan §3). */
+export const LOG_ROTATE_BYTES = 1024 * 1024;
+
+/**
+ * Open the helper's log for append, creating `<configDir>/voice/` first.
+ *
+ * Review round 2, NEW-2: the directory was assumed to exist, so on a machine
+ * where nothing had created it `openSync` threw ENOENT, the spawn was reported
+ * as "helper not found", and the reducer was never told — the strip stayed
+ * `● starting` with no mic. The log is also rotated at 1 MiB (plan §3), which
+ * was documented but absent.
+ *
+ * `""` means "the caller could not name a config dir": no file, no fd, and the
+ * child's stderr is drained to nothing instead.
+ */
+export function openVoiceLog(logPath: string, fs: LogFs = realLogFs): number | null {
+  if (logPath === "") return null;
+  const slash = logPath.lastIndexOf("/");
+  if (slash > 0) fs.mkdir(logPath.slice(0, slash));
+  const size = fs.size(logPath);
+  if (size !== null && size >= LOG_ROTATE_BYTES) fs.rotate(logPath);
+  return fs.open(logPath);
+}
+
+/** The three file operations `openVoiceLog` needs, injectable so a test can
+ * assert the ORDER (mkdir before open) and the rotation without a big file. */
+export interface LogFs {
+  mkdir(dir: string): void;
+  size(path: string): number | null;
+  rotate(path: string): void;
+  open(path: string): number;
+}
+
+const realLogFs: LogFs = {
+  mkdir: (dir) => {
+    // Best effort: a read-only mount must not turn a dictation into a crash —
+    // the `open` below then fails and the caller reports it honestly.
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch {
+      // left to `open`
+    }
+  },
+  size: (path) => {
+    try {
+      return statSync(path).size;
+    } catch {
+      return null;
+    }
+  },
+  rotate: (path) => {
+    try {
+      renameSync(path, `${path}.1`);
+    } catch {
+      // a lost rotation is not worth a failed dictation
+    }
+  },
+  open: (path) => openSync(path, "a"),
+};
+
+/** What this module needs from a spawned process (Bun's shape, narrowed). */
+export interface SpawnedProc {
+  readonly stdin: { write(chunk: string | Uint8Array): unknown; end(): unknown } | null;
+  readonly stdout: ReadableStream<Uint8Array>;
+  /** A pipe when the spec asked for one; an fd when the log took it. */
+  readonly stderr: ReadableStream<Uint8Array> | number | undefined;
+  readonly exited: Promise<number>;
+  kill(signal?: number | NodeJS.Signals): void;
+}
+
+/** The `Bun.spawn` call, as the seam a test replaces (Review round 2, MEDIUM 5). */
+export type BunSpawnFn = (
+  cmd: readonly string[],
+  options: ReturnType<typeof bunSpawnOptions>,
+) => SpawnedProc;
+
+/**
+ * Build the REAL spawner, with its two irreducibles injected: the `Bun.spawn`
+ * call and the log file's file-system operations.
+ *
+ * Extracted here (Review round 2, MEDIUM 5) because the spawn was the ONE place
+ * the spec was not read: the old `bunSpawnProc` hardcoded `stdin`/`stdout`/
+ * `stderr`, so mutating the spec (`stderr: "inherit"`) — and the hardcoded call
+ * itself — stayed green in every test. The caller supplies `Bun.spawn`; a test
+ * supplies a recorder and asserts the options this function builds, so neither
+ * can drift again.
+ */
+export function makeDefaultSpawner(
+  spawn: BunSpawnFn,
+  fs: LogFs | undefined = undefined,
+): VoiceSpawner {
+  return (spec) => {
+    // The log FILE, first: the helper's stderr goes there, never to the frame
+    // (AGENTS §7, F10), and `append` keeps an earlier dictation's lines. The
+    // directory is created first, and the file rotated at 1 MiB (NEW-2, plan §3).
+    let log: number | null = null;
+    try {
+      log = fs === undefined ? openVoiceLog(spec.logPath) : openVoiceLog(spec.logPath, fs);
+    } catch {
+      // An unwritable log must not be reported as a missing binary (NEW-2): it
+      // is re-thrown, and `useVoice` turns it into a `spawnFailed` event with
+      // its own message.
+      throw new Error(`cannot open the voice log ${spec.logPath}`);
+    }
+    const options = bunSpawnOptions(spec, log);
+    let proc: SpawnedProc;
+    try {
+      proc = spawn(spec.cmd, options);
+    } catch (error) {
+      if (log !== null) {
+        try {
+          closeSync(log);
+        } catch {
+          // already closed
+        }
+      }
+      throw error;
+    }
+    // Piped and DRAINED: a full stderr pipe would block the helper.
+    if (proc.stderr !== undefined && typeof proc.stderr !== "number") drainTo(proc.stderr, log);
+    return {
+      stdin: proc.stdin,
+      stdout: proc.stdout,
+      // The caller never gets a raw stream to leak: stderr went to the log fd.
+      stderr: null,
+      exited: proc.exited.finally(() => {
+        if (log === null) return;
+        try {
+          closeSync(log);
+        } catch {
+          // already closed
+        }
+      }),
+      kill: (signal) => {
+        try {
+          proc.kill(signal as NodeJS.Signals | undefined);
+        } catch {
+          // already gone
+        }
+      },
+    };
+  };
+}
+
+/** Copy a child's stderr into the log file (or drain it), until it closes. */
+function drainTo(stream: ReadableStream<Uint8Array>, fd: number | null): void {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  void (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        // No fd to write to (a host-less mount): the child must still not block.
+        if (fd === null) continue;
+        try {
+          writeSync(fd, decoder.decode(value, { stream: true }));
+        } catch {
+          return;
+        }
+      }
+    } catch {
+      // The child died mid-line: the exit event is the one that reports it.
+    } finally {
+      reader.releaseLock?.();
+    }
+  })();
 }
 
 /** Split a stdout chunk into complete lines, keeping the unfinished tail. */
