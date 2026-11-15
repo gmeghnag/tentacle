@@ -47,7 +47,7 @@ export function ActionSheet({
       <View style={styles.root}>
         <Pressable
           accessibilityLabel="Dismiss"
-          style={[StyleSheet.absoluteFill, styles.backdrop]}
+          style={[StyleSheet.absoluteFill, { backgroundColor: palette.scrim }]}
           onPress={onCancel}
         />
         <View
@@ -131,7 +131,6 @@ export function ActionSheet({
 
 const styles = StyleSheet.create({
   root: { flex: 1, justifyContent: "flex-end" },
-  backdrop: { backgroundColor: "rgba(0,0,0,0.35)" },
   stack: { paddingHorizontal: space.inset / 2, gap: 8 },
   group: { borderRadius: radius.tile, overflow: "hidden" },
   head: { paddingHorizontal: space.inset, paddingVertical: 14, gap: 4 },

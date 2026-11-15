@@ -18,6 +18,12 @@ the rest are "value-add" improvements layered on the harness.
   - Earlier owner answers: `docs/feat/mobile-session-view.md` (12, "all +
     images"), `docs/feat/sibling-discovery.md` (10, "all").
 
+- [ ] **feat/voice-conversation** (owner 2026-11-15, plan APPROVED) — hands-free voice conversation on the Mac and the iPhone (realtime-voice V2 + phone edge, background/locked screen in v1). Doc: `docs/feat/voice-conversation.md`. `Type: feat · Size: L (10 S/M slices) · Blast: load-bearing (C3 voice-turn profile) · Suited: Opus plan, DeepSeek slices, mandatory fresh review`. Code after `feat/voice-dictation` + `feat/mobile-voice` merge; spikes C1 (Mac) and P1 (iPhone, owner-assisted) can run now.
+
+- [ ] **feat/per-session-model** (owner 2026-11-15: later — "per ora lasciamo fuori") — `serve` is bound to ONE model (its `--profile` at start); no `session/set_model`; the TUI `/model` only SHOWS the model. Idea: `serve` exposes its config profile NAMES and a session picks one at creation or with a real `/model <profile>` (TUI + app), as a phone/Mac parity step. Origin: docs/feat/serve-mcp.md Owner Q3.
+
+- [ ] **eval/mobile-native-swiftui** (owner 2026-11-15, low priority) — could the iOS app be even smoother/more beautiful with native Swift? Stance: stay on React Native/Expo (native UIKit components already) and adopt SwiftUI only where it pays: (1) MEASURE first — the conversation with thousands of streamed rows on the owner's iPhone 12 Pro (frame drops, scroll, memory); (2) candidates: a high-performance virtualized (or native) transcript list, real system sheets/menus, iOS 26 materials (Liquid Glass) via Expo UI / a local Swift module, interactive sheet gestures; widgets/Live Activity are Swift anyway (task 18). A full Swift rewrite is out (Android lost, two codebases) unless the measurements say otherwise.
+
 ## v0.1.0 stabilization review (in progress)
 
 Full code review, hot-path → polish, to stabilize a v0.1.0. Findings recorded

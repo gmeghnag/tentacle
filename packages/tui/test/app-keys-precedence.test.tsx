@@ -13,6 +13,7 @@ import { App, type AppProps, type SessionController, type SessionDirectory } fro
 import type { DockJobRow } from "../src/background-list.ts";
 import { ARM_MS } from "../src/permission-reply.ts";
 import type { SessionActivity } from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
 const ESC = "\x1b";
@@ -70,6 +71,7 @@ function fake(
   const prompts: string[] = [];
   let aborts = 0;
   const session = {
+    ...inertSession(),
     async *send(prompt: string, signal?: AbortSignal) {
       prompts.push(prompt);
       if (prompt.startsWith("hang")) {

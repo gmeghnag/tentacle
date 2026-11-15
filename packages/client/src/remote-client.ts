@@ -29,6 +29,7 @@ import {
   countTokensBounded,
   formatBytes,
 } from "@tentacle/core";
+import type { PermissionResponse } from "@tentacle/core";
 import {
   ATTACHMENT_CHUNK_BYTES,
   type AgentCapabilities,
@@ -37,6 +38,8 @@ import {
   type ClientInfo,
   type CompactResult,
   type DaemonDiscovery,
+  type DevicePushRegisterParams,
+  type DevicePushRegisterResult,
   DomainErrorCode,
   type HistoryCut,
   type HooksTrustParams,
@@ -78,6 +81,7 @@ import {
   type SessionTitle,
   type SessionTtlResult,
   type SessionUpdateParams,
+  type SetAutoAcceptResult,
   type Sha256,
   type SnapshotResult,
   type SubagentRow,
@@ -116,8 +120,17 @@ import {
   stopped,
 } from "./link-machine.ts";
 import { gateExitText } from "./mapping.ts";
-import { answerLostCause, normalizePermissionReply } from "./permission-map.ts";
-import { PermissionRouter, type RouterAction } from "./permission-router.ts";
+import {
+  answerLostCause,
+  normalizePermissionReply,
+  notificationAnswerOutcome,
+} from "./permission-map.ts";
+import {
+  type NotificationAnswerOutcome,
+  PermissionRouter,
+  type PermissionSendAction,
+  type RouterAction,
+} from "./permission-router.ts";
 import { RemoteSession } from "./remote-session.ts";
 import { type LogOutcome, type LogState, applyLogRead } from "./session-log-reader.ts";
 import { SessionLostError } from "./session-lost.ts";
@@ -236,6 +249,15 @@ export interface SessionStreamListener {
    * it is told so, never recreated from its own copy (docs/fix/detach-live.md R7).
    */
   readonly shared?: boolean;
+  /**
+   * The session's auto-accept: the daemon's snapshot on every open/re-attach
+   * (`OpenResult.autoAccept`), and every change from any client (the
+   * `auto_accept` update). Absent from an older daemon → never called, and the
+   * session keeps a local-only value (docs/feat/session-auto-accept.md D4).
+   */
+  autoAcceptSnapshot?(snapshot: boolean): void;
+  /** An `auto_accept` update: its value and the setter's label (display only, untrusted). */
+  autoAcceptChanged?(on: boolean, by?: string): void;
 }
 
 /** Exits kept for a first `onBackgroundExit` subscriber (the count in the open result still says more are owed). */
@@ -408,6 +430,31 @@ export interface RemoteClientOptions {
    * worker, pod `run`/`attach` and the relay never say it.
    */
   readonly daemonWakes?: boolean;
+  /**
+   * This daemon SHARES the session's auto-accept (`session/set_auto_accept`,
+   * `OpenResult.autoAccept`, the `auto_accept` update; docs/feat/session-auto-accept.md
+   * D4). Defaults to OFF, and must: this is a TRUST bit (AGENTS §7) of the same
+   * kind as `daemonWakes`, so it fails closed — never keyed on `daemonKind`,
+   * which defaults to `"serve"`. Set only by a client that can name its daemon
+   * as trusted: the worker (`local-runtime.ts`), `connect`, and the phone (it
+   * reaches only a `serve`). NEVER by a pod `run`/`attach` client or the relay:
+   * with the bit off the client never sends the method, ignores
+   * `OpenResult.autoAccept` and drops every `auto_accept` update, so a pod can
+   * neither turn auto-accept on nor report it.
+   */
+  readonly sharedAutoAccept?: boolean;
+  /**
+   * This machine's name, sent as `ClientInfo.host` when this client shares the
+   * session's auto-accept (docs/feat/session-auto-accept.md D7): the daemon
+   * echoes it as an ask's `askedOn` and an `auto_accept` update's `by`. A SEAM,
+   * not `os.hostname()` read here: this module is in the PHONE's import graph
+   * (`apps/mobile` → `@tentacle/client`), where a Node built-in does not
+   * resolve at all (Expo/Metro answers `null` for a `node:` specifier, so the
+   * bundle fails to build — Review round 1, HIGH 2). The CLI passes
+   * `os.hostname`; the phone passes its device name; a caller that names none
+   * sends no `host`, and only "also asked on" loses a label.
+   */
+  readonly hostLabel?: () => string | undefined;
   /**
    * Serves the daemon's TITLE calls on the model tunnel (`purpose: "title"`):
    * `model.titleModel`, else the main model. Absent → this laptop's
@@ -798,6 +845,13 @@ export class RemoteClient {
   private readonly refusalsLogged = new Set<string>();
   /** `{ settings }`, or nothing: spread into each frame that may create a session. */
   private readonly carried: { readonly settings?: SessionSettings };
+  /**
+   * The value a session this client CREATES should start with
+   * (`OpenParams.autoAccept`, docs/feat/session-auto-accept.md D2): the TUI's
+   * current switch, carried into a `/clear` fork, a new session and a hop
+   * target. Read at each open and cleared by it — a re-attach never seeds.
+   */
+  private seedAutoAccept: boolean | undefined;
   private readonly settingsListeners = new Set<(notice: SessionSettingsNotice) => void>();
   private readonly settingsChangeListeners = new Set<(change: SessionSettingsChange) => void>();
   /**
@@ -815,6 +869,10 @@ export class RemoteClient {
   private readonly daemonKind: DaemonKind;
   /** The daemon wakes on its own (`serve`, trusted): `RemoteSession.autoAcceptsTurn` reads it. */
   private readonly daemonWakes: boolean;
+  /** This daemon shares the session's auto-accept (`RemoteClientOptions.sharedAutoAccept`). */
+  readonly sharedAutoAccept: boolean;
+  /** This machine's name (`RemoteClientOptions.hostLabel`): `ClientInfo.host` when sharing. */
+  private readonly hostLabel?: () => string | undefined;
   /** This client can put a `move_session` proposal to its owner (declared in `initialize`). */
   private readonly hop: boolean;
   /** Sessions with a `hooks/trust` prompt in flight (at most one each). */
@@ -848,6 +906,14 @@ export class RemoteClient {
    * images-off-reason.md): a daemon of our own protocol is never "old".
    */
   private daemonImages: { readonly protocol?: number; readonly model?: string } = {};
+  /**
+   * The last handshake's whole `agentInfo` — the daemon's own build, model and
+   * the window that model counts against — kept for a client that must SHOW them
+   * (the phone's Session info). Re-read on every handshake, like
+   * `daemonImages`: a `serve` restarted with another model is right after the
+   * reconnect, not just after the first pair.
+   */
+  private daemonHandshake: InitializeResult["agentInfo"] | undefined;
 
   constructor(
     channel: DuplexChannel,
@@ -875,6 +941,10 @@ export class RemoteClient {
     }
     this.daemonKind = options.daemonKind ?? "serve";
     this.daemonWakes = options.daemonWakes === true;
+    this.sharedAutoAccept = options.sharedAutoAccept === true;
+    this.hostLabel = options.hostLabel;
+    // The handle is built in `RemoteSession`, not here: the listener API above
+    // is the wire half (`autoAccept(snapshot)`), and a session owns its value.
     this.hop = options.hop === true;
     if (options.titleModelProvider) {
       this.titleModelProvider = options.titleModelProvider;
@@ -903,6 +973,30 @@ export class RemoteClient {
   /** Handshake; rejects on an incompatible daemon version. */
   async initialize(): Promise<InitializeResult> {
     return this.handshake(this.peer);
+  }
+
+  /**
+   * What the daemon said about ITSELF at the last handshake (`agentInfo`): its
+   * build, the model that runs the turns and the window that model counts
+   * against. `undefined` before the first handshake, or from an older daemon /
+   * a pod, which report nothing. Display only — never an id, a URL or a key.
+   */
+  daemonInfo():
+    | {
+        readonly version?: string;
+        readonly model?: string;
+        readonly contextWindow?: number;
+      }
+    | undefined {
+    const info = this.daemonHandshake;
+    if (info === undefined) {
+      return undefined;
+    }
+    return {
+      version: info.version,
+      ...(info.model === undefined ? {} : { model: info.model }),
+      ...(info.contextWindow === undefined ? {} : { contextWindow: info.contextWindow }),
+    };
   }
 
   /**
@@ -956,6 +1050,38 @@ export class RemoteClient {
       Method.SessionSkills,
       sessionId !== undefined ? { sessionId } : this.carried,
     ).then((result) => result as SessionSkillsResult);
+  }
+
+  /**
+   * Register this phone for push (`device/push_register`, docs/feat/mobile-push.md
+   * Design 7): the raw APNs token, the environment the build is signed for, and
+   * this phone's per-device push key. Resolves the daemon's status, so Settings
+   * can say WHY notifications will not arrive (`off` / `relay-off` /
+   * `relay-no-push`). Not re-sent after a drop (a fresh registration is the
+   * caller's call: it re-registers on every connect anyway). An older daemon
+   * rejects with `MethodNotFound` — the caller shows "daemon too old" and never
+   * loops on it. Schema-validated by the peer.
+   */
+  pushRegister(params: DevicePushRegisterParams): Promise<DevicePushRegisterResult> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.DevicePushRegister, params).then(
+      (result) => result as DevicePushRegisterResult,
+    );
+  }
+
+  /**
+   * Stop every notification from this computer to this phone
+   * (`device/push_unregister`): the daemon deletes THIS device's registration,
+   * so a later ask reaches no banner here. Not re-sent after a drop (the phone
+   * unregisters again on the next toggle, or on the next connect's own check).
+   */
+  pushUnregister(): Promise<void> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.DevicePushUnregister, {}).then(() => {});
   }
 
   /**
@@ -1465,6 +1591,9 @@ export class RemoteClient {
       ...(seed.length > 0 ? { messages: seed } : {}),
       ...(title ? { title } : {}),
       ...this.carried,
+      // The switch the person has now: a `/clear` fork and a new session start
+      // with it (docs/feat/session-auto-accept.md D5).
+      ...this.takeSeedAutoAccept(),
     };
     if (sessionId === undefined) {
       const gen = this.gen;
@@ -1624,6 +1753,78 @@ export class RemoteClient {
     return [...this.sessions.values()]
       .filter((entry) => entry.everLive && !entry.closing)
       .map((entry) => entry.id);
+  }
+
+  /**
+   * The permission asks this client is holding for a session — the one prompted
+   * and any queued behind it, oldest first (a read of the router; display and
+   * routing only, since `answerById` re-validates). The notification path names
+   * an ask with it before sealing an answer about it (mobile-notifications N8).
+   */
+  pendingPermissionsOf(sessionId: string): readonly string[] {
+    return this.router.heldIds(sessionId);
+  }
+
+  /**
+   * Is this session attached (live) on THIS client right now? What the
+   * notification path asks before attaching, so it never attaches (or
+   * detaches) a session a screen is already showing (docs/feat/mobile-notifications.md
+   * Design 4/F19).
+   */
+  isAttached(sessionId: string): boolean {
+    const entry = this.sessions.get(sessionId);
+    return entry?.everLive === true && !entry.closing && entry.attach === undefined;
+  }
+
+  /**
+   * Answer a permission request BY ID, for a decision made outside the prompt —
+   * a notification's Approve / Deny / Reply (docs/feat/mobile-notifications.md
+   * Design 5). Same keyed `session/resolve_permission` as the sheet, same
+   * error mapping, no broker requester and no new frame: the router's
+   * `answerById` settles a held ask whether or not it is the one on screen.
+   *
+   * Says what became of it, so the phone can be truthful (an outcome the person
+   * sees, never a silent drop): `sent`, `not-pending` (another answer won, the
+   * ask is gone, or it was already answered here), `unoffered`, `unreplyable`,
+   * `session-lost` (may have arrived) or `failed` (not delivered — a later
+   * replay offers the ask again).
+   */
+  async answerPermission(
+    sessionId: string,
+    requestId: string,
+    response: PermissionResponse,
+  ): Promise<NotificationAnswerOutcome> {
+    const actions = this.router.answerById(sessionId, requestId, response);
+    // Everything EXCEPT the send runs here — the `abort` for the answered
+    // prompt AND the `prompt` that `next()` returns for the ask that becomes
+    // current. Dropping the latter leaves the next ask held-but-unprompted: the
+    // sheet never shows it and every later ask queues behind it (fix round 1,
+    // finding #2). The `send` is awaited below instead, so its outcome (not a
+    // fire-and-forget) is what the person is told.
+    this.runPermissionActions(actions.filter((a) => a.kind !== "send"));
+    const send = actions.find((a): a is PermissionSendAction => a.kind === "send");
+    if (actions.some((a) => a.kind === "unoffered")) {
+      return "unoffered";
+    }
+    if (actions.some((a) => a.kind === "unreplyable")) {
+      return "unreplyable";
+    }
+    if (!send) {
+      return "not-pending";
+    }
+    try {
+      await this.sendAnswer(send);
+      return "sent";
+    } catch (error) {
+      const outcome = notificationAnswerOutcome(error);
+      if (outcome === "not-pending") {
+        // Answered elsewhere (or gone): expected, not an error, nothing to undo.
+        return outcome;
+      }
+      // Not delivered (or maybe not): a later replay must offer it again.
+      this.router.answerFailed(sessionId, requestId);
+      return outcome;
+    }
   }
 
   /**
@@ -2474,13 +2675,14 @@ export class RemoteClient {
         // offered, which is what a `run`/`attach` TUI (no `hop` prop) needs.
         ...(this.hop ? { hop: true } : {}),
       },
-      ...(this.clientInfo ? { clientInfo: this.clientInfo } : {}),
+      ...(this.clientInfo ? { clientInfo: this.wireClientInfo(this.clientInfo) } : {}),
     }).then(
       (raw) => {
         const result = raw as InitializeResult;
         // Re-read on EVERY handshake: a replaced pod binary may take images
         // differently now, and the client must follow the daemon it has.
         this.capabilities = result.agentCapabilities;
+        this.daemonHandshake = result.agentInfo;
         this.daemonImages = {
           ...(typeof result.protocolVersion === "number"
             ? { protocol: result.protocolVersion }
@@ -2851,6 +3053,7 @@ export class RemoteClient {
                 ...this.logBaseOf(entry),
                 ...(entry.title ? { title: entry.title } : {}),
                 ...this.carried,
+                ...this.takeSeedAutoAccept(),
               },
       );
     } catch (error) {
@@ -2919,6 +3122,7 @@ export class RemoteClient {
     this.noteAttachProgress(entry, 1);
     entry.unflushedExits = result.unflushedExits ?? 0;
     this.noteSettings(entry, result);
+    this.noteAutoAccept(entry, result);
     this.step(entry, {
       kind: "open_result",
       created: result.created,
@@ -2926,6 +3130,83 @@ export class RemoteClient {
       epoch: result.epoch,
       now: this.clock.now(),
     });
+  }
+
+  /**
+   * The open's auto-accept snapshot (`OpenResult.autoAccept`): present ⇔ the
+   * daemon SHARES it, so a listener told everything else is told this too — and
+   * a snapshot that is absent is never reported (an older daemon: the client
+   * keeps its local feed, and the switch is not shared).
+   */
+  private noteAutoAccept(entry: SessionEntry, result: OpenResult): void {
+    if (result.autoAccept === undefined || !this.sharedAutoAccept) {
+      return;
+    }
+    entry.listener?.autoAcceptSnapshot?.(result.autoAccept);
+  }
+
+  /**
+   * The initial auto-accept for the NEXT session this client creates
+   * (`OpenParams.autoAccept`): a `/clear` fork, a new session, a hop target —
+   * the same places `createSession` runs. Ignored by a daemon on an attach, and
+   * by a daemon that does not share it.
+   */
+  seedAutoAcceptOnCreate(on: boolean): void {
+    this.seedAutoAccept = on;
+  }
+
+  /** The `autoAccept` an open-creating frame carries, consumed once. */
+  private takeSeedAutoAccept(): { readonly autoAccept?: boolean } {
+    const on = this.seedAutoAccept;
+    this.seedAutoAccept = undefined;
+    return on === undefined ? {} : { autoAccept: on };
+  }
+
+  /**
+   * `clientInfo` as it goes on the wire: this laptop's hostname added ONLY when
+   * this client shares the session's auto-accept (a trusted daemon — the
+   * worker, `connect`, the phone), never to a pod, which has no use for the
+   * laptop's name (docs/feat/session-auto-accept.md D7, AGENTS §7). The daemon
+   * stamps it into an ask's `askedOn` and an `auto_accept` update's `by`.
+   * Display only; failing to read a hostname is not an error.
+   */
+  private wireClientInfo(info: ClientInfo): ClientInfo {
+    if (!this.sharedAutoAccept) {
+      return info;
+    }
+    const host = this.hostName();
+    return host === undefined ? info : { ...info, host };
+  }
+
+  /**
+   * This machine's name, bounded to the wire field's 64 characters; undefined
+   * when unknown. Read through the injected `hostLabel` seam (never `os` here:
+   * this module is in the phone's bundle — Review round 1, HIGH 2).
+   */
+  private hostName(): string | undefined {
+    try {
+      const name = this.hostLabel?.();
+      return name === undefined || name === "" ? undefined : name.slice(0, 64);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * `session/set_auto_accept` (docs/feat/session-auto-accept.md D4): the
+   * session's auto-accept, for every client of it. Only a client whose TRUST
+   * bit is on ever calls this — a pod can neither set nor read it. Answers the
+   * daemon's value after applying; an older daemon is `MethodNotFound`, which
+   * the caller reports as "not shared".
+   */
+  setSessionAutoAccept(session: RemoteSession, on: boolean): Promise<{ on: boolean }> {
+    const sessionId = session.sessionId;
+    if (sessionId === null || !this.sharedAutoAccept) {
+      return Promise.reject(new Error("this client does not share the session's auto-accept"));
+    }
+    return this.call(this.peer, Method.SetAutoAccept, { sessionId, on }).then(
+      (result) => result as SetAutoAcceptResult,
+    );
   }
 
   /** The daemon's report of this open, to whoever listens. */
@@ -2975,6 +3256,7 @@ export class RemoteClient {
         ...(entry.title ? { title: entry.title } : {}),
         // Nothing was persisted: the laptop that recreates it decides.
         ...this.carried,
+        ...this.takeSeedAutoAccept(),
       })) as OpenResult;
     } catch (error) {
       // Deleted between the reconnect and this recreate (another device).
@@ -3230,6 +3512,13 @@ export class RemoteClient {
       } else if (update.type === "session_settings") {
         // Not turn-scoped: another client's sync is told while idle too.
         this.settingsChanged(entry, update.settings, update.id);
+      } else if (update.type === "auto_accept") {
+        // Not turn-scoped, and DROPPED with the trust bit off (a pod's claim):
+        // a client that does not share keeps its own local auto-accept.
+        if (this.sharedAutoAccept) {
+          entry.listener?.autoAcceptSnapshot?.(update.on);
+          entry.listener?.autoAcceptChanged?.(update.on, update.by);
+        }
       }
       // Closed daemon-side (by any client): nothing left to close at exit,
       // nothing left to answer.
@@ -3660,6 +3949,24 @@ export class RemoteClient {
   }
 
   /**
+   * Write one permission answer: the keyed `session/resolve_permission` the
+   * sheet and a notification's action BOTH send (one wire shape, one place).
+   */
+  private sendAnswer(send: PermissionSendAction): Promise<unknown> {
+    return this.sessionCall(
+      send.sessionId,
+      Method.ResolvePermission,
+      {
+        sessionId: send.sessionId,
+        requestId: send.requestId,
+        optionId: send.optionId,
+        ...(send.message !== undefined ? { message: send.message } : {}),
+      },
+      "keyed",
+    );
+  }
+
+  /**
    * Execute the router's decisions: a prompt goes to the broker with an abort
    * handle (its answer comes back to the router), an abort withdraws it, a
    * send answers the daemon. A losing answer (`PermissionNotPending`) is
@@ -3733,17 +4040,7 @@ export class RemoteClient {
         // with a recreated session, is not an error. The daemon takes a re-send
         // of the answer that already settled it (after a drop) as a success.
         const lost = action.message !== undefined ? onLost : undefined;
-        this.sessionCall(
-          sessionId,
-          Method.ResolvePermission,
-          {
-            sessionId,
-            requestId,
-            optionId: action.optionId,
-            ...(action.message !== undefined ? { message: action.message } : {}),
-          },
-          "keyed",
-        )
+        this.sendAnswer(action)
           .then(() => undefined)
           .catch((error: unknown) => {
             // The decision stays silent; only the person's words come back.

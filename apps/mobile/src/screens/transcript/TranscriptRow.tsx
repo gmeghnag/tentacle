@@ -22,6 +22,7 @@ import { toolMeta, toolSummary } from "../../tool-summary.ts";
 import { type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { ToolRow } from "../../ui/ToolRow.tsx";
+import { animateNextLayout } from "../../ui/animate.ts";
 import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
 
@@ -144,7 +145,10 @@ function ReasoningRowView({ row, palette, onLink }: RowProps): JSX.Element {
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
-        onPress={() => setOpen((was) => !was)}
+        onPress={() => {
+          animateNextLayout();
+          setOpen((was) => !was);
+        }}
         hitSlop={8}
         style={styles.reasoningHead}
       >
@@ -186,7 +190,10 @@ function ToolRowView({ row, palette }: RowProps): JSX.Element {
           tone={meta.tone}
           expandable={lines.length > 0}
           expanded={open}
-          onPress={() => setOpen((was) => !was)}
+          onPress={() => {
+            animateNextLayout();
+            setOpen((was) => !was);
+          }}
           labelTestID={`tool-${tool.id}-${tool.status}`}
         />
         {tool.denialReply !== undefined ? (

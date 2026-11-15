@@ -47,6 +47,15 @@ export interface PairedComputer {
   readonly addresses: readonly string[];
   /** The name this phone gave the computer ("revoke <deviceName>" names it). */
   readonly deviceName: string;
+  /**
+   * The name this PHONE paired under — what the computer lists it as, and so the
+   * only label that matches on both ends (`ClientInfo.host`, docs/feat/
+   * session-auto-accept.md D7: an ask's "also asked on" and a flip's `by`).
+   * OPTIONAL because a record an older build wrote has none, and a record must
+   * stay readable across an update (F-K3): absent → this phone sends no label,
+   * and only the sibling name on an ask is lost.
+   */
+  readonly thisDeviceName?: string;
   readonly pairedAt: number;
 }
 
@@ -54,6 +63,27 @@ export interface PairedComputer {
 export interface StoredComputer extends PairedComputer {
   /** base64url of this phone's private static key FOR THIS computer (Owner Q2). */
   readonly deviceKey: string;
+  /**
+   * What this phone last registered for push with this computer
+   * (docs/feat/mobile-push.md P9): the `(token, env, key)` fingerprint and when.
+   * Absent = never registered, or the toggle is off.
+   */
+  readonly push?: PushRegistrationRecord;
+}
+
+/** One computer's last accepted push registration (see `StoredComputer.push`). */
+export interface PushRegistrationRecord {
+  /** The fingerprint of the accepted `(token, env, pushKey)` (`pushFactsHash`). */
+  readonly hash: string;
+  readonly registeredAt: number;
+  /**
+   * An unregister the person asked for that never reached this computer (review
+   * round 1, H2): `hash` is empty, and the next connect sends it. `off` MUST
+   * survive this store's read/write round trip — dropping it here (review round
+   * 2, R2-1) made the whole debt invisible in the app, so the daemon kept
+   * pushing to a phone whose owner had turned notifications off.
+   */
+  readonly off?: true;
 }
 
 /** What `list()` yields per index entry: a usable computer, or one whose item is unreadable. */
@@ -96,6 +126,12 @@ export interface ComputerStore {
   get(id: string): Promise<StoredComputer | undefined>;
   /** Add or REPLACE (a re-pair keeps the id — Owner Q7). */
   add(computer: PairedComputer, deviceKey: string): Promise<void>;
+  /**
+   * Remember (or, with `undefined`, forget) this computer's push registration
+   * fingerprint (docs/feat/mobile-push.md P9). A write for an id the index does
+   * not list is refused — never an orphan item nothing will ever read.
+   */
+  setPush(id: string, value: PushRegistrationRecord | undefined): Promise<void>;
   /** Forget it on this phone (Owner Q5: local only). */
   remove(id: string): Promise<void>;
 }
@@ -146,14 +182,45 @@ function storedComputerOf(id: string, item: unknown): StoredComputer | undefined
   ) {
     return undefined;
   }
+  // Present only from the build that started naming this phone: a record an
+  // older one wrote has none and still loads (F-K3).
+  const thisDeviceName = record.thisDeviceName;
   return {
     id: record.id,
     name: record.name,
     computerKey: record.computerKey,
     addresses: record.addresses as readonly string[],
     deviceName: record.deviceName,
+    ...(typeof thisDeviceName === "string" ? { thisDeviceName } : {}),
     pairedAt: record.pairedAt,
     deviceKey: record.deviceKey,
+    ...(pushRegistrationOf(record.push) === undefined
+      ? {}
+      : { push: pushRegistrationOf(record.push) }),
+  };
+}
+
+/**
+ * A parsed `push` field, or `undefined` when it is not what this build wrote. A
+ * malformed one is DROPPED rather than rejecting the whole record: the worst a
+ * stale fingerprint can do is re-register once on the next connect, and losing
+ * the computer over it would cost the person a re-pair.
+ */
+function pushRegistrationOf(value: unknown): PushRegistrationRecord | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Partial<PushRegistrationRecord>;
+  if (typeof record.hash !== "string" || typeof record.registeredAt !== "number") {
+    return undefined;
+  }
+  // `off` is copied only when it IS `true`: anything else (a newer build's
+  // future meaning, a hand-edited file) is not this build's debt, and inventing
+  // one would send an unregister nobody asked for.
+  return {
+    hash: record.hash,
+    registeredAt: record.registeredAt,
+    ...(record.off === true ? { off: true as const } : {}),
   };
 }
 
@@ -165,6 +232,7 @@ function publicOf(computer: StoredComputer): PairedComputer {
     computerKey: computer.computerKey,
     addresses: computer.addresses,
     deviceName: computer.deviceName,
+    ...(computer.thisDeviceName === undefined ? {} : { thisDeviceName: computer.thisDeviceName }),
     pairedAt: computer.pairedAt,
   };
 }
@@ -256,12 +324,24 @@ export function createComputerStore(deps: ComputerStoreDeps): ComputerStore {
           computerKey: computer.computerKey,
           addresses: computer.addresses,
           deviceName: computer.deviceName,
+          // This phone's own label (docs/feat/session-auto-accept.md D7), kept
+          // only when pairing named one: an older record has none, and absent
+          // stays absent (never an invented `""`).
+          ...(computer.thisDeviceName === undefined
+            ? {}
+            : { thisDeviceName: computer.thisDeviceName }),
           pairedAt: computer.pairedAt,
           deviceKey,
         };
         // ITEM first: a crash between the two leaves an unlisted orphan (F-P13),
         // which a later pairing of the same id overwrites. The reverse order
         // would list a computer whose key was never written.
+        //
+        // NO `push` field here, deliberately: a re-pair (Owner Q7) replaces the
+        // device key, so the daemon knows this phone under a NEW device id with
+        // no registration. Keeping the old fingerprint would make the phone skip
+        // its registration on the next connect ("same") and never be pushed to
+        // (docs/feat/mobile-push.md P9). The add IS the forget.
         await write(computerKeyOf(computer.id), JSON.stringify({ v: STORE_VERSION, ...record }));
         if (!ids.includes(computer.id)) {
           const next: IndexRecord = { v: STORE_VERSION, ids: [...ids, computer.id] };
@@ -280,6 +360,28 @@ export function createComputerStore(deps: ComputerStoreDeps): ComputerStore {
           await write(INDEX_KEY, JSON.stringify(next));
         }
         await kv.delete(computerKeyOf(id));
+      });
+    },
+
+    setPush(id: string, value: PushRegistrationRecord | undefined): Promise<void> {
+      return serialise(async () => {
+        const ids = await readIndex();
+        // The item is rewritten WHOLE (SecureStore has no partial write), so a
+        // push registration can only be written for a computer this app still
+        // lists: writing it for an unlisted id would resurrect an orphan and
+        // could outlive the record it describes.
+        if (!ids.includes(id)) {
+          return;
+        }
+        const stored = await read(id);
+        if (stored === undefined) {
+          // An unreadable item is NOT repaired here: a newer app's record must
+          // still load (F-K3), and a fingerprint is never worth losing a key for.
+          return;
+        }
+        const { push: _previous, ...rest } = stored;
+        const next = value === undefined ? rest : { ...rest, push: value };
+        await write(computerKeyOf(id), JSON.stringify({ v: STORE_VERSION, ...next }));
       });
     },
   };

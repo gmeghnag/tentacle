@@ -151,6 +151,8 @@ export interface TentacleConfig {
   readonly contextReset: ResolvedConfig["contextReset"];
   /** Whether the agent is offered `move_session` (docs/feat/session-hop.md D9). */
   readonly sessionHop: ResolvedConfig["sessionHop"];
+  /** Whether the agent is offered `workload_shell` (docs/fix/workload-shell-live.md). */
+  readonly workloadShell: ResolvedConfig["workloadShell"];
   readonly maxTokens?: number;
   /**
    * `model.maxImageBytes`: raw bytes one image may have on this model's wire
@@ -220,8 +222,12 @@ export interface TentacleConfig {
   readonly tui?: ResolvedConfig["tui"];
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: ResolvedConfig["sessions"];
+  /** Voice dictation (file or profile); absent = the defaults in `voice-session.ts`. */
+  readonly voice?: ResolvedConfig["voice"];
   /** The mobile relay's settings (file or profile); absent = enabled, `DEFAULT_RELAY_URL`. */
   readonly relay?: ResolvedConfig["relay"];
+  /** Push notifications (file or profile); absent = enabled, a 30 s grace. */
+  readonly push?: ResolvedConfig["push"];
   /**
    * The configured `apiKeyCommand` (the command, never its output): the CLI
    * hides the key FILE it reads from a workspace mount.
@@ -865,6 +871,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     contextAwareness: resolved.contextAwareness,
     contextReset: resolved.contextReset,
     sessionHop: resolved.sessionHop,
+    workloadShell: resolved.workloadShell,
     ...(resolved.maxTokens !== undefined ? { maxTokens: resolved.maxTokens } : {}),
     ...(resolved.maxImageBytes !== undefined ? { maxImageBytes: resolved.maxImageBytes } : {}),
     ...(resolved.images !== undefined ? { images: resolved.images } : {}),
@@ -899,6 +906,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.tui !== undefined ? { tui: resolved.tui } : {}),
     ...(resolved.sessions !== undefined ? { sessions: resolved.sessions } : {}),
     ...(resolved.relay !== undefined ? { relay: resolved.relay } : {}),
+    ...(resolved.push !== undefined ? { push: resolved.push } : {}),
     ...(resolved.apiKeyCommand !== undefined ? { apiKeyCommand: resolved.apiKeyCommand } : {}),
     hooks: contributed.hooks,
     mcpServers: contributed.mcpServers,

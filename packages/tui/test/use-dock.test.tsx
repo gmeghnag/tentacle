@@ -29,6 +29,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { App, type SessionController } from "../src/App.tsx";
 import { resetThemeForTest, setThemeMode } from "../src/theme.ts";
 import { renderAt } from "./real-term.tsx";
+import { inertSession } from "./session-stub.ts";
 
 const SRC = join(import.meta.dir, "..", "src");
 const readSrc = (name: string): string => readFileSync(join(SRC, name), "utf8");
@@ -107,6 +108,7 @@ function fake(opts: { readonly refuse?: string; readonly refuseAfterMs?: number 
   const messages: { id: string; text: string }[] = [];
   const prompts: string[] = [];
   const session = {
+    ...inertSession(),
     async *send(text: string) {
       prompts.push(text);
       yield { type: "turn_end", reason: "end_turn" };

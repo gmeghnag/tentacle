@@ -333,7 +333,23 @@ describe("T2b: the defaults `resolveConfig` does not apply are exactly the CLI's
       .sort();
     // `resolve.ts` passes these through unset when the file omits them, so the
     // CLI (or the TUI) applies its own default — a documented default only.
-    expect(cliDefaults).toEqual(["detach.keepAwake", "engine", "rm", "tui.theme"]);
+    // The `voice.*` leaves default in `tui/src/voice-config.ts` (`VOICE_DEFAULTS`),
+    // which the TUI reads once at mount: a local input device, not a runtime knob.
+    expect(cliDefaults).toEqual([
+      "detach.keepAwake",
+      "engine",
+      "rm",
+      "tui.theme",
+      "voice.autoStop",
+      "voice.autoStopSilenceMs",
+      "voice.enabled",
+      "voice.engine",
+      "voice.input",
+      "voice.key",
+      "voice.language",
+      "voice.maxSeconds",
+      "voice.voiceProcessing",
+    ]);
   });
 });
 

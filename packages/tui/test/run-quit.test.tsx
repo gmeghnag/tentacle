@@ -4,6 +4,7 @@ import { render } from "ink-testing-library";
 import { App, type NoticeFeed, type RunQuit, type SessionController } from "../src/App.tsx";
 import type { SessionEvent } from "../src/state.ts";
 import type { SessionActivity } from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 
 // docs/fix/detach-live.md A2/A6: a detached run's TUI. `/quit` closes the
 // session for every TUI on it (a y/N confirmation with others attached); a
@@ -55,6 +56,7 @@ function shared(onOpen?: (raise: (a: SessionActivity) => void) => void) {
   const make = (): SessionController => {
     log.made += 1;
     return {
+      ...inertSession(),
       async *send(prompt) {
         yield { type: "text", delta: `reply to ${prompt}` };
         yield { type: "turn_end", reason: "end_turn" };
@@ -391,6 +393,7 @@ describe("T49/T48: background sub-agents in the TUI (docs/feat/subagent-backgrou
     const listeners = new Set<(rows: readonly { id: string }[]) => void>();
     let rows: readonly { id: string }[] = [];
     const make = (): SessionController => ({
+      ...inertSession(),
       async *send() {
         yield { type: "turn_end", reason: "end_turn" };
       },

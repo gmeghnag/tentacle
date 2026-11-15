@@ -9,6 +9,7 @@
  * costs the whole probe at most `timeoutMs`.
  */
 import type { ConnectMcpResult, McpConnection } from "./connect.ts";
+import type { SupervisedServer } from "./supervisor.ts";
 
 export type McpServerState = "connecting" | "connected" | "unresponsive" | "closed" | "failed";
 
@@ -124,6 +125,19 @@ export class McpStatusTracker {
       };
     }
     const tools = toolList(connection.toolNames);
+    // A supervised server whose respawn is in flight (docs/feat/serve-mcp.md S3):
+    // `connecting` reuses the existing enum (no protocol change), and the error
+    // line says why, so a person watching `/mcp` is never told "closed" when the
+    // daemon is already bringing it back.
+    const restarting = (connection as SupervisedServer).restarting?.();
+    if (restarting) {
+      return {
+        name,
+        state: "connecting",
+        ...tools,
+        error: oneLine(`restarting (attempt ${restarting.attempt})`),
+      };
+    }
     if (!connection.isOpen()) {
       const reason = connection.closeReason?.() ?? "the server process exited";
       return { name, state: "closed", ...tools, error: oneLine(reason) };

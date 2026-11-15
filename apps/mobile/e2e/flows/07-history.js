@@ -16,7 +16,9 @@ if (typeof history.assistant !== "string" || !history.assistant.includes("mock m
   throw new Error(`the daemon has no mock answer: ${JSON.stringify(history.assistant)}`);
 }
 const prompts = http.get(`http://${MAESTRO_HOOKS}/model-prompts`);
-if (!json(prompts.body).prompts.includes("SLOW flow seven prompt")) {
+// Matched on what was typed: context awareness appends "\n\n[context: …]".
+const asked = (p) => p === "SLOW flow seven prompt" || p.startsWith("SLOW flow seven prompt\n");
+if (!json(prompts.body).prompts.some(asked)) {
   throw new Error("the mock model was never asked the prompt the flow typed");
 }
 output.history = JSON.stringify(history);

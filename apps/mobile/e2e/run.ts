@@ -14,10 +14,18 @@
  * Exit codes: 0 = every flow passed; 2 = a prerequisite is missing (named, with
  * its install command — never a silent skip); anything else = Maestro's own.
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
+import { PermissionBroker } from "@tentacle/core";
+import { writePushRegistration as daemonWritePushRegistration } from "@tentacle/daemon";
+import { encodeBase64Url } from "@tentacle/protocol";
+import { publicKeyOf } from "@tentacle/transport/noise";
 import { $, type Subprocess } from "bun";
+import { createApnsClient } from "../../relay/src/apns-client.ts";
+import type { ApnsJwtSource } from "../../relay/src/apns.ts";
 import { startHooks } from "./hooks.ts";
+import { payloadFor, sealPushMessage } from "./notify-steps.ts";
 import { createPairingHooks } from "./pairing.ts";
 import {
   type IosMajor,
@@ -26,6 +34,7 @@ import {
   parseRuntimes,
   preflight,
 } from "./preflight.ts";
+import { type ApnsPayload, type PushSteps, createPushSteps } from "./push-steps.ts";
 
 const REPO = join(import.meta.dir, "..", "..", "..");
 const RUNS_DIR = join(REPO, ".tentacle", "tmp", "e2e-mobile");
@@ -35,11 +44,29 @@ type Child = Subprocess<"ignore", "inherit", "inherit">;
 /** Every child the run started, killed in `finally`. */
 const children = new Set<Child>();
 
-/** `--ios 18|26` picks one simulator; default is every required major (Owner Q3). */
-export function parseArgs(argv: readonly string[]): { readonly only?: IosMajor } {
+/**
+ * `--ios 18|26` picks one simulator; default is every required major (Owner Q3).
+ * `--only a,b` narrows the flows, like `E2E_ONLY_FLOWS` (the flag wins); it exists
+ * because some shells refuse an env-prefixed command. Names are checked by
+ * `selectedFlows`.
+ */
+export function parseArgs(argv: readonly string[]): {
+  readonly only?: IosMajor;
+  readonly flows?: string;
+} {
+  const flowsAt = argv.indexOf("--only");
+  let flows: string | undefined;
+  if (flowsAt !== -1) {
+    const value = argv[flowsAt + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("--only needs a value (comma-separated flow names)");
+    }
+    flows = value;
+  }
+  const withFlows = flows === undefined ? {} : { flows };
   const at = argv.indexOf("--ios");
   if (at === -1) {
-    return {};
+    return withFlows;
   }
   const value = argv[at + 1];
   if (value === undefined) {
@@ -49,7 +76,7 @@ export function parseArgs(argv: readonly string[]): { readonly only?: IosMajor }
   if (!REQUIRED_IOS_MAJORS.includes(major as IosMajor)) {
     throw new Error(`--ios must be 18 or 26 (got ${JSON.stringify(value)})`);
   }
-  return { only: major as IosMajor };
+  return { only: major as IosMajor, ...withFlows };
 }
 
 /**
@@ -78,6 +105,55 @@ async function simctlRuntimes(): Promise<string> {
 async function simctlDevices(): Promise<string> {
   const result = await $`xcrun simctl list -j devices`.quiet().nothrow();
   return result.exitCode === 0 ? result.stdout.toString() : "";
+}
+
+/**
+ * The harness `serve`'s `config.jsonc`. `model.images` has no env var and an
+ * OpenAI-shaped endpoint (the mock) defaults to no vision, so without this the
+ * daemon refuses every photo `images_off` and flow 18 can never pass.
+ */
+export function harnessConfigText(): string {
+  return `${JSON.stringify(
+    {
+      model: { images: true },
+      // docs/feat/mobile-session-info.md flow 25: one working stdio server and one
+      // that cannot start, so Session info has a `connected` row with tools AND a
+      // `failed` row with an error. MCP connects OFF the start path, so this costs
+      // the other flows nothing (F12: measured at flow 01).
+      mcpServers: {
+        demo: {
+          command: "bun",
+          args: [
+            join(REPO, "packages", "mcp", "test", "fixtures", "strict-legacy-stdio-server.ts"),
+          ],
+        },
+        broken: { command: "/nonexistent-tentacle-e2e" },
+      },
+    },
+    null,
+    2,
+  )}\n`;
+}
+
+/** The user-scope skill flow 25 asserts on (`<configDir>/skills` is a scan root). */
+export const HARNESS_SKILL_NAME = "e2e-demo";
+
+/** Write the skill the Session info flow lists (name + one line). */
+export async function writeHarnessSkill(configDir: string): Promise<void> {
+  const dir = join(configDir, "skills", HARNESS_SKILL_NAME);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "SKILL.md"),
+    [
+      "---",
+      `name: ${HARNESS_SKILL_NAME}`,
+      "description: A demo skill the Session info flow lists",
+      "---",
+      "",
+      "Do the demo.",
+      "",
+    ].join("\n"),
+  );
 }
 
 /** Maestro needs a JDK; the owner's is keg-only, so the run supplies it. */
@@ -154,6 +230,8 @@ export async function waitForPort(port: number, timeoutMs = 20_000): Promise<voi
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
+  // Checked before any build, so a typo fails in a second, not after one.
+  const runFlows = selectedFlows(args.flows);
   const [xcode, cocoapods, maestro, runtimesJson, devicesJson] = await Promise.all([
     versionOf("xcodebuild", "-version"),
     versionOf("pod", "--version"),
@@ -180,6 +258,20 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  // The Notification Service Extension's Swift logic, against the SAME vectors
+  // the TypeScript side is pinned by (docs/feat/mobile-notifications.md N5,
+  // decision 20). Run here, before any build: it takes seconds and it is the only
+  // gate that exercises the extension's crypto (`swift test`, macOS only).
+  const swiftTests = Bun.spawnSync(["bun", "run", "test:swift"], {
+    cwd: REPO,
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  if (swiftTests.exitCode !== 0) {
+    console.error("e2e:mobile: `bun run test:swift` failed (the NSE's PushCore suite)");
+    return 2;
+  }
+
   const runId = `${Date.now()}`;
   const runDir = join(RUNS_DIR, runId);
   await mkdir(join(runDir, "project"), { recursive: true });
@@ -198,9 +290,31 @@ async function main(): Promise<number> {
   // the deployable service — the harness imports it across apps, like the
   // daemon's own relay tests do (`packages/daemon/test/relay-link.test.ts`).
   const { startRelay } = await import("../../relay/src/server.ts");
-  const relay = startRelay({ host: "127.0.0.1", port: 0, onLog: () => {} });
+  // The LOCAL APNs (docs/feat/mobile-push.md P10). P8's own fake, moved here:
+  // an h2c server that records every request body. It is what makes the flow's
+  // payload REAL rather than hand-written — the bytes `xcrun simctl push` gets
+  // are the ones the daemon's sealing chain produced, through the relay, from a
+  // device registration the phone just made.
+  const apns = await startFakeApns();
+  const relay = startRelay({
+    host: "127.0.0.1",
+    port: 0,
+    onLog: () => {},
+    // With an APNs client the relay announces `features: ["push"]`, which is the
+    // ONLY thing that makes the daemon send a `push` frame (C1/F4). Without it
+    // every flow would still pass and push would never be exercised at all.
+    apns: {
+      client: createApnsClient({
+        topic: "so.tentacle.app",
+        jwtSource: apns.jwtSource,
+        origins: { sandbox: apns.origin, production: apns.origin },
+      }),
+      jwtSource: apns.jwtSource,
+      topic: "so.tentacle.app",
+    },
+  });
   const relayUrl = relay.url;
-  console.log(`relay on ${relayUrl}`);
+  console.log(`relay on ${relayUrl}, fake APNs on ${apns.origin}`);
 
   // The real `serve`, from source, on a private config dir and the mock model.
   // Spawned through a function because flow 05 stops it and starts it again on
@@ -220,6 +334,11 @@ async function main(): Promise<number> {
         // 22's whole subject is the relay path.
         "--relay",
         relayUrl,
+        // P10: an ask pushes IMMEDIATELY, so the push flow does not sit out the
+        // 30 s default. Every other flow is untouched by it: none registers a
+        // push key, and with no registration there is nothing to push to.
+        "--push-grace",
+        "0",
       ],
       {
         // The daemon's cwd IS its session cwd (each session's tools are confined
@@ -239,6 +358,11 @@ async function main(): Promise<number> {
     children.add(child);
     return child;
   };
+  // Images ON before the first start (flow 18): serve keeps an existing file.
+  await mkdir(join(runDir, "config"), { recursive: true });
+  await writeFile(join(runDir, "config", "config.jsonc"), harnessConfigText());
+  // Session info's skill row (flow 25): a user-scope skill in the harness config dir.
+  await writeHarnessSkill(join(runDir, "config"));
   let serving = startServe();
 
   try {
@@ -285,8 +409,17 @@ async function main(): Promise<number> {
     );
     await writeFile(join(runDir, "seeded.json"), JSON.stringify(seeded, null, 2));
 
-    // The hooks flow 03/05 call: change the world mid-run (add a session, stop
-    // and restart the daemon on the same port).
+    // docs/feat/mobile-push.md P10: register a push key for the paired device,
+    // make the daemon push one (an ask, `--push-grace 0`), and place the
+    // envelope it produced on the simulator.
+    const pushSteps = harnessPushSteps({
+      url: `ws://127.0.0.1:${daemonPort}/`,
+      configDir: join(runDir, "config"),
+      apns,
+      pairDeviceId: () => pairing.lastDeviceId(),
+      udid: () => currentDevice.udid,
+      log: (line) => console.log(line),
+    });
     // The app lock's hooks (docs/feat/mobile-lock.md Step 0): the flows drive
     // Face ID and read the app's OWN log file, so the assertions are about what
     // the app really wrote — not about what the harness believes it wrote.
@@ -341,6 +474,18 @@ async function main(): Promise<number> {
         // payload ACTUALLY carried. The phone can only show "1 address"; whether
         // that address is the relay is what the flow is about.
         relayQr: async () => ({ payload: pairing.lastPayload() }),
+        // docs/feat/mobile-push.md P10: the push the `push-placeholder` flow
+        // places. `pushSteps.push` (below) pushed it through the daemon's own
+        // chain and kept the payload, so the flow's last step reads what was
+        // ACTUALLY delivered instead of the flow's own assumption.
+        pushPayload: async () => {
+          const placed = pushSteps.last();
+          if (placed === undefined) {
+            throw new Error("no push has been placed yet (the flow places it first)");
+          }
+          return { payload: placed.payload, token: placed.token };
+        },
+        pushPlace: () => pushSteps.place(),
         faceIdEnroll: async () => {
           // Two commits, as Step 0 found: the `-s` alone only SETS the default;
           // the `-p` post is what makes `isEnrolledAsync()` flip to true.
@@ -374,6 +519,73 @@ async function main(): Promise<number> {
           ]);
         },
         logFile: () => appLogFile(currentDevice.udid),
+        // The REAL pending asks: a notification flow names one, so the action it
+        // injects answers the daemon's own request (not a synthetic one).
+        pendingAsk: async (session) => laptop.pendingAsks(session),
+        notifyPayload: async () => {
+          if (lastSealed === undefined) {
+            throw new Error("no `seal-push` has been placed yet");
+          }
+          return { payload: lastSealed.userInfo as { aps: unknown; tp: unknown } };
+        },
+        // docs/feat/mobile-notifications.md N8: seal a plaintext the FLOW chose to
+        // the device's push key (which this harness generated and kept, so it can
+        // seal for real) and place it. A forged one uses another sender key.
+        sealPush: async (options) => {
+          const keys = await notifyKeys();
+          const message = notifyMessageOf(options.kind, options.reply === true, {
+            ...(options.session !== undefined ? { sessionId: options.session } : {}),
+            ...(options.request !== undefined ? { requestId: options.request } : {}),
+          });
+          const sealed = sealPushMessage(
+            message,
+            options.forged === true ? keys.forgedComputerSk : keys.computerSk,
+            keys.devicePushPk,
+            (length) => crypto.getRandomValues(new Uint8Array(length)),
+          );
+          const payload = payloadFor(
+            sealed,
+            options.hostileAps === true
+              ? {
+                  category: "tentacle.ask",
+                  alert: { title: "tentacle", body: "rm -rf / — approve?" },
+                }
+              : {},
+          );
+          await placeOnSimulator(currentDevice.udid, payload, () => {});
+          lastSealed = { message, userInfo: payload as unknown as Record<string, unknown> };
+          return { payload };
+        },
+        // Owner Q7: inject the response Maestro cannot long-press. The APP runs
+        // the real dispatcher (Face ID prompt included) — this only says which
+        // action was "tapped" on the last placed notification.
+        notifyRespond: async (options) => {
+          if (lastSealed === undefined) {
+            throw new Error("notify-respond: no `seal-push` has been placed yet");
+          }
+          const actionId = notifyActionIdOf(options.action);
+          if (actionId === undefined) {
+            throw new Error(`notify-respond: unknown action ${options.action}`);
+          }
+          await injectNotificationResponse(currentDevice.udid, {
+            actionId,
+            userInfo: lastSealed.userInfo,
+            ...(options.text !== undefined ? { userText: options.text } : {}),
+          });
+          return { accepted: true };
+        },
+        // Flow 24's light/dark pairs: `simctl ui`, not `simctl spawn` (it is a
+        // simulator setting, not a process inside it).
+        appearance: async (name) => {
+          const child = Bun.spawn(
+            ["xcrun", "simctl", "ui", currentDevice.udid, "appearance", name],
+            { stdout: "pipe", stderr: "pipe" },
+          );
+          if ((await child.exited) !== 0) {
+            const err = await new Response(child.stderr).text();
+            throw new Error(`simctl ui appearance ${name} failed: ${err.trim()}`);
+          }
+        },
       },
     });
     await hooks.ready;
@@ -403,7 +615,7 @@ async function main(): Promise<number> {
         console.error(`build/install failed for iOS ${major} (exit ${buildCode})`);
         return buildCode;
       }
-      for (const flow of selectedFlows()) {
+      for (const flow of runFlows) {
         // Each flow gets its own pairing scope. "One window at a time" (F-H3) is
         // a rule INSIDE a flow: a flow that failed between `pair-start` and its
         // answer leaves a window open, and the next flow's `pair-start` would be
@@ -442,6 +654,8 @@ async function main(): Promise<number> {
     }
     children.clear();
     mock.stop();
+    // The fake APNs is in THIS process too (an h2c server keeps the loop alive).
+    apns.stop();
     // The local relay is in THIS process, so it needs an explicit stop (a live
     // server keeps the event loop, and therefore the run, alive).
     relay.stop();
@@ -559,7 +773,8 @@ async function buildAndInstall(device: string, runDir: string, major: IosMajor):
 
 /**
  * Seed the simulator's photo library with the flow 18 fixtures (`PNG fixture`,
- * `JPEG fixture` — the NAMES are what PHPicker shows, so a flow can tap them). The
+ * `JPEG fixture`; iOS 26's PHPicker shows "Photo, <date>, <time>" instead, so flow
+ * 18 taps the two newest cells — this pair). The
  * fixtures are generated per run under the harness's scratch dir: never real
  * photos, and nothing under `/tmp` (AGENTS §6).
  */
@@ -595,7 +810,329 @@ async function addMedia(device: string, runDir: string): Promise<number> {
   return result.exitCode;
 }
 
-/** A session handle resolved through the client's own session table (for a subscription). */
+/**
+ * The LOCAL APNs for the push flow (docs/feat/mobile-push.md P10; the fake is
+ * P8's, from `packages/cli/test/serve-push.test.ts`, moved into the harness so
+ * the payload the flow pushes is the one the daemon actually produced).
+ *
+ * Nothing here talks to Apple: it is an h2c server on 127.0.0.1, and the relay's
+ * `createApnsClient` is pointed at it with the `origins` override P4 added for
+ * exactly this. It answers `200` always, so a push always reads `sent`.
+ */
+async function startFakeApns(): Promise<{
+  readonly origin: string;
+  readonly jwtSource: ApnsJwtSource;
+  /** The single object `{aps, tp}` the last push carried, as APNs would send it. */
+  last(): ApnsPayload | undefined;
+  /** How many requests it has answered (a flow's "exactly one push" question). */
+  readonly count: () => number;
+  stop(): void;
+}> {
+  const http2 = await import("node:http2");
+  const seen: ApnsPayload[] = [];
+  const server = http2.createServer();
+  server.on("stream", (stream) => {
+    let body = "";
+    stream.on("data", (chunk: unknown) => {
+      body += String(chunk);
+    });
+    stream.on("end", () => {
+      try {
+        seen.push(JSON.parse(body) as ApnsPayload);
+      } catch {
+        // A body that is not JSON is not a push this harness can use; the flow's
+        // own assertion then fails loudly rather than pushing something odd.
+      }
+      stream.respond({ ":status": 200 });
+      stream.end("");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  const port = (server.address() as { port: number }).port;
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    // The signature is never checked by the fake, so a constant is honest here.
+    jwtSource: {
+      jwt: () => Promise.resolve("header.claims.signature"),
+      invalidate: () => {},
+    },
+    last: () => (seen.length === 0 ? undefined : seen[seen.length - 1]),
+    count: () => seen.length,
+    stop: () => server.close(),
+  };
+}
+
+/**
+ * The harness's side of P10's push flow, wired to the REAL effects.
+ *
+ * The orchestration itself is `createPushSteps` (`./push-steps.ts`) — pure, and
+ * unit-tested, because the property the flow rests on ("the payload placed on the
+ * simulator came out of the daemon's chain") must be provable without a daemon, a
+ * relay or a simulator. Before that split, a mutation replacing the captured
+ * payload with a hand-written literal survived every guard (the task doc's M7).
+ *
+ * Everything below is the effectful half: the daemon's own push store, one ask,
+ * the local fake APNs above, and `xcrun simctl push`.
+ */
+function harnessPushSteps(deps: {
+  readonly url: string;
+  readonly configDir: string;
+  readonly apns: { last(): ApnsPayload | undefined; count(): number };
+  readonly pairDeviceId: () => string | undefined;
+  readonly udid: () => string;
+  readonly log: (line: string) => void;
+}): PushSteps {
+  return createPushSteps({
+    pairedDeviceId: deps.pairDeviceId,
+    // The phone's OWN push key: a fresh X25519 pair, exactly what `push-key.ts`
+    // generates on the device. Nothing in this flow opens it (task 17's extension
+    // would), so it is written and then unused — honestly: the envelope's SHAPE
+    // is what the flow asserts, and `push-envelope.ts` says so.
+    pushKey: () => encodeBase64Url(publicKeyOf(crypto.getRandomValues(new Uint8Array(32)))),
+    register: ({ deviceId, token, env, key }) => {
+      writePushRegistration(deps.configDir, deviceId, { token, env, key });
+    },
+    promptOnce: () => promptOnce(deps.url),
+    apnsCount: () => deps.apns.count(),
+    lastApnsPayload: () => deps.apns.last(),
+    place: (payload) => placeOnSimulator(deps.udid(), payload, deps.log),
+  });
+}
+
+/** The key material the notification flows generated this run (see `notifyKeys`). */
+let notifyKeysCache: NotifyKeys | undefined;
+
+/** The last plaintext `seal-push` placed: what `notify-respond` answers. */
+let lastSealed: { message: unknown; userInfo: unknown } | undefined;
+
+/**
+ * Generate (once per run) the key material `seal-push` seals with: the computer's
+ * static key and the device's push key. The device's PUBLIC half is what the
+ * harness registers with the daemon, so a push the daemon sends goes to a key
+ * this harness can actually seal for — the same real chain production has.
+ */
+async function notifyKeys(): Promise<NotifyKeys> {
+  if (notifyKeysCache !== undefined) {
+    return notifyKeysCache;
+  }
+  const deviceSk = crypto.getRandomValues(new Uint8Array(32));
+  notifyKeysCache = {
+    computerSk: crypto.getRandomValues(new Uint8Array(32)),
+    forgedComputerSk: crypto.getRandomValues(new Uint8Array(32)),
+    devicePushPk: publicKeyOf(deviceSk),
+    devicePushPkText: encodeBase64Url(publicKeyOf(deviceSk)),
+  };
+  return notifyKeysCache;
+}
+
+/**
+ * The notification-flow fixtures (`docs/feat/mobile-notifications.md` N8): the
+ * key material the harness generates ONCE per run, the plaintexts the flows
+ * seal, and the action ids they inject.
+ *
+ * It exists so `seal-push` seals to a REAL device push key (the harness's own,
+ * registered with the daemon) and `notify-respond` names a real action id — the
+ * two things a flow would otherwise fake, and prove nothing about.
+ */
+interface NotifyKeys {
+  /** The COMPUTER's static key (what a genuine push authenticates with). */
+  readonly computerSk: Uint8Array;
+  /** A different sender: what a hostile relay could produce (F4). */
+  readonly forgedComputerSk: Uint8Array;
+  /** The device's push key pair, as a string for `device/push_register`. */
+  readonly devicePushPk: Uint8Array;
+  readonly devicePushPkText: string;
+}
+
+const notifyMessageOf = (
+  kind: string,
+  reply: boolean,
+  /** The REAL ids a flow names, so an injected action answers the daemon's own ask. */
+  real: { readonly sessionId?: string; readonly requestId?: string },
+): {
+  v: 1;
+  id: string;
+  at: number;
+  kind: "ask" | "ask_resolved" | "turn_done" | "turn_failed";
+  computer: string;
+  cwd: string;
+  sessionId: string;
+  title: string;
+  ask?: {
+    requestId: string;
+    tool: string;
+    title: string;
+    preview: string;
+    options: { optionId: string; name: string; kind: "allow_once" | "reject_once" }[];
+    reply?: { maxChars: number };
+  };
+} => {
+  const at = Date.now();
+  const hex = (): string => Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("hex");
+  const ask = {
+    requestId: real.requestId ?? `flow-${hex().slice(0, 8)}`,
+    tool: "shell",
+    title: "Run a shell command",
+    preview: "rm -rf build",
+    options: [
+      { optionId: "allow_once", name: "Allow once", kind: "allow_once" as const },
+      { optionId: "reject_once", name: "Deny", kind: "reject_once" as const },
+    ],
+    ...(reply ? { reply: { maxChars: 1000 } } : {}),
+  };
+  const base = {
+    v: 1 as const,
+    id: hex(),
+    at,
+    computer: "flow-computer",
+    cwd: "/home/dev/tentacle",
+    sessionId: real.sessionId ?? "flow-session",
+    title: "Fix the failing test",
+  };
+  if (kind === "ask_resolved") {
+    return { ...base, kind: "ask_resolved" };
+  }
+  if (kind === "turn_done") {
+    return { ...base, kind: "turn_done" };
+  }
+  if (kind === "turn_failed") {
+    return { ...base, kind: "turn_failed" };
+  }
+  return { ...base, kind: "ask", ask };
+};
+
+/** The action id a `notify-respond` name maps to (the categories' own ids). */
+const notifyActionIdOf = (name: string): string | undefined => {
+  switch (name) {
+    case "approve":
+      return "tentacle.approve";
+    case "deny":
+      return "tentacle.deny";
+    case "reply":
+      return "tentacle.reply";
+    case "open":
+      return "tentacle.open";
+    default:
+      return undefined;
+  }
+};
+
+/**
+ * Hand a response to the app (Owner Q7). The app polls for it in a DEV build only
+ * (`apps/mobile/src/notification-dev-inject.ts` + the `index.ts` hook): a file in
+ * the app's container that the app reads on a short interval. There is no
+ * production path to this, and nothing in the app's decision chain trusts it —
+ * the injected response goes through the SAME dispatcher a real tap does.
+ */
+async function injectNotificationResponse(
+  udid: string,
+  response: { actionId: string; userInfo: unknown; userText?: string },
+): Promise<void> {
+  // The app's data container (`simctl get_app_container` is NOT a `spawn`
+  // subcommand, so it is read directly).
+  const child = Bun.spawnSync(
+    ["xcrun", "simctl", "get_app_container", udid, "so.tentacle.app", "data"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const container = child.stdout.toString().trim();
+  if (child.exitCode !== 0 || container === "") {
+    throw new Error("notify-respond: the app is not installed on the simulator");
+  }
+  const dir = join(container, "Library", "Caches");
+  await mkdir(dir, { recursive: true });
+  await Bun.write(join(dir, "notify-respond.json"), JSON.stringify(response));
+}
+
+/**
+ * Write one device's push registration through the DAEMON'S OWN STORE.
+ *
+ * Not a hand-built `{v: 1, …, at}`: review round 1 (finding 2) found this writer
+ * keeping a second copy of a persisted format, so a change to
+ * `packages/daemon/src/push-store.ts` (a renamed field, a new version, a
+ * different timestamp key) would leave the flow failing with the misleading
+ * "the relay must announce push" error instead of the real one. The store also
+ * validates the record through the wire's own schema, which is the property the
+ * flow depends on and cannot check for itself.
+ */
+function writePushRegistration(
+  configDir: string,
+  deviceId: string,
+  value: { readonly token: string; readonly env: "sandbox" | "production"; readonly key: string },
+): void {
+  const written = daemonWritePushRegistration(configDir, {
+    deviceId,
+    token: value.token,
+    env: value.env,
+    key: value.key,
+    registeredAt: Date.now(),
+  });
+  if (!written.ok) {
+    // Surfaced, never swallowed: a record the daemon's own store refuses is a
+    // flow that would otherwise fail later with the wrong message.
+    throw new Error(
+      `cannot register the harness's push device (${written.path}): ${written.reason}`,
+    );
+  }
+}
+
+/**
+ * Make the daemon raise one ask, which pops the local APNs at once (`--push-grace`
+ * is 0 for this run). `EDIT` is the mock model's tool-call prompt — the same one
+ * flows 08/08b/08c use, so nothing new is asked of the mock.
+ *
+ * The turn is NOT awaited to completion: it SUSPENDS on the ask by design, and
+ * waiting for it would mean answering it, which cancels the push (Design 1).
+ */
+async function promptOnce(url: string): Promise<void> {
+  const factory = webSocketChannelFactory(url, {});
+  const client = new RemoteClient(
+    await factory(),
+    new PermissionBroker(undefined, { holdUntilSet: true }),
+  );
+  await client.initialize();
+  const session = client.newSession(undefined, crypto.randomUUID());
+  // The session is live as soon as it exists; `send` returns its event iterator
+  // and the turn starts on the first pull. One pull is enough to reach the ask.
+  const events = session.send("EDIT p10-push.txt");
+  await events.next();
+}
+
+/**
+ * Hand the payload to the simulator, exactly as APNs would.
+ *
+ * The bundle id is an ARGUMENT, not a field added to the payload: `simctl push`
+ * accepts either, and the argument form keeps the bytes identical to what Apple
+ * would deliver — which is what makes the envelope in them meaningful.
+ */
+async function placeOnSimulator(
+  udid: string,
+  payload: ApnsPayload,
+  log: (line: string) => void,
+): Promise<void> {
+  if (udid === "") {
+    throw new Error("no simulator selected yet");
+  }
+  // The payload is written under the run's OWN scratch dir and removed after.
+  const file = join(RUNS_DIR, `push-payload-${Date.now()}.json`);
+  await mkdir(RUNS_DIR, { recursive: true });
+  await writeFile(file, JSON.stringify({ aps: payload.aps, tp: payload.tp }, null, 2));
+  try {
+    const child = Bun.spawn(["xcrun", "simctl", "push", udid, "so.tentacle.app", file], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const code = await child.exited;
+    const err = await new Response(child.stderr).text();
+    if (code !== 0) {
+      throw new Error(`simctl push failed (${code}): ${err.trim()}`);
+    }
+    log(`push placed on ${udid} from the daemon's own envelope`);
+  } finally {
+    await rm(file, { force: true });
+  }
+}
+
 /**
  * Every flow, in order (docs/feat/mobile-session-view.md 12c supersedes 11a's
  * `04-session-placeholder`; docs/feat/mobile-compose.md 13d adds `12`–`18`). Each
@@ -646,6 +1183,12 @@ export const FLOWS: readonly string[] = [
   // docs/feat/mobile-ui-polish.md Slice 0: the composer above the keyboard (B1)
   // and Return sends (B2), on a session of its own.
   "23-composer-keyboard",
+  // docs/feat/mobile-ui-polish.md Slice 6: the screenshot walk (light/dark pairs
+  // for the visual review), on a session of its own.
+  "24-ui-shots",
+  // docs/feat/mobile-session-info.md: the "…" menu's Session info sheet — the
+  // model, the context, the MCP servers and the skills, on a session of its own.
+  "25-session-info",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -658,18 +1201,34 @@ export const FLOWS: readonly string[] = [
   // (the harness restarts `serve` for its window), and a failure there must not
   // colour the flows whose daemon is the shared one.
   "22-relay-only",
+  // docs/feat/mobile-push.md P10: the push placeholder banner. LAST, because it
+  // is the only flow that leaves a PENDING ASK behind on its own session (an
+  // ask nobody answers, by design: answering it is what cancels the push), and
+  // it registers a push key so the daemon pushes to this simulator. Neither is
+  // visible to another flow (each gets its own session, and every other flow
+  // clears state), but a red here must not colour the flows above it.
+  "push-placeholder",
+  // docs/feat/mobile-notifications.md N8: the notification path. Each leaves a
+  // session of its own (they share `ASK1_ID`'s seed but the ask is raised by the
+  // flow itself), and each ends on DAEMON truth.
+  "22-notify-render",
+  "22-notify-approve",
+  "22-notify-deny",
+  "22-notify-reply",
+  "22-notify-forged",
 ];
 
 /**
- * The flows this run drives. `E2E_ONLY_FLOWS` (comma-separated names) narrows them:
- * a long run degrades the simulator (every flow starts its own XCTest driver), so a
- * single flow is how one is debugged or re-proved in a bounded window. Empty or
- * absent: every flow, which is the gate.
+ * The flows this run drives. `--only` or `E2E_ONLY_FLOWS` (comma-separated names;
+ * the flag wins) narrows them: a long run degrades the simulator (every flow starts
+ * its own XCTest driver), so a single flow is how one is debugged or re-proved in a
+ * bounded window. Empty or absent: every flow, which is the gate.
  */
 export function selectedFlows(
-  only: string | undefined = process.env.E2E_ONLY_FLOWS,
+  flag: string | undefined,
+  env: string | undefined = process.env.E2E_ONLY_FLOWS,
 ): readonly string[] {
-  const wanted = (only ?? "")
+  const wanted = (flag ?? env ?? "")
     .split(",")
     .map((name) => name.trim())
     .filter((name) => name !== "");
@@ -678,7 +1237,7 @@ export function selectedFlows(
   }
   for (const name of wanted) {
     if (!FLOWS.includes(name)) {
-      throw new Error(`E2E_ONLY_FLOWS names an unknown flow: ${name}`);
+      throw new Error(`--only / E2E_ONLY_FLOWS names an unknown flow: ${name}`);
     }
   }
   return wanted;
@@ -700,6 +1259,8 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "17-outbox-changed": "CHANGED_ID",
   "18-photos": "PHOTO_ID",
   "23-composer-keyboard": "KEYBOARD_ID",
+  "24-ui-shots": "SHOTS_ID",
+  "25-session-info": "INFO_ID",
 };
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */

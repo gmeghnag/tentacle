@@ -107,6 +107,11 @@ export const ARGS = {
       "max-sessions": {},
       "max-detached-sessions": {},
       "ws-idle-timeout": {},
+      // `serve --push-grace <seconds>` (docs/feat/mobile-push.md Design 6): the
+      // push grace, 0 = at once. It belongs in THIS table or `parseArgs` refuses
+      // it as an unknown option before `parseServeLimits` can read it — the bug
+      // P10 found (the helper existed, was documented, and was unreachable).
+      "push-grace": {},
       // The pod's resident daemon socket (docs/feat/detached-runs.md S1); default in TMPDIR.
       socket: {},
       // `serve --relay <url>`: the mobile relay this daemon dials out to
@@ -172,7 +177,7 @@ export const ARGS = {
   },
   tui: {
     values: SESSION_MODEL,
-    bools: { interactive: { short: "i" }, "in-process": {}, "no-worker": {}, ...CONTINUE },
+    bools: { interactive: { short: "i" }, ...CONTINUE },
     optional: RESUME,
     conflicts: RESUME_CONFLICTS,
     positional: { min: 0, max: 0 },
@@ -223,6 +228,10 @@ export const ARGS = {
   // sub-command and its subject, so a permissions-shifted value is refused here
   // rather than guessed at in `devices-cmd.ts`.
   devices: { bools: { yes: { short: "y" } }, positional: { min: 0, max: 2 } },
+  // `tentacle voice setup [--yes] | status` (docs/feat/voice-dictation.md §6).
+  // The verb is the only word (plus `--yes` for setup), so a stray one is refused
+  // here rather than guessed at.
+  voice: { bools: { yes: { short: "y" } }, positional: { min: 1, max: 2 } },
   // `tentacle logs [<uid>] [--tail N] [--only …] [--json] [--summary] [-f]`
   // (docs/feat/logs-cmd.md). `-f` is `--follow`'s alias, as in `tail -f`; the
   // uid is the only word, so a second one is refused here, not guessed at.
@@ -420,6 +429,8 @@ export interface ServeLimits {
   readonly wsIdleTimeoutSec?: number;
   /** `serve --address <url>` (repeatable): the daemon's own public URLs, validated. */
   readonly addresses?: readonly string[];
+  /** `serve --push-grace <seconds>` (docs/feat/mobile-push.md Design 6): beats `push.graceSeconds`. */
+  readonly pushGraceSeconds?: number;
 }
 
 /** Bun's ceiling for a WebSocket `idleTimeout` (it throws above it). */
@@ -461,6 +472,19 @@ export function parseServeLimits(
     }
   };
   const idleMs = duration("ws-idle-timeout");
+  // `serve --push-grace <seconds>`: 0 pushes at once, one hour is the maximum
+  // (`push.graceSeconds`'s own bound). Refused HERE, before binding, like every
+  // other flag value — a typo must not silently keep the default.
+  const pushGrace = (): number | undefined => {
+    const raw = value("push-grace");
+    if (raw === undefined) {
+      return undefined;
+    }
+    if (!/^[0-9]{1,5}$/.test(raw) || Number(raw) > 3600) {
+      throw new Error(`--push-grace must be whole seconds, 0 to 3600, got "${raw}"`);
+    }
+    return Number(raw);
+  };
   if (idleMs !== undefined && (idleMs % 1000 !== 0 || idleMs / 1000 > MAX_WS_IDLE_TIMEOUT_SEC)) {
     throw new Error(`--ws-idle-timeout must be whole seconds, at most ${MAX_WS_IDLE_TIMEOUT_SEC}s`);
   }
@@ -484,6 +508,7 @@ export function parseServeLimits(
     maxSessions: count("max-sessions"),
     maxDetachedSessions: count("max-detached-sessions"),
     wsIdleTimeoutSec: idleMs !== undefined ? idleMs / 1000 : undefined,
+    pushGraceSeconds: pushGrace(),
     ...(addresses !== undefined ? { addresses } : {}),
   };
   return Object.fromEntries(
@@ -730,6 +755,7 @@ export type CliMode =
   | "update"
   | "pair"
   | "devices"
+  | "voice"
   | "logs"
   | "plain"
   | "tui"
@@ -765,6 +791,8 @@ const USES_MODEL: Readonly<Record<CliMode, boolean>> = {
   devices: false,
   // `logs` reads the session log files: no daemon, no model, no session.
   logs: false,
+  // `voice` runs the local helper only: no daemon, no model, no session.
+  voice: false,
   // Everything that builds an agent or proxies to a model.
   serve: true,
   run: true,
@@ -784,7 +812,7 @@ export function modeUsesModel(mode: CliMode): boolean {
 
 /**
  * A subcommand → its own arguments; `--plain` → the REPL; any other leading
- * `-…` → the TUI's options (`-i`, `--resume`, `--in-process`…); `--` or a word
+ * `-…` → the TUI's options (`-i`, `--resume`, `--model`…); `--` or a word
  * → a one-shot prompt whose words are kept verbatim.
  */
 export function cliMode(args: readonly string[]): CliMode {
@@ -806,6 +834,7 @@ export function cliMode(args: readonly string[]): CliMode {
     first === "update" ||
     first === "pair" ||
     first === "devices" ||
+    first === "voice" ||
     first === "logs"
   ) {
     return first;
@@ -838,6 +867,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   update: "tentacle update [--check] [--version vX.Y.Z]",
   pair: "tentacle pair [--address ws(s)://host:port/e2e]... [--name <name>]",
   devices: "tentacle devices | revoke <name|id-prefix> | reset [--yes]",
+  voice: "tentacle voice setup [--yes] | status",
   logs: "tentacle logs [<uid>|<run-name>] [--tail N] [--only ask,error,tool] [--json] [--summary] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
-  tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process] [--model <id>] [--profile <name>]",
+  tui: "tentacle [-i] [--resume [uid]|--continue] [--model <id>] [--profile <name>]",
 };

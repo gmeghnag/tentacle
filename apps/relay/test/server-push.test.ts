@@ -14,7 +14,7 @@ import { type ApnsClient, createApnsClient } from "../src/apns-client.ts";
 import type { ApnsJwtSource } from "../src/apns.ts";
 import { APNS_MAX_PAYLOAD_BYTES } from "../src/apns.ts";
 import { RELAY_LIMITS, RelayCore, type RelayLimits } from "../src/relay-core.ts";
-import { type RunningRelay, startRelay } from "../src/server.ts";
+import { type RunningRelay, loggableApnsReason, startRelay } from "../src/server.ts";
 
 const SECRET_BYTE = 11;
 const SECRET = encodeBase64Url(new Uint8Array(32).fill(SECRET_BYTE));
@@ -525,6 +525,28 @@ describe("a `push` frame — who may send one, and what it becomes", () => {
     expect(JSON.parse(await socket.next())).toEqual({ t: "pong" });
     expect(lines.some((line) => line.includes("push-refused"))).toBe(true);
     socket.close();
+  });
+
+  test("an APNs reason with a newline is logged as `other`, never at its own length (L1)", async () => {
+    // `reason` is REMOTE input (Apple's error body) and the log is long-lived: a
+    // raw value could carry a newline (forging a second line) or a kilobyte of
+    // junk into the journal. The bound lives in `loggableApnsReason`.
+    expect(loggableApnsReason("BadDeviceToken")).toBe("BadDeviceToken");
+    expect(loggableApnsReason("ExpiredProviderToken")).toBe("ExpiredProviderToken");
+    expect(loggableApnsReason("timeout")).toBe("timeout");
+    expect(loggableApnsReason("Bad\nToken")).toBe("other");
+    expect(loggableApnsReason("x".repeat(200))).toBe("other");
+    expect(loggableApnsReason("")).toBe("other");
+    // And end to end: a frame that is refused logs only a bounded word.
+    const { server, lines } = bareRelay();
+    const socket = await control(server.url);
+    socket.send(pushFrame(6));
+    await socket.next();
+    socket.close();
+    await Bun.sleep(20);
+    for (const line of lines) {
+      expect(line).not.toMatch(/[\n\r]/);
+    }
   });
 
   test("410 from APNs reaches the daemon as `gone` (it deletes that registration)", async () => {

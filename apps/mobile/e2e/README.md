@@ -22,7 +22,10 @@ Runtimes required: an **iOS 18.x** and an **iOS 26.x** simulator.
 ```sh
 bun run e2e:mobile          # every required simulator (18 + 26)
 bun run e2e:mobile --ios 26 # just one
+bun run e2e:mobile --ios 26 --only 24-ui-shots,18-photos # just these flows
 ```
+
+`--only` is the same as `E2E_ONLY_FLOWS=…` (the flag wins when both are set).
 
 ## What it does
 
@@ -71,6 +74,11 @@ bun run e2e:mobile --ios 26 # just one
 | `20-lock-immediately.yaml` | `immediately` locks the return AND the person lands where they were |
 | `21-export-logs.yaml` | Settings → Export logs writes a file with no title/prompt/token in it (F16) |
 | `_unlock.yaml` | (sub-flow) the lock at cold start + the scripted Face ID match; run after every `launchApp` |
+| `22-notify-render.yaml` | a real sealed push arrives as a banner on its session's thread (task 17) |
+| `22-notify-approve.yaml` | a notification's Approve asks Face ID ALWAYS, then `allow_once` reaches the daemon |
+| `22-notify-deny.yaml` | Deny needs no authentication, raises no Face ID, and refuses the ask |
+| `22-notify-reply.yaml` | Reply carries the person's words to the MODEL (the mock's prompt list) |
+| `22-notify-forged.yaml` | a push sealed with a NON-pinned key answers NOTHING: the ask stays pending |
 
 11b.2's three flows (`18-camera-denied`, `19-deep-link`, `20-camera-close`) keep
 11b.1's numbers because they were written first; the lock's flows keep THEIR
@@ -115,6 +123,43 @@ JAVA_HOME=$(brew --prefix openjdk@17) PATH="$(brew --prefix openjdk@17)/bin:$PAT
 
 A hand-run needs a daemon and a build already pointed at it; the harness is what
 sets those up.
+
+## Notifications on a REAL device (docs/feat/mobile-notifications.md D3)
+
+The `22-notify-*` flows exercise the app's notification path on a simulator, with
+the response INJECTED (`notify-respond`): Maestro cannot long-press a system
+banner, and the Notification Service EXTENSION is a native target that exists only
+in a device build. These are the items a simulator cannot prove, so they are
+recorded here and checked by hand — after task 16's D2 (the APNs key on the relay
+host) and D3a (below):
+
+**D3a — Apple Developer console (owner only, before the first device build):**
+1. Register the App ID `so.tentacle.app.NotificationService` (a Notification
+   Service Extension).
+2. Enable **Keychain Sharing** on BOTH `so.tentacle.app` and the extension's id,
+   with the same group, and confirm the ORDER in `app.json` (its own group
+   first — a device key must never land in the shared group; pinned by
+   `apps/mobile/test/app-config.test.ts`).
+3. Confirm **Time Sensitive Notifications** is on the app's id.
+4. Regenerate the development and distribution provisioning profiles.
+
+**D3 — the checklist (owner's iPhone, one line each, date recorded):**
+- [ ] Long-press an ask's banner on the LOCK SCREEN: Approve / Deny / Reply / Open
+      are all there (the categories registered at launch).
+- [ ] Approve from the locked phone: the app opens, Face ID is asked, and the
+      ask resolves `allow_once` (the TUI shows the tool running).
+- [ ] Deny from the lock screen, no authentication prompt at all.
+- [ ] Reply asks the DEVICE passcode/Face ID before accepting the text.
+- [ ] Killed app, Deny over the LAN: resolved on the TUI within the budget
+      (N0(d)); the same over `relay.tentacle.so`.
+- [ ] Airplane mode, Deny: the "Couldn't reach <computer> — tap to answer" local
+      notification appears, and tapping it opens the sheet with the ask.
+- [ ] Time Sensitive breaks through a Focus mode; turn notices are grouped per
+      session and are quiet.
+- [ ] An ask answered at the desk after the push: the banner is replaced by
+      "Answered on another device".
+- [ ] A forged push (the harness's `seal-push?forged=1` against the owner's
+      phone) shows the placeholder and answers nothing.
 
 ## Not in the gate
 

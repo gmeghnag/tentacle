@@ -5,6 +5,7 @@ import { App, type SessionController } from "../src/App.tsx";
 import { cellWidth } from "../src/cells.ts";
 import { PermissionPrompt, permissionPromptRows } from "../src/components/PermissionPrompt.tsx";
 import { permissionAgentLine } from "../src/permission-ui.ts";
+import { inertSession } from "./session-stub.ts";
 
 // docs/feat/parallel-agents.md T-L: the dialog names the sub-agent that asks.
 
@@ -98,6 +99,7 @@ describe("wide labels are cut by cells", () => {
 
 describe("in the App", () => {
   const session = (): SessionController => ({
+    ...inertSession(),
     async *send() {
       yield { type: "turn_end", reason: "end_turn" };
     },

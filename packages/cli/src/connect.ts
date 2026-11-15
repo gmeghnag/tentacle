@@ -8,6 +8,7 @@
  * is ours (so even a drop during its first `open` is recovered), and the link
  * state shows in the StatusBar.
  */
+import { hostname as osHostname } from "node:os";
 import {
   ChannelError,
   type ConnectOptions as ClientConnectOptions,
@@ -21,7 +22,14 @@ import { PermissionBroker } from "@tentacle/core";
 import { MAX_SESSION_LIST } from "@tentacle/protocol";
 import type { InitializeResult } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
-import { type SessionPick, type ThemeSetting, oneLine, startTui } from "@tentacle/tui";
+import {
+  type SessionPick,
+  type ThemeSetting,
+  VOICE_DEFAULTS,
+  type VoiceConfig,
+  oneLine,
+  startTui,
+} from "@tentacle/tui";
 import {
   type ConnectResumeRequest,
   type ListOutcome,
@@ -33,6 +41,7 @@ import {
 } from "./connect-resume.ts";
 import { createHooksTrustResolver } from "./hooks-trust.ts";
 import { remoteJobsView } from "./local-runtime.ts";
+import { routingAutoAccept } from "./session-auto-accept.ts";
 import { CLIENT_INFO } from "./version.ts";
 
 export interface ConnectOptions {
@@ -127,6 +136,37 @@ export async function connectTheme(
   }
 }
 
+/**
+ * `connect`'s voice settings (docs/feat/voice-dictation.md, Review round 1 HIGH
+ * 4). `connect` reads no model config, so — exactly like the palette — the voice
+ * settings come from the config FILE, and a broken file must never block a
+ * connection: those settings fall back to `VOICE_DEFAULTS` silently (the palette
+ * call right beside this one already WARNED about the file).
+ */
+export async function connectVoice(
+  options: ConnectOptions,
+): Promise<{ readonly config: VoiceConfig; readonly configDir?: string }> {
+  try {
+    const file = await readFileConfig({
+      ...(options.configDir !== undefined
+        ? {
+            configDir: options.configDir,
+            env: { ...process.env, TENTACLE_CONFIG_DIR: options.configDir },
+          }
+        : {}),
+    });
+    return {
+      config: { ...VOICE_DEFAULTS, ...(file.voice ?? {}) },
+      ...(options.configDir !== undefined ? { configDir: options.configDir } : {}),
+    };
+  } catch {
+    return {
+      config: VOICE_DEFAULTS,
+      ...(options.configDir !== undefined ? { configDir: options.configDir } : {}),
+    };
+  }
+}
+
 /** Injectable for tests; production uses the real socket and TUI. */
 export interface ConnectDeps {
   /** A channel factory for the daemon at `url` (rejects with a `ChannelError`). */
@@ -149,6 +189,9 @@ export async function connectTui(
   // The palette FIRST: it needs no daemon (a local file), Ink has not mounted, and
   // a broken config must warn before anything else can fail for another reason.
   const theme = await connectTheme(options, write);
+  // Voice dictation on the laptop the person is sitting at (Review HIGH 4): a
+  // LAPTOP-ONLY input setting read from the same file the palette comes from.
+  const voice = await connectVoice(options);
   // RPC path: hold a daemon's request until the TUI's prompt is mounted.
   const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
   const dial = deps.dial(options.url, {
@@ -186,6 +229,16 @@ export async function connectTui(
     // wake turns, so its `wake-…` asks are this session's — auto-accept answers
     // them. Every other runtime leaves it off: a pod's `wake-` id stays foreign.
     daemonWakes: true,
+    // The other TRUST bit, and the same reasoning (AGENTS §7): a `serve` on the
+    // user's own host shares the session's auto-accept, so this TUI reads and
+    // sets it for every device on the session (docs/feat/session-auto-accept.md
+    // D4). A pod `run`/`attach` and the relay never say it.
+    sharedAutoAccept: true,
+    // This laptop's name, for `ClientInfo.host` (docs/feat/session-auto-accept.md
+    // D7): `node:os` is read HERE, never in `@tentacle/client` — that package is
+    // in the phone's bundle, where a Node built-in does not resolve (Review
+    // round 1, HIGH 2).
+    hostLabel: osHostname,
   });
   // Every controller handed to the TUI, by id: what the exit line reports on.
   const handed = new Map<string, RemoteSession>();
@@ -220,6 +273,12 @@ export async function connectTui(
     // that model instead of `remote`. Absent (an older daemon, a pod) → nothing
     // is passed and the TUI keeps its own defaults.
     const served = servedModel(handshake);
+    // The session's auto-accept, shared with every device attached to it
+    // (docs/feat/session-auto-accept.md D5): a routing feed, re-bound wherever
+    // a session is created or switched.
+    const autoAccept = routingAutoAccept();
+    /** The session the TUI is on: what a `/clear` seeds the next one from. */
+    let previousSession: RemoteSession | null = null;
     await deps.startTui(null, {
       // `remote` still means "the model is the daemon's" for every SEMANTIC use
       // (the error hint, docs/fix/…(c)); `modelLabel` is what is PAINTED.
@@ -227,12 +286,22 @@ export async function connectTui(
       ...(served.label !== undefined ? { modelLabel: served.label } : {}),
       ...(served.contextWindow !== undefined ? { contextWindow: served.contextWindow } : {}),
       cwd: options.url,
+      // The laptop's own `voice.*` (Review round 1, HIGH 4): without this the
+      // `connect` TUI got `VOICE_DEFAULTS`, so `voice.enabled: false` and the
+      // key/language/engine settings were ignored on this path.
+      voice: voice.config,
+      ...(voice.configDir === undefined ? {} : { voiceConfigDir: voice.configDir }),
       permissions,
       // The resumed session first (already attached), then fresh lazy ones (a `/clear`).
       createSession: () => {
+        // A `/clear` fork carries the switch the person has now (`OpenParams.autoAccept`).
+        previousSession?.seedAutoAccept(autoAccept.current());
         const session = pending ?? client.newSession(undefined, crypto.randomUUID());
         pending = null;
-        return track(session);
+        const tracked = track(session);
+        autoAccept.use(tracked.autoAccept);
+        previousSession = tracked;
+        return tracked;
       },
       jobs: remoteJobsView(client),
       // The TUI's ONE live job exit feed (`docs/fix/connect-functest-batch.md`
@@ -250,6 +319,8 @@ export async function connectTui(
       mcpStatus: () => client.mcpStatus(),
       detachOnQuit: true,
       theme,
+      autoAccept,
+      autoAcceptShared: autoAccept,
       sessions: {
         list: () =>
           client.sessionList({ limit: MAX_SESSION_LIST }).then((result) => ({
@@ -263,8 +334,14 @@ export async function connectTui(
             })),
             more: result.cursor !== undefined,
           })),
-        open: (id, reopen) =>
-          track(client.newSession(undefined, id, undefined, { attach: reopen ? { reopen } : {} })),
+        open: (id, reopen) => {
+          const session = track(
+            client.newSession(undefined, id, undefined, { attach: reopen ? { reopen } : {} }),
+          );
+          // `/sessions` switched: the feed follows the session the TUI is on.
+          autoAccept.use(session.autoAccept);
+          return session;
+        },
         remove: (id) => client.deleteSession(id),
       },
     });

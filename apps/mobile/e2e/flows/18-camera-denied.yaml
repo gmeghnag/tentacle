@@ -35,6 +35,10 @@ appId: so.tentacle.app
     timeout: 10000
 - assertVisible:
     id: "pair-camera-settings"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "18-camera-denied"
 # F-P15's other half: the paste card is still there, and it still pairs.
 - assertVisible:
     id: "pair-paste-input"

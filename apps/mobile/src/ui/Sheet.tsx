@@ -12,13 +12,21 @@ import { type Palette, size as SIZE, radius, space, typography } from "../theme.
 export interface SheetProps {
   readonly palette: Palette;
   readonly title?: string;
-  readonly subtitle?: string;
+  /** A string, or a sentence with inline runs (`InlineMono`). */
+  readonly subtitle?: ReactNode;
   readonly children: ReactNode;
   readonly testID?: string;
   /** Add the bottom safe-area inset (an overlay sheet at the screen's bottom). */
   readonly insetBottom?: boolean;
   /** Scroll the content (a sheet with a text field stays usable above the keyboard). */
   readonly scroll?: boolean;
+  /**
+   * The mockups' floating card (`Pair`): 8 pt from the sides and the bottom,
+   * every corner 38, 30 pt under the content. The scrim is the screen's.
+   */
+  readonly floating?: boolean;
+  /** Centre the title and subtitle (`Pair` compare). */
+  readonly centred?: boolean;
 }
 
 export function Sheet({
@@ -29,27 +37,34 @@ export function Sheet({
   testID,
   insetBottom = true,
   scroll = false,
+  floating = false,
+  centred = false,
 }: SheetProps): JSX.Element {
   const insets = useSafeAreaInsets();
+  const align = centred ? styles.centred : null;
   const body = (
     <>
       <View style={[styles.grabber, { backgroundColor: palette.sepSheet }]} />
       {title === undefined ? null : (
-        <Text accessibilityRole="header" style={[typography.title2, { color: palette.label }]}>
+        <Text
+          accessibilityRole="header"
+          style={[typography.title2, align, { color: palette.label }]}
+        >
           {title}
         </Text>
       )}
       {subtitle === undefined ? null : (
-        <Text style={[typography.subhead, { color: palette.sec }]}>{subtitle}</Text>
+        <Text style={[typography.subhead, align, { color: palette.sec }]}>{subtitle}</Text>
       )}
       {children}
     </>
   );
   const container = [
     styles.sheet,
+    floating ? styles.floating : null,
     {
       backgroundColor: palette.sheet,
-      paddingBottom: (insetBottom ? insets.bottom : 0) + 20,
+      paddingBottom: floating ? 30 : (insetBottom ? insets.bottom : 0) + 20,
     },
   ];
   if (scroll) {
@@ -83,6 +98,12 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     gap: 12,
   },
+  floating: {
+    marginHorizontal: 8,
+    marginBottom: 8,
+    borderRadius: radius.sheet,
+  },
+  centred: { textAlign: "center" },
   grabber: {
     alignSelf: "center",
     width: SIZE.grabberWidth,

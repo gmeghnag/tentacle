@@ -1,0 +1,76 @@
+appId: so.tentacle.app
+---
+# `push-placeholder` (docs/feat/mobile-push.md P10, decision 20): the end-to-end
+# half of task 16 that a simulator CAN prove — the app's push entitlement, its
+# expo-notifications wiring, and the payload the daemon's own sealing chain
+# produces, arriving as a banner.
+#
+# WHAT THIS DOES **NOT** prove, stated here so nobody reads more into a green
+# run: Apple's delivery. A simulator issues no APNs device token (registering
+# needs `aps-environment` in a signed profile — owner step D2a), so the app
+# cannot register itself, and `xcrun simctl push` bypasses APNs entirely. The
+# harness therefore registers FOR the phone (`push-place` writes the same
+# per-device file `device/push_register` writes, for the device `_pair` just
+# admitted), makes the daemon push once (`--push-grace 0`, so the ask fires
+# immediately), captures the envelope the fake APNs received, and hands iOS those
+# exact bytes. What that pins is everything from the daemon's rules to the bytes
+# on the wire; real APNs is the real-iPhone checklist
+# (`docs/ops/relay-deploy.md` §6.4), after D2a + D2.
+- runFlow: _pair.yaml
+- assertVisible:
+    id: "computers-list"
+- tapOn:
+    id: "computer-${output.computerId}"
+- extendedWaitUntil:
+    visible:
+      id: "sessions-list"
+    timeout: 30000
+- back
+# The Settings row is where the phone says what it decided, and it is the only
+# screen that reads the registrar's state: `notifications-toggle` exists, and its
+# detail line is drawn from `pushPhaseText`. (Whether iOS GRANTED the permission
+# decides the row's copy, not whether the screen works — so this step does not
+# depend on the system prompt having been answered, which no flow can guarantee
+# on a simulator that has already been asked once.)
+- tapOn:
+    id: "open-settings"
+- assertVisible:
+    id: "settings"
+- assertVisible:
+    id: "notifications-toggle"
+- assertVisible:
+    id: "notifications-detail"
+- back
+- assertVisible:
+    id: "computers-list"
+# Register + push + place, in ONE hook: register a push key for the paired
+# device, raise one ask on a fresh session (`EDIT` is the mock model's tool call,
+# the same prompt flows 08/08b/08c use), wait for the fake APNs to receive the
+# daemon's sealed envelope, and hand those bytes to `simctl push`.
+- runScript:
+    file: "push-place.js"
+# THE BANNER. The relay's fixed `aps` template is what iOS draws (the daemon can
+# put nothing in it — Design 3), so this text is the placeholder every push shows
+# until task 17's NSE replaces it. Asserting it is asserting that the payload
+# `simctl push` accepted was a real APNs alert.
+- extendedWaitUntil:
+    visible: "Open tentacle to see what's new"
+    timeout: 15000
+- assertVisible: "tentacle"
+# Tapping the banner opens the app (the OS's own routing; no deep link is
+# registered for push in this task, so it launches whatever the app was on).
+- tapOn: "Open tentacle to see what's new"
+# The tap DID open the app: it comes back on `Computers` with no launch of its
+# own. NOT `_unlock` a second time — `_pair` already ran it, and the lock is only
+# up at COLD START (Owner Q1), so asserting `lock-screen` here would assert that
+# a relaunch happened, which a banner tap does not do.
+- extendedWaitUntil:
+    visible:
+      id: "computers-list"
+    timeout: 30000
+# TRUTH, not screens (e2e-flows' rule: an id only says what was drawn). The
+# payload the flow placed is the daemon's own envelope — a `tp` object whose key
+# id and ciphertext came out of `sealPush` — and the harness reads back what it
+# actually pushed.
+- runScript:
+    file: "push-assert.js"

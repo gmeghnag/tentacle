@@ -79,6 +79,58 @@ describe("hopSpecOf: the proposal schema", () => {
     });
   });
 
+  // OD1: the tool's structured `namespace` reaches the SAME `HopWorkload` a typed
+  // `/move attach kubernetes:<ns>/<pod>` parses to — one validator, one shape.
+  test("a k8s namespace rides the spec; docker/podman have none", () => {
+    expect(
+      hopSpecOf(
+        JSON.stringify({
+          target: "attach",
+          workload: { engine: "kubernetes", namespace: "openshift-etcd", name: "etcd-0" },
+        }),
+      )?.spec,
+    ).toEqual({
+      target: "attach",
+      workload: { engine: "kubernetes", namespace: "openshift-etcd", name: "etcd-0" },
+      keep: true,
+    });
+    // The same workload the typed grammar gives for `kubernetes:<ns>/<pod>/<c>`.
+    expect(
+      hopSpecOf(
+        JSON.stringify({
+          target: "attach",
+          workload: {
+            engine: "kubernetes",
+            namespace: "openshift-etcd",
+            name: "etcd-0",
+            container: "etcdctl",
+          },
+        }),
+      )?.spec,
+    ).toEqual({
+      target: "attach",
+      workload: {
+        engine: "kubernetes",
+        namespace: "openshift-etcd",
+        name: "etcd-0",
+        container: "etcdctl",
+      },
+      keep: true,
+    });
+  });
+
+  test("an invalid namespace is refused here too (the ONE validator, again)", () => {
+    for (const workload of [
+      { engine: "docker", name: "box", namespace: "ns1" },
+      { engine: "podman", name: "box", namespace: "ns1" },
+      { engine: "kubernetes", name: "web-0", namespace: "Bad_NS" },
+      { engine: "kubernetes", name: "web-0", namespace: "" },
+      { engine: "kubernetes", name: "web-0", namespace: "a".repeat(64) },
+    ]) {
+      expect(hopSpecOf(JSON.stringify({ target: "attach", workload }))).toBeNull();
+    }
+  });
+
   test("not JSON, not a move, and a cross-field contradiction are all null", () => {
     for (const args of [
       "not json",

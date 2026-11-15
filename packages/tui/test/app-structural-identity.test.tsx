@@ -27,6 +27,7 @@ import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import type { SessionActivity } from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -45,6 +46,7 @@ interface Counts {
  */
 function fake(counts: Counts): SessionController {
   return {
+    ...inertSession(),
     watch(_listener: (activity: SessionActivity) => void) {
       counts.watches += 1;
       let released = false;

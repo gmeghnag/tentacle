@@ -1,3 +1,4 @@
+import type { AutoAcceptLink } from "@tentacle/client";
 /**
  * The permission sheet (docs/feat/mobile-session-view.md 12c): the phone's
  * `PermissionRequester`. Pure and React-free (AGENTS §7) — the screen renders
@@ -34,7 +35,8 @@ import type {
   PermissionRequester,
   PermissionResponse,
 } from "@tentacle/core";
-import { DISMISSED } from "@tentacle/core";
+import { DISMISSED, autoApproves, otherDevicesAsked, ownRequest } from "@tentacle/core";
+import { stripAnsi } from "./ansi.ts";
 
 /**
  * How long a freshly-shown ask ignores taps (plan P10; the TUI's open item 3 is
@@ -77,6 +79,12 @@ export type SheetState =
       readonly armedInMs: number;
       /** The sub-agent that asked, when the daemon said so (display only). */
       readonly agent: { readonly type: string; readonly description: string } | null;
+      /**
+       * The OTHER devices this ask also reached (docs/feat/session-auto-accept.md
+       * D7): each a bounded, sanitized label, this phone's own already dropped.
+       * Empty when nobody else was asked. Display only; the first answer wins.
+       */
+      readonly alsoAsked: readonly string[];
     }
   | {
       /**
@@ -106,7 +114,36 @@ export interface PermissionSheetDeps {
   readonly onChange?: (state: SheetState) => void;
   /** How the arm window's end is delivered (defaults to the host's `setTimeout`). */
   readonly schedule?: SheetSchedule;
+  /**
+   * The session's SHARED auto-accept (docs/feat/session-auto-accept.md D6): the
+   * phone's `AutoAcceptLink`. A FUNCTION, because the handle (and so the link)
+   * only exists after the attach — the sheet is built first. Absent, or returning
+   * undefined (a handle with no link, an older client) → no switch and no
+   * automatic answer: the sheet behaves exactly as before.
+   */
+  readonly autoAccept?: () => AutoAcceptLink | undefined;
+  /**
+   * THIS phone's own device label (`ClientInfo.host`) when it declared one, so
+   * an ask's "also asked on" note never names the device it is shown on
+   * (docs/feat/session-auto-accept.md D7). Absent → nothing is dropped.
+   */
+  readonly ownHost?: () => string | undefined;
+  /**
+   * The session's own-vs-foreign test — the WIDEST it offers
+   * (`RemoteSession.autoAcceptsTurn`), the same one a terminal feeds
+   * `autoApproves` (`autoAcceptTest`, docs/fix/autoaccept-wake-turns.md A5).
+   * Absent: a NAMED turn is this app's, and an ask with NO turn id is never
+   * auto-answered (docs/feat/session-auto-accept.md D4 — one rule on every
+   * device, and the terminal's is the stricter one).
+   */
+  readonly autoAcceptsTurn?: (turnId: string) => boolean;
 }
+
+/**
+ * The auto-answer's shape: `allow_once`, never a stored approval — the same
+ * answer a terminal's Shift+Tab gives (`autoApproves` + scope `"once"`).
+ */
+export const AUTO_ACCEPT_RESPONSE: PermissionResponse = { allowed: true, scope: "once" };
 
 export interface PermissionSheet {
   /** The `PermissionRequester` the client's ONE broker gets on mount. */
@@ -125,6 +162,17 @@ export interface PermissionSheet {
   clearReturned(): void;
   /** Whether an ask is on screen. */
   readonly asking: boolean;
+  /**
+   * The session's shared auto-accept, for the screen's switch (`null`: this
+   * computer does not share it — the switch is disabled with a reason).
+   */
+  readonly autoAccept: AutoAcceptLink | null;
+  /**
+   * The line a recent automatic answer left in the sheet (`auto-accepted ·
+   * <tool>`), or null. Display only, and the TOOL name only: never the
+   * command, never the person's text (the app log's P4 rule).
+   */
+  readonly autoAccepted: string | null;
 }
 
 /**
@@ -242,6 +290,12 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
               description: entry.options.agent.description,
             }
           : null,
+      // The daemon's list of who else was asked, minus this phone's own label
+      // (docs/feat/session-auto-accept.md D7). Display only, and the labels come
+      // from a daemon that may be a pod: bounded and stripped, never trusted.
+      alsoAsked: otherDevicesAsked(entry.options?.askedOn, deps.ownHost?.()).map((label) =>
+        stripAnsi(label).replace(/\s+/g, " ").trim().slice(0, 40),
+      ),
     });
     if (armMs > 0 && entry === current) {
       // The window's END is a state change, not a guess: the sheet says so once,
@@ -281,6 +335,15 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
         resolve(DISMISSED);
         return;
       }
+      // The session's auto-accept (docs/feat/session-auto-accept.md D6): with
+      // it ON, an ask this device may answer is answered `allow_once` at once —
+      // never shown, never `allow_always`, and the age guard does not apply (it
+      // exists for a stray TAP, and no finger is involved).
+      if (eligible(req, options)) {
+        noteAutoAccepted(req);
+        resolve(AUTO_ACCEPT_RESPONSE);
+        return;
+      }
       const entry: Pending = {
         req,
         options,
@@ -317,6 +380,39 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
     return armMs <= 0 || at - armedAt >= armMs;
   }
 
+  /** The line an automatic answer leaves (display only; the tool, never the command). */
+  let autoAccepted: string | null = null;
+
+  function noteAutoAccepted(req: PermissionRequest): void {
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: removing them is the point
+    const printable = stripAnsi(req.tool).replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+    autoAccepted = `auto-accepted · ${printable.slice(0, 40)}`;
+    commit(state);
+  }
+
+  /**
+   * May this ask be answered automatically? The SAME rule every surface uses —
+   * `autoApproves` (moved to `@tentacle/core`, so the phone and a terminal can
+   * never disagree) over the session's own-turn test, and the session's shared
+   * switch is ON. A `hooks_trust` or `session_hop` ask, and another device's
+   * turn, always reach a person.
+   */
+  function eligible(
+    req: PermissionRequest,
+    options: PermissionRequestOptions | undefined,
+  ): boolean {
+    const link = deps.autoAccept?.();
+    if (link === undefined || !link.shared() || !link.current()) {
+      return false;
+    }
+    // The session's own-turn test, or — with none wired — "a NAMED turn is this
+    // app's". Either way an ask with NO turn id is not mine, which is the rule
+    // a terminal applies too (D4; Review round 1, MEDIUM 4): the switch must
+    // never grant an ask no device can attribute to a turn.
+    const owns = deps.autoAcceptsTurn ?? (() => true);
+    return autoApproves(req, ownRequest(options?.turnId, owns));
+  }
+
   /** The person's reply did not reach the agent: their words come back. */
   function returnReply(cause: AnswerLostCause): void {
     const text = lostText;
@@ -328,6 +424,12 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
     requester,
     get asking() {
       return state.kind === "asking";
+    },
+    get autoAccept() {
+      return deps.autoAccept?.() ?? null;
+    },
+    get autoAccepted() {
+      return autoAccepted;
     },
     view(at) {
       const when = now(at);

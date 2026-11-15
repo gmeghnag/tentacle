@@ -8,7 +8,7 @@
 import { BlurView } from "expo-blur";
 import type { JSX } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { type Palette, size as SIZE, typography } from "../theme.ts";
+import { type Palette, size as SIZE, shadow, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
 
 export interface GlassButtonProps {
@@ -95,8 +95,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
-    shadowColor: "#000000",
-    shadowOffset: { width: 0, height: 6 },
-    shadowRadius: 20,
+    ...shadow.glass,
   },
 });

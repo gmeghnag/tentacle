@@ -36,6 +36,11 @@ export interface RelayArgs {
   readonly host: string;
   readonly port: number;
   readonly limits: Partial<Record<RelayLimitFlag, number>>;
+  /**
+   * Honour `X-Forwarded-For` from the loopback proxy when keying the limits
+   * (H3). Required behind Caddy: without it every client shares 127.0.0.1.
+   */
+  readonly trustProxy: boolean;
   /** The four APNs values: `undefined` unless the deployment carries push. */
   readonly apns: {
     readonly keyFile?: string;
@@ -54,10 +59,16 @@ Usage: tentacle-relay [options]
   --host <host>                 Bind address (default ${DEFAULT_RELAY_HOST}; put a TLS
                                 proxy in front — the relay speaks ws:// only)
   --port <port>                 Bind port (default ${DEFAULT_RELAY_PORT})
+  --trust-proxy                 Key the abuse limits on the client address in
+                                X-Forwarded-For. Read ONLY from a loopback peer, and
+                                only the right-most untrusted hop. Required behind
+                                Caddy (otherwise every client is 127.0.0.1 and the
+                                per-IP limits become ONE global bucket)
   --max-dials-per-minute <n>    Phone dials per source address per minute (default ${RELAY_LIMITS.dialsPerMinutePerIp})
   --max-streams-per-ip <n>      Concurrent phone sockets per source address (default ${RELAY_LIMITS.concurrentPerIp})
   --max-streams-per-id <n>      Concurrent phone streams per daemon id (default ${RELAY_LIMITS.streamsPerId})
   --max-ids <n>                 Registered daemons (default ${RELAY_LIMITS.registeredIds})
+  --max-ids-per-ip <n>          Registered daemons per source address (default ${RELAY_LIMITS.registeredPerIp})
   --max-hellos-per-minute <n>   Registrations per source address per minute (default ${RELAY_LIMITS.hellosPerMinutePerIp})
   --max-pushes-per-minute <n>   Pushes per registered daemon per minute (default ${RELAY_LIMITS.pushesPerMinutePerId})
   --max-pushes-per-token-per-minute <n>
@@ -71,8 +82,9 @@ Usage: tentacle-relay [options]
   -h, --help                    This text
 
 Environment: TENTACLE_RELAY_HOST, TENTACLE_RELAY_PORT,
+TENTACLE_RELAY_TRUST_PROXY (1/true/0/false),
 TENTACLE_RELAY_MAX_DIALS_PER_MINUTE / _MAX_STREAMS_PER_IP / _MAX_STREAMS_PER_ID /
-_MAX_IDS / _MAX_HELLOS_PER_MINUTE / _MAX_PUSHES_PER_MINUTE /
+_MAX_IDS / _MAX_IDS_PER_IP / _MAX_HELLOS_PER_MINUTE / _MAX_PUSHES_PER_MINUTE /
 _MAX_PUSHES_PER_TOKEN_PER_MINUTE, and TENTACLE_RELAY_APNS_KEY_FILE /
 TENTACLE_RELAY_APNS_KEY_ID / TENTACLE_RELAY_APNS_TEAM_ID /
 TENTACLE_RELAY_APNS_TOPIC. A flag wins over the environment.
@@ -87,6 +99,7 @@ const LIMIT_ENV: Record<RelayLimitFlag, string> = {
   "max-streams-per-ip": "TENTACLE_RELAY_MAX_STREAMS_PER_IP",
   "max-streams-per-id": "TENTACLE_RELAY_MAX_STREAMS_PER_ID",
   "max-ids": "TENTACLE_RELAY_MAX_IDS",
+  "max-ids-per-ip": "TENTACLE_RELAY_MAX_IDS_PER_IP",
   "max-hellos-per-minute": "TENTACLE_RELAY_MAX_HELLOS_PER_MINUTE",
   "max-pushes-per-minute": "TENTACLE_RELAY_MAX_PUSHES_PER_MINUTE",
   "max-pushes-per-token-per-minute": "TENTACLE_RELAY_MAX_PUSHES_PER_TOKEN_PER_MINUTE",
@@ -132,6 +145,22 @@ export function parseRelayArgs(
     port = parsed;
   }
   let help = false;
+  let trustProxy = false;
+  if (env.TENTACLE_RELAY_TRUST_PROXY !== undefined) {
+    // Strictly 1/true/0/false: a value that half-applies is worse than a relay
+    // that refuses to start, exactly as with every numeric value here.
+    const raw = env.TENTACLE_RELAY_TRUST_PROXY.trim().toLowerCase();
+    if (raw === "1" || raw === "true") {
+      trustProxy = true;
+    } else if (raw === "0" || raw === "false") {
+      trustProxy = false;
+    } else {
+      return {
+        ok: false,
+        error: "TENTACLE_RELAY_TRUST_PROXY must be 1, true, 0 or false",
+      };
+    }
+  }
   const apns: {
     keyFile?: string;
     keyId?: string;
@@ -172,6 +201,11 @@ export function parseRelayArgs(
     const arg = argv[i] ?? "";
     if (arg === "--help" || arg === "-h") {
       help = true;
+      i += 1;
+      continue;
+    }
+    if (arg === "--trust-proxy") {
+      trustProxy = true;
       i += 1;
       continue;
     }
@@ -222,17 +256,29 @@ export function parseRelayArgs(
       if (typeof taken === "string") {
         return { ok: false, error: taken };
       }
-      if (taken.value.trim().length === 0) {
-        return { ok: false, error: `${arg} needs a value` };
+      // A BLANK value means "not set", not a refusal. Deployed through systemd an
+      // unset variable is an EMPTY ARGUMENT, never an absent one: `${VAR}` as a
+      // word is always exactly one argument, whose value is "" when the variable
+      // is unknown (systemd.service(5)). Refusing it would make a drop-in
+      // installed a moment before its `EnvironmentFile` — or a rollback that
+      // deletes one file — a `Restart=always` crash loop, i.e. every phone off
+      // the relay because Apple's key is not where it was. So a blank value is
+      // dropped, exactly as an unset variable would be; what remains is a partial
+      // set, which `apnsSetupOf` reports with one `push off:` line while the
+      // relay keeps serving (F4).
+      //
+      // A MISSING value (`--apns-key-id` with nothing after it) is still a
+      // refusal: that is an operator's typo, indistinguishable from a mistake.
+      if (taken.value.trim().length > 0) {
+        apns[apnsName] = taken.value;
       }
-      apns[apnsName] = taken.value;
       i = taken.next;
       continue;
     }
     return { ok: false, error: `unknown argument: ${arg}` };
   }
 
-  return { ok: true, args: { host, port, limits, apns, help } };
+  return { ok: true, args: { host, port, limits, trustProxy, apns, help } };
 }
 
 /** The `--help` text (exported so the test pins it without capturing stdout). */
@@ -319,6 +365,7 @@ if (import.meta.main) {
   const server = startRelay({
     host: parsed.args.host,
     port: parsed.args.port,
+    trustProxy: parsed.args.trustProxy,
     limits: limitsFromFlags(parsed.args.limits),
     onLog: log,
     ...(apns === undefined ? {} : { apns }),

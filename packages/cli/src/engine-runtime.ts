@@ -53,6 +53,7 @@ import {
   type WorkloadState,
 } from "./engine-host.ts";
 import { engineTarget } from "./engine-target.ts";
+import type { HopLiveLine } from "./hop-live-line.ts";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import {
   type ProviderFactory,
@@ -203,8 +204,20 @@ export function createFaultWatch(): {
 /**
  * The startup spinner, on the terminal `log` writes to (stderr by default) and
  * cut to ITS width; `null` when that is not a terminal: one line per phase then.
+ *
+ * `liveLine` WINS when present (docs/feat/session-hop-ux slice 2): a hop has no TTY
+ * of its own (it must never write raw while Ink owns the screen), yet it HAS a
+ * place to paint one line — its own status row. Returning it here is what makes
+ * every `status`-keyed behaviour in this file take the interactive contract with
+ * no further edit: phases go to `set`, the transfer is the bar, the resolver's
+ * verbose path is dropped, and no `attached…`/`ready in…` line is logged.
  */
-function statusLineFor(deps: Pick<EngineRuntimeDeps, "log" | "logTerm">): StatusLine | null {
+function statusLineFor(
+  deps: Pick<EngineRuntimeDeps, "log" | "logTerm" | "liveLine">,
+): HopLiveLine | StatusLine | null {
+  if (deps.liveLine !== undefined) {
+    return deps.liveLine;
+  }
   const term = deps.logTerm ?? termOf(process.stderr);
   return term.tty ? new StatusLine({ write: deps.log, columns: term.columns }) : null;
 }
@@ -271,6 +284,13 @@ export interface EngineRuntimeDeps {
    * spinner runs only on a terminal, cut to its width. Default: stderr's.
    */
   readonly logTerm?: Pick<StreamTerm, "tty" | "columns">;
+  /**
+   * A line to paint INSTEAD of a terminal spinner (docs/feat/session-hop-ux slice
+   * 2): the hop's own status row. Present → the interactive single-line contract
+   * with no TTY, so `log`/`info` keep only what is really a notice (a warning, an
+   * error, the dispose's `quitReport`). A hop passes `createHopLiveLine`.
+   */
+  readonly liveLine?: HopLiveLine;
   /**
    * Where the pod daemon's stderr is kept (`daemon.log`, 0600, bounded), given the
    * workload's name: the run's state dir when it has one. Absent: nothing is kept.
@@ -748,6 +768,13 @@ export interface EngineAttachRuntimeDeps {
    * spinner runs only on a terminal, cut to its width. Default: stderr's.
    */
   readonly logTerm?: Pick<StreamTerm, "tty" | "columns">;
+  /**
+   * A line to paint INSTEAD of a terminal spinner (docs/feat/session-hop-ux slice
+   * 2): the hop's own status row. Present → the interactive single-line contract
+   * with no TTY, so `log`/`info` keep only what is really a notice (a warning, an
+   * error, the dispose's `quitReport`). A hop passes `createHopLiveLine`.
+   */
+  readonly liveLine?: HopLiveLine;
   /**
    * Where the pod daemon's stderr is kept (`daemon.log`, 0600, bounded), given the
    * workload's name: the run's state dir when it has one. Absent: nothing is kept.

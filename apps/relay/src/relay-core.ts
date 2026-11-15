@@ -52,6 +52,23 @@ export const RELAY_LIMITS = {
   registeredIds: 10_000,
   /** `hello` frames per minute, per source address. */
   hellosPerMinutePerIp: 10,
+  /**
+   * Ids one source address may hold registered at once (fix/relay-hardening
+   * M2). `registeredIds` is GLOBAL: with real per-client addresses, one address
+   * could fill it (~17 h at the per-IP hello rate, minutes with a few hundred
+   * addresses) and every new daemon would then be refused `busy`. A large NAT
+   * may legitimately exceed this — it is a flag.
+   */
+  registeredPerIp: 32,
+  /**
+   * Sockets on `/v1/daemon` and `/v1/accept` admitted per source address
+   * BEFORE they have said `hello` / `accept` (H2). At least 2× `streamsPerId`:,
+   * a re-registering daemon releases up to that many held phones at once, and
+   * every one of them opens an accept leg from the same address in one burst.
+   */
+  pendingPerIp: 128,
+  /** `ping` frames per minute, per control socket (M1: a pong is not free). */
+  pingsPerMinute: 30,
   /** Per-IP bookkeeping entries remembered. */
   maxTrackedIps: 4_096,
   /** Device-token push windows remembered, relay-wide (bounded, as the IPs are). */
@@ -75,6 +92,15 @@ export type RelayRefusal = "rate" | "concurrency";
 
 /** The phone leg's close code for a dial the relay refused outright. */
 export const RELAY_CLOSE_REFUSED = 4429;
+
+/**
+ * How long a socket may sit on `/v1/daemon` or `/v1/accept` before its FIRST
+ * frame (H2). The daemon sends it on open (`relay-link.ts:285, 470`), so one RTT
+ * is the real budget; 10 s is generous for a slow link and short enough that a
+ * silent socket cannot be hoarded (`sendPings: true` means a client that only
+ * answers pings is never idle on its own).
+ */
+export const RELAY_PREAUTH_MS = 10_000;
 
 /**
  * What the server must DO after a decision: one frame to one socket, or a close.
@@ -183,6 +209,22 @@ interface PushWindow {
 interface Daemon {
   readonly socket: string;
   readonly since: number;
+  /** The limiter key it registered from, so `registeredPerIp` can be given back. */
+  readonly ip: string;
+}
+
+/** A socket admitted but not yet authenticated (no `hello` / `accept` seen). */
+interface Pending {
+  readonly socket: string;
+  readonly ip: string;
+  readonly since: number;
+}
+
+/** What admitting a pre-auth socket concluded. */
+export interface PendingDecision {
+  readonly ok: boolean;
+  /** The frames/closes it requires: a refusal is `error busy` + close. */
+  readonly effects: readonly RelayEffect[];
 }
 
 interface Stream {
@@ -213,6 +255,10 @@ interface IpState {
   open: number;
   dials: Window;
   hellos: Window;
+  /** Ids this address holds registered now (`registeredPerIp`). */
+  registered: number;
+  /** Pre-auth sockets open now (`pendingPerIp`). */
+  pending: number;
 }
 
 const MINUTE_MS = 60_000;
@@ -250,6 +296,10 @@ export class RelayCore {
   private readonly streams = new Map<string, Stream>();
   private readonly holds = new Map<string, Hold>();
   private readonly ips = new Map<string, IpState>();
+  /** Sockets admitted but not yet authenticated, with their pre-auth deadline. */
+  private readonly pending = new Map<string, Pending>();
+  /** One ping window per control socket, dropped when that socket closes. */
+  private readonly pings = new Map<string, Window>();
   /**
    * Push bookkeeping: the RELAY-WIDE per-token windows (F10). One entry per device
    * token, whatever id pushed to it — the bound a third party would try to mul-
@@ -293,6 +343,47 @@ export class RelayCore {
       }
     }
     return undefined;
+  }
+
+  /** Sockets admitted but not yet authenticated — a test/diagnostic read. */
+  get pendingCount(): number {
+    return this.pending.size;
+  }
+
+  /**
+   * Admit a socket on `/v1/daemon` or `/v1/accept` at its OPEN, before it has
+   * said anything (H2). The relay upgrades such a socket unconditionally today
+   * and the core first sees it at `hello` / `accept`, so nothing bounds how many
+   * a client may hold open; each holds an fd and up to the backpressure buffer.
+   *
+   * A socket admitted here MUST be settled (`controlClosed` / `accept` success /
+   * `pendingClosed`), or it keeps a per-IP slot until {@link RELAY_PREAUTH_MS}
+   * closes it — which is exactly the deadline's job.
+   */
+  admitPending(input: { socket: string; ip: string }): PendingDecision {
+    const at = this.now();
+    const state = this.ipState(input.ip, at);
+    if (state.pending >= this.limits.pendingPerIp) {
+      // A stranger with a loop: not one more fd, and not a slot a real daemon
+      // could have used. The caller closes it `4429` (the dial-refusal code).
+      return { ok: false, effects: [] };
+    }
+    state.pending += 1;
+    this.pending.set(input.socket, { socket: input.socket, ip: input.ip, since: at });
+    return { ok: true, effects: [] };
+  }
+
+  /**
+   * A pre-auth socket closed before it ever authenticated: give its slot back at
+   * once (the sweep would otherwise hold it until the deadline).
+   */
+  pendingClosed(socket: string): void {
+    const pending = this.pending.get(socket);
+    if (pending === undefined) {
+      return;
+    }
+    this.pending.delete(socket);
+    this.releasePending(pending.ip);
   }
 
   /**
@@ -363,6 +454,22 @@ export class RelayCore {
         ],
       };
     }
+    if (
+      existing === undefined &&
+      this.ipState(input.ip, at).registered >= this.limits.registeredPerIp
+    ) {
+      // The GLOBAL cap does not bound what ONE address keeps alive: with real
+      // per-client keys one address could fill `registeredIds` and refuse every
+      // new daemon on the relay (M2). Same answer as the global cap (a daemon
+      // cannot tell a per-address cap from a full registry, and need not).
+      return {
+        ok: false,
+        effects: [
+          this.error(input.socket, "busy"),
+          { kind: "close", target: input.socket, code: 1000 },
+        ],
+      };
+    }
 
     const effects: RelayEffect[] = [
       {
@@ -375,14 +482,22 @@ export class RelayCore {
         frame: { t: "ready", v: RELAY_PROTOCOL_VERSION, id, features: [...this.features] },
       },
     ];
-    if (existing !== undefined && existing.socket !== input.socket) {
+    if (existing === undefined) {
+      this.ipState(input.ip, at).registered += 1;
+    } else if (existing.socket !== input.socket) {
+      // The replaced socket's slot goes back HERE, so its own later close (which
+      // finds no daemon for its key) cannot decrement a second time.
+      this.releaseRegistered(existing.ip);
+      this.ipState(input.ip, at).registered += 1;
       // Newest wins: a restarted daemon must not wait for its predecessor's dead
       // socket to time out. The old one is TOLD, so two machines sharing one
       // secret flap loudly instead of silently (F15, F16).
       effects.push({ kind: "send", target: existing.socket, frame: { t: "replaced" } });
       effects.push({ kind: "close", target: existing.socket, code: 1000 });
     }
-    this.daemons.set(id, { socket: input.socket, since: at });
+    // The socket is authenticated now: its pre-auth slot is settled either way.
+    this.pendingClosed(input.socket);
+    this.daemons.set(id, { socket: input.socket, since: at, ip: input.ip });
     effects.push(...this.releaseHolds(id, input.socket, at));
     return { ok: true, id, effects };
   }
@@ -458,6 +573,8 @@ export class RelayCore {
       };
     }
     stream.accepted = true;
+    // The leg is authenticated now, so its pre-auth slot is settled.
+    this.pendingClosed(input.socket);
     return { ok: true, token: stream.token, id: stream.id, phone: stream.phone };
   }
 
@@ -568,12 +685,38 @@ export class RelayCore {
    * control socket.
    */
   controlClosed(socket: string): void {
+    this.pings.delete(socket);
     for (const [id, daemon] of this.daemons) {
       if (daemon.socket === socket) {
         this.daemons.delete(id);
+        this.releaseRegistered(daemon.ip);
         return;
       }
     }
+    // Never registered: it was only pre-auth, so its pending slot goes back.
+    this.pendingClosed(socket);
+  }
+
+  /**
+   * A `ping` on a control socket: `pong`, unless this socket has used its minute
+   * (M1). Today every ping is answered unconditionally, so a client that never
+   * reads piles pongs into its backpressure buffer — and with the pre-auth gap
+   * (H2) it could do that on sockets it never authenticates.
+   */
+  ping(input: { socket: string }): readonly RelayEffect[] {
+    const at = this.now();
+    let window = this.pings.get(input.socket);
+    if (window === undefined) {
+      window = { count: 0, since: at };
+      this.pings.set(input.socket, window);
+    }
+    if (chargeWindow(window, at) > this.limits.pingsPerMinute) {
+      // Past the limit the socket is closed, not throttled silently: a leg that
+      // pings 30×/min is not a daemon (it pings at most every 25 s).
+      this.pings.delete(input.socket);
+      return [{ kind: "close", target: input.socket, code: 1008 }];
+    }
+    return [{ kind: "send", target: input.socket, frame: { t: "pong" } }];
   }
 
   /** A phone socket closed (held, or spliced): give its slots back exactly once. */
@@ -612,6 +755,16 @@ export class RelayCore {
   sweep(): readonly RelayEffect[] {
     const at = this.now();
     const effects: RelayEffect[] = [];
+    for (const pending of [...this.pending.values()]) {
+      if (at - pending.since >= RELAY_PREAUTH_MS) {
+        // Never authenticated within the deadline: the fd and its buffer go, so
+        // a client cannot hoard sockets by answering pings (`sendPings: true`
+        // means it would otherwise never look idle).
+        this.pending.delete(pending.socket);
+        this.releasePending(pending.ip);
+        effects.push({ kind: "close", target: pending.socket, code: 1008 });
+      }
+    }
     for (const hold of [...this.holds.values()]) {
       if (at - hold.since >= RELAY_STREAM_HOLD_MS) {
         this.holds.delete(hold.phone);
@@ -683,6 +836,22 @@ export class RelayCore {
     }
   }
 
+  /** One id's registration slot goes back to its address (never below zero). */
+  private releaseRegistered(ip: string): void {
+    const state = this.ips.get(ip);
+    if (state !== undefined && state.registered > 0) {
+      state.registered -= 1;
+    }
+  }
+
+  /** One pre-auth slot goes back to its address (never below zero). */
+  private releasePending(ip: string): void {
+    const state = this.ips.get(ip);
+    if (state !== undefined && state.pending > 0) {
+      state.pending -= 1;
+    }
+  }
+
   private admitHello(ip: string, at: number): boolean {
     const state = this.ipState(ip, at);
     if (usedInWindow(state.hellos, at) >= this.limits.hellosPerMinutePerIp) {
@@ -701,6 +870,8 @@ export class RelayCore {
       open: 0,
       dials: { count: 0, since: at },
       hellos: { count: 0, since: at },
+      registered: 0,
+      pending: 0,
     };
     this.ips.set(ip, state);
     if (this.ips.size > this.limits.maxTrackedIps) {

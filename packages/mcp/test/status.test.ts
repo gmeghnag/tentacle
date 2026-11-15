@@ -22,6 +22,8 @@ function fakeConnection(
     isOpen: () => opts.open ?? true,
     closeReason: () => opts.closeReason,
     ping: opts.ping ?? (async () => {}),
+    client: () => ({}) as ReturnType<McpConnection["client"]>,
+    onClose: () => {},
   };
 }
 

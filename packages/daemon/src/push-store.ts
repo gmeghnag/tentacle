@@ -288,6 +288,28 @@ export function deletePushRegistration(
 }
 
 /**
+ * Forget one device's registration, whoever wrote it and whatever token it
+ * holds — the `device/push_unregister` path (the Settings toggle, slice P7).
+ *
+ * Deliberately SEPARATE from {@link deletePushRegistration}: that one is a
+ * `gone` from Apple and must not remove a token the phone has just replaced
+ * (F11), while this one is the device's own instruction and has nothing to
+ * compare against. `absent` is success — an unregister is idempotent.
+ */
+export function forgetPushRegistration(configDir: string, deviceId: string): PushDeleteOutcome {
+  if (!ID_RE.test(deviceId)) {
+    return "absent";
+  }
+  const path = pushPathOf(configDir, deviceId);
+  try {
+    rmSync(path, { force: true });
+    return "deleted";
+  } catch {
+    return "unreadable";
+  }
+}
+
+/**
  * Drop EVERY registration (`devices reset`, F13: a new computer key means no
  * phone can open a push again, so the files are not merely unusable, they are
  * stale). Returns how many files went; a failure to remove one is counted as

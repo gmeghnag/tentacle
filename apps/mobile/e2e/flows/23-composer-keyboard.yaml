@@ -17,11 +17,17 @@ appId: so.tentacle.app
     id: "session-view"
 - assertVisible:
     id: "turn-idle"
-- takeScreenshot: 23-keyboard-closed
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "23-keyboard-closed"
 - tapOn:
     id: "composer-input"
 - inputText: "SLOW keyboard button"
-- takeScreenshot: 23-keyboard-open
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "23-keyboard-open"
 # B1: NO hideKeyboard. With the composer under the keyboard this tap lands on a
 # key, nothing is sent and `turn-running` never shows.
 - tapOn:

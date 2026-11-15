@@ -143,3 +143,127 @@ describe("createForegroundGate", () => {
     expect(h.closed).toEqual(["c0", "c1"]);
   });
 });
+
+// docs/feat/mobile-notifications.md Design 4 / N6: a BACKGROUND task (a
+// notification's Deny or Reply) needs ONE dial through while iOS has the app
+// suspended. `hold(ms)` is that permission, bounded by the caller's budget.
+describe("hold(ms): one dial through a background task", () => {
+  /** A harness with an injected clock, so the hold's expiry is drivable. */
+  function timedHarness() {
+    const dials: ((c: DuplexChannel) => void)[] = [];
+    const closed: string[] = [];
+    const timers: { fn: () => void; ms: number; cancelled: boolean }[] = [];
+    const gate = createForegroundGate(
+      () => new Promise<DuplexChannel>((resolve) => dials.push(resolve)),
+      {
+        setTimeout: (fn, ms) => {
+          const timer = { fn, ms, cancelled: false };
+          timers.push(timer);
+          return timer;
+        },
+        clearTimeout: (handle) => {
+          const timer = handle as { cancelled?: boolean };
+          if (timer) timer.cancelled = true;
+        },
+      },
+    );
+    return {
+      gate,
+      closed,
+      timers,
+      count: () => dials.length,
+      open: (i: number) => dials[i]?.(channel(`c${i}`, closed)),
+      fire: () => {
+        for (const timer of timers) {
+          if (!timer.cancelled) timer.fn();
+        }
+      },
+    };
+  }
+
+  test("a held dial is NOT parked, and its channel is handed out while suspended", async () => {
+    // Mutation: ignore the hold (`if (!suspended)`) → the dial waits forever and
+    // the answer never leaves the phone (F13's silent loss).
+    const h = timedHarness();
+    const release = h.gate.hold(20_000);
+    h.gate.suspend();
+    const dialling = h.gate.dial();
+    await flush();
+    expect(h.count()).toBe(1); // it dialled: not parked behind `resume`
+    h.open(0);
+    const channelGot = await dialling;
+    expect(channelGot).toBeDefined();
+    expect(h.closed).toEqual([]); // and it was NOT closed as a ghost
+    release();
+    h.gate.resume();
+  });
+
+  test("the release re-suspends: the next dial parks again", async () => {
+    const h = timedHarness();
+    const release = h.gate.hold(20_000);
+    h.gate.suspend();
+    const first = h.gate.dial();
+    await flush();
+    h.open(0);
+    await first;
+    release();
+    release(); // idempotent: a `finally` may call it twice
+    let settled = false;
+    const second = h.gate.dial().then(() => {
+      settled = true;
+    });
+    await flush();
+    expect(settled).toBe(false); // back to parked
+    h.gate.resume();
+    await flush();
+    h.open(1);
+    await second;
+  });
+
+  test("the hold expires on its own after `ms`: the NEXT dial parks again", async () => {
+    // The budget is the caller's iOS window (Design 4: ≤ 25 s). A hold that never
+    // ended would keep a socket for a person who has walked away.
+    const h = timedHarness();
+    const release = h.gate.hold(20_000);
+    h.gate.suspend();
+    const dialling = h.gate.dial();
+    await flush();
+    expect(h.count()).toBe(1); // the held dial went out
+    h.open(0);
+    await dialling;
+    h.fire(); // the hold's own timer expires it
+    release(); // idempotent with the expiry — the caller's `finally`
+    // The hold is over: the next dial parks behind `resume`.
+    let settled = false;
+    const later = h.gate.dial().then(() => {
+      settled = true;
+    });
+    await flush();
+    expect(h.count()).toBe(1); // nothing dialled
+    expect(settled).toBe(false);
+    h.gate.resume();
+    await flush();
+    h.open(1);
+    await later;
+  });
+
+  test("two holds overlap without one release ending the other", async () => {
+    const h = timedHarness();
+    const first = h.gate.hold(20_000);
+    const second = h.gate.hold(20_000);
+    h.gate.suspend();
+    first();
+    let settled = false;
+    const dialling = h.gate.dial().then(() => {
+      settled = true;
+    });
+    await flush();
+    // The second hold is still active: the dial goes through.
+    expect(h.count()).toBe(1);
+    h.open(0);
+    await dialling;
+    expect(settled).toBe(true);
+    second();
+    h.gate.resume();
+  });
+});

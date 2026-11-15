@@ -19,6 +19,7 @@ import { Connection, LogSessionStore, SessionHost } from "../../daemon/src/index
 import { createChannelPair } from "../../transport/src/index.ts";
 import { App } from "../src/App.tsx";
 import type { DisplayItem } from "../src/state.ts";
+import { inertSession } from "./session-stub.ts";
 
 // docs/fix/clear-silent-noop.md — the regression test at the REAL interface and
 // the shape that broke it: the real App over the real RPC stack
@@ -163,6 +164,7 @@ test("REPRO (App): a /clear that resets NOTHING on a chat that is on screen says
   const app = render(
     <App
       createSession={() => ({
+        ...inertSession(),
         async *send() {
           yield { type: "turn_end" as const, reason: "end_turn" as const };
         },
@@ -190,6 +192,7 @@ test("an empty transcript: a `{0, 0}` /clear says nothing (nothing was lost)", a
   const app = render(
     <App
       createSession={() => ({
+        ...inertSession(),
         async *send() {
           yield { type: "turn_end" as const, reason: "end_turn" as const };
         },

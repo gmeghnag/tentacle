@@ -60,6 +60,11 @@ export interface KeyHost {
   fieldReset(): void;
   cancelUpload(): void;
 
+  // --- voice dictation (docs/feat/voice-dictation.md): the hook's three intents
+  voiceToggle(): void;
+  voiceFinish(): void;
+  voiceCancel(): void;
+
   // --- panels, sessions, dock
   closePanel(): void;
   panelApply(action: TreeAction): void;
@@ -201,6 +206,15 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "fieldInsert":
       host.fieldInsert(effect.text);
+      return;
+    case "voiceToggle":
+      host.voiceToggle();
+      return;
+    case "voiceFinish":
+      host.voiceFinish();
+      return;
+    case "voiceCancel":
+      host.voiceCancel();
       return;
     case "fieldDeleteBack":
       host.fieldDeleteBack();

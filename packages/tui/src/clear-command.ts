@@ -2,11 +2,13 @@
  * `/clear` (docs/feat/clear-keeps-jobs.md): the pure decision the App executes.
  * `/clear` resets the conversation inside the same session (`session/clear`);
  * background jobs and sub-agents keep running.
+ *
+ * There is no close-and-replace branch: that existed only for the in-process
+ * session, whose `/clear` had nothing to reset (docs/feat/remove-in-process.md).
+ * `SessionController.clear` is required, so every session this runs on can.
  */
 
 export type ClearStep =
-  /** The session has no `clear` (the in-process fallback): close it and start a new one. */
-  | "legacy"
   /** A `/clear` of this TUI is already in flight. */
   | "busy"
   /** A compaction holds the session. */
@@ -17,15 +19,11 @@ export type ClearStep =
   | "clear";
 
 export function clearCommandStep(input: {
-  readonly canClear: boolean;
   readonly running: boolean;
   readonly ownTurn: boolean;
   readonly compacting: boolean;
   readonly clearing: boolean;
 }): ClearStep {
-  if (!input.canClear) {
-    return "legacy";
-  }
   if (input.clearing) {
     return "busy";
   }

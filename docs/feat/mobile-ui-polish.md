@@ -1218,6 +1218,309 @@ Conversation with code/table/tool/diff, Compose with queue, Approval; light+dark
 `bun run lint` 1408 files, 0 issues · `bun test` 10079 pass, 4 skip (opt-in),
 0 fail. No schema change (no `protocol.json` regen, no `protocol.d/` note).
 
+### Slices 5–6 — Offline + Lock + Settings, polish (+ owner feedback #3)
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Load-bearing check, re-run first (holds).** `ComposeBar.tsx`,
+`OutboxDecisionSheet.tsx`, `LockGate.tsx`, `SettingsScreen.tsx`, `Markdown.tsx`,
+`CodeBlock.tsx` were still renderers over precomputed values (`session-view.ts`
+`OutboxRowView`, `lock-screen.ts`, the Settings props, `markdown.ts`). The only
+branching found in a component was `OutboxRows`' state → glyph chain (`◷ ↑ ⏳ ⚠`);
+it moved to a pure module (below). Every existing test stayed green unchanged
+except the one that pinned the aliases this slice removes (`theme.test.ts`, see
+drift).
+
+**B7 — `&#x27;` inside a highlighted code block. Repro first**
+(`.tentacle/tmp/mobile-ui-polish/b7/repro.ts`, on this branch before the fix):
+```
+$ bun .tentacle/tmp/mobile-ui-polish/b7/repro.ts
+parse: {"kind":"blocks","blocks":[{"kind":"code","lang":"python","text":"print('a < b' if x > 1 and y & z else \"q\")"}]}
+python ["print(&#x27;a < b&#x27; if x > 1 and y & z else \"q\")"]
+bash ["print(&#x27;a < b&#x27; if x > 1 and y & z else \"q\")"]
+ts ["print(&#x27;a < b&#x27; if x > 1 and y & z else \"q\")"]
+null ["print('a < b' if x > 1 and y & z else \"q\")"]
+```
+Root cause: highlight.js `escapeHTML` escapes `'` as `&#x27;`
+(`apps/mobile/node_modules/highlight.js/lib/core.js:61-67`), and
+`highlight.ts` `unescapeHtml` undid only `&lt; &gt; &quot; &amp;` — so only a
+block that was HIGHLIGHTED (a known fence language) showed it. Red
+(`test/code-block.test.ts` "quotes, <, > and & show as themselves…", 5 languages
+incl. none): `Received "print(&#x27;a < b&#x27; …"` → fix `highlight.ts:198-211`
+(`&#x27;` → `'`, `&amp;` still last, so a literal `&amp;` stays `&amp;`) → green.
+
+**Owner feedback #3, as built.**
+- *Code blocks* (`src/ui/CodeBlock.tsx`): the mockup's header — label in mono
+  12 `sec` + a 44×34 **Copy** button (`code-<i>-copy`; `expo-clipboard`, success
+  haptic, a 1.5 s checkmark); the lines scroll inside a view inset 12 pt on BOTH
+  sides (the screenshot's lines ran into the block's right edge) with the native
+  horizontal indicator on; 12 pt bottom padding (mockup `padding: 0 12px 12px`).
+- *Font*: the mono family is now **SF Mono** (`MONO = "ui-monospace"`,
+  `theme.ts`): RN 0.88 maps that name to `UIFontDescriptorSystemDesignMonospaced`
+  (`react-native/…/RCTFontUtils.mm:375-404`), the mockups' own family. Measured
+  on the owner's screenshot, the code was already ≈ 12 pt (45 chars over 952 px
+  at 3×); what read as "~17pt" was Menlo's width/weight, so the size stays the
+  mockup's 12.5/19 and the face changes.
+- *Inline code* (`code-block.ts` `inlineCodeLook`, `Markdown.tsx`): a nested
+  `Text`'s background fills the whole line height and takes no padding/radius —
+  the "strip". A span ≤ 24 chars with no newline is now an inline **View chip**
+  (mono 14, padding 1/5, radius 5, `code` fill — the mockup's CSS), shifted 4 pt
+  to sit on the baseline; a longer span is a mono **run with no background**
+  that wraps like text (a chip cannot break across lines).
+- *Typography/spacing*: body was already 16/23; the missing piece was the
+  rhythm — `Markdown` had **no gap between blocks** (the screenshot's
+  "Esecuzione:" sat flush under the code block). Blocks now have the mockup's
+  10 pt gap.
+- *Header "…"* (`SessionScreen.tsx`, `src/session-menu.ts` pure + 5 tests, red 4/5
+  on a stub; inline-code tests red 2/4 on a stub): a glass `ellipsis`
+  button (`session-menu`) opening an action sheet with phone-local actions only —
+  **Copy last answer** / **Copy conversation** (each offered only when it has
+  text; "Nothing to copy yet" otherwise). Computer-side actions stay out (owner
+  decision 2).
+
+**Slice 5 as built.**
+- `src/outbox-look.ts` (new, pure, + `test/outbox-look.test.ts` 8; red 3/7 on a
+  stub before `back-to-draft` was added): per row a cue (`none` / `spinner` /
+  `attention`), a status line, and the "…" options button only when `decide`;
+  the group caption "Waiting for network · sent on reconnect if nothing changed"
+  while any row waits.
+- `ComposeBar.tsx` `OutboxRows`: right-aligned **dashed** bubbles (1.5 pt `dash`,
+  radius 20, 16/22; orange border when a decision is needed), the 44 pt "…"
+  button (`outbox-options-<id>`), status with spinner/warning icon, the caption.
+  `outbox-row-<id>-<state>` kept on the bubble (still the tap target).
+  `BarView.outbox` is now `OutboxRowView[]` (it was a looser copy).
+- `OutboxDecisionSheet.tsx`: native `pageSheet` (was a full-screen `Modal`) with
+  the shared `Sheet` (grabber, title 22, the why as subtitle), the message as a
+  dashed bubble, and 50 pt `PillButton`s — Send primary, Queue as steer
+  secondary, Edit neutral, Discard destructive, Not now neutral. Every testID kept.
+- `SettingsScreen.tsx`: `ScreenHeader` large title + glass back
+  (`settings-back`), `SectionHeader` + 26 pt `GroupedCard` + 44 pt `Row`s, SF
+  Symbol checkmark, the pending "Unlock to apply" in `sec` (the hard-coded
+  `#8E8E93` is gone), notices/errors as `Banner`. `App.tsx`: Settings gets
+  `headerShown: false` + `onBack`.
+- **Lock**: nothing to do — `LockGate.tsx`'s `LockScreen` was already restyled to
+  the mockup in "Visual fix round 1" (96 pt mark, 28/34 title, 54 pt Face ID
+  button, footnote, `Banner` for no-passcode).
+- Offline header subtitle: stays `Offline` — no last-sync time exists in the
+  view-model (the plan's own fallback; nothing invented).
+
+**Slice 6 as built.**
+- *Haptics* (`expo-haptics`): `src/haptic-rules.ts` (pure, + 4 tests, red 3/4 on a
+  stub): press → light (send/queue/send-later), firm (Stop), none (no-op); Return
+  through the SAME `returnKeyAction` gate, so it never "feels" like a Stop; turn
+  end (running → idle) → success. `src/haptics.ts` plays it, errors ignored.
+  Wired in `SessionScreen.tsx` (composer press/Return, the turn-end effect) and on
+  Copy.
+- *LayoutAnimation* (`src/ui/animate.ts`, ease-in-out): tool output, reasoning
+  and diff open/close (`TranscriptRow.tsx`, `DiffView.tsx`); the queue/outbox/
+  chips when `src/compose-motion.ts` `composeRowsMoved` (pure, + 4 tests, red 3/4
+  on a stub) says a row arrived, left or changed state — never on a streamed
+  token alone.
+- *Dark-mode pass*: a scan of every `<Text>` tag in `apps/mobile`
+  (`.tentacle/tmp/mobile-ui-polish/dark/scan.ts`) — the 16 without their own
+  colour all inherit one from a coloured parent `Text` (mono runs, inline
+  markdown, diff counts), are the always-dark camera overlay (`scanner.tsx`), or
+  are the zero-size observables. Hard-coded colours left: shadows, the action
+  sheet backdrop, the camera chrome — all scheme-independent.
+- *Aliases removed* (`theme.ts`): `Palette` is the tokens only; the last three
+  uses (`App.tsx`) now read `bg`/`red`.
+- *Screenshot flow*: `e2e/flows/24-ui-shots.yaml` — Computers, Settings,
+  Sessions, the Conversation after a `SHOWCASE` prompt, the "…" menu, each
+  asserted by its own ids then `takeScreenshot`; its seed is the mock model's
+  `SHOWCASE_MD` (`e2e/mock-model.ts`) on its own session (`SHOTS_ID`,
+  `COMPOSE_SESSION_VARS`). `test/ui-shots-seed.test.ts` (3) reads the seed through
+  the app's own parser: block order (so `code-2` is the code block), both inline
+  looks present, B7's characters literal.
+- `package.json` + `bun.lock`: `expo-haptics ~58.0.8`, `expo-clipboard ~58.0.4`
+  (`bunx expo install`; both need a dev-client/Release rebuild).
+- Changelog: `changelog.d/mobile-ui-polish.changed.md` rewritten to "a new look on
+  every screen" (one bullet, the whole restyle); `…fixed.md`'s bullet gains B7.
+
+**Mutations** (`.tentacle/tmp/mobile-ui-polish/mut56/mutate.ts`: back up, mutate,
+run, restore; each restore byte-checked, `git status` unchanged after):
+| # | Mutation | Caught by |
+|---|---|---|
+| M1 | `unescapeHtml` drops `&#x27;` | `code-block` B7 + `ui-shots-seed` B7 |
+| M2 | `inlineCodeLook` always `chip` | 2 `code-block` cases + `ui-shots-seed` "both looks" |
+| M3 | `pressHaptic`: Return skips `returnKeyAction` | "Return: … never for a Stop" |
+| M4 | `composeRowsMoved` ignores row state | "a row changes state (queued → sending)" |
+| M5 | outbox options from `state`, not `decide` | "the options button follows `decide`" |
+| M6 | copy-last takes the FIRST answer | "copy the last answer: the newest …" |
+| M7 | an alias name back on the palette | "no pre-restyle alias name is left" |
+
+**Drift from Implementation (and why).**
+- `theme.test.ts` "theme aliases (until Slice 6)" pinned the aliases; Slice 6
+  removes them, so it became the inverse guard ("no alias name is left").
+- The screenshot flow is `24-ui-shots.yaml` (numbered, in `FLOWS`) instead of
+  `ui-shots.yaml`: the sandbox allows `bun run e2e:mobile --ios 26` but not an
+  `E2E_ONLY_FLOWS=` prefix, so only a flow in the default list ever runs; it sits
+  before the lock flows (which change the lock setting).
+- The screenshot walk covers Computers, Settings, Sessions, Conversation (code,
+  chip/run inline code, table, list) and the "…" menu. NOT in it: Pair, Diff,
+  Compose-with-queue, Approval, Offline-with-outbox, Lock — each needs daemon-side
+  state a single flow cannot stage without the hooks those flows already use
+  (07/08/12/16/18); their own flows run in the same suite.
+- Inline code is two looks (chip / run), not one: a padded chip cannot wrap, so
+  a long span keeps the mono face without a background.
+- The session "…" menu holds copy actions only (no rename/archive/new): those
+  need the computer (owner decision 2's separate task).
+- Not built: the running-tool row pinned above the composer with its own Stop
+  (Slices 3–4 drift, unchanged), "Offline · synced HH:MM" (no data).
+
+**Simulator (attempted, NOT verified).** `bun run e2e:mobile --ios 26` ran:
+the build installed (the new `expo-haptics`/`expo-clipboard` compiled; no build
+error), then `01-shell` and `02-session-list` both failed at the SAME step, inside
+the shared `_unlock` subflow, before any restyled screen:
+`[Failed] 01-shell (21s) (Assertion is false: id: lock-screen is visible)` (same
+line for 02). Its screenshot
+(`.tentacle/tmp/e2e-mobile/1794704822773/ios26/01-shell/…/step-011-assertCondition-lock-screen.png`)
+shows the app's lock cover drawn under the system **Face ID** sheet: the sheet is
+up and Maestro sees no `lock-screen` id. Every flow goes through `_unlock`, so the
+run was stopped after two (§0: same failure, no new information). This slice did
+not touch `LockGate.tsx`, `_unlock.yaml` or the Face ID scripts. Not diagnosed:
+whether it is the simulator's enrolment state (`faceid-enroll.js`) or the earlier
+rounds' lock changes. **No screenshots were taken**, so the restyle, the inline
+chip's baseline shift, SF Mono, the Copy button and flow 24 are unseen on a
+device. To verify: fix `_unlock` on iOS 26, then `bun run e2e:mobile --ios 26`
+(flow 24's `24-*.png` in its output dir), light and dark.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean ·
+`bunx tsc -p apps/relay` clean · `bun run lint` 1419 files, 0 issues ·
+`bun test` 10108 pass, 4 skip (opt-in), 0 fail. No schema change (no
+`protocol.json` regen, no `protocol.d/` note).
+
+### Visual fix round 2 (slice 6, after `slice-6/visual-review-1.md`)
+
+- **F2 dark mode:** the generated `ios/tentacle/Info.plist` had
+  `UIUserInterfaceStyle = Light` (read, line 109–110) because `app.json` had no
+  `userInterfaceStyle`; added `"userInterfaceStyle": "automatic"`. Guard in
+  `theme.test.ts` (red on the old `app.json`, green now). Takes effect at the next
+  prebuild (the harness prebuilds every run).
+- **F1/F3 `_unlock` on iOS 26:** the system Face ID sheet hides the app, so the
+  old "assert `lock-screen` visible, match, assert it gone" hung on the first step
+  and would pass the last one vacuously. `_unlock.yaml` now keys on the positive
+  signal `app-content` (`LockGate`'s wrapper id once unlocked; `locked-content`,
+  hidden, before): it re-posts `pearl.match` up to 8× until `app-content` is
+  visible, then asserts `lock-screen` gone. `computers-list` is still asserted
+  hidden first. Flows 18–20 still assert `lock-screen` visible directly and will
+  hit the same sheet on iOS 26 — not changed here.
+- **P1:** `pairingView` carries `submit: "empty" | "unparsed" | "ready"`
+  (`pasteSubmit`, pure); Continue is disabled (`fill`, label at 0.5) when empty,
+  neutral when unparsed (still pressable so the payload error explains why), tinted
+  only when the line parses. `submit` on an empty field is now a no-op. Disabled
+  `PillButton`s draw their content at 0.5 everywhere. Tests red on the old module.
+- **P2:** new `ui/InlineMono.tsx` (label colour, 1 pt under the sentence), used on
+  Pair and on the Computers empty hint.
+- **P3:** both intake cards use `space.cardInner` (16).
+- **P4:** body copy is the mockup's sentence.
+- **P5 / all screenshots:** not taken — simulator commands need an approval this
+  run did not have. Still owed: F1's full set light + dark, Lock unobstructed (F3),
+  keyboard-up Pair (P5), iPad.
+
+**Gate:** `bun test apps/mobile` 1024 pass, 0 fail · `bunx tsc -p apps/mobile`
+clean · `bun run lint` 1420 files, 0 issues.
+
+*— claude-opus-5-5, 2026-11-15*
+
+### Fix round — the slice 6 walk on iOS 26 (orchestrator's order)
+
+Each item red-first unless marked; then `bun run e2e:mobile --ios 26 --only
+24-ui-shots,23-composer-keyboard,18-photos` until green.
+
+1. **Harness `--only <flow,flow>`** (`e2e/run.ts` `parseArgs`/`selectedFlows`;
+   the flag wins over `E2E_ONLY_FLOWS`, which still works; names checked before
+   any build). Tests in `e2e-preflight.test.ts`. The first real run iterated the
+   CHARACTERS of a path: `main` already bound `flows` to the flows dir. Renamed
+   to `runFlows`, plus a guard test (one binding, looped over).
+2. **Pair: paste field and Continue under the keyboard** (the walk failed at
+   `pair-review`). The avoiding view shrank the screen but the list kept its
+   offset. New pure `src/field-reveal.ts` (focus/blur, `keyboardDidShow/Hide`,
+   content resize → reveal); `PairScreen` scrolls to the end on a reveal (the
+   paste card is last). Content resize matters: the pasted line wraps and pushes
+   Continue down again. Tests: `field-reveal.test.ts`. On device:
+   `02-pair-keyboard-*.png`, and flow 24 now asserts `pair-paste-submit`
+   visible with the keyboard up before it taps it.
+3. **Light + dark in one walk**: new `appearance` hook (`simctl ui <udid>
+   appearance light|dark`, `appearanceOf`), `flows/appearance.js`, and
+   `_shot.yaml` (light shot → dark → dark shot → light). Flow 24 inlines
+   `_pair`'s steps so the Pair stages are shot too. Tests: `e2e-appearance.test.ts`.
+4. **`turn-idle` missing on iOS 26** (flows 23, 24): the 0×0 `fontSize: 0`
+   observable was absent from the accessibility tree (hierarchy dump: neither
+   id). Now 1×1, absolute, transparent (`SessionScreen` `observable`, same for
+   `composer-filled` in `ui/Composer.tsx`, whose text was also `""`). *No unit
+   test (RN layout); proven only on device:* run 3 got past it, run 5 green.
+5. **B8 — "at most 5 photos" before the library opens** (owner, iOS 18.3.1).
+   `compose-controller.ts` passed `pickRoom(chips)` (the ROOM, 5 when empty) to
+   `pickFromLibrary(taken)` / `takePhoto(taken)`, so the limit was `5 - 5 = 0`
+   and the adapter refused before presenting the picker. Now `counted(chips)`.
+   Test: `compose-controller.test.ts` "B8: the picker is told how many photos
+   are TAKEN" (red: `library:5`). On device the picker now reads "Select up to
+   5 photos." and flow 18 passes.
+6. **Refused photo chips ~380 pt tall**: a `ScrollView`'s base style grows, so
+   the horizontal chip row split the free height with the transcript.
+   `ComposeBar` `chipRow: { flexGrow: 0 }`. Test: `compose-bar-layout.test.ts`
+   (source guard).
+7. **Flow/harness bugs (the flows were wrong, not the app):** flow 18 tapped
+   `Library` (button is "Photo Library"; Maestro matches the whole text), named
+   cells `PNG fixture` (iOS 26's PHPicker labels them "Photo, <date>, <time>"
+   → the two newest cells, this run's `addmedia` pair) and `Add` (iOS 26:
+   "Done"); the harness `serve` had images OFF (`model.images` has no env var;
+   OpenAI-shaped default is no vision) → `harnessConfigText()` written to its
+   `config.jsonc` before the first start, test in `e2e-preflight.test.ts`;
+   `23/07/22-*.js` compared model prompts verbatim, but context awareness
+   appends `\n\n[context: …]` → matched on the typed first line.
+
+**Result:** `✓ 24-ui-shots (iOS 26)` `✓ 23-composer-keyboard (iOS 26)`
+`✓ 18-photos (iOS 26)` — `PASS` (run 1794724072250). Screenshots (light and
+dark, every screen of the walk) in `.tentacle/tmp/mobile-ui/slice-6/01-…09-*`,
+plus `10/11-composer-keyboard-*` (flow 23, light only).
+**Not done here:** the owner's qwen3.8 (vision) photo test against a real
+`serve` (only the mock model's `saw 2 images` is proven); iOS 18 not run; 07
+and 22 not re-run after their script fix.
+**Gate:** `bun test apps/mobile` 1046 pass, 0 fail · `bunx tsc -p apps/mobile`
+clean · `bun run lint` 1425 files, 0 issues.
+
+*— claude-opus-5-5, 2026-11-15*
+
+### Slice 7 — owner feedback #3 + B7 (STOPPED: no work left to plan; B8 verified only by unit test)
+
+**Load-bearing check (holds):** `CodeBlock.tsx`, `Markdown.tsx` and
+`SessionScreen.tsx` still render values that pure modules compute
+(`code-block.ts`, `highlight.ts`, `session-menu.ts`).
+
+**Contradiction, so I stopped here.** The doc has no Slice 7 plan.
+Owner feedback #3 and B7 were already built in "Slices 5–6" (above):
+`highlight.ts:208` decodes `&#x27;`, `CodeBlock.tsx` has the header and Copy
+button, `code-block.ts` has `inlineCodeLook`, `theme.ts:170` sets
+`MONO = "ui-monospace"`, and `session-menu.ts` backs the "…" menu. The owner
+approved those screens on 2026-11-15 10:35. There was nothing left to build and
+no flow list to screenshot, so I made **no code change and wrote no changelog
+fragment**: `mobile-ui-polish.changed.md` and `.fixed.md` already cover this.
+
+**Re-verified on this branch (64431d79):** `code-block`, `session-menu`,
+`ui-shots-seed` and `compose-controller` tests: 55 pass, 0 fail.
+Mutations (`.tentacle/tmp/mobile-ui-polish/s7/mut.ts`; each file restored and
+byte-checked; `git status` clean afterwards):
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `unescapeHtml` drops `&#x27;` (B7) | 2 fail (`code-block` + `ui-shots-seed`) |
+| M2 | `pickFromLibrary(pickRoom(chips))` (B8 reverted) | 1 fail (`compose-controller` B8) |
+
+**Not done: the owner's qwen3.8 (vision) photo test.** It needs a real
+`tentacle serve` on the user's DEFAULT profile, driven from the simulator. The
+sandbox refused even a read of the user's tentacle config. No plan step stages
+a real model in the e2e harness either: the harness uses `mock-model.ts`. B8 is
+proven by the red-first unit test and flow 18 (mock model, `saw 2 images`), NOT
+against qwen3.8. **Decision needed:** approve running a real `serve` (default
+profile) alongside the simulator, or let the owner run the test on device.
+
+**Gate:** `bunx tsc --noEmit` clean. `bun run lint`: 1497 files, no issues.
+`bun test`: the first run had 10806 pass, 5 skip, 1 fail. The rerun had
+0 fail. The failure is flaky and I did not identify it. This slice changes only
+this doc. No schema change.
+
+*— claude-opus-5-5, 2026-11-15*
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)
@@ -1374,5 +1677,113 @@ Conversation with code/table/tool/diff, Compose with queue, Approval; light+dark
 **LOW (not gating):** `contentGrew` treats any size change as growth. While scrolled up, a shrink (collapsing a tool output) shows "New messages". While following, expanding a row jumps to the end.
 
 **Executor behaviour:** stopped on the false auto-accept premise instead of building a fake one (good). Every gap that needs a simulator is listed as NOT verified. The commit is titled "exec (deepseek)" but the Execution section is signed claude-opus-5-5, so the attribution should be reconciled. This reviewer is the same model family as that signature: shared blind spots possible. Simulator/e2e (flows 02/07/08/12–15, B5/B6 on a device) remain unverified.
+
+*— claude-opus-5-5, 2026-11-15*
+
+#### Owner feedback #3 (2026-11-15 01:43, real iPhone, build c8b4dc3c)
+
+It works now ("ora funziona"); "UI migliorata ma si potrebbe fare ancora meglio". Screenshot: `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/owner-shots/conversation-code-0143.jpeg`. Fix in slices 5+6 and check in the final visual gate:
+
+- **B7 (bug):** HTML entities shown raw inside code blocks: `&#x27;` instead of `'` (escaped twice or never unescaped). Red-first test with a code block containing quotes, <, > and &.
+- **Code blocks:** font too big (looks ~17pt; mockup 12.5px mono / 19px line height); the block runs to the right screen edge with no inset/radius on that side. Add the mockup header row (language/file name + copy button), consistent 16px side insets, rounded corners on both sides, a scroll indicator.
+- **Inline code** (e.g. `python3 dirscanner.py [path] [-n N] [--hidden]`): renders as a big separate highlighted strip that wraps with a ragged background. It must be inline mono ~14px with small padding + radius, wrapping like text.
+- **Typography/spacing:** body text and code feel oversized; follow the mockup scale (16/23 body, 13 secondary) and consistent paragraph spacing.
+- **Header:** add the mockup's right-side session menu button (glass "…") to balance the back button.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+
+#### Simulator Face ID — the exact unlock recipe for screenshot agents (orchestrator, 2026-11-15 02:20; supersedes the earlier hint)
+
+Agents writing their own Maestro flows got stuck on the lock screen: the repo's `_unlock.yaml` calls `runScript` hooks (`faceid-enroll.js`, `faceid-match.js`) that only work while `bun run e2e:mobile` runs its hook server (`MAESTRO_HOOKS`). Outside the harness, unlock with the same notifications the harness posts (`apps/mobile/e2e/run.ts:344-363`), all allowed commands:
+
+1. Enroll once per simulator boot (two commits — `-s` alone is not enough):
+   `xcrun simctl spawn booted notifyutil -s com.apple.BiometricKit.enrollmentChanged 1` then
+   `xcrun simctl spawn booted notifyutil -p com.apple.BiometricKit.enrollmentChanged`
+2. Launch the app WITHOUT clearing state: `xcrun simctl launch booted so.tentacle.app` (or a Maestro `launchApp` with `clearState: false`).
+3. Wait until the Face ID prompt is UP (the `lock-screen` id is visible, ~2–3 s), THEN match:
+   `xcrun simctl spawn booted notifyutil -p com.apple.BiometricKit_Sim.pearl.match`
+   (`pearl` = Face ID; NOT `fingerTouch` — that is Touch ID and does nothing here. A match posted before the prompt is up resolves nothing: post it again.)
+4. Then run the screenshot flows against the unlocked app (no `clearState`, no relaunch). The lock screen itself is screenshotted BEFORE step 3.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+## Review — Slices 5–6 (fresh context)
+
+**Verdict: PASS (code); no HIGH/MEDIUM finding.** Scope: `git diff main...HEAD` (17b79078), Slices 5–6 + B7 only.
+
+**Gate (re-run):** `bun run typecheck` clean (root, mobile, relay). `bun run lint`: 1419 files, 0 issues. Touched tests (outbox-look, haptic-rules, compose-motion, session-menu, code-block, theme, ui-shots-seed): 104 pass, 0 fail. Full `bun test` was not re-run here.
+
+**Attacks tried:**
+1. *§7 logic in components:* checked the outbox glyph chain (now `outbox-look.ts`), the haptic choice (`haptic-rules.ts`), the animate decision (`compose-motion.ts`) and the menu text (`session-menu.ts`). All four are pure and tested. What is left in components is presentation: the Copy "copied" timer, and the subscribe wrapper that calls `animateNextLayout`. Holds.
+2. *B7 ordering:* `unescapeHtml` (`highlight.ts:203-209`) decodes `&#x27;` before `&amp;`. A source `&#x27;` that highlight.js escapes to `&amp;#x27;` therefore comes back literal, not as `'`. Holds.
+3. *Settings back / disabled export:* `export-logs` without `onPress` is a `Row` with `disabled` and keeps its testID (`Row.tsx:73-79`). Flow 21 is unaffected. `settings-back` is wired only when `canGoBack()`. Holds.
+4. *Outbox testIDs:* `outbox-row-<id>-<state>` stays on the tap target, still `disabled={!decide}`. Every decision-sheet testID is kept. The `pageSheet` swipe-down goes through `onRequestClose`, so `deciding` is cleared. Holds (not checked on a device).
+5. *Haptic on Return for Stop:* goes through `returnKeyAction` → null. Holds.
+
+**Mutations (mine; `.tentacle/tmp/mobile-ui-polish/rev56/mut.ts`, each restore byte-checked, `git status` clean):** caption on `sending` instead of `waiting` → 1 fail. `turnEndHaptic` without `wasRunning` → 1 fail. Menu dropping user rows → 2 fail. `compose-motion` ignoring `sendNow` → 1 fail. `unescapeHtml` without `&amp;` → 1 fail. The executor's M1–M7 were not re-run.
+
+**LOW (not gating):**
+- `turnEndHaptic` plays *success* for every turn end, including `error` and `interrupted` (`transcript.ts:213-219`; `haptic-rules.ts:33`). This matches the plan's wording, but a failed turn "feels" successful.
+- The press haptic reads the rendered `state.view.composer.action` (`SessionScreen.tsx:425,430`), while the controller acts on the current one. In a one-frame race the feel can differ from the act. The act itself is unaffected.
+- `animateNextLayout` in the subscribe callback animates the whole next commit, transcript growth included, whenever a compose row moves. This may fight follow-scroll (B5). Unverified on a device.
+
+**Unverified:** every restyle in these slices is unseen on a device (`_unlock` failed on iOS 26; no screenshots). The visual gate remains merge-blocking, as the Execution says. The executor stopped after the same `_unlock` failure appeared twice and reported it honestly (good). This reviewer is the same model family as the Execution's signature, so shared blind spots are possible.
+
+*— claude-opus-5-5, 2026-11-15*
+
+
+#### Owner request (2026-11-15 02:35): test photo ATTACHMENTS end to end — part of the final check of slices 5+6
+
+Send a photo from the app (simulator: a Photos sample image via the composer's image button / the 13c photo input) to a session on a local `tentacle serve` that runs the **DEFAULT profile — the local qwen3.8 model, which has vision** (NOT `--profile deepseek`: DeepSeek has no vision and the daemon answers "images are off"). Screenshot the composer with the attached thumbnail, the sent user row with the image, and the model's reply describing it (light + dark), into the final screenshot folder. If anything in the attachment path fails (picker, downscale, upload, the row, the model never seeing the image), it is a bug of this task: reproduce, fix with a red-first test, re-shoot.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+
+#### Owner bug B8 (2026-11-15 02:40, real iPhone 12 Pro, iOS 18.3.1, build c8b4dc3c)
+
+Attaching a photo shows "a message carries at most 5 photos" (refused) — the owner was attaching normally, well under 5. The message comes from `apps/mobile/src/compose-controller.ts:348` (`added.refused > 0`), with the caps in `compose-chips.ts:52/78`, `photo-input.ts:78`, `photo-source.ts:164` (`MAX_ATTACHMENTS_PER_MESSAGE = 5`, `packages/protocol/src/attachment.ts:29`). Suspects to PROVE with a red-first test: the refused count computed against the wrong list (e.g. picks counted twice, failed/old chips still counted, the picker's selection limit not set so iOS returns more than the room, or `pickRoom([])` vs the real chips). Fix it, then verify the full attachment path in the qwen3.8 (vision) test above.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+**B8 precise repro (owner, 02:45):** tap "Add photo" → "Photo library" → the error "a message carries at most 5 photos" appears IMMEDIATELY: the photo library never opens, no photo was selected, the composer had 0 photos. So the refusal is computed BEFORE/INSTEAD OF presenting the picker (e.g. a room of 0 from a wrong count, a selectionLimit of 0 making the picker refuse, a permission/launch failure mapped to "refused", or the picker result for a non-opened library treated as over-cap). Start from the tap handler for "Photo library" (photo-source.ts / photo-input.ts / compose-controller.ts pickRoom) on iOS 18.3.1.
+
+#### Owner visual approval (2026-11-15 10:35)
+
+The owner reviewed the 25 simulator screenshots of slices 5+6 (light/dark) and approved them ("vanno bene"), overriding the Fable gate verdict REVISE (round 2). Merged by the orchestrator on that approval.
+
+
+#### Owner bugs B9 + B10 (2026-11-15 11:03, real iPhone, build b97ff97b) — part of Slice 7
+
+Screenshot: `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/owner-shots/photo-row-1103.png`. The photo DID reach the daemon and the model (serve log: `media_message` with `IMG_4854.jpg`, Qwen3.8 described it correctly), but the app shows it wrong:
+- **B9 (ordering, HIGH):** the user's message with the photo ("Cosa vedi?") is rendered BELOW the assistant's reply to it — the transcript puts the `media_message` row after the reply (ordering by kind/arrival instead of the log order/seq?). Prove with a red-first test on the transcript projection (a `media_message` followed by the reply must render in log order) and fix.
+- **B10 (thumbnail):** the photo shows as a grey placeholder "[image: IMG_4854.jpg]" instead of the picture. Show the real thumbnail: the phone's own just-sent photo from the outbox/local cache at once, and for history/other devices fetch it from the daemon by attachment id (the existing attachment read path; size-capped, cached), with a loading and an error state; tap opens it full screen.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+## Review — Slice 7 (fresh context)
+
+**Verdict: PASS (scope: owner feedback #3, B7, B8). No HIGH finding in scope.** `git diff main...HEAD` (5815252b) changes only this doc: no code, so no §7 invariant is touched.
+
+**Premises:** `highlight.ts:208` decodes `&#x27;` — TRUE. `theme.ts:170` sets `MONO = "ui-monospace"` — TRUE. `code-block.ts:34` `inlineCodeLook` — TRUE. `session-menu.ts` exists — TRUE. B8: `compose-controller.ts:751` calls `pickFromLibrary(counted(chips))` — TRUE.
+
+**Gate:** touched tests (`code-block`, `session-menu`, `ui-shots-seed`, `compose-controller`): 55 pass, 0 fail. `bun run lint`: 1497 files, clean. `bun run typecheck` (root + mobile + relay): clean. I did not re-run the full `bun test`, because the diff is doc-only.
+
+**Mutation** (`.tentacle/tmp/mobile-ui-polish/review7/mut.ts`; each file was restored and byte-compared, and `git status` was clean afterwards):
+- M1 drops `&#x27;` → 2 fail (`code-block` B7, `ui-shots-seed` B7).
+- M2 `pickRoom(chips)` → 1 fail (`compose-controller` B8).
+
+Both tests are non-vacuous.
+
+**B8 on qwen3.8:** the owner's real-iPhone report at 11:03 (build b97ff97b, above) says the photo reached `serve` and Qwen3.8 described it. So B8 holds on a real device. Execution's "Decision needed" is now moot.
+
+**Findings (MEDIUM, doc only):**
+1. Line ~1491 says "nothing left to build". But B9 (HIGH, ordering) and B10 (thumbnail) are filed "part of Slice 7" at line ~1754, and they have no plan and no code. Slice 7 is therefore NOT closed. B9 and B10 need an Implementation and Execution of their own, followed by a new Review.
+2. Line ~1522: the commit `5815252b` reads "exec (deepseek)", but the section is signed `claude-opus-5-5`. §10 requires an honest signature, so one of the two is wrong.
+
+**Attacks tried:**
+- The diff hides code → no, the diff is doc-only.
+- B7 ordering with `&amp;#x27;` → already covered by the Slices 5–6 review.
+- The B8 test is vacuous → no, M2 makes it fail.
+- The flaky 1 fail (line ~1517) is unidentified. With a doc-only diff it cannot come from this slice.
+
+**Executor:** stopped correctly when it found the contradiction, and stated the unverified part honestly. Its model attribution is inconsistent (finding 2). Reviewer: same family as the signed executor, fresh context.
 
 *— claude-opus-5-5, 2026-11-15*

@@ -42,7 +42,7 @@ export interface WebSocketLike {
   addEventListener(type: "message", handler: (event: { data: unknown }) => void): void;
   addEventListener(type: "open", handler: () => void): void;
   addEventListener(type: "pong", handler: () => void): void;
-  addEventListener(type: "close", handler: () => void): void;
+  addEventListener(type: "close", handler: (event: unknown) => void): void;
   addEventListener(type: "error", handler: (event: unknown) => void): void;
 }
 

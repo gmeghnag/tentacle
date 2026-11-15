@@ -41,6 +41,7 @@ import {
   DEFAULT_TOOL_EXECUTION,
   DEFAULT_TOOL_MAX_PARALLEL,
   DEFAULT_TOOL_OUTPUT_RETENTION_DAYS,
+  DEFAULT_WORKLOAD_SHELL_TOOL,
   defaultWritableDirs,
 } from "./defaults.ts";
 import type { ResolvedConfig } from "./resolve.ts";
@@ -738,7 +739,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
   },
   "sessionHop.tool": {
     summary:
-      "Offer the agent `move_session`: it may propose moving this session to another target.",
+      "Offer the agent `move_session` (OFF by default): it may propose moving this session to another target.",
     kind: "leaf",
     type: "boolean",
     scope: "both",
@@ -747,10 +748,32 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     resolved: (c) => c.sessionHop.tool,
     sourceKey: "sessionHopTool",
     env: "TENTACLE_SESSION_HOP_TOOL",
-    sample: "off",
+    sample: "on",
     details:
-      "It only PROPOSES: the tool has no daemon-side effect, and nothing moves until you say yes to the laptop's own prompt (asked when the turn ends, never answered by auto-accept, never remembered). Offered only where a hop exists — the local worker and a pod daemon — and never to a sub-agent.",
-    example: "false",
+      "OFF unless you turn it on: with it off the only way to move is a `/move` you type. It only PROPOSES — the tool has no daemon-side effect, and nothing moves until the laptop's own prompt is answered (asked when the turn ends, never remembered). With `autoAccept` on, a model-proposed move is answered like any other tool, logged allow-once — EXCEPT a move toward local proposed from a pod or container, which always asks. Offered only where a hop exists — the local worker and a pod daemon — and never to a sub-agent.",
+    example: "true",
+  },
+  workloadShell: {
+    summary: "The agent may open a stateful `sh` on another workload (`workload_shell`).",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "workloadShell.tool": {
+    summary:
+      "Offer the agent `workload_shell`: a stateful, non-interactive `sh` on a pod or container.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_WORKLOAD_SHELL_TOOL,
+    resolved: (c) => c.workloadShell.tool,
+    sourceKey: "workloadShellTool",
+    env: "TENTACLE_WORKLOAD_SHELL_TOOL",
+    sample: "on",
+    details:
+      "It dials with YOUR kubeconfig / docker endpoint and runs commands on another workload, so it is OFF unless you turn it on. You are still asked before the first command on each target (and with `always` for the rest of the session). Offered only where tentacle runs on your own host — the local worker and `serve` — never to a pod daemon, which already has its own shell inside its workload.",
+    example: "true",
   },
   autoWake: {
     summary: "Start a continuation turn when a background job exits while idle.",
@@ -846,6 +869,135 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Unset: off — a compaction or a `context_reset` rewrites `<uid>.jsonl`, so the history it replaced is not kept (`--resume` shows the current context either way). On, the replaced segments stay in the file. A LAPTOP-ONLY setting: never carried to a pod.",
     example: "true",
   },
+  voice: {
+    summary: "Voice dictation in the local TUI on the Mac: speak instead of typing.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "voice.enabled": {
+    summary: "Whether Ctrl+R dictates at all.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => true,
+    details:
+      "Off: the key shows a one-line notice and the helper is never spawned (no mic is opened). A local input device of this Mac — never carried to a pod.",
+    example: "false",
+  },
+  "voice.key": {
+    summary: "The key that starts and finishes a dictation.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    default: () => "ctrl+r",
+    details:
+      "`ctrl+<letter>`, and it must be free in the TUI. Ctrl+R starts a dictation; while it is running the same key (or Enter) finishes it and Esc throws it away. Enter never sends.",
+    example: '"ctrl+r"',
+  },
+  "voice.language": {
+    summary: "The spoken language.",
+    kind: "leaf",
+    type: "enum",
+    values: ["auto", "it", "en"],
+    scope: "both",
+    carried: "no",
+    default: () => "auto",
+    details:
+      "`auto` lets the recogniser decide; `it`/`en` force one. Apple's recogniser works per locale, so `auto` follows the engine's detection and `it`/`en` pick the matching locale.",
+    example: '"it"',
+  },
+  "voice.engine": {
+    summary: "Which on-device recogniser transcribes the dictation.",
+    kind: "leaf",
+    type: "enum",
+    values: ["apple", "parakeet"],
+    scope: "both",
+    carried: "no",
+    default: () => "apple",
+    details:
+      "`apple` is macOS's built-in on-device recogniser: nothing to download, and on the V0 set it measured WER 0.082 / 79 ms p50. A language other than the Mac's own installs a small Apple asset on first use (8 s measured). `parakeet` needs a one-time `tentacle voice setup` (≈ 0.6 GB) and measured WER 0.027 / 50 ms. Speech never leaves the Mac either way.",
+    example: '"parakeet"',
+  },
+  "voice.autoStop": {
+    summary: "Finish the dictation on a pause instead of on the key.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => false,
+    details:
+      "Off by default: you end the dictation with the key, so a pause after a comma can never cut it off. On, a pause of `voice.autoStopSilenceMs` ends it. Either way a hard stop at `voice.maxSeconds` ends a forgotten dictation and its text IS inserted.",
+    example: "true",
+  },
+  "voice.autoStopSilenceMs": {
+    summary: "The pause that ends a dictation when `voice.autoStop` is on.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    default: () => 500,
+    details:
+      "Milliseconds, minimum 300 (a shorter floor sits inside the measured comma pauses, 96–224 ms on the V0 set, and truncates dictated text). 500 ms leaves margin over the longest comma pause measured.",
+    example: "800",
+  },
+  "voice.maxSeconds": {
+    summary: "The hard cap on one dictation.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    default: () => 300,
+    details:
+      "Seconds, minimum 10. Reached, the dictation finishes and its text is inserted with a notice — never dropped. 5 minutes of 16 kHz mono audio is about 19 MB.",
+    example: "120",
+  },
+  "voice.input": {
+    summary: "Which microphone the dictation captures from.",
+    kind: "leaf",
+    type: "enum",
+    values: ["default", "builtin"],
+    scope: "both",
+    carried: "no",
+    default: () => "default",
+    details:
+      "`default` follows the macOS input setting; `builtin` forces the built-in mic. With an AirPods mic the call profile (HFP) is negotiated, so other audio drops to call quality while dictating — `builtin` avoids that.",
+    example: '"builtin"',
+  },
+  "voice.voiceProcessing": {
+    summary:
+      "Apple's voice processing (echo cancellation, noise suppression, gain) on the capture.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => true,
+    details:
+      "On by default: it suppresses steady background noise (≈ 74 dB of AEC measured in V0). Off exists for measurement; it is not a quality improvement for normal use.",
+    example: "false",
+  },
+  "voice.modelsDir": {
+    summary: "Where the Parakeet models live.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details:
+      "Default `<configDir>/voice/models`. `tentacle voice setup` downloads there; the helper loads from there and nowhere else (it never downloads at run time).",
+    example: '"~/models/voice"',
+  },
+  "voice.helperPath": {
+    summary: "The voice helper binary, when it is not next to `tentacle`.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details:
+      "Searched first. Otherwise the TUI looks next to the running `tentacle` binary, then in `<configDir>/voice/bin/`. Not found: a notice naming the build command, never a silent no-op.",
+    example: '"/usr/local/bin/tentacle-voice"',
+  },
   relay: {
     summary: "The mobile relay a `serve` with paired devices dials out to.",
     kind: "section",
@@ -875,6 +1027,35 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "`wss://`, or `ws://` to a loopback host only (dev and tests) — the daemon's relay secret travels on the socket, so anything else refuses to start with the reason. The hosted relay is the default: a self-hosted one (`apps/relay`) is named here or with `serve --relay <url>`.",
     example: '"wss://relay.example"',
+  },
+  push: {
+    summary: "Push notifications for the paired phones, through the mobile relay.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "push.enabled": {
+    summary: "Whether this `serve` pushes notifications to its paired phones.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    // `serve` applies the default, as it does the relay's (`relayChoice`).
+    defaultText: "`true`",
+    details:
+      "On, a `serve` with paired phones notifies them through the mobile relay: a permission request nobody answers within `push.graceSeconds` (Time Sensitive), and a turn that ends while no client is attached. The content is sealed end-to-end to each phone, so Apple and the relay carry an opaque blob. Off, no registration is accepted and `device/push_register` answers `off`. It needs the relay: `--no-relay` / `relay.enabled: false` mean no push either (`relay-off`). A LAPTOP-ONLY setting: never carried to a pod.",
+    example: "false",
+  },
+  "push.graceSeconds": {
+    summary: "How long an unanswered permission request waits before a phone is pushed.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    defaultText: "`30`",
+    details:
+      "0 pushes at once; the maximum is 3600 (one hour). At the desk you answer and the phone stays silent: the timer is cancelled the moment the ask settles. Expressed as whole seconds; `serve --push-grace <seconds>` beats this key. Read by the pure rules module, so it is table-tested (`docs/feat/mobile-push.md` Design 1).",
+    example: "60",
   },
   mount: {
     summary: "What a docker/podman run hides from the container's workspace mount.",

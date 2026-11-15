@@ -34,6 +34,7 @@ import { type AppLog, type AppLogField, createAppLog, errorShape } from "./app-l
 import type { StoredComputer } from "./computers.ts";
 import { createForegroundGate } from "./foreground-gate.ts";
 import { sha256Hex } from "./hash.ts";
+import { phoneHooksTrust } from "./hooks-trust.ts";
 import { type LinkDiagnoser, createLinkDiagnoser } from "./link-diagnosis.ts";
 import type { RNWebSocketCtor } from "./rn-websocket.ts";
 import { rnWebSocketCtor } from "./rn-websocket.ts";
@@ -48,7 +49,15 @@ import { rnWebSocketCtor } from "./rn-websocket.ts";
  * so a second construction site cannot quietly forget it (AGENTS §7: one
  * session path, one set of options).
  */
-export const APP_CLIENT_OPTIONS = { sha256Bytes: sha256Hex } as const;
+export const APP_CLIENT_OPTIONS = {
+  sha256Bytes: sha256Hex,
+  // The phone reaches a `serve` on the user's own host and nothing else
+  // (docs/feat/mobile-relay.md: "Only a `serve` on the user's host has a device
+  // route"), so the session's auto-accept is SHARED with it — the same TRUST
+  // bit a `connect` TUI sets (docs/feat/session-auto-accept.md D4/D6). A pod is
+  // never reachable from here, and the bit fails closed anyway.
+  sharedAutoAccept: true,
+} as const;
 
 export interface OpenComputerDeps {
   /** React Native's global `WebSocket` (injected: this module imports no RN). */
@@ -102,6 +111,13 @@ export interface ComputerLink {
   readonly address: () => string;
   /** Holds the redial and drops the live socket while the app is in the background (iOS suspends JS). */
   suspend(): void;
+  /**
+   * Let ONE dial through while the app is suspended, for up to `ms`
+   * (docs/feat/mobile-notifications.md Design 4: a notification's Deny/Reply).
+   * The SAME gate the app's own suspend/resume drives — never a second one, or a
+   * background answer would dial around the gate that exists to bound it.
+   */
+  hold(ms: number): () => void;
   /** The app is active again: let the client redial (its own re-attach does the rest). */
   resume(): void;
   /**
@@ -311,6 +327,27 @@ export async function openComputer(
   const broker = createLinkBroker();
   const client = new RemoteClient(channel, broker, undefined, {
     ...APP_CLIENT_OPTIONS,
+    // Project hooks (docs/feat/serve-mcp.md S4): a phone turn in a project with
+    // hooks must be able to run them. The ask goes through THIS link's broker to
+    // a person, never auto-accepted, and nothing is stored here — the folder is
+    // on the computer (`serve-hooks-trust.ts` checks its own trust file first).
+    // It is per link because it needs the broker, so it is not in
+    // `APP_CLIENT_OPTIONS` (which carries only broker-free bits).
+    hooksTrust: phoneHooksTrust(broker),
+    // This phone's own label, so the daemon can stamp an ask's `askedOn` and an
+    // `auto_accept` update's `by` with it (docs/feat/session-auto-accept.md
+    // D7). The name this phone PAIRED under — what the computer lists it as, so
+    // the label matches on both ends (a record an older build wrote has none,
+    // and then this phone simply sends no label). `node:os` is NOT how this is
+    // read: the phone has no such module (Review round 1, HIGH 2).
+    hostLabel: () => computer.thisDeviceName,
+    // …and the handshake that carries it. The daemon reads `host` from
+    // `initialize` alone (picked once, `connection.ts:627`), so without a
+    // `clientInfo` the seam above never reaches the wire — D7's phone half. The
+    // `host` itself is NOT set here: `wireClientInfo` adds it from `hostLabel`,
+    // which is what keeps the trust bit the ONE gate (a `host` written here
+    // would ride an untrusted client's frame too).
+    clientInfo: { name: "tentacle-app", version: "0" },
     channelFactory: gate.dial,
     onError: (error) => {
       // P4/F16: a client error message is daemon text (an endpoint body, a frame,
@@ -330,6 +367,7 @@ export async function openComputer(
       address: () => current,
       suspend: () => gate.suspend(),
       resume: () => gate.resume(),
+      hold: (ms: number) => gate.hold(ms),
       // DETACH, never close (12a.2; see `leaveComputer`).
       close: () => leaveComputer(client),
     };

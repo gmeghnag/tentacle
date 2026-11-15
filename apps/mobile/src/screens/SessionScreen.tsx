@@ -15,9 +15,10 @@
  * `tool-<callId>-<status>`, `diff-<callId>`, `turn-running`, `turn-idle`,
  * `composer-input`, `composer-send`, `composer-stop`, `banner-<kind>`,
  * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`, `session-back`,
- * `jump-latest`.
+ * `jump-latest`, `session-menu`, `session-menu-sheet`, `session-menu-copy-last|copy-all`.
  */
 import { useIsFocused } from "@react-navigation/native";
+import * as Clipboard from "expo-clipboard";
 import { type ComponentRef, type JSX, useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -36,14 +37,19 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { chatStatus } from "../chat-header.ts";
+import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
 import { type Follow, contentGrew, initialFollow, jumpPill, jumped, scrolled } from "../follow.ts";
+import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
+import { playHaptic } from "../haptics.ts";
 import { linkPrompt } from "../links.ts";
+import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
 import { dictationLocale } from "../speech-locale.ts";
 import { SPEECH_PORT } from "../speech-native-expo.ts";
 import { DENSE_FONT_SCALE, type Palette, typography } from "../theme.ts";
 import type { Row } from "../transcript-rows.ts";
+import { ActionSheet } from "../ui/ActionSheet.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { Composer } from "../ui/Composer.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
@@ -51,6 +57,7 @@ import { GlassButton } from "../ui/GlassButton.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
+import { animateNextLayout } from "../ui/animate.ts";
 import {
   type VoiceController,
   type VoiceState,
@@ -59,6 +66,8 @@ import {
 import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
 import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
+import { RenameSheet } from "./RenameSheet.tsx";
+import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
 import { TranscriptRow } from "./transcript/TranscriptRow.tsx";
@@ -107,7 +116,16 @@ export function SessionScreen({
   // Unmount: `leave()` DETACHES — the session keeps running for every device
   // (decision 4, F18) — and only then release the requester and the listeners.
   useEffect(() => {
-    const unsubscribe = controller.subscribe(setState);
+    // A queue/outbox row arriving, leaving or changing state eases in (Slice 6);
+    // a streamed token alone never animates (`composeRowsMoved`).
+    let shown = controller.state().compose;
+    const unsubscribe = controller.subscribe((next) => {
+      if (composeRowsMoved(shown, next.compose)) {
+        animateNextLayout();
+      }
+      shown = next.compose;
+      setState(next);
+    });
     void controller.open();
     return () => {
       unsubscribe();
@@ -281,6 +299,23 @@ export function SessionScreen({
     running: state.view.composer.running,
     closed: state.transcript.closed,
   });
+  // A turn that ends (own or another device's) taps the hand once (Owner Q4).
+  const wasRunning = useRef(state.view.composer.running);
+  useEffect(() => {
+    playHaptic(turnEndHaptic(wasRunning.current, state.view.composer.running));
+    wasRunning.current = state.view.composer.running;
+  }, [state.view.composer.running]);
+  // The header's "…" menu (owner feedback #3 + Session info): it opens with the
+  // sheet's read, then the phone-local copy actions.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menu = menuOpen ? sessionMenu(rows) : [];
+  // Session info (docs/feat/mobile-session-info.md): the sheet, and which row the
+  // person expanded. Every value it draws is decided in `session-info.ts`.
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const info = state.info;
+  // Owner decision 5: tapping the TITLE renames it (the field is the screen's).
+  const renaming = state.renaming;
   // The decision sheet's own state (which item the person tapped, and why).
   const [deciding, setDeciding] = useState<string | null>(null);
   const decision =
@@ -300,7 +335,9 @@ export function SessionScreen({
         <ScreenHeader
           palette={palette}
           variant="compact"
-          title={title}
+          title={state.view.title}
+          onTitlePress={() => controller.beginRename()}
+          titleTestID="session-title"
           left={
             onBack === undefined ? undefined : (
               <GlassButton
@@ -312,15 +349,55 @@ export function SessionScreen({
               />
             )
           }
+          right={
+            <GlassButton
+              palette={palette}
+              testID="session-menu"
+              icon="ellipsis"
+              accessibilityLabel="Session menu"
+              onPress={() => setMenuOpen(true)}
+            />
+          }
           subtitle={
-            <View style={styles.status} accessibilityLabel={status.text}>
-              <StatusDot palette={palette} tone={status.tone} size={6} />
-              <Text
-                maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                style={[typography.caption, { color: palette.sec }]}
-              >
-                {status.text}
-              </Text>
+            <View testID="session-header-status" style={styles.headerLines}>
+              <View style={styles.status} accessibilityLabel={status.text}>
+                <StatusDot palette={palette} tone={status.tone} size={6} />
+                <Text
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  numberOfLines={1}
+                  style={[typography.caption, { color: palette.sec }]}
+                >
+                  {status.text}
+                </Text>
+                {state.view.headerModel === null ? null : (
+                  <Text
+                    testID="session-header-model"
+                    maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                    numberOfLines={1}
+                    style={[typography.caption, styles.headerModel, { color: palette.sec }]}
+                  >
+                    {`· ${state.view.headerModel}`}
+                  </Text>
+                )}
+              </View>
+              {/* Owner decision 4: a thin bar ONLY, live from the measured
+                  fill — no percentage text in the header. */}
+              {state.view.headerContext === null ? null : (
+                <View
+                  testID="session-header-context"
+                  style={[styles.contextBar, { backgroundColor: palette.sep }]}
+                >
+                  <View
+                    style={{
+                      width: `${state.view.headerContext.percent}%`,
+                      height: "100%",
+                      borderRadius: 1,
+                      backgroundColor:
+                        state.view.headerContext.percent >= 80 ? palette.orange : palette.accent,
+                    }}
+                  />
+                </View>
+              )}
             </View>
           }
         />
@@ -510,12 +587,14 @@ export function SessionScreen({
           // While dictating, Return/Send finalizes first and dictation sends (F8).
           onReturn={() => {
             setFollowState(jumped());
+            playHaptic(pressHaptic(state.view.composer.action, "return"));
             if (voice?.send("return") !== true) {
               controller.pressReturn();
             }
           }}
           onPress={() => {
             setFollowState(jumped());
+            playHaptic(pressHaptic(state.view.composer.action, "button"));
             if (voice?.send("press") !== true) {
               controller.press();
             }
@@ -552,6 +631,57 @@ export function SessionScreen({
           onEdit={() => void controller.outbox("edit", deciding ?? "")}
           onClose={() => setDeciding(null)}
         />
+        <ActionSheet
+          palette={palette}
+          visible={menuOpen}
+          testID="session-menu-sheet"
+          cancelTestID="session-menu-cancel"
+          message={menu.every((action) => action.id === "info") ? "Nothing to copy yet" : undefined}
+          actions={menu.map((action) => ({
+            label: action.label,
+            testID: `session-menu-${action.id}`,
+            onPress: () => {
+              setMenuOpen(false);
+              if (action.id === "info") {
+                // A READ, never a copy: it opens the sheet and starts the pulls.
+                setInfoOpen(true);
+                void controller.openInfo();
+                return;
+              }
+              void Clipboard.setStringAsync(action.text).then(
+                () => playHaptic("success"),
+                () => undefined,
+              );
+            },
+          }))}
+          onCancel={() => setMenuOpen(false)}
+        />
+        {info === null ? null : (
+          <SessionInfoSheet
+            palette={palette}
+            visible={infoOpen}
+            view={info.view}
+            autoAcceptOn={controller.autoAcceptOn()}
+            autoAcceptError={info.autoAcceptError}
+            onAutoAccept={(on) => void controller.setAutoAccept(on)}
+            onRefresh={() => void controller.refreshInfo()}
+            onRetry={() => void controller.refreshInfo()}
+            expanded={expanded}
+            onExpand={setExpanded}
+            onClose={() => {
+              setInfoOpen(false);
+              setExpanded(null);
+              controller.closeInfo();
+            }}
+          />
+        )}
+        <RenameSheet
+          palette={palette}
+          state={renaming}
+          onChange={(text) => controller.setRenameText(text)}
+          onSave={() => void controller.submitRename()}
+          onCancel={() => controller.cancelRename()}
+        />
       </KeyboardAvoidingView>
     </View>
   );
@@ -562,6 +692,9 @@ const styles = StyleSheet.create({
   list: { paddingTop: 8, paddingBottom: 16 },
   emptyList: { flexGrow: 1, justifyContent: "center" },
   status: { flexDirection: "row", alignItems: "center", gap: 5 },
+  headerLines: { alignItems: "center", gap: 4 },
+  headerModel: { flexShrink: 1 },
+  contextBar: { width: 64, height: 2, borderRadius: 1, overflow: "hidden" },
   jump: {
     position: "absolute",
     alignSelf: "center",
@@ -578,6 +711,16 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
   },
   notice: { paddingHorizontal: 16, paddingBottom: 6 },
-  // The turn observable: on screen (XCUITest sees it), takes no room.
-  observable: { width: 0, height: 0, fontSize: 0 },
+  // The turn observable: on screen (XCUITest sees it), takes no room. 1×1 and
+  // absolute, not 0×0: iOS 26 drops an empty-frame element from the
+  // accessibility tree, so `turn-idle` vanished (slice 6 walk, flows 23/24).
+  observable: {
+    position: "absolute",
+    left: 0,
+    bottom: 0,
+    width: 1,
+    height: 1,
+    fontSize: 1,
+    color: "transparent",
+  },
 });

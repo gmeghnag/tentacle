@@ -22,7 +22,7 @@
  */
 import type { DuplexChannel } from "@tentacle/transport";
 import { type AuthorizeVerdict, noiseResponder, systemRandom } from "@tentacle/transport/noise";
-import { Connection, type ConnectionPrincipal } from "./connection.ts";
+import { Connection, type ConnectionPrincipal, type HooksTrustPrecheck } from "./connection.ts";
 import type { DeviceAllow, DeviceAuthority, DeviceClose } from "./device-authority.ts";
 import { hasLivePairing, touchSeen } from "./device-store.ts";
 import { PairHandler } from "./pairing-handler.ts";
@@ -49,6 +49,11 @@ export interface AcceptDeviceDeps {
   /** One line per handshake outcome, for the operator. */
   readonly onAudit?: (line: string) => void;
   readonly maxFrameBytes?: number;
+  /**
+   * The host's own project-hooks answer, before the prompting client is asked
+   * (docs/feat/serve-mcp.md S4): a phone turn asks the HOST's trust first.
+   */
+  readonly hooksTrustPrecheck?: HooksTrustPrecheck;
   /** How often a pairing-only connection re-checks its window (`PAIRING_CHECK_MS`). */
   readonly pairingCheckMs?: number;
   /**
@@ -130,6 +135,15 @@ export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): De
     if (built?.id !== undefined) {
       authority.unregister(built.id, built.handle);
     }
+    // The caller IS the connection's transport, and this is its one teardown
+    // (docs/feat/mobile-push.md P7/F17): the relay leg's socket close calls
+    // exactly this `release`, and the DIRECT route's socket close calls it via
+    // the ws-server. Without closing here, a phone that goes away on the relay
+    // path leaves its `Connection` open — its session keeps counting an
+    // attachment that is gone, so `recheckAsks` never re-decides and a phone
+    // locked mid-grace is never pushed to (F17 inverts). `Connection.close()`
+    // is idempotent and drops every attachment, which is what `detach` needs.
+    built?.connection.close();
   };
   noiseResponder(channel, {
     staticKey: identity,
@@ -172,6 +186,7 @@ export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): De
       const connection = new Connection(secure, deps.sessionHost, deps.onError, {
         maxFrameBytes: deps.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
         principal,
+        ...(deps.hooksTrustPrecheck ? { hooksTrustPrecheck: deps.hooksTrustPrecheck } : {}),
       });
       // ONE handle for this connection: the authority holds it for a revoke,
       // and every teardown path unregisters this same object, so a revoke's

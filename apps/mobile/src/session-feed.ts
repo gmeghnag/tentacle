@@ -68,6 +68,15 @@ export interface SessionFeedDeps {
   readonly put: (next: State) => void;
   /** The foreign turn now stoppable (the composer's Stop), or null when none runs. */
   readonly setForeign: (turn: ForeignTurn | null) => void;
+  /**
+   * The history was REPLACED (a `/clear`, a resync, a `history_reset`): what the
+   * fold just dropped took the measured context fill with it, and the figure the
+   * daemon counted at open described that same chat — so it must be asked
+   * again, not left on the header's bar (the TUI's `forgetContextFill` +
+   * `askContext`, `packages/tui/src/useSessionLink.ts:350-353`; Review round 1,
+   * MEDIUM 2). The fold owns the RULE, the caller owns the request.
+   */
+  readonly onHistoryReplaced?: () => void;
 }
 
 /**
@@ -150,6 +159,10 @@ function foldStream(
           reason = event.reason;
         }
         deps.put(apply(deps.state(), event as TranscriptInput));
+        if (event.type === "history_reset") {
+          // The reset REPLACED the history mid-turn: its fill is gone with it.
+          deps.onHistoryReplaced?.();
+        }
       }
     } catch (error) {
       // The stream threw: its outcome can never arrive (`remote-session.ts`
@@ -175,6 +188,13 @@ export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
               reason: activity.reason,
             }),
           );
+          // `context_reset` APPENDS (the chat those figures described is still
+          // on screen) and `compact` keeps it, saying so once. Anything else
+          // (null, `clear`) REPLACED what was shown, so the context figure is
+          // about a conversation that no longer exists.
+          if (activity.reason === null || activity.reason === "clear") {
+            deps.onHistoryReplaced?.();
+          }
           return;
         case "closed":
           deps.put(apply(deps.state(), { type: "closed", reason: activity.reason }));

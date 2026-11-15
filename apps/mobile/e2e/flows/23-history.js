@@ -16,9 +16,13 @@ if (typeof history.assistant !== "string" || !history.assistant.includes("mock m
   throw new Error(`the daemon has no mock answer: ${JSON.stringify(history.assistant)}`);
 }
 const prompts = json(http.get(`http://${MAESTRO_HOOKS}/model-prompts`).body).prompts;
+// The daemon's context awareness appends "\n\n[context: …]" to the message the
+// model sees, so a prompt is matched on what the person typed, not verbatim.
 for (const sent of ["SLOW keyboard button", "SLOW keyboard return"]) {
-  if (!prompts.includes(sent)) {
-    throw new Error(`the mock model was never asked ${JSON.stringify(sent)}`);
+  if (!prompts.some((p) => p === sent || p.startsWith(`${sent}\n`))) {
+    throw new Error(
+      `the mock model was never asked ${JSON.stringify(sent)} (asked: ${JSON.stringify(prompts)})`,
+    );
   }
 }
 output.history = JSON.stringify(history);

@@ -25,9 +25,12 @@ import type {
 } from "@tentacle/core";
 import {
   type DaemonDiscovery,
+  type DevicePushRegisterParams,
+  type DevicePushRegisterResult,
   JsonRpcErrorCode,
   type McpServerStatus,
   type OpenParams,
+  type PushRegisterStatus,
   type SessionContextResult,
   type SessionListParams,
   type SessionListResult,
@@ -47,6 +50,7 @@ import {
   HostedSession,
   type RestoredSessionState,
   type SessionLogOptions,
+  type SessionPushObserver,
   type TurnErrorPolicy,
 } from "./hosted-session.ts";
 import { toSessionSkills } from "./mapping.ts";
@@ -56,6 +60,7 @@ import {
   reconcileOnReload,
   restoredActivity,
 } from "./persisted-session.ts";
+import { forgetPushRegistration, writePushRegistration } from "./push-store.ts";
 import { type SessionSummary, toSessionList } from "./session-list.ts";
 import type { ArchivedMeta, SessionPersister } from "./session-persister.ts";
 import { type Expired, type ReapPolicy, selectEvictable, selectExpired } from "./session-reaper.ts";
@@ -224,12 +229,29 @@ export interface SessionHostOptions extends TurnErrorPolicy {
   /** One line per refused create, naming the limit and the count (decision D6). */
   readonly onAudit?: (line: string) => void;
   /**
+   * `serve` only (docs/feat/mobile-push.md Design 5, slice P7): the push
+   * observer every session is given, and the facts a push message needs. Absent
+   * on a pod daemon and the in-process worker — no observer, no push, and no
+   * token ever seen there (AGENTS §7). It is NOT an attachment (see
+   * `SessionPushObserver`).
+   */
+  readonly push?: PushObserverOptions;
+  /**
    * `serve` only: every session writes itself here, `close` (and the reaper,
    * the detached cap) keeps it ARCHIVED, `delete` removes its file, `restore`
    * reloads one. Pod daemons and the worker never pass it: there, a close
    * forgets the session.
    */
   readonly persister?: SessionPersister;
+  /**
+   * This daemon SHARES the session's auto-accept (`session/set_auto_accept`,
+   * `OpenResult.autoAccept`; docs/feat/session-auto-accept.md D1/D3): the
+   * worker and a trusted `serve` say yes. Absent (a pod daemon) → every open
+   * omits `autoAccept`, so no laptop client reads or sets it there: a pod can
+   * neither turn auto-accept on nor report it (AGENTS §7, "a pod is not
+   * trusted").
+   */
+  readonly sharedAutoAccept?: boolean;
   /**
    * `serve` only: this computer's live sibling daemons and their addresses
    * (`daemon/discover`, docs/feat/sibling-discovery.md). Absent (a pod daemon,
@@ -300,8 +322,23 @@ export interface SessionHostOptions extends TurnErrorPolicy {
   readonly wakeOnJobExit?: boolean;
 }
 
-/** What `open` did: the session, whether it was built now, and the replay verdict. */
-export interface OpenOutcome {
+/**
+ * The push observer a `serve` hands every session (docs/feat/mobile-push.md
+ * Design 5, slice P7). `PushNotifier` is the one implementation, and the two
+ * other members are what `device/push_register` needs to answer honestly:
+ * WHERE a registration is written, and WHAT this daemon can deliver.
+ */
+export interface PushObserverOptions {
+  readonly observer: SessionPushObserver;
+  /** `<configDir>/devices/push/…` (P5's store) — the registration this RPC writes. */
+  readonly storeDir: string;
+  /** The grace a `device/push_register` result reports (`push.graceSeconds`). */
+  readonly graceSeconds: number;
+  /** What to say about delivery right now (`on` / `relay-off` / `relay-no-push`); `enabled` is this source's own. */
+  readonly status: () => Exclude<PushRegisterStatus, "off">;
+}
+
+/** What `open` did: the session, whether it was built now, and the replay verdict. */ export interface OpenOutcome {
   readonly hosted: HostedSession;
   readonly created: boolean;
   readonly resync: boolean;
@@ -385,6 +422,14 @@ export class SessionHost {
    */
   get images(): ImagePolicy | undefined {
     return this.opts.images;
+  }
+  /**
+   * Whether this daemon SHARES the session's auto-accept (docs/feat/session-auto-accept.md
+   * D1): the worker and a trusted `serve`. A pod daemon never says it, so
+   * `session/open` omits `autoAccept` and no laptop client reads or sets it there.
+   */
+  get sharedAutoAccept(): boolean {
+    return this.opts.sharedAutoAccept === true;
   }
   private readonly sessions = new Map<string, HostedSession>();
   /** ARCHIVED sessions (a persisting host only). An id is in ONE of the two maps, never both. */
@@ -495,7 +540,59 @@ export class SessionHost {
     }
     return source;
   }
-  /** This daemon's MCP servers and their live state; empty when it runs none. */
+  /**
+   * `device/push_register` (docs/feat/mobile-push.md Design 3/5, slice P7):
+   * store one device's registration and answer what this daemon can deliver.
+   *
+   * `MethodNotFound` when this daemon has no push at all (a pod daemon, the
+   * worker, or `push.enabled: false`): an older phone then says "update
+   * tentacle on <computer>" and never retries in a loop (F16), and a pod never
+   * holds a token (AGENTS §7).
+   *
+   * Synchronous: one atomic rename, no lock around this connection (AGENTS §7
+   * "don't serialize the RPC peer"). A failed write is an RPC error
+   * (`push-store-failed`), so the app can say "could not enable notifications"
+   * and retry on the next connect — never half a record (F25).
+   */
+  registerPush(deviceId: string, params: DevicePushRegisterParams): DevicePushRegisterResult {
+    const push = this.opts.push;
+    if (!push) {
+      throw new RpcError(JsonRpcErrorCode.MethodNotFound, "push is not available on this daemon");
+    }
+    const written = writePushRegistration(push.storeDir, {
+      deviceId,
+      token: params.token,
+      env: params.env,
+      key: params.key,
+      registeredAt: this.now(),
+    });
+    if (!written.ok) {
+      throw new RpcError(
+        DomainErrorCode.PushStoreFailed,
+        `cannot store this device's push registration: ${written.reason}`,
+      );
+    }
+    return { graceSeconds: push.graceSeconds, push: push.status() };
+  }
+
+  /**
+   * `device/push_unregister`: this device asked to stop being notified (the
+   * Settings toggle). Removes its registration, and says so even when there was
+   * none — an unregister is idempotent, and an `ENOENT` is success.
+   */
+  unregisterPush(deviceId: string): void {
+    const push = this.opts.push;
+    if (!push) {
+      throw new RpcError(JsonRpcErrorCode.MethodNotFound, "push is not available on this daemon");
+    }
+    // The device's OWN instruction, so there is no token to compare against (a
+    // `gone` from Apple is the compare-and-delete path, F11).
+    forgetPushRegistration(push.storeDir, deviceId);
+  }
+
+  /**
+   * This daemon's MCP servers and their live state; empty when it runs none.
+   */
   mcpStatus(): Promise<readonly McpServerStatus[]> {
     return this.opts.mcpStatus?.() ?? Promise.resolve([]);
   }
@@ -632,7 +729,12 @@ export class SessionHost {
       // One step: out of the archive, live, attached (the restart path, mid-life).
       this.archived.delete(entry.id);
       // A rename (or a reclaim) of the archived session wins over the record it was read from.
-      const hosted = this.restore(withoutReclaimed(record, entry.reclaimed), entry.renamed);
+      // A reopen of an ARCHIVED session starts auto-accept OFF (owner Q3): an old
+      // switch must not silently come back on, so the record's value is dropped here.
+      const hosted = this.restore(
+        { ...withoutReclaimed(record, entry.reclaimed), autoAccept: undefined },
+        entry.renamed,
+      );
       const { resync, epoch } = hosted.attach(attachment, params.since);
       return { hosted, created: false, resync, epoch };
     }
@@ -660,6 +762,9 @@ export class SessionHost {
       attachment.hop === true ? (true as const) : undefined,
     );
     this.sessions.set(id, host);
+    // Only a session this open CREATES takes the seed (`autoAccept`, exactly like
+    // `settings`): a `/clear` fork and a hop target carry the value this way.
+    host.autoAccept = params.autoAccept === true;
     const { epoch } = host.attach(attachment);
     return { hosted: host, created: true, resync: false, epoch };
   }
@@ -955,6 +1060,8 @@ export class SessionHost {
       returned: reconciled.returned,
       ...(record.head !== undefined ? { head: record.head } : {}),
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
+      // A restart KEEPS the session's auto-accept (owner Q3).
+      ...(record.autoAccept === true ? { autoAccept: true } : {}),
       // Paired: the log continues the lineage the files hold (§5); else a new one.
       ...(record.paired ? { log: { head: record.logHead, logged: record.logged } } : {}),
     });
@@ -1153,6 +1260,10 @@ export class SessionHost {
     hosted.grants = grants;
     hosted.workloadShells = workloadShells;
     hosted.hop = hop === true;
+    // The push observer (docs/feat/mobile-push.md P7): `serve` with push on
+    // only. A pod daemon and the worker pass no `push`, so nothing observes
+    // there — a pod never sees a token and never pushes (AGENTS §7).
+    hosted.pushObserver = this.opts.push?.observer;
     return hosted;
   }
 

@@ -98,4 +98,12 @@ export type KeyEffect =
   | { readonly kind: "pasteClipboard" }
   | { readonly kind: "submit"; readonly text: string }
   /** Backspace on an empty input with chips: drop the last chip. */
-  | { readonly kind: "removeLastChip" };
+  | { readonly kind: "removeLastChip" }
+  // --- voice dictation (docs/feat/voice-dictation.md). The key layer only
+  // DECIDES; `useVoice` owns the child and the reducer does the rest.
+  /** Start a dictation, or finish the running one (one key, two meanings). */
+  | { readonly kind: "voiceToggle" }
+  /** Enter while dictating: transcribe and insert. Never sends. */
+  | { readonly kind: "voiceFinish" }
+  /** Esc while dictating: discard it and leave the agent's turn alone. */
+  | { readonly kind: "voiceCancel" };

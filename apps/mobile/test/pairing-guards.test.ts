@@ -84,6 +84,45 @@ describe("no build-time computer, no build-time token (F-H4)", () => {
  * 11b.2's own seams, guarded the same way (a native import and a plist entry are
  * both invisible to the unit tests that would otherwise cover them).
  */
+describe("the push entitlements and plugin are in app.json (P9: a plist entry is invisible to unit tests)", () => {
+  const config = JSON.parse(readFileSync(join(APP, "app.json"), "utf8")) as {
+    expo?: {
+      ios?: {
+        entitlements?: Record<string, unknown>;
+      };
+      plugins?: readonly unknown[];
+    };
+  };
+
+  test("the expo-notifications plugin is registered, and it writes `aps-environment` (mutation: drop it → red)", () => {
+    // A missing plugin is a build WITHOUT the push entitlement: notifications
+    // would simply never arrive, and nothing in JS could tell.
+    const plugin = (config.expo?.plugins ?? []).find(
+      (entry) => Array.isArray(entry) && entry[0] === "expo-notifications",
+    ) as readonly [string, { readonly mode?: string }] | undefined;
+    expect(plugin).toBeDefined();
+    // A development build is signed with the SANDBOX entitlement, which is what
+    // makes `pushEnvironmentOf("development") === "sandbox"` true at runtime
+    // (P0(d): the plugin defaults to `development`, but says so explicitly here).
+    expect(plugin?.[1].mode).toBe("development");
+  });
+
+  test("the shared keychain access group and the Time Sensitive entitlement are declared", () => {
+    const entitlements = config.expo?.ios?.entitlements ?? {};
+    // Task 17's extension must read the push key while the app is not running.
+    // TWO groups, the app's own FIRST (plan C1, fix round 1 #3): the separate
+    // `...push` group is the only one the extension may hold, so an item with no
+    // group (`deviceKey`) can never land in it.
+    expect(entitlements["keychain-access-groups"]).toEqual([
+      "$(AppIdentifierPrefix)so.tentacle.app",
+      "$(AppIdentifierPrefix)so.tentacle.app.push",
+    ]);
+    // Owner Q4: an `ask` is Time Sensitive, which the extension raises after
+    // decrypting; the entitlement is what allows that at all.
+    expect(entitlements["com.apple.developer.usernotifications.time-sensitive"]).toBe(true);
+  });
+});
+
 describe("the camera stays behind ONE seam, and the scheme is registered (11b.2)", () => {
   test("only the wiring file imports expo-camera (every other module stays testable)", () => {
     const importers = shippedSources().filter((path) =>

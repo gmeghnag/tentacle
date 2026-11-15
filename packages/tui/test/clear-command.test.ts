@@ -11,19 +11,12 @@ import {
 
 // docs/feat/clear-keeps-jobs.md — T17: the pure decision behind `/clear`.
 
-const base = { canClear: true, running: false, ownTurn: true, compacting: false, clearing: false };
+const base = { running: false, ownTurn: true, compacting: false, clearing: false };
 const step = (over: Partial<typeof base>): ClearStep => clearCommandStep({ ...base, ...over });
 
 describe("clearCommandStep", () => {
   test("idle: clear", () => {
     expect(step({})).toBe("clear");
-  });
-
-  test("a session without `clear` takes the legacy path, whatever else is going on", () => {
-    expect(step({ canClear: false })).toBe("legacy");
-    expect(step({ canClear: false, running: true, compacting: true, clearing: true })).toBe(
-      "legacy",
-    );
   });
 
   test("a clear already in flight is busy; a compaction blocks it", () => {

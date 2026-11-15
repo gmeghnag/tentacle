@@ -240,6 +240,11 @@ export function reduce(state: PairingState, action: PairingAction): PairingState
         return state;
       }
       const text = textOf(state);
+      // An empty field has nothing to submit: its "Continue" is drawn disabled
+      // (P1), so a tap on it must not turn into a "not a pairing line" error.
+      if (text.trim() === "") {
+        return state;
+      }
       const parsed = parsePairingPayload(text);
       if (!parsed.ok) {
         return { name: "intake", text, failure: payloadFailure(parsed.reason) };
@@ -326,9 +331,30 @@ export interface PairingView {
   readonly computerName?: string;
   /** The text field's value (always shown at `intake`). */
   readonly text: string;
+  /** How the paste field's "Continue" reads for `text` (`pasteSubmit`). */
+  readonly submit: PasteSubmit;
+}
+
+/**
+ * The paste field's "Continue" (visual review 1, P1): `empty` — nothing to
+ * submit, drawn disabled and inert; `unparsed` — text that is not a pairing
+ * line, still pressable so the person learns WHY (the payload failure), but not
+ * drawn as the ready action; `ready` — a line that parses, the tinted action.
+ */
+export type PasteSubmit = "empty" | "unparsed" | "ready";
+
+export function pasteSubmit(text: string): PasteSubmit {
+  if (text.trim() === "") {
+    return "empty";
+  }
+  return parsePairingPayload(text).ok ? "ready" : "unparsed";
 }
 
 export function pairingView(state: PairingState): PairingView {
+  return { ...stageView(state), submit: pasteSubmit(textOf(state)) };
+}
+
+function stageView(state: PairingState): Omit<PairingView, "submit"> {
   switch (state.name) {
     case "intake":
       return {
@@ -377,6 +403,18 @@ export interface RunPairingOptions {
   readonly now?: () => number;
   /** Cancel: closing the channel in flight rejects `pairDevice` (P1/F-P9). */
   readonly signal?: AbortSignal;
+  /**
+   * The FIRST successful pairing's one extra step (docs/feat/mobile-push.md P9,
+   * decision 10: notifications are "asked only when needed and explained").
+   *
+   * Called AFTER the record is stored and the `done` action dispatched, and its
+   * result is IGNORED (`void`): a notification prompt is never a reason to fail
+   * a pairing that already succeeded, and the person may be looking at the OS
+   * sheet for as long as they like (Owner Q7). The decision of WHETHER to ask
+   * lives in `push-registration.ts`; this is only the call site, so a flow test
+   * can prove the order (stored → done → ask).
+   */
+  readonly onPaired?: (computerId: string) => void;
 }
 
 export type PairingOutcome =
@@ -435,6 +473,10 @@ export async function runPairing(options: RunPairingOptions): Promise<PairingOut
       computerKey: encodeBase64Url(payload.key),
       addresses: payload.addresses,
       deviceName,
+      // This phone's OWN label, as the computer will list it (`device/pair`'s
+      // `name`): the one string that matches on both ends, for an ask's "also
+      // asked on" and a flip's `by` (docs/feat/session-auto-accept.md D7).
+      thisDeviceName: deviceName,
       pairedAt: now(),
     };
     try {
@@ -444,6 +486,17 @@ export async function runPairing(options: RunPairingOptions): Promise<PairingOut
       return { ok: false };
     }
     dispatch({ type: "done", result });
+    // The first successful pairing's one extra step (P9): notifications are
+    // asked about HERE and nowhere else (decision 10). After `done`, so the
+    // screen is already moving on, and never awaited — a prompt is not part of
+    // the pairing's success. Guarded for the same reason: a hook that throws
+    // must not turn a stored computer into a `failed` card (the catch below is
+    // the PAIRING's, and this is no longer the pairing).
+    try {
+      options.onPaired?.(result.computer.id);
+    } catch {
+      // A notification prompt is never a reason to lose a paired computer.
+    }
     return { ok: true, computerId: result.computer.id };
   } catch (error) {
     if (options.signal?.aborted === true) {

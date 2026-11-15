@@ -12,6 +12,7 @@ export * from "./permission-router.ts";
 export * from "./queue.ts";
 export * from "./ws-channel.ts";
 export * from "./remote-client.ts";
+export * from "./auto-accept-link.ts";
 export * from "./remote-session.ts";
 export * from "./session-reducer.ts";
 export * from "./version-mismatch.ts";
