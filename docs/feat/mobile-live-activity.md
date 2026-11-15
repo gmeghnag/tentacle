@@ -63,14 +63,26 @@ deploy, which is the owner's step **D4** (planned in L12's runbook delta, never
 done by an executor). Apple console steps are **D4a**. No executor touches the
 server (142.132.169.22 / `relay.tentacle.so`), Apple's console, DNS or Caddy.
 
-**Repro (2026-11-14): the capability is missing.** On this branch (= `main` @
-`88f5a8f`), a search for
+**Repro (2026-11-14): the capability is missing.** On the base this branch was
+cut from (`88f5a8f9`), a search for
 `ActivityKit|LiveActivit|live_activity|liveactivity|NSSupportsLiveActivities|pushToStart`
 in `{packages,apps}/**/*.{ts,tsx,json,swift,js}` → **No files found**.
 `apps/mobile/app.json` has no `NSSupportsLiveActivities`, no extension target,
 no `apps/mobile/targets` / `apps/mobile/modules`. The executor re-runs the
 search on `main` after task 17 merged: then the push/NSE pieces exist, still no
 Live Activity.
+
+> **Branch state (corrected in fix round 1, 2026-11-15).** `88f5a8f9` is this
+> branch's **cut point**, not current `main`. Current `main` is `b44766f8`
+> (task 16 + task 17 merged) and this branch is **305 commits behind** it, so
+> none of the push stack the plan builds on exists here yet
+> (`.tentacle/tmp/mobile-live-activity/precondition-probe.txt`). The plan's
+> `file:line` citations were verified **correct at `88f5a8f9`** (23/23) and
+> re-mapped to `main`: task 16's push hook shifts every cited line in
+> `hosted-session.ts` by +2 … +235
+> (`.tentacle/tmp/mobile-live-activity/cite-map.txt`). **L0–L12 must not run on
+> this branch as it stands** — the base has to carry `main` first (the
+> orchestrator's `git merge-tree` is clean: no conflicts).
 
 ## Implementation
 
@@ -583,6 +595,186 @@ so a later round can tell "green because untouched" from "green after work". No
 changelog fragment was written, because there is no user-visible change to
 announce; no `protocol.d/` note, because no schema changed; `protocol.json` was
 not regenerated, because nothing it is derived from moved.
+
+### Citation re-check — plan correct at its own base, re-mapped to `main`
+
+*— claude-opus-5-5, 2026-11-15* (fix round 1, Review finding 1)
+
+Review round 1 asked for the plan's `file:line` citations to be re-checked
+against the base the branch would actually run on. Evidence:
+`.tentacle/tmp/mobile-live-activity/cite-check.ts` → `cite-map.txt`. It reads
+`git show <rev>:<file>` only (never the worktree, index or refs) and asserts two
+independent things per claim: the symbol really is at the plan's line **on
+`88f5a8f9`** (was the plan right when written?), and where that same symbol sits
+**on `b44766f8`** (what L0 must actually read).
+
+**Result: 23/23 citations were correct at `88f5a8f9`; 17 of them shifted on
+`main`.** So the plan was not wrong — it was written against the pre-task-16
+tree. Task 16's push hook (`emit` → `offerPush`) added ~139 lines above the
+fan-out point and ~235 above the turn machinery, which is why the old numbers
+point at unrelated code on `main` (the dangerous "line numbers line up" case the
+previous Execution flagged).
+
+| claim | plan line | on main | shift | correct at base? |
+|---|---|---|---|---|
+| emit fan-out | `1948` | `2087` | +139 | yes |
+| watchers.offer | `1962` | `2101` | +139 | yes |
+| turn_start (a) | `2081` | `2284` | +203 | yes |
+| turn_start (b) | `2280` | `2483` | +203 | yes |
+| eventToUpdate then emit | `2458` | `2693` | +235 | yes |
+| ask.shown (a) | `921` | `1028` | +107 | yes |
+| ask.shown (b) | `1032` | `1141` | +109 | yes |
+| settle() | `1136` | `1265` | +129 | yes |
+| finishTurn() | `2505` | `2740` | +235 | yes |
+| finishTurn call (a) | `2397` | `2632` | +235 | yes |
+| finishTurn call (b) | `2468` | `2703` | +235 | yes |
+| finishTurn call (c) | `2479` | `2714` | +235 | yes |
+| finishTurn call (d) | `3013` | `3248` | +235 | yes |
+| recheckAsks def | `1088` | `1217` | +129 | yes |
+| recheckAsks caller (a) | `1569` | `1704` | +135 | yes |
+| recheckAsks caller (b) | `1592` | `1731` | +139 | yes |
+| Attachment interface | `191` | `193` | +2 | yes |
+| no own decision (comment) | `30` | `30` | same | yes |
+| tool_call.title+status | `45` | `45` | same | yes |
+| turn_start.turnId | `242` | `242` | same | yes |
+| turn_end.stopReason+error | `257` | `257` | same | yes |
+| session_closed | `290` | `290` | same | yes |
+| session_title.title | `301` | `301` | same | yes |
+
+The six `same` rows are in `packages/protocol/src/updates.ts`, which task 16 did
+not touch. **For L0 onward: read the `on main` column, not the prose numbers** —
+the Implementation's inline citations stay as written (they are true of the plan's
+base) and this table is the translation. One genuinely wrong citation in the old
+text is corrected here: the `finishTurn` *end* was cited as a single line
+(`:2505`) but that is the **definition**; the four **call sites** are
+`:2397`, `:2468`, `:2479`, `:3013` (→ `:2632`, `:2703`, `:2714`, `:3248`).
+
+**Not verified here:** anything the citations resolve to but the plan reasons
+*about* — e.g. that an activity can never race a decision. That is L7's test, not
+a line-number check.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Scope: the two MEDIUM findings of Review round 1. No code, no slice (L0–L12
+remain 0 of 13).** The blocking condition the earlier round reported is
+unchanged and re-verified here; what this round fixes is what it could fix
+without standing to merge 305 commits — the doc's false base claim and its
+unpinned citations, plus the attribution the review flagged.
+
+**Re-verified first (the blocking premise still holds):** `git rev-list --count
+HEAD..main` → **305**; `main` = `b44766f8`. `push-seal.ts`,
+`push-notifier.ts`, `relay-link.ts`, `protocol/relay.ts` — all absent here,
+present on `main`. `grep -c onPushEvent packages/daemon/src/hosted-session.ts` →
+**0** here, **4** on `main` (`:397`, `:419`, `:2127`, `:2162`). So L0 would still
+be checked against code that is not on this branch. **New evidence for the
+orchestrator:** `git merge-tree --write-tree main HEAD` → exit 0, one tree
+(`7e9449be…`), **no conflicts** — bringing `main` in is mechanical, not a
+305-commit conflict-resolution job. Doing the merge is a commit, which an
+executor may not make, so it stays the orchestrator's step (option (a)/(b) of
+the earlier round — now known to be conflict-free in both shapes).
+
+**Finding 1 (MEDIUM) — FIXED. Two parts.**
+
+*(a) The false base claim.* `## Context`'s Repro said "On this branch (= `main`
+@ `88f5a8f`)" — false, and the source of the whole confusion: `88f5a8f9` is the
+**cut point**, while current `main` is `b44766f8`, 305 commits ahead. The Repro
+now says "the base this branch was cut from (`88f5a8f9`)", and a call-out under
+it states the real gap, the probe file, and that L0–L12 must not run on this
+branch as it stands.
+
+*(b) The citations.* The review asked to re-check the plan's line numbers
+against the base. Done mechanically, not by eye:
+`.tentacle/tmp/mobile-live-activity/cite-check.ts` (reads `git show <rev>:<file>`
+only — never the worktree, index or refs) asserts, per claim, that the symbol is
+really at the plan's line on `88f5a8f9` **and** finds the same symbol on
+`b44766f8`. Output `cite-map.txt`, pasted into the new **Citation re-check**
+section above.
+
+**Result: 23/23 citations were correct at `88f5a8f9`; 17 shifted on `main`**
+(task 16's push hook sits above the fan-out point: +139 at `emit`, +235 at the
+turn machinery; the six unchanged rows are in `protocol/updates.ts`, untouched
+by task 16). So the plan was **not wrong** — it was written against the
+pre-task-16 tree, which is exactly the distinction the review needed. The drift
+table is now the translation for L0 onward. One genuine error was found and
+corrected: the plan cited `finishTurn`'s end as `:2505`, which is the
+**definition**; the four call sites are `:2397`, `:2468`, `:2479`, `:3013`.
+
+**Finding 2 (MEDIUM) — FIXED as an honest record; the prior signature is not
+rewritten.** The review is right that it cannot be true: the earlier Execution
+is signed `claude-opus-5-5` inside commit `b5622d6a`, whose subject is
+`feat(mobile-live-activity): exec (deepseek)`. I looked for the deciding evidence
+before concluding — the prior executor's transcript is not in
+`~/.claude/projects` (70 project dirs searched for its own distinctive strings:
+no match), and the session store does not attribute that section; the Commit
+trailer is just the human owner (`Gabriel Meghnagi`), and `git` alone cannot say
+which model wrote a line. **So the truth is: the section's author is
+undetermined, and neither the title nor that signature is evidence.** Per §10 the
+signature's job is to make drift by model visible; forging it in either direction
+would destroy exactly that. I therefore left the earlier section byte-for-byte as
+the reviewer found it and record the conflict here instead: **treat that
+section's signature as unreliable, and its subject-line "deepseek" as unproven.**
+This round's own signature is real — it is the model id in this session's
+transcript (`claude-opus-5-5`), read from
+`~/.claude/projects/-Users-gmeghnag-tentacle/…jsonl`, not assumed.
+
+**Red before green (AGENTS §9).** Verifier:
+`.tentacle/tmp/mobile-live-activity/doc-guard.test.ts` — 6 assertions over the
+doc, whitespace-normalised so a wrapped sentence still matches.
+
+- **RED on the pre-fix doc** (`guard-RED.txt`): `1/6 passed`, exit 1 —
+  F1a, F1c, F1d, F2a, F2b all fail on the real assertions. (F1b passed
+  legitimately: the old text already mentioned `b44766f8`/305 in its Execution.)
+- **GREEN after** the edits: `6/6 passed`, exit 0 (`guard-GREEN.txt`).
+
+**Mutations (§9 non-vacuity — each re-broke the doc, observed the test fail,
+restored):**
+
+| # | mutation | expected | observed |
+|---|---|---|---|
+| M1 | restore the stale `(= `main` @ `88f5a8f`)` wording in the Repro | F1a red | **F1a FAIL** (5/6) |
+| M2 | rename the drift table's headers (`on main`/`shift` → `moved?`) | F1c red | **F1c FAIL** (3/6) |
+| M3 | soften the Result line to "the citations are approximate" | F1d red | **F1d FAIL** (3/6) |
+| M4 | forge this round's sign-off to `deepseek-v4` | F2a red | **F2a FAIL** (5/6) |
+| M5 | delete the Finding-2 attribution paragraph | F2b red | **F2b FAIL** (5/6) |
+
+**Four of the five mutations first PASSED — each assertion was rewritten to
+stop being vacuous.** That is the §2 trap ("proving a weaker correlated
+property") caught mechanically, and it is the most useful thing this round
+produced:
+
+| # | why it passed while the claim was deleted | fix |
+|---|---|---|
+| M3′ | F1d matched `/23\/23/` anywhere; the table header *"correct at base?"* satisfied its second branch | anchor on `**Result: 23/23 citations were correct at `88f5a8f9`` |
+| M4′ | F2a matched `*— claude-opus-5-5…*` anywhere in the section, so a sub-section's signature covered a forged sign-off | take the section's **first** signature, assert the id equals `claude-opus-5-5` |
+| M5′ | F2b matched `/deepseek/i`, which recurs in the mutation table itself | assert the substance: "undetermined" + "treat that section's signature as unreliable" |
+| M2′ | the "drift map" regex was satisfied by a header rename | anchor on the exact `\| claim \| plan line \| on main \| shift \|` header |
+
+F1a also needed scoping: an unscoped check tripped on this very section, which
+*quotes* the old wording to explain the fix — quoting is not the bug — so it now
+reads only the Context/Repro region (before `## Implementation`).
+
+**Drift from the Implementation: none — the Implementation did not run.** The
+one doc-level change beyond the findings: the `finishTurn` call-site correction
+above, which is a citation fact, not a design change.
+
+**Still PARTIAL, and why.** L0–L12: **0 of 13**. The precondition (task 16 + 17
+under this branch) is still unmet, exactly as the previous round reported; no
+slice can be executed or mutation-tested until the base carries `main`. Not
+verified here: any runtime behaviour of the plan — there is no code to observe.
+Environment note carried forward: only the iOS 26.5 simulator runtime is
+installed, so the Tests section's "iOS 18 and iOS 26" requirement still needs the
+iOS 18 runtime (plus D4a's Apple-console work) before L0 can pass.
+
+**Gate (measured, this round — final run on the finished tree):** `bunx tsc
+--noEmit` → exit 0 · `bun run lint` → "Checked 1292 files. No fixes applied", 0
+errors/warnings (baseline-clean, AGENTS §6) · `bun test` → **9317 pass, 3 skip, 0
+fail**, 9320 tests / 670 files, 370 s
+(the 3 skips are the three opt-in ones). This is a doc+scratch round, so green
+here means "the doc edits changed no code path", not "the feature works". No
+changelog fragment (no user-visible change), no `protocol.d/` note (no schema
+change), `protocol.json` untouched.
 
 ## Review
 
