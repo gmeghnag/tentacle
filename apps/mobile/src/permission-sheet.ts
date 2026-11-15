@@ -128,6 +128,15 @@ export interface PermissionSheetDeps {
    * (docs/feat/session-auto-accept.md D7). Absent → nothing is dropped.
    */
   readonly ownHost?: () => string | undefined;
+  /**
+   * The session's own-vs-foreign test — the WIDEST it offers
+   * (`RemoteSession.autoAcceptsTurn`), the same one a terminal feeds
+   * `autoApproves` (`autoAcceptTest`, docs/fix/autoaccept-wake-turns.md A5).
+   * Absent: a NAMED turn is this app's, and an ask with NO turn id is never
+   * auto-answered (docs/feat/session-auto-accept.md D4 — one rule on every
+   * device, and the terminal's is the stricter one).
+   */
+  readonly autoAcceptsTurn?: (turnId: string) => boolean;
 }
 
 /**
@@ -396,10 +405,12 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
     if (link === undefined || !link.shared() || !link.current()) {
       return false;
     }
-    // The phone's session is the only one it holds an id for: `ownsTurn` is the
-    // session's own-vs-foreign test, absent here (the router raises every ask
-    // of the session this app is on).
-    return autoApproves(req, ownRequest(options?.turnId, undefined));
+    // The session's own-turn test, or — with none wired — "a NAMED turn is this
+    // app's". Either way an ask with NO turn id is not mine, which is the rule
+    // a terminal applies too (D4; Review round 1, MEDIUM 4): the switch must
+    // never grant an ask no device can attribute to a turn.
+    const owns = deps.autoAcceptsTurn ?? (() => true);
+    return autoApproves(req, ownRequest(options?.turnId, owns));
   }
 
   /** The person's reply did not reach the agent: their words come back. */

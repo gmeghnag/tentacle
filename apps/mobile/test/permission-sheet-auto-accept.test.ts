@@ -48,7 +48,7 @@ describe("the phone's shared auto-accept", () => {
     // Mutation: ignore the link in the requester → the ask is shown (`asking`).
     const session = link(true, true);
     const { sheet } = sheetWith(session.link);
-    const answer = sheet.requester(ask(), {});
+    const answer = sheet.requester(ask(), { turnId: "t-1" });
     await Promise.resolve();
     expect(await answer).toEqual({ allowed: true, scope: "once" });
     expect(sheet.asking).toBe(false);
@@ -58,7 +58,9 @@ describe("the phone's shared auto-accept", () => {
   test("never allow_always, even though the sheet OFFERS it", async () => {
     const session = link(true, true);
     const { sheet } = sheetWith(session.link);
-    const response = await sheet.requester(ask({ suggestion: { prefix: "git" } }), {});
+    const response = await sheet.requester(ask({ suggestion: { prefix: "git" } }), {
+      turnId: "t-1",
+    });
     expect(response).toEqual({ allowed: true, scope: "once" });
     expect(response.scope).not.toBe("session");
   });
@@ -98,6 +100,25 @@ describe("the phone's shared auto-accept", () => {
     expect(sheet.asking).toBe(true);
   });
 
+  test("an ask with NO turn id always reaches a person (the rule every device shares)", async () => {
+    // `ownRequest(turnId, owns)` is false for a missing turn id under a session
+    // that decides, and the phone's session DOES decide now (its switch is the
+    // session's). Mutation: pass `undefined` as the own-turn test → this ask is
+    // auto-answered, and the phone grants what a terminal would show
+    // (session-auto-accept.md Review round 1, MEDIUM 4; D4 "a request with no
+    // turn id stays not mine").
+    const session = link(true, true);
+    const { sheet } = sheetWith(session.link);
+    void sheet.requester(ask(), {});
+    await Promise.resolve();
+    expect(sheet.asking).toBe(true);
+    // Its own turn's ask IS answered automatically (the same link, same sheet).
+    expect(await sheet.requester(ask(), { turnId: "t-1" })).toEqual({
+      allowed: true,
+      scope: "once",
+    });
+  });
+
   test("no link at all (an older daemon): the sheet behaves as before", async () => {
     const { sheet } = sheetWith();
     expect(sheet.autoAccept).toBeNull();
@@ -118,7 +139,10 @@ describe("the phone's shared auto-accept", () => {
     sheet.answer("allow_once", 10_000);
     expect(await first).toEqual({ allowed: true, scope: "once" });
     // From here the sheet never sees an eligible ask.
-    expect(await sheet.requester(ask(), {})).toEqual({ allowed: true, scope: "once" });
+    expect(await sheet.requester(ask(), { turnId: "t-1" })).toEqual({
+      allowed: true,
+      scope: "once",
+    });
     expect(sheet.asking).toBe(false);
   });
 

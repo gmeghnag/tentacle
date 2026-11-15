@@ -422,7 +422,9 @@ clean (AGENTS §6).
 
 ## Execution
 
-*— claude-sonnet-4-5, 2026-11-15*
+*— deepseek, 2026-11-15* (Review round 1, finding 5: this section was first
+signed `claude-sonnet-4-5`, which did not execute it — commit `e078e7a0` records
+`exec (deepseek)`. Corrected to name the model that did the work.)
 
 **Load-bearing check (re-run first, per the brief): HOLDS.** Every cited site was
 read on this branch before the first edit: the decision point is the requester
@@ -577,3 +579,110 @@ screen) against a `serve` on the same session as a TUI.
 
 Every owner question: the recommendation.
 *— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16*
+
+Review round 1 found 2 HIGH + 3 MEDIUM. Every one is addressed below; each fix
+was shown RED on the branch as it stood before the fix, then green, then
+mutation-checked (AGENTS §9). Repros run in
+`.tentacle/tmp/session-auto-accept/` (`switch-off.ts`, `pod-claim.ts`).
+
+**F1 (HIGH) — an attach to an OFF session left the TUI auto-accepting.** Root
+cause: the link reported only *changes*, and an OFF session's snapshot equals the
+link's initial `false`, so a consumer bound at an unconfirmed attach (the routing
+feed, `/sessions`) never heard the confirmation. Fix, two layers: the link emits
+the FIRST snapshot as an event of its own (`apply`'s `force`, a new
+`AutoAcceptSource` = `"update" | "snapshot"`, so a re-attach that moves nothing
+stays silent), and the routing feed treats that source as neither a remote flip
+nor an own echo (`ownFlip = echo || source === "snapshot" || value === on`).
+`switch-off.ts` before: `on B: feed true | B link false shared true`; after:
+`on B: feed false | B link false shared true | daemon/other device false`.
+
+- `packages/client/src/auto-accept-link.ts` — `AutoAcceptSource`,
+  `onChange(listener)` gains the source, `apply(on, source, label?, force?)`,
+  `sync` forces on the confirmation only.
+- `packages/cli/src/session-auto-accept.ts` — the `onChange` callback takes the
+  source; a snapshot is never `remote()`.
+- Tests: `client/test/auto-accept-link.test.ts` "confirming a session this link
+  already agrees on STILL tells its consumers" (new) + "a RE-attach is silent";
+  `cli/test/session-auto-accept.test.ts` "a session that CONFIRMS sharing at an
+  attach the feed was already bound on" and "a snapshot is not news" (both new).
+
+**F2 (HIGH) — the phone app no longer bundled, and D7's phone half was unbuilt.**
+Root cause: `remote-client.ts` imported `node:os`, which Metro answers `null` for
+on a native platform; it is the first Node built-in in the phone's import graph.
+
+- The label is now a SEAM: `RemoteClientOptions.hostLabel?: () => string |
+  undefined` (`remote-client.ts`, `hostName()` reads it). `node:os` is imported
+  by the callers that have it: `local-runtime.ts` and `connect.ts`
+  (`hostLabel: osHostname`), the phone `connection.ts` (`() =>
+  computer.thisDeviceName`). No `node:` specifier is left in
+  protocol/transport/core/client.
+- D7's phone half is built: pairing records the phone's own label
+  (`PairedComputer.thisDeviceName`, written by `pairing-flow.ts` and persisted by
+  `computer-store.ts` — including `add`, which had silently dropped it), the link
+  sends a `clientInfo` so `wireClientInfo` has something to extend, and the screen
+  hands the sheet `ownHost: () => deps.phoneName?.()` from `App.tsx`.
+- Tests: `apps/mobile/test/node-builtins-guard.test.ts` (new) — a source scan of
+  the phone's real dependency graph plus three wiring guards, each naming the
+  deletion that reddens it; `apps/mobile/test/computer-store.test.ts` "a record an
+  older build wrote still loads, and sends no label" (new, and it caught the
+  `add` gap); `client/test/session-auto-accept.test.ts` "`hostLabel` reaches the
+  wire ONLY with the trust bit".
+
+**F3 (MEDIUM) — the §7 pod gate had no test that failed without it.** New test
+`client/test/session-auto-accept.test.ts` "a daemon that CLAIMS ON never reaches a
+pod-side client (bit OFF, both halves)": the daemon really shares, another client
+turns it ON, and the pod attaches *after* it (so `noteAutoAccept` sees a genuine
+`autoAccept: true`) and then receives genuine `auto_accept` updates. Both halves
+are separately pinned — M-B1 and M-B2 below each redden it alone.
+
+**F4 (MEDIUM) — the phone auto-answered asks the TUI never does.** Root cause:
+`permission-sheet.ts` passed `undefined` as the own-turn test, so `ownRequest`
+returned `true` for a missing turn id. The sheet now takes the session's widest
+test (`PermissionSheetDeps.autoAcceptsTurn`, supplied live from
+`RemoteSession.autoAcceptsTurn` via `autoAcceptsTurnOf`) and, with none wired,
+falls back to `() => true` — which makes `ownRequest` say *not mine* for an ask
+with no turn id, exactly as a terminal decides. Three existing T5 tests that had
+encoded the buggy rule (no turn id → auto-answered) now name a turn.
+
+**F5 (MEDIUM, process) — the signature named the wrong model.** Fixed: this
+section and the Execution one above are signed by the model that actually did the
+work. The previous rounds' signatures are left as they were written (they are that
+model's record), with this round's correcting the record.
+
+#### Mutation checks (each run, then restored by hand — no `git`)
+
+| # | Mutation | Result |
+|---|---|---|
+| M-A1 | `sync` does not force on the confirmation | link "confirming … still tells" red |
+| M-A2 | `ownChange` ignores the `snapshot` source (feed) | feed "a snapshot is not news" red |
+| M-B1 | drop `!this.sharedAutoAccept` in `noteAutoAccept` | pod-claim test red |
+| M-B2 | drop the bit in the `auto_accept` branch of `output()` | pod-claim test red |
+| M-C | drop the bit in `wireClientInfo` | "`hostLabel` … ONLY with the trust bit" red |
+| M-D | restore `import { hostname } from "node:os"` in the client | node-builtins guard red, naming `remote-client.ts:20` |
+| M-E | require `thisDeviceName` when reading a stored record | store round-trip + 4 more red |
+| M-F | delete `hostLabel:` from `openComputer` | wiring guard red |
+| M-G | delete `ownHost:` from the screen | wiring guard red |
+
+Gate (`bunx tsc --noEmit`; `bunx tsc -p apps/mobile`; `bunx tsc -p apps/relay`;
+`bun run lint`; `bun test`):
+
+```
+tsc --noEmit               clean
+tsc -p apps/mobile         clean
+tsc -p apps/relay          clean
+biome check .              1444 files, 0 errors, 0 warnings
+bun test                   10404 pass, 4 skip, 0 fail (751 files)
+```
+
+The 4 skips are the opt-ins §6 names (live-k8s, live-docker ×2, the slow
+real-socket keepalive); none is new.
+
+**Unverified:** still no simulator/Metro run — the bundle fix is proven by the
+source guard (the exact class of failure: a `node:` specifier in the phone's
+import graph), not by `expo export`. To verify for real: `cd apps/mobile && bunx
+expo export --platform ios` (needs the native toolchain), which is what the guard
+stands in for in CI.

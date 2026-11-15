@@ -17,7 +17,6 @@
  * (AGENTS §7 single-broker invariant). Without a factory a drop is terminal,
  * exactly as before.
  */
-import { hostname } from "node:os";
 import {
   type AnswerLostCause,
   type AttachmentRef,
@@ -432,6 +431,18 @@ export interface RemoteClientOptions {
    * neither turn auto-accept on nor report it.
    */
   readonly sharedAutoAccept?: boolean;
+  /**
+   * This machine's name, sent as `ClientInfo.host` when this client shares the
+   * session's auto-accept (docs/feat/session-auto-accept.md D7): the daemon
+   * echoes it as an ask's `askedOn` and an `auto_accept` update's `by`. A SEAM,
+   * not `os.hostname()` read here: this module is in the PHONE's import graph
+   * (`apps/mobile` → `@tentacle/client`), where a Node built-in does not
+   * resolve at all (Expo/Metro answers `null` for a `node:` specifier, so the
+   * bundle fails to build — Review round 1, HIGH 2). The CLI passes
+   * `os.hostname`; the phone passes its device name; a caller that names none
+   * sends no `host`, and only "also asked on" loses a label.
+   */
+  readonly hostLabel?: () => string | undefined;
   /**
    * Serves the daemon's TITLE calls on the model tunnel (`purpose: "title"`):
    * `model.titleModel`, else the main model. Absent → this laptop's
@@ -848,6 +859,8 @@ export class RemoteClient {
   private readonly daemonWakes: boolean;
   /** This daemon shares the session's auto-accept (`RemoteClientOptions.sharedAutoAccept`). */
   readonly sharedAutoAccept: boolean;
+  /** This machine's name (`RemoteClientOptions.hostLabel`): `ClientInfo.host` when sharing. */
+  private readonly hostLabel?: () => string | undefined;
   /** This client can put a `move_session` proposal to its owner (declared in `initialize`). */
   private readonly hop: boolean;
   /** Sessions with a `hooks/trust` prompt in flight (at most one each). */
@@ -909,6 +922,7 @@ export class RemoteClient {
     this.daemonKind = options.daemonKind ?? "serve";
     this.daemonWakes = options.daemonWakes === true;
     this.sharedAutoAccept = options.sharedAutoAccept === true;
+    this.hostLabel = options.hostLabel;
     // The handle is built in `RemoteSession`, not here: the listener API above
     // is the wire half (`autoAccept(snapshot)`), and a session owns its value.
     this.hop = options.hop === true;
@@ -3011,15 +3025,19 @@ export class RemoteClient {
     if (!this.sharedAutoAccept) {
       return info;
     }
-    const host = this.hostLabel();
+    const host = this.hostName();
     return host === undefined ? info : { ...info, host };
   }
 
-  /** This host's name, bounded to the wire field's 64 characters; undefined when unknown. */
-  private hostLabel(): string | undefined {
+  /**
+   * This machine's name, bounded to the wire field's 64 characters; undefined
+   * when unknown. Read through the injected `hostLabel` seam (never `os` here:
+   * this module is in the phone's bundle — Review round 1, HIGH 2).
+   */
+  private hostName(): string | undefined {
     try {
-      const name = hostname();
-      return name === "" ? undefined : name.slice(0, 64);
+      const name = this.hostLabel?.();
+      return name === undefined || name === "" ? undefined : name.slice(0, 64);
     } catch {
       return undefined;
     }

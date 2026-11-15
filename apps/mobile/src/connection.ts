@@ -319,6 +319,20 @@ export async function openComputer(
   const broker = createLinkBroker();
   const client = new RemoteClient(channel, broker, undefined, {
     ...APP_CLIENT_OPTIONS,
+    // This phone's own label, so the daemon can stamp an ask's `askedOn` and an
+    // `auto_accept` update's `by` with it (docs/feat/session-auto-accept.md
+    // D7). The name this phone PAIRED under — what the computer lists it as, so
+    // the label matches on both ends (a record an older build wrote has none,
+    // and then this phone simply sends no label). `node:os` is NOT how this is
+    // read: the phone has no such module (Review round 1, HIGH 2).
+    hostLabel: () => computer.thisDeviceName,
+    // …and the handshake that carries it. The daemon reads `host` from
+    // `initialize` alone (picked once, `connection.ts:627`), so without a
+    // `clientInfo` the seam above never reaches the wire — D7's phone half. The
+    // `host` itself is NOT set here: `wireClientInfo` adds it from `hostLabel`,
+    // which is what keeps the trust bit the ONE gate (a `host` written here
+    // would ride an untrusted client's frame too).
+    clientInfo: { name: "tentacle-app", version: "0" },
     channelFactory: gate.dial,
     onError: (error) => {
       // P4/F16: a client error message is daemon text (an endpoint body, a frame,

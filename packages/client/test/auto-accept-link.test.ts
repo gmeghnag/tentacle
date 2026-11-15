@@ -134,6 +134,32 @@ describe("the auto-accept link", () => {
     r.answers[0]?.resolve();
   });
 
+  test("confirming a session this link already agrees on STILL tells its consumers", () => {
+    // A consumer that read this link BEFORE the daemon confirmed sharing (the
+    // TUI's routing feed, bound at an unconfirmed `/sessions` attach) holds ITS
+    // OWN value; an OFF session equals this link's initial `false`, so an
+    // "only on change" notify would leave that consumer on the laptop's ON
+    // (session-auto-accept.md Review round 1, HIGH 1). Mutation: notify only
+    // from `apply` → `seen` is empty and the feed keeps `true`.
+    const r = rig(true);
+    const seen: boolean[] = [];
+    r.link.onChange((on) => seen.push(on));
+    r.handle.sync(false);
+    expect(seen).toEqual([false]);
+    expect(r.link.shared()).toBe(true);
+    expect(r.link.current()).toBe(false);
+  });
+
+  test("a RE-attach is silent when nothing moved (the confirmation is one event)", () => {
+    const r = rig(true);
+    r.handle.sync(false);
+    const seen: boolean[] = [];
+    r.link.onChange((on) => seen.push(on));
+    r.handle.sync(false);
+    r.handle.sync(false);
+    expect(seen).toEqual([]);
+  });
+
   test("no change, no listener: an update to the value it already has is silent", () => {
     const r = rig();
     r.handle.sync(false);

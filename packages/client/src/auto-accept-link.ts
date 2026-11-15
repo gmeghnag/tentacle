@@ -28,6 +28,14 @@
  */
 
 /**
+ * Where an applied change came from: another client's `auto_accept` update, or
+ * the daemon's own snapshot (the open/re-attach that also CONFIRMS sharing).
+ * A consumer's "another device flipped it" notice must not fire for a snapshot:
+ * an attach is not somebody pressing the switch.
+ */
+export type AutoAcceptSource = "update" | "snapshot";
+
+/**
  * What a consumer (a TUI, the phone, the routing feed) may do with the session's
  * auto-accept. Nothing here can answer an ask: the requester decides, and its
  * `autoApproves` rule is what stands between this value and a tool call.
@@ -41,8 +49,14 @@ export interface AutoAcceptLink {
    * the local value, sends nothing, returns `undefined`.
    */
   set(on: boolean): Promise<{ on: boolean }> | undefined;
-  /** Called on every applied change (from any client, own echoes included). */
-  onChange(listener: (on: boolean) => void): () => void;
+  /**
+   * Called on every applied change (from any client, own echoes included) — and
+   * ONCE when the daemon first CONFIRMS sharing, even if the value it reports is
+   * the one this link already held: a consumer bound before that confirmation
+   * (a TUI's routing feed at an attach) must learn the session's value, which an
+   * "only on change" notify would never tell it.
+   */
+  onChange(listener: (on: boolean, source: AutoAcceptSource) => void): () => void;
   /** True iff the daemon behind this session SHARES it (a trusted daemon that said so). */
   shared(): boolean;
   /**
@@ -88,16 +102,20 @@ export function createAutoAcceptHandle(options: AutoAcceptHandleOptions): AutoAc
   let inFlight = false;
   /** The daemon said it shares this session (`OpenResult.autoAccept` arrived). */
   let confirmed = false;
-  const listeners = new Set<(on: boolean) => void>();
+  const listeners = new Set<(on: boolean, source: AutoAcceptSource) => void>();
 
-  const apply = (on: boolean, label?: string): void => {
+  /**
+   * Apply a value. `force`: notify even when the value did not move — used for
+   * the ONE confirmation (see `sync`), which is an event of its own.
+   */
+  const apply = (on: boolean, source: AutoAcceptSource, label?: string, force = false): void => {
     const changed = value !== on;
     value = on;
     if (label !== undefined) by = label;
-    if (!changed) {
+    if (!changed && !force) {
       return;
     }
-    for (const listener of [...listeners]) listener(on);
+    for (const listener of [...listeners]) listener(on, source);
   };
 
   const sendNow = (on: boolean): Promise<{ on: boolean }> => {
@@ -137,7 +155,7 @@ export function createAutoAcceptHandle(options: AutoAcceptHandleOptions): AutoAc
     },
     set(on) {
       // Locally at once: OFF bites here, ON grants what is on screen.
-      apply(on);
+      apply(on, "update");
       if (!(options.shared && confirmed)) {
         // Not confirmed yet (the session's first open is still in flight): the
         // person's flip must not be undone by the snapshot that open returns.
@@ -154,10 +172,17 @@ export function createAutoAcceptHandle(options: AutoAcceptHandleOptions): AutoAc
     link,
     lastBy: () => by,
     receive(on, label) {
-      apply(on, label);
+      apply(on, "update", label);
       if (pendingSet === on) pendingSet = undefined;
     },
     sync(snapshot) {
+      // The FIRST snapshot is also the confirmation: a consumer already bound to
+      // this link learns the session's value from it even when it matches the
+      // local one (`apply`'s `force`), which is the whole "an OFF session binds
+      // OFF" rule (session-auto-accept.md Review round 1, HIGH 1). A re-attach
+      // of a link that was already confirmed is not one, so it stays silent when
+      // nothing moved.
+      const confirming = !confirmed;
       confirmed = true;
       if (pendingSet !== undefined) {
         // Ours is not acknowledged: it wins over the daemon's older value, and
@@ -165,7 +190,7 @@ export function createAutoAcceptHandle(options: AutoAcceptHandleOptions): AutoAc
         if (!inFlight) void sendNow(pendingSet).catch(() => {});
         return;
       }
-      apply(snapshot);
+      apply(snapshot, "snapshot", undefined, confirming);
     },
     dropped() {
       // A send still in flight is unacknowledged from here on.

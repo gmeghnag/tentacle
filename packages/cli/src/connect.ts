@@ -8,6 +8,7 @@
  * is ours (so even a drop during its first `open` is recovered), and the link
  * state shows in the StatusBar.
  */
+import { hostname as osHostname } from "node:os";
 import {
   ChannelError,
   type ConnectOptions as ClientConnectOptions,
@@ -192,6 +193,11 @@ export async function connectTui(
     // sets it for every device on the session (docs/feat/session-auto-accept.md
     // D4). A pod `run`/`attach` and the relay never say it.
     sharedAutoAccept: true,
+    // This laptop's name, for `ClientInfo.host` (docs/feat/session-auto-accept.md
+    // D7): `node:os` is read HERE, never in `@tentacle/client` — that package is
+    // in the phone's bundle, where a Node built-in does not resolve (Review
+    // round 1, HIGH 2).
+    hostLabel: osHostname,
   });
   // Every controller handed to the TUI, by id: what the exit line reports on.
   const handed = new Map<string, RemoteSession>();

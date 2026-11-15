@@ -21,6 +21,7 @@ import {
 } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
+import type { DuplexChannel } from "@tentacle/transport";
 import { createChannelPair } from "@tentacle/transport";
 import type { SessionEvent } from "../src/mapping.ts";
 import { RemoteClient } from "../src/remote-client.ts";
@@ -83,20 +84,46 @@ function daemon(shared: boolean, extra: { readonly openResult?: (r: object) => o
   });
   const methods: string[] = [];
   const channels: Array<() => void> = [];
+  /** Every `initialize` frame a daemon received, in connection order (D7's wire half). */
+  const inits: unknown[] = [];
   const make = () => {
     const [d, c] = createChannelPair();
     new Connection(d, host);
     return c;
   };
-  return { host, make, methods, channels, openResult: extra.openResult };
+  /** `make` behind a tap that records the `initialize` the client sends. */
+  const tapped = (): ReturnType<typeof make> => {
+    const [d, c] = createChannelPair();
+    new Connection(d, host);
+    const onClient: DuplexChannel = {
+      send: (data: string) => {
+        const frame = JSON.parse(data) as { method?: string; params?: unknown };
+        if (frame.method === "initialize") inits.push(frame.params);
+        c.send(data);
+      },
+      close: () => c.close(),
+      setOnMessage: (handler) => c.setOnMessage(handler),
+      setOnClose: (handler) => c.setOnClose(handler),
+    };
+    return onClient;
+  };
+  return { host, make, tapped, methods, channels, inits, openResult: extra.openResult };
 }
 
 /** One client on `d`, with a chosen `sharedAutoAccept` bit. */
-async function connect(d: ReturnType<typeof daemon>, sharedAutoAccept?: boolean) {
-  const client = new RemoteClient(d.make(), new PermissionBroker(), undefined, {
-    channelFactory: async () => d.make(),
+async function connect(
+  d: ReturnType<typeof daemon>,
+  sharedAutoAccept?: boolean,
+  extra: {
+    readonly hostLabel?: () => string | undefined;
+    readonly clientInfo?: { readonly name: string; readonly version: string };
+  } = {},
+) {
+  const client = new RemoteClient(d.tapped(), new PermissionBroker(), undefined, {
+    channelFactory: async () => d.tapped(),
     random: () => 0,
     ...(sharedAutoAccept === undefined ? {} : { sharedAutoAccept }),
+    ...extra,
   });
   await client.initialize();
   return client;
@@ -136,6 +163,31 @@ describe("T3: the client's shared auto-accept", () => {
     client.close();
   });
 
+  test("`hostLabel` reaches the wire ONLY with the trust bit (D7's laptop half)", async () => {
+    // docs/feat/session-auto-accept.md Review round 1, HIGH 2: the label is a
+    // SEAM (`hostLabel`), not `os.hostname()` read inside this package — that
+    // import broke the phone's bundle. So this test holds both halves of the
+    // seam: it lands in `initialize`'s `clientInfo.host` when the client
+    // SHARES the session, and never when its bit is off (a pod learns nothing).
+    // Mutation: send it unconditionally (drop `wireClientInfo`'s bit test) →
+    // the pod client's frame carries the label too.
+    const d = daemon(true);
+    const shared = await connect(d, true, {
+      hostLabel: () => "gmeghnag-mac",
+      clientInfo: { name: "tentacle", version: "1.0.0" },
+    });
+    const pod = await connect(d, undefined, {
+      hostLabel: () => "gmeghnag-mac",
+      clientInfo: { name: "tentacle", version: "1.0.0" },
+    });
+    // What each client declared, off its own `initialize` frame.
+    expect(
+      d.inits.map((params) => (params as { clientInfo?: { host?: string } }).clientInfo?.host),
+    ).toEqual(["gmeghnag-mac", undefined]);
+    shared.close();
+    pod.close();
+  });
+
   test("an older daemon (no field in OpenResult) → shared() false", async () => {
     // A daemon that does not share says nothing, whatever the client asked for.
     const d = daemon(false);
@@ -144,6 +196,42 @@ describe("T3: the client's shared auto-accept", () => {
     await drain(session.send("hi"));
     expect(session.autoAccept.shared()).toBe(false);
     client.close();
+  });
+
+  test("a daemon that CLAIMS ON never reaches a pod-side client (bit OFF, both halves)", async () => {
+    // AGENTS §7 "a pod is not trusted": the gate is the laptop-side trust bit,
+    // and it must be a TEST — the pass below fails with either check removed.
+    // The daemon here really does share, and another client turns it ON, so the
+    // pod receives a genuine `open{autoAccept: true}` snapshot AND a genuine
+    // `auto_accept {on:true}` update. Both are dropped.
+    // Mutation: drop `!this.sharedAutoAccept` in `noteAutoAccept`
+    // (remote-client.ts) → `current()` becomes true; drop it in the
+    // `auto_accept` branch of `output()` → `current()` and `seen` follow it.
+    // Either one alone turns this test red (the two halves are separate gates).
+    const d = daemon(true);
+    const other = await connect(d, true);
+    const so = other.newSession(undefined, "S");
+    await drain(so.send("hi"));
+    await so.autoAccept.set(true);
+
+    const pod = await connect(d, undefined);
+    const sp = pod.newSession(undefined, "S", undefined, { attach: {} });
+    await sp.open();
+    // The open's own snapshot said ON; the pod ignored it.
+    expect(sp.autoAccept.shared()).toBe(false);
+    expect(sp.autoAccept.current()).toBe(false);
+
+    // And a change AFTER the pod attached: a fresh client turns it OFF and ON.
+    const seen: boolean[] = [];
+    sp.autoAccept.onChange((on) => seen.push(on));
+    await so.autoAccept.set(false);
+    await so.autoAccept.set(true);
+    for (let i = 0; i < 200 && so.autoAccept.current() !== true; i++) await Promise.resolve();
+    expect(so.autoAccept.current()).toBe(true);
+    expect(sp.autoAccept.current()).toBe(false);
+    expect(seen).toEqual([]);
+    other.close();
+    pod.close();
   });
 
   test("every client follows the daemon's updates, own echoes included", async () => {

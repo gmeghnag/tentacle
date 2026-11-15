@@ -16,7 +16,7 @@
  * `AutoAcceptFeed`, `main.ts` calls `use` wherever a session is created or
  * switched, and every rule below is tested without Ink or a socket.
  */
-import type { AutoAcceptLink } from "@tentacle/client";
+import type { AutoAcceptLink, AutoAcceptSource } from "@tentacle/client";
 import type { AutoAcceptFeed } from "@tentacle/tui";
 
 export interface RoutingAutoAccept extends AutoAcceptFeed {
@@ -35,7 +35,8 @@ export interface RoutingAutoAccept extends AutoAcceptFeed {
    * Was the last reported change this laptop's OWN (its Shift+Tab, its own
    * echo)? A flip from another DEVICE is the only one worth a transcript notice
    * (docs/feat/session-auto-accept.md D5) — the person who pressed the key
-   * already saw the status bar change.
+   * already saw the status bar change. A session's SNAPSHOT is never news
+   * either: an attach adopts a value, nobody pressed anything.
    */
   remote(): boolean;
 }
@@ -140,14 +141,15 @@ export function routingAutoAccept(initial = false): RoutingAutoAccept {
         ownFlip = true;
         notify(session.current());
       }
-      offLink = session.onChange((on) => {
+      offLink = session.onChange((on, source: AutoAcceptSource) => {
         // The link calls this for EVERY applied change, this TUI's own echo
-        // included (`auto-accept-link.ts`). One that matches a set of ours still
-        // waiting to come back IS that echo; anything else is another DEVICE's,
-        // and only that is worth a transcript notice.
-        const echo = awaitingEcho === on;
+        // included (`auto-accept-link.ts`), and once for a session's SNAPSHOT.
+        // One that matches a set of ours still waiting to come back IS that
+        // echo, a snapshot is the attach's own fact, and anything else is
+        // another DEVICE's — only that is worth a transcript notice.
+        const echo = source === "update" && awaitingEcho === on;
         if (echo) awaitingEcho = undefined;
-        ownFlip = echo || value === on;
+        ownFlip = echo || source === "snapshot" || value === on;
         notify(on);
       });
     },

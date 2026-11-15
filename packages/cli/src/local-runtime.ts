@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { hostname as osHostname } from "node:os";
 /**
  * The local session runtime built on the RPC stack — the same `RemoteClient` ↔
  * `Connection` path used for remote daemons, but with the daemon in-process
@@ -943,6 +944,11 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     clientInfo: CLIENT_INFO,
     ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
     ...(deps.sharedAutoAccept ? { sharedAutoAccept: true } : {}),
+    // The label a shared session's asks and flips carry (`ClientInfo.host`,
+    // docs/feat/session-auto-accept.md D7). `node:os` lives HERE, not in
+    // `@tentacle/client`: that package is in the phone's bundle, where a Node
+    // built-in does not resolve (Review round 1, HIGH 2).
+    ...(deps.sharedAutoAccept ? { hostLabel: osHostname } : {}),
     ...(deps.hop ? { hop: true as const } : {}),
     ...(deps.titleModelProvider ? { titleModelProvider: deps.titleModelProvider } : {}),
     ...(deps.namedModels ? { namedModels: deps.namedModels } : {}),
