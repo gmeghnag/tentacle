@@ -39,6 +39,9 @@ export type IconName =
   | "magnifyingglass"
   | "bubble.left"
   | "arrow.clockwise"
+  | "arrow.down"
+  | "photo"
+  | "hand.raised"
   | "trash";
 
 export interface IconProps {

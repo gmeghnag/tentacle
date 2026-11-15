@@ -23,6 +23,7 @@
  * - a stream that THREW is LOST (`TURN_LOST_NOTICE`).
  */
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
+import type { AttachmentRef } from "@tentacle/protocol";
 import { type State, type TranscriptInput, type TurnOutcome, apply } from "./transcript.ts";
 
 /**
@@ -69,13 +70,25 @@ export interface SessionFeedDeps {
   readonly setForeign: (turn: ForeignTurn | null) => void;
 }
 
+/**
+ * This phone's own prompt (owner B4). The client never re-delivers the
+ * sender's prompt ("our own prompt is already on screen", `remote-session.ts`),
+ * so the feed draws it — at the stream's FIRST event, i.e. once the daemon took
+ * it: a refusal before the ack gives the words back to the field and leaves no
+ * row. A stream whose first event IS that prompt (a reset replay) is not doubled.
+ */
+export interface OwnPrompt {
+  readonly text: string;
+  readonly attachments?: readonly AttachmentRef[];
+}
+
 export interface SessionFeed {
   /** Fold one session-level activity (`history`, `turn`, `closed`). */
   activity(activity: SessionActivity): void;
   /** Open an OWN bracket, feed `events`, and close the bracket with its outcome.
    * Rejects with the stream's error once its LOST outcome is folded: a caller
    * that owns the turn must see a refusal (12c F13 / 13d F7). */
-  ownTurn(turnId: string, events: AsyncIterable<SessionEvent>): Promise<void>;
+  ownTurn(turnId: string, events: AsyncIterable<SessionEvent>, prompt?: OwnPrompt): Promise<void>;
   /** A stream this feed already folded ended (`link` drops flush nothing: events are immediate). */
   link(up: boolean): void;
 }
@@ -93,8 +106,33 @@ function foldStream(
   turnId: string,
   own: boolean,
   stream: AsyncIterable<SessionEvent>,
+  prompt?: OwnPrompt,
 ): Promise<void> {
   deps.put(apply(deps.state(), { type: "turn_started", turnId, own }));
+  /** The own prompt, drawn once at the first event (null once drawn or skipped). */
+  let pending: OwnPrompt | null =
+    prompt !== undefined && (prompt.text !== "" || (prompt.attachments?.length ?? 0) > 0)
+      ? prompt
+      : null;
+  const drawPrompt = (first: SessionEvent | null): void => {
+    if (pending === null) {
+      return;
+    }
+    const own = pending;
+    pending = null;
+    if (first?.type === "user_message" && first.text === own.text) {
+      return;
+    }
+    deps.put(
+      apply(deps.state(), {
+        type: "user_message",
+        text: own.text,
+        ...(own.attachments !== undefined && own.attachments.length > 0
+          ? { attachments: own.attachments }
+          : {}),
+      } as TranscriptInput),
+    );
+  };
   const finish = (facts: TurnEndFacts): void => {
     deps.put(apply(deps.state(), { type: "turn_ended", outcome: turnOutcome(facts) }));
     if (!own) {
@@ -106,6 +144,7 @@ function foldStream(
     let reason: StopReason | undefined;
     try {
       for await (const event of stream) {
+        drawPrompt(event);
         if (event.type === "turn_end") {
           ended = true;
           reason = event.reason;
@@ -152,7 +191,7 @@ export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
         }
       }
     },
-    ownTurn: (turnId, events) => foldStream(deps, turnId, true, events),
+    ownTurn: (turnId, events, prompt) => foldStream(deps, turnId, true, events, prompt),
     link(up) {
       deps.put(apply(deps.state(), { type: "link", status: up ? "up" : "down" }));
     },

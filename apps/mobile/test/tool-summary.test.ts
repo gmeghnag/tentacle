@@ -14,7 +14,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { toolSummary } from "../src/tool-summary.ts";
+import { toolMeta, toolSummary } from "../src/tool-summary.ts";
 import { type State, type ToolRow, apply, initialState } from "../src/transcript.ts";
 
 type TuiToolTitle = (tool: {
@@ -116,5 +116,32 @@ describe("the output", () => {
 
   test("no output is the empty string", () => {
     expect(toolSummary(foldedTool("shell", '{"command":"ls"}')).output).toBe("");
+  });
+});
+
+describe("toolMeta: the row's status icon tone and trailing text (Slice 3 ToolRow)", () => {
+  const diff = { kind: "diff", path: "a.ts", patch: "", added: 3, removed: 5 } as const;
+
+  test("each status maps to one tone (denied reads as an error)", () => {
+    expect(toolMeta({ status: "ok" }).tone).toBe("ok");
+    expect(toolMeta({ status: "error" }).tone).toBe("error");
+    expect(toolMeta({ status: "denied" }).tone).toBe("error");
+    expect(toolMeta({ status: "running" }).tone).toBe("running");
+    expect(toolMeta({ status: "queued" }).tone).toBe("pending");
+  });
+
+  test("a diff shows its counts, ahead of any duration", () => {
+    expect(toolMeta({ status: "ok", diff, durationMs: 1200 }).trailing).toBe("+3 −5");
+  });
+
+  test("a duration reads in ms under a second, then seconds, then minutes", () => {
+    expect(toolMeta({ status: "ok", durationMs: 42.4 }).trailing).toBe("42 ms");
+    expect(toolMeta({ status: "ok", durationMs: 1250 }).trailing).toBe("1.3 s");
+    expect(toolMeta({ status: "ok", durationMs: 125_000 }).trailing).toBe("2 min 5 s");
+  });
+
+  test("denied says so; nothing known says nothing (no invented exit code)", () => {
+    expect(toolMeta({ status: "denied" }).trailing).toBe("denied");
+    expect(toolMeta({ status: "running" }).trailing).toBe("");
   });
 });

@@ -79,6 +79,50 @@ function subtitleOf(name: string, raw: string): string {
   }
 }
 
+/** The row's status icon: ok (green check), error (red), running (spinner), pending. */
+export type ToolTone = "ok" | "error" | "running" | "pending";
+
+export interface ToolMeta {
+  readonly tone: ToolTone;
+  /**
+   * The row's right-hand text: a diff's `+n −m`, else `denied`, else the
+   * duration; "" when the row knows none of them. Never an exit code: a
+   * `ToolResult` carries none, so the row does not invent one.
+   */
+  readonly trailing: string;
+}
+
+const TONE: Readonly<Record<ToolRow["status"], ToolTone>> = {
+  ok: "ok",
+  error: "error",
+  denied: "error",
+  running: "running",
+  queued: "pending",
+};
+
+/** A duration as a phone row reads it: `42 ms`, `1.3 s`, `2 min 5 s`. */
+function elapsed(ms: number): string {
+  if (ms < 1000) {
+    return `${Math.round(ms)} ms`;
+  }
+  if (ms < 60_000) {
+    return `${(ms / 1000).toFixed(1)} s`;
+  }
+  const seconds = Math.round(ms / 1000);
+  return `${Math.floor(seconds / 60)} min ${seconds % 60} s`;
+}
+
+export function toolMeta(row: Pick<ToolRow, "status" | "durationMs" | "diff">): ToolMeta {
+  const tone = TONE[row.status];
+  if (row.diff !== undefined) {
+    return { tone, trailing: `+${row.diff.added} −${row.diff.removed}` };
+  }
+  if (row.status === "denied") {
+    return { tone, trailing: "denied" };
+  }
+  return { tone, trailing: row.durationMs === undefined ? "" : elapsed(row.durationMs) };
+}
+
 export function toolSummary(row: Pick<ToolRow, "name" | "label" | "args" | "output">): ToolSummary {
   return {
     label: row.label,

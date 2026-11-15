@@ -95,8 +95,12 @@ export interface ComposeWiring {
     readonly onDraft: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
   }) => OutboxDriver;
   readonly photos: PhotoPort;
-  /** The chat handle's compose side, once the attach answered. */
-  readonly handle: () => ComposeHandle | null;
+  /**
+   * The chat handle's compose side, once the attach answered — built over THIS
+   * screen's own attach handle (owner B4: a port without it could not read the
+   * session's facts, so every send died silently after clearing the field).
+   */
+  readonly handle: (session: SendableHandle) => ComposeHandle | null;
   /** Write the draft (13b's store: the text and the chip copies that outlive the screen). */
   readonly draft: (text: string, photos: readonly string[]) => void;
   readonly mint: () => string;
@@ -271,7 +275,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           photos: deps.compose.photos,
           // The handle exists only once the attach answered: a compose act on a
           // half-built screen must never build a frame (AGENTS §7).
-          handle: () => (status.phase === "open" ? (deps.compose?.handle() ?? null) : null),
+          handle: () =>
+            status.phase === "open" && handle !== null
+              ? (deps.compose?.handle(handle) ?? null)
+              : null,
           turnId: () => (foreign !== null ? foreign.turnId : (transcript.turn?.turnId ?? null)),
           stopTurn: (turnId, own) => {
             if (own) {
@@ -469,7 +476,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     // The compose half follows the queue from here (13d): its store is loaded
     // once, and a `queued` broadcast is applied by `compose-state.ts`.
     if (compose !== null) {
-      const wired = deps.compose?.handle() ?? null;
+      const wired = deps.compose?.handle(result.session) ?? null;
       if (wired !== null) {
         void compose.start(wired);
         // The outbox may have items from a killed app: `up` + re-sync is when
@@ -505,7 +512,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         throw error;
       }
     })();
-    await feed.ownTurn(turnId, events).catch(() => {
+    await feed.ownTurn(turnId, events, { text }).catch(() => {
       // The stream threw: the feed folded it as LOST (F8/F19), and `failure` below
       // is what decides whether the person's words come back (F13).
     });
@@ -564,7 +571,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         throw error;
       }
     })();
-    await feed.ownTurn(turnId, events).catch(() => {
+    await feed.ownTurn(turnId, events, { text, attachments: refs }).catch(() => {
       // Folded as LOST by the feed; what the CALLER does about it is decided below.
     });
     ownControl = null;
