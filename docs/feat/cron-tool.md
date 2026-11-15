@@ -815,3 +815,35 @@ new `changelog.d/` fragment (the existing `cron-tool.added.md` still covers S1);
 of round 1 shares this model id, so a fresh-context adversarial pass on round 1
 is still owed (especially: whether "smallest `nextAt`" starves an `at` job against
 a fast `every` job, and whether S3 honours the required flag at every call site).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16* (fresh context for this round; **same model as the
+S1 executor and the round-1 reviewer**, so their blind spots are shared.)
+
+**Verdict: PASS (S1).** All three round-1 findings are fixed by `941d816d`, and a
+mutation shows each fix is pinned by a test.
+
+| Round-1 finding | Fix (`packages/core/src/schedule.ts`) | Mutation → red |
+|---|---|---|
+| 1 HIGH: table order instead of the oldest `nextAt` | fires the overdue job with the smallest `nextAt`, ties go to table order (`scheduleStep`, second loop) | `job.nextAt < best.nextAt` dropped → 2 fail (`…OLDER nextAt fires even when it is not first…`, `…does not starve…`) |
+| 2 HIGH: starvation | same fix | same 2 tests. The round-1 repro (`.tentacle/tmp/cron-tool/order.ts`) now gives: order → sc-2 ✓; starvation → sc-2 fires 6 of 30 (was 0) |
+| 3 MEDIUM: busy spin / burnt slot | `scheduleStep` and `scheduleCheckDelayMs` now REQUIRE `{ idle }`; busy → expiry is swept, nothing fires, and the delay is 60 s, never 0 | gate removed → 1 fail (`a busy check sweeps expiry…`); busy delay dropped → 1 fail (`the check delay is capped…`) |
+
+After each mutation the file was restored from `.tentacle/tmp/cron-tool/r2.bak` and
+`git status` was clean.
+
+**Regressions checked on the diff:** the 31 old tests now call through `idleCheck`
+and are unchanged in meaning; 34 pass / 0 fail. A busy check still applies the
+backwards-clock clamp, and creation order is kept for the table. Identity
+filter/map on `kept` is safe (fresh array, objects are unique). The executor asked
+whether an `at` job can be starved by a fast `every` job: no. The `at` job's
+`nextAt` is fixed, while the fired `every` job's `nextAt` moves past `now`, so on
+the next idle check the overdue `at` has the smaller value and fires.
+
+**Gate:** `bun run lint` → clean (1660 files); `bun run typecheck` → 0. The full
+suite was not re-run: the diff only touches this pure module and its test.
+
+**Carried to S3 (not a finding):** every caller must pass the real `idle` value
+(`!running && !compacting`). S3's T-D2 must pin this with a mutation (`idle: true`
+hard-coded → red).
