@@ -76,6 +76,9 @@ export function mcpToolToTool(
     description: def.description ?? `MCP tool \`${def.name}\` from server \`${server}\`.`,
     inputSchema: z.record(z.unknown()),
     jsonSchema: schema,
+    // The server, tagged for a session's per-server switch: never parsed from
+    // the name, since a server name may itself contain `__`.
+    mcpServer: server,
     permission: "ask",
     ...(isReadOnly(def, readOnlyTools) ? { concurrency: () => readKeys } : {}),
     async execute(input, ctx) {

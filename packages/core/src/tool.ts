@@ -163,6 +163,13 @@ export interface Tool<Input = unknown> {
    * runtime guard.
    */
   readonly jsonSchema?: Record<string, unknown>;
+  /**
+   * The MCP server this tool came from (docs/feat/session-capabilities.md): it
+   * is what a session's per-server switch filters on. Tagged here rather than
+   * parsed from `name`, because a server name may itself contain `__`. Absent
+   * for every built-in tool.
+   */
+  readonly mcpServer?: string;
   readonly permission: PermissionLevel;
   /**
    * What a call touches, for the round executor (docs/feat/parallel-tools.md):
