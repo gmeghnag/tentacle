@@ -38,18 +38,19 @@
         {
           "photosPermission": "choose a photo to send with your message",
           "cameraPermission": "tentacle uses the camera to scan the pairing code shown by `tentacle pair`, and to take a photo you send with a message",
-          "microphonePermission": false
+          "microphonePermission": "tentacle uses the microphone only while you dictate a message; audio stays on this iPhone"
         }
       ],
       [
         "expo-camera",
         {
           "cameraPermission": "tentacle uses the camera to scan the pairing code shown by `tentacle pair`, and to take a photo you send with a message",
-          "microphonePermission": false,
+          "microphonePermission": "tentacle uses the microphone only while you dictate a message; audio stays on this iPhone",
           "recordAudioAndroid": false
         }
       ],
       "expo-secure-store",
+      "./modules/tentacle-speech/app.plugin.js",
       [
         "expo-local-authentication",
         {

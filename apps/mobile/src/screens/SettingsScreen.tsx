@@ -12,6 +12,8 @@
 import type { JSX } from "react";
 import { ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
+import type { SpeechRate } from "../read-aloud.ts";
+import type { LanguageSetting } from "../speech-locale.ts";
 import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
 import { Banner } from "../ui/Banner.tsx";
 import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
@@ -21,6 +23,7 @@ import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { SectionHeader } from "../ui/SectionHeader.tsx";
+import type { VoiceSettings } from "../voice-settings-store.ts";
 
 /** The rows, weakest lock last, with the copy the mockup uses. */
 export const DELAY_ROWS: readonly { readonly value: LockDelay; readonly label: string }[] = [
@@ -60,6 +63,11 @@ export interface SettingsScreenProps {
   readonly onExportLogs: () => void;
   /** False while an export is in flight (a double tap must not write twice). */
   readonly canExport: boolean;
+  /** The voice settings (docs/feat/mobile-voice.md Design §5); absent = no Voice card. */
+  readonly voice?: VoiceSettings;
+  /** A voice write that did not stick. */
+  readonly voiceError?: string;
+  readonly onVoice?: (next: VoiceSettings) => void;
   /** Present only when the stack can go back. */
   readonly onBack?: () => void;
   /**
@@ -72,6 +80,18 @@ export interface SettingsScreenProps {
   readonly onToggleNotifications?: (enabled: boolean) => void;
 }
 
+export const LANGUAGE_ROWS: readonly { readonly value: LanguageSetting; readonly label: string }[] =
+  [
+    { value: "auto", label: "Auto" },
+    { value: "it-IT", label: "Italiano" },
+    { value: "en-US", label: "English" },
+  ];
+
+export const RATE_ROWS: readonly { readonly value: SpeechRate; readonly label: string }[] = [
+  { value: "normal", label: "Normal" },
+  { value: "fast", label: "Fast" },
+];
+
 export function SettingsScreen({
   palette,
   setting,
@@ -82,11 +102,38 @@ export function SettingsScreen({
   onSelectDelay,
   onExportLogs,
   canExport,
+  voice,
+  voiceError,
+  onVoice,
   onBack,
   notifications,
   onToggleNotifications,
 }: SettingsScreenProps): JSX.Element {
   const compact = useCompactTitle();
+  // A voice choice as a checkmark list, the lock rows' look (render only).
+  const choice = <T extends string>(
+    rows: readonly { readonly value: T; readonly label: string }[],
+    selected: T,
+    id: string,
+    pick: (value: T) => void,
+  ) =>
+    rows.map((row, index) => (
+      <Row
+        key={row.value}
+        testID={`${id}-${row.value}`}
+        palette={palette}
+        first={index === 0}
+        minHeight={size.rowSetting}
+        title={row.label}
+        accessibilityLabel={row.label}
+        onPress={() => pick(row.value)}
+        trailing={
+          selected === row.value ? (
+            <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
+          ) : undefined
+        }
+      />
+    ));
   return (
     <View style={[styles.root, { backgroundColor: palette.bg }]}>
       <ScrollView
@@ -204,6 +251,50 @@ export function SettingsScreen({
               </Row>
             </GroupedCard>
           </View>
+          {voice === undefined || onVoice === undefined ? null : (
+            <View style={styles.section}>
+              <SectionHeader palette={palette} title="Voice" />
+              <GroupedCard palette={palette}>
+                <Row
+                  palette={palette}
+                  first
+                  minHeight={size.rowSetting}
+                  title="Read replies aloud"
+                  trailing={
+                    <Switch
+                      testID="voice-read-aloud"
+                      accessibilityLabel="Read replies aloud"
+                      value={voice.readAloud}
+                      trackColor={{ false: palette.fill, true: palette.green }}
+                      onValueChange={(readAloud) => onVoice({ ...voice, readAloud })}
+                    />
+                  }
+                />
+              </GroupedCard>
+              <SectionHeader palette={palette} title="Language" />
+              <GroupedCard palette={palette}>
+                {choice(LANGUAGE_ROWS, voice.language, "voice-language", (language) =>
+                  onVoice({ ...voice, language }),
+                )}
+              </GroupedCard>
+              <SectionHeader palette={palette} title="Speaking rate" />
+              <GroupedCard palette={palette}>
+                {choice(RATE_ROWS, voice.rate, "voice-rate", (rate) => onVoice({ ...voice, rate }))}
+              </GroupedCard>
+              <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
+                Dictation and speech run on this iPhone. Audio never leaves it and is never saved.
+              </Text>
+              {voiceError === undefined ? null : (
+                <Banner
+                  palette={palette}
+                  tone="error"
+                  icon="exclamationmark.triangle"
+                  testID="voice-error"
+                  body={voiceError}
+                />
+              )}
+            </View>
+          )}
           <View style={styles.section}>
             <SectionHeader palette={palette} title="Diagnostics" />
             <GroupedCard palette={palette}>

@@ -17,10 +17,12 @@
  * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`, `session-back`,
  * `jump-latest`, `session-menu`, `session-menu-sheet`, `session-menu-copy-last|copy-all`.
  */
+import { useIsFocused } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import { type ComponentRef, type JSX, useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
+  AppState,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
@@ -43,6 +45,8 @@ import { playHaptic } from "../haptics.ts";
 import { linkPrompt } from "../links.ts";
 import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
+import { dictationLocale } from "../speech-locale.ts";
+import { SPEECH_PORT } from "../speech-native-expo.ts";
 import { DENSE_FONT_SCALE, type Palette, typography } from "../theme.ts";
 import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
@@ -54,6 +58,13 @@ import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
+import {
+  type VoiceController,
+  type VoiceState,
+  createVoiceController,
+} from "../voice-controller.ts";
+import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
+import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
@@ -71,6 +82,11 @@ export interface SessionScreenProps {
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
+/** The iPhone's language, for the `auto` dictation locale (Hermes' Intl reads the device). */
+function deviceLocales(): readonly string[] {
+  return [Intl.DateTimeFormat().resolvedOptions().locale];
+}
+
 const BANNER_LOOK: Readonly<
   Record<
     NonNullable<SessionScreenState["view"]["banner"]>["kind"],
@@ -116,6 +132,66 @@ export function SessionScreen({
       void controller.leave().then(() => controller.dispose());
     };
   }, [controller]);
+
+  // Voice (docs/feat/mobile-voice.md Design §4): one controller per mounted
+  // screen, over the compose seam; disposed on unmount (F13). Created in the
+  // effect, not at render, so a remount never reuses a disposed one.
+  const [voice, setVoice] = useState<VoiceController | null>(null);
+  const [voiceState, setVoiceState] = useState<VoiceState | null>(null);
+  useEffect(() => {
+    const port = SPEECH_PORT;
+    if (port === null) {
+      return;
+    }
+    const v = createVoiceController({
+      port,
+      now: () => Date.now(),
+      draft: () => controller.state().draft,
+      setDraft: (text) => controller.setDraft(text),
+      send: (via) => (via === "return" ? controller.pressReturn() : controller.press()),
+      settings: () => VOICE_SETTINGS.current(),
+      deviceLocales: deviceLocales,
+      every: (fn, ms) => {
+        const handle = setInterval(fn, ms);
+        return { cancel: () => clearInterval(handle) };
+      },
+    });
+    setVoice(v);
+    setVoiceState(v.state());
+    const unsubscribe = v.subscribe(setVoiceState);
+    const app = AppState.addEventListener("change", (next) => {
+      if (next === "active" || next === "inactive" || next === "background") {
+        v.appState(next);
+      }
+    });
+    return () => {
+      app.remove();
+      unsubscribe();
+      v.dispose();
+      setVoice(null);
+      setVoiceState(null);
+    };
+  }, [controller]);
+
+  // Auto-read (F12): a turn that just ended, while this screen is focused.
+  const focused = useIsFocused();
+  const lastTurn = useRef(state.view.turn);
+  useEffect(() => {
+    const ended = endedTurn(lastTurn.current, state.view.turn);
+    lastTurn.current = state.view.turn;
+    if (ended !== undefined && voice !== null) {
+      void voice.turnEnded({ ownTurn: ended.own, focused, rows: state.view.rows });
+    }
+  }, [state.view.turn, state.view.rows, voice, focused]);
+
+  // The spoken permission ask (eval Q4): the title template only, approval stays a tap.
+  const askSeq = state.sheet.kind === "asking" ? state.sheet.seq : undefined;
+  const askTitle = state.sheet.kind === "asking" ? state.sheet.request.title : undefined;
+  useEffect(() => {
+    if (askSeq !== undefined && askTitle !== undefined && voice !== null) {
+      voice.permissionAsked({ title: askTitle }, askSeq, focused);
+    }
+  }, [askSeq, askTitle, voice, focused]);
 
   // A link tap asks first: the whole URL, then Safari (plan F22 / Owner Q7).
   const onLink = useCallback((href: string) => {
@@ -212,6 +288,10 @@ export function SessionScreen({
 
   const banner = state.view.banner;
   const rows = state.view.rows;
+  const voiceView = voiceComposerView(
+    voiceState,
+    dictationLocale(VOICE_SETTINGS.current().language, deviceLocales()),
+  );
   const compose = state.compose;
   const status = chatStatus({
     phase: state.status.phase,
@@ -353,14 +433,21 @@ export function SessionScreen({
             testID="transcript"
             data={rows}
             keyExtractor={(row: Row) => row.key}
-            renderItem={({ item }) => (
-              <TranscriptRow
-                row={item}
-                palette={palette}
-                onLink={onLink}
-                thumbnails={state.thumbnails}
-              />
-            )}
+            renderItem={({ item }) => {
+              const speak = speakButtonOf(voiceState, item, rows, state.view.composer.running);
+              return (
+                <TranscriptRow
+                  row={item}
+                  palette={palette}
+                  onLink={onLink}
+                  thumbnails={state.thumbnails}
+                  {...(speak === undefined || voice === null
+                    ? {}
+                    : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
+                />
+              );
+            }}
+            extraData={voiceState?.readAloud}
             onViewableItemsChanged={onViewable}
             viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
             contentContainerStyle={rows.length === 0 ? styles.emptyList : styles.list}
@@ -455,24 +542,66 @@ export function SessionScreen({
           palette={palette}
           onRemove={(key) => void controller.removeChip(key)}
         />
+        {voiceView.card === undefined || voiceView.card.message === undefined ? null : (
+          <Banner
+            palette={palette}
+            testID="voice-card"
+            tone={voiceView.card.card === "unavailable" ? "info" : "warn"}
+            icon="mic"
+            body={voiceView.card.message}
+            {...(voiceView.card.settings
+              ? {
+                  action: {
+                    label: "Open Settings",
+                    onPress: () => void Linking.openSettings(),
+                    testID: "voice-card-settings",
+                  },
+                }
+              : {})}
+          />
+        )}
+        {voiceView.notice === undefined ? null : (
+          <Text
+            testID="voice-notice"
+            style={[typography.footnote, styles.notice, { color: palette.sec }]}
+          >
+            {voiceView.notice}
+          </Text>
+        )}
         <Composer
           palette={palette}
           draft={state.draft}
           editable={state.view.editable}
-          placeholder={state.view.editable ? "Message tentacle" : "This session has ended"}
+          placeholder={
+            !state.view.editable
+              ? "This session has ended"
+              : (voiceView.placeholder ?? "Message tentacle")
+          }
           button={state.view.composer.button}
-          onChange={(text) => controller.setDraft(text)}
+          onChange={(text) => {
+            // The person typed: dictation yields first (F8), then the compose seam.
+            voice?.userEdit(text);
+            controller.setDraft(text);
+          }}
           // Acting from the composer is looking at the end: follow again (B5).
+          // While dictating, Return/Send finalizes first and dictation sends (F8).
           onReturn={() => {
             setFollowState(jumped());
             playHaptic(pressHaptic(state.view.composer.action, "return"));
-            controller.pressReturn();
+            if (voice?.send("return") !== true) {
+              controller.pressReturn();
+            }
           }}
           onPress={() => {
             setFollowState(jumped());
             playHaptic(pressHaptic(state.view.composer.action, "button"));
-            controller.press();
+            if (voice?.send("press") !== true) {
+              controller.press();
+            }
           }}
+          mic={state.view.editable ? voiceView.mic : "hidden"}
+          onMic={() => voice?.tapMic()}
+          level={voiceView.level}
           onPhoto={() =>
             Alert.alert("Add a photo", undefined, [
               { text: "Cancel", style: "cancel" },

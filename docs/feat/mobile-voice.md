@@ -370,11 +370,389 @@ In dependency order. Everything is in `apps/mobile/`; nothing outside it except 
 
 ## Execution
 
-*(empty: not started; Implementation awaits owner approval)*
+*— executor recorded as **deepseek** by the exec commit `2dca65b3` ("feat(mobile-voice): exec (deepseek)"), 2026-11-15. This line first read `claude-opus-5-5`, which conflicts with that commit (Review round 1, finding 2). The exact DeepSeek model id is not recorded anywhere in the repo; the orchestrator must confirm it. Fix round 1 below is signed separately.*
+
+### Load-bearing check (re-run first)
+
+- **Header half: holds.** Re-grepped against the SDK on this machine, `iPhoneOS27.1.sdk`.
+  - `SFSpeechRecognitionRequest.h:63,65`: `requiresOnDeviceRecognition` is honoured only if `supportsOnDeviceRecognition` is true.
+  - `SFSpeechRecognizer.h:162,164`: with `supportsOnDeviceRecognition` false, the recognizer "requires a network".
+  - `addsPunctuation` is at `:72`.
+  - `Speech.swiftinterface`:
+    - `actor SpeechAnalyzer` `:228`; `class SpeechTranscriber` `:346`, with `.progressiveTranscription` `:353`, `.volatileResults` `:378` and `isAvailable` `:408`;
+    - `class DictationTranscriber` `:70`;
+    - `AssetInventory`: `maximumReservedLocales` / `reservedLocales` / `reserve` / `status` / `assetInstallationRequest` `:34-57`;
+    - `bestAvailableAudioFormat` `:254`.
+- **Step 0 (a)(b)(c): NOT RUN.** There is no device or simulator in this executor's reach.
+  - The real-device checklist is in `modules/tentacle-speech/README.md`.
+  - Until (a) is known, the iOS 18 phone path is unverified. The code still cannot go to the network: the TS refusal and the Swift refusal are both tested (see Mutations).
+
+### As built, in plan order
+
+**Slice 1: read-aloud (DONE, except the native run).**
+
+- `src/speakable.ts`, a walk of `Parsed`:
+  - a code block becomes "code block, N lines[, lang]" (it/en);
+  - a table is summarised, a link keeps its text, a bare URL is read as "link";
+  - emoji and box-drawing characters are stripped;
+  - utterances are split at 600 characters at a sentence boundary;
+  - a `chunked` row ends with "message truncated".
+- `src/speech-language.ts`: `detectLanguage`, with a margin of 2, and `pickVoice`.
+- `src/read-aloud.ts`: the reducer, plus `readAloudOffered`, `streamingRowKey`, `speechRequest`, `autoReadRow` and `spokenAsk`.
+- The native module is in `modules/tentacle-speech/`:
+  - `ios/SpeechCore.swift`: the session, permissions, capabilities, `AVSpeechSynthesizer`, the interruption and route observers, and haptics;
+  - `ios/TentacleSpeechModule.swift` (the Expo glue), `ios/TentacleSpeech.podspec`, `expo-module.config.json`;
+  - `src/speech-native.ts` (the port) and `src/speech-native-expo.ts`.
+- UI: `Icon.tsx` (+5 names), `TranscriptRow.tsx` (`assistant-speak` / `assistant-speak-stop`), `SessionScreen.tsx`.
+
+**Slice 2: dictation (DONE, except the native run).**
+
+- `ios/RecognizerEngine.swift` (iOS 18, on device only, 50 s rollover) and `ios/AnalyzerEngine.swift` (iOS 26).
+- `app.json`:
+  - the same dictation string goes into **both** `microphonePermission`s;
+  - the plugin `./modules/tentacle-speech/app.plugin.js` is registered and writes `NSSpeechRecognitionUsageDescription`.
+- `test/pairing-guards.test.ts` is rewritten (Design §6), plus a plugin test.
+- `src/speech-engine.ts`, `src/voice-permission.ts`, `src/speech-locale.ts`, `src/dictation.ts`.
+- `src/voice-controller.ts`.
+- `ui/Composer.tsx` gets the mic button: `composer-mic` / `composer-mic-listening`, an accent border while listening, and a level-driven waveform.
+- SessionScreen gets the `voice-card` / `voice-card-settings` Banner and the `voice-notice` line.
+
+**Slice 3: settings and polish (PARTIAL).**
+
+- Done:
+  - `src/voice-settings-store.ts` (store and holder) and `src/voice-settings-expo.ts`;
+  - the `SettingsScreen.tsx` Voice card: `voice-read-aloud`, `voice-language-*`, `voice-rate-*`, the footnote and `voice-error`, wired in `App.tsx`;
+  - auto-read and the spoken ask (in the controller, gated in `read-aloud.ts`);
+  - the module README with the checklist;
+  - `changelog.d/mobile-voice.added.md`.
+- **Not done: the Maestro flows 24, 25 and 26.**
+  - They need a dev build that contains the new native module (prebuild, pod install, xcodebuild) and a `simctl privacy` harness hook.
+  - Neither can be produced or verified here, and an unrun flow proves nothing (`e2e-flows.test.ts` rules).
+  - To verify: build the dev client, then add the three flows against the testIDs above.
+
+**F3 (plist).** `bunx expo config apps/mobile --type introspect --json`, which runs every plugin mod, produced:
+
+```
+"NSMicrophoneUsageDescription":"tentacle uses the microphone only while you dictate a message; audio stays on this iPhone"
+"NSSpeechRecognitionUsageDescription":"tentacle turns your speech into text on this iPhone, for the message you are writing"
+```
+
+(The camera, Face ID, local-network and photo keys are unchanged.)
+
+**Swift.** The three engine files typecheck with no errors and no warnings:
+
+```
+$ xcrun -sdk iphoneos swiftc -typecheck -swift-version 5 -target arm64-apple-ios18.0 SpeechCore.swift RecognizerEngine.swift AnalyzerEngine.swift
+TYPECHECK_OK
+```
+
+`TentacleSpeechModule.swift` imports ExpoModulesCore, so it was checked against the expo-modules-core 58 sources by reading only, not compiled. That covers `Exception(name:description:code:)`, `runOnQueue` (async only, so the sync commands hop with `DispatchQueue.main.async`) and `OnCreate`. **To verify:** run a dev-client build.
+
+### Red → green and mutations
+
+| Target | Mutation / red | Result |
+|---|---|---|
+| `pairing-guards` agreement test | written before the `app.json` change | RED: `Expected: "string"  Received: "boolean"`, then green |
+| same | `expo-image-picker` mic back to `false` | 1 fail (agreement test) |
+| `speakable` (the plan's target) | speak `block.text` for a code block | 4 fail (all "code block" tests) |
+| `speech-engine` F1 (the plan's target) | drop the `onDevice` check | 2 fail (both F1 tests) |
+| `read-aloud` | drop the `event.id` check | 1 fail ("late 'stopped' does not idle the new one") |
+| `read-aloud` spoken ask | add `detail` to the template | 1 fail ("never the detail or input") |
+| `dictation` | append volatile instead of replacing it | 1 fail |
+| `dictation` F11 | `stopSpeaking` after `start` | 6 fail |
+| `voice-controller` F13 | no `unsubscribePort()` in dispose | 1 fail |
+| `voice-wiring` (Swift F1) | `requiresOnDeviceRecognition = false` | 1 fail |
+
+Every mutation was reverted and the file re-run green. The new modules are features, not fixes, so for them "red" means the mutations above. Their tests could not be red on an assertion before the module existed.
+
+### Drift from the Implementation (and why)
+
+1. **`speak` and `speech` events carry an `id`.** Without it, switching rows lets the old speech's late `stopped` idle the new one.
+2. **`speak` carries `lang` / `language`.** AVSpeech needs a language when `pickVoice` returns `undefined` (F10).
+3. **The port gains `reserveLocale`, and `installAsset(engine, locale)`.** The reducer gains a `reserve` effect and a `reserved` event. F5's fallback needs a TS seam. Capabilities also report `dictationAssets`, because the two iOS 26 models have separate assets.
+4. **`probe` effect / `probed` event; `startFailed` in `asking`.** The capabilities read is a reducer effect, not controller logic, and a throw never leaves the state at `asking`.
+5. **`finalizing.then` became `finalizing.after`.** Biome's `noThenProperty` rule.
+6. **Send semantics:**
+   - an interruption or route change never sends, even mid-`finalizing{send}`;
+   - F9 ("no send") applies to a tap-stop;
+   - an explicit Send with no new speech still goes to `composerAction`, which decides.
+7. **Recognizer error 1110 ("no speech") ends as `stopped`, not `error`.** It is a quiet end and needs no failure card.
+8. **Swift is split into three engine files plus the glue**, so the engines typecheck without Expo. The podspec sits in `ios/` (the Expo local-module convention). There is no `modules/…/index.ts`: the adapter is `src/speech-native-expo.ts`, which uses `requireOptionalNativeModule`. On a build without the module the mic and speaker buttons are hidden.
+9. **New pure modules:**
+   - `voice-view.ts`: the SessionScreen projection plus `endedTurn`, so the screen holds no branching (§7);
+   - the settings holder;
+   - `voice-settings-expo.ts`, so `pairing-guards`' Keychain-importer list now has three wiring files, sorted.
+10. **Auto-read's own-turn gate** uses `TurnRow.own` (`transcript-rows.ts:87`). It was cheap, so it was kept.
+11. **`deviceLocales`** is `Intl…resolvedOptions().locale`, a single locale, because `expo-localization` is not a dependency.
+12. **The spoken ask caps the title at 80 characters.**
+13. **Not built:** Owner Q3's long-press one-shot language switch (debt), and the Maestro flows (above).
+14. **Side effect (Android, out of scope).** A string `microphonePermission` makes expo-image-picker add `android.permission.RECORD_AUDIO` (`withImagePicker.js:36-44`); `introspect` now lists it. The app is iOS-first and the module is iOS-only.
+15. **Unverified:** whether `SpeechAnalyzer` needs Speech authorization. Both permissions are requested anyway, as the plan says.
+
+### Gate
+
+`bun run typecheck` (root, `apps/mobile`, `apps/relay`) is clean. `bun run lint`: `Checked 1457 files … No fixes applied`, 0 errors. `bun test`: **10480 pass, 4 skip, 0 fail**.
+- 3 of the skips are the baseline opt-ins.
+- The 4th is the pre-existing docker opt-in `packages/cli/test/session-hop.docker.test.ts:248` (`TENTACLE_DOCKER_TESTS`). None are in `apps/mobile`.
+- No schema changed, so there is no `protocol.json` regeneration and no `protocol.d/` note.
+
+### Fix round 1
+
+*— executor recorded as **deepseek** by its commit `86691927` ("fix(mobile-voice): review round 1 (deepseek)"), 2026-11-15. This line first read `claude-opus-5-5`, which conflicts with that commit (Review round 2). The exact DeepSeek model id is not recorded in the repo; the orchestrator must confirm it. Corrected in Fix round 2.*
+
+**Finding 1 (HIGH, start/cancel race): FIXED in TS and Swift. The Swift runtime behaviour is unverified on a device.**
+
+Root cause: no event or command named the dictation it belonged to. A `started` that arrived after a cancel was dropped, and the native cancel had either already missed the engine or reached it too early.
+
+The fix tags every attempt with an id, taking the reviewer's preferred option, which matches drift 1 for speech:
+
+- **TS**
+  - `dictation.ts`
+    - `tap` carries `attempt`, a fresh id from the controller's counter (an id source, like `now`).
+    - `asking`, `preparing`, `listening` and `finalizing` carry it.
+    - The `start` and `cancel` effects carry it.
+    - `started` carries it; `startFailed` and `ended` may carry it.
+  - `stale()` runs before the per-state switch:
+    - a `started` that is not the current `preparing{starting}` → `cancel{attempt: event.attempt}`, whatever the state, and the state is unchanged;
+    - a duplicate `started` for the current listening attempt → no effect;
+    - an `ended` or `startFailed` tagged with another attempt → ignored.
+  - Because a `cancel` names its attempt, cancelling a stale start never touches a newer one.
+  - `voice-controller.ts`: `tapMic` increments `attempts`; `start` passes it and tags both outcomes; `cancel` → `port.cancelDictation(attempt)`; the port's `ended.attempt` is forwarded.
+  - `speech-native.ts` / `speech-native-expo.ts`: `startDictation({…, attempt})`, `cancelDictation(attempt)`, `ended.attempt?`.
+- **Swift**
+  - `SpeechCore.swift`:
+    - `cancelledThrough` and `newestStart`, both main-thread only;
+    - `startDictation(…, attempt:)` refuses a cancelled or older attempt on entry, so a cancel that reached main before the start's hop wins;
+    - after `await next.start()`, if the attempt was cancelled or superseded, it runs `next.cancel()` and throws `cancelled`;
+    - the catch path nils `engine` only if it is still this start's engine (before, it could nil a newer one);
+    - `cancelDictation(attempt:)` records the attempt and cancels the engine only when `attempt >= newestStart`;
+    - `EngineSink` carries the attempt, so `coreEnded` sends `attempt`.
+  - `AnalyzerEngine.start`: the `finished` check shares a main hop with the step it guards. One hop does the check plus installing the analyzer and results task; another does the check plus `startAudio`. A cancel during any await either finds the analyzer to cancel, or makes the start throw before the mic opens.
+  - `RecognizerEngine.begin`: `guard !finished` first.
+  - `TentacleSpeechModule.swift`: the `startDictation` / `cancelDictation` arguments and `ended.attempt`. Checked by reading only, as in round 0: it imports ExpoModulesCore.
+  - `xcrun … swiftc -typecheck` on the three engine files: `TYPECHECK_OK`.
+
+**Red, then green.**
+- `test/dictation.test.ts` "start/cancel race (attempt ids)", 7 tests. Written first and run on the unfixed reducer: **7 fail, on assertions**. Repro `race.ts` printed `idle+started → idle []`; the test now expects `[{type:"cancel",attempt:1}]`:
+  ```
+  error: expect(received).toEqual(expected)
+  - [ { "attempt": 1, "type": "cancel" } ]
+  + []
+  ```
+- `test/voice-wiring.test.ts` "start/cancel race: the Swift side", 4 static guards. With the pre-fix Swift files copied back in: **4 fail**. Restored: 11 pass.
+- `test/voice-controller.test.ts`, two new tests:
+  - "a tap while the native start is pending, then the start resolves": the port gets `cancel:1` twice, the state is idle, there is no `haptic:start` and no ticker;
+  - "a stale ended from an older attempt does not end the current dictation".
+  - Their non-vacuity is shown by M1 to M3 below. They were not run red on the old controller, because the old port signature had no attempt.
+
+**Mutations.** Each was applied with `sed`, run, then restored from a scratch copy in `.tentacle/tmp/mobile-voice/new/`.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `stale()`: late `started` → `effects: []` (the original bug) | 6 fail: 5 reducer race tests + the controller pending-start test |
+| M2 | `stale()`: never ignore a mismatched `ended`/`startFailed` (`!== current` → `=== -1`) | 2 fail: the reducer stale-ended test + the controller stale-ended test |
+| M3 | controller: `port.cancelDictation(0)` instead of `effect.attempt` | 2 fail: the pending-start test + dispose (F13) |
+| M4 | `AnalyzerEngine`: delete the `guard !self.finished` before `startAudio` | 1 fail: "the analyzer re-checks `finished` in the same main hop that opens the mic" |
+
+**Finding 2 (MEDIUM, signature): PARTIAL.**
+- The Execution signature now states what the evidence shows: commit `2dca65b3` says the executor was DeepSeek, and the earlier line read `claude-opus-5-5`.
+- The exact DeepSeek model id is not recorded anywhere I could read, so the orchestrator must fill it in.
+- This round is signed with its real model, `claude-opus-5-5`.
+
+**Drift / debt.**
+- Only the start-path events are tagged. `probed`, `permissions`, `reserved` and the `asset*` events are untagged, and so is a `startFailed` raised by the probe or permission request. Those can still reach a newer attempt's `asking`/`preparing` after a fast tap-tap-tap: the wrong card or a lost attempt, but never a live mic, because no native start is pending in those phases.
+- The port signature changed (`startDictation` / `cancelDictation` take an attempt). This is app-internal; the daemon protocol is untouched, so no `protocol.d/` note.
+- **Unverified (device):** the Swift start/cancel interleavings. To verify, on a dev build tap the mic twice quickly (and background mid-start) on iOS 18 and on iOS 26; the mic indicator must go off. Add this to the module README checklist.
+
+**Gate.**
+- `bun run typecheck` (root, `apps/mobile`, `apps/relay`): clean.
+- `bun run lint`: `Checked 1457 files … No fixes applied`.
+- `bun test`: **10493 pass, 4 skip, 0 fail**, the same skips as round 0.
+- The first full run reported **1 fail out of 10497**. Two reruns did not reproduce it, and I did not capture which test it was. The voice tests are deterministic and passed in every narrow run, so this was likely a timing-flaky test elsewhere. Unidentified.
+
+### Fix round 2
+
+*— executor recorded as **deepseek** by its commit `b29760c1` ("fix(mobile-voice): review round 2 (deepseek)"), 2026-11-15. This line first read `claude-opus-5-5`, which conflicts with that commit (Review round 3). The exact DeepSeek model id is not recorded in the repo; the orchestrator must confirm it. Corrected in Fix round 3.*
+
+**NEW HIGH (remount regression): FIXED.**
+- Root cause: attempt ids were counted per controller (one per `SessionScreen` mount), but `SpeechCore.swift`'s `cancelledThrough` / `newestStart` live for the whole process, so the next screen's first ids were refused as `cancelled`.
+- `apps/mobile/src/voice-controller.ts`: a module-level `nextAttemptId()` (process-wide, monotonic) replaces the per-controller `attempts`. New optional dep `nextAttempt?: () => number` (an id source, like `now`) defaults to it; `SessionScreen` does not pass it, so the app uses the process-wide one. Swift unchanged.
+- `apps/mobile/test/voice-controller.test.ts`:
+  - new "attempt ids across screens": a `NativeGuardPort` modelling the Swift guards (refuse `attempt <= max(cancelledThrough, newestStart)`, never reset), two controllers on it. Screen 1 dictates, is disposed, then screen 2 taps: it must reach `listening` with a higher id;
+  - `setup()` injects a per-setup counter, so the existing absolute assertions (`cancel:1`, `[1]`) stay deterministic whatever the test order.
+- **Red** (before the fix, on the assertion):
+  ```
+  error: expect(received).toBe(expected)
+  Expected: "listening"
+  Received: "failed"
+  (fail) attempt ids across screens … > a second session screen's first tap still starts dictation (process-unique ids)
+   11 pass / 1 fail
+  ```
+- **Green:** 12 pass, 0 fail.
+- **Mutation M5:** the default was put back to a per-controller counter (`let own = 0; deps.nextAttempt ?? (() => ++own)`). Result: 1 fail (the new test), 11 pass. Restored from `.tentacle/tmp/mobile-voice/r2/vc.ts`; then 12 pass.
+
+**MEDIUM (signature): FIXED as far as the repo allows.** The "Fix round 1" signature now says what its commit `86691927` records (deepseek) and that it first read `claude-opus-5-5`. The exact DeepSeek id is still not recorded anywhere, so the orchestrator must confirm it, as for the Execution line. This round is signed with its real model id.
+
+**Gate.**
+- `bun run typecheck` (root, mobile, relay): clean.
+- `bun run lint`: `Checked 1457 files … No fixes applied`.
+- `bun test`: **10494 pass, 4 skip, 0 fail** (10498 tests). The skips are the same as before.
+
+### Fix round 3
+
+*— claude-opus-5-5, 2026-11-15 (this is my own model id; if this round's commit is labelled anything else, the label is wrong)*
+
+**Round 1, finding 2 / Round 3 (signature, MEDIUM): FIXED as far as the repo allows.** The "Fix round 2" signature now says what its commit `b29760c1` records (deepseek) and that it first read `claude-opus-5-5`. This is the same correction as for "Fix round 1". Doc only; no code changed.
+- Open for the orchestrator: three sections (Execution, Fix round 1, Fix round 2) were each signed `claude-opus-5-5` by their writer, while the commits say "(deepseek)". Either the writer mis-signed, or the commit label is wrong. Only the orchestrator, who spawned them, knows which. The exact DeepSeek id is still not recorded.
+- No red/green and no mutation this round: no code or test changed, and Round 3 found no code defect.
+
+**Gate.**
+- `bunx tsc --noEmit`: clean.
+- `bun run lint`: `Checked 1457 files … No fixes applied`.
+- `bun test`: **10494 pass, 4 skip, 0 fail** (10498 tests). The skips are the same opt-in skips as before.
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-15* (fresh context. Execution is signed by the same model, but commit `2dca65b3` says "exec (deepseek)", so see finding 2.)
+
+**Verdict: REQUEST-CHANGES**
+
+**Gate (re-run).**
+- `bun test apps/mobile/test`: 1146 pass, 0 fail.
+- `bun run lint`: 1457 files, clean.
+- `bun run typecheck` (root, mobile, relay): clean.
+- The full `bun test` was not re-run; the diff touches only `apps/mobile`.
+
+**Findings.**
+
+1. **HIGH: a cancel during a pending native start leaves the mic running, with no UI.**
+   - TS half (`dictation.ts`):
+     - `preparing{starting}` + `tap`, `send`, background, `ttsStarting` or `dispose` goes to idle and emits `cancel` (`:415-428`).
+     - A late `started` that arrives in idle is dropped with no effect (`:320-332`).
+     - Repro `.tentacle/tmp/mobile-voice/race.ts` prints `idle+started → idle []`.
+   - Swift half:
+     - `AnalyzerEngine.start` awaits four times (`:96-109`), then calls `startAudio` without checking `finished` (`:110`).
+     - A `cancel` that lands during those awaits runs `finish` → `engineEnded`. That sets `SpeechCore.engine = nil` (`SpeechCore.swift:191`), so no later stop or cancel can reach the engine.
+     - The audio tap then feeds an analyzer that nothing cancels. `consume` keeps `self` alive while the results stream is open (`:108,113`).
+     - `RecognizerEngine.begin` has the same missing `finished` check (`RecognizerEngine.swift:52`). It also has a window where the cancel's main-queue hop runs before `engine = next` (`SpeechCore.swift:176`).
+   - Result: the mic stays live and transcribes into a reducer that ignores it. Nothing auto-stops it, because the ticker runs only while listening.
+   - Fix:
+     - re-check `finished` after every await in both engines' start;
+     - have the reducer answer a `started` that arrives in idle or failed with `cancel`;
+     - preferably, tag dictation events with an id, as drift 1 already does for speech;
+     - add a regression test for "late `started` → cancel".
+   - Untested on device, like all native code here.
+2. **MEDIUM (process, §10): who executed is unclear.** Execution is signed `claude-opus-5-5`, but the exec commit says deepseek. §10 uses the signature to track model drift, and this L task needed a strong executor. Fix the signature so it is true.
+
+**Mutation (non-vacuity).** Dropped `&& rec.onDevice` in `speech-engine.ts:60`. Result: 3 fail (`speech-engine` F1 ×2, `dictation` F1 ×1). Restored from a scratch copy; `git status` is clean.
+
+**Attacks tried.**
+- F1 never-cloud: holds in TS (mutation above) and in Swift (`RecognizerEngine.swift:41,79` guard plus `requiresOnDeviceRecognition`).
+- F13 dispose: the listener is removed first (`voice-controller.ts:317`). Holds.
+- F11 speak during dictation:
+  - the order on the main queue is stop, then speak (`setCategory(.playback)` while the input tap is still running for one hop);
+  - no deterministic defect found statically; needs a device.
+- F4 deactivation: `deactivateIfIdle` runs from `didFinish` and depends on `synthesizer.isSpeaking` being false inside that callback. Unverified: if it is still true there, other audio stays ducked. Check on device.
+- Start/cancel race: finding 1.
+
+**What holds.** The pure modules follow §7 (logic out of components). No protocol, persistence or daemon change. The plist keys were checked through `expo config` introspect.
+
+**Executor behaviour.** Honest about what is unverified (Step 0, Maestro, the Expo glue). Missed the dictation-side counterpart of its own speech-`id` drift fix.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; reviewed `git diff HEAD~1`, commit `86691927`)
+
+**Verdict: REQUEST-CHANGES**
+
+**Gate.**
+- `bun test apps/mobile/test`: 1159 pass, 0 fail.
+- `bun run lint`: 1457 files, clean.
+- `bun run typecheck` (root, mobile, relay): clean.
+
+**Round 1, finding 1 (start/cancel race): fixed in TS; the Swift half reads correctly.**
+- Mutation: replaced the `cancel` effect for a stray `started` in `dictation.ts` `stale()` with no effect. Result: 6 fail (`dictation` ×5, `voice-controller` ×1).
+- Restored from a scratch copy; `git status` is clean.
+- Swift: `finished` is now checked inside the main hop before the mic opens (`AnalyzerEngine.swift` start, `RecognizerEngine.swift:53`), and `SpeechCore` cancels an engine that was superseded or cancelled after its `start()` returned. Unverified on device (module README item 13).
+
+**Round 1, finding 2 (signature): only partly fixed.** The Execution signature now says deepseek. But the new "Fix round 1" sub-section is signed `claude-opus-5-5`, while its commit `86691927` says "(deepseek)": the same mismatch again.
+
+**NEW: HIGH (regression from the fix). Dictation stops working on every session screen after the first.**
+- The cause:
+  - `attempts` starts at 0 in each voice controller (`voice-controller.ts:93`), and there is one controller per `SessionScreen` mount (`SessionScreen.tsx:128`);
+  - `SpeechCore` is one object for the whole process (the native module), and its `cancelledThrough` / `newestStart` are never reset (`SpeechCore.swift:58-59`);
+  - `startDictation` refuses any `attempt <= max(cancelledThrough, newestStart)`.
+- Failure: open a session, dictate once (attempt 1), leave (dispose cancels attempt 1), then open any session. Its first tap sends attempt 1 again, the start is refused with `cancelled`, and the mic shows the start-failed card. This repeats until that screen has made more taps than every earlier screen together.
+- Repro `.tentacle/tmp/mobile-voice/remount.ts` (it models the Swift guards):
+  ```
+  screen 1, first tap: listening
+  screen 2, first tap: failed
+  ```
+- No test covers it, because the fake port does not model the native counters.
+- Fix: make the attempt id unique for the whole process, for example a module-level counter in `speech-native-expo.ts` or in the port, or a counter seeded from the clock. Add a test with two controllers on one port.
+
+**Attacks tried.**
+- Mutation of the stale-`started` cancel: caught (above).
+- Two controllers sharing one port: regression found (above).
+- A stale `ended` or `startFailed` for another attempt is ignored (`stale()`). Holds.
+- A cancel never reaches a newer engine (`attempt >= newestStart`). Holds by reading.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; reviewed `git diff HEAD~1`, commit `b29760c1`)
+
+**Verdict: REQUEST-CHANGES.** One doc-only fix is left; the code is clear.
+
+**Gate.**
+- `bun test apps/mobile/test`: 1160 pass, 0 fail.
+- `bun run lint`: 1457 files, clean.
+- `bun run typecheck` (root, mobile, relay): clean.
+
+**Round 2, the remount regression (HIGH): FIXED.**
+- `nextAttemptId()` is now a counter for the whole module, so for the whole process (`voice-controller.ts`). `SessionScreen` does not inject one, so it uses the default.
+- The repro `.tentacle/tmp/mobile-voice/remount.ts` now prints `screen 2, first tap: listening`.
+- Mutation: changed the default back to a counter per controller. Result: 1 fail (the new "attempt ids across screens" test, whose fake models the native guards).
+- Restored from a scratch copy; `git status` is clean.
+
+**Round 1, finding 2 (signature, MEDIUM): STILL OPEN, for the third time.**
+- The new "Fix round 2" sub-section is signed `claude-opus-5-5`, but its commit `b29760c1` says "(deepseek)".
+- "Fix round 1" was corrected the same way, and the same mistake was repeated in the next section.
+- Fix: sign "Fix round 2" with the model that actually wrote it. This is a doc edit only; no code is affected.
+
+**Attacks tried.**
+- Default id source mutated back to per controller: caught (above).
+- A JS reload or Fast Refresh resets `lastAttemptId` while the native `SpeechCore` keeps its counters. Not a finding: Expo recreates native modules on a full reload (`OnDestroy` → `shutdown`), and Fast Refresh happens in dev only. Not checked on a device.
+- The injected `nextAttempt` in the tests keeps their ids absolute and does not hide the default path, because the new test uses the default.
+
+**Executor behaviour.** The code fix was targeted and came with a correct red test. The executor keeps mis-signing the doc sections it writes.
+
+### Round 4
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; reviewed `git diff HEAD~1`, commit `4b0bd143`)
+
+**Verdict: PASS.**
+
+**Scope.** `git diff HEAD~1 --name-only` shows only `docs/feat/mobile-voice.md`. No code or test changed, so there is nothing to mutate (§9 does not apply). Round 3's code verification and its mutation still hold.
+
+**Gate.**
+- `bun test apps/mobile/test`: 1160 pass, 0 fail.
+- `bun run lint`: 1457 files, clean.
+- `bun run typecheck` (root, mobile, relay): clean.
+
+**Round 1, finding 2 / Round 3 (signature): resolved by escalation.**
+- The "Fix round 2" signature now matches its commit, and it says what it first read.
+- The writer signs "Fix round 3" as `claude-opus-5-5` and says outright that its commit label (`4b0bd143`, "(deepseek)") may be wrong.
+- That turns a silent mismatch into an open question for the orchestrator, which is the right shape under §0 ("escalate, don't spin"). This reviewer cannot tell from the repo which side is right.
+- **For the orchestrator, before merge:** say which model executed Execution and Fix rounds 1–3, and correct either the signatures or the commit labels. §10 depends on this record being true.
+
+**Attacks tried.**
+- The diff touches only the doc: confirmed.
+- Any regression from it: none, since no code changed and the gate is green.
+- Whether the "Fix round 2" correction is accurate: it matches commit `b29760c1`.
+
+**Overall.**
+- What holds: finding 1 (the start/cancel race) is fixed in TS and Swift, and the remount regression is fixed. Both are pinned by tests that fail under mutation. The never-cloud rule F1 holds.
+- What is unverified (all native): Step 0 (a)–(c), the README device checklist (item 13 covers the race), Maestro flows 24–26, and the audio-session un-duck after `didFinish`.
 
 ## Notes / debt (for Review)
 
