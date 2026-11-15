@@ -684,6 +684,35 @@ The fix tags every attempt with an id, taking the reviewer's preferred option, w
 - A stale `ended` or `startFailed` for another attempt is ignored (`stale()`). Holds.
 - A cancel never reaches a newer engine (`attempt >= newestStart`). Holds by reading.
 
+### Round 3
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; reviewed `git diff HEAD~1`, commit `b29760c1`)
+
+**Verdict: REQUEST-CHANGES.** One doc-only fix is left; the code is clear.
+
+**Gate.**
+- `bun test apps/mobile/test`: 1160 pass, 0 fail.
+- `bun run lint`: 1457 files, clean.
+- `bun run typecheck` (root, mobile, relay): clean.
+
+**Round 2, the remount regression (HIGH): FIXED.**
+- `nextAttemptId()` is now a counter for the whole module, so for the whole process (`voice-controller.ts`). `SessionScreen` does not inject one, so it uses the default.
+- The repro `.tentacle/tmp/mobile-voice/remount.ts` now prints `screen 2, first tap: listening`.
+- Mutation: changed the default back to a counter per controller. Result: 1 fail (the new "attempt ids across screens" test, whose fake models the native guards).
+- Restored from a scratch copy; `git status` is clean.
+
+**Round 1, finding 2 (signature, MEDIUM): STILL OPEN, for the third time.**
+- The new "Fix round 2" sub-section is signed `claude-opus-5-5`, but its commit `b29760c1` says "(deepseek)".
+- "Fix round 1" was corrected the same way, and the same mistake was repeated in the next section.
+- Fix: sign "Fix round 2" with the model that actually wrote it. This is a doc edit only; no code is affected.
+
+**Attacks tried.**
+- Default id source mutated back to per controller: caught (above).
+- A JS reload or Fast Refresh resets `lastAttemptId` while the native `SpeechCore` keeps its counters. Not a finding: Expo recreates native modules on a full reload (`OnDestroy` → `shutdown`), and Fast Refresh happens in dev only. Not checked on a device.
+- The injected `nextAttempt` in the tests keeps their ids absolute and does not hide the default path, because the new test uses the default.
+
+**Executor behaviour.** The code fix was targeted and came with a correct red test. The executor keeps mis-signing the doc sections it writes.
+
 ## Notes / debt (for Review)
 
 *— claude-opus-5-5, 2026-11-15*
