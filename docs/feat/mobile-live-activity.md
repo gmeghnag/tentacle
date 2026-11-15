@@ -585,3 +585,52 @@ announce; no `protocol.d/` note, because no schema changed; `protocol.json` was
 not regenerated, because nothing it is derived from moved.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES. Nothing to approve: no code was built. The
+executor was right to stop.**
+
+`git diff main...HEAD` is this doc alone (+99 lines of Execution). None of the
+L0–L12 slices exist, so there were no §7 invariants, failure modes or new tests
+to attack, and no mutation to run.
+
+**Premise check (were the executor's blocking claims true?):**
+
+| claim | result |
+|---|---|
+| branch is 305 commits behind `main` | TRUE (`git rev-list --count HEAD..main` → 305) |
+| only this doc differs from `88f5a8f9` | TRUE (`git diff --stat 88f5a8f9 HEAD` → this doc only) |
+| `push-notifier.ts`, `push-seal.ts`, `relay-link.ts` missing here, present on `main` | TRUE (Glob finds none here; `git cat-file -t main:<path>` → blob for each) |
+| `onPushEvent` absent from `hosted-session.ts` | TRUE (0 matches) |
+| `gate.hold()` takes no budget | TRUE (`apps/mobile/src/foreground-gate.ts:68` `function hold(): Promise<void>`) |
+
+**Gate:** `bun run lint` passes: 1292 files checked, nothing to fix.
+`bun run typecheck` passes. `bun test` was not re-run: no code changed, and the
+executor's run (9317 pass, 3 opt-in skips, 0 fail) describes the base this
+branch already has.
+
+**Findings:**
+1. **MEDIUM — the branch can't carry this feature.** It is cut before tasks 16
+   and 17 (doc:4, :67 still say "resume on `main` @ `88f5a8f`"). The
+   orchestrator must re-cut it from current `main` (`b44766f8`) and carry this
+   doc across (option (a)), then re-check the line numbers the plan cites
+   (e.g. `hosted-session.ts:1948-1963`) against that base before L0.
+2. **MEDIUM — who wrote the Execution section is unclear.** Commit `b5622d6a`
+   is titled "exec (deepseek)", but the section is signed `claude-opus-5-5`.
+   §10 needs an honest signature so drift by model can be tracked. Whoever
+   re-issues the task must fix one or the other.
+
+**Attacks tried:** (1) checked whether the "blocked" claim was just a misread
+line number. It is not: the line numbers match, but the hook is missing. (2)
+looked for any code change slipped in beside the doc: none. (3) checked whether
+the stop hid a change that broke the gate: lint and typecheck are clean.
+
+**Executor behaviour:** correct and disciplined. It applied the brief's
+load-bearing STOP instead of building on code that isn't there. It wrote no
+code, ran the gate so the result was measured, and escalated with one specific
+decision for the orchestrator.
+
+**Same model family?** The section is signed by the same model family as this
+reviewer, so blind spots may be shared. For this doc-only round that risk is
+low.
