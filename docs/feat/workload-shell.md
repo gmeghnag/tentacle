@@ -952,7 +952,297 @@ pasted into Execution.
 
 ## Execution
 
-*(empty)*
+*— claude-sonnet-4-5-20250929, 2026-11-15*
+
+### Load-bearing check (ran FIRST, as required)
+
+The plan's one still-unverified fact was **WS2 step 0**: does
+`command eval '<syntax error>'` leave dash / busybox ash / bash alive? It does —
+and this is what the whole framing rests on:
+
+```
+=== alpine ===            (busybox ash)
+sh: eval: line 1: syntax error: unexpected end of file (expecting "then")
+RC_AFTER_SYNTAX_ERROR=2
+ALIVE_AFTER_SYNTAX_ERROR
+RC_AFTER_CD=0
+PWD=/etc P=7 Q=9
+ALIVE_AFTER_CD
+sh: eval: line 6: this-command-does-not-exist-xyz: not found
+RC_AFTER_NOTFOUND=127
+ALIVE_AFTER_NOTFOUND
+=== debian:stable-slim === (dash)
+sh: 1: eval: Syntax error: end of file unexpected (expecting "then")
+RC_AFTER_SYNTAX_ERROR=2 / ALIVE_AFTER_SYNTAX_ERROR / PWD=/etc P=7 Q=9 / RC_AFTER_NOTFOUND=127
+=== ubi9/ubi-minimal ===   (bash)
+sh: eval: line 2: syntax error: unexpected end of file
+RC_AFTER_SYNTAX_ERROR=2 / ALIVE_AFTER_SYNTAX_ERROR / PWD=/etc P=7 Q=9 / RC_AFTER_NOTFOUND=127
+```
+
+Recipe at `.tentacle/tmp/workload-shell/recipe.sh`, run as
+`podman run --rm -i <img> sh < recipe.sh`. **All three dialects keep the shell
+alive** after a syntax error and after a not-found, and `cd`/`export` persist.
+
+> **Note on the first attempt.** The first recipe I wrote had a quoting bug of
+> its own (`printf "…'\n"` inside a double-quoted line), so `sh` reported
+> "unterminated quoted string" and died with exit 2 on all three images. That
+> was my script's error, not `eval`'s. The corrected recipe above is the
+> evidence; the lesson is that this check is only meaningful when the harness
+> itself is verified first.
+
+Also verified against the real code path (see *Live end-to-end* below): the same
+behaviour on real `alpine` under podman.
+
+### WS1 — the raw exec primitive (DONE)
+
+- `packages/k8s/src/exec-raw.ts` (new): `rawExec(ws, handlers)` over
+  `WebSocketLike`. stdout/stderr are handed out as **bytes** (never decoded — a
+  NUL and a split multi-byte sequence survive), stdin is `[0, …bytes]` with **no**
+  appended newline, channel 3 is accumulated and parsed with the existing
+  `parseKubeStatus`, and the ping/pong heartbeat closes after 2 silent ticks
+  (after a first pong). Writes queue until `open`. Late `setOnEnd` handlers get
+  the end at once.
+- `packages/k8s/src/client.ts`: `KubeClient.openRawExec` — `buildExecUrl` +
+  `makeWebSocket` + `rawExec`, three lines, exactly as the plan predicted.
+  `packages/k8s/src/index.ts`: re-export.
+- `packages/docker/src/exec-raw.ts` (new): `rawExec(conn, target, handlers)` =
+  `createExec` → `hijack(execStartRequest)` → `StdDemux` (bytes) → `inspectExec`
+  for the REAL `ExitCode`. Setup is async but `write` is synchronous, so bytes
+  are queued until the hijack resolves; a setup failure arrives as the stream's
+  single `end` with `error`, never a throw.
+- `packages/docker/src/client.ts`, `index.ts`: `openRawExec` + re-export.
+- `packages/cli/src/engine-host.ts`: `EngineRawExec`, `EngineRawExecEnd` and
+  `openRawExec` on the seam (additive; `openExec`/`runExec` untouched).
+  `engine-k8s.ts` / `engine-docker.ts`: the pass-throughs, plus `openRawExec` on
+  `PodCluster` / `DockerClientLike`. Test fakes: throwing stubs.
+- Tests: `k8s/test/exec-raw.test.ts` (11), `docker/test/exec-raw.test.ts` (8).
+
+**Mutations (both killed):** appending `\n` to the raw k8s stdin writer → red
+(`stdin frames are [0, ...bytes] with NO appended newline`); decoding stdout per
+message/frame in either engine → red (`split UTF-8 and NUL survive`). The docker
+one only died after I **strengthened** the test: splitting `é` *inside one
+frame* passes even under a per-chunk decoder, because a frame is a whole
+`Uint8Array`. Splitting it **across two frames** is what proves the byte path.
+
+### WS2 — the pure frame, the registry, the tool, the keyed grants (DONE)
+
+- `packages/tools/src/workload-shell-frame.ts` (new, pure): `makeNonce`,
+  `escapeSingleQuoted`, `bootstrapLine`, `commandLine`, `parseReady`,
+  `CaptureWindow` (32 KiB head + 32 KiB tail + dropped count, binary detection),
+  `FrameParser` (an incremental **byte** scanner with an explicit `flush()`),
+  `killTreeScript`, `resultText`.
+- `packages/tools/src/workload-shell.ts` (new): `targetKey`, the
+  `WorkloadShellBackend` seam, `WorkloadShells` (lazy open, one shell per key, the
+  cap of 4, the idle close, the timeout ladder, `dispose`) and the tool.
+- `packages/tools/src/move-session.ts`: exports `WORKLOAD_PART` /
+  `WORKLOAD_PART_MAX` so both tools accept exactly the same grammar.
+  `index.ts`: exports.
+- `packages/cli/src/workload-shell-backend.ts` (new): `LaptopWorkloadShellBackend`
+  over `buildEngineHost`, hosts **pinned per `(engine, namespace)`** for the
+  session's life, `explain` via `dialVerdict` → `execError` → the distroless text.
+- `packages/cli/src/wiring.ts`: `workloadShell?: { backend }` on
+  `BuildAgentOptions`, `workloadShells?` on `WiredAgent`; registered only when
+  the option is present. `worker.ts` and `createServeAgent` pass it;
+  `tunnelledAgent` never does.
+- `packages/agent/src/session-grants.ts`: `workloadPrefixes: Map<targetKey, …>`.
+  `covers` reads it, returns **true for `action: "close"`** (nothing to
+  authorize), and `remember` **returns without storing** when there is no
+  derivable prefix — it never reaches `grantedTools`. `clear()` empties it.
+- `packages/agent/src/permission-gate.ts`: the `workload_shell` prompt case
+  (title, `where $ command` detail, and a suggestion **only when the prefix
+  would actually cover the command**).
+- `packages/tui/src/permission-ui.ts`: `… on this workload`, and **no "always"
+  option at all** without a suggestion.
+- `packages/daemon/src/session-host.ts`, `hosted-session.ts`: `workloadShells` on
+  the factory return, `AgentReuse`, `reusable()`, `HostedSession.workloadShells`
+  and the three teardown sites.
+- Tests: `tools/test/workload-shell-frame.test.ts` (29),
+  `tools/test/workload-shell.test.ts` (20), `agent/test/session-grants.test.ts`
+  (+6), `tui/test/permission-workload-shell.test.ts` (4),
+  `cli/test/workload-shell-wiring.test.ts` (4),
+  `daemon/test/workload-shell-teardown.test.ts` (3).
+
+**Mutations (killed):** no cap → red; `dispose` closing without the kill one-shot
+→ red; dropping the `[new shell …]` reset notice → red; registering the tool
+unconditionally (the pod-daemon drift, eval risk 6) → 3 red; removing the
+session-end dispose → 2 red; a capture window that never drops → red; no
+leading-newline strip → red; a parser with no marker carry → red; the **grant
+bleed pair** (a no-suggestion "always" becoming a session-wide grant, plus
+`covers` falling through to `grantedTools`) → 2 red. Each half of that pair is
+invisible alone, which is why the test drives the real `remember`→`covers`
+sequence.
+
+### WS3 — the ladder, close and the live row (DONE)
+
+- The timeout ladder: TERM tree → probe → KILL tree → probe → close with
+  `includeSelf` and a restart notice. The probe is a **marker-only** `printf`
+  line (no `command eval`), so nothing can run twice; a shell stuck in a builtin
+  loop cannot answer it, which is exactly how "restarted" is detected.
+- Idle close (15 min, `unref`'d, injectable timers) and the owed `[new shell …]`
+  notice. Keepalive: **not sent** by the primitive and not used by the registry —
+  see *Drift* below.
+- Live end-to-end against a real podman `alpine` container, through the REAL
+  `DockerClient.openRawExec` + `WorkloadShells` (script +
+  output in `.tentacle/tmp/workload-shell/live.ts`):
+
+| # | command | exit | cwd | result |
+|---|---|---|---|---|
+| 1 | `cd /etc; X=42; export X` | 0 | `/etc` | — |
+| 2 | `pwd; echo X=$X` | 0 | `/etc` | `/etc` + `X=42` — **state persisted** |
+| 3 | `if` | 2 | `/etc` | the syntax error, shell alive |
+| 4 | `echo alive; echo X=$X; pwd` | 0 | `/etc` | `alive`, `X=42`, `/etc` |
+| 5 | `head -c 200 /dev/urandom` | 0 | `/etc` | `[binary output: 200 bytes not shown …]` |
+| 6 | `yes 0123456789 \| head -c 3000000` | 0 | `/etc` | `dropped=2934464` |
+| 7 | `sleep 600` (timeout 3 s) | 143 | `/etc` | `[killed after 3s: …the shell (cwd/env) survived]` |
+| 8 | `echo X=$X; pwd` | 0 | `/etc` | `X=42`, `/etc` — **survived the kill** |
+| 9 | `while :; do :; done` | 0 | `/` | `[killed after 3s; shell restarted — cwd/env reset]` |
+| 10 | `echo X=$X; pwd` | 0 | `/` | `X=` , `/` — state really gone, and **said so** |
+| 11 | `exit` | 1 | `/` | `[shell exited (exit/exec/set -e) — next run opens a new shell]` |
+| 12 | `echo fresh` | 0 | `/` | `fresh` + `[new shell …]` |
+
+  Every case the plan listed for WS3 passes on a real engine. `dispose` at the
+  end closed the container's shell.
+- `changelog.d/workload-shell.added.md`.
+
+**Mutation (killed):** sending a keepalive while `running` — see *Drift* (the
+keepalive was removed, so the mutation target no longer exists; the invariant is
+pinned instead by "the probe is marker-only").
+
+### Drift from the Implementation (and why)
+
+1. **`parseKubeStatus` was already exported** (`k8s/src/exec-run.ts:77`), so the
+   planned "export it (no behaviour change)" row was a no-op. No edit made.
+2. **The idle keepalive (`:\n` every 15 s while `ready`) is NOT implemented.**
+   The plan (D3) says to send it; the plan's own D1 says the *primitive* must not,
+   "because a line queued during a command would run after it". Implementing it
+   in the registry needs a `ready ⟺ running` state machine that stays correct
+   across a *drop*, and a `:\n` written between commands is executed as a no-op
+   but is **indistinguishable from a command line** by the parser — the plan's
+   own WS3 mutation target ("send keepalive while `running` → red") is exactly the
+   bug that design invites. What protects the stream instead: the k8s socket's
+   own ping heartbeat (D1, implemented and tested) and the docker connection's
+   own liveness. The *gap*: a docker exec idle for >15 min may be cut by the
+   engine — the shell then ends, the next `run` reports `[new shell …]` honestly.
+   Recorded as debt below rather than shipped as a half-correct timer.
+3. **`EngineRawExec` lives on the seam, not as `ByteDuplex`** (`write` +
+   `setOnStdout`/`setOnStderr`/`setOnEnd`/`close`, as the plan's D1 actually
+   specified). `ByteDuplex` has no stdout/stderr split, so it could not carry
+   two streams.
+4. **The kill script walks ancestry, not a breadth-first frontier.** The first
+   version (a queue of pids) was ~40 lines of POSIX shell whose `sed`
+   backreference got mangled by the generator; a per-process ancestry walk is
+   shorter, needs no queue, and is what I could verify live. **It also needed a
+   self-exclusion guard** (`[ "$__tnt_p" = "$$" ] && continue`): the script runs
+   *inside* the shell, so it is itself a descendant of the target — the first live
+   run killed the script itself mid-walk and left the children alive. Found by
+   running it, not by reading it; pinned by a test.
+5. **`HostedSession.workloadShells` is a public field set after construction**,
+   not a constructor argument: the constructor is positional with 13 parameters,
+   and `grants`/`imagesPolicy`/`hop` already follow the field pattern.
+6. **The `[new shell …]` notice is owed, not inferred.** A drop, an idle close
+   and a restart all leave a key with no shell; the next `run` would otherwise
+   open silently and the model would trust state that is gone. `owedNotice`
+   carries it.
+7. **A suggestion is only offered when the rule would actually cover the
+   command.** `suggestShellPrefix` returns `echo` for `echo $(rm -rf /)`, but
+   `commandCoveredByPrefixes` refuses anything with a substitution — so the
+   generic path would have shown "don't ask again for `echo`" for a rule that
+   never applies. The tool's prompt case filters on
+   `commandCoveredByPrefixes(command, [prefix])`.
+8. **`WorkloadShellAborted`** is a new error type: an aborted turn must report
+   the abort *and* the ladder's notices, and `ToolResult` has no field for both.
+   The tool maps it to `aborted` + the notices, `isError: true`.
+9. **The engine layer is loaded ON DEMAND, via a new async `prime()` on the
+   backend seam.** This was found by the gate, and it is the most important
+   drift: a *static* `import` of `workload-shell-backend.ts` in `worker.ts`
+   **silently killed the worker's RPC peer**. `worker-version-marker.test.ts`
+   timed out (no error, no message — the Worker simply never answered), and 6
+   other `cli` tests failed with it. `engine-select.ts` reaches
+   `@tentacle/docker`'s and `@tentacle/k8s`'s cleanup modules (the `Bun.spawn`
+   delete exit net), and pulling that graph into the worker bundle was fatal.
+   It took the narrow run (`packages/cli` alone) to see it: the per-package
+   green runs hid it, and my first three hypotheses (the option, a cycle, the
+   constructor) were all wrong. The fix is a dynamic `import()` inside the
+   backend plus `prime(target)` on the seam — the registry awaits it before
+   `open`, so `open`/`oneShot` stay synchronous (the bootstrap line is written
+   the moment a shell opens). `worker.ts`'s module graph is now byte-identical
+   to `main`'s.
+   **Lesson for Review:** a new static import in `worker.ts` is a load-bearing
+   change, not a wiring detail. `worker-version-marker.test.ts` is the alarm.
+
+### Mutation summary (all planned targets, and the extras)
+
+Every row was applied, the narrow suite run, and the file restored.
+
+| # | mutation | result |
+|---|---|---|
+| 1 | k8s raw writer appends `\n` (the RPC framing mistake) | **killed** (2 red) |
+| 2 | k8s per-message decode of channel bytes | **killed** (1 red) |
+| 3 | docker per-frame decode of stdout/stderr | **killed** (1 red, after strengthening) |
+| 4 | no cap on open shells | **killed** (1 red) |
+| 5 | `dispose`/`close` without the kill one-shot | **killed** (2 red) |
+| 6 | drop the `[new shell …]` reset notice | **killed** (2 red) |
+| 7 | register `workload_shell` unconditionally (pod-daemon drift) | **killed** (3 red) |
+| 8 | remove the session-end dispose | **killed** (2 red) |
+| 9 | capture window never drops | **killed** (1 red) |
+| 10 | no leading-newline strip | **killed** (1 red) |
+| 11 | parser with no marker carry | **killed** (1 red) |
+| 12 | kill script without the self-exclusion guard | **killed** (1 red, added after the live finding) |
+| 13 | grant bleed PAIR: a no-suggestion "always" → session-wide + `covers` falling through | **killed** (2 red) |
+| 14 | suggestion offered when the rule cannot cover the command | **killed** (`permission-workload-shell`) |
+| 15 | keepalive while `running` | **n/a — see Drift 2** (no keepalive is sent) |
+
+Two mutations needed the *test* fixed before they died, which is the point of
+mutating: #3 (splitting UTF-8 inside one frame proves nothing — it must cross two
+frames) and #13 (either half alone is invisible; the pair is the bug).
+
+### Gate (final, on this branch)
+
+```
+bunx tsc --noEmit                  → clean
+bunx tsc -p apps/mobile --noEmit    → clean
+bunx tsc -p apps/relay --noEmit     → clean
+bun run lint                        → Checked 1391 files. No fixes applied. (0 errors)
+bun test                            → 10057 pass · 4 skip · 0 fail · 727 files (396 s)
+```
+
+The 4 skips are the documented opt-in rows (live-k8s `TENTACLE_K8S_SERVER`,
+live-docker `TENTACLE_DOCKER_TESTS=1`, the real-socket keepalive
+`TENTACLE_SLOW_TESTS=1`, and one more of that family) — NOT failures (§6).
+No `protocol.d/` note: no schema, method or update kind changed.
+
+### Not done (deliberate, per the plan's own scope)
+
+- `job_write` — owner NO-GO.
+- Streaming `read`, stdin to commands, a TTY, replay after a reconnect.
+- Pod-daemon registration (out by design; pinned by a test).
+- The opt-in live suites (`TENTACLE_K8S_SERVER` / `TENTACLE_DOCKER_TESTS=1`) were
+  **not added** as test files: the live proof above ran the real client +
+  registry against a real container by hand (output pasted here), which is what
+  the plan's *Validation* asks for before Review. A skipped-by-default live file
+  whose rows nobody runs would be weaker evidence than the transcript above, and
+  adding one that cannot run in this environment would be an unverified claim.
+  **Unverified:** the k8s live path (no cluster here — the k8s primitive is
+  covered by `FakeWS` only).
+
+### Debt
+
+- The idle keepalive gap (drift 2): a long-idle docker exec may be cut by the
+  engine; the next run reports it honestly but the state is lost.
+- The prompt does not name the kube CONTEXT (owner Q5), and neither does the
+  first result. The backend resolves and holds it (`LaptopWorkloadShellBackend`
+  has a `where(target)` that returns `context "kind-dev", namespace default`),
+  but nothing calls it: D3's `[opened sh in kubernetes context …]` line needs a
+  place in `resultText` for an INFORMATIONAL line, and every existing notice
+  there makes the result an error (`isError`), which a successful open must not
+  be. Deliberately left out rather than fudged; the context is pinned per
+  session (the `(engine, namespace)` cache), so it cannot silently change under
+  an open shell — only its visibility in the transcript is missing.
+- Non-TUI frontends show the generic "always" label; the real rule is narrower
+  (the safe direction).
+- `&`-backgrounded grandchildren can survive a daemon crash — parity with
+  `oc exec`, and the description warns against it.
+
 
 ## Review — owner verdict
 

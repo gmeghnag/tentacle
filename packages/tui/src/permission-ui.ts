@@ -206,6 +206,29 @@ export function buildPermissionChoices(req: PermissionRequest): PermissionChoice
   if (req.kind === "session_hop") {
     return hopChoices(req);
   }
+  // `workload_shell`'s "always" is scoped to the SINGLE workload
+  // (docs/feat/workload-shell.md D6), so its label says so — and with no
+  // derivable prefix there is nothing to scope, so no "always" is offered at
+  // all. Offering the session-wide wording here would read as broader than the
+  // rule; the rule being narrower than the label is the safe direction, but a
+  // label that is simply WRONG is not.
+  if (req.tool === "workload_shell") {
+    return [
+      { label: "Yes", response: { allowed: true, scope: "once" } },
+      ...(req.suggestion
+        ? [
+            {
+              label: `Yes, and don't ask again for \`${req.suggestion.prefix}\` commands on this workload`,
+              response: { allowed: true, scope: "session" as const },
+            },
+          ]
+        : []),
+      { label: "No", response: { allowed: false } },
+      ...(req.reply
+        ? [{ label: "No, let's talk about it", response: { allowed: false }, reply: true as const }]
+        : []),
+    ];
+  }
   const always = req.suggestion
     ? `Yes, and don't ask again for \`${req.suggestion.prefix}\` commands`
     : "Yes, and don't ask again this session";

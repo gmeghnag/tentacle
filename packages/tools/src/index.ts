@@ -10,6 +10,8 @@ export * from "./task.ts";
 export * from "./skill.ts";
 export * from "./context-reset.ts";
 export * from "./move-session.ts";
+export * from "./workload-shell.ts";
+export * from "./workload-shell-frame.ts";
 export * from "./concurrency.ts";
 export * from "./search.ts";
 export * from "./search-tool.ts";

@@ -10,6 +10,7 @@ import {
   type ExecTarget,
   KubeApiError,
   type Pod,
+  type RawExec,
   type RunExecOptions,
   type RunExecResult,
   type WaitForReadyOptions,
@@ -66,6 +67,11 @@ class StubCluster implements PodCluster {
       `runexec:${target.pod}:${target.container ?? "-"}:${options?.timeoutMs ?? "-"}`,
     );
     return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+  }
+  // Not exercised here (the raw exec has its own suite, docs/feat/workload-shell.md
+  // WS1); a call would be a test mistake, so it throws instead of faking bytes.
+  openRawExec(_target: ExecTarget): RawExec {
+    throw new Error("openRawExec is not used in this test");
   }
 }
 

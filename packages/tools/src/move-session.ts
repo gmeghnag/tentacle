@@ -36,10 +36,16 @@ export const MOVE_SESSION_REASON_MAX = 500;
  * re-checks every argument through `hopWorkload` before anything is built, so
  * the two cannot disagree about what is accepted (the stricter one refuses first).
  */
-const WORKLOAD_PART = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+export const WORKLOAD_PART = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** The same 253-byte ceiling a k8s DNS-1123 name has (`HOP_WORKLOAD_PART_MAX`). */
-const WORKLOAD_PART_MAX = 253;
+export const WORKLOAD_PART_MAX = 253;
+
+/**
+ * The workload grammar, exported so `workload_shell` accepts EXACTLY the same
+ * names as `move_session` — ONE spelling for both tools, never two that drift.
+ */
+export const workloadTargetGrammar = { part: WORKLOAD_PART, max: WORKLOAD_PART_MAX } as const;
 
 const workloadSchema = z
   .object({

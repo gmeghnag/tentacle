@@ -23,6 +23,7 @@ import {
   type EngineEndpoint,
   type EngineInfo,
   type ExecChannelOptions,
+  type RawExec,
   type RemoveContainerOptions,
   type RunExecOptions,
   type RunExecResult,
@@ -225,6 +226,11 @@ class FakeDockerClient implements DockerClientLike {
       return Promise.resolve({ exitCode: 0, stdout: '{"resident":false}\n', stderr: "" });
     }
     return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+  }
+  // Not exercised here (the raw exec has its own suite, docs/feat/workload-shell.md
+  // WS1); a call would be a test mistake, so it throws instead of faking bytes.
+  openRawExec(_target: DockerExecTarget): RawExec {
+    throw new Error("openRawExec is not used in this test");
   }
 }
 

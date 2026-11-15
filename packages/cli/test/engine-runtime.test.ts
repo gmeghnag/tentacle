@@ -21,6 +21,7 @@ import {
   type ExecTarget,
   KubeApiError,
   type Pod,
+  type RawExec,
   type RunExecOptions,
   type RunExecResult,
   type WaitForReadyOptions,
@@ -159,6 +160,11 @@ class FakeCluster implements PodCluster {
     });
     this.connection = new Connection(daemonCh, host);
     return clientCh;
+  }
+  // The raw exec has its own suites (docs/feat/workload-shell.md WS1); a call
+  // from this runtime test would be a mistake, so it throws.
+  openRawExec(_target: ExecTarget): RawExec {
+    throw new Error("openRawExec is not used in this test");
   }
   // One-shot execs (the binary-injection sequence): record them. `--version`
   // succeeds; the image probe reports glibc x64; the install command is treated as done.
@@ -596,6 +602,9 @@ describe("startPodRuntime", () => {
       openExec: () => {
         throw new Error("should not be reached");
       },
+      openRawExec: () => {
+        throw new Error("should not be reached");
+      },
       runExec: () => {
         throw new Error("should not be reached");
       },
@@ -629,6 +638,9 @@ describe("startPodRuntime", () => {
       deletePod: () => Promise.resolve(),
       deletePodBestEffort: () => {},
       openExec: () => {
+        throw new Error("should not be reached");
+      },
+      openRawExec: () => {
         throw new Error("should not be reached");
       },
       runExec: () => {
@@ -1379,6 +1391,9 @@ describe("startPodRuntime", () => {
       deletePod: () => Promise.resolve(),
       deletePodBestEffort: () => {},
       openExec: () => {
+        throw new Error("should not be reached");
+      },
+      openRawExec: () => {
         throw new Error("should not be reached");
       },
       runExec: () => {
