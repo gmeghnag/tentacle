@@ -103,11 +103,21 @@ final class AnalyzerEngine: DictationEngine {
     let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
     let analyzer = SpeechAnalyzer(modules: [module])
     try await analyzer.prepareToAnalyze(in: format)
-    self.analyzer = analyzer
-    self.input = continuation
-    resultsTask = Task { [weak self] in await self?.consume(module) }
+    // `finished` is main-thread state: each check shares a main hop with the step
+    // it guards, so a cancel during any await above either finds the analyzer
+    // (and cancels it) or makes the start throw — never a mic nobody cancels
+    // (review round 1, finding 1).
+    try await MainActor.run {
+      guard !self.finished else { throw SpeechCore.cancelledStart }
+      self.analyzer = analyzer
+      self.input = continuation
+      self.resultsTask = Task { [weak self] in await self?.consume(module) }
+    }
     try await analyzer.start(inputSequence: stream)
-    try await MainActor.run { try self.startAudio(format: format, continuation: continuation) }
+    try await MainActor.run {
+      guard !self.finished else { throw SpeechCore.cancelledStart }
+      try self.startAudio(format: format, continuation: continuation)
+    }
   }
 
   private func consume(_ module: any SpeechModule) async {

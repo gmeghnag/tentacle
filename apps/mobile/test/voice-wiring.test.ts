@@ -36,6 +36,51 @@ describe("F1: the Swift recognizer is on-device only", () => {
   });
 });
 
+/**
+ * Review round 1, finding 1 (Swift half): a cancel during a pending start never
+ * leaves the mic open. Static guards (the module only builds in a dev client);
+ * the behaviour itself is device-only.
+ */
+describe("start/cancel race: the Swift side", () => {
+  const core = code(read(MOD, "ios", "SpeechCore.swift"));
+  const analyzer = code(read(MOD, "ios", "AnalyzerEngine.swift"));
+  const recognizer = code(read(MOD, "ios", "RecognizerEngine.swift"));
+  const glue = code(read(MOD, "ios", "TentacleSpeechModule.swift"));
+
+  test("the analyzer re-checks `finished` in the same main hop that opens the mic", () => {
+    expect(analyzer).toMatch(
+      /MainActor\.run \{\s*guard !self\.finished else \{ throw SpeechCore\.cancelledStart \}\s*try self\.startAudio\(/,
+    );
+    expect(analyzer).toMatch(
+      /MainActor\.run \{\s*guard !self\.finished else \{ throw SpeechCore\.cancelledStart \}\s*self\.analyzer = analyzer/,
+    );
+  });
+
+  test("the recognizer refuses to begin once finished", () => {
+    expect(recognizer).toMatch(
+      /private func begin\(\) throws \{\s*guard !finished else \{ throw SpeechCore\.cancelledStart \}/,
+    );
+  });
+
+  test("the core refuses a cancelled attempt, and cancels an engine whose start lost the race", () => {
+    expect(core).toContain("guard attempt > cancelledThrough, attempt > newestStart else");
+    expect(core).toMatch(
+      /try await next\.start\(\)[\s\S]*?if attempt <= cancelledThrough \|\| engine !== next \{\s*next\.cancel\(\)/,
+    );
+    expect(core).toMatch(
+      /func cancelDictation\(attempt: Int\) \{\s*cancelledThrough = max\(cancelledThrough, attempt\)/,
+    );
+  });
+
+  test("the glue passes the attempt both ways", () => {
+    expect(glue).toContain(
+      "self.core.startDictation(engine: engine, locale: locale, attempt: attempt)",
+    );
+    expect(glue).toContain("self.core.cancelDictation(attempt: attempt)");
+    expect(glue).toContain('"attempt": attempt');
+  });
+});
+
 describe("one native seam", () => {
   test("only `speech-native-expo.ts` names the native module", () => {
     const hits = sources(join(APP, "src")).filter((p) =>

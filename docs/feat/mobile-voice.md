@@ -370,7 +370,7 @@ In dependency order. Everything is in `apps/mobile/`; nothing outside it except 
 
 ## Execution
 
-*— claude-opus-5-5, 2026-11-15*
+*— executor recorded as **deepseek** by the exec commit `2dca65b3` ("feat(mobile-voice): exec (deepseek)"), 2026-11-15. This line first read `claude-opus-5-5`, which conflicts with that commit (Review round 1, finding 2). The exact DeepSeek model id is not recorded anywhere in the repo; the orchestrator must confirm it. Fix round 1 below is signed separately.*
 
 ### Load-bearing check (re-run first)
 
@@ -495,6 +495,80 @@ Every mutation was reverted and the file re-run green. The new modules are featu
 - 3 of the skips are the baseline opt-ins.
 - The 4th is the pre-existing docker opt-in `packages/cli/test/session-hop.docker.test.ts:248` (`TENTACLE_DOCKER_TESTS`). None are in `apps/mobile`.
 - No schema changed, so there is no `protocol.json` regeneration and no `protocol.d/` note.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Finding 1 (HIGH, start/cancel race): FIXED in TS and Swift. The Swift runtime behaviour is unverified on a device.**
+
+Root cause: no event or command named the dictation it belonged to. A `started` that arrived after a cancel was dropped, and the native cancel had either already missed the engine or reached it too early.
+
+The fix tags every attempt with an id, taking the reviewer's preferred option, which matches drift 1 for speech:
+
+- **TS**
+  - `dictation.ts`
+    - `tap` carries `attempt`, a fresh id from the controller's counter (an id source, like `now`).
+    - `asking`, `preparing`, `listening` and `finalizing` carry it.
+    - The `start` and `cancel` effects carry it.
+    - `started` carries it; `startFailed` and `ended` may carry it.
+  - `stale()` runs before the per-state switch:
+    - a `started` that is not the current `preparing{starting}` → `cancel{attempt: event.attempt}`, whatever the state, and the state is unchanged;
+    - a duplicate `started` for the current listening attempt → no effect;
+    - an `ended` or `startFailed` tagged with another attempt → ignored.
+  - Because a `cancel` names its attempt, cancelling a stale start never touches a newer one.
+  - `voice-controller.ts`: `tapMic` increments `attempts`; `start` passes it and tags both outcomes; `cancel` → `port.cancelDictation(attempt)`; the port's `ended.attempt` is forwarded.
+  - `speech-native.ts` / `speech-native-expo.ts`: `startDictation({…, attempt})`, `cancelDictation(attempt)`, `ended.attempt?`.
+- **Swift**
+  - `SpeechCore.swift`:
+    - `cancelledThrough` and `newestStart`, both main-thread only;
+    - `startDictation(…, attempt:)` refuses a cancelled or older attempt on entry, so a cancel that reached main before the start's hop wins;
+    - after `await next.start()`, if the attempt was cancelled or superseded, it runs `next.cancel()` and throws `cancelled`;
+    - the catch path nils `engine` only if it is still this start's engine (before, it could nil a newer one);
+    - `cancelDictation(attempt:)` records the attempt and cancels the engine only when `attempt >= newestStart`;
+    - `EngineSink` carries the attempt, so `coreEnded` sends `attempt`.
+  - `AnalyzerEngine.start`: the `finished` check shares a main hop with the step it guards. One hop does the check plus installing the analyzer and results task; another does the check plus `startAudio`. A cancel during any await either finds the analyzer to cancel, or makes the start throw before the mic opens.
+  - `RecognizerEngine.begin`: `guard !finished` first.
+  - `TentacleSpeechModule.swift`: the `startDictation` / `cancelDictation` arguments and `ended.attempt`. Checked by reading only, as in round 0: it imports ExpoModulesCore.
+  - `xcrun … swiftc -typecheck` on the three engine files: `TYPECHECK_OK`.
+
+**Red, then green.**
+- `test/dictation.test.ts` "start/cancel race (attempt ids)", 7 tests. Written first and run on the unfixed reducer: **7 fail, on assertions**. Repro `race.ts` printed `idle+started → idle []`; the test now expects `[{type:"cancel",attempt:1}]`:
+  ```
+  error: expect(received).toEqual(expected)
+  - [ { "attempt": 1, "type": "cancel" } ]
+  + []
+  ```
+- `test/voice-wiring.test.ts` "start/cancel race: the Swift side", 4 static guards. With the pre-fix Swift files copied back in: **4 fail**. Restored: 11 pass.
+- `test/voice-controller.test.ts`, two new tests:
+  - "a tap while the native start is pending, then the start resolves": the port gets `cancel:1` twice, the state is idle, there is no `haptic:start` and no ticker;
+  - "a stale ended from an older attempt does not end the current dictation".
+  - Their non-vacuity is shown by M1 to M3 below. They were not run red on the old controller, because the old port signature had no attempt.
+
+**Mutations.** Each was applied with `sed`, run, then restored from a scratch copy in `.tentacle/tmp/mobile-voice/new/`.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `stale()`: late `started` → `effects: []` (the original bug) | 6 fail: 5 reducer race tests + the controller pending-start test |
+| M2 | `stale()`: never ignore a mismatched `ended`/`startFailed` (`!== current` → `=== -1`) | 2 fail: the reducer stale-ended test + the controller stale-ended test |
+| M3 | controller: `port.cancelDictation(0)` instead of `effect.attempt` | 2 fail: the pending-start test + dispose (F13) |
+| M4 | `AnalyzerEngine`: delete the `guard !self.finished` before `startAudio` | 1 fail: "the analyzer re-checks `finished` in the same main hop that opens the mic" |
+
+**Finding 2 (MEDIUM, signature): PARTIAL.**
+- The Execution signature now states what the evidence shows: commit `2dca65b3` says the executor was DeepSeek, and the earlier line read `claude-opus-5-5`.
+- The exact DeepSeek model id is not recorded anywhere I could read, so the orchestrator must fill it in.
+- This round is signed with its real model, `claude-opus-5-5`.
+
+**Drift / debt.**
+- Only the start-path events are tagged. `probed`, `permissions`, `reserved` and the `asset*` events are untagged, and so is a `startFailed` raised by the probe or permission request. Those can still reach a newer attempt's `asking`/`preparing` after a fast tap-tap-tap: the wrong card or a lost attempt, but never a live mic, because no native start is pending in those phases.
+- The port signature changed (`startDictation` / `cancelDictation` take an attempt). This is app-internal; the daemon protocol is untouched, so no `protocol.d/` note.
+- **Unverified (device):** the Swift start/cancel interleavings. To verify, on a dev build tap the mic twice quickly (and background mid-start) on iOS 18 and on iOS 26; the mic indicator must go off. Add this to the module README checklist.
+
+**Gate.**
+- `bun run typecheck` (root, `apps/mobile`, `apps/relay`): clean.
+- `bun run lint`: `Checked 1457 files … No fixes applied`.
+- `bun test`: **10493 pass, 4 skip, 0 fail**, the same skips as round 0.
+- The first full run reported **1 fail out of 10497**. Two reruns did not reproduce it, and I did not capture which test it was. The voice tests are deterministic and passed in every narrow run, so this was likely a timing-flaky test elsewhere. Unidentified.
 
 ## Review
 

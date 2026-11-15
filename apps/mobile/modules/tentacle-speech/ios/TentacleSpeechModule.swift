@@ -28,13 +28,17 @@ public class TentacleSpeechModule: Module, SpeechCoreDelegate {
       try await Self.coded { try await self.core.installAsset(engine: engine, locale: locale) }
     }
 
-    AsyncFunction("startDictation") { (engine: String, locale: String) async throws in
-      try await Self.coded { try await self.core.startDictation(engine: engine, locale: locale) }
+    AsyncFunction("startDictation") { (engine: String, locale: String, attempt: Int) async throws in
+      try await Self.coded {
+        try await self.core.startDictation(engine: engine, locale: locale, attempt: attempt)
+      }
     }
 
     // Commands touch main-thread state (the engine, the synthesizer, UIKit haptics).
     Function("stopDictation") { DispatchQueue.main.async { self.core.stopDictation() } }
-    Function("cancelDictation") { DispatchQueue.main.async { self.core.cancelDictation() } }
+    Function("cancelDictation") { (attempt: Int) in
+      DispatchQueue.main.async { self.core.cancelDictation(attempt: attempt) }
+    }
 
     AsyncFunction("voices") { () -> [[String: Any]] in
       self.core.voices()
@@ -74,8 +78,8 @@ public class TentacleSpeechModule: Module, SpeechCoreDelegate {
     sendEvent("level", ["rms": rms])
   }
 
-  func coreEnded(reason: String, code: String?) {
-    var body: [String: Any] = ["reason": reason]
+  func coreEnded(reason: String, code: String?, attempt: Int) {
+    var body: [String: Any] = ["reason": reason, "attempt": attempt]
     if let code { body["code"] = code }
     sendEvent("ended", body)
   }

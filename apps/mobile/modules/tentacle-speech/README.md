@@ -40,3 +40,4 @@ Use the owner's iPhone (iOS 18.3.1), plus an iOS 26 device if one is available.
 10. Read a reply with a code block and a table. You hear "code block, N lines" and no symbols. Note which voice `pickVoice` chose.
 11. Haptics on start, stop and error.
 12. VoiceOver: the mic and speaker buttons announce their labels.
+13. Start/cancel race (review round 1, finding 1), on iOS 18 and on iOS 26 (on iOS 26, also during a first-run model download): tap the mic twice quickly; tap it then background the app at once; tap, tap, tap. Each time the orange mic indicator must go off within about a second, and no text appears afterwards.

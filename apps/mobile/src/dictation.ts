@@ -42,6 +42,7 @@ export type DictationState =
   | { readonly kind: "idle"; readonly notice?: string }
   | {
       readonly kind: "asking";
+      readonly attempt: number;
       readonly base: string;
       readonly locale: string;
       readonly caps?: Capabilities;
@@ -50,6 +51,7 @@ export type DictationState =
     }
   | {
       readonly kind: "preparing";
+      readonly attempt: number;
       readonly base: string;
       readonly locale: string;
       readonly caps: Capabilities;
@@ -62,11 +64,14 @@ export type DictationState =
     }
   | (Text & {
       readonly kind: "listening";
+      /** The attempt this dictation belongs to (from its `tap`). */
+      readonly attempt: number;
       readonly startedAt: number;
       readonly lastTextAt: number;
     })
   | (Text & {
       readonly kind: "finalizing";
+      readonly attempt: number;
       readonly after: "idle" | "send";
       readonly via?: SendVia;
       readonly since: number;
@@ -77,22 +82,36 @@ export type DictationState =
 export const DICTATION_IDLE: DictationState = { kind: "idle" };
 
 export type DictationEvent =
-  | { readonly type: "tap"; readonly draft: string; readonly locale: string; readonly now: number }
+  | {
+      readonly type: "tap";
+      readonly draft: string;
+      readonly locale: string;
+      readonly now: number;
+      /** A fresh id per tap (the controller's counter, like `now`): tags this attempt. */
+      readonly attempt: number;
+    }
   | { readonly type: "probed"; readonly caps: Capabilities }
   | { readonly type: "permissions"; readonly permissions: Permissions }
   | { readonly type: "reserved"; readonly ok: boolean }
   | { readonly type: "assetProgress"; readonly fraction: number }
   | { readonly type: "assetInstalled" }
   | { readonly type: "assetFailed" }
-  | { readonly type: "started"; readonly now: number }
-  | { readonly type: "startFailed"; readonly code?: string }
+  /** The native start of `attempt` resolved. */
+  | { readonly type: "started"; readonly now: number; readonly attempt: number }
+  /** `attempt` is set when it is a native start that failed (not the probe). */
+  | { readonly type: "startFailed"; readonly code?: string; readonly attempt?: number }
   | {
       readonly type: "dictation";
       readonly finalDelta: string;
       readonly volatile: string;
       readonly now: number;
     }
-  | { readonly type: "ended"; readonly reason: EndedReason; readonly code?: string }
+  | {
+      readonly type: "ended";
+      readonly reason: EndedReason;
+      readonly code?: string;
+      readonly attempt?: number;
+    }
   | { readonly type: "userEdit"; readonly text: string }
   | { readonly type: "send"; readonly via: SendVia; readonly now: number }
   | { readonly type: "appState"; readonly state: "active" | "inactive" | "background" }
@@ -106,9 +125,15 @@ export type DictationEffect =
   | { readonly type: "requestPermissions" }
   | { readonly type: "reserve"; readonly locale: string }
   | { readonly type: "installAsset"; readonly engine: Engine; readonly locale: string }
-  | { readonly type: "start"; readonly engine: Engine; readonly locale: string }
+  | {
+      readonly type: "start";
+      readonly engine: Engine;
+      readonly locale: string;
+      readonly attempt: number;
+    }
   | { readonly type: "stop" }
-  | { readonly type: "cancel" }
+  /** Cancel THIS attempt's native dictation, pending or running; never a newer one. */
+  | { readonly type: "cancel"; readonly attempt: number }
   | { readonly type: "setDraft"; readonly text: string }
   | { readonly type: "haptic"; readonly kind: "start" | "stop" | "error" }
   | { readonly type: "send"; readonly via: SendVia }
@@ -204,6 +229,7 @@ function failed(view: MicView, extra: DictationEffect[] = []): DictationStep {
 
 /** Permissions + capabilities known: ask, explain, or pick an engine. */
 function decide(
+  attempt: number,
   base: string,
   locale: string,
   caps: Capabilities,
@@ -216,7 +242,7 @@ function decide(
       ? // Asked once and still undetermined: the OS will not decide now. Back to idle.
         { state: DICTATION_IDLE, effects: [] }
       : {
-          state: { kind: "asking", base, locale, caps, asked: true },
+          state: { kind: "asking", attempt, base, locale, caps, asked: true },
           effects: [{ type: "requestPermissions" }],
         };
   }
@@ -237,6 +263,7 @@ function decide(
       return {
         state: {
           kind: "preparing",
+          attempt,
           base,
           locale,
           caps,
@@ -248,11 +275,12 @@ function decide(
       };
     case "engine":
       if (choice.engine === "recognizer") {
-        return startNow(base, locale, caps, "recognizer");
+        return startNow(attempt, base, locale, caps, "recognizer");
       }
       return {
         state: {
           kind: "preparing",
+          attempt,
           base,
           locale,
           caps,
@@ -265,11 +293,26 @@ function decide(
   }
 }
 
-function startNow(base: string, locale: string, caps: Capabilities, engine: Engine): DictationStep {
+function startNow(
+  attempt: number,
+  base: string,
+  locale: string,
+  caps: Capabilities,
+  engine: Engine,
+): DictationStep {
   return {
-    state: { kind: "preparing", base, locale, caps, engine, phase: "starting", next: "start" },
+    state: {
+      kind: "preparing",
+      attempt,
+      base,
+      locale,
+      caps,
+      engine,
+      phase: "starting",
+      next: "start",
+    },
     // Never transcribe our own voice: read-aloud stops BEFORE the mic opens (F11).
-    effects: [{ type: "stopSpeaking" }, { type: "start", engine, locale }],
+    effects: [{ type: "stopSpeaking" }, { type: "start", engine, locale, attempt }],
   };
 }
 
@@ -292,16 +335,17 @@ function settle(
 }
 
 function finalize(
-  state: Text,
+  state: Active,
   now: number,
   after: "idle" | "send",
   via?: SendVia,
   notice?: string,
 ): DictationStep {
-  const { base, finals, volatile } = state;
+  const { attempt, base, finals, volatile } = state;
   return {
     state: {
       kind: "finalizing",
+      attempt,
       base,
       finals,
       volatile,
@@ -314,14 +358,57 @@ function finalize(
   };
 }
 
+/** The attempt the state belongs to; idle and failed belong to none. */
+function attemptOf(state: DictationState): number | undefined {
+  return state.kind === "idle" || state.kind === "failed" ? undefined : state.attempt;
+}
+
+/**
+ * Events from a native start that is no longer the current one (review round 1,
+ * finding 1). A `started` that is not the current `preparing{starting}` means a
+ * mic is open that nothing listens to: cancel THAT attempt, whatever the state
+ * (a `cancel` names its attempt, so a newer dictation is never touched). A
+ * stale `ended` / `startFailed` must not end the current attempt.
+ */
+function stale(state: DictationState, event: DictationEvent): DictationStep | undefined {
+  const current = attemptOf(state);
+  if (event.type === "started") {
+    if (state.kind === "preparing" && state.phase === "starting" && event.attempt === current) {
+      return undefined;
+    }
+    if (event.attempt === current && (state.kind === "listening" || state.kind === "finalizing")) {
+      return { state, effects: [] };
+    }
+    return { state, effects: [{ type: "cancel", attempt: event.attempt }] };
+  }
+  if (
+    (event.type === "ended" || event.type === "startFailed") &&
+    event.attempt !== undefined &&
+    event.attempt !== current
+  ) {
+    return { state, effects: [] };
+  }
+  return undefined;
+}
+
 export function dictationReduce(state: DictationState, event: DictationEvent): DictationStep {
   const none: DictationStep = { state, effects: [] };
+  const ignored = stale(state, event);
+  if (ignored !== undefined) {
+    return ignored;
+  }
   switch (state.kind) {
     case "idle":
     case "failed":
       if (event.type === "tap") {
         return {
-          state: { kind: "asking", base: event.draft, locale: event.locale, asked: false },
+          state: {
+            kind: "asking",
+            attempt: event.attempt,
+            base: event.draft,
+            locale: event.locale,
+            asked: false,
+          },
           effects: [{ type: "probe", locale: event.locale }],
         };
       }
@@ -334,12 +421,13 @@ export function dictationReduce(state: DictationState, event: DictationEvent): D
     case "asking":
       switch (event.type) {
         case "probed":
-          return decide(state.base, state.locale, event.caps, state.asked);
+          return decide(state.attempt, state.base, state.locale, event.caps, state.asked);
         case "permissions":
           // A denial mid-request never leaves us here: the states re-derive (F2).
           return state.caps === undefined
             ? { state: DICTATION_IDLE, effects: [] }
             : decide(
+                state.attempt,
                 state.base,
                 state.locale,
                 { ...state.caps, permissions: event.permissions },
@@ -365,31 +453,30 @@ export function dictationReduce(state: DictationState, event: DictationEvent): D
         case "reserved":
           if (!event.ok) {
             // At the reserved-locale cap (F5): the next engine in order, else unavailable.
-            return decide(state.base, state.locale, state.caps, true, true);
+            return decide(state.attempt, state.base, state.locale, state.caps, true, true);
           }
           return state.next === "download"
             ? {
                 state: { ...state, phase: "downloading", download: 0 },
                 effects: [{ type: "installAsset", engine: state.engine, locale: state.locale }],
               }
-            : startNow(state.base, state.locale, state.caps, state.engine);
+            : startNow(state.attempt, state.base, state.locale, state.caps, state.engine);
         case "assetProgress":
           return state.phase === "downloading"
             ? { state: { ...state, download: event.fraction }, effects: [] }
             : none;
         case "assetInstalled":
           return state.phase === "downloading"
-            ? startNow(state.base, state.locale, state.caps, state.engine)
+            ? startNow(state.attempt, state.base, state.locale, state.caps, state.engine)
             : none;
         case "assetFailed":
           return state.phase === "downloading" ? failed(DOWNLOAD_FAILED(state.locale)) : none;
         case "started":
-          if (state.phase !== "starting") {
-            return none;
-          }
+          // Only the current `starting` attempt reaches here (`stale` took the rest).
           return {
             state: {
               kind: "listening",
+              attempt: state.attempt,
               base: state.base,
               finals: "",
               volatile: "",
@@ -416,15 +503,18 @@ export function dictationReduce(state: DictationState, event: DictationEvent): D
         case "dispose":
         case "ttsStarting":
           // A download in progress continues in the system; nothing listens.
-          return { state: DICTATION_IDLE, effects: [{ type: "cancel" }] };
+          return { state: DICTATION_IDLE, effects: [{ type: "cancel", attempt: state.attempt }] };
         case "appState":
           return event.state === "active"
             ? none
-            : { state: DICTATION_IDLE, effects: [{ type: "cancel" }] };
+            : { state: DICTATION_IDLE, effects: [{ type: "cancel", attempt: state.attempt }] };
         case "send":
           return {
             state: DICTATION_IDLE,
-            effects: [{ type: "cancel" }, { type: "send", via: event.via }],
+            effects: [
+              { type: "cancel", attempt: state.attempt },
+              { type: "send", via: event.via },
+            ],
           };
         default:
           return none;
@@ -461,7 +551,7 @@ function active(state: Active, event: DictationEvent): DictationStep {
         return none;
       }
       // The person typed: their text wins, pending volatile is dropped (F8).
-      return { state: DICTATION_IDLE, effects: [{ type: "cancel" }] };
+      return { state: DICTATION_IDLE, effects: [{ type: "cancel", attempt: state.attempt }] };
     case "send":
       if (finalizing !== undefined) {
         return { state: { ...finalizing, after: "send", via: event.via }, effects: [] };
@@ -473,7 +563,10 @@ function active(state: Active, event: DictationEvent): DictationStep {
     case "tick":
       if (finalizing !== undefined) {
         return event.now - finalizing.since >= FINALIZE_TIMEOUT_MS
-          ? withCancel(settle(finalizing, finalizing.after, finalizing.via, finalizing.notice))
+          ? withCancel(
+              settle(finalizing, finalizing.after, finalizing.via, finalizing.notice),
+              finalizing.attempt,
+            )
           : none;
       }
       if (state.kind === "listening" && event.now - state.startedAt >= HARD_CAP_MS) {
@@ -509,14 +602,14 @@ function active(state: Active, event: DictationEvent): DictationStep {
       // Backgrounded / locked (F6): stop and keep everything shown; never send.
       return withStop(settle(state, "idle", undefined, undefined));
     case "dispose":
-      return { state: DICTATION_IDLE, effects: [{ type: "cancel" }] };
+      return { state: DICTATION_IDLE, effects: [{ type: "cancel", attempt: state.attempt }] };
     default:
       return none;
   }
 }
 
-function withCancel(step: DictationStep): DictationStep {
-  return { state: step.state, effects: [{ type: "cancel" }, ...step.effects] };
+function withCancel(step: DictationStep, attempt: number): DictationStep {
+  return { state: step.state, effects: [{ type: "cancel", attempt }, ...step.effects] };
 }
 
 function withStop(step: DictationStep): DictationStep {

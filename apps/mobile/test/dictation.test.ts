@@ -51,9 +51,9 @@ const drafts = (effects: readonly DictationEffect[]) =>
 /** tap → probe → start → started, from `draft`, at t=0. */
 function listening(draft = "", caps: Capabilities = iOS18) {
   return run([
-    { type: "tap", draft, locale: L, now: 0 },
+    { type: "tap", draft, locale: L, now: 0, attempt: 1 },
     { type: "probed", caps },
-    { type: "started", now: 0 },
+    { type: "started", now: 0, attempt: 1 },
   ]);
 }
 
@@ -78,7 +78,7 @@ describe("start path", () => {
     expect(effects).toEqual([
       { type: "probe", locale: L },
       { type: "stopSpeaking" },
-      { type: "start", engine: "recognizer", locale: L },
+      { type: "start", engine: "recognizer", locale: L, attempt: 1 },
       { type: "haptic", kind: "start" },
     ]);
     expect(state.kind).toBe("listening");
@@ -92,7 +92,7 @@ describe("start path", () => {
 
   test("undetermined → requestPermissions; the grant then starts (one tap)", () => {
     const { state, effects } = run([
-      { type: "tap", draft: "", locale: L, now: 0 },
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
       {
         type: "probed",
         caps: { ...iOS18, permissions: { mic: "undetermined", speech: "notDetermined" } },
@@ -105,7 +105,7 @@ describe("start path", () => {
 
   test("a denial mid-request never stays at asking: the card (F2)", () => {
     const { state } = run([
-      { type: "tap", draft: "", locale: L, now: 0 },
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
       {
         type: "probed",
         caps: { ...iOS18, permissions: { mic: "undetermined", speech: "notDetermined" } },
@@ -117,7 +117,7 @@ describe("start path", () => {
 
   test("F1: supported but not on device → unavailable card, NO start effect", () => {
     const { state, effects } = run([
-      { type: "tap", draft: "", locale: L, now: 0 },
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
       {
         type: "probed",
         caps: { ...iOS18, recognizer: { [L]: { supported: true, onDevice: false } } },
@@ -129,7 +129,7 @@ describe("start path", () => {
 
   test("F1: Swift's own not-on-device refusal → the unavailable card", () => {
     const { state } = run([
-      { type: "tap", draft: "", locale: L, now: 0 },
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
       { type: "probed", caps: iOS18 },
       { type: "ended", reason: "error", code: "not-on-device" },
     ]);
@@ -141,7 +141,7 @@ describe("start path", () => {
 
   test("a failed capabilities read never leaves us at asking", () => {
     const { state, effects } = run([
-      { type: "tap", draft: "", locale: L, now: 0 },
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
       { type: "startFailed" },
     ]);
     expect(state.kind).toBe("failed");
@@ -150,7 +150,7 @@ describe("start path", () => {
 
   test("returning to the app clears a card (a Settings grant is picked up, F2)", () => {
     const denied = run([
-      { type: "tap", draft: "", locale: L, now: 0 },
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
       { type: "probed", caps: { ...iOS18, permissions: { mic: "denied", speech: "authorized" } } },
     ]).state;
     expect(denied.kind).toBe("failed");
@@ -168,20 +168,20 @@ describe("iOS 26: reserve and download (F5)", () => {
 
   test("installed → reserve → start transcriber", () => {
     const { effects } = run([
-      { type: "tap", draft: "", locale: L, now: 0 },
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
       { type: "probed", caps: ios26("installed") },
       { type: "reserved", ok: true },
     ]);
     expect(effects.slice(1)).toEqual([
       { type: "reserve", locale: L },
       { type: "stopSpeaking" },
-      { type: "start", engine: "transcriber", locale: L },
+      { type: "start", engine: "transcriber", locale: L, attempt: 1 },
     ]);
   });
 
   test("download: progress line, then start on install", () => {
     const mid = run([
-      { type: "tap", draft: "", locale: L, now: 0 },
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
       { type: "probed", caps: ios26("supported") },
       { type: "reserved", ok: true },
       { type: "assetProgress", fraction: 0.42 },
@@ -194,34 +194,34 @@ describe("iOS 26: reserve and download (F5)", () => {
 
   test("download failure → failed card; the next tap retries", () => {
     const { state } = run([
-      { type: "tap", draft: "", locale: L, now: 0 },
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
       { type: "probed", caps: ios26("supported") },
       { type: "reserved", ok: true },
       { type: "assetFailed" },
     ]);
     expect(state.kind).toBe("failed");
-    expect(types(run([{ type: "tap", draft: "", locale: L, now: 1 }], state).effects)).toEqual([
-      "probe",
-    ]);
+    expect(
+      types(run([{ type: "tap", draft: "", locale: L, now: 1, attempt: 1 }], state).effects),
+    ).toEqual(["probe"]);
   });
 
   test("reserve refused → falls back to the on-device recognizer", () => {
     const { effects } = run([
-      { type: "tap", draft: "", locale: L, now: 0 },
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
       { type: "probed", caps: ios26("installed") },
       { type: "reserved", ok: false },
     ]);
-    expect(effects.at(-1)).toEqual({ type: "start", engine: "recognizer", locale: L });
+    expect(effects.at(-1)).toEqual({ type: "start", engine: "recognizer", locale: L, attempt: 1 });
   });
 
   test("a tap while preparing cancels", () => {
     const { state, effects } = run([
-      { type: "tap", draft: "", locale: L, now: 0 },
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
       { type: "probed", caps: ios26("supported") },
       { type: "reserved", ok: true },
-      { type: "tap", draft: "", locale: L, now: 1 },
+      { type: "tap", draft: "", locale: L, now: 1, attempt: 1 },
     ]);
-    expect(effects.at(-1)).toEqual({ type: "cancel" });
+    expect(effects.at(-1)).toEqual({ type: "cancel", attempt: 1 });
     expect(state.kind).toBe("idle");
   });
 });
@@ -262,7 +262,7 @@ describe("text while listening", () => {
       ],
       l.state,
     );
-    expect(effects).toEqual([{ type: "cancel" }]);
+    expect(effects).toEqual([{ type: "cancel", attempt: 1 }]);
     expect(state.kind).toBe("idle");
   });
 
@@ -283,7 +283,7 @@ describe("stop and send", () => {
   test("tap while listening → stop; ended promotes volatile to final, soft haptic", () => {
     const { state, effects } = run(
       [
-        { type: "tap", draft: "", locale: L, now: 2 },
+        { type: "tap", draft: "", locale: L, now: 2, attempt: 1 },
         { type: "ended", reason: "stopped" },
       ],
       withText(),
@@ -323,7 +323,7 @@ describe("stop and send", () => {
   test("F9: stop with no speech → draft stays the base, no send, no notice", () => {
     const { state, effects } = run(
       [
-        { type: "tap", draft: "", locale: L, now: 1 },
+        { type: "tap", draft: "", locale: L, now: 1, attempt: 1 },
         { type: "ended", reason: "stopped" },
       ],
       listening("typed").state,
@@ -421,7 +421,92 @@ describe("interruptions, background, dispose", () => {
       [{ type: "dispose" }, { type: "dictation", finalDelta: "late", volatile: "", now: 9 }],
       withText(),
     );
-    expect(effects).toEqual([{ type: "cancel" }]);
+    expect(effects).toEqual([{ type: "cancel", attempt: 1 }]);
     expect(state).toEqual(DICTATION_IDLE);
+  });
+});
+
+/**
+ * Review round 1, finding 1: a cancel while the native start is pending must
+ * never leave the mic running. Every attempt carries an id (from `tap`); a
+ * `started` that is not the current `preparing{starting}` is answered with a
+ * `cancel` for ITS attempt, and a stale `ended` / `startFailed` is ignored.
+ */
+describe("start/cancel race (attempt ids)", () => {
+  const starting = (attempt: number, from: DictationState = DICTATION_IDLE) =>
+    run(
+      [
+        { type: "tap", draft: "", locale: L, now: 0, attempt },
+        { type: "probed", caps: iOS18 },
+      ],
+      from,
+    );
+  const tapAgain = (state: DictationState, attempt: number) =>
+    run([{ type: "tap", draft: "", locale: L, now: 1, attempt }], state);
+
+  test("the start and cancel effects carry the attempt id", () => {
+    const first = starting(1);
+    expect(first.effects.at(-1)).toEqual({
+      type: "start",
+      engine: "recognizer",
+      locale: L,
+      attempt: 1,
+    });
+    expect(tapAgain(first.state, 2).effects).toEqual([{ type: "cancel", attempt: 1 }]);
+  });
+
+  test("a late started after a cancel (idle) → cancel that attempt", () => {
+    const idle = tapAgain(starting(1).state, 2);
+    expect(idle.state.kind).toBe("idle");
+    const late = dictationReduce(idle.state, { type: "started", now: 2, attempt: 1 });
+    expect(late.state.kind).toBe("idle");
+    expect(late.effects).toEqual([{ type: "cancel", attempt: 1 }]);
+  });
+
+  test("a late started after backgrounding → cancel that attempt", () => {
+    const gone = run([{ type: "appState", state: "background" }], starting(1).state);
+    const late = dictationReduce(gone.state, { type: "started", now: 2, attempt: 1 });
+    expect(late.effects).toEqual([{ type: "cancel", attempt: 1 }]);
+  });
+
+  test("a late started in failed → cancel that attempt; the card stays", () => {
+    const failedState: DictationState = {
+      kind: "failed",
+      view: { action: "none", card: "unavailable", settings: false, message: "x" },
+    };
+    const late = dictationReduce(failedState, { type: "started", now: 2, attempt: 1 });
+    expect(late.state).toEqual(failedState);
+    expect(late.effects).toEqual([{ type: "cancel", attempt: 1 }]);
+  });
+
+  test("a stale started while the NEXT attempt is starting → cancel the stale one only", () => {
+    const second = starting(3, tapAgain(starting(1).state, 2).state);
+    const late = dictationReduce(second.state, { type: "started", now: 2, attempt: 1 });
+    expect(late.state).toEqual(second.state);
+    expect(late.effects).toEqual([{ type: "cancel", attempt: 1 }]);
+    const own = dictationReduce(late.state, { type: "started", now: 3, attempt: 3 });
+    expect(own.state.kind).toBe("listening");
+  });
+
+  test("a stale started while listening to the next attempt → cancel it, keep listening", () => {
+    const live = run([{ type: "started", now: 0, attempt: 2 }], starting(2).state).state;
+    const late = dictationReduce(live, { type: "started", now: 1, attempt: 1 });
+    expect(late.state).toEqual(live);
+    expect(late.effects).toEqual([{ type: "cancel", attempt: 1 }]);
+  });
+
+  test("a stale ended / startFailed does not end the current attempt", () => {
+    const second = starting(2);
+    const stale: DictationEvent[] = [
+      { type: "ended", reason: "cancelled", attempt: 1 },
+      { type: "ended", reason: "error", attempt: 1 },
+      { type: "startFailed", attempt: 1 },
+    ];
+    for (const event of stale) {
+      expect(dictationReduce(second.state, event).state).toEqual(second.state);
+    }
+    const live = run([{ type: "started", now: 0, attempt: 2 }], second.state).state;
+    const ended = dictationReduce(live, { type: "ended", reason: "stopped", attempt: 1 });
+    expect(ended.state).toEqual(live);
   });
 });

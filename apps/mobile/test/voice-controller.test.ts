@@ -44,14 +44,16 @@ class FakeSpeechPort implements SpeechPort {
     this.calls.push(`reserve:${locale}`);
     return true;
   };
-  startDictation = async (o: { engine: Engine; locale: string }) => {
+  startAttempts: number[] = [];
+  startDictation = async (o: { engine: Engine; locale: string; attempt: number }) => {
     this.calls.push(`start:${o.engine}:${o.locale}`);
+    this.startAttempts.push(o.attempt);
   };
   stopDictation = () => {
     this.calls.push("stop");
   };
-  cancelDictation = () => {
-    this.calls.push("cancel");
+  cancelDictation = (attempt: number) => {
+    this.calls.push(`cancel:${attempt}`);
   };
   voices = async () => [
     { id: "alice", language: "it-IT", name: "Alice", quality: "enhanced" as const, novelty: false },
@@ -171,6 +173,38 @@ describe("dictation through the port", () => {
     expect(d.kind).toBe("failed");
     expect(s.port.calls.at(-1)).toBe("haptic:error");
   });
+
+  test("a tap while the native start is pending, then the start resolves → that attempt is cancelled (review r1 #1)", async () => {
+    const s = setup();
+    let resolveStart: () => void = () => {};
+    s.port.startDictation = (o) => {
+      s.port.calls.push(`start:${o.engine}:${o.locale}`);
+      s.port.startAttempts.push(o.attempt);
+      return new Promise<void>((r) => {
+        resolveStart = r;
+      });
+    };
+    s.voice.tapMic();
+    await flush();
+    expect(s.port.startAttempts).toEqual([1]);
+    s.voice.tapMic(); // cancel while start() is pending
+    expect(s.port.calls.at(-1)).toBe("cancel:1");
+    resolveStart(); // the native start lands after the cancel: a live mic nobody listens to
+    await flush();
+    expect(s.voice.state().dictation.kind).toBe("idle");
+    expect(s.port.calls.filter((c) => c === "cancel:1").length).toBe(2);
+    expect(s.port.calls).not.toContain("haptic:start");
+    expect(s.timers.length).toBe(0);
+  });
+
+  test("a stale ended from an older attempt does not end the current dictation", async () => {
+    const s = setup();
+    await listening(s);
+    s.port.fire({ type: "ended", reason: "cancelled", attempt: 0 });
+    expect(s.voice.state().dictation.kind).toBe("listening");
+    s.port.fire({ type: "ended", reason: "stopped", attempt: 1 });
+    expect(s.voice.state().dictation.kind).toBe("idle");
+  });
 });
 
 describe("read-aloud through the port", () => {
@@ -221,7 +255,7 @@ describe("dispose (F13)", () => {
     const before = s.drafts.length;
     s.voice.dispose();
     expect(s.port.listeners.size).toBe(0);
-    expect(s.port.calls.slice(-1)).toEqual(["cancel"]);
+    expect(s.port.calls.slice(-1)).toEqual(["cancel:1"]);
     expect(s.timers.length).toBe(0);
     s.port.fire({ type: "dictation", finalDelta: "late", volatile: "" });
     expect(s.drafts.length).toBe(before);

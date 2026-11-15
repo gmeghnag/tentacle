@@ -11,7 +11,15 @@ import { endedTurn, speakButtonOf, voiceComposerView } from "../src/voice-view.t
 const idle: VoiceState = { dictation: DICTATION_IDLE, readAloud: READ_ALOUD_IDLE, level: 0.7 };
 const listening: VoiceState = {
   ...idle,
-  dictation: { kind: "listening", base: "", finals: "", volatile: "", startedAt: 0, lastTextAt: 0 },
+  dictation: {
+    kind: "listening",
+    attempt: 1,
+    base: "",
+    finals: "",
+    volatile: "",
+    startedAt: 0,
+    lastTextAt: 0,
+  },
 };
 
 describe("composer", () => {

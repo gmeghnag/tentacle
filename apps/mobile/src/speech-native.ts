@@ -45,7 +45,13 @@ export type EndedReason = "stopped" | "cancelled" | "interrupted" | "route" | "e
 export type SpeechPortEvent =
   | { readonly type: "dictation"; readonly finalDelta: string; readonly volatile: string }
   | { readonly type: "level"; readonly rms: number }
-  | { readonly type: "ended"; readonly reason: EndedReason; readonly code?: string }
+  | {
+      readonly type: "ended";
+      readonly reason: EndedReason;
+      readonly code?: string;
+      /** The attempt whose engine ended (the id `startDictation` was given). */
+      readonly attempt?: number;
+    }
   | {
       readonly type: "speech";
       readonly id: number;
@@ -64,9 +70,22 @@ export interface SpeechPort {
   installAsset(engine: Engine, locale: string): Promise<void>;
   /** iOS 26: `AssetInventory.reserve(locale:)` — false at the reserved-locale cap (F5). */
   reserveLocale(locale: string): Promise<boolean>;
-  startDictation(options: { readonly engine: Engine; readonly locale: string }): Promise<void>;
+  /**
+   * Start dictation `attempt` (a fresh id per tap). Rejects with code
+   * `cancelled` if `cancelDictation(attempt)` (or a newer start) came first.
+   */
+  startDictation(options: {
+    readonly engine: Engine;
+    readonly locale: string;
+    readonly attempt: number;
+  }): Promise<void>;
   stopDictation(): void;
-  cancelDictation(): void;
+  /**
+   * Cancel `attempt`, whether its start is still pending or it is running; a
+   * newer attempt is never touched. Remembered, so a start that has not reached
+   * the native side yet is refused when it does.
+   */
+  cancelDictation(attempt: number): void;
   voices(): Promise<readonly VoiceInfo[]>;
   speak(options: {
     readonly id: number;

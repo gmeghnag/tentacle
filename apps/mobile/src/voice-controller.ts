@@ -89,6 +89,8 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   let disposed = false;
   let ticker: { cancel(): void } | undefined;
   let voices: Promise<readonly VoiceInfo[]> | undefined;
+  /** A fresh id per mic tap (an id source, like `now`); the reducer matches events to it. */
+  let attempts = 0;
   const listeners = new Set<(state: VoiceState) => void>();
 
   const emit = () => {
@@ -168,16 +170,26 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
           () => dictate({ type: "assetFailed" }),
         );
         return;
-      case "start":
-        port
-          .startDictation({ engine: effect.engine, locale: effect.locale })
-          .then(() => dictate({ type: "started", now: deps.now() }), fail);
+      case "start": {
+        const { attempt } = effect;
+        port.startDictation({ engine: effect.engine, locale: effect.locale, attempt }).then(
+          () => dictate({ type: "started", now: deps.now(), attempt }),
+          (error: unknown) => {
+            const code = (error as { code?: unknown } | null)?.code;
+            dictate(
+              typeof code === "string"
+                ? { type: "startFailed", code, attempt }
+                : { type: "startFailed", attempt },
+            );
+          },
+        );
         return;
+      }
       case "stop":
         port.stopDictation();
         return;
       case "cancel":
-        port.cancelDictation();
+        port.cancelDictation(effect.attempt);
         return;
       case "setDraft":
         deps.setDraft(effect.text);
@@ -214,7 +226,12 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
         dictate({ ...event, now: deps.now() });
         return;
       case "ended":
-        dictate(event.code === undefined ? { type: "ended", reason: event.reason } : event);
+        dictate({
+          type: "ended",
+          reason: event.reason,
+          ...(event.code === undefined ? {} : { code: event.code }),
+          ...(event.attempt === undefined ? {} : { attempt: event.attempt }),
+        });
         return;
       case "assetProgress":
         dictate(event);
@@ -260,7 +277,14 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       return () => listeners.delete(listener);
     },
     tapMic() {
-      dictate({ type: "tap", draft: deps.draft(), locale: locale(), now: deps.now() });
+      attempts += 1;
+      dictate({
+        type: "tap",
+        draft: deps.draft(),
+        locale: locale(),
+        now: deps.now(),
+        attempt: attempts,
+      });
     },
     userEdit(text) {
       dictate({ type: "userEdit", text });

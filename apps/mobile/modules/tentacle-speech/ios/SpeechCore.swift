@@ -21,7 +21,7 @@ import UIKit
 protocol SpeechCoreDelegate: AnyObject {
   func coreDictation(finalDelta: String, volatile: String)
   func coreLevel(_ rms: Double)
-  func coreEnded(reason: String, code: String?)
+  func coreEnded(reason: String, code: String?, attempt: Int)
   func coreSpeech(id: Int, state: String, index: Int?)
   func coreAssetProgress(_ fraction: Double)
 }
@@ -54,6 +54,10 @@ final class SpeechCore: NSObject, AVSpeechSynthesizerDelegate {
   private var speechReported = false
 
   private var engine: DictationEngine?
+  /// Main thread. The highest attempt TS cancelled, and the newest start seen.
+  private var cancelledThrough = 0
+  private var newestStart = 0
+  static let cancelledStart = SpeechCoreError(code: "cancelled", message: "cancelled during start")
   private var observers: [NSObjectProtocol] = []
 
   override init() {
@@ -150,12 +154,18 @@ final class SpeechCore: NSObject, AVSpeechSynthesizerDelegate {
     }
   }
 
+  /// Start dictation `attempt` (TS's id for one mic tap). A cancel for this
+  /// attempt — or a newer start — that reached the main thread first wins: the
+  /// start is refused, or the engine it made is cancelled, never left listening
+  /// (review round 1, finding 1).
   @MainActor
-  func startDictation(engine kind: String, locale id: String) async throws {
+  func startDictation(engine kind: String, locale id: String, attempt: Int) async throws {
+    guard attempt > cancelledThrough, attempt > newestStart else { throw Self.cancelledStart }
+    newestStart = attempt
     engine?.cancel()
     engine = nil
     if synthesizer.isSpeaking { stopSpeaking() }
-    let sink = EngineSink(core: self)
+    let sink = EngineSink(core: self, attempt: attempt)
     let next: DictationEngine
     switch kind {
     case "recognizer":
@@ -177,20 +187,34 @@ final class SpeechCore: NSObject, AVSpeechSynthesizerDelegate {
     do {
       try await next.start()
     } catch {
-      engine = nil
+      if engine === next { engine = nil }
       deactivateIfIdle()
       throw error
+    }
+    // Cancelled or superseded while the start was awaiting: its mic must not stay on.
+    if attempt <= cancelledThrough || engine !== next {
+      next.cancel()
+      throw Self.cancelledStart
     }
   }
 
   func stopDictation() { engine?.stop() }
-  func cancelDictation() { engine?.cancel() }
+
+  /// Cancel `attempt` (main thread): remembered, so a start of it that has not
+  /// reached the main thread yet is refused; the running engine is cancelled
+  /// only if it is this attempt's (or older), never a newer one's.
+  func cancelDictation(attempt: Int) {
+    cancelledThrough = max(cancelledThrough, attempt)
+    if attempt >= newestStart { engine?.cancel() }
+  }
 
   /// Called by an engine (main thread) once it has fully ended.
-  fileprivate func engineEnded(_ ended: DictationEngine, reason: String, code: String?) {
+  fileprivate func engineEnded(
+    _ ended: DictationEngine, attempt: Int, reason: String, code: String?
+  ) {
     if engine === ended { engine = nil }
     deactivateIfIdle()
-    delegate?.coreEnded(reason: reason, code: code)
+    delegate?.coreEnded(reason: reason, code: code, attempt: attempt)
   }
 
   // MARK: speech
@@ -308,16 +332,23 @@ final class SpeechCore: NSObject, AVSpeechSynthesizerDelegate {
 /// What an engine reports into; every call hops to the main thread.
 final class EngineSink {
   private weak var core: SpeechCore?
+  /// The attempt of the engine this sink serves (tags its `ended`).
+  private let attempt: Int
   private var lastLevelAt = Date.distantPast
 
-  init(core: SpeechCore) { self.core = core }
+  init(core: SpeechCore, attempt: Int) {
+    self.core = core
+    self.attempt = attempt
+  }
 
   func text(finalDelta: String, volatile: String) {
     DispatchQueue.main.async { self.core?.text(finalDelta: finalDelta, volatile: volatile) }
   }
 
   func ended(_ engine: DictationEngine, reason: String, code: String? = nil) {
-    DispatchQueue.main.async { self.core?.engineEnded(engine, reason: reason, code: code) }
+    DispatchQueue.main.async {
+      self.core?.engineEnded(engine, attempt: self.attempt, reason: reason, code: code)
+    }
   }
 
   /// RMS of a buffer → 0..1 (−50 dB…0 dB), throttled to ~10 Hz. Audio thread.

@@ -15,7 +15,7 @@ import type { Capabilities, Permissions, SpeechPort, SpeechPortEvent } from "./s
 type Events = {
   dictation(body: { finalDelta: string; volatile: string }): void;
   level(body: { rms: number }): void;
-  ended(body: { reason: string; code?: string }): void;
+  ended(body: { reason: string; code?: string; attempt?: number }): void;
   speech(body: { id: number; state: string; index?: number }): void;
   assetProgress(body: { fraction: number }): void;
 };
@@ -26,9 +26,9 @@ interface Native {
   requestPermissions(): Promise<Permissions>;
   reserveLocale(locale: string): Promise<boolean>;
   installAsset(engine: string, locale: string): Promise<void>;
-  startDictation(engine: string, locale: string): Promise<void>;
+  startDictation(engine: string, locale: string, attempt: number): Promise<void>;
   stopDictation(): void;
-  cancelDictation(): void;
+  cancelDictation(attempt: number): void;
   voices(): Promise<readonly VoiceInfo[]>;
   speak(
     id: number,
@@ -47,9 +47,9 @@ function portOver(native: Native): SpeechPort {
     requestPermissions: () => native.requestPermissions(),
     reserveLocale: (locale) => native.reserveLocale(locale),
     installAsset: (engine, locale) => native.installAsset(engine, locale),
-    startDictation: (o) => native.startDictation(o.engine, o.locale),
+    startDictation: (o) => native.startDictation(o.engine, o.locale, o.attempt),
     stopDictation: () => native.stopDictation(),
-    cancelDictation: () => native.cancelDictation(),
+    cancelDictation: (attempt) => native.cancelDictation(attempt),
     voices: () => native.voices(),
     speak: (o) => native.speak(o.id, o.utterances, o.voiceId ?? null, o.language, o.rate),
     stopSpeaking: () => native.stopSpeaking(),

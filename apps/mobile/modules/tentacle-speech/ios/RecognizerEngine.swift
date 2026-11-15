@@ -50,6 +50,8 @@ final class RecognizerEngine: DictationEngine {
   }
 
   private func begin() throws {
+    // Cancelled before the main hop: never open the mic (review round 1, finding 1).
+    guard !finished else { throw SpeechCore.cancelledStart }
     newSegment()
     let input = audio.inputNode
     let format = input.outputFormat(forBus: 0)
