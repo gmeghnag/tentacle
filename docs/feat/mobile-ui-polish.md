@@ -1757,3 +1757,33 @@ Screenshot: `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/owner-shots/photo-
 - **B9 (ordering, HIGH):** the user's message with the photo ("Cosa vedi?") is rendered BELOW the assistant's reply to it — the transcript puts the `media_message` row after the reply (ordering by kind/arrival instead of the log order/seq?). Prove with a red-first test on the transcript projection (a `media_message` followed by the reply must render in log order) and fix.
 - **B10 (thumbnail):** the photo shows as a grey placeholder "[image: IMG_4854.jpg]" instead of the picture. Show the real thumbnail: the phone's own just-sent photo from the outbox/local cache at once, and for history/other devices fetch it from the daemon by attachment id (the existing attachment read path; size-capped, cached), with a loading and an error state; tap opens it full screen.
 *— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+## Review — Slice 7 (fresh context)
+
+**Verdict: PASS (scope: owner feedback #3, B7, B8). No HIGH finding in scope.** `git diff main...HEAD` (5815252b) changes only this doc: no code, so no §7 invariant is touched.
+
+**Premises:** `highlight.ts:208` decodes `&#x27;` — TRUE. `theme.ts:170` sets `MONO = "ui-monospace"` — TRUE. `code-block.ts:34` `inlineCodeLook` — TRUE. `session-menu.ts` exists — TRUE. B8: `compose-controller.ts:751` calls `pickFromLibrary(counted(chips))` — TRUE.
+
+**Gate:** touched tests (`code-block`, `session-menu`, `ui-shots-seed`, `compose-controller`): 55 pass, 0 fail. `bun run lint`: 1497 files, clean. `bun run typecheck` (root + mobile + relay): clean. I did not re-run the full `bun test`, because the diff is doc-only.
+
+**Mutation** (`.tentacle/tmp/mobile-ui-polish/review7/mut.ts`; each file was restored and byte-compared, and `git status` was clean afterwards):
+- M1 drops `&#x27;` → 2 fail (`code-block` B7, `ui-shots-seed` B7).
+- M2 `pickRoom(chips)` → 1 fail (`compose-controller` B8).
+
+Both tests are non-vacuous.
+
+**B8 on qwen3.8:** the owner's real-iPhone report at 11:03 (build b97ff97b, above) says the photo reached `serve` and Qwen3.8 described it. So B8 holds on a real device. Execution's "Decision needed" is now moot.
+
+**Findings (MEDIUM, doc only):**
+1. Line ~1491 says "nothing left to build". But B9 (HIGH, ordering) and B10 (thumbnail) are filed "part of Slice 7" at line ~1754, and they have no plan and no code. Slice 7 is therefore NOT closed. B9 and B10 need an Implementation and Execution of their own, followed by a new Review.
+2. Line ~1522: the commit `5815252b` reads "exec (deepseek)", but the section is signed `claude-opus-5-5`. §10 requires an honest signature, so one of the two is wrong.
+
+**Attacks tried:**
+- The diff hides code → no, the diff is doc-only.
+- B7 ordering with `&amp;#x27;` → already covered by the Slices 5–6 review.
+- The B8 test is vacuous → no, M2 makes it fail.
+- The flaky 1 fail (line ~1517) is unidentified. With a doc-only diff it cannot come from this slice.
+
+**Executor:** stopped correctly when it found the contradiction, and stated the unverified part honestly. Its model attribution is inconsistent (finding 2). Reviewer: same family as the signed executor, fresh context.
+
+*— claude-opus-5-5, 2026-11-15*
