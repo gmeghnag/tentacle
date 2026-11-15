@@ -1253,3 +1253,30 @@ No `protocol.d/` note: no schema, method or update kind changed.
 ## Review — owner verdict (2026-11-14 00:10)
 
 **GO for the small v1** (`workload_shell` on k8s + docker/podman, ~3 slices, no protocol change). **`job_write`: NO-GO for now.** "Always" approvals of the tool are **scoped to the single workload** (recommended). Promoted to `docs/feat/workload-shell.md` (branch `feat/workload-shell`).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; same model family as the plan's author, a different one from the executor)
+
+**Verdict: REQUEST-CHANGES** — the §7 invariants hold; two "no leftovers" (D4) holes are confirmed by a repro.
+
+**Gate (touched files):** 279 pass · 0 fail (13 files, incl. `worker-version-marker`). `bun run lint`: clean (1391 files). `bun run typecheck`: clean. The full `bun test` was not re-run here.
+
+**Findings**
+1. **MEDIUM — after `dispose`, an open can finish and leave a live shell** (`packages/tools/src/workload-shell.ts:258-261`, `:461-471`, `:563-570`). `run` checks `disposed` only at entry. An `open` that is awaiting `prime` when the session ends goes on to `backend.open`, writes into `shells` of a disposed registry and returns. Nothing closes it again. Repro (`.tentacle/tmp/workload-shell/review-dispose-race.ts`): dispose while prime is pending, then release it → `{outcome:"hi", opened:1, closed:false, sizeAfterDispose:1}`. Fix: re-check `disposed` after `prime` and after ready, and close the shell + kill its tree there.
+2. **MEDIUM — a failed open never closes its exec** (`workload-shell.ts:514-519`). The ready-timeout (15 s) and bad-ready paths call `forget(key)` and rethrow, but never call `exec.close()` or kill the tree. A slow or garbled bootstrap leaves a live exec stream, and possibly a running `sh`, outside the registry, where neither dispose nor idle close can reach it. Same repro, first run (wrong ready marker): `opened:1, closed:false` after the timeout.
+3. **MEDIUM (minor) — the cap of 4 can be bypassed by parallel opens** (`workload-shell.ts:267-273`). The check happens before `await this.open()`, which only inserts into the map after `prime`. Distinct targets run on separate concurrency lanes, so N parallel first-runs all pass the check.
+
+**Mutations (each reverted, tree byte-identical, `git status` clean):**
+- `workloadTargetKey` ignoring the container → session-grants goes red (1).
+- Removing the session-end `dispose` → teardown goes red (2).
+
+**Attacks tried:**
+- Grant bleed across workloads/tools: holds (keyed; no fallthrough to `grantedTools`).
+- The settings rebuild's `foreign` check: holds. Only `tunnelledAgent` honours `reuse`, and it never has shells. Worker/serve report no settings, so a sync gives `applied:false` and the empty registry is disposed.
+- Pod-daemon registration: absent (`serve.ts` `tunnelledAgent` and the non-proxy pod branch pass no backend).
+- Single broker: holds (`permission:"ask"`, same gate).
+- A forged pid/sentinel only affects the pod itself.
+- Subagents are not offered the tool.
+
+**Executor:** thorough and honest about drift (keepalive dropped, live suites not added, k8s unverified live). It missed the lifecycle edges of `open` itself.
