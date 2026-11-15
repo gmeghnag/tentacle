@@ -560,7 +560,35 @@ deterministically (C4/P3's job to wire, T10/T11 to prove).
 
 ## Review
 
-*(empty)*
+### C2 review · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES.** The pure modules (speakable, chunker, narration, ask-speech, endpoint, voice-lang) hold. The reducer breaks P-F1/P-F12: events that arrive while the mode is off or paused can open the mic by themselves.
+
+**Gate:** `bun test packages/core/test/voice` 115 pass / 0 fail; `bun run lint` clean (1595 files); `bun run typecheck` clean. Mutation (mine): drop the `source === "call"` guard (`conversation.ts:681`) → 1 fail; reverted, `git status` clean.
+
+**Repro** (`.tentacle/tmp/voice-conversation/review/r1.ts`, output abridged):
+```
+A link flap while OFF:       linkDown->paused ; linkUp->listening [speak "Reconnected.", listen]
+B ask while OFF, cleared:    askPending->askPending [hush, speak] ; askCleared->listening [listen]
+C call pause, link flap:     ... linkUp->listening [listen]
+D call pause, ask flap:      ... askCleared->listening [listen]
+E 5 empty bargeins:          the 4th and the 5th both emit notice + speak "Echo detected."; bargein events still hush
+F start{bargeIn:false}+toggle: bargeIn true
+G narration seq 0 + reply seq 0: spoken{0} → listening while the reply chunk is still in flight
+H ask on a foreign turn:     hush + speak the ask
+```
+
+**Findings**
+1. **HIGH — the mic opens without the person (P-F12, P-F1).** `linkDown` (`conversation.ts:332`), `resumeFailed` (`:372`), `thermal` (`:387`), `recognitionFailed` (`:734`) and `askPending` (`:307`) do not check `state === "off"` or `pausedBy`. `linkUp` (`:356`) and `askCleared` (`:323`) then go to `listening` + `listen` from any state except `off`. The §6 controller is app-scoped and always feeds link and ask events, so: (A) a relay flap with voice mode never turned on starts recording; (B) an approval with the mode off makes it speak, then listen; (C, D) after a phone call, a link flap or an ask that clears reopens the mic. Fix: these events are no-ops while `off`; `linkUp`/`askCleared` restore the state from before (keep `paused{call|user|thermal|recognition}`). Add tests for A–D.
+2. **MEDIUM — the F1 echo rule does not converge.** After barge-in is turned off (`:527`), the reducer still acts on `bargein` (`:258`). There is no guard on `model.bargeIn` and no command telling the edge. Every later empty barge-in re-emits the notice plus `speak "Echo detected…"`, and that speech is itself echo, so the loop F1 exists to break continues. Also, `turnOn` (`:419`) forces `bargeIn: true` and overrides the user's `bargeIn:false` setting (§6 Settings row).
+3. **MEDIUM — `seq` is ambiguous.** Every system line (ask, link, narration, echo, resumeFailed: `:313,345,363,377,537,617,738`) uses `seq: 0`, which collides with the first reply chunk's seq 0. `spoken{seq}` (`:272`) removes by value, so G leaves `listening` while the reply is still playing (narration's `replyQueued` then becomes wrong). The flushed chunks of `turnEnded` (`:639`) are never added to `inFlight`. The edges (C1 `speak{seq}`/`spoken{seq}`) need one monotonic seq.
+4. **MEDIUM — F14 for asks.** `askPending` carries no turn id and is spoken unconditionally (H). The plan's F14 says "an ask is spoken by the edge that originated the turn", so two edges in voice mode both speak it.
+5. **MEDIUM — undocumented drift: the endpoint fold was not moved.** The plan's Preconditions say C2 **moves** `voice-endpoint.ts` to core. `packages/tui/src/voice-endpoint.ts` still exists, is still exported (`tui/src/index.ts:71`) and is used (`voice-session.ts:16`), so two endpoint folds now exist. Execution does not record this as drift. Either re-point the TUI to core, or record the deferral to C4.
+6. **MEDIUM — F5 is not implemented anywhere.** There is no `maxSpokenChars` / "the rest is on screen" in core (`rg` finds nothing). The reducer is the only producer of `speak`, so a long reply is spoken in full. Implement it here or assign it to a slice in the doc.
+
+**Attacks that found nothing:** the core import graph is React/Ink/RN-free; `export *` adds no name clash (typecheck clean); the `call` guard is non-vacuous (mutation above); `final` while an ask is pending → fieldInsert, never a send.
+
+**Executor behaviour:** an honest Execution (it records its own red-on-first-attempt mutations and corrects the T5 premise with evidence). But the reducer was tested only from the `on` path: the off/paused cross-state entry points, which the reducer's own "total, late events are no-ops" contract (`conversation.ts:233`) promises, were never tested. Same model family caveat: none (DeepSeek executed, Opus reviewed).
 
 #### Owner answers (2026-11-15, batch 1)
 
