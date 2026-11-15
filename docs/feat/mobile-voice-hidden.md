@@ -242,3 +242,22 @@ nothing in `Composer.tsx:120`), so the gates are pure-function changes, as the p
   case the owner prefers the row visible-but-disabled.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-16* (fresh context, but the **same model** as the executor: blind spots we share can survive both passes)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM finding: a test gap on a failure mode the plan lists; the code itself looks correct).
+
+**Gate (what I re-ran):** the 8 touched mobile test files → 134 pass / 0 fail; the whole `apps/mobile/test` suite → 1755 pass / 0 fail; `bun run lint` → 1661 files, clean; `bun run typecheck` (root + mobile + relay) → clean. I did not re-run the full `bun test`: the diff touches only `apps/mobile` (plus docs and changelog).
+
+**Findings**
+1. **MEDIUM — the reducer's `stopRequested` handling in `asking` and `preparing` is untested** (`apps/mobile/src/dictation.ts:447`, `:511`). I removed `case "stopRequested"` from `preparing` (mutation R2), then from `asking` (R3). The whole mobile suite stayed green both times, because `default: return none` swallows the event. Failure scenario: a dictation is in `preparing`/`downloading` (an on-device model download takes long), the user opens Settings and turns Dictation OFF, and the event is ignored. The attempt then reaches `started` and is `listening` behind a mic that is now hidden. That is exactly the "hidden mic still listening" failure in the plan's Failure modes. The controller tests only cover `listening`. Fix: add one reducer test per state (`asking`, `preparing`, `downloading`) asserting idle, plus the `cancel` effect for `preparing`.
+
+**Mutations (each reverted; `git status` empty afterwards):** R1 `voiceStops` ignores the "Read replies aloud" row going off → 1 RED (good). R2 / R3 above → **survived**.
+
+**Premises:** TRUE: the HIDDEN / `undefined` paths in `voice-view.ts`; the auto-read gates (`voice-controller.ts`, now `autoReadOn`); the versioned record and preserved-write rule (`voice-settings-store.ts` `write`). TRUE, and the reason for the drift: SessionScreen read the settings only at render, never subscribed (the executor's subscribe is correct). The App root subscribes *before* `load()` (`App.tsx:1119-1120`).
+
+**Attacks tried:** (a) A v1 record with `readAloud: true` → migrated with both switches off, so auto-read stays silent (`autoReadOn` needs both). Holds. (b) A v3 record or garbage → still `unreadable` and preserved. Holds. (c) The controller is rebuilt (the `voice` dep changes) → `previous === next`, so no spurious stop. Holds. (d) The `extraData` memo is keyed on `readAloudButton`, so rows re-render when the speaker switch flips. Holds. (e) The `stopRequested` coverage across reducer states → finding 1. (f) SessionScreen only subscribes in an effect after the first render: if `load()` resolves in that window (a cold-start deep link), the screen keeps the defaults. That is the fail-safe direction (voice off) and lasts until a remount, so it is below MEDIUM.
+
+**Not done vs the plan (no code impact):** `TODO.md` still lacks the `fix/mobile-dictation-quality` entry. The executor left it to the orchestrator; it can go direct to `main` (§10 carve-out).
+
+**Executor behaviour:** disciplined. It ran the load-bearing check first and reported it failing honestly, recorded its drift with reasons, and listed 12 mutations. Its blind spot: it mutation-tested `stopRequested` only in the `active` state.
