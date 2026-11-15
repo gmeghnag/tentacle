@@ -23,7 +23,8 @@ import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { SectionHeader } from "../ui/SectionHeader.tsx";
-import type { VoiceSettings } from "../voice-settings-store.ts";
+import { voiceRows } from "../voice-beta.ts";
+import { DEFAULT_VOICE_SETTINGS, type VoiceSettings } from "../voice-settings-store.ts";
 
 /** The rows, weakest lock last, with the copy the mockup uses. */
 export const DELAY_ROWS: readonly { readonly value: LockDelay; readonly label: string }[] = [
@@ -110,6 +111,9 @@ export function SettingsScreen({
   onToggleNotifications,
 }: SettingsScreenProps): JSX.Element {
   const compact = useCompactTitle();
+  // Which voice rows the Beta switches reveal (pure: `voice-beta.ts`); with every
+  // switch off the section is the two switches and a footnote.
+  const rows = voiceRows(voice ?? DEFAULT_VOICE_SETTINGS);
   // A voice choice as a checkmark list, the lock rows' look (render only).
   const choice = <T extends string>(
     rows: readonly { readonly value: T; readonly label: string }[],
@@ -253,34 +257,86 @@ export function SettingsScreen({
           </View>
           {voice === undefined || onVoice === undefined ? null : (
             <View style={styles.section}>
-              <SectionHeader palette={palette} title="Voice" />
+              {/* docs/feat/mobile-voice-hidden.md: the voice features live under
+                  BETA, OFF by default, and a row appears only when a switch that
+                  uses it is on. Which rows those are is `voiceRows`, not this. */}
+              <SectionHeader palette={palette} title="Beta" />
               <GroupedCard palette={palette}>
                 <Row
                   palette={palette}
                   first
                   minHeight={size.rowSetting}
-                  title="Read replies aloud"
+                  title="Dictation"
                   trailing={
                     <Switch
-                      testID="voice-read-aloud"
-                      accessibilityLabel="Read replies aloud"
-                      value={voice.readAloud}
+                      testID="beta-dictation"
+                      accessibilityLabel="Dictation"
+                      value={voice.dictation}
                       trackColor={{ false: palette.fill, true: palette.green }}
-                      onValueChange={(readAloud) => onVoice({ ...voice, readAloud })}
+                      onValueChange={(dictation) => onVoice({ ...voice, dictation })}
+                    />
+                  }
+                />
+                <Row
+                  palette={palette}
+                  minHeight={size.rowSetting}
+                  title="Read aloud"
+                  trailing={
+                    <Switch
+                      testID="beta-read-aloud"
+                      accessibilityLabel="Read aloud"
+                      value={voice.readAloudButton}
+                      trackColor={{ false: palette.fill, true: palette.green }}
+                      onValueChange={(readAloudButton) => onVoice({ ...voice, readAloudButton })}
                     />
                   }
                 />
               </GroupedCard>
-              <SectionHeader palette={palette} title="Language" />
-              <GroupedCard palette={palette}>
-                {choice(LANGUAGE_ROWS, voice.language, "voice-language", (language) =>
-                  onVoice({ ...voice, language }),
-                )}
-              </GroupedCard>
-              <SectionHeader palette={palette} title="Speaking rate" />
-              <GroupedCard palette={palette}>
-                {choice(RATE_ROWS, voice.rate, "voice-rate", (rate) => onVoice({ ...voice, rate }))}
-              </GroupedCard>
+              <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
+                Experimental features. They may not work well yet.
+              </Text>
+              {rows.autoRead ? (
+                <>
+                  <SectionHeader palette={palette} title="Read aloud" />
+                  <GroupedCard palette={palette}>
+                    <Row
+                      palette={palette}
+                      first
+                      minHeight={size.rowSetting}
+                      title="Read replies aloud"
+                      trailing={
+                        <Switch
+                          testID="voice-read-aloud"
+                          accessibilityLabel="Read replies aloud"
+                          value={voice.readAloud}
+                          trackColor={{ false: palette.fill, true: palette.green }}
+                          onValueChange={(readAloud) => onVoice({ ...voice, readAloud })}
+                        />
+                      }
+                    />
+                  </GroupedCard>
+                </>
+              ) : null}
+              {rows.language ? (
+                <>
+                  <SectionHeader palette={palette} title="Language" />
+                  <GroupedCard palette={palette}>
+                    {choice(LANGUAGE_ROWS, voice.language, "voice-language", (language) =>
+                      onVoice({ ...voice, language }),
+                    )}
+                  </GroupedCard>
+                </>
+              ) : null}
+              {rows.rate ? (
+                <>
+                  <SectionHeader palette={palette} title="Speaking rate" />
+                  <GroupedCard palette={palette}>
+                    {choice(RATE_ROWS, voice.rate, "voice-rate", (rate) =>
+                      onVoice({ ...voice, rate }),
+                    )}
+                  </GroupedCard>
+                </>
+              ) : null}
               <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
                 Dictation and speech run on this iPhone. Audio never leaves it and is never saved.
               </Text>

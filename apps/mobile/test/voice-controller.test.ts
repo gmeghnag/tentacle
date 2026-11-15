@@ -242,13 +242,67 @@ describe("read-aloud through the port", () => {
     off.voice.permissionAsked({ title: "Run a shell command" }, 1, true);
     expect(off.port.spoken).toEqual([]);
 
-    const on = setup({ readAloud: true });
+    const on = setup({ readAloud: true, readAloudButton: true });
     await on.voice.turnEnded({ ownTurn: true, focused: true, rows });
     expect(on.port.spoken[0]?.utterances).toEqual(["Done, the file is saved."]);
     on.voice.permissionAsked({ title: "Run a shell command" }, 7, true);
     expect(on.port.spoken.at(-1)?.utterances).toEqual([
       "Permission needed: Run a shell command. Answer on screen.",
     ]);
+  });
+
+  test("'Read replies aloud' on but the Beta switch OFF speaks nothing (docs/feat/mobile-voice-hidden.md)", async () => {
+    const rows = [
+      { kind: "user", key: "u", text: "q" },
+      { kind: "assistant", key: "a", text: "Done, the file is saved." },
+    ];
+    const s = setup({ readAloud: true, readAloudButton: false });
+    await s.voice.turnEnded({ ownTurn: true, focused: true, rows });
+    s.voice.permissionAsked({ title: "Run a shell command" }, 2, true);
+    expect(s.port.spoken).toEqual([]);
+    expect(s.port.calls).not.toContain("stopSpeaking");
+  });
+});
+
+describe("the Beta switches going OFF stop what they were running (docs/feat/mobile-voice-hidden.md)", () => {
+  test("Dictation off while listening ends the dictation: no stuck 'listening', nothing sent", async () => {
+    const s = setup({ dictation: true });
+    await listening(s);
+    s.port.fire({ type: "dictation", finalDelta: "ciao", volatile: "" });
+    expect(s.drafts.at(-1)).toBe("typed ciao");
+    // Settings → Beta → Dictation went off (App calls this on every change).
+    s.voice.settingsChanged({ ...DEFAULT_VOICE_SETTINGS, dictation: true }, DEFAULT_VOICE_SETTINGS);
+    expect(s.voice.state().dictation.kind).not.toBe("listening");
+    expect(s.port.calls.at(-1)).toBe("stop");
+    s.port.fire({ type: "ended", reason: "stopped" });
+    expect(s.voice.state().dictation.kind).toBe("idle");
+    // Ending a dictation this way must never send the transcript.
+    expect(s.sends).toEqual([]);
+    expect(s.timers.length).toBe(0);
+  });
+
+  test("Read aloud off while speaking stops the speech", async () => {
+    const s = setup({ readAloud: true, readAloudButton: true });
+    await s.voice.tapSpeak({ key: "a", text: "hello there" });
+    expect(s.voice.state().readAloud.kind).toBe("speaking");
+    s.voice.settingsChanged(
+      { ...DEFAULT_VOICE_SETTINGS, readAloud: true, readAloudButton: true },
+      { ...DEFAULT_VOICE_SETTINGS, readAloud: true, readAloudButton: false },
+    );
+    expect(s.voice.state().readAloud.kind).toBe("idle");
+    expect(s.port.calls.at(-1)).toBe("stopSpeaking");
+  });
+
+  test("a change that turns nothing off leaves a running dictation alone", async () => {
+    const s = setup({ dictation: true });
+    await listening(s);
+    const before = s.port.calls.length;
+    s.voice.settingsChanged(
+      { ...DEFAULT_VOICE_SETTINGS, dictation: true },
+      { ...DEFAULT_VOICE_SETTINGS, dictation: true, rate: "fast" },
+    );
+    expect(s.voice.state().dictation.kind).toBe("listening");
+    expect(s.port.calls.length).toBe(before);
   });
 });
 

@@ -19,7 +19,15 @@
  */
 import { useIsFocused } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
-import { type ComponentRef, type JSX, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type ComponentRef,
+  type JSX,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Alert,
   AppState,
@@ -76,6 +84,7 @@ import {
   createVoiceController,
 } from "../voice-controller.ts";
 import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
+import type { VoiceSettings } from "../voice-settings-store.ts";
 import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
@@ -150,6 +159,11 @@ export function SessionScreen({
   // effect, not at render, so a remount never reuses a disposed one.
   const [voice, setVoice] = useState<VoiceController | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState | null>(null);
+  // The Beta switches (docs/feat/mobile-voice-hidden.md) are read on every render
+  // AND subscribed: Settings is another screen, so without this a switch flipped
+  // there would only reach the composer on a remount.
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(() => VOICE_SETTINGS.current());
+  useEffect(() => VOICE_SETTINGS.subscribe(setVoiceSettings), []);
   useEffect(() => {
     const port = SPEECH_PORT;
     if (port === null) {
@@ -184,6 +198,15 @@ export function SessionScreen({
       setVoiceState(null);
     };
   }, [controller]);
+
+  // A switch that went OFF stops what it was running, so no invisible surface is
+  // left live (hidden mic still listening, hidden speaker still talking).
+  const lastVoiceSettings = useRef(voiceSettings);
+  useEffect(() => {
+    const previous = lastVoiceSettings.current;
+    lastVoiceSettings.current = voiceSettings;
+    voice?.settingsChanged(previous, voiceSettings);
+  }, [voiceSettings, voice]);
 
   // Auto-read (F12): a turn that just ended, while this screen is focused.
   const focused = useIsFocused();
@@ -330,7 +353,16 @@ export function SessionScreen({
   const rows = state.view.rows;
   const voiceView = voiceComposerView(
     voiceState,
-    dictationLocale(VOICE_SETTINGS.current().language, deviceLocales()),
+    dictationLocale(voiceSettings.language, deviceLocales()),
+    voiceSettings,
+  );
+  // What `renderItem` reads besides the row itself. A fresh array on every render
+  // would re-render every row on any state change; the Beta switches change
+  // rarely, so the identity is keyed on the two values that decide a row's look
+  // (the read-aloud state and whether the speaker is offered at all).
+  const rowExtraData = useMemo(
+    () => ({ readAloud: voiceState?.readAloud, speakShown: voiceSettings.readAloudButton }),
+    [voiceState?.readAloud, voiceSettings.readAloudButton],
   );
   const compose = state.compose;
   const status = chatStatus({
@@ -474,7 +506,13 @@ export function SessionScreen({
             data={rows}
             keyExtractor={(row: Row) => row.key}
             renderItem={({ item }) => {
-              const speak = speakButtonOf(voiceState, item, rows, state.view.composer.running);
+              const speak = speakButtonOf(
+                voiceState,
+                item,
+                rows,
+                state.view.composer.running,
+                voiceSettings,
+              );
               return (
                 <TranscriptRow
                   row={item}
@@ -487,7 +525,7 @@ export function SessionScreen({
                 />
               );
             }}
-            extraData={voiceState?.readAloud}
+            extraData={rowExtraData}
             onViewableItemsChanged={onViewable}
             viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
             contentContainerStyle={rows.length === 0 ? styles.emptyList : styles.list}
