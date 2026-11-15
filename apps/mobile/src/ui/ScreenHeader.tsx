@@ -1,10 +1,11 @@
 /**
  * The screen's own header (docs/feat/mobile-ui-polish.md Design 2/4): the native
  * nav bar is hidden (`headerShown: false`) and this row sits under the safe-area
- * top — glass buttons left and right, then either a LARGE title that scrolls
- * with the list (list screens: put `ScreenHeader` inside the ScrollView) or a
- * compact centred title + status line (chat screens). Swipe-back is the native
- * stack's, untouched. Render only.
+ * top — bare thin glyph buttons left and right, then either a LARGE title that
+ * scrolls with the list (list screens: put `ScreenHeader` inside the ScrollView)
+ * or a compact centred title + status line (chat screens) closed by one hairline
+ * (docs/feat/mobile-chrome.md A1). Swipe-back is the native stack's, untouched.
+ * Render only.
  */
 import type { JSX, ReactNode } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
@@ -57,7 +58,19 @@ export function ScreenHeader({
       </Text>
     );
     return (
-      <View style={[styles.compactRow, { paddingTop: top, minHeight: top + SIZE.headerChat }]}>
+      <View
+        style={[
+          styles.compactRow,
+          {
+            paddingTop: top,
+            minHeight: top + SIZE.headerChat,
+            // A1: the chat header closes with one hairline (`sepChat`), so the
+            // transcript scrolls under a line rather than under nothing.
+            borderBottomWidth: StyleSheet.hairlineWidth,
+            borderBottomColor: palette.sepChat,
+          },
+        ]}
+      >
         <View style={styles.side}>{left}</View>
         <View style={styles.compactTitle}>
           {onTitlePress === undefined ? (
@@ -115,7 +128,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: space.inset,
   },
-  side: { width: 96, flexDirection: "row", gap: 10 },
+  // `minWidth`, not a fixed 96: A1's right cluster is the context ring + "…" (two
+  // 44 pt targets), which is a few points wider — a fixed side would squeeze it.
+  side: { minWidth: 96, flexDirection: "row", gap: 10, alignItems: "center" },
   sideRight: { justifyContent: "flex-end" },
   compactTitle: { flex: 1, alignItems: "center" },
 });

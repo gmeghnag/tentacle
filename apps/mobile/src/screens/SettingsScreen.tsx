@@ -17,8 +17,8 @@ import type { LanguageSetting } from "../speech-locale.ts";
 import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
 import { Banner } from "../ui/Banner.tsx";
 import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
-import { GlassButton } from "../ui/GlassButton.tsx";
 import { GroupedCard } from "../ui/GroupedCard.tsx";
+import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
@@ -148,7 +148,7 @@ export function SettingsScreen({
           title="Settings"
           left={
             onBack === undefined ? undefined : (
-              <GlassButton
+              <HeaderIcon
                 palette={palette}
                 testID="settings-back"
                 icon="chevron.left"
