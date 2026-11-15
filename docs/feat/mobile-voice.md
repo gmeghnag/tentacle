@@ -726,6 +726,34 @@ The fix tags every attempt with an id, taking the reviewer's preferred option, w
 
 **Executor behaviour.** The code fix was targeted and came with a correct red test. The executor keeps mis-signing the doc sections it writes.
 
+### Round 4
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; reviewed `git diff HEAD~1`, commit `4b0bd143`)
+
+**Verdict: PASS.**
+
+**Scope.** `git diff HEAD~1 --name-only` shows only `docs/feat/mobile-voice.md`. No code or test changed, so there is nothing to mutate (§9 does not apply). Round 3's code verification and its mutation still hold.
+
+**Gate.**
+- `bun test apps/mobile/test`: 1160 pass, 0 fail.
+- `bun run lint`: 1457 files, clean.
+- `bun run typecheck` (root, mobile, relay): clean.
+
+**Round 1, finding 2 / Round 3 (signature): resolved by escalation.**
+- The "Fix round 2" signature now matches its commit, and it says what it first read.
+- The writer signs "Fix round 3" as `claude-opus-5-5` and says outright that its commit label (`4b0bd143`, "(deepseek)") may be wrong.
+- That turns a silent mismatch into an open question for the orchestrator, which is the right shape under §0 ("escalate, don't spin"). This reviewer cannot tell from the repo which side is right.
+- **For the orchestrator, before merge:** say which model executed Execution and Fix rounds 1–3, and correct either the signatures or the commit labels. §10 depends on this record being true.
+
+**Attacks tried.**
+- The diff touches only the doc: confirmed.
+- Any regression from it: none, since no code changed and the gate is green.
+- Whether the "Fix round 2" correction is accurate: it matches commit `b29760c1`.
+
+**Overall.**
+- What holds: finding 1 (the start/cancel race) is fixed in TS and Swift, and the remount regression is fixed. Both are pinned by tests that fail under mutation. The never-cloud rule F1 holds.
+- What is unverified (all native): Step 0 (a)–(c), the README device checklist (item 13 covers the race), Maestro flows 24–26, and the audio-session un-duck after `didFinish`.
+
 ## Notes / debt (for Review)
 
 *— claude-opus-5-5, 2026-11-15*
