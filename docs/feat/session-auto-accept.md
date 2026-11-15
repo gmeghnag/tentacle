@@ -422,9 +422,16 @@ clean (AGENTS §6).
 
 ## Execution
 
-*— deepseek, 2026-11-15* (Review round 1, finding 5: this section was first
-signed `claude-sonnet-4-5`, which did not execute it — commit `e078e7a0` records
-`exec (deepseek)`. Corrected to name the model that did the work.)
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-15* (Review round 1,
+finding 5: this section was first signed `claude-sonnet-4-5`, which did not
+execute it. Corrected in Fix round 1 to `deepseek` — the family, not an id —
+and to the real id in Fix round 2. The evidence is the orchestrator's own run
+log, `~/.tentacle/tmp/orchestration/runs/night-session-auto-accept.log`, whose
+`04:43 deepseek done:` line is the record of the `ds()` path taking this step;
+the commit subject `exec (deepseek)` is NOT evidence, being a hard-coded string
+in `night-task.sh`. The id is this repo's deepseek profile in
+`~/.config/tentacle/config.jsonc`, the same id `device-pairing.md` and
+`app-decomposition.md` sign that executor with.)
 
 **Load-bearing check (re-run first, per the brief): HOLDS.** Every cited site was
 read on this branch before the first edit: the decision point is the requester
@@ -582,7 +589,15 @@ Every owner question: the recommendation.
 
 ### Fix round 1
 
-*— claude-opus-5-5, 2026-11-16*
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-15* (Review round 2,
+finding 1: this section was signed `claude-opus-5-5, 2026-11-16` — the reviewer's
+id and the wrong date. Corrected to the executor actually recorded taking this
+step: `night-session-auto-accept.log` has `07:02 deepseek done:`, the `ds()` path
+of `night-task.sh` (`~/bin/tentacle --profile deepseek`, model
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in `~/.config/tentacle/config.jsonc`).
+The commit subject `review round 1 (deepseek)` is not independent evidence: it is
+a hard-coded string in `night-task.sh`. The date was the round's own commit
+`347bf2d3`, 2026-11-15 07:02 +0100.)
 
 Review round 1 found 2 HIGH + 3 MEDIUM. Every one is addressed below; each fix
 was shown RED on the branch as it stood before the fix, then green, then
@@ -710,3 +725,125 @@ stands in for in CI.
 1. **MEDIUM (process, AGENTS §10): the signature still does not match the commit.** "Fix round 1" is signed `claude-opus-5-5, 2026-11-16`, but its commit `347bf2d3` says `review round 1 (deepseek)`. The same section claims F5 is fixed ("signed by the model that actually did the work"). One of the two records is wrong. Fix: sign the section with the model that executed it.
 
 **Regressions checked on the diff, none found:** forcing the first snapshot fires once, a re-attach that changes nothing stays silent, and a snapshot is never announced as another device's flip. `hostLabel` reaches the wire only with the trust bit (the test fails without that check). The phone's `clientInfo` matches the schema regex. An older paired-computer record without `thisDeviceName` still loads. Nit, below MEDIUM: the phone's `clientInfo.version: "0"` would show as `tentacle-app 0` in a version-mismatch message (`daemon/src/version-mismatch.ts:73`).
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-15*
+
+Scope: Round 2's one open HIGH/MEDIUM (finding 1, the signature record) plus the
+root cause it exposed. Round 2 re-verified F1–F4 by mutation and found them
+fixed, so no code changed this round.
+
+**F1-of-round-2 (MEDIUM, AGENTS §10) — the signature did not name the model that
+wrote the section. FIXED, with the cause removed.**
+
+*Root cause, and why it survived two rounds:* §10 asks the signature to name the
+model so the different-model check is readable, and there were **two** defects,
+not one. `### Fix round 1` was signed `claude-opus-5-5, 2026-11-16` — the
+*reviewer's* id and a date one day after the round ran (commit `347bf2d3`,
+2026-11-15 07:02 +0100). And `## Execution`, corrected in Fix round 1, was signed
+`deepseek` — the model FAMILY, not an id. Round 1 fixed the string that was
+pointed at and left both the family name and the mechanism that produced the
+wrong string, so the same class came back.
+
+*Which record is the truth.* Not the commit subject: `night-task.sh`'s fix loop
+calls `commit "fix($SLUG): review round N (deepseek)"` for **every** fix round —
+the string is hard-coded, so it can never disagree with itself and is no evidence
+either way (the same finding `docs/feat/app-decomposition.md:1149` records). The
+orchestrator's own run log is the record of which executor path took the step:
+
+```
+$ grep -n "deepseek done\|opus .* done" ~/.tentacle/tmp/orchestration/runs/night-session-auto-accept.log
+04:43 deepseek done: …        ← exec
+06:18 opus new on personal …  ← review round 1
+07:02 deepseek done: …        ← FIX ROUND 1
+07:04 opus resume on personal ← review round 2
+```
+
+So fix round 1 was the `ds()` path (`~/bin/tentacle --profile deepseek`), whose
+model is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`
+(`~/.config/tentacle/config.jsonc`, the id `device-pairing.md` and
+`app-decomposition.md` sign that executor with); the reviews were opus. Both
+sections are now signed with the real id and the real date, and the correction
+note states which artefact it rests on and that the commit subject is not one.
+
+*This round's own signature is honest about the same trap:* fix round 2 was
+executed by `claude-opus-5-5` (this section), while its commit subject will read
+`(deepseek)` — the two disagree, and the doc says so rather than restating the
+subject.
+
+*Red first (§9).* `.tentacle/tmp/session-auto-accept/sig-check.ts` reads the doc,
+the run log and the commit, and exits 1 on the property:
+
+```
+BEFORE: run log: fix round 1 went through the deepseek executor: true
+        Fix round 1  : "claude-opus-5-5" 2026-11-16
+        Execution    : "deepseek" 2026-11-15
+        RED: - Fix round 1 (line 585) is signed "claude-opus-5-5" — the executor was
+               deepseek (rits/deepseek-ai/DeepSeek-V4.1-Flash-1017)
+             - Fix round 1 (line 585) is dated 2026-11-16 — that round ran on 2026-11-15
+             - Execution (line 425) is signed "deepseek" — a model FAMILY is not an id
+AFTER:  Fix round 1  : "rits/deepseek-ai/DeepSeek-V4.1-Flash-1017" 2026-11-15
+        Execution    : "rits/deepseek-ai/DeepSeek-V4.1-Flash-1017" 2026-11-15
+        GREEN: both sections name the model that wrote them
+```
+
+*A permanent guard, so the class cannot come back a third time:*
+`scripts/test/session-auto-accept-signatures.test.ts` (new) is the doc-local
+version of `scripts/test/task-doc-signatures.test.ts` — the repo-wide check is
+not widened because 162 exec+review pairs across `docs/feat` + `docs/fix` name
+one model (measured; that class needs its own `fix/` task, and `main` would go
+red). It asserts every executed section names its author's real id and date, that
+no signature stops at a family name, and that the two models are still told apart
+(so a future round cannot make the record unreadable by re-signing everything to
+one id). Its expectations are the ids, **not** the commit subjects, for the
+reason above.
+
+*Red first, on the pre-fix doc* (`git show HEAD:… > doc-prefix.md`, the guard
+pointed at that copy — 2 pass / 2 fail):
+
+```
+- "line 425 "Execution": "deepseek", want rits/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+- "line 585 "Fix round 1": "claude-opus-5-5", want rits/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+- "line 585 "Fix round 1": dated 2026-11-16, ran 2026-11-15",
+(fail) … each names its author's real id — never another model's, never a family name
+(fail) … no signature stops at a model family (an id is a slug, not a vendor name)
+ 2 pass / 2 fail        [after the fix: 4 pass / 0 fail]
+```
+
+*Mutation (run, then restored by hand — no `git`; doc md5 `2cc1bc52…` before and
+after every one):* **M-1**, re-sign `### Fix round 1` back to `claude-opus-5-5` →
+1 fail, naming `line 592 "Fix round 1": "claude-opus-5-5"`. **M-2**, re-sign
+`## Execution` back to `deepseek` → 3 fail (the family-name test, the id test,
+and "the two models are told apart"). **M-3**, sign `### Fix round 2` `deepseek`
+instead of the id that executed it → 2 fail, naming `line 731 "Fix round 2":
+"deepseek"`. **M-4**, re-sign all three to `claude-opus-5-5` → 2 fail, including
+"the two models are told apart" (`ids.size` 1 ≠ 2), which is §10's
+different-model check itself.
+
+| # | Mutation | Result |
+|---|---|---|
+| M-1 | `### Fix round 1` → `claude-opus-5-5` | 1 fail: id test, names line 592 |
+| M-2 | `## Execution` → `deepseek` | 3 fail: family-name + id + told-apart |
+| M-3 | `### Fix round 2` → `deepseek` | 2 fail: id test, names line 731 |
+| M-4 | all three → `claude-opus-5-5` | 2 fail: id test + told-apart (`ids.size` 1) |
+
+Gate (`bunx tsc --noEmit`; `bun run lint`; `bun test`):
+
+```
+bunx tsc --noEmit     clean
+bun run typecheck     clean (also apps/mobile + apps/relay)
+bun run lint          1445 files, 0 errors, 0 warnings
+bun test              10408 pass, 4 skip, 0 fail (752 files)
+```
+
+The 4 skips are the opt-ins §6 names (live-k8s, live-docker ×2, the slow
+real-socket keepalive); none is new. The suite grew by exactly this round's 4
+tests, and lint by exactly its one new file.
+
+**Not fixed this round, and why:** everything Round 2 listed as a sub-MEDIUM nit
+(the phone's `clientInfo.version: "0"` showing as `tentacle-app 0` in a
+version-mismatch message) is left open — it is below the severity this round was
+scoped to, and it belongs with the phone handshake. The `expo export` verification
+of F2 in round 1 remains unrun (it needs the native toolchain; the source guard
+stands in for it in CI).
