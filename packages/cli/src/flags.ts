@@ -420,6 +420,8 @@ export interface ServeLimits {
   readonly wsIdleTimeoutSec?: number;
   /** `serve --address <url>` (repeatable): the daemon's own public URLs, validated. */
   readonly addresses?: readonly string[];
+  /** `serve --push-grace <seconds>` (docs/feat/mobile-push.md Design 6): beats `push.graceSeconds`. */
+  readonly pushGraceSeconds?: number;
 }
 
 /** Bun's ceiling for a WebSocket `idleTimeout` (it throws above it). */
@@ -461,6 +463,19 @@ export function parseServeLimits(
     }
   };
   const idleMs = duration("ws-idle-timeout");
+  // `serve --push-grace <seconds>`: 0 pushes at once, one hour is the maximum
+  // (`push.graceSeconds`'s own bound). Refused HERE, before binding, like every
+  // other flag value — a typo must not silently keep the default.
+  const pushGrace = (): number | undefined => {
+    const raw = value("push-grace");
+    if (raw === undefined) {
+      return undefined;
+    }
+    if (!/^[0-9]{1,5}$/.test(raw) || Number(raw) > 3600) {
+      throw new Error(`--push-grace must be whole seconds, 0 to 3600, got "${raw}"`);
+    }
+    return Number(raw);
+  };
   if (idleMs !== undefined && (idleMs % 1000 !== 0 || idleMs / 1000 > MAX_WS_IDLE_TIMEOUT_SEC)) {
     throw new Error(`--ws-idle-timeout must be whole seconds, at most ${MAX_WS_IDLE_TIMEOUT_SEC}s`);
   }
@@ -484,6 +499,7 @@ export function parseServeLimits(
     maxSessions: count("max-sessions"),
     maxDetachedSessions: count("max-detached-sessions"),
     wsIdleTimeoutSec: idleMs !== undefined ? idleMs / 1000 : undefined,
+    pushGraceSeconds: pushGrace(),
     ...(addresses !== undefined ? { addresses } : {}),
   };
   return Object.fromEntries(

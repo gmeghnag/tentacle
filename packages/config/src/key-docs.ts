@@ -876,6 +876,35 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "`wss://`, or `ws://` to a loopback host only (dev and tests) — the daemon's relay secret travels on the socket, so anything else refuses to start with the reason. The hosted relay is the default: a self-hosted one (`apps/relay`) is named here or with `serve --relay <url>`.",
     example: '"wss://relay.example"',
   },
+  push: {
+    summary: "Push notifications for the paired phones, through the mobile relay.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "push.enabled": {
+    summary: "Whether this `serve` pushes notifications to its paired phones.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    // `serve` applies the default, as it does the relay's (`relayChoice`).
+    defaultText: "`true`",
+    details:
+      "On, a `serve` with paired phones notifies them through the mobile relay: a permission request nobody answers within `push.graceSeconds` (Time Sensitive), and a turn that ends while no client is attached. The content is sealed end-to-end to each phone, so Apple and the relay carry an opaque blob. Off, no registration is accepted and `device/push_register` answers `off`. It needs the relay: `--no-relay` / `relay.enabled: false` mean no push either (`relay-off`). A LAPTOP-ONLY setting: never carried to a pod.",
+    example: "false",
+  },
+  "push.graceSeconds": {
+    summary: "How long an unanswered permission request waits before a phone is pushed.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    defaultText: "`30`",
+    details:
+      "0 pushes at once; the maximum is 3600 (one hour). At the desk you answer and the phone stays silent: the timer is cancelled the moment the ask settles. Expressed as whole seconds; `serve --push-grace <seconds>` beats this key. Read by the pure rules module, so it is table-tested (`docs/feat/mobile-push.md` Design 1).",
+    example: "60",
+  },
   mount: {
     summary: "What a docker/podman run hides from the container's workspace mount.",
     kind: "section",

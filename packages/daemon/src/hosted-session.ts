@@ -138,6 +138,7 @@ import {
   classifyPending,
   closeFailedTurn,
 } from "./persisted-session.ts";
+import type { PushAttached } from "./push-rules.ts";
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
 import { forkableMessages } from "./session-fork.ts";
@@ -206,6 +207,17 @@ export interface Attachment {
    * reverse-tunnel): the session's model calls may go through it (`modelLink`).
    */
   readonly model?: ModelLink;
+  /**
+   * The device this client is, when the connection authenticated one
+   * (`ConnectionPrincipal.kind === "device"`). Set by `Connection` from its own
+   * principal — the socket's key already decided it (AGENTS §7, nothing here
+   * decides access). Absent for a token client, a pairing connection and the
+   * in-process worker.
+   *
+   * Push reads it for ONE thing: a device attached to this session is showing
+   * the sheet, so it is not pushed to (docs/feat/mobile-push.md Design 1).
+   */
+  readonly deviceId?: string;
 }
 
 /** A permission request waiting for its first answer (keyed by its nonce). */
@@ -345,6 +357,53 @@ export interface SessionPersistence {
 export interface SessionWake {
   /** One line per wake started (the session id only — never a job's command). */
   readonly onAudit?: (line: string) => void;
+}
+
+/**
+ * The updates a push observer is given: exactly the four whose timing the push
+ * rules decide on (docs/feat/mobile-push.md Design 1). Nothing else reaches it —
+ * a `token`/`subagent_message`/`history_replaced` is not a notification.
+ */
+type UpdateOf<K extends SessionUpdate["type"]> = Extract<SessionUpdate, { type: K }>;
+export type PushWatchedUpdate =
+  | UpdateOf<"permission_request">
+  | UpdateOf<"permission_resolved">
+  | UpdateOf<"turn_end">
+  | UpdateOf<"session_closed">;
+
+/**
+ * What a push observer is told, when (`PushEvent` in `push-rules.ts` is the
+ * shell's own form of exactly these facts).
+ *
+ * `update` is the session event itself (one of the four above); `attachment`
+ * says only "the attached set changed" — a client attached or detached. That
+ * second case exists because the exclusion is read at the push DEADLINE: a
+ * phone locked mid-grace detaches, and without this event it would still count
+ * as showing the sheet (F17). It carries no ask and pushes nothing itself.
+ */
+export type PushHookEvent =
+  | { readonly type: "update"; readonly update: PushWatchedUpdate }
+  | { readonly type: "attachment" };
+
+/**
+ * `serve` only (docs/feat/mobile-push.md Design 5, slice P7): an OBSERVER of a
+ * session's events, for push notifications.
+ *
+ * Deliberately NOT an `Attachment`, and that is the whole design:
+ * `attachments.size` drives `blockingUnsupported`/`recheckAsks` (a pending ask
+ * is denied when no attached client can show it), the idle reaper,
+ * `session/list`'s `attached` and `modelLink`. An observer registered there
+ * would make the daemon believe a client is watching — it would both silence
+ * the turn-end push it exists to send and deny asks nobody is holding
+ * (AGENTS §7 one session path; `watchers.ts` keeps followers apart for the same
+ * reason). It answers nothing, records nothing, and cannot become a model link.
+ *
+ * Synchronous and O(1), called from inside `emit` and inside the steering
+ * no-await window (`finishTurn`): the implementation must defer its own I/O.
+ * A throw is caught and reported, never thrown into the turn (F24).
+ */
+export interface SessionPushObserver {
+  onPushEvent(sessionId: string, event: PushHookEvent, attached: PushAttached): void;
 }
 
 /** How a failed turn's error leaves the daemon (see `redactTurnError`). */
@@ -561,6 +620,13 @@ export class HostedSession {
    */
   private historyRepairNoticed = false;
   private readonly jobs: JobController | undefined;
+  /**
+   * The push observer (docs/feat/mobile-push.md P7), absent everywhere but a
+   * `serve` with push on. It is NOT an attachment: see `SessionPushObserver`.
+   * Set by `SessionHost.build` after construction, like `imagesPolicy` — the
+   * session is not reachable (hence not attachable) until `build` returns.
+   */
+  pushObserver: SessionPushObserver | undefined = undefined;
   private readonly unsubscribeExit: (() => void) | undefined;
   private readonly unsubscribeStart: (() => void) | undefined;
   /**
@@ -1542,6 +1608,11 @@ export class HostedSession {
       // The TTL clock moved: a restart must see it (the reaper counts a detach
       // as activity). A capture only — safe anywhere, the fan-out included.
       this.persist();
+      // A device that left is no longer showing the sheet. The push rules read
+      // the attached set at their DEADLINE, so a phone locked mid-grace must be
+      // reported as detached, or the ask is never pushed (F17). One place for
+      // every removal path (`detach`, and the fan-out's own throw cleanup).
+      this.offerPushAttachment();
     }
   }
 
@@ -1579,6 +1650,10 @@ export class HostedSession {
     this.attachments.delete(attachment);
     this.attachments.add(attachment);
     this.recheckAsks();
+    // AFTER the set moved (and after `recheckAsks`, which may settle an ask):
+    // the push rules read the attached set at their deadline, so they must know
+    // a device attached (F17's inverse).
+    this.offerPushAttachment();
     return { resync: covered === undefined || !("replay" in covered), epoch: this.cut.epoch };
   }
 
@@ -1972,6 +2047,70 @@ export class HostedSession {
     // O(1) enqueue, never an await): a follower can neither reorder nor delay a
     // client's stream, and a watcher's bug is dropped by `offer` itself.
     this.watchers.offer(params);
+    // The push observer LAST, for the same reason, and only for the four
+    // updates a notification is about (docs/feat/mobile-push.md Design 5).
+    this.offerPush(update);
+  }
+
+  /**
+   * Hand one update to the push observer, if this daemon has one (a `serve`
+   * only) and it is one of the four the rules decide on. O(1) and synchronous,
+   * so `turn_end` stays inside the steering no-await window; a throw is
+   * reported, never thrown into the turn or at the other clients (F24).
+   */
+  private offerPush(update: SessionUpdate): void {
+    const observer = this.pushObserver;
+    if (observer === undefined) {
+      return;
+    }
+    if (
+      update.type !== "permission_request" &&
+      update.type !== "permission_resolved" &&
+      update.type !== "turn_end" &&
+      update.type !== "session_closed"
+    ) {
+      return;
+    }
+    try {
+      observer.onPushEvent(this.id, { type: "update", update }, this.pushAttached());
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+  }
+
+  /**
+   * The attached set as a push rule reads it: how many clients of ANY kind are
+   * watching (a TUI silences a turn-end push too), and which DEVICES among them
+   * (those show the sheet already, so they are not pushed to). Read live, so a
+   * detach mid-grace is seen at the deadline (F17).
+   */
+  private pushAttached(): PushAttached {
+    const devices: string[] = [];
+    for (const attachment of this.attachments) {
+      if (attachment.deviceId !== undefined) {
+        devices.push(attachment.deviceId);
+      }
+    }
+    return { clients: this.attachments.size, devices };
+  }
+
+  /**
+   * Tell the push observer that the attached set changed (an attach or a
+   * detach). The rules need it as its OWN event: they exclude the devices
+   * attached at the deadline, not the ones attached at the last ask, so a phone
+   * locked during the grace must be pushed to (F17, fix round 1). Same
+   * contract as `offerPush`: synchronous, O(1), a throw is reported.
+   */
+  private offerPushAttachment(): void {
+    const observer = this.pushObserver;
+    if (observer === undefined) {
+      return;
+    }
+    try {
+      observer.onPushEvent(this.id, { type: "attachment" }, this.pushAttached());
+    } catch (error) {
+      this.reportTurnError(error);
+    }
   }
 
   /**

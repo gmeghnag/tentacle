@@ -32,3 +32,4 @@ export * from "./session-log-store.ts";
 export * from "./session-blobs.ts";
 export * from "./session-fork.ts";
 export * from "./push-rules.ts";
+export * from "./push-notifier.ts";

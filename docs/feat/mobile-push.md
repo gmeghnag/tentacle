@@ -1844,3 +1844,248 @@ the grace expire → a push to that device.
 Same model family as the executor's earlier slices (fresh context only).
 
 *— claude-opus-5-5, 2026-11-15*
+
+## Execution
+
+### P7 (daemon wiring: the hook, `PushNotifier`, `device/push_register`) — DONE
+
+*— Claude (Claude Code 2.1.325 — the exact model id is not exposed in this environment; reported honestly rather than guessed), 2026-11-15*
+
+**Load-bearing check, re-run first: PASS.** `.tentacle/tmp/mobile-push/p78-load-bearing.ts`
+(scratch, in this worktree — the write guard confines scratch to the worktree,
+so it is the worktree's gitignored `.tentacle/tmp/`, not the repo root's),
+49 checks, `LOAD-BEARING: PASS`:
+
+```
+PASS emit() — hosted-session.ts:1960
+PASS watchers.offer AFTER the attachment fan-out (the hook goes last) — :1963 < :1974
+PASS blockingUnsupported keys on attachments.size
+PASS recheckAsks() — :1100
+PASS both ask paths reach the ONE emit() (ask.shown = true → this.emit(update)) — :933 :1044
+PASS settle emits permission_resolved / finishTurn emits turn_end synchronously
+PASS attach() — :1557   PASS detach() — :1602   PASS removeAttachment() — :1538
+PASS Attachment interface — :191
+PASS push-notifier.ts / push-hook.test.ts / push-notifier.test.ts / relay-link-push.test.ts
+     / serve-push.test.ts absent — the capability really was missing
+PASS no `onPushEvent` / no Attachment.deviceId / no `push` frame in relay-link / no
+     `push` config section / no DevicePushRegister case / no SessionHostOptions.push
+PASS protocol exports the push wire + relay push frames; a `ready` with
+     features:['push'] parses; a `push-result` parses
+PASS transport/push exports sealPush/openPush/pushKeyId/publicKeyOf
+PASS push-store + push-rules export what P7/P8 use
+PASS DeviceAuthority has staticKey()+identity(), and NO membership check yet (P7 adds one)
+PASS relay server takes an injected apns client and announces features
+```
+
+The probe's first draft **failed on one check of my own making** — it asserted
+"exactly one `ask.shown = true`", and there are two (a turn's ask, a background
+child's ask). The property that matters is "every `permission_request` reaches
+the *one* `emit`", which both sites satisfy (`:933`, `:1044`); the probe was
+corrected to state that, and no code changed because of it.
+
+**Files (P7's list, plus the three the plan's file list did not name).**
+`packages/daemon/src/push-notifier.ts` (new); `packages/daemon/src/hosted-session.ts`
+(`SessionPushObserver` + `PushHookEvent` + `PushWatchedUpdate`, `Attachment.deviceId`,
+`pushObserver`, `offerPush`/`offerPushAttachment`/`pushAttached`, the calls in
+`emit`/`attach`/`removeAttachment`); `packages/daemon/src/session-host.ts`
+(`SessionHostOptions.push` = `PushObserverOptions`, `registerPush`/`unregisterPush`,
+the observer handed to each built session); `packages/daemon/src/connection.ts` (the
+two method cases + the principal gate + `Attachment.deviceId`); `packages/daemon/src/index.ts`
+(one export); `packages/daemon/src/push-store.ts` (**added** `forgetPushRegistration`);
+`packages/daemon/src/device-authority.ts` (**added** `knows(id)`);
+`packages/protocol/src/jsonrpc.ts` (**added** `DomainErrorCode.PushStoreFailed`), and
+`packages/protocol/schema/protocol.json` regenerated with `bun run schema:export`
+(the ONE line it gained is that error code — no method, no schema shape, so no
+`PROTOCOL_VERSION` move and no `protocol.d/` note). Tests:
+`packages/daemon/test/push-hook.test.ts` (14), `packages/daemon/test/push-notifier.test.ts` (19).
+
+**As built.** `SessionPushObserver` is a plain option on `HostedSession` (set by
+`SessionHost.build`, like `imagesPolicy`), called from `emit` **after**
+`watchers.offer` and only for `permission_request` / `permission_resolved` /
+`turn_end` / `session_closed`, plus an `attachment` event from `attach` and from
+`removeAttachment` (the one place every removal path goes through — `detach`, and
+the fan-out's own throw cleanup). It is deliberately not an `Attachment`: it is a
+separate callback, so `attachments.size` (which drives `recheckAsks`, the reaper,
+`session/list`, `modelLink`) never sees it. `PushNotifier` feeds the rules, owns
+the ONE timer (`nextDeadlineAt` → `setTimeout` → `tick`), builds the `PushMessage`
+from the updates it was shown, seals it per device, and hands `{token, env,
+collapse, ttl, payload}` to an injected `PushSink`. All I/O starts from a
+`queueMicrotask` after the hook returns.
+
+**Drift from the Implementation, and why.**
+1. **`pushRegisterStatus` takes `{enabled, relay, relaySupportsPush}`; the CLI
+   reports only the three reachable verdicts.** The design's `off` is
+   unreachable by construction: `push.enabled: false` means no `push` option at
+   all, so the RPC answers `MethodNotFound` (the plan's own F16 shape), never a
+   result with `push: "off"`. The enum member stays (P2's wire owns it, and the
+   app may show it for an older daemon); only the CLI's path cannot produce it.
+2. **`forgetPushRegistration` is an addition to P5's store.** `device/push_unregister`
+   is the device's own instruction and has no token to compare against, while
+   `deletePushRegistration` is a `gone` from Apple and MUST compare (F11). Reusing
+   the compare-and-delete would have made the Settings toggle a no-op.
+3. **`DeviceAuthority.knows(id)` is an addition.** P7's `registered()` has to
+   filter a P5 file by the authority's snapshot at push time (F14), and the
+   authority exposed no membership check. It is read-only and side-effect free,
+   like `authorize`.
+4. **`PushStoreFailed` (-32019) is a new domain error code.** The plan says the
+   write failure is "an RPC error `push-store-failed`"; there was no code for it.
+   It is additive on the wire (`errorCodes` in the exported schema), so no bump.
+5. **The `attachment` event carries `PushAttached` rather than nothing.** P6's
+   `PushEvent` already had the shape; the plan's "carries no ask" is honoured —
+   it pushes nothing — but the attached set travels with it so the rules never
+   have to keep a second copy.
+
+**Red before green.** `bun test packages/daemon/test/push-hook.test.ts` and
+`push-notifier.test.ts` before the modules existed fail at the module boundary
+(not property-bearing, §9). The property-bearing evidence is the mutation tables
+below. Two of my own test drafts were **vacuously green and were rewritten**:
+(a) the no-await probe first read a flag set from the CLIENT's notification, but
+peer notifications land on a later microtask, so the flag was never set during
+`emit` and the probe proved nothing — it now uses a second raw attachment whose
+sink queues a microtask INSIDE the fan-out (M3 bites it); (b) `push-notifier`'s
+F11 test re-registered BEFORE the send instead of between the send and the
+answer, so it proved nothing — the new one re-registers inside the sink (M2 bites
+it). Both are recorded rather than quietly fixed.
+
+**Mutations — P7 hook** (`sh .tentacle/tmp/mobile-push/p7-mut.sh`, one edit at a
+time, restored from `.tentacle/tmp/mobile-push/p7-bak/` by `cp`, never git; the
+script ends with `diff -q` = IDENTICAL and a green re-run):
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | the observer registered as an `Attachment` | **RED 4** (the not-an-attachment pair + the attach-path throw) |
+| M2 | the four-type filter dropped (every update forwarded) | **RED 1** "…and NOTHING else the session emits" |
+| M3 | the hook deferred onto a `queueMicrotask` | **RED 1** the no-microtask-between test |
+| M4 | the detach event dropped | **RED 1** "a detach is an event of its own (F17)" |
+| M5 | the hook's throw no longer caught | **RED 1** "the turn still ends and every client gets every update" |
+| M6 | `deviceId` taken from a constant instead of the principal | **RED 1** "a device attachment carries ITS id" |
+| M7 | the device-principal gate on `push_register` dropped | **RED 1** "a token principal is refused" |
+
+M3 and M7 **survived the first run** and were the two useful results. M7's
+pattern did not match: Biome had rewrapped the `throw new RpcError(...)` across
+three lines, so the edit was a no-op (not a surviving mutation). M3 was a real
+survivor — the vacuity described above — fixed by rewriting the probe, after
+which it goes RED.
+
+**Mutations — P7 notifier** (`sh .tentacle/tmp/mobile-push/p7n-mut.sh`, same
+pattern, backups in `p7n-bak/`):
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | the recipient key = the computer's own key | **RED 6** (every openable-envelope test) |
+| M2 | `gone` forgets with the wrong token (an unconditional delete) | **RED 1** the F11 pair |
+| M3 | the ask's `tool` dropped from the message | **RED 2** |
+| M4 | the seal/send not deferred (synchronous inside the hook) | **RED 1** "a grace-0 push is NOT sealed inside the hook" |
+| M5 | the `attachment` event ignored | **RED 1** the F17 row |
+| M6 | `ttl: 0` instead of the plan's 3600 | **RED 1** |
+
+M4 also survived the first run — the hook test covered the SESSION side of the
+window but nothing pinned the NOTIFIER's own deferral. A dedicated test (the
+sink must not have been called when `onPushEvent` returns) was added, and M4 now
+goes RED.
+
+### P8 (`serve` wiring, `relayLink.push`, end-to-end) — DONE
+
+*— Claude (Claude Code 2.1.325 — the exact model id is not exposed in this environment; reported honestly rather than guessed), 2026-11-15*
+
+**Files.** `packages/daemon/src/relay-link.ts` (`push`/`pushStatus` on
+`RunningRelayLink`, the `n` correlation with a per-socket counter, `pushHoldMs`/
+`pushTimeoutMs`, `ready.features` read through `knownRelayFeatures`, `push-result`
+handling, held-push flush on `ready`, settle-on-teardown); `packages/cli/src/serve.ts`
+(`buildPush` — the notifier + the registration source + the status + the late
+`bindHost`/`bindLink`; wired into `startDaemon`/`reloadedHost`/`listen`);
+`packages/cli/src/flags.ts` (`--push-grace`, validated 0–3600 before binding);
+`packages/config/src/{schema,resolve,load,defaults,key-docs}.ts` (`push.enabled`,
+`push.graceSeconds`); `README.md` (regenerated by `bun run docs:config`).
+Tests: `packages/daemon/test/relay-link-push.test.ts` (10),
+`packages/cli/test/serve-push.test.ts` (6), `packages/cli/test/push-config.test.ts` (4).
+Changelog: `changelog.d/mobile-push-hook.added.md`.
+
+**As built.** `relayLink.push` refuses without a frame when the relay announced
+no `"push"` (C1), holds a frame while the link reconnects, flushes it on `ready`,
+drops it after 60 s with `push-dropped link-down` (F2), correlates answers by `n`
+(out of order is normal), settles every pending entry on a control teardown, and
+treats an unknown status as `unavailable` rather than closing the link. `serve`
+builds the whole chain only when the device route exists and `push.enabled` is
+not false; with no relay the register result says `relay-off`, and with a relay
+that has no key it says `relay-no-push`.
+
+**One load-bearing BUG found and fixed (a real defect, not a plan drift).**
+`acceptDevice`'s `release()` — which is exactly what the relay leg calls when its
+socket closes — unregistered the authority handle but **never closed the
+`Connection`**. On the direct route the ws-server closes it, so nothing noticed;
+on the RELAY path (the only one push uses) a phone that went away stayed
+attached, so its session still counted it, the rules read "every device is
+attached", and the ask ended `push-empty` — **F17 inverted on the push path**.
+Evidence, from `.tentacle/tmp/mobile-push/p8-e2e-probe.ts` before the fix:
+
+```
+[hook] attachment {"clients":1,"devices":["cfa570c653bd212b"]}
+[hook] update permission_request {"clients":1,"devices":["cfa570c653bd212b"]}
+[audit] push-dropped empty 1 ask(s) ended their grace with no device to push to
+apns requests: 0
+```
+
+and after `built?.connection.close()` was added to `teardown`
+(`device-accept.ts`): `[audit] push-sent ask cfa570c6` / `apns requests: 1`. It is
+pinned by a new `relay-link-push` test (a phone dials through the relay, opens a
+session, closes its socket → `attachedCount` reaches 0), which is RED on the
+pre-fix code (4 s timeout) AND makes the end-to-end RED too.
+
+**Mutations — P8 link** (`sh .tentacle/tmp/mobile-push/p8-mut.sh`, backups in
+`p8-bak/`, ends `diff -q` = IDENTICAL + green re-run):
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | the `features` gate dropped in `push()` | **RED 3** |
+| M2 | `pushStatus()` always `on` | **RED 1** |
+| M3 | `push-result` ignores `n` (resolves the oldest) | **RED 1** the out-of-order pair |
+| M4 | nothing held while connecting | **RED 2** |
+| M5 | a teardown does not settle pending pushes | **RED 1** |
+| M6 | an unknown status trusted as-is | **RED 1** |
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| A | `teardown` does not close the `Connection` (the pre-fix code) | **RED 2** — the new relay-detach test AND the P8 end-to-end |
+
+M1 first targeted `sendPush`'s own `features` check and **survived**: `push()`
+already gates, so the inner check was unreachable. Rather than keep a test that
+cannot fail, the redundant inner check was **deleted** (one gate, the load-bearing
+one) and the mutation re-pointed at `push()`'s gate, where it goes RED. M5 first
+survived as well (no test put a pending push against a teardown) — the
+teardown test was added, and it now bites.
+
+**Also updated.** Design §5 (the hook's contract as built), F17's row (the relay
+detach), and the changelog fragment (one bullet covering P7 + P8).
+`packages/protocol/schema/protocol.json` regenerated (one error code).
+
+**Gate (this worktree, this branch, uncommitted — see the note below).**
+`bunx tsc --noEmit` → exit 0; `bunx tsc -p apps/mobile` and `-p apps/relay` →
+exit 0. `bun run lint` → `Checked 1387 files in 435ms. No fixes applied.` (0/0,
+matches the §6 baseline). `bun test` → **10114 pass, 4 skip, 0 fail**, 10118 tests
+/ 727 files, 426 s. The four skips are the documented opt-ins (live-k8s,
+live-docker, the real-socket keepalive) plus `session-hop.docker.test.ts`'s,
+which is pre-existing on `main` and untouched here. No wire break, so no
+`protocol.d/` note and no `PROTOCOL_VERSION` move.
+
+**Unverified.** The app-side half (P9: `expo-notifications`, the per-device push
+key in the shared keychain group, `push-registration.ts`) and the NSE (task 17)
+are other slices; this one proves the daemon's chain ends in an envelope that
+OPENS with the device key + the computer key, against a fake APNs. Real APNs
+(and the Time Sensitive level, which an NSE raises) needs D2a/D2 and a device —
+`push-placeholder.yaml` / the real-iPhone checklist, P10. The `push-sent` audit
+line lands with the sink's answer, so a test must wait for it rather than read it
+right after the APNs request: three consecutive runs of `serve-push.test.ts` were
+green after that change.
+
+**Branch note.** The task prompt says "branch here"; this worktree is on
+`feat/mobile-push` (already merged into `main`, `git rev-list --count main..HEAD`
+= 0) and I am told never to `checkout`/`commit`, so P7/P8 are **uncommitted
+working-tree edits on `feat/mobile-push`**, listed in `git status`. The
+orchestrator decides where they land.
+
+**Scratch.** The write guard refuses paths outside the worktree, so every probe
+and mutation script lives in this worktree's gitignored
+`.tentacle/tmp/mobile-push/` (`p78-load-bearing.ts`, `p8-e2e-probe.ts`,
+`p7-mut.sh`, `p7n-mut.sh`, `p8-mut.sh`, and their `*-bak/` backups) rather than
+the repo root's `.tentacle/tmp/mobile-push/`.
