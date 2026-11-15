@@ -8,6 +8,7 @@
  * computer's registrar is never another computer's.
  */
 import { describe, expect, test } from "bun:test";
+import { createComputerStore } from "../src/computer-store.ts";
 import {
   type PushClient,
   type PushMemoryStore,
@@ -62,16 +63,25 @@ function fakeStore(): PushMemoryStore & {
  */
 function fakeToggle(
   initial?: boolean,
-): PushToggleStore & { readonly stored: () => boolean | undefined; failWrite?: boolean } {
+  /** A record this build cannot read (`writable: false`) — never written over (R2-2). */
+  unwritable?: boolean,
+): PushToggleStore & {
+  readonly stored: () => boolean | undefined;
+  readonly writes: () => number;
+  failWrite?: boolean;
+} {
   let value = initial;
+  let writes = 0;
   const fake = {
     stored: () => value,
+    writes: () => writes,
     failWrite: false,
-    read: async () => ({ enabled: value ?? true, writable: true }),
+    read: async () => ({ enabled: value ?? true, writable: unwritable !== true }),
     write: async (enabled: boolean) => {
       if (fake.failWrite) {
         throw new Error("disk full");
       }
+      writes += 1;
       value = enabled;
     },
   };
@@ -632,5 +642,165 @@ describe("H4: one old daemon does not lock the phone's switch", () => {
     expect(
       notificationsView({ enabled: true, phase: "daemon-too-old" }, "Mac", "granted").switchable,
     ).toBe(false);
+  });
+});
+
+/**
+ * Review round 2 (§9: each of these was RED on the reviewed code — see Execution
+ * "Fix round 2" for the runs, and the mutation that must keep it red).
+ *
+ * R2-1's own red is in `computer-store.test.ts` (the store was dropping the
+ * debt) AND here, over the REAL store: the reviewer's point was that every
+ * earlier H2 test used a fake memory that stored the object verbatim, so the
+ * app's own path was never exercised.
+ */
+describe("R2-1: the debt survives the REAL Keychain store, end to end", () => {
+  /** A real `createComputerStore` over an in-memory Keychain. */
+  function realStore() {
+    const items = new Map<string, string>();
+    const kv = {
+      get: async (key: string) => items.get(key) ?? null,
+      set: async (key: string, value: string) => {
+        items.set(key, value);
+      },
+      delete: async (key: string) => {
+        items.delete(key);
+      },
+    };
+    return { kv, store: createComputerStore({ kv, keychainAccessible: 1 }) };
+  }
+
+  const paired = async (): Promise<ReturnType<typeof realStore>> => {
+    const made = realStore();
+    await made.store.add(
+      {
+        id: "c1",
+        name: "Mac",
+        computerKey: "c".repeat(43),
+        addresses: ["ws://127.0.0.1:4000/e2e"],
+        deviceName: "iPhone",
+        pairedAt: 1,
+      },
+      "d".repeat(43),
+    );
+    return made;
+  };
+
+  test("off with no link → the NEXT manager unregisters (mutation: drop `off` in pushRegistrationOf → red)", async () => {
+    const { store } = await paired();
+    const toggle = fakeToggle();
+    const calls: string[] = [];
+    const live: PushClient = {
+      pushRegister: async () => {
+        calls.push("register");
+        return { push: "on", graceSeconds: 30 };
+      },
+      pushUnregister: async () => {
+        calls.push("unregister");
+      },
+    };
+    const first = createPushManager({ store, toggle, platform: platform(), now: () => 1 });
+    await first.sync("c1", () => live);
+    // The computer is not connected (the app's `CLIENTS.get(id)` is undefined).
+    await first.setEnabledForAll([{ id: "c1" }], false, () => () => undefined);
+    expect(calls).toEqual(["register"]);
+    // What the store really hands back: the debt, not just a bare fingerprint.
+    expect((await store.get("c1"))?.push).toEqual({ hash: "", registeredAt: 1, off: true });
+
+    // A RELAUNCH: a new manager, the same Keychain, a live link again.
+    const second = createPushManager({ store, toggle, platform: platform(), now: () => 1 });
+    await second.sync("c1", () => live);
+    expect(calls).toEqual(["register", "unregister"]);
+    // Settled, and not re-registered: the toggle is off.
+    expect((await store.get("c1"))?.push).toBeUndefined();
+  });
+
+  test("…and turning it back on then registers in that SAME connect", async () => {
+    const { store } = await paired();
+    const toggle = fakeToggle();
+    const calls: string[] = [];
+    const live: PushClient = {
+      pushRegister: async () => {
+        calls.push("register");
+        return { push: "on", graceSeconds: 30 };
+      },
+      pushUnregister: async () => {
+        calls.push("unregister");
+      },
+    };
+    const first = createPushManager({ store, toggle, platform: platform(), now: () => 1 });
+    await first.sync("c1", () => live);
+    await first.setEnabledForAll([{ id: "c1" }], false, () => () => undefined);
+
+    // Back ON while the computer is still away, then the link comes up.
+    const second = createPushManager({ store, toggle, platform: platform(), now: () => 1 });
+    await second.setEnabledForAll([{ id: "c1" }], true, () => () => undefined);
+    await second.sync("c1", () => live);
+    // The daemon's stale file is dropped first, then the person's new decision.
+    expect(calls).toEqual(["register", "unregister", "register"]);
+  });
+});
+
+describe("R2-2: a stored switch this build cannot read is never overwritten", () => {
+  test("an UNWRITABLE record is not written over (mutation: always `await toggle.write` → red)", async () => {
+    const toggle = fakeToggle(false, true);
+    const manager = createPushManager({
+      toggle,
+      store: fakeStore(),
+      platform: platform(),
+      now: () => 1,
+    });
+    await manager.setEnabledForAll([{ id: "c1" }], true, () => () => fakeClient());
+    // The decision is the session's (the row reflects it)…
+    expect(manager.viewForAll([{ id: "c1", name: "Mac" }], "granted").enabled).toBe(true);
+    // …and the newer build's record is untouched: no write at all.
+    expect(toggle.writes()).toBe(0);
+    expect(toggle.stored()).toBe(false);
+  });
+
+  test("a READABLE record still persists (the gate is the record's, not a blanket skip)", async () => {
+    const toggle = fakeToggle(true);
+    const manager = createPushManager({
+      toggle,
+      store: fakeStore(),
+      platform: platform(),
+      now: () => 1,
+    });
+    await manager.setEnabledForAll([{ id: "c1" }], false, () => () => fakeClient());
+    expect(toggle.writes()).toBe(1);
+    expect(toggle.stored()).toBe(false);
+  });
+
+  test("the single-computer toggle honours it too", async () => {
+    const toggle = fakeToggle(false, true);
+    const manager = createPushManager({
+      toggle,
+      store: fakeStore(),
+      platform: platform(),
+      now: () => 1,
+    });
+    await manager.setEnabled("c1", true, () => fakeClient());
+    expect(toggle.writes()).toBe(0);
+  });
+
+  test("a read that THROWS is not a licence to write (the fail-safe default, mutation: start `writable` at true → red)", async () => {
+    // `push-toggle-store.ts` promises its read never rejects, but the port allows
+    // it: an unreadable Keychain must not become an overwritable record.
+    let writes = 0;
+    const manager = createPushManager({
+      toggle: {
+        read: async () => {
+          throw new Error("keychain locked");
+        },
+        write: async () => {
+          writes += 1;
+        },
+      },
+      store: fakeStore(),
+      platform: platform(),
+      now: () => 1,
+    });
+    await manager.setEnabledForAll([{ id: "c1" }], false, () => () => fakeClient());
+    expect(writes).toBe(0);
   });
 });

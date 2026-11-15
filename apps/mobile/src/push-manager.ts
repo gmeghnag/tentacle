@@ -25,6 +25,7 @@ import {
   type PushMemory,
   type PushPermission,
   type PushRegistrar,
+  type PushRegistration,
   type PushSink,
   type PushState,
   createPushRegistrar,
@@ -36,10 +37,14 @@ import type { PushToggleStore } from "./push-toggle-store.ts";
 /** The store calls the memory needs (`KEYCHAIN_STORE` and its `setPush`). */
 export interface PushMemoryStore {
   get(id: string): Promise<StoredComputer | undefined>;
-  setPush(
-    id: string,
-    value: { readonly hash: string; readonly registeredAt: number } | undefined,
-  ): Promise<void>;
+  /**
+   * The value type is the REGISTRAR's own `PushRegistration`, not a narrower
+   * literal: review round 2 (R2-1) found that a hand-written `{hash,
+   * registeredAt}` here let the caller write `off` while `computer-store.ts`
+   * dropped it on read, with TS silent about it. Naming the one type both ends
+   * use is what keeps the debt round-tripping.
+   */
+  setPush(id: string, value: PushRegistration | undefined): Promise<void>;
 }
 
 /** The link's two calls (`RemoteClient.pushRegister` / `pushUnregister`). */
@@ -200,6 +205,14 @@ export function createPushManager(deps: PushManagerDeps): PushManager {
    * come up — otherwise a relaunch would show "on" to a person who turned it off.
    */
   let enabled = true;
+  /**
+   * Whether the stored switch may be overwritten. `false` for a record this build
+   * cannot read (an unknown `v`, garbage bytes, a read error): `PushToggleRead`
+   * says so, and `push-toggle-store.ts` promises that record is left untouched —
+   * a promise the manager has to keep, since it is the only writer (review round
+   * 2, R2-2). The decision still lives in memory for the session.
+   */
+  let writable = false;
   let hydration: Promise<void> | undefined;
 
   /**
@@ -213,6 +226,7 @@ export function createPushManager(deps: PushManagerDeps): PushManager {
       const read = await deps.toggle.read().catch(() => undefined);
       if (read !== undefined) {
         enabled = read.enabled;
+        writable = read.writable;
       }
     })();
     return hydration;
@@ -244,9 +258,14 @@ export function createPushManager(deps: PushManagerDeps): PushManager {
   };
 
   /** Persist the switch. A failure keeps the session's decision (the next launch
-   * reads what is on disk, which is the honest thing to say). */
+   * reads what is on disk, which is the honest thing to say), and a record this
+   * build cannot read is NEVER written over (R2-2) — the decision is the
+   * session's alone, and the newer build's record survives. */
   const rememberEnabled = async (next: boolean): Promise<void> => {
     enabled = next;
+    if (!writable) {
+      return;
+    }
     await deps.toggle.write(next).catch(() => {});
   };
 

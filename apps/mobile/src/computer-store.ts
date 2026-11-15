@@ -67,6 +67,14 @@ export interface PushRegistrationRecord {
   /** The fingerprint of the accepted `(token, env, pushKey)` (`pushFactsHash`). */
   readonly hash: string;
   readonly registeredAt: number;
+  /**
+   * An unregister the person asked for that never reached this computer (review
+   * round 1, H2): `hash` is empty, and the next connect sends it. `off` MUST
+   * survive this store's read/write round trip — dropping it here (review round
+   * 2, R2-1) made the whole debt invisible in the app, so the daemon kept
+   * pushing to a phone whose owner had turned notifications off.
+   */
+  readonly off?: true;
 }
 
 /** What `list()` yields per index entry: a usable computer, or one whose item is unreadable. */
@@ -193,7 +201,14 @@ function pushRegistrationOf(value: unknown): PushRegistrationRecord | undefined 
   if (typeof record.hash !== "string" || typeof record.registeredAt !== "number") {
     return undefined;
   }
-  return { hash: record.hash, registeredAt: record.registeredAt };
+  // `off` is copied only when it IS `true`: anything else (a newer build's
+  // future meaning, a hand-edited file) is not this build's debt, and inventing
+  // one would send an unregister nobody asked for.
+  return {
+    hash: record.hash,
+    registeredAt: record.registeredAt,
+    ...(record.off === true ? { off: true as const } : {}),
+  };
 }
 
 /** The public half of a stored computer (never the key). */

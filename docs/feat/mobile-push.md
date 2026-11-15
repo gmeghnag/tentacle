@@ -2883,3 +2883,132 @@ read/write the registrar already owns — and `computer-store.ts` drops a malfor
 relaunch — `createPushToggleStore`'s underlying `SecureStore.setItemAsync` — needs
  a simulator/device; everything above is a fake `SecureKV` (the same seam
 `lock-settings-store.ts` is tested through).
+
+### Fix round 2
+
+*— claude-opus-5-5 (the model id this environment reports for me), 2026-11-16*
+
+Scope: the two findings of *Review — Round 2* (1 HIGH, 1 MEDIUM). Both reproduced
+on the reviewed code before any edit, both fixed red-before-green, both
+mutation-checked (§9). Scratch (gitignored, inside THIS worktree):
+`.tentacle/tmp/mobile-push/fixr2/` — `mut.sh`, `mut.log`, `probe-toggle.ts`,
+`probe-store.ts`, and the two `.fixed.ts` backups the mutation script restores from.
+
+**Repro before the fix (the reviewer's `.tentacle/tmp/mobile-push/p9-review2.test.ts`,
+real `createComputerStore` + real `createPushToggleStore`, on the reviewed code):**
+
+```
+stored push: {"hash":"","registeredAt":1794730248318}      ← `off` is GONE
+error: expect(received).toEqual(expected)
+@@ -2,3 +2,2 @@
+    "register",
+-   "unregister",
+ 0 pass · 1 fail
+```
+
+The debt was written and read back without `off`, so `syncOnce`'s
+`last?.off === true` never fired and the next connect fell through to
+`skip disabled` — the daemon kept pushing to a phone whose owner had said stop.
+
+**R2-1 (HIGH) — the store round-trips the debt, and the type gap is closed.**
+Root cause: `computer-store.ts` `pushRegistrationOf` rebuilt the record as
+`{hash, registeredAt}` only, dropping `off` on every `get`; the narrower hand-
+written `setPush` value type in `push-manager.ts` let the writer name `off` while
+the reader did not, and TS said nothing.
+- `computer-store.ts:66-78`: `PushRegistrationRecord.off?: true` — the field is
+  now part of the persisted contract, documented as the debt record.
+- `computer-store.ts:196-211`: `pushRegistrationOf` copies `off` **only when it is
+  exactly `true`**. A dropped field (the bug) and a coerced one are both wrong: a
+  newer build's future meaning, or a hand-edited file, must not make the phone
+  send an unregister nobody asked for.
+- `push-manager.ts:37-48`: `PushMemoryStore.setPush`'s value type is the
+  registrar's own `PushRegistration`, not a narrower literal — the one type both
+  ends use, so this divergence cannot reappear silently.
+
+**R2-2 (MEDIUM) — a record this build cannot read is never written over.**
+Root cause: `ready()` dropped `PushToggleRead.writable`, and `rememberEnabled`
+always wrote, so `push-toggle-store.ts`'s promise ("an unknown `v` is never
+overwritten") was false the moment the manager wrote.
+- `push-manager.ts:205-215`: `writable` starts **`false`** — fail-safe, so a read
+  that throws (the port allows it, even though the store's own read never
+  rejects) cannot licence an overwrite.
+- `push-manager.ts:223-233`: `ready()` keeps `read.writable`.
+- `push-manager.ts:260-271`: `rememberEnabled` updates `enabled` in memory (the
+  session's decision, exactly the app-lock setting's preserved-record rule) and
+  returns WITHOUT writing when `writable` is false.
+
+**Tests (red before green, §9).** Both new blocks were run against the reviewed
+code first — 5 RED, each on its own assertion, not on an import or compile error:
+
+```
+(fail) … an `off` DEBT round-trips through the store        @@ "off": true missing
+(fail) R2-1 … off with no link → the NEXT manager unregisters  @@ "unregister" missing
+(fail) R2-1 … turning it back on then registers in that SAME connect  @@ "unregister" missing
+(fail) R2-2 … an UNWRITABLE record is not written over       Expected: 0  Received: 1
+(fail) R2-2 … the single-computer toggle honours it too      Expected: 0  Received: 1
+```
+
+- `test/computer-store.test.ts`: +2 tests (the debt round-trips; an `off` that is
+  not exactly `true` is not invented into one).
+- `test/push-manager.test.ts`: +5 tests in two new `describe` blocks (R2-1 over
+  the REAL store, both the "off stays off" and the "back on registers in the same
+  connect" shapes — the reviewer's point was that every earlier H2 test used a
+  fake memory that stored the object verbatim; R2-2 unwritable / readable /
+  single-computer / read-throws). `fakeToggle()` gained an `unwritable` argument
+  and a `writes()` counter; no existing call site changed behaviour.
+
+**Mutations (§9 — each breaks ONE fix; the named test went RED, restored after).**
+
+```
+M1   pushRegistrationOf drops `off` (computer-store.ts:210)   3 fail  R2-1 ×2 + the round-trip
+M1b  `off` coerced (`!== undefined`) instead of checked (:210) 1 fail  "not exactly `true` is not invented"
+M2   rememberEnabled ignores writable (push-manager.ts:266)    3 fail  R2-2 ×3
+M2b  `writable` starts true (…:215)                            1 fail  "a read that THROWS is not a licence"
+M2c  `writable` inverted (…:229)                               5 fail  H1 + R2-1 + R2-2 ×3
+```
+
+**A note on running mutations, because it nearly cost a false result.** The
+first scripted run piped `head -20` into the loop; SIGPIPE killed the script
+between applying M2c and restoring, leaving `writable = !read.writable` in the
+tree. Every subsequent probe then read that as the fix. `diff` against the
+`.fixed.ts` backups caught it, the tree was restored, and the script now writes a
+log file instead of being truncated. All figures above are from the
+log-file run, followed by `diff -q` on both files (`CLEAN`) before the gate.
+
+**Gate (this worktree, after the fixes; `git status` shows only the four edited
+files).**
+
+```
+bun run typecheck                 exit 0  (tsc --noEmit && -p apps/mobile && -p apps/relay)
+bun run lint                      1399 files — clean (0 errors, 0 warnings)
+bun test                          10223 pass, 4 skip, 0 fail  (734 files, 411 s)
+```
+
+The 4 skips are the pre-existing opt-ins (live k8s, live docker, live docker
+session-hop, the slow real-socket test) — none in a touched file. This round adds
+7 tests (2 in `computer-store.test.ts`, 5 in `push-manager.test.ts`) and removes
+none; the total moved 10215 → 10223 against the figure fix round 1 recorded, so
+the 8th is not mine to attribute — and it is not a new failure (0 fail either way).
+
+**One non-reproducing failure, recorded rather than hidden.** After the final
+`changelog.d/` edit, ONE full run reported `10222 pass, 4 skip, 1 fail` (same
+10227 total), and I had piped that run through `tail -5`, so the failing test's
+name was lost — my mistake, and the reason the scripted runs above now write log
+files. It did not reproduce: two further full `bun test` runs were
+`10223 pass, 0 fail`, and the whole mobile suite (`apps/mobile/test`, 916 tests,
+which contains every test this round touched) was 6/6 green when run alone. So it
+is a load-dependent timing flake somewhere outside the files this round changed,
+not a fix of mine — but I cannot name it, and that is the honest limit of this
+claim. Verify with repeated full runs if a name is wanted.
+
+**Drift from the review's suggested shape.** None substantive: the review offered
+"either keep the value in memory only when `writable` is false, or remove the
+promise", and the first was taken (the promise is the better contract — it is what
+protects a newer build's record). One addition beyond the letter of the finding:
+`writable` defaults to **false** rather than true, so the fail-safe holds even if
+`read()` rejects, which the fake-store seam in the tests makes reachable.
+
+**Unverified (one line).** The real Keychain item's durability across a device
+relaunch still needs a simulator/device (unchanged from fix round 1); everything
+here is a fake `SecureKV`, the same seam `lock-settings-store.ts` is tested
+through.

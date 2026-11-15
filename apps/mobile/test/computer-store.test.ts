@@ -289,6 +289,33 @@ describe("the push registration fingerprint (docs/feat/mobile-push.md P9)", () =
     expect(read?.deviceKey).toBe("priv-a");
   });
 
+  test("an `off` DEBT round-trips through the store (mutation: return only `{hash, registeredAt}` → red)", async () => {
+    // Review round 2, R2-1: the toggle-off while a computer is not connected
+    // stores `{hash:"", registeredAt, off:true}`, and this reader used to
+    // rebuild the record WITHOUT `off`, so the debt was invisible in the app and
+    // the daemon kept pushing to a phone whose owner said stop. The type gap is
+    // why TS was silent; this test is the contract that closes it.
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("a"), "priv-a");
+    await s.setPush("a", { hash: "", registeredAt: 9, off: true });
+    expect((await s.get("a"))?.push).toEqual({ hash: "", registeredAt: 9, off: true });
+  });
+
+  test("an `off` that is not exactly `true` is not invented into a debt", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("a"), "priv-a");
+    const raw = JSON.parse(kv.items.get(computerKeyOf("a")) ?? "{}") as Record<string, unknown>;
+    kv.items.set(
+      computerKeyOf("a"),
+      JSON.stringify({ ...raw, push: { hash: "h", registeredAt: 1, off: "yes" } }),
+    );
+    // Readable, but not this build's debt: an unregister nobody asked for is a
+    // bug of its own, so the field is dropped rather than coerced.
+    expect((await s.get("a"))?.push).toEqual({ hash: "h", registeredAt: 1 });
+  });
+
   test("a RE-PAIR forgets the fingerprint: the device id changed, so the old one means nothing", async () => {
     const kv = fakeKV();
     const s = store(kv);

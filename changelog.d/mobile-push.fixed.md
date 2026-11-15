@@ -6,4 +6,7 @@
   not be sent is never treated as sent); turning it back on registers immediately
   with the computers that are connected instead of waiting for a reconnect; and
   one outdated computer no longer makes the switch inoperable, so notifications
-  can still be turned off for the computers that do deliver.
+  can still be turned off for the computers that do deliver. The unregister is
+  also remembered across an app relaunch (it lives in the computer's own stored
+  record) and a switch record left by a different app version is never
+  overwritten.
