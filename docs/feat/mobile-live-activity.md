@@ -72,11 +72,14 @@ no `apps/mobile/targets` / `apps/mobile/modules`. The executor re-runs the
 search on `main` after task 17 merged: then the push/NSE pieces exist, still no
 Live Activity.
 
-> **Branch state (corrected in fix round 1, 2026-11-15).** `88f5a8f9` is this
-> branch's **cut point**, not current `main`. Current `main` is `b44766f8`
-> (task 16 + task 17 merged) and this branch is **305 commits behind** it, so
-> none of the push stack the plan builds on exists here yet
-> (`.tentacle/tmp/mobile-live-activity/precondition-probe.txt`). The plan's
+> **Branch state (corrected in fix round 1, 2026-11-15; re-measured in round 2,
+> 2026-11-16).** `88f5a8f9` is this branch's **cut point**, not current `main`.
+> Current `main` is `b9b2d4fb` and this branch is **315 commits behind** it, so
+> none of the push stack the plan builds on exists here yet — `main` moved during
+> round 2 (`b44766f8` at 305 behind → `b9b2d4fb` at 315); the merge stays
+> conflict-free at the later base (`git merge-tree --write-tree main HEAD` → exit
+> 0). The probe is in
+> `.tentacle/tmp/mobile-live-activity/precondition-probe.txt`. The plan's
 > `file:line` citations were verified **correct at `88f5a8f9`** (23/23) and
 > re-mapped to `main`: task 16's push hook shifts every cited line in
 > `hosted-session.ts` by +2 … +235
@@ -116,7 +119,8 @@ Proof (daemon, by source):
   `session_title.title` (`:301-305`), `session_closed` (`:290-293`).
 - **The observer must not be an attachment.** `recheckAsks` denies a pending
   ask when no attached client can show it (`hosted-session.ts:1088-1097`,
-  called at `:1569`, `:1592`); `Attachment` (`:191-203`) feeds that set.
+  called at `:1569`, `:1592`); `Attachment` (`hosted-session.ts:191-203` — the
+  file matters: the drift table below now carries it) feeds that set.
   Task 16 keeps the hook out of it; this task only widens its kind filter.
 - **The daemon holds the sender key** (`device-authority.ts:146` `staticKey()`,
   `:151` `identity()`), as for push.
@@ -615,34 +619,41 @@ fan-out point and ~235 above the turn machinery, which is why the old numbers
 point at unrelated code on `main` (the dangerous "line numbers line up" case the
 previous Execution flagged).
 
-| claim | plan line | on main | shift | correct at base? |
-|---|---|---|---|---|
-| emit fan-out | `1948` | `2087` | +139 | yes |
-| watchers.offer | `1962` | `2101` | +139 | yes |
-| turn_start (a) | `2081` | `2284` | +203 | yes |
-| turn_start (b) | `2280` | `2483` | +203 | yes |
-| eventToUpdate then emit | `2458` | `2693` | +235 | yes |
-| ask.shown (a) | `921` | `1028` | +107 | yes |
-| ask.shown (b) | `1032` | `1141` | +109 | yes |
-| settle() | `1136` | `1265` | +129 | yes |
-| finishTurn() | `2505` | `2740` | +235 | yes |
-| finishTurn call (a) | `2397` | `2632` | +235 | yes |
-| finishTurn call (b) | `2468` | `2703` | +235 | yes |
-| finishTurn call (c) | `2479` | `2714` | +235 | yes |
-| finishTurn call (d) | `3013` | `3248` | +235 | yes |
-| recheckAsks def | `1088` | `1217` | +129 | yes |
-| recheckAsks caller (a) | `1569` | `1704` | +135 | yes |
-| recheckAsks caller (b) | `1592` | `1731` | +139 | yes |
-| Attachment interface | `191` | `193` | +2 | yes |
-| no own decision (comment) | `30` | `30` | same | yes |
-| tool_call.title+status | `45` | `45` | same | yes |
-| turn_start.turnId | `242` | `242` | same | yes |
-| turn_end.stopReason+error | `257` | `257` | same | yes |
-| session_closed | `290` | `290` | same | yes |
-| session_title.title | `301` | `301` | same | yes |
+Files: `hs` = `packages/daemon/src/hosted-session.ts` · `upd` =
+`packages/protocol/src/updates.ts`. The file column is load-bearing: a line
+number without its file is not a citation (see the round-2 note under the
+table).
 
-The six `same` rows are in `packages/protocol/src/updates.ts`, which task 16 did
-not touch. **For L0 onward: read the `on main` column, not the prose numbers** —
+| claim | file | plan line | on main | shift | correct at base? |
+|---|---|---|---|---|---|
+| emit fan-out | `hs` | `1948` | `2087` | +139 | yes |
+| watchers.offer | `hs` | `1962` | `2101` | +139 | yes |
+| turn_start (a) | `hs` | `2081` | `2284` | +203 | yes |
+| turn_start (b) | `hs` | `2280` | `2483` | +203 | yes |
+| eventToUpdate then emit | `hs` | `2458` | `2693` | +235 | yes |
+| ask.shown (a) | `hs` | `921` | `1028` | +107 | yes |
+| ask.shown (b) | `hs` | `1032` | `1141` | +109 | yes |
+| settle() | `hs` | `1136` | `1265` | +129 | yes |
+| finishTurn() | `hs` | `2505` | `2740` | +235 | yes |
+| finishTurn call (a) | `hs` | `2397` | `2632` | +235 | yes |
+| finishTurn call (b) | `hs` | `2468` | `2703` | +235 | yes |
+| finishTurn call (c) | `hs` | `2479` | `2714` | +235 | yes |
+| finishTurn call (d) | `hs` | `3013` | `3248` | +235 | yes |
+| recheckAsks def | `hs` | `1088` | `1217` | +129 | yes |
+| recheckAsks caller (a) | `hs` | `1569` | `1704` | +135 | yes |
+| recheckAsks caller (b) | `hs` | `1592` | `1731` | +139 | yes |
+| Attachment interface | `hs` | `191` | `193` | +2 | yes |
+| no own decision (comment) | `hs` | `30` | `30` | same | yes |
+| tool_call.title+status | `upd` | `45` | `45` | same | yes |
+| turn_start.turnId | `upd` | `242` | `242` | same | yes |
+| turn_end.stopReason+error | `upd` | `257` | `257` | same | yes |
+| session_closed | `upd` | `290` | `290` | same | yes |
+| session_title.title | `upd` | `301` | `301` | same | yes |
+
+**Five** of the six `same` rows are in `packages/protocol/src/updates.ts`, which
+task 16 did not touch; the sixth, `no own decision`, is a comment in `hs`
+(fix round 2 — the earlier wording said "six … are in `updates.ts`", which was
+off by one). **For L0 onward: read the `on main` column, not the prose numbers** —
 the Implementation's inline citations stay as written (they are true of the plan's
 base) and this table is the translation. One genuinely wrong citation in the old
 text is corrected here: the `finishTurn` *end* was cited as a single line
@@ -775,6 +786,133 @@ fail**, 9320 tests / 670 files, 370 s
 here means "the doc edits changed no code path", not "the feature works". No
 changelog fragment (no user-visible change), no `protocol.d/` note (no schema
 change), `protocol.json` untouched.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Scope: Review round 2's two findings, plus one record defect this round found
+and fixed. No code, no slice (L0–L12 remain 0 of 13).** The signature is real:
+read from this session's transcript
+(`~/.claude/projects/-Users-gmeghnag-tentacle/d3ca19a6-….jsonl` — 460 assistant
+records, every one `"model":"claude-opus-5-5"`), not assumed.
+
+**Re-verified first (the blocking premise still holds).** `git rev-list --count
+HEAD..main` → **315**; `main` = **b9b2d4fb**. `push-seal.ts`,
+`push-notifier.ts`, `relay-link.ts` absent here, present on `main`;
+`grep -c onPushEvent packages/daemon/src/hosted-session.ts` → **0** here. The
+branch is still cut before tasks 16/17, so no slice can run. `main` moved
+**during** this round (`b44766f8`/305 → `b9b2d4fb`/315), which is why both
+verifiers first went red on the doc's now-stale base claim — that is the guards
+working, and the figures above are the final measurement. **New — what round 2
+could not do:** `git merge-tree --write-tree main HEAD` → exit 0, **no
+conflicts**, re-confirmed at the later base. It writes no ref and no index, so it
+is inside an executor's standing; the merge itself is a commit and is not.
+
+**Finding 1 (the branch/base) — FIXED to the limit of an executor's standing;
+the merge itself is STILL OPEN and remains the orchestrator's.** Round 2 asked
+the orchestrator to confirm the merge is conflict-free before merging; that is
+now **confirmed** above, with the tree hash recorded. What I cannot do is perform
+it (`git merge` = a commit, and this round is forbidden
+`checkout`/`restore`/`stash`/`commit`), so the root cause stays open by design,
+not by omission. Nothing here pretends the branch is usable.
+
+**New defect found this round, MEDIUM — the drift table had no file column, so
+two of its rows cited a line in the wrong file. FIXED.**
+
+Round 1 added the drift table to stop "line numbers line up while pointing at
+unrelated code". It then reproduced that trap itself: the table recorded *which
+line*, never *which file*. Eighteen rows are `hosted-session.ts`, five are
+`updates.ts`, and a reader following `| Attachment interface | 191 | 193 |` has
+no way to know it means `hosted-session.ts:191-203` — the Implementation prose at
+`:119` says so, but the adjacent rows are `updates.ts`, so the natural read is
+`updates.ts:193`. Measured, that line is `});`. The interface is at
+`hosted-session.ts:191` on the base and `:193` on `main` (task 17's `hop` field
+is what moves it), so the *number* was right and the *citation* was not — the
+worse kind of wrong, because it survives a spot-check of the number.
+
+Fixed by adding the missing `file` column (aliases defined above the table) and
+one sentence on why that column is load-bearing. Second, smaller correction: the
+prose said "the six `same` rows are in `packages/protocol/src/updates.ts`", but
+only **five** are — the sixth, `no own decision`, is a comment in
+`hosted-session.ts:30` (`the daemon makes no decision of its own`). Both are
+prose/table errors; no design change.
+
+**What was re-verified, mechanically.** Round 2 spot-checked rows by eye and said
+so. This round checks **every row against the commits**:
+`.tentacle/tmp/mobile-live-activity/r2-cite-verify.ts` reads `git show
+<rev>:<file>` only (never the worktree, index or refs) and asserts per row: the
+row names a file (A1) · the `on main` line in that file at `main` really is the
+claimed symbol (A2) · the `plan line` in that file at `88f5a8f9` really is that
+symbol (A3) · `on main − plan line` equals the `shift` cell (A4). The verifier
+supplies the symbols; **the numbers come from the doc**, so the two are checked
+against each other rather than against themselves.
+
+**Result: 23/23 rows hold on all four assertions** (71 row-level checks) plus 2
+doc-level checks = **73/73** (`r2-cite-GREEN.txt`). Round 1's arithmetic and round
+2's spot-check were both right: the table's *numbers* were never the problem —
+the missing *file* was.
+
+**Red before green (AGENTS §9).**
+
+- **RED on the pre-fix doc** (`r2-cite-RED.txt`): **0/25** — A1 and all 23 A2s
+  fail on the real assertion ("row names no file"); A1b fails with the trap
+  measured: `updates.ts:193 = "});"`.
+- **GREEN after**: **73/73**, exit 0 (`r2-cite-GREEN.txt`).
+
+**Mutations (§9 non-vacuity — each re-broke the doc, observed the named test
+fail, restored from `doc-r2-good.md`):**
+
+| # | mutation | expected | observed |
+|---|---|---|---|
+| M1 | drop the `file` column (header + every row) | A1 red | **A1 + A1b + 23×A2 FAIL** (0/25) |
+| M2 | `Attachment` row back to `upd` — the real defect | A1b, A2, A3 red | **3 FAIL** (68/73): A1b; `@ updates.ts:193 on main (found "});")`; `@ updates.ts:191 at 88f5a8f9 (found "unansweredCalls…")` |
+| M3 | `emit` `on main` `2087`→`2088` | A2, A4 red | **2 FAIL** (69/73): A2 (`found "const params = toUpdateParams…"`), A4 (`doc=+139 real=+140`) |
+| M4 | revert the "Five" correction to "Six" | D1 red | **D1 FAIL** (72/73): `table: 6 same, 5 upd, 1 hs` |
+| M5b | base claim `305`→`304` (at the then-current base `b44766f8`) | D2 red | **D2 FAIL** (72/73) |
+| M5b′ | base claim `315`→`314` (re-run at the final base `b9b2d4fb`) | D2 red | **D2 FAIL** (72/73) |
+| M6 | drop the `file` column vs round 1's guard | F1c red | **F1c FAIL** |
+
+**A vacuous assertion of mine was caught by mutation, not by reading.** D2 first
+asserted the flat text `includes("305 commits behind")`; **M5 (inserting a hedge
+right after the claim) still passed 73/73**. Fixed to parse the sentence's actual
+number and compare it with `git rev-list --count HEAD..main`, which M5b then
+failed correctly. Reported rather than hidden: **M5c (appending a clause after a
+correct claim) still passes**, and that is not vacuity — the claim stays true and
+no assertion should fail on a true claim.
+
+**One regression I introduced, and fixed.** Round 1's `doc-guard.test.ts` F1c
+pinned the exact old header `| claim | plan line | on main | shift |`, so adding
+the `file` column turned a passing test red (5/6). I did not delete the test: F1c
+now asserts the **stronger** header including `file`, and M6 proves it still bites
+(drop the column → F1c FAIL). Guard now **6/6**.
+
+**Drift from the Implementation: none — the Implementation still did not run.**
+Both doc edits are record corrections (a citation's file, a miscount); neither
+touches the design, the slices or any precondition.
+
+**Still PARTIAL, and why.** L0–L12: **0 of 13**. Precondition unchanged — the
+branch does not carry `main`; the merge is conflict-free but is a commit, which
+this round may not make. Not verified here: any runtime behaviour of the plan (no
+code exists to observe), and the iOS 18 simulator runtime is still absent (only
+26.5 installed), which L0(b) needs alongside D4a's Apple-console work.
+
+**Gate (measured, final run on the finished tree):** `bunx tsc --noEmit` → exit
+0 · `bun run lint` → "Checked 1292 files in 371ms. No fixes applied", 0
+errors/warnings (baseline-clean, AGENTS §6) · `bun test` → **9317 pass, 3 skip, 0
+fail**, 9320 tests / 670 files, 368 s (the 3 skips are the three opt-in ones),
+re-run on the finished tree after the last doc edit.
+Doc+scratch only: `git status --short` → `M docs/feat/mobile-live-activity.md`,
+nothing else, so green means "the doc edits changed no code path", not "the
+feature works". No changelog fragment (no user-visible change), no `protocol.d/`
+note (no schema change), `protocol.json` untouched.
+
+**Scratch location, honestly.** AGENTS §6 names
+`<repo root>/.tentacle/tmp/<slug>/`, but this session's write scope is the branch
+worktree, so the evidence sits in
+`.tentacle/worktrees/mobile-live-activity/.tentacle/tmp/mobile-live-activity/`
+(where round 1 also put it). Both are gitignored; nothing is lost, and a reviewer
+must look there.
 
 ## Review
 
