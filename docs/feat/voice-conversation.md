@@ -427,11 +427,604 @@ Red first (§9); each is shown failing on a stub, then green, and the named muta
 
 ## Execution
 
-*(empty — the plan is not yet approved)*
+### C2 — shared core (§3 modules) · *— deepseek-v4.1-flash (tentacle), 2026-11-15*
+
+**Scope.** Slice C2 only. Nothing of C3 (protocol/daemon/provider), C1/C1b/C4/C5
+(Mac helper + TUI) or P1–P4 (phone) was touched.
+
+**Load-bearing check (run FIRST, per the brief).** C2's precondition is
+"shared code lives in `@tentacle/core`", which both edges depend on, React-/
+Ink-/RN-free. Re-run on this branch
+(`.tentacle/tmp/voice-conversation/c2-load-bearing.txt`): `rg 'from
+"(react|ink|react-native)' packages/core/src` → no match;
+`@tentacle/core` is a dependency of both `apps/mobile/package.json:11` and
+`packages/tui/package.json:12`; core's deps are `@tentacle/protocol` + `zod`
+only. **PASSED** — the slice proceeded.
+
+**Capability missing, shown before the code (feat repro).** `packages/core/src/voice/`
+did not exist (`ls` → no such file); `rg -n 'export (function|const|type|interface)
+(clean|splitLong|speakable|narration|chunker|askSpeech|voiceLang|conversation)'
+packages/core/src packages/protocol/src` → no match. V1's endpoint fold exists on
+`feat/voice-dictation` (`packages/tui/src/voice-endpoint.ts`, merged into `main`)
+and mobile-voice's `speakable.ts` on `feat/mobile-voice` only (both verified with
+`git ls-tree`).
+
+**As built, in the plan's dependency order.** All under
+`packages/core/src/voice/` (+ `export *` at `packages/core/src/index.ts:28`),
+tests under `packages/core/test/voice/` (7 files, 115 tests):
+
+| Module | What the plan asked for (verified against §3, not memory) |
+|---|---|
+| `voice-lang.ts:42` | utterance → setting → `en`; an unspoken tag is `null`, never a guess (P-F6). |
+| `speakable.ts:316` | `clean`/`splitLong` lifted from mobile-voice **verbatim** (same `MAX_UTTERANCE` 600, same sentence/space rules) + a streaming fold: fences → `(code on screen)`/`(codice a schermo)`, tables → placeholder, links → label, bare URL → `link`, control chars stripped. |
+| `chunker.ts:301` | ≤ `firstWords`(4) for the FIRST chunk, then sentence/clause ends, cap `maxChars`(200), `flush()`, never inside a word or a number, delta-split invariant. |
+| `narration.ts:113` | tool name only (labels localized), ≤ 1 line per 5 s, silent while a reply chunk is queued; unknown tool → "working"/"Sto lavorando". |
+| `ask-speech.ts:66` | verbatim when ≤ 120 chars **and** one line, else the screen template; always ends "answer on screen"; never a truncation; `explanation` accepted and ignored (F7). |
+| `endpoint.ts:172` | edge-neutral fold, per-edge defaults: Mac `turnModel:true` (asks Smart Turn), phone `turnModel:false` (the `textGrew` rule); floor 500 ms, hard stop 3 s, `autoStop:true` for conversation mode. |
+| `conversation.ts:762` | the reducer: 7 states, the normalised event vocabulary, and the 8 commands (`prompt`/`enqueue`/`fieldInsert`/`notice`/`speak`/`hush`/`listen`/`unlisten`) as DATA. |
+
+**Drift from the Implementation (and why).** Three, all inside C2's own files:
+
+1. **`ask-speech` is its own file, not a section of `narration.ts`** — the plan's
+   Files list names it separately (§3 row 5) and the two have different inputs;
+   no change to behaviour.
+2. **`speakable` exposes a streaming fold (`speakableFilter`) alongside the
+   one-shot `speakableText`.** §3 says `speakable.ts` is a markdown→text
+   transform, which is what `speakableText` is; but §3 also says the reply
+   arrives as deltas and that the CHUNKER consumes them. Both are needed: the
+   reducer runs `speakableFilter` first (so a fence's body is dropped before the
+   chunker ever sees it), then `chunkFilter`. A fence straddling a delta boundary
+   is the reason the fold exists, and T2 tests it at every split point.
+3. **`conversation.ts` also applies `narration`'s throttle** (it owns
+   `narratedAtMs` in its model, and `toolCall` events go through `narrate`), so
+   the throttle has ONE clock owner rather than two. `narration.ts` stays
+   independently testable (T3), exactly as the plan describes it.
+
+**The plan's step that the code contradicted, and how it was fixed.** The
+"mutations" line of T5 says "floor 200 → red". On the V1 fixtures that is
+**false**: the four comma pauses are 192/224/192/192 ms, so at a 32 ms window a
+200 ms floor never reaches them and the traces stay green
+(`runMac(..., {floorMs: 200})` → 0 cuts). The tests now pin the true
+reproduction instead: a 0 ms floor ("cut on silence", how V1 reproduced V0) cuts
+all four traces, and a floor of exactly 192 ms cuts e04 — both red-to-green
+properties, both in `endpoint.test.ts`. The 500 ms shipped floor's own guard
+(`>= COMMA_SAFE_FLOOR_MS`, read as a literal) is unchanged.
+
+**Mutations (plan targets; all applied to the real files, the test run, the
+original bytes written back — never `git checkout`).** Script + output:
+`.tentacle/tmp/voice-conversation/mutations.ts`.
+
+```
+MUTATION T1 chunker maxChars 200 -> 40: RED (2 fail) — test is non-vacuous
+MUTATION T2 speakable keeps fences (body into the placeholder slot): RED (3 fail)
+MUTATION T3 narration interpolates the arguments: RED (6 fail)
+MUTATION T4 ask-speech truncates instead of falling back: RED (2 fail)
+MUTATION T5 endpoint floor 500 -> 200 (both edges): RED (1 fail)
+MUTATION T5 endpoint drops the textGrew rule: RED (1 fail)
+MUTATION T9 send while an ask is pending: RED (1 fail)
+MUTATION T9 speak foreign turns: RED (1 fail)
+MUTATION T9 auto-resume after a phone call: RED (1 fail)
+----
+ALL MUTATIONS APPLIED AND RED (every target test is non-vacuous)
+```
+
+Two of these were **green on the first attempt** and the tests were sharpened,
+not the code: "speak foreign turns" needed the mutation to be
+`return turnId !== ""` (my first attempt only guarded a null id, which no test
+path reaches), and the T5 floor mutation had to become the reproduction above.
+The plan's T9 parity test was checked for non-vacuity by asserting that the
+scripted sequence really emits all six of `prompt`/`enqueue`/`speak`/`listen`/
+`unlisten`/`hush` — an all-empty pair would otherwise compare equal.
+
+**Failure modes covered by this slice** (§ *Failure modes*, the ones C2 owns):
+F1 (echo rule, >3 empty barge-ins/30 s → barge-in off + notice), F2 (comma floor
+on both edges, plus the V1 regression), F3 (a steer, never a second prompt), F4
+(hush + "connection lost" + `paused`; reconnect listens and re-speaks nothing),
+F6 (ask pending blocks every send, text → field), F7 (fence bodies, hrefs, tool
+arguments and ask explanations never reach speech), F14 (foreign turns are not
+spoken; a voice-steered one is), F15 (10-min idle off), P-F1 (`source:"call"`
+never auto-resumes), P-F1b (`other` + `shouldResume` → listen), P-F9 (5
+recognition failures in 60 s → paused), P-F10 (`resumeFailed` → "Open tentacle to
+resume"), P-F11 (thermal critical → paused, serious → notice).
+
+**Gate (run on this branch, in this order).**
+
+- `bunx tsc --noEmit` → clean (exit 0, no output).
+- `bun run lint` → `Checked 1595 files … No fixes applied.` (0 errors, 0
+  warnings — the §6 clean baseline, unchanged).
+- `bun test` → **11417 pass, 5 skip, 0 fail** across 822 files; the 5 skips are
+  the documented opt-in ones (live k8s ×2, live docker ×2, the slow keepalive),
+  no new skip. C2's own file: `bun test packages/core/test/voice` → 115 pass,
+  0 fail.
+- `packages/protocol/schema/protocol.json`: **not regenerated — no schema
+  changed.** C2 touches no protocol file (`git status --short packages/protocol`
+  is empty); `voice`/`reasoning` on the wire is C3's.
+- Changelog: `changelog.d/voice-conversation.changed.md` (one bullet; scoped to
+  the core, since nothing is user-visible until the edges are wired). The plan's
+  Files list gives C5/P4 the `voice-conversation.added.md` bullet — that stays
+  theirs, because the feature is not yet reachable from either edge.
+  `CHANGELOG.md` untouched; the fragment guard is green.
+- `TODO.md` not touched, per the brief.
+
+**Not done here, by design:** the mobile `speakable.ts` import swap (Files step
+1's second clause). `apps/mobile/src/speakable.ts` does not exist on this branch
+(`feat/mobile-voice` is unmerged), so there is nothing to re-point; it is a
+dependency-order item for whoever lands mobile-voice, recorded here rather than
+done blind. Verified: `ls apps/mobile/src/speakable.ts` → No such file.
+
+**Unverified (one line each, with how to check):** the phone/P1-pinned floor is
+still V1's 500 ms base — the spike E10/E8 must confirm it on the device
+(`ENDPOINT_EDGE_DEFAULTS.phone.floorMs`, `endpoint.ts`); and the reducer's
+`speak` ordering is only as good as the edge reporting `spoken{seq}`
+deterministically (C4/P3's job to wire, T10/T11 to prove).
+
+### Fix round 1 — the review's findings 1–6 · *— deepseek-v4.1-flash (tentacle), 2026-11-15*
+
+**Scope.** The C2 review's five code findings (1, 2, 3, 4, 6) and the drift
+finding (5). No other slice touched; no protocol/wire/on-disk change, so no
+`protocol.d/` note and `PROTOCOL_VERSION` is untouched.
+
+**Reproduced first (before any edit).** The review's own script, re-run on this
+branch: `.tentacle/tmp/voice-conversation/review/r1.ts` → the same eight rows
+(A–H), identical commands. After the fixes the same script prints:
+
+```
+A link flap while OFF:      linkDown->off [] ; linkUp->off []
+B ask while OFF, cleared:   askPending->off [] ; askCleared->off []
+C call pause, link flap:    linkDown->paused [] ; linkUp->paused []
+D call pause, ask flap:     askPending->paused [] ; askCleared->paused []
+E 5 empty bargeins:         the trip emits notice+speak+bargeIn{false}; the 5th emits []
+F start{bargeIn:false}+toggle: bargeIn false (and `bargeIn{enabled:false}` sent)
+G narration seq 0 + reply:  narration seq 0, reply chunk seq 1 — no collision
+H ask on a foreign turn:    hush only, no speak
+```
+
+**Red before green.** New file `packages/core/test/voice/conversation-fix1.test.ts`
+(28 tests, one `describe` per finding). Its first run on the unmodified reducer:
+**20 fail / 7 pass**, every failure on the assertion of the property (no import
+or compile error). The failed set was exactly findings 1, 2, 3, 4 and 6; the
+7 that passed were the controls that must stay true (own-turn asks ARE spoken,
+short replies are not capped, the mode starts off, …).
+
+**As built, per finding.**
+
+1. **HIGH — the mic opens without the person.** `isOn()` (`conversation.ts:304`)
+   is now the one gate the app-scoped controller's unconditional events go
+   through: `linkDown` (`:440`) still TRACKS the link but reacts only when on;
+   `linkUp` (`:459`) resumes only when `pausedBy === "link"`; `askPending`
+   (`:393`) is still RECORDED while off (F6's send block must hold there too) but
+   keeps `state` as it was; `askCleared` (`:419`) returns to `listening` only
+   from an on state; `resumeFailed` (`:484`), `thermal` (`:506`),
+   `recognitionFailed` (`:941`) and `bargein` (`:335`) are no-ops unless on.
+   `interrupted{ended}` additionally requires `pausedBy === source`, so another
+   app's audio ending cannot undo a user/thermal/link pause. The pause REASON is
+   never overwritten by a non-pausing event.
+2. **MEDIUM — F1 does not converge.** `bargein` is a no-op when `model.bargeIn`
+   is false, so the notice and "Echo detected…" are emitted once per trip, not
+   per event. A new command `bargeIn{enabled}` tells the EDGE's own gate to stop
+   raising `bargein` (finding 2's "no command telling the edge"). `turnOn` now
+   re-arms from `bargeInSetting` (the person's §6 setting, carried by
+   `conversationStart({bargeIn:false})`), never from the live flag the echo rule
+   lowered, so a switch-on clears the trip and honours the setting.
+3. **MEDIUM — `seq` is ambiguous.** `SpeechOutput.seq` is now ONE monotonic
+   counter for the whole mode: `systemSpeak()` (`:291`) gives every system line
+   (link, ask, echo, resumeFailed, narration) the next seq, `textDelta` and
+   `turnEnded` continue it, and the pipeline reset carries it
+   (`emptySpeech(seq, …)`). Verified at the reducer boundary: the earlier
+   `spoken{seq}` test (G) now leaves the reply chunk in `inFlight`.
+4. **MEDIUM — F14 for asks.** `askPending` takes an optional `turnId`; when the
+   daemon does not name it, the turn the reducer already knows (`model.turnId`)
+   is the fallback. A foreign turn's ask is `hush` + recorded, never spoken —
+   while still blocking sends on both edges (it is answerable anywhere).
+5. **MEDIUM — the endpoint fold was not moved.** `packages/tui/src/voice-endpoint.ts`
+   is now a **thin adapter** (68 lines, V1's input shape unchanged) that
+   translates to `@tentacle/core`'s `foldEndpoint` and delegates; the duplicate
+   implementation is gone, so there is one fold and one place that decides a
+   cut. V1's own pin (`packages/tui/test/voice-endpoint.test.ts`, 18 tests,
+   comma floor read as a literal) stays green and now exercises the shared code
+   end to end; `voice-session.ts` needed no change.
+6. **MEDIUM — F5 was nowhere.** `CONVERSATION_DEFAULTS.maxSpokenChars` (1 200) +
+   per-edge `conversationStart({maxSpokenChars})`; `speakWithinBudget()`
+   (`:739`) caps what is SPOKEN per reply and `turnEnded` says "The rest is on
+   screen." once (`restNoticed`), then a new turn gets a fresh budget. Only
+   speech is capped — the display is the session transcript's.
+
+**Mutations — every fix has one, and each was applied to the real file, the
+narrow test run, the original bytes written back** (never `git checkout`:
+`.tentacle/tmp/voice-conversation/mutations-fix1.ts`):
+
+```
+RED F1: drop the off/paused gate everywhere (isOn -> true) — 7 fail / 21 pass
+RED F1: linkUp resumes from ANY pause (drop pausedBy==='link') — 3 fail / 25 pass
+RED F1: askCleared ignores off/paused — 2 fail / 26 pass
+RED F2: the reducer acts on bargein with barge-in off — 2 fail / 26 pass
+RED F2: turnOn forces bargeIn true (override the setting) — 1 fail / 27 pass
+RED F2: the edge is not told (drop the bargeIn command) — 1 fail / 27 pass
+RED F3: system lines go back to seq 0 — 3 fail / 25 pass
+RED F3: seq restarts at every turn end — 1 fail / 27 pass
+RED F4: speak a foreign turn's ask — 2 fail / 26 pass
+RED F6: no F5 cap (speak everything) — 2 fail / 26 pass
+RED F6: cap hit but 'the rest is on screen' is never said — 2 fail / 26 pass
+RED F5: the TUI fold ignores the core floor again — 6 fail / 12 pass
+```
+
+One mutation came back **GREEN on the first attempt** and is recorded honestly
+rather than claimed: *"the echo rule re-announces on every later empty
+barge-in"* (an `&& model.bargeIn` condition added to `bargeIn()`'s trip branch).
+That is not a weak test — the guard the review asked for lives in the reducer's
+`bargein` case, so making the *helper* unconditional changed no reachable
+behaviour. Mutating the real guard instead (drop `!model.bargeIn` from that case)
+does turn it red (`2 fail / 26 pass`, in the list above); the harness keeps the
+helper form only as the record of a mutation that proved nothing.
+
+**Gate (this branch, in this order, on the FINAL tree — re-run after the last
+source edit, the ask's `turnId` fallback).**
+
+- `bunx tsc --noEmit` → clean (exit 0, no output).
+- `bun run lint` → `Checked 1596 files … No fixes applied.` (0 errors, 0
+  warnings; the §6 clean baseline — one file more than the pre-fix 1595 because
+  of the new test file).
+- `bun test` → **11445 pass, 5 skip, 0 fail** across 823 files (427 s), run
+  twice (before and after the doc-only edits above; identical counts). The 5
+  skips are the documented opt-in ones (live k8s ×2, live docker ×2, slow
+  keepalive), no new skip. Narrow runs: `packages/core/test/voice` → 143 pass,
+  0 fail; `packages/tui/test/voice-endpoint.test.ts` → 18 pass, 0 fail.
+- No protocol file touched (`git status --short packages/protocol` empty), so
+  `protocol.json` needs no regeneration. `CHANGELOG.md` untouched; the existing
+  `changelog.d/voice-conversation.changed.md` bullet already covers the core
+  (this round changes no user-visible behaviour beyond what it described — F5's
+  cap is included there as "the conversation reducer" behaviour).
+
+**Honest notes on the shape.** (a) `linkDown` while `paused` records
+`linkDown: true` and says nothing; the `paused` reason is preserved, so an ask
+that clears or a link that returns cannot silently resume the mic. (b) A
+person's `toggle` off→on is the ONLY way barge-in comes back, as the review
+asked; `remote{playPause}` from `off` goes through `turnOn` too and so also
+re-arms it from the setting. (c) F5's cap counts characters of what is
+actually spoken, so the model's `maxSpokenChars` is a ceiling over the reply,
+not a per-chunk limit.
 
 ## Review
 
-*(empty)*
+### C2 review · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES.** The pure modules (speakable, chunker, narration, ask-speech, endpoint, voice-lang) hold. The reducer breaks P-F1/P-F12: events that arrive while the mode is off or paused can open the mic by themselves.
+
+**Gate:** `bun test packages/core/test/voice` 115 pass / 0 fail; `bun run lint` clean (1595 files); `bun run typecheck` clean. Mutation (mine): drop the `source === "call"` guard (`conversation.ts:681`) → 1 fail; reverted, `git status` clean.
+
+**Repro** (`.tentacle/tmp/voice-conversation/review/r1.ts`, output abridged):
+```
+A link flap while OFF:       linkDown->paused ; linkUp->listening [speak "Reconnected.", listen]
+B ask while OFF, cleared:    askPending->askPending [hush, speak] ; askCleared->listening [listen]
+C call pause, link flap:     ... linkUp->listening [listen]
+D call pause, ask flap:      ... askCleared->listening [listen]
+E 5 empty bargeins:          the 4th and the 5th both emit notice + speak "Echo detected."; bargein events still hush
+F start{bargeIn:false}+toggle: bargeIn true
+G narration seq 0 + reply seq 0: spoken{0} → listening while the reply chunk is still in flight
+H ask on a foreign turn:     hush + speak the ask
+```
+
+**Findings**
+1. **HIGH — the mic opens without the person (P-F12, P-F1).** `linkDown` (`conversation.ts:332`), `resumeFailed` (`:372`), `thermal` (`:387`), `recognitionFailed` (`:734`) and `askPending` (`:307`) do not check `state === "off"` or `pausedBy`. `linkUp` (`:356`) and `askCleared` (`:323`) then go to `listening` + `listen` from any state except `off`. The §6 controller is app-scoped and always feeds link and ask events, so: (A) a relay flap with voice mode never turned on starts recording; (B) an approval with the mode off makes it speak, then listen; (C, D) after a phone call, a link flap or an ask that clears reopens the mic. Fix: these events are no-ops while `off`; `linkUp`/`askCleared` restore the state from before (keep `paused{call|user|thermal|recognition}`). Add tests for A–D.
+2. **MEDIUM — the F1 echo rule does not converge.** After barge-in is turned off (`:527`), the reducer still acts on `bargein` (`:258`). There is no guard on `model.bargeIn` and no command telling the edge. Every later empty barge-in re-emits the notice plus `speak "Echo detected…"`, and that speech is itself echo, so the loop F1 exists to break continues. Also, `turnOn` (`:419`) forces `bargeIn: true` and overrides the user's `bargeIn:false` setting (§6 Settings row).
+3. **MEDIUM — `seq` is ambiguous.** Every system line (ask, link, narration, echo, resumeFailed: `:313,345,363,377,537,617,738`) uses `seq: 0`, which collides with the first reply chunk's seq 0. `spoken{seq}` (`:272`) removes by value, so G leaves `listening` while the reply is still playing (narration's `replyQueued` then becomes wrong). The flushed chunks of `turnEnded` (`:639`) are never added to `inFlight`. The edges (C1 `speak{seq}`/`spoken{seq}`) need one monotonic seq.
+4. **MEDIUM — F14 for asks.** `askPending` carries no turn id and is spoken unconditionally (H). The plan's F14 says "an ask is spoken by the edge that originated the turn", so two edges in voice mode both speak it.
+5. **MEDIUM — undocumented drift: the endpoint fold was not moved.** The plan's Preconditions say C2 **moves** `voice-endpoint.ts` to core. `packages/tui/src/voice-endpoint.ts` still exists, is still exported (`tui/src/index.ts:71`) and is used (`voice-session.ts:16`), so two endpoint folds now exist. Execution does not record this as drift. Either re-point the TUI to core, or record the deferral to C4.
+6. **MEDIUM — F5 is not implemented anywhere.** There is no `maxSpokenChars` / "the rest is on screen" in core (`rg` finds nothing). The reducer is the only producer of `speak`, so a long reply is spoken in full. Implement it here or assign it to a slice in the doc.
+
+**Attacks that found nothing:** the core import graph is React/Ink/RN-free; `export *` adds no name clash (typecheck clean); the `call` guard is non-vacuous (mutation above); `final` while an ask is pending → fieldInsert, never a send.
+
+**Executor behaviour:** an honest Execution (it records its own red-on-first-attempt mutations and corrects the T5 premise with evidence). But the reducer was tested only from the `on` path: the off/paused cross-state entry points, which the reducer's own "total, late events are no-ops" contract (`conversation.ts:233`) promises, were never tested. Same model family caveat: none (DeepSeek executed, Opus reviewed).
+
+### Round 2 · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES.** All six round-1 findings are fixed, and each fix is non-vacuous. One HIGH remains in the same class as finding 1 (I missed it in round 1).
+
+**Gate:** `bun test packages/core/test/voice packages/tui/test/voice` → 271 pass, 0 fail. `bun run lint` is clean (1596 files). `bun run typecheck` is clean.
+
+**Round-1 repros re-run** (`review/r1.ts`):
+- A and B: the mode stays `off`, with no commands.
+- C and D: the mode stays `paused`, and no `listen` is sent.
+- E: a later barge-in does nothing, and `bargeIn{enabled:false}` is sent once.
+- F: `bargeIn:false` is honoured when the mode turns on.
+- G: narration gets seq 0 and the reply chunk seq 1, and the chunk stays in flight.
+- H: the ask on a foreign turn is not spoken; the reducer only sends `hush`.
+
+**Mutations** (`review/mut2.ts`; the original bytes are written back and `git status` is clean). Each one turns `packages/core/test/voice` red:
+
+| Mutation | Result |
+|---|---|
+| `linkUp` resumes from any pause | 4 fail |
+| `askCleared` ignores off/paused | 2 fail |
+| `linkDown` while off pauses | 4 fail |
+| `bargein` handled with barge-in off | 2 fail |
+| `turnOn` forces `bargeIn: true` | 1 fail |
+| system lines use `seq: 0` | 3 fail |
+| a foreign ask is spoken | 2 fail |
+| no F5 cap | 2 fail |
+
+Finding 5: `tui/src/voice-endpoint.ts` is now a thin adapter over the core fold. The V1 regression suite stays green against it.
+
+**Findings**
+1. **HIGH — the reply is spoken while the mode is paused (P-F1, F4 spirit).**
+   - Cause: `textDelta` (`conversation.ts:706`) guards `ask`, `linkDown` and `off`, but not `paused`. `turnEnded` (`:811`) flushes the tail whatever the state.
+   - Effects, from `review/r2.ts`:
+     - (J) During a phone call (`paused{call}`), the turn keeps streaming daemon-side, and every delta emits `speak` seq 0,1,… plus the tail at the end of the turn.
+     - (K) The same happens after a lock-screen pause (`paused{user}`).
+     - (L) `resumeFailed` (`:494`) keeps the pipeline, so the tail is spoken at the end of the turn while the screen says "Open tentacle to resume".
+   - This is the same "the reducer, not the edge, must refuse" rule as finding 1.
+   - Fix: `!isOn(model)` → no `speak` in `textDelta`, `turnEnded` and `toolCall` (`toolCall` already checks it), and `resumeFailed` resets the pipeline. Add tests J/K/L.
+2. **MEDIUM — the residual of finding 3 is not fixed.** The tail that `turnEnded` flushes, and every `systemSpeak` line, are never added to `inFlight` (`:821`, `:837` resets it to `[]`). In M, `spoken{0}` → `listening` while the tail (seq 1) is still playing, so `canListen` accepts `utter` over the reply's own audio. The fix is to add these seqs to `inFlight`, or to document why not.
+
+**Attacks that found nothing:**
+- `interrupted{ended, other}` resumes only when `pausedBy === "other"`, so it cannot undo a user or thermal pause.
+- `turnOff` while the link is down, then `turnOn`, gives `paused{link}`, and `linkUp` resumes it (the person's own intent).
+- The F5 cap is applied to the tail flushed at turn end too.
+- `emptySpeech()` with no `seq` argument is called nowhere.
+
+**Executor behaviour:** every fix is targeted, and each has its own named test. The fix for finding 1 was applied to the events I listed, not to the property behind them ("a paused or off mode produces no audio"), so `textDelta` was missed. That miss was mine first: round 1 did not name it either.
+
+### Round 3 · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, a small fix). Round 2's HIGH is fixed. Round 2's MEDIUM is fixed for the end of a turn, but the same loss happens one event later, at the start of the next turn.
+
+**Gate:**
+- `bun test packages/core/test/voice packages/tui/test/voice`: 282 pass, 0 fail.
+- `bun run lint`: clean (1597 files).
+- `bun run typecheck`: clean.
+
+**Repros** (`review/r2.ts` re-run):
+- J, K: no `speak` while paused.
+- L: `resumeFailed` sends `hush`, and the tail is not spoken at the end of the turn.
+- M: the tail joins `inFlight`, so `spoken{0}` keeps the state at `speaking`.
+
+**Mutations** (`review/mut3.ts`; the original bytes are restored and `git status` is clean). All five turn the tests red:
+
+| Mutation | Result |
+|---|---|
+| `textDelta` guards only `off` | 4 fail |
+| `turnEnded` flushes while paused | 1 fail |
+| `resumeFailed` keeps the pipeline | 1 fail |
+| `systemSpeak` lines left out of `inFlight` | 3 fail |
+| the flushed tail left out of `inFlight` | 1 fail |
+
+**Findings**
+1. **MEDIUM: `turnStarted` drops `inFlight`, the case finding 2 was about.**
+   - Code: `conversation.ts` `turnStarted` builds `{ ...emptySpeech(model.speech.seq), … }`, which has `inFlight: []`. `textDelta` resets the same way whenever `speech.turnId` differs.
+   - The comment in `turnEnded` says "`inFlight` is the MODE's", but this reset drops it anyway.
+   - `review/r3.ts` N: `turnEnded` leaves `inFlight = [0,1,2]`. Then a queued steer or prompt starts the next turn at once (`turnStarted`), and `inFlight` becomes `[]`. `spoken{0}` → `listening` while seqs 1 and 2 are still playing. This is round 2's M again, one event later.
+   - Fix: carry `model.speech.inFlight` through both resets, and add test N.
+
+**Noted, not blocking:**
+- (O) A `speaking{seq}` for the ask line moves `askPending` → `speaking`. It stays `speaking` after `spoken`, because `ask !== null`. The state shown is wrong until `askCleared`. Sends stay blocked (`canSend` checks `ask`). This predates round 2.
+- (P) `turnEnded` with a tail in flight overwrites `capturing` with `speaking`. `final` is still sent correctly.
+
+**Attacks that found nothing:**
+- Every hush path (`linkDown`, echo, `recognitionFailed`, `resumeFailed`, `askPending`) resets `inFlight` before adding its own line.
+- System lines in a paused state never move the state, because `spoken` only leaves `speaking`.
+- F5's "the rest is on screen" line is not said while paused.
+
+**Executor behaviour:** the fixes are targeted and each has a named, non-vacuous test. This time the "paused/off → no audio" rule was applied as a property (`isOn` in `textDelta`, `turnEnded` and the F5 line), not event by event.
+
+### Round 4 · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: PASS** for C2, with one constraint carried to the edge slices (below).
+
+**Gate:**
+- `bun test packages/core/test/voice packages/tui/test/voice`: 284 pass, 0 fail.
+- `bun run lint`: clean (1598 files).
+- `bun run typecheck`: clean.
+
+**Round-3 finding fixed.** Repro N (`review/r4.ts`):
+- `turnStarted` keeps `inFlight = [0,1,2]`.
+- The state stays `speaking` through `spoken{0}` and `spoken{1}`.
+- It returns to `listening` only at `spoken{2}`.
+
+**Mutations** (`review/mut4.ts`; the original bytes are restored and `git status` is clean):
+- `turnStarted` drops `inFlight`: tests go red (2 fail).
+- The `textDelta` reset drops `inFlight`: tests go red (1 fail).
+
+**Constraint for C1/C4/P2a (not a C2 defect).** Since this round, `inFlight` lives for the whole mode. So a `speak{seq}` that never gets its `spoken{seq}` now keeps the mode in `speaking` across turns, until the next hush or toggle. Before, the next `turnStarted` cleared it.
+- Repro Q: seq 0 is never reported, and two turns later the state is still `speaking`.
+- While stuck, `utter` is ignored (`canListen`), so `lastSpeechAtMs` is not refreshed. F15's idle-off can then turn the mode off while the person is talking.
+- Narration also stays muted.
+- F8 ("a failed chunk is skipped") and the helper's `error{tts_failed}` carry no seq, and the reducer has no failure input.
+- **Edge contract:** every `speak{seq}` must end in exactly one `spoken{seq}`, including a failed or skipped chunk (or `tts_failed` carries the seq and the edge maps it to `spoken`).
+- C1, C4 and P2a must pin this with a test. The C2 reducer needs no change for it.
+
+**Still open, not blocking:** (O) `askPending` displays as `speaking`; (P) `turnEnded` overwrites `capturing`. Both are cosmetic state issues, and sends stay correct.
+
+**Overall:**
+- Across four rounds, every HIGH and MEDIUM is fixed.
+- Each fix is pinned by a test, and a mutation shows the test fails without it.
+- The reducer now refuses audio while off or paused as a property of its state, rather than one event at a time.
+
+### Fix round 2 — the review's findings 1–2 · *— claude-sonnet-4-5-20250929 (tentacle), 2026-11-15*
+
+**Scope.** Round 2's HIGH (finding 1) and MEDIUM (finding 2), both in
+`packages/core/src/voice/conversation.ts`. No other file, no protocol/wire/
+on-disk change (no `protocol.d/` note, `PROTOCOL_VERSION` untouched, no
+changelog fragment: internal reducer behaviour, invisible to the user).
+
+**Reproduced first (before any edit).** The reviewer's own script, re-run on
+this branch (`.tentacle/tmp/voice-conversation/review/r2.ts`): J and K emitted
+`speak` seq 0/1 per delta and the tail at turn end while `paused`; L spoke the
+tail after `resumeFailed`; M left `listening` on `spoken{0}` while the tail
+(seq 1) was still playing.
+
+**Red before green.** New file
+`packages/core/test/voice/conversation-fix2.test.ts` (11 tests, one `describe`
+per finding). First run on the unmodified reducer: **7 fail / 0 pass**
+(`round2/red.txt`), every failure on the assertion of the property, not on an
+import:
+
+```
+(fail) fix 1 … J: a phone-call pause silences the reply that keeps streaming
+(fail) fix 1 … K: a lock-screen (Now Playing) pause silences it too
+(fail) fix 1 … L: after resumeFailed, the tail is not spoken at turn end (P-F10)
+(fail) fix 1 … a pause does not poison the NEXT turn: resuming speaks again
+(fail) fix 2 … M: the tail flushed at turn end stays in flight
+(fail) fix 2 … N: a system line stays in flight across a late report of hushed audio
+(fail) fix 2 … the ask line and the narration line are tracked the same way
+```
+
+Two tests were added after the first mutation pass (L2, L3) because two
+mutations initially survived — see the table below.
+
+**As built, per finding.**
+
+1. **HIGH — the reply is spoken while the mode is paused (P-F1, F4's spirit).**
+   The gate is now the PROPERTY, not the list of events round 1 fixed:
+   - `textDelta` (`:727`) refuses on `!isOn(model)` instead of `state === "off"`,
+     so a call, a lock-screen pause and a refused resume all silence a streaming
+     reply;
+   - `turnEnded` (`:822`) flushes its tail only `&& isOn(model)`, so the end of a
+     paused turn emits nothing (the text is on screen; F5's "rest" line is gated
+     the same way);
+   - `resumeFailed` (`:493`) drops the LIVE pipeline (`emptySpeech(seq)`) and now
+     sends `hush` before its line, so nothing of the interrupted reply is spoken
+     over "Open tentacle to resume" and no tail can be flushed later.
+   `toolCall` already checked `paused`; it, `interrupted`, `thermal`,
+   `recognitionFailed` and `bargein` were left as round 1 built them.
+2. **MEDIUM — the residual of round-1 finding 3.** `systemSpeak` (`:291`) now
+   takes the `SpeechOutput` it speaks from and returns the advanced one with its
+   seq APPENDED to `inFlight`; every system-line site (ask, link down, link up,
+   resume-failed, echo, narration, "rest is on screen", recognition) stores that
+   whole pipeline instead of only `seq`. `turnEnded` appends the flushed tail's
+   seqs to `inFlight`, carries them across the per-turn pipeline reset, and keeps
+   the state `speaking` while any is in flight. So `spoken{seq}` always names a
+   tracked seq, and the mode cannot return to `listening` over its own audio.
+
+**Drift from the Implementation:** none in the exam question's sense — but two
+changes beyond the letter of the review: (a) `resumeFailed` now emits `hush`
+(previously `notice` + `speak` only), because dropping the pipeline while the
+edge kept playing the hushed chunk left `spoken{0}` clearing nothing; (b) the
+echo trip (`bargeIn`, `:676`) now builds its line from a hushed pipeline too, so
+the hushed chunk is not left in `inFlight` and the reset keeps the model's
+`maxSpokenChars`. Both are finding 2's property applied to the other `hush`
+sites, not new behaviour.
+
+**Mutations (`.tentacle/tmp/voice-conversation/round2/mut.ts`; the original
+bytes are written back after each, and the harness ends with
+`restored byte-identical: true`).** Each turns
+`packages/core/test/voice/conversation-fix2.test.ts` red:
+
+| Mutation | Result |
+|---|---|
+| `textDelta` guarded on `off` only (the round-2 bug) | 4 fail |
+| `turnEnded` flushes the tail whatever the state | 1 fail (L3) |
+| `resumeFailed` keeps the live pipeline (no reset) | 1 fail (L2) |
+| `systemSpeak` does not append its seq to `inFlight` | 3 fail |
+| `turnEnded` does not append the flushed tail to `inFlight` | 1 fail (M) |
+| the in-flight tail does not keep the state `speaking` | 1 fail (M2) |
+
+**Honest note on the first pass** (`round2/mut.txt`): mutations 2 and 3 came
+back GREEN at first — the two pause guards overlapped, so each masked the other
+and a *removal* of one changed no reachable behaviour. Rather than claim them,
+two tests were added that isolate each guard (L2 pins the pipeline reset; L3
+pins the state check on `turnEnded` with a directly constructed paused model,
+since every pause path in the reducer today also resets the pipeline). Both
+mutations then fail. Re-run: `round2/mut2.txt`.
+
+**Gate (this branch, on the FINAL tree).**
+
+- `bunx tsc --noEmit` → clean (exit 0, no output).
+- `bun run lint` → `Checked 1597 files in 444ms. No fixes applied.` (0 errors,
+  0 warnings — the §6 clean baseline; two files more than round 2's 1596 area
+  because of the new test file).
+- `bun test` → **11456 pass, 5 skip, 0 fail** across 824 files (421 s). The 5
+  skips are the documented opt-in ones (`skipIf` on live k8s ×3, live docker ×2;
+  the slow keepalive is in these too) — no new skip, none of mine. Narrow runs:
+  `packages/core/test/voice packages/tui/test/voice` → 280 pass, 0 fail.
+- No protocol file touched, `CHANGELOG.md` untouched, no changelog fragment
+  (the reducer's internal bookkeeping is not user-visible beyond what the
+  existing `changelog.d/voice-conversation.added.md` bullet already describes).
+
+**Residual, stated rather than hidden.** `speaking{seq}` still trusts the edge's
+report: if an edge raises it for a seq the mode never spoke, the state follows.
+That is round 1's contract (the edge owns playback), unchanged here.
+
+### Fix round 3 — the review's finding 1 · *— claude-opus-5-5 (tentacle), 2026-11-15*
+
+**Scope.** Round 3's one MEDIUM, in `packages/core/src/voice/conversation.ts`.
+No other file, no protocol/wire/on-disk change (`PROTOCOL_VERSION` untouched, no
+`protocol.d/` note, no changelog fragment: internal reducer bookkeeping).
+
+**Reproduced first (before any edit).** The reviewer's own script, re-run on this
+branch (`.tentacle/tmp/voice-conversation/review/r3.ts`), scenario N:
+
+```
+turnEnded->speaking inFlight=[0,1,2] [{"cmd":"speak","text":"And more tail","seq":2}]
+turnStarted->speaking inFlight=[] []
+spoken->listening  inFlight=[]
+```
+
+The comment in `turnEnded` says `inFlight` is the MODE's, but the reset that
+follows invented an empty one — round 2's `M`, one event later.
+
+**Red before green.** New file
+`packages/core/test/voice/conversation-fix3.test.ts` (2 tests). First run on the
+unmodified reducer: **2 fail / 0 pass**, each on the assertion of the property:
+
+```
+(fail) N3: turnStarted keeps the previous turn's tail in flight
+        expect(next.speech.inFlight).toEqual([0, 1])   → received []
+(fail) N3b: the per-turn reset inside a delta keeps the tail too
+        expect(next.model.speech.inFlight).toEqual([0, 1, 2]) → received [0, 1]
+```
+
+**As built.** The carry is on the PROPERTY ("`inFlight` outlives a turn"), not on
+the one event the review named — there are exactly two places that build a fresh
+per-turn pipeline, and both lost it:
+
+- `turnStarted` (`:389-393`) spreads `emptySpeech(model.speech.seq)` and now sets
+  `inFlight: model.speech.inFlight` beside it, keeping `seq` (finding 3) and
+  `inFlight` (this finding) while resetting the pipeline and F5's budget.
+- `textDelta`'s own reset (`:738-747`, taken whenever `speech.turnId !== turnId`,
+  which is the state `turnStarted` leaves behind) carries the same two fields.
+
+**Drift from the review's letter:** none. The review asked for "carry
+`model.speech.inFlight` through both resets, and add test N" — that is what was
+done, with two tests instead of one because the two resets are independently
+removable (see the mutation table).
+
+**Mutations (`.tentacle/tmp/voice-conversation/f3/mut.ts`; the original bytes are
+written back after each, and the harness ends with `restored byte-identical:
+true`; `git status` shows only the intended two files).** Each mutation removes
+one carry:
+
+| Mutation | Result |
+|---|---|
+| `turnStarted`'s reset does not carry `inFlight` (the round-3 bug) | 2 fail (N3, N3b) |
+| `textDelta`'s reset does not carry `inFlight` | 1 fail (N3b) |
+
+The first mutation fails N3b as well because its first event is a `turnStarted`;
+the second is killed ONLY by N3b, which is why both tests are kept — a
+single-test suite would have left the `textDelta` carry unpinned. That is the
+non-vacuity check from §9, done by mutation rather than by argument.
+
+**Gate (this branch, on the FINAL tree).**
+
+- `bunx tsc --noEmit` → clean (exit 0, no output).
+- `bun run lint` → `Checked 1598 files in 446ms. No fixes applied.` (0 errors,
+  0 warnings — the §6 clean baseline; one file more than round 2's 1597 for the
+  new test file).
+- `bun test` → **11458 pass, 5 skip, 0 fail** across 825 files (424 s). The 5
+  skips are the documented opt-in ones (live k8s ×3, live docker ×2) — no new
+  skip. Narrow: `packages/core/test/voice packages/tui/test/voice` → 284 pass,
+  0 fail.
+- No protocol file touched, `CHANGELOG.md` untouched, no changelog fragment.
+
+**Considered and left alone (not a regression, but worth stating).** Entries
+leave `inFlight` only through `spoken{seq}`, so carrying them further widens one
+existing trust assumption: a seq the edge never reports now holds the mic shut
+across turn boundaries too. Every path that stops audio resets the pipeline
+without them (`linkDown`, `resumeFailed`, `recognitionFailed`, `thermal`,
+`askPending`, `turnOff`/`turnOn`, the idle `tick`), so the mode cannot wedge that
+way — and a `hush` the edge honours reports nothing further by design. The
+residual is the same round-1 contract as above: the edge owns playback.
+(Round 3's non-blocking notes O and P were left untouched, as the review said
+they do not block.)
 
 #### Owner answers (2026-11-15, batch 1)
 
