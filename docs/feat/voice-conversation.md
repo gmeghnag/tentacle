@@ -716,6 +716,54 @@ H ask on a foreign turn:     hush + speak the ask
 
 **Executor behaviour:** an honest Execution (it records its own red-on-first-attempt mutations and corrects the T5 premise with evidence). But the reducer was tested only from the `on` path: the off/paused cross-state entry points, which the reducer's own "total, late events are no-ops" contract (`conversation.ts:233`) promises, were never tested. Same model family caveat: none (DeepSeek executed, Opus reviewed).
 
+### Round 2 · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES.** All six round-1 findings are fixed, and each fix is non-vacuous. One HIGH remains in the same class as finding 1 (I missed it in round 1).
+
+**Gate:** `bun test packages/core/test/voice packages/tui/test/voice` → 271 pass, 0 fail. `bun run lint` is clean (1596 files). `bun run typecheck` is clean.
+
+**Round-1 repros re-run** (`review/r1.ts`):
+- A and B: the mode stays `off`, with no commands.
+- C and D: the mode stays `paused`, and no `listen` is sent.
+- E: a later barge-in does nothing, and `bargeIn{enabled:false}` is sent once.
+- F: `bargeIn:false` is honoured when the mode turns on.
+- G: narration gets seq 0 and the reply chunk seq 1, and the chunk stays in flight.
+- H: the ask on a foreign turn is not spoken; the reducer only sends `hush`.
+
+**Mutations** (`review/mut2.ts`; the original bytes are written back and `git status` is clean). Each one turns `packages/core/test/voice` red:
+
+| Mutation | Result |
+|---|---|
+| `linkUp` resumes from any pause | 4 fail |
+| `askCleared` ignores off/paused | 2 fail |
+| `linkDown` while off pauses | 4 fail |
+| `bargein` handled with barge-in off | 2 fail |
+| `turnOn` forces `bargeIn: true` | 1 fail |
+| system lines use `seq: 0` | 3 fail |
+| a foreign ask is spoken | 2 fail |
+| no F5 cap | 2 fail |
+
+Finding 5: `tui/src/voice-endpoint.ts` is now a thin adapter over the core fold. The V1 regression suite stays green against it.
+
+**Findings**
+1. **HIGH — the reply is spoken while the mode is paused (P-F1, F4 spirit).**
+   - Cause: `textDelta` (`conversation.ts:706`) guards `ask`, `linkDown` and `off`, but not `paused`. `turnEnded` (`:811`) flushes the tail whatever the state.
+   - Effects, from `review/r2.ts`:
+     - (J) During a phone call (`paused{call}`), the turn keeps streaming daemon-side, and every delta emits `speak` seq 0,1,… plus the tail at the end of the turn.
+     - (K) The same happens after a lock-screen pause (`paused{user}`).
+     - (L) `resumeFailed` (`:494`) keeps the pipeline, so the tail is spoken at the end of the turn while the screen says "Open tentacle to resume".
+   - This is the same "the reducer, not the edge, must refuse" rule as finding 1.
+   - Fix: `!isOn(model)` → no `speak` in `textDelta`, `turnEnded` and `toolCall` (`toolCall` already checks it), and `resumeFailed` resets the pipeline. Add tests J/K/L.
+2. **MEDIUM — the residual of finding 3 is not fixed.** The tail that `turnEnded` flushes, and every `systemSpeak` line, are never added to `inFlight` (`:821`, `:837` resets it to `[]`). In M, `spoken{0}` → `listening` while the tail (seq 1) is still playing, so `canListen` accepts `utter` over the reply's own audio. The fix is to add these seqs to `inFlight`, or to document why not.
+
+**Attacks that found nothing:**
+- `interrupted{ended, other}` resumes only when `pausedBy === "other"`, so it cannot undo a user or thermal pause.
+- `turnOff` while the link is down, then `turnOn`, gives `paused{link}`, and `linkUp` resumes it (the person's own intent).
+- The F5 cap is applied to the tail flushed at turn end too.
+- `emptySpeech()` with no `seq` argument is called nowhere.
+
+**Executor behaviour:** every fix is targeted, and each has its own named test. The fix for finding 1 was applied to the events I listed, not to the property behind them ("a paused or off mode produces no audio"), so `textDelta` was missed. That miss was mine first: round 1 did not name it either.
+
 #### Owner answers (2026-11-15, batch 1)
 
 - Q1 order: **yes** — spike now, code after V1 (`feat/voice-dictation`) and `feat/mobile-voice` merge; a language with no on-device recognizer has no voice mode, never cloud.
