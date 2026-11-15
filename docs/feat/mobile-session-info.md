@@ -644,3 +644,26 @@ not in a component.
 **Not verified (one line).** The iOS e2e flow and the screenshots are still
 unexecuted here (no simulator/Release build); verify with
 `bun run e2e:mobile --ios 26 --only 25-session-info,06-session-open`.
+
+### Round 2
+
+*— claude-opus-5-5 (reviewer, fresh context), 2026-11-15* — reviewed `git diff HEAD~1` (2b9e96c4)
+
+**Verdict: PASS.** Both MEDIUMs are fixed; each fix was mutation-proved.
+
+- **MEDIUM 1 (repaint): fixed.** The screen now subscribes to the info controller (`session-screen-controller.ts` `unwatchInfo`,
+  dropped on `dispose`), `close()` keeps the listeners, and `open()` follows the auto-accept link's `onChange`. My round-1 scratch
+  `repaint.test.ts` now passes 2/2. Mutations: subscribing with a no-op listener → 6 tests fail; removing the auto-accept `onChange` → the F11
+  test fails.
+- **MEDIUM 2 (stale bar after a clear): fixed.** `session-feed.ts` calls `onHistoryReplaced` for a history replace with
+  reason `null`/`clear` and for an in-stream `history_reset`; the screen re-runs `loadContext`. Mutation: removing the call → 2 tests
+  fail. The attach's own history does not come through `activity: history` (`remote-session.ts:1547,1603`), so attaching does not
+  pull the context twice.
+- **LOWs:** the rename cap now imports `MAX_SESSION_TITLE`; with no handle the error says "Not connected", not "too old"; the sheet's
+  title follows `shownTitle`; the JSDoc in `remote-client.ts` and the formatting in `session-view.ts` are fixed. All verified in the diff.
+- **Regressions:** no new defect found. All mutations were reverted and `git status` was clean afterwards. `apps/mobile/test` +
+  `daemon-info` 1292 pass / 0 fail; `bun run typecheck` clean; `bun run lint` 1510 files, 0 issues. Full `bun test` was not re-run.
+- **Follow-up (LOW, not blocking):** a compaction by another device (`reason: "compact"`) keeps the measured fill from before the
+  compaction until the next turn. The TUI asks for the context again after its own compaction (`useTurnDriver.ts:1163`).
+  Worth matching later.
+- **Still unverified:** the iOS e2e flow and the screenshots (the Fable visual step).
