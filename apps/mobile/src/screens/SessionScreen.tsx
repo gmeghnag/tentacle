@@ -55,6 +55,8 @@ import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
+import { RenameSheet } from "./RenameSheet.tsx";
+import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
 import { TranscriptRow } from "./transcript/TranscriptRow.tsx";
@@ -223,9 +225,17 @@ export function SessionScreen({
     playHaptic(turnEndHaptic(wasRunning.current, state.view.composer.running));
     wasRunning.current = state.view.composer.running;
   }, [state.view.composer.running]);
-  // The header's "…" menu (owner feedback #3): phone-local copy actions only.
+  // The header's "…" menu (owner feedback #3 + Session info): it opens with the
+  // sheet's read, then the phone-local copy actions.
   const [menuOpen, setMenuOpen] = useState(false);
   const menu = menuOpen ? sessionMenu(rows) : [];
+  // Session info (docs/feat/mobile-session-info.md): the sheet, and which row the
+  // person expanded. Every value it draws is decided in `session-info.ts`.
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const info = state.info;
+  // Owner decision 5: tapping the TITLE renames it (the field is the screen's).
+  const renaming = state.renaming;
   // The decision sheet's own state (which item the person tapped, and why).
   const [deciding, setDeciding] = useState<string | null>(null);
   const decision =
@@ -245,7 +255,9 @@ export function SessionScreen({
         <ScreenHeader
           palette={palette}
           variant="compact"
-          title={title}
+          title={state.view.title}
+          onTitlePress={() => controller.beginRename()}
+          titleTestID="session-title"
           left={
             onBack === undefined ? undefined : (
               <GlassButton
@@ -267,14 +279,45 @@ export function SessionScreen({
             />
           }
           subtitle={
-            <View style={styles.status} accessibilityLabel={status.text}>
-              <StatusDot palette={palette} tone={status.tone} size={6} />
-              <Text
-                maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                style={[typography.caption, { color: palette.sec }]}
-              >
-                {status.text}
-              </Text>
+            <View testID="session-header-status" style={styles.headerLines}>
+              <View style={styles.status} accessibilityLabel={status.text}>
+                <StatusDot palette={palette} tone={status.tone} size={6} />
+                <Text
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  numberOfLines={1}
+                  style={[typography.caption, { color: palette.sec }]}
+                >
+                  {status.text}
+                </Text>
+                {state.view.headerModel === null ? null : (
+                  <Text
+                    testID="session-header-model"
+                    maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                    numberOfLines={1}
+                    style={[typography.caption, styles.headerModel, { color: palette.sec }]}
+                  >
+                    {`· ${state.view.headerModel}`}
+                  </Text>
+                )}
+              </View>
+              {/* Owner decision 4: a thin bar ONLY, live from the measured
+                  fill — no percentage text in the header. */}
+              {state.view.headerContext === null ? null : (
+                <View
+                  testID="session-header-context"
+                  style={[styles.contextBar, { backgroundColor: palette.sep }]}
+                >
+                  <View
+                    style={{
+                      width: `${state.view.headerContext.percent}%`,
+                      height: "100%",
+                      borderRadius: 1,
+                      backgroundColor:
+                        state.view.headerContext.percent >= 80 ? palette.orange : palette.accent,
+                    }}
+                  />
+                </View>
+              )}
             </View>
           }
         />
@@ -464,12 +507,18 @@ export function SessionScreen({
           visible={menuOpen}
           testID="session-menu-sheet"
           cancelTestID="session-menu-cancel"
-          message={menu.length === 0 ? "Nothing to copy yet" : undefined}
+          message={menu.every((action) => action.id === "info") ? "Nothing to copy yet" : undefined}
           actions={menu.map((action) => ({
             label: action.label,
             testID: `session-menu-${action.id}`,
             onPress: () => {
               setMenuOpen(false);
+              if (action.id === "info") {
+                // A READ, never a copy: it opens the sheet and starts the pulls.
+                setInfoOpen(true);
+                void controller.openInfo();
+                return;
+              }
               void Clipboard.setStringAsync(action.text).then(
                 () => playHaptic("success"),
                 () => undefined,
@@ -477,6 +526,32 @@ export function SessionScreen({
             },
           }))}
           onCancel={() => setMenuOpen(false)}
+        />
+        {info === null ? null : (
+          <SessionInfoSheet
+            palette={palette}
+            visible={infoOpen}
+            view={info.view}
+            autoAcceptOn={controller.autoAcceptOn()}
+            autoAcceptError={info.autoAcceptError}
+            onAutoAccept={(on) => void controller.setAutoAccept(on)}
+            onRefresh={() => void controller.refreshInfo()}
+            onRetry={() => void controller.refreshInfo()}
+            expanded={expanded}
+            onExpand={setExpanded}
+            onClose={() => {
+              setInfoOpen(false);
+              setExpanded(null);
+              controller.closeInfo();
+            }}
+          />
+        )}
+        <RenameSheet
+          palette={palette}
+          state={renaming}
+          onChange={(text) => controller.setRenameText(text)}
+          onSave={() => void controller.submitRename()}
+          onCancel={() => controller.cancelRename()}
         />
       </KeyboardAvoidingView>
     </View>
@@ -488,6 +563,9 @@ const styles = StyleSheet.create({
   list: { paddingTop: 8, paddingBottom: 16 },
   emptyList: { flexGrow: 1, justifyContent: "center" },
   status: { flexDirection: "row", alignItems: "center", gap: 5 },
+  headerLines: { alignItems: "center", gap: 4 },
+  headerModel: { flexShrink: 1 },
+  contextBar: { width: 64, height: 2, borderRadius: 1, overflow: "hidden" },
   jump: {
     position: "absolute",
     alignSelf: "center",

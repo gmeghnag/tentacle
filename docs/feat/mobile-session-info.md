@@ -336,11 +336,180 @@ Red first (stub returning empty view → fail), then green; mutation proof per �
 
 ## Execution
 
-*— (executor), (date)*
+*— claude-sonnet-4-5-20250929 (executor), 2026-11-15*
+
+**Load-bearing check re-run first — PASSED, and one correction.** Every row of the
+table checked out against the code at HEAD `1d3a9c90`, with these findings:
+
+- `mcp/status` (`packages/daemon/src/connection.ts:401-406`) and
+  `session/skills` / `session/context` (`:402-404`) dispatch with **no principal
+gate** — confirmed; the only `device` gates are push (`:459,471`).
+- `RemoteSession.skills()`/`context()` (`remote-session.ts:902,914`) and the
+  cast at `App.tsx:210-219` — confirmed.
+- **Correction (plan was incomplete, not wrong):** the plan's Owner decisions
+  list 5 items; the Implementation/Design/Files sections predate decisions 2
+  (model under the title), 4 (context bar in the header) and 5 (rename by
+  tapping the title). I implemented the DECISIONS, not the superseded design
+  text: no `agentInfo.provider` (decision 1), `shortModel` to the last `/`
+  segment (decision 2), `headerContext` bar from `agent_usage` (decision 4), and
+  `session/rename` by tapping the title (decision 5). Recorded here as drift.
+- **Correction 2:** F11's "a failed `set` reverts" is **wrong against the code**:
+  `createAutoAcceptHandle.set` applies locally at once and keeps the value
+  pending for a re-send (`auto-accept-link.ts:156-168,193-200`) — a reverted
+  switch would disagree with the decision the daemon receives on the next
+  attach. Implemented as: report the error, keep the link's value (test
+  `a failed set is REPORTED and keeps the person's decision`).
+
+### As built, in dependency order
+
+**Slice 1 — client (the plan's slice 2).** `packages/client/src/remote-client.ts`:
+`daemonHandshake` (`:903-909`) re-read on EVERY handshake next to `daemonImages`
+(`:2578`), exposed as `daemonInfo()` (`~:1000`). No protocol change: `agentInfo`
+already carries `version`/`model`/`contextWindow` (`session.ts:269-286`), so **no
+`protocol.d/` note and no `PROTOCOL_VERSION` move**; `protocol.json` unchanged.
+
+**Slice 2 — app pure modules.**
+- `apps/mobile/src/session-info.ts` (new): the whole view-model — 4 sections,
+every phase per section, `contextMeter`, `tokensText`, `devicesText`
+(`attached − 1`), `shortenPath`, `sanitizeDisplay`, `shortModel`, `headerModel`,
+`headerContext`.
+- `apps/mobile/src/session-info-controller.ts` (new): the four pulls, **each
+  painting its own section as it lands** (not one batched `Promise.all`
+  assignment — a deferred MCP would have gated all four; caught by the
+  parallel test), a generation counter per open/close, one refresh on link `up`,
+  and the F4 phase gate.
+- `apps/mobile/src/session-rename.ts` (new): `renamePlan` (empty/unchanged =
+  no-op, cap, one line), `renameErrorText`, `titleAfterRename`.
+- `apps/mobile/src/session-menu.ts`: `"info"` first, always.
+- `apps/mobile/src/transcript.ts`: `sessionTokens`/`lastTurnTokens` on `State`,
+the `usage` case (the TUI's rule, `state.ts:485-497`), and `lastTurnTokens: null`
+on a REPLACED history (the TUI's `forgetContextFill`) — `transcript-parity`
+stays green.
+- `apps/mobile/src/session-view.ts`: `headerModel` + `headerContext` on the view.
+- `apps/mobile/src/session-screen-controller.ts`: `SendableHandle` gained
+  `skills?`/`context?`/`rename?`/`onTitle?`; the `info` port dep; `SessionScreenState`
+  gained `info` and `renaming`; the actions (`openInfo`/`closeInfo`/`refreshInfo`/
+  `setAutoAccept`/`autoAcceptOn`/`beginRename`/`setRenameText`/`submitRename`/
+  `cancelRename`), the title watch, and `leave`/`dispose` unsubscribing both.
+
+**Slice 3 — app UI.** `src/screens/SessionInfoSheet.tsx` (render only),
+`src/screens/RenameSheet.tsx` (in-app alert: no native alert button is visible to
+XCUITest), `screens/SessionScreen.tsx` (menu action, header model + bar, title
+tap), `ui/ScreenHeader.tsx` (`onTitlePress`), `App.tsx` (`infoWiring`, built over
+`link.client` + the screen's own handle). No new SF Symbols needed —
+`xmark`/`wifi.slash`/`exclamationmark.triangle` already existed.
+
+**Slice 4 — e2e.** `apps/mobile/e2e/run.ts`: `harnessConfigText()` now carries one
+working stdio MCP server + one `/nonexistent-tentacle-e2e`; `writeHarnessSkill()`
+writes `<configDir>/skills/e2e-demo/SKILL.md`; flow `25-session-info` in `FLOWS`
+with `INFO_ID`. `e2e/flows/25-session-info.yaml` + `25-session-info.js` (ends on
+daemon truth: the rename is read back from `session/list`).
+
+**Drift 3 (added, not in the plan): the context pull runs AT ATTACH.** Owner
+decision 4 wants the header's bar live, but a session attached after its turns
+has no `agent_usage` to measure from — the bar would stay absent until the next
+turn, and a person who never opens the sheet would never see it. The TUI already
+solves this (`useSessionLink`'s `askContext` at attach), so
+`SessionInfoController.loadContext()` (`session-info-controller.ts`) runs one
+`session/context` pull when the attach answers
+(`session-screen-controller.ts`'s `attach`), gated on `phase === "open"` (F4)
+and on the same generation counter (F5). The sheet's own pull is a separate,
+fresh one — never reused, since a turn may have outdated it.
+
+### Tests (red → green, then mutation-proved)
+
+New files: `session-info.test.ts` (37), `session-info-controller.test.ts` (17),
+`session-info-header.test.ts` (10), `session-rename.test.ts` (9),
+`session-view-header.test.ts` (8), `session-screen-info.test.ts` (10),
+`packages/client/test/daemon-info.test.ts` (4). **Red was shown** for the fold's
+`usage` case and for every new module (import/export failure first, then
+the property): `session-info-header.test.ts` failed with "Export named
+'headerContext' not found", `headerContext`/`shortModel` did not exist, and
+`usage` was the fold's silent default branch — the fold test failed until the case
+was added.
+
+**Mutations (each reverted, restored file re-tested green):**
+
+| # | Mutation | Killed by |
+|---|---|---|
+| 1 | `count = tools.length` (drop `moreTools`) | `the MCP section > one row per server…` (1 fail) |
+| 2 | `others = attached` (no `− 1`) | `devicesText > alone, one other…` + the SESSION section (2 fail) |
+| 3 | invert `exact` for `≈` | 5 tests (contextMeter ×3, MODEL section, live-bar) |
+| 4 | remove the generation check | `the first open's MCP result… is dropped` + `a result arriving after close()` (2 fail) |
+| 5 | remove the phase gate (`port.session()` unconditionally) | `\`skills\`/\`context\` are not called at all` + the later-`open` refresh (2 fail) |
+| 6 | `daemonHandshake ?? result.agentInfo` (first handshake only) | `it follows the SECOND handshake (F7)` (1 fail) |
+
+Also caught by the suite itself and fixed (a real regression my edit introduced):
+the header block dropped `queued: composeState.queued` from `sessionView`, failing
+`session-screen-compose.test.ts` — restored.
+
+### Failure modes
+
+F1 (link down/drops) — `offline` per pull + banner + one refresh on `up`; F2
+(MethodNotFound) — `unsupported` in that section only; F3 (slow MCP) — per-section
+painting; F4 (not attached) — phase gate, spy count 0; F5 (stale) — generation
+counter; F6 (no window/model) — "Not reported"/tokens-only, no bar; F7 —
+`daemonInfo()` per handshake; F8 (not on page 1) — rows omitted, `empty` state;
+F9 (huge lists) — `MAX_SKILL_ROWS` 100 + "and N more", tool names only on
+expand; F10 (hostile strings) — `sanitizeDisplay` (bidi/zero-width/clamp); F11 —
+auto-accept switch bound to the live link, error reported without faking a revert;
+F12 (e2e slowness) — MCP connects off the start path; not measured by a real iOS
+run here (see the unverified line below).
+
+**Not verified:** the e2e flow (`25-session-info.yaml`) and the screenshots were
+NOT executed in this environment — the iOS simulator run needs a Release build and
+XCUITest driver, and it is the reviewer's Fable/visual step. Verify with
+`bun run e2e:mobile --ios 26 --only 25-session-info`. Its static guards DO pass
+(`apps/mobile/test/e2e-flows.test.ts`, 22/22: it ends on a `runScript` whose body
+reads a hook and throws, and every hook it names is served).
+
+**Gate (this branch).** `bunx tsc --noEmit` + `tsc -p apps/mobile` +
+`tsc -p apps/relay` clean; `bun run lint` (biome, 1510 files) clean — the §6
+baseline of 0 errors/0 warnings holds; `bun test` **10904 pass, 0 fail, 5 skip**
+(425 s). The 5 skips are the documented opt-in ones (live k8s/docker, the
+real-socket keepalive, a watchdog), each guarded by an opt-in variable, none in a
+file this task touched. `packages/protocol/schema/protocol.json` is unchanged (no
+schema change): no `protocol:bump` and no `protocol.d/` note.
 
 ## Review
 
-*— (reviewer), (date)*
+*— claude-opus-5-5, 2026-11-15* (fresh context; a different model family from the DeepSeek executor)
+
+**Verdict: REQUEST-CHANGES** — two MEDIUM findings, both proven by a scratch run.
+
+1. **MEDIUM — the info controller's emits reach nobody; the screen never repaints when a pull lands.**
+   `createSessionInfo` paints each section through its own `emit()` (`session-info-controller.ts:178-183,217-226`),
+   but no one subscribes to it (`session-screen-controller.ts` only calls `info.state()` inside its own `emit`, which
+   runs after `await info.open()`/`refresh()` at `:818-829`; `void info.loadContext()` at `:629` has no follow-up emit).
+   Effects: (a) the header bar (Owner decision 4) stays absent after attach on an idle session until some unrelated
+   event emits; (b) F3 is false end-to-end: with an MCP probe pending, skills/context have landed in the controller but the
+   sheet still shows `loading` for every section until MCP settles; (c) the link-`up` auto-refresh (F1, `:271-278`) and
+   an auto-accept flip from another device (F11) repaint nothing. Scratch `.tentacle/tmp/mobile-session-info/repaint.test.ts`
+   (screen `onChange`): after the attach-time context resolves, 0 emits, last emitted `headerContext: null` while
+   `state()` says 42 %; with MCP never resolving, last emitted skills phase `loading` while `state()` says `empty`.
+   The screen tests miss it because they read `screen.state()` (a pull), never the emitted states.
+2. **MEDIUM — the header bar shows the DROPPED chat's fill after a `/clear` / replace.** The fold forgets
+   `lastTurnTokens` on a replace (`transcript.ts:273-277`), so `headerContext` falls back to `open`
+   (`session-info.ts:266`) = the attach-time `session/context` figure, which is never re-asked (`loadContext`'s only call
+   site is the attach, `session-screen-controller.ts:629`). The TUI forgets AND re-asks (`useSessionLink.ts:350-353`,
+   compaction `useTurnDriver.ts:1163`) — this is docs/fix/connect-functest-batch.md item E reintroduced on the phone.
+   Scratch `clear-bar.ts`: after a `clear` with open = 120k / 200k → bar `{ percent: 60 }` on an empty session.
+
+LOW (not blocking): `submitRename` with no handle says "too old to rename" (`session-screen-controller.ts:467-474`) for a
+not-attached session; the sheet subtitle keeps the route title after a rename (`App.tsx:333,350` captures `title`);
+`MAX_TITLE_LENGTH = 200` is documented as the daemon's cap but `MAX_SESSION_TITLE = 256` (`protocol/session.ts:459`);
+`daemonInfo()` was inserted under `mcpStatus`'s JSDoc (`remote-client.ts:966-996`); a doc comment got folded into a
+type line (`session-view.ts:158`).
+
+**Gate (touched files):** 11 files / 144 pass, 0 fail (incl. transcript-parity, e2e-flows, session-screen-compose);
+`bun run typecheck` clean; `bun run lint` 1510 files, 0 issues. Full `bun test` not re-run here.
+**Mutation:** removing the generation check in `paint` → 2 F5 tests fail; reverted, `git status` clean.
+**§7:** one session path holds (port = `link.client` + the screen's own handle; no frame built); no protocol/persistence
+change; auto-accept goes through the shared link, laptop gating untouched; F4 phase gate holds.
+**Attacks with no finding:** the `history_reset` rewrite is equivalent to `withHistory` (reason `null`); F4 never calls
+`skills`/`context` without a handle; `daemonInfo()` re-read per handshake (F7).
+**Executor:** honest drift notes (decisions 2/4/5, F11 correction), real mutation table; but the "per-section painting"
+claim was proven only at the controller, never through the screen that renders it. The e2e flow is unexecuted (as declared).
 
 #### Owner decisions (2026-11-15 12:20, chosen on the mockups `.tentacle/tmp/mobile-ui/session-info-mockups.html`)
 
@@ -350,3 +519,151 @@ Red first (stub returning empty view → fail), then green; mutation proof per �
 4. **Context: also in the header** — a thin bar ONLY (no "8% contesto" text) under the title line, live from `agent_usage`; the exact numbers stay in the sheet.
 5. **NEW: tap the title to rename the session** — an inline edit / iOS alert with a text field, saved through the existing rename path (the TUI's `/rename`, `session/rename` or the title entry — find it with file:line), visible on every client; empty or unchanged = no-op; error state.
 *— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+### Fix round 1
+
+*— claude-opus-5-5 (executor), 2026-11-15*
+
+Both MEDIUM findings were real, and both were fixed at the LAYER the reviewer
+named. All five LOWs are fixed too — two sat in the same controller as MEDIUM 1,
+so leaving them would have meant touching the same lines twice.
+
+**MEDIUM 1 — the info controller's emits reached nobody. FIXED.**
+Root cause, one sentence: `createSessionInfo` painted each section by calling its
+own `emit()` (`session-info-controller.ts:178-183,217-226`), but nothing
+subscribed, so the screen only ever re-rendered on some *other* event — and an
+idle session has none.
+
+- `session-screen-controller.ts:450` — the screen now subscribes:
+  `unwatchInfo = info.subscribe(() => emit())`, unwound in `dispose()` (`:984`).
+  That is the missing edge: every pull that lands, the link's `up` refresh, a
+  replaced history's fresh count and an auto-accept flip now repaint.
+- `session-info-controller.ts:316-325` — `close()` no longer
+  `listeners.clear()`s. The sheet closing stops the *pulls* (F5) but the same
+  controller feeds the **HEADER's bar**, which is on screen either way (Owner
+  decision 4); clearing the listeners froze the bar for the rest of the screen's
+  life. The screen drops its own subscription on `dispose`.
+- `session-info-controller.ts:278-282` — an **auto-accept flip from another
+  device** (F11, finding 1c) had no listener at all: `open()` now takes
+  `port.session()?.autoAccept?.onChange(() => emit())` and `close()` releases it.
+
+**MEDIUM 2 — the header's bar kept the DROPPED chat's fill after a `/clear`. FIXED.**
+Root cause, one sentence: the fold forgot `lastTurnTokens` on a replace
+(`transcript.ts:273-277`) so `headerContext` fell back to `openContext` — the
+attach-time `session/context` figure, which nothing re-asked.
+
+- `session-feed.ts:70-79,161-165,191-198` — the feed gained `onHistoryReplaced`,
+  called on a `history` activity whose reason REPLACED what was shown (`null`,
+  `clear`) and on a mid-turn `history_reset` (`:161-165`). `context_reset`
+  appends and `compact` keeps the transcript, so neither fires it — the same
+  line the TUI draws (`useSessionLink.ts:350-353`).
+- `session-screen-controller.ts:355-368` — the screen's answer to it is the
+  TUI's: `info.loadContext()`, i.e. ask the daemon for the count of what it
+  holds NOW. The rule stays in the pure fold; the request is the caller's.
+
+**LOWs fixed (all five — two of them in the same controller as MEDIUM 1):**
+- `session-rename.ts:31-37` — `MAX_TITLE_LENGTH` is now `MAX_SESSION_TITLE`
+  **imported** from `@tentacle/protocol`, not a restated `200`: the local 200
+  silently refused a title the daemon (256) accepts, and any future move of the
+  daemon's number would have drifted the two apart.
+- `session-screen-controller.ts:886` — `submitRename` with **no handle**
+  (the attach never answered) said "too old to rename sessions", which is a lie
+  about the computer's build; it now says "Not connected to that session." The
+  `MethodNotFound` sentence is kept for a handle that HAS no `rename`.
+- `session-screen-controller.ts:435-443` — the sheet's subtitle was bound to the
+  port's `title()`, i.e. the ROUTE's copy captured when the screen was built, so
+  it kept the old name after a rename; the port is now spread with
+  `title: () => shownTitle` (the screen's live title).
+- Two doc-comment folds (both from the review's LOW list):
+  `session-view.ts:158` (a doc comment swallowed into `blockedBy`'s type line
+  — the comment now sits on its own line) and `remote-client.ts:968`
+  (`daemonInfo()` inserted under `mcpStatus`'s JSDoc — the JSDoc is now on
+  `daemonInfo`, and `mcpStatus` has its own back at `:993-998`).
+
+**Left unfixed:** nothing from the review's list — both MEDIUMs and all five
+LOWs are fixed above. The e2e/screenshot step remains unexecuted (declared in
+the *Not verified* line).
+
+**Order of work (as built).** Proven RED first — `session-screen-info.test.ts`'s
+new `describe` blocks, driving the SCREEN's `emitted` states ("Review round 1,
+MEDIUM 1" / "MEDIUM 2"). Then MEDIUM 1's two edges (the screen's subscription,
+`close()`'s listeners), then MEDIUM 2 (the fold's hook + the screen's re-ask),
+each mutated. Then the five LOWs. Then MEDIUM 1's third edge (finding 1c, the
+auto-accept listener) — heard only while re-reading finding 1 against the code,
+after the LOWs; it carries its own test and mutation (row 4) like the rest.
+
+**Tests: RED first, on the property, then GREEN (§9).** All in
+`apps/mobile/test/session-screen-info.test.ts`, driving the **screen**
+(`onChange` / `emitted`), never the controller directly — the review's central
+criticism was that the existing tests read `state()`, a pull:
+
+| test | red on the buggy code because |
+|---|---|
+| `the attach-time context pull reaches the emitted state` | last emitted `headerContext: null` while `state()` said 42 % |
+| `skills/context landing while the MCP probe is still pending repaint the sheet` | emitted skills phase `loading`, `state()` `empty` |
+| `the link coming back up repaints the sheet from the auto-refresh (F1)` | emitted banner still `offline` after the refresh landed |
+| `an auto-accept flip from another device repaints the switch (F11)` | 0 emits on `flip(true)` |
+| `the header's bar keeps repainting after the sheet was opened and closed` | `close()` cleared the listeners ⇒ bar frozen at 60 % |
+| `after a /clear the header's bar follows the emptied session` | bar stayed `{percent: 60}` on an empty session |
+
+The 6th was **red on the assertion of the property** (`percent: 60` received,
+`2` expected), not on a compile error — it needed the feed's new hook AND the
+screen's answer to it, and each was mutated separately (rows 2 and 5 below).
+
+**Mutations (§9 non-vacuity — each applied, run, reverted; `git status` clean
+after each):**
+
+| # | mutation | result |
+|---|---|---|
+| 1 | `const unwatchInfo = () => {}` (no subscription) | 3 fail: the three MEDIUM-1 emit tests (`…attaches`, `…pending`, `the link coming back up`); the F11 one still passed (it needs mutation 4) |
+| 2 | `onHistoryReplaced: () => {}` in the screen (no re-ask) | 1 fail: `after a /clear the header's bar…` (`percent: 60`, expected 2) |
+| 3 | `listeners.clear()` restored in `close()` | 1 fail: `the header's bar keeps repainting after the sheet was opened and closed` |
+| 4 | `unSwitch = null` (never listen to the auto-accept link) | 1 fail: `an auto-accept flip from another device repaints the switch` |
+| 5 | the feed's `if (activity.reason === null \|\| "clear")` hook deleted | 2 fail: both MEDIUM-2 tests |
+| 6 | `createSessionInfo(infoPort)` (port title, not `shownTitle`) | 1 fail: `a rename made here reaches the SHEET's subtitle too` |
+| 7 | the `session === null` branch merged back into the "too old" one | 1 fail: `a rename asked with NO handle says that, never 'too old'` |
+
+**Gate (this branch, after the fixes).** `bunx tsc --noEmit` clean ·
+`bunx tsc -p apps/mobile` clean · `bunx tsc -p apps/relay` clean ·
+`bun run lint` (biome, **1510 files, 0 errors, 0 warnings** — the §6 baseline
+holds) · `bun test` **10912 pass, 0 fail, 5 skip** (420 s, 10917 tests / 787
+files). The 5 skips are the documented opt-ins — 2 live-k8s
+(`packages/k8s`, `packages/cli/workload-shell-live.k8s`), 2 live-docker
+(`packages/docker`, `packages/cli/session-hop.docker`) and the real-socket
+keepalive (`packages/daemon/ws-server`, `TENTACLE_SLOW_TESTS`) — the SAME 5 the
+pre-fix tree had (10904 pass/0 fail/5 skip), so no test was newly skipped to
+make this green.
+
+**Design note (AGENTS §7).** Nothing moved across a §7 invariant: no protocol or
+persistence change, no second session path (the port is still `link.client` +
+the screen's own handle), the auto-accept listener is the SAME shared
+`AutoAcceptLink` (one broker, laptop gating untouched), and the new rule
+(*a replaced history invalidates the context figure*) lives in the pure fold,
+not in a component.
+
+**Not verified (one line).** The iOS e2e flow and the screenshots are still
+unexecuted here (no simulator/Release build); verify with
+`bun run e2e:mobile --ios 26 --only 25-session-info,06-session-open`.
+
+### Round 2
+
+*— claude-opus-5-5 (reviewer, fresh context), 2026-11-15* — reviewed `git diff HEAD~1` (2b9e96c4)
+
+**Verdict: PASS.** Both MEDIUMs are fixed; each fix was mutation-proved.
+
+- **MEDIUM 1 (repaint): fixed.** The screen now subscribes to the info controller (`session-screen-controller.ts` `unwatchInfo`,
+  dropped on `dispose`), `close()` keeps the listeners, and `open()` follows the auto-accept link's `onChange`. My round-1 scratch
+  `repaint.test.ts` now passes 2/2. Mutations: subscribing with a no-op listener → 6 tests fail; removing the auto-accept `onChange` → the F11
+  test fails.
+- **MEDIUM 2 (stale bar after a clear): fixed.** `session-feed.ts` calls `onHistoryReplaced` for a history replace with
+  reason `null`/`clear` and for an in-stream `history_reset`; the screen re-runs `loadContext`. Mutation: removing the call → 2 tests
+  fail. The attach's own history does not come through `activity: history` (`remote-session.ts:1547,1603`), so attaching does not
+  pull the context twice.
+- **LOWs:** the rename cap now imports `MAX_SESSION_TITLE`; with no handle the error says "Not connected", not "too old"; the sheet's
+  title follows `shownTitle`; the JSDoc in `remote-client.ts` and the formatting in `session-view.ts` are fixed. All verified in the diff.
+- **Regressions:** no new defect found. All mutations were reverted and `git status` was clean afterwards. `apps/mobile/test` +
+  `daemon-info` 1292 pass / 0 fail; `bun run typecheck` clean; `bun run lint` 1510 files, 0 issues. Full `bun test` was not re-run.
+- **Follow-up (LOW, not blocking):** a compaction by another device (`reason: "compact"`) keeps the measured fill from before the
+  compaction until the next turn. The TUI asks for the context again after its own compaction (`useTurnDriver.ts:1163`).
+  Worth matching later.
+- **Still unverified:** the iOS e2e flow and the screenshots (the Fable visual step).

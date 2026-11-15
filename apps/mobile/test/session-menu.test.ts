@@ -24,8 +24,16 @@ const tool: Row = {
 };
 
 describe("sessionMenu", () => {
-  test("an empty conversation offers nothing", () => {
-    expect(sessionMenu([])).toEqual([]);
+  test("an empty conversation offers Session info and NOTHING to copy", () => {
+    // Slice 3: the menu opens with the sheet's read, which needs no rows; the
+    // copy actions keep their "only when there is something" rule (the screen
+    // then shows "Nothing to copy yet" as a footnote).
+    expect(sessionMenu([]).map((action) => action.id)).toEqual(["info"]);
+  });
+
+  test("Session info is the FIRST action, before the copy actions", () => {
+    const ids = sessionMenu([user("u1", "hi"), answer("a1", "yo")]).map((action) => action.id);
+    expect(ids).toEqual(["info", "copy-last", "copy-all"]);
   });
 
   test("copy the last answer: the newest assistant text, tools and reasoning skipped", () => {
@@ -48,7 +56,10 @@ describe("sessionMenu", () => {
   });
 
   test("no answer yet: only the conversation can be copied", () => {
-    expect(sessionMenu([user("u1", "hi")]).map((action) => action.id)).toEqual(["copy-all"]);
+    expect(sessionMenu([user("u1", "hi")]).map((action) => action.id)).toEqual([
+      "info",
+      "copy-all",
+    ]);
   });
 
   test("blank texts are skipped, never copied as empty lines", () => {

@@ -15,7 +15,7 @@
  */
 import type { SessionEvent } from "@tentacle/client";
 import type { PermissionBroker, PermissionRequester } from "@tentacle/core";
-import type { AttachmentRef } from "@tentacle/protocol";
+import type { AttachmentRef, SessionContextResult, SessionSkillsResult } from "@tentacle/protocol";
 import { DomainErrorCode } from "@tentacle/transport";
 import { RpcError } from "@tentacle/transport";
 import type { Compose, ComposeHandle, PhotoPort } from "./compose-controller.ts";
@@ -37,6 +37,19 @@ import {
 } from "./permission-sheet.ts";
 import type { SessionController, SessionHandle, SessionOpenFailure } from "./session-controller.ts";
 import { type ForeignTurn, createSessionFeed } from "./session-feed.ts";
+import {
+  type InfoPort,
+  type SessionInfoState,
+  createSessionInfo,
+} from "./session-info-controller.ts";
+import {
+  type RenameState,
+  renameErrorText,
+  renamePlan,
+  titleAfterRename,
+} from "./session-rename.ts";
+
+export type { RenameState };
 import type { ComposeBarView, OutboxRowView, SessionViewInput } from "./session-view.ts";
 
 import { type SessionStatus, type SessionView, sessionView } from "./session-view.ts";
@@ -62,6 +75,21 @@ export interface SendableHandle extends SessionHandle {
    * turns). Absent on a handle that decides nothing: see `autoAcceptsTurnOf`.
    */
   readonly autoAcceptsTurn?: (turnId: string) => boolean;
+  /**
+   * The session's title changes (`RemoteSession.onTitle`, the daemon's
+   * `session_title`): a rename on ANY device reaches the header.
+   */
+  onTitle?(listener: (notice: { readonly title: string }) => void): () => void;
+  /**
+   * The skills this session has (`RemoteSession.skills()`, `session/skills`): what
+   * Session info lists. Optional because a fake handle need not answer, and an
+   * older daemon rejects it — the caller's section then says so (F2/F4).
+   */
+  skills?(): Promise<SessionSkillsResult>;
+  /** The context this session would send now (`session/context`). */
+  context?(): Promise<SessionContextResult>;
+  /** Rename it (`session/rename`, the TUI's `/rename` path). */
+  rename?(title: string): Promise<string>;
 }
 
 /**
@@ -88,6 +116,13 @@ export interface SessionScreenState {
   readonly thumbnails: ThumbnailState;
   /** The compose half (13d): the queue, the chips, the outbox. */
   readonly compose: ComposeBarView;
+  /**
+   * Session info (docs/feat/mobile-session-info.md): the sheet's value, `null`
+   * while it is closed. The header's model and context bar live in `view`.
+   */
+  readonly info: SessionInfoState | null;
+  /** Whether the rename field is open (Owner decision 5: tap the title). */
+  readonly renaming: RenameState | null;
 }
 
 /**
@@ -154,6 +189,13 @@ export interface SessionScreenDeps {
   readonly onChange?: (state: SessionScreenState) => void;
   /** The compose half (13d). Absent: a screen with no queue and no photos (12c's tests). */
   readonly compose?: ComposeWiring;
+  /**
+   * Session info (docs/feat/mobile-session-info.md): the port the sheet pulls
+   * through, built over the ONE client stack. It takes an accessor because the
+   * session's handle only exists AFTER the attach (`skills`/`context`/`autoAccept`
+   * are the handle's), and the screen is built first.
+   */
+  readonly info?: (handle: () => SendableHandle | null) => InfoPort;
 }
 
 export interface SessionScreenController {
@@ -174,8 +216,26 @@ export interface SessionScreenController {
    * the CURRENT action — never a Stop, never a no-op clear.
    */
   pressReturn(): void;
-  /** The link went up/down (the client's `onLinkStatus`): the banner's `reconnecting`. */
+  /** Up/Down (the client's `onLinkStatus`): the banner's `reconnecting`. */
   link(up: boolean): void;
+  /** Session info opened: start every pull (F1–F5 live in the controller). */
+  openInfo(): Promise<void>;
+  /** The sheet closed: drop in-flight answers and stop following the link (F5). */
+  closeInfo(): void;
+  /** Pull-to-refresh, and a `Retry` row (and the port's link `up`, its own). */
+  refreshInfo(): Promise<void>;
+  /** The auto-accept switch (Owner Q3, F11). */
+  setAutoAccept(on: boolean): Promise<void>;
+  /** The switch's value NOW (the session's shared link: a flip elsewhere is here). */
+  autoAcceptOn(): boolean;
+  /** Tapping the title: the rename field opens on the CURRENT title (Owner 5). */
+  beginRename(): void;
+  /** What is typed into it. */
+  setRenameText(text: string): void;
+  /** Save it: a no-op when empty/unchanged, else `session/rename`. */
+  submitRename(): Promise<void>;
+  /** Dismiss it without saving. */
+  cancelRename(): void;
   /** The person's tap on a link: the sheet's confirmation is the screen's job. */
   onLink(href: string): void;
   /** The FlatList's visible window: which images want bytes (12b's driver). */
@@ -228,6 +288,18 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   let thumbnails: ThumbnailState = initialThumbnails;
   let handle: SendableHandle | null = null;
   let foreign: ForeignTurn | null = null;
+  /** The session's title as the screen shows it: the route's, then the daemon's (`session_title`/rename). */
+  let shownTitle = deps.title;
+  /** The last attached handle's title subscription (dropped on a re-attach/leave). */
+  let sessionTitleWatch: (() => void) | undefined;
+  /** The rename field (Owner decision 5): `null` while it is closed. */
+  let renaming: RenameState | null = null;
+  /**
+   * Session info (docs/feat/mobile-session-info.md). Built over the ONE client
+   * stack (`deps.info` hands back the port the app wired), and it reads the
+   * handle LIVE: the attach that creates it happens after this.
+   */
+  const infoPort = deps.info === undefined ? null : deps.info(() => handle);
   /** This phone's own turn's abort (Stop, for `own: true`). */
   let ownControl: AbortController | null = null;
   let disposed = false;
@@ -281,6 +353,16 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     setForeign: (turn) => {
       foreign = turn;
       emit();
+    },
+    // A REPLACED history (a `/clear`, a resync) forgets the measured fill in the
+    // fold, and the daemon has to be asked to count what the session holds now:
+    // the attach-time `openContext` figure described the chat that was just
+    // dropped, and `headerContext` falls back to it (Review round 1, MEDIUM 2;
+    // the TUI's `forgetContextFill` + `askContext`).
+    onHistoryReplaced: () => {
+      if (info !== null) {
+        void info.loadContext().catch(() => {});
+      }
     },
   });
 
@@ -346,6 +428,42 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           },
         });
 
+  /**
+   * A port or the sheet's controller built over it: `createSessionInfo` is cheap
+   * and STATEFUL (its generation counter), so exactly one lives per screen and
+   * `open()`/`close()` are what restart it.
+   */
+  /**
+   * One controller per screen. `title` is OVERRIDDEN with this screen's own
+   * `shownTitle`: the port's copy is the route's, captured when the screen was
+   * built, so the sheet's subtitle kept the old name after a rename this phone
+   * (or another) made (Review round 1, LOW).
+   */
+  const info =
+    infoPort === null ? null : createSessionInfo({ ...infoPort, title: () => shownTitle });
+  /**
+   * The info controller's OWN emits (Review round 1, MEDIUM 1): every pull that
+   * lands, the link's `up` refresh and another device's auto-accept flip repaint
+   * this screen. Without it the header's bar and the sheet's sections only moved
+   * on some UNRELATED event — and on an idle session there is none.
+   */
+  const unwatchInfo = info === null ? () => {} : info.subscribe(() => emit());
+
+  /** The daemon's model as the header shows it (`undefined`: report nothing). */
+  function modelOf(): string | undefined {
+    return infoPort?.daemon()?.model;
+  }
+
+  /** The context window the bar divides by (`undefined`: no bar, F6). */
+  function windowOf(): number | undefined {
+    return infoPort?.daemon()?.contextWindow;
+  }
+
+  /** The daemon's count at open: the bar's figure until a turn measures one. */
+  function measuredContext(): { readonly used: number; readonly exact: boolean } | null {
+    return info?.state().openContext ?? null;
+  }
+
   /** The compose view the screen draws (empty when this build has no compose half). */
   function composeView(): { readonly bar: ComposeBarView; readonly items: readonly OutboxItem[] } {
     if (compose === null) {
@@ -372,7 +490,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         returnedOthers: value.returnedOthers,
         returnedNotice: value.returnedNotice,
         outbox: outboxRows(value.outbox, {
-          title: deps.title,
+          title: shownTitle,
           project: deps.project,
           status,
           rows: [],
@@ -393,7 +511,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   function view(): SessionView {
     const composeState = composeView().bar;
     return sessionView({
-      title: deps.title,
+      title: shownTitle,
       project: deps.project,
       status,
       rows: transcript.rows,
@@ -402,6 +520,19 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       ended: transcript.closed,
       draft,
       archived: deps.archived,
+      // The header's model and context bar (Owner 2/4): the daemon's handshake
+      // facts re-read per open (F7), and the fill THIS session measured — never
+      // a fabricated 0 (the bar is absent until there is something to fill).
+      ...(info === null
+        ? {}
+        : {
+            header: {
+              model: modelOf(),
+              measured: transcript.lastTurnTokens?.prompt ?? null,
+              open: measuredContext(),
+              window: windowOf(),
+            },
+          }),
       queued: composeState.queued,
       returnedOthers: composeState.returnedOthers,
       ...(composeState.returnedNotice === ""
@@ -429,6 +560,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       sheet: sheet.view(),
       thumbnails,
       compose: composeView().bar,
+      info: info === null ? null : info.state(),
+      renaming,
     };
   }
 
@@ -507,6 +640,18 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     queuedReopen = false;
     handle = result.session;
     status = { phase: "open" };
+    // The daemon's title can move while this screen is open (another device's
+    // rename, or this one's): the header follows it, never the route's copy.
+    sessionTitleWatch?.();
+    sessionTitleWatch = result.session.onTitle?.((notice) => {
+      shownTitle = titleAfterRename(notice.title);
+      emit();
+    });
+    // The header's context bar needs a figure NOW: a session attached after its
+    // turns has no `agent_usage` to measure from (the TUI asks at attach too).
+    if (info !== null) {
+      void info.loadContext().catch(() => {});
+    }
     // Asks reach the person from now on. Set AFTER the attach, so a replayed ask
     // is queued by the broker until the sheet is up and then delivered in order
     // (F1) — never to a half-built screen.
@@ -689,6 +834,87 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     link(up) {
       feed.link(up);
     },
+    async openInfo() {
+      await info?.open();
+      emit();
+    },
+    closeInfo() {
+      info?.close();
+      emit();
+    },
+    async refreshInfo() {
+      await info?.refresh();
+      emit();
+    },
+    async setAutoAccept(on) {
+      await info?.setAutoAccept(on);
+      emit();
+    },
+    autoAcceptOn() {
+      return info?.autoAcceptOn() ?? false;
+    },
+    beginRename() {
+      renaming = { text: shownTitle, saving: false, error: null };
+      emit();
+    },
+    setRenameText(text) {
+      if (renaming === null) {
+        return;
+      }
+      renaming = { ...renaming, text, error: null };
+      emit();
+    },
+    async submitRename() {
+      const field = renaming;
+      const session = handle;
+      if (field === null) {
+        return;
+      }
+      const plan = renamePlan(shownTitle, field.text);
+      if (plan.kind === "noop") {
+        // Empty or unchanged is a NO-OP (Owner decision 5): the sheet closes and
+        // nothing is sent — the title's source is not needlessly rewritten.
+        renaming = null;
+        emit();
+        return;
+      }
+      if (plan.kind === "invalid") {
+        renaming = { ...field, saving: false, error: plan.reason };
+        emit();
+        return;
+      }
+      if (session === null || session.rename === undefined) {
+        // No handle: the attach never answered (`not-attached` phase). Blaming the
+        // computer's build would be a lie — nothing was even asked (Review round
+        // 1, LOW).
+        renaming = {
+          ...field,
+          saving: false,
+          error:
+            session === null
+              ? "Not connected to that session."
+              : "This computer's tentacle is too old to rename sessions.",
+        };
+        emit();
+        return;
+      }
+      renaming = { ...field, saving: true, error: null };
+      emit();
+      try {
+        const stored = await session.rename(plan.title);
+        shownTitle = titleAfterRename(stored);
+        renaming = null;
+      } catch (error) {
+        // The field stays open with the person's text and the reason: a failed
+        // rename must never look like it worked.
+        renaming = { ...field, saving: false, error: renameErrorText(error) };
+      }
+      emit();
+    },
+    cancelRename() {
+      renaming = null;
+      emit();
+    },
     onLink(href) {
       // The screen shows the confirmation (`links.ts`); nothing is opened here.
       void href;
@@ -746,14 +972,21 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       // has one link, hence one broker, shared by every screen on it).
       releaseRequester();
       compose?.stop();
+      info?.close();
+      sessionTitleWatch?.();
+      sessionTitleWatch = undefined;
       await deps.controller.leave(deps.sessionId);
       emit();
     },
     dispose() {
       disposed = true;
       listeners.clear();
+      unwatchInfo();
       unmount.abort();
       compose?.stop();
+      info?.close();
+      sessionTitleWatch?.();
+      sessionTitleWatch = undefined;
       // Idempotent and identity-scoped: a dispose that lands AFTER the next
       // screen mounted its requester withdraws nothing.
       releaseRequester();

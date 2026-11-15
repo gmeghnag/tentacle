@@ -1,0 +1,454 @@
+/**
+ * The Session info view-model (docs/feat/mobile-session-info.md, Owner decisions
+ * 1–2). Pure, so every state the sheet can be in is decided and asserted HERE,
+ * not in a `.tsx` the harness cannot import (AGENTS §7).
+ *
+ * The states are enumerated per section (loading/ready/empty/error/unsupported/
+ * offline/not-open), because the plan's whole point is that ONE section failing
+ * must never take the others down (F2, F3, F4).
+ */
+import { describe, expect, test } from "bun:test";
+import type { McpServerStatus } from "@tentacle/protocol";
+import {
+  type InfoFacts,
+  type Pull,
+  contextMeter,
+  devicesText,
+  headerModel,
+  sanitizeDisplay,
+  sessionInfoView,
+  shortModel,
+  shortenPath,
+  tokensText,
+} from "../src/session-info.ts";
+
+const ready = <T>(value: T): Pull<T> => ({ state: "ready", value });
+const loading = <T>(): Pull<T> => ({ state: "loading" });
+const failed = <T>(kind: "error" | "unsupported" | "offline" | "not-open"): Pull<T> => ({
+  state: "error",
+  kind,
+});
+
+const server = (over: Partial<McpServerStatus> & { name: string }): McpServerStatus => ({
+  state: "connected",
+  tools: [],
+  moreTools: 0,
+  ...over,
+});
+
+function facts(over: Partial<InfoFacts> = {}): InfoFacts {
+  return {
+    phase: "open",
+    link: "up",
+    title: "Fix the flaky test",
+    computerName: "MacBook Pro",
+    daemon: { version: "1.4.0", model: "claude-sonnet-4-5", contextWindow: 200_000 },
+    mcp: ready({ servers: [] }),
+    skills: ready({ slash: [], skills: [], problems: [], moreProblems: 0 }),
+    context: ready({ used: 0, exact: true }),
+    entry: ready({
+      sessionId: "s-1",
+      title: "Fix the flaky test",
+      cwd: "/Users/me/tentacle/apps",
+      createdAt: 0,
+      updatedAt: 0,
+      running: false,
+      attached: 1,
+      archived: false,
+      jobs: 0,
+    }),
+    autoAccept: false,
+    ...over,
+  };
+}
+
+const section = (f: InfoFacts, id: string) => {
+  const found = sessionInfoView(f).sections.find((s) => s.id === id);
+  if (found === undefined) {
+    throw new Error(`no ${id} section`);
+  }
+  return found;
+};
+
+describe("headerModel (Owner decision 2: model under the title)", () => {
+  test("the status word comes first, the model after it", () => {
+    expect(headerModel({ text: "Idle", tone: "online" }, "claude-sonnet-4-5")).toEqual({
+      status: { text: "Idle", tone: "online" },
+      model: "claude-sonnet-4-5",
+    });
+  });
+
+  test("no model known → the status alone (today's look)", () => {
+    expect(headerModel({ text: "Idle", tone: "online" }, undefined)).toEqual({
+      status: { text: "Idle", tone: "online" },
+      model: null,
+    });
+  });
+
+  test("a slashed id shows only its last segment (owner)", () => {
+    expect(shortModel("rits/deepseek-ai/DeepSeek-V4.1-Flash-1017")).toBe(
+      "DeepSeek-V4.1-Flash-1017",
+    );
+    expect(shortModel("claude-sonnet-4-5")).toBe("claude-sonnet-4-5");
+    expect(shortModel(undefined)).toBeNull();
+    // Nothing after the slash: never an empty word in the header.
+    expect(shortModel("rits/")).toBe("rits/");
+  });
+});
+
+describe("contextMeter (the sheet's exact figures, Owner decision 4)", () => {
+  test("percent and both figures when the window is known", () => {
+    const meter = contextMeter({ used: 84_000, exact: true }, 200_000);
+    expect(meter.text).toBe("42 % · 84k of 200k");
+    expect(meter.percent).toBe(42);
+    expect(meter.tone).toBe("running");
+  });
+
+  test("an estimate is prefixed ≈, an exact count is not", () => {
+    expect(contextMeter({ used: 84_000, exact: false }, 200_000).text).toBe("≈ 42 % · 84k of 200k");
+    expect(contextMeter({ used: 84_000, exact: true }, 200_000).text.startsWith("≈")).toBe(false);
+  });
+
+  test("the meter turns to attention at 80 % (the TUI's warn zone)", () => {
+    expect(contextMeter({ used: 160_000, exact: true }, 200_000).tone).toBe("attention");
+    expect(contextMeter({ used: 159_000, exact: true }, 200_000).tone).toBe("running");
+    // Over 100 %: the bar is clamped, the numbers are not.
+    expect(contextMeter({ used: 300_000, exact: true }, 200_000).percent).toBe(100);
+  });
+
+  test("no window known → tokens only, and NO meter (F6)", () => {
+    const meter = contextMeter({ used: 84_000, exact: true }, undefined);
+    expect(meter.text).toBe("84k tokens");
+    expect(meter.percent).toBeNull();
+    expect(meter.tone).toBeNull();
+  });
+
+  test("tokens read as k and M", () => {
+    expect(tokensText(950)).toBe("950");
+    expect(tokensText(84_000)).toBe("84k");
+    expect(tokensText(1_200_000)).toBe("1.2M");
+    expect(tokensText(200_000)).toBe("200k");
+  });
+});
+
+describe("devicesText (attached counts THIS phone, so others = attached − 1)", () => {
+  test("alone, one other, many others", () => {
+    expect(devicesText(1)).toBe("Only this phone");
+    expect(devicesText(2)).toBe("This phone + 1 other");
+    expect(devicesText(3)).toBe("This phone + 2 others");
+  });
+});
+
+describe("shortenPath", () => {
+  test("last two components, with an ellipsis when there were more", () => {
+    expect(shortenPath("/Users/me/tentacle/apps")).toBe("…/tentacle/apps");
+    expect(shortenPath("tentacle/apps")).toBe("tentacle/apps");
+    expect(shortenPath("/")).toBe("/");
+    expect(shortenPath("/srv")).toBe("/srv");
+  });
+});
+
+describe("sanitizeDisplay (Hostile strings, F10)", () => {
+  test("bidi overrides and zero-width characters are stripped", () => {
+    expect(sanitizeDisplay("a\u202eb\u200bc")).toBe("abc");
+    expect(sanitizeDisplay("ok\u2066name\u2069")).toBe("okname");
+    expect(sanitizeDisplay("plain name")).toBe("plain name");
+  });
+
+  test("a huge error is clamped", () => {
+    expect(sanitizeDisplay("x".repeat(1000)).length).toBeLessThanOrEqual(300);
+  });
+});
+
+describe("the MODEL section", () => {
+  test("the daemon's model, mono, with the context row under it (Owner 1: no provider)", () => {
+    const model = section(facts(), "model");
+    expect(model.phase).toBe("ready");
+    const [modelRow, contextRow] = model.rows;
+    expect(modelRow?.title).toBe("Model");
+    expect(modelRow?.value).toBe("claude-sonnet-4-5");
+    expect(modelRow?.mono).toBe(true);
+    expect(contextRow?.title).toBe("Context");
+    expect(contextRow?.value).toBe("0 % · 0 of 200k");
+    // There is no "API" row: the owner chose the model name only.
+    expect(model.rows.some((row) => row.title === "API")).toBe(false);
+  });
+
+  test("an older daemon that reports nothing says so (F6)", () => {
+    const model = section(facts({ daemon: undefined }), "model");
+    expect(model.rows[0]?.value).toBe("Not reported");
+    // No daemonInfo at all: no context row either (nothing to report it from).
+    expect(model.rows).toHaveLength(1);
+  });
+
+  test("a slashed model id is shown in FULL here (only the header shortens it)", () => {
+    const model = section(
+      facts({ daemon: { model: "rits/deepseek-ai/DeepSeek-V4.1-Flash-1017" } }),
+      "model",
+    );
+    expect(model.rows[0]?.value).toBe("rits/deepseek-ai/DeepSeek-V4.1-Flash-1017");
+  });
+
+  test("a context pull that is still loading shows the loading row, not a fake 0", () => {
+    const model = section(facts({ context: loading() }), "model");
+    expect(model.phase).toBe("ready");
+    expect(model.rows[1]?.loading).toBe(true);
+  });
+
+  test("an unsupported context pull says the daemon is too old (F2)", () => {
+    const model = section(facts({ context: failed("unsupported") }), "model");
+    expect(model.rows[1]?.value).toBe("Needs a newer tentacle on MacBook Pro");
+  });
+});
+
+describe("the SESSION section", () => {
+  test("project (shortened), devices, background only when there are jobs", () => {
+    const one = section(facts(), "session");
+    expect(one.rows.map((row) => row.title)).toEqual(["Project", "Devices"]);
+    expect(one.rows[0]?.value).toBe("…/tentacle/apps");
+    expect(one.rows[0]?.accessibilityLabel).toBe("/Users/me/tentacle/apps");
+    expect(one.rows[1]?.value).toBe("Only this phone");
+
+    const busy = section(
+      facts({
+        entry: ready({
+          sessionId: "s-1",
+          title: "t",
+          cwd: "/srv/app",
+          createdAt: 0,
+          updatedAt: 0,
+          running: false,
+          attached: 3,
+          archived: false,
+          jobs: 2,
+        }),
+      }),
+      "session",
+    );
+    expect(busy.rows.map((row) => row.title)).toEqual(["Project", "Devices", "Background"]);
+    expect(busy.rows[1]?.value).toBe("This phone + 2 others");
+    expect(busy.rows[2]?.value).toBe("2 jobs running");
+  });
+
+  test("a session missing from the first list page omits the rows, never '0' (F8)", () => {
+    expect(section(facts({ entry: ready(null) }), "session").phase).toBe("empty");
+    const listed = section(facts({ entry: ready(null) }), "session");
+    expect(listed.rows).toHaveLength(0);
+    expect(listed.empty?.title).toBe("Not in the first page");
+  });
+
+  test("the session's own last figure wins over the pulled one (a live bar)", () => {
+    const live = section(facts({ context: ready({ used: 100_000, exact: false }) }), "model");
+    expect(live.rows[1]?.value).toBe("≈ 50 % · 100k of 200k");
+  });
+});
+
+describe("the MCP section", () => {
+  const servers = [
+    server({
+      name: "strict-legacy",
+      tools: ["read", "write", "search"],
+      moreTools: 2,
+      latencyMs: 4,
+    }),
+    server({ name: "ghost", state: "failed", error: "spawn /nonexistent ENOENT" }),
+    server({ name: "slow", state: "unresponsive", error: "ping timed out after 10000ms" }),
+    server({ name: "gone", state: "closed" }),
+  ];
+
+  test("one row per server, in daemon order, with its state", () => {
+    const mcp = section(facts({ mcp: ready({ servers }) }), "mcp");
+    expect(mcp.phase).toBe("ready");
+    expect(mcp.rows.map((row) => row.title)).toEqual(["strict-legacy", "ghost", "slow", "gone"]);
+    // tools.length + moreTools, never the names alone.
+    expect(mcp.rows[0]?.value).toBe("5 tools");
+    expect(mcp.rows[0]?.tone).toBe("online");
+    expect(mcp.rows[1]?.tone).toBe("attention");
+    expect(mcp.rows[1]?.value).toBe("failed");
+    expect(mcp.rows[1]?.subtitle).toBe("spawn /nonexistent ENOENT");
+    expect(mcp.rows[1]?.glyph).toBe("exclamationmark.triangle");
+    expect(mcp.rows[2]?.tone).toBe("attention");
+    expect(mcp.rows[3]?.tone).toBe("offline");
+    expect(mcp.rows[3]?.value).toBe("closed");
+  });
+
+  test("the tool names are the expanded text, never the row's own", () => {
+    const mcp = section(facts({ mcp: ready({ servers }) }), "mcp");
+    expect(mcp.rows[0]?.expand).toBe("read, write, search, +2 more");
+    expect(mcp.rows[0]?.subtitle).toBeUndefined();
+  });
+
+  test("the footer counts what connected, and says 'on <computer>' (daemon-wide)", () => {
+    const mcp = section(facts({ mcp: ready({ servers }) }), "mcp");
+    expect(mcp.title).toBe("MCP servers · on MacBook Pro");
+    expect(mcp.footer).toBe("1 of 4 connected");
+  });
+
+  test("no servers is an empty section with the config hint", () => {
+    const mcp = section(facts({ mcp: ready({ servers: [] }) }), "mcp");
+    expect(mcp.phase).toBe("empty");
+    expect(mcp.empty?.title).toBe("No MCP servers on MacBook Pro");
+    expect(mcp.empty?.footnote).toContain("mcpServers");
+  });
+
+  test("each of the four pull states reads differently", () => {
+    expect(section(facts({ mcp: loading() }), "mcp").phase).toBe("loading");
+    expect(section(facts({ mcp: failed("unsupported") }), "mcp").empty?.title).toBe(
+      "Needs a newer tentacle on MacBook Pro",
+    );
+    expect(section(facts({ mcp: failed("error") }), "mcp").phase).toBe("error");
+    expect(section(facts({ mcp: failed("offline") }), "mcp").phase).toBe("offline");
+  });
+});
+
+describe("the SKILLS section", () => {
+  const skill = (
+    over: Partial<{
+      name: string;
+      description: string;
+      scope: "project" | "user";
+      user: boolean;
+      model: boolean;
+      location: string;
+    }> = {},
+  ) => ({
+    name: "e2e-demo",
+    description: "A demo skill",
+    scope: "user" as const,
+    user: true,
+    model: true,
+    location: "/tmp/x/SKILL.md",
+    ...over,
+  });
+
+  test("a user skill is /name, a project-only one is bare, with its scope chip", () => {
+    const skills = section(
+      facts({
+        skills: ready({
+          slash: [],
+          skills: [
+            skill(),
+            skill({ name: "repair", user: false, scope: "project", description: "Fix builds" }),
+          ],
+          problems: [],
+          moreProblems: 0,
+        }),
+      }),
+      "skills",
+    );
+    expect(skills.rows[0]?.title).toBe("/e2e-demo");
+    expect(skills.rows[0]?.chip).toBe("user");
+    expect(skills.rows[0]?.subtitle).toBe("A demo skill");
+    expect(skills.rows[1]?.title).toBe("repair");
+    expect(skills.rows[1]?.chip).toBe("project");
+    // The location (a path on the computer) is never shown.
+    expect(JSON.stringify(skills)).not.toContain("/tmp/x/SKILL.md");
+  });
+
+  test("a skill neither the user nor the model can use now is 'off'", () => {
+    const skills = section(
+      facts({
+        skills: ready({
+          slash: [],
+          skills: [skill({ user: false, model: false })],
+          problems: [],
+          moreProblems: 0,
+        }),
+      }),
+      "skills",
+    );
+    expect(skills.rows[0]?.value).toBe("off");
+    expect(skills.rows[0]?.dim).toBe(true);
+    expect(skills.rows[0]?.title).toBe("e2e-demo");
+  });
+
+  test("100 rows at most, then 'and N more' (F9)", () => {
+    const many = Array.from({ length: 130 }, (_unused, index) =>
+      skill({ name: `s${index}`, description: `d${index}` }),
+    );
+    const skills = section(
+      facts({ skills: ready({ slash: [], skills: many, problems: [], moreProblems: 0 }) }),
+      "skills",
+    );
+    expect(skills.rows).toHaveLength(100);
+    expect(skills.rowsNote).toBe("and 30 more");
+  });
+
+  test("skipped skills are a footer pointing at the computer", () => {
+    const skills = section(
+      facts({
+        skills: ready({
+          slash: [],
+          skills: [skill()],
+          problems: ["broken: no frontmatter"],
+          moreProblems: 1,
+        }),
+      }),
+      "skills",
+    );
+    expect(skills.footer).toBe("2 skills skipped — open /skills on the computer for details");
+  });
+
+  test("no skills at all is an empty section with the skills-dir hint", () => {
+    const skills = section(
+      facts({ skills: ready({ slash: [], skills: [], problems: [], moreProblems: 0 }) }),
+      "skills",
+    );
+    expect(skills.phase).toBe("empty");
+    expect(skills.empty?.title).toBe("No skills");
+    expect(skills.empty?.footnote).toContain(".agents/skills");
+  });
+
+  test("a not-attached session is `not-open`, never a fresh session's skills (F4)", () => {
+    const skills = section(facts({ phase: "failed", skills: failed("not-open") }), "skills");
+    expect(skills.phase).toBe("not-open");
+    expect(skills.empty?.title).toBe("Open the session to see its skills");
+  });
+});
+
+describe("the sheet as a whole", () => {
+  test("four sections, in the plan's order, under the session's title", () => {
+    const view = sessionInfoView(facts());
+    expect(view.sections.map((s) => s.id)).toEqual(["model", "session", "mcp", "skills"]);
+    expect(view.subtitle).toBe("Fix the flaky test");
+    expect(view.footer).toBe("tentacle 1.4.0 · MacBook Pro");
+  });
+
+  test("a versionless daemon still names the computer", () => {
+    expect(sessionInfoView(facts({ daemon: { model: "m" } })).footer).toBe("MacBook Pro");
+  });
+
+  test("offline: one banner, and every section it dims says so (F1)", () => {
+    const view = sessionInfoView(
+      facts({ link: "down", mcp: failed("offline"), skills: failed("offline") }),
+    );
+    expect(view.banner?.kind).toBe("offline");
+    expect(view.banner?.text).toContain("Offline");
+    expect(view.sections.find((s) => s.id === "mcp")?.phase).toBe("offline");
+  });
+
+  test("an already-open session keeps its facts while the link is down (dimmed, not blank)", () => {
+    const view = sessionInfoView(
+      facts({ link: "down", mcp: ready({ servers: [server({ name: "ghost" })] }) }),
+    );
+    const mcp = view.sections.find((s) => s.id === "mcp");
+    expect(mcp?.phase).toBe("ready");
+    expect(mcp?.dim).toBe(true);
+  });
+
+  test("the auto-accept switch is offered only when the session has one (Q3)", () => {
+    expect(sessionInfoView(facts()).autoAccept).toBe(false);
+    expect(sessionInfoView(facts({ autoAccept: true })).autoAccept).toBe(true);
+  });
+
+  test("one section failing never takes the others down (F2)", () => {
+    const view = sessionInfoView(
+      facts({ mcp: failed("unsupported"), skills: failed("error"), context: failed("not-open") }),
+    );
+    const by = (id: string) => view.sections.find((s) => s.id === id);
+    expect(by("model")?.phase).toBe("ready");
+    expect(by("session")?.phase).toBe("ready");
+    expect(by("mcp")?.phase).toBe("unsupported");
+    expect(by("skills")?.phase).toBe("error");
+  });
+});

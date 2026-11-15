@@ -7,7 +7,7 @@
  * stack's, untouched. Render only.
  */
 import type { JSX, ReactNode } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { DENSE_FONT_SCALE, type Palette, size as SIZE, space, typography } from "../theme.ts";
 
@@ -23,6 +23,12 @@ export interface ScreenHeaderProps {
   /** Add the safe-area top inset (false inside a sheet/modal that already has it). */
   readonly insetTop?: boolean;
   readonly titleTestID?: string;
+  /**
+   * The title is tappable (docs/feat/mobile-session-info.md Owner decision 5: tap
+   * it to rename). Only the compact variant offers it — a list's large title is
+   * the screen's own name, not something a person names.
+   */
+  readonly onTitlePress?: () => void;
 }
 
 export function ScreenHeader({
@@ -34,23 +40,39 @@ export function ScreenHeader({
   right,
   insetTop = true,
   titleTestID,
+  onTitlePress,
 }: ScreenHeaderProps): JSX.Element {
   const insets = useSafeAreaInsets();
   const top = insetTop ? insets.top : 0;
   if (variant === "compact") {
+    const heading = (
+      <Text
+        testID={titleTestID}
+        accessibilityRole="header"
+        numberOfLines={1}
+        maxFontSizeMultiplier={DENSE_FONT_SCALE}
+        style={[typography.headline, { color: palette.label }]}
+      >
+        {title}
+      </Text>
+    );
     return (
       <View style={[styles.compactRow, { paddingTop: top, minHeight: top + SIZE.headerChat }]}>
         <View style={styles.side}>{left}</View>
         <View style={styles.compactTitle}>
-          <Text
-            testID={titleTestID}
-            accessibilityRole="header"
-            numberOfLines={1}
-            maxFontSizeMultiplier={DENSE_FONT_SCALE}
-            style={[typography.headline, { color: palette.label }]}
-          >
-            {title}
-          </Text>
+          {onTitlePress === undefined ? (
+            heading
+          ) : (
+            <Pressable
+              testID={`${titleTestID ?? "header-title"}-tap`}
+              accessibilityRole="button"
+              accessibilityLabel={`${title}. Rename`}
+              accessibilityHint="Opens a field to rename this session"
+              onPress={onTitlePress}
+            >
+              {heading}
+            </Pressable>
+          )}
           {subtitle}
         </View>
         <View style={[styles.side, styles.sideRight]}>{right}</View>
