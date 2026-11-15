@@ -1,0 +1,382 @@
+# feat/session-capabilities — turn MCP servers and skills on/off for one session
+
+> **Status:** implementation (plan, awaiting owner approval)
+> **Branch:** `feat/session-capabilities`
+> **Size:** L (6 S/M slices) · **Blast:** load-bearing (the agent loop's per-round request, protocol, session log) · **Suited:** Opus plan; S1/S4/S5 a weaker model is fine, S2/S3a/S3b a strong model; Review mandatory, in a fresh context, red-teaming §7 (single session path, persistence, a pod is not trusted)
+> **Changelog:** `changelog.d/session-capabilities.added.md`: "**Turn MCP servers and skills off for one session.** `/mcp` and `/skills` (and Session info on the iPhone) can hide a server or a skill from the model for the current session; it takes effect on the next model call and is kept with the session."
+
+## Context
+
+*— claude-opus-5-5, 2026-11-15*
+
+Owner request (2026-11-15, `TODO.md`): "se devo giocarci a dama non mi serve
+fargli vedere mcp o skill su k8s". In a session the user wants to turn off
+individual **MCP servers** and **skills**, so the model **does not see** them:
+they are absent from the tool list and from the skills catalog sent to the
+model. They are not just denied at the permission prompt. Reasons:
+context/token economy, less distraction, and no stray k8s calls in a checkers
+game.
+
+Today the model's capability set is fixed per launch or context:
+
+- **MCP tools** are registered once into the session's `ToolRegistry`, by the
+  daemon-wide hub (`packages/cli/src/mcp-hub.ts:96-111`, `onBuilt` `:173-178`).
+  Every registered tool goes to the model on every round:
+  `this.config.tools.definitions()` is called per round
+  (`packages/agent/src/agent.ts:1211`), and every registered tool is listed
+  (`packages/tools/src/registry.ts:56-66`).
+- **Skills**: the catalog is a **suffix of the system prompt** (history[0]):
+  `${withAgents.trimEnd()}\n\n${catalog}\n` (`packages/config/src/resolve.ts:436-438`,
+  `renderSkillsCatalog` `packages/config/src/skills.ts:227-246`). The `skill`
+  tool's enum is the same set (`offeredSkills`, `skills.ts:218-220`;
+  `z.enum` `packages/tools/src/skill.ts:233`). The model's set changes only at a
+  context reset (`agent.ts:2316-2345`; `session-skills.ts:5-8`).
+- No session-level switch exists anywhere: the Repro below.
+- The surfaces that list them already exist: TUI `/mcp` (`packages/tui/src/mcp-panel.ts`),
+  `/skills` (`packages/tui/src/skills-panel.ts`), and the iPhone Session info
+  (`docs/feat/mobile-session-info.md`: MCP servers via daemon-wide `mcp/status`,
+  skills via `session/skills` with a per-skill `model` flag). So by the parity
+  rule the toggles go on both.
+
+Constraints: §7 TUI-over-RPC, a single session path (the switch is a session
+RPC, and every runtime gets it through `RemoteClient` ↔ `Connection`).
+Persistence on the laptop plus the trusted `serve` daemon. A pod is not
+trusted. Protocol is pre-public: breaking is allowed, but the change here is
+additive. UI is decided by the owner on mockups, in the feat/mobile-chrome
+style.
+
+**Repro (2026-11-15, `feat/session-capabilities` = `main` da1958f0):** the
+capability is missing. A search of `packages/` for any session-level switch
+(`set_capabilit|disabledSkills|disabledMcp|sessionCapabilities`):
+
+```
+Found 0 total occurrences across 0 files.
+```
+
+The executor re-runs a behavioural repro in `.tentacle/tmp/session-capabilities/`
+before S2. It starts `startDaemon` with the stdio fixture
+(`packages/cli/test/fixtures/mcp-stdio-server.ts`, as in `docs/feat/serve-mcp.md`
+Repro), opens a session with a recorder provider, sends one prompt, and prints
+the request's tool names. `mcp__echo__echo` is present and nothing can remove
+it. They paste the script and its output here.
+
+## Implementation
+
+*— claude-opus-5-5, 2026-11-15*
+
+### Load-bearing assumption
+
+**The model request is rebuilt on every round from two seams that the change can
+project without touching the stored history:** the tool list
+(`this.config.tools.definitions()`, `agent.ts:1211`, and `contextUsage`
+`agent.ts:1680`) and the message view (`modelView(messages)`, `agent.ts:1215`,
+`packages/agent/src/context-awareness.ts:65-74`). `modelView` already
+transforms the stored history into "the model's copy" (repair + render) and
+leaves the store untouched. So "hidden" can be a **pure per-round projection**:
+
+- filter the definitions,
+- rewrite the `skill` definition's enum,
+- swap the catalog suffix of the system message.
+
+The stored `messages`, the session log and the registry are never mutated.
+Disabling and re-enabling is lossless. Compaction and `context_reset` keep
+working unchanged, because they recompose the full system prompt
+(`load.ts:418-449`) and the projection is applied to it again.
+
+Verified: tools (`agent.ts:1211`, per loop iteration) and view (`:1215`). To
+verify in S2 before any edit: that no other request builder bypasses these two
+(the step-limit final request, the compaction summary request, a sub-agent's
+loop). Grep `ChatRequest = {` and `definitions()` in `packages/agent/src`.
+Each one found goes through the same projection, or is shown to send no
+tools/system prompt.
+
+### Preconditions
+
+- The catalog is the **last** block of the system prompt, rendered
+  deterministically from the offered set (`resolve.ts:436-438`,
+  `skills.ts:227-246`). `SKILLS_PROMPT_HEADER` starts it (`skills.ts:11`).
+- The `skill` tool's enum = `offeredSkills` (`skills.ts:214-220`). The agent
+  knows the model's current set (`offeredSkillNames(this.config.tools.definitions())`,
+  `agent.ts:882`, `:2316`).
+- MCP tools are named `mcp__<server>__<tool>` (`packages/mcp/src/tool-adapter.ts:40-42`).
+  But a server name may itself contain `__`, so the server is **tagged** on the
+  `Tool`, not parsed from the name (Design).
+- Sub-agents get a filtered subset of the parent's registry
+  (`packages/agent/src/subagent.ts:284-285`, `:367`). The projection must reach
+  them too (S2).
+- A per-session state already has the exact shape we need:
+  `session/set_auto_accept`. It is whole-state, idempotent, broadcast to every
+  attachment with `by`, held by a sharing daemon, an `OpenParams` field for a
+  CREATED session, an `OpenResult` snapshot, and the `serve` sidecar
+  (`packages/protocol/src/session.ts:976-1000`, `:905-940`; `updates.ts:322-340`
+  `auto_accept: "display"` `:513`; `packages/daemon/src/daemon-state-file.ts:96`).
+  We copy that pattern, except for the op shape (delta, F4).
+- Session-log entries: unknown + non-critical ⇒ skipped, unknown + critical ⇒
+  the whole log refused. Adding a **critical** type is an owner decision and
+  needs a `PROTOCOL_VERSION` bump (`packages/protocol/src/session-log.ts:12-22`,
+  table `:274-288`). The daemon emits typed entries next to `title`
+  (`packages/daemon/src/session-log.ts:131`).
+- `session/update_settings` rebuilds the agent and is **idle-only**
+  (`session.ts:957-965`). That is wrong for this feature: the switch must work
+  mid-turn without a rebuild. So the switch is NOT a carried setting.
+- Pods today run **no MCP hub** (`createMcpHub` is used only by `startDaemon`
+  `serve.ts:384` and the worker; laptop `mcpServers` do not apply in a pod,
+  `docs/feat/config-carry.md` Q5). A pod session's MCP list is empty. Its
+  skills are the pod's disk.
+
+### Design
+
+**State.** Each session holds `SessionCapabilities = { disabledMcp: string[], disabledSkills: string[] }`:
+sorted, de-duplicated server and skill names. It is a **disabled** set, so
+anything new (a server added to the config, a skill created on disk) is **on**
+by default. A name that no longer exists stays in the set; it is harmless and
+comes back off if the thing reappears. MCP granularity is per server.
+Per-tool is a later field: fields are free (§7 forward-compat), so nothing is
+reserved now.
+
+**Pure module** `packages/agent/src/capabilities.ts` (React-free, §7):
+
+- `applyCapabilityOp(state, op) → state`. `op = { kind: "mcp" | "skill", name, enabled }`.
+  It is idempotent and returns the same object when nothing changed.
+- `projectTools(defs, serverOf, state) → defs`. It drops every def whose tool
+  is tagged with a disabled server. It rewrites the `skill` def's
+  `parameters.enum` minus the disabled skills, and drops `skill` entirely when
+  that leaves nothing (a `z.enum` cannot be empty, `skill.ts:233`).
+- `projectSystem(content, offered, state) → content`. It cuts at the **last**
+  `\n\n${SKILLS_PROMPT_HEADER}` and re-renders `renderSkillsCatalog(offered − disabled)`.
+  That reuses the one renderer, so the bytes are identical to a composed prompt
+  of that set. With nothing left it gives `withAgents.trimEnd()`. With no
+  header found, it returns `content` unchanged (no catalog to hide).
+- `isHidden(toolName, serverOf, state)` and `isSkillHidden(name, state)`, for
+  the execution guard.
+
+**Agent (S2).**
+
+- `Agent` holds `capabilities` (initial value from the builder) and gets
+  `setCapabilities(state)`.
+- The round at `agent.ts:1211` takes a **snapshot** and sends
+  `projectTools(defs)` plus a view whose system message is `projectSystem(...)`.
+  `contextUsage` (`:1680`) and `estimateUsed` use the same projection, so the
+  status bar counts what is really sent.
+- **Execution guard:** a call in a round's response is judged against **that
+  round's snapshot**. A call to a tool that was hidden in the snapshot (the
+  model hallucinating from older history) gets an error result:
+  `"<tool> is turned off for this session"`. It is never executed. The same
+  goes for `skill{name}` with a disabled name.
+- Sub-agents spawned from this session use the parent's live state.
+- On `/compact` and `context_reset`, `carryOverSkills` (`compact.ts:226`) does
+  NOT carry the bodies of disabled skills: the new history must not
+  re-introduce what the user hid.
+- A user's own `/name` of a disabled skill still works (Q4).
+
+**MCP tag.** `Tool` (`packages/core/src/tool.ts:155-179`) gets an optional
+`readonly mcpServer?: string`, set by the MCP adapter. `serverOf` reads it.
+
+**Protocol (S3a), additive, no `PROTOCOL_VERSION` bump.**
+
+- Request `session/set_capability {sessionId, kind: "mcp"|"skill", name, enabled}`
+  returns `{capabilities}`, the whole state AFTER. A delta, not whole-state:
+  two clients toggling *different* items both land (F4).
+- Update `capabilities {capabilities, by?}`: class **display** in `UPDATE_CLASS`.
+  It goes to every attachment, own echoes included, only on a change. An
+  older client shows `unsupported` once. It cannot toggle anyway, and what
+  the model sees is daemon-side.
+- `OpenResult.capabilities` is the snapshot on every open/attach.
+- `OpenParams.capabilities` is honoured only for a session this open CREATES,
+  exactly like `autoAccept`. It is how resume-from-laptop-copy, a `/clear`
+  fork and a hop carry the state.
+- `session/skills` entries get `disabled?: true`. `mcp/status` stays
+  daemon-wide, and the per-session state comes from `OpenResult` + the update.
+- Wire both ends: schema → `methods.ts` → `Connection` handler → `RemoteClient`/`RemoteSession.setCapability`
+  → `client/mapping.ts` reverse mapping → reducer.
+- An older daemon answers `MethodNotFound`. The client then hides the
+  toggles, and its surface shows "not supported by this computer".
+
+**Persistence (S3b).**
+
+- New log entry `capabilities {capabilities}`: the whole state, the last one
+  wins. It is emitted by the daemon on every change, on the session's log
+  lineage, so the laptop persists it from its `session/log` reads, already
+  validated and re-serialized (§7).
+- Criticality is an owner decision (Q2). The recommendation is
+  **non-critical**: an older build that skips it loads the session with
+  everything on. That fails open on *visibility* only. It is never a security
+  loss, because permissions still gate every call.
+- The load fold (laptop `--resume`, `serve` reload) takes the last
+  `capabilities` entry, and the session is created with it
+  (`OpenParams.capabilities` / the daemon's builder).
+- On `context_reset` / compaction (a new `base` segment), the daemon re-emits
+  the current state right after the `base`. Then the new segment is
+  self-contained, even when superseded segments are dropped
+  (`keepSuperseded` off).
+- `/clear` fork: carried (Q5).
+- No sidecar field: the log is the record, and the sidecar names the entry it
+  pairs with.
+
+**Pods.**
+
+- The request goes to the pod daemon, which applies it to its own agent and
+  log. There is nothing to gate on the laptop: the switch only *removes*
+  model-visible capabilities and creates no laptop effect or approval (§7).
+- A pod that lies (claims "off" but keeps sending) can only waste context. It
+  already controls its own loop anyway.
+- The laptop stores the validated `capabilities` entry like any other.
+- Skills listed are the pod's. MCP has nothing to list until pods run MCP
+  servers. The toggle UI then simply shows "no MCP servers in this pod".
+
+**Effective time.** From the **next model call**. A call in flight completes
+with the old set. Prompt cache: tools come before system in the provider's
+cache prefix, so a change costs **one full-price request** and is cached again
+from there. Rapid toggles before the next call coalesce for free (the snapshot
+is read once per round). A mid-turn toggle is allowed. Mid-turn vs
+next-turn is Q1.
+
+**Surfaces (S4 TUI, S5 iPhone). The look is decided on mockups; this only says
+what each surface must offer.**
+
+- **TUI:** the existing `/mcp` and `/skills` panels get one switch per row.
+  - Each row shows on/off. Space/Enter toggles it and sends
+    `session/set_capability`.
+  - The row reflects the daemon's echo (not optimistic, or optimistic with
+    rollback on error).
+  - A footer line says "applies to the next model call · hidden from the
+    model, not uninstalled".
+  - A skill row distinguishes "off" from the existing "after reset" marker.
+  - Optional shortcut commands `/mcp off <name>` / `/skills off <name>` (Q6).
+  - The view-model and key routing are a pure module next to `mcp-panel.ts` /
+    `skills-panel.ts`. The component only renders.
+- **iPhone Session info:** the MCP SERVERS and SKILLS sections get a trailing
+  switch per full-width row, in the feat/mobile-chrome style (minimal rows, no
+  cards).
+  - The switch is disabled with a footnote when the daemon does not support
+    it, or the session is not open (the F4 `not-open` phase,
+    `mobile-session-info.md`).
+  - Another device's change arrives as the `capabilities` update and shows
+    "changed on <by>" (untrusted text, passed through `untrustedText`).
+  - The state logic goes in the app's pure session-info model, not the
+    component.
+
+### Files
+
+Dependency order: protocol → agent → daemon → client → cli → tui → mobile.
+
+- **S1** (S · contained · weaker model OK): `packages/agent/src/capabilities.ts`
+  (new), `packages/agent/test/capabilities.test.ts` (new),
+  `packages/core/src/tool.ts` (`mcpServer?`), `packages/mcp/src/tool-adapter.ts`
+  (set it).
+- **S2** (M · load-bearing · strong model): `packages/agent/src/agent.ts`
+  (state, setter, snapshot at `:1211`, `contextUsage` `:1680`, execution guard,
+  skill guard), `packages/agent/src/subagent.ts` (live parent state),
+  `packages/agent/src/compact.ts` (`carryOverSkills` filter),
+  `packages/agent/test/agent-capabilities.test.ts` (new).
+- **S3a** (M · load-bearing · strong model): `packages/protocol/src/session.ts`
+  (request/result, `OpenParams`/`OpenResult` field), `updates.ts` (update +
+  `UPDATE_CLASS` display), `skills.ts` (`disabled?`), `methods.ts`;
+  `packages/daemon/src/connection.ts` + `hosted-session.ts` (handler, broadcast
+  with `by`, apply to the agent); `packages/client/src/remote-client.ts`,
+  `remote-session.ts`, `mapping.ts`, `session-reducer.ts`; tests next to the
+  `set_auto_accept` ones; `protocol.json` regenerated at merge
+  (`bun run protocol:bump`).
+- **S3b** (M · load-bearing · strong model): `packages/protocol/src/session-log.ts`
+  (entry + `LOG_ENTRY_CRITICAL` per Q2), `packages/daemon/src/session-log.ts`
+  (emit on change and after each `base`), `packages/daemon/src/persisted-session.ts`
+  (reload fold), the laptop fold + `open{capabilities}` on resume/fork/hop
+  (`packages/cli/src/session-resume.ts`, `session-saver.ts`, `tui-sessions.ts`,
+  `session-hop.ts`; the executor confirms each by grep for `autoAccept` carry
+  sites), `packages/client/src/session-log-reader.ts`. If Q2 = critical: a
+  `protocol.d/session-capabilities.md` note.
+- **S4** (M · cross-module · weaker model OK after S3a): `packages/tui/src/mcp-panel.ts`,
+  `skills-panel.ts`, `skills-sync.ts`, a pure `capability-toggles.ts` (new) +
+  tests in the `app.test.tsx` style; `commands.ts` if Q6.
+- **S5** (M · cross-module · after mockups): `apps/mobile` Session info model +
+  sheet + its tests; the e2e flow `25-session-info` gets a toggle step.
+
+### Failure modes
+
+| # | Case | Convergence |
+|---|------|-------------|
+| F1 | Toggle mid-turn while a model call is streaming | That call completes with its snapshot. The next round uses the new state. Nothing is aborted. |
+| F2 | A disabled server's call already issued (same round) or awaiting permission | Judged against the round's snapshot, where it was visible: it proceeds through the normal gate (the user can still deny). Later rounds: hidden, and a hallucinated call gets the "turned off" error, never executed. |
+| F3 | The model calls a hidden tool from memory of earlier history | Error result, not executed. Past `tool_use` blocks stay in history. **To verify in S2:** both providers (`openai`, `anthropic`) accept history calls to a tool absent from `tools`. A cheap recorder + one real-shape request test. If one refuses, STOP and bring it back to the owner, without improvising. The candidate is to project past calls to hidden tools in `modelView` the way `repairHistory` already rewrites invalid history. |
+| F4 | Two clients toggle at once | The delta op serializes in the daemon (synchronous apply, no lock on the peer, §7 "don't serialize the peer"). Different items both land. The same item: the last write wins, and every client converges on the broadcast echo, in total order. |
+| F5 | Disconnect / reconnect | `OpenResult.capabilities` is the snapshot on re-attach. Updates missed while away are covered by it. |
+| F6 | Daemon restart (`serve`) | The reload fold reads the last `capabilities` entry up to the sidecar's entry. A crash between the toggle and its log write loses that toggle: the state is "everything on" or the previous one. That is honest, and the UI shows what the daemon reports. |
+| F7 | Older daemon | `MethodNotFound` → toggles hidden ("not supported"). No silent no-op. |
+| F8 | Older client | The update is display: `unsupported` once. The model still sees the session's real set, decided daemon-side. |
+| F9 | Older build loads a log with `capabilities` | Non-critical (rec): skipped → everything visible. Critical: refused loudly. |
+| F10 | Unknown name (a typo, a server removed) | Accepted and stored (the set is names). The UI only offers existing names. A cap (e.g. 256 entries, names ≤128 chars, matching `mcp.ts` caps) rejects a flood with `InvalidParams`. |
+| F11 | Everything disabled | `skill` tool dropped and catalog removed. The model has the built-ins only. Valid. |
+| F12 | `context_reset` / compaction | The system prompt is recomposed full and still projected. The state is re-emitted after the new `base`. Bodies of disabled skills are not carried. |
+| F13 | MCP connect settles after the toggle | The registry gains tools tagged with the server. The projection hides them at the next round. Order does not matter. |
+| F14 | Pod lies about state | Wastes context only. No laptop effect, no approval created (§7). |
+| F15 | A user's `/name` of a disabled skill | Runs (Q4 rec). The body enters history as the user's explicit act. |
+
+### Tests
+
+Red before green for every slice. Mutation-check each property (§9).
+
+- **S1** (`capabilities.test.ts`):
+  - `projectTools` drops exactly the disabled server's tools, tag-based. A
+    server named `a__b` is handled (mutation: parse by name → red).
+  - The `skill` enum is filtered, and `skill` is dropped when empty.
+  - `projectSystem` output **byte-equals** `composeSystemPrompt` of the reduced
+    set (the exact property: what the model sees = a prompt composed without
+    them). An AGENTS.md containing the header text earlier is still cut at the
+    LAST one.
+  - Ops are idempotent (same object back).
+- **S2** (recorder provider):
+  - With `mcp__echo__echo` disabled, the **next request's** `tools` lacks it
+    and its system message lacks the skill. The in-flight request is unchanged
+    (mutation: snapshot read after the call → red).
+  - A hallucinated call to a hidden tool: the fixture's call log stays empty
+    and the result says "turned off".
+  - A sub-agent's request lacks it.
+  - `contextUsage` counts the projected size.
+  - After `context_reset` the projection still holds and no disabled body is
+    carried.
+- **S3a** (`Connection` + `RemoteClient` over the in-memory channel):
+  - Two clients: A disables `echo`, B gets `capabilities` with `by`, both
+    converge.
+  - Concurrent deltas on different items both land.
+  - Idempotent set → no update.
+  - `OpenResult` snapshot on re-attach.
+  - `MethodNotFound` path on the client.
+  - `UPDATE_CLASS` has the kind (the existing exhaustiveness test).
+- **S3b**:
+  - Toggle → `session/log` carries `capabilities`. The laptop file holds it,
+    and `--resume` recreates the session with it: the first request lacks the
+    tool.
+  - `serve` restart reloads it.
+  - A context reset segment re-carries it.
+  - An older reader skips it (non-critical).
+- **S4**: pure toggle view-model + key routing, unit-tested. One
+  `ink-testing-library` frame test: Space on a row sends the request, and the
+  echo flips the row.
+- **S5**: session-info model tests (disabled when unsupported or not-open,
+  remote change copy). The e2e toggle step.
+
+### Owner questions (with recommendations)
+
+1. **When does a toggle apply?** (a) the next model call, even mid-turn;
+   (b) the next turn only. **Rec (a)**: that is what was asked, and it is
+   simplest. The cache cost is one request either way.
+2. **Log entry `capabilities`: critical or not?** **Rec non-critical**. An
+   older build shows everything (fail-open on visibility, permissions still
+   gate). Critical would make an older build refuse the whole session over a
+   preference, and would need a `PROTOCOL_VERSION` bump.
+3. **Disabled-set vs enabled-set?** **Rec disabled-set**: new servers/skills
+   are on by default, as today.
+4. **The user's own `/name` of a disabled skill:** allow, or block? **Rec
+   allow**: the switch is about what the *model* sees.
+5. **Does a `/clear` fork (and a hop) keep the switches?** **Rec yes**: it is
+   the same task context. A brand-new session starts with everything on.
+6. **Typed commands too** (`/mcp off k8s`, `/skills off kubernetes`) besides
+   the panel toggles? **Rec yes in the TUI** (cheap, scriptable). Panel only on
+   the phone.
+7. **Named presets** ("game mode": config `capabilityPresets` applied at
+   session start)? **Rec later**, a follow-up task, once per-session toggles
+   prove useful.
+
+## Execution
+
+## Review
