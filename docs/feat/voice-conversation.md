@@ -1085,6 +1085,88 @@ because the stated form is unobservable and (ii) the process caveat above. No
 PARTIAL on behaviour: every field, every rule of §4, F9 and F10 is implemented
 and pinned by a test that was shown red.
 
+### Fix round 1 · *— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (tentacle CLI, `--profile deepseek`), 2026-11-15*
+
+Scope: the **Round 1** review's one MEDIUM + two LOW (`### C3 review`, the
+`REQUEST-CHANGES` pass). No HIGH existed. Read first: `docs/EXECUTOR-BRIEF.md`,
+AGENTS §9, and that review round — each fix below was written as a failing test
+against the buggy code before any edit (§9 red-before-green), then mutation-checked.
+
+**1. MEDIUM — F9's latch fired on ANY 400 (fixed).**
+`packages/providers/src/openai-provider.ts:222-233`. Was
+`reasoningSwitchesRefused = true` before the retry's result was known, so a 400
+for an unrelated cause (context over the server's limit, a refused tool schema, an
+oversized image — the repo has no overflow handling of its own) left the latch
+permanently set for the provider instance, i.e. for the life of a `serve` daemon:
+every later voice turn then silently reasoned, against the owner's Q2 switch.
+Now the switch-free retry runs first and the latch is its result —
+`this.reasoningSwitchesRefused = res.ok` (`:232`). A 400 on both bodies still
+fails the turn exactly as before; it just teaches nothing.
+
+*Test* (`packages/providers/test/reasoning-off.test.ts:107`): one provider, two
+voice turns, endpoint always 400. Asserts 2 then 4 bodies, with the **third**
+body still carrying both switches — nothing was learned — and the fourth plain.
+Red before the fix on the property itself (`expected length 4, received 3`: the
+latch had suppressed the switches on turn two), not on a compile error.
+
+**2. LOW — the forced final report never consumed a voice mark (fixed).**
+`packages/agent/src/agent.ts:1595-1596`. The `max_iterations` report is the ONE
+request the loop builds by hand (no tools, no `reasoning`), so it never went
+through `voiceRequest`; a voice steer drained into it answered a listening person
+with no spoken-style line. Added `markVoice()` right after that drain, before the
+report's request is built. The line still rides only on `finalMessages`, never on
+`messages` — F10 holds.
+
+*Test* (`packages/daemon/test/voice-turn.test.ts:244`): a TYPED turn whose only
+round calls a tool with `maxIterations: 1`, so the cap is spent and the report is
+built; a voice `enqueue{reasoning:"keep"}` lands during that round. Asserts the
+report carries the steer's text, the spoken line, and that the stored history is
+still clean. Red before the fix (`expect(hasLine(report)).toBe(true)` → false), and
+the steer's text was already present — so it fails on the mark, not on the drain.
+
+**3. LOW — the first 400's body was never read or cancelled (fixed).**
+Same site. Added `discardBody(res)` (`packages/providers/src/openai-provider.ts:441`)
+before the retry, cancelling a body nobody reads instead of leaving the rejected
+stream holding its connection while a second one opens.
+
+*Test* (`packages/providers/test/reasoning-off.test.ts:128`): the 400 answers a
+`ReadableStream` that is never closed and counts its own `cancel`; asserts exactly
+one cancel and two bodies. Red without the discard.
+
+**Mutations (script `.tentacle/tmp/voice-conversation/fix1-mutations.ts`, real
+files, byte-exact restore, never `git checkout`/`restore`/`stash`; re-run on the
+final tree).**
+
+```
+MUTATION F1 latch set BEFORE the retry's result is known (the bug) -> RED (1 fail) restored=true
+MUTATION F1 never latch at all (a 400 on every voice turn, forever) -> RED (1 fail) restored=true
+MUTATION LOW-1 the final report does not consume the voice mark (the bug) -> RED (1 fail) restored=true
+MUTATION LOW-2 the rejected first answer's body is never released (the bug) -> RED (1 fail) restored=true
+---- ALL MUTATIONS RED
+```
+
+The second F1 mutation is the one that matters for symmetry: it proves the new
+test pins *both* directions (a latch that never sets is as wrong as one that sets
+too eagerly), which is exactly the non-vacuity gap the review named.
+
+**Gate, run on this tree after the fixes.** `bunx tsc --noEmit` exit 0 · `bun run
+lint` clean (`biome check .`, 1634 files, 0 findings — matches the AGENTS §6
+baseline) · `bun test` **11770 pass, 5 skip, 0 fail** across 845 files, the 5 skips
+being the opt-in baselines (2 docker, 2 k8s, `ws-server` `skipIf(!SLOW)`) — no new
+failure and no new skip.
+
+**Drift / process, stated plainly.** Another executor was working this same
+worktree: my four edits plus these doc notes were committed as `879be7ea` by that
+worker while I was still verifying, and its doc text attributes the two code fixes
+to "the round-1 worker" (accurate), so no edit of mine was lost — `git status` was
+clean afterwards. Its recorded test total (**11722 pass**) already contains my
+tests, which I checked rather than assumed (`git show 879be7ea` has all 7 providers
+tests and the "max_iterations final report" describe); the **11770** in my gate
+line is therefore *not* explained by my additions, and I did not chase the delta —
+it is consistent with other concurrent slices landing in this worktree, and the
+gate's own claim (0 fail, no new skip) is what this fix stands on. **Per-finding
+status: 1 FIXED, 2 FIXED, 3 FIXED.**
+
 ## Review
 
 ### C2 review · *— claude-opus-5-5, 2026-11-15*
@@ -1504,6 +1586,27 @@ round 1, in a fresh context, and a different family from the deepseek executor.
     from a state that was already latched.
   - Every `steering` mutation still drains `voiceMarks` in step
     (`session.ts:180-181,290-291,307-308`).
+
+### Round 2 · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: PASS (C3).** This is an independent re-run. The section above was
+written by another review context running concurrently, and this one agrees with
+it. `HEAD~1..HEAD` (`e83c679e`) is doc-only, so the fixes were verified as they
+stand in the tree, from `879be7ea`.
+
+- **MEDIUM (F9 latch): FIXED.** The latch is now `res.ok`
+  (`openai-provider.ts:232`). Mutation: put back the latch-before-retry code.
+  Result: RED.
+- **LOW (final report did not consume the mark): FIXED.** `markVoice()` runs at
+  `agent.ts:1596`. Mutation: remove it. Result: RED.
+- **LOW (first 400 body): FIXED.** `discardBody` is in place. Mutation: remove
+  it. Result: RED.
+- **Regressions:** none. The latch changes only inside the `wantOff` branch. The
+  report's `markVoice` affects only the line, because that request carries no
+  `reasoning`.
+- **Gate:** the C3 files plus `packages/providers/test` give 185 pass, 0 fail.
+  `bun run lint` checks 1655 files with 0 findings. `bun run typecheck` is
+  clean. All mutations were reverted and `git status` is clean.
 
 #### Owner answers (2026-11-15, batch 1)
 
