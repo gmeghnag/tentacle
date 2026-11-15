@@ -305,6 +305,109 @@ describe("runPairing", () => {
   });
 });
 
+describe("runPairing: Cancel closes every channel the race opened", () => {
+  test("Cancel closes EVERY channel the race opened, winner included (mutation: keep one `inFlight` → red)", async () => {
+    // With a race the LAST channel to open can be an abandoned loser while the
+    // winner is mid-exchange, so a single `inFlight` closes the wrong socket and
+    // the exchange's channel stays open: the phone keeps a pairing socket on the
+    // computer after Cancel. The property: abort closes ALL of them.
+    const closed: string[] = [];
+    const make = (name: string): DuplexChannel => {
+      let onClose: (() => void) | undefined;
+      let isClosed = false;
+      const channel: DuplexChannel = {
+        send: () => {},
+        close: () => {
+          isClosed = true;
+          closed.push(name);
+          onClose?.();
+        },
+        setOnMessage: () => {},
+        setOnClose: (handler) => {
+          onClose = handler;
+          // A real socket tells a handler that arrives LATE (the handshake may
+          // install its handler after a cancel already closed the channel).
+          if (isClosed) handler();
+        },
+      };
+      return channel;
+    };
+    const winner = make("winner");
+    const loser = make("loser");
+    const controller = new AbortController();
+    // The shape only a race produces: address 1 is slow enough (900 ms) that the
+    // stagger starts address 2 at 750 ms, and address 2's socket opens AFTER
+    // address 1's (at ~1 000 ms) — so the LAST channel the runner saw is the LOSER
+    // while the WINNER is the one mid-handshake. A single `inFlight` keeps the
+    // loser and Cancel closes the wrong socket.
+    const dial = (address: string) => async () => {
+      if (address === ADDRESS) {
+        await new Promise((r) => setTimeout(r, 900));
+        return winner;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+      return loser;
+    };
+    // After both sockets opened, while the winner's handshake is still pending.
+    setTimeout(() => controller.abort(), 1_200);
+    const dispatched: string[] = [];
+    const settled = await Promise.race([
+      runPairing({
+        payload: {
+          v: 1,
+          key: KEY,
+          computer: "MacBook",
+          code: CODE,
+          addresses: [ADDRESS, "ws://127.0.0.1:4002/e2e"],
+        },
+        deviceName: "iPhone",
+        store: watchStore().store,
+        dial,
+        random: (n) => new Uint8Array(n).fill(3),
+        dispatch: (action) => dispatched.push(action.type),
+        signal: controller.signal,
+      }),
+      // The winner's handshake only rejects when its socket CLOSES: with the
+      // single `inFlight` nobody closes it, so the run never settles at all.
+      new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 2_500)),
+    ]);
+    // The property, in one line: Cancel ENDED the pairing.
+    expect(settled).not.toBe("hung");
+    expect(settled).toEqual({ ok: false });
+    expect(closed).toContain("winner");
+    expect(dispatched).toEqual(["failed"]);
+  });
+
+  test("a channel that opens AFTER the abort is closed at once (kept)", async () => {
+    const closed: string[] = [];
+    let onClose: (() => void) | undefined;
+    const channel: DuplexChannel = {
+      send: () => {},
+      close: () => {
+        closed.push("late");
+        onClose?.();
+      },
+      setOnMessage: () => {},
+      setOnClose: (handler) => {
+        onClose = handler;
+        if (closed.length > 0) handler();
+      },
+    };
+    const controller = new AbortController();
+    controller.abort();
+    await runPairing({
+      payload: { v: 1, key: KEY, computer: "MacBook", code: CODE, addresses: [ADDRESS] },
+      deviceName: "iPhone",
+      store: watchStore().store,
+      dial: () => async () => channel,
+      random: (n) => new Uint8Array(n).fill(3),
+      dispatch: () => {},
+      signal: controller.signal,
+    });
+    expect(closed).toContain("late");
+  });
+});
+
 describe("the pairing-success hook (docs/feat/mobile-push.md P9, decision 10)", () => {
   test("`onPaired` runs AFTER the record is stored and AFTER `done`, and only on success", async () => {
     // The order IS the property: notifications are asked about once a computer

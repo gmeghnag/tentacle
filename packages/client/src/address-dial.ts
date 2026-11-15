@@ -37,7 +37,7 @@
  * Pure and React-free (AGENTS §7) with the timer injected: no test waits 750 ms,
  * and every rule below is decided in one place, not across components.
  */
-import { ChannelError } from "@tentacle/client";
+import { ChannelError } from "./link-machine.ts";
 
 /** How long an unopened address holds the next one back (`STAGGER_MS`, Owner Q6). */
 export const STAGGER_MS = 750;
@@ -94,6 +94,21 @@ export interface FirstAnsweringOptions {
   readonly timer?: DialTimer;
   /** Override {@link STAGGER_MS} (a test's own scale; production reads the constant). */
   readonly staggerMs?: number;
+  /**
+   * Which failure is the COMPUTER's verdict (default {@link isTerminalDialError},
+   * i.e. `unauthorized` only). Pairing overrides it: its `PairingRefused` is a
+   * daemon answer about the whole computer too (a spent or wrong code), so no
+   * other address may be tried for it.
+   */
+  readonly isTerminal?: (error: unknown) => boolean;
+  /**
+   * How long a round may go without ANY socket opening before it is declared
+   * `unreachable` (default: no deadline — a link's own dial deadline already
+   * covers the caller). A socket that opens after it is `abandon`ed on arrival.
+   * It bounds the OPEN only, never a handshake: a winner's `confirm` may wait on
+   * a human for as long as its own design allows.
+   */
+  readonly openDeadlineMs?: number;
 }
 
 /**
@@ -151,14 +166,15 @@ export async function firstAnswering<TOpened, TAnswer>(
   const ring: number[] = addresses.map((_address, offset) => (start + offset) % addresses.length);
   let round = roundOf(ring, addresses);
   let last: unknown;
+  const terminal = options.isTerminal ?? isTerminalDialError;
   while (round.length > 0) {
-    const outcome = await raceOnce(round, steps, options.timer ?? systemTimer, options.staggerMs);
+    const outcome = await raceOnce(round, steps, options);
     if (outcome.kind === "answered") {
       memory.lastGood = outcome.index;
       return outcome.value;
     }
     last = outcome.error;
-    if (isTerminalDialError(outcome.error)) {
+    if (terminal(outcome.error)) {
       throw outcome.error;
     }
     // A winner that OPENED and then failed its handshake is a path that is
@@ -188,10 +204,11 @@ function roundOf(ring: readonly number[], addresses: readonly string[]): Candida
 function raceOnce<TOpened, TAnswer>(
   round: readonly Candidate[],
   steps: DialSteps<TOpened, TAnswer>,
-  timer: DialTimer,
-  staggerMs: number | undefined,
+  options: FirstAnsweringOptions,
 ): Promise<RaceOutcome<TAnswer>> {
-  const stagger = staggerMs ?? STAGGER_MS;
+  const timer = options.timer ?? systemTimer;
+  const stagger = options.staggerMs ?? STAGGER_MS;
+  const openDeadlineMs = options.openDeadlineMs;
   return new Promise((resolve) => {
     let next = 0;
     /** Opens still in flight (the round cannot be called "all failed" while any is). */
@@ -200,6 +217,7 @@ function raceOnce<TOpened, TAnswer>(
     let winner = false;
     let settled = false;
     let armed: { readonly cancel: () => void } | undefined;
+    let deadline: { readonly cancel: () => void } | undefined;
     let lastError: unknown;
 
     const finish = (outcome: RaceOutcome<TAnswer>): void => {
@@ -209,6 +227,8 @@ function raceOnce<TOpened, TAnswer>(
       settled = true;
       armed?.cancel();
       armed = undefined;
+      deadline?.cancel();
+      deadline = undefined;
       resolve(outcome);
     };
 
@@ -263,6 +283,10 @@ function raceOnce<TOpened, TAnswer>(
       winner = true;
       armed?.cancel();
       armed = undefined;
+      // The deadline covers the OPEN only: a winner's handshake is the
+      // exchange's own business (`device/pair` may wait on a human).
+      deadline?.cancel();
+      deadline = undefined;
       steps.confirm(opened).then(
         (value) => finish({ kind: "answered", value, index: candidate.index }),
         // The slot in the round this candidate was RACED in, so the caller's
@@ -272,6 +296,18 @@ function raceOnce<TOpened, TAnswer>(
       );
     };
 
+    if (openDeadlineMs !== undefined) {
+      // Armed BEFORE the first open, so it bounds an open that never settles.
+      deadline = timer.schedule(
+        () =>
+          finish({
+            kind: "failed",
+            error: new ChannelError("unreachable", `no address opened within ${openDeadlineMs} ms`),
+            at: undefined,
+          }),
+        openDeadlineMs,
+      );
+    }
     startNext();
   });
 }
