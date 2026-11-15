@@ -417,6 +417,8 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `mount.hide` | — | — | The paths to hide — this list REPLACES the default one. |
 | `mount.hideExtra` | — | — | Extra paths to hide, ADDED to the default list. |
 | `packages.*` | — | — | Whether this installed package is enabled. |
+| `push.enabled` | — | `true` | Whether this `serve` pushes notifications to its paired phones. |
+| `push.graceSeconds` | — | `30` | How long an unanswered permission request waits before a phone is pushed. |
 | `relay.enabled` | — | `true` | Whether `serve` dials the mobile relay at all. |
 | `relay.url` | — | `wss://relay.tentacle.so` | Which relay `serve` dials. |
 | `rm` | — | false | Whether `run` removes its pod/container when the run ends. |

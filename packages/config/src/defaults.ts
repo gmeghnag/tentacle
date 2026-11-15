@@ -225,6 +225,14 @@ export const DEFAULT_CONFIG_JSONC = `{
   // because the daemon's relay secret travels on that socket.
   // "relay": { "enabled": true, "url": "wss://relay.tentacle.so" },
 
+  // Push notifications (docs/feat/mobile-push.md): a \`serve\` pushes to its paired
+  // phones when a permission request has waited \`graceSeconds\` unanswered (0 = at
+  // once, max 3600) or a turn ends while nobody is watching. Apple and the relay
+  // carry only an opaque, sealed blob. "enabled": false turns it off; it needs
+  // the relay, so \`--no-relay\` means no push either. \`serve --push-grace <s>\`
+  // overrides graceSeconds.
+  // "push": { "enabled": true, "graceSeconds": 30 },
+
   // \`tentacle run --engine docker|podman\` mounts the current folder into the
   // container; these paths (dirs or files, "~/…" or absolute) are hidden when
   // inside it. "hide" REPLACES the default list (~/.ssh, ~/.aws, ~/.kube,
