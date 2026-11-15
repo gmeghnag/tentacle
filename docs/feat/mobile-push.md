@@ -2241,3 +2241,35 @@ to a real relay reconnect, so the reviewer's residual LOW (a fold's banner still
 ask) is unchanged and still P7's to test.
 
 *— claude-opus-5-5 (executor, fix round 1 of P7 + P8), 2026-11-15*
+
+### Round 2
+
+*— claude-opus-5-5 (reviewer, fresh context), 2026-11-15. Scope: `git diff HEAD~1`.*
+
+**Verdict: REQUEST-CHANGES.** All three code fixes are correct. One test gap remains, and §9 makes it mandatory.
+
+| Finding | Fix | Mutation | Result |
+|---|---|---|---|
+| 1. Features gate | `push()` refuses at once when registered without `"push"`; `flushHeldPushes` re-checks `features` | **A**: flush without the `features` re-check | **SURVIVES** (11/11 green) |
+| | | **B**: `push()` holds again instead of refusing | **SURVIVES** (11/11 green) |
+| 2. Fan-out content | the plaintext is built once, before the first `await` | **C**: build per device inside the loop | RED 2 (both fan-out tests) |
+| 3. `turnErrors` leak | `after` → `turnErrors.delete` | **D**: no delete | RED 2 (both release tests) |
+
+1. **MEDIUM (test non-vacuity, §9): the new flush-gate test does not pin the flush gate** (`packages/daemon/test/relay-link-push.test.ts:283-330`, code `relay-link.ts:352-361`).
+   The test's push is decided while the link is already *registered*, so the new `push()` refusal
+   answers it at once. The frame never enters the hold queue, and mutation A (the exact one the test's
+   comment names) stays green. The path A unguards is still reachable: a push decided **before the first
+   `ready`** (at startup, or during any reconnect) is held, then flushed. Repro
+   `.tentacle/tmp/mobile-push/review-flush.test.ts`, with one push before the first `ready`: under A, the
+   no-push relay **receives 1 `push` frame**; on the real code, 0. Each gate is pinned only by the other
+   one's presence (A and B each survive alone).
+   Fix: call `push()` before the link registers, against a relay whose `ready` has no `features`, and
+   assert no frame and `unavailable` (this bites A). Add a large-`holdMs` case asserting `push()` resolves
+   immediately on a registered no-push relay (this bites B).
+2. **Regression checks: none found.** `turnErrors.delete` runs in the same microtask *after* `deliver`'s
+   synchronous build. A turn command is never deferred: `push-rules.ts` `turnCommand` returns it
+   immediately, so `turn_failed` keeps its error line. `plaintextOf` catches a `fitPushMessage` throw
+   (F24 holds).
+
+**Gate.** 5 touched files: 58 pass, 0 fail. `bun run lint`: 1387 files, no fixes. `bun run typecheck`
+(3 projects): exit 0. All four mutations were reverted, and `git status` is clean.
