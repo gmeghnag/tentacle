@@ -579,4 +579,91 @@ Gate before done: `bun run check` (typecheck → lint, baseline clean → test; 
 
 ## Execution
 
+### S1 — `core/src/schedule.ts` (pure table)
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Scope: S1 only** (S1b dropped by Owner Q2).
+
+**Repro re-run first** (feature missing, on this branch @ `a5afc1aa`):
+`rg -n -i "cron|schedul" packages/tools/src packages/protocol/src/updates.ts
+packages/daemon/src/hosted-session.ts packages/daemon/src/daemon-state-file.ts`
+→ only the word "schedule" used for macrotasks/the persister (9 hits, same list as
+Context); `packages/core/src/schedule.ts` and `core/test/schedule.test.ts` do not
+exist; `core/src/index.ts` exports nothing schedule-related. **Load-bearing
+assumption re-checked** (`prompt()`/`assertIdle` at `hosted-session.ts:2262`,
+`:2621`; `WAKE_TURN_PREFIX`/`isWakeTurnId` at `protocol/src/session.ts:311-315`;
+`refuseWakeTurnId` at `daemon/src/connection.ts:1036`; host clock
+`SessionHostOptions.now` at `session-host.ts:231`) — all hold as cited, and the
+daemon's own wake already calls `prompt()` directly with no request (`:2858`). No
+contradiction found; S1 needed none of it (it is pure), so nothing was blocked.
+
+**Red first.** `packages/core/test/schedule.test.ts` written before the module:
+`bun test packages/core/test/schedule.test.ts` → `Cannot find module
+'../src/schedule.ts'`, 0 pass / 1 fail. Then the module, then green (31 pass).
+
+**As built** — `packages/core/src/schedule.ts` (new, exported from
+`core/src/index.ts`):
+- `ScheduledJob` row: `{ id, kind: "every"|"at", spec, intervalMs?, prompt,
+  createdAt, expiresAt, nextAt, fires, failures, createdBy }`.
+- `parseDurationMs` (`m`/`h`/`d` only — `90s` refused), `parseScheduleSpec`
+  (exactly one of `every`/`at`, 1 m…7 d interval, `at` = bare date / local
+  date-time / offset / `in 20m`, past and >7 d refused with a reason),
+  `scheduleCreate` (id minted by the caller, prompt 1…2000 chars, cap 10,
+  table replaced never mutated), `scheduleStep` (advance-BEFORE-fire,
+  catch-up ONCE, one pending fire, back-jump clamp, expiry sweep, older
+  `nextAt` wins), `scheduleSettled` (error ×3 → removed; `ok` resets;
+  `cancelled` ignored), `scheduleDelete`, `schedulePromptText`
+  (`[scheduled sc-1 · every 10m · fire 1] …`), `nextDueAt` and
+  `scheduleCheckDelayMs` (the daemon's one `setTimeout`: ≤ 60 s, ≥ 0).
+
+**Drift from Implementation (all deliberate):**
+1. **`at` needs a grace window to have the plan's reload rule.** D6 says "a
+   one-shot overdue at reload fires once if not past `expiresAt`", but D3 never
+   said what `expiresAt` is for an `at` job. Fixed to `nextAt +
+   SCHEDULE_TTL_MS` (7 d), so a host that was asleep past the time still fires
+   it ONCE and a one genuinely abandoned is removed instead of firing days
+   late. S3 relies on this; the D3 state list is otherwise unchanged.
+2. **`intervalMs` added to the row.** The plan's state list carries `spec`
+   (display text) only; the pure `slotAfter`/clamp arithmetic needs the
+   interval as a number, and re-parsing display text would be a second rule.
+   The wire row (S2, D5) is unaffected: it carries `spec`, not `intervalMs`.
+3. **A relative `at` is stored resolved.** `at: "in 20m"` becomes `spec: "at
+   2026-11-16T10:20"` (host zone) — a row read five minutes later must not
+   still say "in 20m". Not in the plan; the alternative is a lie in every UI.
+4. **`scheduleFiredMessage` removed.** It only wrapped `{role, content}`, and
+   S3 calls `prompt()` with content blocks, not `ChatMessage`s — dead code, so
+   it is not shipped.
+5. **Failure stop is `scheduleSettled(table, id, end)`,** keyed by the job's id
+   (the daemon knows which job a `wake-` turn fired). The plan described the
+   rule but not the seam; S3 calls this one function on a fired turn's end.
+
+**Mutation checks** (each applied to the module, the named test re-run, then
+`cp` from `.tentacle/tmp/cron-tool/schedule.ts.bak` restored — verified
+byte-identical with `diff -q`):
+| # | Mutation | Red |
+|---|---|---|
+| M1 | drop catch-up-once (re-arm from the old slot) | 3 fail: `catch-up ONCE…`, `two due together…`, `a forward jump…` |
+| M2 | drop the back-jump clamp | 1 fail: `the clock jumped backwards…` |
+| M3 | never count failures (`if (false)`) | 1 fail: `three errors in a row remove the job` |
+| M4 | drop the expiry arm | 2 fail: `recurring job past its 7-day expiry…`, `one-shot past its grace…` |
+| M5 | count a `cancelled` end | 1 fail: `a cancelled turn does not count (nor reset)` |
+| M6 | drop the 10-job cap | 1 fail: `the 11th live job is refused…` |
+| M7 | keep a one-shot after it fires | 2 fail: `a one-shot fires once and leaves the table`, `…overdue while we were down…` |
+| M8 | fire without advancing (`fires`/`nextAt` unchanged) | 6 fail incl. `at-most-once` and `the prefix names the job…` |
+
+**Gate**: `bunx tsc --noEmit` → 0; `bun run lint` (`biome check .`, 1660 files)
+→ clean, no fixes; `bun test` → **12008 pass, 5 skip, 0 fail** (858 files,
+443 s). The 5 skips were enumerated one file at a time, all pre-existing
+opt-ins: `k8s/test/integration.live` + `cli/test/workload-shell-live.k8s`
+(`TENTACLE_K8S_SERVER`), `docker/test/integration.live` +
+`cli/test/session-hop.docker` (`TENTACLE_DOCKER_TESTS=1`),
+`daemon/test/ws-server` (`TENTACLE_SLOW_TESTS=1`) — i.e. AGENTS §6's three
+opt-ins across five files; **no new skip, and none in `core`**.
+No schema change, so `packages/protocol/schema/protocol.json` is untouched; no
+`protocol.d/` note (S1 is pure core). Changelog:
+`changelog.d/cron-tool.added.md` (one bullet; `CHANGELOG.md` untouched).
+
+**S1: DONE.** S2–S6 not started (per the slice instruction).
+
 ## Review
