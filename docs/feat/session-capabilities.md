@@ -1,8 +1,8 @@
 # feat/session-capabilities — turn MCP servers and skills on/off for one session
 
-> **Status:** implementation (plan, awaiting owner approval)
+> **Status:** implementation — **Implementation APPROVED by the owner (2026-11-15) — UI slices wait for the mockups** (S4, S5: `.tentacle/tmp/session-capabilities/mockups/index.html`, UI questions at the end)
 > **Branch:** `feat/session-capabilities`
-> **Size:** L (6 S/M slices) · **Blast:** load-bearing (the agent loop's per-round request, protocol, session log) · **Suited:** Opus plan; S1/S4/S5 a weaker model is fine, S2/S3a/S3b a strong model; Review mandatory, in a fresh context, red-teaming §7 (single session path, persistence, a pod is not trusted)
+> **Size:** L (6 slices: S1 S · S2 M · S3a M · S3b M · S4 M **UI** · S5 M **UI**) · **Blast:** load-bearing (the agent loop's per-round request, protocol, session log) · **Suited:** Opus plan; S1/S4/S5 a weaker model is fine, S2/S3a/S3b a strong model; Review mandatory, in a fresh context, red-teaming §7 (single session path, persistence, a pod is not trusted)
 > **Changelog:** `changelog.d/session-capabilities.added.md`: "**Turn MCP servers and skills off for one session.** `/mcp` and `/skills` (and Session info on the iPhone) can hide a server or a skill from the model for the current session; it takes effect on the next model call and is kept with the session."
 
 ## Context
@@ -63,6 +63,8 @@ it. They paste the script and its output here.
 ## Implementation
 
 *— claude-opus-5-5, 2026-11-15*
+
+**Implementation APPROVED by the owner (2026-11-15) — UI slices (S4, S5) wait for the mockups.** Revised to the owner's answers: panel only (no typed commands), non-critical log entry, disabled-set, `/clear` and hop keep the switches, presets later.
 
 ### Load-bearing assumption
 
@@ -167,7 +169,7 @@ reserved now.
 - On `/compact` and `context_reset`, `carryOverSkills` (`compact.ts:226`) does
   NOT carry the bodies of disabled skills: the new history must not
   re-introduce what the user hid.
-- A user's own `/name` of a disabled skill still works (Q4).
+- A user's own `/name` of a disabled skill still works (owner, Q4).
 
 **MCP tag.** `Tool` (`packages/core/src/tool.ts:155-179`) gets an optional
 `readonly mcpServer?: string`, set by the MCP adapter. `serverOf` reads it.
@@ -198,10 +200,10 @@ reserved now.
   wins. It is emitted by the daemon on every change, on the session's log
   lineage, so the laptop persists it from its `session/log` reads, already
   validated and re-serialized (§7).
-- Criticality is an owner decision (Q2). The recommendation is
-  **non-critical**: an older build that skips it loads the session with
-  everything on. That fails open on *visibility* only. It is never a security
-  loss, because permissions still gate every call.
+- **Non-critical** (owner, Q2): an older build that skips it loads the
+  session with everything on. That fails open on *visibility* only. It is
+  never a security loss, because permissions still gate every call. So there is
+  no `PROTOCOL_VERSION` bump and no `protocol.d/` note.
 - The load fold (laptop `--resume`, `serve` reload) takes the last
   `capabilities` entry, and the session is created with it
   (`OpenParams.capabilities` / the daemon's builder).
@@ -209,7 +211,7 @@ reserved now.
   the current state right after the `base`. Then the new segment is
   self-contained, even when superseded segments are dropped
   (`keepSuperseded` off).
-- `/clear` fork: carried (Q5).
+- `/clear` fork and hop: carried (owner, Q5). A brand-new session starts with everything on.
 - No sidecar field: the log is the record, and the sidecar names the entry it
   pairs with.
 
@@ -228,13 +230,16 @@ reserved now.
 with the old set. Prompt cache: tools come before system in the provider's
 cache prefix, so a change costs **one full-price request** and is cached again
 from there. Rapid toggles before the next call coalesce for free (the snapshot
-is read once per round). A mid-turn toggle is allowed. Mid-turn vs
-next-turn is Q1.
+is read once per round). A mid-turn toggle is allowed (owner, Q1).
 
-**Surfaces (S4 TUI, S5 iPhone). The look is decided on mockups; this only says
-what each surface must offer.**
+**Surfaces (S4 TUI, S5 iPhone — the UI slices). Panel only (owner, Q6): no
+typed `/mcp off …` / `/skills off …` commands, on the Mac or on the phone. The
+look is decided on the mockups; this only says what each surface must offer.**
 
-- **TUI:** the existing `/mcp` and `/skills` panels get one switch per row.
+- **TUI:** the panel opens the way it does today: the existing `/mcp` and
+  `/skills` entries of the command palette, with no arguments. Their palette
+  descriptions say they now hold the on/off. The panels get one switch per row
+  (the mockups compare doing it in each panel vs one combined panel).
   - Each row shows on/off. Space/Enter toggles it and sends
     `session/set_capability`.
   - The row reflects the daemon's echo (not optimistic, or optimistic with
@@ -242,7 +247,6 @@ what each surface must offer.**
   - A footer line says "applies to the next model call · hidden from the
     model, not uninstalled".
   - A skill row distinguishes "off" from the existing "after reset" marker.
-  - Optional shortcut commands `/mcp off <name>` / `/skills off <name>` (Q6).
   - The view-model and key routing are a pure module next to `mcp-panel.ts` /
     `skills-panel.ts`. The component only renders.
 - **iPhone Session info:** the MCP SERVERS and SKILLS sections get a trailing
@@ -278,18 +282,22 @@ Dependency order: protocol → agent → daemon → client → cli → tui → m
   `set_auto_accept` ones; `protocol.json` regenerated at merge
   (`bun run protocol:bump`).
 - **S3b** (M · load-bearing · strong model): `packages/protocol/src/session-log.ts`
-  (entry + `LOG_ENTRY_CRITICAL` per Q2), `packages/daemon/src/session-log.ts`
+  (entry, `LOG_ENTRY_CRITICAL: false`), `packages/daemon/src/session-log.ts`
   (emit on change and after each `base`), `packages/daemon/src/persisted-session.ts`
   (reload fold), the laptop fold + `open{capabilities}` on resume/fork/hop
   (`packages/cli/src/session-resume.ts`, `session-saver.ts`, `tui-sessions.ts`,
   `session-hop.ts`; the executor confirms each by grep for `autoAccept` carry
-  sites), `packages/client/src/session-log-reader.ts`. If Q2 = critical: a
-  `protocol.d/session-capabilities.md` note.
-- **S4** (M · cross-module · weaker model OK after S3a): `packages/tui/src/mcp-panel.ts`,
-  `skills-panel.ts`, `skills-sync.ts`, a pure `capability-toggles.ts` (new) +
-  tests in the `app.test.tsx` style; `commands.ts` if Q6.
-- **S5** (M · cross-module · after mockups): `apps/mobile` Session info model +
-  sheet + its tests; the e2e flow `25-session-info` gets a toggle step.
+  sites), `packages/client/src/session-log-reader.ts`. No `protocol.d/` note
+  (non-critical entry, additive request/update).
+- **S4 — UI** (M · cross-module · weaker model OK; after S3a **and the owner's
+  mockup choice**): `packages/tui/src/mcp-panel.ts`, `skills-panel.ts`,
+  `skills-sync.ts`, `tree-panel.ts` (a toggle key + row state), a pure
+  `capability-toggles.ts` (new); the two palette descriptions
+  (`commands/mcp.ts`, `commands/skills.ts`); tests in the `app.test.tsx` style.
+  No new command.
+- **S5 — UI** (M · cross-module · weaker model OK; after S3a **and the owner's
+  mockup choice**): `apps/mobile` Session info model + sheet + its tests; the
+  e2e flow `25-session-info` gets a toggle step.
 
 ### Failure modes
 
@@ -303,13 +311,13 @@ Dependency order: protocol → agent → daemon → client → cli → tui → m
 | F6 | Daemon restart (`serve`) | The reload fold reads the last `capabilities` entry up to the sidecar's entry. A crash between the toggle and its log write loses that toggle: the state is "everything on" or the previous one. That is honest, and the UI shows what the daemon reports. |
 | F7 | Older daemon | `MethodNotFound` → toggles hidden ("not supported"). No silent no-op. |
 | F8 | Older client | The update is display: `unsupported` once. The model still sees the session's real set, decided daemon-side. |
-| F9 | Older build loads a log with `capabilities` | Non-critical (rec): skipped → everything visible. Critical: refused loudly. |
+| F9 | Older build loads a log with `capabilities` | Non-critical (owner): skipped → everything visible. |
 | F10 | Unknown name (a typo, a server removed) | Accepted and stored (the set is names). The UI only offers existing names. A cap (e.g. 256 entries, names ≤128 chars, matching `mcp.ts` caps) rejects a flood with `InvalidParams`. |
 | F11 | Everything disabled | `skill` tool dropped and catalog removed. The model has the built-ins only. Valid. |
 | F12 | `context_reset` / compaction | The system prompt is recomposed full and still projected. The state is re-emitted after the new `base`. Bodies of disabled skills are not carried. |
 | F13 | MCP connect settles after the toggle | The registry gains tools tagged with the server. The projection hides them at the next round. Order does not matter. |
 | F14 | Pod lies about state | Wastes context only. No laptop effect, no approval created (§7). |
-| F15 | A user's `/name` of a disabled skill | Runs (Q4 rec). The body enters history as the user's explicit act. |
+| F15 | A user's `/name` of a disabled skill | Runs (owner, Q4). The body enters history as the user's explicit act. |
 
 ### Tests
 
@@ -357,6 +365,8 @@ Red before green for every slice. Mutation-check each property (§9).
 
 ### Owner questions (with recommendations)
 
+*Answered — see “Owner answers (2026-11-15)” below; the Implementation above is revised to match (revision: claude-opus-5-5, 2026-11-15).*
+
 1. **When does a toggle apply?** (a) the next model call, even mid-turn;
    (b) the next turn only. **Rec (a)**: that is what was asked, and it is
    simplest. The cache cost is one request either way.
@@ -388,6 +398,76 @@ Red before green for every slice. Mutation-check each property (§9).
 7. Named presets: **later**, a follow-up task.
 
 UI (TUI panel + iPhone Session info toggles): mockups first, in the approved mobile-chrome look, before the UI slices.
+
+#### UI mockups + owner questions (S4, S5)
+
+*— claude-opus-5-5, 2026-11-15*
+
+The page is `.tentacle/tmp/session-capabilities/mockups/index.html`. It is
+gitignored, so the S4/S5 executor regenerates its frames from the owner's
+choice. It is one self-contained page with a light/dark toggle:
+
+- **TUI frames**: 120 cols, using the helpers from
+  `.tentacle/site/mockup-generator/gen-v3.ts` and the tokens from
+  `packages/tui/src/theme.ts`.
+- **iPhone frames**: the approved mobile-chrome look, with tokens from
+  `.tentacle/tmp/mobile-chrome/mockups/index.html`: A1 header, B1 dark
+  `#1F1F1E`, E2 full-width bands, each frame in light and in dark.
+
+**How it opens** (no typed commands): the existing `/mcp` and `/skills` palette
+entries, with no arguments. Their descriptions gain "— and on/off for this
+session".
+
+Keys:
+- <kbd>space</kbd> toggles.
+- <kbd>enter</kbd> expands (a server's tools).
+- <kbd>esc</kbd> closes.
+- A click on the switch column toggles.
+
+Variants:
+- **T1**: a `[on ]/[off]` column in each existing panel. Off rows are dimmed
+  and marked "hidden from the model". The title rule says "this session ·
+  applies to the next model call".
+- **T2**: ONE panel "Visible to the model · this session", opened by both
+  entries. It has a section per kind, `[✓]/[ ]`, a summary in the title rule,
+  and a status-line marker `⊘ 1 server · 2 skills off`.
+- **P1**: a trailing iOS switch on every Session info row, as Auto-accept
+  already is in the same sheet. A tap on the name opens the server's tools.
+  "Off · changed on <device>" shows a remote change. With an old daemon the
+  switches are disabled, with a footnote.
+- **P2**: the rows stay as today (value + chevron, "Off" instead of the count).
+  The switch "Visible to the model" sits on the pushed server/skill page.
+
+Owner questions (one per variant row, with a recommendation):
+
+1. **Row T:** T1 or T2? **Rec T1**. It is the minimal change: each panel keeps
+   its job, and `/skills` already carries per-skill detail that a merged panel
+   would make long.
+2. **Row T, status-line marker** (only when something is off), even with T1?
+   **Rec yes**. It keeps a hidden k8s from being forgotten, and costs nothing
+   when everything is on.
+3. **Row P:** P1 or P2? **Rec P1**. It is one tap, matching the Mac's one key
+   (parity), and the same pattern as Auto-accept. The tools stay one tap away.
+4. **Row P, "changed on <device>"** under a row another device changed (and the
+   TUI transcript notice)? **Rec yes**, while the sheet/panel stays open, as
+   untrusted text through `untrustedText`.
+
+**Verification (2026-11-15):** `.tentacle/tmp/session-capabilities/verify.ts`
+does the following:
+- extracts the page's `<script>`;
+- runs it against a stub `document` with `MODE` set to light, then dark;
+- checks that every expected `data-frame` is present, that no terminal line
+  exceeds 120 cols, and that there is no `undefined` or `NaN` in the output.
+
+```ts
+const m = html.match(/<script>([\s\S]*?)<\/script>/);
+const run = new Function("document", `${script}\nMODE=${JSON.stringify(mode)};render();return {html: document.getElementById("root").innerHTML, overflows: OVERFLOWS, body: document.body.className};`);
+```
+
+```
+light body: light frames: 23 / 23 missing: [] overflows: 0 undefined: false NaN: false
+dark body: dark frames: 23 / 23 missing: [] overflows: 0 undefined: false NaN: false
+```
 
 ## Execution
 
