@@ -298,6 +298,39 @@ describe("the round's request is projected through the switches", () => {
     expect(toolNames(h.model.requests[1])).toContain(ECHO);
   });
 
+  test("a GROUPED round (read-only mode) still refuses the hidden server's call", async () => {
+    // Production default: `read-only`, so read-class MCP calls of one round
+    // run as a group (`runGroup`), not one by one. The skill tool is
+    // exclusive (never grouped), so the hidden thing in a group is an MCP tool.
+    const readKeys = [{ mode: "read", resource: "mcp:echo" }] as const;
+    const otherRan: string[] = [];
+    const h = harness({
+      capabilities: off({ disabledMcp: ["echo"] }),
+      extra: { toolExecution: { mode: "read-only", maxParallel: 2 } },
+      script: [
+        calls(call("g1", ECHO, { text: "hidden" }), call("g2", "mcp__other__x")),
+        [{ type: "text", delta: "ok" }],
+      ],
+    });
+    h.tools.replace(ECHO, { ...echoTool(h.echoed), concurrency: () => readKeys });
+    h.tools.register({
+      ...echoTool([]),
+      name: "mcp__other__x",
+      mcpServer: "other",
+      concurrency: () => [{ mode: "read", resource: "mcp:other" }],
+      async execute() {
+        otherRan.push("x");
+        return { content: "other ran" };
+      },
+    });
+    const events = await collect(h.session.send("go"));
+    expect(events.some((e) => e.type === "tool_phase" && e.id === "g2")).toBe(true);
+    expect(resultOf(events, "g1")).toBe(`${ECHO} is turned off for this session`);
+    expect(h.echoed).toEqual([]);
+    expect(resultOf(events, "g2")).toBe("other ran");
+    expect(otherRan).toEqual(["x"]);
+  });
+
   test("F15: the user's own /name of a disabled skill still runs", async () => {
     const h = harness({
       capabilities: off({ disabledSkills: ["k8s"] }),
@@ -399,6 +432,26 @@ describe("F12: a context reset keeps the projection and carries no disabled skil
     const sent = JSON.stringify(after?.messages.slice(1));
     expect(sent).toContain("BODY:damajs");
     expect(sent).not.toContain("k8s");
+  });
+
+  test("/compact (Session.compact) carries no disabled skill's body into the new history", async () => {
+    const h = harness({
+      script: [
+        calls(call("c1", SKILL_TOOL_NAME, { name: "k8s" })),
+        calls(call("c2", SKILL_TOOL_NAME, { name: "damajs" })),
+        [{ type: "text", delta: "done" }],
+        // The summary request of /compact.
+        [{ type: "text", delta: "SUMMARY" }],
+      ],
+    });
+    await collect(h.session.send("go"));
+    expect(JSON.stringify(h.session.messages)).toContain("BODY:k8s");
+    h.agent.setCapabilities(off({ disabledSkills: ["k8s"] }));
+    await h.session.compact();
+    const after = JSON.stringify(h.session.messages.slice(1));
+    expect(after).toContain("SUMMARY");
+    expect(after).toContain("BODY:damajs");
+    expect(after).not.toContain("BODY:k8s");
   });
 
   test("carryOverSkills drops a disabled skill from both kept and dropped", () => {

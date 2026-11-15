@@ -979,6 +979,72 @@ showed agent.ts, compact.ts and subagent.ts byte-identical.
 
 **S2: DONE.** S3a/S3b/S4/S5: not started (out of scope).
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16*
+
+Both S2 Review findings were test gaps. The code was right, so no source
+changed. Two tests were added to `packages/agent/test/agent-capabilities.test.ts`.
+
+1. **Grouped guard (finding 1): FIXED.** The test is "a GROUPED round (read-only
+   mode) still refuses the hidden server's call".
+   - Setup: `toolExecution {mode:"read-only", maxParallel:2}`. Two read-class
+     MCP calls in one round: `mcp__echo__echo` (server hidden) and
+     `mcp__other__x`.
+   - It asserts the round went through `runGroup`: a `tool_phase` for `g2`,
+     which only `runGroup` yields.
+   - It asserts the hidden call is answered "turned off" and never runs, and
+     the visible call runs.
+   - **Drift from the Review's scenario.** `skill` beside `fs_read` never
+     groups: the `skill` tool declares no `concurrency`, so `classOf` makes it
+     `exclusive`. The reachable hidden-in-a-group case is a read-only MCP tool,
+     which the adapter tags `concurrency: () => [{read, mcp:<server>}]`
+     (`mcp/src/tool-adapter.ts:83`).
+2. **`/compact` call site (finding 2): FIXED.** The test is "/compact
+   (Session.compact) carries no disabled skill's body into the new history".
+   - It loads `k8s` and `damajs`, disables `k8s`, then calls
+     `session.compact()`.
+   - It asserts the new history holds `SUMMARY` and `BODY:damajs`, and holds no
+     `BODY:k8s`.
+
+**Red before green.** Both tests are green on the current code, because the
+code was already right. Red is shown by mutating the code each test pins. The
+runner is `.tentacle/tmp/session-capabilities/fr1-mut.ts`: one replacement, then
+the S2 file runs, then the original is written back. `cmp` against `fr1bak/`
+was clean afterwards.
+
+```
+== MB (group authorizeCall without the snapshot)
+(fail) … a GROUPED round (read-only mode) still refuses the hidden server's call
+ 12 pass
+ 1 fail
+== ME (/compact passes [] instead of the disabled set)
+(fail) F12: … > /compact (Session.compact) carries no disabled skill's body into the new history
+ 12 pass
+ 1 fail
+RESTORED
+```
+
+These are the Review's own MB and ME, which both survived before. Now each
+turns exactly its new test red. With the sources restored, the narrow run is
+13 pass / 0 fail.
+
+The LOW nit (the estimate reuses the anchor's `promptTokens`) is not addressed.
+It is not HIGH or MEDIUM.
+
+**Gate**
+- `bunx tsc --noEmit` → clean.
+- `bun run lint` → `Checked 1658 files … No fixes applied.` (the §6 baseline).
+- `bun test` → **11936 pass, 5 skip, 0 fail** (11941 tests, 857 files, 443s).
+  That is the S2 count of 11934 plus the 2 new tests. The 5 skips are the
+  opt-in guards.
+- **Flake.** The first full run had **2 fails**. One of them was in
+  `packages/cli/test/serve-autowake.test.ts` (T3/C5), a file this branch does
+  not touch. The pass count was 11934, which means 2 tests that passed before
+  had failed. Re-run alone, that file passed 5/5. A second full run was clean
+  (above). I did not identify the second failing test: the first run was not
+  logged.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-15* (fresh context; same model as the S2 executor, so shared blind spots may survive. Scope: S2, `git diff main...HEAD`)
