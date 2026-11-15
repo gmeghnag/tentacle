@@ -332,7 +332,13 @@ const SINK_JUNK = /[\u001b\r]|\[2K/;
 /** The factories over one fake host, with everything recorded. */
 function rig(
   log: FakeHostLog,
-  opts: { mount?: boolean; cwd?: string; detachedRun?: boolean } = {},
+  opts: {
+    mount?: boolean;
+    cwd?: string;
+    detachedRun?: boolean;
+    /** A worker that cannot start: the local target's failure path (T6). */
+    failWorker?: boolean;
+  } = {},
 ) {
   const host = fakeHost(log);
   const pair = sharedPair();
@@ -352,6 +358,13 @@ function rig(
     status: (line) => statuses.push(line),
     notify: (text) => notices.push(text),
     ...(opts.mount === false ? { mount: false } : {}),
+    ...(opts.failWorker
+      ? {
+          spawnWorker: (): Worker => {
+            throw new Error("no worker here");
+          },
+        }
+      : {}),
     detachedRun: (workload) => {
       detachedAsks.push(workload.name);
       return opts.detachedRun === true;
@@ -1066,6 +1079,27 @@ describe("H6 an attach leaves a user-owned workload alone, even with `keep: fals
     expect(log.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
     expect(readKept(join(dir, "config", "kept")).entries).toHaveLength(1);
     await built.built.runtime.dispose();
+  });
+});
+
+describe("T6 a failed local build names the reason, and the session stays put", () => {
+  test("a worker that cannot start is one `not moved:` line carrying the worker's own reason", async () => {
+    // docs/feat/remove-in-process.md F6/T6. `startWorkerRuntime` no longer
+    // resolves `null` (AGENTS §7: no fallback), so the only failure path is its
+    // throw — and the notice must say WHY, not just "could not start".
+    // Mutation: return `{ kind: "failed", notice: "not moved: the local agent
+    // could not start" }` without the reason → the `toContain` fails.
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { failWorker: true });
+    const built = await r.build({ target: "local", keep: true }, "uid-1");
+    if (built.kind !== "failed") {
+      throw new Error("expected the local build to fail");
+    }
+    expect(built.notice).toBe("not moved: the local agent could not start (no worker here)");
+    // Nothing engine-side was touched: a local target creates no workload.
+    expect(log.calls).toEqual([]);
+    // And the reason is one clean line (no raw terminal bytes, D6).
+    expect(SINK_JUNK.test(built.notice)).toBe(false);
   });
 });
 

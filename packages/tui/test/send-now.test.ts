@@ -22,7 +22,6 @@ const base = {
   running: true,
   compacting: false,
   pending: false,
-  canSendNow: true,
   latchedUnsupported: false,
 };
 const rpc = (code: number) => Object.assign(new Error(`code ${code}`), { code });
@@ -33,7 +32,6 @@ describe("planSendNow", () => {
     ["no turn running, no compaction", { running: false }, { kind: "none" }],
     ["a send-now already pending", { pending: true }, { kind: "none" }],
     ["the controller has sendNow", {}, { kind: "atomic", target: "turn" }],
-    ["no sendNow (local session)", { canSendNow: false }, { kind: "fallback" }],
     ["latched after a MethodNotFound", { latchedUnsupported: true }, { kind: "fallback" }],
     // D3c (docs/feat/send-now-d.md): this TUI's own `/compact` is running.
     [
@@ -50,11 +48,6 @@ describe("planSendNow", () => {
       "compacting, no queued row",
       { running: false, compacting: true, hasQueued: false },
       { kind: "none" },
-    ],
-    [
-      "compacting, no sendNow → the rows wait for its end",
-      { running: false, compacting: true, canSendNow: false },
-      { kind: "wait" },
     ],
     [
       "compacting, latched → the rows wait for its end",
@@ -242,8 +235,7 @@ describe("withRestored", () => {
 });
 
 describe("fallbackNotice", () => {
-  test("names why it is not atomic", () => {
-    expect(fallbackNotice("daemon")).toContain("this daemon can't send-now atomically");
-    expect(fallbackNotice("session")).toContain("this session can't send-now atomically");
+  test("names why it is not atomic, and it is the daemon's limit", () => {
+    expect(fallbackNotice()).toContain("this daemon can't send-now atomically");
   });
 });

@@ -10,7 +10,8 @@
  * A prompt can end without a person's choice: its request is withdrawn (the
  * signal aborts — answered on another device, or its turn cancelled) or the
  * TUI unmounts. Both resolve `DISMISSED`: over RPC nothing is sent (the request
- * stays pending for another client); in-process the gate reads it as a refusal.
+ * stays pending for another client); on the worker's own broker the gate reads
+ * it as a refusal.
  */
 import {
   DISMISSED,

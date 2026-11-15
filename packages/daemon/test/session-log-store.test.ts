@@ -212,33 +212,6 @@ describe("F1 on disk: a replace never drops content its copy does not contain", 
     expect(await load(store, "s")).toEqual(seed);
   });
 
-  test("W14 the whole-history path (in-process): one writer's shorter copy replaces; another writer's longer file goes aside", async () => {
-    const where = fresh();
-    const asides: LogAsideInfo[] = [];
-    const rec = (messages: ChatMessage[]): SessionRecord => ({
-      id: "s",
-      cwd: "/w",
-      model: "m",
-      createdAt: 1,
-      updatedAt: 1,
-      title: "t",
-      messages,
-    });
-    const mine = new LogSessionStore(where, { onAside: (i) => asides.push(i) });
-    await mine.saveSnapshot(rec([user("a"), asst("b"), user("c"), asst("d")]));
-    await mine.saveSnapshot(rec([user("summary")])); // a compaction by the same writer
-    expect(asides).toEqual([]);
-    expect(await load(mine, "s")).toEqual([user("summary")]);
-    // A resume by another writer: the file is a prefix of its copy → no aside.
-    const resumed = new LogSessionStore(where, { onAside: (i) => asides.push(i) });
-    await resumed.saveSnapshot(rec([user("summary"), asst("more")]));
-    expect(asides).toEqual([]);
-    // A stale writer (the first one) with a copy that does not contain the file → aside.
-    await mine.saveSnapshot(rec([user("stale")]));
-    expect(asides).toHaveLength(1);
-    expect(await load(mine, "s")).toEqual([user("stale")]);
-  });
-
   // docs/feat/session-log-serve-store.md Q11: a base that explicitly continues
   // the file's last entry (`prev` = its id: `serve`'s reload) restates that segment.
   test("S10 a base continuing the file's last entry is contained (no aside), even with in-place changes after it", async () => {
@@ -633,29 +606,6 @@ describe("fix round 1", () => {
     const after = await parse(off, "s");
     expect(after.segments.map((s) => s.base.reason)).toEqual(["create", "compact"]);
     expect(after.segments[0]?.messages).toEqual([user("a"), asst("b")]);
-  });
-
-  test("L3 an in-process saveSnapshot carries the kept segments over", async () => {
-    const where = fresh();
-    const kept = new LogSessionStore(where, { keepSuperseded: true });
-    const log = new FakeLog("D1");
-    const reader = new FakeReader("s");
-    await kept.write(reader.read(log.base([user("a"), asst("b")]), "cold"));
-    await kept.write(reader.read(log.base([user("summary")], "compact")));
-    const snap = new LogSessionStore(where);
-    await snap.saveSnapshot({
-      id: "s",
-      cwd: "/w",
-      model: "m",
-      createdAt: 1,
-      updatedAt: 1,
-      title: "t",
-      messages: [user("summary"), asst("more")],
-    });
-    const file = await parse(snap, "s");
-    expect(file.segments).toHaveLength(2);
-    expect(file.segments[0]?.messages).toEqual([user("a"), asst("b")]);
-    expect(currentSegment(file).messages).toEqual([user("summary"), asst("more")]);
   });
 
   test("L3 the continuing compaction rewrite (option off) sets aside the unknown lines of the segment it supersedes", async () => {

@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
+import { inertSession } from "./session-stub.ts";
 
 const SRC = join(import.meta.dir, "..", "src");
 const readSrc = (name: string): string => readFileSync(join(SRC, name), "utf8");
@@ -29,6 +30,7 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** The smallest session an App needs to mount (these cases never send a prompt). */
 const idleSession = (): SessionController =>
   ({
+    ...inertSession(),
     async *send() {
       yield { type: "turn_end", reason: "end_turn" };
     },

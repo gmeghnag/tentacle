@@ -25,6 +25,7 @@ import {
   permissionDetailLines,
   permissionShowsCwd,
 } from "../src/permission-ui.ts";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const strip = (s: string | undefined) =>
@@ -47,6 +48,7 @@ function rows(frame: string | undefined): string[] {
  */
 function session(history: string[], log: { sends: string[] }): SessionController {
   return {
+    ...inertSession(),
     async *send(prompt) {
       log.sends.push(prompt);
       yield { type: "text", delta: `reply to ${prompt}` };
@@ -432,6 +434,7 @@ describe("H3 the App: the transcript rows keep their position across a hop", () 
     const log = { sends: [] as string[] };
     let release: () => void = () => {};
     const slow: SessionController = {
+      ...inertSession(),
       async *send(prompt) {
         log.sends.push(prompt);
         yield { type: "text", delta: "working" };
@@ -697,6 +700,7 @@ describe("a WAKE whose send fails gives the line back (review round 1, MEDIUM 3)
   function flakySession(log: { sends: string[] }, wait: { release: () => void }) {
     let call = 0;
     return {
+      ...inertSession(),
       async *send(prompt: string) {
         call += 1;
         log.sends.push(prompt);

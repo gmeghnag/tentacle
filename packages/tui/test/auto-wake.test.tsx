@@ -13,6 +13,7 @@ import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import { SendNowErrorCode } from "../src/send-now.ts";
 import type { SessionActivity } from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 
 const noopEnv: ExecutionEnvironment = {
   id: "noop",
@@ -217,6 +218,7 @@ describe("autonomous wake on job-exit", () => {
     let turns = 0;
     let raise: (activity: SessionActivity) => void = () => {};
     const session = {
+      ...inertSession(),
       async *send() {
         sends += 1;
         if (sends === 1) {
@@ -250,6 +252,7 @@ describe("autonomous wake on job-exit", () => {
     // turn starts before the watch and the replayed (pre-wake) history wipes its rows.
     const order: string[] = [];
     const session = {
+      ...inertSession(),
       async *send() {
         order.push("send");
         yield { type: "text", delta: "WOKE-REPLY" } as const;
@@ -295,6 +298,7 @@ describe("autonomous wake on job-exit", () => {
 
   test("T-TUI-6b the relay hand-over (wakeHanded) renders its wake live over the same replayed history", async () => {
     const session = {
+      ...inertSession(),
       async *send() {
         yield { type: "text", delta: "HANDED-REPLY" } as const;
         yield { type: "turn_end", reason: "end_turn" } as const;
@@ -324,6 +328,7 @@ describe("autonomous wake on job-exit", () => {
     let sends = 0;
     let raise: (activity: SessionActivity) => void = () => {};
     const session = {
+      ...inertSession(),
       async *send() {
         sends += 1;
         raise(foreignTurn());
@@ -350,6 +355,7 @@ describe("autonomous wake on job-exit", () => {
     let fire: (n: { agentId: string; text: string; wake: boolean }) => void = () => {};
     let turns = 0;
     const session = {
+      ...inertSession(),
       async *send() {
         turns += 1;
         yield { type: "text", delta: "WOKE-ON-NOTIFY" } as const;
@@ -382,6 +388,7 @@ describe("autonomous wake on job-exit", () => {
     let fire: (n: { agentId: string; text: string; wake: boolean }) => void = () => {};
     let turns = 0;
     const session = {
+      ...inertSession(),
       async *send() {
         turns += 1;
         yield { type: "turn_end", reason: "end_turn" } as const;
@@ -411,6 +418,7 @@ describe("autonomous wake on job-exit", () => {
     const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv, jobs });
     const one = new Session(agent);
     const session = {
+      ...inertSession(),
       send: (text: string, signal?: AbortSignal) => one.send(text, signal),
       onSubagentNotify(listener: (n: { agentId: string; text: string; wake: boolean }) => void) {
         fire = listener;

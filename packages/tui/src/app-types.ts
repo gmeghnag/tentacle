@@ -58,10 +58,12 @@ export interface SessionController {
    * (docs/feat/attachments-tui.md D5): the SESSION does it (only it can await a
    * lazy open), so `App` never needs a daemon id. Rejects with a typed error
    * (`ImagesUnavailableError`, `RangeError`, an upload failure) — never a
-   * silent drop. Optional: absent (the in-process fallback) → images are off,
-   * with the reason `NO_IMAGE_SEAM` gives.
+   * silent drop. Not optional: every runtime this TUI drives has an image seam
+   * (docs/feat/remove-in-process.md — the in-process session it was optional for
+   * is gone), so a session that cannot take images says so THROUGH `imageInput`
+   * (`{kind: "off", reason}`), never by the member being absent.
    */
-  attachImage?(
+  attachImage(
     bytes: Uint8Array,
     meta: { readonly mimeType: string; readonly name?: string },
     opts?: {
@@ -69,16 +71,18 @@ export interface SessionController {
       readonly onProgress?: (sent: number, size: number) => void;
     },
   ): Promise<AttachmentRef>;
-  /** What this session may do with an image right now (structurally `ImageInput`); present with `attachImage`. */
-  imageInput?(): AttachMode;
+  /** What this session may do with an image right now (structurally `ImageInput`). */
+  imageInput(): AttachMode;
   /** Compact the conversation (summarise + replace history); optional. */
   compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
   /**
    * `/clear` (docs/feat/clear-keeps-jobs.md): reset the conversation inside the
-   * session; background jobs and sub-agents keep running. Optional: absent on
-   * the in-process fallback, where `/clear` closes the session and starts a new one.
+   * session; background jobs and sub-agents keep running. Required: there is no
+   * in-process fallback whose `/clear` was a close-and-replace any more
+   * (docs/feat/remove-in-process.md), so `clearCommandStep` no longer has a
+   * `legacy` branch to decide.
    */
-  clear?(): Promise<{ before: number; after: number }>;
+  clear(): Promise<{ before: number; after: number }>;
   /**
    * The open a RESET needs (`/clear`, `/compact`) on a session whose
    * conversation lives only daemon-side under an id nothing has opened yet
@@ -107,10 +111,11 @@ export interface SessionController {
    * cancel the running turn and start one whose prompt is `messages`, in one
    * daemon step. Resolves with the new turn's events (a `user_message` with
    * the prompt the daemon sent; none for a continuation); rejects on a
-   * refusal, and the events reject `Cancelled` if it never started. Optional:
-   * without it the TUI stops the turn, then sends.
+   * refusal, and the events reject `Cancelled` if it never started. Not
+   * optional: the in-process session that had no `sendNow` is gone, so the only
+   * fallback left is the daemon's own `MethodNotFound` (an older daemon).
    */
-  sendNow?(
+  sendNow(
     messages: readonly QueuedMessage[],
     target: "turn" | "compaction",
     signal?: AbortSignal,

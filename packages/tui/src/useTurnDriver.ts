@@ -448,15 +448,12 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
   }, [stateRef, streamCtrlRef]);
 
   /** The fallback's notice, once per App (it does not repeat on later chords). */
-  const noticeFallback = useCallback(
-    (who: "daemon" | "session") => {
-      if (!fallbackNoticedRef.current) {
-        fallbackNoticedRef.current = true;
-        pushNotice(fallbackNotice(who));
-      }
-    },
-    [fallbackNoticedRef, pushNotice],
-  );
+  const noticeFallback = useCallback(() => {
+    if (!fallbackNoticedRef.current) {
+      fallbackNoticedRef.current = true;
+      pushNotice(fallbackNotice());
+    }
+  }, [fallbackNoticedRef, pushNotice]);
 
   // `streamTurn`, through a ref: it and `settleSendNow` call each other.
   const streamTurnRef = useRef<
@@ -947,7 +944,6 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       running: stateRef.current.running && streamCtrlRef.current !== null,
       compacting: compactingRef.current,
       pending: sendNowRef.current !== null,
-      canSendNow: ctrl?.sendNow !== undefined,
       latchedUnsupported: sendNowUnsupportedRef.current,
     });
     if (plan.kind === "none" || !ctrl) {
@@ -955,7 +951,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     }
     if (plan.kind === "wait") {
       // No way to cancel the compaction: the rows stay, its end sends them.
-      pushNotice(compactionWaitNotice(ctrl.sendNow ? "daemon" : "session"));
+      pushNotice(compactionWaitNotice());
       return true;
     }
     const taken = takeForSendNow(rowsRef.current);
@@ -963,14 +959,14 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     for (const m of taken.messages) {
       ownedIdsRef.current.add(m.id);
     }
-    if (plan.kind === "fallback" || !ctrl.sendNow) {
+    if (plan.kind === "fallback") {
       // The fallback stops the turn itself, for sure: like Ctrl+C, dismissed
       // (not denied) — the turn's cancel settles the ask.
       if (permission.pending) {
         permission.answer(DISMISSED);
       }
       sendNowRef.current = { mode: "fallback", next: null, successor: null, resetSeen: false };
-      noticeFallback(ctrl.sendNow ? "daemon" : "session");
+      noticeFallback();
       streamCtrlRef.current?.abort();
       return true;
     }
@@ -1026,7 +1022,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
           setRows(() => after.rows);
           showIdle();
           drainHeld();
-          pushNotice(compactionWaitNotice("daemon"));
+          pushNotice(compactionWaitNotice());
           if (after.send !== null) {
             wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
             void runRef.current?.(after.send, { fallback: true });
@@ -1053,7 +1049,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         }
         pending.mode = "fallback";
         sendNowUnsupportedRef.current = true;
-        noticeFallback("daemon");
+        noticeFallback();
         if (old) {
           // As the latched fallback: it stops the turn itself, so an open
           // dialog (that turn's ask) is dismissed — not denied — at once; an

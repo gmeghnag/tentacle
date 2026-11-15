@@ -172,7 +172,7 @@ export const ARGS = {
   },
   tui: {
     values: SESSION_MODEL,
-    bools: { interactive: { short: "i" }, "in-process": {}, "no-worker": {}, ...CONTINUE },
+    bools: { interactive: { short: "i" }, ...CONTINUE },
     optional: RESUME,
     conflicts: RESUME_CONFLICTS,
     positional: { min: 0, max: 0 },
@@ -784,7 +784,7 @@ export function modeUsesModel(mode: CliMode): boolean {
 
 /**
  * A subcommand → its own arguments; `--plain` → the REPL; any other leading
- * `-…` → the TUI's options (`-i`, `--resume`, `--in-process`…); `--` or a word
+ * `-…` → the TUI's options (`-i`, `--resume`, `--model`…); `--` or a word
  * → a one-shot prompt whose words are kept verbatim.
  */
 export function cliMode(args: readonly string[]): CliMode {
@@ -839,5 +839,5 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   pair: "tentacle pair [--address ws(s)://host:port/e2e]... [--name <name>]",
   devices: "tentacle devices | revoke <name|id-prefix> | reset [--yes]",
   logs: "tentacle logs [<uid>|<run-name>] [--tail N] [--only ask,error,tool] [--json] [--summary] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
-  tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process] [--model <id>] [--profile <name>]",
+  tui: "tentacle [-i] [--resume [uid]|--continue] [--model <id>] [--profile <name>]",
 };

@@ -1,5 +1,4 @@
 import { homedir } from "node:os";
-import { Session } from "@tentacle/agent";
 import {
   type AttachmentRef,
   DISMISSED,
@@ -44,6 +43,7 @@ import { PURE_LAYERS } from "./keys/layers.ts";
 import { resolveLineEffects } from "./keys/line-layer.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
+import { localSession } from "./local-session.ts";
 import { type OpenPanel, panelClick } from "./panel.ts";
 import { pasteTarget, sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
@@ -556,7 +556,7 @@ export function App({
     if (!agent) {
       throw new Error("App requires either `agent` or `createSession`");
     }
-    return new Session(agent);
+    return localSession(agent);
   }, [createSession, agent]);
   if (sessionRef.current === null) {
     sessionRef.current = makeSession();
@@ -1356,8 +1356,6 @@ export function App({
     setQuitConfirm,
     runQuit,
     detachOnQuit,
-    makeSession,
-    swapSession,
     pushNotice,
     wakeIfPending,
     exit,

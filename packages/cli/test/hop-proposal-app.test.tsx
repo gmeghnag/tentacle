@@ -21,6 +21,7 @@ import type { PermissionRequest, PermissionResponse } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
 import { App, type HopSpec, type SessionController } from "@tentacle/tui";
 import { render } from "ink-testing-library";
+import { inertSession } from "../../tui/test/session-stub.ts";
 import { createHopFeed } from "../src/hop-feed.ts";
 import type { HopOutcome } from "../src/session-hop.ts";
 
@@ -69,6 +70,7 @@ const MOVED: HopOutcome = {
 function proposingSession(log: { sends: string[] }): SessionController {
   let turns = 0;
   return {
+    ...inertSession(),
     async *send(prompt) {
       log.sends.push(prompt);
       turns += 1;
@@ -104,6 +106,7 @@ function proposingSession(log: { sends: string[] }): SessionController {
 /** A session that just answers: what a moved-to session does on a wake. */
 function plainSession(log: { sends: string[] }): SessionController {
   return {
+    ...inertSession(),
     async *send(prompt) {
       log.sends.push(prompt);
       yield { type: "text", delta: "ok" };

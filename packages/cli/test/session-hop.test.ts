@@ -380,7 +380,6 @@ describe("D1: a failure at steps 2, 3 or 4 leaves the old runtime live (never se
     const saver = new SessionSaver(
       {
         write: () => Promise.reject(new Error("ENOSPC")),
-        saveSnapshot: () => Promise.reject(new Error("ENOSPC")),
         remove: () => Promise.resolve(),
       },
       (text) => notices.push(text),
@@ -624,7 +623,6 @@ describe("D1 step 3/4(b): cleanFor(id) — one uid's failure decides only its ow
           if (refuse && write.id === uid) throw new Error("ENOSPC");
           return store.write(write);
         },
-        saveSnapshot: (record) => store.saveSnapshot(record),
         remove: (id) => store.remove(id),
       },
       () => {},

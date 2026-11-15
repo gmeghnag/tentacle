@@ -122,15 +122,11 @@ export function useAttachments(host: AttachHost): AttachLayer {
   // its duplicate/cap count) always sees the previous one's chips.
   const attachChainRef = useRef<Promise<void>>(Promise.resolve());
 
-  /** What the CURRENT session takes: its own answer, or the reason a session with no seam gives. */
-  const attachMode = useCallback((): AttachMode => {
-    const session = sessionRef.current;
-    const answered = session?.imageInput?.();
-    if (answered !== undefined) {
-      return answered;
-    }
-    return session?.attachImage === undefined ? NO_IMAGE_SEAM : NO_IMAGE_SEAM;
-  }, [sessionRef]);
+  /** What the CURRENT session takes: its own answer (a session that takes none says so). */
+  const attachMode = useCallback(
+    (): AttachMode => sessionRef.current?.imageInput() ?? NO_IMAGE_SEAM,
+    [sessionRef],
+  );
   /**
    * Put a refused prompt's chips back (docs/feat/attachments-tui.md D8): the
    * bytes are still in them, so Enter uploads them again. Appended, never
@@ -294,11 +290,14 @@ export function useAttachments(host: AttachHost): AttachLayer {
   const sendWithImages = useCallback(
     (text: string, chips: readonly AttachedImage[]): void => {
       const session = sessionRef.current;
-      const seam = session?.attachImage;
-      if (seam === undefined) {
+      if (session === null) {
         restoreInput(text, "_images are off: this session does not take images_");
         return;
       }
+      // Every controller has the seam (docs/feat/remove-in-process.md): a session
+      // that does not take images answers `imageInput()` with `{kind:"off"}`,
+      // which is why no chips of one ever get here.
+      const seam = session.attachImage;
       const gen = attachGenRef.current;
       const controller = new AbortController();
       uploadCtrlRef.current = controller;

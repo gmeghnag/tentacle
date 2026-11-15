@@ -22,6 +22,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type AppProps, type SessionController } from "../src/App.tsx";
 import type { DockJobRow } from "../src/background-list.ts";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
@@ -58,6 +59,7 @@ function fake(opts: { jobs?: readonly DockJobRow[] } = {}): {
 } {
   const prompts: string[] = [];
   const session = {
+    ...inertSession(),
     async *send(prompt: string) {
       prompts.push(prompt);
       yield { type: "text", delta: `reply to ${prompt}` };

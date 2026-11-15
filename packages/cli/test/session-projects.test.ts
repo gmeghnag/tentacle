@@ -6,7 +6,7 @@ import { type SessionRecord, projectKey } from "@tentacle/agent";
 import { LogSessionStore } from "@tentacle/daemon";
 import { findInOtherProjects } from "../src/session-projects.ts";
 import { type TuiSessions, openTuiSessions } from "../src/tui-sessions.ts";
-import { saveFixture } from "./session-fixture.ts";
+import { recordWrite, saveFixture } from "./session-fixture.ts";
 
 /** The resumed record, or `undefined` when `openTuiSessions` said "don't start". */
 const resumeOf = (opened: TuiSessions | { readonly exit: number }) =>
@@ -176,7 +176,7 @@ describe("openTuiSessions per project (end to end at the seam)", () => {
     const root = freshRoot();
     const sessions = await openTuiSessions({ root, cwd: projA }, { wanted: false }, () => {});
     if ("exit" in sessions) throw new Error("unreachable");
-    sessions.saver.save(rec("new", projA, 5));
+    sessions.saver.write(recordWrite(rec("new", projA, 5)));
     await sessions.saver.drain();
     expect(await filesIn(root)).toEqual([projectKey(projA)]);
     expect(await filesIn(join(root, projectKey(projA)))).toEqual(["new.jsonl"]);
