@@ -35,13 +35,14 @@ const REPO_ROOT = join(RELAY_DIR, "..", "..");
 
 const read = (path: string): string => readFileSync(path, "utf8");
 
-/** The `[Service]` section's `key=value` pairs, last one winning (systemd's rule). */
-function serviceKeys(unit: string): Map<string, string> {
-  const keys = new Map<string, string>();
-  let section = "";
-  // systemd joins a line ending in `\` with the next one. `ExecStart` is the
-  // place an operator WILL use it (an override with more flags), and reading
-  // that wrong would report a flag mismatch that is not there.
+/**
+ * The unit's logical lines: comments dropped, `\`-continuations joined
+ * (systemd.service(5)). Shared by the readers below so none of them can drift
+ * on how a continued `ExecStart` is read — the place an operator WILL use it
+ * (an override with more flags), and reading that wrong would report a flag
+ * mismatch that is not there.
+ */
+function unitLines(unit: string): string[] {
   const joined: string[] = [];
   let pending = "";
   for (const raw of unit.split("\n")) {
@@ -58,7 +59,14 @@ function serviceKeys(unit: string): Map<string, string> {
   if (pending !== "") {
     joined.push(pending);
   }
-  for (const raw of joined) {
+  return joined;
+}
+
+/** The `[Service]` section's `key=value` pairs, last one winning (systemd's rule). */
+function serviceKeys(unit: string): Map<string, string> {
+  const keys = new Map<string, string>();
+  let section = "";
+  for (const raw of unitLines(unit)) {
     const line = raw.trim();
     if (line === "") {
       continue;
@@ -105,6 +113,44 @@ function execStart(unit: string): { program: string; argv: string[] } {
 /** The `ExecStart` value exactly as systemd sees it, `${VAR}`s still unexpanded. */
 function rawExecStart(unit: string): string {
   return serviceKeys(unit).get("Service/ExecStart") ?? "";
+}
+
+/**
+ * systemd's rule for REPEATED `ExecStart=` assignments, in file order: an empty
+ * value clears the list and a non-empty one appends to it, and a non-`oneshot`
+ * service may end up with at most ONE entry or systemd refuses the whole unit
+ * ("more than one ExecStart= setting, which is only allowed for Type=oneshot
+ * services. Refusing." — systemd.service(5)).
+ *
+ * `serviceKeys` cannot answer this: it is last-wins, so a drop-in that REPLACES
+ * the base unit's command line and one that ADDS a second one read identically.
+ * That gap is exactly review round 2's finding 1, so it gets its own reader.
+ */
+function execStarts(unit: string): string[] {
+  const live: string[] = [];
+  let section = "";
+  for (const raw of unitLines(unit)) {
+    const line = raw.trim();
+    if (line.startsWith("[") && line.endsWith("]")) {
+      section = line.slice(1, -1);
+      continue;
+    }
+    if (section !== "Service" || !line.startsWith("ExecStart=")) {
+      continue;
+    }
+    const value = line.slice("ExecStart=".length);
+    if (value.trim() === "") {
+      live.length = 0;
+      continue;
+    }
+    live.push(value);
+  }
+  return live;
+}
+
+/** The `Type=` systemd will see — a later section/assignment wins, as in systemd. */
+function unitType(unit: string): string {
+  return serviceKeys(unit).get("Service/Type") ?? "simple";
 }
 
 describe("R7 relay.service — the unit starts the binary the runbook installs", () => {
@@ -502,6 +548,37 @@ describe("P10 relay.service — push is a DROP-IN, so the base unit always boots
     expect(withPush.argv.length - base.argv.length).toBe(8);
   });
 
+  test("the drop-in RESETS ExecStart before restating it, so the unit still starts", () => {
+    // Review round 2, finding 1 (HIGH): a drop-in does not replace the base
+    // unit's `ExecStart=`, it is APPENDED to it. `Type=simple` (relay.service:28)
+    // allows exactly one entry, so a drop-in holding only the full line hands
+    // systemd TWO and it refuses the unit ("more than one ExecStart= setting,
+    // which is only allowed for Type=oneshot services. Refusing.") — the install
+    // in §6.1 would take every phone off the relay. The empty `ExecStart=` on its
+    // own line is the documented way to clear the inherited list first.
+    //
+    // Read as systemd reads it: base unit first, the drop-in's assignments on
+    // top, in file order. `serviceKeys` cannot see this (last-wins), which is how
+    // the reviewed tree passed "the drop-in's ExecStart is the base unit's…".
+    expect(unitType(unit())).toBe("simple");
+    const dropInLines = execStarts(dropIn());
+    // The reset is IN the drop-in: its first `ExecStart=` assignment is empty.
+    const firstExec = dropIn()
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .find((line) => line.trimStart().startsWith("ExecStart="));
+    expect(firstExec?.trim()).toBe("ExecStart=");
+    // …and the overlay therefore ends with exactly one live command line.
+    const overlay = execStarts(`${unit()}\n${dropIn()}`);
+    if (overlay.length !== 1) {
+      throw new Error(
+        `installing the drop-in leaves ${overlay.length} ExecStart= assignments on a Type=simple unit: systemd refuses it, so push-ON would cost every phone the relay`,
+      );
+    }
+    expect(dropInLines.length).toBe(1);
+    expect(dropInLines[0]?.trim().startsWith("/opt/tentacle-relay/")).toBe(true);
+  });
+
   test("the sandbox still lets the unit read its own credential directory", () => {
     // `ProtectSystem=strict` makes the whole filesystem read-only, and the
     // credential dir lives under /run/credentials (a tmpfs systemd mounts for the
@@ -551,5 +628,22 @@ describe("P10 relay.service — push is a DROP-IN, so the base unit always boots
     // The old claim ("nothing in the unit has to be edited") is no longer the
     // whole story: the drop-in is an installed artefact, not an edit.
     expect(text).toMatch(/drop-in/i);
+  });
+
+  test("the runbook gives the KEY-LESS drop-in one fate: 243/CREDENTIALS, not 'fine'", () => {
+    // Review round 2, finding 2 (MEDIUM): §6.3 said a drop-in left behind with
+    // the key gone costs 243/CREDENTIALS (l.359-361) and then told the operator
+    // that same case "is also fine" (l.362-364). The blank-value leniency that
+    // sentence leaned on covers a MISSING `apns.conf` — the two IDs — and never
+    // a missing `.p8`, which is `LoadCredential=`, i.e. a start failure before
+    // the binary runs at all. An operator who trusts it removes the key, keeps
+    // the drop-in, and meets a crash loop. One fate, stated once.
+    const text = read(join(REPO_ROOT, "docs", "ops", "relay-deploy.md"));
+    expect(text).not.toMatch(/with the key\s+gone but the drop-in present,[^.]*?\bfine\b/is);
+    // The true statement is still there, in the words an operator greps for.
+    expect(text).toMatch(/drop-in left\s+behind[\s\S]{0,200}243\/CREDENTIALS/);
+    // …and it names the two settings that make it fatal, so the reason is
+    // checkable rather than a bare "do not do this".
+    expect(text).toMatch(/LoadCredential/);
   });
 });

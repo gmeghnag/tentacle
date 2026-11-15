@@ -358,9 +358,13 @@ journalctl -u relay.service -n 5 --no-pager     # expect the `push off:` line
 
 The drop-in goes in the SAME `rm` as the key on purpose: with the drop-in left
 behind, `LoadCredential=` names a file that no longer exists and systemd refuses
-to start the unit (243/CREDENTIALS) — a crash loop, not a rollback. With the key
-gone but the drop-in present, the relay is also fine (a blank `--apns-*` value is
-push off, not a refusal), but do not rely on that: remove both.
+to start the unit (243/CREDENTIALS) — a crash loop, not a rollback. **That is the
+only outcome of a key-less drop-in**, and it is not softened by the blank-value
+leniency: that covers a missing `/etc/tentacle-relay/apns.conf` (the two IDs,
+which `parseRelayArgs` treats as "not set"), never a missing `.p8` — a
+`LoadCredential=` whose file is absent fails the start before the binary is even
+exec'd. So there is no "key gone but drop-in present is fine" case: remove both,
+or you get a crash loop.
 
 ### 6.4 Smoke test a real push
 

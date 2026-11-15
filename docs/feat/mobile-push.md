@@ -3460,3 +3460,142 @@ unobserved.
 2. **MEDIUM — the runbook contradicts itself on rollback** (`docs/ops/relay-deploy.md:362`). It says that "with the key gone but the drop-in present, the relay is also fine", but l.359-361 (and the drop-in's `LoadCredential`) say that case gives 243/CREDENTIALS. The blank-value leniency only covers a missing `apns.conf`, not a missing `.p8`. An operator who trusts l.362 gets a crash loop.
 
 *— claude-opus-5-5, 2026-11-15 (fresh context, round 2)*
+
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-16 (the executor of this round; not the author of the
+review above, though the same model id — this environment reports
+`claude-opus-5-5` for the session, per `~/.claude/settings.json` and the
+session's own transcript)*
+
+Scope: both findings of *Round 2 — REQUEST-CHANGES* (1 HIGH, 1 MEDIUM), each
+reproduced on the reviewed tree before any edit, fixed red-before-green, and
+mutation-checked (§9). Scratch is this worktree's gitignored
+`.tentacle/tmp/mobile-push/fix2/` — the shared
+`/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-push/` is outside the writable
+worktree (the tool sandbox refuses it; same constraint fix round 1 hit),
+and every script logs to a FILE, never a pipe.
+
+**Repro before the fix.** Two probes, each re-implementing the rule the finding
+is about rather than scanning the file by eye.
+
+*F1* — `f1-repro.ts` overlays the two SHIPPED files the way systemd does (base
+unit first, drop-in's assignments on top, in file order), applies systemd's own
+`ExecStart=` semantics, and reports what `systemctl restart` would do after
+§6.1's install:
+
+```
+Type                : simple
+ExecStart(s) live   : 2
+  [0] /opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100     --…
+  [1] /opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100     --…
+VERDICT: systemd REFUSES the unit — 'more than one ExecStart= setting, which is
+only allowed for Type=oneshot services. Refusing.' → restart fails with the
+drop-in installed ⇒ every phone off the relay (F4 broken)
+```
+
+*F2* — `f2-repro.ts` reads the shipped runbook as an operator would:
+
+```
+• With the key gone but the drop-in present, the relay is also fine (a blank
+  `--apns-*` value is push off, not a refusal), but do not rely on that: remove both.
+claims the key-less drop-in is FINE : true
+VERDICT: CONTRADICTION — the same paragraph says 243/CREDENTIALS and 'also fine'
+```
+
+**F1 (HIGH) — the drop-in clears the inherited `ExecStart` before restating it.**
+`apps/relay/deploy/relay.service.d/apns.conf:34` is now an EMPTY `ExecStart=`
+(the bare assignment, after the comment that explains it) immediately before the
+restated command line at `:38`,
+with the comment saying why: a drop-in is appended to the base unit's command
+line, and `Type=simple` allows exactly one. Probe after the fix: `ExecStart(s)
+live : 1` → "the overlay is accepted".
+
+The test gap the review named is closed by a READER, not a string scan.
+`serviceKeys` is last-wins, so "the drop-in replaced the command line" and "the
+drop-in added a second one" read identically to it — which is exactly how the
+reviewed tree passed. So `deploy.test.ts` gains `execStarts()` (`:129-158`),
+which collects `ExecStart=` assignments in FILE ORDER, honouring the empty-value
+reset, plus `unitType()` (`:152-154`); both read through a new shared
+`unitLines()` (`:45-63`) extracted from `serviceKeys` so the three readers cannot
+drift on how
+a `\`-continued line is joined. The new test (`:551-583`) asserts the drop-in's
+first `ExecStart=` assignment is empty, and that the OVERLAY of the two real
+files ends with exactly one live command line — i.e. it tests systemd's rule,
+not the file's shape. `Type` is asserted `simple`, so the guard cannot go quiet
+if someone changes it.
+
+**F2 (MEDIUM) — the runbook gives a key-less drop-in one fate.**
+`docs/ops/relay-deploy.md:359-366` now says that 243/CREDENTIALS "is the only
+outcome of a key-less drop-in", names what the blank-value leniency does and does
+not cover (a missing `apns.conf` — the two IDs — never a missing `.p8`, because
+`LoadCredential=` fails the start before the binary is exec'd), and closes with
+"there is no 'key gone but drop-in present is fine' case". The contradictory
+sentence is gone, not qualified. Pinned by a new test (`:633-648`) that asserts
+the "also fine" claim is ABSENT (regex over the wrap), that the true statement is
+still there inside the same 200-char window an operator reads, and that
+`LoadCredential` is named so the reason is checkable.
+
+**Reds (red before green, §9 — each on its own assertion, not an import).**
+
+```
+(fail) … > the drop-in RESETS ExecStart before restating it, so the unit still starts
+       Expected: "ExecStart="
+       Received: "ExecStart=/opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100 \"
+(fail) … > the runbook gives the KEY-LESS drop-in one fate: 243/CREDENTIALS, not 'fine'
+       Expected substring or pattern: not /with the key\s+gone but the drop-in present,[^.]*?\bfine\b/is
+ 27 pass · 2 fail   (the 27 include every pre-existing P10/R7 guard, unchanged)
+```
+
+**Mutations (§9 — each breaks ONE half; `diff -q`-verified restores, and every
+script asserts its mutation APPLIED before running the suite).**
+
+```
+M1  the empty `ExecStart=` reset deleted again (the review's exact bug)   1 fail  the reset test
+M2  the reset present but placed AFTER the command block                  5 fail  reset test + 4 ExecStart readers
+M3  the runbook's "also fine" sentence restored                          1 fail  the one-fate test
+M4  Type=simple → Type=oneshot (many ExecStarts become legal)             1 fail  the reset test
+```
+
+Two honest notes on the mutations, because both first attempts were VACUOUS
+greens and that is the failure mode §9 exists for:
+- **M3 first run: "29 pass, 0 fail"** — the `python3` anchor spanned a line
+  wrap, raised `AssertionError: anchor missing`, and so mutated nothing. Redone
+  by slicing on the real sentence boundaries; it then printed the replaced
+  length and the test red. A `0 fail` from an unapplied mutation is not a
+  result.
+- **M2 first two runs: "29 pass, 0 fail"** — run 1's `awk` broke the `\`-continued
+  block, and run 2 moved the reset past a COMMENT line, which systemd skips, so
+  neither changed what systemd sees. The third (`mutate3.sh`) moves it past the
+  whole continued command and ASSERTS `reset[0] > first_cmd` before testing:
+  `M2 applied: command line at 36, reset now at 42 (after it)` → 5 fail.
+  M1 and M4 were decisive first time and are kept as they ran.
+
+**Changelog.** `changelog.d/mobile-push-push-optional-deploy.fixed.md` — the
+existing fragment (same artefact, same user-visible surface) gained the
+drop-in-is-a-legal-override clause and the one-fate rollback clause, rather than
+a second fragment for one deploy change. `[Unreleased]` untouched. No
+`protocol.d/` note, no `PROTOCOL_VERSION` move, `packages/protocol/schema/`…
+untouched: no wire change.
+
+**Gate (this worktree, `feat/mobile-push`, uncommitted — per the task prompt;
+nothing checked out, restored, stashed or committed).**
+`bunx tsc --noEmit` → 0 · `bunx tsc -p apps/mobile --noEmit` → 0 ·
+`bunx tsc -p apps/relay --noEmit` → 0 · `bun run lint` → `Checked 1406 files in
+448ms. No fixes applied.` (0 errors, 0 warnings — the §6 baseline after one
+auto-fixable `useTemplate` in my own new test, hand-fixed) · `bun test` →
+**10267 pass, 4 skip, 0 fail** (10271 tests / 737 files, 393 s). The four skips
+are the documented opt-ins (live-k8s, live-docker, the real-socket keepalive,
+`session-hop.docker`), none in a touched file. This round adds 2 tests
+(`deploy.test.ts` 27 → 29, plus the three reader helpers) and edits no other
+suite.
+
+**Unverified (one line each, and how to check).**
+(a) A real `systemctl daemon-reload` + `restart` with the drop-in installed —
+needs the host; `systemd-analyze verify` is the runbook's own step (§6.1) and the
+ordered-reader test pins the rule that broke it.
+(b) `push-placeholder`'s banner assertion — still BLOCKED by this machine's
+simulator (`_unlock` fails on a pre-existing flow too, unchanged since P10).
+
+**Per finding:** F1 HIGH **FIXED** · F2 MEDIUM **FIXED**.
