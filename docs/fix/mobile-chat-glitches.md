@@ -910,4 +910,32 @@ unless noted.**
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+**Verdict: APPROVE** (no HIGH/MEDIUM findings). Scope: `git diff main...HEAD` only.
+
+**Gate (re-run by the reviewer):** the 11 touched test files: 172 pass, 0 fail.
+`bun run lint`: clean (1608 files). `bun run typecheck`: clean (root, mobile,
+relay). Full `bun test` not re-run here; Execution reports 11530 pass / 5 opt-in skips.
+
+**Mutation non-vacuity (each reverted; `git status` clean, byte-identical afterwards):**
+- `remote-session.ts` ack branch: `onAccepted` not called. 3 red: `prompt-accepted` (a)+(c), and `outbox-link` "port's prompt done at the ACK".
+- `session-screen-controller.ts` `sends += 0`: 6 red (`sends` cases, refused send included).
+- `follow.ts` `endOffset` 16 pt short (the bug's own magnitude): 4 red (`follow`, "true end", "viewport shrinks").
+- `session-feed.ts` draw-at-ack inverted (`closed`): 4 red (the ack-draw, reset-replay, late-ack and compose ACK tests).
+- `transcript.ts` `subagent_end` `done: false`: 3 red, including the TUI-parity fixture.
+- Weak spot, not a finding: dropping `subagent_start` turns no test red, because `subagent_tool`/`end` fall back to `?? EMPTY_SUB`. The only observable lost is the "0 tool uses" line before the first child tool.
+
+**Attacks tried:**
+1. *Driver queue released at the ack* (`outbox-driver.ts` `perform` → `session.prompt` now resolves early). The next queued prompt's `runOne` reads facts with turn 1 running. `decide` (`outbox.ts:191-203`) then returns `decide/changed` (the sheet), never a blind send or a `TurnInProgress` loop. Before this change it reached the same sheet at turn end (history length changed). Holds.
+2. *Stop before the ack.* `onAbort` sets `abortWanted`. The ack still calls `onAccepted` and then re-sends the cancel (`remote-session.ts` ack branch). The item settles `sent` and the turn ends cancelled. No resurrection, no false `link` rejection. Holds.
+3. *Stream ends with no ack and no events.* `untilAccepted` rejects `SessionNotOpenError("link")`, so the item becomes `waiting` with its key and `decide` answers `sent` on reconnect if the daemon took it. A key-preserving retry, never a silent drop. Holds.
+4. *Reset replay after an early draw.* The client's `reset` path (`remote-session.ts:1574`, `:1785`) queues `history_reset` before the replayed `user_message`, so the rows are replaced first and the prompt shows once. Pinned. Holds.
+5. *`ack.ended` retry:* `onAccepted` runs before `finish`, so the bubble is drawn before `closed`. Pinned by test (c) plus the feed's late-ack test. Holds.
+6. *§7 invariants:* client change is additive (an optional callback, no wire field, no `protocol.d/` needed). No persistence, broker or peer-serialisation path touched. Logic stays in pure modules (`follow.ts`, `untilAccepted`, `subAgentLine`, `sends` counting in the controller), and the `.tsx` changes only render or perform. Holds.
+
+**Notes (below MEDIUM):** `toolMeta` shows tone `ok` for a sub-agent that is done even when its `stopReason` is an error/cancel. This lasts only until the call's own result lands. Cosmetic.
+
+**Executor behaviour:** the diff matches the Implementation's file list and order. Tests name their mutation, and the ones I re-ran went red as claimed. No scope creep found.
+
+**Reviewer independence:** a fresh context on a different model family from the executor (DeepSeek), so blind spots are less likely to be shared.
+
+*— claude-opus-5-5, 2026-11-15*
