@@ -764,6 +764,48 @@ Finding 5: `tui/src/voice-endpoint.ts` is now a thin adapter over the core fold.
 
 **Executor behaviour:** every fix is targeted, and each has its own named test. The fix for finding 1 was applied to the events I listed, not to the property behind them ("a paused or off mode produces no audio"), so `textDelta` was missed. That miss was mine first: round 1 did not name it either.
 
+### Round 3 · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, a small fix). Round 2's HIGH is fixed. Round 2's MEDIUM is fixed for the end of a turn, but the same loss happens one event later, at the start of the next turn.
+
+**Gate:**
+- `bun test packages/core/test/voice packages/tui/test/voice`: 282 pass, 0 fail.
+- `bun run lint`: clean (1597 files).
+- `bun run typecheck`: clean.
+
+**Repros** (`review/r2.ts` re-run):
+- J, K: no `speak` while paused.
+- L: `resumeFailed` sends `hush`, and the tail is not spoken at the end of the turn.
+- M: the tail joins `inFlight`, so `spoken{0}` keeps the state at `speaking`.
+
+**Mutations** (`review/mut3.ts`; the original bytes are restored and `git status` is clean). All five turn the tests red:
+
+| Mutation | Result |
+|---|---|
+| `textDelta` guards only `off` | 4 fail |
+| `turnEnded` flushes while paused | 1 fail |
+| `resumeFailed` keeps the pipeline | 1 fail |
+| `systemSpeak` lines left out of `inFlight` | 3 fail |
+| the flushed tail left out of `inFlight` | 1 fail |
+
+**Findings**
+1. **MEDIUM: `turnStarted` drops `inFlight`, the case finding 2 was about.**
+   - Code: `conversation.ts` `turnStarted` builds `{ ...emptySpeech(model.speech.seq), … }`, which has `inFlight: []`. `textDelta` resets the same way whenever `speech.turnId` differs.
+   - The comment in `turnEnded` says "`inFlight` is the MODE's", but this reset drops it anyway.
+   - `review/r3.ts` N: `turnEnded` leaves `inFlight = [0,1,2]`. Then a queued steer or prompt starts the next turn at once (`turnStarted`), and `inFlight` becomes `[]`. `spoken{0}` → `listening` while seqs 1 and 2 are still playing. This is round 2's M again, one event later.
+   - Fix: carry `model.speech.inFlight` through both resets, and add test N.
+
+**Noted, not blocking:**
+- (O) A `speaking{seq}` for the ask line moves `askPending` → `speaking`. It stays `speaking` after `spoken`, because `ask !== null`. The state shown is wrong until `askCleared`. Sends stay blocked (`canSend` checks `ask`). This predates round 2.
+- (P) `turnEnded` with a tail in flight overwrites `capturing` with `speaking`. `final` is still sent correctly.
+
+**Attacks that found nothing:**
+- Every hush path (`linkDown`, echo, `recognitionFailed`, `resumeFailed`, `askPending`) resets `inFlight` before adding its own line.
+- System lines in a paused state never move the state, because `spoken` only leaves `speaking`.
+- F5's "the rest is on screen" line is not said while paused.
+
+**Executor behaviour:** the fixes are targeted and each has a named, non-vacuous test. This time the "paused/off → no audio" rule was applied as a property (`isOn` in `textDelta`, `turnEnded` and the F5 line), not event by event.
+
 ### Fix round 2 — the review's findings 1–2 · *— claude-sonnet-4-5-20250929 (tentacle), 2026-11-15*
 
 **Scope.** Round 2's HIGH (finding 1) and MEDIUM (finding 2), both in
