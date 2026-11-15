@@ -169,7 +169,49 @@ describe("projectSystem", () => {
     expect(out).not.toContain("<name>k8s</name>");
   });
 
+  test("a stale `offered` cannot advertise a skill the `skill` tool does not offer", () => {
+    // S2's obvious source, `this.listing`, follows the disk after a user rescan
+    // (agent.ts:883-911) while the model's `skill` enum and catalog stay fixed
+    // until a reset. A skill that appeared after compose must NOT reach the
+    // re-rendered catalog: the gate is the COMPOSED catalog's own names, the
+    // same set the `skill` tool accepts.
+    const grown = [...offered, skill("late")];
+    const out = projectSystem(full, grown, caps({ disabledSkills: ["k8s"] }));
+    expect(out).not.toContain("<name>late</name>");
+    expect(out).toBe(
+      composeSystemPrompt({
+        identity: "ID",
+        agentsMd: "RULES",
+        agentsEnabled: true,
+        skills: [skill("damajs")],
+      }).systemPrompt,
+    );
+  });
+
+  test("a name the renderer escapes is still recognised (the gate is the composed bytes)", () => {
+    // The catalog escapes `<`, `>`, `&`, `"` in a name and a description, so the
+    // gate compares ESCAPED names. Comparing the raw name would drop every
+    // such skill from the re-render (it is not in the block as raw text).
+    const odd = [skill("a&b"), skill("damajs")];
+    const prompt = composeSystemPrompt({
+      identity: "ID",
+      agentsEnabled: true,
+      skills: odd,
+    }).systemPrompt;
+    const out = projectSystem(prompt, odd, caps({ disabledSkills: ["damajs"] }));
+    expect(out).toContain("<name>a&amp;b</name>");
+    expect(out).not.toContain("<name>damajs</name>");
+    expect(out).toBe(
+      composeSystemPrompt({ identity: "ID", agentsEnabled: true, skills: [skill("a&b")] })
+        .systemPrompt,
+    );
+  });
+
   test("everything hidden, no AGENTS.md → byte-equals the prompt with no catalog", () => {
+    // Holds for an identity that does not itself end in whitespace: the head is
+    // already `identity.trimEnd()`, so an identity with a trailing newline loses
+    // that one byte here (LOW, accepted: `composeSystemPrompt` holds no
+    // `withAgents` the projection could read back). Pinned by the next test.
     const bare = composeSystemPrompt({
       identity: "ID",
       agentsEnabled: true,
@@ -197,6 +239,27 @@ describe("projectSystem", () => {
     );
     expect(out).toBe("ID\n\n# Project rules (AGENTS.md)\n\nRULES");
     expect(out).not.toContain(SKILLS_PROMPT_HEADER);
+  });
+
+  test("everything hidden keeps a catalog-free prompt's bytes, less a trailing newline", () => {
+    // The LOW of review round 1, pinned so it cannot drift silently: with NO
+    // AGENTS.md the projection's head is `identity.trimEnd()`, so an identity
+    // that itself ends in whitespace (a PROMPT.md read from disk usually ends
+    // in `\n`) loses that byte when the last catalog goes away. It is inherent
+    // to the inputs — `composeSystemPrompt` keeps no untrimmed `withAgents` to
+    // read back, and S2 holds only the composed prompt — and semantically
+    // nothing: it is whitespace at the end of a system prompt. The Design names
+    // `withAgents.trimEnd()`, so this is the specified output.
+    const nl = composeSystemPrompt({
+      identity: "ID\n",
+      agentsEnabled: true,
+      skills: offered,
+    }).systemPrompt;
+    const out = projectSystem(nl, offered, caps({ disabledSkills: ["k8s", "damajs"] }));
+    expect(out).toBe("ID");
+    expect(
+      composeSystemPrompt({ identity: "ID\n", agentsEnabled: true, skills: [] }).systemPrompt,
+    ).toBe("ID\n");
   });
 
   test("nothing hidden → the same string back", () => {

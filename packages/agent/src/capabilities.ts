@@ -12,7 +12,12 @@
  * agent rebuilds its request every round, so disabling and re-enabling is
  * lossless and compaction / `context_reset` keep working unchanged.
  */
-import { SKILLS_PROMPT_HEADER, type SkillInfo, renderSkillsCatalog } from "@tentacle/config";
+import {
+  SKILLS_PROMPT_HEADER,
+  type SkillInfo,
+  escapeSkillText,
+  renderSkillsCatalog,
+} from "@tentacle/config";
 import type { ToolDefinition } from "@tentacle/core";
 import { SKILL_TOOL_NAME } from "@tentacle/tools";
 
@@ -167,11 +172,39 @@ export function projectTools(
 }
 
 /**
+ * The skill names a composed catalog offers, read from the catalog block
+ * itself. That block IS the record of the set the prompt was composed with —
+ * and it is the same set the model's `skill` enum holds, because both are
+ * `offeredSkills(...)` at compose time (`resolve.ts:446`, `wiring.ts:165`).
+ * Names in the block are `escapeSkillText`-ed, so the comparison is on escaped
+ * text; the renderer's own `<name>` tags are the only ones there (a description
+ * is escaped too, so it cannot fabricate one).
+ */
+function composedSkillNames(catalog: string): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const match of catalog.matchAll(/<name>([^<]*)<\/name>/g)) {
+    const name = match[1];
+    if (name !== undefined) {
+      names.add(name);
+    }
+  }
+  return names;
+}
+
+/**
  * The system prompt with the skills catalog re-rendered from the skills still
  * offered. The catalog is the LAST block of the prompt (`composeSystemPrompt`),
  * so the cut is at the LAST header: an AGENTS.md that mentions "# Skills" is
  * left alone. Re-rendering through the one renderer makes the bytes identical
  * to a prompt composed without those skills. No header → `content` unchanged.
+ *
+ * The re-render is gated on the names the COMPOSED catalog holds, never on
+ * `offered` alone: `offered` is the caller's view, and the obvious S2 source
+ * (`Agent.listing`) follows the disk at a user rescan while the model's catalog
+ * and `skill` enum stay fixed until a context reset (`agent.ts:883-911`). A
+ * name not in the block is not re-advertised, so turning one skill off can
+ * never uncover a skill the `skill` tool would reject. A composed name that
+ * `offered` cannot describe is left out (it keeps its enum entry).
  */
 export function projectSystem(
   content: string,
@@ -186,7 +219,10 @@ export function projectSystem(
   if (at === -1) {
     return content;
   }
-  const visible = offered.filter((s) => !isSkillHidden(s.name, state));
+  const composed = composedSkillNames(content.slice(at));
+  const visible = offered.filter(
+    (s) => composed.has(escapeSkillText(s.name)) && !isSkillHidden(s.name, state),
+  );
   const catalog = renderSkillsCatalog(visible);
   const head = content.slice(0, at);
   // `composeSystemPrompt` writes `${withAgents.trimEnd()}\n\n${catalog}\n`, so

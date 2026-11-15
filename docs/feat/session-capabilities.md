@@ -247,6 +247,23 @@ look is decided on the mockups; this only says what each surface must offer.**
   - A footer line says "applies to the next model call · hidden from the
     model, not uninstalled".
   - A skill row distinguishes "off" from the existing "after reset" marker.
+  - **Quiet row grammar (owner feedback, 2026-11-15).** The leading switch
+    alone means "visible to the model": `[✓]` on, `[ ]` off for this session,
+    `[–]` dim and locked for a skill the model can never invoke (its own
+    frontmatter, `disable-model-invocation: true` →
+    `modelInvocable: false`, `packages/config/src/skills.ts:43,163`). Space
+    does nothing on `[–]`. There are no wordy columns.
+    - `/skills`: the head becomes `[✓] name  description`. The `who()` column
+      (`you + model` / `you only` / `model only` / `hidden`,
+      `packages/tui/src/skills-panel.ts:49-57`, used in the head at `:73`) is
+      **removed, today's panel included**. Who can invoke it, and why, moves
+      into the expanded rows (Enter): `/name · the model sees it too` ·
+      `/name · off for the model in this session — you can still run it` ·
+      `/name · only you: its SKILL.md sets disable-model-invocation`.
+    - `/mcp`: the head becomes `[✓] name  ● 14 tools`. The state word and the
+      latency (`mcp-panel.ts` `head()`) move to the first expanded row
+      (`connected · 38 ms`), and the error stays there too. A failed server
+      keeps `✗ failed` on the head, because that is a state to act on.
   - The view-model and key routing are a pure module next to `mcp-panel.ts` /
     `skills-panel.ts`. The component only renders.
 - **iPhone Session info:** the MCP SERVERS and SKILLS sections get a trailing
@@ -300,6 +317,17 @@ Dependency order: protocol → agent → daemon → client → cli → tui → m
   `capability-toggles.ts` (new); the two palette descriptions
   (`commands/mcp.ts`, `commands/skills.ts`); tests in the `app.test.tsx` style.
   No new command.
+  **Also:** remove `who()` from `skills-panel.ts` (head `:73`) and move the
+  who/why into the children (`:74-78`, next to `modelNote`). Update its tests:
+  `packages/tui/test/app.test.tsx:2029-2030` pin `you + model` / `model only`
+  today, plus any `skills-panel` unit test. In `mcp-panel.ts` `head()` /
+  `children()`, the state word and latency move to the first child. The `[–]`
+  needs `modelInvocable` on the wire: the executor checks whether
+  `session/skills` already carries it (the listing's `model`/`user` flags,
+  `packages/agent/src/session-skills.ts:12-23`, may not tell "never" from
+  "off"). If it does not, an optional `locked?: true` field on the
+  `session/skills` entry is added in S3a. That is additive, so there is no
+  bump.
 - **S5 — UI** (M · cross-module · weaker model OK; after S3a **and the owner's
   mockup choice**): `apps/mobile` Session info model + sheet + its tests; the
   e2e flow `25-session-info` gets a toggle step.
@@ -430,9 +458,9 @@ Keys:
 - A click on the switch column toggles.
 
 Variants:
-- **T1**: a `[on ]/[off]` column in each existing panel. Off rows are dimmed
-  and marked "hidden from the model". The title rule says "this session ·
-  applies to the next model call".
+- **T1**: a `[✓]`/`[ ]`/`[–]` column in each existing panel, with the quiet
+  grammar (no wordy columns, `who()` gone). Off rows are dimmed with no words.
+  The title rule says "this session · applies to the next model call".
 - **T2**: ONE panel "Visible to the model · this session", opened by both
   entries. It has a section per kind, `[✓]/[ ]`, a summary in the title rule,
   and a status-line marker `⊘ 1 server · 2 skills off`.
@@ -456,6 +484,11 @@ Owner questions (one per variant row, with a recommendation):
 4. **Row P, "changed on <device>"** under a row another device changed (and the
    TUI transcript notice)? **Rec yes**, while the sheet/panel stays open, as
    untrusted text through `untrustedText`.
+5. **The `[–]` locked marker for a skill the model can never invoke** (today
+   "you only"): yes? **Rec yes**. A dim, immutable row with no words tells at
+   a glance "the model does not see it, and it is not this session's choice",
+   and the expanded row says why. A `[ ]` there would lie, because it would
+   look re-enableable.
 
 **Verification (2026-11-15):** `.tentacle/tmp/session-capabilities/verify.ts`
 does the following:
@@ -619,3 +652,84 @@ No schema changed, so `protocol.json` was not regenerated.
 **Mutations (copied back from a scratch backup; `git status` clean afterwards):** skill enum left unfiltered → 2 red; `projectTools` hidden ≡ false → 1 red. The executor's M1–M5 are plausible but I did not re-run them.
 **Attacks tried:** is the catalog truly LAST (nothing appended after compose; `agent.ts:926` sends the prompt as-is) → holds; the skill def's shape (the test goes through the real `ToolRegistry`/zod path) → holds; tag vs name-parse for `a__b` → holds (the tag is set in `tool-adapter.ts:81`); §7 invariants: pure module, no protocol, persistence or pod surface in S1 → none touched; a stale `offered` → finding 1.
 **Executor:** honest drift notes, flagged the trimEnd question itself. The doc is signed `claude-sonnet-4-5-20250929` but commit `3f8f2d0d` says "exec (deepseek)": reconcile the signature.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Scope.** Review round 1's one MEDIUM plus its LOW. `git status --short` →
+`M packages/agent/src/capabilities.ts`, `M packages/agent/test/capabilities.test.ts`
+(the doc edits that also show as modified in this worktree are the owner's
+mockup/revision work, not mine — I only appended this section).
+
+**1 (MEDIUM) — the re-render is now gated on the COMPOSED catalog, not on
+`offered`.** `projectSystem` re-renders from `offered` intersected with the
+names the prompt's own catalog block holds (`capabilities.ts:183`
+`composedSkillNames`, used at `:222-225`). The block is the record of the set
+the prompt was composed with, and it is the same set the `skill` enum holds
+(both are `offeredSkills(...)` at compose time: `resolve.ts:446`,
+`cli/src/wiring.ts:165`), so it cannot go stale against the tool the way
+`Agent.listing` does (`agent.ts:883-911`). The comparison is on
+`escapeSkillText(name)` because the renderer escapes names in the block — a
+raw comparison would drop every skill whose name contains `&`, `<`, `>` or `"`.
+
+Why this shape rather than the review's "limit to the `skill` def's enum": the
+enum lives in a *different* input (`defs`), so taking it would add a third
+parameter and a second thing to keep in sync; the block is already the exact
+byte record of what was advertised. **`offered` keeps its role only as the
+description source** — a composed name `offered` cannot describe is dropped from
+the catalog (its enum entry stays), so the two cannot disagree in that direction
+either (`offered` ⊉ composed). Both directions are now closed.
+
+**2 (LOW) — the one-byte case is pinned, not argued.** `capabilities.test.ts:244`
+asserts the exact behaviour with a `PROMPT.md`-style identity ending in `\n`:
+the projection gives `"ID"`, `composeSystemPrompt` with no skills gives `"ID\n"`.
+It is inherent to the projection's inputs (S2 holds the composed prompt only;
+no untrimmed `withAgents` is recoverable) and semantically nil (trailing
+whitespace on a system prompt), and it is what the Design says
+(`withAgents.trimEnd()`). Pinned so it cannot drift silently; **not changed**.
+
+**Red before green (§9).** The new MEDIUM test was written first and shown red on
+the unfixed code, on the assertion (not a compile error):
+
+```
+$ bun test packages/agent/test/capabilities.test.ts
+error: expect(received).not.toContain(expected)
+Expected to not contain: "<name>late</name>"
+Received: "ID\n\n# Project rules (AGENTS.md)\n\nRULES\n\n# Skills\n…<name>damajs</name>…<name>late</name>…"
+(fail) projectSystem > a stale `offered` cannot advertise a skill the `skill` tool does not offer
+ 17 pass · 1 fail
+```
+
+The reviewer's standalone repro now answers the other way —
+`.tentacle/tmp/session-capabilities/r1.ts` → `catalog offers c (not in skill
+enum): false` (was `true`).
+
+**Mutation checks (§9) — each shown red on the assertion, then reverted from
+`.tentacle/tmp/session-capabilities/cap-fix1.bak`; `git diff` matches the backup
+afterwards.**
+
+| # | Mutation | Result |
+|---|----------|--------|
+| F1a | drop the gate — back to `offered.filter((s) => !isSkillHidden(...))` (the reviewer's bug) | **RED** — `a stale \`offered\` cannot advertise a skill the \`skill\` tool does not offer`: `Expected to not contain "<name>late</name>"`. 19 pass / 1 fail |
+| F1b | gate on the raw name, `composed.has(s.name)` instead of the escaped one | **RED** — `a name the renderer escapes is still recognised`: the `a&b` skill vanishes. 19 pass / 1 fail |
+
+F1b is the mutation that matters for non-vacuity: it shows the escaping half of
+the fix is load-bearing, not decoration (the F1a mutant alone would still pass
+with a raw comparison on ASCII names).
+
+**Gate.** `bunx tsc --noEmit` → exit 0, clean · `bun run lint` →
+`Checked 1657 files in 485ms. No fixes applied.` (0 errors, 0 warnings, the §6
+baseline) · `bun test` → **11923 pass, 5 skip, 0 fail**, `84892 expect() calls`,
+`Ran 11928 tests across 856 files. [419.68s]` — 11923 = the pre-fix 11920 + the
+3 new tests; the 5 skips are the pre-existing opt-in guards (live-k8s ×2,
+live-docker, root-confinement, slow-ws). Narrow file:
+`bun test packages/agent/test/capabilities.test.ts` → 20 pass / 0 fail.
+
+**Verdict per finding.** 1 (MEDIUM) FIXED · 2 (LOW) FIXED (pinned; behaviour kept
+deliberately) · the Review's "reconcile the signature" note: the Execution above
+is signed `claude-sonnet-4-5-20250929` but commit `3f8f2d0d` says
+"exec (deepseek)" — I cannot verify which model wrote it and I will not
+overwrite another model's signature. **Open for the orchestrator**: the S1
+Execution signature and the commit message disagree, and only the agent that
+ran it knows.
