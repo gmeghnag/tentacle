@@ -2980,3 +2980,173 @@ dead branch and replaced both with M3/M4 above, which the tests kill.
   belong to S9. The floating button belongs to S10.
 - No render test for the three components. They only map `activity.ts` values, and the
   repo's RN render stubs are process-global (S4 review round 2).
+
+## Execution (slice S9 — Activity actions)
+
+*— claude-opus-5-5, 2026-11-16 · slice S9 only*
+
+**Scope: S9 (Files item 10) only.** No floating button, no setting, no flow 28 (S10).
+No protocol, daemon, client or persistence change, so
+`packages/protocol/schema/protocol.json` was **not** regenerated and no `protocol.d/`
+note was written. `TODO.md` untouched.
+
+### Load-bearing check, re-run first (it held)
+
+S9 stands on "every action already exists client-side and never throws at the UI for
+a refusal". Checked before any edit:
+
+- `RemoteSession` has the five members: `onSubagentMessage`
+  (`packages/client/src/remote-session.ts:801`), `messageSubagent` (`:821`),
+  `killSubagent` (`:832`), `jobOutput` (`:845`), `killJob` (`:856`).
+- `RemoteClient` turns an older daemon's `MethodNotFound` into a typed refusal for all four
+  calls (`packages/client/src/remote-client.ts:1462-1541`). It **re-throws any other
+  error** (a dropped link). So the controller catches that case itself (below). This was
+  not in the plan, and it is now a tested failure mode.
+- The echo `subagent_message{agentId, text, n}` and `SubagentRow.userRead`
+  (`packages/protocol/src/session.ts:599`) carry everything the read marks need.
+
+No new client call was needed.
+
+### Drift from the Implementation (each reconciled here)
+
+1. **Focus is typed, not a bare id.** `ActivityFocus = {kind:"child"|"job", id} | null`
+   (`subagent-detail.ts:190`). `sa-N` and `bg-N` come from different counters, and the
+   plan never said they cannot collide. S8's `reportRow` is no longer used by the app.
+   It is still exported and tested (`activity.ts:197`); it is left for S10 or a cleanup.
+2. **The detail resolves NOW.** `sheetDetail` (`subagent-detail.ts:244`) runs
+   `resolveFocus` (`:200`), so the live row wins over a stale Finished one. A child that
+   ends while its detail is open flips to its Finished half on the next replace (F14),
+   with no screen state.
+3. **"Opened" moved to "the report is on screen".** S8 marked a report opened at the
+   tap, even while the report was still pending. Then a report that arrived later was
+   never "new". Now `SessionScreen.tsx:422-427` calls `openReport` when a report is
+   actually shown. This also covers a watched child that ends.
+4. **A finished child's report shows what the user sent it.** Each message still unread
+   is marked "not read": the TUI's `sentState` truth table, copied to
+   `subagent-detail.ts:60`. The app does not depend on `@tentacle/tui`.
+5. **The messages come from the daemon's echo only** (`session-screen-controller.ts:723`),
+   never from a local copy. A message sent from the TUI shows too, and none shows twice.
+   Each child keeps at most `SENT_CAP` = 20 messages. Its messages are pruned when it
+   is in neither list.
+6. **The Stop confirm buttons say "Stop agent" / "Stop job"**, not "Stop". The link that
+   opens the confirm is also "Stop", and flow 27 must tap the alert's button without
+   ambiguity.
+7. **"Show in chat" needed one `follow.ts` state, `shown()`** (`follow.ts:103`). The
+   list scrolls to the note and stops following, so the next delta does not pull it
+   back. `scrollToIndex` without `getItemLayout` gets ONE retry through
+   `onScrollToIndexFailed` (`SessionScreen.tsx:688`). It is offered only when the
+   report's row is in the list (`showRow`).
+8. **Flow 27 cannot open the short child's report CONTENT on the phone.** Verified at
+   `apps/mobile/src/transcript.ts:388-391`: the reducer draws a `context_note` only for
+   `reason: "hook"`. So the report reaches the phone with the next history read, and the
+   Finished memory belongs to the screen (S8 drift 4). The flow asserts the row is under
+   Finished. `27-activity.js` asserts that the parent's model received the report.
+   Drawing a background `context_note` live would be a reducer change. It is outside S9
+   and is a candidate follow-up.
+9. **The mock model gained flow-27 scenarios** (`e2e/mock-model.ts:189-249, 325-375`):
+   `AGENTS27` (two background `agent_task` calls in one round), `CHILDSTEPS n` (one slow
+   `fs_read` per round, then a report) and `SHELLJOB27`. A child is recognised by ANY
+   user message: the user's message reaches it as a later user message, like a steer
+   (`packages/agent/src/subagent.ts:173`). A child's report sent back to the parent does
+   not contain the marker (`packages/core/src/agent-job-ledger.ts:354-369`), and a test
+   pins this. `e2e-mock-activity.test.ts` sends these scenarios through the REAL
+   `OpenAIProvider`. It imports the provider by path, because the app does not depend
+   on it.
+
+### As-built, in order
+
+1. `src/subagent-detail.ts` (new, pure):
+   - `detailView` — the steps window is the last 5 of `tail`. "… n earlier" comes from
+     `toolUses`. The newest step is marked `latest`. Each sent message gets a read mark.
+     Actions: running → message + Stop; finished → Copy + Show (only with a report).
+   - `jobDetailView` — the last 200 lines, `truncated`, and `exited (code n)` /
+     `killed`. Stop is offered only while the job is in the list AND its last read
+     says running.
+   - Outcome helpers: `messageOutcome`, `killChildOutcome`, `killJobOutcome`.
+   - `stopConfirm`, `recordSent`/`pruneSent`, `resolveFocus`, `sheetDetail`, `showRow`.
+   - Every label goes through `activity.ts`'s `oneLine` (now exported), for F16.
+2. `src/session-screen-controller.ts`:
+   - `ActivityState` gains `sent`, `child: ChildAction | null` and `job: JobAction | null`
+     (`:107-137`).
+   - New actions: `openChild`/`setChildDraft`/`messageChild`/`stopChild`/`openJob`/
+     `refreshJob`/`stopJob`/`closeDetail` (`:1085-1165`).
+   - `setChild`/`setJob` apply an answer only while the same detail is still open
+     (`:744-760`). `readJob` turns a throw into `found:false` (`:762`).
+   - A handle without a member answers `ACTIVITY_UNSUPPORTED` (F15).
+3. `src/follow.ts`: `shown()`.
+4. Components (render only): `screens/SubagentDetail.tsx` (rewritten: steps, your
+   messages with their mark, the message field, Stop, Show in chat, and the S8 report
+   half), `screens/JobDetail.tsx` (new), `screens/ActivitySheet.tsx` (every row opens,
+   and the sheet draws `SheetDetail`), `screens/SessionScreen.tsx` (focus, the `Alert`
+   confirm worded by `stopConfirm`, Show in chat, the opened-on-screen effect).
+5. `e2e/mock-model.ts` scenarios, `e2e/flows/27-activity.{yaml,js}`, and flow 27
+   registered in `e2e/run.ts` (`FLOWS` + its own `ACTIVITY_ID` session).
+6. `changelog.d/mobile-chrome.added.md`: the existing bullet (S7/S8's) was extended, not
+   a new file. The owner asked for ONE `mobile-chrome.<category>.md` fragment, and S8
+   already put Activity there (S8 drift 9).
+
+### Tests (red first)
+
+`test/subagent-detail.test.ts` (26) and `test/session-screen-activity-actions.test.ts`
+(16) were written before their modules or methods. The controller file's first run was RED on
+the property: the methods were missing, so each call threw inside a test body. That is
+not an import error, but I do not count it as a red on each property either. The red on
+each property is shown by the mutations below. `test/e2e-mock-activity.test.ts` (5) and
+the `follow.test.ts` case were added with their code. `test/subagent-detail.test.ts`
+gained one case after the first mutation pass: "the list still shows the job but the
+read says exited". Without it, the `running` rule had half its condition unpinned.
+
+Controller failure modes covered:
+- F14: a refusal or a throw keeps the draft; `{killed:false}` → "already finished".
+- Races: a second press while a send is in flight sends nothing; an answer for a child
+  already left never lands on the next one; a read after close does not reopen it.
+- F19: Stop re-reads how the job ended; `{killed:false}` → "already exited"; a thrown
+  read becomes `found:false`.
+- F15: a handle without the members gets typed refusals.
+
+### Mutation checks (§9: each applied, the 4 S9 files run, restored; script `.tentacle/tmp/mobile-chrome/s9-mutations.ts`, output `s9-mutations.out`; backups in `s9-bak/`, compared afterwards: identical)
+
+```
+M1 steps window = FIRST 5 of tail: 1 fail / 60 pass → KILLED
+M2 'earlier' from tail length, not toolUses: 1 fail / 60 pass → KILLED
+M3 read mark off by one (n < userRead): 2 fail / 59 pass → KILLED
+M4 an ended child's unread message not flagged: 2 fail / 59 pass → KILLED
+M5 Stop offered on a finished child: 1 fail / 60 pass → KILLED
+M6 a refusal clears the draft: 3 fail / 58 pass → KILLED
+M7 {killed:false} says nothing: 3 fail / 58 pass → KILLED
+M8 a finished-per-list job keeps Stop: 1 fail / 60 pass → KILLED
+M9 Finished wins over the live row: 4 fail / 57 pass → KILLED
+M10 Show in chat: wrong row: 1 fail / 60 pass → KILLED
+M11 sent memory not capped: 1 fail / 60 pass → KILLED
+M12 a thrown send escapes (no catch): 1 fail / 60 pass → KILLED
+M13 a late answer lands on the next child: 1 fail / 60 pass → KILLED
+M14 the echo is never subscribed: 2 fail / 59 pass → KILLED
+M15 sent never pruned: 1 fail / 60 pass → KILLED
+M16 Stop job does not re-read: 1 fail / 60 pass → KILLED
+M17 output read without the 200-line window: 2 fail / 59 pass → KILLED
+M18 closeDetail keeps the job (a late read reopens): 1 fail / 60 pass → KILLED
+M19 Show in chat keeps following: 1 fail / 60 pass → KILLED
+M20 mock: child found by its LAST user message only: 2 fail / 59 pass → KILLED
+M21 mock: children launched in the foreground: 1 fail / 60 pass → KILLED
+```
+
+On the first pass M3 reported SURVIVED. Its pattern had matched the docstring
+(`` `n <= userRead` is read ``) instead of the code. With a pattern anchored on the code,
+it is KILLED, as shown above.
+
+### Gate
+
+GATE_PLACEHOLDER
+
+### Not done in this slice (and why)
+
+- **Flow 27 was written but NOT run.** The iOS build is still blocked by the pre-existing
+  `liveactivity` → `PushCore` error (`apps/mobile/targets/live-activity/LACore/LACore.swift:23`,
+  `import PushCore`). S1–S8 recorded this blocker and S6 escalated it (§0, two strikes).
+  So "flow 27 green" is still owed. To verify: once `PushCore` resolves, run
+  `bun run e2e:mobile --ios 26 --only 27-activity`. The selectors still unproven on a
+  device are: rows tapped by description (`text: "long child"`), the step label regex
+  `.*step-4.*`, and `{id: "activity-mark-sent-.*", text: "read"}`.
+- No render test for `SubagentDetail`/`JobDetail`/`ActivitySheet`, for the same reason as
+  S8: the RN render stubs are process-global. Their behaviour lives in `subagent-detail.ts`.
+- The short child's report content on the phone while you watch: see drift 8.

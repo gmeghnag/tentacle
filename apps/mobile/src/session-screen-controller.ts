@@ -17,6 +17,7 @@ import type { RemoteSession, SessionEvent } from "@tentacle/client";
 import type { PermissionBroker, PermissionRequester } from "@tentacle/core";
 import type {
   AttachmentRef,
+  JobOutputResult,
   JobRow,
   SessionContextResult,
   SessionSkillsResult,
@@ -56,6 +57,15 @@ import {
   renamePlan,
   titleAfterRename,
 } from "./session-rename.ts";
+import {
+  JOB_LINES,
+  type SentMemory,
+  killChildOutcome,
+  killJobOutcome,
+  messageOutcome,
+  pruneSent,
+  recordSent,
+} from "./subagent-detail.ts";
 
 export type { RenameState };
 import type { ComposeBarView, OutboxRowView, SessionViewInput } from "./session-view.ts";
@@ -98,7 +108,33 @@ export interface ActivityState {
   readonly subagents: readonly SubagentRow[] | null;
   readonly jobs: { readonly rows: readonly JobRow[]; readonly count: number } | null;
   readonly memory: ActivityMemory;
+  /** The person's messages to each child, from the daemon's echo (S9; this attach only). */
+  readonly sent: SentMemory;
+  /** The open child's detail: its message field and the last action's notice (S9). */
+  readonly child: ChildAction | null;
+  /** The open shell job's detail: its last output read (S9). */
+  readonly job: JobAction | null;
 }
+
+export interface ChildAction {
+  readonly id: string;
+  readonly draft: string;
+  /** A message or a Stop is in flight. */
+  readonly busy: boolean;
+  readonly notice: string | null;
+}
+
+export interface JobAction {
+  readonly id: string;
+  /** The last read; `null` until the first one lands. */
+  readonly output: JobOutputResult | null;
+  /** A read or a Stop is in flight. */
+  readonly busy: boolean;
+  readonly notice: string | null;
+}
+
+/** What a handle without the S9 members (an older client or daemon) says: a typed refusal (F15). */
+export const ACTIVITY_UNSUPPORTED = "This computer's tentacle cannot do this.";
 
 /** A handle this screen can also prompt (what the composer's Send needs). */
 export interface SendableHandle extends SessionHandle, ActivityHandle {
@@ -298,6 +334,22 @@ export interface SessionScreenController {
   cancelRename(): void;
   /** The person opened a Finished child's report: it is no longer "new" (S8). */
   openReport(agentId: string): void;
+  /** A child's detail opened (S9): a fresh message field, no notice. */
+  openChild(agentId: string): void;
+  /** What is typed into the open child's message field. */
+  setChildDraft(text: string): void;
+  /** Send the field to the open child; a refusal or a throw keeps it and says why (F14). */
+  messageChild(): Promise<void>;
+  /** Stop the open child (after the screen's confirm, F17); `{killed:false}` → "already finished". */
+  stopChild(): Promise<void>;
+  /** A shell job's detail opened: read its output tail (S9). */
+  openJob(jobId: string): Promise<void>;
+  /** Read the open job's output again (pull to refresh). */
+  refreshJob(): Promise<void>;
+  /** Stop the open job (after the confirm), then read how it ended (F19). */
+  stopJob(): Promise<void>;
+  /** The detail closed (back to the list, or the sheet closed). */
+  closeDetail(): void;
   /** The person's tap on a link: the sheet's confirmation is the screen's job. */
   onLink(href: string): void;
   /** The FlatList's visible window: which images want bytes (12b's driver). */
@@ -339,6 +391,10 @@ function refusedBeforeStart(error: unknown, streamed: boolean): boolean {
   return error instanceof RpcError && error.code === DomainErrorCode.TurnInProgress;
 }
 
+function asError(e: unknown): Error {
+  return e instanceof Error ? e : new Error(String(e));
+}
+
 export function createSessionScreen(deps: SessionScreenDeps): SessionScreenController {
   /** `Loading…` from the first render: the screen mounts already attaching. */
   let status: SessionStatus = { phase: "opening" };
@@ -360,7 +416,14 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    * Background work (S8). The lists are the daemon's; the Finished memory lives
    * for this screen (a re-attach keeps it — F13), never persisted.
    */
-  let activity: ActivityState = { subagents: null, jobs: null, memory: emptyMemory };
+  let activity: ActivityState = {
+    subagents: null,
+    jobs: null,
+    memory: emptyMemory,
+    sent: {},
+    child: null,
+    job: null,
+  };
   /** The last attached handle's `onSubagents`/`onJobs` subscriptions. */
   let activityWatch: (() => void) | undefined;
   /** The rename field (Owner decision 5): `null` while it is closed. */
@@ -645,21 +708,71 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    */
   function watchActivity(session: SendableHandle): () => void {
     const offAgents = session.onSubagents?.((rows) => {
-      activity = {
-        ...activity,
-        subagents: rows,
-        memory: onSubagents(activity.memory, rows, deps.now()),
-      };
+      const memory = onSubagents(activity.memory, rows, deps.now());
+      // A child's messages live as long as it is live or Finished (bounded with it).
+      const keep = new Set([...rows.map((r) => r.id), ...memory.finished.map((f) => f.row.id)]);
+      activity = { ...activity, subagents: rows, memory, sent: pruneSent(activity.sent, keep) };
       emit();
     });
     const offJobs = session.onJobs?.((report) => {
       activity = { ...activity, jobs: { rows: report.rows, count: report.count } };
       emit();
     });
+    // S9: the person's messages to a child, from the daemon's echo only (a
+    // message sent from another device shows too, and none twice).
+    const offSent = session.onSubagentMessage?.((notice) => {
+      activity = {
+        ...activity,
+        sent: recordSent(activity.sent, notice.agentId, {
+          text: notice.text,
+          ...(notice.n === undefined ? {} : { n: notice.n }),
+        }),
+      };
+      emit();
+    });
     return () => {
       offAgents?.();
       offJobs?.();
+      offSent?.();
     };
+  }
+
+  /**
+   * Patch the open child's detail — only while it is still THAT child's (S9): an
+   * answer for a child the person already left never lands on the next one.
+   */
+  function setChild(open: ChildAction, patch: Partial<Omit<ChildAction, "id">>): void {
+    if (activity.child?.id !== open.id) {
+      return;
+    }
+    activity = { ...activity, child: { ...activity.child, ...patch } };
+    emit();
+  }
+
+  /** Patch the open job's detail, only while it is still that job's (S9). */
+  function setJob(jobId: string, patch: Partial<Omit<JobAction, "id">>): void {
+    if (activity.job?.id !== jobId) {
+      return;
+    }
+    activity = { ...activity, job: { ...activity.job, ...patch } };
+    emit();
+  }
+
+  /** Read a job's output tail; a throw is a `found: false` notice, never a throw at the UI (F19). */
+  async function readJob(jobId: string): Promise<void> {
+    const read = handle?.jobOutput?.bind(handle);
+    setJob(jobId, { busy: true });
+    const output: JobOutputResult =
+      read === undefined
+        ? { found: false, jobId, reason: ACTIVITY_UNSUPPORTED }
+        : await read(jobId, { lines: JOB_LINES }).catch(
+            (e: unknown): JobOutputResult => ({
+              found: false,
+              jobId,
+              reason: `Could not read the output: ${asError(e).message}`,
+            }),
+          );
+    setJob(jobId, { busy: false, output });
   }
 
   const listeners = new Set<(state: SessionScreenState) => void>();
@@ -968,6 +1081,87 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     openReport(agentId) {
       activity = { ...activity, memory: markOpened(activity.memory, agentId) };
       emit();
+    },
+    openChild(agentId) {
+      activity = {
+        ...activity,
+        child: { id: agentId, draft: "", busy: false, notice: null },
+        job: null,
+      };
+      emit();
+    },
+    setChildDraft(text) {
+      if (activity.child !== null) {
+        activity = { ...activity, child: { ...activity.child, draft: text } };
+        emit();
+      }
+    },
+    async messageChild() {
+      const open = activity.child;
+      const text = open?.draft.trim() ?? "";
+      if (open === null || open.busy || text === "") {
+        return;
+      }
+      setChild(open, { busy: true, notice: null });
+      const send = handle?.messageSubagent?.bind(handle);
+      const result = await (send === undefined
+        ? Promise.resolve({ ok: false, reason: ACTIVITY_UNSUPPORTED })
+        : send(open.id, text).catch((e: unknown) => asError(e)));
+      const outcome = messageOutcome(result);
+      setChild(open, {
+        busy: false,
+        notice: outcome.notice,
+        ...(outcome.keepDraft ? {} : { draft: "" }),
+      });
+    },
+    async stopChild() {
+      const open = activity.child;
+      if (open === null || open.busy) {
+        return;
+      }
+      setChild(open, { busy: true, notice: null });
+      const kill = handle?.killSubagent?.bind(handle);
+      const notice =
+        kill === undefined
+          ? ACTIVITY_UNSUPPORTED
+          : killChildOutcome(open.id, await kill(open.id).catch((e: unknown) => asError(e)));
+      setChild(open, { busy: false, notice });
+    },
+    async openJob(jobId) {
+      activity = {
+        ...activity,
+        job: { id: jobId, output: null, busy: false, notice: null },
+        child: null,
+      };
+      emit();
+      await readJob(jobId);
+    },
+    async refreshJob() {
+      const open = activity.job;
+      if (open !== null && !open.busy) {
+        await readJob(open.id);
+      }
+    },
+    async stopJob() {
+      const open = activity.job;
+      if (open === null || open.busy) {
+        return;
+      }
+      setJob(open.id, { busy: true, notice: null });
+      const kill = handle?.killJob?.bind(handle);
+      const notice =
+        kill === undefined
+          ? ACTIVITY_UNSUPPORTED
+          : killJobOutcome(open.id, await kill(open.id).catch((e: unknown) => asError(e)));
+      setJob(open.id, { busy: false, notice });
+      // How it ended (or that it already had): the detail shows it (F19).
+      await readJob(open.id);
+    },
+    closeDetail() {
+      if (activity.child !== null || activity.job !== null) {
+        activity = { ...activity, child: null, job: null };
+        emit();
+      }
     },
     async deleteSchedule(scheduleId) {
       await info?.deleteSchedule(scheduleId);

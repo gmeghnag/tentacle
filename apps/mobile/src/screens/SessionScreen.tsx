@@ -46,7 +46,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { reportsOf } from "../activity-memory.ts";
-import { activityView, agentCardTarget, reportRow } from "../activity.ts";
+import { activityView, agentCardTarget } from "../activity.ts";
 import { chatStatus } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
@@ -60,6 +60,7 @@ import {
   jumpPill,
   jumped,
   scrolled,
+  shown,
   viewportChanged,
 } from "../follow.ts";
 import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
@@ -69,6 +70,7 @@ import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
 import { dictationLocale } from "../speech-locale.ts";
 import { SPEECH_PORT } from "../speech-native-expo.ts";
+import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
 import { DENSE_FONT_SCALE, type Palette, typography } from "../theme.ts";
 import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
@@ -275,6 +277,8 @@ export function SessionScreen({
   const followRef = useRef<Follow>(initialFollow);
   const [follow, setFollow] = useState<Follow>(initialFollow);
   const dragging = useRef(false);
+  /** "Show in chat" (S9) may retry its `scrollToIndex` ONCE after an unmeasured row. */
+  const showRetry = useRef(false);
   /** The list's native content height and viewport (0 until measured). */
   const size = useRef<ListSize>({ content: 0, viewport: 0 });
   const setFollowState = useCallback((next: Follow) => {
@@ -375,7 +379,7 @@ export function SessionScreen({
   // and a 1 s clock for the elapsed times while it is open. Every value is
   // `activity.ts`'s; the reports are joined from the transcript by note id.
   const [activityOpen, setActivityOpen] = useState(false);
-  const [activityFocus, setActivityFocus] = useState<string | null>(null);
+  const [activityFocus, setActivityFocus] = useState<ActivityFocus>(null);
   const [activityNow, setActivityNow] = useState(() => Date.now());
   useEffect(() => {
     if (!activityOpen) {
@@ -397,14 +401,68 @@ export function SessionScreen({
     },
     activityNow,
   );
-  // Only a Finished child's report opens (and so stops being "new"); a running
-  // child's focus is the list (its live detail is S9's).
-  const focusActivity = (id: string | null) => {
-    const target = reportRow(activityVm, id);
-    if (target !== null) {
-      controller.openReport(target.id);
+  // S9: the open detail — a child's (live, or Finished with its report) or a
+  // shell job's — as `sheetDetail` resolves it NOW (a child that ends while open
+  // flips to its report, F14).
+  const activityDetail = sheetDetail(
+    activityFocus,
+    {
+      subagents: activity.subagents,
+      jobs: activity.jobs?.rows ?? null,
+      finished: activity.memory.finished,
+      reports,
+      sent: activity.sent,
+      job: activity.job,
+    },
+    activityNow,
+  );
+  const shownReport = activityDetail?.kind === "child" ? activityDetail.report : null;
+  // A report counts as opened once it is ON SCREEN (also when a child the person
+  // was watching ends and its report arrives).
+  const shownReportId = shownReport === null ? null : activityFocus?.id;
+  useEffect(() => {
+    if (shownReportId !== null && shownReportId !== undefined) {
+      controller.openReport(shownReportId);
     }
-    setActivityFocus(target?.id ?? null);
+  }, [shownReportId, controller]);
+  const focusActivity = (next: ActivityFocus) => {
+    setActivityFocus(next);
+    if (next === null) {
+      controller.closeDetail();
+    } else if (next.kind === "job") {
+      void controller.openJob(next.id);
+    } else {
+      controller.openChild(next.id);
+    }
+  };
+  // Stop is destructive: one confirmation (F17), worded by `stopConfirm`.
+  const confirmStop = () => {
+    if (activityFocus === null) {
+      return;
+    }
+    const ask = stopConfirm(activityFocus);
+    const stop =
+      activityFocus.kind === "job"
+        ? () => void controller.stopJob()
+        : () => void controller.stopChild();
+    Alert.alert(ask.title, ask.message, [
+      { text: "Cancel", style: "cancel" },
+      { text: ask.confirm, style: "destructive", onPress: stop },
+    ]);
+  };
+  // "Show in chat": the report's own row, scrolled to with the sheet closed; the
+  // list stops following so the next delta does not pull it back (`shown`).
+  const showIndex = showRow(rows, shownReport);
+  const showInChat = () => {
+    if (showIndex === null) {
+      return;
+    }
+    setActivityOpen(false);
+    setActivityFocus(null);
+    controller.closeDetail();
+    setFollowState(shown());
+    showRetry.current = true;
+    list.current?.scrollToIndex({ index: showIndex, animated: true, viewPosition: 0.2 });
   };
   const rowExtraData = useMemo(
     () => ({
@@ -484,7 +542,7 @@ export function SessionScreen({
                   running={activityVm.count > 0}
                   accessibilityLabel={activityVm.accessibilityLabel}
                   onPress={() => {
-                    setActivityFocus(null);
+                    focusActivity(null);
                     setActivityOpen(true);
                   }}
                 />
@@ -594,7 +652,7 @@ export function SessionScreen({
                         agent: {
                           id: child,
                           onOpen: () => {
-                            focusActivity(child);
+                            focusActivity({ kind: "child", id: child });
                             setActivityOpen(true);
                           },
                         },
@@ -627,6 +685,24 @@ export function SessionScreen({
             }}
             onContentSizeChange={onContentSize}
             onLayout={onListLayout}
+            onScrollToIndexFailed={(info) => {
+              // "Show in chat" on a row not rendered yet (no `getItemLayout`):
+              // jump near it by the average row, then try once more.
+              list.current?.scrollToOffset({
+                offset: info.averageItemLength * info.index,
+                animated: false,
+              });
+              if (showRetry.current) {
+                showRetry.current = false;
+                setTimeout(() => {
+                  list.current?.scrollToIndex({
+                    index: info.index,
+                    animated: true,
+                    viewPosition: 0.2,
+                  });
+                }, 50);
+              }
+            }}
             ListEmptyComponent={
               <View testID="transcript-empty">
                 {state.status.phase === "open" ? (
@@ -842,13 +918,20 @@ export function SessionScreen({
           palette={palette}
           visible={activityOpen}
           view={activityVm}
-          reports={reports}
-          focus={activityFocus}
+          detail={activityDetail}
+          child={activity.child}
+          job={activity.job}
           onFocus={focusActivity}
+          onDraft={(text) => controller.setChildDraft(text)}
+          onSend={() => void controller.messageChild()}
+          onStop={confirmStop}
+          onRefreshJob={() => void controller.refreshJob()}
+          {...(showIndex === null ? {} : { onShow: showInChat })}
           onLink={onLink}
           onClose={() => {
             setActivityOpen(false);
             setActivityFocus(null);
+            controller.closeDetail();
           }}
         />
         <RenameSheet

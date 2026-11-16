@@ -2,32 +2,43 @@
  * The Activity sheet (docs/feat/mobile-chrome.md Design 5, slice S8): everything
  * that runs beside the conversation, one band per group, running first —
  * Sub-agents, Shell jobs, Finished, Scheduled (a ghost: cron has no protocol yet).
- * A Finished row with a report opens it (`SubagentDetail`). Read-only in S8: the
- * running rows' detail, message and Stop, and a job's output, are S9.
+ * Every row opens its detail (S9): a child's (`SubagentDetail` — live steps,
+ * message, Stop; or a Finished child's report) or a shell job's (`JobDetail`).
  *
- * Render only (AGENTS §7): the groups, rows and labels are `activity.ts`'s; the
- * one piece of state here is WHICH report is open (presentation).
+ * Render only (AGENTS §7): the groups, rows and labels are `activity.ts`'s, the
+ * detail is `subagent-detail.ts`'s `sheetDetail`; WHICH one is open is the
+ * screen's.
  */
 import type { JSX } from "react";
 import { ActivityIndicator, Modal, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import type { ChildReport } from "../activity-memory.ts";
-import { type ActivityGroup, type ActivityView, reportRow } from "../activity.ts";
+import type { ActivityGroup, ActivityView } from "../activity.ts";
+import type { ChildAction, JobAction } from "../session-screen-controller.ts";
+import type { ActivityFocus, SheetDetail } from "../subagent-detail.ts";
 import { DENSE_FONT_SCALE, type Palette, space, typography } from "../theme.ts";
 import { BandSection } from "../ui/BandSection.tsx";
 import { Row } from "../ui/Row.tsx";
 import { Sheet } from "../ui/Sheet.tsx";
+import { JobDetail } from "./JobDetail.tsx";
 import { SubagentDetail } from "./SubagentDetail.tsx";
 
 export interface ActivitySheetProps {
   readonly palette: Palette;
   readonly visible: boolean;
   readonly view: ActivityView;
-  readonly reports: ReadonlyMap<string, ChildReport>;
-  /** The child whose report is open (a row's or the transcript card's tap); `null`: the list. */
-  readonly focus: string | null;
-  /** Open a child's report (`id`) or go back to the list (`null`). */
-  readonly onFocus: (agentId: string | null) => void;
+  /** The open detail (`sheetDetail`); `null`: the list. */
+  readonly detail: SheetDetail;
+  readonly child: ChildAction | null;
+  readonly job: JobAction | null;
+  /** Open a row's detail, or go back to the list (`null`). */
+  readonly onFocus: (focus: ActivityFocus) => void;
+  readonly onDraft: (text: string) => void;
+  readonly onSend: () => void;
+  /** Stop the open child or job — the screen confirms first (F17). */
+  readonly onStop: () => void;
+  readonly onRefreshJob: () => void;
+  /** Absent: the open report's row is not in the transcript. */
+  readonly onShow?: () => void;
   readonly onLink: (href: string) => void;
   readonly onClose: () => void;
 }
@@ -39,7 +50,7 @@ function Group({
 }: {
   readonly palette: Palette;
   readonly group: ActivityGroup;
-  readonly onOpen: (id: string) => void;
+  readonly onOpen: (focus: ActivityFocus) => void;
 }): JSX.Element {
   if (group.ghost) {
     return (
@@ -62,12 +73,10 @@ function Group({
           leading={
             row.running ? <ActivityIndicator size="small" color={palette.accent} /> : undefined
           }
+          chevron
+          onPress={() => onOpen({ kind: row.kind === "job" ? "job" : "child", id: row.id })}
           {...(row.kind === "finished"
-            ? {
-                value: row.unread ? "Report · new" : row.hasReport ? "Report" : "",
-                chevron: true,
-                onPress: () => onOpen(row.id),
-              }
+            ? { value: row.unread ? "Report · new" : row.hasReport ? "Report" : "" }
             : {})}
         >
           {row.step === undefined ? null : (
@@ -89,14 +98,19 @@ export function ActivitySheet({
   palette,
   visible,
   view,
-  reports,
-  focus,
+  detail,
+  child,
+  job,
   onFocus,
+  onDraft,
+  onSend,
+  onStop,
+  onRefreshJob,
+  onShow,
   onLink,
   onClose,
 }: ActivitySheetProps): JSX.Element {
   const insets = useSafeAreaInsets();
-  const row = reportRow(view, focus);
   const close = onClose;
   return (
     <Modal
@@ -114,18 +128,32 @@ export function ActivitySheet({
           scroll
           onClose={close}
         >
-          {row === null ? (
+          {detail === null ? (
             <ScrollView testID="activity-scroll" showsVerticalScrollIndicator>
               {view.groups.map((group) => (
                 <Group key={group.kind} palette={palette} group={group} onOpen={onFocus} />
               ))}
               <View style={{ height: insets.bottom + 20 }} />
             </ScrollView>
+          ) : detail.kind === "job" ? (
+            <JobDetail
+              palette={palette}
+              view={detail.view}
+              action={job}
+              onRefresh={onRefreshJob}
+              onStop={onStop}
+              onBack={() => onFocus(null)}
+            />
           ) : (
             <SubagentDetail
               palette={palette}
-              row={row}
-              report={reports.get(row.id) ?? null}
+              view={detail.view}
+              report={detail.report}
+              action={child}
+              onDraft={onDraft}
+              onSend={onSend}
+              onStop={onStop}
+              {...(onShow === undefined ? {} : { onShow })}
               onLink={onLink}
               onBack={() => onFocus(null)}
             />

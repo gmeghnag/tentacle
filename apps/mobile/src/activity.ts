@@ -65,7 +65,7 @@ export interface ActivityView {
 }
 
 /** One line of plain text: control characters and line breaks become spaces. */
-function oneLine(text: string): string {
+export function oneLine(text: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: flattening untrusted text
   return text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
 }

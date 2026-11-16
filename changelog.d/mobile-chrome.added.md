@@ -1,4 +1,4 @@
-- **New session from the phone, and background work you can see.** The sessions
+- **New session from the phone, and background work you can see and steer.** The sessions
   drawer gains a "New session" pill: it creates an empty session on the computer
   the drawer lists (that computer's own project), opens it with the keyboard up,
   and the first message starts it. The pill is offered only while that computer
@@ -10,5 +10,9 @@
   Shell jobs (the command, `bg-N` · status · elapsed), Finished (the children
   that ended while you watched, each opening its report, with Copy) and a greyed
   Scheduled for later. An `agent_task` card in the conversation links to its
-  child in that sheet. Read-only for now: messaging or stopping a child and a
-  job's output come next.
+  child in that sheet. Every row opens: a running child shows its latest steps,
+  your messages to it (marked "read" once it has taken them in), a "Message
+  sa-N…" field and Stop; a shell job shows its output (pull to refresh) and
+  Stop; a finished child's report adds "Show in chat". Stop asks once first,
+  and a message or Stop the computer refuses (the child just ended, an older
+  computer) says why and keeps what you typed.
