@@ -311,4 +311,123 @@ it as such in Execution (§9). Gate: `bun run check`, lint baseline 0/0.
 
 ## Execution
 
+*— claude-opus-5-5, 2026-11-16*
+
+### Load-bearing check (re-run first, as instructed)
+
+`bun run repro.ts` from `.tentacle/tmp/serve-autoaccept-unattended/` on this tree **before any
+edit** (a real `SessionHost{sharedAutoAccept:true}` + a `Connection`; the client sets ON, prompts,
+`session/detach`es — the phone app closing):
+
+```
+set_auto_accept -> {"on":true}
+updates seen: permission_request
+tool ran: 0 -> STUCK: nobody answers the ask
+```
+
+Exactly the plan's expected output → the assumption holds: one requester, one resolution point.
+After the fix (same script, `answersAutoAccept: true` added to the host):
+
+```
+set_auto_accept -> {"on":true}
+updates seen: permission_request,permission_resolved
+tool ran: 1 -> answered
+```
+
+### As built, in dependency order
+
+1. **`packages/daemon/src/hosted-session.ts`**
+   - `TurnErrorPolicy` (`:524-533`) gains `answersAutoAccept?: boolean`, with the doc comment
+     saying why it rides this bag: it must be known at CONSTRUCTION (a reload's resumed turn
+     re-asks inside the constructor) and this is the constructor input every host already passes.
+     Stored as `private readonly answersAutoAccept: boolean` (`:729-734`), set `=== true`
+     (`:924`).
+   - `PendingAsk` (`:261-272`) gains `readonly req: PermissionRequest` and `readonly turnId?`,
+     set by `registerAsk` (which takes both as new parameters, `:1248-1267`); its two callers pass
+     the live ask's inputs: `awaitDecision` → `(req, this.activeTurnId ?? undefined)`,
+     `awaitBackgroundDecision` → `(req, spawnTurn)`.
+   - `autoAnswers(req, turnId)` (`:1423`): `answersAutoAccept && autoAccept &&
+     autoApproves(req, ownRequest(turnId, () => true))` — `autoApproves`/`ownRequest` imported
+     from `@tentacle/core`, never copied.
+   - `autoAnswer(requestId)` (`:1444`): only an ask that exists, is `shown` and offers
+     `allow_once`, and only when `autoAnswers` holds; answers through `resolvePermission`, never
+     `settle`.
+   - Called right after the emit in `awaitDecision`'s `persisted().then` (`:1207`) and in
+     `awaitBackgroundDecision` (`:1328`).
+   - The `blockingUnsupported` refusal is skipped when `autoAnswers` holds, in BOTH gates
+     (`:1151`, `:1304`) — and `recheckAsks` (`:1400-1410`) skips such an ask too, so a detach/attach
+     in the window before the emit cannot refuse one the daemon was going to answer.
+   - `setAutoAccept` (`:2846-2860`): on a change to `true`, after `persist()` + `emit(auto_accept)`,
+     sweeps `[...this.asks.keys()]` through `autoAnswer`.
+2. **`packages/daemon/src/session-host.ts`**: `SessionHostOptions.answersAutoAccept?` (`:283-290`),
+   getter `answersAutoAccept` (`:513`, `=== true`), and the constructor wiring at the
+   `HostedSession` `TurnErrorPolicy` object (`:1430`) — conditional spread, so an unset option adds
+   nothing.
+3. **`packages/cli/src/serve.ts`**: `answersAutoAccept: true` beside `sharedAutoAccept: true` in
+   `startDaemon` (`:766`). Not in `worker.ts`, `podSessionHost`, `startStdioDaemon` or the relay.
+
+**One small addition beyond the Implementation's site list**, in the same rule as OD5: `recheckAsks`
+also skips an ask `autoAnswers` holds. Before the fix the question could not arise; now it can —
+a detach/attach changing the attached set in the window between the ask's registration and its
+emit would settle it `cancelled` with "client does not support permission_request", a refusal for an
+ask nobody needed to answer. No test covers that window (it is a one-tick race); the change is a
+guard for it, not a behaviour the tests pin.
+
+Otherwise **no drift from the Implementation.** No protocol/schema change (D6/OD4 held), so
+`packages/protocol/schema/protocol.json` is untouched and no `protocol.d/` note is needed. D7 was
+already done in the planning commit.
+`changelog.d/serve-autoaccept-unattended.fixed.md` added with the plan's bullet.
+
+### Tests (red first; each named mutation run and pasted)
+
+`packages/daemon/test/serve-autoaccept-unattended.test.ts` (13 tests) and
+`packages/cli/test/serve-autoaccept-unattended.test.ts` (2 tests, the real `startDaemon` WebSocket
+path + the host-getter pins). Cases: U1, U2, U3, U4, U5, U6 (+ U6b, a real out-of-band ask through
+the session's broker during a live turn), U7, U8 (+ U8b archived reopen), U9, U10, U11 (RPC), the
+CLI end-to-end, and the pod/worker getters.
+
+**Mutation results** (`sh .tentacle/tmp/serve-autoaccept-unattended/mutate.sh`, each mutation
+applied to the real file, the named tests run, the file restored with `cp` — never git; final
+`diff -q` reported `clean`):
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | drop `autoAnswer` in `awaitDecision` | U1, U5, U8, U9, U10, U11 red (6 fail) |
+| M2 | `answersAutoAccept !== false` (default on) | U2, U7, U10, U8, U8b red |
+| M3 | drop `this.autoAccept` from `autoAnswers` | U3, U4 red |
+| M4 | drop the D4 sweep in `setAutoAccept` | U4 red |
+| M5 | `settle` instead of `resolvePermission` in `autoAnswer` | U5 red |
+| M6 | `ownRequest` only, no `autoApproves` | U6 red — and, re-run after U6b, **both U6 and U6b** red |
+| M7 | no turn id for a background ask | U7 red |
+| M8 | ignore `restored.autoAccept` | U8 red |
+| M9 | no `blockingUnsupported` skip | U10 red |
+| M10 | delete `answersAutoAccept: true` from `startDaemon` | the CLI end-to-end test red |
+| M11 | add `answersAutoAccept: true` to the pod host | the CLI pod/worker getter test red |
+
+U2, U3, U6 are guards (green before the fix — nothing answered at all then); their non-vacuity is
+exactly the M2 / M3 / M6 rows above, showing each red after the fix (§9).
+
+**Red before green, on the property**: on the unmodified tree the same fixtures hang — the repro
+above prints `STUCK`, and U1's `until(() => !hosted.running)` times out. The remaining red-first
+evidence is the mutation table, taken after the fix, which is what §9 asks for a guard.
+
+### Gate
+
+`bunx tsc --noEmit` (+ `apps/mobile`, `apps/relay`) — clean · `bun run lint` — clean (0 errors,
+0 warnings, the AGENTS §6 baseline) · `bun test` — **12752 pass, 5 skip, 0 fail** (12757 across 910
+files; the 5 skips are the opt-in live/slow ones, §6 — none is in a file this task touches).
+Narrow files during iteration: the two new ones plus `session-auto-accept`,
+`session-auto-accept-persist`, `persistence`, `subagent-background`, `serve-autowake`,
+`parallel-agents` — all green.
+
+### Unverified, stated plainly
+
+- The `recheckAsks` skip has no test (a one-tick detach/attach race); it is reasoned from
+  `attach`/`detach` both calling `recheckAsks`, not measured. Verify by attaching an
+  old client and detaching it inside the same tick as a raise.
+- The `serve` end-to-end test uses the fake OpenAI endpoint's `shell` tool with `echo hello`; it
+  exercises the real WebSocket daemon, not a real `mcp__playwright__` ask. The requester path is the
+  same one (`permissionOptions` offers `allow_once` for every ask), so this is a fidelity note, not
+  a gap in the property.
+
 ## Review
