@@ -1587,3 +1587,25 @@ Reviewer is the same model family as the executor (fresh context only).
   acceptable).
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; same model family as the executor)
+
+### Round 3
+
+**Verdict: APPROVE** (P3; round-2 MEDIUM fixed, no new HIGH/MEDIUM).
+
+- **Round-2 MEDIUM — FIXED.** `isPdf` (`packages/core/src/pdf-text.ts:521-551`)
+  now allows a printable prefix and accepts EOL, `%` or a non-text byte after the
+  version. The round-2 repro (`.tentacle/tmp/pdf-read/rev-p3/r2.ts`) gives
+  `plain`, `printableJunk` (HTTP prefix) and `sameLineBinaryComment` all EXTRACTED.
+  The round-1 repro (`r.ts`, `notes.md` prose, whole + ranged) still reads as text.
+- **Mutations (each reverted, `git status` clean):** drop the `%` branch → 3 FAIL
+  (incl. `fs_read` "the binary comment on the header line"); bring back the
+  printable-prefix rejection → 3 FAIL (incl. `fs_read` "a printable junk line before
+  the header").
+- **Regressions:** none found. The text fallback from round 1 is unchanged and still
+  covers prose that the looser sniff lets through (e.g. `%PDF-1.7` alone on a line).
+  Nit, not blocking: such a text file over `MAX_PDF_BYTES` is refused as too large
+  instead of read as text, because the size check runs before the fallback.
+- **Gate:** `fs-read-pdf` + `pdf-text` + `host-execution` 95 pass, 0 fail ·
+  `bun run lint` 1755 files, clean · `bun run typecheck` exit 0. Full suite not re-run.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; same model family as the executor)
