@@ -325,6 +325,12 @@ export interface PersistingController extends SessionController {
   seedAutoAccept(on: boolean): void;
   /** `RemoteSession.capabilities`: the session's MCP/skill switches as the daemon last reported them. */
   capabilities: RemoteSession["capabilities"];
+  /** `RemoteSession.onCapabilities`: the switches' snapshots and changes (the `/mcp` / `/skills` rows). */
+  onCapabilities: RemoteSession["onCapabilities"];
+  /** `RemoteSession.setCapability`: Space in `/mcp` / `/skills` (S4). */
+  setCapability: RemoteSession["setCapability"];
+  /** `RemoteSession.opened`: open daemon-side (no switches yet ⇒ "not started", not "unsupported"). */
+  opened(): boolean;
   /** `RemoteSession.seedCapabilities`: the NEXT created session starts with this one's switches. */
   seedCapabilities(): void;
   /** `RemoteSession.watch`; a foreign turn is saved at its end, a `history` at once. */
@@ -811,6 +817,11 @@ export function persistingController(
       inner.seedAutoAccept(on);
     },
     capabilities: () => inner.capabilities(),
+    // The `/mcp` / `/skills` switches (S4). A change is saved by the
+    // subscription above (`capsSeen`): nothing to flush here.
+    onCapabilities: (listener) => inner.onCapabilities(listener),
+    setCapability: (kind, name, enabled) => inner.setCapability(kind, name, enabled),
+    opened: () => inner.opened(),
     // A `/clear` close-and-replace keeps the switches (owner Q5, S3b).
     seedCapabilities() {
       inner.seedCapabilities();

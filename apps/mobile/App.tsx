@@ -92,6 +92,11 @@ import {
   drawerTarget,
   initialDrawer,
 } from "./src/drawer-nav.ts";
+import {
+  NEW_SESSION_TITLE,
+  createDrawerNewSession,
+  newSessionPill,
+} from "./src/drawer-new-session.ts";
 import { createDrawerRename } from "./src/drawer-rename.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
@@ -140,7 +145,7 @@ import {
   keychainKV,
   pushKeychain,
 } from "./src/secure-kv.ts";
-import { createSessionController } from "./src/session-controller.ts";
+import { createFreshSession, createSessionController } from "./src/session-controller.ts";
 import type { InfoPort } from "./src/session-info-controller.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
 import { type SessionListState, type SessionRow, initialSessionList } from "./src/session-list.ts";
@@ -1049,6 +1054,43 @@ function SessionDrawerHost({
   );
   const [renaming, setRenaming] = useState(() => rename.state());
   useEffect(() => rename.subscribe(() => setRenaming(rename.state())), [rename]);
+  // New session (S7): created at the tap on the LISTED computer (the phone's
+  // open and outbox attach only), then opened like a row, composer focused.
+  const navigateRef = useRef({ from, onNavigate, names: new Map<string, string>() });
+  navigateRef.current.from = from;
+  navigateRef.current.onNavigate = onNavigate;
+  const fresh = useMemo(
+    () =>
+      createDrawerNewSession({
+        mint: () => crypto.randomUUID(),
+        create: async (computerId, sessionId) => {
+          let link: Awaited<ReturnType<typeof LINKS.get>>;
+          try {
+            link = await LINKS.get(computerId);
+          } catch {
+            return { ok: false, reason: "link" } as const;
+          }
+          return createFreshSession(link.client.newSession(undefined, sessionId));
+        },
+        opened: (computerId, sessionId) => {
+          const at = navigateRef.current;
+          dispatch({ type: "close" });
+          at.onNavigate(
+            drawerTarget(at.from, {
+              computerId,
+              computerName: at.names.get(computerId) ?? computerId,
+              sessionId,
+              title: NEW_SESSION_TITLE,
+              archived: false,
+              focus: true,
+            }),
+          );
+        },
+      }),
+    [],
+  );
+  const [freshState, setFreshState] = useState(() => fresh.state());
+  useEffect(() => fresh.subscribe(() => setFreshState(fresh.state())), [fresh]);
   const openDrawer = useCallback(
     () => dispatch({ type: "open", computerId: from.computerId }),
     [from.computerId],
@@ -1060,6 +1102,8 @@ function SessionDrawerHost({
   });
   const title = drawerTitle(records, rows, listed);
   const name = title?.name ?? listed;
+  navigateRef.current.names.set(listed, name);
+  const canCreate = title?.canCreate === true;
   const close = (): void => dispatch({ type: "close" });
   return (
     <SessionsDrawer
@@ -1110,6 +1154,9 @@ function SessionDrawerHost({
       onToggleArchived={(shown) => dispatch({ type: "toggle-archived", shown })}
       onMore={() => void controller.more()}
       onRetry={() => void controller.refresh()}
+      newSession={newSessionPill(canCreate, freshState)}
+      onNewSession={() => void fresh.start(listed, canCreate)}
+      onNewSessionDismiss={() => fresh.dismiss()}
     >
       {children(openDrawer)}
     </SessionsDrawer>
@@ -1133,6 +1180,7 @@ function SessionRoute({
   sessionId,
   title,
   archived,
+  focus,
   onOpenDrawer,
 }: {
   readonly palette: Palette;
@@ -1140,6 +1188,7 @@ function SessionRoute({
   readonly sessionId: string;
   readonly title: string;
   readonly archived: boolean;
+  readonly focus: boolean;
   readonly onOpenDrawer: () => void;
 }): JSX.Element {
   const [controller, setController] = useState<SessionScreenController | null>(null);
@@ -1233,6 +1282,7 @@ function SessionRoute({
       controller={controller}
       title={title}
       onOpenDrawer={onOpenDrawer}
+      focusComposer={focus}
     />
   );
 }
@@ -1906,6 +1956,7 @@ function AppShell(): JSX.Element {
                     sessionId={route.params.sessionId}
                     title={route.params.title}
                     archived={route.params.archived}
+                    focus={route.params.focus === true}
                   />
                 )}
               </SessionDrawerHost>

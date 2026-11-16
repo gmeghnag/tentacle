@@ -22,6 +22,8 @@ export interface DrawerPick {
   readonly title: string;
   /** From the Archived section: opened with `archived: true`, never reopened. */
   readonly archived: boolean;
+  /** Just created by New session (S7): opened with the composer focused. */
+  readonly focus?: boolean;
 }
 
 export type DrawerStackRoute =
@@ -47,6 +49,7 @@ export function drawerTarget(from: SessionRoute, pick: DrawerPick): DrawerNav {
       sessionId: pick.sessionId,
       title: pick.title,
       archived: pick.archived,
+      ...(pick.focus === true ? { focus: true } : {}),
     },
   };
   if (sameComputer) {

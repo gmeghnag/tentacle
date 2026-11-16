@@ -8,7 +8,7 @@
  * testIDs (the flows' contract, unchanged): `composer-input`, `composer-photo`,
  * `composer-send` / `composer-stop` / `composer-send-later`, `composer-filled`.
  */
-import type { JSX } from "react";
+import { type ComponentRef, type JSX, useEffect, useRef } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import type { MicButton } from "../dictation.ts";
 import { type Palette, shadow, size, typography } from "../theme.ts";
@@ -39,6 +39,8 @@ export interface ComposerProps {
    * (docs/fix/mobile-chat-glitches.md, item 6).
    */
   readonly fieldKey: number;
+  /** Take focus once the field is editable (a session just created, mobile-chrome S7). */
+  readonly focus?: boolean;
 }
 
 const LABEL: Readonly<Record<ComposerButton, string>> = {
@@ -72,7 +74,18 @@ export function Composer({
   onMic,
   level,
   fieldKey,
+  focus = false,
 }: ComposerProps): JSX.Element {
+  // Focused when it first becomes editable (the attach answered), never again:
+  // the person's own taps decide after that.
+  const input = useRef<ComponentRef<typeof TextInput>>(null);
+  const focused = useRef(false);
+  useEffect(() => {
+    if (focus && editable && !focused.current) {
+      focused.current = true;
+      input.current?.focus();
+    }
+  }, [focus, editable]);
   const stop = button === "stop";
   const disabled = button === "disabled";
   const actionBg = stop ? palette.label : disabled ? palette.fill : palette.accentFill;
@@ -103,6 +116,7 @@ export function Composer({
         <TextInput
           key={fieldKey}
           testID="composer-input"
+          ref={input}
           style={[typography.body, styles.input, { color: palette.label }]}
           value={draft}
           onChangeText={onChange}

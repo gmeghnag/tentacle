@@ -68,6 +68,8 @@ export interface KeyHost {
   // --- panels, sessions, dock
   closePanel(): void;
   panelApply(action: TreeAction): void;
+  /** Flip the open panel's selected switch (`panelSwitchOp` on the live state). */
+  switchCapability(): void;
   setSessionsState(state: SessionsState): void;
   switchTo(id: string, reopen: boolean): void;
   sessionsDelete(id: string, startedGen: number): void;
@@ -170,6 +172,9 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "applyPanel":
       host.panelApply(effect.action);
+      return;
+    case "switchCapability":
+      host.switchCapability();
       return;
     case "setSessionsState":
       host.setSessionsState(effect.state);

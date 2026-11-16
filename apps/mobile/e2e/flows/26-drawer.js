@@ -18,3 +18,13 @@ if (state.title !== expected) {
     `the drawer's rename never reached the computer: title is ${JSON.stringify(state.title)}, expected ${JSON.stringify(expected)}`,
   );
 }
+// S7: the New session's first prompt reached the model (the session was
+// created at the tap; a send to an id that does not exist would never run).
+const prompts = http.get(`http://${MAESTRO_HOOKS}/model-prompts`);
+if (!prompts.ok) {
+  throw new Error(`model-prompts failed: ${prompts.status} ${prompts.body}`);
+}
+const seen = json(prompts.body).prompts;
+if (!seen.some((prompt) => prompt.includes("NEWSESSION flow twenty-six"))) {
+  throw new Error(`the new session's first prompt never ran: ${JSON.stringify(seen)}`);
+}
