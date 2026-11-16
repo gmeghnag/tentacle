@@ -361,6 +361,8 @@ export function updateToEvent(
     case "subagent_message":
     case "session_settings":
     case "auto_accept":
+    // `capabilities` by the session's capability listeners (`RemoteClient`, likewise).
+    case "capabilities":
     case "plan":
     case "turn_start":
     case "turn_end":

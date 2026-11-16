@@ -63,6 +63,7 @@ import {
   restoreNotice,
 } from "./laptop-blobs.ts";
 import { type OwnUse, type ResidentUse, ownUseOf, residentUseOf } from "./relay-state.ts";
+import { wireCapabilities } from "./session-capabilities.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import {
   type SettingsLine,
@@ -322,6 +323,10 @@ export interface PersistingController extends SessionController {
   readonly autoAccept: RemoteSession["autoAccept"];
   /** `RemoteClient.seedAutoAcceptOnCreate`: the value the NEXT created session starts with. */
   seedAutoAccept(on: boolean): void;
+  /** `RemoteSession.capabilities`: the session's MCP/skill switches as the daemon last reported them. */
+  capabilities: RemoteSession["capabilities"];
+  /** `RemoteSession.seedCapabilities`: the NEXT created session starts with this one's switches. */
+  seedCapabilities(): void;
   /** `RemoteSession.watch`; a foreign turn is saved at its end, a `history` at once. */
   watch: RemoteSession["watch"];
   /** `RemoteSession.open` (the eager attach of an `attach` session; else a no-op). */
@@ -517,6 +522,20 @@ export function persistingController(
     await bounded(flushed(), FLUSH_ON_EXIT_TIMEOUT_MS);
   };
   const unsubscribeTitle = inner.onTitle(() => flush());
+  // The switches changed (any client, idle too: docs/feat/session-capabilities.md
+  // S3b): only a save puts their log entry on the laptop before the next turn.
+  // Not the first state seen (the open's snapshot: `saveOnOpen` saves it) —
+  // nor one already known when this subscribes.
+  const capsNow = inner.capabilities?.();
+  let capsSeen: string | undefined = capsNow === undefined ? undefined : JSON.stringify(capsNow);
+  const unsubscribeCaps = inner.onCapabilities?.((state) => {
+    const key = state === undefined ? undefined : JSON.stringify(state);
+    const changed = capsSeen !== undefined && key !== undefined && key !== capsSeen;
+    capsSeen = key ?? capsSeen;
+    if (changed) {
+      flush();
+    }
+  });
   // A background sub-agent's report can land while nobody streams (the session
   // is idle): only this save puts its `end` on the laptop's log (M5,
   // docs/feat/subagent-background.md). `?.`: unit-test fakes of a session.
@@ -763,6 +782,7 @@ export function persistingController(
     close() {
       closed = true;
       unsubscribeTitle();
+      unsubscribeCaps?.();
       unsubscribeAgentExit?.();
       unsubscribeIdle?.();
       void flushed().then(() => inner.close());
@@ -789,6 +809,11 @@ export function persistingController(
     // `/clear` fork and a hop target start with the switch the person has now.
     seedAutoAccept(on: boolean) {
       inner.seedAutoAccept(on);
+    },
+    capabilities: () => inner.capabilities(),
+    // A `/clear` close-and-replace keeps the switches (owner Q5, S3b).
+    seedCapabilities() {
+      inner.seedCapabilities();
     },
     ...(carried
       ? {
@@ -1036,7 +1061,14 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
           record?.messages,
           uid,
           title.source === "auto" ? undefined : { text: title.text, source: title.source },
-          { closeIfLast },
+          // The record's switches seed the open that recreates it: `--resume`
+          // and a hop (its seed is this record) keep them (S3b, owner Q5).
+          {
+            closeIfLast,
+            ...(record?.capabilities
+              ? { capabilities: wireCapabilities(record.capabilities) }
+              : {}),
+          },
         );
     const controller = persistingController(
       session,

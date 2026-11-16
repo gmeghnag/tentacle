@@ -21,6 +21,7 @@ import {
   type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
+  type SessionCapabilitiesWire,
   type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionUpdate,
@@ -157,6 +158,11 @@ export class RemoteSession implements SessionStreamListener {
   private readonly desiredId?: string;
   /** The resumed record's chosen title: seeds the open that creates the session daemon-side. */
   private readonly seedTitle: SeedTitle | undefined;
+  /**
+   * The resumed record's MCP/skill switches (docs/feat/session-capabilities.md
+   * S3b): seed the open that creates the session daemon-side (a resume, a hop).
+   */
+  private readonly seedCaps: SessionCapabilitiesWire | undefined;
   private id: string | null = null;
   /** The in-flight `session/open` of the first `send`, until `id` is known. */
   private opening: Promise<string> | null = null;
@@ -213,6 +219,11 @@ export class RemoteSession implements SessionStreamListener {
    * it keeps a local, in-memory value (AGENTS §7, "a pod is not trusted").
    */
   readonly autoAcceptHandle: AutoAcceptHandle;
+  /** The daemon's switches (`capabilities()`); undefined → it has none (yet). */
+  private capabilityState: SessionCapabilitiesWire | undefined;
+  private readonly capabilityListeners = new Set<
+    (state: SessionCapabilitiesWire | undefined, by?: string) => void
+  >();
   /**
    * The session's auto-accept as a consumer sees it (a TUI's feed, the phone's
    * sheet): `current()`, `set()`, `onChange()`, `shared()` — never `receive`.
@@ -294,11 +305,13 @@ export class RemoteSession implements SessionStreamListener {
     attach?: { readonly reopen?: boolean },
     closeIfLast = false,
     daemonWakes = false,
+    seedCapabilities?: SessionCapabilitiesWire,
   ) {
     this.client = client;
     this.seedMessages = seedMessages;
     this.desiredId = desiredId;
     this.seedTitle = seedTitle;
+    this.seedCaps = seedCapabilities;
     this.attach = attach;
     this.closeIfLast = closeIfLast;
     this.daemonWakes = daemonWakes;
@@ -336,6 +349,84 @@ export class RemoteSession implements SessionStreamListener {
   /** An `auto_accept` update from any client (own echoes included). */
   autoAcceptChanged(on: boolean, by?: string): void {
     this.autoAcceptHandle.receive(on, by);
+  }
+
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md), as
+   * the daemon last reported them: undefined until an open says it has them,
+   * and again after an older daemon answers `MethodNotFound` — a surface then
+   * hides its toggles ("not supported by this computer").
+   */
+  capabilities(): SessionCapabilitiesWire | undefined {
+    return this.capabilityState;
+  }
+
+  /**
+   * Follow the switches: called with the daemon's state on every snapshot and
+   * change (`by` set only on a change: another client's label, untrusted
+   * display text), and with undefined when the daemon turns out not to have
+   * them. Returns the unsubscribe.
+   */
+  onCapabilities(
+    listener: (state: SessionCapabilitiesWire | undefined, by?: string) => void,
+  ): () => void {
+    this.capabilityListeners.add(listener);
+    return () => {
+      this.capabilityListeners.delete(listener);
+    };
+  }
+
+  /**
+   * `session/set_capability`: turn one MCP server or skill on/off for the model.
+   * The state is NOT taken from the answer but from the daemon's echo (the
+   * `capabilities` update, emitted before it answers): with two clients racing,
+   * a late answer must not undo the other's later change (F4). Resolves with the
+   * daemon's state after applying. Rejects on a refusal; `MethodNotFound` (an
+   * older daemon) also clears the state, so the toggles hide (F7).
+   */
+  async setCapability(
+    kind: "mcp" | "skill",
+    name: string,
+    enabled: boolean,
+  ): Promise<SessionCapabilitiesWire> {
+    try {
+      const result = await this.client.setSessionCapability(this, kind, name, enabled);
+      return result.capabilities;
+    } catch (error) {
+      if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+        this.noteCapabilities(undefined);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The NEXT session this client creates starts with this one's switches
+   * (`OpenParams.capabilities`, S3b): a `/clear` close-and-replace keeps them
+   * (owner Q5). A no-op while the daemon has reported none (unknown or an older
+   * daemon): nothing to carry.
+   */
+  seedCapabilities(): void {
+    if (this.capabilityState !== undefined) {
+      this.client.seedCapabilitiesOnCreate(this.capabilityState);
+    }
+  }
+
+  /** `SessionStreamListener`: the daemon's switches on an open/re-attach (F5). */
+  capabilitiesSnapshot(state: SessionCapabilitiesWire): void {
+    this.noteCapabilities(state);
+  }
+
+  /** A `capabilities` update from any client (own echoes included). */
+  capabilitiesChanged(state: SessionCapabilitiesWire, by?: string): void {
+    this.noteCapabilities(state, by);
+  }
+
+  private noteCapabilities(state: SessionCapabilitiesWire | undefined, by?: string): void {
+    this.capabilityState = state;
+    for (const listener of [...this.capabilityListeners]) {
+      listener(state, by);
+    }
   }
 
   /** The link went away: a set still in flight is unacknowledged from here on. */
@@ -470,7 +561,14 @@ export class RemoteSession implements SessionStreamListener {
       // The id is set INSIDE `opening`: whoever awaits it (an enqueue, a
       // send-now racing the first send) finds the session open.
       const opening = this.client
-        .openSession(undefined, this.seedMessages, this.desiredId, this, this.seedTitle)
+        .openSession(
+          undefined,
+          this.seedMessages,
+          this.desiredId,
+          this,
+          this.seedTitle,
+          this.seedCaps,
+        )
         .then(
           (sessionId) => {
             this.id = sessionId;

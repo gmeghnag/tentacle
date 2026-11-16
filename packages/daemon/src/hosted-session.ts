@@ -46,10 +46,12 @@ import type {
   AgentEvent,
   AskHooksTrust,
   BeforeRun,
+  CapabilityOp,
   Session,
+  SessionCapabilities,
   SessionGrants,
 } from "@tentacle/agent";
-import { EMPTY_TITLE, sessionTitle } from "@tentacle/agent";
+import { EMPTY_TITLE, NO_CAPABILITIES, applyCapabilityOp, sessionTitle } from "@tentacle/agent";
 import {
   AGENT_MESSAGE_MAX_CHARS,
   type AgentJob,
@@ -85,6 +87,7 @@ import {
   LOG_PAGE_MAX_CHARS,
   type LogCursor,
   type LogResult,
+  MAX_DISABLED_CAPABILITIES,
   MAX_SESSION_TITLE,
   type PermissionOutcome,
   type PermissionRequestUpdate,
@@ -96,12 +99,14 @@ import {
   type SendNowMessage,
   type SendNowRefusal,
   type SendNowTarget,
+  type SessionCapabilitiesWire,
   type SessionContextResult,
   type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionTitle,
   type SessionUpdate,
   type SetAutoAcceptResult,
+  type SetCapabilityResult,
   type Sha256,
   type SnapshotResult,
   type SubagentRow,
@@ -127,6 +132,7 @@ import {
   stopReasonToProtocol,
   toSessionSkills,
   toUpdateParams,
+  toWireCapabilities,
   wireLine,
 } from "./mapping.ts";
 import { outcomeToResponse, toPermissionRequestUpdate } from "./permission-map.ts";
@@ -317,6 +323,12 @@ export interface RestoredSessionState {
    */
   readonly autoAccept?: boolean;
   /**
+   * The session's MCP/skill switches at the restart, from its log's last
+   * `capabilities` entry (`DaemonSessionRecord.capabilities`,
+   * docs/feat/session-capabilities.md S3b). Absent → everything on.
+   */
+  readonly capabilities?: SessionCapabilities;
+  /**
    * The record's installed head (`DaemonSessionRecord.head`: its index in the
    * reloaded history): the summary again, cut short or not. Absent: none.
    */
@@ -443,6 +455,17 @@ export interface TurnErrorPolicy {
 /** The most of a failed turn's message the wire carries (it may be an upstream body). */
 export const TURN_ERROR_MAX = 400;
 
+/** A state from outside (a client's seed, a reloaded log entry): sorted and de-duplicated, like every applied op. */
+function normalizeCapabilities(state: SessionCapabilities): SessionCapabilities {
+  const norm = (names: readonly string[]) => [...new Set(names)].sort();
+  return { disabledMcp: norm(state.disabledMcp), disabledSkills: norm(state.disabledSkills) };
+}
+
+/** Something is turned off (else the state is the default, and the log says nothing). */
+function hasDisabled(state: SessionCapabilities): boolean {
+  return state.disabledMcp.length > 0 || state.disabledSkills.length > 0;
+}
+
 /** One line: every whitespace run and control character becomes a single space, and
  * the bidi/zero-width controls that could reorder or hide what follows are dropped. */
 function oneLineText(text: string): string {
@@ -560,6 +583,14 @@ export class HostedSession {
    * Off at creation unless `session/open{autoAccept}` seeded it.
    */
   autoAccept = false;
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md): what
+   * the model is NOT offered. Held here, not only on the agent, because a
+   * settings sync builds a fresh agent (everything on) and `swapAgent`
+   * re-applies it. Everything on at creation unless `session/open{capabilities}`
+   * seeded it (`seedCapabilities`).
+   */
+  private caps: SessionCapabilities = NO_CAPABILITIES;
   private readonly session: Session;
   /** The factory's broker: its requester is this session's (installed once, below). */
   private readonly permissions: PermissionBroker;
@@ -788,6 +819,12 @@ export class HostedSession {
     this.watchers = new SessionWatchers(now);
     const resume = restored?.resume;
     this.autoAccept = restored?.autoAccept === true;
+    // The switches a restart reloads (before the log's first segment, which
+    // states them again: `logSegmentFacts`).
+    if (restored?.capabilities !== undefined) {
+      this.caps = normalizeCapabilities(restored.capabilities);
+      session.currentAgent().setCapabilities(this.caps);
+    }
     // A fresh epoch per incarnation (decision D1): a `since` from a previous
     // session under the same id never matches. The seed (resume) is covered.
     // A resumed turn is running AT the cut: its prompt is already in the
@@ -1852,6 +1889,12 @@ export class HostedSession {
    */
   private logSegmentFacts(): void {
     this.log.title(this.wireTitle());
+    // The switches too, when something is off (docs/feat/session-capabilities.md
+    // F12): a segment is self-contained even when the older ones are dropped.
+    // Everything on logs nothing — the fold's default.
+    if (hasDisabled(this.caps)) {
+      this.log.capabilities(this.caps);
+    }
     for (const fact of this.agentJobs.segmentFacts()) {
       if ("stopReason" in fact) {
         this.log.subagentEnd(fact);
@@ -2187,7 +2230,9 @@ export class HostedSession {
    * shares the scan). Rejects when the scan does: nothing changes.
    */
   async skills(): Promise<SessionSkillsResult> {
-    return toSessionSkills(await this.session.refreshSkills());
+    const listing = await this.session.refreshSkills();
+    // Read after the scan: a toggle that landed during it is reported.
+    return toSessionSkills(listing, this.caps.disabledSkills);
   }
 
   /**
@@ -2565,6 +2610,8 @@ export class HostedSession {
       readonly id: string;
     },
   ): void {
+    // A fresh agent starts with everything on: the session's switches carry over.
+    next.setCapabilities(this.caps);
     const previous = this.session.replaceAgent(next);
     // The system head was replaced IN PLACE behind the cut (same length): the
     // one change no cut follows — derived here, or the log would miss it.
@@ -2599,6 +2646,68 @@ export class HostedSession {
       this.emit({ type: "auto_accept", on, ...(by ? { by } : {}) });
     }
     return { on: this.autoAccept };
+  }
+
+  /** The session's switches now: the `OpenResult.capabilities` snapshot (F5). */
+  capabilities(): SessionCapabilitiesWire {
+    return toWireCapabilities(this.caps);
+  }
+
+  /**
+   * The switches of a session this open CREATED (`session/open{capabilities}`,
+   * exactly like `autoAccept`): applied to the agent before its first turn, no
+   * emit (no client is attached yet that has not read the snapshot).
+   */
+  seedCapabilities(seed: SessionCapabilities): void {
+    // Client-supplied: kept sorted and de-duplicated, like every applied op.
+    const state = normalizeCapabilities(seed);
+    this.caps = state;
+    this.session.currentAgent().setCapabilities(state);
+    // Recorded (S3b): the first segment was logged before the seed, so the
+    // carried state (a resume, a fork, a hop) follows it. Everything on: nothing.
+    if (hasDisabled(state)) {
+      this.log.capabilities(state);
+      // The create's first write was captured before this entry (`serve`):
+      // another one, or it lands only with the next change.
+      this.persist();
+    }
+  }
+
+  /**
+   * `session/set_capability` (docs/feat/session-capabilities.md): apply ONE
+   * delta to the session's switches, hand the result to the agent (from its
+   * next model call; a round in flight keeps its snapshot, F1/F2), and tell
+   * every attachment if it CHANGED. Idempotent: a set to the current value
+   * returns without an emit. Synchronous, no lock (AGENTS §7): two deltas are
+   * applied and emitted in one total order, so different items both land and
+   * every client converges on the last echo (F4). A new name past
+   * `MAX_DISABLED_CAPABILITIES` in its set is `InvalidParams` (F10).
+   */
+  setCapability(op: CapabilityOp, by?: string): SetCapabilityResult {
+    this.assertKnown();
+    const next = applyCapabilityOp(this.caps, op);
+    if (next !== this.caps) {
+      const set = op.kind === "mcp" ? next.disabledMcp : next.disabledSkills;
+      if (set.length > MAX_DISABLED_CAPABILITIES) {
+        throw new RpcError(
+          JsonRpcErrorCode.InvalidParams,
+          `at most ${MAX_DISABLED_CAPABILITIES} ${op.kind} names may be turned off`,
+        );
+      }
+      this.caps = next;
+      this.session.currentAgent().setCapabilities(next);
+      // The record is the log (S3b): the whole state after, then a write
+      // (`serve`; a no-op elsewhere). A crash before it lands loses this one
+      // change, and the reload says what it has (F6).
+      this.log.capabilities(next);
+      this.persist();
+      this.emit({
+        type: "capabilities",
+        capabilities: toWireCapabilities(next),
+        ...(by ? { by } : {}),
+      });
+    }
+    return { capabilities: toWireCapabilities(this.caps) };
   }
 
   /**

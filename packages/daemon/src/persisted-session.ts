@@ -14,6 +14,7 @@ import {
   type KnownLogEntry,
   type LogCursor,
   type ReturnedEntry,
+  type SessionCapabilitiesWire,
   type TurnEnd,
 } from "@tentacle/protocol";
 
@@ -136,6 +137,13 @@ export interface DaemonSessionRecord extends SessionRecord {
    * which `SessionHost.restore` decides by not handing it to a reopen.
    */
   readonly autoAccept?: boolean;
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md S3b):
+   * the last `capabilities` entry of the log THROUGH `logHead` (unpaired: the
+   * last segment's). No sidecar field — the log is the record. Absent → none
+   * logged, everything on.
+   */
+  readonly capabilities?: SessionCapabilitiesWire;
   /** The log's projection at `logHead` (`messages` = its first `k` messages + the overlay). */
   readonly logged: readonly ChatMessage[];
   /** The log entry this record pairs with: a reload continues the session's log lineage from it. */

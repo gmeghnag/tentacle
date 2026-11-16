@@ -454,6 +454,32 @@
       "required": ["id"],
       "type": "object"
     },
+    "CapabilitiesUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "by": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/SessionCapabilities"
+        },
+        "type": {
+          "const": "capabilities",
+          "type": "string"
+        }
+      },
+      "required": ["capabilities", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
+    "CapabilityName": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+      "type": "string"
+    },
     "ChatMessage": {
       "additionalProperties": true,
       "properties": {
@@ -1436,6 +1462,7 @@
         "mapping": {
           "base": "#/$defs/LogBaseEntry",
           "call_started": "#/$defs/LogCallStartedEntry",
+          "capabilities": "#/$defs/LogCapabilitiesEntry",
           "checkpoint": "#/$defs/LogCheckpointEntry",
           "media_message": "#/$defs/LogMediaMessageEntry",
           "media_replace": "#/$defs/LogMediaReplaceEntry",
@@ -1489,6 +1516,9 @@
         },
         {
           "$ref": "#/$defs/LogSubagentEndEntry"
+        },
+        {
+          "$ref": "#/$defs/LogCapabilitiesEntry"
         }
       ]
     },
@@ -1584,6 +1614,40 @@
         }
       },
       "required": ["callId", "id", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogCapabilitiesEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/SessionCapabilities"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "capabilities",
+          "type": "string"
+        }
+      },
+      "required": ["capabilities", "id", "seq", "ts", "type"],
       "type": "object"
     },
     "LogCheckpointEntry": {
@@ -2398,6 +2462,9 @@
         "autoAccept": {
           "type": "boolean"
         },
+        "capabilities": {
+          "$ref": "#/$defs/SessionCapabilities"
+        },
         "create": {
           "type": "boolean"
         },
@@ -2449,6 +2516,9 @@
       "properties": {
         "autoAccept": {
           "type": "boolean"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/SessionCapabilities"
         },
         "created": {
           "type": "boolean"
@@ -3815,6 +3885,27 @@
       "required": ["kind", "turnId"],
       "type": "object"
     },
+    "SessionCapabilities": {
+      "additionalProperties": true,
+      "properties": {
+        "disabledMcp": {
+          "items": {
+            "$ref": "#/$defs/CapabilityName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "disabledSkills": {
+          "items": {
+            "$ref": "#/$defs/CapabilityName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        }
+      },
+      "required": ["disabledMcp", "disabledSkills"],
+      "type": "object"
+    },
     "SessionClosed": {
       "additionalProperties": true,
       "properties": {
@@ -4221,6 +4312,7 @@
           "agent_usage": "#/$defs/AgentUsage",
           "auto_accept": "#/$defs/AutoAcceptUpdate",
           "background_exit": "#/$defs/BackgroundExit",
+          "capabilities": "#/$defs/CapabilitiesUpdate",
           "context_note": "#/$defs/ContextNote",
           "dsml_leak": "#/$defs/DsmlLeakUpdate",
           "empty_turn": "#/$defs/EmptyTurn",
@@ -4339,6 +4431,9 @@
         },
         {
           "$ref": "#/$defs/AutoAcceptUpdate"
+        },
+        {
+          "$ref": "#/$defs/CapabilitiesUpdate"
         }
       ]
     },
@@ -4397,6 +4492,36 @@
       "required": ["on"],
       "type": "object"
     },
+    "SetCapabilityParams": {
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": ["mcp", "skill"],
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/CapabilityName"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["enabled", "kind", "name", "sessionId"],
+      "type": "object"
+    },
+    "SetCapabilityResult": {
+      "additionalProperties": true,
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/SessionCapabilities"
+        }
+      },
+      "required": ["capabilities"],
+      "type": "object"
+    },
     "SkillListEntry": {
       "additionalProperties": true,
       "properties": {
@@ -4405,6 +4530,10 @@
           "minLength": 1,
           "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
           "type": "string"
+        },
+        "disabled": {
+          "const": true,
+          "type": "boolean"
         },
         "location": {
           "maxLength": 4096,
@@ -5718,6 +5847,14 @@
       },
       "result": {
         "$ref": "#/$defs/SetAutoAcceptResult"
+      }
+    },
+    "session/set_capability": {
+      "params": {
+        "$ref": "#/$defs/SetCapabilityParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SetCapabilityResult"
       }
     },
     "session/skills": {

@@ -911,6 +911,11 @@ export class SessionHost {
     // Only a session this open CREATES takes the seed (`autoAccept`, exactly like
     // `settings`): a `/clear` fork and a hop target carry the value this way.
     host.autoAccept = params.autoAccept === true;
+    // The switches too (docs/feat/session-capabilities.md): a resume from the
+    // laptop's copy, a `/clear` fork and a hop target carry them this way.
+    if (params.capabilities !== undefined) {
+      host.seedCapabilities(params.capabilities);
+    }
     const { epoch } = host.attach(attachment);
     return { hosted: host, created: true, resync: false, epoch };
   }
@@ -1208,6 +1213,9 @@ export class SessionHost {
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
       // A restart KEEPS the session's auto-accept (owner Q3).
       ...(record.autoAccept === true ? { autoAccept: true } : {}),
+      // And its switches, from the log (docs/feat/session-capabilities.md S3b):
+      // a restart and an archive reopen alike — the same session's choice.
+      ...(record.capabilities !== undefined ? { capabilities: record.capabilities } : {}),
       // Paired: the log continues the lineage the files hold (§5); else a new one.
       ...(record.paired ? { log: { head: record.logHead, logged: record.logged } } : {}),
     });

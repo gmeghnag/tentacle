@@ -147,6 +147,14 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1clear/result": [{ before: 10, after: 1 }],
   "methods/session~1set_auto_accept/params": [{ sessionId: "s", on: true }],
   "methods/session~1set_auto_accept/result": [{ on: true }, { on: false }],
+  "methods/session~1set_capability/params": [
+    { sessionId: "s", kind: "mcp", name: "k8s", enabled: false },
+    { sessionId: "s", kind: "skill", name: "kubernetes", enabled: true },
+  ],
+  "methods/session~1set_capability/result": [
+    { capabilities: { disabledMcp: [], disabledSkills: [] } },
+    { capabilities: { disabledMcp: ["a__b", "k8s"], disabledSkills: ["kubernetes"] } },
+  ],
   "methods/session~1update_settings/params": [
     { sessionId: "s", id: "a1", settings: { maxIterations: 3, toolExecution: "parallel" } },
   ],
@@ -604,6 +612,12 @@ const FIXTURES: Record<string, Json[]> = {
       ],
     }),
     update({ type: "schedules", schedules: [] }),
+    update({ type: "capabilities", capabilities: { disabledMcp: [], disabledSkills: [] } }),
+    update({
+      type: "capabilities",
+      capabilities: { disabledMcp: ["k8s"], disabledSkills: ["kubernetes"] },
+      by: "phone",
+    }),
     update({ type: "queued", entries: [], returned: [] }),
     update({
       type: "queued",
