@@ -1271,3 +1271,46 @@ F1–F3, F11, F13, F15 (S2).
   added no second fragment.
 
 **S3a: DONE.** S3b, S4, S5: not started (out of scope).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; the same model family as the
+plan's author, so shared blind spots are possible.)
+
+**Verdict: APPROVE (S3a).** No HIGH or MEDIUM findings.
+
+- **Gate.** The 7 touched test files pass (77 pass, 0 fail). `bun run lint` is
+  clean (1662 files). `bun run typecheck` is clean (root + mobile + relay).
+  The full `bun test`: the first run gave 12009 pass, 5 skip (opt-in), **2
+  fail**. A re-run gave no `(fail)` line. So these are flakes under parallel
+  load. They are not traced to S3a: its tests are deterministic and green on
+  every run.
+- **Mutations** (`.tentacle/tmp/session-capabilities/rev-mut.ts`, restored, and
+  `git status` stays clean). Each one goes RED:
+  - R1 `swapAgent` no re-apply → 1 fail.
+  - R2 empty `OpenResult` snapshot → 2 fail.
+  - R3 client ignores the update → 1 fail.
+  - R4 seed not given to the agent → 1 fail.
+  - R5 `by` dropped → 2 fail.
+- **Attacks tried:**
+  1. **§7 "don't serialize the peer".** `setCapability` is synchronous, and
+     the handler adds no lock or await. It holds.
+  2. **Inbound bounds.** `peer.ts:152` parses params with `RequestSchemas`, so
+     the seed is capped at 256 entries and 128 characters by the schema. A
+     delta is capped in `setCapability` before any state change. It holds.
+  3. **Settings-sync race.** A toggle that lands while the next agent is being
+     built is picked up, because `swapAgent` reads `this.caps` at swap time.
+     It holds.
+  4. **Re-attach replay after the snapshot.** Every update carries the whole
+     state, and the last one in the ring equals the snapshot. So a replay
+     converges on the current state. It holds.
+  5. **Pod (§7, not trusted).** The update and the snapshot are only shown.
+     There is no laptop effect and no approval. It holds.
+- **Notes (below MEDIUM):**
+  - A skill name longer than 128 characters is listed (`wireLine` 256) but
+    cannot be toggled (`InvalidParams`).
+  - A re-attach to an older daemon keeps the stale state instead of
+    `undefined`.
+- **Executor.** The as-built record matches the code, and the drift is
+  declared honestly. Red-before-green was replaced by mutation, and the record
+  says so openly.
