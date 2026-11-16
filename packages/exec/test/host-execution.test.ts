@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { FileTooLargeError } from "@tentacle/core";
 import { HostExecution } from "../src/index.ts";
 
 let dir: string;
@@ -62,6 +64,69 @@ describe("HostExecution", () => {
     setTimeout(() => ac.abort(), 50);
     const r = await env.exec("sleep 5", { signal: ac.signal });
     expect(r.exitCode).not.toBe(0);
+  });
+});
+
+describe("readBytes", () => {
+  test("round-trips a file's bytes and refuses nothing under the limit", async () => {
+    const path = join(dir, "bytes.bin");
+    await writeFile(path, new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x00, 0xff]));
+    const bytes = await env.readBytes(path, { maxBytes: 1024 });
+    expect([...bytes]).toEqual([0x25, 0x50, 0x44, 0x46, 0x2d, 0x00, 0xff]);
+  });
+
+  test("readLimitBytes returns only the head", async () => {
+    const path = join(dir, "head.bin");
+    await writeFile(path, "0123456789");
+    expect(new TextDecoder().decode(await env.readBytes(path, { readLimitBytes: 4 }))).toBe("0123");
+  });
+
+  test("a relative path resolves against the configured cwd, as readFile does", async () => {
+    await writeFile(join(dir, "relative.txt"), "via cwd");
+    expect(new TextDecoder().decode(await env.readBytes("relative.txt"))).toBe("via cwd");
+  });
+
+  test("a file over maxBytes is refused before its content is read", async () => {
+    const path = join(dir, "big.bin");
+    const handle = await open(path, "w");
+    await handle.truncate(4096);
+    await handle.close();
+
+    const realFile = Bun.file;
+    let opens = 0;
+    Bun.file = ((...args: Parameters<typeof realFile>) => {
+      opens += 1;
+      return realFile(...args);
+    }) as typeof Bun.file;
+    let error: unknown;
+    try {
+      await env.readBytes(path, { maxBytes: 1024 });
+    } catch (caught) {
+      error = caught;
+    } finally {
+      Bun.file = realFile;
+    }
+    expect(error).toBeInstanceOf(FileTooLargeError);
+    expect((error as FileTooLargeError).sizeBytes).toBe(4096);
+    expect((error as Error).message).toContain("MiB limit");
+    expect(opens).toBe(0);
+  });
+
+  test("a missing file explains itself with the configured readHint", async () => {
+    const hinted = new HostExecution({
+      cwd: dir,
+      readHint: () => "that spilled output was removed with its session",
+    });
+    await expect(hinted.readBytes(join(dir, "gone.bin"))).rejects.toThrow(
+      /removed with its session/,
+    );
+    await expect(hinted.readFile(join(dir, "gone.bin"))).rejects.toThrow(
+      /removed with its session/,
+    );
+  });
+
+  test("a directory is not a regular file", async () => {
+    await expect(env.readBytes(dir)).rejects.toThrow(/not a regular file/);
   });
 });
 

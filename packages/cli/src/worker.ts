@@ -22,7 +22,8 @@ import { setGroupForwarder } from "@tentacle/exec";
 import type { McpServerStatus } from "@tentacle/mcp";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
-import { daemonImagePolicy } from "./image-policy.ts";
+import "./pdf-worker-url.ts";
+import { daemonDocumentPolicy, daemonImagePolicy } from "./image-policy.ts";
 import { createMcpHub } from "./mcp-hub.ts";
 import type { ProviderFactory } from "./model-provider.ts";
 import {
@@ -126,6 +127,7 @@ export function workerSessionHost(
     // The worker runs its own config's model on this machine, so it holds the
     // bytes (docs/feat/attachments-prompt.md D4). `undefined` = images off.
     ...(images ? { images } : {}),
+    documents: daemonDocumentPolicy("host"),
     // A failed turn now ends in the stream (`turn_end.error`), not as a handler
     // throw: same policy as below — the real message to this LOCAL client, the
     // full error (with stack) to the daemon error log.

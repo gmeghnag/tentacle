@@ -12,7 +12,11 @@
  *   5. `session/close`  — end the session for every client (idempotent).
  */
 import { z } from "zod";
-import { AttachmentsSchema } from "./attachment.ts";
+import {
+  ATTACHMENT_NAME_RE,
+  AttachmentsSchema,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+} from "./attachment.ts";
 import { ContentBlockSchema, PromptContentBlockSchema } from "./content.ts";
 import { ModelNameSchema } from "./model.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
@@ -50,6 +54,25 @@ export const MessageNoteSchema = z.object({
 export type MessageNote = z.infer<typeof MessageNoteSchema>;
 
 /**
+ * One file attached to a user message, for the chip (display only,
+ * docs/feat/pdf-read.md D4): the file's TEXT is in `content` (a `<file>`
+ * block); this only names it. `kind` is a bounded FREE string (`pdf` today,
+ * `audio` later) — never an enum, for the `MessageNote` reason. The field on
+ * `ChatMessageSchema` is FAIL-SOFT.
+ */
+export const MessageMediaSchema = z.object({
+  kind: z
+    .string()
+    .min(1)
+    .max(32)
+    .regex(/^[a-z][a-z0-9_]*$/),
+  name: z.string().min(1).max(255).regex(ATTACHMENT_NAME_RE),
+  pages: z.number().int().positive().optional(),
+  chars: z.number().int().nonnegative().optional(),
+});
+export type MessageMedia = z.infer<typeof MessageMediaSchema>;
+
+/**
  * Fresh instances per call (the `envelopeShape()` pattern in session-log.ts):
  * the JSON Schema export refuses a schema object reused by two named exports,
  * and the media entry below needs this shape with refs REQUIRED.
@@ -82,6 +105,19 @@ const chatMessageShape = () => ({
    * applied to a display-only field. Never tighten into a lock-out (review M3).
    */
   note: MessageNoteSchema.optional().catch(undefined),
+  /**
+   * On a USER message: the files attached to it, for the chip
+   * (docs/feat/pdf-read.md D4). Display only — the text is in `content`.
+   * FAIL-SOFT like `note`: a value outside these bounds is DROPPED (the
+   * message still loads; an older build shows the raw block), never a refusal
+   * of the CRITICAL entry.
+   */
+  media: z
+    .array(MessageMediaSchema)
+    .min(1)
+    .max(MAX_ATTACHMENTS_PER_MESSAGE)
+    .optional()
+    .catch(undefined),
   /**
    * On a USER message: image refs to send with it (docs/feat/attachments-core.md).
    * Refs, never bytes — the bytes live behind an `AttachmentSource` on the side
@@ -175,6 +211,23 @@ export const AgentCapabilitiesSchema = z.object({
       maxBytes: z.number().int().positive().optional(),
     })
     .optional(),
+  /**
+   * What this daemon does with attached documents (docs/feat/pdf-read.md D4).
+   * Absent = it takes none (the client does not offer PDF attach). Free strings,
+   * the `images` rule: `input` `"upload"` (bytes by `attachment/put`, then a
+   * `document{ref}`; this daemon extracts) or `"client"` (a pod: the client
+   * extracts and sends `document{text}` — PDF bytes never enter it). FAIL-SOFT:
+   * a value this build cannot read is dropped, never a refused `initialize`.
+   */
+  documents: z
+    .object({
+      input: z.string().min(1).max(32),
+      /** Per-document byte cap for `"upload"`; absent = `MAX_IMAGE_BYTES`. */
+      maxBytes: z.number().int().positive().optional(),
+      kinds: z.array(z.string().min(1).max(32)).max(16),
+    })
+    .optional()
+    .catch(undefined),
 });
 export type AgentCapabilities = z.infer<typeof AgentCapabilitiesSchema>;
 

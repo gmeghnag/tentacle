@@ -12,8 +12,10 @@
  * Pure, and the single caller of `imageLimits()` on this side, so the advertised
  * capability can never disagree with what the provider actually does.
  */
-import type { ImagePolicy } from "@tentacle/daemon";
+import type { DocumentPolicy, ImagePolicy } from "@tentacle/daemon";
+import { MAX_IMAGE_BYTES } from "@tentacle/protocol";
 import { imageLimits } from "@tentacle/providers";
+import { extractPdf } from "@tentacle/tools";
 
 /** The config keys this decision reads (a resolved `TentacleConfig` has them). */
 export interface ImagePolicyConfig {
@@ -39,4 +41,17 @@ export function daemonImagePolicy(
   }
   const limits = imageLimits(config.provider, config);
   return limits.vision ? { source: "store", maxBytes: limits.maxBytes } : undefined;
+}
+
+/**
+ * What a daemon does with attached documents (docs/feat/pdf-read.md D4): a
+ * daemon on the user's own machine (in-process worker, `serve`) holds uploaded
+ * bytes and extracts them; a POD takes text only — the laptop extracts, and PDF
+ * bytes never enter a pod (AGENTS §7), with or without `--model-proxy`.
+ * Unlike images, it does not depend on the model: a `<file>` block is text.
+ */
+export function daemonDocumentPolicy(where: "host" | "pod"): DocumentPolicy {
+  return where === "pod"
+    ? { source: "client" }
+    : { source: "store", maxBytes: MAX_IMAGE_BYTES, extract: extractPdf };
 }

@@ -80,6 +80,20 @@ export function findYogaWasm(): string {
 }
 
 /**
+ * The binary's entrypoints, repo-relative. Every module spawned as a Worker is
+ * one on purpose: in a compiled binary a `new Worker("./x.ts")` resolves against
+ * the EMBEDDED entrypoints — a missing one fails with "ModuleNotFound resolving
+ * /$bunfs/root/x.ts" (see local-runtime.ts). `worker.ts` is the daemon worker;
+ * `pdf-worker.ts` the PDF parser (docs/feat/pdf-read.md D2). All three sit in
+ * ONE directory, so the embedded root (and `./worker.ts`) does not move.
+ */
+export const BINARY_ENTRYPOINTS = [
+  "packages/cli/src/main.ts",
+  "packages/cli/src/worker.ts",
+  "packages/cli/src/pdf-worker.ts",
+] as const;
+
+/**
  * Build the standalone `tentacle` binary to `outfile` for `target`. Shared
  * by `scripts/build.ts` (the `compile` script) and the pod-binary cache so the
  * two never drift. Returns `true` on success, `false` (after logging) on
@@ -106,14 +120,7 @@ export async function buildBinary(
   const yogaInitPath = resolve(dirname(wasmPath), "index.js");
 
   const result = await Bun.build({
-    // `worker.ts` is a second entrypoint on purpose: in a compiled binary the
-    // daemon worker must be embedded, and `new Worker("./worker.ts")` resolves
-    // against the embedded entrypoints — without it the spawn fails with
-    // "ModuleNotFound resolving /$bunfs/root/worker.ts" (see local-runtime.ts).
-    entrypoints: [
-      resolve(root, "packages/cli/src/main.ts"),
-      resolve(root, "packages/cli/src/worker.ts"),
-    ],
+    entrypoints: BINARY_ENTRYPOINTS.map((path) => resolve(root, path)),
     // @ts-expect-error - `compile` is supported by the Bun bundler
     compile: { outfile, ...(target ? { target } : {}) },
     // Inject the CLI package version as the marker literal
