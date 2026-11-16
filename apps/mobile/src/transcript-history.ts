@@ -38,7 +38,13 @@ export function restartPromptOf(content: string): string | null {
 function noteRow(key: string, m: ChatMessage): Row {
   const [first = "", ...rest] = m.content.split("\n");
   const body = rest.join("\n").trim();
-  return { kind: "notice", key, text: first, ...(body === "" ? {} : { body }) };
+  return {
+    kind: "notice",
+    key,
+    text: first,
+    ...(body === "" ? {} : { body }),
+    ...(m.note === undefined ? {} : { note: m.note }),
+  };
 }
 
 /** Rows for `messages`; `nextKey` mints one key per row (the fold's own counter). */

@@ -14,6 +14,7 @@ import {
   jumped,
   nearBottom,
   scrolled,
+  shown,
   viewportChanged,
 } from "../src/follow.ts";
 
@@ -77,6 +78,13 @@ describe("follow (B5)", () => {
     const state = jumped();
     expect(state).toEqual({ following: true, unseen: false });
     expect(jumpPill(state)).toBe(false);
+  });
+
+  test("Show in chat (mobile-chrome S9): held where it scrolled, so new content does not pull it back", () => {
+    const state = shown();
+    expect(state.following).toBe(false);
+    expect(contentGrew(state, { content: 2000, viewport: VIEW }).scrollTo).toBeNull();
+    expect(jumpPill(state)).toBe(true);
   });
 });
 

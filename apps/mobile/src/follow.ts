@@ -95,6 +95,15 @@ export function jumped(): Follow {
   return initialFollow;
 }
 
+/**
+ * "Show in chat" (docs/feat/mobile-chrome.md S9): the list scrolled to an older
+ * row for the person, so it stops following — the next delta must not pull it
+ * back to the end; the pill takes them there.
+ */
+export function shown(): Follow {
+  return { following: false, unseen: false };
+}
+
 /** The "Jump to latest" pill shows whenever the list is not following. */
 export function jumpPill(state: Follow): boolean {
   return !state.following;
