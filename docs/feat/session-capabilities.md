@@ -1314,3 +1314,201 @@ plan's author, so shared blind spots are possible.)
 - **Executor.** The as-built record matches the code, and the drift is
   declared honestly. Red-before-green was replaced by mutation, and the record
   says so openly.
+
+## Execution — S3b
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Slice S3b only**: the `capabilities` log entry, its folds (laptop load and
+`serve` reload), and the carry into a session the laptop creates (resume, hop,
+`/clear` close-and-replace, a worker recreate). Not touched: S4/S5 (UI).
+
+**Provenance, honestly.** When I started, the worktree already held an
+uncommitted S3b implementation and its three test files, from an earlier
+executor run that left no Execution record. I did not rewrite it. I reviewed
+it against the plan and the code, made one hardening edit, re-ran every check
+myself, and wrote this record. The as-built below is the code as it stands now.
+
+### Load-bearing check (re-run first)
+
+It passed. S3b stands on two facts:
+
+1. The laptop stores the daemon's typed entries from `session/log` after it
+   validates them. `client/session-log-reader.ts:77` derives KNOWN from
+   `LOG_ENTRY_CRITICAL`, so a new entry in that table is known. `:263`
+   validates with `KnownLogEntrySchema`.
+2. An unknown, non-critical entry is dropped, not refused
+   (`session-log-reader.ts:257`). That is F9.
+
+Every new `base` goes through one call site, `replaced(…)` → `logSegmentFacts()`
+(`hosted-session.ts:3308-3313`): compaction, `context_reset` and `/clear` alike.
+The constructor's first segment calls it at `:864`.
+
+### As built, in order (protocol → agent type → daemon → client → cli)
+
+1. **Protocol.** `session-log.ts` adds `LogCapabilitiesEntrySchema` (`skippable()`,
+   the body is `SessionCapabilitiesSchema`, so the S3a caps apply) to the union,
+   with `LOG_ENTRY_CRITICAL.capabilities = false`. `protocol.json` was
+   regenerated (`bun run schema:export`, +38 lines).
+2. **Agent.** `SessionRecord.capabilities?` is in `session-store.ts` (a type only).
+3. **Daemon.**
+   - `SessionLog.capabilities(state)` (`session-log.ts`).
+   - `lastCapabilities(entries)` (`session-log-file.ts`) is the one fold for
+     both stores.
+   - `HostedSession`:
+     - `setCapability` logs the whole state after a change, then calls
+       `persist()`.
+     - `seedCapabilities` logs it, and persists only when something is off.
+       The create's first write was captured before the seed.
+     - `logSegmentFacts` re-logs it after every `base`, when something is off
+       (F12).
+     - The constructor applies `restored.capabilities` to `caps` and to the
+       agent.
+   - `LogSessionStore.load` folds the current segment.
+   - `daemon-state-file.ts` `rebuild` folds `derivedFrom`, the log THROUGH
+     the sidecar's `logHead` (F6).
+   - `DaemonSessionRecord.capabilities?` is added, and `SessionHost.restore`
+     hands it over.
+4. **Client.**
+   - `SessionEntry.capabilities` tracks the seed, the open snapshot and every
+     update.
+   - `openSession` sends the record's state, or the one-shot
+     `seedCapabilitiesOnCreate`. `openOn` sends the entry's state on a
+     (re)create, and so does `recreate` (a worker that lost the session).
+   - `newSession(…, {capabilities})` → the `RemoteSession` seed.
+   - `RemoteSession.seedCapabilities()`.
+5. **CLI.**
+   - `session-capabilities.ts` (new): `seedCapabilitiesOf` and
+     `wireCapabilities`.
+   - `local-runtime.ts` `build` passes `record.capabilities` to `newSession`.
+     That covers `--resume`, and a hop too, because a hop IS that seed path
+     (`session-hop.ts:14-16,205-223`).
+   - `persistingController` flushes on a capabilities change. Without that, a
+     toggle made on another device while this session is idle would not reach
+     the laptop file until the next turn.
+   - `main.ts` and `connect.ts` call `seedCapabilities` on a `/clear`
+     close-and-replace, next to `seedAutoAccept`.
+
+**My edit:** `local-runtime.ts` `persistingController` now seeds `capsSeen`
+from `inner.capabilities()`. Before, it skipped the first state it saw.
+That is only right while the controller subscribes before the open, which is
+true today. With this edit, a later subscription still flushes the first real
+change. No test pins this: today's call order cannot reach the case.
+
+### Drift from the Implementation (and why)
+
+- **The Files list is wrong in places.** The carry did not land in
+  `session-resume.ts`, `session-saver.ts`, `tui-sessions.ts`, `session-hop.ts`
+  or `session-log-reader.ts`. A grep of `newSession(`/`openSession(` finds ONE
+  laptop create path that holds a record (`local-runtime.ts:1057`). Hop and
+  `--resume` both use it. The reader and the saver needed no change, because
+  they are driven by the `LOG_ENTRY_CRITICAL` table. The real carry sites are
+  `local-runtime.ts`, `main.ts`, `connect.ts`, `remote-client.ts` and
+  `remote-session.ts`.
+- **Additional daemon files:** `daemon-state-file.ts` (the reload fold),
+  `session-log-store.ts` (the laptop fold), `session-log-file.ts` (the shared
+  fold), `session-host.ts` (restore hand-over) and `hosted-session.ts`.
+- **"Everything on" logs nothing** after a `base` or a seed. It is the fold's
+  default. A *change* back to everything on IS logged, so that it supersedes
+  the last off-state.
+- **A worker recreate carries the switches** (`recreate`, `openOn`). The plan
+  did not list it, but without it a lost in-process worker would silently turn
+  everything back on.
+- `connect` attaches (`connect.ts:341,452`) do not seed. The `serve` daemon's
+  state wins on an attach. That is the existing rule.
+
+### Red before green (§9) — honest note
+
+The tests and the implementation came together from the earlier run, so no
+run on the pre-change code exists. As in S3a, red is shown by **mutating every
+target**. Each mutation below fails on an assertion, not on a compile error.
+
+### Mutation checks (§9)
+
+The runner is `.tentacle/tmp/session-capabilities/s3b-mut.ts`. Each mutation
+is one string replacement, then the 5 S3b test files run, then the original is
+written back. Afterwards `git diff | cmp` against the saved pre-run diff
+printed `ALL-IDENTICAL`.
+
+```
+== M1 setCapability does not log: RED 44/5
+== M2 seed not logged: RED 47/2
+== M3 seed not persisted: RED 48/1
+== M4 new segment does not re-log: RED 47/2
+== M5 rebuild does not fold: RED 46/3
+== M6 rebuild folds past logHead: RED 48/1
+== M7 laptop load does not fold: RED 46/3
+== M8 fold takes the FIRST entry: RED 48/1
+== M9 resume does not seed: RED 48/1
+== M10 no flush on a change: RED 47/2
+== M11 one-shot seed not cleared: RED 47/2
+== M12 create frame lacks caps: RED 46/3
+== M13 recreate lacks caps: RED 48/1
+== M14 restored caps ignored by HostedSession: RED 48/1
+== M15 restore does not hand them over: RED 48/1
+== M16 entry marked critical: RED 46/3
+== M17 client forgets the update: RED 48/1
+RESTORED
+ALL-IDENTICAL
+```
+
+### Tests
+
+- `packages/daemon/test/session-capabilities-log.test.ts` (9 tests):
+  - L1: a change logs the whole state, non-critical; an idempotent set logs
+    nothing; going back to everything on is logged.
+  - L2: a seed is logged (de-duplicated); an empty seed logs nothing.
+  - L3: a new segment re-carries the state (F12).
+  - S1/S2: the laptop fold takes the last entry, and only from the current
+    segment.
+  - R1: a `serve` restore hides the server again, and the first request after
+    it lacks the tool.
+  - R2: only the log through `logHead` counts (F6).
+  - R3: a create with switches is durable with no later change.
+- `packages/cli/test/session-capabilities-resume.test.ts` (4 tests):
+  - C1: an idle toggle from another device reaches the laptop file.
+  - C2: `--resume` recreates the session with the switches, and its first
+    request lacks `mcp__echo__echo`.
+  - C3: a record with no switches starts with everything on.
+  - C4: a `/clear` close-and-replace carries the switches once, and only once.
+- `packages/client/test/session-capabilities.test.ts` (+2):
+  - R1: a worker recreate carries the switches.
+  - R2: a resumed seed, and the one-shot seed consumed once.
+- `packages/protocol/test/capabilities.test.ts` (+2): the entry parses, is
+  not critical (`critical: true` is malformed) and is bounded (F10).
+  `session-log.test.ts` pins the critical table.
+
+**F9 (an older reader skips it):** this is proven by two pieces, not by an
+older binary.
+- The entry can never be written critical: the schema rejects it, and both L1
+  and M16 cover that.
+- The reader drops unknown non-critical entries (`session-log-reader.ts:257`,
+  existing tests).
+
+### Failure modes covered by S3b
+
+F6, F9 and F12 (the re-emit), plus the persistence half of F5: the laptop file
+and a recreate. The Q5 carry is covered for resume, hop and `/clear`.
+
+### Notes / debt
+
+- **Two side copies carry no switches.** The `/clear` archive fork
+  (`session-fork.ts:34`) and an aside (`saveAside`) are built from messages
+  only (§7). If one is reopened, it shows everything. That fails open on
+  visibility only.
+- **Hop has no dedicated test.** Its seed is the same `load` → `build` path
+  that C2 pins.
+
+### Gate
+
+- `bunx tsc --noEmit` is clean. `bun run typecheck` (root + mobile + relay) is
+  clean.
+- `bun run lint`: `Checked 1671 files … No fixes applied.` (the baseline, 0/0).
+- `bun test`: **12084 pass, 5 skip, 0 fail** (12089 tests, 866 files,
+  442.57s). The 5 skips are the opt-in guards.
+- `protocol.json` was regenerated, and the drift gate passes.
+- There is no `protocol.d/` note: the entry is non-critical (owner Q2).
+- Changelog: the feature's one fragment `changelog.d/session-capabilities.added.md`
+  already exists and covers "kept with the session". I added none.
+
+**S3b: DONE.** S4, S5: not started (out of scope).

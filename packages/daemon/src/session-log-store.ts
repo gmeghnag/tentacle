@@ -51,6 +51,7 @@ import {
   currentSegment,
   entryLines,
   headerLine,
+  lastCapabilities,
   parseLogFile,
   segmentFromMessages,
 } from "./session-log-file.ts";
@@ -1084,6 +1085,9 @@ export class LogSessionStore {
     // nothing — the note rides the next save's segment. (The listing,
     // `summarize`, stays without them: its count is short until the resume.)
     const messages = [...closed, ...subagentLoadNotes(segment.entries, closed)];
+    // The switches (docs/feat/session-capabilities.md S3b): the current
+    // segment's last `capabilities` entry — a superseded segment's never apply.
+    const capabilities = lastCapabilities(segment.entries);
     return {
       status: "ok",
       record: {
@@ -1094,6 +1098,7 @@ export class LogSessionStore {
         updatedAt: Math.round(mtime),
         title: titleOf(segment.title, messages),
         messages,
+        ...(capabilities !== undefined ? { capabilities } : {}),
       },
     };
   }

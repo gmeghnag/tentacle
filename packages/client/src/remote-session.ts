@@ -155,6 +155,11 @@ export class RemoteSession implements SessionStreamListener {
   private readonly desiredId?: string;
   /** The resumed record's chosen title: seeds the open that creates the session daemon-side. */
   private readonly seedTitle: SeedTitle | undefined;
+  /**
+   * The resumed record's MCP/skill switches (docs/feat/session-capabilities.md
+   * S3b): seed the open that creates the session daemon-side (a resume, a hop).
+   */
+  private readonly seedCaps: SessionCapabilitiesWire | undefined;
   private id: string | null = null;
   /** The in-flight `session/open` of the first `send`, until `id` is known. */
   private opening: Promise<string> | null = null;
@@ -297,11 +302,13 @@ export class RemoteSession implements SessionStreamListener {
     attach?: { readonly reopen?: boolean },
     closeIfLast = false,
     daemonWakes = false,
+    seedCapabilities?: SessionCapabilitiesWire,
   ) {
     this.client = client;
     this.seedMessages = seedMessages;
     this.desiredId = desiredId;
     this.seedTitle = seedTitle;
+    this.seedCaps = seedCapabilities;
     this.attach = attach;
     this.closeIfLast = closeIfLast;
     this.daemonWakes = daemonWakes;
@@ -387,6 +394,18 @@ export class RemoteSession implements SessionStreamListener {
         this.noteCapabilities(undefined);
       }
       throw error;
+    }
+  }
+
+  /**
+   * The NEXT session this client creates starts with this one's switches
+   * (`OpenParams.capabilities`, S3b): a `/clear` close-and-replace keeps them
+   * (owner Q5). A no-op while the daemon has reported none (unknown or an older
+   * daemon): nothing to carry.
+   */
+  seedCapabilities(): void {
+    if (this.capabilityState !== undefined) {
+      this.client.seedCapabilitiesOnCreate(this.capabilityState);
     }
   }
 
@@ -539,7 +558,14 @@ export class RemoteSession implements SessionStreamListener {
       // The id is set INSIDE `opening`: whoever awaits it (an enqueue, a
       // send-now racing the first send) finds the session open.
       const opening = this.client
-        .openSession(undefined, this.seedMessages, this.desiredId, this, this.seedTitle)
+        .openSession(
+          undefined,
+          this.seedMessages,
+          this.desiredId,
+          this,
+          this.seedTitle,
+          this.seedCaps,
+        )
         .then(
           (sessionId) => {
             this.id = sessionId;

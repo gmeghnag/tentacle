@@ -39,6 +39,7 @@ import {
   currentSegment,
   entriesThrough,
   foldThrough,
+  lastCapabilities,
 } from "./session-log-file.ts";
 
 /** The state file's `format` tag. */
@@ -456,6 +457,10 @@ export function rebuild(
   // messages: a note delivered after the last log write is in the sidecar's
   // tail, and closes its id. `reconcileOnReload` appends them.
   const loadNotes = subagentLoadNotes(derivedFrom, messages);
+  // The switches (docs/feat/session-capabilities.md S3b): from the SAME
+  // entries, so a change logged after `logHead` (its write never paired) is
+  // ignored like the rest of that tail (F6).
+  const capabilities = lastCapabilities(derivedFrom);
   return {
     ok: true,
     value: {
@@ -474,6 +479,7 @@ export function rebuild(
       ...(sidecar.archivedAt !== undefined ? { archivedAt: sidecar.archivedAt } : {}),
       ...(head !== undefined ? { head } : {}),
       ...(sidecar.autoAccept === true ? { autoAccept: true } : {}),
+      ...(capabilities !== undefined ? { capabilities } : {}),
       logged,
       logHead: sidecar.logHead,
       paired: through !== null,

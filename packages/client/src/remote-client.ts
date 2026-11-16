@@ -694,6 +694,13 @@ interface SessionEntry {
    * never regenerated over a rename.
    */
   title: SeedTitle | undefined;
+  /**
+   * The session's MCP/skill switches as this client last knew them (its seed,
+   * the open's snapshot, a `capabilities` update): what a create that may not
+   * have landed and a recreate seed the daemon with
+   * (docs/feat/session-capabilities.md S3b). Undefined: none known.
+   */
+  capabilities: SessionCapabilitiesWire | undefined;
   /** The daemon's last reported queue; undefined until it reports one (an older daemon never does). */
   queued: QueueState | undefined;
   /** The daemon's last reported background sub-agents; undefined until it reports one. */
@@ -864,6 +871,8 @@ export class RemoteClient {
    * target. Read at each open and cleared by it — a re-attach never seeds.
    */
   private seedAutoAccept: boolean | undefined;
+  /** `seedCapabilitiesOnCreate`'s value: read by the next creating open, and cleared by it. */
+  private seedCaps: SessionCapabilitiesWire | undefined;
   private readonly settingsListeners = new Set<(notice: SessionSettingsNotice) => void>();
   private readonly settingsChangeListeners = new Set<(change: SessionSettingsChange) => void>();
   /**
@@ -1240,7 +1249,12 @@ export class RemoteClient {
     seedMessages?: readonly ChatMessage[],
     sessionId?: string,
     seedTitle?: SeedTitle,
-    opts: { readonly attach?: { readonly reopen?: boolean }; readonly closeIfLast?: boolean } = {},
+    opts: {
+      readonly attach?: { readonly reopen?: boolean };
+      readonly closeIfLast?: boolean;
+      /** The resumed record's switches (S3b): seed the open that creates it; ignored on an attach. */
+      readonly capabilities?: SessionCapabilitiesWire;
+    } = {},
   ): RemoteSession {
     return new RemoteSession(
       this,
@@ -1250,6 +1264,7 @@ export class RemoteClient {
       opts.attach,
       opts.closeIfLast === true,
       this.daemonWakes,
+      opts.capabilities,
     );
   }
 
@@ -1595,8 +1610,14 @@ export class RemoteClient {
     sessionId?: string,
     listener?: SessionStreamListener,
     title?: SeedTitle,
+    capabilities?: SessionCapabilitiesWire,
   ): Promise<string> {
     const seed = messages ?? [];
+    // The switches it starts with (docs/feat/session-capabilities.md S3b): the
+    // resumed record's, else the ones the person has now (a `/clear`
+    // close-and-replace); the one-shot seed is consumed either way.
+    const carried = this.takeSeedCapabilities();
+    const caps = capabilities ?? carried;
     const params = {
       create: true,
       ...(cwd ? { cwd } : {}),
@@ -1606,17 +1627,18 @@ export class RemoteClient {
       // The switch the person has now: a `/clear` fork and a new session start
       // with it (docs/feat/session-auto-accept.md D5).
       ...this.takeSeedAutoAccept(),
+      ...(caps ? { capabilities: caps } : {}),
     };
     if (sessionId === undefined) {
       const gen = this.gen;
       const result = (await this.call(this.peer, Method.Open, params)) as OpenResult;
-      const entry = this.register(result.sessionId, seed, listener, title);
+      const entry = this.register(result.sessionId, seed, listener, title, caps);
       this.step(entry, { kind: "open_sent" });
       this.applyOpenResult(entry, gen, result);
       await this.whenLive(entry);
       return result.sessionId;
     }
-    const entry = this.register(sessionId, seed, listener, title);
+    const entry = this.register(sessionId, seed, listener, title, caps);
     try {
       await this.openOn(entry, this.gen, { ...params, sessionId });
       await this.whenLive(entry);
@@ -2938,6 +2960,7 @@ export class RemoteClient {
     seed: readonly ChatMessage[],
     listener: SessionStreamListener | undefined,
     title?: SeedTitle,
+    capabilities?: SessionCapabilitiesWire,
   ): SessionEntry {
     const existing = this.sessions.get(id);
     if (existing && !existing.closing) {
@@ -2962,6 +2985,7 @@ export class RemoteClient {
       turnEndsApplied: 0,
       turnEndsInHistory: 0,
       title,
+      capabilities,
       queued: undefined,
       subagents: undefined,
       jobs: undefined,
@@ -3082,6 +3106,7 @@ export class RemoteClient {
                 ...(entry.title ? { title: entry.title } : {}),
                 ...this.carried,
                 ...this.takeSeedAutoAccept(),
+                ...(entry.capabilities ? { capabilities: entry.capabilities } : {}),
               },
       );
     } catch (error) {
@@ -3177,6 +3202,7 @@ export class RemoteClient {
   /** The open's switches snapshot (`OpenResult.capabilities`, F5); absent → never reported. */
   private noteCapabilities(entry: SessionEntry, result: OpenResult): void {
     if (result.capabilities !== undefined) {
+      entry.capabilities = result.capabilities;
       entry.listener?.capabilitiesSnapshot?.(result.capabilities);
     }
   }
@@ -3217,6 +3243,26 @@ export class RemoteClient {
     const on = this.seedAutoAccept;
     this.seedAutoAccept = undefined;
     return on === undefined ? {} : { autoAccept: on };
+  }
+
+  /**
+   * The MCP/skill switches the NEXT session this client creates starts with
+   * (`OpenParams.capabilities`, docs/feat/session-capabilities.md S3b): a
+   * `/clear` close-and-replace keeps them (owner Q5). Ignored by a daemon on an
+   * attach. A resumed record's own switches take precedence.
+   */
+  seedCapabilitiesOnCreate(state: SessionCapabilitiesWire): void {
+    this.seedCaps = {
+      disabledMcp: [...state.disabledMcp],
+      disabledSkills: [...state.disabledSkills],
+    };
+  }
+
+  /** The switches an open-creating frame carries, consumed once. */
+  private takeSeedCapabilities(): SessionCapabilitiesWire | undefined {
+    const state = this.seedCaps;
+    this.seedCaps = undefined;
+    return state;
   }
 
   /**
@@ -3314,6 +3360,9 @@ export class RemoteClient {
         // Nothing was persisted: the laptop that recreates it decides.
         ...this.carried,
         ...this.takeSeedAutoAccept(),
+        // The switches it had (docs/feat/session-capabilities.md S3b): a lost
+        // worker never turns everything back on.
+        ...(entry.capabilities ? { capabilities: entry.capabilities } : {}),
       })) as OpenResult;
     } catch (error) {
       // Deleted between the reconnect and this recreate (another device).
@@ -3578,6 +3627,7 @@ export class RemoteClient {
         }
       } else if (update.type === "capabilities") {
         // Not turn-scoped: a toggle lands idle or mid-turn, from any client.
+        entry.capabilities = update.capabilities;
         entry.listener?.capabilitiesChanged?.(update.capabilities, update.by);
       }
       // Closed daemon-side (by any client): nothing left to close at exit,

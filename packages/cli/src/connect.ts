@@ -296,6 +296,8 @@ export async function connectTui(
       createSession: () => {
         // A `/clear` fork carries the switch the person has now (`OpenParams.autoAccept`).
         previousSession?.seedAutoAccept(autoAccept.current());
+        // …and its MCP/skill switches (docs/feat/session-capabilities.md, owner Q5).
+        previousSession?.seedCapabilities();
         const session = pending ?? client.newSession(undefined, crypto.randomUUID());
         pending = null;
         const tracked = track(session);

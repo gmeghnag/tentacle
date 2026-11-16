@@ -168,3 +168,76 @@ describe("RemoteSession capabilities", () => {
     expect(err instanceof Error && /not open/.test(err.message)).toBe(true);
   });
 });
+
+// Slice S3b: the switches a client carries into a session it (re)creates.
+describe("the client carries the switches into a session it creates", () => {
+  const OFF = { disabledMcp: ["echo"], disabledSkills: [] };
+  const quietHost = () =>
+    new SessionHost({
+      defaultCwd: "/tmp/session-capabilities-client",
+      createAgent: () => ({
+        agent: new Agent({
+          model: {
+            id: "quiet",
+            async *stream() {
+              yield { type: "done" as const };
+            },
+          },
+          tools: new ToolRegistry(),
+          env: {} as ExecutionEnvironment,
+        }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+  const drain = async (gen: AsyncIterable<unknown>) => {
+    for await (const _ of gen) {
+      // consume
+    }
+  };
+
+  test("R1 a daemon that lost the session (a worker restart) recreates it WITH its switches", async () => {
+    // Mutation: drop `capabilities` from `recreate`'s open → the new daemon has everything on.
+    let host = quietHost();
+    let last: ReturnType<typeof createChannelPair>[1] | null = null;
+    const dial = () => {
+      const [d, c] = createChannelPair();
+      new Connection(d, host);
+      last = c;
+      return c;
+    };
+    const rc = new RemoteClient(dial(), new PermissionBroker(), undefined, {
+      channelFactory: async () => dial(),
+      random: () => 0,
+    });
+    await rc.initialize();
+    const session = rc.newSession(undefined, "S");
+    await drain(session.send("first"));
+    await session.setCapability("mcp", "echo", false);
+    expect(session.capabilities()).toEqual(OFF);
+    // A new daemon that never heard of S: the client recreates S from its copy.
+    host = quietHost();
+    (last as { close(): void } | null)?.close();
+    expect(await waitFor(() => host.get("S") !== undefined)).toBe(true);
+    expect(host.get("S")?.capabilities()).toEqual(OFF);
+    rc.close();
+  });
+
+  test("R2 a resumed record's switches seed the create; a one-shot seed is consumed once", async () => {
+    // Mutation: `takeSeedCapabilities` does not clear → the second new session is seeded too.
+    const d = daemon();
+    const rc = await d.client("laptop");
+    const resumed = rc.newSession([{ role: "user", content: "q" }], "R", undefined, {
+      capabilities: OFF,
+    });
+    await resumed.openSeeded();
+    expect(resumed.capabilities()).toEqual(OFF);
+
+    resumed.seedCapabilities();
+    const next = rc.newSession(undefined, "N1");
+    await next.openSeeded();
+    expect(next.capabilities()).toEqual(OFF);
+    const after = rc.newSession(undefined, "N2");
+    await after.openSeeded();
+    expect(after.capabilities()).toEqual({ disabledMcp: [], disabledSkills: [] });
+  });
+});

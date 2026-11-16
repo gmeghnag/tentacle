@@ -35,6 +35,10 @@
  * report, capped). A build that does not know them skips them; the LOAD
  * derivation (`subagentLoadNotes`, core) turns what they leave open into a
  * history note, so a restart is honest without them.
+ *
+ * `capabilities` (docs/feat/session-capabilities.md, owner Q2) is NON-critical
+ * too: the session's MCP/skill switches; an older build skips it and shows the
+ * model everything.
  */
 import { z } from "zod";
 import {
@@ -43,6 +47,7 @@ import {
   MessageWithAttachmentsSchema,
   type MessageWithoutAttachments,
   MessageWithoutAttachmentsSchema,
+  SessionCapabilitiesSchema,
   SessionIdSchema,
   SessionTitleSchema,
   StopReasonSchema,
@@ -187,6 +192,21 @@ export const LogTitleEntrySchema = z.object({
   title: SessionTitleSchema,
 });
 
+/**
+ * The session's MCP/skill switches (docs/feat/session-capabilities.md S3b): the
+ * WHOLE state after a change, the last one of a segment wins (none = everything
+ * on). Logged on every change and again after a `base` when something is off,
+ * so a segment is self-contained. NOT critical (owner Q2): an older build skips
+ * it and loads the session with everything visible — fail-open on visibility
+ * only, permissions still gate every call. Not security: a pod writes it.
+ */
+export const LogCapabilitiesEntrySchema = z.object({
+  ...envelopeShape(),
+  ...skippable(),
+  type: z.literal("capabilities"),
+  capabilities: SessionCapabilitiesSchema,
+});
+
 /** The projection here has `count` messages and `projectionDigest` `digest` (F2: derivation drift). Not security: a pod writes it. */
 export const LogCheckpointEntrySchema = z.object({
   ...envelopeShape(),
@@ -263,6 +283,7 @@ export const KnownLogEntrySchema = z.discriminatedUnion("type", [
   LogCallStartedEntrySchema,
   LogSubagentBackgroundEntrySchema,
   LogSubagentEndEntrySchema,
+  LogCapabilitiesEntrySchema,
 ]);
 export type KnownLogEntry = z.infer<typeof KnownLogEntrySchema>;
 export type LogMessageEntry = z.infer<typeof LogMessageEntrySchema>;
@@ -286,6 +307,7 @@ export const LOG_ENTRY_CRITICAL: Readonly<Record<LogEntryType, boolean>> = {
   call_started: false,
   subagent_background: false,
   subagent_end: false,
+  capabilities: false,
 };
 
 /**
