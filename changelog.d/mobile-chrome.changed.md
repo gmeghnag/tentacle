@@ -20,7 +20,10 @@
   label never truncates: a long value shortens instead, keeping the end that
   tells values apart (a path its tail, a model id both ends), and at the
   largest text sizes the value drops under its label rather than squeezing it.
-  The chat's back chevron becomes a
+  Settings, Computers, Sessions, Pair and Session info all draw their sections
+  that way now — one band per section, with the section's notes on the band's
+  own margin — and the old inset grouped card and its separate section header
+  are gone. The chat's back chevron becomes a
   hamburger that opens a **sessions drawer** over the conversation: the
   computer as its title (tap to list another paired computer's sessions, or
   pair one), Running / Recent / a collapsed Archived · n, the open session

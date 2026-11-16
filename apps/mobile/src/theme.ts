@@ -242,7 +242,6 @@ export const size = {
   touch: 44,
   composer: 48,
   fab: 56,
-  rowProject: 60,
   rowSession: 64,
   /** An E2 row in a band (Settings, Session info, Computers). */
   rowList: 50,
@@ -270,15 +269,9 @@ export const shadow = {
 
 export const space = {
   inset: 16,
-  cardInner: 16,
-  sectionComputers: 28,
-  sectionSessions: 22,
   /** The E2 band's horizontal inset: label and row content align on it. */
   rowX: 20,
   /** Above a section's small uppercase label (Design 4: 22 pt). */
   sectionTop: 22,
   transcript: 14,
-  /** Separator inset after a 32 pt icon tile (16 + 32 + 12). */
-  separatorAfterTile: 60,
-  separatorPlain: 16,
 } as const;

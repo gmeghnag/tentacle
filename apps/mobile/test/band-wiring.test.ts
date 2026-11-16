@@ -251,6 +251,27 @@ describe("S3 · the restyled `Sheet` (Design 4)", () => {
     expect(sheet).toMatch(/accessibilityLabel="Close"/);
     expect(sheet).toMatch(/accessibilityRole="button"/);
   });
+
+  test("in the scroll variant the glyph is OUTSIDE the ScrollView", () => {
+    // S4 mounts `onClose` on Session info — a sheet long enough to scroll. Inside
+    // the content, the one way out scrolls away (the screen's old fixed top bar
+    // did not), so the variant hoists it into the frame.
+    const sheet = code(SHEET);
+    // (a) the shared head leaves the glyph OUT when scrolling. Without this guard
+    // the glyph renders twice on a scrolled sheet — the frame's copy is below, so
+    // a scan of the scroll branch alone cannot see it (mutation M16).
+    const head = sheet.slice(sheet.indexOf("const head = ("), sheet.indexOf("const container = "));
+    expect(head).toContain("{scroll ? null : closeGlyph}");
+    // (b) and the scroll branch renders it AFTER the scroller, not inside it.
+    const scroll = sheet.slice(sheet.indexOf("if (scroll) {"));
+    const open = scroll.indexOf("<ScrollView");
+    const close = scroll.indexOf("</ScrollView>");
+    expect(open).toBeGreaterThan(-1);
+    expect(close).toBeGreaterThan(open);
+    expect(scroll.slice(open, close)).toContain("{head}");
+    expect(scroll.slice(open, close)).not.toContain("closeGlyph");
+    expect(scroll.slice(close)).toContain("{closeGlyph}");
+  });
 });
 
 describe("S3 · the row tokens the primitives read exist (S1 landed them)", () => {
