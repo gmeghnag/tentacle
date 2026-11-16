@@ -19,6 +19,7 @@ import type { BackgroundAgentRow } from "./background-view.ts";
 import { cellWidth, truncateCells } from "./cells.ts";
 import { formatDuration, formatTokens } from "./format.ts";
 import { type JobEnd, jobDrawerTail, jobElapsedSeconds, jobEndView } from "./job-drawer.ts";
+import { type ScheduleDockRow, scheduleMeta, scheduleTitle } from "./schedule-view.ts";
 
 /** The most rows the dropdown shows before it windows (mockup 05). */
 export const LIST_MAX_ROWS = 5;
@@ -66,7 +67,7 @@ export type DockTone =
 /** One painted row of the list: the parts, plus the whole line it makes. */
 export interface BackgroundDockRow {
   readonly id: string;
-  readonly glyph: "running" | "asking" | "job";
+  readonly glyph: "running" | "asking" | "job" | "schedule";
   /** The child's `agentType` (`explore`, `general`), or `shell` for a job. */
   readonly typeCol: string;
   /** Already cut to its column. */
@@ -162,16 +163,24 @@ export interface BackgroundListView {
   readonly focused: boolean;
 }
 
-/** The background list is shown iff something is running (the plan's `listVisible`). */
+/** The background list is shown iff something is running OR armed (the plan's `listVisible`). */
 export function listVisible(
   rows: readonly BackgroundAgentRow[] | undefined,
   jobs: readonly DockJobRow[] = [],
+  schedules: readonly ScheduleDockRow[] = [],
 ): boolean {
-  return (rows?.length ?? 0) + jobs.length > 0;
+  return (rows?.length ?? 0) + jobs.length + schedules.length > 0;
 }
 
-function glyphOf(id: string, askingId: string | null, isJob: boolean): BackgroundDockRow["glyph"] {
-  if (isJob) {
+function glyphOf(
+  id: string,
+  askingId: string | null,
+  kind: "agent" | "job" | "schedule",
+): BackgroundDockRow["glyph"] {
+  if (kind === "schedule") {
+    return "schedule";
+  }
+  if (kind === "job") {
     return "job";
   }
   return id === askingId ? "asking" : "running";
@@ -279,7 +288,14 @@ function paintRow(
   const { selected } = item;
   const glyphTone: DockTone =
     item.glyph === "asking" ? "warn" : item.glyph === "job" ? "subtle" : "accent";
-  const glyphChar = item.glyph === "asking" ? "▲" : item.glyph === "job" ? "◆" : "●";
+  const glyphChar =
+    item.glyph === "asking"
+      ? "▲"
+      : item.glyph === "job"
+        ? "◆"
+        : item.glyph === "schedule"
+          ? "◷"
+          : "●";
   // The selection grammar (the palette's, the `/mcp` panel's): accent + bold on
   // the selected row, the rest dimmed; unfocused rows are calm.
   const idTone: DockTone = selected ? "accentBold" : "subtle";
@@ -404,6 +420,7 @@ export function dockHint(
 export function backgroundListView(opts: {
   readonly rows: readonly BackgroundAgentRow[] | undefined;
   readonly jobs?: readonly DockJobRow[];
+  readonly schedules?: readonly ScheduleDockRow[];
   readonly askingId?: string | null;
   readonly focus: DockFocus;
   readonly width: number;
@@ -411,6 +428,7 @@ export function backgroundListView(opts: {
 }): BackgroundListView {
   const agents = opts.rows ?? [];
   const jobs = opts.jobs ?? [];
+  const schedules = opts.schedules ?? [];
   const askingId = opts.askingId ?? null;
   const width = Math.max(10, opts.width);
   const selectedId = opts.focus.kind === "list" ? opts.focus.selected : null;
@@ -419,7 +437,7 @@ export function backgroundListView(opts: {
   // pinned and the input typing (owner 2026-11-11) it paints calm, while the
   // selection stays marked (↓ comes back to that row).
   const focused = opts.focus.kind === "list" && !opts.focus.typing;
-  const total = agents.length + jobs.length;
+  const total = agents.length + jobs.length + schedules.length;
 
   // Every item in its paint order: the children first (launch order), the jobs
   // after — a job's row never jumps above a child that started later (mockup 05).
@@ -433,7 +451,7 @@ export function backgroundListView(opts: {
     items.push({
       selected: row.id === selectedId,
       armed: isArmed,
-      glyph: glyphOf(row.id, askingId, false),
+      glyph: glyphOf(row.id, askingId, "agent"),
       id: row.id,
       typeCol: row.agentType ?? "",
       title: row.description ?? "",
@@ -454,6 +472,23 @@ export function backgroundListView(opts: {
       model: "",
       meta: `running · ${formatDuration(seconds)}`,
       metaTone: "dim",
+    });
+  }
+  // The session's armed wakes last (they outlive a turn, so they never jump
+  // above one that started later either). `◷ sc-N`: the third wire id kind,
+  // read from the id alone (`dockKindOf`).
+  for (const schedule of schedules) {
+    const isArmed = armed && schedule.id === selectedId;
+    items.push({
+      selected: schedule.id === selectedId,
+      armed: isArmed,
+      glyph: "schedule",
+      id: schedule.id,
+      typeCol: "",
+      title: scheduleTitle(schedule),
+      model: "",
+      meta: isArmed ? `delete ${schedule.id}? ctrl+x` : scheduleMeta(schedule, opts.now),
+      metaTone: isArmed ? "warn" : "dim",
     });
   }
   const cols = rowColumns(items, width);

@@ -34,7 +34,9 @@ describe("flow 25: the MCP switch step", () => {
 
   test("the flow's testID is the one the sheet draws for a row's switch", () => {
     const sheet = read("src", "screens", "SessionInfoSheet.tsx");
-    expect(sheet).toContain("testID={`session-info-${sectionId}-${row.title}-switch`}");
+    // The row's IDENTITY, not its title (S6 fix round 1: two rows may share a
+    // title; `e2e-session-capabilities.test.ts` must pin what is really drawn).
+    expect(sheet).toContain("testID={`session-info-${sectionId}-${rowIdentity(row)}-switch`}");
   });
 
   test("the script reads the hook and fails loudly on either wrong state", () => {

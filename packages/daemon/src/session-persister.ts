@@ -543,6 +543,9 @@ export class SessionPersister {
       ...(state.archivedAt !== undefined ? { archivedAt: state.archivedAt } : {}),
       ...(state.head !== undefined ? { head: state.head } : {}),
       ...(state.autoAccept === true ? { autoAccept: true } : {}),
+      ...(state.schedules !== undefined && state.schedules.length > 0
+        ? { schedules: state.schedules }
+        : {}),
       logged: log.logged,
       logHead: log.head,
       paired: true,

@@ -43,17 +43,17 @@ describe("notice colours: one soft blue, the hint grey", () => {
   test("bullet and text are blue, the hint is grey, separately", () => {
     // Mutation: leave noticeLines on theme.subtle → no BLUE anywhere.
     expect(probe.hinted).toEqual([
-      `${BLUE}⏺${CLOSE} ${BLUE}Session settings: {}${CLOSE} ${GREY}(/clear to reset)${CLOSE}`,
+      `${BLUE}●${CLOSE} ${BLUE}Session settings: {}${CLOSE} ${GREY}(/clear to reset)${CLOSE}`,
     ]);
   });
 
   test("no hint: no grey, no trailing space", () => {
-    expect(probe.plain).toEqual([`${BLUE}⏺${CLOSE} ${BLUE}Container config: {}${CLOSE}`]);
+    expect(probe.plain).toEqual([`${BLUE}●${CLOSE} ${BLUE}Container config: {}${CLOSE}`]);
   });
 
   test("a multi-line notice: the hint ends the last line, text lines stay blue", () => {
     expect(probe.multi).toEqual([
-      `${BLUE}⏺${CLOSE} ${BLUE}a${CLOSE}`,
+      `${BLUE}●${CLOSE} ${BLUE}a${CLOSE}`,
       `  ${BLUE}b${CLOSE} ${GREY}(h)${CLOSE}`,
     ]);
   });

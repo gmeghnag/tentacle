@@ -13,6 +13,8 @@ describe("toolLabel", () => {
     expect(toolLabel("search")).toBe("Search");
     expect(toolLabel("agent_task")).toBe("Agent");
     expect(toolLabel("skill")).toBe("Skill");
+    expect(toolLabel("schedule_create")).toBe("Schedule");
+    expect(toolLabel("schedule_control")).toBe("Schedules");
   });
 
   test("an unknown name (MCP, future tool) displays as itself", () => {

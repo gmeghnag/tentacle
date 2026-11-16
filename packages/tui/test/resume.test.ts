@@ -82,7 +82,7 @@ describe("messagesToItems", () => {
     const header = stripAnsi(
       itemLines(items[0] as ToolItem, { width: 80, expandAll: false })[0] ?? "",
     );
-    expect(header).toBe("⏺ Bash sleep 2");
+    expect(header).toBe("● Bash sleep 2");
     expect("durationMs" in (items[0] as ToolItem)).toBe(false);
   });
 
@@ -100,7 +100,7 @@ describe("messagesToItems", () => {
     const header = stripAnsi(
       itemLines(items[0] as ToolItem, { width: 80, expandAll: false })[0] ?? "",
     );
-    expect(header).toBe("⏺ Bash sleep 2 2.0s");
+    expect(header).toBe("● Bash sleep 2 2.0s");
   });
 
   test("an orphan tool result (truncated history) shows as a notice", () => {

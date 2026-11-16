@@ -424,6 +424,11 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `relay.enabled` | — | `true` | Whether `serve` dials the mobile relay at all. |
 | `relay.url` | — | `wss://relay.tentacle.so` | Which relay `serve` dials. |
 | `rm` | — | false | Whether `run` removes its pod/container when the run ends. |
+| `schedules.expiryDays` | — | 7 | A recurring wake's life, and its longest interval, in days (1–30). |
+| `schedules.maxAheadDays` | — | 7 | How far ahead a one-shot wake may point, in days (1–30). |
+| `schedules.maxJobs` | — | 10 | Live scheduled wakes per session (1–100). |
+| `schedules.minIntervalMinutes` | — | 1 | The shortest recurring interval, in minutes (1–1440). |
+| `schedules.promptMaxChars` | — | 2000 | The longest prompt a scheduled wake may carry (1–20000). |
 | `sessionHop.tool` | `TENTACLE_SESSION_HOP_TOOL` | false | Offer the agent `move_session` (OFF by default): it may propose moving this session to another target. |
 | `sessions.keepSuperseded` | — | — | Keep the history a compaction or a `context_reset` replaced in the session file. |
 | `subagents.agentTaskDescription` | — | — | Replaces the `agent_task` description (max 4096 bytes; the sub-agent types are appended). |

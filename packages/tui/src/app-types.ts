@@ -16,6 +16,7 @@ import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import type { AutoAcceptFeed, AutoAcceptSharedFeed } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedMessage, ReturnedCause } from "./queued.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import type { SessionsView } from "./sessions-panel.ts";
 import type { SessionSkillsView } from "./skills-sync.ts";
 import type { DisplayItem, SessionEvent } from "./state.ts";
@@ -221,6 +222,29 @@ export interface SessionController {
   messageSubagent?(agentId: string, text: string): Promise<{ ok: boolean; reason?: string }>;
   /** Stop one background child (`session/agent_kill`); `{killed: false}` if it was not running. */
   killSubagent?(agentId: string): Promise<{ killed: boolean }>;
+  /**
+   * The session's ARMED scheduled wakes (`schedules`, docs/feat/cron-tool.md S5):
+   * the daemon's table, bounded and sanitized by the client (`spec`/`prompt` are
+   * a MODEL's text, D5). The current table, if any, is given at once; then every
+   * change (create, delete, fire, expiry, failure stop). The rows are MIRRORED
+   * structurally (`ScheduleDockRow`), never the protocol's type: the TUI does not
+   * depend on it (`background-view.ts`'s rule). Optional: absent on a pod's
+   * client and on an older daemon — where no table exists, and painting an empty
+   * one would claim there are no wakes.
+   */
+  onSchedules?(
+    listener: (report: {
+      readonly rows: readonly ScheduleDockRow[];
+      readonly count: number;
+    }) => void,
+  ): (() => void) | undefined;
+  /**
+   * Drop one scheduled wake (`session/schedule_delete`). A refusal is a typed
+   * RESULT with a `reason`, never a throw: an unknown id, an older daemon, or a
+   * client whose daemon is not trusted to schedule (`daemonWakes` off) each say
+   * their own. Optional with `onSchedules`.
+   */
+  deleteSchedule?(scheduleId: string): Promise<{ deleted: boolean; reason?: string }>;
   /**
    * Subscribe to this session's running background SHELL jobs as the daemon
    * reports them (bounded by the client; `count` is the daemon's own number).
