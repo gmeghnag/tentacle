@@ -265,7 +265,71 @@ The owner asked to get going now. Each recommendation above is adopted:
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-16*
+
+Slice `all`. **DONE** (except T4, which is manual and the owner's, see below).
+
+**Load-bearing check, re-run first: holds.** `bun .tentacle/tmp/tui-redraw-flash/repro.ts`
+gave the same output as Context: (a) and (b) are 66 writes with 1980 `ESC[2K`, so
+30 per write and `maxEraseInOneWrite` = 30. Each frame is one write.
+`rg "<Static" packages/tui/src` only matches a comment (`state.ts:7`).
+`log-update.js:17` and `ink.js:122` are single writes, as the plan cites.
+
+**As built, in order:**
+1. `packages/tui/src/sync-output.ts` (new): `BSU`, `ESU`, the `SyncStream` type
+   (the stdout subset Ink reads), and `synchronizedStdout(stream)`. It uses
+   explicit delegation. `write` brackets a non-empty string and passes anything
+   else through. `columns`/`rows`/`isTTY` are live getters. The
+   `on`/`off`/`once`/`addListener`/`removeListener` methods forward to `stream`
+   and return the wrapper. It first landed with an **identity** `write`, for red.
+2. `packages/tui/src/run.tsx`: the import, plus the `render(...)` options
+   `stdout: fullscreen ? (synchronizedStdout(process.stdout) as unknown as NodeJS.WriteStream) : process.stdout`.
+   This is the single call site cast the plan calls for.
+3. `packages/tui/test/sync-output.test.tsx` (new): T1, T2, T3 and three unit tests
+   (bracketing + `rest` forwarded; empty and non-string pass through; live
+   getters + listeners on the real stream, removed by `off`). T1 and T2 mount
+   `App` with Ink's real `render` on a `FakeTty` through the wrapper, with a
+   hanging `send()`.
+4. Flipped `write` to the bracketing version.
+5. `changelog.d/tui-redraw-flash.fixed.md`.
+
+**Red → green.** With the identity `write` (step 1):
+```
+(fail) T1: every frame while Thinking is one complete BSU…ESU update
+       expect(w.startsWith(BSU)).toBe(true)  Received: false   (after the ≥3-frames check passed)
+(fail) synchronizedStdout unit > a non-empty string becomes one bracketed write
+ 4 pass / 2 fail
+```
+After step 4: `6 pass / 0 fail`.
+
+**Mutations (each reverted, then 6/6 green again):**
+| mutation | result |
+|---|---|
+| M1: `rows`/`columns` copied at wrap time (and separately, `rows` hard-wired to 30) | **T2 red** `Expected: <= 23, Received: 29`; the live-getter unit test is red too (`Received: 30`) |
+| M2: drop the wrap in `run.tsx` (`? process.stdout`) | **T3 red** (only T3, as the plan predicted: T1 builds its own wrapper) |
+| M0: identity `write` (the red stage above) | **T1 red** + bracketing unit red |
+
+**Gate:** `bunx tsc --noEmit` clean. `bun run lint`: 1696 files, 0 errors.
+`bun test`: **12244 pass, 5 skip, 0 fail** (880 files). All 5 skips are env-gated
+opt-ins: `session-hop.docker`, `workload-shell-live.k8s`, `ws-server` slow,
+`docker/integration.live`, `k8s/integration.live`. AGENTS §6 still says "three",
+so that count is stale; nothing here added a skip. No schema change, so no
+`protocol.json` regeneration and no `protocol.d/` note.
+
+**Drift from Implementation:**
+- Files 5 (`TODO.md` tick) was **not done**: the orchestrator's instruction for
+  this run was "Do not touch TODO.md". That is left to the orchestrator at merge.
+- T2 strips Ink's erase/clear prefix with a `startsWith` loop, not a regex.
+  Biome's `noControlCharactersInRegex` rejects `\x1b` in a regex literal.
+- T1 also asserts `endsWith(ESU)` and exactly one BSU and one ESU per frame, as
+  planned. It takes about 0.4 s of ticks after the submit (each of T1/T2 takes
+  about 0.7 s in total).
+
+**Unverified: T4 (the visible property).** No real terminal was driven here. T1
+proves each frame is one atomic synchronized update, not that the flash is gone
+on screen. To verify: the owner runs a long "Thinking…" turn in iTerm2/Ghostty
+(no flash), and checks Terminal.app and tmux for no `?2026` text and no
+regression. Record which terminals were checked.
 
 ## Review
 
