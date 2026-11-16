@@ -1747,3 +1747,4 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
       icon (16–32 px). See
       `docs/feat/mascot.md` (Review).
 - [ ] **feat/token-usage-log** (owner 2026-11-16) — record per-round token usage (prompt/completion/cached, model) in the session log or a run summary, to see where DeepSeek runs waste input tokens (~8B so far). Type: feat · Size: S · Blast: contained.
+- [ ] **eval/app-store-release** (owner 2026-11-16) — what an App Store release of the iPhone app needs: Apple Developer account (personal vs company), App Store Connect record, EU DSA trader status, distribution cert/profile, production APNs (relay + PushCore), PrivacyInfo.xcprivacy, usage strings, TestFlight, listing (icon, screenshots, privacy-policy + support URL on tentacle.so, nutrition labels, export compliance), and the review blocker: a reviewer-reachable demo serve or demo mode (guideline 2.1).
