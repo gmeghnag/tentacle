@@ -7,6 +7,7 @@
 export * from "./mapping.ts";
 export * from "./artifact-store.ts";
 export * from "./attachment-store.ts";
+export * from "./prompt-documents.ts";
 export * from "./device-store.ts";
 export * from "./push-store.ts";
 export * from "./live-store.ts";

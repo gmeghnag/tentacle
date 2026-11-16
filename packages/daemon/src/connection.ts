@@ -101,6 +101,7 @@ import {
 import { artifactListResult } from "./artifact-store.ts";
 import type { Attachment, HostedSession } from "./hosted-session.ts";
 import { type PairHandler, pairingRefusedError } from "./pairing-handler.ts";
+import { hasDocuments, resolvePromptDocuments } from "./prompt-documents.ts";
 import type { SessionHost } from "./session-host.ts";
 import { versionMismatch } from "./version-mismatch.ts";
 
@@ -380,7 +381,7 @@ export class Connection {
       case Method.SessionDelete:
         return this.deleteSession(params as DeleteParams);
       case Method.Prompt:
-        return this.prompt(params as PromptParams);
+        return this.prompt(params as PromptParams, context?.signal);
       case Method.Compact:
         return this.compact(params as CompactParams, context?.signal);
       // Synchronous, holds no lock (AGENTS §7): `HostedSession.clear` never awaits.
@@ -776,6 +777,17 @@ export class Connection {
                   : { input: "client" },
             }
           : {}),
+        // What a client may attach as a document (docs/feat/pdf-read.md D4):
+        // absent when this daemon takes none; `client` on a pod, which takes
+        // text only (no PDF bytes into a pod, AGENTS §7).
+        ...(this.host.documents
+          ? {
+              documents:
+                this.host.documents.source === "store"
+                  ? { input: "upload", maxBytes: this.host.documents.maxBytes, kinds: ["pdf"] }
+                  : { input: "client", kinds: ["pdf"] },
+            }
+          : {}),
       },
       ...(this.host.identity
         ? {
@@ -999,9 +1011,12 @@ export class Connection {
 
   // Acks at once: the turn runs daemon-side and ends with `turn_end` in the
   // stream, so its outcome survives a lost response.
-  private prompt(params: PromptParams): PromptResult {
+  private prompt(params: PromptParams, signal?: AbortSignal): PromptResult | Promise<PromptResult> {
     refuseWakeTurnId(params.turnId);
     const hosted = this.lookup(params.sessionId);
+    if (hasDocuments(params.content)) {
+      return this.promptWithDocuments(params, hosted, signal);
+    }
     // The PROMPTING connection is asked about project hooks: it is the client
     // with a human behind this turn (docs/feat/hooks-project-trust.md). The
     // laptop decides; a rejection (an old laptop's `MethodNotFound`, a drop)
@@ -1012,6 +1027,39 @@ export class Connection {
       params.skill,
       this.askHooksTrust,
       params.voice,
+    );
+  }
+
+  // Attached documents (docs/feat/pdf-read.md D4): extracted BEFORE the turn is
+  // accepted — `hosted.prompt` stays synchronous (its ack admits one turn) and
+  // gets plain `<file>` text. A failure refuses the prompt, nothing recorded.
+  // Holds no lock (AGENTS §7): requests stay concurrent while it extracts.
+  private async promptWithDocuments(
+    params: PromptParams,
+    hosted: HostedSession,
+    signal: AbortSignal | undefined,
+  ): Promise<PromptResult> {
+    // A retry of an accepted turn is answered BEFORE extracting: a fresh
+    // extraction could fail and refuse a turn that is live (review P4 #1).
+    const known = hosted.knownTurn(params.turnId);
+    if (known) {
+      return known;
+    }
+    const { content, media } = await resolvePromptDocuments(params.content, {
+      policy: this.host.documents,
+      store: hosted.uploads,
+      ...(signal ? { signal } : {}),
+    });
+    // Looked up AGAIN: the session may have been closed (or replaced) while
+    // the extraction ran — a closed one refuses here, never takes a turn.
+    return this.lookup(params.sessionId).prompt(
+      params.turnId,
+      content,
+      params.skill,
+      this.askHooksTrust,
+      params.voice,
+      undefined,
+      media,
     );
   }
 

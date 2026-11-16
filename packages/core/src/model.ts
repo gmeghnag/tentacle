@@ -76,6 +76,21 @@ export interface ChatMessage {
    * has no key (never `[]`), so it hashes and serialises as it always did.
    */
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * On a USER message: the files attached to it, for the chip
+   * (docs/feat/pdf-read.md D4). Display only for the renderers — the text is in
+   * `content` as `<file>` blocks; the agent loop adds one "this is data" line to
+   * the model's copy (`renderForModel`). Non-empty when present.
+   */
+  readonly media?: readonly MessageMedia[];
+}
+
+/** One attached file on a user message (the wire's `MessageMediaSchema`; `kind` is a free string). */
+export interface MessageMedia {
+  readonly kind: string;
+  readonly name: string;
+  readonly pages?: number;
+  readonly chars?: number;
 }
 
 /**

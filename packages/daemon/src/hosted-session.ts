@@ -60,6 +60,7 @@ import {
   type ChatMessage,
   DISMISSED,
   type JobController,
+  type MessageMedia,
   type ModelProvider,
   NOTE_KIND,
   type PermissionBroker,
@@ -76,9 +77,11 @@ import {
   type SubagentEndBody,
   anySignal,
   attachmentLabel,
+  autoApproves,
   checkAttachmentRefs,
   daemonWakeGate,
   formatBytes,
+  ownRequest,
   scheduleCheckDelayMs,
   scheduleCreate,
   scheduleDelete,
@@ -260,6 +263,16 @@ export interface Attachment {
 interface PendingAsk {
   /** The request as it was streamed: what a fresh watcher's `state.pending` repeats. */
   readonly update: PermissionRequestUpdate;
+  /**
+   * The request the ask was raised FOR, laptop-side (`autoAnswers` reads its
+   * `kind`/`hopAuto`, which the wire update does not carry).
+   */
+  readonly req: PermissionRequest;
+  /**
+   * The turn it was raised in (`this.activeTurnId`, or a background child's
+   * spawning turn): what auto-accept's own-turn test reads, at answer time.
+   */
+  readonly turnId?: string;
   readonly offered: ReadonlySet<string>;
   /**
    * The options a reply may come with (the `reject_*` kinds), when the ask
@@ -509,6 +522,16 @@ export interface TurnErrorPolicy {
   readonly exposeTurnErrors?: boolean;
   /** Receives every turn failure, unredacted — never silent. */
   readonly onTurnError?: (error: Error) => void;
+  /**
+   * A TRUST bit: this daemon itself answers an auto-accepted ask
+   * (docs/fix/serve-autoaccept-unattended.md). Only `startDaemon` (the user's
+   * own host) sets it. It rides this bag because it must be known at
+   * CONSTRUCTION (a reload's resumed turn re-asks inside the constructor), and
+   * the policy bag is the constructor input every host already passes.
+   * Absent (a pod daemon, the worker, the relay, a hand-built session) →
+   * `false`: nobody answers on its own there.
+   */
+  readonly answersAutoAccept?: boolean;
 }
 
 /** The most of a failed turn's message the wire carries (it may be an upstream body). */
@@ -710,6 +733,14 @@ export class HostedSession {
   private compactionSummary: ChatMessage | undefined;
   private readonly errorPolicy: TurnErrorPolicy;
   /**
+   * A TRUST bit (docs/fix/serve-autoaccept-unattended.md D1): this daemon
+   * answers an auto-accepted ask itself, so a `serve` session keeps running
+   * with nobody attached. Only `startDaemon` (the user's own host) sets it —
+   * never a pod daemon, the worker or the relay (AGENTS §7). Read at answer
+   * time, beside the session's live `autoAccept`.
+   */
+  private readonly answersAutoAccept: boolean;
+  /**
    * A resumed turn's pending entries from the record, each until its call is
    * asked again (an ask for the same call replaces it) or answered without a
    * re-ask (all cleared at the next commit, a context reset, the turn's end).
@@ -900,6 +931,7 @@ export class HostedSession {
     // `started in background as sa-N` result, a note) is never handed out again.
     this.agentJobs = AgentJobLedger.fromHistory(session.messages);
     this.errorPolicy = errorPolicy;
+    this.answersAutoAccept = errorPolicy.answersAutoAccept === true;
     this.ring = new SessionRing(ringBytes);
     this.watchers = new SessionWatchers(now);
     const resume = restored?.resume;
@@ -1123,8 +1155,16 @@ export class HostedSession {
     // A blocking update only to a session one of whose clients can answer it
     // (docs/feat/protocol-v10-forward-compat.md): otherwise refuse at once,
     // with the reason the model sees — never suspend on a client that cannot
-    // show it. Nobody attached: unchanged (held for a client to attach).
-    const unsupported = this.blockingUnsupported("permission_request");
+    // show it. Nobody attached: unchanged (held for a client to attach). An
+    // ask the DAEMON will answer needs no client at all, so it is never
+    // refused that way (docs/fix/serve-autoaccept-unattended.md OD5) — at raise
+    // (here) and, since `autoAccept` can move while the ask's write is in
+    // flight, AGAIN when it is shown (the `persisted().then` below: fix round 1,
+    // R1). Deciding only here left an ask shown to a client that cannot display
+    // it and this host no longer answers, waiting forever.
+    const unsupported = this.autoAnswers(req, this.activeTurnId ?? undefined)
+      ? undefined
+      : this.blockingUnsupported("permission_request");
     if (unsupported !== undefined) {
       return Promise.resolve({ allowed: false, reason: unsupported });
     }
@@ -1151,7 +1191,14 @@ export class HostedSession {
       requestedAt: this.now(),
       ...(groupStart !== undefined ? { groupStart } : {}),
     };
-    const decided = this.registerAsk(requestId, update, record, settleOn);
+    const decided = this.registerAsk(
+      requestId,
+      update,
+      record,
+      settleOn,
+      req,
+      this.activeTurnId ?? undefined,
+    );
     // The resumed call asked again: its live ask replaces the record's entry.
     if (toolCallId !== undefined) {
       this.carried = this.carried.filter((p) => p.toolCallId !== toolCallId);
@@ -1165,12 +1212,25 @@ export class HostedSession {
       if (!ask) {
         return;
       }
+      // The OD5 skip is decided AGAIN here, not only at raise: `autoAccept` can
+      // move while this ask's write is in flight, and the refusal must follow
+      // the value the ANSWER will read (`autoAnswers`, in `autoAnswer` below).
+      // Otherwise the ask is shown to a client that cannot display it — and this
+      // host no longer answers it — so it waits forever (fix round 1, R1).
+      if (!this.autoAnswers(ask.req, ask.turnId)) {
+        const reason = this.blockingUnsupported("permission_request");
+        if (reason !== undefined) {
+          this.settle(requestId, { outcome: "cancelled" }, reason);
+          return;
+        }
+      }
       ask.shown = true;
       try {
         this.emit(update);
       } catch (error) {
         this.reportTurnError(error);
       }
+      this.autoAnswer(requestId);
     });
     return decided.then(async ({ outcome, reason, message }) => {
       // `settle` already took this ask out of `asks`: write the record without
@@ -1217,12 +1277,16 @@ export class HostedSession {
     update: PermissionRequestUpdate,
     record: PendingPermission | null,
     signal: AbortSignal,
+    req: PermissionRequest,
+    turnId: string | undefined,
     reoffer?: PermissionRequestUpdate,
   ): Promise<{ outcome: PermissionOutcome; reason?: string; message?: string }> {
     return new Promise((resolve) => {
       const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
       this.asks.set(requestId, {
         update,
+        req,
+        ...(turnId !== undefined ? { turnId } : {}),
         offered: new Set(update.options.map((o) => o.optionId)),
         replyable: new Set(
           update.reply
@@ -1263,19 +1327,21 @@ export class HostedSession {
     if (this.closed || !signal || signal.aborted) {
       return Promise.resolve(outcomeToResponse({ outcome: "cancelled" }));
     }
-    const unsupported = this.blockingUnsupported("permission_request");
+    const requestId = crypto.randomUUID();
+    const spawnTurn = this.spawnTurns.get(agentId);
+    const unsupported = this.autoAnswers(req, spawnTurn)
+      ? undefined
+      : this.blockingUnsupported("permission_request");
     if (unsupported !== undefined) {
       return Promise.resolve({ allowed: false, reason: unsupported });
     }
-    const requestId = crypto.randomUUID();
-    const spawnTurn = this.spawnTurns.get(agentId);
     const asked = this.askedOn();
     const update: PermissionRequestUpdate = {
       ...toPermissionRequestUpdate(requestId, options.toolCallId || "pending", req, options.agent),
       ...(spawnTurn !== undefined ? { turnId: spawnTurn } : {}),
       ...(asked !== undefined ? { askedOn: asked } : {}),
     };
-    const decided = this.registerAsk(requestId, update, null, signal, update);
+    const decided = this.registerAsk(requestId, update, null, signal, req, spawnTurn, update);
     const ask = this.asks.get(requestId);
     if (ask) {
       ask.shown = true;
@@ -1285,6 +1351,7 @@ export class HostedSession {
     } catch (error) {
       this.reportTurnError(error);
     }
+    this.autoAnswer(requestId);
     return decided.then(({ outcome, reason, message }) => {
       if (reason !== undefined) {
         return { allowed: false, reason };
@@ -1360,8 +1427,55 @@ export class HostedSession {
       return;
     }
     for (const requestId of [...this.asks.keys()]) {
+      // An ask this host ANSWERS itself needs no client: `blockingUnsupported`
+      // is asked about the set, not about that one ask (docs/fix/
+      // serve-autoaccept-unattended.md OD5).
+      const ask = this.asks.get(requestId);
+      if (ask && this.autoAnswers(ask.req, ask.turnId)) continue;
       this.settle(requestId, { outcome: "cancelled" }, reason);
     }
+  }
+
+  /**
+   * The daemon answers this ask itself (docs/fix/serve-autoaccept-unattended.md
+   * D2): a trusted host (`answersAutoAccept`), the session's auto-accept ON,
+   * and the SAME rule a client's auto-accept applies. Every turn of the session
+   * is "own" on a trusted daemon (session-auto-accept Q2: the widest test
+   * counts, so a wake turn is answered too — docs/fix/autoaccept-wake-turns.md),
+   * and a request with NO turn is not known to be the session's (`ownRequest`),
+   * so a background child's ask without a spawn turn waits. Re-evaluated
+   * against the LIVE `this.autoAccept`, never cached (the toggle sweep, D4).
+   */
+  private autoAnswers(req: PermissionRequest, turnId: string | undefined): boolean {
+    return (
+      this.answersAutoAccept &&
+      this.autoAccept &&
+      autoApproves(
+        req,
+        ownRequest(turnId, () => true),
+      )
+    );
+  }
+
+  /**
+   * Answer `requestId` as the computer, when this host may and the session's
+   * auto-accept says so: `allow_once` — never a lasting rule (D3) — through
+   * `resolvePermission`, so the answer is REMEMBERED and a client's identical
+   * one stays the no-op success of `SettledAnswers`. Only an ask already SHOWN
+   * is answered (a cancel between the record's write and the emit leaves none),
+   * so every attached client sees the same request/resolved pair a client's own
+   * auto-answer produces. Synchronous (AGENTS §7): `resolvePermission` settles
+   * end to end in this tick.
+   */
+  private autoAnswer(requestId: string): void {
+    const ask = this.asks.get(requestId);
+    if (!ask || !ask.shown || !ask.offered.has("allow_once")) {
+      return;
+    }
+    if (!this.autoAnswers(ask.req, ask.turnId)) {
+      return;
+    }
+    this.resolvePermission(requestId, "allow_once");
   }
 
   /**
@@ -2402,6 +2516,19 @@ export class HostedSession {
   }
 
   /**
+   * The answer to a `turnId` this session already accepted (running or ended),
+   * else undefined. `prompt`'s dedupe — exposed so a caller with slow work
+   * before `prompt` (attached documents) answers a retry without redoing it.
+   */
+  knownTurn(turnId: string): PromptResult | undefined {
+    const known = this.turns.get(turnId);
+    if (!known) {
+      return undefined;
+    }
+    return known.end ? { turnId, ended: known.end } : { turnId };
+  }
+
+  /**
    * Accept a turn and ack at once; the turn itself runs in `drive` and ends
    * with a `turn_end` update. Synchronous up to the ack ON PURPOSE: two prompts
    * arriving together must see the first one's controller (an `await` before it
@@ -2419,11 +2546,13 @@ export class HostedSession {
     voice?: VoiceTurn,
     /** The scheduled wake that fires this turn (`fireSchedule` only; display data for `turn_start`). */
     schedule?: { readonly id: string; readonly spec: string },
+    /** Attached documents' chips (`resolvePromptDocuments`); their text is already in `content`. */
+    media?: readonly MessageMedia[],
   ): PromptResult {
     // The key first: a retry is answered even while a turn runs, or after it ended.
-    const known = this.turns.get(turnId);
+    const known = this.knownTurn(turnId);
     if (known) {
-      return known.end ? { turnId, ended: known.end } : { turnId };
+      return known;
     }
     // Before the busy check: a rejected prompt starts and records nothing.
     const { text, refs } = splitPrompt(content);
@@ -2473,6 +2602,7 @@ export class HostedSession {
       this.session.send(text, controller.signal, {
         ...(skill !== undefined ? { skill } : {}),
         ...(refs.length > 0 ? { attachments: refs } : {}),
+        ...(media !== undefined && media.length > 0 ? { media } : {}),
         ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
         ...(voice !== undefined ? { voice } : {}),
         beforeRun: this.beforeRunFn,
@@ -2755,6 +2885,17 @@ export class HostedSession {
       this.autoAccept = on;
       this.persist();
       this.emit({ type: "auto_accept", on, ...(by ? { by } : {}) });
+      // Switched ON with asks already pending: answer them now, as the computer
+      // (docs/fix/serve-autoaccept-unattended.md D4) — after the `auto_accept`
+      // emit, so every client sees the switch before the answers it causes. An
+      // ask not shown yet is answered by its own `autoAnswer` once it is
+      // (`autoAnswers` reads the live value). An ask a client wins in this same
+      // tick leaves none here and its own answer stands (first wins).
+      if (on) {
+        for (const requestId of [...this.asks.keys()]) {
+          this.autoAnswer(requestId);
+        }
+      }
     }
     return { on: this.autoAccept };
   }

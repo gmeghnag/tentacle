@@ -8,6 +8,7 @@
 import {
   type AttachmentRef,
   type ChatMessage,
+  type MessageMedia,
   NOTE_KIND,
   type VoiceTurn,
   checkAttachmentRefs,
@@ -56,6 +57,12 @@ export interface SendOptions {
    * prompt is a prompt, not a continuation).
    */
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * The files attached to this turn's user message (docs/feat/pdf-read.md D4):
+   * display chips only — their text is already in `text` as `<file>` blocks.
+   * Ignored when nothing is pushed.
+   */
+  readonly media?: readonly MessageMedia[];
   /**
    * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3);
    * see `RunOptions.voice`. A voice `enqueue` (`enqueueVoice`) marks the rest of
@@ -187,6 +194,7 @@ export class Session {
         role: "user",
         content: text,
         ...(refs.length > 0 ? { attachments: [...refs] } : {}),
+        ...(opts.media !== undefined && opts.media.length > 0 ? { media: [...opts.media] } : {}),
       });
     }
     try {

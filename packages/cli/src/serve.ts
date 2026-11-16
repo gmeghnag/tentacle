@@ -63,7 +63,7 @@ import { relayIdOf } from "@tentacle/transport/relay-id";
 import { applyCarried } from "./carried-settings.ts";
 import { type DiscoveryDriver, startDiscovery } from "./discovery.ts";
 import type { ServeLimits } from "./flags.ts";
-import { daemonImagePolicy } from "./image-policy.ts";
+import { daemonDocumentPolicy, daemonImagePolicy } from "./image-policy.ts";
 import { type McpHub, capStderr, createMcpHub } from "./mcp-hub.ts";
 import type { ProviderFactory } from "./model-provider.ts";
 import { readRelaySecret } from "./relay-secret.ts";
@@ -761,6 +761,12 @@ async function reloadedHost(
     // Its host is the user's own machine, so the session's auto-accept is SHARED
     // with every device attached (docs/feat/session-auto-accept.md D1).
     sharedAutoAccept: true,
+    // And, for the same reason, the DAEMON answers an auto-accepted ask itself,
+    // so a session keeps running with no app or terminal attached
+    // (docs/fix/serve-autoaccept-unattended.md D1). Never set on a pod daemon,
+    // the worker or the relay: there a daemon-side "approval" is a check the
+    // workload controls (AGENTS §7).
+    answersAutoAccept: true,
     identity: { tentacle: APP_VERSION, kind: "serve" },
     modelInfo: { name: config.model, contextWindow: config.contextWindow },
     // ITS OWN model, told to a client for DISPLAY only (a `connect` TUI's ctx
@@ -784,6 +790,7 @@ async function reloadedHost(
     // This daemon runs its own config's model, so it holds the bytes
     // (docs/feat/attachments-prompt.md D4); `undefined` = no image input at all.
     ...(images ? { images } : {}),
+    documents: daemonDocumentPolicy("host"),
     // Push (docs/feat/mobile-push.md P8) and Live Activities (task 18) both
     // observe the SAME session hook. ONE observer is registered — a fan-out of
     // whichever of the two exist — so `HostedSession.pushObserver` stays a single
@@ -1284,6 +1291,8 @@ export function podSessionHost(
     defaultCwd: config.cwd,
     onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
     ...(images ? { images } : {}),
+    // A pod takes document TEXT only: the laptop extracts (AGENTS §7).
+    documents: daemonDocumentPolicy("pod"),
     // `run`/`attach`'s daemon: a skew is fixed by attaching again (it replaces it).
     identity: { tentacle: APP_VERSION, kind: "container" },
     // Only the model-proxy branch honours `settings`: a daemon the laptop does

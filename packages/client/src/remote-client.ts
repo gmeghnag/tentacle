@@ -43,6 +43,7 @@ import {
   type DaemonDiscovery,
   type DevicePushRegisterParams,
   type DevicePushRegisterResult,
+  type DocumentContent,
   DomainErrorCode,
   type HistoryCut,
   type HooksTrustParams,
@@ -69,6 +70,7 @@ import {
   Notification,
   type OpenResult,
   PROTOCOL_VERSION,
+  type PromptContentBlock,
   type PromptResult,
   type QueueState,
   type RenameResult,
@@ -2725,14 +2727,23 @@ export class RemoteClient {
     skill?: string,
     attachments?: readonly AttachmentRef[],
     voice?: VoiceTurn,
+    /**
+     * Attached documents (docs/feat/pdf-read.md D4): `document{ref}` after an
+     * upload, or `document{text}` for a pod. Send only when `initialize`
+     * advertised `documents` — an older daemon refuses the block loudly.
+     */
+    documents?: readonly DocumentContent[],
   ): Promise<PromptResult> {
     // An image-only prompt is `[attachment, …]` with no text block at all: a
     // `{type:"text",text:""}` would read as an empty prompt daemon-side.
-    const content =
-      attachments !== undefined && attachments.length > 0
+    const refs = attachments ?? [];
+    const docs = documents ?? [];
+    const content: PromptContentBlock[] =
+      refs.length > 0 || docs.length > 0
         ? [
             ...(prompt !== "" ? [{ type: "text" as const, text: prompt }] : []),
-            ...attachments.map((ref) => ({ type: "attachment" as const, ref })),
+            ...refs.map((ref) => ({ type: "attachment" as const, ref })),
+            ...docs,
           ]
         : [text(prompt)];
     return this.sessionCall(
