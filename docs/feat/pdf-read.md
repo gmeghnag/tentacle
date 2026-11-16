@@ -1814,3 +1814,22 @@ holds) · an old daemon (the `kind` literal and the union member give a loud `In
 deduplicated"), which misses the case where the retry is refused. Its own mutation table checks out.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; SAME model as the P4 executor, so shared blind spots are possible)
+
+### Round 2
+
+**Verdict: APPROVE** (both P4 findings fixed and pinned; nothing new at HIGH/MEDIUM in `git diff HEAD~1`).
+
+- **#1 fixed.** `connection.ts:1028` answers a known turnId through `HostedSession.knownTurn` before
+  extracting. `prompt` reuses the same helper, so the two checks cannot drift apart. Mutation (pre-check removed) → RED 1
+  ("a retried prompt{turnId} … without a second extraction"). A retry that arrives while the FIRST
+  extraction is still running still extracts twice. That is acceptable: no turn is accepted yet, so no live turn can be
+  refused.
+- **#2 fixed.** The sanitiser removed → RED 1 (ESC/BEL test, through a real pod `Connection`, checking both the log and the model
+  copy). The `too-many-pages` retry disabled → RED 1 (it asserts `calls == [{}, {pages:"1-100"}]` and checks the footer
+  `[pages 101-250 not included]`). Each mutation was restored, and `git status` was clean afterwards (`.tentacle/tmp/pdf-read/p4r/mut2.ts`).
+- **Regressions:** `packages/daemon/test` + `pdf-attach` + `document-content`: 1316 pass, 1 skip (opt-in), 0 fail
+  on the two latest runs. An earlier run had 1 fail that did not recur and was not captured. It is unattributed
+  and looks like a timing flake; watch it in the full gate. `bun run typecheck` exit 0 · `bun run lint` 1776 files, clean.
+  Full suite not re-run.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; SAME model as the P4 executor)
