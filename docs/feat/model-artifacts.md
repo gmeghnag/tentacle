@@ -1416,3 +1416,31 @@ This was a fresh-context review of `git diff main...HEAD`, limited to S2. The re
   - **S6b:** an SVG wrapped with the HTML prefix must be written as `.html`. Under `.svg`, the meta CSP is not honoured, and the file is no longer valid XML.
   - **S3:** clamp `callId` to ≤ 256 characters, and refuse a 0-byte file, because `ArtifactMetaSchema` refuses `size` 0.
 - **Executor behaviour:** the report is honest. Documented drift (nested detail, relative-path secret check) matches the code, and the surviving M4 mutation is explained correctly.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16*
+
+### S3 — Store + `present` tool + daemon wiring: PASS (no HIGH/MEDIUM)
+
+This was a fresh-context review of `git diff main...HEAD`, limited to S3. The reviewer is the same model as the S3 executor (only the context is fresh), so blind spots the two share can survive both passes.
+
+- **Gate (narrow):** the 6 S3 test files → `77 pass, 0 fail`. `bun run lint` → `Checked 1700 files … No fixes applied.` `bun run typecheck` → clean. The full `bun test` was not re-run here.
+- **Reviewer mutations** (`.tentacle/tmp/model-artifacts/rev-s3/mut.ts`, on `artifact-store.ts`; each was reverted, the file came back byte-equal, and `git status` stayed clean):
+  - `evicted()` keeps the blob → 2 fail
+  - the idempotent re-present skips restoring an evicted blob → 1 fail
+  - the `offset >= size` check is dropped → 1 fail
+  - The executor's M1–M19, including M19 (a serialized `RpcPeer` deadlocks T3.7), match the tests as written.
+- **§7 invariants:**
+  - **Don't serialize the RPC peer: holds.** `artifact/list` and `artifact/read` take no lock (`connection.ts:462-469`), and T3.7 deadlocks under serialization.
+  - **Connection scoping (P8): holds.** Both cases go through `this.lookup`.
+  - **Pod not trusted:** pod metas stay in the pod store. Nothing is gated on the laptop in S3, and the laptop-side checks belong to S5.
+  - **Persistence:** `details` are not written to `ChatMessage`, and `toolResultContent` is unchanged, so no log format changed.
+- **Attacks that found nothing:**
+  - A negative or unaligned offset: refused by `ArtifactReadParamsSchema` (`nonnegative().int()`) and the alignment check.
+  - A sub-agent reaching the store: the child `Agent` is built without `artifacts`, `present` is filtered out by name in both places, and no config-spreading clone of an `Agent` exists.
+  - A settings sync losing the store: the rebuild reuses the same store (`hosted.artifacts`).
+  - The context-usage probe leaking budget: its throwaway store charges nothing and is disposed in `finally`.
+  - Cross-session eviction while another session is mid-read: the read answers `evicted`, which is the planned behaviour.
+- **Nit (LOW, not blocking; for S5/S6a):** re-presenting the same `id` with the same bytes returns the PRIOR meta (`artifact-store.ts:154-158`). That meta keeps the earlier call's `callId` and `title`, so after a reload the second call's row joins no card. A joiner keyed on `callId` must accept this, or the store must record the new `callId`.
+- **Executor behaviour:** the report is honest. It admits the code was inherited without red-first and makes up for it with mutations. The drift (child filter in `subagent.ts`, the factories forwarding the store) is real and was needed.
