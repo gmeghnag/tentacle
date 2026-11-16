@@ -1958,3 +1958,22 @@ D. send through the attached handle: ok
 
 **Executor behaviour:** honest. It found that the plan's premise ("lazy on the first send") was false, did not make a persisted-format change, and documented the drift. Its mutation Mb covered "no detach" but not "detach not awaited", so finding 1 slipped through.
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · verifies Fix round 1 (`git diff HEAD~1`)*
+
+**Verdict: APPROVE** (S7). Both findings are resolved.
+
+1. **Finding 1: FIXED, confirmed by mutation.** I re-ran the same mutant, `await handle.detach()` → `void handle.detach()` (`src/session-controller.ts:131`). It now gives **1 fail**; before the fix it gave 0 fail. I reverted it, and `git status` was clean afterwards.
+2. **Finding 2: FIXED in the doc.** The `admit()` cite (`session-host.ts:1235-1257`) matches the code. The cost of creating at the tap is now part of the owner's open decision. No code change was expected.
+
+**Regressions:**
+- The diff touches only the test fake and the doc.
+- The detach-failure test still passes: the fake logs `detach-done` before it throws, and `createFreshSession` still swallows the error.
+- Double-tap guard mutant: still 1 fail.
+- S7 test files: 12 pass · 0 fail. `bun run lint`: 1685 files, clean. `bun run typecheck` (root + mobile + relay): clean.
+
+**Still open:**
+- E2E flow 26 has never run on a simulator (the same native-build block as S6).
+- LOW, not blocking: error not cleared on a re-tap; host unmounted mid-create.
+
