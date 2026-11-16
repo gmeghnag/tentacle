@@ -1329,3 +1329,53 @@ family.
   this note.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context)
+
+### P3 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (one HIGH).
+
+1. **HIGH — `fs_read` can no longer read a text file that mentions `%PDF-` in its
+   first KiB.** `packages/tools/src/builtins.ts:166-169` routes any file whose head
+   `isPdf` (substring `%PDF-` anywhere in 1024 bytes, `core/src/pdf-text.ts:493-500`)
+   to the PDF branch with no fallback: whole reads throw `corrupt PDF`, ranged reads
+   throw `is a PDF: use pages` (`builtins.ts:170-172`). End-to-end repro
+   (`.tentacle/tmp/pdf-read/rev-p3/r.ts`, real `HostExecution` + `fsReadTool`), a
+   3-line `notes.md` containing ``Every PDF starts with `%PDF-1.7`.``:
+   `ERR notes.md: corrupt PDF: Invalid PDF structure.` and
+   `ERR …/notes.md is a PDF: use pages (e.g. "1-5"), not line ranges`. On `main` it
+   reads fine. That breaks the core read tool on docs, fixtures and source about PDFs
+   (e.g. this branch's own `pdf-fixture.ts`/tests), and the model has no workaround.
+   The "text file named `.pdf` → text" row in Failure modes covers the extension,
+   not this content false positive; no test pins it. Fix (executor's choice): fall
+   back to the text path when extraction fails `corrupt` and the bytes decode as
+   valid UTF-8 (or the head has no binary bytes), and/or tighten the sniff for
+   `fs_read` (`%PDF-` at a line start after only whitespace/BOM/binary junk). Add the
+   `notes.md` case, both whole and ranged.
+
+**Gate (touched files):** `fs-read-pdf` + `host-execution` 33 pass, 0 fail ·
+`bun run lint` 1755 files, clean · `bun run typecheck` exit 0. Full suite not re-run.
+
+**Mutations (mine, each reverted, `git status` clean after):** drop
+`maxBytes: MAX_PDF_BYTES` in `readPdf` → "over MAX_PDF_BYTES is refused" FAILS;
+drop `!st.isFile()` in `readBytes` → "a directory is not a regular file" FAILS.
+
+**Attacks tried:** (a) content false positive — finding 1; (b) env wrappers that
+forward `readFile` but drop `readBytes` (the real daemon path silently losing PDFs) —
+none: `HostExecution` is the only implementation, the agent/subagent/hooks pass it
+through; (c) hostile `/Count` driving `formatPdfText`/`pdfVerdict` on the daemon
+main thread — P1's fix holds (`missingFooters` walks only read pages, the range span
+is checked before filling); (d) ENOENT `readHint` now hit by the sniff first —
+same hint via the shared `readError`; (e) stat→read TOCTOU (file grows after `stat`)
+bypasses `maxBytes` — real but needs a local racing writer; not raised above a nit
+(`file.slice(0, maxBytes + 1)` would close it); (f) abort — `ctx.signal` reaches
+`extractPdf`.
+
+**What holds:** optional `readBytes` (no fake breaks), the plain text path is
+unchanged for non-PDF heads, size refusal before reading, `pages` never silently
+ignored, executor's mutation table reproduces for the two I re-ran.
+
+**Executor behaviour:** honest drift notes and a solid mutation table; the gap is a
+missing adversarial input class (text that *looks* like a PDF), not sloppiness.
+Reviewer is the same model family as the executor (fresh context only).
+
+*— claude-opus-5-5, 2026-11-16*
