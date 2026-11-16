@@ -3343,3 +3343,179 @@ rewrite (a subscription registry with a live flag) keeps the round-1 echo and le
 Gate: the 3 activity/detail files give 53 pass / 0 fail; `bun run lint` is clean (1734 files);
 `bun run typecheck` is clean. I did not re-run the full suite (the executor reports 12597 pass ·
 5 skip · 0 fail). Flow 27 has still not run, because of the `PushCore` blocker.
+
+## Execution (slice S10 — Floating Activity button, F2 opt-in)
+
+*— claude-opus-5-5, 2026-11-16 · slice S10 only*
+
+**Scope: S10 (Files item 11) only.** No other slice's file was changed beyond
+the mount points the plan names (`SessionScreen.tsx`, `SettingsScreen.tsx`,
+`App.tsx`). No protocol, daemon, client or persistence-format change outside
+the phone's own Keychain record, so `packages/protocol/schema/protocol.json`
+was **not** regenerated and no `protocol.d/` note was written. `TODO.md`
+untouched.
+
+### Load-bearing check, re-run first (it held)
+
+S10 stands on "a phone-local, default-off setting over existing seams; no new
+protocol and no native dependency":
+
+- The store pattern exists: `voice-settings-store.ts` (versioned record behind
+  `SecureKV`, `createVoiceSettingsStore`/`Holder`) + its 18-line Keychain
+  wiring `voice-settings-expo.ts`; `App.tsx` loads it once and `SessionScreen`
+  subscribes (`VOICE_SETTINGS.subscribe`).
+- Core RN only: `PanResponder`, `Animated` and `AccessibilityInfo`
+  (`reduceMotionChanged`) are already used by `screens/SessionsDrawer.tsx:26-30,
+  90-106, 134`; `screenReaderChanged`/`isScreenReaderEnabled` are the same API.
+  `expo-blur` is already a dependency (`ui/GlassButton.tsx:8`). No rebuild.
+- The band: `SessionScreen`'s list host `<View style={styles.screen}>` sits
+  between the header (+ banner) and the composer, inside the
+  `KeyboardAvoidingView`, so its measured size IS the band, keyboard included.
+
+### Drift from the Implementation (each reconciled here)
+
+1. **`bounds` is the band's own `{width, height}`**, not "header bottom /
+   composer top" in screen coordinates. The button is mounted inside the list
+   host, whose top is the header's bottom and whose bottom is the composer's
+   top, so the plan's two inputs become `0` and `height`. Same property (F20),
+   no measuring of two other views.
+2. **`visible` takes `covered` and `fits`, not `voiceOver`.** VoiceOver does not
+   change whether the button shows (it stays, fixed); it changes the pill, so
+   that rule is its own function `headerPill({mode, voiceOver})`. `covered` =
+   drawer, Activity, Session info, the "…" menu, rename, the outbox decision or
+   the permission sheet open (`SessionScreen.tsx:524-537`); the drawer's state
+   reaches the screen through a new `drawerOpen` argument of
+   `SessionDrawerHost`'s `children` (`App.tsx:1205`, `:2026`, `:1332`).
+3. **The holder keeps a FAILED write's pick** (F22: "the mode in memory stays
+   what the user picked for this run"), unlike the voice holder, which keeps
+   the old value. A preserved (newer/unreadable) record refuses and changes
+   nothing; the holder exposes `writable()` and the Settings rows are disabled
+   with "Set by a newer version of tentacle — this version cannot change it."
+4. **A bad `position` inside our own v1 record drops the position only**
+   (mode kept, writable). A broken spot must not lock the user out of the
+   setting. An unknown `mode` or `v`, junk bytes, or a read error → defaults,
+   not writable (the voice-store rule).
+5. **Flow 28 cannot drive the left-edge back-swipe (F21).** Maestro has no iOS
+   edge gesture; flows 05 and 26 already state this. The half of F21 that IS
+   driven: the drag that starts ON the button moves the button. The plan's
+   "Pinned in flow 28 (back-swipe still works …)" is therefore not met; it is
+   stated in the flow header.
+6. **Edge position in flow 28 is asserted relationally** (`leftOf`/`rightOf`
+   `session-title`, `above` `composer-input`): Maestro asserts no coordinates.
+   These selectors are unproven on a device (flow not run, below).
+7. **Changelog:** the existing `changelog.d/mobile-chrome.added.md` bullet was
+   extended (owner: ONE `mobile-chrome.<category>.md` fragment; S8 drift 9).
+   The plan's `mobile-activity.added.md` was not written.
+8. **Two structural guards grew with the slice** (both pinned counts, not
+   behaviour): `test/pairing-guards.test.ts` lists the 4th Keychain wiring file
+   `src/activity-settings-expo.ts`; `test/band-screens.test.ts` counts 8
+   Settings bands and names "Activity button".
+9. **A hidden button unmounts after its fade-out** (`FloatingActivity.tsx`,
+   `rendered`), so an invisible, opacity-0 button is never in the VoiceOver
+   tree or found by `assertNotVisible`.
+10. **S8's unused `reportRow`** (S9 drift 1: "left for S10 or a cleanup") was
+    not touched: unrelated to the floating button.
+
+### As-built, in order
+
+1. `src/floating-button.ts` (new, pure, 145 lines): `FLOAT_SIZE` 54,
+   `EDGE_INSET` 10 (F21), `BAND_MARGIN` 8; `fits(bounds)` (band ≥ 2 × size,
+   F20); `snap(drop, bounds)` (centre left of the midline → left, on/right →
+   right; y clamped to the band through the stored fraction); `place(stored,
+   bounds)` (re-projects `yFraction`; default right edge, bottom); `isTap`
+   (< 6 pt and < 300 ms); `visible`; `motion(reduce)` (no spring, 150 ms
+   fade); `a11y(voiceOver)` (not draggable); `headerPill`.
+2. `src/activity-settings-store.ts` (new, pure): key `tentacle.activity-button`,
+   `{v:1, mode, position?}`; store + holder (drift 3, 4).
+   `src/activity-settings-expo.ts` (new): the Keychain wiring, the
+   `voice-settings-expo.ts` pattern, `WHEN_UNLOCKED_THIS_DEVICE_ONLY`.
+3. `src/ui/FloatingActivity.tsx` (new, render + gesture plumbing): 54 pt glass
+   circle (BlurView + `glass`/`glassBorder`, `shadow.glass`), spinner + count;
+   `PanResponder` grants on touch start (F21) and refuses termination; release
+   → `isTap` → open, else `snap` → `Animated.spring` (or placement + fade under
+   Reduce Motion) → `onDrop` (written on drop only). Under VoiceOver no pan
+   handlers; activate = `onAccessibilityTap`. `useAccessibilityFlags()` reads
+   VoiceOver and Reduce Motion live (F23).
+4. `SessionScreen.tsx`: subscribes `ACTIVITY_SETTINGS` (`:519`), the pill only
+   when `headerPill` (`:522`, `:577`), `onLayout` on the list host feeds the
+   band (`:659`), the button mounted in it only in "floating" (`:786`).
+5. `SettingsScreen.tsx`: "Activity button" band, `activity-button-header` /
+   `-floating` checkmark rows (`ACTIVITY_BUTTON_ROWS`, `:95`; band `:286`),
+   error banner `activity-button-error`.
+6. `App.tsx`: loads the setting once, `selectActivityMode` ("That Activity
+   button setting didn't save", `:1444-1452`), passes it to Settings
+   (`:1950`); `drawerOpen` threaded to the screen (drift 2).
+7. `e2e/flows/28-floating-activity.yaml` (new) + `e2e/run.ts` (`FLOWS`
+   `:1202`, its own session `FLOAT_ID` `:1277`); it reuses the mock model's
+   `AGENTS27` (60-step long child, so it outlives the relaunch).
+
+### Tests (red first)
+
+`test/floating-button.test.ts` (30) and `test/activity-settings-store.test.ts`
+(16, one added after the mutation pass — M14) were written before their modules; the first run was RED on the missing
+modules only (`Cannot find module '../src/floating-button.ts'`, 0 pass / 2
+fail) — not a red on a property (§9), so the red per property is the mutation
+table below. Covered: midline left/right/exactly-on (→ right), y clamp at both
+ends, the too-short band (107 vs 108 pt), NaN drop, `place` re-projection into
+a shorter band, round-trip, default spot, `isTap` 5 pt/200 ms, 7 pt, 400 ms;
+`visible` for every mode × count × unread plus covered and too-short;
+`motion(true)` no spring; `a11y(true)` not draggable; the pill rule in all four
+mode × VoiceOver cases; the store's three fail-safe rules, the read-error
+refusal, the bad-position rule and the holder's F22 behaviour.
+
+### Mutation checks (§9: each applied with an anchor that must match once, the 2 S10 files run, restored; script `.tentacle/tmp/mobile-chrome/s10/mutations.ts`, output `s10/mutations.out`; both files compared afterwards: identical)
+
+```
+M1 midline inverted: 3 fail / 43 pass → KILLED
+M2 midline tie → left (<=): 1 fail / 45 pass → KILLED
+M3 y clamp dropped (snap): 2 fail / 44 pass → KILLED
+M4 stored fraction not clamped (place): 1 fail / 45 pass → KILLED
+M5 too-short band not hidden: 2 fail / 44 pass → KILLED
+M6 right edge without inset: 2 fail / 44 pass → KILLED
+M7 tap ignores duration: 1 fail / 45 pass → KILLED
+M8 visible ignores covered: 1 fail / 45 pass → KILLED
+M9 visible ignores unread: 1 fail / 45 pass → KILLED
+M10 Reduce Motion ignored: 1 fail / 45 pass → KILLED
+M11 a11y ignores voiceOver: 1 fail / 45 pass → KILLED
+M12 pill ignores voiceOver: 1 fail / 45 pass → KILLED
+M13 unknown v accepted: 2 fail / 44 pass → KILLED
+M14 read error writable: 1 fail / 45 pass → KILLED
+M15 preserved write not refused: 2 fail / 44 pass → KILLED
+M16 bad position kept: 1 fail / 45 pass → KILLED
+M17 holder: failed write drops the pick: 1 fail / 45 pass → KILLED
+M18 holder: preserved set publishes: 1 fail / 45 pass → KILLED
+```
+
+The plan's three targets are M1 (midline), M3 (clamp) and M11/M12 (VoiceOver).
+On the first pass two SURVIVED: **M3** was an equivalent mutant (`snap` clamped
+y AND the fraction, so dropping the y clamp changed nothing); the redundant
+clamp was removed and M3 retargeted at the one that remains. **M14** was a real
+gap (nothing wrote after a failed read); the test "after a read error, a write
+is refused" was added and kills it.
+
+### Gate
+
+- `bun run typecheck` (`tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay`): clean.
+- `bun run lint`: **clean, 0 errors / 0 warnings, 1740 files** (AGENTS §6 baseline).
+- `bun test`: **12643 pass · 5 skip · 0 fail**, 904 files, 455 s
+  (`.tentacle/tmp/mobile-chrome/s10/full.log`). The 5 skips are the documented
+  opt-ins. This run started before drift 9's edit to `FloatingActivity.tsx`
+  (a render-only component no test imports). After that edit,
+  `bun test apps/mobile` gave **2137 pass · 0 fail**, and typecheck and lint
+  were clean again.
+- The 2 S10 files: **46 pass · 0 fail**.
+
+### Not done in this slice (and why)
+
+- **Flow 28 was written but NOT run** — the same `PushCore` iOS build blocker
+  as flows 26/27 (`apps/mobile/targets/live-activity/LACore/LACore.swift:23`).
+  To verify: `bun run e2e:mobile --ios 26 --only 28-floating-activity`. Unproven
+  on a device: `swipe: from: {id: floating-activity} direction: LEFT` lands in
+  the left half, and the `leftOf`/`rightOf`/`above` relational asserts.
+- **F21's back-swipe with the button on the left** — not drivable (drift 5).
+- **No render test for `FloatingActivity.tsx`** — same reason as S8/S9 (the RN
+  render stubs are process-global); every decision it makes is a
+  `floating-button.ts` call that the tests pin. The drag/spring itself is
+  unverified until a device run.
+- **The `covered` OR in `SessionScreen`** is plain flag-joining, not tested on
+  its own; `visible`'s use of it is (M8).
