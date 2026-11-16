@@ -1878,3 +1878,42 @@ D. send through the attached handle: ok
   title arrives; the daemon's own (empty) title shows there.
 - Nothing committed. `TODO.md` untouched.
 
+## Review (slice S7)
+
+*— claude-opus-5-5, 2026-11-16 · slice S7 only · fresh context, SAME model as the S7 executor (shared blind spots possible)*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM test gap; the code holds).
+
+**Gate (re-run):**
+- S7 test files + `drawer-nav` + `session-screen-follow-wiring` + `e2e-flows`: 60 pass · 0 fail.
+- `bun run lint`: 1685 files, clean.
+- `bun run typecheck` (root + mobile + relay): clean.
+- Full `bun test`: not re-run.
+- E2E flow 26: not run (the same native-build block as S6), so it is unverified.
+
+**Findings**
+
+1. **MEDIUM: nothing pins that the detach is awaited before ok.**
+   - **The gap:** the test is `apps/mobile/test/drawer-new-session.test.ts:41-47`. Its fake `detach` (`:30-31`) logs the moment it is called, before any await. So mutating `await handle.detach()` → `void handle.detach()` (`src/session-controller.ts:131`) still gives 0 fail on both S7 files. Yet the docstring of `createFreshSession` says this ordering is what stops the screen's attach racing the detach.
+   - **Failure scenario:** without the await, `session/detach` and the screen's attach-open for the same id go out on one connection. The peer dispatches them concurrently (§7). If the daemon handles the detach second, the phone's attach is undone daemon-side, and the screen shows a session that never streams.
+   - **Fix:** in the fake, log a second entry after an awaited deferred, and assert create → detach → detach-done → answered.
+2. **MEDIUM (an owner call, not code): the cost of creating at the tap is understated.**
+   - **What Execution leaves out:** it says an abandoned session is "archived by the idle TTL". But every create runs `admit()` (`packages/daemon/src/session-host.ts:1234-1256`), and at `maxDetachedSessions` that archives the oldest idle detached session.
+   - **Effect:** repeated taps that are never sent push the person's real older sessions into Archived. That is reversible, but it is not reported to the person. It belongs in the owner's decision between lazy create and create at the tap.
+
+**Mutations (mine; `git status` was clean afterwards):**
+- Detach not awaited → survives (finding 1).
+- Double-tap guard removed → 1 fail.
+- Error not cleared on a re-tap → survives (LOW, not reported).
+
+**Attacks tried:**
+- **Minted-id collision:** `openSeeded` on a live id ATTACHES (`remote-session.ts:535-541`), but a UUIDv4 makes a collision negligible. Holds.
+- **Detach failure:** it is swallowed. `endSession` removes only its own entry (`remote-client.ts:1697`), so the screen's listener survives. Holds.
+- **§7 pure modules:** all branching is in `drawer-new-session.ts` / `createFreshSession`, and the components only render. Holds.
+- **§7 protocol and persistence:** no wire, schema or disk change, and no second session path (it goes through `RemoteClient`). Holds.
+- **§7 pod trust:** the error text is chosen by reason code, never taken from the daemon's message. Holds.
+- **Offline:** nothing is sent. Holds.
+- **Host unmounted mid-create:** `opened` can still navigate. LOW.
+
+**Executor behaviour:** honest. It found that the plan's premise ("lazy on the first send") was false, did not make a persisted-format change, and documented the drift. Its mutation Mb covered "no detach" but not "detach not awaited", so finding 1 slipped through.
+
