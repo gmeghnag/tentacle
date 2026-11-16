@@ -16,4 +16,5 @@ export * from "./workload-shell-frame.ts";
 export * from "./concurrency.ts";
 export * from "./search.ts";
 export * from "./search-tool.ts";
+export * from "./chart.ts";
 export * from "./subagent-tools.ts";

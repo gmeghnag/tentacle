@@ -1,6 +1,6 @@
 # feat/model-charts — the model draws charts in the conversation (iPhone native, Mac TUI in braille)
 
-> **Status:** implementation — **plan APPROVED** (owner answers + rev-2 iPhone picks); **slice C1 (spec + validator + shared math + palette) EXECUTED** — see *Execution*.
+> **Status:** implementation — **plan APPROVED** (owner answers + rev-2 iPhone picks); **slices C1 (spec + validator + shared math + palette) and C2 (the `chart` tool, registration, labels) EXECUTED** — see *Execution*.
 > **Branch:** `feat/model-charts`
 > **Size:** L (split into 8 slices, each S or M) · **Blast:** cross-module (a new model tool with no I/O; no protocol bump, no new update type, no session-log type; one new native module on the phone) · **Suited:** per slice (below): `deepseek` for the pure/contained slices, `opus` for the visual and native ones; mandatory fresh-context Review of the whole branch (L).
 > **Changelog:** `changelog.d/model-charts.added.md` (written by C8).
@@ -752,9 +752,15 @@ pure fixtures elsewhere.
 | C5 | Phone pure layout + scrub machine | M · contained · **deepseek** | 5 | T5 green |
 | C6 | `react-native-svg` + `ChartView` + transcript branch | M · cross-module (**new native module ⇒ dev build**, batch with model-artifacts S8) · **opus** | 6 | T6 green on the simulator; if the build machine cannot build, unit tests + the honest "pixels unverified" line |
 | C7 | Full screen, scrub, table, a11y, haptics | M · cross-module · **opus** | 7 | T7 green; P9 checked on device |
-| C8 | Gallery / hub / artifact kind + changelog | S · cross-module · **deepseek** | 8 (after model-artifacts S9 + mobile-hub H4 are on `main`; else C8 waits and the branch merges without it) | T8 green |
+| C8 | Gallery / hub / artifact kind + the tool's `present` call (C2's T2.3) + changelog | S · cross-module · **deepseek** | 8 (after model-artifacts S9 + mobile-hub H4 are on `main`; else C8 waits and the branch merges without it) | T8 green, T2.3 green |
 
 Order: C1 → C2 → C3 → C4 → C5 → C6 → C7 → C8. One merge after the fresh-context Review.
+
+**C2 as executed:** T2.3 (the artifact registration, D3's `ctx.artifacts`) moved to
+C8 — `ToolContext.artifacts` is feat/model-artifacts' seam and is not on this branch,
+so adding it here would define `ArtifactSink` twice (P8 says C1–C7 do not depend on
+it). C8 already owns the `"chart"` artifact kind and the gallery, so it adds the
+`present` call and T2.3 together. Everything else in C2's row is done; see *Execution*.
 
 ### Owner questions
 
@@ -1074,8 +1080,222 @@ spec intact end to end (the plan's C2.0 repro), and that a TUI/phone row's store
 `args` re-validates to the same spec. The seam is proved statically above and the
 validator is fuzzed, but the round trip itself is C2's first deliverable.
 
-## Review
+### C2 — the `chart` tool, registration, labels (slice C2 of 8)
 
+*— claude-opus-5-5 (executor), 2026-11-16*
+
+**Load-bearing check re-run FIRST, as the plan requires** — "the spec can ride the
+tool call's own arguments to every client". Static grep (as C1) plus the runtime
+proof the plan demanded, `.tentacle/tmp/model-charts/args-roundtrip.ts`: a real
+`SessionHost` + `Connection` + `RemoteClient` over `createChannelPair`, a scripted
+model calling `chart` with a **39 022-byte** spec (8 series × 700 points, which is
+under the 64 KiB cap: a bigger fixture is refused by the validator, not by the wire).
+
+```
+$ NODE_PATH=…/zod@3.23.8/node_modules bun .tentacle/tmp/model-charts/args-roundtrip.ts
+spec bytes = 39022
+live: tool_start.arguments bytes=39020 deep-equal=true
+reload: tui bytes=39020 deep-equal=true
+reload: phone bytes=39020 deep-equal=true
+PASS
+```
+
+**HOLDS.** Nothing C2 adds touches the wire: no `protocol.d/` note, no
+`PROTOCOL_VERSION` bump, no `protocol.json` regeneration. The 2-byte gap is the fixture's own
+non-ASCII `€` (three UTF-8 bytes against one JS code unit, and `ARGS.length` counts
+code units): everything the property needs is asserted on the parsed value
+(`toEqual`) and on string identity, never on a byte count.
+
+The script lives in `.tentacle/tmp/model-charts/args-roundtrip.ts` (gitignored, so it
+does not survive the branch) — reproduced here, and turned into the permanent test
+**T2.0** (`packages/client/test/chart-args-roundtrip.test.ts`), which is the version
+that keeps running:
+
+```ts
+// .tentacle/tmp/model-charts/args-roundtrip.ts — run with
+//   NODE_PATH=<repo>/node_modules/.bun/zod@3.23.8/node_modules bun <this file>
+// (a script under .tentacle/ resolves no workspace dependency, so `zod` — which
+// `@tentacle/core` needs — comes from NODE_PATH and the four local modules are
+// imported by absolute path).
+const POINTS = 700;                       // 8 × 700 → ~39 KiB, under the 64 KiB cap
+const spec = { type: "line", title: "Ricavi mensili".padEnd(115, " "),
+  labels: Array.from({ length: POINTS }, (_, i) => `m${i % 12}-${Math.floor(i / 12)}`),
+  datasets: Array.from({ length: 8 }, (_, s) => ({
+    label: `Serie ${s}`,
+    data: Array.from({ length: POINTS }, (_, i) => Math.round((i + s) * 13.5 * 100) / 100),
+  })),
+  y: { unit: "€", format: "compact" } };
+const ARGS = JSON.stringify(spec);
+// A model that calls `chart` once, then answers.
+class Scripted { *stream() { yield { type: "tool_call", toolCall: { id: "c1", name: "chart", arguments: ARGS } }; yield { type: "done" }; } }
+// The REAL stack: SessionHost + Connection + RemoteClient over createChannelPair.
+new Connection(daemonCh, new SessionHost({ createAgent: () => ({ agent, permissions }) }));
+const client = new RemoteClient(clientCh, new PermissionBroker());
+await client.initialize();
+const session = client.newSession();
+for await (const event of session.send("dammi un grafico")) events.push(event);   // LIVE
+const live = events.find((e) => e.type === "tool_start").arguments;
+const history = await client.snapshot(session.sessionId);                          // RELOAD
+const tui = messagesToItems(history).filter((i) => i.kind === "tool")[0].args;
+const phone = historyRows(history, counter()).filter((r) => r.kind === "tool")[0].args;
+const same = (a) => JSON.stringify(JSON.parse(a)) === JSON.stringify(spec);
+console.log(same(live) && same(tui) && same(phone) && live === tui && live === phone ? "PASS" : "FAIL");
+```
+
+**As built** (dependency order):
+
+| # | File | What it is |
+|---|---|---|
+| 1 | `packages/core/src/tool.ts` (`Tool.argumentsHint`) | An optional `(rawArguments) => string \| undefined` a tool may offer the registry's `invalid JSON arguments for <name>` path. The seam the NaN/Infinity hint rides (T2.2): the registry hands over the RAW text, and only the tool knows its own usual offender. |
+| 2 | `packages/tools/src/registry.ts` | The parse-failure branch appends `tool.argumentsHint?.(rawArguments)` when it answers; byte-identical to before for every tool that has none — `invalid JSON arguments for ${name}`, no trailing newline (pinned by T2.2's third row). |
+| 3 | `packages/tools/src/chart.ts` (new) | `CHART_TOOL_NAME`, `CHART_ARGUMENTS_HINT`, `chartArgumentsHint` (matched on `/\b(NaN|Infinity|undefined)\b/`, so a plain typo gets no diagnosis it does not deserve), `chartTool`: `permission: "none"`, `jsonSchema: CHART_JSON_SCHEMA` with `inputSchema: z.record(z.unknown())`, `concurrency: () => []`, `execute` = `validateChartSpec` → `summarizeChart(...).line`. The 1 371-char description (`two charts`, `colour`, "write 12.5, never \"12.5\"", the caps). |
+| 4 | `packages/tools/src/index.ts` | Exports `chart.ts`. |
+| 5 | `packages/core/src/tool-labels.ts` | `chart: "Chart"`. |
+| 6 | `packages/agent/src/subagent.ts` | `CHART_TOOL_NAME` in both "never a child" lists (the registry filter and `readOnlyType`'s pre-filter skip). |
+| 7 | `packages/cli/src/wiring.ts` | `tools.register(chartTool)` beside `createContextResetTool()` — the one registration site shared by every session-hosting build. |
+| 8 | `packages/tui/src/render-lines.ts` | `toolSubtitle`'s `chart` case → the spec's `title`, falling back to the raw args. |
+| 9 | `apps/mobile/src/tool-summary.ts` | `subtitleOf`'s `chart` case, case-for-case with the TUI's. |
+
+Tests: `packages/tools/test/chart.test.ts` (T2.1, T2.2, T2.4),
+`packages/client/test/chart-args-roundtrip.test.ts` (T2.0, the load-bearing
+property), `packages/cli/test/chart-wiring.test.ts` (T2.5: registration + the
+sub-agent filter, against the real `buildAgent`), `packages/core/test/tool-labels.test.ts`
+(T2.6 label), `packages/tui/test/render-lines.test.ts` + `apps/mobile/test/tool-summary.test.ts`
+(T2.6 subtitle parity in both directions). One existing pinned test changed, on
+purpose: `packages/cli/test/wiring.test.ts:983`'s tool-name list gained `chart`
+(that file's whole point is that the list is byte-pinned, so a new tool must be an
+explicit edit there).
+
+**Mutations (§9; each applied, the named test shown failing, then reverted —
+script `.tentacle/tmp/mut.sh`, output below verbatim).**
+
+```
+1) drop the sub-agent filter entry                        (subagent.ts, registry filter)
+   → (fail) a `general` child (tools: "all") does not get it…           0 pass 1 fail
+2) drop the registration                                   (wiring.ts)
+   → 4 fail (all three registration rows + the child's parent-had-it check)
+3) registry: never append the hint                         (registry.ts `hint === undefined` → true)
+   → 2 fail, (fail) T2.2 "the registry's JSON error carries it"
+4) chart: drop `argumentsHint`                             (chart.ts)
+   → the same 2 T2.2 rows fail
+4b) chart: hint unconditionally, whatever the text       (chart.ts `return CHART_ARGUMENTS_HINT`)
+   → (fail) T2.2 "a plain syntax error gets NO hint"
+4c) registry: always append (newline + `hint ?? ""`)      (registry.ts)
+   → 2 fail: the no-hint tool's message gains a trailing newline
+5) answer with a home-made line instead of the shared summary (chart.ts)
+   → 3 fail, incl. T2.1 "the result is `Chart shown to the user: …`"
+6) `concurrency: "exclusive"` instead of `() => []`         (chart.ts)
+   → (fail) T2.1 "the tool touches no resource: two charts never conflict"
+7) the TUI subtitle reads the wrong key                     (render-lines.ts)
+   → 2 fail: the phone's parity case AND the TUI's own chart row
+8) drop `chart: "Chart"`                                    (tool-labels.ts)
+   → 2 fail: (fail) toolLabel "maps every built-in tool name…", (fail) the chart row
+9) skip validation entirely                                 (chart.ts `if (!validation.ok)`)
+   → 2 fail, incl. T2.4 "an over-cap spec is refused with the cap's advice"
+10) `rawInput: undefined`                                   (daemon/src/mapping.ts)
+   → (fail) T2.0, the load-bearing round trip
+11) client: `String(update.rawInput)` instead of the string  (client/src/mapping.ts)
+   → (fail) T2.0 (`[object Object]`)
+12) reload truncates the row's args to 4 000 chars           (tui/src/resume.ts)
+   → (fail) T2.0
+```
+
+One mutation that stayed **green**, recorded so nobody re-derives it: the client
+re-serialising the parsed object (`JSON.stringify` of `rawInput` instead of passing
+the string through) leaves T2.0 green — JS preserves insertion order and the
+round trip is lossless, so string identity survives. T2.0 therefore pins "nothing
+is lost", which is what the renderers need; it does not pin "nobody
+re-serialises". The test's header says so.
+
+**Drift from the Implementation (and why).**
+
+1. **T2.3 (the artifact registration) is NOT in C2 — it moved to C8.** The plan's
+   D3 has `execute` call `ctx.artifacts.present({kind: "chart", …})`, but
+   `ToolContext.artifacts` / `ArtifactSink` do not exist on this branch: they
+   arrive with **feat/model-artifacts** (plan P8, "not on `main` yet"). Adding that
+   seam here would mean a second, conflicting definition of `ArtifactSink` in
+   `core/src/tool.ts` — the plan's own P8 says C1–C7 do not depend on it. So C2
+   ships the tool without the sink and C8 (which already owns `"chart"` in
+   `ARTIFACT_KINDS`, the gallery and the fragment) adds the `present` call, its
+   failure mode and its test. **This is the one place the slice's "Done when" is
+   not fully met: T2.3 is deferred, not dropped.**
+2. **`concurrency: { keys: [] }` cannot be written as the plan says.** `Tool.concurrency`
+   is `"exclusive" | ((input) => readonly ResourceKey[] | "exclusive")`
+   (`core/src/tool.ts:218-220`) — there is no `{keys}` object, and an empty key
+   list would classify as `"exclusive"` anyway (`isReadClass` requires `length >
+   0`, `agent/src/round-plan.ts:53-55`). Written as `concurrency: () => []`: the
+   tool touches nothing, and the round executor does not serialize charts. Pinned
+   by mutation 6.
+3. **The NaN/Infinity hint needed a seam that did not exist.** The plan says "we
+   add the hint by checking the raw text", but `Tool.execute` never runs on a parse
+   failure — `registry.execute` returns before it (`tools/src/registry.ts:81-95`).
+   Rather than special-casing the name `"chart"` in the registry (a tool-specific
+   branch in a generic choke point), the hint is a `Tool.argumentsHint` field: any
+   tool that knows its usual non-JSON offender sets it, and every other tool's
+   message is byte-identical (the 123 existing call sites keep `invalid JSON
+   arguments for ${name}` alone). This is additive and needs no `protocol.d/`
+   note (it is not on the wire at all).
+4. **The result line's locale.** `summarizeChart` defaults to `en`, so a real
+   call answers `y €11.8k–€20.8k` (`it` would give `11,8k €–20,8k €`, T1.16's
+   fixture). The tool passes no locale on purpose: the result is MODEL-facing, the
+   row is the client's to format, and a daemon (a pod's) has no reader locale to
+   offer — inventing one from `LANG` inside a pod would be a guess about the
+   laptop's user. T2.1/T2.4 pin the `en` text and say why.
+5. **The subtitle's fallback is the RAW args, not `""`.** `toolSubtitle`'s
+   `default:` arm returns `tool.args`; the `chart` case follows the same rule for a
+   spec with no `title` (a pod-forged `rawInput`, an old row), so a broken chart
+   row still says something instead of rendering an empty subtitle. Both sides do
+   it, and the parity test covers `"not json"` on both.
+6. **A second changelog fragment was not added.** The plan and C1 already own
+   `changelog.d/model-charts.added.md`, and two fragments cannot share a
+   `<slug>.<category>` (the release script treats a duplicate name as a conflict,
+   `scripts/changelog.ts:88-92`). C2's user-visible part is folded into that one
+   bullet rather than filed as `model-charts-c2.added.md`.
+7. **`packages/cli/test/wiring.test.ts`'s pinned tool list gained `chart`.** That
+   test exists to make a start-up change deliberate (`docs/feat/context-reset-refresh.md`);
+   the addition is the intended one and carries its own comment there.
+
+**Not in C2** (later slices): the TUI renderer and its `chart` theme tokens (C3),
+the row branch / cut exemption / expand / `tui.chartGlyphs` (C4),
+`apps/mobile/src/chart-{layout,scrub}.ts` (C5), `react-native-svg` + `ChartView` +
+the transcript branch (C6), full screen / scrub / table / a11y / haptics (C7), the
+gallery and the artifact sink (C8).
+
+**Gate.** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bun run lint` clean (0 errors, 0 warnings — the §6 baseline) · `bun test`
+**12 623 pass, 5 skip, 0 fail** (12 628 tests, 904 files, 455 s) — the 5 skips are
+exactly the three opt-in groups of §6 (2 live-docker, 2 live-k8s, 1 real-socket
+slow), so no new fail and no non-opt-in skip · no schema changed, so
+`packages/protocol/schema/protocol.json` needed no regeneration · one fragment
+(`changelog.d/model-charts.added.md`, extended; `CHANGELOG.md` untouched, its
+`[Unreleased]` empty) · `TODO.md` untouched.
+
+```sh
+$ bunx tsc --noEmit                      # (no output)
+$ bunx tsc -p apps/mobile --noEmit       # (no output)
+$ bun run lint
+Checked 1737 files in 510ms. No fixes applied.
+$ bun test
+ 12623 pass · 5 skip · 0 fail · 13 snapshots, 98283 expect() calls
+ Ran 12628 tests across 904 files. [454.98s]
+```
+
+**One pre-existing flake, NOT this change.** An earlier full run hit
+`packages/exec/test/confinement.test.ts` ("R2-4: a hard-linked file INSIDE the root
+is writable again", `packages/exec/test/confinement.test.ts:471`). It is not
+reachable from here: `git diff <base> -- packages/exec` is empty and `packages/exec`
+imports nothing this slice added. Measured, under 10 CPU hogs, 25 runs each:
+**branch 0/25, pristine `main` (`main-ro` worktree) 2/25** — it flakes on `main`
+too, and it is a timing assumption in that fixture (`link` + replace-rename under
+load), for its own task. Recorded, not fixed here (AGENTS §0: a different defect).
+
+**Unverified in this slice** (C3's job, named so it is not mistaken for done): that
+an actual terminal DRAWS anything from these arguments — there is no renderer yet,
+so a `chart` row today shows its label and title and, on an old client, the result
+text. Whether the braille/blocks/bar renderers fit the frame at every width is
+C3's and C4's, with `ink-testing-library` frames.
+
+## Review
 *(empty — mandatory fresh-context review after C8)*
 
 #### Owner choices — iPhone visual language rev 2 (2026-11-16 ~12:35, binding)

@@ -1308,6 +1308,16 @@ describe("toolTitle labels", () => {
     });
   });
 
+  // docs/feat/model-charts.md D3: the row says the chart's title — the spec is
+  // hundreds of characters of JSON, and the title is what the user reads above
+  // the chart. A spec with no title falls back to the raw args like any other row.
+  test("chart shows its title, and the raw args when it has none", () => {
+    expect(
+      toolTitle(tool("chart", '{"type":"line","title":"Ricavi 2026","datasets":[{"label":"R"}]}')),
+    ).toEqual({ label: "Chart", subtitle: "Ricavi 2026" });
+    expect(toolTitle(tool("chart", '{"type":"line"}')).subtitle).toBe('{"type":"line"}');
+  });
+
   test("an unlabelled (MCP) tool keeps its name and raw args", () => {
     expect(toolTitle(tool("mcp__x__y", '{"q":1}'))).toEqual({
       label: "mcp__x__y",

@@ -605,6 +605,11 @@ function toolSubtitle(
       return str("agent_id") ?? "";
     case "skill":
       return str("name") ?? "";
+    // A chart's row names the chart, not its JSON: the title is what the user
+    // reads above it, and the spec itself is many hundred characters
+    // (docs/feat/model-charts.md D3). The phone mirrors this case for case.
+    case "chart":
+      return str("title") ?? tool.args;
     default:
       return tool.args;
   }
