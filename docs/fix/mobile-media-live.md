@@ -433,3 +433,34 @@ a device.
 - `own_prompt` matches `user_message` for an ordinary prompt; only `schedule` is missing, and an own prompt never carries one.
 - `resync` reuses `attach(false)`, and the compose half is built once (`session-screen-controller.ts:538`), so there is no second driver and no second session path (§7).
 - A resync calls `deps.controller.leave`, not the screen's `leave()`, so it does not abort an own turn that is running.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; diff `HEAD~1` = 0d105c29)
+
+**Verdict: APPROVE (PASS).**
+
+**Gate:** lint clean (0 errors). Typecheck clean. `bun test apps/mobile`: 2192 pass, 0 fail.
+
+**R2-1 is fixed:**
+- `removeItem` no longer deletes the photo copies (`outbox-store.ts:379`). The sent row's `localUri` now outlives the outbox item, and `backToDraft` keeps its files.
+- The folder is bounded by `photo-copies.ts`. A copy is removed only if no item or draft names it, it is older than one week, and it is not among the newest 60.
+- `TranscriptRow.tsx` now has an `onError` handler. Through `displayUri` (`media-layout.ts:95`), it falls back to the label instead of drawing an empty frame.
+- The wiring is correct: `createExpoOutboxFs().list` returns URIs (`outbox-fs-expo.ts:67`), which `remove` accepts. The prune is skipped when the store load is `refused`.
+
+**Mutations** (applied together, then reverted; `git status` clean afterwards):
+
+| mutation | result |
+|---|---|
+| `removeItem` deletes the copies again | 2 tests red in `outbox-store.test.ts` |
+| `displayUri` ignores `broken` | `media-layout.test.ts` red |
+| `copiesToRemove` drops the `inUse` check | `photo-copies.test.ts` red |
+| `copiesToRemove` drops the grace window | `photo-copies.test.ts` red (plus the prune test) |
+
+**Residual risks (non-blocking, LOW):**
+- **Shared folder, partial in-use list.** `photosRoot()` is ONE folder for every computer, but each `outboxOf(computerId)` prunes it with only ITS store's `inUse` (`App.tsx:337`). For another computer's photo to be lost, that computer's waiting item or draft must be older than a week AND there must be 60 newer copies. Even then the loss is visible: `readPhoto` throws, which gives a typed refusal at send. Cheap hardening: prune once, with `inUse` taken from every paired computer's store.
+- **Corrupt store.** A `corrupt` load (file set aside) still prunes with an empty `inUse`, so only the grace window and the tail protect the set-aside items' photos.
+
+**Regressions looked for, none found:**
+- `discard` and `backToDraft` no longer delete files. Their copies become prunable only after the grace window.
+- Copy names are unique (`<stamp>-<seq>-`), so `samePath`'s name comparison cannot match two different copies.
