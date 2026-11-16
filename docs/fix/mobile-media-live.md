@@ -11,6 +11,8 @@
 2. In the user bubble the photo renders as a placeholder `[image: IMG_4876.jpg]` with a generic image glyph instead of the photo's **thumbnail**.
 3. Owner request (same task): **pull-to-refresh** on the session transcript — a resync (re-open/re-read the session from the daemon) as a safety net. Native `RefreshControl`, the mobile-chrome look.
 
+4. **Owner (screenshot of a WhatsApp photo bubble), same task:** a message with an attachment + text is laid out like WhatsApp — the **image on top, full bubble width, rounded to the bubble**, and the **text (caption) BELOW the image inside the same bubble**, never the text above a small squeezed image. The same for **PDF and other files**: a document card on top (icon, file name, size / page count) and the caption below it. A bubble with only an image has no empty text area. Tapping the image opens it full screen. Applies to the user's own bubbles (and to any media row rendered in the transcript).
+
 ## Implementation
 
 *— the executor writes it FIRST (AGENTS §1, §8): reproduce, then plan, then fix.*
@@ -18,7 +20,8 @@
 - **Repro first (paste output):** drive the phone's session controller/reducer (the existing fakes in `apps/mobile/test/`, e.g. the session-screen-controller / connection tests) through: send text + an image attachment → daemon echo of the user `media_message` → assistant deltas → `turn_end`. Assert the transcript shows the assistant text and the running state ends. Find which update the phone drops or throws on (media echo row shape, attachment ids, an exception in a row mapper, a turn-id mismatch between the media prompt and its updates…). Characterize: does it happen for a text-only message? (expected: no).
 - **Thumbnail:** the user's own bubble must show the image it just sent (the local picked URI / the downscaled upload, docs/feat/attachments*.md); after a reopen, the history's media row should show a thumbnail if the daemon serves it, else a tasteful placeholder — say which and why.
 - **Pull-to-refresh:** pull on the transcript → resync with the daemon (the reopen path the owner used), spinner while loading, no duplicate rows, works offline with an honest message.
-- **Tests red-first** for each of the three; `bun run check` green.
+- **Bubble layout (item 4):** a pure layout model (media first, caption second, sizes from the image's aspect ratio clamped to a max height) + the render-only bubble; screenshot-free tests on the model.
+- **Tests red-first** for each of the four; `bun run check` green.
 
 ## Execution
 
