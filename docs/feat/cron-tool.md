@@ -1191,3 +1191,33 @@ the ref without re-cutting it. Also carried unchanged from the Review: S3 must
 still emit `schedules` on every mutation and pass `schedule: {id, spec}` on a
 fired `turn_start`, and must spread the required `{ idle }` flag at every
 `scheduleStep`/`scheduleCheckDelayMs` call site (Round 2's carried note).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16* (fresh context, the same reviewer as S2 round 1;
+the executor was deepseek.)
+
+**Verdict: PASS (S2).** `1e41c74b` fixes finding 1. `firedScheduleRef`
+(`packages/client/src/schedules.ts`) is the one function that applies both the
+trust check and the sanitizing. Both places that build a `user_message` now call
+it: `startForeign` (`remote-session.ts:1594`, with `update.schedule` passed in at
+`:1766`) and the reset re-delivery path in `onUpdate` (`:1882`).
+
+| Mutation | Red |
+|---|---|
+| remove `!trusted` from `firedScheduleRef` | 2 fail (the unit test for an untrusted daemon, and the bit-OFF pod test) |
+| paint `spec` without sanitizing | 2 fail (the unit sanitize test, and the hostile-`spec` test) |
+| remove `firedScheduleRef` from the `onUpdate` path | 1 fail (`…re-delivered after a reset…`) |
+| stop passing `update.schedule` into `startForeign` | 2 fail (the bit-ON test, and the hostile-`spec` test) |
+
+Each mutation was restored from `.tentacle/tmp/cron-tool/*.r2.bak`, and
+`git status` was clean afterwards.
+
+**Regressions:** the change only adds data. When there is no ref or the bit is
+off, the result is `{}`, so the `user_message` looks exactly as it did before (the
+bit-OFF test checks the exact shape). `bun test packages/client` → 773 pass /
+0 fail. `bun run lint` → clean (1670 files). `bun run typecheck` → 0. The full
+suite was not re-run, because the diff touches only the client.
+
+**Not a finding:** an id made only of control characters comes out as `""`. That
+is cosmetic and comes from the trusted `serve` daemon; S3 creates ids as `sc-N`.
