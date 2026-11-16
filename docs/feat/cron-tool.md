@@ -2480,3 +2480,112 @@ device after a delete) is not exercised: React Native has no renderer under
 **Regressions on the diff:** none found. Other sections have no `key`, so `rowIdentity` falls back to their titles, and their testIDs are byte-identical to before (flow 25's `-switch` testID is pinned). Minor, not blocking: an ordinal can collide with a real id (`x`, `x␠`, `x#2` → `x`, `x#2`, `x#2`). Daemon ids are generated `sc-N`, so this is theoretical.
 
 **Gate:** `bun test apps/mobile/test` → 1950 pass / 0 fail (144 files). `bun run lint` → clean (1716 files). `bun run typecheck` → clean.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-16* (fixing the S6 Review **round 2** above; that
+reviewer was fresh-context, this round is not — so a fresh-context pass on it is
+still owed.)
+
+**Finding addressed: the one MEDIUM** (two parts: `rowIdentity` unpinned by any
+test, and the guard regex that never matches).
+
+**Reproduced on this branch before any edit**, both parts:
+
+```
+$ bun run .tentacle/tmp/cron-tool/fixr2/regex-vacuous.ts
+shipped matches a real row.title key: false
+correct matches a real row.title key: true
+shipped.source: \\$\\{row\\.title\\}
+```
+
+and the property the reviewer named, by mutating `rowIdentity` to
+`return row.title;` and re-running the two mobile test files **before** writing
+any test: `72 pass / 0 fail` — the suite was green with the fix removed, exactly
+as the review said.
+
+**Root cause, one sentence each.**
+1. Every test asserted *that the view-model sets `key`* and *that the sheet calls
+   `rowIdentity`*, but none asserted *what `rowIdentity` returns*, so the one line
+   where `key` outranks `title` (`session-info.ts:250`) was unguarded.
+2. `/\\$\\{row\.title\\}/` is, in a regex literal, an escaped backslash followed
+   by an **end-of-input anchor** — it can only match the literal text
+   `\` at the very end of the file, which no source has. It was always `false`.
+
+**As built** (test-only; **no production source changed** — the fix in
+`a906f89a` was already correct, as the review found)
+- `apps/mobile/test/session-info.test.ts:794-817` — one new test,
+  `` `rowIdentity` is what makes a keyed row distinct — the key WINS over the
+  title ``: the unit property both ways (`{title:"check CI", key:"sc-2"}` →
+  `"sc-2"`; `{title:"Project"}` → `"Project"`, the fallback every non-schedule row
+  uses), plus the two same-prompt rows of the real `schedules` section whose
+  identities are `["sc-1","sc-2"]` and `new Set(ids).size === ids.length`. So it
+  pins the function's contract **and** the property the review actually cared
+  about (two same-prompt wakes stay distinct), not merely a weaker correlate.
+- `apps/mobile/test/schedule-wiring.test.ts:39` — the guard rewritten to
+  `/\$\{row\.title\}/`, with a comment naming the vacuous spelling it replaced so
+  it is not reintroduced.
+- The import of `rowIdentity` added to `session-info.test.ts` (`:20`).
+
+**Red before green, on the assertion** (§9). With the production fix mutated away
+(`rowIdentity` → `return row.title;`), the new test fails **on its assertion**
+(`71 pass / 1 fail`), not on an import or compile error. The same mutation against
+the pre-round tests was `72 pass / 0 fail` — the two runs together are the proof
+that the test, not the tree, changed.
+
+**Mutation checks** (`.tentacle/tmp/cron-tool/fixr2/mut.py` — one exact
+single-site edit per run, unique-site asserted, the original restored from a
+`.bak` and its **SHA-256 compared afterwards: `bytes restored: True` on all
+seven**; `git status` showed only this round's two test files throughout).
+
+| # | mutated production site | red |
+|---|---|---|
+| m1 | `rowIdentity` → `return row.title;` (**the review's own mutation**) | 1 fail — the new test |
+| m2 | the sheet's React `key` → `${row.title}` | 1 fail — the wiring guard |
+| m3 | the Delete testID → `row.title` | 2 fail |
+| m4 | `expanded` → `${row.title}` | 1 fail |
+| m5 | the `schedules` section stops setting the row's `key` | 3 fail — all three key tests |
+| m6 | `keyedScheduleRows` drops the ordinal | 1 fail — the repeated-id test |
+| m7 | the `onExpand` **set** key → `${row.title}` (pinned by *no* `toContain`: **only the regex can see it**) | 1 fail — the wiring guard |
+
+m1 closes the review's gap; m7 is what proves the regex itself is non-vacuous,
+because it is the one site no `toContain` assertion in that test covers.
+
+**The regex fix, proved directly** (`.tentacle/tmp/cron-tool/fixr2/regex-proof.sh`:
+the *same* m7 source mutation run against the old guard, then the new one):
+
+```
+OLD regex (vacuous) ->  7 pass  0 fail
+FIXED regex         ->  6 pass  1 fail
+```
+
+That is the whole finding in two lines: the m7 mutant survives the shipped regex
+and is caught by the rewritten one.
+
+**The review's own minor note (an ordinal can collide with a real id) is
+deliberately NOT changed.** It is non-blocking by the review's own words, needs
+ids like `x`, `x␠`, `x#2` in one table to trigger, and the daemon mints `sc-N`
+(`packages/daemon`, S3) — so a fix would be new production surface (`keyedScheduleRows`
+gaining a third de-duplication pass) for an unreachable case. Recording it rather
+than guessing.
+
+**Scope.** Two test files. No protocol, no client, no daemon, no TUI, no mobile
+production source; `bunx tsc -p apps/mobile` and `-p apps/relay` untouched by the
+diff. No new `changelog.d/` fragment and no `protocol.d/` note, for the reason
+fix round 1 gave (internal test work carries no fragment, §10; no wire change).
+
+**Gate** (this tree, after the last edit):
+- `bunx tsc --noEmit` → clean; `bunx tsc -p apps/mobile` → clean;
+  `bunx tsc -p apps/relay` → clean.
+- `bun run lint` → clean, 1716 files, no fixes applied.
+- `bun test apps/mobile/test` → **1951 pass / 0 fail** (144 files) — the 1950 of
+  round 1 plus exactly the one new test.
+- full `bun test` → **12448 pass / 5 skip / 0 fail** (12453 tests, 892 files,
+  451 s). Round 1's full run was 12447 / 5 / 0, so the delta is the one new test;
+  the same 5 opt-in skips (live k8s ×2, live docker ×2, slow keepalive ×1), no
+  new skip, none in `apps/mobile`.
+
+**Unverified.** Same as round 1, unchanged by this round: React Native has no
+renderer under `bun test`, so the repaint itself (a row dropped or duplicated after
+a delete) is pinned through the view-model and the wiring guards, not through a
+render. Confirming it on device needs the Maestro flow.

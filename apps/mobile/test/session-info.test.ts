@@ -17,6 +17,7 @@ import {
   contextMeter,
   devicesText,
   headerModel,
+  rowIdentity,
   sanitizeDisplay,
   sessionInfoView,
   settledOp,
@@ -788,6 +789,31 @@ describe("the SCHEDULED WAKES section (cron-tool S6, mockup M7)", () => {
     expect(found.rows.map((row) => row.title)).toEqual(["check CI", "check CI"]);
     // The RAW id is the identity, and it survives a title collision.
     expect(found.rows.map((row) => row.key)).toEqual(["sc-1", "sc-2"]);
+  });
+
+  test("`rowIdentity` is what makes a keyed row distinct — the key WINS over the title", () => {
+    // The ONE place `key` takes priority over `title` (S6 Review round 2's
+    // MEDIUM): the sheet builds its React key, its expansion state and every
+    // testID from `rowIdentity`, so a regression to `row.title` there would
+    // re-collapse two same-prompt wakes with the whole suite green.
+    expect(rowIdentity({ title: "check CI", key: "sc-2" })).toBe("sc-2");
+    // A row with no key (every non-schedule row) still has an identity: its title.
+    expect(rowIdentity({ title: "Project" })).toBe("Project");
+    // And it survives the real section: two same-prompt rows stay distinct.
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([
+          wake({ id: "sc-1", prompt: "check CI" }),
+          wake({ id: "sc-2", kind: "at", spec: "at 17:00", prompt: "check CI" }),
+        ]),
+      }),
+      "schedules",
+    );
+    expect(found.rows.map((row) => row.title)).toEqual(["check CI", "check CI"]);
+    const identities = found.rows.map((row) => rowIdentity(row));
+    expect(identities).toEqual(["sc-1", "sc-2"]);
+    expect(new Set(identities).size).toBe(identities.length);
   });
 
   test("a repeated (or unpaintable) id still yields UNIQUE, paint-safe keys", () => {

@@ -33,7 +33,10 @@ describe("M7: the Session info section's delete control", () => {
   test("every key, expansion and testID is built from the row's identity, never its title", () => {
     const sheet = read("src", "screens", "SessionInfoSheet.tsx");
     // No `row.title` in a key/testID/expanded key at all, in any of the three.
-    expect(sheet).not.toMatch(/\\$\\{row\\.title\\}/);
+    // (`/\$\{row\.title\}/` — NOT `/\\$\\{…\\}/`, which is a literal backslash
+    // followed by an end anchor and so matches nothing: the S6 Review round 2's
+    // vacuous guard. See `.tentacle/tmp/cron-tool/fixr2/regex-vacuous.ts`.)
+    expect(sheet).not.toMatch(/\$\{row\.title\}/);
     expect(sheet).toContain("key={`${section.id}-${rowIdentity(row)}`}");
     expect(sheet).toContain("testID={`session-info-${sectionId}-${rowIdentity(row)}`}");
     expect(sheet).toContain("testID={`session-info-${sectionId}-${rowIdentity(row)}-switch`}");
