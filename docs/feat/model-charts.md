@@ -1862,3 +1862,13 @@ before *Fix round 1* below, which is the round that answers them.
 - **Gate:** `chart-spec`/`chart-helpers`/`chart-fuzz` + `packages/tools` + `packages/tui/test` → 2924 pass / 0 fail; `bun run typecheck` green; `bun run lint` clean (1779 files).
 - **Mutations (each reverted, tree clean after):** M1 drop the `readPoints` all-null check → RED (T1.3 point form). M2 pie/doughnut guard off → RED (T1.13 pie). M3 category-x guard off → RED (T1.13 bar no x type). M4 point-form bar cap reverted to labels-only → RED (T1.13 cap). M5 `checkAligned` never called → RED (T1.13 stacked). Finding 1 and findings 2a/2c: fixed and pinned.
 - **MEDIUM — finding 2b only half fixed** (`packages/core/src/chart/spec.ts:770`): the point-form bar cap counts `datasets[0].data.length` only. Probe (`.tentacle/tmp/model-charts/r2.ts`): `type: "bar"`, `x: {type: "number"}`, `datasets: [{10 points}, {200 points}]` → `ok: true`; likewise two series of 60 points on disjoint x (120 distinct categories) → `ok: true`. The 60-category cap is bypassed by putting a short series first, and the client re-runs this same validator, so a forged spec reaches the renderers. Fix: count the distinct x across all datasets (or the max length) and add a test with the long series second.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Verdict: PASS** — no HIGH/MEDIUM. Scope: `git diff HEAD~1` (d3d02ab9).
+
+- **Round 2 MEDIUM fixed:** `spec.ts:770` now counts `distinctX(datasets)` (distinct x across every point-form series). The round-2 probe (`r2.ts`) now refuses both hostile shapes (`[10, 200]` points, 2×60 on disjoint x); the same-x stacked bar is still accepted.
+- **Mutation:** going back to counting `datasets[0].data.length` → RED (T1.13 "the cap counts every series' x, not only the first one's"). Reverted, tree clean.
+- **Gate:** `chart-spec`/`chart-helpers`/`chart-fuzz` 72 pass / 0 fail; `bun run typecheck` green; `bun run lint` clean (1779 files). No regression seen in the diff, which touches only the bar-cap branch.
