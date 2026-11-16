@@ -1383,3 +1383,17 @@ the C1+C2 test files, `bun run lint` and `bunx tsc --noEmit` are green (see
 *— recorded by claude-opus-5-5 (orchestrator), 2026-11-16*
 
 On `modern.html`: **1 A · 2 B · 3 B · 4 B · 5 B · 6 A · 7 A · 8 B · 9 A · 10 A** (line A; bar, stacked bar, area, donut B; scatter A; scrubbing A; full screen B; gallery A; table A). Owner: "in generale mi piace il font mono sui grafici" → chart typography (hero number, labels, axis ticks, callouts) is MONOSPACE in every section, also where direction A is chosen. iPhone sections 1–10 are now decided; the plan is fully approved.
+
+### Review round 2 — C1+C2 (fresh context)
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Verdict: APPROVE (C1+C2 only)** — no HIGH/MEDIUM findings. Scope: `git diff main...HEAD`, slices C1+C2.
+
+- **Gate (narrow):** the 12 touched test files → 295 pass / 0 fail (12 611 expects); `bun run lint` clean (1774 files); `bun run typecheck` green (root + mobile + relay). Full `bun test` not re-run in this round.
+- **Mutation 1** (`subagent.ts:402`, drop `CHART_TOOL_NAME` from the "never a child" filter) → `chart-wiring.test.ts` RED (1 fail). Reverted, tree clean.
+- **Mutation 2** (`spec.ts:549`, accept `"12.5"` as a number — the plan's C1 mutation) → 8 RED in `chart-spec`/`chart-fuzz`. Reverted, tree clean.
+- **Attacks tried:** (a) §7 single session path — `chart` adds no wire method/update; T2.0 drives the real `SessionHost`+`Connection`+`RemoteClient` and both frontends' rebuild functions: holds. (b) Args truncation on any client/persistence path — grep for `args/arguments/rawInput .slice`/truncate in `packages`/`apps` src: none; relay/device frame caps (8 MiB) far above the 64 KiB spec cap: holds. (c) Pod forgery (§7 "pod not trusted") — `permission: "none"`, no laptop-side effect, drawing re-validates (C4/C5): holds for C2. (d) Registry hint seam — a tool without `argumentsHint` keeps the byte-identical message (pinned): holds.
+- **Low (not blocking):** `chartArgumentsHint` (`tools/src/chart.ts:37`) matches `NaN|Infinity|undefined` anywhere in the raw text, including inside a string (a title "Infinity War" with an unrelated syntax error gets the NaN hint). Cost: one misleading sentence on an already-failed parse.
+- **Not verified here:** T2.0 rebuilds rows from the daemon's history, not from a laptop `<uid>.jsonl` reload; T2.3 deferred to C8 (recorded drift).
+- **Reviewer = same model family as the executor's orchestrator** (fresh context only): shared blind spots possible.
