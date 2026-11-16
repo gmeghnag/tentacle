@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import type { ChatMessage } from "@tentacle/core";
+import type { SessionCapabilities } from "./capabilities.ts";
 import type { SessionSnapshot } from "./session.ts";
 
 export interface SessionRecord {
@@ -27,6 +28,12 @@ export interface SessionRecord {
    */
   readonly title: string | RecordTitle;
   readonly messages: readonly ChatMessage[];
+  /**
+   * The session's MCP/skill switches, from its log's last `capabilities` entry
+   * (docs/feat/session-capabilities.md S3b): a resume, a hop and a `serve`
+   * reload carry them into the session they open. Absent → everything on.
+   */
+  readonly capabilities?: SessionCapabilities;
 }
 
 /** A chosen title as a record stores it. */

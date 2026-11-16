@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  KnownLogEntrySchema,
+  LOG_ENTRY_CRITICAL,
   MAX_DISABLED_CAPABILITIES,
   Method,
   OpenParamsSchema,
@@ -16,6 +18,37 @@ import {
 // docs/feat/session-capabilities.md — slice S3a (protocol), additive.
 
 const NONE = { disabledMcp: [], disabledSkills: [] };
+
+// Slice S3b: the switches as a session-log entry (non-critical, owner Q2).
+describe("the `capabilities` log entry", () => {
+  const entry = {
+    seq: 3,
+    id: "i/3",
+    prev: "i/2",
+    ts: 1,
+    type: "capabilities",
+    capabilities: { disabledMcp: ["echo"], disabledSkills: [] },
+  };
+
+  test("a known entry, the whole state, not critical", () => {
+    expect(KnownLogEntrySchema.safeParse(entry).success).toBe(true);
+    expect(LOG_ENTRY_CRITICAL.capabilities).toBe(false);
+    // Marked critical it is MALFORMED: an older build must be able to skip it.
+    expect(KnownLogEntrySchema.safeParse({ ...entry, critical: true }).success).toBe(false);
+    expect(KnownLogEntrySchema.safeParse({ ...entry, capabilities: undefined }).success).toBe(
+      false,
+    );
+  });
+
+  test("bounded like the wire state (F10)", () => {
+    const many = Array.from({ length: MAX_DISABLED_CAPABILITIES + 1 }, (_, i) => `s${i}`);
+    const at = (disabledMcp: string[]) =>
+      KnownLogEntrySchema.safeParse({ ...entry, capabilities: { ...NONE, disabledMcp } }).success;
+    expect(at(many.slice(1))).toBe(true);
+    expect(at(many)).toBe(false);
+    expect(at(["x".repeat(129)])).toBe(false);
+  });
+});
 
 describe("session/set_capability", () => {
   test("the method is wired to its schemas", () => {

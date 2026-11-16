@@ -26,6 +26,7 @@ import {
   type KnownLogEntry,
   KnownLogEntrySchema,
   LOG_ENTRY_CRITICAL,
+  type SessionCapabilitiesWire,
   type SessionTitle,
   appendEntryBody,
   isAppendEntry,
@@ -490,6 +491,24 @@ export function entryLines(entries: readonly KnownLogEntry[]): string {
     out += `${JSON.stringify(e)}\n`;
   }
   return out;
+}
+
+/**
+ * The session's MCP/skill switches a segment's entries leave
+ * (docs/feat/session-capabilities.md S3b): the LAST `capabilities` entry, the
+ * whole state; none → undefined (everything on). One fold for both stores:
+ * the laptop's `load` and the `serve` reload (THROUGH its sidecar's entry).
+ */
+export function lastCapabilities(
+  entries: readonly KnownLogEntry[],
+): SessionCapabilitiesWire | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry?.type === "capabilities") {
+      return entry.capabilities;
+    }
+  }
+  return undefined;
 }
 
 /**

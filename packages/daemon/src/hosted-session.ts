@@ -323,6 +323,12 @@ export interface RestoredSessionState {
    */
   readonly autoAccept?: boolean;
   /**
+   * The session's MCP/skill switches at the restart, from its log's last
+   * `capabilities` entry (`DaemonSessionRecord.capabilities`,
+   * docs/feat/session-capabilities.md S3b). Absent → everything on.
+   */
+  readonly capabilities?: SessionCapabilities;
+  /**
    * The record's installed head (`DaemonSessionRecord.head`: its index in the
    * reloaded history): the summary again, cut short or not. Absent: none.
    */
@@ -448,6 +454,17 @@ export interface TurnErrorPolicy {
 
 /** The most of a failed turn's message the wire carries (it may be an upstream body). */
 export const TURN_ERROR_MAX = 400;
+
+/** A state from outside (a client's seed, a reloaded log entry): sorted and de-duplicated, like every applied op. */
+function normalizeCapabilities(state: SessionCapabilities): SessionCapabilities {
+  const norm = (names: readonly string[]) => [...new Set(names)].sort();
+  return { disabledMcp: norm(state.disabledMcp), disabledSkills: norm(state.disabledSkills) };
+}
+
+/** Something is turned off (else the state is the default, and the log says nothing). */
+function hasDisabled(state: SessionCapabilities): boolean {
+  return state.disabledMcp.length > 0 || state.disabledSkills.length > 0;
+}
 
 /** One line: every whitespace run and control character becomes a single space, and
  * the bidi/zero-width controls that could reorder or hide what follows are dropped. */
@@ -802,6 +819,12 @@ export class HostedSession {
     this.watchers = new SessionWatchers(now);
     const resume = restored?.resume;
     this.autoAccept = restored?.autoAccept === true;
+    // The switches a restart reloads (before the log's first segment, which
+    // states them again: `logSegmentFacts`).
+    if (restored?.capabilities !== undefined) {
+      this.caps = normalizeCapabilities(restored.capabilities);
+      session.currentAgent().setCapabilities(this.caps);
+    }
     // A fresh epoch per incarnation (decision D1): a `since` from a previous
     // session under the same id never matches. The seed (resume) is covered.
     // A resumed turn is running AT the cut: its prompt is already in the
@@ -1866,6 +1889,12 @@ export class HostedSession {
    */
   private logSegmentFacts(): void {
     this.log.title(this.wireTitle());
+    // The switches too, when something is off (docs/feat/session-capabilities.md
+    // F12): a segment is self-contained even when the older ones are dropped.
+    // Everything on logs nothing — the fold's default.
+    if (hasDisabled(this.caps)) {
+      this.log.capabilities(this.caps);
+    }
     for (const fact of this.agentJobs.segmentFacts()) {
       if ("stopReason" in fact) {
         this.log.subagentEnd(fact);
@@ -2631,13 +2660,17 @@ export class HostedSession {
    */
   seedCapabilities(seed: SessionCapabilities): void {
     // Client-supplied: kept sorted and de-duplicated, like every applied op.
-    const norm = (names: readonly string[]) => [...new Set(names)].sort();
-    const state = {
-      disabledMcp: norm(seed.disabledMcp),
-      disabledSkills: norm(seed.disabledSkills),
-    };
+    const state = normalizeCapabilities(seed);
     this.caps = state;
     this.session.currentAgent().setCapabilities(state);
+    // Recorded (S3b): the first segment was logged before the seed, so the
+    // carried state (a resume, a fork, a hop) follows it. Everything on: nothing.
+    if (hasDisabled(state)) {
+      this.log.capabilities(state);
+      // The create's first write was captured before this entry (`serve`):
+      // another one, or it lands only with the next change.
+      this.persist();
+    }
   }
 
   /**
@@ -2663,6 +2696,11 @@ export class HostedSession {
       }
       this.caps = next;
       this.session.currentAgent().setCapabilities(next);
+      // The record is the log (S3b): the whole state after, then a write
+      // (`serve`; a no-op elsewhere). A crash before it lands loses this one
+      // change, and the reload says what it has (F6).
+      this.log.capabilities(next);
+      this.persist();
       this.emit({
         type: "capabilities",
         capabilities: toWireCapabilities(next),
