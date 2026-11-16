@@ -64,19 +64,24 @@ function processAlive(pid: number): boolean {
 export class SessionBlobs {
   private readonly io: SessionBlobsIo;
 
+  /**
+   * `suffix` names the dir kind: `.attachments` (images, the default) or
+   * `.artifacts` (docs/feat/model-artifacts.md D5) — the same code for both.
+   */
   constructor(
     private readonly dir: string,
     io?: SessionBlobsIo,
+    private readonly suffix: string = BLOB_DIR_SUFFIX,
   ) {
     this.io = io ?? defaultIo;
   }
 
-  /** `<dir>/<uid>.attachments` — throws on an invalid session id (never a path from it). */
-  private blobDir(uid: string): string {
+  /** `<dir>/<uid><suffix>` — throws on an invalid session id (never a path from it). */
+  blobDir(uid: string): string {
     if (!isValidSessionId(uid)) {
       throw new Error(`invalid session id ${JSON.stringify(uid)}`);
     }
-    return join(this.dir, `${uid}${BLOB_DIR_SUFFIX}`);
+    return join(this.dir, `${uid}${this.suffix}`);
   }
 
   private blobPath(uid: string, id: string): string {
@@ -117,6 +122,41 @@ export class SessionBlobs {
     }
     try {
       return new Uint8Array(await readFile(path));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * At most `length` bytes of the blob from `offset` (a chunked read never
+   * loads the whole file), or `null` when absent or unreadable.
+   */
+  async readRange(
+    uid: string,
+    id: string,
+    offset: number,
+    length: number,
+  ): Promise<Uint8Array | null> {
+    let path: string;
+    try {
+      path = this.blobPath(uid, id);
+    } catch {
+      return null;
+    }
+    try {
+      const handle = await open(path, "r");
+      try {
+        const out = new Uint8Array(length);
+        let got = 0;
+        while (got < length) {
+          const { bytesRead } = await handle.read(out, got, length - got, offset + got);
+          if (bytesRead === 0) break;
+          got += bytesRead;
+        }
+        return out.subarray(0, got);
+      } finally {
+        await handle.close();
+      }
     } catch {
       return null;
     }
@@ -173,7 +213,7 @@ export class SessionBlobs {
     }
   }
 
-  /** `rm -r <uid>.attachments`. */
+  /** `rm -r <uid><suffix>`. */
   async removeAll(uid: string): Promise<void> {
     await rm(this.blobDir(uid), { recursive: true, force: true });
   }
@@ -187,8 +227,8 @@ export class SessionBlobs {
       return [];
     }
     return names
-      .filter((name) => name.endsWith(BLOB_DIR_SUFFIX) && !name.startsWith("."))
-      .map((name) => name.slice(0, -BLOB_DIR_SUFFIX.length))
+      .filter((name) => name.endsWith(this.suffix) && !name.startsWith("."))
+      .map((name) => name.slice(0, -this.suffix.length))
       .filter((uid) => isValidSessionId(uid));
   }
 

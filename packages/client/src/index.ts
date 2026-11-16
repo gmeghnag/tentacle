@@ -18,6 +18,7 @@ export * from "./remote-session.ts";
 export * from "./session-reducer.ts";
 export * from "./version-mismatch.ts";
 export * from "./upload-window.ts";
+export * from "./read-window.ts";
 export * from "./watch.ts";
 export * from "./image-input.ts";
 export * from "./laptop-images.ts";

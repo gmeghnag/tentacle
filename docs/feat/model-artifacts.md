@@ -331,7 +331,8 @@ conversation, like the attachments blob dir (P7) — which is also why it needs
 **D6 — client (`packages/client`).**
 - `client/mapping.ts` `tool_call_update`: `artifact` → `ToolResult.details = { kind: "artifact", artifact: meta }` (nested: S2)
   (core union grows `kind: "artifact"`, D2).
-- `RemoteClient.listArtifacts(sessionId): Promise<ArtifactMeta[]>` —
+- `RemoteClient.listArtifacts(sessionId): Promise<ArtifactListResult>` (`{ artifacts, truncated? }`:
+  the wire's `truncated` is passed on, never dropped — changed from `ArtifactMeta[]` in S5) —
   `MethodNotFound` → `ArtifactsUnsupportedError` (the UI says "needs a newer
   tentacle on <computer>").
 - `RemoteClient.readArtifact(sessionId, meta, { signal, onProgress }): Promise<Uint8Array>` —
@@ -1252,6 +1253,118 @@ $ bun test            → 12236 pass, 5 skip, 0 fail (12241 tests, 883 files, 44
 The 5 skips are the same opt-in ones as in S1/S2. None was added.
 
 **Unverified:** none for this slice. The `serve` disk copy (D5) is S4's.
+
+### S5 — Client list/read + mapping: DONE (gate RED only on S4's uncommitted files)
+
+*— claude-opus-5-5 (executor, S5), 2026-11-16*
+
+**Starting state.** The tree held S4 work in progress: modified
+`daemon/src/session-blobs.ts` and `session-log-store.ts`, plus untracked
+`daemon/src/session-artifacts.ts` and `daemon/test/artifact-manifest.test.ts`
+(last written 09:41; no S4 executor running; no S4 Execution entry). S5 touches
+none of these files and they were left exactly as found. They are the only
+cause of the red gate below.
+
+**Load-bearing check, re-run first:**
+
+```
+$ bun .tentacle/tmp/model-artifacts/read-roundtrip.ts
+chunks=12 sha-equal=true
+order=enqueue,chunk0,chunk1,…,chunk11
+enqueue-before-last=true maxRpcFrame=349591 maxRawNoiseFrame=87383
+PASS
+$ bun test packages/daemon/test/artifact-connection.test.ts   → 6 pass, 0 fail
+```
+
+**As built, in order:**
+
+1. `packages/client/test/read-window.test.ts` (new, 11 tests) — RED: module absent.
+2. `packages/client/src/read-window.ts` (new, pure): `ReadWindow` (window 2;
+   `next` → `read{offset}` | `wait` | `done`; `accept` checks the reply's `size`
+   against the META's, then the base64 TEXT length, then strict decode (canonical
+   only), then the decoded length, and only then copies into a buffer sized from
+   the meta; `rewind` forgets in-flight reads, so the next read is the first
+   MISSING chunk; `finish` requires every chunk and the sha256). Errors:
+   `ArtifactCorruptError`, `ArtifactReadAbortedError` (`name: "AbortError"`),
+   `ArtifactLinkLostError`. The constructor refuses a non-integer, 0 or
+   > `MAX_ARTIFACT_BYTES` size with `RangeError` before any buffer exists. → 11/11 green.
+3. `packages/client/test/mapping.test.ts` +1 test (T5.5). RED on its assertion
+   (`details` undefined), then `client/src/mapping.ts` `tool_call_update`:
+   `update.artifact` → `details: { kind: "artifact", artifact }` (nested). Green.
+4. `packages/client/test/artifacts.test.ts` (new, 15 tests): T5.1 against a
+   real `SessionHost` + `Connection` (bytes presented daemon-side, then list +
+   verified read, progress, two concurrent reads, the daemon's
+   `ArtifactUnavailable` passed through). T5.2: a tapped `Dialer` drops the link
+   right after the 3rd answer; chunks 0–2 are read exactly once and the first
+   read on the new link is chunk 3. An abort mid-read issues no further read; an
+   already-aborted signal issues zero reads. T5.3 against a fake daemon: an honest
+   control, then a short chunk (not retried), wrong bytes, another `size`, a
+   2 GiB `size` (refused by the wire schema), a meta over the cap (`RangeError`,
+   zero reads). T5.4: `MethodNotFound` on list and on read →
+   `ArtifactsUnsupportedError`; `truncated` passed through. RED at load (exports
+   absent).
+5. `packages/client/src/remote-client.ts`: `ArtifactsUnsupportedError` +
+   `ARTIFACTS_OLD_DAEMON`, `ArtifactReadOptions`, `listArtifacts` (read-only;
+   waits out a drop with a factory, like `snapshot`), and `readArtifact` +
+   `pullArtifact` + `issueArtifactRead`, the `upload()`/`pump` idiom (a failing
+   read is captured, rethrown after its siblings settle, then `rewind` → resume).
+   An abort wakes a pending wait at once (the race includes the signal).
+   Corrupt/abort errors are final, never retried. `liveGeneration` and
+   `throwIfAborted` take an optional `LinkErrors` (default: the upload's), so a
+   read reports `ArtifactLinkLostError` / `ArtifactReadAbortedError` and not
+   upload words. Uploads are unchanged. `client/src/index.ts` exports
+   `read-window.ts`. → 51/51 green on the three files; `bun test packages/client`
+   790 pass, 0 fail.
+
+**Drift from Implementation (and why):**
+
+- `listArtifacts` returns `ArtifactListResult` (`{ artifacts, truncated? }`), not
+  `ArtifactMeta[]`. Returning only the array would silently drop the wire's
+  `truncated`. D6 is updated to match. **S6a/S9 use `.artifacts`.**
+- `packages/transport/src/index.ts` now also exports `decodeBase64`. That file is
+  not in Files item 5. It is the existing strict, canonical-only decoder of the
+  Noise framing, reused so a pod cannot pass two different texts for one chunk.
+- A reply that fails the wire schema (e.g. a 2 GiB `size`) reaches the caller as
+  the peer's `RpcError` ("invalid result for artifact/read"), not as
+  `ArtifactCorruptError`. It is rejected either way and nothing is sized from it.
+  A UI shows "couldn't verify" for both (S6a/S9).
+- No changelog fragment was added: `changelog.d/model-artifacts.added.md` (S1)
+  already describes the verified, resumable chunked read. The rule is one
+  fragment per slug+category.
+
+**Mutations** (each applied, run on `artifacts.test.ts` + `read-window.test.ts`,
+reverted; `grep -c "false &&"` = 0 after):
+
+```
+M1 (plan target) skip the sha256 check in finish   24 pass, 2 fail (wrong bytes: client + window)
+M2 skip reply.size === meta.size                   24 pass, 2 fail (other size: client + window)
+M3 skip both chunk-length checks                   23 pass, 3 fail (short chunk ×2, long chunk)
+M4 rewind also forgets held chunks (restart at 0)  24 pass, 2 fail (drop resumes at chunk 3 ×2)
+M5 drop the in-loop abort check                    14 pass, 1 fail (abort issues no further read)
+T5.5 shown red before its code (no mapping)        24 pass, 2 fail (the T5.5 assertion; + artifacts.test.ts at load)
+```
+
+**Schema / version:** no protocol schema changed (S1 made all the wire
+changes), so `protocol.json` was not regenerated and there is no `protocol.d/` note.
+
+**Gate** (worktree root):
+
+```
+$ bunx tsc --noEmit     → 24 errors, ALL in S4's WIP: daemon/src/session-artifacts.ts (1),
+                          daemon/src/session-log-store.ts (2), daemon/test/artifact-manifest.test.ts (21);
+                          0 in packages/client or packages/transport
+  tsc -p apps/mobile    → 2 errors, both daemon/src/session-log-store.ts (S4 WIP); tsc -p apps/relay → 0
+$ bun run lint          → 1 error: formatting in daemon/test/artifact-manifest.test.ts (S4 WIP); S5 files clean
+$ bun test              → 12336 pass, 5 skip, 6 fail (12347 tests, 891 files, 446 s);
+                          all 6 fails are "LogSessionStore artifacts (T4)" in artifact-manifest.test.ts
+```
+
+The 5 skips are the same count as S3's (the opt-in ones). The gate goes green
+once S4 is finished or that WIP is set aside. This executor did neither (only
+S5 was in scope).
+
+**Unverified:** that the gate is green with S4 finished. To check: re-run `bun run
+check` after S4's executor lands its slice.
 
 ## Review
 

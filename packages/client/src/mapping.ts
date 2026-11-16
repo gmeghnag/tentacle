@@ -269,6 +269,12 @@ export function updateToEvent(
         name: toolNames.get(update.toolCallId) ?? "tool",
         result: {
           ...toolResultFromContent(update.content, update.status === "failed"),
+          // `present`'s card: the free field only, NESTED (the meta has its own
+          // `kind`), never parsed from the "Presented …" text
+          // (docs/feat/model-artifacts.md D6). An older daemon sends no field.
+          ...(update.artifact
+            ? { details: { kind: "artifact" as const, artifact: update.artifact } }
+            : {}),
           // The field only, never derived from the banner text (docs/feat/tui-spill-note.md).
           ...(update.spill ? { spill: update.spill } : {}),
           // Likewise: the field only, never parsed from the denial text (docs/feat/permission-reply.md).

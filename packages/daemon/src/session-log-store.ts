@@ -162,6 +162,8 @@ export interface LogSessionStoreOptions {
   readonly onAside?: (info: LogAsideInfo) => void;
   /** The session image bytes beside the logs (docs/feat/attachments-durable.md D1); injectable for tests. */
   readonly blobs?: SessionBlobs;
+  /** The session artifacts beside the logs (docs/feat/model-artifacts.md D5); injectable for tests. */
+  readonly artifacts?: SessionArtifacts;
   /** How long a live holder of a session's lock is waited for. Default 2 s. */
   readonly lockWaitMs?: number;
   /** A lock whose stamp is older than this is stale (taken over). Default 30 s. */
@@ -193,6 +195,8 @@ type Op =
   | { readonly kind: "forget" }
   | { readonly kind: "blob"; readonly blobId: string; readonly bytes: Uint8Array }
   | { readonly kind: "dropBlobs" }
+  | { readonly kind: "artifact"; readonly meta: ArtifactMeta; readonly bytes: Uint8Array }
+  | { readonly kind: "sweepArtifacts" }
   | { readonly kind: "remove" };
 
 interface Slot {
