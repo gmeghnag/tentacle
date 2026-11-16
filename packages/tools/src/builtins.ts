@@ -8,7 +8,7 @@
  * so a rich frontend can render a git-style diff. Mutating tools default to
  * `permission: "ask"`.
  */
-import type { ExecOptions, Tool, ToolContext, ToolResultDetail } from "@tentacle/core";
+import type { ExecOptions, Tool, ToolContext, ToolDiffDetail } from "@tentacle/core";
 import { pathLocksFor } from "@tentacle/core";
 import { createTwoFilesPatch } from "diff";
 import { z } from "zod";
@@ -16,7 +16,7 @@ import { shellKillTool, shellOutputTool } from "./background.ts";
 import { pathConcurrency } from "./concurrency.ts";
 
 /** Build a unified-diff detail and count changed lines. */
-function makeDiff(path: string, before: string, after: string): ToolResultDetail {
+function makeDiff(path: string, before: string, after: string): ToolDiffDetail {
   const patch = createTwoFilesPatch(path, path, before, after, "", "");
   let added = 0;
   let removed = 0;

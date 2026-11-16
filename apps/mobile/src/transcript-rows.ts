@@ -3,7 +3,7 @@
  * history mapper (`transcript-history.ts`) and the fold share one definition
  * without a cycle.
  */
-import type { AttachmentRef, ToolResult, ToolResultDetail } from "@tentacle/core";
+import type { AttachmentRef, ToolDiffDetail, ToolResult } from "@tentacle/core";
 
 /** A tool row's status: the TUI's four, plus the person's own reply-refusal. */
 export type ToolStatus = "queued" | "running" | "ok" | "error" | "denied";
@@ -58,7 +58,7 @@ export interface ToolRow {
   /** The result text: collapsed on screen until tapped. */
   readonly output?: string;
   /** A file diff, when the tool produced one (live only, plan P7). */
-  readonly diff?: ToolResultDetail;
+  readonly diff?: ToolDiffDetail;
   readonly durationMs?: number;
   readonly hook?: ToolResult["hook"];
   readonly spill?: ToolResult["spill"];

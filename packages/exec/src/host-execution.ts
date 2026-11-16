@@ -27,7 +27,7 @@ import {
 } from "node:fs";
 import { type FileHandle, open, rename, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { scrubSensitiveEnv } from "@tentacle/core";
+import { isSecretPath, scrubSensitiveEnv } from "@tentacle/core";
 import type {
   BackgroundHandle,
   ExecOptions,
@@ -63,9 +63,15 @@ export interface HostExecutionConfig {
   readonly writableDirs?: readonly string[];
   /**
    * TEST SEAM ONLY: runs between the confinement check and the `open` of a
-   * write, with the checked real path — where a race test swaps in a link.
+   * write (or of a `readBytes`), with the checked real path — where a race test
+   * swaps in a link.
    */
   readonly beforeOpen?: (realPath: string) => void | Promise<void>;
+  /**
+   * TEST SEAM ONLY: runs after `readBytes` opened the file and every check
+   * passed (type, size, re-confinement) — immediately before the bytes are read.
+   */
+  readonly beforeRead?: (realPath: string) => void | Promise<void>;
   /**
    * TEST SEAM ONLY: runs after the temp file is written and chmodded and the
    * last re-checks passed — immediately before the `rename`.
@@ -84,6 +90,34 @@ export class WorkspaceWriteError extends Error {
     super(message);
     this.code = code;
   }
+}
+
+/**
+ * Why a confined binary read (`readBytes`, docs/feat/model-artifacts.md D3) was
+ * refused. The message is model-actionable; `reason` is for callers and tests.
+ */
+export type WorkspaceReadReason =
+  | "outside"
+  | "secret"
+  | "too_large"
+  | "not_file"
+  | "unresolvable"
+  | "missing"
+  | "changed";
+
+/** Thrown when `readBytes` refuses a path. */
+export class WorkspaceReadError extends Error {
+  override readonly name = "WorkspaceReadError";
+  readonly reason: WorkspaceReadReason;
+  constructor(reason: WorkspaceReadReason, message: string) {
+    super(message);
+    this.reason = reason;
+  }
+}
+
+/** `3.2 MiB`, `20 MiB` — for a size refusal the model can act on. */
+function mib(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, "")} MiB`;
 }
 
 /** Realpath `p` if it exists, else return it unchanged (normalized by caller). */
@@ -149,6 +183,8 @@ function realTarget(abs: string): RealTarget {
  */
 const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fsConstants;
 const OPEN_TEMP = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+/** `readBytes`' open: never through a final-component link, never blocking on a FIFO. */
+const OPEN_READ = fsConstants.O_RDONLY | O_NOFOLLOW | fsConstants.O_NONBLOCK;
 /** The in-place fallback's open: an existing file only, never a link, never blocking on a FIFO. */
 const OPEN_IN_PLACE = O_WRONLY | O_NOFOLLOW | fsConstants.O_NONBLOCK;
 /** Temp-create errors after which an EXISTING writable target is written in place (fix round 5). */
@@ -218,6 +254,7 @@ export class HostExecution implements ExecutionEnvironment {
   private readonly beforeOpen: ((realPath: string) => void | Promise<void>) | undefined;
   private readonly beforeRename: ((realPath: string) => void | Promise<void>) | undefined;
   private readonly beforeInPlaceOpen: ((realPath: string) => void | Promise<void>) | undefined;
+  private readonly beforeRead: ((realPath: string) => void | Promise<void>) | undefined;
   /** Commands whose leader exited (their group was handed to `releaseGroup`). */
   private readonly released = new WeakSet<Subprocess>();
 
@@ -228,6 +265,7 @@ export class HostExecution implements ExecutionEnvironment {
     this.beforeOpen = config?.beforeOpen;
     this.beforeRename = config?.beforeRename;
     this.beforeInPlaceOpen = config?.beforeInPlaceOpen;
+    this.beforeRead = config?.beforeRead;
     this.defaultCwd = resolve(config?.cwd ?? process.cwd());
     this.root = safeRealpath(resolve(config?.root ?? this.defaultCwd));
     const writable = writableRootsOf(config?.writableDirs ?? []);
@@ -370,6 +408,114 @@ export class HostExecution implements ExecutionEnvironment {
       }
       throw error;
     }
+  }
+
+  /**
+   * A CONFINED binary read, for `present` (docs/feat/model-artifacts.md D3) —
+   * unlike `readFile`, what it returns may leave the workspace (shown on a
+   * phone, opened in a browser), so:
+   * 1. the REAL path (symlinks followed; dangling/looping refused) must be
+   *    inside the workspace `root` — `writableDirs` do not count;
+   * 2. its workspace-relative path must not look secret (`isSecretPath`);
+   * 3. it is opened `O_NOFOLLOW|O_NONBLOCK` (a link swapped in at the final name
+   *    is refused; a FIFO never blocks) and must be a regular file;
+   * 4. the path is RE-confined after the open and must still name the opened
+   *    inode (a parent directory swapped for a link to outside is caught);
+   * 5. `size > maxBytes` is refused BEFORE reading; a length that differs from
+   *    the `fstat` size when read (grown or shrunk) is refused, never truncated.
+   * Residual (as for writes): a swap and swap-back between steps 4 and 5 by a
+   * user who can write a directory on the path.
+   */
+  async readBytes(
+    path: string,
+    options: { readonly maxBytes: number },
+  ): Promise<{ readonly bytes: Uint8Array; readonly realPath: string }> {
+    const abs = resolve(this.defaultCwd, path);
+    const real = this.confineRead(abs, path);
+    await this.beforeOpen?.(real);
+    let handle: FileHandle;
+    try {
+      handle = await open(real, OPEN_READ);
+    } catch (error) {
+      const code = errnoOf(error);
+      if (code === "ENOENT") {
+        throw new WorkspaceReadError("missing", `no such file: ${path}`);
+      }
+      if (code === "ELOOP" || code === "EMLINK") {
+        throw new WorkspaceReadError("unresolvable", `refused: the file is now a symlink: ${path}`);
+      }
+      throw error;
+    }
+    try {
+      const st = await handle.stat();
+      if (!st.isFile()) {
+        throw new WorkspaceReadError("not_file", `not a regular file: ${path}`);
+      }
+      const again = this.confineRead(abs, path);
+      const now = statSync(again, { throwIfNoEntry: false });
+      if (now === undefined || now.dev !== st.dev || now.ino !== st.ino) {
+        throw new WorkspaceReadError(
+          "changed",
+          `the file changed while it was opened — try again: ${path}`,
+        );
+      }
+      if (st.size > options.maxBytes) {
+        throw new WorkspaceReadError(
+          "too_large",
+          `file too large (${mib(st.size)} > ${mib(options.maxBytes)}): ${path}`,
+        );
+      }
+      await this.beforeRead?.(real);
+      // One byte more than announced: a file that grew is seen, not cut.
+      const cap = st.size + 1;
+      const buffer = new Uint8Array(cap);
+      let total = 0;
+      while (total < cap) {
+        const { bytesRead } = await handle.read(buffer, total, cap - total, total);
+        if (bytesRead === 0) {
+          break;
+        }
+        total += bytesRead;
+      }
+      if (total !== st.size) {
+        throw new WorkspaceReadError(
+          "changed",
+          `the file changed while it was read — try again: ${path}`,
+        );
+      }
+      return { bytes: buffer.subarray(0, total), realPath: real };
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /**
+   * The checked REAL read path for `readBytes`, or a `WorkspaceReadError`:
+   * inside `root` (only), not secret-looking (judged workspace-relative).
+   */
+  private confineRead(abs: string, path: string): string {
+    const target = realTarget(abs);
+    if (!target.ok) {
+      throw new WorkspaceReadError(
+        "unresolvable",
+        target.loop
+          ? `refused: symlink loop at ${target.dangling}: ${path}`
+          : `refused: dangling symlink ${target.dangling}: ${path}`,
+      );
+    }
+    if (!within(this.root, target.path)) {
+      throw new WorkspaceReadError(
+        "outside",
+        `outside the workspace (${this.root}) — copy it into the workspace first: ${path}`,
+      );
+    }
+    if (isSecretPath(relative(this.root, target.path))) {
+      throw new WorkspaceReadError(
+        "secret",
+        `looks like a secret file (${basename(target.path)}) — refused: ${path}`,
+      );
+    }
+    return target.path;
   }
 
   /**

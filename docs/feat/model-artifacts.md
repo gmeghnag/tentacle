@@ -228,7 +228,7 @@ input: {
   GIF/WebP → image (+ width/height), `%PDF-` → pdf, `<svg` → svg, `<!doctype
   html`/`<html` → html, `.md` → markdown, valid UTF-8 → text, else other);
   `meta = await ctx.artifacts.present({...})` (D4); return
-  `{ content: "Presented \"<title>\" to the user as artifact <id> v<n> (<kind>, <size>). They open it from the card in the transcript.", details: { kind: "artifact", ...meta } }`.
+  `{ content: "Presented \"<title>\" to the user as artifact <id> v<n> (<kind>, <size>). They open it from the card in the transcript.", details: { kind: "artifact", artifact: meta } }` (nested, not spread — the meta has its own `kind`; fixed in S2).
 - Registered in `wiring.ts` beside `context_reset` when `options.artifacts` is
   passed (worker, `serve`, pod daemons — every session-hosting build). It is
   **not** offered to sub-agents (P3: filtered out by name in the child registry
@@ -329,7 +329,7 @@ conversation, like the attachments blob dir (P7) — which is also why it needs
   removed.
 
 **D6 — client (`packages/client`).**
-- `client/mapping.ts` `tool_call_update`: `artifact` → `ToolResult.details = { kind: "artifact", ...meta }`
+- `client/mapping.ts` `tool_call_update`: `artifact` → `ToolResult.details = { kind: "artifact", artifact: meta }` (nested: S2)
   (core union grows `kind: "artifact"`, D2).
 - `RemoteClient.listArtifacts(sessionId): Promise<ArtifactMeta[]>` —
   `MethodNotFound` → `ArtifactsUnsupportedError` (the UI says "needs a newer
@@ -910,6 +910,211 @@ for the whole feature (S2–S9 add no further fragment to it). `CHANGELOG.md` an
 sha256 verification) is S5's, and the load-bearing round-trip repro is S3's (T3.7);
 this slice only proves the wire shapes they will bind to. There is nothing in S1
 that can be verified end-to-end without those.
+
+### S2 — Binary confined read + pure kind/card/CSP helpers: DONE
+
+*— claude-opus-5-5 (executor, S2), 2026-11-16*
+
+**Check re-run first** (the Context's second Repro line is the one S2 closes; S3
+owns the whole-path round-trip repro):
+
+```
+$ rg -n 'readBytes|arrayBuffer\(\)|\.bytes\(\)' packages/core/src/execution.ts packages/exec/src/host-execution.ts | wc -l
+0
+$ rg -n 'secret-path|isSecretPath|classifyArtifact|artifactCsp|artifactCard' packages --glob '!**/node_modules/**' | wc -l
+0
+```
+
+Still missing, so the slice is not stale.
+
+**As built** (in dependency order, core first and then exec):
+
+1. `packages/core/src/secret-path.ts` (new): `isSecretPath(path)` is pure and
+   case-insensitive, and splits on `/` and `\`. It matches the D3 list
+   (basenames `.env`, `.env.*`, `*.pem|.key|.p12`, `id_rsa*|id_ed25519*|id_ecdsa*`,
+   `.netrc|.npmrc|.pypirc`, `credentials*`, and any directory segment
+   `.ssh|.aws|.gnupg|.kube|.docker`).
+2. `packages/core/src/artifact-kind.ts` (new): `classifyArtifact(bytes, {path?, kind?})`
+   and `imageDimensions(bytes, mime)`. The image magic reuses `sniffImageType`
+   (`image-sniff.ts`) instead of a second copy. Dimensions come from the PNG
+   IHDR, the GIF screen descriptor, JPEG SOFn (marker walk), and WebP
+   VP8/VP8L/VP8X. A truncated header or a side outside 1..65535 gives no
+   dimensions, never a guess. The order is: image/PDF magic → known archive
+   signature (zip/gzip ⇒ `other` + precise mime) → invalid UTF-8 or NUL ⇒ `other`
+   → the caller's text `kind` hint → text sniff (`<!doctype html`/`<html`,
+   `<svg`/`<?xml…<svg`) → extension (`.html/.htm/.svg/.md/.markdown`) → `text`.
+3. `packages/core/src/artifact-card.ts` (new): `artifactCard(meta, {state?, origin?})`
+   returns `{kind, glyph, title, line2, action, state}`, plus `formatArtifactSize`
+   (decimal B/KB/MB). The kind is narrowed through S1's `artifactKindOf`. `other`
+   gets `action: "save"` (never `open`) and `unavailable` gets `none`. `line2`
+   carries the `vN` suffix, `from the pod`, and `no longer available`.
+4. `packages/core/src/artifact-csp.ts` (new): `artifactCspPolicy({network?})`,
+   `artifactCsp()` (the `<!doctype html><meta http-equiv=CSP …>` prefix) and
+   `wrapArtifactHtml(body)`. The offline policy is exactly the D8 string. The
+   network-on variant opens img/style/font/script/connect/media to `*` and keeps
+   `frame-src`, `form-action` and `base-uri` at `'none'`.
+5. `packages/core/src/tool.ts:23-70`: `ToolResultDetail` is now a union with
+   `{kind:"artifact", artifact: ArtifactMeta}`. It adds a `ToolDiffDetail` alias
+   (`:43`), the `ArtifactPresentInput` and `ArtifactSink` interfaces (`:66`),
+   and `ToolContext.artifacts?` (`:169`).
+6. `packages/core/src/execution.ts:55`: an optional
+   `readBytes?(path, {maxBytes}) → {bytes, realPath}` member.
+7. `packages/core/src/index.ts`: the four new modules are exported.
+8. `packages/exec/src/host-execution.ts`: `WorkspaceReadError` with a `reason`
+   (`:109`), and `OPEN_READ = O_RDONLY|O_NOFOLLOW|O_NONBLOCK` (`:187`).
+   `readBytes` (`:429`) and `confineRead` (`:496`) do the following, in order:
+   - resolve the real path with `realTarget` (dangling or looping ⇒ `unresolvable`);
+   - require it `within(root)` (root only, `writableDirs` do NOT count) ⇒ `outside`;
+   - run `isSecretPath` on the workspace-relative real path ⇒ `secret`;
+   - `open` with `OPEN_READ` (ENOENT ⇒ `missing`, ELOOP ⇒ `unresolvable`);
+   - `fstat`: anything but a regular file ⇒ `not_file`;
+   - re-confine the path, which must still name the same dev/inode ⇒ `outside` or `changed`;
+   - `size > maxBytes` ⇒ `too_large`, refused BEFORE any read
+     (`file too large (3.2 MiB > 2 MiB)`);
+   - read up to `size+1` bytes, and refuse (`changed`) if the length read ≠ `size`.
+
+   A new TEST SEAM `beforeRead` (`:74`) sits beside the existing `beforeOpen`,
+   whose doc now also covers reads.
+9. Consumers of the widened union are narrowed to `ToolDiffDetail`, a type-only
+   change: `packages/tools/src/builtins.ts` (`makeDiff`),
+   `apps/mobile/src/diff-view.ts`, `transcript-rows.ts` (`ToolRow.diff`) and
+   `apps/mobile/test/diff-view.test.ts`. One behavioural line,
+   `apps/mobile/src/transcript.ts:504-505`: a row's `diff` is set only for a
+   `kind:"diff"` detail. An artifact detail used to be taken as a diff there
+   (it would have crashed `diffView` on `.patch`). The daemon, TUI and CLI
+   consumers already narrowed on `kind`, so tsc made no other change.
+
+**Tests:** these were written first and run RED, with every new file failing on
+`Cannot find module` (core) or the missing `readBytes`/`WorkspaceReadError` (exec).
+For a feat that is the capability being absent, so I did not add stub modules.
+Non-vacuity is proved by the mutations below instead. Green after:
+
+- `packages/core/test/secret-path.test.ts` (5), `artifact-kind.test.ts` (8),
+  `artifact-card.test.ts` (6), `artifact-csp.test.ts` (5).
+- `packages/exec/test/read-bytes.test.ts` (16). This covers T2.1 (`../`,
+  absolute outside); T2.2 (in-root link → out refused, in → in allowed,
+  symlinked dir out, writableDirs don't widen, dangling/loop/missing, a file
+  swapped for a link at `beforeOpen`, a PARENT DIR swapped for a link at
+  `beforeOpen`); T2.3 (`maxBytes+1` refused with the `beforeRead` spy at 0,
+  exactly `maxBytes` OK with the spy at 1, the MiB message); T2.4 (growth during
+  the read, FIFO via `mkfifo`, directory, `.`); T2.5 (`.env`, `.env.local`,
+  `a/.ssh/config`, `x.pem` refused and `env.md` allowed, a link to `.env`
+  refused by its target, a workspace under `…/.docker/project` still works).
+  T2.6 is in `artifact-kind.test.ts`.
+- `apps/mobile/test/transcript.test.ts`: +1, "an artifact detail is never taken
+  as a diff".
+
+**Mutations** (`.tentacle/tmp/model-artifacts/s2-mut/mut.ts`: apply, run that
+file, copy the original back, assert restored; `git diff --stat` identical
+before and after):
+
+```
+M1 drop within (plan target)                 11 pass, 5 fail  (../outside, link out, dir link out, writableDirs, dir swap)
+M2 drop isSecretPath                         14 pass, 2 fail
+M3 drop re-confine after open                15 pass, 1 fail  (parent-dir swap)
+M4 drop O_NOFOLLOW on read                   16 pass, 0 fail  ← see note
+M5 drop size check                           14 pass, 2 fail
+M6 truncate instead of refusing growth       15 pass, 1 fail
+M7 drop regular-file check                   15 pass, 1 fail  (FIFO/dir)
+M8 no beforeRead seam (spy vacuity)          14 pass, 2 fail
+M9 reads allowed in writableDirs             15 pass, 1 fail
+M10 secret check on the full real path       15 pass, 1 fail  (workspace under .docker)
+M11 secret: no dir segments                   2 pass, 3 fail
+M12 secret: case-sensitive                    4 pass, 1 fail
+M13 kind hint before binary magic             7 pass, 1 fail
+M14 archive sig not checked before text       7 pass, 1 fail
+M15 extension before %PDF- magic              7 pass, 1 fail
+M16 card: other is openable                   4 pass, 2 fail
+M17 card: wire kind not narrowed              5 pass, 1 fail
+M18 csp: connect-src * offline                3 pass, 2 fail
+M19 csp: network-on opens frames              4 pass, 1 fail
+M20 csp: wrap appends instead of prepends     4 pass, 1 fail
+M21 mobile: any detail is a diff             30 pass, 1 fail
+```
+
+M4 note: `O_NOFOLLOW` is belt and braces. A final-component link swapped in
+after the check is ALSO caught by the post-open re-confinement (step 4), which
+M3 proves load-bearing. With `O_NOFOLLOW` dropped, a swap to an in-root
+non-secret file reads that file, which is something the caller could read
+anyway. The property "nothing outside the root or secret is read" holds without
+it, so M4 surviving is expected. I did not add a mechanism-only test.
+
+**Drift from Implementation (all reconciled, plan text fixed where wrong):**
+
+1. **`details: { kind: "artifact", ...meta }` was a bug in the plan.** The meta
+   has its own `kind` (`"image"`, `"html"`…), so the spread clobbered the
+   discriminant. The detail is now NESTED, `{ kind: "artifact", artifact: meta }`,
+   and D2 and D6 are edited to say so. S3 (tool) and S5 (`client/mapping.ts`)
+   must build it nested.
+2. **Secret check on the WORKSPACE-RELATIVE real path**, where D3 said
+   `isSecretPath(real)`. With the absolute path, a workspace that itself lives
+   under `~/.docker/…` or `~/.kube/…` would refuse every file. A symlink is
+   still judged by its target. Pinned by M10.
+3. **Additions to D3's list:** `*.pfx` and `id_dsa*` (the same class of key
+   files). Matching is case-insensitive.
+4. **A post-open re-confinement and an `O_NOFOLLOW|O_NONBLOCK` open**, not in
+   D3, which only said "stat → regular file". Without the re-check, a
+   check→open race (a parent dir swapped for a link) escapes the root. The
+   residual, a swap and swap-back between the re-check and the read, is the
+   same one the writes document.
+5. **`artifactKindOf` stays in `@tentacle/protocol`** (S1 put it there), where
+   Files item 2 listed it under `core/artifact-kind.ts`. One narrowing function,
+   not two.
+6. **Classification extras:** zip/gzip signatures are checked before the text
+   path (`PK\x03\x04` decodes as UTF-8), and HEIC is `other` (`image/heic`, not
+   every viewer renders it). An explicit text `kind` hint never turns binary
+   bytes into a viewable kind.
+7. **`ToolDiffDetail` alias + mobile narrowing** (item 9): Files item 2 didn't
+   list these, but tsc requires them once the union grows. They are type-only
+   apart from the one line in `transcript.ts`, which is pinned by M21.
+8. **Changelog:** no new fragment. `changelog.d/model-artifacts.added.md` (S1)
+   already covers the feature, including "confined to the workspace,
+   secret-looking names refused". The brief says ONE fragment.
+
+**Carried to S3:** the store must emit metas that pass `ArtifactMetaSchema`. In
+particular `callId` ≤ 256 (round-2 review note), and `ArtifactPresentInput.callId`
+is unclamped in `core`. `present` maps `WorkspaceReadError.message` to its
+`isError` text, and the messages are already model-actionable.
+
+**Gate** (worktree root):
+
+```
+$ bun run typecheck   → exit 0 (tsc --noEmit, apps/mobile, apps/relay)
+$ bun run lint        → Checked 1688 files. No fixes applied. (0/0, the §6 baseline)
+$ bun test            → 12172 pass, 5 skip, 0 fail (12177 tests, 876 files, 447 s)
+```
+
+The 5 skips are the same pre-existing opt-in count S1 enumerated (k8s ×2,
+docker ×2, `TENTACLE_SLOW_TESTS`), and none was added here. No schema changed,
+so `protocol.json` was not regenerated, and no `protocol.d/` note was written
+(no wire change).
+
+**Unverified:** the FIFO/`O_NONBLOCK` and `O_NOFOLLOW` behaviour was proven on
+macOS (APFS) only. Linux semantics are the same per POSIX, but CI on Linux is
+the check.
+
+#### S2 re-verification (re-spawned executor)
+
+*— claude-opus-5-5 (executor, S2 re-spawn), 2026-11-16*
+
+This executor was spawned again for S2 and found the slice already built and
+uncommitted in the tree. It did not re-implement anything. It re-checked the work
+against the current tree and changed no production or test code:
+
+- Narrow tests: the 7 S2 files → `80 pass, 0 fail`.
+- Mutations: all 21 were re-run with the same scratch runner, and each count matches
+  the table above, including M1, the plan's target (`drop within`), at
+  `11 pass, 5 fail`. M4 survives as documented. M6's pattern no longer matched
+  the multi-line `throw` (the runner skipped it and did not run it), so it was
+  re-keyed on the `if` line alone and gave `15 pass, 1 fail` ("a file that grows
+  during the read is refused, not truncated"). `git diff --stat` was identical
+  before and after, so the tree was restored.
+- Gate: `bun run typecheck` → exit 0 · `bun run lint` → `Checked 1688 files. No
+  fixes applied.` · `bun test` → `12172 pass, 5 skip, 0 fail` (12177 tests, 876
+  files, 446 s). The skips are the 5 opt-in ones, and the gate is unchanged from the S2 gate above.
+- Changelog: `changelog.d/model-artifacts.added.md` (S1) is the slice's one
+  fragment. No second fragment was added. No schema changed, so `protocol.json`
+  was left as is.
 
 ## Review
 

@@ -12,7 +12,7 @@ import type { EndReason, SessionEvent } from "@tentacle/client";
  * `SessionEvent`s, its `history` activity, the turn bracket, the link status and
  * the session's end. No React, no client, no I/O.
  */
-import type { ChatMessage, ToolResultDetail } from "@tentacle/core";
+import type { ChatMessage, ToolDiffDetail } from "@tentacle/core";
 import { describeEmptyTurn, describeRepairs, describeTruncation, toolLabel } from "@tentacle/core";
 import { historyRows, restartPromptOf } from "./transcript-history.ts";
 import {
@@ -500,7 +500,9 @@ function applyToolResult(
   event: Extract<StreamEvent, { type: "tool_result" }>,
 ): State {
   const at = state.rows.findLastIndex((row) => row.kind === "tool" && row.id === event.id);
-  const settled: ToolResultDetail | undefined = event.result.details;
+  // Only a diff is a row's `diff`: an artifact detail is its own card (S9).
+  const settled: ToolDiffDetail | undefined =
+    event.result.details?.kind === "diff" ? event.result.details : undefined;
   const update = (row: ToolRow): ToolRow => ({
     ...row,
     // A refusal with a reply is its own status (the TUI shows `✗ Denied · <text>`).

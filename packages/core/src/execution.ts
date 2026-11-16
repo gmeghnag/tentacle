@@ -46,6 +46,17 @@ export interface ExecutionEnvironment {
   readFile(path: string): Promise<string>;
   writeFile(path: string, contents: string): Promise<void>;
   /**
+   * A CONFINED binary read (docs/feat/model-artifacts.md D3): the real path
+   * (symlinks followed) must be inside the workspace root and not
+   * secret-looking, a regular file of at most `maxBytes` (refused before
+   * reading), unchanged in length while read. Unlike `readFile`, which is
+   * unconfined. Optional: an env without it cannot present files.
+   */
+  readBytes?(
+    path: string,
+    options: { readonly maxBytes: number },
+  ): Promise<{ readonly bytes: Uint8Array; readonly realPath: string }>;
+  /**
    * Start a command in the background and return immediately. Optional: an
    * environment that cannot run background processes leaves it undefined, and
    * the background tools report that the capability is unavailable.
