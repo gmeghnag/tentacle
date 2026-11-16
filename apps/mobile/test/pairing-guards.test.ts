@@ -72,10 +72,12 @@ describe("no build-time computer, no build-time token (F-H4)", () => {
     // stay free of the native import, which is what this guard protects. The
     // voice settings (docs/feat/mobile-voice.md Design §3) add a third wiring
     // file; `voice-settings-store.ts` decides and stays pure. The Activity button
-    // (docs/feat/mobile-chrome.md Design 6) adds a fourth, the same way.
+    // (docs/feat/mobile-chrome.md Design 6) adds a fourth, the same way; the
+    // photo settings (fix/mobile-media-live item 5) a fifth.
     expect(importers.map((path) => path.slice(APP.length + 1)).sort()).toEqual([
       "src/activity-settings-expo.ts",
       "src/lock-settings-expo.ts",
+      "src/photo-settings-expo.ts",
       "src/secure-kv.ts",
       "src/voice-settings-expo.ts",
     ]);

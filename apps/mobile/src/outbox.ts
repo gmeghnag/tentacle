@@ -24,6 +24,7 @@
  *   with its own key against the turn it is bound to).
  */
 import type { AttachmentRef } from "@tentacle/protocol";
+import type { LocalPhoto } from "./transcript-rows.ts";
 
 /** One photo of an item: the COPY in the app's sandbox, and its ref once uploaded. */
 export interface OutboxPhoto {
@@ -253,6 +254,18 @@ export function withRef(item: OutboxItem, index: number, ref: AttachmentRef): Ou
 /** Every ref the prompt will name, in the item's order. */
 export const refsOf = (item: OutboxItem): readonly AttachmentRef[] =>
   item.photos.flatMap((photo) => (photo.ref === undefined ? [] : [photo.ref]));
+
+/**
+ * An item's photos as their LOCAL copies, keyed by the ref each became
+ * (fix/mobile-media-live item 2): the file the phone uploaded, so the
+ * transcript's own row draws the picture it just sent instead of the placeholder
+ * label. An item whose copy is gone (a retry after a relaunch) carries none, and
+ * the row falls back to the label — the daemon offers no read-back either way.
+ */
+export const localPhotosOf = (item: OutboxItem): readonly LocalPhoto[] =>
+  item.photos.flatMap((photo) =>
+    photo.ref === undefined ? [] : [{ id: photo.ref.id, uri: photo.file }],
+  );
 
 /** The photos still to upload, by index (one at a time: ≤ 15 MiB of bytes in JS memory). */
 export const pendingUploads = (item: OutboxItem): readonly number[] =>
