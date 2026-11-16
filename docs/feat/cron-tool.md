@@ -1999,3 +1999,23 @@ use the raw id) is untouched — it is explicitly LOW because the client already
 bounds and sanitizes the id, and changing it would touch `background-list.ts`'s
 column arithmetic for no safety gain. Still owed: a **fresh-context** Review of
 this round (this fix and the S5 review share a model id).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; a different model family from the executor, DeepSeek.)
+
+**Verdict: APPROVE-WITH-NITS (PASS).** All three Round 1 findings are fixed, and each fix is pinned by a test that fails when the fix is mutated away.
+
+| Finding | Fix | Mutation (reverted, `cmp` identical) | Red |
+|---|---|---|---|
+| 1 false cause | `departedScheduleNotice` now states only "is no longer scheduled", or "expired" when the clock proves it | restored the "repeated failures" / "fired and is done" causes | 6 fail |
+| 2 stale panel | `followSchedules` (App) → `withSchedulesData` + `refreshedSchedules` (clamps the cursor, drops the arm) | dropped `setSchedulesData` | 3 fail (panel follows: empty, appears, clamp) |
+| 3 `Nov` | `dayMonth` | `MONTHS[10]` | 1 fail |
+
+My Round 1 repro (`.tentacle/tmp/cron-tool/s5rev/repro.test.ts`) now shows the panel emptied to "No scheduled wakes in this session." and no invented cause.
+
+**Gate:** touched files → 74 pass / 0 fail. `bun run lint` → clean (1706 files). `bun run typecheck` → clean. `git status` is clean after the mutations.
+
+**Nit (LOW, not blocking):** the own-delete suppression (`ownScheduleDeletesRef`) never fires on the real wire. `HostedSession.deleteSchedule` → `removeSchedule` → `scheduleChanged` → `publishSchedules()` (`hosted-session.ts:3162`) sends the `schedules` frame synchronously, BEFORE the RPC reply. So `own.add(id)` in the `.then` (`useDock.ts`, `usePanels.ts`) runs after the departure has already been diffed. The repro, which publishes before it resolves like the daemon does, prints both "Schedule sc-1 is no longer scheduled." and "Deleted sc-1.". Both lines are true, so this is redundant, not false. But the comments "Recorded BEFORE the frame that drops it can arrive" are wrong, and the frame test passes only because it calls `report([])` after the reply has resolved, the reverse of production. The stale id is dropped at the next report, so it does not leak. Fix if wanted: add the id when the delete is SENT (and remove it on a refusal), and make the frame test publish before it resolves.
+
+**Regressions on the diff:** none found. The session switch path (`setSchedules(undefined)`) clears the own set, and `refreshedSchedules` handles `undefined` and `[]`.
