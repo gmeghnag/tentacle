@@ -6,10 +6,19 @@ import {
   initialWake,
   wakeStep,
 } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 import { useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { AppView } from "./AppView.tsx";
 import { frameLayout } from "./app-layout.ts";
+import {
+  type ArtifactConfirm,
+  type ArtifactStep,
+  NO_ARTIFACT_IN_TRANSCRIPT,
+  artifactOpenError,
+  artifactStep,
+  newestArtifact,
+} from "./artifact-open.ts";
 import {
   NO_ARTIFACT_OPENER,
   artifactsByCall,
@@ -217,7 +226,7 @@ export function App({
   home = defaultHome(),
   localCwd = defaultLocalCwd(),
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
-  openArtifact,
+  artifactOpener,
   initialItems,
   initialPrompt,
   daemonInPod = false,
@@ -404,6 +413,15 @@ export function App({
   const setQuitConfirm = useCallback((facts: QuitConfirmFacts | null) => {
     quitConfirmRef.current = facts;
     setQuitConfirmState(facts);
+  }, []);
+  // The artifact open confirm (docs/feat/model-artifacts.md D8: a pod's bytes,
+  // or a page with the network): the line and what `y` opens, or null. The ref
+  // is the truth for the key handler; the state renders. Never remembered.
+  const [artifactConfirm, setArtifactConfirmState] = useState<ArtifactConfirm | null>(null);
+  const artifactConfirmRef = useRef<ArtifactConfirm | null>(null);
+  const setArtifactConfirm = useCallback((next: ArtifactConfirm | null) => {
+    artifactConfirmRef.current = next;
+    setArtifactConfirmState(next);
   }, []);
   // The controller of the FOREIGN turn being streamed (another device's), or
   // null: `/exit` leaves it running (docs/feat/tui-foreign-turns.md C4).
@@ -850,6 +868,7 @@ export function App({
     jobOutput: jobOutputRef.current,
     dockFinished: dockFinishedRef.current,
     quitConfirm,
+    artifactConfirm,
     panel,
     sessionId: sessionRef.current?.sessionId ?? null,
     capsPhase: sessionCapsPhase(sessionRef.current, caps),
@@ -1706,6 +1725,40 @@ export function App({
     return () => clearPasteTimeout();
   }, [clearPasteTimeout]);
 
+  /**
+   * Carry out one artifact decision (`artifactStep`, pure — docs/feat/model-artifacts.md
+   * D8): a notice, the confirm line, or a verified read handed to the runtime's
+   * OS opener. The origin is the RUNTIME's (`shownInPod`), never the meta's. No
+   * byte is read before the decision says go: a pod's confirm reads only on `y`.
+   */
+  const runArtifact = (artifact: ArtifactMeta, step: ArtifactStep): void => {
+    if (step.kind === "notice") {
+      pushNotice(step.text);
+      return;
+    }
+    if (step.kind === "confirm") {
+      setArtifactConfirm({ text: step.text, meta: artifact, plan: step.plan });
+      return;
+    }
+    const session = sessionRef.current;
+    if (artifactOpener === undefined || session?.readArtifact === undefined) {
+      pushNotice(NO_ARTIFACT_OPENER);
+      return;
+    }
+    const opener = artifactOpener;
+    void session
+      .readArtifact(artifact)
+      .then((bytes) =>
+        step.kind === "open"
+          ? opener.open(step.plan, bytes)
+          : opener
+              .save({ name: step.name, wrap: step.wrap }, bytes)
+              .then((path) => pushNotice(`Saved "${artifact.title}" to ${path}`)),
+      )
+      .catch((error: unknown) => pushNotice(artifactOpenError(artifact, error)));
+  };
+  const artifactOrigin = shownInPod ? "pod" : "local";
+
   // --- the key router's executor port (S3) ---------------------------------
   // The ONE place a routing decision becomes a call into the App. Every field is
   // an existing stable callback (the App's own `useCallback`s) or a decision
@@ -1797,15 +1850,26 @@ export function App({
       });
     },
     setSessionsState,
-    // `/artifacts`' Enter: the panel already decided WHICH version
-    // (`artifactAt`), so the App only hands the meta to the runtime's opener.
-    // Absent (a runtime with no seam) says so, never a silent swallow.
-    openArtifact: (artifact) => {
-      if (openArtifact === undefined) {
-        pushNotice(NO_ARTIFACT_OPENER);
+    // `/artifacts`' Enter / `s` / `n`: the panel already decided WHICH version
+    // (`artifactAt`); `artifactStep` decides what happens to it. Absent seam
+    // (no opener or no read) says so, never a silent swallow.
+    openArtifact: (artifact, intent) =>
+      runArtifact(artifact, artifactStep(artifact, artifactOrigin, intent ?? "open")),
+    openNewestArtifact: () => {
+      const newest = newestArtifact(stateRef.current.items);
+      if (newest === undefined) {
+        pushNotice(NO_ARTIFACT_IN_TRANSCRIPT);
         return;
       }
-      openArtifact(artifact);
+      runArtifact(newest, artifactStep(newest, artifactOrigin, "open"));
+    },
+    // `y` opens exactly what the line asked about, once; anything else drops it.
+    answerArtifactConfirm: (yes) => {
+      const asked = artifactConfirmRef.current;
+      setArtifactConfirm(null);
+      if (yes && asked !== null) {
+        runArtifact(asked.meta, { kind: "open", plan: asked.plan });
+      }
     },
     switchTo,
     sessionsDelete,
@@ -1877,6 +1941,7 @@ export function App({
         char,
         key,
         quitConfirm: () => quitConfirmRef.current,
+        artifactConfirm: () => artifactConfirmRef.current,
         dock: () => dockRef.current,
         chord: () => chordRef.current,
         running: () => stateRef.current.running,
@@ -1991,6 +2056,7 @@ export function App({
         expandAll,
         selection,
         quitConfirm,
+        artifactConfirm,
         hopRow,
         loading,
         compacting,

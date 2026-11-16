@@ -12,6 +12,7 @@
  */
 import type { PermissionResponse } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ArtifactIntent } from "../artifact-open.ts";
 import type { DockState } from "../background-focus.ts";
 import type { ChordState } from "../chord.ts";
 import type { QuitConfirmFacts } from "../commands.ts";
@@ -66,7 +67,16 @@ export type KeyEffect =
    * (docs/feat/model-artifacts.md D8). The META is the panel's own decision
    * (`artifactAt`), never an index the App resolves again.
    */
-  | { readonly kind: "openArtifact"; readonly artifact: ArtifactMeta }
+  | {
+      readonly kind: "openArtifact";
+      readonly artifact: ArtifactMeta;
+      /** `n` (with the network) or `s` (save a copy); absent: a plain open. */
+      readonly intent?: ArtifactIntent;
+    }
+  /** `Ctrl+X Ctrl+O`: open the newest artifact in the transcript (D8). */
+  | { readonly kind: "openNewestArtifact" }
+  /** The artifact open confirm (a pod's bytes, or the network) was answered. */
+  | { readonly kind: "answerArtifactConfirm"; readonly yes: boolean }
   /** Switch to another session (the panel already closed). */
   | { readonly kind: "switchTo"; readonly id: string; readonly reopen: boolean }
   /** Delete a session, then refresh the panel if it is still the same one. */

@@ -14,6 +14,7 @@ import {
 } from "./App.tsx";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
+import { createArtifactOpener } from "./os-open.ts";
 import { messagesToItems } from "./resume.ts";
 import { synchronizedStdout } from "./sync-output.ts";
 import type { TargetBadge } from "./target-view.ts";
@@ -201,6 +202,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         {...(options.hop ? { hop: options.hop } : {})}
         {...(options.targetFeed ? { targetFeed: options.targetFeed } : {})}
         {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
+        artifactOpener={createArtifactOpener()}
       />,
       {
         stdin,

@@ -37,6 +37,7 @@ export function snap(
     char,
     key: { ...NO_KEY, ...key },
     quitConfirm: () => null,
+    artifactConfirm: () => null,
     dock: () => ({ focus: { kind: "input" }, drafts: {}, sent: {} }),
     chord: () => ({ armedAt: null }),
     running: () => false,

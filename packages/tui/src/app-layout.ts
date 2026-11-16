@@ -26,6 +26,7 @@
  * (a ref, written by `App`'s `onPillRange` callback). Those arrive as inputs or
  * leave as values.
  */
+import type { ArtifactConfirmView } from "./artifact-open.ts";
 import { type AttachDraft, attachRowRows, attachRowView } from "./attach-draft.ts";
 import type { DockState } from "./background-focus.ts";
 import {
@@ -109,6 +110,8 @@ export interface FrameInput {
   /** `dockFinishedRef.current`: when the last child finished (for the pill). */
   readonly dockFinished: { readonly id: string; readonly at: number } | null;
   readonly quitConfirm: QuitConfirmFacts | null;
+  /** The artifact open confirm (model-artifacts D8): the quit dialog's slot. */
+  readonly artifactConfirm: ArtifactConfirmView | null;
   readonly panel: OpenPanel | null;
   /** The session's own id (`sessionRef.current?.sessionId ?? null`). */
   readonly sessionId: string | null;
@@ -158,6 +161,7 @@ export function frameLayout(input: FrameInput) {
     jobOutput: jobOutputMap,
     dockFinished,
     quitConfirm,
+    artifactConfirm,
     panel,
     sessionId,
     capsPhase,
@@ -183,6 +187,9 @@ export function frameLayout(input: FrameInput) {
   const paletteCommands =
     !permission.pending && !st.running && !panel ? matchCommands(field.value, skills) : [];
   const paletteOpen = paletteCommands.length > 0;
+  // The quit dialog OR the artifact open confirm: one row in the same slot, and
+  // either one owns the screen the same way (the dock and drawer step aside).
+  const confirmShown = quitConfirm !== null || artifactConfirm !== null;
   const commandSel = paletteOpen
     ? Math.min(Math.max(0, commandIndex), paletteCommands.length - 1)
     : 0;
@@ -230,7 +237,7 @@ export function frameLayout(input: FrameInput) {
   // and its row says `⚠ needs your permission` — hiding the list there made that
   // row unreachable (Review M1).
   const dockListVisible =
-    dock.focus.kind === "list" && listVisible(subagents, jobRows) && quitConfirm === null;
+    dock.focus.kind === "list" && listVisible(subagents, jobRows) && !confirmShown;
   const dockView = dockListVisible
     ? backgroundListView({
         rows: subagentsRef.current,
@@ -243,7 +250,7 @@ export function frameLayout(input: FrameInput) {
     : null;
   // The drawer: a child's (its tools and messages), or a job's (its output tail).
   const drawerOpen =
-    dock.focus.kind === "open" && quitConfirm === null && !permission.pending
+    dock.focus.kind === "open" && !confirmShown && !permission.pending
       ? { id: dock.focus.id, ended: dock.focus.ended }
       : null;
   const jobOutput = drawerOpen === null ? undefined : jobOutputMap[drawerOpen.id];
@@ -307,20 +314,19 @@ export function frameLayout(input: FrameInput) {
     permission.pending && permission.mode.mode === "reply"
       ? replyView(permission.mode, columns, replyMax)
       : undefined;
-  const activeRows =
-    quitConfirm !== null
-      ? QUIT_CONFIRM_ROWS
-      : permission.pending
-        ? permissionPromptRows(
-            permission.choices.length,
-            permission.pending === null ? 0 : permissionDetailLines(permission.pending).length,
-            permission.pending !== null && permissionShowsCwd(permission.pending),
-            replyShown?.rows.length,
-            permission.pendingAgent !== null,
-          ) + dockHeight
-        : runningRows +
-          (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length) +
-          dockHeight;
+  const activeRows = confirmShown
+    ? QUIT_CONFIRM_ROWS
+    : permission.pending
+      ? permissionPromptRows(
+          permission.choices.length,
+          permission.pending === null ? 0 : permissionDetailLines(permission.pending).length,
+          permission.pending !== null && permissionShowsCwd(permission.pending),
+          replyShown?.rows.length,
+          permission.pendingAgent !== null,
+        ) + dockHeight
+      : runningRows +
+        (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length) +
+        dockHeight;
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
   // Terminal row (1-based) of the panel's first body row: the transcript
   // viewport, the bottom area's marginTop row, the running rows, the title rule.
@@ -336,7 +342,7 @@ export function frameLayout(input: FrameInput) {
    * slot instead, and none of them paints the dock.
    */
   const dockTop =
-    dockHeight === 0 || listView || paletteOpen || quitConfirm !== null || permission.pending
+    dockHeight === 0 || listView || paletteOpen || confirmShown || permission.pending
       ? null
       : viewport + 1 + runningRows + 1;
   /**
@@ -418,6 +424,8 @@ export type AppViewModel = FrameLayout & {
   readonly expandAll: boolean;
   readonly selection: Selection | null;
   readonly quitConfirm: QuitConfirmFacts | null;
+  /** The artifact open confirm (model-artifacts D8): the quit dialog's slot. */
+  readonly artifactConfirm: ArtifactConfirmView | null;
   /** The hop's own status row (`null`: no hop runs — the normal bar paints). */
   readonly hopRow: string | null;
   readonly loading: { readonly done: number; readonly total: number } | null;

@@ -52,6 +52,23 @@ export const artifactsKind: PanelKind<ArtifactsPanel> = {
     return g === null ? panel : withTree(panel, treeClick(g, panel.tree, at, bodyIndex));
   },
   key: (panel: ArtifactsPanel, snap: KeySnapshot): LayerStep => {
+    // `s` save a copy / `n` open with the network (S6b): the same meta under the
+    // cursor, with the intent the RUNTIME's plan then decides on (`artifactStep`:
+    // a pod's page never gets the network).
+    const modified = snap.key.ctrl === true || snap.key.meta === true;
+    const intent = modified
+      ? null
+      : snap.char === "s"
+        ? "save"
+        : snap.char === "n"
+          ? "network"
+          : null;
+    if (intent !== null) {
+      const meta: ArtifactMeta | undefined = artifactAt(panel.data, panel.tree);
+      return meta === undefined
+        ? consumed()
+        : consumed({ kind: "openArtifact", artifact: meta, intent });
+    }
     const action = treeKey(snap.char, snap.key);
     if (action === "close") {
       return consumed({ kind: "closePanel" });

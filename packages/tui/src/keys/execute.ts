@@ -12,6 +12,7 @@
  */
 import type { PermissionResponse } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ArtifactIntent } from "../artifact-open.ts";
 import type { DockState } from "../background-focus.ts";
 import type { ChordState } from "../chord.ts";
 import type { QuitConfirmFacts } from "../commands.ts";
@@ -73,7 +74,11 @@ export interface KeyHost {
   switchCapability(): void;
   setSessionsState(state: SessionsState): void;
   /** Open the artifact a `/artifacts` row asks for (docs/feat/model-artifacts.md D8). */
-  openArtifact(artifact: ArtifactMeta): void;
+  openArtifact(artifact: ArtifactMeta, intent?: ArtifactIntent): void;
+  /** `Ctrl+X Ctrl+O`: the newest artifact in the transcript. */
+  openNewestArtifact(): void;
+  /** The artifact open confirm's answer (`y` opens; anything else drops it). */
+  answerArtifactConfirm(yes: boolean): void;
   switchTo(id: string, reopen: boolean): void;
   sessionsDelete(id: string, startedGen: number): void;
   killJob(id: string): void;
@@ -183,7 +188,13 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       host.setSessionsState(effect.state);
       return;
     case "openArtifact":
-      host.openArtifact(effect.artifact);
+      host.openArtifact(effect.artifact, effect.intent);
+      return;
+    case "openNewestArtifact":
+      host.openNewestArtifact();
+      return;
+    case "answerArtifactConfirm":
+      host.answerArtifactConfirm(effect.yes);
       return;
     case "switchTo":
       host.switchTo(effect.id, effect.reopen);

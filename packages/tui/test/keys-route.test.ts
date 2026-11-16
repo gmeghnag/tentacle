@@ -17,12 +17,16 @@ import { NO_KEY, snap } from "./key-snapshot.ts";
 const route = (s: KeySnapshot) => routeKey(s, PURE_LAYERS);
 
 describe("the layer list", () => {
-  test("is the documented 15, in the documented order, and the walk is its first 14", () => {
+  test("is the documented 16, in the documented order, and the walk is its first 15", () => {
     // The order IS the safety property (AGENTS §7): a reordering must be red
     // here, not a subtle behaviour change in a frame diff.
     expect(LAYER_ORDER).toEqual([
       "shiftTab",
       "quitConfirm",
+      // The artifact open confirm (model-artifacts S6b) answers right after the
+      // quit dialog and BEFORE the chord and the permission prompt: its `y` can
+      // never approve an ask that opened meanwhile.
+      "artifactConfirm",
       "chord",
       "permission",
       "ctrlC",

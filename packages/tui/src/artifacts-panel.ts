@@ -47,7 +47,8 @@ export interface ArtifactGroup {
   readonly versions: readonly ArtifactMeta[];
 }
 
-export const ARTIFACTS_HINT = "↑↓ select · → versions · enter open · esc close";
+export const ARTIFACTS_HINT =
+  "↑↓ select · → versions · enter open · s save · n network · esc close";
 
 /** A runtime whose session cannot list artifacts (an older daemon, or one with no store). */
 export const NO_ARTIFACT_LIST = "_Artifacts aren't available on this runtime._";

@@ -68,6 +68,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
     expandAll,
     selection,
     quitConfirm,
+    artifactConfirm,
     hopRow,
     loading,
     compacting,
@@ -128,6 +129,8 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
       <Box marginTop={1}>
         {quitConfirm !== null ? (
           <QuitConfirm text={quitConfirmText(quitConfirm)} columns={columns} />
+        ) : artifactConfirm !== null ? (
+          <QuitConfirm text={artifactConfirm.text} columns={columns} />
         ) : permission.pending ? (
           <PermissionPrompt
             req={permission.pending}

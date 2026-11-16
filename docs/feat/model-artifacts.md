@@ -1747,3 +1747,164 @@ The 5 skips are the same opt-in ones as S3/S5's. Every S6a test is green.
 S4's WIP is still in the tree (this executor was told to implement S6a only, and
 does not touch, stash or commit another slice's files). To check: re-run
 `bun run check` once S4 lands.
+
+### S6b — TUI opener (temp files, CSP wrap, pod confirm, chord): DONE (gate RED only on S4's committed daemon files)
+
+*— claude-opus-5-5 (executor, S6b), 2026-11-16*
+
+**Load-bearing check, re-run first** (unchanged script):
+
+```
+$ bun /Users/gmeghnag/tentacle/.tentacle/tmp/model-artifacts/read-roundtrip.ts
+chunks=12 sha-equal=true
+order=enqueue,chunk0,chunk1,…,chunk11
+enqueue-before-last=true maxRpcFrame=349591 maxRawNoiseFrame=87383
+PASS
+```
+
+**Starting state.** Tree clean at `0422f7c3`. S4's daemon files (committed in
+`72e5d036`) still fail `tsc` (24) and Biome (1); S6b touches no daemon file
+(`git diff --quiet HEAD -- packages/daemon` holds).
+
+**As built, in order** (each test file RED before its code):
+
+1. `tui/test/artifact-open.test.ts` (18) — RED at load (module absent). Then
+   `tui/src/artifact-open.ts` (pure): `openPlan(meta, origin, intent)` →
+   `{kind: open|confirm|save-only, file: "<sha8>.<ext>"|null, wrap: csp|null, network}`,
+   the extension from OUR map only (`png jpg gif webp heic` by mime, `html` for
+   html AND svg, `pdf md txt`; any other image mime and `other` → `save-only`);
+   `artifactStep` (the ONE decision per key: notice / confirm / open / save);
+   `saveName` (the source's or title's last segment, its own extension DROPPED,
+   `[A-Za-z0-9 ._-]`, no leading dot, then OUR extension: open map, else
+   `zip gz tar json csv txt` by mime, else `bin`); `wrapArtifactBytes` (CSP prefix
+   as the first bytes); `newestArtifact(items)` (the chord's target).
+2. `tui/test/os-open.test.ts` (9) — RED at load. Then `tui/src/os-open.ts`:
+   `createArtifactOpener(deps)` — ONE lazy `mkdtemp` dir under `os.tmpdir()`
+   (`tentacle-artifacts-*`), removed by a `process.once("exit")` handler; file
+   `0600`; `Bun.spawn(["open"|"xdg-open", path], {stdio: ignore×3})`, a non-zero
+   exit rejects; it re-checks the plan file against `^[0-9a-f]{8}\.[a-z]{2,4}$`
+   before any write. `save` writes to `~/Downloads` with `wx`, `name (n).ext` on a
+   clash, and refuses a name with a separator or a leading dot.
+3. Chord: `chord.test.ts` + `keys-layers.test.ts` rows RED on their assertions.
+   `chord.ts` gains the `openArtifact` action (`Ctrl+X` then `Ctrl+O` in the
+   window; a bare `Ctrl+O` still passes to the expand toggle);
+   `layer-precedence.ts` maps it to the `openNewestArtifact` effect.
+4. Confirm: `keys-layers.test.ts` "artifact-confirm" (5) RED. New layer
+   `artifactConfirmLayer` right after `quitConfirm`, BEFORE the chord and the
+   permission prompt (only a plain `y` is yes, `quitConfirmKey`'s rule); its
+   `KeySnapshot.artifactConfirm()` getter, `KeyLayerName`, `PURE_LAYERS`,
+   `LAYER_ORDER` (now 16, pinned in `keys-route.test.ts` with the reason), the
+   `answerArtifactConfirm` / `openNewestArtifact` effects + `KeyHost` methods
+   (`keys-execute.test.ts` rows). `app-layout.ts`: `confirmShown` = quit OR
+   artifact confirm drives the four sites that were `quitConfirm !== null`
+   (`app-layout.test.ts` pins the slot: 3 rows, no dock). `AppView.tsx` paints it
+   with the existing `QuitConfirm` row.
+5. Panel: `artifacts-panel.test.ts` (2) RED. `panels/artifacts.ts`: plain `s` →
+   `openArtifact{intent:"save"}`, `n` → `{intent:"network"}` on the meta under
+   the cursor; `ARTIFACTS_HINT` names both.
+6. App: `app-artifacts.test.tsx` (10 new, ink frames) RED — the App threw on the
+   missing snapshot getter, then on its assertions. `App.tsx`: `runArtifact`
+   (a thin executor of `artifactStep`: notice → `pushNotice`; confirm →
+   `setArtifactConfirm`; open/save → `controller.readArtifact` (verified bytes)
+   → the port; any rejection → ONE notice); origin = `shownInPod` (the runtime's
+   fact, never the meta); `answerArtifactConfirm` clears the line and opens ONLY
+   the plan it showed. `run.tsx` passes `createArtifactOpener()`.
+
+**Real-filesystem check** (`.tentacle/tmp/model-artifacts/s6b-realfs-parent.ts`:
+real `mkdtemp`/`writeFile`/exit handler in a child process, spawn stubbed so no
+browser opens; the parent checks the dir after the child exits):
+
+```
+argv=["open","/var/folders/…/T/tentacle-artifacts-SSLi9w/ab12cd34.html"]
+dirMode=700 fileMode=600
+first=<!doctype html><meta http-equiv="Content-Security-Policy" co
+existedDuring=true removedAtExit=true
+```
+
+**Drift from Implementation (and why):**
+
+- **The port is the OS half only.** S6a's `AppProps.openArtifact(meta) => void`
+  ("the runtime decides") is replaced by `AppProps.artifactOpener: ArtifactOpener`
+  (`open(plan, bytes)`, `save(request, bytes)`). The App owns the controller
+  (`createSession`) and the confirm row, so the decision (pure `artifactStep`) and
+  the verified read run there; `startTui` never holds the controller. S6a's two
+  frame tests were moved to the new port (same assertions plus the planned file).
+- **`OpenPlan` has no `app: "default" | "preview"`; it has `network`.** The
+  extension already selects the handler; `open -a Preview` would override the
+  person's choice and does not exist on Linux.
+- **The confirm is a new key layer in the quit dialog's slot**, not a dock line:
+  that slot is the one that owns the screen and is decided BEFORE the permission
+  prompt, so a `y` can never approve an ask that opened under it (mutation M9).
+- **Panel `s` / `n` are built here.** D8 lists them; S6a built only `enter`.
+- **A saved HTML/SVG copy is CSP-wrapped too** (as `.html`), so double-clicking
+  it later in `~/Downloads` is still offline; saved names never keep the model's
+  extension (`run.command` → `run.bin`).
+- **The chord's target is the newest card in the transcript** (`newestArtifact`),
+  not the daemon's list: instant, and it is the card that shows `^X^O`. After a
+  `/clear` it says so and points at `/artifacts`.
+- **Kind narrowing goes through `artifactCard(meta).kind`** (core): the TUI
+  depends on protocol for TYPES only (`@tentacle/protocol` is not a runtime dep).
+- **Changelog:** S6a's `model-artifacts.changed.md` bullet already covers the Mac
+  surface; it is extended (opener, chord, `s`/`n`, pod confirm) rather than adding a
+  third fragment for one slug.
+
+**Not done (debt, deliberately):**
+
+- **Click on a card line** (D8) — not in Files item 7 nor T6b. `tool-hit.ts`
+  resolves only a call's HEADER row (`LaidItem` carries no row role), so a card
+  click needs a row-role in the layout first. The header click still toggles the
+  call; `Ctrl+X Ctrl+O` and `/artifacts` open.
+- **The `fetching report.html 1.2/3.4 MB` status line** (D8): the TUI has no
+  transient status-line seam (notices are permanent transcript rows). A failure is
+  one notice, a save is one notice, a successful open is silent.
+- **No quarantine xattr on a saved copy**: a pod-supplied `.zip` saved with `s` has
+  no Gatekeeper quarantine. Residual of an explicit key; candidate follow-up.
+
+**Mutations** (each applied with Edit, the named file run, reverted with Edit; a
+grep for every mutated token afterwards found none):
+
+```
+M1 (plan target) ext from the title            artifact-open             16 pass 2 fail
+M2 `other` handed to an opener (bin)           artifact-open+app         30 pass 5 fail
+M3 pod opens without confirm                   artifact-open+app         32 pass 3 fail
+M4 pod page planned with the network           artifact-open             17 pass 1 fail
+M5 CSP wrap dropped                            artifact-open+os-open     23 pass 4 fail
+M6 spawn stdio inherit                         os-open                    8 pass 1 fail
+M7 save flag `w` (overwrites)                  os-open                    8 pass 1 fail
+M8 plan-file name guard removed                os-open                    8 pass 1 fail
+M9 confirm layer after permission              keys-layers               35 pass 1 fail
+M10 confirm never cleared (remembered)         app-artifacts             16 pass 1 fail
+M11 pod bytes read before the `y`              app-artifacts             16 pass 1 fail
+M12 origin ignored (always local)              app-artifacts             15 pass 2 fail
+M13 Enter accepted as yes                      keys-layers               35 pass 1 fail
+```
+
+**Schema / version:** no protocol schema changed; `protocol.json` not
+regenerated; no `protocol.d/` note.
+
+**Gate** (worktree root):
+
+```
+$ bun test <the 9 S6b tui files>          190 pass 0 fail
+$ bunx tsc --noEmit                        24 errors, ALL in packages/daemon
+    (src/session-artifacts.ts, src/session-log-store.ts, test/artifact-manifest.test.ts) — 0 in tui
+$ bun run lint (biome check .)             1 error: format, packages/daemon/test/artifact-manifest.test.ts
+$ bunx biome check packages/tui changelog.d   333 files, clean
+$ bun test                                 12507 pass · 5 skip · 6 fail — all 6 "LogSessionStore artifacts (T4)"
+$ git diff --stat HEAD -- packages/daemon packages/protocol   (empty: S6b touches neither)
+```
+
+Every red is S4's (committed in `72e5d036`, as recorded at "Starting state"); S6b adds
+none. The gate goes green when S4's fix round lands, not in this slice.
+
+#### S6b re-verification (re-spawned executor)
+
+*— claude-opus-5-5 (executor, S6b re-spawn), 2026-11-16*
+
+The as-built above was already in the tree with the gate unfilled; it was verified,
+not redone. Load-bearing check re-run: `read-roundtrip.ts` → `PASS` (same output as
+above). Plan-target mutation re-applied independently — `openExt` returning the
+title's extension when it has one: **5 fail / 39 pass** across `artifact-open`,
+`os-open`, `app-artifacts` (T6b.1 ×3, T6b.3 save, the `other`-never-opened frame);
+reverted, 44 pass / 0 fail, no mutation token left in `tui/src`. The 5 skips (baseline
+names 3 opt-in) are not S6b's: the 9 S6b files run 0 skips.

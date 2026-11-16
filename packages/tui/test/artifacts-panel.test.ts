@@ -11,7 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ArtifactMeta } from "@tentacle/protocol";
 import type { Key } from "ink";
-import { artifactGroups, artifactsListError } from "../src/artifacts-panel.ts";
+import { ARTIFACTS_HINT, artifactGroups, artifactsListError } from "../src/artifacts-panel.ts";
 import { NOTHING } from "../src/keys/contract.ts";
 import type { KeySnapshot } from "../src/keys/snapshot.ts";
 import { type OpenPanel, applyPanel, artifactsPanel, panelClick, panelView } from "../src/panel.ts";
@@ -40,6 +40,7 @@ function snap(over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}
     char,
     key: { ...NO_KEY, ...key },
     quitConfirm: () => null,
+    artifactConfirm: () => null,
     dock: () => ({ focus: { kind: "input" }, drafts: {}, sent: {} }) as never,
     chord: () => ({ armedAt: null }),
     running: () => false,
@@ -196,6 +197,24 @@ describe("S6a: the panel's keys are its own decision", () => {
     expect(step(onChild, {}, "", { return: true }).effects).toEqual([
       { kind: "openArtifact", artifact: LIST[0] as ArtifactMeta },
     ]);
+  });
+
+  test("`s` saves and `n` opens with the network — the meta under the cursor (S6b)", () => {
+    expect(step(panel(), {}, "s").effects).toEqual([
+      { kind: "openArtifact", artifact: LIST[2] as ArtifactMeta, intent: "save" },
+    ]);
+    expect(step(panel(), {}, "n").effects).toEqual([
+      { kind: "openArtifact", artifact: LIST[2] as ArtifactMeta, intent: "network" },
+    ]);
+    // A modified `s` is not the save key.
+    expect(step(panel(), {}, "s", { ctrl: true })).toEqual(NOTHING);
+    // Nothing under the cursor: spent, nothing saved.
+    expect(step(panel([]), {}, "s").effects).toEqual([]);
+  });
+
+  test("the panel's hint names the save and network keys", () => {
+    expect(ARTIFACTS_HINT).toContain("s save");
+    expect(ARTIFACTS_HINT).toContain("n network");
   });
 
   test("enter on an empty panel opens nothing, and a key it does not claim passes", () => {

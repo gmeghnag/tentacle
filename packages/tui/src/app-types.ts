@@ -14,6 +14,7 @@ import type { CapKind, CapsView } from "./capability-toggles.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
+import type { ArtifactOpener } from "./os-open.ts";
 import type { AutoAcceptFeed, AutoAcceptSharedFeed } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedMessage, ReturnedCause } from "./queued.ts";
 import type { SessionsView } from "./sessions-panel.ts";
@@ -559,13 +560,14 @@ export interface AppProps {
   readonly localCwd?: string;
   readonly saveFile?: (path: string, content: string) => Promise<void>;
   /**
-   * Open one artifact version (docs/feat/model-artifacts.md D8): `enter` in
-   * `/artifacts` (and, from S6b, the chord and a click on a card) hands the
-   * meta over and the RUNTIME decides how to show it (a temp file + the OS's
-   * opener, a confirm for pod bytes). Absent → the panel says opening is not
-   * available here, and nothing is opened behind the person's back.
+   * The OS side of opening an artifact (docs/feat/model-artifacts.md D8, S6b):
+   * write the planned temp file and spawn the OS opener, or save a copy to
+   * `~/Downloads`. The DECISION (name, CSP wrap, a pod's confirm) is
+   * `artifact-open.ts`'s and the bytes come from `readArtifact` (verified); this
+   * port only executes. `startTui` passes `createArtifactOpener()`. Absent → the
+   * App says opening is not available here, and nothing is read or opened.
    */
-  readonly openArtifact?: (artifact: ArtifactMeta) => void;
+  readonly artifactOpener?: ArtifactOpener;
   /** Transcript to seed on start (a resumed session); replaces the welcome line. */
   readonly initialItems?: readonly DisplayItem[];
   /**
