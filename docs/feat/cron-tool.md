@@ -589,6 +589,149 @@ Gate before done: `bun run check` (typecheck → lint, baseline clean → test; 
 
 **Merge plan:** one branch, slices S1 → S2 → S3 → S4 → S5 → S6 each executed + reviewed on it; merged to `main` once, after S6 PASS.
 
+### S6 — iPhone: Session-info section, list badge, fired bubble
+
+*— claude-opus-5-5, 2026-11-17*
+
+**The plan had no S6 section** (the slice row, D8's M7/M8 and the "waits for the
+owner's mockup choice" note were the whole spec; Owner Q9 = B unblocked it). This
+Implementation was written FIRST, source-verified against the branch, and is the
+plan the code follows.
+
+**Load-bearing assumption.** *The phone may be given the `daemonWakes` trust bit*
+— the load-bearing check (`.tentacle/tmp/cron-tool/s6-loadbearing.ts`) proves the
+bit is what gates all four surfaces: the `schedules` frame
+(`remote-client.ts:3688`), a resync's `SnapshotResult.schedules` (`:3500`), the
+`turn_start.schedule` ref (`remote-session.ts:1705`, `:1991`) and
+`deleteSchedule` (`:898`). Without it a phone surface could never see a wake.
+The assumption itself rests on the same argument the phone's `sharedAutoAccept:
+true` already makes (`connection.ts:56-61`): a phone dials a `serve` on the user's
+own host through the device route and nothing else — never a pod (`daemonWakes`
+fails closed, `remote-client.ts:987`) — so a daemon-side claim about the laptop's
+own turns is the user's own daemon's claim, exactly what `connect` sets
+(`connect.ts:232`) and the worker now sets too (S4's `WORKER_TRUST`).
+
+**Preconditions (verified on this branch).**
+- **P1 (wire half done).** `ScheduleRowSchema` (`session.ts:749-777`),
+  `SnapshotResult.schedules` (`:831`, `undefined` = "this daemon does not report
+  them", `[]` = "none left"), `SessionListEntry.schedules` as a COUNT (`:1430`),
+  the `schedules` update in class `display` (`updates.ts:420`, `:550`),
+  `TurnStart.schedule` (`:265`), `session/schedule_delete` with a `reason` on
+  refusal (`:791-810`). Evidence: the load-bearing check's 9 `OK` wire/client
+  lines.
+- **P2 (client half done).** `RemoteSession.onSchedules(listener)` gives the
+  current table at once (`remote-session.ts:869-885`), `deleteSchedule` never
+  throws for a refusal (`:894-905`), and `firedScheduleRef` gates + sanitizes the
+  ref (`schedules.ts:77-89`), which the mapping already spreads into the
+  `user_message` event (`mapping.ts:42-48`).
+- **P3 (the phone's client options).** `APP_CLIENT_OPTIONS`
+  (`connection.ts:54-62`) is the broker-free bit set `openComputer` spreads into
+  the one `RemoteClient` (`:330-331`); `daemonWakes` is broker-free (a boolean),
+  so it belongs there and not in the per-link block.
+- **P4 (the sheet's per-section states).** `Pull<T>` = `loading` / `ready` /
+  `error{kind}` with `error|unsupported|offline|not-open`
+  (`session-info.ts:37-45`); each section decides its own, so one failing pull
+  never blanks another (`mobile-session-info.md` F2-F4). The table arrives by
+  SUBSCRIPTION, not a request, so it joins `autoAccept`/`capabilities` as a
+  followed feed (`session-info-controller.ts:304-337`) rather than a 5th pull.
+- **P5 (a list row's badge).** `SessionRow.badges` + `badgesFor`
+  (`session-list.ts:208-220`) is the row's badge view-model, and
+  `session-groups.ts:42-56`'s `sessionMeta`/`sessionLine` is the VISIBLE line —
+  the phone's `Row` draws `sessionLine`, never `badges` (SessionsScreen.tsx:84-96,
+  SessionsDrawer.tsx:472-486). A count nobody draws would be a no-op, so M8's
+  badge goes in BOTH (badge = the view-model's fact, meta line = what is read).
+- **P6 (the transcript's user row).** `UserRow` (`transcript-rows.ts:20-30`)
+  carries `text`/`images`/`restart`; the fold's `user_message` case builds it
+  (`transcript.ts:213-220`) and the UNTRUSTED-ref gate already ran in the client
+  (`firedScheduleRef`), so the phone only decides the head's wording.
+- **P7 (no gesture library).** `apps/mobile/package.json` has no
+  `react-native-gesture-handler`, so M7's "swipe left: Delete" has no mechanism
+  that a Maestro flow could also drive (plan P9: testID, not gestures).
+
+**Design.**
+- **Trust bit (1 line).** `connection.ts`'s `APP_CLIENT_OPTIONS` gains
+  `daemonWakes: true`, with the reason in its doc comment (same argument as
+  `sharedAutoAccept`, never a pod).
+- **One new pure module, `apps/mobile/src/schedule-view.ts`** (AGENTS §7 — every
+  string is a decidable fact, none may live in a `.tsx`):
+  `scheduleTitle(row)` (the prompt, sanitized and one-lined),
+  `scheduleMetaText(row, now)` (`every 10m · next 14:30 · 4×`; `today 17:00 ·
+  one-shot`), `firedScheduleHead(ref)` (`◷ Scheduled · every 10m`, the M8 head),
+  `wakesBadge(count)` (`1 wake` / `2 wakes` / `""`), `wakesMeta(count)` (the meta
+  line's `2 wakes`), `schedulesNote(rows, now?)`. Every daemon string goes
+  through `sanitizeDisplay` (`session-info.ts:225-241`), the sheet's own
+  sanitizer.
+- **Session info section (M7).** `SectionId` gains `schedules`;
+  `InfoFacts.schedules: Pull<{ rows: readonly ScheduleRow[] }> | { state:
+  "unsupported" }` (the existing `Pull`); `schedulesSection(facts)` decides:
+  not-attached → `not-open` ("Open the session to see its scheduled wakes"); link
+  down → `offline` + dim; `rows === undefined` → `unsupported` (P1's semantics: an
+  older daemon never reports them) worded with the sheet's existing
+  `errorWords`, as M7's parenthetical asks; `[]` → `empty` (`No scheduled wakes`,
+  footnote `Ask the agent to check something every 10 minutes`); else `ready`,
+  one row per wake (`◷` icon + prompt title + meta subtitle), each carrying
+  `delete` (`InfoRow.delete: { id, accessibilityLabel }`). A refused delete shows
+  under the rows (`InfoSection.footer`), never as a section failure. The section
+  sits after `session` (the mockup's order: the session's own facts, then what is
+  pending on it).
+- **Delete (P7 drift).** A trailing `Delete` control on the row (testID
+  `session-info-schedules-<id>-delete`), not a swipe: no gesture library, and
+  plan P9's rule is testID-addressable controls. The sheet takes
+  `onDeleteSchedule(id)`.
+- **The controller.** `InfoSession` gains `onSchedules?` and
+  `deleteSchedule?` (loosened structural ports, like `InfoCapabilities`);
+  `InfoSection` ("where a failure came from") gains `schedules`. `open()` follows
+  the feed (`followSchedules`) exactly as it follows `capabilities`: the install's
+  immediate report paints, a later frame repaints, and `undefined` paints
+  `unsupported`. `deleteSchedule(id)` sends, and on a `deleted: false` keeps the
+  daemon's `reason` (or the client's own) in `schedulesError` until the next
+  attempt — printed under the rows. A throw is recorded the same way, without a
+  fabricated cause.
+- **List badge (M8).** `session-list.ts`: `SessionRow.wakes: number` (from
+  `entry.schedules`), `badgesFor` appends `2 wakes` after the jobs count, and
+  `session-groups.ts`'s `sessionMeta` appends it before the time, so it is on
+  screen.
+- **Fired bubble (M8).** `UserRow.schedule?: { id, spec }` — copied only when the
+  event carries one (`transcript.ts`), i.e. only for a LIVE fired turn from a
+  trusted daemon; a reload shows option A (the durable `[scheduled …]` prefix in
+  the bubble's own text, unchanged). `TranscriptRow.tsx`'s `UserRowView` paints
+  `firedScheduleHead` above the markdown when the ref is present, and nothing at
+  all when it is absent.
+- **Wiring.** `App.tsx`'s `infoWiring` adds `onSchedules`/`deleteSchedule` from
+  the screen's own `RemoteSession`; `session-screen-controller.ts` forwards
+  `deleteSchedule` and exposes it; `SessionScreen.tsx` passes
+  `onDeleteSchedule` to the sheet.
+
+**Files (dependency order).** `apps/mobile/src/schedule-view.ts` (new) →
+`session-list.ts`, `session-groups.ts` → `transcript-rows.ts`, `transcript.ts`,
+`screens/transcript/TranscriptRow.tsx` → `session-info.ts` →
+`session-info-controller.ts` → `screens/SessionInfoSheet.tsx` →
+`session-screen-controller.ts`, `screens/SessionScreen.tsx`, `App.tsx` →
+`connection.ts` (the trust bit) → `changelog.d/cron-tool.added.md` (the fragment's
+Sentence only; no second fragment).
+
+**Failure modes.** (a) An older daemon: `onSchedules` never reports → the section
+says `unsupported`, and the delete is never offered (no rows). (b) A `deleted:
+false` (an older daemon's `MethodNotFound`, an unknown id) → the daemon's reason
+under the rows, the row STAYS (the list is the daemon's, never a local echo).
+(c) A session switch: `open()` refollows and the install's report replaces the
+previous session's table (the generation counter is the same guard as every other
+section). (d) Link down: `offline` + dim, the rows kept when they were already
+known — a wake table is not made stale by a cut, it is just not followed. (e) A
+pod's claim: no bit → no frame at all (the client drops it), so the section can
+only ever read `unsupported` there. (f) A hostile `spec`/`prompt`/`id`: sanitized
+and one-lined at the view-model, never in the component.
+
+**Tests (red first, §9).** `apps/mobile/test/schedule-view.test.ts` (pure: head,
+meta text for both kinds, badge, title sanitizing);
+`session-info.test.ts` additions (all five section states + a row's delete id + a
+refusal footer); `session-list.test.ts`/`session-groups.test.ts` (the count →
+badge + meta line); `transcript.test.ts` (a ref is kept, its absence stays
+absent); `session-info-controller.test.ts` (the feed paints, `undefined` →
+`unsupported`, a refused delete's reason, a session switch replaces the table);
+`connection.test.ts` (the trust bit, and a `schedules` frame reaching
+`session.schedules` through the app's own `openComputer`).
+
 ## Execution
 
 ### S1 — `core/src/schedule.ts` (pure table)
@@ -1326,6 +1469,179 @@ original bytes and compared after every run. All 19 `restored=true`.
 `hopMovedNotice`'s signature touches a hop string S5 was not given, and D7's
 table wants it counted at the hop, which is S3's `move_session` path.
 
+
+### S6 — iPhone: Session-info section, list badge, fired bubble
+
+*— claude-opus-5-5, 2026-11-17*
+
+**Scope: S6 only** (S1–S5 done above; no daemon, protocol, TUI or CLI change).
+
+**Load-bearing check, re-run FIRST** — `.tentacle/tmp/cron-tool/s6-loadbearing.ts`
+(exit 0; it FAILS if a wire/client precondition is missing or a phone surface is
+already there, so it can neither pass on a stale plan nor on a wrong base):
+
+```
+14 precondition(s) OK / 0 FAIL · 6 surface(s) ABSENT (to build) / 0 STALE (already there)
+S6 load-bearing: HOLDS
+  OK protocol ScheduleRowSchema
+  OK protocol ScheduleDeleteParams/Result
+  OK protocol SnapshotResult carries schedules
+  OK protocol SessionListEntry.schedules (count)
+  OK protocol `schedules` update is display class
+  OK protocol TurnStartSchema.schedule
+  OK client RemoteSession.onSchedules
+  OK client RemoteSession.deleteSchedule
+  OK client firedScheduleRef (the trust + sanitize gate)
+  OK a `schedules` frame is DROPPED without the bit
+  OK a snapshot's `schedules` is DROPPED without the bit
+  OK `turn_start.schedule` is DROPPED without the bit
+  OK `deleteSchedule` refuses without the bit
+  OK the phone's precedent: it already trusts its daemon for auto-accept
+  ABSENT the phone client's daemonWakes — APP_CLIENT_OPTIONS = ["sha256Bytes","sharedAutoAccept"]
+  ABSENT Session-info `schedules` section — model,session,mcp,skills
+  ABSENT the info port's schedule seam
+  ABSENT a wake badge on a list row — ["attached"]
+  ABSENT a wake count on SessionRow — [sessionId,title,subtitle,badges,archived,running,attached]
+  ABSENT a fired bubble's ref — {kind:"user",…,text:"[scheduled sc-1 · every 10m · fire 5] check CI"}
+```
+
+So S6 was phone-side reading only — exactly as the slice row claimed — and the
+trust bit is what every surface hangs on (the four `DROPPED without the bit` lines
+are the proof, not an assumption).
+
+**Drift from the Implementation I wrote above** (all after checking the code):
+1. **`sanitizeDisplay` MOVED to `apps/mobile/src/display-text.ts`**, re-exported by
+   `session-info.ts` under the same name. A second copy in `schedule-view.ts`
+   would have been a duplicate sanitizer — and `schedule-view.ts` cannot import
+   `session-info.ts` (that module imports `schedule-view.ts`). One function, one
+   place, both surfaces.
+2. **A one-shot's meta line does NOT repeat its `spec`**: `${dayTime} · one-shot`
+   (`today 14:29 · one-shot`), not `at 17:00 · today 14:29 · in 2h 29m`. The spec
+   is `at 17:00` — the same fact twice, and the RENDERED time is the one in the
+   person's own zone. Pinned by two tests (this device's day, and another day).
+3. **No swipe-to-delete.** `apps/mobile/package.json` carries no gesture library,
+   and plan P9's rule is a testID-addressable control: the row has a trailing
+   `Delete` with `testID session-info-schedules-<title>-delete`, which a Maestro
+   flow can tap. Implementation's P7 said this; recorded here as a drift from
+   mockup M7's "(swipe left: Delete)".
+4. **`InfoFacts.now` (and `InfoPort.now()`) was ADDED.** The rows word their
+   times (`next 14:30`, `today 17:00`) and every other clock in this app is
+   injected; `App.tsx` passes `Date.now`. Without it a sheet would need a
+   module-level clock, which no test could pin.
+5. **A `not-open` sheet still draws the section.** The controller kept the feed
+   only when attached, so an unattached sheet silently LOST the section — a
+   person could not tell "no wakes" from "old build". `InfoPort.offersSchedules`
+   (a fact about the WIRING, set by `App.tsx`) makes the reason statable; without
+   it the section is still not drawn (a build with no feed at all).
+6. **`refresh()` re-installs the feed** (drift found BY a test): the controller's
+   `refresh` only re-ran the pulls, so pull-to-refresh left the previous
+   subscription and the previous refusal in place — the test `a session switch
+   refollows` was red until `stopSchedules(); followSchedules();` was added.
+7. **A refused/expired/deleted row's wording is the DAEMON's.** No cause is ever
+   inferred from a list diff (the S5 fix round's lesson): a refusal puts the
+   daemon's own `reason` under the rows, and a successful delete leaves the row
+   in place until the next table says otherwise.
+8. **`fixture` updates the guard demanded:** `drawer-list.test.ts`,
+   `session-groups.test.ts` (a `wakes` field on the row), `session-info.test.ts`
+   and `session-screen-info.test.ts` (the `now` fact), and
+   `session-info-controller.test.ts` (`port.now()`).
+
+**As built (dependency order; red before green per slice).**
+1. **`apps/mobile/src/schedule-view.ts` (new, pure)** — `scheduleLabel`
+   (controls→space, `sanitizeDisplay`, bounded), `scheduleTitle`,
+   `scheduleMetaText` (`every 10m · next 14:30 · 4×` / `today 14:29 · one-shot`),
+   `wakesBadge`/`wakesMeta` (`2 wakes`, `""` at 0), `firedScheduleHead`
+   (`◷ Scheduled · every 10m`, `""` with no ref), `scheduleIdLabel`.
+2. **The trust bit** — `connection.ts`'s `APP_CLIENT_OPTIONS` gains
+   `daemonWakes: true`, beside `sharedAutoAccept` and for the same reason.
+3. **List row (M8)** — `session-list.ts` `SessionRow.wakes` + the badge; and
+   `session-groups.ts`'s `sessionMeta` names them on the line a person reads (an
+   archived row's are frozen, so it does not).
+4. **Transcript (M8)** — `UserRow.schedule` + the `user_message` case copies a
+   live ref; `TranscriptRow.tsx` paints the head only when the ref is there.
+5. **Session info (M7)** — `SectionId` gains `schedules`; `InfoRow.delete`;
+   `SchedulesFeed`; `now` on the facts; `schedulesSection` with all five states;
+   `display-text.ts` holds the one sanitizer.
+6. **Controller** — `InfoSession.schedules` (`InfoSchedules`), `offersSchedules`,
+   `port.now()`, `followSchedules`/`stopSchedules`, `deleteSchedule`, the
+   `schedules` member of `InfoSection` (the failure-report union), and `refresh`
+   re-installing the feed.
+7. **Sheet + screen + app** — `SessionInfoSheet.tsx`'s trailing Delete,
+   `SessionScreen.tsx`'s `onDeleteSchedule`, `session-screen-controller.ts`'s
+   `deleteSchedule`, `App.tsx`'s `now`/`offersSchedules`/`schedules` seams.
+
+**Tests.** `schedule-view.test.ts` (8, pure); `session-info.test.ts` +9 (the
+section's five states, the delete id, the sanitizing); `session-info-controller.ts`
++9 (install paints, later frame repaints, `undefined` → unsupported, the raw id,
+a refusal's reason, a throw, a session switch, close stops following, `not-open`,
+`unsupported`); `session-list.test.ts` +2, `session-groups.test.ts` +1,
+`transcript.test.ts` +1; `connection.test.ts` +3 (**end to end over the app's own
+`openComputer`**: a wake created daemon-side reaches `session.schedules` through
+`/e2e`, a delete through the app's client stack removes it, and a daemon that
+never schedules reports nothing at all — that third one is the `unsupported` case
+proved on the wire, not in a fixture); `schedule-wiring.test.ts` (6, source-read
+guards for the controls RN cannot render here, the pattern
+`e2e-session-capabilities.test.ts` already uses).
+
+**RED before green** — `.tentacle/tmp/cron-tool/red-s6.ts` applies 7 pre-S6
+variants at once over the NEW tests, runs them, then restores every file from its
+original bytes and compares:
+
+```
+patched 7 sites (pre-S6 behaviour) — running the NEW tests
+ 160 pass
+ 21 fail
+21 fail on the pre-S6 code · restored=true
+```
+
+**Mutation checks** — `.tentacle/tmp/cron-tool/mut-s6.ts` (one exact substitution
+each, refused unless the site matches exactly once; every file rewritten from its
+original bytes and compared after every run):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | the phone drops `daemonWakes` | 2: the bit, and the end-to-end wake table |
+| M2 | no `schedule` ref on a user row | 1: `a fired turn's ref is carried on its row` |
+| M3 | no wake count on the row | 1: `a row carries the wake count` |
+| M4 | the badge drops the wakes word | 1: `badges: … then armed wakes` |
+| M5 | the meta line drops the wakes word | 1: `armed wakes are named on the line a person reads` |
+| M6 | the view never projects the section | 8: every section test |
+| M7 | `undefined` reads as `[]` | 3: `unsupported` (both layers) |
+| M8 | a Delete is offered with the link down | 1: `offline: … no delete is offered` |
+| M9 | the controller never feeds the facts | 9: all feed tests |
+| M10 | a refusal's reason is swallowed | 1: `a refused delete keeps the row …` |
+| M11 | a refusal also drops the row (local echo) | 1: same test |
+| M12 | `close()` keeps following | 1: `closing the sheet stops following` |
+| M13 | `refresh()` does not re-install the feed | 1: `a session switch refollows` |
+| M14 | a head with no ref | 1: `no ref at all paints NOTHING` |
+| M15 | a one-shot names a `×` | 2: both one-shot meta tests |
+| M16 | no sanitizing | 3: the three sanitize tests |
+| M17 | `0 wakes` at zero | 2: the badge tests |
+| M18 | the sheet ignores the row's `delete` | 1: the wiring guard |
+| M19 | the screen forgets to forward the delete | 1: the wiring guard |
+| M20 | `App.tsx` subscribes to nothing | 1: the wiring guard |
+| M21 | the fired head is painted with no ref | 1: the wiring guard |
+
+All 21 red; `all files restored byte-for-byte: true`. (M1's second red is the
+end-to-end one: with the bit dropped the daemon's real `schedules` frame never
+reaches the phone, which is the property the whole slice rests on.)
+
+**Gate** (2026-11-17, this tree):
+- `bunx tsc --noEmit`, `tsc -p apps/mobile --noEmit`, `tsc -p apps/relay --noEmit`: all clean.
+- `bun run lint`: clean (1716 files).
+- `bun test`: **12444 pass / 5 skip / 0 fail** (12449 tests, 892 files). The 5
+  skips are the opt-in group (live k8s ×2, live docker ×2, slow keepalive ×1).
+  S5's fix-round count was 12340/887; this slice adds 4 mobile files + ~104 tests.
+- No protocol schema changed → `PROTOCOL_VERSION` untouched and
+  `protocol.json` NOT regenerated (the `json-schema` drift test passes).
+- Changelog: the ONE existing fragment `changelog.d/cron-tool.added.md` gains the
+  iPhone sentence (Session-info section + Delete, `2 wakes`, the fired head). No
+  second fragment (S2–S5's own rule: one task, one fragment); `CHANGELOG.md`
+  untouched.
+
+**S6: DONE.** No slice follows it: the branch's slice plan (S1 → S6) is complete.
+Carried, not done here: the `move_session` hop's "N scheduled wakes dropped"
+notice (D7's table) — it is the daemon's hop path (S3's `move_session`), not the phone.
 
 ## Review
 

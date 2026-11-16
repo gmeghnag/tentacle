@@ -103,10 +103,13 @@ const Ctor = rnWebSocketCtor(RNShapedWebSocket);
 const key = (fill: number) => new Uint8Array(32).fill(fill);
 const PHONE_KEY = key(7);
 
-function host(policy?: ImagePolicy): SessionHost {
+function host(policy?: ImagePolicy, schedules = false): SessionHost {
   return new SessionHost({
     defaultCwd: CWD,
     ...(policy === undefined ? {} : { images: policy }),
+    // `serve` and the worker pass this; a pod daemon never does (cron-tool D1).
+    // Default limits, real timers: this harness only reads the table it produces.
+    ...(schedules ? { schedules: {} } : {}),
     createAgent: () => ({
       agent: new Agent({ model: new Echo(), tools: new ToolRegistry(), env: env as never }),
       permissions: new PermissionBroker(),
@@ -118,6 +121,8 @@ interface Daemon {
   readonly url: string;
   /** The stored computer, exactly what pairing would have written (P3). */
   readonly computer: StoredComputer;
+  /** The daemon's own host: the test drives a session's table through it (cron-tool S6). */
+  readonly sessions: SessionHost;
   stop(): void;
 }
 
@@ -127,7 +132,9 @@ interface Daemon {
  * `computer.id` is the id of the key the app pinned, and the device key opens the
  * channel.
  */
-function daemon(options: { readonly policy?: ImagePolicy } = {}): Daemon {
+function daemon(
+  options: { readonly policy?: ImagePolicy; readonly schedules?: boolean } = {},
+): Daemon {
   const configDir = mkdtempSync(join(tmpdir(), "mobile-connection-"));
   const created = loadOrCreateIdentity(configDir, {
     name: "gabriel-mac",
@@ -148,10 +155,11 @@ function daemon(options: { readonly policy?: ImagePolicy } = {}): Daemon {
     throw new Error(added.reason);
   }
   const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+  const sessionHost = host(options.policy, options.schedules === true);
   const server = startWsServer({
     host: "127.0.0.1",
     port: 0,
-    sessionHost: host(options.policy),
+    sessionHost,
     devices: { authority, pairingCheckMs: 20 },
     token: TOKEN,
   });
@@ -167,6 +175,7 @@ function daemon(options: { readonly policy?: ImagePolicy } = {}): Daemon {
   return {
     url: `${server.url}/e2e`,
     computer,
+    sessions: sessionHost,
     stop: () => {
       server.stop();
       authority.stop();
@@ -793,6 +802,100 @@ describe("the socket diagnostics reach the injected sink (docs/feat/mobile-lock.
       const link = await open(d);
       try {
         expect(Array.isArray((await link.client.sessionList()).sessions)).toBe(true);
+      } finally {
+        await link.close();
+        await seeder.closeSessions();
+        seeder.close();
+      }
+    });
+  });
+});
+
+/**
+ * cron-tool S6: the phone trusts its daemon's own turns.
+ *
+ * THE LOAD-BEARING PROPERTY (docs/feat/cron-tool.md S6). `RemoteClient` drops
+ * every `schedules` frame, every snapshot's table, every `turn_start.schedule`
+ * ref and every delete when `daemonWakes` is off (`remote-client.ts:3500`,
+ * `:3688`; `remote-session.ts:898`, `:1705`). So the app's ONE options set must
+ * carry the bit, or no phone surface could ever see a wake — the section would
+ * read `unsupported` over a daemon that schedules perfectly well.
+ *
+ * Proved END TO END over the app's own `openComputer` (not by asserting a
+ * constant): the daemon really creates a wake and the phone really receives the
+ * table and deletes through it.
+ */
+describe("scheduled wakes over the app's own link (cron-tool S6)", () => {
+  /** Wait for a condition the daemon publishes asynchronously (no fixed sleep). */
+  async function until(check: () => boolean, label: string): Promise<void> {
+    for (let i = 0; i < 200; i += 1) {
+      if (check()) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error(`timed out waiting for ${label}`);
+  }
+
+  test("the app client sets daemonWakes (the one bit every wake surface hangs on)", () => {
+    // `APP_CLIENT_OPTIONS` is what `openComputer` spreads into its `RemoteClient`.
+    expect(APP_CLIENT_OPTIONS.daemonWakes).toBe(true);
+  });
+
+  test("a wake created daemon-side reaches the phone's table, and a delete removes it", async () => {
+    const d = daemon({ schedules: true });
+    const seeder = await seeded(d.url);
+    const link = await open(d);
+    try {
+      // The session the app attaches to, made by THIS phone (its own handle).
+      // Attached FIRST: a follow installed after the fact only sees later frames,
+      // and the attach's own snapshot is the other door of the same table.
+      const session = link.client.newSession(undefined, SESSION_ID, undefined, { attach: {} });
+      await session.open();
+      const seen: (readonly { id: string }[] | undefined)[] = [];
+      const unsubscribe = session.onSchedules((report) => seen.push(report.rows));
+      // The daemon creates the wake itself (the model's `schedule_create` path).
+      const hosted = d.sessions.get(SESSION_ID);
+      expect(hosted).toBeDefined();
+      const link2 = hosted?.scheduleLink();
+      expect(link2).not.toBeUndefined();
+      const created = link2?.create({ prompt: "check CI on PR #412", every: "10m" });
+      expect(created?.ok).toBe(true);
+      await until(() => session.schedules?.length === 1, "the `schedules` frame");
+      expect(session.schedules?.map((r) => r.id)).toEqual(["sc-1"]);
+      expect(session.schedules?.[0]?.prompt).toBe("check CI on PR #412");
+      expect(session.schedules?.[0]?.spec).toBe("every 10m");
+
+      // The user's own handle deletes it through the app's client stack.
+      const deleted = await session.deleteSchedule("sc-1");
+      expect(deleted.deleted).toBe(true);
+      await until(() => session.schedules?.length === 0, "the empty `schedules` frame");
+      expect(session.schedules).toEqual([]);
+      unsubscribe();
+      expect(seen.length).toBeGreaterThan(0);
+    } finally {
+      await link.close();
+      await seeder.closeSessions();
+      seeder.close();
+      d.stop();
+    }
+  });
+
+  test("a daemon that never schedules sends no table at all (never an empty list)", async () => {
+    // A POD daemon's shape: no `schedules` option, so no `SnapshotResult.schedules`
+    // and no frame — the phone's section must read `unsupported`, not "none left".
+    await withDaemon(async (d) => {
+      const seeder = await seeded(d.url);
+      const link = await open(d);
+      try {
+        const session = link.client.newSession(undefined, SESSION_ID, undefined, { attach: {} });
+        // `open()` is the resync read that folds `SnapshotResult.schedules`
+        // (gated on the same bit): on a daemon that never schedules, nothing is
+        // reported and nothing is claimed.
+        await session.open();
+        expect(session.schedules).toBeUndefined();
+        // …and a delete is refused locally, with the client's own reason (no frame).
+        const refused = await session.deleteSchedule("sc-1");
+        expect(refused.deleted).toBe(false);
+        expect(refused.reason).toBeTruthy();
       } finally {
         await link.close();
         await seeder.closeSessions();

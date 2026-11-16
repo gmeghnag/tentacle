@@ -8,6 +8,7 @@
  * Pure and React-free (AGENTS §7): a regroup of `session-list.ts`'s rows, no new
  * data. Titles are daemon strings: matched as plain text, never interpreted.
  */
+import { wakesMeta } from "./schedule-view.ts";
 import type { SessionRow, SessionSections } from "./session-list.ts";
 
 export interface SessionGroups {
@@ -38,12 +39,18 @@ export function groupSessions(sections: SessionSections, query: string): Session
   };
 }
 
-/** The line under a row's title: state, who is attached, and how long ago. */
+/** The line under a row's title: state, who is attached, armed wakes, and how long ago. */
 export function sessionMeta(row: SessionRow): string {
   const state = row.archived ? "Archived" : row.running ? "Running" : "Idle";
   const parts = [state];
   if (!row.archived && row.attached > 0) {
     parts.push(`${row.attached} attached`);
+  }
+  // Armed wakes (docs/feat/cron-tool.md S6, M8's `◷ 2`): an archived session's
+  // are frozen and never fire, so they earn no word there.
+  const wakes = row.archived ? "" : wakesMeta(row.wakes);
+  if (wakes !== "") {
+    parts.push(wakes);
   }
   parts.push(row.subtitle);
   return parts.join(" · ");

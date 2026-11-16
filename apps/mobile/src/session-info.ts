@@ -15,12 +15,15 @@
  */
 import type {
   McpServerStatus,
+  ScheduleRow,
   SessionCapabilitiesWire,
   SessionContextResult,
   SessionListEntry,
   SessionSkillsResult,
 } from "@tentacle/protocol";
 import type { ChatStatus } from "./chat-header.ts";
+import { sanitizeDisplay } from "./display-text.ts";
+import { scheduleMetaText, scheduleTitle } from "./schedule-view.ts";
 import type { StatusTone } from "./ui/StatusDot.tsx";
 
 /** What the daemon's handshake reported (slice 2's `daemonInfo()`), or `undefined`. */
@@ -63,6 +66,19 @@ export interface InfoFacts {
   /** Whether the session's shared auto-accept exists to switch (Owner Q3). */
   readonly autoAccept: boolean;
   /**
+   * The session's armed scheduled wakes (docs/feat/cron-tool.md S6, M7): the
+   * table the client FOLLOWS (`onSchedules`), so `undefined` inside `ready` never
+   * happens — a daemon that does not report a table at all is `unsupported`.
+   * Absent entirely: the sheet was built without the feed (a port that offers
+   * none), which draws no section at all.
+   */
+  readonly schedules?: SchedulesFeed;
+  /**
+   * The clock the rows' distances are worded against (`next 14:30`, `today
+   * 17:00`). Injected like every other clock here: a test never waits for one.
+   */
+  readonly now: number;
+  /**
    * The session's MCP/skill switches (docs/feat/session-capabilities.md S5).
    * Absent: no switch is drawn at all (a port that offers none).
    */
@@ -100,6 +116,24 @@ export interface CapabilitySwitches {
   readonly error: { readonly kind: CapabilityKind; readonly text: string } | null;
 }
 
+/**
+ * The scheduled-wakes section's feed (docs/feat/cron-tool.md S6, M7). The table
+ * is FOLLOWED (`RemoteSession.onSchedules`), not pulled: a wake fires, expires or
+ * is deleted by another device between openings, and the daemon publishes the
+ * whole list on every change.
+ *
+ * `rows === undefined` is the honest "this daemon does not report a table" (an
+ * older one) — exactly the protocol's own rule for `SnapshotResult.schedules`
+ * (`undefined` ≠ `[]`), and it reads `unsupported`, so a person is told to
+ * update rather than shown an empty list that would be a lie.
+ */
+export interface SchedulesFeed {
+  /** The daemon's table as last reported, or undefined (none reported yet / an older daemon). */
+  readonly rows: readonly ScheduleRow[] | undefined;
+  /** A refused delete: the daemon's reason (or the client's own), under the rows. */
+  readonly error: string | null;
+}
+
 /** The trailing switch of one MCP server or skill row. */
 export interface RowSwitch {
   readonly kind: CapabilityKind;
@@ -112,7 +146,7 @@ export interface RowSwitch {
   readonly accessibilityLabel: string;
 }
 
-export type SectionId = "model" | "session" | "mcp" | "skills";
+export type SectionId = "model" | "session" | "schedules" | "mcp" | "skills";
 
 export type SectionPhase =
   | "loading"
@@ -151,6 +185,20 @@ export interface InfoRow {
   readonly accessibilityLabel?: string;
   /** The trailing on/off switch (session-capabilities S5); absent: none. */
   readonly switch?: RowSwitch;
+  /**
+   * A trailing Delete control (docs/feat/cron-tool.md S6, M7's delete): the RAW
+   * id the daemon knows the row by. Present only on an armed scheduled wake, and
+   * only when a delete is actually sendable (attached, link up, a trusted
+   * daemon) — a control that cannot send is worse than no control.
+   */
+  readonly delete?: RowDelete;
+}
+
+/** The trailing Delete of one row (the schedule section's own control). */
+export interface RowDelete {
+  /** The RAW id sent to `session/schedule_delete` (the title is sanitized). */
+  readonly id: string;
+  readonly accessibilityLabel: string;
 }
 
 export interface InfoSection {
@@ -208,18 +256,12 @@ export interface ContextMeter {
  * line, bounded (`oneLine`'s rule in the TUI, `commands.ts:56-64`). The wire
  * rejects control characters only, and the daemon is trusted — but a skill's
  * DESCRIPTION is a file on disk, which is not.
+ *
+ * Re-exported from `display-text.ts` (where it LIVES since cron-tool S6): the
+ * schedule rows and the fired head sanitize the same way, and one copy is what
+ * keeps them from drifting.
  */
-export function sanitizeDisplay(text: string): string {
-  const cleaned = text
-    // Bidi: overrides, embeddings, isolates and the marks.
-    .replace(/[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g, "")
-    // Zero-width and the BOM (an ALTERNATION, not a class: a zero-width joiner
-    // composes several emoji into one, which a character class cannot express).
-    .replace(/\u200b|\u200c|\u200d|\u2060|\ufeff/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return cleaned.length <= 300 ? cleaned : `${cleaned.slice(0, 299)}…`;
-}
+export { sanitizeDisplay } from "./display-text.ts";
 
 /** A token count as the sheet writes it: `950`, `84k`, `1.2M`. */
 export function tokensText(tokens: number): string {
@@ -597,6 +639,87 @@ function sessionSection(facts: InfoFacts): InfoSection {
   return { id: "session", title: "Session", phase: "ready", rows, dim: facts.link === "down" };
 }
 
+/**
+ * The SCHEDULED WAKES section (docs/feat/cron-tool.md S6, mockup M7): the
+ * session's armed wakes, each with its own Delete, in the daemon's order.
+ *
+ * Its own state, like every other section (F2-F4): one refused delete never
+ * changes the list, and the list is never blanked by a link that drops — an
+ * already-known table stays readable (dim), it just stops being followed.
+ *
+ * `schedules` absent in `facts` means this sheet was built without the feed at
+ * all (a port that offers none): then the section is not drawn, never faked.
+ */
+function schedulesSection(facts: InfoFacts): InfoSection | null {
+  const feed = facts.schedules;
+  if (feed === undefined) {
+    return null;
+  }
+  const title = "Scheduled wakes";
+  if (facts.phase !== "open") {
+    return {
+      id: "schedules",
+      title,
+      phase: "not-open",
+      rows: [],
+      empty: { title: "Open the session to see its scheduled wakes" },
+    };
+  }
+  const rows = feed.rows;
+  if (rows === undefined) {
+    // An older daemon never reports a table (`SnapshotResult.schedules` absent):
+    // retrying can never help, so it is `unsupported`, not an error (F2's rule).
+    return {
+      id: "schedules",
+      title,
+      phase: "unsupported",
+      rows: [],
+      empty: {
+        title: `Can't see scheduled wakes — update tentacle on ${sanitizeDisplay(facts.computerName)}`,
+      },
+    };
+  }
+  if (rows.length === 0) {
+    return {
+      id: "schedules",
+      title,
+      phase: "empty",
+      rows: [],
+      empty: {
+        title: "No scheduled wakes",
+        footnote: "Ask the agent to check something every 10 minutes",
+      },
+    };
+  }
+  // A delete is sendable only when the session is attached and the link is up;
+  // a control that cannot send is worse than no control (the ghost switch's rule).
+  const deletable = facts.link === "up";
+  const now = facts.now;
+  return {
+    id: "schedules",
+    title,
+    phase: "ready",
+    rows: rows.map((row) => {
+      const name = scheduleTitle(row);
+      return {
+        title: name,
+        subtitle: scheduleMetaText(row, now),
+        tone: "running" as const,
+        ...(deletable
+          ? {
+              delete: {
+                id: row.id,
+                accessibilityLabel: `Delete the scheduled wake "${name}"`,
+              },
+            }
+          : {}),
+      };
+    }),
+    dim: facts.link === "down",
+    ...(feed.error === null ? {} : { footer: feed.error }),
+  };
+}
+
 /** The MCP section: the daemon's servers (`/mcp`'s own order, daemon-wide). */
 function mcpSection(facts: InfoFacts): InfoSection {
   const title = `MCP servers · on ${sanitizeDisplay(facts.computerName)}`;
@@ -815,9 +938,13 @@ function skippedText(count: number): string {
 
 /** The whole sheet, from the facts the controller gathered. */
 export function sessionInfoView(facts: InfoFacts): SessionInfoView {
+  const schedules = schedulesSection(facts);
   const sections = [
     modelSection(facts),
     sessionSection(facts),
+    // After the session's own facts and before the computer-wide ones: a wake is
+    // pending work ON this session (mockup M7's order).
+    ...(schedules === null ? [] : [schedules]),
     mcpSection(facts),
     skillsSection(facts),
   ];

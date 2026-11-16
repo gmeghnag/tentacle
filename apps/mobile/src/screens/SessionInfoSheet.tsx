@@ -31,6 +31,12 @@ export interface SessionInfoSheetProps {
   readonly onAutoAccept: (on: boolean) => void;
   /** A server's/skill's switch (session-capabilities S5): the row's own kind and raw name. */
   readonly onSwitch: (kind: "mcp" | "skill", name: string, enabled: boolean) => void;
+  /**
+   * Delete one armed scheduled wake (cron-tool S6, M7): the row's RAW id. A
+   * trailing control, not a swipe: the app carries no gesture library, and plan
+   * P9's rule is a testID-addressable control.
+   */
+  readonly onDeleteSchedule: (scheduleId: string) => void;
   /** Pull-to-refresh and a Retry row. */
   readonly onRefresh: () => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
@@ -65,6 +71,7 @@ function SectionBody({
   onExpand,
   onRetry,
   onSwitch,
+  onDeleteSchedule,
 }: {
   readonly palette: Palette;
   readonly section: InfoSection;
@@ -72,6 +79,7 @@ function SectionBody({
   readonly onExpand: (id: string | null) => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
   readonly onSwitch: SessionInfoSheetProps["onSwitch"];
+  readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
 }): JSX.Element {
   if (section.phase === "loading") {
     return <LoadingRow palette={palette} first />;
@@ -104,6 +112,7 @@ function SectionBody({
           first={index === 0}
           sectionId={section.id}
           onSwitch={onSwitch}
+          onDeleteSchedule={onDeleteSchedule}
           expanded={expanded === `${section.id}:${row.title}`}
           onExpand={() => {
             if (row.expand === undefined) {
@@ -128,6 +137,7 @@ function InfoRowView({
   expanded,
   onExpand,
   onSwitch,
+  onDeleteSchedule,
 }: {
   readonly palette: Palette;
   readonly row: InfoRow;
@@ -136,8 +146,10 @@ function InfoRowView({
   readonly expanded: boolean;
   readonly onExpand: () => void;
   readonly onSwitch: SessionInfoSheetProps["onSwitch"];
+  readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
 }): JSX.Element {
   const toggle = row.switch;
+  const remove = row.delete;
   const values =
     row.value === undefined && row.chip === undefined ? undefined : (
       <View style={styles.trailing}>
@@ -165,9 +177,20 @@ function InfoRowView({
       </View>
     );
   // P1 (owner): a trailing switch on the row, as Auto-accept's; a ghost
-  // (disabled) one when the view-model says it cannot send.
+  // (disabled) one when the view-model says it cannot send. A scheduled wake's
+  // trailing control is its Delete instead (cron-tool S6): a wake has no on/off.
   const trailing =
-    toggle === undefined ? (
+    remove !== undefined ? (
+      <Pressable
+        testID={`session-info-${sectionId}-${row.title}-delete`}
+        accessibilityRole="button"
+        accessibilityLabel={remove.accessibilityLabel}
+        onPress={() => onDeleteSchedule(remove.id)}
+        style={styles.delete}
+      >
+        <Text style={[typography.subhead, { color: palette.red }]}>Delete</Text>
+      </Pressable>
+    ) : toggle === undefined ? (
       values
     ) : (
       <View style={styles.switchTrail}>
@@ -224,6 +247,7 @@ function Section({
   onExpand,
   onRetry,
   onSwitch,
+  onDeleteSchedule,
 }: {
   readonly palette: Palette;
   readonly section: InfoSection;
@@ -231,6 +255,7 @@ function Section({
   readonly onExpand: (id: string | null) => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
   readonly onSwitch: SessionInfoSheetProps["onSwitch"];
+  readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
 }): JSX.Element {
   return (
     <View style={styles.section}>
@@ -243,6 +268,7 @@ function Section({
           onExpand={onExpand}
           onRetry={onRetry}
           onSwitch={onSwitch}
+          onDeleteSchedule={onDeleteSchedule}
         />
       </GroupedCard>
       {section.rowsNote === undefined ? null : (
@@ -282,6 +308,7 @@ export function SessionInfoSheet({
   autoAcceptError,
   onAutoAccept,
   onSwitch,
+  onDeleteSchedule,
   onRefresh,
   onRetry,
   onClose,
@@ -340,6 +367,7 @@ export function SessionInfoSheet({
                   onExpand={onExpand}
                   onRetry={onRetry}
                   onSwitch={onSwitch}
+                  onDeleteSchedule={onDeleteSchedule}
                 />
                 {/* The switch belongs to the SESSION's settings, right under it. */}
                 {section.id !== "session" || !view.autoAccept ? null : (
@@ -404,4 +432,5 @@ const styles = StyleSheet.create({
   trailing: { alignItems: "flex-end", gap: 2, maxWidth: "55%" },
   lead: { flexDirection: "row", alignItems: "center", gap: 6 },
   switchTrail: { flexDirection: "row", alignItems: "center", gap: 10 },
+  delete: { paddingVertical: 8, paddingLeft: 12 },
 });
