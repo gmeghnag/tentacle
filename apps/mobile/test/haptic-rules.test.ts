@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ComposerAction } from "../src/composer.ts";
-import { pressHaptic, turnEndHaptic } from "../src/haptic-rules.ts";
+import { hubHaptic, pressHaptic, turnEndHaptic } from "../src/haptic-rules.ts";
 
 const send: ComposerAction = { kind: "send", text: "hi" };
 const queue: ComposerAction = { kind: "queue", text: "hi" };
@@ -39,5 +39,22 @@ describe("turnEndHaptic", () => {
     expect(turnEndHaptic(false, false)).toBeNull();
     expect(turnEndHaptic(true, true)).toBeNull();
     expect(turnEndHaptic(false, true)).toBeNull();
+  });
+});
+
+describe("hubHaptic (docs/feat/mobile-hub.md Design 2)", () => {
+  test("the hub's cues: open = firm, a new highlight = tick, commit = commit", () => {
+    expect(hubHaptic({ kind: "haptic", cue: "firm" })).toBe("firm");
+    expect(hubHaptic({ kind: "haptic", cue: "tick" })).toBe("tick");
+    expect(hubHaptic({ kind: "haptic", cue: "commit" })).toBe("commit");
+  });
+
+  test("every other effect is silent (close, highlight, the commit itself, drag, tap)", () => {
+    expect(hubHaptic({ kind: "close" })).toBeNull();
+    expect(hubHaptic({ kind: "highlight", index: 1 })).toBeNull();
+    expect(hubHaptic({ kind: "commit", id: "stop" })).toBeNull();
+    expect(hubHaptic({ kind: "dragTo", delta: { x: 1, y: 1 } })).toBeNull();
+    expect(hubHaptic({ kind: "dragCancel" })).toBeNull();
+    expect(hubHaptic({ kind: "tap" })).toBeNull();
   });
 });

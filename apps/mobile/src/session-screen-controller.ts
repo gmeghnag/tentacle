@@ -33,6 +33,7 @@ import {
   FAILED_NOTICE,
   REFUSED_NOTICE,
   RESYNC_FAILED_NOTICE,
+  composerAction,
   restoreAfterFailure,
   returnKeyAction,
 } from "./composer.ts";
@@ -320,6 +321,12 @@ export interface SessionScreenController {
   setDraft(text: string): void;
   /** A tap on the composer's one button. */
   press(): void;
+  /**
+   * The hub's Stop (docs/feat/mobile-hub.md P2): the composer's own stop branch,
+   * decided as if the field were blank — a draft never turns it into a steer.
+   * A no-op unless that resolves to `stop` (a turn runs, the link is up).
+   */
+  stopTurn(): void;
   /**
    * The keyboard's Return (B2): `press` only when `returnKeyAction` allows it on
    * the CURRENT action — never a Stop, never a no-op clear.
@@ -1066,6 +1073,11 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       }
       return;
     }
+    stop(action);
+  }
+
+  /** The ONE stop path: the composer's button and the hub's Stop both end here. */
+  function stop(action: ComposerAction): void {
     if (action.kind !== "stop") {
       return;
     }
@@ -1075,6 +1087,19 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       return;
     }
     foreign?.cancel();
+  }
+
+  /** The hub's Stop: the composer's truth table with nothing to send (P2). */
+  function stopTurn(): void {
+    stop(
+      composerAction({
+        link: transcript.link,
+        text: "",
+        turn: transcript.turn,
+        ended: transcript.closed,
+        photos: 0,
+      }),
+    );
   }
 
   return {
@@ -1097,6 +1122,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       emit();
     },
     press,
+    stopTurn,
     pressReturn() {
       // The gate reads the action NOW, as `press` does: a second Return before
       // the screen re-rendered must not see a stale `send` and then Stop.
