@@ -243,6 +243,12 @@ export interface SessionScreenController {
   autoAcceptOn(): boolean;
   /** An MCP server's or skill's switch (docs/feat/session-capabilities.md S5). */
   setCapability(kind: "mcp" | "skill", name: string, enabled: boolean): Promise<void>;
+  /**
+   * Delete one armed scheduled wake (docs/feat/cron-tool.md S6, M7): the row's
+   * RAW id. The row leaves when the daemon's next table says so — never on a
+   * local echo — and a refusal shows the daemon's own reason under the rows.
+   */
+  deleteSchedule(scheduleId: string): Promise<void>;
   /** Tapping the title: the rename field opens on the CURRENT title (Owner 5). */
   beginRename(): void;
   /** What is typed into it. */
@@ -882,6 +888,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     async setCapability(kind, name, enabled) {
       await info?.setCapability(kind, name, enabled);
+      emit();
+    },
+    async deleteSchedule(scheduleId) {
+      await info?.deleteSchedule(scheduleId);
       emit();
     },
     beginRename() {

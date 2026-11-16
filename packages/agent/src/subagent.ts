@@ -34,6 +34,8 @@ import {
   CONTEXT_RESET_TOOL_NAME,
   MOVE_SESSION_TOOL_NAME,
   PRESENT_TOOL_NAME,
+  SCHEDULE_CONTROL_TOOL_NAME,
+  SCHEDULE_CREATE_TOOL_NAME,
   ToolRegistry,
   createAgentNotifyTool,
 } from "@tentacle/tools";
@@ -400,6 +402,10 @@ export function createSubagentRunner(deps: SubagentDeps): {
         // `present` shows the USER an artifact: a child's output is its report
         // to the parent, one origin per card (docs/feat/model-artifacts.md Q13).
         tool.name === PRESENT_TOOL_NAME ||
+        // The schedule table is the SESSION's, and a fire starts a MAIN-agent
+        // turn (docs/feat/cron-tool.md P4): a child may neither arm nor drop one.
+        tool.name === SCHEDULE_CREATE_TOOL_NAME ||
+        tool.name === SCHEDULE_CONTROL_TOOL_NAME ||
         tool.name === AGENT_CONTROL_TOOL_NAME ||
         tool.name === AGENT_KILL_TOOL_NAME ||
         tool.name === AGENT_MESSAGE_TOOL_NAME ||

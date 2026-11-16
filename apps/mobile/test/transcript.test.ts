@@ -362,6 +362,23 @@ test("a prompt's images are carried on its row (the owner's requirement)", () =>
   ]);
 });
 
+test("a fired turn's ref is carried on its row; an ordinary prompt's row has none (cron-tool S6)", () => {
+  const state = fold([
+    {
+      type: "user_message",
+      text: "[scheduled sc-1 · every 10m · fire 5] check CI",
+      schedule: { id: "sc-1", spec: "every 10m" },
+    },
+    { type: "user_message", text: "and now something else" },
+  ]);
+  const fired = state.rows[0];
+  expect(fired?.kind === "user" && fired.schedule).toEqual({ id: "sc-1", spec: "every 10m" });
+  // Absence is the normal case (an ordinary prompt, an older daemon, a RELOAD):
+  // never an empty object, which a renderer would have to second-guess.
+  const plain = state.rows[1];
+  expect(plain?.kind === "user" && "schedule" in plain).toBe(false);
+});
+
 test("a closed session keeps the transcript and adds one notice", () => {
   const before = fold([
     { type: "history", messages: [{ role: "user", content: "hi" }], reason: null },

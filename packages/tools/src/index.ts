@@ -10,6 +10,7 @@ export * from "./task.ts";
 export * from "./skill.ts";
 export * from "./context-reset.ts";
 export * from "./move-session.ts";
+export * from "./schedule.ts";
 export * from "./workload-shell.ts";
 export * from "./workload-shell-frame.ts";
 export * from "./concurrency.ts";

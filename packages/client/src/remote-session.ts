@@ -18,6 +18,8 @@ import {
   type JobRow,
   JsonRpcErrorCode,
   type QueueState,
+  type ScheduleDeleteResult,
+  type ScheduleRow,
   type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
@@ -51,6 +53,7 @@ import {
   type SessionTitleNotice,
   type UploadOptions,
 } from "./remote-client.ts";
+import { SCHEDULE_UNTRUSTED_DAEMON, firedScheduleRef } from "./schedules.ts";
 import type { StreamOutput } from "./session-reducer.ts";
 import type { SubagentNotify } from "./subagents.ts";
 
@@ -208,7 +211,8 @@ export class RemoteSession implements SessionStreamListener {
   /**
    * The daemon is a trusted `serve` host that starts its own wake turns: their
    * asks count as this session's for auto-accept (`autoAcceptsTurn`). From
-   * `RemoteClientOptions.daemonWakes`; FALSE everywhere but `connect`.
+   * `RemoteClientOptions.daemonWakes`; FALSE everywhere but `connect` and the
+   * local worker (docs/feat/cron-tool.md D1).
    */
   private readonly daemonWakes: boolean;
   /**
@@ -462,7 +466,7 @@ export class RemoteSession implements SessionStreamListener {
 
   /**
    * Auto-accept may answer an ask of this turn: one I minted, or — on a trusted
-   * `serve` daemon that wakes on its own (`daemonWakes`, set by `connect`) — the
+   * daemon that wakes on its own (`daemonWakes`: `connect`, the worker) — the
    * SESSION's own wake turn (docs/fix/autoaccept-wake-turns.md A4).
    *
    * The prefix test is stateless on purpose: a wake turn that ended, and a
@@ -744,6 +748,15 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * The session's scheduled wakes as the daemon last reported them (bounded
+   * here). Undefined: no report yet, an older daemon, or a client whose daemon
+   * is not trusted to start its own turns (a pod's table is dropped, AGENTS §7).
+   */
+  get schedules(): readonly ScheduleRow[] | undefined {
+    return this.id ? this.client.schedulesOf(this.id) : undefined;
+  }
+
+  /**
    * Subscribe to this session's queue as the daemon reports it (every
    * writer's rows, live or a resync's); the current state, if any, is given
    * at once. Returns an unsubscribe (docs/feat/tui-foreign-turns.md C7).
@@ -880,6 +893,50 @@ export class RemoteSession implements SessionStreamListener {
       return Promise.resolve({ killed: false });
     }
     return this.client.killJob(this.id, jobId);
+  }
+
+  /**
+   * Subscribe to this session's scheduled wakes as the daemon reports them
+   * (bounded and sanitized by the client); the current table, if any, is given
+   * at once. A wake fires between turns, so this fires while idle. The notice
+   * carries the daemon's own count beside the rows (it caps 10, this client 32).
+   * Returns an unsubscribe (docs/feat/cron-tool.md D5).
+   */
+  onSchedules(
+    listener: (report: { rows: readonly ScheduleRow[]; count: number }) => void,
+  ): () => void {
+    const unsubscribe = this.client.onSessionSchedules((notice) => {
+      if (notice.sessionId === this.id) {
+        listener({ rows: notice.rows, count: notice.count });
+      }
+    });
+    const now = this.schedules;
+    if (now) {
+      // A table already reported: the count is its length (the client's bound is
+      // 32 against the daemon's 10, so nothing was cut — H1's reasoning).
+      listener({ rows: now, count: now.length });
+    }
+    return unsubscribe;
+  }
+
+  /**
+   * Drop one scheduled wake (`session/schedule_delete`, docs/feat/cron-tool.md
+   * D5). A refusal (unknown id, an older daemon) is a RESULT with a `reason`,
+   * never a throw at the TUI. A client whose daemon is not trusted to schedule
+   * wakes (a pod, `run`/`attach`) answers its own refusal and sends nothing: a
+   * pod can neither claim nor cancel a wake on the laptop's behalf (AGENTS §7).
+   */
+  deleteSchedule(scheduleId: string): Promise<ScheduleDeleteResult> {
+    if (!this.id) {
+      return Promise.resolve({ deleted: false, reason: "this session is not open yet" });
+    }
+    if (!this.daemonWakes) {
+      return Promise.resolve({
+        deleted: false,
+        reason: SCHEDULE_UNTRUSTED_DAEMON,
+      });
+    }
+    return this.client.deleteSchedule(this.id, scheduleId);
   }
 
   /**
@@ -1650,6 +1707,7 @@ export class RemoteSession implements SessionStreamListener {
     turnId: string,
     prompt: string,
     attachments?: readonly AttachmentRef[],
+    schedule?: { readonly id: string; readonly spec: string },
   ): ActiveTurn {
     const turn: ActiveTurn = {
       turnId,
@@ -1677,6 +1735,9 @@ export class RemoteSession implements SessionStreamListener {
         type: "user_message",
         text: prompt,
         ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
+        // The scheduled wake that started it (S2 Review 1): one gate for both
+        // doors (`firedScheduleRef`), never sanitizing in a component.
+        ...firedScheduleRef(schedule, this.daemonWakes),
       });
     }
     this.raise({
@@ -1846,7 +1907,7 @@ export class RemoteSession implements SessionStreamListener {
           if (!own.ended) this.onUpdate(own, update);
           return;
         }
-        this.startForeign(update.turnId, update.prompt, update.attachments);
+        this.startForeign(update.turnId, update.prompt, update.attachments, update.schedule);
         return;
       }
       case "turn_end": {
@@ -1874,6 +1935,7 @@ export class RemoteSession implements SessionStreamListener {
       case "queued":
       case "subagents":
       case "jobs":
+      case "schedules":
       case "subagent_notify":
       case "subagent_message":
         return;
@@ -1959,6 +2021,9 @@ export class RemoteSession implements SessionStreamListener {
             type: "user_message",
             text: update.prompt,
             ...(hasRefs(update.attachments) ? { attachments: update.attachments } : {}),
+            // Same gate as `startForeign` (a wake turn this session DID start,
+            // re-delivered after a reset).
+            ...firedScheduleRef(update.schedule, this.daemonWakes),
           });
         }
       }
@@ -1980,6 +2045,7 @@ export class RemoteSession implements SessionStreamListener {
       update.type === "queued" ||
       update.type === "subagents" ||
       update.type === "jobs" ||
+      update.type === "schedules" ||
       update.type === "subagent_notify" ||
       update.type === "subagent_message"
     ) {

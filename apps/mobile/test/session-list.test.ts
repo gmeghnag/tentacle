@@ -227,7 +227,7 @@ describe("rows", () => {
     expect(sections.archived.map((r) => r.sessionId)).toEqual(["old"]);
   });
 
-  test("badges: running, attached count, job count", () => {
+  test("badges: running, attached count, job count, then armed wakes (cron-tool S6)", () => {
     const [row] = rows(
       [entry({ sessionId: "a", running: true, attached: 2, jobs: 3, updatedAt: NOW })],
       NOW,
@@ -237,6 +237,21 @@ describe("rows", () => {
     expect(quiet?.badges).toEqual([]);
     const [one] = rows([entry({ sessionId: "c", attached: 1, jobs: 1 })], NOW).active;
     expect(one?.badges).toEqual(["attached", "1 job"]);
+    // A wake is the least urgent fact, so it comes last (the mockup's `◷ 2`).
+    const [wakes] = rows([entry({ sessionId: "d", jobs: 1, schedules: 2 })], NOW).active;
+    expect(wakes?.badges).toEqual(["1 job", "2 wakes"]);
+    const [single] = rows([entry({ sessionId: "e", schedules: 1 })], NOW).active;
+    expect(single?.badges).toEqual(["1 wake"]);
+    // A daemon that reports no table (an older one) says nothing, never "0 wakes".
+    const [none] = rows([entry({ sessionId: "f", schedules: 0 })], NOW).active;
+    expect(none?.badges).toEqual([]);
+  });
+
+  test("a row carries the wake count as its own fact (M8's `◷ 2`), 0 when unreported", () => {
+    const [two] = rows([entry({ sessionId: "a", schedules: 2 })], NOW).active;
+    expect(two?.wakes).toBe(2);
+    const [unreported] = rows([entry({ sessionId: "b" })], NOW).active;
+    expect(unreported?.wakes).toBe(0);
   });
 
   test("a future updatedAt is clamped to 'just now', never 'in 3 minutes'", () => {

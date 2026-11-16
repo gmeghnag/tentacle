@@ -16,6 +16,8 @@ describe("toolLabel", () => {
     // `present` (docs/feat/model-artifacts.md S6a): the card's header reads
     // `Present`, so it has to be a label rather than the raw tool name.
     expect(toolLabel("present")).toBe("Present");
+    expect(toolLabel("schedule_create")).toBe("Schedule");
+    expect(toolLabel("schedule_control")).toBe("Schedules");
   });
 
   test("an unknown name (MCP, future tool) displays as itself", () => {

@@ -3826,6 +3826,91 @@
       "required": ["cause", "id", "text"],
       "type": "object"
     },
+    "ScheduleDeleteParams": {
+      "additionalProperties": true,
+      "properties": {
+        "scheduleId": {
+          "$ref": "#/$defs/ScheduleId"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["scheduleId", "sessionId"],
+      "type": "object"
+    },
+    "ScheduleDeleteResult": {
+      "additionalProperties": true,
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": ["deleted"],
+      "type": "object"
+    },
+    "ScheduleId": {
+      "maxLength": 64,
+      "minLength": 1,
+      "type": "string"
+    },
+    "ScheduleRow": {
+      "additionalProperties": true,
+      "properties": {
+        "createdAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expiresAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fires": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "nextAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "spec": {
+          "type": "string"
+        }
+      },
+      "required": ["createdAt", "fires", "id", "kind", "nextAt", "prompt", "spec"],
+      "type": "object"
+    },
+    "SchedulesUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "schedules": {
+          "items": {
+            "$ref": "#/$defs/ScheduleRow"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "schedules",
+          "type": "string"
+        }
+      },
+      "required": ["schedules", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "SeedTitle": {
       "additionalProperties": true,
       "properties": {
@@ -4036,6 +4121,10 @@
         },
         "running": {
           "type": "boolean"
+        },
+        "schedules": {
+          "minimum": 0,
+          "type": "integer"
         },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
@@ -4371,6 +4460,7 @@
           "permission_resolved": "#/$defs/PermissionResolvedUpdate",
           "plan": "#/$defs/Plan",
           "queued": "#/$defs/QueuedUpdate",
+          "schedules": "#/$defs/SchedulesUpdate",
           "session_closed": "#/$defs/SessionClosed",
           "session_settings": "#/$defs/SessionSettingsUpdate",
           "session_title": "#/$defs/SessionTitleUpdate",
@@ -4463,6 +4553,9 @@
         },
         {
           "$ref": "#/$defs/JobsUpdate"
+        },
+        {
+          "$ref": "#/$defs/SchedulesUpdate"
         },
         {
           "$ref": "#/$defs/SubagentNotify"
@@ -4669,6 +4762,12 @@
         },
         "queued": {
           "$ref": "#/$defs/QueueState"
+        },
+        "schedules": {
+          "items": {
+            "$ref": "#/$defs/ScheduleRow"
+          },
+          "type": "array"
         },
         "since": {
           "$ref": "#/$defs/HistoryCut"
@@ -5151,6 +5250,19 @@
         },
         "prompt": {
           "type": "string"
+        },
+        "schedule": {
+          "additionalProperties": true,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/ScheduleId"
+            },
+            "spec": {
+              "type": "string"
+            }
+          },
+          "required": ["id", "spec"],
+          "type": "object"
         },
         "turnId": {
           "$ref": "#/$defs/TurnId"
@@ -5868,6 +5980,14 @@
       },
       "result": {
         "$ref": "#/$defs/ResolvePermissionResult"
+      }
+    },
+    "session/schedule_delete": {
+      "params": {
+        "$ref": "#/$defs/ScheduleDeleteParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ScheduleDeleteResult"
       }
     },
     "session/send_now": {

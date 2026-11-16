@@ -16,6 +16,8 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   agent_task: "Agent",
   skill: "Skill",
   present: "Present",
+  schedule_create: "Schedule",
+  schedule_control: "Schedules",
 };
 
 /** The display label for a tool name; the name itself when it has none. */

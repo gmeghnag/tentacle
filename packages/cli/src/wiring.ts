@@ -53,6 +53,7 @@ import {
   type JobController,
   type ModelProvider,
   PermissionBroker,
+  type ScheduleLimits,
 } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
@@ -66,6 +67,8 @@ import {
   createAgentControlTool,
   createContextResetTool,
   createMoveSessionTool,
+  createScheduleControlTool,
+  createScheduleCreateTool,
   createSkillActivator,
   createSkillTool,
   createTaskTool,
@@ -428,9 +431,34 @@ export interface BuildAgentOptions {
    * reaching other workloads would need cluster credentials inside the pod
    * (AGENTS §7, "a pod is not trusted").
    */
+  /**
+   * The session's scheduled wakes (docs/feat/cron-tool.md D1/D2): the LAZY link
+   * `AgentContext.schedules` hands the factory. Present → the agent is offered
+   * `schedule_create` (asks) and `schedule_control`. The host passes it ONLY
+   * where it schedules — `serve` and the local worker; a pod daemon's host has
+   * no table, so no link and no tools (owner Q4, AGENTS §7).
+   */
+  readonly schedules?: (() => import("@tentacle/core").ScheduleLink | null) | undefined;
   readonly workloadShell?:
     | { readonly backend: import("@tentacle/tools").WorkloadShellBackend }
     | undefined;
+}
+
+/**
+ * A host's `schedules.*` config → the core's create limits (docs/feat/cron-tool.md
+ * D3, owner Q6). Read from the HOST's own config (never carried): `serve` and the
+ * worker pass the result as `SessionHostOptions.schedules.limits`.
+ */
+export function scheduleLimitsOf(config: TentacleConfig): ScheduleLimits {
+  const minute = 60_000;
+  const day = 86_400_000;
+  return {
+    maxJobs: config.schedules.maxJobs,
+    minIntervalMs: config.schedules.minIntervalMinutes * minute,
+    ttlMs: config.schedules.expiryDays * day,
+    maxAheadMs: config.schedules.maxAheadDays * day,
+    promptMaxChars: config.schedules.promptMaxChars,
+  };
 }
 
 /** `agent_task`'s model list over the tunnel: the laptop's selectable names, with their text. */
@@ -701,6 +729,14 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       : undefined;
   if (workloadShells !== undefined) {
     tools.register(createWorkloadShellTool(workloadShells));
+  }
+  // Scheduled wakes (docs/feat/cron-tool.md D1/D2): only with the host's link —
+  // `serve` and the worker. Never a pod daemon (no link), never a child agent
+  // (`subagent.ts`'s filter). The link is looked up per call: the table is the
+  // SESSION's, so a settings sync that rebuilds this agent keeps it.
+  if (options.schedules !== undefined) {
+    tools.register(createScheduleCreateTool(options.schedules));
+    tools.register(createScheduleControlTool(options.schedules));
   }
 
   const agent = new Agent({

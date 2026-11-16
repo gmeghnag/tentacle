@@ -36,6 +36,12 @@ export interface SessionSummary {
   readonly archived: boolean;
   /** Background jobs running now; absent for an archived entry. */
   readonly jobs?: number;
+  /**
+   * Armed scheduled wakes (docs/feat/cron-tool.md D5): a live session on a host
+   * that schedules. Absent for an archived entry (its wakes are frozen and do
+   * not fire) and where the host never schedules (a pod daemon).
+   */
+  readonly schedules?: number;
 }
 
 /** A position in the order: the sort key of one entry. */
@@ -89,6 +95,7 @@ export function toSessionList(
       attached: s.attached,
       archived: s.archived,
       ...(s.jobs !== undefined ? { jobs: s.jobs } : {}),
+      ...(s.schedules !== undefined ? { schedules: s.schedules } : {}),
     };
     if (after === undefined || compare(entry, after) > 0) {
       entries.push(entry);

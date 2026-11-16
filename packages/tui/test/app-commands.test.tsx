@@ -99,6 +99,7 @@ describe("S0 command smoke: every built-in command answers", () => {
       "/mcp",
       "/skills",
       "/artifacts",
+      "/schedule",
       "/agents",
       "/settings",
       "/exit",

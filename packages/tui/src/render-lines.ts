@@ -25,6 +25,7 @@ import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
 import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
+import { firedScheduleHead } from "./schedule-view.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 import {
@@ -792,7 +793,18 @@ export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
           ? []
           : userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
       const images = (item.images ?? []).map((row) => theme.subtle(row));
-      return [...(item.restart ? [theme.subtle("restart prompt")] : []), ...rows, ...images];
+      // A fired turn's own head (cron-tool S5, M4 option B): the styled row the
+      // `turn_start.schedule` ref earns. No ref → nothing here, and the durable
+      // `[scheduled …]` prefix in the text is the whole row (option A).
+      const fired = firedScheduleHead(item.schedule, item.text);
+      return [
+        ...(fired === ""
+          ? []
+          : [theme.accent(truncateCells(fired, Math.floor(opts.width ?? DEFAULT_WIDTH)))]),
+        ...(item.restart ? [theme.subtle("restart prompt")] : []),
+        ...rows,
+        ...images,
+      ];
     }
     case "assistant":
       return assistantLines(item.text);

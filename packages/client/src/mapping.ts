@@ -38,6 +38,14 @@ export type SessionEvent =
       readonly type: "user_message";
       readonly text: string;
       readonly attachments?: readonly AttachmentRef[];
+      /**
+       * The scheduled wake that started this turn (`turn_start.schedule`,
+       * docs/feat/cron-tool.md D5, owner Q9 = B): display data for a styled
+       * fired row. Absent for an ordinary turn, for an older daemon, and on a
+       * reload (the durable `[scheduled sc-1 · …]` prefix in `text` is then the
+       * only truth, M4 option A).
+       */
+      readonly schedule?: { readonly id: string; readonly spec: string };
     }
   /**
    * The daemon sent an update type this client does not know (a newer
@@ -345,7 +353,8 @@ export function updateToEvent(
     // `session_title` by its title listeners (it is not turn-scoped), and
     // `queued` by its queue listeners (`RemoteClient`, not turn-scoped either),
     // `subagents` by its own (likewise), `jobs` by its own (a shell job's list,
-    // likewise), `subagent_notify` by its notify
+    // likewise), `schedules` by its own (a scheduled wake's table, likewise),
+    // `subagent_notify` by its notify
     // listeners (a child's message to the agent, likewise), `subagent_message`
     // by its own (the USER's message to a child, likewise), `session_settings`
     // by its settings-change listeners (likewise).
@@ -353,6 +362,7 @@ export function updateToEvent(
     case "queued":
     case "subagents":
     case "jobs":
+    case "schedules":
     case "subagent_notify":
     case "subagent_message":
     case "session_settings":

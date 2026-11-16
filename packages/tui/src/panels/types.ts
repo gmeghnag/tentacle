@@ -11,6 +11,7 @@ import type { ArtifactsData } from "../artifacts-panel.ts";
  * `panel.ts` re-exports every name below, so no importer changed.
  */
 import type { McpServerView } from "../mcp-panel.ts";
+import { SCHEDULES_START, type ScheduleDockRow, type SchedulesState } from "../schedule-view.ts";
 import type { SessionsState, SessionsView } from "../sessions-panel.ts";
 import { SESSIONS_START } from "../sessions-panel.ts";
 import type { SkillsListView } from "../skills-panel.ts";
@@ -49,7 +50,23 @@ export interface ArtifactsPanel {
   readonly now: number;
 }
 
-export type OpenPanel = TreePanel | SessionsPanel | ArtifactsPanel;
+/** `/schedule` (docs/feat/cron-tool.md S5, mockup M3): a flat list with its own cursor and delete confirm. */
+export interface SchedulesPanel {
+  readonly kind: "schedule";
+  /** The daemon's table; `undefined` = never reported (a pod, an older daemon). */
+  readonly data: readonly ScheduleDockRow[] | undefined;
+  readonly state: SchedulesState;
+  /** When the rows' distances were computed (`next 14:30 (in 9m)`). */
+  readonly now: number;
+}
+
+export type OpenPanel = TreePanel | SessionsPanel | ArtifactsPanel | SchedulesPanel;
+
+/** The `/schedule` panel (docs/feat/cron-tool.md S5): the daemon's table, or `undefined` until it reports. */
+export const schedulesPanel = (
+  now: number,
+  data: readonly ScheduleDockRow[] | undefined = undefined,
+): SchedulesPanel => ({ kind: "schedule", data, state: SCHEDULES_START, now });
 
 /** The `/sessions` panel in its loading state (or showing `data`). */
 export const sessionsPanel = (now: number, data: SessionsView | null = null): SessionsPanel => ({

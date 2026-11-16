@@ -305,8 +305,8 @@ describe("S4 · Session info · bands on a sheet, and the sheet's own close glyp
     ]) {
       expect(info).toContain(id);
     }
-    expect(info).toContain("testID={`session-info-${sectionId}-${row.title}`}");
-    expect(info).toContain("testID={`session-info-${sectionId}-${row.title}-switch`}");
+    expect(info).toContain("testID={`session-info-${sectionId}-${rowIdentity(row)}`}");
+    expect(info).toContain("testID={`session-info-${sectionId}-${rowIdentity(row)}-switch`}");
   });
 });
 
