@@ -1929,3 +1929,70 @@ M13-note-not-once: 1 fail :: what Off does is said once: under the servers, or u
   `protocol.d/` note.
 
 **S5: DONE** (with the debt above: no header count, e2e not run here).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Verdict: APPROVE (S5).** No HIGH or MEDIUM finding. Scope: `git diff
+main...HEAD`, slice S5 only. The reviewer is the same model family as the S5
+executor (claude-opus-5-5). Only the context is fresh, so blind spots shared
+by both passes may survive.
+
+**Gate (re-run here):**
+- The 4 S5 test files: 109 pass, 0 fail.
+- `bun run lint`: 1690 files checked, nothing to fix (the 0/0 baseline).
+- `bun run typecheck` (root + mobile + relay): clean.
+- The full `bun test` was not re-run. The executor's run reports 12206 pass
+  and 5 opt-in skips.
+
+**Premises checked (all TRUE):**
+- `RemoteSession.capabilities` / `onCapabilities` / `setCapability`: a
+  `MethodNotFound` clears the state (`packages/client/src/remote-session.ts:357-398`).
+- The daemon emits the echo synchronously, before it answers
+  (`hosted-session.ts:2686-2709`, `emit` at `:2139`). So the phone's
+  pending-op match cannot be raced into a false "changed on <me>".
+- `session/skills` `model` does not depend on `disabled` (`daemon/src/mapping.ts:99-101`).
+  So `locked = !model && !modelAfterReset` never locks a skill that was only
+  turned off, and the rule is the same as the TUI's `skillSwitch`
+  (`tui/src/capability-toggles.ts:105`).
+
+**§7 invariants:**
+- **One session path:** holds. The switches ride the screen's own
+  `RemoteSession`. There is no new frame and no second client.
+- **Logic in pure modules:** holds. Phase, diff, echo matching and copy live
+  in `session-info.ts`. The sheet only maps `row.switch` to a `Switch`.
+- **Protocol:** untouched, so no `protocol.d/` note is needed.
+- **Untrusted text:** `by`, the refusal text and names all pass
+  `sanitizeDisplay`.
+
+**Mutations** (`.tentacle/tmp/session-capabilities/review-mut.ts`; the tree was
+restored byte-identical and `git status` is clean). All 4 were killed:
+- locked ignores `modelAfterReset`: 1 fail.
+- `by` not sanitized: 1 fail.
+- refusal text not sanitized: 1 fail.
+- offline switch left interactive: 6 fail.
+
+The executor's 13 mutations are recorded above. They were not re-run.
+
+**Attacks tried:**
+1. **Own echo arriving after the answer**, so the phone's own change would show
+   "changed on <me>". Not possible: the daemon emits synchronously before it
+   answers.
+2. **A disabled skill misread as locked**, so it could never be re-enabled. Not
+   possible: the flags are independent (premise above).
+3. **The sheet closed while a set is pending.** `finally` settles the op, and
+   the next open re-reads `lastCaps`. No stale note is left.
+4. **Ghost switches** (offline, not-open, unsupported, locked) sending a set.
+   The controller guards on `phase`, and the sheet sets `disabled`. Both are
+   pinned by tests.
+
+**Accepted debt, not findings:**
+- The e2e step is not run here.
+- No "N of M on" in the section header.
+- The `App.tsx` adapter is covered only by typecheck and e2e.
+- The feed is bound to the handle at open, the same pattern as auto-accept.
+
+**How the executor behaved:** honest. It stated that the pure model's red came
+from mutation, not from a literal red run. Its drift (`sanitizeDisplay` used for
+`untrustedText`) is documented and justified.
