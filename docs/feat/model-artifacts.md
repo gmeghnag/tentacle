@@ -1252,3 +1252,30 @@ not this slice's; this round only pins the wire bound it relies on.
 - **Regression sweep:** M1–M11 each make at least one test fail. Each mutation was reverted, and `git status` was clean afterwards. The fix diff touches only the read-result schema, its tests and the regenerated JSON. Nothing else on the wire changed.
 - **Gate:** `bun test packages/protocol` → 441 pass, 0 fail. `bun run lint` clean (1664 files). `bun run typecheck` clean.
 - **Carried to S2/S5 (not S1 findings):** S2 must keep `callId` ≤ 256 characters. S5 must still check that the read's `size` equals `meta.size`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16*
+
+### S2 — Binary confined read + pure kind/card/CSP helpers: PASS (no HIGH/MEDIUM)
+
+This was a fresh-context review of `git diff main...HEAD`, limited to S2. The reviewer is the same model family as the S2 executor, so blind spots the two share can survive both passes.
+
+- **Gate (narrow):** the 7 S2 test files → `80 pass, 0 fail`. `bun run lint` → `Checked 1688 files … No fixes applied.` `bun run typecheck` → clean. The full `bun test` was not re-run here; Execution reports `12172 pass, 5 skip`.
+- **Mutations** (`.tentacle/tmp/model-artifacts/rev-s2/mut.ts`; each one was reverted, and the tree stayed clean):
+  - drop `within` (the plan's target) → 5 fail
+  - judge the secret check on the link path instead of the target → 2 fail
+  - drop the post-read length check → 1 fail
+  - make the size cap off by one → 1 fail
+- **§7 "what leaves the workspace" (`host-execution.ts` `readBytes`/`confineRead`):** the code checks, in order: the real path, then root-only `within`, then the secret check on the workspace-relative target, then an `O_NOFOLLOW|O_NONBLOCK` open, then `fstat` is a regular file, then a re-confine with a dev/ino match, then size before the read, then length = size. Every listed failure mode (T2.1–T2.5) is pinned. A path with the wrong case on macOS is refused, never let through.
+- **Attacks that found nothing:**
+  - A hardlink to `~/.ssh/id_rsa` inside the workspace is read. Making one needs an approved shell command, and that command could just as well `cp` the key, so nothing new is exposed.
+  - `.ENV` and `.env.` are refused.
+  - A text `kind` hint never overrides binary magic.
+  - The CSP prefix comes first, and the offline policy has no `media-src`, so media falls back to `default-src 'none'`.
+  - A blob worker is blocked, because `worker-src` falls back to `script-src 'unsafe-inline'`.
+  - Nested `details` keeps the discriminant. Its consumers narrow it, and the mobile line is pinned.
+- **Carried forward:**
+  - **S6b:** an SVG wrapped with the HTML prefix must be written as `.html`. Under `.svg`, the meta CSP is not honoured, and the file is no longer valid XML.
+  - **S3:** clamp `callId` to ≤ 256 characters, and refuse a 0-byte file, because `ArtifactMetaSchema` refuses `size` 0.
+- **Executor behaviour:** the report is honest. Documented drift (nested detail, relative-path secret check) matches the code, and the surviving M4 mutation is explained correctly.
