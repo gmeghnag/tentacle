@@ -173,6 +173,31 @@
     "AgentCapabilities": {
       "additionalProperties": true,
       "properties": {
+        "documents": {
+          "additionalProperties": true,
+          "properties": {
+            "input": {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            "kinds": {
+              "items": {
+                "maxLength": 32,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 16,
+              "type": "array"
+            },
+            "maxBytes": {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["input", "kinds"],
+          "type": "object"
+        },
         "images": {
           "additionalProperties": true,
           "properties": {
@@ -510,6 +535,14 @@
         "durationMs": {
           "minimum": 0,
           "type": "integer"
+        },
+        "media": {
+          "items": {
+            "$ref": "#/$defs/MessageMedia"
+          },
+          "maxItems": 5,
+          "minItems": 1,
+          "type": "array"
         },
         "note": {
           "$ref": "#/$defs/MessageNote"
@@ -935,6 +968,87 @@
         }
       },
       "required": ["addresses", "cwd", "startedAt"],
+      "type": "object"
+    },
+    "DocumentContent": {
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "const": "pdf",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "pattern": "^[^\\p{Cc}]*$",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/DocumentSource"
+        },
+        "type": {
+          "const": "document",
+          "type": "string"
+        }
+      },
+      "required": ["kind", "name", "source", "type"],
+      "type": "object"
+    },
+    "DocumentSource": {
+      "discriminator": {
+        "mapping": {
+          "ref": "#/$defs/DocumentSourceRef",
+          "text": "#/$defs/DocumentSourceText"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DocumentSourceRef"
+        },
+        {
+          "$ref": "#/$defs/DocumentSourceText"
+        }
+      ]
+    },
+    "DocumentSourceRef": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "size": {
+          "exclusiveMinimum": 0,
+          "maximum": 15728640,
+          "type": "integer"
+        },
+        "type": {
+          "const": "ref",
+          "type": "string"
+        }
+      },
+      "required": ["id", "size", "type"],
+      "type": "object"
+    },
+    "DocumentSourceText": {
+      "additionalProperties": true,
+      "properties": {
+        "pages": {
+          "exclusiveMinimum": 0,
+          "maximum": 1000000,
+          "type": "integer"
+        },
+        "text": {
+          "maxLength": 65536,
+          "type": "string"
+        },
+        "type": {
+          "const": "text",
+          "type": "string"
+        }
+      },
+      "required": ["pages", "text", "type"],
       "type": "object"
     },
     "DsmlLeakUpdate": {
@@ -2223,6 +2337,33 @@
       "required": ["servers"],
       "type": "object"
     },
+    "MessageMedia": {
+      "additionalProperties": true,
+      "properties": {
+        "chars": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "pattern": "^[^\\p{Cc}]*$",
+          "type": "string"
+        },
+        "pages": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["kind", "name"],
+      "type": "object"
+    },
     "MessageNote": {
       "additionalProperties": true,
       "properties": {
@@ -2271,6 +2412,14 @@
         "durationMs": {
           "minimum": 0,
           "type": "integer"
+        },
+        "media": {
+          "items": {
+            "$ref": "#/$defs/MessageMedia"
+          },
+          "maxItems": 5,
+          "minItems": 1,
+          "type": "array"
         },
         "note": {
           "$ref": "#/$defs/MessageNote"
@@ -2325,6 +2474,14 @@
         "durationMs": {
           "minimum": 0,
           "type": "integer"
+        },
+        "media": {
+          "items": {
+            "$ref": "#/$defs/MessageMedia"
+          },
+          "maxItems": 5,
+          "minItems": 1,
+          "type": "array"
         },
         "note": {
           "$ref": "#/$defs/MessageNote"
@@ -2793,6 +2950,7 @@
       "discriminator": {
         "mapping": {
           "attachment": "#/$defs/AttachmentContent",
+          "document": "#/$defs/DocumentContent",
           "image": "#/$defs/ImageContent",
           "resource": "#/$defs/ResourceContent",
           "text": "#/$defs/TextContent"
@@ -2811,6 +2969,9 @@
         },
         {
           "$ref": "#/$defs/AttachmentContent"
+        },
+        {
+          "$ref": "#/$defs/DocumentContent"
         }
       ]
     },

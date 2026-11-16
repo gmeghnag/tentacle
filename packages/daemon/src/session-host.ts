@@ -70,6 +70,7 @@ import {
   reconcileOnReload,
   restoredActivity,
 } from "./persisted-session.ts";
+import type { DocumentPolicy } from "./prompt-documents.ts";
 import { forgetPushRegistration, writePushRegistration } from "./push-store.ts";
 import { type SessionSummary, toSessionList } from "./session-list.ts";
 import type { ArchivedMeta, SessionPersister } from "./session-persister.ts";
@@ -238,6 +239,12 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * Unset = off, so every host that does not opt in keeps refusing them.
    */
   readonly images?: ImagePolicy;
+  /**
+   * What this daemon does with attached documents (docs/feat/pdf-read.md D4):
+   * `store` extracts uploaded bytes, `client` (a pod) takes text only. Unset =
+   * off: `initialize` advertises none and a `document` block is refused.
+   */
+  readonly documents?: DocumentPolicy;
   /** The clock for liveness stamps and the sweep (default `Date.now`). */
   readonly now?: () => number;
   /** Refuse to CREATE (or reopen) a session past this many live ones on the daemon. Unset = no limit. */
@@ -486,6 +493,11 @@ export class SessionHost {
    */
   get images(): ImagePolicy | undefined {
     return this.opts.images;
+  }
+
+  /** What this daemon does with attached documents (`initialize`, `session/prompt`). Unset = off. */
+  get documents(): DocumentPolicy | undefined {
+    return this.opts.documents;
   }
   /**
    * Whether this daemon SHARES the session's auto-accept (docs/feat/session-auto-accept.md

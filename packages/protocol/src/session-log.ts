@@ -331,7 +331,10 @@ export function replaceEntryType(m: object): "replace" | "media_replace" {
 }
 
 /** A message as an emitter holds it: core's readonly one, or the wire's parsed one. */
-export type AppendableMessage = Readonly<Omit<WireChatMessage, "attachments" | "toolCalls">> & {
+export type AppendableMessage = Readonly<
+  Omit<WireChatMessage, "attachments" | "toolCalls" | "media">
+> & {
+  readonly media?: ReadonlyArray<Readonly<NonNullable<WireChatMessage["media"]>[number]>>;
   readonly toolCalls?: ReadonlyArray<{
     readonly id: string;
     readonly name: string;
@@ -463,7 +466,11 @@ export type LogResult = z.infer<typeof LogResultSchema>;
 export type Sha256 = (text: string) => string;
 
 /** A message as both ends hold it (the wire's parsed object, or core's readonly one). */
-export type DigestibleMessage = Readonly<Omit<WireChatMessage, "toolCalls" | "attachments">> & {
+export type DigestibleMessage = Readonly<
+  Omit<WireChatMessage, "toolCalls" | "attachments" | "media">
+> & {
+  /** Display only, never hashed (like `note`): core's readonly array is accepted. */
+  readonly media?: ReadonlyArray<Readonly<NonNullable<WireChatMessage["media"]>[number]>>;
   readonly toolCalls?: readonly {
     readonly id: string;
     readonly name: string;

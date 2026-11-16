@@ -60,6 +60,7 @@ import {
   type ChatMessage,
   DISMISSED,
   type JobController,
+  type MessageMedia,
   type ModelProvider,
   NOTE_KIND,
   type PermissionBroker,
@@ -2410,6 +2411,8 @@ export class HostedSession {
     voice?: VoiceTurn,
     /** The scheduled wake that fires this turn (`fireSchedule` only; display data for `turn_start`). */
     schedule?: { readonly id: string; readonly spec: string },
+    /** Attached documents' chips (`resolvePromptDocuments`); their text is already in `content`. */
+    media?: readonly MessageMedia[],
   ): PromptResult {
     // The key first: a retry is answered even while a turn runs, or after it ended.
     const known = this.turns.get(turnId);
@@ -2464,6 +2467,7 @@ export class HostedSession {
       this.session.send(text, controller.signal, {
         ...(skill !== undefined ? { skill } : {}),
         ...(refs.length > 0 ? { attachments: refs } : {}),
+        ...(media !== undefined && media.length > 0 ? { media } : {}),
         ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
         ...(voice !== undefined ? { voice } : {}),
         beforeRun: this.beforeRunFn,

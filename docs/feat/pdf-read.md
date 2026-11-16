@@ -1278,6 +1278,118 @@ real-socket keepalive).
 
 *— claude-opus-5-5, 2026-11-16*
 
+### P4 — `document` block, `documents` capability, `media`, daemon extraction · executed by `claude-opus-5-5`, 2026-11-16
+
+**Start state.** An earlier, interrupted P4 attempt had left the slice mostly
+written but uncommitted, untested daemon-side, and failing `tsc`
+(`DigestibleMessage` vs core's readonly `media`). I checked that work against the
+plan rather than rewriting it, then finished it.
+
+**Load-bearing check (re-run).** `bun test packages/tools/test/pdf-extract.test.ts`
+is green: real pdf.js under Bun, in the Worker. The new daemon tests also drive
+the real `extractPdf` on generated PDFs. **Precondition 8 verified, not
+coupled:** every session gets an `AttachmentStore` whatever the image policy
+(`session-host.ts:1390`). `attachment/put` is not gated on `images`; only the
+advertisement reads it (`connection.ts:758`). So `documents` works with no vision.
+
+**As built (dependency order):**
+- protocol: in `content.ts` — `MAX_DOCUMENT_TEXT_CHARS` (64 KiB),
+  `DocumentSourceSchema`, `DocumentContentSchema` (`kind: z.literal("pdf")`,
+  control-free `name`), and a member of `PromptContentBlockSchema` only. In
+  `session.ts` — `MessageMediaSchema` (free `kind`) and
+  `ChatMessage.media` (≤ 5, `.optional().catch(undefined)`). Also
+  `AgentCapabilitiesSchema.documents` (`input` / `maxBytes?` / `kinds`, fail-soft).
+  In `session-log.ts` — `AppendableMessage`/`DigestibleMessage` take a readonly
+  `media`, and `canonicalMessage` does NOT hash it, the same as `note`: an older
+  build strips it, so a checkpoint must not depend on it. `protocol.json` is
+  regenerated (the drift test is green). No `protocol.d/` note: the change is
+  additive, and an older daemon refuses the new block with `InvalidParams`.
+- core: `pdf-text.ts` adds `sanitizeAttachedText`, `attachedPdfText` (verdicts;
+  footers say `[pages A-B not included]` and never name `fs_read`; hard-capped)
+  and `attachedDocument` (always re-runs `fileBlock` and the sanitiser/cap, and
+  returns `{block, media}`). It also adds `formatPdfText({readHint})`. In
+  `model.ts`, `MAX_ATTACHED_PDF_CHARS` is now the wire's
+  `MAX_DOCUMENT_TEXT_CHARS`, and `ChatMessage.media` / `MessageMedia` are added.
+- daemon: new `prompt-documents.ts` with `resolvePromptDocuments` and
+  `DocumentPolicy` (`store`+`extract` | `client`). `SessionHost.documents`
+  holds the policy. `Connection` advertises it in `initialize` and adds
+  `promptWithDocuments`. `HostedSession.prompt(..., media)` and the agent's
+  `SendOptions.media` reach the user message.
+- agent: `renderForModel` appends `ATTACHED_FILES_NOTE` to the model's copy of a
+  message that has `media`. The persisted message does not get it.
+- cli: `daemonDocumentPolicy("host"|"pod")` (`image-policy.ts`). The worker and
+  `serve` use `store` with `extractPdf`. `podSessionHost` uses `client`, with or
+  without `--model-proxy`.
+- client: `RemoteClient.send(..., documents?)` adds the blocks after the text
+  and image refs.
+
+**Drift from Implementation (and why):**
+1. `source` is a TAGGED union, `{type:"ref", id, size} | {type:"text", text,
+   pages}`, not `{ref:{…}} | {text, pages}`. The JSON Schema export accepts no
+   untagged union, and tagging makes "both/neither" unrepresentable. The
+   json-schema union count goes 10 → 11.
+2. The system-prompt line was moved to a per-message note (`renderForModel`),
+   added only on a message that has `media`. This leaves every other session's
+   system prompt and cache prefix untouched, and puts the note right next to the
+   data it covers. It is never persisted.
+3. Extraction does not happen in `splitPrompt`. `HostedSession.prompt` is
+   synchronous on purpose (its ack admits exactly one turn), so `Connection`
+   resolves the documents first. It holds no lock (the peer stays concurrent,
+   AGENTS §7) and then prompts with plain text. `splitPrompt` is unchanged, so a
+   `document` block that reaches it is still refused loudly. After the await the
+   session is **looked up again**, so a session closed during the extraction
+   refuses instead of starting a turn (race test, M6).
+4. A `too-many-pages` result is retried once with `pages: "1-100"`: the plan's
+   "all pages up to 100". The cut is stated in a footer.
+
+**Tests:**
+- `protocol/test/document-content.test.ts`: both sources; both/neither and
+  over-cap refused; control character in the name; unknown kind; `media` is
+  fail-soft, including inside a CRITICAL `message` entry; capability with free
+  strings.
+- `core/test/pdf-attach.test.ts`.
+- `agent/test/context-awareness.test.ts`: +1 for the note.
+- **new `daemon/test/prompt-documents.test.ts` (12)**, through a real
+  `Connection` with the real extractor:
+  - `document{ref}` → exactly one `<file … kind="pdf" pages="2">` plus `media`
+    in the log; the note appears only in the model's copy.
+  - `</file>` in `document{text}` is neutralised.
+  - Refused, recording nothing (the same `turnId` then works): not uploaded,
+    not a PDF, encrypted (names the file), scanned ("OCR"), 6 documents.
+  - Pod: advertises `client`, refuses `{ref}` even when the bytes were uploaded,
+    and **never parses**; takes `{text}`.
+  - No policy → nothing advertised and a loud refusal.
+  - Closed during the extraction → refused, no turn.
+  - sha mismatch (unit test, fake store).
+
+**Mutation checks** (`.tentacle/tmp/pdf-read/p4/mutate.ts`; each mutation is
+applied, its tests run, the file restored; the tree was verified clean after):
+```
+M1 media not fail-soft (drop .catch):          RED, 2 fail (both media fail-soft tests)
+M2 pod reads bytes (skip the client check):    RED, 1 fail (pod refuses {ref}, never parses)
+M3 client block trusted (raw <file> for text): RED, 2 fail (</file> neutralised; pod takes text)
+M4 no sha check:                               RED, 1 fail (bytes ≠ id refused)
+M5 no data note:                               RED, 2 fail (agent note; daemon end-to-end)
+M6 no re-lookup after extraction:              RED, 1 fail (closed during extraction)
+M7 no per-message cap:                         RED, 1 fail (6 documents refused)
+```
+
+**Not verified / debt:**
+- When a prompt is refused after its upload, the blob stays in the session
+  store under the store's existing budget/lifetime. Which rule frees it was not
+  traced (the plan's "[verify which]").
+- A retry with the same `turnId` while its documents are still extracting runs
+  the extraction again; the turn itself is still deduplicated by
+  `hosted.prompt`.
+- The changelog fragment `changelog.d/pdf-read.added.md` already covers attach
+  and was left as is.
+
+**Gate:** `bun run typecheck` (root + mobile + relay) exit 0 · `bun run lint`
+**1776 files, clean** · `bun test` **12934 pass, 5 skip, 0 fail** across 919
+files (the 5 are the same opt-ins as above).
+
+*— claude-opus-5-5, 2026-11-16*
+
 ## Review
 
 ### P1 — fresh-context adversarial review
