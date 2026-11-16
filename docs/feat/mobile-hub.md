@@ -710,3 +710,34 @@ regenerated and there is no `protocol.d/` note.
 *— recorded by claude-opus-5-5 (orchestrator), 2026-11-16*
 
 "Fallo fare a Opus, che deve esser fatto bene, estetico, funzionale, di facile utilizzo e bello." **Every slice (H1–H4) is executed by Opus** (`slices.txt` updated), as is mobile-chrome S10 (the base floating button). The bar is visual and tactile quality, not only green tests: executors compare the result against the chosen fan mockup (A) frame by frame, tune springs/stagger/haptics for feel, and the Review judges aesthetics and ease of use as well as correctness.
+
+### H1 + H2 — fresh-context adversarial review
+
+*— claude-opus-5-5, 2026-11-16* (same model as the executor, fresh context only: blind spots we share can survive both passes)
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM; the rest holds).
+
+1. **MEDIUM — Stop/Steer re-validation does not check that it is the same turn** (`apps/mobile/src/hub-actions.ts:177-186`).
+   `resolveCommit` asks "does *a* stoppable turn exist now", not "is the turn shown at the open still the one running".
+   Scenario: turn A runs, the user long-presses and highlights Stop, A ends, and turn B starts before the release (an outbox send-later flush, another device's prompt, or a queued follow-up). `resolveCommit("stop", ctxNow)` returns `run`, so H3's `stopTurn()` cancels B, a turn the user never saw start.
+   This breaks M7's convergence ("the turn has already ended → no-op + Already finished"). Fix: snapshot `turn.turnId` at the open (in `HubMenu` or as a `resolveCommit` argument) and return `noop{ALREADY_FINISHED}` when `ctxNow.turn?.turnId` differs. Add a red→green test for it.
+
+**Gate (re-run here).** The five touched test files pass, 110/0 · `bun run lint` is clean (1746 files, no fixes) · `bun run typecheck` is clean (root + mobile + relay). The full `bun test` was not re-run (the scope is the pure slices).
+
+**Mutations (reviewer's own, `.tentacle/tmp/mobile-hub/rev/mut.ts`; bytes restored, `git status` clean afterwards).** Each of these makes a test fail: a second `down` restarts the press (M16) · a stale timer accepted (M13) · sticky ignores `down` · drag cancel without `dragCancel` · a late-timer `up` becomes a tap · the notice ignores `ended` · the sticky hit radius +20 · no ring hysteresis. **One survives:** Attach without the `ended === null` guard (22/0). That is a nit: the guard is belt-and-braces, and no test pins it.
+
+**Attacks that found nothing.**
+- Timer after `up` / timer of an earlier press: ignored.
+- Wobble < SLOP then return: sticky.
+- Ring-boundary flicker: 4 pt band.
+- End-of-arc hysteresis is consistent with "midpoint + 4°" (`heldOff − bestOff < 2·hyst`).
+- `ids`/`items` length mismatch: `commit` → `CLOSE`.
+- Zero ids: no open, no haptic.
+- Import cycle `floating-button → hub-gesture → hub-fan → floating-button`: type-only, so it is erased.
+- §7 "logic in pure modules": all thresholds, hit-tests and ordering are in `.ts`, no React.
+- No protocol, persistence or daemon surface is touched.
+
+**Noted, not a finding.**
+- Until H3, Floating mode shows the S10 button at zero activity (`SessionScreen.tsx:524`). This is documented and the setting is off by default.
+
+**Executor behaviour.** The executor worked red-first. Drifts were recorded honestly (the item-order correction was backed by the sweep). Mutation logs were reproduced in kind.
