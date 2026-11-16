@@ -2811,3 +2811,16 @@ M7 targets the `gap` the fix adds, from `band-wiring.test.ts`'s prop guard
   TREE has one block per note and no nested text runs. It cannot prove pixels —
   a real device render is still the only proof of that, and it is not in this
   round.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · checks the fix commit `67e44b69` (`git diff HEAD~1`)*
+
+**Verdict: APPROVE.** Finding 1 is fixed, and I found no regression in the fix diff.
+
+- **Fix:** the new pure module `band-notes.ts` (`sectionNotes`) returns one entry per note, keyed by its role. `BandSection` now draws its notes in a column `View`, each note as a sibling `BandNote` `<Text>`, with `gap: 8`. The single-`footnote` path is unchanged: one `<Text>`, which still allows inline runs such as `InlineMono`.
+- **Mutation 1:** I wrapped `notes` in a `<Text>` inside `BandSection`. The 3 render tests in `band-notes.test.ts` failed (block per note, no nested Text, switch-note testID on a real view). Reverted.
+- **Mutation 2:** I gave the switch note the key `footer`. 2 tests failed, including the duplicate-key one. Reverted, and `git status` was clean.
+- **Checks:** `bun test apps/mobile` 1953 pass / 0 fail across 144 files. `bun run lint` clean (1695 files). `bun run typecheck` OK.
+- **Regression attacks:** `mock.module` replaces those modules for the whole test process, and `mock.restore` does not undo module mocks in Bun. I checked whether other tests use the mocked modules: the other three files that mention `react-native`, `expo-symbols` or the safe-area package only match them as text, and the full mobile suite stays green. So it is safe today, but a future test that renders RN will pick up the stubs. Not a finding. The three other `footnote=` callers (Computers, Settings) keep their old rendering. The `band-wiring` label test was rewritten to read the style blocks; I checked it against the new stylesheet and it still asserts `rowX`, `sectionTop` and the 6 pt bottom padding.
+- **Still owed from round 1:** flows 24/25 and the visual check against row D, blocked by `PushCore`.
