@@ -1908,3 +1908,64 @@ title's extension when it has one: **5 fail / 39 pass** across `artifact-open`,
 `os-open`, `app-artifacts` (T6b.1 ×3, T6b.3 save, the `other`-never-opened frame);
 reverted, 44 pass / 0 fail, no mutation token left in `tui/src`. The 5 skips (baseline
 names 3 opt-in) are not S6b's: the 9 S6b files run 0 skips.
+
+## Review
+
+### S6a + S6b — TUI card, `/artifacts`, opener: REQUEST-CHANGES (3 MEDIUM)
+
+*— claude-opus-5-5 (fresh-context reviewer), 2026-11-16. Same model family as the S6b executor (fresh context only): shared blind spots are possible.*
+
+**Gate.** 16 touched test files (tui S6a/S6b + registry/layer pins + cli
+`subagent-panel-controller`): **279 pass, 0 fail**. `bun run typecheck`: 24 errors,
+all in `packages/daemon` (S4: `session-artifacts.ts` 1, `session-log-store.ts` 2,
+`test/artifact-manifest.test.ts` 21). `bun run lint`: 1 error (format,
+`daemon/test/artifact-manifest.test.ts`, S4). Neither has an error in tui, core or cli.
+
+**Findings**
+
+1. **MEDIUM — the SVG CSP wrap is not pinned by any test** (`tui/src/artifact-open.ts:94`).
+   Mutation `wrapOf` → `kind === "html"` only (SVG unwrapped) → **44 pass / 0 fail** across
+   `artifact-open`, `os-open`, `app-artifacts`. The only SVG case (`artifact-open.test.ts:54`)
+   checks the file NAME. Failure: a regression writes a pod SVG as `ab12cd34.html` with NO
+   CSP, and it opens with scripts and full network. Fix: assert `wrap: "csp"` for svg in
+   `openPlan`/`artifactStep(save)`, plus one `os-open` write whose first bytes are the prefix.
+2. **MEDIUM — cards (and `^X^O`) are lost on every history replace.** The join runs only in
+   the mount watch effect (`App.tsx:1493`). `resetHistory`/`appendHistory` →
+   `historyItems` → `messagesToItems(messages)` with no map (`state.ts:693`), reached by the
+   activity snapshot after a dropped link (`useSessionLink.ts:347`), by `history_reset`
+   (`state.ts:707`), and by `/sessions` swaps (`swapSession`, `useSessionLink.ts:555`, which
+   doesn't re-run the effect). Failure: the link drops and resyncs, or the user switches to a
+   session with artifacts. The `present` rows go plain, and `Ctrl+X Ctrl+O` says "No artifact in
+   this transcript". This contradicts T6a ("after resume"). Fix: run the
+   `needsArtifactJoin` → `listArtifacts` join after each history commit/swap, with a frame test.
+3. **MEDIUM — the pod confirm says "network blocked", which is untrue** (`artifact-open.ts:130`).
+   CSP does not govern top-level navigation. A wrapped `file://` page with scripts on
+   can still `location = "https://x/?b"`, use `<meta http-equiv=refresh>` or `window.open`.
+   The phone has a navigation predicate and an escape suite (T7.2/T8.1); the Mac has
+   neither, and no test. Failure: the user approves a pod page because the prompt says
+   "network blocked", and the page beacons out or redirects to a phishing page. Fix: honest
+   wording (for example "no fetch/XHR; it can still navigate away"), or scripts off for pod
+   HTML (Owner Q5's fallback). The plan's "network blocked" claim (D8) needs the same fix.
+
+**Mutations (reviewer's own; applied by script, restored byte-identical, `git status` clean):**
+A SVG unwrapped → 44/0 (**survives**: finding 1) · B `saveName` keeps a leading dot → 43/1 ·
+C `newestArtifact` reversed → 42/2. The executor's M1–M13 were not re-run. M1 was re-run
+independently by the S6b re-spawn.
+
+**Attacks tried, nothing found:** a model title or path in the temp name (`<sha8>` +
+our ext; `PLAN_FILE_RE` re-guard at `os-open.ts:88`); `other` sent to an opener (save-only
+in both layers); the origin taken from the meta (it is `shownInPod`, `App.tsx:522`;
+engine TUIs pass `daemonInPod: true`, `cli/main.ts:1440`); pod bytes read before `y`
+(`runArtifact` confirms first); the confirm `y` approving a permission ask (the layer sits
+before `permission`, `layers.ts:50`); terminal writes (stdio ignore ×3); a save that
+overwrites (`wx`, numbered names); a leading-dot or separator save name (two guards).
+
+**Holds:** §7 terminal (no raw write), single broker (untouched), pod trust for the open path
+(origin from the runtime, confirm every time, not remembered, no network offer, temp dir
+`0700` under `os.tmpdir()`, removed at exit). **Residual, not counted above:** a pod `.zip`
+saved with `s` has no quarantine xattr, so Gatekeeper is bypassed for an `.app` inside it.
+The executor declared this debt, and it should be tracked in TODO.
+
+**Executor behaviour:** both executors recorded their drift and debt honestly and ran
+broad mutation sets. The SVG-wrap gap and the history-replace path were missed: both are
+cases they did not test, not false claims.
