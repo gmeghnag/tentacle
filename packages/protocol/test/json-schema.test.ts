@@ -323,6 +323,45 @@ const FIXTURES: Record<string, Json[]> = {
     { have: 0, complete: false },
     { have: 4, complete: true },
   ],
+  // The model presents an artifact (docs/feat/model-artifacts.md D1): the list
+  // is every VERSION oldest-first, a read is one aligned chunk plus the size.
+  "methods/artifact~1list/params": [{ sessionId: "s1" }],
+  "methods/artifact~1list/result": [
+    {
+      artifacts: [
+        {
+          artifactId: "report",
+          version: 1,
+          sha256: "a".repeat(64),
+          size: 1024,
+          mimeType: "text/html",
+          kind: "html",
+          title: "report.html",
+          callId: "c1",
+          createdAt: 1_700_000_000_000,
+        },
+        {
+          artifactId: "report",
+          version: 2,
+          sha256: "b".repeat(64),
+          size: 2048,
+          mimeType: "text/html",
+          kind: "html",
+          title: "report.html",
+          callId: "c2",
+          createdAt: 1_700_000_001_000,
+          source: "docs/report.html",
+        },
+      ],
+      truncated: false,
+    },
+    { artifacts: [] },
+  ],
+  "methods/artifact~1read/params": [{ sessionId: "s1", sha256: "a".repeat(64), offset: 0 }],
+  "methods/artifact~1read/result": [
+    { data: Buffer.from("abcd").toString("base64"), size: 4 },
+    { data: "", size: 4 },
+  ],
   // Pairing over the secure channel (docs/feat/device-pairing.md 9c): the code
   // and a display name; back, a device id and the computer that took it.
   "methods/device~1pair/params": [

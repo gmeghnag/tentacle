@@ -760,4 +760,153 @@ ALL PASS
 
 ## Execution
 
+*— deepseek-v4-pro (executor, S1), 2026-11-16*
+
+### S1 — Protocol: DONE
+
+**Load-bearing check re-run first** (the Context's Repro, worktree `feat/model-artifacts`,
+`main` merged @ `8ea2bb97`):
+
+```
+$ rg -n '"present"|artifact/' packages apps --glob '!**/node_modules/**' | wc -l
+4      # NOT the capability: relay-secret.ts's `read.kind === "present"` /
+       # `{ kind: "present"; text }` (4 hits, unrelated file). No `present` tool,
+       # no `artifact/*` method, no artifact module.
+$ rg -n 'readBytes|arrayBuffer\(\)|\.bytes\(\)' packages/core/src/execution.ts packages/exec/src/host-execution.ts | wc -l
+0
+$ ls apps/mobile/node_modules | rg -c 'webview'
+0   (exit 1: no match)
+```
+
+Verdict: the capability is still missing. One drift from the doc's expectation:
+the first command prints **4**, not 0 — those four hits are `relay-secret.ts`'s
+`kind: "present"` discriminant (a secret-prompt read state), unrelated to this
+feature; the artifact surface itself is absent (no `artifact/` method, no
+artifact module, no `present` tool). Not a blocker, the plan's assumption holds.
+
+**As built** (dependency order, protocol only — no other slice touched):
+
+1. `packages/protocol/src/artifact.ts` (new, 162 lines): `ARTIFACT_ID_RE`,
+   `MAX_ARTIFACT_BYTES` (20 MiB), `MAX_ARTIFACT_LIST` (500), the closed
+   `ARTIFACT_KINDS` + `ArtifactKind`, `ArtifactMetaSchema`/`ArtifactMeta`,
+   `artifactKindOf` (the ONE narrowing of the wire's free `kind`, unknown →
+   `"other"`), `ArtifactList{,Params,Result}Schema`,
+   `ArtifactRead{,Params,Result}Schema`, `ArtifactUnavailableReason` (TS type).
+   `title`/`source` use `ATTACHMENT_NAME_RE`; `sha256` uses `ATTACHMENT_ID_RE`;
+   the read chunk reuses `ATTACHMENT_CHUNK_B64_MAX`/`ATTACHMENT_CHUNK_BYTES`
+   (imported, not redefined — one source of truth for the chunk size).
+   `mimeType`/`kind` are FREE strings, exactly as D1 asks.
+2. `packages/protocol/src/index.ts`: one export line (`./artifact.ts`).
+3. `packages/protocol/src/jsonrpc.ts`: `DomainErrorCode.ArtifactUnavailable =
+   -32020` (next free after `PushStoreFailed: -32019`), doc'd with its reasons.
+4. `packages/protocol/src/methods.ts`: `Method.ArtifactList` = `"artifact/list"`,
+   `Method.ArtifactRead` = `"artifact/read"` + their two `RequestSchemas` rows.
+5. `packages/protocol/src/updates.ts`: `ToolCallUpdateSchema.artifact:
+   ArtifactMetaSchema.optional()` — the free field, `tool_call_update` stays
+   `display` in `UPDATE_CLASS` (untouched), no new update type, so no
+   `protocol.d/` note and no `PROTOCOL_VERSION` edit (still 24).
+6. `packages/protocol/schema/protocol.json`: regenerated with
+   `bun run protocol:bump` (the merge command: no notes, so it refreshed the
+   schema; `x-protocol-version` still 24). It now carries `ArtifactListParams`,
+   `ArtifactListResult`, `ArtifactMeta`, `ArtifactReadParams`,
+   `ArtifactReadResult`, the two `methods` rows, `ArtifactUnavailable: -32020`,
+   and the `artifact` property on `ToolCallUpdate`.
+7. `packages/protocol/test/json-schema.test.ts`: fixtures for both new methods
+   (`artifact~1list`, `artifact~1read`), so the zod ⇔ JSON Schema agreement test
+   covers them. Adding a method without its fixture fails that test's
+   "every method … has a fixture" case — an existing gate, not a new one.
+
+**Red before green** (`packages/protocol/test/artifact.test.ts`, new, 19 tests /
+86 assertions), written before the module and run first:
+
+```
+$ bun test packages/protocol/test/artifact.test.ts
+ 2 pass
+ 17 fail      # every fail on its OWN assertion (missing schema → `undefined` /
+              # `toBe(true)` mismatch), not on an import or compile error
+```
+
+Green after (same file): `19 pass, 0 fail, 86 expect() calls`.
+
+**Test coverage against T1** (`### Tests`): T1.1 = the six `ArtifactMetaSchema`
+cases (valid meta; slug has no traversal/uppercase; `title` refuses `\n`/`\t`/
+ESC and caps at 120; `size` 0 / negative / fractional / `MAX+1` refused;
+sha256/version; free `kind`/`mimeType`; dims bounded; unknown field stripped).
+T1.2 = an oversize `artifact` (and a bad title/artifactId) makes the whole
+`tool_call_update` frame invalid. T1.3 = `ToolCallUpdateSchema.omit({artifact})`
+parses a NEW frame and strips the field (forward compat). T1.4 = both
+`RequestSchemas` rows exist and are the same schema objects; both methods are
+also listed and parse in `json-schema.test.ts`; `artifactKindOf({kind:
+"hologram"})` → `"other"`. Plus: `ArtifactUnavailable` is -32020 and unique,
+`UPDATE_CLASS.tool_call_update` is still `display`, `KNOWN_UPDATE_TYPES` has no
+`artifact_presented`.
+
+**Failure-mode tests, as the plan's table demands for this slice:**
+
+- *"Daemon announces a 2 GiB artifact → `ArtifactMetaSchema.size ≤ 20 MiB` →
+  frame refused at parse"* — pinned twice: on the schema and on the frame
+  (`a meta the schema refuses makes the FRAME invalid`). **Mutation-verified**:
+  dropping `.max(MAX_ARTIFACT_BYTES)` turned exactly those two cases red
+  (`17 pass, 2 fail`), then restored.
+- *"New daemon, old app → the `artifact` field stripped"* — pinned by the
+  omit-shape case. **Mutation-verified**: deleting the field from
+  `ToolCallUpdateSchema` turned all three field cases red (`16 pass, 3 fail`),
+  then restored.
+- *A newer daemon's `kind`/`mimeType` must never refuse a frame* (the free-string
+  rule, `attachment.ts:10-13`). **Mutation-verified**: making `kind`
+  `z.enum(ARTIFACT_KINDS)` turned exactly that case red (`18 pass, 1 fail`),
+  then restored.
+- *Additive only* — no version bump, no new update kind, one free field, one
+  error code, two methods.
+
+**Drift from Implementation — two, both small and reconciled:**
+
+1. `ArtifactListResult`'s `truncated` is `.optional()` and the schema caps
+   `artifacts` at `MAX_ARTIFACT_LIST`, where D1's comment wrote "≤ 500,
+   `truncated`". Making the CAP a schema rule (not a store convention) is what
+   T1.1 asks ("refuse … > 20 MiB"-style bounds) and what the JSON-Schema export
+   needs; `truncated` stays optional because a list that fits says nothing
+   (the repo's "omit a field there is no value for" rule,
+   `session.ts:700-703`). No wire meaning changes: still "every version, oldest
+   first".
+2. `ArtifactReadResultSchema.size` carries `.max()`-less
+   `z.number().int().positive()` — a chunk's total size is the VERSION's size,
+   already capped by `ArtifactMetaSchema.size`; capping it a second time would
+   duplicate the constant. T1.1's "size 0 and > 20 MiB" case applies to the META
+   (where it is pinned) and the read's `0` is refused.
+
+No other divergence. Nothing in S2–S9 was implemented (no `readBytes`, no
+`present`, no store, no client, no TUI/phone code) — `rg` over the tree still
+shows only the protocol surface added here.
+
+**Gate** (worktree root):
+
+```
+$ bunx tsc --noEmit                    → exit 0
+$ bun run lint                         → Checked 1664 files. No fixes applied. (0 errors, 0 warnings — the §6 baseline)
+$ bun test                             → 12027 pass, 5 skip, 0 fail (12032 tests, 860 files, 450 s)
+```
+
+The 5 skips are pre-existing opt-in gates, none new and none touched by this
+slice: `packages/k8s/test/integration.live.test.ts` (no `TENTACLE_K8S_SERVER`),
+`packages/docker/test/integration.live.test.ts` (no `TENTACLE_DOCKER_TESTS`),
+`packages/cli/test/workload-shell-live.k8s.test.ts` + `session-hop.docker.test.ts`
+(the same two opt-ins), and `ws-server.test.ts`'s real-socket keepalive
+(`TENTACLE_SLOW_TESTS`) — checked one by one (`bun test` on them alone:
+`0 pass, 2 skip` for the cli pair). `confinement.test.ts`'s `skipIf(isRoot)`
+cases RUN here (uid 501: `46 pass, 0 fail`). No test added by S1 is skipped.
+`bun run protocol:bump` run: no `protocol.d/` notes ⇒ `PROTOCOL_VERSION` stays
+24, schema refreshed.
+
+**Changelog:** `changelog.d/model-artifacts.added.md` — ONE bullet. The plan says
+S9 writes it; the brief for THIS slice requires one fragment and forbids a second
+task-level file, so the fragment is written here, as a user-visible feature note
+for the whole feature (S2–S9 add no further fragment to it). `CHANGELOG.md` and
+`TODO.md` untouched.
+
+**Unverified / next:** the read path itself (chunked `readArtifact`, resume,
+sha256 verification) is S5's, and the load-bearing round-trip repro is S3's (T3.7);
+this slice only proves the wire shapes they will bind to. There is nothing in S1
+that can be verified end-to-end without those.
+
 ## Review

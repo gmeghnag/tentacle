@@ -7,6 +7,7 @@
  * clients (forward compatibility of a streamed event feed).
  */
 import { z } from "zod";
+import { ArtifactMetaSchema } from "./artifact.ts";
 import { AttachmentRefSchema, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachment.ts";
 import { ContentBlockSchema } from "./content.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
@@ -63,6 +64,14 @@ export const ToolCallUpdateSchema = z.object({
   durationMs: z.number().int().nonnegative().optional(),
   /** Set on a refused call the person replied to: their reply (display only, docs/feat/permission-reply.md). */
   denialReply: PermissionReplyTextSchema.optional(),
+  /**
+   * Set when the call PRESENTED an artifact (docs/feat/model-artifacts.md): its
+   * version's meta, so the card can be drawn live. A FREE field on a display
+   * update (no new kind, no version bump): an older client strips it and shows
+   * the tool's text. A client re-reads `artifact/list` on it, so the gallery
+   * also learns of a present that no card was drawn for.
+   */
+  artifact: ArtifactMetaSchema.optional(),
 });
 
 export const PlanEntryStatusSchema = z.enum(["pending", "in_progress", "completed"]);

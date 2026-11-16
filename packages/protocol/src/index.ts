@@ -16,6 +16,7 @@ export * from "./jsonrpc.ts";
 export * from "./content.ts";
 export * from "./attachment.ts";
 export * from "./attachment-upload.ts";
+export * from "./artifact.ts";
 export * from "./pairing.ts";
 export * from "./device.ts";
 export * from "./push.ts";
