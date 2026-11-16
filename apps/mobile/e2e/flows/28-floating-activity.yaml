@@ -1,0 +1,118 @@
+appId: so.tentacle.app
+---
+# 28 (docs/feat/mobile-chrome.md slice S10): the floating Activity button, opt-in.
+# Settings → Activity button → Floating; the mock model's `AGENTS27` launches a
+# background child (60 slow steps, so it outlives the relaunch below).
+#
+# Driven: the floating button appears and the header pill does not; a drag
+# starting ON the button moves it to the left edge (F21: a touch that starts on
+# the button is the button's); a relaunch brings it back on the left (the
+# Keychain record); a tap opens Activity; the keyboard up keeps it above the
+# composer (F20); Settings → Header → the pill is back, no floating button.
+#
+# Edge positions are asserted relative to the centred title (`leftOf`/`rightOf`
+# `session-title`): Maestro asserts no coordinates.
+#
+# Not driven here (stated, not hidden): the left-edge back-swipe with the button
+# on the left (F21) — Maestro has no iOS edge gesture (flows 05/26 say the same);
+# VoiceOver and Reduce Motion (F23) — Maestro cannot toggle them reliably;
+# `floating-button.test.ts` pins both rules.
+- runFlow: _pair.yaml
+- extendedWaitUntil:
+    visible:
+      id: "computers-list"
+    timeout: 30000
+- tapOn:
+    id: "open-settings"
+- tapOn:
+    id: "activity-button-floating"
+- tapOn:
+    id: "settings-back"
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${FLOAT_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "AGENTS27"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+# The button carries the count; the header pill is not drawn ("Floating" replaces it).
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- assertNotVisible:
+    id: "session-activity"
+# Its default spot: the right edge.
+- assertVisible:
+    id: "floating-activity"
+    rightOf:
+      id: "session-title"
+# Drag it into the left half: it snaps to the left edge.
+- swipe:
+    from:
+      id: "floating-activity"
+    direction: LEFT
+- assertVisible:
+    id: "floating-activity"
+    leftOf:
+      id: "session-title"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "28-floating-left"
+# Keyboard up: the band shrinks, the button stays above the composer (F20).
+- tapOn:
+    id: "composer-input"
+- assertVisible:
+    id: "floating-activity"
+    above:
+      id: "composer-input"
+- hideKeyboard
+# Kill and relaunch: it comes back on the left (the stored edge).
+- launchApp
+- runFlow: _unlock.yaml
+- extendedWaitUntil:
+    visible:
+      id: "computer-${output.computerId}"
+    timeout: 30000
+- tapOn:
+    id: "computer-${output.computerId}"
+- tapOn:
+    id: "session-${FLOAT_ID}"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- assertVisible:
+    id: "floating-activity"
+    leftOf:
+      id: "session-title"
+# A tap opens Activity.
+- tapOn:
+    id: "floating-activity"
+- assertVisible:
+    id: "activity-subagents"
+- tapOn:
+    id: "activity-sheet-close"
+# Back to Header: the pill returns, the floating button is gone.
+- tapOn:
+    id: "session-drawer"
+- tapOn:
+    id: "drawer-settings"
+- tapOn:
+    id: "activity-button-header"
+- tapOn:
+    id: "settings-back"
+- extendedWaitUntil:
+    visible:
+      id: "session-activity"
+    timeout: 20000
+- assertNotVisible:
+    id: "floating-activity"

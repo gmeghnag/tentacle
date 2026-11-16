@@ -52,6 +52,8 @@ import {
   useColorScheme,
 } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { ACTIVITY_SETTINGS } from "./src/activity-settings-expo.ts";
+import type { ActivitySettings } from "./src/activity-settings-store.ts";
 import {
   type AppLock,
   type AppLockEvent,
@@ -103,6 +105,7 @@ import {
   newSessionPill,
 } from "./src/drawer-new-session.ts";
 import { createDrawerRename } from "./src/drawer-rename.ts";
+import type { ActivityButtonMode } from "./src/floating-button.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
@@ -1018,7 +1021,7 @@ function SessionDrawerHost({
   readonly onNavigate: (nav: DrawerNav) => void;
   readonly onSettings: () => void;
   readonly onPair: () => void;
-  readonly children: (openDrawer: () => void) => ReactNode;
+  readonly children: (openDrawer: () => void, drawerOpen: boolean) => ReactNode;
 }): JSX.Element {
   const [drawer, dispatch] = useReducer(drawerReducer, from.computerId, initialDrawer);
   const [rows, setRows] = useState<readonly ComputerRow[]>([]);
@@ -1199,7 +1202,7 @@ function SessionDrawerHost({
       onNewSession={() => void fresh.start(listed, canCreate)}
       onNewSessionDismiss={() => fresh.dismiss()}
     >
-      {children(openDrawer)}
+      {children(openDrawer, drawer.open)}
     </SessionsDrawer>
   );
 }
@@ -1223,6 +1226,7 @@ function SessionRoute({
   archived,
   focus,
   onOpenDrawer,
+  drawerOpen,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
@@ -1231,6 +1235,7 @@ function SessionRoute({
   readonly archived: boolean;
   readonly focus: boolean;
   readonly onOpenDrawer: () => void;
+  readonly drawerOpen: boolean;
 }): JSX.Element {
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -1324,6 +1329,7 @@ function SessionRoute({
       title={title}
       onOpenDrawer={onOpenDrawer}
       focusComposer={focus}
+      drawerOpen={drawerOpen}
     />
   );
 }
@@ -1423,6 +1429,26 @@ function AppShell(): JSX.Element {
   const selectVoice = useCallback((next: VoiceSettings) => {
     setVoiceError(undefined);
     VOICE_SETTINGS.set(next).catch(() => setVoiceError("That voice setting didn't save"));
+  }, []);
+
+  // The Activity button (docs/feat/mobile-chrome.md Design 6, F22): loaded once;
+  // a failed write keeps the pick for this run and says so; a newer build's
+  // record is never written over (the row says it cannot be changed here).
+  const [activitySettings, setActivitySettings] = useState<ActivitySettings>(() =>
+    ACTIVITY_SETTINGS.current(),
+  );
+  const [activityWritable, setActivityWritable] = useState(true);
+  const [activityError, setActivityError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = ACTIVITY_SETTINGS.subscribe(setActivitySettings);
+    void ACTIVITY_SETTINGS.load().then(() => setActivityWritable(ACTIVITY_SETTINGS.writable()));
+    return unsubscribe;
+  }, []);
+  const selectActivityMode = useCallback((mode: ActivityButtonMode) => {
+    setActivityError(undefined);
+    ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), mode }).catch(() =>
+      setActivityError("That Activity button setting didn't save"),
+    );
   }, []);
 
   // The switcher cover follows the setting (Owner Q2): on for everything but
@@ -1918,6 +1944,10 @@ function AppShell(): JSX.Element {
                 voice={voiceSettings}
                 {...(voiceError === undefined ? {} : { voiceError })}
                 onVoice={selectVoice}
+                activityMode={activitySettings.mode}
+                activityWritable={activityWritable}
+                {...(activityError === undefined ? {} : { activityError })}
+                onActivityMode={selectActivityMode}
                 // P9: ONE row for the phone, over every paired computer. A
                 // computer that cannot deliver outranks one that can — it is the
                 // reason nothing arrives — and the toggle reaches all of them.
@@ -1989,10 +2019,11 @@ function AppShell(): JSX.Element {
                 onSettings={() => navigation.navigate("Settings")}
                 onPair={() => navigation.navigate("Pair", undefined)}
               >
-                {(openDrawer) => (
+                {(openDrawer, drawerOpen) => (
                   <SessionRoute
                     palette={palette}
                     onOpenDrawer={openDrawer}
+                    drawerOpen={drawerOpen}
                     computerId={route.params.computerId}
                     sessionId={route.params.sessionId}
                     title={route.params.title}
