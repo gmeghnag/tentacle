@@ -63,6 +63,7 @@ import {
   restoreNotice,
 } from "./laptop-blobs.ts";
 import { type OwnUse, type ResidentUse, ownUseOf, residentUseOf } from "./relay-state.ts";
+import { wireCapabilities } from "./session-capabilities.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import {
   type SettingsLine,
@@ -322,6 +323,16 @@ export interface PersistingController extends SessionController {
   readonly autoAccept: RemoteSession["autoAccept"];
   /** `RemoteClient.seedAutoAcceptOnCreate`: the value the NEXT created session starts with. */
   seedAutoAccept(on: boolean): void;
+  /** `RemoteSession.capabilities`: the session's MCP/skill switches as the daemon last reported them. */
+  capabilities: RemoteSession["capabilities"];
+  /** `RemoteSession.onCapabilities`: the switches' snapshots and changes (the `/mcp` / `/skills` rows). */
+  onCapabilities: RemoteSession["onCapabilities"];
+  /** `RemoteSession.setCapability`: Space in `/mcp` / `/skills` (S4). */
+  setCapability: RemoteSession["setCapability"];
+  /** `RemoteSession.opened`: open daemon-side (no switches yet ⇒ "not started", not "unsupported"). */
+  opened(): boolean;
+  /** `RemoteSession.seedCapabilities`: the NEXT created session starts with this one's switches. */
+  seedCapabilities(): void;
   /** `RemoteSession.watch`; a foreign turn is saved at its end, a `history` at once. */
   watch: RemoteSession["watch"];
   /** `RemoteSession.open` (the eager attach of an `attach` session; else a no-op). */
@@ -331,6 +342,12 @@ export interface PersistingController extends SessionController {
   /** `RemoteSession.openForReset`: the open a reset needs (else a no-op). */
   openForReset: RemoteSession["openForReset"];
   ownsTurn: RemoteSession["ownsTurn"];
+  /**
+   * `RemoteSession.autoAcceptsTurn`: own turns, plus the daemon's `wake-` turns
+   * where the runtime trusts its daemon (`daemonWakes`: the worker, `connect`).
+   * The TUI's auto-accept prefers it over `ownsTurn` (docs/feat/cron-tool.md D1).
+   */
+  autoAcceptsTurn: RemoteSession["autoAcceptsTurn"];
   onQueued: RemoteSession["onQueued"];
   /** `RemoteSession.onSubagents`: the live list of this session's background sub-agents. */
   onSubagents?: RemoteSession["onSubagents"];
@@ -340,6 +357,10 @@ export interface PersistingController extends SessionController {
   jobOutput?: RemoteSession["jobOutput"];
   /** `RemoteSession.killJob`: stop one background shell job. */
   killJob?: RemoteSession["killJob"];
+  /** `RemoteSession.onSchedules`: this session's armed scheduled wakes (cron-tool S5). */
+  onSchedules?: RemoteSession["onSchedules"];
+  /** `RemoteSession.deleteSchedule`: drop one armed wake. */
+  deleteSchedule?: RemoteSession["deleteSchedule"];
   /** `RemoteSession.onSubagentNotify`: a running child's message to this session's agent. */
   onSubagentNotify?: RemoteSession["onSubagentNotify"];
   /** `RemoteSession.messageSubagent`: the user's text into a running background child. */
@@ -517,6 +538,20 @@ export function persistingController(
     await bounded(flushed(), FLUSH_ON_EXIT_TIMEOUT_MS);
   };
   const unsubscribeTitle = inner.onTitle(() => flush());
+  // The switches changed (any client, idle too: docs/feat/session-capabilities.md
+  // S3b): only a save puts their log entry on the laptop before the next turn.
+  // Not the first state seen (the open's snapshot: `saveOnOpen` saves it) —
+  // nor one already known when this subscribes.
+  const capsNow = inner.capabilities?.();
+  let capsSeen: string | undefined = capsNow === undefined ? undefined : JSON.stringify(capsNow);
+  const unsubscribeCaps = inner.onCapabilities?.((state) => {
+    const key = state === undefined ? undefined : JSON.stringify(state);
+    const changed = capsSeen !== undefined && key !== undefined && key !== capsSeen;
+    capsSeen = key ?? capsSeen;
+    if (changed) {
+      flush();
+    }
+  });
   // A background sub-agent's report can land while nobody streams (the session
   // is idle): only this save puts its `end` on the laptop's log (M5,
   // docs/feat/subagent-background.md). `?.`: unit-test fakes of a session.
@@ -731,6 +766,9 @@ export function persistingController(
     ownsTurn(turnId) {
       return turnId === adoptedTurn || inner.ownsTurn(turnId);
     },
+    autoAcceptsTurn(turnId) {
+      return turnId === adoptedTurn || inner.autoAcceptsTurn(turnId);
+    },
     onQueued(listener) {
       return inner.onQueued(listener);
     },
@@ -745,6 +783,15 @@ export function persistingController(
     },
     killJob(jobId) {
       return inner.killJob(jobId);
+    },
+    // docs/feat/cron-tool.md S5: the dock's rows, the pill's count and
+    // `/schedule` all paint this ONE per-session feed, and a delete is the
+    // daemon's (its `schedules` frame is what removes the row).
+    onSchedules(listener) {
+      return inner.onSchedules(listener);
+    },
+    deleteSchedule(scheduleId) {
+      return inner.deleteSchedule(scheduleId);
     },
     onSubagentNotify(listener) {
       return inner.onSubagentNotify(listener);
@@ -763,6 +810,7 @@ export function persistingController(
     close() {
       closed = true;
       unsubscribeTitle();
+      unsubscribeCaps?.();
       unsubscribeAgentExit?.();
       unsubscribeIdle?.();
       void flushed().then(() => inner.close());
@@ -789,6 +837,16 @@ export function persistingController(
     // `/clear` fork and a hop target start with the switch the person has now.
     seedAutoAccept(on: boolean) {
       inner.seedAutoAccept(on);
+    },
+    capabilities: () => inner.capabilities(),
+    // The `/mcp` / `/skills` switches (S4). A change is saved by the
+    // subscription above (`capsSeen`): nothing to flush here.
+    onCapabilities: (listener) => inner.onCapabilities(listener),
+    setCapability: (kind, name, enabled) => inner.setCapability(kind, name, enabled),
+    opened: () => inner.opened(),
+    // A `/clear` close-and-replace keeps the switches (owner Q5, S3b).
+    seedCapabilities() {
+      inner.seedCapabilities();
     },
     ...(carried
       ? {
@@ -876,6 +934,13 @@ export interface LocalRuntimeDeps {
    */
   readonly sharedAutoAccept?: boolean;
   /**
+   * This daemon mints its OWN `wake-` turns — the session's scheduled wakes
+   * (docs/feat/cron-tool.md D1) — so their asks are the session's own for
+   * auto-accept. A TRUST bit (AGENTS §7), so it fails closed: set by the worker
+   * path alone (`WORKER_TRUST`); a pod `run`/`attach` and the relay NEVER say it.
+   */
+  readonly daemonWakes?: boolean;
+  /**
    * This client can put a `move_session` proposal to its owner (docs/feat/session-hop.md
    * D8/D9): declared in `initialize` as `clientCapabilities.hop`, so a POD daemon
    * offers the tool to the sessions it creates. Set by a hop target's own runtime
@@ -945,6 +1010,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     clientInfo: CLIENT_INFO,
     ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
     ...(deps.sharedAutoAccept ? { sharedAutoAccept: true } : {}),
+    ...(deps.daemonWakes ? { daemonWakes: true } : {}),
     // The label a shared session's asks and flips carry (`ClientInfo.host`,
     // docs/feat/session-auto-accept.md D7). `node:os` lives HERE, not in
     // `@tentacle/client`: that package is in the phone's bundle, where a Node
@@ -1036,7 +1102,14 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
           record?.messages,
           uid,
           title.source === "auto" ? undefined : { text: title.text, source: title.source },
-          { closeIfLast },
+          // The record's switches seed the open that recreates it: `--resume`
+          // and a hop (its seed is this record) keep them (S3b, owner Q5).
+          {
+            closeIfLast,
+            ...(record?.capabilities
+              ? { capabilities: wireCapabilities(record.capabilities) }
+              : {}),
+          },
         );
     const controller = persistingController(
       session,
@@ -1401,6 +1474,15 @@ export function workerStartFailureText(error: unknown, logPath: string): string 
  * "TUI always over RPC — one session path"), so a worker problem is an error the
  * caller reports, never a silently degraded TUI.
  */
+/**
+ * The worker call site's TRUST bits (AGENTS §7): its daemon is THIS laptop's own
+ * code, so the session's auto-accept is shared (docs/feat/session-auto-accept.md
+ * D1) and its daemon-minted `wake-` turns — the session's scheduled wakes — are
+ * the session's own (docs/feat/cron-tool.md D1). Exported so a test pins it; a
+ * pod `run`/`attach` and the relay never pass either.
+ */
+export const WORKER_TRUST = { sharedAutoAccept: true, daemonWakes: true } as const;
+
 export async function startWorkerRuntime(
   config: TentacleConfig,
   deps: { permissions: PermissionBroker; saver: SessionSaver; resume: SessionRecord | null },
@@ -1478,9 +1560,9 @@ export async function startWorkerRuntime(
           // images-off-reason.md).
           modelScope: "laptop" as const,
           resume: deps.resume,
-          // The daemon here is THIS laptop's own code, so the session's
-          // auto-accept is shared by every TUI on it (docs/feat/session-auto-accept.md D1).
-          sharedAutoAccept: true,
+          // The daemon here is THIS laptop's own code: the session's auto-accept
+          // is shared by every TUI on it, and its wakes are the session's own.
+          ...WORKER_TRUST,
           hooksTrustStore: fileTrustStore(config.configDir, (message) => {
             logDaemonError(config.configDir, new Error(message));
           }),

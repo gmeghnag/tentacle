@@ -16,6 +16,9 @@ import {
   MAX_SESSION_TITLE,
   QueuedEntrySchema,
   ReturnedEntrySchema,
+  ScheduleIdSchema,
+  ScheduleRowSchema,
+  SessionCapabilitiesSchema,
   SessionIdSchema,
   SessionSettingsReportSchema,
   StopReasonSchema,
@@ -251,6 +254,15 @@ export const TurnStartSchema = z.object({
    * text-only turn (never an empty array).
    */
   attachments: z.array(AttachmentRefSchema).max(MAX_ATTACHMENTS_PER_MESSAGE).optional(),
+  /**
+   * The scheduled wake that started this turn (docs/feat/cron-tool.md D5, owner
+   * Q9 = B): DISPLAY data only, so a client can style a fired row. Optional and
+   * additive — a strip schema, so an older client drops it and still shows the
+   * durable `[scheduled sc-1 · …]` prefix in `prompt` (M4 option A). Absent for
+   * every turn no schedule started, and on a reload of a fired turn (the
+   * conversation is the truth there).
+   */
+  schedule: z.object({ id: ScheduleIdSchema, spec: z.string() }).optional(),
 });
 
 /** A turn ended (last update of every turn): the turn's outcome, in the stream. */
@@ -339,6 +351,21 @@ export const AutoAcceptUpdateSchema = z.object({
 });
 
 /**
+ * The session's MCP/skill switches changed (`session/set_capability`,
+ * docs/feat/session-capabilities.md): the whole state after, so every attached
+ * client converges. Sent only on a CHANGE, to every attachment, in one total
+ * order, own echoes included. Display only: an older client shows it as
+ * `unsupported` once; what the model sees is decided daemon-side anyway. `by`
+ * is the setter's label (as `auto_accept`'s): display only, untrusted text.
+ */
+export const CapabilitiesUpdateSchema = z.object({
+  type: z.literal("capabilities"),
+  capabilities: SessionCapabilitiesSchema,
+  /** Who set it: a short label, absent when the daemon knew no name → "another device". */
+  by: z.string().min(1).max(64).optional(),
+});
+
+/**
  * The session's settings changed (`session/update_settings`,
  * docs/feat/session-settings-apply.md): its report now, and the applier's
  * request `id`, so that client knows its own and every other one can tell its
@@ -377,6 +404,20 @@ export const JobsUpdateSchema = z.object({
 export const SubagentsUpdateSchema = z.object({
   type: z.literal("subagents"),
   agents: z.array(SubagentRowSchema),
+});
+
+/**
+ * The session's scheduled wakes changed (created, deleted, fired, expired, or
+ * stopped after repeated failures): the FULL table, replacing any earlier one
+ * (docs/feat/cron-tool.md D5). Sent to every attached client while idle too —
+ * a wake fires between turns, so its row is never turn-scoped. Display only:
+ * nothing waits on it (a client that skips it loses the live list, and the
+ * snapshot's first page carries it), so an older client shows `unsupported`
+ * once per session and nothing hangs.
+ */
+export const SchedulesUpdateSchema = z.object({
+  type: z.literal("schedules"),
+  schedules: z.array(ScheduleRowSchema),
 });
 
 /**
@@ -443,10 +484,12 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   QueuedUpdateSchema,
   SubagentsUpdateSchema,
   JobsUpdateSchema,
+  SchedulesUpdateSchema,
   SubagentNotifySchema,
   SubagentMessageUpdateSchema,
   SessionSettingsUpdateSchema,
   AutoAcceptUpdateSchema,
+  CapabilitiesUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
@@ -503,6 +546,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   subagents: "display",
   // Full state, sent only on a job's start or exit; nothing waits on it.
   jobs: "display",
+  // Full state, sent only when a scheduled wake changes; nothing waits on it.
+  schedules: "display",
   // A notice; the note itself rides the conversation (nothing hangs).
   subagent_notify: "display",
   // The user's own notice (every client shows it); the parent's note lands at its turn.
@@ -511,6 +556,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   session_settings: "display",
   // A switch's new value; the snapshot also rides every OpenResult (nothing hangs).
   auto_accept: "display",
+  // The switches' new state; the snapshot also rides every OpenResult (nothing hangs).
+  capabilities: "display",
 };
 
 /** Every update type this build knows — what a client declares at `initialize`. */

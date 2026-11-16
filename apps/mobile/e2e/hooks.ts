@@ -16,6 +16,8 @@ export type HookName =
   | "laptop-prompt"
   | "laptop-answer"
   | "session-state"
+  /** Flow 25 (docs/feat/session-capabilities.md S5): the daemon's MCP/skill switches. */
+  | "session-capabilities"
   | "history"
   | "file-exists"
   | "model-prompts"
@@ -146,6 +148,11 @@ export interface HookActions {
     readonly archived: boolean;
     /** The daemon's title now (flow 25: the phone's rename reached the computer). */
     readonly title: string;
+  } | null>;
+  /** The daemon's MCP/skill switches of a session, or `null` (it reported none). */
+  readonly capabilities: (sessionId: string) => Promise<{
+    readonly disabledMcp: readonly string[];
+    readonly disabledSkills: readonly string[];
   } | null>;
   /** Every message of the session, oldest first, with the refs each one names. */
   readonly history: (sessionId: string) => Promise<{
@@ -284,6 +291,7 @@ export function hookFor(path: string): HookName | undefined {
     case "laptop-prompt":
     case "laptop-answer":
     case "session-state":
+    case "session-capabilities":
     case "history":
     case "file-exists":
     case "model-prompts":
@@ -402,6 +410,11 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             const session = required(query.session, "session");
             const state = await deps.actions.sessionState(session);
             return Response.json({ ok: true, hook, state });
+          }
+          case "session-capabilities": {
+            const session = required(query.session, "session");
+            const capabilities = await deps.actions.capabilities(session);
+            return Response.json({ ok: true, hook, capabilities });
           }
           case "history": {
             const session = required(query.session, "session");

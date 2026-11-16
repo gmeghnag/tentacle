@@ -16,7 +16,7 @@
  * `messagePortChannel` ignores non-string frames, so they don't reach the RPC.
  */
 import type { TentacleConfig } from "@tentacle/config";
-import type { AttachmentSource } from "@tentacle/core";
+import type { AttachmentSource, ScheduleLink } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
 import { setGroupForwarder } from "@tentacle/exec";
 import type { McpServerStatus } from "@tentacle/mcp";
@@ -30,6 +30,7 @@ import {
   type WiredAgent,
   buildAgent,
   createSkillScan,
+  scheduleLimitsOf,
   sweepToolOutput,
   toolOutputStore,
   workerSessionBuild,
@@ -45,7 +46,11 @@ import { LaptopWorkloadShellBackend } from "./workload-shell-backend.ts";
  */
 export function workerAgentFactory(
   config: TentacleConfig,
-  ctx: { readonly attachments?: AttachmentSource },
+  ctx: {
+    readonly attachments?: AttachmentSource;
+    /** The session's scheduled wakes (docs/feat/cron-tool.md D1): the worker schedules. */
+    readonly schedules?: () => ScheduleLink | null;
+  },
   options: { readonly skillScan?: SkillScan; readonly createProvider?: ProviderFactory } = {},
 ): WiredAgent {
   return buildAgent(
@@ -63,6 +68,9 @@ export function workerAgentFactory(
       // the two kinds that offers the model `move_session`, and the laptop's TUI
       // is right here to ask its owner about a proposal.
       moveSession: true,
+      // Scheduled wakes (docs/feat/cron-tool.md D1): this host keeps a table (in
+      // memory only — it lives as long as the TUI), so its agent is offered the tools.
+      ...(ctx.schedules ? { schedules: ctx.schedules } : {}),
       // `workload_shell` (docs/feat/workload-shell.md D3): the worker IS the
       // user's own host, so it holds the kubeconfig / docker endpoint the tool
       // dials. A pod daemon never passes this.
@@ -104,6 +112,10 @@ export function workerSessionHost(
     // The laptop's own code in this process: the session's auto-accept is
     // shared with every TUI on it (docs/feat/session-auto-accept.md D1).
     sharedAutoAccept: true,
+    // Scheduled wakes (docs/feat/cron-tool.md D1, owner Q4): the worker keeps the
+    // session's table and fires it itself, with THIS laptop's `schedules.*` limits.
+    // Never persisted (pods and the worker never persist, AGENTS §7).
+    schedules: { limits: scheduleLimitsOf(config) },
     // The client's own build: no skew possible, named for completeness.
     identity: { tentacle: deps.version, kind: "worker" },
     newSessionSkills: () => skillScan.newSession(),

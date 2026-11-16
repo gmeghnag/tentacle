@@ -59,6 +59,31 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "25-session-info-skills"
+# docs/feat/session-capabilities.md S5 (P1): the `demo` server's trailing switch
+# hides it from the model for THIS session. The daemon truth is read after each
+# tap; it is turned back on, so a re-run starts with everything visible.
+- scrollUntilVisible:
+    element:
+      id: "session-info-mcp-demo-switch"
+    direction: UP
+- tapOn:
+    id: "session-info-mcp-demo-switch"
+- waitForAnimationToEnd
+- runScript:
+    file: "25-session-capabilities.js"
+    env:
+      EXPECT: "off"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "25-session-info-switch-off"
+- tapOn:
+    id: "session-info-mcp-demo-switch"
+- waitForAnimationToEnd
+- runScript:
+    file: "25-session-capabilities.js"
+    env:
+      EXPECT: "on"
 # Owner decision 5: tapping the TITLE renames the session, through the existing
 # `session/rename`. The flow types a name the daemon will store VERBATIM, then
 # renames it back, so a re-run starts from the same title.

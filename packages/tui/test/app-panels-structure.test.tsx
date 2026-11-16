@@ -74,13 +74,14 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
   test("the façade delegates by KIND LOOKUP, over a registry of descriptors", () => {
     const facade = readSrc("panel.ts");
     // One lookup per facade call, and nothing that switches on a kind itself.
-    expect(countOf(facade, "kindOf(panel)")).toBe(3);
+    // view, apply, click, switchOp (docs/feat/session-capabilities.md S4).
+    expect(countOf(facade, "kindOf(panel)")).toBe(4);
     expect(facade).not.toContain('=== "mcp"');
     expect(facade).not.toContain('=== "skills"');
     const registry = readSrc(join("panels", "registry.ts"));
     // ONE line per kind: the measurable "new panel = file + registry line".
     expect(registry).toContain(
-      "export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [sessionsKind, mcpKind, skillsKind];",
+      "export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [\n  sessionsKind,\n  mcpKind,\n  skillsKind,\n  scheduleKind,\n];",
     );
     // The two panel key layers are the registry's decision too, not their own.
     const layers = readSrc(join("keys", "layer-panels.ts"));

@@ -28,7 +28,7 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     expect(empty.rows.map((r) => r.text)).toEqual(["  No skills on this daemon."]);
   });
 
-  test("one aligned row per skill: name, who may invoke it, description", () => {
+  test("one aligned row per skill: name, description (who may invoke it is in the expanded rows)", () => {
     const p = skillsPanel(
       list([
         skill({}),
@@ -39,11 +39,29 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     );
     expect(panelView(p, 80, 10).title).toBe("Skills · 4 found");
     expect(texts(p)).toEqual([
-      "❯ ▸ review    you + model  review a diff",
-      "  ▸ deploy    you only     ship it",
-      "  ▸ lint-fix  model only   fix lint",
-      "  ▸ ghost     hidden       nobody",
+      "❯ ▸ review    review a diff",
+      "  ▸ deploy    ship it",
+      "  ▸ lint-fix  fix lint",
+      "  ▸ ghost     nobody",
     ]);
+  });
+
+  test("expanded: who may invoke it, and why (the who column moved here)", () => {
+    const who = (s: SkillView): string | undefined => {
+      const rows = texts(applyPanel(skillsPanel(list([s])), "toggle", 80));
+      return rows.at(-2)?.trim();
+    };
+    expect(who(skill({}))).toBe("/review · the model sees it too");
+    expect(who(skill({ user: false }))).toBe("no /command · the model sees it");
+    expect(who(skill({ model: false }))).toBe(
+      "/review · only you: its SKILL.md sets disable-model-invocation",
+    );
+    expect(who(skill({ user: false, model: false }))).toBe(
+      "no /command · not offered to the model",
+    );
+    expect(who(skill({ model: false, modelAfterReset: true }))).toBe(
+      "/review · model: after a context reset",
+    );
   });
 
   test("expanded: the description wrapped to the width, how it is invoked, where it lives", () => {
@@ -51,7 +69,7 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     let p = skillsPanel(list([skill({ description: long, model: false, scope: "user" })]));
     p = applyPanel(p, "toggle", 60);
     const rows = texts(p, 60);
-    expect(rows[0]?.startsWith("❯ ▾ review  you only")).toBe(true);
+    expect(rows[0]?.startsWith("❯ ▾ review  word word")).toBe(true);
     const body = rows.slice(1);
     for (const r of body) {
       expect(r.length).toBeLessThanOrEqual(60);
@@ -59,14 +77,15 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     // The description, wrapped: every word is there (no row cut it).
     const described = body.slice(0, -2).map((r) => r.trim());
     expect(described.join(" ")).toBe(long);
-    expect(body.at(-2)).toBe("        /review · not offered to the model");
+    // Cut to the 60 columns like every row (`fit`).
+    expect(body.at(-2)).toBe("        /review · only you: its SKILL.md sets disable-model…");
     expect(body.at(-1)).toBe("        user · /w/.agents/skills/review/SKILL.md");
   });
 
   test("not a /command: says so", () => {
     let p = skillsPanel(list([skill({ user: false })]));
     p = applyPanel(p, "toggle", 80);
-    expect(texts(p)).toContain("        no /command · offered to the model");
+    expect(texts(p)).toContain("        no /command · the model sees it");
   });
 
   test("discovery problems: counted in the title, one group listing them (and how many more)", () => {
@@ -75,7 +94,7 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     let open = applyPanel(p, "down", 80);
     open = applyPanel(open, "toggle", 80);
     expect(texts(open)).toEqual([
-      "  ▸ review  you + model  review a diff",
+      "  ▸ review  review a diff",
       "❯ ▾ ! 5 discovery problems",
       "        skipped skill at /x/SKILL.md: no description",
       "        … 4 more",

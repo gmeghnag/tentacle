@@ -53,10 +53,12 @@ import { type WakeModel, wakeStep } from "@tentacle/core";
 import { type MutableRefObject, useCallback, useRef } from "react";
 import type { SessionController, SessionDirectory } from "./app-types.ts";
 import { noteSent, resetDock } from "./background-focus.ts";
+import type { CapsView } from "./capability-toggles.ts";
 import { CLEARED_ELSEWHERE_NOTICE, CLEARED_NOTICE } from "./clear-command.ts";
 import type { QuitConfirmFacts } from "./commands.ts";
 import { type DaemonQueue, handBackRows, takeAll } from "./queued.ts";
 import type { QueuedRows } from "./queued.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import { openFailedNotice, stayingNotice, switchRefusedNotice } from "./sessions-panel.ts";
 import type { SkillsSync } from "./skills-sync.ts";
 import {
@@ -108,8 +110,14 @@ export interface SessionLinkHost {
   readonly queueSubRef: MutableRefObject<(() => void) | null>;
   readonly agentsSubRef: MutableRefObject<(() => void) | null>;
   readonly jobsSubRef: MutableRefObject<(() => void) | null>;
+  /** The session's armed scheduled wakes (`schedules`, cron-tool S5). */
+  readonly schedulesSubRef: MutableRefObject<(() => void) | null>;
   readonly notifySubRef: MutableRefObject<(() => void) | null>;
   readonly dockMsgSubRef: MutableRefObject<(() => void) | null>;
+  /** The session's MCP/skill switches (docs/feat/session-capabilities.md S4). */
+  readonly capsSubRef: MutableRefObject<(() => void) | null>;
+  /** The switches the daemon reported (`App`'s: it renders them). */
+  readonly onCapsChange: (caps: CapsView | undefined, by?: string) => void;
 
   // --- the latches of the turn driver and of a follow (all shared)
   /** Activities held while a run of mine streamed (`onActivity` pushes them). */
@@ -158,6 +166,8 @@ export interface SessionLinkHost {
   /** The dock's rows reset and a child's sent message (`S5`). */
   readonly setAgents: DockLayer["setAgents"];
   readonly setJobs: DockLayer["setJobs"];
+  /** The session's armed wake table (`useDock`'s `setSchedules`, cron-tool S5). */
+  readonly setSchedules: DockLayer["setSchedules"];
   readonly setDock: DockLayer["setDock"];
   readonly jobOutputRef: DockLayer["jobOutputRef"];
   /** An open `/sessions` panel re-read at the next render (`S7`). */
@@ -213,8 +223,11 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
     queueSubRef,
     agentsSubRef,
     jobsSubRef,
+    schedulesSubRef,
     notifySubRef,
     dockMsgSubRef,
+    capsSubRef,
+    onCapsChange,
     heldRef,
     abortRef,
     streamCtrlRef,
@@ -245,6 +258,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
     drainHeld,
     setAgents,
     setJobs,
+    setSchedules,
     setDock,
     jobOutputRef,
     touchPanel,
@@ -410,12 +424,15 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       queueSubRef.current?.();
       agentsSubRef.current?.();
       jobsSubRef.current?.();
+      schedulesSubRef.current?.();
       notifySubRef.current?.();
       dockMsgSubRef.current?.();
+      capsSubRef.current?.();
       heldRef.current = [];
       setDaemonQueue(undefined);
       setAgents(undefined);
       setJobs(undefined);
+      setSchedules(undefined);
       jobOutputRef.current = {};
       // The dock belongs to a session: a switch starts it over (its drafts and
       // its `sent` are per session, docs/feat/subagent-panel.md).
@@ -430,6 +447,11 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       queueSubRef.current = session?.onQueued?.((q) => setDaemonQueue(q)) ?? null;
       agentsSubRef.current = session?.onSubagents?.((rows) => setAgents(rows)) ?? null;
       jobsSubRef.current = session?.onJobs?.((report) => setJobs(report.rows)) ?? null;
+      // The session's armed scheduled wakes (cron-tool S5): the SAME per-session
+      // feed the dock and `/schedule` paint. `undefined` when this session has no
+      // table to report (a pod, an older daemon), never an empty claim.
+      schedulesSubRef.current =
+        session?.onSchedules?.((report) => setSchedules(report.rows)) ?? null;
       // A RUNNING background child's message to the agent
       // (docs/feat/agent-message-two-way.md): the notice at once, and — when it
       // asks for one and this laptop allows two-way — the same wake an exit arms.
@@ -452,6 +474,11 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
           flushNow();
           setDock((prev) => noteSent(prev, m.agentId, m.text, m.n));
         }) ?? null;
+      // The session's MCP/skill switches (docs/feat/session-capabilities.md
+      // S4): its current state at once (never news: no `by`), then every
+      // snapshot and change the daemon reports.
+      onCapsChange(session?.capabilities?.());
+      capsSubRef.current = session?.onCapabilities?.((caps, by) => onCapsChange(caps, by)) ?? null;
       const opening = session?.open?.();
       if (!opening) {
         onOpened?.(true); // nothing to open (a local session)
@@ -472,13 +499,16 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       agentsSubRef,
       armWake,
       askContext,
+      capsSubRef,
       dockMsgSubRef,
       flushNow,
       heldRef,
       jobOutputRef,
       jobsSubRef,
+      schedulesSubRef,
       notifySubRef,
       onActivityRef,
+      onCapsChange,
       pushNotice,
       queueSubRef,
       sessionRef,
@@ -487,6 +517,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       setDaemonQueue,
       setDock,
       setJobs,
+      setSchedules,
       setScrollOffset,
       skillsSync,
       stateRef,

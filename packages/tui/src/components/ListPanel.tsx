@@ -24,7 +24,7 @@ export function ListPanel({ view, columns }: { view: PanelView; columns: number 
           key={`${view.start + i}`}
           color={row.selected ? accent : undefined}
           bold={row.selected}
-          {...(row.selected || row.kind === "head" ? {} : dimProps())}
+          {...(row.selected || (row.kind === "head" && row.dim !== true) ? {} : dimProps())}
           wrap="truncate-end"
         >
           {row.text}

@@ -224,10 +224,11 @@ export async function connectTui(
     // Asked through the same broker; never stored (the folder is on another host).
     hooksTrust: createHooksTrustResolver({ broker: permissions, interactive: true }),
     clientInfo: CLIENT_INFO,
-    // The ONE place this trust bit is set (AGENTS §7, docs/fix/autoaccept-wake-turns.md
-    // A3): a `serve` daemon is trusted and is the only one that starts its own
-    // wake turns, so its `wake-…` asks are this session's — auto-accept answers
-    // them. Every other runtime leaves it off: a pod's `wake-` id stays foreign.
+    // A TRUST bit (AGENTS §7, docs/fix/autoaccept-wake-turns.md A3): a `serve`
+    // daemon is trusted and starts its own wake turns, so its `wake-…` asks are
+    // this session's — auto-accept answers them. The only other runtime that
+    // sets it is the local worker (`WORKER_TRUST`, docs/feat/cron-tool.md D1); a
+    // pod's `wake-` id stays foreign.
     daemonWakes: true,
     // The other TRUST bit, and the same reasoning (AGENTS §7): a `serve` on the
     // user's own host shares the session's auto-accept, so this TUI reads and
@@ -296,6 +297,8 @@ export async function connectTui(
       createSession: () => {
         // A `/clear` fork carries the switch the person has now (`OpenParams.autoAccept`).
         previousSession?.seedAutoAccept(autoAccept.current());
+        // …and its MCP/skill switches (docs/feat/session-capabilities.md, owner Q5).
+        previousSession?.seedCapabilities();
         const session = pending ?? client.newSession(undefined, crypto.randomUUID());
         pending = null;
         const tracked = track(session);

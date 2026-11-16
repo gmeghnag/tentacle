@@ -1,5 +1,3 @@
-import type { LayerStep } from "../keys/contract.ts";
-import { NOTHING } from "../keys/contract.ts";
 /**
  * The panel registry (docs/feat/app-decomposition.md S7, plan H4(4)): every panel
  * kind DESCRIBES ITSELF — how it projects to rows, how a tree action or a body
@@ -19,10 +17,14 @@ import { NOTHING } from "../keys/contract.ts";
  *
  * Pure: no React, no state. The stateful half is `usePanels.ts`.
  */
+import type { CapOp, CapsPhase } from "../capability-toggles.ts";
+import type { LayerStep } from "../keys/contract.ts";
+import { NOTHING } from "../keys/contract.ts";
 import type { KeySnapshot } from "../keys/snapshot.ts";
 import type { OpenPanel } from "../panel.ts";
 import type { PanelView, TreeAction } from "../tree-panel.ts";
 import { mcpKind } from "./mcp.ts";
+import { scheduleKind } from "./schedule.ts";
 import { sessionsKind } from "./sessions.ts";
 import { skillsKind } from "./skills.ts";
 
@@ -39,6 +41,11 @@ export interface PanelAt {
   readonly maxBody: number;
   /** The live session id (`/sessions` marks its row); null when there is none. */
   readonly current: string | null;
+  /**
+   * The session's MCP/skill switches, read live like `current`
+   * (docs/feat/session-capabilities.md S4); absent → no switch column.
+   */
+  readonly caps?: CapsPhase;
 }
 
 /**
@@ -59,6 +66,11 @@ export interface PanelKind<P extends { readonly kind: string }> {
   click(panel: P, view: PanelView, bodyIndex: number, width: number): P;
   /** Which of this kind's keys this chunk is, and what it decides (`LayerStep`). */
   key(panel: P, snap: KeySnapshot): LayerStep;
+  /**
+   * What Space on the selected row asks the daemon (an on/off switch), or null
+   * when the row has none. Absent: this kind carries no switches.
+   */
+  switchOp?(panel: P, width: number, caps: CapsPhase): CapOp | null;
 }
 
 /**
@@ -66,7 +78,12 @@ export interface PanelKind<P extends { readonly kind: string }> {
  * `kind`). `/mcp` and `/skills` share the tree mechanic (`panels/tree.ts`),
  * `/sessions` is a flat list with its own.
  */
-export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [sessionsKind, mcpKind, skillsKind];
+export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [
+  sessionsKind,
+  mcpKind,
+  skillsKind,
+  scheduleKind,
+];
 
 /**
  * The descriptor of `panel`'s kind. `kinds` is a parameter (not a closed-over

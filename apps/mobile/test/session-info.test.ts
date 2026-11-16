@@ -8,21 +8,30 @@
  * must never take the others down (F2, F3, F4).
  */
 import { describe, expect, test } from "bun:test";
-import type { McpServerStatus } from "@tentacle/protocol";
+import type { McpServerStatus, ScheduleRow } from "@tentacle/protocol";
 import {
+  type CapabilitySwitches,
   type InfoFacts,
   type Pull,
+  capabilityChanges,
   contextMeter,
   devicesText,
   headerModel,
+  rowIdentity,
   sanitizeDisplay,
   sessionInfoView,
+  settledOp,
   shortModel,
   shortenPath,
+  switchPhase,
   tokensText,
 } from "../src/session-info.ts";
 
 const ready = <T>(value: T): Pull<T> => ({ state: "ready", value });
+/** The two classes a terminal must never receive, as `client/schedules.ts` tests them too. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detecting them is the point
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+const FORMAT = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069]/;
 const loading = <T>(): Pull<T> => ({ state: "loading" });
 const failed = <T>(kind: "error" | "unsupported" | "offline" | "not-open"): Pull<T> => ({
   state: "error",
@@ -40,6 +49,7 @@ function facts(over: Partial<InfoFacts> = {}): InfoFacts {
   return {
     phase: "open",
     link: "up",
+    now: new Date(2026, 10, 17, 12, 0, 0).getTime(),
     title: "Fix the flaky test",
     computerName: "MacBook Pro",
     daemon: { version: "1.4.0", model: "claude-sonnet-4-5", contextWindow: 200_000 },
@@ -450,5 +460,381 @@ describe("the sheet as a whole", () => {
     expect(by("session")?.phase).toBe("ready");
     expect(by("mcp")?.phase).toBe("unsupported");
     expect(by("skills")?.phase).toBe("error");
+  });
+});
+
+describe("MCP/skill switches (docs/feat/session-capabilities.md S5, P1)", () => {
+  const on = (over: Partial<CapabilitySwitches> = {}): CapabilitySwitches => ({
+    phase: "on",
+    state: { disabledMcp: [], disabledSkills: [] },
+    changedBy: {},
+    error: null,
+    ...over,
+  });
+  const capSkill = (
+    over: Partial<{ name: string; user: boolean; model: boolean; modelAfterReset: boolean }> = {},
+  ) => ({
+    name: "kubernetes",
+    description: "Drive a cluster",
+    scope: "user" as const,
+    user: true,
+    model: true,
+    location: "/tmp/k/SKILL.md",
+    ...over,
+  });
+  const withCaps = (caps: CapabilitySwitches, skills = [capSkill()]) =>
+    facts({
+      capabilities: caps,
+      mcp: ready({
+        servers: [
+          server({ name: "k8s", tools: ["get"] }),
+          server({ name: "a__b" }),
+          server({ name: "broken", state: "failed", error: "spawn ENOENT" }),
+        ],
+      }),
+      skills: ready({ slash: [], skills, problems: [], moreProblems: 0 }),
+    });
+
+  test("every server and skill row has a switch, on unless the session turned it off", () => {
+    const f = withCaps(on({ state: { disabledMcp: ["a__b"], disabledSkills: [] } }));
+    const mcp = section(f, "mcp");
+    expect(mcp.rows.map((row) => [row.title, row.switch?.on, row.switch?.interactive])).toEqual([
+      ["k8s", true, true],
+      ["a__b", false, true],
+      ["broken", true, true],
+    ]);
+    // The op carries the RAW name, the kind of the section.
+    expect(mcp.rows[1]?.switch?.name).toBe("a__b");
+    expect(mcp.rows[1]?.switch?.kind).toBe("mcp");
+    expect(section(f, "skills").rows[0]?.switch).toMatchObject({ kind: "skill", on: true });
+  });
+
+  test("an off server says so and is dimmed; its error stays readable", () => {
+    const f = withCaps(on({ state: { disabledMcp: ["k8s", "broken"], disabledSkills: [] } }));
+    const rows = section(f, "mcp").rows;
+    expect(rows[0]?.subtitle).toBe("Off · hidden from the model");
+    expect(rows[0]?.dim).toBe(true);
+    expect(rows[2]?.subtitle).toBe("Off · hidden from the model — spawn ENOENT");
+    expect(rows[1]?.subtitle).toBeUndefined();
+    expect(rows[1]?.dim).toBeUndefined();
+  });
+
+  test("an off skill: the user can still run /name; a model-only one is just hidden", () => {
+    const f = withCaps(on({ state: { disabledMcp: [], disabledSkills: ["kubernetes", "veil"] } }), [
+      capSkill(),
+      capSkill({ name: "veil", user: false }),
+    ]);
+    const rows = section(f, "skills").rows;
+    expect(rows[0]?.subtitle).toBe("Off · you can still run /kubernetes");
+    expect(rows[0]?.dim).toBe(true);
+    expect(rows[1]?.subtitle).toBe("Off · hidden from the model");
+  });
+
+  test("a skill the model can never be offered is a locked ghost switch, no words (Q5)", () => {
+    const f = withCaps(on(), [
+      capSkill({ model: false }),
+      capSkill({ name: "later", model: false, modelAfterReset: true }),
+    ]);
+    const rows = section(f, "skills").rows;
+    expect(rows[0]?.switch).toMatchObject({ on: false, interactive: false });
+    expect(rows[0]?.dim).toBe(true);
+    expect(rows[0]?.subtitle).toBe("Drive a cluster");
+    expect(rows[0]?.value).toBeUndefined();
+    // Offered after the next reset: the session's switch, not locked.
+    expect(rows[1]?.switch).toMatchObject({ on: true, interactive: true });
+  });
+
+  test("another device's change reads 'changed on <device>', sanitized (Q4)", () => {
+    const f = withCaps(
+      on({
+        state: { disabledMcp: ["k8s"], disabledSkills: [] },
+        changedBy: { "mcp:k8s": "Mac‮book", "skill:kubernetes": "" },
+      }),
+    );
+    expect(section(f, "mcp").rows[0]?.subtitle).toBe(
+      "Off · hidden from the model · changed on Macbook",
+    );
+    expect(section(f, "skills").rows[0]?.subtitle).toBe("On · changed on another device");
+  });
+
+  test("an older daemon: ghost switches and an update footnote, on both sections (F7)", () => {
+    const f = withCaps(on({ phase: "unsupported", state: undefined }));
+    const mcp = section(f, "mcp");
+    const skills = section(f, "skills");
+    expect(mcp.rows.every((row) => row.switch?.interactive === false)).toBe(true);
+    expect(skills.rows.every((row) => row.switch?.interactive === false)).toBe(true);
+    expect(mcp.switchNote).toBe("The tentacle on MacBook Pro can't turn servers off — update it.");
+    expect(skills.switchNote).toBe(
+      "The tentacle on MacBook Pro can't turn skills off — update it.",
+    );
+  });
+
+  test("not open: the daemon-wide servers are listed, their switches are not usable (F4)", () => {
+    const f = withCaps(on({ phase: "not-open", state: undefined }));
+    const mcp = section(f, "mcp");
+    expect(mcp.rows.every((row) => row.switch?.interactive === false)).toBe(true);
+    expect(mcp.switchNote).toBe("Open the session to turn servers on or off");
+  });
+
+  test("offline: the switches freeze on the last state, with no extra note (the banner says it)", () => {
+    const f = withCaps(
+      on({ phase: "offline", state: { disabledMcp: ["k8s"], disabledSkills: [] } }),
+    );
+    const mcp = section(f, "mcp");
+    expect(mcp.rows[0]?.switch).toMatchObject({ on: false, interactive: false });
+    expect(mcp.switchNote).toBeUndefined();
+  });
+
+  test("what Off does is said once: under the servers, or under the skills when none", () => {
+    const f = withCaps(on());
+    expect(section(f, "mcp").switchNote).toBe(
+      "Off hides it from the model in this session, from the next reply.",
+    );
+    expect(section(f, "skills").switchNote).toBeUndefined();
+    const noServers = { ...f, mcp: ready({ servers: [] }) };
+    expect(section(noServers, "skills").switchNote).toBe(
+      "Off hides it from the model in this session, from the next reply.",
+    );
+  });
+
+  test("a refused set is shown under ITS section only", () => {
+    const f = withCaps(on({ error: { kind: "skill", text: "too many\nnames" } }));
+    expect(section(f, "skills").switchNote).toBe("Couldn't switch: too many names");
+    expect(section(f, "mcp").switchNote).toBe(
+      "Off hides it from the model in this session, from the next reply.",
+    );
+  });
+
+  test("no switches offered by the port: today's rows, no switch, no note", () => {
+    const f = { ...withCaps(on()), capabilities: undefined };
+    expect(section(f, "mcp").rows.every((row) => row.switch === undefined)).toBe(true);
+    expect(section(f, "mcp").switchNote).toBeUndefined();
+  });
+});
+
+describe("switchPhase / capabilityChanges (pure)", () => {
+  const empty = { disabledMcp: [], disabledSkills: [] };
+
+  test("the phase: not attached, then offline, then the daemon's own report", () => {
+    expect(switchPhase({ attached: false, link: "up", state: empty })).toBe("not-open");
+    expect(switchPhase({ attached: true, link: "down", state: empty })).toBe("offline");
+    expect(switchPhase({ attached: true, link: "up", state: undefined })).toBe("unsupported");
+    expect(switchPhase({ attached: true, link: "up", state: empty })).toBe("on");
+  });
+
+  test("a snapshot (no by) is never news, and leaves the pending ops alone", () => {
+    const pending = [{ kind: "mcp" as const, name: "k8s", enabled: false }];
+    const next = { disabledMcp: ["k8s", "x"], disabledSkills: [] };
+    expect(capabilityChanges(empty, next, undefined, pending)).toEqual({
+      remote: [],
+      own: [],
+      pending,
+    });
+  });
+
+  test("my own echo is consumed; everything else in the change is another device's", () => {
+    const pending = [{ kind: "mcp" as const, name: "k8s", enabled: false }];
+    const prev = { disabledMcp: [], disabledSkills: ["veil"] };
+    const next = { disabledMcp: ["k8s"], disabledSkills: [] };
+    expect(capabilityChanges(prev, next, "iPhone", pending)).toEqual({
+      remote: [{ key: "skill:veil", by: "iPhone" }],
+      own: ["mcp:k8s"],
+      pending: [],
+    });
+  });
+
+  test("a pending op for the OPPOSITE value is not an echo (the other device won)", () => {
+    const pending = [{ kind: "skill" as const, name: "veil", enabled: false }];
+    const next = { disabledMcp: [], disabledSkills: [] };
+    const prev = { disabledMcp: [], disabledSkills: ["veil"] };
+    const out = capabilityChanges(prev, next, "Mac", pending);
+    expect(out.remote).toEqual([{ key: "skill:veil", by: "Mac" }]);
+    expect(out.pending).toEqual(pending);
+  });
+
+  test("settledOp drops exactly one matching op", () => {
+    const op = { kind: "mcp" as const, name: "k8s", enabled: false };
+    expect(settledOp([op, op], op)).toEqual([op]);
+    expect(settledOp([op], { ...op, enabled: true })).toEqual([op]);
+  });
+});
+
+describe("the SCHEDULED WAKES section (cron-tool S6, mockup M7)", () => {
+  const NOW = new Date(2026, 10, 17, 12, 0, 0).getTime();
+  const wake = (over: Partial<ScheduleRow> = {}): ScheduleRow => ({
+    id: "sc-1",
+    kind: "every",
+    spec: "every 10m",
+    prompt: "check CI on PR #412",
+    nextAt: NOW + 10 * 60_000,
+    fires: 4,
+    createdAt: NOW - 3_600_000,
+    expiresAt: new Date(2026, 10, 22, 14, 20).getTime(),
+    ...over,
+  });
+  const feed = (
+    rows: readonly ScheduleRow[] | undefined,
+    error: string | null = null,
+  ): InfoFacts["schedules"] => ({ rows, error });
+
+  test("a session with no feed at all draws NO section (a port that offers none)", () => {
+    const f = facts();
+    expect(f.schedules).toBeUndefined();
+    expect(sessionInfoView(f).sections.map((s) => s.id)).not.toContain("schedules");
+  });
+
+  test("ready: one row per wake, its prompt as the title and its spec/next/fires under it", () => {
+    const found = section(facts({ now: NOW, schedules: feed([wake()]) }), "schedules");
+    expect(found.phase).toBe("ready");
+    expect(found.title).toBe("Scheduled wakes");
+    expect(found.rows).toHaveLength(1);
+    expect(found.rows[0]?.title).toBe("check CI on PR #412");
+    expect(found.rows[0]?.subtitle).toBe("every 10m · next 12:10 · 4×");
+    // A sendable delete: a RAW id (the title is sanitized) and its own label.
+    expect(found.rows[0]?.delete?.id).toBe("sc-1");
+    expect(found.rows[0]?.delete?.accessibilityLabel).toContain("check CI on PR #412");
+  });
+
+  test("a one-shot reads as its own day and time, never a fire count", () => {
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([wake({ kind: "at", spec: "at 17:00", nextAt: NOW + 3_600_000 })]),
+      }),
+      "schedules",
+    );
+    expect(found.rows[0]?.subtitle).toBe("today 13:00 · one-shot");
+  });
+
+  test("empty: a reported, empty table says so — with a hint, never a fake row", () => {
+    const found = section(facts({ now: NOW, schedules: feed([]) }), "schedules");
+    expect(found.phase).toBe("empty");
+    expect(found.rows).toEqual([]);
+    expect(found.empty?.title).toBe("No scheduled wakes");
+    expect(found.empty?.footnote).toBeTruthy();
+  });
+
+  test("unsupported: an older daemon reports NO table (undefined ≠ [])", () => {
+    const found = section(facts({ now: NOW, schedules: feed(undefined) }), "schedules");
+    expect(found.phase).toBe("unsupported");
+    expect(found.rows).toEqual([]);
+    // The sheet's own words for an older daemon, naming the computer.
+    expect(found.empty?.title).toContain("MacBook Pro");
+  });
+
+  test("not-open: an unattached session never shows a fresh session's wakes (F4)", () => {
+    const found = section(
+      facts({ phase: "failed", now: NOW, schedules: feed([wake()]) }),
+      "schedules",
+    );
+    expect(found.phase).toBe("not-open");
+    expect(found.rows).toEqual([]);
+  });
+
+  test("offline: the known rows STAY (dim), they just stop being followed; no delete is offered", () => {
+    const found = section(
+      facts({ link: "down", now: NOW, schedules: feed([wake()]) }),
+      "schedules",
+    );
+    expect(found.phase).toBe("ready");
+    expect(found.dim).toBe(true);
+    expect(found.rows).toHaveLength(1);
+    // A control that cannot send is worse than no control (the ghost-switch rule).
+    expect(found.rows[0]?.delete).toBeUndefined();
+  });
+
+  test("a refused delete is a FOOTER, never a section failure: the rows stay", () => {
+    const found = section(
+      facts({ now: NOW, schedules: feed([wake()], "this daemon cannot delete a scheduled wake") }),
+      "schedules",
+    );
+    expect(found.phase).toBe("ready");
+    expect(found.footer).toBe("this daemon cannot delete a scheduled wake");
+    expect(found.rows).toHaveLength(1);
+  });
+
+  test("every daemon string is sanitized before it is drawn", () => {
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([
+          wake({ id: "sc\n1", prompt: "a\u001b[2J\u202eb", spec: "every\u009b31m10m" }),
+        ]),
+      }),
+      "schedules",
+    );
+    const row = found.rows[0];
+    for (const text of [row?.title ?? "", row?.subtitle ?? ""]) {
+      expect(CONTROL.test(text)).toBe(false);
+      expect(FORMAT.test(text)).toBe(false);
+    }
+    // The id is sent raw, but never longer than the wire allows (the client bounded it).
+    expect(row?.delete?.id).toBe("sc\n1");
+  });
+
+  test("two wakes with the SAME prompt carry distinct row keys (S6 fix round 1)", () => {
+    // Nothing in core stops two wakes sharing a prompt: `check CI` every 10m and a
+    // one-shot `check CI` at 17:00. The TITLE is therefore no identity — a React
+    // key, the expansion state or a Maestro testID built from it collides.
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([
+          wake({ id: "sc-1", prompt: "check CI" }),
+          wake({ id: "sc-2", kind: "at", spec: "at 17:00", prompt: "check CI" }),
+        ]),
+      }),
+      "schedules",
+    );
+    expect(found.rows.map((row) => row.title)).toEqual(["check CI", "check CI"]);
+    // The RAW id is the identity, and it survives a title collision.
+    expect(found.rows.map((row) => row.key)).toEqual(["sc-1", "sc-2"]);
+  });
+
+  test("`rowIdentity` is what makes a keyed row distinct — the key WINS over the title", () => {
+    // The ONE place `key` takes priority over `title` (S6 Review round 2's
+    // MEDIUM): the sheet builds its React key, its expansion state and every
+    // testID from `rowIdentity`, so a regression to `row.title` there would
+    // re-collapse two same-prompt wakes with the whole suite green.
+    expect(rowIdentity({ title: "check CI", key: "sc-2" })).toBe("sc-2");
+    // A row with no key (every non-schedule row) still has an identity: its title.
+    expect(rowIdentity({ title: "Project" })).toBe("Project");
+    // And it survives the real section: two same-prompt rows stay distinct.
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([
+          wake({ id: "sc-1", prompt: "check CI" }),
+          wake({ id: "sc-2", kind: "at", spec: "at 17:00", prompt: "check CI" }),
+        ]),
+      }),
+      "schedules",
+    );
+    expect(found.rows.map((row) => row.title)).toEqual(["check CI", "check CI"]);
+    const identities = found.rows.map((row) => rowIdentity(row));
+    expect(identities).toEqual(["sc-1", "sc-2"]);
+    expect(new Set(identities).size).toBe(identities.length);
+  });
+
+  test("a repeated (or unpaintable) id still yields UNIQUE, paint-safe keys", () => {
+    // Two ids that sanitize to the same label are one identity to React, and an
+    // id the phone must never paint (a newline) cannot ride into a testID raw.
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([
+          wake({ id: "sc\n1", prompt: "a" }),
+          wake({ id: "sc 1", prompt: "b" }),
+          wake({ id: "\u0001", prompt: "c" }),
+        ]),
+      }),
+      "schedules",
+    );
+    const keys = found.rows.map((row) => row.key ?? "");
+    expect(keys).toEqual(["sc 1", "sc 1#2", "wake"]);
+    for (const key of keys) {
+      expect(CONTROL.test(key)).toBe(false);
+      expect(FORMAT.test(key)).toBe(false);
+    }
   });
 });

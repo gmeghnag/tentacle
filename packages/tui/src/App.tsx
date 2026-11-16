@@ -28,6 +28,15 @@ import {
   blinkState,
   syncBlink,
 } from "./blink.ts";
+import {
+  type CapOp,
+  type CapsView,
+  noSwitchNotice,
+  remoteChangeNotices,
+  sessionCapsPhase,
+  settled,
+  switchFailedNotice,
+} from "./capability-toggles.ts";
 import { idleChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import { type QuitConfirmFacts, oneLine, paletteStep } from "./commands.ts";
@@ -44,7 +53,7 @@ import { resolveLineEffects } from "./keys/line-layer.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { localSession } from "./local-session.ts";
-import { type OpenPanel, panelClick } from "./panel.ts";
+import { type OpenPanel, panelClick, panelSwitchOp } from "./panel.ts";
 import { pasteTarget, sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
 import {
@@ -54,6 +63,7 @@ import {
   autoAcceptTest,
   usePermissionBroker,
 } from "./permission-ui.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import { useAttachments } from "./useAttachments.ts";
 import { useDock } from "./useDock.ts";
 import { useHop } from "./useHop.ts";
@@ -401,10 +411,21 @@ export function App({
   const agentsSubRef = useRef<(() => void) | null>(null);
   /** The current session's `onJobs` subscription (replaced with it). */
   const jobsSubRef = useRef<(() => void) | null>(null);
+  /** This session's armed wake feed (cron-tool S5), replaced with the session. */
+  const schedulesSubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentNotify` subscription (replaced with it). */
   const notifySubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentMessage` subscription (replaced with it). */
   const dockMsgSubRef = useRef<(() => void) | null>(null);
+  /** The current session's `onCapabilities` subscription (replaced with it). */
+  const capsSubRef = useRef<(() => void) | null>(null);
+  // The session's MCP/skill switches as the daemon last reported them
+  // (docs/feat/session-capabilities.md S4): the state renders, the ref is what
+  // the key executor and the change handler read live.
+  const [caps, setCapsState] = useState<CapsView | undefined>(undefined);
+  const capsRef = useRef<CapsView | undefined>(undefined);
+  /** This TUI's own switch sets awaiting their answer: their echo is not news. */
+  const capsPendingRef = useRef<readonly CapOp[]>([]);
   // My `/compact`s whose history has not arrived yet: that compaction's notice
   // is mine ("Context compacted"), not "on another device" (C6).
   const ownCompactionsRef = useRef(0);
@@ -509,6 +530,8 @@ export function App({
   });
   const { subagents, subagentsRef, setAgents, dockLastRowsRef } = dockLayer;
   const { jobRows, jobRowsRef, setJobs, dockLastJobRowsRef } = dockLayer;
+  const { scheduleRows, schedulesRef, setSchedules, ownScheduleDeletesRef, deleteSchedule } =
+    dockLayer;
   const { dockOutcomeRef, dockFinishedRef, dockStoppedRef } = dockLayer;
   const { jobOutputRef, setJobOutputGen, jobReadAtRef } = dockLayer;
   const { dock, dockRef, setDock, dockIds, dockVisible } = dockLayer;
@@ -820,6 +843,7 @@ export function App({
     subagentsRef,
     jobRows,
     jobRowsRef,
+    scheduleRows,
     drawerRow,
     drawerJob,
     jobOutput: jobOutputRef.current,
@@ -827,6 +851,7 @@ export function App({
     quitConfirm,
     panel,
     sessionId: sessionRef.current?.sessionId ?? null,
+    capsPhase: sessionCapsPhase(sessionRef.current, caps),
     field,
     attach,
     skills: skills(),
@@ -961,6 +986,23 @@ export function App({
     [flushNow],
   );
   pushNoticeRef.current = pushNotice;
+
+  /**
+   * The daemon reported the session's switches (a snapshot, an echo, another
+   * device's change, or none: an older daemon). The rows follow it; another
+   * device's change earns a notice (`remoteChangeNotices` decides).
+   */
+  const onCapsChange = useCallback(
+    (next: CapsView | undefined, by?: string) => {
+      const notices = remoteChangeNotices(capsRef.current, next, by, capsPendingRef.current);
+      capsRef.current = next;
+      setCapsState(next);
+      for (const text of notices) {
+        pushNotice(text);
+      }
+    },
+    [pushNotice],
+  );
 
   // Rows changed: the dock keeps its selection BY ID, follows it when the row
   // leaves, and returns to the input when the list empties — `reconcile`'s
@@ -1193,6 +1235,9 @@ export function App({
     panelGenRef,
     panelApply,
     setSessionsState,
+    setSchedulesState,
+    setSchedulesData,
+    deleteSchedule: deleteScheduleInPanel,
     touchPanel,
     closePanel,
     openPanel,
@@ -1204,7 +1249,25 @@ export function App({
     switchingRef,
     columns,
     pushNotice,
+    sessionRef,
+    ownScheduleDeletesRef,
   });
+
+  /**
+   * The daemon's `schedules` report, for EVERY surface at once (cron-tool fix
+   * round 1, finding 2): the dock's rows (its own `setSchedules`) and, if it is
+   * open, the `/schedule` panel — which otherwise stayed the snapshot it opened
+   * on, offering a delete for an id the daemon no longer has. This is the ONE
+   * feed the follow installs, so a wake created or deleted while the panel is
+   * open shows up there too.
+   */
+  const followSchedules = useCallback(
+    (rows: readonly ScheduleDockRow[] | undefined) => {
+      setSchedules(rows);
+      setSchedulesData(rows, Date.now());
+    },
+    [setSchedules, setSchedulesData],
+  );
 
   // `run "<prompt>"`: the first message, sent once at mount, like a typed one: a
   // failed send leaves it in the conversation with the error under it (it is
@@ -1340,8 +1403,11 @@ export function App({
     queueSubRef,
     agentsSubRef,
     jobsSubRef,
+    schedulesSubRef,
     notifySubRef,
     dockMsgSubRef,
+    capsSubRef,
+    onCapsChange,
     heldRef,
     abortRef,
     streamCtrlRef,
@@ -1372,6 +1438,7 @@ export function App({
     drainHeld,
     setAgents,
     setJobs,
+    setSchedules: followSchedules,
     setDock,
     jobOutputRef,
     touchPanel,
@@ -1398,8 +1465,12 @@ export function App({
       agentsSubRef.current = null;
       jobsSubRef.current?.();
       jobsSubRef.current = null;
+      schedulesSubRef.current?.();
+      schedulesSubRef.current = null;
       notifySubRef.current?.();
       notifySubRef.current = null;
+      capsSubRef.current?.();
+      capsSubRef.current = null;
     };
   }, [watchSession]);
 
@@ -1424,6 +1495,7 @@ export function App({
     runClearRef,
     subagentsRef,
     jobRowsRef,
+    schedulesRef,
     setQuitConfirm,
     runQuit,
     detachOnQuit,
@@ -1498,6 +1570,7 @@ export function App({
           histIndexRef,
           draftRef,
           sessionRef,
+          schedulesRef,
           stateRef,
           busyCompacting: () => compactingRef.current,
           syncingRef,
@@ -1546,6 +1619,7 @@ export function App({
       restoreInput,
       run,
       saveFile,
+      schedulesRef,
       sessions,
       shownModel,
       skills,
@@ -1699,9 +1773,45 @@ export function App({
     },
     closePanel,
     panelApply,
+    // Space in `/mcp` / `/skills` (docs/feat/session-capabilities.md S4): what it
+    // flips is decided on the LIVE panel and switches (`panelSwitchOp`); the row
+    // flips on the daemon's echo, never here.
+    switchCapability: () => {
+      const open = panelRef.current;
+      const session = sessionRef.current;
+      if (open === null) {
+        return;
+      }
+      const phase = sessionCapsPhase(session, capsRef.current);
+      const op = panelSwitchOp(open, columns, phase);
+      if (op === null || !session?.setCapability) {
+        const why = noSwitchNotice(phase);
+        if (why !== null) pushNotice(why);
+        return;
+      }
+      capsPendingRef.current = [...capsPendingRef.current, op];
+      const done = (): void => {
+        capsPendingRef.current = settled(capsPendingRef.current, op);
+      };
+      session.setCapability(op.kind, op.name, op.enabled).then(done, (error: unknown) => {
+        done();
+        pushNotice(switchFailedNotice(op, error));
+      });
+    },
     setSessionsState,
+    setSchedulesState,
     switchTo,
     sessionsDelete,
+    // A wake's delete is the DOCK's when it comes from the dropdown, and the
+    // PANEL's when it comes from `/schedule` (the generation gate: a reply that
+    // lands after the panel closed is dropped). Both go out as the same method.
+    deleteSchedule: (id) => {
+      if (panel !== null && panel.kind === "schedule") {
+        deleteScheduleInPanel(id, panelGenRef.current);
+        return;
+      }
+      deleteSchedule(id);
+    },
     killJob,
     killChild,
     setDock,

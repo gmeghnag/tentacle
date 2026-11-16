@@ -153,6 +153,7 @@ import { localAutoAccept, styleInfo } from "./run-ui.ts";
 import { serveModelNotice } from "./serve-model-notice.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { autoAcceptOf, routingAutoAccept, seedAutoAcceptOf } from "./session-auto-accept.ts";
+import { seedCapabilitiesOf } from "./session-capabilities.ts";
 import { NOT_A_TERMINAL, dimIf, termOf } from "./streams.ts";
 import { startTerminal } from "./terminal.ts";
 import {
@@ -2272,6 +2273,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             // starts with the switch the person has now: the open carries it
             // as `OpenParams.autoAccept` (D5), read by the SAME client.
             seedAutoAcceptOf(lastController, autoAcceptFeed.current());
+            // …and with its MCP/skill switches (docs/feat/session-capabilities.md, owner Q5).
+            seedCapabilitiesOf(lastController);
             const controller = created();
             // The session this TUI is on now: the feed adopts its value and
             // listens for another device's flips. A controller with no shared

@@ -16,9 +16,12 @@ import {
   type JobRow,
   JsonRpcErrorCode,
   type QueueState,
+  type ScheduleDeleteResult,
+  type ScheduleRow,
   type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
+  type SessionCapabilitiesWire,
   type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionUpdate,
@@ -47,6 +50,7 @@ import {
   type SessionTitleNotice,
   type UploadOptions,
 } from "./remote-client.ts";
+import { SCHEDULE_UNTRUSTED_DAEMON, firedScheduleRef } from "./schedules.ts";
 import type { StreamOutput } from "./session-reducer.ts";
 import type { SubagentNotify } from "./subagents.ts";
 
@@ -154,6 +158,11 @@ export class RemoteSession implements SessionStreamListener {
   private readonly desiredId?: string;
   /** The resumed record's chosen title: seeds the open that creates the session daemon-side. */
   private readonly seedTitle: SeedTitle | undefined;
+  /**
+   * The resumed record's MCP/skill switches (docs/feat/session-capabilities.md
+   * S3b): seed the open that creates the session daemon-side (a resume, a hop).
+   */
+  private readonly seedCaps: SessionCapabilitiesWire | undefined;
   private id: string | null = null;
   /** The in-flight `session/open` of the first `send`, until `id` is known. */
   private opening: Promise<string> | null = null;
@@ -199,7 +208,8 @@ export class RemoteSession implements SessionStreamListener {
   /**
    * The daemon is a trusted `serve` host that starts its own wake turns: their
    * asks count as this session's for auto-accept (`autoAcceptsTurn`). From
-   * `RemoteClientOptions.daemonWakes`; FALSE everywhere but `connect`.
+   * `RemoteClientOptions.daemonWakes`; FALSE everywhere but `connect` and the
+   * local worker (docs/feat/cron-tool.md D1).
    */
   private readonly daemonWakes: boolean;
   /**
@@ -210,6 +220,11 @@ export class RemoteSession implements SessionStreamListener {
    * it keeps a local, in-memory value (AGENTS §7, "a pod is not trusted").
    */
   readonly autoAcceptHandle: AutoAcceptHandle;
+  /** The daemon's switches (`capabilities()`); undefined → it has none (yet). */
+  private capabilityState: SessionCapabilitiesWire | undefined;
+  private readonly capabilityListeners = new Set<
+    (state: SessionCapabilitiesWire | undefined, by?: string) => void
+  >();
   /**
    * The session's auto-accept as a consumer sees it (a TUI's feed, the phone's
    * sheet): `current()`, `set()`, `onChange()`, `shared()` — never `receive`.
@@ -291,11 +306,13 @@ export class RemoteSession implements SessionStreamListener {
     attach?: { readonly reopen?: boolean },
     closeIfLast = false,
     daemonWakes = false,
+    seedCapabilities?: SessionCapabilitiesWire,
   ) {
     this.client = client;
     this.seedMessages = seedMessages;
     this.desiredId = desiredId;
     this.seedTitle = seedTitle;
+    this.seedCaps = seedCapabilities;
     this.attach = attach;
     this.closeIfLast = closeIfLast;
     this.daemonWakes = daemonWakes;
@@ -335,6 +352,84 @@ export class RemoteSession implements SessionStreamListener {
     this.autoAcceptHandle.receive(on, by);
   }
 
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md), as
+   * the daemon last reported them: undefined until an open says it has them,
+   * and again after an older daemon answers `MethodNotFound` — a surface then
+   * hides its toggles ("not supported by this computer").
+   */
+  capabilities(): SessionCapabilitiesWire | undefined {
+    return this.capabilityState;
+  }
+
+  /**
+   * Follow the switches: called with the daemon's state on every snapshot and
+   * change (`by` set only on a change: another client's label, untrusted
+   * display text), and with undefined when the daemon turns out not to have
+   * them. Returns the unsubscribe.
+   */
+  onCapabilities(
+    listener: (state: SessionCapabilitiesWire | undefined, by?: string) => void,
+  ): () => void {
+    this.capabilityListeners.add(listener);
+    return () => {
+      this.capabilityListeners.delete(listener);
+    };
+  }
+
+  /**
+   * `session/set_capability`: turn one MCP server or skill on/off for the model.
+   * The state is NOT taken from the answer but from the daemon's echo (the
+   * `capabilities` update, emitted before it answers): with two clients racing,
+   * a late answer must not undo the other's later change (F4). Resolves with the
+   * daemon's state after applying. Rejects on a refusal; `MethodNotFound` (an
+   * older daemon) also clears the state, so the toggles hide (F7).
+   */
+  async setCapability(
+    kind: "mcp" | "skill",
+    name: string,
+    enabled: boolean,
+  ): Promise<SessionCapabilitiesWire> {
+    try {
+      const result = await this.client.setSessionCapability(this, kind, name, enabled);
+      return result.capabilities;
+    } catch (error) {
+      if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+        this.noteCapabilities(undefined);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The NEXT session this client creates starts with this one's switches
+   * (`OpenParams.capabilities`, S3b): a `/clear` close-and-replace keeps them
+   * (owner Q5). A no-op while the daemon has reported none (unknown or an older
+   * daemon): nothing to carry.
+   */
+  seedCapabilities(): void {
+    if (this.capabilityState !== undefined) {
+      this.client.seedCapabilitiesOnCreate(this.capabilityState);
+    }
+  }
+
+  /** `SessionStreamListener`: the daemon's switches on an open/re-attach (F5). */
+  capabilitiesSnapshot(state: SessionCapabilitiesWire): void {
+    this.noteCapabilities(state);
+  }
+
+  /** A `capabilities` update from any client (own echoes included). */
+  capabilitiesChanged(state: SessionCapabilitiesWire, by?: string): void {
+    this.noteCapabilities(state, by);
+  }
+
+  private noteCapabilities(state: SessionCapabilitiesWire | undefined, by?: string): void {
+    this.capabilityState = state;
+    for (const listener of [...this.capabilityListeners]) {
+      listener(state, by);
+    }
+  }
+
   /** The link went away: a set still in flight is unacknowledged from here on. */
   autoAcceptDropped(): void {
     this.autoAcceptHandle.dropped();
@@ -368,7 +463,7 @@ export class RemoteSession implements SessionStreamListener {
 
   /**
    * Auto-accept may answer an ask of this turn: one I minted, or — on a trusted
-   * `serve` daemon that wakes on its own (`daemonWakes`, set by `connect`) — the
+   * daemon that wakes on its own (`daemonWakes`: `connect`, the worker) — the
    * SESSION's own wake turn (docs/fix/autoaccept-wake-turns.md A4).
    *
    * The prefix test is stateless on purpose: a wake turn that ended, and a
@@ -467,7 +562,14 @@ export class RemoteSession implements SessionStreamListener {
       // The id is set INSIDE `opening`: whoever awaits it (an enqueue, a
       // send-now racing the first send) finds the session open.
       const opening = this.client
-        .openSession(undefined, this.seedMessages, this.desiredId, this, this.seedTitle)
+        .openSession(
+          undefined,
+          this.seedMessages,
+          this.desiredId,
+          this,
+          this.seedTitle,
+          this.seedCaps,
+        )
         .then(
           (sessionId) => {
             this.id = sessionId;
@@ -611,6 +713,15 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * The session's scheduled wakes as the daemon last reported them (bounded
+   * here). Undefined: no report yet, an older daemon, or a client whose daemon
+   * is not trusted to start its own turns (a pod's table is dropped, AGENTS §7).
+   */
+  get schedules(): readonly ScheduleRow[] | undefined {
+    return this.id ? this.client.schedulesOf(this.id) : undefined;
+  }
+
+  /**
    * Subscribe to this session's queue as the daemon reports it (every
    * writer's rows, live or a resync's); the current state, if any, is given
    * at once. Returns an unsubscribe (docs/feat/tui-foreign-turns.md C7).
@@ -750,6 +861,50 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * Subscribe to this session's scheduled wakes as the daemon reports them
+   * (bounded and sanitized by the client); the current table, if any, is given
+   * at once. A wake fires between turns, so this fires while idle. The notice
+   * carries the daemon's own count beside the rows (it caps 10, this client 32).
+   * Returns an unsubscribe (docs/feat/cron-tool.md D5).
+   */
+  onSchedules(
+    listener: (report: { rows: readonly ScheduleRow[]; count: number }) => void,
+  ): () => void {
+    const unsubscribe = this.client.onSessionSchedules((notice) => {
+      if (notice.sessionId === this.id) {
+        listener({ rows: notice.rows, count: notice.count });
+      }
+    });
+    const now = this.schedules;
+    if (now) {
+      // A table already reported: the count is its length (the client's bound is
+      // 32 against the daemon's 10, so nothing was cut — H1's reasoning).
+      listener({ rows: now, count: now.length });
+    }
+    return unsubscribe;
+  }
+
+  /**
+   * Drop one scheduled wake (`session/schedule_delete`, docs/feat/cron-tool.md
+   * D5). A refusal (unknown id, an older daemon) is a RESULT with a `reason`,
+   * never a throw at the TUI. A client whose daemon is not trusted to schedule
+   * wakes (a pod, `run`/`attach`) answers its own refusal and sends nothing: a
+   * pod can neither claim nor cancel a wake on the laptop's behalf (AGENTS §7).
+   */
+  deleteSchedule(scheduleId: string): Promise<ScheduleDeleteResult> {
+    if (!this.id) {
+      return Promise.resolve({ deleted: false, reason: "this session is not open yet" });
+    }
+    if (!this.daemonWakes) {
+      return Promise.resolve({
+        deleted: false,
+        reason: SCHEDULE_UNTRUSTED_DAEMON,
+      });
+    }
+    return this.client.deleteSchedule(this.id, scheduleId);
+  }
+
+  /**
    * Subscribe to MY rows coming back (docs/feat/queued-broadcast.md): a row I
    * queued that its turn left undrained, which no send-now carried on. Each
    * row is given once, with the text I typed (never the daemon's), then
@@ -859,6 +1014,16 @@ export class RemoteSession implements SessionStreamListener {
 
   get sessionId(): string | null {
     return this.id ?? this.desiredId ?? null;
+  }
+
+  /**
+   * The session is open daemon-side (`sessionId` already names the id it WILL
+   * open): a surface tells "not started yet" from "the daemon has no switches"
+   * (docs/feat/session-capabilities.md S4). A method, not a getter: `connect`
+   * hands this session to the TUI as its `SessionController` as is.
+   */
+  opened(): boolean {
+    return this.id !== null;
   }
 
   /** How many of my queued rows stay on the daemon if this session stops being followed now (QN2). */
@@ -1507,6 +1672,7 @@ export class RemoteSession implements SessionStreamListener {
     turnId: string,
     prompt: string,
     attachments?: readonly AttachmentRef[],
+    schedule?: { readonly id: string; readonly spec: string },
   ): ActiveTurn {
     const turn: ActiveTurn = {
       turnId,
@@ -1534,6 +1700,9 @@ export class RemoteSession implements SessionStreamListener {
         type: "user_message",
         text: prompt,
         ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
+        // The scheduled wake that started it (S2 Review 1): one gate for both
+        // doors (`firedScheduleRef`), never sanitizing in a component.
+        ...firedScheduleRef(schedule, this.daemonWakes),
       });
     }
     this.raise({
@@ -1703,7 +1872,7 @@ export class RemoteSession implements SessionStreamListener {
           if (!own.ended) this.onUpdate(own, update);
           return;
         }
-        this.startForeign(update.turnId, update.prompt, update.attachments);
+        this.startForeign(update.turnId, update.prompt, update.attachments, update.schedule);
         return;
       }
       case "turn_end": {
@@ -1731,6 +1900,7 @@ export class RemoteSession implements SessionStreamListener {
       case "queued":
       case "subagents":
       case "jobs":
+      case "schedules":
       case "subagent_notify":
       case "subagent_message":
         return;
@@ -1816,6 +1986,9 @@ export class RemoteSession implements SessionStreamListener {
             type: "user_message",
             text: update.prompt,
             ...(hasRefs(update.attachments) ? { attachments: update.attachments } : {}),
+            // Same gate as `startForeign` (a wake turn this session DID start,
+            // re-delivered after a reset).
+            ...firedScheduleRef(update.schedule, this.daemonWakes),
           });
         }
       }
@@ -1837,6 +2010,7 @@ export class RemoteSession implements SessionStreamListener {
       update.type === "queued" ||
       update.type === "subagents" ||
       update.type === "jobs" ||
+      update.type === "schedules" ||
       update.type === "subagent_notify" ||
       update.type === "subagent_message"
     ) {

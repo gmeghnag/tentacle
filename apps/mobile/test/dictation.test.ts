@@ -510,3 +510,62 @@ describe("start/cancel race (attempt ids)", () => {
     expect(ended.state).toEqual(live);
   });
 });
+
+/**
+ * Review round 1, finding 1: Settings → Beta → Dictation going OFF sends
+ * `stopRequested` (`voice-controller.ts:363`). It must end the attempt in EVERY
+ * non-idle state — a slow on-device download, or a pending permission ask, must
+ * not reach `started` behind a mic that is now hidden (the plan's "hidden mic
+ * still listening" failure). The `preparing`/`asking` cases are the ones a
+ * `default: return none` would silently swallow.
+ */
+describe("stopRequested in every pending state (switch turned OFF)", () => {
+  const ios26Downloading: Capabilities = {
+    os: 26,
+    analyzer: { transcriber: true, dictation: true, assets: { [L]: "supported" } },
+    recognizer: { [L]: { supported: true, onDevice: true } },
+    permissions: GRANTED,
+  };
+  const asking = () => run([{ type: "tap", draft: "typed", locale: L, now: 0, attempt: 1 }]).state;
+  const preparing = () => run([{ type: "probed", caps: iOS18 }], asking()).state;
+  const downloading = () =>
+    run(
+      [
+        { type: "probed", caps: ios26Downloading },
+        { type: "reserved", ok: true },
+        { type: "assetProgress", fraction: 0.1 },
+      ],
+      asking(),
+    ).state;
+
+  test("the fixtures really are in those states", () => {
+    expect(asking().kind).toBe("asking");
+    expect(preparing()).toMatchObject({ kind: "preparing", phase: "starting" });
+    expect(downloading()).toMatchObject({ kind: "preparing", phase: "downloading" });
+  });
+
+  test("in asking → idle, nothing native was started to cancel", () => {
+    const { state, effects } = run([{ type: "stopRequested", now: 1 }], asking());
+    expect(state).toEqual(DICTATION_IDLE);
+    expect(effects).toEqual([]);
+  });
+
+  test("in preparing{starting} → idle + cancel of THIS attempt", () => {
+    const { state, effects } = run([{ type: "stopRequested", now: 1 }], preparing());
+    expect(state).toEqual(DICTATION_IDLE);
+    expect(effects).toEqual([{ type: "cancel", attempt: 1 }]);
+  });
+
+  test("in preparing{downloading} → idle + cancel (a slow download is not listening)", () => {
+    const { state, effects } = run([{ type: "stopRequested", now: 1 }], downloading());
+    expect(state).toEqual(DICTATION_IDLE);
+    expect(effects).toEqual([{ type: "cancel", attempt: 1 }]);
+  });
+
+  test("a `started` arriving after the switch went off never reaches listening", () => {
+    const after = run([{ type: "stopRequested", now: 1 }], preparing()).state;
+    const late = dictationReduce(after, { type: "started", now: 2, attempt: 1 });
+    expect(late.state.kind).toBe("idle");
+    expect(late.effects).toEqual([{ type: "cancel", attempt: 1 }]);
+  });
+});

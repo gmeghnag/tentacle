@@ -22,6 +22,7 @@ import type {
   JobController,
   ModelProvider,
   PermissionBroker,
+  ScheduleLink,
 } from "@tentacle/core";
 import {
   type DaemonDiscovery,
@@ -58,6 +59,7 @@ import {
   type RestoredSessionState,
   type SessionLogOptions,
   type SessionPushObserver,
+  type SessionSchedules,
   type TurnErrorPolicy,
 } from "./hosted-session.ts";
 import { forgetLiveRegistration, writeLiveRegistration } from "./live-store.ts";
@@ -129,6 +131,14 @@ export interface AgentContext {
    * alike, and only a hop-capable TUI has a feed and a broker prompt for it.
    */
   readonly hop?: true;
+  /**
+   * The session's scheduled wakes (docs/feat/cron-tool.md P1/D1): a LAZY link
+   * (the agent exists before its session; `null` until it does, or once it
+   * ended), present ONLY where the host schedules (`SessionHostOptions.schedules`:
+   * `serve` and the worker). A factory offers the schedule tools exactly when
+   * this is present — never on a pod daemon (AGENTS §7).
+   */
+  readonly schedules?: () => ScheduleLink | null;
 }
 
 /** What a rebuilt agent takes over from the session it replaces the agent of. */
@@ -336,6 +346,13 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * daemons and the worker never pass it: off.
    */
   readonly wakeOnJobExit?: boolean;
+  /**
+   * `serve` and the in-process worker only (docs/feat/cron-tool.md D1, owner
+   * Q4): every session keeps the agent's scheduled wakes and fires them by
+   * itself (`SessionSchedules`). A pod daemon never passes it: no table, no
+   * link, no tools.
+   */
+  readonly schedules?: SessionSchedules;
 }
 
 /**
@@ -911,6 +928,11 @@ export class SessionHost {
     // Only a session this open CREATES takes the seed (`autoAccept`, exactly like
     // `settings`): a `/clear` fork and a hop target carry the value this way.
     host.autoAccept = params.autoAccept === true;
+    // The switches too (docs/feat/session-capabilities.md): a resume from the
+    // laptop's copy, a `/clear` fork and a hop target carry them this way.
+    if (params.capabilities !== undefined) {
+      host.seedCapabilities(params.capabilities);
+    }
     const { epoch } = host.attach(attachment);
     return { hosted: host, created: true, resync: false, epoch };
   }
@@ -1208,6 +1230,12 @@ export class SessionHost {
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
       // A restart KEEPS the session's auto-accept (owner Q3).
       ...(record.autoAccept === true ? { autoAccept: true } : {}),
+      // Its scheduled wakes too, restart and reopen alike (D6): re-armed, an
+      // overdue one fires once (catch-up).
+      ...(record.schedules !== undefined ? { schedules: record.schedules } : {}),
+      // And its switches, from the log (docs/feat/session-capabilities.md S3b):
+      // a restart and an archive reopen alike — the same session's choice.
+      ...(record.capabilities !== undefined ? { capabilities: record.capabilities } : {}),
       // Paired: the log continues the lineage the files hold (§5); else a new one.
       ...(record.paired ? { log: { head: record.logHead, logged: record.logged } } : {}),
     });
@@ -1365,6 +1393,8 @@ export class SessionHost {
       // `move_session` proposal, so this factory may offer the tool. Unset →
       // never offered (a `run`/`attach` TUI has no `/move` feed).
       ...(hop ? { hop: true as const } : {}),
+      // Lazy like `modelLink`; only where this host schedules (D1).
+      ...(this.opts.schedules ? { schedules: () => bound.hosted?.scheduleLink() ?? null } : {}),
     });
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
@@ -1399,6 +1429,7 @@ export class SessionHost {
       log,
       agentJobs,
       uploads,
+      this.opts.schedules,
     );
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;
@@ -1445,6 +1476,9 @@ export class SessionHost {
       // (the CREATING client's), so the rebuilt agent offers the tool exactly when
       // the first one did (D8/D9).
       ...(hosted.hop ? { hop: true as const } : {}),
+      // The table is the SESSION's (P1): the rebuilt agent gets the same link,
+      // so its tools see the same wakes and the timer is untouched.
+      ...(this.opts.schedules ? { schedules: () => hosted.scheduleLink() } : {}),
     });
     const foreign =
       next.permissions !== reuse.permissions ||

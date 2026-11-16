@@ -16,6 +16,7 @@ import { ChannelError } from "@tentacle/client";
 import { DomainErrorCode, JsonRpcErrorCode, type SessionListEntry } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import { type LinkDiagnosis, diagnosisMessage } from "./link-diagnosis.ts";
+import { wakesBadge } from "./schedule-view.ts";
 
 /** One page as the network layer hands it back (the reducer never awaits). */
 export interface SessionPage {
@@ -170,6 +171,12 @@ export interface SessionRow {
   /** Relative time from `updatedAt`, e.g. "3m ago". */
   readonly subtitle: string;
   readonly badges: readonly string[];
+  /**
+   * Armed scheduled wakes on this session (docs/feat/cron-tool.md S6, M8): the
+   * daemon's count, `0` when it reports none — an older daemon reports nothing,
+   * and a phone that claimed otherwise would show a wake that cannot exist here.
+   */
+  readonly wakes: number;
   readonly archived: boolean;
   /** A turn runs now (the Running section, `session-groups.ts`). */
   readonly running: boolean;
@@ -217,6 +224,12 @@ function badgesFor(entry: SessionListEntry): readonly string[] {
   if (entry.jobs !== undefined && entry.jobs > 0) {
     badges.push(entry.jobs === 1 ? "1 job" : `${entry.jobs} jobs`);
   }
+  // After the jobs: a wake is the least urgent thing a row can say (it is not
+  // running, it waits), and the mockup puts its count beside the jobs one.
+  const wakes = wakesBadge(entry.schedules ?? 0);
+  if (wakes !== "") {
+    badges.push(wakes);
+  }
   return badges;
 }
 
@@ -234,6 +247,7 @@ export function rows(entries: readonly SessionListEntry[], now: number): Session
       title: entry.title,
       subtitle: relativeTime(entry.updatedAt, now),
       badges: badgesFor(entry),
+      wakes: entry.schedules ?? 0,
       archived: entry.archived,
       running: entry.running,
       attached: entry.attached,

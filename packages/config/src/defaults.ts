@@ -70,6 +70,17 @@ export const DEFAULT_SESSION_HOP_TOOL = false;
  * opt-in rather than opt-out.
  */
 export const DEFAULT_WORKLOAD_SHELL_TOOL = false;
+/**
+ * `schedules.*`: the host's limits on the agent's scheduled wakes
+ * (docs/feat/cron-tool.md D3, owner Q6). The same values as `@tentacle/core`'s
+ * `DEFAULT_SCHEDULE_LIMITS` (this package does not depend on core; a CLI test
+ * pins that the two agree).
+ */
+export const DEFAULT_SCHEDULES_MAX_JOBS = 10;
+export const DEFAULT_SCHEDULES_MIN_INTERVAL_MINUTES = 1;
+export const DEFAULT_SCHEDULES_EXPIRY_DAYS = 7;
+export const DEFAULT_SCHEDULES_MAX_AHEAD_DAYS = 7;
+export const DEFAULT_SCHEDULES_PROMPT_MAX_CHARS = 2000;
 /** Resets allowed per user message; `-1` = unlimited. */
 export const DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE = -1;
 /** Max characters of a tool result kept inline before it is spilled to a file. */
@@ -208,6 +219,10 @@ export const DEFAULT_CONFIG_JSONC = `{
   // (a pod or container) with \`workload_shell\`? It dials with YOUR kubeconfig /
   // docker endpoint, so it is off unless you turn it on.
   // "workloadShell": { "tool": ${DEFAULT_WORKLOAD_SHELL_TOOL} },
+
+  // Scheduled wakes: limits on the agent's \`schedule_create\` (it asks you
+  // first). Read by THIS host (the local worker, \`serve\`); never carried to a pod.
+  // "schedules": { "maxJobs": ${DEFAULT_SCHEDULES_MAX_JOBS}, "minIntervalMinutes": ${DEFAULT_SCHEDULES_MIN_INTERVAL_MINUTES}, "expiryDays": ${DEFAULT_SCHEDULES_EXPIRY_DAYS}, "maxAheadDays": ${DEFAULT_SCHEDULES_MAX_AHEAD_DAYS}, "promptMaxChars": ${DEFAULT_SCHEDULES_PROMPT_MAX_CHARS} },
 
   // Default engine of \`tentacle run\` / \`tentacle attach\`: "kubernetes" (a pod),
   // "docker" or "podman" (a container). --engine and TENTACLE_ENGINE win.

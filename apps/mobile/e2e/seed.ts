@@ -463,6 +463,35 @@ export async function queueStateOf(
   }
 }
 
+/**
+ * The daemon's MCP/skill switches of a session (flow 25, docs/feat/
+ * session-capabilities.md S5): the open's own snapshot, read through a client
+ * that attaches and detaches, so the flow asserts the DAEMON's state, not the
+ * phone's screen. `null`: the daemon reported none (unopenable, or too old).
+ */
+export async function capabilitiesOf(
+  deps: { readonly url: string; readonly token: string },
+  sessionId: string,
+): Promise<{ disabledMcp: readonly string[]; disabledSkills: readonly string[] } | null> {
+  const live = await attach(deps);
+  const session = live.newSession(undefined, sessionId, undefined, { attach: {} });
+  try {
+    try {
+      await session.open();
+    } catch {
+      // Unopenable: it reports no switches.
+    }
+    const state = session.capabilities();
+    return state === undefined
+      ? null
+      : { disabledMcp: [...state.disabledMcp], disabledSkills: [...state.disabledSkills] };
+  } finally {
+    await session.detach().catch(() => {});
+    await live.drain().catch(() => {});
+    live.close();
+  }
+}
+
 /** Whether `project/<file>` exists in the `serve` cwd (flow 08/10's truth). */
 export async function fileExists(deps: { readonly cwd: string }, file: string): Promise<boolean> {
   try {

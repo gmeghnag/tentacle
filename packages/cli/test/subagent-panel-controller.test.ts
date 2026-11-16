@@ -372,6 +372,11 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       "sendNow",
       "close",
       "skills",
+      // The `/mcp` / `/skills` switches (docs/feat/session-capabilities.md S4).
+      "capabilities",
+      "onCapabilities",
+      "setCapability",
+      "opened",
       "context",
       "rename",
       "onReturned",
@@ -383,6 +388,11 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       "onSubagentNotify",
       "messageSubagent",
       "killSubagent",
+      // The session's armed scheduled wakes (docs/feat/cron-tool.md S5): the
+      // dock's rows, the pill's count and `/schedule` all paint this feed, and a
+      // delete is the daemon's own method. Forwarded in `persistingController`.
+      "onSchedules",
+      "deleteSchedule",
       "onJobs",
       "jobOutput",
       "killJob",

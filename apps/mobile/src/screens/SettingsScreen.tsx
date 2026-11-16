@@ -1,9 +1,10 @@
 /**
  * Settings (docs/feat/mobile-lock.md D6; no mockup — the system of
- * docs/feat/mobile-ui-polish.md applied: large title + glass back, 26 pt grouped
- * cards, 44 pt rows, an SF Symbol checkmark, `Banner` for notices). A dumb
- * renderer: which delay is selected, whether the device can lock, and what the
- * export did all arrive precomputed.
+ * docs/feat/mobile-ui-polish.md applied, restyled to E2 bands by S4 of
+ * docs/feat/mobile-chrome.md: a large title + thin back, ONE full-width
+ * `BandSection` per section, 44 pt rows, an SF Symbol checkmark, `Banner` for
+ * notices). A dumb renderer: which delay is selected, whether the device can lock,
+ * and what the export did all arrive precomputed.
  *
  * The four delay rows are `lock-delay-<v>` and the export row is `export-logs`,
  * because those are the only values a Maestro flow can assert (P9: RN's new
@@ -12,18 +13,19 @@
 import type { JSX } from "react";
 import { ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
+import type { ActivityButtonMode } from "../floating-button.ts";
 import type { SpeechRate } from "../read-aloud.ts";
 import type { LanguageSetting } from "../speech-locale.ts";
 import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
+import { BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
-import { GlassButton } from "../ui/GlassButton.tsx";
-import { GroupedCard } from "../ui/GroupedCard.tsx";
+import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
-import { SectionHeader } from "../ui/SectionHeader.tsx";
-import type { VoiceSettings } from "../voice-settings-store.ts";
+import { voiceRows } from "../voice-beta.ts";
+import { DEFAULT_VOICE_SETTINGS, type VoiceSettings } from "../voice-settings-store.ts";
 
 /** The rows, weakest lock last, with the copy the mockup uses. */
 export const DELAY_ROWS: readonly { readonly value: LockDelay; readonly label: string }[] = [
@@ -78,7 +80,25 @@ export interface SettingsScreenProps {
    */
   readonly notifications?: NotificationsRow;
   readonly onToggleNotifications?: (enabled: boolean) => void;
+  /**
+   * The Activity button (docs/feat/mobile-chrome.md Design 6): the header pill
+   * (default) or the floating button. Absent = no section.
+   */
+  readonly activityMode?: ActivityButtonMode;
+  /** False over a newer build's record: the rows are disabled and say why (F22). */
+  readonly activityWritable?: boolean;
+  /** A write that did not stick (the pick still holds for this run). */
+  readonly activityError?: string;
+  readonly onActivityMode?: (mode: ActivityButtonMode) => void;
 }
+
+export const ACTIVITY_BUTTON_ROWS: readonly {
+  readonly value: ActivityButtonMode;
+  readonly label: string;
+}[] = [
+  { value: "header", label: "Header" },
+  { value: "floating", label: "Floating" },
+];
 
 export const LANGUAGE_ROWS: readonly { readonly value: LanguageSetting; readonly label: string }[] =
   [
@@ -108,8 +128,15 @@ export function SettingsScreen({
   onBack,
   notifications,
   onToggleNotifications,
+  activityMode,
+  activityWritable = true,
+  activityError,
+  onActivityMode,
 }: SettingsScreenProps): JSX.Element {
   const compact = useCompactTitle();
+  // Which voice rows the Beta switches reveal (pure: `voice-beta.ts`); with every
+  // switch off the section is the two switches and a footnote.
+  const rows = voiceRows(voice ?? DEFAULT_VOICE_SETTINGS);
   // A voice choice as a checkmark list, the lock rows' look (render only).
   const choice = <T extends string>(
     rows: readonly { readonly value: T; readonly label: string }[],
@@ -148,7 +175,7 @@ export function SettingsScreen({
           title="Settings"
           left={
             onBack === undefined ? undefined : (
-              <GlassButton
+              <HeaderIcon
                 palette={palette}
                 testID="settings-back"
                 icon="chevron.left"
@@ -160,7 +187,8 @@ export function SettingsScreen({
         />
         <View style={styles.body}>
           <View style={styles.section}>
-            <SectionHeader palette={palette} title="App lock" />
+            {/* The no-passcode notice is not a row: it stays a banner, above the
+                band it explains (Design 4 bands hold rows, not notices). */}
             {notice === "no-passcode" ? (
               <Banner
                 palette={palette}
@@ -171,7 +199,11 @@ export function SettingsScreen({
                 body="This iPhone has no passcode. Add one in Settings → Face ID & Passcode."
               />
             ) : null}
-            <GroupedCard palette={palette}>
+            <BandSection
+              palette={palette}
+              title="App lock"
+              footnote="How long tentacle may stay in the background before it asks for Face ID again."
+            >
               {DELAY_ROWS.map((row, index) => {
                 const selected = setting === row.value;
                 const asked = pending === row.value && !selected;
@@ -202,10 +234,7 @@ export function SettingsScreen({
                   />
                 );
               })}
-            </GroupedCard>
-            <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
-              How long tentacle may stay in the background before it asks for Face ID again.
-            </Text>
+            </BandSection>
             {error === undefined ? null : (
               <Banner
                 palette={palette}
@@ -217,8 +246,7 @@ export function SettingsScreen({
             )}
           </View>
           <View style={styles.section}>
-            <SectionHeader palette={palette} title="Notifications" />
-            <GroupedCard palette={palette}>
+            <BandSection palette={palette} title="Notifications">
               {/* P9: ONE row for the phone. With nothing paired the switch is
                   disabled and the detail says what to do about it. */}
               <Row
@@ -249,39 +277,125 @@ export function SettingsScreen({
                     : notifications.detail}
                 </Text>
               </Row>
-            </GroupedCard>
+            </BandSection>
           </View>
+          {activityMode === undefined || onActivityMode === undefined ? null : (
+            <View style={styles.section}>
+              <BandSection
+                palette={palette}
+                title="Activity button"
+                footnote={
+                  activityWritable
+                    ? "Where running sub-agents and jobs show: in the header, or as a button you can drag to either edge."
+                    : "Set by a newer version of tentacle — this version cannot change it."
+                }
+              >
+                {ACTIVITY_BUTTON_ROWS.map((row, index) => (
+                  <Row
+                    key={row.value}
+                    testID={`activity-button-${row.value}`}
+                    palette={palette}
+                    first={index === 0}
+                    minHeight={size.rowSetting}
+                    title={row.label}
+                    accessibilityLabel={row.label}
+                    dimmed={!activityWritable}
+                    {...(activityWritable ? { onPress: () => onActivityMode(row.value) } : {})}
+                    trailing={
+                      activityMode === row.value ? (
+                        <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
+                      ) : undefined
+                    }
+                  />
+                ))}
+              </BandSection>
+              {activityError === undefined ? null : (
+                <Banner
+                  palette={palette}
+                  tone="error"
+                  icon="exclamationmark.triangle"
+                  testID="activity-button-error"
+                  body={activityError}
+                />
+              )}
+            </View>
+          )}
           {voice === undefined || onVoice === undefined ? null : (
             <View style={styles.section}>
-              <SectionHeader palette={palette} title="Voice" />
-              <GroupedCard palette={palette}>
+              {/* docs/feat/mobile-voice-hidden.md: the voice features live under
+                  BETA, OFF by default, and a row appears only when a switch that
+                  uses it is on. Which rows those are is `voiceRows`, not this. */}
+              <BandSection
+                palette={palette}
+                title="Beta"
+                footnote="Experimental features. They may not work well yet."
+              >
                 <Row
                   palette={palette}
                   first
                   minHeight={size.rowSetting}
-                  title="Read replies aloud"
+                  title="Dictation"
                   trailing={
                     <Switch
-                      testID="voice-read-aloud"
-                      accessibilityLabel="Read replies aloud"
-                      value={voice.readAloud}
+                      testID="beta-dictation"
+                      accessibilityLabel="Dictation"
+                      value={voice.dictation}
                       trackColor={{ false: palette.fill, true: palette.green }}
-                      onValueChange={(readAloud) => onVoice({ ...voice, readAloud })}
+                      onValueChange={(dictation) => onVoice({ ...voice, dictation })}
                     />
                   }
                 />
-              </GroupedCard>
-              <SectionHeader palette={palette} title="Language" />
-              <GroupedCard palette={palette}>
-                {choice(LANGUAGE_ROWS, voice.language, "voice-language", (language) =>
-                  onVoice({ ...voice, language }),
-                )}
-              </GroupedCard>
-              <SectionHeader palette={palette} title="Speaking rate" />
-              <GroupedCard palette={palette}>
-                {choice(RATE_ROWS, voice.rate, "voice-rate", (rate) => onVoice({ ...voice, rate }))}
-              </GroupedCard>
-              <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
+                <Row
+                  palette={palette}
+                  minHeight={size.rowSetting}
+                  title="Read aloud"
+                  trailing={
+                    <Switch
+                      testID="beta-read-aloud"
+                      accessibilityLabel="Read aloud"
+                      value={voice.readAloudButton}
+                      trackColor={{ false: palette.fill, true: palette.green }}
+                      onValueChange={(readAloudButton) => onVoice({ ...voice, readAloudButton })}
+                    />
+                  }
+                />
+              </BandSection>
+              {rows.autoRead ? (
+                <BandSection palette={palette} title="Read aloud">
+                  <Row
+                    palette={palette}
+                    first
+                    minHeight={size.rowSetting}
+                    title="Read replies aloud"
+                    trailing={
+                      <Switch
+                        testID="voice-read-aloud"
+                        accessibilityLabel="Read replies aloud"
+                        value={voice.readAloud}
+                        trackColor={{ false: palette.fill, true: palette.green }}
+                        onValueChange={(readAloud) => onVoice({ ...voice, readAloud })}
+                      />
+                    }
+                  />
+                </BandSection>
+              ) : null}
+              {rows.language ? (
+                <BandSection palette={palette} title="Language">
+                  {choice(LANGUAGE_ROWS, voice.language, "voice-language", (language) =>
+                    onVoice({ ...voice, language }),
+                  )}
+                </BandSection>
+              ) : null}
+              {rows.rate ? (
+                <BandSection palette={palette} title="Speaking rate">
+                  {choice(RATE_ROWS, voice.rate, "voice-rate", (rate) =>
+                    onVoice({ ...voice, rate }),
+                  )}
+                </BandSection>
+              ) : null}
+              {/* The privacy note spans every voice section, so it is the group's
+                  own line, not one band's footnote — on the band's gutter. */}
+              <Text style={[typography.footnote, styles.note, { color: palette.sec }]}>
                 Dictation and speech run on this iPhone. Audio never leaves it and is never saved.
               </Text>
               {voiceError === undefined ? null : (
@@ -296,8 +410,11 @@ export function SettingsScreen({
             </View>
           )}
           <View style={styles.section}>
-            <SectionHeader palette={palette} title="Diagnostics" />
-            <GroupedCard palette={palette}>
+            <BandSection
+              palette={palette}
+              title="Diagnostics"
+              footnote="Logs hold connection state, errors and timings — never message content or keys. You choose where to share the file."
+            >
               <Row
                 testID="export-logs"
                 palette={palette}
@@ -308,11 +425,7 @@ export function SettingsScreen({
                 dimmed={!canExport}
                 {...(canExport ? { onPress: onExportLogs } : {})}
               />
-            </GroupedCard>
-            <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
-              Logs hold connection state, errors and timings — never message content or keys. You
-              choose where to share the file.
-            </Text>
+            </BandSection>
             {exportError === undefined ? null : (
               <Banner
                 palette={palette}
@@ -330,13 +443,15 @@ export function SettingsScreen({
   );
 }
 
-// ONE left edge (visual review V3/N13): the cards sit on the page margin (their
-// own `marginHorizontal`), headers AND footers 16 inside the card edge, banners
-// on the page margin; the first group as far under the title as between groups.
+// ONE left edge: every band is full-width and brings its own 20 pt gutter
+// (`space.rowX`), so the body adds none and the rhythm between sections is the
+// band's own `space.sectionTop` (Design 4) — a wrapper gap on top of it would
+// double the distance between two bands. The `section` wrappers now only group a
+// band with the banner that belongs to it.
 const styles = StyleSheet.create({
   root: { flex: 1 },
   content: { paddingBottom: 40 },
-  body: { gap: space.sectionComputers, paddingTop: space.sectionSessions },
+  body: { gap: 0 },
   section: { gap: 8 },
-  footnote: { paddingHorizontal: space.inset + space.cardInner },
+  note: { paddingHorizontal: space.rowX, paddingTop: 8 },
 });

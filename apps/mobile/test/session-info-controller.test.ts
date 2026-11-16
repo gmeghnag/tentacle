@@ -11,17 +11,23 @@ import { describe, expect, test } from "bun:test";
 import { JsonRpcErrorCode } from "@tentacle/protocol";
 import type {
   McpServerStatus,
+  ScheduleDeleteResult,
+  ScheduleRow,
   SessionContextResult,
   SessionSkillsResult,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import {
   type InfoPort,
+  type InfoSchedules,
   type SessionInfoState,
   createSessionInfo,
 } from "../src/session-info-controller.ts";
 
 const emptySkills: SessionSkillsResult = { slash: [], skills: [], problems: [], moreProblems: 0 };
+
+/** The one clock every test in this file hands the controller (17 Nov 2026, 12:00 local). */
+const NOW = new Date(2026, 10, 17, 12, 0, 0).getTime();
 
 /** A promise plus its settlers: the only way to assert an ORDER deterministically. */
 function deferred<T>(): {
@@ -57,6 +63,7 @@ function port(over: Partial<InfoPort> = {}): {
   const calls = { mcp: 0, skills: 0, context: 0 };
   const base: InfoPort = {
     daemon: () => ({ version: "1.4.0", model: "claude-sonnet-4-5", contextWindow: 200_000 }),
+    now: () => NOW,
     computerName: () => "MacBook Pro",
     title: () => "Fix the flaky test",
     phase: () => "open",
@@ -395,6 +402,232 @@ describe("auto-accept (Owner Q3, F11)", () => {
   });
 });
 
+describe("MCP/skill switches (docs/feat/session-capabilities.md S5)", () => {
+  type Caps = { disabledMcp: string[]; disabledSkills: string[] };
+  type Listener = (state: Caps | undefined, by?: string) => void;
+  /**
+   * A `RemoteSession`'s switch surface, faithful to its contract: the state is
+   * the daemon's, a set's ECHO (with this phone's `by`) arrives BEFORE its
+   * answer, and `MethodNotFound` clears the state (an older daemon, F7).
+   */
+  function fakeCaps() {
+    let state: Caps | undefined = { disabledMcp: [], disabledSkills: [] };
+    const listeners = new Set<Listener>();
+    const sets: { kind: string; name: string; enabled: boolean }[] = [];
+    let answer: (op: { kind: "mcp" | "skill"; name: string; enabled: boolean }) => Promise<void> =
+      async (op) => {
+        caps.push(applied(op), "iPhone");
+      };
+    const applied = (op: { kind: "mcp" | "skill"; name: string; enabled: boolean }): Caps => {
+      const base = state ?? { disabledMcp: [], disabledSkills: [] };
+      const key = op.kind === "mcp" ? "disabledMcp" : "disabledSkills";
+      const list = base[key].filter((name) => name !== op.name);
+      return { ...base, [key]: op.enabled ? list : [...list, op.name].sort() };
+    };
+    const caps = {
+      current: () => state,
+      onChange(listener: Listener) {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      async set(kind: "mcp" | "skill", name: string, enabled: boolean) {
+        sets.push({ kind, name, enabled });
+        await answer({ kind, name, enabled });
+        return state;
+      },
+      /** The daemon reports a state (a change from anyone, or a snapshot without `by`). */
+      push(next: Caps | undefined, by?: string) {
+        state = next;
+        for (const listener of [...listeners]) {
+          listener(next, by);
+        }
+      },
+      applied,
+      sets,
+      listeners,
+      answerWith(fn: typeof answer) {
+        answer = fn;
+      },
+    };
+    return caps;
+  }
+  const servers: McpServerStatus[] = [
+    { name: "k8s", state: "connected", tools: ["get"], moreTools: 0 },
+  ];
+  function withCaps(caps: ReturnType<typeof fakeCaps>, over: Partial<InfoPort> = {}) {
+    return port({
+      mcpStatus: () => Promise.resolve(servers),
+      session: () => ({
+        skills: () => Promise.resolve(emptySkills),
+        context: () => Promise.resolve({ used: 1, exact: true }),
+        capabilities: caps,
+      }),
+      ...over,
+    }).port;
+  }
+  const k8s = (state: SessionInfoState) =>
+    view(state)
+      .sections.find((s) => s.id === "mcp")
+      ?.rows.find((row) => row.title === "k8s");
+
+  test("a tap sends ONE set; the row flips only on the daemon's echo (not optimistic)", async () => {
+    const caps = fakeCaps();
+    const gate = deferred<void>();
+    caps.answerWith(async () => {
+      await gate.promise;
+    });
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    expect(k8s(info.state())?.switch).toMatchObject({ on: true, interactive: true });
+    const sent = info.setCapability("mcp", "k8s", false);
+    await settle();
+    expect(caps.sets).toEqual([{ kind: "mcp", name: "k8s", enabled: false }]);
+    // Sent, not echoed: still on.
+    expect(k8s(info.state())?.switch?.on).toBe(true);
+    caps.push(caps.applied({ kind: "mcp", name: "k8s", enabled: false }), "iPhone");
+    gate.resolve();
+    await sent;
+    expect(k8s(info.state())?.switch?.on).toBe(false);
+    // My own echo is not "changed on" anything.
+    expect(k8s(info.state())?.subtitle).toBe("Off · hidden from the model");
+  });
+
+  test("another device's change repaints the sheet with 'changed on <device>' (Q4)", async () => {
+    const caps = fakeCaps();
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    let painted = 0;
+    info.subscribe(() => {
+      painted += 1;
+    });
+    caps.push({ disabledMcp: ["k8s"], disabledSkills: [] }, "MacBook");
+    expect(painted).toBeGreaterThan(0);
+    expect(k8s(info.state())?.subtitle).toBe("Off · hidden from the model · changed on MacBook");
+  });
+
+  test("a snapshot (re-attach, no by) is never 'changed on' (F5)", async () => {
+    const caps = fakeCaps();
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    caps.push({ disabledMcp: ["k8s"], disabledSkills: [] });
+    expect(k8s(info.state())?.switch?.on).toBe(false);
+    expect(k8s(info.state())?.subtitle).toBe("Off · hidden from the model");
+  });
+
+  test("my own later change clears another device's note on that row", async () => {
+    const caps = fakeCaps();
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    caps.push({ disabledMcp: ["k8s"], disabledSkills: [] }, "MacBook");
+    await info.setCapability("mcp", "k8s", true);
+    expect(k8s(info.state())?.switch?.on).toBe(true);
+    expect(k8s(info.state())?.subtitle).toBeUndefined();
+  });
+
+  test("close() stops following the switches and forgets the notes (only while open)", async () => {
+    const caps = fakeCaps();
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    expect(caps.listeners.size).toBe(1);
+    caps.push({ disabledMcp: ["k8s"], disabledSkills: [] }, "MacBook");
+    info.close();
+    expect(caps.listeners.size).toBe(0);
+    await info.open();
+    expect(caps.listeners.size).toBe(1);
+    expect(k8s(info.state())?.subtitle).toBe("Off · hidden from the model");
+  });
+
+  test("a refused set is shown under its section, and cleared by the next attempt", async () => {
+    const caps = fakeCaps();
+    caps.answerWith(async () => {
+      throw new RpcError(JsonRpcErrorCode.InvalidParams, "too many names");
+    });
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    await info.setCapability("mcp", "k8s", false);
+    const mcp = () => view(info.state()).sections.find((s) => s.id === "mcp");
+    expect(mcp()?.switchNote).toBe("Couldn't switch: too many names");
+    expect(k8s(info.state())?.switch?.on).toBe(true);
+    caps.answerWith(async (op) => {
+      caps.push(caps.applied(op), "iPhone");
+    });
+    await info.setCapability("mcp", "k8s", false);
+    expect(mcp()?.switchNote).toBe(
+      "Off hides it from the model in this session, from the next reply.",
+    );
+  });
+
+  test("a refused set leaves nothing pending: the same change from another device is news", async () => {
+    const caps = fakeCaps();
+    caps.answerWith(async () => {
+      throw new RpcError(JsonRpcErrorCode.InternalError, "boom");
+    });
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    await info.setCapability("mcp", "k8s", false);
+    caps.push({ disabledMcp: ["k8s"], disabledSkills: [] }, "MacBook");
+    expect(k8s(info.state())?.subtitle).toBe("Off · hidden from the model · changed on MacBook");
+  });
+
+  test("an older daemon (MethodNotFound) turns the switches into ghosts, with no error text (F7)", async () => {
+    const caps = fakeCaps();
+    caps.answerWith(async () => {
+      caps.push(undefined);
+      throw new RpcError(JsonRpcErrorCode.MethodNotFound, "Method not found");
+    });
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    await info.setCapability("mcp", "k8s", false);
+    const mcp = view(info.state()).sections.find((s) => s.id === "mcp");
+    expect(k8s(info.state())?.switch?.interactive).toBe(false);
+    expect(mcp?.switchNote).toBe("The tentacle on MacBook Pro can't turn servers off — update it.");
+  });
+
+  test("an open that reported no switches is `unsupported` from the start", async () => {
+    const caps = fakeCaps();
+    // The open's snapshot carried no `capabilities` (an older daemon).
+    caps.push(undefined);
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    expect(k8s(info.state())?.switch?.interactive).toBe(false);
+  });
+
+  test("not attached: the switches are ghosts and a tap sends nothing (F4)", async () => {
+    const caps = fakeCaps();
+    const info = createSessionInfo(withCaps(caps, { phase: () => "failed" }));
+    await info.open();
+    expect(k8s(info.state())?.switch?.interactive).toBe(false);
+    await info.setCapability("mcp", "k8s", false);
+    expect(caps.sets).toEqual([]);
+  });
+
+  test("offline: a tap sends nothing (F1)", async () => {
+    const caps = fakeCaps();
+    let notify: (status: "up" | "down") => void = () => undefined;
+    const info = createSessionInfo(
+      withCaps(caps, {
+        onLink: (listener) => {
+          notify = listener;
+          return () => undefined;
+        },
+      }),
+    );
+    await info.open();
+    notify("down");
+    expect(k8s(info.state())?.switch?.interactive).toBe(false);
+    await info.setCapability("mcp", "k8s", false);
+    expect(caps.sets).toEqual([]);
+  });
+
+  test("a handle with no switch surface reads as an older daemon", async () => {
+    const info = createSessionInfo(port({ mcpStatus: () => Promise.resolve(servers) }).port);
+    await info.open();
+    expect(k8s(info.state())?.switch?.interactive).toBe(false);
+  });
+});
+
 describe("the sheet's facts", () => {
   test("the title, the computer and the daemon come from the port, not the wire", async () => {
     const info = createSessionInfo(port().port);
@@ -481,5 +714,213 @@ describe("a failed pull is REPORTED as its class, never its text (docs/fix/mobil
       await info.open();
       expect(reports).toEqual([]);
     }
+  });
+});
+
+describe("the scheduled wakes feed (cron-tool S6, M7)", () => {
+  const wake = (i: number): ScheduleRow => ({
+    id: `sc-${i}`,
+    kind: "every",
+    spec: `every ${i}m`,
+    prompt: `check ${i}`,
+    nextAt: NOW + i * 60_000,
+    fires: i,
+    createdAt: NOW,
+  });
+
+  /** A fake `InfoSchedules`: the listener is what a real `onSchedules` calls at install. */
+  function feed(initial: readonly ScheduleRow[] | undefined): {
+    readonly port: InfoSchedules;
+    readonly report: (rows: readonly ScheduleRow[] | undefined) => void;
+    readonly removed: string[];
+    readonly unsubscribed: () => number;
+    refuse: ScheduleDeleteResult | undefined;
+  } {
+    let listener: ((rows: readonly ScheduleRow[] | undefined) => void) | null = null;
+    let unsubscribes = 0;
+    const removed: string[] = [];
+    const handle = {
+      refuse: undefined as ScheduleDeleteResult | undefined,
+    };
+    const port: InfoSchedules = {
+      current: () => initial,
+      onChange: (next) => {
+        listener = next;
+        // A real `RemoteSession.onSchedules` reports the current table at once.
+        if (initial !== undefined) {
+          next(initial);
+        }
+        return () => {
+          unsubscribes += 1;
+          // The real client's unsubscribe stops delivering: a frame after it is
+          // no listener's business (otherwise this fake would prove nothing).
+          if (listener === next) {
+            listener = null;
+          }
+        };
+      },
+      remove: (scheduleId) => {
+        removed.push(scheduleId);
+        return Promise.resolve(handle.refuse ?? { deleted: true });
+      },
+    };
+    return {
+      port,
+      report: (rows) => listener?.(rows),
+      removed,
+      unsubscribed: () => unsubscribes,
+      get refuse() {
+        return handle.refuse;
+      },
+      set refuse(value) {
+        handle.refuse = value;
+      },
+    };
+  }
+
+  const withFeed = (f: ReturnType<typeof feed>) =>
+    port({ session: () => ({ ...sessionBase, schedules: f.port }) });
+
+  const sessionBase = {
+    skills: () => Promise.resolve(emptySkills),
+    context: () => Promise.resolve({ used: 84_000, exact: true } as SessionContextResult),
+    autoAccept: undefined,
+  };
+
+  const sectionOf = (state: SessionInfoState) =>
+    state.view.sections.find((s) => s.id === "schedules");
+
+  test("the install's table paints at once; no section without a feed", async () => {
+    const without = createSessionInfo(port().port);
+    await without.open();
+    expect(sectionOf(without.state())).toBeUndefined();
+
+    const f = feed([wake(1), wake(2)]);
+    const info = createSessionInfo(withFeed(f).port);
+    await info.open();
+    expect(sectionOf(info.state())?.phase).toBe("ready");
+    expect(sectionOf(info.state())?.rows.map((r) => r.title)).toEqual(["check 1", "check 2"]);
+  });
+
+  test("a later frame repaints; `undefined` reads as an older daemon, never an empty list", async () => {
+    const f = feed([]);
+    const info = createSessionInfo(withFeed(f).port);
+    await info.open();
+    expect(sectionOf(info.state())?.phase).toBe("empty");
+
+    f.report([wake(3)]);
+    expect(sectionOf(info.state())?.phase).toBe("ready");
+    expect(sectionOf(info.state())?.rows).toHaveLength(1);
+
+    f.report(undefined);
+    expect(sectionOf(info.state())?.phase).toBe("unsupported");
+    expect(sectionOf(info.state())?.rows).toEqual([]);
+  });
+
+  test("a delete sends the RAW id; the row leaves only on the daemon's next table", async () => {
+    const f = feed([wake(1), wake(2)]);
+    const info = createSessionInfo(withFeed(f).port);
+    await info.open();
+    await info.deleteSchedule("sc-1");
+    expect(f.removed).toEqual(["sc-1"]);
+    // The local list is NOT touched: the next frame is what removes a row.
+    expect(sectionOf(info.state())?.rows).toHaveLength(2);
+    f.report([wake(2)]);
+    expect(sectionOf(info.state())?.rows.map((r) => r.title)).toEqual(["check 2"]);
+  });
+
+  test("a refused delete keeps the row and shows the daemon's own reason (no invented cause)", async () => {
+    const f = feed([wake(1)]);
+    f.refuse = { deleted: false, reason: "this daemon cannot delete a scheduled wake" };
+    const info = createSessionInfo(withFeed(f).port);
+    await info.open();
+    await info.deleteSchedule("sc-1");
+    const section = sectionOf(info.state());
+    expect(section?.rows).toHaveLength(1);
+    expect(section?.footer).toBe("this daemon cannot delete a scheduled wake");
+    expect(section?.phase).toBe("ready");
+  });
+
+  test("a thrown delete is reported, and the next frame retires the reason", async () => {
+    const f = feed([wake(1)]);
+    const failing: InfoSchedules = {
+      ...f.port,
+      remove: () => Promise.reject(new Error("not connected to the daemon")),
+    };
+    const info = createSessionInfo(
+      port({ session: () => ({ ...sessionBase, schedules: failing }) }).port,
+    );
+    await info.open();
+    await info.deleteSchedule("sc-1");
+    expect(sectionOf(info.state())?.footer).toBe("not connected to the daemon");
+    expect(sectionOf(info.state())?.rows).toHaveLength(1);
+    f.report([wake(1)]);
+    expect(sectionOf(info.state())?.footer).toBeUndefined();
+  });
+
+  test("a session switch refollows: the new table replaces the previous session's", async () => {
+    let rows: readonly ScheduleRow[] | undefined = [wake(1)];
+    const listener: { next: ((rows: readonly ScheduleRow[] | undefined) => void) | null } = {
+      next: null,
+    };
+    const switching: InfoSchedules = {
+      current: () => rows,
+      onChange: (next) => {
+        listener.next = next;
+        if (rows !== undefined) {
+          next(rows);
+        }
+        return () => {
+          listener.next = null;
+        };
+      },
+      remove: () => Promise.resolve({ deleted: true }),
+    };
+    const info = createSessionInfo(
+      port({ session: () => ({ ...sessionBase, schedules: switching }) }).port,
+    );
+    await info.open();
+    expect(sectionOf(info.state())?.rows).toHaveLength(1);
+
+    // The next session has none of them: the install reports the truth.
+    rows = [];
+    await info.refresh();
+    expect(sectionOf(info.state())?.phase).toBe("empty");
+  });
+
+  test("closing the sheet stops following the feed", async () => {
+    const f = feed([wake(1)]);
+    const info = createSessionInfo(withFeed(f).port);
+    await info.open();
+    info.close();
+    expect(f.unsubscribed()).toBeGreaterThan(0);
+    // A frame that lands after the close paints nothing: the sheet is gone.
+    const before = info.state();
+    f.report([wake(1), wake(2)]);
+    expect(sectionOf(info.state())?.rows).toHaveLength(1);
+    expect(sectionOf(before)?.rows).toHaveLength(1);
+  });
+
+  test("a delete with no feed at all is a no-op (not attached, or no table)", async () => {
+    const info = createSessionInfo(port().port);
+    await info.open();
+    // Resolves, sends nothing, throws nothing: there is no control to press.
+    await info.deleteSchedule("sc-1");
+    expect(sectionOf(info.state())).toBeUndefined();
+  });
+
+  test("a wiring that offers the feed says `not-open` before any attach (never hides)", async () => {
+    const info = createSessionInfo(port({ phase: () => "failed", offersSchedules: true }).port);
+    await info.open();
+    expect(sectionOf(info.state())?.phase).toBe("not-open");
+    expect(sectionOf(info.state())?.rows).toEqual([]);
+  });
+
+  test("an attached daemon that reports no table reads `unsupported` (an older build)", async () => {
+    const info = createSessionInfo(
+      port({ offersSchedules: true, session: () => sessionBase }).port,
+    );
+    await info.open();
+    expect(sectionOf(info.state())?.phase).toBe("unsupported");
   });
 });

@@ -68,6 +68,7 @@ export function StatusBar({
   hiddenAbove = 0,
   expandAll = false,
   autoApprove = false,
+  capsMarker = null,
   pill = { kind: "none" },
   onPillRange,
   link = null,
@@ -87,6 +88,11 @@ export function StatusBar({
   hiddenAbove?: number;
   expandAll?: boolean;
   autoApprove?: boolean;
+  /**
+   * `⊘ 1 server · 2 skills off` while the session hides something from the
+   * model (`capsMarker`, docs/feat/session-capabilities.md S4); null: nothing.
+   */
+  capsMarker?: string | null;
   /**
    * The background work, as ONE pill after `auto-accept on`
    * (`status-view.ts`'s `pillView`; the owner's UI revision). `kind: "none"` =
@@ -108,11 +114,11 @@ export function StatusBar({
   const width = Math.max(10, columns);
   // The right slot is `auto-accept`'s, always: nothing displaces it (owner's rule).
   const rightHint = autoApprove ? " ⏵⏵ auto-accept on " : " ⏵⏵ auto-accept off (shift+tab) ";
-  const suffix = scrolledUp
-    ? ` · ↑${hiddenAbove} more (↓ to follow)`
-    : expandAll
-      ? " · expanded"
-      : "";
+  // The switches' marker leads the suffix: it says what the model cannot see,
+  // and gives way with the suffix on a short line (`statusLayout`).
+  const suffix = `${capsMarker === null ? "" : ` · ${capsMarker}`}${
+    scrolledUp ? ` · ↑${hiddenAbove} more (↓ to follow)` : expandAll ? " · expanded" : ""
+  }`;
   // The pill rides the right-hand box, AFTER the auto-accept indicator: it is one
   // more fact about the session, never a replacement for it (the owner's rule).
   const pillValue = pillText(pill);

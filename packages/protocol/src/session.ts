@@ -737,6 +737,74 @@ export const JobKillResultSchema = z.object({
 });
 export type JobKillResult = z.infer<typeof JobKillResultSchema>;
 
+// --- the session's scheduled wakes (docs/feat/cron-tool.md D5, S2) --------
+// The live table of the agent's own wake-ups: one full-state update
+// (`schedules`), sent only on a change (create, delete, fire, expiry, failure
+// stop), plus the first page's list. Lenient like `JobRow`: `spec` and `prompt`
+// are LABELS (the fired prompt's real text rides the conversation), so `kind`
+// and every string stay free/bounded-but-untrusted — the client sanitises
+// (§7: a pod's daemon is not trusted; a `serve` daemon writes these itself).
+
+/** How long a row's `spec`/`prompt` label may be on the wire (the client cuts for its own surface). */
+export const SCHEDULE_LABEL_MAX = 200;
+
+/** One scheduled wake, as the daemon reports it. */
+export const ScheduleRowSchema = z.object({
+  /** Its `sc-N` handle: what `session/schedule_delete` takes and the fired prompt names. */
+  id: z.string().min(1),
+  /**
+   * A free string (`every`, `at`, or a newer build's new kind): a client that
+   * does not know it paints `spec` and loses one word, not the whole list.
+   */
+  kind: z.string(),
+  /**
+   * The request as the model gave it (`every 10m`, `at 17:00`), a one-line
+   * label. NOT `line()`: a control character here must cost the CLIENT's
+   * sanitising, never the whole frame — a known update type failing its member
+   * is an ERROR the client reports (`mapping.ts` `classifyUpdate`), so one odd
+   * label would kill the list. Lenient like `JobRow.command`; the client is the
+   * gate (AGENTS §7). The daemon still cuts both to `SCHEDULE_LABEL_MAX`.
+   */
+  spec: z.string(),
+  /** What the fired turn is told, cut by the daemon: a label, never the truth (lenient, as `spec`). */
+  prompt: z.string(),
+  /** The next fire, in the DAEMON host's clock (a pod/user host skew is accepted, like `JobRow.startedAt`). */
+  nextAt: z.number().int().nonnegative(),
+  /** Absent for a one-shot (`at`): a recurring wake expires (`D3`), an `at` does not outlive its fire. */
+  expiresAt: z.number().int().nonnegative().optional(),
+  /** Fired turns so far: the ordinal the fired prompt quotes (`fire 5`). */
+  fires: z.number().int().nonnegative(),
+  createdAt: z.number().int().nonnegative(),
+});
+export type ScheduleRow = z.infer<typeof ScheduleRowSchema>;
+
+/** A schedule's id as the methods take it (`sc-N`): bounded, its own named export. */
+export const ScheduleIdSchema = z.string().min(1).max(64);
+
+/**
+ * `session/schedule_delete`: drop one scheduled wake by hand (the user's own
+ * handle, like `session/job_kill`). Read-only state, so the daemon answers it
+ * synchronously and never awaits a turn (§7 "Don't serialize the RPC peer").
+ * Additive: an older daemon answers `MethodNotFound`, shown as a notice.
+ */
+export const ScheduleDeleteParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  scheduleId: ScheduleIdSchema,
+});
+export type ScheduleDeleteParams = z.infer<typeof ScheduleDeleteParamsSchema>;
+
+export const ScheduleDeleteResultSchema = z.object({
+  /** `true` iff it existed and was removed (idempotent: an unknown id is `false`). */
+  deleted: z.boolean(),
+  /**
+   * Why nothing was deleted, when the daemon has something to say (an unknown
+   * id, a session with no table): shown as a notice, never thrown. A client that
+   * refused locally (its daemon is not trusted to schedule) says its own.
+   */
+  reason: z.string().optional(),
+});
+export type ScheduleDeleteResult = z.infer<typeof ScheduleDeleteResultSchema>;
+
 export const SnapshotResultSchema = z.object({
   /** Chronological slice of the history, ending at the cut (or at the cursor). */
   messages: z.array(ChatMessageSchema),
@@ -754,6 +822,13 @@ export const SnapshotResultSchema = z.object({
   subagents: z.array(SubagentRowSchema).optional(),
   /** The background shell jobs running at the cut (first page only; an older daemon sends none). */
   jobs: z.array(JobRowSchema).optional(),
+  /**
+   * The session's scheduled wakes at the cut, the FULL table (first page only;
+   * an older daemon sends none, and a pod daemon sends none either — it never
+   * holds one, AGENTS §7). Empty list vs. absent: absent means "this daemon does
+   * not report them", never "none left".
+   */
+  schedules: z.array(ScheduleRowSchema).optional(),
 });
 export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 
@@ -899,6 +974,22 @@ export const SessionSettingsReportSchema = z.object({
 });
 export type SessionSettingsReport = z.infer<typeof SessionSettingsReportSchema>;
 
+/** At most this many names in ONE disabled set (a flood is `InvalidParams`, F10). */
+export const MAX_DISABLED_CAPABILITIES = 256;
+/** One server or skill name a switch names. */
+export const CapabilityNameSchema = line(128);
+
+/**
+ * A session's MCP/skill switches (`session/set_capability`,
+ * docs/feat/session-capabilities.md): sorted, de-duplicated DISABLED names, so
+ * anything new (a server added, a skill created) is on.
+ */
+export const SessionCapabilitiesSchema = z.object({
+  disabledMcp: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
+  disabledSkills: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
+});
+export type SessionCapabilitiesWire = z.infer<typeof SessionCapabilitiesSchema>;
+
 export const OpenParamsSchema = z.object({
   /** Client-chosen id (so the client owns the persistence uid); absent → daemon-chosen. */
   sessionId: SessionIdSchema.optional(),
@@ -932,6 +1023,12 @@ export const OpenParamsSchema = z.object({
    * (docs/feat/session-auto-accept.md D2). Absent → off.
    */
   autoAccept: z.boolean().optional(),
+  /**
+   * The session's initial switches, for a session this open CREATES (ignored
+   * otherwise, exactly like `autoAccept`): how a resume from the laptop's copy,
+   * a `/clear` fork and a hop target carry them. Absent → everything on.
+   */
+  capabilities: SessionCapabilitiesSchema.optional(),
 });
 export type OpenParams = z.infer<typeof OpenParamsSchema>;
 
@@ -959,6 +1056,12 @@ export const OpenResultSchema = z.object({
    * it (`RemoteClientOptions.sharedAutoAccept`, AGENTS §7).
    */
   autoAccept: z.boolean().optional(),
+  /**
+   * The session's switches now (docs/feat/session-capabilities.md): the
+   * snapshot every open/attach/re-attach adopts (F5). Absent → an older
+   * daemon, which has none (the client hides its toggles).
+   */
+  capabilities: SessionCapabilitiesSchema.optional(),
 });
 export type OpenResult = z.infer<typeof OpenResultSchema>;
 
@@ -1017,6 +1120,31 @@ export const SetAutoAcceptResultSchema = z.object({
   on: z.boolean(),
 });
 export type SetAutoAcceptResult = z.infer<typeof SetAutoAcceptResultSchema>;
+
+// --- session/set_capability ---------------------------------------------
+// Turn one MCP server or one skill on/off for the MODEL in this session
+// (docs/feat/session-capabilities.md): hidden from the tool list and the skills
+// catalog from the next model call, never uninstalled. A DELTA (one name), not
+// the whole state, so two clients toggling different items both land (F4).
+// Held by every daemon (a pod included: it only REMOVES what its own model is
+// offered, so there is nothing to gate on the laptop, AGENTS §7). Idempotent:
+// a set to the current value returns without an emit. Additive: an older
+// daemon answers `MethodNotFound`, and the client hides its toggles.
+
+export const SetCapabilityParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  kind: z.enum(["mcp", "skill"]),
+  /** A server name (`mcp`) or a skill name (`skill`); an unknown one is stored (F10). */
+  name: CapabilityNameSchema,
+  enabled: z.boolean(),
+});
+export type SetCapabilityParams = z.infer<typeof SetCapabilityParamsSchema>;
+
+export const SetCapabilityResultSchema = z.object({
+  /** The session's whole state AFTER applying (a losing race reads the winner's). */
+  capabilities: SessionCapabilitiesSchema,
+});
+export type SetCapabilityResult = z.infer<typeof SetCapabilityResultSchema>;
 
 // --- session/close ------------------------------------------------------
 // End the session for everyone: abort its turn, stop its background jobs, tell
@@ -1299,6 +1427,8 @@ export const SessionListEntrySchema = z.object({
   archived: z.boolean(),
   /** The session's background work running now: shell jobs and sub-agents. Absent: an archived session, or an older daemon. */
   jobs: z.number().int().nonnegative().optional(),
+  /** The session's armed scheduled wakes (a COUNT: the rows are the `schedules` list). Absent: an older daemon, or one that never holds a schedule. */
+  schedules: z.number().int().nonnegative().optional(),
 });
 export type SessionListEntry = z.infer<typeof SessionListEntrySchema>;
 

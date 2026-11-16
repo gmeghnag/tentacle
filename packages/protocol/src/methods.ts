@@ -71,6 +71,8 @@ import {
   ReclaimResultSchema,
   RenameParamsSchema,
   RenameResultSchema,
+  ScheduleDeleteParamsSchema,
+  ScheduleDeleteResultSchema,
   SendNowParamsSchema,
   SessionContextParamsSchema,
   SessionContextResultSchema,
@@ -78,6 +80,8 @@ import {
   SessionListResultSchema,
   SetAutoAcceptParamsSchema,
   SetAutoAcceptResultSchema,
+  SetCapabilityParamsSchema,
+  SetCapabilityResultSchema,
   SnapshotParamsSchema,
   SnapshotResultSchema,
   SubagentMessageParamsSchema,
@@ -111,6 +115,8 @@ export const Method = {
   UpdateSettings: "session/update_settings",
   /** The session's auto-accept, on or off, for every client (docs/feat/session-auto-accept.md). */
   SetAutoAccept: "session/set_auto_accept",
+  /** Turn one MCP server or skill on/off for the model in this session (docs/feat/session-capabilities.md). */
+  SetCapability: "session/set_capability",
   Snapshot: "session/snapshot",
   /** The session's committed history as a typed event log, after a position (docs/feat/session-log.md). */
   Log: "session/log",
@@ -128,6 +134,12 @@ export const Method = {
   JobOutput: "session/job_output",
   /** The user stops one (the same decision as the model's `shell_kill` tool). */
   JobKill: "session/job_kill",
+  /**
+   * The user drops one scheduled wake (docs/feat/cron-tool.md D5): the same
+   * decision as the model's `schedule_control{action:"delete"}`. Synchronous
+   * daemon-side (it is state, never a turn), so it never awaits the peer.
+   */
+  ScheduleDelete: "session/schedule_delete",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
   /** Daemon → client: the exact prompt size of a request, counted by the laptop's provider. */
@@ -230,6 +242,10 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: SetAutoAcceptParamsSchema,
     result: SetAutoAcceptResultSchema,
   },
+  [Method.SetCapability]: {
+    params: SetCapabilityParamsSchema,
+    result: SetCapabilityResultSchema,
+  },
   [Method.Snapshot]: { params: SnapshotParamsSchema, result: SnapshotResultSchema },
   [Method.Log]: { params: LogParamsSchema, result: LogResultSchema },
   [Method.Enqueue]: { params: EnqueueParamsSchema, result: EnqueueResultSchema },
@@ -248,6 +264,10 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.AgentKill]: { params: AgentKillParamsSchema, result: AgentKillResultSchema },
   [Method.JobOutput]: { params: JobOutputParamsSchema, result: JobOutputResultSchema },
   [Method.JobKill]: { params: JobKillParamsSchema, result: JobKillResultSchema },
+  [Method.ScheduleDelete]: {
+    params: ScheduleDeleteParamsSchema,
+    result: ScheduleDeleteResultSchema,
+  },
   [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
   [Method.ModelStreamChunked]: {
     params: ModelStreamChunkedParamsSchema,

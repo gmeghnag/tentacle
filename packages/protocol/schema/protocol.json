@@ -454,6 +454,32 @@
       "required": ["id"],
       "type": "object"
     },
+    "CapabilitiesUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "by": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/SessionCapabilities"
+        },
+        "type": {
+          "const": "capabilities",
+          "type": "string"
+        }
+      },
+      "required": ["capabilities", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
+    "CapabilityName": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+      "type": "string"
+    },
     "ChatMessage": {
       "additionalProperties": true,
       "properties": {
@@ -1436,6 +1462,7 @@
         "mapping": {
           "base": "#/$defs/LogBaseEntry",
           "call_started": "#/$defs/LogCallStartedEntry",
+          "capabilities": "#/$defs/LogCapabilitiesEntry",
           "checkpoint": "#/$defs/LogCheckpointEntry",
           "media_message": "#/$defs/LogMediaMessageEntry",
           "media_replace": "#/$defs/LogMediaReplaceEntry",
@@ -1489,6 +1516,9 @@
         },
         {
           "$ref": "#/$defs/LogSubagentEndEntry"
+        },
+        {
+          "$ref": "#/$defs/LogCapabilitiesEntry"
         }
       ]
     },
@@ -1584,6 +1614,40 @@
         }
       },
       "required": ["callId", "id", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogCapabilitiesEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/SessionCapabilities"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "capabilities",
+          "type": "string"
+        }
+      },
+      "required": ["capabilities", "id", "seq", "ts", "type"],
       "type": "object"
     },
     "LogCheckpointEntry": {
@@ -2398,6 +2462,9 @@
         "autoAccept": {
           "type": "boolean"
         },
+        "capabilities": {
+          "$ref": "#/$defs/SessionCapabilities"
+        },
         "create": {
           "type": "boolean"
         },
@@ -2449,6 +2516,9 @@
       "properties": {
         "autoAccept": {
           "type": "boolean"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/SessionCapabilities"
         },
         "created": {
           "type": "boolean"
@@ -3619,6 +3689,91 @@
       "required": ["cause", "id", "text"],
       "type": "object"
     },
+    "ScheduleDeleteParams": {
+      "additionalProperties": true,
+      "properties": {
+        "scheduleId": {
+          "$ref": "#/$defs/ScheduleId"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["scheduleId", "sessionId"],
+      "type": "object"
+    },
+    "ScheduleDeleteResult": {
+      "additionalProperties": true,
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": ["deleted"],
+      "type": "object"
+    },
+    "ScheduleId": {
+      "maxLength": 64,
+      "minLength": 1,
+      "type": "string"
+    },
+    "ScheduleRow": {
+      "additionalProperties": true,
+      "properties": {
+        "createdAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expiresAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fires": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "nextAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "spec": {
+          "type": "string"
+        }
+      },
+      "required": ["createdAt", "fires", "id", "kind", "nextAt", "prompt", "spec"],
+      "type": "object"
+    },
+    "SchedulesUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "schedules": {
+          "items": {
+            "$ref": "#/$defs/ScheduleRow"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "schedules",
+          "type": "string"
+        }
+      },
+      "required": ["schedules", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "SeedTitle": {
       "additionalProperties": true,
       "properties": {
@@ -3730,6 +3885,27 @@
       "required": ["kind", "turnId"],
       "type": "object"
     },
+    "SessionCapabilities": {
+      "additionalProperties": true,
+      "properties": {
+        "disabledMcp": {
+          "items": {
+            "$ref": "#/$defs/CapabilityName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "disabledSkills": {
+          "items": {
+            "$ref": "#/$defs/CapabilityName"
+          },
+          "maxItems": 256,
+          "type": "array"
+        }
+      },
+      "required": ["disabledMcp", "disabledSkills"],
+      "type": "object"
+    },
     "SessionClosed": {
       "additionalProperties": true,
       "properties": {
@@ -3808,6 +3984,10 @@
         },
         "running": {
           "type": "boolean"
+        },
+        "schedules": {
+          "minimum": 0,
+          "type": "integer"
         },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
@@ -4132,6 +4312,7 @@
           "agent_usage": "#/$defs/AgentUsage",
           "auto_accept": "#/$defs/AutoAcceptUpdate",
           "background_exit": "#/$defs/BackgroundExit",
+          "capabilities": "#/$defs/CapabilitiesUpdate",
           "context_note": "#/$defs/ContextNote",
           "dsml_leak": "#/$defs/DsmlLeakUpdate",
           "empty_turn": "#/$defs/EmptyTurn",
@@ -4142,6 +4323,7 @@
           "permission_resolved": "#/$defs/PermissionResolvedUpdate",
           "plan": "#/$defs/Plan",
           "queued": "#/$defs/QueuedUpdate",
+          "schedules": "#/$defs/SchedulesUpdate",
           "session_closed": "#/$defs/SessionClosed",
           "session_settings": "#/$defs/SessionSettingsUpdate",
           "session_title": "#/$defs/SessionTitleUpdate",
@@ -4236,6 +4418,9 @@
           "$ref": "#/$defs/JobsUpdate"
         },
         {
+          "$ref": "#/$defs/SchedulesUpdate"
+        },
+        {
           "$ref": "#/$defs/SubagentNotify"
         },
         {
@@ -4246,6 +4431,9 @@
         },
         {
           "$ref": "#/$defs/AutoAcceptUpdate"
+        },
+        {
+          "$ref": "#/$defs/CapabilitiesUpdate"
         }
       ]
     },
@@ -4304,6 +4492,36 @@
       "required": ["on"],
       "type": "object"
     },
+    "SetCapabilityParams": {
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": ["mcp", "skill"],
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/CapabilityName"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["enabled", "kind", "name", "sessionId"],
+      "type": "object"
+    },
+    "SetCapabilityResult": {
+      "additionalProperties": true,
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/SessionCapabilities"
+        }
+      },
+      "required": ["capabilities"],
+      "type": "object"
+    },
     "SkillListEntry": {
       "additionalProperties": true,
       "properties": {
@@ -4312,6 +4530,10 @@
           "minLength": 1,
           "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
           "type": "string"
+        },
+        "disabled": {
+          "const": true,
+          "type": "boolean"
         },
         "location": {
           "maxLength": 4096,
@@ -4403,6 +4625,12 @@
         },
         "queued": {
           "$ref": "#/$defs/QueueState"
+        },
+        "schedules": {
+          "items": {
+            "$ref": "#/$defs/ScheduleRow"
+          },
+          "type": "array"
         },
         "since": {
           "$ref": "#/$defs/HistoryCut"
@@ -4882,6 +5110,19 @@
         },
         "prompt": {
           "type": "string"
+        },
+        "schedule": {
+          "additionalProperties": true,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/ScheduleId"
+            },
+            "spec": {
+              "type": "string"
+            }
+          },
+          "required": ["id", "spec"],
+          "type": "object"
         },
         "turnId": {
           "$ref": "#/$defs/TurnId"
@@ -5584,6 +5825,14 @@
         "$ref": "#/$defs/ResolvePermissionResult"
       }
     },
+    "session/schedule_delete": {
+      "params": {
+        "$ref": "#/$defs/ScheduleDeleteParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ScheduleDeleteResult"
+      }
+    },
     "session/send_now": {
       "params": {
         "$ref": "#/$defs/SendNowParams"
@@ -5598,6 +5847,14 @@
       },
       "result": {
         "$ref": "#/$defs/SetAutoAcceptResult"
+      }
+    },
+    "session/set_capability": {
+      "params": {
+        "$ref": "#/$defs/SetCapabilityParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SetCapabilityResult"
       }
     },
     "session/skills": {

@@ -102,6 +102,36 @@ export function openFailureReason(error: unknown): SessionOpenFailure {
   return "link";
 }
 
+/** A handle built WITHOUT `attach` (`client.newSession(undefined, id)`): its `openSeeded` CREATES. */
+export interface FreshHandle {
+  openSeeded(): Promise<void>;
+  detach(): Promise<void>;
+}
+
+/**
+ * The phone's New session (docs/feat/mobile-chrome.md S7): the ONE place the
+ * phone creates. `openSeeded` is `session/open{create}` under the phone-minted
+ * id (an absent id is created empty; the daemon's open is atomic). The create
+ * happens HERE, at the tap, not at the first send: the screen's open and the
+ * outbox's port both attach only (`open` above; `App.tsx` `outboxOf`), so an
+ * id that does not exist yet could never be sent to. The create's own handle
+ * is then detached — and awaited — so the screen's controller attaches a
+ * session this client no longer follows (the client's table is keyed by id).
+ * A failed detach is still ok: the session exists, and the attach that follows
+ * re-reaches it. Never throws.
+ */
+export async function createFreshSession(
+  handle: FreshHandle,
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: SessionOpenFailure }> {
+  try {
+    await handle.openSeeded();
+  } catch (error) {
+    return { ok: false, reason: openFailureReason(error) };
+  }
+  await handle.detach().catch(() => {});
+  return { ok: true };
+}
+
 export function createSessionController<S extends SessionHandle>(
   deps: SessionControllerDeps<S>,
 ): SessionController<S> {

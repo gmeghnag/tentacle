@@ -10,11 +10,13 @@ import type { JobOutputResult, JobRow } from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
+import type { CapKind, CapsView } from "./capability-toggles.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import type { AutoAcceptFeed, AutoAcceptSharedFeed } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedMessage, ReturnedCause } from "./queued.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import type { SessionsView } from "./sessions-panel.ts";
 import type { SessionSkillsView } from "./skills-sync.ts";
 import type { DisplayItem, SessionEvent } from "./state.ts";
@@ -132,6 +134,30 @@ export interface SessionController {
    */
   skills?(): Promise<SessionSkillsView>;
   /**
+   * The session's MCP/skill switches as the daemon last reported them
+   * (docs/feat/session-capabilities.md S4): undefined until an open says it
+   * has them, and when the daemon has none (an older one). Optional with the
+   * two below: absent where no daemon owns the session.
+   */
+  capabilities?(): CapsView | undefined;
+  /**
+   * Follow the switches: the daemon's state on every snapshot and change (`by`
+   * only on a change: the device that made it, untrusted text), undefined when
+   * the daemon turns out not to have them. Returns an unsubscribe.
+   */
+  onCapabilities?(listener: (caps: CapsView | undefined, by?: string) => void): () => void;
+  /**
+   * `session/set_capability`: turn one MCP server or skill on/off for the
+   * model. The rows follow the daemon's echo (`onCapabilities`), never this
+   * answer. Rejects on a refusal.
+   */
+  setCapability?(kind: CapKind, name: string, enabled: boolean): Promise<unknown>;
+  /**
+   * The session is open daemon-side (a fresh or resumed one opens at its first
+   * message): no switches yet means "not started", not "not supported".
+   */
+  opened?(): boolean;
+  /**
    * The context size the daemon counts at open (docs/feat/tui-target-badge.md):
    * exact where the provider can count without generating, else an estimate.
    * Asked once per session the view follows; a rejection leaves `ctx –/max`.
@@ -196,6 +222,29 @@ export interface SessionController {
   messageSubagent?(agentId: string, text: string): Promise<{ ok: boolean; reason?: string }>;
   /** Stop one background child (`session/agent_kill`); `{killed: false}` if it was not running. */
   killSubagent?(agentId: string): Promise<{ killed: boolean }>;
+  /**
+   * The session's ARMED scheduled wakes (`schedules`, docs/feat/cron-tool.md S5):
+   * the daemon's table, bounded and sanitized by the client (`spec`/`prompt` are
+   * a MODEL's text, D5). The current table, if any, is given at once; then every
+   * change (create, delete, fire, expiry, failure stop). The rows are MIRRORED
+   * structurally (`ScheduleDockRow`), never the protocol's type: the TUI does not
+   * depend on it (`background-view.ts`'s rule). Optional: absent on a pod's
+   * client and on an older daemon — where no table exists, and painting an empty
+   * one would claim there are no wakes.
+   */
+  onSchedules?(
+    listener: (report: {
+      readonly rows: readonly ScheduleDockRow[];
+      readonly count: number;
+    }) => void,
+  ): (() => void) | undefined;
+  /**
+   * Drop one scheduled wake (`session/schedule_delete`). A refusal is a typed
+   * RESULT with a `reason`, never a throw: an unknown id, an older daemon, or a
+   * client whose daemon is not trusted to schedule (`daemonWakes` off) each say
+   * their own. Optional with `onSchedules`.
+   */
+  deleteSchedule?(scheduleId: string): Promise<{ deleted: boolean; reason?: string }>;
   /**
    * Subscribe to this session's running background SHELL jobs as the daemon
    * reports them (bounded by the client; `count` is the daemon's own number).

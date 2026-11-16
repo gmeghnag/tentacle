@@ -4,20 +4,27 @@
  * `session-info.ts`'s view-model, and every decision (which section is loading,
  * what a cap says, which tone a server gets) was made there.
  *
- * The grammar is the Settings screen's (`mobile-ui-polish.md:1288-1291`):
- * `SectionHeader` + a 26 pt `GroupedCard` of 44 pt `Row`s, in a native
- * `pageSheet`.
+ * The grammar is the E2 band (docs/feat/mobile-chrome.md Design 4, S4):
+ * `BandSection` — one full-width surface per section, square, a small uppercase
+ * label above it — of 44 pt `Row`s, inside a native `pageSheet`. Every band and
+ * every row says `onSheet`, so the ground and the hairlines are the sheet's own
+ * tokens (`bandOnSheet`, `sepSheet`).
  */
-import type { JSX } from "react";
+import type { JSX, ReactNode } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import type { InfoRow, InfoSection, SessionInfoView } from "../session-info.ts";
+import { sectionNotes } from "../band-notes.ts";
+import {
+  type InfoRow,
+  type InfoSection,
+  type SessionInfoView,
+  rowIdentity,
+} from "../session-info.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, space, typography } from "../theme.ts";
+import { BandNote, BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
-import { GroupedCard } from "../ui/GroupedCard.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
-import { SectionHeader } from "../ui/SectionHeader.tsx";
 import { Sheet } from "../ui/Sheet.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
 
@@ -29,6 +36,14 @@ export interface SessionInfoSheetProps {
   readonly autoAcceptOn: boolean;
   readonly autoAcceptError: string | null;
   readonly onAutoAccept: (on: boolean) => void;
+  /** A server's/skill's switch (session-capabilities S5): the row's own kind and raw name. */
+  readonly onSwitch: (kind: "mcp" | "skill", name: string, enabled: boolean) => void;
+  /**
+   * Delete one armed scheduled wake (cron-tool S6, M7): the row's RAW id. A
+   * trailing control, not a swipe: the app carries no gesture library, and plan
+   * P9's rule is a testID-addressable control.
+   */
+  readonly onDeleteSchedule: (scheduleId: string) => void;
   /** Pull-to-refresh and a Retry row. */
   readonly onRefresh: () => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
@@ -48,6 +63,7 @@ function LoadingRow({
       palette={palette}
       title="Checking…"
       first={first}
+      onSheet
       dimmed
       minHeight={44}
       testID="session-info-loading"
@@ -62,12 +78,16 @@ function SectionBody({
   expanded,
   onExpand,
   onRetry,
+  onSwitch,
+  onDeleteSchedule,
 }: {
   readonly palette: Palette;
   readonly section: InfoSection;
   readonly expanded: string | null;
   readonly onExpand: (id: string | null) => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
+  readonly onSwitch: SessionInfoSheetProps["onSwitch"];
+  readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
 }): JSX.Element {
   if (section.phase === "loading") {
     return <LoadingRow palette={palette} first />;
@@ -82,6 +102,7 @@ function SectionBody({
         title={retryable ? `${text} · Retry` : text}
         subtitle={empty?.footnote}
         first
+        onSheet
         minHeight={44}
         {...(retryable
           ? { tone: "accent", onPress: () => onRetry(section.id) }
@@ -94,18 +115,22 @@ function SectionBody({
     <>
       {section.rows.map((row, index) => (
         <InfoRowView
-          key={`${section.id}-${row.title}`}
+          key={`${section.id}-${rowIdentity(row)}`}
           palette={palette}
           row={row}
           first={index === 0}
           sectionId={section.id}
-          expanded={expanded === `${section.id}:${row.title}`}
+          onSwitch={onSwitch}
+          onDeleteSchedule={onDeleteSchedule}
+          expanded={expanded === `${section.id}:${rowIdentity(row)}`}
           onExpand={() => {
             if (row.expand === undefined) {
               return;
             }
             onExpand(
-              expanded === `${section.id}:${row.title}` ? null : `${section.id}:${row.title}`,
+              expanded === `${section.id}:${rowIdentity(row)}`
+                ? null
+                : `${section.id}:${rowIdentity(row)}`,
             );
           }}
         />
@@ -122,6 +147,8 @@ function InfoRowView({
   sectionId,
   expanded,
   onExpand,
+  onSwitch,
+  onDeleteSchedule,
 }: {
   readonly palette: Palette;
   readonly row: InfoRow;
@@ -129,8 +156,12 @@ function InfoRowView({
   readonly sectionId: InfoSection["id"];
   readonly expanded: boolean;
   readonly onExpand: () => void;
+  readonly onSwitch: SessionInfoSheetProps["onSwitch"];
+  readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
 }): JSX.Element {
-  const trailing =
+  const toggle = row.switch;
+  const remove = row.delete;
+  const values =
     row.value === undefined && row.chip === undefined ? undefined : (
       <View style={styles.trailing}>
         {row.value === undefined || row.value === "" ? null : (
@@ -156,6 +187,34 @@ function InfoRowView({
         )}
       </View>
     );
+  // P1 (owner): a trailing switch on the row, as Auto-accept's; a ghost
+  // (disabled) one when the view-model says it cannot send. A scheduled wake's
+  // trailing control is its Delete instead (cron-tool S6): a wake has no on/off.
+  const trailing =
+    remove !== undefined ? (
+      <Pressable
+        testID={`session-info-${sectionId}-${rowIdentity(row)}-delete`}
+        accessibilityRole="button"
+        accessibilityLabel={remove.accessibilityLabel}
+        onPress={() => onDeleteSchedule(remove.id)}
+        style={styles.delete}
+      >
+        <Text style={[typography.subhead, { color: palette.red }]}>Delete</Text>
+      </Pressable>
+    ) : toggle === undefined ? (
+      values
+    ) : (
+      <View style={styles.switchTrail}>
+        {values}
+        <Switch
+          testID={`session-info-${sectionId}-${rowIdentity(row)}-switch`}
+          accessibilityLabel={toggle.accessibilityLabel}
+          value={toggle.on}
+          disabled={!toggle.interactive}
+          onValueChange={(on) => onSwitch(toggle.kind, toggle.name, on)}
+        />
+      </View>
+    );
   return (
     <>
       <Row
@@ -163,6 +222,7 @@ function InfoRowView({
         title={row.title}
         {...(row.subtitle === undefined ? {} : { subtitle: row.subtitle })}
         first={first}
+        onSheet
         minHeight={44}
         dimmed={row.dim === true}
         {...(row.accessibilityLabel === undefined
@@ -170,7 +230,7 @@ function InfoRowView({
           : { accessibilityLabel: row.accessibilityLabel })}
         {...(row.expand === undefined ? {} : { onPress: onExpand, chevron: !expanded })}
         trailing={trailing}
-        testID={`session-info-${sectionId}-${row.title}`}
+        testID={`session-info-${sectionId}-${rowIdentity(row)}`}
       >
         {row.tone === undefined ? null : (
           <View style={styles.lead}>
@@ -191,48 +251,60 @@ function InfoRowView({
   );
 }
 
-/** A section header plus its card and footnotes. */
+/** One section: its note(s) under the band, its rows (and its own last row) in it. */
 function Section({
   palette,
   section,
   expanded,
   onExpand,
   onRetry,
+  onSwitch,
+  onDeleteSchedule,
+  lastRow,
 }: {
   readonly palette: Palette;
   readonly section: InfoSection;
   readonly expanded: string | null;
   readonly onExpand: (id: string | null) => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
+  readonly onSwitch: SessionInfoSheetProps["onSwitch"];
+  readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
+  /** A row that belongs to THIS section but is not the view-model's (Auto-accept). */
+  readonly lastRow?: ReactNode;
 }): JSX.Element {
+  // The section's notes are the band's footnotes (Design 4), so they sit on the
+  // band's own 20 pt gutter instead of 12 pt inside the label they explain. One
+  // BLOCK per note — `band-notes.ts` decides how many, and their keys by ROLE
+  // (S4 review finding 1: a Fragment of `<Text>`s laid out inline, joining them
+  // into one line and hiding the switch note's testID).
+  const notes = sectionNotes(section);
   return (
     <View style={styles.section}>
-      <SectionHeader palette={palette} title={section.title} />
-      <GroupedCard palette={palette} surface={palette.fill}>
+      <BandSection
+        palette={palette}
+        title={section.title}
+        onSheet
+        notes={notes.map((note) => (
+          <BandNote
+            key={note.key}
+            palette={palette}
+            {...(note.testID === undefined ? {} : { testID: note.testID })}
+          >
+            {note.text}
+          </BandNote>
+        ))}
+      >
         <SectionBody
           palette={palette}
           section={section}
           expanded={expanded}
           onExpand={onExpand}
           onRetry={onRetry}
+          onSwitch={onSwitch}
+          onDeleteSchedule={onDeleteSchedule}
         />
-      </GroupedCard>
-      {section.rowsNote === undefined ? null : (
-        <Text
-          maxFontSizeMultiplier={DENSE_FONT_SCALE}
-          style={[typography.footnote, styles.footnote, { color: palette.sec }]}
-        >
-          {section.rowsNote}
-        </Text>
-      )}
-      {section.footer === undefined ? null : (
-        <Text
-          maxFontSizeMultiplier={DENSE_FONT_SCALE}
-          style={[typography.footnote, styles.footnote, { color: palette.sec }]}
-        >
-          {section.footer}
-        </Text>
-      )}
+        {lastRow}
+      </BandSection>
     </View>
   );
 }
@@ -244,6 +316,8 @@ export function SessionInfoSheet({
   autoAcceptOn,
   autoAcceptError,
   onAutoAccept,
+  onSwitch,
+  onDeleteSchedule,
   onRefresh,
   onRetry,
   onClose,
@@ -258,19 +332,7 @@ export function SessionInfoSheet({
       presentationStyle="pageSheet"
       onRequestClose={onClose}
     >
-      <View style={[styles.root, { backgroundColor: palette.sheet, paddingTop: insets.top }]}>
-        <View style={styles.topBar}>
-          <View style={styles.spacer} />
-          <Pressable
-            testID="session-info-close"
-            accessibilityRole="button"
-            accessibilityLabel="Close"
-            onPress={onClose}
-            style={styles.close}
-          >
-            <Icon name="xmark" color={palette.sec} size={17} />
-          </Pressable>
-        </View>
+      <View style={[styles.root, { backgroundColor: palette.bg }]}>
         <Sheet
           palette={palette}
           title="Session info"
@@ -278,6 +340,8 @@ export function SessionInfoSheet({
           testID="session-info-sheet"
           insetBottom={false}
           scroll
+          onClose={onClose}
+          closeTestID="session-info-close"
         >
           <ScrollView
             testID="session-info-scroll"
@@ -301,32 +365,36 @@ export function SessionInfoSheet({
                   expanded={expanded}
                   onExpand={onExpand}
                   onRetry={onRetry}
-                />
-                {/* The switch belongs to the SESSION's settings, right under it. */}
-                {section.id !== "session" || !view.autoAccept ? null : (
-                  <View style={styles.section}>
-                    <GroupedCard palette={palette} surface={palette.fill}>
-                      <Row
-                        palette={palette}
-                        title="Auto-accept"
-                        subtitle={
-                          autoAcceptError ?? "Allow every ask in this session, on every device"
-                        }
-                        first
-                        minHeight={44}
-                        testID="session-info-autoaccept"
-                        trailing={
-                          <Switch
-                            testID="session-info-autoaccept-switch"
-                            accessibilityLabel="Auto-accept for this session, on every device"
-                            value={autoAcceptOn}
-                            onValueChange={(on) => onAutoAccept(on)}
+                  onSwitch={onSwitch}
+                  onDeleteSchedule={onDeleteSchedule}
+                  {...(section.id === "session" && view.autoAccept === true
+                    ? {
+                        // Design 4 / the mockup's `infoE2` (`index.html:394-397`):
+                        // Auto-accept is the SESSION band's LAST ROW, not a band of
+                        // its own — the switch belongs to this session's settings.
+                        lastRow: (
+                          <Row
+                            palette={palette}
+                            title="Auto-accept"
+                            subtitle={
+                              autoAcceptError ?? "Allow every ask in this session, on every device"
+                            }
+                            onSheet
+                            minHeight={44}
+                            testID="session-info-autoaccept"
+                            trailing={
+                              <Switch
+                                testID="session-info-autoaccept-switch"
+                                accessibilityLabel="Auto-accept for this session, on every device"
+                                value={autoAcceptOn}
+                                onValueChange={(on) => onAutoAccept(on)}
+                              />
+                            }
                           />
-                        }
-                      />
-                    </GroupedCard>
-                  </View>
-                )}
+                        ),
+                      }
+                    : {})}
+                />
               </View>
             ))}
             <Text
@@ -353,15 +421,13 @@ export function SessionInfoSheet({
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  topBar: { flexDirection: "row", alignItems: "center", paddingHorizontal: space.inset },
-  spacer: { flex: 1 },
-  close: { width: 32, height: 32, alignItems: "center", justifyContent: "center" },
-  content: { gap: 22 },
-  sectionGroup: { gap: 22 },
-  section: { gap: 8 },
-  footnote: { paddingHorizontal: space.inset + space.cardInner },
+  content: { gap: 0 },
+  sectionGroup: { gap: 0 },
+  section: { gap: 0 },
   footer: { textAlign: "center", paddingHorizontal: space.inset, paddingTop: 4 },
   refresh: { alignSelf: "center", paddingVertical: 8, paddingHorizontal: 16 },
   trailing: { alignItems: "flex-end", gap: 2, maxWidth: "55%" },
   lead: { flexDirection: "row", alignItems: "center", gap: 6 },
+  switchTrail: { flexDirection: "row", alignItems: "center", gap: 10 },
+  delete: { paddingVertical: 8, paddingLeft: 12 },
 });

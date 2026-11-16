@@ -20,6 +20,7 @@ import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
 import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
+import { firedScheduleHead } from "./schedule-view.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 import {
@@ -101,7 +102,7 @@ function assistantLines(text: string): string[] {
   const rendered = renderMarkdown(text).replace(/\n+$/, "");
   const [first = "", ...rest] = rendered.split("\n");
   // A brand-accent bullet marks the reply; continuation lines hang under it.
-  return [`${theme.accent("⏺")} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
+  return [`${theme.accent(BULLET)} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
 }
 
 const HUNK_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
@@ -713,7 +714,7 @@ function separatorLines(text: string, width: number): string[] {
 function noticeLines(text: string, expanded: boolean, hint?: string, body?: string): string[] {
   const [first = "", ...rest] = text.split("\n");
   const lines = [
-    `${theme.notice("⏺")} ${theme.notice(first)}`,
+    `${theme.notice(BULLET)} ${theme.notice(first)}`,
     ...rest.map((l) => `  ${theme.notice(l)}`),
   ];
   if (hint) {
@@ -744,7 +745,18 @@ export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
           ? []
           : userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
       const images = (item.images ?? []).map((row) => theme.subtle(row));
-      return [...(item.restart ? [theme.subtle("restart prompt")] : []), ...rows, ...images];
+      // A fired turn's own head (cron-tool S5, M4 option B): the styled row the
+      // `turn_start.schedule` ref earns. No ref → nothing here, and the durable
+      // `[scheduled …]` prefix in the text is the whole row (option A).
+      const fired = firedScheduleHead(item.schedule, item.text);
+      return [
+        ...(fired === ""
+          ? []
+          : [theme.accent(truncateCells(fired, Math.floor(opts.width ?? DEFAULT_WIDTH)))]),
+        ...(item.restart ? [theme.subtle("restart prompt")] : []),
+        ...rows,
+        ...images,
+      ];
     }
     case "assistant":
       return assistantLines(item.text);
@@ -860,14 +872,15 @@ export function carryColor(rows: readonly string[]): string[] {
 // change invalidates all three (a fresh entry holds only the view just built).
 //
 // The blink glyph is NOT part of the cache: a row is always wrapped with the ON
-// glyph `⏺` and the OFF phase swaps in the SAME character under the SGR conceal
+// glyph `●` and the OFF phase swaps in the SAME character under the SGR conceal
 // attribute (`fix/tui-blink-off-width`), so a phase tick changes one equal-width
 // glyph in row 0 of an already-cached layout and re-wraps nothing at all
 // (docs/feat/tui-tool-blink.md, finding 1). Swapping before/inside the wrap was
 // the round-1 bug: the OFF glyph was 1 column, so the row wrapped differently
 // and the transcript jumped a row at 1 Hz. Counting spaces is wrong wherever a
-// terminal draws `⏺` narrower than `string-width` says — the same character is
-// width-identical by construction, so the row cannot move in ANY terminal.
+// terminal draws the bullet narrower than `string-width` says — the same
+// character is width-identical by construction, so the row cannot move in ANY
+// terminal.
 // The same property is what lets a CLICKED call keep blinking
 // (docs/feat/tui-tool-expand.md point 7): the command block is below row 0, so
 // it is untouched by the swap.
@@ -894,7 +907,8 @@ function offPhaseRows(rows: readonly string[]): readonly string[] {
     return hit;
   }
   const [first = "", ...rest] = rows;
-  // The FIRST `⏺` of row 0 is the bullet: `toolLines` opens the header with it.
+  // The FIRST bullet of row 0 is the call's glyph: `toolLines` opens the header
+  // with it.
   // Replacing only that one keeps the SGR codes around it and the rest of the
   // row (label, subtitle, duration) byte-identical — the conceal closes at
   // `ESC[28m` immediately after the glyph, so nothing else on the row is hidden.
@@ -944,7 +958,7 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
 /**
  * The cached ON layout, or its concealed OFF twin while a running call is in
  * the OFF half of the shared cycle. Only a RUNNING tool is ever affected: a
- * settled call's `toolBullet` is `⏺` at every phase, so its rows are returned
+ * settled call's `toolBullet` is `●` at every phase, so its rows are returned
  * as the very same array (the cache-hit identity the tests pin).
  */
 function withPhase(

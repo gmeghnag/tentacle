@@ -144,6 +144,8 @@ describe("session/log schemas", () => {
       call_started: false,
       subagent_background: false,
       subagent_end: false,
+      // docs/feat/session-capabilities.md, owner Q2 (2026-11-15): not critical.
+      capabilities: false,
     });
     for (const option of KnownLogEntrySchema.options) {
       const type = option.shape.type.value as keyof typeof LOG_ENTRY_CRITICAL;

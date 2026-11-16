@@ -14,12 +14,20 @@
  * XCUITest under RN's new architecture, plan P9): `session-view`, `row-<key>`,
  * `tool-<callId>-<status>`, `diff-<callId>`, `turn-running`, `turn-idle`,
  * `composer-input`, `composer-send`, `composer-stop`, `banner-<kind>`,
- * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`, `session-back`,
+ * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`, `session-drawer`,
  * `jump-latest`, `session-menu`, `session-menu-sheet`, `session-menu-copy-last|copy-all`.
  */
 import { useIsFocused } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
-import { type ComponentRef, type JSX, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type ComponentRef,
+  type JSX,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Alert,
   AppState,
@@ -37,9 +45,14 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { reportsOf } from "../activity-memory.ts";
+import { ACTIVITY_SETTINGS } from "../activity-settings-expo.ts";
+import type { ActivitySettings } from "../activity-settings-store.ts";
+import { activityView, agentCardTarget } from "../activity.ts";
 import { chatStatus } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
+import { type FloatBounds, fits, visible as floatVisible, headerPill } from "../floating-button.ts";
 import {
   type Follow,
   type FollowStep,
@@ -50,6 +63,7 @@ import {
   jumpPill,
   jumped,
   scrolled,
+  shown,
   viewportChanged,
 } from "../follow.ts";
 import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
@@ -59,13 +73,17 @@ import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
 import { dictationLocale } from "../speech-locale.ts";
 import { SPEECH_PORT } from "../speech-native-expo.ts";
+import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
 import { DENSE_FONT_SCALE, type Palette, typography } from "../theme.ts";
 import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
+import { ActivityBadge } from "../ui/ActivityBadge.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { Composer } from "../ui/Composer.tsx";
+import { ContextRing } from "../ui/ContextRing.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
-import { GlassButton } from "../ui/GlassButton.tsx";
+import { FloatingActivity, useAccessibilityFlags } from "../ui/FloatingActivity.tsx";
+import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
@@ -76,7 +94,9 @@ import {
   createVoiceController,
 } from "../voice-controller.ts";
 import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
+import type { VoiceSettings } from "../voice-settings-store.ts";
 import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
+import { ActivitySheet } from "./ActivitySheet.tsx";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
@@ -89,8 +109,15 @@ export interface SessionScreenProps {
   readonly controller: SessionScreenController;
   /** The session's title (the compact header). */
   readonly title: string;
-  /** Present only when the stack can go back. */
-  readonly onBack?: () => void;
+  /**
+   * The hamburger (mobile-chrome Design 3, F1): opens the sessions drawer. The
+   * only opener — the left-edge swipe keeps meaning back.
+   */
+  readonly onOpenDrawer?: () => void;
+  /** Just created by the drawer's New session (S7): the composer takes focus once it is editable. */
+  readonly focusComposer?: boolean;
+  /** The sessions drawer is open over this screen: the floating button hides (F20). */
+  readonly drawerOpen?: boolean;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -119,7 +146,9 @@ export function SessionScreen({
   palette,
   controller,
   title,
-  onBack,
+  onOpenDrawer,
+  focusComposer = false,
+  drawerOpen = false,
 }: SessionScreenProps): JSX.Element {
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
@@ -150,6 +179,11 @@ export function SessionScreen({
   // effect, not at render, so a remount never reuses a disposed one.
   const [voice, setVoice] = useState<VoiceController | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState | null>(null);
+  // The Beta switches (docs/feat/mobile-voice-hidden.md) are read on every render
+  // AND subscribed: Settings is another screen, so without this a switch flipped
+  // there would only reach the composer on a remount.
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(() => VOICE_SETTINGS.current());
+  useEffect(() => VOICE_SETTINGS.subscribe(setVoiceSettings), []);
   useEffect(() => {
     const port = SPEECH_PORT;
     if (port === null) {
@@ -184,6 +218,15 @@ export function SessionScreen({
       setVoiceState(null);
     };
   }, [controller]);
+
+  // A switch that went OFF stops what it was running, so no invisible surface is
+  // left live (hidden mic still listening, hidden speaker still talking).
+  const lastVoiceSettings = useRef(voiceSettings);
+  useEffect(() => {
+    const previous = lastVoiceSettings.current;
+    lastVoiceSettings.current = voiceSettings;
+    voice?.settingsChanged(previous, voiceSettings);
+  }, [voiceSettings, voice]);
 
   // Auto-read (F12): a turn that just ended, while this screen is focused.
   const focused = useIsFocused();
@@ -241,6 +284,8 @@ export function SessionScreen({
   const followRef = useRef<Follow>(initialFollow);
   const [follow, setFollow] = useState<Follow>(initialFollow);
   const dragging = useRef(false);
+  /** "Show in chat" (S9) may retry its `scrollToIndex` ONCE after an unmeasured row. */
+  const showRetry = useRef(false);
   /** The list's native content height and viewport (0 until measured). */
   const size = useRef<ListSize>({ content: 0, viewport: 0 });
   const setFollowState = useCallback((next: Follow) => {
@@ -330,7 +375,110 @@ export function SessionScreen({
   const rows = state.view.rows;
   const voiceView = voiceComposerView(
     voiceState,
-    dictationLocale(VOICE_SETTINGS.current().language, deviceLocales()),
+    dictationLocale(voiceSettings.language, deviceLocales()),
+    voiceSettings,
+  );
+  // What `renderItem` reads besides the row itself. A fresh array on every render
+  // would re-render every row on any state change; the Beta switches change
+  // rarely, so the identity is keyed on the two values that decide a row's look
+  // (the read-aloud state and whether the speaker is offered at all).
+  // Activity (docs/feat/mobile-chrome.md S8): the sheet, which report it shows,
+  // and a 1 s clock for the elapsed times while it is open. Every value is
+  // `activity.ts`'s; the reports are joined from the transcript by note id.
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [activityFocus, setActivityFocus] = useState<ActivityFocus>(null);
+  const [activityNow, setActivityNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!activityOpen) {
+      return;
+    }
+    setActivityNow(Date.now());
+    const timer = setInterval(() => setActivityNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [activityOpen]);
+  const reports = useMemo(() => reportsOf(state.transcript.rows), [state.transcript.rows]);
+  const activity = state.activity;
+  const activityVm = activityView(
+    {
+      subagents: activity.subagents,
+      jobs: activity.jobs,
+      finished: activity.memory.finished,
+      reports,
+      opened: activity.memory.opened,
+    },
+    activityNow,
+  );
+  // S9: the open detail — a child's (live, or Finished with its report) or a
+  // shell job's — as `sheetDetail` resolves it NOW (a child that ends while open
+  // flips to its report, F14).
+  const activityDetail = sheetDetail(
+    activityFocus,
+    {
+      subagents: activity.subagents,
+      jobs: activity.jobs?.rows ?? null,
+      finished: activity.memory.finished,
+      reports,
+      sent: activity.sent,
+      job: activity.job,
+    },
+    activityNow,
+  );
+  const shownReport = activityDetail?.kind === "child" ? activityDetail.report : null;
+  // A report counts as opened once it is ON SCREEN (also when a child the person
+  // was watching ends and its report arrives).
+  const shownReportId = shownReport === null ? null : activityFocus?.id;
+  useEffect(() => {
+    if (shownReportId !== null && shownReportId !== undefined) {
+      controller.openReport(shownReportId);
+    }
+  }, [shownReportId, controller]);
+  const focusActivity = (next: ActivityFocus) => {
+    setActivityFocus(next);
+    if (next === null) {
+      controller.closeDetail();
+    } else if (next.kind === "job") {
+      void controller.openJob(next.id);
+    } else {
+      controller.openChild(next.id);
+    }
+  };
+  // Stop is destructive: one confirmation (F17), worded by `stopConfirm`.
+  const confirmStop = () => {
+    if (activityFocus === null) {
+      return;
+    }
+    const ask = stopConfirm(activityFocus);
+    const stop =
+      activityFocus.kind === "job"
+        ? () => void controller.stopJob()
+        : () => void controller.stopChild();
+    Alert.alert(ask.title, ask.message, [
+      { text: "Cancel", style: "cancel" },
+      { text: ask.confirm, style: "destructive", onPress: stop },
+    ]);
+  };
+  // "Show in chat": the report's own row, scrolled to with the sheet closed; the
+  // list stops following so the next delta does not pull it back (`shown`).
+  const showIndex = showRow(rows, shownReport);
+  const showInChat = () => {
+    if (showIndex === null) {
+      return;
+    }
+    setActivityOpen(false);
+    setActivityFocus(null);
+    controller.closeDetail();
+    setFollowState(shown());
+    showRetry.current = true;
+    list.current?.scrollToIndex({ index: showIndex, animated: true, viewPosition: 0.2 });
+  };
+  const rowExtraData = useMemo(
+    () => ({
+      readAloud: voiceState?.readAloud,
+      speakShown: voiceSettings.readAloudButton,
+      // An agent card's link follows the live/Finished lists.
+      activity,
+    }),
+    [voiceState?.readAloud, voiceSettings.readAloudButton, activity],
   );
   const compose = state.compose;
   const status = chatStatus({
@@ -360,6 +508,37 @@ export function SessionScreen({
   const [deciding, setDeciding] = useState<string | null>(null);
   const decision =
     deciding === null ? null : (compose.outbox.find((r) => r.itemId === deciding) ?? null);
+  // The floating Activity button (Design 6, S10): the Settings choice (read
+  // live, like the voice switches), VoiceOver / Reduce Motion (F23), and the
+  // band it lives in — the list host between the header and the composer, so
+  // the keyboard and the composer's growth shrink it (F20). Every rule is
+  // `floating-button.ts`'s.
+  const [activitySettings, setActivitySettings] = useState<ActivitySettings>(() =>
+    ACTIVITY_SETTINGS.current(),
+  );
+  useEffect(() => ACTIVITY_SETTINGS.subscribe(setActivitySettings), []);
+  const a11yFlags = useAccessibilityFlags();
+  const [band, setBand] = useState<FloatBounds | null>(null);
+  const pillShown =
+    activityVm.badge && headerPill({ mode: activitySettings.mode, voiceOver: a11yFlags.voiceOver });
+  const floatShown = floatVisible({
+    mode: activitySettings.mode,
+    count: activityVm.count,
+    unread: activityVm.unread,
+    covered:
+      drawerOpen ||
+      activityOpen ||
+      infoOpen ||
+      menuOpen ||
+      renaming !== null ||
+      decision !== null ||
+      state.sheet.kind !== "idle",
+    fits: band !== null && fits(band),
+  });
+  const openActivity = () => {
+    focusActivity(null);
+    setActivityOpen(true);
+  };
   return (
     <View
       ref={frame}
@@ -379,24 +558,50 @@ export function SessionScreen({
           onTitlePress={() => controller.beginRename()}
           titleTestID="session-title"
           left={
-            onBack === undefined ? undefined : (
-              <GlassButton
+            onOpenDrawer === undefined ? undefined : (
+              <HeaderIcon
                 palette={palette}
-                testID="session-back"
-                icon="chevron.left"
-                accessibilityLabel="Back"
-                onPress={onBack}
+                testID="session-drawer"
+                icon="line.3.horizontal"
+                accessibilityLabel="Sessions"
+                onPress={onOpenDrawer}
               />
             )
           }
           right={
-            <GlassButton
-              palette={palette}
-              testID="session-menu"
-              icon="ellipsis"
-              accessibilityLabel="Session menu"
-              onPress={() => setMenuOpen(true)}
-            />
+            <>
+              {/* F1: the Activity pill, between the title and the ring, only
+                  while something runs or a report is unread (Design 5). With
+                  "Floating" the button carries it instead, unless VoiceOver
+                  runs (F23). */}
+              {pillShown ? (
+                <ActivityBadge
+                  palette={palette}
+                  testID="session-activity"
+                  label={activityVm.badgeLabel}
+                  running={activityVm.count > 0}
+                  accessibilityLabel={activityVm.accessibilityLabel}
+                  onPress={openActivity}
+                />
+              ) : null}
+              {/* A1: the context fraction as a small ring next to "…", tap →
+                  Session info (Design 2). Absent when nothing measured one. */}
+              {state.view.headerContext === null ? null : (
+                <ContextRing
+                  palette={palette}
+                  percent={state.view.headerContext.percent}
+                  onPress={() => setInfoOpen(true)}
+                  testID="session-header-context"
+                />
+              )}
+              <HeaderIcon
+                palette={palette}
+                testID="session-menu"
+                icon="ellipsis"
+                accessibilityLabel="Session menu"
+                onPress={() => setMenuOpen(true)}
+              />
+            </>
           }
           subtitle={
             <View testID="session-header-status" style={styles.headerLines}>
@@ -420,24 +625,6 @@ export function SessionScreen({
                   </Text>
                 )}
               </View>
-              {/* Owner decision 4: a thin bar ONLY, live from the measured
-                  fill — no percentage text in the header. */}
-              {state.view.headerContext === null ? null : (
-                <View
-                  testID="session-header-context"
-                  style={[styles.contextBar, { backgroundColor: palette.sep }]}
-                >
-                  <View
-                    style={{
-                      width: `${state.view.headerContext.percent}%`,
-                      height: "100%",
-                      borderRadius: 1,
-                      backgroundColor:
-                        state.view.headerContext.percent >= 80 ? palette.orange : palette.accent,
-                    }}
-                  />
-                </View>
-              )}
             </View>
           }
         />
@@ -467,27 +654,59 @@ export function SessionScreen({
             />
           </View>
         )}
-        <View style={styles.screen}>
+        <View
+          style={styles.screen}
+          onLayout={(event) => {
+            const { width, height } = event.nativeEvent.layout;
+            setBand({ width, height });
+          }}
+        >
           <FlatList
             ref={list}
             testID="transcript"
             data={rows}
             keyExtractor={(row: Row) => row.key}
             renderItem={({ item }) => {
-              const speak = speakButtonOf(voiceState, item, rows, state.view.composer.running);
+              const speak = speakButtonOf(
+                voiceState,
+                item,
+                rows,
+                state.view.composer.running,
+                voiceSettings,
+              );
+              const child =
+                item.kind === "tool"
+                  ? agentCardTarget(
+                      item.id,
+                      item.sub?.movedTo,
+                      activity.subagents,
+                      activity.memory.finished,
+                    )
+                  : null;
               return (
                 <TranscriptRow
                   row={item}
                   palette={palette}
                   onLink={onLink}
                   thumbnails={state.thumbnails}
+                  {...(child === null
+                    ? {}
+                    : {
+                        agent: {
+                          id: child,
+                          onOpen: () => {
+                            focusActivity({ kind: "child", id: child });
+                            setActivityOpen(true);
+                          },
+                        },
+                      })}
                   {...(speak === undefined || voice === null
                     ? {}
                     : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
                 />
               );
             }}
-            extraData={voiceState?.readAloud}
+            extraData={rowExtraData}
             onViewableItemsChanged={onViewable}
             viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
             contentContainerStyle={rows.length === 0 ? styles.emptyList : styles.list}
@@ -509,6 +728,24 @@ export function SessionScreen({
             }}
             onContentSizeChange={onContentSize}
             onLayout={onListLayout}
+            onScrollToIndexFailed={(info) => {
+              // "Show in chat" on a row not rendered yet (no `getItemLayout`):
+              // jump near it by the average row, then try once more.
+              list.current?.scrollToOffset({
+                offset: info.averageItemLength * info.index,
+                animated: false,
+              });
+              if (showRetry.current) {
+                showRetry.current = false;
+                setTimeout(() => {
+                  list.current?.scrollToIndex({
+                    index: info.index,
+                    animated: true,
+                    viewPosition: 0.2,
+                  });
+                }, 50);
+              }
+            }}
             ListEmptyComponent={
               <View testID="transcript-empty">
                 {state.status.phase === "open" ? (
@@ -544,6 +781,26 @@ export function SessionScreen({
                 {follow.unseen ? "New messages" : "Jump to latest"}
               </Text>
             </Pressable>
+          ) : null}
+          {activitySettings.mode === "floating" ? (
+            <FloatingActivity
+              palette={palette}
+              bounds={band}
+              position={activitySettings.position}
+              shown={floatShown}
+              label={activityVm.badgeLabel}
+              running={activityVm.count > 0}
+              accessibilityLabel={activityVm.accessibilityLabel}
+              voiceOver={a11yFlags.voiceOver}
+              reduceMotion={a11yFlags.reduceMotion}
+              onPress={openActivity}
+              onDrop={(position) => {
+                // Written on drop only; a failed write keeps the spot for this run (F22).
+                ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), position }).catch(
+                  () => undefined,
+                );
+              }}
+            />
           ) : null}
         </View>
         {/* ONE element, two ids: `turn-running` while a turn streams (own or
@@ -612,6 +869,7 @@ export function SessionScreen({
         <Composer
           palette={palette}
           fieldKey={state.sends}
+          focus={focusComposer}
           draft={state.draft}
           editable={state.view.editable}
           placeholder={
@@ -706,6 +964,8 @@ export function SessionScreen({
             autoAcceptOn={controller.autoAcceptOn()}
             autoAcceptError={info.autoAcceptError}
             onAutoAccept={(on) => void controller.setAutoAccept(on)}
+            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
+            onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}
             onRefresh={() => void controller.refreshInfo()}
             onRetry={() => void controller.refreshInfo()}
             expanded={expanded}
@@ -717,6 +977,26 @@ export function SessionScreen({
             }}
           />
         )}
+        <ActivitySheet
+          palette={palette}
+          visible={activityOpen}
+          view={activityVm}
+          detail={activityDetail}
+          child={activity.child}
+          job={activity.job}
+          onFocus={focusActivity}
+          onDraft={(text) => controller.setChildDraft(text)}
+          onSend={() => void controller.messageChild()}
+          onStop={confirmStop}
+          onRefreshJob={() => void controller.refreshJob()}
+          {...(showIndex === null ? {} : { onShow: showInChat })}
+          onLink={onLink}
+          onClose={() => {
+            setActivityOpen(false);
+            setActivityFocus(null);
+            controller.closeDetail();
+          }}
+        />
         <RenameSheet
           palette={palette}
           state={renaming}
@@ -736,7 +1016,6 @@ const styles = StyleSheet.create({
   status: { flexDirection: "row", alignItems: "center", gap: 5 },
   headerLines: { alignItems: "center", gap: 4 },
   headerModel: { flexShrink: 1 },
-  contextBar: { width: 64, height: 2, borderRadius: 1, overflow: "hidden" },
   jump: {
     position: "absolute",
     alignSelf: "center",

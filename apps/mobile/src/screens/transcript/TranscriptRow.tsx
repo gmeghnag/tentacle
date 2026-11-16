@@ -16,6 +16,7 @@ import { type JSX, type ReactNode, useState } from "react";
 import { Image, Pressable, StyleSheet, Text, View } from "react-native";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
+import { firedScheduleHead } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
 import { subAgentLine, toolMeta, toolSummary } from "../../tool-summary.ts";
@@ -41,6 +42,12 @@ export interface RowProps {
    */
   readonly speak?: "offered" | "speaking";
   readonly onSpeak?: (row: { readonly key: string; readonly text: string }) => void;
+  /**
+   * An `agent_task` card's child in the Activity sheet (`activity.ts`
+   * `agentCardTarget`, docs/feat/mobile-chrome.md S8): its id and the tap.
+   * Absent: a plain tool row.
+   */
+  readonly agent?: { readonly id: string; readonly onOpen: () => void };
 }
 
 function Shell({
@@ -61,9 +68,24 @@ function parsedOf(text: string): Parsed {
 
 function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Element {
   const user = row as Extract<Row, { kind: "user" }>;
+  // A fired turn's own head (cron-tool S6, M8 option B): the styled row a LIVE
+  // `turn_start.schedule` ref earns. No ref → nothing here, and the durable
+  // `[scheduled …]` prefix inside the bubble's text is the whole message (option
+  // A, which is also what a reload shows: the ref is display data, never stored).
+  const fired = firedScheduleHead(user.schedule);
   return (
     <Shell row={user}>
       <View style={[styles.bubble, { backgroundColor: palette.fill }]}>
+        {fired === "" ? null : (
+          <Text
+            testID="row-scheduled-head"
+            numberOfLines={1}
+            maxFontSizeMultiplier={DENSE_FONT_SCALE}
+            style={[typography.caption, { color: palette.accent }]}
+          >
+            {fired}
+          </Text>
+        )}
         {user.restart === true ? (
           <Text style={[typography.caption, { color: palette.sec }]}>restart prompt</Text>
         ) : null}
@@ -169,7 +191,7 @@ function ReasoningRowView({ row, palette, onLink }: RowProps): JSX.Element {
   );
 }
 
-function ToolRowView({ row, palette }: RowProps): JSX.Element {
+function ToolRowView({ row, palette, agent }: RowProps): JSX.Element {
   const tool = row as Extract<Row, { kind: "tool" }>;
   const [open, setOpen] = useState(false);
   const [all, setAll] = useState(false);
@@ -208,6 +230,23 @@ function ToolRowView({ row, palette }: RowProps): JSX.Element {
           >
             {progress}
           </Text>
+        )}
+        {agent === undefined ? null : (
+          // S8: the card's second entry into Activity (the header pill is the first).
+          <Pressable
+            testID={`tool-${tool.id}-activity`}
+            accessibilityRole="button"
+            accessibilityLabel={`Open ${agent.id} in Activity`}
+            hitSlop={6}
+            onPress={agent.onOpen}
+          >
+            <Text
+              maxFontSizeMultiplier={DENSE_FONT_SCALE}
+              style={[typography.footnote, { color: palette.accent }]}
+            >
+              {`${agent.id} · Activity ›`}
+            </Text>
+          </Pressable>
         )}
         {tool.denialReply !== undefined ? (
           <Text

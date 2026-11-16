@@ -20,7 +20,7 @@ import type {
 import { JsonRpcErrorCode } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import { createSessionController } from "../src/session-controller.ts";
-import type { InfoPort, InfoSession } from "../src/session-info-controller.ts";
+import type { InfoCapabilities, InfoPort, InfoSession } from "../src/session-info-controller.ts";
 import {
   type SendableHandle,
   type SessionScreenState,
@@ -71,6 +71,8 @@ function harness(
     /** Absent: a handle that offers no shared switch (no `autoAccept`). */
     readonly autoAccept?: ReturnType<typeof fakeAutoAccept>;
     readonly mcp?: () => Promise<readonly McpServerStatus[]>;
+    /** The handle's MCP/skill switches (session-capabilities S5); absent: none. */
+    readonly capabilities?: InfoCapabilities;
   } = {},
 ) {
   const calls = { skills: 0, context: 0, mcp: 0, list: 0 };
@@ -118,9 +120,11 @@ function harness(
       Promise.resolve({ slash: [], skills: [], problems: [], moreProblems: 0 }),
     context: () => handle.context?.() ?? Promise.resolve({ used: 0, exact: true }),
     ...(options.autoAccept === undefined ? {} : { autoAccept: options.autoAccept.link }),
+    ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
   };
   const port: InfoPort = {
     daemon: () => ({ version: "1.4.0", model: "claude-sonnet-4-5", contextWindow: 200_000 }),
+    now: () => Date.now(),
     computerName: () => "e2e-mac",
     title: () => "Alpha",
     phase: () => "open",
@@ -448,6 +452,41 @@ describe("a pull that lands REPAINTS the screen (Review round 1, MEDIUM 1)", () 
     expect(h.emitted.length).toBeGreaterThan(before);
     expect(screen.autoAcceptOn()).toBe(true);
     expect(lastEmitted(h.emitted).info?.view.autoAccept).toBe(true);
+  });
+
+  test("a server's switch reaches the session's set, and its echo repaints the row (S5)", async () => {
+    type Caps = { disabledMcp: string[]; disabledSkills: string[] };
+    let state: Caps = { disabledMcp: [], disabledSkills: [] };
+    let notify: (next: Caps | undefined, by?: string) => void = () => undefined;
+    const sets: unknown[] = [];
+    const capabilities: InfoCapabilities = {
+      current: () => state,
+      onChange: (listener) => {
+        notify = listener;
+        return () => undefined;
+      },
+      set: (kind, name, enabled) => {
+        sets.push({ kind, name, enabled });
+        state = { ...state, disabledMcp: enabled ? [] : [name] };
+        notify(state, "iPhone");
+        return Promise.resolve(state);
+      },
+    };
+    const h = harness({
+      capabilities,
+      mcp: () =>
+        Promise.resolve([{ name: "k8s", state: "connected", tools: ["get"], moreTools: 0 }]),
+    });
+    const screen = h.screen();
+    await screen.open();
+    await screen.openInfo();
+    await settle();
+    await screen.setCapability("mcp", "k8s", false);
+    expect(sets).toEqual([{ kind: "mcp", name: "k8s", enabled: false }]);
+    const row = lastEmitted(h.emitted)
+      .info?.view.sections.find((s) => s.id === "mcp")
+      ?.rows.find((r) => r.title === "k8s");
+    expect(row?.switch?.on).toBe(false);
   });
 });
 

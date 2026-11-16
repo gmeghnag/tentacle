@@ -37,6 +37,7 @@ import {
   listVisible,
 } from "./background-list.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
+import { type CapsPhase, capsMarker } from "./capability-toggles.ts";
 import {
   type QuitConfirmFacts,
   type SlashSkill,
@@ -58,6 +59,7 @@ import {
 } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedRows } from "./queued.ts";
 import { shownRows } from "./queued.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import type { Selection } from "./selection.ts";
 import type { DisplayState } from "./state.ts";
 import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
@@ -92,6 +94,11 @@ export interface FrameInput {
   readonly subagentsRef: { current: readonly BackgroundAgentRow[] | undefined };
   readonly jobRows: readonly DockJobRow[] | undefined;
   readonly jobRowsRef: { current: readonly DockJobRow[] | undefined };
+  /**
+   * The session's ARMED scheduled wakes (cron-tool S5): they ride the same dock
+   * and pill as the children and jobs. `undefined` = no table to report.
+   */
+  readonly scheduleRows: readonly ScheduleDockRow[] | undefined;
   readonly drawerRow: BackgroundAgentRow | null;
   readonly drawerJob: DockJobRow | null;
   /** `jobOutputRef.current`: a job's cached output tail, keyed by its wire id. */
@@ -111,6 +118,11 @@ export interface FrameInput {
   readonly panel: OpenPanel | null;
   /** The session's own id (`sessionRef.current?.sessionId ?? null`). */
   readonly sessionId: string | null;
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md S4):
+   * the panels' switch column and the status-line marker. Absent: none.
+   */
+  readonly capsPhase?: CapsPhase;
   readonly field: { readonly value: string; readonly cursor: number };
   readonly attach: AttachDraft;
   readonly skills: readonly SlashSkill[];
@@ -147,6 +159,7 @@ export function frameLayout(input: FrameInput) {
     subagentsRef,
     jobRows,
     jobRowsRef,
+    scheduleRows,
     drawerRow,
     drawerJob,
     jobOutput: jobOutputMap,
@@ -154,6 +167,7 @@ export function frameLayout(input: FrameInput) {
     quitConfirm,
     panel,
     sessionId,
+    capsPhase,
     field,
     attach,
     skills,
@@ -195,7 +209,11 @@ export function frameLayout(input: FrameInput) {
   const voiceRows = voiceStrip === null || voiceStrip === undefined ? 0 : VOICE_STRIP_ROWS;
   const inputBoxRows =
     inputContentLines + 2 + attachRowRows(attach, Math.max(1, columns - 2)) + voiceRows;
-  const listView = panel ? panelView(panel, columns, panelMaxBody(termRows), sessionId) : null;
+  const listView = panel
+    ? panelView(panel, columns, panelMaxBody(termRows), sessionId, capsPhase)
+    : null;
+  // The status-line marker while something is off (owner Q2): null otherwise.
+  const capsShown = capsMarker(capsPhase?.kind === "on" ? capsPhase.caps : undefined);
   // Rows above the input/panel while a turn runs: the thinking line + the
   // queued-message lines (each one row: `wrap="truncate-end"`) + the send-now
   // hint row under them + one blank row between the hint and the thinking line.
@@ -219,11 +237,14 @@ export function frameLayout(input: FrameInput) {
   // and its row says `⚠ needs your permission` — hiding the list there made that
   // row unreachable (Review M1).
   const dockListVisible =
-    dock.focus.kind === "list" && listVisible(subagents, jobRows) && quitConfirm === null;
+    dock.focus.kind === "list" &&
+    listVisible(subagents, jobRows, scheduleRows) &&
+    quitConfirm === null;
   const dockView = dockListVisible
     ? backgroundListView({
         rows: subagentsRef.current,
         jobs: jobRowsRef.current,
+        schedules: scheduleRows ?? [],
         askingId: permission.pendingAgent?.id ?? null,
         focus: dock.focus,
         width: columns,
@@ -277,6 +298,7 @@ export function frameLayout(input: FrameInput) {
   const pill = pillView({
     agents: subagents?.length ?? 0,
     jobs: jobRows?.length ?? 0,
+    schedules: scheduleRows?.length ?? 0,
     askingId: permission.pendingAgent?.id ?? null,
     finished: dockFinished,
     now: dockNow,
@@ -356,6 +378,7 @@ export function frameLayout(input: FrameInput) {
     voiceRows,
     inputBoxRows,
     listView,
+    capsShown,
     shown,
     runningRows,
     dockListVisible,
