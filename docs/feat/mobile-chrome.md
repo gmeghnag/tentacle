@@ -2178,3 +2178,48 @@ is a genuine fail.
   pins props, tokens and branch structure — it cannot prove RN lays them out
   correctly. The pure decisions it leans on (`valueEllipsis`, `rowLayout`) are
   tested by value in `row-value.test.ts`.
+
+## Review (slice S3 — band primitives, E2)
+
+*— claude-opus-5-5, 2026-11-16 · fresh context, slice S3 only*
+
+**Verdict: REQUEST-CHANGES.**
+
+Gate: `row-value` + `band-wiring` **28 pass / 0 fail**; `bun run lint` clean
+(1689 files); `bun run typecheck` clean. Own mutation: `valueEllipsis("model")`
+→ `"tail"` ⇒ 2 fail, reverted, tree clean.
+
+1. **HIGH — `apps/mobile/src/ui/Row.tsx:223`** (`text: { flexShrink: 0 }`,
+   was `flex: 1`; `textCapped` applies only when a `value` is passed): a row
+   whose title is long and which has a `chevron`/`trailing` but no `value`
+   (every current call site, e.g. `SessionsScreen.tsx:70-81` with a session
+   title, `SessionInfoSheet.tsx:161-172`) lets the label take the full inner
+   width and pushes the chevron/trailing past the screen edge. Repro (Yoga,
+   RN's layout engine, `.tentacle/tmp/mobile-chrome/s3-review-yoga.ts`, 390 pt
+   row, 20 pt gutters, 80-char title, 14 pt chevron):
+   `main flex:1 → chevron right edge 370` · `branch flexShrink:0 → 396` (off a
+   390 pt screen). S4 keeps this Row, so it is not interim. `band-wiring.test.ts:121`
+   pins the buggy property. Fix direction: the label column must still shrink
+   against trailing controls (e.g. `flexShrink: 1` + `minWidth` / `flex: 1`
+   when no value) — "never truncated" means wrap, not overflow.
+2. **MEDIUM — Execution's claim "S3 alone changes nothing a user can see" is
+   false.** `Row` (16 live call sites) lost `numberOfLines={2}`, its gutter,
+   inset and default height, and `Sheet.tsx:63` re-grounds every non-floating
+   sheet (`SessionInfoSheet`, `OutboxDecisionSheet`) from `sheet` to `bg` under
+   `GroupedCard`s that still paint `fill`. Merged to `main` per slice, that is a
+   visible, unscreenshotted interim look.
+3. **MEDIUM — signature.** The Execution is signed `claude-opus-5-5`, but its
+   commit `7faddece` is titled `exec (deepseek)`. §10 requires the signature be
+   the model that wrote it; one of the two is wrong.
+
+Nits (not blocking): `BandSection.tsx:15,30` still says the sheet ground "becomes
+`page`" (Drift 2 chose `bg`); `Row` hairlines always use `sep`, never `sepSheet`
+inside a sheet band.
+
+Attacks tried: (a) Yoga layout of label vs chevron — **found #1**; (b) mutation
+of the per-kind ellipsis — test holds; (c) surface audit of the Sheet ground vs
+the palettes — dark `bg #1F1F1E` / `bandOnSheet #2A2A28` holds, interim
+`GroupedCard` mismatch → #2; (d) §7 "logic in pure modules" — `rowLayout`
+carries the branching, Row only maps it: holds. No protocol/persistence/runtime
+invariant touched. Executor behaviour: scope respected, thorough mutation table,
+honest about no device render; over-claimed "no visible change".
