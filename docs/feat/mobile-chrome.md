@@ -2824,3 +2824,522 @@ M7 targets the `gap` the fix adds, from `band-wiring.test.ts`'s prop guard
 - **Checks:** `bun test apps/mobile` 1953 pass / 0 fail across 144 files. `bun run lint` clean (1695 files). `bun run typecheck` OK.
 - **Regression attacks:** `mock.module` replaces those modules for the whole test process, and `mock.restore` does not undo module mocks in Bun. I checked whether other tests use the mocked modules: the other three files that mention `react-native`, `expo-symbols` or the safe-area package only match them as text, and the full mobile suite stays green. So it is safe today, but a future test that renders RN will pick up the stubs. Not a finding. The three other `footnote=` callers (Computers, Settings) keep their old rendering. The `band-wiring` label test was rewritten to read the style blocks; I checked it against the new stylesheet and it still asserts `rowX`, `sectionTop` and the 6 pt bottom padding.
 - **Still owed from round 1:** flows 24/25 and the visual check against row D, blocked by `PushCore`.
+
+## Execution (slice S8 — Activity F1, read-only)
+
+*— claude-opus-5-5, 2026-11-16 · slice S8 only*
+
+**Scope: S8 (Files item 9) only.** S9/S10 untouched: no `subagent-detail.ts`,
+no message/Stop, no `JobDetail`, no flow 27/28, no floating button or setting.
+No protocol, daemon, client or persistence change, so
+`packages/protocol/schema/protocol.json` was **not** regenerated. `TODO.md`
+untouched.
+
+### Load-bearing check, re-run first (it held)
+
+S8 stands on "the phone's gap is purely app-side: every member the sheet needs
+already exists client-side". Checked before any edit:
+
+- `RemoteSession` has all eight members: `subagents` (`packages/client/src/remote-session.ts:698`),
+  `jobs` (`:707`), `onSubagents` (`:735`, hands the current list at once),
+  `onJobs` (`:755`, rows + the daemon's count, H1), `onSubagentMessage` (`:788`),
+  `messageSubagent` (`:808`), `killSubagent` (`:819`), `jobOutput` (`:832`), `killJob` (`:843`).
+- Schemas: `SubagentRowSchema` (`packages/protocol/src/session.ts:566`), `JobRowSchema` (`:656`),
+  `SubagentsUpdateSchema`/`JobsUpdateSchema` (`packages/protocol/src/updates.ts:380,393`).
+- The phone's session controller builds a real `RemoteSession` (`apps/mobile/App.tsx:276-277,
+  378-383`), so widening the handle type needs no adapter.
+
+No new client call was needed.
+
+### Drift from the Implementation (each reconciled here)
+
+1. **"Keep the agent card's progress instead of dropping it at `transcript.ts:414-419`" was
+   already done** by `fix/mobile-chat-glitches` (item 10): `subagent_start/usage/tool/end`
+   fold into `ToolRow.sub` (`apps/mobile/src/transcript.ts:420-452`), drawn by
+   `subAgentLine`. S8 changes nothing there. What S8 adds to the card is the link into the sheet.
+2. **The report join needed the note's id on the row, and the rows dropped it.**
+   `noteRow` kept only text and body. `NoticeRow.note?` (`transcript-rows.ts:98`) is new,
+   and `historyRows` copies `m.note` (`transcript-history.ts:46`). This is additive and is
+   not in the Files list.
+3. **The join happens at view time, not inside the memory reducer.** `activity-memory.ts`
+   holds the live list, Finished (last row + `endedAt`, newest first, cap 20) and the
+   opened ids. `reportsOf(transcript.rows)` builds `note.id → report` on every render. A
+   note that arrives before or after the leave therefore joins the same way, by
+   construction (tested).
+4. **Reports arrive through the history only.** The daemon delivers the report note to the
+   agent's next turn, and no live phone event carries it. A child that ends while you
+   watch shows `report pending` until the history is re-read (an attach, a resync, a
+   context reset). Nothing is lost, because the report is in the conversation. This is a
+   property of the wire, not a bug of S8.
+5. **`SendableHandle` is widened with OPTIONAL members.** `ActivityHandle =
+   Partial<Pick<RemoteSession, 8 members>>` (`session-screen-controller.ts:79`). Fakes and
+   older clients keep compiling, and F15 (nothing reported) falls out as `null` lists.
+6. **The sheet is a `pageSheet` `Modal`, like Session info,** not a medium-detent sheet.
+   RN core `Modal` has no detents, and a detent library would need a native rebuild.
+7. **Read-only scope inside the sheet.** Running sub-agent and shell-job rows are not
+   tappable: their detail, message, Stop and output are S9's. A tap on the card of a
+   running child opens the list. **"Show in chat"** on a report is deferred to S9:
+   `FlatList.scrollToIndex` without `getItemLayout` needs an `onScrollToIndexFailed`
+   path, and that path belongs with the detail.
+8. **`ui/ToolRow.tsx` is not changed.** The card's link (`tool-<id>-activity`, "sa-N ·
+   Activity ›") lives in `TranscriptRow`'s `ToolRowView`, beside the progress line.
+   `ToolRow` stays a generic primitive.
+9. **Changelog.** The owner asked for ONE fragment named `mobile-chrome.<category>.md`, and
+   the repo allows one bullet per file (`scripts/changelog.ts:125`). So the existing
+   `changelog.d/mobile-chrome.added.md` bullet (S7's New session) was extended to cover
+   Activity, the same way `mobile-chrome.changed.md` grew slice by slice. The plan's
+   `mobile-activity.added.md` was not written.
+10. **A dead branch was removed.** A first draft of `onSubagents` also skipped rows
+    "already Finished". Mutation showed that this can never happen: the step that lists a
+    row removes it from Finished. The check was removed and the reason is noted in the
+    code (see mutations).
+
+### As-built, in order
+
+1. `src/activity-memory.ts` (new, pure): `onSubagents(memory, rows, now)` turns a row that
+   leaves the list into a Finished entry and takes a row that comes back out of Finished.
+   The first list is never a finish. Newest entries come first, capped at
+   `FINISHED_CAP` = 20. Also `markOpened`, and `reportsOf(rows)`, which joins
+   `subagent_report`/`subagent_lost` notes by `note.id`. A test pins these note kinds to
+   core's `NOTE_KIND`. Plus the `NoticeRow.note` plumbing (drift 2).
+2. `src/activity.ts` (new, pure): `activityView(input, now)` returns count, unread, badge,
+   badge label, a11y label and groups.
+   - Count = live sub-agents + the daemon's running job count.
+   - The badge shows while something runs or a report is unread.
+   - Group order: Sub-agents, Shell jobs, Finished, Scheduled. Scheduled is always a
+     ghost, and an empty live group is hidden.
+   - Each string is flattened to one plain line (F16). A newer daemon's unknown `state`
+     is shown as is. `elapsed` is never negative under clock skew.
+   - Also `reportRow(view, focus)` and `agentCardTarget(callId, movedTo, live, finished)`.
+3. `src/session-screen-controller.ts`: `ActivityHandle`/`ActivityState`, and
+   `SessionScreenState.activity` (`:177`). `watchActivity` (`:640`) subscribes
+   `onSubagents`/`onJobs` at every attach (`:742`) and drops both on leave and dispose
+   (`:1089`, `:1103`). `openReport(id)` (`:962`) is new.
+4. Components (render only):
+   - `ui/ActivityBadge.tsx`: the pill, with a spinner while something runs and the
+     `activity.ts` label.
+   - `screens/ActivitySheet.tsx`: bands per group. A Finished row opens its report. It
+     keeps no state, because `focus` is the screen's.
+   - `screens/SubagentDetail.tsx`: the report half — title, meta, the report through the
+     transcript's `Markdown` (links go through the screen's confirm), and Copy.
+   - `TranscriptRow.tsx`: the card link.
+   - `SessionScreen.tsx`: the pill before the context ring (`:480`), the card target per
+     row (`:578`), the sheet mount (`:840`), and a 1 s clock only while the sheet is open.
+     Only a Finished child's focus marks its report opened, so a tap on a running child's
+     card does not pre-read a future report.
+
+### Tests (red first)
+
+`test/activity-memory.test.ts`, `test/activity.test.ts` and
+`test/session-screen-activity.test.ts` were written before their modules. Their first run
+was RED only on a missing module. That is not a red on the property (§9), so the red on
+each property is shown by the mutations below: every one was applied to the finished code
+and turned a test red. The controller test drives a fake handle that stands for
+`RemoteSession`. It shows that the open snapshot's live child puts the pill on the first
+frame (F13), that replaces and jobs reach the state, that a leave becomes Finished stamped
+with the screen clock, that `openReport` works, that leave and dispose unsubscribe, and
+that a handle without the members shows nothing and does not throw (F15). The three files
+give **43 pass, 0 fail**.
+
+### Mutation checks (§9: each applied, the 3 S8 files run, restored; script `.tentacle/tmp/mobile-chrome/s8-mutations.ts`; `cmp` against `s8-bak/` afterwards: identical)
+
+```
+M1 note.id join broken (report keyed by row key): 4 fail / 39 pass → KILLED
+M2 note dropped by historyRows: 1 fail / 42 pass → KILLED
+M3 a row back in the live list stays Finished: 1 fail / 42 pass → KILLED
+M4 Finished oldest first: 1 fail / 42 pass → KILLED
+M5 cap dropped: 1 fail / 42 pass → KILLED
+M6 count ignores shell jobs: 3 fail / 40 pass → KILLED
+M7 badge ignores unread: 1 fail / 42 pass → KILLED
+M8 empty live group shown: 1 fail / 42 pass → KILLED
+M9 controller never subscribes: 4 fail / 39 pass → KILLED
+M10 leave keeps subscriptions: 1 fail / 42 pass → KILLED
+M11 agent card ignores movedTo: 1 fail / 42 pass → KILLED
+M12 reportRow accepts a running child: 1 fail / 42 pass → KILLED
+```
+
+The first run had two mutations that SURVIVED: "the first list counted as a finish" and
+"no dedupe of already-Finished". Both were *equivalent* mutants: the code they altered
+could not change behaviour, and one of them was the dead branch of drift 10. I removed the
+dead branch and replaced both with M3/M4 above, which the tests kill.
+### Gate
+
+- `bun run typecheck` (`tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay`): clean.
+- `bun run lint`: **clean, 0 errors and 0 warnings, 1706 files**. This matches the AGENTS §6
+  baseline.
+- `bun test`: **12335 pass · 5 skip · 0 fail**, 886 files, 440 s (log in
+  `.tentacle/tmp/mobile-chrome/s8-full.log`). The 5 skips are the documented opt-in ones.
+
+### Not done in this slice (and why)
+
+- **Device / Maestro: not run.** Flow 27 is S9's. "The pill shows on a live background
+  child" is proven at the controller seam (fake `onSubagents` → `activityView(...).badge`),
+  not on a simulator. To verify: run a session with a background `agent_task` on the
+  phone. The `session-activity` pill should show `1`, and the sheet should list the child.
+- Detail, message and Stop for running children, job output and Stop, and "Show in chat"
+  belong to S9. The floating button belongs to S10.
+- No render test for the three components. They only map `activity.ts` values, and the
+  repo's RN render stubs are process-global (S4 review round 2).
+
+## Execution (slice S9 — Activity actions)
+
+*— claude-opus-5-5, 2026-11-16 · slice S9 only*
+
+**Scope: S9 (Files item 10) only.** No floating button, no setting, no flow 28 (S10).
+No protocol, daemon, client or persistence change, so
+`packages/protocol/schema/protocol.json` was **not** regenerated and no `protocol.d/`
+note was written. `TODO.md` untouched.
+
+### Load-bearing check, re-run first (it held)
+
+S9 stands on "every action already exists client-side and never throws at the UI for
+a refusal". Checked before any edit:
+
+- `RemoteSession` has the five members: `onSubagentMessage`
+  (`packages/client/src/remote-session.ts:801`), `messageSubagent` (`:821`),
+  `killSubagent` (`:832`), `jobOutput` (`:845`), `killJob` (`:856`).
+- `RemoteClient` turns an older daemon's `MethodNotFound` into a typed refusal for all four
+  calls (`packages/client/src/remote-client.ts:1462-1541`). It **re-throws any other
+  error** (a dropped link). So the controller catches that case itself (below). This was
+  not in the plan, and it is now a tested failure mode.
+- The echo `subagent_message{agentId, text, n}` and `SubagentRow.userRead`
+  (`packages/protocol/src/session.ts:599`) carry everything the read marks need.
+
+No new client call was needed.
+
+### Drift from the Implementation (each reconciled here)
+
+1. **Focus is typed, not a bare id.** `ActivityFocus = {kind:"child"|"job", id} | null`
+   (`subagent-detail.ts:190`). `sa-N` and `bg-N` come from different counters, and the
+   plan never said they cannot collide. S8's `reportRow` is no longer used by the app.
+   It is still exported and tested (`activity.ts:197`); it is left for S10 or a cleanup.
+2. **The detail resolves NOW.** `sheetDetail` (`subagent-detail.ts:244`) runs
+   `resolveFocus` (`:200`), so the live row wins over a stale Finished one. A child that
+   ends while its detail is open flips to its Finished half on the next replace (F14),
+   with no screen state.
+3. **"Opened" moved to "the report is on screen".** S8 marked a report opened at the
+   tap, even while the report was still pending. Then a report that arrived later was
+   never "new". Now `SessionScreen.tsx:422-427` calls `openReport` when a report is
+   actually shown. This also covers a watched child that ends.
+4. **A finished child's report shows what the user sent it.** Each message still unread
+   is marked "not read": the TUI's `sentState` truth table, copied to
+   `subagent-detail.ts:60`. The app does not depend on `@tentacle/tui`.
+5. **The messages come from the daemon's echo only** (`session-screen-controller.ts:723`),
+   never from a local copy. A message sent from the TUI shows too, and none shows twice.
+   Each child keeps at most `SENT_CAP` = 20 messages. Its messages are pruned when it
+   is in neither list.
+6. **The Stop confirm buttons say "Stop agent" / "Stop job"**, not "Stop". The link that
+   opens the confirm is also "Stop", and flow 27 must tap the alert's button without
+   ambiguity.
+7. **"Show in chat" needed one `follow.ts` state, `shown()`** (`follow.ts:103`). The
+   list scrolls to the note and stops following, so the next delta does not pull it
+   back. `scrollToIndex` without `getItemLayout` gets ONE retry through
+   `onScrollToIndexFailed` (`SessionScreen.tsx:688`). It is offered only when the
+   report's row is in the list (`showRow`).
+8. **Flow 27 cannot open the short child's report CONTENT on the phone.** Verified at
+   `apps/mobile/src/transcript.ts:388-391`: the reducer draws a `context_note` only for
+   `reason: "hook"`. So the report reaches the phone with the next history read, and the
+   Finished memory belongs to the screen (S8 drift 4). The flow asserts the row is under
+   Finished. `27-activity.js` asserts that the parent's model received the report.
+   Drawing a background `context_note` live would be a reducer change. It is outside S9
+   and is a candidate follow-up.
+9. **The mock model gained flow-27 scenarios** (`e2e/mock-model.ts:189-249, 325-375`):
+   `AGENTS27` (two background `agent_task` calls in one round), `CHILDSTEPS n` (one slow
+   `fs_read` per round, then a report) and `SHELLJOB27`. A child is recognised by ANY
+   user message: the user's message reaches it as a later user message, like a steer
+   (`packages/agent/src/subagent.ts:173`). A child's report sent back to the parent does
+   not contain the marker (`packages/core/src/agent-job-ledger.ts:354-369`), and a test
+   pins this. `e2e-mock-activity.test.ts` sends these scenarios through the REAL
+   `OpenAIProvider`. It imports the provider by path, because the app does not depend
+   on it.
+
+### As-built, in order
+
+1. `src/subagent-detail.ts` (new, pure):
+   - `detailView` — the steps window is the last 5 of `tail`. "… n earlier" comes from
+     `toolUses`. The newest step is marked `latest`. Each sent message gets a read mark.
+     Actions: running → message + Stop; finished → Copy + Show (only with a report).
+   - `jobDetailView` — the last 200 lines, `truncated`, and `exited (code n)` /
+     `killed`. Stop is offered only while the job is in the list AND its last read
+     says running.
+   - Outcome helpers: `messageOutcome`, `killChildOutcome`, `killJobOutcome`.
+   - `stopConfirm`, `recordSent`/`pruneSent`, `resolveFocus`, `sheetDetail`, `showRow`.
+   - Every label goes through `activity.ts`'s `oneLine` (now exported), for F16.
+2. `src/session-screen-controller.ts`:
+   - `ActivityState` gains `sent`, `child: ChildAction | null` and `job: JobAction | null`
+     (`:107-137`).
+   - New actions: `openChild`/`setChildDraft`/`messageChild`/`stopChild`/`openJob`/
+     `refreshJob`/`stopJob`/`closeDetail` (`:1085-1165`).
+   - `setChild`/`setJob` apply an answer only while the same detail is still open
+     (`:744-760`). `readJob` turns a throw into `found:false` (`:762`).
+   - A handle without a member answers `ACTIVITY_UNSUPPORTED` (F15).
+3. `src/follow.ts`: `shown()`.
+4. Components (render only): `screens/SubagentDetail.tsx` (rewritten: steps, your
+   messages with their mark, the message field, Stop, Show in chat, and the S8 report
+   half), `screens/JobDetail.tsx` (new), `screens/ActivitySheet.tsx` (every row opens,
+   and the sheet draws `SheetDetail`), `screens/SessionScreen.tsx` (focus, the `Alert`
+   confirm worded by `stopConfirm`, Show in chat, the opened-on-screen effect).
+5. `e2e/mock-model.ts` scenarios, `e2e/flows/27-activity.{yaml,js}`, and flow 27
+   registered in `e2e/run.ts` (`FLOWS` + its own `ACTIVITY_ID` session).
+6. `changelog.d/mobile-chrome.added.md`: the existing bullet (S7/S8's) was extended, not
+   a new file. The owner asked for ONE `mobile-chrome.<category>.md` fragment, and S8
+   already put Activity there (S8 drift 9).
+
+### Tests (red first)
+
+`test/subagent-detail.test.ts` (26) and `test/session-screen-activity-actions.test.ts`
+(16) were written before their modules or methods. The controller file's first run was RED on
+the property: the methods were missing, so each call threw inside a test body. That is
+not an import error, but I do not count it as a red on each property either. The red on
+each property is shown by the mutations below. `test/e2e-mock-activity.test.ts` (5) and
+the `follow.test.ts` case were added with their code. `test/subagent-detail.test.ts`
+gained one case after the first mutation pass: "the list still shows the job but the
+read says exited". Without it, the `running` rule had half its condition unpinned.
+
+Controller failure modes covered:
+- F14: a refusal or a throw keeps the draft; `{killed:false}` → "already finished".
+- Races: a second press while a send is in flight sends nothing; an answer for a child
+  already left never lands on the next one; a read after close does not reopen it.
+- F19: Stop re-reads how the job ended; `{killed:false}` → "already exited"; a thrown
+  read becomes `found:false`.
+- F15: a handle without the members gets typed refusals.
+
+### Mutation checks (§9: each applied, the 4 S9 files run, restored; script `.tentacle/tmp/mobile-chrome/s9-mutations.ts`, output `s9-mutations.out`; backups in `s9-bak/`, compared afterwards: identical)
+
+```
+M1 steps window = FIRST 5 of tail: 1 fail / 60 pass → KILLED
+M2 'earlier' from tail length, not toolUses: 1 fail / 60 pass → KILLED
+M3 read mark off by one (n < userRead): 2 fail / 59 pass → KILLED
+M4 an ended child's unread message not flagged: 2 fail / 59 pass → KILLED
+M5 Stop offered on a finished child: 1 fail / 60 pass → KILLED
+M6 a refusal clears the draft: 3 fail / 58 pass → KILLED
+M7 {killed:false} says nothing: 3 fail / 58 pass → KILLED
+M8 a finished-per-list job keeps Stop: 1 fail / 60 pass → KILLED
+M9 Finished wins over the live row: 4 fail / 57 pass → KILLED
+M10 Show in chat: wrong row: 1 fail / 60 pass → KILLED
+M11 sent memory not capped: 1 fail / 60 pass → KILLED
+M12 a thrown send escapes (no catch): 1 fail / 60 pass → KILLED
+M13 a late answer lands on the next child: 1 fail / 60 pass → KILLED
+M14 the echo is never subscribed: 2 fail / 59 pass → KILLED
+M15 sent never pruned: 1 fail / 60 pass → KILLED
+M16 Stop job does not re-read: 1 fail / 60 pass → KILLED
+M17 output read without the 200-line window: 2 fail / 59 pass → KILLED
+M18 closeDetail keeps the job (a late read reopens): 1 fail / 60 pass → KILLED
+M19 Show in chat keeps following: 1 fail / 60 pass → KILLED
+M20 mock: child found by its LAST user message only: 2 fail / 59 pass → KILLED
+M21 mock: children launched in the foreground: 1 fail / 60 pass → KILLED
+```
+
+On the first pass M3 reported SURVIVED. Its pattern had matched the docstring
+(`` `n <= userRead` is read ``) instead of the code. With a pattern anchored on the code,
+it is KILLED, as shown above.
+
+### Gate
+
+*Filled by fix round 1 (the S9 executor left the literal placeholder this
+review's finding 4 names). This is the gate **re-run on the S9 tree plus fix
+round 1's tests** — the honest reading, since no S9-time gate result was ever
+recorded and the tree has since been re-measured. What is certain: the S9 code
+(`activity.ts`, `subagent-detail.ts`, the `SessionScreen` actions) is in the tree
+these numbers were taken on.*
+
+- `bunx tsc --noEmit`, `bunx tsc -p apps/mobile`, `bunx tsc -p apps/relay`:
+  clean (the full `bun run typecheck`).
+- `bun run lint`: **clean, 0 errors / 0 warnings, 1734 files** (AGENTS §6
+  baseline is clean, so "no new issues" is true).
+- `bun test`: **12597 pass · 5 skip · 0 fail**, 902 files, 451 s
+  (`.tentacle/tmp/mobile-chrome/fr1/full.log`). The 5 skips are the documented
+  opt-in ones (2 docker, 2 k8s, 1 slow keepalive); none in `apps/mobile`.
+- `bun test apps/mobile`: **2091 pass · 0 fail**, 152 files
+  (`.tentacle/tmp/mobile-chrome/fr1/mobile-suite.log`).
+
+### Not done in this slice (and why)
+
+- **Flow 27 was written but NOT run.** The iOS build is still blocked by the pre-existing
+  `liveactivity` → `PushCore` error (`apps/mobile/targets/live-activity/LACore/LACore.swift:23`,
+  `import PushCore`). S1–S8 recorded this blocker and S6 escalated it (§0, two strikes).
+  So "flow 27 green" is still owed. To verify: once `PushCore` resolves, run
+  `bun run e2e:mobile --ios 26 --only 27-activity`. The selectors still unproven on a
+  device are: rows tapped by description (`text: "long child"`), the step label regex
+  `.*step-4.*`, and `{id: "activity-mark-sent-.*", text: "read"}`.
+- No render test for `SubagentDetail`/`JobDetail`/`ActivitySheet`, for the same reason as
+  S8: the RN render stubs are process-global. Their behaviour lives in `subagent-detail.ts`.
+- The short child's report content on the phone while you watch: see drift 8.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16 · answers Review (slices S8 + S9) · my own id, proven below*
+
+**Model id provenance.** My own session transcript,
+`~/.claude/projects/-Users-gmeghnag-tentacle/fa477ae9-96f6-4705-bffa-dce2ef1b77a4.jsonl`
+(the `CLAUDE_CODE_SESSION_ID` in my environment), holds **529 assistant events,
+every one `"model":"claude-opus-5-5"`** (31 more are `"<synthetic>"`, harness noise).
+`~/.claude/settings.json` says `"model": "opus"`. Counted, not assumed.
+
+Scope: the review's **4 MEDIUM, 0 HIGH**. All four were test-non-vacuity gaps plus
+one blank doc field, so **no production code changed** — the fix is three tests
+that pin the three surviving guards, plus the S9 Gate. Every mutation below was
+applied to the real controller, run, and `cmp`'d back to identical.
+
+#### What each finding turned out to be
+
+1. **Re-attach unsubscribe** (`session-screen-controller.ts:860`). The guard
+   exists (`activityWatch?.()` before the new `watchActivity`). §9 requires a
+   test that was RED on the code without it; nothing had one, so deleting the
+   line stayed green. The blocker was that the fake handle dropped the old
+   callback on unsubscribe (`agents = null`), so a leaked subscription was
+   *invisible*. The harness now keeps every subscription with a `live` flag and
+   **delivers only to live ones** — so "the old handle still delivers" is the
+   test, not an assumption.
+2. **`setJob`'s identity guard** (`:753`). Same shape: the guard is right, its
+   only pin was a child-path analogue (M13). Needs a job-path test where a slow
+   `bg-1` read lands after `bg-2` is open.
+3. **`stopChild`/`stopJob` busy guards** (`:1117`, `:1145`). Both guards are
+   correct; the UI's `disabled={busy}` is what hid them from the suite.
+4. **The `GATE_PLACEHOLDER`** (`S9 ### Gate`) — filled above, and honestly
+   labelled: the S9 executor recorded no gate, so the numbers are the ones
+   re-run now (S9 tree + this round's tests), not an S9-time capture.
+
+#### The tests (all in `apps/mobile/test/session-screen-activity-actions.test.ts`)
+
+- Harness: `SubscriptionKind`, `register`, `deliver`, `liveCount` (`:40-70`,
+  `:116-123`) — every `onSubagents`/`onJobs`/`onSubagentMessage` is recorded with
+  a `live` flag, `deliver` skips dead ones, `liveCount(kind)` counts live ones.
+  `agents`/`echo` now go through `deliver`, so they behave like a real handle
+  that stops pushing after an unsubscribe.
+- **Finding 1** — `:161` `the previous subscriptions are released, so one echo is
+  recorded ONCE`: one live sub per stream after attach, `reopen()`, settle, still
+  one live per stream, and one echo → exactly one recorded message.
+- **Finding 2** — `:406` `a slow read of the job you LEFT never lands on the next
+  one (S9)`: open `bg-1` (slow), close, open `bg-2`, `bg-2` resolves, then
+  `bg-1` resolves — the detail is still `bg-2`'s, with `bg-2`'s output.
+- **Finding 3** — `:288` child and `:357` job: a second Stop while the first is
+  in flight sends no second kill (asserted on `calls`, and on `notice` staying
+  null — a second `{killed:false}` would have written "already finished" over a
+  stop that succeeded).
+
+Source lines the guards live at, as they stand after this round (the review
+cited `:1119`/`:1147`; the file shifts by a line or two, so these are checked):
+`activityWatch?.()` before the re-watch at **`:860`**; `setJob`'s identity guard
+at **`:753-757`**; `stopChild`'s busy guard at **`:1117-1120`**; `stopJob`'s at
+**`:1145-1148`**.
+
+#### Red-first, and how each red was reached
+
+The guards are correct, so a plain "add the test" is green immediately — that
+proves nothing (§9). The red is therefore **the review's own mutation**, and
+each test was written to be the thing that kills it. Every mutation below was
+applied to `apps/mobile/src/session-screen-controller.ts`, run against this one
+test file, then `cp`'d back and `cmp`'d against
+`.tentacle/tmp/mobile-chrome/fr1/controller.ts.bak` (**identical** every time).
+Script: `.tentacle/tmp/mobile-chrome/fr1/mutate.sh` (asserts the anchor matches
+exactly once, so a mis-anchored mutation cannot silently no-op); outputs
+`m3.out`–`m5.out`.
+
+| # | Mutation (the review's surviving one) | Result |
+|---|---|---|
+| M1 | `activityWatch?.()` before `watchActivity` deleted (finding 1) | **KILLED** — `liveCount("agents")` Expected 1, Received **2** |
+| M2 | `setJob` guards "any open job" instead of THAT job (finding 2) | **KILLED** — detail showed `jobId: "bg-1"` / `["bg-1 line"]` for open `bg-2` |
+| M3 | `stopChild` drops `|| open.busy` (finding 3) | **KILLED** — `calls` got a second `"kill sa-2"` |
+| M4 | `stopJob` drops `|| open.busy` (finding 3) | **KILLED** — `killJob` got a second `"killJob bg-1"` |
+| M5 | `watchActivity` returns a no-op unsubscribe (whole teardown dead) | **KILLED** — 2 tests (finding 1's + the existing leave test) |
+
+**M3 was weak on its first form and was rewritten.** With the fake returning a
+never-settling promise for *both* kills, the mutation made the test **time out
+(5000 ms)** rather than fail an assertion — a killed-by-timeout is not the
+property (§9). The fake now answers the *second* call with `{killed:false}`
+immediately, so M3 fails on `expect(h.calls).toEqual(["kill sa-2"])` with the
+extra `"kill sa-2"` — the actual bug — in 0.27 ms. M4 got the same shape from the
+start. M5 exists because M1 alone could be satisfied by a test that only counted
+the registry: M5 kills the *entire* teardown and still fails, so the new test is
+not pinned to one line.
+
+#### Drift from the plan
+
+- **None to the Implementation's Design.** No production line changed: every
+  guard the review found unpinned was already correct, so this round is tests +
+  one doc field. `git status --porcelain` after the round lists exactly
+  `apps/mobile/test/session-screen-activity-actions.test.ts` and
+  `docs/feat/mobile-chrome.md`.
+- **The harness changed more than "add a test file" would suggest.** The real
+  blocker for finding 1 was the fake's `agents = null` teardown hiding a leak; a
+  test could not be written without making the fake model `unsubscribe`
+  honestly. That is the fake's contract matching `RemoteSession`'s, not scope
+  creep — and the existing leave/dispose tests still pass through it.
+
+#### Gate (this round)
+
+- `bunx tsc --noEmit` → clean; `bunx tsc -p apps/mobile` → clean
+  (`bunx tsc -p apps/relay` covered by the full `bun run typecheck`). The review
+  had already re-run `bun run typecheck` clean.
+- `bun run lint` → **clean, 0 errors / 0 warnings, 1734 files**.
+- `bun test apps/mobile` → **2091 pass · 0 fail**, 152 files, 13.7 s.
+- `bun test` (full) → **12597 pass · 5 skip · 0 fail**, 902 files, 451 s
+  (`.tentacle/tmp/mobile-chrome/fr1/full.log`). 5 skips = the documented opt-ins.
+- The single targeted file: **20 pass · 0 fail** (was 17 before this round).
+
+#### Not done, and why
+
+- **Flow 27 and the visual check against row D are still owed** — the `PushCore`
+  iOS build blocker the slices recorded still stands. Nothing in this round can
+  settle it.
+- **No device proof for the three fixed contracts.** They are controller-seam
+  properties (subscription liveness, identity guards, busy guards), which is
+  exactly what a fake-handle test can prove and pixels cannot.
+- **S9's Gate is a re-run, not a capture.** Stated in the section itself so the
+  record does not claim a measurement nobody took.
+
+## Review (slices S8 + S9)
+
+*— claude-opus-5-5, 2026-11-16 · fresh context, same model as the S8/S9 executor (shared blind spots possible)*
+
+**Verdict: REQUEST-CHANGES** (no HIGH; three MEDIUM test-non-vacuity gaps + one doc gap).
+
+Gate (re-run): the 7 touched test files **104 pass / 0 fail**; `bun run lint` clean (1734 files);
+`bun run typecheck` clean. Full `bun test` not re-run. Flow 27 not run (the known `PushCore` blocker).
+
+Reviewer mutations (`.tentacle/tmp/mobile-chrome/rev-mut.ts`, file restored byte-identical):
+`messageChild` busy guard removed → KILLED; prune drops Finished ids → KILLED; and three SURVIVED:
+
+1. **MEDIUM — re-attach unsubscribe is unpinned.** `session-screen-controller.ts:860` (`activityWatch?.()`
+   before re-watching) can be deleted with every test green. Failure: after a re-attach the old
+   handle's `onSubagents`/`onJobs`/`onSubagentMessage` stay subscribed; if the old handle is still
+   delivering (same transport, a resync), each echo is recorded twice in `sent` (the "none shows
+   twice" claim of S9 drift 5 breaks) and a stale list can overwrite the new one. Add a test: attach,
+   re-attach, fire on the OLD handle → state unchanged.
+2. **MEDIUM — `setJob`'s identity guard is unpinned** (`:754`; mutated to "any open job" → green).
+   Failure: open `bg-1` (slow read), back, open `bg-2`; `bg-1`'s read lands → `bg-2`'s detail shows
+   `bg-1`'s output (`sheetDetail` trusts `activity.job.id`). The child analogue is tested (M13); the
+   job one is not.
+3. **MEDIUM — `stopChild`/`stopJob` busy guards are unpinned** (`:1119`, `:1147`; removed → green).
+   Failure: a second Stop while the first is in flight sends a second kill; its `{killed:false}`
+   overwrites the notice with "sa-N already finished" for a stop that just succeeded. The UI's
+   `disabled={busy}` hides this today, but the controller contract is untested.
+4. **MEDIUM — the S9 Execution's Gate section is a literal `GATE_PLACEHOLDER`**
+   (`docs/feat/mobile-chrome.md`, S9 `### Gate`). The as-built record claims no gate result.
+
+**Attacks tried that found nothing:** `messageChild` double-send (guarded, tested); a thrown
+`messageSubagent`/`killSubagent`/`jobOutput` (all caught → notice, draft kept); handle with no S9
+members (typed `ACTIVITY_UNSUPPORTED`); `sentState` truth table vs. the TUI's; `jobDetailView`
+offering Stop on a job gone from the list (not offered); `openReport` effect loop (stable id, no loop);
+`leave`/`dispose` drop all three subscriptions. §7: no protocol/daemon/persistence change, nothing
+written raw to the terminal, no new RPC serialization — no invariant touched.
+
+**Executor behaviour:** honest scope and drift notes, real mutation pass (it caught and fixed its own
+mis-anchored M3), but left the Gate unfilled and its race tests cover the child path only.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · fresh context, same model as the S8/S9 executor*
+
+**Verdict: PASS.** The fix commit (`0d453a7a`) changes only
+`test/session-screen-activity-actions.test.ts` and this doc. No production code changed, so it
+cannot cause a code regression. I re-ran my round-1 mutation script
+(`.tentacle/tmp/mobile-chrome/rev-mut.ts`, file restored byte-identical): the re-attach unsubscribe
+was dropped → KILLED (1 fail); the `setJob` identity guard was weakened → KILLED (1); the
+`stopChild`/`stopJob` busy guards were removed → KILLED (2); the two that round 1 already caught are
+still KILLED. Finding 4: the S9 Gate is filled in, and it is labelled as a re-run. The harness
+rewrite (a subscription registry with a live flag) keeps the round-1 echo and leave tests green.
+Gate: the 3 activity/detail files give 53 pass / 0 fail; `bun run lint` is clean (1734 files);
+`bun run typecheck` is clean. I did not re-run the full suite (the executor reports 12597 pass ·
+5 skip · 0 fail). Flow 27 has still not run, because of the `PushCore` blocker.

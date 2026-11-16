@@ -45,6 +45,8 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { reportsOf } from "../activity-memory.ts";
+import { activityView, agentCardTarget } from "../activity.ts";
 import { chatStatus } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
@@ -58,6 +60,7 @@ import {
   jumpPill,
   jumped,
   scrolled,
+  shown,
   viewportChanged,
 } from "../follow.ts";
 import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
@@ -67,9 +70,11 @@ import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
 import { dictationLocale } from "../speech-locale.ts";
 import { SPEECH_PORT } from "../speech-native-expo.ts";
+import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
 import { DENSE_FONT_SCALE, type Palette, typography } from "../theme.ts";
 import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
+import { ActivityBadge } from "../ui/ActivityBadge.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { Composer } from "../ui/Composer.tsx";
 import { ContextRing } from "../ui/ContextRing.tsx";
@@ -87,6 +92,7 @@ import {
 import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
 import type { VoiceSettings } from "../voice-settings-store.ts";
 import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
+import { ActivitySheet } from "./ActivitySheet.tsx";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
@@ -271,6 +277,8 @@ export function SessionScreen({
   const followRef = useRef<Follow>(initialFollow);
   const [follow, setFollow] = useState<Follow>(initialFollow);
   const dragging = useRef(false);
+  /** "Show in chat" (S9) may retry its `scrollToIndex` ONCE after an unmeasured row. */
+  const showRetry = useRef(false);
   /** The list's native content height and viewport (0 until measured). */
   const size = useRef<ListSize>({ content: 0, viewport: 0 });
   const setFollowState = useCallback((next: Follow) => {
@@ -367,9 +375,103 @@ export function SessionScreen({
   // would re-render every row on any state change; the Beta switches change
   // rarely, so the identity is keyed on the two values that decide a row's look
   // (the read-aloud state and whether the speaker is offered at all).
+  // Activity (docs/feat/mobile-chrome.md S8): the sheet, which report it shows,
+  // and a 1 s clock for the elapsed times while it is open. Every value is
+  // `activity.ts`'s; the reports are joined from the transcript by note id.
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [activityFocus, setActivityFocus] = useState<ActivityFocus>(null);
+  const [activityNow, setActivityNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!activityOpen) {
+      return;
+    }
+    setActivityNow(Date.now());
+    const timer = setInterval(() => setActivityNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [activityOpen]);
+  const reports = useMemo(() => reportsOf(state.transcript.rows), [state.transcript.rows]);
+  const activity = state.activity;
+  const activityVm = activityView(
+    {
+      subagents: activity.subagents,
+      jobs: activity.jobs,
+      finished: activity.memory.finished,
+      reports,
+      opened: activity.memory.opened,
+    },
+    activityNow,
+  );
+  // S9: the open detail — a child's (live, or Finished with its report) or a
+  // shell job's — as `sheetDetail` resolves it NOW (a child that ends while open
+  // flips to its report, F14).
+  const activityDetail = sheetDetail(
+    activityFocus,
+    {
+      subagents: activity.subagents,
+      jobs: activity.jobs?.rows ?? null,
+      finished: activity.memory.finished,
+      reports,
+      sent: activity.sent,
+      job: activity.job,
+    },
+    activityNow,
+  );
+  const shownReport = activityDetail?.kind === "child" ? activityDetail.report : null;
+  // A report counts as opened once it is ON SCREEN (also when a child the person
+  // was watching ends and its report arrives).
+  const shownReportId = shownReport === null ? null : activityFocus?.id;
+  useEffect(() => {
+    if (shownReportId !== null && shownReportId !== undefined) {
+      controller.openReport(shownReportId);
+    }
+  }, [shownReportId, controller]);
+  const focusActivity = (next: ActivityFocus) => {
+    setActivityFocus(next);
+    if (next === null) {
+      controller.closeDetail();
+    } else if (next.kind === "job") {
+      void controller.openJob(next.id);
+    } else {
+      controller.openChild(next.id);
+    }
+  };
+  // Stop is destructive: one confirmation (F17), worded by `stopConfirm`.
+  const confirmStop = () => {
+    if (activityFocus === null) {
+      return;
+    }
+    const ask = stopConfirm(activityFocus);
+    const stop =
+      activityFocus.kind === "job"
+        ? () => void controller.stopJob()
+        : () => void controller.stopChild();
+    Alert.alert(ask.title, ask.message, [
+      { text: "Cancel", style: "cancel" },
+      { text: ask.confirm, style: "destructive", onPress: stop },
+    ]);
+  };
+  // "Show in chat": the report's own row, scrolled to with the sheet closed; the
+  // list stops following so the next delta does not pull it back (`shown`).
+  const showIndex = showRow(rows, shownReport);
+  const showInChat = () => {
+    if (showIndex === null) {
+      return;
+    }
+    setActivityOpen(false);
+    setActivityFocus(null);
+    controller.closeDetail();
+    setFollowState(shown());
+    showRetry.current = true;
+    list.current?.scrollToIndex({ index: showIndex, animated: true, viewPosition: 0.2 });
+  };
   const rowExtraData = useMemo(
-    () => ({ readAloud: voiceState?.readAloud, speakShown: voiceSettings.readAloudButton }),
-    [voiceState?.readAloud, voiceSettings.readAloudButton],
+    () => ({
+      readAloud: voiceState?.readAloud,
+      speakShown: voiceSettings.readAloudButton,
+      // An agent card's link follows the live/Finished lists.
+      activity,
+    }),
+    [voiceState?.readAloud, voiceSettings.readAloudButton, activity],
   );
   const compose = state.compose;
   const status = chatStatus({
@@ -430,6 +532,21 @@ export function SessionScreen({
           }
           right={
             <>
+              {/* F1: the Activity pill, between the title and the ring, only
+                  while something runs or a report is unread (Design 5). */}
+              {activityVm.badge ? (
+                <ActivityBadge
+                  palette={palette}
+                  testID="session-activity"
+                  label={activityVm.badgeLabel}
+                  running={activityVm.count > 0}
+                  accessibilityLabel={activityVm.accessibilityLabel}
+                  onPress={() => {
+                    focusActivity(null);
+                    setActivityOpen(true);
+                  }}
+                />
+              ) : null}
               {/* A1: the context fraction as a small ring next to "…", tap →
                   Session info (Design 2). Absent when nothing measured one. */}
               {state.view.headerContext === null ? null : (
@@ -514,12 +631,32 @@ export function SessionScreen({
                 state.view.composer.running,
                 voiceSettings,
               );
+              const child =
+                item.kind === "tool"
+                  ? agentCardTarget(
+                      item.id,
+                      item.sub?.movedTo,
+                      activity.subagents,
+                      activity.memory.finished,
+                    )
+                  : null;
               return (
                 <TranscriptRow
                   row={item}
                   palette={palette}
                   onLink={onLink}
                   thumbnails={state.thumbnails}
+                  {...(child === null
+                    ? {}
+                    : {
+                        agent: {
+                          id: child,
+                          onOpen: () => {
+                            focusActivity({ kind: "child", id: child });
+                            setActivityOpen(true);
+                          },
+                        },
+                      })}
                   {...(speak === undefined || voice === null
                     ? {}
                     : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
@@ -548,6 +685,24 @@ export function SessionScreen({
             }}
             onContentSizeChange={onContentSize}
             onLayout={onListLayout}
+            onScrollToIndexFailed={(info) => {
+              // "Show in chat" on a row not rendered yet (no `getItemLayout`):
+              // jump near it by the average row, then try once more.
+              list.current?.scrollToOffset({
+                offset: info.averageItemLength * info.index,
+                animated: false,
+              });
+              if (showRetry.current) {
+                showRetry.current = false;
+                setTimeout(() => {
+                  list.current?.scrollToIndex({
+                    index: info.index,
+                    animated: true,
+                    viewPosition: 0.2,
+                  });
+                }, 50);
+              }
+            }}
             ListEmptyComponent={
               <View testID="transcript-empty">
                 {state.status.phase === "open" ? (
@@ -759,6 +914,26 @@ export function SessionScreen({
             }}
           />
         )}
+        <ActivitySheet
+          palette={palette}
+          visible={activityOpen}
+          view={activityVm}
+          detail={activityDetail}
+          child={activity.child}
+          job={activity.job}
+          onFocus={focusActivity}
+          onDraft={(text) => controller.setChildDraft(text)}
+          onSend={() => void controller.messageChild()}
+          onStop={confirmStop}
+          onRefreshJob={() => void controller.refreshJob()}
+          {...(showIndex === null ? {} : { onShow: showInChat })}
+          onLink={onLink}
+          onClose={() => {
+            setActivityOpen(false);
+            setActivityFocus(null);
+            controller.closeDetail();
+          }}
+        />
         <RenameSheet
           palette={palette}
           state={renaming}

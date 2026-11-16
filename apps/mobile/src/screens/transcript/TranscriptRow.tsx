@@ -42,6 +42,12 @@ export interface RowProps {
    */
   readonly speak?: "offered" | "speaking";
   readonly onSpeak?: (row: { readonly key: string; readonly text: string }) => void;
+  /**
+   * An `agent_task` card's child in the Activity sheet (`activity.ts`
+   * `agentCardTarget`, docs/feat/mobile-chrome.md S8): its id and the tap.
+   * Absent: a plain tool row.
+   */
+  readonly agent?: { readonly id: string; readonly onOpen: () => void };
 }
 
 function Shell({
@@ -185,7 +191,7 @@ function ReasoningRowView({ row, palette, onLink }: RowProps): JSX.Element {
   );
 }
 
-function ToolRowView({ row, palette }: RowProps): JSX.Element {
+function ToolRowView({ row, palette, agent }: RowProps): JSX.Element {
   const tool = row as Extract<Row, { kind: "tool" }>;
   const [open, setOpen] = useState(false);
   const [all, setAll] = useState(false);
@@ -224,6 +230,23 @@ function ToolRowView({ row, palette }: RowProps): JSX.Element {
           >
             {progress}
           </Text>
+        )}
+        {agent === undefined ? null : (
+          // S8: the card's second entry into Activity (the header pill is the first).
+          <Pressable
+            testID={`tool-${tool.id}-activity`}
+            accessibilityRole="button"
+            accessibilityLabel={`Open ${agent.id} in Activity`}
+            hitSlop={6}
+            onPress={agent.onOpen}
+          >
+            <Text
+              maxFontSizeMultiplier={DENSE_FONT_SCALE}
+              style={[typography.footnote, { color: palette.accent }]}
+            >
+              {`${agent.id} · Activity ›`}
+            </Text>
+          </Pressable>
         )}
         {tool.denialReply !== undefined ? (
           <Text

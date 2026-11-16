@@ -12,6 +12,8 @@
  * - `SLOW …` streams a few seconds and then ENDS (the running indicator is
  *   observable, and `turn-idle` follows);
  * - `SHOWCASE …` answers with `SHOWCASE_MD` (the screenshot flow's markdown);
+ * - `AGENTS27` / `SHELLJOB27` (flow 27) launch two background children and a
+ *   background shell job; a child (`CHILDSTEPS n`) takes n slow `fs_read` steps;
  * - anything else answers in five chunks, fast.
  *
  * The tool call is streamed the way a real server streams one (a `tool_calls`
@@ -24,6 +26,8 @@
 export interface MockModelOptions {
   /** How long a `HOLD` stream keeps streaming (a rough total, ms). */
   readonly holdMs?: number;
+  /** The spacing of a flow-27 child's rounds (ms; `CHILD_STEP_MS` by default). */
+  readonly childStepMs?: number;
 }
 
 export interface MockModel {
@@ -183,8 +187,70 @@ export function editTarget(prompt: string): string | null {
   return null;
 }
 
+/**
+ * Flow 27 (docs/feat/mobile-chrome.md S9). `AGENTS27` on a line launches TWO
+ * background children with `agent_task{background}`: a LONG one (60 steps, so
+ * the flow can watch its steps, message it and Stop it) and a SHORT one (3 steps,
+ * it ends on its own and leaves a report). `SHELLJOB27` starts `sleep 30` as a
+ * background shell job (an `ask` tool: the flow approves it).
+ */
+export const AGENTS_PROMPT = "AGENTS27";
+export const SHELLJOB_PROMPT = "SHELLJOB27";
+/** A child's prompt: `CHILDSTEPS <n>` — it calls `fs_read` n times, one per round, then reports. */
+export const CHILD_MARK = "CHILDSTEPS";
+/** The spacing of a child's rounds (ms): slow enough for a flow to see its steps advance. */
+export const CHILD_STEP_MS = 2000;
+export const LONG_CHILD_STEPS = 60;
+export const SHORT_CHILD_STEPS = 3;
+
+/** One of the flow's prompts, matched on a LINE (the daemon adds its own `[context: …]` line). */
+export function promptLine(prompt: string, word: string): boolean {
+  return prompt.split("\n").some((line) => line.trim() === word);
+}
+
+/**
+ * A child's plan: how many steps its prompt asks for, from ANY of its user
+ * messages (the person's own message to it arrives as a later user message, like
+ * a steer, so the LAST one is not always the prompt). `null`: not a child.
+ */
+export function childSteps(body: unknown): number | null {
+  const messages = (body as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) {
+    return null;
+  }
+  for (const raw of messages) {
+    const m = raw as { role?: unknown; content?: unknown };
+    if (m.role !== "user" || typeof m.content !== "string") {
+      continue;
+    }
+    const match = new RegExp(`${CHILD_MARK} (\\d+)`).exec(m.content);
+    if (match?.[1] !== undefined) {
+      return Number(match[1]);
+    }
+  }
+  return null;
+}
+
+/** How many tool results the request carries: the steps a child already took. */
+export function toolResults(body: unknown): number {
+  const messages = (body as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) {
+    return 0;
+  }
+  return messages.filter((m) => (m as { role?: unknown }).role === "tool").length;
+}
+
+/** One streamed tool call at `index` (id, name, then the arguments). */
+function toolCallFrames(index: number, id: string, name: string, args: object): string[] {
+  return [
+    frame({ tool_calls: [{ index, id, type: "function", function: { name, arguments: "" } }] }),
+    frame({ tool_calls: [{ index, function: { arguments: JSON.stringify(args) } }] }),
+  ];
+}
+
 export function startMockModel(options: MockModelOptions = {}): MockModel {
   const holdMs = options.holdMs ?? 60_000;
+  const childStepMs = options.childStepMs ?? CHILD_STEP_MS;
   let holding = false;
   const prompts: string[] = [];
   const replies: string[] = [];
@@ -200,6 +266,7 @@ export function startMockModel(options: MockModelOptions = {}): MockModel {
       return new Response(
         stream(req, {
           holdMs,
+          childStepMs,
           setHeld: (v) => {
             holding = v;
           },
@@ -230,6 +297,7 @@ function stream(
   req: Request,
   ctx: {
     readonly holdMs: number;
+    readonly childStepMs: number;
     readonly setHeld: (v: boolean) => void;
     readonly prompts: string[];
     readonly replies: string[];
@@ -253,6 +321,58 @@ function stream(
         }
       }
       const send = (chunk: string) => controller.enqueue(encoder.encode(chunk));
+      const mint = () => {
+        const id = `${TOOL_CALL_PREFIX}${ctx.calls.length + 1}`;
+        ctx.calls.push(id);
+        return id;
+      };
+      // Flow 27: a background child (before any other rule — its rounds end in
+      // tool results, and the person's message to it is a later user message).
+      const steps = childSteps(body);
+      if (steps !== null) {
+        const done = toolResults(body);
+        await Bun.sleep(ctx.childStepMs);
+        if (done < steps) {
+          for (const chunk of toolCallFrames(0, mint(), "fs_read", {
+            path: `project/step-${done + 1}.txt`,
+          })) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
+        } else {
+          send(frame({ content: `Child report: ${steps} steps done.` }));
+          send(frame({}, "stop"));
+        }
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      if (!followUp && promptLine(prompt, AGENTS_PROMPT)) {
+        const long = { description: "long child", prompt: `${CHILD_MARK} ${LONG_CHILD_STEPS}` };
+        const short = { description: "short child", prompt: `${CHILD_MARK} ${SHORT_CHILD_STEPS}` };
+        for (const chunk of [
+          ...toolCallFrames(0, mint(), "agent_task", { ...long, background: true }),
+          ...toolCallFrames(1, mint(), "agent_task", { ...short, background: true }),
+        ]) {
+          send(chunk);
+        }
+        send(frame({}, "tool_calls"));
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      if (!followUp && promptLine(prompt, SHELLJOB_PROMPT)) {
+        for (const chunk of toolCallFrames(0, mint(), "shell", {
+          command: "sleep 30",
+          run_in_background: true,
+        })) {
+          send(chunk);
+        }
+        send(frame({}, "tool_calls"));
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
       const edit = followUp ? null : editTarget(prompt);
       if (edit !== null) {
         // A real streamed tool call: the id, the name, the arguments, then the
