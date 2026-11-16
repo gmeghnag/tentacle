@@ -909,3 +909,9 @@ surfaces `#FFFFFF` light, `#1F1F1E` dark):
 ## Review
 
 *(empty — mandatory fresh-context review after C8)*
+
+#### Owner choices — iPhone visual language rev 2 (2026-11-16 ~12:35, binding)
+
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-16*
+
+On `modern.html`: **1 A · 2 B · 3 B · 4 B · 5 B · 6 A · 7 A · 8 B · 9 A · 10 A** (line A; bar, stacked bar, area, donut B; scatter A; scrubbing A; full screen B; gallery A; table A). Owner: "in generale mi piace il font mono sui grafici" → chart typography (hero number, labels, axis ticks, callouts) is MONOSPACE in every section, also where direction A is chosen. iPhone sections 1–10 are now decided; the plan is fully approved.
