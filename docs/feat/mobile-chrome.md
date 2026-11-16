@@ -1466,3 +1466,19 @@ The plan's third mutation target, "break the `note.id` join", belongs to S8
   task's single fragment `changelog.d/mobile-chrome.changed.md` (S1–S6) is
   unchanged. S6 adds the drawer to it.
 - Nothing committed (the orchestrator commits).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16 · slice S5 only, fresh context (same model family as the S5 Execution signature: shared blind spots possible)*
+
+**Verdict: APPROVE (PASS)** — no HIGH/MEDIUM findings. Scope: `git diff main...HEAD` (6 S5 files + this doc).
+
+**Gate (re-run):** the 4 drawer test files 27 pass · 0 fail (77 expects); `bun run lint` 1668 files clean; `bun run typecheck` (root + mobile + relay) clean. Full `bun test` not re-run (pure leaf modules, nothing imports them yet).
+
+**Premise table:** `App.tsx:852-854` builds a controller over `LINKS.get(computerId)` TRUE; `:944` `SessionRoute` resolves its own link TRUE; `:1651` `navigate("Session", …)` TRUE; `session-list-controller.ts:49` / `:135` TRUE; `viewModel.empty` = `entries.length===0 && status==="loaded"` TRUE; `routes.ts` stack `Computers → Sessions{computerId,name} → Session{…,archived}` TRUE. The load-bearing assumption (no new client call) holds: the seam test injects only the existing loader.
+
+**Mutations (mine, with Edit, reverted; `git status` clean after):** `??`→`||` on the archived auto-expand → caught (explicit collapse test); drop `!source.stale` from `empty` → caught (F2 stale-empty); `toggle-archived` ignores `shown` → caught; `close` keeps `menuOpen` → caught; drop `archivedRows.length > 0` guard → **survives** (LOW: `archivedOpen:true` with 0 archived rows yields `[]` instead of `null`; harmless for render, untested).
+
+**Attacks tried:** (1) same id on another computer → `reset`, not `stay`, and no highlight via `drawerCurrentId` — holds. (2) F2: stale/error never `empty` — holds. (3) F4 stack shape incl. `archived:true` on both paths (Owner Q4) — holds. (4) `canCreate` from `computerStatus`: a probe that fails while the link diagnoser still says `ok` (dial fine, `session/list` errors) yields `state:"ok"` (`computer-rows.ts:79-89`, `App.tsx:528`) → title "Online", `canCreate:true` — pre-existing `computerRows` behaviour, LOW; S6/S7 should not rely on `canCreate` alone (the create path's own failure state, F8, is the real net). (5) §7 "logic in pure modules": all branching is in `drawer-list.ts`/`drawer-nav.ts`; no protocol/persistence/IO touched.
+
+**Executor behaviour:** honest provenance note and drift list; cited lines verified. Process nit: the branch commit is titled `exec (deepseek)` while the Execution is signed claude-opus-5-5 and says the files predate it — the authoring model of the S5 code is unclear; record it once in the commit/scorecard.
