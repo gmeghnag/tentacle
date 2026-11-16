@@ -19,7 +19,15 @@
  */
 import { useIsFocused } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
-import { type ComponentRef, type JSX, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type ComponentRef,
+  type JSX,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Alert,
   AppState,
@@ -64,8 +72,9 @@ import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { Composer } from "../ui/Composer.tsx";
+import { ContextRing } from "../ui/ContextRing.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
-import { GlassButton } from "../ui/GlassButton.tsx";
+import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
@@ -76,6 +85,7 @@ import {
   createVoiceController,
 } from "../voice-controller.ts";
 import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
+import type { VoiceSettings } from "../voice-settings-store.ts";
 import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
@@ -150,6 +160,11 @@ export function SessionScreen({
   // effect, not at render, so a remount never reuses a disposed one.
   const [voice, setVoice] = useState<VoiceController | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState | null>(null);
+  // The Beta switches (docs/feat/mobile-voice-hidden.md) are read on every render
+  // AND subscribed: Settings is another screen, so without this a switch flipped
+  // there would only reach the composer on a remount.
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(() => VOICE_SETTINGS.current());
+  useEffect(() => VOICE_SETTINGS.subscribe(setVoiceSettings), []);
   useEffect(() => {
     const port = SPEECH_PORT;
     if (port === null) {
@@ -184,6 +199,15 @@ export function SessionScreen({
       setVoiceState(null);
     };
   }, [controller]);
+
+  // A switch that went OFF stops what it was running, so no invisible surface is
+  // left live (hidden mic still listening, hidden speaker still talking).
+  const lastVoiceSettings = useRef(voiceSettings);
+  useEffect(() => {
+    const previous = lastVoiceSettings.current;
+    lastVoiceSettings.current = voiceSettings;
+    voice?.settingsChanged(previous, voiceSettings);
+  }, [voiceSettings, voice]);
 
   // Auto-read (F12): a turn that just ended, while this screen is focused.
   const focused = useIsFocused();
@@ -330,7 +354,16 @@ export function SessionScreen({
   const rows = state.view.rows;
   const voiceView = voiceComposerView(
     voiceState,
-    dictationLocale(VOICE_SETTINGS.current().language, deviceLocales()),
+    dictationLocale(voiceSettings.language, deviceLocales()),
+    voiceSettings,
+  );
+  // What `renderItem` reads besides the row itself. A fresh array on every render
+  // would re-render every row on any state change; the Beta switches change
+  // rarely, so the identity is keyed on the two values that decide a row's look
+  // (the read-aloud state and whether the speaker is offered at all).
+  const rowExtraData = useMemo(
+    () => ({ readAloud: voiceState?.readAloud, speakShown: voiceSettings.readAloudButton }),
+    [voiceState?.readAloud, voiceSettings.readAloudButton],
   );
   const compose = state.compose;
   const status = chatStatus({
@@ -380,7 +413,7 @@ export function SessionScreen({
           titleTestID="session-title"
           left={
             onBack === undefined ? undefined : (
-              <GlassButton
+              <HeaderIcon
                 palette={palette}
                 testID="session-back"
                 icon="chevron.left"
@@ -390,13 +423,25 @@ export function SessionScreen({
             )
           }
           right={
-            <GlassButton
-              palette={palette}
-              testID="session-menu"
-              icon="ellipsis"
-              accessibilityLabel="Session menu"
-              onPress={() => setMenuOpen(true)}
-            />
+            <>
+              {/* A1: the context fraction as a small ring next to "…", tap →
+                  Session info (Design 2). Absent when nothing measured one. */}
+              {state.view.headerContext === null ? null : (
+                <ContextRing
+                  palette={palette}
+                  percent={state.view.headerContext.percent}
+                  onPress={() => setInfoOpen(true)}
+                  testID="session-header-context"
+                />
+              )}
+              <HeaderIcon
+                palette={palette}
+                testID="session-menu"
+                icon="ellipsis"
+                accessibilityLabel="Session menu"
+                onPress={() => setMenuOpen(true)}
+              />
+            </>
           }
           subtitle={
             <View testID="session-header-status" style={styles.headerLines}>
@@ -420,24 +465,6 @@ export function SessionScreen({
                   </Text>
                 )}
               </View>
-              {/* Owner decision 4: a thin bar ONLY, live from the measured
-                  fill — no percentage text in the header. */}
-              {state.view.headerContext === null ? null : (
-                <View
-                  testID="session-header-context"
-                  style={[styles.contextBar, { backgroundColor: palette.sep }]}
-                >
-                  <View
-                    style={{
-                      width: `${state.view.headerContext.percent}%`,
-                      height: "100%",
-                      borderRadius: 1,
-                      backgroundColor:
-                        state.view.headerContext.percent >= 80 ? palette.orange : palette.accent,
-                    }}
-                  />
-                </View>
-              )}
             </View>
           }
         />
@@ -474,7 +501,13 @@ export function SessionScreen({
             data={rows}
             keyExtractor={(row: Row) => row.key}
             renderItem={({ item }) => {
-              const speak = speakButtonOf(voiceState, item, rows, state.view.composer.running);
+              const speak = speakButtonOf(
+                voiceState,
+                item,
+                rows,
+                state.view.composer.running,
+                voiceSettings,
+              );
               return (
                 <TranscriptRow
                   row={item}
@@ -487,7 +520,7 @@ export function SessionScreen({
                 />
               );
             }}
-            extraData={voiceState?.readAloud}
+            extraData={rowExtraData}
             onViewableItemsChanged={onViewable}
             viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
             contentContainerStyle={rows.length === 0 ? styles.emptyList : styles.list}
@@ -736,7 +769,6 @@ const styles = StyleSheet.create({
   status: { flexDirection: "row", alignItems: "center", gap: 5 },
   headerLines: { alignItems: "center", gap: 4 },
   headerModel: { flexShrink: 1 },
-  contextBar: { width: 64, height: 2, borderRadius: 1, overflow: "hidden" },
   jump: {
     position: "absolute",
     alignSelf: "center",

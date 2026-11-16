@@ -31,8 +31,8 @@ import { DENSE_FONT_SCALE, type Palette, size as SIZE, space, typography } from 
 import { ActionSheet, type SheetAction } from "../ui/ActionSheet.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
-import { GlassButton } from "../ui/GlassButton.tsx";
 import { GroupedCard } from "../ui/GroupedCard.tsx";
+import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { InlineMono } from "../ui/InlineMono.tsx";
 import { Row } from "../ui/Row.tsx";
@@ -100,14 +100,14 @@ export function ComputersScreen({
           title="Computers"
           right={
             <>
-              <GlassButton
+              <HeaderIcon
                 testID="open-settings"
                 palette={palette}
                 icon="slider.horizontal.3"
                 accessibilityLabel="Settings"
                 onPress={onOpenSettings}
               />
-              <GlassButton
+              <HeaderIcon
                 testID="computers-add"
                 palette={palette}
                 icon="plus"

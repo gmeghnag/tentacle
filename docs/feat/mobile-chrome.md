@@ -983,3 +983,377 @@ the diff.
 **Nit (not blocking):** nothing checks that RenameSheet uses `radius.dialog`
 specifically (pointing it at, say, `radius.tile` would still pass). Screenshots
 are still owed, as in round 1.
+
+## Execution (slice S2 — header, A1)
+
+*— claude-opus-5-5, 2026-11-16 · slice S2 only*
+
+**Scope: S2 (Header, A1) only.** S3–S10 untouched: no `BandSection`, `Row`,
+`Sheet`, `drawer-*`, `activity*`, `floating-button` or `SessionScreen` drawer work.
+No protocol, daemon, client or wire change — no schema changed, so
+`packages/protocol/schema/protocol.json` was **not** regenerated (confirmed:
+`git status` names only `apps/mobile` sources, two test files, the doc and the
+changelog fragment). `TODO.md` untouched. The left button is still "back", as
+the slice's own `done when` says (it becomes the drawer in S6).
+
+### Load-bearing check, re-run first (it held)
+
+S2's slice-level assumption is Design 2's: **the ring can be drawn from plain
+`View`s, so the header restyle needs no `react-native-svg` and no native
+rebuild.** Evidence on the branch tip before any edit
+(`.tentacle/tmp/mobile-chrome/s2-repro-before.log`, script pasted below):
+
+```
+== S2's new modules:
+  MISSING src/ui/HeaderIcon.tsx
+  MISSING src/ui/ContextRing.tsx
+== ringArcs / ringLabel in src:
+  (none if blank)
+== the header still draws glass circles:
+  GlassButton call sites in screens:       13
+== the compact header has no hairline:
+  (none)
+== the context is a flat 2pt bar, not a ring:
+739:  contextBar: { width: 64, height: 2, borderRadius: 1, overflow: "hidden" },
+== react-native-svg (the dependency the ring must NOT need):
+0
+```
+
+So the capability was genuinely absent, and `react-native-svg` is genuinely not a
+dependency (`package.json`). The plan's cited preconditions were re-checked
+against the code, not trusted:
+
+- **Thin glyphs** — `Icon.tsx:64` now carries `"thin" | "light"` (S1 landed), and
+  `SymbolWeight` carries both (`expo-symbols/build/SymbolModule.types.d.ts:81`).
+- **The compact header has the slots** — `ScreenHeader`'s `compact` variant takes
+  `left`/`right`/`subtitle`/`onTitlePress`, and it is used by exactly ONE screen
+  (`grep 'variant="compact"'` → `SessionScreen.tsx:377`), so the hairline and the
+  side-cluster change cannot touch a list screen.
+- **The context fraction exists** — `session-view.ts:180`
+  `headerContext: { percent, approx } | null`, fed by `session-info.ts:261`. The
+  ring reads that same number; the screen's own `null` guard is preserved.
+- **No gesture/svg dependency needed** — `react-native-svg` absent from
+  `package.json`; the ring is `View`s, as Design 2 requires.
+
+### Drift from the Implementation (3, each reconciled here)
+
+1. **`ringHalfRotation` was not in the plan's Files list, and it is not
+   optional.** Design 2 says the ring is "two clipped half-rings rotated by the
+   fraction — plain `View`s", and asks only for `ringArcs(percent) →
+   { rightDeg, leftDeg, tone }`. That is not enough to pin the geometry: the two
+   *absolute* rotation bases (the window each half is empty at) are the actual
+   look, and leaving them as constants inside `ContextRing.tsx` would put the one
+   part that can be wrong — and that no screenshot can catch on this machine —
+   in an unimportable `.tsx`. So the pure module gained
+   `ringHalfRotation(arcs) → { right, left }` and `ringLabel(percent)`, both
+   tested in `chat-header.test.ts`. This follows §7 (computation you'd want to
+   test → pure module), it does not change the design's shape, and it spends the
+   plan's own Design-2 sentence rather than inventing a new one.
+2. **My first rotation bases were wrong, and the model caught it — not the
+   code review.** The first write used `right = 135 + rightDeg`, `left = 315 +
+   leftDeg`. Sampling all 36 000 half-degrees of the circle for the two windows
+   (`.tentacle/tmp/mobile-chrome/s2-ring-geometry.ts`, output below) showed that
+   mapping sweeping *backwards* — 0% painted the whole ring and 100% painted
+   nothing. The correct bases are `right = 315`, `left = 135`, which are exact at
+   every sample. This is exactly the class of error the plan warned about
+   ("deriving rendering behaviour by armchair reasoning"), so it was decided by a
+   measurement, and the corrected constants are pinned by a test.
+   ```
+   candidate A (135/315):  0% → 360deg painted, 100% → 0deg   WRONG
+   candidate B (315/135):  0% → 0, 25% → 90, 50% → 180, 75% → 270, 100% → 360  OK
+   ```
+3. **`ScreenHeader`'s side column went `width` → `minWidth`.** A1 puts TWO
+   targets ("…" and the ring) in the right cluster; at a fixed `width: 96` with
+   `gap: 10` the second 44 pt button overflowed the column and would have been
+   squeezed by `paddingHorizontal`. `minWidth: 96` keeps the title centred on an
+   ordinary header and lets the ring cluster take its 98 pt. Behaviour identical
+   on every screen that has one button or none.
+
+One more, small: `HeaderIcon` gained `onLongPress` and `disabled` props while it
+was being written (neither is used by S2's call sites). They are the two
+affordances a header button has and S6's hamburger/drawer work needs them; a
+prop with no caller is dead weight, but removing and re-adding them across
+slices is worse. Recorded so the reviewer can rule on it.
+
+### As-built, in order
+
+1. **Tests first (red).** `chat-header.test.ts` gained the `ringArcs` block (0,
+   49/50/51 split, 100, >100 clamp, NaN/negative, the 80 tone flip, `ringLabel`)
+   and the `ringHalfRotation` block; new `test/header-wiring.test.ts` pins the
+   wiring (bare `HeaderIcon`, default `light`/22, no `BlurView`/`shadow.glass`/
+   `borderRadius` in it, no screen keeps a glass circle except over-camera, the
+   five screens use `HeaderIcon`, the chat header draws the ring *guarded by a
+   real reading*, the ring imports no svg, the compact hairline exists and the
+   large variant has none).
+   **Red on the property, not on compile:** 1 error
+   (`SyntaxError: Export named 'ringArcs' not found` — the module genuinely had
+   no such export) then, with the export added, **5 failing assertions** with
+   readable diffs (`offenders: ["PairScreen.tsx","SessionScreen.tsx",…]`,
+   `has: false` for `SessionScreen.tsx`, `not.toMatch(/contextBar:/)`), i.e. they
+   were measuring the look, not the parse.
+2. **`src/chat-header.ts`** — `RingTone`, `RingArcs`, `ringArcs` (`:66`),
+   `ringLabel` (`:77`), `RingHalfRotation`, `ringHalfRotation` (`:107`).
+3. **`src/ui/HeaderIcon.tsx`** (new) — a 44 pt bare `Pressable` + `Icon`,
+   default `light` at 22, pressed 0.5, disabled 0.35, `label` for Pair's `Cancel`,
+   `tone="accent"` for Computers' "+". No blur, no border, no shadow, no radius.
+4. **`src/ui/ContextRing.tsx`** (new) — a 20 pt track (`sep`) + two clipped
+   half-planes, each a full-size box whose `borderTop`/`borderLeft` arc is
+   rotated by `ringHalfRotation`, the box offset half a ring inside its window so
+   its centre stays the ring's. 44 pt tap target, `accessibilityLabel` from
+   `ringLabel` (F11), tap → Session info.
+5. **`src/ui/ScreenHeader.tsx`** — compact variant closes with one
+   `hairlineWidth` line in `palette.sepChat` (large variant untouched); side
+   column `minWidth: 96` + `alignItems: "center"`.
+6. **The screens** — `SessionScreen` (`:384` back, `:398` ring, `:405` "…"),
+   `SessionsScreen`, `SettingsScreen`, `ComputersScreen` (both buttons),
+   `PairScreen` (`:175` `Cancel`) all swap their header `GlassButton`s for
+   `HeaderIcon`. `GlassButton` therefore has exactly ONE live call site,
+   `PairScreen.tsx:440` — the over-camera `Cancel`, which Design 2 keeps. (The
+   plan also reserves `GlassButton` for the FAB, but no FAB exists yet, so there
+   is no second site; the ring's `ContextRing` deliberately does not use it.)
+   `SessionScreen`'s flat 2 pt `contextBar` and its style entry are gone; the ring
+   carries `testID="session-header-context"`, so flow 25's assertion still holds
+   (and it now taps Session info).
+7. **`changelog.d/mobile-chrome.changed.md`** — the S1 bullet extended to cover
+   the header (one bullet, one file, `parseFragments` OK). The plan's Files item
+   12 says this one fragment spans S1–S6, so S2 extends it rather than adding a
+   second `changed` fragment (a second file would be a real filename collision).
+   `CHANGELOG.md` and `[Unreleased]` untouched.
+
+### Mutation checks (§9 — each applied, run, reverted; script and full output in `.tentacle/tmp/mobile-chrome/s2-mutations.{sh,out}`)
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | ring half-mark split 50 → 40 (the sweep overdraws) | 3 fail |
+| 2 | orange threshold 80 → 90 | 1 fail |
+| 3 | drop the `Number.isFinite` guard (broken transform) | 1 fail |
+| 4 | swap the two rotation bases (the wrong mapping, drift 2) | 1 fail |
+| 5 | put a `BlurView` back in `HeaderIcon` (a glass circle again) | 1 fail |
+| 6 | default weight `light` → `semibold` (the old thick glyphs) | 1 fail |
+| 7 | compact header hairline `hairlineWidth` → 0 | 1 fail |
+| 8 | the ring drawn unconditionally (no reading guard) | 1 fail |
+| 9 | `ContextRing` ignores `ringHalfRotation` (magic constants) | 1 fail |
+
+**Mutation 8 found a real vacuity, and it was fixed.** The first version of that
+assertion was `expect(SESSION_SCREEN).toMatch(/<ContextRing\b/)`, which is blind
+to whether the ring is *guarded* — mutation 8 (`headerContext === null ? null :`
+→ `true ? null :`) passed it, so the test proved nothing. Rewritten to locate the
+guard and assert the `<ContextRing` + `percent={state.view.headerContext.percent}`
+inside it (plus "no old bar"), after which mutation 8 fails as it should. Every
+row above is from the run *after* that fix; the baseline before each mutation and
+the green re-run after each revert were both `20 pass / 0 fail`, and `git diff`
+after the script names only the intended files.
+
+### Gate
+
+- `bunx tsc --noEmit` (root) — **clean**.
+- `bunx tsc -p apps/mobile --noEmit` — **clean**. (First run reported
+  `packages/agent/src/capabilities.ts(20,8): Cannot find module '@tentacle/config'`
+  — a stale `node_modules` in this worktree, not my code: the same error appears
+  on an untouched worktree, and `bun install --frozen-lockfile` in this one
+  cleared it. Nothing in `packages/` is modified.)
+- `bunx tsc -p apps/relay --noEmit` — **clean**.
+- `bun run lint` — **`Checked 1661 files. No fixes applied.`** (0 errors, 0
+  warnings; AGENTS §6 baseline is clean). The first run flagged 8
+  format/`organizeImports` errors in my own files only; `biome check --write` on
+  exactly those 11 files fixed them.
+- `bun test` (full suite) — **11978 pass, 5 skip, 0 fail** across 858 files. The 5
+  skips are the documented opt-in ones (live-k8s ×2, live-docker ×2, the
+  real-socket slow test); no non-opt-in skip.
+- `packages/protocol/schema/protocol.json` — **not regenerated**: no schema
+  changed (no `packages/protocol` file in the diff).
+
+### Not done in this slice (and why)
+
+- **The `done when`'s "flow 24 shots" are NOT captured.** The e2e build is still
+  blocked by the pre-existing `PushCore` error S1 recorded
+  (`apps/mobile/targets/live-activity/LACore/LACore.swift:23` imports `PushCore`;
+  `expo-target.config.js` declares no Swift package, and `git diff` shows I did
+  not touch `targets/`). Per AGENTS §0 this is the second slice hitting the same
+  wall, so it is not retried here: **the ring's pixels are unverified on a device
+  / simulator**. What IS verified: the geometry (numerically, and by test), the
+  sizes, the colours read from tokens, and that no screen still draws a glass
+  header circle. The visual pass is owed to Review or an e2e-capable machine, and
+  the honest state is "geometry and wiring proven, pixels not yet seen".
+- **The ring's rotation is a clockwise sweep from 12 o'clock** by construction of
+  the two windows; whether the owner prefers the remaining fraction in `sep` to
+  read as "used" vs "free" is a mockup detail I did not invent an answer to — the
+  mockup (`index.html:221` `ring(p, pct)`) draws the *used* fraction in accent
+  over a `sep` track, and that is what this paints.
+- **`Icon`'s `thin` weight is unused by S2.** A1's header glyphs are `light`; the
+  union carries `thin` from S1 for the drawer's future glyphs. No call site uses
+  it, so nothing pins it beyond S1's union test — stated rather than implied.
+
+### Fix round 1 (slice S2)
+
+*— claude-opus-5-5, 2026-11-16 · slice S2 · fixes Review round 1 (S2)*
+
+**Findings addressed:** both MEDIUM, no HIGH raised. Tests only — no product code
+changed, which is the correct shape for both: neither finding was a bug in the
+shipped code, each was a coupling no assertion held. Scope stayed S2; `git diff`
+names one file (`apps/mobile/test/header-wiring.test.ts`, +31 lines).
+
+**Reproduced first (before any edit).** Both mutations applied to the untouched
+tree, the slice's two test files run:
+`.tentacle/tmp/mobile-chrome/f1-repro.sh` → `20 pass / 0 fail` for **both**. So
+both gaps were real, and neither "test" was red on the property it claimed.
+Script and output: `.tentacle/tmp/mobile-chrome/f1-repro.{sh,out}`.
+
+**1. MEDIUM — the ring's tap wiring was not pinned. FIXED.**
+Root cause: `header-wiring.test.ts` asserted only that `ContextRing.tsx`
+*declares* `onPress?: () => void` (a property of the component), never that the
+chat header *passes* one — and the component's own `onPress === undefined` branch
+silently renders a `progressbar` instead of a `button`, so dropping the prop at
+`SessionScreen.tsx:401` costs no type error and no test.
+- `test/header-wiring.test.ts:121-128` — new test: take the `<ContextRing …/>`
+  element the header writes and assert `onPress={` **and** `setInfoOpen(true)`
+  inside it. Asserting the *value*, not just the prop's presence, so wiring the
+  tap to the wrong setter also fails.
+- `test/header-wiring.test.ts:33-39` — `ringCallSite()` helper: slices from
+  `<ContextRing` to the following `/>` and asserts both boundaries exist, so the
+  test cannot pass by slicing an empty string (the classic source-scan vacuity).
+
+**2. MEDIUM — the arc's border sides were not pinned. FIXED.**
+Root cause: `ringHalfRotation`'s bases (315/135) are only correct for a
+`borderTop`+`borderLeft` arc (centred at 10:30). That coupling has two halves; the
+pure half is tested in `chat-header.test.ts`, the component half had no assertion,
+so `borderLeftColor → borderRightColor` moved the arc's centre to 1:30 with every
+test green — a phantom 90° at 0% and a wrong sweep everywhere.
+- `test/header-wiring.test.ts:130-142` — assert the arc reads `borderTopColor:
+  tone` **and** `borderLeftColor: tone`, and that neither `borderRightColor` nor
+  `borderBottomColor` appears in the file. The negative halves are what catch a
+  future side swap, not just a missing side. Comment names the coupling to the
+  bases so the next editor sees why the sides are not a free choice.
+
+**Drift from the Implementation: none.** Both fixes are test-only, so the Design
+sections still describe the code as built.
+
+**Red before green (§9), on the assertion, not on an import/compile error** —
+`.tentacle/tmp/mobile-chrome/fix1-red.{sh,out}`, new tests against the mutated
+buggy code, each applied → run → reverted (`RESTORED-OK`):
+
+| Mutation (buggy code) | Result |
+|---|---|
+| `<ContextRing>` loses `onPress={(…)}` | **21 pass / 1 fail** — `Expected substring or pattern: /onPress=\{/`, `Received: "<ContextRing\n palette={palette}\n …"` |
+| `borderLeftColor` → `borderRightColor` | **21 pass / 1 fail** — `Expected substring or pattern: /borderLeftColor: tone/` |
+| `borderTopColor` → `borderBottomColor` | **21 pass / 1 fail** — `Expected substring or pattern: /borderTopColor: tone/` |
+
+Green after: **22 pass / 0 fail** (65 `expect()` calls).
+
+**Mutation checks on the fixed tree** — `.tentacle/tmp/mobile-chrome/fix1-mutations.{sh,out}`,
+baseline `22 pass / 0 fail` before, every revert verified by `diff` (`REVERT-OK`):
+
+| # | Mutation | Result |
+|---|---|---|
+| A | `onPress={() => setInfoOpen(true)}` → `setInfoOpen(false)` (right prop, wrong target) | 1 fail — the passes-the-tap test |
+| B | drop `onPress=` from the call site (the finding's own) | 1 fail — the same test |
+| C | `borderLeftColor` → `borderRightColor` (the finding's own) | 1 fail — the arc test |
+| D | the arc redrawn as one full circle (`borderColor: tone`) | 1 fail — the arc test |
+| E | the whole `<ContextRing …/>` deleted (non-vacuity of the call-site slice) | 2 fails — the "draws `ContextRing`" guard test **and** the new tap test (`ringCallSite`'s own `indexOf` assertions), so it cannot pass on `""` |
+
+A and D are the ones that matter beyond the two findings: A proves the test pins
+the *destination* of the tap, not the presence of a prop; D proves the arc test
+pins the half-arc shape, not merely "a colour is set somewhere".
+
+**Fix round 2's nit (round-2 review of *S1*) carries over, still open and still
+non-blocking for S1:** nothing asserts that `RenameSheet` uses `radius.dialog`
+specifically. Named here so it is not mistaken for new debt from this round —
+this round added no `theme` assertions.
+
+**Still unverified (unchanged, third slice to hit it):** the pixels. The e2e iOS
+build is still blocked by the pre-existing `PushCore` resolution error
+(`targets/live-activity/LACore/LACore.swift:23`), `targets/` untouched by this
+branch, so flow 24's shots were not captured and the ring has never been seen on
+glass. Per AGENTS §0 this is not retried a third time. To verify: run
+`bun run e2e:mobile --ios 26 --only 24-ui-shots` on an e2e-capable machine and
+open the chat header in both appearances — 0%, ~34%, ~85% (orange) are the cases
+the geometry test names.
+
+**Gate (after the last edit, in this tree):**
+`bunx tsc --noEmit` — clean (`TSC-ROOT-OK`); `bunx tsc -p apps/mobile --noEmit` —
+clean; `bunx tsc -p apps/relay --noEmit` — clean. `bun run lint` — `Checked 1661
+files in 456ms. No fixes applied.` (0 errors, 0 warnings; AGENTS §6 baseline is
+clean). `bun test` (full suite) — **11980 pass, 5 skip, 0 fail** across 858 files
+(13 snapshots, 85024 `expect()` calls, 420 s); the 5 skips are the documented
+opt-in ones (live-k8s ×2, live-docker ×2, the real-socket slow test), no
+non-opt-in skip and no flake this run. The count is +2 against the previous
+slice's 11978, which is exactly the two new tests.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16 · slice S2 only, fresh context. The Execution
+section above is also signed claude-opus-5-5, so the shared-blind-spot caveat
+(AGENTS §10) applies.*
+
+**Verdict: REQUEST-CHANGES** (two MEDIUM test-coverage gaps; no HIGH, no code bug found).
+
+**Gate (scoped, as asked):** `bun test chat-header.test.ts header-wiring.test.ts`
+gave 20 pass / 0 fail; `bun run lint` is clean; `bun run typecheck` is green.
+The full `bun run check` was not run. Maestro flow 24 (screenshots) was not run
+because there is no simulator, so the pixels are still unseen.
+
+**Findings**
+1. MEDIUM: the "tap the ring → Session info" wiring is not pinned
+   (`SessionScreen.tsx:401`, `header-wiring.test.ts:752`). Mutation: deleting
+   `onPress={() => setInfoOpen(true)}` from the `<ContextRing>` call site leaves
+   all 20 tests green. The test only checks that `ContextRing` *declares*
+   `onPress?`. Failure scenario: a refactor drops the prop, the ring shows up as a
+   non-interactive `progressbar` (the `onPress === undefined` branch), and Design
+   2 / F11's tap target silently disappears. Fix: assert `onPress=` inside the
+   guarded `<ContextRing` slice that the test already takes.
+2. MEDIUM: the arc's border sides are not pinned (`ContextRing.tsx:387-388`).
+   `ringHalfRotation`'s bases (315/135) are correct ONLY for a
+   `borderTop`+`borderLeft` arc (centred at 10:30). Mutation: `borderLeftColor` →
+   `borderRightColor` leaves all tests green and moves the arc's centre to 1:30.
+   Neither half then starts empty at 0%: the ring shows a phantom 90° at 0% and a
+   wrong sweep everywhere. The executor's "verified numerically" claim covers the
+   pure function, not this coupling. Fix: assert both `borderTopColor: tone` and
+   `borderLeftColor: tone` (or move the side choice into the pure module next to
+   the bases).
+
+**Mutations:** swapping the right base 315→135 fails as expected. So does a
+hairline coloured `sep` instead of `sepChat`. #1 and #2 above survive. All edits
+were reverted, and `git status --porcelain` is empty.
+
+**Attacks tried (nothing found):**
+- Geometry, re-derived by hand: 0/25/50/75/100% gives 0/90/180/270/360°,
+  clockwise from 12.
+- The relative `left:-10` offset inside the 10 pt window keeps the rotation
+  centre on the ring's centre.
+- Typecheck covers the `GlassButton`→`HeaderIcon` prop compatibility.
+- The Pair "Cancel" header is not over the camera. The scanner's close button
+  keeps `GlassButton onDark` (`PairScreen.tsx:440`).
+- Flow 25 still finds `session-header-context` by id.
+- The ring and "…" hit slops (10 + 4 against a 10 pt gap) do not overlap either
+  box.
+- No `react-native-svg` dependency.
+- No §7 invariant is touched (render-only, geometry in the pure module).
+
+**Executor behaviour:** in scope (S3–S10 untouched), honest about the unseen
+pixels, and the geometry is pinned in the pure module as §7 asks. But two
+mutations on the slice's own load-bearing couplings were not tried.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · checks `git diff HEAD~1` (00e3a67d), which is
+test + doc only and changes no source.*
+
+**Verdict: APPROVE.** Both round-1 findings are closed, and I found no new HIGH
+or MEDIUM issue.
+
+- **Finding 1 (ring tap):** closed. I re-ran it with a mutation: dropping
+  `onPress` from the `<ContextRing>` call site now FAILS the new test, "PASSES
+  the tap through". I also pointed the tap at `setMenuOpen(true)`, the wrong
+  target, and that FAILS too. Two possible holes do not apply. `ringCallSite`
+  slices from `<ContextRing` to the first `/>`. That marker cannot be cut early
+  by `=>`. The slice can never be empty, because it is guarded by `expect`s on
+  both indices.
+- **Finding 2 (arc border sides):** closed. Re-running `borderLeftColor` →
+  `borderRightColor` now FAILS the test "the arc stays the
+  `borderTop`+`borderLeft` half".
+- **Regressions:** the diff touches no source code. The two touched test files
+  give 22 pass / 0 fail. `bun run lint` is clean and `bun run typecheck` is green.
+  I reverted every mutation, and `git status --porcelain` is empty.
+- **Still open:** the S2 pixels are unseen (flow 24 needs a simulator), which is
+  the executor's own stated debt. These are source-scan tests, which is the
+  repo's accepted pattern for `.tsx` that Bun cannot import.

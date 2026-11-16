@@ -339,7 +339,12 @@ export class Session {
    */
   async compact(signal?: AbortSignal, onReplaced?: () => void): Promise<CompactResult> {
     const before = this.messages.length;
-    const skills = carryOverSkills(await this.agent.reloadSkills(this.id, this.messages, signal));
+    // A skill hidden for this session is not carried into the compacted history (F12).
+    const skills = carryOverSkills(
+      await this.agent.reloadSkills(this.id, this.messages, signal),
+      undefined,
+      this.agent.capabilities().disabledSkills,
+    );
     signal?.throwIfAborted();
     const summary = await this.agent.summarize(this.messages, signal, skills.kept);
     signal?.throwIfAborted();

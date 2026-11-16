@@ -118,3 +118,31 @@ describe("the composer routes through dictation (F8)", () => {
     expect(screen).toMatch(/voice\?\.send\("press"\) !== true\) \{\s*controller\.press\(\)/);
   });
 });
+
+/**
+ * docs/feat/mobile-voice-hidden.md: the Beta switches are read LIVE. Settings is a
+ * different screen on top of this one, so a screen that only read
+ * `VOICE_SETTINGS.current()` at mount would keep showing the mic (or the speaker)
+ * after the person switched them off.
+ */
+describe("the Beta switches reach this screen without a remount", () => {
+  const screen = code(read(APP, "src", "screens", "SessionScreen.tsx"));
+
+  test("it SUBSCRIBES to the voice settings (mutation: drop the subscribe → red)", () => {
+    expect(screen).toContain("VOICE_SETTINGS.subscribe(setVoiceSettings)");
+  });
+
+  test("both surfaces are gated from that live copy, never from a render-time read", () => {
+    // The two call sites that decide whether voice shows at all.
+    expect(screen).toMatch(
+      /voiceComposerView\(\s*voiceState,\s*dictationLocale\(voiceSettings\.language/,
+    );
+    expect(screen).toMatch(/speakButtonOf\([\s\S]{0,240}?voiceSettings,\s*\)/);
+    // No render-time read survives the switch: that is the bug this task fixes.
+    expect(screen).not.toContain("VOICE_SETTINGS.current().language");
+  });
+
+  test("a switch going OFF is passed to the controller, so nothing keeps running hidden", () => {
+    expect(screen).toContain("voice?.settingsChanged(previous, voiceSettings)");
+  });
+});

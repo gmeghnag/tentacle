@@ -114,6 +114,11 @@ describe("native events and app state", () => {
     ]);
   });
 
+  test("the Beta Read-aloud switch going off stops speaking (docs/feat/mobile-voice-hidden.md)", () => {
+    expect(run([{ type: "settingsOff" }], speaking).effects).toEqual([{ type: "stopSpeaking" }]);
+    expect(run([{ type: "settingsOff" }]).effects).toEqual([]);
+  });
+
   test("dispose stops speaking; idle dispose does nothing (F13)", () => {
     expect(run([{ type: "dispose" }], speaking).effects).toEqual([{ type: "stopSpeaking" }]);
     expect(run([{ type: "dispose" }]).effects).toEqual([]);

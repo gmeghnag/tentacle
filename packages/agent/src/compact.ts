@@ -221,12 +221,16 @@ const NO_SKILLS: SkillCarryOver = { kept: [], dropped: [] };
 /**
  * Split the active skills (activation order) into kept and dropped: keep the
  * most recent ones while their contents fit in `budget`; the first that does
- * not fit, and every older one, is dropped.
+ * not fit, and every older one, is dropped. A skill in `disabled` (hidden
+ * for this session, docs/feat/session-capabilities.md) is neither kept nor
+ * named as dropped: the rebuilt history must not re-introduce what the user hid.
  */
 export function carryOverSkills(
-  skills: readonly CarriedSkill[],
+  all: readonly CarriedSkill[],
   budget = MAX_KEPT_SKILL_CHARS,
+  disabled: readonly string[] = [],
 ): SkillCarryOver {
+  const skills = disabled.length === 0 ? all : all.filter((s) => !disabled.includes(s.name));
   let used = 0;
   let firstKept = skills.length;
   for (let i = skills.length - 1; i >= 0; i--) {

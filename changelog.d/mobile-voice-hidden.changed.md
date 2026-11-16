@@ -1,0 +1,1 @@
+- **Voice moves to Beta in the iPhone app.** Dictation and read-aloud are off by default; turn them on in Settings → Beta.
