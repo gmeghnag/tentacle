@@ -8,7 +8,7 @@
  * must never take the others down (F2, F3, F4).
  */
 import { describe, expect, test } from "bun:test";
-import type { McpServerStatus } from "@tentacle/protocol";
+import type { McpServerStatus, ScheduleRow } from "@tentacle/protocol";
 import {
   type CapabilitySwitches,
   type InfoFacts,
@@ -17,6 +17,7 @@ import {
   contextMeter,
   devicesText,
   headerModel,
+  rowIdentity,
   sanitizeDisplay,
   sessionInfoView,
   settledOp,
@@ -27,6 +28,10 @@ import {
 } from "../src/session-info.ts";
 
 const ready = <T>(value: T): Pull<T> => ({ state: "ready", value });
+/** The two classes a terminal must never receive, as `client/schedules.ts` tests them too. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detecting them is the point
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+const FORMAT = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069]/;
 const loading = <T>(): Pull<T> => ({ state: "loading" });
 const failed = <T>(kind: "error" | "unsupported" | "offline" | "not-open"): Pull<T> => ({
   state: "error",
@@ -44,6 +49,7 @@ function facts(over: Partial<InfoFacts> = {}): InfoFacts {
   return {
     phase: "open",
     link: "up",
+    now: new Date(2026, 10, 17, 12, 0, 0).getTime(),
     title: "Fix the flaky test",
     computerName: "MacBook Pro",
     daemon: { version: "1.4.0", model: "claude-sonnet-4-5", contextWindow: 200_000 },
@@ -650,5 +656,185 @@ describe("switchPhase / capabilityChanges (pure)", () => {
     const op = { kind: "mcp" as const, name: "k8s", enabled: false };
     expect(settledOp([op, op], op)).toEqual([op]);
     expect(settledOp([op], { ...op, enabled: true })).toEqual([op]);
+  });
+});
+
+describe("the SCHEDULED WAKES section (cron-tool S6, mockup M7)", () => {
+  const NOW = new Date(2026, 10, 17, 12, 0, 0).getTime();
+  const wake = (over: Partial<ScheduleRow> = {}): ScheduleRow => ({
+    id: "sc-1",
+    kind: "every",
+    spec: "every 10m",
+    prompt: "check CI on PR #412",
+    nextAt: NOW + 10 * 60_000,
+    fires: 4,
+    createdAt: NOW - 3_600_000,
+    expiresAt: new Date(2026, 10, 22, 14, 20).getTime(),
+    ...over,
+  });
+  const feed = (
+    rows: readonly ScheduleRow[] | undefined,
+    error: string | null = null,
+  ): InfoFacts["schedules"] => ({ rows, error });
+
+  test("a session with no feed at all draws NO section (a port that offers none)", () => {
+    const f = facts();
+    expect(f.schedules).toBeUndefined();
+    expect(sessionInfoView(f).sections.map((s) => s.id)).not.toContain("schedules");
+  });
+
+  test("ready: one row per wake, its prompt as the title and its spec/next/fires under it", () => {
+    const found = section(facts({ now: NOW, schedules: feed([wake()]) }), "schedules");
+    expect(found.phase).toBe("ready");
+    expect(found.title).toBe("Scheduled wakes");
+    expect(found.rows).toHaveLength(1);
+    expect(found.rows[0]?.title).toBe("check CI on PR #412");
+    expect(found.rows[0]?.subtitle).toBe("every 10m · next 12:10 · 4×");
+    // A sendable delete: a RAW id (the title is sanitized) and its own label.
+    expect(found.rows[0]?.delete?.id).toBe("sc-1");
+    expect(found.rows[0]?.delete?.accessibilityLabel).toContain("check CI on PR #412");
+  });
+
+  test("a one-shot reads as its own day and time, never a fire count", () => {
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([wake({ kind: "at", spec: "at 17:00", nextAt: NOW + 3_600_000 })]),
+      }),
+      "schedules",
+    );
+    expect(found.rows[0]?.subtitle).toBe("today 13:00 · one-shot");
+  });
+
+  test("empty: a reported, empty table says so — with a hint, never a fake row", () => {
+    const found = section(facts({ now: NOW, schedules: feed([]) }), "schedules");
+    expect(found.phase).toBe("empty");
+    expect(found.rows).toEqual([]);
+    expect(found.empty?.title).toBe("No scheduled wakes");
+    expect(found.empty?.footnote).toBeTruthy();
+  });
+
+  test("unsupported: an older daemon reports NO table (undefined ≠ [])", () => {
+    const found = section(facts({ now: NOW, schedules: feed(undefined) }), "schedules");
+    expect(found.phase).toBe("unsupported");
+    expect(found.rows).toEqual([]);
+    // The sheet's own words for an older daemon, naming the computer.
+    expect(found.empty?.title).toContain("MacBook Pro");
+  });
+
+  test("not-open: an unattached session never shows a fresh session's wakes (F4)", () => {
+    const found = section(
+      facts({ phase: "failed", now: NOW, schedules: feed([wake()]) }),
+      "schedules",
+    );
+    expect(found.phase).toBe("not-open");
+    expect(found.rows).toEqual([]);
+  });
+
+  test("offline: the known rows STAY (dim), they just stop being followed; no delete is offered", () => {
+    const found = section(
+      facts({ link: "down", now: NOW, schedules: feed([wake()]) }),
+      "schedules",
+    );
+    expect(found.phase).toBe("ready");
+    expect(found.dim).toBe(true);
+    expect(found.rows).toHaveLength(1);
+    // A control that cannot send is worse than no control (the ghost-switch rule).
+    expect(found.rows[0]?.delete).toBeUndefined();
+  });
+
+  test("a refused delete is a FOOTER, never a section failure: the rows stay", () => {
+    const found = section(
+      facts({ now: NOW, schedules: feed([wake()], "this daemon cannot delete a scheduled wake") }),
+      "schedules",
+    );
+    expect(found.phase).toBe("ready");
+    expect(found.footer).toBe("this daemon cannot delete a scheduled wake");
+    expect(found.rows).toHaveLength(1);
+  });
+
+  test("every daemon string is sanitized before it is drawn", () => {
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([
+          wake({ id: "sc\n1", prompt: "a\u001b[2J\u202eb", spec: "every\u009b31m10m" }),
+        ]),
+      }),
+      "schedules",
+    );
+    const row = found.rows[0];
+    for (const text of [row?.title ?? "", row?.subtitle ?? ""]) {
+      expect(CONTROL.test(text)).toBe(false);
+      expect(FORMAT.test(text)).toBe(false);
+    }
+    // The id is sent raw, but never longer than the wire allows (the client bounded it).
+    expect(row?.delete?.id).toBe("sc\n1");
+  });
+
+  test("two wakes with the SAME prompt carry distinct row keys (S6 fix round 1)", () => {
+    // Nothing in core stops two wakes sharing a prompt: `check CI` every 10m and a
+    // one-shot `check CI` at 17:00. The TITLE is therefore no identity — a React
+    // key, the expansion state or a Maestro testID built from it collides.
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([
+          wake({ id: "sc-1", prompt: "check CI" }),
+          wake({ id: "sc-2", kind: "at", spec: "at 17:00", prompt: "check CI" }),
+        ]),
+      }),
+      "schedules",
+    );
+    expect(found.rows.map((row) => row.title)).toEqual(["check CI", "check CI"]);
+    // The RAW id is the identity, and it survives a title collision.
+    expect(found.rows.map((row) => row.key)).toEqual(["sc-1", "sc-2"]);
+  });
+
+  test("`rowIdentity` is what makes a keyed row distinct — the key WINS over the title", () => {
+    // The ONE place `key` takes priority over `title` (S6 Review round 2's
+    // MEDIUM): the sheet builds its React key, its expansion state and every
+    // testID from `rowIdentity`, so a regression to `row.title` there would
+    // re-collapse two same-prompt wakes with the whole suite green.
+    expect(rowIdentity({ title: "check CI", key: "sc-2" })).toBe("sc-2");
+    // A row with no key (every non-schedule row) still has an identity: its title.
+    expect(rowIdentity({ title: "Project" })).toBe("Project");
+    // And it survives the real section: two same-prompt rows stay distinct.
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([
+          wake({ id: "sc-1", prompt: "check CI" }),
+          wake({ id: "sc-2", kind: "at", spec: "at 17:00", prompt: "check CI" }),
+        ]),
+      }),
+      "schedules",
+    );
+    expect(found.rows.map((row) => row.title)).toEqual(["check CI", "check CI"]);
+    const identities = found.rows.map((row) => rowIdentity(row));
+    expect(identities).toEqual(["sc-1", "sc-2"]);
+    expect(new Set(identities).size).toBe(identities.length);
+  });
+
+  test("a repeated (or unpaintable) id still yields UNIQUE, paint-safe keys", () => {
+    // Two ids that sanitize to the same label are one identity to React, and an
+    // id the phone must never paint (a newline) cannot ride into a testID raw.
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([
+          wake({ id: "sc\n1", prompt: "a" }),
+          wake({ id: "sc 1", prompt: "b" }),
+          wake({ id: "\u0001", prompt: "c" }),
+        ]),
+      }),
+      "schedules",
+    );
+    const keys = found.rows.map((row) => row.key ?? "");
+    expect(keys).toEqual(["sc 1", "sc 1#2", "wake"]);
+    for (const key of keys) {
+      expect(CONTROL.test(key)).toBe(false);
+      expect(FORMAT.test(key)).toBe(false);
+    }
   });
 });

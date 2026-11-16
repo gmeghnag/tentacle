@@ -124,6 +124,7 @@ function harness(
   };
   const port: InfoPort = {
     daemon: () => ({ version: "1.4.0", model: "claude-sonnet-4-5", contextWindow: 200_000 }),
+    now: () => Date.now(),
     computerName: () => "e2e-mac",
     title: () => "Alpha",
     phase: () => "open",

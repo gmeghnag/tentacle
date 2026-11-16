@@ -257,6 +257,12 @@ export interface QuitCommandInput {
    * detaches, so its caller passes 0 and the confirm never claims otherwise.
    */
   readonly jobs?: number;
+  /**
+   * The session's ARMED scheduled wakes (docs/feat/cron-tool.md S5, mockup M6):
+   * a quit that CLOSES the session ends them with it. A `connect` quit only
+   * detaches, so its caller passes 0 — the wakes live on with the daemon.
+   */
+  readonly schedules?: number;
   /** The user said `y` to `quitConfirmText`. */
   readonly confirmed: boolean;
 }
@@ -287,6 +293,12 @@ export function quitCommandStep(input: QuitCommandInput): "exit" | "stop-then-ex
   if ((input.jobs ?? 0) > 0 && !input.detaches && !input.confirmed) {
     return "confirm";
   }
+  // The same for an ARMED scheduled wake (cron-tool S5, M6): it is the session's
+  // state, so a quit that ends the session ends it — and nobody would be left to
+  // be woken. A `connect` quit leaves it armed daemon-side.
+  if ((input.schedules ?? 0) > 0 && !input.detaches && !input.confirmed) {
+    return "confirm";
+  }
   if (input.endsSession) {
     return input.running ? "stop-then-exit" : "exit";
   }
@@ -303,11 +315,53 @@ export interface QuitConfirmFacts {
   readonly names: readonly string[];
   /** The SHELL jobs running now (owner Q3 (a)): counted apart from the children. */
   readonly jobs?: number;
+  /**
+   * The session's armed scheduled wakes (cron-tool S5, M6): a quit that ENDS the
+   * session ends them, so their ids are named. Absent/empty: nothing to say
+   * (and a `connect` quit never reaches here: it only detaches).
+   */
+  readonly scheduleIds?: readonly string[];
 }
 
 /** Ids the dialog names, and how much of each: one row at 80 columns (LOW-2). */
 const QUIT_NAMES_SHOWN = 3;
 const QUIT_NAME_MAX = 12;
+
+/** Wakes the quit warning names, and the whole line's cell budget (`QUIT_CONFIRM_ROWS` = 1). */
+const QUIT_WAKES_SHOWN = 3;
+const QUIT_WAKE_ID_MAX = 12;
+const QUIT_WAKES_COLS = 78;
+
+/**
+ * The quit warning for ARMED scheduled wakes a quit would destroy
+ * (docs/feat/cron-tool.md S5, mockup M6), or null at none. One bounded row: the
+ * dialog has exactly `QUIT_CONFIRM_ROWS`, and these are a daemon's (possibly a
+ * pod's) ids — so the names yield to the sentence instead of being cut mid-word
+ * by Ink's `truncate-end` (LOW-2's lesson, from the children's ids).
+ */
+export function scheduleQuitText(ids: readonly string[]): string | null {
+  if (ids.length === 0) {
+    return null;
+  }
+  const verb = ids.length === 1 ? "ends" : "end";
+  const what = ids.length === 1 ? "1 scheduled wake" : `${ids.length} scheduled wakes`;
+  const room = QUIT_WAKES_COLS - `${what} () ${verb} with this session — quit? (y/N)`.length;
+  let shown = 0;
+  let names = "";
+  for (const id of ids.slice(0, QUIT_WAKES_SHOWN)) {
+    const one = oneLine(id).slice(0, QUIT_WAKE_ID_MAX);
+    const next = shown === 0 ? one : `${names}, ${one}`;
+    const rest = ids.length - shown - 1;
+    if (next.length + (rest > 0 ? ` +${rest}`.length : 0) > room) {
+      break;
+    }
+    names = next;
+    shown += 1;
+  }
+  const rest = ids.length - shown;
+  const list = `${names}${rest > 0 ? `${names === "" ? "" : " "}+${rest}` : ""}`;
+  return `${what} (${list}) ${verb} with this session — quit? (y/N)`;
+}
 
 /** The confirmation `/quit` asks with others on the session, or children to lose. */
 export function quitConfirmText(facts: QuitConfirmFacts): string {
@@ -315,11 +369,16 @@ export function quitConfirmText(facts: QuitConfirmFacts): string {
   // A SHELL job is a different thing to lose, and is worded apart (owner Q3 (a)):
   // it keeps no report, so nothing of it reaches the conversation afterwards.
   const jobs = facts.jobs ?? 0;
+  const wakes = facts.scheduleIds ?? [];
   const who = others === 1 ? "1 other terminal" : `${others} other terminals`;
-  if (agents <= 0 && jobs <= 0) {
+  if (agents <= 0 && jobs <= 0 && wakes.length === 0) {
     return `${who} attached — close the session for all? (y/N)`;
   }
-  if (agents <= 0) {
+  if (agents <= 0 && jobs <= 0 && others <= 0) {
+    // Wakes alone: their own sentence, naming the ids (M6).
+    return scheduleQuitText(wakes) ?? `${who} attached — close the session for all? (y/N)`;
+  }
+  if (agents <= 0 && wakes.length === 0) {
     const shells = jobs === 1 ? "1 background shell job" : `${jobs} background shell jobs`;
     return others > 0
       ? `${who} attached · ${jobs === 1 ? "1 shell job running" : `${jobs} shell jobs running`} — close the session for all? (y/N)`
@@ -339,13 +398,19 @@ export function quitConfirmText(facts: QuitConfirmFacts): string {
       : `${agents} background sub-agents (${shown}${more})`;
   // Both kinds running: the children by id, then the jobs as a count.
   const shells = jobs <= 0 ? "" : jobs === 1 ? " · 1 shell job" : ` · ${jobs} shell jobs`;
+  const arms =
+    wakes.length === 0
+      ? ""
+      : wakes.length === 1
+        ? " · 1 scheduled wake"
+        : ` · ${wakes.length} scheduled wakes`;
   if (others > 0) {
     const running = agents === 1 ? "1 sub-agent running" : `${agents} sub-agents running`;
     const runningJobs =
       jobs <= 0 ? "" : jobs === 1 ? " · 1 shell job running" : ` · ${jobs} shell jobs running`;
-    return `${who} attached · ${running}${runningJobs} — close the session for all? (y/N)`;
+    return `${who} attached · ${running}${runningJobs}${arms} — close the session for all? (y/N)`;
   }
-  return `${what}${shells} will be lost — quit? (y/N)`;
+  return `${what}${shells}${arms} will be lost — quit? (y/N)`;
 }
 
 /** A key on that confirmation: only a plain `y`/`Y` closes; anything else (Enter, Ctrl+Y) is No. */

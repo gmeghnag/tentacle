@@ -63,6 +63,7 @@ import {
   type RenameResult,
   type ResolvePermissionParams,
   type ResolvePermissionResult,
+  type ScheduleDeleteParams,
   type SendNowParams,
   type SessionContextParams,
   type SessionContextResult,
@@ -435,6 +436,11 @@ export class Connection {
       case Method.JobKill: {
         const { sessionId, jobId } = params as JobKillParams;
         return this.lookup(sessionId).jobKill(jobId);
+      }
+      case Method.ScheduleDelete: {
+        // Synchronous (docs/feat/cron-tool.md D5): never waits on a turn.
+        const { sessionId, scheduleId } = params as ScheduleDeleteParams;
+        return this.lookup(sessionId).deleteSchedule(scheduleId);
       }
       case Method.McpStatus:
         return this.mcpStatus();

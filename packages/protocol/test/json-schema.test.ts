@@ -175,6 +175,30 @@ const FIXTURES: Record<string, Json[]> = {
     { messages: [], since: { epoch: "e", seq: 0 }, title: { text: "(empty)", source: "auto" } },
     {
       messages: [],
+      schedules: [
+        {
+          id: "sc-1",
+          kind: "every",
+          spec: "every 10m",
+          prompt: "check CI on PR #412",
+          nextAt: 1_700_000_000_000,
+          expiresAt: 1_700_500_000_000,
+          fires: 4,
+          createdAt: 1_699_999_000_000,
+        },
+        {
+          id: "sc-2",
+          kind: "at",
+          spec: "at 17:00",
+          prompt: "remind me",
+          nextAt: 2,
+          fires: 0,
+          createdAt: 1,
+        },
+      ],
+    },
+    {
+      messages: [],
       since: { epoch: "e", seq: 3 },
       queued: {
         entries: [{ id: "a", text: "A" }],
@@ -255,6 +279,14 @@ const FIXTURES: Record<string, Json[]> = {
   ],
   "methods/session~1job_kill/params": [{ sessionId: "s", jobId: "bg-1" }],
   "methods/session~1job_kill/result": [{ killed: true }, { killed: false }],
+  // feat/cron-tool S2: the user drops one scheduled wake (the model's own
+  // handle is `schedule_control{action:"delete"}`).
+  "methods/session~1schedule_delete/params": [{ sessionId: "s", scheduleId: "sc-1" }],
+  "methods/session~1schedule_delete/result": [
+    { deleted: true },
+    { deleted: false },
+    { deleted: false, reason: "no schedule sc-9 in this session" },
+  ],
   "methods/session~1enqueue/params": [{ sessionId: "s", id: "e", turnId: "t", text: "steer" }],
   "methods/session~1enqueue/result": [{}],
   "methods/session~1send_now/params": [
@@ -555,6 +587,31 @@ const FIXTURES: Record<string, Json[]> = {
     }),
     update({ type: "auto_accept", on: true }),
     update({ type: "auto_accept", on: false, by: "laptop" }),
+    // feat/cron-tool S2: a fired turn's styled row (owner Q9 = B), and the full
+    // table of the session's scheduled wakes (display class).
+    update({ type: "turn_start", turnId: "wake-1", prompt: "[scheduled sc-1] go" }),
+    update({
+      type: "turn_start",
+      turnId: "wake-1",
+      prompt: "[scheduled sc-1 · every 10m · fire 5] go",
+      schedule: { id: "sc-1", spec: "every 10m" },
+    }),
+    update({
+      type: "schedules",
+      schedules: [
+        {
+          id: "sc-1",
+          kind: "every",
+          spec: "every 10m",
+          prompt: "check CI on PR #412",
+          nextAt: 1_700_000_000_000,
+          expiresAt: 1_700_500_000_000,
+          fires: 4,
+          createdAt: 1_699_999_000_000,
+        },
+      ],
+    }),
+    update({ type: "schedules", schedules: [] }),
     update({ type: "capabilities", capabilities: { disabledMcp: [], disabledSkills: [] } }),
     update({
       type: "capabilities",

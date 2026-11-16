@@ -71,6 +71,8 @@ import {
   ReclaimResultSchema,
   RenameParamsSchema,
   RenameResultSchema,
+  ScheduleDeleteParamsSchema,
+  ScheduleDeleteResultSchema,
   SendNowParamsSchema,
   SessionContextParamsSchema,
   SessionContextResultSchema,
@@ -132,6 +134,12 @@ export const Method = {
   JobOutput: "session/job_output",
   /** The user stops one (the same decision as the model's `shell_kill` tool). */
   JobKill: "session/job_kill",
+  /**
+   * The user drops one scheduled wake (docs/feat/cron-tool.md D5): the same
+   * decision as the model's `schedule_control{action:"delete"}`. Synchronous
+   * daemon-side (it is state, never a turn), so it never awaits the peer.
+   */
+  ScheduleDelete: "session/schedule_delete",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
   /** Daemon → client: the exact prompt size of a request, counted by the laptop's provider. */
@@ -256,6 +264,10 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.AgentKill]: { params: AgentKillParamsSchema, result: AgentKillResultSchema },
   [Method.JobOutput]: { params: JobOutputParamsSchema, result: JobOutputResultSchema },
   [Method.JobKill]: { params: JobKillParamsSchema, result: JobKillResultSchema },
+  [Method.ScheduleDelete]: {
+    params: ScheduleDeleteParamsSchema,
+    result: ScheduleDeleteResultSchema,
+  },
   [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
   [Method.ModelStreamChunked]: {
     params: ModelStreamChunkedParamsSchema,

@@ -21,7 +21,12 @@ import {
 } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { type RemoteClient, type RemoteSession, webSocketChannelFactory } from "@tentacle/client";
-import { type AttachmentRef, encodeBase64Url, parsePairingPayload } from "@tentacle/protocol";
+import {
+  type AttachmentRef,
+  type ScheduleRow,
+  encodeBase64Url,
+  parsePairingPayload,
+} from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import { getRandomBytes } from "expo-crypto";
 import { File } from "expo-file-system";
@@ -406,10 +411,16 @@ function infoWiring(
     // Re-read every time the sheet opens: a `serve` restarted with another model
     // must not show the model the app handshook at pair time (F7).
     daemon: () => link.client.daemonInfo(),
+    // The clock the scheduled wakes' times are worded against (cron-tool S6): the
+    // phone's own, read at each paint so a sheet left open does not freeze it.
+    now: () => Date.now(),
     computerName: () => RECORDS.get(computerId)?.name ?? "",
     title: () => title,
     phase: () => (handle() === null ? "failed" : "open"),
     sessionId,
+    // This wiring reads the session's armed wakes (cron-tool S6): one flag, so a
+    // sheet opened before any attach can say `not-open` instead of hiding.
+    offersSchedules: true,
     mcpStatus: () => link.client.mcpStatus(),
     sessionList: () => link.client.sessionList({ limit: 200 }),
     // The handle is the screen's OWN attach (`RemoteSession`, cast): a second
@@ -424,6 +435,22 @@ function infoWiring(
         skills: () => remote.skills(),
         context: () => remote.context(),
         ...(live.autoAccept === undefined ? {} : { autoAccept: live.autoAccept }),
+        // The session's armed wakes (cron-tool S6, M7): the SAME handle's
+        // `onSchedules`/`deleteSchedule`, so the phone follows the one client
+        // stack. No second reader: the client already bounded and sanitized the
+        // rows, and `onSchedules` reports the current table at install.
+        ...(typeof remote.deleteSchedule !== "function"
+          ? {}
+          : {
+              schedules: {
+                current: () => remote.schedules,
+                // `onSchedules` reports the table it already knows at install,
+                // then every change: one feed, no polling.
+                onChange: (listener: (rows: readonly ScheduleRow[] | undefined) => void) =>
+                  remote.onSchedules((report) => listener(report.rows)),
+                remove: (scheduleId: string) => remote.deleteSchedule(scheduleId),
+              },
+            }),
         // The MCP/skill switches (docs/feat/session-capabilities.md S5): the same
         // handle's `capabilities()` / `onCapabilities` / `setCapability`, so the
         // phone toggles through the one client stack like the TUI does.

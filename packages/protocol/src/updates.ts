@@ -16,6 +16,8 @@ import {
   MAX_SESSION_TITLE,
   QueuedEntrySchema,
   ReturnedEntrySchema,
+  ScheduleIdSchema,
+  ScheduleRowSchema,
   SessionCapabilitiesSchema,
   SessionIdSchema,
   SessionSettingsReportSchema,
@@ -252,6 +254,15 @@ export const TurnStartSchema = z.object({
    * text-only turn (never an empty array).
    */
   attachments: z.array(AttachmentRefSchema).max(MAX_ATTACHMENTS_PER_MESSAGE).optional(),
+  /**
+   * The scheduled wake that started this turn (docs/feat/cron-tool.md D5, owner
+   * Q9 = B): DISPLAY data only, so a client can style a fired row. Optional and
+   * additive — a strip schema, so an older client drops it and still shows the
+   * durable `[scheduled sc-1 · …]` prefix in `prompt` (M4 option A). Absent for
+   * every turn no schedule started, and on a reload of a fired turn (the
+   * conversation is the truth there).
+   */
+  schedule: z.object({ id: ScheduleIdSchema, spec: z.string() }).optional(),
 });
 
 /** A turn ended (last update of every turn): the turn's outcome, in the stream. */
@@ -396,6 +407,20 @@ export const SubagentsUpdateSchema = z.object({
 });
 
 /**
+ * The session's scheduled wakes changed (created, deleted, fired, expired, or
+ * stopped after repeated failures): the FULL table, replacing any earlier one
+ * (docs/feat/cron-tool.md D5). Sent to every attached client while idle too —
+ * a wake fires between turns, so its row is never turn-scoped. Display only:
+ * nothing waits on it (a client that skips it loses the live list, and the
+ * snapshot's first page carries it), so an older client shows `unsupported`
+ * once per session and nothing hangs.
+ */
+export const SchedulesUpdateSchema = z.object({
+  type: z.literal("schedules"),
+  schedules: z.array(ScheduleRowSchema),
+});
+
+/**
  * A RUNNING background sub-agent sent its parent agent a message
  * (`agent_notify`, docs/feat/agent-message-two-way.md): the text reached the
  * parent's conversation. `wake` says whether the note asks for a continuation
@@ -459,6 +484,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   QueuedUpdateSchema,
   SubagentsUpdateSchema,
   JobsUpdateSchema,
+  SchedulesUpdateSchema,
   SubagentNotifySchema,
   SubagentMessageUpdateSchema,
   SessionSettingsUpdateSchema,
@@ -520,6 +546,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   subagents: "display",
   // Full state, sent only on a job's start or exit; nothing waits on it.
   jobs: "display",
+  // Full state, sent only when a scheduled wake changes; nothing waits on it.
+  schedules: "display",
   // A notice; the note itself rides the conversation (nothing hangs).
   subagent_notify: "display",
   // The user's own notice (every client shows it); the parent's note lands at its turn.

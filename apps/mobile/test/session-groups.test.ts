@@ -12,6 +12,7 @@ const row = (over: Partial<SessionRow> & { sessionId: string }): SessionRow => (
   title: over.sessionId,
   subtitle: "5m ago",
   badges: [],
+  wakes: 0,
   archived: false,
   running: false,
   attached: 0,
@@ -59,6 +60,16 @@ describe("sessionMeta (the inline line under a title)", () => {
   });
   test("archived", () => {
     expect(sessionMeta(z)).toBe("Archived · 3d ago");
+  });
+  test("armed wakes are named on the line a person reads (cron-tool S6, M8)", () => {
+    expect(sessionMeta(row({ sessionId: "w", wakes: 2 }))).toBe("Idle · 2 wakes · 5m ago");
+    expect(sessionMeta(row({ sessionId: "w", wakes: 1, attached: 1 }))).toBe(
+      "Idle · 1 attached · 1 wake · 5m ago",
+    );
+    // An archived session's wakes are frozen and never fire: they earn no word.
+    expect(sessionMeta(row({ sessionId: "w", archived: true, wakes: 3 }))).toBe(
+      "Archived · 5m ago",
+    );
   });
 });
 

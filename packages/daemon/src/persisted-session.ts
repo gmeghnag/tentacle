@@ -8,7 +8,7 @@
  * never does: a record it wrote would be pod-supplied history (AGENTS §7).
  */
 import { type SessionRecord, type TitleState, suspendedInGroup } from "@tentacle/agent";
-import type { ChatMessage, ToolCall } from "@tentacle/core";
+import type { ChatMessage, ScheduledJob, ToolCall } from "@tentacle/core";
 import {
   DomainErrorCode,
   type KnownLogEntry,
@@ -96,6 +96,8 @@ export interface DaemonSessionState {
    * D3): absent = off, so an older build's file and this one read the same.
    */
   readonly autoAccept?: boolean;
+  /** The scheduled wakes (docs/feat/cron-tool.md D6), written only when non-empty. */
+  readonly schedules?: readonly ScheduledJob[];
   /** The session log's part (absent: none — e.g. `archive`'s capture after the close, which reuses the one before). */
   readonly log?: DaemonLogCapture;
 }
@@ -137,6 +139,13 @@ export interface DaemonSessionRecord extends SessionRecord {
    * which `SessionHost.restore` decides by not handing it to a reopen.
    */
   readonly autoAccept?: boolean;
+  /**
+   * The scheduled wakes at the last write (docs/feat/cron-tool.md D6): a
+   * restart re-arms them, an ARCHIVED session keeps them frozen and a reopen
+   * re-arms them (catch-up once). Absent = none; present stamps the state
+   * file v3, so an older build refuses the session instead of dropping them.
+   */
+  readonly schedules?: readonly ScheduledJob[];
   /**
    * The session's MCP/skill switches (docs/feat/session-capabilities.md S3b):
    * the last `capabilities` entry of the log THROUGH `logHead` (unpaired: the

@@ -40,6 +40,7 @@ import { backgroundCount, backgroundNames } from "./background-view.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
 import { clearCommandStep, clearErrorNotice, clearNoopNotice } from "./clear-command.ts";
 import { type QuitConfirmFacts, quitCommandStep } from "./commands.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import type { DisplayState } from "./state.ts";
 
 /**
@@ -92,6 +93,11 @@ export interface QuitClearHost {
   /** The dock's rows (S5): a quit counts the children and jobs it would lose. */
   readonly subagentsRef: MutableRefObject<readonly BackgroundAgentRow[] | undefined>;
   readonly jobRowsRef: MutableRefObject<readonly DockJobRow[] | undefined>;
+  /**
+   * The session's ARMED scheduled wakes (cron-tool S5, M6): a quit that CLOSES
+   * the session ends them, so it asks first. Read at quit time, like the jobs'.
+   */
+  readonly schedulesRef: MutableRefObject<readonly ScheduleDockRow[] | undefined>;
   /** `/quit`'s confirmation facts (the dialog's state is App's: it renders it). */
   readonly setQuitConfirm: (facts: QuitConfirmFacts | null) => void;
   /** A detached run's TUI: `/quit` closes for all, and `others` is asked live. */
@@ -136,6 +142,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
     runClearRef,
     subagentsRef,
     jobRowsRef,
+    schedulesRef,
     setQuitConfirm,
     runQuit,
     detachOnQuit,
@@ -157,6 +164,10 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
       // A running SHELL job dies with the session too (owner Q3 (a)) — but only a
       // quit that CLOSES it loses one, so a `connect` detach passes none.
       const jobs = detachOnQuit ? 0 : (jobRowsRef.current?.length ?? 0);
+      // A scheduled wake lives in the SESSION (cron-tool D6): a quit that ends
+      // it ends them all, and nobody would be left to be woken. A `connect`
+      // quit only detaches, so the daemon keeps them armed.
+      const scheduleIds = detachOnQuit ? [] : (schedulesRef.current ?? []).map((row) => row.id);
       const step = quitCommandStep({
         running: stateRef.current.running,
         exitPending: exitPendingRef.current,
@@ -166,6 +177,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
         others: confirmed ? 0 : (runQuit?.othersOnSession() ?? 0),
         agents: confirmed ? 0 : agents,
         jobs: confirmed ? 0 : jobs,
+        schedules: confirmed ? 0 : scheduleIds.length,
         confirmed,
       });
       if (step === "confirm") {
@@ -173,6 +185,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
           others: runQuit?.othersOnSession() ?? 0,
           agents,
           jobs,
+          ...(scheduleIds.length === 0 ? {} : { scheduleIds }),
           names: backgroundNames(subagentsRef.current),
         });
         return;
@@ -197,6 +210,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
       exitPendingRef,
       foreignRef,
       jobRowsRef,
+      schedulesRef,
       pushNotice,
       runQuit,
       setQuitConfirm,
