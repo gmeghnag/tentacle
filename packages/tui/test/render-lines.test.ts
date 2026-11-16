@@ -1102,7 +1102,7 @@ describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => 
     expect(on).toHaveLength(off.length); // same row count: nothing re-flows
     const onRow = strip(on.find((r) => r.includes("cp a b")) ?? "");
     const offRow = strip(off.find((r) => r.includes("cp a b")) ?? "");
-    expect(onRow.startsWith("⏺ Bash")).toBe(true);
+    expect(onRow.startsWith(`${blink.BULLET} Bash`)).toBe(true);
     // THE property that kills the bug (fix/tui-blink-off-width): with the SGR
     // stripped, the OFF row is BYTE-IDENTICAL to the ON row — the same glyph in
     // the same cells, so the label cannot sit one column off in any terminal.
@@ -1161,8 +1161,11 @@ describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => 
     // differently ON vs OFF and the transcript jumped a row at 1 Hz. The OFF
     // phase now emits the SAME character, hidden, so no width function and no
     // terminal can disagree about it.
-    expect(stringWidth(blink.toolBullet("running", 0))).toBe(2);
-    expect(stringWidth(blink.toolBullet("running", 500))).toBe(2);
+    // The property is EQUALITY between the phases, not any particular number:
+    // the same character cannot be two widths. (The round-1 bullet happened to
+    // measure 2; the current one measures 1 — either way both halves agree.)
+    expect(stringWidth(blink.toolBullet("running", 0))).toBe(stringWidth(blink.BULLET));
+    expect(stringWidth(blink.toolBullet("running", 500))).toBe(stringWidth(blink.BULLET));
     expect(strip(blink.toolBullet("running", 500))).toBe(blink.BULLET);
     const long = {
       ...running,
@@ -1177,7 +1180,7 @@ describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => 
       const on = transcriptRows([{ ...long }], { expandAll: false, width, blinkPhase: 0 });
       const off = transcriptRows([{ ...long }], { expandAll: false, width, blinkPhase: 500 });
       expect([width, on.length]).toEqual([width, off.length]); // same row count
-      expect(strip(on[0] ?? "").startsWith("⏺ Bash")).toBe(true);
+      expect(strip(on[0] ?? "").startsWith(`${blink.BULLET} Bash`)).toBe(true);
       expect(off.map(strip)).toEqual(on.map(strip));
     }
     // Non-vacuity: the ON row really IS a wrapped row (the command's tail is
@@ -1210,7 +1213,7 @@ describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => 
       const cold = done.map((i) => ({ ...i }) as DisplayItem);
       const rows = transcriptRows(cold, { expandAll: false, width: 24, blinkPhase: phase });
       for (const row of rows.filter((r) => r.includes("Bash"))) {
-        expect(strip(row).startsWith("⏺ Bash")).toBe(true);
+        expect(strip(row).startsWith(`${blink.BULLET} Bash`)).toBe(true);
       }
     }
   });
@@ -1730,7 +1733,7 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
       args: JSON.stringify({ command: `${COMMAND} | tail-second` }),
     };
     const rows = transcriptRows([longTool, second], { expandAll: true, width: 40 }).map(strip);
-    // Both calls contribute continuation rows: two `⏺ Bash` headers, each
+    // Both calls contribute continuation rows: two bullet headers, each
     // followed by at least one `  │ ` row, and both tails are visible.
     expect(rows.filter((r) => r.includes("Bash"))).toHaveLength(2);
     expect(rows.filter((r) => r.startsWith(CONT)).length).toBeGreaterThan(3);
@@ -1856,7 +1859,7 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
     });
     expect(on).toHaveLength(off.length); // the continuation block does not re-flow
     expect(on.length).toBeGreaterThan(2); // it really is expanded + wrapped
-    expect(strip(on[0] ?? "").startsWith("⏺ Bash")).toBe(true);
+    expect(strip(on[0] ?? "").startsWith(`${blink.BULLET} Bash`)).toBe(true);
     expect(strip(off[0] ?? "")).toBe(strip(on[0] ?? "")); // same glyph, same cells
     expect(off[0] ?? "").toContain("\x1b[8m"); // and really concealed
     // Only the glyph differs; every continuation and body row is identical.

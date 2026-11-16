@@ -4,13 +4,16 @@
  * `session-info.ts`'s view-model, and every decision (which section is loading,
  * what a cap says, which tone a server gets) was made there.
  *
- * The grammar is the Settings screen's (`mobile-ui-polish.md:1288-1291`):
- * `SectionHeader` + a 26 pt `GroupedCard` of 44 pt `Row`s, in a native
- * `pageSheet`.
+ * The grammar is the E2 band (docs/feat/mobile-chrome.md Design 4, S4):
+ * `BandSection` — one full-width surface per section, square, a small uppercase
+ * label above it — of 44 pt `Row`s, inside a native `pageSheet`. Every band and
+ * every row says `onSheet`, so the ground and the hairlines are the sheet's own
+ * tokens (`bandOnSheet`, `sepSheet`).
  */
-import type { JSX } from "react";
+import type { JSX, ReactNode } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { sectionNotes } from "../band-notes.ts";
 import {
   type InfoRow,
   type InfoSection,
@@ -18,11 +21,10 @@ import {
   rowIdentity,
 } from "../session-info.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, space, typography } from "../theme.ts";
+import { BandNote, BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
-import { GroupedCard } from "../ui/GroupedCard.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
-import { SectionHeader } from "../ui/SectionHeader.tsx";
 import { Sheet } from "../ui/Sheet.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
 
@@ -61,6 +63,7 @@ function LoadingRow({
       palette={palette}
       title="Checking…"
       first={first}
+      onSheet
       dimmed
       minHeight={44}
       testID="session-info-loading"
@@ -99,6 +102,7 @@ function SectionBody({
         title={retryable ? `${text} · Retry` : text}
         subtitle={empty?.footnote}
         first
+        onSheet
         minHeight={44}
         {...(retryable
           ? { tone: "accent", onPress: () => onRetry(section.id) }
@@ -218,6 +222,7 @@ function InfoRowView({
         title={row.title}
         {...(row.subtitle === undefined ? {} : { subtitle: row.subtitle })}
         first={first}
+        onSheet
         minHeight={44}
         dimmed={row.dim === true}
         {...(row.accessibilityLabel === undefined
@@ -246,7 +251,7 @@ function InfoRowView({
   );
 }
 
-/** A section header plus its card and footnotes. */
+/** One section: its note(s) under the band, its rows (and its own last row) in it. */
 function Section({
   palette,
   section,
@@ -255,6 +260,7 @@ function Section({
   onRetry,
   onSwitch,
   onDeleteSchedule,
+  lastRow,
 }: {
   readonly palette: Palette;
   readonly section: InfoSection;
@@ -263,11 +269,31 @@ function Section({
   readonly onRetry: (section: InfoSection["id"]) => void;
   readonly onSwitch: SessionInfoSheetProps["onSwitch"];
   readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
+  /** A row that belongs to THIS section but is not the view-model's (Auto-accept). */
+  readonly lastRow?: ReactNode;
 }): JSX.Element {
+  // The section's notes are the band's footnotes (Design 4), so they sit on the
+  // band's own 20 pt gutter instead of 12 pt inside the label they explain. One
+  // BLOCK per note — `band-notes.ts` decides how many, and their keys by ROLE
+  // (S4 review finding 1: a Fragment of `<Text>`s laid out inline, joining them
+  // into one line and hiding the switch note's testID).
+  const notes = sectionNotes(section);
   return (
     <View style={styles.section}>
-      <SectionHeader palette={palette} title={section.title} />
-      <GroupedCard palette={palette} surface={palette.fill}>
+      <BandSection
+        palette={palette}
+        title={section.title}
+        onSheet
+        notes={notes.map((note) => (
+          <BandNote
+            key={note.key}
+            palette={palette}
+            {...(note.testID === undefined ? {} : { testID: note.testID })}
+          >
+            {note.text}
+          </BandNote>
+        ))}
+      >
         <SectionBody
           palette={palette}
           section={section}
@@ -277,32 +303,8 @@ function Section({
           onSwitch={onSwitch}
           onDeleteSchedule={onDeleteSchedule}
         />
-      </GroupedCard>
-      {section.rowsNote === undefined ? null : (
-        <Text
-          maxFontSizeMultiplier={DENSE_FONT_SCALE}
-          style={[typography.footnote, styles.footnote, { color: palette.sec }]}
-        >
-          {section.rowsNote}
-        </Text>
-      )}
-      {section.footer === undefined ? null : (
-        <Text
-          maxFontSizeMultiplier={DENSE_FONT_SCALE}
-          style={[typography.footnote, styles.footnote, { color: palette.sec }]}
-        >
-          {section.footer}
-        </Text>
-      )}
-      {section.switchNote === undefined ? null : (
-        <Text
-          maxFontSizeMultiplier={DENSE_FONT_SCALE}
-          testID={`session-info-switch-note-${section.id}`}
-          style={[typography.footnote, styles.footnote, { color: palette.sec }]}
-        >
-          {section.switchNote}
-        </Text>
-      )}
+        {lastRow}
+      </BandSection>
     </View>
   );
 }
@@ -330,19 +332,7 @@ export function SessionInfoSheet({
       presentationStyle="pageSheet"
       onRequestClose={onClose}
     >
-      <View style={[styles.root, { backgroundColor: palette.sheet, paddingTop: insets.top }]}>
-        <View style={styles.topBar}>
-          <View style={styles.spacer} />
-          <Pressable
-            testID="session-info-close"
-            accessibilityRole="button"
-            accessibilityLabel="Close"
-            onPress={onClose}
-            style={styles.close}
-          >
-            <Icon name="xmark" color={palette.sec} size={17} />
-          </Pressable>
-        </View>
+      <View style={[styles.root, { backgroundColor: palette.bg }]}>
         <Sheet
           palette={palette}
           title="Session info"
@@ -350,6 +340,8 @@ export function SessionInfoSheet({
           testID="session-info-sheet"
           insetBottom={false}
           scroll
+          onClose={onClose}
+          closeTestID="session-info-close"
         >
           <ScrollView
             testID="session-info-scroll"
@@ -375,32 +367,34 @@ export function SessionInfoSheet({
                   onRetry={onRetry}
                   onSwitch={onSwitch}
                   onDeleteSchedule={onDeleteSchedule}
-                />
-                {/* The switch belongs to the SESSION's settings, right under it. */}
-                {section.id !== "session" || !view.autoAccept ? null : (
-                  <View style={styles.section}>
-                    <GroupedCard palette={palette} surface={palette.fill}>
-                      <Row
-                        palette={palette}
-                        title="Auto-accept"
-                        subtitle={
-                          autoAcceptError ?? "Allow every ask in this session, on every device"
-                        }
-                        first
-                        minHeight={44}
-                        testID="session-info-autoaccept"
-                        trailing={
-                          <Switch
-                            testID="session-info-autoaccept-switch"
-                            accessibilityLabel="Auto-accept for this session, on every device"
-                            value={autoAcceptOn}
-                            onValueChange={(on) => onAutoAccept(on)}
+                  {...(section.id === "session" && view.autoAccept === true
+                    ? {
+                        // Design 4 / the mockup's `infoE2` (`index.html:394-397`):
+                        // Auto-accept is the SESSION band's LAST ROW, not a band of
+                        // its own — the switch belongs to this session's settings.
+                        lastRow: (
+                          <Row
+                            palette={palette}
+                            title="Auto-accept"
+                            subtitle={
+                              autoAcceptError ?? "Allow every ask in this session, on every device"
+                            }
+                            onSheet
+                            minHeight={44}
+                            testID="session-info-autoaccept"
+                            trailing={
+                              <Switch
+                                testID="session-info-autoaccept-switch"
+                                accessibilityLabel="Auto-accept for this session, on every device"
+                                value={autoAcceptOn}
+                                onValueChange={(on) => onAutoAccept(on)}
+                              />
+                            }
                           />
-                        }
-                      />
-                    </GroupedCard>
-                  </View>
-                )}
+                        ),
+                      }
+                    : {})}
+                />
               </View>
             ))}
             <Text
@@ -427,13 +421,9 @@ export function SessionInfoSheet({
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  topBar: { flexDirection: "row", alignItems: "center", paddingHorizontal: space.inset },
-  spacer: { flex: 1 },
-  close: { width: 32, height: 32, alignItems: "center", justifyContent: "center" },
-  content: { gap: 22 },
-  sectionGroup: { gap: 22 },
-  section: { gap: 8 },
-  footnote: { paddingHorizontal: space.inset + space.cardInner },
+  content: { gap: 0 },
+  sectionGroup: { gap: 0 },
+  section: { gap: 0 },
   footer: { textAlign: "center", paddingHorizontal: space.inset, paddingTop: 4 },
   refresh: { alignSelf: "center", paddingVertical: 8, paddingHorizontal: 16 },
   trailing: { alignItems: "flex-end", gap: 2, maxWidth: "55%" },

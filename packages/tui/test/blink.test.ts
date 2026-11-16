@@ -83,9 +83,9 @@ describe("toolBullet", () => {
   test("the OFF glyph is the SAME character, only concealed: the two phases cannot differ in width", () => {
     // THE property (fix/tui-blink-off-width): the ON and OFF rows must occupy the
     // same cells in EVERY terminal. `"  "` failed this on the owner's terminal,
-    // where `⏺` draws 1 column: a fixed count of spaces is right only where the
-    // glyph happens to be 2 wide. The same character cannot disagree with
-    // itself.
+    // where the bullet draws 1 column: a fixed count of spaces is right only
+    // where the glyph happens to be 2 wide. The same character cannot disagree
+    // with itself.
     const off = toolBullet("running", 500);
     expect(strip(off)).toBe(BULLET); // the glyph itself, not a blank
     expect(stringWidth(off)).toBe(stringWidth(BULLET)); // same measured width

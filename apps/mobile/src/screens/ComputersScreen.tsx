@@ -5,10 +5,11 @@
  * `computer-rows.ts`, what is said about them and what the menu offers from
  * `computer-status.ts`.
  *
- * The look is the approved `Main` mockup (docs/feat/mobile-ui-polish.md, Slice 2):
- * a large title with two glass buttons (Settings, "+" to pair another computer),
- * per computer a bold header with a status dot and a 26 pt card holding its
- * project row, and the "Pair a computer" card with its hint at the bottom.
+ * The look is the approved `Main` mockup (docs/feat/mobile-ui-polish.md, Slice 2),
+ * restyled to E2 bands by S4 of docs/feat/mobile-chrome.md: a large title with two
+ * thin header buttons (Settings, "+" to pair another computer), per computer a bold
+ * heading (status dot + status line) over ONE full-width `BandSection` holding its
+ * project row, and the "Pair a computer" band with its hint as the footnote.
  *
  * Pair again / Remove live in a menu (Owner Q5): a long-press on the project row
  * or the "…" next to the computer's name. A computer that cannot work without a
@@ -29,9 +30,9 @@ import type { ComputerRow } from "../computer-rows.ts";
 import { computerStatus, menuActions } from "../computer-status.ts";
 import { DENSE_FONT_SCALE, type Palette, size as SIZE, space, typography } from "../theme.ts";
 import { ActionSheet, type SheetAction } from "../ui/ActionSheet.tsx";
+import { BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
-import { GroupedCard } from "../ui/GroupedCard.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { InlineMono } from "../ui/InlineMono.tsx";
@@ -140,7 +141,22 @@ export function ComputersScreen({
           />
         ))}
         <View style={styles.section}>
-          <GroupedCard palette={palette}>
+          <BandSection
+            palette={palette}
+            footnote={
+              <>
+                Run{" "}
+                <InlineMono palette={palette} size={typography.footnote.fontSize}>
+                  tentacle pair
+                </InlineMono>{" "}
+                on the computer. Its projects show up here as soon as{" "}
+                <InlineMono palette={palette} size={typography.footnote.fontSize}>
+                  tentacle serve
+                </InlineMono>{" "}
+                runs in them.
+              </>
+            }
+          >
             <Row
               testID="computers-pair-card"
               palette={palette}
@@ -152,18 +168,7 @@ export function ComputersScreen({
               minHeight={SIZE.rowAction}
               onPress={onAdd}
             />
-          </GroupedCard>
-          <Text style={[typography.footnote, styles.hint, { color: palette.sec }]}>
-            Run{" "}
-            <InlineMono palette={palette} size={typography.footnote.fontSize}>
-              tentacle pair
-            </InlineMono>{" "}
-            on the computer. Its projects show up here as soon as{" "}
-            <InlineMono palette={palette} size={typography.footnote.fontSize}>
-              tentacle serve
-            </InlineMono>{" "}
-            runs in them.
-          </Text>
+          </BandSection>
         </View>
       </ScrollView>
       <CompactBar palette={palette} title="Computers" shown={compact.shown} />
@@ -236,7 +241,7 @@ function ComputerSection({
           <Icon name="ellipsis" color={palette.accent} size={22} />
         </Pressable>
       </View>
-      <GroupedCard palette={palette}>
+      <BandSection palette={palette}>
         <Row
           testID={`computer-${row.id}`}
           palette={palette}
@@ -271,7 +276,7 @@ function ComputerSection({
             onPress={() => onPairAgain(row)}
           />
         ) : null}
-      </GroupedCard>
+      </BandSection>
     </View>
   );
 }
@@ -344,14 +349,20 @@ export function removeMessage(row: ComputerRow): string {
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  section: { marginTop: space.sectionComputers },
+  // BandSection owns the section rhythm (`space.sectionTop` above every band), so
+  // a computer's block adds none: its heading carries the gap that separates two
+  // computers, and the band brings the one under the heading.
+  section: { marginTop: 0 },
   computerHeader: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
+    paddingTop: space.sectionTop,
     paddingLeft: space.inset + 4,
     paddingRight: space.inset - 4,
-    paddingBottom: 10,
+    // The band's own `sectionTop` supplies the rest of the gap under the heading
+    // (Design 4's label→band 6 pt, plus the band's margin).
+    paddingBottom: 6,
   },
   computerText: { flex: 1, gap: 2 },
   statusLine: { flexDirection: "row", alignItems: "center", gap: 6 },
@@ -361,5 +372,4 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  hint: { paddingHorizontal: space.inset + space.cardInner, paddingTop: 8 },
 });

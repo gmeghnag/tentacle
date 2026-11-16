@@ -10,6 +10,8 @@
  *  - a 0.5 pt hairline BETWEEN rows, inset to the gutter, and none after the last
  *    one — the last row draws no bottom edge and the band's own edge closes the
  *    section (so the separator is drawn at each row's TOP, `first` suppressing it);
+ *    the hairline is `sep` on the grouped ground and `sepSheet` on a sheet
+ *    (`onSheet`, which every band in Session info passes);
  *  - the label NEVER truncates: it wraps at large sizes and is never line-capped,
  *    because a truncated setting name is a bug, not a look. "Never truncated" is
  *    not "never shrinks": the label column FILLS the row (`flex: 1`) so a long
@@ -67,6 +69,8 @@ export interface RowProps {
   readonly tone?: "default" | "accent" | "destructive";
   /** The first row of its band: no hairline above it (the band's edge closes it). */
   readonly first?: boolean;
+  /** On a sheet's band: the hairline is `sepSheet`, matching the band's own edges. */
+  readonly onSheet?: boolean;
   readonly minHeight?: number;
   readonly onPress?: () => void;
   readonly onLongPress?: () => void;
@@ -95,6 +99,7 @@ export function Row({
   dimmed = false,
   tone = "default",
   first = false,
+  onSheet = false,
   minHeight = SIZE.rowList,
   onPress,
   onLongPress,
@@ -156,7 +161,12 @@ export function Row({
     >
       {/* Between rows only: the band's own edges close the section. */}
       {first ? null : (
-        <View style={[styles.separator, { left: space.rowX, backgroundColor: palette.sep }]} />
+        <View
+          style={[
+            styles.separator,
+            { left: space.rowX, backgroundColor: onSheet ? palette.sepSheet : palette.sep },
+          ]}
+        />
       )}
       {dot === undefined ? null : <StatusDot palette={palette} tone={dot} size={7} />}
       {leading}
