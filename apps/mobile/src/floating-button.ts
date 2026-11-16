@@ -8,6 +8,7 @@
  * measured `{width, height}` is the bounds, so the keyboard (which shrinks the
  * band) and the composer's growth are inputs, never guesses (F20).
  */
+import { classifyPress } from "./hub-gesture.ts";
 
 /** The button's diameter (pt). */
 export const FLOAT_SIZE = 54;
@@ -15,10 +16,6 @@ export const FLOAT_SIZE = 54;
 export const EDGE_INSET = 10;
 /** The gap kept to the header above and the composer below. */
 export const BAND_MARGIN = 8;
-/** A press that moved less than this (pt) … */
-export const TAP_SLOP = 6;
-/** … and lasted less than this (ms) is a tap. */
-export const TAP_MS = 300;
 /** The fade when it appears / disappears, and Reduce Motion's placement. */
 export const FADE_MS = 150;
 
@@ -96,28 +93,25 @@ export function place(
   };
 }
 
-/** A tap opens Activity; anything else is a drag (never both). */
+/**
+ * A tap opens Activity; anything else is a drag or the hub's long-press (never
+ * both). The thresholds are the hub machine's (`hub-gesture.ts`: 10 pt / 400 ms).
+ */
 export function isTap(path: { dx: number; dy: number; ms: number }): boolean {
-  return Math.hypot(path.dx, path.dy) < TAP_SLOP && path.ms < TAP_MS;
+  return classifyPress(path) === "tap";
 }
 
 /**
- * Drawn only in "floating" while something runs or a report is unread; hidden
- * while the drawer or a sheet covers it, or while the band is too short (F20).
+ * The hub (docs/feat/mobile-hub.md Design 6): drawn whenever "floating" is on —
+ * at zero activity too, so its actions stay reachable — and hidden only while
+ * the drawer or a sheet covers it, or while the band is too short (F20).
  */
 export function visible(input: {
   readonly mode: ActivityButtonMode;
-  readonly count: number;
-  readonly unread: number;
   readonly covered: boolean;
   readonly fits: boolean;
 }): boolean {
-  return (
-    input.mode === "floating" &&
-    (input.count > 0 || input.unread > 0) &&
-    !input.covered &&
-    input.fits
-  );
+  return input.mode === "floating" && !input.covered && input.fits;
 }
 
 /** Reduce Motion: an immediate placement + a fade, no spring/overshoot (F23). */

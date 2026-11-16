@@ -16,6 +16,7 @@ import { type JSX, type ReactNode, useState } from "react";
 import { Image, Pressable, StyleSheet, Text, View } from "react-native";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
+import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
 import { firedScheduleHead } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
@@ -26,9 +27,25 @@ import { ToolRow } from "../../ui/ToolRow.tsx";
 import { animateNextLayout } from "../../ui/animate.ts";
 import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
+import { MediaViewer } from "./MediaViewer.tsx";
 
 /** Lines of a tool's output shown before "show more" (plan F21's bound on screen). */
 export const OUTPUT_PREVIEW_LINES = 12;
+
+/**
+ * The width a bubble's media is laid out at, in points (item 4). The bubble caps
+ * at 77% of the page (see `styles.bubble`), and the phone's narrowest supported
+ * width is 320 pt: 0.77 × 320 − 2 × 14 (the bubble's own padding) ≈ 218. A fixed
+ * figure is what keeps this a pure decision — the real width would need an
+ * `onLayout` round-trip, and the photo is drawn `cover` in a box of the right
+ * SHAPE, so a few points either way crop rather than distort.
+ */
+export const MEDIA_BUBBLE_WIDTH = 218;
+
+/** The image's own box, from the pure layout (`mediaBox`). */
+function boxStyle(box: MediaBox): { width: number; height: number } {
+  return { width: box.width, height: box.height };
+}
 
 export interface RowProps {
   readonly row: Row;
@@ -73,6 +90,21 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
   // `[scheduled …]` prefix inside the bubble's text is the whole message (option
   // A, which is also what a reload shows: the ref is display data, never stored).
   const fired = firedScheduleHead(user.schedule);
+  /** Item 4's geometry: media boxes at the bubble's width, caption below iff there are words. */
+  const layout = layoutMedia(user.images, {
+    width: MEDIA_BUBBLE_WIDTH,
+    hasText: user.text !== "",
+  });
+  const captionBelow = layout.captionBelow;
+  /** The photo open full screen (item 4). One state: null = closed. */
+  const [viewing, setViewing] = useState<{ uri: string; label: string } | null>(null);
+  /**
+   * URIs whose `<Image>` has reported a load failure (Review round 2, R2-1): a
+   * file can vanish under a row that outlives it (the app trims old copies, a
+   * person can wipe the phone's data), and the bubble must then draw its label
+   * rather than an empty frame. `displayUri` decides; this only remembers.
+   */
+  const [broken, setBroken] = useState<readonly string[]>([]);
   return (
     <Shell row={user}>
       <View style={[styles.bubble, { backgroundColor: palette.fill }]}>
@@ -89,45 +121,75 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
         {user.restart === true ? (
           <Text style={[typography.caption, { color: palette.sec }]}>restart prompt</Text>
         ) : null}
-        {/* The bubble is `fill`; code inside it is `code`, which differs (B4). */}
-        <Markdown
-          parsed={parsedOf(user.text)}
-          palette={palette}
-          onLink={onLink}
-          codeBackground={palette.code}
-        />
-        {user.images.length > 0 ? (
+        {/* Item 4 (the owner's WhatsApp shape): the media FIRST, full bubble
+            width; the caption BELOW it, inside the same bubble. */}
+        {user.images.length === 0 ? null : (
           <View style={styles.images}>
             {user.images.map((image) => {
               const thumb = thumbnailFor(thumbnails, image.id);
+              // The LOCAL copy wins: it is the only pixels that exist for a photo
+              // this phone just sent (`thumbnails.ts:19-25` — no read-back), and a
+              // loaded thumbnail is the only source for any other. A URI already
+              // known to be unloadable is no answer at all: the label is.
+              const uri = displayUri(image.localUri ?? thumb?.uri, broken);
+              const box = mediaBox(image, MEDIA_BUBBLE_WIDTH);
+              const label = imageRowText(image);
               return (
                 <View
                   key={image.id}
                   testID={`image-${image.id}`}
-                  style={[styles.image, { backgroundColor: palette.code }]}
+                  style={[styles.image, { backgroundColor: palette.code }, boxStyle(box)]}
                 >
-                  {thumb === undefined ? (
-                    // No bytes reachable yet (no read-back method exists): the
-                    // label is what this build can honestly show (12b Drift 1).
+                  {uri === undefined ? (
+                    // No bytes reachable at all (a history row, another device's
+                    // message): the label is what this build can honestly show.
                     <View style={styles.imageLabel}>
                       <Icon name="photo" color={palette.sec} size={18} />
                       <Text numberOfLines={2} style={[typography.caption, { color: palette.sec }]}>
-                        {imageRowText(image)}
+                        {label}
                       </Text>
                     </View>
                   ) : (
-                    <Image
-                      source={{ uri: thumb.uri }}
-                      style={styles.thumb}
-                      accessibilityIgnoresInvertColors
-                    />
+                    <Pressable
+                      testID={`image-${image.id}-open`}
+                      accessibilityRole="imagebutton"
+                      accessibilityLabel={`Open ${label}`}
+                      onPress={() => setViewing({ uri, label })}
+                    >
+                      <Image
+                        source={{ uri }}
+                        style={styles.imageFill}
+                        // A file that cannot be read (trimmed, wiped, moved) turns
+                        // the bubble back into its label instead of an empty frame.
+                        onError={() =>
+                          setBroken((had) => (had.includes(uri) ? had : [...had, uri]))
+                        }
+                        // The box is the photo's own shape (or the clamp), so `cover`
+                        // crops at the clamp instead of squashing the photo.
+                        resizeMode="cover"
+                        accessibilityIgnoresInvertColors
+                      />
+                    </Pressable>
                   )}
                 </View>
               );
             })}
           </View>
-        ) : null}
+        )}
+        {/* The caption, BELOW the media and inside the same bubble — and never an
+            empty block: a photo-only bubble has no text area at all (item 4).
+            `hasText` is the words' own presence; the markdown source is its truth. */}
+        {!captionBelow ? null : (
+          // The bubble is `fill`; code inside it is `code`, which differs (B4).
+          <Markdown
+            parsed={parsedOf(user.text)}
+            palette={palette}
+            onLink={onLink}
+            codeBackground={palette.code}
+          />
+        )}
       </View>
+      <MediaViewer open={viewing} palette={palette} onClose={() => setViewing(null)} />
     </Shell>
   );
 }
@@ -330,7 +392,10 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   images: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
-  image: { borderRadius: 12, overflow: "hidden" },
+  // The image fills its own box (whose shape `mediaBox` decided): full bubble
+  // width, rounded to the bubble (item 4).
+  image: { borderRadius: radius.bubble, overflow: "hidden" },
+  imageFill: { width: "100%", height: "100%" },
   imageLabel: {
     width: 96,
     height: 96,
@@ -339,7 +404,6 @@ const styles = StyleSheet.create({
     gap: 4,
     padding: 6,
   },
-  thumb: { width: 96, height: 96 },
   reasoningHead: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 28 },
   reasoning: { borderLeftWidth: 2, paddingLeft: 12, marginTop: 4 },
   tool: { gap: 8 },

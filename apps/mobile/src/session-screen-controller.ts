@@ -32,6 +32,8 @@ import {
   type ComposerAction,
   FAILED_NOTICE,
   REFUSED_NOTICE,
+  RESYNC_FAILED_NOTICE,
+  composerAction,
   restoreAfterFailure,
   returnKeyAction,
 } from "./composer.ts";
@@ -78,6 +80,7 @@ import {
   createThumbnailDriver,
   initialThumbnails,
 } from "./thumbnails.ts";
+import type { LocalPhoto } from "./transcript-rows.ts";
 import { type State, initialState } from "./transcript.ts";
 
 /**
@@ -211,6 +214,11 @@ export interface SessionScreenState {
   readonly sends: number;
   /** Background sub-agents and shell jobs (docs/feat/mobile-chrome.md S8). */
   readonly activity: ActivityState;
+  /**
+   * A pull-to-refresh is running (item 3): the `RefreshControl` stays spinning
+   * until the re-attach settles, so the gesture never looks ignored.
+   */
+  readonly refreshing: boolean;
 }
 
 /**
@@ -232,11 +240,25 @@ export interface ComposeWiring {
       text: string,
       turnId: string,
       refs: readonly AttachmentRef[],
+      photos?: readonly LocalPhoto[],
     ) => Promise<void>;
     /** 13b's hand-back: an item whose text belongs in the field (F7/F20). */
     readonly onDraft: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
+    /**
+     * This screen's OWN compose handle, once the attach answered — what the
+     * driver's port must be built over (fix/mobile-media-live item 1). A second
+     * `RemoteSession` for the same id replaces the client's stream listener, so
+     * the driver opening one steals the very turn it starts ("Running" for ever,
+     * no reply — while the daemon finished it).
+     */
+    readonly handle: () => ComposeHandle | null;
   }) => OutboxDriver;
   readonly photos: PhotoPort;
+  /**
+   * The person's "Send photos at original size" (item 5), read at every pick.
+   * Absent = the downscale (the default).
+   */
+  readonly sendPhotoOriginalSize?: () => boolean;
   /**
    * The chat handle's compose side, once the attach answered — built over THIS
    * screen's own attach handle (owner B4: a port without it could not read the
@@ -299,6 +321,12 @@ export interface SessionScreenController {
   setDraft(text: string): void;
   /** A tap on the composer's one button. */
   press(): void;
+  /**
+   * The hub's Stop (docs/feat/mobile-hub.md P2): the composer's own stop branch,
+   * decided as if the field were blank — a draft never turns it into a steer.
+   * A no-op unless that resolves to `stop` (a turn runs, the link is up).
+   */
+  stopTurn(): void;
   /**
    * The keyboard's Return (B2): `press` only when `returnKeyAction` allows it on
    * the CURRENT action — never a Stop, never a no-op clear.
@@ -371,6 +399,12 @@ export interface SessionScreenController {
   ): Promise<void>;
   /** The screen unmounted: detach, withdraw the sheet, release the requester. */
   leave(): Promise<void>;
+  /**
+   * Pull-to-refresh (item 3): re-read this session from the daemon — the reopen
+   * the owner did by hand. Replaces the rows from the daemon's history, never
+   * appends them; a failed re-attach keeps the rows and says so once.
+   */
+  resync(): Promise<void>;
   /** Unsubscribe everything (the screen's cleanup, after `leave`). */
   dispose(): void;
 }
@@ -517,7 +551,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           // turn it starts must stream into this transcript (a drained stream shows
           // nothing — 13d's flow 07/18). The app passes a factory, not a driver.
           driver: deps.compose.driver({
-            prompt: (text, turnId, refs) => promptWithRefs(text, turnId, refs),
+            prompt: (text, turnId, refs, photos) => promptWithRefs(text, turnId, refs, photos),
             // 13b's own hand-back (F7/F20): the item is gone and its text is the
             // field's again — APPENDED, never overwriting what the person typed.
             onDraft: (item) => {
@@ -525,8 +559,18 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
               deps.compose?.draft(draft, []);
               emit();
             },
+            // The driver's port is built over THIS screen's handle — the one that
+            // IS the client's stream listener — so the turn a photo message starts
+            // folds here (item 1's whole bug: a second handle took the stream).
+            handle: () =>
+              status.phase === "open" && handle !== null
+                ? (deps.compose?.handle(handle) ?? null)
+                : null,
           }),
           photos: deps.compose.photos,
+          ...(deps.compose.sendPhotoOriginalSize === undefined
+            ? {}
+            : { sendPhotoOriginalSize: deps.compose.sendPhotoOriginalSize }),
           // The handle exists only once the attach answered: a compose act on a
           // half-built screen must never build a frame (AGENTS §7).
           handle: () =>
@@ -684,6 +728,18 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     });
   }
 
+  /**
+   * Pull-to-refresh (item 3): the resync the owner used by hand — leave the
+   * session, then attach it again. The daemon's history arrives as a `history`
+   * activity (reason `null`) and `withHistory` REPLACES the rows
+   * (`transcript.ts:274-281`), so nothing is doubled. `leave()` detaches THIS
+   * screen's listener only; another device's view is untouched.
+   *
+   * Deliberately not a new session path (AGENTS §7): it is `attach(false)`, the
+   * same call the screen's mount makes.
+   */
+  let refreshing = false;
+
   function state(): SessionScreenState {
     return {
       status,
@@ -698,6 +754,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       renaming,
       sends,
       activity,
+      refreshing,
     };
   }
 
@@ -950,6 +1007,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     text: string,
     turnId: string,
     refs: readonly AttachmentRef[],
+    photos?: readonly LocalPhoto[],
   ): Promise<void> {
     const session = handle;
     if (session === null) {
@@ -963,7 +1021,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       (onAccepted) => session.send(text, control.signal, { turnId, attachments: refs, onAccepted }),
       // Folded as LOST by the feed on a throw; what the CALLER does about it is
       // `accepted`'s rejection.
-      (events, accepted) => feed.ownTurn(turnId, events, { text, attachments: refs }, accepted),
+      (events, accepted) =>
+        feed.ownTurn(turnId, events, { text, attachments: refs, photos }, accepted),
     );
     void run.done.then(() => {
       if (ownControl === control) {
@@ -1014,6 +1073,11 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       }
       return;
     }
+    stop(action);
+  }
+
+  /** The ONE stop path: the composer's button and the hub's Stop both end here. */
+  function stop(action: ComposerAction): void {
     if (action.kind !== "stop") {
       return;
     }
@@ -1023,6 +1087,19 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       return;
     }
     foreign?.cancel();
+  }
+
+  /** The hub's Stop: the composer's truth table with nothing to send (P2). */
+  function stopTurn(): void {
+    stop(
+      composerAction({
+        link: transcript.link,
+        text: "",
+        turn: transcript.turn,
+        ended: transcript.closed,
+        photos: 0,
+      }),
+    );
   }
 
   return {
@@ -1045,6 +1122,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       emit();
     },
     press,
+    stopTurn,
     pressReturn() {
       // The gate reads the action NOW, as `press` does: a second Return before
       // the screen re-rendered must not see a stale `send` and then Stop.
@@ -1293,6 +1371,39 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       activityWatch = undefined;
       await deps.controller.leave(deps.sessionId);
       emit();
+    },
+    async resync() {
+      // Already running, or nothing to re-read: a second pull is a no-op (the
+      // list would otherwise re-enter `attach` and be refused by its own guard).
+      if (refreshing || disposed) {
+        return;
+      }
+      refreshing = true;
+      emit();
+      const before = transcript.rows.length;
+      try {
+        // The owner's own recovery: leave, then re-attach. `attach` is the ONE
+        // path in (AGENTS §7), so a resync cannot diverge from a first mount.
+        await deps.controller.leave(deps.sessionId);
+        handle = null;
+        if (disposed) {
+          return;
+        }
+        await attach(false);
+        if (status.phase !== "open") {
+          // Offline / archived / gone: the re-attach failed typed. The rows are
+          // KEPT (never an empty transcript) and the failure is honest — the
+          // banner already shows its reason, so this only says why nothing moved.
+          notice = RESYNC_FAILED_NOTICE;
+        } else if (transcript.rows.length === before && before > 0) {
+          // The daemon answered with exactly what is shown: worth saying only
+          // when there was something to compare, so a fresh empty session is quiet.
+          notice = null;
+        }
+      } finally {
+        refreshing = false;
+        emit();
+      }
     },
     dispose() {
       disposed = true;

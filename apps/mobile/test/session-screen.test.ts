@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import { PermissionBroker, type PermissionResponse } from "@tentacle/core";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
-import { FAILED_NOTICE, REFUSED_NOTICE } from "../src/composer.ts";
+import { FAILED_NOTICE, REFUSED_NOTICE, RESYNC_FAILED_NOTICE } from "../src/composer.ts";
 import { createSessionController } from "../src/session-controller.ts";
 import {
   type SendableHandle,
@@ -408,7 +408,101 @@ describe("sending and stopping (decision 15, F12, F13)", () => {
     expect(signals[0]?.aborted).toBe(true);
     expect(screen.state().transcript.turn).toBeNull(); // the bracket closed
   });
+});
 
+describe("stopTurn — the hub's Stop (docs/feat/mobile-hub.md P2)", () => {
+  /** A foreign turn whose stream never ends on its own, and a spy on its cancel. */
+  async function foreignRunning(h: ReturnType<typeof harness>) {
+    const cancelled = { value: false };
+    h.sessions[0]?.emitActivity({
+      kind: "turn",
+      turnId: "t-hub",
+      events: (async function* () {
+        yield { type: "text", delta: "streaming" } as SessionEvent;
+        await new Promise(() => {});
+      })(),
+      cancel: () => {
+        cancelled.value = true;
+      },
+    });
+    await settle();
+    return cancelled;
+  }
+
+  test("a draft in the field does not turn the hub's Stop into a steer: the foreign turn is cancelled", async () => {
+    // Mutation: `stopTurn` calling `act()` (the composer's tap) → red: with a
+    // draft the composer's action is `queue`, so nothing cancels the turn.
+    const h = harness();
+    const { screen } = h.make();
+    await screen.open();
+    const cancelled = await foreignRunning(h);
+    screen.setDraft("half-written steer");
+    expect(screen.state().view.composer.button).toBe("queue");
+    screen.stopTurn();
+    expect(cancelled.value).toBe(true);
+    expect(screen.state().draft).toBe("half-written steer");
+  });
+
+  test("an OWN turn with a draft stops through its own abort signal", async () => {
+    const signals: AbortSignal[] = [];
+    const handle: SendableHandle = {
+      open: () => Promise.resolve(),
+      detach: () => Promise.resolve(),
+      watch: () => () => {},
+      send: async function* (prompt: string, signal?: AbortSignal) {
+        yield { type: "user_message", text: prompt } as SessionEvent;
+        if (signal !== undefined) {
+          signals.push(signal);
+        }
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        yield { type: "turn_end", reason: "cancelled" } as SessionEvent;
+      },
+    };
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "e2e-mac",
+      controller: createSessionController<SendableHandle>({ newSession: () => handle }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    await screen.open();
+    screen.setDraft("a long turn");
+    screen.press();
+    await settle();
+    screen.setDraft("typed while it runs");
+    expect(signals[0]?.aborted).toBe(false);
+    screen.stopTurn();
+    await settle();
+    expect(signals[0]?.aborted).toBe(true);
+    expect(screen.state().transcript.turn).toBeNull();
+  });
+
+  test("link down (M8): nothing is cancelled — Stop travels the wire", async () => {
+    const h = harness();
+    const { screen } = h.make();
+    await screen.open();
+    const cancelled = await foreignRunning(h);
+    screen.link(false);
+    await settle();
+    expect(screen.state().transcript.link).toBe("down");
+    screen.stopTurn();
+    expect(cancelled.value).toBe(false);
+  });
+
+  test("no turn running: a no-op", async () => {
+    const h = harness();
+    const { screen } = h.make();
+    await screen.open();
+    expect(() => screen.stopTurn()).not.toThrow();
+    expect(screen.state().transcript.turn).toBeNull();
+  });
+});
+
+describe("sending and stopping, continued", () => {
   test("a send refused before the ack puts the text BACK with a notice (F13)", async () => {
     const h = harness();
     const { screen } = h.make();
@@ -630,5 +724,107 @@ describe("the transcript's end and the thumbnails window", () => {
     expect(refs).toContain("near");
     // `far` is 40 rows above the window, past `PREFETCH_ROWS`: it is never fetched.
     expect(refs).not.toContain("far");
+  });
+});
+
+describe("pull-to-refresh (fix/mobile-media-live item 3)", () => {
+  /** A handle whose `open` answers with the daemon's history at attach time. */
+  function historySession(sessions: FakeSession[], id: string, history: () => SessionActivity) {
+    const base = fakeSession(sessions, id);
+    return {
+      ...base,
+      // The controller subscribes AFTER `open()` (`session-controller.ts:196-198`),
+      // and the real `watch` delivers what the attach buffered — so the history
+      // is handed over on SUBSCRIBE, exactly as a reopened session's is.
+      watch: (fn: (activity: SessionActivity) => void) => {
+        const off = base.watch(fn);
+        fn(history());
+        return off;
+      },
+    } satisfies FakeSession;
+  }
+
+  test("a resync REPLACES the rows from the daemon's history, never doubling them (mutation: append instead of replace → 2× the rows)", async () => {
+    const now = new Date().toISOString();
+    const message = (id: string, content: string) => ({
+      id,
+      role: "user" as const,
+      content,
+      createdAt: now,
+    });
+    let history = [message("m1", "first")];
+    const sessions: FakeSession[] = [];
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "mac",
+      controller: createSessionController<SendableHandle>({
+        newSession: (id) =>
+          historySession(sessions, id, () => ({
+            kind: "history",
+            messages: history as never,
+            reason: null,
+          })),
+      }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    await screen.open();
+    await settle();
+    expect(screen.state().transcript.rows.filter((r) => r.kind === "user")).toHaveLength(1);
+
+    // The daemon gained a message meanwhile (another device's turn): a pull must
+    // show it — and show it ONCE (the history is a snapshot, not a delta).
+    history = [message("m1", "first"), message("m2", "second")];
+    await screen.resync();
+    await settle();
+    const texts = screen
+      .state()
+      .transcript.rows.flatMap((r) => (r.kind === "user" ? [r.text] : []));
+    expect(texts).toEqual(["first", "second"]);
+    // The spinner is off again once the re-attach settled.
+    expect(screen.state().refreshing).toBe(false);
+  });
+
+  test("a resync that cannot re-attach KEEPS the rows and says so (mutation: drop the notice → a gesture that did nothing is silent)", async () => {
+    const sessions: FakeSession[] = [];
+    let fail = false;
+    const now = new Date().toISOString();
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "mac",
+      controller: createSessionController<SendableHandle>({
+        newSession: (id) => {
+          const base = historySession(sessions, id, () => ({
+            kind: "history",
+            reason: null,
+            messages: [{ id: "m1", role: "user", content: "kept", createdAt: now }] as never,
+          }));
+          if (!fail) {
+            return base;
+          }
+          // The realistic failure: the attach itself cannot be made (the link is
+          // down). `session-controller.ts:183-187` turns this into a typed
+          // `{ok:false, reason}`; a throw from `newSession` would escape instead.
+          return { ...base, open: () => Promise.reject(new Error("no link")) };
+        },
+      }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    await screen.open();
+    await settle();
+    expect(screen.state().transcript.rows).toHaveLength(1);
+
+    fail = true;
+    await screen.resync();
+    await settle();
+    // Never an empty transcript, and never a silent no-op.
+    expect(screen.state().transcript.rows).toHaveLength(1);
+    expect(screen.state().notice).toBe(RESYNC_FAILED_NOTICE);
+    expect(screen.state().refreshing).toBe(false);
   });
 });

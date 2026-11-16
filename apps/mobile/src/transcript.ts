@@ -12,22 +12,25 @@ import type { EndReason, SessionEvent } from "@tentacle/client";
  * `SessionEvent`s, its `history` activity, the turn bracket, the link status and
  * the session's end. No React, no client, no I/O.
  */
-import type { ChatMessage, ToolResultDetail } from "@tentacle/core";
+import type { AttachmentRef, ChatMessage, ToolResultDetail } from "@tentacle/core";
 import { describeEmptyTurn, describeRepairs, describeTruncation, toolLabel } from "@tentacle/core";
 import { historyRows, restartPromptOf } from "./transcript-history.ts";
 import {
   type ImageRef,
+  type LocalPhoto,
   type Row,
   type SubProgress,
   type ToolRow,
   type ToolStatus,
   type TurnRow,
   imageRef,
+  imageRefWithLocal,
 } from "./transcript-rows.ts";
 
 export type {
   AssistantRow,
   ImageRef,
+  LocalPhoto,
   NoticeRow,
   ReasoningRow,
   Row,
@@ -37,7 +40,7 @@ export type {
   TurnRow,
   UserRow,
 } from "./transcript-rows.ts";
-export { imageRef, imageRowText } from "./transcript-rows.ts";
+export { imageRef, imageRefWithLocal, imageRowText } from "./transcript-rows.ts";
 export {
   CONTEXT_RESET_HEADER,
   CONTEXT_RESET_SEPARATOR,
@@ -72,6 +75,18 @@ export type TranscriptInput =
       readonly reason: "compact" | "context_reset" | "clear" | null;
       /** This client caused the compaction: another device's notice is not ours. */
       readonly own?: true;
+    }
+  /**
+   * This phone's OWN prompt, folded before the daemon re-delivers it (a
+   * `user_message` the client never sends back to its sender). `photos` is the
+   * LOCAL copy of each ref this phone just uploaded (item 2): the only pixels
+   * that exist for a fresh send (`thumbnails.ts:19-25` — no read-back method).
+   */
+  | {
+      readonly type: "own_prompt";
+      readonly text: string;
+      readonly attachments?: readonly AttachmentRef[];
+      readonly photos?: readonly LocalPhoto[];
     }
   | { readonly type: "turn_started"; readonly turnId: string; readonly own: boolean }
   | {
@@ -189,6 +204,11 @@ function lastTextRow<T extends "assistant" | "reasoning">(
   return last !== undefined && last.kind === kind ? (last as Row & { kind: T }) : undefined;
 }
 
+/** The local copies by the ref id they became (empty when there are none). */
+function photosById(photos: readonly LocalPhoto[] | undefined): ReadonlyMap<string, LocalPhoto> {
+  return new Map((photos ?? []).map((photo) => [photo.id, photo]));
+}
+
 /** Fold one input into the transcript. */
 export function apply(state: State, input: TranscriptInput): State {
   switch (input.type) {
@@ -213,6 +233,17 @@ export function apply(state: State, input: TranscriptInput): State {
         { ...state, lastTurnTokens: null },
         { type: "history", messages: input.messages, reason: null },
       );
+    case "own_prompt":
+      // The phone's own message: the refs AND the local files behind them, so
+      // the bubble shows the photo that was just sent (item 2).
+      return push(state, (key) => ({
+        kind: "user",
+        key,
+        text: input.text,
+        images: (input.attachments ?? []).map(
+          (ref): ImageRef => imageRefWithLocal(ref, photosById(input.photos).get(ref.id)),
+        ),
+      }));
     case "user_message":
       return push(state, (key) => ({
         kind: "user",
