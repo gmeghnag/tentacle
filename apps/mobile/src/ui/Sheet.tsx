@@ -43,6 +43,11 @@ export interface SheetProps {
   readonly centred?: boolean;
   /** Draw the 18 pt close glyph in the corner (Design 4). */
   readonly onClose?: () => void;
+  /**
+   * The close glyph's own testID. Defaults to `${testID}-close`; a screen that
+   * already ships a flow tapping its close control keeps that id.
+   */
+  readonly closeTestID?: string;
 }
 
 export function Sheet({
@@ -56,26 +61,32 @@ export function Sheet({
   floating = false,
   centred = false,
   onClose,
+  closeTestID,
 }: SheetProps): JSX.Element {
   const insets = useSafeAreaInsets();
   const align = centred ? styles.centred : null;
   // A full sheet is the banded ground; a floating card keeps its own surface.
   const ground = floating ? palette.sheet : palette.bg;
-  const body = (
+  // The close glyph, drawn in the corner. In the SCROLL variant it is hoisted out
+  // of the scroller (`fixedClose` below): a sheet long enough to scroll (Session
+  // info) must never scroll its own way out of reach.
+  const closeGlyph =
+    onClose === undefined ? null : (
+      <Pressable
+        testID={closeTestID ?? (testID === undefined ? "sheet-close" : `${testID}-close`)}
+        accessibilityRole="button"
+        accessibilityLabel="Close"
+        onPress={onClose}
+        hitSlop={8}
+        style={styles.close}
+      >
+        <Icon name="xmark" color={palette.sec} size={18} />
+      </Pressable>
+    );
+  const head = (
     <>
       <View style={[styles.grabber, { backgroundColor: palette.sepSheet }]} />
-      {onClose === undefined ? null : (
-        <Pressable
-          testID={testID === undefined ? "sheet-close" : `${testID}-close`}
-          accessibilityRole="button"
-          accessibilityLabel="Close"
-          onPress={onClose}
-          hitSlop={8}
-          style={styles.close}
-        >
-          <Icon name="xmark" color={palette.sec} size={18} />
-        </Pressable>
-      )}
+      {scroll ? null : closeGlyph}
       {title === undefined ? null : (
         <Text
           accessibilityRole="header"
@@ -100,23 +111,26 @@ export function Sheet({
   ];
   if (scroll) {
     return (
-      <ScrollView
-        testID={testID}
-        style={{
-          backgroundColor: ground,
-          borderTopLeftRadius: radius.sheet,
-          borderTopRightRadius: radius.sheet,
-        }}
-        contentContainerStyle={container}
-        keyboardShouldPersistTaps="handled"
-      >
-        {body}
-      </ScrollView>
+      <View style={[styles.scrollBody, { backgroundColor: ground }]}>
+        <ScrollView
+          testID={testID}
+          style={{
+            backgroundColor: ground,
+            borderTopLeftRadius: radius.sheet,
+            borderTopRightRadius: radius.sheet,
+          }}
+          contentContainerStyle={container}
+          keyboardShouldPersistTaps="handled"
+        >
+          {head}
+        </ScrollView>
+        {closeGlyph}
+      </View>
     );
   }
   return (
     <View testID={testID} style={container}>
-      {body}
+      {head}
     </View>
   );
 }
@@ -129,6 +143,9 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     gap: 12,
   },
+  // The scroll variant's frame: the sheet IS the ground, and the close glyph is
+  // pinned to it rather than to the content that scrolls.
+  scrollBody: { flex: 1 },
   floating: {
     marginHorizontal: 8,
     marginBottom: 8,

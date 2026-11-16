@@ -13,10 +13,12 @@
  * VIEW-MODEL output (`camera-access.ts`): this file decides no permission
  * behaviour, it only draws the state it is handed.
  *
- * The look is the approved `Pair` mockup (docs/feat/mobile-ui-polish.md Slice 2):
- * the intake is a large-title screen (Scan as the primary action, paste as the
- * alternative); the live camera covers the whole screen with its viewfinder and
- * a glass Cancel; review → connecting → compare → done is a bottom sheet.
+ * The look is the approved `Pair` mockup (docs/feat/mobile-ui-polish.md Slice 2),
+ * restyled to E2 bands by S4 of docs/feat/mobile-chrome.md (the hero and the paste
+ * field are each ONE full-width `BandSection`): the intake is a large-title screen
+ * (Scan as the primary action, paste as the alternative); the live camera covers
+ * the whole screen with its viewfinder and a glass Cancel; review → connecting →
+ * compare → done is a bottom sheet.
  */
 import { type ComponentRef, type JSX, type ReactNode, useCallback, useEffect, useRef } from "react";
 import {
@@ -36,16 +38,15 @@ import { FIELD_REVEAL_IDLE, type FieldRevealEvent, revealStep } from "../field-r
 import { PAIR_COPY, pairSheetHeading } from "../pair-copy.ts";
 import type { PairingView } from "../pairing-flow.ts";
 import { type Palette, size as SIZE, radius, space, typography } from "../theme.ts";
+import { BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
 import { GlassButton } from "../ui/GlassButton.tsx";
-import { GroupedCard } from "../ui/GroupedCard.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { InlineMono } from "../ui/InlineMono.tsx";
 import { PillButton } from "../ui/PillButton.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
-import { SectionHeader } from "../ui/SectionHeader.tsx";
 import { Sheet } from "../ui/Sheet.tsx";
 
 export interface PairScreenProps {
@@ -188,7 +189,7 @@ export function PairScreen({
         {view.stage === "intake" || inSheet ? (
           <>
             <View style={styles.block}>
-              <GroupedCard palette={palette}>
+              <BandSection palette={palette}>
                 <View style={styles.hero}>
                   <View style={[styles.heroTile, { backgroundColor: palette.tint }]}>
                     <Icon name="qrcode.viewfinder" color={palette.accent} size={28} />
@@ -223,7 +224,7 @@ export function PairScreen({
                     </View>
                   ) : null}
                 </View>
-              </GroupedCard>
+              </BandSection>
             </View>
 
             {camera.card === undefined ? null : (
@@ -253,8 +254,7 @@ export function PairScreen({
             )}
 
             <View style={styles.block}>
-              <SectionHeader palette={palette} title="Or paste the line it prints" />
-              <GroupedCard palette={palette}>
+              <BandSection palette={palette} title="Or paste the line it prints">
                 <View style={styles.paste}>
                   <TextInput
                     testID="pair-paste-input"
@@ -282,7 +282,7 @@ export function PairScreen({
                     onPress={onSubmit}
                   />
                 </View>
-              </GroupedCard>
+              </BandSection>
             </View>
           </>
         ) : null}
@@ -454,13 +454,16 @@ export function PairScreen({
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  block: { marginTop: space.sectionSessions },
-  insetBlock: { paddingHorizontal: space.inset },
+  block: { marginTop: 0 },
+  // A banner is not a band, so it brings its own gap (`BandSection` supplies the
+  // one above every band).
+  insetBlock: { marginTop: space.sectionTop, paddingHorizontal: space.inset },
   center: { textAlign: "center" },
   stretch: { alignSelf: "stretch", marginTop: 6 },
-  // ONE inner gutter for both intake cards (P3): the Scan button, the paste
-  // field and "Continue" share their left and right edges.
-  hero: { alignItems: "center", gap: 8, padding: space.cardInner },
+  // ONE inner gutter for both intake bands (P3): the Scan button, the paste
+  // field and "Continue" share their left and right edges, on the band's own
+  // `space.rowX` so they line up with every row label in the app (E2).
+  hero: { alignItems: "center", gap: 8, padding: space.rowX },
   heroTile: {
     width: SIZE.iconTileLarge + 12,
     height: SIZE.iconTileLarge + 12,
@@ -469,7 +472,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginBottom: 4,
   },
-  paste: { padding: space.cardInner, gap: 12 },
+  paste: { padding: space.rowX, gap: 12 },
   field: { borderRadius: radius.tile, paddingHorizontal: 14, minHeight: 48, paddingVertical: 13 },
   label: { marginTop: 4, letterSpacing: -0.08 },
   sheetBody: { gap: 12, marginTop: 4 },
