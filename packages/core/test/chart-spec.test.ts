@@ -269,6 +269,26 @@ describe("T1.13 the point form is scoped (Review round 2, finding 2)", () => {
     );
   });
 
+  test("…and the cap counts every series' x, not only the first one's", () => {
+    const bar = (series: { x: number; y: number }[][]) => ({
+      type: "bar",
+      title: "T",
+      datasets: series.map((data, i) => ({ label: `S${i}`, data })),
+      x: { type: "number" },
+    });
+    const xRun = (n: number, off = 0) =>
+      Array.from({ length: n }, (_, i) => ({ x: i + 1 + off, y: i }));
+    // A short series first must not buy the long one an exemption: 200 points
+    // is 200 categories whichever dataset carries them.
+    expect(errors(bar([xRun(10), xRun(200)]))[0]).toBe(
+      'datasets have 200 distinct x values (max 60 categories for a bar chart) — fold the smallest into "Other" or use a line chart',
+    );
+    // Two series of 60 on DISJOINT x are 120 categories, not 60.
+    expect(errors(bar([xRun(60), xRun(60, 1000)])).length).toBe(1);
+    // …while two series of 60 sharing their x are still one 60-category bar.
+    expect(accepted(bar([xRun(60), xRun(60)])).type).toBe("bar");
+  });
+
   test("a stacked chart needs every series on the same x", () => {
     const stacked = (aligned: boolean) => ({
       type: "area",

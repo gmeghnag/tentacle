@@ -228,7 +228,7 @@ plain-sentence errors with the fix, every error at once (≤ 8, by path):**
 | empty `datasets` / empty `data` | `datasets is empty — give at least one series with at least one value` |
 | 1 point | **valid** (drawn as a single marked point / bar) |
 | all `null` | `datasets[0].data has no values (all null)` — in the plain-value form and in the `{x,y}` point form alike |
-| a bar over the 60-category cap, given as `{x,y}` points | `datasets[0].data has 61 points (max 60 categories for a bar chart) — fold the smallest into "Other" or use a line chart` |
+| a bar over the 60-category cap, given as `{x,y}` points | `datasets[0].data has 61 points (max 60 categories for a bar chart) — fold the smallest into "Other" or use a line chart`; several series → `datasets have 120 distinct x values (max 60 categories for a bar chart) — …` (the count is the DISTINCT x across every series — a short first series buys no exemption) |
 
 The same validator runs **daemon-side** (the tool's error) **and client-side** before
 drawing (a pod can forge `rawInput`; an old row may predate a cap change): an invalid
@@ -1701,6 +1701,83 @@ user-visible behaviour beyond a refused invalid spec, so `changelog.d/` is
 unchanged (C4's two fragments stand). Review round 2's non-blocking LOW
 (`chartArgumentsHint` matching `Infinity` inside a title string) is untouched —
 it is LOW and costs one misleading sentence on an already-failed parse.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-16*
+
+One finding, from **Review round 2 (`Round 2`)** — its single MEDIUM (2b, half
+fixed in Fix round 1). No other HIGH/MEDIUM was open on C1+C2: the review above
+it (`Review round 2 — C1+C2 (fresh context)`) is an APPROVE with one non-blocking
+LOW, which stays untouched (last paragraph of the previous section).
+
+**Repro (RED, on the fix-round-1 code).** `.tentacle/tmp/model-charts/r3-cap.ts`:
+
+```
+A short-then-long: true [ 10, 200 ]
+B disjoint x: true ok
+C control: false datasets[0].data has 200 points (max 60 categories for a bar chart) — …
+```
+
+Two series, the long one second (A) and two 60-point series on disjoint x (B),
+both `ok: true` — the cap reads `datasets[0].data.length` only, so a short first
+series buys the rest an exemption. C is the same spec with one series: correctly
+refused, which is what made the gap invisible.
+
+**Root cause (one sentence).** `spec.ts` counted the point-form bar cap from one
+dataset, while the renderer (`chart-lines.ts` `hbars`/`categories`) draws one
+column per distinct x across the series that are present.
+
+**Fix (`packages/core/src/chart/spec.ts`).**
+
+- `distinctX(datasets)` beside `isPointForm` (`spec.ts:917`): the `Set` of
+  `String(x)` across every point-form dataset — the column count the cap is
+  about.
+- The cap block (`spec.ts:766-784`) is now `if (type === "bar" && datasets)` and counts
+  `distinctX` in the point form. Three messages, by shape: `labels` (unchanged
+  text), one series (unchanged text — `datasets[0].data has 61 points …`), and
+  NEW for several series: `datasets have 120 distinct x values (max 60
+  categories for a bar chart) — fold the smallest into "Other" or use a line
+  chart`. The `labels` sentence is byte-identical to before, deliberately: it is
+  the owner-approved text and is pinned by T1.12.
+- Doc: the *Design* error table row now names the several-series sentence and
+  says the count is the distinct x across every series.
+
+**Test (RED first, at the property).** `chart-spec.test.ts`, in T1.13: "…and the
+cap counts every series' x, not only the first one's" — 10-then-200 must be
+refused with the new sentence (line 283), 60+60 disjoint refused (line 287), and
+60+60 *sharing* x still **accepted** (the guard must not reject a legitimate
+multi-series bar). Red on the old code at `:283` — `expected the spec to be
+refused, it was accepted`, not a compile error. Green after.
+
+**Mutations (each reverted; tree clean after).**
+
+```
+# M1 — distinctX back to datasets[0].data.length
+(fail) … the cap counts every series' x, not only the first one's   line 283
+ 54 pass / 1 fail
+
+# M2 — distinctX = max length (counts A but not disjoint x)
+(fail) … the cap counts every series' x, not only the first one's   line 287
+ 54 pass / 1 fail
+```
+
+M2 is the one that matters: it is the plausible near-miss the finding itself
+offered ("the distinct x across all datasets (or the max length)") and the test
+fires on the second assertion, so the two halves are pinned independently.
+
+**Gate.** `bunx tsc --noEmit` green; `bun run lint` clean (1779 files);
+`bun test` → 12999 pass, 0 fail, 5 skip (the 5 known opt-in live-infra skips:
+k8s ×2, docker ×2, slow-ws ×1), 13004 tests / 923 files.
+
+**Drift.** None to the Design beyond the error-row addition above. One shape
+choice: the cap reads all *point-form* datasets only (`distinctX` skips a values
+form), which is right because `forms` mixing points and values is already
+refused a few lines earlier.
+
+**Not done, deliberately.** Review round 2's LOW (`chartArgumentsHint` matching
+`Infinity` inside a title string, `tools/src/chart.ts:37`) stays open: it is LOW
+and misleads only on an already-failed parse.
 
 ## Review
 *(empty — mandatory fresh-context review after C8)*

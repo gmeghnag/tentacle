@@ -763,18 +763,22 @@ export function validateChartSpec(raw: unknown): ChartValidation {
   const points = forms.includes("points");
   const labels = readLabels(reader, raw, xType, needsLabels(type, points));
 
-  // A bar's category count is its labels', or — in the point form — the values'
-  // own x positions, which never pass through `labels`.
-  const categories =
-    type === "bar" && datasets
-      ? (labels?.length ?? (points ? (datasets[0]?.data.length ?? 0) : 0))
-      : 0;
-  if (categories > CHART_CAPS.categories) {
-    reader.fail(
-      labels
-        ? `labels has ${categories} categories (max ${CHART_CAPS.categories} for a bar chart) — fold the smallest into "Other" or use a line chart`
-        : `datasets[0].data has ${categories} points (max ${CHART_CAPS.categories} categories for a bar chart) — fold the smallest into "Other" or use a line chart`,
-    );
+  // A bar's category count is its labels', or — in the point form — the
+  // DISTINCT x values across EVERY series: the renderer draws one column per x,
+  // so a short first series must not buy the others an exemption.
+  if (type === "bar" && datasets) {
+    const categories = labels?.length ?? (points ? distinctX(datasets) : 0);
+    if (categories > CHART_CAPS.categories) {
+      const fix = 'fold the smallest into "Other" or use a line chart';
+      const max = CHART_CAPS.categories;
+      reader.fail(
+        labels
+          ? `labels has ${categories} categories (max ${max} for a bar chart) — ${fix}`
+          : datasets.length === 1
+            ? `datasets[0].data has ${categories} points (max ${max} categories for a bar chart) — ${fix}`
+            : `datasets have ${categories} distinct x values (max ${max} categories for a bar chart) — ${fix}`,
+      );
+    }
   }
   checkLengths(reader, type, datasets, labels);
   if (raw.stacked === true) checkAligned(reader, datasets);
@@ -903,6 +907,20 @@ function checkLengths(
 /** Whether a validated dataset's data are `{x, y}` points rather than plain values. */
 function isPointForm(data: ChartDataset["data"]): data is readonly ChartPoint[] {
   return data.length > 0 && isRecord(data[0]);
+}
+
+/**
+ * The distinct x positions across every point-form dataset — the number of
+ * columns a bar actually draws. Counting one dataset (or its length) lets a
+ * short first series buy the others an exemption from the category cap.
+ */
+function distinctX(datasets: readonly ChartDataset[]): number {
+  const seen = new Set<string>();
+  for (const dataset of datasets) {
+    if (!isPointForm(dataset.data)) continue;
+    for (const point of dataset.data) seen.add(String(point.x));
+  }
+  return seen.size;
 }
 
 /**
