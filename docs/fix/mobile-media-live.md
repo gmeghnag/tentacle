@@ -173,6 +173,120 @@ on the wire), so no `protocol.d/` note and no `protocol.json` regeneration.
 
 ## Execution
 
+### Fix round 1
+
+*— claude-sonnet-4-5 (executor), 2026-11-17*
+
+**Precondition, blocking and worth recording:** the disk was 100% full (117 MiB free), so
+`bun test` could not even start — the preload's `mkdtempSync` threw `ENOSPC`. Cause: 11,035
+leaked `/var/folders/…/T/tentacle-test-home-*` dirs (6.1 GB) from earlier runs
+(`scripts/test-env-guard.ts:38` never removes them). I deleted only those older than 2 h
+(no live run disturbed) and reclaimed 6.2 GB. Nothing in the repo was touched by this.
+
+Done in the plan's order, after re-establishing each finding's red state.
+
+**Finding 1 (HIGH, red gate).** `bunx tsc -p apps/mobile --noEmit` failed with
+`session-feed.test.ts(261,7) TS2353 'photos' does not exist in type 'OwnPrompt'`, and
+`bun run lint` had 6 errors. The lint errors were purely mechanical (organizeImports in
+`App.tsx`/`photo-settings-expo.ts`/`outbox-link.test.ts`, format in `compose-controller.ts`
+and the two statements joined on one line at `outbox-link.test.ts:923`, `useImportType` at
+`SettingsScreen.tsx:16`) — `biome check --write` on those files, no semantics changed. The
+typecheck error was the trace of S2 being half-built; finding 2a fixes it.
+
+**Finding 2a (HIGH, S2 — the local photo reaches the row).** The plan's shape exactly: the
+item's copies ride an optional 4th `photos` argument. New `localPhotosOf(item)`
+(`outbox.ts`, beside `refsOf`) maps `ref.id → file`; `OutboxSession.prompt` and
+`ComposeDeps.prompt` take it; `outbox-driver.perform` passes the UPLOADED item's;
+`promptWithRefs` hands it to `feed.ownTurn`'s `OwnPrompt`; and the fold gained a distinct
+input `own_prompt` (not a widened `user_message`, so a daemon- or peer-supplied event can
+never claim local bytes) mapping refs through the already-present `imageRefWithLocal`. The
+daemon's `user_message` case is untouched and still uses `imageRef`.
+
+*Drift from the plan:* the plan said `transcript.apply`'s `user_message` case carries the
+photos. That would put a local-URI field on the same input the wire's own `user_message`
+parses into, so a ref-shaped payload could name a local file. A separate `own_prompt`
+input is the same behaviour with the trust boundary intact.
+
+*Drift:* item 2's `aspectRatio` is not exercised end-to-end. `PickedPhoto` carries no
+width/height and the chip does not keep them, so a sent row has `localUri` but no ratio ⇒
+a square tile (`media-layout.ts`'s documented fallback for an unknown shape). Threading the
+picker's dimensions would touch the outbox record's validator for a cosmetic gain — left
+as debt.
+
+**Finding 2b (HIGH, S4 — the WhatsApp bubble).** New pure
+`apps/mobile/src/media-layout.ts`: `mediaBox(ref, width)` (height from the ratio, clamped
+at `MEDIA_MAX_RATIO = 4/3`, an honest `cropped` flag, and a missing or nonsense ratio
+falling back to a square tile) and `layoutMedia(refs, {width, hasText})`. `TranscriptRow`'s
+user bubble now renders **media first at full bubble width** (radius `radius.bubble`,
+`resizeMode="cover"`) and the caption **below** it in the same bubble, with no caption
+block at all when there are no words. The local URI wins over a fetched thumbnail. New
+`MediaViewer.tsx` (a `Modal` + `Image`, one state, tap / close glyph / Android back) opened
+by tapping an image.
+
+*Drift:* the media width is the constant `MEDIA_BUBBLE_WIDTH = 218`, not a measured
+`onLayout` width. A measured width needs a render-time round trip — the kind of logic §7
+keeps out of a component — and `cover` in a box of the right SHAPE crops by a few points
+instead of distorting. Debt.
+
+**Finding 2c (HIGH, S3 — pull-to-refresh).** `SessionScreenController.resync()`: `leave` →
+`attach(false)`, i.e. the owner's own recovery and the ONE attach path (§7), behind a
+`refreshing` flag and a re-entry guard so a second pull is a no-op. The re-attach's history
+is a `history` activity with reason `null`, which `withHistory` REPLACES, so rows never
+double. A failed re-attach keeps the rows and says so once through the new
+`RESYNC_FAILED_NOTICE` (`composer.ts`). `SessionScreen`'s transcript `FlatList` renders a
+`RefreshControl` over it.
+
+**Finding 3 (MEDIUM, the resize could distort).** Confirmed and fixed at the seam: the
+decision moved out of the effect into `photo-input.ts`'s `resizeAxis(target)`, which names
+the **long edge only** (width when `width >= height`, else height), and `photo-source.ts`
+calls `reencode(…, resizeAxis(step))`. `reencode`'s target type is now one-edge-or-scale,
+so naming both is not expressible; `ImageManipulator.resize` derives the other edge from
+the pixels it actually holds, which is what makes a pre-EXIF-orientation picker report
+harmless.
+
+**One structural pin updated, deliberately:** `band-screens.test.ts` counted Settings'
+bands (8) and listed them. Item 5's Photos switch is a real ninth band, so the count became
+9 and "Photos" joined the label list. That test is a structure pin, not a behaviour one;
+deleting the band to keep the count would have removed the owner's switch.
+
+**Test non-vacuity (§9) — every mutation run and reverted.** Bun prints failures to
+stderr, so each was read from `stdout + stderr`; `rc` is its exit code.
+
+| module | mutation | result |
+|---|---|---|
+| `transcript.ts` fold | `imageRefWithLocal(...)` → `imageRef(ref)` | rc 1, 1 fail |
+| `outbox-driver.perform` | drop the `localPhotosOf(...)` argument | rc 1, 1 fail (`localUri` undefined) |
+| `outbox-link.test.ts` harness | driver's `getSession` opens a real second `client.newSession` (the review's own mutation, real API) | rc 1, 1 fail — `expect(...).toBeNull()`, the stuck "Running" |
+| `media-layout.ts` | `MEDIA_MAX_RATIO` 4/3 → 1 | rc 1, 3 fail |
+| `media-layout.ts` | `captionBelow` always `true` | rc 1, 1 fail |
+| `media-layout.ts` | unsafe ratio used as-is | rc 1, 1 fail |
+| `TranscriptRow.tsx` | `mediaBox(...)` → a hard-coded 96×96 box | rc 1, 1 fail |
+| `SessionScreen.tsx` | `onRefresh` → a no-op | rc 1, 1 fail |
+| `session-screen-controller.ts` | drop `RESYNC_FAILED_NOTICE` | rc 1, 1 fail |
+| `session-screen-controller.ts` | leave `refreshing` true | rc 1, 2 fail |
+| `transcript.ts` `applyHistory` | `withHistory` → `appendHistory` (append, not replace) | rc 1, 1 fail |
+| `photo-input.ts` | `resizeAxis` always names the width | rc 1, 1 fail |
+| `photo-input.ts` | `resizeAxis` names both edges | rc 1, 3 fail |
+
+**Gate (on this branch, after every fix):**
+
+```
+bunx tsc --noEmit           → clean
+bunx tsc -p apps/mobile     → clean
+bunx tsc -p apps/relay      → clean
+bun run lint                → clean (1747 files, 0 errors, 0 warnings; §6 baseline is clean)
+bun test                    → 12687 pass, 5 skip, 0 fail (907 files, 13 snapshots)
+```
+
+The 5 skips are the pre-existing opt-in gates (live k8s ×2, live docker, the slow
+real-socket keepalive, exec confinement) — none new, none mine.
+
+**Debt, deliberate:** (a) a sent photo's `aspectRatio` needs the picker's dimensions in the
+chip and the outbox record; (b) the media width is a constant rather than a measured bubble
+width; (c) nothing exercises the `RefreshControl` on a device — the wiring guard pins the
+call and the Maestro flows are a separate task. Unverified on hardware, as the plan's own
+Validation said (no simulator here).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; the same model family as the planner, not as the executor)

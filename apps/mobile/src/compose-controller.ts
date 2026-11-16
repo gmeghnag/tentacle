@@ -63,7 +63,8 @@ import {
   type SessionFacts,
   refusalOf,
 } from "./outbox.ts";
-import { refsOf as itemRefsOf } from "./outbox.ts";
+import { refsOf as itemRefsOf, localPhotosOf } from "./outbox.ts";
+import type { LocalPhoto } from "./transcript-rows.ts";
 
 /** The chat handle the compose acts use (a seam: tests pass a fake). */
 export interface ComposeHandle {
@@ -150,8 +151,17 @@ export interface ComposeDeps {
    * iOS 26 run's failure of flow 07). Resolves at the daemon's ACK, while the
    * turn keeps folding — so the item settles when the daemon has its key, not
    * when the turn ends (docs/fix/mobile-chat-glitches.md, bug 2).
+   *
+   * `photos` (item 2): the LOCAL copies of the refs, so the bubble draws the
+   * picture that was just sent — the daemon has no read-back method, so this is
+   * the only source of pixels for a fresh send.
    */
-  readonly prompt: (text: string, turnId: string, refs: readonly AttachmentRef[]) => Promise<void>;
+  readonly prompt: (
+    text: string,
+    turnId: string,
+    refs: readonly AttachmentRef[],
+    photos?: readonly LocalPhoto[],
+  ) => Promise<void>;
   /** Something the screen draws changed. */
   readonly onChange: () => void;
   /** A sentence to show (a refusal's reason), cleared by the next act. */
@@ -411,7 +421,7 @@ export function createCompose(deps: ComposeDeps): Compose {
       return;
     }
     try {
-      await deps.prompt(text, item.turnId, itemRefsOf(item));
+      await deps.prompt(text, item.turnId, itemRefsOf(item), localPhotosOf(item));
     } catch (error) {
       // A refusal before the ack (`TurnInProgress`, a drop, a dead link): 13b's
       // own mapping decides the item, and the words come back to the field —
@@ -764,9 +774,7 @@ export function createCompose(deps: ComposeDeps): Compose {
       );
     },
     async pickCamera() {
-      await applyPicks(
-        await deps.photos.takePhoto(counted(chips), deps.sendPhotoOriginalSize?.()),
-      );
+      await applyPicks(await deps.photos.takePhoto(counted(chips), deps.sendPhotoOriginalSize?.()));
     },
     async removeChip(key) {
       chips = chipRemoved(chips, key);

@@ -12,7 +12,13 @@ import {
   MAX_IMAGE_BYTES,
 } from "@tentacle/core";
 import { AttachmentRefSchema } from "@tentacle/protocol";
-import { type PhotoState, nextPhotoStep, photoCopyName, photoName } from "../src/photo-input.ts";
+import {
+  type PhotoState,
+  nextPhotoStep,
+  photoCopyName,
+  photoName,
+  resizeAxis,
+} from "../src/photo-input.ts";
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -415,5 +421,30 @@ describe("nextPhotoStep — a photo's SIZE (item 5: long edge ≤ 2048, quality 
 
   test("never UPSCALES: a tiny photo's long edge stays where it is (mutation: scale to exactly 2048 → a blurred upscale)", () => {
     expect(nextPhotoStep(state({ width: 320, height: 240 })).kind).toBe("ready");
+  });
+});
+
+describe("resizeAxis — the effect names ONE edge (Review round 1, MEDIUM 3)", () => {
+  /**
+   * `ImageManipulator.resize` does NOT keep the aspect ratio when it is given
+   * both numbers: it fits the image into that box. So the resize must name the
+   * long edge only — otherwise a picker that reported pre-EXIF-orientation
+   * dimensions (a known expo-image-picker issue for rotated photos) turns a
+   * portrait shot into a squashed landscape one.
+   *
+   * Mutation: return `{width, height}` (or always the width) → red.
+   */
+  test("a landscape target names its WIDTH", () => {
+    expect(resizeAxis({ width: 2048, height: 1536 })).toEqual({ width: 2048 });
+  });
+
+  test("a portrait target names its HEIGHT, never the width (mutation: always the width → a squashed portrait)", () => {
+    expect(resizeAxis({ width: 1536, height: 2048 })).toEqual({ height: 2048 });
+  });
+
+  test("it never returns both — the manipulator derives the other from the pixels", () => {
+    const axis = resizeAxis({ width: 2048, height: 2048 });
+    expect(Object.keys(axis)).toHaveLength(1);
+    expect(axis).toEqual({ width: 2048 });
   });
 });

@@ -5,8 +5,8 @@
  * stricter `WHEN_UNLOCKED_THIS_DEVICE_ONLY` class costs nothing.
  */
 import * as SecureStore from "expo-secure-store";
-import { keychainKV } from "./secure-kv.ts";
 import { createPhotoSettingsHolder, createPhotoSettingsStore } from "./photo-settings-store.ts";
+import { keychainKV } from "./secure-kv.ts";
 
 /** The app's ONE photo-settings copy (loaded at launch by `App.tsx`). */
 export const PHOTO_SETTINGS = createPhotoSettingsHolder(

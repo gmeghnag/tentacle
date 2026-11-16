@@ -40,6 +40,7 @@ import {
   type NativeSyntheticEvent,
   Platform,
   Pressable,
+  RefreshControl,
   StyleSheet,
   Text,
   View,
@@ -717,6 +718,16 @@ export function SessionScreen({
             onScrollBeginDrag={() => {
               dragging.current = true;
             }}
+            // Pull-to-refresh (item 3): the owner's own recovery — re-read the
+            // session from the daemon. The look is the chrome's, the decision is
+            // `controller.resync()`'s (never a second session path).
+            refreshControl={
+              <RefreshControl
+                refreshing={state.refreshing}
+                onRefresh={() => void controller.resync()}
+                tintColor={palette.sec}
+              />
+            }
             onScrollEndDrag={() => {
               dragging.current = false;
             }}

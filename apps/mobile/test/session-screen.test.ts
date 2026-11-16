@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import { PermissionBroker, type PermissionResponse } from "@tentacle/core";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
-import { FAILED_NOTICE, REFUSED_NOTICE } from "../src/composer.ts";
+import { FAILED_NOTICE, REFUSED_NOTICE, RESYNC_FAILED_NOTICE } from "../src/composer.ts";
 import { createSessionController } from "../src/session-controller.ts";
 import {
   type SendableHandle,
@@ -630,5 +630,107 @@ describe("the transcript's end and the thumbnails window", () => {
     expect(refs).toContain("near");
     // `far` is 40 rows above the window, past `PREFETCH_ROWS`: it is never fetched.
     expect(refs).not.toContain("far");
+  });
+});
+
+describe("pull-to-refresh (fix/mobile-media-live item 3)", () => {
+  /** A handle whose `open` answers with the daemon's history at attach time. */
+  function historySession(sessions: FakeSession[], id: string, history: () => SessionActivity) {
+    const base = fakeSession(sessions, id);
+    return {
+      ...base,
+      // The controller subscribes AFTER `open()` (`session-controller.ts:196-198`),
+      // and the real `watch` delivers what the attach buffered — so the history
+      // is handed over on SUBSCRIBE, exactly as a reopened session's is.
+      watch: (fn: (activity: SessionActivity) => void) => {
+        const off = base.watch(fn);
+        fn(history());
+        return off;
+      },
+    } satisfies FakeSession;
+  }
+
+  test("a resync REPLACES the rows from the daemon's history, never doubling them (mutation: append instead of replace → 2× the rows)", async () => {
+    const now = new Date().toISOString();
+    const message = (id: string, content: string) => ({
+      id,
+      role: "user" as const,
+      content,
+      createdAt: now,
+    });
+    let history = [message("m1", "first")];
+    const sessions: FakeSession[] = [];
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "mac",
+      controller: createSessionController<SendableHandle>({
+        newSession: (id) =>
+          historySession(sessions, id, () => ({
+            kind: "history",
+            messages: history as never,
+            reason: null,
+          })),
+      }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    await screen.open();
+    await settle();
+    expect(screen.state().transcript.rows.filter((r) => r.kind === "user")).toHaveLength(1);
+
+    // The daemon gained a message meanwhile (another device's turn): a pull must
+    // show it — and show it ONCE (the history is a snapshot, not a delta).
+    history = [message("m1", "first"), message("m2", "second")];
+    await screen.resync();
+    await settle();
+    const texts = screen
+      .state()
+      .transcript.rows.flatMap((r) => (r.kind === "user" ? [r.text] : []));
+    expect(texts).toEqual(["first", "second"]);
+    // The spinner is off again once the re-attach settled.
+    expect(screen.state().refreshing).toBe(false);
+  });
+
+  test("a resync that cannot re-attach KEEPS the rows and says so (mutation: drop the notice → a gesture that did nothing is silent)", async () => {
+    const sessions: FakeSession[] = [];
+    let fail = false;
+    const now = new Date().toISOString();
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "mac",
+      controller: createSessionController<SendableHandle>({
+        newSession: (id) => {
+          const base = historySession(sessions, id, () => ({
+            kind: "history",
+            reason: null,
+            messages: [{ id: "m1", role: "user", content: "kept", createdAt: now }] as never,
+          }));
+          if (!fail) {
+            return base;
+          }
+          // The realistic failure: the attach itself cannot be made (the link is
+          // down). `session-controller.ts:183-187` turns this into a typed
+          // `{ok:false, reason}`; a throw from `newSession` would escape instead.
+          return { ...base, open: () => Promise.reject(new Error("no link")) };
+        },
+      }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    await screen.open();
+    await settle();
+    expect(screen.state().transcript.rows).toHaveLength(1);
+
+    fail = true;
+    await screen.resync();
+    await settle();
+    // Never an empty transcript, and never a silent no-op.
+    expect(screen.state().transcript.rows).toHaveLength(1);
+    expect(screen.state().notice).toBe(RESYNC_FAILED_NOTICE);
+    expect(screen.state().refreshing).toBe(false);
   });
 });

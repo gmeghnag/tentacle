@@ -126,6 +126,8 @@ import {
   runPairing,
 } from "./src/pairing-flow.ts";
 import { handlePairingText, takePendingLink } from "./src/pending-link.ts";
+import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
+import type { PhotoSettings } from "./src/photo-settings-store.ts";
 import { pickFromLibrary, takePhoto } from "./src/photo-source.ts";
 import { rewritePushDirectory } from "./src/push-directory-expo.ts";
 import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
@@ -167,8 +169,6 @@ import { createSwitcherCover } from "./src/switcher-cover.ts";
 import { type Palette, paletteFor } from "./src/theme.ts";
 import { HeaderIcon } from "./src/ui/HeaderIcon.tsx";
 import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
-import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
-import type { PhotoSettings } from "./src/photo-settings-store.ts";
 import { VOICE_SETTINGS } from "./src/voice-settings-expo.ts";
 import type { VoiceSettings } from "./src/voice-settings-store.ts";
 

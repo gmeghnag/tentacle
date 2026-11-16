@@ -66,3 +66,42 @@ describe("item 5: the 'Send photos at original size' switch reaches the picker",
     expect(settings).toContain('testID="photos-original-size"');
   });
 });
+
+describe("item 3: pull-to-refresh is wired to the transcript list", () => {
+  test("the transcript FlatList carries a RefreshControl over `controller.resync()` (mutation: drop it → no gesture)", () => {
+    const screen = readFileSync(join(APP, "src", "screens", "SessionScreen.tsx"), "utf8");
+    expect(screen).toContain("<RefreshControl");
+    // The decision is the controller's (one session path); the component only
+    // renders it (AGENTS §7).
+    expect(screen).toContain("onRefresh={() => void controller.resync()}");
+    expect(screen).toContain("refreshing={state.refreshing}");
+  });
+});
+
+describe("item 4: the media bubble is laid out, not hand-placed", () => {
+  test("TranscriptRow lays the media out through the pure model (mutation: hard-code a 96 pt square → no ratio, no clamp)", () => {
+    const row = readFileSync(
+      join(APP, "src", "screens", "transcript", "TranscriptRow.tsx"),
+      "utf8",
+    );
+    expect(row).toContain("layoutMedia(");
+    expect(row).toContain("mediaBox(");
+    // The local copy wins over a fetched thumbnail: it is the only pixels a
+    // fresh send has.
+    expect(row).toContain("image.localUri ?? thumb?.uri");
+  });
+
+  test("tapping an image opens the full-screen viewer", () => {
+    const row = readFileSync(
+      join(APP, "src", "screens", "transcript", "TranscriptRow.tsx"),
+      "utf8",
+    );
+    expect(row).toContain("<MediaViewer");
+    const viewer = readFileSync(
+      join(APP, "src", "screens", "transcript", "MediaViewer.tsx"),
+      "utf8",
+    );
+    expect(viewer).toContain("<Modal");
+    expect(viewer).toContain('testID="media-viewer"');
+  });
+});

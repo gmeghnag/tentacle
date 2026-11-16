@@ -13,7 +13,7 @@
 import type { JSX } from "react";
 import { ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
-import { type ActivityButtonMode } from "../floating-button.ts";
+import type { ActivityButtonMode } from "../floating-button.ts";
 import type { PhotoSettings } from "../photo-settings-store.ts";
 import type { SpeechRate } from "../read-aloud.ts";
 import type { LanguageSetting } from "../speech-locale.ts";

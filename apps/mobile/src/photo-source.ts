@@ -20,7 +20,7 @@ import { Directory, File, Paths } from "expo-file-system";
 import { ImageManipulator, SaveFormat } from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import type { PhotoRefusal, PhotoStep, ReadyPhoto } from "./photo-input.ts";
-import { nextPhotoStep, photoCopyName, photoName } from "./photo-input.ts";
+import { nextPhotoStep, photoCopyName, photoName, resizeAxis } from "./photo-input.ts";
 
 /** What one picked photo became: a sendable ref's ingredients, or a refusal. */
 export type PickedPhoto =
@@ -133,12 +133,20 @@ export async function preparePickedPhoto(
     if (step.kind === "resize") {
       // Item 5: the long edge, at the quality the pure step chose. It is a JPEG
       // from here on (the plan's ≈300–600 KB), so the type is re-sniffed above.
+      //
+      // ONE dimension, deliberately (Review round 1, MEDIUM 3):
+      // `ImageManipulator.resize` does NOT keep the aspect ratio when given both
+      // — it fits the image into that box, so a picker that reported
+      // pre-EXIF-orientation dimensions (a known expo-image-picker issue for
+      // rotated photos) turns a portrait shot into a squashed landscape one. The
+      // pure step names both numbers only to decide WHICH edge is the long one;
+      // the manipulator derives the other from the pixels it actually has.
       resized = true;
       converted = true;
       bytes = await reencode(
         asset.uri,
         { format: SaveFormat.JPEG, compress: step.quality },
-        { width: step.width, height: step.height },
+        resizeAxis(step),
       );
       continue;
     }
@@ -168,15 +176,22 @@ export async function preparePickedPhoto(
 async function reencode(
   uri: string,
   options: { readonly format: SaveFormat; readonly compress: number },
-  target?: { readonly width: number; readonly height: number } | { readonly scale: number },
+  target?:
+    | { readonly width: number; readonly height?: never }
+    | { readonly height: number; readonly width?: never }
+    | { readonly scale: number },
 ): Promise<Uint8Array<ArrayBuffer>> {
   const context = ImageManipulator.manipulate(uri);
   if (target !== undefined) {
     if ("scale" in target) {
       const image = await context.renderAsync();
       context.resize({ width: Math.max(1, Math.round(image.width * target.scale)) });
-    } else {
-      context.resize({ width: target.width, height: target.height });
+    } else if ("width" in target && target.width !== undefined) {
+      // ONE edge only (Review round 1, MEDIUM 3): the manipulator keeps the
+      // aspect ratio itself when it has a single dimension to work from.
+      context.resize({ width: target.width });
+    } else if ("height" in target && target.height !== undefined) {
+      context.resize({ height: target.height });
     }
   }
   const rendered = await context.renderAsync();

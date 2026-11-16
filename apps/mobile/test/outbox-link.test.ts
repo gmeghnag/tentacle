@@ -38,8 +38,8 @@ import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 // give a row back once after a kill — the app never registers `onReturned`.
 import { handBack } from "../../../packages/client/src/hand-back.ts";
 import { SpyDaemonStore } from "../../../packages/daemon/test/support/daemon-store-spy.ts";
-import { composeHandleOf, foldingOutboxSession } from "../src/compose-handle.ts";
 import type { PickedPhoto } from "../src/compose-controller.ts";
+import { composeHandleOf, foldingOutboxSession } from "../src/compose-handle.ts";
 import { leaveComputer } from "../src/connection.ts";
 import {
   type OutboxDriver,
@@ -920,7 +920,8 @@ function screenOn(phone: App, sid: string, photo: readonly PickedPhoto[] = []) {
             save: (items) => store.setItems(items),
             finish: (itemId) => store.removeItem(itemId),
           },
-          readPhoto: async () => PNG_BYTES,          mint: () => crypto.randomUUID(),
+          readPhoto: async () => PNG_BYTES,
+          mint: () => crypto.randomUUID(),
           onDraft: folding.onDraft,
         }),
       photos: { pickFromLibrary: async () => photo, takePhoto: async () => photo },
@@ -1031,6 +1032,16 @@ describe("fix/mobile-media-live item 1: a photo message's turn folds into the sc
     const rows = screen.state().transcript.rows;
     expect(rows.some((row) => row.kind === "assistant" && row.text.includes("ok:"))).toBe(true);
     expect(screen.state().transcript.turn).toBeNull();
+
+    // Item 2: the row this phone just sent carries the LOCAL file it uploaded, so
+    // the bubble draws the photo instead of `[image: a.png]` (mutation: drop
+    // `photos` from the prompt path → `localUri` undefined → red). The daemon has
+    // no read-back method, so nothing else could supply these pixels.
+    const sent = rows.find((row) => row.kind === "user" && row.text === "look at this");
+    if (sent?.kind !== "user") {
+      throw new Error("no sent row");
+    }
+    expect(sent.images[0]?.localUri).toBe("file:///o/photos/a.png");
 
     await screen.leave();
     screen.dispose();

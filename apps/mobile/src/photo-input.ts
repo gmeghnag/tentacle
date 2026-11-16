@@ -102,6 +102,24 @@ export type PhotoStep =
   | { readonly kind: "ready"; readonly photo: ReadyPhoto }
   | { readonly kind: "refuse"; readonly reason: PhotoRefusal; readonly detail: string };
 
+/**
+ * The ONE dimension a resize should name, for a target the pure step chose.
+ *
+ * `ImageManipulator.resize` does NOT preserve the aspect ratio when it is given
+ * both numbers — it fits the image into that box. So the effect must name the
+ * LONG edge only and let the manipulator derive the other from the pixels it
+ * actually holds (Review round 1, MEDIUM 3: a picker that reports
+ * pre-EXIF-orientation dimensions would otherwise squash a portrait photo into a
+ * landscape box). The pure step still computes both, because deciding which edge
+ * is the long one IS the decision; `resizeAxis` says what to do about it.
+ */
+export function resizeAxis(target: {
+  readonly width: number;
+  readonly height: number;
+}): { readonly width: number } | { readonly height: number } {
+  return target.width >= target.height ? { width: target.width } : { height: target.height };
+}
+
 /** The long-edge resize's target, or null when the photo is already small enough. */
 function resizeTarget(state: PhotoState): { width: number; height: number } | null {
   const { width, height } = state;

@@ -29,6 +29,7 @@ import {
   asSteer,
   createItem,
   decide,
+  localPhotosOf,
   notOpenRefusal,
   pendingUploads,
   refsOf,
@@ -37,6 +38,7 @@ import {
   withRef,
   withState,
 } from "./outbox.ts";
+import type { LocalPhoto } from "./transcript-rows.ts";
 
 /**
  * The session as the driver sees it: the four acts it performs, and the facts
@@ -62,7 +64,13 @@ export interface OutboxSession {
    * (`untilAccepted`, docs/fix/mobile-chat-glitches.md bug 2). Rejects with a
    * refusal before the ack, or `SessionNotOpenError("link")` when unanswered.
    */
-  prompt(text: string, turnId: string, attachments: readonly AttachmentRef[]): Promise<void>;
+  prompt(
+    text: string,
+    turnId: string,
+    attachments: readonly AttachmentRef[],
+    /** The LOCAL copies of those refs, for the transcript's own row (item 2). */
+    photos?: readonly LocalPhoto[],
+  ): Promise<void>;
   /** One steer, with the key it carries, bound to the turn it was typed during. */
   steer(text: string, id: string, turnId: string): Promise<void>;
   /** The daemon's state now (after `open()`): history length, the running turn, availability. */
@@ -252,7 +260,12 @@ export function createOutboxDriver(
           await refuse(uploaded.item, uploaded.refusal);
           return;
         }
-        await session.prompt(uploaded.item.text, uploaded.item.turnId, refsOf(uploaded.item));
+        await session.prompt(
+          uploaded.item.text,
+          uploaded.item.turnId,
+          refsOf(uploaded.item),
+          localPhotosOf(uploaded.item),
+        );
       }
     } catch (error) {
       // `current`, not `sending`: an upload that landed recorded its ref, and
