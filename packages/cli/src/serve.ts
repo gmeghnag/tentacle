@@ -758,6 +758,12 @@ async function reloadedHost(
     // Its host is the user's own machine, so the session's auto-accept is SHARED
     // with every device attached (docs/feat/session-auto-accept.md D1).
     sharedAutoAccept: true,
+    // And, for the same reason, the DAEMON answers an auto-accepted ask itself,
+    // so a session keeps running with no app or terminal attached
+    // (docs/fix/serve-autoaccept-unattended.md D1). Never set on a pod daemon,
+    // the worker or the relay: there a daemon-side "approval" is a check the
+    // workload controls (AGENTS §7).
+    answersAutoAccept: true,
     identity: { tentacle: APP_VERSION, kind: "serve" },
     modelInfo: { name: config.model, contextWindow: config.contextWindow },
     // ITS OWN model, told to a client for DISPLAY only (a `connect` TUI's ctx

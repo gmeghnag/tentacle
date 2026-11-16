@@ -286,6 +286,16 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    */
   readonly sharedAutoAccept?: boolean;
   /**
+   * A TRUST bit: this daemon ANSWERS an auto-accepted ask itself, so a session
+   * with auto-accept on keeps running with nobody attached
+   * (docs/fix/serve-autoaccept-unattended.md D1). Only `startDaemon` — the
+   * user's own host — sets it. Never the worker, a pod daemon (`serve --stdio`,
+   * `run`/`attach`) or the relay: there, a daemon-side "approval" would be a
+   * check a workload controls (AGENTS §7, "a pod is not trusted"). Fails
+   * closed: absent → false.
+   */
+  readonly answersAutoAccept?: boolean;
+  /**
    * `serve` only: this computer's live sibling daemons and their addresses
    * (`daemon/discover`, docs/feat/sibling-discovery.md). Absent (a pod daemon,
    * the worker) → `MethodNotFound`: a pod learns nothing about the laptop's
@@ -506,6 +516,14 @@ export class SessionHost {
    */
   get sharedAutoAccept(): boolean {
     return this.opts.sharedAutoAccept === true;
+  }
+  /**
+   * Whether this daemon ANSWERS an auto-accepted ask itself
+   * (docs/fix/serve-autoaccept-unattended.md D1): a trusted `serve` only, and
+   * a pod daemon, the worker and the relay never.
+   */
+  get answersAutoAccept(): boolean {
+    return this.opts.answersAutoAccept === true;
   }
   private readonly sessions = new Map<string, HostedSession>();
   /** ARCHIVED sessions (a persisting host only). An id is in ONE of the two maps, never both. */
@@ -1419,6 +1437,9 @@ export class SessionHost {
       {
         ...(exposeTurnErrors ? { exposeTurnErrors } : {}),
         ...(onTurnError ? { onTurnError } : {}),
+        // A trust bit, and a CONSTRUCTOR input because a reload's resumed turn
+        // re-asks inside the constructor (docs/fix/serve-autoaccept-unattended.md D1).
+        ...(this.opts.answersAutoAccept === true ? { answersAutoAccept: true } : {}),
       },
       this.opts.ringBytes,
       () => this.now(),
