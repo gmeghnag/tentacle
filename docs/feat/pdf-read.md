@@ -1064,3 +1064,38 @@ mutation on the prelude (drop `console.warn = quiet`) → 1 fail. **Gate:**
 `git status --porcelain` was empty.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; different family from the executor, DeepSeek)
+
+### Round 5
+
+**Verdict: REQUEST-CHANGES** (the round-4 HIGH is still open). There has been no code
+since round 4: `git diff 093a877a HEAD` only touches this doc. Nothing in
+`packages/**/pdf*` or `extract*` mentions `resourceLimits`, `smol`, `rss`,
+`memoryUsage` or `ulimit`.
+
+1. **HIGH — a small hostile PDF can still take down the daemon.**
+   `packages/tools/src/pdf/extract.ts:36-37` spawns `new Worker(url, {type:"module"})`
+   with no memory bound. The only kill switch is the 20 s timer at `:106`, which
+   does nothing about memory. Re-ran `r4/bomb.ts 256`: a **255 KiB** PDF inflated to
+   256 MiB, RSS went from 278 MB to a peak of **839 MB** in 674 ms, and the result
+   was `ok:true`. It was not even reported as an error. At about 2 B RSS per inflated
+   byte, a few MiB of PDF (under `MAX_PDF_BYTES`) gets the OS to kill the daemon and
+   every session on it, well inside 20 s.
+   `pdf-extract.test.ts` has no bomb or huge-page fixture. Required: a hard memory
+   cap (a child process with an OS limit, or a heap/RSS watchdog that
+   `terminate()`s), mapped to a clean typed tool error. Add a test that generates the
+   bomb in-test, asserts that typed error and a bounded RSS, and is shown failing
+   (red) without the cap.
+2. **MEDIUM — the async "worker cannot load" path is still vacuous.** The test at
+   `pdf-extract.test.ts:228` throws synchronously from `spawn`. That hits the `catch`
+   at `extract.ts:121` and never reaches `onerror`. A real Bun Worker with a missing
+   URL fails through `onerror` before `ready` (`extract.ts:155`). Mutation:
+   `:155 → corrupt` left the file at **24 pass, 0 fail**. Reverted; `git status`
+   clean.
+3. **Unverified (unchanged):** the compiled-binary `$bunfs` worker path
+   (`r4/probe-bin`) has still not been run.
+
+**Gate:** `pdf-extract` + `pdf-worker-entry` + `pdf-text` 72 pass, 0 fail; `bun run
+lint` 1734 files, clean; `bun run typecheck` exit 0. Full `bun test` not run: it
+has no bearing on a no-code round.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; same model as the round-1–4 reviewer)
