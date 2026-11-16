@@ -29,6 +29,8 @@ export interface SessionInfoSheetProps {
   readonly autoAcceptOn: boolean;
   readonly autoAcceptError: string | null;
   readonly onAutoAccept: (on: boolean) => void;
+  /** A server's/skill's switch (session-capabilities S5): the row's own kind and raw name. */
+  readonly onSwitch: (kind: "mcp" | "skill", name: string, enabled: boolean) => void;
   /** Pull-to-refresh and a Retry row. */
   readonly onRefresh: () => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
@@ -62,12 +64,14 @@ function SectionBody({
   expanded,
   onExpand,
   onRetry,
+  onSwitch,
 }: {
   readonly palette: Palette;
   readonly section: InfoSection;
   readonly expanded: string | null;
   readonly onExpand: (id: string | null) => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
+  readonly onSwitch: SessionInfoSheetProps["onSwitch"];
 }): JSX.Element {
   if (section.phase === "loading") {
     return <LoadingRow palette={palette} first />;
@@ -99,6 +103,7 @@ function SectionBody({
           row={row}
           first={index === 0}
           sectionId={section.id}
+          onSwitch={onSwitch}
           expanded={expanded === `${section.id}:${row.title}`}
           onExpand={() => {
             if (row.expand === undefined) {
@@ -122,6 +127,7 @@ function InfoRowView({
   sectionId,
   expanded,
   onExpand,
+  onSwitch,
 }: {
   readonly palette: Palette;
   readonly row: InfoRow;
@@ -129,8 +135,10 @@ function InfoRowView({
   readonly sectionId: InfoSection["id"];
   readonly expanded: boolean;
   readonly onExpand: () => void;
+  readonly onSwitch: SessionInfoSheetProps["onSwitch"];
 }): JSX.Element {
-  const trailing =
+  const toggle = row.switch;
+  const values =
     row.value === undefined && row.chip === undefined ? undefined : (
       <View style={styles.trailing}>
         {row.value === undefined || row.value === "" ? null : (
@@ -154,6 +162,23 @@ function InfoRowView({
             {row.chip}
           </Text>
         )}
+      </View>
+    );
+  // P1 (owner): a trailing switch on the row, as Auto-accept's; a ghost
+  // (disabled) one when the view-model says it cannot send.
+  const trailing =
+    toggle === undefined ? (
+      values
+    ) : (
+      <View style={styles.switchTrail}>
+        {values}
+        <Switch
+          testID={`session-info-${sectionId}-${row.title}-switch`}
+          accessibilityLabel={toggle.accessibilityLabel}
+          value={toggle.on}
+          disabled={!toggle.interactive}
+          onValueChange={(on) => onSwitch(toggle.kind, toggle.name, on)}
+        />
       </View>
     );
   return (
@@ -198,12 +223,14 @@ function Section({
   expanded,
   onExpand,
   onRetry,
+  onSwitch,
 }: {
   readonly palette: Palette;
   readonly section: InfoSection;
   readonly expanded: string | null;
   readonly onExpand: (id: string | null) => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
+  readonly onSwitch: SessionInfoSheetProps["onSwitch"];
 }): JSX.Element {
   return (
     <View style={styles.section}>
@@ -215,6 +242,7 @@ function Section({
           expanded={expanded}
           onExpand={onExpand}
           onRetry={onRetry}
+          onSwitch={onSwitch}
         />
       </GroupedCard>
       {section.rowsNote === undefined ? null : (
@@ -233,6 +261,15 @@ function Section({
           {section.footer}
         </Text>
       )}
+      {section.switchNote === undefined ? null : (
+        <Text
+          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+          testID={`session-info-switch-note-${section.id}`}
+          style={[typography.footnote, styles.footnote, { color: palette.sec }]}
+        >
+          {section.switchNote}
+        </Text>
+      )}
     </View>
   );
 }
@@ -244,6 +281,7 @@ export function SessionInfoSheet({
   autoAcceptOn,
   autoAcceptError,
   onAutoAccept,
+  onSwitch,
   onRefresh,
   onRetry,
   onClose,
@@ -301,6 +339,7 @@ export function SessionInfoSheet({
                   expanded={expanded}
                   onExpand={onExpand}
                   onRetry={onRetry}
+                  onSwitch={onSwitch}
                 />
                 {/* The switch belongs to the SESSION's settings, right under it. */}
                 {section.id !== "session" || !view.autoAccept ? null : (
@@ -364,4 +403,5 @@ const styles = StyleSheet.create({
   refresh: { alignSelf: "center", paddingVertical: 8, paddingHorizontal: 16 },
   trailing: { alignItems: "flex-end", gap: 2, maxWidth: "55%" },
   lead: { flexDirection: "row", alignItems: "center", gap: 6 },
+  switchTrail: { flexDirection: "row", alignItems: "center", gap: 10 },
 });

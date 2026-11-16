@@ -241,6 +241,8 @@ export interface SessionScreenController {
   setAutoAccept(on: boolean): Promise<void>;
   /** The switch's value NOW (the session's shared link: a flip elsewhere is here). */
   autoAcceptOn(): boolean;
+  /** An MCP server's or skill's switch (docs/feat/session-capabilities.md S5). */
+  setCapability(kind: "mcp" | "skill", name: string, enabled: boolean): Promise<void>;
   /** Tapping the title: the rename field opens on the CURRENT title (Owner 5). */
   beginRename(): void;
   /** What is typed into it. */
@@ -877,6 +879,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     autoAcceptOn() {
       return info?.autoAcceptOn() ?? false;
+    },
+    async setCapability(kind, name, enabled) {
+      await info?.setCapability(kind, name, enabled);
+      emit();
     },
     beginRename() {
       renaming = { text: shownTitle, saving: false, error: null };
