@@ -2062,3 +2062,22 @@ code. Its mutation table omits the duplicated retry, which is the only branch th
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; the SAME model family as the P5 executor, so
 shared blind spots are possible)
+
+### Round 2 (P5)
+
+**Verdict: APPROVE.** The P5 finding is fixed and pinned. `git diff HEAD~1` has nothing new at HIGH or MEDIUM.
+
+- **#1 fixed, and done the better way.** The retry is now a single pure helper,
+  `extractAttachedPdf` (`packages/core/src/pdf-text.ts:579`). Both ends call it: the daemon
+  (`prompt-documents.ts:143`) and the laptop (`remote-client.ts:2316`). The behaviour is unchanged:
+  the same signal goes to both calls, and only `too-many-pages` is retried.
+- **Mutation: the retry in the helper never triggers.** RED 4: two core unit tests, the daemon's
+  `resolvePromptDocuments` test, and the new laptop-mode test (`[{}, {pages:"1-100"}]` + the footer
+  `[pages 101-2500 not included]` + zero frames).
+- **Mutation: the client skips the helper and calls `extract` directly.** RED 1 (the new laptop test).
+- Both mutations were reverted, and `git status --porcelain` was empty.
+- **Regressions:** `packages/client` + `pdf-text` + `prompt-documents` + the two `pdf-attach` TUI
+  files: 891 pass, 0 fail. `bun run typecheck` exit 0. `bun run lint`: 1782 files, clean.
+  The full suite was not re-run.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; the SAME model family as the executor)
