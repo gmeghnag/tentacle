@@ -13,6 +13,8 @@
 
 4. **Owner (screenshot of a WhatsApp photo bubble), same task:** a message with an attachment + text is laid out like WhatsApp — the **image on top, full bubble width, rounded to the bubble**, and the **text (caption) BELOW the image inside the same bubble**, never the text above a small squeezed image. The same for **PDF and other files**: a document card on top (icon, file name, size / page count) and the caption below it. A bubble with only an image has no empty text area. Tapping the image opens it full screen. Applies to the user's own bubbles (and to any media row rendered in the transcript).
 
+5. **Owner, same task — downscale photos before sending.** Today (`apps/mobile/src/photo-source.ts:116,120`) a photo is only converted HEIC→JPEG (0.9) and downscaled ONCE, by 0.5, only when over `MAX_IMAGE_BYTES`; a normal iPhone photo goes out at ~4032×3024 / several MB. New default: **long edge ≤ 2048 px, JPEG quality 0.8** (≈300–600 KB) — models downsample anyway (Claude ~1568 px) and local VL models (Qwen-VL) turn pixels into tokens (slow prefill, context burned); smaller uploads over the relay. Never upscale. A Settings switch **"Send photos at original size"** (off by default; a versioned phone-local setting, the existing settings-store pattern) bypasses it. The local bubble thumbnail still uses the local photo. Keep the existing over-cap refusal rule. Pure decision in `photo-input.ts` (`nextPhotoStep`: target size from width/height/setting), tested; the effect stays in `photo-source.ts`.
+
 ## Implementation
 
 *— the executor writes it FIRST (AGENTS §1, §8): reproduce, then plan, then fix.*
@@ -21,7 +23,8 @@
 - **Thumbnail:** the user's own bubble must show the image it just sent (the local picked URI / the downscaled upload, docs/feat/attachments*.md); after a reopen, the history's media row should show a thumbnail if the daemon serves it, else a tasteful placeholder — say which and why.
 - **Pull-to-refresh:** pull on the transcript → resync with the daemon (the reopen path the owner used), spinner while loading, no duplicate rows, works offline with an honest message.
 - **Bubble layout (item 4):** a pure layout model (media first, caption second, sizes from the image's aspect ratio clamped to a max height) + the render-only bubble; screenshot-free tests on the model.
-- **Tests red-first** for each of the four; `bun run check` green.
+- **Downscale (item 5):** tests on the pure step (4032×3024 → 2048×1536; 1200×900 untouched; the original-size setting bypasses; HEIC still converted).
+- **Tests red-first** for each of the five; `bun run check` green.
 
 ## Execution
 
