@@ -2422,3 +2422,405 @@ biting through `valueFullWidth`, so no assertion was lost with it.
 - **Finding 3 (MEDIUM) — fixed.** The signature is corrected to the DeepSeek profile and matches the commit title.
 - Round-1 nit fixed: `BandSection` docs now say `bg`. The nit about `Row` hairlines using `sep` inside a sheet is still open and not blocking.
 - Gate: the two S3 test files pass **32 / 0**; `bun run lint` clean (1689 files); `bun run typecheck` clean. The diff touches no protocol, persistence or runtime path.
+
+## Execution (slice S4 — screens to bands, E2)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (tentacle profile `deepseek`), 2026-11-16 · slice S4 only*
+
+> **Signature provenance (checked, not assumed — the trap S3 hit).** My first
+> draft above said `claude-opus-5-5`; that is the ORCHESTRATOR's model, not mine.
+> Evidence for the corrected id: my own process lineage is
+> `night-task4.sh mobile-chrome S4` → `tentacle --profile deepseek` → this
+> session (`ps -o command= -p $$` and its parents), the profile's model is pinned
+> at `~/.config/tentacle/config.jsonc` → `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`,
+> and this session's tool names are tentacle's (`fs_read`/`fs_multi_edit`/`shell`),
+> never Claude Code's `Read`/`Edit`/`Bash`.
+
+
+**Scope: S4 (Files item 5) only.** The five screens named by the slice —
+`SessionInfoSheet`, `SettingsScreen`, `ComputersScreen`, `SessionsScreen`,
+`PairScreen` — became `BandSection`s, and `GroupedCard` + `SectionHeader` are
+deleted. S5–S10 untouched: `src/drawer-*`, `SessionsDrawer.tsx`, `App.tsx`,
+`src/activity*`, `floating-button.ts` were not opened. No protocol, daemon,
+client, persistence or runtime change, so
+`packages/protocol/schema/protocol.json` was **not** regenerated. `TODO.md`
+untouched.
+
+### Load-bearing check, re-run first (it held)
+
+S3's Execution handed S4 one check: **the S3 primitives + `Sheet onClose`
+express every `GroupedCard`/`SectionHeader` call site — no fifth primitive, no
+new dependency.** Re-run on the branch before any edit
+(`.tentacle/tmp/mobile-chrome/s4-repro-before.{sh,log}`):
+
+```
+== primitives on disk          BandSection, Row, Sheet, row-value present;
+                               GroupedCard, SectionHeader still present (S4 deletes)
+== BandSection props           palette, title (REQUIRED), children, footnote?, onSheet?, testID?
+== Sheet: onClose?             45,58,67,72 — declared, drawn, guarded
+== call sites                  SessionInfo 2/1   Settings 7/7   Computers 2/0
+                               Sessions 2/1      Pair 2/1        (GroupedCard/SectionHeader)
+```
+
+So the capability was genuinely absent (15 `<GroupedCard`, 10 `<SectionHeader`,
+exactly S3's count) and **it held, with one thing to say**: `BandSection`'s
+`title` was REQUIRED, but three of the fifteen sites have no label of their own —
+a computer's band is headed by the screen's own name + status line, and the
+"Load more" / pair-card bands are single trailing actions. `BandSection`'s doc
+already said "a band is a *surface*… it only owns the ground, the hairlines and
+the label" (S3's Execution, recorded there so S4 would not be surprised), so the
+missing piece was mechanical, not conceptual: `title` became optional and a
+label-less band still keeps `space.sectionTop` above it. Recorded as Drift 1
+rather than as a new primitive — S3's conclusion stands.
+
+### Drift from the Implementation (5, each reconciled here)
+
+1. **`BandSection.title` optional (was required), and `Sheet.closeTestID` added
+   (not in the plan).** Both are the same discovery, from two ends: (a) three
+   sites have no section label (above); (b) Design 4 says "`Sheet.tsx` … an 18 pt
+   close glyph", and S3's `onClose` derives its id as `${testID}-close` =
+   `session-info-sheet-close`, while `25-session-info.yaml:91` taps
+   **`session-info-close`**. Renaming the flow's id is a flow edit S6 owns
+   (it rewrites 24 and 05), and the id is a flow contract, so `Sheet` takes an
+   optional `closeTestID` and Session info passes its existing one. One glyph,
+   one id, no flow change.
+2. **The scroll variant's close glyph is pinned OUTSIDE the `ScrollView`.** A
+   drift I found, not planned: `Sheet`'s scroll branch put the glyph in the
+   scrolling content, so on Session info — the one sheet that scrolls — the only
+   way out scrolled away. The screen's old 32 pt top bar was fixed, so this would
+   have been a REGRESSION introduced by replacing it. The scroll branch now
+   renders `{closeGlyph}` after the `ScrollView`, in the sheet's frame, and
+   `{scroll ? null : closeGlyph}` keeps it from drawing twice.
+3. **Auto-accept is the Session band's LAST ROW, not a second band.** Design 4
+   does not mention it; the mockup's `infoE2` (`index.html:394-397`) draws
+   Project, Devices, then Auto-accept inside the SAME band, and the row belongs
+   to that session's settings. `Section` gained a `lastRow?: ReactNode` prop
+   (render-only, no branching) instead of the screen wrapping a second surface
+   around it, and the row is handed in gated on `section.id === "session"` — the
+   same condition the old block used.
+4. **The three dead spacing tokens, plus two more.** S3's Execution left
+   `space.separatorPlain`/`separatorAfterTile`/`size.rowProject` for "S4's delete
+   pass", and `space.cardInner` became readerless once the five screens moved to
+   `space.rowX`. Once the section rhythm moved into the band, `space.sectionSessions`
+   and `space.sectionComputers` lost their last readers too (Pair's `block`,
+   Settings'/Sessions' `body`/`sections`/`section` gaps, Computers' `section`). All
+   six are deleted and `band-screens.test.ts` scans that no `src` file reads them,
+   so a future screen cannot reach for the old measure thinking it is the house
+   one.
+5. **Session info's sheet root re-grounds to `bg`, and its own top bar is gone.**
+   Design 4's "the sheet's ground becomes `page`" was settled in S3 as `bg` (the
+   grouped ground; `palette.sheet` is `#FFFFFF` in light and would have put the
+   bands on their own colour). The screen's root still painted `palette.sheet`
+   above the `Sheet`, which in light leaves a white strip at the top safe-area
+   inset; it is `palette.bg` now, and the `topBar`/`close` styles went with the
+   duplicated glyph (Drift 2).
+
+Two smaller things, both recorded for Review: `Row` gained `onSheet` (the open
+nit from S3's fix round 1 — "if S4 mounts banded rows in a sheet, `Row` needs an
+`onSheet`-equivalent then": it now paints `sepSheet` for the hairline between two
+rows, and every row in Session info passes it), and the voice group's privacy
+note stayed the GROUP's own line (`styles.note`, on the band's `rowX` gutter)
+rather than becoming the Speaking-rate band's footnote — it covers the whole
+group, and it is not gated on `rows.rate` (it was outside every gate before).
+
+### As-built, in order
+
+1. **Tests first (red).** New `test/band-screens.test.ts` (35 tests) — the two
+   deleted files, "nothing under `src` imports or renders them", each screen's
+   bands, the section notes as footnote(s), the standalone bands, Auto-accept
+   inside the Session band, the flow-24/25 testIDs, `Row.onSheet`,
+   `Sheet.closeTestID`, the rhythm, and the six dead tokens. On the untouched
+   code: **5 pass / 27 fail**, every failure on the PROPERTY (a `GroupedCard`
+   tag found, a band absent, a footnote missing, `onSheet` undefined) — never on
+   an import or a compile error (`.tentacle/tmp/mobile-chrome/s4-red.log`).
+   `band-wiring.test.ts` gained the scroll-variant assertion (S3's file, one
+   test, because the property is `Sheet`'s).
+2. **`src/ui/Row.tsx`** — `onSheet?: boolean`; the separator's colour is
+   `onSheet ? palette.sepSheet : palette.sep`.
+3. **`src/ui/BandSection.tsx`** — `title` optional; a label-less band keeps
+   `sectionTop`. Doc line about what it replaced flipped to the past tense.
+4. **`src/ui/Sheet.tsx`** — `closeTestID`; the glyph hoisted to `head` with
+   `{scroll ? null : closeGlyph}`; the scroll branch wraps the `ScrollView` in a
+   `scrollBody` frame and renders the glyph after it.
+5. **`SettingsScreen.tsx`** — 7 sections → 7 bands, the App-lock notice and the
+   error/voice/export banners stay banners (a band holds rows, not notices), the
+   three notes became `footnote`s, the privacy note the group's own line.
+6. **`SessionsScreen.tsx`** — `Section` → `BandSection title={title}`; "Load more"
+   a standalone band; the `section`/`sections` gaps dropped (the band owns them).
+7. **`ComputersScreen.tsx`** — each computer's band standalone under its heading
+   (the heading took the rhythm: `paddingTop: sectionTop`, `paddingBottom: 6`);
+   the pair card a band with the hint as its `footnote`.
+8. **`PairScreen.tsx`** — the hero (standalone) and the paste field (its own
+   label) as bands; `hero`/`paste` padding `cardInner` → `rowX`; `block` gap
+   dropped, the failure banner keeps its own (`insetBlock`).
+9. **`SessionInfoSheet.tsx`** — `Section` renders ONE `BandSection onSheet`
+   holding the view-model's rows plus `lastRow` (Auto-accept); the section's
+   `rowsNote`/`footer`/`switchNote` become its footnote (the switch note keeps
+   its testID); every `Row` passes `onSheet`; root → `palette.bg`; the screen's
+   own close button deleted in favour of `Sheet onClose` + `closeTestID`.
+10. **Deletes.** `src/ui/GroupedCard.tsx`, `src/ui/SectionHeader.tsx`; the six
+    dead tokens in `theme.ts`.
+11. **`changelog.d/mobile-chrome.changed.md`** — S3 already extended this task's
+    ONE bullet (`scripts/changelog.ts:125` refuses a second `- ` bullet); it
+    gained the sentence naming the five screens. `CHANGELOG.md`, `TODO.md`
+    untouched.
+
+### Mutation checks (§9 — each applied, run, reverted, `cmp`'d back; script and full output in `.tentacle/tmp/mobile-chrome/s4-mutations.{sh,out}`)
+
+Baseline before and after: **54 pass / 0 fail** (`band-screens` + `band-wiring`).
+`cmp` against the scratch backups after every revert found no residue.
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | `Row`'s sheet hairline goes back to `sep` | 1 fail |
+| 2 | `BandSection` always draws its label (no standalone band) | 1 fail |
+| 3 | Settings' App-lock note back to a screen `<Text>` (no footnote) | 1 fail |
+| 4 | a Settings section keeps a `GroupedCard` | 3 fail |
+| 5 | Sessions' "Load more" gets a label of its own | 1 fail |
+| 6 | the Computers band gets a `title` (heading doubled) | 1 fail |
+| 7 | Computers' hint back to a `<Text>` outside the band | 1 fail |
+| 8 | Pair's paste block padding back to 16 | 1 fail |
+| 9 | a Session-info band stops declaring `onSheet` | 1 fail |
+| 10 | Session info drops `closeTestID` (flow 25 taps nothing) | 1 fail |
+| 11 | Session info's root keeps `palette.sheet` | 1 fail |
+| 12 | Auto-accept no longer handed to the band | 1 fail |
+| 13 | `Sheet`'s glyph ignores `closeTestID` | 1 fail |
+| 14 | `theme.ts` brings `cardInner` back | 1 fail |
+| 15 | a Settings section loses its band label | 1 fail |
+| 16 | the scroll variant puts the glyph back inside the scroller | 1 fail |
+| 17 | a wrapper gap comes back above the bands | 1 fail |
+
+**Five mutations found real vacuities and were fixed** — 3, 8, 4, 13 and 16 each
+passed on the first attempt:
+
+- **3 and 8** were `some()`/single-property assertions: `some(tag => tag.includes("footnote="))`
+  was answered by the two other bands, and only `hero`'s padding was pinned (the
+  paste block's could drift). Both rewritten to per-note / per-block.
+- **4** was a broken mutation (`scan`-engine sed) rather than a weak test — it now
+  swaps a band for a `<GroupedCard>` and fails 3 tests.
+- **13** was untested at all: `closeTestID` was declared and read, but nothing
+  asserted the read, so a rename would have silently broken flow 25. A test pins
+  `closeTestID ?? (testID === undefined`.
+- **16** was the assertion I had just written, and it was wrong: it scanned the
+  scroll branch, where the frame's copy sits AFTER the `ScrollView` (correct) —
+  so re-rendering the glyph in `head` left it green. It now also pins the
+  `{scroll ? null : closeGlyph}` guard in `head`, which is the property that
+  actually protects against a doubled glyph.
+
+### Gate
+
+- `bunx tsc --noEmit` (root), `bunx tsc -p apps/mobile --noEmit`,
+  `bunx tsc -p apps/relay --noEmit` — **all clean** (`TSC-ALL-OK`, exit 0).
+- `bun run lint` — **`Checked 1693 files. No fixes applied.`** (0 errors, 0
+  warnings; AGENTS §6 baseline is clean, so no new issues). My first runs flagged
+  format errors in my own test file and one stray `;;` in PairScreen's imports;
+  `biome check --write` on exactly those fixed them.
+- `bun test` (full suite) — **12274 pass, 5 skip, 0 fail** across 880 files
+  (`.tentacle/tmp/mobile-chrome/s4-gate.log`). The 5 skips are the documented
+  opt-in ones (live-k8s ×2, live-docker ×2, real-socket slow test); no non-opt-in
+  skip appeared.
+- `apps/mobile` alone — **1944 pass, 0 fail** across 143 files.
+- `packages/protocol/schema/protocol.json` — **not regenerated**: no schema changed.
+
+### Not done in this slice (and why)
+
+- **Flows 24 and 25 were not run on a simulator** — the `done when` names them,
+  and the iOS e2e build is still blocked by the pre-existing `PushCore`
+  resolution error S1/S2/S3 recorded. So "the bands look right on glass" is
+  **owed, not proven**. What IS verified: every testID those two flows assert
+  still exists in `src` (`export-logs`, `lock-delay-*`, `open-settings`,
+  `settings-back`, `computers-list`, `computer-<id>`, `sessions-search`,
+  `sessions-no-match`, `session-<id>`, `pair-paste-input`, `pair-paste-submit`,
+  `pair-review`, `pair-sas-*`, `session-info-sheet`, `session-info-close`,
+  `session-info-model-*`, `session-info-mcp-*`, `session-info-skills-*`,
+  `session-info-mcp-demo-switch`, and S6's `session-drawer`/`drawer*`), and the
+  structure each of them is drawn by is pinned by `band-screens.test.ts`. To
+  verify: `bun run e2e:mobile --ios 24 && … 25` once `PushCore` resolves, and read
+  the shots against mockup row D (`index.html` `infoE2`/`settingsE2`).
+- **No screenshot of the five screens.** Same blocker; the visual check the slice
+  table asks for ("standard Review + visual check vs row D") is the reviewer's to
+  run, and this slice cannot invent one.
+- **The drawer's own lists are not banded** — Design 4 says so explicitly ("The
+  drawer is NOT banded"), and S6 has not landed its UI yet.
+- **`SessionInfoSheet`'s `styles.section`/`sectionGroup` are now `gap: 0`
+  wrappers.** They are kept because `view.sections.map` needs a per-section key
+  holder, not because they space anything; a future pass can fold them once the
+  map is rewritten.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16 · slice S4 only, fresh context (different model family from the deepseek executor)*
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM).
+
+**Gate (re-run):** band-screens + band-wiring + e2e-session-capabilities: 58 pass / 0 fail; `bun run lint` clean (1693 files); `bun run typecheck` OK. I did not re-run the full suite.
+
+**Findings**
+
+1. **MEDIUM — a section's notes run together into one line.** Code: `SessionInfoSheet.tsx:244-274` and `BandSection.tsx:67-73`. `Section` passes the notes as a Fragment of `<Text>`s. `BandSection` puts that Fragment inside its own footnote `<Text>`. React Native lays out a `<Text>` nested in another `<Text>` inline, with no break between them. Before S4, each note was its own paragraph. Example: the MCP section always has a `footer` (`session-info.ts:687`) and may also have a `switchNote` (`:689`), so it now reads "1 of 2 connected" followed straight by the switch note, with no space. The Skills section can join three notes this way ("and 3 more" + "N skipped" + the switch note, `:797-802`). A second problem comes with it: a nested `<Text>` is a virtual text node on iOS, so the `session-info-switch-note-*` testID matches no view. The tests did not catch this because they scan the source text and never lay anything out, so the mutation-based checks cannot see it either. Fix: let `BandSection` take a non-string footnote as a `View`, or have each note render as its own block. Then add a test that pins one block per note.
+
+**Attacks tried**
+- Mutation: I removed the `{closeGlyph}` that the scroll variant pins outside the `ScrollView`. The band-wiring test failed (1 fail), so that test does detect the change. I reverted the edit with `Edit`, and `git status` showed the tree clean afterwards.
+- Flow contracts: flow 25 still taps `session-info-close`, through `closeTestID` on `Sheet`. No flow references the switch-note id.
+- Auto-accept moved into the Session band as its last row. It no longer passes `first`, so it draws a hairline between itself and the row above, which is correct. It shows on the same condition as before (`section.id === "session" && autoAccept`).
+- §7 invariants: S4 only touches rendering. It has no protocol, persistence, RPC or broker reach, and puts no new logic in a component apart from the `notes` filter, which is trivial.
+- Small items, not findings: the root dropped `paddingTop: insets.top`, which was the old top bar's inset (please confirm on a device). `BandSection.tsx:4` duplicates the "label, then ONE full-width surface" line in its doc comment. Two notes with identical text would get duplicate React keys.
+
+**Unverified:** I did not run flows 24/25 or take screenshots, because the PushCore blocker recorded in Execution still stands. So the visual check against row D is still owed.
+
+**Executor behaviour:** Honest and thorough. It recorded its drift openly, fixed the five vacuous tests its own mutations exposed, and was clear about what it had not verified. Its gap is the one in finding 1: every test reads the source, none renders, so a layout regression gets through.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16 · answers Review (slice S4) · my own id, proven below*
+
+**Model id provenance.** My own session transcript,
+`~/.claude/projects/-Users-gmeghnag-tentacle/fa477ae9-96f6-4705-bffa-dce2ef1b77a4.jsonl`
+(the `CLAUDE_CODE_SESSION_ID` in my environment), carries **663 assistant events,
+every one `"model":"claude-opus-5-5"`** (31 more are `"<synthetic>"`, harness
+noise). `~/.claude/settings.json` says `"model": "opus"`, and `claude-opus-5-5`
+is the only non-synthetic id in that log. So the signature is the model that
+actually wrote it — checked, not assumed (the absence of this check is what
+produced the S3 review's finding 3).
+
+Scope: the review's **1 MEDIUM, 0 HIGH**. The three "small items, not findings"
+were also closed where they were mine to close (§ Nits below); the device
+confirmation of `paddingTop` is still the owner's.
+
+#### The finding
+
+**MEDIUM — a section's notes ran together into one line** (`SessionInfoSheet.tsx`
+`Section`, `BandSection.tsx` footnote). `Section` passed its notes as a Fragment
+of `<Text>`s, `BandSection` put that Fragment inside its own footnote `<Text>`,
+and a `<Text>` inside a `<Text>` lays out INLINE in React Native. So "2 of 2
+connected" ran straight into "Off hides it from the model…", and because the
+inner node is a virtual text node, `session-info-switch-note-*` matched no view.
+
+#### Reproduced first, and RED on the property
+
+The finding's own diagnosis was that every test in this folder reads the SOURCE,
+so no mutation can see a layout regression. That is the real gap, so the fix
+starts with a test that RENDERS. `test/band-notes.test.ts` walks the real
+element tree of `SessionInfoSheet` — calling the components and following the
+returned elements, which needs only React itself (no renderer: no
+`react-test-renderer`, no `react-dom` in this repo) — with `react-native`,
+`expo-symbols` and `react-native-safe-area-context` mocked to host stubs.
+
+Red, on the shipped code (`.tentacle/tmp/mobile-chrome/f1r1-red5.log`):
+
+```
+(fail) … no `<Text>` is nested in a `<Text>` anywhere in the sheet
+   -   "nested": [],
+   +   "nested": [
+   +     "2 of 2 connectedOff hides it from the model in this session, from the next reply.",
+   +   ],
+(fail) … each note is its own block: never two notes inside one text run
+   -   "parent": "View",
+   +   "parent": "Text",
+(fail) … the switch note's testID is on a real view, per section
+   -   "hosts": 1,
+   +   "hosts": 0,
+```
+
+That joined string is the review's finding, reproduced exactly. Green after the
+fix: `8 pass / 0 fail`.
+
+One harness bug found and fixed on the way, worth recording because it is the
+same trap this test exists to avoid: the first version stubbed each host as a
+FUNCTION, so the walker called it and discarded the result — every assertion ran
+on an empty tree and passed on the buggy code. The stubs are string element
+types now, and the test asserts `textBlocks > 10` before believing a verdict.
+
+#### What changed
+
+- **`apps/mobile/src/band-notes.ts` (new, pure).** `sectionNotes(section)` → the
+  section's notes as BLOCKS in reading order (`rowsNote`, `footer`,
+  `switchNote`), each keyed by its ROLE, with the switch note's testID. Blank
+  notes are not blocks. Pure + React-free (AGENTS §7), so "how many blocks, in
+  what order, with what key" is asserted without rendering anything.
+- **`apps/mobile/src/ui/BandSection.tsx`.** The `footnote` slot wraps its content
+  in a `View` (a column, `paddingTop: 8`, `gap: 8` — the old `section: { gap: 8 }`
+  rhythm the notes had before they moved into the band's slot), not a `Text`; a
+  new **`notes?: readonly ReactNode[]`** prop stacks one block each; new exported
+  **`BandNote`** is the paragraph to render into it. `footnote` stays ONE
+  paragraph (so a plain string and `ComputersScreen`'s inline `InlineMono` copy
+  keep working) — a `View` around a raw string child would throw in RN, and a
+  `View` around inline runs would stack them.
+- **`apps/mobile/src/screens/SessionInfoSheet.tsx`.** `Section` reads
+  `sectionNotes(section)` and maps one `<BandNote>` per note into `notes={…}`;
+  the local `notes` filter and the Fragment are gone.
+- **`apps/mobile/test/band-wiring.test.ts`.** The label assertion read a fixed
+  900-char window from the first `label`, which landed in the JSX and stopped
+  reaching the stylesheet once the component grew (fix round 1 added `BandNote`).
+  It now slices the two STYLE BLOCKS — same property, no character window.
+- **`changelog.d/mobile-chrome.changed.md`** — the band sentence now says each
+  note stays a paragraph of its own.
+
+#### Nits the review listed as non-blocking, both closed
+
+- `BandSection.tsx`'s doc comment said "then an label, then ONE full-width
+  surface…" twice (a duplicated line, `:4`). Rewritten to one line.
+- Two notes with identical text got duplicate React keys: keys are now the
+  note's ROLE, pinned by a test (`two notes saying the SAME words still get
+  distinct keys`).
+
+#### Mutation checks (§9 — each applied, run, reverted, `cmp`'d back)
+
+Script `.tentacle/tmp/mobile-chrome/f1-mut2.sh` + `f1-mut3.sh`, output
+`f1-mut2.out` / `f1-mut3.out`. Face value of a `bun test` run, not a code read.
+
+| # | Mutation | Killed |
+|---|---|---|
+| M1 | `BandSection` puts the notes back inside ONE `<Text>` (the shipped bug) | 3 tests |
+| M2′ | `BandNote` nests a run inside its own `<Text>` (the inline shape) | 2 tests |
+| M3 | `footer` keyed as `rowsNote` | 1 test |
+| M4 | the switch note's `testID` dropped | 1 test |
+| M5 | an absent note still becomes a blank block | 3 tests |
+| M6 | keys by TEXT instead of by role (the pre-fix shape) | 2 tests |
+| M7 | `footnotes: { gap: 8 }` removed (blocks stack shoulder to shoulder) | 1 test |
+
+Two weaker mutations were tried first and **rejected as weak**, which is why the
+table has M2′/M6 instead: M2 (wrapping `BandNote`'s `<Text>` in a `View`) is not
+Text-in-Text at all, and the original M3/M6 shapes killed only the ordering
+test. A mutation that kills the wrong test proves nothing (§9). After every
+mutation: `cp` back and `cmp` against the fixed copies — all three files
+`identical`, then `8 pass / 0 fail`.
+
+M7 targets the `gap` the fix adds, from `band-wiring.test.ts`'s prop guard
+(applied, run, reverted, `cmp` back to identical).
+
+#### Gate
+
+- `bunx tsc --noEmit` → clean; `bunx tsc -p apps/mobile` → clean;
+  `bunx tsc -p apps/relay` → clean (the full `bun run typecheck`).
+- `bun run lint` → **clean, 0 errors / 0 warnings, 1695 files** (the AGENTS §6
+  baseline is clean, so "no new issues" is true).
+- `bun test` → **12282 pass · 5 skip · 0 fail**, 881 files, 447 s
+  (`.tentacle/tmp/mobile-chrome/f1-full.log`). The 5 skips are the documented
+  opt-in ones (2 docker, 2 k8s, 1 slow keepalive), none in `apps/mobile`.
+
+#### Not done, and why
+
+- **The device/screenshot check against row D is still owed.** The same PushCore
+  blocker the slice recorded still stands; I did not run flows 24/25.
+- **`paddingTop: insets.top` on the sheet's root** stays dropped (the review's
+  "please confirm on a device") — that is an owner decision on a device, not
+  something a laptop test can settle, and I did not want to invent a
+  screenshot-backed claim.
+- **Verification boundary, stated plainly:** the render test proves the ELEMENT
+  TREE has one block per note and no nested text runs. It cannot prove pixels —
+  a real device render is still the only proof of that, and it is not in this
+  round.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · checks the fix commit `67e44b69` (`git diff HEAD~1`)*
+
+**Verdict: APPROVE.** Finding 1 is fixed, and I found no regression in the fix diff.
+
+- **Fix:** the new pure module `band-notes.ts` (`sectionNotes`) returns one entry per note, keyed by its role. `BandSection` now draws its notes in a column `View`, each note as a sibling `BandNote` `<Text>`, with `gap: 8`. The single-`footnote` path is unchanged: one `<Text>`, which still allows inline runs such as `InlineMono`.
+- **Mutation 1:** I wrapped `notes` in a `<Text>` inside `BandSection`. The 3 render tests in `band-notes.test.ts` failed (block per note, no nested Text, switch-note testID on a real view). Reverted.
+- **Mutation 2:** I gave the switch note the key `footer`. 2 tests failed, including the duplicate-key one. Reverted, and `git status` was clean.
+- **Checks:** `bun test apps/mobile` 1953 pass / 0 fail across 144 files. `bun run lint` clean (1695 files). `bun run typecheck` OK.
+- **Regression attacks:** `mock.module` replaces those modules for the whole test process, and `mock.restore` does not undo module mocks in Bun. I checked whether other tests use the mocked modules: the other three files that mention `react-native`, `expo-symbols` or the safe-area package only match them as text, and the full mobile suite stays green. So it is safe today, but a future test that renders RN will pick up the stubs. Not a finding. The three other `footnote=` callers (Computers, Settings) keep their old rendering. The `band-wiring` label test was rewritten to read the style blocks; I checked it against the new stylesheet and it still asserts `rowX`, `sectionTop` and the 6 pt bottom padding.
+- **Still owed from round 1:** flows 24/25 and the visual check against row D, blocked by `PushCore`.

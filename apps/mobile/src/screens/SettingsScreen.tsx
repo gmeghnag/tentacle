@@ -1,9 +1,10 @@
 /**
  * Settings (docs/feat/mobile-lock.md D6; no mockup — the system of
- * docs/feat/mobile-ui-polish.md applied: large title + glass back, 26 pt grouped
- * cards, 44 pt rows, an SF Symbol checkmark, `Banner` for notices). A dumb
- * renderer: which delay is selected, whether the device can lock, and what the
- * export did all arrive precomputed.
+ * docs/feat/mobile-ui-polish.md applied, restyled to E2 bands by S4 of
+ * docs/feat/mobile-chrome.md: a large title + thin back, ONE full-width
+ * `BandSection` per section, 44 pt rows, an SF Symbol checkmark, `Banner` for
+ * notices). A dumb renderer: which delay is selected, whether the device can lock,
+ * and what the export did all arrive precomputed.
  *
  * The four delay rows are `lock-delay-<v>` and the export row is `export-logs`,
  * because those are the only values a Maestro flow can assert (P9: RN's new
@@ -15,14 +16,13 @@ import type { LockDelay, LockNotice } from "../app-lock.ts";
 import type { SpeechRate } from "../read-aloud.ts";
 import type { LanguageSetting } from "../speech-locale.ts";
 import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
+import { BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
-import { GroupedCard } from "../ui/GroupedCard.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
-import { SectionHeader } from "../ui/SectionHeader.tsx";
 import { voiceRows } from "../voice-beta.ts";
 import { DEFAULT_VOICE_SETTINGS, type VoiceSettings } from "../voice-settings-store.ts";
 
@@ -164,7 +164,8 @@ export function SettingsScreen({
         />
         <View style={styles.body}>
           <View style={styles.section}>
-            <SectionHeader palette={palette} title="App lock" />
+            {/* The no-passcode notice is not a row: it stays a banner, above the
+                band it explains (Design 4 bands hold rows, not notices). */}
             {notice === "no-passcode" ? (
               <Banner
                 palette={palette}
@@ -175,7 +176,11 @@ export function SettingsScreen({
                 body="This iPhone has no passcode. Add one in Settings → Face ID & Passcode."
               />
             ) : null}
-            <GroupedCard palette={palette}>
+            <BandSection
+              palette={palette}
+              title="App lock"
+              footnote="How long tentacle may stay in the background before it asks for Face ID again."
+            >
               {DELAY_ROWS.map((row, index) => {
                 const selected = setting === row.value;
                 const asked = pending === row.value && !selected;
@@ -206,10 +211,7 @@ export function SettingsScreen({
                   />
                 );
               })}
-            </GroupedCard>
-            <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
-              How long tentacle may stay in the background before it asks for Face ID again.
-            </Text>
+            </BandSection>
             {error === undefined ? null : (
               <Banner
                 palette={palette}
@@ -221,8 +223,7 @@ export function SettingsScreen({
             )}
           </View>
           <View style={styles.section}>
-            <SectionHeader palette={palette} title="Notifications" />
-            <GroupedCard palette={palette}>
+            <BandSection palette={palette} title="Notifications">
               {/* P9: ONE row for the phone. With nothing paired the switch is
                   disabled and the detail says what to do about it. */}
               <Row
@@ -253,15 +254,18 @@ export function SettingsScreen({
                     : notifications.detail}
                 </Text>
               </Row>
-            </GroupedCard>
+            </BandSection>
           </View>
           {voice === undefined || onVoice === undefined ? null : (
             <View style={styles.section}>
               {/* docs/feat/mobile-voice-hidden.md: the voice features live under
                   BETA, OFF by default, and a row appears only when a switch that
                   uses it is on. Which rows those are is `voiceRows`, not this. */}
-              <SectionHeader palette={palette} title="Beta" />
-              <GroupedCard palette={palette}>
+              <BandSection
+                palette={palette}
+                title="Beta"
+                footnote="Experimental features. They may not work well yet."
+              >
                 <Row
                   palette={palette}
                   first
@@ -291,53 +295,43 @@ export function SettingsScreen({
                     />
                   }
                 />
-              </GroupedCard>
-              <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
-                Experimental features. They may not work well yet.
-              </Text>
+              </BandSection>
               {rows.autoRead ? (
-                <>
-                  <SectionHeader palette={palette} title="Read aloud" />
-                  <GroupedCard palette={palette}>
-                    <Row
-                      palette={palette}
-                      first
-                      minHeight={size.rowSetting}
-                      title="Read replies aloud"
-                      trailing={
-                        <Switch
-                          testID="voice-read-aloud"
-                          accessibilityLabel="Read replies aloud"
-                          value={voice.readAloud}
-                          trackColor={{ false: palette.fill, true: palette.green }}
-                          onValueChange={(readAloud) => onVoice({ ...voice, readAloud })}
-                        />
-                      }
-                    />
-                  </GroupedCard>
-                </>
+                <BandSection palette={palette} title="Read aloud">
+                  <Row
+                    palette={palette}
+                    first
+                    minHeight={size.rowSetting}
+                    title="Read replies aloud"
+                    trailing={
+                      <Switch
+                        testID="voice-read-aloud"
+                        accessibilityLabel="Read replies aloud"
+                        value={voice.readAloud}
+                        trackColor={{ false: palette.fill, true: palette.green }}
+                        onValueChange={(readAloud) => onVoice({ ...voice, readAloud })}
+                      />
+                    }
+                  />
+                </BandSection>
               ) : null}
               {rows.language ? (
-                <>
-                  <SectionHeader palette={palette} title="Language" />
-                  <GroupedCard palette={palette}>
-                    {choice(LANGUAGE_ROWS, voice.language, "voice-language", (language) =>
-                      onVoice({ ...voice, language }),
-                    )}
-                  </GroupedCard>
-                </>
+                <BandSection palette={palette} title="Language">
+                  {choice(LANGUAGE_ROWS, voice.language, "voice-language", (language) =>
+                    onVoice({ ...voice, language }),
+                  )}
+                </BandSection>
               ) : null}
               {rows.rate ? (
-                <>
-                  <SectionHeader palette={palette} title="Speaking rate" />
-                  <GroupedCard palette={palette}>
-                    {choice(RATE_ROWS, voice.rate, "voice-rate", (rate) =>
-                      onVoice({ ...voice, rate }),
-                    )}
-                  </GroupedCard>
-                </>
+                <BandSection palette={palette} title="Speaking rate">
+                  {choice(RATE_ROWS, voice.rate, "voice-rate", (rate) =>
+                    onVoice({ ...voice, rate }),
+                  )}
+                </BandSection>
               ) : null}
-              <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
+              {/* The privacy note spans every voice section, so it is the group's
+                  own line, not one band's footnote — on the band's gutter. */}
+              <Text style={[typography.footnote, styles.note, { color: palette.sec }]}>
                 Dictation and speech run on this iPhone. Audio never leaves it and is never saved.
               </Text>
               {voiceError === undefined ? null : (
@@ -352,8 +346,11 @@ export function SettingsScreen({
             </View>
           )}
           <View style={styles.section}>
-            <SectionHeader palette={palette} title="Diagnostics" />
-            <GroupedCard palette={palette}>
+            <BandSection
+              palette={palette}
+              title="Diagnostics"
+              footnote="Logs hold connection state, errors and timings — never message content or keys. You choose where to share the file."
+            >
               <Row
                 testID="export-logs"
                 palette={palette}
@@ -364,11 +361,7 @@ export function SettingsScreen({
                 dimmed={!canExport}
                 {...(canExport ? { onPress: onExportLogs } : {})}
               />
-            </GroupedCard>
-            <Text style={[typography.footnote, styles.footnote, { color: palette.sec }]}>
-              Logs hold connection state, errors and timings — never message content or keys. You
-              choose where to share the file.
-            </Text>
+            </BandSection>
             {exportError === undefined ? null : (
               <Banner
                 palette={palette}
@@ -386,13 +379,15 @@ export function SettingsScreen({
   );
 }
 
-// ONE left edge (visual review V3/N13): the cards sit on the page margin (their
-// own `marginHorizontal`), headers AND footers 16 inside the card edge, banners
-// on the page margin; the first group as far under the title as between groups.
+// ONE left edge: every band is full-width and brings its own 20 pt gutter
+// (`space.rowX`), so the body adds none and the rhythm between sections is the
+// band's own `space.sectionTop` (Design 4) — a wrapper gap on top of it would
+// double the distance between two bands. The `section` wrappers now only group a
+// band with the banner that belongs to it.
 const styles = StyleSheet.create({
   root: { flex: 1 },
   content: { paddingBottom: 40 },
-  body: { gap: space.sectionComputers, paddingTop: space.sectionSessions },
+  body: { gap: 0 },
   section: { gap: 8 },
-  footnote: { paddingHorizontal: space.inset + space.cardInner },
+  note: { paddingHorizontal: space.rowX, paddingTop: 8 },
 });
