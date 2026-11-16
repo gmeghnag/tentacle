@@ -1034,3 +1034,16 @@ The 5 skips are the same pre-existing opt-in gates the S1 executor enumerated
 **Unverified / next:** unchanged from S1 — the read path (chunked `readArtifact`,
 resume, sha256) is S5's, and T5.3's "never buffers > `meta.size`" is S5's test,
 not this slice's; this round only pins the wire bound it relies on.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16* (same fresh-context reviewer as round 1; a different model family from the executor)
+
+**Verdict: PASS.** Both round-1 findings are fixed, and the fix diff (`bbd4058b`) introduces no regressions.
+
+- **Finding 1 (vacuous chunk-cap test): fixed.** The test now uses `"A".repeat(ATTACHMENT_CHUNK_B64_MAX + 4)`, which is valid base64, so only the cap can reject it. `B64_MAX` = 349 528, a multiple of 4. Mutation M6 (drop `.max(ATTACHMENT_CHUNK_B64_MAX)`) went from 0 to **1 fail**.
+- **Finding 2 (unbounded read `size`): fixed** at `artifact.ts:144` with `.max(MAX_ARTIFACT_BYTES)`. `protocol.json` regenerated (`maximum: 20971520`). New mutation M10 (drop that max) → **1 fail**.
+- **`source` gap: fixed.** M8 (drop the control-char check) went from 0 to **1 fail**. New M11 (drop `.max(512)`) → **1 fail**.
+- **Regression sweep:** M1–M11 each make at least one test fail. Each mutation was reverted, and `git status` was clean afterwards. The fix diff touches only the read-result schema, its tests and the regenerated JSON. Nothing else on the wire changed.
+- **Gate:** `bun test packages/protocol` → 441 pass, 0 fail. `bun run lint` clean (1664 files). `bun run typecheck` clean.
+- **Carried to S2/S5 (not S1 findings):** S2 must keep `callId` ≤ 256 characters. S5 must still check that the read's `size` equals `meta.size`.
