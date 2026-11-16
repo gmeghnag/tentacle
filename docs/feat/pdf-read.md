@@ -825,3 +825,24 @@ the 1–2-blank case and the hostile-count bound.
   µs, so a flake is unlikely.
 
 *— claude-opus-5-5, 2026-11-16*
+
+### P2 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (P2 not implemented — nothing to review).
+
+- `git diff main...HEAD --name-only` touches only `changelog.d/pdf-read.added.md`,
+  `docs/feat/pdf-read.md`, `packages/core/src/{index,pdf-text}.ts` and
+  `packages/core/test/pdf-text.test.ts` — all P1. `git grep "pdfjs|pdf-extract|pdf-worker"
+  HEAD -- packages scripts package.json` → no hits: no `pdfjs-dist` pin in
+  `packages/tools/package.json`, no Worker extractor, no `ready` handshake, no
+  timeout/semaphore, no third build entrypoint, no fixture generator, no
+  `pdf-extract.test.ts`. The Execution has no P2 section.
+- Therefore no §7 invariant (`$bunfs` entrypoint, non-blocking daemon, hostile input)
+  could be attacked and no mutation could be run for P2.
+- Gate on HEAD: `pdf-text.test.ts` 44 pass, 0 fail; `bun run lint` 1722 files, clean;
+  `bun run typecheck` exit 0. No regression from the `main` merge (`6c18cfb7`).
+- Carry into P2 (from the P1 Execution, still unaddressed in §Design D2): the
+  mandatory `ready` handshake before `postMessage`, and `doc.cleanup()` instead of
+  `doc.destroy()` on pdfjs-dist 6.5.438.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context)
