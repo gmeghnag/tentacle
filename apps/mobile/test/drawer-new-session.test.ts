@@ -29,6 +29,10 @@ function fresh(log: string[], fail?: { readonly open?: unknown; readonly detach?
     },
     async detach() {
       log.push("detach");
+      // Settles a macrotask later, like a real RPC round trip: a caller that
+      // does not AWAIT the detach answers before "detach-done" is logged.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      log.push("detach-done");
       if (fail?.detach !== undefined) {
         throw fail.detach;
       }
@@ -43,7 +47,7 @@ describe("createFreshSession", () => {
     const result = await createFreshSession(fresh(log));
     log.push("answered");
     expect(result).toEqual({ ok: true });
-    expect(log).toEqual(["create", "detach", "answered"]);
+    expect(log).toEqual(["create", "detach", "detach-done", "answered"]);
   });
 
   test("a failed create is a typed reason by error code, and nothing is detached", async () => {

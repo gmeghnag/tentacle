@@ -1779,7 +1779,12 @@ D. send through the attached handle: ok
    - **Cost (owner's call, see Not done):** tapping New session and never
      sending leaves an empty session on that computer. It shows in Recent with
      no title, and is archived by the daemon's idle TTL like any other
-     detached session.
+     detached session. **And** every create runs the daemon's `admit()`
+     (`packages/daemon/src/session-host.ts:1235-1257`): at
+     `maxDetachedSessions` it ARCHIVES the detached session idle the longest.
+     So repeated taps that are never sent push the person's real older
+     sessions into Archived — reversible (reopen), but not reported to them.
+     (Corrected in Fix round 1; Review S7 finding 2.)
 2. **F8 has a different shape.** The plan said "a failed create on the first
    send surfaces as the composer's send-failure state (outbox keeps the text)".
    Now a create fails at the tap, before anything has been typed. The drawer
@@ -1873,10 +1878,46 @@ D. send through the attached handle: ok
   the person never sends. The other option is a true lazy create: an outbox
   item flagged "may create", persisted, so that a retry after an app kill
   still creates. That is a persisted-format change and needs its own task.
-  Until the owner decides, the tap creates.
+  Until the owner decides, the tap creates. Weigh in the decision: at the
+  daemon's detached cap each abandoned create archives one of the person's
+  real idle sessions (Drift 1, cost), silently.
 - No "(new)" placeholder row is drawn in the drawer before the first turn's
   title arrives; the daemon's own (empty) title shows there.
 - Nothing committed. `TODO.md` untouched.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16 · answers Review (slice S7)*
+
+1. **MEDIUM, detach not pinned as awaited — FIXED (test only; the code was
+   already right).** `apps/mobile/test/drawer-new-session.test.ts` `fresh()`:
+   the fake `detach` now settles a macrotask later (`setTimeout 0`, like an RPC
+   round trip) and logs `detach-done`; the ordering test asserts
+   `create → detach → detach-done → answered`.
+   - **Red (mutation = the reviewer's bug):** `await handle.detach()` →
+     `void handle.detach()` in `src/session-controller.ts:131`:
+     ```
+     error: expect(received).toEqual(expected)
+         "detach",
+     -   "detach-done",
+         "answered",
+     (fail) createFreshSession > creates, THEN detaches, and only then answers ok …
+      9 pass
+      1 fail
+     ```
+     (Before this round the same mutant gave 0 fail — Review S7.) Reverted with
+     Edit; `git diff --stat` then showed only the test file.
+   - **Green:** `drawer-new-session` + `new-session-link`: 12 pass · 0 fail.
+2. **MEDIUM, cost of create-at-tap understated — FIXED (doc; it stays the
+   owner's call).** Verified `admit()` (`packages/daemon/src/session-host.ts:1235-1257`):
+   at `maxDetachedSessions` with a persister it archives `selectEvictable`'s
+   victim. Drift 1's cost and Not done now state that abandoned creates can
+   silently push real idle sessions into Archived. No code change: choosing
+   lazy create vs. create-at-tap is the owner decision already open.
+
+**Gate:** `bunx tsc --noEmit` clean · `tsc -p apps/mobile` clean ·
+`bun run lint` 1685 files clean · `bun test` **12148 pass · 5 skip · 0 fail**
+(874 files; the opt-in skips). E2E flow 26 still not run (same native block).
 
 ## Review (slice S7)
 
