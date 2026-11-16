@@ -114,7 +114,7 @@ export class SessionArtifacts {
       const last = new Uint8Array(1);
       await handle.read(last, 0, 1, size - 1);
       // A torn last line (a crash mid-append) is closed first, so it stays one bad line.
-      const data = Buffer.from(last[0] === 0x0a ? line : `\n${line}`);
+      const data = new Uint8Array(Buffer.from(last[0] === 0x0a ? line : `\n${line}`));
       await handle.write(data, 0, data.length, size);
       await handle.sync();
     } finally {

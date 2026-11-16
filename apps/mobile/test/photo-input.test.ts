@@ -12,7 +12,13 @@ import {
   MAX_IMAGE_BYTES,
 } from "@tentacle/core";
 import { AttachmentRefSchema } from "@tentacle/protocol";
-import { type PhotoState, nextPhotoStep, photoCopyName, photoName } from "../src/photo-input.ts";
+import {
+  type PhotoState,
+  nextPhotoStep,
+  photoCopyName,
+  photoName,
+  resizeAxis,
+} from "../src/photo-input.ts";
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -324,5 +330,121 @@ describe("each pick's sandbox copy gets its OWN name (finding 3)", () => {
     // The extension survives, so the file still says what it is.
     expect(copy.endsWith(".png")).toBe(true);
     expect(copy.startsWith("1700000000000-12-")).toBe(true);
+  });
+});
+
+/**
+ * Item 5 (fix/mobile-media-live): a photo goes out with its LONG EDGE ≤ 2048 px
+ * at JPEG quality 0.8 (`≈300–600 KB`), never at 4032×3024 / several MB.
+ *
+ * Why: models downsample anyway (Claude ~1568 px) and a local VL model (Qwen-VL)
+ * turns pixels into tokens — slow prefill, context burned — while the relay
+ * carries the upload. The setting "Send photos at original size" bypasses the
+ * resize (a person who wants the full picture), never the format rules.
+ *
+ * Every case names the mutation it is red on.
+ */
+describe("nextPhotoStep — a photo's SIZE (item 5: long edge ≤ 2048, quality 0.8)", () => {
+  test("a 4032×3024 iPhone photo asks for a 2048-wide conversion (mutation: no edge rule → the full 12 MP photo is sent)", () => {
+    // The step names the TARGET WIDTH, so the adapter never has to recompute it:
+    // the aspect ratio is kept (2048×1536 — the plan's own numbers).
+    expect(nextPhotoStep(state({ width: 4032, height: 3024 }))).toEqual({
+      kind: "resize",
+      width: 2048,
+      height: 1536,
+      quality: 0.8,
+    });
+  });
+
+  test("a photo already within 2048 on its long edge goes out untouched (mutation: resize a small photo → needless re-encode → red)", () => {
+    // 1200×900: not resized, and NOT re-encoded either (only the type decides).
+    expect(nextPhotoStep(state({ width: 1200, height: 900, name: "small.jpg" }))).toMatchObject({
+      kind: "ready",
+      photo: { mimeType: "image/png" },
+    });
+  });
+
+  test("a portrait photo is bounded by its HEIGHT, never stretched (mutation: always scale the width → a 3024-wide crop)", () => {
+    expect(nextPhotoStep(state({ width: 3024, height: 4032 }))).toEqual({
+      kind: "resize",
+      width: 1536,
+      height: 2048,
+      quality: 0.8,
+    });
+  });
+
+  test("exactly 2048 is NOT resized (the boundary is `>`, never `>=`)", () => {
+    expect(nextPhotoStep(state({ width: 2048, height: 1000 })).kind).toBe("ready");
+  });
+
+  test("‘Send photos at original size’ bypasses the resize (mutation: ignore the setting → the person's choice is overridden)", () => {
+    const step = nextPhotoStep(state({ width: 4032, height: 3024, sendOriginal: true }));
+    expect(step.kind).toBe("ready");
+  });
+
+  test("the resize happens ONCE (mutation: no `resized` check → an endless resize loop)", () => {
+    const step = nextPhotoStep(state({ width: 4032, height: 3024, resized: true }));
+    expect(step.kind).toBe("ready");
+  });
+
+  test("HEIC is still converted (the resize is about SIZE, not the format) and its size comes after", () => {
+    expect(nextPhotoStep(state({ bytes: HEIC, width: 4032, height: 3024 }))).toEqual({
+      kind: "convert-to-jpeg",
+    });
+    // Converted: the resize is what is left to do.
+    expect(nextPhotoStep(state({ width: 4032, height: 3024, converted: true }))).toMatchObject({
+      kind: "resize",
+      width: 2048,
+    });
+  });
+
+  test("a pick with no width/height is never guessed at: it goes out as it came", () => {
+    // The picker may not report dimensions; inventing a resize target would be a
+    // wrong aspect ratio, so the cap rule (`MAX_IMAGE_BYTES`) alone applies.
+    expect(nextPhotoStep(state()).kind).toBe("ready");
+  });
+
+  test("the over-cap refusal still wins over the edge rule (a 15 MB 4032-wide PNG is resized, and the size is then re-checked)", () => {
+    // Order: the cap is about what the WIRE accepts, so a photo over it must be
+    // shrunk even when it is also too wide — one resize serves both.
+    const huge = image(PNG_SIG, MAX_IMAGE_BYTES);
+    const step = nextPhotoStep(state({ bytes: huge, width: 4032, height: 3024 }));
+    // The edge rule fires first (it is the cheaper, always-on bound), and the
+    // size is re-checked on the result.
+    expect(step).toMatchObject({ kind: "resize", width: 2048, quality: 0.8 });
+  });
+
+  test("the JPEG re-encode writes 0.8 (the plan's figure), which the adapter reads off the step", () => {
+    const step = nextPhotoStep(state({ width: 4032, height: 3024 }));
+    expect(step.kind === "resize" ? step.quality : null).toBe(0.8);
+  });
+
+  test("never UPSCALES: a tiny photo's long edge stays where it is (mutation: scale to exactly 2048 → a blurred upscale)", () => {
+    expect(nextPhotoStep(state({ width: 320, height: 240 })).kind).toBe("ready");
+  });
+});
+
+describe("resizeAxis — the effect names ONE edge (Review round 1, MEDIUM 3)", () => {
+  /**
+   * `ImageManipulator.resize` does NOT keep the aspect ratio when it is given
+   * both numbers: it fits the image into that box. So the resize must name the
+   * long edge only — otherwise a picker that reported pre-EXIF-orientation
+   * dimensions (a known expo-image-picker issue for rotated photos) turns a
+   * portrait shot into a squashed landscape one.
+   *
+   * Mutation: return `{width, height}` (or always the width) → red.
+   */
+  test("a landscape target names its WIDTH", () => {
+    expect(resizeAxis({ width: 2048, height: 1536 })).toEqual({ width: 2048 });
+  });
+
+  test("a portrait target names its HEIGHT, never the width (mutation: always the width → a squashed portrait)", () => {
+    expect(resizeAxis({ width: 1536, height: 2048 })).toEqual({ height: 2048 });
+  });
+
+  test("it never returns both — the manipulator derives the other from the pixels", () => {
+    const axis = resizeAxis({ width: 2048, height: 2048 });
+    expect(Object.keys(axis)).toHaveLength(1);
+    expect(axis).toEqual({ width: 2048 });
   });
 });

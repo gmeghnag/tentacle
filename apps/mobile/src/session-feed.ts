@@ -24,7 +24,13 @@
  */
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import type { AttachmentRef } from "@tentacle/protocol";
-import { type State, type TranscriptInput, type TurnOutcome, apply } from "./transcript.ts";
+import {
+  type LocalPhoto,
+  type State,
+  type TranscriptInput,
+  type TurnOutcome,
+  apply,
+} from "./transcript.ts";
 
 /**
  * A turn end's reason, derived from the client's OWN union rather than by naming
@@ -91,6 +97,13 @@ export interface SessionFeedDeps {
 export interface OwnPrompt {
   readonly text: string;
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * The LOCAL copy of each ref this phone just uploaded (fix/mobile-media-live
+   * item 2): the only pixels that exist for a fresh send — the daemon has no
+   * read-back method (`thumbnails.ts:19-25`). Absent for a text-only prompt, an
+   * outbox retry whose copies are gone, and any ref from another device.
+   */
+  readonly photos?: readonly LocalPhoto[];
 }
 
 export interface SessionFeed {
@@ -143,11 +156,14 @@ function foldStream(
     }
     deps.put(
       apply(deps.state(), {
-        type: "user_message",
+        // `own_prompt`, not `user_message`: this one carries the phone's LOCAL
+        // files too, so the bubble draws the photo it just sent (item 2).
+        type: "own_prompt",
         text: own.text,
         ...(own.attachments !== undefined && own.attachments.length > 0
           ? { attachments: own.attachments }
           : {}),
+        ...(own.photos !== undefined && own.photos.length > 0 ? { photos: own.photos } : {}),
       } as TranscriptInput),
     );
   };

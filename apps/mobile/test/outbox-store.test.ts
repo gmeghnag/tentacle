@@ -255,7 +255,7 @@ describe("what it refuses", () => {
 });
 
 describe("finishing an item", () => {
-  test("removing it drops it from the file AND deletes its photo copies", async () => {
+  test("removing it drops it from the file but KEEPS its photo copies (Review round 2 R2-1: the transcript's own row draws them, and the row outlives the item — mutation: delete them again → red)", async () => {
     const fs = memoryFs();
     const store = createOutboxStore(fs, paths);
     await store.load();
@@ -263,25 +263,30 @@ describe("finishing an item", () => {
     fs.files.set("/copy/a/0.png", "bytes");
     expect(await store.removeItem("a")).toBe(true);
     expect(store.data.items.map((entry) => entry.itemId)).toEqual(["b"]);
-    expect(fs.files.has("/copy/a/0.png")).toBe(false); // the copy is gone
+    // The person's row on screen still names this file (`localPhotosOf` →
+    // `ImageRef.localUri`), and the daemon offers no read-back, so the copy is
+    // the only pixels there are: it must still be readable after the ack.
+    expect(fs.files.has("/copy/a/0.png")).toBe(true);
     // A relaunch agrees.
     const again = createOutboxStore(fs, paths);
     const loaded = await again.load();
     expect(loaded.kind === "loaded" ? loaded.data.items.map((e) => e.itemId) : []).toEqual(["b"]);
   });
 
-  test("a copy that cannot be removed does not make the removal fail (the item is what matters)", async () => {
+  test("the removal never touches the photo folder at all (mutation: any `fs.remove` here → red)", async () => {
     const fs = memoryFs();
     const store = createOutboxStore(fs, paths);
     await store.load();
     await store.setItems([item("a")]);
-    const reallyRemove = fs.remove.bind(fs);
-    fs.remove = async () => {
-      throw new Error("EBUSY");
+    const removed: string[] = [];
+    fs.remove = async (path) => {
+      removed.push(path);
     };
     expect(await store.removeItem("a")).toBe(true);
-    fs.remove = reallyRemove;
     expect(store.data.items).toEqual([]);
+    // Bounding the folder is `photo-copies.ts`'s decision, over a grace window
+    // and the copies still in use — never a delete at the ack.
+    expect(removed).toEqual([]);
   });
 });
 

@@ -52,6 +52,8 @@ import {
   useColorScheme,
 } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { ACTIVITY_SETTINGS } from "./src/activity-settings-expo.ts";
+import type { ActivitySettings } from "./src/activity-settings-store.ts";
 import {
   type AppLock,
   type AppLockEvent,
@@ -63,8 +65,8 @@ import { APP_LOG_FILES } from "./src/app-log-fs-expo.ts";
 import { createAppLogFile } from "./src/app-log-fs.ts";
 import { type AppLog, createAppLog, errorShape } from "./src/app-log.ts";
 import { exportFileName, exportText } from "./src/app-log.ts";
-import type { PickedPhoto } from "./src/compose-controller.ts";
-import { composeHandleOf } from "./src/compose-handle.ts";
+import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
+import { composeHandleOf, foldingOutboxSession } from "./src/compose-handle.ts";
 import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
 import {
   type ComputerRecordLike,
@@ -103,6 +105,7 @@ import {
   newSessionPill,
 } from "./src/drawer-new-session.ts";
 import { createDrawerRename } from "./src/drawer-rename.ts";
+import type { ActivityButtonMode } from "./src/floating-button.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
@@ -112,7 +115,6 @@ import { MemoryAnswers } from "./src/notification-dispatch.ts";
 import { createDraftStore } from "./src/outbox-drafts.ts";
 import { createOutboxDriver } from "./src/outbox-driver.ts";
 import { createExpoOutboxFs, outboxRoot } from "./src/outbox-fs-expo.ts";
-import { outboxSessionOf } from "./src/outbox-session.ts";
 import { type OutboxStore, createOutboxStore, outboxPaths } from "./src/outbox-store.ts";
 import type { OutboxItem } from "./src/outbox.ts";
 import {
@@ -124,7 +126,10 @@ import {
   runPairing,
 } from "./src/pairing-flow.ts";
 import { handlePairingText, takePendingLink } from "./src/pending-link.ts";
-import { pickFromLibrary, takePhoto } from "./src/photo-source.ts";
+import { inUseCopies, prunePhotoCopies } from "./src/photo-copies.ts";
+import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
+import type { PhotoSettings } from "./src/photo-settings-store.ts";
+import { photosRoot, pickFromLibrary, takePhoto } from "./src/photo-source.ts";
 import { rewritePushDirectory } from "./src/push-directory-expo.ts";
 import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
 import { createPushManager } from "./src/push-manager.ts";
@@ -295,6 +300,15 @@ type FoldingPrompt = {
   readonly prompt: (text: string, turnId: string, refs: readonly AttachmentRef[]) => Promise<void>;
   /** 13b's hand-back (F7/F20): the item's text is the field's again. */
   readonly onDraft?: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
+  /**
+   * The screen's OWN compose handle (fix/mobile-media-live item 1). The driver's
+   * port is built from it — never from a fresh `client.newSession(...)`, which is
+   * a SECOND session handle for the same id: `RemoteClient.register` reassigns the
+   * entry's listener to it (`remote-client.ts:3023-3026`), so the screen stops
+   * receiving the turn it started (a photo message stayed "Running" for ever over
+   * a turn the daemon had finished).
+   */
+  readonly handle?: () => ComposeHandle | null;
 };
 
 interface OutboxRuntime {
@@ -315,26 +329,31 @@ function outboxOf(computerId: string): OutboxRuntime {
     return known;
   }
   const store = createOutboxStore(createExpoOutboxFs(), outboxPaths(outboxRoot(), computerId));
+  // Bounding the photo folder is THIS store's job now, not `removeItem`'s (fix
+  // round 2, R2-1): a copy outlives its item because the transcript's row draws
+  // it, so what may go is decided by `photo-copies.ts` — its grace window, its
+  // newest-copies tail, and everything this store still names. Once, at start,
+  // after the load (the items and drafts it keeps are what must not be touched).
+  void store.load().then((loaded) => {
+    if (loaded.kind === "refused") {
+      // A newer build's file: its items are unreadable, so NOTHING here knows
+      // which copies are in use. The tail and the grace are the only guard, and
+      // a wrong guess would delete a photo that build still needs: skip it.
+      return [];
+    }
+    return prunePhotoCopies(createExpoOutboxFs(), photosRoot(), {
+      now: Date.now(),
+      inUse: inUseCopies(store.data),
+    });
+  });
   const driver = (folding: FoldingPrompt) =>
     createOutboxDriver(
-      // The port is built per run from the client's own session, so a redial's new
-      // handle is picked up (never a stale one — 13b's contract).
-      async (sessionId) => {
-        const client = CLIENTS.get(computerId);
-        if (client === undefined) {
-          return null;
-        }
-        const session = client.newSession(undefined, sessionId, undefined, { attach: {} });
-        try {
-          await session.open();
-        } catch {
-          return null;
-        }
-        // No live-turn accessor here: `facts()` reads the session's own `busy`,
-        // and a steer is turn-bound by its `steerTurnId` (13b's contract).
-        const port = outboxSessionOf(session, client, () => null as string | null);
-        return { ...port, prompt: folding.prompt };
-      },
+      // The port is the SCREEN's own handle's (fix/mobile-media-live item 1):
+      // a second `RemoteSession` for the same id replaces the client's stream
+      // listener, so the driver would steal the very turn it starts. A handle
+      // that is not there yet (the attach has not answered) gives null: the item
+      // stays `waiting` with its key and goes at the next run.
+      async () => foldingOutboxSession(folding.handle?.() ?? null, folding.prompt),
       {
         persistence: {
           items: () => store.data.items,
@@ -375,8 +394,9 @@ function composeWiring(computerId: string, sessionId: string, link: ComputerLink
     store: outbox.store,
     driver: outbox.driver,
     photos: {
-      pickFromLibrary: async (taken) => adaptPick(await pickFromLibrary(taken)),
-      takePhoto: async (taken) => adaptPick(await takePhoto(taken)),
+      pickFromLibrary: async (taken, sendOriginal) =>
+        adaptPick(await pickFromLibrary(taken, sendOriginal)),
+      takePhoto: async (taken, sendOriginal) => adaptPick(await takePhoto(taken, sendOriginal)),
     },
     // The screen's OWN attach handle (owner B4): the port reads its facts, and no
     // second handle of this id is ever opened (it would steal the screen's stream).
@@ -392,6 +412,9 @@ function composeWiring(computerId: string, sessionId: string, link: ComputerLink
       outbox.drafts.force(computerId, sessionId, { text, photos: photoFiles });
     },
     mint: () => crypto.randomUUID(),
+    // Item 5's switch, read at every pick (so a Settings flip applies to the next
+    // photo without a remount).
+    sendPhotoOriginalSize: () => PHOTO_SETTINGS.current().sendOriginal,
   };
 }
 
@@ -1018,7 +1041,7 @@ function SessionDrawerHost({
   readonly onNavigate: (nav: DrawerNav) => void;
   readonly onSettings: () => void;
   readonly onPair: () => void;
-  readonly children: (openDrawer: () => void) => ReactNode;
+  readonly children: (openDrawer: () => void, drawerOpen: boolean) => ReactNode;
 }): JSX.Element {
   const [drawer, dispatch] = useReducer(drawerReducer, from.computerId, initialDrawer);
   const [rows, setRows] = useState<readonly ComputerRow[]>([]);
@@ -1199,7 +1222,7 @@ function SessionDrawerHost({
       onNewSession={() => void fresh.start(listed, canCreate)}
       onNewSessionDismiss={() => fresh.dismiss()}
     >
-      {children(openDrawer)}
+      {children(openDrawer, drawer.open)}
     </SessionsDrawer>
   );
 }
@@ -1223,6 +1246,7 @@ function SessionRoute({
   archived,
   focus,
   onOpenDrawer,
+  drawerOpen,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
@@ -1231,6 +1255,7 @@ function SessionRoute({
   readonly archived: boolean;
   readonly focus: boolean;
   readonly onOpenDrawer: () => void;
+  readonly drawerOpen: boolean;
 }): JSX.Element {
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -1324,6 +1349,7 @@ function SessionRoute({
       title={title}
       onOpenDrawer={onOpenDrawer}
       focusComposer={focus}
+      drawerOpen={drawerOpen}
     />
   );
 }
@@ -1423,6 +1449,44 @@ function AppShell(): JSX.Element {
   const selectVoice = useCallback((next: VoiceSettings) => {
     setVoiceError(undefined);
     VOICE_SETTINGS.set(next).catch(() => setVoiceError("That voice setting didn't save"));
+  }, []);
+
+  // The Activity button (docs/feat/mobile-chrome.md Design 6, F22): loaded once;
+  // a failed write keeps the pick for this run and says so; a newer build's
+  // record is never written over (the row says it cannot be changed here).
+  const [activitySettings, setActivitySettings] = useState<ActivitySettings>(() =>
+    ACTIVITY_SETTINGS.current(),
+  );
+  const [activityWritable, setActivityWritable] = useState(true);
+  const [activityError, setActivityError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = ACTIVITY_SETTINGS.subscribe(setActivitySettings);
+    void ACTIVITY_SETTINGS.load().then(() => setActivityWritable(ACTIVITY_SETTINGS.writable()));
+    return unsubscribe;
+  }, []);
+  const selectActivityMode = useCallback((mode: ActivityButtonMode) => {
+    setActivityError(undefined);
+    ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), mode }).catch(() =>
+      setActivityError("That Activity button setting didn't save"),
+    );
+  }, []);
+
+  // Photos (fix/mobile-media-live item 5): the "Send photos at original size"
+  // switch, loaded once. A failed write leaves the copy unchanged and says so;
+  // a newer build's record is never written over.
+  const [photoSettings, setPhotoSettings] = useState<PhotoSettings>(() => PHOTO_SETTINGS.current());
+  const [photoWritable, setPhotoWritable] = useState(true);
+  const [photoError, setPhotoError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    void PHOTO_SETTINGS.load().then(() => {
+      setPhotoSettings(PHOTO_SETTINGS.current());
+      setPhotoWritable(PHOTO_SETTINGS.writable());
+    });
+  }, []);
+  const selectPhotoSettings = useCallback((next: PhotoSettings) => {
+    setPhotoError(undefined);
+    setPhotoSettings(next);
+    PHOTO_SETTINGS.set(next).catch(() => setPhotoError("That photo setting didn't save"));
   }, []);
 
   // The switcher cover follows the setting (Owner Q2): on for everything but
@@ -1918,6 +1982,16 @@ function AppShell(): JSX.Element {
                 voice={voiceSettings}
                 {...(voiceError === undefined ? {} : { voiceError })}
                 onVoice={selectVoice}
+                activityMode={activitySettings.mode}
+                activityWritable={activityWritable}
+                {...(activityError === undefined ? {} : { activityError })}
+                onActivityMode={selectActivityMode}
+                // Item 5's switch (fix/mobile-media-live): the downscale is the
+                // default, and a newer build's record is never written over.
+                photoSettings={photoSettings}
+                photoWritable={photoWritable}
+                {...(photoError === undefined ? {} : { photoError })}
+                onPhotoSettings={selectPhotoSettings}
                 // P9: ONE row for the phone, over every paired computer. A
                 // computer that cannot deliver outranks one that can — it is the
                 // reason nothing arrives — and the toggle reaches all of them.
@@ -1989,10 +2063,11 @@ function AppShell(): JSX.Element {
                 onSettings={() => navigation.navigate("Settings")}
                 onPair={() => navigation.navigate("Pair", undefined)}
               >
-                {(openDrawer) => (
+                {(openDrawer, drawerOpen) => (
                   <SessionRoute
                     palette={palette}
                     onOpenDrawer={openDrawer}
+                    drawerOpen={drawerOpen}
                     computerId={route.params.computerId}
                     sessionId={route.params.sessionId}
                     title={route.params.title}

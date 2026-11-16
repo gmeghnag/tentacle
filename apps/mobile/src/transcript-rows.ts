@@ -11,6 +11,16 @@ export type ToolStatus = "queued" | "running" | "ok" | "error" | "denied";
 /** An image a prompt named, as the transcript carries it (`media_message` refs). */
 export type ImageRef = Pick<AttachmentRef, "id" | "mimeType" | "size"> & {
   readonly name?: string;
+  /**
+   * A LOCAL copy of these bytes, when this phone has one (fix/mobile-media-live
+   * item 2): the file it just uploaded, so the bubble shows the photo it sent
+   * instead of a placeholder. Absent for a history row, another device's
+   * message, or any ref the daemon alone knows — there is no read-back method
+   * (`thumbnails.ts:19-25`), so no other source exists.
+   */
+  readonly localUri?: string;
+  /** The local copy's aspect ratio (w/h), when it is known: the bubble's shape. */
+  readonly aspectRatio?: number;
 };
 
 export interface UserRow {
@@ -101,6 +111,11 @@ export interface NoticeRow {
   readonly body?: string;
   /** A full-width rule around the text (a context reset's separator). */
   readonly separator?: true;
+  /**
+   * The tentacle note it was drawn from (`ChatMessage.note`): the Activity
+   * sheet joins a sub-agent's report by its `id` (`activity-memory.ts`).
+   */
+  readonly note?: { readonly kind: string; readonly id?: string };
 }
 
 /**
@@ -135,5 +150,37 @@ export function imageRef(ref: AttachmentRef): ImageRef {
     mimeType: ref.mimeType,
     size: ref.size,
     ...(ref.name !== undefined ? { name: ref.name } : {}),
+  };
+}
+
+/**
+ * The local copy of one image this phone sent (item 2): the file it uploaded,
+ * with the size the picker reported. The transcript's row carries it so the
+ * bubble draws the photo it sent — the daemon offers no read-back, so this is
+ * the only source of pixels for a fresh send.
+ */
+export interface LocalPhoto {
+  /** The `AttachmentRef.id` this file's bytes became. */
+  readonly id: string;
+  /** The sandbox copy's URI (`photo-source.ts`'s `copyInto`). */
+  readonly uri: string;
+  readonly width?: number;
+  readonly height?: number;
+}
+
+/** `ref`'s row-shaped image, with its local copy attached when this phone has one. */
+export function imageRefWithLocal(ref: AttachmentRef, local: LocalPhoto | undefined): ImageRef {
+  const base = imageRef(ref);
+  if (local === undefined || local.id !== ref.id) {
+    return base;
+  }
+  const ratio =
+    local.width !== undefined && local.height !== undefined && local.height > 0
+      ? local.width / local.height
+      : undefined;
+  return {
+    ...base,
+    localUri: local.uri,
+    ...(ratio === undefined ? {} : { aspectRatio: ratio }),
   };
 }

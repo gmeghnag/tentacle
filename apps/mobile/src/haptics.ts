@@ -10,11 +10,20 @@ export function playHaptic(kind: HapticKind | null): void {
   if (kind === null) {
     return;
   }
-  const done =
-    kind === "success"
-      ? Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
-      : Haptics.impactAsync(
-          kind === "firm" ? Haptics.ImpactFeedbackStyle.Medium : Haptics.ImpactFeedbackStyle.Light,
-        );
-  done.catch(() => undefined);
+  play(kind).catch(() => undefined);
+}
+
+function play(kind: HapticKind): Promise<void> {
+  switch (kind) {
+    case "success":
+      return Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    case "tick":
+      return Haptics.selectionAsync();
+    case "commit":
+      return Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid);
+    case "firm":
+      return Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    case "light":
+      return Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }
 }

@@ -38,11 +38,13 @@ import {
 } from "@tentacle/agent";
 import { type ChatMessage, subagentLoadNotes } from "@tentacle/core";
 import {
+  type ArtifactMeta,
   type KnownLogEntry,
   type LogCursor,
   type SessionTitle,
   canonicalMessage,
 } from "@tentacle/protocol";
+import type { SessionArtifacts } from "./session-artifacts.ts";
 import { BLOB_DIR_SUFFIX, SessionBlobs } from "./session-blobs.ts";
 import {
   type LogSegment,

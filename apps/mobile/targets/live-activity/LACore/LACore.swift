@@ -20,7 +20,15 @@
 
 import CryptoKit
 import Foundation
+// The SAME sources build twice: as the SwiftPM module `PushCore`
+// (native-tests/PushCoreTests, where `import` resolves) and as part of this
+// target's OWN module in the generated Xcode project, which has no `PushCore`
+// module — an unguarded `import PushCore` there failed the archive with
+// "Unable to resolve module dependency: 'PushCore'" while `swift test` stayed
+// green. `apps/mobile/test/app-config.test.ts` pins both halves.
+#if canImport(PushCore)
 import PushCore
+#endif
 
 /// The HPKE `info` of an activity content-state (`@tentacle/transport/push`'s `LA_INFO`).
 public let laInfo = "tentacle-la/1"

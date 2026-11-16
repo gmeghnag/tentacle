@@ -63,7 +63,8 @@ import {
   type SessionFacts,
   refusalOf,
 } from "./outbox.ts";
-import { refsOf as itemRefsOf } from "./outbox.ts";
+import { refsOf as itemRefsOf, localPhotosOf } from "./outbox.ts";
+import type { LocalPhoto } from "./transcript-rows.ts";
 
 /** The chat handle the compose acts use (a seam: tests pass a fake). */
 export interface ComposeHandle {
@@ -101,8 +102,9 @@ export interface ComposeHandle {
 
 /** The photo adapter (`photo-source.ts` in the app; a fake in tests). */
 export interface PhotoPort {
-  pickFromLibrary(taken: number): Promise<readonly PickedPhoto[]>;
-  takePhoto(taken: number): Promise<readonly PickedPhoto[]>;
+  /** `sendOriginal`: the person's "Send photos at original size" (item 5). */
+  pickFromLibrary(taken: number, sendOriginal?: boolean): Promise<readonly PickedPhoto[]>;
+  takePhoto(taken: number, sendOriginal?: boolean): Promise<readonly PickedPhoto[]>;
 }
 
 /** One picked photo, as `photo-source.ts` answers it (13c's pipeline output). */
@@ -123,6 +125,12 @@ export interface ComposeDeps {
   readonly store: OutboxStore;
   readonly driver: OutboxDriver;
   readonly photos: PhotoPort;
+  /**
+   * The person's "Send photos at original size" setting (item 5), read at every
+   * pick. Absent = the downscale (the default): a fake, or a build without the
+   * switch.
+   */
+  readonly sendPhotoOriginalSize?: () => boolean;
   /** The handle once the session opened (null before it, and after a failure). */
   readonly handle: () => ComposeHandle | null;
   /** The turn running now (a steer binds to it), or null. */
@@ -143,8 +151,17 @@ export interface ComposeDeps {
    * iOS 26 run's failure of flow 07). Resolves at the daemon's ACK, while the
    * turn keeps folding — so the item settles when the daemon has its key, not
    * when the turn ends (docs/fix/mobile-chat-glitches.md, bug 2).
+   *
+   * `photos` (item 2): the LOCAL copies of the refs, so the bubble draws the
+   * picture that was just sent — the daemon has no read-back method, so this is
+   * the only source of pixels for a fresh send.
    */
-  readonly prompt: (text: string, turnId: string, refs: readonly AttachmentRef[]) => Promise<void>;
+  readonly prompt: (
+    text: string,
+    turnId: string,
+    refs: readonly AttachmentRef[],
+    photos?: readonly LocalPhoto[],
+  ) => Promise<void>;
   /** Something the screen draws changed. */
   readonly onChange: () => void;
   /** A sentence to show (a refusal's reason), cleared by the next act. */
@@ -404,7 +421,7 @@ export function createCompose(deps: ComposeDeps): Compose {
       return;
     }
     try {
-      await deps.prompt(text, item.turnId, itemRefsOf(item));
+      await deps.prompt(text, item.turnId, itemRefsOf(item), localPhotosOf(item));
     } catch (error) {
       // A refusal before the ack (`TurnInProgress`, a drop, a dead link): 13b's
       // own mapping decides the item, and the words come back to the field —
@@ -750,10 +767,14 @@ export function createCompose(deps: ComposeDeps): Compose {
     // picker's limit from it; passing the room (5 on an empty composer) made
     // the limit 0 and refused before the library opened.
     async pickLibrary() {
-      await applyPicks(await deps.photos.pickFromLibrary(counted(chips)));
+      // `deps.sendPhotoOriginalSize` is the person's Settings switch (item 5):
+      // read at the PICK, so a flip takes effect on the next photo.
+      await applyPicks(
+        await deps.photos.pickFromLibrary(counted(chips), deps.sendPhotoOriginalSize?.()),
+      );
     },
     async pickCamera() {
-      await applyPicks(await deps.photos.takePhoto(counted(chips)));
+      await applyPicks(await deps.photos.takePhoto(counted(chips), deps.sendPhotoOriginalSize?.()));
     },
     async removeChip(key) {
       chips = chipRemoved(chips, key);
