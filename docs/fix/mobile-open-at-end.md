@@ -95,6 +95,186 @@ asserting the initial scroll call is `animated: false`.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-16 — APPROVED*
 
+**Slice B** (swipe a row left → its time). **Size: M · Blast: cross-module**
+(additive protocol field + daemon + client + mobile; no §7 invariant, no
+persisted format, no version bump) — supersedes the header's "contained, no
+protocol" for this slice. Fresh-context Opus review stays mandatory.
+
+#### Load-bearing assumption — where a row's time comes from (PROVED: nowhere today)
+
+The phone has **no per-message time** on any path, so one must be added:
+- The phone's history is `session/snapshot`, not `session/log`:
+  `remote-client.ts:3839-3866` pages `Method.Snapshot` and keeps only
+  `result.messages`; `remote-client.ts:3514-3520` steps `{kind:"snapshot",
+  messages,…}` → `session-reducer.ts:372-381` `reset{messages}` →
+  `remote-session.ts:1763-1767` `history{messages}` (or `:1780`
+  `history_reset{messages}` into a running turn) → `session-feed.ts:216-220` →
+  `transcript.ts:72-73` → `historyRows(messages, nextKey)`
+  (`transcript-history.ts:51`).
+- `ChatMessage` carries no time (`protocol/session.ts:80-100`), nor does
+  `SnapshotResultSchema` (`session.ts:862-880`); no live `session/update` does
+  either (`grep ts:` over `protocol/src` hits only `session-log.ts:107`).
+- The only `ts` is the log envelope's (`session-log.ts:107`), and it is NOT the
+  arrival time: `SessionLog.segment` re-logs every message of a `base` with
+  `this.now()` (daemon `session-log.ts:177,338`), so after a `serve` reload
+  (`hosted-session.ts:971`) or a compaction every message would read the restart
+  time. The phone also never calls `readBack` (no hasher, full log read).
+- The daemon CAN know it: `SessionLog.commit` (`daemon/session-log.ts:104-122`)
+  is the single place an index is appended / replaced / truncated, with an
+  injected clock (`:79`), and every daemon builds one
+  (`hosted-session.ts:965`), committed to `cut.length` (`:2081`) — the same
+  bound `snapshotPage` slices (`:2017-2023`).
+
+**⇒ Design stands on:** "`SessionLog`'s committed prefix (`ref`) is
+index-aligned with `session.messages.slice(0, cut.length)` whenever
+`snapshotPage` runs." Prove first (Execution step 1): a hosted-session test
+asserting `times.length === messages.length` on the first page and on a
+cursor page, across a turn, a compaction and a reload. If it fails, STOP and
+fix the plan.
+
+#### Preconditions (verified)
+- Fields are free (§7): `SnapshotResultSchema` is a strip schema
+  (`session.ts:862`, `z.object`), so an older client drops `times`, an older
+  daemon sends none → rows show nothing. No `protocol.d/` note.
+- Rows are rendered one `FlatList` cell per `Row` (`SessionScreen.tsx:663-704`,
+  `renderItem` → `TranscriptRow`); no gesture library in the app — gestures are
+  core `PanResponder` (`ui/FloatingActivity.tsx:112-117`, which already claims
+  touches that START on the hub and refuses termination).
+- Back navigation is native-stack (`App.tsx:22,176`): a RIGHTWARD left-edge
+  swipe. Our pan is leftward only.
+- Mono + secondary colour exist: `MONO`/`type.mono` (`theme.ts:193,210`),
+  `palette.sec` (`theme.ts:40`).
+- RN does not render under `bun test`; the repo's "SessionScreen render test"
+  is a SOURCE-wiring test (`test/session-screen-follow-wiring.test.ts:1-12`).
+
+#### Design
+1. **Daemon — times live in `SessionLog`.** A `times: number[]` parallel to
+   `ref`: `commit` append → `now()`; replace → keep the existing time (a later
+   edit of a message is not a new arrival); truncate → slice; `segment`
+   (create/seed/reload/compact/context_reset) → `0` (unknown) for every base
+   message. Accessor `timesOf(start, end)`. `snapshotPage` adds
+   `times: this.log.timesOf(start, end)`.
+2. **Protocol — `SnapshotResult.times?: number[]`** (int ≥ 0, epoch ms), same
+   length and order as `messages`; `0` = not known (no `null` on the wire,
+   matching the envelope convention, `session-log.ts:104`). Display-only.
+3. **Client — pass it through, never derive it.** `readSnapshotPages`
+   concatenates `times` page-wise like `messages` (`:3859,3866`); a page whose
+   `times` is absent or of the wrong length makes the WHOLE snapshot's `times`
+   undefined (never misaligned). `snapshot` input → `reset` output →
+   `history{messages, times?}` / `history_reset{messages, times?}`
+   (`mapping.ts:31`) / the context-reset history (`remote-session.ts:1820`).
+   The TUI ignores it; nothing is written to disk (§7 persistence untouched).
+4. **Mobile rows carry `at?: number`** on `UserRow`, `AssistantRow`, `ToolRow`
+   (`transcript-rows.ts`). `historyRows(messages, nextKey, times?)` sets it from
+   `times[i]` (> 0 only); a tool row takes its CALL's time (the assistant
+   message that listed it), never the result's. Live rows: the feed is given
+   an injected `now()` (app shell passes `Date.now`) and stamps `at` on the
+   fold input; the fold sets `at` when it CREATES a user/assistant/tool row and
+   never on upsert. `notice`/`reasoning`/`turn` rows: no time. A resync
+   replaces rows with the daemon's times (live stamps are dropped with them).
+5. **Pure module `src/row-swipe.ts`** (React-free): `REVEAL = 64`,
+   `SLOP = 12`; `claimsPan({dx, dy}, hasTime)` → true only if `hasTime`,
+   `dx < -SLOP` and `|dx| > 2·|dy|`; `revealOffset(dx)` → `0` for `dx ≥ 0`,
+   else `-REVEAL·(1 − e^(−|dx|/REVEAL))` (resistance, capped, monotone);
+   `timeLabel(at, fmt)` → `null` for missing/0, else `fmt(at)`; `fmt` defaults
+   to `Intl.DateTimeFormat(undefined, {hour: "2-digit", minute: "2-digit"})`
+   (device locale decides 12/24h) — injected in tests.
+6. **Component — `screens/transcript/SwipeTime.tsx`** (dumb): wraps one row in
+   an `Animated.View` with `translateX` (native driver); its `PanResponder`
+   uses `onMoveShouldSetPanResponder: claimsPan` (never `onStart…`, so taps,
+   the tool-row expand and long-press selection are untouched),
+   `onPanResponderMove: set(revealOffset(dx))`, release AND terminate →
+   `Animated.spring` to 0, `onPanResponderTerminationRequest: () => true`
+   (a native vertical scroll wins and the row springs back). The label is
+   `position: "absolute"`, `right: -REVEAL`, `width: REVEAL`, top/bottom 0,
+   centred, `type.mono` + `palette.sec` — outside the layout, so the row's
+   height never changes. `renderItem` wraps `TranscriptRow` in it with
+   `label={timeLabel(item.at)}`; no `Date`/`Intl` in the component.
+
+#### Files (dependency order)
+1. `packages/protocol/src/session.ts` — `times` on `SnapshotResultSchema`;
+   regenerate `schema/protocol.json` (merge step does it; run locally for the
+   drift test).
+2. `packages/daemon/src/session-log.ts` — `times`, `timesOf`;
+   `packages/daemon/src/hosted-session.ts` — `snapshotPage` adds `times`.
+3. `packages/client/src/remote-client.ts` (`readSnapshotPages`, snapshot step),
+   `session-reducer.ts` (input/output), `remote-session.ts` (`history`,
+   `history_reset`, context-reset history), `mapping.ts` (`history_reset` type).
+4. `apps/mobile/src/transcript-rows.ts`, `transcript-history.ts`,
+   `transcript.ts`, `session-feed.ts` (+ its `now` dep at the call site).
+5. `apps/mobile/src/row-swipe.ts` (new).
+6. `apps/mobile/src/screens/transcript/SwipeTime.tsx` (new),
+   `screens/SessionScreen.tsx` (`renderItem`).
+7. `changelog.d/mobile-swipe-timestamps.added.md`.
+
+#### Failure modes → convergence
+- **Vertical scroll vs pan:** claim only on a clearly horizontal LEFT move
+  (2:1); a scroll that starts first keeps the responder; a takeover terminates
+  the pan → spring back. Never a stuck offset.
+- **Edge-swipe back:** rightward → `claimsPan` false; native back untouched.
+- **Hub button:** a touch starting on it is the hub's (`FloatingActivity`
+  claims on start, refuses termination) — rows never see it.
+- **Tool-row tap / expand, text selection, speak button:** no movement → no
+  claim (move-only responder); `Pressable`s keep the tap.
+- **Row without a time** (old daemon, reload/compaction-restored message,
+  notice): `claimsPan` false → the row does not move; nothing shown.
+- **Misaligned `times`** (bug or hostile pod): length mismatch → dropped
+  entirely in the client. A pod can lie about times: display-only label, never
+  persisted, no laptop effect — inside "a pod is not trusted" (§7).
+- **Re-attach / resync / foreground resync (slice A):** rows replaced by the
+  snapshot's times; a row mid-swipe that is unmounted takes its
+  `Animated.Value` with it.
+- **Slice A open-at-end / follow:** translateX + absolute label → no content
+  height change, so `contentGrew`/follow never fire from a swipe.
+- **Clock skew (live phone stamp vs daemon time):** a resync converges to the
+  daemon's; HH:mm only, minutes of skew at most.
+
+#### Tests (red first; mutation target in brackets)
+- protocol: `SnapshotResultSchema` parses with and without `times`; json-schema
+  drift test green after regen.
+- daemon `session-log`: append stamps the injected clock; replace keeps the
+  first time [mutation: re-stamp on replace]; truncate drops; a `base`
+  segment yields 0s [mutation: stamp `now()` on segment].
+- daemon `hosted-session`: `times.length === messages.length` on first and
+  cursor pages, after a turn, a compaction, a reload (the load-bearing proof)
+  [mutation: off-by-one in `timesOf` slice].
+- client: snapshot `times` reaches `history` and in-turn `history_reset`;
+  multi-page concat order; one page without `times` → `undefined` [mutation:
+  drop the field in `session-reducer` reset output].
+- mobile `transcript`: history with times → user/assistant/tool `at`, none on
+  notice/reasoning, 0 → none; tool row keeps the call's time; live create
+  stamps, upsert does not [mutation: set `at` on upsert].
+- mobile `row-swipe`: claim matrix (left-horizontal yes; vertical, diagonal
+  1.5:1, rightward, sub-slop, no-time → no); `revealOffset` 0 for dx ≥ 0,
+  monotone, never past `-REVEAL`; `timeLabel` null for missing/0 and uses the
+  injected formatter [mutation: `>=` vs `>` on SLOP; drop the cap].
+- SessionScreen/SwipeTime source-wiring test (repo pattern): `renderItem`
+  wraps `TranscriptRow` in `SwipeTime` with `timeLabel(item.at…)`; responder is
+  `onMoveShouldSetPanResponder` → `claimsPan`, NOT `onStartShould…`; spring on
+  BOTH release and terminate; `useNativeDriver: true`; label
+  `position: "absolute"`; no `Date`/`Intl` in either component [mutation:
+  remove the terminate spring-back].
+- Device check (owner's iPhone, Execution notes it): scroll while swiping,
+  back-swipe, hub drag, tool expand, selection, a long session opened at end.
+
+#### Orchestrator decisions (owner delegated, 2026-11-16)
+1. **Time source:** daemon-tracked arrival time on an additive
+   `SnapshotResult.times`, plus phone-stamped receipt for live rows —
+   recommended over (a) phone-only stamping (every history row blank after a
+   reopen: fails the reference case) and (b) phone `readBack` of
+   `session/log` (its `ts` is rewritten at reload/compaction, needs a hasher, a
+   full log read).
+2. **Unknown = 0, not `null`**; a restored-at-reload message has no time
+   (debt below).
+3. **No-time rows don't move** (no dead gesture).
+4. **Core `PanResponder` + `Animated`**, no new dependency (minimalism).
+5. **Labelled rows:** user, assistant, tool only.
+6. **Debt (not this slice):** times survive a `serve` reload only if the
+   daemon derives them from its on-disk log's original `append` entries —
+   a follow-up if the owner asks.
+
+*— claude-opus-5-5, 2026-11-16 — Slice B APPROVED*
+
 ## Execution
 
 ## Review
