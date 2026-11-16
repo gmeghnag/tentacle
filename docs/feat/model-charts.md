@@ -612,6 +612,13 @@ surfaces `#FFFFFF` light, `#1F1F1E` dark):
 - It must read as a natural part of the reply: the model can write text BEFORE and AFTER it in the same turn (text → chart → text, several charts in one reply). So the `chart` tool call does NOT render as a tool row ("● Chart …"): the chart itself takes the row's place, with at most a discreet caption (title/subtitle) — no tool chrome. Same in the TUI: the braille/block chart inline between the paragraphs, centred to the transcript width.
 - "Deve essere una cosa fatta bene." Opus executes the rendering slices.
 
+
+#### Owner answers (2026-11-16 ~11:40, binding)
+
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-16*
+
+"Ok a tutte le consigliate." Q1–Q8 = the recommendations. Mockup choices (sections 1–16, chosen on `.tentacle/mockups/model-charts/scegli.html`): iPhone 1–10 **A**; TUI 11–14 **A**, 15 **B** (one sparkline row per series), 16 **A**. **Implementation APPROVED.**
+
 ## Execution
 
 *(empty — starts after the owner approves the Implementation)*
