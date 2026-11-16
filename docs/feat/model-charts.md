@@ -1775,3 +1775,13 @@ Round 2's two findings (MEDIUM):
 Rounds 3 and 4 restated both verbatim and added that the loop had reviewed only
 review commits in between. All four hostile shapes still reproduced on HEAD
 before *Fix round 1* below, which is the round that answers them.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Verdict: REQUEST-CHANGES** — one MEDIUM. Scope: `git diff HEAD~1` (c84c4301, fix of the two C1 MEDIUMs).
+
+- **Gate:** `chart-spec`/`chart-helpers`/`chart-fuzz` + `packages/tools` + `packages/tui/test` → 2924 pass / 0 fail; `bun run typecheck` green; `bun run lint` clean (1779 files).
+- **Mutations (each reverted, tree clean after):** M1 drop the `readPoints` all-null check → RED (T1.3 point form). M2 pie/doughnut guard off → RED (T1.13 pie). M3 category-x guard off → RED (T1.13 bar no x type). M4 point-form bar cap reverted to labels-only → RED (T1.13 cap). M5 `checkAligned` never called → RED (T1.13 stacked). Finding 1 and findings 2a/2c: fixed and pinned.
+- **MEDIUM — finding 2b only half fixed** (`packages/core/src/chart/spec.ts:770`): the point-form bar cap counts `datasets[0].data.length` only. Probe (`.tentacle/tmp/model-charts/r2.ts`): `type: "bar"`, `x: {type: "number"}`, `datasets: [{10 points}, {200 points}]` → `ok: true`; likewise two series of 60 points on disjoint x (120 distinct categories) → `ok: true`. The 60-category cap is bypassed by putting a short series first, and the client re-runs this same validator, so a forged spec reaches the renderers. Fix: count the distinct x across all datasets (or the max length) and add a test with the long series second.
