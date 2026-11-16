@@ -42,6 +42,8 @@ export interface SessionsScreenProps {
   readonly onOpen: (row: SessionRow) => void;
   /** Present only when the stack can go back. */
   readonly onBack?: () => void;
+  /** Opened from the drawer's magnifier: the search field takes focus when it appears. */
+  readonly focusSearch?: boolean;
 }
 
 function Section({
@@ -106,6 +108,7 @@ export function SessionsScreen({
   onRetry,
   onOpen,
   onBack,
+  focusSearch,
 }: SessionsScreenProps): JSX.Element {
   const [query, setQuery] = useState("");
   const groups = groupSessions(view.sections, query);
@@ -160,6 +163,7 @@ export function SessionsScreen({
                 autoCapitalize="none"
                 clearButtonMode="while-editing"
                 returnKeyType="search"
+                autoFocus={focusSearch === true}
                 accessibilityLabel="Search sessions"
               />
             </View>

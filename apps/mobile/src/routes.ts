@@ -13,6 +13,8 @@ export interface ComputerRoute {
 export interface SessionsRoute {
   readonly computerId: string;
   readonly name: string;
+  /** Opened from the drawer's magnifier (mobile-chrome Design 3): the search field is focused. */
+  readonly search?: boolean;
 }
 
 export interface SessionRoute {

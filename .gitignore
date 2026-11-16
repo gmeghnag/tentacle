@@ -33,5 +33,8 @@ coverage/
 apps/mobile/ios/
 apps/mobile/android/
 apps/mobile/.expo/
+# `expo prebuild` writes this when the widget target has none; main never tracked it
+# (docs/feat/mobile-chrome.md S1 note + S6 Review finding 1).
+apps/mobile/targets/live-activity/Info.plist
 # SwiftPM's build products for the NSE's test package (docs/feat/mobile-notifications.md N5)
 apps/mobile/native-tests/PushCoreTests/.build/

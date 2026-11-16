@@ -31,7 +31,8 @@ export type DrawerStackRoute =
 
 export type DrawerNav =
   | { readonly kind: "stay" }
-  | { readonly kind: "replace"; readonly route: DrawerStackRoute }
+  /** Always the Session route (same computer, another session): `navigation.replace`. */
+  | { readonly kind: "replace"; readonly route: Extract<DrawerStackRoute, { name: "Session" }> }
   | { readonly kind: "reset"; readonly routes: readonly DrawerStackRoute[] };
 
 export function drawerTarget(from: SessionRoute, pick: DrawerPick): DrawerNav {
@@ -39,7 +40,7 @@ export function drawerTarget(from: SessionRoute, pick: DrawerPick): DrawerNav {
   if (sameComputer && pick.sessionId === from.sessionId) {
     return { kind: "stay" };
   }
-  const session: DrawerStackRoute = {
+  const session: Extract<DrawerStackRoute, { name: "Session" }> = {
     name: "Session",
     params: {
       computerId: pick.computerId,
@@ -109,4 +110,42 @@ export function drawerReducer(state: DrawerState, action: DrawerAction): DrawerS
     default:
       return state;
   }
+}
+
+/**
+ * The magnifier (Design 3: no drawer search in v1): the listed computer's
+ * Sessions screen with its search focused, as a whole stack so back lands on
+ * Computers — never on the session the drawer was opened over.
+ */
+export function drawerSearchTarget(computerId: string, name: string): readonly DrawerStackRoute[] {
+  return [{ name: "Computers" }, { name: "Sessions", params: { computerId, name, search: true } }];
+}
+
+/** The panel's width (Design 3): the session is pushed right by the same amount. */
+export const DRAWER_WIDTH = 300;
+const DRAWER_MS = 220;
+/** A horizontal move this long (pt) is the panel's own gesture. */
+const SWIPE_CLAIM = 10;
+/** A left swipe this long (pt) closes the panel. */
+const SWIPE_CLOSE = 50;
+
+/**
+ * How the drawer moves (F11): `slide` is how far the panel travels and the
+ * session is pushed; with Reduce Motion nothing translates (fade only).
+ */
+export function drawerMotion(reduceMotion: boolean): {
+  readonly slide: number;
+  readonly duration: number;
+} {
+  return { slide: reduceMotion ? 0 : DRAWER_WIDTH, duration: DRAWER_MS };
+}
+
+/** The panel claims a pan only when it is clearly horizontal (its list keeps vertical scrolls). */
+export function swipeIsHorizontal(dx: number, dy: number): boolean {
+  return Math.abs(dx) >= SWIPE_CLAIM && Math.abs(dx) > Math.abs(dy);
+}
+
+/** A released pan closes the panel when it went left, far enough, and mostly sideways. */
+export function swipeCloses(dx: number, dy: number): boolean {
+  return dx <= -SWIPE_CLOSE && Math.abs(dx) > Math.abs(dy);
 }
