@@ -1866,3 +1866,26 @@ fail** (12201 tests, 874 files). All 5 skips are opt-in: k8s live ×2
 
 **Executor behaviour:** honest. It recorded its drift (the `autoAcceptsTurn` gap the plan missed), ran a reproducible mutation script, and reported the unrelated `exec` flake without hiding it.
 
+
+## Review
+
+### S5 — REQUEST-CHANGES
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; a different model family from the S5 executor, DeepSeek.)
+
+**Findings**
+1. **HIGH: every deletion is reported as a failure.** `useDock.ts` `setSchedules` calls `departedScheduleNotice` (`schedule-view.ts:426-444`) on ANY row that leaves the table. The user's own `x x` (dock or panel), a phone delete, and the model's `schedule_control{delete}` (`hosted-session.ts:3132`) all publish the same shrunk list. Repro (`.tentacle/tmp/cron-tool/s5rev/repro.test.ts`): `/schedule` → `x x` on an in-date `every` wake → the transcript says **"Schedule sc-1 stopped after repeated failures."** and then "Deleted sc-1." A deleted one-shot says "fired and is done". This is the "silent wrong state" the brief warns about, in its loud form: a false cause. Fix: don't guess. Either the daemon names the reason (a protocol change), or the TUI suppresses ids it deleted itself and words the fallback neutrally ("sc-1 is no longer scheduled"). Add a frame test: delete → frame `[]` → the "failures" text is absent.
+2. **HIGH: the `/schedule` panel is a snapshot and never follows the table.** `commands/schedule.ts:26-27` copies `schedulesRef.current` into `SchedulesPanel.data` once. Nothing writes `data` again: no `withSchedules*` call from `setSchedules`, and the only call site of `isScheduleOpen` is the delete gate. Same repro: after the delete, the pill has dropped to no `sched` but the panel still shows `Scheduled wakes (1)` with sc-1. A second `x x` sends a delete for a gone id, and a wake created while the panel is open never appears. The command's own doc ("follows every later change") and the M3 claim "the row leaves on the daemon's frame" are both false. The existing frame test only checks `api.deletes` and never pushes the follow-up frame, so it can't see this. Fix: `setSchedules` also updates an open schedule panel (clamping the cursor and disarming if the armed id is gone). Add a test: delete → `report([])` → the panel says `No scheduled wakes`.
+3. **MEDIUM: a hardcoded month.** `schedule-view.ts:267` builds `` `expires ${getDate()} Nov` ``. Repro: a wake expiring in 20 days (6 Dec) paints **"expires 6 Nov"**, which is past. Recurring wakes carry a multi-day `expiresAt`, so this is wrong for most real rows from late November on. Format the month from the date. The test should use a fixed clock and an expiry in another month.
+
+**Gate (touched scope):** 8 touched test files → **125 pass / 0 fail**. `bun run lint` → clean (1706 files). `bun run typecheck` → clean. Full suite not re-run, because S5 is TUI-only and the findings above block anyway.
+
+**Mutation:** my own useDock mutation was not run: the command was not approved in this session. Findings 1 and 2 are vacuity gaps by construction: the suite passes while the repro shows the wrong frame. The executor's M1–M19 table matches the tests it names.
+
+**§7 attacks:**
+- (a) Logic in pure modules: holds. The decisions are in `schedule-view.ts`/`panels/schedule.ts`, and `useDock` only wires them.
+- (b) A pod is not trusted: holds. Ids, specs and prompts are `oneLine`d and cell-cut on the panel, head and notice. One gap: the dock's armed meta `delete ${schedule.id}?` (`background-list.ts`) and the `Deleted ${id}` notices use the raw id. That is LOW, because the client already bounds and sanitizes it.
+- (c) No new protocol, and the TUI does not import `@tentacle/protocol`: holds.
+- (d) Quit: a `connect` detach passes 0, and a closing quit asks. Holds.
+
+**Executor behaviour:** thorough and honest about its drift (ctrl+x vs x, the snapshot "no request" choice). But drift 3 assumed the load re-read was enough without proving that the panel follows, and its departure diff never considered a deliberate delete.
