@@ -746,6 +746,7 @@ export function SessionScreen({
             autoAcceptOn={controller.autoAcceptOn()}
             autoAcceptError={info.autoAcceptError}
             onAutoAccept={(on) => void controller.setAutoAccept(on)}
+            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
             onRefresh={() => void controller.refreshInfo()}
             onRetry={() => void controller.refreshInfo()}
             expanded={expanded}

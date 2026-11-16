@@ -10,15 +10,19 @@
 import { describe, expect, test } from "bun:test";
 import type { McpServerStatus } from "@tentacle/protocol";
 import {
+  type CapabilitySwitches,
   type InfoFacts,
   type Pull,
+  capabilityChanges,
   contextMeter,
   devicesText,
   headerModel,
   sanitizeDisplay,
   sessionInfoView,
+  settledOp,
   shortModel,
   shortenPath,
+  switchPhase,
   tokensText,
 } from "../src/session-info.ts";
 
@@ -450,5 +454,201 @@ describe("the sheet as a whole", () => {
     expect(by("session")?.phase).toBe("ready");
     expect(by("mcp")?.phase).toBe("unsupported");
     expect(by("skills")?.phase).toBe("error");
+  });
+});
+
+describe("MCP/skill switches (docs/feat/session-capabilities.md S5, P1)", () => {
+  const on = (over: Partial<CapabilitySwitches> = {}): CapabilitySwitches => ({
+    phase: "on",
+    state: { disabledMcp: [], disabledSkills: [] },
+    changedBy: {},
+    error: null,
+    ...over,
+  });
+  const capSkill = (
+    over: Partial<{ name: string; user: boolean; model: boolean; modelAfterReset: boolean }> = {},
+  ) => ({
+    name: "kubernetes",
+    description: "Drive a cluster",
+    scope: "user" as const,
+    user: true,
+    model: true,
+    location: "/tmp/k/SKILL.md",
+    ...over,
+  });
+  const withCaps = (caps: CapabilitySwitches, skills = [capSkill()]) =>
+    facts({
+      capabilities: caps,
+      mcp: ready({
+        servers: [
+          server({ name: "k8s", tools: ["get"] }),
+          server({ name: "a__b" }),
+          server({ name: "broken", state: "failed", error: "spawn ENOENT" }),
+        ],
+      }),
+      skills: ready({ slash: [], skills, problems: [], moreProblems: 0 }),
+    });
+
+  test("every server and skill row has a switch, on unless the session turned it off", () => {
+    const f = withCaps(on({ state: { disabledMcp: ["a__b"], disabledSkills: [] } }));
+    const mcp = section(f, "mcp");
+    expect(mcp.rows.map((row) => [row.title, row.switch?.on, row.switch?.interactive])).toEqual([
+      ["k8s", true, true],
+      ["a__b", false, true],
+      ["broken", true, true],
+    ]);
+    // The op carries the RAW name, the kind of the section.
+    expect(mcp.rows[1]?.switch?.name).toBe("a__b");
+    expect(mcp.rows[1]?.switch?.kind).toBe("mcp");
+    expect(section(f, "skills").rows[0]?.switch).toMatchObject({ kind: "skill", on: true });
+  });
+
+  test("an off server says so and is dimmed; its error stays readable", () => {
+    const f = withCaps(on({ state: { disabledMcp: ["k8s", "broken"], disabledSkills: [] } }));
+    const rows = section(f, "mcp").rows;
+    expect(rows[0]?.subtitle).toBe("Off · hidden from the model");
+    expect(rows[0]?.dim).toBe(true);
+    expect(rows[2]?.subtitle).toBe("Off · hidden from the model — spawn ENOENT");
+    expect(rows[1]?.subtitle).toBeUndefined();
+    expect(rows[1]?.dim).toBeUndefined();
+  });
+
+  test("an off skill: the user can still run /name; a model-only one is just hidden", () => {
+    const f = withCaps(on({ state: { disabledMcp: [], disabledSkills: ["kubernetes", "veil"] } }), [
+      capSkill(),
+      capSkill({ name: "veil", user: false }),
+    ]);
+    const rows = section(f, "skills").rows;
+    expect(rows[0]?.subtitle).toBe("Off · you can still run /kubernetes");
+    expect(rows[0]?.dim).toBe(true);
+    expect(rows[1]?.subtitle).toBe("Off · hidden from the model");
+  });
+
+  test("a skill the model can never be offered is a locked ghost switch, no words (Q5)", () => {
+    const f = withCaps(on(), [
+      capSkill({ model: false }),
+      capSkill({ name: "later", model: false, modelAfterReset: true }),
+    ]);
+    const rows = section(f, "skills").rows;
+    expect(rows[0]?.switch).toMatchObject({ on: false, interactive: false });
+    expect(rows[0]?.dim).toBe(true);
+    expect(rows[0]?.subtitle).toBe("Drive a cluster");
+    expect(rows[0]?.value).toBeUndefined();
+    // Offered after the next reset: the session's switch, not locked.
+    expect(rows[1]?.switch).toMatchObject({ on: true, interactive: true });
+  });
+
+  test("another device's change reads 'changed on <device>', sanitized (Q4)", () => {
+    const f = withCaps(
+      on({
+        state: { disabledMcp: ["k8s"], disabledSkills: [] },
+        changedBy: { "mcp:k8s": "Mac‮book", "skill:kubernetes": "" },
+      }),
+    );
+    expect(section(f, "mcp").rows[0]?.subtitle).toBe(
+      "Off · hidden from the model · changed on Macbook",
+    );
+    expect(section(f, "skills").rows[0]?.subtitle).toBe("On · changed on another device");
+  });
+
+  test("an older daemon: ghost switches and an update footnote, on both sections (F7)", () => {
+    const f = withCaps(on({ phase: "unsupported", state: undefined }));
+    const mcp = section(f, "mcp");
+    const skills = section(f, "skills");
+    expect(mcp.rows.every((row) => row.switch?.interactive === false)).toBe(true);
+    expect(skills.rows.every((row) => row.switch?.interactive === false)).toBe(true);
+    expect(mcp.switchNote).toBe("The tentacle on MacBook Pro can't turn servers off — update it.");
+    expect(skills.switchNote).toBe(
+      "The tentacle on MacBook Pro can't turn skills off — update it.",
+    );
+  });
+
+  test("not open: the daemon-wide servers are listed, their switches are not usable (F4)", () => {
+    const f = withCaps(on({ phase: "not-open", state: undefined }));
+    const mcp = section(f, "mcp");
+    expect(mcp.rows.every((row) => row.switch?.interactive === false)).toBe(true);
+    expect(mcp.switchNote).toBe("Open the session to turn servers on or off");
+  });
+
+  test("offline: the switches freeze on the last state, with no extra note (the banner says it)", () => {
+    const f = withCaps(
+      on({ phase: "offline", state: { disabledMcp: ["k8s"], disabledSkills: [] } }),
+    );
+    const mcp = section(f, "mcp");
+    expect(mcp.rows[0]?.switch).toMatchObject({ on: false, interactive: false });
+    expect(mcp.switchNote).toBeUndefined();
+  });
+
+  test("what Off does is said once: under the servers, or under the skills when none", () => {
+    const f = withCaps(on());
+    expect(section(f, "mcp").switchNote).toBe(
+      "Off hides it from the model in this session, from the next reply.",
+    );
+    expect(section(f, "skills").switchNote).toBeUndefined();
+    const noServers = { ...f, mcp: ready({ servers: [] }) };
+    expect(section(noServers, "skills").switchNote).toBe(
+      "Off hides it from the model in this session, from the next reply.",
+    );
+  });
+
+  test("a refused set is shown under ITS section only", () => {
+    const f = withCaps(on({ error: { kind: "skill", text: "too many\nnames" } }));
+    expect(section(f, "skills").switchNote).toBe("Couldn't switch: too many names");
+    expect(section(f, "mcp").switchNote).toBe(
+      "Off hides it from the model in this session, from the next reply.",
+    );
+  });
+
+  test("no switches offered by the port: today's rows, no switch, no note", () => {
+    const f = { ...withCaps(on()), capabilities: undefined };
+    expect(section(f, "mcp").rows.every((row) => row.switch === undefined)).toBe(true);
+    expect(section(f, "mcp").switchNote).toBeUndefined();
+  });
+});
+
+describe("switchPhase / capabilityChanges (pure)", () => {
+  const empty = { disabledMcp: [], disabledSkills: [] };
+
+  test("the phase: not attached, then offline, then the daemon's own report", () => {
+    expect(switchPhase({ attached: false, link: "up", state: empty })).toBe("not-open");
+    expect(switchPhase({ attached: true, link: "down", state: empty })).toBe("offline");
+    expect(switchPhase({ attached: true, link: "up", state: undefined })).toBe("unsupported");
+    expect(switchPhase({ attached: true, link: "up", state: empty })).toBe("on");
+  });
+
+  test("a snapshot (no by) is never news, and leaves the pending ops alone", () => {
+    const pending = [{ kind: "mcp" as const, name: "k8s", enabled: false }];
+    const next = { disabledMcp: ["k8s", "x"], disabledSkills: [] };
+    expect(capabilityChanges(empty, next, undefined, pending)).toEqual({
+      remote: [],
+      own: [],
+      pending,
+    });
+  });
+
+  test("my own echo is consumed; everything else in the change is another device's", () => {
+    const pending = [{ kind: "mcp" as const, name: "k8s", enabled: false }];
+    const prev = { disabledMcp: [], disabledSkills: ["veil"] };
+    const next = { disabledMcp: ["k8s"], disabledSkills: [] };
+    expect(capabilityChanges(prev, next, "iPhone", pending)).toEqual({
+      remote: [{ key: "skill:veil", by: "iPhone" }],
+      own: ["mcp:k8s"],
+      pending: [],
+    });
+  });
+
+  test("a pending op for the OPPOSITE value is not an echo (the other device won)", () => {
+    const pending = [{ kind: "skill" as const, name: "veil", enabled: false }];
+    const next = { disabledMcp: [], disabledSkills: [] };
+    const prev = { disabledMcp: [], disabledSkills: ["veil"] };
+    const out = capabilityChanges(prev, next, "Mac", pending);
+    expect(out.remote).toEqual([{ key: "skill:veil", by: "Mac" }]);
+    expect(out.pending).toEqual(pending);
+  });
+
+  test("settledOp drops exactly one matching op", () => {
+    const op = { kind: "mcp" as const, name: "k8s", enabled: false };
+    expect(settledOp([op, op], op)).toEqual([op]);
+    expect(settledOp([op], { ...op, enabled: true })).toEqual([op]);
   });
 });

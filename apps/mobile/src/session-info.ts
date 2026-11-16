@@ -15,6 +15,7 @@
  */
 import type {
   McpServerStatus,
+  SessionCapabilitiesWire,
   SessionContextResult,
   SessionListEntry,
   SessionSkillsResult,
@@ -61,6 +62,54 @@ export interface InfoFacts {
   readonly entry: Pull<SessionListEntry | null>;
   /** Whether the session's shared auto-accept exists to switch (Owner Q3). */
   readonly autoAccept: boolean;
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md S5).
+   * Absent: no switch is drawn at all (a port that offers none).
+   */
+  readonly capabilities?: CapabilitySwitches;
+}
+
+/** Which kind of thing a switch hides from the model. */
+export type CapabilityKind = "mcp" | "skill";
+
+/** One `session/set_capability` this phone sent and has not had answered yet. */
+export interface CapabilityOp {
+  readonly kind: CapabilityKind;
+  readonly name: string;
+  readonly enabled: boolean;
+}
+
+/**
+ * Whether the switches can be used now: `on`; `not-open` (no attach answered,
+ * F4); `unsupported` (the daemon reported no switches: an older one, F7);
+ * `offline` (the link is down, F1).
+ */
+export type SwitchPhase = "on" | "not-open" | "unsupported" | "offline";
+
+/** What the sheet needs to draw the switches (the controller gathers it). */
+export interface CapabilitySwitches {
+  readonly phase: SwitchPhase;
+  /** The daemon's switches as last reported, or undefined (none reported). */
+  readonly state: SessionCapabilitiesWire | undefined;
+  /**
+   * Another device's change per item while the sheet is open (Owner Q4):
+   * `capabilityKey` → its `by` label, RAW (untrusted: sanitized when drawn).
+   */
+  readonly changedBy: Readonly<Record<string, string>>;
+  /** A refused set, shown under its section until the next attempt. */
+  readonly error: { readonly kind: CapabilityKind; readonly text: string } | null;
+}
+
+/** The trailing switch of one MCP server or skill row. */
+export interface RowSwitch {
+  readonly kind: CapabilityKind;
+  /** The RAW name the daemon knows it by (the row's title is sanitized). */
+  readonly name: string;
+  /** Visible to the model in this session. */
+  readonly on: boolean;
+  /** A tap sends a set; false draws a ghost switch (locked, old daemon, not open, offline). */
+  readonly interactive: boolean;
+  readonly accessibilityLabel: string;
 }
 
 export type SectionId = "model" | "session" | "mcp" | "skills";
@@ -100,6 +149,8 @@ export interface InfoRow {
   /** What a tap reveals (tool names, the full error/skill text). */
   readonly expand?: string;
   readonly accessibilityLabel?: string;
+  /** The trailing on/off switch (session-capabilities S5); absent: none. */
+  readonly switch?: RowSwitch;
 }
 
 export interface InfoSection {
@@ -116,6 +167,8 @@ export interface InfoSection {
   readonly dim?: boolean;
   /** The section that can be retried (`error` only). */
   readonly retry?: boolean;
+  /** Under the rows: what the switches do, why they are off, or a refused set. */
+  readonly switchNote?: string;
 }
 
 export interface SessionInfoView {
@@ -269,6 +322,166 @@ export function headerContext(input: {
     return { percent: null, approx };
   }
   return { percent: Math.min(100, Math.round((used / input.window) * 100)), approx };
+}
+
+/** One item's key in `changedBy` (and the sheet's expanded-row ids). */
+export function capabilityKey(kind: CapabilityKind, name: string): string {
+  return `${kind}:${name}`;
+}
+
+/**
+ * Whether the switches can be used: not attached → `not-open` (F4); the link
+ * down → `offline`; attached but the daemon reported no switches → `unsupported`
+ * (an older daemon's open has no `capabilities`, or a set answered
+ * `MethodNotFound`, F7).
+ */
+export function switchPhase(input: {
+  readonly attached: boolean;
+  readonly link: "up" | "down";
+  readonly state: SessionCapabilitiesWire | undefined;
+}): SwitchPhase {
+  if (!input.attached) {
+    return "not-open";
+  }
+  if (input.link === "down") {
+    return "offline";
+  }
+  return input.state === undefined ? "unsupported" : "on";
+}
+
+function listOf(state: SessionCapabilitiesWire | undefined, kind: CapabilityKind): string[] {
+  if (state === undefined) {
+    return [];
+  }
+  return [...(kind === "mcp" ? state.disabledMcp : state.disabledSkills)];
+}
+
+/** Every item whose on/off differs between two states, as the op that made it so. */
+function diffOps(
+  prev: SessionCapabilitiesWire | undefined,
+  next: SessionCapabilitiesWire,
+): CapabilityOp[] {
+  const ops: CapabilityOp[] = [];
+  for (const kind of ["mcp", "skill"] as const) {
+    const before = new Set(listOf(prev, kind));
+    const after = new Set(listOf(next, kind));
+    for (const name of after) {
+      if (!before.has(name)) {
+        ops.push({ kind, name, enabled: false });
+      }
+    }
+    for (const name of before) {
+      if (!after.has(name)) {
+        ops.push({ kind, name, enabled: true });
+      }
+    }
+  }
+  return ops;
+}
+
+const sameOp = (a: CapabilityOp, b: CapabilityOp): boolean =>
+  a.kind === b.kind && a.name === b.name && a.enabled === b.enabled;
+
+/**
+ * What one `capabilities` report means for the "changed on <device>" notes
+ * (Owner Q4). A report without `by` is a snapshot (an open/re-attach), never
+ * news. Of a change, each item this phone has a matching op pending for is
+ * its OWN echo (the daemon echoes before it answers): consumed, and any older
+ * note on it cleared. Every other changed item is another device's.
+ */
+export function capabilityChanges(
+  prev: SessionCapabilitiesWire | undefined,
+  next: SessionCapabilitiesWire | undefined,
+  by: string | undefined,
+  pending: readonly CapabilityOp[],
+): {
+  readonly remote: readonly { readonly key: string; readonly by: string }[];
+  readonly own: readonly string[];
+  readonly pending: readonly CapabilityOp[];
+} {
+  if (next === undefined || by === undefined) {
+    return { remote: [], own: [], pending };
+  }
+  const left = [...pending];
+  const remote: { key: string; by: string }[] = [];
+  const own: string[] = [];
+  for (const op of diffOps(prev, next)) {
+    const key = capabilityKey(op.kind, op.name);
+    const at = left.findIndex((mine) => sameOp(mine, op));
+    if (at >= 0) {
+      left.splice(at, 1);
+      own.push(key);
+    } else {
+      remote.push({ key, by });
+    }
+  }
+  return { remote, own, pending: left };
+}
+
+/** `pending` without one op equal to `op` (its answer arrived). */
+export function settledOp(
+  pending: readonly CapabilityOp[],
+  op: CapabilityOp,
+): readonly CapabilityOp[] {
+  const at = pending.findIndex((mine) => sameOp(mine, op));
+  return at < 0 ? pending : [...pending.slice(0, at), ...pending.slice(at + 1)];
+}
+
+/** The ` · changed on <device>` suffix of a row another device switched. */
+function changedSuffix(switches: CapabilitySwitches, key: string): string {
+  const by = switches.changedBy[key];
+  if (by === undefined) {
+    return "";
+  }
+  return ` · changed on ${sanitizeDisplay(by) || "another device"}`;
+}
+
+/** A row's trailing switch. A `locked` skill is a ghost switch, off (Owner Q5). */
+function rowSwitch(
+  switches: CapabilitySwitches,
+  kind: CapabilityKind,
+  name: string,
+  locked: boolean,
+): RowSwitch {
+  const on = !locked && !listOf(switches.state, kind).includes(name);
+  return {
+    kind,
+    name,
+    on,
+    interactive: !locked && switches.phase === "on",
+    accessibilityLabel: `Show ${sanitizeDisplay(name)} to the model in this session`,
+  };
+}
+
+/**
+ * The note under a section's rows: a refused set wins; then why the switches
+ * cannot be used; then (for the first section that has switches) what Off does.
+ */
+function switchNote(
+  switches: CapabilitySwitches | undefined,
+  kind: CapabilityKind,
+  computer: string,
+  explain: boolean,
+): string | undefined {
+  if (switches === undefined) {
+    return undefined;
+  }
+  if (switches.error !== null && switches.error.kind === kind) {
+    return `Couldn't switch: ${sanitizeDisplay(switches.error.text)}`;
+  }
+  const what = kind === "mcp" ? "servers" : "skills";
+  switch (switches.phase) {
+    case "unsupported":
+      return `The tentacle on ${sanitizeDisplay(computer)} can't turn ${what} off — update it.`;
+    case "not-open":
+      return `Open the session to turn ${what} on or off`;
+    case "offline":
+      return undefined;
+    case "on":
+      return explain
+        ? "Off hides it from the model in this session, from the next reply."
+        : undefined;
+  }
 }
 
 /** The MCP server's dot and value (a state word for anything not connected). */
@@ -432,13 +645,29 @@ function mcpSection(facts: InfoFacts): InfoSection {
       },
     };
   }
+  const switches = facts.capabilities;
   const rows: InfoRow[] = servers.map((server) => {
     const look = serverLook(server);
     const error = server.error === undefined ? undefined : sanitizeDisplay(server.error);
+    const shownError = server.state === "connected" ? undefined : error;
+    const toggle =
+      switches === undefined ? undefined : rowSwitch(switches, "mcp", server.name, false);
+    const changed =
+      switches === undefined ? "" : changedSuffix(switches, capabilityKey("mcp", server.name));
+    // Off: the row says so first (the mockup's "Off · hidden from the model");
+    // another device's change is appended; a server's own error stays readable.
+    const note =
+      toggle !== undefined && !toggle.on
+        ? `Off · hidden from the model${changed}`
+        : changed === ""
+          ? undefined
+          : `On${changed}`;
+    const subtitle = [note, shownError].filter((part) => part !== undefined).join(" — ");
     return {
       title: sanitizeDisplay(server.name),
       ...look,
-      ...(server.state === "connected" ? {} : error === undefined ? {} : { subtitle: error }),
+      ...(subtitle === "" ? {} : { subtitle }),
+      ...(toggle === undefined ? {} : { switch: toggle, ...(toggle.on ? {} : { dim: true }) }),
       ...(server.state === "connected" && server.tools.length > 0
         ? {
             expand: [
@@ -457,7 +686,12 @@ function mcpSection(facts: InfoFacts): InfoSection {
     rows,
     footer: `${connected} of ${servers.length} connected`,
     dim: facts.link === "down",
+    ...optionalNote(switchNote(switches, "mcp", facts.computerName, true)),
   };
+}
+
+function optionalNote(note: string | undefined): { switchNote?: string } {
+  return note === undefined ? {} : { switchNote: note };
 }
 
 /** The SKILLS section: what the session can do, in the daemon's precedence order. */
@@ -520,14 +754,37 @@ function skillsSection(facts: InfoFacts): InfoSection {
         : {}),
     };
   }
+  const switches = facts.capabilities;
   const rows: InfoRow[] = value.skills.slice(0, MAX_SKILL_ROWS).map((skill) => {
     const name = sanitizeDisplay(skill.name);
     const off = !skill.user && !skill.model;
+    const description = sanitizeDisplay(skill.description);
+    if (switches === undefined) {
+      return {
+        title: skill.user ? `/${name}` : name,
+        subtitle: description,
+        chip: skill.scope,
+        ...(off ? { value: "off", dim: true } : {}),
+      };
+    }
+    // Locked: the model can never be offered it (its own SKILL.md sets
+    // `disable-model-invocation`): neither offered now nor after a reset. Not
+    // this session's choice, so a ghost switch, dim, no words (Owner Q5).
+    const locked = !skill.model && skill.modelAfterReset !== true;
+    const toggle = rowSwitch(switches, "skill", skill.name, locked);
+    const changed = changedSuffix(switches, capabilityKey("skill", skill.name));
+    const subtitle =
+      !locked && !toggle.on
+        ? `Off${skill.user ? ` · you can still run /${name}` : " · hidden from the model"}${changed}`
+        : changed === ""
+          ? description
+          : `On${changed}`;
     return {
       title: skill.user ? `/${name}` : name,
-      subtitle: sanitizeDisplay(skill.description),
+      subtitle,
       chip: skill.scope,
-      ...(off ? { value: "off", dim: true } : {}),
+      switch: toggle,
+      ...(toggle.on ? {} : { dim: true }),
     };
   });
   const skipped = value.problems.length + value.moreProblems;
@@ -540,6 +797,15 @@ function skillsSection(facts: InfoFacts): InfoSection {
     ...(more > 0 ? { rowsNote: `and ${more} more` } : {}),
     ...(skipped > 0 ? { footer: skippedText(skipped) } : {}),
     dim: facts.link === "down",
+    // What Off does is said ONCE: under the MCP rows, or here when there are none.
+    ...optionalNote(
+      switchNote(
+        switches,
+        "skill",
+        facts.computerName,
+        !(facts.mcp.state === "ready" && facts.mcp.value.servers.length > 0),
+      ),
+    ),
   };
 }
 
