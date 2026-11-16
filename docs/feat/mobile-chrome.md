@@ -1722,3 +1722,258 @@ hand with Edit.) The plan's third target, the `note.id` join, belongs to S8.
 - **Gate (my run):** `bun run lint` clean (1679 files). `bun run typecheck` (root + mobile + relay) clean. The diff touches no TS, so I did not re-run tests.
 - **Regressions:** none. The diff is `.gitignore` + one file deletion + this doc. The new Fix round 1 section sits above `## Review`, which is fine.
 
+## Execution (slice S7 — New session from the phone)
+
+*— claude-opus-5-5, 2026-11-16 · slice S7 only*
+
+**Scope:** S7 only (Files item 8 + the pill). No protocol, daemon or client
+change, so there is no `protocol.d/` note and `protocol.json` was not
+regenerated.
+
+### Load-bearing check, re-run first: no daemon work needed, but "lazy on first send" does not hold
+
+The probe is `.tentacle/tmp/mobile-chrome/s7-probe.test.ts`. It runs a real
+`SessionHost` + `Connection` + `RemoteClient` and the phone's own
+`createSessionController`, built as `App.tsx` builds it. Output:
+
+```
+A. phone attach-only open of a minted id: {"ok":false,"reason":"link"}
+B. after openSeeded (no attach), listed: [true]
+C. phone attach after create+detach: true
+D. send through the attached handle: ok
+```
+
+- **What held:** creating a session needs nothing new from the daemon or the
+  protocol. A handle built without `attach` creates the session through its
+  `openSeeded()` (`session/open{create}` under a given id,
+  `packages/client/src/remote-session.ts:543-584`), and the session is then
+  listed.
+- **What failed:** the plan says the session is created *lazily, on the first
+  send*, but that is not possible on the phone's current path. (A) shows
+  why: both of the phone's ways to reach a session only attach:
+  - the screen's open (`session-controller.ts` `open`; `App.tsx` `RUNTIMES`,
+    `attach: {}`);
+  - the outbox's session port (`App.tsx` `outboxOf`, `newSession(…, {attach: {}})`
+    then `open()`, which answers null on failure, so the item would wait for
+    ever, `outbox-driver.ts:395`).
+
+  A minted id that does not exist yet can never be sent to. Making it lazy would
+  mean changing the outbox's persisted item, or a per-id "may create" flag that
+  survives an app kill. That is a load-bearing persisted-format change, well
+  beyond S.
+
+### Drift from the Implementation (each reconciled here)
+
+1. **The session is created at the tap, not on the first send** (Design 3 "New
+   session", Preconditions "New session without new protocol", F8).
+   `createFreshSession` (`src/session-controller.ts:123`) does three things in
+   order:
+   - calls `openSeeded()` on a handle built without `attach`;
+   - then detaches that handle and **waits** for the detach, so the screen's
+     own attach does not race a detach of the same id in the client's table;
+   - then answers `ok`.
+
+   It returns a typed reason (`openFailureReason`) and never throws. After
+   that, the Session screen and the outbox work unchanged: they attach to a
+   session that now exists.
+   - **Cost (owner's call, see Not done):** tapping New session and never
+     sending leaves an empty session on that computer. It shows in Recent with
+     no title, and is archived by the daemon's idle TTL like any other
+     detached session. **And** every create runs the daemon's `admit()`
+     (`packages/daemon/src/session-host.ts:1235-1257`): at
+     `maxDetachedSessions` it ARCHIVES the detached session idle the longest.
+     So repeated taps that are never sent push the person's real older
+     sessions into Archived — reversible (reopen), but not reported to them.
+     (Corrected in Fix round 1; Review S7 finding 2.)
+2. **F8 has a different shape.** The plan said "a failed create on the first
+   send surfaces as the composer's send-failure state (outbox keeps the text)".
+   Now a create fails at the tap, before anything has been typed. The drawer
+   stays open, opens nothing, and shows why (`drawer-new-error`, text chosen
+   by the reason code and never taken from the daemon's message). No prompt
+   exists yet, so none can be lost. The pill is disabled while the listed
+   computer is not online (`drawerTitle(...).canCreate`, from S5). A tap with
+   `canCreate` false, or during a create already in flight, sends nothing.
+3. **"Composer focused" needed a route param the plan did not name.**
+   - `SessionRoute.focus?` (`routes.ts`) and `DrawerPick.focus?`
+     (`drawer-nav.ts:52`, passed through on both the replace path and the
+     reset path).
+   - `SessionScreen` `focusComposer` → `Composer` `focus`. The composer
+     focuses the field once, the first time it becomes editable (after the
+     attach answers), and never again.
+4. **The plan's S7 test "offline → send fails into the outbox (F8)" became
+   "offline → a typed `link` refusal, and nothing is created on the
+   daemon"**, because the create no longer happens at a send.
+
+### As-built
+
+- `src/session-controller.ts:110-133`: `FreshHandle` + `createFreshSession`
+  (the phone's ONE create path).
+- `src/drawer-new-session.ts` (new, pure):
+  - `createDrawerNewSession({ mint, create, opened })`: one create at a time,
+    online only. A failure is kept until the next tap or `dismiss`.
+  - `newSessionPill(canCreate, state)` and `newSessionErrorText(reason)`.
+  - `NEW_SESSION_TITLE = "(new)"`.
+- `App.tsx` `SessionDrawerHost` (`:1059-1092`): `mint` = `crypto.randomUUID`.
+  `create` = `LINKS.get(listed)`; a failed dial answers `link`, otherwise
+  `createFreshSession(client.newSession(undefined, id))`. `opened` closes the
+  drawer and calls `drawerTarget(from, {…, title: "(new)", archived: false,
+  focus: true})`. That is the existing replace/reset path, so a create on
+  ANOTHER computer resets the stack exactly as F4 does for a row.
+- `screens/SessionsDrawer.tsx`: in the footer, Settings on the left and the
+  `PillButton` "New session" (`drawer-new`) on the right. A failure line
+  (`drawer-new-error`, tap to dismiss) sits above the footer. Render only.
+- `e2e/flows/26-drawer.yaml` + `.js`, appended at the end:
+  - tap `drawer-new` → `transcript-empty` → text typed with NO tap on the field
+    (this proves the focus) → send → `turn-idle`;
+  - re-open: a `drawer-current-.*` row (the minted id, matched by pattern) and
+    ALPHA back as an ordinary row;
+  - daemon truth: `model-prompts` contains the new session's prompt.
+- **Red before green:**
+  - With the stubs in place (the right signatures, wrong behaviour),
+    `drawer-new-session.test.ts` went 8 fail · 1 pass, all on assertions. The
+    one pass was the offline test, which passed only because the stub did
+    nothing; mutation Md below shows that test is not vacuous.
+  - The pill test was 1 fail before `newSessionPill` was implemented.
+  - The new `drawer-nav` case failed on the assertion before `focus` was passed
+    through (`Expected: true, Received: undefined`).
+  - `new-session-link.test.ts` was written after `createFreshSession`, so its
+    non-vacuity rests on mutations Ma and Mi.
+
+### Mutation checks (§9: `.tentacle/tmp/mobile-chrome/s7-mutations.ts` applies each, runs the 3 S7 test files, restores; `git status` afterwards shows only this slice's files; the re-run gave 19 pass · 0 fail)
+
+| # | Mutation | Caught by (fail) |
+|---|---|---|
+| Ma | create skipped (no `openSeeded`). **Plan target:** "creates" | 4, including both real-daemon tests |
+| Mb | no detach after the create | 1: creates, THEN detaches, then answers |
+| Mc | failure reason not by code (always `link`) | 1: typed reason by error code |
+| Md | offline still creates (F8). **Plan target:** "offline" | 1: F8 offline sends nothing |
+| Me | double tap not guarded | 1: second tap while in flight |
+| Mf | a failed create still opens | 2: F8 failure opens nothing; dismiss |
+| Mg | pill enabled while offline | 1: pill enabled only online |
+| Mh | a fresh pick drops `focus` | 1: drawer-nav fresh pick |
+| Mi | (test-side) create through an ATTACH handle, the phone's current path | 1: the real-daemon test (not created → not listed) |
+
+### Gate
+
+- `bun run check` (from the repo root):
+  - typecheck (root + `apps/mobile` + `apps/relay`): clean.
+  - `biome check .`: 1685 files, clean.
+  - `bun test`: **12148 pass · 5 skip · 0 fail** (874 files). The skips are
+    the same opt-in ones as S6.
+- The first run had one failure, a source-text guard I broke:
+  `session-screen-follow-wiring.test.ts` "Composer: `key={fieldKey}` …".
+  It pins `key` then `testID` as adjacent attributes, and my new `ref` sat
+  between them. I moved `ref` after `testID` and left the guard as it is.
+- **E2E: NOT RUN.** It is the same block as S6: the Release build fails on the
+  `liveactivity` → `PushCore` dependency, which also fails on `main` (S6 Fix
+  round 1, finding 2). Under AGENTS §0 I did not try a third rebuild. The
+  static `test/e2e-flows.test.ts` accepts the edited flow 26 (34 pass). The
+  steps added to flow 26 are therefore **unverified on a simulator**. To
+  verify: fix the native target, then
+  `bun run e2e:mobile --ios 26 --only 26-drawer`, in light and dark.
+
+### Not done in this slice (and why)
+
+- **Owner decision needed:** creating at the tap leaves an empty session if
+  the person never sends. The other option is a true lazy create: an outbox
+  item flagged "may create", persisted, so that a retry after an app kill
+  still creates. That is a persisted-format change and needs its own task.
+  Until the owner decides, the tap creates. Weigh in the decision: at the
+  daemon's detached cap each abandoned create archives one of the person's
+  real idle sessions (Drift 1, cost), silently.
+- No "(new)" placeholder row is drawn in the drawer before the first turn's
+  title arrives; the daemon's own (empty) title shows there.
+- Nothing committed. `TODO.md` untouched.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16 · answers Review (slice S7)*
+
+1. **MEDIUM, detach not pinned as awaited — FIXED (test only; the code was
+   already right).** `apps/mobile/test/drawer-new-session.test.ts` `fresh()`:
+   the fake `detach` now settles a macrotask later (`setTimeout 0`, like an RPC
+   round trip) and logs `detach-done`; the ordering test asserts
+   `create → detach → detach-done → answered`.
+   - **Red (mutation = the reviewer's bug):** `await handle.detach()` →
+     `void handle.detach()` in `src/session-controller.ts:131`:
+     ```
+     error: expect(received).toEqual(expected)
+         "detach",
+     -   "detach-done",
+         "answered",
+     (fail) createFreshSession > creates, THEN detaches, and only then answers ok …
+      9 pass
+      1 fail
+     ```
+     (Before this round the same mutant gave 0 fail — Review S7.) Reverted with
+     Edit; `git diff --stat` then showed only the test file.
+   - **Green:** `drawer-new-session` + `new-session-link`: 12 pass · 0 fail.
+2. **MEDIUM, cost of create-at-tap understated — FIXED (doc; it stays the
+   owner's call).** Verified `admit()` (`packages/daemon/src/session-host.ts:1235-1257`):
+   at `maxDetachedSessions` with a persister it archives `selectEvictable`'s
+   victim. Drift 1's cost and Not done now state that abandoned creates can
+   silently push real idle sessions into Archived. No code change: choosing
+   lazy create vs. create-at-tap is the owner decision already open.
+
+**Gate:** `bunx tsc --noEmit` clean · `tsc -p apps/mobile` clean ·
+`bun run lint` 1685 files clean · `bun test` **12148 pass · 5 skip · 0 fail**
+(874 files; the opt-in skips). E2E flow 26 still not run (same native block).
+
+## Review (slice S7)
+
+*— claude-opus-5-5, 2026-11-16 · slice S7 only · fresh context, SAME model as the S7 executor (shared blind spots possible)*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM test gap; the code holds).
+
+**Gate (re-run):**
+- S7 test files + `drawer-nav` + `session-screen-follow-wiring` + `e2e-flows`: 60 pass · 0 fail.
+- `bun run lint`: 1685 files, clean.
+- `bun run typecheck` (root + mobile + relay): clean.
+- Full `bun test`: not re-run.
+- E2E flow 26: not run (the same native-build block as S6), so it is unverified.
+
+**Findings**
+
+1. **MEDIUM: nothing pins that the detach is awaited before ok.**
+   - **The gap:** the test is `apps/mobile/test/drawer-new-session.test.ts:41-47`. Its fake `detach` (`:30-31`) logs the moment it is called, before any await. So mutating `await handle.detach()` → `void handle.detach()` (`src/session-controller.ts:131`) still gives 0 fail on both S7 files. Yet the docstring of `createFreshSession` says this ordering is what stops the screen's attach racing the detach.
+   - **Failure scenario:** without the await, `session/detach` and the screen's attach-open for the same id go out on one connection. The peer dispatches them concurrently (§7). If the daemon handles the detach second, the phone's attach is undone daemon-side, and the screen shows a session that never streams.
+   - **Fix:** in the fake, log a second entry after an awaited deferred, and assert create → detach → detach-done → answered.
+2. **MEDIUM (an owner call, not code): the cost of creating at the tap is understated.**
+   - **What Execution leaves out:** it says an abandoned session is "archived by the idle TTL". But every create runs `admit()` (`packages/daemon/src/session-host.ts:1234-1256`), and at `maxDetachedSessions` that archives the oldest idle detached session.
+   - **Effect:** repeated taps that are never sent push the person's real older sessions into Archived. That is reversible, but it is not reported to the person. It belongs in the owner's decision between lazy create and create at the tap.
+
+**Mutations (mine; `git status` was clean afterwards):**
+- Detach not awaited → survives (finding 1).
+- Double-tap guard removed → 1 fail.
+- Error not cleared on a re-tap → survives (LOW, not reported).
+
+**Attacks tried:**
+- **Minted-id collision:** `openSeeded` on a live id ATTACHES (`remote-session.ts:535-541`), but a UUIDv4 makes a collision negligible. Holds.
+- **Detach failure:** it is swallowed. `endSession` removes only its own entry (`remote-client.ts:1697`), so the screen's listener survives. Holds.
+- **§7 pure modules:** all branching is in `drawer-new-session.ts` / `createFreshSession`, and the components only render. Holds.
+- **§7 protocol and persistence:** no wire, schema or disk change, and no second session path (it goes through `RemoteClient`). Holds.
+- **§7 pod trust:** the error text is chosen by reason code, never taken from the daemon's message. Holds.
+- **Offline:** nothing is sent. Holds.
+- **Host unmounted mid-create:** `opened` can still navigate. LOW.
+
+**Executor behaviour:** honest. It found that the plan's premise ("lazy on the first send") was false, did not make a persisted-format change, and documented the drift. Its mutation Mb covered "no detach" but not "detach not awaited", so finding 1 slipped through.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · verifies Fix round 1 (`git diff HEAD~1`)*
+
+**Verdict: APPROVE** (S7). Both findings are resolved.
+
+1. **Finding 1: FIXED, confirmed by mutation.** I re-ran the same mutant, `await handle.detach()` → `void handle.detach()` (`src/session-controller.ts:131`). It now gives **1 fail**; before the fix it gave 0 fail. I reverted it, and `git status` was clean afterwards.
+2. **Finding 2: FIXED in the doc.** The `admit()` cite (`session-host.ts:1235-1257`) matches the code. The cost of creating at the tap is now part of the owner's open decision. No code change was expected.
+
+**Regressions:**
+- The diff touches only the test fake and the doc.
+- The detach-failure test still passes: the fake logs `detach-done` before it throws, and `createFreshSession` still swallows the error.
+- Double-tap guard mutant: still 1 fail.
+- S7 test files: 12 pass · 0 fail. `bun run lint`: 1685 files, clean. `bun run typecheck` (root + mobile + relay): clean.
+
+**Still open:**
+- E2E flow 26 has never run on a simulator (the same native-build block as S6).
+- LOW, not blocking: error not cleared on a re-tap; host unmounted mid-create.
+

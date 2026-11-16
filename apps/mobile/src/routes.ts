@@ -27,6 +27,8 @@ export interface SessionRoute {
    * `open{reopen}` (Owner Q4: browsing the list never revives a session).
    */
   readonly archived: boolean;
+  /** Just created by the drawer's New session (mobile-chrome S7): the composer is focused. */
+  readonly focus?: boolean;
 }
 
 /**
