@@ -457,6 +457,7 @@ toggle them reliably. This is stated here, not hidden.
 | H2 | **Action list + haptic kinds** | S · contained · `deepseek` | 4, 5 | `hub-actions` + `haptic-rules` tests red→green + mutation |
 | H3 | **Hub UI + wiring of what is on `main`** | M · contained (setting-gated) · `opus` | step 1 = the load-bearing spike; then 6–10, 12 | spike output pasted; controller test; flow 29 green in both themes; `bun run check` |
 | H4 | **Artifacts + Scheduled entries** | S · contained · `deepseek` | 11, once feat/model-artifacts and feat/cron-tool S6 are on `main` (else the slice waits; the hub ships without them, P6) | `hub-actions` cases for both badges; flow 29 step: an unseen artifact → the dot + the item badge |
+| H4a | **Scheduled entry only** (owner 2026-11-16: ship it now, cron-tool is on `main`) | S · contained · `deepseek` | the Scheduled-wakes half of H4: `hub-actions` case + badge (`schedules`, `nextWakeInMs`), Session info scrolled to SCHEDULED WAKES; tests incl. a real-screen render. The Artifacts entry stays for H4b, after feat/model-artifacts merges. | |
 
 Then the Review: a fresh-context `/code-review` that red-teams M1–M17 and
 §7 "logic lives in pure modules" (no threshold, hit-test or ordering in a
