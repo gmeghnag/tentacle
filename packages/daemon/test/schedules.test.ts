@@ -6,6 +6,7 @@ import {
   type ModelProvider,
   PermissionBroker,
   SCHEDULE_CHECK_INTERVAL_MS,
+  SCHEDULE_TTL_MS,
   type ScheduleLink,
   type StreamEvent,
 } from "@tentacle/core";
@@ -333,6 +334,35 @@ describe("a session fires its own scheduled wakes (S3)", () => {
     for (const capture of withWake) {
       expect(capture.schedules?.map((j) => [j.fires, j.nextAt])).toEqual([[1, T0 + 20 * MIN]]);
     }
+    await persister.stop();
+  });
+
+  test("T-D3b a recurring job past its 7-day expiry: removed, published, captured, audited; never fired", async () => {
+    // Mutation: drop `persist()` / `publishSchedules()` from `checkSchedules`'
+    // `due === null && changed` branch → the dead row stays on the wire / on disk.
+    const store = new SpyDaemonStore();
+    const persister = persisterOn(store);
+    const r = rig({ persister });
+    const a = await r.connect();
+    await a.open({ create: true });
+    r.link().create({ prompt: "check CI", every: "10m" });
+    await settle();
+    expect(
+      a
+        .of("schedules")
+        .at(-1)
+        ?.schedules.map((row) => row.id),
+    ).toEqual(["sc-1"]);
+    expect(persister.captures.at(-1)?.schedules?.map((j) => j.id)).toEqual(["sc-1"]);
+    const captured = persister.captures.length;
+    await r.tick(SCHEDULE_TTL_MS);
+    // Expired, not fired: the sweep runs before the due pick.
+    expect(r.model.fired()).toEqual([]);
+    expect(r.link().list()).toEqual([]);
+    expect(a.of("schedules").at(-1)?.schedules).toEqual([]);
+    expect(persister.captures.length).toBeGreaterThan(captured);
+    expect(persister.captures.at(-1)?.schedules ?? []).toEqual([]);
+    expect(r.audit).toContain("schedule: sc-1 expired S");
     await persister.stop();
   });
 

@@ -1461,3 +1461,37 @@ approved). I spot-checked it with the mutations above instead.
 **Drift 5 accepted:** there is no notice frame for an expiry or a failure stop
 (the list diff and the audit line carry it). It is carried to S5 as written.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16* (fixing the S3 review above; same model id as the
+reviewer, so its blind spots can survive both passes — a different-model review
+of this round is still owed.)
+
+**Finding 1 (MEDIUM, expiry path untested at the daemon) — FIXED.** New test
+`T-D3b` (`packages/daemon/test/schedules.test.ts`, after T-D3): an attached
+client + capturing persister, a `every 10m` job, the clock moved by
+`SCHEDULE_TTL_MS`, one check. It asserts: never fired; `list()` empty; the last
+`schedules` frame is `[]`; a NEW capture exists and carries no table; the audit
+line `schedule: sc-1 expired S`. No production change: the code was right, the
+pin was missing. Green on the branch code; red shown by mutation (each reverted
+with Edit; `git diff packages/daemon/src` empty afterwards):
+
+| Mutation in `checkSchedules` (`hosted-session.ts`) | T-D3b |
+|---|---|
+| A: drop `this.persist()` in the `due === null && changed` branch | RED — `expect(received).toBeGreaterThan(expected)` Expected `> 2`, Received `2` |
+| B: drop `this.publishSchedules()` in that branch | RED — last `schedules` frame `toEqual([])`, received the old 1-row list |
+| C: drop the `expired` audit line | RED — `expect(received).toContain(expected)` |
+
+**Finding 2 (MEDIUM, process: who executed S3) — NOT FIXABLE BY CODE, escalated.**
+Commit `073a82b1` (`feat(cron-tool): exec (deepseek)`) carries all the S3 code,
+while the S3 Execution is signed `claude-opus-5-5`. The repo cannot tell which is
+true; the owner must say. If DeepSeek wrote S3, correct the S3 Execution's
+signature. S3 is `load-bearing`, so §10 then wants a strong-model fresh review
+of the S3 code (Round 1's reviewer was Opus, which fits that case). This entry is
+signed with the executor's real id.
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (1684 files, after
+`biome check --write` on the test file) · `bun test` **12196 pass / 5 skip / 0
+fail** (12201 tests, 874 files). All 5 skips are opt-in: k8s live ×2
+(`TENTACLE_K8S_SERVER`), docker live ×2 (`TENTACLE_DOCKER_TESTS`), slow keepalive
+×1. None of them is in a branch file.
