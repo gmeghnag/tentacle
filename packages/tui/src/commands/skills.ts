@@ -7,7 +7,7 @@ type Ctx = Pick<CommandContext, "openPanel" | "skillsSync">;
 
 export const command = {
   name: "/skills",
-  description: "every skill found: who can use it, and any problems",
+  description: "every skill found: who can use it, problems — and on/off for this session",
   run: (ctx: Ctx): void => {
     // The session's skills read again (docs/feat/skills-hot-reload.md).
     ctx.openPanel(

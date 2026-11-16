@@ -13,6 +13,8 @@ export interface ComputerRoute {
 export interface SessionsRoute {
   readonly computerId: string;
   readonly name: string;
+  /** Opened from the drawer's magnifier (mobile-chrome Design 3): the search field is focused. */
+  readonly search?: boolean;
 }
 
 export interface SessionRoute {
@@ -25,6 +27,8 @@ export interface SessionRoute {
    * `open{reopen}` (Owner Q4: browsing the list never revives a session).
    */
   readonly archived: boolean;
+  /** Just created by the drawer's New session (mobile-chrome S7): the composer is focused. */
+  readonly focus?: boolean;
 }
 
 /**

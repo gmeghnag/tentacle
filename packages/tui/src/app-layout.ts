@@ -37,6 +37,7 @@ import {
   listVisible,
 } from "./background-list.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
+import { type CapsPhase, capsMarker } from "./capability-toggles.ts";
 import {
   type QuitConfirmFacts,
   type SlashSkill,
@@ -111,6 +112,11 @@ export interface FrameInput {
   readonly panel: OpenPanel | null;
   /** The session's own id (`sessionRef.current?.sessionId ?? null`). */
   readonly sessionId: string | null;
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md S4):
+   * the panels' switch column and the status-line marker. Absent: none.
+   */
+  readonly capsPhase?: CapsPhase;
   readonly field: { readonly value: string; readonly cursor: number };
   readonly attach: AttachDraft;
   readonly skills: readonly SlashSkill[];
@@ -154,6 +160,7 @@ export function frameLayout(input: FrameInput) {
     quitConfirm,
     panel,
     sessionId,
+    capsPhase,
     field,
     attach,
     skills,
@@ -195,7 +202,11 @@ export function frameLayout(input: FrameInput) {
   const voiceRows = voiceStrip === null || voiceStrip === undefined ? 0 : VOICE_STRIP_ROWS;
   const inputBoxRows =
     inputContentLines + 2 + attachRowRows(attach, Math.max(1, columns - 2)) + voiceRows;
-  const listView = panel ? panelView(panel, columns, panelMaxBody(termRows), sessionId) : null;
+  const listView = panel
+    ? panelView(panel, columns, panelMaxBody(termRows), sessionId, capsPhase)
+    : null;
+  // The status-line marker while something is off (owner Q2): null otherwise.
+  const capsShown = capsMarker(capsPhase?.kind === "on" ? capsPhase.caps : undefined);
   // Rows above the input/panel while a turn runs: the thinking line + the
   // queued-message lines (each one row: `wrap="truncate-end"`) + the send-now
   // hint row under them + one blank row between the hint and the thinking line.
@@ -356,6 +367,7 @@ export function frameLayout(input: FrameInput) {
     voiceRows,
     inputBoxRows,
     listView,
+    capsShown,
     shown,
     runningRows,
     dockListVisible,

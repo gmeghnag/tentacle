@@ -25,7 +25,16 @@ import { type AttachmentRef, encodeBase64Url, parsePairingPayload } from "@tenta
 import type { DuplexChannel } from "@tentacle/transport";
 import { getRandomBytes } from "expo-crypto";
 import { File } from "expo-file-system";
-import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type JSX,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
   AppState,
@@ -52,7 +61,12 @@ import { exportFileName, exportText } from "./src/app-log.ts";
 import type { PickedPhoto } from "./src/compose-controller.ts";
 import { composeHandleOf } from "./src/compose-handle.ts";
 import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
-import { type ComputerRow, computerRows, probeComputer } from "./src/computer-rows.ts";
+import {
+  type ComputerRecordLike,
+  type ComputerRow,
+  computerRows,
+  probeComputer,
+} from "./src/computer-rows.ts";
 import {
   type ComputerEntry,
   type ComputerSource,
@@ -62,6 +76,28 @@ import {
 import { type ComputerLink, openComputer } from "./src/connection.ts";
 import { pairingTextFromUrl } from "./src/deep-link.ts";
 import { createDraftScheduler } from "./src/drafts.ts";
+import {
+  type DrawerRow,
+  drawerComputers,
+  drawerItems,
+  drawerList,
+  drawerTitle,
+} from "./src/drawer-list.ts";
+import {
+  type DrawerNav,
+  type DrawerStackRoute,
+  drawerCurrentId,
+  drawerReducer,
+  drawerSearchTarget,
+  drawerTarget,
+  initialDrawer,
+} from "./src/drawer-nav.ts";
+import {
+  NEW_SESSION_TITLE,
+  createDrawerNewSession,
+  newSessionPill,
+} from "./src/drawer-new-session.ts";
+import { createDrawerRename } from "./src/drawer-rename.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
@@ -89,12 +125,17 @@ import { readAsked, readPermission, readPushFacts, requestPermission } from "./s
 import { createPushManager } from "./src/push-manager.ts";
 import type { PushPermission } from "./src/push-registration.ts";
 import { createPushToggleStore } from "./src/push-toggle-store.ts";
-import { type RootStackParams, initialRoute } from "./src/routes.ts";
+import {
+  type RootStackParams,
+  type SessionRoute as SessionRouteParams,
+  initialRoute,
+} from "./src/routes.ts";
 import { QrScanner, usePairingCamera } from "./src/scanner.tsx";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
 import { LockGate } from "./src/screens/LockGate.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
+import { SessionsDrawer } from "./src/screens/SessionsDrawer.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
 import {
@@ -104,7 +145,7 @@ import {
   keychainKV,
   pushKeychain,
 } from "./src/secure-kv.ts";
-import { createSessionController } from "./src/session-controller.ts";
+import { createFreshSession, createSessionController } from "./src/session-controller.ts";
 import type { InfoPort } from "./src/session-info-controller.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
 import { type SessionListState, type SessionRow, initialSessionList } from "./src/session-list.ts";
@@ -117,7 +158,7 @@ import {
 } from "./src/session-screen-controller.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
 import { type Palette, paletteFor } from "./src/theme.ts";
-import { GlassButton } from "./src/ui/GlassButton.tsx";
+import { HeaderIcon } from "./src/ui/HeaderIcon.tsx";
 import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
 import { VOICE_SETTINGS } from "./src/voice-settings-expo.ts";
 import type { VoiceSettings } from "./src/voice-settings-store.ts";
@@ -816,12 +857,14 @@ function SessionsRoute({
   title,
   onOpen,
   onBack,
+  focusSearch,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
   readonly title: string;
   readonly onOpen: (row: SessionRow) => void;
   readonly onBack?: () => void;
+  readonly focusSearch?: boolean;
 }): JSX.Element {
   const [snapshot, setSnapshot] = useState<SessionListState>(initialSessionList);
   const [now, setNow] = useState(() => Date.now());
@@ -906,8 +949,223 @@ function SessionsRoute({
       onRetry={() => void controller.refresh()}
       onOpen={onOpen}
       {...(onBack === undefined ? {} : { onBack })}
+      {...(focusSearch === undefined ? {} : { focusSearch })}
     />
   );
+}
+
+/**
+ * The sessions drawer over one Session route (docs/feat/mobile-chrome.md Design
+ * 3, slice S6). Wiring only: the list is the Sessions screen's own controller
+ * over the SAME link registry (no new client call — the plan's load-bearing
+ * assumption); every decision is `drawer-list.ts` / `drawer-nav.ts` /
+ * `drawer-rename.ts`; a pick leaves through `onNavigate`. A switch only
+ * unmounts the session screen, which DETACHES (never `session/close`, F6).
+ */
+function SessionDrawerHost({
+  palette,
+  from,
+  records,
+  onNavigate,
+  onSettings,
+  onPair,
+  children,
+}: {
+  readonly palette: Palette;
+  readonly from: SessionRouteParams;
+  readonly records: readonly ComputerRecordLike[];
+  readonly onNavigate: (nav: DrawerNav) => void;
+  readonly onSettings: () => void;
+  readonly onPair: () => void;
+  readonly children: (openDrawer: () => void) => ReactNode;
+}): JSX.Element {
+  const [drawer, dispatch] = useReducer(drawerReducer, from.computerId, initialDrawer);
+  const [rows, setRows] = useState<readonly ComputerRow[]>([]);
+  const [snapshot, setSnapshot] = useState<SessionListState>(initialSessionList);
+  const [now, setNow] = useState(() => Date.now());
+  const [rowMenu, setRowMenu] = useState<DrawerRow | null>(null);
+  const listed = drawer.computerId;
+  // One controller per LISTED computer (`SessionsRoute`'s `load`); a computer
+  // picked in the menu gets a fresh one, so the previous list never shows
+  // under the new title, and a late page of the old one is dropped (F3).
+  const controller = useMemo(
+    () =>
+      createSessionListController({
+        load: async (params) => {
+          const link = await LINKS.get(listed);
+          return link.client.sessionList(
+            params.cursor === undefined ? { limit: 50 } : { limit: 50, cursor: params.cursor },
+          );
+        },
+        now: () => Date.now(),
+      }),
+    [listed],
+  );
+  const controllerRef = useRef(controller);
+  controllerRef.current = controller;
+  useEffect(() => {
+    setSnapshot(initialSessionList);
+    const unsubscribe = controller.subscribe((state) => {
+      setSnapshot(state);
+      setNow(Date.now());
+    });
+    return () => {
+      unsubscribe();
+      controller.dispose();
+    };
+  }, [controller]);
+  // F3: the list (and the title's status) is re-read on every open, and when a
+  // computer is picked while open.
+  useEffect(() => {
+    if (drawer.open) {
+      void controller.refresh();
+    }
+  }, [drawer.open, controller]);
+  useEffect(() => {
+    if (!drawer.open) {
+      return;
+    }
+    let live = true;
+    // A failed probe keeps the last rows: the title then says what it last
+    // knew (or "Connecting…"); the list below reports its own failure (F2).
+    void loadRows().then(
+      (built) => {
+        if (live) {
+          setRows(built);
+        }
+      },
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [drawer.open]);
+  // Rename by id on the ROW's computer (F7); a success re-reads that list.
+  const rename = useMemo(
+    () =>
+      createDrawerRename({
+        rename: async (computerId, sessionId, title) => {
+          const link = await LINKS.get(computerId);
+          return (await link.client.rename(sessionId, title)).text;
+        },
+        renamed: () => void controllerRef.current.refresh(),
+      }),
+    [],
+  );
+  const [renaming, setRenaming] = useState(() => rename.state());
+  useEffect(() => rename.subscribe(() => setRenaming(rename.state())), [rename]);
+  // New session (S7): created at the tap on the LISTED computer (the phone's
+  // open and outbox attach only), then opened like a row, composer focused.
+  const navigateRef = useRef({ from, onNavigate, names: new Map<string, string>() });
+  navigateRef.current.from = from;
+  navigateRef.current.onNavigate = onNavigate;
+  const fresh = useMemo(
+    () =>
+      createDrawerNewSession({
+        mint: () => crypto.randomUUID(),
+        create: async (computerId, sessionId) => {
+          let link: Awaited<ReturnType<typeof LINKS.get>>;
+          try {
+            link = await LINKS.get(computerId);
+          } catch {
+            return { ok: false, reason: "link" } as const;
+          }
+          return createFreshSession(link.client.newSession(undefined, sessionId));
+        },
+        opened: (computerId, sessionId) => {
+          const at = navigateRef.current;
+          dispatch({ type: "close" });
+          at.onNavigate(
+            drawerTarget(at.from, {
+              computerId,
+              computerName: at.names.get(computerId) ?? computerId,
+              sessionId,
+              title: NEW_SESSION_TITLE,
+              archived: false,
+              focus: true,
+            }),
+          );
+        },
+      }),
+    [],
+  );
+  const [freshState, setFreshState] = useState(() => fresh.state());
+  useEffect(() => fresh.subscribe(() => setFreshState(fresh.state())), [fresh]);
+  const openDrawer = useCallback(
+    () => dispatch({ type: "open", computerId: from.computerId }),
+    [from.computerId],
+  );
+
+  const list = drawerList(viewModel(snapshot, now), {
+    currentId: drawerCurrentId(drawer, from),
+    archivedOpen: drawer.archivedOpen,
+  });
+  const title = drawerTitle(records, rows, listed);
+  const name = title?.name ?? listed;
+  navigateRef.current.names.set(listed, name);
+  const canCreate = title?.canCreate === true;
+  const close = (): void => dispatch({ type: "close" });
+  return (
+    <SessionsDrawer
+      palette={palette}
+      open={drawer.open}
+      title={title}
+      menuOpen={drawer.menuOpen}
+      computers={drawerComputers(records, rows, listed)}
+      items={drawerItems(list)}
+      onClose={close}
+      onTitle={() => dispatch({ type: "menu", open: !drawer.menuOpen })}
+      onPickComputer={(computerId) => dispatch({ type: "select-computer", computerId })}
+      onPair={() => {
+        close();
+        onPair();
+      }}
+      onSearch={() => {
+        close();
+        onNavigate({ kind: "reset", routes: drawerSearchTarget(listed, name) });
+      }}
+      onSettings={() => {
+        close();
+        onSettings();
+      }}
+      onOpenRow={(row) => {
+        close();
+        onNavigate(
+          drawerTarget(from, {
+            computerId: listed,
+            computerName: name,
+            sessionId: row.id,
+            title: row.title,
+            archived: row.archived,
+          }),
+        );
+      }}
+      onRowMenu={setRowMenu}
+      rowMenu={rowMenu}
+      onRowMenuClosed={() => setRowMenu(null)}
+      onRename={(row) => {
+        setRowMenu(null);
+        rename.begin(listed, row);
+      }}
+      rename={renaming?.field ?? null}
+      onRenameText={(text) => rename.setText(text)}
+      onRenameSave={() => void rename.submit()}
+      onRenameCancel={() => rename.cancel()}
+      onToggleArchived={(shown) => dispatch({ type: "toggle-archived", shown })}
+      onMore={() => void controller.more()}
+      onRetry={() => void controller.refresh()}
+      newSession={newSessionPill(canCreate, freshState)}
+      onNewSession={() => void fresh.start(listed, canCreate)}
+      onNewSessionDismiss={() => fresh.dismiss()}
+    >
+      {children(openDrawer)}
+    </SessionsDrawer>
+  );
+}
+
+/** The drawer's stack as the navigator's `reset` takes it. */
+function stackRoutes(routes: readonly DrawerStackRoute[]): DrawerStackRoute[] {
+  return [...routes];
 }
 
 /**
@@ -922,14 +1180,16 @@ function SessionRoute({
   sessionId,
   title,
   archived,
-  onBack,
+  focus,
+  onOpenDrawer,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
   readonly sessionId: string;
   readonly title: string;
   readonly archived: boolean;
-  readonly onBack?: () => void;
+  readonly focus: boolean;
+  readonly onOpenDrawer: () => void;
 }): JSX.Element {
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -992,15 +1252,13 @@ function SessionRoute({
           variant="compact"
           title={title}
           left={
-            onBack === undefined ? undefined : (
-              <GlassButton
-                palette={palette}
-                testID="session-back"
-                icon="chevron.left"
-                accessibilityLabel="Back"
-                onPress={onBack}
-              />
-            )
+            <HeaderIcon
+              palette={palette}
+              testID="session-drawer"
+              icon="line.3.horizontal"
+              accessibilityLabel="Sessions"
+              onPress={onOpenDrawer}
+            />
           }
         />
         <View style={styles.connecting}>
@@ -1023,7 +1281,8 @@ function SessionRoute({
       palette={palette}
       controller={controller}
       title={title}
-      {...(onBack === undefined ? {} : { onBack })}
+      onOpenDrawer={onOpenDrawer}
+      focusComposer={focus}
     />
   );
 }
@@ -1646,6 +1905,7 @@ function AppShell(): JSX.Element {
                 palette={palette}
                 computerId={route.params.computerId}
                 title={route.params.name}
+                {...(route.params.search === true ? { focusSearch: true } : {})}
                 {...(navigation.canGoBack() ? { onBack: () => navigation.goBack() } : {})}
                 onOpen={(row) =>
                   navigation.navigate("Session", {
@@ -1669,14 +1929,37 @@ function AppShell(): JSX.Element {
             options={({ route }) => ({ title: route.params.title, headerShown: false })}
           >
             {({ navigation, route }) => (
-              <SessionRoute
+              <SessionDrawerHost
                 palette={palette}
-                {...(navigation.canGoBack() ? { onBack: () => navigation.goBack() } : {})}
-                computerId={route.params.computerId}
-                sessionId={route.params.sessionId}
-                title={route.params.title}
-                archived={route.params.archived}
-              />
+                from={route.params}
+                records={pairedComputers}
+                // F4: same computer → replace (no stack growth); another computer
+                // → the whole stack, so back lands on THAT computer's list.
+                onNavigate={(nav) => {
+                  if (nav.kind === "replace") {
+                    navigation.replace("Session", nav.route.params);
+                  } else if (nav.kind === "reset") {
+                    navigation.reset({
+                      index: nav.routes.length - 1,
+                      routes: stackRoutes(nav.routes),
+                    });
+                  }
+                }}
+                onSettings={() => navigation.navigate("Settings")}
+                onPair={() => navigation.navigate("Pair", undefined)}
+              >
+                {(openDrawer) => (
+                  <SessionRoute
+                    palette={palette}
+                    onOpenDrawer={openDrawer}
+                    computerId={route.params.computerId}
+                    sessionId={route.params.sessionId}
+                    title={route.params.title}
+                    archived={route.params.archived}
+                    focus={route.params.focus === true}
+                  />
+                )}
+              </SessionDrawerHost>
             )}
           </Stack.Screen>
         </Stack.Navigator>

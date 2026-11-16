@@ -210,3 +210,28 @@ function capsOf(ctl: object): unknown {
   const read = (ctl as { capabilities?: () => unknown }).capabilities;
   return typeof read === "function" ? read.call(ctl) : undefined;
 }
+
+describe("the TUI's switch path through the runtime controller (S4)", () => {
+  test("C5 opened() after the first message; setCapability → onCapabilities echo; the next request lacks the tool", async () => {
+    // Mutations: drop `setCapability` / `onCapabilities` / `opened` from
+    // `persistingController` → the TUI sees "unsupported" (no switch column).
+    const d = daemon();
+    const { runtime } = await runtimeOn("s4", d);
+    const ctl = runtime.createSession();
+    expect(typeof ctl.setCapability).toBe("function");
+    expect(ctl.opened()).toBe(false);
+    await drain(ctl.send("hello"));
+    expect(ctl.opened()).toBe(true);
+    const seen: unknown[] = [];
+    const unsubscribe = ctl.onCapabilities((caps) => seen.push(caps));
+    await ctl.setCapability("mcp", "echo", false);
+    await until(() => seen.length > 0);
+    expect(seen.at(-1)).toEqual(OFF);
+    expect(ctl.capabilities()).toEqual(OFF);
+    await drain(ctl.send("next"));
+    expect(d.model.tools.at(-1)).toContain("shell");
+    expect(d.model.tools.at(-1)).not.toContain("mcp__echo__echo");
+    unsubscribe();
+    await runtime.dispose();
+  });
+});

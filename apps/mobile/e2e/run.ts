@@ -1189,6 +1189,9 @@ export const FLOWS: readonly string[] = [
   // docs/feat/mobile-session-info.md: the "…" menu's Session info sheet — the
   // model, the context, the MCP servers and the skills, on a session of its own.
   "25-session-info",
+  // docs/feat/mobile-chrome.md S6: the sessions drawer — highlight, rename by
+  // id, switch — on a session of its own (it renames it).
+  "26-drawer",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -1261,6 +1264,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "23-composer-keyboard": "KEYBOARD_ID",
   "24-ui-shots": "SHOTS_ID",
   "25-session-info": "INFO_ID",
+  "26-drawer": "DRAWER_ID",
 };
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */

@@ -7,7 +7,7 @@ type Ctx = Pick<CommandContext, "pushNotice" | "mcpStatus" | "openPanel">;
 
 export const command = {
   name: "/mcp",
-  description: "MCP servers: reachability and their tools",
+  description: "MCP servers: reachability, tools — and on/off for this session",
   run: (ctx: Ctx): void => {
     const mcpStatus = ctx.mcpStatus;
     if (!mcpStatus) {

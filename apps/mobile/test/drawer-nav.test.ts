@@ -6,7 +6,7 @@
  * keeps `archived: true` (Owner Q4: browsing never revives).
  */
 import { describe, expect, test } from "bun:test";
-import { type DrawerPick, drawerTarget } from "../src/drawer-nav.ts";
+import { type DrawerPick, drawerSearchTarget, drawerTarget } from "../src/drawer-nav.ts";
 import type { SessionRoute } from "../src/routes.ts";
 
 const FROM: SessionRoute = { computerId: "a", sessionId: "s1", title: "one", archived: false };
@@ -66,5 +66,28 @@ describe("drawerTarget", () => {
 
   test("the same session id on ANOTHER computer is a different session", () => {
     expect(drawerTarget(FROM, pick({ computerId: "b", sessionId: "s1" })).kind).toBe("reset");
+  });
+});
+
+describe("drawerSearchTarget (the magnifier)", () => {
+  test("the listed computer's Sessions screen, search focused, under Computers", () => {
+    expect(drawerSearchTarget("b", "Mac b")).toEqual([
+      { name: "Computers" },
+      { name: "Sessions", params: { computerId: "b", name: "Mac b", search: true } },
+    ]);
+  });
+});
+
+describe("drawerTarget for a session just created (New session, S7)", () => {
+  test("a fresh pick opens with the composer focused, on either path; an ordinary pick never does", () => {
+    const same = drawerTarget(FROM, pick({ sessionId: "new-1", focus: true }));
+    expect(same.kind === "replace" ? same.route.params.focus : undefined).toBe(true);
+    const other = drawerTarget(FROM, pick({ computerId: "b", sessionId: "new-2", focus: true }));
+    expect(other.kind === "reset" ? other.routes.at(-1) : undefined).toEqual({
+      name: "Session",
+      params: { computerId: "b", sessionId: "new-2", title: "two", archived: false, focus: true },
+    });
+    const plain = drawerTarget(FROM, pick());
+    expect(plain.kind === "replace" ? "focus" in plain.route.params : true).toBe(false);
   });
 });

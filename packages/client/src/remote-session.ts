@@ -1015,6 +1015,16 @@ export class RemoteSession implements SessionStreamListener {
     return this.id ?? this.desiredId ?? null;
   }
 
+  /**
+   * The session is open daemon-side (`sessionId` already names the id it WILL
+   * open): a surface tells "not started yet" from "the daemon has no switches"
+   * (docs/feat/session-capabilities.md S4). A method, not a getter: `connect`
+   * hands this session to the TUI as its `SessionController` as is.
+   */
+  opened(): boolean {
+    return this.id !== null;
+  }
+
   /** How many of my queued rows stay on the daemon if this session stops being followed now (QN2). */
   stayingRows(): number {
     const state = this.queued;

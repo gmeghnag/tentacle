@@ -70,29 +70,30 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     const view = panelView(loadPanel([github, db, fs]), 80, 10);
     expect(view.title).toBe("MCP servers · 2 of 3 reachable");
     expect(view.rows.map((r) => r.text)).toEqual([
-      "❯ ▸ github  ● connected · 3 tools · 41 ms",
+      "❯ ▸ github  ● 3 tools",
       "  ▸ db      ✗ failed",
-      "  ▸ fs      ● connected · 1 tool · 3 ms",
+      "  ▸ fs      ● 1 tool",
     ]);
     expect(view.rows.map((r) => r.selected)).toEqual([true, false, false]);
   });
 
-  test("enter on a server expands it to its tool names; again collapses", () => {
+  test("enter on a server expands it to its state, then its tool names; again collapses", () => {
     const open = applyPanel(loadPanel([github, fs]), panelKey("", { return: true }));
     expect(texts(open)).toEqual([
-      "❯ ▾ github  ● connected · 3 tools · 41 ms",
+      "❯ ▾ github  ● 3 tools",
+      "        connected · 41 ms",
       "        create_issue",
       "        list_prs",
       "        get_file",
-      "  ▸ fs      ● connected · 1 tool · 3 ms",
+      "  ▸ fs      ● 1 tool",
     ]);
-    expect(texts(applyPanel(open, "toggle"))[0]).toBe("❯ ▸ github  ● connected · 3 tools · 41 ms");
+    expect(texts(applyPanel(open, "toggle"))[0]).toBe("❯ ▸ github  ● 3 tools");
   });
 
   test("the cursor walks tool rows; enter or ← on one collapses its server and returns to it", () => {
     let p = applyPanel(loadPanel([github, fs]), "toggle");
-    p = applyPanel(applyPanel(p, "down"), "down"); // on list_prs
-    expect(texts(p)[2]).toBe("❯       list_prs");
+    p = applyPanel(applyPanel(applyPanel(p, "down"), "down"), "down"); // on list_prs
+    expect(texts(p)[3]).toBe("❯       list_prs");
     for (const action of ["toggle", "collapse"] as const) {
       const back = applyPanel(p, action);
       expect(back.tree.expanded).toEqual([]);
@@ -122,13 +123,14 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     expect(texts(p)).toEqual([
       "  ▾ db   ✗ failed",
       "        spawn ENOENT",
-      "❯ ▾ big  ● connected · 301 tools · 41 ms",
+      "❯ ▾ big  ● 301 tools",
+      "        connected · 41 ms",
       "        a",
       "        … 300 more",
     ]);
   });
 
-  test("unresponsive/closed show the error then their tools; connected with none says so; connecting says so", () => {
+  test("unresponsive/closed show their state and error, then their tools; connected with none says so; connecting says so", () => {
     const stuck: McpServerView = {
       name: "s",
       state: "unresponsive",
@@ -146,12 +148,13 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     const wait: McpServerView = { name: "w", state: "connecting", tools: [], moreTools: 0 };
     const p = at([stuck, empty, wait], [0, 1, 2], 0);
     expect(texts(p)).toEqual([
-      "❯ ▾ s  ! unresponsive · 1 tool",
-      "        timed out",
+      "❯ ▾ s  ! 1 tool",
+      "        unresponsive · timed out",
       "        t",
-      "  ▾ e  ● connected · 0 tools · 1 ms",
+      "  ▾ e  ● 0 tools",
+      "        connected · 1 ms",
       "        no tools",
-      "  ▾ w  … connecting",
+      "  ▾ w  …",
       "        still connecting",
     ]);
   });
@@ -177,7 +180,7 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     for (const r of rows) {
       expect(r.length).toBeLessThanOrEqual(30);
     }
-    expect(rows[1]?.endsWith("…")).toBe(true);
+    expect(rows[2]?.endsWith("…")).toBe(true);
   });
 
   test("a long list is windowed on the cursor, and the hint says where", () => {
@@ -186,12 +189,12 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     let view = panelView(p, 80, 5);
     expect(view.rows.length).toBe(5);
     expect(view.start).toBe(0);
-    expect(view.hint).toContain("1–5 of 41");
+    expect(view.hint).toContain("1–5 of 42");
     p = at([many], [0], 30);
     view = panelView(p, 80, 5);
     expect(view.rows.length).toBe(5);
-    expect(view.rows.find((r) => r.selected)?.text).toBe("❯       t29");
-    expect(view.hint).toContain(`${view.start + 1}–${view.start + 5} of 41`);
+    expect(view.rows.find((r) => r.selected)?.text).toBe("❯       t28");
+    expect(view.hint).toContain(`${view.start + 1}–${view.start + 5} of 42`);
   });
 
   test("the body never takes more than about half the terminal", () => {
@@ -216,10 +219,10 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
 
   test("a click maps through the window (body row 0 is the window's first row)", () => {
     const many: McpServerView = { ...github, tools: Array.from({ length: 40 }, (_, i) => `t${i}`) };
-    const p = at([many, fs], [0], 41);
+    const p = at([many, fs], [0], 42);
     const view = panelView(p, 80, 5);
     const last = panelClick(p, view, 4); // the fs row, at the window's bottom
-    expect(last.tree.cursor).toBe(41);
+    expect(last.tree.cursor).toBe(42);
     expect(last.tree.expanded).toEqual([0, 1]);
   });
 
@@ -229,11 +232,12 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     expect(applyPanel(p, "toggle")).toBe(p);
   });
 
-  test("keys: arrows, enter/space, esc/q; anything else is none", () => {
+  test("keys: arrows, enter expands, space switches on/off, esc/q; anything else is none", () => {
     expect(panelKey("", { upArrow: true })).toBe("up");
     expect(panelKey("", { downArrow: true })).toBe("down");
     expect(panelKey("", { return: true })).toBe("toggle");
-    expect(panelKey(" ", {})).toBe("toggle");
+    // Space is the on/off switch (docs/feat/session-capabilities.md S4), not expand.
+    expect(panelKey(" ", {})).toBe("switch");
     expect(panelKey("", { rightArrow: true })).toBe("expand");
     expect(panelKey("", { leftArrow: true })).toBe("collapse");
     expect(panelKey("", { escape: true })).toBe("close");

@@ -14,7 +14,7 @@
  * XCUITest under RN's new architecture, plan P9): `session-view`, `row-<key>`,
  * `tool-<callId>-<status>`, `diff-<callId>`, `turn-running`, `turn-idle`,
  * `composer-input`, `composer-send`, `composer-stop`, `banner-<kind>`,
- * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`, `session-back`,
+ * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`, `session-drawer`,
  * `jump-latest`, `session-menu`, `session-menu-sheet`, `session-menu-copy-last|copy-all`.
  */
 import { useIsFocused } from "@react-navigation/native";
@@ -99,8 +99,13 @@ export interface SessionScreenProps {
   readonly controller: SessionScreenController;
   /** The session's title (the compact header). */
   readonly title: string;
-  /** Present only when the stack can go back. */
-  readonly onBack?: () => void;
+  /**
+   * The hamburger (mobile-chrome Design 3, F1): opens the sessions drawer. The
+   * only opener — the left-edge swipe keeps meaning back.
+   */
+  readonly onOpenDrawer?: () => void;
+  /** Just created by the drawer's New session (S7): the composer takes focus once it is editable. */
+  readonly focusComposer?: boolean;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -129,7 +134,8 @@ export function SessionScreen({
   palette,
   controller,
   title,
-  onBack,
+  onOpenDrawer,
+  focusComposer = false,
 }: SessionScreenProps): JSX.Element {
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
@@ -412,13 +418,13 @@ export function SessionScreen({
           onTitlePress={() => controller.beginRename()}
           titleTestID="session-title"
           left={
-            onBack === undefined ? undefined : (
+            onOpenDrawer === undefined ? undefined : (
               <HeaderIcon
                 palette={palette}
-                testID="session-back"
-                icon="chevron.left"
-                accessibilityLabel="Back"
-                onPress={onBack}
+                testID="session-drawer"
+                icon="line.3.horizontal"
+                accessibilityLabel="Sessions"
+                onPress={onOpenDrawer}
               />
             )
           }
@@ -645,6 +651,7 @@ export function SessionScreen({
         <Composer
           palette={palette}
           fieldKey={state.sends}
+          focus={focusComposer}
           draft={state.draft}
           editable={state.view.editable}
           placeholder={

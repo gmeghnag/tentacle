@@ -1482,3 +1482,498 @@ The plan's third mutation target, "break the `note.id` join", belongs to S8
 **Attacks tried:** (1) same id on another computer → `reset`, not `stay`, and no highlight via `drawerCurrentId` — holds. (2) F2: stale/error never `empty` — holds. (3) F4 stack shape incl. `archived:true` on both paths (Owner Q4) — holds. (4) `canCreate` from `computerStatus`: a probe that fails while the link diagnoser still says `ok` (dial fine, `session/list` errors) yields `state:"ok"` (`computer-rows.ts:79-89`, `App.tsx:528`) → title "Online", `canCreate:true` — pre-existing `computerRows` behaviour, LOW; S6/S7 should not rely on `canCreate` alone (the create path's own failure state, F8, is the real net). (5) §7 "logic in pure modules": all branching is in `drawer-list.ts`/`drawer-nav.ts`; no protocol/persistence/IO touched.
 
 **Executor behaviour:** honest provenance note and drift list; cited lines verified. Process nit: the branch commit is titled `exec (deepseek)` while the Execution is signed claude-opus-5-5 and says the files predate it — the authoring model of the S5 code is unclear; record it once in the commit/scorecard.
+
+## Execution (slice S6 — drawer UI + navigation, C1)
+
+*— claude-opus-5-5, 2026-11-16 · slice S6 only*
+
+**Scope:** S6 only. No New session pill (S7), no Activity (S8–S10). No
+protocol, daemon or client change, so `protocol.json` was not regenerated (no
+schema changed).
+
+**Provenance (stated honestly):** at the start of this run the worktree already
+held an earlier, unrecorded S6 attempt, uncommitted (mtime 2026-11-16
+01:36–01:39): `drawerItems`/`drawerComputers` added to `drawer-list.ts`,
+`drawerMotion`/`swipeIsHorizontal`/`swipeCloses`/`DRAWER_WIDTH` added to
+`drawer-nav.ts`, a new `drawer-rename.ts`, `screens/SessionsDrawer.tsx`,
+`test/drawer-items.test.ts` and `test/drawer-rename.test.ts`. None of it was
+wired in, and `SessionsDrawer.tsx` did not typecheck. I checked it against the
+plan and the code and kept it with two fixes (below). The wiring, routes, flows,
+the magnifier target and all the evidence below are mine.
+
+### Load-bearing check, re-run first (it held)
+
+- The six drawer test files: 50 pass · 0 fail. That includes `drawer-seam`
+  (two controllers over two fake `session/list` loaders, no other client call)
+  and `drawer-nav` (`drawerTarget` stack).
+- The seams are where S5 cited them: `App.tsx` `SessionsRoute` builds its
+  controller over `LINKS.get(computerId)` (`:852-854` before this slice's
+  edits), `SessionRoute` resolves its own link (`:944`), and the Sessions screen
+  opens with `navigate("Session", …)` (`:1651`). The drawer host reuses exactly
+  that `load`. **No new client call** was needed; rename uses the existing
+  `RemoteClient.rename` (`packages/client/src/remote-client.ts:1215`).
+
+### Drift from the Implementation (each reconciled here)
+
+1. **The host is mounted in `App.tsx`, not in `SessionScreen`.**
+   `SessionDrawerHost` (`App.tsx:960`) wraps the Session route's content, so it
+   covers both the session screen AND `SessionRoute`'s connecting/error frame.
+   The hamburger is in both (`SessionScreen.tsx:421`, `App.tsx:1208`). Mounting
+   it inside `SessionScreen` would leave a session that cannot connect with no
+   way to the drawer, which is exactly the F2 case. `SessionScreen` only gets
+   `onOpenDrawer`.
+2. **`onBack` is gone from the Session screen.** The plan says `session-back`
+   → `session-drawer`. The chevron is removed, and back is the native edge
+   swipe (F1). The connecting frame's leftover `GlassButton` (S2 missed it)
+   became a `HeaderIcon` hamburger, so `GlassButton` is no longer imported by
+   `App.tsx`.
+3. **Flows 24 and 05 never tapped `session-back`** (the plan's Files item 7 is
+   wrong). Only the two component sites carried the id. 24 gains a drawer
+   shot. 05 gains the F2 drawer check (below), and because the session screen
+   has no back button any more, it leaves through the drawer's magnifier.
+4. **The magnifier needed a target the plan did not name.** I added
+   `drawerSearchTarget(computerId, name)` (`drawer-nav.ts:120`): a reset to
+   `[Computers, Sessions{…, search: true}]`. `SessionsRoute` (`routes.ts`) gains
+   an optional `search`, and `SessionsScreen` gains `focusSearch` →
+   `autoFocus`. A reset, not a push: back from the search lands on Computers,
+   not on the session the drawer covered.
+5. **Flow 26 is single-computer.** The harness runs ONE `serve`, so the
+   cross-computer switch, the computer menu with a second computer, and "back
+   lands on the right computer's list" are NOT driven on the simulator. F4's
+   stack is pinned by `drawer-nav.test.ts`, and the M1 mutation below shows
+   that pin is not vacuous. The edge back-swipe is not driven either: Maestro
+   has no iOS edge gesture. The flow's header says this.
+6. **The title chevron is always `chevron.down`.** The earlier attempt's
+   `chevron.up.chevron.down` (shown while the menu is open) is not in
+   `IconName`, and that was the `tsc` error.
+7. **A failed probe of the computer rows is swallowed in the host.** The title
+   keeps its last rows, or says "Connecting…". The list below reports its own
+   failure (F2), so nothing reads as fine.
+
+### As-built
+
+- `App.tsx`:
+  - `SessionDrawerHost` (`:960`): `useReducer(drawerReducer)`, plus one
+    `createSessionListController` per LISTED computer. It is recreated on a
+    menu pick, so a late page of the old one is dropped and the old list never
+    shows under the new title.
+  - The list and the computer rows (`loadRows`) are re-read on every open (F3).
+  - `createDrawerRename` over `LINKS.get(row's computer).client.rename`. A
+    success re-reads the list.
+  - Everything drawn is computed by `drawerList`/`drawerItems`/`drawerTitle`/
+    `drawerComputers`, with `drawerCurrentId` for the highlight.
+  - Row tap → `drawerTarget` → `onNavigate`. The `Session` screen maps it to
+    `navigation.replace` (same computer) or `navigation.reset` (another computer,
+    F4), and `stay` only closes.
+  - Settings → `navigate("Settings")`; Pair a computer → `navigate("Pair")`.
+- `screens/SessionsDrawer.tsx` (render only):
+  - A 300 pt panel. The session is pushed and dimmed with `scrim`, using a
+    220 ms `Animated.timing`. Under Reduce Motion it fades instead
+    (`drawerMotion`, read live).
+  - Closes on a scrim tap, a row tap, a left swipe (`PanResponder`,
+    horizontal only), or VoiceOver escape. The panel is
+    `accessibilityViewIsModal`, and the session behind it is hidden from
+    accessibility while open.
+  - Long-press → `ActionSheet` "Rename" → the existing `RenameSheet`.
+  - Daemon strings are drawn as plain `Text` only.
+- `drawer-rename.ts` (kept): every text decision is `session-rename.ts`'s
+  `renamePlan`/`renameErrorText`. A failure keeps the field open with the text
+  and the reason (F7). A second Save while saving sends nothing. A success that
+  lands after Cancel still refreshes the list (the daemon did rename it).
+  I renamed one of its tests, whose name said "does not … refresh" while it
+  asserted the refresh.
+- Flows:
+  - `e2e/flows/26-drawer.yaml` + `.js`, registered in `run.ts` with its own
+    session `DRAWER_ID`. The steps: open → current highlighted → shot →
+    long-press Rename → switch to `ALPHA_ID` → re-open shows `ALPHA_ID`
+    current → scrim closes.
+  - It ends on daemon truth: the rename is stored, AND the session that was
+    switched away from still exists (F6: detach, never close).
+  - `24-ui-shots.yaml` gains the drawer shot. `05-daemon-down.yaml` gains the F2
+    check: with `serve` down, the drawer shows `drawer-retry` and NOT
+    `drawer-empty`.
+- **Red before green:** `drawerSearchTarget` was first written without
+  `search: true`. Its test went RED on the assertion (`- "search": true`,
+  1 fail), then green. The earlier attempt's pure code had no
+  pre-implementation red I could show, so its non-vacuity rests on the
+  mutations below.
+
+### Mutation checks (§9: each applied with Edit, the 6 drawer test files run, reverted; final run 51 pass · 0 fail)
+
+| # | Mutation | Caught by (fail) |
+|---|---|---|
+| M1 | swap `replace`/`reset` (`if (!sameComputer)`) — **plan target** | 4: same computer → replace; other → reset (F4); archived pick; same id other computer |
+| M2 | drop the `currentId` match (`current: false`) — **plan target** | 3: seam two-computers; highlight per section; archived auto-expand |
+| S6a | a failed read is not an error (`if (false)`) | 1: F2 failed first read is an error, never empty |
+| S6c | no list refresh after a rename | 2: success refreshes; answer after cancel still refreshes |
+| S6d | a failed rename shows no reason | 2: F7 failure keeps text + reason; MethodNotFound sentence |
+| S6e | double Save not guarded | 1: a second Save while saving sends nothing |
+| S6f | Reduce Motion still slides | 1: Reduce Motion: fade only |
+| S6g | a right swipe also closes | 1: left swipe past threshold closes; right does not |
+| S6i | unprobed computer says "Online" | 1: not probed yet says Connecting…, never Online |
+
+(The prepared script `.tentacle/tmp/mobile-chrome/s6-mutations.sh` could not be
+run because the shell permission was refused, so I did the same mutations by
+hand with Edit.) The plan's third target, the `note.id` join, belongs to S8.
+
+### Gate
+
+- `bun run check` (log: `.tentacle/tmp/mobile-chrome/s6-gate.log`):
+  - typecheck (root + `apps/mobile` + `apps/relay`): clean.
+  - `biome check .`: 1679 files, no errors or warnings.
+  - `bun test`: **12119 pass · 5 skip · 0 fail** (870 files). The skips are the
+    same pre-existing opt-in files as S5, none of them in `apps/mobile`.
+- **E2E: NOT RUN GREEN. The build is blocked by an issue that predates S6.**
+  `bun run e2e:mobile --ios 26 --only 26-drawer,24-ui-shots,05-daemon-down`
+  (run `.tentacle/tmp/e2e-mobile/1794791065114`) got through prebuild and
+  `serve`/seed, then failed at the Release build. xcodebuild exited 65 with
+  `targets/live-activity/LACore/LACore.swift:23:8: error: Unable to resolve
+  module dependency: 'PushCore' (in target 'liveactivity')`. S6 touches no
+  native/Swift file, so this blocks every flow, not just these three. The
+  e2e-flows static test (`test/e2e-flows.test.ts`, 34 pass) accepts the new
+  and edited flows. Flows 26/24/05 therefore remain **unverified on a
+  simulator**. To verify: fix the `liveactivity` → `PushCore` dependency (a
+  separate fix), then re-run the command above, in light and dark.
+
+### Not done in this slice (and why)
+
+- New session pill and its disabled-offline state (F8): S7.
+- Cross-computer switch on the simulator: needs a second `serve` in the
+  harness (drift 5). Pinned by pure tests only.
+- Nothing committed (the orchestrator commits). `TODO.md` untouched.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16 · slice S6 · fixes Review round 1 (2 MEDIUM)*
+
+1. **Finding 1, the undisclosed `live-activity/Info.plist`: FIXED.**
+   `git cat-file -e main:…/live-activity/Info.plist` reports it is not on
+   `main`. Only `notification-service/Info.plist` is tracked there. This file
+   is the same `expo prebuild` artifact that S1 removed. S6's failed e2e run
+   regenerated it, and the commit swept it in. Fix:
+   - The file is deleted from the working tree (`git status`: ` D`).
+   - `.gitignore:36-38` now ignores that one path, so a prebuild cannot bring
+     it back. It has now leaked twice: S1 and S6.
+   - Red/green/mutation, via `git ls-files --cached --ignored --exclude-standard apps/mobile/targets/`:
+     - Red, before the rule: empty output.
+     - Green, after the rule: `apps/mobile/targets/live-activity/Info.plist`.
+     - Mutation, rule commented out: empty again.
+     - Reverted: the path is listed again.
+   - No unit test was added. A test that asserts the file is absent would fail
+     on every local prebuild. The ignore rule is the guard.
+2. **Finding 2, flows 26/24/05 not green on a simulator: NOT FIXED (blocked).**
+   The block is the `liveactivity` → `PushCore` build error that exists on
+   `main`. `LACore.swift:23` has `import PushCore`, and
+   `live-activity/expo-target.config.js` declares no package. S1 and S6 each
+   rebuilt once and both hit it. Under AGENTS §0 (two strikes) I did not rebuild
+   a third time. Fixing the native target is a separate `fix` task, and §10
+   allows one code task at a time. **Decision needed from the owner:** either
+   open that fix first and then re-run
+   `bun run e2e:mobile --ios 26 --only 26-drawer,24-ui-shots,05-daemon-down`
+   (light and dark), or accept S6 with the simulator pass deferred.
+- LOW items (the `swipeIsHorizontal` vertical case, the rename refreshing the
+  current list, the stale header title) were left as they are, since this round
+  covers HIGH/MEDIUM only.
+- **Gate:** `bunx tsc --noEmit` clean. `bun run lint`: 1679 files, clean.
+  `bun test`: **12119 pass · 5 skip · 0 fail** (870 files). That matches the
+  S6 baseline, and the skips are the opt-in ones.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16 · slice S6 only, fresh context (the same model as the executor, so blind spots it shares may survive both passes)*
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, 0 HIGH).
+
+1. **MEDIUM: an out-of-scope native file was committed and not disclosed.** `apps/mobile/targets/live-activity/Info.plist` (new in 9d51e996). S1's Execution (around line 837) called this file a stray `expo prebuild` artifact and removed it. S6 commits it, while its Execution says "S6 touches no native/Swift file". *Failure:* the diff ships an undisclosed change to the live-activity target, which is the same target whose build is currently failing (`PushCore`), and it reverses an earlier slice's decision with no reason given. Either drop it, or justify it in Execution (e.g. if it is required the way `notification-service/Info.plist` is tracked on `main`).
+2. **MEDIUM: the slice's "done when" is not met.** That row says "flow 26 green both themes; back-swipe lands on the right computer". Flows 26, 24 and 05 have not run green on a simulator (the build is blocked by the pre-existing `PushCore` error). The cross-computer back-swipe is only pinned by `drawer-nav.test.ts`. *Failure:* render-time faults the stripped unit tests cannot see would ship unseen. Examples: the scrim or panel `pointerEvents` after close, `accessibilityElementsHidden` covering the scrim, `autoFocus` on the search reset, or the `replace`/`reset` wiring at `App.tsx` (~`:1888-1897`). The executor disclosed this honestly. It is still owed before S6 counts as done.
+
+**Gate (re-run by me):** the 6 touched test files (drawer-items, drawer-rename, drawer-nav, drawer-list, drawer-seam, e2e-flows) gave 78 pass · 0 fail. `bun run lint` checked 1679 files, clean. `bun run typecheck` (root + mobile + relay) was clean. I did not re-run the full suite.
+
+**Mutations (applied with Edit, reverted, `git status` clean afterwards):**
+- `drawerSearchTarget` without `Computers`: caught (1 fail).
+- `swipeIsHorizontal` without the `|dx| > |dy|` guard: **survived**. The vertical case in the test, `(-5, 20)`, is below the claim threshold anyway. LOW gap: add a case like `(-20, 40)`.
+- The executor's M1/M2/S6a–S6i table was not re-done.
+
+**Attacks tried:**
+- (a) F4: a cross-computer pick resets, a same-computer pick replaces, and the same id on another computer gets no highlight (`drawerCurrentId`). Holds.
+- (b) F2: daemon down. The list's `LINKS.get` throws, so the list shows an error with Retry. A failed probe of the rows is swallowed, and the title shows its last rows or "Connecting…". It never says "Online" (`drawerTitle`). Holds.
+- (c) F7: rename goes to the row's computer (`listed` is captured at `begin`), a failure keeps the field open, and a double Save is guarded. Holds. LOW: `renamed` refreshes whichever list is current, not the computer that was renamed. That list is disposed and re-read on the next pick, so it converges.
+- (d) F3: a menu pick recreates the controller and disposes the old one, so a late page is dropped. Holds.
+- (e) F6: a switch is `replace`/`reset`, which unmounts and so only detaches. No `session/close` was added. Holds by code; the flow that proves it has not run.
+- (f) §7 "logic in pure modules": the branching is in `drawer-list`/`drawer-nav`/`drawer-rename`. The host is wiring only. Holds.
+- (g) §7 "a pod is not trusted": daemon strings are drawn as plain `Text`. No protocol or persistence change. Holds.
+- LOW: renaming the open session from the drawer leaves the session header's title on the old route param.
+
+**Executor behaviour:** careful and candid. It disclosed the inherited uncommitted attempt, the e2e block and the drift (the host in `App.tsx`, the extra magnifier target). The one miss is the undisclosed `Info.plist`.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · reviews 2631546f (`git diff HEAD~1`) only*
+
+**Verdict: PASS.** The code is approved. The simulator pass is still owed and needs the owner's decision (see 2).
+
+1. **Finding 1: FIXED and verified.**
+   - `git cat-file -e main:…/live-activity/Info.plist` fails, so the file was never on `main`.
+   - The commit deletes the file and ignores that one exact path (`.gitignore:36-38`).
+   - Probe: I wrote a temporary file at that path. `git status --ignored` showed it as `!!` (ignored).
+   - Mutation: I commented the rule out. The status became `??` (untracked), so the rule is the guard. I restored the rule, deleted the probe, and `git status` was clean.
+   - Regression check: the tree now matches `main` for this target, and prebuild still generates the file locally, so nothing is lost.
+2. **Finding 2: NOT FIXED, correctly escalated.** Flows 26/24/05 are still blocked by the `PushCore` build error that also exists on `main`. The executor stopped under §0 (two strikes) and named the decision the owner must make: fix the native target first, or accept S6 with the simulator pass deferred. The code needs no further change. S6's "done when" (flow 26 green in both themes) stays unmet until that pass runs.
+- **Gate (my run):** `bun run lint` clean (1679 files). `bun run typecheck` (root + mobile + relay) clean. The diff touches no TS, so I did not re-run tests.
+- **Regressions:** none. The diff is `.gitignore` + one file deletion + this doc. The new Fix round 1 section sits above `## Review`, which is fine.
+
+## Execution (slice S7 — New session from the phone)
+
+*— claude-opus-5-5, 2026-11-16 · slice S7 only*
+
+**Scope:** S7 only (Files item 8 + the pill). No protocol, daemon or client
+change, so there is no `protocol.d/` note and `protocol.json` was not
+regenerated.
+
+### Load-bearing check, re-run first: no daemon work needed, but "lazy on first send" does not hold
+
+The probe is `.tentacle/tmp/mobile-chrome/s7-probe.test.ts`. It runs a real
+`SessionHost` + `Connection` + `RemoteClient` and the phone's own
+`createSessionController`, built as `App.tsx` builds it. Output:
+
+```
+A. phone attach-only open of a minted id: {"ok":false,"reason":"link"}
+B. after openSeeded (no attach), listed: [true]
+C. phone attach after create+detach: true
+D. send through the attached handle: ok
+```
+
+- **What held:** creating a session needs nothing new from the daemon or the
+  protocol. A handle built without `attach` creates the session through its
+  `openSeeded()` (`session/open{create}` under a given id,
+  `packages/client/src/remote-session.ts:543-584`), and the session is then
+  listed.
+- **What failed:** the plan says the session is created *lazily, on the first
+  send*, but that is not possible on the phone's current path. (A) shows
+  why: both of the phone's ways to reach a session only attach:
+  - the screen's open (`session-controller.ts` `open`; `App.tsx` `RUNTIMES`,
+    `attach: {}`);
+  - the outbox's session port (`App.tsx` `outboxOf`, `newSession(…, {attach: {}})`
+    then `open()`, which answers null on failure, so the item would wait for
+    ever, `outbox-driver.ts:395`).
+
+  A minted id that does not exist yet can never be sent to. Making it lazy would
+  mean changing the outbox's persisted item, or a per-id "may create" flag that
+  survives an app kill. That is a load-bearing persisted-format change, well
+  beyond S.
+
+### Drift from the Implementation (each reconciled here)
+
+1. **The session is created at the tap, not on the first send** (Design 3 "New
+   session", Preconditions "New session without new protocol", F8).
+   `createFreshSession` (`src/session-controller.ts:123`) does three things in
+   order:
+   - calls `openSeeded()` on a handle built without `attach`;
+   - then detaches that handle and **waits** for the detach, so the screen's
+     own attach does not race a detach of the same id in the client's table;
+   - then answers `ok`.
+
+   It returns a typed reason (`openFailureReason`) and never throws. After
+   that, the Session screen and the outbox work unchanged: they attach to a
+   session that now exists.
+   - **Cost (owner's call, see Not done):** tapping New session and never
+     sending leaves an empty session on that computer. It shows in Recent with
+     no title, and is archived by the daemon's idle TTL like any other
+     detached session. **And** every create runs the daemon's `admit()`
+     (`packages/daemon/src/session-host.ts:1235-1257`): at
+     `maxDetachedSessions` it ARCHIVES the detached session idle the longest.
+     So repeated taps that are never sent push the person's real older
+     sessions into Archived — reversible (reopen), but not reported to them.
+     (Corrected in Fix round 1; Review S7 finding 2.)
+2. **F8 has a different shape.** The plan said "a failed create on the first
+   send surfaces as the composer's send-failure state (outbox keeps the text)".
+   Now a create fails at the tap, before anything has been typed. The drawer
+   stays open, opens nothing, and shows why (`drawer-new-error`, text chosen
+   by the reason code and never taken from the daemon's message). No prompt
+   exists yet, so none can be lost. The pill is disabled while the listed
+   computer is not online (`drawerTitle(...).canCreate`, from S5). A tap with
+   `canCreate` false, or during a create already in flight, sends nothing.
+3. **"Composer focused" needed a route param the plan did not name.**
+   - `SessionRoute.focus?` (`routes.ts`) and `DrawerPick.focus?`
+     (`drawer-nav.ts:52`, passed through on both the replace path and the
+     reset path).
+   - `SessionScreen` `focusComposer` → `Composer` `focus`. The composer
+     focuses the field once, the first time it becomes editable (after the
+     attach answers), and never again.
+4. **The plan's S7 test "offline → send fails into the outbox (F8)" became
+   "offline → a typed `link` refusal, and nothing is created on the
+   daemon"**, because the create no longer happens at a send.
+
+### As-built
+
+- `src/session-controller.ts:110-133`: `FreshHandle` + `createFreshSession`
+  (the phone's ONE create path).
+- `src/drawer-new-session.ts` (new, pure):
+  - `createDrawerNewSession({ mint, create, opened })`: one create at a time,
+    online only. A failure is kept until the next tap or `dismiss`.
+  - `newSessionPill(canCreate, state)` and `newSessionErrorText(reason)`.
+  - `NEW_SESSION_TITLE = "(new)"`.
+- `App.tsx` `SessionDrawerHost` (`:1059-1092`): `mint` = `crypto.randomUUID`.
+  `create` = `LINKS.get(listed)`; a failed dial answers `link`, otherwise
+  `createFreshSession(client.newSession(undefined, id))`. `opened` closes the
+  drawer and calls `drawerTarget(from, {…, title: "(new)", archived: false,
+  focus: true})`. That is the existing replace/reset path, so a create on
+  ANOTHER computer resets the stack exactly as F4 does for a row.
+- `screens/SessionsDrawer.tsx`: in the footer, Settings on the left and the
+  `PillButton` "New session" (`drawer-new`) on the right. A failure line
+  (`drawer-new-error`, tap to dismiss) sits above the footer. Render only.
+- `e2e/flows/26-drawer.yaml` + `.js`, appended at the end:
+  - tap `drawer-new` → `transcript-empty` → text typed with NO tap on the field
+    (this proves the focus) → send → `turn-idle`;
+  - re-open: a `drawer-current-.*` row (the minted id, matched by pattern) and
+    ALPHA back as an ordinary row;
+  - daemon truth: `model-prompts` contains the new session's prompt.
+- **Red before green:**
+  - With the stubs in place (the right signatures, wrong behaviour),
+    `drawer-new-session.test.ts` went 8 fail · 1 pass, all on assertions. The
+    one pass was the offline test, which passed only because the stub did
+    nothing; mutation Md below shows that test is not vacuous.
+  - The pill test was 1 fail before `newSessionPill` was implemented.
+  - The new `drawer-nav` case failed on the assertion before `focus` was passed
+    through (`Expected: true, Received: undefined`).
+  - `new-session-link.test.ts` was written after `createFreshSession`, so its
+    non-vacuity rests on mutations Ma and Mi.
+
+### Mutation checks (§9: `.tentacle/tmp/mobile-chrome/s7-mutations.ts` applies each, runs the 3 S7 test files, restores; `git status` afterwards shows only this slice's files; the re-run gave 19 pass · 0 fail)
+
+| # | Mutation | Caught by (fail) |
+|---|---|---|
+| Ma | create skipped (no `openSeeded`). **Plan target:** "creates" | 4, including both real-daemon tests |
+| Mb | no detach after the create | 1: creates, THEN detaches, then answers |
+| Mc | failure reason not by code (always `link`) | 1: typed reason by error code |
+| Md | offline still creates (F8). **Plan target:** "offline" | 1: F8 offline sends nothing |
+| Me | double tap not guarded | 1: second tap while in flight |
+| Mf | a failed create still opens | 2: F8 failure opens nothing; dismiss |
+| Mg | pill enabled while offline | 1: pill enabled only online |
+| Mh | a fresh pick drops `focus` | 1: drawer-nav fresh pick |
+| Mi | (test-side) create through an ATTACH handle, the phone's current path | 1: the real-daemon test (not created → not listed) |
+
+### Gate
+
+- `bun run check` (from the repo root):
+  - typecheck (root + `apps/mobile` + `apps/relay`): clean.
+  - `biome check .`: 1685 files, clean.
+  - `bun test`: **12148 pass · 5 skip · 0 fail** (874 files). The skips are
+    the same opt-in ones as S6.
+- The first run had one failure, a source-text guard I broke:
+  `session-screen-follow-wiring.test.ts` "Composer: `key={fieldKey}` …".
+  It pins `key` then `testID` as adjacent attributes, and my new `ref` sat
+  between them. I moved `ref` after `testID` and left the guard as it is.
+- **E2E: NOT RUN.** It is the same block as S6: the Release build fails on the
+  `liveactivity` → `PushCore` dependency, which also fails on `main` (S6 Fix
+  round 1, finding 2). Under AGENTS §0 I did not try a third rebuild. The
+  static `test/e2e-flows.test.ts` accepts the edited flow 26 (34 pass). The
+  steps added to flow 26 are therefore **unverified on a simulator**. To
+  verify: fix the native target, then
+  `bun run e2e:mobile --ios 26 --only 26-drawer`, in light and dark.
+
+### Not done in this slice (and why)
+
+- **Owner decision needed:** creating at the tap leaves an empty session if
+  the person never sends. The other option is a true lazy create: an outbox
+  item flagged "may create", persisted, so that a retry after an app kill
+  still creates. That is a persisted-format change and needs its own task.
+  Until the owner decides, the tap creates. Weigh in the decision: at the
+  daemon's detached cap each abandoned create archives one of the person's
+  real idle sessions (Drift 1, cost), silently.
+- No "(new)" placeholder row is drawn in the drawer before the first turn's
+  title arrives; the daemon's own (empty) title shows there.
+- Nothing committed. `TODO.md` untouched.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16 · answers Review (slice S7)*
+
+1. **MEDIUM, detach not pinned as awaited — FIXED (test only; the code was
+   already right).** `apps/mobile/test/drawer-new-session.test.ts` `fresh()`:
+   the fake `detach` now settles a macrotask later (`setTimeout 0`, like an RPC
+   round trip) and logs `detach-done`; the ordering test asserts
+   `create → detach → detach-done → answered`.
+   - **Red (mutation = the reviewer's bug):** `await handle.detach()` →
+     `void handle.detach()` in `src/session-controller.ts:131`:
+     ```
+     error: expect(received).toEqual(expected)
+         "detach",
+     -   "detach-done",
+         "answered",
+     (fail) createFreshSession > creates, THEN detaches, and only then answers ok …
+      9 pass
+      1 fail
+     ```
+     (Before this round the same mutant gave 0 fail — Review S7.) Reverted with
+     Edit; `git diff --stat` then showed only the test file.
+   - **Green:** `drawer-new-session` + `new-session-link`: 12 pass · 0 fail.
+2. **MEDIUM, cost of create-at-tap understated — FIXED (doc; it stays the
+   owner's call).** Verified `admit()` (`packages/daemon/src/session-host.ts:1235-1257`):
+   at `maxDetachedSessions` with a persister it archives `selectEvictable`'s
+   victim. Drift 1's cost and Not done now state that abandoned creates can
+   silently push real idle sessions into Archived. No code change: choosing
+   lazy create vs. create-at-tap is the owner decision already open.
+
+**Gate:** `bunx tsc --noEmit` clean · `tsc -p apps/mobile` clean ·
+`bun run lint` 1685 files clean · `bun test` **12148 pass · 5 skip · 0 fail**
+(874 files; the opt-in skips). E2E flow 26 still not run (same native block).
+
+## Review (slice S7)
+
+*— claude-opus-5-5, 2026-11-16 · slice S7 only · fresh context, SAME model as the S7 executor (shared blind spots possible)*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM test gap; the code holds).
+
+**Gate (re-run):**
+- S7 test files + `drawer-nav` + `session-screen-follow-wiring` + `e2e-flows`: 60 pass · 0 fail.
+- `bun run lint`: 1685 files, clean.
+- `bun run typecheck` (root + mobile + relay): clean.
+- Full `bun test`: not re-run.
+- E2E flow 26: not run (the same native-build block as S6), so it is unverified.
+
+**Findings**
+
+1. **MEDIUM: nothing pins that the detach is awaited before ok.**
+   - **The gap:** the test is `apps/mobile/test/drawer-new-session.test.ts:41-47`. Its fake `detach` (`:30-31`) logs the moment it is called, before any await. So mutating `await handle.detach()` → `void handle.detach()` (`src/session-controller.ts:131`) still gives 0 fail on both S7 files. Yet the docstring of `createFreshSession` says this ordering is what stops the screen's attach racing the detach.
+   - **Failure scenario:** without the await, `session/detach` and the screen's attach-open for the same id go out on one connection. The peer dispatches them concurrently (§7). If the daemon handles the detach second, the phone's attach is undone daemon-side, and the screen shows a session that never streams.
+   - **Fix:** in the fake, log a second entry after an awaited deferred, and assert create → detach → detach-done → answered.
+2. **MEDIUM (an owner call, not code): the cost of creating at the tap is understated.**
+   - **What Execution leaves out:** it says an abandoned session is "archived by the idle TTL". But every create runs `admit()` (`packages/daemon/src/session-host.ts:1234-1256`), and at `maxDetachedSessions` that archives the oldest idle detached session.
+   - **Effect:** repeated taps that are never sent push the person's real older sessions into Archived. That is reversible, but it is not reported to the person. It belongs in the owner's decision between lazy create and create at the tap.
+
+**Mutations (mine; `git status` was clean afterwards):**
+- Detach not awaited → survives (finding 1).
+- Double-tap guard removed → 1 fail.
+- Error not cleared on a re-tap → survives (LOW, not reported).
+
+**Attacks tried:**
+- **Minted-id collision:** `openSeeded` on a live id ATTACHES (`remote-session.ts:535-541`), but a UUIDv4 makes a collision negligible. Holds.
+- **Detach failure:** it is swallowed. `endSession` removes only its own entry (`remote-client.ts:1697`), so the screen's listener survives. Holds.
+- **§7 pure modules:** all branching is in `drawer-new-session.ts` / `createFreshSession`, and the components only render. Holds.
+- **§7 protocol and persistence:** no wire, schema or disk change, and no second session path (it goes through `RemoteClient`). Holds.
+- **§7 pod trust:** the error text is chosen by reason code, never taken from the daemon's message. Holds.
+- **Offline:** nothing is sent. Holds.
+- **Host unmounted mid-create:** `opened` can still navigate. LOW.
+
+**Executor behaviour:** honest. It found that the plan's premise ("lazy on the first send") was false, did not make a persisted-format change, and documented the drift. Its mutation Mb covered "no detach" but not "detach not awaited", so finding 1 slipped through.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · verifies Fix round 1 (`git diff HEAD~1`)*
+
+**Verdict: APPROVE** (S7). Both findings are resolved.
+
+1. **Finding 1: FIXED, confirmed by mutation.** I re-ran the same mutant, `await handle.detach()` → `void handle.detach()` (`src/session-controller.ts:131`). It now gives **1 fail**; before the fix it gave 0 fail. I reverted it, and `git status` was clean afterwards.
+2. **Finding 2: FIXED in the doc.** The `admit()` cite (`session-host.ts:1235-1257`) matches the code. The cost of creating at the tap is now part of the owner's open decision. No code change was expected.
+
+**Regressions:**
+- The diff touches only the test fake and the doc.
+- The detach-failure test still passes: the fake logs `detach-done` before it throws, and `createFreshSession` still swallows the error.
+- Double-tap guard mutant: still 1 fail.
+- S7 test files: 12 pass · 0 fail. `bun run lint`: 1685 files, clean. `bun run typecheck` (root + mobile + relay): clean.
+
+**Still open:**
+- E2E flow 26 has never run on a simulator (the same native-build block as S6).
+- LOW, not blocking: error not cleared on a re-tap; host unmounted mid-create.
+
