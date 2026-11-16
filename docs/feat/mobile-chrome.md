@@ -262,8 +262,9 @@ switch to `HeaderIcon` too — one weight across the app.
 - an optional footnote under the band (13 pt `sec`).
 `ui/Row.tsx` becomes full-width inside the band: 20 pt side padding,
 `size.rowList` min height, a 0.5 pt hairline between rows inset 20 pt (none
-after the last row — the band's own edge closes it), label `flexShrink: 0`
-(never truncated, wraps at Dynamic Type sizes), value `flex: 1`
+after the last row — the band's own edge closes it), label `flex: 1`
+(never truncated — it WRAPS, and it may shrink: a column that refuses to
+shrink pushes a chevron/switch past the row's edge, fix round 1), value `flex: 1`
 right-aligned with its own ellipsis — `ellipsizeMode` per value KIND,
 decided in a pure helper `row-value.ts` (`valueEllipsis(kind)`: `path` →
 head (`…/hop-live/proj` keeps the tail), `model` → middle, text → tail). The
@@ -1977,3 +1978,447 @@ D. send through the attached handle: ok
 - E2E flow 26 has never run on a simulator (the same native-build block as S6).
 - LOW, not blocking: error not cleared on a re-tap; host unmounted mid-create.
 
+
+## Execution (slice S3 — band primitives, E2)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (tentacle profile `deepseek`), 2026-11-16 · slice S3 only*
+
+> **Signature corrected in fix round 1** (Review round 1, finding 3). This
+> section was signed `claude-opus-5-5` while its commit (`7faddece`) is titled
+> `exec (deepseek)`. The commit was right: `night-task3.sh:24` runs the S3 step
+> through `tentacle --profile deepseek`, and this run's own log carries tentacle's
+> tool names (`[tool] fs_read`, `[tool] shell`, `[tool] fs_multi_edit` —
+> `runs/night-mobile-chrome-exec.log`), never Claude Code's `Read`/`Bash`/`Edit`.
+> The wrong id came from the run's own self-check: it grepped
+> `~/.claude/projects/*/*.jsonl`, which is the ORCHESTRATOR's transcript (opus),
+> and adopted the model id it found there. The profile's model id is pinned in
+> `~/.config/tentacle/config.jsonc` → `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`,
+> which is what the signature now says. Nothing else in this section changes.
+
+**Scope: S3 (Band primitives) only.** S4–S10 untouched: no screen was rewired
+(`grep` still finds 15 `<GroupedCard`, 10 `<SectionHeader`, 16 `<Row` call
+sites in `src/screens` — S4's job), `GroupedCard`/`SectionHeader` still exist,
+and no `drawer-*`/`activity*`/`floating-button` file was created. No protocol,
+daemon, client or wire change, so `packages/protocol/schema/protocol.json` was
+**not** regenerated (`git status` names only `apps/mobile` sources, two test
+files, the changelog fragment and this doc). `TODO.md` untouched. Left button is
+still "back" (S6).
+
+### Load-bearing check, re-run first (it held)
+
+S3's slice-level assumption: **the four S3 files are sufficient to express every
+call site S4 must rewire — no fifth primitive, no new dependency.**
+
+Every site's shape was read before any edit (`.tentacle/tmp/mobile-chrome/s3-repro-before.{sh,log}`):
+
+```
+== S3's new modules:
+  MISSING src/row-value.ts
+  MISSING src/ui/BandSection.tsx
+== Row.tsx today:    value slot 0, dot slot 0, ellipsizeMode 0,
+                     minHeight = SIZE.rowProject, paddingHorizontal: space.cardInner
+== Sheet.tsx today:  backgroundColor: palette.sheet (both branches), xmark 0
+== tokens S1 landed: rowList 50, rowX 20, sectionTop 22, band, bandOnSheet, sheet 14
+== call sites S4 must rewire: <GroupedCard 15   <SectionHeader 10   <Row 16
+== GroupedCard's non-row children (S4 must carry these in a band):
+     PairScreen  <View style={styles.hero}>   (a hero tile + button)
+     PairScreen  <View style={styles.paste}>  (a TextInput + button)
+     SessionInfo <SectionBody>                (a component that renders Rows)
+== MISSING test/row-value.test.ts
+```
+
+So the capability was genuinely absent. The check **held** with one thing to say:
+`PairScreen`'s two "cards" hold a hero block and a paste field, not rows. A band
+is a *surface*, so it carries arbitrary children (it only owns the ground, the
+hairlines and the label) — no primitive is missing, and S4 reuses `BandSection`
+for them with `children` being the existing `View`s. Recorded here so S4 does not
+discover it as a surprise.
+
+### Drift from the Implementation (4, each reconciled here)
+
+1. **`rowLayout` was not in the Files list — it took a second input.** Design 4
+   asks for "`ellipsizeMode` per value KIND, decided in a pure helper
+   `row-value.ts` (`valueEllipsis(kind)`)" and, for F10, "`Row`'s wrap rule, pure
+   `rowLayout(fontScale)` **if needed**". Two things forced the second input:
+   (a) Design 4 *also* says "a row with a description (Auto-accept) puts it under
+   the label, the switch top-aligned" — that is a layout decision at the DEFAULT
+   font scale, which a `fontScale`-only function cannot express (mutation 5
+   proved it: removing it left the tests green until the property was pinned);
+   so `rowLayout(fontScale, { description })` returns `controlAlign` as well as
+   `direction`/`valueAlign`/`valueFullWidth`. The component now holds no
+   alignment branching at all, which is §7's point.
+2. **`Sheet`'s ground is `bg`, not `page`, and `BandSection` reads
+   `bandOnSheet`.** Design 4's "the sheet's ground becomes `page`" is the
+   *mockup's* variable, not the token: the mockup re-binds `sheet` →
+   `bg`-equivalent and `band` → `bandOnSheet` (`index.html:390`), while this
+   repo's two palettes both define `page` as the CHAT ground (`#FFFFFF` light,
+   `#1F1F1E` dark) and `bg` as the grouped ground (`#F2F2F7` light,
+   `#1F1F1E` dark). In light the two differ, and a sheet grounded on `page`
+   would have put WHITE bands on `#FFFFFF` — invisible. So: `Sheet`'s full
+   (non-floating) ground is `palette.bg` (`#F2F2F7` / `#1F1F1E`) and
+   `BandSection onSheet` draws `palette.bandOnSheet` (`#FFFFFF` / `#2A2A28`).
+   That is exactly the mockup's result — measured from the rendered page, not
+   argued: light `#FFFFFF` bands on `#F2F2F7`, dark `#2A2A28` on `#1F1F1E`
+   (`.tentacle/tmp/mobile-chrome/s3-primitives-final.png`, sampled by
+   `s3-pixels.py`).
+3. **`Row`'s `last` prop was dropped, and `first` now means "no hairline above".**
+   Design 4 says the hairline is drawn "between rows inset 20 pt (none after the
+   last row — the band's own edge closes it)". The old `Row` drew a TOP-edge
+   separator suppressed by `first`, which already satisfies both halves (the last
+   row's top line is a line *between* it and the previous row; nothing needs
+   suppressing under the last row because nothing is ever drawn there). A `last`
+   prop would have been a prop with no drawing behind it, so the interface keeps
+   `first` only and the test pins the arrangement (`expect(row).not.toMatch(/last\?:/)`).
+   `Row` also gained `value`/`valueKind`/`valueMono`/`dot`/`leading` (Design 4's
+   value slot, dot-before-label, and Session info's warning glyph) and LOST the
+   `subtitleMono`-driven card inset.
+4. **`Row`'s base `minHeight` moved `rowProject` (60) → `rowList` (50).** Design 4
+   sets `size.rowList` for a band row; every S4 call site passes its own
+   `minHeight` anyway (`rowSetting` 44, `rowSession` 64, `rowAction` 52), so the
+   default only matters for the new band rows S4 adds. `space.separatorPlain` /
+   `separatorAfterTile` are now unused by the app — left in `theme.ts` (S4's
+   delete pass, with `GroupedCard`/`SectionHeader`) rather than removed here,
+   because `theme.test.ts` does not pin them and removing a token mid-task is not
+   S3's call.
+
+Two smaller things, both recorded so Review can rule: the floating `Sheet`
+variant keeps `palette.sheet` (Design 4 only re-grounds a *banded* sheet, and
+`Pair`'s compare sheet is a card over a scrim — line 348 of the mockup), and
+`Sheet` gained an optional `onClose` (the 18 pt glyph Design 4 asks for) which
+**no screen passes yet** — S4 mounts it on Session info.
+
+### As-built, in order
+
+1. **Tests first (red).** New `test/row-value.test.ts` (10 tests) and
+   `test/band-wiring.test.ts` (18). Stubbed `row-value.ts` and `BandSection.tsx`
+   with deliberately-wrong implementations so the red was on the PROPERTY, not on
+   an import: `4 fail` on `row-value` (`Expected: 3 / Received: 1` for the
+   per-kind mapping, `Expected: 1.4 / Received: 99` for the threshold) and
+   `12 fail` on `band-wiring` (side margin present, no bottom hairline, no
+   close glyph, `palette.sheet` not `bandOnSheet`, the old `space.cardInner`…).
+2. **`src/row-value.ts` (new, pure).** `valueEllipsis(kind)` — `path` → `head`,
+   `model` → `middle`, `text` → `tail`; `ROW_WRAP_AT = 1.4`;
+   `rowLayout(fontScale, { description })` → `{ direction, valueAlign,
+   valueFullWidth, controlAlign }`, `NaN`/`±Infinity` → the one-line layout.
+3. **`src/ui/BandSection.tsx` (new).** Label (12 pt, `sec`, uppercase, `0.24`
+   tracking — the mockup's `.02em` at 12 pt, `space.rowX` inset, 6 pt under),
+   the full-width square band (`radius.card`, `hairlineWidth` top+bottom,
+   `band`/`bandOnSheet` + `sep`/`sepSheet`), an optional footnote.
+4. **`src/ui/Row.tsx`.** Full-width 20 pt gutter, `rowList` min height, top-edge
+   hairline between rows, dot/`leading`/tile before the label, the label
+   `flexShrink: 0` with the 70% cap only while a value shares the row, the value
+   right-aligned with `valueEllipsis(kind)` and placed by `rowLayout` (beside or
+   under), `alignItems` from `controlAlign`.
+5. **`src/ui/Sheet.tsx`.** `bg` ground for the full sheet (`sheet` for the
+   floating card), `radius.sheet`, optional 18 pt `xmark` close button, palette
+   only (no hex).
+6. **`changelog.d/mobile-chrome.changed.md`** — the task's ONE bullet (S2 already
+   extended it; `scripts/changelog.ts:125` refuses a second `- ` bullet) gained
+   the banded-lists sentence. `CHANGELOG.md`, `TODO.md` untouched.
+
+### Mutation checks (§9 — each applied, run, reverted; full script and output in `.tentacle/tmp/mobile-chrome/s3-mutations.{sh,out}`)
+
+Baseline before each mutation and after each revert: **28 pass / 0 fail** (the
+two S3 test files). `git status` after the script names only this slice's files.
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | `path` eats its tail (kind ignored) | 3 fail |
+| 2 | every kind one constant | 3 fail |
+| 3 | `ROW_WRAP_AT` 1.4 → 2.5 (never wraps) | 1 fail |
+| 4 | drop the `Number.isFinite` guard | 1 fail |
+| 5 | a described row's control back to centred | 2 fail |
+| 6 | band gets a side margin back (E1, not E2) | 1 fail |
+| 7 | drop the band's bottom hairline | 1 fail |
+| 8 | label truncates (`flexShrink: 1`) | 1 fail |
+| 9 | row ignores `valueEllipsis` (`ellipsizeMode="tail"`) | 1 fail |
+| 10 | row ignores `rowLayout` (magic constants) | 1 fail |
+| 11 | the dot moved AFTER the label | 1 fail |
+| 12 | sheet keeps its own surface (no banded ground) | 1 fail |
+| 13 | close glyph loses its label | 1 fail |
+| 14 | sheet corner radius hard-coded 38 | 1 fail |
+| 15 | the 70% label cap on the base style | 1 fail |
+| 16 | the stacked value dropped (never moved) | 1 fail |
+
+**Three mutations found real vacuities, and they were fixed** — 11, 13 and 14 each
+passed on the first attempt: `indexOf("StatusDot")` hit the IMPORT line (so moving
+the dot was invisible), `toMatch(/accessibilityLabel/)` matched an empty label,
+and `not.toMatch(/radius:\s*\d/)` missed `borderTopLeftRadius: 38`. All three
+assertions were rewritten to their real properties (JSX-scoped, non-empty label,
+any `*adius:`), and a 15th/16th were added after a later change (the 70% cap, the
+value's two placements). The table above is the run AFTER those fixes; every row
+is a genuine fail.
+
+### Gate
+
+- `bunx tsc --noEmit` (root) — **clean**.
+- `bunx tsc -p apps/mobile --noEmit` — **clean**.
+- `bunx tsc -p apps/relay --noEmit` — **clean**.
+- `bun run lint` — **`Checked 1689 files. No fixes applied.`** (0 errors, 0
+  warnings; AGENTS §6 baseline is clean. My first run flagged 3 format errors in
+  my own two test files; `biome check --write` on exactly those fixed them).
+- `bun test` (full suite) — **12176 pass, 5 skip, 0 fail** across 876 files. The 5
+  skips are the documented opt-in ones; `bun test packages/k8s apps/mobile` shows
+  the k8s skip explicitly, and no non-opt-in skip appeared.
+- `packages/protocol/schema/protocol.json` — **not regenerated**: no schema changed.
+
+### Not done in this slice (and why)
+
+- **The `done when`'s "primitive-only screenshot" is a mockup-accurate page, not
+  a simulator shot.** There is no headless React Native renderer in this repo (no
+  `react-test-renderer`, no `react-native-web` in any `node_modules`), and the
+  native e2e build is still blocked by the pre-existing `PushCore` error S1/S2
+  recorded. So the pixels of the real components are **unverified on a device**.
+  What IS verified: every measure the primitives draw with, read from the real
+  modules and rendered into a standalone page
+  (`.tentacle/tmp/mobile-chrome/s3-primitives.{html,final.png}`, generator
+  `s3-primitives-geometry.ts`), then **sampled back out of the PNG**
+  (`s3-pixels.py`): light `#FFFFFF` bands on a `#F2F2F7` ground with `#636366`
+  labels, dark `#2A2A28` on `#1F1F1E` with `#A3A19B` — E2's "one step above the
+  ground" in both palettes, at the real 20/22/50 pt measures. In other words:
+  geometry and colours proven, RN's own rendering not seen. S4's flows are the
+  first place the real thing is on screen.
+- **No screen is rewired** — the slice table's `done when` is the primitive and
+  its tests; no screen's structure changes until S4. **But S3 is NOT invisible,
+  and my first draft of this line ("S3 alone changes nothing a user can see")
+  was false** (Review round 1, finding 2). The 22 live `<Row>` sites render
+  through the rewritten `Row` TODAY, inside the 15 `GroupedCard`s S4 has not
+  replaced yet, so the current look is an interim, unscreenshotted mix. Measured
+  from `git show main:apps/mobile/src/ui/Row.tsx` vs now
+  (`.tentacle/tmp/mobile-chrome/f1r1-visible.sh`):
+  - the row's own inset widened `space.cardInner` 16 → `space.rowX` 20, so inside
+    an un-rewired card the text now sits 16 + 20 = **36 pt** from the screen edge
+    (was 16 + 16 = 32), and the hairline inset moved 16/60 → 20;
+  - vertical padding 10 → 12 and base `minHeight` `rowProject` 60 → `rowList` 50
+    (13 of the 22 sites pass their own `minHeight`, so 9 change height);
+  - the title/subtitle **lost `numberOfLines={2}`**: a long session title now
+    wraps to any number of lines instead of being capped at two;
+  - the separator lost its `icon`-dependent inset (60 after a tile), so a tiled
+    row's hairline now starts at the gutter;
+  - `Sheet`'s non-floating ground moved `sheet` → `bg`: `SessionInfoSheet` and
+    `OutboxDecisionSheet` (neither passes `floating`) go from `#FFFFFF` to
+    `#F2F2F7` in light, under `GroupedCard surface={palette.fill}` (`#EFEFF4`)
+    cards that still paint the old surface. Dark is unchanged (`#2A2A28` vs
+    `#1F1F1E` inside a `pageSheet` Modal whose own ground is `page`).
+  So the changelog bullet must not claim a look that is not on screen yet, and
+  S4 owns the visible change. Recorded rather than hidden.
+- **`PairScreen`'s hero and paste field are not yet in a band** (S4), and the new
+  `Sheet onClose` has no call site (S4). `space.separatorPlain`/
+  `separatorAfterTile`/`size.rowProject` are now unreferenced by the app,
+  deliberately left for S4's delete pass.
+- **`band-wiring.test.ts` is a source-reading test** (the repo's established
+  pattern for `.tsx`: `header-wiring.test.ts`, `icon-glass-wiring.test.ts`). It
+  pins props, tokens and branch structure — it cannot prove RN lays them out
+  correctly. The pure decisions it leans on (`valueEllipsis`, `rowLayout`) are
+  tested by value in `row-value.test.ts`.
+
+## Review (slice S3 — band primitives, E2)
+
+*— claude-opus-5-5, 2026-11-16 · fresh context, slice S3 only*
+
+**Verdict: REQUEST-CHANGES.**
+
+Gate: `row-value` + `band-wiring` **28 pass / 0 fail**; `bun run lint` clean
+(1689 files); `bun run typecheck` clean. Own mutation: `valueEllipsis("model")`
+→ `"tail"` ⇒ 2 fail, reverted, tree clean.
+
+1. **HIGH — `apps/mobile/src/ui/Row.tsx:223`** (`text: { flexShrink: 0 }`,
+   was `flex: 1`; `textCapped` applies only when a `value` is passed): a row
+   whose title is long and which has a `chevron`/`trailing` but no `value`
+   (every current call site, e.g. `SessionsScreen.tsx:70-81` with a session
+   title, `SessionInfoSheet.tsx:161-172`) lets the label take the full inner
+   width and pushes the chevron/trailing past the screen edge. Repro (Yoga,
+   RN's layout engine, `.tentacle/tmp/mobile-chrome/s3-review-yoga.ts`, 390 pt
+   row, 20 pt gutters, 80-char title, 14 pt chevron):
+   `main flex:1 → chevron right edge 370` · `branch flexShrink:0 → 396` (off a
+   390 pt screen). S4 keeps this Row, so it is not interim. `band-wiring.test.ts:121`
+   pins the buggy property. Fix direction: the label column must still shrink
+   against trailing controls (e.g. `flexShrink: 1` + `minWidth` / `flex: 1`
+   when no value) — "never truncated" means wrap, not overflow.
+2. **MEDIUM — Execution's claim "S3 alone changes nothing a user can see" is
+   false.** `Row` (16 live call sites) lost `numberOfLines={2}`, its gutter,
+   inset and default height, and `Sheet.tsx:63` re-grounds every non-floating
+   sheet (`SessionInfoSheet`, `OutboxDecisionSheet`) from `sheet` to `bg` under
+   `GroupedCard`s that still paint `fill`. Merged to `main` per slice, that is a
+   visible, unscreenshotted interim look.
+3. **MEDIUM — signature.** The Execution is signed `claude-opus-5-5`, but its
+   commit `7faddece` is titled `exec (deepseek)`. §10 requires the signature be
+   the model that wrote it; one of the two is wrong.
+
+Nits (not blocking): `BandSection.tsx:15,30` still says the sheet ground "becomes
+`page`" (Drift 2 chose `bg`); `Row` hairlines always use `sep`, never `sepSheet`
+inside a sheet band.
+
+Attacks tried: (a) Yoga layout of label vs chevron — **found #1**; (b) mutation
+of the per-kind ellipsis — test holds; (c) surface audit of the Sheet ground vs
+the palettes — dark `bg #1F1F1E` / `bandOnSheet #2A2A28` holds, interim
+`GroupedCard` mismatch → #2; (d) §7 "logic in pure modules" — `rowLayout`
+carries the branching, Row only maps it: holds. No protocol/persistence/runtime
+invariant touched. Executor behaviour: scope respected, thorough mutation table,
+honest about no device render; over-claimed "no visible change".
+
+### Fix round 1
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (tentacle profile `deepseek`), 2026-11-16 · answers Review round 1 (slice S3) · my own id, confirmed below*
+
+**Model id provenance (I checked rather than assumed).** My prompt is the
+`ds "… fix round $N …"` call at `night-task3.sh:45`, whose `ds()` launches
+`tentacle --profile deepseek` (`night-task3.sh:24`); the profile's model is
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` (`~/.config/tentacle/config.jsonc`).
+I also confirmed the run log this session writes to —
+`runs/night-mobile-chrome-fix1.log` — contains my own `f1r1-*` commands, so it
+is this session and not a neighbour's. (That is the same check whose absence
+produced finding 3.)
+
+#### Finding 1 (HIGH) — `Row.tsx:223` `text: { flexShrink: 0 }` overflowed the row
+
+**FIXED.**
+
+- **Reproduced first**, with Yoga (RN's own engine, through the copy `ink`
+  vendors) and the row's REAL style set — 390 pt row, 20 pt gutters, 12 pt gap,
+  a 14 pt chevron, an 80-char title. Measured on the shipped code
+  (`.tentacle/tmp/mobile-chrome/f1r1-yoga5.out`):
+
+  | case | label | last control's right edge (inner edge = 370) |
+  |---|---|---|
+  | no value, chevron | 350×44 | **396** — off a 390 pt screen |
+  | no value, tile+dot, chevron | 350×48 | **475** |
+  | no value, switch | 350×44 | **433** |
+  | value + tile + switch | 244×66 | **399** |
+  | value, chevron | 244×66 | 370 ok |
+
+  So the bug was wider than the review's case: the cap (70%) only existed on the
+  value branch, so every value-less row with a trailing control overflowed, and
+  even a capped row overflowed once a tile or a switch joined it.
+- **Root cause (one sentence):** the label column refused to shrink
+  (`flexShrink: 0`), so it took its MEASURED width and the trailing control was
+  pushed past the row instead of the label wrapping.
+- **RED first** (§9): 5 fail on the untouched code, on the property, not on an
+  import — `row-value.test.ts` ×4 (`labelSizing` undefined) and
+  `band-wiring.test.ts` (`flexShrink: 0` present).
+- **Fix, in §7's shape (decision in a pure module, component only renders):**
+  `row-value.ts` gained `RowLayout.labelSizing: "fill" | "capped" | "stacked"`,
+  computed by `rowLayout(fontScale, { description, hasValue })`; `Row.tsx` maps
+  it to one of three styles and holds no branching. Base `text` is now
+  `{ flexShrink: 1, minWidth: 0 }`; `textFill: { flex: 1 }` (nothing shares the
+  line), `textCapped: { flexShrink: 1, maxWidth: "70%" }`, `textStacked`
+  unchanged. "Never truncated" is kept where it belongs — the label's `<Text>`
+  carries no line cap — and is no longer conflated with "never shrinks".
+- **AFTER, styles read back OUT of the shipped `Row.tsx`** (`f1r1-yoga-after.ts`,
+  so the measurement cannot drift from the code): every case ends at
+  `370/370 ok` — chevron, tile+dot, switch, value+tile+switch, stacked.
+- **Drift (1, deliberate):** I deleted `RowLayout.direction`. After the fix
+  nothing in `src` read it (only tests), it duplicated `valueFullWidth`, and two
+  representations of one fact is exactly the drift class this finding came from.
+  Its tests now assert `valueFullWidth`.
+
+#### Finding 2 (MEDIUM) — "S3 alone changes nothing a user can see" was false
+
+**FIXED (doc).** The claim is replaced in **Not done in this slice** with the
+measured list (`.tentacle/tmp/mobile-chrome/f1r1-visible.out`): the inset went
+16 → 20 (`36 pt` from the screen edge inside an un-rewired card, was 32), the
+vertical padding 10 → 12, the base `minHeight` 60 → 50 (9 of 22 live sites
+change height), the title **lost `numberOfLines={2}`** so a long title wraps
+freely, the separator lost its icon-dependent inset, and `Sheet`'s non-floating
+ground moved `sheet` → `bg`, which recolours `SessionInfoSheet` and
+`OutboxDecisionSheet` in light (`#FFFFFF` → `#F2F2F7`) under `GroupedCard
+surface={palette.fill}` cards that still paint the old surface. The 22 live
+`<Row>` sites inside 15 un-rewired `GroupedCard`s are stated as the interim look
+it is, and S4 is named as the owner of the visible change.
+
+What I did **not** do: rewrite the changelog bullet. It describes the finished
+restyle (an unreleased fragment, assembled at release), and one bullet can only
+describe one end state — but Review should know I considered it.
+
+#### Finding 3 (MEDIUM) — signature vs commit title
+
+**FIXED (doc), and it was the opposite of what round 1 guessed.** The commit
+title was right and the signature was wrong. Evidence: S3 was launched by
+`night-task3.sh:24` (`tentacle --profile deepseek`), and its log
+(`runs/night-mobile-chrome-exec.log`) carries tentacle's tool names
+(`[tool] fs_read` ×22, `[tool] shell` ×122, `[tool] fs_multi_edit` ×11) — the
+deepseek CLI, never Claude Code's `Read`/`Bash`/`Edit`. Its own self-check (`sed
+-n '417,432p'` of that log) grepped `~/.claude/projects/*/*.jsonl`, which is the
+ORCHESTRATOR's transcript, found `claude-opus-5-5` there, and adopted it. The S3
+Execution header now carries the profile's real id plus a note saying exactly
+that; the body is unchanged.
+
+#### Nits (were not blocking; both closed)
+
+- `BandSection.tsx:15,30` said a sheet's ground "becomes `page`" — now `bg`, the
+  token Drift 2 actually chose and the code actually passes.
+- `Row`'s hairlines still paint `palette.sep`, never `sepSheet`, inside a sheet
+  band. I checked before changing it and left it: no live `Row` sits on a sheet
+  surface today (`SessionInfoSheet`/`OutboxDecisionSheet` still hold
+  `GroupedCard surface={palette.fill}` until S4, and `BandSection onSheet`'s
+  `sepSheet` edge is the band's own border). In the two palettes `sep` and
+  `sepSheet` are identical in light (`#C6C6C8`) and differ by `#3A3936` vs
+  `#403F3B` in dark. If S4 mounts banded rows in a sheet, `Row` needs an
+  `onSheet`-equivalent then; recorded rather than guessed now.
+
+#### Mutation checks (§9 — each applied, the 2 S3 files run, reverted, `cmp`'d back)
+
+Scripts/output: `.tentacle/tmp/mobile-chrome/f1r1-mutations.{sh,out}` and
+`f1r1-mut2.{ts,out}`; backups in `f1r1-bak/`, each restored file verified
+`identical to scratch backup`.
+
+| # | Mutation (each is the fix reversed) | Result |
+|---|---|---|
+| M1 | `text: flexShrink: 1` → `flexShrink: 0` (the original bug) | **1 fail** |
+| M2 | `textFill: { flex: 1 }` → `{}` (style exists, no fill) | **1 fail** |
+| M3 | the 70% cap leaks onto the base `text` style | **1 fail** |
+| M4 | `labelSizing === "capped"` branch wired off | **1 fail** |
+| M5 | `rowLayout` ignores `hasValue` (`if (true)`) | **2 fail** |
+| M6 | the label regains `numberOfLines={2}` | **1 fail** |
+| M7 | the pure module always returns `fill` (cap never applies) | **2 fail** |
+| M8 | `textStacked` keeps a 70% cap | **1 fail** |
+
+**Two mutations survived on the first attempt and were real gaps, now closed:**
+- M2 — nothing proved that `textFill` *fills*; the test only checked the branch
+  was taken. Yoga then leaves the value-less label at its measured width, i.e.
+  the overflow again. The wiring test now pins the three styles' geometry.
+- M8 — nothing proved the stacked label's full width, so a leftover 70% cap
+  would have squeezed it silently. Pinned the same way.
+(M6 appears twice in the `.out` files: the `sed` line in the shell script cannot
+match across lines and is a deliberate no-op, so the template literal edit in
+`f1r1-mut2.ts` is the real M6.)
+
+One further non-vacuity note: `direction`'s deletion is covered by M5/M7 still
+biting through `valueFullWidth`, so no assertion was lost with it.
+
+#### Gate
+
+- `bunx tsc --noEmit` (root) — clean.
+- `bunx tsc -p apps/mobile --noEmit` — clean.
+- `bunx tsc -p apps/relay --noEmit` — clean.
+- `bun run lint` — `Checked 1689 files. No fixes applied.` (0/0, matches the §6
+  baseline).
+- `bun test` (full suite) — **12180 pass, 5 skip, 0 fail** across 876 files, 424 s
+  (`.tentacle/tmp/mobile-chrome/f1r1-gate-full.log`). The 5 skips are the
+  documented opt-ins; total is +4 over S3's 12176 = the four new `labelSizing`
+  tests, and no new skip appeared.
+- Files touched: `apps/mobile/src/row-value.ts`, `apps/mobile/src/ui/Row.tsx`,
+  `apps/mobile/src/ui/BandSection.tsx` (comments only), the two test files, this
+  doc. No protocol/daemon/client/wire change, so `protocol.json` was not
+  regenerated; no git checkout/restore/stash/commit was run.
+
+#### Unverified, stated
+
+- **No device/simulator render.** Still the S3/S6 block (no headless RN
+  renderer; the native build is blocked by the pre-existing `PushCore` error).
+  The fix's geometry is proven with Yoga against the shipped style values, which
+  is the engine RN uses, but the real pixels are unseen — the same limitation
+  Review accepted for S3.
+- **The `sepSheet` nit** depends on S4's final structure (see above).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · fresh context, verifies fix commit `44c5fc6c`*
+
+**Verdict: PASS.**
+
+- **Finding 1 (HIGH) — fixed.** The label column now shrinks (`text: { flexShrink: 1, minWidth: 0 }`), and pure `rowLayout(...).labelSizing` (`fill`/`capped`/`stacked`) chooses its width rule. Yoga repro (`s3-review-yoga.ts`): `fill` → chevron right edge **370** (= main), `capped` → 291; it was 396 before the fix. Mutations, each reverted with the tree left clean: base `flexShrink: 0` → band-wiring 1 fail; `textFill` without `flex: 1` → 1 fail; `rowLayout` ignoring `hasValue` → row-value 2 fail.
+- **Finding 2 (MEDIUM) — fixed.** The Execution now states that S3 is visible and names S4 as the owner of that change.
+- **Finding 3 (MEDIUM) — fixed.** The signature is corrected to the DeepSeek profile and matches the commit title.
+- Round-1 nit fixed: `BandSection` docs now say `bg`. The nit about `Row` hairlines using `sep` inside a sheet is still open and not blocking.
+- Gate: the two S3 test files pass **32 / 0**; `bun run lint` clean (1689 files); `bun run typecheck` clean. The diff touches no protocol, persistence or runtime path.
