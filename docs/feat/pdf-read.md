@@ -548,7 +548,125 @@ goes back to the owner.
 
 ## Execution
 
-*(empty — filled by the executor of each slice, starting with R0 in P2)*
+### P1 — pure `pdf-text.ts` · executed by `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` (tentacle `--profile deepseek`), 2026-11-16
+
+**R0 was re-run first, as instructed, and it PASSES — but the plan's own harness was
+broken, and P2 must be amended before it starts.** The pasted harness hung on G1
+(180 s, no output). Isolated in two cheap steps: a trivial worker round-trip works
+(`echo-worker.ts`), and with a traced worker the module body runs (`A/B/C`) but never
+receives the message; delaying `postMessage` 200 ms makes it parse. So the bytes were
+posted before the worker's top-level `await import("pdfjs-dist/legacy/build/pdf.mjs")`
+installed `self.onmessage`, and Bun dropped the message. With a `ready` handshake
+(`pdf-worker2.ts` + `extract2.ts` in `.tentacle/tmp/pdf-read/r0/`, result in its
+`RESULT.md`):
+
+```
+bun extract2.ts hello.pdf                  # G1: worker, from source
+--- page 1 / 2 --- / Hello PDF world / --- page 2 / 2 --- / Second page   ms=143 rss=43MB
+bun build --compile --minify extract2.ts pdf-worker2.ts --outfile x-with  # 4 modules
+./x-with hello.pdf                          # G2+G4: single binary, in the Worker
+Warning: Cannot load "@napi-rs/canvas" …    # acceptable text-only warnings
+Warning: Cannot polyfill `DOMMatrix` …      # (recorded, not fatal)
+--- page 1 / 2 --- / Hello PDF world / --- page 2 / 2 --- / Second page   ms=68 rss=30MB
+./x-with --hang                             # G5
+terminated after 352 ms
+stat -f '%z' x-with x-without               # G3
+x-with 72662258 · x-without (noop.ts) 70862450 → delta 1_799_808 B = 1.7 MB (≤ 6 MB)
+```
+
+Pinned for R0: `pdfjs-dist@6.5.438` (the newest published). Gates: **G1 ✅ G2 ✅
+G3 1.7 MB ✅ G4 ✅ G5 ✅ (352 ms)**.
+
+Two facts R0 hands P2 (drift against §Load-bearing/§Design D2, not acted on here
+because they are P2's slice):
+1. **The handshake is mandatory.** A naive `postMessage(bytes)` right after
+   `new Worker(...)` is silently DROPPED while pdf.js's worker module is still
+   importing — extract.ts must wait for the worker's `ready`, or the extraction hangs
+   with no error (looks exactly like a pathological PDF). P2's design should say so.
+2. On 6.5.438 the parsed document has **no `doc.destroy()`** — `doc.cleanup()` is the
+   available teardown (a main-thread `mt.ts` repro: `TypeError: doc.destroy is not a
+   function`). §Design D2's `doc.destroy()` in `finally` must become `doc.cleanup()` or
+   a guarded call.
+
+**P1 as built** — `packages/core/src/pdf-text.ts` (new, 470 lines), exported from
+`packages/core/src/index.ts:30`, tests in `packages/core/test/pdf-text.test.ts` (new,
+38 tests). Contents, per D1:
+
+- `isTextItem` (a full guard: `str` + `transform` + `width` + `height` + `hasEOL`),
+  `buildPageText(items)` — the owner's heuristic kept exactly (space when same
+  baseline within `0.5·fontSize` and `gap > 0.25·fontSize`, `fontSize = max(height) ||
+  1`, no doubling an existing space, newline on `hasEOL`), plus the D1 additions:
+  C0 controls (except `\t`, `\n`) and `\x7f` dropped by code point, `trimEnd` per
+  line, runs of 3+ blank lines collapsed to one blank line, and empty items ignored
+  for spacing while still contributing their EOL.
+- `parsePageRange(spec, numPages)` → `{ok:true,pages}` | `{ok:false,reason,message}`
+  with reasons `malformed | out-of-range | reversed | too-many`, every message naming
+  the rule ("pages start at 1", "this PDF has N pages", "over the 100-page limit").
+- `formatPdfText` — header `[pdf <name>: N pages, pages A-B shown]`, `--- page n / M ---`
+  markers, and one footer per unread gap naming the next call
+  (`[pages 101-412 not read — call fs_read with pages: "101-200"]`), the page-range
+  suggester capped at `MAX_PAGES_PER_READ`; `maxChars` cuts at a page boundary and
+  never returns an empty read (one over-cap page is still returned whole).
+- `pdfVerdict` → `{kind:"text"|"no-text"|"partial"}` with the owner's wording
+  ("no extractable text — it looks scanned (pages are images); OCR is not supported")
+  and `pages 4, 7 have no text (images)` for a mixed document.
+- `fileBlock` / `splitFileBlocks` — `<file name="…" kind="pdf" pages="N">`, the name
+  attribute-escaped (`& < > "`), `</file` inside the text neutralised to `<\/file`;
+  the splitter is its exact inverse for renderers.
+- `isPdf(head)` — `%PDF-` anywhere in the first `PDF_HEAD_BYTES` (1024) bytes.
+- Constants: `MAX_PDF_BYTES` 50 MiB, `MAX_PAGES_PER_READ` 100, `MAX_PDF_TEXT_CHARS`
+  400 000, `MAX_ATTACHED_PDF_CHARS` 64 KiB, `PDF_PARSE_TIMEOUT_MS` 20 000,
+  `PDF_HEAD_BYTES` 1024, plus `NO_TEXT_CHARS_PER_PAGE` 16 and `MIN_DENSITY_PAGES` 3.
+
+**Drift from the Implementation, and why** (all three in the plan's own wording, none
+breaking its Design):
+
+1. **`pdfVerdict`'s message carries no `[pdf …]` wrapper.** D1's spec puts brackets
+   around the verdict sentence in the §Design text, but the same sentence is also a
+   *tool error* (D3: "Errors are tool errors (thrown with the clear message)") and a
+   *prompt refusal* (D4) — a `[pdf …]` header would then sit inside an `Error:` line.
+   The bracket is the READ header's job (`formatPdfText`); the verdict is a sentence.
+   P3/P4 can wrap it if they want.
+2. **The density test needs ≥ 3 pages (`MIN_DENSITY_PAGES`).** D1 says "≈16 non-space
+   chars per page over all pages"; applied to one or two pages it calls a readable
+   two-line slide or a short memo "scanned — OCR is not supported" and hides content
+   that IS there. The all-pages-empty case (the real scan) is still caught at any page
+   count, so the failure mode "scanned PDF reads as empty" stays closed.
+3. **`splitFileBlocks` strips the `\n` `fileBlock` adds around the body**, so
+   `split(fileBlock(x)).blocks[0].text === x.text` exactly — a renderer round-trip.
+
+**Tests, red first.** `packages/core/test/pdf-text.test.ts` was written before the
+module: `bun test packages/core/test/pdf-text.test.ts` →
+`error: Cannot find module '../src/pdf-text.ts' … 0 pass, 1 fail`. Then green in
+steps (38 pass) as the three implementation bugs the first run exposed were fixed:
+(a) an empty item was treated as "the previous text" and glued two real items
+(`"ab"` for `a`/``/`b`) — empty items are now skipped for spacing but still emit
+their EOL (the blank-line collapse depends on it); (b) a reversed range was reported
+before the out-of-range check, so `"7-"` on 5 pages said "runs backwards: write 5-7"
+— the start-past-`numPages` check now runs first; (c) `splitFileBlocks` left the
+block's own newlines around the text.
+
+**Mutation checks (non-vacuity, §9)** — each applied to the module, run, reverted:
+
+```
+A drop the `</file` neutralisation   → 2 fail  (both fileBlock/splitFileBlocks tests)
+B gap threshold 0.25 → 0.05          → 2 fail  (kerning test + the fontSize test)
+C isPdf window unbounded (whole file)→ 2 fail  (offset-1100 + the trailing-%PDF- test)
+D drop the MAX_PAGES_PER_READ cap    → 1 fail  (the 1-101 refusal)
+reverted                             → 38 pass, 0 fail
+```
+
+**Gate.** `bunx tsc --noEmit` exit 0 · `bun run typecheck` (tsc + mobile + relay) exit 0
+· `bun run lint` (`biome check .`, 1700 files, 0 errors 0 warnings = the §6 baseline)
+exit 0 · `bun test` **12330 pass, 5 skip (the opt-in three), 0 fail** across 884 files.
+(One first run failed `scripts/test/install.test.ts > "a pinned version must match
+what the release actually contains"` — nothing in P1 touches `scripts/`; that file
+alone is green, then `scripts/test/` 94/94 green, then the full suite 0 fail, i.e. a
+flaky environment-dependent assertion, not this change.)
+
+Changelog: `changelog.d/pdf-read.added.md` written (one bullet; P3/P6 extend it, the
+plan's §Files says "written in P3" — written early instead so the slug exists once).
+No schema changed, so `packages/protocol/schema/protocol.json` is untouched.
 
 ## Review
 
