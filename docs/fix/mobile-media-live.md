@@ -174,3 +174,27 @@ on the wire), so no `protocol.d/` note and no `protocol.json` regeneration.
 ## Execution
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; the same model family as the planner, not as the executor)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Findings (HIGH/MEDIUM):**
+1. **HIGH: the gate is red.** `bun test` on the touched files: 100 pass, **1 fail**. The failing test is `session-feed.test.ts:270`, "the sent row carries its LOCAL copy". `bun run typecheck`: `session-feed.test.ts(261,7) TS2353 'photos' does not exist in type 'OwnPrompt'`. `bun run lint`: **6 errors**, against a clean baseline (§6). They are organizeImports in `App.tsx`, `photo-settings-expo.ts` and `outbox-link.test.ts`; format in `compose-controller.ts` and `outbox-link.test.ts:923`, where two statements are joined on one line; and useImportType at `SettingsScreen.tsx:16`.
+2. **HIGH: S2, S3 and S4 are not implemented, although "slice all" was in scope.**
+   - S2: `photos` is not threaded through `OwnPrompt`/`transcript.apply`/`session-feed`. `imageRefWithLocal` (`transcript-rows.ts:175`) is dead code with no caller, so the sent bubble still shows `[image: name]`.
+   - S3: there is no `resync()`, no `refreshing` and no `RefreshControl` on the transcript.
+   - S4: `media-layout.ts`, `MediaViewer.tsx` and the `TranscriptRow.tsx` changes are missing, so owner items 2, 3 and 4 are still open.
+   - The Execution section is empty, so none of this drift is declared.
+3. **MEDIUM (plausible): the long-edge resize can distort a photo.** `photo-source.ts:629` passes BOTH `width` and `height` to `ImageManipulator.resize`, which does not keep the aspect ratio. The two numbers are computed from the picker's `asset.width/height`. If the picker reports pre-EXIF-orientation dimensions (a known expo-image-picker issue for rotated photos), a portrait photo is squashed into a landscape box. The plan said `resize({width})`. Pass only the long edge's dimension and let the manipulator derive the other.
+
+**Mutation (§9):**
+- In `outbox-link.test.ts`, I replaced `screenOn`'s `getSession` with a second `newSession`+`open` (the old `App.tsx` shape). The item-1 test went **red**: `transcript.turn` stayed `{own:true}` at line 1033. I reverted it and `git status` is clean, so S1's test is non-vacuous.
+- Note: `await until(() => !screen.state().transcript.turn)` (line 1024) passes vacuously before the press. The test only holds because of the final `toBeNull()`.
+
+**What holds:**
+- S1 is correct and reuses the existing seam (`foldingOutboxSession` over the screen's `ComposeHandle.port`). It adds no second session path, so it respects the §7 "one session path" invariant.
+- The pure step in S5 is sound (no upscale, GIF exempt, HEIC still converted with `sendOriginal`, bounded loop).
+- The settings store follows the versioned pattern: an unknown `v` is never overwritten.
+
+**Executor behaviour:** shipped about half the plan with a red gate and an empty Execution section. It added a test for unbuilt code (`session-feed`) that cannot typecheck.
