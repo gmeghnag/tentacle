@@ -17,13 +17,19 @@
  */
 import type { TentacleConfig } from "@tentacle/config";
 import type { ArtifactSink, AttachmentSource, ScheduleLink } from "@tentacle/core";
-import { Connection, SessionHost } from "@tentacle/daemon";
+import {
+  Connection,
+  LogSessionStore,
+  SessionHost,
+  type SessionHostOptions,
+} from "@tentacle/daemon";
 import { setGroupForwarder } from "@tentacle/exec";
 import type { McpServerStatus } from "@tentacle/mcp";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
 import "./pdf-worker-url.ts";
 import { daemonDocumentPolicy, daemonImagePolicy } from "./image-policy.ts";
+import { laptopArtifactSeed } from "./laptop-artifacts.ts";
 import { createMcpHub } from "./mcp-hub.ts";
 import type { ProviderFactory } from "./model-provider.ts";
 import {
@@ -38,6 +44,27 @@ import {
 } from "./wiring.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
 import { LaptopWorkloadShellBackend } from "./workload-shell-backend.ts";
+
+/**
+ * D11's worker-side half: a seed that lists what THIS laptop kept beside the
+ * session's log and reads its blobs on demand. Read-only: the main thread owns
+ * that dir (§7), and only a version the manifest names is ever read.
+ *
+ * `LogSessionStore` here is a plain reader (it never writes: every write op is
+ * unused), which is why the daemon's own store type can be used for it.
+ */
+export function laptopSeedFrom(dir: string): SessionHostOptions["artifactSeed"] {
+  const store = new LogSessionStore(dir);
+  return (id) =>
+    laptopArtifactSeed(
+      {
+        artifacts: (uid) => store.artifactManifest(uid),
+        readArtifact: (uid, sha256, offset, length) =>
+          store.readArtifactBlob(uid, sha256, offset, length),
+      },
+      id,
+    );
+}
 
 /**
  * The worker's per-session wiring, exported so a test can drive it with an
@@ -104,6 +131,13 @@ export function workerSessionHost(
     readonly onBuilt?: (wired: WiredAgent) => void;
     /** A test's provider recorder: a turn's `ChatRequest` then never leaves the machine. */
     readonly createProvider?: ProviderFactory;
+    /**
+     * A RESUMED session's artifacts, from THIS laptop's copy (docs/feat/
+     * model-artifacts.md D11): the worker keeps nothing on disk, so its gallery
+     * would be empty after `--resume`. Absent → memory-only, as before (and a
+     * pod daemon never passes one: AGENTS §7).
+     */
+    readonly artifactSeed?: SessionHostOptions["artifactSeed"];
   },
 ): SessionHost {
   const skillScan = deps.skillScan ?? createSkillScan(config);
@@ -116,6 +150,9 @@ export function workerSessionHost(
     // The laptop's own code in this process: the session's auto-accept is
     // shared with every TUI on it (docs/feat/session-auto-accept.md D1).
     sharedAutoAccept: true,
+    // D11: the RESUMED session's gallery comes back from the laptop's own copy
+    // (this daemon writes nothing). Only this host ever sets it.
+    ...(deps.artifactSeed ? { artifactSeed: deps.artifactSeed } : {}),
     // Scheduled wakes (docs/feat/cron-tool.md D1, owner Q4): the worker keeps the
     // session's table and fires it itself, with THIS laptop's `schedules.*` limits.
     // Never persisted (pods and the worker never persist, AGENTS §7).
@@ -176,7 +213,7 @@ port.addEventListener("message", (event: { data: unknown }) => {
   // The version comes from the main thread, NOT from `version.ts`: importing it
   // would inline the compile-time marker into this second bundle too (two
   // markers in the binary; scripts/build.ts demands exactly one).
-  const { config, version } = event.data as WorkerBootstrap;
+  const { config, version, artifactsDir } = event.data as WorkerBootstrap;
 
   // Connect MCP once, in the background. Until it resolves the hub keeps every
   // freshly-built registry, so it can register the tools into them the moment
@@ -199,6 +236,9 @@ port.addEventListener("message", (event: { data: unknown }) => {
     mcpStatus: () => hub.status(),
     toolsReady: () => hub.ready(),
     onBuilt: (wired) => hub.onBuilt(wired.tools),
+    // D11: a RESUMED session's gallery, from the copy the MAIN thread keeps
+    // beside the log. READ ONLY here — the main thread owns that dir (§7).
+    ...(artifactsDir ? { artifactSeed: laptopSeedFrom(artifactsDir) } : {}),
   });
   // Bind one Connection to this worker's port; the main thread is the client.
   // A handler crash (previously surfaced as a bare "RpcError: internal error"

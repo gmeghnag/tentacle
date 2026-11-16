@@ -42,9 +42,25 @@ export const ARTIFACT_MEMORY_BYTES = 128 * 1024 * 1024;
 /** The wire's cap on a meta's `callId` (`ArtifactMetaSchema`). */
 const MAX_CALL_ID = 256;
 
-/** A store's view of the budget: told when one of its blobs was evicted. */
+/**
+ * A store's view of the budget: told when one of its blobs was evicted.
+ */
 interface Holder {
   evicted(sha256: string): void;
+}
+
+/**
+ * Where a resumed worker session's artifacts come from (docs/feat/model-artifacts.md
+ * D11): the versions THIS laptop kept beside the log, and their bytes on demand.
+ * Only the worker path ever passes one (its daemon is this laptop's own code) —
+ * a pod's artifacts are pod-supplied and are never read from a laptop dir
+ * (AGENTS §7). Metas are the seed's; bytes are loaded lazily, on the first read.
+ */
+export interface ArtifactSeed {
+  /** The versions on the laptop, oldest first (`LogSessionStore.artifactManifest`). */
+  readonly metas: readonly ArtifactMeta[];
+  /** One version's bytes from the laptop's disk, or `null` (absent, unreadable). */
+  readonly read: (sha256: string, size: number) => Promise<Uint8Array | null>;
 }
 
 /**
@@ -115,12 +131,24 @@ export class ArtifactStore implements ArtifactSink, Holder {
   private readonly latest = new Map<string, ArtifactMeta>();
   private minted = 0;
   private readonly now: () => number;
+  /** A resumed worker session's laptop copy (D11): the metas it lists, read lazily. */
+  private readonly seed: ArtifactSeed | undefined;
 
   constructor(
     private readonly budget: ArtifactBudget,
-    opts: { readonly now?: () => number } = {},
+    opts: { readonly now?: () => number; readonly seed?: ArtifactSeed } = {},
   ) {
     this.now = opts.now ?? Date.now;
+    this.seed = opts.seed;
+    for (const raw of opts.seed?.metas ?? []) {
+      const parsed = ArtifactMetaSchema.safeParse(raw);
+      if (!parsed.success) continue; // a lens the wire would refuse is never listed
+      this.metas.push(parsed.data);
+      const prior = this.latest.get(parsed.data.artifactId);
+      if (!prior || prior.version <= parsed.data.version) {
+        this.latest.set(parsed.data.artifactId, parsed.data);
+      }
+    }
   }
 
   /** The budget evicted one of our blobs: its metas stay, its bytes go. */
@@ -183,7 +211,7 @@ export class ArtifactStore implements ArtifactSink, Holder {
     if (!meta) {
       throw unavailable("unknown", "this session holds no such artifact — ask to present it again");
     }
-    const bytes = this.blobs.get(sha256);
+    const bytes = this.blobs.get(sha256) ?? (await this.load(sha256));
     if (!bytes) {
       throw unavailable(
         "evicted",
@@ -219,6 +247,25 @@ export class ArtifactStore implements ArtifactSink, Holder {
       );
     }
     this.blobs.set(sha256, bytes.slice());
+  }
+
+  /**
+   * A seeded version's bytes, from the laptop's copy (D11). Held like any other
+   * (the budget is charged, so a resumed gallery cannot exceed the daemon's
+   * allowance): a copy that is gone, short or over budget reads as unavailable.
+   */
+  private async load(sha256: string): Promise<Uint8Array | undefined> {
+    if (!this.seed) return undefined;
+    const meta = this.metas.find((m) => m.sha256 === sha256);
+    if (!meta) return undefined;
+    const bytes = await this.seed.read(sha256, meta.size).catch(() => null);
+    if (!bytes || bytes.length !== meta.size) return undefined;
+    try {
+      this.hold(sha256, bytes);
+    } catch {
+      return undefined;
+    }
+    return this.blobs.get(sha256);
   }
 
   private mint(): string {

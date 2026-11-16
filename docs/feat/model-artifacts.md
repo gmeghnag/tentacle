@@ -2276,6 +2276,209 @@ them exactly as found; they are the only cause of the RED below.
   full-suite failure is S4's file, and every S7 test passes.
 - S7's own files: 58 pass, 0 fail (4 files).
 
+### Fix round 1
+
+*— claude-opus-5-5 (executor), 2026-11-16*
+
+**S10 implemented; the two MEDIUMs fixed.**
+
+**Scope.** The three review findings, in the order the review listed them. The
+branch was red before this round (S4's store ops were committed without their
+code); it is green after it, and S10 — the HIGH, found unimplemented — is now
+built, pinned by T10, and mutation-checked.
+
+**Finding 3 (MEDIUM, gate red) — FIXED first, because everything else is
+verified on a green gate.** The S4 coverage the review found missing from
+`LogSessionStore` is implemented: `putArtifact`/`readArtifactBlob`/
+`artifactManifest`/`artifactOwners`/`sweepArtifacts`
+(`packages/daemon/src/session-log-store.ts:451,459,474,480,485`), the
+`artifactStore` field (`:630`, `options.artifacts ?? new SessionArtifacts(dir)`),
+the `artifact`/`sweepArtifacts` run() cases (`:611`), the artifacts dir named on
+a failed op, `removeLocked` also dropping `artifactStore.removeAll(id)`, `/clear`
+fork artifact linking (`linkForkArtifacts`/`callIdsOf`, `:288,706`), and the
+`directory` getter (`:333`) `main.ts` needs. `packages/daemon/test/artifact-manifest.test.ts`
+is **8 pass, 0 fail**; the file was also formatted (it had been committed
+unformatted, which is the lint half of the review's gate finding).
+
+**Finding 2 (MEDIUM, `cacheDir`) — FIXED.**
+`apps/mobile/src/artifact-cache.ts:135-144`: a dot-only id (`..`, `.`, `...`) has
+each dot turned into `_` and an empty id becomes `_`, so `cacheDir` can never
+name `artifacts/..` (the cache root) or `.`. Test
+`apps/mobile/test/artifact-cache.test.ts:117` ("a DOT-ONLY id never names the
+cache root or its parent") asserts the four ids, and was shown RED first: with
+the OLD sanitizer restored as a mutation (`const name = safe`) it fails —
+**14 pass, 1 fail** — and green on the fix: **15 pass, 0 fail**.
+
+**Finding 1 (HIGH, S10/D11 never implemented) — IMPLEMENTED + pinned.**
+The laptop keeps each artifact version beside the log, at the save points
+`persistingController` already has, and a resumed worker session's store is
+seeded from that copy. Files (`file:line` is post-execution):
+
+- `packages/daemon/src/artifact-store.ts:59` — `ArtifactSeed` (`metas`,
+  `read(sha256,size)`); `:139-155` the ctor takes `{seed}`, wire-checks each meta
+  through `ArtifactMetaSchema` (a meta the wire would refuse is never listed) and
+  keeps the latest version per `artifactId`; `:257-271` `load()` reads a seeded
+  version lazily on the first `artifact/read`, refuses a length ≠ `meta.size`,
+  charges the budget through `hold`, and answers `ArtifactUnavailable{evicted}`
+  when the copy is gone, short or over budget.
+- `packages/daemon/src/session-host.ts:263` `SessionHostOptions.artifactSeed`,
+  used at `:1456` in the one `build()` site.
+- `packages/cli/src/laptop-artifacts.ts` (new) — `artifactsToKeep` (`:23`, dedupe
+  by `sha256`) and `laptopArtifactSeed` (`:59`, `"refused"`/empty → `undefined`,
+  and only a sha256 the manifest names is ever read).
+- `packages/cli/src/local-runtime.ts:421-495` — `LaptopArtifacts` (fetch what the
+  daemon lists and the laptop lacks, ONE notice, never throws);
+  `:547,627,636-661` the `artifacts?: LaptopArtifacts` controller param,
+  `keepArtifacts()` inside `flush()`, and `flushed()` awaiting both `running` and
+  `keeping`; `:1034` `LocalRuntimeDeps.keepArtifacts`; `:1332-1345` the one build
+  site (`undefined` unless `keepArtifacts === true`); `:1664,1702` the worker's
+  `artifactsDir` in the bootstrap; `:1748` `keepArtifacts: true` at the worker's
+  `createLocalRuntime` call — **the ONE place that decides**, so a pod
+  `run`/`attach` and `connect` keep nothing.
+- `packages/cli/src/session-saver.ts:223,231` — `putArtifact` (resolves at once
+  for a removed uid or a store without it, REJECTS when the write failed) and
+  `artifactManifest`; `SaveTarget` extended.
+- `packages/cli/src/worker-bootstrap.ts:17` `artifactsDir`; `worker.ts:56`
+  `laptopSeedFrom` (read-only `LogSessionStore`), `:140,155` the host option,
+  `:216,241` the bootstrap destructure and the seed.
+- `packages/cli/src/main.ts:2185` passes `sessions.store.directory`.
+
+**T10 tests** — `packages/cli/test/artifacts-durable.test.ts` (new, 11 tests):
+
+1. present → turn end → `<uid>.artifacts/` holds the blob (under its sha256) and
+   `manifest.jsonl` with one line, through `LogSessionStore.artifactManifest`;
+2. `--resume` on a fresh host seeded from that dir: `openSeeded` +
+   `listArtifacts` list the version from the seed alone, and `readArtifact`
+   returns the exact bytes (lazily — no turn ran);
+3. a seeded meta whose blob was deleted → `readArtifact` rejects
+   `ArtifactUnavailable{reason:"evicted"}`, never bytes;
+4. a seeded blob SHORTER than its meta → the same refusal (`load()`'s size
+   check), never a truncated artifact;
+5. **pod exclusion (§7)**: the same present + save through a runtime WITHOUT
+   `keepArtifacts` leaves NO `<uid>.artifacts` dir and an empty manifest, while
+   the log itself IS saved (the store is the laptop's normal one);
+6. `startWorkerRuntime` posts `artifactsDir` in the bootstrap (a fake worker, so
+   no process is spawned);
+7. **end to end over the REAL worker boundary**: a spawned worker, a scripted
+   OpenAI-compatible server whose first turn calls `present`; the blob+manifest
+   land in the laptop dir, then a second worker started with `--resume` lists and
+   reads it back;
+8. `artifactsToKeep` dedupe (one sha256 under two ids fetched once, held skipped);
+9. an older daemon (`ArtifactsUnsupportedError` from `artifact/list`) → nothing
+   kept and NO notice (a daemon without the method must not warn every turn);
+10. a failing disk → exactly ONE notice across three save points;
+11. a `"refused"` manifest → never written, never seeded.
+
+**Red before green — the honest form.** Finding 3 has a true red-first: the S4
+test file (`packages/daemon/test/artifact-manifest.test.ts`) was committed RED —
+it called `putArtifact`/`artifactManifest`/`sweepArtifacts`, which did not exist,
+so it failed six cases AND broke `tsc` — and the store ops were written to make
+it green (**8 pass, 0 fail**).
+
+For S10 (finding 1) the honest form is different, and worth saying plainly: the
+S10 code was already in the tree at this round's start (implemented, untested),
+so its tests are **test-after**, not red-first. What stands in their place is the
+mutation table below. It is not merely "a mutation fails a test": each row
+restores a piece of the *pre-S10* behaviour — no keep at the worker's call site,
+no dir in the bootstrap, no seed forwarded, no lazy read, no seeded metas, no
+write — and BOTH the narrow tests and the end-to-end worker test go red. A test
+written against the un-implemented branch would fail for exactly those reasons.
+Two failures seen while writing them (`listArtifacts` returning `[]` before an
+open) were my own test bug, and are why test 2 and the e2e do the `openSeeded()`
+the TUI does.
+
+**Mutation table** (each mutation applied alone, the file restored afterwards and
+its `md5` checked against the pre-mutation value; the counts are what that run
+reported — the file had 10 tests for the first rows and 11 for the later ones,
+because the SHORT-blob case and the `"refused"`-seed half were added while
+mutation-testing):
+
+| Mutation | Result |
+|---|---|
+| `keepArtifacts: true` dropped at the worker's `createLocalRuntime` call (`local-runtime.ts:1748`) | 9 pass, **1 fail** (e2e: `[]` vs `["report"]`) |
+| `artifactsDir` not posted in the bootstrap (`:1702`) | 8 pass, **2 fail** (the bootstrap test + e2e) |
+| `laptopSeedFrom`'s manifest read → `() => []` (`worker.ts:61`) | 7 pass, **3 fail** |
+| `SessionHost` seed not forwarded (`session-host.ts:1456`) | 7 pass, **4 fail** |
+| `if (this.seed) return undefined` in `load()` (lazy read dropped) | 8 pass, **2 fail** (`evicted` on a resume) |
+| seeded metas not pushed in the ctor (`artifact-store.ts:146`) | 7 pass, **3 fail** |
+| `load()`'s length check dropped | 10 pass, **1 fail** (the SHORT blob) |
+| `keepArtifacts()` removed from `flush()` (`local-runtime.ts:627`) | 6 pass, **5 fail** |
+| the write path → `Promise.resolve()` (`:1341`) | 6 pass, **5 fail** |
+| `LaptopArtifacts.save()` returns before fetching (`:464`) | 5 pass, **6 fail** |
+| the ONE-notice guard dropped (`:487`) | 10 pass, **1 fail** |
+| `artifactsToKeep`'s dedupe dropped | 7 pass, **4 fail** |
+| `laptopArtifactSeed` reads `"refused"` as ours | 10 pass, **1 fail** (`metas.map is not a function`) |
+| `artifact/list`'s error rethrown instead of swallowed | 10 pass, **1 fail** |
+| the POD exclusion → `deps.keepArtifacts === true` replaced by `true` | 9 pass, **1 fail** (T10 §7) |
+
+**Drift from the Implementation, declared:**
+
+- **The save point is `flush()`, not "turn end".** The plan said turn end; the
+  controller has six save points (a committed round, turn end, a title, the
+  switches, a compaction, idle) and `flush()` is the one function all of them
+  call. Keeping artifacts there costs nothing extra (fetches are coalesced onto
+  their own detached promise and `flushed()` awaits both), and it makes the
+  gallery survive a crash mid-turn, not just a clean quit.
+- **The worker is handed the store DIR, not an in-memory seed.** The plan's
+  "re-seed the new worker's store from that dir" is implemented as
+  `artifactsDir` in the `WorkerBootstrap`, read by a plain read-only
+  `LogSessionStore` (`laptopSeedFrom`). An in-memory handoff is impossible across
+  the worker boundary (the seed is bytes, and the pool is 128 MiB), and this
+  keeps the read lazy: the worker touches the disk only when a version is
+  actually opened.
+- **`--resume` needs an open.** `listArtifacts` on a session that nothing has
+  opened returns the empty list by design (`remote-session.ts:652`), so T10 does
+  the `openSeeded()` the TUI does. The seed is in the store BEFORE the open (it
+  is the `SessionHost.build()` site), so the resumed gallery is complete on the
+  first read.
+- `wiring.test.ts:627`'s broker grep-guard was widened to `\{\s*permissions,\s*saver`:
+  the added `artifactsDir` line makes Biome break the argument object over
+  several lines, and the guard was pinned to one-line formatting. It still
+  asserts the SAME identifier in both places (`new PermissionBroker(` count 1,
+  and the `permissions,` argument to `startTui`).
+
+**Gate (this round, on the final tree).**
+`bunx tsc --noEmit` — **clean**. `bunx tsc -p apps/mobile` — clean.
+`bunx tsc -p apps/relay` — clean. `bun run lint` — **clean** (1823 files, no
+fixes applied; the S4 test file the review flagged is formatted now).
+`bun test` (full suite, run twice: once mid-round, once last on the final tree
+after the doc and changelog edits — same result) — **13258 pass, 5 skip, 0 fail**
+(13 snapshots, 88955 expect() calls, 945 files). The 5 skips are the documented
+opt-ins (live-k8s, live-docker, the real-socket keepalive). Narrow on the final
+tree: `artifacts-durable` 11 pass, 0 fail; `local-runtime` + `artifacts-durable`
+90 pass, 0 fail; `daemon/test` 1344 pass / 1 skip / 0 fail; `daemon/test/artifact-manifest`
+8 pass, 0 fail; `apps/mobile/test/artifact-cache` 15 pass, 0 fail;
+`apps/mobile` whole 2346 pass, 0 fail; `scripts/test/changelog-guard` 5 pass,
+0 fail; and the four narrow test files together (`artifacts-durable`,
+`wiring`, `artifact-cache`, `artifact-manifest`) 76 pass, 0 fail.
+
+**Residual / debt (declared, not fixed here):**
+
+- No wire change and no `protocol.d/` note: `artifact/list`/`artifact/read`
+  already existed, and the seed is daemon-internal. `PROTOCOL_VERSION` is
+  untouched.
+- The laptop copy is kept for EVERY version the daemon lists, including ones a
+  session never opened (the plan's "what a save point has to fetch"); there is
+  no laptop-side artifact byte cap, unlike images' `LAPTOP_IMAGE_BYTES`. A
+  worker session that presents many 20 MiB files grows its dir until
+  `tentacle`'s normal session cleanup — worth a cap in a later task.
+- The pod exclusion is enforced by `keepArtifacts` being set at exactly ONE call
+  site (`local-runtime.ts:1748`), not by a type: a future pod path that sets it
+  would silently write a pod's artifacts on the laptop. T10's §7 test pins the
+  absence today; a compile-time split (a `LocalRuntimeDeps` variant only the
+  worker can build) is the stronger form.
+- S10 is `load-bearing` (§7 persistence + pod exclusion), so per AGENTS §10 it
+  needs a **fresh-context Review** of this round, not an in-context one.
+
+**One test fixed on the way (not a code drift):** `packages/cli/test/wiring.test.ts:627`
+— the single-broker grep-guard was pinned to ONE-LINE formatting of main.ts's
+runtime call, which the added `artifactsDir` line made Biome re-wrap. Widened to
+`\{\s*permissions,\s*saver`; it still asserts one `new PermissionBroker(` in the
+block and the `permissions,` argument to `startTui`, so the invariant is
+unchanged and still non-vacuous (the mutation already recorded in its comment —
+`permissions: new PermissionBroker()` at the `startTui` call — still fails it).
+
+
 
 ## Review
 

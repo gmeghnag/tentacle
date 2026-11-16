@@ -52,7 +52,12 @@ import {
   type UpdateSettingsResult,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
-import { ARTIFACT_MEMORY_BYTES, ArtifactBudget, ArtifactStore } from "./artifact-store.ts";
+import {
+  ARTIFACT_MEMORY_BYTES,
+  ArtifactBudget,
+  type ArtifactSeed,
+  ArtifactStore,
+} from "./artifact-store.ts";
 import { AttachmentStore, DAEMON_UPLOAD_BYTES, UploadBudget } from "./attachment-store.ts";
 import type { ModelLink } from "./connection.ts";
 import {
@@ -248,6 +253,14 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * it, the oldest versions are evicted (their metas stay listed).
    */
   readonly artifactBytes?: number;
+  /**
+   * This daemon keeps nothing on disk, so a RESUMED session's gallery would be
+   * empty; the laptop hands its own copy back through this
+   * (docs/feat/model-artifacts.md D11). Only the WORKER path sets it (this
+   * laptop's own code, beside its own store); a pod daemon never does — a pod's
+   * artifacts are never read from the laptop (AGENTS §7).
+   */
+  readonly artifactSeed?: (id: string) => ArtifactSeed | undefined;
   /**
    * What this daemon does with image prompts: where the bytes live, and the
    * capability `initialize` advertises (docs/feat/attachments-prompt.md D2).
@@ -1437,8 +1450,11 @@ export class SessionHost {
     const uploads = new AttachmentStore(this.uploadBudget, disk ? { disk } : {});
     // The session's artifact store (docs/feat/model-artifacts.md D4), likewise
     // created BEFORE the agent and owned by the session. Memory only here; the
-    // `serve` disk copy is a later slice (D5).
-    const artifacts = new ArtifactStore(this.artifactBudget);
+    // `serve` disk copy is D5, and a resumed WORKER session's gallery comes back
+    // from the laptop's copy (`artifactSeed`, D11) — never a pod's.
+    const artifacts = new ArtifactStore(this.artifactBudget, {
+      ...(this.opts.artifactSeed ? { seed: this.opts.artifactSeed(id) } : {}),
+    });
     const {
       agent,
       permissions,

@@ -44,6 +44,8 @@ import type {
 import { forkWrite, forkableMessages } from "@tentacle/daemon";
 import { applyGroupMessage } from "@tentacle/exec";
 import {
+  type ArtifactListResult,
+  type ArtifactMeta,
   DomainErrorCode,
   type McpServerStatus,
   type SessionSettings,
@@ -54,6 +56,7 @@ import type { SessionController } from "@tentacle/tui";
 import { createSettingsNotifier } from "./carried-settings.ts";
 import { logDaemonError } from "./daemon-log.ts";
 import { type HooksTrustStore, createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
+import { artifactsToKeep } from "./laptop-artifacts.ts";
 import {
   type DurableImages,
   LaptopKeeper,
@@ -403,6 +406,95 @@ function titleState(title: SessionTitle): TitleState {
 }
 
 /**
+ * Keeps the artifacts a session presents beside its log, on this laptop
+ * (docs/feat/model-artifacts.md D11): a worker daemon persists nothing, and its
+ * gallery would otherwise be empty after `--resume`.
+ *
+ * The work happens AROUND a save, never inside it: the daemon's own list is read
+ * first, each version this laptop lacks is fetched (`readArtifact`, already
+ * verified against its meta by the client) and written under the session's
+ * queue, so a `remove` queued after it leaves no orphan dir. One blob is fetched
+ * once however many versions name it. Never throws: a failed fetch or write is
+ * one notice, and the conversation goes on (an artifact the laptop could not
+ * keep is a smaller loss than a turn that cannot be saved).
+ */
+export class LaptopArtifacts {
+  private readonly notice: (text: string) => void;
+  /** The ONE notice this session shows (a disk that stays full must not print after every turn). */
+  private warned = false;
+
+  constructor(opts: {
+    /** The versions on disk now (`LogSessionStore.artifactManifest`); `"refused"` → keep nothing. */
+    readonly kept: () => readonly ArtifactMeta[] | "refused";
+    /** The daemon's own list for this session (verified: `RemoteClient.listArtifacts`). */
+    readonly list: () => Promise<ArtifactListResult>;
+    /** One version's bytes, verified against its meta (`RemoteClient.readArtifact`). */
+    readonly read: (meta: ArtifactMeta) => Promise<Uint8Array>;
+    /** `LogSessionStore.putArtifact`'s bound half: rejects when the write failed. */
+    readonly write: (meta: ArtifactMeta, bytes: Uint8Array) => Promise<void>;
+    readonly notice: (text: string) => void;
+    /**
+     * Whether this session's copy is still ours to write: a hand-over
+     * (`stopSaving`), a session deleted elsewhere, an older daemon with no
+     * `artifact/list` at all, a pod runtime.
+     */
+    readonly saving: () => boolean;
+  }) {
+    this.opts = opts;
+    this.notice = opts.notice;
+  }
+
+  private readonly opts: {
+    readonly kept: () => readonly ArtifactMeta[] | "refused";
+    readonly list: () => Promise<ArtifactListResult>;
+    readonly read: (meta: ArtifactMeta) => Promise<Uint8Array>;
+    readonly write: (meta: ArtifactMeta, bytes: Uint8Array) => Promise<void>;
+    readonly notice: (text: string) => void;
+    readonly saving: () => boolean;
+  };
+
+  /**
+   * Fetch and keep whatever the daemon lists and this laptop lacks. Called
+   * fire-and-forget from a save point (the turn does not wait on a disk);
+   * resolves when done and never rejects.
+   */
+  async save(): Promise<void> {
+    if (!this.opts.saving()) return;
+    const kept = this.opts.kept();
+    if (kept === "refused") return; // a newer tentacle wrote this dir: never write it
+    let list: ArtifactListResult;
+    try {
+      list = await this.opts.list();
+    } catch {
+      // An older daemon (`ArtifactsUnsupportedError`), a link gone for good, a
+      // session that ended, a pod that never listed one where we may not read:
+      // nothing to keep, and nothing worth a notice — the cards still render.
+      return;
+    }
+    for (const meta of artifactsToKeep(kept, list)) {
+      if (!this.opts.saving()) return;
+      try {
+        const bytes = await this.opts.read(meta);
+        await this.opts.write(meta, bytes);
+      } catch (error) {
+        this.warn(error);
+        return;
+      }
+    }
+  }
+
+  private warn(error: unknown): void {
+    if (this.warned) return;
+    this.warned = true;
+    this.notice(
+      `⚠ the artifacts this session presents are not being saved on this laptop (${
+        error instanceof Error ? error.message : String(error)
+      }), so after a restart they will read as unavailable`,
+    );
+  }
+}
+
+/**
  * Wrap a remote session so its history is persisted after each committed
  * round, turn end and compaction. Reads the authoritative log back from the
  * daemon (`session/log`) rather than reconstructing it from the update stream.
@@ -446,6 +538,13 @@ export function persistingController(
    * nothing is restored (`connect`, unit fakes, a store with no blobs).
    */
   durable?: DurableImages,
+  /**
+   * This session's artifacts on THIS laptop's disk (docs/feat/model-artifacts.md
+   * D11). Absent → nothing is kept and nothing is restored (`connect`, a pod
+   * runtime, unit fakes). Run at the same save points as the log, DETACHED like
+   * it: a fetch never holds the turn open.
+   */
+  artifacts?: LaptopArtifacts,
 ): PersistingController {
   /** The newest read held (what `/clear` forks) and the read head already forked. */
   let lastRead: {
@@ -522,6 +621,10 @@ export function persistingController(
     if (sealed) {
       return;
     }
+    // D11: the artifacts ride the SAME save points (a round, a turn end, a
+    // title, the switches, idle), detached and coalesced on their own — the
+    // turn never waits on a fetch.
+    keepArtifacts();
     if (running) {
       again = true;
       return;
@@ -530,7 +633,33 @@ export function persistingController(
       running = null;
     });
   };
-  const flushed = (): Promise<void> => running ?? Promise.resolve();
+  const flushed = (): Promise<void> =>
+    Promise.all([running ?? Promise.resolve(), keeping ?? Promise.resolve()]).then(() => undefined);
+  /**
+   * D11: the artifacts are kept at the SAME save points, DETACHED (a fetch must
+   * not hold the turn open, §6's rule for the log read). One in flight at a
+   * time, coalesced like the save: a burst of rounds fetches each new version
+   * once, because the next pass reads the daemon's list afresh.
+   */
+  let keeping: Promise<void> | null = null;
+  let keepAgain = false;
+  const keepArtifacts = (): void => {
+    if (!artifacts || sealed) return;
+    if (keeping) {
+      keepAgain = true;
+      return;
+    }
+    keeping = (async () => {
+      do {
+        keepAgain = false;
+        await artifacts.save();
+      } while (keepAgain);
+    })().finally(() => {
+      keeping = null;
+    });
+  };
+  const keptArtifacts = (): Promise<void> => keeping ?? Promise.resolve();
+
   /**
    * Q4: an opened session's state goes to the laptop now and the read-back is
    * waited for (bounded), so a TUI with no turn since counts as saved. A read
@@ -895,6 +1024,15 @@ export function persistingController(
 export interface LocalRuntimeDeps {
   readonly channel: DuplexChannel;
   /**
+   * Where THIS laptop keeps the session's artifacts beside its log
+   * (docs/feat/model-artifacts.md D11): set → the session's own store is kept on
+   * disk at each save point, and a resumed one is re-seeded from it. ONLY a
+   * `local` runtime (the in-process worker: the laptop's own code, its own
+   * store) sets it — a pod's artifacts are pod-supplied and are never written on
+   * the laptop (§7), and `connect` keeps no copy (the serve daemon's is truth).
+   */
+  readonly keepArtifacts?: true;
+  /**
    * Opens a fresh channel to the same daemon after a drop (a pod's new exec, a
    * WebSocket redial): present → the client reconnects and resumes; absent
    * (the worker) → a drop is terminal.
@@ -1188,6 +1326,23 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
           notify: (text) => deps.notify?.(text),
         };
       })(),
+      // D11: this session's artifacts on THIS laptop's disk. Absent
+      // (`keepArtifacts` unset: a pod `run`/`attach`, `connect`) nothing is kept
+      // — a pod's artifacts are pod-supplied and never written here (§7).
+      deps.keepArtifacts === true
+        ? new LaptopArtifacts({
+            // The main thread owns the dir: `"refused"` (a newer tentacle's
+            // format) means never write it.
+            kept: () => deps.saver.artifactManifest(uid),
+            list: () => session.listArtifacts(),
+            read: (meta) => session.readArtifact(meta),
+            // A hand-over (`stopSaving`): whoever saves the log owns the copy.
+            write: (meta, bytes) =>
+              saving ? deps.saver.putArtifact(uid, meta, bytes) : Promise.resolve(),
+            notice: (text) => deps.notify?.(text),
+            saving: () => saving && !deps.saver.isRemoved(uid),
+          })
+        : undefined,
     );
     controllers.add(controller);
     return controller;
@@ -1495,7 +1650,19 @@ export const WORKER_TRUST = { sharedAutoAccept: true, daemonWakes: true } as con
 
 export async function startWorkerRuntime(
   config: TentacleConfig,
-  deps: { permissions: PermissionBroker; saver: SessionSaver; resume: SessionRecord | null },
+  deps: {
+    permissions: PermissionBroker;
+    saver: SessionSaver;
+    resume: SessionRecord | null;
+    /**
+     * The laptop store dir holding this project's sessions (docs/feat/
+     * model-artifacts.md D11). A worker keeps nothing, so a RESUMED session's
+     * gallery must come back from the copy the MAIN thread wrote beside the log:
+     * this is the ONE dir the worker may READ (never write) for it. Absent →
+     * nothing is restored.
+     */
+    artifactsDir?: string;
+  },
   log: (line: string) => void,
   opts: {
     /** Test seam: how the worker is constructed (default: the URL form below). */
@@ -1529,7 +1696,11 @@ export async function startWorkerRuntime(
       failHandshake?.(new Error(workerError));
     });
     // Object bootstrap (structured-cloned); the worker takes its version from it.
-    worker.postMessage({ config, version: APP_VERSION } satisfies WorkerBootstrap);
+    worker.postMessage({
+      config,
+      version: APP_VERSION,
+      ...(deps.artifactsDir ? { artifactsDir: deps.artifactsDir } : {}),
+    } satisfies WorkerBootstrap);
   } catch (error) {
     throw new WorkerStartError("spawn", reasonOf(error));
   }
@@ -1570,6 +1741,11 @@ export async function startWorkerRuntime(
           // images-off-reason.md).
           modelScope: "laptop" as const,
           resume: deps.resume,
+          // D11: this session's artifacts are kept on THIS laptop's disk (its own
+          // code, its own store) and a resumed one is re-seeded from that copy.
+          // The ONE place that decides: a pod `run`/`attach` and `connect` never
+          // reach here, so nothing a pod presents is ever written on the laptop.
+          keepArtifacts: true,
           // The daemon here is THIS laptop's own code: the session's auto-accept
           // is shared by every TUI on it, and its wakes are the session's own.
           ...WORKER_TRUST,

@@ -123,7 +123,10 @@ describe("LogSessionStore artifacts (T4)", () => {
       const malformedNamed = "e".repeat(64);
       await writeFile(join(adir, orphan), "orphan");
       await writeFile(join(adir, malformedNamed), "m");
-      await writeFile(join(adir, "manifest.jsonl"), `${await readFile(join(adir, "manifest.jsonl"), "utf8")}{"sha256":"${malformedNamed}"\n`);
+      await writeFile(
+        join(adir, "manifest.jsonl"),
+        `${await readFile(join(adir, "manifest.jsonl"), "utf8")}{"sha256":"${malformedNamed}"\n`,
+      );
       expect((await store.artifactOwners()).sort()).toEqual(["G", "S"]);
       for (const id of await store.artifactOwners()) await store.sweepArtifacts(id);
       expect(await readdir(dir)).not.toContain("G.artifacts");
@@ -155,10 +158,18 @@ describe("LogSessionStore artifacts (T4)", () => {
       await store.putArtifact("S", m1, one);
       await store.putArtifact("S", m2, two);
       const messages = [user("show"), asst("", ["c1"]), tool("c1", "Presented")];
-      const update = forkWrite({ id: "F", meta: META, messages, title: { source: "auto" } as never, ts: 5 });
+      const update = forkWrite({
+        id: "F",
+        meta: META,
+        messages,
+        title: { source: "auto" } as never,
+        ts: 5,
+      });
       await store.fork("S", update);
       expect(store.artifactManifest("F")).toEqual([m1]);
-      expect((await readdir(join(dir, "F.artifacts"))).sort()).toEqual([m1.sha256, "manifest.jsonl"].sort());
+      expect((await readdir(join(dir, "F.artifacts"))).sort()).toEqual(
+        [m1.sha256, "manifest.jsonl"].sort(),
+      );
       expect(store.artifactManifest("S")).toEqual([m1, m2]);
       // A retry of the landed fork changes nothing (manifest written once, atomically).
       await store.fork("S", update);

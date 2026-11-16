@@ -44,7 +44,7 @@ import {
   type SessionTitle,
   canonicalMessage,
 } from "@tentacle/protocol";
-import type { SessionArtifacts } from "./session-artifacts.ts";
+import { ARTIFACT_DIR_SUFFIX, SessionArtifacts } from "./session-artifacts.ts";
 import { BLOB_DIR_SUFFIX, SessionBlobs } from "./session-blobs.ts";
 import {
   type LogSegment,
@@ -284,8 +284,19 @@ export function blobIdsOf(entries: readonly KnownLogEntry[]): Set<string> {
   return ids;
 }
 
-/** The id at which `entries` holds `id`, searching from the end (the usual case is near it). */
-function indexOfId(entries: readonly KnownLogEntry[], id: string): number {
+/** Every tool-call id of a chat (`/clear` forks the artifacts presented in those calls). */
+function callIdsOf(messages: readonly ChatMessage[]): Set<string> {
+  const ids = new Set<string>();
+  for (const message of messages) {
+    for (const call of message.toolCalls ?? []) ids.add(call.id);
+  }
+  return ids;
+}
+
+/** The id at which `entries` holds `id`, searching from the end (the usual case is near it). */ function indexOfId(
+  entries: readonly KnownLogEntry[],
+  id: string,
+): number {
   for (let i = entries.length - 1; i >= 0; i--) {
     if (entries[i]?.id === id) return i;
   }
@@ -304,6 +315,7 @@ export class LogSessionStore {
   private readonly token = randomUUID().slice(0, 8);
   private swept = false;
   private readonly blobs: SessionBlobs;
+  private readonly artifactStore: SessionArtifacts;
 
   constructor(
     private readonly dir: string,
@@ -311,9 +323,15 @@ export class LogSessionStore {
   ) {
     this.io = options.io ?? defaultIo;
     this.blobs = options.blobs ?? new SessionBlobs(dir);
+    this.artifactStore = options.artifacts ?? new SessionArtifacts(dir);
     this.keepSuperseded = options.keepSuperseded === true;
     this.lockWaitMs = options.lockWaitMs ?? 2000;
     this.lockStaleMs = options.lockStaleMs ?? 30_000;
+  }
+
+  /** The directory every session file of this store lives in (`<configDir>/sessions/<projectKey>`). */
+  get directory(): string {
+    return this.dir;
   }
 
   /** The session file's path. */
@@ -421,6 +439,54 @@ export class LogSessionStore {
       return Promise.reject(new Error(`invalid session id ${JSON.stringify(id)}`));
     }
     return this.enqueue(id, { kind: "dropBlobs" });
+  }
+
+  /**
+   * Keep one artifact version on disk, `<uid>.artifacts/<sha256>` + its
+   * manifest line (docs/feat/model-artifacts.md D5), under its lock, in its
+   * queue — so a `remove` queued after it leaves no orphan dir. Blob FIRST,
+   * then the manifest line; rejects when either write failed (the caller's
+   * `present` is then an error, never a card pointing at missing bytes).
+   */
+  putArtifact(id: string, meta: ArtifactMeta, bytes: Uint8Array): Promise<void> {
+    if (!isValidSessionId(id)) {
+      return Promise.reject(new Error(`invalid session id ${JSON.stringify(id)}`));
+    }
+    return this.enqueue(id, { kind: "artifact", meta, bytes });
+  }
+
+  /** At most `length` bytes of one artifact blob from `offset`, or `null` (absent, unreadable, a bad sha). No lock. */
+  readArtifactBlob(
+    id: string,
+    sha256: string,
+    offset: number,
+    length: number,
+  ): Promise<Uint8Array | null> {
+    return this.artifactStore.readRange(id, sha256, offset, length).catch(() => null);
+  }
+
+  /**
+   * The session's artifact versions, oldest first (synchronous: a store is
+   * built synchronously), or `"refused"` when the manifest's `schemaVersion` is
+   * not this build's — then the caller's store stays memory-only and the dir is
+   * never written.
+   */
+  artifactManifest(id: string): ArtifactMeta[] | "refused" {
+    if (!isValidSessionId(id)) return "refused";
+    return this.artifactStore.manifest(id);
+  }
+
+  /** The session ids that have an artifacts dir (`serve`'s start-up sweep, D5c). */
+  artifactOwners(): Promise<string[]> {
+    return this.artifactStore.owners();
+  }
+
+  /** Sweep one session's artifacts dir at start-up (D5c), under its lock, in its queue. */
+  sweepArtifacts(id: string): Promise<void> {
+    if (!isValidSessionId(id)) {
+      return Promise.reject(new Error(`invalid session id ${JSON.stringify(id)}`));
+    }
+    return this.enqueue(id, { kind: "sweepArtifacts" });
   }
 
   /**
@@ -540,7 +606,11 @@ export class LogSessionStore {
         else if (op.kind === "forget") this.writers.delete(id);
         else if (op.kind === "blob") await this.blobs.write(id, op.blobId, op.bytes);
         else if (op.kind === "dropBlobs") await this.blobs.removeAll(id);
-        else await this.removeLocked(id);
+        else if (op.kind === "artifact") {
+          await this.artifactStore.append(id, op.meta, op.bytes);
+        } else if (op.kind === "sweepArtifacts") {
+          await this.artifactStore.sweep(id, await exists(this.file(id)));
+        } else await this.removeLocked(id);
       } finally {
         await release();
       }
@@ -556,7 +626,9 @@ export class LogSessionStore {
       const what =
         op.kind === "blob" || op.kind === "dropBlobs"
           ? join(this.dir, `${id}${BLOB_DIR_SUFFIX}`)
-          : target;
+          : op.kind === "artifact" || op.kind === "sweepArtifacts"
+            ? join(this.dir, `${id}${ARTIFACT_DIR_SUFFIX}`)
+            : target;
       throw new Error(`couldn't ${verb} ${what}: ${describeFsError(error)}`, { cause: error });
     }
   }
@@ -607,6 +679,7 @@ export class LogSessionStore {
         await this.writeLocked(id, update);
         if (update.sidecar !== undefined) await this.writeStateLocked(id, update.sidecar);
         await this.linkForkBlobs(sourceId, update);
+        await this.linkForkArtifacts(sourceId, update);
       } finally {
         await release();
       }
@@ -623,6 +696,16 @@ export class LogSessionStore {
   private async linkForkBlobs(sourceId: string, update: LogWrite): Promise<void> {
     const ids = blobIdsOf(update.entries);
     if (ids.size > 0) await this.blobs.link(sourceId, update.id, ids);
+  }
+
+  /**
+   * Give the fork the artifacts its own messages name (`/clear` keeps the
+   * gallery, docs/feat/model-artifacts.md D5c): the versions whose `callId` is
+   * a call of the forked chat. The source keeps all of its own.
+   */
+  private async linkForkArtifacts(sourceId: string, update: LogWrite): Promise<void> {
+    const callIds = callIdsOf(update.messages);
+    if (callIds.size > 0) await this.artifactStore.fork(sourceId, update.id, callIds);
   }
 
   /** The fork's files are the ones this update would write: log, and the sidecar when one is expected. */
@@ -924,8 +1007,9 @@ export class LogSessionStore {
     }
     // The images LAST (docs/feat/attachments-durable.md D1): a remove cut short
     // leaves blobs with no log (swept by `serve` at start), never a log whose
-    // images are gone.
+    // images are gone. The artifacts likewise (docs/feat/model-artifacts.md D5c).
     await this.blobs.removeAll(id);
+    await this.artifactStore.removeAll(id);
   }
 
   /** temp + fsync + rename: the old file or the new one, never half of one. */

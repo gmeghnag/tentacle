@@ -134,8 +134,13 @@ export function missingFrom(
 /** The directory holding one computer's cached artifacts (forward slashes, RN's form). */
 export function cacheDir(computerId: string): string {
   // A computer id is a UUID-ish slug from the daemon; a separator in it would
-  // escape the directory, so it is reduced to its safe characters.
-  return `artifacts/${computerId.replace(/[^A-Za-z0-9._-]/g, "_")}`;
+  // escape the directory, so it is reduced to its safe characters. A DOT-ONLY
+  // result is not a name at all, though: `artifacts/..` IS the cache root (its
+  // parent), so the per-computer delete would wipe every computer's cache — each
+  // dot of such a segment becomes `_`, and an empty id becomes one `_`.
+  const safe = computerId.replace(/[^A-Za-z0-9._-]/g, "_");
+  const name = safe === "" ? "_" : safe.replace(/^\.+$/, (dots) => "_".repeat(dots.length));
+  return `artifacts/${name}`;
 }
 
 /** The cached copy's path for one version: content-addressed, never the model's name. */

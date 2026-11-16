@@ -114,6 +114,22 @@ describe("paths and names", () => {
     expect(cacheDir("a/b")).not.toContain("/b/");
   });
 
+  test("a DOT-ONLY id never names the cache root or its parent (review round 2, M2)", () => {
+    // `..` and `.` survive the character filter whole, so the naive form is the
+    // root itself (`artifacts/..` == the cache root's parent): a per-computer
+    // delete would wipe every computer's cache (and, joined by a caller, more).
+    expect(cacheDir("..")).not.toBe("artifacts/..");
+    expect(cacheDir(".")).not.toBe("artifacts/.");
+    expect(cacheDir("..")).toBe("artifacts/__");
+    expect(cacheDir(".")).toBe("artifacts/_");
+    expect(cacheDir("")).toBe("artifacts/_");
+    expect(cacheDir("...")).toBe("artifacts/___");
+    for (const id of ["..", ".", "", "..."]) {
+      expect(cacheDir(id).split("/")).toHaveLength(2);
+      expect(cacheDir(id).split("/")[1]).toMatch(/^[A-Za-z0-9_-]+$/);
+    }
+  });
+
   test("a share name keeps a real extension, adds the kind's when missing, and sanitizes", () => {
     expect(shareName("report.pdf", "pdf")).toBe("report.pdf");
     expect(shareName("Q3 dashboard", "html")).toBe("Q3 dashboard.html");
