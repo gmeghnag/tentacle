@@ -1557,3 +1557,19 @@ This was a fresh-context review of `git diff main...HEAD`, limited to S3. The re
   - Cross-session eviction while another session is mid-read: the read answers `evicted`, which is the planned behaviour.
 - **Nit (LOW, not blocking; for S5/S6a):** re-presenting the same `id` with the same bytes returns the PRIOR meta (`artifact-store.ts:154-158`). That meta keeps the earlier call's `callId` and `title`, so after a reload the second call's row joins no card. A joiner keyed on `callId` must accept this, or the store must record the new `callId`.
 - **Executor behaviour:** the report is honest. It admits the code was inherited without red-first and makes up for it with mutations. The drift (child filter in `subagent.ts`, the factories forwarding the store) is real and was needed.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; same model as the S5 executor, so blind spots may be shared)
+
+### S5 — Client list/read + mapping: PASS (no HIGH/MEDIUM in S5 code)
+
+- **Tests:** `artifacts.test.ts` + `read-window.test.ts` + `mapping.test.ts` → 51 pass, 0 fail.
+- **Mutation (the plan's target):** skip the sha256 check in `ReadWindow.finish` → 24 pass, 2 fail ("right lengths, wrong bytes" in client and window). Reverted from a scratch copy; `git status` is clean.
+- **Gate:** `bun run lint` → 1 error, and `bun run typecheck` → 24 errors. All of them are in S4's work in progress (`daemon/src/session-artifacts.ts`, `session-log-store.ts`, `daemon/test/artifact-manifest.test.ts`). Commit `72e5d036` committed that work together with S5. There are 0 errors in `packages/client` or `packages/transport`. **This is not an S5 finding, but it blocks the merge:** S4 must be finished, or its files taken out of the commit, before `bun run check` can pass.
+- **Attacks tried (none found a HIGH/MEDIUM):**
+  1. Hostile pod: every reply is checked before it can size or fill anything. The buffer is sized from `meta.size` (`read-window.ts:79-86`). The reply's `size` is compared with the meta's. The base64 length is checked before decoding, decoding is strict, and the decoded length is checked too. The client's chunk size (`min(C, size-offset)`) matches the daemon's slicing (`artifact-store.ts:193-199`).
+  2. Drop/abort races in `pullArtifact`: every task resolves, and its failure is captured and rethrown only after `allSettled`. A failure always stops new reads before the next `next()`, and `rewind` runs only after the pull returns. An abort wakes the race and stops new reads. The answers still in flight land in a window that is then thrown away. No loop runs forever: each retry either gets a new answer, which accepts a chunk, or runs into the reconnect deadline.
+  3. Mapping: `details.kind === "artifact"` does not break any consumer. Every reader checks the kind first (`daemon/mapping.ts:233`, `tui/render-lines.ts:461`, `tui/commands.ts:521`, `mobile/transcript.ts:505`). `present` produces no diff detail for it to overwrite.
+  4. §7 pod trust: the sha256 check only shows that the bytes match the meta, and the meta also comes from the pod. That is the intended scope (it proves consistency, not where the bytes came from). Opening pod bytes safely is S6b/S8's job.
+- **Executor behaviour:** the report is accurate. The drift it lists (`ArtifactListResult`, exporting `decodeBase64`) is real and justified. The one thing it got wrong: it says it "left exactly as found" S4's work in progress, yet that work went into the same commit.
