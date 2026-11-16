@@ -32,6 +32,7 @@ import {
 import type { VoiceInfo } from "./speech-language.ts";
 import { dictationLocale, langOf, speechLocaleCandidates } from "./speech-locale.ts";
 import type { SpeechPort, SpeechPortEvent } from "./speech-native.ts";
+import { autoReadOn, voiceStops } from "./voice-beta.ts";
 import type { VoiceSettings } from "./voice-settings-store.ts";
 
 /** How often a running dictation is ticked (silence / cap / finalize timeout). */
@@ -86,6 +87,12 @@ export interface VoiceController {
   /** A permission sheet appeared: the templated spoken ask, when auto-read is on. */
   permissionAsked(request: { readonly title: string }, seq: number, focused: boolean): void;
   appState(state: AppStateName): void;
+  /**
+   * Settings → Beta changed (docs/feat/mobile-voice-hidden.md): a switch that went
+   * OFF stops what it was running — the dictation it was listening to, the speech
+   * it was reading — so no surface is left live behind a hidden button.
+   */
+  settingsChanged(previous: VoiceSettings, next: VoiceSettings): void;
   dispose(): void;
 }
 
@@ -315,7 +322,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     tapSpeak: (row) => speakRow(row.key, row.text),
     async turnEnded(input) {
       const gates: AutoReadGates = {
-        enabled: deps.settings().readAloud,
+        enabled: autoReadOn(deps.settings()),
         focused: input.focused,
         appActive: app === "active",
         dictationIdle: state.dictation.kind === "idle" || state.dictation.kind === "failed",
@@ -329,7 +336,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     },
     permissionAsked(request, seq, focused) {
       const idleDictation = state.dictation.kind === "idle" || state.dictation.kind === "failed";
-      if (!deps.settings().readAloud || !focused || app !== "active" || !idleDictation) {
+      if (!autoReadOn(deps.settings()) || !focused || app !== "active" || !idleDictation) {
         return;
       }
       const lang = langOf(locale());
@@ -348,6 +355,16 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       app = next;
       dictate({ type: "appState", state: next });
       read({ type: "appState", state: next });
+    },
+    settingsChanged(previous, next) {
+      const stops = voiceStops(previous, next);
+      if (stops.dictation) {
+        // Ends it the way a second tap does: the text is kept, nothing is sent.
+        dictate({ type: "stopRequested", now: deps.now() });
+      }
+      if (stops.readAloud) {
+        read({ type: "settingsOff" });
+      }
     },
     dispose() {
       if (disposed) {

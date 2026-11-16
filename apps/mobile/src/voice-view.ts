@@ -15,6 +15,7 @@ import { readAloudOffered, speakingRowKey, streamingRowKey } from "./read-aloud.
 import type { DictationLocale } from "./speech-locale.ts";
 import type { VoiceState } from "./voice-controller.ts";
 import type { MicView } from "./voice-permission.ts";
+import type { VoiceSettings } from "./voice-settings-store.ts";
 
 export interface VoiceComposerView {
   readonly mic: MicButton;
@@ -38,8 +39,11 @@ const HIDDEN: VoiceComposerView = {
 export function voiceComposerView(
   state: VoiceState | null,
   locale: DictationLocale,
+  settings: VoiceSettings,
 ): VoiceComposerView {
-  if (state === null) {
+  // The Beta switch is the first gate (docs/feat/mobile-voice-hidden.md): with
+  // Dictation off nothing of it renders, whatever the controller state says.
+  if (state === null || !settings.dictation) {
     return HIDDEN;
   }
   const mic = micButtonOf(state.dictation, true);
@@ -62,8 +66,11 @@ export function speakButtonOf(
   row: { readonly kind: string; readonly key: string; readonly text?: string },
   rows: readonly { readonly kind: string; readonly key: string }[],
   running: boolean,
+  settings: VoiceSettings,
 ): "offered" | "speaking" | undefined {
-  if (state === null || row.kind !== "assistant") {
+  // The Beta switch gates the whole surface, `speaking` included: with Read aloud
+  // off a row shows neither the speaker nor the stop (docs/feat/mobile-voice-hidden.md).
+  if (state === null || row.kind !== "assistant" || !settings.readAloudButton) {
     return undefined;
   }
   if (speakingRowKey(state.readAloud) === row.key) {
