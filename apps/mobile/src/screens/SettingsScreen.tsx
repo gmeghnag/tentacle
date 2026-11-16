@@ -13,6 +13,7 @@
 import type { JSX } from "react";
 import { ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
+import type { ActivityButtonMode } from "../floating-button.ts";
 import type { SpeechRate } from "../read-aloud.ts";
 import type { LanguageSetting } from "../speech-locale.ts";
 import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
@@ -79,7 +80,25 @@ export interface SettingsScreenProps {
    */
   readonly notifications?: NotificationsRow;
   readonly onToggleNotifications?: (enabled: boolean) => void;
+  /**
+   * The Activity button (docs/feat/mobile-chrome.md Design 6): the header pill
+   * (default) or the floating button. Absent = no section.
+   */
+  readonly activityMode?: ActivityButtonMode;
+  /** False over a newer build's record: the rows are disabled and say why (F22). */
+  readonly activityWritable?: boolean;
+  /** A write that did not stick (the pick still holds for this run). */
+  readonly activityError?: string;
+  readonly onActivityMode?: (mode: ActivityButtonMode) => void;
 }
+
+export const ACTIVITY_BUTTON_ROWS: readonly {
+  readonly value: ActivityButtonMode;
+  readonly label: string;
+}[] = [
+  { value: "header", label: "Header" },
+  { value: "floating", label: "Floating" },
+];
 
 export const LANGUAGE_ROWS: readonly { readonly value: LanguageSetting; readonly label: string }[] =
   [
@@ -109,6 +128,10 @@ export function SettingsScreen({
   onBack,
   notifications,
   onToggleNotifications,
+  activityMode,
+  activityWritable = true,
+  activityError,
+  onActivityMode,
 }: SettingsScreenProps): JSX.Element {
   const compact = useCompactTitle();
   // Which voice rows the Beta switches reveal (pure: `voice-beta.ts`); with every
@@ -256,6 +279,47 @@ export function SettingsScreen({
               </Row>
             </BandSection>
           </View>
+          {activityMode === undefined || onActivityMode === undefined ? null : (
+            <View style={styles.section}>
+              <BandSection
+                palette={palette}
+                title="Activity button"
+                footnote={
+                  activityWritable
+                    ? "Where running sub-agents and jobs show: in the header, or as a button you can drag to either edge."
+                    : "Set by a newer version of tentacle — this version cannot change it."
+                }
+              >
+                {ACTIVITY_BUTTON_ROWS.map((row, index) => (
+                  <Row
+                    key={row.value}
+                    testID={`activity-button-${row.value}`}
+                    palette={palette}
+                    first={index === 0}
+                    minHeight={size.rowSetting}
+                    title={row.label}
+                    accessibilityLabel={row.label}
+                    dimmed={!activityWritable}
+                    {...(activityWritable ? { onPress: () => onActivityMode(row.value) } : {})}
+                    trailing={
+                      activityMode === row.value ? (
+                        <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
+                      ) : undefined
+                    }
+                  />
+                ))}
+              </BandSection>
+              {activityError === undefined ? null : (
+                <Banner
+                  palette={palette}
+                  tone="error"
+                  icon="exclamationmark.triangle"
+                  testID="activity-button-error"
+                  body={activityError}
+                />
+              )}
+            </View>
+          )}
           {voice === undefined || onVoice === undefined ? null : (
             <View style={styles.section}>
               {/* docs/feat/mobile-voice-hidden.md: the voice features live under
