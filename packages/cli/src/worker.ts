@@ -16,7 +16,7 @@
  * `messagePortChannel` ignores non-string frames, so they don't reach the RPC.
  */
 import type { TentacleConfig } from "@tentacle/config";
-import type { AttachmentSource } from "@tentacle/core";
+import type { ArtifactSink, AttachmentSource } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
 import { setGroupForwarder } from "@tentacle/exec";
 import type { McpServerStatus } from "@tentacle/mcp";
@@ -45,7 +45,7 @@ import { LaptopWorkloadShellBackend } from "./workload-shell-backend.ts";
  */
 export function workerAgentFactory(
   config: TentacleConfig,
-  ctx: { readonly attachments?: AttachmentSource },
+  ctx: { readonly attachments?: AttachmentSource; readonly artifacts?: ArtifactSink },
   options: { readonly skillScan?: SkillScan; readonly createProvider?: ProviderFactory } = {},
 ): WiredAgent {
   return buildAgent(
@@ -59,6 +59,8 @@ export function workerAgentFactory(
       // The session's store: this host runs the laptop's own model in this
       // process, so it holds an image's bytes (docs/feat/attachments-prompt.md D4).
       ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+      // The session's artifact store: the model may `present` (model-artifacts D4).
+      ...(ctx.artifacts ? { artifacts: ctx.artifacts } : {}),
       // A worker session may hop (docs/feat/session-hop.md D8/D9): this is one of
       // the two kinds that offers the model `move_session`, and the laptop's TUI
       // is right here to ask its owner about a proposal.

@@ -33,6 +33,7 @@ import {
   AGENT_STATUS_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
   MOVE_SESSION_TOOL_NAME,
+  PRESENT_TOOL_NAME,
   ToolRegistry,
   createAgentNotifyTool,
 } from "@tentacle/tools";
@@ -396,6 +397,9 @@ export function createSubagentRunner(deps: SubagentDeps): {
         tool.name === spawnToolName ||
         tool.name === CONTEXT_RESET_TOOL_NAME ||
         tool.name === MOVE_SESSION_TOOL_NAME ||
+        // `present` shows the USER an artifact: a child's output is its report
+        // to the parent, one origin per card (docs/feat/model-artifacts.md Q13).
+        tool.name === PRESENT_TOOL_NAME ||
         tool.name === AGENT_CONTROL_TOOL_NAME ||
         tool.name === AGENT_KILL_TOOL_NAME ||
         tool.name === AGENT_MESSAGE_TOOL_NAME ||
@@ -625,6 +629,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
         toolName === spawnToolName ||
         toolName === CONTEXT_RESET_TOOL_NAME ||
         toolName === MOVE_SESSION_TOOL_NAME ||
+        toolName === PRESENT_TOOL_NAME ||
         toolName === AGENT_CONTROL_TOOL_NAME ||
         toolName === AGENT_KILL_TOOL_NAME ||
         toolName === AGENT_MESSAGE_TOOL_NAME ||

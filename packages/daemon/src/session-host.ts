@@ -17,6 +17,7 @@ import {
 } from "@tentacle/agent";
 import type {
   AgentJobs,
+  ArtifactSink,
   AttachmentSource,
   ChatMessage,
   JobController,
@@ -50,6 +51,7 @@ import {
   type UpdateSettingsResult,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import { ARTIFACT_MEMORY_BYTES, ArtifactBudget, ArtifactStore } from "./artifact-store.ts";
 import { AttachmentStore, DAEMON_UPLOAD_BYTES, UploadBudget } from "./attachment-store.ts";
 import type { ModelLink } from "./connection.ts";
 import {
@@ -115,6 +117,13 @@ export interface AgentContext {
    * the bytes itself (`"client"`, docs/feat/attachments-prompt.md D2/D6).
    */
   readonly attachments?: AttachmentSource;
+  /**
+   * The session's artifact store (docs/feat/model-artifacts.md D4), on EVERY
+   * session-hosting daemon: a factory that offers `present` hands it to the
+   * agent (`AgentConfig.artifacts`). Session-owned like `attachments`, so a
+   * settings sync rebuilds on the same one.
+   */
+  readonly artifacts?: ArtifactSink;
   /**
    * A LIVE session's state the new agent must take over instead of building
    * its own (`session/update_settings`, docs/feat/session-settings-apply.md):
@@ -222,6 +231,12 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * `DAEMON_UPLOAD_BYTES`).
    */
   readonly uploadBytes?: number;
+  /**
+   * This daemon's in-memory artifact allowance, shared by every session's store
+   * (docs/feat/model-artifacts.md D4; default `ARTIFACT_MEMORY_BYTES`). Over
+   * it, the oldest versions are evicted (their metas stay listed).
+   */
+  readonly artifactBytes?: number;
   /**
    * What this daemon does with image prompts: where the bytes live, and the
    * capability `initialize` advertises (docs/feat/attachments-prompt.md D2).
@@ -463,6 +478,14 @@ export class SessionHost {
     return this.uploadBudget.used;
   }
 
+  /** ONE per daemon, like `uploadBudget`: every session's artifact store draws on it. */
+  private readonly artifactBudget: ArtifactBudget;
+
+  /** Bytes every session's artifact store holds together. */
+  get artifactBytesUsed(): number {
+    return this.artifactBudget.used;
+  }
+
   /**
    * What this daemon does with image prompts (`initialize` advertises it,
    * `prompt` enforces it). Unset = images off.
@@ -494,6 +517,7 @@ export class SessionHost {
   constructor(opts: SessionHostOptions) {
     this.opts = opts;
     this.uploadBudget = new UploadBudget(opts.uploadBytes ?? DAEMON_UPLOAD_BYTES);
+    this.artifactBudget = new ArtifactBudget(opts.artifactBytes ?? ARTIFACT_MEMORY_BYTES);
     this.identity = opts.identity;
     this.modelInfo = opts.modelInfo;
   }
@@ -520,9 +544,13 @@ export class SessionHost {
     seed?: readonly ChatMessage[],
     settings?: SessionSettings,
   ): Promise<SessionContextResult> {
+    // A throwaway store, so the probe offers the same tools (`present`) a real
+    // session would and counts them; nothing is ever presented into it.
+    const artifacts = new ArtifactStore(this.artifactBudget);
     const { agent, jobs, agentJobs, workloadShells } = this.opts.createAgent(this.opts.defaultCwd, {
       modelLink: () => link,
       ...(settings ? { settings } : {}),
+      artifacts,
     });
     // Read in the same stretch as the agent's tool list is built.
     const complete = this.opts.toolsReady?.() ?? true;
@@ -536,6 +564,7 @@ export class SessionHost {
       const usage = await session.contextUsage(signal);
       return complete ? usage : { used: usage.used, exact: false };
     } finally {
+      artifacts.dispose();
       jobs?.dispose();
       agentJobs?.dispose();
       // The probe's shells are not the session's (docs/feat/workload-shell.md D4).
@@ -1356,6 +1385,10 @@ export class SessionHost {
     // (docs/feat/attachments-durable.md D2); every other host: memory only.
     const disk = this.opts.persister?.blobs(id);
     const uploads = new AttachmentStore(this.uploadBudget, disk ? { disk } : {});
+    // The session's artifact store (docs/feat/model-artifacts.md D4), likewise
+    // created BEFORE the agent and owned by the session. Memory only here; the
+    // `serve` disk copy is a later slice (D5).
+    const artifacts = new ArtifactStore(this.artifactBudget);
     const {
       agent,
       permissions,
@@ -1369,6 +1402,7 @@ export class SessionHost {
       modelLink: () => bound.hosted?.modelLink() ?? null,
       ...(settings ? { settings } : {}),
       ...(this.opts.images?.source === "store" ? { attachments: uploads } : {}),
+      artifacts,
       // D8/D9: the client that CREATED this session can ask its owner about a
       // `move_session` proposal, so this factory may offer the tool. Unset →
       // never offered (a `run`/`attach` TUI has no `/move` feed).
@@ -1407,6 +1441,7 @@ export class SessionHost {
       log,
       agentJobs,
       uploads,
+      artifacts,
     );
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;
@@ -1449,6 +1484,8 @@ export class SessionHost {
       reuse,
       // A settings sync must not silently turn every image into a placeholder.
       ...(this.opts.images?.source === "store" ? { attachments: hosted.uploads } : {}),
+      // The session's artifacts are its own, not the agent's: the same store.
+      artifacts: hosted.artifacts,
       // A settings sync rebuilds the agent: the session's `hop` fact is its own
       // (the CREATING client's), so the rebuilt agent offers the tool exactly when
       // the first one did (D8/D9).

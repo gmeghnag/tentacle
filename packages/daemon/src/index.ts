@@ -5,6 +5,7 @@
  * in-memory channel in tests; `WsServer` binds it to a real WebSocket.
  */
 export * from "./mapping.ts";
+export * from "./artifact-store.ts";
 export * from "./attachment-store.ts";
 export * from "./device-store.ts";
 export * from "./push-store.ts";

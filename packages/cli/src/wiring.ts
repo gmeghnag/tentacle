@@ -48,6 +48,7 @@ import {
 } from "@tentacle/config";
 import {
   AgentJobs,
+  type ArtifactSink,
   type AttachmentSource,
   type JobController,
   type ModelProvider,
@@ -69,6 +70,7 @@ import {
   createSkillTool,
   createTaskTool,
   createWorkloadShellTool,
+  presentTool,
   subagentExtraTools,
 } from "@tentacle/tools";
 import { logDaemonError } from "./daemon-log.ts";
@@ -393,6 +395,13 @@ export interface BuildAgentOptions {
    */
   readonly attachments?: AttachmentSource;
   /**
+   * The session's artifact store (docs/feat/model-artifacts.md D2/D4): set ⇒
+   * the agent is offered `present`, writing into it. Every SESSION-hosting
+   * build passes `AgentContext.artifacts` (the worker, `serve`, both pod
+   * branches); a one-shot or a child agent never does, so they never offer it.
+   */
+  readonly artifacts?: ArtifactSink;
+  /**
    * Offer this agent `move_session` (docs/feat/session-hop.md D9): the model may
    * PROPOSE moving its session, and nothing more — the laptop asks the owner at
    * the turn's end. Set by the runtimes that own a hoppable session (the local
@@ -674,6 +683,11 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   if (options.moveSession === true && config.sessionHop.tool) {
     tools.register(createMoveSessionTool());
   }
+  // `present` (docs/feat/model-artifacts.md D2): only where a session store
+  // exists to receive it. A sub-agent's registry drops it by name (subagent.ts).
+  if (options.artifacts) {
+    tools.register(presentTool);
+  }
   // `workload_shell` (docs/feat/workload-shell.md D3): a stateful, non-interactive
   // `sh` reached through the LAPTOP's engine credentials. Offered only when the
   // caller passes a backend — the local worker and `serve`; never a pod daemon
@@ -701,6 +715,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     agentJobs,
     // The session's bytes, where this side holds them (docs/feat/attachments-prompt.md D4).
     ...(options.attachments ? { attachments: options.attachments } : {}),
+    ...(options.artifacts ? { artifacts: options.artifacts } : {}),
     resultTransforms,
     toolOutput,
     systemPrompt: config.systemPrompt,

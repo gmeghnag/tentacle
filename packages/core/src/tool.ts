@@ -68,6 +68,12 @@ export interface ArtifactSink {
 }
 
 /**
+ * The wire's artifact bounds, for `present`'s input schema: `@tentacle/tools`
+ * depends on core only, and must not keep a second copy of these numbers.
+ */
+export { ARTIFACT_ID_RE, ATTACHMENT_NAME_RE, MAX_ARTIFACT_BYTES } from "@tentacle/protocol";
+
+/**
  * A result too large for the context (`spillLargeOutput`), as data: what a
  * frontend shows instead of the model's banner, never parsed from `content`
  * (docs/feat/tui-spill-note.md).

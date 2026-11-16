@@ -19,6 +19,7 @@ import {
   type AgentJobExit,
   type AgentJobs,
   type AgentNotify,
+  type ArtifactSink,
   type AttachmentSource,
   type BackgroundJob,
   COUNT_TOKENS_CAP_MS,
@@ -561,6 +562,12 @@ export interface AgentConfig {
    * wires one in this task: until a producer exists, every ref is a placeholder.
    */
   readonly attachments?: AttachmentSource;
+  /**
+   * The session's artifact store (docs/feat/model-artifacts.md D4): handed to
+   * every tool call's context for `present`. A sub-agent is built without one,
+   * so it cannot present.
+   */
+  readonly artifacts?: ArtifactSink;
   /** The trust asker when a turn brings none (the in-process TUI: no RPC). */
   readonly askHooksTrust?: AskHooksTrust;
   /** Background-job registry; when set, the shell tools can launch jobs and
@@ -1173,6 +1180,7 @@ export class Agent {
       signal: signal ?? new AbortController().signal,
       env: this.config.env,
       ...(this.config.jobs ? { jobs: this.config.jobs } : {}),
+      ...(this.config.artifacts ? { artifacts: this.config.artifacts } : {}),
       history: messages,
     };
 

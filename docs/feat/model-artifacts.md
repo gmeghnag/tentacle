@@ -1116,6 +1116,143 @@ against the current tree and changed no production or test code:
   fragment. No second fragment was added. No schema changed, so `protocol.json`
   was left as is.
 
+### S3 — Store + `present` tool + daemon wiring: DONE
+
+*— claude-opus-5-5 (executor, S3), 2026-11-16*
+
+**Starting state, stated honestly.** This executor found S3 already built and
+uncommitted in the tree, with no Execution entry: a previous S3 executor stopped
+before writing one. That executor wrote the code and the tests. They were not
+written red-first in this session, so non-vacuity rests on the mutation table
+below: every target fails its test when the code is removed. This executor
+re-verified the work against the plan, strengthened T3.7 (below) and wrote this
+entry. No production code changed in this pass.
+
+**Load-bearing check, re-run first**
+(`.tentacle/tmp/model-artifacts/read-roundtrip.ts`: `RpcPeer` ↔ `RpcPeer` over
+`createChannelPair` wrapped in the Noise pair, 3 MiB in 256 KiB chunks):
+
+```
+chunks=12 sha-equal=true
+order=enqueue,chunk0,chunk1,chunk2,chunk3,chunk4,chunk5,chunk6,chunk7,chunk8,chunk9,chunk10,chunk11
+enqueue-before-last=true maxRpcFrame=349591 maxRawNoiseFrame=87383
+PASS
+```
+
+The plan asks for this check with a real `SessionHost` + `Connection`. The
+scratch script stubs the daemon side. The real-daemon version is the test T3.7
+(`packages/daemon/test/artifact-connection.test.ts`), which goes `present` →
+`artifact/list` → 12× `artifact/read` over the Noise pair and asserts the
+sha256, the RPC frame < 8 MiB and the raw Noise frame < 96 Ki chars (the relay
+cap).
+
+**As built (Files item 3, in dependency order)**
+
+- `core/src/tool.ts`: re-exports `ARTIFACT_ID_RE`, `ATTACHMENT_NAME_RE` and
+  `MAX_ARTIFACT_BYTES` from `@tentacle/protocol`, so `tools` keeps no second copy
+  of the bounds.
+- `daemon/src/artifact-store.ts` (new): `ArtifactBudget` (one per daemon,
+  oldest-first eviction across sessions), `ArtifactStore` (snapshot copy,
+  versioning, idempotent re-present, minted `a<N>` that skips model ids, every
+  meta checked against `ArtifactMetaSchema` before it is stored, `callId` clamped
+  to 256, 0 bytes refused, an invalid `source` dropped, `read` limited to this
+  store's list and to aligned offsets with no lock) and `artifactListResult`
+  (≤ `MAX_ARTIFACT_LIST`, the newest kept, `truncated`).
+- `daemon/src/session-host.ts`: `artifactBudget` (`opts.artifactBytes ??
+  ARTIFACT_MEMORY_BYTES`), a store per session built before the agent and passed
+  as `AgentContext.artifacts`, the same store on a settings sync, and
+  `artifactBytesUsed`.
+- `hosted-session.ts`: `readonly artifacts`, and `close()` disposes it.
+- `connection.ts`: the `artifact/list` and `artifact/read` cases through
+  `this.lookup` (P8).
+- `mapping.ts`: `details.kind === "artifact"` → `tool_call_update.artifact`.
+- `daemon/src/index.ts`: exports the store.
+- `agent/src/agent.ts`: `AgentConfig.artifacts` → `ToolContext.artifacts`.
+- `agent/src/subagent.ts`: `present` is filtered out of the child registry and
+  out of the type check.
+- `tools/src/present.ts` (new) and `tools/src/index.ts`.
+- `cli/src/wiring.ts`: `BuildAgentOptions.artifacts` registers `present`.
+- `worker.ts` and `serve.ts` (`createServeAgent`, `tunnelledAgent`, both
+  `podSessionHost` branches): forward `ctx.artifacts`.
+
+**Drift from the Implementation (and why)**
+
+1. The child filter lives in `agent/src/subagent.ts`, where the existing
+   `context_reset`/`move_session` filters are. Files item 3 says `wiring.ts`.
+   That was the wrong file, and `subagent.ts` is the one place the registry is
+   copied (P3).
+2. Files item 3 did not list `worker.ts`, `serve.ts` or `daemon/index.ts`. The
+   factories must forward `ctx.artifacts`, or `present` is never offered.
+   `cli/test/artifact-hosts.test.ts` pins each factory (M16 and M17).
+3. The context-usage probe (`SessionHost` `contextUsage`) builds a throwaway
+   store, so its tool count matches a real session's. It disposes the store in
+   `finally`.
+4. The `ArtifactStore` constructor has no `disk` or `sessionMaxBytes` yet. Those
+   belong to S4 (D5), and S3 is memory-only on every host, `serve` included.
+5. When a `ToolContext` has no `toolCallId`, the meta's `callId` falls back to
+   `"present"`. The agent always sets it, so this only applies to direct calls.
+6. **T3.7 was strengthened.** The inherited test sent the enqueue between
+   chunks 2 and 3 and checked only that it was answered before chunk 11. That is
+   a weak correlate (§2). The new mutation M19 serializes `RpcPeer`'s inbound
+   requests, and that test still passed (`2 pass, 0 fail`). The test now holds
+   every read from chunk 3 on until the enqueue is answered, and sends the
+   enqueue after chunk 3. A serializing daemon deadlocks, and a 2 s race catches
+   it. M19 now gives `1 pass, 1 fail` (`artifact-connection.test.ts`, the race
+   assertion).
+
+**Tests (T3.1–T3.7):** `daemon/test/artifact-store.test.ts` (T3.1, T3.3,
+T3.4, T3.5, list cap), `tools/test/present.test.ts` (T3.1 via the tool; T3.2
+too large / outside / secret, content > 2 MiB, both/neither, title/id schema,
+empty file, store full, env without `readBytes`; T3.6 no sink),
+`agent/test/subagent.test.ts` (T3.6 registry), `agent/test/agent-artifacts.test.ts`,
+`cli/test/artifact-hosts.test.ts`, and `daemon/test/artifact-connection.test.ts`
+(T3.7, the live `artifact` field, the P8 cross-connection refusal, the `unknown`
+sha, the budget returned on close, the same store across a settings sync).
+Narrow run: `77 pass, 0 fail` (6 files).
+
+**Mutations** (`.tentacle/tmp/model-artifacts/s3-mut/mut.ts` and
+`mut-serial.ts`). Each was applied, its tests run, then restored, and the
+restore was asserted byte-equal. `git diff --stat` was the same before and after.
+
+```
+M1 read: no offset alignment check               13 pass, 1 fail
+M2 budget evicts NEWEST not oldest               13 pass, 1 fail
+M3 no idempotent re-present                      12 pass, 2 fail
+M4 no snapshot copy                              13 pass, 1 fail
+M5 read: unknown sha not refused                 18 pass, 2 fail
+M6 no callId clamp                               13 pass, 1 fail
+M7 no wire-schema check of the meta              13 pass, 1 fail
+M8 mapping drops the artifact field              5 pass, 1 fail
+M9 close does not dispose artifacts              5 pass, 1 fail
+M10 settings sync builds on a NEW store          5 pass, 1 fail
+M11 agent: ToolContext without artifacts         2 pass, 6 fail
+M12 sub-agent registry keeps present             37 pass, 1 fail
+M13 present: no sink check                       10 pass, 1 fail
+M14 present: path read with the text readFile    9 pass, 2 fail
+M15 present: detail spread (discriminant clobbered) 15 pass, 2 fail
+M16 wiring: worker drops ctx.artifacts           4 pass, 2 fail
+M17 wiring: pod proxy drops artifacts            5 pass, 1 fail
+M18 wiring: present offered without a store      5 pass, 1 fail
+M19 RpcPeer serializes inbound requests (T3.7)   before: 2 pass, 0 fail · after the fix: 1 pass, 1 fail
+```
+
+**Schema / version / changelog:** no protocol schema changed in S3, so
+`protocol.json` was not regenerated and no `protocol.d/` note was written. The
+one fragment is still `changelog.d/model-artifacts.added.md` (S1), which already
+describes `present`. No second fragment was added.
+
+**Gate** (worktree root):
+
+```
+$ bunx tsc --noEmit   → exit 0   (bun run typecheck incl. mobile + relay → exit 0)
+$ bun run lint        → Checked 1700 files in 522ms. No fixes applied. (0/0, the §6 baseline)
+$ bun test            → 12236 pass, 5 skip, 0 fail (12241 tests, 883 files, 445 s)
+```
+
+The 5 skips are the same opt-in ones as in S1/S2. None was added.
+
+**Unverified:** none for this slice. The `serve` disk copy (D5) is S4's.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-16* (fresh-context reviewer; a different model family from the S1 executor, deepseek-v4-pro)
