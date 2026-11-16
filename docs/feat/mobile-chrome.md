@@ -3519,3 +3519,68 @@ is refused" was added and kills it.
   unverified until a device run.
 - **The `covered` OR in `SessionScreen`** is plain flag-joining, not tested on
   its own; `visible`'s use of it is (M8).
+
+## Review (slice S10 — Floating Activity button)
+
+*— claude-opus-5-5, 2026-11-16 · fresh context, slice S10 only (`git diff main...HEAD`)*
+
+**Verdict: APPROVE** (no HIGH/MEDIUM finding).
+
+**Same-model note:** the S10 executor signed as claude-opus-5-5 too — a fresh
+context only, so shared blind spots can survive. Blast is `contained` (default-off
+setting, no protocol/daemon/persistence-format change), so the AGENTS §10 tier
+does not require a different model.
+
+**Gate (re-run here):** touched tests (`floating-button`, `activity-settings-store`,
+`band-screens`, `pairing-guards`) **93 pass · 0 fail**; `bun run lint` clean
+(1740 files); `bun run typecheck` clean (root + mobile + relay). Full `bun test`
+not re-run (Execution: 12643 pass · 5 opt-in skips).
+
+**§7 invariants touched:** none of protocol / persistence / broker / RPC — the only
+new on-disk record is phone-local Keychain (`tentacle.activity-button`), versioned,
+unknown `v` refused and never written over (store `preserved` + holder `writable`).
+"Logic in pure modules": every rule (snap, place, isTap, visible, motion, a11y,
+headerPill, store fail-safes) is in `floating-button.ts` / `activity-settings-store.ts`;
+`FloatingActivity.tsx` only plumbs gestures into them. Holds.
+
+**Mutation (reviewer's own, beyond the executor's M1–M18; script
+`.tentacle/tmp/mobile-chrome/review-s10/mut.ts`, tree byte-identical after, `git
+status` clean):** R1 `visible` ignores `fits` · R2 default edge left · R3 position
+`yFraction ≤ 2` accepted · R4 write drops `v` · R5 holder skips the writable gate ·
+R6 pill always drawn in floating · R7 missing record → not writable — **all 7 KILLED**.
+
+**Attacks tried (none reaches MEDIUM):**
+1. *Write over a newer record before `load()` resolves* — holder `writable` starts
+   `true` and the store's `preserved` starts `false`, so a `set` racing ahead of the
+   first Keychain read would overwrite an unknown-`v` record. Not reachable in
+   practice: the floating button cannot exist before load (mode defaults to
+   "header"), and a Settings tap would have to beat one Keychain read. LOW; a
+   cheap hardening is to start `writable` false until `load()` settles.
+2. *Button unmounted mid-drag* (`shown` → false, e.g. the permission sheet arrives
+   while a finger holds it; fade 150 ms → `rendered` false → `null`): if RN never
+   delivers release/terminate to the deleted view, `moving.current` stays `true`
+   and the re-placement effect (`FloatingActivity.tsx:80-84`) is skipped until the
+   next grant, so the button could reappear where the finger left it. Fabric's
+   deletion path does not visibly clear the responder; unverified without a device.
+   Narrow trigger, self-heals on the next touch → LOW. Verify on device or reset
+   `moving` when `shown` goes false.
+3. *Second grab before the drop is published* — `onPanResponderGrant` starts from
+   `place(props.position)`, which updates only after the Keychain write resolves;
+   a re-grab inside that window jumps the button to the old spot. LOW (ms window).
+4. *Preserved record + floating drop* — unreachable: a non-writable read is always
+   the "header" defaults and the Settings rows are disabled.
+5. *F20 band / keyboard* — the list host is inside the `KeyboardAvoidingView`;
+   `fits` false hides the button and (outside VoiceOver) the pill too, so there is
+   no Activity entry while the keyboard is up on a short band — exactly what the
+   plan's F20 accepts.
+
+**Not proven (stated by Execution, confirmed):** flow 28 not run (iOS build
+blocker shared with 26/27); F21 back-swipe not drivable; no render test for
+`FloatingActivity.tsx`. Flow 28's selectors are the existing testIDs plus the new
+`floating-activity` / `activity-button-*`.
+
+**Executor behaviour:** in scope (only the plan's mount points touched), drifts
+listed and reasoned (bounds = band size, `covered` instead of `voiceOver` in
+`visible`, F22 holder keeps a failed pick), honest about the unrun flow and the
+two survivors it found in its first mutation pass (equivalent mutant removed, real
+gap closed with a test).
