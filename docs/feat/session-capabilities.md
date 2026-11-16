@@ -1762,3 +1762,170 @@ suite I read.
 uncommitted implementation. It showed red by mutation rather than claiming
 red on unimplemented code, and it listed its drift (no mouse toggle, no
 separate footer).
+
+## Execution — S5
+
+*— claude-opus-5-5, 2026-11-16*
+
+Slice S5 only (the iPhone Session info). No other slice was touched. It is
+built on the owner's delegated choices **P1** (a trailing switch on every row),
+**Q4** ("changed on <device>") and **Q5** (`[–]` locked). The wording is taken
+from the P1 mockup frames (`mockups/index.html` `p1Info`).
+
+### Load-bearing check (re-run first)
+
+The question: does the phone's session handle already carry the switch API
+through the ONE client stack, so that S5 adds no frame and no second path?
+**Yes, it holds.**
+- The Session info port's handle is the screen's own `RemoteSession`, cast
+  (`apps/mobile/App.tsx` `infoWiring`).
+- `RemoteSession` has `capabilities()`, `onCapabilities(listener)` (the `by`
+  argument is set only on a change) and `setCapability(kind, name, enabled)`.
+  A `MethodNotFound` clears the state
+  (`packages/client/src/remote-session.ts:357-398`).
+- The open's snapshot reaches it (`capabilitiesSnapshot`, `:413`).
+- `apps/mobile/node_modules/@tentacle/client` is a symlink to
+  `packages/client`, so the phone runs this same code.
+- The client maps the `capabilities` update to `null` for the transcript
+  (`packages/client/src/mapping.ts:355`), so the phone shows no `unsupported`
+  notice for it.
+- `locked` needs no wire field. This is the S4 finding, re-read: `model` and
+  `disabled` are independent, and `!model && !modelAfterReset` means the model
+  can never be offered the skill.
+
+### As built (protocol → client unchanged; mobile only)
+
+- **Pure model** `apps/mobile/src/session-info.ts`:
+  - `CapabilitySwitches` (`:90`) carries the phase, the daemon's state,
+    `changedBy` and a refused set.
+  - `InfoRow.switch`, `InfoSection.switchNote`, and an optional
+    `InfoFacts.capabilities` (absent → today's rows, unchanged).
+  - `switchPhase` (`:338`) gives `not-open`, then `offline`, then
+    `unsupported` (no state), then `on`.
+  - `capabilityChanges` (`:392`): a report without `by` is a snapshot and never
+    news. A changed item matching one of my pending ops is my own echo
+    (consumed, and its older note cleared). Anything else is another device's.
+  - `settledOp` (`:422`), `rowSwitch` (`:440`) and `switchNote` (`:460`).
+  - MCP rows: an off row reads `Off · hidden from the model`, dimmed. The
+    server's own error is kept after ` — `.
+  - Skill rows: an off row reads `Off · you can still run /name` (or
+    `Off · hidden from the model` for a model-only skill). A locked skill
+    (`:773`) is a ghost switch, off and dim, and keeps its description (no
+    words, Q5). The old `value: "off"` word stays only when no switches are
+    offered.
+  - Another device's change appends ` · changed on <by>`, through
+    `sanitizeDisplay`. An empty `by` reads `another device`.
+  - "Off hides it from the model in this session, from the next reply." is
+    said once: under the MCP rows, or under Skills when there are no servers.
+  - Old daemon: `The tentacle on <computer> can't turn servers|skills off —
+    update it.` Not open: `Open the session to turn servers on or off`.
+    Offline: no note (the banner already says it).
+- **Controller** `apps/mobile/src/session-info-controller.ts`:
+  - `InfoCapabilities` port (`:55`); `facts()` builds the switches from the
+    LIVE handle (`:235`).
+  - `followCaps` / `stopCaps` (`:245`, `:269`) follow `onChange` only while the
+    sheet is open. `close()` unsubscribes and forgets the notes and the error.
+  - `setCapability` (`:453`) is a no-op unless the phase is `on`. It records a
+    pending op, sends, and on a refusal shows the error under its section
+    (except `MethodNotFound`, which the "update it" note covers). In `finally`
+    it settles the pending op. It is not optimistic: the row flips on the echo.
+- **Screen**: `SessionScreenController.setCapability` is a passthrough plus
+  emit (`session-screen-controller.ts:883`). `SessionScreen.tsx` wires
+  `onSwitch`.
+- **Sheet** `SessionInfoSheet.tsx` (render only):
+  - an RN `Switch` after the row's value/chip (`:175`), `disabled` when not
+    interactive;
+  - testID `session-info-<section>-<title>-switch`;
+  - the section's `switchNote` as a footnote.
+- **App port** `App.tsx:433`: `capabilities: { current, onChange, set }` over
+  the same `RemoteSession`.
+- **e2e**:
+  - flow `25-session-info.yaml` taps `session-info-mcp-demo-switch`;
+  - `25-session-capabilities.js` reads the DAEMON's switches (`EXPECT=off`),
+    takes a light/dark shot, taps again, and checks `EXPECT=on` (so a re-run
+    starts clean);
+  - new harness hook `session-capabilities` (`e2e/hooks.ts:294,414`) over
+    `capabilitiesOf` (`e2e/seed.ts:472`: attach, open, read the snapshot,
+    detach), wired in `e2e/run.ts`.
+- **Changelog**: the one fragment `changelog.d/session-capabilities.added.md`
+  gains the iPhone sentence.
+
+### Drift from the Implementation (and why)
+
+- **`untrustedText` → `sanitizeDisplay`.** The plan names `untrustedText`,
+  which lives in `packages/cli`, and the app does not depend on it. The
+  sheet's own `sanitizeDisplay` follows the same rule (bidi and zero-width out,
+  one line, bounded). Every daemon string in the sheet already passes through
+  it.
+- **The `by`-less report is never news.** A snapshot and an update without
+  `by` look the same at the `onCapabilities` listener. As in S4, neither shows
+  "changed on". An update from a daemon that knew no setter name therefore
+  shows no note. The row's state is still correct.
+- **No "N of M on" in the section headers.** The P1 frame shows a count in the
+  header's right slot. `SectionHeader` has no such slot, and the existing
+  footer ("1 of 4 connected") was kept. This is a cosmetic gap, left as debt.
+- **e2e not run here.** It needs the iOS simulator and Maestro. The wiring is
+  pinned by `test/e2e-session-capabilities.test.ts` (served hook, `run.ts`
+  wiring, the order tap→off→tap→on→close, the testID equals the sheet's
+  template, and the script throws on either wrong state). To verify:
+  `bun apps/mobile/e2e/run.ts 25-session-info` on a Mac with the simulator.
+- **`App.tsx` port wiring is not unit-tested.** `App.tsx` is not importable
+  under `bun test` (RN). It is a three-line adapter, type-checked against both
+  `RemoteSession` and `InfoCapabilities`. The e2e step is its test.
+
+### Red before green (§9) — honest note
+
+- **Controller** (11 tests) and **screen passthrough** (1 test) were written
+  BEFORE the code and shown red: 11 fail, then 1 fail (`setCapability` absent,
+  and rows with no switch). Then they went green.
+- **Pure model:** I wrote the code first, so its red is shown by mutation
+  (below), not by a literal red run.
+
+### Mutation checks (§9)
+
+Run with `.tentacle/tmp/session-capabilities/s5-mut.ts`. Each mutation is a
+literal replace that is checked for uniqueness and restored in `finally`. It
+runs the 4 S5 test files. All 13 were killed:
+
+```
+M1-own-echo-news: 3 fail :: a tap sends ONE set; the row flips only on the daemon's echo (not optimistic) | my own later change clears another device's note on that row | my own echo is consumed; …
+M2-snapshot-news: 1 fail :: a snapshot (no by) is never news, and leaves the pending ops alone
+M3-never-unsupported: 4 fail :: an older daemon (MethodNotFound) turns the switches into ghosts, with no error text (F7) | an open that reported no switches is `unsupported` from the start | a handle with no switch surface reads as an older daemon
+M4-never-locked: 1 fail :: a skill the model can never be offered is a locked ghost switch, no words (Q5)
+M5-locked-flippable: 1 fail :: a skill the model can never be offered is a locked ghost switch, no words (Q5)
+M6-no-phase-guard: 2 fail :: not attached: the switches are ghosts and a tap sends nothing (F4) | offline: a tap sends nothing (F1)
+M7-close-keeps-feed: 1 fail :: close() stops following the switches and forgets the notes (only while open)
+M8-unsupported-as-error: 1 fail :: an older daemon (MethodNotFound) turns the switches into ghosts, with no error text (F7)
+M9-pending-kept: 1 fail :: a refused set leaves nothing pending: the same change from another device is news
+M10-optimistic: 2 fail :: a tap sends ONE set; the row flips only on the daemon's echo (not optimistic) | a refused set is shown under its section, and cleared by the next attempt
+M11-screen-noop: 1 fail :: a server's switch reaches the session's set, and its echo repaints the row (S5)
+M12-flow-no-on-check: 1 fail :: the flow taps the switch, checks the daemon OFF, taps again, checks it ON
+M13-note-not-once: 1 fail :: what Off does is said once: under the servers, or under the skills when none
+```
+
+### Failure modes covered by S5
+
+- **F1 (offline):** ghost switches frozen on the last state; a tap sends
+  nothing.
+- **F4 (two clients) / Q4:** the own echo is consumed; another device's change
+  shows "changed on <by>", sanitized; a pending op for the OPPOSITE value is
+  not an echo.
+- **F5 (re-attach snapshot):** applied, never news.
+- **F7 (older daemon):** no state at open, or `MethodNotFound` on a set →
+  ghost switches plus the "update it" note, with no error text.
+- **Not open (F4 of mobile-session-info):** ghosts, a note, and no send.
+- **Refusal:** shown under its own section and cleared on the next attempt.
+  Nothing is left pending.
+- **F10:** a name with `__` is sent RAW (the row title is sanitized
+  separately).
+
+### Gate
+
+- `bun run typecheck` (`tsc --noEmit` plus mobile and relay) is clean.
+- `bun run lint`: `Checked 1690 files … No fixes applied.` (the 0/0 baseline).
+- `bun test`: **12206 pass, 5 skip, 0 fail** (12211 tests, 877 files,
+  444.56s). The 5 skips are the opt-in guards.
+- No schema changed, so `protocol.json` was not regenerated and there is no
+  `protocol.d/` note.
+
+**S5: DONE** (with the debt above: no header count, e2e not run here).
