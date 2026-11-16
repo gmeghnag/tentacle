@@ -1019,3 +1019,48 @@ orchestrator is committing only review text. P2 needs an executor run (Opus, per
 §Slices) before another review round is useful.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context)
+
+### Round 4
+
+**Verdict: REQUEST-CHANGES.** Reviewed `git diff HEAD~1` (`093a877a`, P2 as
+implemented; executed by DeepSeek although §Slices assigns P2 to Opus).
+
+1. **HIGH — a decompression bomb runs the whole daemon out of memory.**
+   `packages/tools/src/pdf/extract.ts:37` spawns the worker with no memory bound:
+   `smol` was dropped (Execution drift 3), and nothing replaced it. A Bun Worker
+   shares the daemon's process, so §Design D2's claim ("a decompression bomb costs one
+   worker thread for ≤ 20 s") is false. Repro `.tentacle/tmp/pdf-read/r4/bomb.ts`:
+   one page whose FlateDecode content stream inflates to N MiB of spaces, run
+   through `createPdfExtractor()` from source:
+   ```
+   inflate=64MiB  pdf=64KiB  ms=230 rssBase=89MB  peak=261MB  ok:true
+   inflate=512MiB pdf=510KiB ms=812 rssBase=535MB peak=1613MB ok:true
+   ```
+   That is about +2 bytes of RSS per inflated byte, at about 1.3 GB/s. A 5 MiB PDF
+   (far under `MAX_PDF_BYTES`) reaches about 10 GB well inside the 20 s timeout, and two
+   concurrent slots double it. The OS kills the daemon and every session it hosts
+   (a model-chosen `fs_read` is enough). P2 needs a real memory kill switch with a
+   regression test that uses this bomb shape. Two options: a process-RSS or worker-heap
+   watchdog that `terminate()`s over a budget, or a child process with an OS limit.
+2. **MEDIUM — the "worker cannot load" failure mode is untested.**
+   `extract.ts:146` maps a pre-`ready` error to `unavailable`. My mutation to
+   `corrupt` leaves `pdf-extract.test.ts` at 24 pass, 0 fail. That is the plan's
+   §Failure modes row for a bad build, and the model would be told "the PDF parser
+   crashed". The behaviour itself is right (`r4/missing.ts` →
+   `unavailable … ModuleNotFound`, 1 ms). It needs a test with a missing worker URL.
+3. **Unverified (load-bearing):** the compiled-binary path is still unproven. I built
+   a probe binary with the exact P2 layout (a temporary entry in `packages/cli/src`
+   + `worker.ts` + `pdf-worker.ts`, `Bun.build --compile`, success). The entry was
+   deleted afterwards and `git status` was clean. Running the binary needed an
+   approval this session did not have. Run
+   `.tentacle/tmp/pdf-read/r4/probe-bin .tentacle/tmp/pdf-read/r4/hello.pdf` before
+   P2 is called done.
+
+**Held:** the `ready` handshake, the security options, the semaphore with waiter
+cleanup, the abort and timeout paths, and the console and fetch prelude. My extra
+mutation on the prelude (drop `console.warn = quiet`) → 1 fail. **Gate:**
+`pdf-extract` + `pdf-worker-entry` + `pdf-text` 72 pass, 0 fail; `bun run lint`
+1734 files, clean; `bun run typecheck` exit 0. After both mutations were restored,
+`git status --porcelain` was empty.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; different family from the executor, DeepSeek)
