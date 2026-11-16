@@ -1746,3 +1746,4 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
 - [ ] **Mascot follow-ups**: dark-mode README variant (`<picture>`), small-size
       icon (16–32 px). See
       `docs/feat/mascot.md` (Review).
+- [ ] **feat/token-usage-log** (owner 2026-11-16) — record per-round token usage (prompt/completion/cached, model) in the session log or a run summary, to see where DeepSeek runs waste input tokens (~8B so far). Type: feat · Size: S · Blast: contained.
