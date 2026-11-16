@@ -347,7 +347,7 @@ epoch ms from the host's injected `now()` (`session-host.ts:1327`).
 | Event | Schedules |
 |---|---|
 | compaction / `context_reset` | kept (outside the history; the prompt is self-sufficient by contract) |
-| `/clear` (in place) | **dropped**, with a notice (Owner Q7): they were the old chat's intentions, just as `/clear` drops the session approvals (P10) |
+| `/clear` (in place) | **kept** (Owner Q7 answer, "tienili"): like background jobs, they stay with the session that goes on; no notice. (The original "drop" rule was overruled; updated by S3's executor.) |
 | `/clear` fork (the kept old chat) | none: the fork is built from messages only |
 | settings sync (agent rebuilt) | kept (table on `HostedSession`; the link is passed to the new factory call, P1) |
 | session hop (`move_session`) | not carried in v1; the hop's summary notice says `N scheduled wakes dropped` |
@@ -496,7 +496,7 @@ The session list row shows `◷ 2` beside the existing jobs count
 | pod daemon claims schedules (`schedules` frame) | dropped by the laptop (`daemonWakes` off) | — |
 | forged `session/prompt{turnId:"wake-…"}` | refused already (`connection.ts:1037`) | — |
 | settings sync during an armed timer | table + timer on `HostedSession`, untouched | — |
-| `/clear` | dropped + notice (Q7) | — |
+| `/clear` | kept (Q7 answer); the archived fork carries none | only the live session owns the table: no duplicate firing |
 | worker quit | schedules end; M6 warns | — |
 
 ### Tests (red first, §9; existing fakes only)
@@ -516,7 +516,7 @@ The session list row shows `◷ 2` beside the existing jobs count
   - T-D3 advance-before-fire: snapshot the persisted record at `turn_start` → `nextAt` already moved.
   - T-D4 reload: persister rig → restart past two slots → exactly one catch-up fire; v3 stamped only when non-empty; v1/v2 files still load.
   - T-D5 held ask with nobody attached → busy, no further fire; attach + resolve → completes.
-  - T-D6 `/clear` drops + notice; compaction keeps; settings sync keeps (mutation: table on the agent → red).
+  - T-D6 `/clear` KEEPS the table (Q7 answer) and the fork carries none; compaction keeps; settings sync keeps (mutation: table on the agent → red).
   - T-D7 archive freezes, `reopen` re-arms; close clears the timer (mutation: don't clear → a fire after close → red).
   - T-D8 liveness: an armed schedule keeps a detached session out of `reapExpired` (if Q5 = yes).
   - T-D9 `schedule_delete` over the wire; `schedules` update after each change; synchronous handler.
@@ -834,6 +834,182 @@ failure stop), put the table on the snapshot's first page, answer
 `session/schedule_delete` synchronously, stamp `SessionListEntry.schedules`, and
 pass `schedule: {id, spec}` on a fired `turn_start` — the wire is ready for all
 five.
+
+### S3 — daemon (table, timer, fire, persistence)
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Scope: S3 only** (S1/S2 done above; S4–S6 untouched: no tool, no wiring, no
+config, no UI).
+
+**Load-bearing check re-run first** (this branch @ `19fc2cd4`), before any edit:
+`HostedSession.prompt` (`hosted-session.ts:2307` then) is synchronous up to the
+ack and takes the slot through `assertIdle()` (`:2730`); the job-exit wake
+already calls it with no request (`maybeWake`, `:2942-2967`);
+`WAKE_TURN_PREFIX`/`isWakeTurnId` at `protocol/src/session.ts:311-315`; a client
+`wake-` id refused at `connection.ts:1048`; `finishTurn` (`:2866`) persists then
+`kickWake`s outside the steering window; `persister.schedule` captures
+synchronously (`session-persister.ts:152-169`, `write` → `capture` before any
+await). **All hold — not blocked.** **Repro (feature missing):** `rg
+"scheduleLink|scheduleTable|schedules" packages/daemon/src` → one hit only
+(S2's `watch-queue.ts:75` `DROPPABLE`); the new test file's first run: **0 pass /
+4 fail**, `TypeError: hosted().scheduleLink is not a function`.
+
+**Plan fix before coding (owner Q7 = keep).** D7's `/clear` row, the `/clear`
+failure-mode row and T-D6 said "drop + notice"; updated in place to "kept; the
+archived fork carries none".
+
+**As built (dependency order).**
+1. `packages/core/src/schedule.ts:440` — `ScheduleLink` (type only): `now`,
+   `create`, `list`, `delete`, all synchronous. The seam S4's tools call.
+2. `packages/daemon/src/schedules-view.ts` (new, pure): `scheduleRows` (one-line
+   labels cut to `SCHEDULE_LABEL_MAX`; `expiresAt` only for `every`),
+   `sameScheduleRows`, `scheduleSeqSeed`, `scheduleEndOf`, `parseScheduleRecords`.
+3. `packages/daemon/src/hosted-session.ts` — `SessionSchedules` option (`:423`;
+   present = on; `onAudit`, injectable `setTimeout`/`clearTimeout`) as a new last
+   constructor parameter; table/seq/timer/`lastSchedules`/`firedTurns` fields;
+   `Cut.schedules`; restored table + seeded counter + `armSchedules()` in the
+   constructor. `scheduleLink()` (`:3095`, `null` without the option or once
+   closed); `deleteSchedule` (`:3138`, the user's method, synchronous, a refusal
+   carries `reason`); `checkSchedules` (`:3167`, the timer's body: the gate is
+   `wakeDue({pending:true},{enabled:true, idle:!running, blocked:closed})` — no
+   `lastEndBad` — then `scheduleStep(…, { idle })`); `fireSchedule` (`:3197`:
+   commit the advanced table → `persist()` → publish → `recordCut(null)` +
+   `wakeUnflushed` like `maybeWake` → `prompt(wake-<uuid>, [prefixed text], …,
+   {id, spec})`); `settleFired` (`:3232`, from `finishTurn` `:2995`, state first);
+   `armSchedules`/`disarmSchedules`/`kickSchedules` (ONE timer, ≤ 60 s, 60 s
+   while busy, 0 after a turn's or compaction's end `:3023`, `:3536`);
+   `publishSchedules` (`:3286`, full list on change, cut moves when idle). `prompt()`
+   gained an optional 6th parameter `schedule` → `turn_start.schedule` (`:2446`);
+   `Connection` never passes it, so no client can claim a fire. `close()` disarms
+   (`:3709`); the table stays (archive). `persistedState` writes `schedules` only
+   when non-empty; `summary` gives the count where the host schedules (`:1767`);
+   `liveness().busy` counts an armed table (owner Q5, `:1784`); the snapshot's
+   first page carries `schedules` where the host schedules (`:1915`).
+4. `packages/daemon/src/persisted-session.ts:100,148` — `schedules?` on
+   `DaemonSessionState` and `DaemonSessionRecord`; `session-persister.ts:546`
+   copies it (non-empty only).
+5. `packages/daemon/src/daemon-state-file.ts` — `DAEMON_STATE_VERSION_SCHEDULES =
+   3` (`:70`), `DAEMON_STATE_VERSIONS = [1, 2, 3]`; `sidecarOf` stamps 3 exactly
+   when the table is non-empty (`:130`), else the old 1/2 rule; `parseSidecar`
+   refuses `schedules` in a v1/v2 file (`:387`) and a malformed table; `rebuild`
+   carries it.
+6. `packages/daemon/src/session-host.ts` — `SessionHostOptions.schedules` (`:355`);
+   `AgentContext.schedules` (`:141`), passed lazily in `build` (`:1397`) AND
+   `updateSettings` (`:1481`) only when the option is set; `build` hands the option
+   to the session (`:1432`); `restore` hands `record.schedules` back for a restart
+   and a reopen alike (`:1235`).
+7. `packages/daemon/src/connection.ts:440` — `session/schedule_delete` →
+   `deleteSchedule` (synchronous). `session-list.ts:44,98` — the count.
+
+**Drift from Implementation (each deliberate):**
+1. **`SessionHostOptions.schedules` carries no limits.** The plan says "(config
+   limits)", but S1's core rules use constants (`SCHEDULE_MAX_JOBS`, …), and
+   `schedules.*` config is S4's slice. The option is `{ onAudit?, setTimeout?,
+   clearTimeout? }`. **Carried to S4:** wiring `schedules.*` config needs the core
+   functions parameterised (or the config rejected outside the defaults).
+2. **The timer is injectable** (`SessionSchedules.setTimeout`/`clearTimeout`, the
+   `startReaper` precedent). The default is the global, `unref`'d, so a schedule
+   never keeps a worker process alive on its own. This is what lets the tests pin
+   "busy → 60 s, never a 0 ms spin" and "close clears the timer" without sleeping.
+3. **New pure module `schedules-view.ts`** (not in the file list): the row
+   projection, the counter seed, the sidecar validation and the end mapping are
+   branching logic, so they live outside `HostedSession` (AGENTS §7).
+4. **The `sc-N` counter is not persisted.** It is seeded from the table and every
+   `sc-N` the history mentions (a fired prompt, a create's result text), so a
+   reload never hands out an id the model has seen. No extra sidecar field.
+   Over-counting only skips numbers.
+5. **No "notice" frame for an expiry or a failure stop.** D3 says "with a
+   one-line notice". S2 added no notice update type, and S3 adds no protocol. The
+   daemon publishes the `schedules` list (the row disappears) and writes an audit
+   line (`schedule: sc-1 expired S` / `schedule: sc-1 stopped after failures S`).
+   **Carried to S5:** derive the user-facing notice from the list diff, or ask for
+   a display-class notice type. **Reviewer: confirm this is acceptable.**
+6. **`SessionListEntry.schedules` is live-only.** An archived entry omits it: its
+   wakes are frozen and do not fire, and the archived index reads only the
+   sidecar header line.
+7. **`ScheduleLink` lives in core** (`schedule.ts`): the tools package cannot
+   import the daemon, and the plan did not say where the type goes.
+8. **Two existing tests used `schemaVersion: 3` as "an unknown version"**
+   (`daemon/test/persistence.test.ts:1337`, `cli/test/serve-persistence.test.ts:426,447`).
+   3 is now valid, so they use 4 and the new message (`is not 1 or 2 or 3`).
+9. **T-D10 covers the daemon half only:** a host without the option gives no
+   link, no `AgentContext.schedules`, no snapshot list, no count, and delete is
+   refused. `podSessionHost` passes no option (the option is new), and the
+   "tools absent" half belongs to S4's wiring test.
+10. **Not S3, carried:** the `move_session` hop's "N scheduled wakes dropped"
+    notice (D7), the worker passing the option + `daemonWakes` (S4).
+
+**Tests** — `packages/daemon/test/schedules.test.ts` (new, 16): real `SessionHost`
++ `Connection`, scripted model, injected clock and timer, no real sleeps.
+T-D1 fire; T-D1b `turn_start.schedule` + every list frame; T-D2 busy (no fire, no
+lost slot, 60 s poll, one catch-up fire at the end); T-D3 advance-before-fire
+(every capture naming the fired turn has the slot moved; a `SessionPersister`
+subclass records the captures); T-D4 restart past two slots → one fire, v1 → v3 →
+v1 on disk, no id reuse; T-D5 held ask → busy, no second fire, an answer
+completes, the next fire follows; T-D6a `/clear` keeps + the fork carries none;
+T-D6b compaction keeps + the rebuilt agent gets the same link; T-D7 close
+disarms, archive keeps the table frozen, `reopen` re-arms and catches up once;
+T-D8 an armed table keeps a detached session out of the idle TTL; T-D9 the delete
+method answers mid-turn, plus snapshot/list/count; T-D10 no option → nothing;
+T-D11 three failed fires remove the job, and a failed turn does not block the
+next fire; three v3-sidecar tests (round trip; v1/v2 carrying `schedules`
+refused; malformed table refused).
+
+**Mutation checks** (each applied to the source, this file re-run, the source
+restored from `.tentacle/tmp/cron-tool/{hs,sh,dsf}.s3.bak`, `diff -q` clean after
+every one):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | skip `prompt()` in `fireSchedule` | 10 fail (every test that fires) |
+| M2 | drop `schedule` from the fired `turn_start` | 1: T-D1b |
+| M3 | `scheduleStep(…, { idle: true })` whatever the slot | 2: T-D2, T-D5 |
+| M4 | commit the advanced table after `prompt()` (microtask) | 1: T-D3 |
+| M5 | `restore` drops `record.schedules` | 2: T-D4, T-D7 |
+| M6 | `/clear` empties the table | 1: T-D6a |
+| M7 | `updateSettings` stops passing the link | 1: T-D6b |
+| M8 | `close` does not disarm | 1: T-D7 |
+| M9 | drop the table term from `liveness().busy` | 1: T-D8 |
+| M10 | `deleteSchedule` calls `assertIdle()` | 1: T-D9 |
+| M11 | the link handed to the factory unconditionally (a pod would get it) | 1: T-D10 |
+| M12 | drop `settleFired` from `finishTurn` | 1: T-D11 |
+| M13 | fires honour `lastEndBad` | 1: T-D11 |
+| M14 | accept `schedules` in a v1/v2 sidecar | 1: the v1/v2 refusal test |
+| M15 | drop `kickSchedules()` at a turn's end | 1: T-D2 |
+
+M3 is Round 2's carried requirement ("`idle: true` hard-coded → red"). M11 pins
+the pod exclusion at the host. M14 pins the "older build refuses, never drops"
+version rule.
+
+**Re-verification (a second executor pass, same slice; the first stopped at
+the gate).** The `{hs,sh,dsf}.s3.bak` backups named above no longer existed, so
+the table above was treated as unverified and re-run from scratch.
+1. Load-bearing check re-run on the current tree: `prompt` `:2399` → `assertIdle()`
+   `:2424` (defined `:2826`); `maybeWake` `:3049` uses the same `wakeDue`;
+   `finishTurn` `:2962` persists, then `kickWake` `:3019` and `kickSchedules`
+   `:3023` outside the steering window; `connection.ts:1054` refuses a client
+   `wake-` id; `protocol/src/session.ts:311-315`. **Holds.**
+2. All 15 mutations re-applied by a script
+   (`/Users/gmeghnag/tentacle/.tentacle/tmp/cron-tool/mut-s3.ts`: one exact
+   substitution per mutation, refused unless its site matches exactly once;
+   the S3 test file is run; the original bytes are written back and compared).
+   Every one is **red with exactly the tests listed above** (M1: 10 fail; M3, M5:
+   2; all others: 1), and every file was `restored`. Nothing in the source changed
+   in this pass.
+3. Changelog: `changelog.d/cron-tool.added.md` already exists on the branch
+   (one bullet for the whole feature), so S3 adds none. No schema changed in S3,
+   so `protocol.json` was not regenerated (the `json-schema` drift test passes).
+
+**Gate** (2026-11-16, this tree): `bunx tsc --noEmit` clean · `bun run lint`
+clean (1684 files, 0 issues) · `bun test` **12195 pass / 5 skip / 0 fail**
+(874 files). The 5 skips are the opt-in group, the same count as S2's full run
+before the S3 diff (`fulltest-s2b.log`: 5 skip), so no skip is new.
+`bun test packages/daemon/test/schedules.test.ts`: 16 pass / 0 fail.
+
+*— claude-opus-5-5, 2026-11-16 (re-verification + gate)*
+
+**S3: DONE.** S4–S6 not started (per the slice instruction).
 
 ## Review
 

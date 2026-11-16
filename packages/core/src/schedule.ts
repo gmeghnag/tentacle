@@ -431,6 +431,23 @@ export function schedulePromptText(job: ScheduledJob): string {
   return `[scheduled ${job.id} · ${job.spec} · fire ${job.fires}] ${job.prompt}`;
 }
 
+/**
+ * A session's schedule table as its tools see it (docs/feat/cron-tool.md P1):
+ * the LAZY link `AgentContext.schedules` returns, owned by the hosted session
+ * (so a settings sync, which rebuilds the agent, keeps it). Every method is
+ * synchronous. `null` from the link: this runtime does not schedule (a pod).
+ */
+export interface ScheduleLink {
+  /** The host's clock (the one `nextAt` is on), for the tool's "in 10m" texts. */
+  now(): number;
+  /** Add one job; the id is minted by the session (`sc-N`, never reused). */
+  create(request: ScheduleRequest): ScheduleCreateResult;
+  /** The live table, in creation order. */
+  list(): readonly ScheduledJob[];
+  /** Remove one job by id; `false` when it is not in this session. */
+  delete(id: string): boolean;
+}
+
 /** The earliest armed slot, or null for an empty table (the daemon arms nothing). */
 export function nextDueAt(table: readonly ScheduledJob[]): number | null {
   let earliest: number | null = null;

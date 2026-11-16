@@ -66,6 +66,11 @@ import {
   type PermissionRequest,
   type PermissionRequestOptions,
   type PermissionResponse,
+  SCHEDULE_ID_PREFIX,
+  type ScheduleCreateResult,
+  type ScheduleLink,
+  type ScheduleRequest,
+  type ScheduledJob,
   type SubagentBackgroundBody,
   type SubagentEndBody,
   anySignal,
@@ -73,6 +78,12 @@ import {
   checkAttachmentRefs,
   daemonWakeGate,
   formatBytes,
+  scheduleCheckDelayMs,
+  scheduleCreate,
+  scheduleDelete,
+  schedulePromptText,
+  scheduleSettled,
+  scheduleStep,
   wakeDue,
 } from "@tentacle/core";
 import {
@@ -96,6 +107,9 @@ import {
   type QueueState,
   type QueuedEntry,
   type ReturnedEntry,
+  SCHEDULE_LABEL_MAX,
+  type ScheduleDeleteResult,
+  type ScheduleRow,
   type SendNowMessage,
   type SendNowRefusal,
   type SendNowTarget,
@@ -149,6 +163,12 @@ import {
 import type { PushAttached } from "./push-rules.ts";
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
+import {
+  sameScheduleRows,
+  scheduleEndOf,
+  scheduleRows,
+  scheduleSeqSeed,
+} from "./schedules-view.ts";
 import { forkableMessages } from "./session-fork.ts";
 import type { ImagePolicy, WorkloadShellsLike } from "./session-host.ts";
 import type { SessionSummary } from "./session-list.ts";
@@ -289,6 +309,8 @@ interface Cut {
   readonly subagents: readonly SubagentRow[];
   /** The running background SHELL jobs as of the cut: the last `jobs` list emitted. */
   readonly jobs: readonly JobRow[];
+  /** The scheduled wakes as of the cut: the last `schedules` list emitted (docs/feat/cron-tool.md D5). */
+  readonly schedules: readonly ScheduleRow[];
 }
 
 /**
@@ -322,6 +344,12 @@ export interface RestoredSessionState {
    * nothing is answered until a device attaches). Absent → off.
    */
   readonly autoAccept?: boolean;
+  /**
+   * The scheduled wakes at the restart or the reopen (`DaemonSessionRecord.schedules`,
+   * docs/feat/cron-tool.md D6): re-armed at once, so an overdue one fires ONCE
+   * at the first idle check (catch-up, D3). Absent → none.
+   */
+  readonly schedules?: readonly ScheduledJob[];
   /**
    * The session's MCP/skill switches at the restart, from its log's last
    * `capabilities` entry (`DaemonSessionRecord.capabilities`,
@@ -384,6 +412,30 @@ export interface SessionWake {
   /** One line per wake started (the session id only — never a job's command). */
   readonly onAudit?: (line: string) => void;
 }
+
+/**
+ * `serve` and the in-process worker only (docs/feat/cron-tool.md D1): the
+ * session keeps the agent's scheduled wakes and fires each through `prompt()`
+ * under a `wake-` id when it is due and the slot is free. Present = on; absent
+ * on a pod daemon — no table, no link, so its factory never offers the tools
+ * (a pod must not decide when turns start on the laptop's model key, AGENTS §7).
+ */
+export interface SessionSchedules {
+  /** One line per fire and per job the session drops on its own (ids only — never a prompt). */
+  readonly onAudit?: (line: string) => void;
+  /** The ONE timer's clock (tests inject it; default the globals). */
+  readonly setTimeout?: (fn: () => void, ms: number) => unknown;
+  readonly clearTimeout?: (handle: unknown) => void;
+}
+
+/** `unref`'d: a schedule never keeps a process alive on its own (the worker quits with its TUI). */
+const defaultSetTimeout = (fn: () => void, ms: number): unknown => {
+  const handle = setTimeout(fn, ms);
+  (handle as { unref?: () => void }).unref?.();
+  return handle;
+};
+const defaultClearTimeout = (handle: unknown): void =>
+  clearTimeout(handle as ReturnType<typeof setTimeout>);
 
 /**
  * The updates a push observer is given: exactly the four whose timing the push
@@ -751,6 +803,22 @@ export class HostedSession {
    * client must not wake for them too).
    */
   private wakeUnflushed: string | null = null;
+  /** The scheduled wakes (`SessionSchedules`); absent = this runtime never schedules. */
+  private readonly scheduling: SessionSchedules | undefined;
+  /**
+   * The table (docs/feat/cron-tool.md D3): SESSION state, here and not on the
+   * agent, so a settings sync (which rebuilds the agent) keeps it, and `/clear`
+   * keeps it (owner Q7). Replaced, never mutated (the core rules return a new one).
+   */
+  private scheduleTable: readonly ScheduledJob[] = [];
+  /** The last `sc-N` handed out: ids are never reused in a session (D2). */
+  private scheduleSeq = 0;
+  /** The ONE schedule timer (a check at the next slot, ≤ 60 s; 0 after a turn's end). */
+  private scheduleTimer: unknown = null;
+  /** The last `schedules` list emitted (or the initial one): what the cut records. */
+  private lastSchedules: readonly ScheduleRow[] = [];
+  /** The fired turns that have not ended, by turnId → the job that fired each (its failure budget). */
+  private readonly firedTurns = new Map<string, string>();
   /** The committed history as a typed log (`session/log`), derived at the cut's own points. */
   private readonly log: SessionLog;
   private readonly logSha256: Sha256;
@@ -776,11 +844,13 @@ export class HostedSession {
     logOptions: SessionLogOptions = {},
     agentRuntime?: AgentJobs,
     uploads: AttachmentStore = new AttachmentStore(new UploadBudget()),
+    schedules?: SessionSchedules,
   ) {
     this.id = id;
     this.uploads = uploads;
     this.now = now;
     this.wake = wake;
+    this.scheduling = schedules;
     const restored = persistence?.restored;
     this.persister = persistence?.persister ?? null;
     this.keepFork = persistence?.keepFork ?? null;
@@ -840,7 +910,16 @@ export class HostedSession {
       // A session is built with an EMPTY registry (a `serve` reload starts with
       // no jobs), and every later job announces itself through `onStart`.
       jobs: [],
+      schedules: [],
     };
+    // The scheduled wakes a restart or a reopen brings back (D6), with the
+    // counter seeded from them and the history: no id the model saw is reused.
+    this.scheduleTable = restored?.schedules ?? [];
+    this.scheduleSeq = scheduleSeqSeed(session.messages, this.scheduleTable);
+    this.lastSchedules = scheduleRows(this.scheduleTable);
+    this.cut = { ...this.cut, schedules: this.lastSchedules };
+    // Re-armed at once: an overdue one fires at the first idle check (catch-up ONCE).
+    this.armSchedules();
     // The log's first segment: this incarnation's history at the cut (a
     // reload's after its repair; a resumed turn is open at it).
     this.logSha256 = logOptions.sha256 ?? nodeSha256;
@@ -1456,6 +1535,8 @@ export class HostedSession {
       returned: this.returned.map((r) => ({ ...r })),
       ...(head >= 0 ? { head } : {}),
       autoAccept: this.autoAccept,
+      // The table as of NOW (D6): written only when non-empty (the sidecar's v3).
+      ...(this.scheduleTable.length > 0 ? { schedules: [...this.scheduleTable] } : {}),
       ...(withLog ? { log: this.logCapture(after) } : {}),
       // From the mirror (= the agent's queue in every stretch, the module's
       // load-bearing assumption), so texts and ids never disagree.
@@ -1682,6 +1763,8 @@ export class HostedSession {
       jobs:
         (this.jobs?.list().filter((job) => job.status === "running").length ?? 0) +
         (this.agentRuntime?.list().length ?? 0),
+      // A count, only where the session schedules (docs/feat/cron-tool.md D5).
+      ...(this.scheduling ? { schedules: this.scheduleTable.length } : {}),
     };
   }
 
@@ -1692,7 +1775,13 @@ export class HostedSession {
       attached: this.attachments.size,
       // A running background sub-agent keeps the session busy (shell jobs do not:
       // a forgotten dev server is what the TTL frees). docs/feat/subagent-background.md H2.
-      busy: this.running || (this.agentRuntime?.list().length ?? 0) > 0,
+      // An ARMED scheduled wake too (owner Q5, docs/feat/cron-tool.md D7): a daily
+      // reminder must not be archived after a day of silence. Bounded by its
+      // 7-day expiry; the admin cap still applies (it ignores `busy`).
+      busy:
+        this.running ||
+        (this.agentRuntime?.list().length ?? 0) > 0 ||
+        (this.scheduling !== undefined && this.scheduleTable.length > 0),
       lastActiveAt: this.lastActiveAt,
       lastDetachAt: this.lastDetachAt,
     };
@@ -1822,6 +1911,8 @@ export class HostedSession {
       ...(cursor === undefined ? { queued: cut.queued } : {}),
       ...(cursor === undefined ? { subagents: [...cut.subagents] } : {}),
       ...(cursor === undefined ? { jobs: [...cut.jobs] } : {}),
+      // Only where the session schedules (a pod daemon sends none, D5).
+      ...(cursor === undefined && this.scheduling ? { schedules: [...cut.schedules] } : {}),
     };
   }
 
@@ -1863,6 +1954,7 @@ export class HostedSession {
       queued: this.lastQueued,
       subagents: this.lastSubagents,
       jobs: this.lastJobs,
+      schedules: this.lastSchedules,
     };
     this.ring.evict(this.seq);
     // The committed prefix moved: its changes join the log (pointer compares only).
@@ -2310,6 +2402,8 @@ export class HostedSession {
     skill?: string,
     askHooksTrust?: AskHooksTrust,
     voice?: VoiceTurn,
+    /** The scheduled wake that fires this turn (`fireSchedule` only; display data for `turn_start`). */
+    schedule?: { readonly id: string; readonly spec: string },
   ): PromptResult {
     // The key first: a retry is answered even while a turn runs, or after it ended.
     const known = this.turns.get(turnId);
@@ -2348,6 +2442,8 @@ export class HostedSession {
         // Another client's rows (docs/feat/attachments-tui.md D2): the refs the
         // prompt named, absent for a text-only turn (never `[]`).
         ...(refs.length > 0 ? { attachments: refs } : {}),
+        // A fired scheduled wake (D5, owner Q9 = B): the client styles the row.
+        ...(schedule !== undefined ? { schedule } : {}),
       });
     } catch (error) {
       // The turn is accepted (state above): a throwing sink must not strand it
@@ -2891,6 +2987,13 @@ export class HostedSession {
         this.queue = [];
       }
     }
+    // A fired scheduled wake's end counts against its job (D3 failure stop):
+    // state first, like the rest — the capture below has it.
+    const firedBy = this.firedTurns.get(turnId);
+    if (firedBy !== undefined) {
+      this.firedTurns.delete(turnId);
+      this.settleFired(firedBy, end.stopReason);
+    }
     try {
       this.emit({ type: "turn_end", turnId, ...end });
     } finally {
@@ -2914,6 +3017,10 @@ export class HostedSession {
       // An exit the turn's start did not flush (it came later): the daemon
       // wakes for it. Scheduled too.
       this.kickWake();
+      // A failure stop's list, then a scheduled wake that came due while the
+      // turn held the slot: checked on the next macrotask (only a timer here).
+      this.publishSchedules();
+      this.kickSchedules();
     }
   }
 
@@ -2975,6 +3082,231 @@ export class HostedSession {
       this.wake?.onAudit?.(`wake: background job exit ${this.id}`);
     } catch {
       // The audit sink failed: the turn runs regardless.
+    }
+  }
+
+  // --- scheduled wakes (docs/feat/cron-tool.md S3) ----------------------------
+
+  /**
+   * The table as this session's tools see it (`AgentContext.schedules`, P1), or
+   * `null` where the session does not schedule (a pod daemon) or has ended.
+   * Looked up per call by the tool, never cached: the agent may be rebuilt.
+   */
+  scheduleLink(): ScheduleLink | null {
+    if (this.scheduling === undefined || this.closed) {
+      return null;
+    }
+    return {
+      now: () => this.now(),
+      create: (request) => this.createSchedule(request),
+      list: () => this.scheduleTable,
+      delete: (id) => this.removeSchedule(id),
+    };
+  }
+
+  /** The model's create (`schedule_create`, asked through the broker before it gets here). */
+  private createSchedule(request: ScheduleRequest): ScheduleCreateResult {
+    if (this.closed) {
+      return { ok: false, reason: "this session has ended" };
+    }
+    const result = scheduleCreate(this.scheduleTable, request, {
+      id: `${SCHEDULE_ID_PREFIX}${this.scheduleSeq + 1}`,
+      now: this.now(),
+      createdBy: this.activeTurnId ?? "",
+    });
+    if (result.ok) {
+      this.scheduleSeq += 1;
+      this.scheduleChanged(result.table);
+    }
+    return result;
+  }
+
+  /** Drop one job (the model's `schedule_control{delete}` or the user's method). */
+  private removeSchedule(id: string): boolean {
+    const { table, deleted } = scheduleDelete(this.scheduleTable, id);
+    if (deleted) {
+      this.scheduleChanged(table);
+    }
+    return deleted;
+  }
+
+  /**
+   * `session/schedule_delete` (D5): the user drops one wake by hand — the same
+   * decision as the model's delete. Synchronous (§7: never awaits a turn), and
+   * a refusal is an answer with its reason, never a throw.
+   */
+  deleteSchedule(scheduleId: string): ScheduleDeleteResult {
+    if (this.removeSchedule(scheduleId)) {
+      return { deleted: true };
+    }
+    return {
+      deleted: false,
+      reason:
+        this.scheduling === undefined && this.scheduleTable.length === 0
+          ? "this session has no scheduled wakes"
+          : `no scheduled wake ${wireLine(scheduleId, 64)} in this session`,
+    };
+  }
+
+  /** A new table: the write (synchronous capture), the list, the timer. */
+  private scheduleChanged(table: readonly ScheduledJob[]): void {
+    this.scheduleTable = table;
+    this.persist();
+    this.publishSchedules();
+    this.armSchedules();
+  }
+
+  /**
+   * ONE check of the table (the timer's body; tests call it directly): sweep
+   * expiry, and when the slot is free fire the ONE due job (D3). The job is
+   * advanced and the advance captured BEFORE `prompt()` (at-most-once: a crash
+   * mid-turn never fires that slot again). `lastEndBad` is NOT honoured: a
+   * user's Esc on some turn must not silence a reminder (the failure stop bounds
+   * a dead model instead). Re-arms the timer last, whatever happened.
+   */
+  checkSchedules(): void {
+    if (this.scheduling === undefined || this.closed) {
+      return;
+    }
+    // The same pure gate as the job-exit wake, with the slot as its only input
+    // besides `closed` (no `lastEndBad`, above).
+    const idle = wakeDue(
+      { pending: true },
+      { enabled: true, idle: !this.running, blocked: this.closed },
+    );
+    const step = scheduleStep(this.scheduleTable, this.now(), { idle });
+    const changed =
+      step.table.length !== this.scheduleTable.length ||
+      step.table.some((job, i) => job !== this.scheduleTable[i]);
+    for (const job of step.expired) {
+      this.scheduleAudit(`schedule: ${job.id} expired ${this.id}`);
+    }
+    if (step.due === null) {
+      if (changed) {
+        this.scheduleTable = step.table;
+        this.persist();
+        this.publishSchedules();
+      }
+      this.armSchedules();
+      return;
+    }
+    this.fireSchedule(step.due, step.table);
+  }
+
+  /** Fire `job` (already advanced in `table`): commit, capture, publish, THEN `prompt()`. */
+  private fireSchedule(job: ScheduledJob, table: readonly ScheduledJob[]): void {
+    this.scheduleTable = table;
+    // The advance is on disk-bound state BEFORE the turn exists (D3).
+    this.persist();
+    this.publishSchedules();
+    const turnId = `${WAKE_TURN_PREFIX}${crypto.randomUUID()}`;
+    // As the job-exit wake: the cut moves to "now", and the turn's start will
+    // flush every pending exit — so an attach meanwhile reads 0 (one turn).
+    this.recordCut(null);
+    this.wakeUnflushed = turnId;
+    this.firedTurns.set(turnId, job.id);
+    try {
+      this.prompt(
+        turnId,
+        [{ type: "text", text: schedulePromptText(job) }],
+        undefined,
+        undefined,
+        undefined,
+        {
+          id: job.id,
+          spec: job.spec.slice(0, SCHEDULE_LABEL_MAX),
+        },
+      );
+    } catch (error) {
+      // The slot was free in this same stretch: unexpected. The slot stays
+      // consumed (at-most-once), and the timer is re-armed below.
+      this.wakeUnflushed = null;
+      this.firedTurns.delete(turnId);
+      this.reportTurnError(error);
+    }
+    this.scheduleAudit(`wake: scheduled ${job.id} ${this.id}`);
+    this.armSchedules();
+  }
+
+  /** A fired turn ended: count it against its job (3 errors in a row → removed, D3). */
+  private settleFired(jobId: string, stopReason: string): void {
+    const { table, removed } = scheduleSettled(
+      this.scheduleTable,
+      jobId,
+      scheduleEndOf(stopReason),
+    );
+    this.scheduleTable = table;
+    if (removed) {
+      this.scheduleAudit(`schedule: ${jobId} stopped after failures ${this.id}`);
+    }
+  }
+
+  /**
+   * Arm the ONE timer for the next check: at the next slot, ≤ 60 s; a full
+   * interval while the slot is held (never a 0 ms spin — `kickSchedules` checks
+   * at the turn's end). Nothing armed for an empty table or a closed session.
+   */
+  private armSchedules(delayMs?: number): void {
+    this.disarmSchedules();
+    if (this.scheduling === undefined || this.closed) {
+      return;
+    }
+    const delay =
+      this.scheduleTable.length === 0
+        ? null
+        : (delayMs ??
+          scheduleCheckDelayMs(this.scheduleTable, this.now(), { idle: !this.running }));
+    if (delay === null) {
+      return;
+    }
+    const set = this.scheduling.setTimeout ?? defaultSetTimeout;
+    this.scheduleTimer = set(() => {
+      this.scheduleTimer = null;
+      this.checkSchedules();
+    }, delay);
+  }
+
+  private disarmSchedules(): void {
+    if (this.scheduleTimer !== null) {
+      (this.scheduling?.clearTimeout ?? defaultClearTimeout)(this.scheduleTimer);
+      this.scheduleTimer = null;
+    }
+  }
+
+  /** The slot was freed (a turn's or a compaction's end): check on the next macrotask. */
+  private kickSchedules(): void {
+    this.armSchedules(0);
+  }
+
+  /**
+   * Stream the table if it changed since the last `schedules` frame (full
+   * state; an unchanged list sends nothing). Never throws. Idle: the cut then
+   * moves to "now", like `publishJobs`.
+   */
+  private publishSchedules(): void {
+    if (this.closed || this.scheduling === undefined) {
+      return;
+    }
+    const rows = scheduleRows(this.scheduleTable);
+    if (sameScheduleRows(rows, this.lastSchedules)) {
+      return;
+    }
+    this.lastSchedules = rows;
+    try {
+      this.emit({ type: "schedules", schedules: [...rows] });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    if (this.controller === null) {
+      this.recordCut(null);
+    }
+  }
+
+  private scheduleAudit(line: string): void {
+    try {
+      this.scheduling?.onAudit?.(line);
+    } catch {
+      // The audit sink failed: the schedule goes on regardless.
     }
   }
 
@@ -3200,6 +3532,8 @@ export class HostedSession {
       this.publishQueue();
       // An exit that came while the slot was the compaction's (scheduled).
       this.kickWake();
+      // A scheduled wake that came due during it, likewise.
+      this.kickSchedules();
     }
   }
 
@@ -3299,6 +3633,8 @@ export class HostedSession {
       subagents: this.lastSubagents,
       // Likewise the shell jobs (`/clear` keeps them).
       jobs: this.lastJobs,
+      // And the scheduled wakes (owner Q7: `/clear` keeps them; a compaction too).
+      schedules: this.lastSchedules,
     };
     // A new log segment: the SAME array was replaced in place, so it is never
     // diffed — the reference copy is reset (F3). Before the emit, like the cut.
@@ -3369,6 +3705,8 @@ export class HostedSession {
       clearTimeout(this.wakeKick);
       this.wakeKick = null;
     }
+    // The table itself stays (an archive keeps it frozen, D6); only the timer goes.
+    this.disarmSchedules();
     if (this.activeTurnId !== null) {
       try {
         this.finishTurn(this.activeTurnId, { stopReason: "cancelled" });
