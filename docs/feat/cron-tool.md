@@ -1012,3 +1012,63 @@ suite was not re-run: the diff only touches this pure module and its test.
 **Carried to S3 (not a finding):** every caller must pass the real `idle` value
 (`!running && !compacting`). S3's T-D2 must pin this with a mutation (`idle: true`
 hard-coded → red).
+
+## Review
+
+### S2 — REQUEST-CHANGES
+
+*— claude-opus-5-5, 2026-11-16* (fresh context. The S2 executor was deepseek, a
+different model family. The S1 reviewer was this same model.)
+
+**Scope:** `git diff main...HEAD`, S2 files only (protocol, client, `watch-queue.ts`, their tests).
+
+**Findings**
+1. **MEDIUM: `turn_start.schedule` is on the wire but the client never reads it.**
+   `packages/client/src/mapping.ts:48` declares `user_message.schedule?`, but neither
+   place that builds a `user_message` copies it in: the foreign-turn path at
+   `packages/client/src/remote-session.ts:1589` and the send-now/reset path at `:1872`.
+   A wake turn reaches the client as a foreign turn, so that first path is the one
+   that matters. The S2 slice row says "`TurnStart.schedule`; `client/mapping.ts`
+   reverse", and §7 says to wire BOTH ends. **What goes wrong:** S3 sends
+   `turn_start{schedule:{id,spec}}`, the client drops it, and S5's styled fired row
+   (Q9 = B) has nothing to draw from. No test covers this, so the gap does not show.
+   **The fix needs three things:** (a) carry `update.schedule` into the foreign
+   turn's `user_message`; (b) only when `daemonWakes` is on, because otherwise a pod
+   could make any turn look like the laptop's own scheduled wake (§7); (c) run
+   `spec` through `sanitizeScheduleText`, because `turn_start.schedule.spec` is an
+   unbounded `z.string()` (`packages/protocol/src/updates.ts:264`). Add a test for
+   the bit ON, a test for the bit OFF, and a test with a hostile `spec`, each shown
+   red first.
+
+**Gate (touched files):** `bun test` on schedule-rows, json-schema, client
+schedules, watch-queue and daemon mapping → 90 pass / 0 fail. `bun run lint` →
+clean (1670 files). `bun run typecheck` → 0. The full suite was not re-run.
+
+**Mutations** (each one restored from `.tentacle/tmp/cron-tool/rc.rv.bak`;
+`git status` was clean afterwards):
+- Dropping the `daemonWakes` gate on the live `schedules` arm → 1 fail (`…the frame is DROPPED…`).
+- Dropping `schedules` from `firstPage`'s copy → 1 fail (`a snapshot's list is adopted only with the bit ON`).
+Together these confirm that the trust bit is tested at both entry points (the
+executor's M1/M2).
+
+**Attacks tried**
+- **A pod sends a `schedules` frame or snapshot.** It is dropped at both entry
+  points, as shown by the mutations above. Holds.
+- **A pod's client calls delete.** `RemoteSession.deleteSchedule` refuses on the
+  client and sends nothing (`remote-session.ts:799`). Holds.
+- **A hostile label (C0/C1 escapes, bidi controls).** It is sanitized and cut short
+  in `schedules.ts`, and `spec`/`prompt` are not `line()`, so one bad row does not
+  kill the whole list. Holds for the list. It does NOT hold for
+  `turn_start.schedule.spec` (finding 1).
+- **A watcher's queue overflows.** `schedules` is in `DROPPABLE`. Holds.
+- **An older daemon.** It answers `MethodNotFound`, which becomes a typed refusal.
+  Holds.
+- **Not a finding:** a row id longer than 64 characters passes `ScheduleRow`
+  (`.min(1)` only), but `ScheduleIdSchema` (≤ 64) rejects it in the delete
+  params/`turn_start`. S3 must keep ids at `sc-N`.
+
+**Executor behaviour:** it reported its departures from the plan honestly (the
+`SnapshotResult` correction checked out against the code) and documented a strong
+set of mutations. It marked S2 DONE with one of the slice's six items (the reverse
+mapping of `turn_start.schedule`) only half built, and did not list that as a
+deviation.
