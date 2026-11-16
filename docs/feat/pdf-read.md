@@ -670,4 +670,43 @@ No schema changed, so `packages/protocol/schema/protocol.json` is untouched.
 
 ## Review
 
-*(empty)*
+### P1 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (two MEDIUM, both in the pure module, both small fixes).
+
+1. **MEDIUM — paragraph breaks are deleted.** `packages/core/src/pdf-text.ts:155-163`
+   pushes a blank line only when `blanks === 3`, so a run of 1 or 2 blank lines
+   vanishes while a run of 3+ becomes one. D1 says "collapse runs of > 2 blank
+   lines" (keep ≤ 2). Probe: items `Para one.`⏎, ``⏎, `Para two.` →
+   `"Para one.\nPara two."`; `A`⏎ ``⏎ ``⏎ `B` → `"A\nB"`. The test at
+   `packages/core/test/pdf-text.test.ts:119-129` covers only the 3-blank run:
+   **mutation `blanks === 3` → `blanks === 1` survives (38 pass)**, so it pins nothing
+   that would tell the two rules apart. Fix: keep the first blank (or the first two)
+   of a run; add a 1-blank and 2-blank case.
+2. **MEDIUM — unbounded work driven by a hostile page count.** `parsePageRange`
+   (`pdf-text.ts:223-226`) fills a `Set` over the whole span BEFORE the
+   `MAX_PAGES_PER_READ` check (`:228`), and `missingFooters` (`:311-326`) walks every
+   page up to `numPages`. `numPages` comes from the PDF's own `/Count` (hostile input,
+   D2 lets a `pages` range bypass the 2000-page refusal). Probe:
+   `parsePageRange("1-", 30_000_000)` → 1938 ms then `too-many`;
+   `formatPdfText({numPages: 300_000_000, pages:[1]})` → 358 ms; at `/Count` ≈ 2³¹ the
+   Set is an OOM. If P3 calls these on the daemon's main thread (outside the killable
+   worker) this blocks every session (§7 "don't serialize"). Fix: reject a part whose
+   span alone exceeds the cap before looping; compute footers from the read set's
+   gaps arithmetically, not page by page. Add a test with `numPages: 2 ** 31`.
+
+**Gate (this slice's touched files):** `bun test packages/core/test/pdf-text.test.ts`
+38 pass 0 fail · `bun run lint` 1700 files, clean · `bun run typecheck` exit 0. Full
+suite not re-run (scope: P1 touched files).
+
+**Attacks tried:** (a) `</file` breakout — neutralised case-insensitively, holds
+(round-trip lowercases `</FILE>` → `</file>`: nit, not an escape); (b) blank-line
+rule — finding 1; (c) hostile `numPages` — finding 2; (d) `"7-"` / `0` / reversed /
+comma lists — correct messages; (e) §7: the module is pure, React-free, no I/O,
+no protocol/persistence change — holds. Mutation: blank-line rule survives
+(finding 1); tree verified clean after revert (`git status --porcelain` empty).
+
+**Executor:** honest Execution, red-first shown, drift stated with reasons; missed
+the 1–2-blank case and the hostile-count bound.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; different family from the executor, DeepSeek)
