@@ -96,3 +96,15 @@ error text (`⏺ /clear failed: undefined is not an object …`) verbatim as his
 tree, which renders nothing, so the scan skips it by design; changing it would falsify the quote.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-16* (fresh-context adversarial review of `git diff main...HEAD`)
+
+**Verdict: PASS — no HIGH/MEDIUM findings.**
+
+- **Gate (re-run):** the 10 touched test files → 328 pass / 0 fail; `bun run lint` clean (1697 files); `bun run typecheck` clean (root + mobile + relay).
+- **§7 invariants:** none touched in a load-bearing way — no protocol, persistence, or terminal-I/O path changes; the "logic in pure modules" rule holds (the glyph stays one constant in `blink.ts:34`, and the only remaining literal sites, `render-lines.ts:104,716`, now go through `BULLET`). The blink same-character rule holds: OFF = `theme.hidden(BULLET)` (`blink.ts:53`).
+- **Attacked: glyph collision.** `●` was already used as a status glyph (`background-list.ts:282`, `mcp-panel.ts:29`, `voice-view.ts:90`). The one place that matches the bullet by value, `offPhaseRows` (`render-lines.ts:903`, `first.replace(BULLET, …)`), runs only on a running tool's row 0, which `toolLines` opens with the bullet. So the first match is always the call's own glyph. The other `●` glyphs live in separate views, not in transcript tool rows. No hit-testing code matches rows by the glyph.
+- **Attacked: width 2→1.** The header budget is computed from `stringWidth(BULLET)` (`render-lines.ts:682`), so it adapts. `"● "` is now 2 columns, matching the 2-space `INDENT` for continuation lines, which is better alignment than before. The executor's relaxed frame-width assertion (78–79) is backed by mutation M3.
+- **Test non-vacuity:** I tried to mutate `render-lines.ts:104` back to the literal, but the sandbox did not approve it, so the tree was left untouched. I rely on the executor's recorded mutations M1–M3, which together cover the value, the scan bypass and the OFF-width property. Unverified by me: re-running those mutations (`sed` a literal U+23FA into `render-lines.ts:716`, then `bun test packages/tui/test/bullet-glyph.test.ts` should go red).
+- **Accepted, not a finding:** U+25CF is East-Asian-Ambiguous width (plan accepted this). The full `bun test` suite was not re-run by me (the executor reports 12247/0 fail).
+- **Executor behaviour:** stayed in scope, recorded its drift honestly (the width assertions), and kept the historical quote in `clear-connect-unbound.test.tsx` deliberately.
