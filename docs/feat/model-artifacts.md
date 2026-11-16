@@ -577,7 +577,9 @@ behaviour) before its code, and one mutation per slice is applied and reverted
 - **T5 (client)** 1 `readArtifact` assembles + verifies; 2 link drop after chunk
   2 resumes at chunk 3 (no chunk 0–2 re-read), abort stops issuing; 3 a fake
   daemon answering a short chunk / wrong bytes / other `size` → `ArtifactCorruptError`,
-  and never buffers > `meta.size`; 4 `MethodNotFound` → `ArtifactsUnsupportedError`;
+  and never buffers > `meta.size` (the read reply's own `size` is bounded at
+  `MAX_ARTIFACT_BYTES` on the wire, but it is still checked against `meta.size`
+  before it sizes anything); 4 `MethodNotFound` → `ArtifactsUnsupportedError`;
   5 `client/mapping` rebuilds `details.kind === "artifact"`.
 - **T6a (TUI)** ink frames: the card line under a `present` tool row (live and
   after resume via `artifactsByCall`), width 80 and 120, no line overflow; the
@@ -967,3 +969,68 @@ repro and is not verifiable in S1.
 on the branch via `protocol:bump`; changelog written in S1, not S9) are declared and harmless.
 Its tests are mostly non-vacuous (7/9 mutations caught), but it did not mutation-check the
 cap it most needed to.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16*
+
+Both findings FIXED, each with a test shown RED before the fix and a
+mutation-check after it (§9). No other behaviour changed; the tree's only
+production edit is ONE added bound in `artifact.ts` (plus the docstring above it
+and the regenerated `protocol.json`); everything else is test.
+
+**Finding 1 — MEDIUM, vacuous per-chunk-cap test. FIXED.**
+`packages/protocol/test/artifact.test.ts:210-216`: the over-cap case is now
+`"A".repeat(ATTACHMENT_CHUNK_B64_MAX + 4)` — valid, unpadded base64, so the
+padding regex accepts it and only `.max` can refuse it. (The right bound is also
+asserted to PASS at exactly `ATTACHMENT_CHUNK_B64_MAX`, so the case cannot go
+green by the cap being wrong in the other direction.) **M6 re-run (cap dropped at
+`artifact.ts:142`): `19 pass, 1 fail`, failing at `artifact.test.ts:216:84` — the
+assertion of the cap, not an import/compile error.** Reverted; `git diff` clean
+of the mutation.
+
+The same round also closes M8 (0 fail in the review), which the review folded
+into finding 1: `packages/protocol/test/artifact.test.ts:73-78` is a new case for
+`MetaSchema.source` — `"a\nb"`, `"a\tb"`, `"x\u001b[2J"`, `"a".repeat(513)` all
+refused, `"docs/a.html"` accepted. **M8 re-run (`source`'s `regex(ATTACHMENT_NAME_RE)`
+dropped at `artifact.ts:85`): `19 pass, 1 fail` at `artifact.test.ts:75:52`.**
+Reverted.
+
+**Finding 2 — MEDIUM, unbounded `ArtifactReadResultSchema.size`. FIXED.**
+`packages/protocol/src/artifact.ts:144` — `.max(MAX_ARTIFACT_BYTES)`, and the
+docstring above it says why (a client may size a buffer from the read reply, so
+a 2 GiB announcement must fail to parse; S5 still checks `size === meta.size`).
+Test: `artifact.test.ts:218-223` — `size` of `0`, `-1`, `1.5`, `maxBytes + 1`
+and `2_147_483_648` refused, `maxBytes` accepted. **Red before the fix:**
+`bun test packages/protocol/test/artifact.test.ts` → `19 pass, 1 fail`, at
+`artifact.test.ts:221:63` (the `size` loop). **M2' (the new cap dropped):
+`19 pass, 1 fail`, same line 221.** Reverted → `20 pass, 0 fail`.
+
+**Consequent: generated schema.** The `size` bound changes the exported JSON
+Schema, so the drift gate (`packages/protocol/test/json-schema.test.ts`) went
+red on the zod edit alone (`440 pass, 1 fail`, "protocol.json is stale").
+`bun run schema:export` regenerated it — a one-line diff, `"maximum": 20971520`
+on the read result's `size`. No hand-edit, and no `PROTOCOL_VERSION` move: a
+narrowed bound on a NEW field of a NEW method is not a break for any peer that
+existed before it (there is no peer that ever sent an unbounded `size`).
+
+**Plan note (the review asked for it):** T5 (`docs/feat/model-artifacts.md:576-580`)
+now states that the read reply's `size` is bounded on the wire *and* still
+checked against `meta.size` before sizing anything.
+
+**Gate** (worktree root, after the fixes):
+
+```
+$ bunx tsc --noEmit    → exit 0
+$ bun run lint         → Checked 1664 files in 459ms. No fixes applied. (0/0 — the §6 baseline)
+$ bun test             → 12028 pass, 5 skip, 0 fail (12033 tests, 860 files, 446 s)
+```
+
+The 5 skips are the same pre-existing opt-in gates the S1 executor enumerated
+(k8s ×2, docker ×2, `TENTACLE_SLOW_TESTS`), re-checked here one file at a time:
+`5 skip, 0 fail` across those six files, none added by this round.
+`packages/protocol` alone: `441 pass, 0 fail` (was 440 — the new `source` case).
+
+**Unverified / next:** unchanged from S1 — the read path (chunked `readArtifact`,
+resume, sha256) is S5's, and T5.3's "never buffers > `meta.size`" is S5's test,
+not this slice's; this round only pins the wire bound it relies on.

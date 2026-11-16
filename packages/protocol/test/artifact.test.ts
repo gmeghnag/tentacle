@@ -70,6 +70,13 @@ describe("ArtifactMetaSchema (T1.1)", () => {
     expect(parses(MetaSchema, meta({ title: "a".repeat(120) }))).toBe(true);
   });
 
+  test("`source` is display-only too: no control character, at most 512 chars", () => {
+    for (const source of ["a\nb", "a\tb", "x\u001b[2J", "a".repeat(513)]) {
+      expect(parses(MetaSchema, meta({ source }))).toBe(false);
+    }
+    expect(parses(MetaSchema, meta({ source: "docs/a.html" }))).toBe(true);
+  });
+
   test("`size` is positive and capped at MAX_ARTIFACT_BYTES (20 MiB)", () => {
     expect(maxBytes).toBe(20 * 1024 * 1024);
     for (const size of [0, -1, 1.5, (maxBytes ?? 0) + 1]) {
@@ -200,11 +207,20 @@ describe("the method registry (T1.4)", () => {
     }
     expect(parses(ReadResultSchema, { data: chunk, size: 1024 })).toBe(true);
     expect(parses(ReadResultSchema, { data: "", size: 1024 })).toBe(true);
-    expect(parses(ReadResultSchema, { data: `${chunk}AAAA`, size: P.ATTACHMENT_CHUNK_BYTES })).toBe(
-      false,
-    );
+    // The per-chunk cap, on a string that is VALID base64: `chunk` is 262144
+    // raw bytes, so it ends in `==` and an appended tail would be refused by
+    // the padding regex instead of by the cap (a vacuous test). `"A".repeat(n)`
+    // with n a multiple of 4 is valid, unpadded base64 — only `.max` can refuse it.
+    const b64Max = P.ATTACHMENT_CHUNK_B64_MAX;
+    expect(parses(ReadResultSchema, { data: "A".repeat(b64Max), size: 1024 })).toBe(true);
+    expect(parses(ReadResultSchema, { data: "A".repeat(b64Max + 4), size: 1024 })).toBe(false);
     expect(parses(ReadResultSchema, { data: "not base64!", size: 4 })).toBe(false);
-    expect(parses(ReadResultSchema, { data: chunk, size: 0 })).toBe(false);
+    // `size` is the version's announced total: bounded like a meta's, so a
+    // hostile read reply cannot announce 2 GiB through the schema.
+    for (const size of [0, -1, 1.5, maxBytes === undefined ? 0 : maxBytes + 1, 2_147_483_648]) {
+      expect(parses(ReadResultSchema, { data: chunk, size })).toBe(false);
+    }
+    expect(parses(ReadResultSchema, { data: chunk, size: maxBytes })).toBe(true);
   });
 
   test("its unavailable code is additive, free and unique", () => {

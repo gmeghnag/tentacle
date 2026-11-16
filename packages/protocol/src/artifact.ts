@@ -130,13 +130,18 @@ export const ArtifactReadParamsSchema = z.object({
 });
 export type ArtifactReadParams = z.infer<typeof ArtifactReadParamsSchema>;
 
-/** At most one chunk of bytes (base64), plus the version's declared total size. */
+/**
+ * At most one chunk of bytes (base64), plus the version's declared total size.
+ * `size` is bounded like a meta's: a client may size its buffer or its progress
+ * from the read reply, so a hostile 2 GiB announcement must fail to parse here
+ * rather than become a `reserve`. (The client still checks `size === meta.size`.)
+ */
 export const ArtifactReadResultSchema = z.object({
   data: z
     .string()
     .max(ATTACHMENT_CHUNK_B64_MAX)
     .regex(/^[A-Za-z0-9+/]*={0,2}$/),
-  size: z.number().int().positive(),
+  size: z.number().int().positive().max(MAX_ARTIFACT_BYTES),
 });
 export type ArtifactReadResult = z.infer<typeof ArtifactReadResultSchema>;
 
