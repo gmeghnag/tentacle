@@ -1721,3 +1721,43 @@ Reviewer is the same model family as the executor (fresh context only).
   `bun run lint` 1755 files, clean · `bun run typecheck` exit 0. Full suite not re-run.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; same model family as the executor)
+
+### P4 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (no HIGH; two MEDIUM: one design gap, one test gap).
+
+1. **MEDIUM: a retried `prompt{turnId}` re-extracts before the key check.** `packages/daemon/src/connection.ts:1028`
+   awaits `resolvePromptDocuments` (a Worker run of up to 20 s per document, ×5, ×2 when it hits `too-many-pages`)
+   before `hosted.prompt`, whose first step is the dedupe ("a retry is answered even while a turn runs",
+   `hosted-session.ts:2417`). Scenario: the response is lost and the client re-sends the same turnId after a
+   reconnect. The turn is already running, but the retry waits for a fresh extraction, and if that extraction fails this
+   time (timeout or memory cap under load, or the blob is gone), the retry gets `InvalidParams` while the turn
+   runs. The client then sees "refused" for a turn that is live: a loud answer that is wrong. Fix: answer a
+   known turnId from `HostedSession.turns` before resolving the documents, and add a test (retry of an accepted turn →
+   no second `extract` call).
+2. **MEDIUM: two P4 defences have no test (mutations survived).** (a) Dropping `sanitizeAttachedText` from
+   `attachedDocument` (`packages/core/src/pdf-text.ts:579`) still gives 0 failures. That sanitiser is what keeps
+   control/ESC bytes from a client's `document{text}` (accepted by BOTH policies, `prompt-documents.ts:118`)
+   out of the CRITICAL message entry and the TUI transcript. (b) The `too-many-pages` → `1-100` retry
+   (`prompt-documents.ts:146`, Execution drift 4) is never exercised: disabling it also gives 0 failures. Add one
+   test each (a `\x1b[` in `document{text}` → absent from the log; a fake extractor that returns `too-many-pages` → called
+   again with `pages:"1-100"` and the footer names the cut).
+
+**Gate (this slice):** the 5 touched test files: 62 pass, 0 fail · `bun run typecheck` exit 0 · `bun run lint`
+1776 files, clean. Full suite not re-run.
+
+**Mutations** (`.tentacle/tmp/pdf-read/p4r/mut.ts`; each one restored, `git status` clean afterwards):
+no `isPdf` → RED 1 · advertisement swapped → RED 2 · no cap on client text → RED 1 · note on every message → RED 1 ·
+no sanitiser → **survives** · no too-many retry → **survives** · no `maxBytes` check → survives (redundant today:
+the schema caps `size` at `MAX_IMAGE_BYTES` = `maxBytes`, so this is not a finding).
+
+**Attacks tried, with what they found:** the pod gets bytes (`{ref}` is refused before any read, holds) ·
+`media` on the CRITICAL entry (`.catch` fail-soft, not hashed in `canonicalMessage`, holds) · `</file>` / attribute
+breakout (`fileBlock` escapes `</file` and `escapeAttribute` escapes `"<>&`, holds) · enqueue/send_now carrying a
+document (text-only schemas, holds) · peer serialization (no lock, the session is looked up again after the await,
+holds) · an old daemon (the `kind` literal and the union member give a loud `InvalidParams`, holds).
+
+**Executor behaviour:** the doc is honest. It flags finding 1 itself as debt, but rates it harmless ("still
+deduplicated"), which misses the case where the retry is refused. Its own mutation table checks out.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; SAME model as the P4 executor, so shared blind spots are possible)
