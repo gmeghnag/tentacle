@@ -1357,3 +1357,112 @@ or MEDIUM issue.
 - **Still open:** the S2 pixels are unseen (flow 24 needs a simulator), which is
   the executor's own stated debt. These are source-scan tests, which is the
   repo's accepted pattern for `.tsx` that Bun cannot import.
+
+## Execution (slice S5 — drawer logic, C1)
+
+*— claude-opus-5-5, 2026-11-16 · slice S5 only*
+
+**Scope:** S5 only, pure modules + tests. Nothing else was touched: no UI, no
+`App.tsx`, no protocol/daemon/client change, so `protocol.json` was not
+regenerated (no schema changed).
+
+**Provenance (stated honestly):** the six S5 files were already in the
+worktree as **untracked** files at the start of this run (mtime 2026-11-16 00:50,
+no Execution entry). They came from an earlier, unrecorded attempt. I did not
+author them. I verified them against the plan and the code, kept them, added
+one guard (below), and did the red/mutation evidence myself.
+
+### Load-bearing check, re-run first (it held)
+
+- `createSessionListController({ load, now })` and `viewModel(state, now)`
+  (`session-list-controller.ts:49`, `:135-155`) are screen-independent.
+  `App.tsx:852-854` builds one over `LINKS.get(computerId)` (the plan cited
+  `:848-850`, which drifted by 4 lines). `SessionRoute` resolves its own link
+  from `computerId` (`App.tsx:944`). The Sessions screen opens a session with
+  `navigation.navigate("Session", …)` (`App.tsx:1651`).
+- `drawer-seam.test.ts` drives two controllers over two fake `session/list`
+  loaders (computers a/b) into `drawerList`. The only injected call is the
+  existing loader, so the drawer needs **no new client call**.
+  `drawer-nav.test.ts` asserts `drawerTarget`'s stack. Both are green, so the
+  plan stands.
+
+### Drift from the Implementation (each kept, reasons)
+
+1. **`drawerTitle(records, rows, selectedId)`**, not `(computers, selectedId)`.
+   The paired records are synchronous, but the probed `ComputerRow`s
+   (`computerRows`) arrive later. So the title names the computer from the
+   record and says "Connecting…" until its row exists. A computer that is no
+   longer paired returns `null`, so no title is invented. It also returns
+   `tone`, `project` and `canCreate` (online only; F2/F8).
+2. **`archivedOpen: boolean | null`** (null = automatic). The auto-expand for
+   an archived current session (F5) can then be overridden by an explicit
+   collapse. `toggle-archived` flips what is SHOWN.
+3. **`drawerTarget` returns `DrawerNav`** = `stay | replace{route} |
+   reset{routes}`. `stay` is the open session itself on the same computer (just
+   close: no remount, no detach). The same id on ANOTHER computer is a
+   different session, so it resets.
+4. **Added `drawerCurrentId(state, from)`** (`drawer-nav.ts`, mine). It
+   highlights only while the drawer lists the open session's OWN computer.
+   Without it, S6 would need a branch in the component (§7), and an equal
+   session id on another daemon would be highlighted wrongly.
+5. **The reducer lives in `drawer-nav.ts`**, with its own test file
+   (`drawer-reducer.test.ts`). The Slices table says "four drawer test files":
+   seam, list, nav, reducer.
+
+### As-built
+
+- `apps/mobile/src/drawer-list.ts`: `drawerList` (Running/Recent split in
+  the daemon's order; current matched by id; Archived · n collapsed, auto or
+  toggled; `empty` only for a fresh successful empty read, never when stale or
+  failed (F2); stale/error/`canLoadMore` passed through) and `drawerTitle`.
+- `apps/mobile/src/drawer-nav.ts`: `drawerTarget`, `drawerCurrentId`,
+  `initialDrawer`, `drawerReducer` (open/close/select-computer/
+  toggle-archived/menu). Every open restarts on the open session's computer;
+  selecting a computer resets the archived toggle and shuts the menu.
+- Tests: `apps/mobile/test/drawer-{seam,list,nav,reducer}.test.ts`, 27 tests.
+- **Red before green:** `drawerCurrentId` was written as a naive stub
+  (`return from.sessionId`) first. The test "another computer listed: nothing
+  highlighted" went RED on its assertion (`Received: "s1"`), then green with
+  the real rule. The pre-existing code had no pre-implementation red I could
+  show, so its non-vacuity rests on the mutations below.
+- `biome check --write` formatted `drawer-nav.test.ts` (the earlier attempt
+  left it unformatted; that was the only lint error).
+
+### Mutation checks (§9: each applied with Edit, the 4 drawer files run, reverted; final `cmp` against scratch backups = identical)
+
+| # | Mutation | Caught by (fail) |
+|---|---|---|
+| M1 | swap `replace`/`reset` (`if (!sameComputer)`) — **plan target** | 4: same computer → replace; other → reset (F4); archived pick; same id other computer |
+| M2 | drop the `currentId` match (`current: false`) — **plan target** | 3: seam two-computers; highlight per section; archived auto-expand |
+| M5 | no archived auto-expand (`?? false`) | 2: highlight per section; archived auto-expand |
+| M6 | stale/error reads as empty (`empty: source.empty`) | 1: "a failed or stale read is not (F2)" |
+| M8 | one computer switchable (`> 0`) | 1: one paired computer not switchable |
+| M10 | archived pick dropped (`archived: false`) | 1: archived pick keeps `archived: true` |
+| M3 | select-computer keeps the archived toggle | 1: selecting a computer resets the toggle |
+| M9 | create while offline (`canCreate: true`) | 2: offline; needs pairing again |
+| M4 | reopen keeps the picked computer | 1: reopening restarts on the open session's computer |
+| M11 | `stay` ignores the computer | 1: same id on ANOTHER computer |
+| M7 | highlight ignores the listed computer | 1: drawerCurrentId other computer |
+
+The plan's third mutation target, "break the `note.id` join", belongs to S8
+(`activity-memory`). It is not in S5.
+
+### Gate
+
+- `bunx tsc --noEmit`: clean. `bun run typecheck` (root + `apps/mobile` +
+  `apps/relay`): clean.
+- `bun run lint`: 1668 files, 0 errors/warnings.
+- `bun test`: **12035 pass · 5 skip · 0 fail** (863 files). The skips are all in
+  pre-existing opt-in live files (k8s/docker/exec-confinement/ws-server/
+  session-hop docker). None are in `apps/mobile`.
+
+### Not done in this slice (and why)
+
+- No UI, no wiring. `SessionsDrawer.tsx`, the hamburger, `App.tsx`
+  `onSwitch` and the flows are S6. S6 maps `DrawerNav` to
+  `navigation.replace`/`reset` and passes `drawerCurrentId(...)` to
+  `drawerList`.
+- **Changelog:** S5 has no user-visible effect (the modules are not wired). The
+  task's single fragment `changelog.d/mobile-chrome.changed.md` (S1–S6) is
+  unchanged. S6 adds the drawer to it.
+- Nothing committed (the orchestrator commits).
