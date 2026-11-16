@@ -1072,3 +1072,122 @@ executor's M1/M2).
 set of mutations. It marked S2 DONE with one of the slice's six items (the reverse
 mapping of `turn_start.schedule`) only half built, and did not list that as a
 deviation.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16* (executor of fix round 1 for the S2 review above;
+**the same model id as the S2 reviewer**, so a fresh-context pass on this round is
+still owed.)
+
+**Findings addressed: the one Review finding (MEDIUM), in full — and its part (b)
+turned out to have two doors, not one.**
+
+**Repro before the fix** (`packages/client/test/schedules.test.ts`, this branch
+@ `4643c40a`) — the new tests RED on the assertion of the property:
+```
+(fail) …the client's user_message carries {id, spec} (the bit ON…)
+       @@ -1,6 +1,2 @@   - "schedule": { "id": "sc-1", "spec": "every 10m" }
+(fail) …a hostile `spec` is sanitized before it can reach a terminal
+       error: no schedule ref
+ 10 pass / 2 fail
+```
+The pod test (bit OFF) was green before AND after, by design: it pins "the claim
+is dropped", which a client that never reads the field also satisfies. It is kept
+as the guard for the trust half, not as proof of the fix — the mutations M1/M5 are
+what prove that half.
+
+**Root cause, one sentence:** `turn_start.schedule` is on the wire
+(`updates.ts:264`) and `mapping.ts:48` declared the field, but neither place that
+builds a `user_message` copied it in — so a fired wake reached the client as a
+plain foreign turn, and S5's styled fired row (Q9 = B) had nothing to draw from.
+
+**As built**
+- `packages/client/src/schedules.ts:62-90` — new exported
+  `firedScheduleRef(schedule, trusted)`: the ONE decision site for the ref. It
+  returns `{}` (nothing to spread) or `{schedule: {id, spec}}`, both strings
+  through `sanitizeScheduleText` (the new `SCHEDULE_ID_CLIENT_MAX = 64` matches
+  the protocol's `ScheduleIdSchema`). Both gates the review asked for — (b) trust,
+  (c) sanitizing — live here, so the two doors cannot drift, exactly as
+  `gateExitText` does for a job's two pod-supplied strings.
+- `packages/client/src/remote-session.ts:1591-1596` (**door 1**, the foreign turn
+  the review named at `:1589`) — `startForeign` takes the ref and spreads
+  `firedScheduleRef(schedule, this.daemonWakes)` into its `user_message`; `route`'s
+  `turn_start` arm (`:1766`) passes `update.schedule` in.
+- `packages/client/src/remote-session.ts:1877-1883` (**door 2**, the send-now /
+  reset path at `:1872`, which the review named in the same breath) — the same
+  spread, so an own turn re-delivered after a reset keeps its ref.
+- **Why `remote-session.ts`, not only `mapping.ts`:** the review pointed at the
+  mapping; the ref has to ride the `user_message` the SESSION pushes, so the copy
+  belongs where that event is built. `mapping.ts`'s `SessionEvent` already
+  declared the field (`:48`) and needed no change.
+
+**Drift from Implementation:** none. The S2 slice row's "`TurnStart.schedule`;
+`client/mapping.ts` reverse" is now satisfied end to end; D5 unchanged. No schema
+or wire change (the field already existed), so no `protocol.d/` note and no
+`PROTOCOL_VERSION` edit; no new `changelog.d/` fragment (S2 adds no new
+user-visible behaviour of its own — the existing `cron-tool.added.md` covers the
+feature); `CHANGELOG.md` untouched.
+
+**Tests (red first, §9)** — `packages/client/test/schedules.test.ts`, +4:
+1. `the client's user_message carries {id, spec} (the bit ON)` — end to end over
+   the fake daemon (a `turn_start` frame → a turn activity's stream). RED: no
+   `schedule` key.
+2. `with the bit OFF (a pod) the claim is DROPPED` — the AGENTS §7 half. Green
+   before the fix too (a client that reads nothing drops it): kept as the guard,
+   proven by M1/M5 rather than by itself. Declared, not hidden.
+3. `a hostile spec is sanitized` — `\u001b[2J`, `\n`, `\u202e`, 400 chars. RED:
+   `error: no schedule ref`.
+4. `an own turn re-delivered after a reset carries it too (the second door)` —
+   drives `output({kind:"reset"})` then the replayed `turn_start`. Shown red by
+   mutation M6: before the fix it cannot even compile against the field, so a
+   compile-red would be the only pre-fix red — which §9 forbids as proof.
+Plus 3 unit tests for `firedScheduleRef` (untrusted spreads nothing; trusted is
+sanitized and bounded; absent stays absent) — the pure site, per §7 ("logic in
+pure modules; components only render").
+
+**Mutation checks** (each applied to the src, this test file re-run, source
+restored from `.tentacle/tmp/cron-tool/{sch,rs}.f1.bak`, `diff -q` clean after
+every one — confirmed with `RESTORED-CLEAN`):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | `firedScheduleRef`: drop the `!trusted` guard (the review's bug) | 2 fail: the pure "untrusted spreads nothing" + the end-to-end pod test |
+| M2 | paint `spec` as sent (no `sanitizeScheduleText`) | 2 fail: the pure trusted-ref test + the hostile end-to-end test |
+| M3 | paint `id` as sent (no strip/bound) | 1 fail: the pure trusted-ref test |
+| M4 | unwire door 1 (`startForeign`'s spread) | 2 fail: the bit-ON test + the hostile test |
+| M5 | hard-code `trusted = true` at door 1 (the §7 disaster: a pod's claim accepted) | 1 fail: the pod test |
+| M6 | unwire door 2 (`onUpdate`'s spread) | 1 fail: "the second door" |
+
+M1/M5 are the pair proving the TRUST bit is pinned in the code path, not only in
+a component's offering; M2/M3 prove each part of the label is sanitized
+separately (a `spec`-only fix would let a hostile id through); M4/M6 prove each
+door is wired.
+
+**Tried and NOT kept (declared):** after the first pass I wanted one enqueue
+helper in `RemoteSession` so both doors shared a literal line. The two sites
+differ in their guards (`startForeign` pushes only when prompt/refs exist;
+`onUpdate` only for `sendNow || reset`), so one helper would have grown flags and
+hidden those rules; the shared *decision* was extracted instead
+(`firedScheduleRef`) and both call sites stay legible. A rejected shape, not a
+drift from the design.
+
+**Gate (final, on this branch):**
+- `bunx tsc --noEmit` → **0**; `bun run typecheck` (root + mobile + relay) → **0**.
+- `bun run lint` (`biome check .`) → **clean, no fixes, 1670 files** (one
+  formatting fix on the new test file was applied with `biome check --write`
+  first, as §6 prescribes; that apply is not part of the final run).
+- Narrow: `bun test packages/client` → **773 pass / 0 fail** (70 files); the
+  changed file alone: **16 pass / 0 fail** (up from 12).
+- Full `bun test` → **12115 pass, 5 skip, 0 fail** (864 files, 443.6 s). That is
+  S2's 12108 **+ 7 new tests**, and the same 5 pre-existing opt-in skips
+  (`TENTACLE_K8S_SERVER` ×2, `TENTACLE_DOCKER_TESTS` ×2, `TENTACLE_SLOW_TESTS`
+  ×1): **no new skip, none in `client`.**
+
+**Not done / for the next round:** this round shares the reviewer's model id, so
+a fresh-context adversarial pass on it is still owed — in particular on (a)
+whether a `turn_start.schedule` arriving on a turn this session already tracks
+(a wake the CLIENT did not mint) can bypass both doors, and (b) whether S5 paints
+the ref without re-cutting it. Also carried unchanged from the Review: S3 must
+still emit `schedules` on every mutation and pass `schedule: {id, spec}` on a
+fired `turn_start`, and must spread the required `{ idle }` flag at every
+`scheduleStep`/`scheduleCheckDelayMs` call site (Round 2's carried note).

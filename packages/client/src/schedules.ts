@@ -14,6 +14,8 @@ import { progressText } from "./mapping.ts";
 export const MAX_SCHEDULE_ROWS = 32;
 /** How long a row's `spec`/`prompt` label may be on screen — this module's own cap, not a panel's. */
 export const SCHEDULE_LABEL_CLIENT_MAX = 200;
+/** How long an ID may be here: the protocol's own bound (`ScheduleIdSchema`, ≤ 64), applied to the ref. */
+export const SCHEDULE_ID_CLIENT_MAX = 64;
 /** Shown when the daemon cannot delete a schedule: it predates the method. */
 export const SCHEDULE_OLD_DAEMON = "this daemon cannot delete a scheduled wake (older version)";
 /** A client that must not act on a schedule at all (a pod, `run`/`attach`): its daemon is not trusted. */
@@ -55,6 +57,33 @@ function boundRow(row: ScheduleRow): ScheduleRow {
 /** The list as this client keeps it: at most `MAX_SCHEDULE_ROWS`, the daemon's order. */
 export function boundSchedules(rows: readonly ScheduleRow[]): ScheduleRow[] {
   return rows.slice(0, MAX_SCHEDULE_ROWS).map(boundRow);
+}
+
+/**
+ * The `turn_start.schedule` ref of a fired wake, ready to spread into a
+ * `user_message` (S2 Review 1). ONE function for its two doors — the foreign
+ * turn (`startForeign`) and an own turn re-delivered after a reset (`onUpdate`)
+ * — so they cannot drift, as `gateExitText` does for a job's strings.
+ *
+ * Two gates, both here:
+ * - **Trust.** `spec` is an unbounded `z.string()` (`updates.ts`), and the ref
+ *   is the daemon's CLAIM that this turn is the laptop's own scheduled wake.
+ *   Only a client whose daemon starts turns on its own may act on it
+ *   (`daemonWakes`): a pod could otherwise dress any turn up as one (AGENTS §7).
+ * - **Sanitizing.** A fired row paints `spec` beside the prompt, so it takes the
+ *   same treatment a list row does — one line, escapes gone, bounded.
+ */
+export function firedScheduleRef(
+  schedule: { readonly id: string; readonly spec: string } | undefined,
+  trusted: boolean,
+): { schedule?: { id: string; spec: string } } {
+  if (schedule === undefined || !trusted) return {};
+  return {
+    schedule: {
+      id: sanitizeScheduleText(schedule.id, SCHEDULE_ID_CLIENT_MAX),
+      spec: sanitizeScheduleText(schedule.spec),
+    },
+  };
 }
 
 /** A snapshot's list, bounded the same way. Absent (an older daemon) stays absent. */

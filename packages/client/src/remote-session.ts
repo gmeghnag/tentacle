@@ -49,7 +49,7 @@ import {
   type SessionTitleNotice,
   type UploadOptions,
 } from "./remote-client.ts";
-import { SCHEDULE_UNTRUSTED_DAEMON } from "./schedules.ts";
+import { SCHEDULE_UNTRUSTED_DAEMON, firedScheduleRef } from "./schedules.ts";
 import type { StreamOutput } from "./session-reducer.ts";
 import type { SubagentNotify } from "./subagents.ts";
 
@@ -1563,6 +1563,7 @@ export class RemoteSession implements SessionStreamListener {
     turnId: string,
     prompt: string,
     attachments?: readonly AttachmentRef[],
+    schedule?: { readonly id: string; readonly spec: string },
   ): ActiveTurn {
     const turn: ActiveTurn = {
       turnId,
@@ -1590,6 +1591,9 @@ export class RemoteSession implements SessionStreamListener {
         type: "user_message",
         text: prompt,
         ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
+        // The scheduled wake that started it (S2 Review 1): one gate for both
+        // doors (`firedScheduleRef`), never sanitizing in a component.
+        ...firedScheduleRef(schedule, this.daemonWakes),
       });
     }
     this.raise({
@@ -1759,7 +1763,7 @@ export class RemoteSession implements SessionStreamListener {
           if (!own.ended) this.onUpdate(own, update);
           return;
         }
-        this.startForeign(update.turnId, update.prompt, update.attachments);
+        this.startForeign(update.turnId, update.prompt, update.attachments, update.schedule);
         return;
       }
       case "turn_end": {
@@ -1873,6 +1877,9 @@ export class RemoteSession implements SessionStreamListener {
             type: "user_message",
             text: update.prompt,
             ...(hasRefs(update.attachments) ? { attachments: update.attachments } : {}),
+            // Same gate as `startForeign` (a wake turn this session DID start,
+            // re-delivered after a reset).
+            ...firedScheduleRef(update.schedule, this.daemonWakes),
           });
         }
       }
