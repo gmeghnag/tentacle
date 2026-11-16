@@ -1390,6 +1390,59 @@ files (the 5 are the same opt-ins as above).
 
 *— claude-opus-5-5, 2026-11-16*
 
+### Fix round 1 — P4 review (two MEDIUM) · executed by `claude-opus-5-5`, 2026-11-16
+
+1. **MEDIUM #1 (a retried `prompt{turnId}` re-extracted) — FIXED.** New
+   `HostedSession.knownTurn(turnId)` (`packages/daemon/src/hosted-session.ts`,
+   just above `prompt`): the dedupe `prompt` already did, now one method that
+   `prompt` itself calls. `Connection.promptWithDocuments`
+   (`packages/daemon/src/connection.ts`) asks it FIRST and answers a known turn
+   without calling `resolvePromptDocuments`. A retry can no longer be refused by
+   a fresh extraction failing while its turn runs. `prompt` keeps its own check,
+   so a retry that lands during another retry's extraction is still deduped.
+   Test: `P4 review fixes > a retried prompt{turnId} of an accepted turn is
+   answered without a second extraction`. RED on the old code, on the assertion:
+   `expect(h.extracted.count).toBe(1)` got `Received: 2`.
+2. **MEDIUM #2a (sanitiser untested) — FIXED.** Test `document{text}
+   control/ESC bytes never reach the log or the model` (pod policy;
+   `"red\x1b[31mtext\x07bell"`). Neither the logged user message nor the model's
+   last message contains `\x1b` / `\x07`.
+3. **MEDIUM #2b (too-many-pages retry untested) — FIXED.** Unit test
+   `too-many-pages is retried with the first read's worth, and the cut is named`.
+   A fake extractor returns `too-many-pages` with no `pages` and 100 of 250 pages
+   with `pages:"1-100"`. The test asserts the calls `[{}, {pages:"1-100"}]`, the
+   block's `[pages 101-250 not included]` footer and the `pages: 250` chip.
+   Drift: the first version of the fake pages had too little text, so
+   `pdfVerdict` density-classed them "scanned". The pages were padded; the code
+   did not change.
+
+   #2a/#2b only add tests (the code was already correct), so they are not
+   red-before-green. Their non-vacuity comes from the mutations below.
+
+**Mutations** (`.tentacle/tmp/pdf-read/fr1/mut.ts`: each applied, then
+`prompt-documents.test.ts` run, then restored; `git status` shows only the 3
+intended files):
+
+| mutation | result |
+|---|---|
+| `connection.ts`: early `knownTurn` → `undefined` | RED 1 (the retry test) |
+| `pdf-text.ts`: drop `sanitizeAttachedText` in `attachedDocument` | RED 1 (the ESC test) |
+| `prompt-documents.ts`: `too-many-pages` check → never matches | RED 1 (the too-many test) |
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` **1776 files, clean**
+(after `biome check --write` on the test file) · `prompt-documents.test.ts`
+15 pass · `bun test packages/daemon` **1302 pass, 1 skip, 0 fail** ·
+full `bun test` (one run) **12935 pass, 5 skip, 2 fail**. One of the two is
+`serve-log-store.test.ts > S2 … (b) an in-place annotation …`
+(`expect(k).toBeLessThan(0)`). It passes alone (22/0) and in the full daemon
+package run, and this round does not touch the log store. It looks like a
+timing flake under full-suite load. The second failure's name was cut off by
+`tail -n 15`, and the suite was not re-run, by the token budget. It is not in
+`packages/daemon`, the only package this round touches. **Unverified:** that
+both fails are flakes. To check, run `bun test 2>&1 | grep '^(fail)'`.
+
+*— claude-opus-5-5, 2026-11-16*
+
 ## Review
 
 ### P1 — fresh-context adversarial review

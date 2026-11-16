@@ -298,4 +298,63 @@ describe("resolvePromptDocuments (unit)", () => {
     );
     expect(got.message).toContain("r.pdf: the uploaded bytes do not match their id");
   });
+
+  test("too-many-pages is retried with the first read's worth, and the cut is named", async () => {
+    const pdf = makePdf([["x"]]);
+    const calls: { pages?: string }[] = [];
+    const policy: DocumentPolicy = {
+      source: "store",
+      maxBytes: STORE.maxBytes,
+      extract: async (_bytes, options) => {
+        calls.push(options.pages === undefined ? {} : { pages: options.pages });
+        if (options.pages === undefined) {
+          return { ok: false, reason: "too-many-pages", message: "250 pages: pass pages" };
+        }
+        const pages = Array.from({ length: 100 }, (_, i) => ({
+          n: i + 1,
+          text: `page ${i + 1} ${"words ".repeat(20)}`,
+        }));
+        return { ok: true, numPages: 250, pages };
+      },
+    };
+    const got = await resolvePromptDocuments([refDoc("big.pdf", pdf) as never], {
+      policy,
+      store: { read: async () => pdf },
+    });
+    expect(calls).toEqual([{}, { pages: "1-100" }]);
+    const block = got.content[0];
+    const text = block?.type === "text" ? block.text : "";
+    expect(text).toContain("page 100");
+    expect(text).toContain("[pages 101-250 not included]");
+    expect(got.media[0]?.pages).toBe(250);
+  });
+});
+
+describe("P4 review fixes", () => {
+  test("a retried prompt{turnId} of an accepted turn is answered without a second extraction", async () => {
+    const h = harness(STORE);
+    await ready(h);
+    const pdf = makePdf([["once"]]);
+    await put(h, pdf);
+    await prompt(h, "t1", [refDoc("once.pdf", pdf)]);
+    await settle();
+    expect(h.extracted.count).toBe(1);
+    // The response was lost; the client re-sends the SAME turnId.
+    const again = (await prompt(h, "t1", [refDoc("once.pdf", pdf)])) as { turnId: string };
+    expect(again.turnId).toBe("t1");
+    expect(h.extracted.count).toBe(1);
+    expect(h.model.requests).toHaveLength(1);
+  });
+
+  test("document{text} control/ESC bytes never reach the log or the model", async () => {
+    const h = harness(POD);
+    await ready(h);
+    await prompt(h, "t1", [textDoc("esc.pdf", "red\x1b[31mtext\x07bell")]);
+    await settle();
+    const user = (await logOf(h)).find((e) => e.message?.role === "user");
+    expect(user?.message?.content).toContain("red");
+    expect(user?.message?.content).not.toContain("\x1b");
+    expect(user?.message?.content).not.toContain("\x07");
+    expect(h.model.requests[0]?.messages.at(-1)?.content ?? "").not.toContain("\x1b");
+  });
 });

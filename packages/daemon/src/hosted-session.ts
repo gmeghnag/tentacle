@@ -2394,6 +2394,19 @@ export class HostedSession {
   }
 
   /**
+   * The answer to a `turnId` this session already accepted (running or ended),
+   * else undefined. `prompt`'s dedupe — exposed so a caller with slow work
+   * before `prompt` (attached documents) answers a retry without redoing it.
+   */
+  knownTurn(turnId: string): PromptResult | undefined {
+    const known = this.turns.get(turnId);
+    if (!known) {
+      return undefined;
+    }
+    return known.end ? { turnId, ended: known.end } : { turnId };
+  }
+
+  /**
    * Accept a turn and ack at once; the turn itself runs in `drive` and ends
    * with a `turn_end` update. Synchronous up to the ack ON PURPOSE: two prompts
    * arriving together must see the first one's controller (an `await` before it
@@ -2415,9 +2428,9 @@ export class HostedSession {
     media?: readonly MessageMedia[],
   ): PromptResult {
     // The key first: a retry is answered even while a turn runs, or after it ended.
-    const known = this.turns.get(turnId);
+    const known = this.knownTurn(turnId);
     if (known) {
-      return known.end ? { turnId, ended: known.end } : { turnId };
+      return known;
     }
     // Before the busy check: a rejected prompt starts and records nothing.
     const { text, refs } = splitPrompt(content);

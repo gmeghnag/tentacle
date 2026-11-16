@@ -1025,6 +1025,12 @@ export class Connection {
     hosted: HostedSession,
     signal: AbortSignal | undefined,
   ): Promise<PromptResult> {
+    // A retry of an accepted turn is answered BEFORE extracting: a fresh
+    // extraction could fail and refuse a turn that is live (review P4 #1).
+    const known = hosted.knownTurn(params.turnId);
+    if (known) {
+      return known;
+    }
     const { content, media } = await resolvePromptDocuments(params.content, {
       policy: this.host.documents,
       store: hosted.uploads,
