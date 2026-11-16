@@ -1961,3 +1961,46 @@ deduplicated"), which misses the case where the retry is refused. Its own mutati
   Full suite not re-run.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; SAME model as the P4 executor)
+
+### P5 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM finding, a test gap; nothing at HIGH).
+
+1. **MEDIUM: the laptop-mode `too-many-pages` retry is not covered by any test.**
+   `packages/client/src/remote-client.ts:2318-2324` copies the daemon's retry once with
+   `pages: "1-${MAX_PAGES_PER_READ}"`. The daemon's copy got a test in P4 round 1 (MEDIUM #2b).
+   This one has none. Mutation `extraction.reason === "too-many-pages"` → a value that never matches:
+   **`document-attach.test.ts` stays green**. Failure scenario: in a pod session (`run`/`attach`),
+   a user attaches a PDF of more than 2000 pages. If this branch regresses, the attach fails with
+   "too many pages" instead of sending the first 100 pages plus the `[pages … not included]`
+   footer. No test would catch it. Fix: port the P4 test (a fake extractor that answers
+   `too-many-pages`; assert the calls `[{}, {pages:"1-100"}]` and the footer in `document{text}`).
+   Better still, move the retry into one pure helper that both ends call, so the two copies cannot drift.
+
+**Gate:** the 11 touched test files: 208 pass, 0 fail. `bun run typecheck` exit 0.
+`bun run lint`: 1782 files, clean. The full suite was not re-run.
+
+**Mutations** (each applied with a direct edit, the owning tests run, then reverted. Afterwards
+`git status --porcelain` was empty):
+
+| mutation | result |
+|---|---|
+| `RemoteSession.sendPrompt` passes `undefined` instead of `turn.documents` | RED 2 (the RemoteSession→`session/prompt` tests) |
+| `useAttachments` runs with `documents: []` | RED 2 (P5a, P5b frames) |
+| `document-input.ts` §7 gate (`servesModel` + `upload`) disabled | RED 2 (unit test + the `RemoteClient` test) |
+| laptop `too-many-pages` retry never taken | **survives**: finding 1 |
+
+**Attacks tried:**
+- **PDF bytes reaching a pod.** The pod daemon advertises `input:"client"` (`connection.ts:774`), which maps to `laptop`, and only `document{text}` is sent. An `upload` claim from a client that serves the model is OFF. Holds.
+- **The extractor on the Ink thread.** `extractPdf` is the worker-backed `createPdfExtractor` (`tools/src/pdf/extract.ts:110`), and it is injected only beside `modelProvider` (`local-runtime.ts:1050`). Holds.
+- **A keyed re-send after a drop.** `ActiveTurn.documents` is carried, and M1 is killed. Holds.
+- **Opening the session when documents are off.** `RemoteSession.attachDocument` checks the mode before `open()`. Holds.
+- **Single broker and RPC peer.** P5 does not touch them. Holds.
+- **A mixed image+PDF drop with images off** (`attach-draft.ts:115`). The whole drop is refused with the images notice. This is loud and documented, not silent. Low; not raised.
+- **The `withDocuments` overCap value is discarded** (`attach-draft.ts:130`). The image path has the same race behaviour. Low.
+
+**Executor behaviour:** the Execution section is honest, and its drift notes (a)–(f) match the
+code. Its mutation table omits the duplicated retry, which is the only branch that escapes the tests.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; the SAME model family as the P5 executor, so
+shared blind spots are possible)
