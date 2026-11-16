@@ -4,7 +4,7 @@
  * and dimmed. Top: the computer it lists as its TITLE (tap → the computer
  * menu, when there is more than one), its status line, the magnifier (→ the
  * Sessions screen's search). Then Running / Recent / Archived · n. Bottom:
- * Settings.
+ * Settings, and the New session pill (S7, `drawer-new-session.ts`).
  *
  * RENDER ONLY (AGENTS §7): what is listed, in which order, what is current,
  * what a failed read says, how it moves — `drawer-list.ts` (`drawerItems`,
@@ -18,7 +18,8 @@
  * `drawer-pair`, `drawer-search`, `drawer-session-<id>` / `drawer-current-<id>`
  * (the open session), `drawer-archived`, `drawer-more`, `drawer-loading`,
  * `drawer-error`, `drawer-retry`, `drawer-stale`, `drawer-empty`,
- * `drawer-settings`, `drawer-row-menu`, `drawer-row-rename`.
+ * `drawer-settings`, `drawer-row-menu`, `drawer-row-rename`, `drawer-new`,
+ * `drawer-new-error`.
  */
 import { type JSX, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -41,6 +42,7 @@ import { ActionSheet } from "../ui/ActionSheet.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
+import { PillButton } from "../ui/PillButton.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
 
@@ -72,6 +74,14 @@ export interface SessionsDrawerProps {
   readonly onToggleArchived: (shown: boolean) => void;
   readonly onMore: () => void;
   readonly onRetry: () => void;
+  /** The New session pill (`newSessionPill`, S7): online only, one create at a time. */
+  readonly newSession: {
+    readonly enabled: boolean;
+    readonly busy: boolean;
+    readonly error: string | null;
+  };
+  readonly onNewSession: () => void;
+  readonly onNewSessionDismiss: () => void;
   /** The session screen (or its connecting frame). */
   readonly children: ReactNode;
 }
@@ -236,6 +246,19 @@ function Panel(props: SessionsDrawerProps & { readonly bottom: number }): JSX.El
         keyExtractor={(item) => item.key}
         renderItem={({ item }) => <Item {...props} item={item} />}
       />
+      {props.newSession.error === null ? null : (
+        <Pressable
+          testID="drawer-new-error"
+          accessibilityRole="button"
+          accessibilityHint="Dismisses this message"
+          onPress={props.onNewSessionDismiss}
+          style={styles.newError}
+        >
+          <Text style={[styles.newErrorText, { color: palette.red }]}>
+            {props.newSession.error}
+          </Text>
+        </Pressable>
+      )}
       <View
         style={[
           styles.footer,
@@ -249,6 +272,17 @@ function Panel(props: SessionsDrawerProps & { readonly bottom: number }): JSX.El
           size={21}
           accessibilityLabel="Settings"
           onPress={props.onSettings}
+        />
+        <View style={styles.footerGap} />
+        <PillButton
+          palette={palette}
+          testID="drawer-new"
+          label="New session"
+          icon="plus"
+          height={40}
+          disabled={!props.newSession.enabled}
+          busy={props.newSession.busy}
+          onPress={props.onNewSession}
         />
       </View>
       <ActionSheet
@@ -523,4 +557,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
+  footerGap: { flex: 1 },
+  newError: { paddingHorizontal: 20, paddingVertical: 8 },
+  newErrorText: { fontSize: 13, lineHeight: 18 },
 });

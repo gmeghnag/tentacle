@@ -1722,3 +1722,159 @@ hand with Edit.) The plan's third target, the `note.id` join, belongs to S8.
 - **Gate (my run):** `bun run lint` clean (1679 files). `bun run typecheck` (root + mobile + relay) clean. The diff touches no TS, so I did not re-run tests.
 - **Regressions:** none. The diff is `.gitignore` + one file deletion + this doc. The new Fix round 1 section sits above `## Review`, which is fine.
 
+## Execution (slice S7 — New session from the phone)
+
+*— claude-opus-5-5, 2026-11-16 · slice S7 only*
+
+**Scope:** S7 only (Files item 8 + the pill). No protocol, daemon or client
+change, so there is no `protocol.d/` note and `protocol.json` was not
+regenerated.
+
+### Load-bearing check, re-run first: no daemon work needed, but "lazy on first send" does not hold
+
+The probe is `.tentacle/tmp/mobile-chrome/s7-probe.test.ts`. It runs a real
+`SessionHost` + `Connection` + `RemoteClient` and the phone's own
+`createSessionController`, built as `App.tsx` builds it. Output:
+
+```
+A. phone attach-only open of a minted id: {"ok":false,"reason":"link"}
+B. after openSeeded (no attach), listed: [true]
+C. phone attach after create+detach: true
+D. send through the attached handle: ok
+```
+
+- **What held:** creating a session needs nothing new from the daemon or the
+  protocol. A handle built without `attach` creates the session through its
+  `openSeeded()` (`session/open{create}` under a given id,
+  `packages/client/src/remote-session.ts:543-584`), and the session is then
+  listed.
+- **What failed:** the plan says the session is created *lazily, on the first
+  send*, but that is not possible on the phone's current path. (A) shows
+  why: both of the phone's ways to reach a session only attach:
+  - the screen's open (`session-controller.ts` `open`; `App.tsx` `RUNTIMES`,
+    `attach: {}`);
+  - the outbox's session port (`App.tsx` `outboxOf`, `newSession(…, {attach: {}})`
+    then `open()`, which answers null on failure, so the item would wait for
+    ever, `outbox-driver.ts:395`).
+
+  A minted id that does not exist yet can never be sent to. Making it lazy would
+  mean changing the outbox's persisted item, or a per-id "may create" flag that
+  survives an app kill. That is a load-bearing persisted-format change, well
+  beyond S.
+
+### Drift from the Implementation (each reconciled here)
+
+1. **The session is created at the tap, not on the first send** (Design 3 "New
+   session", Preconditions "New session without new protocol", F8).
+   `createFreshSession` (`src/session-controller.ts:123`) does three things in
+   order:
+   - calls `openSeeded()` on a handle built without `attach`;
+   - then detaches that handle and **waits** for the detach, so the screen's
+     own attach does not race a detach of the same id in the client's table;
+   - then answers `ok`.
+
+   It returns a typed reason (`openFailureReason`) and never throws. After
+   that, the Session screen and the outbox work unchanged: they attach to a
+   session that now exists.
+   - **Cost (owner's call, see Not done):** tapping New session and never
+     sending leaves an empty session on that computer. It shows in Recent with
+     no title, and is archived by the daemon's idle TTL like any other
+     detached session.
+2. **F8 has a different shape.** The plan said "a failed create on the first
+   send surfaces as the composer's send-failure state (outbox keeps the text)".
+   Now a create fails at the tap, before anything has been typed. The drawer
+   stays open, opens nothing, and shows why (`drawer-new-error`, text chosen
+   by the reason code and never taken from the daemon's message). No prompt
+   exists yet, so none can be lost. The pill is disabled while the listed
+   computer is not online (`drawerTitle(...).canCreate`, from S5). A tap with
+   `canCreate` false, or during a create already in flight, sends nothing.
+3. **"Composer focused" needed a route param the plan did not name.**
+   - `SessionRoute.focus?` (`routes.ts`) and `DrawerPick.focus?`
+     (`drawer-nav.ts:52`, passed through on both the replace path and the
+     reset path).
+   - `SessionScreen` `focusComposer` → `Composer` `focus`. The composer
+     focuses the field once, the first time it becomes editable (after the
+     attach answers), and never again.
+4. **The plan's S7 test "offline → send fails into the outbox (F8)" became
+   "offline → a typed `link` refusal, and nothing is created on the
+   daemon"**, because the create no longer happens at a send.
+
+### As-built
+
+- `src/session-controller.ts:110-133`: `FreshHandle` + `createFreshSession`
+  (the phone's ONE create path).
+- `src/drawer-new-session.ts` (new, pure):
+  - `createDrawerNewSession({ mint, create, opened })`: one create at a time,
+    online only. A failure is kept until the next tap or `dismiss`.
+  - `newSessionPill(canCreate, state)` and `newSessionErrorText(reason)`.
+  - `NEW_SESSION_TITLE = "(new)"`.
+- `App.tsx` `SessionDrawerHost` (`:1059-1092`): `mint` = `crypto.randomUUID`.
+  `create` = `LINKS.get(listed)`; a failed dial answers `link`, otherwise
+  `createFreshSession(client.newSession(undefined, id))`. `opened` closes the
+  drawer and calls `drawerTarget(from, {…, title: "(new)", archived: false,
+  focus: true})`. That is the existing replace/reset path, so a create on
+  ANOTHER computer resets the stack exactly as F4 does for a row.
+- `screens/SessionsDrawer.tsx`: in the footer, Settings on the left and the
+  `PillButton` "New session" (`drawer-new`) on the right. A failure line
+  (`drawer-new-error`, tap to dismiss) sits above the footer. Render only.
+- `e2e/flows/26-drawer.yaml` + `.js`, appended at the end:
+  - tap `drawer-new` → `transcript-empty` → text typed with NO tap on the field
+    (this proves the focus) → send → `turn-idle`;
+  - re-open: a `drawer-current-.*` row (the minted id, matched by pattern) and
+    ALPHA back as an ordinary row;
+  - daemon truth: `model-prompts` contains the new session's prompt.
+- **Red before green:**
+  - With the stubs in place (the right signatures, wrong behaviour),
+    `drawer-new-session.test.ts` went 8 fail · 1 pass, all on assertions. The
+    one pass was the offline test, which passed only because the stub did
+    nothing; mutation Md below shows that test is not vacuous.
+  - The pill test was 1 fail before `newSessionPill` was implemented.
+  - The new `drawer-nav` case failed on the assertion before `focus` was passed
+    through (`Expected: true, Received: undefined`).
+  - `new-session-link.test.ts` was written after `createFreshSession`, so its
+    non-vacuity rests on mutations Ma and Mi.
+
+### Mutation checks (§9: `.tentacle/tmp/mobile-chrome/s7-mutations.ts` applies each, runs the 3 S7 test files, restores; `git status` afterwards shows only this slice's files; the re-run gave 19 pass · 0 fail)
+
+| # | Mutation | Caught by (fail) |
+|---|---|---|
+| Ma | create skipped (no `openSeeded`). **Plan target:** "creates" | 4, including both real-daemon tests |
+| Mb | no detach after the create | 1: creates, THEN detaches, then answers |
+| Mc | failure reason not by code (always `link`) | 1: typed reason by error code |
+| Md | offline still creates (F8). **Plan target:** "offline" | 1: F8 offline sends nothing |
+| Me | double tap not guarded | 1: second tap while in flight |
+| Mf | a failed create still opens | 2: F8 failure opens nothing; dismiss |
+| Mg | pill enabled while offline | 1: pill enabled only online |
+| Mh | a fresh pick drops `focus` | 1: drawer-nav fresh pick |
+| Mi | (test-side) create through an ATTACH handle, the phone's current path | 1: the real-daemon test (not created → not listed) |
+
+### Gate
+
+- `bun run check` (from the repo root):
+  - typecheck (root + `apps/mobile` + `apps/relay`): clean.
+  - `biome check .`: 1685 files, clean.
+  - `bun test`: **12148 pass · 5 skip · 0 fail** (874 files). The skips are
+    the same opt-in ones as S6.
+- The first run had one failure, a source-text guard I broke:
+  `session-screen-follow-wiring.test.ts` "Composer: `key={fieldKey}` …".
+  It pins `key` then `testID` as adjacent attributes, and my new `ref` sat
+  between them. I moved `ref` after `testID` and left the guard as it is.
+- **E2E: NOT RUN.** It is the same block as S6: the Release build fails on the
+  `liveactivity` → `PushCore` dependency, which also fails on `main` (S6 Fix
+  round 1, finding 2). Under AGENTS §0 I did not try a third rebuild. The
+  static `test/e2e-flows.test.ts` accepts the edited flow 26 (34 pass). The
+  steps added to flow 26 are therefore **unverified on a simulator**. To
+  verify: fix the native target, then
+  `bun run e2e:mobile --ios 26 --only 26-drawer`, in light and dark.
+
+### Not done in this slice (and why)
+
+- **Owner decision needed:** creating at the tap leaves an empty session if
+  the person never sends. The other option is a true lazy create: an outbox
+  item flagged "may create", persisted, so that a retry after an app kill
+  still creates. That is a persisted-format change and needs its own task.
+  Until the owner decides, the tap creates.
+- No "(new)" placeholder row is drawn in the drawer before the first turn's
+  title arrives; the daemon's own (empty) title shows there.
+- Nothing committed. `TODO.md` untouched.
+

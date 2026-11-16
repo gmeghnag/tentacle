@@ -77,3 +77,17 @@ describe("drawerSearchTarget (the magnifier)", () => {
     ]);
   });
 });
+
+describe("drawerTarget for a session just created (New session, S7)", () => {
+  test("a fresh pick opens with the composer focused, on either path; an ordinary pick never does", () => {
+    const same = drawerTarget(FROM, pick({ sessionId: "new-1", focus: true }));
+    expect(same.kind === "replace" ? same.route.params.focus : undefined).toBe(true);
+    const other = drawerTarget(FROM, pick({ computerId: "b", sessionId: "new-2", focus: true }));
+    expect(other.kind === "reset" ? other.routes.at(-1) : undefined).toEqual({
+      name: "Session",
+      params: { computerId: "b", sessionId: "new-2", title: "two", archived: false, focus: true },
+    });
+    const plain = drawerTarget(FROM, pick());
+    expect(plain.kind === "replace" ? "focus" in plain.route.params : true).toBe(false);
+  });
+});

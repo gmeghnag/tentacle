@@ -104,6 +104,8 @@ export interface SessionScreenProps {
    * only opener — the left-edge swipe keeps meaning back.
    */
   readonly onOpenDrawer?: () => void;
+  /** Just created by the drawer's New session (S7): the composer takes focus once it is editable. */
+  readonly focusComposer?: boolean;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -133,6 +135,7 @@ export function SessionScreen({
   controller,
   title,
   onOpenDrawer,
+  focusComposer = false,
 }: SessionScreenProps): JSX.Element {
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
@@ -648,6 +651,7 @@ export function SessionScreen({
         <Composer
           palette={palette}
           fieldKey={state.sends}
+          focus={focusComposer}
           draft={state.draft}
           editable={state.view.editable}
           placeholder={
