@@ -208,7 +208,8 @@ export class RemoteSession implements SessionStreamListener {
   /**
    * The daemon is a trusted `serve` host that starts its own wake turns: their
    * asks count as this session's for auto-accept (`autoAcceptsTurn`). From
-   * `RemoteClientOptions.daemonWakes`; FALSE everywhere but `connect`.
+   * `RemoteClientOptions.daemonWakes`; FALSE everywhere but `connect` and the
+   * local worker (docs/feat/cron-tool.md D1).
    */
   private readonly daemonWakes: boolean;
   /**
@@ -462,7 +463,7 @@ export class RemoteSession implements SessionStreamListener {
 
   /**
    * Auto-accept may answer an ask of this turn: one I minted, or — on a trusted
-   * `serve` daemon that wakes on its own (`daemonWakes`, set by `connect`) — the
+   * daemon that wakes on its own (`daemonWakes`: `connect`, the worker) — the
    * SESSION's own wake turn (docs/fix/autoaccept-wake-turns.md A4).
    *
    * The prefix test is stateless on purpose: a wake turn that ended, and a

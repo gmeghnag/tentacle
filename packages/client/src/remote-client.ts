@@ -455,8 +455,9 @@ export interface RemoteClientOptions {
    * (`wake-<uuid>`, docs/fix/autoaccept-wake-turns.md): their asks are this
    * session's, so auto-accept may answer them. Defaults to OFF, and must: this
    * is a TRUST bit (AGENTS §7), so it fails closed — never keyed on
-   * `daemonKind`, which defaults to `"serve"`. Set only by `connect`; the
-   * worker, pod `run`/`attach` and the relay never say it.
+   * `daemonKind`, which defaults to `"serve"`. Set only by `connect` and the
+   * local worker (laptop code that fires the session's scheduled wakes,
+   * docs/feat/cron-tool.md D1); pod `run`/`attach` and the relay never say it.
    */
   readonly daemonWakes?: boolean;
   /**

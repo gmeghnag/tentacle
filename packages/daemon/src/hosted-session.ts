@@ -68,6 +68,7 @@ import {
   type PermissionResponse,
   SCHEDULE_ID_PREFIX,
   type ScheduleCreateResult,
+  type ScheduleLimits,
   type ScheduleLink,
   type ScheduleRequest,
   type ScheduledJob,
@@ -423,6 +424,11 @@ export interface SessionWake {
 export interface SessionSchedules {
   /** One line per fire and per job the session drops on its own (ids only — never a prompt). */
   readonly onAudit?: (line: string) => void;
+  /**
+   * The HOST's own create limits (its `schedules.*` config, never carried —
+   * docs/feat/cron-tool.md D3, owner Q6). Absent = `DEFAULT_SCHEDULE_LIMITS`.
+   */
+  readonly limits?: ScheduleLimits;
   /** The ONE timer's clock (tests inject it; default the globals). */
   readonly setTimeout?: (fn: () => void, ms: number) => unknown;
   readonly clearTimeout?: (handle: unknown) => void;
@@ -3113,6 +3119,7 @@ export class HostedSession {
       id: `${SCHEDULE_ID_PREFIX}${this.scheduleSeq + 1}`,
       now: this.now(),
       createdBy: this.activeTurnId ?? "",
+      ...(this.scheduling?.limits ? { limits: this.scheduling.limits } : {}),
     });
     if (result.ok) {
       this.scheduleSeq += 1;

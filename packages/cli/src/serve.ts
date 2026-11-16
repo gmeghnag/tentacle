@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
 import { DEFAULT_PUSH_GRACE_SECONDS } from "@tentacle/config";
-import type { AttachmentSource } from "@tentacle/core";
+import type { AttachmentSource, ScheduleLink } from "@tentacle/core";
 import {
   type AgentReuse,
   Connection,
@@ -75,6 +75,7 @@ import {
   type WiredAgent,
   buildAgent,
   createSkillScan,
+  scheduleLimitsOf,
   sweepToolOutput,
   toolOutputStore,
 } from "./wiring.ts";
@@ -204,7 +205,12 @@ export function createServeAgent(
   config: TentacleConfig,
   options: Pick<ServeOptions, "onError" | "onNotice" | "createProvider">,
   skillScan: SkillScan,
-  ctx: { readonly cwd: string; readonly attachments?: AttachmentSource },
+  ctx: {
+    readonly cwd: string;
+    readonly attachments?: AttachmentSource;
+    /** The session's scheduled wakes (docs/feat/cron-tool.md D1): `serve` schedules. */
+    readonly schedules?: () => ScheduleLink | null;
+  },
   /** The daemon-wide MCP set: its tools join every registry this builds (S2). */
   mcpHub?: Pick<McpHub, "onBuilt">,
 ): WiredAgent {
@@ -224,6 +230,9 @@ export function createServeAgent(
       // on the user's own host, so it holds the credentials the tool dials with.
       // `tunnelledAgent` (the pod daemon) never passes this.
       workloadShell: { backend: new LaptopWorkloadShellBackend() },
+      // Scheduled wakes (docs/feat/cron-tool.md D1): `serve` keeps the table (in its
+      // sidecar) and fires it with nobody attached. `tunnelledAgent` never passes this.
+      ...(ctx.schedules ? { schedules: ctx.schedules } : {}),
     },
   );
   // The MCP tools join THIS registry too — now, or at settle through the hub's
@@ -762,6 +771,13 @@ async function reloadedHost(
     // is attached to wakes on a job exit (docs/feat/serve-autowake.md). The
     // stdio (pod) daemon and the worker never set it.
     wakeOnJobExit: config.autoWake,
+    // Scheduled wakes (docs/feat/cron-tool.md D1, owner Q4): a `serve` session keeps
+    // its table, persists it in the sidecar and fires it with nobody attached, with
+    // THIS host's `schedules.*` limits. The stdio (pod) daemon never sets it.
+    schedules: {
+      limits: scheduleLimitsOf(config),
+      ...(options.onAudit ? { onAudit: options.onAudit } : {}),
+    },
     // This daemon runs its own config's model, so it holds the bytes
     // (docs/feat/attachments-prompt.md D4); `undefined` = no image input at all.
     ...(images ? { images } : {}),

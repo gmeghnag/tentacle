@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_SCHEDULE_LIMITS,
   SCHEDULE_CHECK_INTERVAL_MS,
+  type ScheduleLimits,
   type ScheduledJob,
   nextDueAt,
   parseDurationMs,
@@ -432,5 +434,71 @@ describe("the timer's inputs (the daemon owns the one setTimeout)", () => {
     expect(scheduleCheckDelayMs([job], NOW, { idle: false })).toBe(SCHEDULE_CHECK_INTERVAL_MS);
     expect(scheduleCheckDelayMs([], NOW, { idle: true })).toBeNull();
     expect(scheduleCheckDelayMs([], NOW, { idle: false })).toBeNull();
+  });
+});
+
+describe("S4: the host's limits (`schedules.*` config) replace the defaults", () => {
+  const limits: ScheduleLimits = {
+    maxJobs: 2,
+    minIntervalMs: 5 * MINUTE,
+    ttlMs: 2 * DAY,
+    maxAheadMs: DAY,
+    promptMaxChars: 10,
+  };
+  const create = (
+    request: { every?: string; at?: string; prompt?: string },
+    table: readonly ScheduledJob[] = [],
+  ) =>
+    scheduleCreate(
+      table,
+      {
+        prompt: request.prompt ?? "check CI",
+        ...(request.every === undefined ? {} : { every: request.every }),
+        ...(request.at === undefined ? {} : { at: request.at }),
+      },
+      { id: "sc-9", now: NOW, createdBy: "t", limits },
+    );
+
+  test("the defaults are the documented ones (owner Q6)", () => {
+    expect(DEFAULT_SCHEDULE_LIMITS).toEqual({
+      maxJobs: 10,
+      minIntervalMs: MINUTE,
+      ttlMs: 7 * DAY,
+      maxAheadMs: 7 * DAY,
+      promptMaxChars: 2000,
+    });
+  });
+
+  test("min interval: 4m refused under a 5m floor, with the floor in the reason", () => {
+    const refused = create({ every: "4m" });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.reason).toContain("at least 5m");
+    expect(create({ every: "5m" }).ok).toBe(true);
+  });
+
+  test("ttl: a recurring job expires ttlMs after creation; an interval past it is refused", () => {
+    const ok = create({ every: "1h" });
+    expect(ok.ok && ok.job.expiresAt).toBe(NOW + 2 * DAY);
+    const refused = create({ every: "3d" });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.reason).toContain("at most 2d");
+  });
+
+  test("max ahead: `in 2d` refused under a 1d limit", () => {
+    const refused = create({ at: "in 2d" });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.reason).toContain("more than 1d ahead");
+    expect(create({ at: "in 20h" }).ok).toBe(true);
+  });
+
+  test("prompt and job caps follow the limits", () => {
+    const long = create({ every: "1h", prompt: "x".repeat(11) });
+    expect(long.ok).toBe(false);
+    if (!long.ok) expect(long.reason).toContain("at most 10 characters");
+    const one = created({ every: "1h" }, { id: "sc-1" });
+    const two = created({ every: "1h" }, { id: "sc-2" });
+    const full = create({ every: "1h" }, [one, two]);
+    expect(full.ok).toBe(false);
+    if (!full.ok) expect(full.reason).toContain("already 2 scheduled wakes");
   });
 });

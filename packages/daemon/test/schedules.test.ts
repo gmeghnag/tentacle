@@ -2,11 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { Agent } from "@tentacle/agent";
 import {
   type ChatRequest,
+  DEFAULT_SCHEDULE_LIMITS,
   type ExecutionEnvironment,
   type ModelProvider,
   PermissionBroker,
   SCHEDULE_CHECK_INTERVAL_MS,
   SCHEDULE_TTL_MS,
+  type ScheduleLimits,
   type ScheduleLink,
   type StreamEvent,
 } from "@tentacle/core";
@@ -123,6 +125,8 @@ interface RigOptions {
   readonly persister?: SessionPersister;
   readonly model?: Model;
   readonly clock?: { now: number };
+  /** The host's `schedules.*` limits (S4); absent = the defaults. */
+  readonly limits?: ScheduleLimits;
 }
 
 function rig(opts: RigOptions = {}) {
@@ -142,6 +146,7 @@ function rig(opts: RigOptions = {}) {
             onAudit: (line: string) => audit.push(line),
             setTimeout: timers.set,
             clearTimeout: timers.clear,
+            ...(opts.limits ? { limits: opts.limits } : {}),
           },
         }
       : {}),
@@ -585,6 +590,29 @@ describe("the wire and the runtimes (S3, D5/D1)", () => {
     expect(
       await a.client.request("session/schedule_delete", { sessionId: "S", scheduleId: "sc-1" }),
     ).toEqual({ deleted: false, reason: "this session has no scheduled wakes" });
+  });
+
+  test("T-D12 the host's limits (`schedules.*`, S4) are the ones the link's create applies", async () => {
+    // Mutation: `createSchedule` drops `limits` → the 2-job cap and 5m floor are ignored.
+    const r = rig({
+      limits: { ...DEFAULT_SCHEDULE_LIMITS, maxJobs: 2, minIntervalMs: 5 * MIN },
+    });
+    await r.detachedAfterTurn();
+    const floor = r.link().create({ prompt: "p", every: "4m" });
+    expect(floor.ok).toBe(false);
+    if (!floor.ok) expect(floor.reason).toContain("at least 5m");
+    expect(r.link().create({ prompt: "a", every: "5m" }).ok).toBe(true);
+    expect(r.link().create({ prompt: "b", every: "5m" }).ok).toBe(true);
+    const full = r.link().create({ prompt: "c", every: "5m" });
+    expect(full.ok).toBe(false);
+    if (!full.ok) expect(full.reason).toContain("already 2 scheduled wakes");
+    // A refused create mints no id: the two accepted ones are sc-1 and sc-2.
+    expect(
+      r
+        .link()
+        .list()
+        .map((job) => job.id),
+    ).toEqual(["sc-1", "sc-2"]);
   });
 
   test("T-D11 three failed fires in a row remove the job; a failed turn does NOT block the next fire", async () => {

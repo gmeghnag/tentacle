@@ -188,7 +188,10 @@ Worker: its fired turns are `wake-` turns minted by laptop code. The worker
 call site sets `daemonWakes: true` (next to `sharedAutoAccept`, P11), so the
 local TUI's auto-accept treats them as the session's own
 (`autoAcceptsTurn`, `docs/fix/autoaccept-wake-turns.md` A4). Pods and the relay
-never set it (unchanged).
+never set it (unchanged). **Corrected by S4's executor (verified, 2026-11-16):**
+the bit alone is not enough. The worker TUI's controller (`persistingController`,
+`local-runtime.ts`) forwarded `ownsTurn` but not `autoAcceptsTurn`, so the TUI
+fell back to `ownsTurn` and a `wake-` turn stayed foreign. S4 forwards it too.
 
 #### D2 — Tool shape (model-facing)
 
@@ -1010,6 +1013,161 @@ before the S3 diff (`fulltest-s2b.log`: 5 skip), so no skip is new.
 *— claude-opus-5-5, 2026-11-16 (re-verification + gate)*
 
 **S3: DONE.** S4–S6 not started (per the slice instruction).
+
+### S4 — tools + wiring (the tools, config, which hosts offer them, the worker trust bit)
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Scope: S4 only.** No TUI or mobile changes (S5/S6), and no protocol change.
+
+**Load-bearing check, re-run first** (this tree, before any edit):
+- `prompt()` is at `hosted-session.ts:2399` and takes the slot through
+  `assertIdle()` at `:2424`.
+- `connection.ts:1054` refuses a client `wake-` id; `WAKE_TURN_PREFIX` and
+  `isWakeTurnId` are at `protocol/src/session.ts:311-315`.
+- S4's own preconditions hold. P1: the lazy link is passed in `build` and in
+  `updateSettings` (`session-host.ts:1397`, `:1481`). P2: `workload_shell` and
+  `move_session` are already gated per host (`wiring.ts`). P4: the child filter
+  is at `subagent.ts:395`. P11: the worker sets `sharedAutoAccept`, and only
+  `connect` sets `daemonWakes` (`connect.ts:231`).
+
+**Not blocked.**
+
+**Repro (feature missing):** no `schedule_create` or `schedule_control` was
+registered anywhere. The new host test's first run, after `scheduleLimitsOf`
+existed but before the wiring: **2 pass / 2 fail**. The worker and `serve` were
+offered neither tool; the pod test was already green.
+
+**As built (dependency order; each step red first):**
+1. **Core limits** (`core/src/schedule.ts:46` `ScheduleLimits`, `:55`
+   `DEFAULT_SCHEDULE_LIMITS`). `parseScheduleSpec(…, limits)` and
+   `scheduleCreate(…, {limits})` take the host's limits; the default is owner
+   Q6's. Refusal texts now name the real limit (`at least 5m`, `more than 1d
+   ahead`). `ttlMs` is also the longest `every`: an interval longer than the
+   job's life would never fire. This replaces the separate 7 d interval cap,
+   with the same default.
+   - Red: 4 assertion failures. Green: 39/39.
+2. **Daemon** (`hosted-session.ts:431`): `SessionSchedules.limits?`, passed to
+   `scheduleCreate` (`:3122`).
+   - T-D12 in `daemon/test/schedules.test.ts`: red, then green (18/18).
+3. **Tools** (`tools/src/schedule.ts`, new; exported from `tools/src/index.ts`):
+   - `createScheduleCreateTool(link)`: `permission: "ask"`; a flat
+     `{prompt, every?, at?}`.
+   - `createScheduleControlTool(link)`: `permission: "none"`;
+     `{action: list|delete, id?}`.
+   - Concurrency: `list` reads `schedules`, `delete` writes it, and garbage
+     input is `"exclusive"`.
+   - The link is looked up on every call; `null` (the session ended) gives a
+     tool error.
+   - `scheduleClock` formats times in the host's zone.
+   - Labels: `Schedule` / `Schedules` (`core/src/tool-labels.ts`).
+4. **Child filter** (`agent/src/subagent.ts:403`): both tool names are added.
+   - `agent/test/subagent-schedule.test.ts`: red (a `general` child was offered
+     both), then green.
+5. **Config `schedules.*`**: file-only, never carried, every key
+   per-key-mergeable in a profile.
+   - Keys: `maxJobs` (1–100, default 10), `minIntervalMinutes` (1–1440, default
+     1), `expiryDays` (1–30, default 7), `maxAheadDays` (1–30, default 7),
+     `promptMaxChars` (1–20000, default 2000).
+   - Edited: `schema.ts:414`, `resolve.ts:100` (`SchedulesConfig`, with
+     `sources` entries like `contextAwareness`), `load.ts`, `profile.ts`,
+     `defaults.ts` (constants and a template comment line), `key-docs.ts`.
+   - The README config table was regenerated with `bun run docs:config`
+     (+5 rows).
+   - `config/test/schedules.test.ts`: red 4, then green 4.
+6. **Wiring** (`cli/src/wiring.ts`):
+   - `scheduleLimitsOf(config)` (`:443`) turns minutes/days into the core's ms.
+   - `BuildAgentOptions.schedules` (`:432`) registers both tools only when
+     present (`:723`).
+   - Factories: `workerAgentFactory` (`worker.ts:52`) and `createServeAgent`
+     (`serve.ts:212`) pass `ctx.schedules`.
+   - Hosts: `workerSessionHost` passes `schedules: {limits}` (`worker.ts:118`);
+     `serve` passes `{limits, onAudit}` (`serve.ts:778`).
+   - `podSessionHost` / `tunnelledAgent` are untouched, so a pod gets no table,
+     no link and no tools.
+   - `cli/test/schedule-hosts.test.ts`: one real turn per host, asserting
+     `ChatRequest.tools`. Red 2 (worker, serve), then green 4.
+7. **Worker trust bit** (`cli/src/local-runtime.ts`):
+   - `WORKER_TRUST = {sharedAutoAccept, daemonWakes}` (`:1471`) is spread at the
+     worker call site (`:1552`).
+   - `LocalRuntimeDeps.daemonWakes` (`:929`) is forwarded to `RemoteClient`.
+   - `persistingController` now forwards `autoAcceptsTurn` (`:765`, which keeps
+     `adoptedTurn`).
+   - Comments that said "only `connect` sets `daemonWakes`" were updated
+     (`remote-client.ts`, `remote-session.ts`, `connect.ts`).
+   - `cli/test/worker-daemon-wakes.test.ts`: red 3 (the controller had no
+     `autoAcceptsTurn`), then green 3.
+
+**Drift from Implementation (each deliberate):**
+1. **The plan was missing one link (now fixed in D1).** The worker setting
+   `daemonWakes` did not make its TUI auto-accept a `wake-` turn, because
+   `persistingController` exposed only `ownsTurn`. S4 forwards
+   `autoAcceptsTurn`. For pods and the relay (bit off) it equals `ownsTurn`, so
+   nothing changes there. `relay-policy.ts` still reads only minted turns.
+2. **Core limits are parameterised** (carried from S3's drift 1). This touches
+   S1/S3 code minimally: one optional argument, defaults unchanged, and S1's
+   tests are untouched and green.
+3. **Config key names were chosen here** (the plan only said `schedules.*`).
+   They use unit-suffixed integers (the `toolOutputRetentionDays` style) and
+   have no env vars: file-only, like `contextAwareness`.
+4. **Tool result texts differ slightly from D2's sketch:**
+   - The fired text quotes `· fire N`, because that is what `schedulePromptText`
+     really sends.
+   - A one-shot reads `one-shot at 16:20 (in 2h).`, with no expiry.
+   - The closing sentence is the runtime-neutral "It lasts while this session
+     runs." The tool cannot tell `serve` from the worker.
+5. **The permission-prompt wording (D4/M1) is not S4's.** `Tool` has no
+   permission-summary hook. The ask carries the call's input, and the TUI
+   renders it, so the M1 text belongs to S5.
+6. **Still carried, not S4:** the `move_session` hop's "N scheduled wakes
+   dropped" notice (D7), the expiry/failure notice (S3 drift 5), and the M6
+   quit warning. All are S5's.
+
+**Mutation checks.** Run by `/Users/gmeghnag/tentacle/.tentacle/tmp/cron-tool/mut-s4.ts`.
+Each mutation is one exact substitution, refused unless its site matches
+exactly once. After each run the original bytes are written back and compared.
+All 16 were `restored=true`.
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | filter drops `schedule_create` | 2: both child tests |
+| M2 | filter drops `schedule_control` | 2: both child tests |
+| M3 | `buildAgent` registers the tools unconditionally (a pod would get them) | 1: pod host test |
+| M4 | worker host passes no `schedules` option | 1: worker host test |
+| M5 | worker factory drops `ctx.schedules` | 1: worker host test |
+| M6 | `serve` host passes no `schedules` option | 1: serve host test |
+| M7 | `serve` factory drops `ctx.schedules` | 1: serve host test |
+| M8 | `scheduleLimitsOf` ignores `minIntervalMinutes` | 1: worker host test |
+| M9 | daemon `createSchedule` drops `limits` | 1: T-D12 |
+| M10 | core ignores `limits.minIntervalMs` | 1: core min-interval test |
+| M11 | core ignores `limits.maxJobs` | 1: core caps test |
+| M12 | `WORKER_TRUST` without `daemonWakes` | 1: call-site pin |
+| M13 | `createLocalRuntime` does not forward `daemonWakes` | 1: auto-accept test |
+| M14 | controller `autoAcceptsTurn` answers `ownsTurn` (the pre-S4 fallback) | 1: auto-accept test |
+| M15 | `schedule_create` permission `none` | 1: tools "asks" test |
+| M16 | `delete` ignores the link's answer | 1: tools delete test |
+
+The plan names two targets: "remove from filter → red" (M1/M2) and "`wiring`
+offers them only with the link" (M3–M7).
+
+**Gate** (2026-11-16, this tree):
+- `bunx tsc --noEmit`: clean.
+- `bun run lint`: clean (1701 files).
+- `bun test`: **12287 pass / 5 skip / 1 fail** (12293 tests, 885 files).
+  - The 5 skips are the opt-in group, the same count as S3.
+  - The 1 fail is `packages/exec/test/confinement.test.ts` "R2-4: a hard-linked
+    file INSIDE the root is writable again" (`Expected "new" / Received "old"`).
+    The `exec` package is untouched by this diff (`git diff --stat --
+    packages/exec` is empty). It passed twice in isolation (46/46) and with the
+    whole `exec` package (105/105), so it is a flake under full-suite load, not
+    an S4 regression. It was not reproduced on a clean tree, because a stash or
+    checkout is not allowed here.
+- No protocol schema changed, so `protocol.json` was not regenerated; the
+  `json-schema` drift test passes.
+- Changelog: the existing single fragment `changelog.d/cron-tool.added.md` gains
+  one sentence (it asks first; `schedules.*` limits). The changelog tests pass.
+
+**S4: DONE.** S5–S6 not started.
 
 ## Review
 

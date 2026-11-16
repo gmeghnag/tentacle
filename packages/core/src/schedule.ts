@@ -35,6 +35,30 @@ export const SCHEDULE_MAX_AHEAD_MS = 7 * 86_400_000;
 export const SCHEDULE_PROMPT_MAX_CHARS = 2000;
 /** Consecutive `error` ends of a fired turn before the job is removed. */
 export const SCHEDULE_MAX_FAILURES = 3;
+
+/**
+ * The create-time limits a HOST applies (its own `schedules.*` config, never a
+ * carried setting — docs/feat/cron-tool.md D3, owner Q6). Every one is checked
+ * when a job is created (expiry is stamped then), so the table and `scheduleStep`
+ * need none of them. `ttlMs` is also the longest `every`: an interval past the
+ * job's life would never fire.
+ */
+export interface ScheduleLimits {
+  readonly maxJobs: number;
+  readonly minIntervalMs: number;
+  readonly ttlMs: number;
+  readonly maxAheadMs: number;
+  readonly promptMaxChars: number;
+}
+
+/** Owner Q6's defaults: the constants above, as one value. */
+export const DEFAULT_SCHEDULE_LIMITS: ScheduleLimits = {
+  maxJobs: SCHEDULE_MAX_JOBS,
+  minIntervalMs: SCHEDULE_MIN_INTERVAL_MS,
+  ttlMs: SCHEDULE_TTL_MS,
+  maxAheadMs: SCHEDULE_MAX_AHEAD_MS,
+  promptMaxChars: SCHEDULE_PROMPT_MAX_CHARS,
+};
 /**
  * The daemon re-arms its one timer to at most this: a sleep, a clock jump or a
  * long delay is noticed within 60 s, and the timer never meets `setTimeout`'s
@@ -93,6 +117,13 @@ export function parseDurationMs(text: string): number | null {
   if (!Number.isInteger(count) || count <= 0) return null;
   const ms = count * (unit === "m" ? MINUTE_MS : unit === "h" ? 60 * MINUTE_MS : 86_400_000);
   return Number.isSafeInteger(ms) ? ms : null;
+}
+
+/** `86400000` → `1d`, `300000` → `5m`: a limit in the unit the model writes. */
+function durationText(ms: number): string {
+  if (ms % 86_400_000 === 0) return `${ms / 86_400_000}d`;
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
+  return `${Math.round(ms / MINUTE_MS)}m`;
 }
 
 /** A parsed `every`/`at`, or why it was refused (the model reads the reason and repairs). */
@@ -191,6 +222,7 @@ function localMinuteText(ms: number): string {
 export function parseScheduleSpec(
   request: { readonly every?: string; readonly at?: string },
   now: number,
+  limits: ScheduleLimits = DEFAULT_SCHEDULE_LIMITS,
 ): ParsedSpec {
   const kinds = [request.every, request.at].filter((value) => value !== undefined).length;
   if (kinds !== 1) {
@@ -210,8 +242,11 @@ export function parseScheduleSpec(
           "every: an interval in minutes/hours/days (`10m`, `2h`, `7d`); seconds are not supported",
       };
     }
-    if (intervalMs < SCHEDULE_MIN_INTERVAL_MS || intervalMs > SCHEDULE_MAX_INTERVAL_MS) {
-      return { ok: false, reason: "every: the interval must be at least 1m and at most 7d" };
+    if (intervalMs < limits.minIntervalMs || intervalMs > limits.ttlMs) {
+      return {
+        ok: false,
+        reason: `every: the interval must be at least ${durationText(limits.minIntervalMs)} and at most ${durationText(limits.ttlMs)}`,
+      };
     }
     return {
       ok: true,
@@ -219,7 +254,7 @@ export function parseScheduleSpec(
       spec: `every ${request.every.trim().toLowerCase()}`,
       intervalMs,
       nextAt: now + intervalMs,
-      expiresAt: now + SCHEDULE_TTL_MS,
+      expiresAt: now + limits.ttlMs,
     };
   }
   const at = request.at ?? "";
@@ -231,8 +266,12 @@ export function parseScheduleSpec(
       reason: `at: ${at.trim()} is in the past — give a future time, or use \`every <interval>\``,
     };
   }
-  if (parsed - now > SCHEDULE_MAX_AHEAD_MS) {
-    return { ok: false, reason: "at: the time is more than 7d ahead (the limit is 7d)" };
+  if (parsed - now > limits.maxAheadMs) {
+    const limit = durationText(limits.maxAheadMs);
+    return {
+      ok: false,
+      reason: `at: the time is more than ${limit} ahead (the limit is ${limit})`,
+    };
   }
   return {
     ok: true,
@@ -243,7 +282,7 @@ export function parseScheduleSpec(
     nextAt: parsed,
     // A one-shot keeps its grace, so a host that was asleep past its time still
     // fires it once instead of dropping it unseen.
-    expiresAt: parsed + SCHEDULE_TTL_MS,
+    expiresAt: parsed + limits.ttlMs,
   };
 }
 
@@ -259,9 +298,16 @@ export type ScheduleCreateResult =
 export function scheduleCreate(
   table: readonly ScheduledJob[],
   request: ScheduleRequest,
-  options: { readonly id: string; readonly now: number; readonly createdBy: string },
+  options: {
+    readonly id: string;
+    readonly now: number;
+    readonly createdBy: string;
+    /** The host's `schedules.*` limits; default owner Q6's. */
+    readonly limits?: ScheduleLimits;
+  },
 ): ScheduleCreateResult {
-  const spec = parseScheduleSpec(request, options.now);
+  const limits = options.limits ?? DEFAULT_SCHEDULE_LIMITS;
+  const spec = parseScheduleSpec(request, options.now, limits);
   if (!spec.ok) return { ok: false, reason: spec.reason };
   const prompt = request.prompt.trim();
   if (prompt === "") {
@@ -270,16 +316,16 @@ export function scheduleCreate(
       reason: "prompt: say what you should be told when this fires (it is all you get)",
     };
   }
-  if (prompt.length > SCHEDULE_PROMPT_MAX_CHARS) {
+  if (prompt.length > limits.promptMaxChars) {
     return {
       ok: false,
-      reason: `prompt: at most ${SCHEDULE_PROMPT_MAX_CHARS} characters (${prompt.length} given) — make it a short instruction`,
+      reason: `prompt: at most ${limits.promptMaxChars} characters (${prompt.length} given) — make it a short instruction`,
     };
   }
-  if (table.length >= SCHEDULE_MAX_JOBS) {
+  if (table.length >= limits.maxJobs) {
     return {
       ok: false,
-      reason: `there are already ${SCHEDULE_MAX_JOBS} scheduled wakes in this session (the limit) — delete one with schedule_control {action: "delete"}`,
+      reason: `there are already ${limits.maxJobs} scheduled wakes in this session (the limit) — delete one with schedule_control {action: "delete"}`,
     };
   }
   const job: ScheduledJob = {
