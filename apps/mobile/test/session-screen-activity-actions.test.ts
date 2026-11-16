@@ -37,9 +37,29 @@ interface Fakes {
   killJob?: (jobId: string) => Promise<{ killed: boolean }>;
 }
 
+type SubscriptionKind = "agents" | "jobs" | "sent";
+
 function harness(fakes: Fakes | null) {
-  let agents: ((rows: readonly SubagentRow[]) => void) | null = null;
-  let echo: ((n: { agentId: string; text: string; n?: number }) => void) | null = null;
+  // Every subscription is kept, with whether it is still live: the unreleased
+  // one (a re-attach that forgets to unsubscribe) is only visible this way.
+  const subs: { kind: SubscriptionKind; fn: (arg: never) => void; live: boolean }[] = [];
+  function register(kind: SubscriptionKind, fn: (arg: never) => void): () => void {
+    const sub = { kind, fn, live: true };
+    subs.push(sub);
+    return () => {
+      sub.live = false;
+    };
+  }
+  /** What a handle does on a push: every LIVE subscription hears it, dead ones never. */
+  function deliver(kind: SubscriptionKind, arg: unknown): void {
+    for (const sub of subs) {
+      if (sub.live && sub.kind === kind) {
+        (sub.fn as (a: unknown) => void)(arg);
+      }
+    }
+  }
+  const liveCount = (kind: SubscriptionKind) =>
+    subs.filter((sub) => sub.live && sub.kind === kind).length;
   const calls: string[] = [];
   const handle: SendableHandle = {
     open: () => Promise.resolve(),
@@ -52,22 +72,17 @@ function harness(fakes: Fakes | null) {
       ? {}
       : {
           onSubagents: (fn: (rows: readonly SubagentRow[]) => void) => {
-            agents = fn;
+            const off = register("agents", fn as (arg: never) => void);
             fn([child("sa-1"), child("sa-2")]);
-            return () => {
-              agents = null;
-            };
+            return off;
           },
           onJobs: (fn: (r: { rows: readonly JobRow[]; count: number }) => void) => {
+            const off = register("jobs", fn as (arg: never) => void);
             fn({ rows: [job], count: 1 });
-            return () => {};
+            return off;
           },
-          onSubagentMessage: (fn: (n: { agentId: string; text: string; n?: number }) => void) => {
-            echo = fn;
-            return () => {
-              echo = null;
-            };
-          },
+          onSubagentMessage: (fn: (n: { agentId: string; text: string; n?: number }) => void) =>
+            register("sent", fn as (arg: never) => void),
           messageSubagent: (agentId: string, text: string) => {
             calls.push(`message ${agentId} ${text}`);
             return fakes.message?.(agentId, text) ?? Promise.resolve({ ok: true });
@@ -101,9 +116,10 @@ function harness(fakes: Fakes | null) {
   return {
     screen,
     calls,
-    agents: (rows: SubagentRow[]) => agents?.(rows),
-    echo: (n: { agentId: string; text: string; n?: number }) => echo?.(n),
-    echoing: () => echo !== null,
+    agents: (rows: SubagentRow[]) => deliver("agents", rows),
+    echo: (n: { agentId: string; text: string; n?: number }) => deliver("sent", n),
+    echoing: () => liveCount("sent") > 0,
+    liveCount,
   };
 }
 
@@ -111,6 +127,13 @@ async function attached(fakes: Fakes | null) {
   const h = harness(fakes);
   await h.screen.open();
   return h;
+}
+
+/** Let the attach's awaited continuations run (`reopen` is fire-and-forget). */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 4; i += 1) {
+    await Promise.resolve();
+  }
 }
 
 describe("the person's messages to a child", () => {
@@ -132,6 +155,25 @@ describe("the person's messages to a child", () => {
     h.agents([child("sa-1")]);
     expect(h.screen.state().activity.sent["sa-2"]).toEqual([{ text: "hi", n: 1 }]);
     expect(h.screen.state().activity.sent["sa-9"]).toBeUndefined();
+  });
+});
+
+describe("a re-attach (review round 1, finding 1)", () => {
+  test("the previous subscriptions are released, so one echo is recorded ONCE", async () => {
+    const h = await attached({});
+    expect(h.liveCount("agents")).toBe(1);
+    expect(h.liveCount("jobs")).toBe(1);
+    expect(h.liveCount("sent")).toBe(1);
+    h.screen.reopen(); // the Reopen button: a second attach on the same screen
+    await settle();
+    expect(h.screen.state().status.phase).toBe("open");
+    // One live subscription per stream: the old handle's were released.
+    expect(h.liveCount("agents")).toBe(1);
+    expect(h.liveCount("jobs")).toBe(1);
+    expect(h.liveCount("sent")).toBe(1);
+    // The failure the finding names: a still-live old handle doubles every echo.
+    h.echo({ agentId: "sa-2", text: "salta i test", n: 1 });
+    expect(h.screen.state().activity.sent["sa-2"]).toEqual([{ text: "salta i test", n: 1 }]);
   });
 });
 
@@ -242,6 +284,33 @@ describe("Stop a child (F14, F17)", () => {
     await h.screen.stopChild();
     expect(h.screen.state().activity.child?.notice).toBe("Not stopped: offline");
   });
+
+  test("a second Stop while the first is in flight sends no second kill (S9)", async () => {
+    // The UI's `disabled={busy}` hides this today, but the controller is the
+    // contract: one tap, one kill. A second one's `{killed:false}` would
+    // overwrite a stop that just succeeded with "sa-2 already finished".
+    let release: (v: { killed: boolean }) => void = () => {};
+    let kills = 0;
+    const h = await attached({
+      kill: () => {
+        kills += 1;
+        return kills === 1
+          ? new Promise((resolve) => {
+              release = resolve;
+            })
+          : Promise.resolve({ killed: false });
+      },
+    });
+    h.screen.openChild("sa-2");
+    const first = h.screen.stopChild();
+    expect(h.screen.state().activity.child?.busy).toBe(true);
+    await h.screen.stopChild();
+    expect(h.calls).toEqual(["kill sa-2"]);
+    expect(h.screen.state().activity.child?.notice).toBeNull();
+    release({ killed: true });
+    await first;
+    expect(h.screen.state().activity.child).toMatchObject({ busy: false, notice: null });
+  });
 });
 
 describe("a shell job (F19)", () => {
@@ -285,6 +354,30 @@ describe("a shell job (F19)", () => {
     expect(h.screen.state().activity.job?.notice).toBe("bg-1 already exited");
   });
 
+  test("a second Stop while the first is in flight sends no second killJob (S9)", async () => {
+    let release: (v: { killed: boolean }) => void = () => {};
+    let kills = 0;
+    const h = await attached({
+      killJob: () => {
+        kills += 1;
+        return kills === 1
+          ? new Promise((resolve) => {
+              release = resolve;
+            })
+          : Promise.resolve({ killed: false });
+      },
+    });
+    await h.screen.openJob("bg-1");
+    const first = h.screen.stopJob();
+    expect(h.screen.state().activity.job?.busy).toBe(true);
+    await h.screen.stopJob();
+    expect(h.calls.filter((c) => c.startsWith("killJob"))).toEqual(["killJob bg-1"]);
+    expect(h.screen.state().activity.job?.notice).toBeNull();
+    release({ killed: true });
+    await first;
+    expect(h.screen.state().activity.job).toMatchObject({ busy: false, notice: null });
+  });
+
   test("a thrown read is a found:false notice, never a throw", async () => {
     const h = await attached({ output: () => Promise.reject(new Error("offline")) });
     await h.screen.openJob("bg-1");
@@ -308,6 +401,38 @@ describe("a shell job (F19)", () => {
     release({ found: true, jobId: "bg-1", output: ["late"] });
     await read;
     expect(h.screen.state().activity.job).toBeNull();
+  });
+
+  test("a slow read of the job you LEFT never lands on the next one (S9)", async () => {
+    // Open bg-1 (a slow read), go back, open bg-2; bg-1's read then lands. Its
+    // output must not be shown as bg-2's, which is what `sheetDetail` would do
+    // if it trusted a patch that skipped the identity guard.
+    const releases = new Map<string, (v: JobOutputResult) => void>();
+    const h = await attached({
+      output: (jobId) =>
+        new Promise((resolve) => {
+          releases.set(jobId, resolve);
+        }),
+    });
+    const first = h.screen.openJob("bg-1");
+    h.screen.closeDetail();
+    const second = h.screen.openJob("bg-2");
+    releases.get("bg-2")?.({ found: true, jobId: "bg-2", output: ["bg-2 line"] });
+    await second;
+    expect(h.screen.state().activity.job).toEqual({
+      id: "bg-2",
+      output: { found: true, jobId: "bg-2", output: ["bg-2 line"] },
+      busy: false,
+      notice: null,
+    });
+    releases.get("bg-1")?.({ found: true, jobId: "bg-1", output: ["bg-1 line"] });
+    await first;
+    expect(h.screen.state().activity.job).toEqual({
+      id: "bg-2",
+      output: { found: true, jobId: "bg-2", output: ["bg-2 line"] },
+      busy: false,
+      notice: null,
+    });
   });
 });
 

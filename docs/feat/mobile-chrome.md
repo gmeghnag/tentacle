@@ -3136,7 +3136,22 @@ it is KILLED, as shown above.
 
 ### Gate
 
-GATE_PLACEHOLDER
+*Filled by fix round 1 (the S9 executor left the literal placeholder this
+review's finding 4 names). This is the gate **re-run on the S9 tree plus fix
+round 1's tests** — the honest reading, since no S9-time gate result was ever
+recorded and the tree has since been re-measured. What is certain: the S9 code
+(`activity.ts`, `subagent-detail.ts`, the `SessionScreen` actions) is in the tree
+these numbers were taken on.*
+
+- `bunx tsc --noEmit`, `bunx tsc -p apps/mobile`, `bunx tsc -p apps/relay`:
+  clean (the full `bun run typecheck`).
+- `bun run lint`: **clean, 0 errors / 0 warnings, 1734 files** (AGENTS §6
+  baseline is clean, so "no new issues" is true).
+- `bun test`: **12597 pass · 5 skip · 0 fail**, 902 files, 451 s
+  (`.tentacle/tmp/mobile-chrome/fr1/full.log`). The 5 skips are the documented
+  opt-in ones (2 docker, 2 k8s, 1 slow keepalive); none in `apps/mobile`.
+- `bun test apps/mobile`: **2091 pass · 0 fail**, 152 files
+  (`.tentacle/tmp/mobile-chrome/fr1/mobile-suite.log`).
 
 ### Not done in this slice (and why)
 
@@ -3150,6 +3165,129 @@ GATE_PLACEHOLDER
 - No render test for `SubagentDetail`/`JobDetail`/`ActivitySheet`, for the same reason as
   S8: the RN render stubs are process-global. Their behaviour lives in `subagent-detail.ts`.
 - The short child's report content on the phone while you watch: see drift 8.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16 · answers Review (slices S8 + S9) · my own id, proven below*
+
+**Model id provenance.** My own session transcript,
+`~/.claude/projects/-Users-gmeghnag-tentacle/fa477ae9-96f6-4705-bffa-dce2ef1b77a4.jsonl`
+(the `CLAUDE_CODE_SESSION_ID` in my environment), holds **529 assistant events,
+every one `"model":"claude-opus-5-5"`** (31 more are `"<synthetic>"`, harness noise).
+`~/.claude/settings.json` says `"model": "opus"`. Counted, not assumed.
+
+Scope: the review's **4 MEDIUM, 0 HIGH**. All four were test-non-vacuity gaps plus
+one blank doc field, so **no production code changed** — the fix is three tests
+that pin the three surviving guards, plus the S9 Gate. Every mutation below was
+applied to the real controller, run, and `cmp`'d back to identical.
+
+#### What each finding turned out to be
+
+1. **Re-attach unsubscribe** (`session-screen-controller.ts:860`). The guard
+   exists (`activityWatch?.()` before the new `watchActivity`). §9 requires a
+   test that was RED on the code without it; nothing had one, so deleting the
+   line stayed green. The blocker was that the fake handle dropped the old
+   callback on unsubscribe (`agents = null`), so a leaked subscription was
+   *invisible*. The harness now keeps every subscription with a `live` flag and
+   **delivers only to live ones** — so "the old handle still delivers" is the
+   test, not an assumption.
+2. **`setJob`'s identity guard** (`:753`). Same shape: the guard is right, its
+   only pin was a child-path analogue (M13). Needs a job-path test where a slow
+   `bg-1` read lands after `bg-2` is open.
+3. **`stopChild`/`stopJob` busy guards** (`:1117`, `:1145`). Both guards are
+   correct; the UI's `disabled={busy}` is what hid them from the suite.
+4. **The `GATE_PLACEHOLDER`** (`S9 ### Gate`) — filled above, and honestly
+   labelled: the S9 executor recorded no gate, so the numbers are the ones
+   re-run now (S9 tree + this round's tests), not an S9-time capture.
+
+#### The tests (all in `apps/mobile/test/session-screen-activity-actions.test.ts`)
+
+- Harness: `SubscriptionKind`, `register`, `deliver`, `liveCount` (`:40-70`,
+  `:116-123`) — every `onSubagents`/`onJobs`/`onSubagentMessage` is recorded with
+  a `live` flag, `deliver` skips dead ones, `liveCount(kind)` counts live ones.
+  `agents`/`echo` now go through `deliver`, so they behave like a real handle
+  that stops pushing after an unsubscribe.
+- **Finding 1** — `:161` `the previous subscriptions are released, so one echo is
+  recorded ONCE`: one live sub per stream after attach, `reopen()`, settle, still
+  one live per stream, and one echo → exactly one recorded message.
+- **Finding 2** — `:406` `a slow read of the job you LEFT never lands on the next
+  one (S9)`: open `bg-1` (slow), close, open `bg-2`, `bg-2` resolves, then
+  `bg-1` resolves — the detail is still `bg-2`'s, with `bg-2`'s output.
+- **Finding 3** — `:288` child and `:357` job: a second Stop while the first is
+  in flight sends no second kill (asserted on `calls`, and on `notice` staying
+  null — a second `{killed:false}` would have written "already finished" over a
+  stop that succeeded).
+
+Source lines the guards live at, as they stand after this round (the review
+cited `:1119`/`:1147`; the file shifts by a line or two, so these are checked):
+`activityWatch?.()` before the re-watch at **`:860`**; `setJob`'s identity guard
+at **`:753-757`**; `stopChild`'s busy guard at **`:1117-1120`**; `stopJob`'s at
+**`:1145-1148`**.
+
+#### Red-first, and how each red was reached
+
+The guards are correct, so a plain "add the test" is green immediately — that
+proves nothing (§9). The red is therefore **the review's own mutation**, and
+each test was written to be the thing that kills it. Every mutation below was
+applied to `apps/mobile/src/session-screen-controller.ts`, run against this one
+test file, then `cp`'d back and `cmp`'d against
+`.tentacle/tmp/mobile-chrome/fr1/controller.ts.bak` (**identical** every time).
+Script: `.tentacle/tmp/mobile-chrome/fr1/mutate.sh` (asserts the anchor matches
+exactly once, so a mis-anchored mutation cannot silently no-op); outputs
+`m3.out`–`m5.out`.
+
+| # | Mutation (the review's surviving one) | Result |
+|---|---|---|
+| M1 | `activityWatch?.()` before `watchActivity` deleted (finding 1) | **KILLED** — `liveCount("agents")` Expected 1, Received **2** |
+| M2 | `setJob` guards "any open job" instead of THAT job (finding 2) | **KILLED** — detail showed `jobId: "bg-1"` / `["bg-1 line"]` for open `bg-2` |
+| M3 | `stopChild` drops `|| open.busy` (finding 3) | **KILLED** — `calls` got a second `"kill sa-2"` |
+| M4 | `stopJob` drops `|| open.busy` (finding 3) | **KILLED** — `killJob` got a second `"killJob bg-1"` |
+| M5 | `watchActivity` returns a no-op unsubscribe (whole teardown dead) | **KILLED** — 2 tests (finding 1's + the existing leave test) |
+
+**M3 was weak on its first form and was rewritten.** With the fake returning a
+never-settling promise for *both* kills, the mutation made the test **time out
+(5000 ms)** rather than fail an assertion — a killed-by-timeout is not the
+property (§9). The fake now answers the *second* call with `{killed:false}`
+immediately, so M3 fails on `expect(h.calls).toEqual(["kill sa-2"])` with the
+extra `"kill sa-2"` — the actual bug — in 0.27 ms. M4 got the same shape from the
+start. M5 exists because M1 alone could be satisfied by a test that only counted
+the registry: M5 kills the *entire* teardown and still fails, so the new test is
+not pinned to one line.
+
+#### Drift from the plan
+
+- **None to the Implementation's Design.** No production line changed: every
+  guard the review found unpinned was already correct, so this round is tests +
+  one doc field. `git status --porcelain` after the round lists exactly
+  `apps/mobile/test/session-screen-activity-actions.test.ts` and
+  `docs/feat/mobile-chrome.md`.
+- **The harness changed more than "add a test file" would suggest.** The real
+  blocker for finding 1 was the fake's `agents = null` teardown hiding a leak; a
+  test could not be written without making the fake model `unsubscribe`
+  honestly. That is the fake's contract matching `RemoteSession`'s, not scope
+  creep — and the existing leave/dispose tests still pass through it.
+
+#### Gate (this round)
+
+- `bunx tsc --noEmit` → clean; `bunx tsc -p apps/mobile` → clean
+  (`bunx tsc -p apps/relay` covered by the full `bun run typecheck`). The review
+  had already re-run `bun run typecheck` clean.
+- `bun run lint` → **clean, 0 errors / 0 warnings, 1734 files**.
+- `bun test apps/mobile` → **2091 pass · 0 fail**, 152 files, 13.7 s.
+- `bun test` (full) → **12597 pass · 5 skip · 0 fail**, 902 files, 451 s
+  (`.tentacle/tmp/mobile-chrome/fr1/full.log`). 5 skips = the documented opt-ins.
+- The single targeted file: **20 pass · 0 fail** (was 17 before this round).
+
+#### Not done, and why
+
+- **Flow 27 and the visual check against row D are still owed** — the `PushCore`
+  iOS build blocker the slices recorded still stands. Nothing in this round can
+  settle it.
+- **No device proof for the three fixed contracts.** They are controller-seam
+  properties (subscription liveness, identity guards, busy guards), which is
+  exactly what a fake-handle test can prove and pixels cannot.
+- **S9's Gate is a re-run, not a capture.** Stated in the section itself so the
+  record does not claim a measurement nobody took.
 
 ## Review (slices S8 + S9)
 
