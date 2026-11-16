@@ -186,6 +186,121 @@ describe("S5 M2: the dock's row and the pill", () => {
   });
 });
 
+describe("S5 fix round 1: a deliberate delete is never blamed on a failure", () => {
+  test("the panel's own `x x` says `Deleted`, and never `repeated failures`", async () => {
+    const api = fake({ schedules: [WAKE_1] });
+    const t = await mount(api);
+    await t.line("/schedule");
+    t.term.stdin.write("x");
+    await delay(60);
+    t.term.stdin.write("x");
+    await delay(60);
+    expect(api.deletes).toEqual(["sc-1"]);
+    // The daemon publishes the shrunk table — the only frame a delete produces.
+    api.report([]);
+    await delay(120);
+    const frame = t.frame();
+    expect(frame).toContain("Deleted sc-1.");
+    expect(frame).not.toContain("repeated failures");
+    expect(frame).not.toContain("fired and is done");
+    // And no second line about the same wake: `Deleted sc-1.` is the whole story.
+    expect(frame).not.toContain("is no longer scheduled");
+    t.term.unmount();
+  });
+
+  test("someone ELSE's delete says only that it is gone (no cause is invented)", async () => {
+    const api = fake({ schedules: [WAKE_1, WAKE_2] });
+    const t = await mount(api);
+    // A phone (or the model's `schedule_control{delete}`) removes the one-shot.
+    api.report([WAKE_1]);
+    await delay(120);
+    const frame = t.frame();
+    expect(frame).toContain("Schedule sc-2 is no longer scheduled.");
+    expect(frame).not.toContain("fired and is done");
+    expect(frame).not.toContain("repeated failures");
+    t.term.unmount();
+  });
+
+  test("the dock's `ctrl+x ctrl+x` is the same: `Deleted`, never a failure", async () => {
+    const api = fake({ schedules: [WAKE_1] });
+    const t = await mount(api);
+    await openDropdown(t.term);
+    t.term.stdin.write(CTRL_X);
+    await delay(60);
+    t.term.stdin.write(CTRL_X);
+    await delay(60);
+    expect(api.deletes).toEqual(["sc-1"]);
+    api.report([]);
+    await delay(120);
+    const frame = t.frame();
+    expect(frame).toContain("Deleted sc-1.");
+    expect(frame).not.toContain("repeated failures");
+    expect(frame).not.toContain("is no longer scheduled");
+    t.term.unmount();
+  });
+});
+
+describe("S5 fix round 1: the /schedule panel follows the table", () => {
+  test("a delete's frame empties the panel: `No scheduled wakes`, no row, no ghost delete", async () => {
+    const api = fake({ schedules: [WAKE_1] });
+    const t = await mount(api);
+    await t.line("/schedule");
+    expect(t.frame()).toContain("Scheduled wakes (1)");
+    // The daemon answers the delete with the shrunk table (nothing else does).
+    t.term.stdin.write("x");
+    await delay(60);
+    t.term.stdin.write("x");
+    await delay(60);
+    api.report([]);
+    await delay(120);
+    const frame = t.frame();
+    expect(frame).toContain("No scheduled wakes");
+    expect(frame).not.toContain("check CI on PR #412");
+    // A second `x x` on an empty panel sends nothing (the ghost is gone).
+    t.term.stdin.write("x");
+    await delay(60);
+    t.term.stdin.write("x");
+    await delay(80);
+    expect(api.deletes).toEqual(["sc-1"]);
+    t.term.unmount();
+  });
+
+  test("a wake created while the panel is open appears without re-opening it", async () => {
+    const api = fake({ schedules: [WAKE_1] });
+    const t = await mount(api);
+    await t.line("/schedule");
+    expect(t.frame()).toContain("Scheduled wakes (1)");
+    expect(t.frame()).not.toContain("remind: standup notes");
+    // The model's `schedule_create` fires one while the panel is up.
+    api.report([WAKE_1, WAKE_2]);
+    await delay(120);
+    const frame = t.frame();
+    expect(frame).toContain("Scheduled wakes (2)");
+    expect(frame).toContain("remind: standup notes");
+    t.term.unmount();
+  });
+
+  test("the cursor is clamped by the report, so `x` never addresses a gone row", async () => {
+    const api = fake({ schedules: [WAKE_1, WAKE_2] });
+    const t = await mount(api);
+    await t.line("/schedule");
+    t.term.stdin.write(DOWN);
+    await delay(60);
+    // The second wake leaves under the cursor (a phone's delete).
+    api.report([WAKE_1]);
+    await delay(120);
+    t.term.stdin.write("x");
+    await delay(60);
+    const armed = t.frame();
+    // The arm names the row the cursor fell back on, never the gone `sc-2`.
+    expect(armed).not.toContain("delete sc-2?");
+    t.term.stdin.write("x");
+    await delay(80);
+    expect(api.deletes).toEqual(["sc-1"]);
+    t.term.unmount();
+  });
+});
+
 describe("S5 M3: the /schedule panel", () => {
   test("each wake is a summary plus its quoted prompt, and `x x` deletes", async () => {
     const api = fake({ schedules: [WAKE_1, WAKE_2] });
@@ -277,12 +392,14 @@ describe("S5: a wake that leaves the table says why (S3 drift 5)", () => {
     t.term.unmount();
   });
 
-  test("a wake still in date was stopped after failures, and says THAT", async () => {
+  test("a wake still in date is not blamed on failures: it is simply gone", async () => {
     const api = fake({ schedules: [WAKE_1] });
     const t = await mount(api);
     api.report([]);
     await delay(120);
-    expect(t.frame()).toContain("Schedule sc-1 stopped after repeated failures.");
+    const frame = t.frame();
+    expect(frame).toContain("Schedule sc-1 is no longer scheduled.");
+    expect(frame).not.toContain("repeated failures");
     t.term.unmount();
   });
 });

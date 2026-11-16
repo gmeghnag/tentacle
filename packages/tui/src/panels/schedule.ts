@@ -15,6 +15,7 @@ import type { KeySnapshot } from "../keys/snapshot.ts";
 import {
   type ScheduleDeleteStep,
   type ScheduleDockRow,
+  refreshedSchedules,
   scheduleDeleteStep,
   scheduleKey,
   schedulesMove,
@@ -114,3 +115,19 @@ export const withSchedulesState = (
   panel: OpenPanel | null,
   state: SchedulesPanel["state"],
 ): OpenPanel | null => (panel?.kind === "schedule" ? { ...panel, state } : panel);
+
+/**
+ * The open `/schedule` panel after a REPORT (`refreshedSessions`' counterpart,
+ * fix round 1 finding 2): the daemon's new table, the clock re-stamped (the rows'
+ * distances are computed from it), and the cursor/arm brought back in range by
+ * `refreshedSchedules`. Without this the panel is a SNAPSHOT: it would keep a
+ * deleted wake and offer a delete for an id the table no longer has.
+ */
+export const withSchedulesData = (
+  panel: OpenPanel | null,
+  rows: readonly ScheduleDockRow[] | undefined,
+  now: number,
+): OpenPanel | null =>
+  panel?.kind === "schedule"
+    ? { ...panel, data: rows, now, state: refreshedSchedules(panel.state, rows) }
+    : panel;

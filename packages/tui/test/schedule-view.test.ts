@@ -13,6 +13,7 @@ import {
   type ScheduleDockRow,
   departedScheduleNotice,
   firedScheduleHead,
+  refreshedSchedules,
   scheduleDeleteStep,
   scheduleKey,
   scheduleMeta,
@@ -103,6 +104,22 @@ describe("S5: the /schedule panel", () => {
     expect(texts[3]).toContain('"remind: standup notes"');
   });
 
+  test("an expiry names ITS OWN month, never a hardcoded one (fix round 1)", () => {
+    // Two LOCAL dates, so the assertion holds in any zone: the clock is 3 Jan
+    // and the wake expires on 15 Feb — the bug painted `expires 15 Jan`.
+    const now = new Date(2026, 0, 3, 12, 0, 0).getTime();
+    const feb = new Date(2026, 1, 15, 12, 0, 0).getTime();
+    const view = schedulesView([every({ expiresAt: feb })], SCHEDULES_START, now, 120, 8);
+    const summary = view.rows[0]?.text ?? "";
+    expect(summary).toContain("expires 15 Feb");
+    expect(summary).not.toContain("Jan");
+    // Same month, and the year boundary: the month follows the DATE.
+    const dec = new Date(2025, 11, 6, 12, 0, 0).getTime();
+    const jan = new Date(2026, 0, 2, 12, 0, 0).getTime();
+    const crosses = schedulesView([every({ expiresAt: dec })], SCHEDULES_START, jan, 120, 8);
+    expect(crosses.rows[0]?.text ?? "").toContain("expires 6 Dec");
+  });
+
   test("the selected wake is marked, and the cursor walks WAKES not lines", () => {
     const view = schedulesView([every(), at()], { cursor: 1, armed: null }, NOW, 100, 8);
     expect(view.rows[0]?.selected).toBe(false);
@@ -182,6 +199,27 @@ describe("S5: deleting a wake is an arm, then a delete", () => {
   });
 });
 
+describe("S5: the /schedule panel FOLLOWS the table (fix round 1)", () => {
+  test("a report replaces the rows, re-stamps the clock and keeps a live cursor", () => {
+    const before = { cursor: 1, armed: null };
+    const next = refreshedSchedules(before, [every(), every({ id: "sc-3" })]);
+    expect(next.cursor).toBe(1);
+    expect(next.armed).toBeNull();
+  });
+
+  test("a shrunken table clamps the cursor, and an emptied one goes to 0", () => {
+    expect(refreshedSchedules({ cursor: 4, armed: null }, [every()]).cursor).toBe(0);
+    expect(refreshedSchedules({ cursor: 3, armed: null }, []).cursor).toBe(0);
+    expect(refreshedSchedules({ cursor: 3, armed: null }, undefined).cursor).toBe(0);
+  });
+
+  test("an arm on a row the report dropped disarms (it cannot delete a ghost)", () => {
+    expect(refreshedSchedules({ cursor: 1, armed: "sc-2" }, [every()]).armed).toBeNull();
+    // Still there: the arm survives its own table's report.
+    expect(refreshedSchedules({ cursor: 0, armed: "sc-1" }, [every(), at()]).armed).toBe("sc-1");
+  });
+});
+
 describe("S5: the fired turn's head (M4 option B, degrading to A)", () => {
   test("names the id and the interval, and reads `fire N` out of the durable prefix", () => {
     const head = firedScheduleHead(
@@ -253,16 +291,36 @@ describe("S5: a wake that left the table says why (S3 drift 5, derived from the 
     expect(departedScheduleNotice([gone], [], NOW)).toBe("Schedule sc-1 expired.");
   });
 
-  test("still in date: it was stopped after failing turns", () => {
+  test("still in date: it says it is GONE, and never a cause it cannot know", () => {
+    // Fix round 1 (finding 1): a row leaving the table proves only that it left.
+    // Its cause may be the user's own delete, a phone's, the model's
+    // `schedule_control{delete}`, a fire, or 3 failing turns — this TUI sees one
+    // shrunk list, so it claims none of them.
     expect(departedScheduleNotice([every()], [], NOW)).toBe(
-      "Schedule sc-1 stopped after repeated failures.",
+      "Schedule sc-1 is no longer scheduled.",
     );
   });
 
-  test("a one-shot that fired and left is not an expiry and not a failure", () => {
-    // A one-shot's `expiresAt` is absent, so it has no expiry to speak of; its
-    // fire is the reason it is gone.
-    expect(departedScheduleNotice([at()], [], NOW)).toBe("Schedule sc-2 fired and is done.");
+  test("a one-shot that left is not claimed as fired (it may have been deleted)", () => {
+    expect(departedScheduleNotice([at()], [], NOW)).toBe("Schedule sc-2 is no longer scheduled.");
+  });
+
+  test("the ids this TUI deleted ITSELF stay silent (mutation: ignore the set)", () => {
+    // Its own `x x` already said `Deleted sc-1.`; a second line about it is noise.
+    expect(departedScheduleNotice([every()], [], NOW, new Set(["sc-1"]))).toBeNull();
+  });
+
+  test("a suppressed id does not silence another row's departure in the same report", () => {
+    expect(departedScheduleNotice([every(), at()], [], NOW, new Set(["sc-1"]))).toBe(
+      "Schedule sc-2 is no longer scheduled.",
+    );
+  });
+
+  test("an expiry is still named for an id that is NOT this TUI's own delete", () => {
+    const gone = every({ expiresAt: NOW - 1 });
+    expect(departedScheduleNotice([gone], [], NOW, new Set(["sc-9"]))).toBe(
+      "Schedule sc-1 expired.",
+    );
   });
 
   test("nothing left, or a row still there: no notice (mutation: diff by LENGTH)", () => {
@@ -274,7 +332,7 @@ describe("S5: a wake that left the table says why (S3 drift 5, derived from the 
 
   test("two departures are two lines, each honest", () => {
     const text = departedScheduleNotice([every({ expiresAt: NOW - 1 }), at()], [], NOW);
-    expect(text).toBe("Schedule sc-1 expired.\nSchedule sc-2 fired and is done.");
+    expect(text).toBe("Schedule sc-1 expired.\nSchedule sc-2 is no longer scheduled.");
   });
 
   test("a hostile id is bounded into the sentence", () => {

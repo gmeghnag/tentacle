@@ -53,6 +53,28 @@ export interface SchedulesState {
 
 export const SCHEDULES_START: SchedulesState = { cursor: 0, armed: null };
 
+/** The months a row's expiry names (`6 Dec`): English, as every other row here. */
+const MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+/** A day and its month, in the VIEWER's zone (`6 Dec`), never a fixed month. */
+function dayMonth(at: number): string {
+  const d = new Date(at);
+  return `${d.getDate()} ${MONTHS[d.getMonth()] ?? ""}`.trim();
+}
+
 /** The dock's title column: the prompt, one line, cut in cells. */
 export function scheduleTitle(row: ScheduleDockRow): string {
   return truncateCells(oneLine(row.prompt), SCHEDULE_TITLE_COLS);
@@ -100,8 +122,7 @@ export function scheduleRows(
 /** One wake's summary line (the row the cursor walks), in the panel's grammar. */
 function summaryRow(row: ScheduleDockRow, now: number, selected: boolean): string {
   // `sc-1  every 10m   next 14:30 (in 9m)   fired 4×   expires 22 Nov`
-  const expires =
-    row.expiresAt === undefined ? "" : `   expires ${new Date(row.expiresAt).getDate()} Nov`;
+  const expires = row.expiresAt === undefined ? "" : `   expires ${dayMonth(row.expiresAt)}`;
   return [
     selected ? "❯ " : "  ",
     fit(oneLine(row.id), 10).padEnd(10),
@@ -165,6 +186,23 @@ export function schedulesView(
     hint,
     start: win.start,
   };
+}
+
+/**
+ * The panel's state over a NEW table (`refreshedSessions`' counterpart, fix round
+ * 1 finding 2): the cursor kept in range — a wake that left must not leave the
+ * cursor past the end, or the next `x` would address a row that is gone — and an
+ * arm dropped when the row it names is no longer there (an arm must never be
+ * able to delete a ghost).
+ */
+export function refreshedSchedules(
+  state: SchedulesState,
+  rows: readonly ScheduleDockRow[] | undefined,
+): SchedulesState {
+  const count = rows?.length ?? 0;
+  const cursor = count === 0 ? 0 : Math.min(Math.max(0, state.cursor), count - 1);
+  const still = state.armed !== null && (rows ?? []).some((row) => row.id === state.armed);
+  return { cursor, armed: still ? state.armed : null };
 }
 
 export type ScheduleKeyAction = "up" | "down" | "delete" | "close" | "none";
@@ -256,26 +294,31 @@ export function firedScheduleHead(
 
 /**
  * The notice a row that LEFT the table leaves in the transcript (S3's drift 5,
- * carried to S5): derived from the LIST DIFF, never a frame of its own. Past its
- * `expiresAt` → `expired`; a recurring wake still in date → its fired turns kept
- * failing; a one-shot with no expiry → it fired, which is what it was for.
+ * carried to S5). Derived from the LIST DIFF, never a frame of its own, so it can
+ * only state what the diff PROVES: that the row is gone. Past its `expiresAt` it
+ * may name that expiry (the clock is evidence); nothing else is claimed, because
+ * a departure is equally the user's own `x x`, a phone's delete, the model's
+ * `schedule_control{delete}`, a one-shot's fire, or 3 failing turns — and a
+ * guessed cause is a false statement, not a nicety (fix round 1, finding 1).
+ *
+ * `own` is the ids THIS TUI deleted: it already said `Deleted sc-N.`, so a second
+ * line about the same wake is noise (and its cause would be wrong).
  */
 export function departedScheduleNotice(
   before: readonly ScheduleDockRow[],
   after: readonly ScheduleDockRow[],
   now: number,
+  own: ReadonlySet<string> = new Set(),
 ): string | null {
   const live = new Set(after.map((row) => row.id));
   const lines = before
-    .filter((row) => !live.has(row.id))
+    .filter((row) => !live.has(row.id) && !own.has(row.id))
     .map((row) => {
       const id = fit(oneLine(row.id), NOTICE_ID_MAX);
       if (row.expiresAt !== undefined && row.expiresAt <= now) {
         return `Schedule ${id} expired.`;
       }
-      return row.kind === "at"
-        ? `Schedule ${id} fired and is done.`
-        : `Schedule ${id} stopped after repeated failures.`;
+      return `Schedule ${id} is no longer scheduled.`;
     });
   return lines.length === 0 ? null : lines.join("\n");
 }

@@ -1889,3 +1889,113 @@ fail** (12201 tests, 874 files). All 5 skips are opt-in: k8s live ×2
 - (d) Quit: a `connect` detach passes 0, and a closing quit asks. Holds.
 
 **Executor behaviour:** thorough and honest about its drift (ctrl+x vs x, the snapshot "no request" choice). But drift 3 assumed the load re-read was enough without proving that the panel follows, and its departure diff never considered a deliberate delete.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16* (fixing the S5 review above; the same model id as
+that reviewer, so a fresh-context Review of this round is still owed.)
+
+**Findings addressed: all three (2 HIGH + 1 MEDIUM).** Every one reproduced on
+this branch at `6cf1a27c` before any edit, with
+`.tentacle/tmp/cron-tool/s5rev/repro.test.ts` (the reviewer's own script, run as
+`bun test <abs path>`): `/schedule` → `x x` painted the panel still holding
+`Scheduled wakes (1)` with `sc-1`, then "Schedule sc-1 stopped after repeated
+failures." and "Deleted sc-1.", and the row read `expires 6 Nov` for an expiry on
+6 Dec.
+
+**Root cause, one sentence each:**
+1. `departedScheduleNotice` (`schedule-view.ts`) derived a *cause* from a list
+   diff that only proves a *departure*, so the user's own delete, a phone's
+   delete, the model's `schedule_control{delete}`, a one-shot's fire and 3
+   failing turns all came out as "stopped after repeated failures".
+2. `commands/schedule.ts` copied `schedulesRef.current` into
+   `SchedulesPanel.data` once and nothing ever wrote it again — the panel was a
+   snapshot of the instant `/schedule` was typed.
+3. `summaryRow` formatted the expiry as `getDate() Nov` — the month was a
+   literal.
+
+**As built**
+- **Finding 1 — no guessed cause.** `schedule-view.ts`'s
+  `departedScheduleNotice(before, after, now, own = new Set())` now says only
+  what the diff proves: `Schedule sc-1 expired.` when the row's own `expiresAt`
+  is past (the clock is evidence), else `Schedule sc-1 is no longer scheduled.`
+  The `kind === "at"` → "fired and is done" and the failures sentence are gone.
+  The `own` set suppresses the ids **this TUI** deleted, which already have a
+  `Deleted sc-1.` line — and their departure would be attributed to them, not to
+  a cause. `useDock` gained `ownScheduleDeletesRef` (a `Set<string>`), written by
+  a successful `deleteSchedule` **before** the frame that drops the row can
+  arrive, shared with the `/schedule` panel's delete (`usePanels` writes it too,
+  through the same `PanelsHost` field), and cleared when a report is `undefined`
+  (a session switch: the deleted-id memory belongs to the session that went).
+- **Finding 2 — the panel follows the table.** New pure rules:
+  `schedule-view.ts`'s `refreshedSchedules(state, rows)` (`refreshedSessions`'
+  counterpart: the cursor clamped, `0` for an empty/`undefined` table, and an arm
+  dropped when the row it names is gone — an arm must never delete a ghost) and
+  `panels/schedule.ts`'s `withSchedulesData(panel, rows, now)` (the new table, the
+  `now` re-stamped for the rows' distances, the state through
+  `refreshedSchedules`). `usePanels` exposes `setSchedulesData`, and `App`'s new
+  `followSchedules` is what `useSessionLink` now installs in place of `setSchedules`:
+  it writes the dock's rows **and** the open panel. One feed, both surfaces.
+- **Finding 3 — the real month.** `schedule-view.ts`'s `dayMonth(at)` formats the
+  day and the month name in the viewer's zone from the date itself (`6 Dec`).
+
+**Drift from the review's suggested shapes (and why)**
+- The review offered "suppress the ids it deleted itself, *or* word the fallback
+  neutrally". Both were done, because neither alone is enough: the neutral
+  wording alone still prints a second line about a wake the user just deleted
+  (noise, and `Deleted` already said it), and suppression alone would leave the
+  guessing sentence for every other departure (a phone's delete is the common
+  case). Expiry stays named — it is the one cause the row's own data proves.
+- `ownScheduleDeletesRef` lives in `useDock` (where the dock's delete and the
+  `schedules` feed already are) and travels as a `PanelsHost` field rather than a
+  new `App`-owned ref: one set, one owner, both executors.
+- The scope test-pinned: no protocol change, no new frame, no daemon edit — the
+  fix is entirely the laptop's reading of a list it already receives.
+- **Consequence, accepted:** because `followSchedules` is the field
+  `useSessionLink` installs, a session SWITCH now also writes the panel (with
+  `undefined`, the switch's reset), so an open `/schedule` shows the honest "not
+  supported" placeholder for the tick before the new session's `onSchedules`
+  reports, instead of keeping the previous session's rows. Stale rows from
+  another session were the worse of the two, and the client's follow delivers the
+  current table at install, so the window is one tick.
+
+**Tests (red first, §9).** Red evidence is `.tentacle/tmp/cron-tool/red-f1.ts`:
+it applies all 8 pre-fix variants at once over the *new* tests, runs them, then
+restores every file from its original bytes and compares. **15 fail / 37 pass**
+on the pre-fix code (assertions, not compile errors), restored=true. Green after
+the fix: `schedule-view.test.ts` + `schedule-panel-frames.test.tsx` = 52 pass / 0
+fail.
+
+**Mutation checks** — `.tentacle/tmp/cron-tool/mut-f1.ts` (one exact substitution
+each, refused unless the site matches exactly once, file rewritten from its
+original bytes and compared after every run; all `restored=true`):
+
+| # | Mutation | Red |
+|---|---|---|
+| F1-a | `departedScheduleNotice` ignores `own` | 2: the two own-suppression tests |
+| F1-b | the guessed cause is back (failures / fired) | 3: all three frame/pure cause tests |
+| F1-c | the dock's delete is not recorded as ours | 1: the dock's `ctrl+x ctrl+x` frame test |
+| F1-d | the panel's delete is not recorded as ours | 1: the panel's `x x` frame test |
+| F2-a | the followed report never reaches the panel | 3: all three panel-follows frame tests |
+| F2-b | `refreshedSchedules` does not clamp the cursor | 1: the clamp test |
+| F2-c | `refreshedSchedules` keeps an arm on a gone row | 1: the disarm test |
+| F3-a | the hardcoded `Nov` is back | 1: `an expiry names ITS OWN month` |
+
+**Gate** (2026-11-17, this tree):
+- `bunx tsc --noEmit`: clean.
+- `bun run lint`: clean (1706 files).
+- `bun test`: **12340 pass / 5 skip / 0 fail** (12345 tests, 887 files) — the 5
+  skips are the opt-in group (live k8s ×2, live docker ×2, slow keepalive ×1).
+  The S5 execution's count was 12332; the 8 new tests are the difference.
+- No protocol schema changed, `PROTOCOL_VERSION` untouched, `protocol.json` not
+  regenerated. The one changelog fragment (`changelog.d/cron-tool.added.md`) was
+  corrected where it promised the old behaviour: "a wake that expired **or
+  stopped after repeated failures** says so" → a wake that left says it is gone,
+  an expiry is named.
+
+**Not done / carried:** the reviewer's LOW (the dock's armed meta
+`delete ${schedule.id}?` in `background-list.ts` and the `Deleted ${id}` notices
+use the raw id) is untouched — it is explicitly LOW because the client already
+bounds and sanitizes the id, and changing it would touch `background-list.ts`'s
+column arithmetic for no safety gain. Still owed: a **fresh-context** Review of
+this round (this fix and the S5 review share a model id).

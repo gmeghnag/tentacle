@@ -26,7 +26,7 @@ import { useCallback, useRef } from "react";
 import type { SessionController, SessionDirectory } from "./app-types.ts";
 import { SCHEDULE_UNSUPPORTED } from "./commands/schedule.ts";
 import { type OpenPanel, applyPanel } from "./panel.ts";
-import { isScheduleOpen, withSchedulesState } from "./panels/schedule.ts";
+import { isScheduleOpen, withSchedulesData, withSchedulesState } from "./panels/schedule.ts";
 import {
   deleteFailedNotice,
   isSessionsOpen,
@@ -53,6 +53,12 @@ export interface PanelsHost {
   readonly pushNotice: (text: string) => void;
   /** The live session (the `/schedule` delete goes through its client). */
   readonly sessionRef: { readonly current: SessionController | null };
+  /**
+   * The ids this TUI deleted, written by a successful `/schedule` delete too
+   * (cron-tool fix round 1, finding 1): the departure notice must not explain
+   * the panel's own delete as a failure or a fire.
+   */
+  readonly ownScheduleDeletesRef: { readonly current: Set<string> };
 }
 
 /** The panels' actions, under the identifiers `App` already used. */
@@ -77,6 +83,12 @@ export interface PanelsLayer {
   sessionsDelete(id: string, startedGen: number): void;
   /** Write the `/schedule` panel's own state (its arm/answer, cron-tool S5). */
   setSchedulesState(state: SchedulesState): void;
+  /**
+   * The open `/schedule` panel follows a REPORT (cron-tool fix round 1, finding
+   * 2): the new table, re-stamped, cursor and arm brought back in range. Without
+   * it the panel is the snapshot it was opened on.
+   */
+  setSchedulesData(rows: readonly ScheduleDockRow[] | undefined, now: number): void;
   /** Delete one scheduled wake; the row leaves on the daemon's own frame. */
   deleteSchedule(id: string, startedGen: number): void;
 }
@@ -84,6 +96,7 @@ export interface PanelsLayer {
 export function usePanels(host: PanelsHost): PanelsLayer {
   // Destructured so the callbacks' deps name FIELDS, never the port (Fable H2).
   const { panelRef, setPanel, sessions, switchingRef, columns, pushNotice, sessionRef } = host;
+  const { ownScheduleDeletesRef } = host;
 
   const panelGenRef = useRef(0);
 
@@ -136,6 +149,13 @@ export function usePanels(host: PanelsHost): PanelsLayer {
     [setPanel],
   );
 
+  /** An open `/schedule` panel follows the daemon's report (cron-tool fix round 1, finding 2). */
+  const setSchedulesData = useCallback(
+    (rows: readonly ScheduleDockRow[] | undefined, now: number) =>
+      setPanel((p) => withSchedulesData(p, rows, now)),
+    [setPanel],
+  );
+
   /**
    * Delete one scheduled wake, then refresh the panel — but only if it is still
    * THE SAME panel: the generation the key landed in is compared at the answer,
@@ -156,6 +176,10 @@ export function usePanels(host: PanelsHost): PanelsLayer {
         (result) => {
           if (!applies()) return;
           if (result.deleted) {
+            // Ours: the frame that drops it must not be re-explained as a
+            // failure (fix round 1, finding 1). Recorded BEFORE that frame can
+            // arrive, as the dock's own delete does.
+            ownScheduleDeletesRef.current.add(id);
             pushNotice(`_Deleted ${id}._`);
             return;
           }
@@ -167,7 +191,7 @@ export function usePanels(host: PanelsHost): PanelsLayer {
         },
       );
     },
-    [sessionRef, pushNotice, panelRef],
+    [sessionRef, pushNotice, panelRef, ownScheduleDeletesRef],
   );
 
   const touch = useCallback(() => setPanel((p) => touchPanel(p)), [setPanel]);
@@ -217,6 +241,7 @@ export function usePanels(host: PanelsHost): PanelsLayer {
     panelApply,
     setSessionsState,
     setSchedulesState,
+    setSchedulesData,
     deleteSchedule,
     touchPanel: touch,
     closePanel,

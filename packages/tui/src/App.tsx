@@ -63,6 +63,7 @@ import {
   autoAcceptTest,
   usePermissionBroker,
 } from "./permission-ui.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import { useAttachments } from "./useAttachments.ts";
 import { useDock } from "./useDock.ts";
 import { useHop } from "./useHop.ts";
@@ -529,7 +530,8 @@ export function App({
   });
   const { subagents, subagentsRef, setAgents, dockLastRowsRef } = dockLayer;
   const { jobRows, jobRowsRef, setJobs, dockLastJobRowsRef } = dockLayer;
-  const { scheduleRows, schedulesRef, setSchedules, deleteSchedule } = dockLayer;
+  const { scheduleRows, schedulesRef, setSchedules, ownScheduleDeletesRef, deleteSchedule } =
+    dockLayer;
   const { dockOutcomeRef, dockFinishedRef, dockStoppedRef } = dockLayer;
   const { jobOutputRef, setJobOutputGen, jobReadAtRef } = dockLayer;
   const { dock, dockRef, setDock, dockIds, dockVisible } = dockLayer;
@@ -1234,6 +1236,7 @@ export function App({
     panelApply,
     setSessionsState,
     setSchedulesState,
+    setSchedulesData,
     deleteSchedule: deleteScheduleInPanel,
     touchPanel,
     closePanel,
@@ -1247,7 +1250,24 @@ export function App({
     columns,
     pushNotice,
     sessionRef,
+    ownScheduleDeletesRef,
   });
+
+  /**
+   * The daemon's `schedules` report, for EVERY surface at once (cron-tool fix
+   * round 1, finding 2): the dock's rows (its own `setSchedules`) and, if it is
+   * open, the `/schedule` panel — which otherwise stayed the snapshot it opened
+   * on, offering a delete for an id the daemon no longer has. This is the ONE
+   * feed the follow installs, so a wake created or deleted while the panel is
+   * open shows up there too.
+   */
+  const followSchedules = useCallback(
+    (rows: readonly ScheduleDockRow[] | undefined) => {
+      setSchedules(rows);
+      setSchedulesData(rows, Date.now());
+    },
+    [setSchedules, setSchedulesData],
+  );
 
   // `run "<prompt>"`: the first message, sent once at mount, like a typed one: a
   // failed send leaves it in the conversation with the error under it (it is
@@ -1418,7 +1438,7 @@ export function App({
     drainHeld,
     setAgents,
     setJobs,
-    setSchedules,
+    setSchedules: followSchedules,
     setDock,
     jobOutputRef,
     touchPanel,

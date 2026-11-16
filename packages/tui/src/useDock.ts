@@ -88,6 +88,13 @@ export interface DockLayer {
   readonly scheduleRows: readonly ScheduleDockRow[] | undefined;
   readonly schedulesRef: { current: readonly ScheduleDockRow[] | undefined };
   readonly setSchedules: (rows: readonly ScheduleDockRow[] | undefined) => void;
+  /**
+   * The wakes THIS TUI asked the daemon to delete (fix round 1, finding 1): their
+   * departure is ours, so it is already said (`Deleted sc-N.`) and must not be
+   * re-explained as somebody else's. Shared with the `/schedule` panel's delete,
+   * which reaches the same method through another executor.
+   */
+  readonly ownScheduleDeletesRef: { current: Set<string> };
 
   // --- exits and output (written by App's ordered effects)
   readonly dockOutcomeRef: { current: Record<string, DockOutcome> };
@@ -192,24 +199,43 @@ export function useDock(host: DockHost): DockLayer {
     undefined,
   );
   const schedulesRef = useRef<readonly ScheduleDockRow[] | undefined>(undefined);
+  /** The ids this TUI deleted (a dock `ctrl+x` or a `/schedule` `x x`): see `setSchedules`. */
+  const ownScheduleDeletesRef = useRef<Set<string>>(new Set());
   const setSchedules = useCallback(
     (rows: readonly ScheduleDockRow[] | undefined) => {
       const before = schedulesRef.current;
       schedulesRef.current = rows;
-      // A wake that LEFT the table says why (cron-tool S3's drift 5, carried to
-      // S5): the daemon publishes only the list, so the NOTICE is derived from
-      // the diff — never a frame of its own, and never silently. Only a real
-      // report can speak: `undefined` is "no table here", not "all gone".
+      // A wake that LEFT the table says so (cron-tool S3's drift 5, carried to
+      // S5) — and says only that, plus an expiry the clock proves (fix round 1,
+      // finding 1). The daemon publishes the list alone, so a guessed CAUSE
+      // (failures, a fire) would be a false statement: the user's own delete
+      // looks exactly like a failure stop. Only a real report can speak:
+      // `undefined` is "no table here", not "all gone".
       if (before !== undefined && rows !== undefined) {
-        const gone = departedScheduleNotice(before, rows, Date.now());
+        const own = ownScheduleDeletesRef.current;
+        const live = new Set(rows.map((row) => row.id));
+        const gone = departedScheduleNotice(before, rows, Date.now(), own);
         if (gone !== null) {
           for (const text of gone.split("\n")) {
             pushNotice(`_${text}_`);
           }
         }
+        // Each of our own ids is spent once its departure has been read: a later
+        // departure of the same id (a new wake cannot reuse it, but the set must
+        // not grow) says what it is.
+        for (const id of [...own]) {
+          if (!live.has(id)) {
+            own.delete(id);
+          }
+        }
       }
       // The frame must follow the ARMED ids and their counters (the rows are
       // labels, so a count would miss a `fire 5` or a moved `nextAt`).
+      // `undefined` is also what a switch writes (`useSessionLink`'s reset): the
+      // deleted-id memory belongs to the session that goes away with it.
+      if (rows === undefined) {
+        ownScheduleDeletesRef.current.clear();
+      }
       setScheduleRowsState(rows);
     },
     [pushNotice],
@@ -500,6 +526,10 @@ export function useDock(host: DockHost): DockLayer {
       void session.deleteSchedule(id).then(
         (result) => {
           if (result.deleted) {
+            // Ours: the departure of this id must not be re-explained as a
+            // failure or a fire (fix round 1, finding 1). Recorded BEFORE the
+            // frame that drops it can arrive.
+            ownScheduleDeletesRef.current.add(id);
             pushNotice(`_Deleted ${id}._`);
             return;
           }
@@ -526,6 +556,7 @@ export function useDock(host: DockHost): DockLayer {
     scheduleRows,
     schedulesRef,
     setSchedules,
+    ownScheduleDeletesRef,
     deleteSchedule,
     dockOutcomeRef,
     dockFinishedRef,
