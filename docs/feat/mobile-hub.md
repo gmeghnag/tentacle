@@ -821,3 +821,22 @@ take both from one read, or widen `HubMenu` to carry the `HubOpen`; I left
 `HubMenu` alone (it is a gesture-machine type, and `HubMenu.ids` already
 mirrors the actions) rather than change `hub-gesture.ts` for a field nothing
 reads yet.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16* (same model as round 1, fresh context only)
+
+**Verdict: PASS.**
+
+**Round-1 MEDIUM is fixed** (`apps/mobile/src/hub-actions.ts:171-218`, commit `8dccb2ac`). A Stop or Steer now runs only if the turn running at the release is the turn shown when the fan opened. `hubOpen` takes that turn's `turnId` at the open, and `sameTurn` compares it at the release. A replaced turn gives no-op + `ALREADY_FINISHED`. `TurnRow.turnId` is a non-null `string` (`transcript-rows.ts:118`), so the `?? null` cannot make two different turns compare equal.
+
+**Mutations** (`.tentacle/tmp/mobile-hub/rev/mut2.ts`; bytes restored, `git status` clean). Each of these makes a test fail:
+- drop `sameTurn`: 3 fail
+- the notice ignores the turn change: 3 fail
+- `hubOpen` always null: 1 fail
+- `sameTurn` skips Steer: 1 fail
+- Attach without its `ended` guard: 1 fail (the nit that survived round 1 is now pinned)
+
+**Regressions.** `bun test apps/mobile/test/`: 2216 pass, 0 fail. `bun run lint` is clean (1746 files). `bun run typecheck` is clean (root + mobile + relay).
+
+**Caveat for H3.** The new `resolveCommit` argument does nothing unless H3 takes `hubOpen(ctx)` exactly when `open` fires and passes it at the release. H3's review should check that wiring.
