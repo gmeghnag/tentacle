@@ -167,7 +167,7 @@ describe("display state reducer", () => {
     if (tool?.kind === "tool") {
       expect(tool.durationMs).toBe(450);
       expect(stripAnsi(itemLines(tool, { width: 80, expandAll: false })[0] ?? "")).toBe(
-        "⏺ Bash sleep 2 0.5s",
+        "● Bash sleep 2 0.5s",
       );
     }
   });
@@ -193,7 +193,7 @@ describe("display state reducer", () => {
     if (tool?.kind === "tool") {
       expect("durationMs" in tool).toBe(false);
       expect(stripAnsi(itemLines(tool, { width: 80, expandAll: false })[0] ?? "")).toBe(
-        "⏺ Bash sleep 2",
+        "● Bash sleep 2",
       );
     }
   });
