@@ -760,6 +760,157 @@ already `changelog.d/pdf-read.added.md`).
 
 *— claude-opus-5-5, 2026-11-16*
 
+### Fix round 3 — P2 implemented (the P2 review's only finding) · executed by `claude-opus-5-5`, 2026-11-16
+
+The P2 review (rounds 1–3) had one finding: **P2 was not implemented**. This round
+implements it. R0 was not re-run: the P1 Execution already records it passing on
+`pdfjs-dist@6.5.438` (G1–G5), and that version is what is pinned here.
+
+**As built**
+
+- `packages/tools/package.json`: `"pdfjs-dist": "6.5.438"` (exact, no caret);
+  `bun.lock` updated by `bun add --exact`. New export `./pdf-worker`.
+- `packages/tools/src/pdf/options.ts`: `pdfDocumentOptions(data)`, the hardened
+  options (`isEvalSupported:false`, `disableFontFace:true`, `useSystemFonts:false`,
+  `useWorkerFetch:false`, `stopAtErrors:false`, `enableXfa:false`, `verbosity:0`,
+  no `cMapUrl` / `standardFontDataUrl` / `url`). Also the wire types
+  `PdfWorkerRequest`, `PdfExtraction` and `pdfMessage`, which cuts a pdf.js
+  message to one line of at most 200 printable characters.
+- `packages/tools/src/pdf/run.ts`: `runExtraction(getDocument, req)`, which runs
+  inside the worker, with pdf.js injected. It opens the file and maps
+  `PasswordException` → `encrypted` and anything else → `corrupt`. A `pages` spec
+  goes through P1's `parsePageRange`, and a failure → `bad-pages`. With no range,
+  more than 2000 pages → `too-many-pages`; otherwise it reads pages
+  1..min(N, 100). It stops at a page boundary once `MAX_PDF_TEXT_CHARS` is reached
+  (`truncated`). A page that throws reads as `""`, and the other pages survive.
+  It calls `page.cleanup()` after each page and a guarded `doc.cleanup?.()` in
+  `finally`; it does not call `doc.destroy()`, which does not exist on 6.5.438
+  (R0).
+- `packages/tools/src/pdf/quiet.ts`: the worker's prelude, imported first. It
+  turns every `console` method into a no-op, because pdf.js's import-time polyfill
+  warnings would otherwise land on the terminal Ink owns (§7). It also replaces
+  `fetch` with a rejecting function.
+- `packages/tools/src/pdf/pdf-worker.ts`: the worker module. It runs the prelude,
+  then a STATIC import of `pdf.worker.mjs` (`globalThis.pdfjsWorker`), then
+  `pdf.mjs`. It installs `onmessage` and only then posts `"ready"`: the
+  **mandatory handshake** from R0.
+- `packages/tools/src/pdf/extract.ts`: `createPdfExtractor({spawn?, maxConcurrent=2})`
+  and the process-wide `extractPdf`. It creates one Worker per call, lazily, so
+  pdf.js is never loaded on the main thread. A file over `MAX_PDF_BYTES` →
+  `too-large`, and so does an already-aborted signal (`aborted`); neither spawns.
+  The timeout (default 20 s) covers the wait for a slot, and the timeout and the
+  `AbortSignal` both `terminate()` the worker. The semaphore is released in
+  `finish`, and a timed-out waiter is removed from the queue. Bytes are posted
+  only after `ready`, as a COPY that is transferred. A spawn failure, or an
+  `error` event before `ready`, → `unavailable` ("PDF reading is unavailable in
+  this build: …"); an `error` after `ready` → `corrupt` ("the PDF parser
+  crashed"). `setPdfWorkerUrl` / `pdfWorkerUrl` are exported from `@tentacle/tools`.
+- `packages/cli/src/pdf-worker.ts` is the build entrypoint (`import
+  "@tentacle/tools/pdf-worker"`). `packages/cli/src/pdf-worker-url.ts` sets
+  the extractor's URL to `new URL("./pdf-worker.ts", import.meta.url)`; it is
+  imported for its effect by `main.ts` and `worker.ts` (a daemon runs in either).
+- `packages/cli/src/pod-binary-build.ts`: `BINARY_ENTRYPOINTS` (exported) =
+  `main.ts`, `worker.ts`, `pdf-worker.ts`; `buildBinary` maps over it.
+- `docs/BUILD.md`: one paragraph on worker entrypoints.
+- Tests: `packages/tools/test/pdf-extract.test.ts` (24 tests),
+  `packages/tools/test/pdf-fixture.ts` (generator: N pages, `/Encrypt`, truncated,
+  `/ToUnicode` via an incremental update, heavy content stream),
+  `packages/tools/test/fixtures/pdf-hang-worker.ts` (busy loop after `ready`),
+  `packages/tools/test/fixtures/pdf-quiet-probe.ts`, and
+  `packages/cli/test/pdf-worker-entry.test.ts` (4 tests).
+
+**Drift from the Implementation, and why**
+
+1. **The worker entrypoint is `packages/cli/src/pdf-worker.ts`, not
+   `packages/tools/src/pdf/pdf-worker.ts`.** R0 proved only one layout: the worker
+   entry in the SAME directory as the other entrypoints. An entrypoint in
+   `packages/tools` would move the embedded `$bunfs` root to the common ancestor,
+   and it is unproven whether `./worker.ts` (the daemon) and a cross-package
+   `new URL(…, import.meta.url)` still resolve then. I could not settle this here:
+   `bun build` and `bun build --compile` both need an approval that this run did
+   not have. So the design mirrors what R0 proved. The tools module stays the
+   implementation; the CLI file is a one-line entry and sets the URL. The tests
+   pin that the three entrypoints share one directory and that the URL is the
+   entry file.
+2. **Two extra failure reasons:** `bad-pages` (the range is validated in the
+   worker against the real `numPages`, which only the parse knows) and
+   `unavailable` (§Failure modes "Worker cannot spawn" already names that
+   message).
+3. **`smol: true` dropped.** The plan's "[verify the option in Bun's Worker
+   typing]" check found it absent from `WorkerOptions` (`tsc` TS2353). A cast would
+   ship an option that is not verified to work.
+4. **`truncated` = the text cap was hit.** Pages outside the request are left out
+   of `truncated`; the caller derives them from `numPages`, as `formatPdfText`
+   does.
+5. **The looping-PDF test uses a busy-loop stand-in worker**
+   (`fixtures/pdf-hang-worker.ts`), not a real looping PDF. pdf.js bounds every
+   recursion I could build cheaply: a 400 000-operator content stream extracts in
+   about 120 ms (the probe below). What is under test is the kill switch, and the
+   stand-in keeps a real thread CPU-bound until `terminate()`. A real PDF that
+   parses slowly is covered by the 400k-operator test.
+6. **The text-cap test drives `runExtraction` with a faked pdf.js.** pdf.js clips
+   a page's text to its MediaBox (a 250 000-character line extracts as 91
+   characters), so no small fixture reaches 400 000 characters.
+
+**Probe (real worker, from source):**
+`.tentacle/tmp/pdf-read/p2/probe.ts`
+```
+hello 824 ms {"ok":true,"numPages":2,"pages":[{"n":1,"text":"Hello PDF world"},{"n":2,"text":"Second page"}],"truncated":false}
+page2 71 ms {"ok":true,"numPages":3,"pages":[{"n":2,"text":"two"}],"truncated":false}
+unicode 67 ms {"ok":true,"numPages":1,"pages":[{"n":1,"text":"αé"}],"truncated":false}
+encrypted 60 ms {"ok":false,"reason":"encrypted","message":"the PDF is password-protected; tentacle cannot open encrypted PDFs"}
+truncated 59 ms {"ok":false,"reason":"corrupt","message":"corrupt PDF: Invalid PDF structure."}
+garbage 60 ms {"ok":false,"reason":"corrupt","message":"corrupt PDF: Invalid PDF structure."}
+heavy400000 123 ms {"ok":true,"numPages":1,...}
+```
+
+**Red before green.** P2 is new code, so on the reviewed HEAD the test file cannot
+even import its module. That is a compile-level red, which §9 does not count. The
+property-level red is the mutation table below: each property's test goes red on a
+code change that removes exactly that property.
+
+**Mutation checks (non-vacuity, §9).** Script: `.tentacle/tmp/pdf-read/p2/mutate.ts`.
+Each mutation is applied, the two new test files are run, and the file is restored;
+a byte-exact restore is asserted.
+```
+M1 isEvalSupported true:     25 pass · 2 fail  (hardened options ×2)
+M2 post before ready:        26 pass · 1 fail  (nothing is posted before ready)
+M3 no semaphore:             25 pass · 2 fail  (max two live; waiter timeout)
+M4 finish never terminates:  24 pass · 3 fail  (abort; ready; slots)
+M5 no text cap:              26 pass · 1 fail  (truncated at a page boundary)
+M6 fetch not blocked:        26 pass · 1 fail  (prelude refuses fetch)
+M7 entrypoint dropped:       25 pass · 2 fail  (embeds pdf-worker.ts; URL is an entrypoint)
+M8 no encrypted mapping:     26 pass · 1 fail  (password-protected → encrypted)
+M9 stale waiter left queued: 26 pass · 1 fail  (waiter's timeout frees its place)
+M10 no too-large check:      26 pass · 1 fail  (over the byte cap, no spawn)
+```
+After all ten, `git status` showed only this round's own changes.
+
+**Not verified here:** the compiled binary running the CLI entrypoint (R0 G2/G4 on
+the real `buildBinary`). `bun build --compile` needs an approval this run did not
+have. To verify: `bun run compile && ./dist/tentacle` on a session that `fs_read`s
+a PDF once P3 wires it in, or a `TENTACLE_SLOW_TESTS=1` compile test. It is also
+unverified that the console silencing removes the "Cannot polyfill DOMMatrix"
+warnings *in the binary* (the probe test proves the console is silenced inside the
+worker). No `docs/library-bugs.md` entry: the drop of a message posted before
+`ready` is a Worker-ordering fact, documented in `pdf-worker.ts`; pdf.js needed no
+workaround beyond the static import.
+
+**Gate.** `bunx tsc --noEmit` exit 0 · `bun run typecheck` (tsc + mobile + relay)
+exit 0 · `bun run lint` (`biome check .`, 1734 files, no fixes, 0 errors) · `bun
+test` **12573 pass, 5 skip (the opt-in three), 0 fail** across 899 files. That
+count is from a full re-run after the `smol` removal (the first run gave the same
+count). Last edit after that run: `extract.ts` now turns a worker message that is
+not a result shape into `corrupt` instead of passing it through. Its test went red
+first (`23 pass · 1 fail`) and is now green. The narrow files are 28 pass, 0 fail,
+and typecheck and lint were re-run clean after it; the full suite was not re-run
+after this one change.
+
+No changelog change: `changelog.d/pdf-read.added.md` already exists, and P2 is not
+user-visible until P3 wires `fs_read`. No protocol change.
+
+*— claude-opus-5-5, 2026-11-16*
+
 ## Review
 
 ### P1 — fresh-context adversarial review

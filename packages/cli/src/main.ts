@@ -53,6 +53,7 @@ import {
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { logDaemonError } from "./daemon-log.ts";
+import "./pdf-worker-url.ts";
 import { detachedRunOf } from "./detached-run-of.ts";
 import { devicesCommand, resetCommand, revokeCommand } from "./devices-cmd.ts";
 import { type EngineHost, type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
