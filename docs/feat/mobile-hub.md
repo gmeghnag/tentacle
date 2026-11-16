@@ -924,3 +924,40 @@ reads yet.
 **Regressions.** `bun test apps/mobile/test/`: 2216 pass, 0 fail. `bun run lint` is clean (1746 files). `bun run typecheck` is clean (root + mobile + relay).
 
 **Caveat for H3.** The new `resolveCommit` argument does nothing unless H3 takes `hubOpen(ctx)` exactly when `open` fires and passes it at the release. H3's review should check that wiring.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16* (H3 partial, commit `f317a593`. Same model family as the doc's executor signature, fresh context only.)
+
+**Verdict: PASS for the code delivered. No HIGH or MEDIUM findings.** H3 is still **PARTIAL**: the spike, the UI, flow 29 and the full gate are not done, so it is not mergeable as a slice.
+
+**Premises.**
+- TRUE: `stop()` is the one stop path. `act()` falls through to it (`session-screen-controller.ts:1024`), and so does `stopTurn` (`:1041`), so P2 holds.
+- TRUE: `stopTurn` reads the same `link`/`turn`/`closed` inputs that `sessionView` gives `composerOf` (`session-view.ts:358`). It passes `text: ""` and `photos: 0`, so a draft or a photo cannot turn Stop into a queue or into `none`.
+
+**Gate.**
+- `session-screen` + `hub-session`: 31 pass, 0 fail.
+- `bun run lint`: clean (1748 files).
+- `bun run typecheck`: clean (root, mobile and relay).
+- Full `bun test`: NOT re-run. The data volume still has only 146 MiB free.
+
+**Mutations** (`.tentacle/tmp/mobile-hub/rev3-mut.ts`; bytes restored, `git status` clean).
+- These make a test fail: drop the own abort (2 fail); drop the foreign cancel (2); remove the voiceOver cancel clause (1); default edge `left` (1); a short band no longer gives the menu (1).
+- **These survive (nits, not findings):**
+  - `stopTurn` passing `ended: null` instead of `transcript.closed`: 22/0. The ended guard of the hub's Stop is unpinned.
+  - `hubContextOf` hard-coding `dictation: false`: 9/0.
+
+**Attacks that found nothing.**
+- A draft or photos during a hub Stop: decided as blank, so Stop still runs.
+- Link down: `none`, so nothing is cancelled (M8, pinned).
+- Re-entrancy: `stop` is synchronous and does not touch `draft`, so `press`'s `sends` count is not affected.
+- §7 "logic in pure modules": `hub-session.ts` imports no React.
+- No protocol, persistence or daemon surface is touched.
+
+**Carried to the rest of H3.**
+- The `hubOpen(ctx)` → `resolveCommit` wiring (Round 2 caveat) is still unbuilt, because no caller exists yet. It must be reviewed when `FloatingActivity` lands.
+
+**Executor behaviour.**
+- It stopped and reported the ENOSPC block honestly rather than faking the spike.
+- It wrote the tests red first and pasted the mutation log.
+- One discrepancy: the commit message says "exec (deepseek)", but the Execution section is signed claude-opus-5-5, and the owner note requires Opus. This should be reconciled so the model attribution (§10) is true.
