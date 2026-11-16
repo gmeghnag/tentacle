@@ -312,3 +312,33 @@ Validation said (no simulator here).
 - The settings store follows the versioned pattern: an unknown `v` is never overwritten.
 
 **Executor behaviour:** shipped about half the plan with a red gate and an empty Execution section. It added a test for unbuilt code (`session-feed`) that cannot typecheck.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; diff `HEAD~1` = 73dccbb6)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Gate:** lint clean (0 errors). Typecheck clean. `bun test apps/mobile`: 2181 pass, 0 fail. Round-1 findings 1 (red gate) and 3 (two-dimension resize) are **fixed**. Finding 2 (S2/S3/S4 missing) is fixed for S3 and S4. S2 is wired, but it does not work in the app (new finding R2-1).
+
+**Mutations** (each reverted; `git status` clean afterwards):
+
+| fix | mutation | result |
+|---|---|---|
+| resize names one edge | `resizeAxis` always returns `{width}` | `photo-input.test.ts` "portrait target names its HEIGHT" **red** |
+| S2 local copy on the row | `own_prompt` drops the local photo | `session-feed.test.ts` "sent photo's row carries its LOCAL copy" **red** |
+| S3 resync | skip `attach(false)` | `session-screen.test.ts` both pull-to-refresh tests **red** |
+
+**New finding:**
+
+**R2-1 HIGH: the thumbnail points at a file that is deleted right after sending.**
+- `localPhotosOf` (`outbox.ts:266`) uses `photo.file`, which is the OUTBOX copy.
+- The driver sends the prompt (`outbox-driver.ts:263`). When the daemon acknowledges it, the driver calls `persistence.finish(item.itemId)` (`outbox-driver.ts:277`). The app wires `finish` to `store.removeItem`, and that call does `fs.remove(photo.file)` for each photo (`outbox-store.ts:390-392`).
+- Failure scenario: the person sends a photo. About a second later the row's `localUri` names a file that no longer exists. `TranscriptRow.tsx:126` hands that URI to `<Image>` with no `onError` fallback, so the bubble shows an empty frame instead of the photo. Tapping it opens an empty `MediaViewer`. Owner item 2 is still open.
+- The unit tests pass because they never check that the file still exists.
+- Possible fixes: keep a display copy that outlives the item, or have `finish` skip the delete for rows still on screen. Either way, add an `onError` fallback to the placeholder.
+
+**Regressions looked for, none found:**
+- `own_prompt` matches `user_message` for an ordinary prompt; only `schedule` is missing, and an own prompt never carries one.
+- `resync` reuses `attach(false)`, and the compose half is built once (`session-screen-controller.ts:538`), so there is no second driver and no second session path (§7).
+- A resync calls `deps.controller.leave`, not the screen's `leave()`, so it does not abort an own turn that is running.
