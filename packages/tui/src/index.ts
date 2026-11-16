@@ -73,6 +73,8 @@ export * from "./voice-session.ts";
 export * from "./voice-view.ts";
 export { helperPathCandidates } from "./voice-spawn.ts";
 export type { ThemeSetting } from "./theme.ts";
+/** A chart's plot glyphs (`tui.chartGlyphs`, docs/feat/model-charts.md D5). */
+export type { ChartGlyphs } from "./chart-lines.ts";
 export type { TargetBadge } from "./target-view.ts";
 export type { ContextOpen } from "./status-view.ts";
 export type { SessionChoice, SessionPick } from "./session-picker.ts";

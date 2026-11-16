@@ -11,6 +11,7 @@ import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
 import type { CapKind, CapsView } from "./capability-toggles.ts";
+import type { ChartGlyphs } from "./chart-lines.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
@@ -607,4 +608,11 @@ export interface AppProps {
    * tier (the dock's 100/80/56, docs/feat/subagent-panel.md).
    */
   readonly columns?: number;
+  /**
+   * A chart's plot glyphs (`tui.chartGlyphs`, docs/feat/model-charts.md D5):
+   * absent → `braille` (2×4 dots per cell); `blocks` is for a font with no
+   * braille, which a terminal cannot report. A LAPTOP-ONLY display setting:
+   * constant for the App's lifetime, never carried to a pod.
+   */
+  readonly chartGlyphs?: ChartGlyphs;
 }

@@ -12,6 +12,7 @@ import {
   type SessionDirectory,
   type TargetFeed,
 } from "./App.tsx";
+import type { ChartGlyphs } from "./chart-lines.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { messagesToItems } from "./resume.ts";
@@ -102,6 +103,11 @@ export interface TuiOptions {
    * `--resume` picker and the runtime share the answer.
    */
   readonly theme?: ThemeSetting;
+  /**
+   * A chart's plot glyphs (`tui.chartGlyphs`, docs/feat/model-charts.md D5):
+   * `braille` (default) or `blocks` for a font without braille. LAPTOP-ONLY.
+   */
+  readonly chartGlyphs?: ChartGlyphs;
 }
 
 /**
@@ -200,6 +206,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         {...(options.autoAcceptShared ? { autoAcceptShared: options.autoAcceptShared } : {})}
         {...(options.hop ? { hop: options.hop } : {})}
         {...(options.targetFeed ? { targetFeed: options.targetFeed } : {})}
+        chartGlyphs={options.chartGlyphs ?? "braille"}
         {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
       />,
       {

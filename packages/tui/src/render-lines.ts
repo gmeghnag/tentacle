@@ -14,6 +14,7 @@ import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import { BULLET, blinkOn, hiddenBullet } from "./blink.ts";
 import { truncateCells } from "./cells.ts";
+import { type ChartGlyphs, chartToolBody } from "./chart-lines.ts";
 import { formatDurationMs } from "./format.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
@@ -64,6 +65,13 @@ export interface RenderOptions {
    * shows every call's command, which subsumes this set.
    */
   readonly expandedIds?: readonly string[];
+  /**
+   * A chart's plot glyphs (`tui.chartGlyphs`, docs/feat/model-charts.md D5):
+   * `braille` (default) or `blocks` for a font without braille. Constant for an
+   * App's lifetime (a display setting, decided at launch), so it is not part of
+   * the row-cache key.
+   */
+  readonly chartGlyphs?: ChartGlyphs;
 }
 
 const DEFAULT_THRESHOLD = 8;
@@ -75,6 +83,12 @@ const DEFAULT_WIDTH = 80;
 const INDENT = "  ";
 /** Read at CALL time: a module-load capture would freeze the palette (and the mode). */
 const connector = (): string => `${theme.subtle("⎿")} `;
+/**
+ * The `chart` tool's name (`@tentacle/tools`' `CHART_TOOL_NAME`). A literal, not
+ * an import: the TUI never depends on the tools package (the same reason the
+ * `toolSubtitle` case spells it out), and the name is data on the wire anyway.
+ */
+const CHART_TOOL = "chart";
 // An expanded call's command, on the rows under its header (owner mockup):
 // 4 display columns, so the command never wraps under the bullet.
 const COMMAND_PREFIX = "  │ ";
@@ -666,8 +680,64 @@ interface BodyFit extends CollapseFit {
   readonly limit: number | undefined;
 }
 
+/**
+ * A `chart` call's rows, drawn from its own arguments — or `undefined` for every
+ * other call, and for a `chart` whose arguments are not a spec this build can
+ * draw (invalid JSON, a cap lowered since, another model's forgery): that one
+ * falls back to the generic tool row, never a crash and never an error in the
+ * transcript (docs/feat/model-charts.md C4/T4.3).
+ *
+ * Drawn ONCE per (item, width, expand, glyphs) by a tiny memo, like the other
+ * per-item caches: the layout runs on every blink tick and every frame.
+ */
+const chartCache = new WeakMap<ToolItem, Map<string, readonly string[] | null>>();
+
+function chartRow(
+  tool: ToolItem,
+  width: number,
+  opts: RenderOptions,
+): readonly string[] | undefined {
+  if (tool.name !== CHART_TOOL) {
+    return undefined;
+  }
+  // Only a settled call draws: a running chart has no args yet (the tool call is
+  // complete before it starts), and the generic row's spinner is the honest row.
+  if (tool.status === "running" || tool.status === "queued") {
+    return undefined;
+  }
+  const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
+  const glyphs = opts.chartGlyphs ?? "braille";
+  const key = `${width}|${expanded ? 1 : 0}|${glyphs}`;
+  let slots = chartCache.get(tool);
+  if (!slots) {
+    slots = new Map();
+    chartCache.set(tool, slots);
+  } else {
+    const hit = slots.get(key);
+    if (hit !== undefined) {
+      return hit ?? undefined;
+    }
+  }
+  const lines = chartToolBody(tool.args, { width, expanded, glyphs });
+  if (lines === undefined || lines.length === 0) {
+    slots.set(key, null);
+    return undefined;
+  }
+  const shown = [...lines];
+  slots.set(key, shown);
+  return shown;
+}
+
 function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const cols = Math.max(1, Math.floor(opts.width ?? DEFAULT_WIDTH));
+  // A chart draws ITSELF in the row's place: no bullet, no `● Chart …` header, no
+  // body connector — the chart is part of the reply, not a tool block (owner
+  // requirement, docs/feat/model-charts.md D5). Its caption is its first row, so
+  // it is also the row a click toggles (`tool-hit.ts`: a header is row 0).
+  const chart = chartRow(tool, cols, opts);
+  if (chart !== undefined) {
+    return [...chart];
+  }
   if (tool.status === "queued") {
     // Approved, not started: one dim row, no body, no spinner.
     const row = queuedRow(toolTitle(tool));

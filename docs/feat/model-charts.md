@@ -1350,6 +1350,184 @@ higher than C2's recorded `12623` because `main` was merged in at `5dcdfffa`.
 **Unverified / owed:** a genuine fresh-context C1+C2 adversarial review. This
 round cannot stand in for it.
 
+### C4 — TUI wiring: row branch, cut exemption, expand, `tui.chartGlyphs` (slice C4 of 8)
+
+*— claude-sonnet-4-5, 2026-12-06*
+
+**Load-bearing check re-run FIRST (P3), and it held — then failed where the
+slice needs it.** A repro on the branch (`.tentacle/tmp/model-charts/c4-repro.ts`,
+output below) shows the three preconditions the slice stands on: the `chart` row
+took the generic `plainToolBody` path, the generic cut applied to it, and
+`tui.chartGlyphs` did not exist in the config schema (`strict()` refused it).
+That is exactly the gap the slice closes; nothing in the plan contradicted the
+code, so no plan edit was needed.
+
+```sh
+$ bun run .tentacle/tmp/model-charts/c4-repro.ts     # BEFORE
+chart row body rows: 2
+|● Chart Ricavi mensili 2025 vs 2026
+|⎿ line chart: 2 series
+renders a chart (braille/block glyphs): false
+cut applied (has a "more lines" marker): true
+tui.chartGlyphs accepted by the schema: false
+  → Unrecognized key(s) in object: 'chartGlyphs'
+```
+
+As-built, in dependency order:
+
+1. **`packages/tui/src/chart-lines.ts`** — new pure `chartToolBody(args, options)`:
+   `JSON.parse` then `validateChartSpec` (the SAME shared caps as the daemon),
+   `chartLines` on success, `undefined` on anything else. The client re-validates
+   on every draw, so a pod's forgery or a spec a newer daemon wrote above this
+   build's caps draws nothing rather than crashing or printing an error into the
+   transcript (AGENTS §7 "a pod is not trusted"; T4.3).
+2. **`packages/tui/src/render-lines.ts`** — the row branch in `toolLines`
+   (`:735`): a `chart` call that resolves returns the chart rows INSTEAD of the
+   header + connector + body, so the chart takes the row's place and is
+   structurally exempt from `collapsedBody` (the exemption is not a second flag —
+   there is no generic body left to cut). Per-item memo keyed on
+   `width|expanded|glyphs` (`chartCache`), because the layout runs on every blink
+   tick. Expand uses the existing `expandAll || isExpanded(expandedIds, id)`, so
+   Ctrl+O and a header click both work with no new machinery — the chart's
+   caption is row 0, which is already the header row `tool-hit.ts` toggles.
+   `RenderOptions.chartGlyphs` added.
+3. **`packages/config`** — `tui.chartGlyphs: "braille" | "blocks"` in
+   `schema.ts` (beside `theme`, same `.strict()` object), the registry entry in
+   `key-docs.ts` (leaf, enum, `carried: "no"`, default `braille`), the commented
+   scaffold in `defaults.ts`, and `resolve.ts`'s `tui` type widened. `README.md`'s
+   generated table refreshed with `bun run docs:config`.
+4. **Plumbing** — `AppProps.chartGlyphs` → the App's four `RenderOptions` sites
+   (the resize warm, the committing layout, `layoutOptsRef`, the idle warm; all
+   four were needed — the resize-warm opts feed the cache the committing render
+   then hits); `TuiOptions.chartGlyphs` → the App mount; `main.ts` ×2 from
+   `config.tui?.chartGlyphs ?? "braille"`; `connect.ts` ×1 from its own
+   `connectChartGlyphs` file reader (same rule as `connectTheme`: never block a
+   connection on a broken file). `ChartGlyphs` exported from `@tentacle/tui`.
+
+**Drift from the Implementation: two, both small and deliberate.**
+
+- **The chart keeps NO header row at all.** The plan's D5 says "compact = mini
+  plot + legend + axes (≈ 11 rows)" and lists expansion as "Ctrl+O, or a click on
+  the chart's header", which reads as if a `● Chart <title>` row survives. The
+  binding owner requirement (*Owner requirements*, ``:899``) says the opposite —
+  "it does NOT render as a tool row (\"● Chart …\"): the chart itself takes the
+  row's place, with at most a discreet caption". I followed the owner
+  requirement: `chartLines`' own caption row (the title) is the block's row 0, so
+  a click still lands on a header. The mockups' `● Chart …` rows predate that
+  requirement.
+- **The `chart` name is a local `const CHART_TOOL = "chart"` in `render-lines.ts`,
+  not an import of `@tentacle/tools`' `CHART_TOOL_NAME`.** The TUI package does
+  not depend on the tools package (that is why `toolSubtitle`'s `case "chart"`
+  already spells the name out); the name is wire data anyway.
+
+**Red before green (§9), each shown failing on the pre-change code and reverted
+after.** Results pasted:
+
+```
+# Mutation 1 — drop the `chartRow` branch from `toolLines` (render-lines.ts)
+(fail) a chart in the transcript (C4) > the row IS the chart: no tool chrome, and the title is its caption
+(fail) a chart in the transcript (C4) > the chart body is exempt from the generic cut
+(fail) a chart in the transcript (C4) > ctrl+o expands it (more rows, per-series stats and the data table)
+(fail) a chart in the transcript (C4) > `tui.chartGlyphs: blocks` draws quadrant blocks, never braille
+ 111 pass · 4 fail
+
+# …the same mutation, the App-frame suite (T4.1/T4.2/T4.3/T4.4)
+(fail) live: the chart draws in place of the tool row
+(fail) after a resume: the same chart, from the stored arguments
+(fail) ctrl+o expands it, and a second ctrl+o collapses it again
+(fail) `chartGlyphs: blocks` reaches the renderer through the App
+(fail) a resize re-lays the chart out at the new width (form changes tier)
+(fail) nothing is written to process.stdout while a chart draws (AGENTS §7)
+ 1 pass · 6 fail
+
+# Mutation 2 — ignore `opts.chartGlyphs` (hard-code `braille`)
+(fail) a chart in the transcript (C4) > `tui.chartGlyphs: blocks` draws quadrant blocks, never braille
+ 114 pass · 1 fail
+
+# Mutation 3 — drop `chartGlyphs` from the App's committing layout options
+(fail) a chart in the App (C4/T4) > `chartGlyphs: blocks` reaches the renderer through the App
+ 6 pass · 1 fail
+
+# Mutation 4 — `chartToolBody` without `validateChartSpec` (a bare try/catch)
+(fail) a chart in the transcript (C4) > an invalid (forged) spec falls back to the generic row, never a crash
+(fail) a chart in the transcript (C4) > a spec valid on the daemon but over THIS build's caps also falls back
+ 113 pass · 2 fail
+
+# Mutation 5 — a fixed width passed to `chartToolBody` (the resize property)
+(fail) a chart in the App (C4/T4) > a resize re-lays the chart out at the new width (form changes tier)
+ 0 pass · 1 fail
+
+# Mutation 6 — a direct `process.stdout.write` inside `chartToolBody`
+(fail) a chart in the App (C4/T4) > nothing is written to process.stdout while a chart draws (AGENTS §7)
+ 0 pass · 1 fail
+
+# Mutation 7 — remove `tui.chartGlyphs` from the config schema
+(fail) tui.chartGlyphs > the two values are accepted in the file and in a profile; anything else is an error
+(fail) tui.chartGlyphs > it sits beside `tui.theme` rather than replacing it
+(fail) tui.chartGlyphs > a profile's value applies, and the scaffold shows the key
+ 1 pass · 3 fail
+
+# Mutation 8 — `connectChartGlyphs` returns a constant `braille`
+(fail) connectChartGlyphs > `tui.chartGlyphs: blocks` is read
+ 3 pass · 1 fail
+```
+
+**Tests added.** `packages/tui/test/render-lines.test.ts` — 11 cases (the row is
+the chart; the cut is exempt; Ctrl+O expands; `expandedIds` expands; `blocks`
+glyphs; four invalid/forged specs fall back; an over-cap spec falls back; a
+running/queued chart keeps the generic row; every row fits the width at
+120/100/80/60/50/40/30/20; another tool untouched). `packages/tui/test/app.test.tsx`
+— 7 ink frames (live, after a resume, Ctrl+O both ways, `chartGlyphs` through the
+App, resize 100 → 50 → 100 across the form tiers, a forged spec, the stdout spy).
+`packages/config/test/tui-chart-glyphs.test.ts` — 4. `packages/cli/test/connect-chart-glyphs.test.ts`
+— 4.
+
+**Two properties I nearly asserted weakly, and fixed (§2).** The resize test
+first compared only the widest plot row, which mutation 5 did NOT kill (the
+frame stayed 100 wide because `chartLines` caps and centres at `CHART_MAX_WIDTH`
+= 120); it now asserts the FORM TIER changes (`┤` plot at 100 cols → sparkline
+rows `▁` and no `┤` at 50 → back), which is the property the slice hinges on. The
+stdout spy was also shown non-vacuous (mutation 6).
+
+**One pinned list changed on purpose:** `packages/config/test/key-docs.test.ts`'s
+"defaults `resolveConfig` does not apply" now includes `tui.chartGlyphs`, exactly
+as it includes `tui.theme` — the TUI applies `braille` at launch, not
+`resolveConfig` (its test was updated with a comment saying so).
+
+**One fragment, not two:** `changelog.d/model-charts.changed.md` (new). C1/C2
+own `model-charts.added.md`; two files cannot share a `<slug>.<category>`
+(`scripts/changelog.ts`), and "charts now draw in the TUI" is a change to what
+exists, not a new capability. `CHANGELOG.md` untouched; `[Unreleased]` empty.
+
+**Unverified in this slice (named so it is not mistaken for done):**
+the *visual quality* of those frames at a real terminal — the frames are pinned
+in tests, but whether the braille plot reads well at 80 columns with a real font
+(and whether `blocks` is enough on a braille-less font) is the owner's look, not
+a test. C3's mockup comparison is still owed for the same reason.
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run lint` clean (0 errors, 0
+warnings — the §6 baseline; the two auto-fixable formatting/organizeImports
+trips in my own new code were fixed with `biome check --write`) · no schema
+changed on the wire, so `packages/protocol/schema/protocol.json` needed no
+regeneration (a config-file key is not a protocol schema) · the full suite
+**12 989 pass / 5 skip / 0 fail**, the 5 skips being exactly §6's three opt-in
+groups (2 live-docker, 2 live-k8s, 1 real-socket slow):
+
+```sh
+$ bunx tsc --noEmit
+(no output)
+
+$ bun run lint
+Checked 1779 files in 529ms. No fixes applied.
+
+$ bun test
+ 12989 pass
+ 5 skip
+ 0 fail
+ 33 snapshots, 101507 expect() calls
+Ran 12994 tests across 923 files. [446.09s]
+```
+
 ## Review
 *(empty — mandatory fresh-context review after C8)*
 

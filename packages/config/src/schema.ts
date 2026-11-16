@@ -452,7 +452,16 @@ const settingsShape = {
    * the query. A LAPTOP-ONLY display setting: never carried to a pod.
    */
   tui: z
-    .object({ theme: z.enum(["auto", "dark", "light"]).optional() })
+    .object({
+      theme: z.enum(["auto", "dark", "light"]).optional(),
+      /**
+       * The plot's glyphs (docs/feat/model-charts.md D5): `braille` (default,
+       * 2×4 dots per cell) or `blocks` (quadrant blocks, 2×2) for a font that
+       * has no braille. A terminal cannot report a missing glyph, so it is a
+       * setting. LAPTOP-ONLY display: never carried to a pod.
+       */
+      chartGlyphs: z.enum(["braille", "blocks"]).optional(),
+    })
     .strict()
     .optional(),
   /**

@@ -35,6 +35,7 @@ import {
   parseIsoDate,
   thinLabels,
   usesPoints,
+  validateChartSpec,
 } from "@tentacle/core";
 import chalk from "chalk";
 import { cellWidth, truncateCells } from "./cells.ts";
@@ -1058,6 +1059,30 @@ function bodyRows(spec: ChartSpec, ctx: Ctx): Row[] {
 
 function hostLocale(): string {
   return Intl.DateTimeFormat().resolvedOptions().locale;
+}
+
+/**
+ * The rows a `chart` tool call draws, from its own arguments — or `undefined`
+ * when those are not a spec this client can draw (not JSON, or refused by the
+ * shared validator: a pod can forge them, AGENTS §7).
+ *
+ * The client re-validates here on every draw, with the same caps as the daemon
+ * (docs/feat/model-charts.md D1/C4): the worst a forged or newer-than-this-build
+ * spec does is fall back to the generic tool row, never a crash and never an
+ * error message in the transcript.
+ */
+export function chartToolBody(
+  args: string,
+  options: ChartLineOptions,
+): readonly string[] | undefined {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(args);
+  } catch {
+    return undefined;
+  }
+  const validation = validateChartSpec(raw);
+  return validation.ok ? chartLines(validation.spec, options) : undefined;
 }
 
 /**
