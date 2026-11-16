@@ -148,4 +148,11 @@ describe("CHART_JSON_SCHEMA", () => {
   test("it is closed, so the model reads which keys exist", () => {
     expect(CHART_JSON_SCHEMA.additionalProperties).toBe(false);
   });
+
+  test("the data description states the point form's scope (Review round 2, finding 2)", () => {
+    const description = String((data as unknown as { description: string }).description);
+    expect(description).toContain('an x whose type is "number"/"date"');
+    expect(description).toContain("never for pie/doughnut");
+    expect(description).toContain("same x in every series");
+  });
 });

@@ -184,7 +184,7 @@ type ChartSpec = {
 | `subtitle` | `plugins.subtitle.text` (flattened) | Period / source ("€ · 2026 fino a ottobre") — the one line of context models always want to add; without it they stuff the title. |
 | `labels` | yes | Category/date/number positions for `line`/`bar`/`area`, slice names for `pie`/`doughnut`. Optional only when every dataset uses `{x,y}`. |
 | `datasets[].label` | yes | Series name: legend, direct labels, callout, table header. Required (a nameless series is the #1 legend bug). |
-| `datasets[].data` | yes | Numbers or `null` (gap). `{x,y}` points for scatter and number/date x (Chart.js' own point form). |
+| `datasets[].data` | yes | Numbers or `null` (gap). `{x,y}` points for scatter and number/date x (Chart.js' own point form) — never for `pie`/`doughnut`, and a stacked chart's series must all sit on the same `x`. An all-`null` series is an error in both forms. |
 | `stacked` | `options.scales.*.stacked` (flattened to top level) | Changes the meaning (sum vs overlap), so it is data, not style. Top level, because "which axis" is a Chart.js internal small models misplace. |
 | `x.type` | `scales.x.type` (`category`/`linear`/`time`) | **Added vocabulary:** `number` / `date` instead of `linear` / `time` (plainer). Default `category`; `scatter` defaults to `number`. No inference from label shape (predictable). |
 | `x/y.unit` | no | **Added.** "€", "ms", "%", "GB" — the one thing that makes a number a quantity. One unit per axis. |
@@ -219,12 +219,16 @@ plain-sentence errors with the fix, every error at once (≤ 8, by path):**
 | pie with negative / all zero | `pie values must be ≥ 0 and not all 0 — use a bar chart for signed values` |
 | pie with 2 datasets | `pie/doughnut take exactly one dataset — make one chart per series` |
 | `stacked` on a line | `stacked works with bar and area only — use type "area" with stacked: true` |
+| `{x,y}` points on a pie/doughnut | `datasets[0].data uses {x, y} points — a pie takes one number per label (put the slice names in labels)` |
+| `{x,y}` points with a category x | `datasets[0].data uses {x, y} points — the x axis must be numeric: add x: {"type": "number"} (or "date")` |
+| a stacked chart whose series sit on different `x` | `datasets[1].data has different x values from datasets[0].data — a stacked chart sums one column at a time, so every series needs the same x (or use stacked: false)` |
 | date not ISO (`"03/01/2026"`) | `labels[0] "03/01/2026" is not an ISO date — write 2026-03-01 (or 2026-03, or 2026-03-01T14:00:00Z)` |
 | `x.type:"date"` mixing date-only and timestamps | `labels mix dates and times — use one form` |
 | over a cap | `datasets has 11 series (max 8) — keep the 7 largest and fold the rest into "Other"`; `1 800 points (max 1000 per series) — aggregate (e.g. per hour) or sample` ; spec > 64 KiB → `the chart is too large (71 KiB > 64 KiB)` |
 | empty `datasets` / empty `data` | `datasets is empty — give at least one series with at least one value` |
 | 1 point | **valid** (drawn as a single marked point / bar) |
-| all `null` | `datasets[0].data has no values (all null)` |
+| all `null` | `datasets[0].data has no values (all null)` — in the plain-value form and in the `{x,y}` point form alike |
+| a bar over the 60-category cap, given as `{x,y}` points | `datasets[0].data has 61 points (max 60 categories for a bar chart) — fold the smallest into "Other" or use a line chart` |
 
 The same validator runs **daemon-side** (the tool's error) **and client-side** before
 drawing (a pod can forge `rawInput`; an old row may predate a cap change): an invalid
@@ -666,7 +670,7 @@ Dependency order (slice in brackets):
 | Huge (\|v\| > 1e15) | error "scale it" | — | T1.6 |
 | Tiny / negative values | nice ticks across 0; bars grow from the 0 baseline both ways; compact never rounds to "0k" (falls back to full below 1 000) | — | T1.7, T3.4 |
 | All values equal / 1 point | ±10 % (or [0,1]) range; one marked point / one bar | — | T1.8, T3.5 |
-| Empty / all-null | error | — | T1.3 |
+| Empty / all-null | error, in both the values and the `{x,y}` point form | — | T1.3 |
 | Mixed units | not detectable; the description says "two charts"; one unit per axis is all the schema allows | — | (description) |
 | Dates: non-ISO, mixed kinds, DST | errors for the first two; instants plotted on real elapsed time (a DST day has 23/25 hours, ticks stay on local round hours), calendar dates never shifted | — | T1.9, T1.10 |
 | 1000 points on 80 cols | LTTB to ~2 points per dot column; spikes kept | — | T1.11, T3.6 |
@@ -1528,6 +1532,176 @@ $ bun test
 Ran 12994 tests across 923 files. [446.09s]
 ```
 
+### Fix round 1 — Review round 2's two MEDIUMs (C1)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-16*
+
+*(Two headings carry this name: the one above the C4 section, which had no
+findings, and this one — the round that actually fixed something. Review rounds
+3 and 4 restated round 2's two findings because no fix had run in between; their
+verdicts are recorded under *Review* below.)*
+
+**The findings picked up** are the ones in *Review round 2* (`spec.ts:607` and
+`spec.ts:571-606`), repeated unchanged in rounds 3 and 4. Reproduced first, on
+HEAD, before any edit — `.tentacle/tmp/model-charts/probe-round2.ts`:
+
+```
+1 scatter all-null y: ACCEPTED
+2a pie points: ACCEPTED
+2b bar points 900: ACCEPTED
+2c stacked area misaligned x: ACCEPTED
+ok line number-x points: ACCEPTED
+ok line date-x points: ACCEPTED
+ok scatter with points: ACCEPTED
+ok scatter with a gap: ACCEPTED
+```
+
+Until the fix, all four hostile shapes were accepted (the four `ok` lines are the
+legitimate forms, which must stay accepted); after it, all four are refused and
+all four legitimate forms still pass.
+
+**1. An all-`null` `{x,y}` series is refused (was a silent empty chart).**
+`readNumbers` had the all-null check, `readPoints` did not, so a scatter whose
+points all carry `y: null` validated, the tool reported `1 series × 1 · y no
+values`, and nothing was drawn. `readPoints` now ends with the same check
+(`spec.ts:646-649`) and the same sentence, `datasets[0].data has no values (all
+null)`, so the model gets one message in either data form. A *gap* inside a
+point series (some `y: null`) stays valid — the check is `every`.
+
+**2. The point form is scoped to where its own x means something.**
+`{x,y}` points carry their x, so they are only meaningful where x is a number:
+the old `readData` accepted them for any type, and every count computed off
+`labels` then silently saw nothing. Four consequences, one guard each:
+
+- `readData` refuses points for `pie`/`doughnut` (`spec.ts:539-543`) — a slice
+  is named by a label, and the shape had slipped past `checkPie` too.
+- `readData` refuses points when the chart is not a `scatter` and `x.type` is
+  `category` (`spec.ts:547-552`), with the fix in the sentence (`add x: {"type":
+  "number"} (or "date")`) — and only for a *known* type, so an unknown `type`
+  keeps the single, useful error it deserves. Refusing the *shape* is the fix
+  for the finding review round 2 raised as "a bar with points and no labels",
+  rather than bolting the category cap onto a chart whose axis cannot place the
+  points.
+- The 60-category bar cap now counts the point form's values when the axis *is*
+  numeric (`spec.ts:768-778`): `datasets[0].data has 61 points (max 60
+  categories for a bar chart) — …`, since those x positions never pass through
+  `labels`.
+- A `stacked` chart whose series sit on different x is refused
+  (`checkAligned`, `spec.ts:913-928`): stacking sums one column at a time, so
+  misaligned series stack into a lie. The plain-values form is aligned by
+  construction and is untouched.
+
+**Drift from the Implementation (and why).** Two, both narrowing:
+
+1. The plan's `datasets[].data` row said only "`{x,y}` points for scatter and
+   number/date x". It did not say what to do when a model writes them anyway,
+   and it did not say the stacked form needs aligned x. Both rows are now
+   written out (spec table + failure-mode table, *Design*), because an error
+   message the plan does not name is a plan gap, not a free choice.
+2. Fixing this exposed a pre-existing second message: `forms` was derived from
+   the *validated* datasets, so a dataset that failed to parse made the chart
+   look like the values form and `needsLabels` then demanded labels
+   (`labels is missing — line charts need one label per value…`) on a pie. A
+   pie with a string value got two errors, one of them misleading. `forms` is
+   now read from the RAW arguments (`rawForms`, `spec.ts:821-828`), so the
+   complaint describes what the model wrote. This is the fix review round 2's
+   finding 2 implies (one honest sentence per mistake) rather than new scope.
+
+The model-facing `CHART_JSON_SCHEMA` description of `datasets[].data` states the
+new scope too (`json-schema.ts:66-67`), so a model reading the schema does not
+have to hit the error to learn it. That guard also refuses to add the axis
+sentence when `type` is unknown or missing (`spec.ts:547`): an unknown type is
+already an error, and telling the model to fix the x axis of a chart that
+cannot be drawn is a second, misleading job.
+
+**Tests (red first).** Both files were run before the fix and failed on the
+assertion of the property, not on a compile error:
+
+- `packages/core/test/chart-spec.test.ts` T1.3 — `all null in the point form
+  too` + `…but one real value among the gaps is still valid`.
+- the new T1.13 — pie/doughnut points, a bar with points and a category x, the
+  numeric-x bar cap at 60/61, the stacked alignment pair, an unknown type not
+  being double-charged for a missing axis, and a block asserting the legitimate
+  forms (line number-x, line date-x, scatter, a gap) still pass.
+- `packages/core/test/chart-helpers.test.ts` — the schema description pins its
+  three claims, so the model-facing text cannot drift back.
+
+Red, before any code change (5 fail / 48 pass):
+
+```
+(fail) T1.3 shape > all null in the point form too (Review round 2, finding 1)
+(fail) T1.13 … > pie and doughnut take slices from labels, never points
+(fail) T1.13 … > a bar with points and no x type is refused (the category cap cannot see them)
+(fail) T1.13 … > …and with a number x, the 60-category cap counts the points
+(fail) T1.13 … > a stacked chart needs every series on the same x
+```
+
+**Mutations (§9 non-vacuity — each applied, run, reverted).**
+
+```
+### MUTATION 1 (finding 1): drop the all-null check in readPoints
+(fail) T1.3 shape > all null in the point form too (Review round 2, finding 1)
+ 52 pass   1 fail
+
+### MUTATION 2 (finding 2a/2b): both readData point-form scope guards disabled
+(fail) T1.13 … > pie and doughnut take slices from labels, never points
+(fail) T1.13 … > a bar with points and no x type is refused (the category cap cannot see them)
+ 51 pass   2 fail
+
+### MUTATION 3 (finding 2b, cap): bar point-form category count removed
+(fail) T1.13 … > …and with a number x, the 60-category cap counts the points
+ 52 pass   1 fail
+
+### MUTATION 4 (finding 2c): stacked x-alignment check removed
+(fail) T1.13 … > a stacked chart needs every series on the same x
+ 52 pass   1 fail
+
+### MUTATION 5 (drift 2): rawForms forced to "values"
+(fail) T1.13 … > a stacked chart needs every series on the same x
+(fail) T1.13 … > the legitimate point forms still pass
+ 48 pass   5 fail
+
+### MUTATION 6 (schema): the data description back to HEAD's wording
+(fail) CHART_JSON_SCHEMA > the data description states the point form's scope
+ 12 pass   1 fail
+
+### MUTATION 7 (the `type !== null` guard): an unknown type double-charged
+(fail) T1.13 … > an unknown type is not double-charged for the axis it never had
+ 53 pass   1 fail
+```
+
+Every revert left the narrow file green again (54 pass / 0 fail;
+`chart-helpers` 13 pass / 0 fail).
+
+**Gate** (this branch, this round; the whole suite was run once, at the end):
+
+```sh
+$ bunx tsc --noEmit
+(no output)          # TSC_EXIT=0
+
+$ bun run lint
+Checked 1779 files in 530ms. No fixes applied.
+
+$ bun test
+ 12998 pass
+ 5 skip
+ 0 fail
+ 33 snapshots, 101463 expect() calls
+Ran 13003 tests across 923 files. [442.38s]
+```
+
+The 5 skips are §6's three opt-in groups (2 live-docker, 2 live-k8s, 1
+real-socket slow), not failures. The 9 new tests are the count's increase over
+the 12 989 C4 recorded, and the suite was run on the final tree (after the
+mutation-7 guard and its test).
+
+**Not done here, deliberately.** No wire change (no method, no update, no
+field), so no `protocol.d/` note and no `PROTOCOL_VERSION` move; no new
+user-visible behaviour beyond a refused invalid spec, so `changelog.d/` is
+unchanged (C4's two fragments stand). Review round 2's non-blocking LOW
+(`chartArgumentsHint` matching `Infinity` inside a title string) is untouched —
+it is LOW and costs one misleading sentence on an already-failed parse.
+
 ## Review
 *(empty — mandatory fresh-context review after C8)*
 
@@ -1575,3 +1749,29 @@ On `modern.html`: **1 A · 2 B · 3 B · 4 B · 5 B · 6 A · 7 A · 8 B · 9 A 
 - **Low (not blocking):** `chartArgumentsHint` (`tools/src/chart.ts:37`) matches `NaN|Infinity|undefined` anywhere in the raw text, including inside a string (a title "Infinity War" with an unrelated syntax error gets the NaN hint). Cost: one misleading sentence on an already-failed parse.
 - **Not verified here:** T2.0 rebuilds rows from the daemon's history, not from a laptop `<uid>.jsonl` reload; T2.3 deferred to C8 (recorded drift).
 - **Reviewer = same model family as the executor's orchestrator** (fresh context only): shared blind spots possible.
+
+### Review rounds 2–4 in `runs/` (REQUEST-CHANGES — the findings fixed above)
+
+*— recorded by rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor), 2026-11-16*
+
+These are a *different* review from the section above: the orchestrator's
+`runs/night-model-charts-review{2,3,4}.json` (one session,
+`64a7f815-…`, account `condo`), each reviewing C1's validator at the C1/C2
+scope. All three returned **REQUEST-CHANGES**; none of them committed its
+section to this doc, so their verdicts are recorded here from the run files.
+
+Round 2's two findings (MEDIUM):
+
+1. `spec.ts:607` — `readPoints` has no all-`null` check (`readNumbers` has one at
+   `:564`, pre-fix). A scatter whose points all carry `y: null` passes, the tool
+   reports success (`"1 series × 1 · y no values"`), and nothing is drawn. The
+   plan says an all-`null` series is an error.
+2. `spec.ts:571-606` — `{x,y}` points are accepted for any chart type, but the
+   plan allows them only for scatter and number/date x. Pie with no labels, a
+   900-point category bar that skips the 60-category cap, and stacked areas whose
+   series sit on different x all pass. The client re-runs this same check, so a
+   forged spec in these shapes would reach the renderers too.
+
+Rounds 3 and 4 restated both verbatim and added that the loop had reviewed only
+review commits in between. All four hostile shapes still reproduced on HEAD
+before *Fix round 1* below, which is the round that answers them.

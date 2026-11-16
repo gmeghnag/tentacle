@@ -175,6 +175,40 @@ describe("T1.3 shape", () => {
     expect(errors(raw)).toContain("datasets[0].data has no values (all null)");
   });
 
+  test("all null in the point form too (Review round 2, finding 1)", () => {
+    const raw = {
+      type: "scatter",
+      title: "T",
+      datasets: [
+        {
+          label: "A",
+          data: [
+            { x: 1, y: null },
+            { x: 2, y: null },
+          ],
+        },
+      ],
+    };
+    expect(errors(raw)).toContain("datasets[0].data has no values (all null)");
+  });
+
+  test("…but one real value among the gaps is still valid", () => {
+    const raw = {
+      type: "scatter",
+      title: "T",
+      datasets: [
+        {
+          label: "A",
+          data: [
+            { x: 1, y: null },
+            { x: 2, y: 3 },
+          ],
+        },
+      ],
+    };
+    expect(accepted(raw).type).toBe("scatter");
+  });
+
   test("missing title and missing type", () => {
     expect(errors({ labels: ["a"], datasets: [{ label: "A", data: [1] }] })).toContain(
       "type is missing — allowed: line, bar, area, pie, doughnut, scatter",
@@ -199,6 +233,103 @@ describe("T1.3 shape", () => {
     const list = errors(raw);
     expect(list.length).toBeGreaterThan(1);
     expect(list.length).toBeLessThanOrEqual(8);
+  });
+});
+
+describe("T1.13 the point form is scoped (Review round 2, finding 2)", () => {
+  const points = (n: number) => Array.from({ length: n }, (_, i) => ({ x: i + 1, y: i }));
+
+  test("pie and doughnut take slices from labels, never points", () => {
+    for (const type of ["pie", "doughnut"]) {
+      // ONE sentence: the form is refused, and no spurious "labels is missing".
+      expect(errors({ type, title: "T", datasets: [{ label: "A", data: points(2) }] })).toEqual([
+        `datasets[0].data uses {x, y} points — a ${type} takes one number per label (put the slice names in labels)`,
+      ]);
+    }
+  });
+
+  test("a bar with points and no x type is refused (the category cap cannot see them)", () => {
+    expect(
+      errors({ type: "bar", title: "T", datasets: [{ label: "A", data: points(3) }] }),
+    ).toEqual([
+      'datasets[0].data uses {x, y} points — the x axis must be numeric: add x: {"type": "number"} (or "date")',
+    ]);
+  });
+
+  test("…and with a number x, the 60-category cap counts the points", () => {
+    const bar = (n: number) => ({
+      type: "bar",
+      title: "T",
+      datasets: [{ label: "A", data: points(n) }],
+      x: { type: "number" },
+    });
+    expect(accepted(bar(60)).type).toBe("bar");
+    expect(errors(bar(61))[0]).toBe(
+      'datasets[0].data has 61 points (max 60 categories for a bar chart) — fold the smallest into "Other" or use a line chart',
+    );
+  });
+
+  test("a stacked chart needs every series on the same x", () => {
+    const stacked = (aligned: boolean) => ({
+      type: "area",
+      title: "T",
+      stacked: true,
+      x: { type: "number" },
+      datasets: [
+        {
+          label: "A",
+          data: [
+            { x: 1, y: 1 },
+            { x: 2, y: 2 },
+          ],
+        },
+        {
+          label: "B",
+          data: aligned
+            ? [
+                { x: 1, y: 2 },
+                { x: 2, y: 1 },
+              ]
+            : [
+                { x: 2, y: 1 },
+                { x: 3, y: 2 },
+              ],
+        },
+      ],
+    });
+    expect(accepted(stacked(true)).type).toBe("area");
+    expect(errors(stacked(false))[0]).toBe(
+      "datasets[1].data has different x values from datasets[0].data — a stacked chart sums one column at a time, so every series needs the same x (or use stacked: false)",
+    );
+  });
+
+  test("an unknown type is not double-charged for the axis it never had", () => {
+    expect(
+      errors({ type: "donut", title: "T", datasets: [{ label: "A", data: points(2) }] }),
+    ).toEqual([
+      'unknown type "donut" — did you mean "doughnut"? Allowed: line, bar, area, pie, doughnut, scatter',
+    ]);
+  });
+
+  test("the legitimate point forms still pass", () => {
+    const line = (x: unknown) => ({
+      type: "line",
+      title: "T",
+      datasets: [{ label: "A", data: points(2) }],
+      x,
+    });
+    expect(accepted(line({ type: "number" })).type).toBe("line");
+    expect(
+      accepted({
+        type: "line",
+        title: "T",
+        datasets: [{ label: "A", data: [{ x: "2026-03-01", y: 1 }] }],
+        x: { type: "date" },
+      }).type,
+    ).toBe("line");
+    expect(
+      accepted({ type: "scatter", title: "T", datasets: [{ label: "A", data: points(2) }] }).type,
+    ).toBe("scatter");
   });
 });
 

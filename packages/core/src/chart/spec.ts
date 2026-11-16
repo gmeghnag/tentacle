@@ -516,6 +516,7 @@ function readData(
   at: string,
   values: unknown[],
   xType: XAxisType,
+  type: ChartType | null,
 ): (number | null)[] | ChartPoint[] | null {
   if (values.length === 0) {
     reader.fail(`${at} is empty — give at least one value per label`);
@@ -532,7 +533,25 @@ function readData(
     reader.fail(`${at} mixes numbers and {x, y} points — use one form`);
     return null;
   }
-  if (points > 0) return readPoints(reader, at, values, xType);
+  if (points > 0) {
+    // The point form carries its own x, so it is only meaningful where x is a
+    // number: a category axis (and a pie's slices) needs the `labels` form.
+    if (type === "pie" || type === "doughnut") {
+      reader.fail(
+        `${at} uses {x, y} points — a ${type} takes one number per label (put the slice names in labels)`,
+      );
+      return null;
+    }
+    // Only for a KNOWN type: an unknown/missing `type` already fails, and a
+    // second sentence about the axis is noise on a chart that cannot be drawn.
+    if (type !== null && type !== "scatter" && xType === "category") {
+      reader.fail(
+        `${at} uses {x, y} points — the x axis must be numeric: add x: {"type": "number"} (or "date")`,
+      );
+      return null;
+    }
+    return readPoints(reader, at, values, xType);
+  }
   return readNumbers(reader, at, values);
 }
 
@@ -623,6 +642,10 @@ function readPoints(
       continue;
     }
     out.push({ x, y });
+  }
+  if (out.length === values.length && out.every((point) => point.y === null)) {
+    reader.fail(`${at} has no values (all null)`);
+    return null;
   }
   return out.length === values.length ? out : null;
 }
@@ -730,26 +753,31 @@ export function validateChartSpec(raw: unknown): ChartValidation {
   const y = readAxis(reader, raw, "y");
   const xType = (x as ChartXAxis | undefined)?.type ?? (type === "scatter" ? "number" : "category");
 
-  const datasets = readDatasets(reader, raw, xType);
-  const forms = datasets?.map((dataset) =>
-    dataset.data.length > 0 && isRecord(dataset.data[0]) ? "points" : "values",
-  );
-  if (forms?.includes("points") && forms.includes("values")) {
+  const datasets = readDatasets(reader, raw, xType, type);
+  // The form is read from the RAW input: a dataset that failed to parse must
+  // still not make a pie look like a chart that needs labels.
+  const forms = rawForms(raw);
+  if (forms.includes("points") && forms.includes("values")) {
     reader.fail("datasets mix numbers and {x, y} points — use one form");
   }
-  const labels = readLabels(
-    reader,
-    raw,
-    xType,
-    needsLabels(type, Boolean(forms?.includes("points"))),
-  );
+  const points = forms.includes("points");
+  const labels = readLabels(reader, raw, xType, needsLabels(type, points));
 
-  if (type && datasets && labels && type === "bar" && labels.length > CHART_CAPS.categories) {
+  // A bar's category count is its labels', or — in the point form — the values'
+  // own x positions, which never pass through `labels`.
+  const categories =
+    type === "bar" && datasets
+      ? (labels?.length ?? (points ? (datasets[0]?.data.length ?? 0) : 0))
+      : 0;
+  if (categories > CHART_CAPS.categories) {
     reader.fail(
-      `labels has ${labels.length} categories (max ${CHART_CAPS.categories} for a bar chart) — fold the smallest into "Other" or use a line chart`,
+      labels
+        ? `labels has ${categories} categories (max ${CHART_CAPS.categories} for a bar chart) — fold the smallest into "Other" or use a line chart`
+        : `datasets[0].data has ${categories} points (max ${CHART_CAPS.categories} categories for a bar chart) — fold the smallest into "Other" or use a line chart`,
     );
   }
   checkLengths(reader, type, datasets, labels);
+  if (raw.stacked === true) checkAligned(reader, datasets);
   checkPie(reader, type, datasets);
   reader.finishNotes();
 
@@ -786,10 +814,24 @@ function needsLabels(type: ChartType | null, points: boolean): boolean {
   return !points && type !== "scatter";
 }
 
+/**
+ * The data form each dataset uses, read from the RAW arguments — before any of
+ * them fails to parse, so a broken dataset still tells us what shape was meant.
+ */
+function rawForms(raw: Record<string, unknown>): ("points" | "values")[] {
+  const datasets = raw.datasets;
+  if (!Array.isArray(datasets)) return [];
+  return datasets.map((entry): "points" | "values" => {
+    const data = isRecord(entry) ? entry.data : undefined;
+    return Array.isArray(data) && data.length > 0 && isRecord(data[0]) ? "points" : "values";
+  });
+}
+
 function readDatasets(
   reader: SpecReader,
   raw: Record<string, unknown>,
   xType: XAxisType,
+  type: ChartType | null,
 ): ChartDataset[] | null {
   const value = raw.datasets;
   if (value === undefined) {
@@ -831,7 +873,7 @@ function readDatasets(
       reader.fail(`${at}.data must be an array — e.g. [12.5, 14.1, 13.8]`);
       continue;
     }
-    const data = readData(reader, `${at}.data`, entry.data, xType);
+    const data = readData(reader, `${at}.data`, entry.data, xType, type);
     if (label === undefined || data === null) continue;
     out.push({ label, data });
   }
@@ -855,6 +897,33 @@ function checkLengths(
         `datasets[${i}].data has ${dataset.data.length} values but labels has ${labels.length} — give one value per label (null for a gap)`,
       );
     }
+  }
+}
+
+/** Whether a validated dataset's data are `{x, y}` points rather than plain values. */
+function isPointForm(data: ChartDataset["data"]): data is readonly ChartPoint[] {
+  return data.length > 0 && isRecord(data[0]);
+}
+
+/**
+ * A stacked chart sums one column at a time, so its series must sit on the same
+ * x. The plain values form is aligned by construction (one value per label); the
+ * point form is not, and misaligned series stack into a lie.
+ */
+function checkAligned(reader: SpecReader, datasets: ChartDataset[] | null): void {
+  if (!datasets || datasets.length < 2) return;
+  const first = datasets[0];
+  if (!first || !isPointForm(first.data)) return;
+  const xs = first.data.map((point) => String(point.x));
+  for (let i = 1; i < datasets.length; i++) {
+    const dataset = datasets[i];
+    if (!dataset || !isPointForm(dataset.data)) continue;
+    const other = dataset.data.map((point) => String(point.x));
+    if (other.length === xs.length && other.every((x, k) => x === xs[k])) continue;
+    reader.fail(
+      `datasets[${i}].data has different x values from datasets[0].data — a stacked chart sums one column at a time, so every series needs the same x (or use stacked: false)`,
+    );
+    return;
   }
 }
 

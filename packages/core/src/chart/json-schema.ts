@@ -64,7 +64,7 @@ export const CHART_JSON_SCHEMA: Record<string, unknown> = {
             minItems: 1,
             maxItems: CHART_CAPS.points,
             description:
-              'One value per label, in the same order, as NUMBERS (not strings: write 12.5, never "12.5" or "14,1"). Use null for a gap. For a scatter or a number/date axis you may use {x, y} points instead.',
+              'One value per label, in the same order, as NUMBERS (not strings: write 12.5, never "12.5" or "14,1"). Use null for a gap. For a scatter, or an x whose type is "number"/"date", you may use {x, y} points instead — never for pie/doughnut, and a stacked chart needs the same x in every series.',
             items: {
               anyOf: [
                 { type: "number" },
