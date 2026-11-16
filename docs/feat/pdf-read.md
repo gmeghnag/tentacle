@@ -221,8 +221,12 @@ checks it at the start of the slice and STOPs if false).
   `worker.terminate()` → `reason: "timeout"`/`"aborted"`. A pathological file
   (infinite loop in a content stream, decompression bomb) costs one worker
   thread for ≤ 20 s and never blocks another session (AGENTS §7 "don't serialize").
-  Memory: `new Worker(url, { smol: true })` [verify the option in Bun's
-  Worker typing]; a file over `MAX_PDF_BYTES` is refused before any parse.
+  Memory: a Bun Worker shares the daemon's process and honours no heap limit
+  (`smol` is not in its typing; `node:worker_threads` `resourceLimits` is
+  ignored), so the main thread polls the process RSS every 10 ms while a PDF
+  worker lives and kills every live one past a 512 MiB growth budget →
+  `reason: "too-much-memory"` (fix round 1 of the P2 review). A file over
+  `MAX_PDF_BYTES` is refused before any parse.
 - Concurrency: a module-level semaphore, at most 2 PDF workers per daemon
   process; a third waits (bounded by its own timeout). Prevents N parallel
   sub-agents from spawning N heavy threads.
@@ -410,7 +414,8 @@ In dependency order; one slice = one row of §Slices.
 | Encrypted (user password) | "password-protected; cannot open" | — (no password UI in v1, §Notes) |
 | Owner-password only (print/copy restricted, opens without password) | pdf.js opens it → text returned | — |
 | Corrupt / truncated | `stopAtErrors:false` salvages pages; nothing parseable → "corrupt PDF: <reason≤200>" | — |
-| Hostile: infinite loop / bomb / deep recursion | worker killed at 20 s → "took too long to parse (limit 20 s)"; other sessions unaffected | worker gone, semaphore released in `finally` |
+| Hostile: infinite loop / deep recursion | worker killed at 20 s → "took too long to parse (limit 20 s)"; other sessions unaffected | worker gone, semaphore released in `finally` |
+| Hostile: decompression bomb (memory) | process RSS +512 MiB while PDF workers run → every live PDF worker killed → `too-much-memory`; a concurrent legit PDF is killed too (RSS is not per worker) | workers gone, slots released; a waiter that then starts gets a fresh baseline |
 | Hostile: CVE-2024-4367 font | patched version + `isEvalSupported:false`; test pins the option | — |
 | Hostile: network lure (remote fonts/cMaps) | no URLs configured, `fetch` throws in the worker | — |
 | Prompt injection in text | `<file>` block, `</file` neutralised, system-prompt line | data, not instructions |
@@ -908,6 +913,83 @@ after this one change.
 
 No changelog change: `changelog.d/pdf-read.added.md` already exists, and P2 is not
 user-visible until P3 wires `fs_read`. No protocol change.
+
+*— claude-opus-5-5, 2026-11-16*
+
+### Fix round 1 — P2 review round 5 (HIGH memory bomb, MEDIUM onerror test) · executed by `claude-opus-5-5`, 2026-11-16
+
+**Choice of kill switch (probe first).** `node:worker_threads` `resourceLimits:
+{ maxOldGenerationSizeMb: 64 }` is ignored by Bun 1.4: a worker that allocates
+40 × 32 MiB reported `alive 40` with process RSS peaking at 1152 MB
+(`.tentacle/tmp/pdf-read/f1/rl.ts`). An OS limit on a child process is not portable
+(macOS does not enforce `RLIMIT_AS`) and would mean a second spawn path. So the
+switch is a **main-thread RSS watchdog**. The worker's inflate loop never blocks
+the main thread's timers.
+
+**HIGH — fixed.** `packages/tools/src/pdf/extract.ts:78` `memoryWatchdog`: while
+at least one worker of the extractor is live, it reads `process.memoryUsage.rss()`
+every 10 ms (`memoryPollMs`). The baseline is the RSS when the first live worker
+started. Past `memoryBudgetBytes` of growth (default `PDF_MEMORY_BUDGET_BYTES` =
+512 MiB, `:67`), every live extraction is finished with the new reason
+`too-much-memory` (`options.ts:43`, message at `:188`). That terminates the worker
+and releases the slot. RSS is process-wide, so it cannot say which worker is
+growing, and all live workers go. The sweep kills a snapshot (`:87`): a kill frees
+a slot, and that can start a waiter synchronously. The baseline is then re-read,
+so the waiter is not charged for RSS the killed workers left behind. Polling stops
+when no worker is live. `extract.ts:157` unregisters on every finish path.
+The test fixture `makeFlateBombPdf` (`test/pdf-fixture.ts:128`) builds the bomb in
+memory.
+
+Measured with `.tentacle/tmp/pdf-read/f1/scale.ts <inflate MiB> <budget MiB>` (peak
+RSS growth; poll 10 ms):
+```
+inflate=512MiB  budget=0(none) peak=+664MiB ms=726 ok
+inflate=512MiB  budget=64      peak=+96MiB  ms=193 too-much-memory
+inflate=1024MiB budget=0(none) peak=+1789MiB ms=1323 ok
+inflate=1024MiB budget=512     peak=+577MiB ms=204 too-much-memory
+```
+Under a burst, RSS grows by about 20 MiB/ms (buffer doubling). At 25 ms polls the
+same 256 MiB bomb overshot to +240 MiB against a 128 MiB budget, so the default is
+10 ms.
+
+Tests (`test/pdf-extract.test.ts`):
+- `:299` is the real worker and a real 512 MiB bomb with a 64 MiB budget. It
+  asserts `too-much-memory` and peak RSS growth < budget + 128 MiB.
+  **RED on the pre-fix code:** the result was `ok:true` and the reason assertion
+  failed (`Expected: "too-much-memory" Received: false`; the first run of the
+  256 MiB variant showed `rss +294 MiB … "ok":true`).
+- `:259` uses a fake RSS and fake workers. Under budget, nothing is killed. Over
+  budget, both live workers are killed, the queued third worker runs with a fresh
+  baseline, and polling stops when idle. **RED on the pre-fix code:** it timed out
+  at 5000 ms because nothing was killed.
+
+**MEDIUM — fixed.** `:247` drives a real `new Worker` on a missing module URL. It
+fails asynchronously through `onerror` before `ready` and is asserted
+`unavailable` + "unavailable in this build". The behaviour was already correct, so
+this test was green on the pre-fix code. Its red is the reviewer's mutation, below.
+
+**Mutations (each reverted; a grep for the markers shows none left):**
+```
+M1 tick never kills (`|| true`)            → 25 pass 2 fail: ":259" timeout; ":299" Expected "too-much-memory" Received false
+M2 kill only at 6× budget                  → ":299" reason ok, but Expected < 201326592 Received 521716816 (bound is non-vacuous)
+M3 no baseline reset after a sweep         → ":259" Expected false Received true (the waiter was killed)
+M4 never clear the poll interval when idle → ":259" Expected 9 Received 13 (still polling)
+M5 pre-ready onerror → corrupt (extract.ts) → 26 pass 1 fail: ":247" Expected "unavailable" Received "corrupt"
+```
+
+**Drift from Implementation:** D2's "`smol: true`" memory line is replaced by the
+watchdog. The §Failure modes "bomb" case is split off the 20 s timeout row into a
+row of its own. `PdfFailureReason` gains `too-much-memory`. It is internal (it
+reaches the model only as the message text), so this is not a protocol change. The
+real PDF tests (2001 pages, 400 000 operators) run under the default 512 MiB
+budget and still pass, so the budget does not trip on them. **Not done:** the
+compiled-binary `$bunfs` probe (review item 3) is still unrun, because running the
+binary needs an approval this session does not have:
+`.tentacle/tmp/pdf-read/r4/probe-bin .tentacle/tmp/pdf-read/r4/hello.pdf`.
+
+**Gate:** `bunx tsc --noEmit` exit 0 · `bun run lint` (1734 files, 0 errors) ·
+`bun test` **12577 pass, 5 skip, 0 fail** across 899 files. The 5 skips are this
+branch's existing count (the P2 run had the same 5).
 
 *— claude-opus-5-5, 2026-11-16*
 

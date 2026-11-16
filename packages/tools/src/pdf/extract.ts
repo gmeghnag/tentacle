@@ -48,6 +48,61 @@ export interface ExtractPdfOptions {
 export interface PdfExtractorOptions {
   spawn?: () => PdfWorkerLike;
   maxConcurrent?: number;
+  /**
+   * How much the process RSS may grow while this extractor's workers run
+   * before ALL of them are killed (`too-much-memory`). Default 512 MiB.
+   */
+  memoryBudgetBytes?: number;
+  /**
+   * How often the RSS is read while a worker runs. Default 10 ms: a bomb
+   * grows the RSS in bursts of ~20 MiB/ms (buffer doubling), so the interval
+   * bounds the overshoot past the budget.
+   */
+  memoryPollMs?: number;
+  /** Reads the process RSS (a test fakes it). */
+  readRss?: () => number;
+}
+
+/** The default `memoryBudgetBytes`. */
+export const PDF_MEMORY_BUDGET_BYTES = 512 * 1024 * 1024;
+
+/**
+ * The memory kill switch (docs/feat/pdf-read.md §Design D2). A Bun Worker
+ * shares the daemon's process and honours no heap limit (`resourceLimits` is
+ * ignored, `smol` is not in its typing), so a decompression bomb would grow
+ * the daemon until the OS kills it. Instead the main thread — which a busy
+ * worker never blocks — polls the process RSS while any worker lives, and
+ * kills every live one when it has grown more than the budget since the
+ * watch began. The RSS cannot be split per worker, so all of them go.
+ */
+function memoryWatchdog(budget: number, pollMs: number, readRss: () => number) {
+  const live = new Set<() => void>();
+  let baseline = 0;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const tick = () => {
+    if (readRss() - baseline <= budget) return;
+    // A kill frees a slot, which may start a waiter synchronously: snapshot,
+    // and give whatever is live afterwards a fresh baseline (what the killed
+    // workers leave in the RSS is not the newcomer's).
+    for (const kill of [...live]) kill();
+    baseline = readRss();
+  };
+  return {
+    watch(kill: () => void): () => void {
+      if (live.size === 0) {
+        baseline = readRss();
+        timer = setInterval(tick, pollMs);
+      }
+      live.add(kill);
+      return () => {
+        live.delete(kill);
+        if (live.size === 0 && timer !== undefined) {
+          clearInterval(timer);
+          timer = undefined;
+        }
+      };
+    },
+  };
 }
 
 export type ExtractPdf = (bytes: Uint8Array, options?: ExtractPdfOptions) => Promise<PdfExtraction>;
@@ -56,6 +111,12 @@ export type ExtractPdf = (bytes: Uint8Array, options?: ExtractPdfOptions) => Pro
 export function createPdfExtractor(options: PdfExtractorOptions = {}): ExtractPdf {
   const spawn = options.spawn ?? spawnBunWorker;
   const maxConcurrent = options.maxConcurrent ?? 2;
+  const budget = options.memoryBudgetBytes ?? PDF_MEMORY_BUDGET_BYTES;
+  const watchdog = memoryWatchdog(
+    budget,
+    options.memoryPollMs ?? 10,
+    options.readRss ?? (() => process.memoryUsage.rss()),
+  );
   let active = 0;
   const queue: (() => void)[] = [];
 
@@ -87,11 +148,13 @@ export function createPdfExtractor(options: PdfExtractorOptions = {}): ExtractPd
       let holding = false;
       let ready = false;
       let worker: PdfWorkerLike | undefined;
+      let unwatch: (() => void) | undefined;
 
       const finish = (result: PdfExtraction) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        unwatch?.();
         signal?.removeEventListener("abort", onAbort);
         worker?.terminate();
         if (holding) release();
@@ -122,6 +185,13 @@ export function createPdfExtractor(options: PdfExtractorOptions = {}): ExtractPd
           finish(unavailable(error));
           return;
         }
+        unwatch = watchdog.watch(() =>
+          finish({
+            ok: false,
+            reason: "too-much-memory",
+            message: `the PDF needed more than ${Math.round(budget / 1024 / 1024)} MiB of memory to parse, so it was stopped (a decompression bomb, or a page too large to read)`,
+          }),
+        );
         worker.onmessage = (event) => {
           if (event.data === "ready") {
             ready = true;

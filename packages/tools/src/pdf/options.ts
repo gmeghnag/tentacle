@@ -40,6 +40,7 @@ export type PdfFailureReason =
   | "bad-pages"
   | "timeout"
   | "too-large"
+  | "too-much-memory"
   | "aborted"
   | "unavailable";
 

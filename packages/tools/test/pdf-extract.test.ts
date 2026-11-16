@@ -5,6 +5,7 @@ import { pdfDocumentOptions } from "../src/pdf/options.ts";
 import { type GetDocument, runExtraction } from "../src/pdf/run.ts";
 import {
   makeEncryptedPdf,
+  makeFlateBombPdf,
   makeHeavyPdf,
   makePdf,
   makeToUnicodePdf,
@@ -242,6 +243,76 @@ describe("extractPdf — the kill switch and the slots", () => {
     expect(!r.ok && r.message).toContain("unavailable in this build");
     expect((await extract(hello())).ok).toBe(true);
   });
+
+  test("a real worker whose module is missing fails before ready → unavailable", async () => {
+    // A missing URL does not throw from `new Worker`: it fails later, through
+    // `onerror`, before the worker ever says `ready`.
+    const missing = new URL("./fixtures/no-such-pdf-worker.ts", import.meta.url).href;
+    const extract = createPdfExtractor({
+      spawn: () => new Worker(missing, { type: "module" }) as unknown as PdfWorkerLike,
+    });
+    const r = await extract(hello(), { timeoutMs: 5_000 });
+    expect(!r.ok && r.reason).toBe("unavailable");
+    expect(!r.ok && r.message).toContain("unavailable in this build");
+  });
+
+  test("over the memory budget every live worker is killed; a waiter then runs", async () => {
+    let rss = 1_000;
+    let reads = 0;
+    const workers: FakeWorker[] = [];
+    const extract = createPdfExtractor({
+      memoryBudgetBytes: 100,
+      memoryPollMs: 5,
+      readRss: () => {
+        reads++;
+        return rss;
+      },
+      spawn: () => {
+        const w = new FakeWorker();
+        workers.push(w);
+        return w;
+      },
+    });
+    const jobs = [extract(hello()), extract(hello()), extract(hello())];
+    rss = 1_050; // under budget: nobody is killed
+    await Bun.sleep(20);
+    expect(workers.filter((w) => w.terminated).length).toBe(0);
+    rss = 1_101;
+    const [a, b] = await Promise.all([jobs[0], jobs[1]]);
+    for (const r of [a, b]) {
+      expect(!r?.ok && r?.reason).toBe("too-much-memory");
+      expect(!r?.ok && r?.message).toContain("memory");
+    }
+    // The waiter got a slot with a fresh baseline: the RSS the killed workers
+    // left behind does not count against it.
+    await Bun.sleep(20);
+    expect(workers.length).toBe(3);
+    expect(workers[2]?.terminated).toBe(false);
+    workers[2]?.emit({ ok: true, numPages: 1, pages: [], truncated: false });
+    expect((await jobs[2])?.ok).toBe(true);
+    // Idle: the watchdog stops polling.
+    const after = reads;
+    await Bun.sleep(20);
+    expect(reads).toBe(after);
+  });
+
+  test("a decompression bomb is killed at the memory budget, with process RSS bounded", async () => {
+    const MiB = 1024 * 1024;
+    const bomb = makeFlateBombPdf(512 * MiB); // a 0.5 MiB file
+    Bun.gc(true);
+    const budget = 64 * MiB;
+    const extract = createPdfExtractor({ spawn: realWorker, memoryBudgetBytes: budget });
+    const base = process.memoryUsage.rss();
+    let peak = base;
+    const sample = setInterval(() => {
+      peak = Math.max(peak, process.memoryUsage.rss());
+    }, 5);
+    const r = await extract(bomb, { timeoutMs: 15_000 });
+    clearInterval(sample);
+    expect(!r.ok && r.reason).toBe("too-much-memory");
+    // Unbounded, this file grows the RSS by ≈ +650 MiB; capped, ≈ +100 MiB.
+    expect(peak - base).toBeLessThan(budget + 128 * MiB);
+  }, 30_000);
 
   test("over the byte cap → too-large, without spawning", async () => {
     let spawned = 0;

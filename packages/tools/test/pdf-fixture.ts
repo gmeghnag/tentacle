@@ -2,6 +2,7 @@
  * Test-only PDF generator (docs/feat/pdf-read.md §Tests): KB-sized PDFs built
  * in memory, so no binary fixture is committed. Grown from the R0 `make-pdf.ts`.
  */
+import { deflateSync } from "node:zlib";
 
 interface FixtureOptions {
   /** Extra trailer entries (e.g. an `/Encrypt` dictionary). */
@@ -117,4 +118,37 @@ function appendObject(pdf: Uint8Array, body: string): Uint8Array {
 export function makeHeavyPdf(ops: number): Uint8Array {
   const body = `BT /F1 12 Tf 72 720 Td ${"(x) Tj ".repeat(ops)}ET`;
   return makePdf([[]], { rawContent: [body] });
+}
+
+/**
+ * A decompression bomb: one page whose FlateDecode content stream inflates to
+ * `inflatedBytes` of spaces (≈ 1/1000 of that on disk). Binary, so it is
+ * assembled as bytes rather than through `makePdf`'s text path.
+ */
+export function makeFlateBombPdf(inflatedBytes: number): Uint8Array {
+  const z = deflateSync(new Uint8Array(inflatedBytes).fill(0x20), { level: 9 });
+  const enc = new TextEncoder();
+  const head = enc.encode(
+    [
+      "%PDF-1.4",
+      "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj",
+      "2 0 obj\n<< /Type /Pages /Kids [4 0 R] /Count 1 >>\nendobj",
+      "3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj",
+      "4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>\nendobj",
+      `5 0 obj\n<< /Length ${z.length} /Filter /FlateDecode >>\nstream\n`,
+    ].join("\n"),
+  );
+  const offsets: number[] = [];
+  const text = new TextDecoder().decode(head);
+  for (let n = 1; n <= 5; n++) offsets.push(text.indexOf(`\n${n} 0 obj`) + 1);
+  const xref = head.length + z.length + "\nendstream\nendobj\n".length;
+  let tail = "\nendstream\nendobj\nxref\n0 6\n0000000000 65535 f \n";
+  for (const off of offsets) tail += `${String(off).padStart(10, "0")} 00000 n \n`;
+  tail += `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  const end = enc.encode(tail);
+  const out = new Uint8Array(head.length + z.length + end.length);
+  out.set(head, 0);
+  out.set(z, head.length);
+  out.set(end, head.length + z.length);
+  return out;
 }
