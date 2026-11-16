@@ -1677,3 +1677,34 @@ fail** (12201 tests, 874 files). All 5 skips are opt-in: k8s live ×2
 - **Regressions:** none possible in production, because no source changed.
   `bun run typecheck` is clean. `bun run lint` is clean (1684 files).
 
+## Review
+
+### S4 — APPROVE-WITH-NITS
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; the same model family as S4's executor, so blind spots they share can survive both passes)
+
+**Scope:** S4 only (`git diff main...HEAD`: tools, child filter, config, wiring, worker trust bit).
+
+**Gate:** the 8 touched test files pass (98 pass / 0 fail). `bun run lint` is clean (1701 files). `bun run typecheck` is clean (root, mobile, relay). The full `bun test` was not re-run here.
+
+**Attacks tried:**
+1. **Pod exclusion.**
+   - `podSessionHost` (`serve.ts:1277`) passes no `schedules`.
+   - `session-host.ts:1397` and `:1481` hand the link only when `opts.schedules` is set.
+   - The `buildAgent` registration is gated (`wiring.ts:723`).
+   - Result: holds. The executor's M3 mutation covers it.
+2. **Trust bit widening.**
+   - `persistingController.autoAcceptsTurn` (`local-runtime.ts:765`) delegates to `RemoteSession.autoAcceptsTurn` (`remote-session.ts:477`).
+   - With `daemonWakes` off (pod, relay), that is `ownsTurn` plus the shared auto-accept, and the shared auto-accept is false on a pod.
+   - `relay-policy.ts` still reads only minted turns.
+   - Result: holds.
+3. **Children.** The child filter covers both tools (`subagent.ts:401`). Result: holds.
+4. **Config carry.** `schedules.*` is file-only and is absent from the carry path, so a laptop cannot loosen a `serve` host's limits. Result: holds.
+5. **Mutation** (mine, reverted, `cmp` byte-identical, `git status` clean): `schedule_create` returned success when the link is null → red, 1 fail ("no link → an error"). The executor's M1–M16 table is consistent with the tests.
+
+**Nits (not blocking):**
+- `wiring.ts:425`: the new `schedules` JSDoc sits between `workloadShell`'s doc comment and its field, so `workloadShell` loses its doc. Move it above `workloadShell`'s comment.
+- `tools/src/schedule.ts:79`: the `every` description hard-codes "at least 1m", but `schedules.minIntervalMinutes` can raise that minimum. Only the repair text states the real limit.
+
+**Executor behaviour:** honest. It recorded its drift (the `autoAcceptsTurn` gap the plan missed), ran a reproducible mutation script, and reported the unrelated `exec` flake without hiding it.
+
