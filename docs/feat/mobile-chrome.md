@@ -1642,6 +1642,42 @@ hand with Edit.) The plan's third target, the `note.id` join, belongs to S8.
   harness (drift 5). Pinned by pure tests only.
 - Nothing committed (the orchestrator commits). `TODO.md` untouched.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16 · slice S6 · fixes Review round 1 (2 MEDIUM)*
+
+1. **Finding 1, the undisclosed `live-activity/Info.plist`: FIXED.**
+   `git cat-file -e main:…/live-activity/Info.plist` reports it is not on
+   `main`. Only `notification-service/Info.plist` is tracked there. This file
+   is the same `expo prebuild` artifact that S1 removed. S6's failed e2e run
+   regenerated it, and the commit swept it in. Fix:
+   - The file is deleted from the working tree (`git status`: ` D`).
+   - `.gitignore:36-38` now ignores that one path, so a prebuild cannot bring
+     it back. It has now leaked twice: S1 and S6.
+   - Red/green/mutation, via `git ls-files --cached --ignored --exclude-standard apps/mobile/targets/`:
+     - Red, before the rule: empty output.
+     - Green, after the rule: `apps/mobile/targets/live-activity/Info.plist`.
+     - Mutation, rule commented out: empty again.
+     - Reverted: the path is listed again.
+   - No unit test was added. A test that asserts the file is absent would fail
+     on every local prebuild. The ignore rule is the guard.
+2. **Finding 2, flows 26/24/05 not green on a simulator: NOT FIXED (blocked).**
+   The block is the `liveactivity` → `PushCore` build error that exists on
+   `main`. `LACore.swift:23` has `import PushCore`, and
+   `live-activity/expo-target.config.js` declares no package. S1 and S6 each
+   rebuilt once and both hit it. Under AGENTS §0 (two strikes) I did not rebuild
+   a third time. Fixing the native target is a separate `fix` task, and §10
+   allows one code task at a time. **Decision needed from the owner:** either
+   open that fix first and then re-run
+   `bun run e2e:mobile --ios 26 --only 26-drawer,24-ui-shots,05-daemon-down`
+   (light and dark), or accept S6 with the simulator pass deferred.
+- LOW items (the `swipeIsHorizontal` vertical case, the rename refreshing the
+  current list, the stale header title) were left as they are, since this round
+  covers HIGH/MEDIUM only.
+- **Gate:** `bunx tsc --noEmit` clean. `bun run lint`: 1679 files, clean.
+  `bun test`: **12119 pass · 5 skip · 0 fail** (870 files). That matches the
+  S6 baseline, and the skips are the opt-in ones.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-16 · slice S6 only, fresh context (the same model as the executor, so blind spots it shares may survive both passes)*
