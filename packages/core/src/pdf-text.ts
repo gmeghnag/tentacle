@@ -14,6 +14,9 @@
  * the text the model reads.
  */
 
+import { MAX_DOCUMENT_TEXT_CHARS } from "@tentacle/protocol";
+import type { MessageMedia } from "./model.ts";
+
 /** A file over this is refused before any byte is parsed (`fs_read`). */
 export const MAX_PDF_BYTES = 50 * 1024 * 1024;
 
@@ -23,8 +26,12 @@ export const MAX_PAGES_PER_READ = 100;
 /** Characters of extracted text one `fs_read` call returns before cutting. */
 export const MAX_PDF_TEXT_CHARS = 400_000;
 
-/** Characters of text an ATTACHED PDF may add to a message (the A/V transcript cap). */
-export const MAX_ATTACHED_PDF_CHARS = 64 * 1024;
+/**
+ * Characters of text an ATTACHED PDF may add to a message (the A/V transcript
+ * cap) — the wire's own bound on `document{text}`, so a client's extraction
+ * never exceeds what the daemon accepts.
+ */
+export const MAX_ATTACHED_PDF_CHARS = MAX_DOCUMENT_TEXT_CHARS;
 
 /** One parse's budget; past it the worker is killed (a hostile file costs 20 s). */
 export const PDF_PARSE_TIMEOUT_MS = 20_000;
@@ -284,6 +291,12 @@ export interface FormatPdfTextInput {
   readonly name: string;
   /** Cut the returned text at a page boundary past this many characters. */
   readonly maxChars?: number;
+  /**
+   * Footers name the next `fs_read` call (default). `false` for an attached
+   * document: the model has no path to call with, so a footer only says what
+   * was left out.
+   */
+  readonly readHint?: boolean;
 }
 
 function pluralPages(count: number): string {
@@ -314,7 +327,7 @@ export function formatPdfText(input: FormatPdfTextInput): string {
       ? `[pdf ${input.name}: ${pluralPages(input.numPages)}, no pages read]`
       : `[pdf ${input.name}: ${pluralPages(input.numPages)}, pages ${compressRanges(read)} shown]`;
   const body = kept.map((page) => `${pageMarker(page.n, input.numPages)}\n${page.text}`);
-  const footer = missingFooters(readNumbers, input.numPages);
+  const footer = missingFooters(readNumbers, input.numPages, input.readHint ?? true);
   return [header, ...body, ...footer].join("\n");
 }
 
@@ -323,7 +336,7 @@ function pageMarker(page: number, numPages: number): string {
 }
 
 /** One footer line per gap, each naming the next `pages` value to ask for. */
-function missingFooters(read: ReadonlySet<number>, numPages: number): string[] {
+function missingFooters(read: ReadonlySet<number>, numPages: number, readHint: boolean): string[] {
   // Arithmetic, never a walk over the document. The old shape stepped a counter
   // from 1 to `numPages` — the PDF's own `/Count`, i.e. hostile input — so one
   // hostile count turned a header/footer into seconds of blocked daemon (§7
@@ -334,20 +347,23 @@ function missingFooters(read: ReadonlySet<number>, numPages: number): string[] {
   let cursor = 1;
   for (const page of readPages) {
     if (page > cursor) {
-      lines.push(gapFooter(cursor, page - 1));
+      lines.push(gapFooter(cursor, page - 1, readHint));
     }
     cursor = Math.max(cursor, page + 1);
   }
   if (cursor <= numPages) {
-    lines.push(gapFooter(cursor, numPages));
+    lines.push(gapFooter(cursor, numPages, readHint));
   }
   return lines;
 }
 
 /** The footer for one unread run `start..end`, suggesting at most one read's worth. */
-function gapFooter(start: number, end: number): string {
-  const suggestEnd = Math.min(end, start + MAX_PAGES_PER_READ - 1);
+function gapFooter(start: number, end: number, readHint: boolean): string {
   const span = start === end ? `${start}` : `${start}-${end}`;
+  if (!readHint) {
+    return `[pages ${span} not included]`;
+  }
+  const suggestEnd = Math.min(end, start + MAX_PAGES_PER_READ - 1);
   const suggest = start === suggestEnd ? `${start}` : `${start}-${suggestEnd}`;
   return `[pages ${span} not read — call fs_read with pages: "${suggest}"]`;
 }
@@ -488,6 +504,83 @@ export function splitFileBlocks(content: string): SplitFileBlocksResult {
     rest = rest.replace(match[0], "");
   }
   return { text: rest.trim(), blocks };
+}
+
+/** Cut `text` to `max` characters, the cut said in a last line that fits too. */
+function capText(text: string, max: number): string {
+  if (text.length <= max) {
+    return text;
+  }
+  const note = `\n[text cut at ${max} characters]`;
+  return text.slice(0, Math.max(0, max - note.length)) + note;
+}
+
+/**
+ * The text an attached document may carry: C0 (tab and newline excepted), DEL
+ * and C1 removed. A client's `document{text}` is untrusted and ends up in
+ * terminals (TUI, transcript) and in the model's input.
+ */
+export function sanitizeAttachedText(text: string): string {
+  let out = "";
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    const control =
+      (code < 0x20 && code !== 0x09 && code !== 0x0a) || (code >= 0x7f && code <= 0x9f);
+    if (!control) {
+      out += char;
+    }
+  }
+  return out;
+}
+
+export interface AttachedPdfTextInput {
+  readonly name: string;
+  readonly numPages: number;
+  readonly pages: readonly PdfPageText[];
+}
+
+export type AttachedPdfTextResult =
+  | { readonly ok: true; readonly text: string; readonly pages: number }
+  | { readonly ok: false; readonly message: string };
+
+/**
+ * An attached PDF's extracted pages as the text of its `<file>` block
+ * (docs/feat/pdf-read.md D4): page markers, footers that name what was left out
+ * (never an `fs_read` call — the model has no path), a partial verdict last,
+ * and never over `MAX_ATTACHED_PDF_CHARS`. A scan is refused with its verdict.
+ */
+export function attachedPdfText(input: AttachedPdfTextInput): AttachedPdfTextResult {
+  const verdict = pdfVerdict(input);
+  if (verdict.kind === "no-text") {
+    return { ok: false, message: verdict.message };
+  }
+  const suffix = verdict.kind === "partial" ? `\n${verdict.message}` : "";
+  const budget = MAX_ATTACHED_PDF_CHARS - suffix.length;
+  const body = formatPdfText({ ...input, maxChars: budget, readHint: false });
+  return { ok: true, text: capText(body, budget) + suffix, pages: input.numPages };
+}
+
+export interface AttachedDocumentInput {
+  readonly name: string;
+  readonly pages: number;
+  readonly text: string;
+}
+
+/**
+ * The `<file>` block and the chip entry for one attached document, ALWAYS
+ * rebuilt where the message is made (the daemon): the text is re-sanitised and
+ * re-capped, and `fileBlock` neutralises `</file` — a client's own block is
+ * never trusted.
+ */
+export function attachedDocument(input: AttachedDocumentInput): {
+  readonly block: string;
+  readonly media: MessageMedia;
+} {
+  const text = capText(sanitizeAttachedText(input.text), MAX_ATTACHED_PDF_CHARS);
+  return {
+    block: fileBlock({ name: input.name, kind: "pdf", pages: input.pages, text }),
+    media: { kind: "pdf", name: input.name, pages: input.pages, chars: text.length },
+  };
 }
 
 /** Printable ASCII: a byte a text line is made of (a PDF's body is mostly not). */

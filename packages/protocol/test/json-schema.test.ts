@@ -754,7 +754,8 @@ describe("tagged-union shape (what codegen needs)", () => {
     //     `RelayToDaemonFrame`, `RelayControlFrame` (docs/feat/mobile-relay.md
     //     R1). Not RPC (they have their own `RELAY_PROTOCOL_VERSION`), but the
     //     same `*Schema`/tagged-union shape, so codegen sees them too.
-    expect(unions).toBe(10);
+    // +1: `DocumentSource` (an attached document's ref | text, docs/feat/pdf-read.md D4).
+    expect(unions).toBe(11);
   });
 
   test("every $ref names a $def", () => {
