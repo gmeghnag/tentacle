@@ -1147,7 +1147,11 @@ export class HostedSession {
     // with the reason the model sees — never suspend on a client that cannot
     // show it. Nobody attached: unchanged (held for a client to attach). An
     // ask the DAEMON will answer needs no client at all, so it is never
-    // refused that way (docs/fix/serve-autoaccept-unattended.md OD5).
+    // refused that way (docs/fix/serve-autoaccept-unattended.md OD5) — at raise
+    // (here) and, since `autoAccept` can move while the ask's write is in
+    // flight, AGAIN when it is shown (the `persisted().then` below: fix round 1,
+    // R1). Deciding only here left an ask shown to a client that cannot display
+    // it and this host no longer answers, waiting forever.
     const unsupported = this.autoAnswers(req, this.activeTurnId ?? undefined)
       ? undefined
       : this.blockingUnsupported("permission_request");
@@ -1197,6 +1201,18 @@ export class HostedSession {
       const ask = this.asks.get(requestId);
       if (!ask) {
         return;
+      }
+      // The OD5 skip is decided AGAIN here, not only at raise: `autoAccept` can
+      // move while this ask's write is in flight, and the refusal must follow
+      // the value the ANSWER will read (`autoAnswers`, in `autoAnswer` below).
+      // Otherwise the ask is shown to a client that cannot display it — and this
+      // host no longer answers it — so it waits forever (fix round 1, R1).
+      if (!this.autoAnswers(ask.req, ask.turnId)) {
+        const reason = this.blockingUnsupported("permission_request");
+        if (reason !== undefined) {
+          this.settle(requestId, { outcome: "cancelled" }, reason);
+          return;
+        }
       }
       ask.shown = true;
       try {

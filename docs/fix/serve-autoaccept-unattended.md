@@ -430,4 +430,85 @@ Narrow files during iteration: the two new ones plus `session-auto-accept`,
   same one (`permissionOptions` offers `allow_once` for every ask), so this is a fidelity note, not
   a gap in the property.
 
+### Fix round 1
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-16*
+
+**State found.** `## Review` was empty on this branch, and the three Review rounds
+committed to the *dropped* 401 session (`a6a35eef`/`4809ec62`/`9c3c5c55`, not in
+this branch's history) reviewed a tree with **no implementation at all**: their
+single HIGH was "nothing is implemented". Execution (`8b18c342`) landed after
+them, so that HIGH was closed by the code, not by a fix round. Both halves are
+recorded below: the closure of that HIGH (F1) and the one real defect the
+adversarial pass over the executed diff turned up (F2).
+
+**F1 — HIGH "no implementation" (dropped rounds 1–3): FIXED, verified.** The
+property holds on this tree: the repro (`repro.ts`) still prints `STUCK` on the
+WORKER shape (correct fail-closed: `sharedAutoAccept` only), and with the serve
+shape (`repro-serve.ts`, `answersAutoAccept: true` added) prints
+`updates seen: permission_request,permission_resolved` / `tool ran: 1 ->
+answered`. The 14 daemon tests and 2 CLI tests pass. I re-ran the mutation table
+independently (`mut-fix1.sh`, cp-based, never git; worktree clean after):
+
+```
+M1  drop autoAnswer in awaitDecision      -> 7 red (U1,U5,U6b,U8,U9,U10,U11)
+M2  trust bit defaults ON                 -> 5 red (U2,U7,U8,U8b,U10)
+M3  drop this.autoAccept                  -> 2 red (U3,U4)
+M4  drop the D4 sweep                     -> 1 red (U4)
+M5  settle not resolvePermission          -> 1 red (U5)
+M6  ownRequest only, no autoApproves      -> 2 red (U6,U6b)
+M7  background ask without its turn       -> 1 red (U7)
+M9  no OD5 skip                           -> 1 red (U10)
+M10 serve bit off                         -> 1 red (CLI end-to-end)
+M11 pod host answers too                  -> 1 red (CLI pod/worker getters)
+```
+
+Every row reproduces as the plan claims. One correction to the plan's table:
+the doc's M7 line names the wrong site — the mutation that actually reddens U7 is
+`registerAsk(..., req, undefined, ...)` in `awaitBackgroundDecision`
+(`:1334`), not the update's `turnId` field. Noted, not a code defect.
+
+**F2 — HIGH (found here): the OD5 skip was decided only at RAISE, so a toggle
+mid-write could hang an ask forever. FIXED.**
+- *Defect*: OD5 skips the `blockingUnsupported` refusal by reading `autoAnswers`
+  at raise (`:1150`), while the answer reads it again, later, when the ask is
+  shown (`autoAnswer`, `:1468`). `setAutoAccept(false)` landing in between (the
+  `persisted()` write window) inverts the two: the ask is registered with the
+  refusal skipped, then shown to a client that cannot display
+  `permission_request` (an old client) and never answered, because this host no
+  longer auto-accepts. Pre-fix such an ask was refused with a reason the model
+  sees; after `8b18c342` it suspends forever — the exact stall
+  `blockingUnsupported` exists to prevent (`docs/feat/protocol-v10-forward-compat.md`).
+  Reachable on a `serve` with an older phone/TUI attached and auto-accept toggled
+  from another device while an ask's write is in flight.
+- *Repro* (`.tentacle/tmp/serve-autoaccept-unattended/probe-toggle-off.ts`,
+  real `SessionHost`, `SpyDaemonStore{hold}`, one old client, ON → OFF inside the
+  write window): before — `running: true  toolRan: 0` / `HANG: still waiting,
+  nobody can be shown it`; after — the turn ends.
+- *Fix*: re-decide the skip where the ask is actually shown, against the same
+  live value the answer will use, and refuse with `blockingUnsupported`'s reason
+  (`hosted-session.ts:1205-1214`); the raise-time skip stays as the cheap early
+  exit, with its comment updated (`:1147-1156`).
+- *Test*: R1 (`packages/daemon/test/serve-autoaccept-unattended.test.ts:570-619`),
+  **red first on the property** (`error: timed out: () => !hosted.running`,
+  a hang, not a compile/import error), green after.
+- *Mutation of the fix* (MR1, revert only the show-time re-decision): `R1` red
+  (`13 pass  1 fail`), everything else green — the fix is non-vacuous.
+- *Checked, not changed*: `awaitBackgroundDecision` shows its ask synchronously
+  (`:1334-1339`), so it has no such window. The reverse race (OFF at raise, ON in
+  the window) still produces the pre-fix outcome (refused, tool never ran,
+  `probe-toggle-on.ts`) — unchanged behaviour, no regression.
+
+**Drift from Implementation:** one guarded site added, outside its file list:
+the show-time re-decision above. It is the same OD5 rule the plan asked for, at
+the second point the value can disagree. No protocol/schema change; no new trust
+bit; nothing set on the worker, `podSessionHost`, `startStdioDaemon` or the relay.
+
+**Gate.** `bunx tsc --noEmit` clean (+`apps/mobile`, `apps/relay`) · `bun run lint`
+clean (0 errors, 0 warnings — the §6 baseline) · `bun test` **12753 pass, 5 skip,
+0 fail** (12758 across 910 files; the 5 skips are the opt-in live/slow ones, §6).
+That is the exec's 12752 + R1. Narrow files during the fix: the two new ones plus
+`session-auto-accept`, `session-auto-accept-persist`, `serve-autowake`,
+`persistence`, `push-notifier` — 164 pass, 0 fail.
+
 ## Review

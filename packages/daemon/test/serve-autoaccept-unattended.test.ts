@@ -567,6 +567,61 @@ describe("U8: a reload / an archived reopen", () => {
   });
 });
 
+describe("R1: the OD5 skip is re-decided when the ask is SHOWN", () => {
+  test("R1 auto-accept switched OFF while the ask's write is in flight, only an old client attached → refused, never left hanging", async () => {
+    // Finding of fix round 1 (HIGH). OD5 skips the `blockingUnsupported` refusal
+    // at RAISE, reading `autoAnswers` there; the answer itself is re-read later,
+    // when the ask is shown. Between the two, `setAutoAccept(false)` can land —
+    // so the ask is shown to a client that cannot display it, one this host will
+    // no longer answer: it hangs forever, where before the fix it was refused
+    // with a reason the model sees (the property `blockingUnsupported` exists
+    // for, docs/feat/protocol-v10-forward-compat.md). Mutation: decide the skip
+    // once, at raise (`autoAnswers` at `:1150` only), and this test hangs.
+    const store = new SpyDaemonStore();
+    const persister = new SessionPersister({
+      store,
+      cwd: "/tmp/serve-autoaccept-unattended-od5",
+      model: "m",
+      onError: () => {},
+    });
+    const runs: string[] = [];
+    const model = new Scripted([[call("c1", "askme"), done]]);
+    const host = new SessionHost({
+      defaultCwd: "/tmp/serve-autoaccept-unattended-od5",
+      persister,
+      sharedAutoAccept: true,
+      answersAutoAccept: true,
+      createAgent: () => {
+        const permissions = new PermissionBroker();
+        const agent = new Agent({
+          model,
+          tools: new ToolRegistry().register(counted("askme", runs)),
+          env,
+          requestPermission: (req, options) => permissions.request(req, options),
+        });
+        return { agent, permissions };
+      },
+    });
+    const old = client([]); // an older client: it cannot show an ask
+    const { hosted } = host.open({ create: true }, old.attachment);
+    hosted.setAutoAccept(true, "phone");
+    // Hold the disk: the ask is registered (and its OD5 skip decided, ON) but
+    // not shown yet.
+    store.hold = true;
+    hosted.prompt("T1", go);
+    await until(() => hosted.running);
+    await settle(4);
+    hosted.setAutoAccept(false, "phone"); // switched OFF inside that window
+    store.hold = false;
+    store.release();
+    // The turn must END: refused with the reason (no answer, no tool run), not
+    // wait on a client that cannot be shown the ask.
+    await until(() => !hosted.running, 3000);
+    expect(runs).toEqual([]);
+    expect(old.of("permission_resolved")).toHaveLength(0);
+  });
+});
+
 describe("U11: the RPC surface", () => {
   test("U11 a real connection: ON, prompt, detach → the turn ends and the tool ran once", async () => {
     // Mutation: delete `answersAutoAccept: true` from serve.ts (the CLI test pins
