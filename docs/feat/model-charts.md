@@ -1891,6 +1891,104 @@ each; the phone bullet belongs to C6/C8.
 
 **C5: DONE** (T5 green; pixels are C6's).
 
+### C6 — `react-native-svg` + `ChartView` + transcript branch (slice C6 of 8)
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Load-bearing check re-run first.** `bun test packages/client/test/chart-args-roundtrip.test.ts`
+→ `1 pass, 0 fail, 12 expect() calls`. It holds.
+
+**As built** (dependency order):
+1. `apps/mobile/package.json`: `react-native-svg` `15.16.0`, exact — the version Expo 58
+   pins (`node_modules/expo/bundledNativeModules.json:115`); `bun.lock` updated.
+2. `apps/mobile/src/theme.ts`: `ChartTokens` + `chartTokensFor(palette)` — the mockup's
+   chrome per mode (`modern-manifest.json`: `guide`, `guideStrong`, `track`, `mutedBar`,
+   `mutedLine`, `seriesSoft`) plus the app's own `label`/`sec`, `page` as the dot-ring
+   surface, and `green`/`red` for the hero pill.
+3. `apps/mobile/src/chart-row.ts` (new, pure): `chartRowSpec` (name `chart`, status not
+   `error`/`denied`, spec re-validated by `chartSpecOf`), `chartRowView` (layout at a
+   width, with a 32-entry cache keyed by width + fontScale + locale + args, because a row
+   re-renders on every transcript update), `chartScheme`, `paintColor`, `textColor`.
+4. `apps/mobile/src/ui/chart/ChartView.tsx` (new, render only, hook-free): title (+
+   subtitle), the mono hero (`fontVariant: tabular-nums`) with the delta pill / chip
+   and the context line, then `<Svg>`: `LinearGradient` defs (one per series), guides
+   (`Line`, dotted `1 3` / solid), paths (stroked when the layout gives `strokeWidth`,
+   else filled), dots (halo, surface ring, hollow), mono `SvgText`; legend row when the
+   layout falls back to one. No card, no frame `Rect`. The root is ONE accessibility
+   element whose label is `layout.summary`.
+5. `apps/mobile/src/screens/transcript/TranscriptRow.tsx`: `case "tool"` → `ChartRowView`
+   when the name is `chart`; it lays out at `useWindowDimensions().width − 2 × space.inset`
+   with the device's `fontScale` and locale, and falls back to `ToolRowView` when
+   `chartRowView` is `null`. The chart takes the row's place: no `ToolRow` header (owner
+   requirement, 2026-11-16 ~11:20). testID `chart-<callId>`.
+6. E2E: `e2e/mock-model.ts` `CHART31` → one streamed `chart` call (`CHART_SPEC`);
+   `e2e/flows/31-chart-inline.yaml` (send → `chart-mocked-.*` visible, no `tool-mocked-.*`;
+   cold relaunch → reopen → still visible, i.e. rebuilt from history); registered in
+   `e2e/run.ts` (`FLOWS`, `CHART_ID` session).
+7. Tests: `test/chart-row.test.ts` (11), `test/chart-view.test.ts` (10, a mocked
+   `react-native-svg` with string host stubs + the transcript dispatch),
+   `test/e2e-mock-chart.test.ts` (2, through the real `OpenAIProvider` stream).
+
+**Drift from the Implementation, and why.**
+1. **The appear animation is NOT in C6.** Rev 2 item 8 describes it in `ChartView`, but
+   its tests (Reduce Motion → opacity only; a history row does not animate) are T7, so
+   it goes with C7. C6 draws still.
+2. **`ChartView` is hook-free; the hooks live in `ChartRowView`** (`TranscriptRow.tsx`),
+   so the render test can walk it with no renderer (the `band-notes.test.ts` pattern).
+3. **A failed or refused `chart` call keeps the generic tool row**, even with a valid
+   spec: its error/denial text is what the person needs to see. Not in the plan.
+4. **Width from `useWindowDimensions`, not `onLayout`:** the row is full width minus the
+   inset, so the window width is exact, and a rotation re-lays out with no extra frame.
+5. **`header-wiring.test.ts` (mobile-chrome Design 2) pinned "no `react-native-svg` in
+   `package.json`"** as a proxy for "the context ring is plain Views". The approved plan
+   (Q8) adds the package, so that one line is dropped; the ring-level asserts (no
+   `react-native-svg` import in `ContextRing`, geometry from the pure module) stay.
+6. **`SF Pro Rounded` question (rev 2, "Unverified")**: moot, because the owner picked mono
+   for the whole chart. For the record, RN 0.88 maps `ui-rounded` to
+   `UIFontDescriptorSystemDesignRounded` (`RCTFontUtils.mm:381`), so no bundling would be needed.
+7. **Red before green:** every new test file failed first on its missing module (not on
+   an assertion), so non-vacuity is shown by the mutations below (12/12 killed).
+8. **`chart-view.test.ts`'s `react-native` mock is a superset of `band-notes.test.ts`'s**
+   (`Switch` included). Bun keeps the first mock's export shape across files: without it
+   the first full run failed `band-notes` with "Export named 'Switch' not found".
+
+**Mutations** (scratch `c6-mut.ts`: apply, run the named file, restore; `git status`
+afterwards showed only this slice's files):
+```
+KILLED   gradient fill dropped — 1 fail
+KILLED   status gate dropped (failed call drawn) — 1 fail
+KILLED   no re-validation in the row (forged drawn) — 1 fail
+KILLED   dispatcher never branches — 2 fail
+KILLED   svg text not mono — 1 fail
+KILLED   paint ignores the mode — 1 fail
+KILLED   cache key without width (stale layout) — 1 fail
+KILLED   a card container — 1 fail
+KILLED   stroked paths also filled — 1 fail
+KILLED   width without the inset — 1 fail
+KILLED   mock model: no CHART31 branch — 1 fail
+KILLED   dark tokens = light — 1 fail
+```
+
+**Gate.**
+- `bunx tsc --noEmit`, `tsc -p apps/mobile`, `tsc -p apps/relay`: clean.
+- `bun run lint`: clean (1818 files).
+- `bun test` (once): `13231 pass, 5 skip, 2 fail`. The 2 fails were this slice's (drift
+  5 and 8). Both are fixed; `bun test apps/mobile` afterwards → `2361 pass, 0 fail`. The
+  full suite was not re-run (budget: once). The 5 skips match C5's run.
+- No schema change → `protocol.json` untouched; no `protocol.d/` note (no wire change, D7).
+
+**Changelog.** One bullet per fragment, and `model-charts.added.md` / `.changed.md` already
+exist, so the iPhone half went into the `.changed.md` bullet ("Charts now draw in the Mac
+TUI and on the iPhone"). No third file.
+
+**Unverified — pixels.** No dev build was made in this slice (a new native module needs
+one; plan: batch with model-artifacts S8), so `31-chart-inline` has not run on a
+simulator, and the look has not been compared with `modern.html`. To verify: build the
+dev client with `react-native-svg`, then `bun apps/mobile/e2e/run.ts --only 31-chart-inline`.
+
+**C6: PARTIAL** — code + unit T6 green and mutation-checked; T6's e2e flow is written but
+not run (pixels unverified, as the slice table allows).
+
 ## Review
 *(empty — mandatory fresh-context review after C8)*
 
