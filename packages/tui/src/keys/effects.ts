@@ -11,6 +11,7 @@
  * state that decided them.
  */
 import type { PermissionResponse } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 import type { DockState } from "../background-focus.ts";
 import type { ChordState } from "../chord.ts";
 import type { QuitConfirmFacts } from "../commands.ts";
@@ -60,6 +61,12 @@ export type KeyEffect =
   | { readonly kind: "switchCapability" }
   /** Write the sessions panel's state (`sessionsDelete`'s arm/answer). */
   | { readonly kind: "setSessionsState"; readonly state: SessionsState }
+  /**
+   * Enter in `/artifacts`: open the version the panel's cursor is on
+   * (docs/feat/model-artifacts.md D8). The META is the panel's own decision
+   * (`artifactAt`), never an index the App resolves again.
+   */
+  | { readonly kind: "openArtifact"; readonly artifact: ArtifactMeta }
   /** Switch to another session (the panel already closed). */
   | { readonly kind: "switchTo"; readonly id: string; readonly reopen: boolean }
   /** Delete a session, then refresh the panel if it is still the same one. */

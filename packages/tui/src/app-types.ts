@@ -6,7 +6,7 @@
  */
 import type { Agent } from "@tentacle/agent";
 import type { AttachmentRef, JobController, PermissionBroker } from "@tentacle/core";
-import type { JobOutputResult, JobRow } from "@tentacle/protocol";
+import type { ArtifactListResult, ArtifactMeta, JobOutputResult, JobRow } from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
@@ -44,6 +44,16 @@ export type { RunQuit } from "./useQuitClear.ts";
 export interface SettingsNoticeLine {
   readonly text: string;
   readonly hint?: string;
+}
+
+/**
+ * How an artifact read is driven (structurally the client's
+ * `ArtifactReadOptions`): `signal` stops issuing chunks, `onProgress` reports
+ * `(have, size)` against the META's own size.
+ */
+export interface ArtifactOpenOptions {
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (have: number, size: number) => void;
 }
 
 export interface SessionController {
@@ -151,6 +161,20 @@ export interface SessionController {
    * answer. Rejects on a refusal.
    */
   setCapability?(kind: CapKind, name: string, enabled: boolean): Promise<unknown>;
+  /**
+   * The artifacts the model presented in this session
+   * (docs/feat/model-artifacts.md D6/D8), as the daemon's `artifact/list`
+   * answered — `truncated` passed on, never dropped. Optional: absent on an
+   * older daemon AND on a session whose runtime has no artifact store, and the
+   * `/artifacts` panel says so instead of opening empty.
+   */
+  listArtifacts?(): Promise<ArtifactListResult>;
+  /**
+   * One artifact version's bytes, verified against `meta` (every chunk's length,
+   * the answer's `size`, and the whole's sha256) — docs/feat/model-artifacts.md
+   * D6. The opener (S6b) reads through THIS; absent with `listArtifacts` above.
+   */
+  readArtifact?(meta: ArtifactMeta, options?: ArtifactOpenOptions): Promise<Uint8Array>;
   /**
    * The session is open daemon-side (a fresh or resumed one opens at its first
    * message): no switches yet means "not started", not "not supported".
@@ -534,6 +558,14 @@ export interface AppProps {
    */
   readonly localCwd?: string;
   readonly saveFile?: (path: string, content: string) => Promise<void>;
+  /**
+   * Open one artifact version (docs/feat/model-artifacts.md D8): `enter` in
+   * `/artifacts` (and, from S6b, the chord and a click on a card) hands the
+   * meta over and the RUNTIME decides how to show it (a temp file + the OS's
+   * opener, a confirm for pod bytes). Absent → the panel says opening is not
+   * available here, and nothing is opened behind the person's back.
+   */
+  readonly openArtifact?: (artifact: ArtifactMeta) => void;
   /** Transcript to seed on start (a resumed session); replaces the welcome line. */
   readonly initialItems?: readonly DisplayItem[];
   /**

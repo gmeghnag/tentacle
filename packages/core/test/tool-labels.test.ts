@@ -13,6 +13,9 @@ describe("toolLabel", () => {
     expect(toolLabel("search")).toBe("Search");
     expect(toolLabel("agent_task")).toBe("Agent");
     expect(toolLabel("skill")).toBe("Skill");
+    // `present` (docs/feat/model-artifacts.md S6a): the card's header reads
+    // `Present`, so it has to be a label rather than the raw tool name.
+    expect(toolLabel("present")).toBe("Present");
   });
 
   test("an unknown name (MCP, future tool) displays as itself", () => {

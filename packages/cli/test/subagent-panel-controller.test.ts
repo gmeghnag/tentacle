@@ -376,6 +376,10 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       "capabilities",
       "onCapabilities",
       "setCapability",
+      // The artifacts the model presented (docs/feat/model-artifacts.md S6a): the
+      // panel's list and the opener's bytes, both through the session.
+      "listArtifacts",
+      "readArtifact",
       "opened",
       "context",
       "rename",

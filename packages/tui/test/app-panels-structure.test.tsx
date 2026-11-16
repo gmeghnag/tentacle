@@ -80,9 +80,15 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
     expect(facade).not.toContain('=== "skills"');
     const registry = readSrc(join("panels", "registry.ts"));
     // ONE line per kind: the measurable "new panel = file + registry line".
-    expect(registry).toContain(
-      "export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [sessionsKind, mcpKind, skillsKind];",
-    );
+    // `/artifacts` (docs/feat/model-artifacts.md S6a) is the fourth, and it
+    // arrived exactly that way: its own file plus one entry in this list.
+    const list = /PANEL_KINDS: readonly PanelKind<OpenPanel>\[\] = \[([\s\S]*?)\];/.exec(
+      registry,
+    )?.[1];
+    expect(list).toBeDefined();
+    for (const kind of ["sessions", "mcp", "skills", "artifacts"]) {
+      expect((list ?? "").match(new RegExp(`${kind}Kind`, "g"))).toHaveLength(1);
+    }
     // The two panel key layers are the registry's decision too, not their own.
     const layers = readSrc(join("keys", "layer-panels.ts"));
     expect(layers).not.toContain("sessionsKey");

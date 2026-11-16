@@ -8,7 +8,12 @@
  *
  * Pure and framework-free: no React, no Ink — just strings in, strings out.
  */
-import { type ToolResultDetail, type ToolResultSpill, toolLabel } from "@tentacle/core";
+import {
+  type ToolResultDetail,
+  type ToolResultSpill,
+  artifactCard,
+  toolLabel,
+} from "@tentacle/core";
 import chalk from "chalk";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
@@ -72,6 +77,8 @@ const DEFAULT_WIDTH = 80;
 // that marks a tool's output block (Claude-Code style). Both are 2 columns so
 // bodies stay aligned whichever is used.
 const INDENT = "  ";
+/** The chord that opens the newest artifact (docs/feat/model-artifacts.md D8, S6b). */
+export const ARTIFACT_OPEN_HINT = "^X^O";
 /** Read at CALL time: a module-load capture would freeze the palette (and the mode). */
 const connector = (): string => `${theme.subtle("⎿")} `;
 // An expanded call's command, on the rows under its header (owner mockup):
@@ -235,6 +242,42 @@ function renderBar(row: DiffRow, gutterW: number, width: number): string {
 function renderContext(row: DiffRow, gutterW: number): string {
   const numStr = (row.no !== null ? String(row.no) : "").padStart(gutterW);
   return theme.subtle(`${numStr}   ${row.text}`);
+}
+
+/**
+ * `present`'s card (docs/feat/model-artifacts.md D8, chosen variant A): ONE row
+ * under the tool header — `▣ <title>` then the card's own metadata and the open
+ * hint. Two lines total with the header, never a box; the view-model is
+ * `@tentacle/core`'s `artifactCard`, so the phone's band row and this row can
+ * never disagree about what an artifact IS.
+ *
+ * The `pod` origin comes from the RUNTIME (`RenderOptions.artifactsInPod`: a
+ * `run`/`attach` daemon's bytes are pod-supplied), never from the meta, and an
+ * evicted artifact shows `no longer available` from the card's own state.
+ */
+function artifactBody(tool: ToolItem, width: number, inPod: boolean): string[] {
+  const detail = tool.detail;
+  if (detail?.kind !== "artifact") {
+    return [];
+  }
+  const card = artifactCard(detail.artifact, inPod ? { origin: "pod" } : {});
+  const hint =
+    card.action === "open"
+      ? ` · ${ARTIFACT_OPEN_HINT} open`
+      : card.action === "save"
+        ? " · s save to ~/Downloads"
+        : "";
+  const tail = `${card.line2}${hint}`;
+  // ONE row (chosen variant A: two lines total with the header). The title keeps
+  // its room first — what the person recognises — and the metadata takes what is
+  // left: a narrow terminal loses the tail, never the name. Cut by CELLS, so the
+  // row cannot wrap into a second one and overflow the block's width.
+  const room = Math.max(1, width - stringWidth(card.glyph) - 2);
+  const title = truncateCells(card.title, Math.max(1, Math.min(room, Math.ceil(room * 0.6))));
+  const meta = truncateCells(tail, Math.max(0, room - stringWidth(title) - 1));
+  return [
+    `${theme.accent(card.glyph)} ${chalk.bold(title)}${meta === "" ? "" : ` ${theme.subtle(meta)}`}`,
+  ];
 }
 
 /**
@@ -460,6 +503,11 @@ function readLines(tool: ToolItem, limit: number | undefined): readonly string[]
 function plainToolBody(tool: ToolItem, width: number, inPod: boolean, fit: BodyFit): string[] {
   if (tool.detail?.kind === "diff") {
     return diffBody(tool.detail, width);
+  }
+  // `present`: the card, instead of the generic tool body (D8). Its two rows are
+  // what the block exists to show, so no top-collapse applies to them.
+  if (tool.detail?.kind === "artifact") {
+    return artifactBody(tool, width, inPod);
   }
   const expanded = fit.expanded;
   // Sub-agent (`agent_task`): the rolling tail, then its report (when done).

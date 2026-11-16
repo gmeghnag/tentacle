@@ -11,6 +11,8 @@
  */
 import type { AttachmentRef, ChatMessage } from "@tentacle/core";
 import {
+  type ArtifactListResult,
+  type ArtifactMeta,
   DomainErrorCode,
   type JobOutputResult,
   type JobRow,
@@ -41,6 +43,7 @@ import { turnRecovery } from "./link-machine.ts";
 import { type SessionEvent, stopReasonFromProtocol, updateToEvent } from "./mapping.ts";
 import { AsyncQueue } from "./queue.ts";
 import {
+  type ArtifactReadOptions,
   ImagesUnavailableError,
   type ReadBack,
   type RemoteClient,
@@ -629,6 +632,38 @@ export class RemoteSession implements SessionStreamListener {
   /** What this session may do with an image right now (the daemon's capability, D5). */
   imageInput(): ImageInput {
     return this.client.imageInput();
+  }
+
+  /**
+   * The artifacts the model presented in this session
+   * (docs/feat/model-artifacts.md D6/D8): the daemon's `artifact/list`, in its
+   * own order (oldest first), `truncated` passed on. Like `skills()`/
+   * `context()`, it needs a daemon-side id — one that is still opening waits for
+   * it; a session nothing has opened yet (a `--resume` before its first prompt)
+   * has none, and the answer is the empty list, not a spurious open.
+   *
+   * An older daemon → `ArtifactsUnsupportedError` (caught by the `/artifacts`
+   * panel, which says "needs a newer tentacle").
+   */
+  async listArtifacts(): Promise<ArtifactListResult> {
+    const id = this.id ?? (this.opening ? await this.opening : null);
+    if (id === null) {
+      return { artifacts: [] };
+    }
+    return this.client.listArtifacts(id);
+  }
+
+  /**
+   * One version's bytes, VERIFIED against `meta` (`RemoteClient.readArtifact`:
+   * every chunk's length, the answer's `size`, and the whole's sha256). Same
+   * lazy-id rule as `listArtifacts`: nothing is open ⇒ there is nothing to read.
+   */
+  async readArtifact(meta: ArtifactMeta, options: ArtifactReadOptions = {}): Promise<Uint8Array> {
+    const id = this.id ?? (this.opening ? await this.opening : null);
+    if (id === null) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "the session is not open");
+    }
+    return this.client.readArtifact(id, meta, options);
   }
 
   private raise(activity: SessionActivity): void {

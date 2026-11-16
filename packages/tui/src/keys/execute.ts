@@ -11,6 +11,7 @@
  * taken upstream, in the effect's own `kind`.
  */
 import type { PermissionResponse } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 import type { DockState } from "../background-focus.ts";
 import type { ChordState } from "../chord.ts";
 import type { QuitConfirmFacts } from "../commands.ts";
@@ -71,6 +72,8 @@ export interface KeyHost {
   /** Flip the open panel's selected switch (`panelSwitchOp` on the live state). */
   switchCapability(): void;
   setSessionsState(state: SessionsState): void;
+  /** Open the artifact a `/artifacts` row asks for (docs/feat/model-artifacts.md D8). */
+  openArtifact(artifact: ArtifactMeta): void;
   switchTo(id: string, reopen: boolean): void;
   sessionsDelete(id: string, startedGen: number): void;
   killJob(id: string): void;
@@ -178,6 +181,9 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "setSessionsState":
       host.setSessionsState(effect.state);
+      return;
+    case "openArtifact":
+      host.openArtifact(effect.artifact);
       return;
     case "switchTo":
       host.switchTo(effect.id, effect.reopen);

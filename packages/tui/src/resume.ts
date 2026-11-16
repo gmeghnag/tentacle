@@ -5,6 +5,8 @@
  */
 import { restartPromptOf } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
+import { withArtifactDetails } from "./artifacts-panel.ts";
 import { imageRowText } from "./attach-draft.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 
@@ -32,8 +34,17 @@ function noteItem(m: ChatMessage): DisplayItem {
  * A restart message (a context reset's first user message) is shown as the
  * separator, then the model's prompt alone — tentacle's appended notes
  * (jobs, skills) are the model's, not the user's.
+ *
+ * `artifactsByCall` (docs/feat/model-artifacts.md D8) is the daemon's
+ * `artifact/list`, keyed by the `present` call that produced each version: a
+ * reloaded transcript carries no `details` (they are not in `ChatMessage`), so
+ * the card's metadata can only come from there. Absent → the rows stay plain,
+ * exactly as before.
  */
-export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[] {
+export function messagesToItems(
+  messages: readonly ChatMessage[],
+  artifactsByCall?: ReadonlyMap<string, ArtifactMeta>,
+): DisplayItem[] {
   const items: DisplayItem[] = [];
   const toolAt = new Map<string, number>(); // toolCallId → index in `items`
 
@@ -94,5 +105,5 @@ export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[]
       }
     }
   }
-  return items;
+  return artifactsByCall === undefined ? items : [...withArtifactDetails(items, artifactsByCall)];
 }

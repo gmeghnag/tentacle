@@ -23,6 +23,7 @@ import { NOTHING } from "../keys/contract.ts";
 import type { KeySnapshot } from "../keys/snapshot.ts";
 import type { OpenPanel } from "../panel.ts";
 import type { PanelView, TreeAction } from "../tree-panel.ts";
+import { artifactsKind } from "./artifacts.ts";
 import { mcpKind } from "./mcp.ts";
 import { sessionsKind } from "./sessions.ts";
 import { skillsKind } from "./skills.ts";
@@ -75,9 +76,15 @@ export interface PanelKind<P extends { readonly kind: string }> {
 /**
  * THE registry: ONE line per panel kind, in no significant order (lookup is by
  * `kind`). `/mcp` and `/skills` share the tree mechanic (`panels/tree.ts`),
- * `/sessions` is a flat list with its own.
+ * `/artifacts` too (its versions fold under their artifact); `/sessions` is a
+ * flat list with its own.
  */
-export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [sessionsKind, mcpKind, skillsKind];
+export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [
+  sessionsKind,
+  mcpKind,
+  skillsKind,
+  artifactsKind,
+];
 
 /**
  * The descriptor of `panel`'s kind. `kinds` is a parameter (not a closed-over

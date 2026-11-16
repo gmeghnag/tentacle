@@ -1573,3 +1573,177 @@ This was a fresh-context review of `git diff main...HEAD`, limited to S3. The re
   3. Mapping: `details.kind === "artifact"` does not break any consumer. Every reader checks the kind first (`daemon/mapping.ts:233`, `tui/render-lines.ts:461`, `tui/commands.ts:521`, `mobile/transcript.ts:505`). `present` produces no diff detail for it to overwrite.
   4. §7 pod trust: the sha256 check only shows that the bytes match the meta, and the meta also comes from the pod. That is the intended scope (it proves consistency, not where the bytes came from). Opening pod bytes safely is S6b/S8's job.
 - **Executor behaviour:** the report is accurate. The drift it lists (`ArtifactListResult`, exporting `decodeBase64`) is real and justified. The one thing it got wrong: it says it "left exactly as found" S4's work in progress, yet that work went into the same commit.
+
+### S6a — TUI card + `/artifacts` panel: DONE
+
+*— deepseek-v4-pro (executor, S6a), 2026-11-16*
+
+**Load-bearing check, re-run first** (`.tentacle/tmp/model-artifacts/read-roundtrip.ts`,
+worktree root, unchanged by this slice):
+
+```
+$ bun .tentacle/tmp/model-artifacts/read-roundtrip.ts
+chunks=12 sha-equal=true
+order=enqueue,chunk0,chunk1,…,chunk11
+enqueue-before-last=true maxRpcFrame=349591 maxRawNoiseFrame=87383
+PASS
+```
+
+**Starting state.** The tree carried S4's work in progress (`daemon/src/session-artifacts.ts`,
+`daemon/src/session-log-store.ts`, `daemon/src/session-blobs.ts`,
+`daemon/test/artifact-manifest.test.ts`) — the same files S5 recorded. S6a touches
+none of them and left them exactly as found; they are the only cause of the
+non-green gate below.
+
+**As built, in order** (red shown before each green):
+
+1. `packages/tui/test/artifacts-panel.test.ts` (new, 21 tests) — RED at load
+   (`Cannot find module '../src/panels/artifacts.ts'`).
+2. `packages/tui/src/artifacts-panel.ts` (new, pure): `artifactGroups` (one group
+   per `artifactId`, NEWEST PRESENTED first by its newest version's `createdAt`,
+   versions newest-first, a `createdAt` tie broken on the id so two daemons
+   reporting one millisecond still order stably), `artifactsTreeGroups` (a head
+   per artifact + its other versions as children), `artifactsTitle`
+   (`artifacts · 5`, `+` when the daemon cut the list), `artifactsView` (rows, or
+   the honest `loading…` / `No artifacts in this session.` note), `artifactAt`
+   (the ONE `enter` decision: the meta UNDER the cursor — a head is its newest
+   version, a folded child is `versions[child + 1]`), `artifactsByCall` (the
+   resume join keyed on `callId`, newest version winning), `needsArtifactJoin`
+   (only a `present` row still waiting for its card asks the daemon at all),
+   `withArtifactDetails` (same array back when nothing joined),
+   `artifactsListError` (an older daemon is a fact, not a stack trace).
+3. `packages/tui/src/panels/artifacts.ts` (new): the descriptor — `view`, `apply`,
+   `click` through the shared tree mechanic, and a `key` that turns `enter` into
+   the `openArtifact` EFFECT carrying the decided meta (never an index the App
+   resolves again) and answers `switch` with `NOTHING` (Space has no meaning on
+   an artifact). One registry line in `panels/registry.ts`; one field + the
+   `artifactsPanel` constructor in `panels/types.ts`; re-exported by `panel.ts`.
+4. `packages/tui/src/keys/effects.ts` + `execute.ts`: the `openArtifact` effect
+   and its one host call. `keys-execute.test.ts` did not need a row (the effect
+   carries a meta object; its wiring is pinned end-to-end by T6a in
+   `app-artifacts.test.tsx` instead).
+5. `packages/tui/test/artifact-card.test.ts` (new, 16 tests) — RED on its
+   assertions (no card; `messagesToItems` took no map). Then
+   `packages/tui/src/render-lines.ts`: `artifactBody` — ONE row under the tool
+   header, `▣ <title>  <line2> · ^X^O open`, cut by CELLS so it cannot wrap into a
+   second row (`truncateCells`; the title keeps its room first, so a narrow
+   terminal loses the tail, never the name); `other` offers
+   `s · save to ~/Downloads` and never `open`; the `pod` mark comes from the
+   RUNTIME (`RenderOptions.spillInPod`, the one "this daemon runs in a pod" the
+   renderer already receives), never from the meta. `resume.ts` `messagesToItems`
+   gained the optional `artifactsByCall` and joins the card's detail onto the
+   row its `callId` names. `core/src/tool-labels.ts` += `present: "Present"`.
+6. `packages/tui/test/app-artifacts.test.tsx` (new, 9 tests, ink frames) — RED.
+   Then the wiring: `SessionController.listArtifacts?()` + `readArtifact?()`,
+   `AppProps.openArtifact`, `commands/artifacts.ts` + one registry line, the
+   `openArtifact` host method in `App.tsx` (absent seam → `NO_ARTIFACT_OPENER`,
+   never a silent swallow), and the mount join inside the EXISTING watch effect
+   (no new `useEffect`: the 22-effect pin holds).
+
+**Registry pins updated (each a decision the slice makes, not a drive-by):**
+`commands-registry.test.ts` and `app-commands.test.tsx` (18 → 19 built-ins),
+`panels-registry.test.ts` (the fourth kind), `app-panels-structure.test.tsx` (the
+registry line, now read as a LIST so a fourth entry does not need a literal
+rewrite), `app-session-link-structure.test.ts` (the watch effect's deps), and the
+cli's `subagent-panel-controller.test.ts` GUARD (both new controller members —
+that guard is what caught `readArtifact` being declared in the plan's Files item
+but never exposed on the controller; `RemoteSession`, `PersistingController`, the
+runtime wrapper and the guard's expected list now all carry it).
+
+**Drift from Implementation (and why):**
+
+- **`RenderOptions.spillInPod` carries the pod origin, not a per-item field.** The
+  plan's D7/D8 put `"from the pod"` on the card, and the natural first cut was an
+  `ToolItem.artifactOrigin: "local" | "pod"` field. That is a value a
+  pod-supplied meta could influence, and it duplicates a fact the renderer is
+  already given (the runtime's `daemonInPod`, threaded as `spillInPod`). The
+  origin is now read from the runtime alone. `ToolItem` gained no field at all:
+  the planned `artifactState` is S6b's (only a REFUSED READ establishes
+  `unavailable`), so adding it now would have been dead code.
+- **The mount join is conditional (`needsArtifactJoin`).** Unconditional, every
+  session — a fresh one, one with no `present` row — made an `artifact/list` call
+  at mount (caught by T6a's own `seen` assertion, which saw two lists for one
+  command). It now asks only when a `present` row is still waiting for its card,
+  so the resume path is free where it can change nothing.
+- **`artifactsPanel(view, now)` takes the list and the stamp separately**, not a
+  `{artifacts, now}` object: `now` is the PANEL's read time, not the daemon's
+  answer, and mixing it into `ArtifactsData` made `truncated` a field of two
+  different things.
+- **`app-panels-structure.test.tsx` reads the registry LIST, not a literal.** The
+  literal was a one-line `[a, b, c]` at three kinds; at four, Biome formats it
+  across lines, and a literal pin would then fail for a FORMATTING reason rather
+  than a wiring one. It now counts one `<kind>Kind` per kind inside the list.
+- **`panels/tree.ts` `withTree` is generic over any `{ tree }`** (was `<P extends
+  TreePanel>`): `/artifacts` is a tree-mimic panel with its own `kind`, and
+  narrowing it to `TreePanel` would have meant a second copy of the same
+  identity-preserving write.
+
+**Mutations** (each applied, run on the named files, reverted; `git diff` on the
+touched files afterwards showed only the real change, and `grep -c 'if (false)'`
+= 0 on both mutated modules). Script: `.tentacle/tmp/model-artifacts/s6a-mut.sh`.
+
+```
+M1 (plan target) enter ignores the folded version     28 pass  1 fail
+M2 (plan target) groups keep the wire order            28 pass  1 fail
+M2b sort reversed                                      25 pass  4 fail
+M3 (planned)     join keeps the FIRST version          28 pass  1 fail   [see note]
+M3' (replacement) join keys on artifactId, not callId  28 pass  1 fail
+M4 (plan target) card never offers save                27 pass  2 fail
+M5               old-daemon message stops naming one   28 pass  1 fail
+M6               join overwrites an EXISTING detail    28 pass  1 fail
+M7               Enter never reaches the opener         8 pass  1 fail
+M8               pod mark dropped                      28 pass  1 fail
+```
+
+*Note on M3:* `meta.version >= seen.version` → `>` survived, and it is a VACUOUS
+mutation, not a weak test — two versions of one artifact never share a number, so
+`>` and `>=` accept exactly the same inputs. It is replaced by M3' (key the map on
+`artifactId` instead of `callId`), which fails as it should. The "newest version
+wins" property itself is pinned by the order-independence case in
+`artifact-card.test.ts` (`artifactsByCall([v2, v1])` returns v2), which M2b does
+not cover: M2b is the GROUP order, that one is the JOIN's choice.
+
+**Red-before-green, explicitly:** the format and resume tests were RED on their
+own assertions on the unmodified tree (7 fails in `artifact-card.test.ts`: no
+card row, no `v2`, no save tail, no pod mark, and the join absent), the panel
+tests were RED at module load, and the frame tests were RED on the missing card,
+the missing command and the missing opener — each captured above in the order
+they were written.
+
+**Schema / version / changelog:** no protocol schema changed (S1 made every wire
+change; this slice only CONSUMES `ArtifactListResult`/`ArtifactMeta`), so
+`protocol.json` was not regenerated and there is no `protocol.d/` note.
+
+`changelog.d/model-artifacts.changed.md` (new, one bullet). S1's
+`model-artifacts.added.md` is this slug's `added` bullet and it describes the
+`present` tool, the store and the wire — not the Mac surface this slice builds.
+A second bullet under the same slug but a DIFFERENT category is a different
+filename, so nothing collides (AGENTS §10: two tasks collide only by reusing one
+slug+category), and it keeps the release note honest: what a Mac user gains here
+(the card, the resume join, `/artifacts`, the save-only path) is a change to the
+TUI, not another new capability. `scripts/test/changelog-guard.test.ts` +
+`changelog.test.ts` → 21 pass on it.
+
+**Gate** (worktree root):
+
+```
+$ bunx tsc --noEmit   → 24 errors, ALL in S4's WIP (daemon/src/session-artifacts.ts,
+                        session-log-store.ts, daemon/test/artifact-manifest.test.ts);
+                        0 in tui, core, client, cli
+$ bun run lint        → 1 error, formatting in daemon/test/artifact-manifest.test.ts (S4 WIP);
+                        every S6a file clean
+$ bun test packages/tui     → 2381 pass, 0 fail (169 files)
+$ bun test packages/cli     → 3408 pass, 2 skip, 0 fail (232 files)
+$ bun test packages/client  → 790 pass, 0 fail
+$ bun test packages/core    → 387 pass, 0 fail
+$ bun test (full)           → 12374 pass, 5 skip, 6 fail (12385 tests, 894 files, 441 s);
+                              all 6 fails are "LogSessionStore artifacts (T4)" in
+                              artifact-manifest.test.ts (S4 WIP, `putArtifact` absent)
+```
+
+The 5 skips are the same opt-in ones as S3/S5's. Every S6a test is green.
+
+**Unverified:** a green `bun run check` — the same blocker S5 recorded, because
+S4's WIP is still in the tree (this executor was told to implement S6a only, and
+does not touch, stash or commit another slice's files). To check: re-run
+`bun run check` once S4 lands.

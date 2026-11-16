@@ -80,6 +80,8 @@ async function mount(f: Fake, props: Partial<AppProps> = {}) {
 
 describe("S0 command smoke: every built-in command answers", () => {
   test("the registry this file covers is exactly SLASH_COMMANDS (a new command must be added here)", () => {
+    // `/artifacts` is the 19th (docs/feat/model-artifacts.md S6a): a panel
+    // command, so its smoke case is in `app-artifacts.test.tsx`.
     expect(SLASH_COMMANDS.map((c) => c.name)).toEqual([
       "/help",
       "/clear",
@@ -96,6 +98,7 @@ describe("S0 command smoke: every built-in command answers", () => {
       "/tokens",
       "/mcp",
       "/skills",
+      "/artifacts",
       "/agents",
       "/settings",
       "/exit",

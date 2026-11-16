@@ -341,6 +341,10 @@ export interface PersistingController extends SessionController {
   openSeeded: RemoteSession["openSeeded"];
   /** `RemoteSession.openForReset`: the open a reset needs (else a no-op). */
   openForReset: RemoteSession["openForReset"];
+  /** `RemoteSession.listArtifacts`: the session's presented artifacts (docs/feat/model-artifacts.md D8). */
+  listArtifacts: RemoteSession["listArtifacts"];
+  /** `RemoteSession.readArtifact`: one version's verified bytes (`/artifacts`' opener, S6b). */
+  readArtifact: RemoteSession["readArtifact"];
   ownsTurn: RemoteSession["ownsTurn"];
   onQueued: RemoteSession["onQueued"];
   /** `RemoteSession.onSubagents`: the live list of this session's background sub-agents. */
@@ -753,6 +757,12 @@ export function persistingController(
     openForReset() {
       return inner.openForReset();
     },
+    // The artifacts the model presented here (docs/feat/model-artifacts.md D8):
+    // the PANEL's list, and the bytes its opener reads. Both are the daemon's
+    // (a pod's are pod-supplied and the TUI labels them so), and neither is
+    // persisted on this laptop in S6a.
+    listArtifacts: () => inner.listArtifacts(),
+    readArtifact: (meta, options) => inner.readArtifact(meta, options),
     ownsTurn(turnId) {
       return turnId === adoptedTurn || inner.ownsTurn(turnId);
     },

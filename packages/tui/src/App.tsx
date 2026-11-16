@@ -10,6 +10,12 @@ import { useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { AppView } from "./AppView.tsx";
 import { frameLayout } from "./app-layout.ts";
+import {
+  NO_ARTIFACT_OPENER,
+  artifactsByCall,
+  needsArtifactJoin,
+  withArtifactDetails,
+} from "./artifacts-panel.ts";
 import { type AttachDraft, EMPTY_DRAFT, removeLastChip, uploadDone } from "./attach-draft.ts";
 import { type AttachedImage, type FileProbe, nodeFileProbe } from "./attach-files.ts";
 import {
@@ -211,6 +217,7 @@ export function App({
   home = defaultHome(),
   localCwd = defaultLocalCwd(),
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
+  openArtifact,
   initialItems,
   initialPrompt,
   daemonInPod = false,
@@ -1427,6 +1434,31 @@ export function App({
   useEffect(() => {
     watchSession(sessionRef.current);
     watchedRef.current = true;
+    // The session's artifacts, ONCE per watched session (docs/feat/model-artifacts.md
+    // D8): a resumed transcript holds no card metadata (it is not in a
+    // `ChatMessage`), so the daemon's list supplies it and the rows join on
+    // `callId`. Asked ONLY when a `present` row is still waiting for its card,
+    // so a fresh or card-less session says nothing on the wire. A failure (an
+    // older daemon: `ArtifactsUnsupportedError`) leaves the transcript exactly
+    // as it was — no notice, nothing invented.
+    const watched = sessionRef.current;
+    if (needsArtifactJoin(stateRef.current.items)) {
+      void watched?.listArtifacts?.().then(
+        (result) => {
+          if (sessionRef.current === watched) {
+            const items = withArtifactDetails(
+              stateRef.current.items,
+              artifactsByCall(result.artifacts),
+            );
+            if (items !== stateRef.current.items) {
+              stateRef.current = { ...stateRef.current, items: [...items] };
+              flushNow();
+            }
+          }
+        },
+        () => {},
+      );
+    }
     return () => {
       activitySubRef.current?.();
       activitySubRef.current = null;
@@ -1441,7 +1473,7 @@ export function App({
       capsSubRef.current?.();
       capsSubRef.current = null;
     };
-  }, [watchSession]);
+  }, [watchSession, flushNow]);
 
   // --- quit and clear (S8) --------------------------------------------------
   // The three executors live in `useQuitClear.ts`. The hook owns no state and no
@@ -1765,6 +1797,16 @@ export function App({
       });
     },
     setSessionsState,
+    // `/artifacts`' Enter: the panel already decided WHICH version
+    // (`artifactAt`), so the App only hands the meta to the runtime's opener.
+    // Absent (a runtime with no seam) says so, never a silent swallow.
+    openArtifact: (artifact) => {
+      if (openArtifact === undefined) {
+        pushNotice(NO_ARTIFACT_OPENER);
+        return;
+      }
+      openArtifact(artifact);
+    },
     switchTo,
     sessionsDelete,
     killJob,
