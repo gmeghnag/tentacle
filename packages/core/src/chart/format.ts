@@ -114,6 +114,29 @@ export function formatNumber(value: number, format: NumberFormat = {}): string {
   return `${signed} ${unit}`;
 }
 
+/** A formatted number split from its unit, so a hero can style the unit smaller. */
+export interface NumberParts {
+  /** `20.800`, `−1,3M` — the signed number, no unit. */
+  readonly number: string;
+  /** `€`, `%`, `ms`, or `""`. */
+  readonly unit: string;
+  /** The locale writes the unit first (`€20,800` in `en`). */
+  readonly unitBefore: boolean;
+}
+
+/**
+ * {@link formatNumber}, in parts: the same digits and the same unit side, so
+ * `number` + `unit` joined reads exactly as `formatNumber` would write it.
+ */
+export function formatParts(value: number, format: NumberFormat = {}): NumberParts {
+  const { unit: _unit, ...bare } = format;
+  const number = formatNumber(value, bare);
+  const unit = format.unit ?? "";
+  const unitBefore =
+    unit !== "" && CURRENCY_SYMBOLS.has(unit) && currencyFirst(format.locale ?? "en");
+  return { number, unit, unitBefore };
+}
+
 /**
  * A date label at the granularity it was written with — `2026`, `mar 2026`,
  * `1 mar`, `14:00`, `14:00:05` — in the reader's locale and zone.

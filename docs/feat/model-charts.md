@@ -1779,6 +1779,118 @@ refused a few lines earlier.
 `Infinity` inside a title string, `tools/src/chart.ts:37`) stays open: it is LOW
 and misleads only on an already-failed parse.
 
+### C5 — phone pure layout + scrub machine (slice C5 of 8)
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Load-bearing check re-run first.** The scratch repro `args-roundtrip.ts` no longer
+resolves `zod` from `.tentacle/tmp/` (it sits outside the workspace), so I ran its
+committed form, T2.0: `bun test packages/client/test/chart-args-roundtrip.test.ts`
+→ `1 pass, 0 fail, 12 expect() calls`. It holds. `apps/mobile/src/chart-*` did not
+exist before this slice.
+
+**As built** (all pure and React-free; the owner's picks: line A, bar/stacked/area/donut
+B, scatter A, scrub A; mono typography):
+- `packages/core/src/chart/format.ts` — `formatParts(value, format) → {number, unit,
+  unitBefore}` (rev 2 item 3). Joined back, it reads exactly as `formatNumber`.
+- `apps/mobile/src/chart-geometry.ts` — `monotoneTangents`/`monotoneCubics`/`monotonePath`
+  (Fritsch–Carlson + Brodlie), `curveLength` (sampled, for the draw-in), `runs` (null =
+  break), `domain` (12 % pad / zero + 8 %), `guides` (≤ 3 nice), `barUp`/`barSide` (only
+  the data end rounded, r clamped, ≤ 0,2 pt → no path, negatives round the far end),
+  `rectPath`, `sector` (4 tangent corners, clamped corner radius, full ring for one
+  slice), `dodge`, `leastSquares`.
+- `apps/mobile/src/chart-hero.ts` — `heroOf(spec, at, locale)` with the item-3 rules
+  (line/area vs series 1 or own first value; stacked total vs previous column; bars
+  max + "il più alto di N", no delta; donut total; scatter slope per 10^⌊log10 xMax⌋
+  with an `r²` chip, gated on ≥ 8 points and r² ≥ 0,5), `heroDelta` (▲/▼, no pill on
+  ref 0), `xTexts`, it/en words.
+- `apps/mobile/src/chart-layout-kit.ts` (view-model types, mono text measuring with
+  CJK = 2 cells, `fitText`, `textBox`/`overlaps`), `chart-layout-axis.ts` (x positions,
+  `pickXLabels`, `guideItems` with the collision drop, `labelsFit`, legend, summary,
+  table), `chart-layout-shapes.ts` (bars B as rows ≤ 12 categories / columns above,
+  stacked B, donut B, scatter A), `chart-layout.ts` (`chartSpecOf` — re-validation of
+  the object or the raw JSON text; `chartLayout`; line A and area B; `hit`; `scrubAt`).
+- `apps/mobile/src/chart-scrub.ts` — `reduceScrub`: 250 ms hold → scrub at the down
+  point (`index` + `tick`); travel ≥ 10 pt before the hold → `yield` (the list
+  scrolls); one `tick` per index change; up/cancel → `release`.
+- Tests: `apps/mobile/test/chart-{scrub,geometry,hero,layout}.test.ts` (+ the shared
+  `chart-fixtures.ts`) — 51 tests, T5.1–T5.15; `packages/core/test/chart-format-parts.test.ts`.
+
+**Drift from the Implementation, and why.**
+1. **Files.** Item 5 named two files; the layout is five (`chart-layout.ts` + `-kit`,
+   `-axis`, `-shapes`, and `chart-geometry.ts`, `chart-hero.ts`) so no write is huge and
+   there is no import cycle (shapes and line both need the axis helpers). Plus
+   `formatParts` in core `format.ts`, which rev 2 item 3 asks for but no slice listed.
+2. **No `scheme` and no `style` option.** `chartLayout(raw, {width, height?, fontScale?,
+   locale?, hidden?, measure?})`. Colours come back as `Paint` = `{series: k}` or a theme
+   token (`mutedLine`, `track`, `guide`, …); the component resolves them per mode (the
+   tokens are C6's `theme.ts`). The `style` switch is gone, as rev 2 said.
+3. **The donut test reads "within 1 %" as 1 percentage point of the ring, after adding
+   back each slice's pad strip.** Relative 1 % cannot hold: the 4 corner arcs cost
+   ~5 pt² per slice, about 5 % of a 2,3 % slice. Measured with an independent SVG-path
+   flattener plus the shoelace formula.
+4. **A slice thinner than its gap keeps half its angle** (`pad = min(gap pad, sweep/4)`).
+   Without this, a 0,5 % slice is swallowed by its 2,5 pt gap, and T5.13 asks that it
+   survive.
+5. **Stacked gap 1,5 pt, radius 3** (the picked B mockup), not item 5's generic 2 pt.
+6. **No scrub on bar rows, donut or scatter** (`hit` → `null`; the machine then never
+   enters). Columns and stacked scrub by column; line and area by x.
+7. **Words.** `summary` reuses core `summarizeChart`, whose words are English ("min",
+   "max", "from … to"). Only the numbers follow the locale. Italian words would be a
+   core change for C7/a11y.
+8. **Red before green was not followed in order.** I wrote the modules first and the
+   tests after. Every test was then shown failing on the property it pins, by the
+   mutations below (22/22 killed).
+
+**Mutations** (scratch `c5-mut.ts`: apply, run the named test file, restore; `git
+status` afterwards showed only this slice's files):
+```
+KILLED   T5.8 Catmull-Rom tangents — 1 fail
+KILLED   T5.13 round caps (corner unclamped, pad unshrunk) — 1 fail
+KILLED   T5.12 stacked gap not subtracted — 1 fail
+KILLED   T5.12 r unclamped — 1 fail
+KILLED   T5.9 guides allow 4 — 1 fail
+KILLED   T5.9 collision drop disabled — 1 fail
+KILLED   T5.10 delta vs series 0's first, not series 1 — 3 fail
+KILLED   T5.10 ref = 0 not guarded — 1 fail
+KILLED   T5.10 scatter gate removed — 1 fail
+KILLED   T5.2 hit without clamp (null outside the plot) — 1 fail
+KILLED   T5.3 x labels not thinned — 4 fail
+KILLED   T5.4 colour by visible position — 1 fail
+KILLED   T5.4 hidden series still in the domain — 1 fail
+KILLED   T5.5 no re-validation — 1 fail
+KILLED   T5.6 no yield on an early pan — 1 fail
+KILLED   T5.6 tick on a repeated index — 1 fail
+KILLED   T5.7 summary ignores the locale — 1 fail
+KILLED   T5.11 dodge disabled — 1 fail
+KILLED   T5.11 no legend fallback — 1 fail
+KILLED   T5.14 scrub hero at rest — 1 fail
+KILLED   T5.15 emoji triangle — 3 fail
+KILLED   formatParts unit side ignored — 2 fail
+```
+
+**Gate.**
+- `bun run lint`: clean (1813 files).
+- `bunx tsc --noEmit`: one error, `packages/tools/src/pdf/pdf-worker.ts(22,38)` cannot
+  find `pdfjs-dist`. That is not this diff: `pdfjs-dist` 6.5.438 is declared in
+  `packages/tools/package.json` but not installed in this worktree; it arrived with
+  the `main` merge.
+- `tsc -p apps/mobile` and `tsc -p apps/relay`: clean.
+- `bun test` (once): `13182 pass, 5 skip, 31 fail`. Narrow re-runs put the fails in
+  `packages/tools`, `packages/daemon` and `packages/cli`: the PDF tests ("Cannot find
+  module 'pdfjs-dist/legacy/build/pdf.worker.mjs'"), the two compiled-binary marker
+  tests, and one `fs_read` sniff test. None is in a package this slice touched.
+  `bun test apps/mobile packages/core` → `2914 pass, 0 fail`.
+- **Unverified:** whether those 31 pass with `pdfjs-dist` installed. To check: run
+  `bun install` in the worktree, then the full `bun test`.
+
+**Changelog.** No fragment for C5. Nothing is drawn on the phone until C6 wires
+`ChartView`, so there is no user-visible change, and internal work adds none (AGENTS
+§10). `changelog.d/model-charts.added.md` and `.changed.md` already exist, one bullet
+each; the phone bullet belongs to C6/C8.
+
+**C5: DONE** (T5 green; pixels are C6's).
+
 ## Review
 *(empty — mandatory fresh-context review after C8)*
 
