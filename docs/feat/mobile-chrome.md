@@ -1706,3 +1706,19 @@ hand with Edit.) The plan's third target, the `note.id` join, belongs to S8.
 
 **Executor behaviour:** careful and candid. It disclosed the inherited uncommitted attempt, the e2e block and the drift (the host in `App.tsx`, the extra magnifier target). The one miss is the undisclosed `Info.plist`.
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · reviews 2631546f (`git diff HEAD~1`) only*
+
+**Verdict: PASS.** The code is approved. The simulator pass is still owed and needs the owner's decision (see 2).
+
+1. **Finding 1: FIXED and verified.**
+   - `git cat-file -e main:…/live-activity/Info.plist` fails, so the file was never on `main`.
+   - The commit deletes the file and ignores that one exact path (`.gitignore:36-38`).
+   - Probe: I wrote a temporary file at that path. `git status --ignored` showed it as `!!` (ignored).
+   - Mutation: I commented the rule out. The status became `??` (untracked), so the rule is the guard. I restored the rule, deleted the probe, and `git status` was clean.
+   - Regression check: the tree now matches `main` for this target, and prebuild still generates the file locally, so nothing is lost.
+2. **Finding 2: NOT FIXED, correctly escalated.** Flows 26/24/05 are still blocked by the `PushCore` build error that also exists on `main`. The executor stopped under §0 (two strikes) and named the decision the owner must make: fix the native target first, or accept S6 with the simulator pass deferred. The code needs no further change. S6's "done when" (flow 26 green in both themes) stays unmet until that pass runs.
+- **Gate (my run):** `bun run lint` clean (1679 files). `bun run typecheck` (root + mobile + relay) clean. The diff touches no TS, so I did not re-run tests.
+- **Regressions:** none. The diff is `.gitignore` + one file deletion + this doc. The new Fix round 1 section sits above `## Review`, which is fine.
+
