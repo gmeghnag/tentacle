@@ -3327,3 +3327,19 @@ written raw to the terminal, no new RPC serialization — no invariant touched.
 
 **Executor behaviour:** honest scope and drift notes, real mutation pass (it caught and fixed its own
 mis-anchored M3), but left the Gate unfilled and its race tests cover the child path only.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · fresh context, same model as the S8/S9 executor*
+
+**Verdict: PASS.** The fix commit (`0d453a7a`) changes only
+`test/session-screen-activity-actions.test.ts` and this doc. No production code changed, so it
+cannot cause a code regression. I re-ran my round-1 mutation script
+(`.tentacle/tmp/mobile-chrome/rev-mut.ts`, file restored byte-identical): the re-attach unsubscribe
+was dropped → KILLED (1 fail); the `setJob` identity guard was weakened → KILLED (1); the
+`stopChild`/`stopJob` busy guards were removed → KILLED (2); the two that round 1 already caught are
+still KILLED. Finding 4: the S9 Gate is filled in, and it is labelled as a re-run. The harness
+rewrite (a subscription registry with a live flag) keeps the round-1 echo and leave tests green.
+Gate: the 3 activity/detail files give 53 pass / 0 fail; `bun run lint` is clean (1734 files);
+`bun run typecheck` is clean. I did not re-run the full suite (the executor reports 12597 pass ·
+5 skip · 0 fail). Flow 27 has still not run, because of the `PushCore` blocker.
