@@ -14,7 +14,12 @@ import type { JSX, ReactNode } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { sectionNotes } from "../band-notes.ts";
-import type { InfoRow, InfoSection, SessionInfoView } from "../session-info.ts";
+import {
+  type InfoRow,
+  type InfoSection,
+  type SessionInfoView,
+  rowIdentity,
+} from "../session-info.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, space, typography } from "../theme.ts";
 import { BandNote, BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
@@ -33,6 +38,12 @@ export interface SessionInfoSheetProps {
   readonly onAutoAccept: (on: boolean) => void;
   /** A server's/skill's switch (session-capabilities S5): the row's own kind and raw name. */
   readonly onSwitch: (kind: "mcp" | "skill", name: string, enabled: boolean) => void;
+  /**
+   * Delete one armed scheduled wake (cron-tool S6, M7): the row's RAW id. A
+   * trailing control, not a swipe: the app carries no gesture library, and plan
+   * P9's rule is a testID-addressable control.
+   */
+  readonly onDeleteSchedule: (scheduleId: string) => void;
   /** Pull-to-refresh and a Retry row. */
   readonly onRefresh: () => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
@@ -68,6 +79,7 @@ function SectionBody({
   onExpand,
   onRetry,
   onSwitch,
+  onDeleteSchedule,
 }: {
   readonly palette: Palette;
   readonly section: InfoSection;
@@ -75,6 +87,7 @@ function SectionBody({
   readonly onExpand: (id: string | null) => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
   readonly onSwitch: SessionInfoSheetProps["onSwitch"];
+  readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
 }): JSX.Element {
   if (section.phase === "loading") {
     return <LoadingRow palette={palette} first />;
@@ -102,19 +115,22 @@ function SectionBody({
     <>
       {section.rows.map((row, index) => (
         <InfoRowView
-          key={`${section.id}-${row.title}`}
+          key={`${section.id}-${rowIdentity(row)}`}
           palette={palette}
           row={row}
           first={index === 0}
           sectionId={section.id}
           onSwitch={onSwitch}
-          expanded={expanded === `${section.id}:${row.title}`}
+          onDeleteSchedule={onDeleteSchedule}
+          expanded={expanded === `${section.id}:${rowIdentity(row)}`}
           onExpand={() => {
             if (row.expand === undefined) {
               return;
             }
             onExpand(
-              expanded === `${section.id}:${row.title}` ? null : `${section.id}:${row.title}`,
+              expanded === `${section.id}:${rowIdentity(row)}`
+                ? null
+                : `${section.id}:${rowIdentity(row)}`,
             );
           }}
         />
@@ -132,6 +148,7 @@ function InfoRowView({
   expanded,
   onExpand,
   onSwitch,
+  onDeleteSchedule,
 }: {
   readonly palette: Palette;
   readonly row: InfoRow;
@@ -140,8 +157,10 @@ function InfoRowView({
   readonly expanded: boolean;
   readonly onExpand: () => void;
   readonly onSwitch: SessionInfoSheetProps["onSwitch"];
+  readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
 }): JSX.Element {
   const toggle = row.switch;
+  const remove = row.delete;
   const values =
     row.value === undefined && row.chip === undefined ? undefined : (
       <View style={styles.trailing}>
@@ -169,15 +188,26 @@ function InfoRowView({
       </View>
     );
   // P1 (owner): a trailing switch on the row, as Auto-accept's; a ghost
-  // (disabled) one when the view-model says it cannot send.
+  // (disabled) one when the view-model says it cannot send. A scheduled wake's
+  // trailing control is its Delete instead (cron-tool S6): a wake has no on/off.
   const trailing =
-    toggle === undefined ? (
+    remove !== undefined ? (
+      <Pressable
+        testID={`session-info-${sectionId}-${rowIdentity(row)}-delete`}
+        accessibilityRole="button"
+        accessibilityLabel={remove.accessibilityLabel}
+        onPress={() => onDeleteSchedule(remove.id)}
+        style={styles.delete}
+      >
+        <Text style={[typography.subhead, { color: palette.red }]}>Delete</Text>
+      </Pressable>
+    ) : toggle === undefined ? (
       values
     ) : (
       <View style={styles.switchTrail}>
         {values}
         <Switch
-          testID={`session-info-${sectionId}-${row.title}-switch`}
+          testID={`session-info-${sectionId}-${rowIdentity(row)}-switch`}
           accessibilityLabel={toggle.accessibilityLabel}
           value={toggle.on}
           disabled={!toggle.interactive}
@@ -200,7 +230,7 @@ function InfoRowView({
           : { accessibilityLabel: row.accessibilityLabel })}
         {...(row.expand === undefined ? {} : { onPress: onExpand, chevron: !expanded })}
         trailing={trailing}
-        testID={`session-info-${sectionId}-${row.title}`}
+        testID={`session-info-${sectionId}-${rowIdentity(row)}`}
       >
         {row.tone === undefined ? null : (
           <View style={styles.lead}>
@@ -229,6 +259,7 @@ function Section({
   onExpand,
   onRetry,
   onSwitch,
+  onDeleteSchedule,
   lastRow,
 }: {
   readonly palette: Palette;
@@ -237,6 +268,7 @@ function Section({
   readonly onExpand: (id: string | null) => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
   readonly onSwitch: SessionInfoSheetProps["onSwitch"];
+  readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
   /** A row that belongs to THIS section but is not the view-model's (Auto-accept). */
   readonly lastRow?: ReactNode;
 }): JSX.Element {
@@ -269,6 +301,7 @@ function Section({
           onExpand={onExpand}
           onRetry={onRetry}
           onSwitch={onSwitch}
+          onDeleteSchedule={onDeleteSchedule}
         />
         {lastRow}
       </BandSection>
@@ -284,6 +317,7 @@ export function SessionInfoSheet({
   autoAcceptError,
   onAutoAccept,
   onSwitch,
+  onDeleteSchedule,
   onRefresh,
   onRetry,
   onClose,
@@ -332,6 +366,7 @@ export function SessionInfoSheet({
                   onExpand={onExpand}
                   onRetry={onRetry}
                   onSwitch={onSwitch}
+                  onDeleteSchedule={onDeleteSchedule}
                   {...(section.id === "session" && view.autoAccept === true
                     ? {
                         // Design 4 / the mockup's `infoE2` (`index.html:394-397`):
@@ -394,4 +429,5 @@ const styles = StyleSheet.create({
   trailing: { alignItems: "flex-end", gap: 2, maxWidth: "55%" },
   lead: { flexDirection: "row", alignItems: "center", gap: 6 },
   switchTrail: { flexDirection: "row", alignItems: "center", gap: 10 },
+  delete: { paddingVertical: 8, paddingLeft: 12 },
 });

@@ -11,17 +11,23 @@ import { describe, expect, test } from "bun:test";
 import { JsonRpcErrorCode } from "@tentacle/protocol";
 import type {
   McpServerStatus,
+  ScheduleDeleteResult,
+  ScheduleRow,
   SessionContextResult,
   SessionSkillsResult,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import {
   type InfoPort,
+  type InfoSchedules,
   type SessionInfoState,
   createSessionInfo,
 } from "../src/session-info-controller.ts";
 
 const emptySkills: SessionSkillsResult = { slash: [], skills: [], problems: [], moreProblems: 0 };
+
+/** The one clock every test in this file hands the controller (17 Nov 2026, 12:00 local). */
+const NOW = new Date(2026, 10, 17, 12, 0, 0).getTime();
 
 /** A promise plus its settlers: the only way to assert an ORDER deterministically. */
 function deferred<T>(): {
@@ -57,6 +63,7 @@ function port(over: Partial<InfoPort> = {}): {
   const calls = { mcp: 0, skills: 0, context: 0 };
   const base: InfoPort = {
     daemon: () => ({ version: "1.4.0", model: "claude-sonnet-4-5", contextWindow: 200_000 }),
+    now: () => NOW,
     computerName: () => "MacBook Pro",
     title: () => "Fix the flaky test",
     phase: () => "open",
@@ -707,5 +714,213 @@ describe("a failed pull is REPORTED as its class, never its text (docs/fix/mobil
       await info.open();
       expect(reports).toEqual([]);
     }
+  });
+});
+
+describe("the scheduled wakes feed (cron-tool S6, M7)", () => {
+  const wake = (i: number): ScheduleRow => ({
+    id: `sc-${i}`,
+    kind: "every",
+    spec: `every ${i}m`,
+    prompt: `check ${i}`,
+    nextAt: NOW + i * 60_000,
+    fires: i,
+    createdAt: NOW,
+  });
+
+  /** A fake `InfoSchedules`: the listener is what a real `onSchedules` calls at install. */
+  function feed(initial: readonly ScheduleRow[] | undefined): {
+    readonly port: InfoSchedules;
+    readonly report: (rows: readonly ScheduleRow[] | undefined) => void;
+    readonly removed: string[];
+    readonly unsubscribed: () => number;
+    refuse: ScheduleDeleteResult | undefined;
+  } {
+    let listener: ((rows: readonly ScheduleRow[] | undefined) => void) | null = null;
+    let unsubscribes = 0;
+    const removed: string[] = [];
+    const handle = {
+      refuse: undefined as ScheduleDeleteResult | undefined,
+    };
+    const port: InfoSchedules = {
+      current: () => initial,
+      onChange: (next) => {
+        listener = next;
+        // A real `RemoteSession.onSchedules` reports the current table at once.
+        if (initial !== undefined) {
+          next(initial);
+        }
+        return () => {
+          unsubscribes += 1;
+          // The real client's unsubscribe stops delivering: a frame after it is
+          // no listener's business (otherwise this fake would prove nothing).
+          if (listener === next) {
+            listener = null;
+          }
+        };
+      },
+      remove: (scheduleId) => {
+        removed.push(scheduleId);
+        return Promise.resolve(handle.refuse ?? { deleted: true });
+      },
+    };
+    return {
+      port,
+      report: (rows) => listener?.(rows),
+      removed,
+      unsubscribed: () => unsubscribes,
+      get refuse() {
+        return handle.refuse;
+      },
+      set refuse(value) {
+        handle.refuse = value;
+      },
+    };
+  }
+
+  const withFeed = (f: ReturnType<typeof feed>) =>
+    port({ session: () => ({ ...sessionBase, schedules: f.port }) });
+
+  const sessionBase = {
+    skills: () => Promise.resolve(emptySkills),
+    context: () => Promise.resolve({ used: 84_000, exact: true } as SessionContextResult),
+    autoAccept: undefined,
+  };
+
+  const sectionOf = (state: SessionInfoState) =>
+    state.view.sections.find((s) => s.id === "schedules");
+
+  test("the install's table paints at once; no section without a feed", async () => {
+    const without = createSessionInfo(port().port);
+    await without.open();
+    expect(sectionOf(without.state())).toBeUndefined();
+
+    const f = feed([wake(1), wake(2)]);
+    const info = createSessionInfo(withFeed(f).port);
+    await info.open();
+    expect(sectionOf(info.state())?.phase).toBe("ready");
+    expect(sectionOf(info.state())?.rows.map((r) => r.title)).toEqual(["check 1", "check 2"]);
+  });
+
+  test("a later frame repaints; `undefined` reads as an older daemon, never an empty list", async () => {
+    const f = feed([]);
+    const info = createSessionInfo(withFeed(f).port);
+    await info.open();
+    expect(sectionOf(info.state())?.phase).toBe("empty");
+
+    f.report([wake(3)]);
+    expect(sectionOf(info.state())?.phase).toBe("ready");
+    expect(sectionOf(info.state())?.rows).toHaveLength(1);
+
+    f.report(undefined);
+    expect(sectionOf(info.state())?.phase).toBe("unsupported");
+    expect(sectionOf(info.state())?.rows).toEqual([]);
+  });
+
+  test("a delete sends the RAW id; the row leaves only on the daemon's next table", async () => {
+    const f = feed([wake(1), wake(2)]);
+    const info = createSessionInfo(withFeed(f).port);
+    await info.open();
+    await info.deleteSchedule("sc-1");
+    expect(f.removed).toEqual(["sc-1"]);
+    // The local list is NOT touched: the next frame is what removes a row.
+    expect(sectionOf(info.state())?.rows).toHaveLength(2);
+    f.report([wake(2)]);
+    expect(sectionOf(info.state())?.rows.map((r) => r.title)).toEqual(["check 2"]);
+  });
+
+  test("a refused delete keeps the row and shows the daemon's own reason (no invented cause)", async () => {
+    const f = feed([wake(1)]);
+    f.refuse = { deleted: false, reason: "this daemon cannot delete a scheduled wake" };
+    const info = createSessionInfo(withFeed(f).port);
+    await info.open();
+    await info.deleteSchedule("sc-1");
+    const section = sectionOf(info.state());
+    expect(section?.rows).toHaveLength(1);
+    expect(section?.footer).toBe("this daemon cannot delete a scheduled wake");
+    expect(section?.phase).toBe("ready");
+  });
+
+  test("a thrown delete is reported, and the next frame retires the reason", async () => {
+    const f = feed([wake(1)]);
+    const failing: InfoSchedules = {
+      ...f.port,
+      remove: () => Promise.reject(new Error("not connected to the daemon")),
+    };
+    const info = createSessionInfo(
+      port({ session: () => ({ ...sessionBase, schedules: failing }) }).port,
+    );
+    await info.open();
+    await info.deleteSchedule("sc-1");
+    expect(sectionOf(info.state())?.footer).toBe("not connected to the daemon");
+    expect(sectionOf(info.state())?.rows).toHaveLength(1);
+    f.report([wake(1)]);
+    expect(sectionOf(info.state())?.footer).toBeUndefined();
+  });
+
+  test("a session switch refollows: the new table replaces the previous session's", async () => {
+    let rows: readonly ScheduleRow[] | undefined = [wake(1)];
+    const listener: { next: ((rows: readonly ScheduleRow[] | undefined) => void) | null } = {
+      next: null,
+    };
+    const switching: InfoSchedules = {
+      current: () => rows,
+      onChange: (next) => {
+        listener.next = next;
+        if (rows !== undefined) {
+          next(rows);
+        }
+        return () => {
+          listener.next = null;
+        };
+      },
+      remove: () => Promise.resolve({ deleted: true }),
+    };
+    const info = createSessionInfo(
+      port({ session: () => ({ ...sessionBase, schedules: switching }) }).port,
+    );
+    await info.open();
+    expect(sectionOf(info.state())?.rows).toHaveLength(1);
+
+    // The next session has none of them: the install reports the truth.
+    rows = [];
+    await info.refresh();
+    expect(sectionOf(info.state())?.phase).toBe("empty");
+  });
+
+  test("closing the sheet stops following the feed", async () => {
+    const f = feed([wake(1)]);
+    const info = createSessionInfo(withFeed(f).port);
+    await info.open();
+    info.close();
+    expect(f.unsubscribed()).toBeGreaterThan(0);
+    // A frame that lands after the close paints nothing: the sheet is gone.
+    const before = info.state();
+    f.report([wake(1), wake(2)]);
+    expect(sectionOf(info.state())?.rows).toHaveLength(1);
+    expect(sectionOf(before)?.rows).toHaveLength(1);
+  });
+
+  test("a delete with no feed at all is a no-op (not attached, or no table)", async () => {
+    const info = createSessionInfo(port().port);
+    await info.open();
+    // Resolves, sends nothing, throws nothing: there is no control to press.
+    await info.deleteSchedule("sc-1");
+    expect(sectionOf(info.state())).toBeUndefined();
+  });
+
+  test("a wiring that offers the feed says `not-open` before any attach (never hides)", async () => {
+    const info = createSessionInfo(port({ phase: () => "failed", offersSchedules: true }).port);
+    await info.open();
+    expect(sectionOf(info.state())?.phase).toBe("not-open");
+    expect(sectionOf(info.state())?.rows).toEqual([]);
+  });
+
+  test("an attached daemon that reports no table reads `unsupported` (an older build)", async () => {
+    const info = createSessionInfo(
+      port({ offersSchedules: true, session: () => sessionBase }).port,
+    );
+    await info.open();
+    expect(sectionOf(info.state())?.phase).toBe("unsupported");
   });
 });

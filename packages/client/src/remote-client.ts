@@ -69,6 +69,8 @@ import {
   type PromptResult,
   type QueueState,
   type RenameResult,
+  type ScheduleDeleteResult,
+  type ScheduleRow,
   type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
@@ -135,6 +137,7 @@ import {
   type RouterAction,
 } from "./permission-router.ts";
 import { RemoteSession } from "./remote-session.ts";
+import { SCHEDULE_OLD_DAEMON, boundSchedules, schedulesFromSnapshot } from "./schedules.ts";
 import { type LogOutcome, type LogState, applyLogRead } from "./session-log-reader.ts";
 import { SessionLostError } from "./session-lost.ts";
 import {
@@ -330,6 +333,20 @@ export interface SessionJobsNotice {
 }
 
 /**
+ * The session's scheduled wakes as the daemon reports them (a `schedules`
+ * update, or the snapshot of a resync): the FULL table, already bounded and
+ * sanitized here. Not turn-scoped — a wake fires between turns. Display only,
+ * and read only by a client whose daemon is trusted to start its own turns
+ * (`daemonWakes`, AGENTS §7: a pod's claim is dropped). `count` is the DAEMON's
+ * own number, taken before the bound above (the daemon caps 10, the client 32).
+ */
+export interface SessionSchedulesNotice {
+  readonly sessionId: string;
+  readonly rows: readonly ScheduleRow[];
+  readonly count: number;
+}
+
+/**
  * A running background child messaged its agent (a `subagent_notify` update,
  * docs/feat/agent-message-two-way.md): the text already reached the parent's
  * conversation; this is only the live notice (and the wake's cue). Not
@@ -438,8 +455,9 @@ export interface RemoteClientOptions {
    * (`wake-<uuid>`, docs/fix/autoaccept-wake-turns.md): their asks are this
    * session's, so auto-accept may answer them. Defaults to OFF, and must: this
    * is a TRUST bit (AGENTS §7), so it fails closed — never keyed on
-   * `daemonKind`, which defaults to `"serve"`. Set only by `connect`; the
-   * worker, pod `run`/`attach` and the relay never say it.
+   * `daemonKind`, which defaults to `"serve"`. Set only by `connect` and the
+   * local worker (laptop code that fires the session's scheduled wakes,
+   * docs/feat/cron-tool.md D1); pod `run`/`attach` and the relay never say it.
    */
   readonly daemonWakes?: boolean;
   /**
@@ -647,6 +665,8 @@ interface Snap {
   readonly subagents?: readonly SubagentRow[];
   /** The running shell jobs at the cut (absent: an older daemon does not report them). */
   readonly jobs?: readonly JobRow[];
+  /** The scheduled wakes at the cut (absent: an older daemon, or one that never holds any). */
+  readonly schedules?: readonly ScheduleRow[];
 }
 
 /** The error of a session the reducer gave up on, WITH its cause (docs/fix/detach-live.md KO 3). */
@@ -707,6 +727,8 @@ interface SessionEntry {
   subagents: readonly SubagentRow[] | undefined;
   /** The daemon's last reported running shell jobs; undefined until it reports one. */
   jobs: readonly JobRow[] | undefined;
+  /** The daemon's last reported scheduled wakes; undefined until it reports one. */
+  schedules: readonly ScheduleRow[] | undefined;
   /** The session's newest settings report (an open's, an own sync's, a `session_settings`). */
   settings: SessionSettingsReport | undefined;
   /** The exits no turn had flushed when the newest open answered (an older daemon: 0). */
@@ -823,6 +845,7 @@ export class RemoteClient {
   private readonly queueListeners = new Set<(notice: SessionQueueNotice) => void>();
   private readonly subagentListeners = new Set<(notice: SessionSubagentsNotice) => void>();
   private readonly jobListeners = new Set<(notice: SessionJobsNotice) => void>();
+  private readonly scheduleListeners = new Set<(notice: SessionSchedulesNotice) => void>();
   private readonly subagentNotifyListeners = new Set<
     (notice: SessionSubagentNotifyNotice) => void
   >();
@@ -1373,6 +1396,41 @@ export class RemoteClient {
   /** The session's running shell jobs as last reported; undefined if never reported. */
   jobsOf(sessionId: string): readonly JobRow[] | undefined {
     return this.sessions.get(sessionId)?.jobs;
+  }
+
+  /** Subscribe to scheduled-wake changes across all sessions (see the notice type). */
+  onSessionSchedules(listener: (notice: SessionSchedulesNotice) => void): () => void {
+    this.scheduleListeners.add(listener);
+    return () => this.scheduleListeners.delete(listener);
+  }
+
+  /** The session's scheduled wakes as last reported; undefined if never reported. */
+  schedulesOf(sessionId: string): readonly ScheduleRow[] | undefined {
+    return this.sessions.get(sessionId)?.schedules;
+  }
+
+  /**
+   * `session/schedule_delete` (docs/feat/cron-tool.md D5): drop one scheduled
+   * wake. Never a throw for a refusal: `{deleted: false}` — and an older
+   * daemon's `MethodNotFound` becomes the same typed refusal, with the reason
+   * the caller shows as a notice. The caller must hold the trust bit (only a
+   * daemon that schedules its own turns has a table to delete from).
+   */
+  deleteSchedule(sessionId: string, scheduleId: string): Promise<ScheduleDeleteResult> {
+    return this.sessionCall(
+      sessionId,
+      Method.ScheduleDelete,
+      { sessionId, scheduleId },
+      "once",
+    ).then(
+      (result) => result as ScheduleDeleteResult,
+      (error: unknown): ScheduleDeleteResult => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { deleted: false, reason: SCHEDULE_OLD_DAEMON };
+        }
+        throw error;
+      },
+    );
   }
 
   /**
@@ -2989,6 +3047,7 @@ export class RemoteClient {
       queued: undefined,
       subagents: undefined,
       jobs: undefined,
+      schedules: undefined,
       settings: undefined,
       unflushedExits: 0,
       attachMark: 0,
@@ -3046,7 +3105,13 @@ export class RemoteClient {
     }
   }
 
-  /** A child's message to the agent (bounded and sanitized here): told, never stored. */
+  /** The scheduled wakes now (a `schedules` update in seq order, or a resync's snapshot): bounded here. */
+  private schedulesChanged(entry: SessionEntry, rows: readonly ScheduleRow[], count: number): void {
+    entry.schedules = rows;
+    for (const listener of this.scheduleListeners) {
+      listener({ sessionId: entry.id, rows, count });
+    }
+  }
   private subagentNotified(entry: SessionEntry, notify: SubagentNotify): void {
     for (const listener of this.subagentNotifyListeners) {
       listener({ sessionId: entry.id, notify });
@@ -3428,6 +3493,13 @@ export class RemoteClient {
       // (the daemon caps nothing — H1 — so this is not a capped number).
       this.jobsChanged(entry, snapshotJobs, snap.jobs?.length ?? 0);
     }
+    // The scheduled wakes at the cut: the same fold, gated on the SAME trust bit
+    // the live frame is (`daemonWakes`): a pod's list is a pod-supplied claim
+    // about the laptop's own wake-ups (AGENTS §7).
+    const snapshotSchedules = schedulesFromSnapshot(snap.schedules);
+    if (snapshotSchedules && this.daemonWakes) {
+      this.schedulesChanged(entry, snapshotSchedules, snap.schedules?.length ?? 0);
+    }
     this.step(entry, {
       kind: "snapshot",
       messages: snap.messages,
@@ -3609,6 +3681,13 @@ export class RemoteClient {
         // Likewise a job: it starts and exits between turns. The count is the
         // frame's own length, taken BEFORE `boundJobs` cuts it (H1).
         this.jobsChanged(entry, boundJobs(update.jobs), update.jobs.length);
+      } else if (update.type === "schedules") {
+        // Not turn-scoped (a wake fires between turns), and DROPPED with the
+        // trust bit off: only a daemon that starts turns on its own can have a
+        // table this client should act on (AGENTS §7, a pod is not trusted).
+        if (this.daemonWakes) {
+          this.schedulesChanged(entry, boundSchedules(update.schedules), update.schedules.length);
+        }
       } else if (update.type === "subagent_notify") {
         // Not turn-scoped: a child messages the agent while it runs (idle too).
         this.subagentNotified(entry, boundSubagentNotify(update));
@@ -3780,6 +3859,7 @@ export class RemoteClient {
       ...(first?.queued ? { queued: first.queued } : {}),
       ...(first?.subagents ? { subagents: first.subagents } : {}),
       ...(first?.jobs ? { jobs: first.jobs } : {}),
+      ...(first?.schedules ? { schedules: first.schedules } : {}),
     };
   }
 

@@ -19,6 +19,7 @@
 import type { AppProps, SessionController } from "../app-types.ts";
 import type { SlashSkill } from "../commands.ts";
 import type { OpenPanel } from "../panel.ts";
+import type { ScheduleDockRow } from "../schedule-view.ts";
 import type { SkillsSync } from "../skills-sync.ts";
 import type { DisplayState } from "../state.ts";
 
@@ -38,6 +39,12 @@ export interface CommandContext {
   readonly draftRef: Live<string>;
   /** The current session — read at command time. */
   readonly sessionRef: Live<SessionController | null>;
+  /**
+   * The session's armed scheduled wakes, as this TUI last reported them
+   * (docs/feat/cron-tool.md S5): `/schedule` opens on them, and the panel's
+   * delete is the daemon's echo, never a local edit.
+   */
+  readonly schedulesRef: Live<readonly ScheduleDockRow[] | undefined>;
   /** The display state (`running`, the transcript rows, the token totals). */
   readonly stateRef: Live<DisplayState>;
   /**

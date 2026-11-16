@@ -81,7 +81,7 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
     const registry = readSrc(join("panels", "registry.ts"));
     // ONE line per kind: the measurable "new panel = file + registry line".
     expect(registry).toContain(
-      "export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [sessionsKind, mcpKind, skillsKind];",
+      "export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [\n  sessionsKind,\n  mcpKind,\n  skillsKind,\n  scheduleKind,\n];",
     );
     // The two panel key layers are the registry's decision too, not their own.
     const layers = readSrc(join("keys", "layer-panels.ts"));

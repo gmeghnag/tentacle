@@ -16,6 +16,7 @@ function row(sessionId: string, over: Partial<SessionRow> = {}): SessionRow {
     title: `t-${sessionId}`,
     subtitle: "3m ago",
     badges: [],
+    wakes: 0,
     archived: false,
     running: false,
     attached: 0,
