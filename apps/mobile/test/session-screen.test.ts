@@ -408,7 +408,101 @@ describe("sending and stopping (decision 15, F12, F13)", () => {
     expect(signals[0]?.aborted).toBe(true);
     expect(screen.state().transcript.turn).toBeNull(); // the bracket closed
   });
+});
 
+describe("stopTurn — the hub's Stop (docs/feat/mobile-hub.md P2)", () => {
+  /** A foreign turn whose stream never ends on its own, and a spy on its cancel. */
+  async function foreignRunning(h: ReturnType<typeof harness>) {
+    const cancelled = { value: false };
+    h.sessions[0]?.emitActivity({
+      kind: "turn",
+      turnId: "t-hub",
+      events: (async function* () {
+        yield { type: "text", delta: "streaming" } as SessionEvent;
+        await new Promise(() => {});
+      })(),
+      cancel: () => {
+        cancelled.value = true;
+      },
+    });
+    await settle();
+    return cancelled;
+  }
+
+  test("a draft in the field does not turn the hub's Stop into a steer: the foreign turn is cancelled", async () => {
+    // Mutation: `stopTurn` calling `act()` (the composer's tap) → red: with a
+    // draft the composer's action is `queue`, so nothing cancels the turn.
+    const h = harness();
+    const { screen } = h.make();
+    await screen.open();
+    const cancelled = await foreignRunning(h);
+    screen.setDraft("half-written steer");
+    expect(screen.state().view.composer.button).toBe("queue");
+    screen.stopTurn();
+    expect(cancelled.value).toBe(true);
+    expect(screen.state().draft).toBe("half-written steer");
+  });
+
+  test("an OWN turn with a draft stops through its own abort signal", async () => {
+    const signals: AbortSignal[] = [];
+    const handle: SendableHandle = {
+      open: () => Promise.resolve(),
+      detach: () => Promise.resolve(),
+      watch: () => () => {},
+      send: async function* (prompt: string, signal?: AbortSignal) {
+        yield { type: "user_message", text: prompt } as SessionEvent;
+        if (signal !== undefined) {
+          signals.push(signal);
+        }
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        yield { type: "turn_end", reason: "cancelled" } as SessionEvent;
+      },
+    };
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "e2e-mac",
+      controller: createSessionController<SendableHandle>({ newSession: () => handle }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    await screen.open();
+    screen.setDraft("a long turn");
+    screen.press();
+    await settle();
+    screen.setDraft("typed while it runs");
+    expect(signals[0]?.aborted).toBe(false);
+    screen.stopTurn();
+    await settle();
+    expect(signals[0]?.aborted).toBe(true);
+    expect(screen.state().transcript.turn).toBeNull();
+  });
+
+  test("link down (M8): nothing is cancelled — Stop travels the wire", async () => {
+    const h = harness();
+    const { screen } = h.make();
+    await screen.open();
+    const cancelled = await foreignRunning(h);
+    screen.link(false);
+    await settle();
+    expect(screen.state().transcript.link).toBe("down");
+    screen.stopTurn();
+    expect(cancelled.value).toBe(false);
+  });
+
+  test("no turn running: a no-op", async () => {
+    const h = harness();
+    const { screen } = h.make();
+    await screen.open();
+    expect(() => screen.stopTurn()).not.toThrow();
+    expect(screen.state().transcript.turn).toBeNull();
+  });
+});
+
+describe("sending and stopping, continued", () => {
   test("a send refused before the ack puts the text BACK with a notice (F13)", async () => {
     const h = harness();
     const { screen } = h.make();

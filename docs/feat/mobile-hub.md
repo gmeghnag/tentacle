@@ -701,6 +701,90 @@ regenerated and there is no `protocol.d/` note.
 **Status: H2 DONE.** H3–H4 not started. Nothing in the app calls
 `hub-actions`/`hubHaptic` yet; H3 wires them.
 
+### H3 — hub UI + wiring (PARTIAL: blocked, out of disk)
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Load-bearing check (step 1, the spike): NOT RUN, blocked by the environment.
+It did not fail.** The spike was set up on the iOS 26 simulator (`iPhone 17 Pro`,
+booted; Maestro present). It was a temporary edit of `ui/FloatingActivity.tsx`:
+the button no longer follows the finger, and it records the number of moves, the
+max page distance from the grant, release and terminate into a `spike-result`
+text. A temporary flow 28 swiped from the button UP (over the transcript
+`ScrollView`) and LEFT, with `duration: 1500`. It ran with
+`bun run e2e:mobile --ios 26 --only 28-floating-activity`. The Release build
+failed in `xcodebuild`:
+`lipo: write() failed, errno=28 (No space left on device)` (run
+`.tentacle/tmp/e2e-mobile/1794840387731/build-ios26.log`). `df`: 145 MiB free on
+the data volume; `~/Library/Developer/Xcode/DerivedData` is 44 GB. Both spike
+files were restored byte-for-byte from copies in `.tentacle/tmp/mobile-hub/spike/`
+(`git status` showed them unmodified afterwards). To re-run it, use those copies
+plus the flow described above. It needs ~10+ GB free (a full Fabric build).
+
+**Done (it does not depend on the spike), red → green:**
+1. `src/session-screen-controller.ts`: `stopTurn()` on the controller interface.
+   `act()`'s stop branch is extracted into one `stop(action)`, which the
+   composer's button and the hub both call (P2: not a second stop path).
+   `stopTurn` = `stop(composerAction({link, text: "", turn, ended, photos: 0}))`.
+   Tests in `test/session-screen.test.ts` › "stopTurn — the hub's Stop":
+   - a foreign turn with a draft is cancelled (the composer shows `queue`, and
+     the draft is kept);
+   - an own turn with a draft aborts its signal;
+   - link down → nothing is cancelled (M8);
+   - with no turn, it is a no-op.
+   Red on a no-op stub: 2 fail on assertions (`Expected: true / Received: false`);
+   green 22/0.
+2. `src/hub-session.ts` (new, pure; it is not in the Files list, see drift
+   below) + `test/hub-session.test.ts`:
+   - `hubContextOf`: the screen's facts; H4's fields are 0/null;
+   - `solveHub`: the menu at the open, anchored on the button centre in band
+     coordinates, with the stored edge; no band or a short band → menu;
+   - `bandPoint`: the grant's local point on the button + the page delta, so no
+     window measurement is needed;
+   - `mustCancel`: the button hidden by a sheet or drawer (M6), VoiceOver on
+     (M10), the band size changed (M15).
+   Red on a valid stub: 7 fail / 2 pass; green 9/0.
+
+**Mutations** (`bun .tentacle/tmp/mobile-hub/mutate-h3.ts`, which restores the
+exact bytes; `git status` was clean of them afterwards):
+```
+S1 stopTurn calls act() (the plan's target): 20 pass, 2 fail — a draft in the field does not turn the hub's Stop into a steer
+S2 stopTurn ignores the link:               21 pass, 1 fail — link down (M8): nothing is cancelled
+S3 stopTurn reads the draft:                20 pass, 2 fail — a draft in the field …
+W1 solveHub ignores the stored edge:         8 pass, 1 fail — a left-edge button fans to the right
+W2 bandPoint drops the local point:          8 pass, 1 fail — the touch's spot on the button + …
+W3 mustCancel ignores a band change:         8 pass, 1 fail — the band changed (M15)
+W4 mustCancel ignores the sheet/drawer:      8 pass, 1 fail — a sheet or the drawer hides the button (M6)
+```
+
+**Not done (waiting on the spike + disk):** `ui/HubFan.tsx`, the
+`FloatingActivity` rewrite (responder → `reduce`, the 400 ms timer, the glyph,
+the arc and badge, `accessibilityActions`), the `SessionScreen` entries,
+`openAttach`, `gestureEnabled`, More/VoiceOver `ActionSheet`, Composer focus for
+Steer, flow 29 + shots, and the changelog re-check. The fragment
+`changelog.d/mobile-hub.added.md` is H1's and is unchanged.
+
+**Drift / decisions so far.**
+- New pure module `hub-session.ts`. It keeps the glue that branches and
+  computes out of the `.tsx` files (AGENTS §7): the open-time solve, the
+  coordinate mapping, and the cancel rule.
+- Planned for the UI, not built: the scrim covers the band only (RN iOS does not
+  hit-test outside a parent's bounds), so the header and composer stay live
+  under a sticky fan. "New session" needs `SessionDrawerHost`'s render prop in
+  `App.tsx` to pass `fresh.start` down (`App.tsx:1024`, `:1202`). That file is
+  not in the plan's Files list.
+
+**Gate (partial state).** `bunx tsc --noEmit` and `-p apps/mobile` / `-p apps/relay`
+are clean. `bun run lint` is clean (1748 files) after `biome check --write` on the
+new test. `bun test` (full): **505 fail, not attributable**. It ran with the disk
+full: the run ended with `no space left on device`, and afterwards no command
+could start (ENOSPC on the tool's temp dir). The narrow files passed before the
+disk filled: `session-screen` 22/0, `hub-session` 9/0. Re-run `bun test` once
+space is freed.
+
+**Status: H3 PARTIAL** (controller `stopTurn` + the pure wiring seam done; the
+spike and all UI blocked by a full disk). H4 not started.
+
 ## Review
 
 *(empty — fresh-context review after H3/H4)*
