@@ -56,6 +56,12 @@ export type ListSize = Pick<ScrollMetrics, "content" | "viewport">;
 export interface FollowStep {
   readonly state: Follow;
   readonly scrollTo: number | null;
+  /**
+   * Whether the scroll is animated. The INITIAL landing of an attach is not
+   * (docs/fix/mobile-open-at-end.md, item 1): a long history would otherwise be
+   * seen scrolling through the whole transcript. Everything after it is.
+   */
+  readonly animated: boolean;
 }
 
 /**
@@ -76,9 +82,13 @@ export function endTarget(m: ListSize): number | null {
 /** The content grew (a delta, a row): scroll to the end, or mark it unseen. */
 export function contentGrew(state: Follow, m: ListSize): FollowStep {
   if (state.following) {
-    return { state, scrollTo: endTarget(m) };
+    return { state, scrollTo: endTarget(m), animated: true };
   }
-  return { state: state.unseen ? state : { following: false, unseen: true }, scrollTo: null };
+  return {
+    state: state.unseen ? state : { following: false, unseen: true },
+    scrollTo: null,
+    animated: true,
+  };
 }
 
 /**
@@ -87,12 +97,88 @@ export function contentGrew(state: Follow, m: ListSize): FollowStep {
  * following → stay, and nothing is "unseen" (no content arrived).
  */
 export function viewportChanged(state: Follow, m: ListSize): FollowStep {
-  return { state, scrollTo: state.following ? endTarget(m) : null };
+  return { state, scrollTo: state.following ? endTarget(m) : null, animated: true };
 }
 
 /** The pill's tap: back to the end, following again. */
 export function jumped(): Follow {
   return initialFollow;
+}
+
+/**
+ * The INITIAL landing (docs/fix/mobile-open-at-end.md, item 1): a long history
+ * must be at its END before it is ever seen, with no visible scroll and no
+ * animation. `contentGrew` cannot do it alone: a `FlatList` renders the first
+ * cells only, so its content height (and hence the end) keeps moving as the
+ * silent scroll renders more — the landing repeats, each time not animated,
+ * until a measurement changes nothing, and the list is hidden until then.
+ *
+ * Pure and React-free (AGENTS §7): the screen owns the ref, the hide and the
+ * scroll.
+ */
+export interface Landing {
+  /** Still landing: the list is laid out (and scrolled) but not yet shown. */
+  readonly settling: boolean;
+  /** The next scroll is not animated (a re-attach, whose rows are already shown). */
+  readonly silent: boolean;
+  /** The content height of the previous measurement (0: none yet). */
+  readonly last: number;
+  /** How many measurements this landing has taken. */
+  readonly rounds: number;
+}
+
+/** A fresh screen's landing: hidden until the end stops moving. */
+export const landingStart: Landing = { settling: true, silent: true, last: 0, rounds: 0 };
+
+/**
+ * A RE-ATTACH (a resync, a Retry, a foreground resync): the rows are already
+ * shown, so nothing is hidden — but the jump to the end must not be animated
+ * either, or the person watches the transcript scroll past again.
+ */
+export const landingQuiet: Landing = { settling: false, silent: true, last: 0, rounds: 0 };
+
+/** Nothing pending: the ordinary follow rules apply. */
+export const landingDone: Landing = { settling: false, silent: false, last: 0, rounds: 0 };
+
+/**
+ * How many measurements a landing may take before the list is shown anyway: a
+ * content height that never repeats (a streaming turn, a thumbnail landing)
+ * must never leave the transcript invisible.
+ */
+export const LANDING_ROUNDS = 12;
+
+/**
+ * One measurement while a landing is pending: the next landing state and the
+ * (never animated) scroll to the end, or `step: null` when there is nothing to
+ * land (already done, sizes unknown, or the person is reading further up —
+ * a foreground resync must never yank them to the end).
+ */
+export function landingStep(
+  state: Landing,
+  m: ListSize,
+  following: boolean,
+): { readonly state: Landing; readonly step: FollowStep | null } {
+  if (!state.settling && !state.silent) {
+    return { state, step: null };
+  }
+  if (!following) {
+    // Scrolled up and reading: show the list as it is and stay where they are.
+    return { state: landingDone, step: null };
+  }
+  if (m.content <= 0 || m.viewport <= 0) {
+    return { state, step: null }; // nothing measured yet: nothing to land
+  }
+  const rounds = state.rounds + 1;
+  const next: Landing = {
+    settling: state.settling && m.content !== state.last && rounds < LANDING_ROUNDS,
+    silent: false,
+    last: m.content,
+    rounds,
+  };
+  return {
+    state: next,
+    step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
+  };
 }
 
 /**

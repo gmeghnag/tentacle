@@ -28,6 +28,13 @@ export interface UserRow {
   /** Stable across updates: a virtualised list keys on it. */
   readonly key: string;
   readonly text: string;
+  /**
+   * When this message ARRIVED (epoch ms; docs/fix/mobile-open-at-end.md, slice
+   * B), shown by the row's swipe. Absent = not known — an older daemon, a
+   * message a reload re-logged (`times[i]` 0), a notice, or a live row folded
+   * with no clock. Never `0` itself: the fold never stores a `0`.
+   */
+  readonly at?: number;
   /** The prompt's images (rendered as `[image: name]`, plan Owner requirement). */
   readonly images: readonly ImageRef[];
   /** The model's restart prompt after a context reset (labelled "restart prompt"). */
@@ -48,6 +55,8 @@ export interface AssistantRow {
   readonly kind: "assistant";
   readonly key: string;
   readonly text: string;
+  /** As `UserRow.at`: the arrival time, when one is known. */
+  readonly at?: number;
   /**
    * A monotonically growing token per text change (`text.length`: the deltas only
    * append), and what a markdown parse is cached on. Chosen over a counter so a
@@ -69,6 +78,12 @@ export interface ToolRow {
   readonly key: string;
   /** The call id (the screen's `tool-<id>-<status>` testID). */
   readonly id: string;
+  /**
+   * The arrival time of the assistant message that LISTED this call — never its
+   * result's (the result is folded onto this row, and a restamp would move the
+   * label each time a delta of that message arrived).
+   */
+  readonly at?: number;
   /** The tool's name, as the model called it. */
   readonly name: string;
   /** The display label (`toolLabel`). */

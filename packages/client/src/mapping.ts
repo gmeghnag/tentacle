@@ -28,7 +28,16 @@ import { DIFF_SCHEME, HOOK_SCHEME } from "./constants.ts";
  */
 export type SessionEvent =
   | AgentEvent
-  | { readonly type: "history_reset"; readonly messages: readonly ChatMessage[] }
+  | {
+      readonly type: "history_reset";
+      readonly messages: readonly ChatMessage[];
+      /**
+       * Each message's arrival time, index-aligned (docs/fix/mobile-open-at-end.md,
+       * slice B); absent for an older daemon or a page that could not be paired.
+       * Display-only: the TUI ignores it, nothing is written to disk (§7).
+       */
+      readonly times?: readonly number[];
+    }
   /**
    * The turn's prompt, re-delivered after a reset (or another device's, on a
    * turn this client attached to). `attachments`: the image refs it named

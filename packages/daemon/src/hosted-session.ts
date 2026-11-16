@@ -2023,6 +2023,9 @@ export class HostedSession {
     const messages = this.session.messages.slice(start, end) as SnapshotResult["messages"];
     return {
       messages,
+      // In step with `messages` by construction (`timesOf` is that same committed
+      // prefix), so a client may pair them by index (docs/fix/mobile-open-at-end.md).
+      times: this.log.timesOf(start, end),
       ...(cursor === undefined ? { since: { epoch: cut.epoch, seq: cut.seq } } : {}),
       ...(cursor === undefined && cut.turnId !== null ? { turn: { turnId: cut.turnId } } : {}),
       ...(start > 0 ? { cursor: `${cut.epoch}/${start}` } : {}),

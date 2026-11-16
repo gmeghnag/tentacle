@@ -47,15 +47,32 @@ function noteRow(key: string, m: ChatMessage): Row {
   };
 }
 
-/** Rows for `messages`; `nextKey` mints one key per row (the fold's own counter). */
+/**
+ * The arrival time of message `index`, as a spreadable row property: `{}` when
+ * nothing is known (no `times`, a short array, or `0` — a message a reload or
+ * compaction re-logged was not received now, docs/fix/mobile-open-at-end.md).
+ */
+function atOf(times: readonly number[] | undefined, index: number): { at?: number } {
+  const at = times?.[index];
+  return at !== undefined && at > 0 ? { at } : {};
+}
+
+/**
+ * Rows for `messages`; `nextKey` mints one key per row (the fold's own counter).
+ * `times` is the daemon's `SnapshotResult.times`, index-aligned with `messages`
+ * (docs/fix/mobile-open-at-end.md, slice B): a row whose time is `0` (not known
+ * — a message a reload or compaction re-logged) carries none at all.
+ */
 export function historyRows(
   messages: readonly ChatMessage[],
   nextKey: () => string,
+  times?: readonly number[],
 ): readonly Row[] {
   const rows: Row[] = [];
   /** toolCallId → index in `rows` (a result lands on its call's row). */
   const toolAt = new Map<string, number>();
-  for (const m of messages) {
+  for (const [index, m] of messages.entries()) {
+    const at = atOf(times, index);
     if (m.role === "system") {
       continue; // the system prompt is not visible
     }
@@ -68,7 +85,14 @@ export function historyRows(
           text: CONTEXT_RESET_SEPARATOR,
           separator: true,
         });
-        rows.push({ kind: "user", key: nextKey(), text: restart, images: [], restart: true });
+        rows.push({
+          kind: "user",
+          key: nextKey(),
+          text: restart,
+          images: [],
+          restart: true,
+          ...at,
+        });
       } else if (m.note !== undefined) {
         rows.push(noteRow(nextKey(), m));
       } else {
@@ -77,6 +101,7 @@ export function historyRows(
           key: nextKey(),
           text: m.content,
           images: (m.attachments ?? []).map((ref): ImageRef => imageRef(ref)),
+          ...at,
         });
       }
     } else if (m.role === "assistant") {
@@ -86,6 +111,7 @@ export function historyRows(
           key: nextKey(),
           text: m.content,
           version: m.content.length,
+          ...at,
         });
       }
       for (const call of m.toolCalls ?? []) {
@@ -98,6 +124,7 @@ export function historyRows(
           label: toolLabel(call.name),
           args: call.arguments,
           status: "ok", // historical: the call already ran
+          ...at,
         });
       }
     } else if (m.role === "tool") {

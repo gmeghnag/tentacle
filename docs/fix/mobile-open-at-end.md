@@ -277,4 +277,175 @@ fix the plan.
 
 ## Execution
 
+### Slice A — open at the end + foreground resync (done)
+
+**Load-bearing check (repro, `.tentacle/tmp/mobile-open-at-end/`, gitignored).**
+`repro-initial-scroll.ts`, BEFORE — a 40 000 pt history, an 800 pt viewport:
+
+```
+content first: {"state":{"following":true,"unseen":false},"scrollTo":null,"animated":true}
+layout after:  {"state":{"following":true,"unseen":false},"scrollTo":39200,"animated":true}
+```
+
+The first layout of an attach therefore scrolled 39 200 pt **animated**: the
+owner's "flies through the whole history". AFTER (`repro-after.ts`, same state):
+
+```
+landing 1:    {"state":{"settling":true,…,"rounds":1},"step":{…,"scrollTo":39200,"animated":false}}
+landing 2:    {"state":{"settling":false,…,"rounds":2},"step":{…,"scrollTo":39200,"animated":false}}
+later append: {…,"scrollTo":39200,"animated":true}
+```
+
+**As built.** `follow.ts` gained `FollowStep.animated` (contentGrew /
+viewportChanged: `true`) and a pure landing machine — `Landing`, `landingStart`,
+`landingQuiet`, `landingDone`, `landingStep(state, size, following)`,
+`LANDING_ROUNDS = 12` — that owns the FIRST scroll of an attach/re-attach: not
+animated, repeated (bounded) until the end stops moving. `SessionScreen.tsx`
+asks `land()` before the follow step in `onContentSize`/`onListLayout`, performs
+`step.animated`, and renders the list inside `<View style={settling ? hidden :
+screen}>` — laid out and scrolled while `opacity: 0`, shown once settled (so a
+long history is never SEEN scrolling, and virtualization is untouched: no
+`initialNumToRender` change). Pull-to-refresh, Retry and Reopen re-arm it
+(`landingQuiet` while following, `landingDone` when scrolled up — a reader is
+never yanked), and `onJump` passes `animated: true`.
+`session-screen-controller.ts` gained `appState(name)` (fed by an `AppState`
+listener in the screen): only a RETURN resyncs (`appWasAway` — the mount's own
+`active` is the open), never while disposed/refreshing/pulling/attaching, not on
+a dead attach, not while the link is down (the redial owns that). `resync` grew a
+`silent` flag with its own `pulling` state, so a foreground resync emits no
+spinner.
+
+**Tests.** `follow.test.ts` (22), `session-screen.test.ts` (31 — a "foreground
+resync" describe of 7: one-per-return, offline, duplicate `active`, already
+pulling, in-turn no duplicate), `session-screen-follow-wiring.test.ts` (12),
+`mobile-media-live-wiring.test.ts` (9; its `resync` assertion now allows the
+landing re-arm but still requires `void controller.resync();`).
+
+**Mutations (RED confirmed).** `landingStep` returning `animated: true` → 4
+fails; dropping the hidden gate → 1; a foreground resync not silent → 1; the
+offline guard → 1; the departure reset (`appWasAway = true`) → 1.
+
+### Slice B — swipe a row left to see its arrival time
+
+**Load-bearing proof (step 1, `packages/daemon/test/session-log.test.ts`).**
+`times.length === messages.length` on the first page and on a cursor page, across
+a turn, mid-turn, a compaction and a reload, and only appended messages are
+stamped — `SessionLog.commitTimes` is the single place (`append` stamps `now()`
+once per batch, `replace` keeps, `truncate` slices), `segment()` zeroes every
+base message, `timesOf(start, end)` is clamped, and `snapshotPage` pairs it with
+`messages.slice(start, end)`. Mutations RED: an off-by-one in `timesOf` → 6
+fails; re-stamping on replace → 3; stamping `now()` on `segment` → 3.
+
+**As built, in the plan's order.**
+1. `protocol/src/session.ts` — `SnapshotResultSchema.times?: number[]` (int ≥ 0),
+   documented as display-only; `packages/protocol/schema/protocol.json`
+   regenerated with `bun run schema:export` (the drift gate
+   `protocol/test/json-schema.test.ts` was RED before the regen and green after).
+   New `protocol/test/snapshot-times.test.ts` (4): parses with/without, rejects a
+   non-integer/negative/non-number, and states that a length mismatch is the
+   CLIENT's business, not the schema's.
+2. `daemon/src/session-log.ts` + `hosted-session.ts` — as proved above.
+3. **Client** (`remote-client.ts`, `session-reducer.ts`, `remote-session.ts`,
+   `mapping.ts`) — `readSnapshotPages` concatenates `times` page-wise in the same
+   `reverse()` as `messages`, and a page whose `times` is absent or of another
+   length makes the WHOLE snapshot's `times` undefined (a pairing the client
+   cannot vouch for is dropped, never half-applied); the snapshot input → the
+   reducer's `reset` output → `history{messages, times?}`, the in-turn
+   `history_reset{messages, times?}` and the context-reset `history` all carry it
+   through untouched. The TUI ignores the field; nothing is persisted (§7).
+4. **Mobile rows** — `at?: number` on `UserRow`/`AssistantRow`/`ToolRow`;
+   `historyRows(messages, nextKey, times?)` pairs by MESSAGE index and drops a `0`
+   (a re-logged message is not a `now`); a tool row takes its CALL's time, never
+   its result's. The fold takes an optional receipt clock (`apply(state, input,
+   now?)`) and stamps a row only where it CREATES it (a delta that extends an
+   existing row keeps its time); `SessionFeedDeps.now` is injected by
+   `session-screen-controller.ts` (`deps.now`), and a `history` activity's times
+   replace the live stamps with the daemon's.
+5. `apps/mobile/src/row-swipe.ts` (new, pure) — `REVEAL = 64`, `SLOP = 12`,
+   `claimsPan`, `revealOffset` (resistance, asymptotically capped at `-REVEAL`),
+   `timeLabel(at, fmt)` with the device's `Intl` formatter injected, and
+   `rowTimeLabel(row, fmt?)` (the per-ROW wrapper the plan called
+   `timeLabel(item.at)` — see drift 2).
+6. `screens/transcript/SwipeTime.tsx` (new, dumb) — `Animated.View` `translateX`
+   (native driver), a `PanResponder` claiming on `onMoveShouldSetPanResponder` →
+   `claimsPan`, `onPanResponderTerminationRequest: () => true`, and a spring to 0
+   on BOTH release and terminate; the label is `position: "absolute"`,
+   `right: -REVEAL`, `width: REVEAL`, `pointerEvents: "none"`, so it never
+   touches the row's height. `SessionScreen.tsx`'s `renderItem` wraps
+   `TranscriptRow` in it with `label={rowTimeLabel(item)}`.
+7. Changelog fragments: `changelog.d/mobile-open-at-end.fixed.md` (slice A) and
+   `changelog.d/mobile-swipe-timestamps.added.md` (slice B); `CHANGELOG.md` is
+   untouched.
+
+**Tests (red first, then green).** `client/test/snapshot-times.test.ts` (7 — a
+page's times reach the activity, an older daemon sends none, multi-page order,
+one page missing → undefined, one page misaligned → undefined, a mid-turn attach's
+`history_reset`, and an older daemon's `history_reset` with no times);
+`mobile/test/row-times.test.ts` (13 — history pairing by message index, the tool
+row's call time, `0` → none, notices/reasoning never, the restart prompt keeps
+the reset message's time, the receipt clock stamps a created row and never an
+upsert, the own prompt at its ack); `mobile/test/row-swipe.test.ts` (11 — the
+claim matrix incl. vertical/diagonal/rightward/sub-slop/no-time, the cap and the
+monotonicity of `revealOffset`, `timeLabel`'s nulls and injected formatter);
+`mobile/test/swipe-time-wiring.test.ts` (8 — the source wiring: move-only claim,
+terminate spring-back, native driver, absolute label, no clock in either
+component, `renderItem` wrapping).
+
+**Mutations (all RED, then reverted).** Client: dropping `times` from the
+reducer's `reset` output → 3; concatenating without the per-page length check → 1;
+a wrong `pages.length` guard → 1 (this one only fails when a page is added after
+the array went unusable). Mobile: `at > 0` → `at !== undefined` → 2; stamping a
+row on upsert → 1. `row-swipe.ts`: dropping the `hasTime` gate → 1; dropping the
+2:1 ratio → 2; replacing the resistance curve with `dx` → 2. Component: removing
+`onPanResponderTerminate` → 1; adding `onStartShouldSetPanResponder` → 1.
+
+### Drift from the Implementation
+
+1. **The daemon-side `timesOf` also clamps and `segment` zeroes** exactly as
+   planned; no drift, recorded only because the plan's "step 1 proof" was
+   satisfied as a `session-log` test rather than a `hosted-session` one (the log
+   is the source of the alignment, and `snapshotPage`'s two lines are the
+   trivial pairing of it — its `messages` and `times` come from the same
+   `start`/`end`).
+2. **`rowTimeLabel(row, fmt?)` instead of `timeLabel(item.at)` in `renderItem`.**
+   `at` exists only on the three labelled row kinds, so `item.at` does not
+   type-check against `Row`; the wrapper lives in the pure module (not the
+   component), so the "which row kinds have a time" rule is still unit-tested and
+   the component stays a renderer.
+3. **The receipt clock is a third `apply` parameter, not a field on every input.**
+   `apply(state, input, now?)` keeps every existing call site and every existing
+   test valid (`apply` with no clock invents nothing), and it is what makes "stamp
+   on CREATE, never on upsert" a property of the fold rather than a discipline
+   spread over a dozen `push` calls.
+4. **`session-screen-controller.ts`'s controller literal is now built in a
+   `const` and published through a one-slot holder**, because Biome's
+   `useConst`/`noAssignInExpressions` refuse the `return (self = {…})` shape slice
+   A introduced. Behaviour identical (the only reader is `appState`, at call
+   time).
+5. **The `SwipeTime` label width is `REVEAL` and the row is NOT clipped**
+   (`overflow: "visible"`): the label sits outside the row's box, which is what
+   keeps a swipe from changing any height the follow machinery measures. On a
+   device the row is at most `REVEAL` narrower than the page for its duration;
+   the label is drawn in the list's own gutter.
+
+### Validation (gate, at the end of slice B)
+
+- `bun run typecheck` — clean (`tsc --noEmit`, `tsc -p apps/mobile`, `tsc -p apps/relay`).
+- `bun run lint` — clean (`biome check .`: 1785 files, 0 errors, 0 warnings — the
+  §6 baseline).
+- `bun test` — **13 022 pass, 5 skip, 0 fail** (926 files). The 5 skips are the
+  three opt-in ones plus two conditional skips in the existing suite; none is new
+  work of this task. One **flake, not a regression**: `pod-binary-build.test.ts`
+  ("a release build carries no build marker") failed ONCE with
+  `Error writing standalone module graph: Io` — the machine's disk was at 100 %
+  (184 MiB free) while a 130 k-test run compiled binaries; it passes on rerun
+  (`19 pass, 0 fail`) and the same file passed in the first full run. Worth a
+  re-run on the merge machine, not a code change.
+- Device check (owner's iPhone) is still **open**: a long session opened at its
+  end with no visible scroll; swipe a row left; scroll while a row is swiped
+  (springs back); the left-edge back-swipe still pops; a tool row still expands
+  on tap; text selection unaffected.
+
+*— claude-opus-5-5 (executor), 2026-11-17*
+
 ## Review

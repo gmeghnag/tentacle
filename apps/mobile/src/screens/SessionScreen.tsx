@@ -57,12 +57,17 @@ import { type FloatBounds, fits, visible as floatVisible, headerPill } from "../
 import {
   type Follow,
   type FollowStep,
+  type Landing,
   type ListSize,
   contentGrew,
   endTarget,
   initialFollow,
   jumpPill,
   jumped,
+  landingDone,
+  landingQuiet,
+  landingStart,
+  landingStep,
   scrolled,
   shown,
   viewportChanged,
@@ -70,6 +75,7 @@ import {
 import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import { linkPrompt } from "../links.ts";
+import { rowTimeLabel } from "../row-swipe.ts";
 import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
 import { dictationLocale } from "../speech-locale.ts";
@@ -103,6 +109,7 @@ import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
+import { SwipeTime } from "./transcript/SwipeTime.tsx";
 import { TranscriptRow } from "./transcript/TranscriptRow.tsx";
 
 export interface SessionScreenProps {
@@ -220,6 +227,19 @@ export function SessionScreen({
     };
   }, [controller]);
 
+  // Item 2 (docs/fix/mobile-open-at-end.md): the app's foreground transition
+  // reaches the controller, which decides (silently resync when a session is
+  // open and the link is up). Its own listener, not the voice effect's: voice
+  // is absent when the Beta port is null, and this must work without it.
+  useEffect(() => {
+    const app = AppState.addEventListener("change", (next) => {
+      if (next === "active" || next === "inactive" || next === "background") {
+        controller.appState(next);
+      }
+    });
+    return () => app.remove();
+  }, [controller]);
+
   // A switch that went OFF stops what it was running, so no invisible surface is
   // left live (hidden mic still listening, hidden speaker still talking).
   const lastVoiceSettings = useRef(voiceSettings);
@@ -289,6 +309,13 @@ export function SessionScreen({
   const showRetry = useRef(false);
   /** The list's native content height and viewport (0 until measured). */
   const size = useRef<ListSize>({ content: 0, viewport: 0 });
+  // Item 1 (docs/fix/mobile-open-at-end.md): a session opens ALREADY at its end.
+  // `landingStep` re-scrolls, never animated, until the end stops moving (a
+  // FlatList renders the first cells only, so the end moves as the silent scroll
+  // renders more) and the list is hidden until then — no visible scroll through
+  // the whole transcript.
+  const landing = useRef<Landing>(landingStart);
+  const [settling, setSettling] = useState(landingStart.settling);
   const setFollowState = useCallback((next: Follow) => {
     if (next !== followRef.current) {
       followRef.current = next;
@@ -299,11 +326,24 @@ export function SessionScreen({
     (step: FollowStep) => {
       setFollowState(step.state);
       if (step.scrollTo !== null) {
-        list.current?.scrollToOffset({ offset: step.scrollTo, animated: true });
+        list.current?.scrollToOffset({ offset: step.scrollTo, animated: step.animated });
       }
     },
     [setFollowState],
   );
+  /** A measurement while a landing (opening or re-attaching) is pending; false when none is. */
+  const land = useCallback((): boolean => {
+    const next = landingStep(landing.current, size.current, followRef.current.following);
+    const changed = next.state.settling !== landing.current.settling;
+    landing.current = next.state;
+    if (next.step !== null) {
+      perform(next.step);
+    }
+    if (changed) {
+      setSettling(next.state.settling);
+    }
+    return next.step !== null;
+  }, [perform]);
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -325,19 +365,28 @@ export function SessionScreen({
   const onContentSize = useCallback(
     (_width: number, height: number) => {
       size.current = { ...size.current, content: height };
+      // A landing (opening, re-attach) owns the scroll until it settles: it is
+      // never animated, and the list stays hidden meanwhile (item 1).
+      if (land()) {
+        return;
+      }
       perform(contentGrew(followRef.current, size.current));
     },
-    [perform],
+    [perform, land],
   );
   const onListLayout = useCallback(
     (event: LayoutChangeEvent) => {
       size.current = { ...size.current, viewport: event.nativeEvent.layout.height };
+      if (land()) {
+        return;
+      }
       perform(viewportChanged(followRef.current, size.current));
     },
-    [perform],
+    [perform, land],
   );
   const onJump = useCallback(() => {
-    perform({ state: jumped(), scrollTo: endTarget(size.current) });
+    // The person asked to go to the latest: animated (they are watching it go).
+    perform({ state: jumped(), scrollTo: endTarget(size.current), animated: true });
   }, [perform]);
 
   // B1(b): `KeyboardAvoidingView` measures its frame relative to its PARENT. The
@@ -637,7 +686,11 @@ export function SessionScreen({
                 ? {
                     action: {
                       label: "Retry",
-                      onPress: () => controller.retry(),
+                      onPress: () => {
+                        // A Retry re-attaches: the history lands silently (item 1).
+                        landing.current = followRef.current.following ? landingQuiet : landingDone;
+                        controller.retry();
+                      },
                       testID: "banner-retry",
                     },
                   }
@@ -645,7 +698,12 @@ export function SessionScreen({
                   ? {
                       action: {
                         label: "Reopen",
-                        onPress: () => controller.reopen(),
+                        onPress: () => {
+                          landing.current = followRef.current.following
+                            ? landingQuiet
+                            : landingDone;
+                          controller.reopen();
+                        },
                         testID: "reopen",
                       },
                     }
@@ -660,116 +718,128 @@ export function SessionScreen({
             setBand({ width, height });
           }}
         >
-          <FlatList
-            ref={list}
-            testID="transcript"
-            data={rows}
-            keyExtractor={(row: Row) => row.key}
-            renderItem={({ item }) => {
-              const speak = speakButtonOf(
-                voiceState,
-                item,
-                rows,
-                state.view.composer.running,
-                voiceSettings,
-              );
-              const child =
-                item.kind === "tool"
-                  ? agentCardTarget(
-                      item.id,
-                      item.sub?.movedTo,
-                      activity.subagents,
-                      activity.memory.finished,
-                    )
-                  : null;
-              return (
-                <TranscriptRow
-                  row={item}
-                  palette={palette}
-                  onLink={onLink}
-                  thumbnails={state.thumbnails}
-                  {...(child === null
-                    ? {}
-                    : {
-                        agent: {
-                          id: child,
-                          onOpen: () => {
-                            focusActivity({ kind: "child", id: child });
-                            setActivityOpen(true);
-                          },
-                        },
-                      })}
-                  {...(speak === undefined || voice === null
-                    ? {}
-                    : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
+          {/* Item 1 (docs/fix/mobile-open-at-end.md): the list is laid out and
+              scrolled to its end HIDDEN, and shown once the end stops moving —
+              so a long history is never seen scrolling through. */}
+          <View style={settling ? styles.hidden : styles.screen}>
+            <FlatList
+              ref={list}
+              testID="transcript"
+              data={rows}
+              keyExtractor={(row: Row) => row.key}
+              renderItem={({ item }) => {
+                const speak = speakButtonOf(
+                  voiceState,
+                  item,
+                  rows,
+                  state.view.composer.running,
+                  voiceSettings,
+                );
+                const child =
+                  item.kind === "tool"
+                    ? agentCardTarget(
+                        item.id,
+                        item.sub?.movedTo,
+                        activity.subagents,
+                        activity.memory.finished,
+                      )
+                    : null;
+                return (
+                  <SwipeTime row={item} palette={palette} label={rowTimeLabel(item)}>
+                    <TranscriptRow
+                      row={item}
+                      palette={palette}
+                      onLink={onLink}
+                      thumbnails={state.thumbnails}
+                      {...(child === null
+                        ? {}
+                        : {
+                            agent: {
+                              id: child,
+                              onOpen: () => {
+                                focusActivity({ kind: "child", id: child });
+                                setActivityOpen(true);
+                              },
+                            },
+                          })}
+                      {...(speak === undefined || voice === null
+                        ? {}
+                        : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
+                    />
+                  </SwipeTime>
+                );
+              }}
+              extraData={rowExtraData}
+              onViewableItemsChanged={onViewable}
+              viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
+              contentContainerStyle={rows.length === 0 ? styles.emptyList : styles.list}
+              keyboardDismissMode="interactive"
+              keyboardShouldPersistTaps="handled"
+              onScroll={onScroll}
+              scrollEventThrottle={32}
+              onScrollBeginDrag={() => {
+                dragging.current = true;
+              }}
+              // Pull-to-refresh (item 3): the owner's own recovery — re-read the
+              // session from the daemon. The look is the chrome's, the decision is
+              // `controller.resync()`'s (never a second session path).
+              refreshControl={
+                <RefreshControl
+                  refreshing={state.refreshing}
+                  onRefresh={() => {
+                    // A re-attach lands silently at the end (item 1): never a second
+                    // visible scroll through the transcript.
+                    landing.current = followRef.current.following ? landingQuiet : landingDone;
+                    void controller.resync();
+                  }}
+                  tintColor={palette.sec}
                 />
-              );
-            }}
-            extraData={rowExtraData}
-            onViewableItemsChanged={onViewable}
-            viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
-            contentContainerStyle={rows.length === 0 ? styles.emptyList : styles.list}
-            keyboardDismissMode="interactive"
-            keyboardShouldPersistTaps="handled"
-            onScroll={onScroll}
-            scrollEventThrottle={32}
-            onScrollBeginDrag={() => {
-              dragging.current = true;
-            }}
-            // Pull-to-refresh (item 3): the owner's own recovery — re-read the
-            // session from the daemon. The look is the chrome's, the decision is
-            // `controller.resync()`'s (never a second session path).
-            refreshControl={
-              <RefreshControl
-                refreshing={state.refreshing}
-                onRefresh={() => void controller.resync()}
-                tintColor={palette.sec}
-              />
-            }
-            onScrollEndDrag={() => {
-              dragging.current = false;
-            }}
-            onMomentumScrollBegin={() => {
-              dragging.current = true;
-            }}
-            onMomentumScrollEnd={() => {
-              dragging.current = false;
-            }}
-            onContentSizeChange={onContentSize}
-            onLayout={onListLayout}
-            onScrollToIndexFailed={(info) => {
-              // "Show in chat" on a row not rendered yet (no `getItemLayout`):
-              // jump near it by the average row, then try once more.
-              list.current?.scrollToOffset({
-                offset: info.averageItemLength * info.index,
-                animated: false,
-              });
-              if (showRetry.current) {
-                showRetry.current = false;
-                setTimeout(() => {
-                  list.current?.scrollToIndex({
-                    index: info.index,
-                    animated: true,
-                    viewPosition: 0.2,
-                  });
-                }, 50);
               }
-            }}
-            ListEmptyComponent={
-              <View testID="transcript-empty">
-                {state.status.phase === "open" ? (
-                  <EmptyState
-                    palette={palette}
-                    icon="bubble.left"
-                    title="Nothing here yet"
-                    body="Say something below."
-                  />
-                ) : state.status.phase === "opening" ? (
-                  <EmptyState palette={palette} loading title="Opening the session…" />
-                ) : null}
-              </View>
-            }
-          />
+              onScrollEndDrag={() => {
+                dragging.current = false;
+              }}
+              onMomentumScrollBegin={() => {
+                dragging.current = true;
+              }}
+              onMomentumScrollEnd={() => {
+                dragging.current = false;
+              }}
+              onContentSizeChange={onContentSize}
+              onLayout={onListLayout}
+              onScrollToIndexFailed={(info) => {
+                // "Show in chat" on a row not rendered yet (no `getItemLayout`):
+                // jump near it by the average row, then try once more.
+                list.current?.scrollToOffset({
+                  offset: info.averageItemLength * info.index,
+                  animated: false,
+                });
+                if (showRetry.current) {
+                  showRetry.current = false;
+                  setTimeout(() => {
+                    list.current?.scrollToIndex({
+                      index: info.index,
+                      animated: true,
+                      viewPosition: 0.2,
+                    });
+                  }, 50);
+                }
+              }}
+              ListEmptyComponent={
+                <View testID="transcript-empty">
+                  {state.status.phase === "open" ? (
+                    <EmptyState
+                      palette={palette}
+                      icon="bubble.left"
+                      title="Nothing here yet"
+                      body="Say something below."
+                    />
+                  ) : state.status.phase === "opening" ? (
+                    <EmptyState palette={palette} loading title="Opening the session…" />
+                  ) : null}
+                </View>
+              }
+            />
+          </View>
           {jumpPill(follow) ? (
             <Pressable
               testID="jump-latest"
@@ -1020,6 +1090,8 @@ export function SessionScreen({
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
+  /** Laid out (and scrolled) but not yet shown: the opening landing. */
+  hidden: { flex: 1, opacity: 0 },
   list: { paddingTop: 8, paddingBottom: 16 },
   emptyList: { flexGrow: 1, justifyContent: "center" },
   status: { flexDirection: "row", alignItems: "center", gap: 5 },

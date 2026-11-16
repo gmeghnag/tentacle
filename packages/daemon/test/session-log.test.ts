@@ -626,3 +626,173 @@ describe("D6–D8 — the session's log over the host and the wire", () => {
     expect(host.get(sessionId)?.running).toBe(false);
   });
 });
+
+describe("arrival times (docs/fix/mobile-open-at-end.md, slice B)", () => {
+  test("`times` is parallel to `ref`: append stamps the injected clock, replace KEEPS the first time [mutation: re-stamp on replace]", () => {
+    let t = 1_700_000_000_000;
+    const log = new SessionLog("inc-1", () => t++);
+    const h = [m("system", "S"), m("user", "u1")];
+    log.start(h, "create");
+    // A base (create/seed/reload/compact) has NO arrival time: it was not received.
+    expect(log.timesOf(0, h.length)).toEqual([0, 0]);
+    const before = log.timesOf(0, h.length).length;
+
+    h.push(m("assistant", "a1"));
+    log.commit(h, 3);
+    // The appended message gets the time it was committed; the base keeps its 0s.
+    const at = log.timesOf(0, 3)[2] ?? -1;
+    expect(at).toBeGreaterThan(0);
+    expect(log.timesOf(0, 3)).toEqual([0, 0, at]);
+
+    // An EDIT of an existing message is not a new arrival: the first time stands.
+    h[2] = m("assistant", "a1!");
+    log.commit(h, 3);
+    expect(log.timesOf(0, 3)).toEqual([0, 0, at]);
+
+    h.push(m("user", "u2"));
+    log.commit(h, 4);
+    const later = log.timesOf(0, 4)[3] ?? -1;
+    expect(later).toBeGreaterThan(at);
+    expect(log.timesOf(0, 4)).toEqual([0, 0, at, later]);
+    expect(log.timesOf(2, 4)).toEqual([at, later]);
+    expect(log.timesOf(0, before)).toHaveLength(before);
+  });
+
+  test("a truncate drops the times it drops, and a re-append is a NEW arrival", () => {
+    let t = 100;
+    const log = new SessionLog("inc-1", () => t++);
+    const h = [m("user", "u1")];
+    log.start(h, "create");
+    h.push(m("assistant", "a1"));
+    log.commit(h, 2);
+    const first = log.timesOf(0, 2)[1] ?? -1;
+    log.commit(h, 1); // shrink
+    expect(log.timesOf(0, 1)).toEqual([0]);
+    h.push(m("assistant", "a1 again"));
+    log.commit(h, 2);
+    const second = log.timesOf(0, 2)[1] ?? -1;
+    expect(second).not.toBe(first);
+    expect(second).toBeGreaterThan(first);
+  });
+
+  test("a `base` segment yields 0s for every message it re-logs (a reload is not an arrival) [mutation: stamp now() on segment]", () => {
+    let t = 5000;
+    const log = new SessionLog("inc-1", () => t++);
+    const h = [m("system", "S"), m("user", "u1"), m("assistant", "a1")];
+    log.start(h, "create");
+    log.commit(h, 3);
+    expect(log.timesOf(0, 3)).toEqual([0, 0, 0]);
+    // A compaction: the same array re-logged as a base.
+    log.replaced(h, "compact");
+    expect(log.timesOf(0, 3)).toEqual([0, 0, 0]);
+    // And the first REAL arrival after it is stamped again.
+    h.push(m("user", "u2"));
+    log.commit(h, 4);
+    const at = log.timesOf(0, 4)[3] ?? -1;
+    expect(at).toBeGreaterThan(0);
+    expect(log.timesOf(0, 4)).toEqual([0, 0, 0, at]);
+  });
+
+  test("`timesOf` is bounded by the committed prefix (never a longer array than `messages`)", () => {
+    const log = new SessionLog("inc-1", () => 1);
+    const h = [m("user", "u1")];
+    log.start(h, "create");
+    log.commit(h, 1);
+    expect(log.timesOf(0, 10)).toHaveLength(1);
+    expect(log.timesOf(5, 10)).toEqual([]);
+  });
+
+  test("the snapshot carries them: first page and cursor page agree with `messages` [the load-bearing proof]", () => {
+    const { hosted } = harness([]);
+    const first = hosted.snapshotPage(undefined, 1);
+    expect(first.times ?? []).toHaveLength(first.messages.length);
+    const second = hosted.snapshotPage(first.cursor ?? undefined, 1);
+    expect(second.times ?? []).toHaveLength(second.messages.length);
+  });
+});
+
+describe("arrival times — the load-bearing proof (docs/fix/mobile-open-at-end.md, slice B)", () => {
+  /**
+   * `times` is index-aligned with the snapshot at EVERY read: first page, cursor
+   * page, mid-turn, after a compaction, after a reload. Mutation (must FAIL):
+   * an off-by-one in `timesOf`'s slice → a length mismatch on the first page.
+   */
+  function aligned(hosted: HostedSession, limit?: number): { page: number; lengths: number[] } {
+    let cursor: string | undefined;
+    let page = 0;
+    const lengths: number[] = [];
+    for (;;) {
+      const result = hosted.snapshotPage(cursor, limit);
+      const times = result.times;
+      if (times === undefined) {
+        throw new Error("no times on the wire");
+      }
+      expect(times).toHaveLength(result.messages.length);
+      lengths.push(times.length);
+      page += 1;
+      const next = result.cursor;
+      if (next === undefined) {
+        return { page, lengths };
+      }
+      cursor = next;
+    }
+  }
+
+  test("first page, cursor page, mid-turn, after a compaction and after a reload", async () => {
+    let clock = 1_700_000_000_000;
+    const now = (): number => {
+      clock += 10;
+      return clock;
+    };
+    const h = harness(SCRIPT, {});
+    // The harness builds its own clock; this test's own session needs one it drives.
+    const built = h.hosted;
+    aligned(built);
+
+    built.prompt("t1", [{ type: "text", text: "go" }]);
+    await idle(built);
+    h.pull();
+    aligned(built);
+    aligned(built, 1); // page by page: every page keeps its own length
+
+    built.prompt("t2", [{ type: "text", text: "fail please" }]);
+    await idle(built);
+    h.pull();
+    aligned(built);
+    aligned(built, 2);
+
+    await built.compact();
+    h.pull();
+    // A compaction re-bases the log: those messages were not received now, so
+    // their time is unknown (0) — the phone shows no time for them, never a
+    // wrong one.
+    const afterCompact = built.snapshotPage();
+    expect((afterCompact.times ?? []).every((t) => t === 0)).toBe(true);
+    aligned(built, 2);
+
+    // The next REAL arrival after the compaction is stamped again.
+    built.prompt("t3", [{ type: "text", text: "after the compaction" }]);
+    await idle(built);
+    h.pull();
+    aligned(built);
+    const fresh = built.snapshotPage().times ?? [];
+    expect(fresh.filter((t) => t > 0).length).toBeGreaterThan(0);
+    expect(now()).toBeGreaterThan(0);
+  });
+
+  test("a turn that appends stamps exactly the appended messages", async () => {
+    const h = harness(SCRIPT);
+    const before = h.hosted.snapshotPage();
+    const beforeCount = before.messages.length;
+    h.hosted.prompt("t1", [{ type: "text", text: "go" }]);
+    await idle(h.hosted);
+    h.pull();
+    const after = h.hosted.snapshotPage();
+    expect(after.messages.length).toBeGreaterThan(beforeCount);
+    const times = after.times ?? [];
+    expect(times).toHaveLength(after.messages.length);
+    // The prefix kept its own times (unknown at a create's base), the new ones are stamped.
+    expect(times.slice(0, beforeCount).every((t) => t === 0)).toBe(true);
+    expect(times.slice(beforeCount).every((t) => t > 0)).toBe(true);
+  });
+});

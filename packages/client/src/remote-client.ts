@@ -669,6 +669,14 @@ interface Snap {
   readonly jobs?: readonly JobRow[];
   /** The scheduled wakes at the cut (absent: an older daemon, or one that never holds any). */
   readonly schedules?: readonly ScheduleRow[];
+  /**
+   * Each message's arrival time, index-aligned with `messages`
+   * (docs/fix/mobile-open-at-end.md, slice B). Absent when the daemon does not
+   * report it, or when ANY page's array was missing or misaligned: a pairing the
+   * caller cannot trust is dropped whole, never half-applied (a row labelled with
+   * another message's time is worse than a row with no time).
+   */
+  readonly times?: readonly number[];
 }
 
 /** The error of a session the reducer gave up on, WITH its cause (docs/fix/detach-live.md KO 3). */
@@ -3514,6 +3522,7 @@ export class RemoteClient {
     this.step(entry, {
       kind: "snapshot",
       messages: snap.messages,
+      ...(snap.times ? { times: snap.times } : {}),
       since: snap.since,
       turn: snap.turn ?? null,
       now: this.clock.now(),
@@ -3838,6 +3847,9 @@ export class RemoteClient {
 
   private async readSnapshotPages(sessionId: string, peer: RpcPeer): Promise<Snap> {
     const pages: (readonly ChatMessage[])[] = [];
+    /** Per page, its `times` — or null once one page's array is unusable. */
+    const times: (readonly number[])[] = [];
+    let aligned = true;
     let first: SnapshotResult | undefined;
     let cursor: string | undefined;
     do {
@@ -3857,6 +3869,14 @@ export class RemoteClient {
         throw new RpcError(JsonRpcErrorCode.InternalError, "snapshot: cursor made no progress");
       }
       pages.push(result.messages as readonly ChatMessage[]);
+      // Pair by index or not at all: a page without `times` (an older daemon, a
+      // restored message) or of another length (a bug, a hostile pod) kills the
+      // whole array.
+      if (aligned && result.times?.length === result.messages.length) {
+        times.push(result.times);
+      } else {
+        aligned = false;
+      }
       const entry = this.sessions.get(sessionId);
       if (entry) {
         this.noteAttachProgress(entry, 1 + pages.length);
@@ -3864,6 +3884,8 @@ export class RemoteClient {
     } while (cursor !== undefined);
     return {
       messages: pages.reverse().flat(),
+      // The same reversal, so a joined array keeps the messages' order.
+      ...(aligned && times.length === pages.length ? { times: times.reverse().flat() } : {}),
       ...(first?.since ? { since: first.since } : {}),
       ...(first?.turn ? { turn: first.turn.turnId } : {}),
       ...(first?.title ? { title: first.title } : {}),

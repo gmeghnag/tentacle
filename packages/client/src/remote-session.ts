@@ -140,6 +140,14 @@ export type SessionActivity =
   | {
       readonly kind: "history";
       readonly messages: readonly ChatMessage[];
+      /**
+       * Each message's arrival time, index-aligned with `messages`
+       * (docs/fix/mobile-open-at-end.md, slice B). Absent when the daemon does not
+       * report it, or when a page of the snapshot was unusable — a frontend then
+       * shows no times at all, never a mispaired one. Display-only: nothing is
+       * persisted from it (§7).
+       */
+      readonly times?: readonly number[];
       readonly reason: "compact" | "context_reset" | "clear" | null;
     }
   /** The session ended daemon-side (another device's close / delete, the reaper). */
@@ -1763,6 +1771,7 @@ export class RemoteSession implements SessionStreamListener {
       this.raise({
         kind: "history",
         messages: out.messages,
+        ...(out.times ? { times: out.times } : {}),
         reason: replaced !== null ? replaced.reason : null,
       });
       return;
@@ -1777,7 +1786,11 @@ export class RemoteSession implements SessionStreamListener {
     for (const m of out.messages) {
       for (const call of m.toolCalls ?? []) turn.toolNames.set(call.id, call.name);
     }
-    turn.queue.push({ type: "history_reset", messages: out.messages });
+    turn.queue.push({
+      type: "history_reset",
+      messages: out.messages,
+      ...(out.times ? { times: out.times } : {}),
+    });
   }
 
   /**
@@ -1817,7 +1830,12 @@ export class RemoteSession implements SessionStreamListener {
         this.endedBehindCut(turn);
       }
     } else {
-      this.raise({ kind: "history", messages: out.messages, reason: "context_reset" });
+      this.raise({
+        kind: "history",
+        messages: out.messages,
+        ...(out.times ? { times: out.times } : {}),
+        reason: "context_reset",
+      });
     }
     if (shown && !shown.ended && shown.turnId !== out.turn) {
       this.closeWithoutOutcome(shown);

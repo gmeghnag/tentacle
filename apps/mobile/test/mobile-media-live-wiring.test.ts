@@ -72,8 +72,9 @@ describe("item 3: pull-to-refresh is wired to the transcript list", () => {
     const screen = readFileSync(join(APP, "src", "screens", "SessionScreen.tsx"), "utf8");
     expect(screen).toContain("<RefreshControl");
     // The decision is the controller's (one session path); the component only
-    // renders it (AGENTS §7).
-    expect(screen).toContain("onRefresh={() => void controller.resync()}");
+    // renders it (AGENTS §7) — and re-arms the silent landing first, so a pull
+    // never scrolls the transcript again (docs/fix/mobile-open-at-end.md).
+    expect(screen).toMatch(/onRefresh=\{\(\) => \{[\s\S]{0,300}void controller\.resync\(\);/);
     expect(screen).toContain("refreshing={state.refreshing}");
   });
 });
