@@ -3150,3 +3150,42 @@ GATE_PLACEHOLDER
 - No render test for `SubagentDetail`/`JobDetail`/`ActivitySheet`, for the same reason as
   S8: the RN render stubs are process-global. Their behaviour lives in `subagent-detail.ts`.
 - The short child's report content on the phone while you watch: see drift 8.
+
+## Review (slices S8 + S9)
+
+*— claude-opus-5-5, 2026-11-16 · fresh context, same model as the S8/S9 executor (shared blind spots possible)*
+
+**Verdict: REQUEST-CHANGES** (no HIGH; three MEDIUM test-non-vacuity gaps + one doc gap).
+
+Gate (re-run): the 7 touched test files **104 pass / 0 fail**; `bun run lint` clean (1734 files);
+`bun run typecheck` clean. Full `bun test` not re-run. Flow 27 not run (the known `PushCore` blocker).
+
+Reviewer mutations (`.tentacle/tmp/mobile-chrome/rev-mut.ts`, file restored byte-identical):
+`messageChild` busy guard removed → KILLED; prune drops Finished ids → KILLED; and three SURVIVED:
+
+1. **MEDIUM — re-attach unsubscribe is unpinned.** `session-screen-controller.ts:860` (`activityWatch?.()`
+   before re-watching) can be deleted with every test green. Failure: after a re-attach the old
+   handle's `onSubagents`/`onJobs`/`onSubagentMessage` stay subscribed; if the old handle is still
+   delivering (same transport, a resync), each echo is recorded twice in `sent` (the "none shows
+   twice" claim of S9 drift 5 breaks) and a stale list can overwrite the new one. Add a test: attach,
+   re-attach, fire on the OLD handle → state unchanged.
+2. **MEDIUM — `setJob`'s identity guard is unpinned** (`:754`; mutated to "any open job" → green).
+   Failure: open `bg-1` (slow read), back, open `bg-2`; `bg-1`'s read lands → `bg-2`'s detail shows
+   `bg-1`'s output (`sheetDetail` trusts `activity.job.id`). The child analogue is tested (M13); the
+   job one is not.
+3. **MEDIUM — `stopChild`/`stopJob` busy guards are unpinned** (`:1119`, `:1147`; removed → green).
+   Failure: a second Stop while the first is in flight sends a second kill; its `{killed:false}`
+   overwrites the notice with "sa-N already finished" for a stop that just succeeded. The UI's
+   `disabled={busy}` hides this today, but the controller contract is untested.
+4. **MEDIUM — the S9 Execution's Gate section is a literal `GATE_PLACEHOLDER`**
+   (`docs/feat/mobile-chrome.md`, S9 `### Gate`). The as-built record claims no gate result.
+
+**Attacks tried that found nothing:** `messageChild` double-send (guarded, tested); a thrown
+`messageSubagent`/`killSubagent`/`jobOutput` (all caught → notice, draft kept); handle with no S9
+members (typed `ACTIVITY_UNSUPPORTED`); `sentState` truth table vs. the TUI's; `jobDetailView`
+offering Stop on a job gone from the list (not offered); `openReport` effect loop (stable id, no loop);
+`leave`/`dispose` drop all three subscriptions. §7: no protocol/daemon/persistence change, nothing
+written raw to the terminal, no new RPC serialization — no invariant touched.
+
+**Executor behaviour:** honest scope and drift notes, real mutation pass (it caught and fixed its own
+mis-anchored M3), but left the Gate unfilled and its race tests cover the child path only.
