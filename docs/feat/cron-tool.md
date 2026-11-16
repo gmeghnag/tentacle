@@ -1397,3 +1397,67 @@ suite was not re-run, because the diff touches only the client.
 
 **Not a finding:** an id made only of control characters comes out as `""`. That
 is cosmetic and comes from the trusted `serve` daemon; S3 creates ids as `sc-N`.
+
+## Review
+
+### S3 — REQUEST-CHANGES
+
+*— claude-opus-5-5, 2026-11-16* (fresh context. If the executor really was Opus,
+this is the same model, and its blind spots can survive both passes: see finding 2.)
+
+Scope: `git diff main...HEAD`, S3 files only (daemon + the `ScheduleLink` type).
+
+**Gate (touched files):** `schedules`, `persistence`, `serve-persistence`,
+`watch-queue` and `mapping` tests → **191 pass / 0 fail**. `bun run lint` is clean
+(1684 files). `bun run typecheck` is clean. The full suite was not re-run.
+
+**Findings**
+1. **MEDIUM: no daemon test covers the expiry path.** See `hosted-session.ts`
+   `checkSchedules`, the `due === null && changed` branch. I removed BOTH
+   `this.persist()` and `this.publishSchedules()` from that branch, and
+   `schedules.test.ts` stayed at 16/16 green. So nothing pins the failure-mode
+   row "recurring job passes 7 days → removed + `schedules` update" at the daemon.
+   If that branch regresses, clients keep a dead row on screen. The sidecar also
+   keeps the job until some other write happens. Fix: add a test that creates a
+   job, moves the clock past `expiresAt` and checks. It must assert three things:
+   a `schedules` frame without the job, a capture without it, and the audit line.
+2. **MEDIUM (process, AGENTS §10 routing): who executed S3 is unclear.** The
+   Execution is signed `claude-opus-5-5`. But the commit that carries the S3 code,
+   `073a82b1`, is titled `exec (deepseek)`. S3 is `load-bearing`, so it needs a
+   strong executor and a review by a different model. The owner should confirm
+   which model wrote the code, and the signature should be corrected if needed.
+
+**Mutations (my own; each one reverted with Edit, and `git status` is clean after):**
+- Removing the constructor's `armSchedules()` → red in T-D4 and T-D7. Pinned.
+- Removing persist + publish in the expiry branch → green. This is finding 1.
+- Removing the `persist()` before `prompt()` in `fireSchedule` → green. This
+  mutation is equivalent, not a gap: `prompt()` already persists at its own
+  `turn_start`, in the same synchronous stretch, so the advance is captured
+  before any await either way. T-D3 holds.
+
+The executor's 15-row mutation table was not re-run (my scripted runner was not
+approved). I spot-checked it with the mutations above instead.
+
+**Attacks tried (no finding)**
+- Firing during a compaction: `running` is `controller !== null`, which also
+  covers compaction (`:1725`), so the gate holds. Compaction's `finally` calls
+  `kickSchedules`.
+- Firing at the same time as a job-exit wake: both run in a 0 ms macrotask. The
+  loser sees `running`, re-arms for 60 s, and is kicked again at the turn's end.
+  Nothing is lost, and the timer never spins.
+- Reload with a suspended turn: the constructor arms the timer at 0 ms, but
+  `resume` takes the controller in the same constructor. The check then sees
+  the session busy, and the job fires after the resumed turn ends. Correct.
+- Pod exclusion (§7): `AgentContext.schedules` is set and the table option is
+  passed only when `SessionHostOptions.schedules` is set. `Connection` never passes
+  `prompt`'s 6th argument, so no client can forge `turn_start.schedule`. A client
+  `wake-` id is still refused.
+- Peer serialization (§7): `session/schedule_delete` is synchronous, with no
+  `assertIdle` (M10 pins this).
+- Version rule: a v3 sidecar is stamped only when the table is non-empty, and a
+  v1/v2 file that carries `schedules` is refused. `rebuild` keeps the sidecar's
+  table on the unpaired path too.
+
+**Drift 5 accepted:** there is no notice frame for an expiry or a failure stop
+(the list diff and the audit line carry it). It is carried to S5 as written.
+
