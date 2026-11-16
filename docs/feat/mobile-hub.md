@@ -506,3 +506,9 @@ Then the Review: a fresh-context `/code-review` that red-teams M1–M17 and
 ## Review
 
 *(empty — fresh-context review after H3/H4)*
+
+#### Owner note (2026-11-16 ~10:20, binding)
+
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-16*
+
+"Fallo fare a Opus, che deve esser fatto bene, estetico, funzionale, di facile utilizzo e bello." **Every slice (H1–H4) is executed by Opus** (`slices.txt` updated), as is mobile-chrome S10 (the base floating button). The bar is visual and tactile quality, not only green tests: executors compare the result against the chosen fan mockup (A) frame by frame, tune springs/stagger/haptics for feel, and the Review judges aesthetics and ease of use as well as correctness.
