@@ -11,11 +11,13 @@ import {
   ARTIFACT_BASE_URL,
   allowNavigation,
   htmlViewerProps,
+  navigationPredicate,
   networkBarLabel,
   pdfViewerProps,
   viewerFor,
   viewerSubtitle,
   viewerTarget,
+  webViewParts,
 } from "../src/artifact-viewer.ts";
 
 const meta = (kind: string) => ({ kind });
@@ -162,5 +164,78 @@ describe("small viewer words", () => {
     });
     expect(target.meta.artifactId).toBe("a");
     expect(target.choice).toEqual({ kind: "webview", scripts: true });
+  });
+});
+
+/**
+ * S8 (docs/feat/model-artifacts.md): two gaps found when wiring the real
+ * `react-native-webview` 14.0.1.
+ *  1. Its JS wrapper hands every URL that FAILS `originWhitelist` (default
+ *     `["http://*", "https://*"]`) to `Linking.openURL` BEFORE our predicate runs
+ *     (`WebViewShared.tsx` `createOnShouldStartLoadWithRequest`): a page setting
+ *     `location = "sms:…?body=<secret>"` or another app's scheme would leave the
+ *     sandbox. `["*"]` makes every URL reach the predicate, which refuses it.
+ *  2. A PDF's first load is its own `file:` uri, not `about:blank`: the predicate
+ *     must allow exactly the initial source of THAT viewer, nothing else.
+ */
+describe("S8: every navigation reaches the predicate", () => {
+  test("originWhitelist is the catch-all, so the wrapper never calls Linking.openURL", () => {
+    expect(htmlViewerProps({ body: "x", network: false, scripts: true }).originWhitelist).toEqual([
+      "*",
+    ]);
+    expect(pdfViewerProps("file:///c/a.pdf").originWhitelist).toEqual(["*"]);
+  });
+
+  test("an html viewer may sit only on about:blank (network on or off)", () => {
+    const refused = ["sms:1?body=s", "tel:1", "mailto:a@b", "tentacle://x", "https://e.x"];
+    for (const network of [false, true]) {
+      const allow = navigationPredicate(htmlViewerProps({ body: "x", network, scripts: true }));
+      expect(allow(ARTIFACT_BASE_URL)).toBe(true);
+      for (const url of [...refused, "file:///c/a.pdf", undefined]) {
+        expect(allow(url)).toBe(false);
+      }
+    }
+  });
+
+  test("a pdf viewer may load exactly its own cached file, nothing else", () => {
+    const uri = "file:///cache/artifacts/c1/ab12";
+    const allow = navigationPredicate(pdfViewerProps(uri));
+    expect(allow(uri)).toBe(true);
+    const refused = [ARTIFACT_BASE_URL, `${uri}x`, "file:///cache/artifacts/c1/other"];
+    for (const url of [...refused, "https://e.x", "sms:1", undefined]) {
+      expect(allow(url)).toBe(false);
+    }
+  });
+});
+
+describe("S8: webViewParts (what the component spreads)", () => {
+  test("html: inline source at about:blank; the flags carry the isolation, no source", () => {
+    const data = htmlViewerProps({ body: "<p>", network: false, scripts: true });
+    const { source, flags } = webViewParts(data);
+    expect(source).toEqual({
+      html: `${artifactCsp({ network: false })}<p>`,
+      baseUrl: ARTIFACT_BASE_URL,
+    });
+    expect(Object.keys(flags).sort()).toEqual(
+      [
+        "allowFileAccess",
+        "allowsLinkPreview",
+        "dataDetectorTypes",
+        "incognito",
+        "javaScriptCanOpenWindowsAutomatically",
+        "javaScriptEnabled",
+        "mediaPlaybackRequiresUserAction",
+        "originWhitelist",
+        "sharedCookiesEnabled",
+      ].sort(),
+    );
+    expect(flags.incognito).toBe(true);
+    expect(flags.originWhitelist).toEqual(["*"]);
+  });
+
+  test("pdf: the file uri alone (no about:blank base), scripts off", () => {
+    const { source, flags } = webViewParts(pdfViewerProps("file:///c/a"));
+    expect(source).toEqual({ uri: "file:///c/a" });
+    expect(flags.javaScriptEnabled).toBe(false);
   });
 });

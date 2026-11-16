@@ -94,6 +94,13 @@ export interface WebViewPropsData {
   readonly mediaPlaybackRequiresUserAction: true;
   readonly javaScriptCanOpenWindowsAutomatically: false;
   readonly dataDetectorTypes: "none";
+  /**
+   * `["*"]`: every URL passes the wrapper's origin check and reaches
+   * `navigationPredicate`. Any narrower list makes `react-native-webview` hand a
+   * non-matching URL (`sms:`, `tel:`, another app's scheme) to `Linking.openURL`
+   * BEFORE the predicate runs — a way out of the sandbox (S8).
+   */
+  readonly originWhitelist: readonly ["*"];
 }
 
 export interface HtmlViewerOptions {
@@ -117,6 +124,7 @@ export function htmlViewerProps(options: HtmlViewerOptions): WebViewPropsData {
     mediaPlaybackRequiresUserAction: true,
     javaScriptCanOpenWindowsAutomatically: false,
     dataDetectorTypes: "none",
+    originWhitelist: ["*"],
   };
 }
 
@@ -133,7 +141,36 @@ export function pdfViewerProps(uri: string): WebViewPropsData {
     mediaPlaybackRequiresUserAction: true,
     javaScriptCanOpenWindowsAutomatically: false,
     dataDetectorTypes: "none",
+    originWhitelist: ["*"],
   };
+}
+
+/**
+ * The predicate a viewer's `onShouldStartLoadWithRequest` applies: the viewer
+ * may load exactly its OWN initial source — `about:blank` for inline html, the
+ * cached file's uri for a PDF — and nothing else, ever (S8: a PDF's first load
+ * is its `file:` uri, which `allowNavigation` alone would refuse).
+ */
+export function navigationPredicate(props: WebViewPropsData): (url: string | undefined) => boolean {
+  const initial = props.uri ?? ARTIFACT_BASE_URL;
+  return (url) => url === initial;
+}
+
+/**
+ * The props data split into the WebView's `source` and its flags (the component
+ * spreads `flags` verbatim). Inline html keeps its `about:blank` base; a PDF is
+ * its file uri alone (`allowingReadAccessToURL` stays unset, so iOS grants read
+ * access to that ONE file, `RNCWebViewImpl.m` `loadFileURL`).
+ */
+export function webViewParts(props: WebViewPropsData): {
+  readonly source: { readonly html: string; readonly baseUrl: string } | { readonly uri: string };
+  readonly flags: Omit<WebViewPropsData, "html" | "uri" | "baseUrl">;
+} {
+  const { html, uri, baseUrl, ...flags } = props;
+  if (html !== undefined) {
+    return { source: { html, baseUrl }, flags };
+  }
+  return { source: { uri: uri ?? baseUrl }, flags };
 }
 
 /** The viewer's header subtitle: the card's type-and-size line, unchanged. */

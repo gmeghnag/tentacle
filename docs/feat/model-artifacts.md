@@ -2544,3 +2544,129 @@ puts S10 *before* S7.
   - drop the seed's size check: the "SHORT blob" test fails;
   - drop the dot-only escape: the round-2 `cacheDir` test fails.
 - **Nit (not blocking):** `session-log-store.ts:730` has `*/ function indexOfId(` on one line (Biome accepts it, but it reads oddly).
+
+## Execution
+
+### S8 — Phone viewers + `react-native-webview` + escape suite: PARTIAL (code + unit/wiring tests DONE; T8 e2e PENDING)
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Load-bearing check, re-run first** (`.tentacle/tmp/model-artifacts/read-roundtrip.ts`):
+
+```
+chunks=12 sha-equal=true
+order=enqueue,chunk0,chunk1,chunk2,chunk3,chunk4,chunk5,chunk6,chunk7,chunk8,chunk9,chunk10,chunk11
+enqueue-before-last=true maxRpcFrame=349591 maxRawNoiseFrame=87383
+PASS
+```
+
+**Capability missing before S8:** `apps/mobile/package.json` had no `react-native-webview`
+(`grep -c` → 0, S7 Execution), and `apps/mobile/src/screens/artifacts/` did not exist.
+
+**As built, in order**
+
+1. `apps/mobile/package.json`: `react-native-webview` **`14.0.1`, exact** (the version
+   `expo@58.0.17`'s `bundledNativeModules.json` names); `bun.lock` updated.
+2. **Two isolation gaps, found by reading the installed library, fixed in the pure
+   module first (red → green)** — `apps/mobile/src/artifact-viewer.ts`:
+   - **`originWhitelist: ["*"]`** on both prop builders (`:127`, `:144`). Why:
+     `react-native-webview/src/WebViewShared.tsx:47-59` hands every URL that FAILS
+     `originWhitelist` (default `["http://*","https://*"]`) to `Linking.openURL`
+     *before* `onShouldStartLoadWithRequest` runs. A page doing
+     `location = "sms:…?body=<secret>"`, `mailto:`, `tel:` or another app's scheme
+     would have LEFT the sandbox through iOS, whatever our predicate says. With
+     `["*"]` every URL passes the wrapper's check and reaches the predicate, which
+     refuses it.
+   - **`navigationPredicate(props)`** (`:154`): the viewer may load exactly its OWN
+     initial source. `allowNavigation` (S7) allows only `about:blank`, but a PDF's
+     first load is its `file:` uri, so the PDF viewer would have refused its own
+     document. HTML: `about:blank` only; PDF: that one uri only.
+   - **`webViewParts(props)`** (`:165`): splits the data into `source` and the
+     flags the component spreads (the html/pdf branch lives in the pure module, not
+     the `.tsx`). iOS grants read access to the ONE file when
+     `allowingReadAccessToURL` is unset (`RNCWebViewImpl.m:895-896`), so it stays unset.
+   RED first (a stub `navigationPredicate` returning the old `allowNavigation`, no
+   `originWhitelist`): `artifact-viewer.test.ts` → **15 pass, 2 fail** on the
+   assertions (whitelist; pdf uri refused). Then green: 19 pass.
+3. Viewers under `apps/mobile/src/screens/artifacts/` (render only):
+   `ViewerHeader.tsx` (✕, title + `line2`, `v<N> ▾` when versions > 1, Share),
+   `HtmlViewer.tsx` (network bar `Network off · Allow` → one-sentence `Alert` →
+   remount with `key` and `network: true`, `useState(false)`: per open, never
+   stored), `PdfViewer.tsx`, `ImageViewer.tsx` (`ScrollView maximumZoomScale={6}`,
+   ground `#1F1F1E`), `MarkdownViewer.tsx` (the transcript's `Markdown.tsx` + a
+   `Source` toggle; `text` as a mono block), `OtherSheet.tsx` (glyph, title,
+   `line2`, `Share…`). Both `<WebView>`s spread the pure flags and add ONLY
+   `onShouldStartLoadWithRequest={(request) => allow(request.url)}` and the same
+   whitelist; no `onMessage`, `injectedJavaScript`, `onOpenWindow`, `Linking`.
+4. `apps/mobile/test/artifact-viewers-wiring.test.ts` (8 tests, the
+   `header-wiring.test.ts` source-pinning pattern): the WebView sites, nothing
+   overridden after the spread (incl. a bare boolean prop), the banned words, the
+   per-open network, the image ground, the exact pin, and that only the two
+   viewers import `react-native-webview`.
+5. T8.1 assets: `apps/mobile/e2e/fixtures/escape.html` (every probe in the plan's
+   list + `css <link>`, `target=_blank` link click and an `sms:` navigation; each
+   tagged `?p=<name>` toward a `__PROBE__` listener, plus a self-report list),
+   `e2e/flows/30-artifact-escape.yaml` and `30-escape-hits.js` (EXPECT=none with
+   network off, then EXPECT=fetch after Allow = non-vacuity).
+
+**Drift from the Implementation (and why)**
+
+- `navigationPredicate`, `webViewParts` and `originWhitelist` are additions to S7's
+  pure module: the plan's predicate (`allowNavigation`) is insufficient on the real
+  library (the two gaps above). `allowNavigation` is kept unchanged (S7's tests).
+- **"long-press offers Copy link" is NOT implemented**: catching a long-press on a
+  link inside the page needs an injected script or a message bridge, which D9
+  forbids. Link taps open nothing (the predicate); `allowsLinkPreview: false`
+  suppresses the system preview. Left for the Review/owner: the bridge-free
+  isolation is worth more than the convenience.
+- **T8.1 is PENDING, not run.** The flow needs (a) S9's transcript card
+  (`artifact-card-*`) — there is no UI path to a viewer before S9; (b) a mock-model
+  `present` trigger in `e2e/mock-model.ts` that substitutes `__PROBE__`; (c) an
+  `escape-hits` hook / probe listener in `e2e/hooks.ts`; (d) adding
+  `"30-artifact-escape"` to `run.ts` `FLOWS` (an explicit list, so the PENDING flow
+  is inert today; `e2e-flows.test.ts` 34 pass). Consequently the **Owner Q5 gate is
+  not yet decided**: scripts stay ON (the adopted primary) and the WebRTC result
+  that would switch to "Run scripts" is owed by that run.
+- T8.2 (pinch-zoom shot, PDF page 1, Markdown heading) also needs S9's entry →
+  **pixels unverified**.
+
+**Mutations** (`.tentacle/tmp/model-artifacts/s8-mutate.ts`: apply, run the two S8
+test files, restore; `git status` unchanged after):
+
+```
+M1 predicate = allowNavigation: RED (1 fail)
+M2 html whitelist default: RED (2 fail)
+M3 bridge onMessage: RED (1 fail)
+M4 pdf scripts override: RED (1 fail)     # first SURVIVED: a bare boolean prop
+                                          # escaped the regex; test fixed, now RED
+M5 parts html as uri: RED (1 fail)
+M6 network remembered: RED (1 fail)
+```
+
+**Changelog:** the existing `changelog.d/model-artifacts.added.md` bullet gains one
+sentence on the iPhone viewers (a fragment holds ONE bullet, and both
+`model-artifacts.added`/`.changed` already exist).
+
+**Native build (one attempt, AGENTS §0):** `bun run e2e:mobile --ios 26 --only 01-shell`
+(prebuild + Release `expo run:ios` with the new module) → `build/install failed for iOS
+26 (exit 1)`, `xcodebuild` exit 65, its log cut off mid-build with no compiler error.
+Cause: **the build machine's disk is full** (`df -h .` → 926 GiB, 902 GiB used,
+**138 MiB free**), not the `PushCore` blocker (now guarded by `#if canImport(PushCore)`,
+`LACore.swift:29-31`). Not retried; I removed only the `apps/mobile/ios/` the run
+generated (185 MB, gitignored, absent before). So **whether `react-native-webview`
+14.0.1 links into the dev build is UNVERIFIED** — verify with the command above once
+the disk has room (then build a new dev build: a new native module).
+
+**Gate**
+- `bun run typecheck` (`tsc --noEmit` + `apps/mobile` + `apps/relay`): clean.
+- `bun run lint`: clean (1831 files), after `biome check --write` on the new files.
+- `bun test` (full, once): 13268 pass, 5 skip (opt-ins), **3 fail** — all from the
+  same full disk: `packages/cli/test/pod-binary-build.test.ts` "Error writing
+  standalone module graph: Io / failed to write compiled executable" (the build was
+  running concurrently). Re-run after freeing 185 MB: **19 pass, 0 fail**. Only two of
+  the three fail names were in the captured tail; the third is assumed the same file
+  (unverified: re-run `bun test` once the disk has room).
+- `bun test apps/mobile`: 2359 pass, 0 fail. `artifact-viewer.test.ts` 19 pass,
+  `artifact-viewers-wiring.test.ts` 8 pass, `e2e-flows.test.ts` 34 pass, changelog
+  guard 21 pass.
+- No schema change → `protocol.json` untouched; no `protocol.d/` note.

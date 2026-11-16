@@ -1,0 +1,52 @@
+appId: so.tentacle.app
+---
+# 30 (docs/feat/model-artifacts.md T8.1): the escape suite. The mock model
+# `present`s `e2e/fixtures/escape.html` (fetch, XHR, img, CSS url(), WebSocket,
+# EventSource, form auto-submit, link target=_blank, location=, window.open,
+# meta refresh, iframe src, about:blank iframe + RTCPeerConnection, sendBeacon,
+# the RN bridge, cookie/localStorage read-after-write, an `sms:` navigation).
+# Every probe aims at the e2e host's probe listener, tagged with its name.
+#
+# Pass = ZERO requests on the listener with network off (30-escape-hits.js
+# with EXPECT=none), THEN, after "Allow network", the fetch probe ARRIVES
+# (EXPECT=fetch) — proving the listener can see a hit at all (non-vacuity).
+# The `sms:` probe must not leave the app: `session-view`'s viewer is still up.
+#
+# STATUS: PENDING. It needs S9's card (`artifact-card-*`) to open the viewer, a
+# mock-model `present` trigger and the `escape-hits` probe hook; see the S8
+# Execution in the task doc.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- tapOn:
+    id: "session-${ESCAPE_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "artifact-card-escape"
+- assertVisible:
+    id: "artifact-html-viewer"
+- assertVisible:
+    id: "artifact-network-off"
+# Give every timed probe (window.open 0.5 s … sms: 2.5 s, meta refresh 3 s) its turn.
+- waitForAnimationToEnd:
+    timeout: 5000
+- assertVisible:
+    id: "artifact-html-viewer"
+- runScript:
+    file: 30-escape-hits.js
+    env:
+      EXPECT: none
+- tapOn:
+    id: "artifact-network-allow"
+- tapOn: "Allow"
+- assertVisible:
+    id: "artifact-network-on"
+- waitForAnimationToEnd:
+    timeout: 3000
+- runScript:
+    file: 30-escape-hits.js
+    env:
+      EXPECT: fetch
+- tapOn:
+    id: "artifact-viewer-close"
