@@ -2081,3 +2081,20 @@ is left as debt, not silently re-declared green. Verify: `bunx tsc -p apps/mobil
 on this tree and on HEAD's `packages/tui/src`.
 
 
+
+### Round 2
+
+*— claude-opus-5-5 (fresh-context reviewer), 2026-11-16* — **PASS (no HIGH/MEDIUM)**. Reviewed `git diff HEAD~1` (`d053d755`).
+
+**Each finding, by mutation** (script `.tentacle/tmp/model-artifacts/rv-mut2.ts`, five tui files; every file restored byte-identical, `git status` clean):
+- F1 SVG unwrapped → **84 pass / 5 fail**. Fixed and now pinned (`artifact-open.test.ts` SVG block, `os-open.test.ts`).
+- F3 confirm text reverted to "network blocked" → **87/2**. Fixed: `artifact-open.ts:136` now says "no fetch/XHR · it can still navigate away".
+- F2 cards on history rebuilds: commit-tail join removed (`useTurnDriver.ts` `joinCards({`) → **83/6**; `history_reset`/`context_reset` join removed → **88/1**; `forgetArtifacts()` on swap removed → **88/1**; the answer's fold removed (`artifact-join.ts`) → **82/7**. Fixed.
+
+**Gate.** `bun test packages/tui`: 2503 pass, 0 fail. `bun run typecheck`: 24 errors, all S4 daemon files (unchanged from round 1). `bun run lint`: 1 error, the S4 `daemon/test/artifact-manifest.test.ts` format (unchanged). None is in this diff.
+
+**LOW (not blocking):**
+- (a) `artifact-join.ts` `checkArtifacts`: the answer is folded into `join.byCall` BEFORE `onLearned`'s session check. A list still in flight across a `/sessions` swap therefore re-fills the just-cleared map with the OLD session's metas. With a repeated `callId` (the file's own premise), that attaches a wrong card; opening it then fails loudly (`unknown`) and opens nothing. Fix: capture the session and skip the fold when it changed.
+- (b) The swap's own re-join (`useSessionLink.ts` `stateRef.current = joinCards(stateRef.current)`) survives deletion → 89/0. A kept transcript after a swap is unpinned (the eager open's commit join covers the common path).
+
+**Regressions checked:** the streaming hot path is unchanged (the join is gated on `history_reset`/`context_reset`); `joinKnownArtifacts` returns the same array on a no-op; still one in-flight request per burst (`pending`).
