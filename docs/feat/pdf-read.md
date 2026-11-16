@@ -993,6 +993,116 @@ branch's existing count (the P2 run had the same 5).
 
 *— claude-opus-5-5, 2026-11-16*
 
+### P3 — `env.readBytes?` + `fs_read` PDF branch + `pages` · executed by a Claude agent (not the plan's assigned DeepSeek), 2026-11-16
+
+**Load-bearing check re-run first (PASSES).** D3 stands on `ExecutionEnvironment`
+gaining an OPTIONAL `readBytes`, and on `fs_read` today NOT reading bytes:
+`rg -n "readBytes" --glob '!node_modules' -l` → only two docs, no code; a live
+probe (`.tentacle/tmp/pdf-read/p3/lb-check.ts`, real `HostExecution` + a real
+2-page PDF) printed `readBytes on env? undefined` and `fs_read` returning
+`"%PDF-1.4\n1 0 obj\n<< /Type /Catalog…` — i.e. the PDF's raw objects, mojibake
+to the model. Capability missing, as the plan says. Precondition 2 also holds: 96
+files construct a `readFile:`-only fake, so `readBytes` had to be optional.
+
+**Order executed** (dependency order, reds shown before each green):
+1. `packages/core/src/execution.ts:43-88` — `ReadBytesOptions`
+   (`maxBytes`, `readLimitBytes`), `FileTooLargeError` (carries `sizeBytes`/
+   `maxBytes`; message names both, in MiB), and `ExecutionEnvironment.readBytes?`.
+2. `packages/exec/src/host-execution.ts:362-411` — `HostExecution.readBytes`:
+   same `resolve(defaultCwd, path)` + `readHint` as `readFile` (extracted into
+   `readError`, no behaviour change to `readFile`), a `statSync` first so
+   `maxBytes` is decided BEFORE any content is read, `readLimitBytes` via
+   `Bun.file().slice(0, n)`, a non-regular file refused.
+3. `packages/tools/src/builtins.ts:68-71,100,116-121,144-186` — the `pages`
+   input, the description sentence, and `readPdf`: `readBytes` absent → `pages`
+   is refused naming the capability (a text read is untouched); one 1 KiB sniff
+   → `isPdf`; line ranges on a PDF refused naming `pages`; `maxBytes:
+   MAX_PDF_BYTES`; `extractPdf` with `ctx.signal`; `pdfVerdict` (`no-text` →
+   a thrown tool error, `partial` → the text plus the empty-page line);
+   `formatPdfText`. `pages` on a non-PDF refused (never silently ignored).
+   Everything else is today's code path, unchanged.
+
+**Red first.** `packages/tools/test/fs-read-pdf.test.ts` was run against the
+pre-fix code: **10 of 15 fail**, each on its own assertion (the delivered
+`%PDF-1.4…` bytes vs the page markers, no size refusal, `pages` accepted
+silently). `packages/exec/test/host-execution.test.ts` gained a `readBytes`
+describe whose size-refusal test asserts `FileTooLargeError` + `opens === 0`.
+
+**Mutations (each reverted; `diff` against the pre-mutation copy is empty, and
+no marker text is left — `rg "if \(false\)|const pdf = undefined"` → none):**
+```
+M1  fs_read never takes the PDF branch (`const pdf = undefined`)   → 8 fail (all PDF cases)
+M2  readBytes ignores maxBytes                                     → 2 fail: exec size test, fs_read over-MAX_PDF_BYTES
+M3  isPdf sniff bypassed (`if (false)`)                            → 3 fail (text `.pdf`, plain text, no-ext)
+M4  `pages` on a non-PDF silently ignored                          → 1 fail: "`pages` on a text file is refused"
+M5  the no-readBytes capability refusal removed                    → 1 fail: "`pages` is refused rather than silently ignored"
+M6  partial verdict not appended                                   → 1 fail: "partly readable PDF …"
+M7  no-text verdict returned as text, not an error                 → 1 fail: "no text layer says it looks scanned"
+M8  readLimitBytes ignored (whole file returned)                   → 1 fail: "readLimitBytes returns only the head"
+M9  readBytes drops `resolve(defaultCwd, …)`                        → 1 fail: "relative path resolves against the configured cwd"
+M10 ctx.signal not passed to extractPdf                            → 1 fail: "a tool aborted (Esc / steer) rejects"
+M11 displayName returns the whole path                             → 1 fail: "locked.pdf is password-protected"
+```
+**Two mutations SURVIVED first and were fixed as a test defect, not a code one**
+(§9 non-vacuity): **M5** — my assertion `/only to PDFs/` also matched the
+*other* refusal, so the two paths were indistinguishable; the test now asserts
+`/cannot read file bytes/`, and M5 kills it. **M9** — every `readBytes` test used
+an absolute path, so "same path resolution as `readFile`" was unpinned; a
+relative-path test was added, and M9 kills it.
+
+**Drift from the Implementation (all deliberate, all small):**
+- **`readBytes` options are two, not one.** D3 says `opts: { maxBytes }`; a head
+  sniff needs a *bound* that is not a *refusal*, so `readLimitBytes` is separate.
+  With `maxBytes` alone, a 4 MiB text file would be refused during the sniff —
+  i.e. `fs_read` on any file over `MAX_PDF_BYTES` would break, including text.
+  `maxBytes` keeps its planned meaning: a refusal before reading.
+- **`FileTooLargeError` lives in `core`, beside the contract.** The message
+  format is the plan's ("refuses, naming the size"); a typed error lets a test
+  assert the refusal rather than a string. The wording is
+  `"<abs> is 50.0 MiB, over the 50.0 MiB limit"` — MiB, two decimals, so a file
+  one byte over the limit reads `50.0 MiB`; the path in the message makes it
+  long but unambiguous. A tool error message re-prefixes the name, so the model
+  sees `huge.pdf: /abs/huge.pdf is …` — mildly redundant, left as-is (honest:
+  it is a message nit, not a behaviour one).
+- **`displayName` instead of `path.basename`.** Biome hoists a `node:` import
+  ABOVE the file's docblock (it did; the repo does have that shape elsewhere,
+  e.g. `cli/src/local-runtime.ts`), which would detach this file's header
+  comment from the file. A three-line local helper keeps the docblock first and
+  imports nothing; it is pinned by M11.
+- **The no-`readBytes` + `pages` case is a REFUSAL, not "today's behaviour".**
+  The plan's test row says a fake env without `readBytes` keeps today's
+  behaviour; that is what a *plain text* read does (byte-identical, pinned). A
+  `pages` request has no meaning there, and silently ignoring it would tell the
+  model it read pages it never read — so it is refused, naming the env.
+- **A scanned PDF is a tool error (`isError`), not a text result.** D3 lists
+  "scanned" among the thrown tool errors; `pdfVerdict` returns the sentence and
+  `readPdf` throws it. The partial case (some pages image-only) returns the text
+  plus the "pages N have no text (images)" line, as D3 says.
+- **P3 needed no extractor change.** `extractPdf`'s `pages` is a spec string, not
+  a number list, so `parsePageRange`/`MAX_PAGES_PER_READ` stay entirely inside
+  P2's worker — which is also why P1's hostile-`/Count` finding stays off this
+  slice's main thread.
+
+**Not done / unverified:** `fs_read` on a PDF inside a *pod* (`--model-proxy`)
+was not exercised on a live pod — it is the same code on pod files, and nothing
+crosses to the laptop, but only the in-process `HostExecution` was run. The
+`pdf-extract` build-entrypoint question stays P2's (no protocol/schema change
+here, so `protocol.json` was not regenerated — `git status packages/protocol` is
+empty). A P4 caller of `extractPdf` on the daemon's main thread will need the
+same `signal` wiring shown at `builtins.ts:174`.
+
+**Gate:** `bunx tsc --noEmit` exit 0 · `bun run lint` 1755 files, 0 errors, 0
+warnings · `bun test` **12740 pass, 5 skip, 0 fail** across 908 files (the 5
+skips are the branch's existing opt-ins).
+
+**Executor note.** §Slices assigns P3 to DeepSeek; this execution was done by a
+**Claude** agent instead (the spawning harness's choice, not mine). It changes
+nothing about the work, but the signature trail should say so. Blast is
+`cross-module` (not `load-bearing`), so standard Review still applies.
+
+*— claude-opus-5-5, 2026-11-16* (per the harness's settings; this runtime
+exposes no exact model id)
+
 ## Review
 
 ### P1 — fresh-context adversarial review
