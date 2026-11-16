@@ -82,13 +82,13 @@ describe("applyEvent: tool_phase", () => {
       );
     expect(rows(s)).toEqual(["◌ Read a.ts · queued"]);
     s = applyEvent(s, { type: "tool_phase", id: "c1", phase: "running" }, 2);
-    expect(rows(s)).toEqual(["⏺ Read a.ts", "⎿ running…"]);
+    expect(rows(s)).toEqual(["● Read a.ts", "⎿ running…"]);
     s = applyEvent(
       s,
       { type: "tool_result", id: "c1", name: "fs_read", result: { content: "x" } },
       3,
     );
-    expect(rows(s)[0]).toBe("⏺ Read a.ts");
+    expect(rows(s)[0]).toBe("● Read a.ts");
     expect(rows(s)).not.toContain("⎿ running…");
   });
 
