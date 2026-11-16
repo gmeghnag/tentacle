@@ -15,6 +15,7 @@ import {
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { messagesToItems } from "./resume.ts";
+import { synchronizedStdout } from "./sync-output.ts";
 import type { TargetBadge } from "./target-view.ts";
 import { lateGuard, readThemeSetting } from "./terminal-background-probe.ts";
 import {
@@ -201,7 +202,16 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         {...(options.targetFeed ? { targetFeed: options.targetFeed } : {})}
         {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
       />,
-      { stdin, exitOnCtrlC: false },
+      {
+        stdin,
+        // Each Ink frame as ONE synchronized update (DEC mode 2026), TTY only: the
+        // erase-all + redraw write can no longer be painted half-way
+        // (docs/fix/tui-redraw-flash.md).
+        stdout: fullscreen
+          ? (synchronizedStdout(process.stdout) as unknown as NodeJS.WriteStream)
+          : process.stdout,
+        exitOnCtrlC: false,
+      },
     );
     await instance.waitUntilExit();
   } finally {
