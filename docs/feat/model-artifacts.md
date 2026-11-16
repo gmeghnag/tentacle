@@ -910,3 +910,60 @@ this slice only proves the wire shapes they will bind to. There is nothing in S1
 that can be verified end-to-end without those.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-16* (fresh-context reviewer; a different model family from the S1 executor, deepseek-v4-pro)
+
+### S1 — Protocol: REQUEST-CHANGES (2 MEDIUM, both small)
+
+**Scope:** `git diff main...HEAD`, slice S1 only (protocol + its tests + changelog fragment).
+
+**Gate:** `bun test packages/protocol` → 440 pass, 0 fail (46 files); `bun run lint` →
+clean (1664 files); `bun run typecheck` → clean (root, mobile, relay).
+
+**Findings**
+
+1. **MEDIUM — vacuous test for the per-chunk cap** (`packages/protocol/test/artifact.test.ts:203-205`,
+   cap at `packages/protocol/src/artifact.ts:135`). The over-cap case is `${chunk}AAAA` where
+   `chunk` = base64 of 256 KiB. 262 144 mod 3 = 1, so `chunk` ends in `==`, and the
+   `={0,2}$` regex refuses the string mid-padding — the `.max(ATTACHMENT_CHUNK_B64_MAX)`
+   is never what fails it. Mutation M6 (drop `.max(ATTACHMENT_CHUNK_B64_MAX)`) → **0 fail**.
+   This is the bound a hostile pod's `artifact/read` reply hits, and §9 says a test that
+   passes on both is no proof. Fix: an over-cap string that is valid base64, e.g.
+   `"A".repeat(ATTACHMENT_CHUNK_B64_MAX + 4)`, and show it red under M6.
+2. **MEDIUM — `ArtifactReadResultSchema.size` is unbounded** (`packages/protocol/src/artifact.ts:137`).
+   The module header (`:13-21`) claims "every field is bounded … neither a client nor a UI can
+   be made to buffer more than [20 MiB]", but a read reply's `size` takes any positive integer.
+   Failure: a pod answers `artifact/read` with `{data:"…", size: 2_147_483_648}`. A client
+   (S5) that sizes its buffer or its progress from the read result rather than the meta gets
+   a 2 GiB announcement through the schema. Fix: `.max(MAX_ARTIFACT_BYTES)` plus a test.
+   S5 must still check that `size === meta.size`. Note it in the plan's T5.
+
+**Mutation (non-vacuity), each reverted, `git status` clean afterwards:** M1 drop the `artifact`
+field → 3 fail · M2 no size cap → 2 · M3 id allows `/` `.` → 1 · M4 `artifactKindOf`
+passthrough → 1 · M5 title without the control-char check → 2 · M6 no chunk cap → **0 (finding 1)** ·
+M7 no list cap → 1 · M8 `source` without the control-char check → **0** (nothing tests `source`'s
+control chars; add one with finding 1) · M9 read `sha256` free → 1.
+
+**Premises checked:** P5 (`ToolCallUpdateSchema` is a strip object, so an older client drops
+`artifact`): TRUE, and the test's `.omit` emulation holds. `UPDATE_CLASS.tool_call_update ===
+"display"`: TRUE. `-32020` is unique and free: TRUE. The chunk constants reuse
+`attachment-upload.ts:26-29`: TRUE. The relay round-trip (load-bearing assumption 2–3) is S3's
+repro and is not verifiable in S1.
+
+**Attacks tried**
+- *Older client vs a new frame:* stripped, parses. Holds.
+- *An invalid nested meta kills the whole `tool_call_update`:* `classifyUpdate`
+  (`client/mapping.ts:63-67`) turns a malformed known type into a turn error. That is loud,
+  not silent, so it is by design, but S2 must emit only metas that pass `ArtifactMetaSchema`.
+  In particular `callId` is capped at 256 (`artifact.ts:80`) while `toolCallId` is unbounded
+  (`updates.ts:58`), so S2 must clamp or check it. Not a finding for S1.
+- *Future loosening:* raising `MAX_ARTIFACT_BYTES` or widening `ARTIFACT_ID_RE` later makes
+  older clients fail the turn (finding: none now). It is a meaning change and needs a
+  `protocol.d/` note. Worth one line in Notes/debt.
+- *Bidi/format chars in `title`:* `ATTACHMENT_NAME_RE` blocks only `\p{Cc}`. Same as the
+  existing attachment-name rule, so not new in S1.
+
+**Executor behaviour:** clean, scoped and honest. The two drifts (`protocol.json` refreshed
+on the branch via `protocol:bump`; changelog written in S1, not S9) are declared and harmless.
+Its tests are mostly non-vacuous (7/9 mutations caught), but it did not mutation-check the
+cap it most needed to.
