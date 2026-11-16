@@ -23,7 +23,7 @@ import type {
 } from "@tentacle/protocol";
 import type { ChatStatus } from "./chat-header.ts";
 import { sanitizeDisplay } from "./display-text.ts";
-import { scheduleMetaText, scheduleTitle } from "./schedule-view.ts";
+import { keyedScheduleRows, scheduleMetaText, scheduleTitle } from "./schedule-view.ts";
 import type { StatusTone } from "./ui/StatusDot.tsx";
 
 /** What the daemon's handshake reported (slice 2's `daemonInfo()`), or `undefined`. */
@@ -165,6 +165,14 @@ export interface SectionEmpty {
 
 export interface InfoRow {
   readonly title: string;
+  /**
+   * The row's IDENTITY (`docs/feat/cron-tool.md` S6 fix round 1): what a React
+   * key, the sheet's expansion state and a testID are built from — never the
+   * title, which is a sanitized label two rows can share (two wakes with the
+   * same prompt). Paint-safe and unique within its section; absent on the
+   * static rows, whose titles are fixed literals no second row repeats.
+   */
+  readonly key?: string;
   readonly subtitle?: string;
   /** The trailing value (a `sec` figure, a state word, a chip's neighbour). */
   readonly value?: string;
@@ -227,6 +235,19 @@ export interface SessionInfoView {
   readonly footer: string;
   /** Offer the auto-accept switch (the session has a shared link). */
   readonly autoAccept: boolean;
+}
+
+/**
+ * One row's IDENTITY: the source of a React key, the expansion state and a
+ * testID. Its own `key` when the view-model minted one (a schedule row's id),
+ * else the title — safe for every OTHER row because those titles are fixed
+ * literals (`Project`, `Devices`, `Context`, a server's or a skill's name) that
+ * no second row of the same section repeats. Never build one of those three
+ * from `row.title` directly: a schedule's title is a sanitized prompt, and two
+ * wakes may share one (`docs/feat/cron-tool.md` S6 fix round 1).
+ */
+export function rowIdentity(row: InfoRow): string {
+  return row.key ?? row.title;
 }
 
 /** The header's subtitle: the status word, then the model (Owner decision 2). */
@@ -695,13 +716,16 @@ function schedulesSection(facts: InfoFacts): InfoSection | null {
   // a control that cannot send is worse than no control (the ghost switch's rule).
   const deletable = facts.link === "up";
   const now = facts.now;
+  // The row's identity is the wake's id, never its title: two wakes may share a
+  // prompt (`check CI` every 10m + a one-shot), and a title-keyed row collides.
   return {
     id: "schedules",
     title,
     phase: "ready",
-    rows: rows.map((row) => {
+    rows: keyedScheduleRows(rows).map(({ row, key }) => {
       const name = scheduleTitle(row);
       return {
+        key,
         title: name,
         subtitle: scheduleMetaText(row, now),
         tone: "running" as const,

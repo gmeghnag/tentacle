@@ -2352,3 +2352,112 @@ My Round 1 repro (`.tentacle/tmp/cron-tool/s5rev/repro.test.ts`) now shows the p
 **Attacks tried.** (a) Pod exclusion: the phone only dials `serve`, and `daemonWakes` fails closed client-side, so it holds. (b) A refusal used as a local echo: the row stays and the daemon's `reason` is shown, so it holds. (c) A delete in flight across close/refresh: `stopSchedules` and `followSchedules` reset the error, so nothing stale survives a reopen. That is LOW, not reported. (d) Hostile `spec`/`prompt`: controls, bidi and length are all stripped in the view-model, so it holds. (e) Same-prompt wakes: **finding 1**.
 
 **Executor behaviour:** a thorough, honest as-built with real red/mutation evidence. It missed uniqueness of the row identity. Side note for the repo: AGENTS §6's `../../../` import template, run from a WORKTREE's `.tentacle/tmp`, resolves into the MAIN checkout (seen in this review's first repro run). Repro and mutation scripts should use absolute worktree paths.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16* (fixing the S6 review above; the same model id
+as that reviewer and as the S6 executor, so a fresh-context Review of this round
+is still owed.)
+
+**Finding addressed: the one MEDIUM.** Reproduced on this branch before any edit
+with the reviewer's own script,
+`.tentacle/tmp/cron-tool/rev-s6-dupkey.ts` (absolute worktree imports, as the
+Review asked):
+
+```
+[ "schedules-check CI", "schedules-check CI" ] unique: false [ "sc-1", "sc-2" ]
+```
+
+**Root cause, one sentence.** A row's identity was its `title`, and a schedule
+row's title is the sanitized prompt — which nothing in core makes unique — so two
+wakes could share a React key, an expansion-state key and a Maestro testID.
+
+**As built**
+- **A row now carries its own identity.** `InfoRow` (`session-info.ts:175`) gains
+  an optional `key`; new `rowIdentity(row)` (`session-info.ts:249`) returns
+  `row.key ?? row.title` and is the ONE source of a React key, the expansion
+  state and every testID. The `?? title` fallback is safe for every other row
+  because those titles are fixed literals (`Project`, `Devices`, `Context`, a
+  server's or a skill's name) no second row of a section repeats; and it is
+  unreachable from a wake, because `keyedScheduleRows` always returns a key for
+  every schedule row (`wake` when an id sanitizes to nothing).
+- **The schedule section mints it from the wake's id.** New pure
+  `keyedScheduleRows(rows)` (`schedule-view.ts:141`) returns each row WITH its
+  key: `scheduleIdLabel(row.id)` — bounded and sanitized like every label there,
+  so it can ride into a testID — with an ordinal (`sc 1#2`) when two ids sanitize
+  to the same label, and `wake` when an id sanitizes to nothing. Uniqueness is
+  the contract, not an accident of the daemon's ids. `schedulesSection`
+  (`session-info.ts:725`) maps over its result, so a row and its key cannot get
+  out of step (no `keys[index]` lookup, no fallback to a raw id).
+- **The sheet uses it everywhere.** `SessionInfoSheet.tsx` builds the React `key`
+  (`:114`), the expansion key (`:121,127,129`) and all three testIDs — delete
+  (`:192`), switch (`:206`), row (`:228`) — from `rowIdentity(row)`. No `${row.title}`
+  is left in any of them.
+- **Two guards had pinned the bug** and were corrected, not deleted: the
+  `schedule-wiring.test.ts` delete-testID assert and the
+  `e2e-session-capabilities.test.ts` switch-testID assert both spelled
+  `${row.title}`; they now assert `${rowIdentity(row)}`, and the wiring file
+  gained a test that asserts NO `${row.title}` remains in a key/testID/expanded
+  key at all.
+
+**Drift from the review's suggested shape (and why).** The review said "carry a
+unique `key` (the raw id)". The key is the raw id **made paint-safe**
+(`scheduleIdLabel`: control characters become spaces, bidi/zero-width stripped,
+≤24 chars) and de-duplicated, because the same string becomes a testID and an
+accessibility label, and a raw `sc\n1` in a testID is unpaintable and a repeated
+id would re-collapse the row. The Delete's `remove.id` still sends the RAW id
+(`remove.id`), so the wire is untouched. Also: instead of `key: keys[index] ??
+row.id` (which could fall back to that raw id and needs `noUncheckedIndexedAccess`
+silencing), the helper returns pairs.
+
+**Scope: the phone's view-model and its sheet only.** No protocol, no client, no
+daemon, no TUI change; `bunx tsc -p apps/relay` untouched.
+
+**No new changelog fragment.** The bug is in a feature that has never shipped:
+`changelog.d/cron-tool.added.md` rides this same branch and describes the iPhone
+section as it now really behaves, so there is no released behaviour to correct
+(AGENTS §10: the changelog is curated, not a commit mirror).
+
+**Red before green.** On the pre-fix sources (copied back from `git show HEAD:` into
+`.tentacle/tmp/cron-tool/fixr1/red/`, never a `git checkout` — forbidden here), the
+new tests fail **on their assertions**, not on a compile error: the two-wake test
+received `[undefined, undefined]` for `key` (expected `["sc-1","sc-2"]`), and the
+repeated-id test received `["","",""]` (expected `["sc 1","sc 1#2","wake"]`). The
+two guard tests fail on the old `${row.title}` spelling. Both pass after the fix.
+
+**Mutations** (`.tentacle/tmp/cron-tool/fixr1/mut.py`, one exact single-site edit
+per run, the file restored and its SHA-256 compared afterwards — all seven
+`bytes restored: True`, `git status` showing only this round's own edits):
+
+| # | mutated site | result |
+|---|---|---|
+| m1 | `key,` → `key: name,` (identity back to the title) | 2 fail |
+| m2 | drop the ordinal (`return { row, key: base }`) | 1 fail |
+| m3 | drop the `wake` fallback (`const base = label`) | 1 fail |
+| m4 | Delete testID back to `${row.title}` | 1 fail |
+| m5 | switch testID back to `${row.title}` | 2 fail |
+| m6 | React `key` back to `${row.title}` | 1 fail |
+| m7 | `expanded` back to `${row.title}` | 1 fail |
+
+Every one of the three identity sites, both guards and both uniqueness rules is
+non-vacuous.
+
+**Gate:** the 6 touched mobile test files → 145 pass / 0 fail; all of
+`apps/mobile/test` → 1950 pass / 0 fail. `bunx tsc --noEmit` → clean;
+`bunx tsc -p apps/mobile` → clean; `bunx tsc -p apps/relay` → clean;
+`bun run lint` → clean (1716 files, 0 warnings); full `bun test` → **12447 pass /
+0 fail / 5 skip** (86641 expect() calls, 892 files, 445 s), re-run on the final
+tree with the three production files' MD5s identical before and after the run. The five skips are
+the opt-in ones AGENTS §6 names, verified by running their files alone
+(`live` k8s ×2, live docker ×2, the slow keepalive test — `11 pass / 5 skip / 0
+fail`): no new skip, no new failure.
+A first full run showed two failures that this round did not cause and does not
+hide: `e2e-session-capabilities.test.ts`'s switch-testID guard, which pinned the
+old `${row.title}` spelling and is corrected above, and
+`packages/docker/test/ssh-dialer.test.ts`'s process-group kill, a timing flake
+that passes on its own (`24 pass / 0 fail`) and on the full re-run.
+
+**Unverified.** The React repaint itself (a row dropped/duplicated on a real
+device after a delete) is not exercised: React Native has no renderer under
+`bun test`, so the identity is pinned through the view-model and the wiring guards
+(the file's own stated approach). Confirming it on device needs the Maestro flow.

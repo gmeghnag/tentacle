@@ -18,11 +18,29 @@ const read = (...parts: string[]): string => readFileSync(join(root, ...parts), 
 describe("M7: the Session info section's delete control", () => {
   test("the sheet draws a trailing Delete per row, with a testID a flow can tap", () => {
     const sheet = read("src", "screens", "SessionInfoSheet.tsx");
-    expect(sheet).toContain("testID={`session-info-${sectionId}-${row.title}-delete`}");
+    expect(sheet).toContain("testID={`session-info-${sectionId}-${rowIdentity(row)}-delete`}");
     // It sends the row's RAW id (the title is a sanitized label).
     expect(sheet).toContain("onPress={() => onDeleteSchedule(remove.id)}");
     // …and it is offered INSTEAD of a switch, never both.
     expect(sheet).toMatch(/remove !== undefined \?/);
+  });
+
+  /**
+   * S6 fix round 1: the row's IDENTITY is never its title. Two wakes may share a
+   * prompt (`check CI` every 10m + a one-shot), so a title-keyed row collides in
+   * React, in the expansion state and in a Maestro testID (the Review's MEDIUM).
+   */
+  test("every key, expansion and testID is built from the row's identity, never its title", () => {
+    const sheet = read("src", "screens", "SessionInfoSheet.tsx");
+    // No `row.title` in a key/testID/expanded key at all, in any of the three.
+    expect(sheet).not.toMatch(/\\$\\{row\\.title\\}/);
+    expect(sheet).toContain("key={`${section.id}-${rowIdentity(row)}`}");
+    expect(sheet).toContain("testID={`session-info-${sectionId}-${rowIdentity(row)}`}");
+    expect(sheet).toContain("testID={`session-info-${sectionId}-${rowIdentity(row)}-switch`}");
+    expect(sheet).toContain("expanded={expanded === `${section.id}:${rowIdentity(row)}`}");
+    // …and the helper is the view-model's, not a second copy in the component.
+    expect(sheet).toContain("rowIdentity");
+    expect(read("src", "session-info.ts")).toContain("export function rowIdentity(row: InfoRow)");
   });
 
   test("the screen passes the controller's delete to the sheet", () => {

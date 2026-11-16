@@ -770,4 +770,45 @@ describe("the SCHEDULED WAKES section (cron-tool S6, mockup M7)", () => {
     // The id is sent raw, but never longer than the wire allows (the client bounded it).
     expect(row?.delete?.id).toBe("sc\n1");
   });
+
+  test("two wakes with the SAME prompt carry distinct row keys (S6 fix round 1)", () => {
+    // Nothing in core stops two wakes sharing a prompt: `check CI` every 10m and a
+    // one-shot `check CI` at 17:00. The TITLE is therefore no identity — a React
+    // key, the expansion state or a Maestro testID built from it collides.
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([
+          wake({ id: "sc-1", prompt: "check CI" }),
+          wake({ id: "sc-2", kind: "at", spec: "at 17:00", prompt: "check CI" }),
+        ]),
+      }),
+      "schedules",
+    );
+    expect(found.rows.map((row) => row.title)).toEqual(["check CI", "check CI"]);
+    // The RAW id is the identity, and it survives a title collision.
+    expect(found.rows.map((row) => row.key)).toEqual(["sc-1", "sc-2"]);
+  });
+
+  test("a repeated (or unpaintable) id still yields UNIQUE, paint-safe keys", () => {
+    // Two ids that sanitize to the same label are one identity to React, and an
+    // id the phone must never paint (a newline) cannot ride into a testID raw.
+    const found = section(
+      facts({
+        now: NOW,
+        schedules: feed([
+          wake({ id: "sc\n1", prompt: "a" }),
+          wake({ id: "sc 1", prompt: "b" }),
+          wake({ id: "\u0001", prompt: "c" }),
+        ]),
+      }),
+      "schedules",
+    );
+    const keys = found.rows.map((row) => row.key ?? "");
+    expect(keys).toEqual(["sc 1", "sc 1#2", "wake"]);
+    for (const key of keys) {
+      expect(CONTROL.test(key)).toBe(false);
+      expect(FORMAT.test(key)).toBe(false);
+    }
+  });
 });

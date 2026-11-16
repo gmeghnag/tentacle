@@ -116,3 +116,37 @@ export function firedScheduleHead(
 export function scheduleIdLabel(id: string): string {
   return scheduleLabel(id, 24);
 }
+
+/** What an unprintable id falls back to, so a row still has a key (`""` is no identity). */
+const WAKE_KEY = "wake";
+
+/**
+ * Each wake's row KEY (S6 fix round 1): the wake's own id, never its title.
+ *
+ * The title is the sanitized prompt, and nothing in core stops two wakes from
+ * sharing one — `check CI` every 10m plus a one-shot `check CI` at 17:00 is a
+ * perfectly legal table. A React key, the sheet's expansion state or a flow's
+ * testID built from that title then collides, so a repaint (a delete, or a fire
+ * changing `fires`/`nextAt`) can drop or duplicate rows, and a tap on the shared
+ * testID is ambiguous.
+ *
+ * The id is bounded and sanitized like every other label here
+ * (`scheduleIdLabel`), so it can ride into a testID and an accessibility label.
+ * A repeated (or unprintable) label gets an ordinal: uniqueness is the contract,
+ * and a daemon that repeats an id must not collapse a row.
+ *
+ * Returns each row WITH its key, so a caller never indexes one list by the
+ * other's position (and never falls back to a raw, unpaintable id).
+ */
+export function keyedScheduleRows(
+  rows: readonly ScheduleRow[],
+): { readonly row: ScheduleRow; readonly key: string }[] {
+  const seen = new Map<string, number>();
+  return rows.map((row) => {
+    const label = scheduleIdLabel(row.id);
+    const base = label === "" ? WAKE_KEY : label;
+    const ordinal = (seen.get(base) ?? 0) + 1;
+    seen.set(base, ordinal);
+    return { row, key: ordinal === 1 ? base : `${base}#${ordinal}` };
+  });
+}

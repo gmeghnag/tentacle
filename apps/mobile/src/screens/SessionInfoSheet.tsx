@@ -11,7 +11,12 @@
 import type { JSX } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import type { InfoRow, InfoSection, SessionInfoView } from "../session-info.ts";
+import {
+  type InfoRow,
+  type InfoSection,
+  type SessionInfoView,
+  rowIdentity,
+} from "../session-info.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, space, typography } from "../theme.ts";
 import { Banner } from "../ui/Banner.tsx";
 import { GroupedCard } from "../ui/GroupedCard.tsx";
@@ -106,20 +111,22 @@ function SectionBody({
     <>
       {section.rows.map((row, index) => (
         <InfoRowView
-          key={`${section.id}-${row.title}`}
+          key={`${section.id}-${rowIdentity(row)}`}
           palette={palette}
           row={row}
           first={index === 0}
           sectionId={section.id}
           onSwitch={onSwitch}
           onDeleteSchedule={onDeleteSchedule}
-          expanded={expanded === `${section.id}:${row.title}`}
+          expanded={expanded === `${section.id}:${rowIdentity(row)}`}
           onExpand={() => {
             if (row.expand === undefined) {
               return;
             }
             onExpand(
-              expanded === `${section.id}:${row.title}` ? null : `${section.id}:${row.title}`,
+              expanded === `${section.id}:${rowIdentity(row)}`
+                ? null
+                : `${section.id}:${rowIdentity(row)}`,
             );
           }}
         />
@@ -182,7 +189,7 @@ function InfoRowView({
   const trailing =
     remove !== undefined ? (
       <Pressable
-        testID={`session-info-${sectionId}-${row.title}-delete`}
+        testID={`session-info-${sectionId}-${rowIdentity(row)}-delete`}
         accessibilityRole="button"
         accessibilityLabel={remove.accessibilityLabel}
         onPress={() => onDeleteSchedule(remove.id)}
@@ -196,7 +203,7 @@ function InfoRowView({
       <View style={styles.switchTrail}>
         {values}
         <Switch
-          testID={`session-info-${sectionId}-${row.title}-switch`}
+          testID={`session-info-${sectionId}-${rowIdentity(row)}-switch`}
           accessibilityLabel={toggle.accessibilityLabel}
           value={toggle.on}
           disabled={!toggle.interactive}
@@ -218,7 +225,7 @@ function InfoRowView({
           : { accessibilityLabel: row.accessibilityLabel })}
         {...(row.expand === undefined ? {} : { onPress: onExpand, chevron: !expanded })}
         trailing={trailing}
-        testID={`session-info-${sectionId}-${row.title}`}
+        testID={`session-info-${sectionId}-${rowIdentity(row)}`}
       >
         {row.tone === undefined ? null : (
           <View style={styles.lead}>
