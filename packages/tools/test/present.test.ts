@@ -60,7 +60,7 @@ function envWith(files: Record<string, Uint8Array | Error>, binary = true): EnvS
     writeFile: async () => {},
     ...(binary
       ? {
-          readBytes: async (path: string, { maxBytes }: { maxBytes: number }) => {
+          readConfinedBytes: async (path: string, { maxBytes }: { maxBytes: number }) => {
             reads.push({ path, maxBytes });
             const f = files[path];
             if (f === undefined) throw new Error(`no such file: ${path}`);

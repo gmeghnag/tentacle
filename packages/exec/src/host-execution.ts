@@ -33,7 +33,9 @@ import type {
   ExecOptions,
   ExecResult,
   ExecutionEnvironment,
+  ReadBytesOptions,
 } from "@tentacle/core";
+import { FileTooLargeError } from "@tentacle/core";
 import type { Subprocess } from "bun";
 import { isLingering, killGroup, releaseGroup, trackGroup } from "./process-group.ts";
 
@@ -394,19 +396,56 @@ export class HostExecution implements ExecutionEnvironment {
     return options?.env ? { ...base, ...options.env } : base;
   }
 
+  /** The `ENOENT` explanation: the config's `readHint`, on every read path. */
+  private readError(abs: string, error: unknown): unknown {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      const hint = this.readHint?.(abs);
+      if (hint !== undefined) {
+        return new Error(`${abs}: ${hint}`);
+      }
+    }
+    return error;
+  }
+
   async readFile(path: string): Promise<string> {
     // Reads are unconfined (by design).
     const abs = resolve(this.defaultCwd, path);
     try {
       return await Bun.file(abs).text();
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        const hint = this.readHint?.(abs);
-        if (hint !== undefined) {
-          throw new Error(`${abs}: ${hint}`);
-        }
+      throw this.readError(abs, error);
+    }
+  }
+
+  /**
+   * A byte read for the PDF tools (docs/feat/pdf-read.md D3): the same path
+   * resolution and `readHint` as `readFile`, plus a SIZE refusal decided by
+   * `stat` BEFORE the content is touched — a hostile 4 GiB `.pdf` costs one
+   * `stat`, never 4 GiB of RSS. `readLimitBytes` bounds a head sniff.
+   */
+  async readBytes(path: string, options?: ReadBytesOptions): Promise<Uint8Array> {
+    const abs = resolve(this.defaultCwd, path);
+    let size: number;
+    try {
+      const st = statSync(abs);
+      if (!st.isFile()) {
+        throw new Error(`${abs}: not a regular file`);
       }
-      throw error;
+      size = st.size;
+    } catch (error) {
+      throw this.readError(abs, error);
+    }
+    const maxBytes = options?.maxBytes;
+    if (maxBytes !== undefined && size > maxBytes) {
+      throw new FileTooLargeError(abs, size, maxBytes);
+    }
+    const limit = options?.readLimitBytes;
+    try {
+      const file = Bun.file(abs);
+      const bounded = limit !== undefined && limit < size ? file.slice(0, limit) : file;
+      return new Uint8Array(await bounded.arrayBuffer());
+    } catch (error) {
+      throw this.readError(abs, error);
     }
   }
 
@@ -426,7 +465,7 @@ export class HostExecution implements ExecutionEnvironment {
    * Residual (as for writes): a swap and swap-back between steps 4 and 5 by a
    * user who can write a directory on the path.
    */
-  async readBytes(
+  async readConfinedBytes(
     path: string,
     options: { readonly maxBytes: number },
   ): Promise<{ readonly bytes: Uint8Array; readonly realPath: string }> {
@@ -490,7 +529,7 @@ export class HostExecution implements ExecutionEnvironment {
   }
 
   /**
-   * The checked REAL read path for `readBytes`, or a `WorkspaceReadError`:
+   * The checked REAL read path for `readConfinedBytes`, or a `WorkspaceReadError`:
    * inside `root` (only), not secret-looking (judged workspace-relative).
    */
   private confineRead(abs: string, path: string): string {

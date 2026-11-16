@@ -55,7 +55,7 @@ const env = {
   exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
   readFile: async () => "",
   writeFile: async () => {},
-  readBytes: async (path: string) => {
+  readConfinedBytes: async (path: string) => {
     if (path !== "out/data.bin") throw new Error(`no such file: ${path}`);
     return { bytes: BYTES, realPath: "/ws/out/data.bin" };
   },

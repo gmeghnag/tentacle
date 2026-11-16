@@ -30,4 +30,5 @@ export * from "./secret-path.ts";
 export * from "./artifact-kind.ts";
 export * from "./artifact-card.ts";
 export * from "./artifact-csp.ts";
+export * from "./pdf-text.ts";
 export * from "./voice/index.ts";

@@ -97,11 +97,11 @@ export const presentTool: Tool<PresentInput> = {
     }
     let bytes: Uint8Array;
     if (input.path !== undefined) {
-      if (!ctx.env.readBytes) {
+      if (!ctx.env.readConfinedBytes) {
         return fail("cannot read binary files here — present generated `content` instead.");
       }
       try {
-        ({ bytes } = await ctx.env.readBytes(input.path, { maxBytes: MAX_ARTIFACT_BYTES }));
+        ({ bytes } = await ctx.env.readConfinedBytes(input.path, { maxBytes: MAX_ARTIFACT_BYTES }));
       } catch (error) {
         return fail(`not presented: ${message(error)}`);
       }

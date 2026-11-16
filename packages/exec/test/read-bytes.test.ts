@@ -1,5 +1,5 @@
 /**
- * `HostExecution.readBytes` — the binary, CONFINED read behind `present`
+ * `HostExecution.readConfinedBytes` — the binary, CONFINED read behind `present`
  * (docs/feat/model-artifacts.md D3, T2). Reads by `fs_read` stay unconfined;
  * these may only ship what is inside the workspace and not secret-looking.
  */
@@ -43,34 +43,36 @@ afterEach(async () => {
   await rm(base, { recursive: true, force: true });
 });
 
-describe("readBytes — happy path", () => {
+describe("readConfinedBytes — happy path", () => {
   test("reads a workspace file as bytes, with its real path", async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 255]);
     mkdirSync(join(root, "out"));
     writeFileSync(join(root, "out", "a.png"), png);
     const env = envWith();
-    const read = await env.readBytes("out/a.png", { maxBytes: 100 });
+    const read = await env.readConfinedBytes("out/a.png", { maxBytes: 100 });
     expect(Array.from(read.bytes)).toEqual(Array.from(png));
     expect(read.realPath.endsWith(join("workspace", "out", "a.png"))).toBe(true);
     // Absolute paths inside the root work too.
-    expect((await env.readBytes(join(root, "out", "a.png"), { maxBytes: 8 })).bytes.length).toBe(8);
+    expect(
+      (await env.readConfinedBytes(join(root, "out", "a.png"), { maxBytes: 8 })).bytes.length,
+    ).toBe(8);
   });
 
   test("an empty file reads as zero bytes (the tool decides what to do with it)", async () => {
     writeFileSync(join(root, "empty.txt"), "");
-    expect((await envWith().readBytes("empty.txt", { maxBytes: 10 })).bytes.length).toBe(0);
+    expect((await envWith().readConfinedBytes("empty.txt", { maxBytes: 10 })).bytes.length).toBe(0);
   });
 });
 
 describe("T2.1/T2.2 — confinement by REAL path", () => {
   test("../outside is refused", async () => {
     writeFileSync(join(outside, "x.png"), "x");
-    expect(await reasonOf(envWith().readBytes("../outside/x.png", { maxBytes: 10 }))).toBe(
+    expect(await reasonOf(envWith().readConfinedBytes("../outside/x.png", { maxBytes: 10 }))).toBe(
       "outside",
     );
-    expect(await reasonOf(envWith().readBytes(join(outside, "x.png"), { maxBytes: 10 }))).toBe(
-      "outside",
-    );
+    expect(
+      await reasonOf(envWith().readConfinedBytes(join(outside, "x.png"), { maxBytes: 10 })),
+    ).toBe("outside");
   });
 
   test("an in-root symlink to an outside target is refused; in-root → in-root is allowed", async () => {
@@ -79,8 +81,10 @@ describe("T2.1/T2.2 — confinement by REAL path", () => {
     writeFileSync(join(root, "real.txt"), "hello");
     symlinkSync(join(root, "real.txt"), join(root, "alias.txt"));
     const env = envWith();
-    expect(await reasonOf(env.readBytes("innocent.txt", { maxBytes: 100 }))).toBe("outside");
-    const alias = await env.readBytes("alias.txt", { maxBytes: 100 });
+    expect(await reasonOf(env.readConfinedBytes("innocent.txt", { maxBytes: 100 }))).toBe(
+      "outside",
+    );
+    const alias = await env.readConfinedBytes("alias.txt", { maxBytes: 100 });
     expect(new TextDecoder().decode(alias.bytes)).toBe("hello");
     expect(alias.realPath.endsWith("real.txt")).toBe(true);
   });
@@ -88,7 +92,7 @@ describe("T2.1/T2.2 — confinement by REAL path", () => {
   test("a symlinked DIRECTORY pointing out is refused by its target", async () => {
     writeFileSync(join(outside, "plot.png"), "x");
     symlinkSync(outside, join(root, "linked"));
-    expect(await reasonOf(envWith().readBytes("linked/plot.png", { maxBytes: 10 }))).toBe(
+    expect(await reasonOf(envWith().readConfinedBytes("linked/plot.png", { maxBytes: 10 }))).toBe(
       "outside",
     );
   });
@@ -96,7 +100,9 @@ describe("T2.1/T2.2 — confinement by REAL path", () => {
   test("writable dirs do NOT widen reads: only the workspace root counts", async () => {
     writeFileSync(join(outside, "x.txt"), "x");
     const env = envWith({ writableDirs: [outside] });
-    expect(await reasonOf(env.readBytes(join(outside, "x.txt"), { maxBytes: 10 }))).toBe("outside");
+    expect(await reasonOf(env.readConfinedBytes(join(outside, "x.txt"), { maxBytes: 10 }))).toBe(
+      "outside",
+    );
   });
 
   test("dangling and looping links are refused; a missing file is 'missing'", async () => {
@@ -104,9 +110,11 @@ describe("T2.1/T2.2 — confinement by REAL path", () => {
     symlinkSync(join(root, "loop-b"), join(root, "loop-a"));
     symlinkSync(join(root, "loop-a"), join(root, "loop-b"));
     const env = envWith();
-    expect(await reasonOf(env.readBytes("dangling", { maxBytes: 10 }))).toBe("unresolvable");
-    expect(await reasonOf(env.readBytes("loop-a", { maxBytes: 10 }))).toBe("unresolvable");
-    expect(await reasonOf(env.readBytes("absent.png", { maxBytes: 10 }))).toBe("missing");
+    expect(await reasonOf(env.readConfinedBytes("dangling", { maxBytes: 10 }))).toBe(
+      "unresolvable",
+    );
+    expect(await reasonOf(env.readConfinedBytes("loop-a", { maxBytes: 10 }))).toBe("unresolvable");
+    expect(await reasonOf(env.readConfinedBytes("absent.png", { maxBytes: 10 }))).toBe("missing");
   });
 
   test("a file swapped for an outside link between the check and the open is refused", async () => {
@@ -118,7 +126,7 @@ describe("T2.1/T2.2 — confinement by REAL path", () => {
         symlinkSync(join(outside, "s.txt"), real);
       },
     });
-    expect(await reasonOf(env.readBytes("a.txt", { maxBytes: 100 }))).not.toBe("ok");
+    expect(await reasonOf(env.readConfinedBytes("a.txt", { maxBytes: 100 }))).not.toBe("ok");
   });
 
   test("a parent DIRECTORY swapped for an outside link after the check is caught by the re-check", async () => {
@@ -131,7 +139,7 @@ describe("T2.1/T2.2 — confinement by REAL path", () => {
         symlinkSync(outside, join(root, "sub"));
       },
     });
-    expect(await reasonOf(env.readBytes("sub/f.txt", { maxBytes: 100 }))).toBe("outside");
+    expect(await reasonOf(env.readConfinedBytes("sub/f.txt", { maxBytes: 100 }))).toBe("outside");
   });
 });
 
@@ -144,20 +152,20 @@ describe("T2.3/T2.4 — size, file type, growth", () => {
         reads += 1;
       },
     });
-    const error = await env.readBytes("big.bin", { maxBytes: 10 }).catch((e: unknown) => e);
+    const error = await env.readConfinedBytes("big.bin", { maxBytes: 10 }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(WorkspaceReadError);
     expect(error instanceof WorkspaceReadError ? error.reason : "").toBe("too_large");
     expect(reads).toBe(0);
     // Exactly maxBytes is fine, and the seam ran (the spy is live).
     writeFileSync(join(root, "ok.bin"), new Uint8Array(10));
-    expect((await env.readBytes("ok.bin", { maxBytes: 10 })).bytes.length).toBe(10);
+    expect((await env.readConfinedBytes("ok.bin", { maxBytes: 10 })).bytes.length).toBe(10);
     expect(reads).toBe(1);
   });
 
   test("the size message is model-actionable, in MiB", async () => {
     writeFileSync(join(root, "big.bin"), new Uint8Array(3 * 1024 * 1024 + 200 * 1024));
     const error = await envWith()
-      .readBytes("big.bin", { maxBytes: 2 * 1024 * 1024 })
+      .readConfinedBytes("big.bin", { maxBytes: 2 * 1024 * 1024 })
       .catch((e: unknown) => e);
     expect(error instanceof Error ? error.message : "").toContain(
       "file too large (3.2 MiB > 2 MiB)",
@@ -167,17 +175,17 @@ describe("T2.3/T2.4 — size, file type, growth", () => {
   test("a file that grows during the read is refused, not truncated", async () => {
     writeFileSync(join(root, "log.txt"), "12345");
     const env = envWith({ beforeRead: (real) => appendFileSync(real, "6789") });
-    expect(await reasonOf(env.readBytes("log.txt", { maxBytes: 100 }))).toBe("changed");
+    expect(await reasonOf(env.readConfinedBytes("log.txt", { maxBytes: 100 }))).toBe("changed");
   });
 
   test("a FIFO and a directory are refused (never blocks on the FIFO)", async () => {
     mkdirSync(join(root, "dir"));
     const env = envWith();
-    expect(await reasonOf(env.readBytes("dir", { maxBytes: 10 }))).toBe("not_file");
-    expect(await reasonOf(env.readBytes(".", { maxBytes: 10 }))).toBe("not_file");
+    expect(await reasonOf(env.readConfinedBytes("dir", { maxBytes: 10 }))).toBe("not_file");
+    expect(await reasonOf(env.readConfinedBytes(".", { maxBytes: 10 }))).toBe("not_file");
     const mk = Bun.spawnSync(["mkfifo", join(root, "pipe")]);
     expect(mk.exitCode).toBe(0);
-    expect(await reasonOf(env.readBytes("pipe", { maxBytes: 10 }))).toBe("not_file");
+    expect(await reasonOf(env.readConfinedBytes("pipe", { maxBytes: 10 }))).toBe("not_file");
   });
 });
 
@@ -190,15 +198,17 @@ describe("T2.5 — secret-looking files inside the workspace", () => {
     writeFileSync(join(root, "env.md"), "# env");
     const env = envWith();
     for (const name of [".env", ".env.local", "a/.ssh/config", "x.pem"]) {
-      expect(await reasonOf(env.readBytes(name, { maxBytes: 100 })), name).toBe("secret");
+      expect(await reasonOf(env.readConfinedBytes(name, { maxBytes: 100 })), name).toBe("secret");
     }
-    expect(await reasonOf(env.readBytes("env.md", { maxBytes: 100 }))).toBe("ok");
+    expect(await reasonOf(env.readConfinedBytes("env.md", { maxBytes: 100 }))).toBe("ok");
   });
 
   test("an innocent-looking link to a secret file is refused by its TARGET's name", async () => {
     writeFileSync(join(root, ".env"), "SECRET=1");
     symlinkSync(join(root, ".env"), join(root, "report.txt"));
-    expect(await reasonOf(envWith().readBytes("report.txt", { maxBytes: 100 }))).toBe("secret");
+    expect(await reasonOf(envWith().readConfinedBytes("report.txt", { maxBytes: 100 }))).toBe(
+      "secret",
+    );
   });
 
   test("a workspace that itself lives under a secret-named dir still works (segments are workspace-relative)", async () => {
@@ -206,6 +216,6 @@ describe("T2.5 — secret-looking files inside the workspace", () => {
     mkdirSync(nested, { recursive: true });
     writeFileSync(join(nested, "chart.svg"), "<svg/>");
     const env = new HostExecution({ cwd: nested });
-    expect(await reasonOf(env.readBytes("chart.svg", { maxBytes: 100 }))).toBe("ok");
+    expect(await reasonOf(env.readConfinedBytes("chart.svg", { maxBytes: 100 }))).toBe("ok");
   });
 });
