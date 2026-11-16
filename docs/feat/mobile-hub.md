@@ -605,6 +605,102 @@ was touched, so `protocol.json` was not regenerated and there is no
 
 **Status: H1 DONE.** H2–H4 not started.
 
+### H2 — action list + haptic kinds
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Load-bearing check (re-run before any edit).** H2 is pure, so it rests on
+P2 and P3, not on the H3 spike. P2 holds: `composerAction` returns `stop`
+only for a blank field, a running turn, a live link and a living session
+(`composer.ts:75-103`), and `none/turn` on a dead link (`:82-84`). P3 holds:
+`playHaptic` is the only `expo-haptics` caller and swallows failures
+(`haptics.ts`). The kinds are one union (`haptic-rules.ts:8`). The installed
+`expo-haptics` has `selectionAsync` and `ImpactFeedbackStyle.Rigid`
+(`node_modules/expo-haptics/build/Haptics.d.ts:24`, `Haptics.types.d.ts:43`).
+
+**As built, in order.**
+1. Skeleton `src/hub-actions.ts` (final types, stub bodies) + `hubHaptic` stub,
+   then the tests. Red on assertions: 20 fail / 8 pass. The 8 are the 4
+   existing haptic tests plus 4 cases a stub happens to satisfy (e.g. "link
+   down → no Stop"); mutations A3/A4/H2 below cover them.
+2. `apps/mobile/src/haptic-rules.ts:13`: `HapticKind` gains `tick` and
+   `commit`. `hubHaptic(effect)` (`:48`) = the effect's `cue` for `haptic`,
+   null for every other effect. *When* to buzz stays decided by
+   `hub-gesture.reduce` (H1); this only maps.
+3. `apps/mobile/src/haptics.ts:16`: `play(kind)` is an exhaustive switch:
+   `tick` → `selectionAsync()`, `commit` → `impactAsync(Rigid)`; `firm`/`light`/`success`
+   are unchanged.
+4. `apps/mobile/src/hub-actions.ts`: `HubEntryId`/`HubActionId`/`HubEntries`
+   (`:12-27`); `hubActions` (`:148`): turn pair, then canonical, then a stable
+   badge partition, then the six-slot cut; `resolveCommit` (`:177`);
+   `buttonBadge` (`:196`); `hubA11yLabel` (`:207`). Stop/Steer presence goes
+   through `composerAction({…, text: "", photos: 0})` (`turnStoppable`, `:104`),
+   the same truth table as the composer (P2).
+5. Green: 28 pass / 0 fail on the two files.
+
+**Drift from the Implementation (and why).**
+- **`resolveCommit(id, ctx, entries)`**: it takes `entries` as a third
+  argument (the plan wrote `resolveCommit(id, ctxNow)`). A commit runs iff
+  `hubActions` would still offer it now, so re-validation is the same rule as
+  presence. It is not a second truth table, and it needs the entries for P6
+  (an entry gone since the open becomes a silent no-op). `more` always runs.
+- **The link-down notice.** M8 says a Stop that races a link drop is a "no-op
+  with the notice", without saying which one. "Already finished" would be
+  false there (the turn still runs daemon-side), so the notice is
+  `NO_CONNECTION` = "Not connected — the turn keeps running". "Already
+  finished" is used when the turn is gone or the session ended. Steer gets the
+  same two notices as Stop.
+- **Steer rides Stop's gate.** On a dead link, typing becomes Send later, not
+  a steer (`composer.ts:85-87`). So the pair is offered only when
+  `composerAction` resolves to `stop`, as the plan's "(turn !== null, link up)"
+  reads.
+- **Attach** is also gated on `ended === null`, besides `editable`
+  (belt-and-braces for M7's "Attach on an ended session → no-op").
+- **Badge promotion = a stable partition** of the canonical part: badged
+  items first, in canonical order, then the rest. This is the literal "moves
+  up to the first canonical slot that has no badge". Without badges nothing
+  moves (pinned).
+- **Item badges**: Artifacts = `{count: unseen}`; Scheduled = a dot when the
+  next wake is ≤ 10 min away (`DUE_SOON_MS`). The context carries
+  `schedules: number` + `nextWakeInMs: number | null`. H4 wires them from
+  `schedules`. No other item has a badge (the button carries the activity
+  count).
+- **`hubA11yLabel`** adds "unread report" when that alone lights the dot, and
+  uses the singular "1 new artifact". Otherwise it uses the plan's wording.
+- **Not done here**: "More/menu choice → `light`" (Design 2) needs no rule
+  function. H3 plays `light` directly. No `menuHaptic` was added.
+- **Changelog**: the one fragment `changelog.d/mobile-hub.added.md` (written in
+  H1) already covers the hub. H2 adds nothing user-visible on its own, so it
+  is unchanged.
+
+**Mutation checks** (`bun .tentacle/tmp/mobile-hub/mutate-h2.ts`: apply one,
+run `hub-actions` + `haptic-rules`, restore the bytes; the tree was re-verified
+green (28/0) after):
+
+```
+A1 promotion passes the turn pair: 27 pass, 1 fail — e.g. hubActions: badges and promotion > promotion never passes the turn pair
+A2 six-cap off by one (<= → <): 27 pass, 1 fail — e.g. hubActions: six slots (M14) > exactly six: all in the fan, no More
+A3 Stop ignores the link (no composerAction): 26 pass, 2 fail — e.g. hubActions: order and presence > link down (M8): no Stop, no Steer
+A4 resolveCommit does not re-validate: 24 pass, 4 fail — e.g. resolveCommit: the world is read again at release (M7/M8) > Stop after the turn ended → no-op + Already finished
+A5 badge priority swapped (dot > number): 27 pass, 1 fail — e.g. buttonBadge + hubA11yLabel > priority: a number (running) > a dot (unseen / unread) > none
+A6 a missing entry still shows (P6): 23 pass, 5 fail — e.g. hubActions: order and presence > idle: the canonical order, no More while it fits in six
+A7 no badge promotion: 26 pass, 2 fail — e.g. hubActions: badges and promotion > a badged item moves up to the first unbadged canonical slot, badged ones keep their order
+H1 tick played as light: 27 pass, 1 fail — e.g. hubHaptic (docs/feat/mobile-hub.md Design 2) > the hub's cues: open = firm, a new highlight = tick, commit = commit
+H2 every effect buzzes: 27 pass, 1 fail — e.g. hubHaptic (docs/feat/mobile-hub.md Design 2) > every other effect is silent (close, highlight, the commit itself, drag, tap)
+```
+
+The plan names no H2 mutation targets ("+ mutation"), so these nine were
+chosen against the plan's test list.
+
+**Gate.** `bun run typecheck` (root + `apps/mobile` + `apps/relay`) clean ·
+`bun run lint` clean (0 errors, 0 warnings, after one Biome format of the new
+test) · `bun test` 12719 pass, 5 skip, 0 fail (the 5 skips are the opt-in
+docker/k8s/slow-socket ones). No schema was touched, so `protocol.json` was not
+regenerated and there is no `protocol.d/` note.
+
+**Status: H2 DONE.** H3–H4 not started. Nothing in the app calls
+`hub-actions`/`hubHaptic` yet; H3 wires them.
+
 ## Review
 
 *(empty — fresh-context review after H3/H4)*
