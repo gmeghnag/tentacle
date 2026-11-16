@@ -70,9 +70,15 @@ describe("S3 · `BandSection`: one full-width band per section (E2)", () => {
     expect(band).toMatch(/letterSpacing/);
     // 12 pt (Design 4) and the row's own 20 pt gutter — the label aligns with the
     // labels below it, which is the mockup's `q()` (`padding: … 20px`).
-    const label = band.slice(band.indexOf("label"), band.indexOf("label") + 900);
+    //
+    // Read from the STYLE BLOCKS, not a character window: a window starting at the
+    // first `label` landed in the JSX (`style={[styles.label…`) and quietly stopped
+    // reaching the stylesheet once the component grew (fix round 1 of the S4 review
+    // added `BandNote`), failing on layout-free prose rather than on the rule.
+    const label = band.slice(band.indexOf("  label: {"), band.indexOf("  band: {"));
     expect(label).toMatch(/space\.rowX/);
-    expect(label).toMatch(/space\.sectionTop/);
+    const section = band.slice(band.indexOf("  section: {"), band.indexOf("  label: {"));
+    expect(section).toMatch(/space\.sectionTop/);
     expect(label).toMatch(/paddingBottom: 6|marginBottom: 6/);
   });
 
@@ -80,6 +86,24 @@ describe("S3 · `BandSection`: one full-width band per section (E2)", () => {
     const band = code(BAND);
     expect(band).toMatch(/footnote\?:/);
     expect(band).toMatch(/palette\.sec/);
+  });
+
+  test("several notes are STACKED blocks, not one inline run (S4 fix round 1)", () => {
+    // The S4 review's finding: a Fragment of `<Text>`s inside the footnote
+    // `<Text>` lays out INLINE, so a section's notes ran together into one line.
+    // `test/band-notes.test.ts` proves the rendered tree has one block per note;
+    // this pins the PROP that makes it possible, and the `gap` that keeps two
+    // paragraphs from stacking shoulder to shoulder.
+    const band = code(BAND);
+    expect(band).toMatch(/notes\?: readonly ReactNode\[\]/);
+    expect(band).toMatch(/export function BandNote\(/);
+    // The footnote slot is a column (`View`), never the paragraph itself.
+    const slot = band.slice(
+      band.indexOf("<View style={[styles.footnotes"),
+      band.indexOf("</View>", band.indexOf("<View style={[styles.footnotes")),
+    );
+    expect(slot).toContain("<Text");
+    expect(band).toMatch(/footnotes: \{[^}]*gap: 8/);
   });
 
   test("the sheet variant swaps BOTH surfaces: the ground and the band", () => {

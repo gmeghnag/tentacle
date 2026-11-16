@@ -2669,3 +2669,145 @@ passed on the first attempt:
 **Unverified:** I did not run flows 24/25 or take screenshots, because the PushCore blocker recorded in Execution still stands. So the visual check against row D is still owed.
 
 **Executor behaviour:** Honest and thorough. It recorded its drift openly, fixed the five vacuous tests its own mutations exposed, and was clear about what it had not verified. Its gap is the one in finding 1: every test reads the source, none renders, so a layout regression gets through.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16 · answers Review (slice S4) · my own id, proven below*
+
+**Model id provenance.** My own session transcript,
+`~/.claude/projects/-Users-gmeghnag-tentacle/fa477ae9-96f6-4705-bffa-dce2ef1b77a4.jsonl`
+(the `CLAUDE_CODE_SESSION_ID` in my environment), carries **663 assistant events,
+every one `"model":"claude-opus-5-5"`** (31 more are `"<synthetic>"`, harness
+noise). `~/.claude/settings.json` says `"model": "opus"`, and `claude-opus-5-5`
+is the only non-synthetic id in that log. So the signature is the model that
+actually wrote it — checked, not assumed (the absence of this check is what
+produced the S3 review's finding 3).
+
+Scope: the review's **1 MEDIUM, 0 HIGH**. The three "small items, not findings"
+were also closed where they were mine to close (§ Nits below); the device
+confirmation of `paddingTop` is still the owner's.
+
+#### The finding
+
+**MEDIUM — a section's notes ran together into one line** (`SessionInfoSheet.tsx`
+`Section`, `BandSection.tsx` footnote). `Section` passed its notes as a Fragment
+of `<Text>`s, `BandSection` put that Fragment inside its own footnote `<Text>`,
+and a `<Text>` inside a `<Text>` lays out INLINE in React Native. So "2 of 2
+connected" ran straight into "Off hides it from the model…", and because the
+inner node is a virtual text node, `session-info-switch-note-*` matched no view.
+
+#### Reproduced first, and RED on the property
+
+The finding's own diagnosis was that every test in this folder reads the SOURCE,
+so no mutation can see a layout regression. That is the real gap, so the fix
+starts with a test that RENDERS. `test/band-notes.test.ts` walks the real
+element tree of `SessionInfoSheet` — calling the components and following the
+returned elements, which needs only React itself (no renderer: no
+`react-test-renderer`, no `react-dom` in this repo) — with `react-native`,
+`expo-symbols` and `react-native-safe-area-context` mocked to host stubs.
+
+Red, on the shipped code (`.tentacle/tmp/mobile-chrome/f1r1-red5.log`):
+
+```
+(fail) … no `<Text>` is nested in a `<Text>` anywhere in the sheet
+   -   "nested": [],
+   +   "nested": [
+   +     "2 of 2 connectedOff hides it from the model in this session, from the next reply.",
+   +   ],
+(fail) … each note is its own block: never two notes inside one text run
+   -   "parent": "View",
+   +   "parent": "Text",
+(fail) … the switch note's testID is on a real view, per section
+   -   "hosts": 1,
+   +   "hosts": 0,
+```
+
+That joined string is the review's finding, reproduced exactly. Green after the
+fix: `8 pass / 0 fail`.
+
+One harness bug found and fixed on the way, worth recording because it is the
+same trap this test exists to avoid: the first version stubbed each host as a
+FUNCTION, so the walker called it and discarded the result — every assertion ran
+on an empty tree and passed on the buggy code. The stubs are string element
+types now, and the test asserts `textBlocks > 10` before believing a verdict.
+
+#### What changed
+
+- **`apps/mobile/src/band-notes.ts` (new, pure).** `sectionNotes(section)` → the
+  section's notes as BLOCKS in reading order (`rowsNote`, `footer`,
+  `switchNote`), each keyed by its ROLE, with the switch note's testID. Blank
+  notes are not blocks. Pure + React-free (AGENTS §7), so "how many blocks, in
+  what order, with what key" is asserted without rendering anything.
+- **`apps/mobile/src/ui/BandSection.tsx`.** The `footnote` slot wraps its content
+  in a `View` (a column, `paddingTop: 8`, `gap: 8` — the old `section: { gap: 8 }`
+  rhythm the notes had before they moved into the band's slot), not a `Text`; a
+  new **`notes?: readonly ReactNode[]`** prop stacks one block each; new exported
+  **`BandNote`** is the paragraph to render into it. `footnote` stays ONE
+  paragraph (so a plain string and `ComputersScreen`'s inline `InlineMono` copy
+  keep working) — a `View` around a raw string child would throw in RN, and a
+  `View` around inline runs would stack them.
+- **`apps/mobile/src/screens/SessionInfoSheet.tsx`.** `Section` reads
+  `sectionNotes(section)` and maps one `<BandNote>` per note into `notes={…}`;
+  the local `notes` filter and the Fragment are gone.
+- **`apps/mobile/test/band-wiring.test.ts`.** The label assertion read a fixed
+  900-char window from the first `label`, which landed in the JSX and stopped
+  reaching the stylesheet once the component grew (fix round 1 added `BandNote`).
+  It now slices the two STYLE BLOCKS — same property, no character window.
+- **`changelog.d/mobile-chrome.changed.md`** — the band sentence now says each
+  note stays a paragraph of its own.
+
+#### Nits the review listed as non-blocking, both closed
+
+- `BandSection.tsx`'s doc comment said "then an label, then ONE full-width
+  surface…" twice (a duplicated line, `:4`). Rewritten to one line.
+- Two notes with identical text got duplicate React keys: keys are now the
+  note's ROLE, pinned by a test (`two notes saying the SAME words still get
+  distinct keys`).
+
+#### Mutation checks (§9 — each applied, run, reverted, `cmp`'d back)
+
+Script `.tentacle/tmp/mobile-chrome/f1-mut2.sh` + `f1-mut3.sh`, output
+`f1-mut2.out` / `f1-mut3.out`. Face value of a `bun test` run, not a code read.
+
+| # | Mutation | Killed |
+|---|---|---|
+| M1 | `BandSection` puts the notes back inside ONE `<Text>` (the shipped bug) | 3 tests |
+| M2′ | `BandNote` nests a run inside its own `<Text>` (the inline shape) | 2 tests |
+| M3 | `footer` keyed as `rowsNote` | 1 test |
+| M4 | the switch note's `testID` dropped | 1 test |
+| M5 | an absent note still becomes a blank block | 3 tests |
+| M6 | keys by TEXT instead of by role (the pre-fix shape) | 2 tests |
+| M7 | `footnotes: { gap: 8 }` removed (blocks stack shoulder to shoulder) | 1 test |
+
+Two weaker mutations were tried first and **rejected as weak**, which is why the
+table has M2′/M6 instead: M2 (wrapping `BandNote`'s `<Text>` in a `View`) is not
+Text-in-Text at all, and the original M3/M6 shapes killed only the ordering
+test. A mutation that kills the wrong test proves nothing (§9). After every
+mutation: `cp` back and `cmp` against the fixed copies — all three files
+`identical`, then `8 pass / 0 fail`.
+
+M7 targets the `gap` the fix adds, from `band-wiring.test.ts`'s prop guard
+(applied, run, reverted, `cmp` back to identical).
+
+#### Gate
+
+- `bunx tsc --noEmit` → clean; `bunx tsc -p apps/mobile` → clean;
+  `bunx tsc -p apps/relay` → clean (the full `bun run typecheck`).
+- `bun run lint` → **clean, 0 errors / 0 warnings, 1695 files** (the AGENTS §6
+  baseline is clean, so "no new issues" is true).
+- `bun test` → **12282 pass · 5 skip · 0 fail**, 881 files, 447 s
+  (`.tentacle/tmp/mobile-chrome/f1-full.log`). The 5 skips are the documented
+  opt-in ones (2 docker, 2 k8s, 1 slow keepalive), none in `apps/mobile`.
+
+#### Not done, and why
+
+- **The device/screenshot check against row D is still owed.** The same PushCore
+  blocker the slice recorded still stands; I did not run flows 24/25.
+- **`paddingTop: insets.top` on the sheet's root** stays dropped (the review's
+  "please confirm on a device") — that is an owner decision on a device, not
+  something a laptop test can settle, and I did not want to invent a
+  screenshot-backed claim.
+- **Verification boundary, stated plainly:** the render test proves the ELEMENT
+  TREE has one block per note and no nested text runs. It cannot prove pixels —
+  a real device render is still the only proof of that, and it is not in this
+  round.

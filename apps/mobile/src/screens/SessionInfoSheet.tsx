@@ -13,9 +13,10 @@
 import type { JSX, ReactNode } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { sectionNotes } from "../band-notes.ts";
 import type { InfoRow, InfoSection, SessionInfoView } from "../session-info.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, space, typography } from "../theme.ts";
-import { BandSection } from "../ui/BandSection.tsx";
+import { BandNote, BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
@@ -240,37 +241,26 @@ function Section({
   readonly lastRow?: ReactNode;
 }): JSX.Element {
   // The section's notes are the band's footnotes (Design 4), so they sit on the
-  // band's own 20 pt gutter instead of 12 pt inside the label they explain.
-  const notes = [section.rowsNote, section.footer, section.switchNote].filter(
-    (note): note is string => note !== undefined && note !== "",
-  );
+  // band's own 20 pt gutter instead of 12 pt inside the label they explain. One
+  // BLOCK per note — `band-notes.ts` decides how many, and their keys by ROLE
+  // (S4 review finding 1: a Fragment of `<Text>`s laid out inline, joining them
+  // into one line and hiding the switch note's testID).
+  const notes = sectionNotes(section);
   return (
     <View style={styles.section}>
       <BandSection
         palette={palette}
         title={section.title}
         onSheet
-        footnote={
-          notes.length === 0 ? undefined : (
-            <>
-              {notes.map((note) =>
-                note === section.switchNote ? (
-                  <Text
-                    key="switch"
-                    testID={`session-info-switch-note-${section.id}`}
-                    maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                  >
-                    {note}
-                  </Text>
-                ) : (
-                  <Text key={note} maxFontSizeMultiplier={DENSE_FONT_SCALE}>
-                    {note}
-                  </Text>
-                ),
-              )}
-            </>
-          )
-        }
+        notes={notes.map((note) => (
+          <BandNote
+            key={note.key}
+            palette={palette}
+            {...(note.testID === undefined ? {} : { testID: note.testID })}
+          >
+            {note.text}
+          </BandNote>
+        ))}
       >
         <SectionBody
           palette={palette}
