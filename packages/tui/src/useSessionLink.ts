@@ -53,6 +53,7 @@ import { type WakeModel, wakeStep } from "@tentacle/core";
 import { type MutableRefObject, useCallback, useRef } from "react";
 import type { SessionController, SessionDirectory } from "./app-types.ts";
 import { noteSent, resetDock } from "./background-focus.ts";
+import type { CapsView } from "./capability-toggles.ts";
 import { CLEARED_ELSEWHERE_NOTICE, CLEARED_NOTICE } from "./clear-command.ts";
 import type { QuitConfirmFacts } from "./commands.ts";
 import { type DaemonQueue, handBackRows, takeAll } from "./queued.ts";
@@ -110,6 +111,10 @@ export interface SessionLinkHost {
   readonly jobsSubRef: MutableRefObject<(() => void) | null>;
   readonly notifySubRef: MutableRefObject<(() => void) | null>;
   readonly dockMsgSubRef: MutableRefObject<(() => void) | null>;
+  /** The session's MCP/skill switches (docs/feat/session-capabilities.md S4). */
+  readonly capsSubRef: MutableRefObject<(() => void) | null>;
+  /** The switches the daemon reported (`App`'s: it renders them). */
+  readonly onCapsChange: (caps: CapsView | undefined, by?: string) => void;
 
   // --- the latches of the turn driver and of a follow (all shared)
   /** Activities held while a run of mine streamed (`onActivity` pushes them). */
@@ -215,6 +220,8 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
     jobsSubRef,
     notifySubRef,
     dockMsgSubRef,
+    capsSubRef,
+    onCapsChange,
     heldRef,
     abortRef,
     streamCtrlRef,
@@ -412,6 +419,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       jobsSubRef.current?.();
       notifySubRef.current?.();
       dockMsgSubRef.current?.();
+      capsSubRef.current?.();
       heldRef.current = [];
       setDaemonQueue(undefined);
       setAgents(undefined);
@@ -452,6 +460,11 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
           flushNow();
           setDock((prev) => noteSent(prev, m.agentId, m.text, m.n));
         }) ?? null;
+      // The session's MCP/skill switches (docs/feat/session-capabilities.md
+      // S4): its current state at once (never news: no `by`), then every
+      // snapshot and change the daemon reports.
+      onCapsChange(session?.capabilities?.());
+      capsSubRef.current = session?.onCapabilities?.((caps, by) => onCapsChange(caps, by)) ?? null;
       const opening = session?.open?.();
       if (!opening) {
         onOpened?.(true); // nothing to open (a local session)
@@ -472,6 +485,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       agentsSubRef,
       armWake,
       askContext,
+      capsSubRef,
       dockMsgSubRef,
       flushNow,
       heldRef,
@@ -479,6 +493,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       jobsSubRef,
       notifySubRef,
       onActivityRef,
+      onCapsChange,
       pushNotice,
       queueSubRef,
       sessionRef,

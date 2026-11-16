@@ -10,6 +10,7 @@ import type { JobOutputResult, JobRow } from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
+import type { CapKind, CapsView } from "./capability-toggles.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
@@ -131,6 +132,30 @@ export interface SessionController {
    * no skills.
    */
   skills?(): Promise<SessionSkillsView>;
+  /**
+   * The session's MCP/skill switches as the daemon last reported them
+   * (docs/feat/session-capabilities.md S4): undefined until an open says it
+   * has them, and when the daemon has none (an older one). Optional with the
+   * two below: absent where no daemon owns the session.
+   */
+  capabilities?(): CapsView | undefined;
+  /**
+   * Follow the switches: the daemon's state on every snapshot and change (`by`
+   * only on a change: the device that made it, untrusted text), undefined when
+   * the daemon turns out not to have them. Returns an unsubscribe.
+   */
+  onCapabilities?(listener: (caps: CapsView | undefined, by?: string) => void): () => void;
+  /**
+   * `session/set_capability`: turn one MCP server or skill on/off for the
+   * model. The rows follow the daemon's echo (`onCapabilities`), never this
+   * answer. Rejects on a refusal.
+   */
+  setCapability?(kind: CapKind, name: string, enabled: boolean): Promise<unknown>;
+  /**
+   * The session is open daemon-side (a fresh or resumed one opens at its first
+   * message): no switches yet means "not started", not "not supported".
+   */
+  opened?(): boolean;
   /**
    * The context size the daemon counts at open (docs/feat/tui-target-badge.md):
    * exact where the provider can count without generating, else an estimate.

@@ -79,6 +79,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
     paletteWin,
     paletteRows,
     listView,
+    capsShown,
     shown,
     dockView,
     drawer,
@@ -262,6 +263,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
           hiddenAbove={hiddenAbove}
           expandAll={expandAll}
           autoApprove={permission.autoApprove}
+          capsMarker={capsShown}
           pill={pill}
           onPillRange={onPillRange}
           link={linkView}

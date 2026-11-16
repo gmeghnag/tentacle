@@ -46,6 +46,7 @@ function spyHost(): { host: KeyHost; calls: string[] } {
     cancelUpload: rec("cancelUpload"),
     closePanel: rec("closePanel"),
     panelApply: rec("panelApply"),
+    switchCapability: rec("switchCapability"),
     setSessionsState: rec("setSessionsState"),
     switchTo: rec("switchTo"),
     sessionsDelete: rec("sessionsDelete"),
@@ -101,6 +102,7 @@ const TABLE: readonly (readonly [KeyEffect, string])[] = [
   [{ kind: "cancelUpload" }, "cancelUpload()"],
   [{ kind: "closePanel" }, "closePanel()"],
   [{ kind: "applyPanel", action: "down" }, 'panelApply("down")'],
+  [{ kind: "switchCapability" }, "switchCapability()"],
   [
     { kind: "setSessionsState", state: { cursor: 1, armed: null } },
     'setSessionsState({"cursor":1,"armed":null})',

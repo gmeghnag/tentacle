@@ -52,6 +52,12 @@ export type KeyEffect =
   | { readonly kind: "closePanel" }
   /** Apply a panel action to the LIVE panel (`applyPanel`, functional read). */
   | { readonly kind: "applyPanel"; readonly action: TreeAction }
+  /**
+   * Space in `/mcp` / `/skills`: flip the selected row's on/off switch
+   * (docs/feat/session-capabilities.md S4). What it flips is decided on the
+   * LIVE panel and switches (`panelSwitchOp`), like `applyPanel`.
+   */
+  | { readonly kind: "switchCapability" }
   /** Write the sessions panel's state (`sessionsDelete`'s arm/answer). */
   | { readonly kind: "setSessionsState"; readonly state: SessionsState }
   /** Switch to another session (the panel already closed). */

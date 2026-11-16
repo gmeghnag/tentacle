@@ -1707,7 +1707,8 @@ describe("/mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     const frame = lastFrame() ?? "";
     expect(asked).toBe(1);
     expect(frame).toContain("MCP servers · 1 of 2 reachable");
-    expect(frame).toContain("❯ ▸ github  ● connected · 2 tools · 4 ms");
+    // The state word and latency moved to the first expanded row (S4, quiet grammar).
+    expect(frame).toContain("❯ ▸ github  ● 2 tools");
     expect(frame).toContain("  ▸ db      ✗ failed");
     expect(frame).not.toContain("Type a task or /command"); // the panel replaces the input
     unmount();
@@ -2026,8 +2027,9 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     const frame = lastFrame() ?? "";
     expect(asked).toBe(2);
     expect(frame).toContain("Skills · 2 found · 1 problem");
-    expect(frame).toContain("❯ ▸ review    you + model  review a diff");
-    expect(frame).toContain("  ▸ lint-fix  model only   fix lint");
+    // Who may invoke it moved to the expanded rows (S4: `who()` removed).
+    expect(frame).toContain("❯ ▸ review    review a diff");
+    expect(frame).toContain("  ▸ lint-fix  fix lint");
     expect(frame).toContain("  ▸ ! 1 discovery problem");
     expect(frame).not.toContain("Type a task or /command");
     unmount();
@@ -2039,7 +2041,7 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     await delay(30);
     let frame = lastFrame() ?? "";
     expect(frame).toContain("❯ ▾ review");
-    expect(frame).toContain("/review · offered to the model");
+    expect(frame).toContain("/review · the model sees it too");
     expect(frame).toContain("project · /w/.agents/skills/review/SKILL.md");
     stdin.write("\u001B");
     await delay(60);

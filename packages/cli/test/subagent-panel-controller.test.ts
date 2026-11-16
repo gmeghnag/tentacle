@@ -372,6 +372,11 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       "sendNow",
       "close",
       "skills",
+      // The `/mcp` / `/skills` switches (docs/feat/session-capabilities.md S4).
+      "capabilities",
+      "onCapabilities",
+      "setCapability",
+      "opened",
       "context",
       "rename",
       "onReturned",

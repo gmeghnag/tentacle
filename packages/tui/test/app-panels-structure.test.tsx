@@ -74,7 +74,8 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
   test("the façade delegates by KIND LOOKUP, over a registry of descriptors", () => {
     const facade = readSrc("panel.ts");
     // One lookup per facade call, and nothing that switches on a kind itself.
-    expect(countOf(facade, "kindOf(panel)")).toBe(3);
+    // view, apply, click, switchOp (docs/feat/session-capabilities.md S4).
+    expect(countOf(facade, "kindOf(panel)")).toBe(4);
     expect(facade).not.toContain('=== "mcp"');
     expect(facade).not.toContain('=== "skills"');
     const registry = readSrc(join("panels", "registry.ts"));
