@@ -395,6 +395,232 @@ describe("auto-accept (Owner Q3, F11)", () => {
   });
 });
 
+describe("MCP/skill switches (docs/feat/session-capabilities.md S5)", () => {
+  type Caps = { disabledMcp: string[]; disabledSkills: string[] };
+  type Listener = (state: Caps | undefined, by?: string) => void;
+  /**
+   * A `RemoteSession`'s switch surface, faithful to its contract: the state is
+   * the daemon's, a set's ECHO (with this phone's `by`) arrives BEFORE its
+   * answer, and `MethodNotFound` clears the state (an older daemon, F7).
+   */
+  function fakeCaps() {
+    let state: Caps | undefined = { disabledMcp: [], disabledSkills: [] };
+    const listeners = new Set<Listener>();
+    const sets: { kind: string; name: string; enabled: boolean }[] = [];
+    let answer: (op: { kind: "mcp" | "skill"; name: string; enabled: boolean }) => Promise<void> =
+      async (op) => {
+        caps.push(applied(op), "iPhone");
+      };
+    const applied = (op: { kind: "mcp" | "skill"; name: string; enabled: boolean }): Caps => {
+      const base = state ?? { disabledMcp: [], disabledSkills: [] };
+      const key = op.kind === "mcp" ? "disabledMcp" : "disabledSkills";
+      const list = base[key].filter((name) => name !== op.name);
+      return { ...base, [key]: op.enabled ? list : [...list, op.name].sort() };
+    };
+    const caps = {
+      current: () => state,
+      onChange(listener: Listener) {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      async set(kind: "mcp" | "skill", name: string, enabled: boolean) {
+        sets.push({ kind, name, enabled });
+        await answer({ kind, name, enabled });
+        return state;
+      },
+      /** The daemon reports a state (a change from anyone, or a snapshot without `by`). */
+      push(next: Caps | undefined, by?: string) {
+        state = next;
+        for (const listener of [...listeners]) {
+          listener(next, by);
+        }
+      },
+      applied,
+      sets,
+      listeners,
+      answerWith(fn: typeof answer) {
+        answer = fn;
+      },
+    };
+    return caps;
+  }
+  const servers: McpServerStatus[] = [
+    { name: "k8s", state: "connected", tools: ["get"], moreTools: 0 },
+  ];
+  function withCaps(caps: ReturnType<typeof fakeCaps>, over: Partial<InfoPort> = {}) {
+    return port({
+      mcpStatus: () => Promise.resolve(servers),
+      session: () => ({
+        skills: () => Promise.resolve(emptySkills),
+        context: () => Promise.resolve({ used: 1, exact: true }),
+        capabilities: caps,
+      }),
+      ...over,
+    }).port;
+  }
+  const k8s = (state: SessionInfoState) =>
+    view(state)
+      .sections.find((s) => s.id === "mcp")
+      ?.rows.find((row) => row.title === "k8s");
+
+  test("a tap sends ONE set; the row flips only on the daemon's echo (not optimistic)", async () => {
+    const caps = fakeCaps();
+    const gate = deferred<void>();
+    caps.answerWith(async () => {
+      await gate.promise;
+    });
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    expect(k8s(info.state())?.switch).toMatchObject({ on: true, interactive: true });
+    const sent = info.setCapability("mcp", "k8s", false);
+    await settle();
+    expect(caps.sets).toEqual([{ kind: "mcp", name: "k8s", enabled: false }]);
+    // Sent, not echoed: still on.
+    expect(k8s(info.state())?.switch?.on).toBe(true);
+    caps.push(caps.applied({ kind: "mcp", name: "k8s", enabled: false }), "iPhone");
+    gate.resolve();
+    await sent;
+    expect(k8s(info.state())?.switch?.on).toBe(false);
+    // My own echo is not "changed on" anything.
+    expect(k8s(info.state())?.subtitle).toBe("Off · hidden from the model");
+  });
+
+  test("another device's change repaints the sheet with 'changed on <device>' (Q4)", async () => {
+    const caps = fakeCaps();
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    let painted = 0;
+    info.subscribe(() => {
+      painted += 1;
+    });
+    caps.push({ disabledMcp: ["k8s"], disabledSkills: [] }, "MacBook");
+    expect(painted).toBeGreaterThan(0);
+    expect(k8s(info.state())?.subtitle).toBe("Off · hidden from the model · changed on MacBook");
+  });
+
+  test("a snapshot (re-attach, no by) is never 'changed on' (F5)", async () => {
+    const caps = fakeCaps();
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    caps.push({ disabledMcp: ["k8s"], disabledSkills: [] });
+    expect(k8s(info.state())?.switch?.on).toBe(false);
+    expect(k8s(info.state())?.subtitle).toBe("Off · hidden from the model");
+  });
+
+  test("my own later change clears another device's note on that row", async () => {
+    const caps = fakeCaps();
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    caps.push({ disabledMcp: ["k8s"], disabledSkills: [] }, "MacBook");
+    await info.setCapability("mcp", "k8s", true);
+    expect(k8s(info.state())?.switch?.on).toBe(true);
+    expect(k8s(info.state())?.subtitle).toBeUndefined();
+  });
+
+  test("close() stops following the switches and forgets the notes (only while open)", async () => {
+    const caps = fakeCaps();
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    expect(caps.listeners.size).toBe(1);
+    caps.push({ disabledMcp: ["k8s"], disabledSkills: [] }, "MacBook");
+    info.close();
+    expect(caps.listeners.size).toBe(0);
+    await info.open();
+    expect(caps.listeners.size).toBe(1);
+    expect(k8s(info.state())?.subtitle).toBe("Off · hidden from the model");
+  });
+
+  test("a refused set is shown under its section, and cleared by the next attempt", async () => {
+    const caps = fakeCaps();
+    caps.answerWith(async () => {
+      throw new RpcError(JsonRpcErrorCode.InvalidParams, "too many names");
+    });
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    await info.setCapability("mcp", "k8s", false);
+    const mcp = () => view(info.state()).sections.find((s) => s.id === "mcp");
+    expect(mcp()?.switchNote).toBe("Couldn't switch: too many names");
+    expect(k8s(info.state())?.switch?.on).toBe(true);
+    caps.answerWith(async (op) => {
+      caps.push(caps.applied(op), "iPhone");
+    });
+    await info.setCapability("mcp", "k8s", false);
+    expect(mcp()?.switchNote).toBe(
+      "Off hides it from the model in this session, from the next reply.",
+    );
+  });
+
+  test("a refused set leaves nothing pending: the same change from another device is news", async () => {
+    const caps = fakeCaps();
+    caps.answerWith(async () => {
+      throw new RpcError(JsonRpcErrorCode.InternalError, "boom");
+    });
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    await info.setCapability("mcp", "k8s", false);
+    caps.push({ disabledMcp: ["k8s"], disabledSkills: [] }, "MacBook");
+    expect(k8s(info.state())?.subtitle).toBe("Off · hidden from the model · changed on MacBook");
+  });
+
+  test("an older daemon (MethodNotFound) turns the switches into ghosts, with no error text (F7)", async () => {
+    const caps = fakeCaps();
+    caps.answerWith(async () => {
+      caps.push(undefined);
+      throw new RpcError(JsonRpcErrorCode.MethodNotFound, "Method not found");
+    });
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    await info.setCapability("mcp", "k8s", false);
+    const mcp = view(info.state()).sections.find((s) => s.id === "mcp");
+    expect(k8s(info.state())?.switch?.interactive).toBe(false);
+    expect(mcp?.switchNote).toBe("The tentacle on MacBook Pro can't turn servers off — update it.");
+  });
+
+  test("an open that reported no switches is `unsupported` from the start", async () => {
+    const caps = fakeCaps();
+    // The open's snapshot carried no `capabilities` (an older daemon).
+    caps.push(undefined);
+    const info = createSessionInfo(withCaps(caps));
+    await info.open();
+    expect(k8s(info.state())?.switch?.interactive).toBe(false);
+  });
+
+  test("not attached: the switches are ghosts and a tap sends nothing (F4)", async () => {
+    const caps = fakeCaps();
+    const info = createSessionInfo(withCaps(caps, { phase: () => "failed" }));
+    await info.open();
+    expect(k8s(info.state())?.switch?.interactive).toBe(false);
+    await info.setCapability("mcp", "k8s", false);
+    expect(caps.sets).toEqual([]);
+  });
+
+  test("offline: a tap sends nothing (F1)", async () => {
+    const caps = fakeCaps();
+    let notify: (status: "up" | "down") => void = () => undefined;
+    const info = createSessionInfo(
+      withCaps(caps, {
+        onLink: (listener) => {
+          notify = listener;
+          return () => undefined;
+        },
+      }),
+    );
+    await info.open();
+    notify("down");
+    expect(k8s(info.state())?.switch?.interactive).toBe(false);
+    await info.setCapability("mcp", "k8s", false);
+    expect(caps.sets).toEqual([]);
+  });
+
+  test("a handle with no switch surface reads as an older daemon", async () => {
+    const info = createSessionInfo(port({ mcpStatus: () => Promise.resolve(servers) }).port);
+    await info.open();
+    expect(k8s(info.state())?.switch?.interactive).toBe(false);
+  });
+});
+
 describe("the sheet's facts", () => {
   test("the title, the computer and the daemon come from the port, not the wire", async () => {
     const info = createSessionInfo(port().port);

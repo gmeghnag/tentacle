@@ -424,6 +424,20 @@ function infoWiring(
         skills: () => remote.skills(),
         context: () => remote.context(),
         ...(live.autoAccept === undefined ? {} : { autoAccept: live.autoAccept }),
+        // The MCP/skill switches (docs/feat/session-capabilities.md S5): the same
+        // handle's `capabilities()` / `onCapabilities` / `setCapability`, so the
+        // phone toggles through the one client stack like the TUI does.
+        ...(typeof remote.setCapability !== "function"
+          ? {}
+          : {
+              capabilities: {
+                current: () => remote.capabilities(),
+                onChange: (listener: Parameters<RemoteSession["onCapabilities"]>[0]) =>
+                  remote.onCapabilities(listener),
+                set: (kind: "mcp" | "skill", name: string, enabled: boolean) =>
+                  remote.setCapability(kind, name, enabled),
+              },
+            }),
       };
     },
     onLink: (listener: (status: "up" | "down") => void) =>
