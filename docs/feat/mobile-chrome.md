@@ -2646,3 +2646,26 @@ passed on the first attempt:
   wrappers.** They are kept because `view.sections.map` needs a per-section key
   holder, not because they space anything; a future pass can fold them once the
   map is rewritten.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16 · slice S4 only, fresh context (different model family from the deepseek executor)*
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM).
+
+**Gate (re-run):** band-screens + band-wiring + e2e-session-capabilities: 58 pass / 0 fail; `bun run lint` clean (1693 files); `bun run typecheck` OK. I did not re-run the full suite.
+
+**Findings**
+
+1. **MEDIUM — a section's notes run together into one line.** Code: `SessionInfoSheet.tsx:244-274` and `BandSection.tsx:67-73`. `Section` passes the notes as a Fragment of `<Text>`s. `BandSection` puts that Fragment inside its own footnote `<Text>`. React Native lays out a `<Text>` nested in another `<Text>` inline, with no break between them. Before S4, each note was its own paragraph. Example: the MCP section always has a `footer` (`session-info.ts:687`) and may also have a `switchNote` (`:689`), so it now reads "1 of 2 connected" followed straight by the switch note, with no space. The Skills section can join three notes this way ("and 3 more" + "N skipped" + the switch note, `:797-802`). A second problem comes with it: a nested `<Text>` is a virtual text node on iOS, so the `session-info-switch-note-*` testID matches no view. The tests did not catch this because they scan the source text and never lay anything out, so the mutation-based checks cannot see it either. Fix: let `BandSection` take a non-string footnote as a `View`, or have each note render as its own block. Then add a test that pins one block per note.
+
+**Attacks tried**
+- Mutation: I removed the `{closeGlyph}` that the scroll variant pins outside the `ScrollView`. The band-wiring test failed (1 fail), so that test does detect the change. I reverted the edit with `Edit`, and `git status` showed the tree clean afterwards.
+- Flow contracts: flow 25 still taps `session-info-close`, through `closeTestID` on `Sheet`. No flow references the switch-note id.
+- Auto-accept moved into the Session band as its last row. It no longer passes `first`, so it draws a hairline between itself and the row above, which is correct. It shows on the same condition as before (`section.id === "session" && autoAccept`).
+- §7 invariants: S4 only touches rendering. It has no protocol, persistence, RPC or broker reach, and puts no new logic in a component apart from the `notes` filter, which is trivial.
+- Small items, not findings: the root dropped `paddingTop: insets.top`, which was the old top bar's inset (please confirm on a device). `BandSection.tsx:4` duplicates the "label, then ONE full-width surface" line in its doc comment. Two notes with identical text would get duplicate React keys.
+
+**Unverified:** I did not run flows 24/25 or take screenshots, because the PushCore blocker recorded in Execution still stands. So the visual check against row D is still owed.
+
+**Executor behaviour:** Honest and thorough. It recorded its drift openly, fixed the five vacuous tests its own mutations exposed, and was clear about what it had not verified. Its gap is the one in finding 1: every test reads the source, none renders, so a layout regression gets through.
