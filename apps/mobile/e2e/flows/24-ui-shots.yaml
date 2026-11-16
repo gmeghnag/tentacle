@@ -135,6 +135,19 @@ appId: so.tentacle.app
     id: "session-menu-cancel"
 - assertNotVisible:
     id: "session-menu-copy-last"
+# mobile-chrome S6: the sessions drawer over the conversation (both themes).
+- tapOn:
+    id: "session-drawer"
+- assertVisible:
+    id: "drawer-current-${SHOTS_ID}"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-drawer"
+- tapOn:
+    id: "drawer-scrim"
+- assertNotVisible:
+    id: "drawer"
 # Leave the simulator light for whatever runs next.
 - runScript:
     file: "appearance.js"

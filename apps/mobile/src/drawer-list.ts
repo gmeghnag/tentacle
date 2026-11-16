@@ -162,3 +162,98 @@ export function drawerTitle(
     canCreate: status.tone === "online",
   };
 }
+
+/**
+ * One line of the drawer's list, in order (slice S6): the component maps each
+ * kind to one element and decides nothing (AGENTS §7).
+ */
+export type DrawerItem =
+  | { readonly kind: "label"; readonly key: string; readonly text: "Running" | "Recent" }
+  | { readonly kind: "row"; readonly key: string; readonly row: DrawerRow }
+  /** "Archived · n": a toggle; its rows follow only while `open`. */
+  | {
+      readonly kind: "archived";
+      readonly key: string;
+      readonly count: number;
+      readonly open: boolean;
+    }
+  | { readonly kind: "more"; readonly key: string }
+  | { readonly kind: "loading"; readonly key: string }
+  /** The list could not be read and has nothing to show: the reason, with Retry (F2). */
+  | { readonly kind: "error"; readonly key: string; readonly text: string }
+  /** A previous list is shown while the computer cannot be reached (F2). */
+  | { readonly kind: "stale"; readonly key: string; readonly text: string }
+  | { readonly kind: "empty"; readonly key: string };
+
+/** The Sessions screen's own wording for the same states (`SessionsScreen.tsx`). */
+const STALE_TEXT = "Showing the last list this phone saw.";
+const ERROR_TEXT = "Something went wrong";
+
+export function drawerItems(list: DrawerList): readonly DrawerItem[] {
+  const items: DrawerItem[] = [];
+  if (list.status === "failed") {
+    items.push({ kind: "error", key: "error", text: list.error ?? ERROR_TEXT });
+  } else if (list.stale) {
+    items.push({ kind: "stale", key: "stale", text: list.error ?? STALE_TEXT });
+  }
+  const anyRows = list.running.length + list.recent.length + list.archived.count > 0;
+  if ((list.status === "loading" || list.status === "idle") && !anyRows) {
+    items.push({ kind: "loading", key: "loading" });
+  }
+  if (list.empty) {
+    items.push({ kind: "empty", key: "empty" });
+  }
+  const section = (text: "Running" | "Recent", rows: readonly DrawerRow[]): void => {
+    if (rows.length === 0) {
+      return;
+    }
+    items.push({ kind: "label", key: `label-${text}`, text });
+    for (const row of rows) {
+      items.push({ kind: "row", key: `row-${row.id}`, row });
+    }
+  };
+  section("Running", list.running);
+  section("Recent", list.recent);
+  if (list.archived.count > 0) {
+    const open = list.archived.rows !== null;
+    items.push({ kind: "archived", key: "archived", count: list.archived.count, open });
+    for (const row of list.archived.rows ?? []) {
+      items.push({ kind: "row", key: `row-${row.id}`, row });
+    }
+  }
+  if (list.canLoadMore) {
+    items.push({ kind: "more", key: "more" });
+  }
+  return items;
+}
+
+/** One computer in the menu under the drawer's title. */
+export interface DrawerComputer {
+  readonly id: string;
+  readonly name: string;
+  readonly tone: ComputerTone;
+  readonly status: string;
+  readonly checked: boolean;
+}
+/**
+ * The computer menu (Design 3): every paired computer in record order, with
+ * the Computers screen's status word; one not probed yet says "Connecting…"
+ * (never "Online" by default). Picking one changes only the drawer's list.
+ */
+export function drawerComputers(
+  records: readonly ComputerRecordLike[],
+  rows: readonly ComputerRow[],
+  selectedId: string,
+): readonly DrawerComputer[] {
+  return records.map((record) => {
+    const row = rows.find((r) => r.id === record.id);
+    const status = row === undefined ? undefined : computerStatus(row);
+    return {
+      id: record.id,
+      name: record.name,
+      tone: status?.tone ?? "offline",
+      status: status?.text ?? "Connecting…",
+      checked: record.id === selectedId,
+    };
+  });
+}

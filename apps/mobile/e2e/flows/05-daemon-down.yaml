@@ -25,6 +25,27 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "05-sessions-stale"
+# mobile-chrome F2: the drawer over a session of the down computer says the list
+# could not be read, with Retry — never an empty "no sessions".
+- tapOn:
+    id: "session-${ALPHA_ID}"
+- tapOn:
+    id: "session-drawer"
+- extendedWaitUntil:
+    visible:
+      id: "drawer-retry"
+    timeout: 20000
+- assertNotVisible:
+    id: "drawer-empty"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "05-drawer-offline"
+# The magnifier resets the stack to Computers → Sessions (the session screen has
+# no back button any more; Maestro has no iOS edge swipe).
+- tapOn:
+    id: "drawer-search"
+- hideKeyboard
 # The computer, offline, on Computers (visual review V5) — then back in.
 - tapOn:
     id: "sessions-back"
