@@ -737,14 +737,17 @@ function noticeLines(text: string, expanded: boolean, hint?: string, body?: stri
 export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
   switch (item.kind) {
     case "user": {
-      // An image-only prompt has no text: its rows are the image lines alone
-      // (a blank text row would collapse — Ink measures an empty <Text> 0×0, P9).
-      const hasImages = (item.images ?? []).length > 0;
-      const rows =
-        item.text === "" && hasImages
-          ? []
-          : userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
+      // An attachment-only prompt has no text: its rows are the attachment lines
+      // alone (a blank text row would collapse — Ink measures an empty <Text> 0×0, P9).
+      const onlyAttachments =
+        item.text === "" && ((item.images ?? []).length > 0 || (item.documents ?? []).length > 0);
+      const rows = onlyAttachments
+        ? []
+        : userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
       const images = (item.images ?? []).map((row) => theme.subtle(row));
+      // A PDF's row (docs/feat/pdf-read.md D5) is the same subtle line, after the
+      // images: the user sees the file's name; the text lives with the model.
+      const documents = (item.documents ?? []).map((row) => theme.subtle(row));
       // A fired turn's own head (cron-tool S5, M4 option B): the styled row the
       // `turn_start.schedule` ref earns. No ref → nothing here, and the durable
       // `[scheduled …]` prefix in the text is the whole row (option A).
@@ -756,6 +759,7 @@ export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
         ...(item.restart ? [theme.subtle("restart prompt")] : []),
         ...rows,
         ...images,
+        ...documents,
       ];
     }
     case "assistant":

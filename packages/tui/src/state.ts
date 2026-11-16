@@ -32,10 +32,15 @@ export interface UserItem {
   readonly kind: "user";
   readonly text: string;
   /**
-   * The prompt's image rows, precomputed (`[image: name]`, docs/feat/attachments-tui.md
-   * D7): one line under the text, and for an image-only prompt the ONLY rows.
+   * The prompt's attachment rows, precomputed (`[image: name]`, docs/feat/attachments-tui.md
+   * D7): one line under the text, and for an attachment-only prompt the ONLY rows.
    */
   readonly images?: readonly string[];
+  /**
+   * The prompt's PDF rows (`[pdf: report.pdf · 2 pp]`, docs/feat/pdf-read.md D5):
+   * after the image rows, in the same slot — the block itself is never shown.
+   */
+  readonly documents?: readonly string[];
   /** The model's restart prompt after a context reset (labelled "restart prompt"). */
   readonly restart?: true;
   /**
@@ -324,6 +329,7 @@ export function startTurn(
   text: string,
   now: number,
   images?: readonly string[],
+  documents?: readonly string[],
 ): DisplayState {
   return {
     ...state,
@@ -331,6 +337,7 @@ export function startTurn(
       kind: "user",
       text,
       ...(images !== undefined && images.length > 0 ? { images } : {}),
+      ...(documents !== undefined && documents.length > 0 ? { documents } : {}),
     }),
     running: true,
     reasoning: false,
@@ -715,6 +722,12 @@ export function applySessionEvent(
         ...(event.attachments !== undefined && event.attachments.length > 0
           ? { images: event.attachments.map(imageRowText) }
           : {}),
+        // A PDF's chip is NOT on the wire (docs/feat/pdf-read.md D6): the daemon
+        // sends `media` into the message it persists, never into `turn_start`,
+        // so another device's PDF prompt shows its text here and its chip when
+        // the transcript is reloaded from the log (`resume.ts`, which reads
+        // `ChatMessage.media`). Said plainly rather than guessed at: naming a
+        // chip this build was never told about would be an invention.
         // Its own row (cron-tool S5, M4 option B); absent paints option A.
         ...(event.schedule === undefined ? {} : { schedule: event.schedule }),
       }),
