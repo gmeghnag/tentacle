@@ -4,8 +4,13 @@
  * screen only reports what happened.
  */
 import { type ComposerAction, returnKeyAction } from "./composer.ts";
+import type { GestureEffect } from "./hub-gesture.ts";
 
-export type HapticKind = "light" | "firm" | "success";
+/**
+ * `tick` = the selection click (a new highlighted hub item), `commit` = a crisp
+ * rigid impact (a hub item chosen) — docs/feat/mobile-hub.md Design 2.
+ */
+export type HapticKind = "light" | "firm" | "success" | "tick" | "commit";
 
 /**
  * The composer's press: light when words leave (send / queue / send later),
@@ -32,4 +37,14 @@ export function pressHaptic(action: ComposerAction, via: "button" | "return"): H
 /** A turn that was running and is not any more: success (own or another device's). */
 export function turnEndHaptic(wasRunning: boolean, running: boolean): HapticKind | null {
   return wasRunning && !running ? "success" : null;
+}
+
+/**
+ * The hub machine's effect → the haptic it plays (docs/feat/mobile-hub.md
+ * Design 2): open = firm (the lift), a new highlight = tick, commit = commit.
+ * The machine already decides WHEN (no tick on a cleared highlight, silence on
+ * cancel / sticky / drag); every other effect is silent here.
+ */
+export function hubHaptic(effect: GestureEffect): HapticKind | null {
+  return effect.kind === "haptic" ? effect.cue : null;
 }

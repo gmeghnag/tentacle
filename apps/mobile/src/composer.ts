@@ -142,6 +142,14 @@ export const REFUSED_NOTICE = "another device started a turn — your message is
 export const FAILED_NOTICE = "that message did not go through — it is back in the field";
 
 /**
+ * A pull-to-refresh whose re-attach failed (item 3): the rows on screen are what
+ * it already had, and nothing was re-read. Never silent — a gesture that changed
+ * nothing must say why.
+ */
+export const RESYNC_FAILED_NOTICE =
+  "could not re-read this session — showing what was already loaded";
+
+/**
  * The field's text after a refused send: the person's words go back, unless
  * something was typed since (then theirs is kept and the refused text follows it
  * on its own line — appended, never silently dropped).

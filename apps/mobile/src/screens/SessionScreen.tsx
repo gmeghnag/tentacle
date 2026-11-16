@@ -40,16 +40,20 @@ import {
   type NativeSyntheticEvent,
   Platform,
   Pressable,
+  RefreshControl,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { reportsOf } from "../activity-memory.ts";
+import { ACTIVITY_SETTINGS } from "../activity-settings-expo.ts";
+import type { ActivitySettings } from "../activity-settings-store.ts";
 import { activityView, agentCardTarget } from "../activity.ts";
 import { chatStatus } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
+import { type FloatBounds, fits, visible as floatVisible, headerPill } from "../floating-button.ts";
 import {
   type Follow,
   type FollowStep,
@@ -79,6 +83,7 @@ import { Banner } from "../ui/Banner.tsx";
 import { Composer } from "../ui/Composer.tsx";
 import { ContextRing } from "../ui/ContextRing.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
+import { FloatingActivity, useAccessibilityFlags } from "../ui/FloatingActivity.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
@@ -112,6 +117,8 @@ export interface SessionScreenProps {
   readonly onOpenDrawer?: () => void;
   /** Just created by the drawer's New session (S7): the composer takes focus once it is editable. */
   readonly focusComposer?: boolean;
+  /** The sessions drawer is open over this screen: the floating button hides (F20). */
+  readonly drawerOpen?: boolean;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -142,6 +149,7 @@ export function SessionScreen({
   title,
   onOpenDrawer,
   focusComposer = false,
+  drawerOpen = false,
 }: SessionScreenProps): JSX.Element {
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
@@ -501,6 +509,35 @@ export function SessionScreen({
   const [deciding, setDeciding] = useState<string | null>(null);
   const decision =
     deciding === null ? null : (compose.outbox.find((r) => r.itemId === deciding) ?? null);
+  // The floating Activity button (Design 6, S10): the Settings choice (read
+  // live, like the voice switches), VoiceOver / Reduce Motion (F23), and the
+  // band it lives in — the list host between the header and the composer, so
+  // the keyboard and the composer's growth shrink it (F20). Every rule is
+  // `floating-button.ts`'s.
+  const [activitySettings, setActivitySettings] = useState<ActivitySettings>(() =>
+    ACTIVITY_SETTINGS.current(),
+  );
+  useEffect(() => ACTIVITY_SETTINGS.subscribe(setActivitySettings), []);
+  const a11yFlags = useAccessibilityFlags();
+  const [band, setBand] = useState<FloatBounds | null>(null);
+  const pillShown =
+    activityVm.badge && headerPill({ mode: activitySettings.mode, voiceOver: a11yFlags.voiceOver });
+  const floatShown = floatVisible({
+    mode: activitySettings.mode,
+    covered:
+      drawerOpen ||
+      activityOpen ||
+      infoOpen ||
+      menuOpen ||
+      renaming !== null ||
+      decision !== null ||
+      state.sheet.kind !== "idle",
+    fits: band !== null && fits(band),
+  });
+  const openActivity = () => {
+    focusActivity(null);
+    setActivityOpen(true);
+  };
   return (
     <View
       ref={frame}
@@ -533,18 +570,17 @@ export function SessionScreen({
           right={
             <>
               {/* F1: the Activity pill, between the title and the ring, only
-                  while something runs or a report is unread (Design 5). */}
-              {activityVm.badge ? (
+                  while something runs or a report is unread (Design 5). With
+                  "Floating" the button carries it instead, unless VoiceOver
+                  runs (F23). */}
+              {pillShown ? (
                 <ActivityBadge
                   palette={palette}
                   testID="session-activity"
                   label={activityVm.badgeLabel}
                   running={activityVm.count > 0}
                   accessibilityLabel={activityVm.accessibilityLabel}
-                  onPress={() => {
-                    focusActivity(null);
-                    setActivityOpen(true);
-                  }}
+                  onPress={openActivity}
                 />
               ) : null}
               {/* A1: the context fraction as a small ring next to "…", tap →
@@ -617,7 +653,13 @@ export function SessionScreen({
             />
           </View>
         )}
-        <View style={styles.screen}>
+        <View
+          style={styles.screen}
+          onLayout={(event) => {
+            const { width, height } = event.nativeEvent.layout;
+            setBand({ width, height });
+          }}
+        >
           <FlatList
             ref={list}
             testID="transcript"
@@ -674,6 +716,16 @@ export function SessionScreen({
             onScrollBeginDrag={() => {
               dragging.current = true;
             }}
+            // Pull-to-refresh (item 3): the owner's own recovery — re-read the
+            // session from the daemon. The look is the chrome's, the decision is
+            // `controller.resync()`'s (never a second session path).
+            refreshControl={
+              <RefreshControl
+                refreshing={state.refreshing}
+                onRefresh={() => void controller.resync()}
+                tintColor={palette.sec}
+              />
+            }
             onScrollEndDrag={() => {
               dragging.current = false;
             }}
@@ -738,6 +790,26 @@ export function SessionScreen({
                 {follow.unseen ? "New messages" : "Jump to latest"}
               </Text>
             </Pressable>
+          ) : null}
+          {activitySettings.mode === "floating" ? (
+            <FloatingActivity
+              palette={palette}
+              bounds={band}
+              position={activitySettings.position}
+              shown={floatShown}
+              label={activityVm.badgeLabel}
+              running={activityVm.count > 0}
+              accessibilityLabel={activityVm.accessibilityLabel}
+              voiceOver={a11yFlags.voiceOver}
+              reduceMotion={a11yFlags.reduceMotion}
+              onPress={openActivity}
+              onDrop={(position) => {
+                // Written on drop only; a failed write keeps the spot for this run (F22).
+                ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), position }).catch(
+                  () => undefined,
+                );
+              }}
+            />
           ) : null}
         </View>
         {/* ONE element, two ids: `turn-running` while a turn streams (own or

@@ -15,4 +15,8 @@
   sa-N…" field and Stop; a shell job shows its output (pull to refresh) and
   Stop; a finished child's report adds "Show in chat". Stop asks once first,
   and a message or Stop the computer refuses (the child just ended, an older
-  computer) says why and keeps what you typed.
+  computer) says why and keeps what you typed. Settings → Activity button can
+  swap the header pill for a floating button (off by default): drag it to
+  either edge, it stays there across launches, and it keeps out of the way of
+  the composer, the keyboard and open sheets; with VoiceOver it stays put and
+  the header pill is shown too.

@@ -377,20 +377,22 @@ export function createOutboxStore(
       });
     },
     async removeItem(itemId) {
-      const item = data.items.find((entry) => entry.itemId === itemId);
-      const saved = await write({
+      // The item goes; its photo copies STAY (fix round 2, Review round 2's
+      // R2-1). A copy is also the only pixels the transcript has for a photo
+      // this phone sent (`localPhotosOf` → `ImageRef.localUri`; the protocol has
+      // no read-back), and the ROW outlives the item — deleting the file at the
+      // ack left the bubble over an empty frame. The same delete also broke the
+      // person's own return path, `backToDraft`: it handed the item's photos
+      // back to the field through this very call.
+      //
+      // Bounding the folder is `photo-copies.ts`'s decision (a grace window +
+      // the newest copies + everything still named by an item or a draft),
+      // applied by the app on its own schedule — never here, where the store
+      // cannot see what a transcript (or another computer) is still showing.
+      return write({
         ...data,
         items: data.items.filter((entry) => entry.itemId !== itemId),
       });
-      if (item === undefined) {
-        return saved;
-      }
-      // Its photo copies go with it. A copy that cannot be removed is not a
-      // failed removal: the item is gone, and a stray file costs disk only.
-      for (const photo of item.photos) {
-        await fs.remove(photo.file).catch(() => {});
-      }
-      return saved;
     },
   };
 }
