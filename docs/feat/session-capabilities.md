@@ -1546,3 +1546,219 @@ Fresh-context adversarial review of slice S3b only (`git diff main...HEAD`).
   identical entry, which is harmless because the last entry wins.
 - **Executor behaviour:** the Execution section is honest. The mutations it
   claims reproduce.
+
+#### UI decisions (owner delegated, 2026-11-16 ~00:55: "Decidi tu" on Q1–Q5)
+
+*— claude-opus-5-5 (orchestrator), 2026-11-16*
+
+The owner delegated the five UI questions to the plan's recommendations: **Q1 T1** (a `[✓]`/`[ ]`/`[–]` column in each existing panel); **Q2 yes** (status-line marker only when something is off); **Q3 P1** (a trailing iOS switch on every Session info row; tap the name for the server's tools; old daemon → switches disabled + footnote); **Q4 yes** ("Off · changed on <device>" while open, through `untrustedText`, + TUI notice); **Q5 yes** (`[–]` locked, dim, no words). The owner reviews the result on the phone in the morning. S4/S5 are APPROVED to execute on these.
+
+## Execution — S4
+
+*— claude-opus-5-5, 2026-11-16*
+
+Slice S4 only (TUI). S5 was not touched.
+
+### Starting state (honest note)
+
+When this run began, the working tree already held an **uncommitted S4
+implementation**. It came from an earlier executor run that was cut off before
+it wrote any Execution section, so its model is unknown. It covered 26 modified
+files plus `capability-toggles.ts` and its two test files.
+
+I did not rewrite it. I verified it against the plan and the code, then
+finished it:
+- fixed the lint;
+- added the missing end-to-end controller test (C5);
+- mutation-checked every target;
+- ran the gate.
+
+Because the code was already there, I could not run "red on unimplemented
+code" literally. Red is shown by mutation instead (below).
+
+### Load-bearing check (re-run first)
+
+The question: does `session/skills` tell "never the model's" (`[–]`) apart
+from "off for this session" (`[ ]`)? **Yes, no `locked` field is needed.**
+- `SkillListEntrySchema` (`packages/protocol/src/skills.ts`) carries `model`,
+  `modelAfterReset?` and `disabled?`.
+- `disabled` is set independently of `model` (`daemon/src/mapping.ts:99-101`).
+- `model` is `offeredNames.has(name)` (`cli/src/wiring.ts:180`), and the
+  offered set is `modelInvocable` skills only (`config/src/skills.ts:219`).
+
+So `!model && !modelAfterReset` means the model can never be offered it. The
+`[ ]` state comes from the session's own switches, never from `model`. There is
+no protocol change and nothing to regenerate in `protocol.json`.
+
+### As built (verified)
+
+- **Pure module** `packages/tui/src/capability-toggles.ts`:
+  - phase: `on` / `not-open` / `unsupported`;
+  - switch state and glyph `[✓]`/`[ ]`/`[–]`, plus `skillLocked`;
+  - `switchOp` (null on locked);
+  - title note, hint and notices;
+  - `capsMarker` (`⊘ 1 server · 2 skills off`);
+  - `remoteChangeNotices` (own echo matched against the pending sets; a
+    snapshot without `by` is never news; `by` and names go through `oneLine`).
+- **Panels:**
+  - `mcp-panel.ts`: the head is `[✓] name  ● N tools` (`✗ failed` stays). The
+    state word and latency, or the error, are the first child.
+  - `skills-panel.ts`: `who()` is removed. The head is
+    `[✓] name  description`. Who may invoke it, and why, moves to the expanded
+    row (`modelNote`).
+  - `tree-panel.ts`: Space is now `switch` and Enter expands. Off and locked
+    groups are drawn `dim`. `ListPanel.tsx` dims a head with `dim`.
+  - `panels/{mcp,skills,tree,registry}.ts`: an optional `PanelKind.switchOp`,
+    `cursorGroup`, and `PanelAt.caps`. `panel.ts` adds `panelSwitchOp`.
+- **Keys:**
+  - `treeStep` gives Space the `switchCapability` effect
+    (`keys/effects.ts`, `keys/execute.ts`).
+  - `App.tsx` `switchCapability` decides on the LIVE panel and switch state,
+    sends `setCapability`, and records it as pending. A refusal gives a
+    notice. The row flips only on the daemon's echo (not optimistic).
+- **Subscription:** `useSessionLink.ts` seeds from `capabilities()` and
+  subscribes `onCapabilities` per session. It unsubscribes on a session switch
+  and on unmount.
+- **Status bar:** `StatusBar.tsx` / `app-layout.ts` show the marker only while
+  something is off.
+- **Palette:** `commands/mcp.ts` and `commands/skills.ts` descriptions end in
+  "— and on/off for this session".
+- **Controller:**
+  - `SessionController` gains optional `capabilities` / `onCapabilities` /
+    `setCapability` / `opened` (`app-types.ts`).
+  - `RemoteSession.opened()` is new (`client/src/remote-session.ts`).
+  - `persistingController` forwards the three new members
+    (`cli/src/local-runtime.ts`).
+  - `connect` hands the raw `RemoteSession` (`connect.ts:296-306`), so every
+    runtime has the switch path.
+- **This run:**
+  - `biome check --write` on 8 files (formatting and import order only) and
+    one unused `biome-ignore` removed;
+  - new test **C5** in `packages/cli/test/session-capabilities-resume.test.ts`;
+  - changelog fragment updated (still the one file);
+  - the first full `bun test` showed **3 failures in tests the narrow runs did
+    not cover**, now fixed:
+    - `app.test.tsx:2044` still expected the old expanded text
+      `offered to the model`. It now expects `the model sees it too`.
+    - The `app-tidy-structure` S14 guard caught `capsMarker` imported and
+      unused in `App.tsx`. I removed the import.
+    - The `subagent-panel-controller` GUARD pins the exact set of forwarded
+      `SessionController` members. I added the four new ones deliberately
+      (they are forwarded, see C5).
+
+### Drift from the Implementation (and why)
+
+- **No mouse toggle on the switch column.** The mockup page's keys list it.
+  The Design does not require it. A click carries only `bodyIndex`, not the
+  column (`mouse-stream.ts:225`), so it would need a mouse-protocol change.
+  A click still selects and expands; Space switches. Left as debt.
+- **No separate footer.** "applies to the next model call" sits in the title
+  rule (`capsTitleNote`), as the chosen T1 frame shows. The plan's
+  "hidden, not uninstalled" wording is not shown.
+- **`skills-sync.ts` unchanged.** The switch state comes from the session
+  (`onCapabilities`), not from the skills listing, so nothing was needed there.
+- **Known imprecision (LOW):**
+  - A skill cut by `MAX_CATALOG_SKILLS` also reads as `[–]`, and its expanded
+    row says "disable-model-invocation". The wire cannot tell it apart, and the
+    old `who()` column said "you only" for it too.
+  - A skill marked `modelAfterReset` shows `[✓]`: the switch is on, but the
+    model gets it only at the next reset, which its expanded row says.
+
+### Mutation checks (§9)
+
+Run with `.tentacle/tmp/session-capabilities/s4-mut.ts`. Each mutation is a
+literal replace, restored from memory. It runs the 4 TUI S4 test files plus
+`session-capabilities-resume.test.ts`. All 12 were killed:
+
+```
+M1-no-forward-set   (persistingController drops setCapability)  1 fail :: C5
+M2-opened-always    (RemoteSession.opened → true)              1 fail :: C5
+M3-space-expands    (Space → "toggle")                         5 fail :: key test, App Space test, not-open test …
+M4-never-locked     (skillLocked → false)                      4 fail :: [–] locked, Space on locked, expanded who/why
+M5-no-marker        (capsMarker → null)                        2 fail :: marker unit, App Space test
+M6-own-echo-news    (own echo not consumed)                    2 fail :: own-echo unit, App Space test
+M7-op-inverted      (enabled: state === "on")                  5 fail :: mcp/skills Space ops …
+M8-optimistic       (flip the row before the echo)             2 fail :: App Space test, refused-switch test
+M9-locked-flippable (switchOp allows locked)                   1 fail :: Space: nothing on a locked skill
+M10-no-unsub        (App unmount keeps the subscription)       1 fail :: leaving the session drops its subscription
+M11-who-back        (who column back in the head)              4 fail :: quiet-grammar heads
+M12-cursor-first    (cursorGroup ignores the cursor)           4 fail :: Space flips the cursor's server/skill
+```
+
+C5 itself was red under M1 and M2. That is the red step for the only test this
+run added.
+
+### Failure modes covered by S4
+
+- **F5 / F13:** the rows read the live snapshot and echo.
+- **F7:** `MethodNotFound` → the state is cleared → phase `unsupported`. The
+  switch column is hidden and the title says "not supported by this computer".
+- **Not open:** no column, and Space explains why.
+- **Refusal:** a notice, and the row stays as reported.
+- **Remote change (Q4):** a notice through `oneLine`. The own echo is silent.
+
+### Gate
+
+- `bunx tsc --noEmit` and `bun run typecheck` (root + mobile + relay) are
+  clean.
+- `bun run lint`: `Checked 1680 files … No fixes applied.` (the 0/0 baseline).
+- `bun test`: **12136 pass, 5 skip, 0 fail** (12141 tests, 872 files,
+  447.06s). The 5 skips are the opt-in guards.
+- No schema changed, so `protocol.json` was not regenerated. There is no
+  `protocol.d/` note.
+- Changelog: the one fragment, `changelog.d/session-capabilities.added.md`, was
+  updated.
+
+**S4: DONE** (with the debt listed above). S5: not started (out of scope).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16*
+
+Fresh-context adversarial pass on **slice S4 only** (`git diff main...HEAD`).
+**Verdict: PASS.** No HIGH or MEDIUM findings.
+
+**Gate (re-run):**
+- 9 touched test files: 233 pass, 0 fail.
+- `bun run lint`: 1680 files, clean.
+- `bun run typecheck` (root + mobile + relay): clean.
+
+**§7 invariants it touches:**
+- **One session path.** It holds. The switches go through
+  `SessionController` → `persistingController` → `RemoteSession` →
+  `session/set_capability`. There is no second send path. The forwarded
+  member set is pinned by the GUARD test and by C5.
+- **Logic in pure modules.** It holds. Every decision (phase, glyph, op, lock,
+  marker, which change is news) is in `capability-toggles.ts`. `App.tsx` only
+  reads the live refs and executes.
+- **A pod is not trusted.** It holds. Every daemon string shown (names, `by`,
+  errors) goes through `oneLine`. A set goes only to the session's own daemon,
+  so it has no laptop effect and creates no approval.
+
+**Ordering checked:** the daemon sends the echo before its answer
+(`remote-session.ts` `setCapability` docstring, and the handler in
+`connection.ts`). The own-echo match therefore runs while the op is still
+pending, so your own change raises no false "changed on <device>" notice.
+Space now means `switch` in `treeKey`. Only `panels/mcp.ts` and
+`panels/skills.ts` use `treeStep`, so no other panel loses Space-to-expand.
+
+**Mutation (mine, reverted, tree verified clean):** I dropped the
+`by === undefined` guard in `remoteChangeNotices`, which makes a snapshot count
+as news. 1 test failed. The executor's 12 mutations are consistent with the
+suite I read.
+
+**LOW (not blocking):**
+1. `capsMarker` counts stale names. A server or skill turned off and later
+   removed (F10, carried through resume and `/clear`) keeps
+   `⊘ 1 server off` in the status line. The panel has no row for it, so the
+   TUI cannot clear it.
+2. `capsPendingRef` is not reset on a session switch. A set still in flight
+   while you switch could hide a matching change on the new session. This is
+   rare and only affects a notice.
+3. The `not-open` → `unsupported` phase reads `opened()` at render time. It
+   updates on the next re-render, not when the session opens.
+
+**Executor behaviour:** the executor was honest about inheriting an
+uncommitted implementation. It showed red by mutation rather than claiming
+red on unimplemented code, and it listed its drift (no mouse toggle, no
+separate footer).

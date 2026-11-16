@@ -1,13 +1,21 @@
 /**
  * What the `/skills` panel says (docs/feat/skills-panel.md): one group per
- * skill the daemon discovered — name, who may invoke it and its description
- * as the head; (expanded) the full description, how it is invoked and where
- * it lives — then one group for the discovery problems. The panel mechanics
+ * skill the daemon discovered — its switch, name and description as the head
+ * (the quiet grammar, docs/feat/session-capabilities.md S4); (expanded) the
+ * full description, who may invoke it and why, and where it lives — then one
+ * group for the discovery problems. The panel mechanics
  * live in `tree-panel.ts`.
  *
  * Every daemon string passes through `oneLine` (bidi/zero-width dropped): the
  * schema only rejects control characters, and the daemon may be a pod.
  */
+import {
+  type CapsPhase,
+  capsTitleNote,
+  skillLocked,
+  skillSwitch,
+  switchGlyph,
+} from "./capability-toggles.ts";
 import { oneLine } from "./commands.ts";
 import { type TreeGroup, wrapText } from "./tree-panel.ts";
 
@@ -25,12 +33,26 @@ export interface SkillView {
   readonly location: string;
 }
 
-/** What the panel says about the model (docs/feat/skills-hot-reload.md). */
-function modelNote(s: SkillView): string {
-  if (s.model) {
-    return "offered to the model";
+/**
+ * Who can invoke it, and why (the expanded row; the head carries only the
+ * switch — docs/feat/session-capabilities.md S4, the quiet grammar). `off`:
+ * turned off for the model in this session.
+ */
+function modelNote(s: SkillView, off: boolean): string {
+  if (skillLocked(s)) {
+    return s.user
+      ? "only you: its SKILL.md sets disable-model-invocation"
+      : "not offered to the model";
   }
-  return s.modelAfterReset === true ? "model: after a context reset" : "not offered to the model";
+  if (off) {
+    return s.user
+      ? "off for the model in this session — you can still run it"
+      : "off for the model in this session";
+  }
+  if (!s.model) {
+    return "model: after a context reset";
+  }
+  return s.user ? "the model sees it too" : "the model sees it";
 }
 
 export interface SkillsListView {
@@ -46,22 +68,23 @@ const DESCRIPTION_LINES = 8;
 /** Columns a child row loses to the marker and the indent (`tree-panel.ts`). */
 const CHILD_PREFIX = 8;
 
-function who(s: SkillView): string {
-  if (s.user && s.model) {
-    return "you + model";
-  }
-  if (s.user) {
-    return "you only";
-  }
-  return s.model ? "model only" : "hidden";
-}
+/** No switch column: the phase shows none (`capsPhase`). */
+const NO_CAPS: CapsPhase = { kind: "unsupported" };
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 const problemCount = (list: SkillsListView): number => list.problems.length + list.moreProblems;
 
-/** The groups at `width` columns (the description wraps to it). */
-export function skillGroups(list: SkillsListView, width: number): TreeGroup[] {
+/**
+ * The groups at `width` columns (the description wraps to it). `phase`: the
+ * session's switches (`capability-toggles.ts`); none by default. Skill `i` is
+ * group `i`; the problems group, when any, comes last.
+ */
+export function skillGroups(
+  list: SkillsListView,
+  width: number,
+  phase: CapsPhase = NO_CAPS,
+): TreeGroup[] {
   const nameWidth = Math.min(
     NAME_COLUMN_MAX,
     list.skills.reduce((w, s) => Math.max(w, oneLine(s.name).length), 0),
@@ -69,13 +92,17 @@ export function skillGroups(list: SkillsListView, width: number): TreeGroup[] {
   const groups: TreeGroup[] = list.skills.map((s) => {
     const name = oneLine(s.name);
     const description = oneLine(s.description);
+    const sw = skillSwitch(phase, s);
+    const lead = sw === null ? "" : `${switchGlyph(sw)} `;
+    const off = sw === "off";
     return {
-      head: `${name.padEnd(nameWidth)}  ${who(s).padEnd(11)}  ${description}`,
+      head: `${lead}${name.padEnd(nameWidth)}  ${description}`,
       children: [
         ...wrapText(description, width - CHILD_PREFIX, DESCRIPTION_LINES),
-        `${s.user ? `/${name}` : "no /command"} · ${modelNote(s)}`,
+        `${s.user ? `/${name}` : "no /command"} · ${modelNote(s, off)}`,
         `${s.scope} · ${oneLine(s.location)}`,
       ],
+      ...(off || sw === "locked" ? { off: true } : {}),
     };
   });
   const problems = problemCount(list);
@@ -91,9 +118,11 @@ export function skillGroups(list: SkillsListView, width: number): TreeGroup[] {
   return groups;
 }
 
-export function skillsTitle(list: SkillsListView): string {
+/** `phase` given: the title also says what the switches do now. */
+export function skillsTitle(list: SkillsListView, phase?: CapsPhase): string {
   const problems = problemCount(list);
-  return `Skills · ${list.skills.length} found${problems > 0 ? ` · ${plural(problems, "problem")}` : ""}`;
+  const base = `Skills · ${list.skills.length} found${problems > 0 ? ` · ${plural(problems, "problem")}` : ""}`;
+  return phase === undefined ? base : `${base} · ${capsTitleNote(phase)}`;
 }
 
 /** Nothing to show: no skill and no problem. */

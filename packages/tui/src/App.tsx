@@ -28,6 +28,15 @@ import {
   blinkState,
   syncBlink,
 } from "./blink.ts";
+import {
+  type CapOp,
+  type CapsView,
+  noSwitchNotice,
+  remoteChangeNotices,
+  sessionCapsPhase,
+  settled,
+  switchFailedNotice,
+} from "./capability-toggles.ts";
 import { idleChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import { type QuitConfirmFacts, oneLine, paletteStep } from "./commands.ts";
@@ -44,7 +53,7 @@ import { resolveLineEffects } from "./keys/line-layer.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { localSession } from "./local-session.ts";
-import { type OpenPanel, panelClick } from "./panel.ts";
+import { type OpenPanel, panelClick, panelSwitchOp } from "./panel.ts";
 import { pasteTarget, sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
 import {
@@ -405,6 +414,15 @@ export function App({
   const notifySubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentMessage` subscription (replaced with it). */
   const dockMsgSubRef = useRef<(() => void) | null>(null);
+  /** The current session's `onCapabilities` subscription (replaced with it). */
+  const capsSubRef = useRef<(() => void) | null>(null);
+  // The session's MCP/skill switches as the daemon last reported them
+  // (docs/feat/session-capabilities.md S4): the state renders, the ref is what
+  // the key executor and the change handler read live.
+  const [caps, setCapsState] = useState<CapsView | undefined>(undefined);
+  const capsRef = useRef<CapsView | undefined>(undefined);
+  /** This TUI's own switch sets awaiting their answer: their echo is not news. */
+  const capsPendingRef = useRef<readonly CapOp[]>([]);
   // My `/compact`s whose history has not arrived yet: that compaction's notice
   // is mine ("Context compacted"), not "on another device" (C6).
   const ownCompactionsRef = useRef(0);
@@ -827,6 +845,7 @@ export function App({
     quitConfirm,
     panel,
     sessionId: sessionRef.current?.sessionId ?? null,
+    capsPhase: sessionCapsPhase(sessionRef.current, caps),
     field,
     attach,
     skills: skills(),
@@ -961,6 +980,23 @@ export function App({
     [flushNow],
   );
   pushNoticeRef.current = pushNotice;
+
+  /**
+   * The daemon reported the session's switches (a snapshot, an echo, another
+   * device's change, or none: an older daemon). The rows follow it; another
+   * device's change earns a notice (`remoteChangeNotices` decides).
+   */
+  const onCapsChange = useCallback(
+    (next: CapsView | undefined, by?: string) => {
+      const notices = remoteChangeNotices(capsRef.current, next, by, capsPendingRef.current);
+      capsRef.current = next;
+      setCapsState(next);
+      for (const text of notices) {
+        pushNotice(text);
+      }
+    },
+    [pushNotice],
+  );
 
   // Rows changed: the dock keeps its selection BY ID, follows it when the row
   // leaves, and returns to the input when the list empties — `reconcile`'s
@@ -1342,6 +1378,8 @@ export function App({
     jobsSubRef,
     notifySubRef,
     dockMsgSubRef,
+    capsSubRef,
+    onCapsChange,
     heldRef,
     abortRef,
     streamCtrlRef,
@@ -1400,6 +1438,8 @@ export function App({
       jobsSubRef.current = null;
       notifySubRef.current?.();
       notifySubRef.current = null;
+      capsSubRef.current?.();
+      capsSubRef.current = null;
     };
   }, [watchSession]);
 
@@ -1699,6 +1739,31 @@ export function App({
     },
     closePanel,
     panelApply,
+    // Space in `/mcp` / `/skills` (docs/feat/session-capabilities.md S4): what it
+    // flips is decided on the LIVE panel and switches (`panelSwitchOp`); the row
+    // flips on the daemon's echo, never here.
+    switchCapability: () => {
+      const open = panelRef.current;
+      const session = sessionRef.current;
+      if (open === null) {
+        return;
+      }
+      const phase = sessionCapsPhase(session, capsRef.current);
+      const op = panelSwitchOp(open, columns, phase);
+      if (op === null || !session?.setCapability) {
+        const why = noSwitchNotice(phase);
+        if (why !== null) pushNotice(why);
+        return;
+      }
+      capsPendingRef.current = [...capsPendingRef.current, op];
+      const done = (): void => {
+        capsPendingRef.current = settled(capsPendingRef.current, op);
+      };
+      session.setCapability(op.kind, op.name, op.enabled).then(done, (error: unknown) => {
+        done();
+        pushNotice(switchFailedNotice(op, error));
+      });
+    },
     setSessionsState,
     switchTo,
     sessionsDelete,

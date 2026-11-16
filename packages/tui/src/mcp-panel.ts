@@ -1,12 +1,16 @@
 /**
  * What the `/mcp` panel says (docs/feat/mcp-tools-panel.md): one group per
- * server — its state as the head, then (expanded) its error and tool names.
- * The panel mechanics live in `tree-panel.ts`.
+ * server — its switch, name, a state glyph and its tool count as the head
+ * (the quiet grammar, docs/feat/session-capabilities.md S4), then (expanded)
+ * its state word with the latency or the error, and its tool names. The panel
+ * mechanics live in `tree-panel.ts`; the switch's decisions in
+ * `capability-toggles.ts`.
  *
  * Every daemon string passes through `oneLine` (bidi/zero-width dropped)
  * before it is shown: the schema only rejects control characters, and the
  * daemon may be a pod.
  */
+import { type CapsPhase, capsTitleNote, mcpSwitch, switchGlyph } from "./capability-toggles.ts";
 import { oneLine } from "./commands.ts";
 import type { TreeGroup } from "./tree-panel.ts";
 
@@ -32,30 +36,42 @@ const GLYPH: Readonly<Record<McpServerView["state"], string>> = {
 /** Server names are padded to align the state column, up to this width. */
 const NAME_COLUMN_MAX = 24;
 
+/** No switch column: the phase shows none (`capsPhase`). */
+const NO_CAPS: CapsPhase = { kind: "unsupported" };
+
 const toolCount = (n: number): string => `${n} tool${n === 1 ? "" : "s"}`;
 
-function head(s: McpServerView, nameWidth: number): string {
-  const base = `${oneLine(s.name).padEnd(nameWidth)}  ${GLYPH[s.state]} ${s.state}`;
-  const total = s.tools.length + s.moreTools;
+/**
+ * `[✓] name  ● 14 tools`. A failed server keeps `✗ failed` (a state to act on);
+ * a connecting one shows its glyph alone (no count is known yet).
+ */
+function head(s: McpServerView, nameWidth: number, phase: CapsPhase): string {
+  const sw = mcpSwitch(phase, s.name);
+  const lead = sw === null ? "" : `${switchGlyph(sw)} `;
+  const name = `${lead}${oneLine(s.name).padEnd(nameWidth)}  ${GLYPH[s.state]}`;
+  if (s.state === "connecting") {
+    return name;
+  }
+  return `${name} ${s.state === "failed" ? "failed" : toolCount(s.tools.length + s.moreTools)}`;
+}
+
+/** The first child: the state word (and the latency, or the error). */
+function stateRow(s: McpServerView): string {
+  const error = oneLine(s.error ?? "");
   switch (s.state) {
     case "connected":
-      return `${base} · ${toolCount(total)} · ${s.latencyMs ?? 0} ms`;
-    case "closed":
-    case "unresponsive":
-      return `${base} · ${toolCount(total)}`;
+      return `connected · ${s.latencyMs ?? 0} ms`;
+    case "connecting":
+      return "still connecting";
+    case "failed":
+      return error || "failed";
     default:
-      return base;
+      return error ? `${s.state} · ${error}` : s.state;
   }
 }
 
 function children(s: McpServerView): string[] {
-  const rows: string[] = [];
-  if (s.state === "connecting") {
-    rows.push("still connecting");
-  } else if (s.state !== "connected") {
-    rows.push(oneLine(s.error ?? "") || s.state);
-  }
-  rows.push(...s.tools.map(oneLine));
+  const rows = [stateRow(s), ...s.tools.map(oneLine)];
   if (s.moreTools > 0) {
     rows.push(`… ${s.moreTools} more`);
   }
@@ -65,15 +81,25 @@ function children(s: McpServerView): string[] {
   return rows;
 }
 
-export function mcpGroups(servers: readonly McpServerView[]): TreeGroup[] {
+/** `phase`: the session's switches (`capability-toggles.ts`); none by default. */
+export function mcpGroups(
+  servers: readonly McpServerView[],
+  phase: CapsPhase = NO_CAPS,
+): TreeGroup[] {
   const nameWidth = Math.min(
     NAME_COLUMN_MAX,
     servers.reduce((w, s) => Math.max(w, oneLine(s.name).length), 0),
   );
-  return servers.map((s) => ({ head: head(s, nameWidth), children: children(s) }));
+  return servers.map((s) => ({
+    head: head(s, nameWidth, phase),
+    children: children(s),
+    ...(mcpSwitch(phase, s.name) === "off" ? { off: true } : {}),
+  }));
 }
 
-export function mcpTitle(servers: readonly McpServerView[]): string {
+/** `phase` given: the title also says what the switches do now. */
+export function mcpTitle(servers: readonly McpServerView[], phase?: CapsPhase): string {
   const reachable = servers.filter((s) => s.state === "connected").length;
-  return `MCP servers · ${reachable} of ${servers.length} reachable`;
+  const base = `MCP servers · ${reachable} of ${servers.length} reachable`;
+  return phase === undefined ? base : `${base} · ${capsTitleNote(phase)}`;
 }
