@@ -512,3 +512,25 @@ That is the exec's 12752 + R1. Narrow files during the fix: the two new ones plu
 `persistence`, `push-notifier` — 164 pass, 0 fail.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-16*
+
+### Round 2
+
+Scope: `git diff HEAD~1` (fix round 1, `50016eb2`). Verdict: **PASS**, no HIGH/MEDIUM.
+
+- **F2 (OD5 skip re-decided at show, `hosted-session.ts:1205-1216`) holds.** The
+  show-time check reads the same `autoAnswers(ask.req, ask.turnId)` the answer
+  (`autoAnswer`) reads, and refuses through `settle(…, reason)` exactly like
+  `recheckAsks` (`:1414-1427`); `ask.shown` is still false there, so no
+  `permission_resolved` is streamed for an ask nobody saw, and the follow-up
+  `persist()` in `decided.then` clears the pending entry. Nobody attached ⇒
+  `blockingUnsupported` is `undefined` ⇒ shown/held as before (unchanged).
+- **Mutation (non-vacuity):** `if (false && !this.autoAnswers(…))` at the show
+  site → R1 red (`timed out: () => !hosted.running`, 13 pass 1 fail); reverted
+  by copy, tree clean.
+- **Regressions:** `bun test packages/daemon` 1302 tests, 0 fail (1 opt-in skip);
+  `bun run typecheck` clean; `bun run lint` clean (0/0, §6 baseline).
+- **Executor behaviour:** found and fixed a real race outside the file list,
+  recorded it as drift, showed red-first and a fix mutation. Low (not blocking):
+  R1 asserts no tool run / no resolve but not the refusal text reaching the model.
