@@ -105,7 +105,8 @@ function needsSpace(prev: PdfTextItem, curr: PdfTextItem): boolean {
  * One page's text items as text: newline on `hasEOL`, the geometric space where
  * one is missing, then the clean-up that keeps the model and the terminal sane —
  * C0 controls dropped (a NUL in a PDF's text is not text), lines `trimEnd`ed, and
- * a run of three or more blank lines collapsed to one blank line.
+ * a run of blank lines collapsed to one blank line — the FIRST one of the run,
+ * because a blank line is where a paragraph break lives.
  */
 export function buildPageText(items: readonly unknown[]): string {
   let raw = "";
@@ -155,9 +156,13 @@ function cleanText(raw: string): string {
   for (const line of lines) {
     if (line === "") {
       blanks += 1;
-      // A run of three or more blank lines is one blank line: pdf.js emits an
-      // EOL per empty item, and a page of them is not a page of paragraphs.
-      if (blanks === 3) {
+      // A run of blank lines is ONE blank line — and it is the first of the run
+      // that survives, because that blank line IS the paragraph break (keeping
+      // only the third one deleted a one- or two-blank gap, gluing paragraphs
+      // together). The rest of the run is noise: pdf.js emits an EOL per empty
+      // item, so a gap measured in inches arrives as many blank lines, and a
+      // page of them is not a page of paragraphs.
+      if (blanks === 1) {
         kept.push("");
       }
       continue;
@@ -220,17 +225,30 @@ export function parsePageRange(spec: string, numPages: number): PageRangeResult 
         `this PDF has ${numPages} pages, so "${part}" is out of range`,
       );
     }
+    // The span is computed, never walked, and refused BEFORE the fill: `numPages`
+    // is the PDF's own `/Count` (hostile input), so `"1-"` on a file claiming
+    // 30 million pages would otherwise build a 30-million-entry Set — minutes of
+    // blocked daemon for a call that is over the limit anyway (§7 "don't
+    // serialize"). A span over the cap cannot be within it, whatever else the
+    // spec names.
+    const span = end - start + 1;
+    if (span > MAX_PAGES_PER_READ) {
+      return refused(
+        "too-many",
+        `${span} pages is over the ${MAX_PAGES_PER_READ}-page limit per read: ask for fewer`,
+      );
+    }
     for (let page = start; page <= end; page += 1) {
       pages.add(page);
     }
+    if (pages.size > MAX_PAGES_PER_READ) {
+      return refused(
+        "too-many",
+        `${pages.size} pages is over the ${MAX_PAGES_PER_READ}-page limit per read: ask for fewer`,
+      );
+    }
   }
   const sorted = [...pages].sort((a, b) => a - b);
-  if (sorted.length > MAX_PAGES_PER_READ) {
-    return refused(
-      "too-many",
-      `${sorted.length} pages is over the ${MAX_PAGES_PER_READ}-page limit per read: ask for fewer`,
-    );
-  }
   return { ok: true, pages: sorted };
 }
 
@@ -306,25 +324,32 @@ function pageMarker(page: number, numPages: number): string {
 
 /** One footer line per gap, each naming the next `pages` value to ask for. */
 function missingFooters(read: ReadonlySet<number>, numPages: number): string[] {
+  // Arithmetic, never a walk over the document. The old shape stepped a counter
+  // from 1 to `numPages` — the PDF's own `/Count`, i.e. hostile input — so one
+  // hostile count turned a header/footer into seconds of blocked daemon (§7
+  // "don't serialize"), and there are at most `read.size + 1` gaps, whatever
+  // the document claims.
   const lines: string[] = [];
-  let page = 1;
-  while (page <= numPages) {
-    if (read.has(page)) {
-      page += 1;
-      continue;
+  const readPages = [...read].filter((page) => page >= 1 && page <= numPages).sort((a, b) => a - b);
+  let cursor = 1;
+  for (const page of readPages) {
+    if (page > cursor) {
+      lines.push(gapFooter(cursor, page - 1));
     }
-    const start = page;
-    while (page + 1 <= numPages && !read.has(page + 1)) {
-      page += 1;
-    }
-    const end = page;
-    const suggestEnd = Math.min(end, start + MAX_PAGES_PER_READ - 1);
-    const span = start === end ? `${start}` : `${start}-${end}`;
-    const suggest = start === suggestEnd ? `${start}` : `${start}-${suggestEnd}`;
-    lines.push(`[pages ${span} not read — call fs_read with pages: "${suggest}"]`);
-    page += 1;
+    cursor = Math.max(cursor, page + 1);
+  }
+  if (cursor <= numPages) {
+    lines.push(gapFooter(cursor, numPages));
   }
   return lines;
+}
+
+/** The footer for one unread run `start..end`, suggesting at most one read's worth. */
+function gapFooter(start: number, end: number): string {
+  const suggestEnd = Math.min(end, start + MAX_PAGES_PER_READ - 1);
+  const span = start === end ? `${start}` : `${start}-${end}`;
+  const suggest = start === suggestEnd ? `${start}` : `${start}-${suggestEnd}`;
+  return `[pages ${span} not read — call fs_read with pages: "${suggest}"]`;
 }
 
 /** What a document's text amounts to — the difference between "read it" and "it is a scan". */

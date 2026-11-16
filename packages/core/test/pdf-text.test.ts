@@ -128,6 +128,27 @@ describe("buildPageText — the owner's spacing heuristic", () => {
     ).toBe("a\n\nb");
   });
 
+  test("a single blank line survives — it IS the paragraph break", () => {
+    expect(
+      buildPageText([
+        item("Para one.", { hasEOL: true }),
+        item("", { hasEOL: true }),
+        item("Para two."),
+      ]),
+    ).toBe("Para one.\n\nPara two.");
+  });
+
+  test("two blank lines collapse to one (not to nothing)", () => {
+    expect(
+      buildPageText([
+        item("A", { x: 0, hasEOL: true }),
+        item("", { x: 0, hasEOL: true }),
+        item("", { x: 0, hasEOL: true }),
+        item("B", { x: 0 }),
+      ]),
+    ).toBe("A\n\nB");
+  });
+
   test("C0 controls are dropped (they reach the model and the terminal); tab and newline stay", () => {
     expect(buildPageText([item("a\u0000b\u0007c")])).toBe("abc");
     expect(buildPageText([item("a\tb")])).toBe("a\tb");
@@ -193,6 +214,42 @@ describe("parsePageRange — what the model asked for", () => {
       pages: Array.from({ length: MAX_PAGES_PER_READ }, (_, i) => i + 1),
     });
   });
+
+  test("a 30-million-page claim is refused without walking the span", () => {
+    // `numPages` is the PDF's own /Count. The old code filled a Set over the
+    // whole span first: 30 million entries, ~2 s, for a call already over the
+    // cap. Proven by time (the refusal is arithmetic) and by the message.
+    const started = performance.now();
+    const result = parsePageRange("1-", 30_000_000);
+    const elapsed = performance.now() - started;
+    expect(result).toMatchObject({ ok: false, reason: "too-many" });
+    expect(elapsed).toBeLessThan(100);
+  });
+
+  test("a page count no Set could hold is refused the same way", () => {
+    // The span alone can never fit the cap, so it is refused before any loop:
+    // filling a Set with 2^31 entries is an out-of-memory, not a slow read.
+    expect(parsePageRange("1-", 2 ** 31)).toMatchObject({ ok: false, reason: "too-many" });
+    expect(parsePageRange(`1-${MAX_PAGES_PER_READ + 1}`, 2 ** 31 - 1)).toMatchObject({
+      ok: false,
+      reason: "too-many",
+    });
+  });
+
+  test("many small parts that TOGETHER exceed the cap are refused", () => {
+    // Each part is small, so only the running total catches it.
+    expect(parsePageRange("1-100,201-300", 5000)).toMatchObject({
+      ok: false,
+      reason: "too-many",
+    });
+    expect(parsePageRange("1-50,201-250", 5000)).toEqual({
+      ok: true,
+      pages: [
+        ...Array.from({ length: 50 }, (_, i) => i + 1),
+        ...Array.from({ length: 50 }, (_, i) => i + 201),
+      ],
+    });
+  });
 });
 
 describe("formatPdfText — markers, header, footer", () => {
@@ -240,6 +297,22 @@ describe("formatPdfText — markers, header, footer", () => {
     expect(out).toContain("--- page 2 / 4 ---");
     expect(out).not.toContain("--- page 3 / 4 ---");
     expect(out).toContain('[pages 3-4 not read — call fs_read with pages: "3-4"]');
+  });
+
+  test("a hostile page count does not turn the footer into a walk over every page", () => {
+    // `numPages` is the PDF's /Count. The old footer stepped 1..numPages: 300
+    // million iterations (~360 ms) for a one-page read. Gaps are arithmetic now,
+    // and there are none more than read.size + 1.
+    const started = performance.now();
+    const out = formatPdfText({
+      pages: [{ n: 1, text: "only page read" }],
+      numPages: 2 ** 31,
+      name: "hostile.pdf",
+    });
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeLessThan(100);
+    expect(out).toContain("--- page 1 / 2147483648 ---");
+    expect(out).toContain('[pages 2-2147483648 not read — call fs_read with pages: "2-101"]');
   });
 
   test("one page whose text alone exceeds the cap is still returned (never an empty read)", () => {

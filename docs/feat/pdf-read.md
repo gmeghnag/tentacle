@@ -184,7 +184,9 @@ checks it at the start of the slice and STOPs if false).
   `!prev.hasEOL`, neither side already has the space, same baseline
   (`|Δy| ≤ 0.5·fontSize`) and `gap = x − (prevX + prevWidth) > 0.25·fontSize`,
   `fontSize = max(prev.height, curr.height) || 1`. Additions: collapse runs of
-  > 2 blank lines; `trimEnd` each line; NUL / C0 controls (except `\n\t`)
+  blank lines to ONE blank line (any run length — the run's first blank
+  survives, since a blank line IS the paragraph break; fix round 1); `trimEnd`
+  each line; NUL / C0 controls (except `\n\t`)
   removed (they reach the model and the terminal).
 - `parsePageRange("1-5" | "3" | "7-" | "2,4,9-11", numPages)` → sorted unique
   page list or a typed error (`0`, reversed, beyond `numPages`, > `MAX_PAGES_PER_READ`).
@@ -667,6 +669,96 @@ flaky environment-dependent assertion, not this change.)
 Changelog: `changelog.d/pdf-read.added.md` written (one bullet; P3/P6 extend it, the
 plan's §Files says "written in P3" — written early instead so the slug exists once).
 No schema changed, so `packages/protocol/schema/protocol.json` is untouched.
+
+### Fix round 1 — both P1 review findings · executed by `claude-opus-5-5`, 2026-11-16
+
+Both findings fixed in `packages/core/src/pdf-text.ts`, tests in
+`packages/core/test/pdf-text.test.ts`. Reproduced first, in
+`.tentacle/tmp/pdf-read/`, on the branch as reviewed:
+
+```
+$ bun repro-f1.ts
+1 blank -> "Para one.\nPara two."        <- the break is GONE
+2 blanks -> "A\nB"                       <- the break is GONE
+3 blanks -> "A\n\nB"                     <- only the 3-run survived
+
+$ bun repro-f2.ts
+parsePageRange('1-', 30_000_000): 1935.1 ms -> too-many
+formatPdfText({numPages: 300_000_000, pages:[1]}): 366.1 ms
+```
+
+**Finding 1 (MEDIUM — paragraph breaks deleted).** `cleanText` emitted the run's
+blank line only at `blanks === 3`, so a 1- or 2-blank run vanished entirely and
+paragraphs were glued together; only a run of 3 or more produced any blank at
+all. Now the run emits its **first** blank (`blanks === 1`), which is the
+paragraph break itself: 1 → kept, 2 → one, 3+ → one (unchanged output for the
+3+ case, so that test still pins the same string).
+Two new cases (`pdf-text.test.ts:131-149`): a single blank survives
+(`"Para one.\n\nPara two."`) and two blanks collapse to one, not to nothing.
+**One reading taken deliberately:** D1 says "collapse runs of > 2 blank lines",
+which read strictly would keep *two* blank lines. This keeps **one** for any run
+length — the review's own first option ("keep the first blank"), and the only
+shape consistent with the already-pinned `3 blanks → one` test: pdf.js emits one
+EOL per empty item, so a run's length is a measure of vertical gap in em, not a
+count of paragraphs. Runs are collapsed, never deleted.
+
+**Finding 2 (MEDIUM — work driven by a hostile page count).** Two spots walked
+the document's own `/Count`:
+- `parsePageRange` filled a `Set` over the whole span *before* the
+  `MAX_PAGES_PER_READ` check. A part's span is now computed and refused
+  (`too-many`, naming the span) **before** any loop; the running `pages.size` is
+  checked after each part, so many small parts can no longer add up past the cap
+  either (`1-100,201-300` → `too-many`; `1-50,201-250` → ok).
+- `missingFooters` stepped a counter 1..`numPages`. Gaps are now derived
+  **arithmetically from the read set** (`missingFooters` + the extracted
+  `gapFooter`), so there are at most `read.size + 1` footers whatever the
+  document claims; output for honest documents is byte-identical (every existing
+  footer test still passes unchanged).
+
+**Red before green (§9).** The five new tests, run against `git show
+HEAD:packages/core/src/pdf-text.ts` (the reviewed code, swapped in by copy —
+no checkout) and the new test file:
+
+```
+(fail) buildPageText > a single blank line survives — it IS the paragraph break
+(fail) buildPageText > two blank lines collapse to one (not to nothing)
+(fail) parsePageRange > a 30-million-page claim is refused without walking the span  [1956 ms]
+(fail) parsePageRange > a page count no Set could hold is refused the same way       [2545 ms]
+(fail) formatPdfText > a hostile page count does not turn the footer into a walk     [3178 ms]
+ 39 pass · 5 fail
+```
+
+**Mutation checks (non-vacuity, §9)** — each applied to the fixed module, run,
+reverted (`diff` clean against the saved copy each time):
+
+```
+A  blanks === 1 -> blanks === 3   → 2 fail  (the 1-blank and 2-blank cases)
+B  drop the span pre-check        → 2 fail  (30-million: 1657 ms; 2**31: 2548 ms)
+C  drop the pages.size check      → 1 fail  (the many-small-parts case)
+D  restore the page-by-page walk  → 1 fail  (the hostile-footer timing case, 3397 ms)
+   reverted                       → 44 pass, 0 fail
+```
+
+(A first attempt at C left the file unparseable — `0 pass, 1 fail` is a compile
+error, not a mutation — so it was redone with the whole `if` block removed.) The
+timing assertions are the property that matters here, and D shows them biting:
+they fail only because the walk is back.
+
+**Gate.** `bunx tsc --noEmit` exit 0 · `bun run lint` (`biome check .`, 1700
+files, 0 errors 0 warnings = the §6 baseline) exit 0 · `bun test` **12336 pass,
+5 skip (the three opt-in), 0 fail** across 884 files. (A first full run had one
+failure in `packages/daemon/test/session-log-store.test.ts` — "T4 the fork
+precedes the source's next write", a `Bun.sleep(60)` ordering assertion; that
+file alone is 43/43 green three times running and the re-run of the whole suite
+is 0 fail. Nothing in this change is reachable from it: `pdf-text.ts` is imported
+only by `packages/core/src/index.ts` and its own test.)
+Only `pdf-text.ts` and its test changed; no other slice reads `cleanText`,
+`parsePageRange`'s internals or `missingFooters` (both are module-private; the
+exported signatures are unchanged), so P2–P6 need no change. No new changelog
+fragment: this is a fix to unshipped code inside the same task (its bullet is
+already `changelog.d/pdf-read.added.md`).
+
+*— claude-opus-5-5, 2026-11-16*
 
 ## Review
 
