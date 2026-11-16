@@ -2523,3 +2523,24 @@ input. The HTML props put the CSP first, with no `onMessage`/`injectedJavaScript
 **Executor behaviour:** S7 is careful and honest about its drift: test-after for the viewer,
 compensated by mutation. But it left S10 silently skipped, although the plan's execution order
 puts S10 *before* S7.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Verdict: PASS (no HIGH/MEDIUM).** The fix commit is `b7b3403a`.
+
+- **Gate:** `bun run typecheck` is clean and `bun run lint` is clean (1823 files). Full `bun test`: 13258 pass, 5 skip (the opt-ins), 0 fail.
+  The touched files (`artifacts-durable`, `artifact-manifest`, `artifact-store`, `artifact-cache`, `wiring`): 90 pass, 0 fail.
+- **Finding 1 (S10 missing) is fixed.** The laptop now keeps each presented version at the same save points as the log: `LaptopArtifacts` in `local-runtime.ts`, writing through `SessionSaver.putArtifact` → `LogSessionStore`.
+  A resumed session gets its artifacts back through the worker-only `artifactSeed` (`worker.ts:241`, read-only, lazy).
+  `keepArtifacts: true` and `artifactSeed` are set ONLY on the worker path (`local-runtime.ts:1748`, `worker.ts`; grep finds no pod or `connect` site).
+  A seeded blob is read only for a sha the manifest names, has its size checked, and is charged to the budget.
+  `mint()` skips seeded ids, and a re-present of a seeded id gets `last+1`.
+- **Finding 2 (`cacheDir` dot-only ids) is fixed** (`artifact-cache.ts`): a dot-only or empty name is replaced with `_`.
+- **Finding 3 (gate red) is fixed:** S4's store methods now exist and the format error is gone.
+- **Mutations (independent, each RED, then reverted; `git status` clean):**
+  - laptop copy always on (pod path): the T10 pod test fails;
+  - drop the seed's size check: the "SHORT blob" test fails;
+  - drop the dot-only escape: the round-2 `cacheDir` test fails.
+- **Nit (not blocking):** `session-log-store.ts:730` has `*/ function indexOfId(` on one line (Biome accepts it, but it reads oddly).
