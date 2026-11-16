@@ -1571,6 +1571,64 @@ agent (the spawning harness's choice). Blast is `cross-module`, so standard Revi
 *— claude-opus-5-5, 2026-11-16* (per the harness's settings; this runtime exposes no exact
 model id)
 
+### Fix round 1 — P5 review (one MEDIUM: the laptop's `too-many-pages` retry had no test) · executed by `claude-opus-5-5`, 2026-11-16
+
+**Finding (MEDIUM, `packages/client/src/remote-client.ts:2318-2324`).** The laptop's copy
+of the attach retry was untested: mutating `extraction.reason === "too-many-pages"` to a
+value that never matches left `document-attach.test.ts` green. A pod session attaching a
+PDF over 2000 pages would then fail with "too many pages" instead of sending the first 100
+pages plus the `[pages … not included]` footer, and no test would notice.
+
+**Fixed at the root, not by copying the test.** The retry existed TWICE — the daemon's
+(`prompt-documents.ts`, on a stored `ref`) and the laptop's (on a pod's `text`) — which is
+why one copy could lose it silently. It is now ONE pure helper,
+`extractAttachedPdf(extract, {signal})` (`packages/core/src/pdf-text.ts:579`): it calls the
+extractor once, retries a `too-many-pages` answer once with
+`pages: "1-${MAX_PAGES_PER_READ}"`, and passes the caller's signal to BOTH calls. Both ends
+call it (`prompt-documents.ts:143`, `remote-client.ts:2316`) and neither keeps a copy, so
+the two paths cannot drift (the reviewer's "better still").
+
+**Three tests, each shown RED before green:**
+
+1. `packages/core/test/pdf-text.test.ts` — the helper itself: `[{}, {pages:"1-100"}]`, and
+   the signal reaches both calls; a failure that is not `too-many-pages` is answered
+   undredged (exactly one call).
+2. `packages/client/test/document-attach.test.ts` — "over the page limit, the attach retries
+   with the first read's worth and names the cut": a fake extractor answering
+   `too-many-pages`, asserting `calls == [{}, {pages:"1-100"}]`, `page 100` and
+   `[pages 101-2500 not included]` in `document{text}`, and an empty frame log (still no
+   bytes to the pod). **RED before the code changed** — the assertion on the retry's own
+   property, not an import error: `DocumentExtractError: big.pdf: 2500 pages: pass pages`,
+   `10 pass · 1 fail`.
+3. The daemon's existing test (`prompt-documents.test.ts:302`) stays green through the
+   refactor, which is the point of one helper.
+
+**Mutations** (`.tentacle/tmp/pdf-read/p5r/`; each restored, `git status` afterwards showed
+only this round's five files):
+
+| mutation | result |
+|---|---|
+| laptop: `reason === "too-many-pages"` → `"never-matches"` (pre-refactor code) | RED 1 (the new client test) |
+| helper: `first.reason !== "too-many-pages"` → `"never-matches"` | RED 2 (client test + daemon unit test) |
+| helper: the retry drops `...request` (the signal is lost on the second call) | RED 1 (the helper's signal test) |
+
+The first two are the pre/post view of the same property; the third pins the part of the
+helper a hand-inlined copy would get wrong.
+
+**Gate (this round).** `bunx tsc --noEmit` exit 0 · `bun run lint` 1782 files, clean
+(`biome check --write` reformatted one type alias I added) · the five touched test files
+(`pdf-text`, `document-attach`, `prompt-documents`, `pdf-attach`, `pdf-attach-pure`)
+**102 pass, 0 fail** · full `bun test` **12981 pass, 5 skip (the branch's opt-ins), 0 fail**
+(923 files; the two unattributed fails the P4 review could not reproduce did not recur).
+
+**Drift from the review's suggested fix.** It offered "port the P4 test" as the fix and
+"move the retry into one pure helper" as the better one; this round did the helper, so the
+ported test is a second pin rather than the only one. No protocol, schema or persisted-format
+change: nothing to bump. No changelog change (the fragment `changelog.d/pdf-read.added.md`
+already covers the feature; this is a test/doc gap).
+
+*— claude-opus-5-5, 2026-11-16*
+
 ## Review
 
 ### P1 — fresh-context adversarial review

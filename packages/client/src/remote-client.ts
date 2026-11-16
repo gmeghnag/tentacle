@@ -23,13 +23,13 @@ import {
   type ChatMessage,
   type ChatRequest,
   DISMISSED,
-  MAX_PAGES_PER_READ,
   type ModelProvider,
   PDF_HEAD_BYTES,
   type PermissionBroker,
   attachedPdfText,
   checkAttachmentRefs,
   countTokensBounded,
+  extractAttachedPdf,
   formatBytes,
   isPdf,
 } from "@tentacle/core";
@@ -2313,14 +2313,9 @@ export class RemoteClient {
       throw new DocumentsUnavailableError(CLIENT_EXTRACTS_DOCUMENTS);
     }
     const signal = options.signal;
-    let extraction = await extract(bytes, signal ? { signal } : {});
-    if (!extraction.ok && extraction.reason === "too-many-pages") {
-      // An attached document has no `pages` to pass: take the first read's worth.
-      extraction = await extract(bytes, {
-        pages: `1-${MAX_PAGES_PER_READ}`,
-        ...(signal ? { signal } : {}),
-      });
-    }
+    const extraction = await extractAttachedPdf((request) => extract(bytes, request), {
+      ...(signal ? { signal } : {}),
+    });
     if (!extraction.ok) {
       throw new DocumentExtractError(`${name}: ${extraction.message}`);
     }

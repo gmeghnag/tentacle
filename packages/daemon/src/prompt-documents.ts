@@ -10,11 +10,11 @@
  */
 import { createHash } from "node:crypto";
 import {
-  MAX_PAGES_PER_READ,
   type MessageMedia,
   PDF_HEAD_BYTES,
   attachedDocument,
   attachedPdfText,
+  extractAttachedPdf,
   isPdf,
 } from "@tentacle/core";
 import {
@@ -140,14 +140,9 @@ async function documentText(
     throw refuse(`${block.name}: not a PDF`);
   }
   const signal = deps.signal;
-  let extraction = await policy.extract(bytes, signal ? { signal } : {});
-  if (!extraction.ok && extraction.reason === "too-many-pages") {
-    // An attached document has no `pages` to pass: take the first read's worth.
-    extraction = await policy.extract(bytes, {
-      pages: `1-${MAX_PAGES_PER_READ}`,
-      ...(signal ? { signal } : {}),
-    });
-  }
+  const extraction = await extractAttachedPdf((options) => policy.extract(bytes, options), {
+    ...(signal ? { signal } : {}),
+  });
   if (!extraction.ok) {
     throw refuse(`${block.name}: ${extraction.message}`);
   }

@@ -183,6 +183,41 @@ describe("laptop mode: a pod never gets PDF bytes", () => {
     laptop.close();
   });
 
+  test("over the page limit, the attach retries with the first read's worth and names the cut", async () => {
+    // Review P5 #1. A pod takes only text, so a >2000-page PDF cannot be given
+    // a `pages` range by anything but THIS retry: without it the attach fails
+    // with "too many pages" instead of sending the first 100 pages plus the
+    // footer that names the cut. The daemon's copy has the same test
+    // (`packages/daemon/test/prompt-documents.test.ts`): both ends are pinned,
+    // so neither can silently lose the retry.
+    const calls: { pages?: string }[] = [];
+    const many: ExtractDocumentHere = async (_bytes, options) => {
+      calls.push(options?.pages === undefined ? {} : { pages: options.pages });
+      if (options?.pages === undefined) {
+        return { ok: false, reason: "too-many-pages", message: "2500 pages: pass pages" };
+      }
+      const pages = Array.from({ length: 100 }, (_, i) => ({
+        n: i + 1,
+        text: `page ${i + 1} ${"words ".repeat(20)}`,
+      }));
+      return { ok: true, numPages: 2500, pages };
+    };
+    const { laptop, frames } = await link(
+      { source: "client" },
+      { servesModel: true, extract: many },
+    );
+    const sessionId = await laptop.openSession("/tmp/pdf-client");
+    const before = frames.length;
+    const block = await laptop.attachDocument(sessionId, PDF, { name: "big.pdf" });
+    expect(calls).toEqual([{}, { pages: "1-100" }]);
+    const text = block.source.type === "text" ? block.source.text : "";
+    expect(text).toContain("page 100");
+    expect(text).toContain("[pages 101-2500 not included]");
+    // Still nothing over the wire but the prompt's text: no bytes to the pod.
+    expect(frames.slice(before)).toEqual([]);
+    laptop.close();
+  });
+
   test("a client-mode daemon with no extractor here is OFF, not an upload", async () => {
     const { laptop, frames } = await link({ source: "client" }, { servesModel: true });
     const sessionId = await laptop.openSession("/tmp/pdf-client");

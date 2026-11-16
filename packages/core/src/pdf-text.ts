@@ -560,6 +560,34 @@ export function attachedPdfText(input: AttachedPdfTextInput): AttachedPdfTextRes
   return { ok: true, text: capText(body, budget) + suffix, pages: input.numPages };
 }
 
+/** What an extractor's answer must look like to be retried (a `reason` when it failed). */
+export type ReasonedExtraction =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Extract an ATTACHED PDF whole (docs/feat/pdf-read.md D6). An attachment has no
+ * `pages` to pass — only an `fs_read` call has one — so a document over
+ * `MAX_PDF_PAGES_WITHOUT_RANGE` is retried ONCE for the first read's worth of
+ * pages, and the footer then names the pages it left out.
+ *
+ * ONE helper, called at BOTH ends: the daemon for a stored `ref` and the laptop
+ * for a pod's `text` (AGENTS §7). Two copies of the retry let a regression drop
+ * it from one path silently, and a >2000-page attachment then fails instead of
+ * sending its first 100 pages.
+ */
+export async function extractAttachedPdf<E extends ReasonedExtraction>(
+  extract: (options: { readonly pages?: string; readonly signal?: AbortSignal }) => Promise<E>,
+  options: { readonly signal?: AbortSignal } = {},
+): Promise<E> {
+  const request = options.signal === undefined ? {} : { signal: options.signal };
+  const first = await extract(request);
+  if (first.ok || first.reason !== "too-many-pages") {
+    return first;
+  }
+  return extract({ pages: `1-${MAX_PAGES_PER_READ}`, ...request });
+}
+
 export interface AttachedDocumentInput {
   readonly name: string;
   readonly pages: number;
