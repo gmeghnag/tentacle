@@ -2098,3 +2098,181 @@ on this tree and on HEAD's `packages/tui/src`.
 - (b) The swap's own re-join (`useSessionLink.ts` `stateRef.current = joinCards(stateRef.current)`) survives deletion → 89/0. A kept transcript after a swap is unpinned (the eager open's commit join covers the common path).
 
 **Regressions checked:** the streaming hot path is unchanged (the join is gated on `history_reset`/`context_reset`); `joinKnownArtifacts` returns the same array on a no-op; still one in-flight request per burst (`pending`).
+
+## Execution
+
+### S7 — Phone pure modules: DONE
+
+*— deepseek-v4.1-flash (`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`), 2026-11-16*
+
+**Load-bearing check, re-run first** (`.tentacle/tmp/model-artifacts/read-roundtrip.ts`,
+run from the worktree root):
+
+```
+$ bun /Users/gmeghnag/tentacle/.tentacle/tmp/model-artifacts/read-roundtrip.ts
+chunks=12 sha-equal=true
+order=enqueue,chunk0,chunk1,…,chunk11
+enqueue-before-last=true maxRpcFrame=349591 maxRawNoiseFrame=87383
+PASS
+```
+
+The roundtrip holds unchanged: a 3 MiB blob reads back over `RpcPeer` ↔ `RpcPeer`
+through the Noise channel pair in 12 × 256 KiB chunks, an interleaved
+`session/enqueue` is answered before the last chunk, and no raw Noise frame
+exceeds 65535 bytes. Nothing in S7 touches that path.
+
+**Capability check** (S7 absent before this slice):
+
+```
+$ ls apps/mobile/src/artifact-*.ts
+(no such file)
+$ rg -c "galleryView|viewerFor|allowNavigation|unseenArtifacts" apps/mobile/src apps/mobile/test
+apps/mobile/src/hub-session.ts:1        # hub's own field, unrelated
+apps/mobile/src/hub-actions.ts:8        # `unseenArtifacts` as a hub CTX field
+apps/mobile/test/hub-actions.test.ts:10
+$ grep -c "react-native-webview" apps/mobile/package.json
+0
+```
+
+`hub-actions.ts:53` already declared an `unseenArtifacts: number` on the hub's
+context, but nothing computed it (it is a field the hub's `count` badge reads;
+`feat/mobile-hub` supplies it). S7 supplies the function.
+
+**As built, in order** (red shown before each green):
+
+1. **`apps/mobile/test/artifact-gallery.test.ts`** (new, 16 tests) — RED at load
+   (`Cannot find module '../src/artifact-gallery.ts'`).
+2. **`apps/mobile/src/artifact-gallery.ts`** (new, pure): `artifactDay` (`Today`
+   / `Yesterday` / `2026-11-12`, a daemon clock ahead of the phone clamped to
+   `Today`), `unseenArtifacts` (ARTIFACTS with something new, never versions — the
+   hub badge's unit), `galleryView` (one row per artifact, newest PRESENTED first
+   by its newest version's `createdAt` with an id tie-break, versions folded into
+   a count, `all` newest-first, day sections in order, `filter` case- and
+   space-insensitive on the TITLE only, `empty` covering both "none" and "no
+   match"), `gallerySummary` (`2 artifacts · 2 new` / `1 artifact` / `No
+   artifacts`). Rows carry `@tentacle/core`'s `artifactCard` — the SAME view-model
+   the Mac renders — so a kind is narrowed once and an unknown kind reads as
+   `other`.
+3. **`apps/mobile/test/artifact-seen-store.test.ts`** (new, 14 tests) — RED at
+   load (module missing).
+4. **`apps/mobile/src/artifact-seen-store.ts`** (new): the `{v:1, seen:{…}}`
+   record behind `SecureKV` (the `voice-settings-store.ts` pattern),
+   `sessionKey(computerId, sessionId)`, `seenFor`, `markGalleryOpened` (forward
+   only), `markArtifactOpened` (dedupe, `MAX_OPENED = 500` oldest-dropped),
+   `ArtifactSeenPreserved` for an unknown `v` / garbage / unreadable Keychain.
+5. **`apps/mobile/src/artifact-seen-expo.ts`** (new, wiring only): the Keychain
+   adapter plus the app's ONE `ARTIFACT_SEEN` holder (`load`/`current`/`set`/
+   `subscribe`), so the gallery and the Session info row read one in-memory copy
+   instead of a native round-trip per render.
+6. **`apps/mobile/test/artifact-viewer.test.ts`** (new, 14 tests) → then
+   **`apps/mobile/src/artifact-viewer.ts`** (new): `viewerFor` (kind → viewer +
+   scripts, an unknown/prototype kind → `none`), `allowNavigation` (the initial
+   `about:blank` is the ONLY allowed load), `htmlViewerProps` (CSP-prefix first,
+   network per open, the isolation flags as DATA, no `onMessage`, no
+   `injectedJavaScript`), `pdfViewerProps` (file uri, scripts off, same
+   isolation), `networkBarLabel`, `viewerSubtitle`, `viewerTarget`.
+7. **`apps/mobile/test/artifact-cache.test.ts`** (new, 14 tests) →
+   **`apps/mobile/src/artifact-cache.ts`** (new): `planCache` (LRU, the version a
+   viewer HOLDS never evicted, `wontFit` when it cannot fit — and then NOT taken),
+   `touch`/`forget`/`missingFrom`, `cacheDir`/`cachePath` (computer id sanitized:
+   no traversal), `shareName`, `ARTIFACT_CACHE_BYTES = 200 MB`.
+
+**T7 coverage** (the plan's own list): T7.1 `galleryView` grouping/fold/unseen +
+`unseenArtifacts` (gallery opened → 0, a new version → 1) ✓ ·
+T7.2 `allowNavigation` (only `about:blank`; `https:`/`data:`/`file:`/
+`javascript:`/`blob:`/`about:srcdoc`/case/whitespace variants refused) + props as
+data (`incognito: true`, no `onMessage`, `javaScriptEnabled` per kind) ✓ ·
+T7.3 `viewerFor` ✓ · T7.4 cache LRU plan + seen-store unknown `v` preserved ✓.
+
+**Drift from the Implementation (and why)**
+
+1. **The gallery route entry (`openArtifactGallery`) was written and then
+   removed.** D9 places it in `routes.ts`, but the Files list puts `routes.ts` +
+   `screens/ArtifactGallery.tsx` in **item 11 (S9)**. Writing it here would have
+   duplicated S9's work and pre-empted S9's `RootStackParams` decision, so S7
+   ships the FOUR pure modules item 9 names and no route.
+2. **`artifact-viewer.ts` was written before its test** (module first, then the
+   test file) — the one violation of red-first in this slice. Compensated with
+   four mutations of that file (M1–M4 below), each RED: the tests are not
+   vacuous. Every other module had its test shown failing at load first.
+3. **A malformed ENTRY inside a valid v1 record is tolerated (dropped), not
+   refused.** The plan's T7.4 says only "seen-store unknown `v` preserved". My
+   first test asserted the stricter rule (any malformed entry ⇒ unwritable) and
+   failed against the intended behaviour; the decided rule is the fail-safe one:
+   an unknown `v` refuses (its fields may mean something else), a bad entry in a
+   record this build understands is dropped — which can only make an artifact
+   look NEW, never hide it, and refusing would burn the record forever. Pinned by
+   the "a malformed ENTRY inside a valid record is dropped" test.
+4. **`isUnseen` uses `>=`, not `>`** — a found bug, not a preference: a version
+   presented in the *same millisecond* the gallery opened may have missed the
+   list that open fetched. The fail-safe direction is a false "new" (a badge)
+   over a false "seen" (an artifact hidden for good). Mutation M7 (`>=` → `>`)
+   is RED on the new boundary test.
+5. **Two boundaries the plan did not name**, added because they are decisions a
+   `.tsx` would otherwise make: `gallerySummary` (the header line, so the sheet
+   formats nothing) and `shareName` (a Share sheet name from the title, with the
+   kind's extension when the title has none) — both pure, both tested.
+6. **Times are formatted in UTC** (`clockTime`, `artifactDay`). The plan says
+   nothing; a phone's timezone is not a fact a unit test can hold, and the
+   daemon's `createdAt` is already the record's only clock, so one timezone beats
+   a mixed one. The section labels are the mockups' (`Today`/`Yesterday`).
+
+**Changelog: deliberately no new fragment.** S7 is pure modules with no wiring —
+nothing a person can see changes until S8/S9 render them. Both fragments this
+task owns already exist (`changelog.d/model-artifacts.added.md` — the capability,
+which names the gallery and the phone viewers; `changelog.d/model-artifacts.changed.md`
+— the Mac's card and panel), and a third would be a slug+category collision or a
+mirror of internal work, which AGENTS §10 says the changelog is not. The `added`
+bullet's "a gallery lists every version … on the Mac and the iPhone" is what S7's
+modules serve; S9 remains the slice that makes it true on the phone.
+
+**Mutations (AGENTS §9 non-vacuity).** Script
+`.tentacle/tmp/model-artifacts/s7-mut.sh`, one property broken at a time, the
+narrow file run, the file restored from a copy; `git status` after the run shows
+exactly the 9 new files and the baseline re-runs at 58 pass / 0 fail:
+
+```
+M0  baseline (4 files)                                          58 pass 0 fail
+M1  allowNavigation: only javascript: refused (any other scheme) 13 pass 1 fail
+M2  javaScriptCanOpenWindowsAutomatically: true                  12 pass 2 fail
+M3  an onMessage bridge added to the props                       12 pass 2 fail
+M4  HTML not CSP-wrapped (body alone)                            12 pass 2 fail
+M5  eviction drops the version a viewer HOLDS                    12 pass 2 fail
+M6  a version that cannot fit is still taken                      13 pass 1 fail
+M7  isUnseen `>=` → `>` (same-instant version reads seen)         15 pass 1 fail
+M8  `opened` ignored (a reopened version stays new)              13 pass 3 fail
+M9  versions counted instead of artifacts (the badge)            14 pass 2 fail
+M10 a future daemon clock reads Tomorrow (day >= → ==)           15 pass 1 fail
+M11 seen-store: an unknown `v` is written over                   13 pass 1 fail
+M12 seen-store: `opened` unbounded                               13 pass 1 fail
+M13 computer id not sanitized (a traversal in the cache dir)     13 pass 1 fail
+M0' after restores                                              58 pass 0 fail
+```
+
+**Gate.** The tree carried S4's work in progress before this slice
+(`packages/daemon/src/session-artifacts.ts`, `session-log-store.ts`,
+`session-blobs.ts`, `daemon/test/artifact-manifest.test.ts`) — the same files S5
+and S6a recorded as the only non-green cause. S7 touched none of them and left
+them exactly as found; they are the only cause of the RED below.
+
+- `bunx tsc --noEmit`: 21 errors, **all** S4's daemon files (none matches
+  `session-log-store|artifact-manifest.test|session-artifacts|session-blobs|serve.ts`
+  → 0 remaining). `bunx tsc -p apps/mobile`: clean. `-p apps/relay`: clean.
+- `bun run lint`: 1 error, S4's `daemon/test/artifact-manifest.test.ts` format —
+  the same one S6a's round 2 recorded, unchanged. The 9 new S7 files: `biome
+  check` clean.
+- `bun test` (full suite, once): **13193 pass, 5 skip, 7 fail**. The 5 skips are
+  the documented opt-ins' cases. Of the 7 fails, SIX are S4's
+  `packages/daemon/test/artifact-manifest.test.ts` (its store methods
+  `putArtifact`/`artifactManifest`/`sweepArtifacts` do not exist yet — the same
+  file whose type errors the gate reports) and the seventh was S7's own, below.
+- **S7 caught one real cross-check failure of its own in that run**:
+  `apps/mobile/test/pairing-guards.test.ts` — "only the wiring files import the
+  Keychain" enumerates every `expo-secure-store` importer, and the new
+  `artifact-seen-expo.ts` was a sixth. Fixed by adding it to that list (the
+  guard's own comment pattern, extended) — the pure `artifact-seen-store.ts`
+  stays free of the native import, which is exactly what the guard protects.
+  After the fix: `bun test apps/mobile` **2345 pass, 0 fail**; the only remaining
+  full-suite failure is S4's file, and every S7 test passes.
+- S7's own files: 58 pass, 0 fail (4 files).
+
