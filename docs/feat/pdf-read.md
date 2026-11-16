@@ -425,6 +425,7 @@ In dependency order; one slice = one row of §Slices.
 | Huge text | > 16 000 chars spilled by the existing pipeline; > 400 000 cut at a page boundary + footer | spill file readable with offset/limit |
 | `pages` out of range / malformed / on a non-PDF; line range on a PDF | tool error naming the rule | model fixes the call |
 | Text file named `.pdf`; PDF without extension | detected by bytes both ways | — |
+| PDF whose header is preceded by a banner/HTTP response, or carries the binary `%âãÏÓ` comment | detected by bytes (the version line decides, not the prefix) — fix round 2 | — |
 | Tool aborted (Esc / steer) | `AbortSignal` terminates the worker | — |
 | Worker cannot spawn (old Bun, missing entrypoint in a bad build) | "PDF reading is unavailable in this build: <reason>" — the build test (P2) catches the missing entrypoint first | — |
 | 3+ concurrent PDFs | semaphore: 2 run, the rest wait within their timeout | — |
@@ -1186,11 +1187,12 @@ writer, was not raised above a nit, and closing it wants `file.slice(0, maxBytes
 `fs_read` on a PDF in a live pod, and the compiled-binary `$bunfs` worker path.
 
 **Drift from Implementation:** D3 says "a PDF is `%PDF-` within the first 1024
-bytes (`isPdf(head)`)". The rule is now "the header line, modulo a non-text
-prefix" — same file, same name, same window; the substring test was measurably
-wrong (a HIGH). §Failure modes row "Text file named `.pdf`; PDF without
-extension" widens to "… and a text file that merely *mentions* `%PDF-`", which
-is what the fallback plus the sniff now guarantee.
+bytes (`isPdf(head)`)". The rule became "the header line, modulo a non-text
+prefix" (see **Fix round 2** below, which supersedes this shape: the prefix is
+ANY printable bytes and the discriminator is what follows the version). §Failure
+modes row "Text file named `.pdf`; PDF without extension" widens to "… and a
+text file that merely *mentions* `%PDF-`", which is what the fallback plus the
+sniff now guarantee.
 
 **Gate:** `bunx tsc --noEmit` exit 0 · `bun run lint` **1755 files, 0 errors, 0
 warnings** · `bun test` **12750 pass, 5 skip, 0 fail** across 908 files (the 5
@@ -1201,6 +1203,80 @@ failures, so those were environmental, not this change.
 
 *— claude-opus-5-5, 2026-11-16* (real id from this harness's settings,
 `~/.claude/settings.json` `modelSettings`; the runtime exposes no other)
+
+### Fix round 2 — the P3 review round 2 MEDIUM (tighter `isPdf` dropped real PDFs) · executed by `claude-opus-5-5`, 2026-11-16
+
+**The finding, reproduced first.** `.tentacle/tmp/pdf-read/fix-r2/repro.ts` (real
+`HostExecution` + `fsReadTool` on `makePdf`), before the fix:
+
+```
+prefixed.pdf         RAW: "HTTP/1.1 200 OK\r\n\r\n%PDF-1.4\n1 0 obj\n<< /Type /Cata"
+binary-comment.pdf   RAW: "%PDF-1.4 %<e2><e3><cf><d3>1 0 obj\n<< /Type /Catalog /Pages 2 0"
+bom.pdf              RAW: "[pdf bom.pdf: 2 pages, pages 1-2 shown]\n--- page 1"
+plain.pdf            RAW: "[pdf plain.pdf: 2 pages, pages 1-2 shown]\n--- page"
+```
+
+Two real PDFs came back as raw objects with no error — the silent-wrong-state
+case the feature exists to prevent. After the fix all four extract.
+
+**Root cause (one sentence).** `isPdf` decided on the *prefix* (nothing
+printable may precede `%PDF-`) and on the *whole* rest of the header line (only
+space/tab allowed after the version), which rejects shapes pdf.js opens: a
+printable response/banner prefix, and the ASCII or binary comment producers put
+on the header line.
+
+**The fix.** `packages/core/src/pdf-text.ts:494-551`. The prefix no longer
+matters at all (it is not the discriminator: prose about PDFs and a real
+prefixed PDF are identical there); everything hinges on the version line, which
+is what actually separates them:
+
+- `%PDF-<n>.<n>` must match (`%PDF-x.y` is text), then skip padding, then the
+  line must END (LF/CR, or the head window ending), or hold a `%` — a
+  PDF-spec comment, which is exactly what the binary comment is — or a
+  non-printable byte. A printable continuation (`%PDF-1.7 is the magic number`,
+  `` `%PDF-1.7`. ``) is still prose and still refused.
+- Deliberate trade: `# PDF notes\n%PDF-1.7\nmore prose` now sniffs as a PDF
+  (its version line is clean). That is not a regression of the round-1 HIGH,
+  because the *fallback* carries it: `corrupt` + `looksLikeTextBytes` →
+  the text path (`builtins.ts:187`), which is what the review's mutation table
+  already showed fixes the HIGH on its own. Pinned end-to-end.
+
+**Tests (all shown RED on the pre-fix code — assertions, not imports).**
+- `packages/core/test/pdf-text.test.ts` +52 lines: "real headers the tight sniff
+  must still accept" (printable prefix, binary comment latin1 and raw-byte, BOM
+  — 2 of the 4 RED: `prefixed`/`binary-comment`, BOM already passed) and "a
+  same-line comment after the version". One round-1 assertion flipped to
+  `true` (`# PDF notes…`) with the reasoning inline, and the round-1
+  "prose quoting the magic" test keeps only its two real false-positive cases.
+- `packages/tools/test/fs-read-pdf.test.ts` +52 lines: "a real PDF the head
+  sniff used to miss" (prefixed, binary comment; both RED, asserting extracted
+  text and no raw `%PDF-1.4`/`1 0 obj`) and "prose that a loose prefix lets
+  through the sniff still reads as text" (the trade-off's other half, RED only
+  under the M4 mutation).
+
+**Mutations (each applied, run, reverted; `git status` clean after).**
+| # | Mutation | Result |
+|---|---|---|
+| M1 | restore "nothing printable before the header" | 3 fail: `fs-read` prefixed PDF, `isPdf` prefixed, `isPdf` prose-quoting |
+| M2 | drop `%` tolerance after the version | 2 fail: `fs-read` binary comment, `isPdf` binary comment |
+| M3 | accept anything after the version (`return true`) | 2 fail: both "prose quoting the magic" tests |
+| M4 | `if (false && …)` on the `corrupt`→text fallback | 2 fail: "DOES sniff as a PDF falls back", "loose prefix … reads as text" |
+| M5 | drop the `%` comment rule only (keep padding) | 2 fail: `isPdf` binary comment, `isPdf` same-line comment |
+
+**Not changed, deliberately.** The round-1 nit (e) (the `stat`→read TOCTOU on
+`maxBytes`) stays untouched — outside this finding, needs a local racing writer.
+An over-permissive prefix means a text file can reach `extractPdf` and pay a
+parse before the fallback; the parse is bounded (`MAX_PDF_BYTES`, the worker's
+20 s timeout) and the alternative was losing real PDFs, which is worse.
+Unverified: the attach paths (P4/P5) reuse `isPdf` and are not built yet, so
+this change's effect there is by construction only.
+
+**Gate:** `bunx tsc --noEmit` exit 0 · `bun run lint` **1755 files, clean**
+(0 errors, 0 warnings) · `bun test` **12758 pass, 5 skip, 0 fail** across 908
+files (the 5 are the branch's existing opt-ins: live-k8s ×3, live-docker, the
+real-socket keepalive).
+
+*— claude-opus-5-5, 2026-11-16*
 
 ## Review
 

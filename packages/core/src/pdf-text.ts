@@ -490,7 +490,7 @@ export function splitFileBlocks(content: string): SplitFileBlocksResult {
   return { text: rest.trim(), blocks };
 }
 
-/** Printable ASCII: a byte that can only come from text, never from a PDF. */
+/** Printable ASCII: a byte a text line is made of (a PDF's body is mostly not). */
 function isPrintableAscii(byte: number): boolean {
   return byte >= 0x20 && byte < 0x7f;
 }
@@ -498,10 +498,22 @@ function isPrintableAscii(byte: number): boolean {
 /**
  * Is this head a PDF? The bytes decide, never the extension — but `%PDF-`
  * merely APPEARING in the head is not enough (fix round 1: prose *about* PDFs,
- * source and docs were sniffed as PDFs and then failed as `corrupt`). A real
- * header is the file's first line, modulo a prefix no prose can carry (a BOM,
- * whitespace, or binary junk: the head window exists for exactly that), and it
- * is `%PDF-<n>.<n>` followed only by non-text bytes up to the end of the line.
+ * source and docs were sniffed as PDFs and then failed as `corrupt`).
+ *
+ * The discriminator is what FOLLOWS the version, because that is what separates
+ * the false positives from every real header: a real header is `%PDF-<n>.<n>`
+ * and then the end of the line, or padding and a comment marker `%` followed by
+ * a non-text byte (the binary comment producers append, `%âãÏÓ`). Prose
+ * continues the sentence — `` `%PDF-1.7`. ``, `%PDF-1.7 is the magic number` —
+ * and `%PDF-x.y` is not a version at all.
+ *
+ * A printable PREFIX is allowed (fix round 2): an HTTP response body
+ * (`HTTP/1.1 200 OK\r\n\r\n%PDF-1.4…`), a stray banner line and an
+ * incremental save's junk all open in pdf.js, and refusing them handed the
+ * model the PDF's raw objects as "text" — the silent wrong state this feature
+ * exists to prevent. The cost is asymmetric and is paid downstream: prose that
+ * a loose prefix lets through parses as `corrupt`, and `fs_read` then falls back
+ * to the text path on bytes that decode as text (D3).
  */
 export function isPdf(head: Uint8Array): boolean {
   const window = head.subarray(0, PDF_HEAD_BYTES);
@@ -513,32 +525,29 @@ export function isPdf(head: Uint8Array): boolean {
   if (at < 0) {
     return false;
   }
-  // Nothing printable may come before the header: `# PDF notes\n%PDF-1.7` and
-  // ``Every PDF starts with `%PDF-1.7`.`` are text; 500 NUL bytes are not.
-  for (const byte of window.subarray(0, at)) {
-    if (isPrintableAscii(byte)) {
-      return false;
-    }
-  }
-  // `%PDF-<major>.<minor>`, then no more than whitespace and binary (the
-  // binary comment some producers append on the header line) to the line end.
   const rest = ascii.slice(at + "%PDF-".length);
   const version = /^\d+\.\d+/.exec(rest);
   if (version === null) {
     return false;
   }
-  const after = window.subarray(at + "%PDF-".length + version[0].length);
-  for (const byte of after) {
-    if (byte === 0x0a || byte === 0x0d) {
-      return true;
-    }
-    // Trailing padding and the binary comment producers put on the header line
-    // are not printable text; a space or a tab is only padding.
-    if (isPrintableAscii(byte) && byte !== 0x20 && byte !== 0x09) {
-      return false;
-    }
+  // Padding (spaces, tabs) is not text: skip it, then the line must end, hold a
+  // comment (`%` starts one, per the PDF spec, and the binary comment producers
+  // append is exactly that), or a non-text byte must follow.
+  let i = at + "%PDF-".length + version[0].length;
+  while (i < window.length && ((window[i] as number) === 0x20 || (window[i] as number) === 0x09)) {
+    i += 1;
   }
-  return true; // the line runs past the head window (a header shorter than EOF)
+  if (i >= window.length) {
+    return true; // a header shorter than the head window
+  }
+  const next = window[i] as number;
+  if (next === 0x0a || next === 0x0d) {
+    return true; // a clean header line
+  }
+  if (next === 0x25) {
+    return true; // `%PDF-1.4 %<comment>`: `%` runs to the end of the line
+  }
+  return !isPrintableAscii(next);
 }
 
 /**

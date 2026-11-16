@@ -276,3 +276,55 @@ describe("fs_read on a plain text file (real env)", () => {
     expect((await read({ path })).content).toBe(await env.readFile(path));
   });
 });
+
+// Fix round 2 (review MEDIUM): a real PDF whose header is not at offset 0 or
+// whose header line carries the binary comment was sniffed as TEXT, so the
+// model got raw PDF objects back with no error — the silent-wrong-state case
+// the feature exists to prevent.
+describe("fs_read on a real PDF the head sniff used to miss", () => {
+  test("a printable junk line before the header (an HTTP response body)", async () => {
+    const pdf = hello();
+    const path = await writePdf(
+      "prefixed.pdf",
+      new Uint8Array([...new TextEncoder().encode("HTTP/1.1 200 OK\r\n\r\n"), ...pdf]),
+    );
+    const result = await read({ path });
+    expect(result.content).toContain("Hello PDF world");
+    expect(result.content).not.toContain("%PDF-1.4");
+    await expect(read({ path: `${path}:1:5` })).rejects.toThrow(/use pages/);
+  });
+
+  test("the binary comment on the header line", async () => {
+    const pdf = hello();
+    const path = await writePdf(
+      "binary-comment.pdf",
+      new Uint8Array([
+        ...new TextEncoder().encode("%PDF-1.4 %"),
+        0xe2,
+        0xe3,
+        0xcf,
+        0xd3,
+        ...pdf.subarray(8),
+      ]),
+    );
+    const result = await read({ path });
+    expect(result.content).toContain("Hello PDF world");
+    expect(result.content).not.toContain("1 0 obj");
+  });
+});
+
+// The other half of the loosened sniff (fix round 2): a text file whose
+// `%PDF-1.7` line stands alone AFTER prose now sniffs as a PDF — the `corrupt`
+// → text fallback must still read it as text, whole and ranged. This is the
+// property the round-1 HIGH was about; the sniff alone no longer guarantees it.
+describe("fs_read on prose that a loose prefix lets through the sniff", () => {
+  test("a standalone header line after a prose line still reads as text", async () => {
+    const path = join(dir, "spec.md");
+    const body = "# PDF notes\n%PDF-1.7\nmore prose about the format\n";
+    await writeFile(path, body);
+    expect((await read({ path })).content).toBe(body);
+    expect((await read({ path, offset: 2, limit: 1 })).content).toBe(
+      `[${path} lines 2-2 of 4]\n%PDF-1.7`,
+    );
+  });
+});

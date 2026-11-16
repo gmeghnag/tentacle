@@ -453,8 +453,12 @@ describe("isPdf — the bytes decide, never the extension", () => {
     expect(isPdf(enc("Every PDF starts with `%PDF-1.7`."))).toBe(false);
     // At the start of a line: what FOLLOWS the version says it is prose.
     expect(isPdf(enc("\n\n%PDF-1.7 is the magic number\nmore\n"))).toBe(false);
-    // A version-only line, but the file has already said something.
-    expect(isPdf(enc("# PDF notes\n%PDF-1.7\nmore prose\n"))).toBe(false);
+    // Fix round 2 loosened this one deliberately: a printable PREFIX is now a
+    // PDF (an HTTP response body, a banner line), so a header-looking line
+    // after prose sniffs as a PDF and relies on the `corrupt` → text fallback.
+    // `fs-read-pdf.test.ts` pins the property that matters: it still READS as
+    // text. What the sniff alone must never accept is prose on the version line.
+    expect(isPdf(enc("# PDF notes\n%PDF-1.7\nmore prose\n"))).toBe(true);
     // A real header line is `%PDF-<major>.<minor>`, then end of line.
     expect(isPdf(enc("%PDF-1.7"))).toBe(true);
     expect(isPdf(enc("%PDF-1.4\r\n1 0 obj\n"))).toBe(true);
@@ -505,5 +509,49 @@ describe("looksLikeTextBytes — the `corrupt` fallback's discriminator", () => 
     expect(looksLikeTextBytes(new Uint8Array([0x61, 0x00, 0x62]))).toBe(false);
     expect(looksLikeTextBytes(new Uint8Array([0x1b, 0x61]))).toBe(false);
     expect(looksLikeTextBytes(new Uint8Array([0xff, 0x61]))).toBe(false);
+  });
+});
+
+// Fix round 2 (review MEDIUM): the tight sniff must not lose a REAL PDF. pdf.js
+// opens all of these; rejecting them returned raw PDF objects as "text".
+describe("isPdf — real headers the tight sniff must still accept", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+  const body = enc("\n1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+
+  test("a printable junk line before the header (an HTTP response body)", () => {
+    expect(isPdf(new Uint8Array([...enc("HTTP/1.1 200 OK\r\n\r\n%PDF-1.4"), ...body]))).toBe(true);
+    // Any single printable prefix line, not just HTTP.
+    expect(isPdf(new Uint8Array([...enc("GARBAGE\n%PDF-1.4"), ...body]))).toBe(true);
+  });
+
+  test("the binary comment producers append on the header line", () => {
+    expect(isPdf(new Uint8Array([...enc("%PDF-1.4 %"), 0xe2, 0xe3, 0xcf, 0xd3, ...body]))).toBe(
+      true,
+    );
+    // The latin1 form of the same comment (what a latin1 decoder gives).
+    expect(isPdf(enc("%PDF-1.4 %âãÏÓ\n1 0 obj\n"))).toBe(true);
+  });
+
+  test("a byte-order mark stays a PDF", () => {
+    expect(isPdf(new Uint8Array([0xef, 0xbb, 0xbf, ...enc("%PDF-1.4"), ...body]))).toBe(true);
+  });
+
+  test("prose quoting the magic is STILL not a PDF (round-6 HIGH stays fixed)", () => {
+    // The loosened rule must not regress the false positive it was added for:
+    // in every false positive the version line is followed by PROSE.
+    expect(isPdf(enc("Every PDF starts with `%PDF-1.7`."))).toBe(false);
+    expect(isPdf(enc("\n\n%PDF-1.7 is the magic number\nmore\n"))).toBe(false);
+  });
+});
+
+// Fix round 2, the spec-literal variant: a `%` after the version starts a
+// comment that runs to the end of the line, so ASCII on it is a real header.
+describe("isPdf — a same-line comment after the version", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+  test("`%PDF-1.4 %<anything>` is a header, prose after a space is not", () => {
+    expect(isPdf(enc("%PDF-1.4 %produced by a tool\n1 0 obj\n"))).toBe(true);
+    expect(isPdf(enc("%PDF-1.7 % gs\n1 0 obj\n"))).toBe(true);
+    // Without the comment marker the version line continues as prose.
+    expect(isPdf(enc("%PDF-1.7 is the magic number\nmore\n"))).toBe(false);
   });
 });
