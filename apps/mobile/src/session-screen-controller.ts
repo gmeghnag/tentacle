@@ -13,11 +13,18 @@
  * - **Nothing is lost.** A send the daemon refused before the ack puts its text
  *   back (F13); a link that drops keeps the rows and the draft (F8, F12).
  */
-import type { SessionEvent } from "@tentacle/client";
+import type { RemoteSession, SessionEvent } from "@tentacle/client";
 import type { PermissionBroker, PermissionRequester } from "@tentacle/core";
-import type { AttachmentRef, SessionContextResult, SessionSkillsResult } from "@tentacle/protocol";
+import type {
+  AttachmentRef,
+  JobRow,
+  SessionContextResult,
+  SessionSkillsResult,
+  SubagentRow,
+} from "@tentacle/protocol";
 import { DomainErrorCode } from "@tentacle/transport";
 import { RpcError } from "@tentacle/transport";
+import { type ActivityMemory, emptyMemory, markOpened, onSubagents } from "./activity-memory.ts";
 import type { Compose, ComposeHandle, PhotoPort } from "./compose-controller.ts";
 import { createCompose } from "./compose-controller.ts";
 import {
@@ -63,8 +70,38 @@ import {
 } from "./thumbnails.ts";
 import { type State, initialState } from "./transcript.ts";
 
+/**
+ * The background-work members of `RemoteSession` the Activity sheet uses
+ * (docs/feat/mobile-chrome.md Design 5): the live lists, their subscriptions and
+ * the actions. Optional: a fake handle (or an older client) has none, and the
+ * sheet then shows nothing (F15).
+ */
+export type ActivityHandle = Partial<
+  Pick<
+    RemoteSession,
+    | "subagents"
+    | "onSubagents"
+    | "onSubagentMessage"
+    | "messageSubagent"
+    | "killSubagent"
+    | "onJobs"
+    | "jobOutput"
+    | "killJob"
+  >
+>;
+
+/**
+ * What the Activity sheet reads (slice S8): the daemon's live lists as last
+ * reported (`null` until one is), and the phone's Finished memory.
+ */
+export interface ActivityState {
+  readonly subagents: readonly SubagentRow[] | null;
+  readonly jobs: { readonly rows: readonly JobRow[]; readonly count: number } | null;
+  readonly memory: ActivityMemory;
+}
+
 /** A handle this screen can also prompt (what the composer's Send needs). */
-export interface SendableHandle extends SessionHandle {
+export interface SendableHandle extends SessionHandle, ActivityHandle {
   send(
     prompt: string,
     signal?: AbortSignal,
@@ -136,6 +173,8 @@ export interface SessionScreenState {
    * field on each change (docs/fix/mobile-chat-glitches.md, items 5/6).
    */
   readonly sends: number;
+  /** Background sub-agents and shell jobs (docs/feat/mobile-chrome.md S8). */
+  readonly activity: ActivityState;
 }
 
 /**
@@ -251,6 +290,8 @@ export interface SessionScreenController {
   submitRename(): Promise<void>;
   /** Dismiss it without saving. */
   cancelRename(): void;
+  /** The person opened a Finished child's report: it is no longer "new" (S8). */
+  openReport(agentId: string): void;
   /** The person's tap on a link: the sheet's confirmation is the screen's job. */
   onLink(href: string): void;
   /** The FlatList's visible window: which images want bytes (12b's driver). */
@@ -309,6 +350,13 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   let shownTitle = deps.title;
   /** The last attached handle's title subscription (dropped on a re-attach/leave). */
   let sessionTitleWatch: (() => void) | undefined;
+  /**
+   * Background work (S8). The lists are the daemon's; the Finished memory lives
+   * for this screen (a re-attach keeps it — F13), never persisted.
+   */
+  let activity: ActivityState = { subagents: null, jobs: null, memory: emptyMemory };
+  /** The last attached handle's `onSubagents`/`onJobs` subscriptions. */
+  let activityWatch: (() => void) | undefined;
   /** The rename field (Owner decision 5): `null` while it is closed. */
   let renaming: RenameState | null = null;
   /**
@@ -580,6 +628,31 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       info: info === null ? null : info.state(),
       renaming,
       sends,
+      activity,
+    };
+  }
+
+  /**
+   * Follow the handle's background lists (S8). Each subscription hands the
+   * current list at once (the open snapshot's — F13), then every replace. A
+   * handle without them (an older client, a fake) leaves both `null` (F15).
+   */
+  function watchActivity(session: SendableHandle): () => void {
+    const offAgents = session.onSubagents?.((rows) => {
+      activity = {
+        ...activity,
+        subagents: rows,
+        memory: onSubagents(activity.memory, rows, deps.now()),
+      };
+      emit();
+    });
+    const offJobs = session.onJobs?.((report) => {
+      activity = { ...activity, jobs: { rows: report.rows, count: report.count } };
+      emit();
+    });
+    return () => {
+      offAgents?.();
+      offJobs?.();
     };
   }
 
@@ -665,6 +738,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       shownTitle = titleAfterRename(notice.title);
       emit();
     });
+    activityWatch?.();
+    activityWatch = watchActivity(result.session);
     // The header's context bar needs a figure NOW: a session attached after its
     // turns has no `agent_usage` to measure from (the TUI asks at attach too).
     if (info !== null) {
@@ -884,6 +959,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       await info?.setCapability(kind, name, enabled);
       emit();
     },
+    openReport(agentId) {
+      activity = { ...activity, memory: markOpened(activity.memory, agentId) };
+      emit();
+    },
     beginRename() {
       renaming = { text: shownTitle, saving: false, error: null };
       emit();
@@ -1006,6 +1085,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       info?.close();
       sessionTitleWatch?.();
       sessionTitleWatch = undefined;
+      activityWatch?.();
+      activityWatch = undefined;
       await deps.controller.leave(deps.sessionId);
       emit();
     },
@@ -1018,6 +1099,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       info?.close();
       sessionTitleWatch?.();
       sessionTitleWatch = undefined;
+      activityWatch?.();
+      activityWatch = undefined;
       // Idempotent and identity-scoped: a dispose that lands AFTER the next
       // screen mounted its requester withdraws nothing.
       releaseRequester();

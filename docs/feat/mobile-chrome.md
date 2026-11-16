@@ -2824,3 +2824,159 @@ M7 targets the `gap` the fix adds, from `band-wiring.test.ts`'s prop guard
 - **Checks:** `bun test apps/mobile` 1953 pass / 0 fail across 144 files. `bun run lint` clean (1695 files). `bun run typecheck` OK.
 - **Regression attacks:** `mock.module` replaces those modules for the whole test process, and `mock.restore` does not undo module mocks in Bun. I checked whether other tests use the mocked modules: the other three files that mention `react-native`, `expo-symbols` or the safe-area package only match them as text, and the full mobile suite stays green. So it is safe today, but a future test that renders RN will pick up the stubs. Not a finding. The three other `footnote=` callers (Computers, Settings) keep their old rendering. The `band-wiring` label test was rewritten to read the style blocks; I checked it against the new stylesheet and it still asserts `rowX`, `sectionTop` and the 6 pt bottom padding.
 - **Still owed from round 1:** flows 24/25 and the visual check against row D, blocked by `PushCore`.
+
+## Execution (slice S8 — Activity F1, read-only)
+
+*— claude-opus-5-5, 2026-11-16 · slice S8 only*
+
+**Scope: S8 (Files item 9) only.** S9/S10 untouched: no `subagent-detail.ts`,
+no message/Stop, no `JobDetail`, no flow 27/28, no floating button or setting.
+No protocol, daemon, client or persistence change, so
+`packages/protocol/schema/protocol.json` was **not** regenerated. `TODO.md`
+untouched.
+
+### Load-bearing check, re-run first (it held)
+
+S8 stands on "the phone's gap is purely app-side: every member the sheet needs
+already exists client-side". Checked before any edit:
+
+- `RemoteSession` has all eight members: `subagents` (`packages/client/src/remote-session.ts:698`),
+  `jobs` (`:707`), `onSubagents` (`:735`, hands the current list at once),
+  `onJobs` (`:755`, rows + the daemon's count, H1), `onSubagentMessage` (`:788`),
+  `messageSubagent` (`:808`), `killSubagent` (`:819`), `jobOutput` (`:832`), `killJob` (`:843`).
+- Schemas: `SubagentRowSchema` (`packages/protocol/src/session.ts:566`), `JobRowSchema` (`:656`),
+  `SubagentsUpdateSchema`/`JobsUpdateSchema` (`packages/protocol/src/updates.ts:380,393`).
+- The phone's session controller builds a real `RemoteSession` (`apps/mobile/App.tsx:276-277,
+  378-383`), so widening the handle type needs no adapter.
+
+No new client call was needed.
+
+### Drift from the Implementation (each reconciled here)
+
+1. **"Keep the agent card's progress instead of dropping it at `transcript.ts:414-419`" was
+   already done** by `fix/mobile-chat-glitches` (item 10): `subagent_start/usage/tool/end`
+   fold into `ToolRow.sub` (`apps/mobile/src/transcript.ts:420-452`), drawn by
+   `subAgentLine`. S8 changes nothing there. What S8 adds to the card is the link into the sheet.
+2. **The report join needed the note's id on the row, and the rows dropped it.**
+   `noteRow` kept only text and body. `NoticeRow.note?` (`transcript-rows.ts:98`) is new,
+   and `historyRows` copies `m.note` (`transcript-history.ts:46`). This is additive and is
+   not in the Files list.
+3. **The join happens at view time, not inside the memory reducer.** `activity-memory.ts`
+   holds the live list, Finished (last row + `endedAt`, newest first, cap 20) and the
+   opened ids. `reportsOf(transcript.rows)` builds `note.id → report` on every render. A
+   note that arrives before or after the leave therefore joins the same way, by
+   construction (tested).
+4. **Reports arrive through the history only.** The daemon delivers the report note to the
+   agent's next turn, and no live phone event carries it. A child that ends while you
+   watch shows `report pending` until the history is re-read (an attach, a resync, a
+   context reset). Nothing is lost, because the report is in the conversation. This is a
+   property of the wire, not a bug of S8.
+5. **`SendableHandle` is widened with OPTIONAL members.** `ActivityHandle =
+   Partial<Pick<RemoteSession, 8 members>>` (`session-screen-controller.ts:79`). Fakes and
+   older clients keep compiling, and F15 (nothing reported) falls out as `null` lists.
+6. **The sheet is a `pageSheet` `Modal`, like Session info,** not a medium-detent sheet.
+   RN core `Modal` has no detents, and a detent library would need a native rebuild.
+7. **Read-only scope inside the sheet.** Running sub-agent and shell-job rows are not
+   tappable: their detail, message, Stop and output are S9's. A tap on the card of a
+   running child opens the list. **"Show in chat"** on a report is deferred to S9:
+   `FlatList.scrollToIndex` without `getItemLayout` needs an `onScrollToIndexFailed`
+   path, and that path belongs with the detail.
+8. **`ui/ToolRow.tsx` is not changed.** The card's link (`tool-<id>-activity`, "sa-N ·
+   Activity ›") lives in `TranscriptRow`'s `ToolRowView`, beside the progress line.
+   `ToolRow` stays a generic primitive.
+9. **Changelog.** The owner asked for ONE fragment named `mobile-chrome.<category>.md`, and
+   the repo allows one bullet per file (`scripts/changelog.ts:125`). So the existing
+   `changelog.d/mobile-chrome.added.md` bullet (S7's New session) was extended to cover
+   Activity, the same way `mobile-chrome.changed.md` grew slice by slice. The plan's
+   `mobile-activity.added.md` was not written.
+10. **A dead branch was removed.** A first draft of `onSubagents` also skipped rows
+    "already Finished". Mutation showed that this can never happen: the step that lists a
+    row removes it from Finished. The check was removed and the reason is noted in the
+    code (see mutations).
+
+### As-built, in order
+
+1. `src/activity-memory.ts` (new, pure): `onSubagents(memory, rows, now)` turns a row that
+   leaves the list into a Finished entry and takes a row that comes back out of Finished.
+   The first list is never a finish. Newest entries come first, capped at
+   `FINISHED_CAP` = 20. Also `markOpened`, and `reportsOf(rows)`, which joins
+   `subagent_report`/`subagent_lost` notes by `note.id`. A test pins these note kinds to
+   core's `NOTE_KIND`. Plus the `NoticeRow.note` plumbing (drift 2).
+2. `src/activity.ts` (new, pure): `activityView(input, now)` returns count, unread, badge,
+   badge label, a11y label and groups.
+   - Count = live sub-agents + the daemon's running job count.
+   - The badge shows while something runs or a report is unread.
+   - Group order: Sub-agents, Shell jobs, Finished, Scheduled. Scheduled is always a
+     ghost, and an empty live group is hidden.
+   - Each string is flattened to one plain line (F16). A newer daemon's unknown `state`
+     is shown as is. `elapsed` is never negative under clock skew.
+   - Also `reportRow(view, focus)` and `agentCardTarget(callId, movedTo, live, finished)`.
+3. `src/session-screen-controller.ts`: `ActivityHandle`/`ActivityState`, and
+   `SessionScreenState.activity` (`:177`). `watchActivity` (`:640`) subscribes
+   `onSubagents`/`onJobs` at every attach (`:742`) and drops both on leave and dispose
+   (`:1089`, `:1103`). `openReport(id)` (`:962`) is new.
+4. Components (render only):
+   - `ui/ActivityBadge.tsx`: the pill, with a spinner while something runs and the
+     `activity.ts` label.
+   - `screens/ActivitySheet.tsx`: bands per group. A Finished row opens its report. It
+     keeps no state, because `focus` is the screen's.
+   - `screens/SubagentDetail.tsx`: the report half — title, meta, the report through the
+     transcript's `Markdown` (links go through the screen's confirm), and Copy.
+   - `TranscriptRow.tsx`: the card link.
+   - `SessionScreen.tsx`: the pill before the context ring (`:480`), the card target per
+     row (`:578`), the sheet mount (`:840`), and a 1 s clock only while the sheet is open.
+     Only a Finished child's focus marks its report opened, so a tap on a running child's
+     card does not pre-read a future report.
+
+### Tests (red first)
+
+`test/activity-memory.test.ts`, `test/activity.test.ts` and
+`test/session-screen-activity.test.ts` were written before their modules. Their first run
+was RED only on a missing module. That is not a red on the property (§9), so the red on
+each property is shown by the mutations below: every one was applied to the finished code
+and turned a test red. The controller test drives a fake handle that stands for
+`RemoteSession`. It shows that the open snapshot's live child puts the pill on the first
+frame (F13), that replaces and jobs reach the state, that a leave becomes Finished stamped
+with the screen clock, that `openReport` works, that leave and dispose unsubscribe, and
+that a handle without the members shows nothing and does not throw (F15). The three files
+give **43 pass, 0 fail**.
+
+### Mutation checks (§9: each applied, the 3 S8 files run, restored; script `.tentacle/tmp/mobile-chrome/s8-mutations.ts`; `cmp` against `s8-bak/` afterwards: identical)
+
+```
+M1 note.id join broken (report keyed by row key): 4 fail / 39 pass → KILLED
+M2 note dropped by historyRows: 1 fail / 42 pass → KILLED
+M3 a row back in the live list stays Finished: 1 fail / 42 pass → KILLED
+M4 Finished oldest first: 1 fail / 42 pass → KILLED
+M5 cap dropped: 1 fail / 42 pass → KILLED
+M6 count ignores shell jobs: 3 fail / 40 pass → KILLED
+M7 badge ignores unread: 1 fail / 42 pass → KILLED
+M8 empty live group shown: 1 fail / 42 pass → KILLED
+M9 controller never subscribes: 4 fail / 39 pass → KILLED
+M10 leave keeps subscriptions: 1 fail / 42 pass → KILLED
+M11 agent card ignores movedTo: 1 fail / 42 pass → KILLED
+M12 reportRow accepts a running child: 1 fail / 42 pass → KILLED
+```
+
+The first run had two mutations that SURVIVED: "the first list counted as a finish" and
+"no dedupe of already-Finished". Both were *equivalent* mutants: the code they altered
+could not change behaviour, and one of them was the dead branch of drift 10. I removed the
+dead branch and replaced both with M3/M4 above, which the tests kill.
+### Gate
+
+- `bun run typecheck` (`tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay`): clean.
+- `bun run lint`: **clean, 0 errors and 0 warnings, 1706 files**. This matches the AGENTS §6
+  baseline.
+- `bun test`: **12335 pass · 5 skip · 0 fail**, 886 files, 440 s (log in
+  `.tentacle/tmp/mobile-chrome/s8-full.log`). The 5 skips are the documented opt-in ones.
+
+### Not done in this slice (and why)
+
+- **Device / Maestro: not run.** Flow 27 is S9's. "The pill shows on a live background
+  child" is proven at the controller seam (fake `onSubagents` → `activityView(...).badge`),
+  not on a simulator. To verify: run a session with a background `agent_task` on the
+  phone. The `session-activity` pill should show `1`, and the sheet should list the child.
+- Detail, message and Stop for running children, job output and Stop, and "Show in chat"
+  belong to S9. The floating button belongs to S10.
+- No render test for the three components. They only map `activity.ts` values, and the
+  repo's RN render stubs are process-global (S4 review round 2).

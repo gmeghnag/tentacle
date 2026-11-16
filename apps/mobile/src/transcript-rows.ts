@@ -91,6 +91,11 @@ export interface NoticeRow {
   readonly body?: string;
   /** A full-width rule around the text (a context reset's separator). */
   readonly separator?: true;
+  /**
+   * The tentacle note it was drawn from (`ChatMessage.note`): the Activity
+   * sheet joins a sub-agent's report by its `id` (`activity-memory.ts`).
+   */
+  readonly note?: { readonly kind: string; readonly id?: string };
 }
 
 /**

@@ -45,6 +45,8 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { reportsOf } from "../activity-memory.ts";
+import { activityView, agentCardTarget, reportRow } from "../activity.ts";
 import { chatStatus } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
@@ -70,6 +72,7 @@ import { SPEECH_PORT } from "../speech-native-expo.ts";
 import { DENSE_FONT_SCALE, type Palette, typography } from "../theme.ts";
 import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
+import { ActivityBadge } from "../ui/ActivityBadge.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { Composer } from "../ui/Composer.tsx";
 import { ContextRing } from "../ui/ContextRing.tsx";
@@ -87,6 +90,7 @@ import {
 import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
 import type { VoiceSettings } from "../voice-settings-store.ts";
 import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
+import { ActivitySheet } from "./ActivitySheet.tsx";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
@@ -367,9 +371,49 @@ export function SessionScreen({
   // would re-render every row on any state change; the Beta switches change
   // rarely, so the identity is keyed on the two values that decide a row's look
   // (the read-aloud state and whether the speaker is offered at all).
+  // Activity (docs/feat/mobile-chrome.md S8): the sheet, which report it shows,
+  // and a 1 s clock for the elapsed times while it is open. Every value is
+  // `activity.ts`'s; the reports are joined from the transcript by note id.
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [activityFocus, setActivityFocus] = useState<string | null>(null);
+  const [activityNow, setActivityNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!activityOpen) {
+      return;
+    }
+    setActivityNow(Date.now());
+    const timer = setInterval(() => setActivityNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [activityOpen]);
+  const reports = useMemo(() => reportsOf(state.transcript.rows), [state.transcript.rows]);
+  const activity = state.activity;
+  const activityVm = activityView(
+    {
+      subagents: activity.subagents,
+      jobs: activity.jobs,
+      finished: activity.memory.finished,
+      reports,
+      opened: activity.memory.opened,
+    },
+    activityNow,
+  );
+  // Only a Finished child's report opens (and so stops being "new"); a running
+  // child's focus is the list (its live detail is S9's).
+  const focusActivity = (id: string | null) => {
+    const target = reportRow(activityVm, id);
+    if (target !== null) {
+      controller.openReport(target.id);
+    }
+    setActivityFocus(target?.id ?? null);
+  };
   const rowExtraData = useMemo(
-    () => ({ readAloud: voiceState?.readAloud, speakShown: voiceSettings.readAloudButton }),
-    [voiceState?.readAloud, voiceSettings.readAloudButton],
+    () => ({
+      readAloud: voiceState?.readAloud,
+      speakShown: voiceSettings.readAloudButton,
+      // An agent card's link follows the live/Finished lists.
+      activity,
+    }),
+    [voiceState?.readAloud, voiceSettings.readAloudButton, activity],
   );
   const compose = state.compose;
   const status = chatStatus({
@@ -430,6 +474,21 @@ export function SessionScreen({
           }
           right={
             <>
+              {/* F1: the Activity pill, between the title and the ring, only
+                  while something runs or a report is unread (Design 5). */}
+              {activityVm.badge ? (
+                <ActivityBadge
+                  palette={palette}
+                  testID="session-activity"
+                  label={activityVm.badgeLabel}
+                  running={activityVm.count > 0}
+                  accessibilityLabel={activityVm.accessibilityLabel}
+                  onPress={() => {
+                    setActivityFocus(null);
+                    setActivityOpen(true);
+                  }}
+                />
+              ) : null}
               {/* A1: the context fraction as a small ring next to "…", tap →
                   Session info (Design 2). Absent when nothing measured one. */}
               {state.view.headerContext === null ? null : (
@@ -514,12 +573,32 @@ export function SessionScreen({
                 state.view.composer.running,
                 voiceSettings,
               );
+              const child =
+                item.kind === "tool"
+                  ? agentCardTarget(
+                      item.id,
+                      item.sub?.movedTo,
+                      activity.subagents,
+                      activity.memory.finished,
+                    )
+                  : null;
               return (
                 <TranscriptRow
                   row={item}
                   palette={palette}
                   onLink={onLink}
                   thumbnails={state.thumbnails}
+                  {...(child === null
+                    ? {}
+                    : {
+                        agent: {
+                          id: child,
+                          onOpen: () => {
+                            focusActivity(child);
+                            setActivityOpen(true);
+                          },
+                        },
+                      })}
                   {...(speak === undefined || voice === null
                     ? {}
                     : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
@@ -758,6 +837,19 @@ export function SessionScreen({
             }}
           />
         )}
+        <ActivitySheet
+          palette={palette}
+          visible={activityOpen}
+          view={activityVm}
+          reports={reports}
+          focus={activityFocus}
+          onFocus={focusActivity}
+          onLink={onLink}
+          onClose={() => {
+            setActivityOpen(false);
+            setActivityFocus(null);
+          }}
+        />
         <RenameSheet
           palette={palette}
           state={renaming}
