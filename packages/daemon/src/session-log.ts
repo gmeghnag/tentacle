@@ -22,6 +22,7 @@
  * entries reference the live message objects). A reader further behind is
  * `rebased` to the last `base`.
  */
+import type { SessionCapabilities } from "@tentacle/agent";
 import type { ChatMessage, SubagentBackgroundBody, SubagentEndBody } from "@tentacle/core";
 import {
   type KnownLogEntry,
@@ -129,6 +130,21 @@ export class SessionLog {
     }
     this.lastTitle = key;
     this.push({ type: "title", title: { text: title.text, source: title.source } });
+  }
+
+  /**
+   * The session's switches, the WHOLE state (docs/feat/session-capabilities.md
+   * S3b): the caller logs it on every change and after a `base` when something
+   * is off — the last one of a segment wins, none = everything on.
+   */
+  capabilities(state: SessionCapabilities): void {
+    this.push({
+      type: "capabilities",
+      capabilities: {
+        disabledMcp: [...state.disabledMcp],
+        disabledSkills: [...state.disabledSkills],
+      },
+    });
   }
 
   turnStart(turnId: string): void {

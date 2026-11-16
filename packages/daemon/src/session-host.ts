@@ -1213,6 +1213,9 @@ export class SessionHost {
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
       // A restart KEEPS the session's auto-accept (owner Q3).
       ...(record.autoAccept === true ? { autoAccept: true } : {}),
+      // And its switches, from the log (docs/feat/session-capabilities.md S3b):
+      // a restart and an archive reopen alike — the same session's choice.
+      ...(record.capabilities !== undefined ? { capabilities: record.capabilities } : {}),
       // Paired: the log continues the lineage the files hold (§5); else a new one.
       ...(record.paired ? { log: { head: record.logHead, logged: record.logged } } : {}),
     });

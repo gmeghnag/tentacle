@@ -1599,6 +1599,7 @@
         "mapping": {
           "base": "#/$defs/LogBaseEntry",
           "call_started": "#/$defs/LogCallStartedEntry",
+          "capabilities": "#/$defs/LogCapabilitiesEntry",
           "checkpoint": "#/$defs/LogCheckpointEntry",
           "media_message": "#/$defs/LogMediaMessageEntry",
           "media_replace": "#/$defs/LogMediaReplaceEntry",
@@ -1652,6 +1653,9 @@
         },
         {
           "$ref": "#/$defs/LogSubagentEndEntry"
+        },
+        {
+          "$ref": "#/$defs/LogCapabilitiesEntry"
         }
       ]
     },
@@ -1747,6 +1751,40 @@
         }
       },
       "required": ["callId", "id", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogCapabilitiesEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/SessionCapabilities"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "capabilities",
+          "type": "string"
+        }
+      },
+      "required": ["capabilities", "id", "seq", "ts", "type"],
       "type": "object"
     },
     "LogCheckpointEntry": {
