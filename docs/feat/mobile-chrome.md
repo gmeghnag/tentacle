@@ -2410,3 +2410,15 @@ biting through `valueFullWidth`, so no assertion was lost with it.
   is the engine RN uses, but the real pixels are unseen — the same limitation
   Review accepted for S3.
 - **The `sepSheet` nit** depends on S4's final structure (see above).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · fresh context, verifies fix commit `44c5fc6c`*
+
+**Verdict: PASS.**
+
+- **Finding 1 (HIGH) — fixed.** The label column now shrinks (`text: { flexShrink: 1, minWidth: 0 }`), and pure `rowLayout(...).labelSizing` (`fill`/`capped`/`stacked`) chooses its width rule. Yoga repro (`s3-review-yoga.ts`): `fill` → chevron right edge **370** (= main), `capped` → 291; it was 396 before the fix. Mutations, each reverted with the tree left clean: base `flexShrink: 0` → band-wiring 1 fail; `textFill` without `flex: 1` → 1 fail; `rowLayout` ignoring `hasValue` → row-value 2 fail.
+- **Finding 2 (MEDIUM) — fixed.** The Execution now states that S3 is visible and names S4 as the owner of that change.
+- **Finding 3 (MEDIUM) — fixed.** The signature is corrected to the DeepSeek profile and matches the commit title.
+- Round-1 nit fixed: `BandSection` docs now say `bg`. The nit about `Row` hairlines using `sep` inside a sheet is still open and not blocking.
+- Gate: the two S3 test files pass **32 / 0**; `bun run lint` clean (1689 files); `bun run typecheck` clean. The diff touches no protocol, persistence or runtime path.
