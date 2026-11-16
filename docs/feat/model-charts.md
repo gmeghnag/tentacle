@@ -1295,8 +1295,88 @@ so a `chart` row today shows its label and title and, on an old client, the resu
 text. Whether the braille/blocks/bar renderers fit the frame at every width is
 C3's and C4's, with `ink-testing-library` frames.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Nothing to fix: review round 1 produced no findings.** The reviewer's session
+died on the quota limit before writing any verdict (evidence in *Review round 1*
+below). So this round made **no code change** — fabricating fixes against a
+review that never happened would be worse than none (AGENTS §9: prove the exact
+property; there is no property named to prove).
+
+Steps, in order:
+
+1. Read `docs/EXECUTOR-BRIEF.md`, AGENTS §9, this doc, and located the expected
+   input — the **latest Review round**. `## Review` was still the placeholder
+   `*(empty — mandatory fresh-context review after C8)*`, and no
+   `docs(model-charts): review round 1` commit exists on the branch.
+2. Traced the orchestrator's artifacts to explain the absence rather than assume
+   it: `runs/night-model-charts-review1.json` = `Error: Session ID … already in
+   use` (no `.result`); `runs/night-model-charts.log` = `14:31 opus new on condo
+   done:` with an **empty** result; the `condo` transcript's last record is the
+   limit message. Recorded as *Review round 1* below.
+3. Re-ran the checks the dead reviewer had already run, so the branch's state is
+   independently confirmed rather than inherited (below).
+4. Bounded adversarial pass to hand the next reviewer a lead instead of a blank
+   page. Two probe results investigated to a verdict:
+   - `niceTicks(0,0)` returning empty ticks was **my** error (a missing required
+     `maxTicks`); with it, `niceTicks(0,0,5)` → `[-1,…,1]`, and `5,5` → `[4.5,5.5]`.
+     Matches D4. **Not a defect.**
+   - `scatter`/`{x,y}` `line` accept an all-`null` y (`"1 series × 1 · y no
+     values"`) while the numeric `data` form refuses it. The plan's own table row
+     "Empty / all-null → error (T1.3)" does not scope this to the numeric form, so
+     this is a **candidate MEDIUM** — left for the real review to rule on, not
+     silently "fixed" here (it is unpinned by any T1.3 case for points, and the
+     validation change belongs with a red test that names the intended scope).
+     Repro: `.tentacle/tmp/model-charts/allnull.ts`.
+
+**No mutations are pasted because no fix was made** — there is no fix to mutate
+(§9's non-vacuity rule applies to a change; there is none). The mutations already
+recorded for C1 and C2 above remain the evidence for those slices.
+
+**Gate** (run on this branch, this round, full suite — not the narrow files):
+
+```sh
+$ bunx tsc --noEmit     # TSC_EXIT=0
+$ bun run lint          # Checked 1751 files in 516ms. No fixes applied.
+$ bun test              # 12718 pass · 5 skip · 0 fail — Ran 12723 tests across 910 files. [461.94s]
+```
+
+The 5 skips are §6's three opt-in groups (`TENTACLE_K8S_SERVER`,
+`TENTACLE_DOCKER_TESTS=1`, `TENTACLE_SLOW_TESTS=1`), not failures. The counts are
+higher than C2's recorded `12623` because `main` was merged in at `5dcdfffa`.
+
+**Unverified / owed:** a genuine fresh-context C1+C2 adversarial review. This
+round cannot stand in for it.
+
 ## Review
 *(empty — mandatory fresh-context review after C8)*
+
+### Review round 1 — DID NOT PRODUCE FINDINGS (C1+C2)
+
+*— claude-opus-5-5, 2026-11-16*
+
+The round-1 reviewer never reached a verdict: its session
+(`64a7f815-fe75-4884-8fae-9b9205d8a5e2`, account `condo`) ended on
+**"You've hit your 5-hour limit"** after 179 records, mid-probe. Evidence:
+
+- `runs/night-model-charts-review1.json` contains only
+  `Error: Session ID … is already in use` — no `.result`, no verdict.
+- No `docker`/doc edit: this section is still the placeholder, and
+  `git log main..HEAD` has **no** `docs(model-charts): review round 1` commit.
+- The transcript's only assistant text is progress narration ("Running the
+  touched tests, lint and typecheck now", "Checking how the round planner treats
+  the chart tool's empty concurrency keys", "Fixing the probe's import path"),
+  then the limit. **Zero** HIGH/MEDIUM statements anywhere in it.
+
+What it *did* establish (reusable, so the next reviewer starts further ahead):
+the C1+C2 test files, `bun run lint` and `bunx tsc --noEmit` are green (see
+*Fix round 1*); its scratch probe is `.tentacle/tmp/model-charts/edge.ts`.
+
+**Consequence:** fix round 1 had **no findings to fix**, so this round changed
+**no code**. A real fresh-context C1+C2 review is still owed before the
+`C1+C2` group can be called reviewed.
 
 #### Owner choices — iPhone visual language rev 2 (2026-11-16 ~12:35, binding)
 
