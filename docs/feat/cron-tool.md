@@ -1495,3 +1495,27 @@ signed with the executor's real id.
 fail** (12201 tests, 874 files). All 5 skips are opt-in: k8s live ×2
 (`TENTACLE_K8S_SERVER`), docker live ×2 (`TENTACLE_DOCKER_TESTS`), slow keepalive
 ×1. None of them is in a branch file.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16* (fresh-context reviewer)
+
+**Verdict: PASS (S3 code).** Finding 2 is still open, and only the owner can close it.
+
+- **Finding 1: FIXED.** The diff is test-only (`schedules.test.ts` adds T-D3b) and
+  changes no production code. I re-ran the mutations myself in `checkSchedules`'s
+  `due === null && changed` branch:
+  - drop `persist()` → T-D3b fails (16 pass / 1 fail);
+  - drop `publishSchedules()` → T-D3b fails (16 pass / 1 fail).
+
+  I reverted both with Edit, and `git status` is clean afterwards. Unmutated:
+  17 pass / 0 fail. The test also asserts "never fired", which pins that the
+  expiry sweep runs before the due pick.
+- **Finding 2: ESCALATED, still open.** The fix round's signature has the same
+  mismatch as before. It is signed `claude-opus-5-5`, but its commit `c4af5f76` is
+  titled `review round 1 (deepseek)`. The owner must say which model wrote S3 and
+  this fix, and correct the signatures to match. This is not a code defect, so it
+  does not block S3.
+- **Regressions:** none possible in production, because no source changed.
+  `bun run typecheck` is clean. `bun run lint` is clean (1684 files).
+
