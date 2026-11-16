@@ -2589,3 +2589,14 @@ fix round 1 gave (internal test work carries no fragment, §10; no wire change).
 renderer under `bun test`, so the repaint itself (a row dropped or duplicated after
 a delete) is pinned through the view-model and the wiring guards, not through a
 render. Confirming it on device needs the Maestro flow.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; same model family as the executor.)
+
+**Verdict: PASS.** `effc5893` changes tests only and closes round 2's MEDIUM.
+
+- **`rowIdentity` is now pinned.** The new test checks that `key` wins over `title`, that a row with no key falls back to its title, and that two same-prompt rows get distinct identities. Mutation `return row.title;` (`session-info.ts:250`) → 1 fail (it was 0 in round 2).
+- **The negative guard is no longer vacuous.** The regex is now `/\$\{row\.title\}/`. Mutation: putting `${row.title}` back into the expansion state → 1 fail. Putting it back into the onExpand toggle → 1 fail. Both were caught only by this guard, because no positive `toContain` covers the toggle.
+- **Regressions on the diff:** none. The diff touches no production code.
+- **Gate:** `bun test apps/mobile/test` → 1951 pass / 0 fail (144 files). `bun run lint` → clean (1716 files). `bun run typecheck` → clean. All mutations were reverted (bytes restored, `git status` shows only this doc).
