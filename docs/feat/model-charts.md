@@ -1,6 +1,6 @@
 # feat/model-charts — the model draws charts in the conversation (iPhone native, Mac TUI in braille)
 
-> **Status:** implementation — **plan written, NOT approved**: the owner decides the *Owner questions* after the mockups (`.tentacle/tmp/model-charts/mockups/index.html`).
+> **Status:** implementation — **plan APPROVED** (owner answers + rev-2 iPhone picks); **slice C1 (spec + validator + shared math + palette) EXECUTED** — see *Execution*.
 > **Branch:** `feat/model-charts`
 > **Size:** L (split into 8 slices, each S or M) · **Blast:** cross-module (a new model tool with no I/O; no protocol bump, no new update type, no session-log type; one new native module on the phone) · **Suited:** per slice (below): `deepseek` for the pure/contained slices, `opus` for the visual and native ones; mandatory fresh-context Review of the whole branch (L).
 > **Changelog:** `changelog.d/model-charts.added.md` (written by C8).
@@ -904,7 +904,175 @@ surfaces `#FFFFFF` light, `#1F1F1E` dark):
 
 ## Execution
 
-*(empty — starts after the owner approves the Implementation)*
+### C1 — spec + validator + shared math + palette (slice C1 of 8)
+
+*— claude-opus-5-5 (executor), 2026-11-16*
+
+**Load-bearing check re-run first (before any edit, on this worktree's `feat/model-charts`
+tip, which is `main` + the doc).** The assumption is "the spec can ride the tool call's
+own arguments — so no new method, no new update type, no `PROTOCOL_VERSION` bump".
+
+```
+$ rg -n "rawInput" packages/daemon/src/mapping.ts
+272:        rawInput: safeParseArgs(event.arguments),
+$ rg -n "rawInput" packages/protocol/src/updates.ts
+54:  rawInput: z.unknown().optional(),
+$ rg -n "rawInput|arguments" packages/client/src/mapping.ts
+268:        arguments:
+269:          typeof update.rawInput === "string"
+270:            ? update.rawInput
+271:            : JSON.stringify(update.rawInput ?? {}),
+$ rg -n "args" packages/tui/src/state.ts        → 123 (readonly args), 437 (args: event.arguments)
+$ rg -n "arguments" apps/mobile/src/transcript.ts apps/mobile/src/transcript-history.ts packages/tui/src/resume.ts
+apps/mobile/src/transcript.ts:357:        args: event.arguments,
+apps/mobile/src/transcript-history.ts:93:          args: call.arguments,
+packages/tui/src/resume.ts:71:          args: call.arguments,
+$ rg -n "tool_call:" packages/protocol/src/updates.ts   (UPDATE_CLASS block)
+517:  tool_call: "display",
+```
+**HOLDS.** `rawInput` is a free `z.unknown()` on a `display`-class update on both
+directions of the mapping, and both frontends keep the call's `arguments` string live
+and after reload. Nothing C1 adds touches the wire, so no `protocol.d/` note.
+
+**Context repro re-run (the capability is genuinely missing):**
+
+```
+$ rg -n '"chart"|chart_spec|ChartSpec' packages apps --glob '!**/node_modules/**' | wc -l
+       0
+$ ls apps/mobile/node_modules | rg -c 'react-native-svg'
+no match
+$ rg -c '"react-native-svg"' bun.lock
+no match
+$ ls packages/core/src/chart
+ls: No such file or directory
+```
+
+**As built** (dependency order; `packages/core/src/chart/`, all React-free and
+re-exported from `packages/core/src/index.ts:13`):
+
+| File | What it is |
+|---|---|
+| `dates.ts` | `parseIsoDate`/`parseIsoDates`/`mixedDateKinds`/`datePositions`; the three kinds (calendar / instant / floating) and the four accepted forms, with impossible dates refused. |
+| `spec.ts` | `ChartSpec` + `validateChartSpec` (the one reader of `unknown`), `CHART_CAPS`, `CHART_MAX_ABS_VALUE`, `canonicalChartJson`/`chartSpecBytes`, `effectiveXType`/`usesPoints`/`specDates`/`specXPositions`. |
+| `scale.ts` | `niceTicks` (Heckbert + a count-fitting step-up), `dateTicks` (incl. month/quarter/year), `thinLabels`, `downsampleLttb`, `bucketMeans`, `finiteValues`. |
+| `format.ts` | `formatNumber` (own `k`/`M`/`G`/`T`, `Intl` separators, locale-driven currency placement), `autoFormat`, `formatDate`, `formatPercent`. |
+| `palette.ts` | palette A (8 slots × light/dark), `seriesColor(index, scheme)`, and the dataviz validator's five checks as code (`validatePalette`, `contrastRatio`, `oklch`). |
+| `summary.ts` | `summarizeChart` → the tool's result line + the per-series facts VoiceOver reads; `chartExtent`, `yFormat`, `datasetValues`. |
+| `json-schema.ts` | `CHART_JSON_SCHEMA`, hand-written and closed, its caps read from `CHART_CAPS` so they cannot drift. |
+
+Tests (red first — see the mutation block): `packages/core/test/chart-spec.test.ts`
+(T1.1–T1.9, T1.12), `chart-math.test.ts` (T1.10, T1.11, T1.13–T1.15),
+`chart-helpers.test.ts` (positions, `seriesColor`, the JSON Schema's agreement with the
+validator), `chart-summary.test.ts` (T1.16 + the canonical bytes),
+`chart-fuzz.test.ts` (the failure modes §9 asks for, see drift 8).
+
+**Mutation checks (§9; each applied, the named test shown failing, then reverted).**
+
+```
+1) accept a numeric string instead of refusing it            (spec.ts readNumbers)
+   → 4 fail, incl. (fail) T1.2 "12.5" — write the number, no quotes
+2) positions by index instead of elapsed time                (dates.ts datePositions)
+   → (fail) T1.10 instants across a DST change stay monotone and on elapsed time
+3) hand-edit a dark slot #9085e9 → #8a83d8                   (palette.ts CHART_PALETTE)
+   → (fail) T1.15 dark: 8 adjacent pass, first-3 all-pairs still clears the CVD floor
+4) plain stride sampling instead of LTTB                     (scale.ts downsampleLttb)
+   → (fail) T1.11 a 1-in-1000 spike survives 1000 → 200
+5) always-compact auto format                                (format.ts autoFormat)
+   → (fail) T1.13 auto: compact above 10 000, full below
+6) a "k" suffix treated as a unit, not a scale               (spec.ts numericReading)
+   → (fail) T1.2 "12k" and "€12" — the plain number
+7) revert the two sentences the fuzz found                   (spec.ts readText,
+                                                              stringValueError)
+   → 3 fail: "a value slot cannot hold a date", "the complaint is about the type",
+     "a series label and an axis title"
+```
+
+**Palette cross-check.** The ported validator was run against the reference
+`validate_palette.js` the plan's numbers came from
+(`.tentacle/tmp/model-charts/xcheck.ts`): every measured ΔE agrees — light 8
+adjacent CVD 16.1 / normal 19.6, light first-3 12.5 / 17.9, dark adjacent 9.9 /
+19.3, dark first-3 **6.6** (warn band) / 15.1 — and the contrast relief lands on the
+same two light slots (`#eda100` 2.17:1, `#e87ba4` 2.69:1). Only the wording differs.
+
+**Drift from the Implementation (and why).**
+
+1. **The owner's example in Context uses `"y":{"unit":"€","format":"k"}`, which the
+   plan's own D2 and the validation table forbid** (`format` is `compact|full`; `12k`
+   is a *value* mistake). §7 says the schema wins over an illustrative example, so
+   `format: "k"` is refused with `y.format "k" is not valid — allowed: compact, full
+   (or leave it out and the client picks)`, and T1.1 uses the D2 form. The Context
+   example needs a one-line fix in the doc (not done here — it is the owner's text).
+2. **`formatPercent` glues `%` (`37,5%`)** like `formatNumber`'s `%` unit, instead of
+   the plan's `37,5 %` for the *legend*. One rule for the glyph, and `%` glued is the
+   Italian convention for a signed magnitude; a legend row reads `▬ Ricavi 37,5%`.
+3. **`niceTicks` gained a count-fitting step-up.** Heckbert alone gives 11 ticks for
+   `0..987` in 8 rows; the plan promises `maxTicks`, so the step climbs until the
+   count fits (the tests pin `≤ maxTicks + 1`).
+4. **`downsampleLttb` keeps a representative of every `null` run.** LTTB treats `null`
+   as 0 for its area math and silently bridges gaps; the plan's "`null` = a break" is
+   a correctness property, so a run of nulls that LTTB would drop keeps its middle
+   point (pinned by T1.11 "nulls stay breaks").
+5. **The 64 KiB cap is measured on the CANONICAL bytes** (`chartSpecBytes`), which is
+   also what the artifact will store (D1) — so the cap and the version identity are
+   the same number.
+6. **`top-level unknown field` messages list the allowed keys** (`allowed: type,
+   title, …`), and `options` gets its own sentence mapping Chart.js' bag onto the
+   spec. The plan names the `options` sentence; the allowed-list form is what
+   `datasets[0]`/`y` already did, so one shape for all three.
+7. **`CHART_JSON_SCHEMA` reads `CHART_CAPS`** instead of repeating the numbers, so
+   the model-facing schema and the validator cannot drift (pinned by
+   `chart-helpers.test.ts`).
+8. **Two sentences changed after a fuzz pass, and got their own test.** A pod can
+   forge `rawInput` and a client re-validates it, so the validator must never throw
+   and must never leak a JS internal into a sentence a model reads. Fuzzing 40 000
+   inputs found two defects: a non-string `title` reported `title must be text —
+   title is missing — give the chart a short title…` (the "you did not give it"
+   sentence reused as the type complaint), and a date in a value slot got only the
+   generic "write a number", with no hint that dates belong in `labels`. Both are
+   fixed (`spec.ts` `readText` / `stringValueError`) and pinned by
+   `chart-fuzz.test.ts`, whose bounded 3 000-case run asserts the other invariants
+   too: never throws, always ≥ 1 and ≤ 8 errors, no `undefined`/`[object`/`NaN` in
+   any message, and both arms of the fuzz reached (so the ok path is exercised, not
+   just the refusals).
+
+**Not in C1** (they belong to later slices): `packages/tools/src/chart.ts`,
+`toolLabel("chart")`, `wiring.ts`, `tui/src/chart-lines.ts` + the `chart` theme
+tokens, the TUI row branch, `apps/mobile/src/chart-{layout,scrub}.ts`,
+`react-native-svg`, the gallery. `summary.ts` is here because the tool's result line
+*is* its output (D4 lists it in `core`), and its exact line is pinned by T1.16 so C2
+can only consume it.
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run lint` clean (0 errors, 0 warnings, the
+§6 baseline) · `bun test` **12 603 pass, 5 skip, 0 fail** (12 608 tests, 901 files,
+462 s) — the 5 skips are exactly the three opt-in groups of §6 (2 live-docker, 2
+live-k8s, 1 real-socket slow), so no new fail and no non-opt-in skip · no schema
+changed, so `packages/protocol/schema/protocol.json` needed no regeneration · one
+fragment `changelog.d/model-charts.added.md` (never `CHANGELOG.md`; its `[Unreleased]`
+is untouched) · `TODO.md` untouched.
+
+```sh
+$ bunx tsc --noEmit                 # (no output)
+$ bun run lint
+Checked 1733 files in 542ms. No fixes applied.
+$ bun test
+ 12603 pass · 5 skip · 0 fail · 13 snapshots, 98227 expect() calls
+ Ran 12608 tests across 901 files. [462.30s]
+```
+
+**One pre-existing flake, not this change.** An earlier full run hit
+`packages/daemon/test/session-log-store.test.ts:815` (T4, "the fork precedes the
+source's next write") — `expect(control.forkTemps).toBe(1)` got 2. That fixture asserts
+after a fixed `await Bun.sleep(60)`; it re-runs green in isolation (3/3) and fails under
+deliberate CPU load (1 of 3 runs with six `bun test` peers alongside).
+`packages/daemon/` imports nothing this slice added
+(`grep -rn chart packages/daemon/src packages/daemon/test` → no match), so it cannot be
+caused here: it is a timing assumption in that fixture, for its own task.
+
+**Unverified in this slice** (C2's job, named so it is not mistaken for done): that a
+real `SessionHost` + `Connection` + `RemoteClient` round-trip carries a 40 KiB chart
+spec intact end to end (the plan's C2.0 repro), and that a TUI/phone row's stored
+`args` re-validates to the same spec. The seam is proved statically above and the
+validator is fuzzed, but the round trip itself is C2's first deliverable.
 
 ## Review
 
