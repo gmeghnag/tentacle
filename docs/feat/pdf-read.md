@@ -846,3 +846,13 @@ the 1–2-blank case and the hostile-count bound.
   `doc.destroy()` on pdfjs-dist 6.5.438.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context)
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES** (P2 still not implemented). `git diff HEAD~1` (`0bd88f0c`)
+only commits the P2 round-1 review text into this doc; it has no code. `git grep
+"pdfjs|pdf-extract|pdf-worker" HEAD -- packages scripts package.json` → still no hits.
+The round-1 finding is unaddressed, and no fix exists to mutate. Gate: `bun run lint`
+clean; `bun run typecheck` exit 0.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context)
