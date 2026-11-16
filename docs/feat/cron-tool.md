@@ -2461,3 +2461,22 @@ that passes on its own (`24 pass / 0 fail`) and on the full re-run.
 device after a delete) is not exercised: React Native has no renderer under
 `bun test`, so the identity is pinned through the view-model and the wiring guards
 (the file's own stated approach). Confirming it on device needs the Maestro flow.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; same model family as the executor.)
+
+**Verdict: REQUEST-CHANGES.** The fix in `a906f89a` is correct code. One link in it is not pinned by any test.
+
+**Finding 1 of round 1 (duplicate keys): fixed in the code.** `keyedScheduleRows` (`schedule-view.ts:141`) gives each row a key from its sanitized id and adds an ordinal on a repeat. `schedulesSection` sets `key` on each row (`session-info.ts:728`). The sheet builds the key, the expansion state and every testID from `rowIdentity(row)` (`SessionInfoSheet.tsx:114-227`). Mutations (`rev-s6-mut2.ts`, bytes restored, `git status` clean):
+- the view-model's `key` set from the title → 2 fail;
+- the ordinal dropped → 1 fail;
+- the sheet's key reverted to `row.title` → 1 fail;
+- the Delete testID reverted to `row.title` → 1 fail;
+- **`rowIdentity` returning `row.title` (`session-info.ts:250`) → 0 fail**.
+
+1. **MEDIUM (test non-vacuity, §9): the property the fix rests on is unpinned.** `rowIdentity` is the only place where `key` takes priority over `title`. If it regresses to `return row.title`, the sheet's keys and testIDs collide again on same-prompt wakes, and the whole mobile suite stays green. The tests check that the view-model sets `key` and that the sheet calls `rowIdentity`. No test checks what `rowIdentity` returns. The guard `expect(sheet).not.toMatch(/\\$\\{row\\.title\\}/)` (`schedule-wiring.test.ts:37`) is also vacuous: `\\$` is a literal backslash followed by an end anchor, so it never matches. It returns `false` even on `${row.title}`. Fix: one unit test, `rowIdentity({title:"check CI", key:"sc-2"}) === "sc-2"`, or better, the identities of the two same-prompt rows are distinct. Rewrite the regex as `/\$\{row\.title\}/`.
+
+**Regressions on the diff:** none found. Other sections have no `key`, so `rowIdentity` falls back to their titles, and their testIDs are byte-identical to before (flow 25's `-switch` testID is pinned). Minor, not blocking: an ordinal can collide with a real id (`x`, `x␠`, `x#2` → `x`, `x#2`, `x#2`). Daemon ids are generated `sc-N`, so this is theoretical.
+
+**Gate:** `bun test apps/mobile/test` → 1950 pass / 0 fail (144 files). `bun run lint` → clean (1716 files). `bun run typecheck` → clean.
