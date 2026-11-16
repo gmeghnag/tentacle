@@ -1482,3 +1482,243 @@ The plan's third mutation target, "break the `note.id` join", belongs to S8
 **Attacks tried:** (1) same id on another computer → `reset`, not `stay`, and no highlight via `drawerCurrentId` — holds. (2) F2: stale/error never `empty` — holds. (3) F4 stack shape incl. `archived:true` on both paths (Owner Q4) — holds. (4) `canCreate` from `computerStatus`: a probe that fails while the link diagnoser still says `ok` (dial fine, `session/list` errors) yields `state:"ok"` (`computer-rows.ts:79-89`, `App.tsx:528`) → title "Online", `canCreate:true` — pre-existing `computerRows` behaviour, LOW; S6/S7 should not rely on `canCreate` alone (the create path's own failure state, F8, is the real net). (5) §7 "logic in pure modules": all branching is in `drawer-list.ts`/`drawer-nav.ts`; no protocol/persistence/IO touched.
 
 **Executor behaviour:** honest provenance note and drift list; cited lines verified. Process nit: the branch commit is titled `exec (deepseek)` while the Execution is signed claude-opus-5-5 and says the files predate it — the authoring model of the S5 code is unclear; record it once in the commit/scorecard.
+
+## Execution (slice S6 — drawer UI + navigation, C1)
+
+*— claude-opus-5-5, 2026-11-16 · slice S6 only*
+
+**Scope:** S6 only. No New session pill (S7), no Activity (S8–S10). No
+protocol, daemon or client change, so `protocol.json` was not regenerated (no
+schema changed).
+
+**Provenance (stated honestly):** at the start of this run the worktree already
+held an earlier, unrecorded S6 attempt, uncommitted (mtime 2026-11-16
+01:36–01:39): `drawerItems`/`drawerComputers` added to `drawer-list.ts`,
+`drawerMotion`/`swipeIsHorizontal`/`swipeCloses`/`DRAWER_WIDTH` added to
+`drawer-nav.ts`, a new `drawer-rename.ts`, `screens/SessionsDrawer.tsx`,
+`test/drawer-items.test.ts` and `test/drawer-rename.test.ts`. None of it was
+wired in, and `SessionsDrawer.tsx` did not typecheck. I checked it against the
+plan and the code and kept it with two fixes (below). The wiring, routes, flows,
+the magnifier target and all the evidence below are mine.
+
+### Load-bearing check, re-run first (it held)
+
+- The six drawer test files: 50 pass · 0 fail. That includes `drawer-seam`
+  (two controllers over two fake `session/list` loaders, no other client call)
+  and `drawer-nav` (`drawerTarget` stack).
+- The seams are where S5 cited them: `App.tsx` `SessionsRoute` builds its
+  controller over `LINKS.get(computerId)` (`:852-854` before this slice's
+  edits), `SessionRoute` resolves its own link (`:944`), and the Sessions screen
+  opens with `navigate("Session", …)` (`:1651`). The drawer host reuses exactly
+  that `load`. **No new client call** was needed; rename uses the existing
+  `RemoteClient.rename` (`packages/client/src/remote-client.ts:1215`).
+
+### Drift from the Implementation (each reconciled here)
+
+1. **The host is mounted in `App.tsx`, not in `SessionScreen`.**
+   `SessionDrawerHost` (`App.tsx:960`) wraps the Session route's content, so it
+   covers both the session screen AND `SessionRoute`'s connecting/error frame.
+   The hamburger is in both (`SessionScreen.tsx:421`, `App.tsx:1208`). Mounting
+   it inside `SessionScreen` would leave a session that cannot connect with no
+   way to the drawer, which is exactly the F2 case. `SessionScreen` only gets
+   `onOpenDrawer`.
+2. **`onBack` is gone from the Session screen.** The plan says `session-back`
+   → `session-drawer`. The chevron is removed, and back is the native edge
+   swipe (F1). The connecting frame's leftover `GlassButton` (S2 missed it)
+   became a `HeaderIcon` hamburger, so `GlassButton` is no longer imported by
+   `App.tsx`.
+3. **Flows 24 and 05 never tapped `session-back`** (the plan's Files item 7 is
+   wrong). Only the two component sites carried the id. 24 gains a drawer
+   shot. 05 gains the F2 drawer check (below), and because the session screen
+   has no back button any more, it leaves through the drawer's magnifier.
+4. **The magnifier needed a target the plan did not name.** I added
+   `drawerSearchTarget(computerId, name)` (`drawer-nav.ts:120`): a reset to
+   `[Computers, Sessions{…, search: true}]`. `SessionsRoute` (`routes.ts`) gains
+   an optional `search`, and `SessionsScreen` gains `focusSearch` →
+   `autoFocus`. A reset, not a push: back from the search lands on Computers,
+   not on the session the drawer covered.
+5. **Flow 26 is single-computer.** The harness runs ONE `serve`, so the
+   cross-computer switch, the computer menu with a second computer, and "back
+   lands on the right computer's list" are NOT driven on the simulator. F4's
+   stack is pinned by `drawer-nav.test.ts`, and the M1 mutation below shows
+   that pin is not vacuous. The edge back-swipe is not driven either: Maestro
+   has no iOS edge gesture. The flow's header says this.
+6. **The title chevron is always `chevron.down`.** The earlier attempt's
+   `chevron.up.chevron.down` (shown while the menu is open) is not in
+   `IconName`, and that was the `tsc` error.
+7. **A failed probe of the computer rows is swallowed in the host.** The title
+   keeps its last rows, or says "Connecting…". The list below reports its own
+   failure (F2), so nothing reads as fine.
+
+### As-built
+
+- `App.tsx`:
+  - `SessionDrawerHost` (`:960`): `useReducer(drawerReducer)`, plus one
+    `createSessionListController` per LISTED computer. It is recreated on a
+    menu pick, so a late page of the old one is dropped and the old list never
+    shows under the new title.
+  - The list and the computer rows (`loadRows`) are re-read on every open (F3).
+  - `createDrawerRename` over `LINKS.get(row's computer).client.rename`. A
+    success re-reads the list.
+  - Everything drawn is computed by `drawerList`/`drawerItems`/`drawerTitle`/
+    `drawerComputers`, with `drawerCurrentId` for the highlight.
+  - Row tap → `drawerTarget` → `onNavigate`. The `Session` screen maps it to
+    `navigation.replace` (same computer) or `navigation.reset` (another computer,
+    F4), and `stay` only closes.
+  - Settings → `navigate("Settings")`; Pair a computer → `navigate("Pair")`.
+- `screens/SessionsDrawer.tsx` (render only):
+  - A 300 pt panel. The session is pushed and dimmed with `scrim`, using a
+    220 ms `Animated.timing`. Under Reduce Motion it fades instead
+    (`drawerMotion`, read live).
+  - Closes on a scrim tap, a row tap, a left swipe (`PanResponder`,
+    horizontal only), or VoiceOver escape. The panel is
+    `accessibilityViewIsModal`, and the session behind it is hidden from
+    accessibility while open.
+  - Long-press → `ActionSheet` "Rename" → the existing `RenameSheet`.
+  - Daemon strings are drawn as plain `Text` only.
+- `drawer-rename.ts` (kept): every text decision is `session-rename.ts`'s
+  `renamePlan`/`renameErrorText`. A failure keeps the field open with the text
+  and the reason (F7). A second Save while saving sends nothing. A success that
+  lands after Cancel still refreshes the list (the daemon did rename it).
+  I renamed one of its tests, whose name said "does not … refresh" while it
+  asserted the refresh.
+- Flows:
+  - `e2e/flows/26-drawer.yaml` + `.js`, registered in `run.ts` with its own
+    session `DRAWER_ID`. The steps: open → current highlighted → shot →
+    long-press Rename → switch to `ALPHA_ID` → re-open shows `ALPHA_ID`
+    current → scrim closes.
+  - It ends on daemon truth: the rename is stored, AND the session that was
+    switched away from still exists (F6: detach, never close).
+  - `24-ui-shots.yaml` gains the drawer shot. `05-daemon-down.yaml` gains the F2
+    check: with `serve` down, the drawer shows `drawer-retry` and NOT
+    `drawer-empty`.
+- **Red before green:** `drawerSearchTarget` was first written without
+  `search: true`. Its test went RED on the assertion (`- "search": true`,
+  1 fail), then green. The earlier attempt's pure code had no
+  pre-implementation red I could show, so its non-vacuity rests on the
+  mutations below.
+
+### Mutation checks (§9: each applied with Edit, the 6 drawer test files run, reverted; final run 51 pass · 0 fail)
+
+| # | Mutation | Caught by (fail) |
+|---|---|---|
+| M1 | swap `replace`/`reset` (`if (!sameComputer)`) — **plan target** | 4: same computer → replace; other → reset (F4); archived pick; same id other computer |
+| M2 | drop the `currentId` match (`current: false`) — **plan target** | 3: seam two-computers; highlight per section; archived auto-expand |
+| S6a | a failed read is not an error (`if (false)`) | 1: F2 failed first read is an error, never empty |
+| S6c | no list refresh after a rename | 2: success refreshes; answer after cancel still refreshes |
+| S6d | a failed rename shows no reason | 2: F7 failure keeps text + reason; MethodNotFound sentence |
+| S6e | double Save not guarded | 1: a second Save while saving sends nothing |
+| S6f | Reduce Motion still slides | 1: Reduce Motion: fade only |
+| S6g | a right swipe also closes | 1: left swipe past threshold closes; right does not |
+| S6i | unprobed computer says "Online" | 1: not probed yet says Connecting…, never Online |
+
+(The prepared script `.tentacle/tmp/mobile-chrome/s6-mutations.sh` could not be
+run because the shell permission was refused, so I did the same mutations by
+hand with Edit.) The plan's third target, the `note.id` join, belongs to S8.
+
+### Gate
+
+- `bun run check` (log: `.tentacle/tmp/mobile-chrome/s6-gate.log`):
+  - typecheck (root + `apps/mobile` + `apps/relay`): clean.
+  - `biome check .`: 1679 files, no errors or warnings.
+  - `bun test`: **12119 pass · 5 skip · 0 fail** (870 files). The skips are the
+    same pre-existing opt-in files as S5, none of them in `apps/mobile`.
+- **E2E: NOT RUN GREEN. The build is blocked by an issue that predates S6.**
+  `bun run e2e:mobile --ios 26 --only 26-drawer,24-ui-shots,05-daemon-down`
+  (run `.tentacle/tmp/e2e-mobile/1794791065114`) got through prebuild and
+  `serve`/seed, then failed at the Release build. xcodebuild exited 65 with
+  `targets/live-activity/LACore/LACore.swift:23:8: error: Unable to resolve
+  module dependency: 'PushCore' (in target 'liveactivity')`. S6 touches no
+  native/Swift file, so this blocks every flow, not just these three. The
+  e2e-flows static test (`test/e2e-flows.test.ts`, 34 pass) accepts the new
+  and edited flows. Flows 26/24/05 therefore remain **unverified on a
+  simulator**. To verify: fix the `liveactivity` → `PushCore` dependency (a
+  separate fix), then re-run the command above, in light and dark.
+
+### Not done in this slice (and why)
+
+- New session pill and its disabled-offline state (F8): S7.
+- Cross-computer switch on the simulator: needs a second `serve` in the
+  harness (drift 5). Pinned by pure tests only.
+- Nothing committed (the orchestrator commits). `TODO.md` untouched.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16 · slice S6 · fixes Review round 1 (2 MEDIUM)*
+
+1. **Finding 1, the undisclosed `live-activity/Info.plist`: FIXED.**
+   `git cat-file -e main:…/live-activity/Info.plist` reports it is not on
+   `main`. Only `notification-service/Info.plist` is tracked there. This file
+   is the same `expo prebuild` artifact that S1 removed. S6's failed e2e run
+   regenerated it, and the commit swept it in. Fix:
+   - The file is deleted from the working tree (`git status`: ` D`).
+   - `.gitignore:36-38` now ignores that one path, so a prebuild cannot bring
+     it back. It has now leaked twice: S1 and S6.
+   - Red/green/mutation, via `git ls-files --cached --ignored --exclude-standard apps/mobile/targets/`:
+     - Red, before the rule: empty output.
+     - Green, after the rule: `apps/mobile/targets/live-activity/Info.plist`.
+     - Mutation, rule commented out: empty again.
+     - Reverted: the path is listed again.
+   - No unit test was added. A test that asserts the file is absent would fail
+     on every local prebuild. The ignore rule is the guard.
+2. **Finding 2, flows 26/24/05 not green on a simulator: NOT FIXED (blocked).**
+   The block is the `liveactivity` → `PushCore` build error that exists on
+   `main`. `LACore.swift:23` has `import PushCore`, and
+   `live-activity/expo-target.config.js` declares no package. S1 and S6 each
+   rebuilt once and both hit it. Under AGENTS §0 (two strikes) I did not rebuild
+   a third time. Fixing the native target is a separate `fix` task, and §10
+   allows one code task at a time. **Decision needed from the owner:** either
+   open that fix first and then re-run
+   `bun run e2e:mobile --ios 26 --only 26-drawer,24-ui-shots,05-daemon-down`
+   (light and dark), or accept S6 with the simulator pass deferred.
+- LOW items (the `swipeIsHorizontal` vertical case, the rename refreshing the
+  current list, the stale header title) were left as they are, since this round
+  covers HIGH/MEDIUM only.
+- **Gate:** `bunx tsc --noEmit` clean. `bun run lint`: 1679 files, clean.
+  `bun test`: **12119 pass · 5 skip · 0 fail** (870 files). That matches the
+  S6 baseline, and the skips are the opt-in ones.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16 · slice S6 only, fresh context (the same model as the executor, so blind spots it shares may survive both passes)*
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, 0 HIGH).
+
+1. **MEDIUM: an out-of-scope native file was committed and not disclosed.** `apps/mobile/targets/live-activity/Info.plist` (new in 9d51e996). S1's Execution (around line 837) called this file a stray `expo prebuild` artifact and removed it. S6 commits it, while its Execution says "S6 touches no native/Swift file". *Failure:* the diff ships an undisclosed change to the live-activity target, which is the same target whose build is currently failing (`PushCore`), and it reverses an earlier slice's decision with no reason given. Either drop it, or justify it in Execution (e.g. if it is required the way `notification-service/Info.plist` is tracked on `main`).
+2. **MEDIUM: the slice's "done when" is not met.** That row says "flow 26 green both themes; back-swipe lands on the right computer". Flows 26, 24 and 05 have not run green on a simulator (the build is blocked by the pre-existing `PushCore` error). The cross-computer back-swipe is only pinned by `drawer-nav.test.ts`. *Failure:* render-time faults the stripped unit tests cannot see would ship unseen. Examples: the scrim or panel `pointerEvents` after close, `accessibilityElementsHidden` covering the scrim, `autoFocus` on the search reset, or the `replace`/`reset` wiring at `App.tsx` (~`:1888-1897`). The executor disclosed this honestly. It is still owed before S6 counts as done.
+
+**Gate (re-run by me):** the 6 touched test files (drawer-items, drawer-rename, drawer-nav, drawer-list, drawer-seam, e2e-flows) gave 78 pass · 0 fail. `bun run lint` checked 1679 files, clean. `bun run typecheck` (root + mobile + relay) was clean. I did not re-run the full suite.
+
+**Mutations (applied with Edit, reverted, `git status` clean afterwards):**
+- `drawerSearchTarget` without `Computers`: caught (1 fail).
+- `swipeIsHorizontal` without the `|dx| > |dy|` guard: **survived**. The vertical case in the test, `(-5, 20)`, is below the claim threshold anyway. LOW gap: add a case like `(-20, 40)`.
+- The executor's M1/M2/S6a–S6i table was not re-done.
+
+**Attacks tried:**
+- (a) F4: a cross-computer pick resets, a same-computer pick replaces, and the same id on another computer gets no highlight (`drawerCurrentId`). Holds.
+- (b) F2: daemon down. The list's `LINKS.get` throws, so the list shows an error with Retry. A failed probe of the rows is swallowed, and the title shows its last rows or "Connecting…". It never says "Online" (`drawerTitle`). Holds.
+- (c) F7: rename goes to the row's computer (`listed` is captured at `begin`), a failure keeps the field open, and a double Save is guarded. Holds. LOW: `renamed` refreshes whichever list is current, not the computer that was renamed. That list is disposed and re-read on the next pick, so it converges.
+- (d) F3: a menu pick recreates the controller and disposes the old one, so a late page is dropped. Holds.
+- (e) F6: a switch is `replace`/`reset`, which unmounts and so only detaches. No `session/close` was added. Holds by code; the flow that proves it has not run.
+- (f) §7 "logic in pure modules": the branching is in `drawer-list`/`drawer-nav`/`drawer-rename`. The host is wiring only. Holds.
+- (g) §7 "a pod is not trusted": daemon strings are drawn as plain `Text`. No protocol or persistence change. Holds.
+- LOW: renaming the open session from the drawer leaves the session header's title on the old route param.
+
+**Executor behaviour:** careful and candid. It disclosed the inherited uncommitted attempt, the e2e block and the drift (the host in `App.tsx`, the extra magnifier target). The one miss is the undisclosed `Info.plist`.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · reviews 2631546f (`git diff HEAD~1`) only*
+
+**Verdict: PASS.** The code is approved. The simulator pass is still owed and needs the owner's decision (see 2).
+
+1. **Finding 1: FIXED and verified.**
+   - `git cat-file -e main:…/live-activity/Info.plist` fails, so the file was never on `main`.
+   - The commit deletes the file and ignores that one exact path (`.gitignore:36-38`).
+   - Probe: I wrote a temporary file at that path. `git status --ignored` showed it as `!!` (ignored).
+   - Mutation: I commented the rule out. The status became `??` (untracked), so the rule is the guard. I restored the rule, deleted the probe, and `git status` was clean.
+   - Regression check: the tree now matches `main` for this target, and prebuild still generates the file locally, so nothing is lost.
+2. **Finding 2: NOT FIXED, correctly escalated.** Flows 26/24/05 are still blocked by the `PushCore` build error that also exists on `main`. The executor stopped under §0 (two strikes) and named the decision the owner must make: fix the native target first, or accept S6 with the simulator pass deferred. The code needs no further change. S6's "done when" (flow 26 green in both themes) stays unmet until that pass runs.
+- **Gate (my run):** `bun run lint` clean (1679 files). `bun run typecheck` (root + mobile + relay) clean. The diff touches no TS, so I did not re-run tests.
+- **Regressions:** none. The diff is `.gitignore` + one file deletion + this doc. The new Fix round 1 section sits above `## Review`, which is fine.
+

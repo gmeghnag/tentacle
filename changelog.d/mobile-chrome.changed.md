@@ -11,5 +11,14 @@
   ends in a single hairline and reads its context fraction as a small ring next
   to "…" instead of a flat 2 pt bar — the ring is plain `View`s, so no
   `react-native-svg` and no native rebuild — and the chat header itself is
-  50 pt instead of 56. The rename dialog keeps its 26 pt alert corners, the
-  light palette is otherwise untouched, and behaviour is unchanged.
+  50 pt instead of 56. The rename dialog keeps its 26 pt alert corners and the
+  light palette is otherwise untouched. The chat's back chevron becomes a
+  hamburger that opens a **sessions drawer** over the conversation: the
+  computer as its title (tap to list another paired computer's sessions, or
+  pair one), Running / Recent / a collapsed Archived · n, the open session
+  highlighted, long-press → Rename (by id, no open), a magnifier into the
+  Sessions screen's search, and Settings at the bottom. Tapping a row switches
+  session — detaching only, never closing it — and after a switch to another
+  computer the back swipe lands on THAT computer's list. A list that cannot be
+  read says so with Retry, never "no sessions"; with Reduce Motion the drawer
+  fades instead of sliding.
