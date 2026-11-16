@@ -2276,3 +2276,47 @@ them exactly as found; they are the only cause of the RED below.
   full-suite failure is S4's file, and every S7 test passes.
 - S7's own files: 58 pass, 0 fail (4 files).
 
+
+## Review
+
+### S10 + S7 — REQUEST-CHANGES (1 HIGH, 2 MEDIUM)
+
+*— claude-opus-5-5, 2026-11-16* (a fresh context, and a different model family from the deepseek executor)
+
+**Gate.** `bun test` on the 5 touched mobile files: 70 pass, 0 fail. `bun run typecheck`: RED,
+because `packages/daemon/test/artifact-manifest.test.ts` calls `putArtifact`/`artifactManifest`/
+`sweepArtifacts`, which do not exist on `LogSessionStore` (S4's test was committed without its code).
+`bun run lint`: RED, 1 format error in that same file. Neither failure comes from S7/S10, but HEAD is not green.
+
+**Findings**
+1. **HIGH: S10 was never implemented.** `git diff main...HEAD` has no D11 code. `ArtifactStore` has
+   no `seed` option (`packages/daemon/src/artifact-store.ts`), `session-saver.ts` is untouched,
+   nothing calls `listArtifacts`→`putArtifact` at the laptop's save points, and there is no T10
+   test. The only S10-adjacent lines are the S6a pass-through (`packages/cli/src/local-runtime.ts:770-775`),
+   and their own comment says "neither is persisted". There is no S10 Execution section either.
+   *Scenario:* a model presents in a worker session → quit → `--resume`: the gallery/`/artifacts`
+   are empty and the persisted cards point at artifacts that no longer exist. The pod-exclusion
+   half of T10 ("a POD runtime writes nothing under the laptop store") is also unpinned, so a
+   later S10 has no regression net for the §7 "pod is not trusted" rule.
+   S10 is `load-bearing` and was assigned to opus. It needs its own Execution and a fresh-context Review.
+2. **MEDIUM: `apps/mobile/src/artifact-cache.ts:138`.** `cacheDir` sanitizes with
+   `[^A-Za-z0-9._-]`, which keeps a computer id of `..` or `.` whole, so `cacheDir("..")` is
+   `artifacts/..`, the cache root. *Scenario:* the planned session-delete step
+   (`missingFrom` doc, `:121-125`) removes "a computer's directory", and for that id it would
+   wipe the whole artifacts cache (and more, depending on how the caller joins the path). The
+   test (`artifact-cache.test.ts:112`) checks only `../../etc`, where the `/` is replaced.
+   The fix is to refuse or escape a dot-only id, and add a test for it.
+3. **MEDIUM: gate red on HEAD (S4).** See Gate above. The S7 Execution blames "S4's work in
+   progress", but those files are COMMITTED on the branch, so the branch cannot merge as it is.
+
+**Mutation (independent).** `allowNavigation` → `url !== undefined`: 13 pass, 1 fail (RED).
+Reverted, and `git status` is clean. The executor's M1–M13 table matches this one data point.
+
+**Attacks tried, finding nothing:** `planCache` with `keep` equal to the LRU entry and
+`incoming.size > cap` (both handled, no partial write). `viewerFor` with a prototype or unknown
+kind goes through `artifactKindOf` to `none`. The PDF props force scripts off whatever the
+input. The HTML props put the CSP first, with no `onMessage`/`injectedJavaScript` keys.
+
+**Executor behaviour:** S7 is careful and honest about its drift: test-after for the viewer,
+compensated by mutation. But it left S10 silently skipped, although the plan's execution order
+puts S10 *before* S7.
