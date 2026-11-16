@@ -802,3 +802,26 @@ no protocol/persistence change — holds. Mutation: blank-line rule survives
 the 1–2-blank case and the hostile-count bound.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; different family from the executor, DeepSeek)
+
+### Round 2
+
+**Verdict: APPROVE** (P1). Reviewed `git diff HEAD~1` (`1b06b0d8`).
+
+- **Finding 1 fixed:** `pdf-text.ts:165` keeps the FIRST blank line of a run.
+  Mutation back to `blanks === 3` → 2 fail (the new 1-blank and 2-blank tests).
+  Drift: a 2-blank run now becomes 1, not 2 (D1 said collapse only runs > 2). This
+  is harmless for the model's reading.
+- **Finding 2 fixed:** `parsePageRange` refuses on the per-part `span` before the
+  fill (`:234`), and adds a running-total check (`:244`). Mutation `span > Infinity`
+  → 2 fail (~1.6 s / 2.5 s). `missingFooters` (`:326-345`) is now arithmetic over the
+  read set. Mutation re-adding a `1..numPages` walk → 1 fail (720 ms).
+- **Regressions probed** (scratch `probe2.ts`): there is no footer when all pages are
+  read. Gaps `[2,4]/5` → 1, 3, 5. `[1]/412` → `"2-101"`. Unsorted or duplicate input
+  `[3,3,1]/3` → 2. `"2,4,9-11"`, `"7-"`/5 and `"5-3"` behave as in round 1.
+- **Gate:** `pdf-text.test.ts` 44 pass, 0 fail. `bun run lint`: 1700 files, clean.
+  `bun run typecheck` exit 0. After all 3 mutations were reverted,
+  `git status --porcelain` was empty.
+- **Nit (not blocking):** the timing tests assert `< 100 ms`. The happy path takes
+  µs, so a flake is unlikely.
+
+*— claude-opus-5-5, 2026-11-16*
