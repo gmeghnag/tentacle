@@ -71,6 +71,7 @@ import {
   type SessionSkillsResult,
   type SessionTtlParams,
   type SetAutoAcceptParams,
+  type SetCapabilityParams,
   type SnapshotParams,
   type SnapshotResult,
   type SubagentMessageParams,
@@ -391,6 +392,13 @@ export class Connection {
       case Method.SetAutoAccept: {
         const { sessionId, on } = params as SetAutoAcceptParams;
         return this.lookup(sessionId).setAutoAccept(on, this.autoAcceptBy);
+      }
+      // Same shape (docs/feat/session-capabilities.md F4): synchronous, no lock,
+      // one total order. Every daemon holds it, a pod included: it only REMOVES
+      // what that daemon's own model is offered, so nothing is gated laptop-side.
+      case Method.SetCapability: {
+        const { sessionId, kind, name, enabled } = params as SetCapabilityParams;
+        return this.lookup(sessionId).setCapability({ kind, name, enabled }, this.autoAcceptBy);
       }
       case Method.Snapshot:
         return this.snapshot(params as SnapshotParams);
@@ -907,6 +915,9 @@ export class Connection {
       // Present iff THIS daemon shares auto-accept (docs/feat/session-auto-accept.md
       // D2): a pod omits it, so no laptop client reads or sets it there.
       ...(this.host.sharedAutoAccept ? { autoAccept: hosted.autoAccept } : {}),
+      // The switches' snapshot on every open/attach (F5), read in the same
+      // synchronous segment as the attach: no update can fall between them.
+      capabilities: hosted.capabilities(),
       // Read in this same synchronous segment as the replay: omitted when 0.
       ...(hosted.unflushedExits > 0 ? { unflushedExits: hosted.unflushedExits } : {}),
     };

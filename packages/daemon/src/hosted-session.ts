@@ -46,10 +46,12 @@ import type {
   AgentEvent,
   AskHooksTrust,
   BeforeRun,
+  CapabilityOp,
   Session,
+  SessionCapabilities,
   SessionGrants,
 } from "@tentacle/agent";
-import { EMPTY_TITLE, sessionTitle } from "@tentacle/agent";
+import { EMPTY_TITLE, NO_CAPABILITIES, applyCapabilityOp, sessionTitle } from "@tentacle/agent";
 import {
   AGENT_MESSAGE_MAX_CHARS,
   type AgentJob,
@@ -85,6 +87,7 @@ import {
   LOG_PAGE_MAX_CHARS,
   type LogCursor,
   type LogResult,
+  MAX_DISABLED_CAPABILITIES,
   MAX_SESSION_TITLE,
   type PermissionOutcome,
   type PermissionRequestUpdate,
@@ -96,12 +99,14 @@ import {
   type SendNowMessage,
   type SendNowRefusal,
   type SendNowTarget,
+  type SessionCapabilitiesWire,
   type SessionContextResult,
   type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionTitle,
   type SessionUpdate,
   type SetAutoAcceptResult,
+  type SetCapabilityResult,
   type Sha256,
   type SnapshotResult,
   type SubagentRow,
@@ -127,6 +132,7 @@ import {
   stopReasonToProtocol,
   toSessionSkills,
   toUpdateParams,
+  toWireCapabilities,
   wireLine,
 } from "./mapping.ts";
 import { outcomeToResponse, toPermissionRequestUpdate } from "./permission-map.ts";
@@ -560,6 +566,14 @@ export class HostedSession {
    * Off at creation unless `session/open{autoAccept}` seeded it.
    */
   autoAccept = false;
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md): what
+   * the model is NOT offered. Held here, not only on the agent, because a
+   * settings sync builds a fresh agent (everything on) and `swapAgent`
+   * re-applies it. Everything on at creation unless `session/open{capabilities}`
+   * seeded it (`seedCapabilities`).
+   */
+  private caps: SessionCapabilities = NO_CAPABILITIES;
   private readonly session: Session;
   /** The factory's broker: its requester is this session's (installed once, below). */
   private readonly permissions: PermissionBroker;
@@ -2187,7 +2201,9 @@ export class HostedSession {
    * shares the scan). Rejects when the scan does: nothing changes.
    */
   async skills(): Promise<SessionSkillsResult> {
-    return toSessionSkills(await this.session.refreshSkills());
+    const listing = await this.session.refreshSkills();
+    // Read after the scan: a toggle that landed during it is reported.
+    return toSessionSkills(listing, this.caps.disabledSkills);
   }
 
   /**
@@ -2565,6 +2581,8 @@ export class HostedSession {
       readonly id: string;
     },
   ): void {
+    // A fresh agent starts with everything on: the session's switches carry over.
+    next.setCapabilities(this.caps);
     const previous = this.session.replaceAgent(next);
     // The system head was replaced IN PLACE behind the cut (same length): the
     // one change no cut follows — derived here, or the log would miss it.
@@ -2599,6 +2617,59 @@ export class HostedSession {
       this.emit({ type: "auto_accept", on, ...(by ? { by } : {}) });
     }
     return { on: this.autoAccept };
+  }
+
+  /** The session's switches now: the `OpenResult.capabilities` snapshot (F5). */
+  capabilities(): SessionCapabilitiesWire {
+    return toWireCapabilities(this.caps);
+  }
+
+  /**
+   * The switches of a session this open CREATED (`session/open{capabilities}`,
+   * exactly like `autoAccept`): applied to the agent before its first turn, no
+   * emit (no client is attached yet that has not read the snapshot).
+   */
+  seedCapabilities(seed: SessionCapabilities): void {
+    // Client-supplied: kept sorted and de-duplicated, like every applied op.
+    const norm = (names: readonly string[]) => [...new Set(names)].sort();
+    const state = {
+      disabledMcp: norm(seed.disabledMcp),
+      disabledSkills: norm(seed.disabledSkills),
+    };
+    this.caps = state;
+    this.session.currentAgent().setCapabilities(state);
+  }
+
+  /**
+   * `session/set_capability` (docs/feat/session-capabilities.md): apply ONE
+   * delta to the session's switches, hand the result to the agent (from its
+   * next model call; a round in flight keeps its snapshot, F1/F2), and tell
+   * every attachment if it CHANGED. Idempotent: a set to the current value
+   * returns without an emit. Synchronous, no lock (AGENTS §7): two deltas are
+   * applied and emitted in one total order, so different items both land and
+   * every client converges on the last echo (F4). A new name past
+   * `MAX_DISABLED_CAPABILITIES` in its set is `InvalidParams` (F10).
+   */
+  setCapability(op: CapabilityOp, by?: string): SetCapabilityResult {
+    this.assertKnown();
+    const next = applyCapabilityOp(this.caps, op);
+    if (next !== this.caps) {
+      const set = op.kind === "mcp" ? next.disabledMcp : next.disabledSkills;
+      if (set.length > MAX_DISABLED_CAPABILITIES) {
+        throw new RpcError(
+          JsonRpcErrorCode.InvalidParams,
+          `at most ${MAX_DISABLED_CAPABILITIES} ${op.kind} names may be turned off`,
+        );
+      }
+      this.caps = next;
+      this.session.currentAgent().setCapabilities(next);
+      this.emit({
+        type: "capabilities",
+        capabilities: toWireCapabilities(next),
+        ...(by ? { by } : {}),
+      });
+    }
+    return { capabilities: toWireCapabilities(this.caps) };
   }
 
   /**

@@ -899,6 +899,22 @@ export const SessionSettingsReportSchema = z.object({
 });
 export type SessionSettingsReport = z.infer<typeof SessionSettingsReportSchema>;
 
+/** At most this many names in ONE disabled set (a flood is `InvalidParams`, F10). */
+export const MAX_DISABLED_CAPABILITIES = 256;
+/** One server or skill name a switch names. */
+export const CapabilityNameSchema = line(128);
+
+/**
+ * A session's MCP/skill switches (`session/set_capability`,
+ * docs/feat/session-capabilities.md): sorted, de-duplicated DISABLED names, so
+ * anything new (a server added, a skill created) is on.
+ */
+export const SessionCapabilitiesSchema = z.object({
+  disabledMcp: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
+  disabledSkills: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
+});
+export type SessionCapabilitiesWire = z.infer<typeof SessionCapabilitiesSchema>;
+
 export const OpenParamsSchema = z.object({
   /** Client-chosen id (so the client owns the persistence uid); absent → daemon-chosen. */
   sessionId: SessionIdSchema.optional(),
@@ -932,6 +948,12 @@ export const OpenParamsSchema = z.object({
    * (docs/feat/session-auto-accept.md D2). Absent → off.
    */
   autoAccept: z.boolean().optional(),
+  /**
+   * The session's initial switches, for a session this open CREATES (ignored
+   * otherwise, exactly like `autoAccept`): how a resume from the laptop's copy,
+   * a `/clear` fork and a hop target carry them. Absent → everything on.
+   */
+  capabilities: SessionCapabilitiesSchema.optional(),
 });
 export type OpenParams = z.infer<typeof OpenParamsSchema>;
 
@@ -959,6 +981,12 @@ export const OpenResultSchema = z.object({
    * it (`RemoteClientOptions.sharedAutoAccept`, AGENTS §7).
    */
   autoAccept: z.boolean().optional(),
+  /**
+   * The session's switches now (docs/feat/session-capabilities.md): the
+   * snapshot every open/attach/re-attach adopts (F5). Absent → an older
+   * daemon, which has none (the client hides its toggles).
+   */
+  capabilities: SessionCapabilitiesSchema.optional(),
 });
 export type OpenResult = z.infer<typeof OpenResultSchema>;
 
@@ -1017,6 +1045,31 @@ export const SetAutoAcceptResultSchema = z.object({
   on: z.boolean(),
 });
 export type SetAutoAcceptResult = z.infer<typeof SetAutoAcceptResultSchema>;
+
+// --- session/set_capability ---------------------------------------------
+// Turn one MCP server or one skill on/off for the MODEL in this session
+// (docs/feat/session-capabilities.md): hidden from the tool list and the skills
+// catalog from the next model call, never uninstalled. A DELTA (one name), not
+// the whole state, so two clients toggling different items both land (F4).
+// Held by every daemon (a pod included: it only REMOVES what its own model is
+// offered, so there is nothing to gate on the laptop, AGENTS §7). Idempotent:
+// a set to the current value returns without an emit. Additive: an older
+// daemon answers `MethodNotFound`, and the client hides its toggles.
+
+export const SetCapabilityParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  kind: z.enum(["mcp", "skill"]),
+  /** A server name (`mcp`) or a skill name (`skill`); an unknown one is stored (F10). */
+  name: CapabilityNameSchema,
+  enabled: z.boolean(),
+});
+export type SetCapabilityParams = z.infer<typeof SetCapabilityParamsSchema>;
+
+export const SetCapabilityResultSchema = z.object({
+  /** The session's whole state AFTER applying (a losing race reads the winner's). */
+  capabilities: SessionCapabilitiesSchema,
+});
+export type SetCapabilityResult = z.infer<typeof SetCapabilityResultSchema>;
 
 // --- session/close ------------------------------------------------------
 // End the session for everyone: abort its turn, stop its background jobs, tell
