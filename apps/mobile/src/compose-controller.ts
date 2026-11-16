@@ -101,8 +101,9 @@ export interface ComposeHandle {
 
 /** The photo adapter (`photo-source.ts` in the app; a fake in tests). */
 export interface PhotoPort {
-  pickFromLibrary(taken: number): Promise<readonly PickedPhoto[]>;
-  takePhoto(taken: number): Promise<readonly PickedPhoto[]>;
+  /** `sendOriginal`: the person's "Send photos at original size" (item 5). */
+  pickFromLibrary(taken: number, sendOriginal?: boolean): Promise<readonly PickedPhoto[]>;
+  takePhoto(taken: number, sendOriginal?: boolean): Promise<readonly PickedPhoto[]>;
 }
 
 /** One picked photo, as `photo-source.ts` answers it (13c's pipeline output). */
@@ -123,6 +124,12 @@ export interface ComposeDeps {
   readonly store: OutboxStore;
   readonly driver: OutboxDriver;
   readonly photos: PhotoPort;
+  /**
+   * The person's "Send photos at original size" setting (item 5), read at every
+   * pick. Absent = the downscale (the default): a fake, or a build without the
+   * switch.
+   */
+  readonly sendPhotoOriginalSize?: () => boolean;
   /** The handle once the session opened (null before it, and after a failure). */
   readonly handle: () => ComposeHandle | null;
   /** The turn running now (a steer binds to it), or null. */
@@ -750,10 +757,16 @@ export function createCompose(deps: ComposeDeps): Compose {
     // picker's limit from it; passing the room (5 on an empty composer) made
     // the limit 0 and refused before the library opened.
     async pickLibrary() {
-      await applyPicks(await deps.photos.pickFromLibrary(counted(chips)));
+      // `deps.sendPhotoOriginalSize` is the person's Settings switch (item 5):
+      // read at the PICK, so a flip takes effect on the next photo.
+      await applyPicks(
+        await deps.photos.pickFromLibrary(counted(chips), deps.sendPhotoOriginalSize?.()),
+      );
     },
     async pickCamera() {
-      await applyPicks(await deps.photos.takePhoto(counted(chips)));
+      await applyPicks(
+        await deps.photos.takePhoto(counted(chips), deps.sendPhotoOriginalSize?.()),
+      );
     },
     async removeChip(key) {
       chips = chipRemoved(chips, key);

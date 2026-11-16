@@ -235,8 +235,21 @@ export interface ComposeWiring {
     ) => Promise<void>;
     /** 13b's hand-back: an item whose text belongs in the field (F7/F20). */
     readonly onDraft: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
+    /**
+     * This screen's OWN compose handle, once the attach answered — what the
+     * driver's port must be built over (fix/mobile-media-live item 1). A second
+     * `RemoteSession` for the same id replaces the client's stream listener, so
+     * the driver opening one steals the very turn it starts ("Running" for ever,
+     * no reply — while the daemon finished it).
+     */
+    readonly handle: () => ComposeHandle | null;
   }) => OutboxDriver;
   readonly photos: PhotoPort;
+  /**
+   * The person's "Send photos at original size" (item 5), read at every pick.
+   * Absent = the downscale (the default).
+   */
+  readonly sendPhotoOriginalSize?: () => boolean;
   /**
    * The chat handle's compose side, once the attach answered — built over THIS
    * screen's own attach handle (owner B4: a port without it could not read the
@@ -525,8 +538,18 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
               deps.compose?.draft(draft, []);
               emit();
             },
+            // The driver's port is built over THIS screen's handle — the one that
+            // IS the client's stream listener — so the turn a photo message starts
+            // folds here (item 1's whole bug: a second handle took the stream).
+            handle: () =>
+              status.phase === "open" && handle !== null
+                ? (deps.compose?.handle(handle) ?? null)
+                : null,
           }),
           photos: deps.compose.photos,
+          ...(deps.compose.sendPhotoOriginalSize === undefined
+            ? {}
+            : { sendPhotoOriginalSize: deps.compose.sendPhotoOriginalSize }),
           // The handle exists only once the attach answered: a compose act on a
           // half-built screen must never build a frame (AGENTS §7).
           handle: () =>

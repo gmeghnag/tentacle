@@ -13,7 +13,8 @@
 import type { JSX } from "react";
 import { ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
-import type { ActivityButtonMode } from "../floating-button.ts";
+import { type ActivityButtonMode } from "../floating-button.ts";
+import type { PhotoSettings } from "../photo-settings-store.ts";
 import type { SpeechRate } from "../read-aloud.ts";
 import type { LanguageSetting } from "../speech-locale.ts";
 import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
@@ -90,6 +91,16 @@ export interface SettingsScreenProps {
   /** A write that did not stick (the pick still holds for this run). */
   readonly activityError?: string;
   readonly onActivityMode?: (mode: ActivityButtonMode) => void;
+  /**
+   * Photos (fix/mobile-media-live item 5): the "Send photos at original size"
+   * switch. Absent = no Photos card (a build without the setting).
+   */
+  readonly photoSettings?: PhotoSettings;
+  /** False over a newer build's record: the switch is disabled and says why. */
+  readonly photoWritable?: boolean;
+  /** A write that did not stick. */
+  readonly photoError?: string;
+  readonly onPhotoSettings?: (next: PhotoSettings) => void;
 }
 
 export const ACTIVITY_BUTTON_ROWS: readonly {
@@ -132,6 +143,10 @@ export function SettingsScreen({
   activityWritable = true,
   activityError,
   onActivityMode,
+  photoSettings,
+  photoWritable = true,
+  photoError,
+  onPhotoSettings,
 }: SettingsScreenProps): JSX.Element {
   const compact = useCompactTitle();
   // Which voice rows the Beta switches reveal (pure: `voice-beta.ts`); with every
@@ -245,6 +260,55 @@ export function SettingsScreen({
               />
             )}
           </View>
+          {photoSettings === undefined || onPhotoSettings === undefined ? null : (
+            <View style={styles.section}>
+              <BandSection
+                palette={palette}
+                title="Photos"
+                footnote="A photo is sent at a long edge of 2048 px (a few hundred KB), which is what models use anyway and what keeps a photo message quick."
+              >
+                <Row
+                  palette={palette}
+                  first
+                  minHeight={size.rowSetting}
+                  title="Send photos at original size"
+                  dimmed={!photoWritable}
+                  trailing={
+                    <Switch
+                      testID="photos-original-size"
+                      accessibilityLabel="Send photos at original size"
+                      value={photoSettings.sendOriginal}
+                      disabled={!photoWritable}
+                      trackColor={{ false: palette.fill, true: palette.green }}
+                      onValueChange={(sendOriginal) =>
+                        onPhotoSettings({ ...photoSettings, sendOriginal })
+                      }
+                    />
+                  }
+                >
+                  <Text
+                    testID="photos-original-size-detail"
+                    numberOfLines={3}
+                    maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                    style={[typography.footnote, { color: palette.sec }]}
+                  >
+                    {photoWritable
+                      ? "Off: photos are downscaled before sending (faster answers, less data). On: the full-size photo goes out."
+                      : "Set by a newer version of tentacle — this version cannot change it."}
+                  </Text>
+                </Row>
+              </BandSection>
+              {photoError === undefined ? null : (
+                <Banner
+                  palette={palette}
+                  tone="error"
+                  icon="exclamationmark.triangle"
+                  testID="photos-error"
+                  body={photoError}
+                />
+              )}
+            </View>
+          )}
           <View style={styles.section}>
             <BandSection palette={palette} title="Notifications">
               {/* P9: ONE row for the phone. With nothing paired the switch is

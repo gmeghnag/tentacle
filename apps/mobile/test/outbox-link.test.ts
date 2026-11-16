@@ -38,7 +38,8 @@ import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 // give a row back once after a kill — the app never registers `onReturned`.
 import { handBack } from "../../../packages/client/src/hand-back.ts";
 import { SpyDaemonStore } from "../../../packages/daemon/test/support/daemon-store-spy.ts";
-import { composeHandleOf } from "../src/compose-handle.ts";
+import { composeHandleOf, foldingOutboxSession } from "../src/compose-handle.ts";
+import type { PickedPhoto } from "../src/compose-controller.ts";
 import { leaveComputer } from "../src/connection.ts";
 import {
   type OutboxDriver,
@@ -54,6 +55,24 @@ import { createSessionController } from "../src/session-controller.ts";
 import { type SendableHandle, createSessionScreen } from "../src/session-screen-controller.ts";
 
 const CWD = "/tmp/mobile-outbox-link";
+
+/** A real 1×1 PNG: the daemon sniffs the type from the BYTES, so a fake header would be refused. */
+const PNG_BYTES = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+  0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+  0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+  0x42, 0x60, 0x82,
+]);
+
+/** One picked photo, as 13c's pipeline hands it to the compose half. */
+const PHOTO: PickedPhoto = {
+  kind: "ready",
+  file: "file:///o/photos/a.png",
+  mimeType: "image/png",
+  name: "a.png",
+  bytes: PNG_BYTES,
+};
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function until(check: () => boolean | Promise<boolean>, ms = 3000): Promise<void> {
@@ -876,7 +895,7 @@ function memoryFs(): OutboxFs {
  * `App.tsx`'s `composeWiring` wires it: the handle is the APP's own
  * `composeHandleOf`, given the screen's attach handle.
  */
-function screenOn(phone: App, sid: string) {
+function screenOn(phone: App, sid: string, photo: readonly PickedPhoto[] = []) {
   const store = createOutboxStore(memoryFs(), outboxPaths("file:///o", "phone"), () => 1);
   return createSessionScreen({
     sessionId: sid,
@@ -895,17 +914,16 @@ function screenOn(phone: App, sid: string) {
       computerId: "phone",
       store,
       driver: (folding) =>
-        createOutboxDriver(async () => null, {
+        createOutboxDriver(async () => foldingOutboxSession(folding.handle(), folding.prompt), {
           persistence: {
             items: () => store.data.items,
             save: (items) => store.setItems(items),
             finish: (itemId) => store.removeItem(itemId),
           },
-          readPhoto: async () => new Uint8Array(),
-          mint: () => crypto.randomUUID(),
+          readPhoto: async () => PNG_BYTES,          mint: () => crypto.randomUUID(),
           onDraft: folding.onDraft,
         }),
-      photos: { pickFromLibrary: async () => [], takePhoto: async () => [] },
+      photos: { pickFromLibrary: async () => photo, takePhoto: async () => photo },
       handle: (session) =>
         composeHandleOf({
           sessionId: sid,
@@ -968,6 +986,55 @@ describe("the port's prompt is done at the daemon's ACK (docs/fix/mobile-chat-gl
     await until(async () => (await userTexts(d, sid)).includes("hold me"));
     expect(await userTexts(d, sid)).toEqual(["hi", "hold me"]);
     app.close();
+    laptop.close();
+  }, 20000);
+});
+
+describe("fix/mobile-media-live item 1: a photo message's turn folds into the screen", () => {
+  /**
+   * The owner's report: a photo message left the header on "Running" and showed
+   * no reply, while the daemon HAD finished the turn (leaving and re-entering
+   * showed it — the history was fine, the LIVE path was not).
+   *
+   * Root cause (verified in the plan's load-bearing check): `App.tsx`'s
+   * `outboxOf` built the outbox port over `client.newSession(...)` — a SECOND
+   * session handle for the same id. `RemoteClient.register` reassigns the
+   * entry's `listener` to whichever handle opened last
+   * (`remote-client.ts:3023-3026`), so the screen's own `watch` stopped
+   * receiving the turn: its `text`/`turn_end` never arrived and `transcript.turn`
+   * — the header's "Running" — was never cleared.
+   *
+   * Mutation: the driver's `getSession` opening its own handle again → the turn
+   * never ends → red.
+   */
+  test("a photo message: the reply arrives AND the running state ends (mutation: a second session handle → stuck Running)", async () => {
+    const d = daemon();
+    const laptop = await dial(d);
+    const sid = await seeded(laptop);
+    const phone = await dial(d);
+    const screen = screenOn(phone, sid, [PHOTO]);
+    await screen.open();
+    await until(() => screen.state().status.phase === "open");
+
+    screen.setDraft("look at this");
+    // A photo through the screen's own chips, as the button does (13c's pipeline
+    // is `photo-input.test.ts`'s subject; here the driver's UPLOAD and prompt are
+    // what must reach the daemon through the screen's handle).
+    await screen.pickPhoto("library");
+    screen.press();
+    await until(() => !screen.state().transcript.turn);
+    await until(() => userRows(screen).includes("look at this"));
+
+    // The daemon finished it...
+    expect(await userTexts(d, sid)).toEqual(["hi", "look at this"]);
+    // ...and the PHONE shows the answer, with no turn running (the owner's symptom).
+    const rows = screen.state().transcript.rows;
+    expect(rows.some((row) => row.kind === "assistant" && row.text.includes("ok:"))).toBe(true);
+    expect(screen.state().transcript.turn).toBeNull();
+
+    await screen.leave();
+    screen.dispose();
+    phone.close();
     laptop.close();
   }, 20000);
 });

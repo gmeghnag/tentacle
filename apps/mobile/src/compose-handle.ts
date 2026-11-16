@@ -14,6 +14,7 @@
  */
 import type { RemoteClient, RemoteSession } from "@tentacle/client";
 import type { ComposeHandle } from "./compose-controller.ts";
+import type { OutboxSession } from "./outbox-driver.ts";
 import { outboxSessionOf } from "./outbox-session.ts";
 
 export interface ComposeHandleDeps {
@@ -23,6 +24,30 @@ export interface ComposeHandleDeps {
   readonly session: RemoteSession;
   /** A fresh turn key (a photo prompt's: a retry is free at the daemon's ledger). */
   readonly mint: () => string;
+}
+
+/**
+ * 13b's driver port over the SCREEN's own handle — the ONE session path for a
+ * photo message (fix/mobile-media-live item 1).
+ *
+ * The driver's `getSession` used to build the port from `client.newSession(...)`,
+ * a SECOND `RemoteSession` for the id: `RemoteClient.register` reassigns the
+ * session entry's `listener` to whichever handle opened last
+ * (`remote-client.ts:3023-3026`), so the screen's `watch` received nothing. A
+ * text+photo prompt then left the header on "Running" and showed no reply while
+ * the daemon had finished the turn — the reply was in the history (leaving and
+ * re-entering showed it), which is what made the live path look fine.
+ *
+ * So the port's four acts come from the handle the SCREEN holds, and only the
+ * folding `prompt` is the screen's own (that is what puts the turn's events in
+ * THIS transcript). A handle that is not there yet (the attach has not answered)
+ * gives null: the item stays `waiting` with its key, never sent twice.
+ */
+export function foldingOutboxSession(
+  handle: ComposeHandle | null,
+  prompt: OutboxSession["prompt"],
+): OutboxSession | null {
+  return handle === null ? null : { ...handle.port, prompt };
 }
 
 export function composeHandleOf(deps: ComposeHandleDeps): ComposeHandle {

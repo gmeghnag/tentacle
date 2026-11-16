@@ -77,10 +77,19 @@ function copyInto(
  * conversion and one downscale. Never throws for a refusal: a refusal is a
  * value (a chip shows it), because "the user picked a 20 MB PNG" is not an
  * exception.
+ *
+ * `sendOriginal` is the person's Settings switch (item 5): with it on, the photo
+ * keeps its size (the format rules still apply — a HEIC is still converted).
  */
 export async function preparePickedPhoto(
-  asset: { readonly uri: string; readonly fileName?: string | null },
+  asset: {
+    readonly uri: string;
+    readonly fileName?: string | null;
+    readonly width?: number;
+    readonly height?: number;
+  },
   taken: number,
+  sendOriginal = false,
 ): Promise<PickedPhoto> {
   let bytes = await new File(asset.uri).bytes();
   // A picked URI's own name is the picker's claim; `photoName` sanitises it by
@@ -88,15 +97,20 @@ export async function preparePickedPhoto(
   const name = photoName(asset.fileName ?? undefined);
   let converted = false;
   let downscaled = false;
-  // Three turns at most (`nextPhotoStep`'s own bound): sniff, after the
-  // conversion, after the shrink.
-  for (let turn = 0; turn < 3; turn += 1) {
+  let resized = false;
+  // Four turns at most (`nextPhotoStep`'s own bound): sniff, after the
+  // conversion, after the long-edge resize, after the cap's shrink.
+  for (let turn = 0; turn < 4; turn += 1) {
     const step: PhotoStep = nextPhotoStep({
       bytes,
       taken,
       converted,
       downscaled,
+      resized,
+      sendOriginal,
       ...(name === undefined ? {} : { name }),
+      ...(asset.width === undefined ? {} : { width: asset.width }),
+      ...(asset.height === undefined ? {} : { height: asset.height }),
     });
     if (step.kind === "refuse") {
       return { kind: "refused", reason: step.reason, detail: step.detail };
@@ -113,11 +127,23 @@ export async function preparePickedPhoto(
     }
     if (step.kind === "convert-to-jpeg") {
       converted = true;
-      bytes = await convert(asset.uri, { format: SaveFormat.JPEG, compress: 0.9 });
+      bytes = await reencode(asset.uri, { format: SaveFormat.JPEG, compress: 0.9 });
+      continue;
+    }
+    if (step.kind === "resize") {
+      // Item 5: the long edge, at the quality the pure step chose. It is a JPEG
+      // from here on (the plan's ≈300–600 KB), so the type is re-sniffed above.
+      resized = true;
+      converted = true;
+      bytes = await reencode(
+        asset.uri,
+        { format: SaveFormat.JPEG, compress: step.quality },
+        { width: step.width, height: step.height },
+      );
       continue;
     }
     downscaled = true;
-    bytes = await convert(asset.uri, { format: SaveFormat.JPEG, compress: 0.8 }, 0.5);
+    bytes = await reencode(asset.uri, { format: SaveFormat.JPEG, compress: 0.8 }, { scale: 0.5 });
   }
   // Unreachable through `nextPhotoStep`'s own bound; a refusal, never a loop.
   return {
@@ -129,24 +155,29 @@ export async function preparePickedPhoto(
 
 /**
  * Re-encode `uri` through `expo-image-manipulator` and read the result's
- * bytes. `scale` below 1 shrinks the width (the one downscale step, which
- * keeps the aspect ratio); `undefined` keeps the size and only changes the
- * format (HEIC → JPEG).
+ * bytes. `target` names what to do about the size: an EXACT width/height (item
+ * 5's long-edge resize), a ratio below 1 (the legacy over-cap shrink, which
+ * keeps the aspect ratio), or nothing at all (only the format changes, HEIC →
+ * JPEG).
  *
  * The copy through `new Uint8Array(...)` is not ceremony: `expo-file-system`
  * types its bytes as `Uint8Array<ArrayBuffer>` and this package's own type is
  * the wider `ArrayBufferLike`, so the value is normalised at the boundary
  * rather than cast away at every use.
  */
-async function convert(
+async function reencode(
   uri: string,
   options: { readonly format: SaveFormat; readonly compress: number },
-  scale?: number,
+  target?: { readonly width: number; readonly height: number } | { readonly scale: number },
 ): Promise<Uint8Array<ArrayBuffer>> {
   const context = ImageManipulator.manipulate(uri);
-  if (scale !== undefined) {
-    const image = await context.renderAsync();
-    context.resize({ width: Math.max(1, Math.round(image.width * scale)) });
+  if (target !== undefined) {
+    if ("scale" in target) {
+      const image = await context.renderAsync();
+      context.resize({ width: Math.max(1, Math.round(image.width * target.scale)) });
+    } else {
+      context.resize({ width: target.width, height: target.height });
+    }
   }
   const rendered = await context.renderAsync();
   const saved = await rendered.saveAsync(options);
@@ -154,7 +185,10 @@ async function convert(
 }
 
 /** One picker result, as the pick's photos (or `[]` when the person cancelled). */
-export async function pickFromLibrary(taken: number): Promise<readonly PickedPhoto[]> {
+export async function pickFromLibrary(
+  taken: number,
+  sendOriginal = false,
+): Promise<readonly PickedPhoto[]> {
   const limit = MAX_ATTACHMENTS_PER_MESSAGE - taken;
   if (limit <= 0) {
     return [
@@ -172,11 +206,14 @@ export async function pickFromLibrary(taken: number): Promise<readonly PickedPho
     selectionLimit: limit,
     quality: 1,
   });
-  return result.canceled ? [] : prepareAll(result.assets, taken);
+  return result.canceled ? [] : prepareAll(result.assets, taken, sendOriginal);
 }
 
 /** One camera shot. The permission is asked HERE, at first use (decision 10). */
-export async function takePhoto(taken: number): Promise<readonly PickedPhoto[]> {
+export async function takePhoto(
+  taken: number,
+  sendOriginal = false,
+): Promise<readonly PickedPhoto[]> {
   const permission = await ImagePicker.requestCameraPermissionsAsync();
   if (!permission.granted) {
     return [
@@ -190,17 +227,23 @@ export async function takePhoto(taken: number): Promise<readonly PickedPhoto[]> 
     ];
   }
   const result = await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 1 });
-  return result.canceled ? [] : prepareAll(result.assets, taken);
+  return result.canceled ? [] : prepareAll(result.assets, taken, sendOriginal);
 }
 
 /** Every asset of one pick, prepared in order (the cap counts what is already attached). */
 async function prepareAll(
-  assets: readonly { readonly uri: string; readonly fileName?: string | null }[],
+  assets: readonly {
+    readonly uri: string;
+    readonly fileName?: string | null;
+    readonly width?: number;
+    readonly height?: number;
+  }[],
   taken: number,
+  sendOriginal = false,
 ): Promise<readonly PickedPhoto[]> {
   const out: PickedPhoto[] = [];
   for (const asset of assets) {
-    out.push(await preparePickedPhoto(asset, taken + out.length));
+    out.push(await preparePickedPhoto(asset, taken + out.length, sendOriginal));
   }
   return out;
 }

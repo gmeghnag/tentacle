@@ -48,6 +48,21 @@ export interface PhotoState {
   readonly converted: boolean;
   /** The one downscale-to-fit step already happened (once only, Owner Q3). */
   readonly downscaled: boolean;
+  /**
+   * The pick's intrinsic size, when the picker reports one (item 5). Absent is
+   * the normal case for a fake and possible in the picker too: a photo with no
+   * measured size is sent as it came (never a guessed aspect ratio).
+   */
+  readonly width?: number;
+  readonly height?: number;
+  /**
+   * The one long-edge resize already happened (item 5). Separate from
+   * `downscaled`, which is the over-`MAX_IMAGE_BYTES` shrink: they are two
+   * different reasons to change the bytes, each allowed once.
+   */
+  readonly resized?: boolean;
+  /** The person's "Send photos at original size" (item 5): no long-edge resize. */
+  readonly sendOriginal?: boolean;
 }
 
 /** A photo that may be uploaded: its bytes decided the type, its name is safe. */
@@ -57,12 +72,52 @@ export interface ReadyPhoto {
   readonly name?: string;
 }
 
+/**
+ * The longest edge a sent photo keeps (item 5). Models downsample anyway
+ * (Claude takes ~1568 px) and a local VL model turns pixels into tokens, so a
+ * 4032×3024 / several-MB photo is slow prefill and a slow upload for nothing.
+ * A JPEG at this edge is ≈300–600 KB.
+ */
+export const PHOTO_MAX_EDGE = 2048;
+
+/** The JPEG quality of that resize (the plan's own figure). */
+export const PHOTO_JPEG_QUALITY = 0.8;
+
 /** The next thing the adapter must do, or the answer. */
 export type PhotoStep =
   | { readonly kind: "convert-to-jpeg" }
+  /** Shrink to fit `MAX_IMAGE_BYTES` (the legacy over-cap step). */
   | { readonly kind: "downscale" }
+  /**
+   * The long-edge resize (item 5): the EXACT target, so the adapter never
+   * recomputes it and the aspect ratio is the pipeline's decision, not the
+   * effect's.
+   */
+  | {
+      readonly kind: "resize";
+      readonly width: number;
+      readonly height: number;
+      readonly quality: number;
+    }
   | { readonly kind: "ready"; readonly photo: ReadyPhoto }
   | { readonly kind: "refuse"; readonly reason: PhotoRefusal; readonly detail: string };
+
+/** The long-edge resize's target, or null when the photo is already small enough. */
+function resizeTarget(state: PhotoState): { width: number; height: number } | null {
+  const { width, height } = state;
+  if (width === undefined || height === undefined || width <= 0 || height <= 0) {
+    return null;
+  }
+  const longEdge = Math.max(width, height);
+  if (longEdge <= PHOTO_MAX_EDGE) {
+    return null; // never upscale: a small photo stays exactly as it is
+  }
+  const scale = PHOTO_MAX_EDGE / longEdge;
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
 
 function refuse(reason: PhotoRefusal, detail: string): PhotoStep {
   return { kind: "refuse", reason, detail };
@@ -92,6 +147,22 @@ export function nextPhotoStep(state: PhotoState): PhotoStep {
   }
   if (sniffed.kind === "not-image") {
     return refuse("not-an-image", "the bytes are not a PNG, JPEG, GIF or WebP image");
+  }
+  // Item 5's long-edge rule, BEFORE the byte cap: it is the cheaper, always-on
+  // bound, and one resize then serves both reasons. A GIF is exempt for the same
+  // reason the cap exempts it — re-encoding would drop its animation — and
+  // "Send photos at original size" turns the rule off entirely (the person's
+  // choice, never a silent override). Already resized once ⇒ never again.
+  if (state.resized !== true && state.sendOriginal !== true && sniffed.mimeType !== "image/gif") {
+    const target = resizeTarget(state);
+    if (target !== null) {
+      return {
+        kind: "resize",
+        width: target.width,
+        height: target.height,
+        quality: PHOTO_JPEG_QUALITY,
+      };
+    }
   }
   if (size > MAX_IMAGE_BYTES) {
     if (sniffed.mimeType === "image/gif") {
