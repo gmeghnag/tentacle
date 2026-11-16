@@ -9,6 +9,10 @@
  * - **When the value drops below the label** (F10, Dynamic Type). A label is
  *   never truncated (Design 4), so at large sizes the row becomes two lines: the
  *   label on its own, the value under it, still right-aligned.
+ * - **How the label column is sized.** "Never truncated" means the label WRAPS;
+ *   it does not mean it may overflow. A column that refuses to shrink takes its
+ *   measured width and pushes the chevron/switch off the row (fix round 1,
+ *   finding 1), so the sizing is a decision, and it is here.
  *
  * `ui/Row.tsx` is the only caller and it only renders what these return.
  */
@@ -44,8 +48,19 @@ export function valueEllipsis(kind: RowValueKind): ValueEllipsis {
 export const ROW_WRAP_AT = 1.4;
 
 export interface RowLayout {
-  /** `row`: label left, value right. `column`: value under the label. */
-  readonly direction: "row" | "column";
+  /**
+   * The label column's width rule, which is what keeps a trailing control INSIDE
+   * the row:
+   *  - `fill` — no value beside it: the label takes the remaining width and wraps
+   *    (`flex: 1`), so a long title grows the row's height, never its width;
+   *  - `capped` — a value shares the line: the label keeps at most 70% of the row
+   *    so the value's own ellipsis has a column;
+   *  - `stacked` — the value is under the label, so the label owns the row.
+   *
+   * In every case the column may SHRINK: refusing to would push a chevron or a
+   * switch past the row's edge (measured: 396 pt on a 390 pt row).
+   */
+  readonly labelSizing: "fill" | "capped" | "stacked";
   readonly valueAlign: "left" | "right";
   /** The value takes the full width of the row (it owns the second line). */
   readonly valueFullWidth: boolean;
@@ -59,32 +74,38 @@ export interface RowLayout {
 }
 
 const ONE_LINE: RowLayout = {
-  direction: "row",
   valueAlign: "right",
   valueFullWidth: false,
   controlAlign: "center",
+  labelSizing: "fill",
 };
 const WITH_DESCRIPTION: RowLayout = { ...ONE_LINE, controlAlign: "top" };
+const WITH_VALUE: RowLayout = { ...ONE_LINE, labelSizing: "capped" };
+const WITH_DESCRIPTION_AND_VALUE: RowLayout = { ...WITH_VALUE, controlAlign: "top" };
 const STACKED: RowLayout = {
-  direction: "column",
   valueAlign: "right",
   valueFullWidth: true,
   controlAlign: "top",
+  labelSizing: "stacked",
 };
 
 /**
- * The row's layout at a given Dynamic Type scale, and whether the row carries a
- * description under its label. A reading the platform cannot supply (`NaN`,
- * `±Infinity`) falls back to the one-line layout: a broken scale must never
- * leave the label with no width at all.
+ * The row's layout at a given Dynamic Type scale, whether the row carries a
+ * description under its label, and whether a value shares the line. A reading the
+ * platform cannot supply (`NaN`, `±Infinity`) falls back to the one-line layout:
+ * a broken scale must never leave the label with no width at all.
  */
-export function rowLayout(fontScale: number, options: { description?: boolean } = {}): RowLayout {
+export function rowLayout(
+  fontScale: number,
+  options: { description?: boolean; hasValue?: boolean } = {},
+): RowLayout {
   const description = options.description === true;
-  if (!Number.isFinite(fontScale)) {
-    return description ? WITH_DESCRIPTION : ONE_LINE;
-  }
-  if (fontScale >= ROW_WRAP_AT) {
+  const hasValue = options.hasValue === true;
+  if (Number.isFinite(fontScale) && fontScale >= ROW_WRAP_AT) {
     return STACKED;
   }
-  return description ? WITH_DESCRIPTION : ONE_LINE;
+  if (!hasValue) {
+    return description ? WITH_DESCRIPTION : ONE_LINE;
+  }
+  return description ? WITH_DESCRIPTION_AND_VALUE : WITH_VALUE;
 }

@@ -12,7 +12,7 @@
  *    (`radius.card` is 0 since S1), with a hairline on its top AND bottom edge so
  *    two sections never merge into one another;
  *  - the band always reads one step above what it sits on: `band` on the page's
- *    grouped ground, and `bandOnSheet` on a sheet whose own ground becomes `page`
+ *    grouped ground, and `bandOnSheet` on a sheet whose own ground is `bg`
  *    (`onSheet`), which is why the two surfaces are palette tokens, not a rule.
  *
  * Render only (AGENTS §7): no branching beyond choosing the two surfaces.
@@ -28,7 +28,7 @@ export interface BandSectionProps {
   readonly children: ReactNode;
   /** A note under the band (13 pt `sec`): what the rows cannot say. */
   readonly footnote?: ReactNode;
-  /** Inside a sheet: both surfaces move up one step (`bandOnSheet`, `page`). */
+  /** Inside a sheet: both surfaces move up one step (`bandOnSheet`, `bg`). */
   readonly onSheet?: boolean;
   readonly testID?: string;
 }

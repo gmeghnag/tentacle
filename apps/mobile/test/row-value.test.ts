@@ -39,26 +39,26 @@ describe("S3 · `valueEllipsis` — the ellipsis follows the KIND, not the width
 describe("S3 · `rowLayout` — a value drops below the label at the largest type (F10)", () => {
   test("at the default type the label and its value share one line", () => {
     expect(rowLayout(1)).toEqual({
-      direction: "row",
       valueAlign: "right",
       valueFullWidth: false,
       controlAlign: "center",
+      labelSizing: "fill",
     });
   });
 
   test("just under the threshold still shares the line", () => {
-    expect(rowLayout(1.39).direction).toBe("row");
+    expect(rowLayout(1.39).valueFullWidth).toBe(false);
   });
 
   test("at the threshold the value drops under the label, full width, still right-aligned", () => {
     expect(ROW_WRAP_AT).toBe(1.4);
     expect(rowLayout(ROW_WRAP_AT)).toEqual({
-      direction: "column",
       valueAlign: "right",
       valueFullWidth: true,
       controlAlign: "top",
+      labelSizing: "stacked",
     });
-    expect(rowLayout(2).direction).toBe("column");
+    expect(rowLayout(2).valueFullWidth).toBe(true);
   });
 
   test("a broken reading falls back to the safe, one-line layout", () => {
@@ -66,10 +66,10 @@ describe("S3 · `rowLayout` — a value drops below the label at the largest typ
     // row whose label has zero width.
     for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
       expect(rowLayout(bad)).toEqual({
-        direction: "row",
         valueAlign: "right",
         valueFullWidth: false,
         controlAlign: "center",
+        labelSizing: "fill",
       });
     }
   });
@@ -79,19 +79,49 @@ describe("S3 · `rowLayout` — a value drops below the label at the largest typ
     // top-aligned" — a 31 pt switch floating in the middle of a two-line label
     // is the bug, and it is not a large-type-only problem.
     expect(rowLayout(1, { description: true }).controlAlign).toBe("top");
-    expect(rowLayout(1, { description: true }).direction).toBe("row");
+    expect(rowLayout(1, { description: true }).valueFullWidth).toBe(false);
     expect(rowLayout(1, { description: false }).controlAlign).toBe("center");
     expect(rowLayout(ROW_WRAP_AT, { description: true })).toEqual({
-      direction: "column",
       valueAlign: "right",
       valueFullWidth: true,
       controlAlign: "top",
+      labelSizing: "stacked",
     });
   });
 
   test("the value is right-aligned in BOTH modes (it never flips side)", () => {
     for (const scale of [1, 1.4, 3]) {
       expect(rowLayout(scale).valueAlign).toBe("right");
+    }
+  });
+});
+
+describe("S3 · the label column's SIZING (fix round 1: `flexShrink: 0` overflowed)", () => {
+  // The bug: a label column that refuses to shrink (`flexShrink: 0`) takes its
+  // MEASURED width, so a long title pushes the chevron/switch past the row's
+  // edge — measured with Yoga (RN's engine) at 390 pt: 396, and 475 with a tile
+  // (`.tentacle/tmp/mobile-chrome/f1r1-yoga5.out`). "Never truncated" (Design 4)
+  // means the label WRAPS — not that it may overflow.
+  test("with no value beside it the label FILLS the row and shrinks to wrap", () => {
+    // Nothing else claims the width, so the label takes all of it; shrinking is
+    // what turns "does not fit" into a second line instead of an overflow.
+    expect(rowLayout(1).labelSizing).toBe("fill");
+  });
+
+  test("with a value beside it the label is CAPPED, so the value keeps a column", () => {
+    expect(rowLayout(1, { hasValue: true }).labelSizing).toBe("capped");
+  });
+
+  test("stacked (large type, or any size with a value) the label owns the row", () => {
+    // `valueFullWidth` already moves the value under the label: no cap is needed.
+    expect(rowLayout(ROW_WRAP_AT, { hasValue: true }).labelSizing).toBe("stacked");
+    expect(rowLayout(ROW_WRAP_AT).labelSizing).toBe("stacked");
+  });
+
+  test("a broken scale still fills (never a zero-width label)", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(rowLayout(bad).labelSizing).toBe("fill");
+      expect(rowLayout(bad, { hasValue: true }).labelSizing).toBe("capped");
     }
   });
 });

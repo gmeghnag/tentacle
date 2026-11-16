@@ -10,10 +10,13 @@
  *  - a 0.5 pt hairline BETWEEN rows, inset to the gutter, and none after the last
  *    one — the last row draws no bottom edge and the band's own edge closes the
  *    section (so the separator is drawn at each row's TOP, `first` suppressing it);
- *  - the label `flexShrink: 0`: it wraps at large sizes and is NEVER truncated,
- *    because a truncated setting name is a bug, not a look. The value takes the
- *    remaining width, right-aligned, with the ellipsis its KIND calls for
- *    (`row-value.ts`: a path keeps its tail, a model both ends);
+ *  - the label NEVER truncates: it wraps at large sizes and is never line-capped,
+ *    because a truncated setting name is a bug, not a look. "Never truncated" is
+ *    not "never shrinks": the label column FILLS the row (`flex: 1`) so a long
+ *    title grows the row's HEIGHT. A column that refuses to shrink would push a
+ *    trailing chevron/switch past the row's edge (fix round 1, finding 1). The
+ *    value takes the remaining width, right-aligned, with the ellipsis its KIND
+ *    calls for (`row-value.ts`: a path keeps its tail, a model both ends);
  *  - at the largest Dynamic Type sizes the value drops UNDER the label
  *    (`rowLayout(fontScale)`, F10) and a trailing switch anchors to the top
  *    instead of floating in the middle of a wrapped paragraph;
@@ -104,7 +107,11 @@ export function Row({
   // Dynamic Type: past the cap the value drops under the label (F10); a row with
   // a description under its label top-aligns its control at any size.
   const { fontScale } = useWindowDimensions();
-  const layout = rowLayout(fontScale, { description: subtitle !== undefined && subtitle !== "" });
+  const hasValue = value !== undefined && value !== "";
+  const layout = rowLayout(fontScale, {
+    description: subtitle !== undefined && subtitle !== "",
+    hasValue,
+  });
   const titleColor =
     tone === "destructive"
       ? palette.red
@@ -114,7 +121,6 @@ export function Row({
           ? palette.sec
           : palette.label;
   const tileColor = dimmed ? palette.sec : palette.accent;
-  const hasValue = value !== undefined && value !== "";
   // ONE value element, placed by the pure decision: beside the label, or (at the
   // largest Dynamic Type sizes) under it, inside the label's own column.
   const valueText =
@@ -169,10 +175,11 @@ export function Row({
       <View
         style={[
           styles.text,
-          // With a value beside it the label is capped so the value has room; a
-          // row with no value gives its label the whole row.
-          hasValue === false || layout.valueFullWidth ? null : styles.textCapped,
-          layout.direction === "column" ? styles.textStacked : null,
+          // Where `rowLayout` puts the label's width: the whole row when nothing
+          // shares the line, a 70% cap beside a value, 100% when stacked.
+          layout.labelSizing === "fill" ? styles.textFill : null,
+          layout.labelSizing === "capped" ? styles.textCapped : null,
+          layout.labelSizing === "stacked" ? styles.textStacked : null,
         ]}
       >
         <Text
@@ -219,11 +226,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  // The label never truncates (Design 4): it wraps, and the VALUE yields.
-  text: { flexShrink: 0, gap: 2 },
+  // The label never truncates (Design 4): it wraps. It may SHRINK, though — a
+  // column that refuses to would push the row's trailing control out of the row.
+  text: { flexShrink: 1, minWidth: 0, gap: 2 },
+  // Nothing shares the line: the label takes the width and wraps inside it.
+  textFill: { flex: 1 },
   // Beside a value the label keeps at most 70% of the row, so the value's own
-  // ellipsis has room; with no value it takes the row.
-  textCapped: { maxWidth: "70%" },
+  // ellipsis has room.
+  textCapped: { flexShrink: 1, maxWidth: "70%" },
   // Stacked, the label column owns the whole row so the value can sit under it.
   textStacked: { flex: 1, maxWidth: "100%" },
   valueBeside: { flex: 1, minWidth: 0 },

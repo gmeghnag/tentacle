@@ -117,8 +117,18 @@ describe("S3 · the E2 `Row` (Design 4)", () => {
 
   test("the label never truncates; the value does (its own ellipsis)", () => {
     const row = code(ROW);
-    // Design 4 / F10: the label wraps and never shrinks away, the value ellipsises.
-    expect(row).toMatch(/flexShrink: 0/);
+    // Design 4 / F10: the label WRAPS (it never truncates), the value ellipsises.
+    // "Never truncated" is achieved by not capping its lines — NOT by refusing to
+    // shrink: a label column with `flexShrink: 0` takes its measured width and
+    // pushes the chevron/switch past the row's edge (fix round 1, finding 1:
+    // Yoga, 390 pt row, 80-char title, chevron right edge 396).
+    expect(row).not.toMatch(/numberOfLines=\{2\}/);
+    expect(row).not.toMatch(/flexShrink: 0/);
+    // The label's own <Text> carries no line cap at all (the value's `{1}` is its
+    // ellipsis, and it renders exactly once — pinned by the test below).
+    const labelText = row.slice(row.indexOf("{title}") - 400, row.indexOf("{title}"));
+    expect(labelText).toContain("maxFontSizeMultiplier");
+    expect(labelText).not.toContain("numberOfLines");
     // The value's ellipsis is decided by the pure helper, per kind.
     expect(row).toMatch(/valueEllipsis\(/);
     expect(row).toMatch(/ellipsizeMode=/);
@@ -131,14 +141,26 @@ describe("S3 · the E2 `Row` (Design 4)", () => {
   test("the label is capped ONLY while a value shares the row", () => {
     // A `maxWidth: "70%"` on the label's base style would hold a value-less row's
     // label to 70% of the band for no reason — the cap exists to give the VALUE
-    // room, so it is applied on that branch alone.
+    // room, so it is applied on that branch alone. Since fix round 1 the branch is
+    // the pure `labelSizing`, so the component maps the three cases and the cap
+    // style itself carries no `flex` that would re-take the row.
     const row = code(ROW);
-    expect(row).toMatch(
-      /hasValue === false \|\| layout\.valueFullWidth \? null : styles\.textCapped/,
-    );
+    expect(row).toMatch(/layout\.labelSizing === "capped" \? styles\.textCapped : null/);
+    expect(row).toMatch(/layout\.labelSizing === "fill" \? styles\.textFill : null/);
+    expect(row).toMatch(/layout\.labelSizing === "stacked" \? styles\.textStacked : null/);
     const base = row.split("\n").find((line) => line.trimStart().startsWith("text: {")) ?? "";
     expect(base).not.toBe("");
     expect(base).not.toMatch(/maxWidth/);
+    expect(base).not.toMatch(/flex: 1/);
+    // The three sizing styles must carry the actual geometry: mutation M2 (a
+    // `textFill` that exists but does not `flex: 1`) left every test green, and
+    // Yoga then leaves the value-less label at its MEASURED width — the overflow
+    // again, just spelled differently.
+    expect(row).toMatch(/textFill: \{ flex: 1 \}/);
+    expect(row).toMatch(/textCapped: \{ flexShrink: 1, maxWidth: "70%" \}/);
+    // Stacked, the label owns the row: a 70% cap left over from the beside case
+    // would squeeze it while the value sits under it (mutation M8).
+    expect(row).toMatch(/textStacked: \{ flex: 1, maxWidth: "100%" \}/);
   });
 
   test("the value is drawn EXACTLY once, and on the line `rowLayout` chose", () => {

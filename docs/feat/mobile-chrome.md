@@ -262,8 +262,9 @@ switch to `HeaderIcon` too — one weight across the app.
 - an optional footnote under the band (13 pt `sec`).
 `ui/Row.tsx` becomes full-width inside the band: 20 pt side padding,
 `size.rowList` min height, a 0.5 pt hairline between rows inset 20 pt (none
-after the last row — the band's own edge closes it), label `flexShrink: 0`
-(never truncated, wraps at Dynamic Type sizes), value `flex: 1`
+after the last row — the band's own edge closes it), label `flex: 1`
+(never truncated — it WRAPS, and it may shrink: a column that refuses to
+shrink pushes a chevron/switch past the row's edge, fix round 1), value `flex: 1`
 right-aligned with its own ellipsis — `ellipsizeMode` per value KIND,
 decided in a pure helper `row-value.ts` (`valueEllipsis(kind)`: `path` →
 head (`…/hop-live/proj` keeps the tail), `model` → middle, text → tail). The
@@ -1980,7 +1981,19 @@ D. send through the attached handle: ok
 
 ## Execution (slice S3 — band primitives, E2)
 
-*— claude-opus-5-5, 2026-11-16 · slice S3 only*
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (tentacle profile `deepseek`), 2026-11-16 · slice S3 only*
+
+> **Signature corrected in fix round 1** (Review round 1, finding 3). This
+> section was signed `claude-opus-5-5` while its commit (`7faddece`) is titled
+> `exec (deepseek)`. The commit was right: `night-task3.sh:24` runs the S3 step
+> through `tentacle --profile deepseek`, and this run's own log carries tentacle's
+> tool names (`[tool] fs_read`, `[tool] shell`, `[tool] fs_multi_edit` —
+> `runs/night-mobile-chrome-exec.log`), never Claude Code's `Read`/`Bash`/`Edit`.
+> The wrong id came from the run's own self-check: it grepped
+> `~/.claude/projects/*/*.jsonl`, which is the ORCHESTRATOR's transcript (opus),
+> and adopted the model id it found there. The profile's model id is pinned in
+> `~/.config/tentacle/config.jsonc` → `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`,
+> which is what the signature now says. Nothing else in this section changes.
 
 **Scope: S3 (Band primitives) only.** S4–S10 untouched: no screen was rewired
 (`grep` still finds 15 `<GroupedCard`, 10 `<SectionHeader`, 16 `<Row` call
@@ -2166,9 +2179,29 @@ is a genuine fail.
   geometry and colours proven, RN's own rendering not seen. S4's flows are the
   first place the real thing is on screen.
 - **No screen is rewired** — the slice table's `done when` is the primitive and
-  its tests; the app looks exactly as S2 left it until S4. So the changelog
-  sentence describes the primitives landing, not a visible change yet. Stated
-  rather than hidden: **S3 alone changes nothing a user can see.**
+  its tests; no screen's structure changes until S4. **But S3 is NOT invisible,
+  and my first draft of this line ("S3 alone changes nothing a user can see")
+  was false** (Review round 1, finding 2). The 22 live `<Row>` sites render
+  through the rewritten `Row` TODAY, inside the 15 `GroupedCard`s S4 has not
+  replaced yet, so the current look is an interim, unscreenshotted mix. Measured
+  from `git show main:apps/mobile/src/ui/Row.tsx` vs now
+  (`.tentacle/tmp/mobile-chrome/f1r1-visible.sh`):
+  - the row's own inset widened `space.cardInner` 16 → `space.rowX` 20, so inside
+    an un-rewired card the text now sits 16 + 20 = **36 pt** from the screen edge
+    (was 16 + 16 = 32), and the hairline inset moved 16/60 → 20;
+  - vertical padding 10 → 12 and base `minHeight` `rowProject` 60 → `rowList` 50
+    (13 of the 22 sites pass their own `minHeight`, so 9 change height);
+  - the title/subtitle **lost `numberOfLines={2}`**: a long session title now
+    wraps to any number of lines instead of being capped at two;
+  - the separator lost its `icon`-dependent inset (60 after a tile), so a tiled
+    row's hairline now starts at the gutter;
+  - `Sheet`'s non-floating ground moved `sheet` → `bg`: `SessionInfoSheet` and
+    `OutboxDecisionSheet` (neither passes `floating`) go from `#FFFFFF` to
+    `#F2F2F7` in light, under `GroupedCard surface={palette.fill}` (`#EFEFF4`)
+    cards that still paint the old surface. Dark is unchanged (`#2A2A28` vs
+    `#1F1F1E` inside a `pageSheet` Modal whose own ground is `page`).
+  So the changelog bullet must not claim a look that is not on screen yet, and
+  S4 owns the visible change. Recorded rather than hidden.
 - **`PairScreen`'s hero and paste field are not yet in a band** (S4), and the new
   `Sheet onClose` has no call site (S4). `space.separatorPlain`/
   `separatorAfterTile`/`size.rowProject` are now unreferenced by the app,
@@ -2223,3 +2256,157 @@ the palettes — dark `bg #1F1F1E` / `bandOnSheet #2A2A28` holds, interim
 carries the branching, Row only maps it: holds. No protocol/persistence/runtime
 invariant touched. Executor behaviour: scope respected, thorough mutation table,
 honest about no device render; over-claimed "no visible change".
+
+### Fix round 1
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (tentacle profile `deepseek`), 2026-11-16 · answers Review round 1 (slice S3) · my own id, confirmed below*
+
+**Model id provenance (I checked rather than assumed).** My prompt is the
+`ds "… fix round $N …"` call at `night-task3.sh:45`, whose `ds()` launches
+`tentacle --profile deepseek` (`night-task3.sh:24`); the profile's model is
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` (`~/.config/tentacle/config.jsonc`).
+I also confirmed the run log this session writes to —
+`runs/night-mobile-chrome-fix1.log` — contains my own `f1r1-*` commands, so it
+is this session and not a neighbour's. (That is the same check whose absence
+produced finding 3.)
+
+#### Finding 1 (HIGH) — `Row.tsx:223` `text: { flexShrink: 0 }` overflowed the row
+
+**FIXED.**
+
+- **Reproduced first**, with Yoga (RN's own engine, through the copy `ink`
+  vendors) and the row's REAL style set — 390 pt row, 20 pt gutters, 12 pt gap,
+  a 14 pt chevron, an 80-char title. Measured on the shipped code
+  (`.tentacle/tmp/mobile-chrome/f1r1-yoga5.out`):
+
+  | case | label | last control's right edge (inner edge = 370) |
+  |---|---|---|
+  | no value, chevron | 350×44 | **396** — off a 390 pt screen |
+  | no value, tile+dot, chevron | 350×48 | **475** |
+  | no value, switch | 350×44 | **433** |
+  | value + tile + switch | 244×66 | **399** |
+  | value, chevron | 244×66 | 370 ok |
+
+  So the bug was wider than the review's case: the cap (70%) only existed on the
+  value branch, so every value-less row with a trailing control overflowed, and
+  even a capped row overflowed once a tile or a switch joined it.
+- **Root cause (one sentence):** the label column refused to shrink
+  (`flexShrink: 0`), so it took its MEASURED width and the trailing control was
+  pushed past the row instead of the label wrapping.
+- **RED first** (§9): 5 fail on the untouched code, on the property, not on an
+  import — `row-value.test.ts` ×4 (`labelSizing` undefined) and
+  `band-wiring.test.ts` (`flexShrink: 0` present).
+- **Fix, in §7's shape (decision in a pure module, component only renders):**
+  `row-value.ts` gained `RowLayout.labelSizing: "fill" | "capped" | "stacked"`,
+  computed by `rowLayout(fontScale, { description, hasValue })`; `Row.tsx` maps
+  it to one of three styles and holds no branching. Base `text` is now
+  `{ flexShrink: 1, minWidth: 0 }`; `textFill: { flex: 1 }` (nothing shares the
+  line), `textCapped: { flexShrink: 1, maxWidth: "70%" }`, `textStacked`
+  unchanged. "Never truncated" is kept where it belongs — the label's `<Text>`
+  carries no line cap — and is no longer conflated with "never shrinks".
+- **AFTER, styles read back OUT of the shipped `Row.tsx`** (`f1r1-yoga-after.ts`,
+  so the measurement cannot drift from the code): every case ends at
+  `370/370 ok` — chevron, tile+dot, switch, value+tile+switch, stacked.
+- **Drift (1, deliberate):** I deleted `RowLayout.direction`. After the fix
+  nothing in `src` read it (only tests), it duplicated `valueFullWidth`, and two
+  representations of one fact is exactly the drift class this finding came from.
+  Its tests now assert `valueFullWidth`.
+
+#### Finding 2 (MEDIUM) — "S3 alone changes nothing a user can see" was false
+
+**FIXED (doc).** The claim is replaced in **Not done in this slice** with the
+measured list (`.tentacle/tmp/mobile-chrome/f1r1-visible.out`): the inset went
+16 → 20 (`36 pt` from the screen edge inside an un-rewired card, was 32), the
+vertical padding 10 → 12, the base `minHeight` 60 → 50 (9 of 22 live sites
+change height), the title **lost `numberOfLines={2}`** so a long title wraps
+freely, the separator lost its icon-dependent inset, and `Sheet`'s non-floating
+ground moved `sheet` → `bg`, which recolours `SessionInfoSheet` and
+`OutboxDecisionSheet` in light (`#FFFFFF` → `#F2F2F7`) under `GroupedCard
+surface={palette.fill}` cards that still paint the old surface. The 22 live
+`<Row>` sites inside 15 un-rewired `GroupedCard`s are stated as the interim look
+it is, and S4 is named as the owner of the visible change.
+
+What I did **not** do: rewrite the changelog bullet. It describes the finished
+restyle (an unreleased fragment, assembled at release), and one bullet can only
+describe one end state — but Review should know I considered it.
+
+#### Finding 3 (MEDIUM) — signature vs commit title
+
+**FIXED (doc), and it was the opposite of what round 1 guessed.** The commit
+title was right and the signature was wrong. Evidence: S3 was launched by
+`night-task3.sh:24` (`tentacle --profile deepseek`), and its log
+(`runs/night-mobile-chrome-exec.log`) carries tentacle's tool names
+(`[tool] fs_read` ×22, `[tool] shell` ×122, `[tool] fs_multi_edit` ×11) — the
+deepseek CLI, never Claude Code's `Read`/`Bash`/`Edit`. Its own self-check (`sed
+-n '417,432p'` of that log) grepped `~/.claude/projects/*/*.jsonl`, which is the
+ORCHESTRATOR's transcript, found `claude-opus-5-5` there, and adopted it. The S3
+Execution header now carries the profile's real id plus a note saying exactly
+that; the body is unchanged.
+
+#### Nits (were not blocking; both closed)
+
+- `BandSection.tsx:15,30` said a sheet's ground "becomes `page`" — now `bg`, the
+  token Drift 2 actually chose and the code actually passes.
+- `Row`'s hairlines still paint `palette.sep`, never `sepSheet`, inside a sheet
+  band. I checked before changing it and left it: no live `Row` sits on a sheet
+  surface today (`SessionInfoSheet`/`OutboxDecisionSheet` still hold
+  `GroupedCard surface={palette.fill}` until S4, and `BandSection onSheet`'s
+  `sepSheet` edge is the band's own border). In the two palettes `sep` and
+  `sepSheet` are identical in light (`#C6C6C8`) and differ by `#3A3936` vs
+  `#403F3B` in dark. If S4 mounts banded rows in a sheet, `Row` needs an
+  `onSheet`-equivalent then; recorded rather than guessed now.
+
+#### Mutation checks (§9 — each applied, the 2 S3 files run, reverted, `cmp`'d back)
+
+Scripts/output: `.tentacle/tmp/mobile-chrome/f1r1-mutations.{sh,out}` and
+`f1r1-mut2.{ts,out}`; backups in `f1r1-bak/`, each restored file verified
+`identical to scratch backup`.
+
+| # | Mutation (each is the fix reversed) | Result |
+|---|---|---|
+| M1 | `text: flexShrink: 1` → `flexShrink: 0` (the original bug) | **1 fail** |
+| M2 | `textFill: { flex: 1 }` → `{}` (style exists, no fill) | **1 fail** |
+| M3 | the 70% cap leaks onto the base `text` style | **1 fail** |
+| M4 | `labelSizing === "capped"` branch wired off | **1 fail** |
+| M5 | `rowLayout` ignores `hasValue` (`if (true)`) | **2 fail** |
+| M6 | the label regains `numberOfLines={2}` | **1 fail** |
+| M7 | the pure module always returns `fill` (cap never applies) | **2 fail** |
+| M8 | `textStacked` keeps a 70% cap | **1 fail** |
+
+**Two mutations survived on the first attempt and were real gaps, now closed:**
+- M2 — nothing proved that `textFill` *fills*; the test only checked the branch
+  was taken. Yoga then leaves the value-less label at its measured width, i.e.
+  the overflow again. The wiring test now pins the three styles' geometry.
+- M8 — nothing proved the stacked label's full width, so a leftover 70% cap
+  would have squeezed it silently. Pinned the same way.
+(M6 appears twice in the `.out` files: the `sed` line in the shell script cannot
+match across lines and is a deliberate no-op, so the template literal edit in
+`f1r1-mut2.ts` is the real M6.)
+
+One further non-vacuity note: `direction`'s deletion is covered by M5/M7 still
+biting through `valueFullWidth`, so no assertion was lost with it.
+
+#### Gate
+
+- `bunx tsc --noEmit` (root) — clean.
+- `bunx tsc -p apps/mobile --noEmit` — clean.
+- `bunx tsc -p apps/relay --noEmit` — clean.
+- `bun run lint` — `Checked 1689 files. No fixes applied.` (0/0, matches the §6
+  baseline).
+- `bun test` (full suite) — **12180 pass, 5 skip, 0 fail** across 876 files, 424 s
+  (`.tentacle/tmp/mobile-chrome/f1r1-gate-full.log`). The 5 skips are the
+  documented opt-ins; total is +4 over S3's 12176 = the four new `labelSizing`
+  tests, and no new skip appeared.
+- Files touched: `apps/mobile/src/row-value.ts`, `apps/mobile/src/ui/Row.tsx`,
+  `apps/mobile/src/ui/BandSection.tsx` (comments only), the two test files, this
+  doc. No protocol/daemon/client/wire change, so `protocol.json` was not
+  regenerated; no git checkout/restore/stash/commit was run.
+
+#### Unverified, stated
+
+- **No device/simulator render.** Still the S3/S6 block (no headless RN
+  renderer; the native build is blocked by the pre-existing `PushCore` error).
+  The fix's geometry is proven with Yoga against the shipped style values, which
+  is the engine RN uses, but the real pixels are unseen — the same limitation
+  Review accepted for S3.
+- **The `sepSheet` nit** depends on S4's final structure (see above).
