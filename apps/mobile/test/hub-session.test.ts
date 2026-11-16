@@ -4,10 +4,11 @@
  * in band coordinates, and when a world change cancels an open fan.
  */
 import { describe, expect, test } from "bun:test";
+import type { ScheduleRow } from "@tentacle/protocol";
 import { FLOAT_SIZE, place } from "../src/floating-button.ts";
-import { hubActions } from "../src/hub-actions.ts";
+import { DUE_SOON_MS, hubActions } from "../src/hub-actions.ts";
 import { ITEM_SIZE } from "../src/hub-fan.ts";
-import { bandPoint, hubContextOf, mustCancel, solveHub } from "../src/hub-session.ts";
+import { bandPoint, hubContextOf, mustCancel, solveHub, wakeContext } from "../src/hub-session.ts";
 
 const BAND = { width: 390, height: 600 };
 const noop = () => {};
@@ -21,7 +22,7 @@ const idle = hubContextOf({
 });
 
 describe("hubContextOf", () => {
-  test("carries the screen's facts; what H4 owns starts empty", () => {
+  test("carries the screen's facts; what H4b owns starts empty", () => {
     expect(idle).toEqual({
       link: "up",
       turn: null,
@@ -32,6 +33,60 @@ describe("hubContextOf", () => {
       nextWakeInMs: null,
       unseenArtifacts: 0,
     });
+  });
+});
+
+const NOW = new Date(2026, 10, 17, 12, 0, 0).getTime();
+const wake = (over: Partial<ScheduleRow> = {}): ScheduleRow => ({
+  id: "sc-1",
+  kind: "every",
+  spec: "every 10m",
+  prompt: "check CI on PR #412",
+  nextAt: NOW + 10 * 60_000,
+  fires: 4,
+  createdAt: NOW - 3_600_000,
+  ...over,
+});
+
+describe("wakeContext — the daemon's wake table, as the hub reads it (H4a)", () => {
+  test("no table (an older daemon, or a pod's dropped one) → no wakes, so no item (M9/P6)", () => {
+    expect(wakeContext(undefined, NOW)).toEqual({ schedules: 0, nextWakeInMs: null });
+    expect(wakeContext([], NOW)).toEqual({ schedules: 0, nextWakeInMs: null });
+  });
+
+  test("the count is the table's length, and the next wake is the SOONEST one", () => {
+    // The daemon's order is not the firing order: a one-shot may come first in
+    // its table and still fire after a recurring wake's next turn.
+    const rows = [
+      wake({ id: "sc-1", nextAt: NOW + 40 * 60_000 }),
+      wake({ id: "sc-2", kind: "at", nextAt: NOW + 5 * 60_000 }),
+      wake({ id: "sc-3", nextAt: NOW + 20 * 60_000 }),
+    ];
+    expect(wakeContext(rows, NOW)).toEqual({ schedules: 3, nextWakeInMs: 5 * 60_000 });
+  });
+
+  test('a wake already due reads 0 ms, never a negative "in −40 s"', () => {
+    expect(wakeContext([wake({ nextAt: NOW - 40_000 })], NOW)).toEqual({
+      schedules: 1,
+      nextWakeInMs: 0,
+    });
+  });
+
+  test("one wake inside the badge window is what promotes the item", () => {
+    const soon = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      schedules: { rows: [wake({ nextAt: NOW + DUE_SOON_MS - 1_000 })], now: NOW },
+    });
+    expect(soon).toMatchObject({ schedules: 1, nextWakeInMs: DUE_SOON_MS - 1_000 });
+    // End to end: the daemon's table alone makes the item appear, badged, first.
+    const a = hubActions(soon, { ...ENTRIES, scheduled: noop });
+    expect(a.all.map((i) => i.id)).toEqual(["scheduled", "attach", "activity", "sessions", "info"]);
+    expect(a.all[0]?.badge).toEqual({ kind: "dot" });
+    expect(a.all[0]?.label).toBe("Scheduled");
   });
 });
 
