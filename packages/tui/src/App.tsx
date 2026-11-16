@@ -12,6 +12,12 @@ import { type ReactElement, useCallback, useEffect, useRef, useState } from "rea
 import { AppView } from "./AppView.tsx";
 import { frameLayout } from "./app-layout.ts";
 import {
+  type ArtifactJoin,
+  checkArtifacts,
+  forgetArtifacts,
+  newArtifactJoin,
+} from "./artifact-join.ts";
+import {
   type ArtifactConfirm,
   type ArtifactStep,
   NO_ARTIFACT_IN_TRANSCRIPT,
@@ -19,12 +25,7 @@ import {
   artifactStep,
   newestArtifact,
 } from "./artifact-open.ts";
-import {
-  NO_ARTIFACT_OPENER,
-  artifactsByCall,
-  needsArtifactJoin,
-  withArtifactDetails,
-} from "./artifacts-panel.ts";
+import { NO_ARTIFACT_OPENER, joinKnownArtifacts } from "./artifacts-panel.ts";
 import { type AttachDraft, EMPTY_DRAFT, removeLastChip, uploadDone } from "./attach-draft.ts";
 import { type AttachedImage, type FileProbe, nodeFileProbe } from "./attach-files.ts";
 import {
@@ -424,6 +425,11 @@ export function App({
     artifactConfirmRef.current = next;
     setArtifactConfirmState(next);
   }, []);
+  // What this TUI has learned of the followed session's artifacts, by `present`
+  // call. It must outlive a transcript rebuild (S6a review finding 2: a resync
+  // or a `/sessions` swap rebuilds rows from `ChatMessage`s, which carry no
+  // card), so it is a ref, not a prop of the one frame that fetched it.
+  const artifactJoinRef = useRef<ArtifactJoin>(newArtifactJoin());
   // The controller of the FOREIGN turn being streamed (another device's), or
   // null: `/exit` leaves it running (docs/feat/tui-foreign-turns.md C4).
   const foreignRef = useRef<AbortController | null>(null);
@@ -639,6 +645,44 @@ export function App({
 
   // --- throttled rendering -------------------------------------------------
   const { scheduleFlush, flushNow } = usePaintScheduler(FRAME_MS);
+
+  /**
+   * A history that just landed, with the cards this TUI already knows attached
+   * (S6a review finding 2). Every path that rebuilds rows from `ChatMessage`s —
+   * a resync's `history_reset`, a `history` replace, a `/sessions` swap — runs
+   * it, so a resumed session's cards survive the rebuild instead of going plain
+   * (and `Ctrl+X Ctrl+O` finding nothing). The decision and the request are
+   * `artifact-join.ts`'s; this is the App's half: which session, which ref, and
+   * a repaint once an answer arrives.
+   */
+  const joinCards = useCallback(
+    (state: DisplayState): DisplayState => {
+      const session = sessionRef.current;
+      const items = checkArtifacts(artifactJoinRef.current, state.items, session, () => {
+        if (sessionRef.current !== session) {
+          return;
+        }
+        // The answer has just been folded into the join's map: attach it to the
+        // rows on screen NOW (they are the ones the request was made for).
+        const learned = joinKnownArtifacts(stateRef.current.items, artifactJoinRef.current.byCall);
+        if (learned !== stateRef.current.items) {
+          stateRef.current = { ...stateRef.current, items: [...learned] };
+        }
+        flushNow();
+      });
+      return items === state.items ? state : { ...state, items: [...items] };
+    },
+    [flushNow],
+  );
+
+  /**
+   * A session SWAP: the artifacts learned for the old session must not attach
+   * cards in the new one (a `callId` can repeat), so the store is emptied —
+   * `joinCards` then asks the new session's own list (S6a review finding 2).
+   */
+  const forgetJoinedArtifacts = useCallback(() => {
+    forgetArtifacts(artifactJoinRef.current);
+  }, []);
   const linkView = useLinkIndicator(link);
 
   // `wakeIfPending`, through a ref: the exit handler below is declared first.
@@ -1391,6 +1435,7 @@ export function App({
       restoreChips,
       model,
       skillsSync,
+      joinCards,
       askContext,
       wakeIfPending,
       exit,
@@ -1452,6 +1497,8 @@ export function App({
     onActivityRef,
     watchReturned,
     flushNow,
+    forgetArtifacts: forgetJoinedArtifacts,
+    joinCards,
     pushNotice,
     restoreInput,
     setCompacting,
@@ -1489,23 +1536,22 @@ export function App({
     // so a fresh or card-less session says nothing on the wire. A failure (an
     // older daemon: `ArtifactsUnsupportedError`) leaves the transcript exactly
     // as it was — no notice, nothing invented.
+    // `checkArtifacts` is the SAME join every later history replace runs
+    // (S6a review finding 2), and it remembers what it learns in
+    // `artifactJoinRef`: a rebuild from `ChatMessage`s can attach the cards again.
     const watched = sessionRef.current;
-    if (needsArtifactJoin(stateRef.current.items)) {
-      void watched?.listArtifacts?.().then(
-        (result) => {
-          if (sessionRef.current === watched) {
-            const items = withArtifactDetails(
-              stateRef.current.items,
-              artifactsByCall(result.artifacts),
-            );
-            if (items !== stateRef.current.items) {
-              stateRef.current = { ...stateRef.current, items: [...items] };
-              flushNow();
-            }
-          }
-        },
-        () => {},
-      );
+    const joined = checkArtifacts(artifactJoinRef.current, stateRef.current.items, watched, () => {
+      if (sessionRef.current !== watched) {
+        return;
+      }
+      const learned = joinKnownArtifacts(stateRef.current.items, artifactJoinRef.current.byCall);
+      if (learned !== stateRef.current.items) {
+        stateRef.current = { ...stateRef.current, items: [...learned] };
+      }
+      flushNow();
+    });
+    if (joined !== stateRef.current.items) {
+      stateRef.current = { ...stateRef.current, items: [...joined] };
     }
     return () => {
       activitySubRef.current?.();

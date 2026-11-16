@@ -14,15 +14,18 @@ import { describe, expect, test } from "bun:test";
 import { PermissionBroker } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
 import { render } from "ink-testing-library";
-import { App, type AppProps, type SessionController } from "../src/App.tsx";
+import { App, type AppProps, type SessionController, type SessionDirectory } from "../src/App.tsx";
 import type { OpenPlan } from "../src/artifact-open.ts";
 import type { ArtifactOpener, SaveRequest } from "../src/os-open.ts";
 import { messagesToItems } from "../src/resume.ts";
-import type { DisplayItem } from "../src/state.ts";
+import type { SessionsView } from "../src/sessions-panel.ts";
+import type { DisplayItem, SessionEvent } from "../src/state.ts";
+import type { SessionActivity } from "../src/turn-feed.ts";
 import { inertSession } from "./session-stub.ts";
 
 const ENTER = "\r";
 const ESC = "\u001B";
+const DOWN = "\u001b[B";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
@@ -348,6 +351,203 @@ describe("S6b: Ctrl+X Ctrl+O opens the newest artifact", () => {
   });
 });
 
+describe("S6a review finding 2: a card survives every history REPLACE", () => {
+  /**
+   * A session that raises activities on demand, and answers `listArtifacts`
+   * with `listed` — the resync/`/sessions`-swap shape the finding names. The
+   * mount join runs once per watched session; a REPLACE (`resetHistory`) built
+   * its rows with `messagesToItems(messages)` and no map, so the card was lost
+   * (this is the red property).
+   */
+  function raisable(listed: ArtifactMeta[]) {
+    let listener: ((a: SessionActivity) => void) | null = null;
+    const lists: number[] = [];
+    const session = {
+      ...inertSession(),
+      async *send() {
+        yield { type: "turn_end", reason: "end_turn" };
+      },
+      watch(l: (a: SessionActivity) => void) {
+        listener = l;
+        return () => {
+          listener = null;
+        };
+      },
+      open: () => Promise.resolve(),
+      detach: () => Promise.resolve(),
+      listArtifacts: () => {
+        lists.push(1);
+        return Promise.resolve({ artifacts: listed });
+      },
+      readArtifact: () => Promise.resolve(new TextEncoder().encode("BYTES")),
+    } as unknown as SessionController;
+    return {
+      session,
+      lists,
+      raise: (a: SessionActivity) => listener?.(a),
+    };
+  }
+
+  /** The daemon's history for one `present` call — what a resync replays. */
+  const RESYNC = [
+    { role: "user", content: "show me" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c2", name: "present", arguments: '{"content":"<h1>x</h1>"}' }],
+    },
+    { role: "tool", content: "Presented.", toolCallId: "c2" },
+  ] as unknown as Parameters<typeof messagesToItems>[0];
+
+  test("a resync (history_reset in a turn, or a `history` replace) keeps the card", async () => {
+    const f = raisable([DASHBOARD]);
+    const t = await mount(f.session);
+    // Nothing on screen yet; the replace brings the `present` row in.
+    f.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
+    await delay(120);
+    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    expect(t.frame()).toContain("HTML page · 14 KB · v2");
+    t.app.unmount();
+  });
+
+  test("a SECOND replace keeps it too (the list is not asked only at mount)", async () => {
+    const f = raisable([DASHBOARD]);
+    const t = await mount(f.session);
+    f.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
+    await delay(120);
+    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    // Another resync (the link dropped again): the rows are rebuilt from
+    // messages, so the join must run again — not "once per watched session".
+    f.raise({ kind: "history", messages: RESYNC, reason: "clear" } as SessionActivity);
+    await delay(120);
+    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    t.app.unmount();
+  });
+
+  test("a resync INSIDE a turn (`history_reset`, no warm) keeps the card", async () => {
+    const listed = [DASHBOARD];
+    const session = {
+      ...inertSession(),
+      // The shape a `connect` resync takes: the turn replays the daemon's
+      // history as an event, then ends. `history_reset` goes through the turn
+      // driver, NOT the activity feed — the other half of the finding.
+      async *send() {
+        yield {
+          type: "history_reset",
+          messages: RESYNC,
+        } as unknown as SessionEvent;
+        yield { type: "turn_end", reason: "end_turn" } as SessionEvent;
+      },
+      listArtifacts: () => Promise.resolve({ artifacts: listed }),
+      readArtifact: () => Promise.resolve(new TextEncoder().encode("BYTES")),
+    } as unknown as SessionController;
+    const t = await mount(session);
+    await t.line("go");
+    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    expect(t.frame()).toContain("HTML page · 14 KB · v2");
+    t.app.unmount();
+  });
+
+  test("a burst of replaces asks the daemon ONCE (the pending latch)", async () => {
+    const f = raisable([DASHBOARD]);
+    const t = await mount(f.session);
+    // Three replaces in one tick: each rebuilds plain rows, so without the
+    // in-flight latch each would fire its own `artifact/list`.
+    f.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
+    f.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
+    f.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
+    await delay(150);
+    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    expect(f.lists.length).toBe(1);
+    t.app.unmount();
+  });
+
+  test("a swap does NOT carry the old session's card over (same callId, other artifact)", async () => {
+    const payroll = meta({
+      artifactId: "payroll",
+      version: 1,
+      sha256: "e".repeat(64),
+      mimeType: "image/png",
+      kind: "image",
+      title: "payroll.png",
+      callId: "c2",
+      createdAt: 9_000,
+    });
+    const a = raisable([DASHBOARD]); // A's `c2` is the dashboard
+    const b = raisable([payroll]); // B's `c2` is something else entirely
+    const dir: SessionDirectory = {
+      list: () =>
+        Promise.resolve({
+          sessions: [
+            { id: "A", title: "A", updatedAt: 2, running: false, attached: 1, archived: false },
+            { id: "B", title: "B", updatedAt: 1, running: false, attached: 0, archived: false },
+          ],
+          more: false,
+        }),
+      open: (id) => (id === "B" ? b.session : a.session),
+      remove: () => Promise.resolve(),
+    };
+    const t = await mount(a.session, { sessions: dir, detachOnQuit: true });
+    // A learns its own card first.
+    a.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
+    await delay(120);
+    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    await t.line("/sessions");
+    t.app.stdin.write(DOWN);
+    await delay(30);
+    t.app.stdin.write(ENTER);
+    await delay(120);
+    b.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
+    await delay(150);
+    // A `callId` is only unique WITHIN a session: keeping A's map across the
+    // swap would attach A's dashboard to B's row (the silent wrong-card bug).
+    expect(t.frame()).toContain("payroll.png");
+    expect(t.frame()).not.toContain("Q3 revenue dashboard");
+    t.app.unmount();
+  });
+
+  test("`Ctrl+X Ctrl+O` finds the artifact after a replace (no 'No artifact' notice)", async () => {
+    const f = raisable([DASHBOARD]);
+    const spy = spyOpener();
+    const t = await mount(f.session, { artifactOpener: spy.opener });
+    f.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
+    await delay(120);
+    await chord(t);
+    expect(t.frame()).not.toContain("No artifact in this transcript");
+    expect(spy.opened.map((o) => o.plan.file)).toEqual(["bbbbbbbb.html"]);
+    t.app.unmount();
+  });
+
+  test("a `/sessions` swap re-joins the NEW session's list (a different artifact)", async () => {
+    const a = raisable([]);
+    const b = raisable([DASHBOARD]);
+    const dir: SessionDirectory = {
+      list: () =>
+        Promise.resolve({
+          sessions: [
+            { id: "A", title: "A", updatedAt: 2, running: false, attached: 1, archived: false },
+            { id: "B", title: "B", updatedAt: 1, running: false, attached: 0, archived: false },
+          ],
+          more: false,
+        }),
+      open: (id) => (id === "B" ? b.session : a.session),
+      remove: () => Promise.resolve(),
+    };
+    const t = await mount(a.session, { sessions: dir, detachOnQuit: true });
+    await t.line("/sessions");
+    t.app.stdin.write(DOWN);
+    await delay(30);
+    t.app.stdin.write(ENTER);
+    await delay(120);
+    // The swap resets the transcript and does NOT re-run the mount effect: the
+    // new session's own list must be joined or its cards never appear.
+    b.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
+    await delay(120);
+    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    t.app.unmount();
+  });
+});
+
 describe("S6b: a pod's bytes always ask, and nothing is remembered (T6b.3)", () => {
   test("the confirm line names the pod; `y` opens offline; the next open asks again", async () => {
     const { session, reads } = readable(DASHBOARD);
@@ -356,7 +556,10 @@ describe("S6b: a pod's bytes always ask, and nothing is remembered (T6b.3)", () 
     await t.line("show me");
     await chord(t);
     expect(t.frame()).toContain("HTML page from the pod");
-    expect(t.frame()).toContain("network blocked");
+    // S6a review finding 3: no false "network blocked" promise on the line the
+    // person approves a pod page on (CSP does not stop a navigation).
+    expect(t.frame()).toContain("no fetch/XHR");
+    expect(t.frame()).not.toContain("network blocked");
     // Asked, not read: no pod byte is fetched before the person says yes.
     expect(reads).toEqual([]);
     expect(spy.opened).toEqual([]);

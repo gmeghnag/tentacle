@@ -13,7 +13,9 @@
  *   An SVG becomes `.html` — under `.svg` the meta CSP is not honoured.
  * - **Pod bytes always ask** (AGENTS §7: a pod is not trusted), never with the
  *   network, and nothing is remembered: the next open asks again. The origin is
- *   the RUNTIME's fact, never a field of the (pod-supplied) meta.
+ *   the RUNTIME's fact, never a field of the (pod-supplied) meta. What the wrap
+ *   buys is bounded and the confirm line says so: no fetch/XHR/sub-resource, but
+ *   CSP does NOT govern top-level navigation (S6a review finding 3).
  */
 import { artifactCard, artifactCsp } from "@tentacle/core";
 import type { ArtifactKind, ArtifactMeta } from "@tentacle/protocol";
@@ -127,7 +129,12 @@ function confirmText(meta: ArtifactMeta, plan: OpenPlan, origin: ArtifactOrigin)
   const title = `"${shortTitle(meta.title)}"`;
   if (origin === "pod") {
     const where = plan.wrap === "csp" ? "your browser" : "its default app";
-    const how = plan.wrap === "csp" ? "scripts on · network blocked · " : "";
+    // CSP governs SUB-RESOURCES, not top-level navigation: a page opened from a
+    // `file://` URL can still `location =` away, use a meta refresh, or
+    // `window.open`. Saying "network blocked" was untrue (S6a review finding 3)
+    // and the person approved on it. Say what the wrap really stops.
+    const how =
+      plan.wrap === "csp" ? "scripts on · no fetch/XHR · it can still navigate away · " : "";
     return `Open ${title} (${typeWord(meta)} from the pod) in ${where}? ${how}not remembered (y/N)`;
   }
   return `Open ${title} with network allowed? the page may reach the internet · this open only (y/N)`;

@@ -382,8 +382,13 @@ unreadable.
   (`xdg-open` on Linux) — no byte reaches the terminal (AGENTS §7).
 - **Pod sessions (untrusted):** `origin = "pod"` → every open is `confirm`
   (a one-line confirm in the dock: `open pod-supplied report.html in your
-  browser? network blocked · y/N`), never remembered; `n` (network) is not
-  offered for pod HTML; `s` writes to `~/Downloads` only on that explicit key.
+  browser? no fetch/XHR · it can still navigate away · y/N`), never remembered;
+  `n` (network) is not offered for pod HTML; `s` writes to `~/Downloads` only on
+  that explicit key.
+  The line claims only what the wrap keeps: CSP blocks sub-resources and
+  fetch/XHR, but it does **not** govern top-level navigation (`location =`, a
+  meta refresh, `window.open`), so the prompt says so rather than promising
+  "network blocked" (S6a review finding 3).
 - Status line: while a read runs, the existing notice line shows
   `fetching report.html 1.2/3.4 MB`; failure → one notice.
 
@@ -1969,3 +1974,110 @@ The executor declared this debt, and it should be tracked in TODO.
 **Executor behaviour:** both executors recorded their drift and debt honestly and ran
 broad mutation sets. The SVG-wrap gap and the history-replace path were missed: both are
 cases they did not test, not false claims.
+
+### Fix round 1
+
+*— claude-opus-5-5 (executor), 2026-11-16.*
+
+Three MEDIUM, no HIGH. All three FIXED; each with a regression test shown RED on the
+pre-fix code, and each fix mutation-checked (below).
+
+**1 MEDIUM — the SVG CSP wrap was unpinned → FIXED.**
+Tests first (`artifact-open.test.ts`, new block "T6b.1 — an SVG is WRAPPED, not merely
+renamed"): `openPlan(svg).wrap === "csp"` for both origins, the `open` step's
+`plan.wrap`, the pod confirm's `your browser` branch, the `save` step's `wrap: "csp"`, and
+`wrapArtifactBytes` prefixing the SVG body. Plus `os-open.test.ts`: an SVG plan really
+writes the prefix at the END of the write path (the reviewer only had a name assertion).
+RED: mutation `wrapOf → kind === "html"` (the reviewer's own mutation A) → **5 fail** in
+`artifact-open.test.ts`, all on `Expected: "csp" / Received: null`; the pre-existing
+name-only SVG cases stayed GREEN — the same blind spot the review found. Green restored
+(33/0). Second mutation on the write path (`if (wrap !== "csp" || true)`) → 3 fail
+(the HTML case, the new SVG case, and the save), reverted.
+
+**2 MEDIUM — cards lost on every history replace → FIXED.**
+Root cause confirmed: the join lived only in App's mount watch effect (`App.tsx:1493`),
+while `resetHistory`/`appendHistory` → `historyItems` → `messagesToItems(messages)` kept no
+map (`state.ts:693`), so a resync (`useSessionLink.ts:347`), a `history_reset` in a turn
+(`useTurnDriver.ts:608`), and a `/sessions` swap all rebuilt plain rows.
+
+Design (reuse-the-seam, AGENTS §7): the per-session knowledge is now an explicit object,
+`ArtifactJoin` (`byCall` + a `pending` latch), held by App in `artifactJoinRef` and
+mutated in ONE place — `artifact-join.ts`'s `checkArtifacts` (pure decisions stay in
+`artifacts-panel.ts`: `joinKnownArtifacts` re-attaches from an existing map;
+`withArtifactDetails` now also FILLS that map, `next`). Call sites: the mount effect
+(App), `commitHistory`'s tail (so every warmed commit joins, `useTurnDriver.ts:528`), the
+streaming loop's `history_reset`/`context_reset` branch (`useTurnDriver.ts:617`), the
+`history` activity's commit compute, and `swapSession` (`forgetArtifacts()` then
+`joinCards`). App's `joinCards` also re-attaches on the async answer, repainting.
+
+Tests (`app-artifacts.test.tsx`, new block "S6a review finding 2"): a `history` replace
+keeps the card; a SECOND replace keeps it (so "once per watched session" cannot pass); a
+resync **inside a turn** (`history_reset` → the driver path) keeps it; `Ctrl+X Ctrl+O`
+finds it (no "No artifact" notice); a `/sessions` swap re-joins the NEW session's list; a
+swap does not carry the old session's card across a repeated `callId`; a burst of three
+replaces asks the daemon ONCE. All 7 RED before the fix (4 on the first run, then 2 more
+after the fakes were completed — the chord test needed `readArtifact`, the swap test
+`detach`; both were test-harness gaps, stated here rather than hidden).
+
+Mutations (each applied, run on `app-artifacts.test.tsx`, reverted):
+- **M2a** drop `joinCards` from `commitHistory`'s tail → 4 fail (all but the in-turn one).
+- **M2b** drop the driver's `history_reset`/`context_reset` branch → 1 fail, exactly the
+  in-turn test.
+- **M2c** drop `forgetArtifacts()` from `swapSession` → 1 fail, exactly the cross-session
+  `callId` test (this mutation SURVIVED at first: the cross-session case had no test, so
+  one was added — non-vacuity by mutation, §9).
+- **M2d** drop the `pending` latch → 1 fail, the burst test (`Expected: 1, Received: 3`).
+- **M2e** drop the inner `joinCards` in the `history` activity's compute (tail intact) →
+  **0 fail**: it is a warm-ordering nicety (the cards are already in the warm), not a
+  property. Recorded rather than claimed as tested.
+
+**3 MEDIUM — the pod confirm said "network blocked", which is untrue → FIXED.**
+`confirmText` (`artifact-open.ts:130`) now says `scripts on · no fetch/XHR · it can still
+navigate away`, and the plan's D8 claim was corrected in this doc (the reviewer asked for
+both). Tests: the pure confirm text must NOT contain "network blocked" and must carry both
+true clauses, and the App frame test asserts the same on the rendered line. RED by
+mutation: restoring the old wording → 2 fail (the pure test and the frame test), reverted.
+The module header's "never with the network" claim was narrowed to what the wrap keeps.
+
+**Drift from the Implementation:** none of the three changes contradicts it; the extra
+surface is `artifact-join.ts` (new, pure around one request) and the two optional
+parameters on `resetHistory`/`appendHistory`/`withArtifactDetails` (additive, existing
+callers unchanged). `resume.ts`'s `messagesToItems` signature is unchanged.
+
+**Gate.** `bunx tsc --noEmit`: **0 errors outside `packages/daemon`**; the 24 that remain
+are all S4's committed WIP (`session-artifacts.ts` 1, `session-log-store.ts` 2,
+`daemon/test/artifact-manifest.test.ts` 21) — the same 24 the S6a/S6b review recorded, not
+mine. `bun run lint`: **1 error, `daemon/test/artifact-manifest.test.ts` format** (S4's,
+also pre-existing); every file I touched is clean (`biome check` on my 12 files: clean).
+`bun test`, per package (the full-suite invocation HANGS in this environment at 0% CPU
+**and does so on a pristine `main` worktree too** — `main-ro`: `EXIT=124` at 120 s, same
+single-line output — so it is environmental, not this change):
+
+```
+agent      634 pass  0 fail   (59 files)      docker    154 pass  0 fail
+cli       2627 pass  0 fail   (162, 2 opt-in) exec      121 pass  0 fail
+client     806 pass  0 fail   (73)            k8s        86 pass  0 fail (1 opt-in)
+config     452 pass  0 fail                   mcp       124 pass  0 fail
+core       426 pass  0 fail                   protocol  467 pass  0 fail
+providers  161 pass  0 fail                   tools     378 pass  0 fail
+transport  150 pass  0 fail                   tui      2503 pass  0 fail  (175 files)
+daemon    1316 pass  6 fail — ALL S4's `LogSessionStore artifacts (T4)` WIP, untouched here
+```
+
+The 6 daemon failures are the artifact-store methods whose types do not exist yet (the same
+files as the 24 tsc errors); `git status` on `packages/daemon` is clean, so none is mine.
+
+**Unverified:** the mobile project's typecheck (`tsc -p apps/mobile`, which pulls tui sources
+in through the parity tests) is **RED at 10 errors**, and it is the BRANCH's, not this
+round's: with my six `packages/tui/src` files temporarily reverted to HEAD (backups, no git
+operation) the same command still reports **10**, the identical set (`app-types.ts`,
+`artifact-open.ts` ×2, `artifacts-panel.ts`, `keys/effects.ts`, `panels/artifacts.ts`,
+`panels/types.ts`, `resume.ts`, and 2 in daemon's S4 `session-log-store.ts`). My only change
+here is a shared `ArtifactCardMap` alias (so `state.ts` needs no new protocol import); with
+it, this round adds NO mobile error of its own. Cause: those tui files' `@tentacle/protocol`
+imports do not resolve under the Expo config (the tui package does not depend on it).
+A fix is a separate task (thread the type through, or give the Expo project a path), so it
+is left as debt, not silently re-declared green. Verify: `bunx tsc -p apps/mobile --noEmit`
+on this tree and on HEAD's `packages/tui/src`.
+
+

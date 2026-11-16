@@ -61,6 +61,9 @@ function fake(over: Partial<OsOpenDeps> = {}, exitCode = 0): Fake {
 
 const HTML_PLAN = { kind: "open", file: "ab12cd34.html", wrap: "csp", network: false } as const;
 const body = new TextEncoder().encode("<h1>hi</h1>");
+/** What `openPlan` yields for an SVG: `.html` (the meta CSP is honoured there) + `csp`. */
+const SVG_PLAN = { kind: "open", file: "ab12cd34.html", wrap: "csp", network: false } as const;
+const SVG_BODY = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
 
 let stdout: ReturnType<typeof spyOn>;
 beforeEach(() => {
@@ -82,6 +85,20 @@ describe("T6b.4 — the temp file", () => {
       expect(text.startsWith(artifactCsp())).toBe(true);
       expect(text.endsWith("<h1>hi</h1>")).toBe(true);
       expect(written.mode).toBe(0o600);
+    }
+  });
+
+  // S6a review finding 1: an SVG goes through the SAME write path as HTML, and
+  // its bytes must really carry the CSP — the name (`.html`) does not prove it.
+  test("an SVG's file gets the CSP prefix as its first bytes, at the END of the write path", async () => {
+    const f = fake();
+    await createArtifactOpener(f.deps).open(SVG_PLAN, SVG_BODY);
+    const written = f.files.get("/T/tentacle-artifacts-0/ab12cd34.html");
+    expect(written).toBeDefined();
+    if (written) {
+      const text = new TextDecoder().decode(written.bytes);
+      expect(text.startsWith(artifactCsp())).toBe(true);
+      expect(text).toContain('xmlns="http://www.w3.org/2000/svg"');
     }
   });
 

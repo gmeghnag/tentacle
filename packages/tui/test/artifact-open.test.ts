@@ -122,17 +122,30 @@ describe("T6b.3 — pod origin always confirms, network never offered", () => {
     expect(step.kind).toBe("notice");
   });
 
-  test("the pod confirm names the bytes' origin, says network is blocked, and remembers nothing", () => {
+  test("the pod confirm names the bytes' origin, and remembers nothing", () => {
     const step = artifactStep(meta(), "pod", "open");
     expect(step.kind).toBe("confirm");
     if (step.kind === "confirm") {
       expect(step.text).toContain("Load test report");
       expect(step.text).toContain("from the pod");
-      expect(step.text).toContain("network blocked");
       expect(step.text).toContain("not remembered");
       expect(step.text).toContain("(y/N)");
       expect(step.plan.network).toBe(false);
     }
+  });
+
+  // S6a review finding 3: CSP stops sub-resources, NOT top-level navigation (a
+  // `location =`, a meta refresh, `window.open`). "network blocked" was a false
+  // promise the person approved a pod page on; the line must say what holds.
+  test("the pod confirm promises no fetch/XHR — and that it can still navigate away", () => {
+    const step = artifactStep(meta(), "pod", "open");
+    expect(step.kind).toBe("confirm");
+    if (step.kind !== "confirm") {
+      return;
+    }
+    expect(step.text).not.toContain("network blocked");
+    expect(step.text).toContain("no fetch/XHR");
+    expect(step.text).toContain("can still navigate away");
   });
 
   test("local network is a confirm with the network on", () => {
@@ -148,6 +161,56 @@ describe("T6b.3 — pod origin always confirms, network never offered", () => {
     for (const origin of ["local", "pod"] as const) {
       const step = artifactStep(meta({ title: "../x.command" }), origin, "save");
       expect(step).toEqual({ kind: "save", name: "x.html", wrap: "csp" });
+    }
+  });
+});
+
+describe("T6b.1 — an SVG is WRAPPED, not merely renamed (S6a review finding 1)", () => {
+  // The `.html` name alone proves nothing: `wrapOf` could stop wrapping an SVG
+  // and every name-based assertion above would still pass (the reviewer's
+  // mutation). The wrap is the security property — an unwrapped `.html` opens
+  // with scripts AND full network — so it is asserted on all three steps.
+  const svg = (over: Partial<ArtifactMeta> = {}): ArtifactMeta =>
+    meta({ kind: "svg", mimeType: "image/svg+xml", title: "diagram.svg", ...over });
+
+  test("openPlan wraps an SVG in the CSP, offline by default", () => {
+    expect(openPlan(svg(), "local").wrap).toBe("csp");
+    expect(openPlan(svg(), "pod").wrap).toBe("csp");
+    expect(openPlan(svg(), "local").network).toBe(false);
+  });
+
+  test("the open step for an SVG carries `wrap: csp`", () => {
+    const step = artifactStep(svg(), "local", "open");
+    expect(step.kind).toBe("open");
+    if (step.kind === "open") {
+      expect(step.plan.wrap).toBe("csp");
+      expect(step.plan.file).toBe("ab12cd34.html");
+    }
+  });
+
+  test("a pod SVG's confirm says the page is wrapped and scripts run", () => {
+    const step = artifactStep(svg(), "pod", "open");
+    expect(step.kind).toBe("confirm");
+    if (step.kind === "confirm") {
+      expect(step.plan.wrap).toBe("csp");
+      expect(step.text).toContain("your browser");
+    }
+  });
+
+  test("a SAVED SVG is wrapped too — the save step carries it", () => {
+    expect(artifactStep(svg(), "local", "save")).toEqual({
+      kind: "save",
+      name: "diagram.html",
+      wrap: "csp",
+    });
+  });
+
+  test("the bytes handed to either write path start with the CSP prefix", () => {
+    const body = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
+    for (const wrap of [openPlan(svg(), "local").wrap, "csp" as const]) {
+      const out = new TextDecoder().decode(wrapArtifactBytes(wrap, false, body));
+      expect(out.startsWith(artifactCsp())).toBe(true);
+      expect(out.endsWith('<svg xmlns="http://www.w3.org/2000/svg"/>')).toBe(true);
     }
   });
 });

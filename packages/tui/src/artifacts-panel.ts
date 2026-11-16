@@ -123,8 +123,37 @@ export function needsArtifactJoin(items: readonly DisplayItem[]): boolean {
  * A row that already carries a detail is left alone: the live path's is the
  * present call's own answer, never a later guess. The SAME array comes back
  * when nothing joined, so a no-op cannot re-render the transcript.
+ *
+ * `next` (optional) supplies the metas this call learned — merged into `byCall`
+ * so a LATER join (another history replace, docs S6a review finding 2) can
+ * still attach them: a `present` row rebuilt from `ChatMessage`s carries no
+ * detail, so the knowledge must outlive the one transcript that first needed it.
  */
 export function withArtifactDetails(
+  items: readonly DisplayItem[],
+  byCall: Map<string, ArtifactMeta>,
+  next?: readonly ArtifactMeta[],
+): readonly DisplayItem[] {
+  if (next !== undefined) {
+    for (const [callId, meta] of artifactsByCall(next)) {
+      const seen = byCall.get(callId);
+      if (seen === undefined || meta.version >= seen.version) {
+        byCall.set(callId, meta);
+      }
+    }
+  }
+  return joinKnownArtifacts(items, byCall);
+}
+
+/**
+ * The transcript a history replace produced, with every card this TUI already
+ * knows attached (`byCall`, filled by `withArtifactDetails`): a REPLACE rebuilds
+ * its rows from `ChatMessage`s, which carry no `detail`, so without this the
+ * cards of a resumed session vanish the moment the link resyncs or `/sessions`
+ * swaps (docs S6a review finding 2). A row that already carries a detail is left
+ * alone (the live path's own answer), and a no-op returns the SAME array.
+ */
+export function joinKnownArtifacts(
   items: readonly DisplayItem[],
   byCall: ReadonlyMap<string, ArtifactMeta>,
 ): readonly DisplayItem[] {

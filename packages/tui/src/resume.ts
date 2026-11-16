@@ -6,7 +6,7 @@
 import { restartPromptOf } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
-import { withArtifactDetails } from "./artifacts-panel.ts";
+import { joinKnownArtifacts } from "./artifacts-panel.ts";
 import { imageRowText } from "./attach-draft.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 
@@ -39,9 +39,20 @@ function noteItem(m: ChatMessage): DisplayItem {
  * `artifact/list`, keyed by the `present` call that produced each version: a
  * reloaded transcript carries no `details` (they are not in `ChatMessage`), so
  * the card's metadata can only come from there. Absent → the rows stay plain,
- * exactly as before.
+ * exactly as before; the MAP ITSELF is the App's `ArtifactJoin` ref, so what it
+ * learns here is still there for the next history replace (S6a review finding 2).
  */
+/** The card map a history rebuild joins through (`ArtifactJoin.byCall`). */
+export type ArtifactCardMap = ReadonlyMap<string, ArtifactMeta>;
+
 export function messagesToItems(
+  messages: readonly ChatMessage[],
+  artifactsByCall?: ReadonlyMap<string, ArtifactMeta>,
+): DisplayItem[] {
+  return itemsOf(messages, artifactsByCall);
+}
+
+function itemsOf(
   messages: readonly ChatMessage[],
   artifactsByCall?: ReadonlyMap<string, ArtifactMeta>,
 ): DisplayItem[] {
@@ -105,5 +116,5 @@ export function messagesToItems(
       }
     }
   }
-  return artifactsByCall === undefined ? items : [...withArtifactDetails(items, artifactsByCall)];
+  return artifactsByCall === undefined ? items : [...joinKnownArtifacts(items, artifactsByCall)];
 }
