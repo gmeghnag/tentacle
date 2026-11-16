@@ -1642,3 +1642,31 @@ hand with Edit.) The plan's third target, the `note.id` join, belongs to S8.
   harness (drift 5). Pinned by pure tests only.
 - Nothing committed (the orchestrator commits). `TODO.md` untouched.
 
+## Review
+
+*— claude-opus-5-5, 2026-11-16 · slice S6 only, fresh context (the same model as the executor, so blind spots it shares may survive both passes)*
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, 0 HIGH).
+
+1. **MEDIUM: an out-of-scope native file was committed and not disclosed.** `apps/mobile/targets/live-activity/Info.plist` (new in 9d51e996). S1's Execution (around line 837) called this file a stray `expo prebuild` artifact and removed it. S6 commits it, while its Execution says "S6 touches no native/Swift file". *Failure:* the diff ships an undisclosed change to the live-activity target, which is the same target whose build is currently failing (`PushCore`), and it reverses an earlier slice's decision with no reason given. Either drop it, or justify it in Execution (e.g. if it is required the way `notification-service/Info.plist` is tracked on `main`).
+2. **MEDIUM: the slice's "done when" is not met.** That row says "flow 26 green both themes; back-swipe lands on the right computer". Flows 26, 24 and 05 have not run green on a simulator (the build is blocked by the pre-existing `PushCore` error). The cross-computer back-swipe is only pinned by `drawer-nav.test.ts`. *Failure:* render-time faults the stripped unit tests cannot see would ship unseen. Examples: the scrim or panel `pointerEvents` after close, `accessibilityElementsHidden` covering the scrim, `autoFocus` on the search reset, or the `replace`/`reset` wiring at `App.tsx` (~`:1888-1897`). The executor disclosed this honestly. It is still owed before S6 counts as done.
+
+**Gate (re-run by me):** the 6 touched test files (drawer-items, drawer-rename, drawer-nav, drawer-list, drawer-seam, e2e-flows) gave 78 pass · 0 fail. `bun run lint` checked 1679 files, clean. `bun run typecheck` (root + mobile + relay) was clean. I did not re-run the full suite.
+
+**Mutations (applied with Edit, reverted, `git status` clean afterwards):**
+- `drawerSearchTarget` without `Computers`: caught (1 fail).
+- `swipeIsHorizontal` without the `|dx| > |dy|` guard: **survived**. The vertical case in the test, `(-5, 20)`, is below the claim threshold anyway. LOW gap: add a case like `(-20, 40)`.
+- The executor's M1/M2/S6a–S6i table was not re-done.
+
+**Attacks tried:**
+- (a) F4: a cross-computer pick resets, a same-computer pick replaces, and the same id on another computer gets no highlight (`drawerCurrentId`). Holds.
+- (b) F2: daemon down. The list's `LINKS.get` throws, so the list shows an error with Retry. A failed probe of the rows is swallowed, and the title shows its last rows or "Connecting…". It never says "Online" (`drawerTitle`). Holds.
+- (c) F7: rename goes to the row's computer (`listed` is captured at `begin`), a failure keeps the field open, and a double Save is guarded. Holds. LOW: `renamed` refreshes whichever list is current, not the computer that was renamed. That list is disposed and re-read on the next pick, so it converges.
+- (d) F3: a menu pick recreates the controller and disposes the old one, so a late page is dropped. Holds.
+- (e) F6: a switch is `replace`/`reset`, which unmounts and so only detaches. No `session/close` was added. Holds by code; the flow that proves it has not run.
+- (f) §7 "logic in pure modules": the branching is in `drawer-list`/`drawer-nav`/`drawer-rename`. The host is wiring only. Holds.
+- (g) §7 "a pod is not trusted": daemon strings are drawn as plain `Text`. No protocol or persistence change. Holds.
+- LOW: renaming the open session from the drawer leaves the session header's title on the old route param.
+
+**Executor behaviour:** careful and candid. It disclosed the inherited uncommitted attempt, the e2e block and the drift (the host in `App.tsx`, the extra magnifier target). The one miss is the undisclosed `Info.plist`.
+
