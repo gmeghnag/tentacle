@@ -2335,3 +2335,20 @@ My Round 1 repro (`.tentacle/tmp/cron-tool/s5rev/repro.test.ts`) now shows the p
 **Nit (LOW, not blocking):** the own-delete suppression (`ownScheduleDeletesRef`) never fires on the real wire. `HostedSession.deleteSchedule` → `removeSchedule` → `scheduleChanged` → `publishSchedules()` (`hosted-session.ts:3162`) sends the `schedules` frame synchronously, BEFORE the RPC reply. So `own.add(id)` in the `.then` (`useDock.ts`, `usePanels.ts`) runs after the departure has already been diffed. The repro, which publishes before it resolves like the daemon does, prints both "Schedule sc-1 is no longer scheduled." and "Deleted sc-1.". Both lines are true, so this is redundant, not false. But the comments "Recorded BEFORE the frame that drops it can arrive" are wrong, and the frame test passes only because it calls `report([])` after the reply has resolved, the reverse of production. The stale id is dropped at the next report, so it does not leak. Fix if wanted: add the id when the delete is SENT (and remove it on a refusal), and make the frame test publish before it resolves.
 
 **Regressions on the diff:** none found. The session switch path (`setSchedules(undefined)`) clears the own set, and `refreshedSchedules` handles `undefined` and `[]`.
+
+## Review
+
+### S6 — REQUEST-CHANGES
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; **same model as the S6 executor**, so the two passes share blind spots.)
+
+**Findings (HIGH/MEDIUM only).**
+1. **MEDIUM — the rows are keyed by their title, which is not unique.** `SessionInfoSheet.tsx:109` keys each row by `${section.id}-${row.title}`, and the Delete's testID (`:272`) uses `row.title` too. For a schedule row the title is the sanitized prompt, cut to 80 characters (`schedule-view.ts:146`). Nothing in core stops two wakes from having the same prompt. Example: `check CI` every 10m plus a one-shot `check CI` at 17:00. Repro `.tentacle/tmp/cron-tool/rev-s6-dupkey.ts` → `[ "schedules-check CI", "schedules-check CI" ] unique: false`, with delete ids `sc-1`/`sc-2`. React then has duplicate keys, so when the table repaints (after a delete, or a fire changes `fires`/`nextAt`) it can drop or duplicate a row. A Maestro tap on the shared testID is also ambiguous. The executor's drift item 3 promises a testID-addressable Delete, and that does not hold here. Fix: carry a unique `key` (the raw id) on the view-model row and use it for both the key and the testID. Then add a test with two same-prompt rows.
+
+**Gate:** 10 touched mobile test files → 241 pass / 0 fail. `bun run lint` → clean (1716 files). `bun run typecheck` → clean (root, mobile, relay). Full `bun test` was not re-run in this pass.
+
+**Mutations** (`rev-s6-mut.ts`, exact single-site, bytes restored, `git status` clean afterwards): dropping `daemonWakes` → 2 fail; offering Delete with the link down → 1 fail; reading `undefined` as `empty` → 1 fail; dropping the fired ref on the user row → 1 fail. All four tests are non-vacuous.
+
+**Attacks tried.** (a) Pod exclusion: the phone only dials `serve`, and `daemonWakes` fails closed client-side, so it holds. (b) A refusal used as a local echo: the row stays and the daemon's `reason` is shown, so it holds. (c) A delete in flight across close/refresh: `stopSchedules` and `followSchedules` reset the error, so nothing stale survives a reopen. That is LOW, not reported. (d) Hostile `spec`/`prompt`: controls, bidi and length are all stripped in the view-model, so it holds. (e) Same-prompt wakes: **finding 1**.
+
+**Executor behaviour:** a thorough, honest as-built with real red/mutation evidence. It missed uniqueness of the row identity. Side note for the repo: AGENTS §6's `../../../` import template, run from a WORKTREE's `.tentacle/tmp`, resolves into the MAIN checkout (seen in this review's first repro run). Repro and mutation scripts should use absolute worktree paths.
