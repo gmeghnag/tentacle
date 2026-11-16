@@ -1710,3 +1710,55 @@ run added.
   updated.
 
 **S4: DONE** (with the debt listed above). S5: not started (out of scope).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16*
+
+Fresh-context adversarial pass on **slice S4 only** (`git diff main...HEAD`).
+**Verdict: PASS.** No HIGH or MEDIUM findings.
+
+**Gate (re-run):**
+- 9 touched test files: 233 pass, 0 fail.
+- `bun run lint`: 1680 files, clean.
+- `bun run typecheck` (root + mobile + relay): clean.
+
+**§7 invariants it touches:**
+- **One session path.** It holds. The switches go through
+  `SessionController` → `persistingController` → `RemoteSession` →
+  `session/set_capability`. There is no second send path. The forwarded
+  member set is pinned by the GUARD test and by C5.
+- **Logic in pure modules.** It holds. Every decision (phase, glyph, op, lock,
+  marker, which change is news) is in `capability-toggles.ts`. `App.tsx` only
+  reads the live refs and executes.
+- **A pod is not trusted.** It holds. Every daemon string shown (names, `by`,
+  errors) goes through `oneLine`. A set goes only to the session's own daemon,
+  so it has no laptop effect and creates no approval.
+
+**Ordering checked:** the daemon sends the echo before its answer
+(`remote-session.ts` `setCapability` docstring, and the handler in
+`connection.ts`). The own-echo match therefore runs while the op is still
+pending, so your own change raises no false "changed on <device>" notice.
+Space now means `switch` in `treeKey`. Only `panels/mcp.ts` and
+`panels/skills.ts` use `treeStep`, so no other panel loses Space-to-expand.
+
+**Mutation (mine, reverted, tree verified clean):** I dropped the
+`by === undefined` guard in `remoteChangeNotices`, which makes a snapshot count
+as news. 1 test failed. The executor's 12 mutations are consistent with the
+suite I read.
+
+**LOW (not blocking):**
+1. `capsMarker` counts stale names. A server or skill turned off and later
+   removed (F10, carried through resume and `/clear`) keeps
+   `⊘ 1 server off` in the status line. The panel has no row for it, so the
+   TUI cannot clear it.
+2. `capsPendingRef` is not reset on a session switch. A set still in flight
+   while you switch could hide a matching change on the new session. This is
+   rare and only affects a notice.
+3. The `not-open` → `unsupported` phase reads `opened()` at render time. It
+   updates on the next re-render, not when the session opens.
+
+**Executor behaviour:** the executor was honest about inheriting an
+uncommitted implementation. It showed red by mutation rather than claiming
+red on unimplemented code, and it listed its drift (no mouse toggle, no
+separate footer).
