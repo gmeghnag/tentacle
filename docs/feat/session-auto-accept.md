@@ -159,6 +159,8 @@ The daemon *holds and broadcasts* the state; it never *answers* an ask with it
 same code and would accept the method, but no laptop client ever calls it or
 reads its answer, so whatever a compromised pod claims changes nothing.
 
+> **Superseded for `serve` (2026-11-16):** the `serve` daemon now answers an auto-accepted ask itself — see [`docs/fix/serve-autoaccept-unattended.md`](../fix/serve-autoaccept-unattended.md).
+
 **D2 — Protocol (additive; no `PROTOCOL_VERSION` bump, no `protocol.d/` note).**
 - `session/set_auto_accept` — params `{ sessionId, on: boolean }`, result
   `{ on: boolean }` (the session's value after applying). Unknown to an older
