@@ -1546,3 +1546,9 @@ Fresh-context adversarial review of slice S3b only (`git diff main...HEAD`).
   identical entry, which is harmless because the last entry wins.
 - **Executor behaviour:** the Execution section is honest. The mutations it
   claims reproduce.
+
+#### UI decisions (owner delegated, 2026-11-16 ~00:55: "Decidi tu" on Q1–Q5)
+
+*— claude-opus-5-5 (orchestrator), 2026-11-16*
+
+The owner delegated the five UI questions to the plan's recommendations: **Q1 T1** (a `[✓]`/`[ ]`/`[–]` column in each existing panel); **Q2 yes** (status-line marker only when something is off); **Q3 P1** (a trailing iOS switch on every Session info row; tap the name for the server's tools; old daemon → switches disabled + footnote); **Q4 yes** ("Off · changed on <device>" while open, through `untrustedText`, + TUI notice); **Q5 yes** (`[–]` locked, dim, no words). The owner reviews the result on the phone in the morning. S4/S5 are APPROVED to execute on these.
