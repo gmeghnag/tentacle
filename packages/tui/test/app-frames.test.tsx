@@ -124,7 +124,7 @@ describe("S0 frame set", () => {
   test("idle", async () => {
     const t = await mount(fake());
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 
@@ -155,11 +155,11 @@ describe("S0 frame set", () => {
     const t = await mount(fake());
     await t.keys("hang", ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
       › hang
 
-      ⏺ reply to hang
+      ● reply to hang
 
 
 
@@ -194,7 +194,7 @@ describe("S0 frame set", () => {
     void t.permissions.request(req, { turnId: "own-1" });
     await delay(60);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 
@@ -225,7 +225,7 @@ describe("S0 frame set", () => {
     const t = await mount(fake());
     await t.keys("/");
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 
@@ -263,7 +263,7 @@ describe("S0 frame set", () => {
     const t = await mount(fake(), { sessions });
     await t.keys("/sessions", ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 
@@ -294,7 +294,7 @@ describe("S0 frame set", () => {
     const t = await mount(fake(), { mcpStatus: () => Promise.resolve([]) });
     await t.keys("/mcp", ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 
@@ -325,7 +325,7 @@ describe("S0 frame set", () => {
     const t = await mount(fake());
     await t.keys("/skills", ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 
@@ -356,7 +356,7 @@ describe("S0 frame set", () => {
     const t = await mount(fake({ agents: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2], jobs: [JOB] }));
     await t.keys(CTRL_T);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 
@@ -382,7 +382,7 @@ describe("S0 frame set", () => {
     `);
     await t.keys(ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 
@@ -408,7 +408,7 @@ describe("S0 frame set", () => {
     `);
     await t.keys(ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 
@@ -439,7 +439,7 @@ describe("S0 frame set", () => {
     const t = await mount(fake({ jobs: [JOB] }));
     await t.keys(DOWN, ENTER, ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 
@@ -470,7 +470,7 @@ describe("S0 frame set", () => {
     const t = await mount(fake({ agents: [BACKGROUND_ROW.sa1] }));
     await t.keys(CTRL_C);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 
@@ -502,7 +502,7 @@ describe("S0 frame set", () => {
     await t.keys("\x1b[200~/tmp/a.png\x1b[201~");
     await delay(80);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "⏺ Tentacle ready. Type a task, or /help for commands.
+      "● Tentacle ready. Type a task, or /help for commands.
 
 
 

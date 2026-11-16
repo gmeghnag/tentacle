@@ -39,7 +39,7 @@ describe("settingsShowLines: /settings alone", () => {
   const SYNC_HINT = "(/settings sync to use this terminal's values)";
 
   test("ONE entry: the title, the block, and the count as its last line, its command in the hint", () => {
-    // Mutation: the count as a second line → a second ⏺ bullet below the block.
+    // Mutation: the count as a second line → a second ● bullet below the block.
     const lines = settingsShowLines(
       { maxIterations: 3 },
       report({ carried: { maxIterations: 5 } }),
