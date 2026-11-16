@@ -1512,3 +1512,37 @@ and a recreate. The Q5 carry is covered for resume, hop and `/clear`.
   already exists and covers "kept with the session". I added none.
 
 **S3b: DONE.** S4, S5: not started (out of scope).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-16*
+
+Fresh-context adversarial review of slice S3b only (`git diff main...HEAD`).
+**Verdict: PASS.** No HIGH or MEDIUM findings.
+
+- **Gate:** the 5 touched test files pass (49 pass, 0 fail). `bun run lint` is
+  clean and `bun run typecheck` is clean.
+- **§7 persistence:** the record is the log. The laptop folds the last
+  `capabilities` entry of the CURRENT segment only (`session-log-store.ts`
+  `lastCapabilities(segment.entries)`). The `serve` reload folds only the
+  entries THROUGH the sidecar's `logHead` (`daemon-state-file.ts` `rebuild`).
+  A daemon write is `persist()` → `SessionPersister.schedule`, so it is never
+  awaited. Pod and worker daemons have no persister, so nothing is stored there.
+- **Pod is not trusted:** a pod-written entry only seeds a later resume with
+  *fewer* visible capabilities. It is schema-capped (`MAX_DISABLED_CAPABILITIES`,
+  `CapabilityNameSchema`) and creates no laptop effect or approval. That holds.
+- **Single path:** the seed rides the existing `openSession` / recreate frames
+  of `RemoteClient`. There is no parallel session path.
+- **Mutation checks** (all reverted, tree clean):
+  - Re-emit after `base` removed → L3 and R1 go red.
+  - `persist()` dropped from the toggle → R1 and R2 go red.
+  - Laptop flush on change removed → C1 and C2 go red.
+- **Survivor (LOW, not blocking):** swapping the precedence to
+  `carried ?? capabilities` in `RemoteClient.openSession` stays green. No test
+  pins "the resumed record's switches beat a pending `/clear` seed". I found no
+  reachable path where both are pending on the same client.
+- **Minor (LOW):** the archived `/clear` fork copy is built from messages
+  only, so it holds no `capabilities` entry. A paired reload re-logs an
+  identical entry, which is harmless because the last entry wins.
+- **Executor behaviour:** the Execution section is honest. The mutations it
+  claims reproduce.
