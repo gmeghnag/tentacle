@@ -118,6 +118,11 @@ export type DictationEvent =
   | { readonly type: "tick"; readonly now: number }
   /** Read-aloud is about to speak (F11): stop listening first. */
   | { readonly type: "ttsStarting"; readonly now: number }
+  /**
+   * Settings → Beta → Dictation went OFF while it listened
+   * (docs/feat/mobile-voice-hidden.md): settle now, keep the text, never send.
+   */
+  | { readonly type: "stopRequested"; readonly now: number }
   | { readonly type: "dispose" };
 
 export type DictationEffect =
@@ -439,6 +444,7 @@ export function dictationReduce(state: DictationState, event: DictationEvent): D
         case "tap":
         case "dispose":
         case "ttsStarting":
+        case "stopRequested":
           return { state: DICTATION_IDLE, effects: [] };
         case "appState":
           return event.state === "active" ? none : { state: DICTATION_IDLE, effects: [] };
@@ -502,6 +508,7 @@ export function dictationReduce(state: DictationState, event: DictationEvent): D
         case "tap":
         case "dispose":
         case "ttsStarting":
+        case "stopRequested":
           // A download in progress continues in the system; nothing listens.
           return { state: DICTATION_IDLE, effects: [{ type: "cancel", attempt: state.attempt }] };
         case "appState":
@@ -559,6 +566,7 @@ function active(state: Active, event: DictationEvent): DictationStep {
       return finalize(state, event.now, "send", event.via);
     case "tap":
     case "ttsStarting":
+    case "stopRequested":
       return finalizing !== undefined ? none : finalize(state, event.now, "idle");
     case "tick":
       if (finalizing !== undefined) {

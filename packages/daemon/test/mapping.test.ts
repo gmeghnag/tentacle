@@ -287,6 +287,12 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "session_settings", settings: { carried: {}, overridden: {} }, id: "a1" },
     // docs/feat/session-auto-accept.md: the session's switch, every device.
     { type: "auto_accept", on: true, by: "laptop" },
+    // docs/feat/session-capabilities.md: the session's MCP/skill switches.
+    {
+      type: "capabilities",
+      capabilities: { disabledMcp: ["k8s"], disabledSkills: [] },
+      by: "phone",
+    },
     { type: "tool_call_phase", toolCallId: "t", phase: "running" },
     {
       type: "queued",

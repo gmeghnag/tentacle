@@ -17,6 +17,7 @@ import {
   MAX_SESSION_TITLE,
   QueuedEntrySchema,
   ReturnedEntrySchema,
+  SessionCapabilitiesSchema,
   SessionIdSchema,
   SessionSettingsReportSchema,
   StopReasonSchema,
@@ -348,6 +349,21 @@ export const AutoAcceptUpdateSchema = z.object({
 });
 
 /**
+ * The session's MCP/skill switches changed (`session/set_capability`,
+ * docs/feat/session-capabilities.md): the whole state after, so every attached
+ * client converges. Sent only on a CHANGE, to every attachment, in one total
+ * order, own echoes included. Display only: an older client shows it as
+ * `unsupported` once; what the model sees is decided daemon-side anyway. `by`
+ * is the setter's label (as `auto_accept`'s): display only, untrusted text.
+ */
+export const CapabilitiesUpdateSchema = z.object({
+  type: z.literal("capabilities"),
+  capabilities: SessionCapabilitiesSchema,
+  /** Who set it: a short label, absent when the daemon knew no name → "another device". */
+  by: z.string().min(1).max(64).optional(),
+});
+
+/**
  * The session's settings changed (`session/update_settings`,
  * docs/feat/session-settings-apply.md): its report now, and the applier's
  * request `id`, so that client knows its own and every other one can tell its
@@ -456,6 +472,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   SubagentMessageUpdateSchema,
   SessionSettingsUpdateSchema,
   AutoAcceptUpdateSchema,
+  CapabilitiesUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
@@ -520,6 +537,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   session_settings: "display",
   // A switch's new value; the snapshot also rides every OpenResult (nothing hangs).
   auto_accept: "display",
+  // The switches' new state; the snapshot also rides every OpenResult (nothing hangs).
+  capabilities: "display",
 };
 
 /** Every update type this build knows — what a client declares at `initialize`. */

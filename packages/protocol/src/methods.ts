@@ -84,6 +84,8 @@ import {
   SessionListResultSchema,
   SetAutoAcceptParamsSchema,
   SetAutoAcceptResultSchema,
+  SetCapabilityParamsSchema,
+  SetCapabilityResultSchema,
   SnapshotParamsSchema,
   SnapshotResultSchema,
   SubagentMessageParamsSchema,
@@ -117,6 +119,8 @@ export const Method = {
   UpdateSettings: "session/update_settings",
   /** The session's auto-accept, on or off, for every client (docs/feat/session-auto-accept.md). */
   SetAutoAccept: "session/set_auto_accept",
+  /** Turn one MCP server or skill on/off for the model in this session (docs/feat/session-capabilities.md). */
+  SetCapability: "session/set_capability",
   Snapshot: "session/snapshot",
   /** The session's committed history as a typed event log, after a position (docs/feat/session-log.md). */
   Log: "session/log",
@@ -243,6 +247,10 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.SetAutoAccept]: {
     params: SetAutoAcceptParamsSchema,
     result: SetAutoAcceptResultSchema,
+  },
+  [Method.SetCapability]: {
+    params: SetCapabilityParamsSchema,
+    result: SetCapabilityResultSchema,
   },
   [Method.Snapshot]: { params: SnapshotParamsSchema, result: SnapshotResultSchema },
   [Method.Log]: { params: LogParamsSchema, result: LogResultSchema },

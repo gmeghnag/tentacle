@@ -72,6 +72,7 @@ import {
   type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
+  type SessionCapabilitiesWire,
   type SessionContextResult,
   type SessionListParams,
   type SessionListResult,
@@ -82,6 +83,7 @@ import {
   type SessionTtlResult,
   type SessionUpdateParams,
   type SetAutoAcceptResult,
+  type SetCapabilityResult,
   type Sha256,
   type SnapshotResult,
   type SubagentRow,
@@ -259,6 +261,15 @@ export interface SessionStreamListener {
   autoAcceptSnapshot?(snapshot: boolean): void;
   /** An `auto_accept` update: its value and the setter's label (display only, untrusted). */
   autoAcceptChanged?(on: boolean, by?: string): void;
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md): the
+   * daemon's snapshot on every open/re-attach (`OpenResult.capabilities`; absent
+   * from an older daemon → never called). No trust bit: a pod's switches only
+   * hide what its own model sees, so its report is taken as display.
+   */
+  capabilitiesSnapshot?(state: SessionCapabilitiesWire): void;
+  /** A `capabilities` update: the state after, and the setter's label (display only, untrusted). */
+  capabilitiesChanged?(state: SessionCapabilitiesWire, by?: string): void;
 }
 
 /** Exits kept for a first `onBackgroundExit` subscriber (the count in the open result still says more are owed). */
@@ -3140,6 +3151,7 @@ export class RemoteClient {
     entry.unflushedExits = result.unflushedExits ?? 0;
     this.noteSettings(entry, result);
     this.noteAutoAccept(entry, result);
+    this.noteCapabilities(entry, result);
     this.step(entry, {
       kind: "open_result",
       created: result.created,
@@ -3160,6 +3172,34 @@ export class RemoteClient {
       return;
     }
     entry.listener?.autoAcceptSnapshot?.(result.autoAccept);
+  }
+
+  /** The open's switches snapshot (`OpenResult.capabilities`, F5); absent → never reported. */
+  private noteCapabilities(entry: SessionEntry, result: OpenResult): void {
+    if (result.capabilities !== undefined) {
+      entry.listener?.capabilitiesSnapshot?.(result.capabilities);
+    }
+  }
+
+  /**
+   * `session/set_capability` (docs/feat/session-capabilities.md): one delta to
+   * the session's switches. Every daemon may hold them (a pod included: it only
+   * hides what its own model sees). Answers the state after applying; an older
+   * daemon is `MethodNotFound`, which the session turns into "not supported".
+   */
+  setSessionCapability(
+    session: RemoteSession,
+    kind: "mcp" | "skill",
+    name: string,
+    enabled: boolean,
+  ): Promise<SetCapabilityResult> {
+    const sessionId = session.sessionId;
+    if (sessionId === null) {
+      return Promise.reject(new Error("the session is not open"));
+    }
+    return this.call(this.peer, Method.SetCapability, { sessionId, kind, name, enabled }).then(
+      (result) => result as SetCapabilityResult,
+    );
   }
 
   /**
@@ -3536,6 +3576,9 @@ export class RemoteClient {
           entry.listener?.autoAcceptSnapshot?.(update.on);
           entry.listener?.autoAcceptChanged?.(update.on, update.by);
         }
+      } else if (update.type === "capabilities") {
+        // Not turn-scoped: a toggle lands idle or mid-turn, from any client.
+        entry.listener?.capabilitiesChanged?.(update.capabilities, update.by);
       }
       // Closed daemon-side (by any client): nothing left to close at exit,
       // nothing left to answer.

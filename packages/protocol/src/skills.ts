@@ -36,6 +36,12 @@ export const SkillListEntrySchema = z.object({
    * at the session's next context reset (the model's set changes only there).
    */
   modelAfterReset: z.boolean().optional(),
+  /**
+   * Turned off for the model in THIS session (`session/set_capability`,
+   * docs/feat/session-capabilities.md): hidden from its catalog and the `skill`
+   * tool whatever `model` says; the user's own `/name` still runs it.
+   */
+  disabled: z.literal(true).optional(),
   /** Its `SKILL.md`, on the daemon's filesystem. */
   location: line(4096),
 });

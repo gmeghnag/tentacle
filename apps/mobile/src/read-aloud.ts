@@ -49,6 +49,11 @@ export type ReadAloudEvent =
   | { readonly type: "appState"; readonly state: "active" | "inactive" | "background" }
   /** Dictation is about to listen: the app must never transcribe its own voice (F11). */
   | { readonly type: "dictationStarting" }
+  /**
+   * Settings → Beta → Read aloud went OFF (docs/feat/mobile-voice-hidden.md): the
+   * phone must fall silent, the same way a backgrounded app does.
+   */
+  | { readonly type: "settingsOff" }
   /** The screen goes away (F13). */
   | { readonly type: "dispose" };
 
@@ -124,6 +129,7 @@ export function readAloudReduce(state: ReadAloudState, event: ReadAloudEvent): R
     case "appState":
       return event.state === "active" ? { state, effects: [] } : stop(state);
     case "dictationStarting":
+    case "settingsOff":
     case "dispose":
       return stop(state);
   }

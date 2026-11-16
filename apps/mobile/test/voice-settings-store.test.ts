@@ -7,6 +7,7 @@ import type { SecureKV } from "../src/computer-store.ts";
 import {
   DEFAULT_VOICE_SETTINGS,
   VOICE_SETTINGS_KEY,
+  type VoiceSettings,
   VoiceSettingsPreserved,
   createVoiceSettingsHolder,
   createVoiceSettingsStore,
@@ -40,18 +41,85 @@ describe("round-trip", () => {
   test("a written record reads back", async () => {
     const f = fake();
     expect((await f.store.read()).settings).toEqual(DEFAULT_VOICE_SETTINGS);
-    const s = { readAloud: true, language: "it-IT", rate: "fast" } as const;
+    const s: VoiceSettings = {
+      dictation: true,
+      readAloud: true,
+      readAloudButton: true,
+      language: "it-IT",
+      rate: "fast",
+    };
     await f.store.write(s);
     expect(await f.store.read()).toEqual({ settings: s, writable: true });
-    expect(JSON.parse(f.items.get(VOICE_SETTINGS_KEY) ?? "")).toEqual({ v: 1, ...s });
+    expect(JSON.parse(f.items.get(VOICE_SETTINGS_KEY) ?? "")).toEqual({ v: 2, ...s });
+  });
+});
+
+/**
+ * docs/feat/mobile-voice-hidden.md: the voice features are opt-in Beta switches,
+ * OFF by default, and an install from before the Beta is MIGRATED (never lost).
+ */
+describe("the Beta switches", () => {
+  test("both default OFF — nothing voice-related runs on a fresh install", async () => {
+    expect(DEFAULT_VOICE_SETTINGS.dictation).toBe(false);
+    expect(DEFAULT_VOICE_SETTINGS.readAloudButton).toBe(false);
+    expect((await fake().store.read()).settings).toEqual({
+      dictation: false,
+      readAloud: false,
+      readAloudButton: false,
+      language: "auto",
+      rate: "normal",
+    });
+  });
+
+  test("a v1 record (the owner's phone) migrates: choices kept, both switches off, writable", async () => {
+    const v1 = JSON.stringify({ v: 1, readAloud: true, language: "it-IT", rate: "fast" });
+    const f = fake(v1);
+    expect(await f.store.read()).toEqual({
+      settings: {
+        dictation: false,
+        readAloud: true,
+        readAloudButton: false,
+        language: "it-IT",
+        rate: "fast",
+      },
+      writable: true,
+    });
+    // The first write upgrades the record: v2, with the switches as real fields.
+    await f.store.write({ ...DEFAULT_VOICE_SETTINGS, dictation: true });
+    expect(JSON.parse(f.items.get(VOICE_SETTINGS_KEY) ?? "")).toEqual({
+      v: 2,
+      ...DEFAULT_VOICE_SETTINGS,
+      dictation: true,
+    });
+  });
+
+  test("a v1 record that is otherwise bogus is still refused, not migrated", async () => {
+    const raw = JSON.stringify({ v: 1, readAloud: "yes", language: "auto", rate: "normal" });
+    const f = fake(raw);
+    expect(await f.store.read()).toEqual({ settings: DEFAULT_VOICE_SETTINGS, writable: false });
+    expect(f.items.get(VOICE_SETTINGS_KEY)).toBe(raw);
   });
 });
 
 describe("fail-safe", () => {
   for (const [name, raw] of [
     ["garbage", "{not json"],
-    ["unknown v", JSON.stringify({ v: 2, readAloud: true, language: "auto", rate: "fast" })],
-    ["bad field", JSON.stringify({ v: 1, readAloud: "yes", language: "auto", rate: "normal" })],
+    [
+      "unknown v (a newer build)",
+      JSON.stringify({
+        v: 3,
+        dictation: true,
+        readAloud: true,
+        readAloudButton: true,
+        language: "auto",
+        rate: "fast",
+      }),
+    ],
+    ["bad field", JSON.stringify({ v: 2, readAloud: "yes", language: "auto", rate: "normal" })],
+    [
+      "bad Beta field",
+      JSON.stringify({ v: 2, dictation: "on", readAloud: false, language: "auto", rate: "fast" }),
+    ],
     [
       "unknown language",
       JSON.stringify({ v: 1, readAloud: true, language: "fr-FR", rate: "normal" }),
@@ -82,14 +150,27 @@ describe("fail-safe", () => {
 
 describe("holder", () => {
   test("load publishes the stored record; set changes current only after the write lands", async () => {
-    const stored = JSON.stringify({ v: 1, readAloud: true, language: "en-US", rate: "normal" });
+    const stored = JSON.stringify({
+      v: 2,
+      dictation: true,
+      readAloud: true,
+      readAloudButton: true,
+      language: "en-US",
+      rate: "normal",
+    });
     const ok = fake(stored);
     const holder = createVoiceSettingsHolder(ok.store);
     const seen: boolean[] = [];
     holder.subscribe((s) => seen.push(s.readAloud));
     expect(holder.current().readAloud).toBe(false);
     await holder.load();
-    expect(holder.current()).toEqual({ readAloud: true, language: "en-US", rate: "normal" });
+    expect(holder.current()).toEqual({
+      dictation: true,
+      readAloud: true,
+      readAloudButton: true,
+      language: "en-US",
+      rate: "normal",
+    });
     await holder.set({ ...holder.current(), rate: "fast" });
     expect(holder.current().rate).toBe("fast");
     expect(seen).toEqual([true, true]);
