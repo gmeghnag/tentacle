@@ -12,7 +12,15 @@
   to "…" instead of a flat 2 pt bar — the ring is plain `View`s, so no
   `react-native-svg` and no native rebuild — and the chat header itself is
   50 pt instead of 56. The rename dialog keeps its 26 pt alert corners and the
-  light palette is otherwise untouched. The chat's back chevron becomes a
+  light palette is otherwise untouched. Grouped lists become full-width bands:
+  one edge-to-edge surface per section, with a small uppercase label above it,
+  a hairline on its top and bottom edges, and the section's footnote beneath —
+  the band always one step above the surface it sits on, so a sheet's own
+  ground moves down a step to keep its bands separate. In a banded row the
+  label never truncates: a long value shortens instead, keeping the end that
+  tells values apart (a path its tail, a model id both ends), and at the
+  largest text sizes the value drops under its label rather than squeezing it.
+  The chat's back chevron becomes a
   hamburger that opens a **sessions drawer** over the conversation: the
   computer as its title (tap to list another paired computer's sessions, or
   pair one), Running / Recent / a collapsed Archived · n, the open session
