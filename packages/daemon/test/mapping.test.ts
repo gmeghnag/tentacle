@@ -320,6 +320,21 @@ describe("toUpdateParams (the session/update frame)", () => {
         { id: "bg-1", command: "watch: grep -c Turno conv.md", startedAt: 1, status: "running" },
       ],
     },
+    // docs/feat/cron-tool.md S2: the session's scheduled wakes (on every change).
+    {
+      type: "schedules",
+      schedules: [
+        {
+          id: "sc-1",
+          kind: "every",
+          spec: "every 10m",
+          prompt: "check CI on PR #412",
+          nextAt: 1,
+          fires: 4,
+          createdAt: 0,
+        },
+      ],
+    },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {

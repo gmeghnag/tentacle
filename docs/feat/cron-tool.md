@@ -302,6 +302,11 @@ epoch ms from the host's injected `now()` (`session-host.ts:1327`).
   `unsupported` once and loses nothing. Reverse mapping in `client/mapping.ts`.
 - `OpenResult.schedules?` (first page, like `jobs`) and
   `SessionListEntry.schedules?: number` (count, for `/sessions` and the phone list).
+  **Corrected by S2's executor (verified against the code, 2026-11-16):** the
+  first page that carries `jobs` is **`SnapshotResult`**, not `OpenResult`
+  (`packages/protocol/src/session.ts:755` `jobs`, `:938` `OpenResultSchema`). The
+  list rides `SnapshotResult.schedules` — the same fold a resync already applies
+  to `jobs` — and `SessionListEntry.schedules` stays the count.
 - Method `session/schedule_delete { sessionId, scheduleId } → { deleted: boolean }`.
   Synchronous daemon-side, never awaits a turn (§7: don't serialize the peer).
   An older daemon answers `MethodNotFound`, shown as a notice. There is no
@@ -441,7 +446,7 @@ The session list row shows `◷ 2` beside the existing jobs count
 |---|---|---|---|---|
 | S1 | `core/src/schedule.ts`: parse `every`/`at`, `scheduleStep`, next-slot, catch-up once, back-jump clamp, caps, expiry, failure stop; row shape | S | contained | pure, no timers |
 | S1b | `cron` 5-field parser + next-match (only if Owner Q2 = include) | S | contained | pure |
-| S2 | protocol: `ScheduleRowSchema`, `schedules` update + `UPDATE_CLASS` display, `OpenResult.schedules`, `SessionListEntry.schedules`, `session/schedule_delete`, `TurnStart.schedule`; `client/mapping.ts` reverse; `protocol.json` regen | S | cross-module | additive, no note |
+| S2 | protocol: `ScheduleRowSchema`, `schedules` update + `UPDATE_CLASS` display, **`SnapshotResult.schedules`** (see the D5 correction), `SessionListEntry.schedules`, `session/schedule_delete`, `TurnStart.schedule`; `client/mapping.ts` reverse; `protocol.json` regen | S | cross-module | additive, no note |
 | S3 | daemon: `HostedSession` table + timer + fire (`wake-` id, advance→persist→prompt) + gate via `wakeDue` + `scheduleLink()` + liveness + clear/close/archive/reopen; `SessionHostOptions.schedules`; `AgentContext.schedules` in `build` AND `updateSettings`; sidecar v3 + reload | M | load-bearing | strong executor |
 | S4 | tools + wiring: `schedule_create`/`schedule_control`, child filter, labels, config `schedules.*`; `serve` + worker pass the option; worker `daemonWakes: true` | M | load-bearing | trust bit + permission |
 | S5 | TUI: pure `schedule-view.ts` (rows, pill text, panel, fired-row model) + dock rows, `/schedule` panel, delete via the method, M4/M6 | M | contained | waits for the owner's mockup choice |
@@ -669,6 +674,166 @@ No schema change, so `packages/protocol/schema/protocol.json` is untouched; no
 `changelog.d/cron-tool.added.md` (one bullet; `CHANGELOG.md` untouched).
 
 **S1: DONE.** S2–S6 not started (per the slice instruction).
+
+### S2 — protocol + client (scheduled wakes on the wire)
+
+*— deepseek-v4.1-flash (tentacle), 2026-11-16*
+
+**Scope: S2 only** (S1 is done above; S3–S6 untouched).
+
+**Load-bearing check re-run first** (this branch @ `6882b4d5`), before any edit:
+- **Repro (feature missing).** `rg -n -i "cron|schedul" packages/tools/src
+  packages/protocol/src/updates.ts packages/daemon/src/hosted-session.ts
+  packages/daemon/src/daemon-state-file.ts` → the same 7 hits as Context, all the
+  word "schedule" for macrotasks/the persister. `rg -n "ScheduleRow|schedule_delete|schedules"
+  packages/protocol/src packages/client/src` → **no hits** (exit 1): no row, no
+  update, no method, no client feed.
+- **The anchors the plan's assumption rests on, re-verified by reading:**
+  `HostedSession.prompt` `packages/daemon/src/hosted-session.ts:2262`,
+  `assertIdle` `:2621`; `WAKE_TURN_PREFIX`/`isWakeTurnId`
+  `packages/protocol/src/session.ts:311-315`; `refuseWakeTurnId`
+  `packages/daemon/src/connection.ts:1036`; `UPDATE_CLASS`
+  `packages/protocol/src/updates.ts:471`; `JobRowSchema` `session.ts:656`. All hold
+  as cited. **S2 needed none of them at runtime** (it is wire + client), but the
+  assumption "a fire is an ordinary `prompt()` on the same slot" is what makes a
+  DISPLAY-class update + a plain method the right shape here, so it was checked
+  before designing anything. No contradiction → not blocked.
+
+**Plan contradiction found and fixed in the doc (D5, plus the slice table).**
+D5 said "`OpenResult.schedules?` (first page, like `jobs`)". The code says
+otherwise: `jobs` rides **`SnapshotResult`** (`session.ts:755`), not
+`OpenResultSchema` (`:938`) — `OpenResult` is the open's own report, and the list
+state is the snapshot's first page. Implemented at the verified site
+(`SnapshotResult.schedules`), and D5 + the S2 row of the slice table now say so.
+Nothing else in the plan contradicted the code.
+
+**Red first** (§9), three files, each shown failing on the un-implemented code:
+
+| test file | red | why it failed |
+|---|---|---|
+| `packages/protocol/test/schedule-rows.test.ts` | 16 fail / 1 pass | `ScheduleRowSchema`, `Method.ScheduleDelete`, `schedules` not exports |
+| `packages/client/test/schedules.test.ts` | (compile-red) `tsc`: `remote-session.ts` has no `schedules`/`onSchedules`/`deleteSchedule`; `mapping.ts:248` "lacks ending return statement" — the new variant is unhandled | |
+| `packages/daemon/test/watch-queue.test.ts` (new test) | 1 fail | `schedules` not in `DROPPABLE` → the queue overflowed and ended the watch |
+| `packages/daemon/test/mapping.test.ts` (found by the FIRST full run) | 1 fail | the daemon's exhaustive sample table had no `schedules` entry |
+
+The client red was a **compile** red, which §9 forbids as proof on its own; after
+the module and the mapping arm existed, the behavioural reds were re-taken as
+mutations (M1/M2/M3/M5/M10/M11 below), which is the real non-vacuity evidence.
+
+**As built (dependency order).**
+1. **`packages/protocol/src/session.ts`** — `ScheduleRowSchema` (+ `ScheduleRow`),
+   `ScheduleIdSchema`, `SCHEDULE_LABEL_MAX = 200`, `ScheduleDeleteParamsSchema`
+   / `ScheduleDeleteResultSchema` (`{deleted, reason?}`); `SnapshotResult.schedules?`;
+   `SessionListEntry.schedules?: number`.
+2. **`packages/protocol/src/updates.ts`** — `SchedulesUpdateSchema` (full list),
+   its member in `SessionUpdateSchema`, `UPDATE_CLASS.schedules = "display"`,
+   `TurnStartSchema.schedule?: {id, spec}`.
+3. **`packages/protocol/src/methods.ts`** — `Method.ScheduleDelete =
+   "session/schedule_delete"` + its `RequestSchemas` entry.
+4. **`packages/client/src/schedules.ts`** (new) — `boundSchedules`,
+   `schedulesFromSnapshot`, `sanitizeScheduleText`, `MAX_SCHEDULE_ROWS = 32`,
+   `SCHEDULE_LABEL_CLIENT_MAX = 200`, `SCHEDULE_OLD_DAEMON`,
+   `SCHEDULE_UNTRUSTED_DAEMON`. The client is the gate (AGENTS §7).
+5. **`packages/client/src/mapping.ts`** — `schedules` joins the "owned elsewhere,
+   no `AgentEvent`" arm; `SessionEvent`'s `user_message` gains the optional
+   `schedule` ref.
+6. **`packages/client/src/remote-client.ts`** — `SessionSchedulesNotice`,
+   `scheduleListeners`, `SessionEntry.schedules`, `Snap.schedules`,
+   `schedulesChanged`, `onSessionSchedules`/`schedulesOf`/`deleteSchedule`, the
+   live dispatch arm and the resync fold — **both gated on `daemonWakes`**;
+   `index.ts` exports the new module.
+7. **`packages/client/src/remote-session.ts`** — `get schedules`,
+   `onSchedules(listener)`, `deleteSchedule(id)` (which refuses locally when the
+   trust bit is off, so a pod can neither claim nor cancel a wake).
+8. **`packages/daemon/src/watch-queue.ts`** — `schedules` added to `DROPPABLE`
+   (a display-class list must be skippable, never end a watcher).
+9. **`packages/protocol/schema/protocol.json`** — regenerated with
+   `bun run schema:export` (+120 lines: the 3 new `$defs`, the method, the
+   `x-event-class: display` annotation). No hand edit.
+10. Fixtures: `json-schema.test.ts` gains the `session/schedule_delete`
+    params/result, a snapshot with `schedules`, two `turn_start`s (plain + fired)
+    and two `schedules` updates — the fixture table is exhaustive, so a new wire
+    position without one fails.
+11. **`packages/daemon/test/mapping.test.ts`** — the sample table there is
+    exhaustive against `UPDATE_CLASS` by design ("keeps the samples honest"), and
+    the full suite caught the missing `schedules` sample (1 fail). Added; that
+    red-then-green is the suite doing its job, not a new behaviour.
+
+**Drift from Implementation (all deliberate, each with its reason):**
+1. **`SnapshotResult.schedules`, not `OpenResult.schedules`** (above).
+2. **`spec`/`prompt` are `z.string()`, NOT `line()`.** D5 said "lenient like
+   `JobRow`", and `line()` is the opposite: a known type failing its member is an
+   **error** the client reports (`mapping.ts` `classifyUpdate`), so one label with
+   a newline would have killed the WHOLE list instead of sanitising one row. Found
+   by the hostile-frame test going red — the behaviour, not a reading. The daemon
+   still cuts to `SCHEDULE_LABEL_MAX`; the client sanitises and cuts to its own
+   cap. `kind` is a free `z.string()` for the same reason (`JobRow.status`).
+   The ID stays bounded (`ScheduleIdSchema`, ≤ 64): it keys a method.
+3. **`ScheduleDeleteResult.reason?` added.** Without it a refusal had no way to
+   say why (an unknown id, an older daemon, an untrusted client), and the TUI
+   needs a notice — the `{deleted:false}`-only shape D5 sketched would have made
+   three different refusals indistinguishable.
+4. **The client refuses `deleteSchedule` locally with the bit off.** D5 said "a
+   client shows `schedules` and offers delete only when `daemonWakes` is on". A UI
+   *offering* is not a guarantee (§7: a daemon-side check is UX, never security),
+   so the gate is in the code path, not only in the panel S5 will paint.
+5. **`watch-queue.ts`'s `DROPPABLE`** was not in the plan's file list (the plan
+   puts the watcher nowhere). A new display type left out of that table would end
+   a follower's watch on `overflow` — exactly the silent-drop class §8 says to
+   design out. One line + one test.
+6. **`SCHEDULE_UNTRUSTED_DAEMON` / `SCHEDULE_OLD_DAEMON`** are two constants, not
+   one: "your daemon is too old" and "your daemon is not trusted to do this" are
+   different sentences for a user.
+
+**Mutation checks** (§9; each applied to the source, the named test file re-run,
+then restored from `.tentacle/tmp/cron-tool/*.bak` with `diff -q` clean after
+every one):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | drop the `daemonWakes` gate on the live `schedules` dispatch | 1 fail: `with the bit OFF (a pod, run/attach) the frame is DROPPED` |
+| M2 | drop the gate on the resync fold | 1 fail: `a snapshot's list is adopted only with the bit ON` |
+| M3 | paint `spec`/`prompt` as sent (no sanitising) | 2 fail: `every label is one line, escape-free…`, `300 rows with control chars…` |
+| M4 | remove `schedules` from `DROPPABLE` | 1 fail: `a schedules frame is DROPPABLE` |
+| M5 | drop the local untrusted-daemon refusal in `RemoteSession.deleteSchedule` | 1 fail: the pod test (it now sends the method) |
+| M6 | `UPDATE_CLASS.schedules` → `"mandatory"` | 1 fail: `the update is a DISPLAY class member` |
+| M7 | drop the `RequestSchemas` entry for the method | 1 fail: `the method is registered with its params and result` |
+| M8 | drop the 32-row bound | 3 fail: both bounding tests + the hostile-frame test |
+| M9 | drop `schedules` from `mapping.ts`'s arm | `tsc` red only (`TS2366`, function lacks ending return) — a compile gate, stated as such, not counted as a test red |
+| M10 | take the notice's `count` AFTER the client's bound | 1 fail: `the count is unbounded` (`32`, wanted `300`) |
+| M11 | make `updateToEvent` emit an event for `schedules` | 1 fail: `updateToEvent returns null for it` |
+
+M1/M2 are the pair that proves the trust bit is pinned at BOTH doors (live frame
+and snapshot); M10 proves the count is the daemon's, not the client's slice.
+
+**Gate.**
+- `bunx tsc --noEmit` → 0 · `bun run typecheck` (root + mobile + relay) → 0.
+- `bun run lint` (`biome check .`, 1670 files) → **clean**, no fixes, no warnings.
+- Narrow: `bun test packages/protocol` → 438 pass / 0 fail (46 files);
+  `bun test packages/client` → 766 pass / 0 fail (70 files);
+  `bun test packages/daemon/test/watch-queue.test.ts` → 16 pass / 0 fail.
+- Full `bun test` → **12108 pass, 5 skip, 0 fail** (864 files, 447.7 s). The five
+  skips were confirmed one file at a time: `k8s/test/integration.live` +
+  `cli/test/workload-shell-live.k8s` (`TENTACLE_K8S_SERVER`),
+  `docker/test/integration.live` + `cli/test/session-hop.docker`
+  (`TENTACLE_DOCKER_TESTS=1`), `daemon/test/ws-server` (`TENTACLE_SLOW_TESTS=1`) —
+  AGENTS §6's three opt-ins across five files. **No new skip.**
+- Schema regenerated (`bun run schema:export`); the drift test is green.
+- **No `protocol.d/` note and no `PROTOCOL_VERSION` edit**: everything added is
+  additive (a display-class update, a new method, optional fields, a count), which
+  §7 says needs neither.
+- Changelog: `changelog.d/cron-tool.added.md` already existed for S1 and covers
+  the user-visible feature these surfaces carry (the list, the delete, the styled
+  fired row); S2 adds no NEW user-visible behaviour of its own, so no second
+  fragment — `CHANGELOG.md` untouched. **Verifier:** if the reviewer prefers a
+  separate `cron-tool.changed.md` for the wire shape, that is a one-line addition.
+
+**S2: DONE.** S3–S6 not started (per the slice instruction). Carried to S3: the
+daemon side must emit `schedules` on every change (create, delete, fire, expiry,
+failure stop), put the table on the snapshot's first page, answer
+`session/schedule_delete` synchronously, stamp `SessionListEntry.schedules`, and
+pass `schedule: {id, spec}` on a fired `turn_start` — the wire is ready for all
+five.
 
 ## Review
 
