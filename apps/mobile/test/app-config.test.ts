@@ -18,7 +18,7 @@
  *     build expands `$(AppIdentifierPrefix)` (fix round 1, finding #4).
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 
 const appJson = JSON.parse(readFileSync(new URL("../app.json", import.meta.url), "utf8")) as {
   expo: {
@@ -214,5 +214,53 @@ describe("PushCore sources compile inside the extension, not only in SwiftPM", (
         /\bPushCore\.\w/.test(readFileSync(new URL(f, dir), "utf8").replace(/\/\/.*$/gm, "")),
       );
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("the Live Activity target compiles the PushCore sources too", () => {
+  // `LACore` calls `openPush`'s primitives, so the widget target needs the
+  // PushCore SOURCES — `@bacons/apple-targets` links a target folder wholesale
+  // and generated project has no `PushCore` MODULE, so `import PushCore` inside
+  // it failed the archive ("Unable to resolve module dependency: 'PushCore'")
+  // while `swift test` stayed green. Two halves must hold together, and each
+  // was verified by a real `xcodebuild -target liveactivity` build:
+  //  - a FOLDER symlink is NOT followed by Xcode's synchronized root group
+  //    (only `LACore/*.swift` compiled ⇒ `cannot find 'PushOpenError' in scope`);
+  //  - PER-FILE symlinks ARE followed (all 6 sources compiled, BUILD SUCCEEDED).
+  // So: one copy of every source, linked file by file — never a copied folder.
+  const nseDir = new URL("../targets/notification-service/PushCore/", import.meta.url);
+  const laDir = new URL("../targets/live-activity/PushCore/", import.meta.url);
+
+  test("every PushCore source is linked into the widget target", () => {
+    const sources = readdirSync(nseDir).filter((f) => f.endsWith(".swift"));
+    // A vacuous pass would hide a renamed folder, so pin the real count too.
+    expect(sources.length).toBeGreaterThanOrEqual(6);
+    const linked: string[] = [];
+    for (const f of sources) {
+      const link = new URL(f, laDir);
+      const stat = lstatSync(link);
+      // A COPY would silently drift from the NSE's sources: it must be a link
+      // that resolves to the ONE file the SwiftPM package also compiles.
+      expect(stat.isSymbolicLink()).toBe(true);
+      expect(realpathSync(link)).toBe(realpathSync(new URL(f, nseDir)));
+      linked.push(f);
+    }
+    // No extra Swift source: a renamed COPY added here would build too, and drift
+    // from the NSE's. (Dotfiles are Finder's business, not the compiler's.)
+    const strays = readdirSync(laDir).filter((f) => f.endsWith(".swift") && !linked.includes(f));
+    expect(strays).toEqual([]);
+  });
+
+  test("LACore.swift guards the module import with canImport", () => {
+    // SwiftPM builds a real `PushCore` module, the Xcode target does not: an
+    // unguarded import is the archive failure, a guard is what makes ONE source
+    // build both ways.
+    const src = readFileSync(
+      new URL("../targets/live-activity/LACore/LACore.swift", import.meta.url),
+      "utf8",
+    );
+    expect(src).toContain("#if canImport(PushCore)");
+    // The import must sit INSIDE the guard: `canImport` elsewhere proves nothing.
+    expect(/#if canImport\(PushCore\)\s*\nimport PushCore\s*\n#endif/.test(src)).toBe(true);
   });
 });
