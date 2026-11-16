@@ -44,6 +44,11 @@ const PHOTO_DIR = "photos";
  */
 let pickSeq = 0;
 
+/** Where the app's photo copies live (`<support>/photos`): what pruning may trim. */
+export function photosRoot(): string {
+  return photoDir().uri;
+}
+
 function photoDir(): Directory {
   const dir = new Directory(Paths.document, PHOTO_DIR);
   dir.create({ intermediates: true, idempotent: true });

@@ -16,7 +16,7 @@ import { type JSX, type ReactNode, useState } from "react";
 import { Image, Pressable, StyleSheet, Text, View } from "react-native";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
-import { type MediaBox, layoutMedia, mediaBox } from "../../media-layout.ts";
+import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
 import { firedScheduleHead } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
@@ -98,6 +98,13 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
   const captionBelow = layout.captionBelow;
   /** The photo open full screen (item 4). One state: null = closed. */
   const [viewing, setViewing] = useState<{ uri: string; label: string } | null>(null);
+  /**
+   * URIs whose `<Image>` has reported a load failure (Review round 2, R2-1): a
+   * file can vanish under a row that outlives it (the app trims old copies, a
+   * person can wipe the phone's data), and the bubble must then draw its label
+   * rather than an empty frame. `displayUri` decides; this only remembers.
+   */
+  const [broken, setBroken] = useState<readonly string[]>([]);
   return (
     <Shell row={user}>
       <View style={[styles.bubble, { backgroundColor: palette.fill }]}>
@@ -122,8 +129,9 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
               const thumb = thumbnailFor(thumbnails, image.id);
               // The LOCAL copy wins: it is the only pixels that exist for a photo
               // this phone just sent (`thumbnails.ts:19-25` — no read-back), and a
-              // loaded thumbnail is the only source for any other.
-              const uri = image.localUri ?? thumb?.uri;
+              // loaded thumbnail is the only source for any other. A URI already
+              // known to be unloadable is no answer at all: the label is.
+              const uri = displayUri(image.localUri ?? thumb?.uri, broken);
               const box = mediaBox(image, MEDIA_BUBBLE_WIDTH);
               const label = imageRowText(image);
               return (
@@ -151,6 +159,11 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
                       <Image
                         source={{ uri }}
                         style={styles.imageFill}
+                        // A file that cannot be read (trimmed, wiped, moved) turns
+                        // the bubble back into its label instead of an empty frame.
+                        onError={() =>
+                          setBroken((had) => (had.includes(uri) ? had : [...had, uri]))
+                        }
                         // The box is the photo's own shape (or the clamp), so `cover`
                         // crops at the clamp instead of squashing the photo.
                         resizeMode="cover"

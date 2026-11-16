@@ -75,3 +75,28 @@ export function layoutMedia(
     captionBelow: options.hasText,
   };
 }
+
+/**
+ * Which URI the bubble may actually draw for one image, or `undefined` when it
+ * must draw its label instead (Review round 2, R2-1).
+ *
+ * The candidate is the local copy, else a fetched thumbnail; `broken` holds the
+ * URIs this screen has already been told will not load (`<Image>`'s `onError`).
+ * A file can disappear under a row that outlives it — the app trims old photo
+ * copies, and a person can delete the phone's data — so the row must be able to
+ * say "no pixels" AFTER it started drawing, exactly as it does for a ref it
+ * never had bytes for. Without this the bubble is an empty frame, and a tap
+ * opens an empty viewer.
+ *
+ * Pure, because it is a decision (§7): the component only holds the `broken`
+ * list and renders whichever answer this gives.
+ */
+export function displayUri(
+  candidate: string | undefined,
+  broken: readonly string[],
+): string | undefined {
+  if (candidate === undefined) {
+    return undefined;
+  }
+  return broken.includes(candidate) ? undefined : candidate;
+}

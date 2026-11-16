@@ -6,7 +6,7 @@
  * Each test names the mutation it is red on (AGENTS §9).
  */
 import { describe, expect, test } from "bun:test";
-import { MEDIA_MAX_RATIO, layoutMedia, mediaBox } from "../src/media-layout.ts";
+import { MEDIA_MAX_RATIO, displayUri, layoutMedia, mediaBox } from "../src/media-layout.ts";
 
 describe("mediaBox — the image's shape follows the photo, bounded", () => {
   test("a landscape photo keeps its ratio at the full width", () => {
@@ -82,5 +82,24 @@ describe("layoutMedia — media first, caption below, nothing empty", () => {
       boxes: [],
       captionBelow: true,
     });
+  });
+});
+
+describe("displayUri — a file that is gone falls back to the label (Review round 2, R2-1)", () => {
+  test("an untried URI is drawn (mutation: always undefined → no photo is ever shown)", () => {
+    expect(displayUri("file:///o/photos/a.png", [])).toBe("file:///o/photos/a.png");
+  });
+
+  test("a URI the Image reported as broken is NOT drawn, so the row draws its label instead of an empty frame (mutation: ignore `broken` → the empty bubble, and a tap opens an empty viewer)", () => {
+    expect(displayUri("file:///o/photos/a.png", ["file:///o/photos/a.png"])).toBeUndefined();
+    // One broken file does not condemn the others on the same row.
+    expect(displayUri("file:///o/photos/b.png", ["file:///o/photos/a.png"])).toBe(
+      "file:///o/photos/b.png",
+    );
+  });
+
+  test("no candidate at all is still no candidate (a history row, another device's message)", () => {
+    expect(displayUri(undefined, [])).toBeUndefined();
+    expect(displayUri(undefined, ["file:///o/photos/a.png"])).toBeUndefined();
   });
 });

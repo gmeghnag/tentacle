@@ -176,7 +176,6 @@ on the wire), so no `protocol.d/` note and no `protocol.json` regeneration.
 ### Fix round 1
 
 *— claude-sonnet-4-5 (executor), 2026-11-17*
-
 **Precondition, blocking and worth recording:** the disk was 100% full (117 MiB free), so
 `bun test` could not even start — the preload's `mkdtempSync` threw `ENOSPC`. Cause: 11,035
 leaked `/var/folders/…/T/tentacle-test-home-*` dirs (6.1 GB) from earlier runs
@@ -286,6 +285,98 @@ chip and the outbox record; (b) the media width is a constant rather than a meas
 width; (c) nothing exercises the `RefreshControl` on a device — the wiring guard pins the
 call and the Maestro flows are a separate task. Unverified on hardware, as the plan's own
 Validation said (no simulator here).
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-17*
+
+Scope: Review round 2's one HIGH finding (**R2-1**: the row's `localUri` names a file
+deleted at the ack), its two named halves (keep the file; add an `onError` fallback), plus
+round 2's vacuity note on the item-1 test. Round-1/round-2 findings already accepted as
+fixed were not revisited.
+
+**Reproduced first (AGENTS §1).** `.tentacle/tmp/mobile-media-live/repro-r2-1.test.ts` — the
+real store, the real driver, memory fs. Before the fix:
+
+```
+rowUri: /o/photos/1700000000000-1-IMG_4876.jpg
+(fail) R2-1: the photo the sent row draws still exists after the ack
+  Expected: true   Received: false      ← the copy is gone
+```
+
+**What changed, and why.**
+
+1. **`apps/mobile/src/outbox-store.ts:379` — `removeItem` no longer touches the photo
+   files.** Root cause in one sentence: a copy is both the outbox's upload bytes and the
+   only pixels the transcript has (`localPhotosOf` → `ImageRef.localUri`; no read-back
+   method), and the ROW outlives the item, so deleting the file at the ack left the bubble
+   over a vanished file — it also broke the person's own return path, since `backToDraft`
+   hands an item's photos back to the field through this same call.
+2. **`apps/mobile/src/photo-copies.ts` (new) — bounding the folder moved here.**
+   `copiesToRemove`/`prunePhotoCopies` remove a copy only when all three hold: nothing
+   in use names it (`inUseCopies`: every live item's photos AND every draft's chips), it is
+   older than `COPY_GRACE_MS` (a week), and it is past the newest `KEEP_DISPLAY_COPIES`
+   (60) by `photoCopyName`'s own stamp+seq order. A file whose name is not that shape is
+   never touched. The grace window is what makes this safe on the one thing a store cannot
+   see — a `waiting` item of ANOTHER computer's store, which is young; when it is not, its
+   upload fails through `readPhoto`'s throw into a typed refusal, visible, never a silent
+   drop.
+3. **`apps/mobile/App.tsx:344` — the sweep is actually wired**, once at start and *after*
+   `store.load()` (the items and drafts it read back are exactly what must not be trimmed),
+   skipped entirely on a `refused` file (unreadable items guard nothing).
+   `apps/mobile/src/photo-source.ts:48` exposes `photosRoot()` — the one module that knows
+   where the copies live (`photo-copies.ts` stays Expo-free).
+4. **`apps/mobile/src/media-layout.ts:94` — `displayUri(candidate, broken)`**, the pure
+   decision behind the fallback, and **`TranscriptRow.tsx:134,164`** — the local copy is
+   still preferred, but a URI `<Image>` reported through `onError` is added to `broken`, so
+   the row falls back to the label it already draws for a ref with no bytes. This is the
+   reviewer's "add an `onError` fallback to the placeholder": one `uri === undefined`
+   branch, now reachable *after* a failed load too, instead of an empty frame and a viewer
+   that opens to nothing.
+5. **`apps/mobile/test/outbox-link.test.ts` — the vacuity note taken seriously.** Round 2
+   observed that `await until(() => !screen.state().transcript.turn)` passes vacuously
+   before the press. The wait is now on the two things the bug actually prevented — the
+   sent row appearing and the reply arriving — with `turn` staying `toBeNull()` as the
+   assertion.
+
+**Red before green, and the mutation each fix is pinned by** (every mutation was applied,
+the named test went red, and the file was restored; `git status` clean of mutations):
+
+| fix | red before (assertion, not import) | mutation → red |
+|---|---|---|
+| `removeItem` keeps copies | `outbox-store.test.ts` "…but KEEPS its photo copies" — `fs.files.has` false | restore the old `fs.remove` loop → **2 red** (incl. "never touches the photo folder") |
+| the sweep keeps what is in use | `photo-copies.test.ts` "a copy still named by an item or a draft…" | drop the `inUse` check → red |
+| the sweep keeps the newest | "the newest copies stay even when old…" | `eligible.map` (no `slice(keep)`) → **3 red** |
+| the grace window | "a copy inside the grace window is kept…" | `void graceMs` → **2 red** |
+| only our own files | "a file that is not one of ours is never removed" | accept any name → **2 red** |
+| `inUseCopies` covers drafts | "its items' photos AND its drafts' chips" | items only → red |
+| the sweep is wired | `mobile-media-live-wiring.test.ts` "the photo folder is bounded by the app…" | `return []` → red; `inUse: []` → red |
+| `onError` → label | same file, "…falls back to the label" | drop `displayUri(` → red; drop `onError=` → red |
+| `displayUri`'s rule | `media-layout.test.ts` "a URI the Image reported as broken is NOT drawn" | ignore `broken` → red |
+| item-1 test is no longer vacuous | `outbox-link.test.ts` (strengthened) | a SECOND `newSession` handle (the round-1 bug) → red |
+
+**Drift from the Implementation, and why.** The Implementation said nothing about copy
+retention (R2-1 is newer). Its S2 wording — "the local file rides the send path" — is
+unchanged; what is new is that the file now *survives*. One design choice worth naming:
+retention is a sweep with a grace window rather than an explicit "rows on screen" set,
+because the screen list is rendering state and the stores are pure data (AGENTS §7); a
+week's grace plus the newest-60 tail covers every row a person can still be looking at.
+
+**Gate** (this branch, after the fix):
+`bunx tsc --noEmit` → 0 · `bun run lint` → 0 errors/warnings (§6 baseline) ·
+`bun test` → **12698 pass, 5 skip, 0 fail** (12703 across 908 files, 449 s). `bun test
+apps/mobile` specifically: **2192 pass, 0 fail**. The 5 skips are the pre-existing opt-in
+gates (live k8s ×2, live docker, the slow real-socket keepalive, exec confinement) — none
+new, none mine.
+
+**Debt, deliberate.** (a) The sweep runs at start only, not after every send: the folder
+grows by at most one launch's photos past the cap, and a per-send sweep would run against
+a row that was just put on screen. (b) A `waiting` item belonging to a *different*
+computer's store is still invisible to this store's `inUse` — the grace window is the
+guard, and the failure mode it leaves (an old copy trimmed) is a visible typed refusal,
+not a silent loss. Nothing is verified on hardware: no simulator here, so `onError`
+firing on a genuinely deleted file is pinned by the pure rule and the wiring guard, not by
+a device.
 
 ## Review
 

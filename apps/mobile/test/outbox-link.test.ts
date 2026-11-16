@@ -1023,8 +1023,17 @@ describe("fix/mobile-media-live item 1: a photo message's turn folds into the sc
     // what must reach the daemon through the screen's handle).
     await screen.pickPhoto("library");
     screen.press();
-    await until(() => !screen.state().transcript.turn);
+    // Wait for the ONE thing the bug prevented — the reply arriving — instead of
+    // for the turn to be absent (Review round 2: `until(() => !turn)` passes
+    // vacuously before the press, so the wait proved nothing). The reply can
+    // only be on this screen if the turn's own stream was folded, and the
+    // `toBeNull()` below then says that turn ended.
     await until(() => userRows(screen).includes("look at this"));
+    await until(() =>
+      screen
+        .state()
+        .transcript.rows.some((row) => row.kind === "assistant" && row.text.includes("ok:")),
+    );
 
     // The daemon finished it...
     expect(await userTexts(d, sid)).toEqual(["hi", "look at this"]);

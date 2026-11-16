@@ -126,9 +126,10 @@ import {
   runPairing,
 } from "./src/pairing-flow.ts";
 import { handlePairingText, takePendingLink } from "./src/pending-link.ts";
+import { inUseCopies, prunePhotoCopies } from "./src/photo-copies.ts";
 import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
 import type { PhotoSettings } from "./src/photo-settings-store.ts";
-import { pickFromLibrary, takePhoto } from "./src/photo-source.ts";
+import { photosRoot, pickFromLibrary, takePhoto } from "./src/photo-source.ts";
 import { rewritePushDirectory } from "./src/push-directory-expo.ts";
 import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
 import { createPushManager } from "./src/push-manager.ts";
@@ -328,6 +329,23 @@ function outboxOf(computerId: string): OutboxRuntime {
     return known;
   }
   const store = createOutboxStore(createExpoOutboxFs(), outboxPaths(outboxRoot(), computerId));
+  // Bounding the photo folder is THIS store's job now, not `removeItem`'s (fix
+  // round 2, R2-1): a copy outlives its item because the transcript's row draws
+  // it, so what may go is decided by `photo-copies.ts` — its grace window, its
+  // newest-copies tail, and everything this store still names. Once, at start,
+  // after the load (the items and drafts it keeps are what must not be touched).
+  void store.load().then((loaded) => {
+    if (loaded.kind === "refused") {
+      // A newer build's file: its items are unreadable, so NOTHING here knows
+      // which copies are in use. The tail and the grace are the only guard, and
+      // a wrong guess would delete a photo that build still needs: skip it.
+      return [];
+    }
+    return prunePhotoCopies(createExpoOutboxFs(), photosRoot(), {
+      now: Date.now(),
+      inUse: inUseCopies(store.data),
+    });
+  });
   const driver = (folding: FoldingPrompt) =>
     createOutboxDriver(
       // The port is the SCREEN's own handle's (fix/mobile-media-live item 1):

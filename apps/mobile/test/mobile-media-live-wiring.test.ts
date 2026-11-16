@@ -105,3 +105,34 @@ describe("item 4: the media bubble is laid out, not hand-placed", () => {
     expect(viewer).toContain('testID="media-viewer"');
   });
 });
+
+describe("Review round 2 R2-1: a photo file that is gone falls back to the label", () => {
+  test("the row's Image reports a load failure and the bubble then draws its label (mutation: no `onError` → an empty frame over a deleted file)", () => {
+    const row = readFileSync(
+      join(APP, "src", "screens", "transcript", "TranscriptRow.tsx"),
+      "utf8",
+    );
+    // The decision is the pure module's (`media-layout.ts` `displayUri`, tested
+    // there); the component supplies the answer to `<Image>`'s `onError` and
+    // draws the label when that answer is `undefined`.
+    expect(row).toContain("displayUri(");
+    expect(row).toContain("onError=");
+    expect(row).toContain("broken");
+    // The label path is reachable AFTER a failed load, not only for a ref that
+    // never had bytes: one `uri === undefined` branch, fed by `displayUri`.
+    expect(row.match(/uri === undefined/g)?.length ?? 0).toBe(1);
+  });
+
+  test("the photo folder is bounded by the app, over the store's own in-use set (mutation: drop the sweep → the copies stay for ever; wire it before the load → an unread store guards nothing)", () => {
+    const body = outboxOf();
+    expect(body).toContain("prunePhotoCopies(");
+    expect(body).toContain("inUseCopies(store.data)");
+    expect(body).toContain("photosRoot()");
+    // After the LOAD: the items and drafts it read back are exactly what must
+    // not be trimmed.
+    expect(body).toContain("store.load().then(");
+    // A newer build's file is unreadable: its items guard their photos, so the
+    // sweep is skipped rather than guessing.
+    expect(body).toContain('loaded.kind === "refused"');
+  });
+});
