@@ -77,6 +77,7 @@ const base = (over: Partial<FrameInput> = {}): FrameInput => ({
   subagentsRef: { current: undefined },
   jobRows: undefined,
   jobRowsRef: { current: undefined },
+  scheduleRows: undefined,
   drawerRow: null,
   drawerJob: null,
   jobOutput: {},

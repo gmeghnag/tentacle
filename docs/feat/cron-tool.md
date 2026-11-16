@@ -1169,6 +1169,164 @@ offers them only with the link" (M3–M7).
 
 **S4: DONE.** S5–S6 not started.
 
+### S5 — TUI (dock rows, `/schedule`, M4/M6)
+
+*— claude-sonnet-4-5, 2026-11-17*
+
+**The plan had no S5 section** (the slice row, D8's mockups M2/M3/M4/M6 and the
+two "carried to S5" items were the whole spec), so this Implementation was
+written FIRST, source-verified, and is the plan the code below follows. It is
+reproduced here so the slice is reviewable against it. No step contradicted the
+code: every seam named below behaved as written.
+
+**Load-bearing check, re-run first** (`.tentacle/tmp/cron-tool/s5-loadbearing.ts`,
+12 OK / 0 MISS — it FAILS the slice if the client half is missing or the TUI
+half is already there):
+
+```
+OK   protocol ScheduleRowSchema exists
+OK   protocol ScheduleDeleteSchema exists
+OK   client RemoteSession.onSchedules exists
+OK   client RemoteSession.deleteSchedule exists
+OK   /schedule is not a slash command
+OK   no schedule panel kind
+OK   pill has no `sched` word — {"kind":"none"}
+OK   dock has no schedule rows
+OK   quit does not ask for armed schedules — exit
+OK   quit text names no schedule
+OK   a fired turn paints option A only
+OK   no `◷ scheduled` head — › [scheduled sc-1 · every 10m · fire 5] check CI
+
+12 OK / 0 MISS
+```
+
+So S5 was rendering-only on top of a finished client: `onSchedules`,
+`deleteSchedule`, the sanitized `turn_start.schedule` ref and the list bounds all
+existed (S2/S4); nothing in the TUI read any of them.
+
+**Verbatim drift from the plan I wrote after checking the code:**
+1. **`scheduleQuitText` lives in `commands.ts`, not `schedule-view.ts`.** M6's
+   text is the `/quit` DIALOG's, and every other word that dialog says is
+   already there (`quitConfirmText`, `quitConfirmKey`, `QUIT_NAME_MAX`). Keeping
+   it in the pure view module split one dialog across two files for no gain.
+2. **The dock's delete key is `ctrl+x` twice, not `x`.** The dock's grammar
+   (`background-focus.ts` `dockClaimsCtrlX`) owns `ctrl+x` and nothing else —
+   a plain `x` there is TYPE-THROUGH (it goes into the input). Verification: the
+   first frame test written with `x` failed with `api.deletes === []`; the armed
+   row's own meta now reads `delete sc-1? ctrl+x`, matching the mechanism. The
+   `/schedule` PANEL does use a plain `x` (its own grammar, like `/sessions`), so
+   the two surfaces differ on purpose and each is pinned.
+3. **`/schedule` sends no request.** It opens on the table the follow already
+   reported (`schedulesRef`), because `onSchedules` installs with the session.
+   The plan's `openPanel(initial, load)` shape is kept (the load re-reads the
+   same ref) so a panel that closes mid-flight still cannot paint stale rows.
+4. **The departure notice (S3's drift 5) is derived in `useDock.setSchedules`**,
+   not in a component and not from a new frame: the daemon publishes only the
+   list, so the diff is the only evidence. `undefined → rows` and
+   `rows → undefined` say nothing (a table that appeared, or a session that
+   stopped reporting, is not a departure).
+5. **`ScheduleDockRow` is a local structural mirror**, not the protocol's type
+   (`background-view.ts`'s rule: the TUI does not import `@tentacle/protocol`).
+6. **`scheduleKind.layer` is `"sessions"`** — the flat-list layer `/sessions`
+   claims, since a cursor list's Esc must close the panel and never reach
+   "Esc stops a running turn". `keys/layers.ts`' 14-name order is untouched.
+
+**As built (dependency order; each slice red before green).**
+1. **`packages/tui/src/schedule-view.ts` (new, pure).** `scheduleTitle`,
+   `scheduleMeta` (recurring `every 10m · next 14:30 · 4×`; one-shot
+   `at 17:00 · in 2h 29m` and never a `×`), `schedulesLabel` (`2 sched`),
+   `schedulesView` (two rows per wake: summary + quoted prompt; the cursor walks
+   WAKES; `undefined` and `[]` are different states), `scheduleKey`/`schedulesMove`
+   /`scheduleDeleteStep` (arm, then delete; a refusal is honest), `firedScheduleHead`
+   (reads `fire N` out of the durable prefix), `departedScheduleNotice`.
+   Every model-supplied string is `oneLine`d and cell-cut.
+   - Red: **17 fail / 10 pass** on the stubs (assertions, not compile errors).
+   - Green: 28/28.
+2. **Dock (M2)** — `background-list.ts`: a `schedule` glyph (`◷`), rows after
+   the children and jobs, `listVisible` counts them, the armed row says
+   `delete sc-N? ctrl+x`. `background-focus.ts`: `dockKindOf` learns `sc-`;
+   the dock's `stop` routes to a new `deleteSchedule` effect.
+   `useDock.ts`: `scheduleRows`/`schedulesRef`/`setSchedules`/`deleteSchedule`,
+   with `dockIds`/`dockVisible` counting them (a dock that did not know them
+   could not be walked into — mutation M16).
+3. **Pill (M2)** — `status-view.ts` `PillInput.schedules` + `schedulesLabel`:
+   `1 shell · 2 sched`, and schedules ALONE make a pill.
+4. **`/schedule` (M3)** — a new panel KIND: `panels/schedule.ts` (its own
+   projection, keys, click and two state rules), one `PANEL_KINDS` line,
+   `schedulesPanel()` in `panels/types.ts` (re-exported by `panel.ts`),
+   `commands/schedule.ts` + one registry line + the `/schedules` alias.
+   `usePanels.ts` gained `setSchedulesState`/`deleteSchedule` (generation-gated,
+   like `/sessions`' delete), `effects.ts`/`execute.ts` the two effect kinds.
+5. **Fired row (M4 option B)** — `state.ts` mirrors `turn_start.schedule` on
+   `UserItem` and on the TUI's own `user_message` event; `render-lines.ts` paints
+   the head above the prompt, and paints NOTHING when the ref is absent (option A
+   is the durable prefix, unchanged).
+6. **M6 quit** — `QuitCommandInput.schedules` asks before a quit that ends the
+   session (a `connect` detaches, so it never asks), `QuitConfirmFacts.scheduleIds`
+   names up to three in ONE bounded row. `useQuitClear` reads the table at quit
+   time.
+7. **Controller surface** — `app-types.ts`: `onSchedules?`/`deleteSchedule?`
+   (and NO `schedules?()` getter: `/schedule` paints the reported ref, so a
+   second read path would be a second truth); `cli/src/local-runtime.ts`
+   forwards both.
+
+**Tests.** `packages/tui/test/schedule-view.test.ts` (28, pure) and
+`packages/tui/test/schedule-panel-frames.test.tsx` (11, `ink-testing-library`
+frames through `renderAt`): M2 pill + dock rows + the `ctrl+x` delete, M3 the
+panel (rows, walk, arm→delete, Esc, and the no-table refusal), M4 the styled
+fired head, M6 the quit warning, and the two departure notices. Four existing
+tests pinned the known lists and were updated as their own comments demand (the
+command registry ×2, the panel registry ×2, `app-layout`'s `FrameInput` base,
+and the `SessionController` GUARD in `packages/cli/test/subagent-panel-controller.test.ts`,
+which is the drift check for a forgotten forward — it FAILED until the two
+members were declared there, which is the evidence the forwarding is wired).
+
+**Mutation checks** — `.tentacle/tmp/cron-tool/mut-s5.ts`: one exact substitution
+each, refused unless the site matches exactly once, the file rewritten from its
+original bytes and compared after every run. All 19 `restored=true`.
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | `scheduleMeta` drops the one-shot branch | 1: `one-shot names its distance` |
+| M2 | `departedScheduleNotice` ignores `expiresAt` | 3: the expiry tests |
+| M3 | `firedScheduleHead` returns a head with NO ref | 1: `no ref at all paints NOTHING` |
+| M4 | the `fire N` regex never matches | 1: `reads fire N out of the durable prefix` |
+| M5 | `schedulesView` treats `undefined` as `[]` | 1: `no rows and no report are DIFFERENT states` |
+| M6 | `scheduleDeleteStep` never reaches `delete` | 1: `the first x arms, the second deletes` |
+| M7 | the departure diff compares against nothing | 1: `nothing left, or a row still there` |
+| M8 | `quitCommandStep` ignores `schedules` | 1: `quitting with armed wakes asks first` |
+| M9 | `listVisible` ignores schedules | 2: the dock-row tests |
+| M10 | the pill drops the `sched` part | 2: the dock-row tests |
+| M11 | `dockKindOf` forgets `sc-` | 1: the dropdown delete |
+| M12 | `render-lines` paints no fired head | 1: `turn_start.schedule paints its own head` |
+| M13 | `state.ts` drops the mirrored ref | 1: same test (the second door) |
+| M14 | the panel's `x` only ever arms | 2: the panel tests |
+| M15 | `/schedule` offers no unsupported refusal | 1: `a session with no table says so` |
+| M16 | `dockIds` omits the wakes | 2: the dock-row tests |
+| M17 | the departure notice is never computed | 2: both departure tests |
+| M18 | the quit text never uses the wakes | 1: `a local quit names them` |
+| M19 | `local-runtime` drops the `onSchedules` forward | 1: the GUARD |
+
+**Gate** (2026-11-17, this tree):
+- `bunx tsc --noEmit`: clean.
+- `bun run lint`: clean (1706 files).
+- `bun test`: **12327 pass / 5 skip / 0 fail** (12332 tests, 887 files). The 5
+  skips are the opt-in group (live k8s ×2, live docker ×2, slow keepalive ×1) —
+  the same count S4 recorded, none of them in a branch file. The `exec`
+  confinement flake S4 saw did not reappear.
+- No protocol schema changed, so `protocol.json` was NOT regenerated and the
+  `json-schema` drift test passes.
+- Changelog: the ONE existing fragment `changelog.d/cron-tool.added.md` gains the
+  TUI sentence (`/schedule`'s panel, the pill + dock rows, the styled fired row,
+  the quit warning, the expiry/failure notice). No second fragment (the plan's
+  own rule at S2/S3/S4: one task, one fragment), `CHANGELOG.md` untouched.
+
+**Not S5, carried:** S6 (the iPhone section, badge and fired bubble). The
+`move_session` hop's "N scheduled wakes dropped" notice is NOT here: changing
+`hopMovedNotice`'s signature touches a hop string S5 was not given, and D7's
+table wants it counted at the hop, which is S3's `move_session` path.
+
+
 ## Review
 
 ### S1 — REQUEST-CHANGES

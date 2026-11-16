@@ -410,6 +410,8 @@ export function App({
   const agentsSubRef = useRef<(() => void) | null>(null);
   /** The current session's `onJobs` subscription (replaced with it). */
   const jobsSubRef = useRef<(() => void) | null>(null);
+  /** This session's armed wake feed (cron-tool S5), replaced with the session. */
+  const schedulesSubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentNotify` subscription (replaced with it). */
   const notifySubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentMessage` subscription (replaced with it). */
@@ -527,6 +529,7 @@ export function App({
   });
   const { subagents, subagentsRef, setAgents, dockLastRowsRef } = dockLayer;
   const { jobRows, jobRowsRef, setJobs, dockLastJobRowsRef } = dockLayer;
+  const { scheduleRows, schedulesRef, setSchedules, deleteSchedule } = dockLayer;
   const { dockOutcomeRef, dockFinishedRef, dockStoppedRef } = dockLayer;
   const { jobOutputRef, setJobOutputGen, jobReadAtRef } = dockLayer;
   const { dock, dockRef, setDock, dockIds, dockVisible } = dockLayer;
@@ -838,6 +841,7 @@ export function App({
     subagentsRef,
     jobRows,
     jobRowsRef,
+    scheduleRows,
     drawerRow,
     drawerJob,
     jobOutput: jobOutputRef.current,
@@ -1229,6 +1233,8 @@ export function App({
     panelGenRef,
     panelApply,
     setSessionsState,
+    setSchedulesState,
+    deleteSchedule: deleteScheduleInPanel,
     touchPanel,
     closePanel,
     openPanel,
@@ -1240,6 +1246,7 @@ export function App({
     switchingRef,
     columns,
     pushNotice,
+    sessionRef,
   });
 
   // `run "<prompt>"`: the first message, sent once at mount, like a typed one: a
@@ -1376,6 +1383,7 @@ export function App({
     queueSubRef,
     agentsSubRef,
     jobsSubRef,
+    schedulesSubRef,
     notifySubRef,
     dockMsgSubRef,
     capsSubRef,
@@ -1410,6 +1418,7 @@ export function App({
     drainHeld,
     setAgents,
     setJobs,
+    setSchedules,
     setDock,
     jobOutputRef,
     touchPanel,
@@ -1436,6 +1445,8 @@ export function App({
       agentsSubRef.current = null;
       jobsSubRef.current?.();
       jobsSubRef.current = null;
+      schedulesSubRef.current?.();
+      schedulesSubRef.current = null;
       notifySubRef.current?.();
       notifySubRef.current = null;
       capsSubRef.current?.();
@@ -1464,6 +1475,7 @@ export function App({
     runClearRef,
     subagentsRef,
     jobRowsRef,
+    schedulesRef,
     setQuitConfirm,
     runQuit,
     detachOnQuit,
@@ -1538,6 +1550,7 @@ export function App({
           histIndexRef,
           draftRef,
           sessionRef,
+          schedulesRef,
           stateRef,
           busyCompacting: () => compactingRef.current,
           syncingRef,
@@ -1586,6 +1599,7 @@ export function App({
       restoreInput,
       run,
       saveFile,
+      schedulesRef,
       sessions,
       shownModel,
       skills,
@@ -1765,8 +1779,19 @@ export function App({
       });
     },
     setSessionsState,
+    setSchedulesState,
     switchTo,
     sessionsDelete,
+    // A wake's delete is the DOCK's when it comes from the dropdown, and the
+    // PANEL's when it comes from `/schedule` (the generation gate: a reply that
+    // lands after the panel closed is dropped). Both go out as the same method.
+    deleteSchedule: (id) => {
+      if (panel !== null && panel.kind === "schedule") {
+        deleteScheduleInPanel(id, panelGenRef.current);
+        return;
+      }
+      deleteSchedule(id);
+    },
     killJob,
     killChild,
     setDock,

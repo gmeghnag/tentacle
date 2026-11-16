@@ -23,8 +23,10 @@
  * STATE (open/close, the generation, the delete chain) lives here.
  */
 import { useCallback, useRef } from "react";
-import type { SessionDirectory } from "./app-types.ts";
+import type { SessionController, SessionDirectory } from "./app-types.ts";
+import { SCHEDULE_UNSUPPORTED } from "./commands/schedule.ts";
 import { type OpenPanel, applyPanel } from "./panel.ts";
+import { isScheduleOpen, withSchedulesState } from "./panels/schedule.ts";
 import {
   deleteFailedNotice,
   isSessionsOpen,
@@ -34,6 +36,7 @@ import {
   withSessionsRefresh,
   withSessionsState,
 } from "./panels/sessions.ts";
+import type { ScheduleDockRow, SchedulesState } from "./schedule-view.ts";
 import type { SessionsState } from "./sessions-panel.ts";
 
 /** The narrow port the panels execute through: the App's own state, setters and refs. */
@@ -48,6 +51,8 @@ export interface PanelsHost {
   /** A panel's width, for `applyPanel` (a render value, as it was inline). */
   readonly columns: number;
   readonly pushNotice: (text: string) => void;
+  /** The live session (the `/schedule` delete goes through its client). */
+  readonly sessionRef: { readonly current: SessionController | null };
 }
 
 /** The panels' actions, under the identifiers `App` already used. */
@@ -70,11 +75,15 @@ export interface PanelsLayer {
   ): void;
   /** Delete a `/sessions` row, then refresh the panel if it is still the same one. */
   sessionsDelete(id: string, startedGen: number): void;
+  /** Write the `/schedule` panel's own state (its arm/answer, cron-tool S5). */
+  setSchedulesState(state: SchedulesState): void;
+  /** Delete one scheduled wake; the row leaves on the daemon's own frame. */
+  deleteSchedule(id: string, startedGen: number): void;
 }
 
 export function usePanels(host: PanelsHost): PanelsLayer {
   // Destructured so the callbacks' deps name FIELDS, never the port (Fable H2).
-  const { panelRef, setPanel, sessions, switchingRef, columns, pushNotice } = host;
+  const { panelRef, setPanel, sessions, switchingRef, columns, pushNotice, sessionRef } = host;
 
   const panelGenRef = useRef(0);
 
@@ -119,6 +128,46 @@ export function usePanels(host: PanelsHost): PanelsLayer {
   const setSessionsState = useCallback(
     (state: SessionsState) => setPanel((p) => withSessionsState(p, state)),
     [setPanel],
+  );
+
+  /** Write the `/schedule` panel's arm/cursor state (cron-tool S5). */
+  const setSchedulesState = useCallback(
+    (state: SchedulesState) => setPanel((p) => withSchedulesState(p, state)),
+    [setPanel],
+  );
+
+  /**
+   * Delete one scheduled wake, then refresh the panel — but only if it is still
+   * THE SAME panel: the generation the key landed in is compared at the answer,
+   * so a reply that lands after the panel closed (or another opened) is dropped.
+   * The row itself leaves on the daemon's `schedules` frame, never on this
+   * answer: the frame is the ONE truth every surface paints (cron-tool D5).
+   */
+  const deleteSchedule = useCallback(
+    (id: string, startedGen: number): void => {
+      const session = sessionRef.current;
+      if (!session?.deleteSchedule) {
+        pushNotice(SCHEDULE_UNSUPPORTED);
+        return;
+      }
+      const applies = (): boolean =>
+        panelGenRef.current === startedGen && isScheduleOpen(panelRef.current);
+      void session.deleteSchedule(id).then(
+        (result) => {
+          if (!applies()) return;
+          if (result.deleted) {
+            pushNotice(`_Deleted ${id}._`);
+            return;
+          }
+          pushNotice(`_${id} was not deleted: ${result.reason ?? "the daemon no longer has it"}_`);
+        },
+        (e: unknown) => {
+          if (!applies()) return;
+          pushNotice(deleteFailedNotice(e));
+        },
+      );
+    },
+    [sessionRef, pushNotice, panelRef],
   );
 
   const touch = useCallback(() => setPanel((p) => touchPanel(p)), [setPanel]);
@@ -167,6 +216,8 @@ export function usePanels(host: PanelsHost): PanelsLayer {
     panelGenRef,
     panelApply,
     setSessionsState,
+    setSchedulesState,
+    deleteSchedule,
     touchPanel: touch,
     closePanel,
     openPanel,

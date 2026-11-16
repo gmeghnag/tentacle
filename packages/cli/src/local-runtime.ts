@@ -357,6 +357,10 @@ export interface PersistingController extends SessionController {
   jobOutput?: RemoteSession["jobOutput"];
   /** `RemoteSession.killJob`: stop one background shell job. */
   killJob?: RemoteSession["killJob"];
+  /** `RemoteSession.onSchedules`: this session's armed scheduled wakes (cron-tool S5). */
+  onSchedules?: RemoteSession["onSchedules"];
+  /** `RemoteSession.deleteSchedule`: drop one armed wake. */
+  deleteSchedule?: RemoteSession["deleteSchedule"];
   /** `RemoteSession.onSubagentNotify`: a running child's message to this session's agent. */
   onSubagentNotify?: RemoteSession["onSubagentNotify"];
   /** `RemoteSession.messageSubagent`: the user's text into a running background child. */
@@ -779,6 +783,15 @@ export function persistingController(
     },
     killJob(jobId) {
       return inner.killJob(jobId);
+    },
+    // docs/feat/cron-tool.md S5: the dock's rows, the pill's count and
+    // `/schedule` all paint this ONE per-session feed, and a delete is the
+    // daemon's (its `schedules` frame is what removes the row).
+    onSchedules(listener) {
+      return inner.onSchedules(listener);
+    },
+    deleteSchedule(scheduleId) {
+      return inner.deleteSchedule(scheduleId);
     },
     onSubagentNotify(listener) {
       return inner.onSubagentNotify(listener);
