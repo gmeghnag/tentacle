@@ -333,4 +333,41 @@ regression. Record which terminals were checked.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-16*
+
+**Verdict: APPROVE** (no HIGH/MEDIUM). Same model as planner/executor (Opus), fresh
+context only: shared blind spots are possible. Scope: `git diff main...HEAD`, slice `all`.
+
+**Gate (re-run):** `bun test packages/tui/test/sync-output.test.tsx` 6 pass / 0 fail;
+`bun run lint` 1696 files, clean; `bun run typecheck` clean (all three tsc). Full
+suite not re-run here (Execution reports 12244 pass / 5 opt-in skips).
+
+**Mutations (each reverted; `git status` clean afterwards):**
+| mutation | result |
+|---|---|
+| identity `write` + wrap dropped in `run.tsx` | T1, T3, bracketing unit **red** (3 fail) |
+| `get rows()` → constant 30 | T2 + live-getter unit **red** |
+
+**Premises checked:** Ink frame = one write (`log-update.js:17`, `ink.js:122`) TRUE;
+Ink reads only `write/columns/rows/on/off` from stdout (`ink.js:44-163`) TRUE; App
+reads `columns/rows/on/off` via `useStdout` (`App.tsx:232,758-788`) TRUE; `render.js`
+keys instances by the stdout object — one new wrapper per `startTui`, no clash; the
+`instanceof Stream` shortcut in `render.js:32` applies to the first arg only, not to
+`options.stdout` — fine.
+
+**Attacks tried:**
+1. §7 "never write raw while Ink owns it": the wrapper adds no write; `ENTER/LEAVE_FULLSCREEN`
+   and the restore path still go to raw `process.stdout` before mount / after unmount. Holds.
+2. Lost ESU / partial write: BSU+chunk+ESU is one string → one queued write. Holds.
+3. Resize / listener splitting: explicit delegation, live getters, mutation-pinned. Holds.
+4. `cliCursor.hide(stdout)` (`components/App.js:92`) writes through the wrapper — bracketed, harmless.
+5. Non-TTY: gated on `fullscreen`, bytes unchanged. Holds.
+
+**LOW (not blocking):** Ink's patched-console path (`ink.js:153-155`) is three writes
+(clear, data, redraw), each bracketed separately, so a `console.log` mid-session can
+still flash; Failure modes calls these writes "harmless". No regression vs `main`, and
+`packages/tui/src` has no `console.*` calls. T4 (seeing it in a real terminal) is still
+unverified: it is the owner's.
+
+**Executor behaviour:** red→green and mutations documented and reproducible; drift
+(TODO.md untouched, regex → `startsWith` loop) stated honestly.
