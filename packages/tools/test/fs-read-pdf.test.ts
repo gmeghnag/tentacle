@@ -35,9 +35,13 @@ const read = (input: Record<string, unknown>, environment: ExecutionEnvironment 
 
 const hello = () => makePdf([["Hello PDF world"], ["Second page"]]);
 
-async function writePdf(name: string, bytes: Uint8Array): Promise<string> {
+function bytes(parts: number[]): Uint8Array {
+  return new Uint8Array(parts);
+}
+
+async function writePdf(name: string, value: Uint8Array): Promise<string> {
   const path = join(dir, name);
-  await writeFile(path, bytes);
+  await writeFile(path, value);
   return path;
 }
 
@@ -86,6 +90,66 @@ describe("fs_read on a PDF", () => {
     await writeFile(path, "just some text\n");
     const result = await read({ path });
     expect(result.content).toBe("just some text\n");
+  });
+
+  // Round-6 HIGH: a text file that *mentions* `%PDF-` in its first KiB was
+  // sniffed as a PDF, so `fs_read` threw `corrupt PDF` (whole) or "use pages"
+  // (ranged) on prose, docs and source about PDFs — with no model workaround.
+  test("prose that mentions `%PDF-` is read as text, whole and ranged", async () => {
+    const path = join(dir, "notes.md");
+    const body = "# PDF notes\nEvery PDF starts with `%PDF-1.7`.\nline three\n";
+    await writeFile(path, body);
+    expect((await read({ path })).content).toBe(body);
+    expect((await read({ path: `${path}:2:3` })).content).toBe(
+      `[${path} lines 2-3 of 4]\nEvery PDF starts with \`%PDF-1.7\`.\nline three`,
+    );
+  });
+
+  test("`%PDF-` alone on a line, after blank lines, is still prose", async () => {
+    const path = join(dir, "header.md");
+    const body = "\n\n%PDF-1.7 is the magic number\nmore prose here\n";
+    await writeFile(path, body);
+    expect((await read({ path })).content).toBe(body);
+    await expect(read({ path, offset: 3, limit: 1 })).resolves.toBeDefined();
+  });
+
+  test("a PDF with a junk prefix before `%PDF-` is still a PDF", async () => {
+    // The false-positive fix must not lose the wild case the head window exists
+    // for: binary junk (a NUL run here) then the header.
+    const junk = new Uint8Array(8);
+    const path = await writePdf("junk-prefix.pdf", bytes([...junk, ...hello()]));
+    const result = await read({ path });
+    expect(result.content).toContain("Hello PDF world");
+    await expect(read({ path: `${path}:1:5` })).rejects.toThrow(/use pages/);
+  });
+
+  test("a text file that DOES sniff as a PDF falls back to text when parsing says corrupt", async () => {
+    // The fallback branch: the head is a legal-looking header line, so the sniff
+    // says PDF, pdf.js says corrupt — but the bytes are valid UTF-8, so it is a
+    // text file, and `pages` on it gets the honest non-PDF refusal.
+    const path = join(dir, "fake.pdf");
+    const body = "%PDF-1.7\nthis is not a real PDF body\njust prose\n";
+    await writeFile(path, body);
+    expect((await read({ path })).content).toBe(body);
+    expect((await read({ path, offset: 2, limit: 1 })).content).toBe(
+      `[${path} lines 2-2 of 4]\nthis is not a real PDF body`,
+    );
+    await expect(read({ path, pages: "1" })).rejects.toThrow(/only to PDFs/);
+  });
+
+  test("a corrupt BINARY PDF is still a corrupt-PDF error, not text", async () => {
+    // The fallback is gated on the bytes being text: a damaged real PDF (gzip
+    // stream, NUL runs) must keep saying so.
+    const path = await writePdf(
+      "damaged.pdf",
+      new Uint8Array([
+        ...new TextEncoder().encode("%PDF-1.4\n1 0 obj\nstream\n"),
+        0x00,
+        0x01,
+        0x02,
+      ]),
+    );
+    await expect(read({ path })).rejects.toThrow(/damaged\.pdf.*corrupt PDF/);
   });
 
   test("a PDF with no extension is extracted", async () => {

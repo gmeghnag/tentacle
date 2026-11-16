@@ -490,12 +490,79 @@ export function splitFileBlocks(content: string): SplitFileBlocksResult {
   return { text: rest.trim(), blocks };
 }
 
-/** `%PDF-` in the file's head — the bytes decide, never the extension. */
+/** Printable ASCII: a byte that can only come from text, never from a PDF. */
+function isPrintableAscii(byte: number): boolean {
+  return byte >= 0x20 && byte < 0x7f;
+}
+
+/**
+ * Is this head a PDF? The bytes decide, never the extension — but `%PDF-`
+ * merely APPEARING in the head is not enough (fix round 1: prose *about* PDFs,
+ * source and docs were sniffed as PDFs and then failed as `corrupt`). A real
+ * header is the file's first line, modulo a prefix no prose can carry (a BOM,
+ * whitespace, or binary junk: the head window exists for exactly that), and it
+ * is `%PDF-<n>.<n>` followed only by non-text bytes up to the end of the line.
+ */
 export function isPdf(head: Uint8Array): boolean {
   const window = head.subarray(0, PDF_HEAD_BYTES);
   let ascii = "";
   for (const byte of window) {
     ascii += String.fromCharCode(byte);
   }
-  return ascii.includes("%PDF-");
+  const at = ascii.indexOf("%PDF-");
+  if (at < 0) {
+    return false;
+  }
+  // Nothing printable may come before the header: `# PDF notes\n%PDF-1.7` and
+  // ``Every PDF starts with `%PDF-1.7`.`` are text; 500 NUL bytes are not.
+  for (const byte of window.subarray(0, at)) {
+    if (isPrintableAscii(byte)) {
+      return false;
+    }
+  }
+  // `%PDF-<major>.<minor>`, then no more than whitespace and binary (the
+  // binary comment some producers append on the header line) to the line end.
+  const rest = ascii.slice(at + "%PDF-".length);
+  const version = /^\d+\.\d+/.exec(rest);
+  if (version === null) {
+    return false;
+  }
+  const after = window.subarray(at + "%PDF-".length + version[0].length);
+  for (const byte of after) {
+    if (byte === 0x0a || byte === 0x0d) {
+      return true;
+    }
+    // Trailing padding and the binary comment producers put on the header line
+    // are not printable text; a space or a tab is only padding.
+    if (isPrintableAscii(byte) && byte !== 0x20 && byte !== 0x09) {
+      return false;
+    }
+  }
+  return true; // the line runs past the head window (a header shorter than EOF)
+}
+
+/**
+ * Could a failed extraction be a text file that merely looked like a PDF? True
+ * for valid UTF-8 with no control bytes beyond tab/newline/CR/form feed — the
+ * cheap discriminator `fs_read` uses to fall back to the text path instead of
+ * reporting `corrupt PDF` for prose (fix round 1).
+ */
+export function looksLikeTextBytes(bytes: Uint8Array): boolean {
+  let text: string;
+  try {
+    // `stream: true` holds back an incomplete trailing sequence instead of
+    // failing: the caller may pass a 1 KiB head that cuts a character in half.
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes, { stream: true });
+  } catch {
+    return false;
+  }
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    // Control bytes other than tab, LF, CR and form feed: a PDF's binary parts
+    // and a text file's own bytes are told apart by this alone in practice.
+    if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0c && code !== 0x0d) {
+      return false;
+    }
+  }
+  return true;
 }

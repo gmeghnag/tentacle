@@ -14,6 +14,7 @@ import {
   PDF_HEAD_BYTES,
   formatPdfText,
   isPdf,
+  looksLikeTextBytes,
   pathLocksFor,
   pdfVerdict,
 } from "@tentacle/core";
@@ -164,17 +165,32 @@ async function readPdf(
   if (!isPdf(head)) {
     return undefined;
   }
-  if (range.offset !== undefined || range.limit !== undefined) {
+  const name = displayName(path);
+  const ranged = range.offset !== undefined || range.limit !== undefined;
+  // A head that is not even text-decoded is a real PDF: refuse the range now,
+  // without reading or parsing the body (fix round 1 keeps this cheap path).
+  if (ranged && !looksLikeTextBytes(head)) {
     throw new Error(`${path} is a PDF: use pages (e.g. "1-5"), not line ranges`);
   }
   const bytes = await readBytes(path, { maxBytes: MAX_PDF_BYTES });
-  const name = displayName(path);
   const extraction = await extractPdf(bytes, {
     ...(pages !== undefined ? { pages } : {}),
     signal: ctx.signal,
   });
   if (!extraction.ok) {
+    // A text file whose head *looked* like a PDF (prose quoting the header, a
+    // `.pdf` that is really text) must still read as text: `corrupt` on valid
+    // UTF-8 is not a broken PDF, it is the text path — which also gives `pages`
+    // on it the honest "applies only to PDFs" refusal. Only `corrupt`: an
+    // encrypted, oversized or timed-out document is a real PDF whatever its
+    // bytes decode to, so those stay errors.
+    if (extraction.reason === "corrupt" && looksLikeTextBytes(bytes)) {
+      return undefined;
+    }
     throw new Error(`${name}: ${extraction.message}`);
+  }
+  if (ranged) {
+    throw new Error(`${path} is a PDF: use pages (e.g. "1-5"), not line ranges`);
   }
   const verdict = pdfVerdict({
     name,

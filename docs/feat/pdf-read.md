@@ -1103,6 +1103,105 @@ nothing about the work, but the signature trail should say so. Blast is
 *— claude-opus-5-5, 2026-11-16* (per the harness's settings; this runtime
 exposes no exact model id)
 
+### Fix round 1 — P3 review (the HIGH content false positive) · executed by `claude-opus-5-5`, 2026-11-16
+
+**Reproduced first.** `.tentacle/tmp/pdf-read/rev-p3/r.ts` (the reviewer's own
+script, real `HostExecution` + `fsReadTool`) on the pre-fix tree:
+`ERR notes.md: corrupt PDF: Invalid PDF structure.` and `ERR …/notes.md is a
+PDF: use pages (e.g. "1-5"), not line ranges`. Same script after the fix: both
+`OK`, the markdown text returned verbatim (whole) and with its
+`[path lines 2-3 of 4]` header (ranged).
+
+**The bug in one sentence.** `isPdf` (`packages/core/src/pdf-text.ts:494`) was a
+bare `%PDF-` substring test over the first 1 KiB, so *prose about* PDFs entered
+the PDF branch, which had no exit: a whole read became `corrupt PDF`, a ranged
+read `is a PDF: use pages`.
+
+**HIGH — fixed, two independent layers** (either alone would close the reported
+case; both are there because each covers what the other cannot):
+
+1. **A stricter sniff** (`packages/core/src/pdf-text.ts:506-542`, `isPdf`): `%PDF-`
+   must be the file's FIRST LINE, modulo a prefix no prose carries (a BOM,
+   whitespace, or binary junk — the head window exists for that), and must be
+   `%PDF-<n>.<n>` followed to end-of-line by nothing but padding (spaces/tabs)
+   and non-printable bytes (the binary comment producers append there). So
+   ``Every PDF starts with `%PDF-1.7`.``, `# PDF notes\n%PDF-1.7\n…` and
+   `%PDF-x.y` are text; `%PDF-1.4\n1 0 obj`, `%PDF-1.7  \n…`, a BOM-prefixed
+   header and a header after a NUL run are still PDFs.
+2. **A `corrupt` → text fallback in `fs_read`** (`builtins.ts:186-191`): when
+   extraction fails with reason `corrupt` **and** the bytes are valid UTF-8 with
+   no control bytes (`looksLikeTextBytes`, `pdf-text.ts:550-568`), `readPdf`
+   returns `undefined` and the caller's unchanged text path runs. This catches
+   what a sniff cannot (a text file that legitimately starts with a header
+   line). Gated on `corrupt` only: `encrypted`, `too-large`, `timeout` and
+   `too-much-memory` stay errors whatever the bytes decode to, and a **binary**
+   damaged PDF still reports `corrupt PDF` (pinned by a test).
+
+The ranged refusal moved (`builtins.ts:169-175`, `:192-194`) so it does not
+short-circuit the fallback: a non-text head is still refused before the body is
+read or parsed (the cheap path the reviewer's mutation pinned), a text head is
+parsed, and only then is it either text (fall through) or a PDF (refuse).
+`pages` on a sniffed-but-text file now gets the honest "applies only to PDFs".
+
+`looksLikeTextBytes` decodes with `{ stream: true }` so a 1 KiB head that cuts a
+UTF-8 character in half is still text, and gates control characters with a
+`codePointAt` loop rather than a regex (Biome
+`noControlCharactersInRegex`).
+
+**Tests added** (red first, each shown failing on the pre-fix code):
+- `packages/core/test/pdf-text.test.ts` — "prose quoting the magic is not a PDF,
+  wherever the quote sits" (inline, line-start, after a heading line, plus the
+  positive `%PDF-1.4\r\n`, `%PDF-1.7  \n`, `%PDF-x.y` cases); "a header line
+  after binary junk or a BOM is still a PDF"; and the
+  `looksLikeTextBytes` describe (prose/source/JSON yes; PDF bytes, a lone NUL, a
+  stray ESC, invalid UTF-8, a half-cut character no).
+  **RED on the pre-fix code:** `Expected: false Received: true` at the inline
+  prose assertion (`isPdf` did not exist in this shape).
+- `packages/tools/test/fs-read-pdf.test.ts` — "prose that mentions `%PDF-` is
+  read as text, whole and ranged" (**RED:** `notes.md: corrupt PDF: Invalid PDF
+  structure.`), "`%PDF-` alone on a line, after blank lines, is still prose"
+  (**RED:** same), "a PDF with a junk prefix before `%PDF-` is still a PDF"
+  (green before and after — a non-vacuity guard on the new prefix rule), "a text
+  file that DOES sniff as a PDF falls back to text when parsing says corrupt"
+  (the fallback branch, with `pages` and `offset/limit`), "a corrupt BINARY PDF
+  is still a corrupt-PDF error, not text" (the fallback's gate).
+
+**Mutations (mine; each reverted by hand from a `.tentacle/tmp` copy — no
+`git restore` was used, and `git status` shows only the four intended files):**
+```
+M1 isPdf → plain `%PDF-` substring          → 1 fail: "prose quoting the magic …" (Expected false, Received true)
+M2 drop the corrupt→text fallback           → 1 fail: "a text file that DOES sniff as a PDF falls back to text"
+M3 ranged refusal unconditional             → 1 fail: same test (the ranged half)
+M4 printable prefix accepted as before-hdr   → 1 fail: "prose quoting the magic …"
+M5 looksLikeTextBytes without stream:true    → 1 fail: "a head that cuts a UTF-8 character in half is still text"
+M6 drop the control-character gate           → 2 fail: "a corrupt BINARY PDF is still a corrupt-PDF error" +
+                                               "real PDF bytes are not text"
+M7 drop the post-version trailing-text rule  → 1 fail: "prose quoting the magic …"
+```
+
+**Not changed, deliberately.** The reviewer's nit (e) — the `stat`→read TOCTOU
+that lets a growing file pass `maxBytes` — is untouched: it needs a local racing
+writer, was not raised above a nit, and closing it wants `file.slice(0, maxBytes
++ 1)` in `HostExecution.readBytes`, outside this finding. Unverified, unchanged:
+`fs_read` on a PDF in a live pod, and the compiled-binary `$bunfs` worker path.
+
+**Drift from Implementation:** D3 says "a PDF is `%PDF-` within the first 1024
+bytes (`isPdf(head)`)". The rule is now "the header line, modulo a non-text
+prefix" — same file, same name, same window; the substring test was measurably
+wrong (a HIGH). §Failure modes row "Text file named `.pdf`; PDF without
+extension" widens to "… and a text file that merely *mentions* `%PDF-`", which
+is what the fallback plus the sniff now guarantee.
+
+**Gate:** `bunx tsc --noEmit` exit 0 · `bun run lint` **1755 files, 0 errors, 0
+warnings** · `bun test` **12750 pass, 5 skip, 0 fail** across 908 files (the 5
+are the branch's existing opt-ins). One full-suite run earlier in this round
+reported 283 failures, all `ENOSPC` (`errno -28`) with the disk at 117 MiB free;
+after space was freed the same tree was re-run twice green with **zero**
+failures, so those were environmental, not this change.
+
+*— claude-opus-5-5, 2026-11-16* (real id from this harness's settings,
+`~/.claude/settings.json` `modelSettings`; the runtime exposes no other)
+
 ## Review
 
 ### P1 — fresh-context adversarial review

@@ -7,6 +7,7 @@ import {
   formatPdfText,
   isPdf,
   isTextItem,
+  looksLikeTextBytes,
   parsePageRange,
   pdfVerdict,
   splitFileBlocks,
@@ -442,5 +443,67 @@ describe("isPdf — the bytes decide, never the extension", () => {
   test("a text file whose content merely mentions %PDF- later on is not parsed as a PDF", () => {
     const text = `${"a".repeat(2000)}%PDF-1.7`;
     expect(isPdf(new TextEncoder().encode(text))).toBe(false);
+  });
+
+  // Round-6 HIGH: prose quoting the magic inside the window used to sniff as a
+  // PDF, so `fs_read` refused it as corrupt (whole) or "use pages" (ranged).
+  test("prose quoting the magic is not a PDF, wherever the quote sits", () => {
+    const enc = (s: string) => new TextEncoder().encode(s);
+    // Mid-line, inline code.
+    expect(isPdf(enc("Every PDF starts with `%PDF-1.7`."))).toBe(false);
+    // At the start of a line: what FOLLOWS the version says it is prose.
+    expect(isPdf(enc("\n\n%PDF-1.7 is the magic number\nmore\n"))).toBe(false);
+    // A version-only line, but the file has already said something.
+    expect(isPdf(enc("# PDF notes\n%PDF-1.7\nmore prose\n"))).toBe(false);
+    // A real header line is `%PDF-<major>.<minor>`, then end of line.
+    expect(isPdf(enc("%PDF-1.7"))).toBe(true);
+    expect(isPdf(enc("%PDF-1.4\r\n1 0 obj\n"))).toBe(true);
+    expect(isPdf(enc("%PDF-1.7  \n1 0 obj\n"))).toBe(true);
+    expect(isPdf(enc("%PDF-x.y\n1 0 obj\n"))).toBe(false);
+  });
+
+  test("a header line after binary junk or a BOM is still a PDF", () => {
+    const enc = (s: string) => new TextEncoder().encode(s);
+    const withBom = enc("\uFEFF%PDF-1.4\n1 0 obj\n");
+    expect(isPdf(withBom)).toBe(true);
+    const bytes = new Uint8Array(8 + 14);
+    bytes.set(enc("%PDF-1.5\n1 0ob"), 8);
+    expect(isPdf(bytes)).toBe(true);
+  });
+});
+
+describe("looksLikeTextBytes — the `corrupt` fallback's discriminator", () => {
+  test("prose, source and JSON (what a sniff false positive is made of) are text", () => {
+    const enc = (s: string) => new TextEncoder().encode(s);
+    expect(looksLikeTextBytes(enc("Every PDF starts with `%PDF-1.7`.\n"))).toBe(true);
+    expect(looksLikeTextBytes(enc("<doc>\r\n\ttab\tand ünïcode ✓\f</doc>\n"))).toBe(true);
+    expect(looksLikeTextBytes(new Uint8Array([]))).toBe(true);
+  });
+
+  test("a head that cuts a UTF-8 character in half is still text", () => {
+    // The sniff passes a 1 KiB window: a multi-byte character may be split.
+    const enc = (s: string) => new TextEncoder().encode(s);
+    const whole = enc("prose about %PDF- ✓\n");
+    expect(looksLikeTextBytes(whole.subarray(0, whole.length - 2))).toBe(true);
+    expect(looksLikeTextBytes(whole)).toBe(true);
+  });
+
+  test("real PDF bytes are not text", () => {
+    // A minimal document: header, a compressed stream, an xref with a NUL run.
+    const pdf = new Uint8Array([
+      ...new TextEncoder().encode("%PDF-1.4\n1 0 obj\n<< /Length 6 >>\nstream\n"),
+      0x78,
+      0x9c,
+      0x00,
+      0x01,
+      0x02,
+      0x03,
+      ...new TextEncoder().encode("\nendstream\nendobj\n"),
+    ]);
+    expect(looksLikeTextBytes(pdf)).toBe(false);
+    // A lone NUL, a stray ESC, invalid UTF-8.
+    expect(looksLikeTextBytes(new Uint8Array([0x61, 0x00, 0x62]))).toBe(false);
+    expect(looksLikeTextBytes(new Uint8Array([0x1b, 0x61]))).toBe(false);
+    expect(looksLikeTextBytes(new Uint8Array([0xff, 0x61]))).toBe(false);
   });
 });
