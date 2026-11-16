@@ -607,6 +607,11 @@ surfaces `#FFFFFF` light, `#1F1F1E` dark):
 - `min`/`max`, log scale, annotations, mixed bar+line, bubble/radar: out of v1 until a
   real conversation needs them.
 
+#### Owner requirements (2026-11-16 ~11:20, binding — add to docs/feat/model-charts.md before approval)
+- The chart is drawn IN the conversation, at the point the model creates it, directly ON the conversation background: full width, centred, NO card / bubble / rounded box around it (owner taste). The artifact exists behind the scenes (save, gallery, full screen), never as a "tap to open" card.
+- It must read as a natural part of the reply: the model can write text BEFORE and AFTER it in the same turn (text → chart → text, several charts in one reply). So the `chart` tool call does NOT render as a tool row ("● Chart …"): the chart itself takes the row's place, with at most a discreet caption (title/subtitle) — no tool chrome. Same in the TUI: the braille/block chart inline between the paragraphs, centred to the transcript width.
+- "Deve essere una cosa fatta bene." Opus executes the rendering slices.
+
 ## Execution
 
 *(empty — starts after the owner approves the Implementation)*
