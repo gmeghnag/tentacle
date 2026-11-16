@@ -1478,3 +1478,36 @@ missing adversarial input class (text that *looks* like a PDF), not sloppiness.
 Reviewer is the same model family as the executor (fresh context only).
 
 *— claude-opus-5-5, 2026-11-16*
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES** (round-1 HIGH fixed; one new MEDIUM from the fix).
+
+- **Round-1 HIGH — FIXED.** The `corrupt` + `looksLikeTextBytes` fallback
+  (`packages/tools/src/builtins.ts:187-189`) reads the `notes.md` prose whole and
+  ranged. Mutations (each reverted, `git status` clean): drop the fallback → "a text
+  file that DOES sniff as a PDF falls back…" FAILS; drop the `looksLikeTextBytes`
+  gate → "a corrupt BINARY PDF is still a corrupt-PDF error" FAILS; revert `isPdf`
+  to a substring match → only `pdf-text.test.ts` "prose quoting the magic" FAILS,
+  every `fs-read-pdf` test still passes. So the fallback alone fixes the HIGH.
+- **MEDIUM (new) — the tighter `isPdf` silently drops real PDFs to the text path.**
+  `packages/core/src/pdf-text.ts:515-539` now rejects (a) any printable byte before
+  `%PDF-` and (b) any printable non-blank byte after the version on the header line.
+  pdf.js opens both. Repro (`.tentacle/tmp/pdf-read/rev-p3/r2.ts`, real
+  `HostExecution` + `fsReadTool` on `makePdf`): `"HTTP/1.1 200 OK\r\n\r\n" + pdf` →
+  `RAW: "HTTP/1.1 200 OK\r\n\r\n%PDF-1.4\n1 0 obj…"`; header
+  `%PDF-1.4 %âãÏÓ` (the binary comment on the same line) → `RAW: "%PDF-1.4 %����…"`.
+  Both were extracted before this commit. This is the silent-wrong-state case the
+  feature exists to prevent: the model gets raw PDF objects as "text", with no error.
+  The same sniff also gates the attach paths (P4/P5). Fix: since the fallback already
+  handles text false positives, loosen `isPdf` again (substring, or at least allow
+  `%` and binary after the version, and a prefix of a printable junk line). Then pin
+  both variants in `fs-read-pdf.test.ts`.
+- **Gate:** `fs-read-pdf` + `pdf-text` + `host-execution` 87 pass, 0 fail ·
+  `bun run lint` 1755 files, clean · `bun run typecheck` exit 0.
+- **Other attacks (nothing found):** a ranged read of a real PDF whose head is all
+  ASCII now parses the whole file before refusing (slower, still correct);
+  `looksLikeTextBytes` on a 50 MiB buffer runs on the main thread (a linear decode,
+  acceptable).
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; same model family as the executor)
