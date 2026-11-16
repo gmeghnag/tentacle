@@ -1181,3 +1181,41 @@ lint` 1734 files, clean; `bun run typecheck` exit 0. Full `bun test` not run: it
 has no bearing on a no-code round.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; same model as the round-1–4 reviewer)
+
+### Round 2
+
+**Verdict: PASS** (it re-reviews the round-5 fix, `git diff HEAD~1` = `93fb1b35`; one
+MEDIUM is left as a follow-up). The commit subject says "deepseek", but the Execution
+header names `claude-opus-5-5`. If Opus did write it, this review shares its model
+family.
+
+- **Round-5 HIGH is fixed.** An RSS watchdog in `extract.ts:76-106` (wired at `:188`)
+  kills every live worker and returns the typed error `too-much-memory`. Mutation:
+  `tick` never kills → **2 fail** (the fake-RSS test and the real bomb test). Reverted.
+  `--rerun-each 6` on the bomb test: 6/6 pass.
+- **Round-5 MEDIUM is fixed.** A new test runs a real Worker with a missing module.
+  Mutation: `:216` (`onerror` before ready) changed to `corrupt` → **1 fail**.
+  Reverted; `git status` clean.
+- **MEDIUM (follow-up, not blocking): the overshoot is far beyond what the comment
+  claims.** `extract.ts:58-61` says the 10 ms poll bounds the overshoot. Repro
+  `.tentacle/tmp/pdf-read/r5/repeat.ts` uses the DEFAULT 512 MiB budget and a
+  1.5 MiB bomb that inflates to 1.5 GiB:
+  - Sequential runs: peak growth was 529, 545 and **1349 MB**.
+  - Two at a time: peak growth was 517 to **1943 MB** (up to 3.8× the budget).
+
+  It looks like single buffer-doubling jumps happen between ticks. Every run still
+  ended `too-much-memory`, and RSS went back to its baseline (+17 to 33 MB, no
+  ratchet). So on a laptop or an unlimited pod (`k8s/pod.ts:51`, where the limit is
+  set only by the user), the daemon survives. With a user pod quota of 2 GiB or less,
+  one bomb could still OOM the pod daemon. The fix: fix the comment, and lower the
+  default or derive it from the cgroup limit.
+- **Unverified (macOS):** after three kills in a row, more bombs finished `ok` in
+  about 2.2 s with RSS growth of 21 MB or less. The likely cause is macOS memory
+  compression hiding resident pages from RSS. Harmless here (those pages are
+  compressed), but the watchdog can't see it. Linux, where pods run, has no such
+  compression by default.
+- **Gate:** `pdf-extract` + `pdf-worker-entry` + `pdf-text` 75 pass, 0 fail; `bun run
+  lint` 1734 files, clean; `bun run typecheck` exit 0. `git status` was clean before
+  this note.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context)
