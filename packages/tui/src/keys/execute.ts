@@ -17,6 +17,7 @@ import type { QuitConfirmFacts } from "../commands.ts";
 import type { OpenPanel } from "../panel.ts";
 import { applyPanel } from "../panel.ts";
 import type { ReplyMode } from "../permission-reply.ts";
+import type { SchedulesState } from "../schedule-view.ts";
 import type { SessionsState, SessionsView } from "../sessions-panel.ts";
 import {
   deleteFailedNotice,
@@ -75,6 +76,10 @@ export interface KeyHost {
   sessionsDelete(id: string, startedGen: number): void;
   killJob(id: string): void;
   killChild(id: string): void;
+  /** Delete one scheduled wake (`session/schedule_delete`, cron-tool S5). */
+  deleteSchedule(id: string): void;
+  /** Write the `/schedule` panel's own state (its arm/answer). */
+  setSchedulesState(state: SchedulesState): void;
   setDock(state: DockState): void;
   toggleAgents(): void;
   toggleExpandAll(): void;
@@ -190,6 +195,12 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "killChild":
       host.killChild(effect.id);
+      return;
+    case "deleteSchedule":
+      host.deleteSchedule(effect.id);
+      return;
+    case "setSchedulesState":
+      host.setSchedulesState(effect.state);
       return;
     case "setDock":
       host.setDock(effect.state);

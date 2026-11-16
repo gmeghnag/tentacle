@@ -59,6 +59,7 @@ import {
 } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedRows } from "./queued.ts";
 import { shownRows } from "./queued.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import type { Selection } from "./selection.ts";
 import type { DisplayState } from "./state.ts";
 import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
@@ -93,6 +94,11 @@ export interface FrameInput {
   readonly subagentsRef: { current: readonly BackgroundAgentRow[] | undefined };
   readonly jobRows: readonly DockJobRow[] | undefined;
   readonly jobRowsRef: { current: readonly DockJobRow[] | undefined };
+  /**
+   * The session's ARMED scheduled wakes (cron-tool S5): they ride the same dock
+   * and pill as the children and jobs. `undefined` = no table to report.
+   */
+  readonly scheduleRows: readonly ScheduleDockRow[] | undefined;
   readonly drawerRow: BackgroundAgentRow | null;
   readonly drawerJob: DockJobRow | null;
   /** `jobOutputRef.current`: a job's cached output tail, keyed by its wire id. */
@@ -153,6 +159,7 @@ export function frameLayout(input: FrameInput) {
     subagentsRef,
     jobRows,
     jobRowsRef,
+    scheduleRows,
     drawerRow,
     drawerJob,
     jobOutput: jobOutputMap,
@@ -230,11 +237,14 @@ export function frameLayout(input: FrameInput) {
   // and its row says `⚠ needs your permission` — hiding the list there made that
   // row unreachable (Review M1).
   const dockListVisible =
-    dock.focus.kind === "list" && listVisible(subagents, jobRows) && quitConfirm === null;
+    dock.focus.kind === "list" &&
+    listVisible(subagents, jobRows, scheduleRows) &&
+    quitConfirm === null;
   const dockView = dockListVisible
     ? backgroundListView({
         rows: subagentsRef.current,
         jobs: jobRowsRef.current,
+        schedules: scheduleRows ?? [],
         askingId: permission.pendingAgent?.id ?? null,
         focus: dock.focus,
         width: columns,
@@ -288,6 +298,7 @@ export function frameLayout(input: FrameInput) {
   const pill = pillView({
     agents: subagents?.length ?? 0,
     jobs: jobRows?.length ?? 0,
+    schedules: scheduleRows?.length ?? 0,
     askingId: permission.pendingAgent?.id ?? null,
     finished: dockFinished,
     now: dockNow,

@@ -46,6 +46,7 @@ import { type DockJobRow, frozenAgent, frozenJob, listVisible } from "./backgrou
 import { type BackgroundAgentRow, sameIds, sameJobIds, sameReads } from "./background-view.ts";
 import type { LineEditor } from "./hooks.ts";
 import { JOB_REFRESH_MS } from "./job-drawer.ts";
+import { type ScheduleDockRow, departedScheduleNotice } from "./schedule-view.ts";
 
 /**
  * What the dock takes from `App`. Three ref-backed fields and the open line
@@ -80,6 +81,20 @@ export interface DockLayer {
   readonly jobRowsRef: { current: readonly DockJobRow[] | undefined };
   readonly setJobs: (rows: readonly DockJobRow[] | undefined) => void;
   readonly dockLastJobRowsRef: { current: readonly DockJobRow[] };
+  /**
+   * The session's ARMED scheduled wakes (cron-tool S5), as last reported:
+   * `undefined` = this session has no table to report (a pod, an older daemon).
+   */
+  readonly scheduleRows: readonly ScheduleDockRow[] | undefined;
+  readonly schedulesRef: { current: readonly ScheduleDockRow[] | undefined };
+  readonly setSchedules: (rows: readonly ScheduleDockRow[] | undefined) => void;
+  /**
+   * The wakes THIS TUI asked the daemon to delete (fix round 1, finding 1): their
+   * departure is ours, so it is already said (`Deleted sc-N.`) and must not be
+   * re-explained as somebody else's. Shared with the `/schedule` panel's delete,
+   * which reaches the same method through another executor.
+   */
+  readonly ownScheduleDeletesRef: { current: Set<string> };
 
   // --- exits and output (written by App's ordered effects)
   readonly dockOutcomeRef: { current: Record<string, DockOutcome> };
@@ -118,6 +133,8 @@ export interface DockLayer {
   // --- the actions
   readonly killChild: (id: string) => void;
   readonly killJob: (id: string) => void;
+  /** Delete one scheduled wake (`session/schedule_delete`, cron-tool S5). */
+  readonly deleteSchedule: (id: string) => void;
   readonly toggleAgents: () => void;
   /** `true` means the dock owned the text; the caller's own submit must not run. */
   readonly submitToTarget: (value: string) => boolean;
@@ -176,6 +193,53 @@ export function useDock(host: DockHost): DockLayer {
   }, []);
   /** The last non-empty rows a job's drawer can freeze on. */
   const dockLastJobRowsRef = useRef<readonly DockJobRow[]>([]);
+  // The session's armed scheduled wakes, as last reported (`undefined`: this
+  // session has no table to report — a pod, an older daemon: cron-tool S5).
+  const [scheduleRows, setScheduleRowsState] = useState<readonly ScheduleDockRow[] | undefined>(
+    undefined,
+  );
+  const schedulesRef = useRef<readonly ScheduleDockRow[] | undefined>(undefined);
+  /** The ids this TUI deleted (a dock `ctrl+x` or a `/schedule` `x x`): see `setSchedules`. */
+  const ownScheduleDeletesRef = useRef<Set<string>>(new Set());
+  const setSchedules = useCallback(
+    (rows: readonly ScheduleDockRow[] | undefined) => {
+      const before = schedulesRef.current;
+      schedulesRef.current = rows;
+      // A wake that LEFT the table says so (cron-tool S3's drift 5, carried to
+      // S5) — and says only that, plus an expiry the clock proves (fix round 1,
+      // finding 1). The daemon publishes the list alone, so a guessed CAUSE
+      // (failures, a fire) would be a false statement: the user's own delete
+      // looks exactly like a failure stop. Only a real report can speak:
+      // `undefined` is "no table here", not "all gone".
+      if (before !== undefined && rows !== undefined) {
+        const own = ownScheduleDeletesRef.current;
+        const live = new Set(rows.map((row) => row.id));
+        const gone = departedScheduleNotice(before, rows, Date.now(), own);
+        if (gone !== null) {
+          for (const text of gone.split("\n")) {
+            pushNotice(`_${text}_`);
+          }
+        }
+        // Each of our own ids is spent once its departure has been read: a later
+        // departure of the same id (a new wake cannot reuse it, but the set must
+        // not grow) says what it is.
+        for (const id of [...own]) {
+          if (!live.has(id)) {
+            own.delete(id);
+          }
+        }
+      }
+      // The frame must follow the ARMED ids and their counters (the rows are
+      // labels, so a count would miss a `fire 5` or a moved `nextAt`).
+      // `undefined` is also what a switch writes (`useSessionLink`'s reset): the
+      // deleted-id memory belongs to the session that goes away with it.
+      if (rows === undefined) {
+        ownScheduleDeletesRef.current.clear();
+      }
+      setScheduleRowsState(rows);
+    },
+    [pushNotice],
+  );
   /**
    * A child's exit as the transcript's notice already learns it, by id: the
    * `end_turn` that means "finished" (what a frozen drawer says).
@@ -236,12 +300,14 @@ export function useDock(host: DockHost): DockLayer {
     (): readonly string[] => [
       ...(subagentsRef.current ?? []).map((r) => r.id),
       ...(jobRowsRef.current ?? []).map((r) => r.id),
+      // The armed wakes last, as the view paints them (cron-tool S5).
+      ...(schedulesRef.current ?? []).map((r) => r.id),
     ],
     [],
   );
   /** Whether the list has anything to show (the dock's `listVisible`). */
   const dockVisible = useCallback(
-    (): boolean => listVisible(subagentsRef.current, jobRowsRef.current),
+    (): boolean => listVisible(subagentsRef.current, jobRowsRef.current, schedulesRef.current),
     [],
   );
   /** The item an open drawer paints: its live row (child or job), or the frozen one. */
@@ -443,6 +509,41 @@ export function useDock(host: DockHost): DockLayer {
     [field, fieldValueRef, sessionRef, pushNotice, setDock],
   );
 
+  /**
+   * Delete one scheduled wake (`session/schedule_delete`, cron-tool S5): the
+   * row disappears when the daemon's `schedules` frame says so — never on a
+   * local echo, so every surface (this TUI, the phone) agrees on one truth. A
+   * refusal is a RESULT with a `reason` (an unknown id, an older daemon, a
+   * client that does not trust its daemon), shown as a notice.
+   */
+  const deleteSchedule = useCallback(
+    (id: string): void => {
+      const session = sessionRef.current;
+      if (!session?.deleteSchedule) {
+        pushNotice("_this session cannot delete scheduled wakes: none are reported here_");
+        return;
+      }
+      void session.deleteSchedule(id).then(
+        (result) => {
+          if (result.deleted) {
+            // Ours: the departure of this id must not be re-explained as a
+            // failure or a fire (fix round 1, finding 1). Recorded BEFORE the
+            // frame that drops it can arrive.
+            ownScheduleDeletesRef.current.add(id);
+            pushNotice(`_Deleted ${id}._`);
+            return;
+          }
+          pushNotice(`_${id} was not deleted: ${result.reason ?? "the daemon no longer has it"}_`);
+        },
+        (error: unknown) =>
+          pushNotice(
+            `_${id} was not deleted: ${error instanceof Error ? error.message : String(error)}_`,
+          ),
+      );
+    },
+    [sessionRef, pushNotice],
+  );
+
   return {
     subagents,
     subagentsRef,
@@ -452,6 +553,11 @@ export function useDock(host: DockHost): DockLayer {
     jobRowsRef,
     setJobs,
     dockLastJobRowsRef,
+    scheduleRows,
+    schedulesRef,
+    setSchedules,
+    ownScheduleDeletesRef,
+    deleteSchedule,
     dockOutcomeRef,
     dockFinishedRef,
     dockStoppedRef,

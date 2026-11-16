@@ -59,6 +59,13 @@ export const APP_CLIENT_OPTIONS = {
   // bit a `connect` TUI sets (docs/feat/session-auto-accept.md D4/D6). A pod is
   // never reachable from here, and the bit fails closed anyway.
   sharedAutoAccept: true,
+  // The same argument, for the daemon's own turns (docs/feat/cron-tool.md D1,
+  // S6): a `serve` on the user's host starts scheduled-wake turns on its own
+  // clock, and only such a daemon may have its `schedules` table, its
+  // `turn_start.schedule` refs and its deletes acted on. `daemonWakes` is the
+  // bit that gates all three (`remote-client.ts`), set by `connect` and the
+  // worker already; a pod's daemon sets it nowhere and its claims are dropped.
+  daemonWakes: true,
 } as const;
 
 export interface OpenComputerDeps {

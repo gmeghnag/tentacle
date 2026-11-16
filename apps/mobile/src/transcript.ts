@@ -219,6 +219,10 @@ export function apply(state: State, input: TranscriptInput): State {
         key,
         text: input.text,
         images: (input.attachments ?? []).map((ref): ImageRef => imageRef(ref)),
+        // The fired turn's own ref (docs/feat/cron-tool.md S6, M8): display data
+        // the client already trust-gated and sanitized, carried as sent. Absent
+        // for every ordinary prompt and after a reload (option A).
+        ...(input.schedule === undefined ? {} : { schedule: input.schedule }),
       }));
     case "unsupported":
       return applyUnsupported(state, input.kind);

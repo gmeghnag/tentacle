@@ -5,6 +5,7 @@
  * was measured: the figures are unknown (`null`, rendered `–`), never a fake 0.
  * The first measured turn gives the real numbers.
  */
+import { schedulesLabel } from "./schedule-view.ts";
 import type { DisplayState, TokenTotals } from "./state.ts";
 
 export interface StatusTokens {
@@ -71,6 +72,13 @@ export interface PillInput {
   readonly agents: number;
   /** Running shell jobs (P6's feed; 0 today). */
   readonly jobs?: number;
+  /**
+   * The session's ARMED scheduled wakes (docs/feat/cron-tool.md S5, mockup M2).
+   * They are not running, but they are the session's background work: a user
+   * must be able to see that a reminder is waiting (`2 sched`), and reach its
+   * rows. Absent = nothing armed.
+   */
+  readonly schedules?: number;
   /** The child waiting on a permission, if any. */
   readonly askingId?: string | null;
   /** The child that just ended and when (ms); `null` when none is in its window. */
@@ -93,17 +101,19 @@ export interface PillInput {
  */
 export function pillView(input: PillInput): PillView {
   const jobs = input.jobs ?? 0;
-  const total = input.agents + jobs;
+  const schedules = input.schedules ?? 0;
+  const total = input.agents + jobs + schedules;
   if (total <= 0) {
     return { kind: "none" };
   }
   // The counts by kind: a pill that says `3` for two agents and a shell hides
-  // what is running; `1 agent` is singular (`2 agents`, `1 shell`). A kind with
-  // NOTHING running contributes no words at all: a shell alone reads `1 shell`,
-  // never `0 agents · 1 shell` (docs/fix/connect-functest-batch.md item B).
+  // what is running; `1 agent` is singular (`2 agents`, `1 shell`, `1 sched`).
+  // A kind with NOTHING contributes no words at all: a shell alone reads
+  // `1 shell`, never `0 agents · 1 shell` (docs/fix/connect-functest-batch.md item B).
   const parts = [
     ...(input.agents > 0 ? [`${input.agents} ${input.agents === 1 ? "agent" : "agents"}`] : []),
     ...(jobs > 0 ? [`${jobs} ${jobs === 1 ? "shell" : "shells"}`] : []),
+    ...(schedulesLabel(schedules) === "" ? [] : [schedulesLabel(schedules)]),
   ];
   const counts = parts.join(" · ");
   const asking = input.askingId ?? null;

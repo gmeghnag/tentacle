@@ -16,6 +16,7 @@ import { type JSX, type ReactNode, useState } from "react";
 import { Image, Pressable, StyleSheet, Text, View } from "react-native";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
+import { firedScheduleHead } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
 import { subAgentLine, toolMeta, toolSummary } from "../../tool-summary.ts";
@@ -67,9 +68,24 @@ function parsedOf(text: string): Parsed {
 
 function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Element {
   const user = row as Extract<Row, { kind: "user" }>;
+  // A fired turn's own head (cron-tool S6, M8 option B): the styled row a LIVE
+  // `turn_start.schedule` ref earns. No ref → nothing here, and the durable
+  // `[scheduled …]` prefix inside the bubble's text is the whole message (option
+  // A, which is also what a reload shows: the ref is display data, never stored).
+  const fired = firedScheduleHead(user.schedule);
   return (
     <Shell row={user}>
       <View style={[styles.bubble, { backgroundColor: palette.fill }]}>
+        {fired === "" ? null : (
+          <Text
+            testID="row-scheduled-head"
+            numberOfLines={1}
+            maxFontSizeMultiplier={DENSE_FONT_SCALE}
+            style={[typography.caption, { color: palette.accent }]}
+          >
+            {fired}
+          </Text>
+        )}
         {user.restart === true ? (
           <Text style={[typography.caption, { color: palette.sec }]}>restart prompt</Text>
         ) : null}

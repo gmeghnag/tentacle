@@ -23,6 +23,11 @@ import {
   DEFAULT_MODEL,
   DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
+  DEFAULT_SCHEDULES_EXPIRY_DAYS,
+  DEFAULT_SCHEDULES_MAX_AHEAD_DAYS,
+  DEFAULT_SCHEDULES_MAX_JOBS,
+  DEFAULT_SCHEDULES_MIN_INTERVAL_MINUTES,
+  DEFAULT_SCHEDULES_PROMPT_MAX_CHARS,
   DEFAULT_SESSION_HOP_TOOL,
   DEFAULT_SUBAGENTS_ENABLED,
   DEFAULT_SUBAGENTS_TWO_WAY,
@@ -87,6 +92,19 @@ export interface WorkloadShellConfig {
   readonly tool: boolean;
 }
 
+/**
+ * `schedules`, resolved: THIS host's limits on the agent's scheduled wakes
+ * (docs/feat/cron-tool.md D3, owner Q6). File-only, never carried: the host
+ * that runs the timer decides.
+ */
+export interface SchedulesConfig {
+  readonly maxJobs: number;
+  readonly minIntervalMinutes: number;
+  readonly expiryDays: number;
+  readonly maxAheadDays: number;
+  readonly promptMaxChars: number;
+}
+
 /** How the API key will be obtained. */
 export type ApiKeySource = "env" | "file" | "command" | "none";
 
@@ -109,6 +127,8 @@ export interface ResolvedConfig {
   readonly sessionHop: SessionHopConfig;
   /** The agent's `workload_shell` tool (docs/fix/workload-shell-live.md, owner decision 1). */
   readonly workloadShell: WorkloadShellConfig;
+  /** The host's limits on the agent's scheduled wakes (docs/feat/cron-tool.md D3). */
+  readonly schedules: SchedulesConfig;
   /** Max output tokens per response; unset → the provider's own default. */
   readonly maxTokens?: number;
   /**
@@ -261,6 +281,11 @@ export interface ResolvedConfig {
     readonly contextResetMaxPerMessage: Source;
     readonly sessionHopTool: Source;
     readonly workloadShellTool: Source;
+    readonly schedulesMaxJobs: Source;
+    readonly schedulesMinIntervalMinutes: Source;
+    readonly schedulesExpiryDays: Source;
+    readonly schedulesMaxAheadDays: Source;
+    readonly schedulesPromptMaxChars: Source;
     readonly maxInlineOutputChars: Source;
     readonly toolOutputRetentionDays: Source;
     readonly redactSecrets: Source;
@@ -575,6 +600,32 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.workloadShell?.tool,
     DEFAULT_WORKLOAD_SHELL_TOOL,
   );
+  // File-only, like `contextAwareness`: the host running the timer decides.
+  const schedulesMaxJobs = pick(
+    undefined,
+    fileConfig.schedules?.maxJobs,
+    DEFAULT_SCHEDULES_MAX_JOBS,
+  );
+  const schedulesMinIntervalMinutes = pick(
+    undefined,
+    fileConfig.schedules?.minIntervalMinutes,
+    DEFAULT_SCHEDULES_MIN_INTERVAL_MINUTES,
+  );
+  const schedulesExpiryDays = pick(
+    undefined,
+    fileConfig.schedules?.expiryDays,
+    DEFAULT_SCHEDULES_EXPIRY_DAYS,
+  );
+  const schedulesMaxAheadDays = pick(
+    undefined,
+    fileConfig.schedules?.maxAheadDays,
+    DEFAULT_SCHEDULES_MAX_AHEAD_DAYS,
+  );
+  const schedulesPromptMaxChars = pick(
+    undefined,
+    fileConfig.schedules?.promptMaxChars,
+    DEFAULT_SCHEDULES_PROMPT_MAX_CHARS,
+  );
   const maxInlineOutputChars = pick(
     parseNonNegativeInt(env.TENTACLE_MAX_OUTPUT_CHARS),
     fileConfig.tools?.maxInlineOutputChars,
@@ -680,6 +731,13 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     },
     sessionHop: { tool: sessionHopTool.value },
     workloadShell: { tool: workloadShellTool.value },
+    schedules: {
+      maxJobs: schedulesMaxJobs.value,
+      minIntervalMinutes: schedulesMinIntervalMinutes.value,
+      expiryDays: schedulesExpiryDays.value,
+      maxAheadDays: schedulesMaxAheadDays.value,
+      promptMaxChars: schedulesPromptMaxChars.value,
+    },
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     ...(maxImageBytes !== undefined ? { maxImageBytes } : {}),
     ...(images !== undefined ? { images } : {}),
@@ -748,6 +806,11 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       contextResetMaxPerMessage: contextResetMaxPerMessage.source,
       sessionHopTool: sessionHopTool.source,
       workloadShellTool: workloadShellTool.source,
+      schedulesMaxJobs: schedulesMaxJobs.source,
+      schedulesMinIntervalMinutes: schedulesMinIntervalMinutes.source,
+      schedulesExpiryDays: schedulesExpiryDays.source,
+      schedulesMaxAheadDays: schedulesMaxAheadDays.source,
+      schedulesPromptMaxChars: schedulesPromptMaxChars.source,
       maxInlineOutputChars: maxInlineOutputChars.source,
       toolOutputRetentionDays: toolOutputRetentionDays.source,
       redactSecrets: redactSecrets.source,

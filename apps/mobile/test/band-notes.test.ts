@@ -236,6 +236,7 @@ describe("`SessionInfoSheet` renders one block per note (S4 review finding 1)", 
         onClose: () => {},
         expanded: null,
         onExpand: () => {},
+        onDeleteSchedule: () => {},
       }),
     );
 

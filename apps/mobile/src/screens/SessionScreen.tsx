@@ -826,6 +826,7 @@ export function SessionScreen({
             autoAcceptError={info.autoAcceptError}
             onAutoAccept={(on) => void controller.setAutoAccept(on)}
             onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
+            onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}
             onRefresh={() => void controller.refreshInfo()}
             onRetry={() => void controller.refreshInfo()}
             expanded={expanded}

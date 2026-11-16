@@ -407,6 +407,26 @@ const settingsShape = {
     .strict()
     .optional(),
   /**
+   * Scheduled wakes (docs/feat/cron-tool.md D3, owner Q6): THIS host's limits on
+   * the agent's `schedule_create`. File-only, never carried (a pod is never
+   * offered the tools). Every key is checked when a wake is created.
+   */
+  schedules: z
+    .object({
+      /** Live wakes per session; 1..100, default 10. */
+      maxJobs: z.number().int().min(1).max(100).optional(),
+      /** The shortest `every`, in minutes; 1..1440, default 1. */
+      minIntervalMinutes: z.number().int().min(1).max(1440).optional(),
+      /** A recurring wake's life (and the longest `every`), in days; 1..30, default 7. */
+      expiryDays: z.number().int().min(1).max(30).optional(),
+      /** How far ahead an `at` may point, in days; 1..30, default 7. */
+      maxAheadDays: z.number().int().min(1).max(30).optional(),
+      /** The longest prompt; 1..20000, default 2000. */
+      promptMaxChars: z.number().int().min(1).max(20_000).optional(),
+    })
+    .strict()
+    .optional(),
+  /**
    * Auto-wake: when a background job exits while the agent is idle, start a
    * continuation turn so it reacts without a user prompt. Default: enabled.
    */

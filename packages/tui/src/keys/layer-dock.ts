@@ -55,11 +55,14 @@ export const dockLayer: KeyLayer = {
     }
     if (step.effect.kind === "stop") {
       // Routed by the id's KIND, never by which list the row came from: a job's
-      // `x`+`y` goes to `session/job_kill` (the daemon's own registry).
+      // `x`+`y` goes to `session/job_kill` (the daemon's own registry), and a
+      // scheduled wake's goes to `session/schedule_delete` (cron-tool S5).
       effects.push(
         dockKindOf(step.effect.id) === "job"
           ? { kind: "killJob", id: step.effect.id }
-          : { kind: "killChild", id: step.effect.id },
+          : dockKindOf(step.effect.id) === "schedule"
+            ? { kind: "deleteSchedule", id: step.effect.id }
+            : { kind: "killChild", id: step.effect.id },
       );
     } else if (step.effect.kind === "open" || step.effect.kind === "close") {
       effects.push({ kind: "fieldSet", text: step.effect.draftIn });

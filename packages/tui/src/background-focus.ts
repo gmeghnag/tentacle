@@ -62,7 +62,8 @@ export type DockEffect =
   | { readonly kind: "none" }
   /** Not the dock's: the App's own routing continues (line editing, palette, …). */
   | { readonly kind: "pass" }
-  /** Stop one child (`session/agent_kill`). */
+  // Stop one child (`session/agent_kill`), or delete one scheduled wake
+  // (`session/schedule_delete`, docs/feat/cron-tool.md S5).
   | { readonly kind: "stop"; readonly id: string }
   /** Open one child: stash the draft it left, restore the target's. */
   | {
@@ -75,12 +76,15 @@ export type DockEffect =
   | { readonly kind: "close"; readonly draftOut: string; readonly draftIn: string };
 
 /**
- * What an id names. The two kinds' ids never collide (`sa-N` vs `bg-N`), and a
- * job's drawer is read-only, so the KIND — not the row's presence — decides where
- * a submitted text goes. Pure, and derived from the id alone, so the App keeps
- * ONE key space and every state key stays the wire id (owner Q5 (b)).
+ * What an id names. The three kinds' ids never collide (`sa-N`, `bg-N`, `sc-N`),
+ * and a job's drawer is read-only, so the KIND — not the row's presence — decides
+ * where a submitted text goes. Pure, and derived from the id alone, so the App
+ * keeps ONE key space and every state key stays the wire id (owner Q5 (b)).
  */
-export function dockKindOf(id: string): "agent" | "job" {
+export function dockKindOf(id: string): "agent" | "job" | "schedule" {
+  if (id.startsWith("sc-")) {
+    return "schedule";
+  }
   return id.startsWith("bg-") ? "job" : "agent";
 }
 

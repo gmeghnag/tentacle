@@ -22,6 +22,16 @@ export interface UserRow {
   readonly images: readonly ImageRef[];
   /** The model's restart prompt after a context reset (labelled "restart prompt"). */
   readonly restart?: true;
+  /**
+   * The scheduled wake that started this turn (docs/feat/cron-tool.md S6, M8
+   * option B): DISPLAY data for the styled `◷ Scheduled · every 10m` head. Set
+   * only from a live `turn_start.schedule` ref the client already gated on the
+   * trust bit and sanitized (`client/schedules.ts` `firedScheduleRef`) — so its
+   * absence is the normal case: an ordinary prompt, an older daemon, a pod's
+   * daemon, or a RELOAD (the durable `[scheduled sc-1 · …]` prefix in `text` is
+   * then the whole row, option A).
+   */
+  readonly schedule?: { readonly id: string; readonly spec: string };
 }
 
 export interface AssistantRow {

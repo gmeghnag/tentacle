@@ -72,6 +72,7 @@ const DROPPABLE: ReadonlySet<SessionUpdate["type"]> = new Set<SessionUpdate["typ
   "session_settings",
   "subagents",
   "jobs",
+  "schedules",
   "subagent_notify",
   "subagent_message",
   "background_exit",

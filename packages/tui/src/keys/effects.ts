@@ -15,6 +15,7 @@ import type { DockState } from "../background-focus.ts";
 import type { ChordState } from "../chord.ts";
 import type { QuitConfirmFacts } from "../commands.ts";
 import type { ReplyMode } from "../permission-reply.ts";
+import type { SchedulesState } from "../schedule-view.ts";
 import type { SessionsState } from "../sessions-panel.ts";
 import type { TreeAction } from "../tree-panel.ts";
 
@@ -60,6 +61,8 @@ export type KeyEffect =
   | { readonly kind: "switchCapability" }
   /** Write the sessions panel's state (`sessionsDelete`'s arm/answer). */
   | { readonly kind: "setSessionsState"; readonly state: SessionsState }
+  /** Write the `/schedule` panel's own state (its arm/answer, cron-tool S5). */
+  | { readonly kind: "setSchedulesState"; readonly state: SchedulesState }
   /** Switch to another session (the panel already closed). */
   | { readonly kind: "switchTo"; readonly id: string; readonly reopen: boolean }
   /** Delete a session, then refresh the panel if it is still the same one. */
@@ -71,6 +74,8 @@ export type KeyEffect =
     }
   | { readonly kind: "killJob"; readonly id: string }
   | { readonly kind: "killChild"; readonly id: string }
+  /** Drop one scheduled wake (`session/schedule_delete`, cron-tool S5): the dock's `x`. */
+  | { readonly kind: "deleteSchedule"; readonly id: string }
   | { readonly kind: "setDock"; readonly state: DockState }
   | { readonly kind: "fieldSet"; readonly text: string }
   | { readonly kind: "fieldReset" }
