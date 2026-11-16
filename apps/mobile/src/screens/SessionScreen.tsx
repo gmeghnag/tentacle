@@ -523,8 +523,6 @@ export function SessionScreen({
     activityVm.badge && headerPill({ mode: activitySettings.mode, voiceOver: a11yFlags.voiceOver });
   const floatShown = floatVisible({
     mode: activitySettings.mode,
-    count: activityVm.count,
-    unread: activityVm.unread,
     covered:
       drawerOpen ||
       activityOpen ||

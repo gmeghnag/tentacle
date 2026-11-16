@@ -214,9 +214,13 @@ centre-to-centre ≥ 56 pt, 8 pt padding from every bound.
 4. Nothing fits → `{kind:"menu"}`: the plain `ActionSheet` with the same
    items. The fan is never clipped; the sweep above found 0 such cases on
    two phone sizes, but the branch exists and is tested.
-- **Order**: item 0 sits at the arc end nearest the composer (largest y) =
-  the shortest travel for a thumb that rests low. With two rings, the inner
-  ring holds the top-priority half.
+- **Order**: item 0 sits at the arc END nearest the composer (the end with
+  the larger y) = the shortest travel for a thumb that rests low, and the
+  rest follow along the arc. With two rings, the inner ring holds the
+  top-priority half. *(Corrected in H1: an arc that passes straight down —
+  six items high in the band — has a lower item in its middle, so "item 0
+  has the largest y" is false in 34 of the 1008 sweep cases; the solver, the
+  same as the mockup's, keeps arc order so priorities stay contiguous.)*
 - **Selection** (`pickItem(layout, point, prev)`): the angular sector around
   the anchor, active between 0.45·R and R + 56 pt (two rings: the radius
   picks the ring). Hysteresis: a neighbour wins only past the midpoint + 4°,
@@ -394,7 +398,9 @@ Red first (AGENTS §9). Pure, bun test, `apps/mobile/test/`:
 - `hub-fan.test.ts`:
   - the sweep of the render-check as a property test (both edges ×
     yFraction 0…1 × n 1…6 × keyboard down/up × 390×844 and 375×667): every
-    item inside bounds − padding, adjacent ≥ 56 pt, item 0 has the largest y;
+    item inside bounds − padding, adjacent ≥ 56 pt, each ring in arc order
+    from its lower end, item 0 on the inner ring (corrected in H1, see
+    Design 3 "Order");
   - the one-ring case uses the minimum R;
   - the bottom-of-band case → two rings;
   - an impossible band (e.g. 120 pt high, n = 6) → `menu`;
@@ -501,7 +507,103 @@ Then the Review: a fresh-context `/code-review` that red-teams M1–M17 and
 
 ## Execution
 
-*(empty — filled by the executing model per slice)*
+### H1 — gesture machine + fan geometry
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Preconditions re-checked.** P1 holds: `git log main` has mobile-chrome merged
+whole (`f0c80329`), and `apps/mobile/src/floating-button.ts` and
+`ui/FloatingActivity.tsx` exist. This plan's load-bearing assumption (the
+`PanResponder` keeps the touch off the button) is H3 step 1's on-device spike;
+H1 is pure code and does not depend on it. H1's own load-bearing check is the
+render-check, re-run before any edit: `bun .tentacle/tmp/mobile-hub/render-check.ts`
+→ `[sweep] cases=1008 oneRing=944 twoRings=64 menuFallback=0 clipped=0`,
+`RENDER-CHECK OK` (unchanged).
+
+**As built, in order.**
+1. Skeletons with the final signatures and placeholder bodies, then the tests.
+   Red on assertions, not imports: `hub-gesture` + `hub-fan` 41 fail / 13 pass
+   (the 13 are cases a no-op satisfies, e.g. "ignored in idle"; the mutations
+   below cover them). `floating-button` (updated tests) 3 fail / 22 pass.
+2. `apps/mobile/src/hub-gesture.ts`: `SLOP` 10, `LONG_MS` 400 (`:24-26`),
+   `classifyPress` (`:31`), `reduce(state, event, solve)` (`:104`) with the
+   states, events and effects of Design 1.
+3. `apps/mobile/src/hub-fan.ts`: `fanLayout` (`:98`, a port of the mockup
+   solver), `pickItem` (`:179`), `labelPlacement` (`:243`), `fanMotion`
+   (`:286`); constants `:15-35`.
+4. `apps/mobile/src/floating-button.ts`: `isTap` = `classifyPress(...) === "tap"`;
+   `TAP_SLOP`/`TAP_MS` removed (no other users); `visible` = Floating ∧
+   ¬covered ∧ fits.
+5. Green: the three files, 82 pass / 0 fail.
+
+**Drift from the Implementation (and why).**
+- **Item order (plan corrected).** Design 3 and Tests said "item 0 has the
+  largest y". The sweep proved that false in 34/1008 cases (all n = 6, high
+  in the band: the arc passes straight down, so a middle item is lowest). The
+  solver keeps the mockup's rule, "item 0 = the lower END of its ring, the
+  rest in arc order". Sorting by y would scatter priorities along the arc.
+  Design 3 "Order" and the Tests bullet are corrected; the property test
+  checks arc adjacency, lower end first, item 0 on the inner ring.
+- **Effects added**: `tap` (a tap needs an effect to open Activity) and
+  `dragCancel` (a system cancel mid-drag puts the button back; S10's `back()`).
+  `dragTo`/`drop` carry `delta` from the down point instead of a page point,
+  because `FloatingActivity` positions from `start + delta`.
+- **`reduce` takes `solve: () => HubMenu`** (layout + item ids). It is called
+  only at the open, so the layout is the open-time snapshot (Design 5).
+  `HubMenu.ids` is how `commit(id)` knows ids, because `fanLayout` takes only `n`.
+- **Late timer**: an `up` at ≥ 400 ms that is still `pressing` (the JS timer
+  was late) opens the fan *sticky* at the release point. Otherwise a held
+  press would do nothing. A stale `timer` (< 400 ms after this press's `down`)
+  is ignored. This extends M13.
+- **Sticky + `down`**: a new touch on the button while sticky closes the fan
+  (Design 1 "a tap … on the button closes"). Its release then meets `idle`.
+- **Menu layout / no items**: `open(menu)` + `firm`, then the machine goes
+  `idle` (the ActionSheet takes over). With zero ids nothing opens and there
+  is no haptic.
+- **Ring-boundary hysteresis, 4 pt** (`RING_HYSTERESIS`). It is not in the
+  plan, but with two rings a finger at the boundary would flicker between
+  rings, and every flicker is a haptic tick. The angular rule of the plan also
+  holds at the arc's ends: the end item holds 4° past its own sector edge.
+- **`labelPlacement`** takes the measured pill size and the screen rect, and
+  returns the pill's top-left. The side gap is `LABEL_GAP` 40 pt from the item
+  centre (the mockup's, it clears the ×1.3 item). Above = the pill's bottom
+  40 pt above the centre. A pill wider than the screen starts at the left padding.
+- **`visible` signature**: `count`/`unread` are dropped, so the one call site
+  `screens/SessionScreen.tsx:524` loses those two lines. That file is H3's, but
+  typecheck needs the change. **Interim effect on this branch until H3**: in
+  Floating mode the S10 button shows at zero activity with an empty count.
+- **Noted for H3, not changed**: Design 8 says the default rest is
+  yFraction 0.72. S10's `place` defaults to 1 (bottom of the band), pinned by
+  `floating-button.test.ts` "no stored position → … bottom". H3 decides.
+- **Changelog**: `changelog.d/mobile-hub.added.md` was written now, with the
+  plan's wording, as the orchestrator asked for one fragment. The plan gives
+  it to H3. It describes the finished hub, and "Artifacts" depends on H4, so
+  H3/H4 must re-check it before merge.
+
+**Mutation checks** (`bun .tentacle/tmp/mobile-hub/mutate.ts`: apply one
+mutation, run the narrow file, restore the bytes; tree re-verified green after):
+
+```
+M1 SLOP < → <= (classifyPress + far): 28 pass, 2 fail — e.g. classifyPress > exactly 10 pt → drag (the slop is exclusive)
+M2 drop the sticky branch: 25 pass, 5 fail — e.g. long-press → fan > released < 10 pt after the open → sticky; no close, no haptic
+M3 tick also on null: 23 pass, 7 fail — e.g. long-press → fan > slide across three items → three highlights + three ticks; back to centre → highlight(null), no tick
+M4 drop the padding: 26 pass, 1 fail — e.g. fanLayout: the render-check sweep as a property > 1008 cases: inside the padding, ≥ 56 pt apart, arc order from the lower end
+M5 drop the two-ring step: 22 pass, 2 fail — e.g. fanLayout: the render-check sweep as a property > never the menu on these phones, and the two-ring step is used
+M6 invert the order: 25 pass, 2 fail — e.g. fanLayout: the render-check sweep as a property > 1008 cases: inside the padding, ≥ 56 pt apart, arc order from the lower end
+M7 drop the hysteresis: 25 pass, 2 fail — e.g. pickItem: sectors, dead zone, reach, hysteresis > hysteresis: the neighbour wins only past the midpoint + 4°
+M8 visible needs activity again: 24 pass, 1 fail — e.g. visible: the hub shows whenever Floating is on, unless covered or the band is short > Floating, uncovered, fits → shown, even with nothing running
+```
+
+M1–M6 are the plan's targets; M7–M8 were added.
+
+**Gate.** `bun run typecheck` (root `tsc --noEmit` + `apps/mobile` +
+`apps/relay`) clean · `bun run lint` clean (0 errors, 0 warnings; Biome
+reformatted the new files once) · `bun test` 12695 pass, 5 skip, 0 fail
+(the 5 skips are the opt-in docker ×2 / k8s ×2 / slow-socket ×1). No schema
+was touched, so `protocol.json` was not regenerated and there is no
+`protocol.d/` note.
+
+**Status: H1 DONE.** H2–H4 not started.
 
 ## Review
 

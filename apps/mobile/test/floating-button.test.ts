@@ -100,39 +100,37 @@ describe("place: re-projects a stored position into the current band", () => {
   });
 });
 
-describe("isTap: a press OR a drag, never both", () => {
-  test("5 pt in 200 ms is a tap", () => {
-    expect(isTap({ dx: 3, dy: 4, ms: 200 })).toBe(true);
+describe("isTap: a press OR a drag, never both (mobile-hub Design 1: 10 pt / 400 ms)", () => {
+  test("9 pt in 390 ms is a tap", () => {
+    expect(isTap({ dx: 9, dy: 0, ms: 390 })).toBe(true);
   });
-  test("7 pt is a drag", () => {
-    expect(isTap({ dx: 7, dy: 0, ms: 100 })).toBe(false);
+  test("7 pt in 350 ms is a tap now (S10's 6 pt / 300 ms called it a drag)", () => {
+    expect(isTap({ dx: 7, dy: 0, ms: 350 })).toBe(true);
   });
-  test("a 400 ms long press is not a tap", () => {
+  test("10 pt is a drag", () => {
+    expect(isTap({ dx: 6, dy: 8, ms: 100 })).toBe(false);
+  });
+  test("a 400 ms long press is not a tap (it opens the hub)", () => {
     expect(isTap({ dx: 0, dy: 0, ms: 400 })).toBe(false);
   });
 });
 
-describe("visible: only in Floating, while something runs or a report is unread", () => {
-  const base = { covered: false, fits: true };
-  for (const mode of ["header", "floating"] as const) {
-    for (const count of [0, 2]) {
-      for (const unread of [0, 1]) {
-        const expected = mode === "floating" && (count > 0 || unread > 0);
-        test(`${mode} × count ${count} × unread ${unread} → ${expected}`, () => {
-          expect(visible({ mode, count, unread, ...base })).toBe(expected);
-        });
+describe("visible: the hub shows whenever Floating is on, unless covered or the band is short", () => {
+  test("Floating, uncovered, fits → shown, even with nothing running", () => {
+    expect(visible({ mode: "floating", covered: false, fits: true })).toBe(true);
+  });
+  test("Header mode → never", () => {
+    for (const covered of [false, true]) {
+      for (const fits of [false, true]) {
+        expect(visible({ mode: "header", covered, fits })).toBe(false);
       }
     }
-  }
+  });
   test("F20: hidden while the drawer or a sheet covers it", () => {
-    expect(visible({ mode: "floating", count: 1, unread: 0, covered: true, fits: true })).toBe(
-      false,
-    );
+    expect(visible({ mode: "floating", covered: true, fits: true })).toBe(false);
   });
   test("F20: hidden while the band is too short", () => {
-    expect(visible({ mode: "floating", count: 1, unread: 0, covered: false, fits: false })).toBe(
-      false,
-    );
+    expect(visible({ mode: "floating", covered: false, fits: false })).toBe(false);
   });
 });
 
