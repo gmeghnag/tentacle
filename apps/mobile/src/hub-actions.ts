@@ -169,17 +169,50 @@ export type HubCommit =
   | { readonly kind: "noop"; readonly notice: string | null };
 
 /**
+ * The world as it was when the fan OPENED — the layout is a snapshot (Design 5),
+ * and so is this. Only the turn's identity is carried: a commit must act on the
+ * turn the person saw, never on whatever runs at the release (M7).
+ */
+export interface HubOpen {
+  /** The running turn's `turnId` at the open; null when the fan opened on an idle session. */
+  readonly turnId: string | null;
+}
+
+/** The snapshot to carry from the open to `resolveCommit` (H3 takes it when `open` fires). */
+export function hubOpen(ctx: HubContext): HubOpen {
+  return { turnId: ctx.turn?.turnId ?? null };
+}
+
+/** Stop/Steer belong to the turn shown at the open; every other entry outlives a turn. */
+function sameTurn(id: HubActionId, ctx: HubContext, open: HubOpen): boolean {
+  if (id !== "stop" && id !== "steer") {
+    return true;
+  }
+  return (ctx.turn?.turnId ?? null) === open.turnId;
+}
+
+/**
  * The layout is a snapshot taken at the open; the world is read again at the
  * release (Design 5, M7/M8). An action runs iff it would still be offered now
- * (the same rule as `hubActions`, no second truth); a turn action that no
- * longer can says why, anything else gone is a silent no-op.
+ * (the same rule as `hubActions`, no second truth) AND — for the turn pair —
+ * iff it is still the SAME turn: turn A ending and turn B starting during the
+ * press makes Stop "already finished", never a cancel of B. A turn action that
+ * no longer can says why, anything else gone is a silent no-op.
  */
-export function resolveCommit(id: HubActionId, ctx: HubContext, entries: HubEntries): HubCommit {
-  if (id === "more" || present(id, ctx, entries)) {
+export function resolveCommit(
+  id: HubActionId,
+  ctx: HubContext,
+  entries: HubEntries,
+  open: HubOpen,
+): HubCommit {
+  if (id === "more" || (present(id, ctx, entries) && sameTurn(id, ctx, open))) {
     return { kind: "run", id };
   }
   if (id === "stop" || id === "steer") {
-    const over = ctx.turn === null || ctx.ended !== null;
+    // "Already finished" is about the turn the person saw: gone, ended, or
+    // replaced. Only a same-turn failure can be the link's fault.
+    const over =
+      ctx.turn === null || ctx.ended !== null || (ctx.turn.turnId ?? null) !== open.turnId;
     return { kind: "noop", notice: over ? ALREADY_FINISHED : NO_CONNECTION };
   }
   return { kind: "noop", notice: null };

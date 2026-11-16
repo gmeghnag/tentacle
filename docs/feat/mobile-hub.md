@@ -741,3 +741,83 @@ regenerated and there is no `protocol.d/` note.
 - Until H3, Floating mode shows the S10 button at zero activity (`SessionScreen.tsx:524`). This is documented and the setting is off by default.
 
 **Executor behaviour.** The executor worked red-first. Drifts were recorded honestly (the item-order correction was backed by the sweep). Mutation logs were reproduced in kind.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Findings addressed:** Review round 1's one MEDIUM (HIGH: none). Plus the
+Review's surviving mutation (Attach's `ended === null` guard, listed there as a
+nit: no test pinned it) and a mutation of my own that survived first.
+
+1. **MEDIUM — Stop/Steer re-validation must check it is the same turn.** FIXED.
+   `resolveCommit` now takes the open's snapshot as a fourth argument,
+   `HubOpen{ turnId: string | null }` (`apps/mobile/src/hub-actions.ts:176-185`),
+   built at the open by a new `hubOpen(ctx)` (`:182`) — the same shape as the
+   layout snapshot the fan already carries. `sameTurn(id, ctx, open)` (`:187`)
+   gates Stop/Steer on `ctx.turn?.turnId === open.turnId`; the notice is
+   `ALREADY_FINISHED` when the shown turn is gone, ended, **or replaced**, and
+   `NO_CONNECTION` only for a failure on the *same* turn (`:208-218`). So turn A
+   ending and turn B starting during the press is a no-op with "Already
+   finished" — B is never cancelled from a fan that never showed it. Same for
+   Steer (focusing the composer for a turn the person did not see). The three
+   pre-existing `resolveCommit` cases were updated to pass the argument; no
+   behaviour of theirs changed.
+2. **Review's surviving mutation — Attach.** FIXED (test only): a second
+   `resolveCommit("attach")` case keeps `editable: true` and `ended: "closed"`,
+   so the `ended === null` guard is now pinned. Removing the guard fails 1 test.
+3. **My own surviving mutation (`hubOpen` returning `null`).** Found by running
+   the mutations below: the snapshot builder H3 calls was unpinned, and a
+   `null` snapshot would make Stop never run. Added a test that asserts
+   `hubOpen` both directions and drives `resolveCommit` end to end with it.
+
+**Red before green.** The new cases fail on the unfixed source on the assertion
+of the property, not on a compile error — the fourth argument was optional-free,
+so adding it to the test file was the only change needed to see red:
+
+```
+bun test apps/mobile/test/hub-actions.test.ts   (fix NOT applied)
+(fail) … > a DIFFERENT turn since the open → Already finished, never that new turn (M7)
+       - { "kind": "noop", "notice": "Already finished" }  + { "kind": "run", "id": "stop" }
+(fail) … > idle at the open: a turn that started since is not stoppable from that fan
+       - { "kind": "noop", … }  + { "kind": "run", "id": "stop" }
+ 22 pass · 2 fail
+```
+
+Green after the fix: `hub-actions` + `hub-gesture` 54 pass / 0 fail; after
+adding the `hubOpen` case, `hub-actions` 25 pass / 0 fail.
+
+**Mutation checks** (`.tentacle/tmp/mobile-hub/fix1-mut.ts`: apply one, run
+`hub-actions.test.ts`, restore the exact bytes — the tree was re-verified 25/0
+after, `git status` shows only the two intended files):
+
+```
+F1 sameTurn dropped (any running turn stoppable):                22 pass · 3 fail
+F2 sameTurn covers Stop only (Steer unchecked):                  24 pass · 1 fail
+F3 stale turn's notice = NO_CONNECTION (identity not in `over`): 22 pass · 3 fail
+F4 hubOpen always returns {turnId: null}:                        24 pass · 1 fail  (after finding 3)
+F5 Attach's ended===null guard removed (the Review's survivor):  24 pass · 1 fail
+restored (unmutated):                                            25 pass · 0 fail
+```
+
+F4 survived the first run (24/0) — that is what produced finding 3; each
+mutation is killed by a test that names its property (`a DIFFERENT turn since
+the open`, `idle at the open`, `Attach on an ended session`, `hubOpen takes the
+turn's identity`).
+
+**Gate.** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bunx tsc -p apps/relay --noEmit` clean · `bun run lint` clean (1746 files, no
+fixes) · `bun test` 12722 pass, 5 skip, 0 fail (12727 across 907 files; the 5
+skips are the opt-in docker/k8s/slow-socket ones). No protocol schema, no
+persistence, no daemon surface touched; the changelog fragment is unchanged
+(this round only makes an unreleased, unwired pure module correct — H3 still
+does the wiring, so nothing user-visible ships from it).
+
+**Note for H3.** The wiring must call `hubOpen(ctx)` when the `open` effect
+fires and pass that value to `resolveCommit` on `commit` — the snapshot is the
+fan's, not the release's. It is the same point where `hubActions` is already
+evaluated (the `solve` callback of `reduce` returns the `HubMenu`), so H3 can
+take both from one read, or widen `HubMenu` to carry the `HubOpen`; I left
+`HubMenu` alone (it is a gesture-machine type, and `HubMenu.ids` already
+mirrors the actions) rather than change `hub-gesture.ts` for a field nothing
+reads yet.

@@ -10,10 +10,12 @@ import {
   DUE_SOON_MS,
   type HubContext,
   type HubEntries,
+  type HubOpen,
   NO_CONNECTION,
   buttonBadge,
   hubA11yLabel,
   hubActions,
+  hubOpen,
   resolveCommit,
 } from "../src/hub-actions.ts";
 
@@ -43,6 +45,9 @@ const IDLE_CTX: HubContext = {
   unseenArtifacts: 0,
 };
 const RUNNING: HubContext = { ...IDLE_CTX, turn: TURN };
+/** The snapshot a fan opened while `TURN` ran carries (H3 passes the `HubMenu` itself). */
+const OPENED_RUNNING: HubOpen = { turnId: TURN.turnId };
+const OPENED_IDLE: HubOpen = { turnId: null };
 
 const ids = (items: readonly { id: string }[]): string[] => items.map((i) => i.id);
 
@@ -167,44 +172,101 @@ describe("hubActions: six slots (M14)", () => {
 
 describe("resolveCommit: the world is read again at release (M7/M8)", () => {
   test("Stop while the turn still runs → run", () => {
-    expect(resolveCommit("stop", RUNNING, MAIN)).toEqual({ kind: "run", id: "stop" });
+    expect(resolveCommit("stop", RUNNING, MAIN, OPENED_RUNNING)).toEqual({
+      kind: "run",
+      id: "stop",
+    });
   });
 
   test("Stop after the turn ended → no-op + Already finished", () => {
-    expect(resolveCommit("stop", IDLE_CTX, MAIN)).toEqual({
+    expect(resolveCommit("stop", IDLE_CTX, MAIN, OPENED_RUNNING)).toEqual({
       kind: "noop",
       notice: ALREADY_FINISHED,
     });
-    expect(resolveCommit("steer", IDLE_CTX, MAIN)).toEqual({
+    expect(resolveCommit("steer", IDLE_CTX, MAIN, OPENED_RUNNING)).toEqual({
       kind: "noop",
       notice: ALREADY_FINISHED,
     });
-    expect(resolveCommit("stop", { ...RUNNING, ended: "gone" }, MAIN)).toEqual({
+    expect(resolveCommit("stop", { ...RUNNING, ended: "gone" }, MAIN, OPENED_RUNNING)).toEqual({
+      kind: "noop",
+      notice: ALREADY_FINISHED,
+    });
+  });
+
+  test("a DIFFERENT turn since the open → Already finished, never that new turn (M7)", () => {
+    // Turn A ran when the fan opened; A ended and B started before the release
+    // (an outbox flush, another device's prompt). Stopping B cancels a turn the
+    // person never saw start.
+    const next: HubContext = {
+      ...IDLE_CTX,
+      turn: { kind: "turn", key: "t2", turnId: "t2", own: false },
+    };
+    expect(resolveCommit("stop", next, MAIN, OPENED_RUNNING)).toEqual({
+      kind: "noop",
+      notice: ALREADY_FINISHED,
+    });
+    expect(resolveCommit("steer", next, MAIN, OPENED_RUNNING)).toEqual({
+      kind: "noop",
+      notice: ALREADY_FINISHED,
+    });
+    // B is stoppable now, but not from this fan: a closed fan does not reach it.
+    expect(resolveCommit("stop", { ...next, link: "down" }, MAIN, OPENED_RUNNING)).toEqual({
+      kind: "noop",
+      notice: ALREADY_FINISHED,
+    });
+  });
+
+  test("idle at the open: a turn that started since is not stoppable from that fan", () => {
+    expect(resolveCommit("stop", RUNNING, MAIN, OPENED_IDLE)).toEqual({
+      kind: "noop",
+      notice: ALREADY_FINISHED,
+    });
+  });
+
+  test("hubOpen takes the turn's identity at the open, null when idle", () => {
+    expect(hubOpen(RUNNING)).toEqual({ turnId: TURN.turnId });
+    expect(hubOpen(IDLE_CTX)).toEqual({ turnId: null });
+    // End to end: the snapshot H3 takes at the open is what makes Stop reach
+    // the turn it shows (and only that one).
+    expect(resolveCommit("stop", RUNNING, MAIN, hubOpen(RUNNING))).toEqual({
+      kind: "run",
+      id: "stop",
+    });
+    expect(resolveCommit("stop", RUNNING, MAIN, hubOpen(IDLE_CTX))).toEqual({
       kind: "noop",
       notice: ALREADY_FINISHED,
     });
   });
 
   test("Stop when the link dropped mid-press → no-op + the link notice", () => {
-    expect(resolveCommit("stop", { ...RUNNING, link: "down" }, MAIN)).toEqual({
+    expect(resolveCommit("stop", { ...RUNNING, link: "down" }, MAIN, OPENED_RUNNING)).toEqual({
       kind: "noop",
       notice: NO_CONNECTION,
     });
   });
 
-  test("Attach on an ended session → a silent no-op", () => {
+  test("Attach on an ended session → a silent no-op, even where the prompt is editable", () => {
     expect(
-      resolveCommit("attach", { ...IDLE_CTX, ended: "closed", editable: false }, MAIN),
+      resolveCommit("attach", { ...IDLE_CTX, ended: "closed", editable: false }, MAIN, OPENED_IDLE),
     ).toEqual({
       kind: "noop",
       notice: null,
     });
+    expect(
+      resolveCommit("attach", { ...IDLE_CTX, ended: "closed", editable: true }, MAIN, OPENED_IDLE),
+    ).toEqual({ kind: "noop", notice: null });
   });
 
   test("an entry gone since the open → a silent no-op; More and live entries run", () => {
-    expect(resolveCommit("artifacts", IDLE_CTX, MAIN)).toEqual({ kind: "noop", notice: null });
-    expect(resolveCommit("more", IDLE_CTX, MAIN)).toEqual({ kind: "run", id: "more" });
-    expect(resolveCommit("activity", IDLE_CTX, MAIN)).toEqual({ kind: "run", id: "activity" });
+    expect(resolveCommit("artifacts", IDLE_CTX, MAIN, OPENED_IDLE)).toEqual({
+      kind: "noop",
+      notice: null,
+    });
+    expect(resolveCommit("more", IDLE_CTX, MAIN, OPENED_IDLE)).toEqual({ kind: "run", id: "more" });
+    expect(resolveCommit("activity", IDLE_CTX, MAIN, OPENED_IDLE)).toEqual({
+      kind: "run",
+      id: "activity",
+    });
   });
 });
 
