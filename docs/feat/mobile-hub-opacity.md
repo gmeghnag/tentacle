@@ -229,3 +229,26 @@ Owner confirmed both recommendations: Q1 Header mode → the "Button opacity" ba
 ## Execution
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-17* (fresh context; same model as the plan's author, different from the executor)
+
+**Verdict: REQUEST-CHANGES.**
+
+Findings (MEDIUM, all in render code that the Bun harness cannot reach):
+1. **The glass border is gone.** `FloatingActivity.tsx` `styles.circle` lost `borderWidth: 1`. The new `styles.body` sets `borderColor` (`:487`) but no `borderWidth`, so the button no longer draws its 1 pt edge at any opacity. This is a regression of today's look at 100 %, which owner Q2 requires to stay unchanged.
+2. **The shadow is gone.** `shadow.glass` and `shadowOpacity` moved onto the body layer, and that layer also takes `styles.clip` (`overflow: "hidden"`, `:485`). On iOS, `overflow: hidden` clips the layer's own shadow (clipsToBounds), so the button casts no shadow even at 100 %. Before this change the shadow was on the unclipped outer view.
+3. **The slider value stays stuck after a drag.** In `HubOpacityBand.tsx:49/78`, `dragging` is never set back to `null`, so `shown` keeps the last dragged value forever. Each VoiceOver increment/decrement after a drag calls `stepOpacity(shown)` from that same value: it writes the same number and the label does not move. It also hides any later change to the stored value.
+4. **The value jumps when the drag starts on the thumb.** In `HubOpacityBand.tsx:738-739`, `nativeEvent.locationX` is measured from the deepest view touched. The rail, fill and thumb have no `pointerEvents="none"`, so a drag that starts on the thumb reads x as 0–22 inside the thumb and the value snaps toward 30 %. The e2e left-end drag cannot catch this.
+
+Gate: the touched tests pass (74/74, 3 files), `bun run lint` is clean, `bun run typecheck` is clean. The full `bun test` was not run.
+Mutations (reverted afterwards, `git status` clean):
+- removing `fanOpen` from `hubOpacity` → the "fan open → 1" test failed;
+- removing the clamp from `parseOpacity` → the clamp test failed.
+
+Attacks tried that found nothing:
+- Every close path ends in a sync of `engaged` (`apply`, up, terminate, tapOverlay, `mustCancel`).
+- The parse fail-safe holds: a non-finite or non-number value is dropped and mode/position are kept, and there is no `v` bump.
+- The arc is a sibling of the body (pinned by `hub-opacity-wiring.test.ts`).
+- No §7 invariant is touched (phone-local UI only).
+
+Executor: stayed inside the plan's scope. The regressions are on the visual side, which unit tests cannot see, and the 30 % screenshots in the plan's Tests list are not attached here.
