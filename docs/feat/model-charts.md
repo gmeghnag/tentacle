@@ -2238,3 +2238,20 @@ before *Fix round 1* below, which is the round that answers them.
 - **Reviewer = same model family as the C5/C6 executor** (claude-opus-5-5, fresh context only): shared blind spots possible.
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Review
+
+### Review — C7 (fresh context)
+
+**Verdict: REQUEST-CHANGES** — two MEDIUM (+ one MEDIUM test gap). Scope: `git diff main...HEAD`, slice C7 only.
+
+- **Gate (narrow):** `chart-interact`/`chart-view`/`chart-row`/`chart-scrub` → 65 pass / 0 fail (221 expects); `bun run lint` clean (1837 files); `bun run typecheck` green (root + mobile + relay). Full `bun test` not re-run.
+- **MEDIUM 1 — Share CSV corrupts negative numeric x** (`apps/mobile/src/chart-interact.ts:98` and `:104`, via `csvCell` `:86`): x is passed as `String(p.x)` / `String(label)`, so the formula guard prefixes it. Probe (`.tentacle/tmp/model-charts/c7-csv.ts`): scatter `x:{type:"number"}`, point `{x:-3,y:1}` → row `'-3,1`; line `labels:[-2,-1,0]` → `'-2,1`, `'-1,2`. The y column stays raw (`2,-4`). The docstring promises "raw numbers", but the shared CSV turns numeric x into text. Fix: pass numeric x/labels as numbers, and test a negative x.
+- **MEDIUM 2 — VoiceOver's "Mostra tabella dati" exposes nothing to VoiceOver** (`apps/mobile/src/ui/chart/ChartView.tsx:69-99`): the root stays `accessible` (one element, label = `summary`) in `mode === "table"`, so the `ChartTable` cells are children of a single accessibility element and cannot be focused. The action changes only the pixels: a VoiceOver user who picks it still hears only the summary. Plan §D6 says "offers the table"; "one element" should apply to chart mode only. Fix: `accessible={mode === "chart"}` (or give the table its own accessible rows), plus a test that pins it.
+- **MEDIUM 3 — test gap (§9, a mutation survived):** `chart-interact.ts:58` `datasets.length !== 2` → `< 2` (a Δ column of series 0 vs 1 on a 3-series chart) → `chart-interact` + `chart-view` **47 pass, 0 fail**. Reverted; `git status` clean. Nothing pins the "exactly two series" boundary. Add a 3-series case.
+- **Attacks tried:** (a) §7 pure-module split: the decisions sit in `chart-interact.ts`, and the components map them: holds. (b) Hidden series vs the table/Δ: `chartTable` ignores `hidden`, so the column count stays consistent: holds. (c) Scrub termination: the list can take the gesture before the hold, never while scrubbing; the timer is cleared on unmount: holds (device feel unverified). (d) Cache key includes `height` + `hidden`: holds. (e) CSV injection on text labels (`=`, `+`, `@`): neutralised: holds.
+- **Low (not blocking):** `ChartAppear` remounts on every table → chart toggle of a live row, so the appear animation replays (`ChartBlock.tsx:30` keeps `animate` true); the KPI Δ (`chart-interact.ts:188`) still uses `heroOf`'s delta when series 1 is hidden.
+- **Unverified:** P9 on a device, the e2e flow `32` (no dev build), and the scrub's native-scroll interplay.
+- **Reviewer = same model family as the C7 executor** (claude-opus-5-5, fresh context only): shared blind spots possible.
+
+*— claude-opus-5-5, 2026-11-17*
