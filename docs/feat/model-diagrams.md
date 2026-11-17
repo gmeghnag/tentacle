@@ -1,6 +1,6 @@
 # feat/model-diagrams — the model draws Mermaid diagrams in the conversation (iPhone WebView, Mac TUI in ASCII)
 
-> **Status:** implementation APPROVED for D1–D2 (orchestrator, night delegation 2026-11-17); D3+ wait for the owner's visual picks (Q1, Q6).
+> **Status:** implementation APPROVED (D1–D2 orchestrator 2026-11-17; D3–D7 after the owner's visual picks, 2026-11-17 09:40)
 > **Branch:** `feat/model-diagrams`
 > **Type:** feat · **Size:** L (split into 7 slices, each S or M) · **Blast:** cross-module (a new model tool with no I/O; a new third-party runtime — mermaid — in the daemon binary and the app bundle; no protocol bump, no new update type, no session-log type) · **Suited:** per slice (below): `opus` for the load-bearing probe and the visual/native slices, `deepseek` for the pure/contained ones; mandatory fresh-context Review of the whole branch (L).
 > **Changelog:** `changelog.d/model-diagrams.added.md` (written by D7).
@@ -478,6 +478,8 @@ orchestrator; the visual picks (1, 6) wait for the owner.
 **Answers (orchestrator, 2026-11-17, owner asleep — night delegation):** Q2 (a), Q3 accept, Q4 as stated, Q5 (a), Q7 (a), Q8 as stated — all the recommendations. Q1 and Q6 (visual) wait for the owner; only D1–D2 run before that.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-17*
+
+**Owner answers (2026-11-17 09:40):** Q1 — **all A** (1A 2A 3A 4A 5A 6A), plus a **setting to switch the iPhone diagrams to the B look** (soft-filled nodes / participants, caption below): one setting `diagrams.style: "outline" | "filled"`, default `"outline"`, in the config (read by the daemon/TUI where relevant) AND as a toggle in the iPhone Settings (same place as the other display settings), applied to every diagram type that has a B variant (flowchart, sequence; others follow the same fill rule). Q6 — 420 pt (recommendation; owner did not object).
 
 ### Mockups
 
