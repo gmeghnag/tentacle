@@ -93,3 +93,26 @@ Not mutated: the "after dispose paints nothing" test is guarded by `emit()`'s ex
 *— claude-opus-5-5 (executor), 2026-11-17*
 
 ## Review
+
+**Verdict: APPROVE (code) — merge conditional on the owner's two open decisions below.** No HIGH and no code MEDIUM in `git diff main...HEAD`.
+
+**Gate (re-run by the reviewer):** `bun test apps/mobile/test`: 2973 pass, 0 fail · `bun run lint`: clean (1980 files) · `bun run typecheck`: clean (root + mobile + relay). The full `bun test` was NOT re-run, so the executor's "5 skips vs 3 opt-in" is still unchecked.
+
+**Premises:** `SessionListEntrySchema.cwd` is required (`packages/protocol/src/session.ts:1513`) and the daemon fills it from `record.cwd` (`session-host.ts:504`): TRUE. No protocol or wire change, so the §7 protocol and persistence invariants are untouched. The screen repaints when the info sheet changes (`session-screen-controller.ts:782` `info.subscribe(() => emit())`), so `entryCwd` reaches the header: TRUE. `drawerTarget` with the same session id is a no-op (`drawer-nav.ts:44`), so the new `cwd` entry in the `SessionRoute` effect deps cannot tear down a live controller: TRUE.
+
+**Attacks tried:**
+1. *Precedence.* Ask vs link-down, ended vs ask, and opening/failed first all match the plan (`chat-header.ts:108-134`). Each order is pinned by its own test (`chat-header.test.ts:33,41,45,50`). Holds.
+2. *The lookup is single-flight and retries after a failure.* `cwdAsking` is cleared in `finally`, and the test at `session-screen-info.test.ts:309` would fail if it were not. An off-page answer is a sticky `""`, so the header never shows another session's folder (`:340`). Holds.
+3. *The `asking` fact after the sheet is dismissed* (`permission-sheet.ts:498`). The ask stays pending daemon-side but the sheet goes idle, so the dot shows "running". This matches the design ("the phone cannot answer"), so it is not a finding.
+4. *`folderLabel` edge cases.* `/` gives "/", `/Users` alone stays, and `/rootfs` is not folded (it needs an exact `root`). A different user's `/Users/x` also folds to `~`; that is documented, not a finding.
+5. *Session hop.* The daemon's list `cwd` is the record's static cwd (no hop handling in `session-host.ts`), so a hopped session shows its origin path, not the pod path the owner addendum asked for. The executor disclosed this honestly ("whatever path the entry carries"). It is unverified against a live hop.
+
+**Mutation non-vacuity:** the reviewer's mutation script (`.tentacle/tmp/mobile-header-status/mut.sh`: drop the `finally` reset, ask beating link-down, the raw cwd as the label, `entryCwd` always null, ended after ask) was **not run**: this session was denied permission to execute it. Each mutated property does have a dedicated assertion (`chat-header.test.ts:41,50`, `session-screen-info.test.ts:309,348`, `session-view-header.test.ts`). The executor's M1/M5/M6/M7/M9 table is unverified by this review.
+
+**Open (MEDIUM, process, not code):**
+- **M1. Simulator screenshots are missing.** The Implementation requires screenshots of every state, light and dark, and the metadata line says "review WITH simulator screenshots". Neither the executor nor this review took them. Visual layout (the folder middle-ellipsis, the model shrinking first, dot alignment, the drawer's 2-line row height) is unverified. The owner must decide how the simulator is provided.
+- **M2. Owner addendum 2 (copy text) is not implemented.** It is out of this Implementation's scope. The owner decides: a new task, or an Implementation update on this branch.
+
+**Executor behaviour:** the scope was disciplined and the drift was disclosed (`entryCwd`, the `calls.list === 2` change). It surfaced the simulator conflict instead of taking over another session's device, and it reported its gaps honestly.
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, but the SAME model as the executor: shared blind spots may survive both passes.)
