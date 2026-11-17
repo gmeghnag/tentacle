@@ -9,6 +9,7 @@ import type { AttachmentRef, JobController, PermissionBroker } from "@tentacle/c
 import type {
   ArtifactListResult,
   ArtifactMeta,
+  CompactResult,
   DocumentContent,
   JobOutputResult,
   JobRow,
@@ -123,8 +124,8 @@ export interface SessionController {
   ): Promise<DocumentContent>;
   /** What this session may do with a PDF right now (structurally `DocumentsInput`). */
   documentsInput(): DocumentMode;
-  /** Compact the conversation (summarise + replace history); optional. */
-  compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
+  /** Compact the conversation (summarise + replace history); optional. The token sizes are optional (an older daemon omits them). */
+  compact?(signal?: AbortSignal): Promise<CompactResult>;
   /**
    * `/clear` (docs/feat/clear-keeps-jobs.md): reset the conversation inside the
    * session; background jobs and sub-agents keep running. Required: there is no

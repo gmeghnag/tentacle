@@ -1,0 +1,124 @@
+appId: so.tentacle.app
+---
+# 33 (docs/feat/mobile-hub.md H3): the floating button is the hub.
+# Settings → Activity button → Floating; in a session the hub shows at zero
+# activity (its glyph, no badge).
+#
+# Driven: a long-press (Maestro's releases in place) opens the fan STICKY: the
+# items stay, a tap on one commits it (Attach → the attachment chooser), a tap
+# elsewhere closes it; a HOLD turn puts Stop first, and Stop stops the turn; a
+# tap is still Activity; Header mode has no hub. Light/dark shots of the open fan.
+#
+# Not driven here (stated, not hidden): press-slide-release — Maestro's `swipe`
+# moves at once (a drag, never a hold), so the machine's path is pinned by
+# `hub-gesture.test.ts` + `hub-session.test.ts` (the driver), and the responder's
+# hold over the transcript by the H3 spike (Execution). The back-swipe after a
+# close (M2) — Maestro has no iOS edge gesture (flows 05/26/28 say the same);
+# VoiceOver / Reduce Motion — not reliably togglable.
+- runFlow: _pair.yaml
+- extendedWaitUntil:
+    visible:
+      id: "computers-list"
+    timeout: 30000
+- tapOn:
+    id: "open-settings"
+- tapOn:
+    id: "activity-button-floating"
+- tapOn:
+    id: "settings-back"
+- tapOn:
+    id: "computer-${output.computerId}"
+- tapOn:
+    id: "session-${HUB_ID}"
+- assertVisible:
+    id: "session-view"
+# Zero activity: the hub is up anyway, with its glyph.
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- assertVisible:
+    id: "hub-glyph"
+# Long-press → the sticky fan; Attach is in it; a tap commits → the chooser.
+- longPressOn:
+    id: "floating-activity"
+- extendedWaitUntil:
+    visible:
+      id: "hub-item-attach"
+    timeout: 5000
+- assertVisible:
+    id: "hub-item-activity"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "33-hub-fan"
+- tapOn:
+    id: "hub-item-attach"
+- extendedWaitUntil:
+    visible:
+      text: "Add an attachment"
+    timeout: 5000
+- tapOn:
+    text: "Cancel"
+- assertNotVisible:
+    id: "hub-item-attach"
+# Long-press → tap outside the items → the fan is gone, nothing ran.
+- longPressOn:
+    id: "floating-activity"
+- extendedWaitUntil:
+    visible:
+      id: "hub-scrim"
+    timeout: 5000
+- tapOn:
+    point: "30%,40%"
+- assertNotVisible:
+    id: "hub-scrim"
+- assertNotVisible:
+    text: "Add an attachment"
+# A long turn: Stop is in the fan; tapping it stops the turn.
+- tapOn:
+    id: "composer-input"
+- inputText: "HOLD hub"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "turn-running"
+    timeout: 20000
+- longPressOn:
+    id: "floating-activity"
+- extendedWaitUntil:
+    visible:
+      id: "hub-item-stop"
+    timeout: 5000
+- assertVisible:
+    id: "hub-item-steer"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "33-hub-fan-running"
+- tapOn:
+    id: "hub-item-stop"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+# A tap is still Activity.
+- tapOn:
+    id: "floating-activity"
+- assertVisible:
+    id: "activity-sheet-close"
+- tapOn:
+    id: "activity-sheet-close"
+# Header mode: no hub.
+- tapOn:
+    id: "session-drawer"
+- tapOn:
+    id: "drawer-settings"
+- tapOn:
+    id: "activity-button-header"
+- tapOn:
+    id: "settings-back"
+- assertNotVisible:
+    id: "floating-activity"

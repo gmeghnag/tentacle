@@ -68,6 +68,7 @@ import { type AppLog, createAppLog, errorShape } from "./src/app-log.ts";
 import { exportFileName, exportText } from "./src/app-log.ts";
 import { ARTIFACT_CACHE, shareCachedCopy } from "./src/artifact-cache-expo.ts";
 import { ARTIFACT_FEEDS } from "./src/artifact-feed.ts";
+import { sessionKey } from "./src/artifact-seen-store.ts";
 import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
 import { composeHandleOf, foldingOutboxSession } from "./src/compose-handle.ts";
 import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
@@ -1067,7 +1068,11 @@ function SessionDrawerHost({
   readonly onNavigate: (nav: DrawerNav) => void;
   readonly onSettings: () => void;
   readonly onPair: () => void;
-  readonly children: (openDrawer: () => void, drawerOpen: boolean) => ReactNode;
+  readonly children: (
+    openDrawer: () => void,
+    drawerOpen: boolean,
+    newSession: () => void,
+  ) => ReactNode;
 }): JSX.Element {
   const [drawer, dispatch] = useReducer(drawerReducer, from.computerId, initialDrawer);
   const [rows, setRows] = useState<readonly ComputerRow[]>([]);
@@ -1339,7 +1344,7 @@ function SessionDrawerHost({
       onNewSession={() => void fresh.start(listed, canCreate)}
       onNewSessionDismiss={() => fresh.dismiss()}
     >
-      {children(openDrawer, drawer.open)}
+      {children(openDrawer, drawer.open, () => void fresh.start(listed, canCreate))}
     </SessionsDrawer>
   );
 }
@@ -1366,6 +1371,7 @@ function SessionRoute({
   onOpenDrawer,
   drawerOpen,
   onOpenArtifacts,
+  onNewSession,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
@@ -1379,6 +1385,8 @@ function SessionRoute({
   readonly drawerOpen: boolean;
   /** The artifacts gallery's ONE entry (docs/feat/model-artifacts.md D9). */
   readonly onOpenArtifacts: (from: ArtifactGalleryRoute["from"], open?: string) => void;
+  /** The drawer's New session, reached from the hub too (docs/feat/mobile-hub.md H3). */
+  readonly onNewSession: () => void;
 }): JSX.Element {
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -1480,6 +1488,8 @@ function SessionRoute({
       focusComposer={focus}
       drawerOpen={drawerOpen}
       onOpenArtifacts={onOpenArtifacts}
+      onNewSession={onNewSession}
+      artifactsSeenKey={sessionKey(computerId, sessionId)}
       onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
     />
   );
@@ -2211,11 +2221,12 @@ function AppShell(): JSX.Element {
                 onSettings={() => navigation.navigate("Settings")}
                 onPair={() => navigation.navigate("Pair", undefined)}
               >
-                {(openDrawer, drawerOpen) => (
+                {(openDrawer, drawerOpen, newSession) => (
                   <SessionRoute
                     palette={palette}
                     onOpenDrawer={openDrawer}
                     drawerOpen={drawerOpen}
+                    onNewSession={newSession}
                     computerId={route.params.computerId}
                     sessionId={route.params.sessionId}
                     title={route.params.title}

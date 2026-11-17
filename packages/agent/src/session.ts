@@ -345,7 +345,12 @@ export class Session {
    * where the history is new and an observer's view of it still old (the
    * daemon's stream barrier). It must not throw.
    */
-  async compact(signal?: AbortSignal, onReplaced?: () => void): Promise<CompactResult> {
+  async compact(
+    signal?: AbortSignal,
+    onReplaced?: () => void,
+    /** `fromTokens`: the context size the caller already measured (the last real prompt). */
+    opts: { readonly fromTokens?: number } = {},
+  ): Promise<CompactResult> {
     const before = this.messages.length;
     // A skill hidden for this session is not carried into the compacted history (F12).
     const skills = carryOverSkills(
@@ -357,19 +362,44 @@ export class Session {
     const summary = await this.agent.summarize(this.messages, signal, skills.kept);
     signal?.throwIfAborted();
     const running = this.agent.runningBackground();
-    const next = compactedHistory(
+    const built = compactedHistory(
       this.messages,
       summary,
       skills,
       stillRunningNote(running.jobs, running.agents),
     );
+    // The sizes (docs/feat/harness-notices.md S1), counted together AFTER the
+    // summary call so a compaction's first model call is not delayed: BEFORE on
+    // the old history (still untouched here) unless the caller knows it, AFTER
+    // on the new one. Bounded, never throw (an estimate when the provider
+    // cannot count). Stamped on the summary (the only user message
+    // `compactedHistory` writes): display only, persisted with it so every
+    // replay draws the separator with figures.
+    const [fromTokens, to] = await Promise.all([
+      opts.fromTokens ?? this.contextUsage(signal).then((u) => u.used),
+      this.agent.contextUsage(built, signal),
+    ]);
+    signal?.throwIfAborted();
+    const compacted = {
+      fromTokens,
+      toTokens: to.used,
+      ...(to.exact ? { toExact: true as const } : {}),
+    };
+    const next = built.map((m) => (m.role === "user" ? { ...m, compacted } : m));
     this.messages.length = 0;
     this.messages.push(...next);
     this.agent.forgetModelRequestBaseline(this.id);
     this.agent.forgetPrune(this.messages);
     onReplaced?.();
     this.persist();
-    return { summary, before, after: this.messages.length };
+    return {
+      summary,
+      before,
+      after: this.messages.length,
+      fromTokens,
+      toTokens: to.used,
+      ...(to.exact ? { toExact: true } : {}),
+    };
   }
 
   /**

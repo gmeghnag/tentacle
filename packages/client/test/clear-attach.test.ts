@@ -117,7 +117,8 @@ test("/compact opens a resumed session nothing has opened and compacts THAT chat
 
   const result = await session.compact();
   // The seeded 3 messages really were compacted to system + summary.
-  expect(result).toEqual({ before: 3, after: 2 });
+  // (+ the token sizes, docs/feat/harness-notices.md S1)
+  expect(result).toMatchObject({ before: 3, after: 2 });
   const back = await session.snapshot();
   expect(back?.some((m) => m.content === "map the repo")).toBe(false);
   client.close();

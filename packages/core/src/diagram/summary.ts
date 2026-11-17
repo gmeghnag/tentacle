@@ -48,7 +48,10 @@ function directionWord(direction: FlowModel["direction"]): string {
 
 /** The labels worth saying, in reading order: the box a reader starts from, then its targets. */
 function flowShape(model: FlowModel): string {
-  const label = new Map(model.nodes.map((node) => [node.id, node.label]));
+  // A box's label may be several lines (`<br/>`, model.ts) and this is ONE
+  // sentence (the tool's result, the phone's VoiceOver label): its lines join.
+  const say = (id: string): string =>
+    (model.nodes.find((node) => node.id === id)?.label ?? id).split("\n").join(" ");
   const targets = new Map<string, string | undefined>();
   for (const edge of model.edges) {
     if (!targets.has(edge.from)) targets.set(edge.from, edge.to);
@@ -62,7 +65,7 @@ function flowShape(model: FlowModel): string {
   let current: string | undefined = start;
   while (current !== undefined && !seen.has(current) && walk.length < 4) {
     seen.add(current);
-    walk.push(label.get(current) ?? current);
+    walk.push(say(current));
     current = targets.get(current);
   }
   return walk.join(" → ");

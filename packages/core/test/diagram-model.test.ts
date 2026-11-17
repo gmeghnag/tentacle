@@ -90,6 +90,55 @@ describe("diagramModel: flowchart", () => {
     expect(model.nodes).toHaveLength(4);
   });
 
+  test("a subgraph with an id keeps its quoted title, and `[[ ]]` is a subroutine", () => {
+    // `subgraph BLOCCO ["Blocco (N = 32)"]`: the id is not part of the title, and
+    // the quoted label keeps its brackets/parentheses (the owner's screenshot).
+    const model = flow(
+      [
+        "flowchart TD",
+        '  subgraph BLOCCO ["Blocco (N = 32)"]',
+        "    A[[+ residuo]]",
+        "    A --> B[Fine]",
+        "  end",
+        "  C[[Sotto-programma]] --> A",
+      ].join("\n"),
+    );
+    expect(model.subgraphs).toEqual([{ title: "Blocco (N = 32)", nodes: ["A", "B"] }]);
+    expect(model.nodes).toEqual([
+      { id: "A", label: "+ residuo", shape: "subroutine" },
+      { id: "B", label: "Fine", shape: "rect" },
+      { id: "C", label: "Sotto-programma", shape: "subroutine" },
+    ]);
+    // a bare `subgraph Title` (no brackets) still reads as before
+    expect(flow("flowchart TD\n  subgraph Auth\n    A --> B\n  end").subgraphs).toEqual([
+      { title: "Auth", nodes: ["A", "B"] },
+    ]);
+    // an unquoted bracketed title too, and one with a space in the id position
+    expect(
+      flow("flowchart TD\n  subgraph Sched [Scheduler]\n    A --> B\n  end").subgraphs,
+    ).toEqual([{ title: "Scheduler", nodes: ["A", "B"] }]);
+  });
+
+  test("`<br/>` in a label is a line break, not four glyphs", () => {
+    const model = flow(
+      [
+        "flowchart TD",
+        "  A[\"Token in ingresso<br/>(es. 'ciao')\"] --> B[Una sola riga]",
+        '  subgraph BLOCCO ["Blocco<br/>ripetuto"]',
+        "    B --> C[Fine<br>ultima]",
+        "  end",
+      ].join("\n"),
+    );
+    expect(model.nodes.map((node) => node.label)).toEqual([
+      "Token in ingresso\n(es. 'ciao')",
+      "Una sola riga",
+      "Fine\nultima",
+    ]);
+    expect(model.subgraphs).toEqual([{ title: "Blocco\nripetuto", nodes: ["C"] }]);
+    // an edge label has one line: the break becomes a space
+    expect(flow("flowchart TD\n  A -->|si<br/>no| B").edges[0]?.label).toBe("si no");
+  });
+
   test("a label with parentheses and a quoted label both keep their text", () => {
     const model = flow('flowchart TD\n  A[Carica (sessione)] --> B["Virgolette, e virgole"]');
     expect(model.nodes.map((node) => node.label)).toEqual([

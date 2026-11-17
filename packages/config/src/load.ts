@@ -913,6 +913,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.mount !== undefined ? { mount: resolved.mount } : {}),
     ...(resolved.tui !== undefined ? { tui: resolved.tui } : {}),
     ...(resolved.sessions !== undefined ? { sessions: resolved.sessions } : {}),
+    ...(resolved.voice !== undefined ? { voice: resolved.voice } : {}),
     ...(resolved.relay !== undefined ? { relay: resolved.relay } : {}),
     ...(resolved.push !== undefined ? { push: resolved.push } : {}),
     ...(resolved.liveActivity !== undefined ? { liveActivity: resolved.liveActivity } : {}),
