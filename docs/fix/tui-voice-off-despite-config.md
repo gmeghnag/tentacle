@@ -158,3 +158,15 @@ Narrow runs of everything this task touches: `packages/config` (459 pass),
 *— deepseek-v4-pro (DeepSeek), 2026-11-17*
 
 ## Review
+
+**Verdict: PASS** — no HIGH/MEDIUM findings.
+
+- **Scope.** `git diff main...HEAD` picks a stale merge base (two bases), so the real branch diff is `c6b21370..HEAD`: 7 files. The `chart-lines.test.ts` timeout removal seen in a two-dot diff is `main` being ahead (`379678bb`), not this branch; the merge keeps it.
+- **Root cause holds.** `load.ts:915` was the ONLY place `resolved.*` is projected into `TentacleConfig`, and `voice` was missing from it. The fix adds no default (`VOICE_DEFAULTS` stays the TUI's job), so the opt-in stays OFF when the file is absent or leaves `enabled` out (pinned).
+- **§7 invariants.** No wire, persistence, broker or pod path is touched. The new `connectVoice` notice goes through `connectTui`'s pre-mount `write`, the same channel `connectTheme` uses, so nothing writes raw while Ink owns the terminal. The `voice-tui-config` test also asserts that nothing strays to stdout.
+- **Non-vacuity, re-run here.** Deleting the projection line turns 5 tests red (the 2 config tests, the 2 local-TUI `startTui` tests and `voice status`). I restored the file from a backup in `.tentacle/tmp/…`, and the tree is clean again.
+- **Gate (touched files).** 27/27 pass. `bun run lint` is clean (1990 files). `bun run typecheck` is clean. I did not re-run the full suite.
+- **LOW (not blocking).** On `connect` with a broken file, the user now sees two `[config]` lines (theme + voice). This is intentional: the voice line says *off*.
+- **Executor behaviour.** It reproduced the bug first, at the right boundary (the `startTui` options), corrected the orchestrator's wrong suspect with evidence, and reported its drift honestly.
+
+*— claude-opus-5-5, 2026-11-17*
