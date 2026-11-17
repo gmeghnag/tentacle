@@ -490,4 +490,34 @@ the spy store's real decoders and `loadState`. To verify, pin a session over
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S1 only)*
+
+**Verdict: APPROVE (S1).** No HIGH or MEDIUM findings.
+
+**Gate:** I ran it myself. `bun test`: 13390 pass, 5 skip, 0 fail (953 files). The diff adds no `skip`, `skipIf` or `todo`. The touched files (`daemon/session-pin`, `daemon/session-list`, `protocol/session-pin`, `client/session-pin`, `protocol/json-schema`): 65 pass. `bun run lint`: clean (1840 files). `bun run typecheck`: clean (root + mobile + relay).
+
+**Mutations I added** (`.tentacle/tmp/mobile-session-actions/rv/mut.ts`; each file restored, `git status` clean afterwards). All 6 were KILLED:
+- R1: the loaded path writes no pin (`withPin` dropped). 2 red.
+- R2: the cap ignores `already`. 1 red.
+- R3: `setPinned` moves `lastChangeAt`. 1 red.
+- R4: the tombstone check is removed. 2 red.
+- R5: `parseSidecar` keeps any value. 1 red.
+- R6: an archived unpin is not rewritten. 1 red.
+
+**Attacks tried:**
+1. *A `/clear` fork inherits the pin* (it would duplicate the pin and break the cap). Holds: `SessionPersister.fork` builds its record by hand, with no `pinnedAt`.
+2. *A reopen races an archived pin rewrite.* Holds: the reopen uses `entry.pinnedAt` (`withPin`), and the loaded path skips once `archived.get(id) !== entry`.
+3. *An archived pin write fails.* Holds: `unwritten` stays set, and the sweep's guard includes `pinChanged`.
+4. *The cap is checked with an await before the set.* Holds: `pin()` is fully synchronous, and `Connection` returns it directly.
+5. *Paging changes when pins exist.* Holds: `sessions` and `cursor` are untouched. `pinned` appears only on the first page, sliced to the cap.
+6. *The relay blocks the new method on a method allowlist.* Holds: `apps/relay` has none.
+7. *Persisting a conversation fact (§7).* Holds: the pin is sidecar-only, with no log entry and no `DAEMON_STATE_VERSION` bump. A malformed value is dropped, not refused.
+8. *A protocol break.* Holds: the change is additive, strip schemas only, so no `protocol.d/` note is needed.
+
+**Not verified (as the Execution says):** a real `serve` restart on disk. It is covered only through the real decoders and `loadState` in tests.
+
+**Notes (not blocking):**
+- The changelog fragment describes the phone feature (S2). Do not release before S2 lands.
+- The branch also regenerates `protocol.json`. That is fine, but `bun run protocol:bump` must still run at merge.
+
+**Executor behaviour:** The Execution is accurate against the code. It records every drift with a reason, and it ran 14 mutations, including one honest correction (the M10 variant). The executor and I are the same model (claude-opus-5-5) with fresh context, so we may share blind spots.
