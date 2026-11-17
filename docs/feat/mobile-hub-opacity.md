@@ -252,3 +252,15 @@ Attacks tried that found nothing:
 - No §7 invariant is touched (phone-local UI only).
 
 Executor: stayed inside the plan's scope. The regressions are on the visual side, which unit tests cannot see, and the 30 % screenshots in the plan's Tests list are not attached here.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17*
+
+**Verdict: REQUEST-CHANGES. No fix commit exists.** HEAD is `fdd496f7`, "docs(mobile-hub-opacity): review round 1 (opus)", and `git diff HEAD~1` touches only this doc (+23 lines). No code changed, so findings 1–4 are all still open and there was no fix to test by mutation:
+1. The body layer still has no `borderWidth`.
+2. The body layer still carries the shadow together with `overflow:hidden`.
+3. `dragging` is never reset.
+4. The drag still reads `locationX` from whichever child the finger is on.
+
+`bun run lint` is clean and `bun run typecheck` is clean, both on unchanged code.
