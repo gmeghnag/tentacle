@@ -978,3 +978,41 @@ scope was not challenged beyond the immediate re-ask.
   re-run the full suite. No regression found in the fix diff.
 - LOW, not blocking: an empty re-ask, then a stall nudge (adds no item), then a cut still merges as "cut again".
   The wording stays truthful.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17* (S3 only, `git diff main...HEAD`; fresh context. The executor is signed opus but the
+commit says "exec (deepseek)", so I may share blind spots with the executor.)
+
+**Verdict: REQUEST-CHANGES** (S3).
+
+**Findings**
+1. **MEDIUM: the collapsed compaction rule is wider than the terminal, so every resumed compaction takes two rows.**
+   `packages/tui/src/render-lines.ts:902-915`: `rest` fills the rule to the full `width`, and the collapsed branch then
+   appends ` ctrl+o to expand` (17 cols). Repro (`.tentacle/tmp/harness-notices/rev-s3-wrap.ts`,
+   `messagesToItems` on a `compacted` summary → `wrapLines(transcriptLines(…))`): at width 60 AND 100 the rows are
+   `"── compacted · ctx 182k → 9k ───…───"` followed by a SECOND row `" ctrl+o to expand"`. This happens on every `--resume`,
+   eager open and resync of a compacted session. `compaction-resume.test.ts:66-69` counts only LOGICAL lines (1) and
+   never checks the width, so it is green on a broken render. Fix: subtract the hint's width from `rest` when a body is
+   collapsed, and assert `stringWidth(row) <= width` after the wrap (shown red first).
+
+**Gate (re-run by reviewer):** 13 touched/re-pinned TUI test files → 291 pass, 0 fail. `bun run typecheck` is clean, and
+`bun run lint` is clean (2018 files). I did not re-run the full suite.
+
+**Mutations (each red, then reverted; `git status` clean):** (A) `historyAction` returns `"separator"` for my own
+compaction too (a double rule) → 4 fail (T-C11, M2, two `historyAction` cases). (B) the settle no longer calls
+`markCompacted` → 4 fail (three slot frames + the app `/compact` case). I did not re-run the executor's M1–M7.
+
+**Attacks tried:** (a) the order of `setCompacting(false)` then `markCompacted` in one settle: it runs in the right
+order, so the `✓` is not wiped (`useTurnDriver.ts:1202-1212`). Holds. (b) An own compaction rule written twice
+(by the settle and by the history): `ownCompactionsRef` → `"none"`. Holds, and mutation A shows it is pinned.
+(c) A session swap or `/clear` during the 3 s: `setCompacting(false)` (`useSessionLink.ts:601`) clears `compactedAt`, and
+a stale timer only sets it to null again. Holds. (d) The row budget against the paint: both read the one `slotView`
+(`app-layout.ts:242`, `AppView.tsx:130`). Holds. (e) The brief slice for a structural summary: the agent always writes
+the head first (`agent/src/compact.ts:342`). Holds. (f) The width of the collapsed body → finding 1. §7: only pure
+modules were added (`spinner-slot.ts`), with no wire, persistence, broker or terminal-IO change.
+LOW, not blocking: `compactedTimerRef` is not cleared on unmount, so a timer can stay pending for up to 3 s after a quit.
+
+**Executor behaviour:** the drift is well documented and the widened assertions are honest. One caveat on the
+"load-bearing check": an `.tentacle/tmp` script that uses `../../../packages/…` resolves to the MAIN checkout, not this
+worktree. My first repro hit exactly that. So the executor's pre-S3 capability check may have read `main`'s sources.
