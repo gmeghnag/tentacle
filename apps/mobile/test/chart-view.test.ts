@@ -15,6 +15,8 @@ interface Node {
   readonly children: Node[];
 }
 
+const STATEFUL = new Set(["ChartBlock", "ChartAppear", "ChartFullScreen"]);
+
 const walk = (element: unknown, out: Node[] = []): Node[] => {
   if (element === null || element === undefined || typeof element === "boolean") return out;
   if (Array.isArray(element)) {
@@ -25,6 +27,12 @@ const walk = (element: unknown, out: Node[] = []): Node[] => {
   const { type, props } = element as { type: unknown; props: Record<string, unknown> };
   if (type === Fragment) {
     walk(props.children, out);
+    return out;
+  }
+  // A stateful component (hooks) cannot be called outside a renderer: it is kept
+  // as a node by name, and its tree is walked from its dumb child instead (C7).
+  if (typeof type === "function" && STATEFUL.has((type as { name: string }).name)) {
+    out.push({ type: (type as { name: string }).name, props, children: [] });
     return out;
   }
   if (typeof type === "function") {
@@ -60,6 +68,8 @@ const BARS = spec({
 });
 
 let ChartView: typeof import("../src/ui/chart/ChartView.tsx").ChartView;
+let full: typeof import("../src/ui/chart/ChartFullScreen.tsx");
+let interact: typeof import("../src/chart-interact.ts");
 let row: typeof import("../src/chart-row.ts");
 let theme: typeof import("../src/theme.ts");
 
@@ -79,6 +89,27 @@ beforeAll(async () => {
     LayoutAnimation: { configureNext: () => {}, create: () => ({}), Types: {}, Properties: {} },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 0.5 },
     useWindowDimensions: () => ({ fontScale: 1, width: 390, height: 844 }),
+    // C7 (ChartAppear / ChartFullScreen); kept in band-notes.test.ts's mock too.
+    AccessibilityInfo: {
+      isReduceMotionEnabled: async () => false,
+      addEventListener: () => ({ remove: () => {} }),
+    },
+    Animated: {
+      View: "Animated.View",
+      Value: class {
+        interpolate() {
+          return this;
+        }
+      },
+      timing: () => ({ start: () => {}, stop: () => {} }),
+      spring: () => ({ start: () => {}, stop: () => {} }),
+      parallel: () => ({ start: () => {}, stop: () => {} }),
+    },
+    Easing: { bezier: () => (t: number) => t },
+    Share: { share: async () => ({}) },
+  }));
+  mock.module("react-native-safe-area-context", () => ({
+    useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
   }));
   mock.module("expo-symbols", () => ({ SymbolView: "SymbolView" }));
   mock.module("expo-clipboard", () => ({ setStringAsync: async () => true }));
@@ -97,6 +128,8 @@ beforeAll(async () => {
     Text: "SvgText",
   }));
   ChartView = (await import("../src/ui/chart/ChartView.tsx")).ChartView;
+  full = await import("../src/ui/chart/ChartFullScreen.tsx");
+  interact = await import("../src/chart-interact.ts");
   row = await import("../src/chart-row.ts");
   theme = await import("../src/theme.ts");
   transcript = await import("../src/screens/transcript/TranscriptRow.tsx");
@@ -247,6 +280,154 @@ describe("ChartView — a dumb renderer of the layout", () => {
   });
 });
 
+describe("ChartView — C7: scrub, table, VoiceOver actions, gestures", () => {
+  const viewOf = (raw: unknown) => {
+    const v = row.chartRowView(
+      { name: "chart", args: JSON.stringify(raw), status: "ok" },
+      { width: 358, fontScale: 1, locale: "it-IT", palette: theme.lightPalette },
+    );
+    if (v === null) throw new Error("no view");
+    return v;
+  };
+
+  test("scrubbing: the hero reads the finger's values, a rule + dots + the dim veil are drawn", () => {
+    const view = viewOf(REVENUE);
+    const scrub = view.layout.scrubAt(3);
+    if (scrub === null) throw new Error("no scrub");
+    const tree = walk(ChartView({ view, testID: "chart-c1", scrub }));
+    const hero = all(tree, "Text").find((t) => t.props.testID === "chart-c1-hero");
+    expect(JSON.stringify(hero?.props.children)).toContain(scrub.hero.num);
+    expect(scrub.hero.num).not.toBe(view.layout.hero.num);
+    const rule = all(tree, "Line").find((l) => l.props.testID === "chart-c1-rule");
+    expect(rule?.props.x1).toBe(scrub.x);
+    const veil = all(tree, "Rect").find((r) => r.props.testID === "chart-c1-dim");
+    expect(veil?.props.x).toBe(scrub.dimFromX);
+    expect(all(tree, "Circle").length).toBeGreaterThanOrEqual(
+      view.layout.dots.length + scrub.dots.length,
+    );
+  });
+
+  test("table mode: no plot, the table (with Δ) in its place; the summary stays the label", () => {
+    const view = viewOf(REVENUE);
+    const tree = walk(ChartView({ view, testID: "chart-c1", mode: "table" }));
+    expect(all(tree, "Svg")).toEqual([]);
+    const cells = all(tree, "Text").map((t) => t.props.children);
+    expect(cells).toContain("Δ");
+    expect(cells).toContain("▲ 26,8%");
+    expect(tree[0]?.props.accessibilityLabel).toBe(view.layout.summary);
+  });
+
+  test("VoiceOver actions: open + show table, routed to onAction by name", () => {
+    const view = viewOf(REVENUE);
+    const got: string[] = [];
+    const tree = walk(ChartView({ view, testID: "chart-c1", onAction: (a) => got.push(a) }));
+    const actions = tree[0]?.props.accessibilityActions as { name: string }[];
+    expect(actions.map((a) => a.name)).toEqual(["activate", "showTable"]);
+    const fire = tree[0]?.props.onAccessibilityAction as (e: unknown) => void;
+    fire({ nativeEvent: { actionName: "showTable" } });
+    fire({ nativeEvent: { actionName: "bogus" } });
+    expect(got).toEqual(["showTable"]);
+  });
+
+  test("the gesture handlers sit on the plot, not on the caption", () => {
+    const view = viewOf(REVENUE);
+    const onResponderGrant = () => {};
+    const tree = walk(ChartView({ view, testID: "chart-c1", plotHandlers: { onResponderGrant } }));
+    const plot = all(tree, "View").find((v) => v.props.testID === "chart-c1-plot");
+    expect(plot?.props.onResponderGrant).toBe(onResponderGrant);
+    expect(tree[0]?.props.onResponderGrant).toBeUndefined();
+  });
+});
+
+describe("ChartFullScreenView — T7: landscape modal, toggles, table, share, close", () => {
+  const setup = (over: Record<string, unknown> = {}) => {
+    const hidden = (over.hidden as Set<number> | undefined) ?? new Set<number>();
+    const view = row.chartRowView(
+      { name: "chart", args: JSON.stringify(REVENUE), status: "ok" },
+      {
+        width: 700,
+        height: 240,
+        hidden,
+        fontScale: 1,
+        locale: "it-IT",
+        palette: theme.lightPalette,
+      },
+    );
+    if (view === null) throw new Error("no view");
+    const calls: string[] = [];
+    const props = {
+      view,
+      testID: "chart-c1-full",
+      words: interact.chartUiWords("it-IT"),
+      chips: interact.seriesChips(REVENUE, hidden, "it-IT"),
+      kpis: interact.fullScreenKpis(REVENUE, hidden, "it-IT"),
+      mode: "chart" as const,
+      scrub: null,
+      reduceMotion: false,
+      locale: "it-IT",
+      palette: theme.lightPalette,
+      insets: { top: 0, bottom: 21, left: 59, right: 59 },
+      tableHeight: 240,
+      onClose: () => calls.push("close"),
+      onToggle: (k: number) => calls.push(`toggle:${k}`),
+      onMode: (m: string) => calls.push(`mode:${m}`),
+      onShare: () => calls.push("share"),
+      ...over,
+    };
+    return { tree: walk(full.ChartFullScreenView(props as never)), calls, view };
+  };
+  const byId = (tree: Node[], type: string, id: string) =>
+    all(tree, type).find((n) => n.props.testID === id);
+  const press = (n: Node | undefined) => (n?.props.onPress as () => void)();
+
+  test("a modal that can go landscape; Reduce Motion → no transition", () => {
+    const modal = setup().tree[0];
+    expect(modal?.type).toBe("Modal");
+    expect(modal?.props.supportedOrientations).toEqual(["portrait", "landscape"]);
+    expect(modal?.props.animationType).toBe("fade");
+    expect(setup({ reduceMotion: true }).tree[0]?.props.animationType).toBe("none");
+  });
+
+  test("series chips toggle by index; table, share and close call their handlers", () => {
+    const { tree, calls } = setup();
+    press(byId(tree, "Pressable", "chart-c1-full-chip-1"));
+    press(byId(tree, "Pressable", "chart-c1-full-table-toggle"));
+    press(byId(tree, "Pressable", "chart-c1-full-share"));
+    press(byId(tree, "Pressable", "chart-c1-full-close"));
+    expect(calls).toEqual(["toggle:1", "mode:table", "share", "close"]);
+  });
+
+  test("a hidden series: its chip reads off, its line is gone, the other keeps its colour", () => {
+    const { tree } = setup({ hidden: new Set([1]) });
+    const chip = byId(tree, "Pressable", "chart-c1-full-chip-1");
+    expect(chip?.props.accessibilityState).toEqual({ checked: false });
+    const strokes = all(tree, "Path")
+      .map((p) => p.props.stroke)
+      .filter(Boolean);
+    expect(strokes).toContain(seriesColor(0, "light"));
+  });
+
+  test("the KPI strip at rest; the scrub hero replaces it while scrubbing", () => {
+    const rest = setup().tree;
+    const texts = (t: Node[]) => all(t, "Text").map((n) => n.props.children);
+    expect(texts(rest)).toContain("ULTIMO · ottobre");
+    const { view } = setup();
+    const scrub = view.layout.scrubAt(2);
+    const scrubbing = setup({ scrub }).tree;
+    expect(byId(scrubbing, "View", "chart-c1-full-kpis")).toBeUndefined();
+    expect(JSON.stringify(texts(scrubbing))).toContain(scrub?.hero.num ?? "∅");
+  });
+
+  test("table mode: the table with Δ in the plot's place", () => {
+    const { tree } = setup({ mode: "table" });
+    expect(all(tree, "Svg")).toEqual([]);
+    expect(byId(tree, "ScrollView", "chart-c1-full-table")?.props.style).toEqual({
+      maxHeight: 240,
+    });
+    expect(all(tree, "Text").map((n) => n.props.children)).toContain("Δ");
+  });
+});
+
 describe("TranscriptRow — a `chart` call draws the chart in the row's place", () => {
   const toolRow = (over: Record<string, unknown> = {}) => ({
     kind: "tool" as const,
@@ -285,10 +466,13 @@ describe("TranscriptRow — a `chart` call draws the chart in the row's place", 
 
   test("valid spec → the chart, full width, no tool chrome", () => {
     const tree = walk(call(dispatch(toolRow())));
-    const found = ids(tree);
-    expect(found).toContain("chart-c1");
-    expect(found.some((id) => id.startsWith("tool-c1"))).toBe(false);
-    expect(all(tree, "Svg")[0]?.props.width).toBe(390 - 2 * theme.space.inset);
+    const block = all(tree, "ChartBlock")[0];
+    expect(block?.props.testID).toBe("chart-c1");
+    expect(ids(tree).some((id) => id.startsWith("tool-c1"))).toBe(false);
+    const view = block?.props.view as Parameters<typeof ChartView>[0]["view"];
+    const inner = walk(ChartView({ view, testID: "chart-c1" }));
+    expect(ids(inner)).toContain("chart-c1");
+    expect(all(inner, "Svg")[0]?.props.width).toBe(390 - 2 * theme.space.inset);
   });
 
   test("forged spec, failed call or another tool → the generic tool row", () => {

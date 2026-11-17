@@ -1989,6 +1989,123 @@ dev client with `react-native-svg`, then `bun apps/mobile/e2e/run.ts --only 31-c
 **C6: PARTIAL** — code + unit T6 green and mutation-checked; T6's e2e flow is written but
 not run (pixels unverified, as the slice table allows).
 
+### C7 — full screen, scrub, table, a11y, haptics (slice C7 of 8)
+
+*— claude-opus-5-5, 2026-11-17*
+
+**Load-bearing check re-run first.** `bun test packages/client/test/chart-args-roundtrip.test.ts`
+→ `1 pass, 0 fail, 12 expect() calls`. It holds.
+
+**As built** (owner picks: scrub A, full screen B, table A; mono everywhere):
+1. `apps/mobile/src/chart-interact.ts` (new, pure): `tableView` (table A: adds a Δ column,
+   series 0 vs series 1, only for a two-series category chart that is not stacked or a
+   pie), `chartCsv` + `csvCell` (RFC 4180, raw numbers, formula-looking text gets a
+   leading `'`), `toggleSeries` (the last visible series stays on) + `seriesChips`,
+   `fullScreenKpis` (B: last · mean · max of the first visible series; none for a donut
+   or a point cloud), `chartA11yActions` / `chartA11yEffect` (activate → full screen,
+   showTable / showChart), `chartMotion` + `appearPlan` (the item-8 descriptor as data:
+   Reduce Motion → `{opacity}` only, history → still), `claimAppear` (once per call
+   id, only when first seen `running`), `fullScreenPlotSize`, `scrubOutcome` and
+   `createScrubDriver` (`reduceScrub` + the tap it does not model; the haptic is a
+   port).
+2. `apps/mobile/src/chart-row.ts`: `ChartRowView.spec`; options `height` and `hidden`,
+   both in the cache key.
+3. `ui/chart/ChartView.tsx` (still hook-free): split into `ChartHero`, `ChartPlot`
+   (+ the scrub's rule, dots and a surface veil right of the finger) and the legend;
+   new props `scrub`, `mode` (`table` → `ChartTable` in the plot's place), `onAction`
+   (the root's `accessibilityActions`), `plotHandlers` (on the plot only), `wrapPlot`,
+   `locale`.
+4. `ui/chart/ChartTable.tsx` (new): the table, tabular mono figures.
+5. `ui/chart/useChartScrub.ts` (new): responder → driver, one `HOLD_MS` timer,
+   `playHaptic` as the port; termination refused only while scrubbing.
+6. `ui/chart/ChartAppear.tsx` (new): one `Animated.View` from `appearPlan`; the plan is
+   fixed once Reduce Motion is known (`null` until then: drawn at opacity 0 for that
+   read).
+7. `ui/chart/ChartFullScreen.tsx` (new): `ChartFullScreenView` (dumb: `Modal` with
+   `supportedOrientations` portrait + landscape, `animationType` `none` under Reduce
+   Motion, close, chips, `Tabella`, Share, KPI strip; while scrubbing the scrub hero
+   replaces the strip) and `ChartFullScreen` (state + `Share.share` of the CSV).
+8. `ui/chart/ChartBlock.tsx` (new): the inline state (mode, full screen, appear,
+   scrub); the `Grafico | Tabella` segments sit OUTSIDE the one accessibility element,
+   so Maestro and touch reach them (VoiceOver uses the action).
+9. `TranscriptRow.tsx`: `ChartRowView` renders `ChartBlock` instead of `ChartView`.
+10. E2E: `e2e/flows/32-chart-interact.yaml` (seg table → back; tap → full screen; KPI
+    strip; chip 1 off; table; close), registered in `e2e/run.ts` (`FLOWS`,
+    `CHART2_ID` session).
+11. Tests: `test/chart-interact.test.ts` (27); `chart-view.test.ts` +9 (scrub, table,
+    actions, gesture placement; full screen: landscape, Reduce Motion, handlers, hidden
+    series, KPI vs scrub hero, table); `chart-row.test.ts` +1.
+
+**Drift from the Implementation, and why.**
+1. **No `haptic-rules.ts` / `haptics.ts` change.** The `"tick"` kind
+   (`Haptics.selectionAsync`) already exists (mobile-hub), and the scrub machine
+   already decides WHEN. The driver calls the port `play("tick")` → `playHaptic`.
+2. **The line's draw-in is a left-to-right wipe of the plot** (one `Animated.View`
+   whose width animates, JS-driven, 900 ms, the item-8 bezier), not a per-path
+   `strokeDashoffset`. It keeps `ChartView` free of `Animated`, and on a line with
+   monotone x it looks the same. The fills, dots and labels are revealed by the same
+   wipe, not faded in after 550 ms. Bars and columns spring as ONE group from their
+   base, so there is no 35–45 ms stagger. The donut pops (0.82 → 1 plus opacity).
+   `LayoutPath.length` stays unused.
+3. **A dim veil, not a `ClipPath`.** Scrub A's "curve right of the finger at 30 %" is a
+   surface-coloured `Rect` at 0.7 opacity over `[dimFromX, plot.right]`. It also dims
+   the guides there. The look is the same on the solid page background.
+4. **A call that settles within one render batch draws still.** `claimAppear` animates
+   only a row first seen `running`. A history row is `ok` (`transcript-history.ts:101`).
+5. **Full screen never animates its plot, and has no in-modal VoiceOver actions.** Its
+   chips, `Tabella` and Share are plain buttons; the plot is one element with the summary.
+6. **Test harness.** `chart-view.test.ts`'s walker keeps the stateful components
+   (`ChartBlock`, `ChartAppear`, `ChartFullScreen`) as named nodes. Calling hooks with no
+   renderer would throw. The dispatch test now asserts the `ChartBlock` props and walks
+   `ChartView` from them. Its `react-native` mock gained `AccessibilityInfo`, `Animated`,
+   `Easing` and `Share`, plus a `react-native-safe-area-context` mock. Both files pass
+   together in either order.
+7. **Red before green:** the `ChartView` and `chart-row` tests were written first and
+   failed on their assertions (4 and 1 fails). `chart-interact.ts` was written before
+   its tests, so its non-vacuity rests on the mutations below.
+
+**Mutations** (scratch `.tentacle/tmp/model-charts/c7-mut.ts`: apply, run the named file,
+restore a byte copy; `git status` afterwards showed only this slice's files):
+```
+KILLED   Reduce Motion ignored — 2 fail
+KILLED   history row animates — 1 fail
+KILLED   tick on release too — 1 fail
+KILLED   tap on every up — 2 fail
+KILLED   last series can be hidden — 1 fail
+KILLED   Δ reversed — 1 fail
+KILLED   csv formula not neutralised — 1 fail
+KILLED   a11y action unfiltered — 1 fail
+KILLED   hero ignores scrub — 1 fail
+KILLED   portrait only — 1 fail
+KILLED   modal ignores Reduce Motion — 1 fail
+KILLED   cache key without hidden — 1 fail   (survived at first; the test then pinned it)
+12/12 killed
+```
+
+**Gate.**
+- `bun run lint`: clean (1831 files).
+- `bun run typecheck` (root + mobile + relay): clean.
+- `bun test` (once): `13318 pass, 5 skip, 0 fail`. The 5 skips are the same as in C5's run.
+- No schema change → `protocol.json` untouched; no `protocol.d/` note (no wire change).
+
+**Changelog.** I extended the iPhone bullet in `changelog.d/model-charts.changed.md` with
+scrub, table, full screen, Share and the appear animation. It is one bullet per fragment,
+and that file already holds the iPhone half, so there is no new file.
+
+**Unverified.**
+- **P9 on device** (the modal really rotates to landscape) and the pixels. No dev build
+  was made, so `32-chart-interact` (like `31`) has not run on a simulator.
+- Whether a tap on the plot's centre reaches the responder under Maestro.
+- How the scrub feels on a real touch, and whether a vertical flick hands over to the list.
+
+To verify: build the dev client, then run `bun apps/mobile/e2e/run.ts --only 32-chart-interact`,
+then rotate in full screen.
+
+**C7: PARTIAL.** The code, the unit T7 (VoiceOver label = summary, the Reduce Motion prop
+check, the haptic spy with one tick per category, toggles, table, full screen) are green and
+mutation-checked. T7's e2e flow is written but has not run, and P9 has not been checked on a
+device.
+
 ## Review
 *(empty — mandatory fresh-context review after C8)*
 

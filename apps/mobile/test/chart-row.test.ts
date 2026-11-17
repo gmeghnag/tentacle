@@ -63,6 +63,21 @@ describe("chartRowView", () => {
     expect(b?.layout.width).toBe(700);
   });
 
+  test("full screen (C7): a height and hidden series re-lay out; the spec rides the view", () => {
+    const inline = chartRowView(row(), opts);
+    const full = chartRowView(row(), { ...opts, height: 240, hidden: new Set([1]) });
+    expect(full?.layout.height).toBe(240);
+    const lineSeries = (v: typeof full) =>
+      (v?.layout.paths ?? []).filter((p) => p.role === "line").map((p) => p.series);
+    expect(lineSeries(full)).toEqual([0]);
+    // The inline row (same width, nothing hidden) is not served the full-screen layout.
+    expect(lineSeries(chartRowView(row(), opts)).sort()).toEqual([0, 1]);
+    expect(inline?.layout.height).not.toBe(240);
+    // Same width and height, the series back on: not the cached hidden layout.
+    expect(lineSeries(chartRowView(row(), { ...opts, height: 240 })).sort()).toEqual([0, 1]);
+    expect(full?.spec.datasets.length).toBe(2);
+  });
+
   test("no width yet, or an invalid spec → null", () => {
     expect(chartRowView(row(), { ...opts, width: 0 })).toBeNull();
     expect(chartRowView(row({ name: "shell" }), opts)).toBeNull();

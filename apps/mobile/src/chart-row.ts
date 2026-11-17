@@ -46,6 +46,8 @@ export function chartScheme(palette: Palette): ChartScheme {
 
 export interface ChartRowView {
   readonly layout: ChartLayout;
+  /** The re-validated spec (full screen's toggles, KPIs, table Δ and CSV read it). */
+  readonly spec: ChartSpec;
   readonly title: string;
   readonly subtitle?: string;
   readonly scheme: ChartScheme;
@@ -57,6 +59,10 @@ export interface ChartRowOptions {
   readonly fontScale: number;
   readonly locale: string;
   readonly palette: Palette;
+  /** Full screen (C7): the plot's height; the inline row lets the layout choose. */
+  readonly height?: number;
+  /** Full screen (C7): the series the reader switched off. */
+  readonly hidden?: ReadonlySet<number>;
 }
 
 /**
@@ -70,7 +76,8 @@ const CACHE_MAX = 32;
 /** Everything the chart row draws, or `null` (not a chart, invalid, no width yet). */
 export function chartRowView(tool: ChartToolRow, options: ChartRowOptions): ChartRowView | null {
   if (!(options.width > 0) || !drawsAsChart(tool)) return null;
-  const key = `${options.width}|${options.fontScale}|${options.locale}|${tool.args}`;
+  const hidden = [...(options.hidden ?? [])].sort((a, b) => a - b).join(",");
+  const key = `${options.width}|${options.height ?? ""}|${hidden}|${options.fontScale}|${options.locale}|${tool.args}`;
   let hit = cache.get(key);
   if (hit === undefined) {
     const spec = chartSpecOf(tool.args);
@@ -81,6 +88,8 @@ export function chartRowView(tool: ChartToolRow, options: ChartRowOptions): Char
             width: options.width,
             fontScale: options.fontScale,
             locale: options.locale,
+            ...(options.height === undefined ? {} : { height: options.height }),
+            ...(options.hidden === undefined ? {} : { hidden: options.hidden }),
           });
     if (spec === null || layout === null) return null;
     hit = { spec, layout };
@@ -92,6 +101,7 @@ export function chartRowView(tool: ChartToolRow, options: ChartRowOptions): Char
   }
   return {
     layout: hit.layout,
+    spec: hit.spec,
     title: hit.spec.title,
     ...(hit.spec.subtitle === undefined ? {} : { subtitle: hit.spec.subtitle }),
     scheme: chartScheme(options.palette),

@@ -26,7 +26,7 @@ import { type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { ToolRow } from "../../ui/ToolRow.tsx";
 import { animateNextLayout } from "../../ui/animate.ts";
-import { ChartView } from "../../ui/chart/ChartView.tsx";
+import { ChartBlock } from "../../ui/chart/ChartBlock.tsx";
 import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MediaViewer } from "./MediaViewer.tsx";
@@ -279,7 +279,13 @@ function ChartRowView(props: RowProps): JSX.Element {
   }
   return (
     <Shell row={tool}>
-      <ChartView view={view} testID={`chart-${tool.id}`} />
+      <ChartBlock
+        view={view}
+        tool={tool}
+        palette={props.palette}
+        locale={deviceLocale()}
+        testID={`chart-${tool.id}`}
+      />
     </Shell>
   );
 }

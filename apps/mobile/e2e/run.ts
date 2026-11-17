@@ -1203,6 +1203,9 @@ export const FLOWS: readonly string[] = [
   // docs/feat/model-charts.md T6: a `chart` call draws inline, live and after a
   // relaunch (from history) — on a session of its own.
   "31-chart-inline",
+  // docs/feat/model-charts.md T7: the chart's table toggle and full screen
+  // (series chip, table, close) — on a session of its own.
+  "32-chart-interact",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -1279,6 +1282,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "27-activity": "ACTIVITY_ID",
   "28-floating-activity": "FLOAT_ID",
   "31-chart-inline": "CHART_ID",
+  "32-chart-interact": "CHART2_ID",
 };
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */
