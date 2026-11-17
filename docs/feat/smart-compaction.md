@@ -1505,3 +1505,22 @@ await main();
 A/B, the default flip and the spot-check are S4's; S3 only measured).
 
 *— claude-opus-5-5 (executor), 2026-11-18 · **S3 only** (nothing of S4)*
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17 · fresh context · scope: **S3 only** (`git diff main...HEAD` = this doc; script `.tentacle/tmp/smart-compaction/replay.final.ts`) · same model family as the executor: shared blind spots possible*
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH). The token gate (31.8 % saved, 1 batch per 114 rounds) is not affected by either finding. The cost figures and one claim about the direction of the error are.
+
+1. **MEDIUM — the cost model misses R2 cache breaks.** `bill()` (`replay.final.ts:80`) extends the cached prefix while `prev[i].content === request[i].content`. R2 (`call_payload`, the rule with the most candidates: 443) rewrites `toolCalls` and leaves `content` alone (`prune.ts:529`, `{ ...message, toolCalls: pruned }`). So at a batch, every assistant message whose arguments were pruned still counts as an unchanged prefix, and is billed at `r` instead of 1, up to the first tool result whose content changed. This over-states "cost saved" at every one of the 31 batches. The claim "pruning never loses money at any ratio" rests on these numbers, and `equivalence.ts` checks only tokens and stubs, never cost. Fix: compare whole messages (e.g. `JSON.stringify(renderForModel(m))`), then re-run the `r` sweep.
+2. **MEDIUM — "conservative" is unproven, and the reasoning points the other way.** The doc says the recomputed anchor "can only fire a batch EARLIER … the numbers below are therefore conservative". Nothing shows that the heuristic counter over-estimates the provider's `promptTokens`, and this corpus has no `usage` entries to check it against. Also, a batch that fires earlier prunes for more rounds, so it makes the savings LARGER, not smaller. Fix: say "the direction of the error is unknown; S4's live `usage` settles it".
+
+**Gate.** `bun test packages/agent/test/prune.test.ts prune-loop.test.ts`: 50 pass / 0 fail. `bun run lint`: clean (1966 files). `bun run typecheck`: root and relay clean. 4 errors in `apps/mobile` (`react-native-webview` is missing because this worktree was installed with `--filter '!@tentacle/mobile'`); no file in the diff is involved. Full `bun test` not re-run.
+
+**Mutation / equivalence.** Not re-run. Running a `bun <script>` needed a permission this session did not have (only `bun test` was allowed). The executor's equivalence check and its M1–M6 table stay their word, not mine.
+
+**Attacks tried.** (a) Is the pasted script the same as the file? It is byte-for-byte equal to `replay.final.ts` by read, and `replay.ts` has the same size. Found nothing. (b) The trigger copy against `Agent.maybePrune`: the set is monotonic, a stale entry is dropped by identity, and the gain gate covers only fresh entries. This matches what S2 reviewed. Found nothing. (c) The cost model against the prune rules found finding 1. (d) The anchor reasoning found finding 2. (e) §7: S3 touches no tracked code, persistence, protocol or pod path, and the logs are only read. Found nothing.
+
+**Nit.** The S3 Execution was filed under the S2 `## Review` heading (after line 886), not under `## Execution`.
+
+**Executor.** Thorough and mostly honest: it flagged the M5 survivor, the unrelated flake and the anchor approximation. But it stated the direction of the anchor error with more confidence than it had.
