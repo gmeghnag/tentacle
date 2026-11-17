@@ -88,3 +88,28 @@ not a minimal fix, and building it here would contradict the approved sizing.
 **Gate:** not run (no code changed).
 
 ## Review
+
+**Verdict: PASS (diagnosis accepted; no code to approve).** `git diff main...HEAD` touches only this doc, so no §7 invariant is touched and there is no test to mutate.
+
+**Premise table (all TRUE):**
+1. No `.tsx` under `apps/mobile/src` imports `hub-gesture`, `hub-fan` or `hub-session`. Only `floating-button.ts:11` uses `classifyPress`, for `isTap`.
+2. `FloatingActivity.tsx:112-157` is a plain `PanResponder`: no hold timer, no `playHaptic`.
+3. The button body is only `ActivityIndicator` + `label` (`:194`), with no glyph.
+4. Scheduled is a ghost group: `activity.ts:174` `ghost: true`, rendered as `"soon"` at `ActivitySheet.tsx:58`.
+5. `mobile-hub.md:705/709/761` mark H3 as PARTIAL, the spike as NOT RUN, and HubFan as not done.
+6. `changelog.d/mobile-hub.added.md:2` claims the long-press fan, which is false on `main`.
+
+**Gate:** `bun run lint` clean (1966 files). `bun run typecheck` clean. `hub-gesture` + `floating-button` tests: 55 pass / 0 fail. Full `bun test` not run (no code changed).
+
+**Findings (HIGH/MEDIUM):**
+1. **MEDIUM, process.** Execution is signed `claude-opus-5-5`, but commit `92ad5936` says `exec (deepseek)`. AGENTS §10 requires the real model. If the executor was deepseek, the signature is false and it hides drift data. The orchestrator should correct it.
+2. **MEDIUM, user-facing, open.** `changelog.d/mobile-hub.added.md:2` will ship a false "fan opens" claim at the next `bun run release` unless option A or C is applied first.
+
+**Attacks tried:**
+- A hidden consumer of the gesture machine on a non-tsx path: only `floating-button.ts` uses it, and only for tap classification.
+- A settings gate hiding an existing fan: there is no fan component to gate.
+- The "haptics not linked" suspect: `playHaptic` is used elsewhere; the button never calls it.
+
+**Executor behaviour:** it stopped and escalated correctly (AGENTS §0/§10) rather than building the L/load-bearing H3 under an S–M contained label. Its diagnosis is accurate and cited. Recommend option A.
+
+*— claude-opus-5-5, 2026-11-17* (fresh context; same family as the signed executor, different from the committed one)
