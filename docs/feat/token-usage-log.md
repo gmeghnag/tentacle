@@ -312,3 +312,30 @@ The non-critical type, the absent-not-0 rule for the happy path, the pure `usage
 Disciplined: plan cited, drift recorded honestly. One gap: its proof script imported `@tentacle/*` from `.tentacle/tmp`, which resolves to **main's** packages, not the worktree. That was right for the "older reader" claim, but it means nothing it ran exercised the new schema. Reviewer and executor are both Claude-family; only the context is fresh.
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Round 2
+
+**Verdict: PASS.** Finding 1 is fixed, on both of the planned layers:
+
+- **Providers:** `core` `tokenCount` (an integer ≥ 0, else `undefined`) is applied at `openai-provider.ts:284` and at every Anthropic count (`anthropic-provider.ts:221-229`, `:286`).
+- **Second net, where the entry is built:** `SessionLog.usage` calls `sanitizeUsageBody`, which judges each field with the entry schema's own field schemas. An invalid field is dropped, never set to 0. A body without both counts yields no entry. The envelope keys are never taken from the body.
+
+**Mutations, each reverted; `git status` clean afterwards:**
+
+| mutation | result |
+|---|---|
+| sanitizer bypassed (`body` pushed as-is) | `daemon/token-usage-log.test.ts`: **2 fail** (dropped field; a null never reaches the durable file) |
+| OpenAI back to `!== undefined` | **1 fail** (null `cached_tokens`) |
+| Anthropic back to the raw `cache_read_input_tokens` | **1 fail** (null cache read) |
+
+**Repro:** the round-1 script against the worktree now gives `usage: {"promptTokens":10,"completionTokens":5}`, and the entry parses.
+
+**Regressions:**
+- The Anthropic prompt sum is unchanged for valid numbers; `null` was already treated as 0 before.
+- An OpenAI `prompt_tokens` that is not a number still reaches `Usage` (pre-existing `?? 0`), but the sanitizer now drops that entry instead of poisoning the log.
+- Tests: `providers/` + `protocol/` + the daemon usage test give **632 pass / 0 fail**; the 8 touched files give **117 pass / 0 fail**.
+- `bun run lint`: clean (1850 files). `bun run typecheck`: 0 errors.
+
+No HIGH/MEDIUM left.
+
+*— claude-opus-5-5, 2026-11-17*
