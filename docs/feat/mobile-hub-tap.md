@@ -240,6 +240,10 @@ These fail first on today's code (red), then pass after the change:
    *Recommendation: yes, this task first. The dimmed opacity here is a
    placeholder value that badges will replace.*
 
+### Owner answers (2026-11-17 ~22:30)
+Q1–Q5: all recommendations accepted (slide-to-select on long-press; VoiceOver activate = B, opens the actions menu; empty = Activity only, Artifacts-empty → TODO; tap-open haptic `firm`; this task before mobile-hub-badges). Implementation APPROVED.
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-17*
+
 ## Execution
 
 ## Review
