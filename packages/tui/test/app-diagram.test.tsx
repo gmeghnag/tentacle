@@ -34,8 +34,11 @@ const rowsOf = (frame: string): string[] => frame.split("\n").map(strip);
 /** The drawn glyphs of the flow renderer: a box corner and the decision mark. */
 const BOX = "╭";
 const DECISION = "◇";
-/** The caption's tier note, cut at narrow widths — so only its head is pinned. */
-const SOURCE_ONLY = "source only";
+/**
+ * The caption's tier note when the drawing does not fit, cut at narrow widths —
+ * so only its head is pinned (fix/tui-diagram-complex-flow: a refusal says WHY).
+ */
+const SOURCE_ONLY = "too wide for";
 
 const noopEnv: ExecutionEnvironment = {
   id: "noop",
@@ -276,7 +279,7 @@ describe("a diagram in the App (T4)", () => {
       app.stdout.emit("resize");
       await delay(200);
       const at50 = app.lastFrame() ?? "";
-      // The wide flowchart no longer fits: the source, with the generic cut.
+      // The wide flowchart no longer fits: the source, with the reason and the generic cut.
       expect(at50).toContain(SOURCE_ONLY);
       expect(at50).not.toContain(BOX);
       expect(at50).toContain("more lines · ctrl+o to expand");

@@ -14,14 +14,17 @@
  *    channel row of the gap if it must move across, and lands on `▼`.
  *
  * It never guesses: a graph it cannot draw faithfully (a self-loop, two edges
- * forced through one column, a label with no room, nested or overlapping
- * subgraphs, wider than the terminal) returns `undefined` and the caller shows
- * the source instead.
+ * forced through one column, nested or overlapping subgraphs, wider than the
+ * terminal) returns no drawing — and says WHY (`FlowRefusal`), so the caption
+ * can tell the reader instead of a bare "source only".
+ *
+ * Long labels are wrapped and `<br/>` labels keep their lines (a box grows
+ * downwards), so a real diagram's prose fits a terminal width.
  *
  * Pure: no I/O, no React, no colour (cells carry style names).
  */
 import type { DiagramEdge, DiagramNode, FlowModel } from "@tentacle/core";
-import { cellWidth } from "./cells.ts";
+import { cellWidth, headCells } from "./cells.ts";
 import {
   Canvas,
   DOWN,
@@ -49,6 +52,14 @@ export interface FlowDrawing {
 
 /** Beyond this many nodes a terminal drawing is not readable: the source is. */
 export const FLOW_MAX_NODES = 60;
+/** The widest a box's label line may be (a longer label is wrapped). */
+const LABEL_CAP = 46;
+/** The narrowest wrap target, however narrow the terminal (`drawFlow` then refuses). */
+const MIN_LABEL_CAP = 12;
+/** Columns a box reserves beyond its label (borders, the side return run, the frame). */
+const WIDTH_MARGIN = 14;
+/** The shortest stretch of a frame's border a title may take (` Ab… `); else no title. */
+const MIN_FRAME_TITLE = 6;
 /** Barycentre sweeps (down + up each). */
 const SWEEPS = 2;
 /** Cross-position relaxation passes (down + up each). */
@@ -87,13 +98,29 @@ interface Chain {
 
 type Dir = "TD" | "BT" | "LR" | "RL";
 
+/** Why a flowchart has no drawing: the caption says it in a few words (D8). */
+export type FlowReason = "too-wide" | "too-big" | "not-drawable";
+
+/** `drawFlow`'s outcome: the drawing, or the reason there is none. */
+export type FlowResult = { readonly drawing: FlowDrawing } | { readonly reason: FlowReason };
+
 /** The drawing, or `undefined` when it cannot be drawn faithfully in `maxWidth`. */
 export function drawFlow(model: FlowModel, maxWidth: number): FlowDrawing | undefined {
-  if (model.nodes.length === 0 || model.nodes.length > FLOW_MAX_NODES) return undefined;
+  const result = drawFlowResult(model, maxWidth);
+  return "drawing" in result ? result.drawing : undefined;
+}
+
+/** {@link drawFlow}, with the reason a refusal gives (the caption says it). */
+export function drawFlowResult(model: FlowModel, maxWidth: number): FlowResult {
+  const none = (reason: FlowReason): FlowResult => ({ reason });
+  if (model.nodes.length === 0 || model.nodes.length > FLOW_MAX_NODES) return none("too-big");
   const byId = new Map(model.nodes.map((n) => [n.id, n] as const));
   for (const e of model.edges) {
-    if (e.from === e.to || !byId.has(e.from) || !byId.has(e.to)) return undefined;
+    if (e.from === e.to || !byId.has(e.from) || !byId.has(e.to)) return none("not-drawable");
   }
+  // How wide one line of a box's label may be: a long label is WRAPPED, not
+  // dropped — a realistic diagram's boxes are prose, not two words.
+  const labelCap = Math.min(LABEL_CAP, Math.max(MIN_LABEL_CAP, maxWidth - WIDTH_MARGIN));
   const dir: Dir = model.direction;
   const sideways = dir === "LR" || dir === "RL";
 
@@ -103,7 +130,7 @@ export function drawFlow(model: FlowModel, maxWidth: number): FlowDrawing | unde
     reversed.has(i) ? { a: e.to, b: e.from } : { a: e.from, b: e.to },
   );
   const rank = longestPath(model, dag);
-  if (rank === undefined) return undefined;
+  if (rank === undefined) return none("not-drawable");
 
   // 2. vertices + chains through dummies.
   const verts = new Map<string, Vertex>();
@@ -153,7 +180,7 @@ export function drawFlow(model: FlowModel, maxWidth: number): FlowDrawing | unde
   orderLayers(layers);
 
   // sizes
-  for (const v of verts.values()) sizeVertex(v, sideways);
+  for (const v of verts.values()) sizeVertex(v, sideways, labelCap);
   const framed = model.subgraphs.length > 0;
   const gaps = layers.map((layer) => layer.map((v) => crossGap(v, sideways, framed)));
 
@@ -179,7 +206,7 @@ export function drawFlow(model: FlowModel, maxWidth: number): FlowDrawing | unde
     m += rankThick[r] as number;
     if (r === ranks - 1) break;
     const plan = planGap(layers[r] as Vertex[], m, sideways, framed);
-    if (plan === undefined) return undefined;
+    if (plan === undefined) return none("not-drawable");
     gapPlan.push(plan);
     m += plan.thickness;
   }
@@ -216,7 +243,7 @@ export function drawFlow(model: FlowModel, maxWidth: number): FlowDrawing | unde
       height: Math.abs(rb - ra) + 1,
     };
     boxes.push(box);
-    drawBox(canvas, box, v.node);
+    drawBox(canvas, box, v.node, labelCap);
   }
 
   for (const chain of chains) {
@@ -259,7 +286,7 @@ export function drawFlow(model: FlowModel, maxWidth: number): FlowDrawing | unde
     const seg = chain.segs[0] as Segment;
     const plan = gapPlan[seg.from.rank] as GapPlan;
     const spot = plan.labels.get(seg);
-    if (spot === undefined) return undefined;
+    if (spot === undefined) return none("not-drawable");
     if (sideways) {
       const w = cellWidth(label) + 2;
       const [r, c0] = map(spot.main, seg.c1);
@@ -279,7 +306,7 @@ export function drawFlow(model: FlowModel, maxWidth: number): FlowDrawing | unde
       const members = sg.nodes
         .map((id) => verts.get(id))
         .filter((v): v is Vertex => v !== undefined);
-      if (members.length === 0) return undefined;
+      if (members.length === 0) return none("not-drawable");
       const m0 = Math.min(...members.map((v) => rankStart[v.rank] as number)) - 2;
       const m1 = Math.max(
         ...members.map((v) => (rankStart[v.rank] as number) + (rankThick[v.rank] as number)),
@@ -298,11 +325,11 @@ export function drawFlow(model: FlowModel, maxWidth: number): FlowDrawing | unde
         nodes: sg.nodes,
       });
     }
-    if (!drawFrames(canvas, rects, boxes)) return undefined;
+    if (!drawFrames(canvas, rects, boxes)) return none("not-drawable");
   }
 
   const width = canvas.width;
-  if (width > maxWidth) return undefined;
+  if (width > maxWidth) return none("too-wide");
   // a frame's margin can leave blank rows at the top/bottom: trimmed (boxes shift with them)
   const rows = canvas.rows();
   let top = 0;
@@ -310,9 +337,11 @@ export function drawFlow(model: FlowModel, maxWidth: number): FlowDrawing | unde
   let end = rows.length;
   while (end > top && (rows[end - 1] as DiagramRow).length === 0) end--;
   return {
-    rows: rows.slice(top, end),
-    width,
-    boxes: boxes.map((b) => ({ ...b, row: b.row - top })),
+    drawing: {
+      rows: rows.slice(top, end),
+      width,
+      boxes: boxes.map((b) => ({ ...b, row: b.row - top })),
+    },
   };
 }
 
@@ -393,20 +422,46 @@ function orderLayers(layers: Vertex[][]): void {
 
 // ── sizes and cross positions ───────────────────────────────────────────────
 
-function sizeVertex(v: Vertex, sideways: boolean): void {
+function sizeVertex(v: Vertex, sideways: boolean, labelCap: number): void {
   if (v.node === undefined) return;
+  const lines = boxLines(v.node, labelCap);
   const k = Math.max(v.outs.length, v.ins.length);
-  const labelW = cellWidth(v.node.label);
+  const labelW = Math.max(...lines.map((line) => cellWidth(line)));
   const width = labelW + (v.node.shape === "decision" ? 6 : 4);
   const cylinder = v.node.shape === "cylinder";
   const base = cylinder ? 4 : 3;
+  const height = base + lines.length - 1;
   if (sideways) {
     v.mainSize = width;
     v.crossSize = Math.max(base, k + 2 + (cylinder ? 1 : 0));
   } else {
-    v.mainSize = base;
+    v.mainSize = height;
     v.crossSize = Math.max(width, 2 * k + 3);
   }
+}
+
+/**
+ * A box's label as the rows it is drawn on: its own lines (`<br/>` in the
+ * source, `model.ts`) and a long line wrapped at `cap` cells. A subroutine
+ * keeps the extra brackets Mermaid draws there (`[[ … ]]`); no line is empty
+ * (a blank row would collapse in the output grid, AGENTS §6).
+ */
+function boxLines(node: DiagramNode, cap: number): string[] {
+  const outer = node.shape === "subroutine" ? Math.max(MIN_LABEL_CAP, cap - 6) : cap;
+  const lines: string[] = [];
+  for (const line of node.label.split("\n")) {
+    let rest = line.trim();
+    if (rest === "") continue;
+    while (cellWidth(rest) > outer) {
+      const head = headCells(rest, outer);
+      const at = head.lastIndexOf(" ");
+      const cut = at > 0 ? at : head.length;
+      lines.push(rest.slice(0, cut).trimEnd());
+      rest = rest.slice(cut).trimStart();
+    }
+    if (rest !== "") lines.push(rest);
+  }
+  return lines.length === 0 ? [" "] : lines;
 }
 
 /** Cells left free after a vertex in its rank (TD: room for its rightmost label). */
@@ -606,7 +661,7 @@ function planGap(
 
 // ── boxes and frames ────────────────────────────────────────────────────────
 
-function drawBox(canvas: Canvas, box: FlowBox, node: DiagramNode): void {
+function drawBox(canvas: Canvas, box: FlowBox, node: DiagramNode, labelCap: number): void {
   const style = node.shape === "decision" ? "decision" : "border";
   const r1 = box.row + box.height - 1;
   const c1 = box.col + box.width - 1;
@@ -619,10 +674,22 @@ function drawBox(canvas: Canvas, box: FlowBox, node: DiagramNode): void {
     canvas.line(box.row + 1, box.col, box.row + 1, c1, style);
     first++;
   }
-  const textRow = first + Math.floor((r1 - 1 - first) / 2);
-  const w = cellWidth(node.label);
-  canvas.text(textRow, box.col + Math.floor((box.width - w) / 2), node.label, "text");
+  // the label's rows are stacked and centred in the box (a `<br/>` label, a wrap)
+  const lines = boxLines(node, labelCap);
+  const top = first + Math.floor((r1 - 1 - first - (lines.length - 1)) / 2);
+  const marks = node.shape === "decision" ? 2 : node.shape === "subroutine" ? 1 : 0;
+  lines.forEach((line, i) => {
+    const room = box.width - 2 * marks;
+    const w = cellWidth(line);
+    const at = box.col + marks + Math.max(0, Math.floor((room - w) / 2));
+    if (node.shape === "subroutine") {
+      canvas.put(top + i, box.col + 1, "[", "text");
+      canvas.put(top + i, c1 - 1, "]", "text");
+    }
+    canvas.text(top + i, at, line, "text");
+  });
   if (node.shape === "decision") {
+    const textRow = top + Math.floor((lines.length - 1) / 2);
     canvas.put(textRow, box.col, "◇", "decision");
     canvas.put(textRow, c1, "◇", "decision");
   }
@@ -630,8 +697,10 @@ function drawBox(canvas: Canvas, box: FlowBox, node: DiagramNode): void {
 
 /**
  * A dim titled frame around each subgraph's boxes. `false` when one cannot be
- * drawn honestly (a non-member box inside it, two frames meeting, no room for
- * its title): the caller then shows the source.
+ * drawn honestly (a non-member box inside it, two frames meeting): the caller
+ * then shows the source. A title that no stretch of the border can hold is
+ * SHORTENED (` Blocco Transf… `) — a frame with a readable beginning beats no
+ * drawing at all, which is the bug this file's fix came from.
  */
 interface FrameRect {
   readonly r0: number;
@@ -647,26 +716,47 @@ function drawFrames(
   given: readonly FrameRect[],
   boxes: readonly FlowBox[],
 ): boolean {
-  // 1. the title: the first stretch of the top border (else the bottom) that no
-  //    edge crosses; the frame grows rightwards to hold it.
-  const rects: (FrameRect & { titleRow: number; titleCol: number })[] = [];
+  // 1. the title: the longest stretch of the top border (else the bottom) that
+  //    no edge crosses, slid right from the corner; the frame grows rightwards
+  //    to hold it. A title too long for any stretch is cut to the longest one —
+  //    a frame titled ` Blocco Transf… ` beats no drawing at all.
+  const rects: (FrameRect & { titleRow: number; titleCol: number; title: string })[] = [];
   for (const f of given) {
-    const title = f.title === "" ? "" : ` ${f.title} `;
-    const tw = cellWidth(title);
-    const clear = (row: number, from: number): boolean => {
+    // a boxed title on one line; a `<br/>` title is joined (`Blocco ripetuto`)
+    const wanted = f.title
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "")
+      .join(" ");
+    const clear = (row: number, from: number, tw: number): boolean => {
       for (let c = from - 1; c <= from + tw; c++) if (!canvas.isBlank(row, c)) return false;
       return true;
     };
     const limit = f.c0 + 2 + FRAME_TITLE_SLIDE;
-    let placed: { titleRow: number; titleCol: number } | undefined;
-    for (const row of [f.r0, f.r1]) {
-      for (let at = f.c0 + 2; placed === undefined && at <= limit; at++) {
-        if (tw === 0 || clear(row, at)) placed = { titleRow: row, titleCol: at };
+    /** The longest title this border can hold, and where (` ` + text + `…` + ` `). */
+    const widest = (row: number): { titleCol: number; title: string } | undefined => {
+      if (wanted === "") return { titleCol: f.c0 + 2, title: "" };
+      const w = cellWidth(wanted);
+      for (let room = w; room >= 1; room--) {
+        const title = ` ${headCells(wanted, room).trimEnd()}${room < w ? "…" : ""} `;
+        if (cellWidth(title) < MIN_FRAME_TITLE) break;
+        for (let at = f.c0 + 2; at <= limit; at++) {
+          if (clear(row, at, cellWidth(title))) return { titleCol: at, title };
+        }
       }
-      if (placed !== undefined) break;
+      return undefined;
+    };
+    let best: { titleRow: number; titleCol: number; title: string } | undefined;
+    for (const row of [f.r0, f.r1]) {
+      const spot = widest(row);
+      if (spot === undefined) continue;
+      if (best !== undefined && cellWidth(spot.title) <= cellWidth(best.title)) continue;
+      best = { titleRow: row, ...spot };
+      // the whole title fits: no better stretch exists
+      if (cellWidth(spot.title) > cellWidth(wanted)) break;
     }
-    if (placed === undefined) return false;
-    rects.push({ ...f, c1: Math.max(f.c1, placed.titleCol + tw + 1), ...placed });
+    if (best === undefined) return false;
+    rects.push({ ...f, c1: Math.max(f.c1, best.titleCol + cellWidth(best.title) + 1), ...best });
   }
   // 2. honesty: no stranger inside a frame, no two frames touching.
   for (const f of rects) {
@@ -694,7 +784,7 @@ function drawFrames(
       edge(r, f.c0, UP | DOWN);
       edge(r, f.c1, UP | DOWN);
     }
-    if (f.title !== "") canvas.text(f.titleRow, f.titleCol, ` ${f.title} `, "frame");
+    if (f.title !== "") canvas.text(f.titleRow, f.titleCol, f.title, "frame");
   }
   return true;
 }

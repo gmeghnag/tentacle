@@ -18,6 +18,7 @@ import {
   LOOP,
   PHONE,
   SUBGRAPH,
+  TRANSFORMER,
   args,
   flowOf,
   randomFlow,
@@ -55,6 +56,8 @@ describe("T3 frames (snapshots)", () => {
     ["classes", CLASSES, 80, false],
     ["loop", LOOP, 80, false],
     ["subgraph", SUBGRAPH, 80, false],
+    ["transform", TRANSFORMER, 200, false],
+    ["transform", TRANSFORMER, 80, false],
   ];
   for (const [name, src, width, expanded] of cases) {
     test(`${name} ${width}${expanded ? " expanded" : ""} — colour off`, () => {
@@ -355,7 +358,8 @@ describe("T3.5 tiers", () => {
     expect(wide.join("\n")).toContain("╭───────────╮");
     const narrow = plain(LOGIN, 30);
     expect(narrow.join("\n")).not.toContain("╭───────────╮");
-    expect(narrow[0]).toContain("Titolo · flowchart · source"); // the caption itself is cut at 30
+    // the caption says WHY (fix/tui-diagram-complex-flow), and is itself cut at 30
+    expect(narrow[0]).toContain("Titolo · flowchart · too wide");
     expect(narrow.filter((l) => l.startsWith("│ "))).toHaveLength(DIAGRAM_SOURCE_PREVIEW);
     expect(narrow.at(-1)?.startsWith("… +2 more lines · ctrl+o")).toBe(true); // cut at 30 too
   });
@@ -386,13 +390,14 @@ describe("T3.5 tiers", () => {
 
   test("a flowchart the router cannot draw faithfully (self-loop) shows its source", () => {
     const lines = plain("flowchart TD\n  A --> A\n  A --> B", 120);
-    expect(lines[0]).toContain("source only");
+    expect(lines[0]).toContain("cannot draw faithfully");
+    expect(lines[0]).toContain("^X^O");
   });
 
   test("a subgraph whose frame would enclose a non-member box is not drawn (no wrong frame)", () => {
     const src = "flowchart TD\n  subgraph S\n    A --> C\n  end\n  A --> B\n  B --> C";
     expect(drawFlow(flowOf(src), 200)).toBeUndefined();
-    expect(plain(src, 120)[0]).toContain("source only");
+    expect(plain(src, 120)[0]).toContain("cannot draw faithfully");
     // the same graph without the subgraph draws
     expect(drawFlow(flowOf("flowchart TD\n  A --> C\n  A --> B\n  B --> C"), 200)).toBeDefined();
   });

@@ -74,7 +74,7 @@ describe("a diagram in the transcript (D4)", () => {
     const at50 = rowsOf(item, 50).join("\n");
     expect(at120).toContain(BOX);
     expect(at120).not.toContain("source only");
-    expect(at50).toContain("source only");
+    expect(at50).toContain("too wide for");
     expect(at50).not.toContain(BOX);
     // …and back again, on the SAME item (the memo must not pin the first tier).
     expect(rowsOf(item, 120).join("\n")).toContain(BOX);

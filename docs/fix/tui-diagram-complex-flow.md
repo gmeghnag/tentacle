@@ -19,4 +19,85 @@ Executor: reproduce FIRST — a test that feeds this exact source at 200 and at 
 
 ## Execution
 
+*— deepseek-v4-pro, 2026-11-17. Branch `fix/tui-diagram-complex-flow`.*
+
+**Load-bearing check (re-run first, passed).** `.tentacle/tmp/tui-diagram-complex-flow/repro.ts`
+feeds the transcribed screenshot source to `lintDiagram` → `diagramModel` → `drawFlow`:
+`lint ok: true`, `model.kind: flowchart nodes=22`, and `drawFlow(200|120|80) = undefined`.
+A debug copy of `drawFlow` with a log on every `return undefined` named the bail-out:
+**`drawFrames` → `false`** at every width (`diagram-ascii-flow.ts:301`, the frame-title
+placement), *not* ranks/gap-plan/width as the Context guessed. Two model bugs sat behind
+it, visible in the dump: the subgraph title parsed as `BLOCCO ["Blocco Transformer (…)" ]`
+(id + brackets included) and `POS[["+ Codifica …"]]` parsed as a rect with a literal
+`["…"]` label (`[[ ]]` was not in the shape table). So: model first, then the frame.
+
+**Slice A — `packages/core/src/diagram/model.ts`: subgraph title, `[[ ]]`, `<br/>`.**
+Tests first in `packages/core/test/diagram-model.test.ts` (red, then green):
+1. `subgraphTitle()` reads Mermaid's three spellings — `Title`, `id [Title]`,
+   `id ["Title"]` — so the id is never part of the title (`model.ts:130`).
+2. `[[ … ]]` → a new `NodeShape` member `subroutine` (`model.ts:104`) — it was being
+   read as `[` + a label starting `[`, which is why `[+ residuo …]` appeared verbatim.
+3. `BR` / `multiline()` / `oneline()` (`model.ts:118`): a box's label and a subgraph's
+   title keep their lines; an **edge** label is one line, so its `<br/>` becomes a space.
+
+**Slice B — `packages/tui/src/diagram-ascii-flow.ts`: labels are rows, wrapping, frame
+title, refusal reason.** New tests in `packages/tui/test/diagram-complex-flow.test.ts`
+(5 red first against the un-fixed renderer):
+- `boxLines()` (wrap at `labelCap` on spaces, `<br/>` lines kept, `[[ ]]` keeps its
+  brackets, never an empty line) feeds `sizeVertex` (a box grows *down*) and `drawBox`
+  (rows stacked and centred).
+- `labelCap = min(46, max(12, width - 14))` — a width-aware wrap, so the width does not
+  blow up on prose; `FLOW_MAX_NODES` still the readability ceiling.
+- `drawFrames`: a title that no border stretch can hold is **shortened** to the longest
+  stretch (`╰─ Blocco Transformer (ripe… ─…`), and both borders are compared so the top
+  border's short run cannot win over the bottom's long one. Only a frame with *no* room
+  (`MIN_FRAME_TITLE` = 6 cells) still refuses.
+- `drawFlowResult()` returns `{ drawing }` or `{ reason }` (`too-wide` / `too-big` /
+  `not-drawable`); `drawFlow()` stays the thin wrapper every existing test uses.
+
+**Slice C — `packages/tui/src/diagram-lines.ts`: the caption says why.** `FLOW_REASON`
+turns the reason into a few words (`too wide for 80 cols — widen the window or ^X^O`,
+`too many boxes to draw — ^X^O for the source`, `cannot draw faithfully in a terminal —
+^X^O for the source`); the bare `source only in the terminal` remains only for a type
+with no drawing at all (class/gantt/…), where it is the true statement.
+
+**Slice D — the `<br/>` fallout on the one-line summary.** `model.label` may now contain
+`\n`, and `describeDiagram` (the phone's VoiceOver text) joins labels into ONE sentence:
+`summary.ts` `flowShape()` now says a label's lines joined by a space. Red test added
+first in `packages/core/test/diagram-summary.test.ts`.
+
+**Drift from the Implementation, and why.**
+- The plan named the bail-out candidates "ranks, gap plan, frames, width, crossing/bent
+  spans". The repro proved it is **frames only** — no ranks/routing work was needed. The
+  back edges already route correctly (return run along the side, `╎ re-iniettato come
+  nuovo token`), so no new router code was written for them; the fixture test pins that
+  they are drawn, which is the property that matters.
+- The plan said "keep the fallback only for genuinely undrawable cases". Implemented as
+  the *reason* split above; a diagram that is merely too wide now says so.
+- Nothing in `docs/feat/model-diagrams.md`'s D3 invariants changed: no emoji glyphs
+  (pinned in the new tests), pure modules (model + renderer stay I/O-free), cell width
+  via `cellWidth`/`headCells`.
+
+**Tests.** `bun test packages/tui/test/diagram-complex-flow.test.ts` (11),
+`packages/tui/test/diagram-lines.test.ts` (47, +2 snapshots: `transform 200` and
+`transform 80`), `diagram-row.test.ts` (10), `app-diagram.test.tsx`,
+`packages/core/test/diagram-model.test.ts` (16), `diagram-summary.test.ts` (9) — all green.
+Existing assertions that pinned the old bare caption were updated to the reason
+(`diagram-lines.test.ts`, `diagram-row.test.ts`, `app-diagram.test.tsx`): each still
+asserts the drawn-vs-source property, now with the honest sentence.
+
+**Mutation checks (each restored after).** Reverting the frame-title shortening → 8 red
+in `diagram-complex-flow.test.ts`. Reverting `subgraphTitle` → the model test, the
+`<br/>` test and the frame-title test red. Reverting `multiline()` → the model `<br/>`
+test and the renderer `<br/>` test red. Reverting the caption to the bare sentence → 7
+red across the three TUI files. Ignoring `labelCap` (no wrap) → the wrap test and the
+empty-line test red.
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run lint` clean (0 errors/warnings) ·
+`bun test` 14511 pass, 5 opt-in skips, **1 fail in
+`packages/docker/test/ssh-dialer.test.ts`** — pre-existing and unrelated: it also fails
+on `main-ro` (2 fail there), it touches no file this task changed, and it asserts a
+spawned ssh child's pid file. Unverified by me: whether that flake is environmental on
+this host; it is not this branch's.
+
 ## Review
