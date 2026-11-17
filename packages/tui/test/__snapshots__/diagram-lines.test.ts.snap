@@ -1,4 +1,4 @@
-[?25h Snapshot v1, https://bun.sh/docs/test/snapshots
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
 exports[`T3 frames (snapshots) login 120 — colour off 1`] = `
 "                                                   Titolo · flowchart

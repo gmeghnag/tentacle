@@ -232,6 +232,50 @@ Owner confirmed both recommendations: Q1 Header mode → the "Button opacity" ba
 
 ## Execution
 
+### Fix round 4
+
+*— claude-opus-5-5, 2026-11-17* (executor; fix round on the open Round 3 findings)
+
+Tree on entry: `git status` clean, HEAD `8ce7aad4` (docs only). The one HIGH/MEDIUM still open is
+Round 3's HIGH (the snapshot corruption); Round 2's other findings and Round 4's two were re-verified
+against the CURRENT source, not against the doc's claims.
+
+1. **HIGH — `packages/tui/test/__snapshots__/diagram-lines.test.ts.snap:1` corrupted.**
+   Restored from `main` (`git show main:<path> > <path>`); the stray `ESC[?25h` before `Snapshot v1` is
+   gone. Evidence:
+   - RED (before): `bun test packages/tui/test/diagram-lines.test.ts` → **33 pass / 14 fail**.
+   - GREEN (after): same file → **47 pass / 0 fail**, 47 tests.
+   - Mutation (this is a data-file fix, so the mutation is the bug itself re-injected):
+     `perl -i -pe 's{^// Bun Snapshot v1}{\x1b\[?25h Snapshot v1}'` on line 1 → back to
+     **33 pass / 14 fail**; restored → byte-identical to `main` (`git diff main -- <path>` empty).
+   - Scope proof: on the whole branch, `git diff a6d6b3cd HEAD --name-only` outside `docs/`,
+     `apps/mobile/` and `changelog.d/` lists **exactly this one file**; `git diff a6d6b3cd HEAD | grep $'\033'`
+     now returns nothing (it returned the snapshot line before the fix).
+
+2. Round 4 finding 1 (shadow) — **still fixed, re-read in the source**: the body layer
+   (`FloatingActivity.tsx:475-484`) carries `shadowOpacity`/`opacity: bodyLevel`/`styles.body` and has
+   the glass fill + glyph as children; `styles.body` (`:580`) has `borderWidth: 1` and `...shadow.glass`
+   and **no** `overflow`; `styles.clip` (`:574`) is applied only to the painted children.
+
+3. Round 4 finding 2 (jump on release) — **still fixed, re-read**: `commit` (`HubOpacityBand.tsx:108-117`)
+   keeps the released value in `dragging`; the pure `settledReleased` (`hub-opacity.ts:121`) drops it on
+   render once the stored prop matches.
+
+4. Round 1 finding 4 (thumb-start drag) — **still fixed**: `pointerEvents="none"` on the rail, fill and
+   thumb (`HubOpacityBand.tsx:195/199/206`).
+
+Gate:
+- `bunx tsc -p apps/mobile --noEmit` → clean (exit 0).
+- `bun run lint` → clean, 1996 files, no fixes applied.
+- Touched mobile tests (4 files) → 114 pass / 0 fail.
+- Full `bun test` → **14611 pass, 5 skip, 0 fail** (14616 tests, 1036 files). The 5 skips are exactly the
+  opt-ins: `ws-server` (SLOW, 1), live-k8s / live-docker (4) — verified by running those files alone with
+  no env set (`1 skip`, `4 skip`, 0 fail each).
+
+Drift from Implementation: none — no production code was changed in this round; the only edit is the
+snapshot restored from `main` plus this doc. Not verified: the visual result at 100 % / 30 % on a simulator
+(render-side, no iOS build here) — the plan's Tests-list screenshots are still owed, as earlier rounds noted.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17* (fresh context; same model as the plan's author, different from the executor)
