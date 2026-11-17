@@ -832,3 +832,20 @@ persistence or terminal-IO change.
 **Executor behaviour:** honest, well-documented drift (`notice` token kept for `dock-tone.ts:33`; `stripInlineMarkdown`
 added for real regressions; mobile mirror forced by the parity test). The happy path is well tested; the merge rule's
 scope was not challenged beyond the immediate re-ask.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* (S2 fix round, `git diff HEAD~1`; same reviewer context, same model family as round 1)
+
+**Verdict: PASS** (S2).
+- F1 fixed: `reaskContinueAt` (`packages/tui/src/state.ts:272-284`, mirrored in `apps/mobile/src/transcript.ts:579-591`)
+  merges only when the continue line is the last notice, nothing except one answer item follows it, and the reason
+  is `length`. The round-1 repro now appends the stream-cut line at the end and leaves the first line as it was.
+  The real re-ask flow still merges: `context_note{continue}` adds no item on either side.
+- Mutations, each red and then reverted, with `git status` clean afterwards: dropping the structural check fails 2
+  tests in the TUI and 2 on the phone; dropping the `length` gate fails 1 in the TUI and 1 on the phone.
+- Gate: `harness-lines`, `truncated-reply-notice`, `harness-render`, `harness-block-frame` and mobile `transcript` +
+  `transcript-parity` → 76 pass, 0 fail. `bun run typecheck` and `bun run lint` (2008 files) are clean. I did not
+  re-run the full suite. No regression found in the fix diff.
+- LOW, not blocking: an empty re-ask, then a stall nudge (adds no item), then a cut still merges as "cut again".
+  The wording stays truthful.
