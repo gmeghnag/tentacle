@@ -139,6 +139,7 @@ import {
   watchAccepts,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import { ArtifactBudget, ArtifactStore } from "./artifact-store.ts";
 import { AttachmentStore, UploadBudget } from "./attachment-store.ts";
 import type { ModelLink } from "./connection.ts";
 import { jobRows, sameJobs } from "./jobs-view.ts";
@@ -634,6 +635,12 @@ export class HostedSession {
    * detached-then-reattached client resumes where it stopped.
    */
   readonly uploads: AttachmentStore;
+  /**
+   * What `present` showed the user in this session (docs/feat/model-artifacts.md
+   * D4): `artifact/list` / `artifact/read` serve it. The SESSION's, like
+   * `uploads`, so a re-attach or a settings sync keeps it.
+   */
+  readonly artifacts: ArtifactStore;
   /** What the factory did with `session/open.settings`; told to whoever attaches. */
   settingsReport: SessionSettingsReport | undefined;
   /**
@@ -888,10 +895,12 @@ export class HostedSession {
     logOptions: SessionLogOptions = {},
     agentRuntime?: AgentJobs,
     uploads: AttachmentStore = new AttachmentStore(new UploadBudget()),
+    artifacts: ArtifactStore = new ArtifactStore(new ArtifactBudget()),
     schedules?: SessionSchedules,
   ) {
     this.id = id;
     this.uploads = uploads;
+    this.artifacts = artifacts;
     this.now = now;
     this.wake = wake;
     this.scheduling = schedules;
@@ -3931,6 +3940,8 @@ export class HostedSession {
     // The single END of a live session covers close, archive, the reaper, the
     // detached cap and delete (P4): the upload reservations go back here.
     this.uploads.dispose();
+    // Memory only: the artifact bytes go back to the daemon's budget.
+    this.artifacts.dispose();
     this.unsubscribeExit?.();
     this.unsubscribeStart?.();
     this.jobs?.dispose();

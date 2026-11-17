@@ -17,8 +17,12 @@ export interface ChordState {
 
 export const idleChord: ChordState = { armedAt: null };
 
-/** `consumed`: the key was the chord's own (swallow it). `pass`: handle the key as usual. */
-export type ChordAction = "sendNow" | "consumed" | "pass";
+/**
+ * `consumed`: the key was the chord's own (swallow it). `pass`: handle the key
+ * as usual. `openArtifact`: `Ctrl+X Ctrl+O` opens the newest artifact
+ * (docs/feat/model-artifacts.md D8) — a bare `Ctrl+O` stays the expand toggle.
+ */
+export type ChordAction = "sendNow" | "openArtifact" | "consumed" | "pass";
 
 export function stepChord(
   state: ChordState,
@@ -35,6 +39,9 @@ export function stepChord(
   }
   if (letter === "s" && now - state.armedAt <= CHORD_WINDOW_MS) {
     return { state: idleChord, action: "sendNow" };
+  }
+  if (letter === "o" && now - state.armedAt <= CHORD_WINDOW_MS) {
+    return { state: idleChord, action: "openArtifact" };
   }
   return { state: idleChord, action: "pass" };
 }

@@ -43,6 +43,7 @@ export type IconName =
   | "arrow.clockwise"
   | "arrow.down"
   | "photo"
+  | "square.and.arrow.up"
   | "hand.raised"
   | "trash"
   | "mic"

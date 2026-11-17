@@ -24,9 +24,11 @@ import type { TreePanel } from "./types.ts";
 
 /**
  * `panel` with `tree` — the SAME object when nothing moved, so a no-op action
- * cannot re-render the App.
+ * cannot re-render the App. Generic over any panel that HAS a `tree` (the tree
+ * kinds and `/artifacts`), not just `TreePanel`: the `kind` discriminant is the
+ * caller's.
  */
-export function withTree<P extends TreePanel>(panel: P, tree: TreeState): P {
+export function withTree<P extends { readonly tree: TreeState }>(panel: P, tree: TreeState): P {
   return tree === panel.tree ? panel : { ...panel, tree };
 }
 

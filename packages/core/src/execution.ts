@@ -80,10 +80,25 @@ export interface ExecutionEnvironment {
   readFile(path: string): Promise<string>;
   writeFile(path: string, contents: string): Promise<void>;
   /**
+  /**
+   * A CONFINED binary read (docs/feat/model-artifacts.md D3): the real path
+   * (symlinks followed) must be inside the workspace root and not
+   * secret-looking, a regular file of at most `maxBytes` (refused before
+   * reading), unchanged in length while read. Unlike `readFile`, which is
+   * unconfined. Optional: an env without it cannot present files.
+   */
+  readConfinedBytes?(
+    path: string,
+    options: { readonly maxBytes: number },
+  ): Promise<{ readonly bytes: Uint8Array; readonly realPath: string }>;
+  /**
    * Read a file's bytes (docs/feat/pdf-read.md D3): the PDF tools need the
    * bytes, not a UTF-8 decode of them. Optional on purpose — an environment
    * that only reads text leaves it undefined, and a tool that needs bytes
    * reports the capability as unavailable rather than half-working.
+   *
+   * Unconfined, like `readFile` — what may leave the workspace goes through
+   * `readConfinedBytes` instead.
    */
   readBytes?(path: string, options?: ReadBytesOptions): Promise<Uint8Array>;
   /**

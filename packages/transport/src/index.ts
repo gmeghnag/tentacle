@@ -10,5 +10,6 @@ export * from "./stream-channel.ts";
 export * from "./errors.ts";
 export * from "./peer.ts";
 /** RFC 4648 base64 (dependency-free: the app's Hermes has neither `Buffer` nor `btoa`), shared
- *  with the secure channel's framing — `attachment/put` chunks ride it as text. */
-export { encodeBase64 } from "./noise-frame.ts";
+ *  with the secure channel's framing — `attachment/put` chunks ride it as text; the STRICT
+ *  decode (canonical text only) reads `artifact/read` chunks back. */
+export { decodeBase64, encodeBase64 } from "./noise-frame.ts";

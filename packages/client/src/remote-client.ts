@@ -37,6 +37,9 @@ import type { PermissionResponse } from "@tentacle/core";
 import {
   ATTACHMENT_CHUNK_BYTES,
   type AgentCapabilities,
+  type ArtifactListResult,
+  type ArtifactMeta,
+  type ArtifactReadResult,
   type AttachmentPutResult,
   type ClearResult,
   type ClientInfo,
@@ -144,6 +147,12 @@ import {
   type PermissionSendAction,
   type RouterAction,
 } from "./permission-router.ts";
+import {
+  ArtifactCorruptError,
+  ArtifactLinkLostError,
+  ArtifactReadAbortedError,
+  ReadWindow,
+} from "./read-window.ts";
 import { RemoteSession } from "./remote-session.ts";
 import { SCHEDULE_OLD_DAEMON, boundSchedules, schedulesFromSnapshot } from "./schedules.ts";
 import { type LogOutcome, type LogState, applyLogRead } from "./session-log-reader.ts";
@@ -194,6 +203,42 @@ export class AttachmentsUnsupportedError extends RpcError {
     this.name = "AttachmentsUnsupportedError";
   }
 }
+
+/** A daemon that predates `artifact/list` / `artifact/read`: the UI says "needs a newer tentacle on <computer>". */
+export const ARTIFACTS_OLD_DAEMON = "this daemon cannot show artifacts (older version)";
+
+/** `artifact/*` on a daemon that does not know it (docs/feat/model-artifacts.md D6): no retry. */
+export class ArtifactsUnsupportedError extends RpcError {
+  constructor(cause: unknown) {
+    super(
+      JsonRpcErrorCode.MethodNotFound,
+      ARTIFACTS_OLD_DAEMON,
+      cause instanceof RpcError ? { code: cause.code } : undefined,
+    );
+    this.name = "ArtifactsUnsupportedError";
+  }
+}
+
+/** `RemoteClient.readArtifact()`'s options. */
+export interface ArtifactReadOptions {
+  readonly signal?: AbortSignal;
+  /** Called as verified-length chunks arrive: `(have, size)`, `size` the META's. */
+  readonly onProgress?: (have: number, size: number) => void;
+}
+
+/** Which errors a drop-wait raises: an upload's, or an artifact read's (same wait, honest words). */
+interface LinkErrors {
+  lost(waitedMs?: number): Error;
+  aborted(): Error;
+}
+const UPLOAD_ERRORS: LinkErrors = {
+  lost: (ms) => new UploadLinkLostError(ms),
+  aborted: () => new UploadAbortedError(),
+};
+const ARTIFACT_ERRORS: LinkErrors = {
+  lost: (ms) => new ArtifactLinkLostError(ms),
+  aborted: () => new ArtifactReadAbortedError(),
+};
 
 /** `RemoteClient.upload()`'s options. */
 export interface UploadOptions {
@@ -2457,6 +2502,174 @@ export class RemoteClient {
   }
 
   /**
+   * Every artifact version the model presented in a session, oldest first, and
+   * whether the daemon cut the list (`truncated`, passed on — never dropped).
+   * Read-only: with a factory it waits out a drop and asks again. An older
+   * daemon → `ArtifactsUnsupportedError` (docs/feat/model-artifacts.md D6).
+   */
+  async listArtifacts(sessionId: string): Promise<ArtifactListResult> {
+    const entry = this.sessions.get(sessionId);
+    for (;;) {
+      const gen = this.channelFactory && entry ? await this.whenLive(entry) : this.gen;
+      try {
+        return (await this.call(this.peer, Method.ArtifactList, {
+          sessionId,
+        })) as ArtifactListResult;
+      } catch (error) {
+        if (isMethodNotFound(error)) {
+          throw new ArtifactsUnsupportedError(error);
+        }
+        if (!this.channelFactory || !entry || (gen === this.gen && this.up)) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  /**
+   * One artifact version's bytes, VERIFIED against `meta` (D6): every chunk is
+   * exactly `min(C, size - offset)` bytes, the daemon's `size` is the meta's,
+   * and the whole hashes to `meta.sha256` — else `ArtifactCorruptError`, never
+   * retried (a pod is not trusted, AGENTS §7). The buffer is sized from the
+   * META (schema-capped at 20 MiB), never from a daemon answer.
+   *
+   * Two chunks in flight (`ReadWindow`, the pure half). A drop resumes at the
+   * first MISSING chunk on the new link (read-only, safe to repeat), bounded by
+   * the upload's `UPLOAD_RECONNECT_MS`; with no reconnect possible it rejects
+   * `ArtifactLinkLostError`. `signal` stops issuing reads
+   * (`ArtifactReadAbortedError`). The daemon's own refusal
+   * (`ArtifactUnavailable`, `UnknownSession`) reaches the caller as is; an
+   * older daemon → `ArtifactsUnsupportedError`.
+   */
+  async readArtifact(
+    sessionId: string,
+    meta: ArtifactMeta,
+    options: ArtifactReadOptions = {},
+  ): Promise<Uint8Array> {
+    const hasher = this.sha256Bytes;
+    if (hasher === undefined) {
+      throw new Error(
+        "readArtifact needs a binary sha-256 hasher (RemoteClientOptions.sha256Bytes)",
+      );
+    }
+    // Sized from the meta, bounded before any buffer or frame (RangeError).
+    const window = new ReadWindow(meta.size);
+    const entry = this.sessions.get(sessionId);
+    const reconnectable = this.channelFactory !== undefined && entry !== undefined;
+    const wait = { deadline: null as number | null };
+    const progress = (): void => options.onProgress?.(window.have, meta.size);
+    for (;;) {
+      this.throwIfAborted(options.signal, ARTIFACT_ERRORS);
+      const gen = await this.liveGeneration(entry, options.signal, wait, ARTIFACT_ERRORS);
+      try {
+        await this.pullArtifact(sessionId, meta.sha256, window, options.signal, () => {
+          // An answer: the link really is back (a later drop gets its own window).
+          wait.deadline = null;
+          progress();
+        });
+        return window.finish(meta.sha256, hasher);
+      } catch (error) {
+        if (isMethodNotFound(error)) {
+          throw new ArtifactsUnsupportedError(error);
+        }
+        // The daemon's bytes failed the check, or the caller stopped: final.
+        if (error instanceof ArtifactCorruptError || error instanceof ArtifactReadAbortedError) {
+          throw error;
+        }
+        if (gen === this.gen && this.up) {
+          throw error;
+        }
+        if (!reconnectable) {
+          throw new ArtifactLinkLostError();
+        }
+        // A drop: forget what was in flight; the next pass reads the first missing chunk.
+        window.rewind();
+      }
+    }
+  }
+
+  /**
+   * Issue `artifact/read`s until the window says done, `READ_WINDOW` at a time
+   * (the `pump` idiom: a failing read is captured, then rethrown once here after
+   * every sibling settled, so no task outlives this call's view of the window).
+   */
+  private async pullArtifact(
+    sessionId: string,
+    sha256: string,
+    window: ReadWindow,
+    signal: AbortSignal | undefined,
+    answered: () => void,
+  ): Promise<void> {
+    const running = new Set<Promise<void>>();
+    let failure: unknown;
+    let failed = false;
+    // An abort wakes a wait at once: a viewer closed on a slow chunk must not
+    // linger. The tasks still out resolve on their own (failures are captured).
+    let wake = (): void => {};
+    const woken = new Promise<void>((resolve) => {
+      wake = resolve;
+    });
+    signal?.addEventListener("abort", wake, { once: true });
+    try {
+      for (;;) {
+        if (signal?.aborted) {
+          throw new ArtifactReadAbortedError();
+        }
+        if (failed) {
+          await Promise.allSettled(running);
+          throw failure;
+        }
+        const step = window.next();
+        if (step.kind === "done") {
+          await Promise.all(running);
+          return;
+        }
+        if (step.kind === "wait") {
+          if (running.size === 0) {
+            throw new Error("artifact read: waiting with nothing in flight");
+          }
+          // Every task RESOLVES (failures are captured), so the race cannot reject.
+          await Promise.race([...running, woken]);
+          continue;
+        }
+        this.issueArtifactRead(sessionId, sha256, step.offset, window, answered, running, (e) => {
+          failed = true;
+          failure = e;
+        });
+      }
+    } finally {
+      signal?.removeEventListener("abort", wake);
+    }
+  }
+
+  /** One `artifact/read` as a task that always resolves; a failure goes to `fail`. */
+  private issueArtifactRead(
+    sessionId: string,
+    sha256: string,
+    offset: number,
+    window: ReadWindow,
+    answered: () => void,
+    running: Set<Promise<void>>,
+    fail: (error: unknown) => void,
+  ): void {
+    const settled = (async (): Promise<void> => {
+      try {
+        const reply = (await this.call(this.peer, Method.ArtifactRead, {
+          sessionId,
+          sha256,
+          offset,
+        })) as ArtifactReadResult;
+        window.accept(offset, reply);
+        answered();
+      } catch (error) {
+        fail(error);
+      }
+    })();
+    running.add(settled);
+    void settled.then(() => running.delete(settled));
+  }
+
+  /**
    * The generation to run on: waits out a drop when the session is known and a
    * reconnect is possible, else the current one. The wait is BOUNDED
    * (`UPLOAD_RECONNECT_MS` from the first drop of this attempt, `wait.deadline`
@@ -2469,6 +2682,7 @@ export class RemoteClient {
     entry: SessionEntry | undefined,
     signal: AbortSignal | undefined,
     wait: { deadline: number | null },
+    errors: LinkErrors = UPLOAD_ERRORS,
   ): Promise<number> {
     if (!this.channelFactory || !entry) {
       return this.gen;
@@ -2479,7 +2693,7 @@ export class RemoteClient {
     const deadline = wait.deadline;
     const left = deadline - this.clock.now();
     if (left <= 0) {
-      throw new UploadLinkLostError(UPLOAD_RECONNECT_MS);
+      throw errors.lost(UPLOAD_RECONNECT_MS);
     }
     return new Promise<number>((resolve, reject) => {
       let done = false;
@@ -2493,10 +2707,10 @@ export class RemoteClient {
         settle();
       };
       const timer = this.clock.setTimeout(() => {
-        finish(() => reject(new UploadLinkLostError(UPLOAD_RECONNECT_MS)));
+        finish(() => reject(errors.lost(UPLOAD_RECONNECT_MS)));
       }, left);
       const onAbort = (): void => {
-        finish(() => reject(new UploadAbortedError()));
+        finish(() => reject(errors.aborted()));
       };
       signal?.addEventListener("abort", onAbort, { once: true });
       // The link's own answer: live (resolve); stopped for good or the session
@@ -2509,9 +2723,12 @@ export class RemoteClient {
     });
   }
 
-  private throwIfAborted(signal: AbortSignal | undefined): void {
+  private throwIfAborted(
+    signal: AbortSignal | undefined,
+    errors: LinkErrors = UPLOAD_ERRORS,
+  ): void {
     if (signal?.aborted) {
-      throw new UploadAbortedError();
+      throw errors.aborted();
     }
   }
 

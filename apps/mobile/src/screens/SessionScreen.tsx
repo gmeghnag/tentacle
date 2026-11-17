@@ -122,6 +122,12 @@ export interface SessionScreenProps {
   readonly focusComposer?: boolean;
   /** The sessions drawer is open over this screen: the floating button hides (F20). */
   readonly drawerOpen?: boolean;
+  /**
+   * The artifacts gallery (docs/feat/model-artifacts.md D9): Session info's row
+   * and a transcript card both lead there. Absent: neither is offered (a screen
+   * with no router, e.g. a unit test's).
+   */
+  readonly onOpenArtifacts?: (from: "session-info" | "card") => void;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -153,6 +159,7 @@ export function SessionScreen({
   onOpenDrawer,
   focusComposer = false,
   drawerOpen = false,
+  onOpenArtifacts,
 }: SessionScreenProps): JSX.Element {
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
@@ -739,6 +746,9 @@ export function SessionScreen({
                   {...(speak === undefined || voice === null
                     ? {}
                     : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
+                  {...(onOpenArtifacts === undefined
+                    ? {}
+                    : { onArtifact: (meta) => onOpenArtifacts("card") })}
                 />
               );
             }}
@@ -1031,6 +1041,14 @@ export function SessionScreen({
             onRetry={() => void controller.refreshInfo()}
             expanded={expanded}
             onExpand={setExpanded}
+            onOpenArtifacts={() => {
+              // The sheet is a way IN: the gallery needs the whole frame, so the
+              // sheet closes before the route pushes (docs D9).
+              setInfoOpen(false);
+              setExpanded(null);
+              controller.closeInfo();
+              onOpenArtifacts?.("session-info");
+            }}
             onClose={() => {
               setInfoOpen(false);
               setExpanded(null);

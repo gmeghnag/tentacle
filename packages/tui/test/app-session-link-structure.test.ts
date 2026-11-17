@@ -130,7 +130,11 @@ describe("S9b: the session link leaves App.tsx", () => {
     );
     // The identifiers are still read at their old call sites, unchanged.
     expect(app).toContain("watchSession(sessionRef.current);");
-    expect(app).toContain("}, [watchSession]);");
+    // `flushNow` joined the deps with S6a (docs/feat/model-artifacts.md D8): the
+    // artifacts a resumed transcript joins arrive ASYNCHRONOUSLY, after mount,
+    // so this effect must repaint. It is `usePaintScheduler`'s `useCallback([])`
+    // — a stable identity, so the effect still runs exactly once per session.
+    expect(app).toContain("}, [watchSession, flushNow]);");
     expect(app).toContain("switchTo,\n");
   });
 

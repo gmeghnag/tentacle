@@ -1,3 +1,5 @@
+import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ArtifactsData } from "../artifacts-panel.ts";
 /**
  * The panel MODEL (docs/feat/app-decomposition.md S7): the three open panels as
  * one state, and the constructors the commands call. Types only plus three
@@ -35,6 +37,19 @@ export interface SessionsPanel {
   // (`panelView`'s `current`, the App's key route) — never a captured copy.
 }
 
+/**
+ * `/artifacts` (docs/feat/model-artifacts.md D8): a tree of artifacts with their
+ * versions folded under each, plus when the list was read (the rows' ages).
+ */
+export interface ArtifactsPanel {
+  readonly kind: "artifacts";
+  /** The daemon's answer; null while the request is in flight. */
+  readonly data: ArtifactsData | null;
+  readonly tree: TreeState;
+  /** When the list was read (the rows' `3m ago`). */
+  readonly now: number;
+}
+
 /** `/schedule` (docs/feat/cron-tool.md S5, mockup M3): a flat list with its own cursor and delete confirm. */
 export interface SchedulesPanel {
   readonly kind: "schedule";
@@ -45,7 +60,7 @@ export interface SchedulesPanel {
   readonly now: number;
 }
 
-export type OpenPanel = TreePanel | SessionsPanel | SchedulesPanel;
+export type OpenPanel = TreePanel | SessionsPanel | ArtifactsPanel | SchedulesPanel;
 
 /** The `/schedule` panel (docs/feat/cron-tool.md S5): the daemon's table, or `undefined` until it reports. */
 export const schedulesPanel = (
@@ -71,4 +86,15 @@ export const skillsPanel = (data: SkillsListView | null = null): TreePanel => ({
   kind: "skills",
   data,
   tree: TREE_START,
+});
+
+/** The `/artifacts` panel, in its loading state (or showing `view`). */
+export const artifactsPanel = (
+  view: { readonly artifacts: readonly ArtifactMeta[]; readonly truncated?: boolean } | null = null,
+  now: number = Date.now(),
+): ArtifactsPanel => ({
+  kind: "artifacts",
+  data: view === null ? null : { ...view },
+  tree: TREE_START,
+  now,
 });

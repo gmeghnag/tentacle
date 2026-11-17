@@ -42,6 +42,7 @@ import {
 } from "react";
 import {
   ActivityIndicator,
+  Alert,
   AppState,
   Linking,
   Platform,
@@ -65,6 +66,8 @@ import { APP_LOG_FILES } from "./src/app-log-fs-expo.ts";
 import { createAppLogFile } from "./src/app-log-fs.ts";
 import { type AppLog, createAppLog, errorShape } from "./src/app-log.ts";
 import { exportFileName, exportText } from "./src/app-log.ts";
+import { ARTIFACT_CACHE, shareCachedCopy } from "./src/artifact-cache-expo.ts";
+import { ARTIFACT_FEEDS } from "./src/artifact-feed.ts";
 import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
 import { composeHandleOf, foldingOutboxSession } from "./src/compose-handle.ts";
 import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
@@ -109,6 +112,7 @@ import type { ActivityButtonMode } from "./src/floating-button.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
+import { tapLink } from "./src/links.ts";
 import { authenticate, biometry, capability } from "./src/lock-auth.ts";
 import { LOCK_SETTING_STORE } from "./src/lock-settings-expo.ts";
 import { MemoryAnswers } from "./src/notification-dispatch.ts";
@@ -140,8 +144,10 @@ import {
   type RootStackParams,
   type SessionRoute as SessionRouteParams,
   initialRoute,
+  openArtifactGallery,
 } from "./src/routes.ts";
 import { QrScanner, usePairingCamera } from "./src/scanner.tsx";
+import { ArtifactGalleryScreen } from "./src/screens/ArtifactGallery.tsx";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
 import { LockGate } from "./src/screens/LockGate.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
@@ -591,6 +597,11 @@ const MEMORY: ComputerMemory<ComputerLink> = {
   links: LINKS,
   diagnoses: DIAGNOSES,
   records: RECORDS,
+  // The artifacts that came from that computer go with it (model-artifacts D9 /
+  // Review round 3, finding 1): the cached bytes may hold workspace content, and
+  // a live feed would outlive the record it was published from.
+  artifactCache: ARTIFACT_CACHE,
+  feeds: ARTIFACT_FEEDS,
   // The extension's copy of the paired computers and their pinned keys follows
   // every store change (docs/feat/mobile-notifications.md Design 6 / N4).
   pushDirectory: () =>
@@ -1260,6 +1271,7 @@ function SessionRoute({
   focus,
   onOpenDrawer,
   drawerOpen,
+  onOpenArtifacts,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
@@ -1269,6 +1281,8 @@ function SessionRoute({
   readonly focus: boolean;
   readonly onOpenDrawer: () => void;
   readonly drawerOpen: boolean;
+  /** The artifacts gallery's ONE entry (docs/feat/model-artifacts.md D9). */
+  readonly onOpenArtifacts: (from: "session-info" | "card") => void;
 }): JSX.Element {
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -1309,6 +1323,10 @@ function SessionRoute({
         // Session info (docs/feat/mobile-session-info.md): the sheet's pulls, over
         // the same client and the screen's own handle.
         info: infoWiring(computerId, sessionId, title, link),
+        // The artifacts gallery's feed (docs/feat/model-artifacts.md D9): this
+        // screen publishes its list and its own reader, the gallery screen —
+        // which holds no handle of its own — reads both.
+        artifacts: { feed: ARTIFACT_FEEDS.feed(computerId, sessionId) },
       });
       // The link's own status: the banner's `reconnecting` (F8/F9).
       unsubscribe = link.onStatus((status) => created?.link(status.state === "up"));
@@ -1363,8 +1381,25 @@ function SessionRoute({
       onOpenDrawer={onOpenDrawer}
       focusComposer={focus}
       drawerOpen={drawerOpen}
+      onOpenArtifacts={onOpenArtifacts}
     />
   );
+}
+
+/**
+ * A link tapped inside a gallery viewer (plan F22, Owner Q7): the whole URL is
+ * confirmed first, then Safari — the same rule the transcript's rows follow, and
+ * `links.ts` owns it.
+ */
+function openConfirmedLink(href: string): void {
+  tapLink(href, {
+    confirm: (prompt, onConfirm) =>
+      Alert.alert(prompt.title, prompt.message, [
+        { text: prompt.cancel, style: "cancel" },
+        { text: prompt.confirm, onPress: onConfirm },
+      ]),
+    open: (url) => void Linking.openURL(url),
+  });
 }
 
 /**
@@ -2086,9 +2121,43 @@ function AppShell(): JSX.Element {
                     title={route.params.title}
                     archived={route.params.archived}
                     focus={route.params.focus === true}
+                    onOpenArtifacts={(from) =>
+                      openArtifactGallery(navigation, {
+                        computerId: route.params.computerId,
+                        sessionId: route.params.sessionId,
+                        title: route.params.title,
+                        archived: route.params.archived,
+                        from,
+                      })
+                    }
                   />
                 )}
               </SessionDrawerHost>
+            )}
+          </Stack.Screen>
+          {/* The artifacts gallery (docs/feat/model-artifacts.md D9): a session's
+              artifacts, reached by Session info's row or a transcript card. It
+              holds no handle — it reads the feed the session screen published. */}
+          <Stack.Screen
+            name="ArtifactGallery"
+            options={({ route }) => ({ title: "Artifacts", headerShown: false })}
+          >
+            {({ navigation, route }) => (
+              <ArtifactGalleryScreen
+                palette={palette}
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                title={route.params.title}
+                archived={route.params.archived}
+                onBack={() => navigation.goBack()}
+                onLink={openConfirmedLink}
+                onShare={(fileUri) => {
+                  // A NAMED copy handed over, then removed once the sheet closes
+                  // (D9, finding 2): the file a person saves or AirDrops is
+                  // `report.zip`, never `3f2a…e9`.
+                  void shareCachedCopy(fileUri);
+                }}
+              />
             )}
           </Stack.Screen>
         </Stack.Navigator>

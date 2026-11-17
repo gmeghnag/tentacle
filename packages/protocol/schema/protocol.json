@@ -298,6 +298,143 @@
       "type": "object",
       "x-event-class": "display"
     },
+    "ArtifactListParams": {
+      "additionalProperties": true,
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["sessionId"],
+      "type": "object"
+    },
+    "ArtifactListResult": {
+      "additionalProperties": true,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/ArtifactMeta"
+          },
+          "maxItems": 500,
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": ["artifacts"],
+      "type": "object"
+    },
+    "ArtifactMeta": {
+      "additionalProperties": true,
+      "properties": {
+        "artifactId": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+          "type": "string"
+        },
+        "callId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "createdAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "maximum": 65535,
+          "type": "integer"
+        },
+        "kind": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "mimeType": {
+          "maxLength": 127,
+          "minLength": 1,
+          "pattern": "^[a-z0-9.+-]+\\/[a-z0-9.+-]+$",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "size": {
+          "exclusiveMinimum": 0,
+          "maximum": 20971520,
+          "type": "integer"
+        },
+        "source": {
+          "maxLength": 512,
+          "pattern": "^[^\\p{Cc}]*$",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 120,
+          "minLength": 1,
+          "pattern": "^[^\\p{Cc}]*$",
+          "type": "string"
+        },
+        "version": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "maximum": 65535,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifactId",
+        "callId",
+        "createdAt",
+        "kind",
+        "mimeType",
+        "sha256",
+        "size",
+        "title",
+        "version"
+      ],
+      "type": "object"
+    },
+    "ArtifactReadParams": {
+      "additionalProperties": true,
+      "properties": {
+        "offset": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": ["offset", "sessionId", "sha256"],
+      "type": "object"
+    },
+    "ArtifactReadResult": {
+      "additionalProperties": true,
+      "properties": {
+        "data": {
+          "maxLength": 349528,
+          "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+          "type": "string"
+        },
+        "size": {
+          "exclusiveMinimum": 0,
+          "maximum": 20971520,
+          "type": "integer"
+        }
+      },
+      "required": ["data", "size"],
+      "type": "object"
+    },
     "AttachmentContent": {
       "additionalProperties": true,
       "properties": {
@@ -5178,6 +5315,9 @@
     "ToolCallUpdate": {
       "additionalProperties": true,
       "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactMeta"
+        },
         "content": {
           "items": {
             "$ref": "#/$defs/ContentBlock"
@@ -5806,6 +5946,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "errorCodes": {
     "AlreadyInitialized": -32007,
+    "ArtifactUnavailable": -32020,
     "AttachmentRefused": -32016,
     "Cancelled": -32010,
     "CompactInProgress": -32009,
@@ -5831,6 +5972,22 @@
     "VersionMismatch": -32002
   },
   "methods": {
+    "artifact/list": {
+      "params": {
+        "$ref": "#/$defs/ArtifactListParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ArtifactListResult"
+      }
+    },
+    "artifact/read": {
+      "params": {
+        "$ref": "#/$defs/ArtifactReadParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ArtifactReadResult"
+      }
+    },
     "attachment/put": {
       "params": {
         "$ref": "#/$defs/AttachmentPutParams"

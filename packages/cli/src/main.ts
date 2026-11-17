@@ -2180,7 +2180,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     try {
       runtime = await (io.startWorkerRuntime ?? startWorkerRuntime)(
         config,
-        { permissions, saver, resume: resumeRecord },
+        {
+          permissions,
+          saver,
+          resume: resumeRecord,
+          // D11: the worker keeps nothing, so a resumed session's artifacts come
+          // back from the copy THIS main thread keeps beside its log. Only this
+          // runtime reads it: a pod's artifacts are pod-supplied.
+          artifactsDir: sessions.store.directory,
+        },
         err,
       );
     } catch (error) {

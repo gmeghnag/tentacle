@@ -625,7 +625,7 @@ describe("the local TUI's single broker (AGENTS §7), pinned where it is built",
     // so the assertion names the argument object, not the callee text; the seam
     // defaults to the real `startWorkerRuntime`.)
     expect(tui).toMatch(
-      /\(io\.startWorkerRuntime \?\? startWorkerRuntime\)\(\s*config,\s*\{ permissions, saver/,
+      /\(io\.startWorkerRuntime \?\? startWorkerRuntime\)\(\s*config,\s*\{\s*permissions,\s*saver/,
     );
     expect(tui).not.toContain("new PermissionBroker(), saver");
     // The callee is the `startTui` seam (`io.startTui ?? startTui`), so the
