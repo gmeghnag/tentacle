@@ -445,3 +445,15 @@ Attacks that found nothing:
 - A second drag while the first write is still in flight: the hold stays until its own value is published.
 - A release that did not move the value: there is no write, and the hold clears on the next render.
 - A failed write: the store still publishes the value (F22), so the hold clears.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-17* (fresh context; same model as the earlier rounds, different from the executor)
+
+**Verdict: REQUEST-CHANGES. There is no fix commit.**
+- HEAD is `b0aa19ec`, "docs(mobile-hub-opacity): review round 2 (opus)". `git diff HEAD~1` touches only this doc, so there is nothing new to mutation-test.
+- Round 2's HIGH finding is still open. `packages/tui/test/__snapshots__/diagram-lines.test.ts.snap:1` still begins with `ESC[?25h Snapshot v1`. `bun test packages/tui/test/diagram-lines.test.ts` gives 33 pass / 14 fail. It is still the only change under `packages/` in `git diff main...HEAD`.
+- `bun run lint` is clean and `bun run typecheck` is clean.
+- Round 4's findings 1–2 stay fixed: the code is unchanged since `7e3bb83a`.
+- The fix: restore that file from `main` (`git show main:<path> > <path>`) in a commit.
+- **Escalation (AGENTS §0):** this is the second time a round has had no executor commit (rounds 2–3 were the first). The orchestrator should confirm that the executor runs in this worktree.
