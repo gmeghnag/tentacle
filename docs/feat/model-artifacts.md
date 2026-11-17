@@ -2839,3 +2839,30 @@ M9 the mock model stops presenting the fixture         RED
 - **Nits:** organizeImports placed an `import type` above the file doc comment in `artifact-feed.ts:1`, `ArtifactGallery.tsx:1` and `ArtifactViewerModal.tsx:1-3`. `viewerFor` has a duplicated JSDoc block (`artifact-viewer.ts:58-71`). The scripts gate `scripts && runScripts` is component logic, but it is trivial.
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Review
+
+### S8 + S9 — Round 3 (fresh context, after merge `e46b71ff`): REQUEST-CHANGES (2 MEDIUM)
+
+**Verdict: REQUEST-CHANGES.** I reviewed `git diff main...HEAD`, limited to the S8+S9 files (`apps/mobile/**`, `changelog.d/model-artifacts.*`). The reviewer is the same model family as the S8 executor and the earlier reviews, so shared blind spots may survive.
+
+**Gate:** `bun run typecheck` is clean. `bun run lint` is clean (1915 files). The 20 touched mobile test files give **326 pass, 0 fail**. I did not run the full `bun test` because it is out of slice scope.
+
+**Findings**
+1. **MEDIUM: the D9 cache contract is not wired, so the phone keeps every byte forever, including after unpair.** `ArtifactViewerModal.tsx:88-90` writes each image, PDF or "other" file to `<cache>/artifacts/<computerId>/<sha256>` and calls no `planCache`/`cacheStep`. A repo-wide grep shows that `cacheStep`, `planCache`, `tooBigNote` and `ARTIFACT_CACHE_BYTES` have zero production callers. D9 (`model-artifacts.md:428-431`, failure-mode row `:548`) requires three things: a 200 MB LRU, the "Too big to keep" note, and deleting the directory on unpair or when this phone deletes the session. None of them happen. `ARTIFACT_FEEDS.forget` is also never called. The modal's own header comment (`:13-14`) claims both the plan and the note. Scenario: a user opens 400 MB of PDFs and screenshots from a computer, then unpairs it. Those artifacts, which may hold workspace content, stay on the phone until iOS purges Caches. The S7 tests pin the pure plan, but nothing pins its use, so T7.4 is green while the behaviour is absent.
+2. **MEDIUM: Share hands over a nameless, extensionless blob.** D9 (`:430-431`) says Share uses a copy named `<sanitized title>.<ext>`, and `OtherSheet.tsx:5` repeats this. In fact `shareName` has no production caller: `App.tsx:2149-2151` shares `file.uri`, which is the 64-hex `<sha256>` path. For kind `other` (`.zip`, unknown types), Share is the ONLY action. Scenario: a user saves `report.zip` to Files or sends it by AirDrop, and it arrives as `3f2a…e9` with no extension, so the recipient cannot open it. The same extensionless path is what `PdfViewer` loads into WKWebView, which picks the MIME type from the extension. Whether a PDF renders at all is therefore **unverified**, because T8.2 has still not run. It should be checked together with the fix.
+
+**Mutations (§9):** I applied two: `navigationPredicate` also allowing `https:`, and `htmlViewerProps` with `javaScriptCanOpenWindowsAutomatically: true`. Each turned `artifact-viewer.test.ts` RED (3 fail together). I reverted both, and `git status --porcelain` is empty.
+
+**Attacks tried:**
+- (a) The scripts default: `viewerFor` sets `scripts:false` for every kind, and `HtmlViewer` gates on `scripts && runScripts` with `useState(false)` and a `key` per state. Holds.
+- (b) Iframe `srcdoc` / meta refresh / `window.open`: the predicate accepts only the exact initial URL, so all are refused. Holds.
+- (c) A reader after the session screen has gone: it reads the current `handle` and rejects loudly when there is none. Holds.
+- (d) Path traversal through `computerId`: `cacheDir` sanitises it. Holds.
+- (e) The cache lifecycle and Share naming: these are findings 1 and 2.
+
+**Still unverified (unchanged):** T8.1 (the escape suite) and T8.2 (pixels) have not run on a simulator. Scripts-off is what ships, so this is not blocking.
+
+**Executor behaviour:** the fix round was honest about what it had not run. The cache and Share gap predates it (S8/S9) and was missed by both earlier reviews, including mine.
+
+*— claude-opus-5-5, 2026-11-17*
