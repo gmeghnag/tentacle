@@ -882,3 +882,15 @@ Opus (shared blind spot possible on finding 2's premise, which this review caugh
   files) and `bun run typecheck` is clean. One residual risk for S2, not S1: `compactedHistory` may carry a message object
   over at the SAME index. The identity check would then still apply that entry, but the candidates there (skills, system) are exempt,
   so it is not a finding.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17 · fresh context · scope: **S2 only** (`git diff main...HEAD`) · same model family as the S2 executor: shared blind spots possible*
+
+**Verdict: PASS** (no HIGH, no MEDIUM).
+
+- **Gate.** Touched files (`prune-loop`, `prune`, `prune-guard`, `carried-settings`, `key-docs-carried`): 166 pass / 0 fail. `bun run lint` clean (1964 files). `bun run typecheck`: only 2 errors in `packages/tools/src/diagram-parse.ts` (`linkedom`/`mermaid` missing from this worktree's `node_modules`; file not in the diff). Full `bun test` not re-run: the 0-fail baseline on a full install is still unproven.
+- **Mutations (reverted, tree clean).** Round request built from `projectedHistory` (prune set ignored) → 7/11 fail. `forgetPrune` removed from `clearConversation` → `/clear` fails. Bulk perl mutations were blocked by permissions, so only these two ran; the executor's M1–M10 table was not re-run.
+- **Attacks that found nothing.** (1) §7 persistence: `requestHistory` only copies messages, and `session.messages` stays untouched (pinned by the log-intact test). (2) In-place replacements: the only `length = 0` sites are `session.ts:366/391` and `agent.ts:2665`, all three call `forgetPrune`. The `messages.pop()` at `agent.ts:1742/1754` only touches the protected tail. (3) Anchor: `ref` is the last stored message, which is never pruned, so the anchor stays valid between batches and is dropped on a batch. (4) Pod: the config bounds (`schema.ts`) match `SessionSettingsSchema`, so a carried value cannot fail `session/open`. The fields are additive and optional, so no bump is needed. (5) Guard: every write tool (`fs_write`/`fs_edit`/`fs_multi_edit`) refuses the placeholder before `lockPath`. No other fs write tool exists in `packages/tools/src`. (6) Hooks: the baseline counts messages, so a batch (same length) needs no reset.
+- **Nits.** The doc says `prune-loop.test.ts` has 12 cases, but it has 11. Sub-agent forwarding is untested (the executor said so).
+- **Executor:** honest. It disclosed its drift, mutation survivors and the unproven full suite.
