@@ -1175,3 +1175,35 @@ T3.2 walks each arrowhead back along the glyphs to a box border. It requires the
 - No schema change, so `protocol.json` was not regenerated; no `protocol.d/` note.
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Review
+
+**Slice D3, fresh-context adversarial review. Verdict: REQUEST-CHANGES** (1 MEDIUM).
+
+1. **MEDIUM: pod-forged control/escape bytes reach the drawn rows** (`packages/tui/src/diagram-lines.ts:65-66` for the title, `:116-119` for the caption, flow labels at `diagram-ascii-flow.ts:267,270,624`). `parseDiagramArgs` re-lints but strips no C0/C1 controls, and `lintDiagram` does not refuse them. Repro (`.tentacle/tmp/model-diagrams/rev-d3/esc.ts`) puts `\x1b]52;c;…\x07\x1b[2J` (OSC 52 clipboard write + clear screen) in three places:
+   - the `title`: ESC present in the output;
+   - a flowchart node label `A["x…y"]`: ESC present;
+   - a `classDiagram` source line, which reaches the highlighted source view: ESC present.
+
+   A sequence message came out clean. Once D4 hands these rows to Ink, a pod (not trusted, §7) could write the laptop clipboard or corrupt the alt-screen. That contradicts the failure-mode row "Pod forges `rawInput` → … the TUI draws text only". Fix: in this pure module, replace `[\u0000-\u001f\u007f-\u009f]` (tab → space) in the title and in every model label/source line before layout. This is the same rule `subagent-notify.ts:29` uses. Add a test that a forged ESC never appears in `diagramToolBody` output. Not checked: whether Ink 5 passes OSC through unchanged (it does not filter non-SGR escapes as far as this review knows, but no frame was captured).
+
+**Gate (narrow + static):** `bun test packages/tui/test/diagram-lines.test.ts` + theme tests: 77 pass / 0 fail (12 snapshots). `bun run lint`: clean. `bun run typecheck`: clean. Full `bun test` was not re-run in this review.
+
+**Mutation:** sideways edge labels blanked (`diagram-ascii-flow.ts:267`) → KILLED (1 fail, snapshot `loop 80`). File restored from a copy; `git status` clean afterwards.
+
+**Attacks tried:**
+- (a) Escape injection: finding 1.
+- (b) Label survival over 400 seeded random flowcharts at 400 cols: 354 drawn, 0 with a missing node or edge label. T3.4 holds beyond its fixtures.
+- (c) Widths 1–19 (outside the T3.1 fuzz), with a CJK and an ASCII title, on 4 fixtures, compact and expanded: 0 lines wider than `width`.
+- (d) 3000-message sequence: refused upstream by lint (`undefined` → generic row).
+- (e) 60-node flowchart: 1 ms. No render-thread stall.
+
+**Holds:**
+- Pure modules, no I/O, no terminal writes (§7).
+- Forged or invalid args → `undefined` (M9).
+- Theme roles map onto existing tokens.
+- Drift items 1–8 are reasonable and honestly stated.
+
+**Executor:** candid about the red-first drift, and backed it with 9 mutations. **Reviewer = same model (claude-opus-5-5) as the executor:** only the context is fresh, so blind spots may be shared.
+
+*— claude-opus-5-5, 2026-11-17*
