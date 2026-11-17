@@ -44,11 +44,10 @@ describe("compactionSeparatorText", () => {
     expect(compactionSeparatorText({})).toBe("compacted");
   });
 
-  test("foreign wording", () => {
-    expect(compactionSeparatorText({ fromTokens: 182000, toTokens: 9000 }, { foreign: true })).toBe(
-      "compacted on another device · ctx 182k → ~9k",
-    );
-    expect(compactionSeparatorText({}, { foreign: true })).toBe("compacted on another device");
+  test("no foreign variant (Q6 owner override): one wording whatever the device", () => {
+    // @ts-expect-error — the function takes the view only.
+    const text = compactionSeparatorText({ fromTokens: 182000, toTokens: 9000 }, { foreign: true });
+    expect(text).toBe("compacted · ctx 182k → ~9k");
   });
 });
 

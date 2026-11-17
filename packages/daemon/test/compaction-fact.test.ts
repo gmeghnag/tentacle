@@ -95,6 +95,14 @@ describe("session/compact reports the context sizes", () => {
     expect(await hosted.compact()).toMatchObject({ fromTokens: 7777, toTokens: 9000 });
   });
 
+  test("a usage without a prompt count (0) is unmeasured: from is measured, never 0 nor stale", async () => {
+    // turn 1: 50k, turn 2: a provider that defaulted a missing count to 0.
+    const hosted = makeHosted([50_000, 0]);
+    await turn(hosted, "t1");
+    await turn(hosted, "t2");
+    expect(await hosted.compact()).toMatchObject({ fromTokens: 7777, toTokens: 9000 });
+  });
+
   test("a history replacement drops the figure: re-measured, not the stale one", async () => {
     const hosted = makeHosted([182_000]);
     await turn(hosted, "t1");

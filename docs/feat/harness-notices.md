@@ -297,7 +297,8 @@ new seam per client. That is why A is recommended.
    notices (`▲` / `◇`).
 3. **Foreign compaction**: `historyAction` (`turn-feed.ts:74-87`) returns
    `separator` instead of `notice` for a non-own compaction; the separator text
-   comes from `compactionOf` on the new history's summary message (`foreign`);
+   comes from `compactionOf` on the new history's summary message, in the same
+   `compactionSeparatorText` wording as an own compaction (Q6: no foreign variant);
    `FOREIGN_COMPACTED_NOTICE` goes. No slot state (this TUI never knew it ran).
 4. **Resume / replace** (`resume.ts:66-73`): a user message for which
    `compactionOf` is non-null projects to a separator item, the brief kept as
@@ -409,10 +410,12 @@ All red on current `main` first (§9), mutation-checked where noted.
   untouched, rejects.
 - Daemon: two turns with `usage` 50k then 182k → `/compact` result
   `fromTokens: 182000`; a sub-agent's usage does not move it; after a context
-  reset it is `undefined` (re-measured). The persisted `message` entry of the
+  reset it is `undefined` (re-measured); a `usage` of `promptTokens: 0` (a
+  provider's default for a missing count) is unmeasured, never `0`. The persisted `message` entry of the
   new segment carries the field (read back through `session/log`).
 - Core `compactionOf`/`compactionSeparatorText`: structural, legacy head, plain
-  user message → null, `~` when estimated, `foreign`.
+  user message → null, `~` when estimated; no foreign variant (Q6: a second
+  argument is a type error and changes nothing).
 
 **S2**
 - `harness-group.ts` table: [info, info, warn, info, separator, info] → glyph
@@ -538,6 +541,32 @@ sub-agent's `subagent_usage`; no turn → measured; after a replacement → re-m
 files (client clear-attach/reattach/reattach.e2e, agent/, protocol/, core, daemon + providers compaction-fact,
 tui app.test) → 1379 pass, 0 fail. The full suite was not re-run (token budget: once). The 5 skips: this slice adds
 no skip. **Unverified:** a full `bun test` after the last fix — run `bun test 2>&1 | tail -n 15`.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-17* (fixes Review round 1; S1 Execution above is also opus — the "exec (deepseek)" commit title is the mislabel)
+
+1. **MEDIUM 1 (fake `0`) — FIXED.** `daemon/src/hosted-session.ts:3104-3107`: a `usage` with
+   `promptTokens <= 0` sets `lastPromptTokens = undefined` (unmeasured ⇒ `compact` measures the old
+   history), so neither `0` nor an older round's stale figure reaches the separator. Test
+   `daemon/test/compaction-fact.test.ts` "a usage without a prompt count (0) is unmeasured": turns 50k then 0 →
+   `fromTokens: 7777`. RED on the old code: received `fromTokens: 0`.
+2. **MEDIUM 2 (foreign variant) — FIXED.** `core/src/compaction-view.ts`: `compactionSeparatorText(view)` takes
+   the view only; the `foreign` wording is gone. The old "foreign wording" test is replaced by "no foreign variant":
+   a `// @ts-expect-error` second argument `{foreign: true}` still yields `compacted · ctx 182k → ~9k`. RED on the old
+   code twice: runtime (received `compacted on another device · …`) and `tsc` (TS2578 unused directive). Doc: Design
+   S3.3 and the Tests §S1 core/daemon bullets updated.
+
+**Mutations (each red, then reverted; `git diff --stat` after = only the fix):**
+| Mutation | Red |
+|---|---|
+| on `0` keep the previous figure (`: this.lastPromptTokens`) | daemon 0-usage test: `fromTokens: 50000` |
+| accept `0` (`>= 0`) | daemon 0-usage test: `fromTokens: 0` |
+| re-add a second parameter `_o?: object` to `compactionSeparatorText` | `tsc`: TS2578 at `core/test/compaction-view.test.ts:48` |
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (1997 files) · full `bun test` (once): 14530 pass,
+5 skip, 0 fail — closes S1's "Unverified" full-suite item. The 5 skips are the same count as S1's run (no skip
+added by this round).
 
 ## Review
 

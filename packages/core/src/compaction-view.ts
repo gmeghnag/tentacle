@@ -35,16 +35,13 @@ export function compactionOf(m: ChatMessage): CompactionView | null {
 
 /**
  * `compacted · ctx 182k → 9k`; `~9k` when the after was estimated (owner Q2);
- * `compacted` alone without figures; `foreign` → `compacted on another device …` (Q6).
+ * `compacted` alone without figures. One wording whatever device compacted
+ * (Q6, owner override): no foreign variant.
  */
-export function compactionSeparatorText(
-  view: CompactionView,
-  opts: { foreign?: boolean } = {},
-): string {
-  const head = opts.foreign ? "compacted on another device" : "compacted";
+export function compactionSeparatorText(view: CompactionView): string {
   if (view.fromTokens === undefined || view.toTokens === undefined) {
-    return head;
+    return "compacted";
   }
   const to = `${view.toExact ? "" : "~"}${formatTokens(view.toTokens)}`;
-  return `${head} · ctx ${formatTokens(view.fromTokens)} → ${to}`;
+  return `compacted · ctx ${formatTokens(view.fromTokens)} → ${to}`;
 }

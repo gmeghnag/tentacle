@@ -3101,7 +3101,10 @@ export class HostedSession {
         // nothing, so it rides the next committed boundary's capture like any
         // other. No entry at all when the provider reported no usage.
         if (event.type === "usage") {
-          this.lastPromptTokens = event.usage.promptTokens;
+          // Providers default a missing prompt count to 0: that is unmeasured,
+          // never a size (nor a reason to keep an older round's figure).
+          this.lastPromptTokens =
+            event.usage.promptTokens > 0 ? event.usage.promptTokens : undefined;
           const model = this.mainModelId();
           this.log.usage({
             turnId,
