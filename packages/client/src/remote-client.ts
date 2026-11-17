@@ -71,6 +71,7 @@ import {
   Notification,
   type OpenResult,
   PROTOCOL_VERSION,
+  type PinResult,
   type PromptContentBlock,
   type PromptResult,
   type QueueState,
@@ -1313,6 +1314,30 @@ export class RemoteClient {
           throw new RpcError(
             JsonRpcErrorCode.MethodNotFound,
             "this daemon is too old to rename sessions — update tentacle",
+          );
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * Pin or unpin a session (`session/pin`, a SET): resolves with the state
+   * after applying. Needs no `open`; live or archived. Not re-sent after a
+   * drop (the user asks again). An older daemon → rejects `MethodNotFound`
+   * with "this daemon is too old to pin sessions — update tentacle".
+   */
+  pinSession(sessionId: string, pinned: boolean): Promise<boolean> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.Pin, { sessionId, pinned }).then(
+      (result) => (result as PinResult).pinned,
+      (error: unknown) => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          throw new RpcError(
+            JsonRpcErrorCode.MethodNotFound,
+            "this daemon is too old to pin sessions — update tentacle",
           );
         }
         throw error;

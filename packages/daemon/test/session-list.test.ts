@@ -624,3 +624,48 @@ describe("SessionHost.list over the wire", () => {
     for (const id of ["r1", "r2", "r3"]) await idle(d, id);
   });
 });
+
+// Pins (docs/feat/mobile-session-actions.md S1): the flag on the entry, and
+// the FIRST page's `pinned` array with every pinned session; paging untouched.
+describe("toSessionList pins (pure)", () => {
+  const pinnedSet = (): SessionSummary[] => [
+    summary("a", 9, { pinnedAt: 1 }),
+    summary("b", 8),
+    summary("c", 7),
+    summary("d", 6, { pinnedAt: 2, archived: true }),
+    summary("e", 5),
+  ];
+
+  test("P1 a pinned summary is listed `pinned: true`; others carry no field", () => {
+    // Mutation: drop the entry flag → red.
+    const r = list(pinnedSet());
+    expect(r.sessions.find((s) => s.sessionId === "a")?.pinned).toBe(true);
+    expect("pinned" in (r.sessions.find((s) => s.sessionId === "b") ?? {})).toBe(false);
+    expect(SessionListResultSchema.safeParse(r).success).toBe(true);
+  });
+
+  test("P2 the first page carries EVERY pinned session (one past `limit` too), in list order", () => {
+    // Mutation: build `pinned` from the page instead of every summary → "d" missing.
+    const r = list(pinnedSet(), { limit: 2 });
+    expect(ids(r)).toEqual(["a", "b"]);
+    expect(r.pinned?.map((s) => s.sessionId)).toEqual(["a", "d"]);
+    expect(r.pinned?.every((s) => s.pinned === true)).toBe(true);
+    expect(SessionListResultSchema.safeParse(r).success).toBe(true);
+  });
+
+  test("P3 a cursor page carries no `pinned`; none pinned → no `pinned` field at all", () => {
+    // Mutation: always attach `pinned` → red on both.
+    const first = list(pinnedSet(), { limit: 2 });
+    const next = list(pinnedSet(), { limit: 2, cursor: first.cursor as string });
+    expect("pinned" in next).toBe(false);
+    expect("pinned" in list([summary("x", 1)])).toBe(false);
+  });
+
+  test("P4 sessions and cursors are identical with and without pins (keyset paging intact)", () => {
+    // Mutation: hoist pinned entries out of (or to the top of) `sessions` → red.
+    const plain = pinnedSet().map(({ pinnedAt: _p, ...s }) => s as SessionSummary);
+    const strip = (pages: SessionListResult[]) =>
+      pages.map((p) => ({ ids: ids(p), cursor: p.cursor }));
+    expect(strip(pages(pinnedSet(), 2))).toEqual(strip(pages(plain, 2)));
+  });
+});

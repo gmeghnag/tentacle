@@ -32,6 +32,38 @@ function argsOf(raw: string): Record<string, unknown> {
   return {};
 }
 
+/**
+ * The ONE list of tool names `subtitleOf` summarises — the TUI's `toolSubtitle`
+ * cases (`packages/tui/src/render-lines.ts`), mirrored here (the app bundle
+ * never imports `@tentacle/tui`, plan P8). A name NOT in it is MCP / unknown and
+ * gets the phone's own `mcpRowArgs` flattening, never the raw JSON.
+ *
+ * The two halves must not drift: `test/tool-summary.test.ts` scans the TUI's
+ * `toolSubtitle` source and fails when a case is missing here (or the reverse).
+ * Main added `chart` to the TUI's switch and this list lagged behind it — hence
+ * the guard. Add a case to BOTH.
+ */
+export const SUMMARISED_TOOLS: readonly string[] = [
+  "fs_read",
+  "fs_write",
+  "fs_edit",
+  "fs_multi_edit",
+  "shell",
+  "search",
+  "shell_output",
+  "shell_kill",
+  "agent_task",
+  "agent_control",
+  "agent_kill",
+  "agent_message",
+  "agent_status",
+  "skill",
+  // A chart's row names the chart, never its spec — and a chart the phone does
+  // not draw as a chart (an error, a spec it cannot re-validate; `chart-row.ts`)
+  // falls back to this generic row, where the title is the honest line.
+  "chart",
+];
+
 /** The TUI's `toolSubtitle`, case for case. */
 function subtitleOf(name: string, raw: string): string {
   const args = argsOf(raw);
@@ -166,23 +198,8 @@ export function toolSummary(row: Pick<ToolRow, "name" | "label" | "args" | "outp
 // as they are (`render-lines.ts` `default`), so `subtitleOf` above stays the
 // parity rule and becomes the FULL command in a step's open body.
 
-/** The tools `subtitleOf` summarises; everything else is MCP / unknown. */
-const SUMMARISED: ReadonlySet<string> = new Set([
-  "fs_read",
-  "fs_write",
-  "fs_edit",
-  "fs_multi_edit",
-  "shell",
-  "search",
-  "shell_output",
-  "shell_kill",
-  "agent_task",
-  "agent_control",
-  "agent_kill",
-  "agent_message",
-  "agent_status",
-  "skill",
-]);
+/** The tools `subtitleOf` summarises, from the one shared list above. */
+const SUMMARISED: ReadonlySet<string> = new Set(SUMMARISED_TOOLS);
 
 /** Tools whose row already says everything (a job or agent id, a skill name). */
 const ROW_SAYS_ALL: ReadonlySet<string> = new Set([
