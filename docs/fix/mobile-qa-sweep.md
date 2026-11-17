@@ -466,3 +466,16 @@ Executor behaviour: honest. It marked the task PARTIAL, stated what was unverifi
 - **Executor behaviour:** honest and thorough. It ran the simulator sweep, gave every row a shot and a run dir, and reported the flow/env failures (24–27) and the unprobed Hermes `typeof` as gaps instead of hiding them. Its one lapse is the missing whole-sheet empty state when it removed the ghost.
 
 *— claude-opus-5-5, 2026-11-17* (fresh context, same model family as the executor: shared blind spots possible)
+
+### Round 2
+
+**Verdict: PASS.**
+
+- **MEDIUM 1 (blank Activity sheet): FIXED, verified by mutation.** `activityView` now returns `empty: "Nothing running"` when there are no groups (`activity.ts:239`). `ActivitySheet.tsx:143` draws that line in a dimmed band.
+  - M-a: `empty: null` → `activity.test.ts` 27 pass / **1 fail**.
+  - M-b: `empty: "Nothing running"` unconditionally → 27 pass / **1 fail**.
+  - Both reverted with the Edit tool. `git diff` is empty afterwards.
+- **Regressions in `HEAD~1..HEAD`:** none. The only new field is `ActivityView.empty`, and typecheck confirms nothing else constructs an `ActivityView`. The activity test files pass 39/0 (3 files). `bun run lint` is clean (1991 files). `bun run typecheck` is clean (root, mobile, relay).
+- **The sheet pin** (`title={view.empty}`) is a source pin only. The pixels of the new band are unverified; this is not blocking.
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, same model family)
