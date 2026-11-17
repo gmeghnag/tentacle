@@ -6,7 +6,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { COMPACTION_SUMMARY_HEAD, type ChatMessage } from "@tentacle/core";
-import { itemLines, stripAnsi } from "../src/render-lines.ts";
+import stringWidth from "string-width";
+import { itemLines, stripAnsi, transcriptLines, wrapLines } from "../src/render-lines.ts";
 import { messagesToItems } from "../src/resume.ts";
 
 const sys: ChatMessage = { role: "system", content: "SYS" };
@@ -74,5 +75,42 @@ describe("messagesToItems: a compaction summary is the separator", () => {
       "  - goal: fix the test",
       "  - plan: slice 3",
     ]);
+  });
+
+  test("the collapsed rule plus its hint fits the width — one row, never two", () => {
+    // Review S3 round 1, F1: `rest` used to fill the rule to the full `width` and
+    // the hint was then appended, so `wrapAnsi` pushed it onto a SECOND row on
+    // every `--resume`/resync of a compacted session. A logical-line count proves
+    // nothing here (both renders are ONE logical line): the assert is on the
+    // wrapped rows' measured width.
+    const items = messagesToItems([
+      sys,
+      summary({ compacted: { fromTokens: 182_000, toTokens: 9_000, toExact: true } }),
+      { role: "assistant", content: "after it" },
+    ]);
+    for (const width of [40, 60, 100]) {
+      const rows = wrapLines(transcriptLines(items, { width, expandAll: false }), width).map(
+        stripAnsi,
+      );
+      // The hint never owns a row of its own: the only row that may carry it is
+      // the rule's, together with the figures. (At 40 it is dropped outright —
+      // head + hint cannot fit — rather than wrapped or truncated.)
+      const hintRows = rows.filter((r) => r.includes("ctrl+o to expand"));
+      expect(hintRows.length).toBeLessThanOrEqual(1);
+      for (const row of hintRows) {
+        expect(row.startsWith("── compacted · ctx 182k → 9k ─")).toBe(true);
+      }
+      if (width >= 60) {
+        expect(hintRows).toHaveLength(1);
+      }
+      for (const row of rows) {
+        expect(stringWidth(row)).toBeLessThanOrEqual(width);
+      }
+      // Two non-empty rows only: the rule and the answer. A fragment of the hint
+      // ("to expand" alone) is the same two-row bug in another dress.
+      expect(rows.filter((r) => r !== "")).toHaveLength(2);
+      // And the visible rule is a rule, not a stub: the figures survive the cut.
+      expect(rows[0]?.startsWith("── compacted · ctx 182k → 9k ──")).toBe(true);
+    }
   });
 });

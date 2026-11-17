@@ -1028,3 +1028,72 @@ worktree. My first repro hit exactly that. So the executor's pre-S3 capability c
   still draws the collapsed rule full-width, with `" ctrl+o to expand"` wrapped onto a second row (width 100).
   There is no fix to mutate, and no width assertion was added to `compaction-resume.test.ts`.
 - Gate: `bun run typecheck` is clean and `bun run lint` is clean (2018 files). There is no code diff, so there is nothing to regress.
+
+### Fix round 2
+
+*— deepseek-v3.2 (executor), 2026-11-17*
+
+Round-2 review of S3 left one open finding (S3 F1, MEDIUM): the collapsed compaction rule
+filled to the full `width` and the `Ctrl+O` hint was appended after it, so `wrapLines` pushed
+the hint onto a SECOND row on every `--resume`, eager open and resync of a compacted session.
+There were no HIGH findings, and S1/S2 were both PASS; this round is F1 only.
+
+**Repro, on the pre-fix tree** (`.tentacle/tmp/harness-notices/s3-w2.ts`, worktree-absolute
+imports — the reviewer's caveat about `../../../packages/…` resolving to the main checkout):
+`messagesToItems` on a `compacted` summary, then `wrapLines(transcriptLines(…))`:
+```
+w=60  ["── compacted · ctx 182k → 9k ──────────────────────────────", " ctrl+o to expand", "", "● ok"]
+w=100 ["── compacted · ctx 182k → 9k ─────────────…──────────────", " ctrl+o to expand", "", "● ok"]
+```
+
+**RED first (§9)** — `compaction-resume.test.ts:80-114`, new case "the collapsed rule plus its
+hint fits the width — one row, never two": wraps the real item at widths 40/60/100 and asserts
+(a) no `" ctrl+o to expand"` row that does not also start with the rule and its figures, (b) at
+most one such row (width ≥ 60: exactly one), (c) every row `stringWidth(row) <= width`, and
+(d) exactly two non-empty rows — the rule and the answer, so a hint FRAGMENT (" to expand"
+alone) cannot pass. On the pre-fix code it failed on (a) at the first width, 1 fail / 5 pass.
+
+**Fix** — `packages/tui/src/render-lines.ts:901-922`: `separatorLines` now budgets the hint out
+of the fill (`rest = width - head - hint`, `:913`) and appends it with no extra space
+(`:921`); one decision, so the collapsed and expanded rules are the same width and `Ctrl+O`
+does not re-flow the row. Two edge shapes the repro did not show, found while making (c)/(d)
+pass:
+- **Too narrow for head + hint** (width 40: 28 + 17 > 40): the hint is DROPPED, not wrapped and
+  not truncated (`:908-912`, `hint` is `""` unless ≥ 2 rule cells survive). A hint no terminal
+  can show whole is noise; wrapping it reproduced the very two-row bug at a narrower width, and
+  truncating it would print a cut `ctrl+o to exp`.
+- **The expanded rule keeps the hint's budget** (measured, not conditional on `expanded`) so the
+  Ctrl+O toggle changes only what is BELOW the rule. `compaction-resume.test.ts:70-78`'s
+  `rule.slice(0, -" ctrl+o to expand".length)` therefore still describes the expanded shape.
+
+**Drift from Implementation:** none in the design; the narrow-terminal rule above is new
+behaviour the Implementation did not name (it only said "subtract the hint's width from `rest`
+when a body is collapsed"). Chosen: drop, so no state can produce a row that overflows or a
+rule that is mostly dashes.
+
+**Mutations (each run, shown red, then reverted from `.tentacle/tmp/harness-notices/bak/rl-fix2.bak`,
+re-verified byte-identical with `diff -q`, suite green again):**
+| Mutation | Red test |
+|---|---|
+| M1 `:913` back to `rest = width - head` (the shipped bug: hint not taken out of the fill) | compaction-resume: 1 fail — the hint row no longer starts with the rule |
+| M2 `:912` drops the fit check (`hint = hasBody ? hintText : ""`) | compaction-resume: 1 fail — 3 non-empty rows at width 40, the hint split across two |
+
+Both are on the ASSERTION of the property (a row's origin / the row count), not on a compile error.
+A third candidate — removing only the `>= 2` guard while keeping the subtraction — is a no-operator
+at every width the test covers (the subtraction alone keeps the row count at 2), so it is not a
+mutation; the guard is pinned by the width-40 case inside M2's red.
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (2018 files) ·
+`bun test` **14667 pass / 0 fail / 5 skip** (14672 across 1053 files). The 5 skips are not
+failures per AGENTS §6 (three are the opt-in suites); I did not itemise the remaining two.
+The FIRST full run was red on a pre-existing branch defect only (the changelog fragment below);
+the run above is the re-run after the split.
+Two gate findings fixed on the way, both pre-existing on this branch, neither caused by this round:
+- `changelog.d/harness-notices.changed.md` held TWO bullets and failed
+  `scripts/test/changelog-guard.test.ts` (`one bullet per file`) on the whole-suite run — the only
+  red. Split into `harness-notices.changed.md` (harness lines / grouping) and
+  `harness-notices-compaction.changed.md` (the compaction slot + rule), verbatim bullets.
+- `biome` reformatted the new two-line `hint` expression (formatter only).
+
+**Unverified:** the reviewer's LOW (`compactedTimerRef` pending up to 3 s after unmount) is left as
+is — out of scope for F1 and not a MEDIUM.
