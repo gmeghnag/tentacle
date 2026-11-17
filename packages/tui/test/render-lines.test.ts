@@ -20,6 +20,7 @@ import {
   wrapLines,
 } from "../src/render-lines.ts";
 import type { DisplayItem, ToolItem } from "../src/state.ts";
+import { FIXTURES } from "./chart-fixtures.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -1308,6 +1309,16 @@ describe("toolTitle labels", () => {
     });
   });
 
+  // docs/feat/model-charts.md D3: the row says the chart's title — the spec is
+  // hundreds of characters of JSON, and the title is what the user reads above
+  // the chart. A spec with no title falls back to the raw args like any other row.
+  test("chart shows its title, and the raw args when it has none", () => {
+    expect(
+      toolTitle(tool("chart", '{"type":"line","title":"Ricavi 2026","datasets":[{"label":"R"}]}')),
+    ).toEqual({ label: "Chart", subtitle: "Ricavi 2026" });
+    expect(toolTitle(tool("chart", '{"type":"line"}')).subtitle).toBe('{"type":"line"}');
+  });
+
   test("an unlabelled (MCP) tool keeps its name and raw args", () => {
     expect(toolTitle(tool("mcp__x__y", '{"q":1}'))).toEqual({
       label: "mcp__x__y",
@@ -2006,5 +2017,131 @@ describe("user prompt image rows", () => {
     expect(lines.indexOf("[image: a.png]")).toBeLessThan(
       lines.findIndex((l) => l.includes("a cat")),
     );
+  });
+});
+
+// docs/feat/model-charts.md C4 (T4): a `chart` tool call draws ITSELF in the
+// row's place — no bullet, no `● Chart …` header, no body connector — from the
+// call's own arguments, and is exempt from the generic body cut.
+describe("a chart in the transcript (C4)", () => {
+  const lineSpec = (): unknown => FIXTURES.line;
+  const specArgs = (raw: unknown = lineSpec()): string => JSON.stringify(raw);
+
+  const chartTool = (extra: Partial<ToolItem> = {}): ToolItem => ({
+    kind: "tool",
+    id: "c1",
+    name: "chart",
+    args: specArgs(),
+    status: "ok",
+    ...extra,
+  });
+
+  test("the row IS the chart: no tool chrome, and the title is its caption", () => {
+    // Mutation: drop the `chartRow` branch in `toolLines` → the row is
+    // `● Chart Ricavi…` + `⎿ <result text>` (the pre-C4 frame).
+    const rows = itemLines(chartTool(), { expandAll: false, width: 100 }).map(strip);
+    const text = rows.join("\n");
+    expect(text).not.toContain("●");
+    expect(text).not.toContain("⎿");
+    expect(rows[0]?.trimEnd()).toBe("Ricavi mensili 2025 vs 2026");
+    // A plot really is drawn: braille dots (the default glyphs).
+    expect(rows.some((r) => /[\u2800-\u28ff]/.test(r))).toBe(true);
+  });
+
+  test("the chart body is exempt from the generic cut", () => {
+    // Mutation: let `collapsedBody` see a chart body → the `… +N more lines`
+    // marker appears and the plot is truncated.
+    const rows = itemLines(chartTool(), {
+      expandAll: false,
+      width: 100,
+      collapseThreshold: 3,
+      previewLines: 2,
+    }).map(strip);
+    expect(rows.join("\n")).not.toContain("more lines");
+    expect(rows.length).toBeGreaterThan(3);
+    // …and the plot's last row (the x axis) survives.
+    expect(rows.join("\n")).toContain("└");
+  });
+
+  test("ctrl+o expands it (more rows, per-series stats and the data table)", () => {
+    const compact = itemLines(chartTool(), { expandAll: false, width: 120 }).map(strip);
+    const expanded = itemLines(chartTool(), { expandAll: true, width: 120 }).map(strip);
+    expect(expanded.length).toBeGreaterThan(compact.length);
+    // The data table is the expanded form's faithful fallback.
+    expect(expanded.join("\n")).toContain("gen");
+    expect(compact.join("\n")).not.toBe(expanded.join("\n"));
+  });
+
+  test("a click on its header expands it (expandedIds)", () => {
+    // The same per-id expand the other calls use: the chart's first row is its
+    // header (`tool-hit.ts`), so `expandedIds` must reach the renderer.
+    const clicked = itemLines(chartTool(), {
+      expandAll: false,
+      width: 120,
+      expandedIds: ["c1"],
+    }).map(strip);
+    const expanded = itemLines(chartTool(), { expandAll: true, width: 120 }).map(strip);
+    expect(clicked).toEqual(expanded);
+  });
+
+  test("`tui.chartGlyphs: blocks` draws quadrant blocks, never braille", () => {
+    // Mutation: ignore `chartGlyphs` (pass `braille` always) → braille appears.
+    const rows = itemLines(chartTool(), {
+      expandAll: false,
+      width: 100,
+      chartGlyphs: "blocks",
+    }).map(strip);
+    const text = rows.join("\n");
+    expect(/[\u2800-\u28ff]/.test(text)).toBe(false);
+    expect(/[▘▝▀▖▌▞▛▗▚▐▜▄▙▟█]/.test(text)).toBe(true);
+  });
+
+  test("an invalid (forged) spec falls back to the generic row, never a crash", () => {
+    // Mutation: draw without `validateChartSpec` → this throws / draws garbage.
+    for (const args of [
+      '{"type":"line","labels":["a"],"datasets":[]}',
+      '{"type":"line","labels":["a"],"datasets":[{"label":"x","data":["12.5"]}]}',
+      "not json",
+      "",
+    ]) {
+      const rows = itemLines(chartTool({ args }), { expandAll: false, width: 100 }).map(strip);
+      expect(rows[0]).toContain("●");
+      expect(rows.join("\n")).not.toContain("⣿");
+    }
+  });
+
+  test("a spec valid on the daemon but over THIS build's caps also falls back", () => {
+    const nine = Array.from({ length: 9 }, (_, i) => ({ label: `s${i}`, data: [1, 2, 3] }));
+    const raw = { type: "line", title: "t", labels: ["a", "b", "c"], datasets: nine };
+    const rows = itemLines(chartTool({ args: specArgs(raw) }), {
+      expandAll: false,
+      width: 100,
+    }).map(strip);
+    expect(rows[0]).toContain("●");
+  });
+
+  test("a running or queued chart keeps the generic row (no args yet to draw)", () => {
+    for (const status of ["running", "queued"] as const) {
+      const rows = itemLines(chartTool({ status }), { expandAll: false, width: 100 }).map(strip);
+      // The generic row, not a plot: no braille anywhere in it.
+      expect(rows.join("\n")).not.toMatch(/[\u2800-\u28ff]/);
+    }
+  });
+
+  test("every row fits the width, at every tier (CJK and narrow widths included)", () => {
+    for (const width of [120, 100, 80, 60, 50, 40, 30, 20]) {
+      const rows = itemLines(chartTool(), { expandAll: false, width }).map(strip);
+      for (const row of rows) {
+        expect(stringWidth(row)).toBeLessThanOrEqual(width);
+      }
+    }
+  });
+
+  test("another tool's row is untouched", () => {
+    const rows = itemLines(
+      { kind: "tool", id: "s1", name: "shell", args: '{"command":"ls"}', status: "ok" },
+      { expandAll: false, width: 100 },
+    ).map(strip);
+    expect(rows[0]).toContain("●");
   });
 });

@@ -3,7 +3,8 @@
  * history mapper (`transcript-history.ts`) and the fold share one definition
  * without a cycle.
  */
-import type { AttachmentRef, ToolResult, ToolResultDetail } from "@tentacle/core";
+import type { AttachmentRef, MessageMedia, ToolResult, ToolResultDetail } from "@tentacle/core";
+import type { DocumentContent } from "@tentacle/protocol";
 
 /** A tool row's status: the TUI's four, plus the person's own reply-refusal. */
 export type ToolStatus = "queued" | "running" | "ok" | "error" | "denied";
@@ -30,6 +31,15 @@ export interface UserRow {
   readonly text: string;
   /** The prompt's images (rendered as `[image: name]`, plan Owner requirement). */
   readonly images: readonly ImageRef[];
+  /**
+   * The prompt's attached files, one `[pdf: name · N pp]` line each
+   * (docs/feat/pdf-read.md D5/D7), after the images — the `<file>` block they
+   * became is NEVER shown (the model has that text, the person has the file).
+   * Absent for a message that carried none, and for a stored one whose `media`
+   * this build was never told about (the raw text then stands: honest
+   * degradation, never a guess).
+   */
+  readonly documents?: readonly string[];
   /** The model's restart prompt after a context reset (labelled "restart prompt"). */
   readonly restart?: true;
   /**
@@ -141,6 +151,45 @@ export type Row = UserRow | AssistantRow | ReasoningRow | ToolRow | NoticeRow;
 export function imageRowText(ref: Pick<ImageRef, "mimeType" | "name">): string {
   const label = ref.name !== undefined && ref.name !== "" ? ref.name : ref.mimeType;
   return `[image: ${label}]`;
+}
+
+/**
+ * A user row's document line, the `[image: name]` shape: `[pdf: report.pdf · 2 pp]`
+ * when the page count is known, `[pdf: report.pdf]` when it is not (a PDF this
+ * phone attached: the count is the daemon's fact and the client never sees it
+ * on the turn). The SAME wording as the TUI's `documentRowText`
+ * (`packages/tui/src/pdf-attach.ts`), pinned to it by `test/transcript-pdf.test.ts`.
+ */
+export function documentRowText(name: string, pages?: number): string {
+  return pages === undefined || pages <= 0 ? `[pdf: ${name}]` : `[pdf: ${name} · ${pages} pp]`;
+}
+
+/**
+ * One stored `media` entry as a row (`ChatMessage.media`, D4): the `[pdf: …]`
+ * line above, or a plain `[kind: name]` for a kind this build does not know
+ * (the field is a bounded free string on the wire — a newer daemon's entry is
+ * still a fact about the message, never silently dropped).
+ */
+export function mediaRowText(media: MessageMedia): string {
+  return media.kind === "pdf"
+    ? documentRowText(media.name, media.pages)
+    : `[${media.kind}: ${media.name}]`;
+}
+
+/**
+ * The rows for the documents a prompt carries, in its own order (D7). The page
+ * count is only known when the CLIENT extracted (`document{text}`, a pod): an
+ * uploaded PDF's count is the daemon's fact, and this phone never sees it on the
+ * turn — so the row names the file and invents nothing, and the count appears
+ * on RESUME from `ChatMessage.media`.
+ */
+export function documentLabels(documents: readonly DocumentContent[]): readonly string[] {
+  return documents.map((document) =>
+    documentRowText(
+      document.name,
+      document.source.type === "text" ? document.source.pages : undefined,
+    ),
+  );
 }
 
 /** A protocol ref as `ImageRef` (the ref's own fields; nothing derived). */

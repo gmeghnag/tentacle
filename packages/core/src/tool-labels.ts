@@ -17,6 +17,9 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   skill: "Skill",
   schedule_create: "Schedule",
   schedule_control: "Schedules",
+  // A chart is shown, never acted on: the row reads `Chart`, the way `Read`/
+  // `Edit` are the display names of the fs tools (docs/feat/model-charts.md D3).
+  chart: "Chart",
 };
 
 /** The display label for a tool name; the name itself when it has none. */

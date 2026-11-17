@@ -196,6 +196,18 @@ export function editTarget(prompt: string): string | null {
  */
 export const AGENTS_PROMPT = "AGENTS27";
 export const SHELLJOB_PROMPT = "SHELLJOB27";
+/** Flow 31 (docs/feat/model-charts.md T6): the model calls `chart` with `CHART_SPEC`. */
+export const CHART_PROMPT = "CHART31";
+export const CHART_SPEC = {
+  type: "line",
+  title: "Ricavi",
+  labels: ["gen", "feb", "mar", "apr", "mag", "giu"],
+  y: { unit: "€" },
+  datasets: [
+    { label: "2026", data: [11800, 12500, 13900, 14100, 15800, 16200] },
+    { label: "2025", data: [10200, 10900, 11500, 11800, 12600, 13100] },
+  ],
+} as const;
 /** A child's prompt: `CHILDSTEPS <n>` — it calls `fs_read` n times, one per round, then reports. */
 export const CHILD_MARK = "CHILDSTEPS";
 /** The spacing of a child's rounds (ms): slow enough for a flow to see its steps advance. */
@@ -366,6 +378,15 @@ function stream(
           command: "sleep 30",
           run_in_background: true,
         })) {
+          send(chunk);
+        }
+        send(frame({}, "tool_calls"));
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      if (!followUp && promptLine(prompt, CHART_PROMPT)) {
+        for (const chunk of toolCallFrames(0, mint(), "chart", CHART_SPEC)) {
           send(chunk);
         }
         send(frame({}, "tool_calls"));

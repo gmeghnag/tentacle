@@ -87,6 +87,14 @@ export type TranscriptInput =
       readonly text: string;
       readonly attachments?: readonly AttachmentRef[];
       readonly photos?: readonly LocalPhoto[];
+      /**
+       * The attached files' row labels (`[pdf: report.pdf]`), docs/feat/pdf-read.md
+       * D7: the compose half knows their NAMES, and that is all it knows — the
+       * page count is the daemon's fact and never travels back on the turn, so a
+       * live row names the file without inventing a count (the count appears on
+       * RESUME, from `ChatMessage.media`). Absent for a text-only prompt.
+       */
+      readonly documents?: readonly string[];
     }
   | { readonly type: "turn_started"; readonly turnId: string; readonly own: boolean }
   | {
@@ -243,6 +251,9 @@ export function apply(state: State, input: TranscriptInput): State {
         images: (input.attachments ?? []).map(
           (ref): ImageRef => imageRefWithLocal(ref, photosById(input.photos).get(ref.id)),
         ),
+        ...(input.documents === undefined || input.documents.length === 0
+          ? {}
+          : { documents: input.documents }),
       }));
     case "user_message":
       return push(state, (key) => ({
@@ -250,6 +261,11 @@ export function apply(state: State, input: TranscriptInput): State {
         key,
         text: input.text,
         images: (input.attachments ?? []).map((ref): ImageRef => imageRef(ref)),
+        // A PDF's rows are NOT on the wire (docs/feat/pdf-read.md D6/D7): the
+        // daemon sends `media` into the message it PERSISTS, never into
+        // `turn_start`, so another device's PDF prompt shows its text here and
+        // its row when the transcript is reloaded from the log
+        // (`transcript-history.ts`). Said plainly rather than guessed at.
         // The fired turn's own ref (docs/feat/cron-tool.md S6, M8): display data
         // the client already trust-gated and sanitized, carried as sent. Absent
         // for every ordinary prompt and after a reload (option A).

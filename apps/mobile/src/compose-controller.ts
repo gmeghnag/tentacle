@@ -1,3 +1,4 @@
+import type { DocumentsInput } from "@tentacle/client";
 /**
  * The session screen's COMPOSE half (docs/feat/mobile-compose.md 13d): the queue
  * rows, the steer, Send now, Take, the photo chips, and the outbox's items.
@@ -25,17 +26,22 @@
  * frame — D4/D5), and 13b's driver is where that lives. It is created on the tap
  * and run at once, so a photo message is also exactly-once across a kill.
  */
-import type { AttachmentRef, QueueState } from "@tentacle/protocol";
+import type { AttachmentRef, DocumentContent, QueueState } from "@tentacle/protocol";
+import { attachSheet } from "./attach-sheet.ts";
 import {
   type Chips,
   type Picked,
+  type PickedDocument,
+  type PickedPdf,
   addPicks,
+  chipDocumentReady,
   chipFiles,
   chipRefused,
   chipRemoved,
   chipUploaded,
   counted,
   pickRoom,
+  splitTaken,
   takeChips,
 } from "./compose-chips.ts";
 import { restoredByRefusal } from "./compose-queue.ts";
@@ -57,13 +63,15 @@ import type { OutboxDriver, OutboxSession } from "./outbox-driver.ts";
 import { unavailableSessionPort } from "./outbox-session.ts";
 import type { OutboxStore } from "./outbox-store.ts";
 import {
+  type OutboxDocument,
   type OutboxItem,
   type OutboxPhoto,
   type Refusal,
   type SessionFacts,
   refusalOf,
 } from "./outbox.ts";
-import { refsOf as itemRefsOf, localPhotosOf } from "./outbox.ts";
+import { documentBlocksOf, refsOf as itemRefsOf, localPhotosOf } from "./outbox.ts";
+import type { PdfRefusal } from "./pdf-input.ts";
 import type { LocalPhoto } from "./transcript-rows.ts";
 
 /** The chat handle the compose acts use (a seam: tests pass a fake). */
@@ -75,6 +83,13 @@ export interface ComposeHandle {
     bytes: Uint8Array,
     meta: { readonly mimeType: string; readonly name?: string },
   ): Promise<AttachmentRef>;
+  /**
+   * `attachDocument`: the wire block a prompt names for an attached PDF
+   * (docs/feat/pdf-read.md D6/D7). The session decides upload-vs-extract from
+   * the daemon's capability — never this file (AGENTS §7). Rejects with
+   * `DocumentsUnavailableError` when the session cannot take one.
+   */
+  attachDocument(bytes: Uint8Array, meta: { readonly name: string }): Promise<DocumentContent>;
   /** One prompt, with the key it carries and the refs its photos already have. */
   send(text: string, attachments: readonly AttachmentRef[]): Promise<void>;
   /** One steer, bound to the turn it was typed during. */
@@ -119,12 +134,36 @@ export type PickedPhoto =
     }
   | { readonly kind: "refused"; readonly detail: string };
 
+/** The PDF adapter (`pdf-source.ts` in the app; a fake in tests). */
+export interface DocumentPort {
+  /**
+   * One pick, decided by `pdf-input.ts` (D7). `[]`: the person cancelled. A
+   * refusal is a `PickedPdf` of kind `refused` — the chip says why, nothing is
+   * attached, and the pick is not an exception (a big or non-PDF file is a
+   * person's choice, not a failure of the app).
+   */
+  pickPdf(taken: number, maxBytes?: number): Promise<readonly PickedPdf[]>;
+  /**
+   * What this session may do with a PDF NOW — ALREADY DECIDED by the client
+   * (`RemoteSession.documentsInput()` → `document-input.ts`), never re-derived
+   * here: the `local` half of that table (does this client serve the model, can
+   * it extract) is the client's own fact.
+   */
+  documentsInput(): DocumentsInput;
+}
+
 export interface ComposeDeps {
   readonly computerId: string;
   readonly sessionId: string;
   readonly store: OutboxStore;
   readonly driver: OutboxDriver;
   readonly photos: PhotoPort;
+  /**
+   * The PDF adapter (docs/feat/pdf-read.md D7). Absent = this build cannot pick
+   * a PDF at all: the `+` sheet then offers no row and says so, rather than a
+   * row that refuses at send.
+   */
+  readonly documents?: DocumentPort;
   /**
    * The person's "Send photos at original size" setting (item 5), read at every
    * pick. Absent = the downscale (the default): a fake, or a build without the
@@ -161,6 +200,8 @@ export interface ComposeDeps {
     turnId: string,
     refs: readonly AttachmentRef[],
     photos?: readonly LocalPhoto[],
+    /** The attached PDFs' wire blocks (D7): the chip's own block, unbuilt here. */
+    documents?: readonly DocumentContent[],
   ) => Promise<void>;
   /** Something the screen draws changed. */
   readonly onChange: () => void;
@@ -176,6 +217,12 @@ export interface ComposeView {
   readonly outbox: readonly OutboxItem[];
   readonly notSaved: boolean;
   readonly chips: Chips;
+  /**
+   * The `+` sheet's offer, from the capability (docs/feat/pdf-read.md D7): the
+   * rows it shows and, when the PDF row is absent, the sentence to say. Pure
+   * `attachSheet`; the screen only renders it.
+   */
+  readonly attach: ReturnType<typeof attachSheet>;
   /** How many waiting rows of MINE the queue shows (Send now's other trigger). */
   readonly ownQueue: number;
   /** **Send now** offered right now (D1's secondary button). */
@@ -196,6 +243,8 @@ export interface Compose {
   take(id: string): Promise<void>;
   pickLibrary(): Promise<void>;
   pickCamera(): Promise<void>;
+  /** The `+` sheet's "File (PDF)" (docs/feat/pdf-read.md D7). */
+  pickDocument(): Promise<void>;
   removeChip(key: string): Promise<void>;
   /** The decision sheet's four answers for one item. */
   outboxSend(itemId: string): Promise<void>;
@@ -281,20 +330,21 @@ export function createCompose(deps: ComposeDeps): Compose {
   };
 
   /** The chip's refusal in words a person can act on (never the daemon's text). */
-  const refusalText = (error: unknown): string => {
+  const refusalText = (error: unknown, kind: "image" | "document" = "image"): string => {
+    const noun = kind === "document" ? "PDF" : "photo";
     const refusal = refusalOf(error, "prompt");
     switch (refusal.kind) {
       case "offline":
-        return "no connection — this photo goes up when the phone is back online";
+        return `no connection — this ${noun} goes up when the phone is back online`;
       case "reupload":
-        return "the upload was cut — pick that photo again to resend it";
+        return `the upload was cut — pick that ${noun} again to resend it`;
       case "draft":
         return "this session is not open any more";
       case "restore":
       case "decide":
-        return "that computer refused this photo";
+        return `that computer refused this ${noun}`;
       default:
-        return "that photo could not be uploaded";
+        return `that ${noun} could not be uploaded`;
     }
   };
 
@@ -302,6 +352,12 @@ export function createCompose(deps: ComposeDeps): Compose {
    * Upload the freshly picked chips, ONE at a time (≤ 15 MiB of bytes in JS
    * memory at once, D4). With no link a chip stays `uploading`: its upload is
    * retried when the session opens, never sent half-done (F6).
+   *
+   * A DOCUMENT chip takes the other path on purpose (`handle.attachDocument`,
+   * docs/feat/pdf-read.md D6): the session decides upload-vs-laptop-extract from
+   * the daemon's capability, so the app never chooses — it only shows the
+   * result. Both kinds share this loop (one set of bytes in memory at a time),
+   * and each is persisted as its own chip state, never both at once.
    */
   const uploadPicked = async (bytes: Map<string, Uint8Array>): Promise<void> => {
     const handle = deps.handle();
@@ -316,14 +372,19 @@ export function createCompose(deps: ComposeDeps): Compose {
       busy = true;
       refresh();
       try {
-        const ref = await handle.attachImage(picked, {
-          mimeType: chip.mimeType,
-          name: chip.name,
-        });
-        chips = chipUploaded(chips, key, ref.id, ref.size);
+        if (chip.kind === "document") {
+          const block = await handle.attachDocument(picked, { name: chip.name });
+          chips = chipDocumentReady(chips, key, block);
+        } else {
+          const ref = await handle.attachImage(picked, {
+            mimeType: chip.mimeType,
+            name: chip.name,
+          });
+          chips = chipUploaded(chips, key, ref.id, ref.size);
+        }
       } catch (error) {
-        chips = chipRefused(chips, key, refusalText(error));
-        deps.notify(refusalText(error));
+        chips = chipRefused(chips, key, refusalText(error, chip.kind));
+        deps.notify(refusalText(error, chip.kind));
       } finally {
         busy = false;
         saveDraft(deps.draft());
@@ -337,19 +398,51 @@ export function createCompose(deps: ComposeDeps): Compose {
     if (picks.length === 0) {
       return;
     }
-    const added = addPicks(
-      chips,
-      picks.map(
-        (pick): Picked =>
-          pick.kind === "ready"
-            ? {
+    // One list of picks in the person's order, each already carrying the bytes
+    // the chip's own upload will need (a photo's, or a PDF's).
+    const entries: { readonly pick: Picked | PickedDocument; readonly bytes?: Uint8Array }[] =
+      picks.map((pick) =>
+        pick.kind === "ready"
+          ? {
+              pick: {
                 kind: "ready",
                 file: pick.file,
                 mimeType: pick.mimeType,
                 name: pick.name,
-              }
-            : { kind: "refused", detail: pick.detail },
-      ),
+              },
+              bytes: pick.bytes,
+            }
+          : { pick: { kind: "refused", detail: pick.detail } },
+      );
+    await applyEntries(entries);
+  };
+
+  /**
+   * One pick's PDFs (docs/feat/pdf-read.md D7): the same two steps as a photo's,
+   * with `attachDocument` in place of `attachImage` — decided by the session,
+   * never here.
+   */
+  const applyPdfs = async (picks: readonly PickedPdf[]): Promise<void> => {
+    if (picks.length === 0) {
+      return;
+    }
+    await applyEntries(
+      picks.map((pick) => (pick.kind === "document" ? { pick, bytes: pick.bytes } : { pick })),
+    );
+  };
+
+  /**
+   * The shared chip step: additive chips first (a refusal is VISIBLE at once —
+   * D5's rule, applied to either kind), then one upload loop over the new keys.
+   * The two kinds are told apart by the pick's own tag, so a mixed pick list
+   * would still work.
+   */
+  const applyEntries = async (
+    entries: readonly { readonly pick: Picked | PickedDocument; readonly bytes?: Uint8Array }[],
+  ): Promise<void> => {
+    const added = addPicks(
+      chips,
+      entries.map((entry) => entry.pick),
       deps.mint,
     );
     // The BYTES of each ready pick, by the chip key the cap gave it, in order.
@@ -357,28 +450,40 @@ export function createCompose(deps: ComposeDeps): Compose {
     const fresh = added.chips.slice(chips.length);
     let at = 0;
     for (const chip of fresh) {
-      const pick = picks[at];
+      const entry = entries[at];
       at += 1;
-      if (chip.state === "uploading" && pick?.kind === "ready") {
-        bytes.set(chip.key, pick.bytes);
+      if (chip.state === "uploading" && entry?.bytes !== undefined) {
+        bytes.set(chip.key, entry.bytes);
       }
     }
     chips = added.chips;
     if (added.refused > 0) {
-      deps.notify(`a message carries at most ${pickRoom([])} photos`);
+      deps.notify(`a message carries at most ${pickRoom([])} attachments`);
     }
     saveDraft(deps.draft());
     refresh();
     await uploadPicked(bytes);
   };
 
-  /** The taken chips as the outbox's own photo records (its items carry copies). */
+  /** The taken chips as the outbox's own PHOTO records (its items carry copies). */
   const photosOf = (taken: ReturnType<typeof takeChips>["taken"]): readonly OutboxPhoto[] =>
-    taken.map((chip) => ({
+    splitTaken(taken).photos.map((chip) => ({
       file: chip.file,
       mimeType: chip.mimeType,
       name: chip.name,
       ref: { id: chip.id, mimeType: chip.mimeType, size: chip.size, name: chip.name },
+    }));
+
+  /**
+   * The taken chips as the item's DOCUMENT records (D7). Its `block` is already
+   * on the chip (the attach ran at pick), so the item's own `attachDocument`
+   * pass finds nothing pending and a resume never re-puts those bytes.
+   */
+  const documentsOf = (taken: ReturnType<typeof takeChips>["taken"]): readonly OutboxDocument[] =>
+    splitTaken(taken).documents.map((chip) => ({
+      file: chip.file,
+      name: chip.name,
+      block: chip.block,
     }));
 
   /** The session's facts, as 13b's `Basis` compares them. */
@@ -421,7 +526,13 @@ export function createCompose(deps: ComposeDeps): Compose {
       return;
     }
     try {
-      await deps.prompt(text, item.turnId, itemRefsOf(item), localPhotosOf(item));
+      await deps.prompt(
+        text,
+        item.turnId,
+        itemRefsOf(item),
+        localPhotosOf(item),
+        documentBlocksOf(item),
+      );
     } catch (error) {
       // A refusal before the ack (`TurnInProgress`, a drop, a dead link): 13b's
       // own mapping decides the item, and the words come back to the field —
@@ -509,6 +620,12 @@ export function createCompose(deps: ComposeDeps): Compose {
         outbox: items(),
         notSaved,
         chips,
+        attach: attachSheet(
+          deps.documents?.documentsInput() ?? {
+            kind: "off",
+            reason: "this build cannot pick a file",
+          },
+        ),
         ownQueue: rows.filter((row) => row.mine).length,
         sendNow: sendNowOffered({
           link: deps.handle() === null ? "down" : "up",
@@ -598,6 +715,7 @@ export function createCompose(deps: ComposeDeps): Compose {
           kind: "prompt",
           text: taken.text,
           photos: photosOf(taken.taken),
+          documents: documentsOf(taken.taken),
           basis: await basis(),
         });
         refresh();
@@ -668,6 +786,7 @@ export function createCompose(deps: ComposeDeps): Compose {
           kind: "prompt",
           text: taken.text,
           photos: photosOf(taken.taken),
+          documents: documentsOf(taken.taken),
           basis: basisNow,
         });
         await deps.driver.run(deps.sessionId);
@@ -775,6 +894,26 @@ export function createCompose(deps: ComposeDeps): Compose {
     },
     async pickCamera() {
       await applyPicks(await deps.photos.takePhoto(counted(chips), deps.sendPhotoOriginalSize?.()));
+    },
+    async pickDocument() {
+      const documents = deps.documents;
+      if (documents === undefined) {
+        return;
+      }
+      // The capability is re-read at the PICK, never taken from the sheet's last
+      // render: a re-attach (or a daemon swapped under us) can change it, and a
+      // pick that quietly landed nothing would look like a lost file.
+      const offer = documents.documentsInput();
+      if (offer.kind !== "upload") {
+        // Not offered (the sheet hides the row), so this is the belt: nothing is
+        // picked and nothing is uploaded — `laptop` would put PDF bytes where
+        // AGENTS §7 says they may never go.
+        deps.notify(
+          offer.kind === "off" ? offer.reason : "this device cannot read a PDF for this session",
+        );
+        return;
+      }
+      await applyPdfs(await documents.pickPdf(counted(chips), offer.maxBytes));
     },
     async removeChip(key) {
       chips = chipRemoved(chips, key);

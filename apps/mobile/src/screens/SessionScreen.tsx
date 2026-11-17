@@ -949,10 +949,17 @@ export function SessionScreen({
           onMic={() => voice?.tapMic()}
           level={voiceView.level}
           onPhoto={() =>
-            Alert.alert("Add a photo", undefined, [
+            Alert.alert("Add an attachment", state.compose.attach.reason ?? undefined, [
               { text: "Cancel", style: "cancel" },
               { text: "Photo Library", onPress: () => void controller.pickPhoto("library") },
               { text: "Camera", onPress: () => void controller.pickPhoto("camera") },
+              // Offered ONLY when this session can read one (D7's pure
+              // `attachSheet`): a row that refuses at send is worse than no row,
+              // and on a pod session it would put PDF bytes on a wire AGENTS §7
+              // forbids.
+              ...(state.compose.attach.items.includes("pdf")
+                ? [{ text: "File (PDF)", onPress: () => void controller.pickDocument() }]
+                : []),
             ])
           }
           bottomPadding={bottomPadding}

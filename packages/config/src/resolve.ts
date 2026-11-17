@@ -204,7 +204,11 @@ export interface ResolvedConfig {
   /** The configured workspace-mount hide list (file or profile); absent = the CLI default list. */
   readonly mount?: MountConfig;
   /** The configured TUI palette (file or profile); absent = `auto` (the TUI probes). */
-  readonly tui?: { readonly theme?: "auto" | "dark" | "light" | undefined };
+  readonly tui?: {
+    readonly theme?: "auto" | "dark" | "light" | undefined;
+    /** A chart's plot glyphs (docs/feat/model-charts.md D5); absent = `braille`. */
+    readonly chartGlyphs?: "braille" | "blocks" | undefined;
+  };
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: { readonly keepSuperseded?: boolean | undefined };
   /** Voice dictation (file or profile); absent = OFF, Ctrl+R, `auto`, no auto-stop. */

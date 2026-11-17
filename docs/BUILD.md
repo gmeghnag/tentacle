@@ -78,3 +78,12 @@ or re-sign it in place:
 ```sh
 codesign --sign - --force ~/bin/yaha
 ```
+
+## The iPhone app: a new dev build after a native module lands
+
+`apps/mobile` is an Expo **dev build**: a JS-only change reaches the phone over
+Metro, but a new NATIVE module needs the app rebuilt and reinstalled
+(`cd apps/mobile && bunx expo run:ios`) — and, since a module's `app.plugin.js`
+only edits the generated project at prebuild, a clean
+`bunx expo prebuild --platform ios` first. `expo-document-picker` (attaching a
+PDF from the phone, `docs/feat/pdf-read.md` D7) is the latest such addition.

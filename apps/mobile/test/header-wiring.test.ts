@@ -103,8 +103,9 @@ describe("S2 · the context ring (A1 + F11)", () => {
     expect(SESSION_SCREEN).not.toMatch(/session-header-context[\s\S]{0,200}height: 2/);
   });
 
-  test("the ring is plain Views — no `react-native-svg` dependency (Design 2)", () => {
-    expect(pkg.dependencies["react-native-svg"]).toBeUndefined();
+  test("the ring is plain Views — it does not use `react-native-svg` (Design 2)", () => {
+    // The package itself IS a dependency since docs/feat/model-charts.md C6 (the
+    // chart, owner Q8); what Design 2 pins is that the RING does not need it.
     expect(RING).toMatch(/from "react-native"/);
     // No IMPORT of it (the file names it in prose to say why it is absent).
     expect(RING).not.toMatch(/from "react-native-svg"/);
