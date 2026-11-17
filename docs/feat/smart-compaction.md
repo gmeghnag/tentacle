@@ -711,3 +711,26 @@ stubs deterministic and marker-bearing.
 **Executor behaviour.** Honest Execution with real red-before-green and documented drift; the mutation set
 was chosen around what was tested, so it over-states coverage. Reviewer is Opus; the plan's author is also
 Opus (shared blind spot possible on finding 2's premise, which this review caught on re-reading the code).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17 · fresh context · scope: `git diff HEAD~1` (12d91e33)*
+
+**Verdict: PASS.**
+
+- **Finding 1 (test gaps) — fixed.** Re-ran the same 10 mutations plus 5 new ones (script
+  `.tentacle/tmp/smart-compaction/mutate.ts`). All **15 of 15 are caught**: A, E and G (R5 content, direction,
+  arguments), F (`covers` start), B and I (failed reads), K (`context_reset` exemption), plus the round-1 C, H and J. File
+  restored byte-identical (`restored: true`, `git status` clean).
+- **Finding 2 (stale index) — fixed.** `PruneEntry.original` (`prune.ts:62`) is checked by identity in
+  `applyPrune` (`:656`) and `estimateGain` (`:680`). Mutations L and M (go back to the range-only guard) are caught by the new
+  in-place-replacement tests. The doc now says `/compact`, `/clear` and `context_reset` reuse the array, so S2
+  must drop the state explicitly at each.
+- **Finding 3 (PDF `pages`) — fixed.** `spanCovers` (`prune.ts:291`) only lets a read with `pages` be covered by the same
+  `pages`. Mutations N, O and P (pages ignored, the one-sided case, the stub text) are each caught.
+- **Nits — handled.** The changelog fragment is deleted. The new Execution entry is signed with the real model id.
+  The old wrong signature is left on the round-1 record, which is acceptable.
+- **Regressions:** none found. `bun test packages/agent/test/prune.test.ts` gives 39 pass / 0 fail. `bun run lint` is clean (1857
+  files) and `bun run typecheck` is clean. One residual risk for S2, not S1: `compactedHistory` may carry a message object
+  over at the SAME index. The identity check would then still apply that entry, but the candidates there (skills, system) are exempt,
+  so it is not a finding.
