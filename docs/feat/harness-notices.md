@@ -209,7 +209,10 @@ parses on a schema without it (strip) — red if a mapper ever spreads.
    — after `compactedHistory(...)` builds `next` and BEFORE `this.messages.length
    = 0`: `to = await this.agent.contextUsage(next, signal)` (bounded 2 s, never
    throws); `from = opts.fromTokens ?? (await this.contextUsage(signal)).used`
-   measured at the START (before the summary call, so it is the old history);
+   ~~measured at the START~~ — **as built: measured AFTER the summary call, in
+   parallel with `to` (`Promise.all`)**, on `this.messages`, which is still the
+   old history until the replacement (an extra await before the summary call
+   delayed it past a link drop's abort; see Execution);
    then the summary message is rebuilt with `compacted: { fromTokens, toTokens:
    to.used, ...(to.exact ? { toExact: true } : {}) }`. Abort check stays after
    the awaits (an abort still leaves the history untouched).
@@ -471,7 +474,70 @@ Owner: "ok" to every recommendation — Q1 (A) display-only fail-soft `compacted
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+### S1 — DONE
+
+*— claude-opus-5-5, 2026-11-17*
+
+**Load-bearing check (first, before any code):** `packages/providers/test/compaction-fact.test.ts`
+— a summary message with `compacted` → Anthropic payload and OpenAI request body
+byte-identical with/without it, no `compacted`/`fromTokens` key. GREEN on the
+unchanged mappers (assumption holds). The strip half: `packages/protocol/test/compaction-fact.test.ts`
+"an older schema without the field strips it".
+
+**As built, in dependency order** (each test written first, shown red on its assertion,
+except the new core module whose first red was the missing export):
+1. `core/src/model.ts` — `ChatMessage.compacted?: CompactionFact` (`{fromTokens, toTokens, toExact?: true}`), documented display-only.
+2. `core/src/format.ts` (new, `formatTokens` moved verbatim), `core/src/compaction-view.ts` (new:
+   `COMPACTION_SUMMARY_HEAD`, `compactionOf`, `compactionSeparatorText`), exported from `core/src/index.ts`;
+   `tui/src/format.ts` re-exports `formatTokens`.
+3. `protocol/src/session.ts` — `chatMessageShape.compacted` (ints ≥ 0, `toExact: literal(true)`,
+   `.optional().catch(undefined)`); `CompactResultSchema` + `fromTokens?`, `toTokens?`, `toExact?: boolean`.
+   `protocol.json` regenerated with `bun run schema:export` (+68 lines; `json-schema.test.ts` green). No `protocol.d/` note.
+4. `agent/src/compact.ts` — head constant imported from core; `CompactResult` + 3 optional fields.
+   `agent/src/session.ts` — `compact(signal, onReplaced, opts?: {fromTokens?})`: both sizes counted,
+   then `signal.throwIfAborted()`, then the summary (the only user message of `compactedHistory`) stamped
+   before the replacement; result carries the sizes.
+5. `daemon/src/hosted-session.ts` — `lastPromptTokens` set from the main agent's `usage` events, cleared in
+   `historyReplaced` (compact, context_reset, clear); passed as `fromTokens`; `compact()` now returns `CompactResult`.
+6. `client/src/remote-session.ts`, `client/src/remote-client.ts`, `tui/src/app-types.ts` — return type `CompactResult`.
+7. `changelog.d/harness-notices.changed.md` — the doc's one bullet (covers S1–S3).
+
+**Drift from Implementation (and why):**
+- **`from` measured after the summary call, in parallel with `to`** (Design S1.3 said "at the START").
+  Measured at the start, the extra await pushed the summary call past a link drop's abort
+  (a closing peer aborts every inbound handler, `transport/src/peer.ts:257-261`), so
+  `client/test/reattach.test.ts` "compact is not re-sent after a drop" (waits for the summary's model call)
+  timed out, and so did the S2 re-attach property test. `this.messages` is untouched until the replacement,
+  so the after-summary count is the same old history; `Promise.all` also saves up to 2 s. Design updated in place.
+- `client/src/remote-client.ts` was not in the Files list (its `compact` return type had to widen too).
+- Reset test uses `/clear` rather than a context reset: one line in `historyReplaced` clears the figure for all
+  three reasons; a mutation removing it turns the test red.
+- Two existing assertions widened, no expectation removed: `client/test/clear-attach.test.ts:120`
+  `toEqual({before, after})` → `toMatchObject` (the result now also carries the sizes); `client/test/remote.test.ts`
+  compact round-trip gains `usage` on its first turn and asserts `fromTokens: 1234`, `toTokens > 0`, `toExact` absent.
+
+**Tests added:** providers (2), protocol (5), core (6), agent (4), daemon (5: last main-agent prompt wins over a
+sub-agent's `subagent_usage`; no turn → measured; after a replacement → re-measured; the new segment's persisted
+`message` entry carries the fact, read back via `logRead` + `LogMessageEntrySchema`; `/clear` leaves no
+`compactionOf` match), client (round-trip over RPC).
+
+**Mutations (each red, then reverted):**
+| Mutation | Red test(s) |
+|---|---|
+| spread `...message` in OpenAI `toWireMessage` + Anthropic user push | providers: both (2/2 fail) |
+| drop `.catch(undefined)` on `compacted` | protocol: malformed-dropped + log-entry-loads (2 fail) |
+| agent: drop `throwIfAborted` after the counts (first shape) | agent: abort during the after-count |
+| agent: ignore `opts.fromTokens` (first shape) | agent: caller's fromTokens wins |
+| agent (final shape): ignore `opts.fromTokens` AND drop `throwIfAborted` | agent: 2 fail (fromTokens, abort) |
+| daemon: do not clear `lastPromptTokens` in `historyReplaced` | daemon: re-measured after a replacement |
+| daemon: also take `subagent_usage` into `lastPromptTokens` | daemon: last main-agent figure |
+| daemon: return only `{before, after}` | client: compact round-trip |
+
+**Gate:** `bun run typecheck` clean · `bun run lint` clean (1997 files) · full `bun test` (once): 14526 pass,
+5 skip, 3 fail — the 3 were the two re-attach tests and `clear-attach.test.ts:120` above; after the fix, the affected
+files (client clear-attach/reattach/reattach.e2e, agent/, protocol/, core, daemon + providers compaction-fact,
+tui app.test) → 1379 pass, 0 fail. The full suite was not re-run (token budget: once). The 5 skips: this slice adds
+no skip. **Unverified:** a full `bun test` after the last fix — run `bun test 2>&1 | tail -n 15`.
 
 ## Review
 

@@ -648,6 +648,25 @@
         "attachments": {
           "$ref": "#/$defs/Attachments"
         },
+        "compacted": {
+          "additionalProperties": true,
+          "properties": {
+            "fromTokens": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "toExact": {
+              "const": true,
+              "type": "boolean"
+            },
+            "toTokens": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["fromTokens", "toTokens"],
+          "type": "object"
+        },
         "content": {
           "type": "string"
         },
@@ -812,6 +831,17 @@
           "type": "integer"
         },
         "before": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fromTokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "toExact": {
+          "type": "boolean"
+        },
+        "toTokens": {
           "minimum": 0,
           "type": "integer"
         }
@@ -2592,6 +2622,25 @@
         "attachments": {
           "$ref": "#/$defs/Attachments"
         },
+        "compacted": {
+          "additionalProperties": true,
+          "properties": {
+            "fromTokens": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "toExact": {
+              "const": true,
+              "type": "boolean"
+            },
+            "toTokens": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["fromTokens", "toTokens"],
+          "type": "object"
+        },
         "content": {
           "type": "string"
         },
@@ -2653,6 +2702,25 @@
       "properties": {
         "attachments": {
           "not": {}
+        },
+        "compacted": {
+          "additionalProperties": true,
+          "properties": {
+            "fromTokens": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "toExact": {
+              "const": true,
+              "type": "boolean"
+            },
+            "toTokens": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["fromTokens", "toTokens"],
+          "type": "object"
         },
         "content": {
           "type": "string"

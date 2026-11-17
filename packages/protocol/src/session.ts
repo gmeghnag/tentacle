@@ -119,6 +119,20 @@ const chatMessageShape = () => ({
     .optional()
     .catch(undefined),
   /**
+   * ONLY on a compaction's summary user message: the context size before and
+   * after it (display only, docs/feat/harness-notices.md S1). FAIL-SOFT like
+   * `note`: a value outside these bounds is DROPPED (the message still loads,
+   * shown without figures), never a refusal of the CRITICAL entry.
+   */
+  compacted: z
+    .object({
+      fromTokens: z.number().int().nonnegative(),
+      toTokens: z.number().int().nonnegative(),
+      toExact: z.literal(true).optional(),
+    })
+    .optional()
+    .catch(undefined),
+  /**
    * On a USER message: image refs to send with it (docs/feat/attachments-core.md).
    * Refs, never bytes — the bytes live behind an `AttachmentSource` on the side
    * that may read them (a pod's refs read nothing on the laptop).
@@ -470,6 +484,14 @@ export const CompactResultSchema = z.object({
   /** Message count before and after compaction. */
   before: z.number().int().nonnegative(),
   after: z.number().int().nonnegative(),
+  /**
+   * Context size in tokens before and after (docs/feat/harness-notices.md S1);
+   * `toExact` when the provider counted the after. Optional: an older daemon
+   * omits them and the client shows `compacted` without figures.
+   */
+  fromTokens: z.number().int().nonnegative().optional(),
+  toTokens: z.number().int().nonnegative().optional(),
+  toExact: z.boolean().optional(),
 });
 export type CompactResult = z.infer<typeof CompactResultSchema>;
 

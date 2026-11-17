@@ -9,6 +9,8 @@ export * from "./model.ts";
 export * from "./attachments.ts";
 export * from "./dsml.ts";
 export * from "./truncation.ts";
+export * from "./format.ts";
+export * from "./compaction-view.ts";
 export * from "./history-validity.ts";
 export * from "./agent-job-ledger.ts";
 export * from "./agent-jobs.ts";

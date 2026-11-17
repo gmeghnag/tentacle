@@ -13,6 +13,7 @@ import type { AttachmentRef, ChatMessage } from "@tentacle/core";
 import {
   type ArtifactListResult,
   type ArtifactMeta,
+  type CompactResult,
   type DocumentContent,
   DomainErrorCode,
   type JobOutputResult,
@@ -1255,7 +1256,7 @@ export class RemoteSession implements SessionStreamListener {
    * answering a hollow `{0, 0}` (review M2). A fresh session stays the plain
    * no-op: a compaction never CREATES one.
    */
-  async compact(): Promise<{ before: number; after: number }> {
+  async compact(): Promise<CompactResult> {
     await this.openForReset();
     if (!this.id) {
       return { before: 0, after: 0 };

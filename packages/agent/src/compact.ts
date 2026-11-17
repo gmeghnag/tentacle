@@ -12,7 +12,7 @@ import type {
   ModelStopReason,
   ToolCall,
 } from "@tentacle/core";
-import { attachmentLabel } from "@tentacle/core";
+import { COMPACTION_SUMMARY_HEAD, attachmentLabel } from "@tentacle/core";
 
 const COMPACT_SYSTEM =
   "You compress a coding-assistant conversation into a dense briefing for the " +
@@ -180,6 +180,11 @@ export interface CompactResult {
   readonly summary: string;
   readonly before: number;
   readonly after: number;
+  /** Context size in tokens before and after (docs/feat/harness-notices.md S1). */
+  readonly fromTokens?: number;
+  readonly toTokens?: number;
+  /** The after was counted by the provider (else an estimate). */
+  readonly toExact?: boolean;
 }
 
 /**
@@ -334,7 +339,7 @@ export function compactedHistory(
   const note = skillsNote(skills);
   next.push({
     role: "user",
-    content: `Summary of the earlier conversation (compacted to save context):\n\n${summary}${running === "" ? "" : `\n\n${running}`}${note === "" ? "" : `\n\n${note}`}`,
+    content: `${COMPACTION_SUMMARY_HEAD}\n\n${summary}${running === "" ? "" : `\n\n${running}`}${note === "" ? "" : `\n\n${note}`}`,
   });
   for (const skill of skills.kept) {
     next.push({ role: "assistant", content: "", toolCalls: [skill.call] });
