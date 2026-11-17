@@ -190,16 +190,24 @@ interface Run {
 async function logs(
   args: string[],
   clientCh: ReturnType<typeof daemon>["clientCh"],
-  seams: { signal?: AbortSignal } = {},
+  seams: {
+    signal?: AbortSignal;
+    /** Sees each stdout/stderr chunk as it is written: wait on the follower's OWN
+     * output (its `watching` line, a `turn_end`), never on a duration. */
+    onOut?: (text: string) => void;
+    onErr?: (text: string) => void;
+  } = {},
 ): Promise<Run> {
   let out = "";
   let err = "";
   const code = await main(["bun", "cli", "logs", ...args], {
     out: (text) => {
       out += text;
+      seams.onOut?.(text);
     },
     err: (text) => {
       err += text;
+      seams.onErr?.(text);
     },
     terminal: { stdin: false, stdout: false },
     colour: false,
@@ -238,15 +246,30 @@ describe("logs -f --connect: the live follower", () => {
     // The follower's dial gets its own pair (the channel is one connection).
     const [fd, fc] = createChannelPair();
     new (await import("../../daemon/src/connection.ts")).Connection(fd, d.host);
-    const run = logs([UID, "-f", "--connect", "ws://x", "--json"], fc);
-    await new Promise((done) => setTimeout(done, 20));
+    // Wait on the follower's own `watching` line (printed once `openWatch`
+    // returned), never on a duration: a fixed 20 ms fence let the prompt run
+    // before the watch existed, so the follower could be closed having only ever
+    // seen `closed` — the flake's exact symptom.
+    const watching = Promise.withResolvers<void>();
+    const ended = Promise.withResolvers<void>();
+    const run = logs([UID, "-f", "--connect", "ws://x", "--json"], fc, {
+      onErr: (text) => {
+        if (text.includes("watching")) watching.resolve();
+      },
+      onOut: (text) => {
+        if (text.includes('"turn_end"')) ended.resolve();
+      },
+    });
+    await watching.promise;
     await driver.request("session/prompt", {
       sessionId: UID,
       turnId: "t1",
       content: [{ type: "text", text: "go" }],
     });
-    // Let the turn stream, then close the session (the follower must exit 0).
-    await new Promise((done) => setTimeout(done, 60));
+    // Close only once the follower has PRINTED the turn's end (the event, not a
+    // 60 ms fence): closing earlier is what truncated `turn_start`/`text`/`turn_end`
+    // and left the follower with only `closed` under load.
+    await ended.promise;
     d.host.close(UID);
     const result = await run;
     expect(result.code).toBe(0);

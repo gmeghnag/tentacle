@@ -40,7 +40,13 @@ const env = {} as ExecutionEnvironment;
 const anyInput = z.object({}).passthrough();
 const tick = (ms = 1): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-async function until(cond: () => boolean, ms = 3000): Promise<void> {
+/**
+ * Wait for `cond`, in 1 ms steps, for up to `ms`. The default is a dead-man
+ * switch, not the assertion: the work under it (a turn ending, a save landing)
+ * takes however long a loaded machine takes, so a 3 s default failed the suite
+ * by scheduling luck while proving nothing about the code.
+ */
+async function until(cond: () => boolean, ms = 20_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!cond()) {
     if (Date.now() > deadline) throw new Error(`timed out: ${String(cond)}`);
@@ -485,7 +491,7 @@ describe("S2 — the overlay: what the log has not committed yet survives a cras
     await until(() => c.ended("T1"));
     await persister.stop();
     await rm(dir, { recursive: true, force: true });
-  });
+  }, 60_000);
 
   test("(b) an in-place annotation of a committed message, then a steer before the next commit: k < the log's length, the annotated copy kept", async () => {
     // Mutation: `k = logged.length` whenever the capture is at least as long (no reference
@@ -516,7 +522,7 @@ describe("S2 — the overlay: what the log has not committed yet survives a cras
     await until(() => c.ended("T1"));
     await persister.stop();
     await rm(dir, { recursive: true, force: true });
-  });
+  }, 60_000);
 });
 
 describe("S3 — the capture stays out of the steering window", () => {
@@ -835,12 +841,52 @@ describe("S11 — a real SIGKILL at random points (a chain of restarts on one st
     const child = join(import.meta.dir, "fixtures", "serve-crash-child.ts");
     let previous: unknown[] = [];
     let loads = 0;
+    let earlyExit = "";
     for (let i = 0; i < ITERATIONS; i++) {
       const proc = Bun.spawn([process.execPath, child, dir], { stdout: "pipe", stderr: "pipe" });
-      // Kill at a random point: before, during or after the reload, mid-turn.
-      await tick(5 + Math.floor(Math.random() * 120));
+      // Wait for the child's OWN `ready` (its reload is done, its turns are
+      // running), then kill it at a random point in the turn. A blind
+      // `sleep(5..125 ms)` measured nothing under load: the child had not finished
+      // booting when it was killed, so no unit ever landed and `loads` stayed 0.
+      // A child that never gets there is killed and counted out, so the loop still
+      // terminates (the assertions below are what catch a store that stops loading).
+      const stdout = proc.stdout as ReadableStream<Uint8Array>;
+      const reader = stdout.getReader();
+      const ready = Promise.withResolvers<boolean>();
+      const decoder = new TextDecoder();
+      let seen = "";
+      const pump = (async () => {
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            seen += decoder.decode(value, { stream: true });
+            if (seen.includes("ready")) {
+              ready.resolve(true);
+              return;
+            }
+          }
+        } catch {
+          // the kill raced the read: not a `ready`
+        } finally {
+          ready.resolve(false);
+        }
+      })();
+      // Every 4th kill stays BLIND (no wait for `ready`), so a kill before or during
+      // the reload is still exercised; the others wait for `ready` (20 s dead-man
+      // switch). Once one capture has landed every later load succeeds whatever
+      // the kill point, so the blind ones do not threaten the `loads` floor.
+      if (i % 4 !== 0) {
+        await Promise.race([ready.promise, tick(20_000)]);
+      }
+      // Kill at a random point: mid-reload, mid-write, mid-rename, mid-turn.
+      await tick(Math.floor(Math.random() * 60));
       proc.kill("SIGKILL");
-      await proc.exited;
+      const exitCode = await proc.exited;
+      await pump.catch(() => undefined);
+      if (earlyExit === "" && exitCode !== null && proc.signalCode === null) {
+        earlyExit = `exit ${exitCode}: ${await new Response(proc.stderr as ReadableStream).text()}`;
+      }
       const result = await new SessionPersister({
         store: new LogSessionStore(dir),
         cwd: "/tmp/serve-crash", // the child's project
@@ -865,7 +911,15 @@ describe("S11 — a real SIGKILL at random points (a chain of restarts on one st
       .split("\n")
       .filter((l) => l !== "");
     expect(new Set(runs).size).toBe(runs.length);
-    expect(loads).toBeGreaterThan(ITERATIONS / 2);
+    // Every load here is a real one: the loop waits for (3 of 4) children's own
+    // `ready` before killing them, so `loads` tracks the captures instead of the machine's
+    // boot speed (the old blind sleep could legitimately score 0, which is why it
+    // flaked under load). A child that fails to boot is counted out, so this is a
+    // floor with room for a straggler — not an exact count, which would be a new
+    // timing assumption of its own (measured: 198–200 of 200).
+    // A child that died on its own (not our SIGKILL) is the real cause of a low
+    // count: surface its stderr instead of a bare number.
+    expect(loads >= ITERATIONS * 0.9 ? "ok" : `loads ${loads}; ${earlyExit}`).toBe("ok");
     expect(runs.length).toBeGreaterThan(0);
     await rm(dir, { recursive: true, force: true });
   }, 120_000);

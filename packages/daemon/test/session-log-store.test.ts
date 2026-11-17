@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { SessionRecord } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
 import { SessionBlobs } from "../src/session-blobs.ts";
@@ -766,7 +766,10 @@ describe("fork (docs/feat/clear-fork-history.md): a NEW session holding the chat
         await appendFile(path, data, { mode: 0o600 });
       },
       writeDurable: async (path, data) => {
-        if (path.includes(forkId)) {
+        // By NAME, never a substring: `path.includes(forkId)` also matched the
+        // SOURCE's own temp (`.s.jsonl.tmp-<pid>-<8 hex>`), whose random suffix
+        // contains "f1" in ~2.7% of runs — a false second fork temp → `forkTemps` 2.
+        if (basename(path).startsWith(`.${forkId}.`)) {
           control.forkTemps++;
           if (control.gate) await control.gate;
           if (control.fail) throw Object.assign(new Error("full"), { code: "ENOSPC" });
@@ -811,7 +814,13 @@ describe("fork (docs/feat/clear-fork-history.md): a NEW session holding the chat
     control.gate = gate.promise;
     const forking = store.fork("s", forkOf("f1"));
     const saving = store.write(reader.read(cleared.base([user("fresh")]), "cold"));
-    await Bun.sleep(60);
+    // Wait for the fork to be PARKED at its gate (it is the observation the
+    // assertions below depend on), never a flat 60 ms: under load the source's
+    // write got that far first.
+    const parked = Date.now() + 20_000;
+    while (control.forkTemps === 0 && Date.now() < parked) {
+      await Bun.sleep(5);
+    }
     expect(control.forkTemps).toBe(1);
     expect(await readFile(store.file("s"), "utf8")).toBe(before);
     gate.resolve();
