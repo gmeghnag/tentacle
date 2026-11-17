@@ -604,6 +604,14 @@ reports 5. None of them come from this slice (the new tests have 0
 `skip`), but I did not identify which 2 are extra.
 No schema touched, so `protocol.json` is not regenerated and there is no `protocol.d/` note.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-17* — addresses Review round 1. It had one finding, a test gap; the code is unchanged.
+
+- **Finding 1 (MEDIUM, test gap) — FIXED.** Added `the tail extends ONLY the last run: an earlier run's last node stays down: false` to `apps/mobile/test/tool-steps.test.ts` (rows `a1, a2, text, b`, thinking). It asserts `a2` is `{up:true, down:false}`, `b` is `{up:false, down:true}`, and the tail is `{thought:"", up:true}`.
+- **Red → green, by mutation:** `tool-steps.ts:157`, `(tailJoins && run === last)` → `tailJoins` gives **26 pass / 1 fail**: the new case, on its `toMatchObject` assertion. Reverted (`git diff src/` empty) → **27/27**.
+- **Gate:** `bunx tsc --noEmit` clean · `tsc -p apps/mobile` clean · `bun run lint` clean (1792 files) · `bun test`: 13089 pass, 5 skip, **1 fail**. The failure is `packages/exec/test/confinement.test.ts` F2 (hard link, a `WorkspaceWriteError` on a `/var` vs `/private/var` temp path). It is unrelated: this branch touches nothing under `packages/`, and the file alone gives 46/46. It is flaky under full-suite load, like the round-0 CLI flake.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17* — **S1 only**, fresh context. This is the same model as the plan author and the S1 executor (Opus), so shared blind spots are possible.

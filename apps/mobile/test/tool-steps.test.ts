@@ -176,6 +176,13 @@ describe("the thread: up/down per node", () => {
     expect(cells.get("t2")).toMatchObject({ thread: UP_DOWN(true, true) });
     expect(tail).toEqual({ thought: "thinking r", up: true });
   });
+
+  test("the tail extends ONLY the last run: an earlier run's last node stays `down: false`", () => {
+    const { cells, tail } = stepLayout([tool("a1"), tool("a2"), text("x"), tool("b")], true);
+    expect(cells.get("a2")).toMatchObject({ thread: UP_DOWN(true, false) });
+    expect(cells.get("b")).toMatchObject({ thread: UP_DOWN(false, true) });
+    expect(tail).toEqual({ thought: "", up: true });
+  });
 });
 
 describe("a resync: the same rows without reasoning", () => {
