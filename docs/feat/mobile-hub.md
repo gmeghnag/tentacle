@@ -1136,3 +1136,39 @@ reads yet.
 - It stopped and reported the ENOSPC block honestly rather than faking the spike.
 - It wrote the tests red first and pasted the mutation log.
 - One discrepancy: the commit message says "exec (deepseek)", but the Execution section is signed claude-opus-5-5, and the owner note requires Opus. This should be reconciled so the model attribution (§10) is true.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17* (H4a, `git diff main...HEAD`. Same model as the Execution signature, so only the context is fresh. The commit says "deepseek": the attribution is still unreconciled.)
+
+**Verdict: REQUEST-CHANGES.** There is one MEDIUM finding.
+
+**M1 — the "scroll once" rule breaks when it reaches the real screen** (`apps/mobile/src/screens/SessionScreen.tsx:572-578`).
+- **Cause.** `revealOnLayout` reads `reveal` from the render closure and calls `setReveal(step.state)` with a plain value. All of the bands' `onLayout` callbacks in one layout pass see the same stale `reveal`, and the last write wins. The bands report in tree order (`schedules` before `mcp`/`skills`), so the state that sticks is the one from a later band. That state still has `want: "schedules"`, so the want is never spent.
+- **Evidence.** `.tentacle/tmp/mobile-hub/rev-h4a/stale.ts` runs the real `revealStep` and simulates the batched pass:
+  - `pass1 [200] want after: schedules`
+  - `pass2 [290] want after: schedules`
+- **Failure scenario.**
+  1. The user taps "Scheduled wakes" and the sheet lands on the band.
+  2. The user scrolls up to read Model or Session.
+  3. Something moves or resizes the schedules band: the Session pull lands (its `loading` single row becomes Project/Devices), a row above it is expanded, or a wake fires and the table changes.
+  4. The schedules band fires `onLayout` again, and the sheet yanks the user back to the band. This repeats every time until the band happens to be the last one to report in a pass.
+- **Rule broken.** The Execution's own rule says "never re-scroll under the person's own scrolling". The pure tests pass because they never exercise the screen's closure, and `hub-scheduled-wiring` reads only the source.
+- **Fix.** Use a functional update: `setReveal(prev => { const s = revealStep(prev, …); … })`, with the scroll side-effect taken out of the updater. Pin it with a test that drives two reports through the same captured state.
+
+**Gate.**
+- Touched files plus `band-notes`/`header-wiring`: 64 pass, 0 fail.
+- `bun run lint`: clean (1782 files).
+- `bun run typecheck`: clean (root, mobile and relay).
+- Full `bun test`: not re-run.
+
+**Mutations.** My mutation run was not approved in this session. I relied on the executor's log (14/14 killed, `S2` covers the want-spend rule in the pure module). Point M1 is exactly the gap that mutation does not reach.
+
+**Attacks that found nothing.**
+- §7 trust: wakes come only through `RemoteSession.onSchedules`, which is gated by `daemonWakes`, so a pod's table is never used. There is no new seam.
+- `onSchedules` gives the current table immediately (`remote-session.ts:878-882`), so dropping the separate read is sound.
+- `scheduledSection` uses `state.info.view`, which is always computed (it is not gated on the sheet being open). So the menu path does reach the band on first use.
+- `wakeContext` uses the soonest wake and never reports a negative delay.
+- No protocol, persistence or daemon surface is touched.
+
+**Executor behaviour.** The as-built record is honest and detailed, and its mutation log was real. It missed that the pure rule's guarantee depends on how the component feeds it state.
