@@ -1575,3 +1575,13 @@ they cannot come from this diff. To confirm, run `bun test 2>&1 | rg "^\(fail\)"
 - (f) A second finger: one responder only, and the driver does not re-arm (D2).
 
 **Executor behaviour:** the spike came first and was evidenced, the logic was pulled into the pure `hub-session.ts` (§7), its own mutations ran, and the drift is stated honestly. It missed the one property the previous round flagged for H3.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* (commit `90cd24c9`, `git diff HEAD~1`: test-only, `test/hub-session.test.ts` +34, no `src/` change)
+
+**Verdict: PASS.** No HIGH or MEDIUM findings.
+
+- **Finding 1 is fixed.** A new test opens on turn `t1` and releases on turn `t2`, for both Stop and Steer, and expects "Already finished". It also checks that the same turn still running does run. I re-ran the round-1 mutation (`resolveCommit(…, hubOpen(ctx))`, which ignores the open snapshot): it went from 30/0 to **31 pass / 1 fail**, so it is now killed.
+- **The `isFanOpen` nit is fixed.** A new driver test covers press → 400 ms → release in place, ending in `fanSticky` with `isFanOpen` true. The mutation that drops `fanSticky` is now **31 / 1, killed**. `isFanOpen` still has no `src/` caller, which is a nit.
+- **Regressions:** none, since the commit touches tests only. The `dispose`-without-cancel mutation is still killed (31 / 1). `hub-session.test.ts` passes 32 / 0, `bun run lint` is clean (1988 files) and `bun run typecheck` is clean. The tree's bytes were restored after the mutations (checked by sha), and `git status` is clean apart from this doc.
