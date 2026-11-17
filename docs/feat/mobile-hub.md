@@ -1515,6 +1515,42 @@ count is now wired). No schema change (no protocol.json regeneration).
 
 **Status: H3 DONE.**
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-17* (answers the H3-redo Review below)
+
+The code was already correct, so this round changes only tests. "Red" is the
+reviewer's mutation, which survived 30/0 before this round and is killed now.
+
+1. **MEDIUM, open snapshot not pinned: FIXED.** New test in
+   `apps/mobile/test/hub-session.test.ts` (`commitPlan` block): "Stop/Steer seen on
+   turn A never act on turn B started before the release". With ctx = turn `t2`
+   running and open = `hubOpen(turn t1)`, both `stop` and `steer` give the notice
+   "Already finished". A positive control (same turn ⇒ `run`) shows the guard keys on
+   the turn id, not on "running".
+2. **Nit, `isFanOpen` sticky untested: FIXED (kept, now pinned).** New driver test
+   "lifted in place after the open, the fan stays up". It presses at the layout's
+   `anchor` (the button's centre: a press at the rig's `p` lands on an item and
+   commits), fires the timer and lifts in place. It then asserts the effects are only
+   `haptic, open`, the state is `fanSticky`, and `isFanOpen` is true. The screen still
+   keeps its own `hubFanOpen` ref. `isFanOpen` stays as the tested definition of
+   "fan up" (M2).
+
+**Mutations** (`.tentacle/tmp/mobile-hub/fix1/mut.ts`; bytes restored and checked identical):
+```
+M1 open snapshot ignored:    31 pass, 1 fail — Stop/Steer seen on turn A never act on turn B started before the release
+M2 isFanOpen without sticky: 31 pass, 1 fail — lifted in place after the open, the fan stays up: sticky is open (M2)
+restored: identical
+```
+Before this round, M1 survived 30/0 (Review) and M2 survived 30/0 (Review nit).
+
+**Gate:** `bun run typecheck` clean · `bun run lint` clean (1988 files) · `bun test`: 14489 pass / 5 skip / **4 fail**,
+in 620 s (the H3 run took less). Only one failure was visible in the `tail`: `serve-log-store` S11, the
+real-SIGKILL chain, which got `> 100` kills and received 0. Run alone, it passes 22/0 in 18 s, so
+it looks like load-sensitive timing. The other 3 failures were cut off by the `tail` and are
+**not identified**. This round changes only `apps/mobile/test/hub-session.test.ts` (32/0), so
+they cannot come from this diff. To confirm, run `bun test 2>&1 | rg "^\(fail\)"` once on a quiet machine.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17* (H3 redo, `git diff main...HEAD`. Same model family as the executor signature: fresh context only, shared blind spots possible.)

@@ -266,6 +266,26 @@ describe("commitPlan — what a released item does (Design 5, M7/M8, M14)", () =
       text: "Already finished",
     });
   });
+  test("Stop/Steer seen on turn A never act on turn B started before the release", () => {
+    const runningB = hubContextOf({
+      link: "up",
+      turn: { turnId: "t2" } as never,
+      ended: null,
+      editable: true,
+      dictation: false,
+    });
+    for (const id of ["stop", "steer"] as const) {
+      expect(commitPlan(id, runningB, withStop, hubOpen(running))).toEqual({
+        kind: "notice",
+        text: "Already finished",
+      });
+    }
+    // The same turn still running does run: the guard is the turn, not "running".
+    expect(commitPlan("stop", running, withStop, hubOpen(running))).toEqual({
+      kind: "run",
+      id: "stop",
+    });
+  });
   test("an entry gone since the open is a silent no-op (P6)", () => {
     expect(commitPlan("info", idle, { attach: noop }, hubOpen(idle))).toEqual({ kind: "none" });
   });
@@ -343,6 +363,20 @@ describe("createHubDriver — the 400 ms timer and the machine, wired (M12, M13,
     r.at(400);
     r.fire();
     expect(r.effects).toEqual(["haptic", "open"]);
+    expect(isFanOpen(r.driver.state())).toBe(true);
+  });
+
+  test("lifted in place after the open, the fan stays up: sticky is open (M2)", () => {
+    const r = rig();
+    const items = hubActions(idle, ENTRIES).fan;
+    const { layout } = solveHub({ bounds: BAND, position: undefined, items });
+    const at = layout.kind === "fan" ? layout.anchor : p; // the button's centre
+    r.driver.down(at, 0);
+    r.at(400);
+    r.fire();
+    r.driver.up(at, 450);
+    expect(r.effects).toEqual(["haptic", "open"]);
+    expect(r.driver.state().kind).toBe("fanSticky");
     expect(isFanOpen(r.driver.state())).toBe(true);
   });
 
