@@ -1,6 +1,6 @@
 # feat/harness-notices — one grey voice for harness lines, grouped; compaction as a slot + separator
 
-> **Status:** implementation (awaiting owner answers + approval)
+> **Status:** implementation approved (owner 17/11) — executing S1 → S2 → S3
 > **Branch:** `feat/harness-notices`
 > **Size:** L (3 slices on this branch + 1 follow-up task) · **Blast:** load-bearing (S1: persisted message field, `session/compact` result) · contained (S2, S3: TUI rendering only) · **Suited:** S1 Opus + mandatory fresh-context Review; S2/S3 DeepSeek + standard Review (S3 Review red-teams the resume/foreign paths)
 > **Changelog:** `changelog.d/harness-notices.changed.md` — one bullet: harness/system lines share one grey with `◇`/`▲`, consecutive ones group, `/compact` shows in the spinner slot and leaves a `compacted · ctx A → B` separator that survives `--resume`.
@@ -464,6 +464,10 @@ All red on current `main` first (§9), mutation-checked where noted.
    (`/help`, `/model`, `/mcp`, `/tokens`) stay styled as command output.**
 6. **Another device's compaction.** **Rec: the same separator, worded
    `compacted on another device · ctx 182k → 9k`, replacing today's notice.**
+
+### Owner answers (2026-11-17)
+
+Owner: "ok" to every recommendation — Q1 (A) display-only fail-soft `compacted` field on the summary message, no new log entry type; Q2 `~` when estimated, never updated later; Q3 resumed summary → separator, body on Ctrl+O; Q4 mobile = follow-up `feat/mobile-harness-notices` (shared logic in `@tentacle/core`); Q5 one-line notices + all `NoticeItem`s, multi-line command replies unchanged; Q6 foreign compaction → `compacted on another device · ctx …` separator. Also (17/11): `Compacted ✓` shows ~3 s then disappears (already in Context). Implementation APPROVED.
 
 ## Execution
 
