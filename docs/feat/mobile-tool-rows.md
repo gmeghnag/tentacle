@@ -781,3 +781,30 @@ are the same 5 as in S1. No schema is touched, so there is no
 - **Finding 1 is fixed.** The new case `the tail extends ONLY the last run` (`apps/mobile/test/tool-steps.test.ts:180`) catches the change. I re-applied the round-1 mutation (drop `run === last` at `tool-steps.ts:158`), and that test now **fails** (1 fail). After reverting, `git status` is clean.
 - **No regressions found.** No `src` file changed. The touched tests pass 75/75. `bun run lint` is clean (1792 files) and `bun run typecheck` is clean.
 - **Still open, as a nit only:** `batchOpen` is redundant.
+
+### Review — S2
+
+*— claude-opus-5-5, 2026-11-17* — fresh context, **S2 only** (`git diff main...HEAD`, the S2 files). Same model as the executor: shared blind spots are possible.
+
+**Verdict: REQUEST-CHANGES.** One MEDIUM finding (a test gap, §9). No HIGH.
+
+1. **MEDIUM: the cell → StepNode hand-off is untested.** The layout's decisions reach the drawing in three places, and no test catches a break in any of them. Each mutation below was applied, the three narrow files run, then restored (`git status` clean): **0 fail** each time.
+   - `TranscriptRow.tsx` ToolRowView: `cell.thought` → `null`. Failure scenario: reasoning → `tool_start`. `stepLayout` hides the reasoning row because it is folded into the tool, but the tool never receives it. There is no ∴ and no thought in the body, so the thought is **silently lost on screen**.
+   - ReasoningRowView: `cell.thread` → `LONE`. An orphan Thought between steps breaks the thread.
+   - SessionScreen: `up={layout.tail.up}` → `up={false}`. The footer node loses its thread segment.
+
+   Fix: add source pins to `tool-rows-wiring.test.ts` for these three hand-offs (`cell.thought`, `cell.thread`, `layout.tail.up`). Then re-run these mutations and show each one red.
+
+**Gate:** the touched tests (wiring, step-view, steps, summary) give **105 pass / 0 fail**. `bun run lint` is clean (1953 files). `bun run typecheck`: root and relay are clean. `tsc -p apps/mobile` gives 6 errors. All 6 are in untouched files and come from modules missing in this worktree (`expo-document-picker`, `react-native-webview`, `react-native-svg`), matching Execution. I did not re-run the full suite.
+
+**Mutations killed (1 fail each):** `tappable` ignores `denialReply` · `trailingRed` ignores `denied` · no `⎿` on the output · `isBlockRow` ignores artifacts.
+
+**Attacks tried:**
+- Flows that assert a body testID without a tap. Only `08` (`diff-`) does, and it now taps first. `08b`/`08c` assert only the label. Holds.
+- `null` before `SwipeTime`, and `styles.list` having no `gap` or separator (so a hidden cell adds no spacing). Holds.
+- `isBlockRow` vs. `ChartRowView`. When `chartRowSpec` is non-null but `chartLayout` returns null, the row falls back to a LONE step with no thought folded into it. Cosmetic only, LOW.
+- §7: logic is in pure modules; no protocol, persistence or terminal path is touched. Holds.
+
+**Still owed (S3):** the simulator half of the load-bearing check (a 0 pt `null` cell, and `scrollToIndex` past hidden rows). The flow-08 edit has not been run.
+
+**Executor behaviour:** honest. The drift is named, and the 7 mutations it lists are real. It missed the cell → node seams above.
