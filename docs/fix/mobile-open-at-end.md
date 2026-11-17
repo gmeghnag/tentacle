@@ -808,3 +808,29 @@ reveal:  {...,"scrollTo":39800,"animated":false} settling false
 executor's signatures still need correcting (round 1 and 2 notes).
 
 *— claude-opus-5-5, 2026-11-17* (fresh context, round 3)
+
+## Review
+
+**Verdict: PASS.** Scope: the whole diff, `git diff main...HEAD` (slices A + B), after the merge of `main` (`ebc9b1b3`).
+
+**Gate.** The 11 touched or related test files (follow, row-swipe, row-times, session-screen, both follow/swipe wiring tests, media-live wiring, client/daemon/protocol snapshot-times, json-schema drift): **174 pass, 0 fail**. `bun run lint`: 1855 files, clean. `bun run typecheck`: clean.
+
+`bun test apps/mobile/test`: 2629 pass, **1 fail**, in `tool-summary.test.ts:255` (rowSubtitle "Ricavi 2026"). That failure is NOT this branch's: neither the source nor the test is in `git diff main...HEAD`, and both came in with `feat/mobile-tool-rows` (`59fbc29f`, which is `main`'s HEAD). It needs fixing on main before the merge gate.
+
+**Mutation (non-vacuity).** I made `session-feed.ts` drop `activity.times` in the `history` case. Result: 1 fail in `row-times.test.ts` ("a history activity's times reach the rows"). I reverted it and `git status` was empty afterwards.
+
+**§7 invariants attacked.**
+- **Persistence:** `times` is never persisted (it lives only in the daemon's in-memory `SessionLog.times` and on the snapshot wire). Holds.
+- **Pod not trusted:** a lying pod affects only a display label. Holds.
+- **Protocol:** the field is additive, the schema strips unknown fields, `protocol.json` was regenerated, and there is no `protocol.d` note, which is correct for a free field. Holds.
+- **Single RPC path:** times ride the existing snapshot → reset → history chain. There is no new session path. Holds.
+
+**Attacks tried.**
+1. Replace vs append inside `commit`: `commitTimes` keeps `[0, old)`, so a replace does not restamp it. Holds.
+2. A cut that runs ahead of the log, or a misaligned or missing page: the client drops all times. Holds.
+3. A foreground resync that changes nothing: `landingQuiet` stays armed until the next content change, which then scrolls silently instead of animated. The end position is the same and a scrolled-up reader is still not yanked. Cosmetic, not reported.
+4. Retry from a failed attach with 0 rows: `hasRows` gates the round, so it converges. Holds.
+
+**Unverified.** The iPhone device check listed in Execution is still open.
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, round 4; same family as the plan author)
