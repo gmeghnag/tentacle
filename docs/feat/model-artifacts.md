@@ -2670,3 +2670,32 @@ the disk has room (then build a new dev build: a new native module).
   `artifact-viewers-wiring.test.ts` 8 pass, `e2e-flows.test.ts` 34 pass, changelog
   guard 21 pass.
 - No schema change → `protocol.json` untouched; no `protocol.d/` note.
+
+## Review
+
+### S8 + S9 — Phone viewers + phone wiring: REQUEST-CHANGES (2 HIGH, 2 MEDIUM)
+
+**Verdict: REQUEST-CHANGES.** I reviewed `git diff main...HEAD` (S8+S9 files only) in a fresh context. The reviewer is the same model family as the S8 executor, so blind spots they share may survive both passes.
+
+**Gate:** `bun run typecheck` is clean. `bun run lint` is **RED: 22 errors**, all format/organizeImports in S9 files (`artifact-feed.ts`, `artifact-join.ts`, `artifact-open.ts`, `screens/ArtifactGallery.tsx`, `artifacts/ArtifactViewerModal.tsx`, `SessionInfoSheet.tsx`, `transcript/TranscriptRow.tsx`). The 12 touched mobile test files give **143 pass, 2 fail**, both in `artifact-gallery-wiring.test.ts`. I did not run the full `bun test` because the slice gate is already red.
+
+**Findings**
+1. **HIGH: the gallery and the card are unreachable.** `apps/mobile/App.tsx` is not in the diff. It registers no `name="ArtifactGallery"` screen and never passes `onOpenArtifacts` to `SessionScreen` (the prop is optional, `SessionScreen.tsx:127`). As a result, `TranscriptRow`'s `onArtifact` is absent (`SessionScreen.tsx:712-714`), the Session-info row's press is a no-op (`SessionScreen.tsx:998`), and nothing calls `openArtifactGallery` (`routes.ts:88`). Concretely, a user taps an artifact card or "Artifacts · 3 ›" and nothing happens, so T9.1/T9.2/T9.4 are unmet on device. The test that pins this (`artifact-gallery-wiring.test.ts:40-42`) is RED and was committed RED.
+2. **HIGH: the security default ships unverified, and its fallback is not built.** T8.1 (the escape suite) is still PENDING, and the Owner Q5 gate is still undecided. CSP does not govern `RTCPeerConnection`, and WKWebView exposes it, so a STUN-URL DNS beacon from model- or pod-supplied HTML is the expected outcome. `viewerFor` hard-codes `scripts: viewer === "webview"` (`artifact-viewer.ts:53`), and there is no "Run scripts" tap: `HtmlViewer.tsx` has no scripts toggle. The pre-decided fallback therefore cannot be switched to. Because of finding 1, flow 30 also still has no UI path, and its mock-model, hooks and `FLOWS` wiring (S8 Execution items a–d) is absent. To fix: build the scripts-OFF + "Run scripts" path, wire flow 30, and run it. Alternatively, ship scripts-OFF by default until the suite is green.
+3. **MEDIUM: S9 has no Execution section.** Commit `209e975e` did not touch this doc. Files item 11 required it, and AGENTS §10 makes it mandatory. With no record of red→green, the drift (card → gallery, not viewer) and the missing App wiring went unreported.
+4. **MEDIUM: one wiring test is RED for the wrong reason.** `artifact-gallery-wiring.test.ts:68` fails because the doc comment at `ArtifactGallery.tsx:7` contains the word `RemoteSession`. The code is innocent. Either the test or the comment must change, or the pin stays permanently red and gets ignored.
+
+**Mutation (§9):** I made `navigationPredicate` (`artifact-viewer.ts:155`) also allow `file:`. `artifact-viewer.test.ts` went **2 fail** (RED). I reverted it, and `git status` is clean. S8's own M1–M6 table is consistent with this.
+
+**Attacks tried:**
+- (a) `sms:`/`mailto:` exit via `originWhitelist`: closed by `["*"]` + the predicate (holds).
+- (b) Top-level `location="about:blank"` to shed the CSP: the predicate allows it, but the old script context dies with the old document, so there is no write path (holds).
+- (c) `window.open`: with no `onOpenWindow` and `javaScriptCanOpenWindowsAutomatically:false`, it loads in place and the predicate refuses it (holds).
+- (d) WebRTC: not blockable by CSP. This is finding 2.
+- (e) Gallery entry reachability: this is finding 1.
+
+**What holds:** the S8 pure module and viewers keep the isolation contract. There is no bridge or `injectedJavaScript`, and nothing overrides the props after the spread. Network access is per open, never remembered. The PDF can read only its own file.
+
+**Executor behaviour:** S8 (opus) was honest and thorough, including the PENDING/unverified lines and a full disk. S9 (deepseek) committed with lint red and its own wiring test red, without recording either.
+
+*— claude-opus-5-5, 2026-11-17*
