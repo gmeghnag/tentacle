@@ -606,3 +606,65 @@ now also: a 2-message session opens visibly at the end, and a swipe left on a
 message row shows its time inside the row's strip.
 
 *— claude-opus-5-5 (fix round 1), 2026-11-17*
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff HEAD~1` (`67833f68`).
+
+**Gate.** `bun test apps/mobile/test` + the client, daemon and protocol
+snapshot-times tests: 2833 pass, 0 fail. `bun run lint`: clean (1785 files).
+`bun run typecheck`: clean.
+
+**Round-1 findings, each mutation-checked.** All mutations were reverted and
+`git status` is empty.
+- **HIGH 1 (list stays hidden): fixed for the case it targets, but see
+  NEW HIGH below.** Mutation: `landingReveal` returns `step: null` and keeps
+  the state → 2 fails in `follow.test.ts`.
+- **HIGH 2 (label off-screen): fixed.** The label is now at `right: 0`, the
+  row is opaque, and the frame clips. Mutation: `right: -REVEAL` → 1 fail in
+  `swipe-time-wiring.test.ts`.
+- **MEDIUM 3 (foreground resync not silent): fixed.** `appState` returns
+  `true` when it starts a re-attach, and the screen then arms
+  `reattachLanding`. Mutation: `return false` → 1 fail in
+  `session-screen.test.ts`.
+
+**NEW HIGH: a slow attach brings back the original bug.**
+`follow.ts:255-258` (`landingReveal`) and `SessionScreen.tsx:376-381`.
+- The empty list has `contentContainerStyle` `flexGrow: 1`
+  (`styles.emptyList`), so its first content measurement is about the
+  viewport height, not 0.
+- So `landingStep` takes a round on the EMPTY state.
+- 120 ms later the timer fires. `content > 0`, so it does not go to
+  `landingAwaiting`: it returns `landingDone`.
+- When the history arrives (any attach slower than 120 ms, i.e. normal over
+  the relay), `landingStep` returns `null`. The rows then go through
+  `contentGrew` with `animated: true`: a visible animated scroll through the
+  whole transcript, the owner's original complaint.
+- Repro (`.tentacle/tmp/mobile-open-at-end/r2-slow-attach.ts`, real event
+  order on the pure functions):
+
+```
+empty-state measured: {"settling":true,"silent":false,"last":800,"rounds":1,"awaiting":false}
+timer: {"settling":false,"silent":false,"last":0,"rounds":0,"awaiting":false}
+history landing step: null
+falls to contentGrew: {"state":{"following":true,"unseen":false},"scrollTo":39200,"animated":true}
+```
+
+- The `awaiting` path is reached only with `content <= 0`, which a laid-out
+  empty list never reports. Its tests cover only that case.
+- Fix: decide "nothing to land yet" from the ROWS (zero rows, or the status
+  still `opening`), not from `content`. Pin it in a test where the timer fires
+  on the empty state and the history arrives after it.
+
+**Other regression attacks (nothing found).**
+- The mount timer is cleared on unmount (`useEffect(() => disarmReveal)`).
+- A re-attach arms `landingQuiet` (`settling` false), so the timer is a no-op
+  for it.
+- `overflow: "hidden"` on the cell frame clips only the translated row.
+  Nothing in `TranscriptRow` draws outside its cell (not device-verified).
+
+**Executor.** The fixes are targeted and each comes with a red test. The
+fix-round section is again signed `claude-opus-5-5` while commit `67833f68`
+says `deepseek`: correct the signature (§10).
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, round 2)
