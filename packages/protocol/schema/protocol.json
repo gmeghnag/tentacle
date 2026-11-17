@@ -2962,6 +2962,29 @@
       "type": "object",
       "x-event-class": "mandatory"
     },
+    "PinParams": {
+      "additionalProperties": true,
+      "properties": {
+        "pinned": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["pinned", "sessionId"],
+      "type": "object"
+    },
+    "PinResult": {
+      "additionalProperties": true,
+      "properties": {
+        "pinned": {
+          "type": "boolean"
+        }
+      },
+      "required": ["pinned"],
+      "type": "object"
+    },
     "Plan": {
       "additionalProperties": true,
       "properties": {
@@ -4210,6 +4233,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "pinned": {
+          "const": true,
+          "type": "boolean"
+        },
         "running": {
           "type": "boolean"
         },
@@ -4264,6 +4291,13 @@
         "cursor": {
           "minLength": 1,
           "type": "string"
+        },
+        "pinned": {
+          "items": {
+            "$ref": "#/$defs/SessionListEntry"
+          },
+          "maxItems": 20,
+          "type": "array"
         },
         "sessions": {
           "items": {
@@ -6019,6 +6053,14 @@
       },
       "result": {
         "$ref": "#/$defs/OpenResult"
+      }
+    },
+    "session/pin": {
+      "params": {
+        "$ref": "#/$defs/PinParams"
+      },
+      "result": {
+        "$ref": "#/$defs/PinResult"
       }
     },
     "session/prompt": {

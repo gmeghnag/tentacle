@@ -55,6 +55,8 @@ import {
   type OpenParams,
   type OpenResult,
   PROTOCOL_VERSION,
+  type PinParams,
+  type PinResult,
   type PromptParams,
   type PromptResult,
   type ReclaimParams,
@@ -467,6 +469,11 @@ export class Connection {
       case Method.Rename: {
         const { sessionId, title } = params as RenameParams;
         return { title: this.host.rename(sessionId, title) } satisfies RenameResult;
+      }
+      // Host-level and synchronous, like `rename`: no `open`, live or archived.
+      case Method.Pin: {
+        const { sessionId, pinned } = params as PinParams;
+        return this.host.pin(sessionId, pinned) satisfies PinResult;
       }
       // Daemon-wide: reads/sets the reaper's TTL, attaches this connection to nothing.
       case Method.SessionTtl:

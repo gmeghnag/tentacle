@@ -106,6 +106,7 @@ export interface ArchivedMeta {
   readonly updatedAt: number;
   readonly title: DaemonSessionRecord["title"];
   readonly archivedAt?: number;
+  readonly pinnedAt?: number;
 }
 
 /** A session's state read back by `loadState`. */
@@ -469,6 +470,7 @@ export class SessionPersister {
         updatedAt: s.updatedAt,
         title: s.title,
         ...(s.archivedAt !== undefined ? { archivedAt: s.archivedAt } : {}),
+        ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}),
       },
     };
   }
@@ -543,6 +545,7 @@ export class SessionPersister {
       ...(state.archivedAt !== undefined ? { archivedAt: state.archivedAt } : {}),
       ...(state.head !== undefined ? { head: state.head } : {}),
       ...(state.autoAccept === true ? { autoAccept: true } : {}),
+      ...(state.pinnedAt !== undefined ? { pinnedAt: state.pinnedAt } : {}),
       ...(state.schedules !== undefined && state.schedules.length > 0
         ? { schedules: state.schedules }
         : {}),
