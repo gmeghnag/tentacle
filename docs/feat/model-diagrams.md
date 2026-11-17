@@ -1398,3 +1398,13 @@ M-B is the non-vacuity guard in the other direction: a guard that killed ALL dra
 **Gate:** `bun run typecheck` (`tsc --noEmit`, `apps/mobile`, `apps/relay`) clean; `bun run lint` clean, 1986 files, no fixes (one `biome check --write` on `diagram-row.test.ts` after a hand-written line was too long to format); full `bun test`, run once at the end: **14469 pass, 5 skip, 0 fail** (the same 5 opt-in/pre-existing skips as the D4 gate; the only edit after it is a comment reflow in `render-lines.ts`, which no test reads). Narrow during the work: `diagram-row` 10 pass, `app-diagram` 8 pass. The three mutations were re-run against the final code shape and still KILLED.
 
 *— claude-opus-5-5, 2026-11-17* (executor of this fix round; branch `feat/model-diagrams`, uncommitted working tree. The id is this session's own harness report — `AI_AGENT=claude-code_2-1-323_agent` with `modelSettings["claude-opus-5-5"]` — and names the FIX executor; finding 2 above corrects the separate D4 slice signature.)
+
+### Round 2
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (`6dd5a41e`).
+
+1. **Finding 1 (HIGH): FIXED.** `render-lines.ts:814` now returns the generic row when `status === "error"`. Re-running my repro (`.tentacle/tmp/model-diagrams/rev-d4/err2.ts`): all four error-status cases now print `● Diagram Login` instead of a drawing. **Mutation:** I disabled the guard (`if (false)`). Result: **KILLED**, 2 fail (`diagram-row` "a FAILED diagram keeps the generic error row", `app-diagram` "live: a source mermaid REFUSES…"). The file was restored from a scratch copy and `git status` is clean. The new tests cover compact, expanded (`expandAll`) and denial (`denialReply` → `Denied`). They also check that the same args at `ok` still draw, so the guard is pinned on status, not on the source.
+2. **Finding 2 (MEDIUM): FIXED.** The D4 Execution is now signed `deepseek (variant not recorded)`, which matches `:425` and `27d396eb`. Note for the orchestrator, not blocking: the fix round is signed `claude-opus-5-5` (with harness evidence), while its commit subject `6dd5a41e … (deepseek)` says otherwise. The commit subject is the orchestrator's label, so the orchestrator should make the two agree.
+3. **Regressions:** the guard sits after the `running`/`queued` check and before the memo, so no error row is ever cached. `ok` rows are unchanged. `app-diagram` + `diagram-row` + `render-lines` + `app.test.tsx`: **257 pass, 0 fail**. `bun run lint`: clean, 1986 files. `bun run typecheck`: clean. Full `bun test` not re-run by me (the executor reports 14469 pass / 5 skip / 0 fail).
+
+*— claude-opus-5-5, 2026-11-17*
