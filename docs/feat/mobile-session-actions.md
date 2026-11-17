@@ -678,3 +678,31 @@ the simulator. To verify: run flow 26 against the harness `serve`.
 - The branch also regenerates `protocol.json`. That is fine, but `bun run protocol:bump` must still run at merge.
 
 **Executor behaviour:** The Execution is accurate against the code. It records every drift with a reason, and it ran 14 mutations, including one honest correction (the M10 variant). The executor and I are the same model (claude-opus-5-5) with fresh context, so we may share blind spots.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S2 only)*
+
+**Verdict: REQUEST-CHANGES (S2).** There are 2 MEDIUM findings and no HIGH ones.
+
+**Gate:** The 8 touched mobile test files give 124 pass, 0 fail. `bun run lint` is clean (1845 files). `bun run typecheck` is clean (root + mobile + relay). I did not re-run the full `bun test`.
+
+**Findings:**
+1. **MEDIUM. `apps/mobile/src/session-groups.ts:47`: `noMatch` ignores the Pinned group.** `noMatch` is still computed as `active.length + archived.length === 0`, but both of those groups now exclude pinned rows. Failure scenario: on the Sessions screen, search for text that only a pinned session matches. The screen shows "No matches — Nothing called “deploy”" (`SessionsScreen.tsx:213`) and, below it, the Pinned section with the matching row. Repro (`.tentacle/tmp/mobile-session-actions/rv2/nomatch.ts`): `groupSessions({pinned:[a], active:[a,b], archived:[]}, "deploy")` returns `{pinned:["a"], noMatch:true}`. No test covers a query together with pins. Fix: add `pinned.length` to the `noMatch` sum, and add a test for it.
+2. **MEDIUM. `apps/mobile/src/drawer-row-actions.ts:173`: the "read `wasOpen` BEFORE the await" property is untested (§9).** Mutation R2 moved the read after the await (`if (deps.currentId() === row.id)`). All 16 tests in `drawer-row-actions.test.ts` still pass, so the mutation SURVIVED. Failure scenario this would let through: the open screen gets `session_closed{deleted}` during the delete call and moves away, so `currentId` changes. A late read then skips `navigate`, and the person lands wherever the screen sent them instead of on `nextAfterCurrent`, which is the Owner Q2 behaviour. Fix: add a test in which `currentId()` changes while `remove` is pending, and assert that `navigate` is still called.
+
+**Mutations I added** (each one restored; `git status` was clean afterwards):
+- R1: drop the wrap-around in `nextAfterCurrent`. KILLED, 1 red.
+- R2: as in finding 2. SURVIVED.
+
+**Attacks tried:**
+- *A stale `pinned` flag survives a first-page refresh through `newer()`.* Holds: a first page REPLACES `entries` (`merge` with mode `first`), and `pinnedEntries` is replaced only on a first page.
+- *The busy flag gets stuck on an offline delete.* Holds: every path in `run` clears it.
+- *The delete/pin goes to the open session's computer instead of the listed one.* Holds: `listed` is passed explicitly, and `reread` is guarded by the computer the drawer currently lists.
+- *An archived next row is opened after a delete.* Holds: `nextAfterCurrent` filters out archived rows.
+- *A pinned archived current row is hidden by the archive toggle.* Holds: it renders in Pinned.
+- *An outbox-queued destructive action.* Holds: it goes straight to `link.client`, on the same path rename uses.
+
+**What holds:** Logic sits in pure modules and the components only render (§7). There is no protocol or persistence change. The Execution's account matches the code.
+
+**Executor behaviour:** The Execution is thorough and honest (17 mutations, two corrected harness errors). Its mutation set missed the timing property in finding 2. The commit says deepseek, but the Execution is signed `opus`. I am claude-opus-5-5 with a fresh context, so if the executor was Opus, we may share blind spots.
