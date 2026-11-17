@@ -22,9 +22,20 @@ Source of the full B3 token set: `.tentacle/mockups/mobile-chrome/index.html:181
 - Changelog: `changelog.d/mobile-dark-ardesia.changed.md` — one bullet.
 
 ## Execution
-*— claude (executor; exact model id not exposed by this harness), 2026-11-17*
+*— claude-code executor (exact model id not exposed by this harness), 2026-11-17*
 
-Followed the Implementation, no drift.
+Followed the Implementation, no drift. This pass re-verified the as-built state
+on the branch (`a9e31713`, clean tree) against the tree itself rather than the
+narrative: the six owner hexes + the B3 companions are in `src/theme.ts:127-170`
+exactly as listed (incl. `glass`, `shadowOpacity` 0.35, `scrim`, `switchOff`;
+`glassBorder` unchanged; no `sheetBehind` key in `Palette`, so nothing to set),
+the register `rg` is clean apart from the intentional B1 history comment at
+`theme.ts:148`, `ImageViewer.tsx`'s `GROUND` and `Sheet.tsx`'s comment carry the
+new ground, and `app.json` has no launch/splash colour. Gate re-run on the
+touched surface: `bunx tsc -p apps/mobile` clean, `bunx biome check apps/mobile`
+clean (552 files, no fixes), `bun test test/theme.test.ts
+test/artifact-viewers-wiring.test.ts test/band-screens.test.ts` → 150 pass / 0
+fail (no contrast threshold weakened).
 
 1. **Verified the load-bearing assumption** with the plan's own `rg`: the only
    dark-ramp hexes live in `apps/mobile/src/theme.ts`; the other hits were
