@@ -155,3 +155,300 @@ export function toolSummary(row: Pick<ToolRow, "name" | "label" | "args" | "outp
     output: stripAnsi(row.output ?? ""),
   };
 }
+
+// ── What one STEP says (docs/feat/mobile-tool-rows.md, Design 1) ──────────
+// NEW phone logic, not a TUI port: the TUI leaves `mcp__x__y` and raw MCP args
+// as they are (`render-lines.ts` `default`), so `subtitleOf` above stays the
+// parity rule and becomes the FULL command in a step's open body.
+
+/** The tools `subtitleOf` summarises; everything else is MCP / unknown. */
+const SUMMARISED: ReadonlySet<string> = new Set([
+  "fs_read",
+  "fs_write",
+  "fs_edit",
+  "fs_multi_edit",
+  "shell",
+  "search",
+  "shell_output",
+  "shell_kill",
+  "agent_task",
+  "agent_control",
+  "agent_kill",
+  "agent_message",
+  "agent_status",
+  "skill",
+]);
+
+/** Tools whose row already says everything (a job or agent id, a skill name). */
+const ROW_SAYS_ALL: ReadonlySet<string> = new Set([
+  "shell_output",
+  "shell_kill",
+  "agent_control",
+  "agent_kill",
+  "agent_message",
+  "agent_status",
+  "skill",
+]);
+
+export interface ToolNameParts {
+  /** An MCP server, drawn `sec` before ` · `; absent for every other tool. */
+  readonly server?: string;
+  readonly tool: string;
+}
+
+const MCP_PREFIX = "mcp__";
+
+/**
+ * A step's name: `mcp__<server>__<tool>` (packages/mcp `tool-adapter.ts`) split
+ * on the first `__` after the prefix, the tool part shown as is (Owner Q5);
+ * every other tool keeps its label. An unparseable MCP name (an empty part) is
+ * the raw label: never an empty name.
+ */
+export function toolName(name: string, label: string): ToolNameParts {
+  if (!name.startsWith(MCP_PREFIX)) {
+    return { tool: label };
+  }
+  const rest = name.slice(MCP_PREFIX.length);
+  const cut = rest.indexOf("__");
+  const server = cut < 0 ? "" : rest.slice(0, cut);
+  const tool = cut < 0 ? "" : rest.slice(cut + 2);
+  return server === "" || tool === "" ? { tool: label } : { server, tool };
+}
+
+/** A JSON object (not an array, not a scalar), or null. */
+function objectOf(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Not JSON: the caller shows the raw text.
+  }
+  return null;
+}
+
+/** One line: tabs and newlines → spaces (the TUI's `fitSubtitle` flattening). */
+function flatten(text: string): string {
+  return text
+    .replace(/\t/g, " ")
+    .replace(/\s*\r?\n\s*/g, " ")
+    .trim();
+}
+
+function basename(path: string): string {
+  const parts = path.split(/[\\/]/).filter((p) => p !== "");
+  return parts.at(-1) ?? path;
+}
+
+/** The order a primary target is looked for in MCP / unknown args. */
+const PRIMARY_KEYS = [
+  "url",
+  "path",
+  "filename",
+  "file",
+  "query",
+  "command",
+  "selector",
+  "text",
+  "name",
+  "element",
+] as const;
+const PATH_KEYS: ReadonlySet<string> = new Set(["path", "filename", "file"]);
+
+/**
+ * An MCP / unknown tool's args as ONE line (Owner Q6), never raw JSON:
+ * 1. not a JSON object → the raw text flattened;
+ * 2. numeric width + height → `W × H`;
+ * 3. the first non-empty string under a primary key (a path as its basename);
+ * 4. `key value` pairs joined by ` · ` (`true` → the key, `false`/`null`
+ *    dropped, nested → `key …`); `{}` → "".
+ */
+export function mcpRowArgs(raw: string): string {
+  const args = objectOf(raw);
+  if (args === null) {
+    return flatten(raw);
+  }
+  if (typeof args.width === "number" && typeof args.height === "number") {
+    return `${args.width} × ${args.height}`;
+  }
+  for (const key of PRIMARY_KEYS) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim() !== "") {
+      return flatten(PATH_KEYS.has(key) ? basename(value) : value);
+    }
+  }
+  const pairs: string[] = [];
+  for (const [key, value] of Object.entries(args)) {
+    if (value === true) {
+      pairs.push(key);
+    } else if (typeof value === "string" || typeof value === "number") {
+      pairs.push(`${key} ${flatten(String(value))}`);
+    } else if (value !== null && typeof value === "object") {
+      pairs.push(`${key} …`);
+    }
+    // false / null (and anything else) say nothing.
+  }
+  return pairs.join(" · ");
+}
+
+/** A positive integer, or undefined. */
+function lineNo(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * A read's range text (`A–B`, `A–`, `1–B`), from offset/limit or else a
+ * `path:start[:end]` suffix — the two forms `fs_read` takes (builtins.ts
+ * `parsePathRange`; offset is 1-based). "" for a whole-file read.
+ */
+function readRange(args: Record<string, unknown>, path: string): { path: string; range: string } {
+  let offset = lineNo(args.offset);
+  let limit = lineNo(args.limit);
+  let file = path;
+  if (offset === undefined && limit === undefined) {
+    const match = /^(.*?):(\d+)(?::(\d+))?$/.exec(path);
+    if (match?.[1] && match[2] !== undefined) {
+      file = match[1];
+      offset = Number(match[2]);
+      limit = match[3] === undefined ? undefined : Math.max(1, Number(match[3]) - offset + 1);
+    }
+  }
+  if (offset === undefined && limit === undefined) {
+    return { path: file, range: "" };
+  }
+  const start = offset ?? 1;
+  return { path: file, range: limit === undefined ? `${start}–` : `${start}–${start + limit - 1}` };
+}
+
+/**
+ * The ONE line on a step: a file tool's basename (+ ` · A–B`, + ` · N edits`,
+ * Owner Q4), the TUI subtitle for the other summarised tools (the row cuts it
+ * with `…`), and `mcpRowArgs` for MCP and any unknown tool.
+ */
+export function rowSubtitle(name: string, raw: string): string {
+  if (!SUMMARISED.has(name)) {
+    return stripAnsi(mcpRowArgs(raw));
+  }
+  const args = argsOf(raw);
+  const path = typeof args.path === "string" ? args.path : "";
+  switch (name) {
+    case "fs_read": {
+      const read = readRange(args, path);
+      const file = basename(read.path);
+      return stripAnsi(read.range === "" ? file : `${file} · ${read.range}`);
+    }
+    case "fs_write":
+    case "fs_edit":
+      return stripAnsi(basename(path));
+    case "fs_multi_edit": {
+      const sub = subtitleOf(name, raw);
+      // `subtitleOf` is `<path>` or `<path> · N edits`: swap in the basename.
+      return stripAnsi(path === "" ? sub : basename(path) + sub.slice(path.length));
+    }
+    default:
+      return stripAnsi(subtitleOf(name, raw));
+  }
+}
+
+const BODY_LEAF_CAP = 20;
+
+/** `key  value` per leaf, nested keys dotted (`a.b`, `items[0]`). */
+function leaves(value: unknown, path: string, out: string[]): void {
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      out.push(`${path}  []`);
+    }
+    value.forEach((item, i) => leaves(item, `${path}[${i}]`, out));
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value);
+    if (entries.length === 0 && path !== "") {
+      out.push(`${path}  {}`);
+    }
+    for (const [key, item] of entries) {
+      leaves(item, path === "" ? key : `${path}.${key}`, out);
+    }
+    return;
+  }
+  const text = typeof value === "string" ? flatten(value) : String(value);
+  out.push(`${path}  ${text}`);
+}
+
+/**
+ * What a step's open body shows as the command. A summarised tool: its full
+ * `subtitleOf` (the whole path or command, a multi-line command keeping its
+ * lines). MCP / unknown: one `key  value` line per leaf, capped at 20 then
+ * `… +N more` (non-JSON args: the raw lines, same cap). `[]` when the row
+ * already says all of it.
+ */
+export function bodyCommand(name: string, raw: string): readonly string[] {
+  if (SUMMARISED.has(name)) {
+    if (ROW_SAYS_ALL.has(name)) {
+      return [];
+    }
+    const full = stripAnsi(subtitleOf(name, raw));
+    return full.trim() === "" ? [] : full.split(/\r?\n/);
+  }
+  const args = objectOf(raw);
+  const lines: string[] = [];
+  if (args === null) {
+    const text = stripAnsi(raw).replace(/\s+$/, "");
+    if (text !== "") {
+      lines.push(...text.split(/\r?\n/));
+    }
+  } else {
+    leaves(args, "", lines);
+  }
+  if (lines.length <= BODY_LEAF_CAP) {
+    return lines.map(stripAnsi);
+  }
+  return [
+    ...lines.slice(0, BODY_LEAF_CAP).map(stripAnsi),
+    `… +${lines.length - BODY_LEAF_CAP} more`,
+  ];
+}
+
+/** The TUI's cut (`render-lines.ts`): over 8 lines → the first 6 + `… +N more lines`. */
+const CUT_OVER = 8;
+const CUT_KEEP = 6;
+
+export interface OutputView {
+  readonly lines: readonly string[];
+  /** Lines held back until "show all" (0 = nothing cut). */
+  readonly hidden: number;
+  /** Drawn red. */
+  readonly error: boolean;
+}
+
+/** A result as a step's body shows it: escapes stripped, trailing newlines trimmed, cut. */
+export function outputView(
+  output: string,
+  opts: { readonly full: boolean; readonly error: boolean },
+): OutputView {
+  const text = stripAnsi(output).replace(/(\r?\n)+$/, "");
+  const lines = text === "" ? [] : text.split(/\r?\n/);
+  if (opts.full || lines.length <= CUT_OVER) {
+    return { lines, hidden: 0, error: opts.error };
+  }
+  return { lines: lines.slice(0, CUT_KEEP), hidden: lines.length - CUT_KEEP, error: opts.error };
+}
+
+function unit(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/** `elapsed()` in words, for VoiceOver: `14 milliseconds`, `1.3 seconds`, `2 minutes 5 seconds`. */
+export function spokenDuration(ms: number): string {
+  if (ms < 1000) {
+    return unit(Math.round(ms), "millisecond");
+  }
+  if (ms < 60_000) {
+    const s = (ms / 1000).toFixed(1);
+    return `${s} ${s === "1.0" ? "second" : "seconds"}`;
+  }
+  const seconds = Math.round(ms / 1000);
+  const min = unit(Math.floor(seconds / 60), "minute");
+  return seconds % 60 === 0 ? min : `${min} ${unit(seconds % 60, "second")}`;
+}

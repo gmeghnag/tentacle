@@ -535,7 +535,74 @@ asleep); the owner may overrule them on waking.
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-17* — **S1 only** (S2, S3 not started)
+
+**Load-bearing check.** The plan puts it as S2's first step (simulator:
+`renderItem → null` lays out at 0 pt, and `scrollToIndex` still works). S1 is
+pure, so it cannot run that check and does not depend on it. I re-checked the
+static half: cells are keyed by `row.key` (`SessionScreen.tsx:704`), and
+"Show in chat" indexes into `rows` (`showRow(rows, …)` :466 →
+`scrollToIndex` :476). That still holds. **The simulator half is still owed by S2.**
+
+**As built, in order (red → green):**
+1. `test/tool-summary.test.ts`: added 20 cases (toolName, rowSubtitle,
+   mcpRowArgs rules 1–4, bodyCommand, outputView, spokenDuration). Ran them
+   against stubs that return the fallback values: **20 fail / 28 pass, all on
+   assertions**. Then wrote `src/tool-summary.ts` (`toolName`, `mcpRowArgs`,
+   `rowSubtitle`, `bodyCommand`, `outputView`, `spokenDuration`). Result: 48/48.
+   `subtitleOf` is untouched, and its parity cases still pass.
+2. `test/tool-steps.test.ts` (new, 26 cases) against a stub `src/tool-steps.ts`:
+   **23 fail / 3 pass**. The 3 that pass are "tail off" cases, which are
+   trivially `null` on a stub. M3 below covers them. Then wrote `stepLayout`,
+   `stepA11yLabel`, `toggleOpen`/`isOpen`. Result: 26/26.
+3. `changelog.d/mobile-tool-rows.changed.md`: the header's bullet. It is
+   written now because the owner's executor brief asks for it; the plan had it in S3.
+
+**Mutation checks (§9).** Each was applied by hand, then reverted, then the file re-run green:
+- M1, drop "no text between" (text no longer flushes the pending reasoning) →
+  4 fail: `NO fold across assistant text`, `no fold across a notice or a user
+  row`, `a trailing thought before the final answer`, `an orphan thought is a
+  node on the thread`.
+- M2, `down` ignores the tail → 2 fail: `on: the last row is a finished tool`,
+  `the tail extends the last node down…`.
+- M3, the tail ignores a running/queued tool in the trailing batch → 2 fail:
+  `off: a running or queued tool…`, `tool_start replaces the footer…`.
+- M4, `outputView` cut off by one (`<= 9`) → 1 fail: `9 lines → the first 6 + 3 hidden`.
+
+**Drift from Implementation (and why):**
+- `StepLayout.tail` is `{ thought; up }`, not `{ thought }`. The design's
+  footer takes "`up` from the layout", but the sketched type had no field
+  for it.
+- Several orphan reasoning rows in a row become ONE Thought node on the first
+  row, and the others are `hidden`. An empty or whitespace-only reasoning row
+  folds to no thought (`thought: null`), or is `hidden` when orphaned. The plan
+  covered neither case. These choices avoid stacked or blank "Thought" lines.
+- The tail rule "a finished tool, nothing running or queued after it" is read
+  as: every tool of the trailing contiguous batch is finished. A parallel batch
+  whose last row is done but an earlier one still runs has no tail. The
+  spinner is the signal there.
+- fs_read ranges: offset only → `A–`, limit only → `1–B`, and `path:N` →
+  `N–`. These are the forms `parsePathRange` accepts (`builtins.ts:84-96`,
+  offset 1-based).
+- `bodyCommand` returns `[]` when the summarised subtitle is empty, and for
+  `shell_output`, `shell_kill`, `agent_control`/`kill`/`message`/`status` and
+  `skill`, whose row is an id or a name. Non-JSON MCP args return the raw lines,
+  with the same 20-line cap.
+- `stepA11yLabel`: an MCP step reads `server tool` (no `·`). A diff reads
+  `N added, M removed` instead of a duration, mirroring `toolMeta`'s trailing
+  priority.
+- `spokenDuration` uses singular forms (`1 minute 1 second`), and a whole
+  minute drops ` 0 seconds`.
+
+**Gate:** `bun run typecheck` clean · `bun run lint` clean (1792 files, 0
+issues) · `bun test`: 13088 pass, 5 skip, **1 fail**. The failure is
+`cli main … apiKeyCommand stops neither the status probe` (ENXIO on a tty write
+in `pod-resident.ts:783`). It is unrelated to this mobile-only change:
+`bun test packages/cli/test/main.test.ts` alone gives 119/119. It is flaky
+under full-suite load. The baseline counts 3 opt-in skips, and the suite now
+reports 5. None of them come from this slice (the new tests have 0
+`skip`), but I did not identify which 2 are extra.
+No schema touched, so `protocol.json` is not regenerated and there is no `protocol.d/` note.
 
 ## Review
 
