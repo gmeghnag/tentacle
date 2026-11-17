@@ -42,6 +42,7 @@
           "microphonePermission": "tentacle uses the microphone only while you dictate a message; audio stays on this iPhone"
         }
       ],
+      "expo-document-picker",
       [
         "expo-camera",
         {

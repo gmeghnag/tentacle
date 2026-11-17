@@ -102,6 +102,10 @@ function harness(
     sessionId: "s1",
     attachImage: async (_bytes, meta) =>
       ({ id: "blob", mimeType: meta.mimeType, size: 3 }) as AttachmentRef,
+    // No PDF in this test: `compose-documents.test.ts` owns that pick path.
+    attachDocument: async () => {
+      throw new Error("no PDF in this test");
+    },
     send: async (text) => {
       session.sent.push(text);
     },
@@ -125,6 +129,11 @@ function harness(
         ({ id: "port", mimeType: meta.mimeType, size: 3 }) as AttachmentRef,
       prompt: async (text) => {
         session.sent.push(text);
+      },
+      // A PDF never reaches this fake: the compose tests cover the pick path in
+      // `compose-documents.test.ts` (docs/feat/pdf-read.md D7).
+      attachDocument: async () => {
+        throw new Error("no PDF in this test");
       },
       steer: async (text, id, turnId) => {
         session.steers.push({ text, id, turnId });

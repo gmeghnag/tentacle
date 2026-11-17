@@ -155,7 +155,7 @@ export function QueueRows({
   );
 }
 
-/** The photo chips (14 pt capsules): progress, or the refusal's reason (13c's decision). */
+/** The attachment chips (14 pt capsules): progress, or the refusal's reason (13c's decision). */
 export function Chips({
   chips,
   palette,
@@ -181,7 +181,7 @@ export function Chips({
           key={chip.key}
           testID={`chip-${index}-${chip.state}`}
           accessibilityRole="button"
-          accessibilityLabel={`Remove ${chip.name ?? "photo"}`}
+          accessibilityLabel={`Remove ${chip.name ?? (chip.kind === "document" ? "file" : "photo")}`}
           onPress={() => onRemove(chip.key)}
           style={[styles.chip, { backgroundColor: palette.fill }]}
         >
@@ -189,7 +189,16 @@ export function Chips({
             <ActivityIndicator size="small" color={palette.accent} />
           ) : (
             <Icon
-              name={chip.state === "ready" ? "photo" : "exclamationmark.triangle"}
+              // The KIND's glyph, never a guess from the name: a PDF the person
+              // picked from Files is a document chip even before it is named
+              // (docs/feat/pdf-read.md D7).
+              name={
+                chip.state === "refused"
+                  ? "exclamationmark.triangle"
+                  : chip.kind === "document"
+                    ? "doc.on.doc"
+                    : "photo"
+              }
               color={chip.state === "refused" ? palette.red : palette.accent}
               size={14}
             />
@@ -202,7 +211,9 @@ export function Chips({
               { color: chip.state === "refused" ? palette.red : palette.label },
             ]}
           >
-            {chip.state === "refused" ? (chip.detail ?? "refused") : (chip.name ?? "photo")}
+            {chip.state === "refused"
+              ? (chip.detail ?? "refused")
+              : (chip.name ?? (chip.kind === "document" ? "file" : "photo"))}
           </Text>
           <Icon name="xmark" color={palette.sec} size={11} />
         </Pressable>

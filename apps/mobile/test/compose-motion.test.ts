@@ -15,6 +15,7 @@ const empty: ComposeBarView = {
   outbox: [],
   notSaved: false,
   chips: [],
+  attach: { items: ["photo", "camera"], reason: null },
   ownQueue: 0,
   sendNow: false,
 };
@@ -49,7 +50,9 @@ describe("composeRowsMoved", () => {
     expect(composeRowsMoved(empty, { ...empty, returnedOthers: [{ id: "r", text: "t" }] })).toBe(
       true,
     );
-    expect(composeRowsMoved(empty, { ...empty, chips: [{ key: "c", state: "ready" }] })).toBe(true);
+    expect(
+      composeRowsMoved(empty, { ...empty, chips: [{ key: "c", kind: "image", state: "ready" }] }),
+    ).toBe(true);
     expect(composeRowsMoved(empty, { ...empty, sendNow: true })).toBe(true);
   });
 });
