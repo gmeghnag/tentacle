@@ -91,3 +91,32 @@ Bun's Intl is complete; the phone runs Hermes with Apple's Intl, which this work
 *— claude-opus-5-5 (executor), 2026-11-17*
 
 ## Review
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH).
+
+1. **MEDIUM — the same suspected chart throw has a second, unguarded path.** `apps/mobile/src/screens/artifacts/ArtifactViewerModal.tsx:175` mounts `ChartFullScreen`, which runs `fullScreenKpis` + `chartRowView` (all the Intl formatting: `ChartFullScreen.tsx:252-261`) in render, with no boundary above it. Scenario: the owner opens the IBM chart from the artifact gallery → the same throw → the same release-mode abort. The Context's goal is "one bad item can never take the app down"; this is another path to the same state (brief: "another path"). Fix: wrap it in `RowGuard` (with a viewer-sized fallback and the same `client-error` log), and add it to the wiring test. (The gallery thumbnail, `ArtifactGallery.tsx:126`, runs in a promise callback, so it rejects rather than aborting. Out of scope, but it should be noted as debt.)
+2. **MEDIUM — once a row fails, it shows the fallback even after its content becomes renderable.** `RowGuard.tsx:25-37` never resets, and FlatList keys rows by `row.key` (`SessionScreen.tsx:863`), so the instance survives a content change. Shown end-to-end (below): after a re-render with valid children, the frame still reads `FALLBACK`. Scenario: a streaming assistant row, or a tool row whose result is later swapped by a `replace` (exactly this session's log), throws once on a transient state. It then stays "couldn't display this item" for the rest of the screen's life, although its final content would render. Fix: reset `failed` when `row` identity changes (e.g. `getDerivedStateFromProps` with a `resetKey={item}`). This still rules out a loop: a re-render with the same input stays failed. Add a test for it.
+
+**Gate (reviewer-run):** touched tests `row-guard.test.ts` + `row-guard-wiring.test.ts` 13 pass / 0 fail; `bun run lint` clean (1970 files); `bun run typecheck` clean (root + mobile + relay). Full `bun test` not re-run by me; the executor's 5 skips vs the 3 in AGENTS §6 are still unconfirmed.
+
+**Mutation:** `getDerivedStateFromError` changed to return `{failed:false}` → `row-guard.test.ts` 2 fail; reverted, `git status` clean.
+
+**Premise table:**
+| Premise | Result |
+|---|---|
+| Charts render inside `TranscriptRow`, so they are a descendant of the guard (`TranscriptRow.tsx:347-358`) | TRUE |
+| `keyExtractor` uses `row.key` (`SessionScreen.tsx:863`) | TRUE |
+| No pre-existing boundary in the app | TRUE (taken from the doc's `rg`; consistent with the code I read) |
+| Root cause (Intl under Hermes-iOS) | UNVERIFIED, as the doc says. I did not reproduce it either. |
+
+**Attacks tried:**
+- (a) Real-reconciler trace (`.tentacle/tmp/mobile-crash-ibm-chart/e2e-guard.ts`: Ink/React 18 driving the actual `RowGuard.tsx`). A throwing child gives `"row-1\nFALLBACK\nrow-3"`, `onError` is called once with `RangeError`, and the sibling rows survive. **Holds.** Re-rendering with valid children still gives `FALLBACK`, which is finding 2.
+- (b) Other chart render sites: finding 1. `ChartBlock`'s own `ChartFullScreen` is a descendant of the guard, so it is covered.
+- (c) Logic outside the guard in `renderItem` / the `stepLayout` memo: still unguarded. The repro shows no throw on this session; acceptable as stated debt.
+- (d) Privacy: `rowErrorFields` keeps the error class only (the test pins this). **Holds.**
+
+**Executor behaviour:** honest. It followed repro-first, recorded that the repro did not reproduce, and did not apply a speculative fix. The plan is clear, and red→green plus mutations are recorded. The tests drive the class methods by hand, not through a reconciler; my trace (a) closes that gap.
+
+*Same model family as the executor (fresh context only): shared blind spots are possible.*
+
+*— claude-opus-5-5, 2026-11-17*
