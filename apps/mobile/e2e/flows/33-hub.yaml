@@ -9,12 +9,17 @@ appId: so.tentacle.app
 # elsewhere closes it; a HOLD turn puts Stop first, and Stop stops the turn; a
 # tap is still Activity; Header mode has no hub. Light/dark shots of the open fan.
 #
+# Opacity (docs/feat/mobile-hub-opacity.md): with Floating picked, a new
+# "Button opacity" band appears; a drag to its left end reads 30 %, and the
+# session's shots show the faint body with the arc still solid (the arc's own
+# solidity is the point: it is OUTSIDE the dimmed layer).
+#
 # Not driven here (stated, not hidden): press-slide-release — Maestro's `swipe`
 # moves at once (a drag, never a hold), so the machine's path is pinned by
 # `hub-gesture.test.ts` + `hub-session.test.ts` (the driver), and the responder's
 # hold over the transcript by the H3 spike (Execution). The back-swipe after a
 # close (M2) — Maestro has no iOS edge gesture (flows 05/26/28 say the same);
-# VoiceOver / Reduce Motion — not reliably togglable.
+# VoiceOver / Reduce Motion / Reduce Transparency — not reliably togglable.
 - runFlow: _pair.yaml
 - extendedWaitUntil:
     visible:
@@ -24,6 +29,32 @@ appId: so.tentacle.app
     id: "open-settings"
 - tapOn:
     id: "activity-button-floating"
+# Hidden in Header mode (Owner Q1), shown with Floating. Maestro's text match is
+# a FULL regex, so the label is given in full.
+- extendedWaitUntil:
+    visible:
+      id: "hub-opacity-slider"
+    timeout: 5000
+- assertVisible:
+    id: "hub-opacity-value"
+    text: "100%"
+# Drag the thumb to the track's left end: the floor, 30 %.
+- swipe:
+    from:
+      id: "hub-opacity-slider"
+    direction: LEFT
+- extendedWaitUntil:
+    visible:
+      id: "hub-opacity-value"
+      text: "30%"
+    timeout: 5000
+- assertVisible:
+    id: "hub-opacity-preview"
+# Light/dark of the band at 30 % (`_shot` flips the appearance and back).
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "33-hub-opacity-band"
 - tapOn:
     id: "settings-back"
 - tapOn:
@@ -39,6 +70,12 @@ appId: so.tentacle.app
     timeout: 30000
 - assertVisible:
     id: "hub-glyph"
+# At 30 % (set above): the body is faint but the button is still there, and the
+# arc — when a turn runs — is at full opacity (it is outside the dimmed layer).
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "33-hub-opacity-30"
 # Long-press → the sticky fan; Attach is in it; a tap commits → the chooser.
 - longPressOn:
     id: "floating-activity"
@@ -86,6 +123,12 @@ appId: so.tentacle.app
     visible:
       id: "turn-running"
     timeout: 20000
+# 30 % and a turn running, at rest: the faint body with the arc still solid — the
+# one thing this feature must not lose (the arc is outside the dimmed layer).
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "33-hub-opacity-30-running"
 - longPressOn:
     id: "floating-activity"
 - extendedWaitUntil:
@@ -111,13 +154,39 @@ appId: so.tentacle.app
     id: "activity-sheet-close"
 - tapOn:
     id: "activity-sheet-close"
-# Header mode: no hub.
+# Back to 100 %: the band's right end, so the last shots show today's look.
+- tapOn:
+    id: "session-drawer"
+- tapOn:
+    id: "drawer-settings"
+- swipe:
+    from:
+      id: "hub-opacity-slider"
+    direction: RIGHT
+- extendedWaitUntil:
+    visible:
+      id: "hub-opacity-value"
+      text: "100%"
+    timeout: 5000
+- tapOn:
+    id: "settings-back"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 10000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "33-hub-opacity-100"
+# Header mode: no hub — and no opacity band (Owner Q1: hidden, not zeroed).
 - tapOn:
     id: "session-drawer"
 - tapOn:
     id: "drawer-settings"
 - tapOn:
     id: "activity-button-header"
+- assertNotVisible:
+    id: "hub-opacity-slider"
 - tapOn:
     id: "settings-back"
 - assertNotVisible:

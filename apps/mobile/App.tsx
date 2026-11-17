@@ -1627,6 +1627,17 @@ function AppShell(): JSX.Element {
       setActivityError("That Activity button setting didn't save"),
     );
   }, []);
+  /**
+   * docs/feat/mobile-hub-opacity.md: ONE write per slider gesture (on release),
+   * spreading the current settings so the mode and the spot survive it. A failed
+   * write reuses the existing banner.
+   */
+  const selectActivityOpacity = useCallback((opacity: number) => {
+    setActivityError(undefined);
+    ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), opacity }).catch(() =>
+      setActivityError("That Activity button setting didn't save"),
+    );
+  }, []);
 
   // Photos (fix/mobile-media-live item 5): the "Send photos at original size"
   // switch, loaded once. A failed write leaves the copy unchanged and says so;
@@ -2143,6 +2154,10 @@ function AppShell(): JSX.Element {
                 activityWritable={activityWritable}
                 {...(activityError === undefined ? {} : { activityError })}
                 onActivityMode={selectActivityMode}
+                {...(activitySettings.opacity === undefined
+                  ? {}
+                  : { activityOpacity: activitySettings.opacity })}
+                onActivityOpacity={selectActivityOpacity}
                 // Item 5's switch (fix/mobile-media-live): the downscale is the
                 // default, and a newer build's record is never written over.
                 photoSettings={photoSettings}
