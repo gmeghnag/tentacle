@@ -92,6 +92,28 @@ export class FakeLog {
       ...(report !== undefined ? { report } : {}),
     });
   }
+  /** One model round's usage (docs/feat/token-usage-log.md; non-critical, projects nothing). */
+  usage(body: {
+    readonly round?: number;
+    readonly final?: true;
+    readonly model?: string;
+    readonly promptTokens: number;
+    readonly completionTokens: number;
+    readonly cachedPromptTokens?: number;
+    readonly messages: number;
+    readonly turnId?: string;
+  }): KnownLogEntry {
+    const { round, final, model, turnId, ...rest } = body;
+    return this.next({
+      type: "usage",
+      critical: false,
+      ...(turnId !== undefined ? { turnId } : {}),
+      ...(round !== undefined ? { round } : {}),
+      ...(final !== undefined ? { final } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...rest,
+    });
+  }
 }
 
 /** A client's view of one session: its head and projection, and the `LogWrite` of each read. */

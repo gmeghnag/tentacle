@@ -57,6 +57,18 @@ export interface Slot {
 /** Where a lineage continues from (`open{logBase}`): the client's head for the messages it seeded. */
 export type LogBase = LogCursor;
 
+/** What a `usage` entry carries (the round's facts, without its envelope; docs/feat/token-usage-log.md). */
+export type UsageBody = {
+  readonly turnId?: string;
+  readonly round?: number;
+  readonly final?: true;
+  readonly model?: string;
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly cachedPromptTokens?: number;
+  readonly messages?: number;
+};
+
 export class SessionLog {
   private readonly slots: Slot[] = [];
   /** `seq` of `slots[0]`. */
@@ -167,6 +179,15 @@ export class SessionLog {
   /** A background sub-agent ended (`report`: its capped work product). */
   subagentEnd(body: SubagentEndBody): void {
     this.push({ type: "subagent_end", critical: false, ...body });
+  }
+
+  /**
+   * One model round's measured spend (docs/feat/token-usage-log.md). NOT
+   * critical and projects nothing: it is a fact about the conversation's cost,
+   * not part of its history. An unmeasured field is absent, never 0.
+   */
+  usage(body: UsageBody): void {
+    this.push({ type: "usage", critical: false, ...body });
   }
 
   /** Assert the projection here; its digest is computed by the first read that serves it. */

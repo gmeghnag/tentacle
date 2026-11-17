@@ -130,8 +130,17 @@ export interface ContextUsage {
 }
 
 export interface Usage {
+  /** The whole prompt, cache hits included (what the context count uses). */
   readonly promptTokens: number;
   readonly completionTokens: number;
+  /**
+   * The part of `promptTokens` the provider served from its prompt cache
+   * (Anthropic's `cache_read_input_tokens`, an OpenAI-compatible server's
+   * `prompt_tokens_details.cached_tokens`). Absent when the server does not
+   * report it — never 0, which would claim a full cache miss
+   * (docs/feat/token-usage-log.md).
+   */
+  readonly cachedPromptTokens?: number;
 }
 
 /**

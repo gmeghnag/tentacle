@@ -146,6 +146,8 @@ describe("session/log schemas", () => {
       subagent_end: false,
       // docs/feat/session-capabilities.md, owner Q2 (2026-11-15): not critical.
       capabilities: false,
+      // docs/feat/token-usage-log.md: not critical (it projects nothing).
+      usage: false,
     });
     for (const option of KnownLogEntrySchema.options) {
       const type = option.shape.type.value as keyof typeof LOG_ENTRY_CRITICAL;
@@ -303,6 +305,59 @@ describe("C9 — canonicalMessage with refs (D2: the digest covers them)", () =>
     expect(canonicalMessage({ role: "user", content: "", attachments: [named] })).not.toBe(
       canonicalMessage({ role: "user", content: "", attachments: [unnamed] }),
     );
+  });
+});
+
+describe("usage entries (docs/feat/token-usage-log.md: non-critical, projects nothing)", () => {
+  const row = {
+    type: "usage",
+    seq: 3,
+    id: "i/3",
+    prev: "i/2",
+    ts: 1,
+    turnId: "t1",
+    round: 0,
+    model: "claude-x",
+    promptTokens: 1200,
+    completionTokens: 80,
+    cachedPromptTokens: 900,
+    messages: 7,
+  };
+
+  test("NON-critical, and a critical variant is refused (that would need a bump)", () => {
+    // RED on main: the type is unknown there, so nothing can be logged.
+    // Mutation: `...critical()` instead of `...skippable()` in the schema →
+    // both assertions fail, and an older build would REFUSE the whole log.
+    expect(LOG_ENTRY_CRITICAL.usage).toBe(false);
+    expect(KnownLogEntrySchema.safeParse(row).success).toBe(true);
+    expect(KnownLogEntrySchema.safeParse({ ...row, critical: true }).success).toBe(false);
+  });
+
+  test("an unmeasured value is OMITTED, never defaulted to 0", () => {
+    // The load-bearing property: `cachedPromptTokens` absent must stay absent
+    // (a 0 claims a full cache miss, which is a measurement the provider never
+    // made). Mutation: `cachedPromptTokens: cachedPromptTokens ?? 0` in the
+    // provider → `"cachedPromptTokens" in parsed` becomes true → red.
+    const bare = {
+      type: "usage",
+      seq: 4,
+      id: "i/4",
+      prev: "i/3",
+      ts: 1,
+      promptTokens: 5,
+      completionTokens: 1,
+      messages: 2,
+    };
+    const parsed = KnownLogEntrySchema.parse(bare);
+    expect("cachedPromptTokens" in parsed).toBe(false);
+    expect("model" in parsed).toBe(false);
+    expect("round" in parsed).toBe(false);
+    expect("final" in parsed).toBe(false);
+    expect("turnId" in parsed).toBe(false);
+    // The forced final report has `final: true` and NO round.
+    const final = KnownLogEntrySchema.parse({ ...bare, final: true });
+    expect("round" in final).toBe(false);
+    expect(KnownLogEntrySchema.safeParse({ ...bare, final: false }).success).toBe(false);
   });
 });
 

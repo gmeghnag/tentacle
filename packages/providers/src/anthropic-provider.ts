@@ -198,6 +198,8 @@ export class AnthropicProvider implements ModelProvider {
     let usage: Usage | undefined;
     let promptTokens: number | undefined;
     let completionTokens: number | undefined;
+    /** The cache-hit part of the prompt, when the server reports one (docs/feat/token-usage-log.md). */
+    let cachedPromptTokens: number | undefined;
 
     for await (const data of parseSSE(res.body, request.signal)) {
       if (data.length === 0) {
@@ -218,6 +220,11 @@ export class AnthropicProvider implements ModelProvider {
               start.input_tokens +
               (start.cache_creation_input_tokens ?? 0) +
               (start.cache_read_input_tokens ?? 0);
+            // Only a cache READ is a hit: a created cache entry was written,
+            // so those tokens cost a full prompt this time.
+            if (start.cache_read_input_tokens !== undefined) {
+              cachedPromptTokens = start.cache_read_input_tokens;
+            }
           }
           break;
         }
@@ -325,6 +332,7 @@ export class AnthropicProvider implements ModelProvider {
       usage = {
         promptTokens: promptTokens ?? 0,
         completionTokens: completionTokens ?? 0,
+        ...(cachedPromptTokens !== undefined ? { cachedPromptTokens } : {}),
       };
     }
     // A cut TEXT reply is reported, not refused here (the call refusal above is

@@ -1587,7 +1587,8 @@
           "title": "#/$defs/LogTitleEntry",
           "truncate": "#/$defs/LogTruncateEntry",
           "turn_end": "#/$defs/LogTurnEndEntry",
-          "turn_start": "#/$defs/LogTurnStartEntry"
+          "turn_start": "#/$defs/LogTurnStartEntry",
+          "usage": "#/$defs/LogUsageEntry"
         },
         "propertyName": "type"
       },
@@ -1633,6 +1634,9 @@
         },
         {
           "$ref": "#/$defs/LogCapabilitiesEntry"
+        },
+        {
+          "$ref": "#/$defs/LogUsageEntry"
         }
       ]
     },
@@ -2273,6 +2277,69 @@
         }
       },
       "required": ["id", "seq", "ts", "turnId", "type"],
+      "type": "object"
+    },
+    "LogUsageEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "cachedPromptTokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completionTokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "final": {
+          "const": true,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "messages": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "promptTokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "round": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "type": {
+          "const": "usage",
+          "type": "string"
+        }
+      },
+      "required": ["completionTokens", "id", "promptTokens", "seq", "ts", "type"],
       "type": "object"
     },
     "McpServerState": {

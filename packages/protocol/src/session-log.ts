@@ -85,6 +85,8 @@ export const SUBAGENT_REPORT_MAX_CHARS = 64 * 1024;
 export const SUBAGENT_AGENT_TYPE_MAX_CHARS = 128;
 export const SUBAGENT_CALL_ID_MAX_CHARS = 256;
 export const SUBAGENT_STOP_REASON_MAX_CHARS = 64;
+/** One `usage` entry's model id (docs/feat/token-usage-log.md). */
+export const USAGE_MODEL_ID_MAX_CHARS = 200;
 
 /** A position in a log: the last entry a reader holds. Both must match (a seq alone is ambiguous across lineages). */
 export const LogCursorSchema = z.object({
@@ -268,6 +270,34 @@ export const LogSubagentEndEntrySchema = z.object({
   report: z.string().max(SUBAGENT_REPORT_MAX_CHARS).optional(),
 });
 
+/**
+ * One model round's measured token usage (docs/feat/token-usage-log.md), so a
+ * run's spend can be analysed afterwards: which round, on which model, how big
+ * the context it sent, how much of it the provider served from cache. NOT
+ * critical: it projects nothing (a build that does not know it skips it and the
+ * history is intact), so `PROTOCOL_VERSION` does not move. An unmeasured value
+ * is OMITTED, never 0 — a 0 would read as a measured zero.
+ */
+export const LogUsageEntrySchema = z.object({
+  ...envelopeShape(),
+  ...skippable(),
+  type: z.literal("usage"),
+  /** The turn it belongs to, when the emitter knows it. */
+  turnId: TurnIdSchema.optional(),
+  /** 0-based round index inside the turn (absent on the forced final report). */
+  round: z.number().int().nonnegative().optional(),
+  /** The ONE no-tools report a spent step budget forces, so it has no round. */
+  final: z.literal(true).optional(),
+  /** The model id, only where this process can know it (never over the pod tunnel). */
+  model: z.string().min(1).max(USAGE_MODEL_ID_MAX_CHARS).optional(),
+  promptTokens: z.number().int().nonnegative(),
+  completionTokens: z.number().int().nonnegative(),
+  /** The served-from-cache part of `promptTokens`, when the provider reports it. */
+  cachedPromptTokens: z.number().int().nonnegative().optional(),
+  /** How many messages the request carried: the context this round sent. */
+  messages: z.number().int().nonnegative().optional(),
+});
+
 /** Every entry type this protocol version knows, parsed strictly by its own schema (strip). */
 export const KnownLogEntrySchema = z.discriminatedUnion("type", [
   LogBaseEntrySchema,
@@ -284,6 +314,7 @@ export const KnownLogEntrySchema = z.discriminatedUnion("type", [
   LogSubagentBackgroundEntrySchema,
   LogSubagentEndEntrySchema,
   LogCapabilitiesEntrySchema,
+  LogUsageEntrySchema,
 ]);
 export type KnownLogEntry = z.infer<typeof KnownLogEntrySchema>;
 export type LogMessageEntry = z.infer<typeof LogMessageEntrySchema>;
@@ -307,6 +338,7 @@ export const LOG_ENTRY_CRITICAL: Readonly<Record<LogEntryType, boolean>> = {
   call_started: false,
   subagent_background: false,
   subagent_end: false,
+  usage: false,
   capabilities: false,
 };
 

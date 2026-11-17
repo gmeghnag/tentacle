@@ -3051,6 +3051,25 @@ export class HostedSession {
         if (event.type === "tool_phase" && event.phase === "running") {
           this.log.callStarted(event.id);
         }
+        // One model round's spend, as the provider measured it
+        // (docs/feat/token-usage-log.md): a NON-critical log entry that projects
+        // nothing, so it rides the next committed boundary's capture like any
+        // other. No entry at all when the provider reported no usage.
+        if (event.type === "usage") {
+          const model = this.mainModelId();
+          this.log.usage({
+            turnId,
+            ...(event.round !== undefined ? { round: event.round } : {}),
+            ...(event.final === true ? { final: true as const } : {}),
+            ...(model !== undefined ? { model } : {}),
+            promptTokens: event.usage.promptTokens,
+            completionTokens: event.usage.completionTokens,
+            ...(event.usage.cachedPromptTokens !== undefined
+              ? { cachedPromptTokens: event.usage.cachedPromptTokens }
+              : {}),
+            ...(event.messages !== undefined ? { messages: event.messages } : {}),
+          });
+        }
         if (event.type === "history_repaired") {
           // Synchronous, no await: the drive-loop invariant holds. The user is
           // told ONCE per loaded session (a restart notifies again, once).
