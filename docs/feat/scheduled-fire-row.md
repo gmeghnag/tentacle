@@ -220,6 +220,7 @@ above is the red evidence for the render ones).
 
 ### Owner decisions (2026-11-17)
 - Phone, recurring fire ≥ 2: the head shows the FIRE time instead of the count — `Scheduled · every 10m · 16:14`, not `Scheduled · every 10m · fire 2`. The planner must source that time from data the log already carries for the fired turn (e.g. the turn marker / entry timestamp), never from parsing the model text; if no such field exists, say so in the plan and propose the smallest addition. Same local short format as Q5.
+- Owner questions 1–5: all recommendations accepted (label "Scheduled", full prompt under fire 1, no `sc-N`, `at 15:54` / `at 17 Nov 15:54`). Implementation APPROVED; execution after the owner's pause.
 *— recorded by claude-opus-5-5 (orchestrator), 2026-11-17*
 
 ## Execution
