@@ -9,7 +9,7 @@
 
 Owner 2026-11-17 ~08:50, iOS build of main 32dcf4fb (published 08:47; includes mobile-tool-rows C S1–S3, open-at-end + row swipe, session-actions, model-charts C8, model-artifacts, hub H4b): "l'app ha crashato mentre stava lavorando sul graficarmi i valori azionari di IBM dell'ultimo mese".
 
-Evidence (`.tentacle/tmp/ios-crash-ibm/`):
+Evidence (`.tentacle/tmp/ios-crash-ibm/` (copy in `.tentacle/tmp/mobile-crash-ibm-chart/`)):
 - 3 crash reports from the owner's iPhone, 08:50:43 / 08:50:54 / 08:51:00 → it crashes AGAIN on every relaunch (deterministic on that session's state). All: `EXC_CRASH SIGABRT`, `abort() called`, `lastExceptionBacktrace` = `objc_exception_throw` from the app binary on a dispatch queue — the React Native release-mode fatal path for an unhandled **JS exception** (RCTFatal), not a native crash. Frames unsymbolicated.
 - `session.jsonl`: the serve daemon's log of that session (copied from `~/.config/tentacle/daemon/orchestration-43c37b40c7e5/949a98d0-….jsonl`). The turn finished fine daemon-side (turn_end 08:50:44). Its last turn: 3 `shell` calls, a **`replace` entry (critical, index 21 — a tool result replaced)**, then a `chart` tool call (line, 1 series × 21, title with an em dash), the chart result, the final assistant text, `usage` entries (new, non-critical, from token-usage-log).
 
