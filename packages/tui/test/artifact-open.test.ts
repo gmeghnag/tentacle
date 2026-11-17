@@ -70,6 +70,23 @@ describe("T6b.1 — file names never carry model input", () => {
     expect(saveName(meta({ title: "...." }))).toBe("report.html");
     expect(saveName(meta({ source: "out/Q3 report.html", title: "t" }))).toBe("Q3 report.html");
   });
+
+  test("a chart artifact saves as its JSON spec — the bytes ARE the spec (C8)", () => {
+    // A chart artifact carries `canonicalChartJson(spec)`, so the copy a person
+    // keeps is a `.json` they can feed back into the tool — never `.bin` (the
+    // mime is not in SAVE_EXT) and never `.txt` (which would read as prose).
+    const chart = meta({
+      kind: "chart",
+      mimeType: "application/vnd.tentacle.chart+json",
+      title: "Ricavi 2026",
+    });
+    expect(saveName(chart)).toBe("Ricavi 2026.json");
+    expect(openPlan(chart, "local").file).toBe("ab12cd34.json");
+    // Opened, not save-only: watching the chart is what a tap is for.
+    expect(artifactStep(chart, "local", "open").kind).toBe("open");
+    // No wrap: a spec is data, not a page (the CSP prefix would corrupt it).
+    expect(openPlan(chart, "local").wrap).toBeNull();
+  });
 });
 
 describe("T6b.2 — `other` is save-only, never opened", () => {

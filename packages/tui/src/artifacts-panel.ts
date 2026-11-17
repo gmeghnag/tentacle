@@ -20,13 +20,16 @@
  */
 import { artifactCard } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
+import { chartToolBody } from "./chart-lines.ts";
 import { oneLine } from "./commands.ts";
 import { pickerAge } from "./session-picker.ts";
 import type { DisplayItem } from "./state.ts";
 import {
   type PanelView,
+  type PanelViewRow,
   type TreeGroup,
   type TreeState,
+  fit,
   noteView,
   treeRows,
   treeView,
@@ -208,6 +211,56 @@ export function artifactsTitle(data: ArtifactsData | null): string {
     return "artifacts · loading…";
   }
   return `artifacts · ${artifactGroups(data).length}${data.truncated === true ? "+" : ""}`;
+}
+
+/**
+ * A CHART artifact's preview (docs/feat/model-charts.md C8): the artifact's own
+ * bytes drawn EXPANDED in the panel's place — the same renderer the transcript's
+ * rows use, so what a person sees here is what the conversation showed, only
+ * with the stats and the table an expanded chart adds.
+ *
+ * The bytes are re-validated by `chartToolBody` (a pod can forge them, and a
+ * newer tentacle can present a spec this build cannot draw): what does not
+ * validate is SAID, never half-drawn. `esc` is the way back, and the hint says
+ * it in both cases.
+ */
+const PREVIEW_HINT = "esc/q back · ↑↓ tree";
+
+function previewRows(text: string): PanelViewRow[] {
+  return text.split("\n").map((line) => ({ text: line, kind: "note" as const, selected: false }));
+}
+
+export function chartPreviewView(
+  preview: { readonly bytes: string },
+  width: number,
+  maxBody: number,
+): PanelView {
+  const title = "artifact · chart";
+  const lines = chartToolBody(preview.bytes, { width, expanded: true });
+  if (lines === undefined || lines.length === 0) {
+    return {
+      title,
+      rows: previewRows(
+        fit("  this build can't draw this chart (its spec did not validate)", width),
+      ),
+      hint: PREVIEW_HINT,
+      start: 0,
+    };
+  }
+  // The body is bounded like every other panel's: a long chart is windowed
+  // from the top (its caption is the part that identifies it).
+  const shown = lines.slice(0, Math.max(1, maxBody));
+  return { title, rows: previewRows(shown.join("\n")), hint: PREVIEW_HINT, start: 0 };
+}
+
+/** A read that failed: the reason, and the way back (never a silent tree). */
+export function chartPreviewErrorView(error: string, width: number): PanelView {
+  return {
+    title: "artifact · chart",
+    rows: previewRows(fit(`  couldn't read this chart: ${oneLine(error)}`, width)),
+    hint: PREVIEW_HINT,
+    start: 0,
+  };
 }
 
 /** Rows, or the honest placeholder while the request is in flight / empty. */

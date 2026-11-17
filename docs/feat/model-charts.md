@@ -2106,6 +2106,197 @@ check, the haptic spy with one tick per category, toggles, table, full screen) a
 mutation-checked. T7's e2e flow is written but has not run, and P9 has not been checked on a
 device.
 
+### C8 — gallery / artifact kind + the tool's `present` call (slice C8 of 8)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, tentacle profile `deepseek`), 2026-11-17*
+
+**Load-bearing check (P8, run by the planner before any edit).**
+`.tentacle/tmp/model-charts/c8-loadbearing.ts` on this worktree's tip:
+
+```
+PASS P8 the store accepts kind `chart` (the wire kind is free) — chart
+PASS P8 the canonical bytes re-validate into the same spec (thumbnail/panel input)
+FAIL T2.3 (missing) the tool registers the chart with the session's sink — present calls: 0; result: Chart shown to the user: line "Ricavi mensili 2025 vs 2026"
+FAIL T8.1 (missing) "chart" is a client kind — artifactKindOf(chart) → other
+2 FAILED (capability missing ⇒ expected)
+```
+
+⇒ The seam is present (`ToolContext.artifacts`, `ArtifactStore.present`,
+`canonicalChartJson`), the capability absent. So C8 is additive on both ends, and it
+is not a wire change: `ARTIFACT_KINDS` is client-side data, the `chart` tool's
+arguments are already `unknown` payload, so **no `PROTOCOL_VERSION` bump and no
+`protocol.d/` note** (D7). `bun run schema:export` regenerated
+`packages/protocol/schema/protocol.json` byte-identically (`git status` clean on it):
+the kind list is not in the schema.
+
+**As built** (dependency order; every test written and shown RED first):
+
+1. **`packages/protocol/src/artifact.ts`** — `"chart"` added to `ARTIFACT_KINDS`
+   between `"text"` and `"other"`, with the doc comment saying it is a CLIENT kind.
+   `artifactKindOf` needed no change: it is one `includes` over the list, which is
+   exactly what makes the old-client property true (a build whose list predates
+   `chart` files it as `other` — saved, never rendered). T8.1's protocol half.
+2. **`packages/core/src/artifact-card.ts`** — `GLYPH.chart = "◱"` (verified: not in
+   `\p{Emoji}`, one code point, one cell) and `KIND_LABEL.chart = "Chart"`, so
+   `line2` is `Chart · 12 KB` and `action` falls out of the existing rule as `open`
+   (`other` is the only `save` kind).
+3. **`packages/tools/src/chart.ts`** — T2.3, in `execute` AFTER a valid spec:
+   `presentChart(spec, ctx)` calls `ctx.artifacts.present({ title, bytes:
+   canonicalChartJson(spec), mimeType: CHART_MIME_TYPE, kind: "chart", callId:
+   ctx.toolCallId ?? CHART_TOOL_NAME })`. The CANONICAL bytes, not the model's own
+   text: they are what every client's thumbnail (8) and the TUI's panel (10)
+   re-validate. A sink failure is a NOTE, never an error —
+   `not added to the gallery (the chart is still shown): <message>` — because the
+   chart a person sees is drawn from the arguments (D1), so the drawing is unaffected
+   either way; no sink (a sub-agent, an older daemon) gives no note and today's
+   result byte-for-byte.
+4. **`apps/mobile/src/artifact-viewer.ts`** — `ViewerKind` gains `"chart"`,
+   `VIEWER.chart = "chart"`. Not `none` (which would only Share the JSON) and not
+   `text` (which would print it). `viewerText` needed no change — its default branch
+   already decodes text, which is why a chart artifact never takes the image/PDF uri
+   path.
+5. **`apps/mobile/src/screens/artifacts/ArtifactViewerModal.tsx`** — a
+   `choice.kind === "chart"` branch renders `<ChartFullScreen tool={{ name: "chart",
+   args: phase.text ?? "", status: "ok" }} …/>` (D6: "opening a chart artifact opens
+   the same full-screen chart"). `reduceMotion` comes from C7's `useReduceMotion`, and
+   `locale` from the same `deviceLocale()` the transcript row uses.
+6. **`apps/mobile/src/artifact-gallery.ts`** — `galleryView` takes an optional 5th
+   `only?: ArtifactKind`, composing with the title needle (a row must match both);
+   `galleryKindCount(list, kind)` counts ARTIFACTS (versions folded) for the chip;
+   `CHART_FILTER_LABEL = "Grafici"`. The `unseen` count stays the session's (it is
+   what the hub badges) — narrowing it with a filter would make the badge change as
+   someone types.
+7. **`apps/mobile/src/chart-row.ts`** — `wantsChartThumbnail(meta)` = kind `chart`
+   AND `size <= CHART_CAPS.bytes` (so a tile never fetches bytes it could not draw);
+   `chartThumbView(meta, bytes, options)` decodes and lays out through the SAME
+   `chartRowView` the transcript uses, so the bytes are re-validated and a forged or
+   newer spec gives `null` (the tile keeps the card's glyph).
+8. **`apps/mobile/src/ui/chart/ChartThumbnail.tsx`** (new) — a dumb renderer: an
+   `<Svg>` of the layout's guides, `paths` and `dots` and NO `SvgText`, one
+   accessibility label (the layout's summary), role `image`. Filled shapes are drawn
+   flat (a gradient at 40 pt reads as a smudge).
+9. **`apps/mobile/src/screens/ArtifactGallery.tsx`** — one fetch per `sha256`, only
+   when `wantsChartThumbnail` (an in-flight set, so a re-render cannot re-fetch), the
+   layout cached by sha in state; a row with a layout renders `<ChartThumbnail>`, else
+   the glyph as before. A `GRAFICI_CHIP` (`Grafici · N`) toggles `only`, offered only
+   when `galleryKindCount > 0` (a chip whose only outcome is "no match" is not a
+   control).
+10. **TUI panel** — `ArtifactsPanel.preview?: { bytes?; error? } | null`; a pure
+    `chartPreviewView(bytes, width, maxBody)` built from
+    `chartToolBody(bytes, { width, expanded: true })` (so the SAME renderer as C4, and
+    re-validated), a note view when it cannot draw, `chartPreviewErrorView` for a
+    failed read, and `PREVIEW_HINT = "esc/q back · ↑↓ tree"`. `panels/artifacts.ts`:
+    `enter` on a meta whose card kind is `chart` returns
+    `consumed({ kind: "previewArtifact", artifact: meta })`; every other kind keeps
+    S6b's `openArtifact`. With a preview open, `esc`/`q` returns
+    `consumed({ kind: "previewArtifact", artifact: null })` (back to the TREE, not out
+    of the panel) and every other key is spent with no effect (a cursor key must not
+    walk invisible rows). New effect `previewArtifact` (`artifact: ArtifactMeta |
+    null`), host method, and in App.tsx: open the preview EMPTY (so `esc` works at
+    once and a slow read is visible), `session.readArtifact`, then fill it — through
+    `usePanels`' new `setArtifactsPreview(startedGen, preview)`, which compares the
+    panel generation first (a read answering after the panel closed or another opened
+    is dropped, like every other panel write).
+11. **TUI `packages/tui/src/artifact-open.ts`** — `KIND_EXT.chart = "json"`, so a
+    saved copy is `<title>.json` (the spec the tool takes back), never `.bin` (the mime
+    is not in `SAVE_EXT`) and never a prose `.txt`. No wrap (a spec is data, and the
+    CSP prefix would corrupt it).
+12. **`changelog.d/model-charts.added.md`** — the C8 user-visible half APPENDED as a
+    sentence to the existing bullet. Not a second bullet: the changelog guard
+    (`scripts/test/changelog-guard.test.ts`, I2) enforces one bullet per fragment
+    file, and a second `.added.md` for the same feature would ship two headlines for
+    one feature.
+13. This Execution.
+
+**Tests (RED → green, narrow file per slice).**
+
+| Test | RED evidence | Green |
+|---|---|---|
+| `packages/protocol/test/artifact.test.ts` | `artifactKindOf(chart) → "other"`, list `["image",…,"text","other"]` (2 fail) | 21 pass |
+| `packages/core/test/artifact-card.test.ts` | `line2` = `" · 12 KB"` (the label was missing), 2 fail | 7 pass |
+| `packages/tools/test/chart.test.ts` | `present calls: 0`; no `not added to the gallery` (2 fail) | 18 pass |
+| `apps/mobile/test/artifact-viewer.test.ts` | `kind: undefined` for `chart` (1 fail) | 22 pass |
+| `apps/mobile/test/artifact-gallery.test.ts` | `SyntaxError: Export named 'CHART_FILTER_LABEL' not found` — then, once the exports existed, 1 fail on order/`unseen` | 22 pass |
+| `apps/mobile/test/chart-thumbnail.test.ts` (new) | `Export named 'chartThumbView' not found` | 8 pass |
+| `apps/mobile/test/chart-thumbnail-render.test.ts` (new) | `Cannot find module '../src/ui/chart/ChartThumbnail.tsx'` | 3 pass |
+| `apps/mobile/test/artifact-gallery-wiring.test.ts` | `Expected to contain: 'choice.kind === "chart"'` | 7 pass |
+| `packages/tui/test/artifact-open.test.ts` | `saveName` → `Ricavi 2026.bin` | 25 pass |
+| `packages/tui/test/artifacts-panel.test.ts` | `Export named 'chartPreviewView' not found`; then 5 fail (title, as `panelView` still drew the tree) | 25 pass |
+| `packages/tui/test/keys-execute.test.ts` | reaches `previewArtifact(null)` through the host | 52 pass |
+| `packages/tui/test/app-panels-structure.test.tsx` | entered a preview and `esc` did not return (the `previewOpen` gate) | 9 pass |
+
+**Mutations (each applied, shown RED, reverted; `git status` after every revert shows
+only the intended edits).**
+
+```
+KILLED  core KIND_LABEL without `chart`          → 2 fail (card line2, panel head text)
+KILLED  the tool never calls presentChart        → 2 fail (T2.3 present-once, sink-failure note)
+KILLED  galleryView's `only` filter is a no-op    → 4 fail (filter, composition, chip count, unknown kind)
+KILLED  preview esc does not close the preview    → 2 fail (panel unit + App frame)
+KILLED  ready build, chart artifact → viewer none → 1 fail (viewerFor)
+KILLED  wantsChartThumbnail ignores the kind      → 2 fail
+KILLED  chartThumbView skips the kind check       → 1 fail
+KILLED  the preview draws COMPACT, not expanded   → 1 fail (App frame: no per-series stats)
+KILLED  ARTIFACT_KINDS without `chart`            → 2 fail (the closed set, the chart case)
+9/9 killed
+```
+
+**Gate.**
+- `bunx tsc --noEmit`: clean.
+- `bun run typecheck` (root + mobile + relay): clean on the slices' files;
+  `tsc -p apps/mobile` still reports the 5 pre-existing module errors `main`
+  reports (missing `expo-document-picker` / `react-native-webview` typings).
+- `bun run lint`: clean (`Checked 1937 files`, 0 errors, 0 warnings — the §6
+  baseline).
+- `bun test`: `14061 pass, 5 skip, 0 fail` (14 066 tests, 1 004 files, 33 snapshots,
+  108 414 expects). The 5 skips are the three opt-in
+  groups (live-k8s, live-docker, the real-socket keepalive).
+
+**One incidental repair, stated because it is not C8's code.** The full run showed
+21 failures in `packages/tui/test/chart-lines.test.ts` (every T3 snapshot), and the
+cause was not chart code: the snapshot file's HEADER line had been corrupted to
+`\x1b[?25h Snapshot v1, …` instead of `// Bun Snapshot v1, …`, so Bun could not
+parse the file at all. Restoring that one line (the file is otherwise untouched —
+`git diff` on it is empty now) turned all 51 cases green. Nothing in C8 writes
+snapshots, so this was collateral from an earlier `--update-snapshots` run.
+
+**Drift from Implementation (and why).**
+- **`chartPreviewView` takes a `{ bytes }` and there is a separate
+  `chartPreviewErrorView`.** The plan's `preview?: { bytes: string } | null` could not
+  say "a read FAILED": falling back to the tree would make the key look as if nothing
+  happened. The field is now `{ bytes?: string; error?: string }`.
+- **The chip is its own `Pressable` with `GRAFICI_CHIP`, not a chip inside the list
+  header.** There was no chip row to extend; the gallery has a fixed header, a summary
+  line and the list. It is placed between the summary and the list, which is where a
+  filter is looked for.
+- **`apps/mobile/src/artifact-gallery.ts` imports nothing new from core**: the kind
+  narrowing is `@tentacle/protocol`'s `artifactKindOf` directly (core's card only wraps
+  it), so `only` and `galleryKindCount` compare the same narrowing as `artifactCard`.
+- **`chart-row.ts` imports `artifactKindOf` from `@tentacle/protocol`, not from
+  `@tentacle/core`.** Core does not re-export it (`artifact-kind.ts` only mentions it in
+  a comment), so the plan's "import CHART_CAPS from core" stands and the narrowing comes
+  from its own package.
+- **The tile fetches are one `useEffect` over `snapshot.list`, guarded by an in-flight
+  `Set`,** not a per-row `useEffect`: a `FlatList` row is unmounted and remounted as it
+  scrolls, and a per-row effect would re-fetch the same bytes on every pass.
+- **The App-level preview test lives in `app-panels-structure.test.tsx`** (the S7 seam
+  file that already drives panels through real `stdin` writes): the wiring is an App
+  seam, and a unit test of the executor alone would not have caught the `esc` route.
+
+**Unverified.**
+- **The pixels.** No dev build was made on this worktree, so neither the gallery
+  thumbnail nor `artifact-chart` (the artifact's full screen) has been looked at on a
+  simulator. Their structure is asserted (paths/dots present, no axis text, the layout's
+  summary as the label); whether a 40 pt tile reads as a chart is the owner's look.
+- **The 40 pt tile's density.** The layout is computed at `40×32` with the shipped
+  rules (no dedicated "thumbnail" thinning); a dense 12-month chart may render fine or
+  mush. Cheap to check on device; a `compact` thumbnail rule would be the fix.
+- **The gallery's `Grafici` chip wording.** `Grafici · N` is Italian in a gallery whose
+  other words are English (`Artifacts`, the day headings) — it follows D6's `Grafico |
+  Tabella` toggle, which the owner picked in Italian; worth one look.
+
+**C8: DONE** on the code and its tests; the pixels are the owner's look.
+
 ## Review
 *(empty — mandatory fresh-context review after C8)*
 

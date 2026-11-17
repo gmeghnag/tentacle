@@ -51,8 +51,22 @@ export const MAX_ARTIFACT_LIST = 500;
  * The CLOSED kind set every client branches on: which viewer, which extension a
  * temp file gets, whether a kind may ever be handed to an OS opener. The wire's
  * `kind` is a free string; `artifactKindOf` is the only place it is narrowed.
+ *
+ * `"chart"` is a CLIENT kind, not a wire one (docs/feat/model-charts.md D3/C8):
+ * the `chart` tool presents its canonical spec JSON under it, so the gallery can
+ * filter and thumbnail it, and a build whose list predates it files the artifact
+ * as `other` — the same narrow, no special case, no protocol version.
  */
-export const ARTIFACT_KINDS = ["image", "svg", "html", "pdf", "markdown", "text", "other"] as const;
+export const ARTIFACT_KINDS = [
+  "image",
+  "svg",
+  "html",
+  "pdf",
+  "markdown",
+  "text",
+  "chart",
+  "other",
+] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
 /**

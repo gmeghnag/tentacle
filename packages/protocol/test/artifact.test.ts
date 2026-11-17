@@ -162,7 +162,25 @@ describe("the free `artifact` field on tool_call_update (T1.2, T1.3)", () => {
 
 describe("artifactKindOf — ONE pure mapping over the closed kind set (T1.4)", () => {
   test("the closed set every client branches on", () => {
-    expect(kinds).toEqual(["image", "svg", "html", "pdf", "markdown", "text", "other"]);
+    expect(kinds).toEqual(["image", "svg", "html", "pdf", "markdown", "text", "chart", "other"]);
+  });
+
+  test("`chart` joins the CLIENT set only: the wire kind stays free (T8.1)", () => {
+    // The chart tool presents its spec as a `"chart"` artifact
+    // (docs/feat/model-charts.md D3/C8). `ARTIFACT_KINDS` is client-side data, so
+    // no schema field and no protocol version moves for it.
+    expect(artifactKindOf?.({ kind: "chart" })).toBe("chart");
+    expect(parses(MetaSchema, meta({ kind: "chart" }))).toBe(true);
+    // ADDITIVE: every kind that existed before is still there, so an artifact
+    // filed under one of them can never start reading as `other`.
+    for (const kind of ["image", "svg", "html", "pdf", "markdown", "text", "other"]) {
+      expect(kinds).toContain(kind);
+      expect(artifactKindOf?.({ kind })).toBe(kind);
+    }
+    // The old-client property is the same narrow: a build whose list predates
+    // `chart` files it as `other` — saved, never rendered — because the mapping
+    // is `includes` over the list, not a special case per kind.
+    expect(artifactKindOf?.({ kind: "Chart" })).toBe("other");
   });
 
   test("a known kind passes through; anything else is `other`", () => {

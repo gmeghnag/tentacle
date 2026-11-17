@@ -19,7 +19,7 @@
  * clock is already the only one in the record — one timezone, never a mixed one.
  */
 import { type ArtifactCardView, artifactCard } from "@tentacle/core";
-import type { ArtifactMeta } from "@tentacle/protocol";
+import { type ArtifactKind, type ArtifactMeta, artifactKindOf } from "@tentacle/protocol";
 import type { ArtifactSeen } from "./artifact-seen-store.ts";
 
 const MINUTE = 60_000;
@@ -133,16 +133,23 @@ function groupArtifacts(list: readonly ArtifactMeta[]): readonly (readonly Artif
  * The gallery: `filter` is the screen's search field (case- and
  * space-insensitive on the TITLE alone — never on a path, which is the daemon's).
  * Order is preserved through the filter, so a search never reshuffles the days.
+ *
+ * `only` is the chip (docs/feat/model-charts.md C8): the `kind` the gallery is
+ * narrowed to (`artifactKindOf`'s answer, so an unknown wire kind is `other`),
+ * absent for every kind. It COMPOSES with `filter` — a row must match both — and
+ * the caller stops offering it once its own count is 0 (`galleryKindCount`).
  */
 export function galleryView(
   list: readonly ArtifactMeta[],
   seen: ArtifactSeen,
   now: number,
   filter: string,
+  only?: ArtifactKind,
 ): GalleryView {
   const needle = filter.trim().toLowerCase();
   const keep = (meta: ArtifactMeta): boolean =>
-    needle === "" || meta.title.toLowerCase().includes(needle);
+    (only === undefined || artifactKindOf(meta) === only) &&
+    (needle === "" || meta.title.toLowerCase().includes(needle));
   const items: GalleryItem[] = [];
   for (const versions of groupArtifacts(list)) {
     const newest = versions[0];
@@ -171,10 +178,32 @@ export function galleryView(
   }
   return {
     sections,
+    // UNCHANGED by a filter, text or kind: this is the session's count (what the
+    // hub badges and the Session info row says), and narrowing it with a search
+    // would make the number change as someone types. The artifact TOTAL above
+    // counts what is listed; this one counts what is new (docs D9).
     unseen: unseenArtifacts(list, seen),
     empty: items.length === 0,
   };
 }
+
+/**
+ * The chip's number: how many ARTIFACTS are of `kind` (versions folded, like
+ * every other count in this file — three versions of one chart is one chart).
+ * A chip whose count is 0 is not offered: it would only ever produce `empty`.
+ */
+export function galleryKindCount(list: readonly ArtifactMeta[], kind: ArtifactKind): number {
+  const ids = new Set<string>();
+  for (const meta of list) {
+    if (artifactKindOf(meta) === kind) {
+      ids.add(meta.artifactId);
+    }
+  }
+  return ids.size;
+}
+
+/** The `Grafici` chip's label (the gallery's own language, as its other words are). */
+export const CHART_FILTER_LABEL = "Grafici";
 
 /** The line under the gallery's header: `Q3 metrics review · 6 artifacts · 1 new`. */
 export function gallerySummary(view: GalleryView): string {

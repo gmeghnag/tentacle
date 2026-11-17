@@ -76,6 +76,13 @@ export type KeyEffect =
     }
   /** `Ctrl+X Ctrl+O`: open the newest artifact in the transcript (D8). */
   | { readonly kind: "openNewestArtifact" }
+  /**
+   * Enter on a CHART artifact in `/artifacts` (docs/feat/model-charts.md C8):
+   * read its spec bytes and draw them expanded in the panel's place. `null`
+   * returns to the tree (the preview's `esc`/`q`). Never an OS opener: the bytes
+   * are a spec, and the panel draws it.
+   */
+  | { readonly kind: "previewArtifact"; readonly artifact: ArtifactMeta | null }
   /** The artifact open confirm (a pod's bytes, or the network) was answered. */
   | { readonly kind: "answerArtifactConfirm"; readonly yes: boolean }
   /** Write the `/schedule` panel's own state (its arm/answer, cron-tool S5). */

@@ -9,12 +9,26 @@
  * projection `ListPanel` only paints.
  */
 import { describe, expect, test } from "bun:test";
+import type { ChartSpec } from "@tentacle/core";
+import { canonicalChartJson, validateChartSpec } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
 import type { Key } from "ink";
-import { ARTIFACTS_HINT, artifactGroups, artifactsListError } from "../src/artifacts-panel.ts";
+import {
+  ARTIFACTS_HINT,
+  artifactGroups,
+  artifactsListError,
+  chartPreviewView,
+} from "../src/artifacts-panel.ts";
 import { NOTHING } from "../src/keys/contract.ts";
 import type { KeySnapshot } from "../src/keys/snapshot.ts";
-import { type OpenPanel, applyPanel, artifactsPanel, panelClick, panelView } from "../src/panel.ts";
+import {
+  type ArtifactsPanel,
+  type OpenPanel,
+  applyPanel,
+  artifactsPanel,
+  panelClick,
+  panelView,
+} from "../src/panel.ts";
 import { artifactsKind } from "../src/panels/artifacts.ts";
 import { type PanelAt, kindOf, panelStep } from "../src/panels/registry.ts";
 
@@ -158,6 +172,116 @@ describe("S6a: the `/artifacts` panel projects newest-first, versions folded", (
   test("a daemon that cut the list says so on the title (never silently)", () => {
     const view = panelView(artifactsPanel({ artifacts: LIST, truncated: true }, 4_000), 120, 12);
     expect(view.title).toContain("+");
+  });
+});
+
+describe("C8: a chart artifact opens as an EXPANDED chart in the panel", () => {
+  const step = (p: OpenPanel, over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}) =>
+    panelStep(snap({ panel: p, ...over }, char, key), "tree");
+  const specOf = (raw: unknown): ChartSpec => {
+    const result = validateChartSpec(raw);
+    if (!result.ok) throw new Error(result.errors.join("; "));
+    return result.spec;
+  };
+  const BYTES = canonicalChartJson(
+    specOf({
+      type: "line",
+      title: "Ricavi",
+      labels: ["gen", "feb", "mar"],
+      datasets: [{ label: "Ricavi", data: [11800, 14000, 20800] }],
+      y: { unit: "€", format: "compact" },
+    }),
+  );
+  const chartMeta = meta({
+    artifactId: "chart",
+    version: 1,
+    title: "Ricavi",
+    kind: "chart",
+    mimeType: "application/vnd.tentacle.chart+json",
+    size: 400,
+    createdAt: 5_000,
+  });
+  const ONE = (): ArtifactsPanel => artifactsPanel({ artifacts: [chartMeta] }, 4_000);
+  const previewing = (bytes: string | null, error?: string): ArtifactsPanel =>
+    error === undefined
+      ? { ...ONE(), preview: bytes === null ? null : { bytes } }
+      : { ...ONE(), preview: { error } };
+
+  test("`chartPreviewView` draws the canonical bytes EXPANDED, never the tree", () => {
+    const view = chartPreviewView({ bytes: BYTES }, 100, 20);
+    // Expanded = the caption + the stats + the table (C3's own `expanded`), so
+    // the preview is MORE than the row the transcript shows.
+    const text = view.rows.map((r) => r.text).join("\n");
+    // The chart's own caption is the first row (the tool chrome is gone, D5).
+    expect(view.rows[0]?.text).toContain("Ricavi");
+    expect(text).toContain("gen");
+    for (const row of view.rows) expect(row.text.length).toBeLessThanOrEqual(100);
+    // And it offers the way BACK — a preview is not a trap.
+    expect(view.hint).toContain("esc");
+  });
+
+  test("bytes that do not re-validate say so, and never draw a half chart", () => {
+    const forged = JSON.stringify({
+      type: "line",
+      title: "Ricavi",
+      labels: ["gen"],
+      datasets: [{ label: "x", data: ["12.5"] }],
+    });
+    for (const bytes of [forged, "{not json", ""]) {
+      const view = chartPreviewView({ bytes }, 100, 20);
+      const text = view.rows.map((r) => r.text).join("\n");
+      expect(text).toContain("can't draw");
+      expect(text).not.toContain("⣀");
+      expect(view.hint).toContain("esc");
+    }
+  });
+
+  test("enter on a chart artifact asks for its PREVIEW; on any other kind it opens it", () => {
+    expect(step(ONE(), {}, "", { return: true }).effects).toEqual([
+      { kind: "previewArtifact", artifact: chartMeta },
+    ]);
+    // A non-chart artifact keeps S6b's open (the OS viewer, save, network).
+    expect(step(panel(), {}, "", { return: true }).effects).toEqual([
+      { kind: "openArtifact", artifact: LIST[2] as ArtifactMeta },
+    ]);
+  });
+
+  test("with a preview OPEN, esc/q goes back to the tree and nothing else is claimed", () => {
+    expect(step(previewing(BYTES), {}, "", { escape: true }).effects).toEqual([
+      { kind: "previewArtifact", artifact: null },
+    ]);
+    expect(step(previewing(BYTES), {}, "q").effects).toEqual([
+      { kind: "previewArtifact", artifact: null },
+    ]);
+    // `enter` changes nothing (there is nothing to open inside a preview) and a
+    // cursor key does not walk a tree that is not on screen.
+    expect(step(previewing(BYTES), {}, "", { return: true }).effects).toEqual([]);
+    expect(step(previewing(BYTES), {}, "", { downArrow: true }).effects).toEqual([]);
+    // A FAILED read is still a preview: the same esc gets out of it.
+    expect(step(previewing(null, "artifact evicted"), {}, "", { escape: true }).effects).toEqual([
+      { kind: "previewArtifact", artifact: null },
+    ]);
+  });
+
+  test("the previewed panel's VIEW is the chart, not the rows", () => {
+    const previewView = panelView(previewing(BYTES), 100, 20);
+    // The chart's caption, not an artifact row (`❯ ◱ Ricavi  Chart · 400 B`).
+    expect(previewView.rows[0]?.text).toContain("Ricavi");
+    expect(previewView.rows.some((r) => r.kind === "head")).toBe(false);
+    // With no preview the tree is back, rows and all.
+    expect(panelView(previewing(null), 100, 20).rows.some((r) => r.kind === "head")).toBe(true);
+  });
+
+  test("a preview read that FAILED has its own words (never a silent tree)", () => {
+    const view = panelView(previewing(null, "artifact evicted"), 100, 20);
+    expect(view.rows.map((r) => r.text).join("\n")).toContain("artifact evicted");
+    // Never a trap: the way back is on screen, and it is the preview's esc.
+    expect(view.hint).toContain("esc");
+  });
+
+  test("a row for a chart artifact says so in the tree (`Chart · N KB`)", () => {
+    const heads = panelView(ONE(), 120, 12).rows.filter((r) => r.kind === "head");
+    expect(heads[0]?.text).toContain("Chart · 400 B");
   });
 });
 

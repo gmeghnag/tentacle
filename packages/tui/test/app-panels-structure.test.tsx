@@ -211,3 +211,95 @@ describe("S7: the panel seam behaves as before the move", () => {
     app.unmount();
   });
 });
+
+/**
+ * C8 (docs/feat/model-charts.md): a CHART artifact's `enter` is a PREVIEW, read
+ * through `session.readArtifact` and drawn expanded INSIDE `/artifacts` — no
+ * temp file, no OS browser (the bytes are a spec) — and `esc` goes back to the
+ * tree instead of closing the panel.
+ */
+describe("C8: a chart artifact previews inside `/artifacts`, and esc returns", () => {
+  const SHA = "a".repeat(64);
+  const chartMeta = {
+    artifactId: "deal-sizes",
+    version: 1,
+    sha256: SHA,
+    size: 400,
+    mimeType: "application/vnd.tentacle.chart+json",
+    kind: "chart",
+    title: "Deal sizes",
+    callId: "c1",
+    createdAt: 1_000,
+  };
+  const SPEC = JSON.stringify({
+    type: "line",
+    title: "Deal sizes",
+    labels: ["gen", "feb", "mar"],
+    datasets: [{ label: "deals", data: [11800, 14000, 20800] }],
+    y: { unit: "€", format: "compact" },
+  });
+
+  const chartSession = (read: () => Promise<Uint8Array>): SessionController =>
+    ({
+      ...idleSession(),
+      listArtifacts: async () => ({ artifacts: [chartMeta] }),
+      readArtifact: read,
+    }) as unknown as SessionController;
+
+  test("enter draws it expanded in the panel's place; esc goes back to the tree", async () => {
+    const app = render(
+      <App
+        createSession={() => chartSession(async () => new TextEncoder().encode(SPEC))}
+        model="m"
+        cwd="/tmp/work"
+      />,
+    );
+    await delay(30);
+    app.stdin.write("/artifacts");
+    await delay(20);
+    app.stdin.write("\r");
+    await delay(60);
+    // The tree row first: the card's own words (`◱ Deal sizes  Chart · 400 B`).
+    expect(app.lastFrame() ?? "").toContain("Chart · 400 B");
+    app.stdin.write("\r");
+    await delay(60);
+    const preview = app.lastFrame() ?? "";
+    // The chart's caption, its per-series stats and its y axis: the EXPANDED
+    // render (C3's own), inside the panel — and NOT the artifact row any more.
+    expect(preview).toContain("Deal sizes");
+    expect(preview).toContain("━━ deals  min €11.8k");
+    expect(preview).toContain("€22k");
+    expect(preview).not.toContain("Chart · 400 B");
+    // esc is the way BACK to the tree, not out of the panel.
+    app.stdin.write("\u001B");
+    await delay(60);
+    const back = app.lastFrame() ?? "";
+    expect(back).toContain("Chart · 400 B");
+    expect(back).not.toContain("━━ deals");
+    app.unmount();
+  });
+
+  test("a read that FAILS says so, with the way back (never a blank panel)", async () => {
+    const app = render(
+      <App
+        createSession={() =>
+          chartSession(() => Promise.reject(new Error("artifact evicted from the store")))
+        }
+        model="m"
+        cwd="/tmp/work"
+      />,
+    );
+    await delay(30);
+    app.stdin.write("/artifacts");
+    await delay(20);
+    app.stdin.write("\r");
+    await delay(60);
+    app.stdin.write("\r");
+    await delay(60);
+    const frame = app.lastFrame() ?? "";
+    expect(frame).toContain("couldn't read this chart");
+    expect(frame).toContain("artifact evicted");
+    expect(frame).toContain("esc");
+    app.unmount();
+  });
+});

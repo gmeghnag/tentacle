@@ -78,6 +78,11 @@ export interface KeyHost {
   openArtifact(artifact: ArtifactMeta, intent?: ArtifactIntent): void;
   /** `Ctrl+X Ctrl+O`: the newest artifact in the transcript. */
   openNewestArtifact(): void;
+  /**
+   * Preview a chart artifact inside `/artifacts` (docs/feat/model-charts.md C8),
+   * or (`null`) return to the tree its `esc`/`q` asked for.
+   */
+  previewArtifact(artifact: ArtifactMeta | null): void;
   /** The artifact open confirm's answer (`y` opens; anything else drops it). */
   answerArtifactConfirm(yes: boolean): void;
   switchTo(id: string, reopen: boolean): void;
@@ -197,6 +202,9 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "openNewestArtifact":
       host.openNewestArtifact();
+      return;
+    case "previewArtifact":
+      host.previewArtifact(effect.artifact);
       return;
     case "answerArtifactConfirm":
       host.answerArtifactConfirm(effect.yes);

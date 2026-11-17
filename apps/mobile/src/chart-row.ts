@@ -8,7 +8,8 @@
  * that does not re-validate (a pod can forge `rawInput`), and a failed or
  * refused call, keep the generic tool row.
  */
-import { type ChartSpec, seriesColor } from "@tentacle/core";
+import { CHART_CAPS, type ChartSpec, seriesColor } from "@tentacle/core";
+import { type ArtifactMeta, artifactKindOf } from "@tentacle/protocol";
 import {
   type ChartLayout,
   type LayoutText,
@@ -107,6 +108,36 @@ export function chartRowView(tool: ChartToolRow, options: ChartRowOptions): Char
     scheme: chartScheme(options.palette),
     tokens: chartTokensFor(options.palette),
   };
+}
+
+/**
+ * The gallery's thumbnail decision (docs/feat/model-charts.md C8): does this
+ * artifact get a drawn tile? Only a `chart` artifact, and only one whose bytes
+ * can hold a spec at all (`CHART_CAPS.bytes`, the same cap the validator
+ * enforces) — so the tile never fetches bytes it could not draw.
+ */
+export function wantsChartThumbnail(meta: ArtifactMeta): boolean {
+  return artifactKindOf(meta) === "chart" && meta.size <= CHART_CAPS.bytes;
+}
+
+/**
+ * A chart ARTIFACT as the tile's view, or `null` — the gallery's cheap thumbnail.
+ *
+ * The bytes are the spec JSON the tool presented (`canonicalChartJson`), and they
+ * go through the SAME `chartRowView` the transcript uses, so they are
+ * re-validated here: a pod-forged or newer-than-this-build spec lays out
+ * nothing (AGENTS §7), and the tile falls back to the card's glyph.
+ */
+export function chartThumbView(
+  meta: ArtifactMeta,
+  bytes: Uint8Array,
+  options: ChartRowOptions,
+): ChartRowView | null {
+  if (artifactKindOf(meta) !== "chart") return null;
+  return chartRowView(
+    { name: CHART_TOOL, args: new TextDecoder().decode(bytes), status: "ok" },
+    options,
+  );
 }
 
 /** A layout colour: a palette slot in this mode, or a chart token. */

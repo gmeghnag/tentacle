@@ -88,7 +88,7 @@ describe("artifactCard — the one view-model both frontends render (D7)", () =>
     const card = artifactCard(meta({ title: "Q3 report" }));
     expect(card.title).toBe("Q3 report");
     const glyphs = new Set(
-      ["image", "svg", "html", "pdf", "markdown", "text", "other"].map(
+      ["image", "svg", "html", "pdf", "markdown", "text", "chart", "other"].map(
         (kind) => artifactCard(meta({ kind })).glyph,
       ),
     );
@@ -96,5 +96,22 @@ describe("artifactCard — the one view-model both frontends render (D7)", () =>
     for (const g of glyphs) {
       expect([...g].length).toBe(1);
     }
+  });
+
+  test("a chart card: its own glyph, `Chart · N KB`, and it OPENS (T8.1/C8)", () => {
+    const chart = artifactCard(
+      meta({ kind: "chart", mimeType: "application/vnd.tentacle.chart+json", size: 12_000 }),
+    );
+    expect(chart.kind).toBe("chart");
+    expect(chart.line2).toBe("Chart · 12 KB");
+    // `open`, never `save`: a spec is a viewer's input (the full-screen chart).
+    expect(chart.action).toBe("open");
+    expect(chart.glyph).toBe("◱");
+    // Glyphs must stay TEXT: an Emoji-property glyph renders two cells wide on
+    // some terminals and breaks the line grid (AGENTS §6's Ink gotcha family).
+    expect(/\p{Emoji}/u.test(chart.glyph)).toBe(false);
+    // One glyph per kind, so a chart is never mistaken for a `text` artifact.
+    expect(chart.glyph).not.toBe(artifactCard(meta({ kind: "text" })).glyph);
+    expect(chart.glyph).not.toBe(artifactCard(meta({ kind: "markdown" })).glyph);
   });
 });

@@ -1,4 +1,5 @@
 import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ArtifactKind } from "@tentacle/protocol";
 /**
  * The artifacts gallery (docs/feat/model-artifacts.md D9): this session's
  * artifacts, newest first, under day headings, with the "new" mark the Session
@@ -11,11 +12,17 @@ import type { ArtifactMeta } from "@tentacle/protocol";
  * `artifact-gallery.ts`'s; every card's words are `@tentacle/core`'s. What is
  * here is the mapping to elements and the two seen marks.
  */
-import { type JSX, useCallback, useEffect, useMemo, useState } from "react";
-import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FlatList, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ARTIFACT_FEEDS, type ArtifactSnapshot } from "../artifact-feed.ts";
-import { type GalleryItem, gallerySummary, galleryView } from "../artifact-gallery.ts";
+import {
+  CHART_FILTER_LABEL,
+  type GalleryItem,
+  galleryKindCount,
+  gallerySummary,
+  galleryView,
+} from "../artifact-gallery.ts";
 import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
 import {
   markArtifactOpened,
@@ -23,11 +30,23 @@ import {
   seenFor,
   sessionKey,
 } from "../artifact-seen-store.ts";
+import { type ChartRowView, chartThumbView, wantsChartThumbnail } from "../chart-row.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../theme.ts";
 import { Icon } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
+import { ChartThumbnail } from "../ui/chart/ChartThumbnail.tsx";
 import { ArtifactViewerModal, type ReadBytes } from "./artifacts/ArtifactViewerModal.tsx";
 
+/** The tile's own box: a thumbnail's size, never the row's height (the tile is 40×40). */
+const THUMB_SIZE = { width: 40, height: 32 } as const;
+
+/** The `Grafici` chip's test id (the e2e flow and this file's wiring test agree on it). */
+const GRAFICI_CHIP = "artifact-gallery-chip-charts";
+
+/** The device's language, for a chart's numbers and dates (as the transcript row does). */
+function deviceLocale(): string {
+  return Intl.DateTimeFormat().resolvedOptions().locale;
+}
 export interface ArtifactGalleryScreenProps {
   readonly palette: Palette;
   readonly computerId: string;
@@ -78,12 +97,52 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
   const [snapshot, setSnapshot] = useState<ArtifactSnapshot>(() => feed.current());
   const [open, setOpen] = useState<{ meta: ArtifactMeta; versions: number } | null>(null);
   const [seenVersion, setSeenVersion] = useState(0);
+  // The `Grafici` chip (C8): `undefined` = every kind, which is the default — a
+  // filter that had to be cleared would hide an artifact from someone who never
+  // asked for it. The chip is offered only when there IS a chart.
+  const [only, setOnly] = useState<ArtifactKind | undefined>(undefined);
   const key = sessionKey(computerId, sessionId);
   const seen = seenFor(ARTIFACT_SEEN.current(), key);
   // `galleryView` is pure and its inputs are small: computed per render rather
   // than memoised on a value object that would change identity anyway.
   const now = Date.now();
-  const view = galleryView(snapshot.list, seen, now, "");
+  const view = galleryView(snapshot.list, seen, now, "", only);
+  const chartCount = galleryKindCount(snapshot.list, "chart");
+  // The tiles' layouts, by sha256: one fetch per version, and only for an
+  // artifact `wantsChartThumbnail` says may be drawn (`chart-row.ts`: the kind
+  // and the 64 KiB cap — the same cap the validator enforces).
+  const [thumbs, setThumbs] = useState<ReadonlyMap<string, ChartRowView>>(() => new Map());
+  const inFlight = useRef(new Set<string>());
+  const window = useWindowDimensions();
+
+  useEffect(() => {
+    for (const meta of snapshot.list) {
+      if (!wantsChartThumbnail(meta) || inFlight.current.has(meta.sha256)) {
+        continue;
+      }
+      inFlight.current.add(meta.sha256);
+      void readBytes(meta).then(
+        (bytes) => {
+          const drawn = chartThumbView(meta, bytes, {
+            width: THUMB_SIZE.width,
+            height: THUMB_SIZE.height,
+            fontScale: window.fontScale,
+            locale: deviceLocale(),
+            palette,
+          });
+          // A spec this build cannot draw (a pod's forgery, a newer spec) lays
+          // out nothing: the tile keeps the card's glyph, never a blank box.
+          if (drawn !== null) {
+            setThumbs((prev) => new Map(prev).set(meta.sha256, drawn));
+          }
+        },
+        () => {
+          // An unreadable version keeps its glyph: the row still opens, and the
+          // viewer says what went wrong there (never a second error here).
+        },
+      );
+    }
+  }, [snapshot.list, readBytes, palette, window.fontScale]);
 
   useEffect(() => {
     const off = feed.subscribe(setSnapshot);
@@ -145,6 +204,31 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
       >
         {gallerySummary(view)}
       </Text>
+      {chartCount === 0 ? null : (
+        // The `Grafici` chip (C8): it narrows the SAME list (`galleryView`'s
+        // `only`), never a second view, and is offered only when there is a
+        // chart — a chip whose only outcome is "no match" is not a control.
+        <Pressable
+          testID={GRAFICI_CHIP}
+          accessibilityRole="button"
+          accessibilityState={{ selected: only === "chart" }}
+          onPress={() => setOnly(only === "chart" ? undefined : "chart")}
+          style={[
+            styles.chip,
+            {
+              backgroundColor: only === "chart" ? palette.accent : palette.code,
+              borderColor: palette.sep,
+            },
+          ]}
+        >
+          <Text
+            maxFontSizeMultiplier={DENSE_FONT_SCALE}
+            style={[typography.caption, { color: only === "chart" ? palette.page : palette.label }]}
+          >
+            {`${CHART_FILTER_LABEL} · ${chartCount}`}
+          </Text>
+        </Pressable>
+      )}
       {listable ? (
         <FlatList
           testID="artifact-gallery-list"
@@ -169,9 +253,18 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
                   style={[styles.row, { borderBottomColor: palette.sep }]}
                 >
                   <View style={[styles.tile, { backgroundColor: palette.code }]}>
-                    <Text style={[typography.subhead, { color: palette.sec }]}>
-                      {item.card.glyph}
-                    </Text>
+                    {thumbs.get(item.newest.sha256) === undefined ? (
+                      <Text style={[typography.subhead, { color: palette.sec }]}>
+                        {item.card.glyph}
+                      </Text>
+                    ) : (
+                      // The drawn tile (C8): the plot alone, from the artifact's
+                      // own spec bytes, re-validated by `chartThumbView`.
+                      <ChartThumbnail
+                        view={thumbs.get(item.newest.sha256) as ChartRowView}
+                        testID={`artifact-gallery-thumb-${item.key}`}
+                      />
+                    )}
                   </View>
                   <View style={styles.body}>
                     <Text
@@ -244,6 +337,15 @@ const styles = StyleSheet.create({
     borderRadius: radius.tile,
     alignItems: "center",
     justifyContent: "center",
+  },
+  chip: {
+    alignSelf: "flex-start",
+    marginHorizontal: space.inset,
+    marginBottom: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: radius.tile,
+    borderWidth: StyleSheet.hairlineWidth,
   },
   body: { flex: 1, gap: 2 },
   newDot: {

@@ -41,6 +41,7 @@ const GLYPH: Readonly<Record<ArtifactKind, string>> = {
   pdf: "▤",
   markdown: "¶",
   text: "≡",
+  chart: "◱",
   other: "▢",
 };
 
@@ -50,6 +51,7 @@ const KIND_LABEL: Readonly<Record<Exclude<ArtifactKind, "image" | "other">, stri
   pdf: "PDF",
   markdown: "Markdown",
   text: "Text",
+  chart: "Chart",
 };
 
 const MIME_LABEL: Readonly<Record<string, string>> = {

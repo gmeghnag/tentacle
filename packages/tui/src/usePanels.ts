@@ -36,8 +36,12 @@ import {
   withSessionsRefresh,
   withSessionsState,
 } from "./panels/sessions.ts";
+import type { ArtifactsPanel } from "./panels/types.ts";
 import type { ScheduleDockRow, SchedulesState } from "./schedule-view.ts";
 import type { SessionsState } from "./sessions-panel.ts";
+
+/** A chart preview's answer (docs/feat/model-charts.md C8): the bytes, or the failure. */
+export type ArtifactsPreview = NonNullable<ArtifactsPanel["preview"]>;
 
 /** The narrow port the panels execute through: the App's own state, setters and refs. */
 export interface PanelsHost {
@@ -91,6 +95,13 @@ export interface PanelsLayer {
   setSchedulesData(rows: readonly ScheduleDockRow[] | undefined, now: number): void;
   /** Delete one scheduled wake; the row leaves on the daemon's own frame. */
   deleteSchedule(id: string, startedGen: number): void;
+  /**
+   * Write the open `/artifacts` panel's chart preview (docs/feat/model-charts.md
+   * C8): `null` closes it back to the tree. The generation the read started in is
+   * compared first, so an answer landing after the panel closed (or another
+   * opened) is DROPPED rather than painted on someone else's screen.
+   */
+  setArtifactsPreview(startedGen: number, preview: ArtifactsPreview | null): void;
 }
 
 export function usePanels(host: PanelsHost): PanelsLayer {
@@ -153,6 +164,17 @@ export function usePanels(host: PanelsHost): PanelsLayer {
   const setSchedulesData = useCallback(
     (rows: readonly ScheduleDockRow[] | undefined, now: number) =>
       setPanel((p) => withSchedulesData(p, rows, now)),
+    [setPanel],
+  );
+
+  /** Write the `/artifacts` chart preview, only if that panel is still the open one. */
+  const setArtifactsPreview = useCallback(
+    (startedGen: number, preview: ArtifactsPreview | null): void => {
+      if (panelGenRef.current !== startedGen) {
+        return;
+      }
+      setPanel((p) => (p !== null && p.kind === "artifacts" ? { ...p, preview } : p));
+    },
     [setPanel],
   );
 
@@ -242,6 +264,7 @@ export function usePanels(host: PanelsHost): PanelsLayer {
     setSessionsState,
     setSchedulesState,
     setSchedulesData,
+    setArtifactsPreview,
     deleteSchedule,
     touchPanel: touch,
     closePanel,
