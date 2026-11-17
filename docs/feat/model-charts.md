@@ -2082,3 +2082,18 @@ before *Fix round 1* below, which is the round that answers them.
 - **Round 2 MEDIUM fixed:** `spec.ts:770` now counts `distinctX(datasets)` (distinct x across every point-form series). The round-2 probe (`r2.ts`) now refuses both hostile shapes (`[10, 200]` points, 2×60 on disjoint x); the same-x stacked bar is still accepted.
 - **Mutation:** going back to counting `datasets[0].data.length` → RED (T1.13 "the cap counts every series' x, not only the first one's"). Reverted, tree clean.
 - **Gate:** `chart-spec`/`chart-helpers`/`chart-fuzz` 72 pass / 0 fail; `bun run typecheck` green; `bun run lint` clean (1779 files). No regression seen in the diff, which touches only the bar-cap branch.
+
+## Review
+
+### Review — C5+C6 (fresh context)
+
+**Verdict: REQUEST-CHANGES** — one MEDIUM. Scope: `git diff main...HEAD`, slices C5+C6 only.
+
+- **Gate (narrow):** the C5/C6 test files (`apps/mobile/test/chart-*`, `e2e-mock-chart`, `header-wiring`, `tool-summary`, core `chart-format-parts`) → 113 pass / 0 fail (4030 expects); `bun run lint` clean (1818 files); `bun run typecheck` green (root + mobile + relay). Full `bun test` not re-run.
+- **MEDIUM — duplicate React keys for repeated scatter points** (`apps/mobile/src/ui/chart/ChartView.tsx:155`): a dot's key is `${series}:${x}:${y}:${r}`, so two equal `{x,y}` in one series (common with integer data) collide. Probe `.tentacle/tmp/model-charts/c56.ts`: a 9-point scatter with `{x:1,y:1}` twice → 1 duplicate dot key at every width (1–361) and fontScale (1, 3.1). React logs "two children with the same key" (a LogBox error in the dev build, which the e2e flows run on) and documents the reconcile as unsupported (children may be duplicated/omitted) on the row's frequent re-renders. Fix: key by index (the list is static per layout), plus a test with a repeated point. No other collision found: paths, texts, guides were unique across line/area/bar(±, 30×2)/pie(dup labels)/flat/single-point fixtures, and no `NaN`/`Infinity` in any path, dot, text, guide or hero.
+- **Mutations (each reverted, `git status` clean after):** M1 `drawsAsChart` lets `denied` through → RED (chart-row "a failed or refused call keeps its tool row"). M2 scrub `tick` on a repeated index → RED (T5.6). The executor's 22 + 12 recorded mutations were not all re-run.
+- **Attacks tried:** (a) §7 "pod not trusted" — the row re-validates `args` via `chartSpecOf` → core `validateChartSpec` before any layout; invalid/partial (streaming) JSON → `null` → generic `ToolRowView`; invalid specs are never cached: holds. (b) §7 "logic in pure modules" — decision, cache, colours in `chart-row.ts`; `ChartView` hook-free, `ChartRowView` only reads window/locale: holds. (c) Cache staleness — key = width|fontScale|locale|args; palette is resolved outside the cache, so a dark/light switch is not stale: holds. (d) Single session path / protocol — C5/C6 add no wire method, update or persisted field: holds. (e) Scrub machine — early timer, pan-before-hold yield, null hit at hold → idle: as specified.
+- **Unverified (executor's own line, confirmed):** no dev build — `31-chart-inline.yaml` never ran, pixels unseen.
+- **Reviewer = same model family as the C5/C6 executor** (claude-opus-5-5, fresh context only): shared blind spots possible.
+
+*— claude-opus-5-5, 2026-11-16*
