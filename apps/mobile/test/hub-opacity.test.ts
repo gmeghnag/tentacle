@@ -284,9 +284,24 @@ describe("every close path lands in `idle` (so the body returns to the setting)"
     expect(menu.ids.length).toBeGreaterThan(0);
   });
 
-  test("tap and cancel end idle", () => {
+  test("a tap OPENS the fan (engaged), and the close after it lands idle", () => {
+    // mobile-hub-tap Design 1: a tap is no longer a close path, it is an open
+    // one — so it must ride the SAME engaged rule (solid body), and its close
+    // must return to the setting, or the body stays solid for good.
     const pressing: GestureState = { kind: "pressing", down: p, t0: 0, last: p };
-    expect(step(pressing, { type: "up", p, t: 100 }).state.kind).toBe("idle");
+    const tapped = step(pressing, { type: "up", p, t: 100 }).state;
+    expect(tapped.kind).toBe("fanSticky");
+    expect(
+      hubOpacity({ setting: 40, gesture: tapped.kind, fanOpen: true, reduceTransparency: false })
+        .body,
+    ).toBe(1);
+    // The next touch on the button closes it: back to the setting, not faint-forever.
+    const closed = step(tapped, { type: "down", p, t: 900 }).state;
+    expect(closed.kind).toBe("idle");
+    expect(
+      hubOpacity({ setting: 40, gesture: closed.kind, fanOpen: false, reduceTransparency: false })
+        .body,
+    ).toBeCloseTo(0.4, 5);
     expect(step(pressing, { type: "cancel" }).state.kind).toBe("idle");
   });
 

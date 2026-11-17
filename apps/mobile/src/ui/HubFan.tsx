@@ -38,6 +38,12 @@ const GLYPH: Readonly<Record<HubActionId, IconName>> = {
   more: "ellipsis",
 };
 
+/**
+ * How faint a dimmed item is drawn (mobile-hub-tap Design 5). A placeholder: the
+ * solid discs of feat/mobile-hub-badges replace it (owner Q5).
+ */
+const DIMMED_OPACITY = 0.45;
+
 export interface HubFanProps {
   readonly palette: Palette;
   readonly layout: Extract<FanLayout, { kind: "fan" }>;
@@ -102,13 +108,17 @@ export function HubFan(props: HubFanProps): JSX.Element {
           outputRange: [motion.fromScale, lit ? motion.highlightScale : 1],
         });
         const fg = lit ? palette.onAccent : item.danger ? palette.red : palette.accent;
+        // A dimmed item has nothing to show: it KEEPS its slot, drawn faint
+        // (mobile-hub-tap Design 5 — badges restyles this into a solid disc).
+        const faint = item.dimmed && !lit ? styles.dimmed : null;
         return (
           <Animated.View
             key={item.id}
             testID={`hub-item-${item.id}`}
             accessible
             accessibilityRole="button"
-            accessibilityLabel={item.label}
+            accessibilityLabel={item.dimmed ? `${item.label}, nothing running` : item.label}
+            accessibilityState={{ disabled: item.dimmed }}
             pointerEvents="none"
             style={[
               styles.item,
@@ -125,6 +135,7 @@ export function HubFan(props: HubFanProps): JSX.Element {
                 opacity: hi !== null && !lit ? motion.dimOpacity : value,
                 transform: [{ scale }],
               },
+              faint,
             ]}
           >
             <Icon name={GLYPH[item.id]} color={fg} size={20} />
@@ -203,6 +214,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   badgeText: { fontSize: 9, fontWeight: "700" },
+  /** A dimmed item (`HubItem.dimmed`): same slot, same geometry, plainly inert. */
+  dimmed: { opacity: DIMMED_OPACITY },
   label: {
     position: "absolute",
     paddingHorizontal: 10,

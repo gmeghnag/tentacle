@@ -1,0 +1,97 @@
+/**
+ * The tap→hub wiring of docs/feat/mobile-hub-tap.md, pinned where Bun can reach
+ * it. `ui/HubFan.tsx` and `ui/FloatingActivity.tsx` are `.tsx` (unimportable
+ * from Bun: React Native's sources are Flow), so this pins the structure from
+ * the source — the `hub-opacity-wiring.test.ts` pattern. What the machine does
+ * with a tap is `hub-gesture.test.ts`'s; this is only that the screen and the
+ * views hand it the right facts and draw the right thing.
+ */
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const ROOT = join(import.meta.dir, "..");
+const read = (...p: string[]) => readFileSync(join(ROOT, ...p), "utf8");
+
+/** The source with its comment lines removed: prose names things the code must not do. */
+const code = (src: string) =>
+  src
+    .split("\n")
+    .filter((line) => !/^\s*(\/?\*|\/\/)/.test(line))
+    .join("\n");
+
+const BUTTON = code(read("src", "ui", "FloatingActivity.tsx"));
+const FAN = code(read("src", "ui", "HubFan.tsx"));
+const SCREEN = code(read("src", "screens", "SessionScreen.tsx"));
+
+describe("the screen tells the hub whether Activity has anything to show", () => {
+  test("`activityEmpty` is the sheet's OWN emptiness rule, not a second one", () => {
+    const at = SCREEN.indexOf("const hubCtx = hubContextOf({");
+    expect(at).toBeGreaterThan(-1);
+    const call = SCREEN.slice(at, SCREEN.indexOf("});", at));
+    expect(call).toContain("activityEmpty: activityVm.groups.length === 0");
+    // `activityView(...)` is the one truth for "is the sheet empty" — the same
+    // field the sheet draws its dimmed line from (`activity.ts`).
+    expect(SCREEN).toContain("const activityVm = activityView(");
+  });
+});
+
+describe("the button no longer opens Activity itself", () => {
+  test("no `tap` effect branch is left to perform", () => {
+    // The machine emits `open` for a tap (mobile-hub-tap Design 1); a leftover
+    // `case "tap":` would be dead code that still called the old handler.
+    expect(BUTTON).not.toContain('case "tap":');
+  });
+
+  test("Activity is reached through the fan's item, so the button has no `onPress` prop", () => {
+    expect(BUTTON).not.toContain("onPress");
+    // ...and the screen no longer passes one to it (the header pill keeps its own).
+    const at = SCREEN.indexOf("<FloatingActivity");
+    const props = SCREEN.slice(at, SCREEN.indexOf("/>", at));
+    expect(props).not.toContain("onPress=");
+    expect(props).toContain("onCommit={commitHub}");
+    expect(props).toContain('onMenu={() => setHubMenu("all")}');
+  });
+
+  test("VoiceOver's activate and long-press both open the actions menu (owner Q2 = B)", () => {
+    // The hint says what the route does; a stale "Double-tap for Activity" would
+    // announce an action the button no longer takes.
+    expect(BUTTON).toContain("Double-tap for actions.");
+    expect(BUTTON).not.toContain("Double-tap for Activity");
+    // ONE handler for the accessibility actions, and no `onAccessibilityTap`
+    // left pointing at a prop that no longer exists.
+    expect(BUTTON).not.toContain("onAccessibilityTap");
+    const handler = BUTTON.slice(
+      BUTTON.indexOf("const onAccessibilityAction"),
+      BUTTON.indexOf("return (", BUTTON.indexOf("const onAccessibilityAction")),
+    );
+    expect(handler).toContain('route.kind === "menu"');
+    expect(handler).not.toContain("props.onPress");
+  });
+});
+
+describe("a dimmed item keeps its slot and is drawn faint (Design 2, 5)", () => {
+  test("the fan reads the flag the hub set, and never filters the item out", () => {
+    expect(FAN).toContain("item.dimmed");
+    expect(FAN).toContain("styles.dimmed");
+    // It is a style on the item that is still mapped and rendered: no `filter`
+    // on `layout.items`, which would shift every later item's slot.
+    expect(FAN).toMatch(/layout\.items\.map\(/);
+    expect(FAN).not.toMatch(/layout\.items\.filter/);
+  });
+
+  test("the faint level is one constant, and a highlighted dimmed item is NOT faint", () => {
+    // While the finger is on it the item must look selected, not inert.
+    expect(FAN).toContain("item.dimmed && !lit");
+    const constant = /const DIMMED_OPACITY = ([\d.]+);/.exec(FAN)?.[1];
+    expect(constant).toBeDefined();
+    const level = Number(constant);
+    expect(level).toBeGreaterThan(0);
+    expect(level).toBeLessThan(1);
+  });
+
+  test("its VoiceOver label says why, and it is announced as not actionable", () => {
+    expect(FAN).toContain("`${item.label}, nothing running`");
+    expect(FAN).toContain("accessibilityState={{ disabled: item.dimmed }}");
+  });
+});

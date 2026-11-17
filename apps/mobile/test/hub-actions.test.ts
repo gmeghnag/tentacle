@@ -11,6 +11,7 @@ import {
   type HubContext,
   type HubEntries,
   type HubOpen,
+  NOTHING_RUNNING,
   NO_CONNECTION,
   buttonBadge,
   hubA11yLabel,
@@ -18,6 +19,7 @@ import {
   hubOpen,
   resolveCommit,
 } from "../src/hub-actions.ts";
+import { commitPlan } from "../src/hub-session.ts";
 
 const noop = (): void => undefined;
 const TURN = { kind: "turn", key: "t1", turnId: "t1", own: true } as const;
@@ -43,6 +45,7 @@ const IDLE_CTX: HubContext = {
   schedules: 0,
   nextWakeInMs: null,
   unseenArtifacts: 0,
+  activityEmpty: false,
 };
 const RUNNING: HubContext = { ...IDLE_CTX, turn: TURN };
 /** The snapshot a fan opened while `TURN` ran carries (H3 passes the `HubMenu` itself). */
@@ -264,6 +267,59 @@ describe("resolveCommit: the world is read again at release (M7/M8)", () => {
     });
     expect(resolveCommit("more", IDLE_CTX, MAIN, OPENED_IDLE)).toEqual({ kind: "run", id: "more" });
     expect(resolveCommit("activity", IDLE_CTX, MAIN, OPENED_IDLE)).toEqual({
+      kind: "run",
+      id: "activity",
+    });
+  });
+});
+
+describe("a dimmed item: nothing to show, but its slot stays (Design 2)", () => {
+  /** Nothing running and no wake feed: Activity has nothing to open. */
+  const EMPTY: HubContext = { ...IDLE_CTX, activityEmpty: true };
+  const dimmedIds = (items: readonly { id: string; dimmed: boolean }[]) =>
+    items.filter((i) => i.dimmed).map((i) => i.id);
+
+  test("only Activity is dimmed, and only when it is empty", () => {
+    expect(dimmedIds(hubActions(EMPTY, EVERY).all)).toEqual(["activity"]);
+    expect(dimmedIds(hubActions(IDLE_CTX, EVERY).all)).toEqual([]);
+  });
+
+  test("a dimmed item keeps its slot: the order is the owner's, never a hidden row", () => {
+    const a = hubActions(EMPTY, EVERY);
+    expect(ids(a.all)).toEqual(ids(hubActions(IDLE_CTX, EVERY).all));
+    expect(ids(a.fan)).toEqual(ids(hubActions(IDLE_CTX, EVERY).fan));
+  });
+
+  test("an item that is not offered is not dimmed either (no dimmed row for an absent action)", () => {
+    expect(hubActions(EMPTY, { info: noop }).all.every((i) => !i.dimmed)).toBe(true);
+  });
+
+  test('committing an empty Activity → a no-op saying "Nothing running"', () => {
+    expect(resolveCommit("activity", EMPTY, EVERY, OPENED_IDLE)).toEqual({
+      kind: "noop",
+      notice: NOTHING_RUNNING,
+    });
+    expect(NOTHING_RUNNING).toBe("Nothing running");
+  });
+
+  test("a live Activity runs, and the release-time world is what counts (both directions)", () => {
+    expect(resolveCommit("activity", IDLE_CTX, EVERY, OPENED_IDLE)).toEqual({
+      kind: "run",
+      id: "activity",
+    });
+    // Dimmed at the open, something started running before the release: it opens.
+    expect(resolveCommit("activity", IDLE_CTX, EVERY, OPENED_IDLE).kind).toBe("run");
+    // Live at the open, the last child ended before the release: it says so.
+    expect(resolveCommit("activity", EMPTY, EVERY, OPENED_IDLE)).toEqual({
+      kind: "noop",
+      notice: NOTHING_RUNNING,
+    });
+    // And the end-to-end plan the screen acts on carries it (`hub-session.ts`).
+    expect(commitPlan("activity", EMPTY, EVERY, hubOpen(EMPTY))).toEqual({
+      kind: "notice",
+      text: NOTHING_RUNNING,
+    });
+    expect(commitPlan("activity", IDLE_CTX, EVERY, hubOpen(IDLE_CTX))).toEqual({
       kind: "run",
       id: "activity",
     });

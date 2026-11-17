@@ -768,6 +768,7 @@ export function SessionScreen({
     ended: state.transcript.closed,
     editable: state.view.editable,
     dictation: voiceSettings.dictation,
+    activityEmpty: activityVm.groups.length === 0,
     schedules: { rows: state.schedules, now: activityNow },
     ...(artifactsSeenKey === undefined
       ? {}
@@ -1191,7 +1192,6 @@ export function SessionScreen({
               onFanChange={onHubFan}
               onCommit={commitHub}
               onMenu={() => setHubMenu("all")}
-              onPress={openActivity}
               onDrop={(position) => {
                 // Written on drop only; a failed write keeps the spot for this run (F22).
                 ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), position }).catch(

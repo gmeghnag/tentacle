@@ -4,8 +4,8 @@ appId: so.tentacle.app
 # Settings → Activity button → Floating; in a session the hub shows at zero
 # activity (its glyph, no badge).
 #
-# Driven: a long-press (Maestro's releases in place) opens the fan STICKY: the
-# items stay, a tap on one commits it (Attach → the attachment chooser), a tap
+# Driven: a TAP opens the fan (the items stay — mobile-hub-tap); a long-press
+# opens the same fan; a tap on one commits it (Attach → the attachment chooser), a tap
 # elsewhere closes it; a HOLD turn puts Stop first, and Stop stops the turn; a
 # tap is still Activity; Header mode has no hub. Light/dark shots of the open fan.
 #
@@ -147,9 +147,16 @@ appId: so.tentacle.app
     visible:
       id: "turn-idle"
     timeout: 20000
-# A tap is still Activity.
+# A TAP now opens the fan (mobile-hub-tap): its own Activity item is what
+# reaches the sheet while something runs.
 - tapOn:
     id: "floating-activity"
+- extendedWaitUntil:
+    visible:
+      id: "hub-item-activity"
+    timeout: 5000
+- tapOn:
+    id: "hub-item-activity"
 - assertVisible:
     id: "activity-sheet-close"
 - tapOn:

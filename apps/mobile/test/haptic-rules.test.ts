@@ -49,13 +49,16 @@ describe("hubHaptic (docs/feat/mobile-hub.md Design 2)", () => {
     expect(hubHaptic({ kind: "haptic", cue: "commit" })).toBe("commit");
   });
 
-  test("every other effect is silent (close, highlight, the commit itself, drag, tap)", () => {
+  test("every other effect is silent (close, highlight, the commit itself, drag)", () => {
     expect(hubHaptic({ kind: "close" })).toBeNull();
     expect(hubHaptic({ kind: "highlight", index: 1 })).toBeNull();
     expect(hubHaptic({ kind: "commit", id: "stop" })).toBeNull();
     expect(hubHaptic({ kind: "dragTo", delta: { x: 1, y: 1 } })).toBeNull();
     expect(hubHaptic({ kind: "dragCancel" })).toBeNull();
-    expect(hubHaptic({ kind: "tap" })).toBeNull();
+  });
+
+  test("light is played as is: the cue of a dimmed commit (mobile-hub-tap Design 3)", () => {
+    expect(hubHaptic({ kind: "haptic", cue: "light" })).toBe("light");
   });
 });
 

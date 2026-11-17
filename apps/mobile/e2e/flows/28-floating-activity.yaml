@@ -7,7 +7,8 @@ appId: so.tentacle.app
 # Driven: the floating button appears and the header pill does not; a drag
 # starting ON the button moves it to the left edge (F21: a touch that starts on
 # the button is the button's); a relaunch brings it back on the left (the
-# Keychain record); a tap opens Activity; the keyboard up keeps it above the
+# Keychain record); a tap opens the hub fan (feat/mobile-hub-tap) and a tap
+# outside it closes it; the keyboard up keeps it above the
 # composer (F20); Settings → Header → the pill is back, no floating button.
 #
 # Edge positions are asserted relative to the centred title (`leftOf`/`rightOf`
@@ -94,13 +95,18 @@ appId: so.tentacle.app
     id: "floating-activity"
     leftOf:
       id: "session-title"
-# A tap opens Activity.
+# A tap on the floating button opens the hub fan, not the Activity sheet
+# (feat/mobile-hub-tap); Activity is one of its items.
 - tapOn:
     id: "floating-activity"
-- assertVisible:
-    id: "activity-subagents"
+- extendedWaitUntil:
+    visible:
+      id: "hub-scrim"
+    timeout: 5000
 - tapOn:
-    id: "activity-sheet-close"
+    point: "30%,40%"
+- assertNotVisible:
+    id: "hub-scrim"
 # Back to Header: the pill returns, the floating button is gone.
 - tapOn:
     id: "session-drawer"

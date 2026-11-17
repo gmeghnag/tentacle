@@ -78,6 +78,8 @@ export function hubContextOf(input: {
   readonly ended: EndReason | null;
   readonly editable: boolean;
   readonly dictation: boolean;
+  /** `activityView(...).groups.length === 0`: nothing for Activity to show (mobile-hub-tap). */
+  readonly activityEmpty?: boolean;
   /** The session's wake feed and the clock to measure it against (H4a). */
   readonly schedules?: {
     readonly rows: readonly ScheduleRow[] | undefined;
@@ -102,6 +104,7 @@ export function hubContextOf(input: {
       input.artifacts?.list === undefined
         ? 0
         : unseenArtifacts(input.artifacts.list, input.artifacts.seen),
+    activityEmpty: input.activityEmpty ?? false,
   };
 }
 
@@ -115,9 +118,10 @@ export function solveHub(input: {
   readonly items: readonly HubItem[];
 }): HubMenu {
   const ids = input.items.map((item) => item.id);
+  const dimmed = input.items.filter((item) => item.dimmed).map((item) => item.id);
   const at = input.bounds === null ? null : place(input.position, input.bounds);
   if (input.bounds === null || at === null) {
-    return { layout: { kind: "menu" }, ids };
+    return { layout: { kind: "menu" }, ids, dimmed };
   }
   const layout = fanLayout({
     anchor: { x: at.x + FLOAT_SIZE / 2, y: at.y + FLOAT_SIZE / 2 },
@@ -125,7 +129,7 @@ export function solveHub(input: {
     bounds: { left: 0, top: 0, right: input.bounds.width, bottom: input.bounds.height },
     n: ids.length,
   });
-  return { layout, ids };
+  return { layout, ids, dimmed };
 }
 
 /**
@@ -223,18 +227,17 @@ const ENTRY_IDS: readonly string[] = [
   "new",
 ] satisfies readonly HubEntryId[];
 
-/** An accessibility action's name → what it does: activate = tap (Activity), long-press = the menu. */
+/** An accessibility action's name → what it does: activate and long-press both open the plain menu. */
 export function hubA11yRoute(
   name: string,
 ):
-  | { readonly kind: "tap" }
   | { readonly kind: "menu" }
   | { readonly kind: "commit"; readonly id: HubEntryId }
   | { readonly kind: "none" } {
-  if (name === "activate") {
-    return { kind: "tap" };
-  }
-  if (name === "longpress" || name === SHOW_ALL) {
+  // A VoiceOver double-tap does what a sighted tap does: it opens the hub. The
+  // fan never opens under VoiceOver, so that is the actions menu (owner Q2 = B
+  // of docs/feat/mobile-hub-tap.md). The rotor still reaches Activity directly.
+  if (name === "activate" || name === "longpress" || name === SHOW_ALL) {
     return { kind: "menu" };
   }
   const id = name.startsWith(ITEM_ACTION) ? name.slice(ITEM_ACTION.length) : "";

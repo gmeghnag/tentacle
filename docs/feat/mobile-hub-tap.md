@@ -246,4 +246,143 @@ Q1–Q5: all recommendations accepted (slide-to-select on long-press; VoiceOver 
 
 ## Execution
 
+*— claude-opus-5-5 (executor; model id read from `~/.claude/settings.json`
+`model: "opus"` / `claude-opus-5-5`), 2026-11-17*
+
+In the worktree `.tentacle/worktrees/mobile-hub-tap` (branch `feat/mobile-hub-tap`
+= `main` @ `d96355bd` + the two plan commits). Order followed as the Implementation
+lists it, red before green per slice.
+
+**Load-bearing check first (passed).** `.tentacle/tmp/mobile-hub-tap/repro.ts` on
+the branch reproduced the Context exactly:
+
+```
+tap → {"state":{"kind":"idle"},"effects":[{"kind":"tap"}]}
+activity item (idle, nothing running) → [{"id":"activity","label":"Activity","badge":null,"danger":false}]
+```
+
+So the tap emitted `tap` (never `solve`d a fan) and the Activity item had no
+"empty" state. Preconditions re-verified in source: `open(..., "sticky")` at
+`hub-gesture.ts:189-190`, the no-fit/no-ids early returns (`:135-144`), the
+`fanSticky` handler (`:248-260`), `setEngaged(driver.state().kind)` after every
+batch (`FloatingActivity.tsx:300`), `hubOpacity`'s engaged rule
+(`hub-opacity.ts:68`), `isFanOpen` (`hub-session.ts:246-248`), the notice line
+(`SessionScreen.tsx:1214-1221`), `activityView(...).empty` (`activity.ts:60-72`).
+No §7 invariant touched.
+
+**As built, in the Implementation's order.**
+
+1. `hub-actions.ts` — `HubContext.activityEmpty: boolean` (required field, not
+   optional: the screen must say it, and a silently-defaulted `false` is the bug
+   this task fixes); `HubItem.dimmed: boolean`; `NOTHING_RUNNING = "Nothing running"`;
+   `dimmedBecause(id, ctx)` (Activity-only, per Q3) used by BOTH `hubActions`
+   (the flag) and `resolveCommit` (the notice) so there is one truth for "empty".
+   `resolveCommit` gained the branch: a live dimmed id → `{kind:"noop", notice}`,
+   read at the release, so a fan opened while empty opens the sheet once Activity
+   fills, and an Activity that empties before the release says so (both directions
+   tested).
+2. `hub-gesture.ts` — `pressing`/`up`: a `tap` now falls through to
+   `open(event.p, solve, "sticky")`; only `drag` still diverges. The `tap` effect
+   kind is REMOVED from `GestureEffect`. `HubCue` gained `"light"`; `HubMenu`
+   gained `dimmed: readonly string[]`; `commit()` plays `light` for a dimmed id and
+   still emits `commit` + `close` (one haptic per release). Module doc table updated.
+3. `hub-session.ts` — `hubContextOf` takes `activityEmpty?: boolean` (optional in
+   the INPUT, defaulted to `false`; every existing caller/test literal stays
+   valid); `solveHub` fills `dimmed` from `items.dimmed` on both layouts;
+   `hubA11yRoute` — **Q2 = B**: `activate` now routes to `menu` (the `"tap"` route
+   variant is gone).
+4. `ui/FloatingActivity.tsx` — the `case "tap":` branch and the whole `onPress`
+   prop are removed (nothing emits `tap`, and Activity is the fan's item now); the
+   `hubA11yRoute` handler lost its `tap` branch; the hint became "Double-tap for
+   actions. Swipe up or down for more actions."; `onAccessibilityTap={props.onPress}`
+   is removed (RN's default would have fired a prop that no longer exists — the
+   `activate` action already covers it); the header comment updated.
+5. `ui/HubFan.tsx` — `DIMMED_OPACITY = 0.45` (a named placeholder, owner Q5),
+   applied as `item.dimmed && !lit` so a highlighted dimmed item still reads as
+   selected; a11y label `"<label>, nothing running"` + `accessibilityState={{disabled}}`.
+   The item is never filtered out of `layout.items`, so no slot moves.
+6. `screens/SessionScreen.tsx` — `activityEmpty: activityVm.groups.length === 0`
+   in the `hubContextOf` call; `onPress={openActivity}` dropped from
+   `<FloatingActivity>` (the header pill's `onPress={openActivity}`, `:879`, is
+   untouched — it is the other, still-valid path).
+7. `changelog.d/mobile-hub-tap.changed.md` — one bullet, as the doc specifies.
+
+**Drift from the Implementation (all small, all deliberate).**
+
+- **A tap with no actions** keeps the plan's behaviour (silent idle) and its test,
+  but the plan's `Failure modes` calls it "a tap with no actions" while Design 1
+  removes the `tap` path entirely. In practice identical (it now no-ops through
+  `open`, not through a `tap` effect); no code difference, noted for honesty.
+- **`HubContext.activityEmpty` is required, `hubContextOf`'s input field is
+  optional.** The plan says `HubContext` gains it and the screen passes it; it did
+  not say which side defaults. Defaulting in `hubContextOf` keeps the 6 existing
+  test literals and the artifacts/scheduled suites untouched, and the screen still
+  passes it explicitly (pinned by `hub-tap-wiring.test.ts`).
+- **`HubFan` a11y label** uses a template literal rather than string concatenation,
+  so the NO-faint case keeps the plain label verbatim (a11y tests elsewhere match
+  the exact label).
+- **e2e flows updated** (not in the plan's Files list): `28-floating-activity.yaml`
+  and `33-hub.yaml` both asserted "a tap opens Activity", which this task makes
+  false. Both now tap the button → assert `hub-scrim`/`hub-item-activity` → close.
+  Leaving them would have shipped a knowingly-stale e2e assertion.
+- **New file `test/hub-tap-wiring.test.ts`** (not in the plan's Tests list): the
+  plan pinned the *machine* but nothing pinned that the component stopped
+  performing `tap`, that the screen passes `activityEmpty` from `activityVm`, or
+  that the fan draws a dimmed item without dropping it. Those are `.tsx` files, so
+  this is the source-pin pattern of `hub-opacity-wiring.test.ts`.
+
+**Tests — red first, then green.**
+
+- Red on the branch before any `src` change: `bun test apps/mobile/test/hub-gesture.test.ts`
+  → **8 fail** (the tap cases, the dimmed-commit cases, M13); `hub-actions.test.ts`
+  → 1 error (`NOTHING_RUNNING` not exported); `hub-session.test.ts`,
+  `haptic-rules.test.ts`, `hub-opacity.test.ts` each red on their changed case;
+  `hub-tap-wiring.test.ts` red on every assertion (`onPress` still present, etc.).
+- Green after: `bun test apps/mobile` → 3204 pass / 0 fail (226 files).
+
+**Mutation checks (§9 non-vacuity, all reverted).** Each mutation was applied to
+`src`, the narrow suite run, and the file restored from a saved copy:
+
+| mutation | result |
+|---|---|
+| `tap` → `{kind:"tap"}` restored (the old path) | 8 fail in gesture/session/opacity suites |
+| `commit()` cue forced to always `"commit"` | 2 fail (the dimmed-commit cases) |
+| `dimmedBecause` forced to `null` (no item ever dimmed) | 4 fail (actions + session) |
+| `solveHub`'s `dimmed` forced to `[]` | 1 fail (the snapshot-carried test) |
+
+So every new assertion fails on the old behaviour, and not on an import/compile
+error.
+
+**Gate** (worktree, after restoring the mutations): `bunx tsc --noEmit` clean,
+`bunx tsc -p apps/mobile` clean, `bunx tsc -p apps/relay` clean, `bun run lint`
+clean (0 errors, 0 warnings — the baseline of AGENTS §6), and the full suite:
+
+```
+ 14851 pass
+ 5 skip
+ 0 fail
+ 47 snapshots, 177774 expect() calls
+Ran 14856 tests across 1065 files. [564.21s]
+```
+
+Zero failures and only the five documented opt-in skips (live-k8s, live-docker,
+real-socket keepalive). No protocol/persistence change, so
+`packages/protocol/schema/protocol.json` needs no regeneration and no
+`protocol.d/` note.
+
+**One incident, disclosed.** A first foreground `bun test` attempt was killed at
+the 120 s timeout mid-run; it left `packages/tui/test/__snapshots__/diagram-lines.test.ts.snap`
+with its header line corrupted to an ESC sequence (`\x1b[?25h Snapshot v1, …`).
+I restored that one line byte-for-byte, and `git diff` for the file is now empty
+(the final full run above leaves it untouched). Likewise, one `git checkout --`
+of `apps/mobile/src/hub-session.ts` during the mutation round reverted my own
+uncommitted edits to it; I re-applied them by hand and the diff above matches the
+intended Design. Neither is in the tree now.
+
+**Unverified (one line).** Nothing was run on a device/simulator: the e2e flows
+are updated but not driven, and the dimmed look (0.45) is a placeholder the owner
+sees for the first time on device — verify by running `33-hub.yaml`, which now
+opens the fan by tapping and asserts the fan, then `28-floating-activity.yaml`.
+
+
 ## Review
