@@ -142,6 +142,7 @@ import { readAsked, readPermission, readPushFacts, requestPermission } from "./s
 import { createPushManager } from "./src/push-manager.ts";
 import type { PushPermission } from "./src/push-registration.ts";
 import { createPushToggleStore } from "./src/push-toggle-store.ts";
+import { queueTrace } from "./src/queue-trace.ts";
 import {
   type ArtifactGalleryRoute,
   type RootStackParams,
@@ -1418,6 +1419,11 @@ function SessionRoute({
         // the device it is shown on (docs/feat/session-auto-accept.md D7): the
         // name this phone paired under. Absent on a record an older build wrote.
         phoneName: () => RECORDS.get(computerId)?.thisDeviceName,
+        // The queue-diagnosis trace (docs/fix/mobile-queued-stuck.md): every
+        // `queued` report, turn bracket, attach and compose act this session sees,
+        // into the ONE exported log (`Settings → Export logs`, `grep qtrace`).
+        // Diagnostic only: nothing here changes a behaviour.
+        trace: queueTrace(sessionId, APP_LOG),
         controller: RUNTIMES.controller(link.client),
         broker: link.permissions,
         now: () => Date.now(),
