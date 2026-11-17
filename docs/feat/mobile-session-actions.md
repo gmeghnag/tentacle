@@ -971,3 +971,13 @@ check for the finding.
 **Holds:** §7 "logic in pure modules": `sessionRows` and `sessionsViewFrom` are pure. There is no protocol or persistence change.
 
 **Executor:** The Execution is accurate, and its listed mutations are real. It did not mutate the two panel call sites. I am the same model family as the executor (fresh context only).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context re-review of `2ef03451`, S3 only)*
+
+**Verdict: APPROVE (S3).** Finding 1 is fixed, and I found no regressions.
+
+- **Finding 1 is fixed.** The new test "the panel's own MOVE and CLICK reach a row the page alone does not hold" (`sessions-panel.test.ts`) now kills both mutations. M7 (`apply` counts the page) → KILLED, 1 red. M8 (`click` counts the page) → KILLED, 1 red. M6 was re-run and is still KILLED (2 red). I restored every mutation, and `git status` was clean afterwards.
+- **No regressions:** the commit adds only a test and doc text. It changes no production code.
+- **Gate:** `sessions-panel` passes 20/20. `bun run lint` is clean (1846 files). `bun run typecheck` is clean (root + mobile + relay). I did not run the full `bun test`.
