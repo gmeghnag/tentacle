@@ -264,6 +264,9 @@ export const typography = {
   monoCode: { fontSize: 12.5, lineHeight: 19, fontFamily: MONO },
   monoDiff: { fontSize: 12, lineHeight: 21, fontFamily: MONO },
   monoInline: { fontSize: 14, lineHeight: 20, fontFamily: MONO },
+  /** A step's name and its one mono line (docs/feat/mobile-tool-rows.md, mockup C). */
+  step: { fontSize: 14, lineHeight: 20, fontWeight: "500" },
+  stepMono: { fontSize: 12.5, lineHeight: 18, fontFamily: MONO },
   sas: { fontSize: 40, lineHeight: 48, fontWeight: "600", letterSpacing: 6, fontFamily: MONO },
 } as const satisfies Record<string, TextStyleToken>;
 

@@ -622,6 +622,158 @@ No schema touched, so `protocol.json` is not regenerated and there is no `protoc
 - **Gate:** `bun test apps/mobile/test` — 2564 pass, 0 fail (182 files), the previously red case green. `bun run lint` — clean, 1851 files. `bunx tsc -p apps/mobile --noEmit` — 2 errors, both pre-existing and environment-only: `Cannot find module 'expo-document-picker'` (`src/pdf-source.ts:1`) and `'react-native-svg'` (`src/ui/chart/ChartView.tsx:24`) — those two packages are not installed in this worktree (`node_modules/` has neither); this diff imports neither.
 - **Deliberately left:** the guard reads the TUI's source text, so renaming `toolSubtitle` or moving it into another file would make it fail loudly (its `indexOf` assertions) rather than silently pass — acceptable for a same-repo parity pin, and the `transcript-parity.test.ts` pattern already reads TUI files. This note records the fix; no `protocol.d/` note and no changelog fragment (internal wiring of a phone-side rule, no user-visible change beyond restoring intent).
 
+### S2 — drawing
+
+*— claude-opus-5-5, 2026-11-17* — **S2 only** (S3 not started).
+
+**Load-bearing check: static half holds; simulator half NOT run (owed to S3).**
+The simulator check needs a native build, and this worktree cannot bundle the
+app: `react-native-svg` and `expo-document-picker` (both in
+`apps/mobile/package.json`) are not installed here (`ls node_modules` shows
+neither), and the sandbox blocks reading the installed app's bundle. The
+cheapest evidence I could get is the RN 0.88 source. Every cell is
+`<View onLayout>{element}</View>` (`@react-native/virtualized-lists`
+`VirtualizedListCellRenderer.js:215-229`), so a `null` item is a measured 0 pt
+cell. `ListMetricsAggregator.notifyCellLayout` (`:76`) stores it like any other
+cell, so `scrollToIndex` onto or past it uses measured frames. The cells are
+still keyed by `row.key`, and "Show in chat" still indexes `rows`
+(unchanged). **To verify:** in S3's simulator run, use "Show in chat" on a
+report below hidden reasoning rows. If that fails, the plan's fallback applies
+(filter the data + a key → index map), and only `SessionScreen` changes.
+
+**As built, in order:**
+1. **Red first.** I wrote two new test files, `test/tool-step-view.test.ts`
+   (the pure S2 view-model) and `test/tool-rows-wiring.test.ts` (source-pinned
+   wiring). Against stubs, `tool-step-view` gave **14 fail / 1 pass**, all on
+   assertions. The 1 pass is "no predicate = S1 behaviour", a guard that is
+   meant to pass. `tool-rows-wiring` was red on every new-wiring assertion.
+   I added `isBlockRow` later, red on its stub first (**1 fail**).
+2. **Pure code** (`src/tool-steps.ts`, `src/tool-summary.ts`):
+   - `stepRowView(row, thought, full)` gives the node everything it draws:
+     the name parts, subtitle, dot, trailing text and its red flag, `live`,
+     body thought, command, `⎿`-prefixed cut output, `tappable`, and the
+     a11y label.
+   - `thoughtRowView`.
+   - `thinkingA11yLabel`.
+   - `liveElapsed`: whole seconds, for the 1 s tick.
+   - `isBlockRow`.
+   - `stepLayout(rows, running, isBlock?)`.
+3. `theme.ts`: added `typography.step` (14/20/500) and `typography.stepMono`
+   (12.5/18 mono). `ui/animate.ts`: `animateNextLayout(reduceMotion = false)`
+   is a no-op under Reduce Motion.
+4. `ui/StepNode.tsx` (new):
+   - `StepNode` draws a 10 pt gutter with the up/down 1 px `sep` segments
+     (`accessibilityElementsHidden`). The node sits at the line's centre (22
+     pt): a 7 pt dot ringed 3 pt in `page`, a 10 pt `accent` ring spinner (a
+     native-driver `Animated.loop`, a still dot under Reduce Motion), a hollow
+     `sec` ring, or ∴. Then the 44 pt `Pressable` line: the name (45% max,
+     with `server · ` in `sec` 400), the mono subtitle, ∴, and the trailing
+     text, or a live `liveElapsed` clock from `row.at`. Then `below`, then the
+     open body under a `sepChat` hairline.
+   - `StepBody` draws the italic thought, the mono command, the `⎿` result
+     with `… +N more lines`, the diff and the reply.
+   - `ThinkingNode` is the footer: a hollow ring, italic "Thinking…", and a
+     clock from its own mount. A tap opens the live thought.
+5. `TranscriptRow.tsx`:
+   - `RowProps.step` (cell, open, full, reduceMotion, onToggle, onShowAll).
+   - `StepShell`: no vertical padding, 6 pt at each end of a run.
+   - `ToolRowView` draws a `StepNode`, and the artifact card keeps its band
+     row.
+   - `ReasoningRowView` draws `null` when `hidden`, else a Thought node.
+   - Both views have no `useState`. I removed `OUTPUT_PREVIEW_LINES`.
+   - The testIDs are unchanged: `tool-<id>-<status>` on the name, plus
+     `-output`, `-reply`, `-progress`, `-activity` and `diff-<id>`.
+6. `SessionScreen.tsx`:
+   - `layout = useMemo(() => stepLayout(rows, running, isBlockRow), [rows, running])`.
+   - `openSteps`/`fullSteps` live in the screen (`useState<readonly string[]>`)
+     and go into `rowExtraData` together with `layout`.
+   - `renderItem` returns `null` for a hidden cell **before** `SwipeTime`.
+     Otherwise it passes `step={…}`, and the toggle calls
+     `animateNextLayout(a11yFlags.reduceMotion)`.
+   - `ListFooterComponent` is a `ThinkingNode` when `layout.tail` is set.
+7. Deleted `ui/ToolRow.tsx` (it had no other importer).
+8. `e2e/flows/08-permission.yaml`: the step is tapped before
+   `assertVisible diff-<id>` (see drift).
+
+**Mutation checks (§9):** each was applied by
+`.tentacle/tmp/mobile-tool-rows/mutate.ts`, which runs the 3 narrow files and
+then restores the file byte-for-byte. All 7 were killed:
+- M5, the hidden cell is not returned `null` → 1 fail (`renderItem reads the row's cell, and a hidden cell is null BEFORE SwipeTime wraps it`).
+- M6, `tappable` ignores the diff → 1 fail (`a diff alone makes the step tappable`).
+- M7, `stepLayout` ignores `isBlock` → 3 fail (the three isBlock layout cases).
+- M8, `live` ignores a missing `at` → 1 fail (`running: a spinner, and a live clock only when…`).
+- M9, `liveElapsed` rounds instead of flooring → 1 fail (`liveElapsed … nothing under a second…`).
+- M10, a `useState` back in `ToolRowView` → 1 fail (`no open/show-all state inside the tool or reasoning view`).
+- M11, the footer is not wired to `layout.tail` → 1 fail (`the footer is the live tail…`).
+
+**Drift from Implementation (and why):**
+- **`isBlock` predicate + `isBlockRow`** (not in the plan). A valid chart
+  (`chartRowSpec`) and a presented artifact draw as blocks, not steps. As
+  nodes, they would leave a neighbour's thread segment dangling into a chart
+  or card. They now end the run like assistant text does. A thought before a
+  block becomes a Thought node and is not folded into it. Pinned by 5 cases.
+- **`stepRowView` and friends are new pure functions.** The plan lists S2 as
+  drawing only. But the tappable rule, the `⎿` join, the live clock rule and
+  the footer label are branching logic, and AGENTS §7 puts that in a pure
+  module. So `StepNode` only maps values.
+- **`layout` is in `rowExtraData` too**, not only the open state. A reasoning
+  row turns `hidden` when a tool follows it while the row object itself stays
+  the same, so its cell must re-render.
+- **Flow 08 taps the step before asserting `diff-<id>`.** The diff now lives
+  in the open body (Owner Q7), so the old always-visible assertion would fail.
+  I changed only that flow. No other flow asserts a body testID without a
+  tap (grep).
+- **Artifact branch.** The card row no longer draws a reply, diff or output
+  under it. A presented artifact is set only on success, so none of them
+  applies. It keeps the progress line and the Activity link.
+- **Reasoning text is plain italic text in the body, no longer `Markdown`**
+  (the design says "italic 13.5 sans").
+- The changelog fragment from S1 already describes what S2 draws, so it is
+  unchanged.
+
+**Not verified here (S3's job):** anything on screen. That covers the
+simulator half of the load-bearing check, the look against mockup C in
+light, dark and AX, VoiceOver, the spinner, and no jump while streaming. The
+e2e flow 08 edit has not been run.
+
+**Gate:** `bunx tsc --noEmit` (root) clean. `tsc -p apps/mobile` gives 6
+errors, all pre-existing and environmental. They are in untouched files that
+import modules not installed in this worktree: `expo-document-picker`,
+`react-native-webview` (×2, plus 2 TS7006 that follow from it) and
+`react-native-svg`. No error is in an S2 file. `bun run lint` is clean (1953
+files). `bun test`: **14201 pass, 5 skip, 0 fail** (1013 files). The skips
+are the same 5 as in S1. No schema is touched, so there is no
+`protocol.json` regeneration and no `protocol.d/` note.
+
+### Fix round 1 (S2)
+
+*— claude-opus-5-5, 2026-11-17* — addresses Review — S2 (one MEDIUM, a test gap). Only a test changed; no `src` change.
+
+- **Finding 1 (MEDIUM): FIXED.** There are two new source pins in `apps/mobile/test/tool-rows-wiring.test.ts`:
+  - `the footer node gets the tail's thought and its up segment`: `<ThinkingNode` carries `thought={layout.tail.thought}` and `up={layout.tail.up}`.
+  - `the layout's cell reaches the node: the folded thought and the thread`:
+    - `ToolRowView` passes `cell.thought` into `stepRowView` and derives `thread` from `cell.thread`.
+    - `ReasoningRowView` derives `thread` from `cell.thread`.
+    - Each view hands `thread={thread}` to both `StepShell` and `StepNode` (exactly 2 sites).
+- **Red → green, by mutation** (`.tentacle/tmp/mobile-tool-rows/mutate-r1.ts`: it applies each mutation, runs wiring + step-view + steps, then restores the file byte-for-byte). The same 6 mutations ran against the HEAD test and against the new test:
+
+  | Mutation | HEAD test | new test |
+  |---|---|---|
+  | F1 `ToolRowView` drops `cell.thought` | 53/0 (survived) | 54/1 |
+  | F2 `ReasoningRowView` `cell.thread` → `LONE` | 53/0 | 54/1 |
+  | F3 footer `up` → `false` | 53/0 | 54/1 |
+  | F4 footer `thought` → `""` | 53/0 | 54/1 |
+  | F5 `ToolRowView` `cell.thread` → `LONE` | 53/0 | 54/1 |
+  | F6 `ReasoningRowView` node `thread={LONE}` | 53/0 | 54/1 |
+
+  Every fail is on the matching new case's assertion. `git status` after the runs shows only the test file.
+- **Gate:**
+  - `bunx tsc --noEmit`: clean.
+  - `bun run lint`: clean (1953 files).
+  - Narrow tests (wiring, step-view, steps, summary): 107/107.
+  - `bun test`: **14203 pass, 5 skip, 0 fail** (1013 files). These are the same 5 skips as S1 and S2.
+- **Left as is:** the LOW issue (a chart whose `chartLayout` is null falls back to a LONE step) and the S3 simulator checks are out of scope for this round.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17* — **S1 only**, fresh context. This is the same model as the plan author and the S1 executor (Opus), so shared blind spots are possible.
@@ -658,3 +810,45 @@ No schema touched, so `protocol.json` is not regenerated and there is no `protoc
 - **Finding 1 is fixed.** The new case `the tail extends ONLY the last run` (`apps/mobile/test/tool-steps.test.ts:180`) catches the change. I re-applied the round-1 mutation (drop `run === last` at `tool-steps.ts:158`), and that test now **fails** (1 fail). After reverting, `git status` is clean.
 - **No regressions found.** No `src` file changed. The touched tests pass 75/75. `bun run lint` is clean (1792 files) and `bun run typecheck` is clean.
 - **Still open, as a nit only:** `batchOpen` is redundant.
+
+### Review — S2
+
+*— claude-opus-5-5, 2026-11-17* — fresh context, **S2 only** (`git diff main...HEAD`, the S2 files). Same model as the executor: shared blind spots are possible.
+
+**Verdict: REQUEST-CHANGES.** One MEDIUM finding (a test gap, §9). No HIGH.
+
+1. **MEDIUM: the cell → StepNode hand-off is untested.** The layout's decisions reach the drawing in three places, and no test catches a break in any of them. Each mutation below was applied, the three narrow files run, then restored (`git status` clean): **0 fail** each time.
+   - `TranscriptRow.tsx` ToolRowView: `cell.thought` → `null`. Failure scenario: reasoning → `tool_start`. `stepLayout` hides the reasoning row because it is folded into the tool, but the tool never receives it. There is no ∴ and no thought in the body, so the thought is **silently lost on screen**.
+   - ReasoningRowView: `cell.thread` → `LONE`. An orphan Thought between steps breaks the thread.
+   - SessionScreen: `up={layout.tail.up}` → `up={false}`. The footer node loses its thread segment.
+
+   Fix: add source pins to `tool-rows-wiring.test.ts` for these three hand-offs (`cell.thought`, `cell.thread`, `layout.tail.up`). Then re-run these mutations and show each one red.
+
+**Gate:** the touched tests (wiring, step-view, steps, summary) give **105 pass / 0 fail**. `bun run lint` is clean (1953 files). `bun run typecheck`: root and relay are clean. `tsc -p apps/mobile` gives 6 errors. All 6 are in untouched files and come from modules missing in this worktree (`expo-document-picker`, `react-native-webview`, `react-native-svg`), matching Execution. I did not re-run the full suite.
+
+**Mutations killed (1 fail each):** `tappable` ignores `denialReply` · `trailingRed` ignores `denied` · no `⎿` on the output · `isBlockRow` ignores artifacts.
+
+**Attacks tried:**
+- Flows that assert a body testID without a tap. Only `08` (`diff-`) does, and it now taps first. `08b`/`08c` assert only the label. Holds.
+- `null` before `SwipeTime`, and `styles.list` having no `gap` or separator (so a hidden cell adds no spacing). Holds.
+- `isBlockRow` vs. `ChartRowView`. When `chartRowSpec` is non-null but `chartLayout` returns null, the row falls back to a LONE step with no thought folded into it. Cosmetic only, LOW.
+- §7: logic is in pure modules; no protocol, persistence or terminal path is touched. Holds.
+
+**Still owed (S3):** the simulator half of the load-bearing check (a 0 pt `null` cell, and `scrollToIndex` past hidden rows). The flow-08 edit has not been run.
+
+**Executor behaviour:** honest. The drift is named, and the 7 mutations it lists are real. It missed the cell → node seams above.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* — covers only `git diff HEAD~1` (8c0b17bb). That commit adds 2 wiring tests and changes no source file.
+
+**Verdict: PASS.**
+
+- **S2 #1 is fixed.** I re-applied the three mutations from round 1. Each now **fails** one test:
+  - `cell.thought` → `null`;
+  - `cell.thread` → `LONE` in ReasoningRowView;
+  - `up={layout.tail.up}` → `up={false}`.
+  
+  The earlier R1–R4 mutations still fail too. After the mutations, `git status` is clean.
+- **No regressions found.** No `src` file changed. The touched tests give 107 pass / 0 fail, and `bun run lint` is clean (1953 files). `bun run typecheck` gives the same 6 errors as round 1. They are the environment-only ones, in untouched files, from modules missing in this worktree. There are no new errors.
+- **Still owed by S3:** the simulator half of the load-bearing check, and running flow 08.

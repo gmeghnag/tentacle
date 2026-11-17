@@ -89,6 +89,7 @@ import { dictationLocale } from "../speech-locale.ts";
 import { SPEECH_PORT } from "../speech-native-expo.ts";
 import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
 import { DENSE_FONT_SCALE, type Palette, typography } from "../theme.ts";
+import { isBlockRow, isOpen, stepLayout, toggleOpen } from "../tool-steps.ts";
 import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
 import { ActivityBadge } from "../ui/ActivityBadge.tsx";
@@ -101,6 +102,7 @@ import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
+import { ThinkingNode } from "../ui/StepNode.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
 import {
   type VoiceController,
@@ -499,6 +501,16 @@ export function SessionScreen({
 
   const banner = state.view.banner;
   const rows = state.view.rows;
+  const running = state.view.composer.running;
+  // The thread of steps (docs/feat/mobile-tool-rows.md S2): how each row draws and
+  // the live "Thinking…" footer. Still ONE cell per row: keys, "Show in chat"
+  // indices and open-at-end's follow read `rows` unchanged.
+  const layout = useMemo(() => stepLayout(rows, running, isBlockRow), [rows, running]);
+  // The open steps and the steps showing every output line, by row key. In the
+  // SCREEN: a virtualised cell that scrolls out of the window unmounts, and its
+  // own state would die with it.
+  const [openSteps, setOpenSteps] = useState<readonly string[]>([]);
+  const [fullSteps, setFullSteps] = useState<readonly string[]>([]);
   const voiceView = voiceComposerView(
     voiceState,
     dictationLocale(voiceSettings.language, deviceLocales()),
@@ -603,8 +615,13 @@ export function SessionScreen({
       speakShown: voiceSettings.readAloudButton,
       // An agent card's link follows the live/Finished lists.
       activity,
+      // A step's open/show-all state, and its cell: a reasoning row turns hidden
+      // when a tool follows it, with the row itself unchanged.
+      openSteps,
+      fullSteps,
+      layout,
     }),
-    [voiceState?.readAloud, voiceSettings.readAloudButton, activity],
+    [voiceState?.readAloud, voiceSettings.readAloudButton, activity, openSteps, fullSteps, layout],
   );
   const compose = state.compose;
   const status = chatStatus({
@@ -836,6 +853,12 @@ export function SessionScreen({
               data={rows}
               keyExtractor={(row: Row) => row.key}
               renderItem={({ item }) => {
+                const cell = layout.cells.get(item.key);
+                // Folded into a step or the footer: a 0 pt cell, and never
+                // swipeable (null BEFORE SwipeTime wraps it).
+                if (cell?.kind === "hidden") {
+                  return null;
+                }
                 const speak = speakButtonOf(
                   voiceState,
                   item,
@@ -859,6 +882,20 @@ export function SessionScreen({
                       palette={palette}
                       onLink={onLink}
                       thumbnails={state.thumbnails}
+                      step={{
+                        cell,
+                        open: isOpen(openSteps, item.key),
+                        full: isOpen(fullSteps, item.key),
+                        reduceMotion: a11yFlags.reduceMotion,
+                        onToggle: () => {
+                          animateNextLayout(a11yFlags.reduceMotion);
+                          setOpenSteps((ids) => toggleOpen(ids, item.key));
+                        },
+                        onShowAll: () =>
+                          setFullSteps((ids) =>
+                            isOpen(ids, item.key) ? ids : toggleOpen(ids, item.key),
+                          ),
+                      }}
                       {...(child === null
                         ? {}
                         : {
@@ -881,6 +918,18 @@ export function SessionScreen({
                 );
               }}
               extraData={rowExtraData}
+              // The live "Thinking…" node (Owner Q2): the thread's last node while
+              // the turn thinks, under the rows so their keys never shift.
+              ListFooterComponent={
+                layout.tail === null ? undefined : (
+                  <ThinkingNode
+                    palette={palette}
+                    thought={layout.tail.thought}
+                    up={layout.tail.up}
+                    reduceMotion={a11yFlags.reduceMotion}
+                  />
+                )
+              }
               onViewableItemsChanged={onViewable}
               viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
               contentContainerStyle={rows.length === 0 ? styles.emptyList : styles.list}

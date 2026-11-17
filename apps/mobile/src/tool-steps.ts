@@ -8,7 +8,17 @@
  * layout only says how a row draws — a reasoning row folded into a step draws
  * nothing (`hidden`); the live "Thinking…" node is the list's footer (`tail`).
  */
-import { rowSubtitle, spokenDuration, toolName } from "./tool-summary.ts";
+import { chartRowSpec } from "./chart-row.ts";
+import {
+  type ToolNameParts,
+  type ToolTone,
+  bodyCommand,
+  outputView,
+  rowSubtitle,
+  spokenDuration,
+  toolMeta,
+  toolName,
+} from "./tool-summary.ts";
 import type { ReasoningRow, Row, ToolRow, ToolStatus } from "./transcript-rows.ts";
 
 /** Draw the thread segment above / below a node. */
@@ -78,7 +88,16 @@ type Node = { key: string } & (
   | { kind: "thought"; text: string }
 );
 
-export function stepLayout(rows: readonly Row[], running: boolean): StepLayout {
+/**
+ * `isBlock`: a tool row that draws as a block instead of a step (a chart, an
+ * artifact card). It is not a node: like assistant text, it ends the run and is
+ * absent from `cells`, and no thought folds into it.
+ */
+export function stepLayout(
+  rows: readonly Row[],
+  running: boolean,
+  isBlock: (row: ToolRow) => boolean = () => false,
+): StepLayout {
   const thinking = isThinking(rows, running);
   const cells = new Map<string, StepCell>();
   // Nodes per run, in order; a run ends at any row that is not a step/thought
@@ -116,7 +135,7 @@ export function stepLayout(rows: readonly Row[], running: boolean): StepLayout {
       batchOpen = false;
       continue;
     }
-    if (row.kind === "tool") {
+    if (row.kind === "tool" && !isBlock(row)) {
       let thought: string | null = null;
       if (pending.length > 0) {
         for (const r of pending) {
@@ -215,4 +234,110 @@ export function toggleOpen(ids: readonly string[], key: string): readonly string
 
 export function isOpen(ids: readonly string[], key: string): boolean {
   return ids.includes(key);
+}
+
+// ── What one node is told to draw (S2: `ui/StepNode.tsx` only maps these) ──
+
+/** The node on the thread: a green/red dot, a spinner, a hollow ring. */
+export type StepDot = "ok" | "error" | "running" | "queued";
+
+const DOT: Readonly<Record<ToolTone, StepDot>> = {
+  ok: "ok",
+  error: "error",
+  running: "running",
+  pending: "queued",
+};
+
+export interface StepRowView {
+  readonly name: ToolNameParts;
+  /** The one mono line after the name. */
+  readonly subtitle: string;
+  readonly dot: StepDot;
+  /** `toolMeta`'s right-hand text: `+n −m`, `denied` or the duration. */
+  readonly trailing: string;
+  readonly trailingRed: boolean;
+  /** A running step with a known start and no trailing yet: the node ticks its own clock. */
+  readonly live: boolean;
+  /** The body, in order: the folded thought, the full command, the result. */
+  readonly thought: string | null;
+  readonly command: readonly string[];
+  /** `⎿` on the first line; `hidden` lines wait for "show all". Null: no result. */
+  readonly output: {
+    readonly text: string;
+    readonly hidden: number;
+    readonly error: boolean;
+  } | null;
+  /** False when the body would be empty (no thought, command, result, diff or reply). */
+  readonly tappable: boolean;
+  readonly a11yLabel: string;
+}
+
+/** A tool row as its step node draws it; `full` = every output line (the screen's show-all set). */
+export function stepRowView(row: ToolRow, thought: string | null, full: boolean): StepRowView {
+  const meta = toolMeta(row);
+  const dot = DOT[meta.tone];
+  const command = bodyCommand(row.name, row.args);
+  const cut = outputView(row.output ?? "", { full, error: row.status === "error" });
+  const output =
+    cut.lines.length === 0
+      ? null
+      : {
+          text: cut.lines.map((line, i) => `${i === 0 ? "⎿ " : "  "}${line}`).join("\n"),
+          hidden: cut.hidden,
+          error: cut.error,
+        };
+  return {
+    name: toolName(row.name, row.label),
+    subtitle: rowSubtitle(row.name, row.args),
+    dot,
+    trailing: meta.trailing,
+    trailingRed: row.status === "error" || row.status === "denied",
+    live: dot === "running" && row.at !== undefined && meta.trailing === "",
+    thought,
+    command,
+    output,
+    tappable:
+      thought !== null ||
+      command.length > 0 ||
+      output !== null ||
+      row.diff !== undefined ||
+      row.denialReply !== undefined,
+    a11yLabel: stepA11yLabel(row, thought !== null),
+  };
+}
+
+/** An orphan thought's line: its first non-empty line, italic after "Thought". */
+export function thoughtRowView(text: string): {
+  readonly subtitle: string;
+  readonly a11yLabel: string;
+} {
+  const subtitle =
+    text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line !== "") ?? "";
+  return { subtitle, a11yLabel: subtitle === "" ? "Thought" : `Thought, ${subtitle}` };
+}
+
+/** The footer's VoiceOver label: `Thinking`, then `Thinking, 12 seconds`. */
+export function thinkingA11yLabel(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 1) {
+    return "Thinking";
+  }
+  return `Thinking, ${
+    seconds < 60
+      ? `${seconds} ${seconds === 1 ? "second" : "seconds"}`
+      : spokenDuration(seconds * 1000)
+  }`;
+}
+
+/**
+ * The screen's `isBlock` for `stepLayout`: a tool row that `TranscriptRow` draws
+ * as a block, not a step — a presented artifact (its card) or a chart call whose
+ * spec re-validates (the chart takes the row's place, `chart-row.ts`). A forged
+ * spec or a failed chart call keeps the generic row, so it stays a step.
+ */
+export function isBlockRow(row: ToolRow): boolean {
+  return row.artifact !== undefined || chartRowSpec(row) !== null;
 }
