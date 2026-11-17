@@ -247,16 +247,25 @@ interface Run {
 /** `main(["logs", …])` with a fake engine host for the run dial. */
 async function logs(
   args: string[],
-  seams: { hostFor?: (kept: KeptEntry) => EngineHost; signal?: AbortSignal } = {},
+  seams: {
+    hostFor?: (kept: KeptEntry) => EngineHost;
+    signal?: AbortSignal;
+    /** Sees each stdout/stderr chunk as it is written: wait on the follower's OWN
+     * output (its `watching` line, a pod exec), never on a duration. */
+    onOut?: (text: string) => void;
+    onErr?: (text: string) => void;
+  } = {},
 ): Promise<Run> {
   let out = "";
   let err = "";
   const code = await main(["bun", "cli", "logs", ...args], {
     out: (text) => {
       out += text;
+      seams.onOut?.(text);
     },
     err: (text) => {
       err += text;
+      seams.onErr?.(text);
     },
     terminal: { stdin: false, stdout: false },
     colour: false,
@@ -319,8 +328,17 @@ describe("logs -f <run-name>: the pod's watcher", () => {
     const p = await pod();
     const attachedBefore = p.host.get(UID)?.attachedCount ?? 0;
     expect(attachedBefore).toBe(1);
-    const run = logs([name, "-f", "--json"], { hostFor: p.hostFor });
-    await new Promise((done) => setTimeout(done, 40));
+    const watching = Promise.withResolvers<void>();
+    const run = logs([name, "-f", "--json"], {
+      hostFor: p.hostFor,
+      // Wait on the follower's own `watching` line, never on a 40 ms fence: the
+      // dial (config read, index lookup, the exec bridge) is a lot of real I/O to
+      // assume done in 40 ms, and under load it was not — `p.calls` was still empty.
+      onErr: (text) => {
+        if (text.includes(`watching ${UID}`)) watching.resolve();
+      },
+    });
+    await watching.promise;
     // The follower is a watcher only: the session has no attachment of ours.
     expect(p.host.get(UID)?.attachedCount).toBe(attachedBefore);
     expect(p.calls).toContain(

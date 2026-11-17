@@ -823,3 +823,70 @@ describe("in-place fallback for a non-writable directory (fix round 5)", () => {
     },
   );
 });
+
+// A loaded gate (or a suite opening many files at once) can hit `EMFILE` on any
+// single syscall. `safeRealpath`/`entryExists` used to swallow EVERY errno, so a
+// transient one became a verdict about the path: a LEXICAL target (`/var/…`) was
+// compared with a realpath'd root (`/private/var/…` on macOS) and a write INSIDE
+// the project was refused as "outside the workspace" — the main-gate flake, and a
+// wrong answer to the model in the product. Proved with real fds in
+// `.tentacle/tmp/main-gate-flakes/red-safe-realpath.test.ts`; injected here so the
+// case is deterministic instead of depending on exhausting the machine.
+describe("a transient path-resolution failure is never a confinement verdict", () => {
+  const EMFILE = (): Error =>
+    Object.assign(new Error("EMFILE: too many open files"), { code: "EMFILE" });
+
+  /** An env on this test's `root`, with the seam. */
+  const env = (pathCall: HostExecutionConfig["pathCall"]) =>
+    new HostExecution({ cwd: root, ...(pathCall !== undefined ? { pathCall } : {}) });
+
+  /** A seam that fails the first `n` path calls, then passes them through. */
+  const failFirst = (n: number) => {
+    let left = n;
+    let failed = 0;
+    const pathCall = <T>(op: () => T): T => {
+      if (left > 0) {
+        left--;
+        failed++;
+        throw EMFILE();
+      }
+      return op();
+    };
+    return { pathCall, failed: () => failed };
+  };
+
+  test("a write inside the project goes through: the transient failure is retried", async () => {
+    const seam = failFirst(4); // a few, not one: the retry must be real
+    const e = env(seam.pathCall);
+    await e.writeFile(join(root, "retried.txt"), "hello");
+    expect(readFileSync(join(root, "retried.txt"), "utf8")).toBe("hello");
+    expect(seam.failed()).toBeGreaterThan(0); // non-vacuous: the failures really happened
+  });
+
+  test("a write outside it is still refused, with the workspace message (never the raw errno)", async () => {
+    await writeFile(join(outside, "secret2.txt"), "orig");
+    const seam = failFirst(2);
+    const e = env(seam.pathCall);
+    const err = await refusal(e.writeFile(join(outside, "secret2.txt"), "pwned"));
+    expect(err?.message).toContain("outside the workspace");
+    expect(readFileSync(join(outside, "secret2.txt"), "utf8")).toBe("orig");
+  });
+
+  test("a persistence of transient failures never yields a lexical path (construction refuses, it never guesses)", async () => {
+    // Every path call fails: there is no honest realpath for the root, so the env
+    // cannot be built at all. The alternative — the old lexical fallback — mixed a
+    // `/var/…` root with `/private/var/…` targets and misjudged every write.
+    const alwaysFails = <T>(_op: () => T): T => {
+      throw EMFILE();
+    };
+    let thrown: unknown;
+    try {
+      env(alwaysFails);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain("could not resolve");
+    expect((thrown as Error).message).not.toContain("outside the workspace");
+  });
+});

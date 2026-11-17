@@ -29,7 +29,12 @@ import { SpyDaemonStore } from "./support/daemon-store-spy.ts";
 
 const CWD = "/tmp/titles-work";
 const tick = (ms = 1): Promise<void> => new Promise((r) => setTimeout(r, ms));
-async function until(cond: () => boolean, ms = 2000): Promise<void> {
+/**
+ * Wait for `cond`, in 1 ms steps, for up to `ms`. The default is a dead-man
+ * switch, not the assertion: a turn ending and its title request settling take
+ * however long a loaded machine takes.
+ */
+async function until(cond: () => boolean, ms = 20_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!cond()) {
     if (Date.now() > deadline) throw new Error(`timed out: ${String(cond)}`);

@@ -130,6 +130,17 @@ describe("F10 the transient voice line is never persisted", () => {
     await until(() => readdirSync(store).some((f) => f.endsWith(".jsonl")));
     const files = readdirSync(store).filter((f) => f.endsWith(".jsonl"));
     expect(files.length).toBeGreaterThan(0);
+    // Wait on the STORE's own commit, not on the model call above: the prompt is
+    // committed to the log a save later than the request is made, and under a
+    // loaded gate that save had not landed when this read it (`turn_start` on
+    // disk, the user's message not yet). Bounded, and only for the read: what is
+    // asserted below is unchanged.
+    const committed = (): boolean =>
+      files.some((file) => readFileSync(join(store, file), "utf8").includes("ciao"));
+    const deadline = Date.now() + 10_000;
+    while (!committed() && Date.now() < deadline) {
+      await tick(10);
+    }
     for (const file of files) {
       const text = readFileSync(join(store, file), "utf8");
       expect(text).not.toContain(VOICE_SPOKEN_LINE);
