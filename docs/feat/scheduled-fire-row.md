@@ -336,3 +336,50 @@ recurring wake shows no clock.
 *— claude-opus-5-5, 2026-11-17 (executor; CLI settings model `opus`, exact build suffix not readable from the environment)*
 
 ## Review
+
+**Verdict: REQUEST-CHANGES** (not mergeable: no code, the feature is not built;
+the executor's stop is correct and its premises hold).
+
+**Scope.** `git diff main...HEAD` = this doc only (+338). No production code, test,
+changelog fragment or `protocol.d/` note. Nothing to mutate (§9 not applicable).
+
+**Gate.** `bun run lint` clean (2047 files, 0 diagnostics); `bun run typecheck`
+clean (root + mobile + relay). No test file touched, so no test run is attributable.
+
+**Findings.**
+1. MEDIUM — the branch delivers none of S1–S4 (Execution §3). It must not merge as
+   a `feat`; it waits on the owner decision in Execution §2.
+2. MEDIUM — attribution mismatch: commit `cf03dbcf` is titled `exec (deepseek)`,
+   while Execution is signed `claude-opus-5-5`. §10 signing exists to track which
+   model did what; one of the two is wrong — fix it before merge.
+3. Missed option (put to the owner): the fire instant can also go in the
+   daemon-authored durable prefix (`schedulePromptText`, `core/src/schedule.ts:476-478`,
+   e.g. `· fired 16:14`). That prefix is already the plan's parse source, it adds
+   no message/format field, and it is written by the daemon, not the model, so it is
+   arguably outside "never from parsing the model text". Its cost: the model sees
+   the wall clock. Weigh it against the proposed `ChatMessage.scheduled` field.
+
+**Premise table (Execution §2).** TRUE: `updates.ts:274` ref is `{id, spec}`;
+`session-log.ts:374` a base zeroes `times`, and `times` exist only in memory
+(`commitTimes` 143-153, nothing restores them from entry `ts` on restart);
+`session-log-reader.ts:198` `LogState` keeps no `ts`; `tui/src/state.ts:32-59`
+`UserItem` has no time field; `hosted-session.ts:3412-3437` fire passes only
+`schedulePromptText` + `{id, spec}`. So `Wake <fire time>` for `every` cannot match
+on live vs reload with today's data. The claim holds.
+
+**Attacks tried.** (a) Is fire time recoverable from snapshot `times` on reload? No:
+zeroed on a base and lost on a restart. (b) From the `every` spec + ordinal? No:
+there's no anchor instant. (c) Did the executor change anything outside the doc?
+No (`--stat` excluding docs is empty). (d) Did the proposed field need a bump?
+Additive and optional on a strip schema, so no bump. Correct per §7, but it is a
+CRITICAL-entry/on-disk change, so asking the owner first was right.
+
+**Executor behaviour.** Disciplined: re-ran the repro, verified the load-bearing
+assumption, found a binding revision unimplementable from the available data,
+stopped and escalated with one decision rather than building a wrong head. Only
+fault: finding 2.
+
+Same model family as the doc's signed executor (fresh context only), so blind
+spots may be shared.
+
+*— claude-opus-5-5, 2026-11-17*
