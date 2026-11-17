@@ -1,3 +1,4 @@
+import type { ArtifactMeta } from "@tentacle/protocol";
 /**
  * The live artifact list, published by the session screen and read by the
  * gallery (docs/feat/model-artifacts.md D9).
@@ -12,7 +13,16 @@
  * Pure (no React, no client import): the phase words are `artifact-join.ts`'s.
  */
 import type { ArtifactPhase } from "./artifact-join.ts";
-import type { ArtifactMeta } from "@tentacle/protocol";
+
+/**
+ * The reader a gallery row opens with: the OWNING screen's own `readArtifact`
+ * (a second `RemoteSession` of one id steals the stream), so it is published on
+ * the feed the same way the list is.
+ */
+export type FeedReader = (
+  meta: ArtifactMeta,
+  options?: { readonly signal?: AbortSignal },
+) => Promise<Uint8Array>;
 
 /** What the screen last knew: the list and the phase it is in. */
 export interface ArtifactSnapshot {
@@ -33,6 +43,14 @@ export interface ArtifactFeed {
    */
   requestRefresh(): void;
   onRefresh(listener: () => void): () => void;
+  /**
+   * The handle's own verified read, published by the screen that holds it (once,
+   * at attach: the closure reads the CURRENT handle, so its identity is stable
+   * and a viewer opened on it never re-reads on an unrelated publish).
+   */
+  provideRead(reader: FeedReader): void;
+  /** That reader, or `undefined` before a screen attached to this session. */
+  read(): FeedReader | undefined;
 }
 
 export function feedKey(computerId: string, sessionId: string): string {
@@ -50,6 +68,7 @@ export function createFeedRegistry(): FeedRegistry {
   const feeds = new Map<string, ArtifactFeed>();
   const make = (): ArtifactFeed => {
     let snapshot: ArtifactSnapshot = EMPTY_SNAPSHOT;
+    let reader: FeedReader | undefined;
     const listeners = new Set<(snapshot: ArtifactSnapshot) => void>();
     const refreshListeners = new Set<() => void>();
     return {
@@ -72,6 +91,12 @@ export function createFeedRegistry(): FeedRegistry {
       onRefresh(listener) {
         refreshListeners.add(listener);
         return () => refreshListeners.delete(listener);
+      },
+      provideRead(next) {
+        reader = next;
+      },
+      read() {
+        return reader;
       },
     };
   };

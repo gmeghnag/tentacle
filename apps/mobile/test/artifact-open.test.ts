@@ -85,7 +85,13 @@ describe("cacheStep", () => {
 
   test("the file a viewer HOLDS is never evicted to make room", () => {
     const held = { entries: [{ sha256: "b".repeat(64), size: 3 * MB, usedAt: 1 }] };
-    const step = cacheStep(held, meta({ sha256: "c".repeat(64), size: 2 * MB }), "b".repeat(64), 2, 4 * MB);
+    const step = cacheStep(
+      held,
+      meta({ sha256: "c".repeat(64), size: 2 * MB }),
+      "b".repeat(64),
+      2,
+      4 * MB,
+    );
     expect(step.evict).toEqual([]);
     expect(step.note).toBe(tooBigNote(meta({ sha256: "c".repeat(64), size: 2 * MB })));
   });

@@ -1,3 +1,5 @@
+import { type ArtifactCardView, artifactCard } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 /**
  * One transcript row (docs/feat/mobile-session-view.md 12c): a DUMB renderer per
  * row kind (AGENTS §7). Every string is daemon-supplied data — plain `Text`,
@@ -14,8 +16,6 @@
  */
 import { type JSX, type ReactNode, useState } from "react";
 import { Image, Pressable, StyleSheet, Text, View } from "react-native";
-import { type ArtifactCardView, artifactCard } from "@tentacle/core";
-import type { ArtifactMeta } from "@tentacle/protocol";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
@@ -435,7 +435,8 @@ function ArtifactCardRow({
   );
 }
 
-function NoticeRowView({ row, palette }: RowProps): JSX.Element {  const notice = row as Extract<Row, { kind: "notice" }>;
+function NoticeRowView({ row, palette }: RowProps): JSX.Element {
+  const notice = row as Extract<Row, { kind: "notice" }>;
   return (
     <Shell row={notice}>
       {notice.separator === true ? (

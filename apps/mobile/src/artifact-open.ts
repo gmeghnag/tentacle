@@ -64,9 +64,7 @@ export function cacheStep(
   cap?: number,
 ): CacheStep {
   const plan =
-    cap === undefined
-      ? planCache(state, meta, keep, now)
-      : planCache(state, meta, keep, now, cap);
+    cap === undefined ? planCache(state, meta, keep, now) : planCache(state, meta, keep, now, cap);
   return { ...plan, note: plan.wontFit ? tooBigNote(meta) : null };
 }
 

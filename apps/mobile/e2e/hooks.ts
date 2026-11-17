@@ -87,7 +87,12 @@ export type HookName =
    */
   | "pending-ask"
   /** docs/feat/mobile-notifications.md N8: the payload the last `seal-push` placed. */
-  | "notify-payload";
+  | "notify-payload"
+  /**
+   * docs/feat/model-artifacts.md T8.1 (flow 30): the probe names that actually
+   * reached the e2e host's listener — the escape suite's only real evidence.
+   */
+  | "escape-hits";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -263,6 +268,12 @@ export interface HookActions {
   }>;
   /** The real pending asks on a session, oldest first (a flow names one). */
   readonly pendingAsk: (sessionId: string) => Promise<readonly string[]>;
+  /**
+   * docs/feat/model-artifacts.md T8.1 (flow 30): the probe names that actually
+   * reached the e2e host's listener. A screen claim cannot prove an escape did
+   * not happen; the listener can — this is the escape suite's only real evidence.
+   */
+  readonly escapeHits: () => { readonly hits: readonly string[] };
   readonly notifyRespond: (options: {
     readonly action: string;
     readonly text?: string;
@@ -520,6 +531,8 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
           }
           case "notify-payload":
             return Response.json({ ok: true, hook, ...(await deps.actions.notifyPayload()) });
+          case "escape-hits":
+            return Response.json({ ok: true, hook, ...deps.actions.escapeHits() });
           case "pending-ask": {
             const session = query.session;
             if (session === undefined) {

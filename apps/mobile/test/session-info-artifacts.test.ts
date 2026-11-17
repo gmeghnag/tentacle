@@ -7,7 +7,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ArtifactMeta } from "@tentacle/protocol";
-import { NOTHING_SEEN, type ArtifactSeen, markArtifactOpened } from "../src/artifact-seen-store.ts";
+import { type ArtifactSeen, NOTHING_SEEN, markArtifactOpened } from "../src/artifact-seen-store.ts";
 import {
   type ArtifactFacts,
   type InfoFacts,
@@ -74,7 +74,9 @@ describe("the artifacts section", () => {
   });
 
   test("a pull still running is `loading` (never an empty gallery)", () => {
-    const section = artifactsSection(facts({ artifacts: artifacts({ pull: { state: "loading" } }) }));
+    const section = artifactsSection(
+      facts({ artifacts: artifacts({ pull: { state: "loading" } }) }),
+    );
     expect(section?.phase).toBe("loading");
   });
 

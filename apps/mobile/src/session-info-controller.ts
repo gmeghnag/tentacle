@@ -255,7 +255,8 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
    * The session's artifacts (docs/feat/model-artifacts.md D9). `null`: the port
    * offers no pull, so the section is not drawn at all.
    */
-  let artifactsPull: Pull<readonly ArtifactMeta[]> | null = port.artifacts === undefined ? null : { state: "loading" };
+  let artifactsPull: Pull<readonly ArtifactMeta[]> | null =
+    port.artifacts === undefined ? null : { state: "loading" };
   let link: "up" | "down" = "up";
   let autoAcceptError: string | null = null;
   /**
@@ -455,7 +456,8 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
         apply(value);
         linkFrom(value);
         emit();
-      };    const paintMcp = paint<{ readonly servers: readonly McpServerStatus[] }>((value) => {
+      };
+    const paintMcp = paint<{ readonly servers: readonly McpServerStatus[] }>((value) => {
       mcp = value;
     });
     const paintEntry = paint<SessionListResult["sessions"][number] | null>((value) => {
@@ -487,14 +489,17 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
       (port.artifacts === undefined
         ? Promise.resolve(null)
         : handle === null
-          ? Promise.resolve<Pull<readonly ArtifactMeta[]> | null>(notOpen<readonly ArtifactMeta[]>())
-          : pull<ArtifactListResult>(() => (port.artifacts as () => Promise<ArtifactListResult>)(), reportFor("artifacts")).then(
+          ? Promise.resolve<Pull<readonly ArtifactMeta[]> | null>(
+              notOpen<readonly ArtifactMeta[]>(),
+            )
+          : pull<ArtifactListResult>(
+              () => (port.artifacts as () => Promise<ArtifactListResult>)(),
+              reportFor("artifacts"),
+            ).then(
               // The pull's magnitude is the ANSWER (`ArtifactListResult`); the
               // section reads the versions alone, so it is unwrapped here, once.
               (value): Pull<readonly ArtifactMeta[]> =>
-                value.state === "ready"
-                  ? { state: "ready", value: value.value.artifacts }
-                  : value,
+                value.state === "ready" ? { state: "ready", value: value.value.artifacts } : value,
             )
       ).then((value) => {
         if (value !== null) {

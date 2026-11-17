@@ -9,12 +9,12 @@
  * transcript that first needed it, or the cards vanish on every resync.
  */
 import { describe, expect, test } from "bun:test";
-import type { ArtifactListResult, ArtifactMeta } from "@tentacle/protocol";
-import type { ChatMessage } from "@tentacle/core";
 import { ArtifactsUnsupportedError } from "@tentacle/client";
+import type { ChatMessage } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
-import { RpcError } from "@tentacle/transport";
+import type { ArtifactListResult, ArtifactMeta } from "@tentacle/protocol";
 import { JsonRpcErrorCode } from "@tentacle/protocol";
+import { RpcError } from "@tentacle/transport";
 import type { ArtifactFeed } from "../src/artifact-feed.ts";
 import { createFeedRegistry } from "../src/artifact-feed.ts";
 import { createSessionController } from "../src/session-controller.ts";
@@ -69,9 +69,8 @@ function harness(
   } = {},
 ) {
   const registry = createFeedRegistry();
-  const feed: ArtifactFeed | undefined = options.withFeed === true
-    ? registry.feed("c1", "s1")
-    : undefined;
+  const feed: ArtifactFeed | undefined =
+    options.withFeed === true ? registry.feed("c1", "s1") : undefined;
   const calls = { list: 0, open: 0 };
   const emitted: SessionScreenState[] = [];
   let watcher: ((activity: unknown) => void) | null = null;
@@ -196,11 +195,60 @@ describe("the session screen's artifacts", () => {
     expect(h.calls.list).toBe(before + 1);
   });
 
+  /**
+   * S8+S9 Review finding 1, the part a source pin cannot prove: the gallery
+   * screen holds no handle, so the BYTES a viewer opens must come from the feed
+   * the owning screen published. Without this publication the gallery renders (a
+   * route, a list) and every tap inside it fails with "no artifact reader".
+   */
+  test("the feed publishes the screen's OWN reader (the gallery's viewer path)", async () => {
+    const read: ArtifactMeta[] = [];
+    const h = harness({
+      withFeed: true,
+      read: (m) => {
+        read.push(m);
+        return Promise.resolve(new Uint8Array([1, 2, 3]));
+      },
+    });
+    const screen = h.screen();
+    // Before any attach there is no handle, and therefore no reader: the gallery
+    // must not read through a half-built screen.
+    expect(h.feed?.read()).toBeUndefined();
+    await screen.open();
+    await settle();
+    const reader = h.feed?.read();
+    if (reader === undefined) {
+      throw new Error("the screen published no reader");
+    }
+    const bytes = await reader(meta({ artifactId: "a" }));
+    expect([...bytes]).toEqual([1, 2, 3]);
+    // Through the ONE handle this screen owns: exactly one read, of that meta.
+    expect(read.map((m) => m.artifactId)).toEqual(["a"]);
+  });
+
+  test("the published reader is stable across publishes (a viewer never re-reads)", async () => {
+    const h = harness({ withFeed: true });
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    const first = h.feed?.read();
+    if (first === undefined) {
+      throw new Error("the screen published no reader");
+    }
+    await screen.refreshArtifacts();
+    await settle();
+    expect(h.feed?.read()).toBe(first);
+  });
+
   test("an older daemon is `unsupported` — and the rows keep whatever they had", async () => {
     const h = harness({
       withFeed: true,
       list: () =>
-        Promise.reject(new ArtifactsUnsupportedError(new RpcError(JsonRpcErrorCode.MethodNotFound, "no such method"))),
+        Promise.reject(
+          new ArtifactsUnsupportedError(
+            new RpcError(JsonRpcErrorCode.MethodNotFound, "no such method"),
+          ),
+        ),
     });
     const screen = h.screen();
     await screen.open();

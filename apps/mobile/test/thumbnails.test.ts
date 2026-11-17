@@ -14,10 +14,12 @@ import {
   MAX_CACHED,
   MAX_IN_FLIGHT,
   PREFETCH_ROWS,
+  THUMBNAIL_MAX_BYTES,
   type ThumbnailDriver,
   type ThumbnailSource,
   type ThumbnailState,
   aborted,
+  artifactImageRef,
   createThumbnailDriver,
   failed,
   initialThumbnails,
@@ -26,8 +28,6 @@ import {
   thumbnailFor,
   visibleRefs,
   wantsThumbnail,
-  artifactImageRef,
-  THUMBNAIL_MAX_BYTES,
 } from "../src/thumbnails.ts";
 import type { ImageRef, ToolRow, UserRow } from "../src/transcript.ts";
 

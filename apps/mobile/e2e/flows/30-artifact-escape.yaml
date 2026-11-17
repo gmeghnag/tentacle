@@ -1,20 +1,24 @@
 appId: so.tentacle.app
 ---
 # 30 (docs/feat/model-artifacts.md T8.1): the escape suite. The mock model
-# `present`s `e2e/fixtures/escape.html` (fetch, XHR, img, CSS url(), WebSocket,
-# EventSource, form auto-submit, link target=_blank, location=, window.open,
-# meta refresh, iframe src, about:blank iframe + RTCPeerConnection, sendBeacon,
-# the RN bridge, cookie/localStorage read-after-write, an `sms:` navigation).
-# Every probe aims at the e2e host's probe listener, tagged with its name.
+# `present`s the run's `project/escape.html` (the fixture with every probe in the
+# plan's list: fetch, XHR, img, CSS url(), WebSocket, EventSource, form
+# auto-submit, link target=_blank, location=, window.open, meta refresh, iframe
+# src, about:blank iframe + RTCPeerConnection, sendBeacon, the RN bridge,
+# cookie/localStorage read-after-write, an `sms:` navigation), and every probe aims
+# at the run's probe listener, tagged with its name.
 #
-# Pass = ZERO requests on the listener with network off (30-escape-hits.js
-# with EXPECT=none), THEN, after "Allow network", the fetch probe ARRIVES
-# (EXPECT=fetch) — proving the listener can see a hit at all (non-vacuity).
-# The `sms:` probe must not leave the app: `session-view`'s viewer is still up.
+# The viewer opens with SCRIPTS OFF and NETWORK OFF (Owner Q5's pre-decided
+# fallback — this flow is what would decide the primary, and it has not run):
+# nothing may reach the listener. Then "Run scripts" (scripts still ON, network
+# still OFF) must STILL reach nothing — that is the check that makes the scripts
+# default safe. Only "Allow network" lets the fetch probe ARRIVE, which proves the
+# listener can see a hit at all (non-vacuity: without it, "zero hits" could just be
+# a dead listener).
 #
-# STATUS: PENDING. It needs S9's card (`artifact-card-*`) to open the viewer, a
-# mock-model `present` trigger and the `escape-hits` probe hook; see the S8
-# Execution in the task doc.
+# STATUS: wired end to end but NOT YET RUN in this task (a new native module needs
+# a dev build; the build machine's disk was full, see the S8 Execution). Until it
+# is run and green, scripts stay OFF by default — the safe side of Owner Q5.
 - runFlow: _pair.yaml
 - tapOn:
     id: "computer-${output.computerId}"
@@ -22,21 +26,46 @@ appId: so.tentacle.app
     id: "session-${ESCAPE_ID}"
 - assertVisible:
     id: "session-view"
+# The card, from a real turn: the mock model's `ESCAPE30` prompt presents the file.
+- runScript:
+    file: 30-present.js
+- extendedWaitUntil:
+    visible:
+      id: "artifact-card-escape"
+    timeout: 20000
 - tapOn:
     id: "artifact-card-escape"
 - assertVisible:
     id: "artifact-html-viewer"
+# The safe defaults, both off, both stated on screen.
 - assertVisible:
     id: "artifact-network-off"
+- assertVisible:
+    id: "artifact-scripts-off"
 # Give every timed probe (window.open 0.5 s … sms: 2.5 s, meta refresh 3 s) its turn.
 - waitForAnimationToEnd:
     timeout: 5000
-- assertVisible:
-    id: "artifact-html-viewer"
 - runScript:
     file: 30-escape-hits.js
     env:
       EXPECT: none
+# Scripts ON, network still OFF: the page's own code runs and must STILL reach
+# nothing (CSP's `connect-src 'none'` is what does it here; the navigation
+# predicate is what stops the link/location/sms probes).
+- tapOn:
+    id: "artifact-scripts-run"
+- tapOn: "Run"
+- extendedWaitUntil:
+    visible:
+      id: "artifact-scripts-on"
+    timeout: 5000
+- waitForAnimationToEnd:
+    timeout: 5000
+- runScript:
+    file: 30-escape-hits.js
+    env:
+      EXPECT: none
+# Network ON for this open: the fetch probe must now arrive (the listener works).
 - tapOn:
     id: "artifact-network-allow"
 - tapOn: "Allow"
@@ -48,5 +77,11 @@ appId: so.tentacle.app
     file: 30-escape-hits.js
     env:
       EXPECT: fetch
+# The `sms:` probe must not have left the app: the viewer is still up.
+- assertVisible:
+    id: "artifact-html-viewer"
 - tapOn:
     id: "artifact-viewer-close"
+# Back on the session: closing the viewer never navigated anywhere.
+- assertVisible:
+    id: "session-view"

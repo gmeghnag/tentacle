@@ -1,3 +1,4 @@
+import type { ArtifactMeta } from "@tentacle/protocol";
 /**
  * The artifacts gallery (docs/feat/model-artifacts.md D9): this session's
  * artifacts, newest first, under day headings, with the "new" mark the Session
@@ -13,16 +14,15 @@
 import { type JSX, useCallback, useEffect, useMemo, useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import type { ArtifactMeta } from "@tentacle/protocol";
 import { ARTIFACT_FEEDS, type ArtifactSnapshot } from "../artifact-feed.ts";
 import { type GalleryItem, gallerySummary, galleryView } from "../artifact-gallery.ts";
+import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
 import {
   markArtifactOpened,
   markGalleryOpened,
   seenFor,
   sessionKey,
 } from "../artifact-seen-store.ts";
-import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../theme.ts";
 import { Icon } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
@@ -35,8 +35,6 @@ export interface ArtifactGalleryScreenProps {
   readonly title: string;
   /** The session was in the Archived section: its bytes need an explicit reopen. */
   readonly archived: boolean;
-  /** The session screen's own reader (never a second session). */
-  readonly readBytes: ReadBytes;
   readonly onBack: () => void;
   readonly onLink: (href: string) => void;
   readonly onShare?: (fileUri: string) => void;
@@ -65,6 +63,18 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
   const { palette, computerId, sessionId, archived } = props;
   const insets = useSafeAreaInsets();
   const feed = useMemo(() => ARTIFACT_FEEDS.feed(computerId, sessionId), [computerId, sessionId]);
+  // The bytes come from the OWNER of the handle, published on the same feed (a
+  // second `RemoteSession` of one id would steal its stream). Absent (the
+  // session screen is gone) the viewer says so instead of blanking.
+  const readBytes = useCallback<ReadBytes>(
+    (meta, options) => {
+      const reader = feed.read();
+      return reader === undefined
+        ? Promise.reject(new Error("no artifact reader: open the session first"))
+        : reader(meta, options);
+    },
+    [feed],
+  );
   const [snapshot, setSnapshot] = useState<ArtifactSnapshot>(() => feed.current());
   const [open, setOpen] = useState<{ meta: ArtifactMeta; versions: number } | null>(null);
   const [seenVersion, setSeenVersion] = useState(0);
@@ -189,7 +199,7 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
               ))}
             </View>
           )}
-              />
+        />
       ) : (
         <View style={styles.center}>
           <Text
@@ -206,7 +216,7 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
           computerId={computerId}
           meta={open.meta}
           versions={open.versions}
-          readBytes={props.readBytes}
+          readBytes={readBytes}
           onClose={() => setOpen(null)}
           onLink={props.onLink}
           {...(props.onShare === undefined ? {} : { onShare: props.onShare })}

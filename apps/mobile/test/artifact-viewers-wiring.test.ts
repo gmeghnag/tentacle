@@ -76,12 +76,35 @@ describe("artifact viewers: the WebView isolation is the pure module's", () => {
   });
 
   test("the predicate and flags come from the pure builders", () => {
-    expect(source("HtmlViewer.tsx")).toContain("htmlViewerProps({ body, network, scripts })");
+    expect(source("HtmlViewer.tsx")).toContain(
+      "htmlViewerProps({ body, network, scripts: scripts && runScripts })",
+    );
     expect(source("PdfViewer.tsx")).toContain("pdfViewerProps(fileUri)");
     for (const f of ["HtmlViewer.tsx", "PdfViewer.tsx"]) {
       expect(source(f)).toContain("navigationPredicate(data)");
       expect(source(f)).toContain("webViewParts(data)");
     }
+  });
+
+  /**
+   * Finding 2 of the S8+S9 Review: the fallback must be SWITCHABLE, and the
+   * default must be the safe one. Scripts start off (`useState(false)` on the
+   * tap, and the pure `viewerFor` never asks for them) and the viewer renders a
+   * one-tap control that reaches `javaScriptEnabled` through the builders —
+   * never a hard-coded `scripts: true`.
+   */
+  test("scripts are OFF until the person taps, and the tap is the only switch", () => {
+    const html = source("HtmlViewer.tsx");
+    expect(html).toContain("const [runScripts, setRunScripts] = useState(false)");
+    expect(html).toContain('testID="artifact-scripts-run"');
+    expect(html).toContain('"artifact-scripts-off"');
+    expect(html).toContain("askScripts");
+    // The variable frame must carry BOTH per-open states, or a tap on one
+    // reloads away the other.
+    expect(html).toMatch(/key=\{`\$\{network \? "online" : "offline"\}-\$\{runScripts \?/);
+    // Never a stored setting, and never scripts on without the tap.
+    expect(html).not.toMatch(/SecureKV|AsyncStorage|SecureStore/);
+    expect(html).not.toContain("scripts: true");
   });
 
   test("no bridge, no injected script, no window hook, no Linking, no wider file access", () => {

@@ -9,7 +9,10 @@
  * predicate). `test/artifact-viewers-wiring.test.ts` pins all of that.
  *
  * Network is OFF per open; "Allow" asks once and reloads (a new `key`) without
- * the CSP's network clauses — for THIS open only, never remembered.
+ * the CSP's network clauses — for THIS open only, never remembered. Scripts are
+ * OFF by default too (Owner Q5's pre-decided fallback: the escape suite that
+ * would justify the primary has not run, and CSP does not govern WebRTC), with
+ * the same shape: one tap, this open only.
  */
 import { type JSX, useState } from "react";
 import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
@@ -18,6 +21,7 @@ import {
   htmlViewerProps,
   navigationPredicate,
   networkBarLabel,
+  scriptsBarLabel,
   webViewParts,
 } from "../../artifact-viewer.ts";
 import { type Palette, typography } from "../../theme.ts";
@@ -26,13 +30,15 @@ export interface HtmlViewerProps {
   readonly palette: Palette;
   /** The verified bytes, decoded as text. */
   readonly body: string;
-  /** `viewerFor(meta).scripts` — the owner's per-kind decision. */
+  /** `viewerFor(meta).canRunScripts` — whether the "Run scripts" tap exists. */
   readonly scripts: boolean;
 }
 
 export function HtmlViewer({ palette, body, scripts }: HtmlViewerProps): JSX.Element {
   const [network, setNetwork] = useState(false);
-  const data = htmlViewerProps({ body, network, scripts });
+  // Owner Q5's fallback: scripts OFF until a person asks for them, for this open.
+  const [runScripts, setRunScripts] = useState(false);
+  const data = htmlViewerProps({ body, network, scripts: scripts && runScripts });
   const { source, flags } = webViewParts(data);
   const allow = navigationPredicate(data);
   const askNetwork = () =>
@@ -40,6 +46,17 @@ export function HtmlViewer({ palette, body, scripts }: HtmlViewerProps): JSX.Ele
       { text: "Cancel", style: "cancel" },
       { text: "Allow", onPress: () => setNetwork(true) },
     ]);
+  // A page with scripts is arbitrary code from the model or a pod: the confirm
+  // says what it means, in one sentence, and nothing is remembered.
+  const askScripts = () =>
+    Alert.alert(
+      "Run scripts?",
+      "The page's own code runs until you close it. Its network is still off.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Run", onPress: () => setRunScripts(true) },
+      ],
+    );
   return (
     <View style={styles.fill} testID="artifact-html-viewer">
       <View style={[styles.bar, { borderBottomColor: palette.sep }]}>
@@ -60,8 +77,28 @@ export function HtmlViewer({ palette, body, scripts }: HtmlViewerProps): JSX.Ele
           </Pressable>
         )}
       </View>
+      {scripts ? (
+        <View style={[styles.bar, { borderBottomColor: palette.sep }]}>
+          <Text
+            testID={runScripts ? "artifact-scripts-on" : "artifact-scripts-off"}
+            style={[typography.footnote, { color: palette.sec }]}
+          >
+            {scriptsBarLabel(runScripts)}
+          </Text>
+          {runScripts ? null : (
+            <Pressable
+              testID="artifact-scripts-run"
+              accessibilityRole="button"
+              onPress={askScripts}
+              hitSlop={12}
+            >
+              <Text style={[typography.footnote, { color: palette.accent }]}>Run scripts</Text>
+            </Pressable>
+          )}
+        </View>
+      ) : null}
       <WebView
-        key={network ? "online" : "offline"}
+        key={`${network ? "online" : "offline"}-${runScripts ? "scripts" : "inert"}`}
         testID="artifact-webview"
         style={styles.fill}
         source={source}

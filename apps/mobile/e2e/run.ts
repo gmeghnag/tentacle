@@ -24,6 +24,7 @@ import { publicKeyOf } from "@tentacle/transport/noise";
 import { $, type Subprocess } from "bun";
 import { createApnsClient } from "../../relay/src/apns-client.ts";
 import type { ApnsJwtSource } from "../../relay/src/apns.ts";
+import { type ProbeListener, escapeFixture, startProbeListener } from "./escape-probes.ts";
 import { startHooks } from "./hooks.ts";
 import { payloadFor, sealPushMessage } from "./notify-steps.ts";
 import { createPairingHooks } from "./pairing.ts";
@@ -278,6 +279,21 @@ async function main(): Promise<number> {
   await mkdir(join(runDir, "config"), { recursive: true });
   console.log(`e2e:mobile run ${runId} → ${runDir}`);
 
+  // The escape suite's listener (docs/feat/model-artifacts.md T8.1, flow 30): the
+  // ONLY thing that can say whether a hostile artifact reached the network.
+  // Started for every run (it is inert until a page loads) so the hook is always
+  // answerable and flow 30 needs no special case.
+  const probes: ProbeListener = startProbeListener();
+  // Flow 30's artifact: the hostile fixture with the placeholder replaced by this
+  // run's listener. A WORKSPACE file, because `present` reads `path` through the
+  // confined reader (D3) — the fixture on disk stays port-free.
+  await writeFile(
+    join(runDir, "project", "escape.html"),
+    escapeFixture(
+      await readFile(join(REPO, "apps", "mobile", "e2e", "fixtures", "escape.html"), "utf8"),
+      probes.url,
+    ),
+  );
   // The mock model runs in THIS process: no extra children to reap.
   const { startMockModel } = await import("./mock-model.ts");
   const mock = startMockModel({ holdMs: 120_000 });
@@ -576,6 +592,9 @@ async function main(): Promise<number> {
           });
           return { accepted: true };
         },
+        // Flow 30's daemon truth (T8.1): what the listener RECEIVED. Nothing on
+        // screen can answer this — a viewer's claim is not evidence.
+        escapeHits: () => ({ hits: probes.hits() }),
         // Flow 24's light/dark pairs: `simctl ui`, not `simctl spawn` (it is a
         // simulator setting, not a process inside it).
         appearance: async (name) => {
@@ -658,6 +677,8 @@ async function main(): Promise<number> {
     mock.stop();
     // The fake APNs is in THIS process too (an h2c server keeps the loop alive).
     apns.stop();
+    // And so is the escape suite's probe listener.
+    probes.stop();
     // The local relay is in THIS process, so it needs an explicit stop (a live
     // server keeps the event loop, and therefore the run, alive).
     relay.stop();
@@ -1200,6 +1221,11 @@ export const FLOWS: readonly string[] = [
   // docs/feat/mobile-chrome.md S10: the floating Activity button (opt-in) — drag,
   // snap, kept across a relaunch, back to Header — on a session of its own.
   "28-floating-activity",
+  // docs/feat/model-artifacts.md T8.1: the HTML artifact's escape suite — the
+  // hostile fixture in the isolated WebView, every probe counted by a real
+  // listener. It runs the mock model's `ESCAPE30` turn on a session of its own,
+  // so its card cannot leak into another flow's transcript.
+  "30-artifact-escape",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -1275,6 +1301,9 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "26-drawer": "DRAWER_ID",
   "27-activity": "ACTIVITY_ID",
   "28-floating-activity": "FLOAT_ID",
+  // docs/feat/model-artifacts.md T8.1 (flow 30): its own session, because the
+  // `present` card is daemon-side state that outlives `clearState`.
+  "30-artifact-escape": "ESCAPE_ID",
 };
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */

@@ -22,8 +22,8 @@ import type {
   SessionListEntry,
   SessionSkillsResult,
 } from "@tentacle/protocol";
-import type { ArtifactSeen } from "./artifact-seen-store.ts";
 import { unseenArtifacts } from "./artifact-gallery.ts";
+import type { ArtifactSeen } from "./artifact-seen-store.ts";
 import type { ChatStatus } from "./chat-header.ts";
 import { sanitizeDisplay } from "./display-text.ts";
 import { keyedScheduleRows, scheduleMetaText, scheduleTitle } from "./schedule-view.ts";
@@ -94,7 +94,9 @@ export interface InfoFacts {
   readonly artifacts?: ArtifactFacts;
 }
 
-/** Which kind of thing a switch hides from the model. */export type CapabilityKind = "mcp" | "skill";
+/** Which kind of thing a switch hides from the model. */ export type CapabilityKind =
+  | "mcp"
+  | "skill";
 
 /** One `session/set_capability` this phone sent and has not had answered yet. */
 export interface CapabilityOp {

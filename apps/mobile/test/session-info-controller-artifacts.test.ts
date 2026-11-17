@@ -88,7 +88,9 @@ describe("the artifacts pull", () => {
       port({
         artifacts: () =>
           Promise.reject(
-            new ArtifactsUnsupportedError(new RpcError(JsonRpcErrorCode.MethodNotFound, "no such method")),
+            new ArtifactsUnsupportedError(
+              new RpcError(JsonRpcErrorCode.MethodNotFound, "no such method"),
+            ),
           ),
       }),
     );

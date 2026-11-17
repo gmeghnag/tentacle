@@ -240,9 +240,7 @@ function InfoRowView({
           ? {}
           : { accessibilityLabel: row.accessibilityLabel })}
         {...(row.expand === undefined ? {} : { onPress: onExpand, chevron: !expanded })}
-        {...(row.opens === "artifacts"
-          ? { onPress: onOpenArtifacts, chevron: true as const }
-          : {})}
+        {...(row.opens === "artifacts" ? { onPress: onOpenArtifacts, chevron: true as const } : {})}
         trailing={trailing}
         testID={`session-info-${sectionId}-${rowIdentity(row)}`}
       >

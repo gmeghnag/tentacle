@@ -30,8 +30,8 @@ import { RpcError } from "@tentacle/transport";
 import { type ActivityMemory, emptyMemory, markOpened, onSubagents } from "./activity-memory.ts";
 import type { ArtifactFeed } from "./artifact-feed.ts";
 import {
-  EMPTY_JOIN,
   type ArtifactJoin,
+  EMPTY_JOIN,
   joinRows,
   phaseOfError,
   withList,
@@ -915,6 +915,23 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   }
 
   /**
+   * Publish the handle's own verified read for the gallery's viewer (D9). The
+   * closure reads the CURRENT `handle` on every call, so one publication serves
+   * the whole screen life and a screen with no handle (before the attach, after a
+   * resync's `leave`) refuses instead of reading through a dead session.
+   */
+  function publishReader(): void {
+    deps.artifacts?.feed.provideRead((meta, options) => {
+      const session = handle;
+      const read = session?.readArtifact?.bind(session);
+      if (read === undefined) {
+        return Promise.reject(new Error("no artifact reader on this session"));
+      }
+      return read(meta, options);
+    });
+  }
+
+  /**
    * Re-read `artifact/list` (docs/feat/model-artifacts.md D9). Single-flight: a
    * gallery mount, a refresh request and a landed list can collide, and one
    * answer serves all three. A failure is a PHASE, never a throw — the screen
@@ -1060,6 +1077,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     // The cards of a resumed transcript (docs/feat/model-artifacts.md D9): the
     // history that landed has no tool details, so the daemon's list is the only
     // source. Asked at every attach — a live turn's card arrives by itself.
+    publishReader();
     void refreshArtifacts();
     // Asks reach the person from now on. Set AFTER the attach, so a replayed ask
     // is queued by the broker until the sheet is up and then delivered in order

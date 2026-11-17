@@ -1,3 +1,6 @@
+import { artifactCard } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
+import { Directory, File, Paths } from "expo-file-system";
 /**
  * The artifact viewer (docs/feat/model-artifacts.md D9): ONE modal that reads the
  * bytes and shows the viewer `artifact-viewer.ts` names for the kind.
@@ -12,9 +15,6 @@
  */
 import { type JSX, useEffect, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
-import { artifactCard } from "@tentacle/core";
-import { Directory, File, Paths } from "expo-file-system";
-import type { ArtifactMeta } from "@tentacle/protocol";
 import { cacheDir, cachePath } from "../../artifact-cache.ts";
 import { openTarget, viewerText } from "../../artifact-open.ts";
 import { viewerFor, viewerSubtitle } from "../../artifact-viewer.ts";
@@ -27,7 +27,10 @@ import { PdfViewer } from "./PdfViewer.tsx";
 import { ViewerHeader } from "./ViewerHeader.tsx";
 
 /** How the bytes arrive: the session screen's own reader (never a second session). */
-export type ReadBytes = (meta: ArtifactMeta, options?: { signal?: AbortSignal }) => Promise<Uint8Array>;
+export type ReadBytes = (
+  meta: ArtifactMeta,
+  options?: { signal?: AbortSignal },
+) => Promise<Uint8Array>;
 
 interface Ready {
   readonly kind: "ready";
@@ -36,7 +39,10 @@ interface Ready {
   readonly text: string | null;
 }
 
-type Phase = { readonly kind: "loading" } | Ready | { readonly kind: "failed"; readonly text: string };
+type Phase =
+  | { readonly kind: "loading" }
+  | Ready
+  | { readonly kind: "failed"; readonly text: string };
 
 /** Where the verified copy lives: `<cache>/artifacts/<computerId>/<sha256>`. */
 function cacheFile(computerId: string, sha256: string): File {
@@ -141,7 +147,7 @@ export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Elemen
       ) : choice.kind === "pdf" ? (
         <PdfViewer fileUri={phase.fileUri} />
       ) : choice.kind === "webview" ? (
-        <HtmlViewer palette={palette} body={phase.text ?? ""} scripts={choice.scripts} />
+        <HtmlViewer palette={palette} body={phase.text ?? ""} scripts={choice.canRunScripts} />
       ) : (
         <MarkdownViewer
           palette={palette}

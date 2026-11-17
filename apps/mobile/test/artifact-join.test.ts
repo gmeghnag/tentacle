@@ -58,9 +58,9 @@ describe("artifactsByCall", () => {
 describe("needsArtifactJoin", () => {
   test("true only for a present row still without a card", () => {
     expect(needsArtifactJoin([tool("present", "c1")])).toBe(true);
-    expect(needsArtifactJoin([tool("present", "c1", { artifact: meta({ artifactId: "a" }) })])).toBe(
-      false,
-    );
+    expect(
+      needsArtifactJoin([tool("present", "c1", { artifact: meta({ artifactId: "a" }) })]),
+    ).toBe(false);
     expect(needsArtifactJoin([tool("Read", "c2")])).toBe(false);
   });
 });

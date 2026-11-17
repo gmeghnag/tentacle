@@ -29,8 +29,20 @@ export type ViewerKind = "image" | "webview" | "pdf" | "markdown" | "text" | "no
 
 export interface ViewerChoice {
   readonly kind: ViewerKind;
-  /** Scripts run in the WebView (`html`/`svg` only; a PDF is always false). */
+  /**
+   * Scripts run in the WebView **right now**. `false` for every kind today: the
+   * Owner Q5 gate turned on the escape suite (T8.1), and CSP cannot block
+   * `RTCPeerConnection` — so the pre-decided FALLBACK is what ships: scripts OFF,
+   * with the viewer's own one-tap "Run scripts" (per open, never remembered).
+   * Flip this to `canRunScripts` only once that suite shows zero hits.
+   */
   readonly scripts: boolean;
+  /**
+   * Whether this kind COULD run scripts, i.e. whether the viewer offers the
+   * "Run scripts" tap. `false` for a PDF (the platform renders it; nothing in a
+   * PDF needs them) and for every non-WebView kind.
+   */
+  readonly canRunScripts: boolean;
 }
 
 const VIEWER: Readonly<Record<ArtifactKind, ViewerKind>> = {
@@ -47,10 +59,20 @@ const VIEWER: Readonly<Record<ArtifactKind, ViewerKind>> = {
  * The viewer for a card's kind: an unknown wire kind is `other`, whose viewer is
  * `none` — a kind this build does not know is SHARED, never rendered.
  */
+/**
+ * The viewer for a card's kind: an unknown wire kind is `other`, whose viewer is
+ * `none` — a kind this build does not know is SHARED, never rendered.
+ *
+ * Scripts are OFF, and the viewer offers "Run scripts" (Owner Q5's fallback):
+ * the escape suite that would justify the primary (scripts on, network off) has
+ * not run, and WebRTC — which CSP does not govern — is a beacon a hostile page
+ * gets for free. A person who wants an interactive page taps once; nothing is
+ * remembered.
+ */
 export function viewerFor(meta: { readonly kind: string }): ViewerChoice {
   const kind = artifactKindOf(meta);
   const viewer = VIEWER[kind];
-  return { kind: viewer, scripts: viewer === "webview" };
+  return { kind: viewer, scripts: false, canRunScripts: viewer === "webview" };
 }
 
 /**
@@ -181,6 +203,14 @@ export function viewerSubtitle(card: { readonly line2: string }): string {
 /** What the network bar says (the HTML/SVG viewer's one control). */
 export function networkBarLabel(network: boolean): string {
   return network ? "Network on · this open only" : "Network off";
+}
+
+/**
+ * What the scripts bar says (Owner Q5's fallback control): the page is inert
+ * until a person asks, and the ask is for THIS open alone.
+ */
+export function scriptsBarLabel(scripts: boolean): string {
+  return scripts ? "Scripts on · this open only" : "Scripts off";
 }
 
 /** The meta a viewer is opened FOR: the version under the tap, never re-resolved. */

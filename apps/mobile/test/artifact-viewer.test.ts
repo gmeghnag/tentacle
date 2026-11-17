@@ -14,6 +14,7 @@ import {
   navigationPredicate,
   networkBarLabel,
   pdfViewerProps,
+  scriptsBarLabel,
   viewerFor,
   viewerSubtitle,
   viewerTarget,
@@ -23,24 +24,70 @@ import {
 const meta = (kind: string) => ({ kind });
 
 describe("viewerFor", () => {
-  test("each kind gets its viewer, and scripts follow the owner's decision", () => {
-    expect(viewerFor(meta("image"))).toEqual({ kind: "image", scripts: false });
-    expect(viewerFor(meta("svg"))).toEqual({ kind: "webview", scripts: true });
-    expect(viewerFor(meta("html"))).toEqual({ kind: "webview", scripts: true });
-    expect(viewerFor(meta("pdf"))).toEqual({ kind: "pdf", scripts: false });
-    expect(viewerFor(meta("markdown"))).toEqual({ kind: "markdown", scripts: false });
-    expect(viewerFor(meta("text"))).toEqual({ kind: "text", scripts: false });
+  test("each kind gets its viewer; scripts are OFF, and the tap follows the kind", () => {
+    expect(viewerFor(meta("image"))).toEqual({
+      kind: "image",
+      scripts: false,
+      canRunScripts: false,
+    });
+    expect(viewerFor(meta("svg"))).toEqual({
+      kind: "webview",
+      scripts: false,
+      canRunScripts: true,
+    });
+    expect(viewerFor(meta("html"))).toEqual({
+      kind: "webview",
+      scripts: false,
+      canRunScripts: true,
+    });
+    expect(viewerFor(meta("pdf"))).toEqual({ kind: "pdf", scripts: false, canRunScripts: false });
+    expect(viewerFor(meta("markdown"))).toEqual({
+      kind: "markdown",
+      scripts: false,
+      canRunScripts: false,
+    });
+    expect(viewerFor(meta("text"))).toEqual({ kind: "text", scripts: false, canRunScripts: false });
   });
 
   test("an unknown kind from a newer daemon is `none` — shared, never rendered", () => {
-    expect(viewerFor(meta("hologram"))).toEqual({ kind: "none", scripts: false });
-    expect(viewerFor(meta(""))).toEqual({ kind: "none", scripts: false });
-    expect(viewerFor(meta("HTML"))).toEqual({ kind: "none", scripts: false });
+    expect(viewerFor(meta("hologram"))).toEqual({
+      kind: "none",
+      scripts: false,
+      canRunScripts: false,
+    });
+    expect(viewerFor(meta(""))).toEqual({ kind: "none", scripts: false, canRunScripts: false });
+    expect(viewerFor(meta("HTML"))).toEqual({ kind: "none", scripts: false, canRunScripts: false });
   });
 
   test("a kind named on the prototype is not a kind (no `__proto__` lookup)", () => {
     expect(viewerFor(meta("__proto__")).kind).toBe("none");
     expect(viewerFor(meta("constructor")).kind).toBe("none");
+  });
+
+  /**
+   * Owner Q5's pre-decided FALLBACK (S8+S9 Review finding 2): the escape suite
+   * that would justify scripts-on has not run, and CSP does not govern
+   * `RTCPeerConnection`, so a hostile page gets a DNS beacon for free. Scripts
+   * must therefore be OFF by default while the viewer still OFFERS the tap —
+   * the two halves finding 2 says were missing (hard-coded on, no control).
+   */
+  test("the fallback ships: scripts OFF by default, the tap available", () => {
+    for (const kind of ["html", "svg", "pdf", "image", "markdown", "text", "other"]) {
+      expect({ kind, scripts: viewerFor(meta(kind)).scripts }).toEqual({ kind, scripts: false });
+    }
+    // Only a WebView kind offers it (a PDF is rendered by the platform).
+    expect(viewerFor(meta("html")).canRunScripts).toBe(true);
+    expect(viewerFor(meta("svg")).canRunScripts).toBe(true);
+    expect(viewerFor(meta("pdf")).canRunScripts).toBe(false);
+    // And the props follow the tap, never the kind alone.
+    expect(htmlViewerProps({ body: "<p>", network: false, scripts: false }).javaScriptEnabled).toBe(
+      false,
+    );
+  });
+
+  test("the scripts bar says what is true now, and that nothing is remembered", () => {
+    expect(scriptsBarLabel(false)).toBe("Scripts off");
+    expect(scriptsBarLabel(true)).toBe("Scripts on · this open only");
   });
 });
 
@@ -163,7 +210,7 @@ describe("small viewer words", () => {
       createdAt: 1,
     });
     expect(target.meta.artifactId).toBe("a");
-    expect(target.choice).toEqual({ kind: "webview", scripts: true });
+    expect(target.choice).toEqual({ kind: "webview", scripts: false, canRunScripts: true });
   });
 });
 

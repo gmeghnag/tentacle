@@ -96,7 +96,10 @@ export function needsArtifactJoin(rows: readonly Row[]): boolean {
  * own answer, never a later guess — and the SAME array comes back when nothing
  * joined, so a no-op cannot re-render the transcript.
  */
-export function joinRows(rows: readonly Row[], byCall: ReadonlyMap<string, ArtifactMeta>): readonly Row[] {
+export function joinRows(
+  rows: readonly Row[],
+  byCall: ReadonlyMap<string, ArtifactMeta>,
+): readonly Row[] {
   if (byCall.size === 0) {
     return rows;
   }
@@ -122,7 +125,9 @@ export function joinRows(rows: readonly Row[], byCall: ReadonlyMap<string, Artif
  */
 export function galleryListable(
   join: ArtifactJoin,
-): { readonly ok: true; readonly list: readonly ArtifactMeta[] } | { readonly ok: false; readonly phase: Exclude<ArtifactPhase, "ready"> } {
+):
+  | { readonly ok: true; readonly list: readonly ArtifactMeta[] }
+  | { readonly ok: false; readonly phase: Exclude<ArtifactPhase, "ready"> } {
   if (join.phase === "ready") {
     return { ok: true, list: join.list };
   }

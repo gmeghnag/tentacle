@@ -2699,3 +2699,123 @@ the disk has room (then build a new dev build: a new native module).
 **Executor behaviour:** S8 (opus) was honest and thorough, including the PENDING/unverified lines and a full disk. S9 (deepseek) committed with lint red and its own wiring test red, without recording either.
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Execution
+
+### Fix round 1 — S8 + S9 Review findings (2 HIGH, 2 MEDIUM)
+
+*— claude-code CLI 2.1.323 (Claude agent); the model id itself is not exported to
+this agent's environment (no `ANTHROPIC_MODEL`/`CLAUDE_MODEL` set), so rather than
+invent one it is stated as unknown — 2026-11-17*
+
+**As built, in order**
+
+1. **Gate first.** `bunx biome check --write apps/mobile` cleared the 22 format/organizeImports
+   errors the Review found (16 files). `git diff` after it contains formatting only.
+2. **Finding 1 (HIGH) — the gallery and the card are reachable now.** Three links, all absent:
+   - `apps/mobile/App.tsx` registers `name="ArtifactGallery"` over `<ArtifactGalleryScreen>`, and
+     `SessionRoute` takes a required `onOpenArtifacts(from)` which it hands to `<SessionScreen>`;
+     the navigator builds it with `openArtifactGallery(navigation, …)` (`App.tsx:2106-2124`,
+     `:1366`). TWO hand-offs, deliberately: the Review's defect was one missing.
+   - The session screen publishes `artifacts: { feed: ARTIFACT_FEEDS.feed(…, …) }` to
+     `createSessionScreen` (`App.tsx:1311`) — the feed the gallery reads.
+   - **The bytes** (a defect the Review's finding 1 implies but does not name): the gallery screen
+     required an injected `readBytes` prop no caller had, so even a routed gallery could not open a
+     viewer. `ArtifactFeed` gained `provideRead`/`read` (`artifact-feed.ts:46-53`, `:95-100`); the
+     owning screen publishes a closure over its CURRENT handle at every attach
+     (`session-screen-controller.ts:923-935`), and the gallery builds its `ReadBytes` from
+     `feed.read()` (`ArtifactGallery.tsx:69`) — one publication per screen life, so a viewer
+     opened on it never re-reads on an unrelated publish.
+3. **Finding 2 (HIGH) — the fallback ships, and its switch exists.** `ViewerChoice` split into
+   `scripts` (what runs now) and `canRunScripts` (whether the tap is offered):
+   `viewerFor` returns `scripts: false` for EVERY kind (`artifact-viewer.ts:72`), so the primary
+   (scripts on) is no longer hard-coded, and `HtmlViewer` grew a second bar — `Scripts off` /
+   `Run scripts` → one-sentence `Alert` → `javaScriptEnabled` through the builders,
+   `useState(false)` (`HtmlViewer.tsx:40`, `:51`), never stored. The WebView's `key` carries both
+   per-open states, or a tap on one would reload away the other.
+4. **Finding 2, the harness half — flow 30 is wired, not inert.** `e2e/escape-probes.ts` (new): the
+   probe listener whose `hits()` is the suite's only evidence, plus `escapeFixture()`. `run.ts`
+   starts it, writes the substituted fixture to `project/escape.html` (a workspace file, because
+   `present` reads `path` through the confined reader), answers `escape-hits`, passes
+   `ESCAPE_ID` to Maestro, adds `"30-artifact-escape"` to `FLOWS`, and stops the listener.
+   `mock-model.ts` grew `ESCAPE30` → one `present` call under id `escape`;
+   `flows/30-present.js` starts the turn from the harness's client; `30-artifact-escape.yaml` was
+   rewritten for the three states (inert → scripts on, network off → network on), each ending on
+   `30-escape-hits.js`.
+5. **Finding 3 (MEDIUM) — this section.** S9's Execution was missing because commit `209e975e`
+   did not touch the doc; the drift (card → gallery, not viewer) is recorded here.
+6. **Finding 4 (MEDIUM) — one pin was RED for the wrong reason.** `artifact-gallery-wiring.test.ts`
+   stripped comments before scanning for `RemoteSession`/`LINKS.get`/`openSession`/
+   `webSocketChannelFactory`, and the pin now targets the dial path rather than a word in a
+   comment. The comment at `ArtifactGallery.tsx:7` stays: it explains why the rule exists.
+7. **Changelog** (`changelog.d/model-artifacts.added.md`, one bullet, edited not added): the iPhone
+   sentence now says HTML/SVG open inert with scripts AND network each per-open.
+
+**Drift from the Implementation (and why)**
+
+- The plan's D9 says "scripts on, network off (Owner Q5)"; the Review's finding 2 and the still-unrun
+  escape suite make scripts-off-with-a-tap the adopted branch of Owner Q5's own pre-decision. The
+  plan's text is unchanged — the switch is one line in `viewerFor` once T8.1 is green.
+- `ArtifactFeed.provideRead`/`read` is an addition to S7/S8's feed: without it the gallery could
+  not satisfy its own viewer path (finding 1's unstated half).
+- Flow 30's `EXPECT=none` now runs TWICE (inert, then scripts-on-network-off). That second check is
+  new but it is what makes the scripts default a measured claim rather than assumed.
+
+**Tests** (red before green; each shown RED on the buggy code)
+
+- `artifact-gallery-wiring.test.ts` — 2 new/extended pins: `App.tsx` wires the whole chain
+  (route, screen, feed, two `onOpenArtifacts=` hand-offs), and the dial-path scan strips comments.
+  Neither existed before; the old `RemoteSession` pin was the permanently-red one.
+- `session-screen-artifacts.test.ts` — 2 new behavioural tests: the feed publishes the screen's OWN
+  reader (absent before an attach, exactly one read after, through the one handle), and the published
+  reader is identity-stable across publishes.
+- `artifact-viewer.test.ts` — `viewerFor`'s expectations rewritten to `{scripts, canRunScripts}`, plus
+  a new test asserting the fallback default over every kind and `scriptsBarLabel`'s two strings.
+- `artifact-viewers-wiring.test.ts` — the `htmlViewerProps` pin follows `scripts && runScripts`, plus
+  a new test: `useState(false)`, both testIDs, `askScripts`, the two-state `key`, no stored setting,
+  and no `scripts: true` anywhere in the viewer.
+- `e2e-escape-probes.test.ts` (new, 8 tests) — the listener over real loopback HTTP (records by name,
+  never drops an unnamed probe, `reset` forgets), the fixture substituting every placeholder while
+  the on-disk file stays port-free, `ESCAPE30` through the REAL provider stream (one `present` call,
+  exact arguments), and flow 30's wiring (in `FLOWS`, its own session var, the six testIDs, three
+  daemon-truth steps, the `escapeHits` action, `--only` resolution).
+
+**Mutations** (`.tentacle/tmp/model-artifacts/fix-round-1-mutations.ts`: apply, run the narrow file,
+restore; `git status` unchanged after — all 9 RED):
+
+```
+M1 the feed never publishes the screen's reader        RED
+M2 App.tsx does not hand the opener to the screen      RED   # first SURVIVED: the pin
+                                                             # regex spanned both hand-offs;
+                                                             # fixed to count them, now RED
+M3 the ArtifactGallery route is never registered       RED
+M4 scripts default back ON (the old primary)           RED
+M5 the scripts tap is ignored                          RED
+M6 the gallery dials again                             RED
+M7 a nameless probe is dropped                         RED
+M8 flow 30 dropped from FLOWS                          RED
+M9 the mock model stops presenting the fixture         RED
+```
+
+**Gate**
+
+- `bunx tsc --noEmit`, `bunx tsc -p apps/mobile --noEmit`, `bunx tsc -p apps/relay --noEmit`: clean.
+- `bun run lint` (`biome check .`): clean, 1853 files — the Review's 22 errors are gone.
+- `bun test` (full, once): **13385 pass, 5 skip (the three opt-ins), 2 fail** — both in
+  `packages/daemon/test/serve-log-store.test.ts` ("the overlay … an in-place annotation …"), a file
+  this task never touches (`git status` is mobile-only). Re-run alone: **22 pass, 0 fail**; and with
+  every `packages/daemon/test/*.test.ts` together: **1344 pass, 0 fail**. Read as load-order flakes
+  under a 958-file run, not a regression — **unverified** as "the branch is green" for that pair;
+  verify with a second full `bun test` on an idle machine.
+- `bun test apps/mobile`: 2431 pass, 0 fail.
+
+**What is still NOT verified** — and must not be read as done:
+
+- **T8.1 has not been RUN.** Flow 30 is wired end to end (`FLOWS`, the mock turn, the listener, the
+  three assertions) and its harness is unit-tested, but no simulator ran it: a new native module
+  (`react-native-webview`) needs a dev build, and the S8 run's build failed on a full disk. Whether
+  WKWebView blocks WebRTC — the whole point of Owner Q5 — is therefore still unknown, which is
+  exactly why scripts ship OFF. Verify: `bun run e2e:mobile --ios 26 --only 30-artifact-escape`
+  once the disk has room.
+- **T8.2 (pixels)**: untouched by this round.
+
