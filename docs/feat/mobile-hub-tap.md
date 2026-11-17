@@ -502,3 +502,18 @@ The new tests are not vacuous.
 - (e) e2e coherence: fails (finding 1).
 
 **Executor behaviour:** the work is disciplined. It went red-first, mutated its own tests, disclosed the snapshot and `git checkout` incidents, and recorded its drift. But it edited e2e flows it never drove without checking the state they assume, and its model signature contradicts the commit message.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* (fresh context; reviewed `git diff HEAD~1` = `5483ee9d`)
+
+**Verdict: PASS**
+
+1. **Finding 1 is fixed.** Flow 33 now waits for `hub-notice` and asserts `activity-sheet-close` is not visible. `hub-notice` is a real testID, rendered when `hubNotice` is set (`SessionScreen.tsx:1214-1216`). The stale header and the `run.ts` comment are corrected. The new `e2e-flows.test.ts` pin is not vacuous: putting back `assertVisible activity-sheet-close` makes it fail.
+2. **Finding 2 is fixed.** `HubFan.tsx` now computes one opacity: `Animated.multiply(base, DIMMED_OPACITY)`, where `base` is the fade `value` or the highlight dim. The old `styles.dimmed` override is gone. The new wiring test is not vacuous: putting back a fixed `DIMMED_OPACITY` makes it fail. It is a source pin, the same pattern as `hub-opacity-wiring`, so it cannot prove what is rendered on device.
+
+**Gate:** `e2e-flows` + `hub-tap-wiring` give 45 pass / 0 fail. `bun run lint` is clean (2045 files) and `bun run typecheck` is clean. Both mutations were reverted and `git status` is clean.
+
+**Regressions:** none found. A dimmed item that is highlighted keeps `!lit` → `base`, unchanged. A dimmed item drawn while another item is lit shows at 0.55 × 0.45, which is intended.
+
+**Nit (below MEDIUM):** the flow asserts that `hub-notice` is visible but not that it says `Nothing running`. The flow was still not run on a device.
