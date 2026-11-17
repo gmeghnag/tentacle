@@ -115,3 +115,33 @@ directory is `1383 pass, 1 skip, 0 fail`. The 5 skips are the opt-in ones —
 14645 pass, as is the whole `apps/mobile` suite (`3026 pass / 0 fail`).
 
 ## Review
+
+### Review (opus, paired)
+*— claude-opus-5-5, 2026-11-17*
+
+**Verdict: PASS.**
+
+- **Owner's property holds.** `StepNode` has no `marker` prop, no `styles.marker` and
+  no `<ThereforeDots>` on the line (`StepNode.tsx:363-366` goes subtitle → trailing);
+  exactly two `<ThereforeDots>` remain: the `thought`/`thinking` node in the gutter and
+  the folded thought in `StepBody`. Every call site that passed `marker` is gone
+  (`TranscriptRow.tsx` ×2, `ThinkingNode` ×1). The Thought row still renders
+  `node: "thought"` (its ∴ node), and the Thinking footer is untouched.
+- **Red→green, re-run by me.** `step-thought-marker.test.ts` + `tool-rows-wiring.test.ts`:
+  21 pass on HEAD. I swapped `StepNode.tsx` + `TranscriptRow.tsx` back to the merge-base
+  (`84872bdf`; `main` itself has since moved on and its `TranscriptRow` no longer
+  resolves on this branch): all 4 behavioural cases + both source guards + the wiring
+  `=== 2` pin fail (`Expected: false / Received: true`). Reverted, tree clean.
+- **Test strength.** The behavioural cases assert the prop is *absent* (`"marker" in
+  props`), and the source guard pins the drawn count at exactly 2 — together they
+  cover re-adding the ∴ by prop or by a hard-coded draw. The body walk (Mutation B)
+  proves the folded thought is still visible, so nothing is lost.
+- **Scope.** Production changes are limited to the two files; the
+  `docs/feat/mobile-tool-rows.md` annotation is doc-only and disclosed as drift. The
+  `stepA11yLabel` "thought first" is kept on purpose; I agree (it is the only signal a
+  VoiceOver user gets, and the owner's complaint was visual).
+- **Changelog** `changelog.d/mobile-step-thought-marker.fixed.md` is present, one bullet.
+- **Gate (scoped per brief):** `bunx tsc -p apps/mobile` clean. Full suite not re-run
+  here; the executor's single `serve-log-store` load flake is in an untouched package.
+- **Executor behaviour:** honest. It caught and fixed its own weak assertion (Mutation B)
+  instead of reporting the first green.
