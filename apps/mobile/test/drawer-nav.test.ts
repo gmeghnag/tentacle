@@ -70,8 +70,9 @@ describe("drawerTarget", () => {
 
   test("the row's cwd rides the route (the header's folder); none → no key", () => {
     const withCwd = drawerTarget(FROM, pick({ cwd: "/srv/app" }));
-    expect(withCwd.kind === "replace" && withCwd.route.name === "Session" && withCwd.route.params)
-      .toMatchObject({ sessionId: "s2", cwd: "/srv/app" });
+    expect(
+      withCwd.kind === "replace" && withCwd.route.name === "Session" && withCwd.route.params,
+    ).toMatchObject({ sessionId: "s2", cwd: "/srv/app" });
     const empty = drawerTarget(FROM, pick({ cwd: "" }));
     expect(empty.kind === "replace" && "cwd" in empty.route.params).toBe(false);
   });

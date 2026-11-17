@@ -40,9 +40,7 @@ describe("headerFolder (docs/feat/mobile-header-status.md: `<folder> · <model>`
 
   test("the folder survives the attach phases (opening, failed, ended)", () => {
     const cwd = "/srv/app";
-    expect(sessionView(input({ cwd, status: { phase: "opening" } })).headerFolder?.label).toBe(
-      cwd,
-    );
+    expect(sessionView(input({ cwd, status: { phase: "opening" } })).headerFolder?.label).toBe(cwd);
     expect(sessionView(input({ cwd, ended: "deleted" })).headerFolder?.label).toBe(cwd);
   });
 });

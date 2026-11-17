@@ -1434,7 +1434,8 @@ function SessionRoute({
       unsubscribe?.();
       created?.dispose();
     };
-  }, [computerId, sessionId, archived, title]);
+    // `cwd` is a route param like `title`: fixed for the route's life.
+  }, [computerId, sessionId, archived, title, cwd]);
 
   if (controller === null) {
     // Dialling the computer: the screen's own id is present, so a flow (and a

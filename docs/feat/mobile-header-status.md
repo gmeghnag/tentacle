@@ -55,4 +55,41 @@ Pre-approved shape:
 
 ## Execution
 
+**Load-bearing check (re-run first): HOLDS.** `SessionListEntrySchema.cwd: line(4096)` is required (`packages/protocol/src/session.ts:1513`) and the daemon fills it (`packages/daemon/src/session-host.ts:504` live, `:886` archived). No protocol change, no `protocol.d/` note, `protocol.json` untouched. The open/attach result (`session.ts:1103`) has no cwd and none was added. The entry has no hop-target label, so none is shown: a hop target's row shows whatever path its entry carries.
+
+**Repro (feat: capability missing).** Before: `chatStatus` returned `{ text: "Idle" | "Running" | …, tone }` (the subtitle word); there was no `asking` fact (an ask showed as Running); `SessionRow`/`DrawerRow`/`SessionRoute` carried no cwd; the header subtitle was `● <word> · <model>`. The new tests were red first: `chat-header`/`folder-label` on the missing exports (new capability), and `session-list`, `drawer-list`, `drawer-nav`, `session-view-header` and `session-screen-info` (4 of 6) on their **assertions**.
+
+**As built, in order:**
+1. `src/chat-header.ts`: `ChatFacts.asking`, `ChatStatus = { dot, state, dimTitle }`, `HeaderDot`, `dotLook`, `titleLabel`. `src/session-info.ts`: the unused `headerModel`/`HeaderModel` (they pinned "status word first") are removed, with their 2 tests.
+2. `src/folder-label.ts` (new): `/Users/<u>`, `/home/<u>`, `/root` → `~`; more than 5 components → `<first two>/…/<last two>`.
+3. `src/session-list.ts` `SessionRow.cwd` (both row builders). `src/drawer-list.ts` `DrawerRow.folder` and `.cwd`. `src/drawer-nav.ts` `DrawerPick.cwd` → route (`""` → no key). `src/routes.ts` `SessionRoute.cwd?`. `App.tsx`: the drawer pick, the Sessions list `onOpen` → route, and `SessionRoute` → `createSessionScreen({ cwd })` (added to the effect's deps).
+4. `src/session-view.ts` `headerFolder: { label, path } | null`. `src/session-screen-controller.ts` `deps.cwd?`. A one-shot `lookUpCwd()` runs after each attach while the folder is unknown (single-flight; a failure retries at the next attach; off-page → `""` → no folder). `headerCwd()` = Session info's `entryCwd` ?? lookup ?? route. `src/session-info-controller.ts` exposes `entryCwd` (like `openContext`).
+5. Components: `src/ui/HeaderDot.tsx` (new: 6 pt, native-driver opacity pulse, steady under Reduce Motion, hidden from VoiceOver). `src/ui/ScreenHeader.tsx` gets `titleLead`/`titleDim`/`titleLabel` (compact only; the Rename label reads `"<title>, <state>. Rename"`). `src/screens/SessionScreen.tsx`: the subtitle is a Pressable → `openInfo()` with the folder (mono 11, `ellipsizeMode="middle"`, shrink 1) and `· model` (shrink 100, so the model gives way first). No subtitle when both are absent. `src/screens/SessionsDrawer.tsx`: a mono folder line under the title.
+6. `changelog.d/mobile-header-status.changed.md`.
+
+**Drift from Implementation:**
+- `SessionInfoState.entryCwd` (new field) instead of reading the info controller's private `entry`.
+- The test "opening Session info starts all four pulls" now expects `calls.list === 2`: the attach's folder lookup plus the sheet's own pull. That harness's route carries no cwd. This is intended, not a regression.
+- The drawer row's VoiceOver label is unchanged (title + meta, no folder), to keep it short. Open to the reviewer.
+
+**Tests added:** `chat-header` (every state → dot; ask > running; link down > ask; ended + running → no dot + dim; `dotLook`; `titleLabel`), `folder-label` (5), `session-list` (cwd on active/archived/pinned rows), `drawer-list` (folder; empty), `drawer-nav` (cwd on route; `""` → no key), `session-view-header` (3), `session-screen-info` (route cwd costs no list; lookup once + no re-ask; failure → none, then retried; off-page → none; info entry refreshes a stale route; a lookup landing after dispose paints nothing), `header-wiring` (4 source-wiring checks: no status word or StatusDot; the ask fact, lead, dim and label wired; mono, middle cut, tap → openInfo; the drawer folder line).
+
+**Mutations (each applied by hand, the narrow file run, then reverted):**
+| # | mutation | result |
+|---|---|---|
+| M1 | `chatStatus`: ask only when `!running` | KILLED (`an ask wins over the running turn`) |
+| M5 | drop the `lookUpCwd()` call at attach | KILLED (3 tests) |
+| M6 | lookup even when the route gave a cwd | KILLED (`route's cwd … costs no session/list`) |
+| M7 | route/lookup preferred over the info entry | KILLED (`refreshes a stale route folder`) |
+| M9 | drawer `folder: row.cwd` (no `folderLabel`) | KILLED |
+Not mutated: the "after dispose paints nothing" test is guarded by `emit()`'s existing `disposed` check, so it pins that guard rather than new code.
+
+**Gate:** `bun run typecheck` clean · `bun run lint` clean (1980 files, 0 errors/warnings) · `bun test`: 14434 pass, 0 fail, 5 skip. AGENTS §6 lists 3 opt-in skips. I added no skip, but I did not check whether the 5 are all opt-in.
+
+**Not done / unverified:**
+- **Simulator screenshots: NOT taken.** `e2e/run.ts:174` `firstDevice` picks the FIRST iOS-26 simulator, and the only one present is already Booted (`iPhone 17 Pro`), probably another session's. Running the harness would take it over, which goes against "use your OWN simulator". Decision needed: a dedicated simulator (a udid flag on the harness, or a cloned device), or the reviewer's run. To verify: drawer + header in light/dark, a long path, a pod path, and each dot state (running, ask, connecting, offline, not connected, ended).
+- **Owner addendum 2 (copy conversation text)** landed in Context DURING execution. It is a separate capability with its own pure module, menu and VoiceOver work, and it is not in this Implementation, so it is **not implemented**. Decision needed: a new task, or an Implementation update on this branch.
+
+*— claude-opus-5-5 (executor), 2026-11-17*
+
 ## Review
