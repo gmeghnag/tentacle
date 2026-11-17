@@ -2202,3 +2202,38 @@ shared blind spots are possible)
   The full suite was not re-run.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; the SAME model family as the executor)
+
+### P6 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (two MEDIUM; the code paths are right, but tests don't pin them).
+
+1. **MEDIUM — the background (offline / send-later) wire path for PDFs has no test pinning it.**
+   `apps/mobile/src/outbox-session.ts:129` is the only place where `documents` reaches
+   `session.send` for a driver-run item. Mutation: `documents.length === 0` → `>= 0` (so PDFs are
+   always dropped) → **2340 pass, 0 fail** across `apps/mobile/test`. Failure scenario: a PDF
+   queued while offline goes out with no document. The send succeeds and nothing says the file
+   was lost. M4/M5 cover the controller and the screen's folding prompt, but not this port. The
+   same mutation run also left two smaller gaps unpinned, also surviving: `reuploaded()` keeping
+   the stale `document{ref}` block (`outbox.ts:275`), so one re-upload is wasted and the item is
+   then refused; and `isDocument` not validating the stored block (`outbox-store.ts:205`).
+2. **MEDIUM — an older build half-loads a new outbox file.** `OUTBOX_SCHEMA_VERSION` stays 1
+   (`outbox-store.ts:34`), and the old `isItem` ignores unknown fields. After a downgrade (a
+   dev build or TestFlight rollback), a pending item with `documents` loads and is sent as text
+   plus photos only. The PDF disappears without a word, and a PDF-only item goes out as an empty
+   prompt. That breaks §7's on-disk rule ("refuses loudly; never half-loads"). Fix: bump the
+   version when an item carries documents, or write such items so an old build refuses them.
+
+**Gate** (P6 scope): the 8 touched/new test files: 106 pass, 0 fail; `apps/mobile/test`:
+2340 pass, 0 fail; `bun run typecheck` clean; `bun run lint` 1792 files, clean. Full `bun test`
+was not re-run.
+**Mutations** (temporary edits, reverted; `git status` clean afterwards): the 3 above all survived.
+**Attacks that found nothing:** `laptop`/`off` never pick (checked at the pick, not only the
+sheet; §7 pod rule holds; `attachDocument` stays the client's one session path);
+`takeChips` sends only `ready` chips, so `documentBlocksOf` never drops an un-attached file
+from a live send; PDF copies are protected from pruning (`photo-copies.ts:148`); full-file read
+before the size check matches `photo-source.ts:99` (not new); copy collisions throw instead of
+swapping files (`overwrite:false` + seq).
+**Executor:** honest drift log (a–g), and the screen-path bug was found red-first (M5). The
+mutation table left out the driver's own session port.
+
+*— claude-opus-5-5, 2026-11-17* (fresh context; same model family as the P4/P5 reviewers, different from the P6 executor)
