@@ -1,6 +1,6 @@
 # feat/mobile-session-actions — Long-press row actions in the sessions drawer: Rename, Delete, Pin
 
-> **Status:** implementation (plan written, NOT approved — see Owner questions)
+> **Status:** implementation APPROVED (orchestrator, night delegation 2026-11-17)
 > **Branch:** `feat/mobile-session-actions`
 > **Size:** M overall, split S1 (M) · S2 (M) · S3 (S) · **Blast:** S1 load-bearing (persisted sidecar + protocol, additive) · S2 contained (mobile) · S3 cross-module (TUI) · **Suited:** S1 strong model + mandatory fresh-context Review (red-team the persistence and protocol invariants of AGENTS §7); S2/S3 any model + standard Review
 > **Changelog:** `changelog.d/mobile-session-actions.added.md` (`- **Session actions on iPhone.** Long-press a session in the drawer to rename, pin to top or delete it; pins are stored on the computer, so the phone and the Mac see the same order.`)
@@ -367,6 +367,10 @@ includes `tsc -p apps/mobile`).
    (sessions are addressed by id).*
 8. **Order inside Pinned.** *Rec: same as the list (`updatedAt` desc). No
    manual reordering.*
+
+**Answers (orchestrator, 2026-11-17, owner asleep — night delegation; owner said "vai in autonomia" for this task):** Q1–Q8 all as recommended. The owner may overrule on waking.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-17*
 
 ## Execution
 
