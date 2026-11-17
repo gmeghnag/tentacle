@@ -13,6 +13,9 @@ Owner 2026-11-17 09:14, on the iOS build of main 32dcf4fb: "sembra che qui i tes
 3. Hub long-press dead / no haptics / no glyph / Activity "Scheduled · soon" → being fixed in `fix/mobile-hub-longpress-dead` (do NOT touch hub files; just re-check at the end and note).
 4. App crash-loop on a session with a chart → being fixed in `fix/mobile-crash-ibm-chart` (do not touch; re-check at the end).
 
+
+**Orchestrator addendum (09:33, owner):** the ∴ glyph beside "Thought" (and the ∴ marker on tool rows) is too small — "anche un filo più grandi" (owner screenshot `/Users/gmeghnag/Desktop/Screenshot 2026-11-17 at 09.31.19.png`, light mode). Make it a bit larger (≈ 12–13 pt instead of 10, centred on the thread line, the dots still thin), same change on the row marker; screenshot before/after in light + dark.
+
 *— claude-opus-5-5 (orchestrator), 2026-11-17*
 
 ## Implementation
@@ -105,3 +108,22 @@ skip count is 5, against the 3 opt-in skips in AGENTS §6; not investigated.
 *— claude-opus-5-5 (executor), 2026-11-17*
 
 ## Review
+
+**Verdict: REQUEST-CHANGES.**
+
+Gate (re-run): the 3 touched test files pass 30/0 · `bun run lint` is clean (1966 files) · `bun run typecheck` is clean (root, mobile, relay). I did not re-run the full `bun test`.
+
+Findings (MEDIUM):
+1. **The test that pins the inset is vacuous in its "sheet" branch.** `apps/mobile/test/artifact-gallery-wiring.test.ts:134` slices `App.tsx` from `options=` up to the first `>`. That `>` is the arrow `=>` in `options={({ route }) => (…)` at `App.tsx:2235`, so the slice never contains `presentation` and `sheet` is always false. The test therefore only pins "`insetTop={false}` never appears". It does not pin the "iff the route is a sheet" that the Execution claims. Scenario: someone later presents the gallery as `presentation: "modal"`. The test still demands an inset, so the ✕ gets a double top gap, and the claimed guard stays silent.
+2. **The D6 chart-bytes pin is now vacuous.** `artifact-gallery-wiring.test.ts:113` still asserts `toContain("phase.text")`. After the refactor, the only `phase.text` in the modal is the **failed** text (`ArtifactViewerModal.tsx:134`). The chart now receives `args: text` (`:183`). Scenario: change the chart's args to `""` or to `failedText`, and every chart artifact renders nothing, with all tests green. The pin should match `args: text` or the `ready?.text` source.
+3. **The task's primary deliverable is missing.** There was no simulator sweep: no `shots/`, no `### Sweep results` table, and no re-check of bugs 3 and 4. The fixes for bug 1 (the overlay and the inset) are source pins only, and their pixels are unverified. The fix is correct on paper, but the task cannot close as `fix/mobile-qa-sweep` until the sweep runs.
+
+Premises: TRUE — a text kind's read sets `fileUri: ""` (`ArtifactViewerModal.tsx:104`), and the old order hit too-big first. TRUE — `svg` maps to `webview` (`artifact-viewer.ts:50`), so it is covered by the fix. TRUE — the gallery route has no `presentation` (`App.tsx:2235`). TRUE — the modal is mounted only by the gallery (`ArtifactGallery.tsx:306`), and that host root is `flex: 1` with no padding, so the absolute overlay covers it.
+
+Mutations: I could not run them, because the session's permission gate refused the mutation script. Findings 1–2 are proved by reading the source, which settles them: the slice's end index and the single `phase.text` occurrence. The executor's M3 (`viewerBody`'s buggy order → red) is consistent with `artifact-open.test.ts:115`.
+
+Attacks tried: (a) other hosts of the absolute-root modal: none, holds. (b) svg/markdown/text reaching too-big: none, holds. (c) `share`/`none` before the file check: pinned, holds. (d) `E2E_HOLD` SIGINT vs the `finally` teardown: the `once` listener resolves into the normal teardown, holds (e2e only). (e) `CALL` directives re-firing on the follow-up round: guarded by `followUp`, holds. No §7 invariant is touched (mobile UI plus the e2e harness only).
+
+Executor behaviour: honest. It marked the task PARTIAL, stated what was unverified, and kept the business logic in a pure module (§7). The two weak pins above are its §9 lapses.
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, same model family as the executor: shared blind spots possible)
