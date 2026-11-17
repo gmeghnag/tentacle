@@ -981,6 +981,9 @@ describe("start-up output pinned (docs/feat/context-reset-refresh.md)", () => {
       // `context_reset`; a pure presentational tool, so it costs the tool list
       // one name and its hand-written schema (`jsonSchema`, not zod-derived).
       "chart",
+      // docs/feat/model-diagrams.md D2: the Mermaid diagram, registered right
+      // after `chart` (same scope, same hand-written-schema shape).
+      "diagram",
     ]);
     expect(JSON.stringify(defs.find((d) => d.name === "skill"))).toBe(
       '{"name":"skill","description":"Load a skill: packaged instructions for a specific kind of task. When the task matches a skill listed under \\"# Skills\\" in the system prompt, call this FIRST with the skill\'s name, then follow the instructions it returns. A skill already loaded in this conversation does not need loading again.","parameters":{"type":"object","properties":{"name":{"type":"string","enum":["alpha","beta"],"description":"The skill to load, from the Skills list"}},"required":["name"],"additionalProperties":false}}',

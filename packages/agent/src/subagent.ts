@@ -33,6 +33,7 @@ import {
   AGENT_STATUS_TOOL_NAME,
   CHART_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
+  DIAGRAM_TOOL_NAME,
   MOVE_SESSION_TOOL_NAME,
   PRESENT_TOOL_NAME,
   SCHEDULE_CONTROL_TOOL_NAME,
@@ -407,6 +408,8 @@ export function createSubagentRunner(deps: SubagentDeps): {
         // rows there: the parent can chart the report it is given
         // (docs/feat/model-charts.md D3, Owner Q7).
         tool.name === CHART_TOOL_NAME ||
+        // A diagram likewise (docs/feat/model-diagrams.md D2, P6).
+        tool.name === DIAGRAM_TOOL_NAME ||
         // The schedule table is the SESSION's, and a fire starts a MAIN-agent
         // turn (docs/feat/cron-tool.md P4): a child may neither arm nor drop one.
         tool.name === SCHEDULE_CREATE_TOOL_NAME ||
@@ -642,6 +645,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
         toolName === MOVE_SESSION_TOOL_NAME ||
         toolName === PRESENT_TOOL_NAME ||
         toolName === CHART_TOOL_NAME ||
+        toolName === DIAGRAM_TOOL_NAME ||
         toolName === AGENT_CONTROL_TOOL_NAME ||
         toolName === AGENT_KILL_TOOL_NAME ||
         toolName === AGENT_MESSAGE_TOOL_NAME ||

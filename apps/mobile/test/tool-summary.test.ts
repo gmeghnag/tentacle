@@ -81,6 +81,13 @@ const CASES: readonly {
     args: '{"type":"line","title":"Ricavi 2026","datasets":[{"label":"R","data":[1]}]}',
     subtitle: "Ricavi 2026",
   },
+  // docs/feat/model-diagrams.md D2 (T2.8): a diagram row names the diagram, never its source.
+  {
+    name: "diagram",
+    args: '{"title":"Flusso di login","mermaid":"flowchart TD\\n  A --> B"}',
+    subtitle: "Flusso di login",
+  },
+  { name: "diagram", args: '{"mermaid":"flowchart TD"}', subtitle: '{"mermaid":"flowchart TD"}' },
   { name: "shell", args: "not json at all", subtitle: "" },
   { name: "mystery_tool", args: "raw args", subtitle: "raw args" },
 ];
