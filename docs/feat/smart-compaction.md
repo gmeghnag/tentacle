@@ -388,7 +388,143 @@ S2 (agent loop with a fake provider capturing `request.messages`):
 
 ## Execution
 
-*(empty until Implementation is approved)*
+*— claude-sonnet-4-5-20250929 (executor), 2026-11-17 · **S1 only***
+
+**Scope.** S1 of the plan, nothing of S2–S4: the pure pruner and its own test.
+No wiring into the loop, no guard in the write tools, no config, no replay, no
+A/B. The changelog fragment is written (S4 pins the default, but the module is
+new public API of `@tentacle/agent`, so the fragment lands with its slice).
+
+**Load-bearing check (re-run first, §1/§9).** Passed. Script
+`.tentacle/tmp/smart-compaction/loadbearing.ts` (in the worktree; the sandbox
+refused the main tree's `.tentacle/tmp`, same gitignored location), driving the
+real session path — `Agent.runMessages` over ONE caller-owned array, the shape
+`Session.messages` has — with a scripted provider that keeps the request array
+by reference:
+
+```
+requests: 2
+req[1] user msg === stored[0]: false      <- see note (1)
+req[2] tool msg === stored[2]: true       <- the loop sends the STORED objects
+modelView keeps the stored objects: true
+stored prefix intact: true
+stored grew to: 4 user,assistant,tool,assistant
+prune of the view kept the store identical: true
+pruned view differs: true
+prune.ts exists: false                    <- S1's capability was absent
+```
+
+Note (1): the *user* message is not identical by reference only because
+`runMessages`'s options push a copy path for the first request; the **tool
+result** (`req[2]`, index 2) is the stored object itself, and `modelView` is
+identity-preserving (`repairHistory` returns the input array when there is
+nothing to repair). The property the design needs is exactly this: the request
+is built from the stored messages (so a prune step must **copy**), and a
+copy-based prune leaves the store byte-identical — the last three lines. The
+seam therefore holds: one projection, `pruned(modelView(projectedHistory(...)))`,
+changes only what the model sees.
+
+**Drift from the Implementation (and why).**
+
+1. **`stubFor`'s signature** is `stubFor(about: StubAbout)`, not
+   `stubFor(message, rule)`. The plan's `(message, rule)` cannot carry what the
+   R1/R3/R4/R5 stubs must state (the superseding call id, the read range, the
+   kept head/tail, the spill path) — those come from *other* history entries, so
+   the stub is a function of the rule's facts, not of the message alone.
+   `pruneCandidates` derives `StubAbout` from the history, which keeps the
+   required property (a stub is a deterministic function of the stored history)
+   and is what the determinism test pins.
+2. **"succeeded" is a positive shape match, not an error-flag read.** The stored
+   history keeps no `isError` — `toolMessage` (`agent.ts:266-278`) stores
+   `content` only — so `succeeded()` matches the tool's own success phrasing
+   (`/^wrote \d+ bytes to .+ \(\+\d+ -\d+\)$/`, `/^edited .+ \(\+\d+ -\d+\)$/`,
+   `/^edited .+ with \d+ edits \(\+\d+ -\d+\)$/`, and for `fs_read` "not the
+   registry's `tool fs_read failed:` prefix and not a `[hook]` rewrite"). The
+   positive direction is the safe one: anything unrecognised is left alone. This
+   is the plan's R2 "successful" precondition made checkable without changing
+   `ChatMessage` (which would be a persisted-format change).
+3. **A stub larger than the body is refused** (`savedChars > 0` required for
+   every rule). Not in the plan, but implied by its purpose: a tiny result gains
+   nothing and a longer stub would grow the request. Its own test pins it.
+4. **`covers()` normalises "no range" to the whole file.** A whole-file read is
+   NOT superseded by a later narrow window; a later whole-file read DOES
+   supersede a narrow earlier one. (Found by mutation M1, see below: the first
+   version had the direction inverted and the mutation was not caught until the
+   test fixture used realistic body sizes.)
+5. **`estimateGain`** returns `{chars, tokens}` with 4 chars/token, the
+   `HeuristicTokenCounter` default — the plan asks for the gain and S2's trigger
+   compares it to the window; the counter itself is the loop's (`anchorContext`
+   / `estimateUsed`), so a model-specific counter still governs the trigger in
+   S2. `prune.ts` therefore imports no token counter.
+6. **`payloadPlaceholder` and `formatChars` are exported** helpers of the module
+   (the plan names four functions; these are shared by `stubFor` and R2 and are
+   worth testing directly).
+7. **`OPTS`**: `keepRecentRounds` 6, `outputChars` 2000, `headLines` 10,
+   `tailLines` 30 in `PRUNE_DEFAULTS`, exactly as the plan's Design tabulates
+   them (S2/S3 retune through config).
+
+**Red before green.** `packages/agent/test/prune.test.ts` (28 cases) was written
+first and run with no module: `error: Cannot find module '../src/prune.ts'` —
+red on the missing capability, as the brief requires. Every assertion is written
+against the Implementation's contract, and the four rounds of genuine failure
+during implementation were all *assertion* failures (a body smaller than its
+stub; `repairCounts` returning `null`, not zeroes, when nothing was repaired),
+never import or compile errors.
+
+**Mutation checks (§9, pasted results).** Each mutation applied to
+`prune.ts`, the suite run, then the original restored and re-verified green.
+Seven mutations, seven catches — every one by the test that owns its property:
+
+```
+M1 R1 disregards the read range  -> (fail) R1 > NOT after a later read of a DIFFERENT (narrower) range
+M2 applyPrune mutates the store  -> (fail) the stored history is byte-identical…
+                                    (fail) user and assistant CONTENT is byte-identical…
+                                    (fail) estimateGain reports what the set actually saves
+M3 protected tail = whole history-> (fail) the last N assistant rounds are never candidates
+M4 R2 ignores success            -> (fail) R2 > a FAILED write keeps its payload
+M5 R4 prunes a spill with no file-> (fail) R4 > a spill with NO file is never pruned
+M6 stubs drop the sentinel       -> (fail) R2 > fs_write…, fs_edit…, fs_multi_edit…
+M7 skill results no longer exempt -> (fail) a skill result is never a candidate…
+```
+
+Two of them found real defects rather than confirming a test, and both were
+fixed: M1's inverted range direction (drift 4) and M2 exposing that the
+"stored history is byte-identical" case shared a fixture an earlier test had
+already mutated — a vacuous-test bug, fixed by giving it its own fixture.
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run lint` clean (1857 files, 0
+errors/warnings, the §6 baseline) · `bun test packages/agent packages/tools`
+1094 pass / 0 fail. Full `bun test`: **13547 pass, 5 skip, 20 fail — all 20 in
+`packages/tui/test/chart-lines.test.ts`, and all caused by this session, not by
+S1.** Cause: my two earlier foreground `bun test` attempts were killed at the
+harness timeout but left an orphaned `bun test` running; it and the background
+run rewrote that suite's snapshot FILE concurrently, and its Bun header was
+overwritten with an ANSI escape (`\033[?25h` in place of `// Bun `). No code or
+snapshot content was involved. Fixed by writing the file's exact `HEAD` bytes
+back (`git show HEAD:… > file`, never `git checkout`); `bun test
+packages/tui/test/chart-lines.test.ts` then reports **51 pass / 0 fail / 20
+snapshots**, and `git status` shows only this slice's five files. To be
+re-verified by the orchestrator on a quiet tree: `bun test 2>&1 | tail -15`
+should be the §6 baseline. The 5 skips are the opt-in/root-only set
+(`session-hop.docker`, `workload-shell-live.k8s`, `k8s/integration.live`,
+`ws-server` SLOW, `confinement` as root) — the §6 baseline, not new.
+
+**Files.** `packages/agent/src/prune.ts` (new, 622 lines),
+`packages/agent/src/index.ts` (`export * from "./prune.ts"` — the module is S2's
+public entry point), `packages/agent/test/prune.test.ts` (new, 505 lines),
+`changelog.d/smart-compaction.added.md` (new). Nothing else: no protocol, daemon,
+client, config, tool or TUI change; no `protocol.d/` note; no schema regeneration
+(no schema changed); `TODO.md` untouched.
+
+**Not verified / left to the other slices.** That the trigger's thresholds pay
+for themselves (S3's replay, S4's A/B); that a small model does not imitate a
+stub (S2's guard + S4's spot-check); the real-world gain figure (S3). S1 itself
+is pure and unit-tested, and is not reachable from the loop until S2 wires it —
+which is why it cannot move any existing test, and the full-suite run above
+confirms that (its only failures were the concurrently-corrupted snapshot file,
+repaired and re-run green).
+
+**Slice status.** S1 **DONE**. S2, S3, S4 not started (out of this scope).
 
 ## Review
 
