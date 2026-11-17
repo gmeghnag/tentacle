@@ -2323,3 +2323,15 @@ native-scroll interplay, and how VoiceOver actually announces the rows (the tree
 audio is not).
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Round 2
+
+**Verdict: PASS** — all three round-1 MEDIUMs are fixed. Scope: `git diff HEAD~1` (fb69dd17).
+
+- **Gate (narrow):** `chart-interact`/`chart-view`/`chart-row`/`chart-scrub` → 70 pass / 0 fail (234 expects); `bun run lint` clean (1837 files); `bun run typecheck` green (root + mobile + relay).
+- **Mutations** (all three applied at once, each pinned by its own test; reverted, `git status` clean): CSV back to `String(p.x)` / `String(label)` → the negative-x test RED. `ChartView` root `accessible` always → both table-mode a11y tests RED. `datasets.length < 2` → the three-series test RED. 4 fail / 48 pass.
+- **Regressions checked:** string and date x still go through the formula guard, because only numbers bypass it. Chart mode still has one element with the summary and both actions. The full-screen table carries the way back (`showChart` → `mode:chart`).
+- **Low (not blocking):** the full-screen table header also offers "activate" (`chartA11yActions("table")`), which is a no-op inside full screen (`ChartFullScreen.tsx:216` handles only `showChart`).
+- **Reviewer = same model family as the orchestrator** (fresh context only).
+
+*— claude-opus-5-5, 2026-11-17*
