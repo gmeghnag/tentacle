@@ -19,7 +19,7 @@
 import { type DiagramSource, diagramModel, lintDiagram } from "@tentacle/core";
 import chalk from "chalk";
 import { cellWidth, truncateCells } from "./cells.ts";
-import { drawFlow } from "./diagram-ascii-flow.ts";
+import { type FlowReason, drawFlowResult } from "./diagram-ascii-flow.ts";
 import { drawSequence } from "./diagram-ascii-seq.ts";
 import type { DiagramRow, DiagramSeg, DiagramStyle } from "./diagram-canvas.ts";
 import { highlightMermaidLine } from "./diagram-highlight.ts";
@@ -30,6 +30,16 @@ import { EXPAND_HINT } from "./tool-expand.ts";
 export const DIAGRAM_SOURCE_PREVIEW = 5;
 /** The title cap the tool enforces (`tools` `DIAGRAM_TITLE_MAX`; tools is not a TUI runtime dep). */
 const TITLE_MAX = 120;
+
+/**
+ * Why a flowchart is shown as its source, in the few words a caption can hold:
+ * the reader's next move differs (`^X^O` opens it, a wider window helps).
+ */
+const FLOW_REASON: Readonly<Record<FlowReason, (width: number) => string>> = {
+  "too-wide": (width) => `too wide for ${width} cols — widen the window or ^X^O`,
+  "too-big": () => "too many boxes to draw — ^X^O for the source",
+  "not-drawable": () => "cannot draw faithfully in a terminal — ^X^O for the source",
+};
 
 export interface DiagramLineOptions {
   /** The cells available; every returned line fits in it. */
@@ -102,9 +112,12 @@ export function diagramView(call: DiagramCall, options: DiagramLineOptions): Dia
   const model = diagramModel(canonical, type);
 
   let drawing: { rows: DiagramRow[]; width: number; indent: boolean } | undefined;
+  /** Why there is no drawing, when there is none (the caption says it). */
+  let reason: string | undefined;
   if (model.kind === "flowchart") {
-    const d = drawFlow(model, width);
-    if (d !== undefined) drawing = { rows: d.rows, width: d.width, indent: false };
+    const d = drawFlowResult(model, width);
+    if ("drawing" in d) drawing = { rows: d.drawing.rows, width: d.drawing.width, indent: false };
+    else reason = FLOW_REASON[d.reason](width);
   } else if (model.kind === "sequence") {
     const d = drawSequence(model, width);
     drawing = { rows: d.rows, width: d.width, indent: d.form === "list" };
@@ -114,7 +127,8 @@ export function diagramView(call: DiagramCall, options: DiagramLineOptions): Dia
     ["title", title],
     ["subtle", ` · ${type}`],
   ];
-  if (drawing === undefined) caption.push(["subtle", " · source only in the terminal"]);
+  if (drawing === undefined)
+    caption.push(["subtle", ` · ${reason ?? "source only in the terminal"}`]);
   if (options.openHint === true) caption.push(["subtle", " · ^X^O open"]);
 
   const rows: DiagramRow[] = [centre(fit(caption, width), width), []];
