@@ -425,3 +425,45 @@ and changes no behaviour, so a fresh-context pass is not gated on it)*
   `queued` reports received (ids + count, never text), turn start/end with ids,
   attach/resync/snapshot/link, local enqueue/send-now/cancel with the local row id,
   and the shown rows after each of them.
+
+## Review — fix slice
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review; SAME model as
+the fix-slice executor, so shared blind spots may survive both passes)*
+
+**Verdict: APPROVE.** No HIGH or MEDIUM findings.
+
+- **Gate:** the touched suites plus `packages/client/test` give 970 pass, 0 fail.
+  `bun run typecheck` is clean (root, mobile, relay). `bun run lint` is clean
+  (2046 files). The full `bun test` was not re-run here.
+- **Mutations** (each applied, the four narrow files run, all reverted; `git
+  status` came back clean):
+  1. No listed ⇒ acked in `onQueued`.
+  2. `successorTurn` folds at once, without waiting.
+  3. `resyncOnUp` never set.
+  Together they make 8 tests fail: 5 pure cases, the controller replay, (b) and (c).
+- **Attacks tried:**
+  1. The plain `send()` path sets `ownControl = null` without checking it
+     (`session-screen-controller.ts:1293`), which could clear the successor's
+     Stop. It cannot happen: `send()` runs only when compose is null (`:1444`),
+     and send-now needs compose.
+  2. Send-now on a FOREIGN turn: its fold is `track`ed too
+     (`session-feed.ts:324`), so the successor waits for its end.
+  3. Two send-nows in a row: `RemoteSession` refuses while `next` is waiting.
+     After promotion, successor 2 waits on successor 1's tracked fold. That is a
+     chain, not a deadlock.
+  4. A Stop before the successor's bracket opens: the signal triggers
+     `client.cancel` on the successor's key. Correct.
+  5. Other `createCompose` callers that would fall back to `drainSendNow`: none
+     in production (`session-screen-controller.ts:716` wires `followSendNow`).
+     The outbox `sendNow` is a different act.
+  6. §7 invariants: one `RemoteSession` path, an additive optional parameter, no
+     wire, persistence or broker change. They hold.
+- **Nit (not blocking):** when a send-now's message is carried over into the
+  daemon's queue rather than the new prompt, and the report arrives after the
+  ACK, `sendNowAccepted` can drop the row for a moment before the report shows
+  it again. That is a flicker; state still converges.
+- **Executor behaviour:** the RED list and the mutation table in Execution match
+  what was reproduced here. The drift in scope (adding (b) and (c)) is grounded in
+  the device capture and stated honestly. Still unverified: on-device behaviour
+  of (b) and (c), as Execution says.
