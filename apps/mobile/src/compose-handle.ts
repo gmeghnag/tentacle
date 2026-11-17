@@ -69,11 +69,11 @@ export function composeHandleOf(deps: ComposeHandleDeps): ComposeHandle {
     steer: async (text, id, turnId) => {
       await client.enqueue(sessionId, id, turnId, text);
     },
-    sendNow: async (messages) => {
-      for await (const _event of await session.sendNow(messages, "turn", undefined)) {
-        // drain: the daemon's own turn runs; the screen follows it by its feed
-      }
-    },
+    // Resolves at the ack with the successor's events: the SCREEN folds them
+    // (`followSendNow`). Draining them here was why the phone never saw the
+    // send-now's turn (docs/fix/mobile-queued-stuck.md (b)).
+    sendNow: (messages, _turnId, next) =>
+      session.sendNow(messages, "turn", next.signal, next.turnId),
     onQueued: (listener) =>
       client.onSessionQueued((notice) => {
         if (notice.sessionId === sessionId) {

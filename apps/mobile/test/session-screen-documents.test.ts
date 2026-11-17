@@ -97,7 +97,7 @@ function harness() {
     attachDocument: async (_bytes, meta) => ({ ...BLOCK, name: meta.name }),
     send: async () => {},
     steer: async () => {},
-    sendNow: async () => {},
+    sendNow: async () => (async function* () {})(),
     onQueued: (listener) => {
       session.queueListener = listener;
       if (session.queue !== null) {

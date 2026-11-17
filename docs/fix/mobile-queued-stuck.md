@@ -1,9 +1,10 @@
 # mobile-queued-stuck — a queue row that never leaves the phone
 
-Type: fix · Size: S · Blast: contained · Suited: DeepSeek exec
+Type: fix · Size: M · Blast: cross-module · Suited: strong model (fix slice)
 
-**Status: DIAGNOSTIC SLICE ONLY.** No behaviour changed. The fix waits for the
-owner's device capture (decision 17/11, option 2).
+**Status:** diagnostic slice merged (deepseek-v4); **fix slice built** on the
+owner's device capture (claude-opus-5-5, 17/11) — three defects, all fixed, see
+"Context addendum" and the fix-slice sections. The qtrace lines stay.
 
 ## Context
 
@@ -55,6 +56,66 @@ after.** This slice is that capture. It adds diagnostics to the log the app
 already exports (Settings → "Export logs", `apps/mobile/src/app-log.ts` and its
 rotating file `app-log-fs.ts`, drained by one interval in `App.tsx`), so one
 device repro answers the question above.
+
+### Context addendum — the device capture (fix slice)
+
+*— claude-opus-5-5, 2026-11-17*
+
+Owner's export, build `680b4b8b`, session `a764ba51` (`.tentacle/tmp/mobile-queued-stuck/capture-1.txt`, `capture-2.txt`; qtrace lines, verbatim):
+
+```
+22:13:55.911Z ev=turn-start turn=c5ad2a4a own=true
+22:13:58.102Z ev=compose act=send-now row=9cbd2fa8
+22:13:58.103Z ev=rows where=after-send-now n=1 id0=9cbd2fa8
+22:13:58.241Z ev=queued-received src=live n=1 id0=9cbd2fa8 returned=0
+22:13:58.241Z ev=rows where=after-queued-live n=1 id0=9cbd2fa8
+22:13:58.246Z ev=turn-end turn=c5ad2a4a outcome=cancelled
+22:13:58.246Z ev=rows where=after-turn-end n=1 id0=9cbd2fa8
+22:13:58.246Z ev=queued-received src=live n=0 returned=0
+22:13:58.246Z ev=rows where=after-queued-live n=1 id0=9cbd2fa8      ← the bug
+22:14:17.415Z ws-close code=1000 / ev=link state=down
+22:14:29.077Z app-state state=active                               (link still down)
+22:14:30.001Z ev=link state=up      ← no attach / resync / history
+22:16:08.210Z ev=link state=up      ← again none (26 s, row still shown)
+22:16:36.543Z ev=attach state=start reopen=false                   (person re-entered)
+22:16:37.601Z ev=history reason=none msgs=111                      (was 108)
+22:16:37.602Z ev=queued-received src=current n=0 → rows n=0
+```
+
+The question the diagnostic asked is answered: **(c) of the table — received,
+applied wrongly.** The clearing frame arrived (`n=0`) and the phone's fold kept
+the row. The "dropped frame" hypothesis is disproved. Three defects, each
+reproduced RED at its own level:
+
+- **(a) the stuck row.** A send-now's minted row is `local`, not `acked`;
+  `shownRows` shows such a row whenever the daemon does not list it
+  (`compose-queue.ts:102`), and on the success path nothing ever acked it — the
+  old `compose-controller.ts:882` awaited `handle.sendNow` and its `finally`
+  (`:905`) only cleared `carried`. Worse, `handle.sendNow` DRAINED the whole new
+  turn (old `compose-handle.ts:72`), so even its resolution came at that turn's
+  end. A listed row was never treated as the daemon's either, so the `n=0` report
+  re-surfaced it as "in flight".
+- **(b) the invisible send-now turn.** The new turn ran daemon-side (108 → 111
+  messages: the user message + the answer), yet no `turn-start` was traced in the
+  19 s after the send-now. Why: the successor turn's events go ONLY to the
+  iterable `RemoteSession.sendNow` returns (an own turn — not a foreign
+  `turn` activity), and `compose-handle.ts` drained that iterable and threw it
+  away. The feed (`session-feed.ts`, where `turn-start` is traced) never saw it:
+  no bracket, no answer, no Stop, until a re-entry read the history.
+- **(c) no resync after a return while offline.** `appState("active")` with the
+  link down skipped the resync ("the redial re-attach owns the recovery"), and
+  `link(up)` only folded the link status. The capture shows two link-ups with no
+  attach and no history: the redial re-reads nothing on this screen.
+
+**TUI parity (`packages/tui/src/queued.ts` `onTurnEnd` = clear all rows).**
+Not adopted, with evidence: the TUI has no daemon list, so its rows can only be
+reconciled by echoes and the turn's end. The phone's rows ARE the daemon's full
+`queued` report, and the daemon re-sends it at the turn's end — the capture
+shows it landing in the same millisecond as `turn-end` (`22:13:58.246`). A
+turn-end clear would instead drop a steer still in flight that the daemon
+carries over to the next turn (`remote-session.ts` `sendNow`: "Enqueues keep
+binding to the old turn until it ends (the daemon carries them over)"). The
+convergence rule is put where the defect is — what makes a row the daemon's.
 
 ## Implementation
 
@@ -211,6 +272,134 @@ The row's id is the 8 characters in `act=enqueue row=…`. Then read, in order:
 | `queued-received` listing the row, then no report without it | the frame was never sent (daemon side) |
 | a report with `n=0` and no `id0`, but `rows … n=1` after it | received, applied wrongly (mobile state) |
 | `rows … n=0` then a LATER `queued-received` listing the row again | a returning report revived it |
+
+## Implementation — fix slice
+
+*— claude-opus-5-5, 2026-11-17*
+
+**Load-bearing assumption:** the daemon's `queued` report is a FULL state and
+the turn's end re-sends it — verified by the capture itself (the `n=0` report at
+`22:13:58.246`, with `turn-end`) and by `QueueState`'s contract quoted at
+`compose-queue.ts:6-9`. So "listed, then not listed" is a sufficient exit for a
+row, and no turn-end clear is needed.
+
+**Preconditions (verified):** `RemoteSession.sendNow` resolves at the daemon's
+ACK with the successor's events (`remote-session.ts`, the `sendPrompt` await,
+then `this.stream(turn, …)`), and buffers them in the turn's `AsyncQueue` until
+consumed; its turn is installed as `next` while the old turn streams, so its
+events follow the old `turn_end`. The feed's `foldStream` opens its bracket
+synchronously at the call (`turn_started`), and the transcript holds ONE bracket
+(`transcript.ts` `startTurn`/`endTurn`).
+
+**Design.**
+1. (a) `compose-state.ts` `onQueued`: a local row the report LISTS becomes
+   `acked` (it is the daemon's now, whatever our request says yet); the existing
+   filter then drops it on the first report that no longer lists it. A row never
+   listed and never acked is still in flight and stays.
+   `sendNowAccepted` (acks every message of a send-now) runs when the send-now's
+   ACK lands — the fallback for a row no report ever listed (the daemon carried
+   it straight into the new prompt).
+2. (b) `ComposeHandle.sendNow(messages, turnId, next)` resolves at the ACK with
+   the successor's events instead of draining them; `next` names the
+   successor's key and the Stop's signal. The compose half hands the request to
+   the screen (`followSendNow`, the same rule as `prompt`), which mints the key
+   (so `transcript.turn.turnId`, which steers bind to, is the daemon's), sets
+   `ownControl` and folds the events through a new `feed.successorTurn`, which
+   opens the bracket only after every stream being folded has closed — the ACK
+   can land before the cancelled turn's `turn_end` is folded, and its
+   `turn_ended` must not close the new bracket. `RemoteSession.sendNow` gains an
+   optional `turnId` (additive, like `send`'s `{ turnId }`; no wire change).
+3. (c) `session-screen-controller.ts`: a return while the link is down sets
+   `resyncOnUp`; the next `link(true)` runs the silent resync once (same
+   guards as the foreground path).
+
+**Files:** `packages/client/src/remote-session.ts` · `apps/mobile/src/compose-state.ts`
+· `compose-controller.ts` · `compose-handle.ts` · `session-feed.ts` ·
+`session-screen-controller.ts` · tests (below) · `changelog.d/mobile-queued-stuck.fixed.md`.
+
+**Failure modes → how state converges.**
+- Plain steer consumed at the next step, before its enqueue ack: listed ⇒ acked,
+  next report drops it; the late ack finds no row (test).
+- Send-now of the field: listed n=1, turn cancelled, n=0 → gone (the capture,
+  replayed at the pure AND controller level).
+- Send-now carried straight into the prompt, never listed: gone at the ACK
+  (`sendNowAccepted`), dropped at the next report (test).
+- Two queued (mine + another device's), send-now carries mine: only the other
+  stays (test).
+- Cancel: the listed row comes back `returned` → given back once, not a row (test).
+- Re-attach with the row still queued on the daemon: the replay lists it → it
+  stays, with my text (test). Re-attach after it was consumed: the replay's
+  `n=0` drops it (test).
+- Send-now refused: unchanged path (`restoredByRefusal`); `followSendNow`
+  restores the previous `ownControl` and folds nothing.
+- Successor stream throws after the ACK: folded LOST by the feed (as any own
+  turn), nothing back to the field.
+- A link blip with no return in between: no resync (test); the owed resync runs
+  once (test).
+
+**Tests:** `compose-state.test.ts` (the 8 pure cases above),
+`compose-controller.test.ts` (the capture replayed with the ACK held; a send-now
+never listed), `session-screen-compose.test.ts` (b: the successor folds here,
+after the cancelled turn's end), `session-screen.test.ts` (c: owed resync at
+link up, once; no resync on a bare blip).
+
+## Execution — fix slice
+
+*— claude-opus-5-5, 2026-11-17*
+
+Kept from the interrupted attempt: `sendNowAccepted` and the pure/controller
+tests (they encoded the right contract); its controller wiring and the
+listed ⇒ acked rule were missing, so all 7 were RED on the tree:
+
+```
+(fail) … > the device capture: a send-now's minted row, listed n=1, then n=0 → gone
+(fail) … > a plain steer consumed at the next step BEFORE its enqueue ack resolves → gone
+(fail) … > two queued (mine + another device's), send-now carries mine → only the other stays
+(fail) … > cancel: the listed row comes back RETURNED → given back once, not left as a row
+(fail) … > re-attach AFTER it was consumed while away → the replay drops it
+(fail) … > the device capture, replayed: send-now row listed, turn cancelled, n=0 → the row leaves
+        expect(h.compose.view().queued).toEqual([])  - []  + [{ id: "k1", mine: true, state: "queued", text: "now please" }]
+(fail) … > a send-now the daemon never LISTS converges when its request succeeds
+ 51 pass / 7 fail
+```
+
+Then, in order: listed ⇒ acked in `onQueued` (`compose-state.ts:136-148`);
+`sendNowAccepted` wired at the ACK (`compose-controller.ts:930`); the optional
+`turnId` on `RemoteSession.sendNow` (`remote-session.ts:1422`);
+`ComposeHandle.sendNow` returns the events (`compose-handle.ts:75`), with a
+drain only when no screen follows (`compose-controller.ts:89`);
+`feed.successorTurn` (`session-feed.ts:279,331`); `followSendNow`
+(`session-screen-controller.ts:1320`); `resyncOnUp` (`:945, 1513, 1546`). Three
+test fakes adapted to the new `sendNow` return type. Narrow suites: 155 pass, 0 fail.
+
+**Mutation check** (each applied, the narrow suite run, then restored):
+
+```
+(a)  no listed⇒acked in onQueued          → 6 fail (the 5 pure cases + the controller replay)
+(a') no sendNowAccepted at the ACK        → 1 fail (a send-now the daemon never LISTS …)
+(b)  screen does not follow the successor → 1 fail (… successor turn folds HERE …)
+(b') successor folded at once (no wait)   → 1 fail (same test, the "still running" line)
+(c)  no resyncOnUp at link up             → 1 fail (… a return while OFFLINE is OWED …)
+```
+
+**Drift from the fix plan:** (b) and (c) were not in the original candidate fix
+(a turn-end clear); the capture showed them, and the turn-end clear was rejected
+(Context addendum). Blast rose from contained to cross-module (an additive
+optional parameter in `@tentacle/client`, the screen controller); no protocol,
+persistence or §7 invariant change — the send-now still goes through the ONE
+`RemoteSession` path, the screen now folds what it used to drain.
+
+**Gate:** `bunx tsc --noEmit` and `bunx tsc -p apps/mobile --noEmit` clean;
+`bun run lint` clean (2046 files, 0 findings, after `biome check --write` on two
+files for line length). One full `bun test`: 14860 pass, 5 skip, 2 fail. The two
+failures are both in `packages/daemon/test/serve-log-store.test.ts` (S2 (a) timed
+out at 20 s, then (b)), which this diff does not touch. Run alone, that file passes
+22/22, so they are load flakes, not this change. This diff adds no skip.
+
+**Unverified:** on-device behaviour of (b)/(c) — verify with one repro of the
+capture's sequence on the next build (expect `ev=turn-start own=true` right
+after the cancelled `turn-end`, and `ev=resync state=start` after a return's
+`link state=up`).
 
 ## Review
 

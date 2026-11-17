@@ -1010,6 +1010,43 @@ describe("foreground resync (docs/fix/mobile-open-at-end.md, item 2)", () => {
     expect(h.screen.state().notice).toBeNull();
   });
 
+  test("docs/fix/mobile-queued-stuck.md (c): a return while OFFLINE is OWED — it resyncs at the next link up, once", async () => {
+    // Device capture 2: `app-state active` with the link down, then two `link
+    // up`s and no attach / history for 26 s — a stale queue row and a missing
+    // answer until the person left and re-entered. Mutation: drop the
+    // `resyncOnUp` branch in `link` → red (opens stays 1).
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.setHistory(["first", "the send-now's answer"]);
+    h.screen.link(false);
+    h.screen.appState("background");
+    expect(h.screen.appState("active")).toBe(false);
+    await settle();
+    expect(h.opens()).toBe(1);
+    h.screen.link(true);
+    await settle();
+    expect(h.opens()).toBe(2);
+    expect(h.screen.state().transcript.rows.filter((r) => r.kind === "user")).toHaveLength(2);
+    // Owed ONCE: a later blip of the link (no return in between) re-reads nothing.
+    h.screen.link(false);
+    h.screen.link(true);
+    await settle();
+    expect(h.opens()).toBe(2);
+  });
+
+  test("a link blip with NO return in between never resyncs (the redial owns it)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.link(false);
+    h.screen.link(true);
+    await settle();
+    expect(h.opens()).toBe(1);
+  });
+
   test("a screen that never attached (a failed open) does not resync on foreground", async () => {
     const h = countingHarness();
     h.goOffline();

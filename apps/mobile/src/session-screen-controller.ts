@@ -40,7 +40,13 @@ import {
   withList,
   withPhase,
 } from "./artifact-join.ts";
-import type { Compose, ComposeHandle, DocumentPort, PhotoPort } from "./compose-controller.ts";
+import type {
+  Compose,
+  ComposeHandle,
+  DocumentPort,
+  PhotoPort,
+  SendNowStart,
+} from "./compose-controller.ts";
 import { createCompose } from "./compose-controller.ts";
 import {
   type ComposerAction,
@@ -758,6 +764,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           },
           mint: deps.compose.mint,
           prompt: promptWithRefs,
+          followSendNow,
           draft: () => draft,
           setDraft: (text) => {
             draft = text;
@@ -928,6 +935,14 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    * on a single return with the app lock on (Review round 5, MEDIUM 1).
    */
   let appWasAway = false;
+  /**
+   * A return came while the link was DOWN: the resync it owed runs at the next
+   * `up`. The redial alone re-reads nothing on this screen — the device capture
+   * (docs/fix/mobile-queued-stuck.md (c)) shows two link-ups after a return with
+   * no attach, no history, a stale queue row and a missing answer for 26 s, until
+   * the person left and re-entered the session.
+   */
+  let resyncOnUp = false;
 
   function state(): SessionScreenState {
     return {
@@ -1296,6 +1311,40 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   }
 
   /**
+   * A send-now's successor turn, folded here as the phone's OWN (the composer's
+   * Stop aborts it: `ownControl`). Resolves at the daemon's ack; a refusal
+   * rejects and leaves nothing behind. Before docs/fix/mobile-queued-stuck.md
+   * (b) the handle drained it: the turn ran on the daemon and the phone saw no
+   * `turn-start`, no answer, until a re-entry read the history.
+   */
+  async function followSendNow(start: SendNowStart): Promise<void> {
+    const turnId = crypto.randomUUID();
+    const control = new AbortController();
+    const before = ownControl;
+    ownControl = control;
+    let events: AsyncIterable<SessionEvent>;
+    try {
+      events = await start({ turnId, signal: control.signal });
+    } catch (error) {
+      if (ownControl === control) {
+        ownControl = before;
+      }
+      throw error;
+    }
+    void feed
+      .successorTurn(turnId, events)
+      .catch(() => {
+        // Folded as LOST by the feed; nothing of the field's comes back after an ack.
+      })
+      .then(() => {
+        if (ownControl === control) {
+          ownControl = null;
+        }
+        emit();
+      });
+  }
+
+  /**
    * ONE prompt with image refs (13d), folded into this screen's transcript as the
    * phone's OWN turn — 12c's fold, not a drained stream: the compose half hands its
    * turn here (`compose-controller.ts`'s `prompt`), and `turn-running`/the answers
@@ -1461,6 +1510,13 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     link(up) {
       feed.link(up);
+      if (!up || !resyncOnUp) {
+        return;
+      }
+      resyncOnUp = false;
+      if (!disposed && !refreshing && !attaching && status.phase === "open") {
+        void holder.current?.resync(true);
+      }
     },
     appState(name) {
       // The app's foreground gate (item 2). The FIRST `active` is the mount, not
@@ -1486,6 +1542,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         return false; // a pull is already re-reading, or there is no live attach
       }
       if (transcript.link === "down") {
+        // Owed, not dropped: it runs at the next `up` (see `resyncOnUp`).
+        resyncOnUp = true;
         return false;
       }
       void holder.current?.resync(true);
