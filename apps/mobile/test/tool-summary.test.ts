@@ -13,8 +13,10 @@
  * one signature this test relies on.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  SUMMARISED_TOOLS,
   bodyCommand,
   mcpRowArgs,
   outputView,
@@ -122,6 +124,45 @@ describe("the subtitle is the call's target, not its JSON", () => {
       expect(toolSummary(row).label).toBe(toolTitle(tui).label);
     });
   }
+});
+
+// ── The guard (main added `chart` to the TUI's switch; the phone's set lagged) ──
+// The TUI's `toolSubtitle` cases and `SUMMARISED_TOOLS` are two halves of one
+// rule: a name the TUI summarises must reach `subtitleOf` on the phone, or
+// `rowSubtitle` flattens its args as MCP JSON. Read the TUI's SOURCE (a static
+// import cannot: `render-lines.ts` pulls terminal-only modules, see the header)
+// and compare the case labels with the list.
+describe("SUMMARISED_TOOLS is the TUI's `toolSubtitle` switch, name for name", () => {
+  /** Every `case "x":` inside `toolSubtitle`, in source order. */
+  function tuiToolSubtitleCases(): string[] {
+    const source = readFileSync(RENDER_LINES, "utf8");
+    const start = source.indexOf("function toolSubtitle(");
+    const end = source.indexOf("\nfunction commandRows(", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = source.slice(start, end);
+    return [...body.matchAll(/^\s*case "([^"]+)":/gm)].map((m) => m[1] ?? "");
+  }
+
+  test("the TUI's cases are found (the scan is not vacuous)", () => {
+    expect(tuiToolSubtitleCases()).toContain("shell");
+    expect(tuiToolSubtitleCases()).toContain("chart");
+  });
+
+  test("a `toolSubtitle` case missing from SUMMARISED_TOOLS fails here", () => {
+    expect([...SUMMARISED_TOOLS].sort()).toEqual([...new Set(tuiToolSubtitleCases())].sort());
+  });
+
+  test("every summarised tool reaches its TUI subtitle, never the MCP flattening", () => {
+    // Args no `subtitleOf` case reads, so the switch says "" (a chart says its
+    // raw args) while `mcpRowArgs` would say `zzz 1` — equal means the name was
+    // routed to the MCP flattening, i.e. missing from the set.
+    const args = '{"zzz":1}';
+    const flattened = mcpRowArgs(args);
+    for (const name of SUMMARISED_TOOLS) {
+      expect(rowSubtitle(name, args)).not.toBe(flattened);
+    }
+  });
 });
 
 describe("the output", () => {
