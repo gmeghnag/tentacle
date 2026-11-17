@@ -126,7 +126,7 @@ export interface Landing {
   /** How many measurements this landing has taken. */
   readonly rounds: number;
   /**
-   * The reveal timer fired with NOTHING measured (a slow attach), so the empty
+   * The reveal timer fired with NOTHING to land yet (a slow attach), so the empty
    * state was seen: the rows that finally arrive hide again for their landing
    * rather than appearing at the TOP. Never set on a re-attach.
    */
@@ -165,9 +165,9 @@ export const landingDone: Landing = {
 };
 
 /**
- * The reveal timer fired with nothing measured (a slow attach): the empty state
- * was seen, so the list is SHOWN now — and the rows that finally arrive hide it
- * again for their own silent landing (`awaiting`).
+ * The reveal timer fired with nothing to land yet (a slow attach): the empty
+ * state was seen, so the list is SHOWN now — and the rows that finally arrive
+ * hide it again for their own silent landing (`awaiting`).
  */
 export const landingAwaiting: Landing = {
   settling: false,
@@ -189,11 +189,21 @@ export const LANDING_ROUNDS = 12;
  * (never animated) scroll to the end, or `step: null` when there is nothing to
  * land (already done, sizes unknown, or the person is reading further up —
  * a foreground resync must never yank them to the end).
+ *
+ * `hasRows` is whether there is anything TO land (Review round 2, HIGH): while an
+ * OPENING landing has no rows yet, the measurement is the empty list's, and a
+ * content container with `flexGrow: 1` reports about the VIEWPORT — so it must
+ * not count as a landing round. Counting it made a slow attach look settled
+ * (`landingReveal` then found `content > 0`) and the history that finally arrived
+ * went through `contentGrew` ANIMATED: a visible scroll through the whole
+ * transcript, the owner's original complaint. A re-attach's rows are already up,
+ * so it never passes `false`.
  */
 export function landingStep(
   state: Landing,
   m: ListSize,
   following: boolean,
+  hasRows: boolean,
 ): { readonly state: Landing; readonly step: FollowStep | null } {
   if (!state.settling && !state.silent) {
     return { state, step: null };
@@ -204,6 +214,11 @@ export function landingStep(
   }
   if (m.content <= 0 || m.viewport <= 0) {
     return { state, step: null }; // nothing measured yet: nothing to land
+  }
+  if (!hasRows) {
+    // The empty state's measurement: there is no end to land at yet, and it must
+    // not be mistaken for one (its height is the viewport's, not a transcript's).
+    return { state, step: null };
   }
   const rounds = state.rounds + 1;
   const next: Landing = {
@@ -239,11 +254,19 @@ export const LANDING_REVEAL_MS = 120;
  *
  * The person reading further up is never yanked: not following → reveal in
  * place, no scroll (`landingDone`, like `landingStep`'s own early exit).
+ *
+ * `hasRows` decides "nothing to land YET" (Review round 2, HIGH): a slow attach
+ * leaves the empty list on screen, and `flexGrow: 1` gives it about the viewport's
+ * height — a `content > 0` test saw that as a landed transcript, revealed as
+ * settled, and the history that then arrived was scrolled in ANIMATED. Only the
+ * rows (or a status that is no longer `opening`) can say whether a landing has
+ * anything to land.
  */
 export function landingReveal(
   state: Landing,
   m: ListSize,
   following: boolean,
+  hasRows: boolean,
 ): { readonly state: Landing; readonly step: FollowStep | null } {
   if (!state.settling) {
     return { state, step: null };
@@ -251,9 +274,9 @@ export function landingReveal(
   if (!following) {
     return { state: landingDone, step: null };
   }
-  if (m.content <= 0 || m.viewport <= 0) {
-    // Nothing measured (a screen still being laid out, or an attach slower than
-    // the timer): show the empty state, and hide again when the rows arrive.
+  if (m.content <= 0 || m.viewport <= 0 || !hasRows) {
+    // Nothing to land yet (a screen still being laid out, or an attach slower
+    // than the timer): show the empty state, and hide again when the rows arrive.
     return { state: landingAwaiting, step: null };
   }
   return {

@@ -605,7 +605,9 @@ removed) and `session-log-store.test.ts` / `main.test.ts` (load flakes under the
 now also: a 2-message session opens visibly at the end, and a swipe left on a
 message row shows its time inside the row's strip.
 
-*— claude-opus-5-5 (fix round 1), 2026-11-17*
+*— deepseek (fix round 1), 2026-11-17*  
+  *Signature corrected in fix round 2: Review round 2 found this line named
+  `claude-opus-5-5` while commit `67833f68` says `deepseek` (§10).*
 
 ### Round 2
 
@@ -668,3 +670,91 @@ fix-round section is again signed `claude-opus-5-5` while commit `67833f68`
 says `deepseek`: correct the signature (§10).
 
 *— claude-opus-5-5, 2026-11-17* (fresh context, round 2)
+
+### Fix round 2
+
+Scope: Review round 2's **NEW HIGH** (a slow attach brought the original visible
+scroll back) and its **LOW** (the signature again). Repro and mutations in
+`.tentacle/tmp/mobile-open-at-end/` (`r2-slow-attach.ts` is the reviewer's;
+`r2-red.ts`, `r2-fixed.ts` are this round's before/after).
+
+**Reproduced first.** `bun run .tentacle/tmp/…/r2-slow-attach.ts` on `1bc61783`,
+before any edit — the reviewer's trace, byte for byte:
+
+```
+empty-state measured: {"settling":true,"silent":false,"last":800,"rounds":1,"awaiting":false}
+timer: {"settling":false,"silent":false,"last":0,"rounds":0,"awaiting":false}
+history landing step: null
+falls to contentGrew: {"state":{"following":true,"unseen":false},"scrollTo":39200,"animated":true}
+```
+
+**NEW HIGH — the empty state was mistaken for a landed transcript. FIXED.**
+Review's diagnosis holds: `styles.emptyList` has `contentContainerStyle`
+`flexGrow: 1`, so the empty list's content measurement is the VIEWPORT's height.
+`landingStep` therefore took a landing round on it (`rounds: 1, last: 800`), the
+120 ms timer found `content > 0` and returned `landingDone`, and the history that
+arrived later had nothing pending — `landingStep` → `null`, the rows falling
+through to `contentGrew` **animated** (`scrollTo: 39200, animated: true`): the
+owner's original complaint, over the relay, on every attach slower than 120 ms.
+`awaiting` was unreachable because a laid-out empty list never reports
+`content <= 0`.
+
+The decision now comes from the **rows**, not from a height:
+
+- `follow.ts` — `landingStep` and `landingReveal` take a fourth argument,
+  `hasRows: boolean`. `landingStep` returns `step: null` while an OPENING landing
+  has no rows (the empty state's height is not a transcript's, so it is not a
+  landing round); `landingReveal`'s "nothing to land YET" test is now
+  `content <= 0 || viewport <= 0 || !hasRows`, so a slow attach lands on
+  `landingAwaiting` (the empty state shown, rows re-hidden for their landing)
+  rather than `landingDone`. A re-attach's rows are already up, so that path is
+  unchanged.
+- `SessionScreen.tsx` — one ref, `hasRows.current = state.view.rows.length > 0 ||
+  state.status.phase !== "opening"`, written at the render (the `visible`/
+  `showRetry` pattern already there) and passed at both measurement sites. The
+  status half matters: an attached session that genuinely has no rows must be
+  shown, not hidden for a landing that will never come.
+
+Before/after on the same event order (`r2-red.ts` → `r2-fixed.ts`):
+
+```
+empty-state measured: {"settling":true,"silent":true,"last":0,"rounds":0,"awaiting":false}
+timer:                {"settling":false,"silent":true,"last":0,"rounds":0,"awaiting":true}
+history landing step: {"state":{"following":true,"unseen":false},"scrollTo":39200,"animated":false}
+```
+
+Tests: `follow.test.ts` gains "a slow attach still lands silently (Review round
+2, NEW HIGH)" — the empty state's measurement is not a landing round, the real
+order (empty → timer → history) lands `animated: false`, and a tall no-rows
+container is still `awaiting`. `session-screen-follow-wiring.test.ts` pins the
+`hasRows` derivation and its use at both sites. The existing 3-arg calls were
+updated mechanically (every other case has rows).
+
+**LOW — the signature. FIXED.** Fix round 1's block is now signed `deepseek`,
+with a note recording who corrected it; this round's block is signed below.
+
+**Red before green.** Sources restored from `git show HEAD:` (no
+checkout/restore/stash): *3 fails* in `follow.test.ts` on the new assertions
+(the extra argument is ignored at runtime, so the failures land on the property,
+not on arity) and *3 fails* in `session-screen-follow-wiring.test.ts`. Both
+green after.
+
+**Mutations (each reverted; tree left with only this round's edits):**
+
+| # | Mutation | Fails |
+|---|---|---|
+| M10 | `landingStep` drops the `!hasRows` guard | 1 (`follow.test.ts`) |
+| M11 | `landingReveal` ignores `hasRows` — exactly the round-2 bug | 2 (`follow.test.ts`) |
+| M12 | screen derives `hasRows` from `size.content > 0` (the old reasoning) | 1 (wiring) |
+| M13 | screen passes a constant `true` at the reveal site | 2 (wiring) |
+
+**Gate.** `bunx tsc --noEmit` clean; `bunx tsc -p apps/mobile` clean;
+`bun run lint` clean (§6 baseline: 1785 files, 0 errors / 0 warnings);
+`bun test` — **13 040 pass, 5 skip, 0 fail** (926 files). Skips are the three opt-in ones plus the two
+conditional skips already recorded above.
+
+**Still open (unchanged):** the device check on the owner's iPhone — now
+specifically that a session whose attach takes ~1 s (a real relay round trip)
+still opens at its end with no visible scroll.
+
+*— claude-opus-5-5 (fix round 2), 2026-11-17*

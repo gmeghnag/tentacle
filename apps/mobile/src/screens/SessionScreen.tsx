@@ -319,6 +319,13 @@ export function SessionScreen({
   const showRetry = useRef(false);
   /** The list's native content height and viewport (0 until measured). */
   const size = useRef<ListSize>({ content: 0, viewport: 0 });
+  // Whether a landing has anything to land yet (Review round 2, HIGH): the list
+  // has rows, or the attach is no longer `opening`. A content HEIGHT cannot
+  // answer it — the empty list's `flexGrow: 1` reports about the VIEWPORT, so a
+  // slow attach looked already settled and the history that then arrived went
+  // through `contentGrew` ANIMATED: the visible scroll this fix exists to stop.
+  const hasRows = useRef(false);
+  hasRows.current = state.view.rows.length > 0 || state.status.phase !== "opening";
   // Item 1 (docs/fix/mobile-open-at-end.md): a session opens ALREADY at its end.
   // `landingStep` re-scrolls, never animated, until the end stops moving (a
   // FlatList renders the first cells only, so the end moves as the silent scroll
@@ -359,7 +366,12 @@ export function SessionScreen({
     disarmReveal();
     reveal.current = setTimeout(() => {
       reveal.current = null;
-      const next = landingReveal(landing.current, size.current, followRef.current.following);
+      const next = landingReveal(
+        landing.current,
+        size.current,
+        followRef.current.following,
+        hasRows.current,
+      );
       const changed = next.state.settling !== landing.current.settling;
       landing.current = next.state;
       if (next.step !== null) {
@@ -378,7 +390,12 @@ export function SessionScreen({
     armReveal();
   }, [armReveal]);
   const land = useCallback((): boolean => {
-    const next = landingStep(landing.current, size.current, followRef.current.following);
+    const next = landingStep(
+      landing.current,
+      size.current,
+      followRef.current.following,
+      hasRows.current,
+    );
     const changed = next.state.settling !== landing.current.settling;
     landing.current = next.state;
     if (next.step !== null) {

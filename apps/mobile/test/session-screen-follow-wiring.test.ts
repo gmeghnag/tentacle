@@ -73,9 +73,7 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
   test("both measurements go through the landing first, and it owns the scroll while pending", () => {
     expect(src).toMatch(/onContentSize = useCallback\([\s\S]{0,400}if \(land\(\)\) \{/);
     expect(src).toMatch(/onListLayout = useCallback\([\s\S]{0,300}if \(land\(\)\) \{/);
-    expect(src).toMatch(
-      /landingStep\(landing\.current, size\.current, followRef\.current\.following\)/,
-    );
+    expect(src).toMatch(/landingStep\(\s*landing\.current,[\s\S]{0,140}hasRows\.current,?\s*\)/);
     expect(src).toMatch(/const landing = useRef<Landing>\(landingStart\)/);
   });
 
@@ -107,7 +105,7 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
     // RN fires a content/layout event only on a CHANGE — so a short session never
     // repeated one and the list stayed invisible.
     expect(src).toMatch(
-      /landingReveal\(landing\.current, size\.current, followRef\.current\.following\)/,
+      /landingReveal\(\s*landing\.current,\s*size\.current,\s*followRef\.current\.following,\s*hasRows\.current,?\s*\)/,
     );
     expect(src).toMatch(/setTimeout\(\(\) => \{[\s\S]{0,600}LANDING_REVEAL_MS\)/);
     // Every landing scroll re-arms it: the reveal waits for the measurements to
@@ -118,5 +116,17 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
     expect(src).toMatch(/useEffect\(\(\) => \{\s*armReveal\(\);\s*\}, \[armReveal\]\)/);
     // Unmounted while landing: the timer never fires into a gone screen.
     expect(src).toMatch(/useEffect\(\(\) => disarmReveal, \[disarmReveal\]\)/);
+  });
+
+  test("a landing decides 'nothing to land YET' from the ROWS, never from the content height (Review round 2, NEW HIGH)", () => {
+    // A content height cannot answer it: the empty list's `flexGrow: 1` makes it
+    // report about the VIEWPORT, so a slow attach looked already settled and the
+    // history that then arrived went through `contentGrew` ANIMATED.
+    expect(src).toMatch(
+      /hasRows\.current = state\.view\.rows\.length > 0 \|\| state\.status\.phase !== "opening"/,
+    );
+    // Both measurements pass it (the reveal is what settled the empty state).
+    expect(src).toMatch(/landingStep\(\s*landing\.current,[\s\S]{0,140}hasRows\.current,?\s*\)/);
+    expect(src).toMatch(/landingReveal\(\s*landing\.current,[\s\S]{0,140}hasRows\.current,?\s*\)/);
   });
 });

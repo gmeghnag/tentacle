@@ -100,9 +100,15 @@ describe("follow (B5)", () => {
 /** A long history: 40 000 pt of content in an 800 pt viewport (the owner's case). */
 const LONG = { content: 40000, viewport: 800 };
 
+/** The list has rows to land at (every case except a still-empty screen). */
+const ROWS = true;
+
+/** The empty state: nothing to land at, whatever height it reports. */
+const NO_ROWS = false;
+
 describe("the initial landing (docs/fix/mobile-open-at-end.md, item 1)", () => {
   test("the first measurement of a long history lands at the end, NOT animated", () => {
-    const first = landingStep(landingStart, LONG, true);
+    const first = landingStep(landingStart, LONG, true, ROWS);
     expect(first.step).not.toBeNull();
     expect(first.step?.scrollTo).toBe(39200);
     expect(first.step?.animated).toBe(false);
@@ -113,32 +119,32 @@ describe("the initial landing (docs/fix/mobile-open-at-end.md, item 1)", () => {
   test("it keeps landing silently while the end keeps moving, then stops", () => {
     // A silent scroll renders more cells, so the native content height grows
     // under it: each new measurement lands again, still not animated.
-    const a = landingStep(landingStart, LONG, true);
-    const b = landingStep(a.state, { content: 44000, viewport: 800 }, true);
+    const a = landingStep(landingStart, LONG, true, ROWS);
+    const b = landingStep(a.state, { content: 44000, viewport: 800 }, true, ROWS);
     expect(b.step?.animated).toBe(false);
     expect(b.step?.scrollTo).toBe(43200);
     expect(b.state.settling).toBe(true);
     // The height repeats: this measurement lands (same offset) and the NEXT one
     // is what lets the list be shown — the shown frame is already at the end.
-    const c = landingStep(b.state, { content: 44000, viewport: 800 }, true);
+    const c = landingStep(b.state, { content: 44000, viewport: 800 }, true, ROWS);
     expect(c.step).toEqual({ state: initialFollow, scrollTo: 43200, animated: false });
     expect(c.state.settling).toBe(false);
     // Settled: the ordinary follow rules from here on.
-    const d = landingStep(c.state, { content: 44100, viewport: 800 }, true);
+    const d = landingStep(c.state, { content: 44100, viewport: 800 }, true, ROWS);
     expect(d.state.settling).toBe(false);
     expect(d.step).toBeNull();
     expect(contentGrew(initialFollow, { content: 44100, viewport: 800 }).animated).toBe(true);
   });
 
   test("an unknown size lands nowhere (a scroll to 0 would be the bug it fixes)", () => {
-    const none = landingStep(landingStart, { content: 0, viewport: 0 }, true);
+    const none = landingStep(landingStart, { content: 0, viewport: 0 }, true, ROWS);
     expect(none.step).toBeNull();
     expect(none.state.rounds).toBe(0);
-    expect(landingStep(landingStart, { content: 40000, viewport: 0 }, true).step).toBeNull();
+    expect(landingStep(landingStart, { content: 40000, viewport: 0 }, true, ROWS).step).toBeNull();
   });
 
   test("a history shorter than the screen lands at 0 (no negative offset, no animation)", () => {
-    const short = landingStep(landingStart, { content: 200, viewport: 800 }, true);
+    const short = landingStep(landingStart, { content: 200, viewport: 800 }, true, ROWS);
     expect(short.step?.scrollTo).toBe(0);
     expect(short.step?.animated).toBe(false);
   });
@@ -147,7 +153,7 @@ describe("the initial landing (docs/fix/mobile-open-at-end.md, item 1)", () => {
     let landing = landingStart;
     let rounds = 0;
     for (; rounds < 100; rounds += 1) {
-      const next = landingStep(landing, { content: 1000 + rounds * 7, viewport: 800 }, true);
+      const next = landingStep(landing, { content: 1000 + rounds * 7, viewport: 800 }, true, ROWS);
       landing = next.state;
       if (!landing.settling) {
         break;
@@ -160,7 +166,7 @@ describe("the initial landing (docs/fix/mobile-open-at-end.md, item 1)", () => {
   });
 
   test("a RE-ATTACH (resync, Retry, foreground) lands silently too: no second visible scroll", () => {
-    const step = landingStep(landingQuiet, LONG, true);
+    const step = landingStep(landingQuiet, LONG, true, ROWS);
     expect(step.step?.animated).toBe(false);
     expect(step.step?.scrollTo).toBe(39200);
     // Nothing was hidden: the rows were already shown before the re-attach.
@@ -168,13 +174,13 @@ describe("the initial landing (docs/fix/mobile-open-at-end.md, item 1)", () => {
   });
 
   test("a foreground resync while the person reads further up does NOT yank them to the end", () => {
-    const step = landingStep(landingQuiet, LONG, false);
+    const step = landingStep(landingQuiet, LONG, false, ROWS);
     expect(step.step).toBeNull();
     expect(step.state.silent).toBe(false);
   });
 
   test("with nothing pending the ordinary rules apply (a later append IS animated)", () => {
-    const step = landingStep(landingDone, LONG, true);
+    const step = landingStep(landingDone, LONG, true, ROWS);
     expect(step.step).toBeNull();
     expect(contentGrew(initialFollow, LONG).animated).toBe(true);
     expect(viewportChanged(initialFollow, LONG).animated).toBe(true);
@@ -187,40 +193,40 @@ describe("the reveal timer: the list is shown even when no measurement repeats (
     // measurements of DISTINCT heights, then silence. `onContentSizeChange` and
     // `onLayout` fire only when a size CHANGES, so the repeated measurement
     // `settling` used to wait for never arrives.
-    const first = landingStep(landingStart, { content: 300, viewport: 800 }, true);
+    const first = landingStep(landingStart, { content: 300, viewport: 800 }, true, ROWS);
     expect(first.state.settling).toBe(true);
-    const second = landingStep(first.state, { content: 420, viewport: 800 }, true);
+    const second = landingStep(first.state, { content: 420, viewport: 800 }, true, ROWS);
     expect(second.state.settling).toBe(true); // still hidden: 420 ≠ 300
     // Silence. The timer is the only thing left that can show the list.
-    const revealed = landingReveal(second.state, { content: 420, viewport: 800 }, true);
+    const revealed = landingReveal(second.state, { content: 420, viewport: 800 }, true, ROWS);
     expect(revealed.state.settling).toBe(false);
     // It lands at the end it knows NOW, and never animates it: the person must
     // not see the transcript scroll after they thought it had settled.
     expect(revealed.step).toEqual({ state: initialFollow, scrollTo: 0, animated: false });
     // Settled for good: the next content event is ordinary follow, animated.
-    expect(landingReveal(revealed.state, LONG, true).step).toBeNull();
+    expect(landingReveal(revealed.state, LONG, true, ROWS).step).toBeNull();
   });
 
   test("a long history the timer reaches before it settles still lands at the TRUE end", () => {
-    const one = landingStep(landingStart, { content: 40000, viewport: 800 }, true);
-    const revealed = landingReveal(one.state, { content: 44000, viewport: 800 }, true);
+    const one = landingStep(landingStart, { content: 40000, viewport: 800 }, true, ROWS);
+    const revealed = landingReveal(one.state, { content: 44000, viewport: 800 }, true, ROWS);
     expect(revealed.step).toEqual({ state: initialFollow, scrollTo: 43200, animated: false });
     expect(revealed.state).toEqual(landingDone);
   });
 
   test("nothing measured: the empty state is still SHOWN, and the rows hide it again for their own landing", () => {
-    const revealed = landingReveal(landingStart, { content: 0, viewport: 0 }, true);
+    const revealed = landingReveal(landingStart, { content: 0, viewport: 0 }, true, ROWS);
     expect(revealed.state.settling).toBe(false); // shown: an invisible empty state is the bug
     expect(revealed.state).toEqual(landingAwaiting);
     expect(revealed.step).toBeNull(); // a scroll to 0 is the bug it fixes
     // And the first real measurement lands, not animated.
-    const landed = landingStep(revealed.state, LONG, true);
+    const landed = landingStep(revealed.state, LONG, true, ROWS);
     expect(landed.step?.animated).toBe(false);
     expect(landed.step?.scrollTo).toBe(39200);
   });
 
   test("a person reading further up is shown where they are, never yanked (mutation: drop the guard → a scroll they did not ask for)", () => {
-    const revealed = landingReveal(landingStart, LONG, false);
+    const revealed = landingReveal(landingStart, LONG, false, ROWS);
     expect(revealed.state).toEqual(landingDone);
     expect(revealed.step).toBeNull();
   });
@@ -239,7 +245,7 @@ describe("a RE-ATTACH arms the landing the same way the pull does (Review round 
   });
 
   test("a re-attach never hides the list it just re-read (mutation: arm `landingStart` → the rows flicker out)", () => {
-    const step = landingStep(reattachLanding(true), { content: 1300, viewport: 800 }, true);
+    const step = landingStep(reattachLanding(true), { content: 1300, viewport: 800 }, true, ROWS);
     expect(step.state.settling).toBe(false); // silent, never hidden: the rows are already up
     expect(step.state.silent).toBe(false); // and this landing is now done
     expect(step.step).toEqual({ state: initialFollow, scrollTo: 500, animated: false });
@@ -248,14 +254,14 @@ describe("a RE-ATTACH arms the landing the same way the pull does (Review round 
   test("but an OPENING landing revealed while it waited for a slow attach hides again for the rows that arrive", () => {
     // A slow attach: the reveal timer fired with nothing measured, so the empty
     // state was seen. The history that finally lands must not be seen at the TOP.
-    const shown = landingReveal(landingStart, { content: 0, viewport: 800 }, true);
+    const shown = landingReveal(landingStart, { content: 0, viewport: 800 }, true, ROWS);
     expect(shown.state).toEqual(landingAwaiting);
     expect(shown.state.settling).toBe(false); // the empty state IS shown
-    const first = landingStep(shown.state, { content: 900, viewport: 800 }, true);
+    const first = landingStep(shown.state, { content: 900, viewport: 800 }, true, ROWS);
     expect(first.state.settling).toBe(true); // hidden for the landing, silently
     expect(first.step).toEqual({ state: initialFollow, scrollTo: 100, animated: false });
     // It settles the ordinary way (a repeated height), and is then shown.
-    const settled = landingStep(first.state, { content: 900, viewport: 800 }, true);
+    const settled = landingStep(first.state, { content: 900, viewport: 800 }, true, ROWS);
     expect(settled.state.settling).toBe(false);
     expect(settled.state.awaiting).toBe(false);
   });
@@ -264,9 +270,54 @@ describe("a RE-ATTACH arms the landing the same way the pull does (Review round 
     // The bug: the screen re-armed `landingQuiet` only for pull/Retry/Reopen, so
     // a resync's new history went through `contentGrew` — ANIMATED, seen.
     const armed = reattachLanding(true);
-    const step = landingStep(armed, LONG, true);
+    const step = landingStep(armed, LONG, true, ROWS);
     expect(step.step?.animated).toBe(false);
     expect(step.step?.scrollTo).toBe(39200);
+  });
+});
+
+describe("a slow attach still lands silently (Review round 2, NEW HIGH)", () => {
+  // The bug: the empty list is laid out with `contentContainerStyle` `flexGrow: 1`,
+  // so its content measurement is the VIEWPORT's height, not 0. That measurement
+  // counted as a landing round, so `landingReveal` — 120 ms later — found
+  // `content > 0` and returned `landingDone`. When the history arrived (any attach
+  // slower than the timer, i.e. the normal case over the relay) `landingStep` had
+  // nothing pending, and the rows went through `contentGrew` with `animated: true`:
+  // a visible scroll through the whole transcript, the owner's original complaint.
+  const VIEWPORT = { content: 800, viewport: 800 };
+
+  test("the empty state's measurement is not a landing round (no end to land at yet)", () => {
+    const empty = landingStep(landingStart, VIEWPORT, true, NO_ROWS);
+    expect(empty.step).toBeNull(); // a scroll to 0 here is the bug it fixes
+    expect(empty.state).toEqual(landingStart); // still hidden, still pending
+  });
+
+  test("the real slow-attach order: empty state, timer, then history — silent, never animated", () => {
+    // 1. mount: the layout and the empty list's content report the viewport height.
+    const laid = landingStep(
+      landingStep(landingStart, { content: 0, viewport: 800 }, true, NO_ROWS).state,
+      VIEWPORT,
+      true,
+      NO_ROWS,
+    );
+    expect(laid.state.settling).toBe(true);
+    // 2. 120 ms pass with no rows (the attach is still in flight): the timer fires.
+    const shown = landingReveal(laid.state, VIEWPORT, true, NO_ROWS);
+    expect(shown.state).toEqual(landingAwaiting); // the empty state IS shown
+    expect(shown.step).toBeNull();
+    // 3. the history arrives: it LANDS, not animated — the bug was `step: null`
+    //    here, which dropped it into `contentGrew`'s animated scroll.
+    const landed = landingStep(shown.state, LONG, true, ROWS);
+    expect(landed.step).toEqual({ state: initialFollow, scrollTo: 39200, animated: false });
+    expect(landed.state.settling).toBe(true); // hidden for its own landing
+    // And nothing on this path ever asked for an animated scroll.
+    expect(contentGrew(initialFollow, LONG).animated).toBe(true); // the path NOT taken
+  });
+
+  test("a tall content container with no rows is still 'nothing to land' (its height is not a transcript's)", () => {
+    const tall = landingReveal(landingStart, { content: 4000, viewport: 800 }, true, NO_ROWS);
+    expect(tall.state).toEqual(landingAwaiting);
+    expect(tall.step).toBeNull(); // a scroll to 3200 on an empty list is nonsense
   });
 });
 
