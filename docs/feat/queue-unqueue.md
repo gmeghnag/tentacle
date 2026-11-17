@@ -298,4 +298,20 @@ diff adds no `skip`/`skipIf` (grep 0), so they predate this branch; check with
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-18* (fresh context; SAME model as executor/planner — shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES**
+
+**Gate:** touched files 236 pass / 0 fail · full `bun test` 14905 pass, 5 skip, 0 fail · `bun run lint` clean · `bun run typecheck` clean.
+
+**Findings**
+1. **HIGH — `removed` is a lie for a row a reserved send-now carries** (`packages/daemon/src/hosted-session.ts:1886-1925` vs `startSuccessor` `:2822-2865`). Between `sendNow` reserving (abort issued) and the old turn settling, a cited queued row is still in `Session.steering` and the mirror; `session.unqueue(id)` succeeds → `removed`, but `startSuccessor` builds `prompt` from `next.messages` (filtered only by `isDelivered`) → the model reads it. Breaks the load-bearing property and the doc's own rule "a send-now's own `messages` → delivered". Reproduced (temporary test, reverted; tree clean): `enqueue a` → `sendNow(T2, [a])` → `unqueue([a])` = `{"removed":["a"]}`, model saw `A`: **true**. T5c misses it because its `a` was never enqueued first. Reachable from the phone's E1 (Send now then Cancel) or a second client. Fix: check `next.messages` ids first → `delivered`; add the test above.
+2. **MEDIUM — repeated ↑ duplicates the text in the field** (`packages/tui/src/App.tsx:2134-2147`, `packages/tui/src/queued.ts:afterUnqueue`). The row and the empty field change only when the async answer arrives, so ↑ autorepeat / a double press sends N unqueues for the same id; the daemon answers `removed` each time (idempotent `unqueued`), `afterUnqueue` returns `text` regardless of whether the row is still in `rows`, and `withRestored` (`send-now.ts:325`) APPENDS → `X\n\nX`. Fix: in-flight guard on the id, or return `text: null` when the target is no longer in `rows`; pin with a pure test.
+
+**Premise table (sampled):** drain is a sync `splice(0)` (`agent/src/session.ts:340-343`) TRUE · `enqueue` sync, ids now passed (`hosted-session.ts:3747`, `:1109`) TRUE · mirror lags agent (T2 proves it) TRUE · "successor `messages` not removable" — FALSE once they were enqueued (finding 1).
+
+**Attacks tried:** (a) reserved send-now + unqueue of its cited row → finding 1; (b) double ↑ before the answer → finding 2 (from code: `afterUnqueue` ignores `rows`); (c) drain race / mirror pairing — T2/T3 hold, executor's M2 mutation stands; (d) archived session, restart retry → documented debt, conservative answers, no silent resurrection; (e) §7 "don't serialize the peer": `Connection.unqueue` awaits only `persisted()` after the sync call — holds. (f) pod trust: unqueue causes no laptop-side effect — holds.
+
+**Mutation:** relied on executor's M1–M8 table; my own mutation-style probe was finding 1's test (red on current code for the property it should hold).
+
+**Executor behaviour:** disciplined, honest drift section (seed ids unpinned, `unqueued` memory-only) and mutation table; missed the cited-row case because its T5c used a non-enqueued message.
