@@ -6,8 +6,10 @@
  * and describes, per index, the stub that should replace it; `applyPrune`
  * builds the copy. The plan's rules:
  *
- * - R1 `superseded_read` — an `fs_read` result a later read (same path, same or
- *   wider range) or a later successful write/edit of that path made stale.
+ * - R1 `superseded_read` — an `fs_read` result a later read of the same path
+ *   covering the same span (same or wider line range; for a PDF the SAME
+ *   `pages` window) or a later successful write/edit of that path made stale.
+ *   A page window is never "covered" by a line range or vice versa.
  * - R2 `call_payload` — the `content`/`old_string`/`new_string`/`edits[].*`
  *   arguments of a SUCCESSFUL write/edit: the file on disk is the truth.
  * - R3 `long_output` — a `shell`/`shell_output` result past `outputChars`:
@@ -24,7 +26,9 @@
  *
  * Every stub is a deterministic function of the stored history (no clock, no
  * counter), so the same bytes are sent every round and the provider's prefix
- * cache holds between batches.
+ * cache holds between batches. An entry pins the message it was built from, so
+ * a set never fires on a different history that reuses its indices (the history
+ * is replaced IN PLACE by `/compact`, `/clear` and `context_reset`).
  */
 import type { ChatMessage, ToolCall } from "@tentacle/core";
 import { CONTEXT_RESET_TOOL_NAME, SKILL_TOOL_NAME } from "@tentacle/tools";
@@ -47,6 +51,15 @@ export type PruneRule =
 /** One pruned message: the replacement, why, and what it saves. */
 export interface PruneEntry {
   readonly rule: PruneRule;
+  /**
+   * The STORED message the entry was built from, by reference. An index alone
+   * cannot tell a live entry from a stale one: `/compact`, `/clear` and
+   * `context_reset` replace the history IN PLACE, reusing the same array
+   * (`session.ts:366-367`, `:390-391`; `agent.ts` resets the same way), so a
+   * set made before the replacement still has in-range indices — and would
+   * stub whatever now sits there (a `/compact` summary, say).
+   */
+  readonly original: ChatMessage;
   /** The message that replaces the stored one at this index (always a new object). */
   readonly message: ChatMessage;
   /** Characters the request no longer carries (>= 1). */
@@ -189,12 +202,22 @@ interface ReadRange {
   readonly to: number | undefined;
 }
 
+/**
+ * What one `fs_read` call covered. Text reads cover LINES; a PDF read covers
+ * PAGES (`pages`, default the first 100), and a page window is not comparable
+ * with a line range — `pages: "101-200"` is covered only by the same `pages`.
+ */
+interface ReadSpan {
+  readonly range?: ReadRange;
+  readonly pages?: string;
+}
+
 /** What one assistant round's call is, for the rules that look forward. */
 interface CallSite {
   readonly index: number;
   readonly call: ToolCall;
   readonly path?: string;
-  readonly range?: ReadRange;
+  readonly read?: ReadSpan;
   /** The content of the result message answering it, when there is one. */
   readonly result?: string;
 }
@@ -229,6 +252,21 @@ function readRangeOf(args: Record<string, unknown>): ReadRange | undefined {
   return { from, to: limit === undefined ? undefined : from + limit - 1 };
 }
 
+/**
+ * The span an `fs_read` call covered. A `pages` read is a PAGE window on a PDF
+ * (default the first 100): it is not a line range, so it is covered only by an
+ * identical `pages` string — never by a whole-file ("first 100 pages") read,
+ * which would leave the stubbed pages in neither.
+ */
+function readSpanOf(args: Record<string, unknown>): ReadSpan {
+  const pages = typeof args.pages === "string" ? args.pages : undefined;
+  if (pages !== undefined) {
+    return { pages };
+  }
+  const range = readRangeOf(args);
+  return range === undefined ? {} : { range };
+}
+
 /** A whole-file read covers every line: `{from: 1, to: undefined}`. */
 const WHOLE_FILE: ReadRange = { from: 1, to: undefined };
 
@@ -245,12 +283,32 @@ function covers(later: ReadRange | undefined, earlier: ReadRange | undefined): b
   return b.to !== undefined && b.to <= a.to;
 }
 
+/**
+ * Does `later` cover everything the earlier read of the same path returned? A
+ * page window and a line window are different spaces: each is covered only by
+ * an identical counterpart.
+ */
+function spanCovers(later: ReadSpan, earlier: ReadSpan): boolean {
+  if (later.pages !== undefined || earlier.pages !== undefined) {
+    return later.pages === earlier.pages;
+  }
+  return covers(later.range, earlier.range);
+}
+
 /** The `lines a-b` a stub reports for a read, or undefined for a whole-file read. */
 function rangeText(range: ReadRange | undefined): string | undefined {
   if (range === undefined) {
     return undefined;
   }
   return range.to === undefined ? `from line ${range.from}` : `lines ${range.from}-${range.to}`;
+}
+
+/** What a stub says a read covered: its line range, or its page window. */
+function spanText(span: ReadSpan): string | undefined {
+  if (span.pages !== undefined) {
+    return `pages ${span.pages}`;
+  }
+  return rangeText(span.range);
 }
 
 /**
@@ -416,7 +474,7 @@ export function pruneCandidates(
           index: i,
           call,
           ...(path !== undefined ? { path } : {}),
-          ...(call.name === "fs_read" ? { range: readRangeOf(args) } : {}),
+          ...(call.name === "fs_read" ? { read: readSpanOf(args) } : {}),
         };
         sites.push(site);
         callById.set(call.id, site);
@@ -466,6 +524,7 @@ export function pruneCandidates(
       if (changed) {
         set.set(index, {
           rule: "call_payload",
+          original: message,
           message: { ...message, toolCalls: pruned },
           savedChars: saved,
         });
@@ -510,6 +569,7 @@ function ruleFor(message: ChatMessage, site: CallSite, ctx: ResultContext): Prun
     const built = stubFor({ ...about, chars: content.length, toolName });
     return {
       rule: about.rule,
+      original: message,
       message: { ...message, content: built.content },
       savedChars: Math.max(0, content.length - built.content.length),
     };
@@ -518,13 +578,13 @@ function ruleFor(message: ChatMessage, site: CallSite, ctx: ResultContext): Prun
   // R1 — an earlier read a later read or a successful write of the same path
   // superseded. Tried first: it points at the file, the truth.
   if (toolName === "fs_read" && site.path !== undefined && succeeded(toolName, content)) {
-    const range = site.range;
+    const span = site.read ?? {};
     const superseded = ctx.sites.find((later) => {
       if (later.index <= site.index || later.path !== site.path) {
         return false;
       }
       if (later.call.name === "fs_read") {
-        return succeeded("fs_read", later.result) && covers(later.range, range);
+        return succeeded("fs_read", later.result) && spanCovers(later.read ?? {}, span);
       }
       if (PAYLOAD_TOOLS.has(later.call.name)) {
         return succeeded(later.call.name, later.result);
@@ -532,11 +592,12 @@ function ruleFor(message: ChatMessage, site: CallSite, ctx: ResultContext): Prun
       return false;
     });
     if (superseded !== undefined) {
+      const text = spanText(span);
       const entry = stub({
         rule: "superseded_read",
         supersededBy: superseded.call.id,
         ...(site.path !== undefined ? { path: site.path } : {}),
-        ...(rangeText(range) !== undefined ? { range: rangeText(range) as string } : {}),
+        ...(text !== undefined ? { range: text } : {}),
       });
       return entry.savedChars > 0 ? entry : undefined;
     }
@@ -581,7 +642,9 @@ function ruleFor(message: ChatMessage, site: CallSite, ctx: ResultContext): Prun
  * The history the model is sent: `history` with every message the set names
  * replaced by its stub. The input array and its messages are never mutated; a
  * message not in the set keeps its identity (so an anchor still matches it),
- * and an empty set returns the array itself.
+ * and an empty set returns the array itself. An entry whose index no longer
+ * holds the message it was built from is SKIPPED, never applied over a
+ * different one: the history may have been replaced in place under a set.
  */
 export function applyPrune(history: readonly ChatMessage[], set: PruneSet): readonly ChatMessage[] {
   if (set.size === 0) {
@@ -590,8 +653,9 @@ export function applyPrune(history: readonly ChatMessage[], set: PruneSet): read
   const out = [...history];
   let changed = false;
   for (const [index, entry] of set) {
-    if (index < 0 || index >= history.length) {
-      // A stale index (a history that shrank under a set built before): ignore.
+    if (history[index] !== entry.original) {
+      // A stale index (a history that shrank, or was replaced in place under a
+      // set built before): ignore, the entry belongs to another conversation.
       continue;
     }
     out[index] = entry.message;
@@ -613,7 +677,8 @@ const CHARS_PER_TOKEN = 4;
 export function estimateGain(history: readonly ChatMessage[], set: PruneSet): PruneGain {
   let chars = 0;
   for (const [index, entry] of set) {
-    if (index < 0 || index >= history.length) {
+    if (history[index] !== entry.original) {
+      // Stale (see `applyPrune`): it would save nothing, so it must not count.
       continue;
     }
     chars += entry.savedChars;

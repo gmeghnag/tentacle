@@ -197,7 +197,7 @@ another round.
 
 | Rule | Candidate | Stub keeps | How to get it back (said in the stub) |
 |---|---|---|---|
-| R1 superseded read | `fs_read` result of path P when a LATER successful `fs_read` of P covers the same range, or a later successful `fs_write`/`fs_edit`/`fs_multi_edit` of P | path, range, size, the round that superseded it | `fs_read P` again (the file is the truth) |
+| R1 superseded read | `fs_read` result of path P when a LATER successful `fs_read` of P covers the same span (a line range, or the SAME `pages` window for a PDF), or a later successful `fs_write`/`fs_edit`/`fs_multi_edit` of P | path, range/pages, size, the round that superseded it | `fs_read P` again (the file is the truth) |
 | R2 write/edit payload | arguments of a SUCCESSFUL `fs_write` (`content`) / `fs_edit` (`old_string`,`new_string`) / `fs_multi_edit` (`edits[].*`) | path + every non-payload field; each payload string → a placeholder with its size | `fs_read P` |
 | R3 long output acted on | a `shell` / `shell_output` result over `pruneOutputChars` (default 2 000) | first 10 + last 30 lines (failures keep the tail, which is where errors are) + exit code + size | re-run ONLY if safe to repeat; else the spill file if any |
 | R4 spill preview | a result with `spill` set | the banner (path, size), preview dropped | `fs_read <spill path>` with offset/limit / grep |
@@ -252,9 +252,14 @@ stub: `fs_read` again (side-effect free), the spill file, re-running a safe
 command. A dedicated recall tool is Owner question 2.
 
 **6. Interactions.**
-- `/compact` and `context_reset` replace the history: the WeakMap entry dies
-  with the old objects (a reset reuses the array — `messages.length = 0`,
-  `agent.ts:2550` — so the reset path also `pruneState.delete(messages)`).
+- `/compact`, `/clear` and `context_reset` replace the history IN PLACE, reusing
+  the same array (`session.ts:366-367` and `:390-391`, `messages.length = 0` +
+  `push`; a reset the same way, `agent.ts:2550`), so **a `WeakMap` entry does
+  NOT die with the old objects** — the S2 state must be dropped explicitly on
+  compact AND on `/clear`. S1's `PruneEntry` therefore carries the `original`
+  message and `applyPrune`/`estimateGain` skip an entry whose
+  `history[index] !== original`; stale indices alone cannot catch this (an
+  in-place replacement keeps every index in range).
 - Resume / reattach / daemon restart: the state is memory-only; the first
   round after a reload recomputes from scratch (one batch if over threshold).
   One cache miss, the same as the anchor's reload story.
@@ -309,7 +314,7 @@ TUI, or the session log. No `protocol.d/` note.
   object; tested through `modelView` (zero repairs on a pruned history).
 - **Resume / restart / reattach** → memory-only state recomputed once; stored
   history and log byte-identical (tested).
-- **`/compact`, `context_reset`, `/clear`** → state dropped with the history.
+- **`/compact`, `context_reset`, `/clear`** → state dropped EXPLICITLY (`pruneState.delete(messages)`) at each replacement: they reuse the array, so the WeakMap entry does not die with the old objects. Belt and braces, a stale set fires on nothing (`PruneEntry.original`).
 - **Sub-agents** → own array, own state; a child's report is a user-role
   note in the parent (never pruned).
 - **Pods** → no wire change; config carried; a pod daemon never persists
@@ -322,14 +327,22 @@ TUI, or the session log. No `protocol.d/` note.
 
 ### Tests
 
-S1 (`packages/agent/test/prune.test.ts`), each property exact:
+S1 (`packages/agent/test/prune.test.ts`, 39 cases), each property exact:
 - user/assistant `content` is byte-identical before/after for every rule;
 - R1 prunes an earlier read of P after a later full read / a successful edit
-  of P; does NOT after a failed edit, nor a later read of a different range;
+  of P; does NOT after a failed edit, nor a later read of a different range,
+  nor a later read that STARTS LATER (lines 1-50 then `offset 40`), nor after a
+  failed later read, nor a failed earlier one; a PDF `pages` read is covered
+  only by the SAME `pages` (never by a default read);
 - R2 replaces only payload fields of a successful write/edit; a failed one is
   untouched; the result parses as a JSON object;
-- R3 keeps head/tail/exit; R4 keeps the spill path; R5 only exact duplicates;
-- the protected tail and skill results are never candidates;
+- R3 keeps head/tail/exit; R4 keeps the spill path;
+- R5 only exact duplicates — same tool AND same arguments AND same bytes — and
+  only the EARLIER copy, on a non-`fs_read` tool whose body exceeds its stub;
+- the protected tail, skill results and `context_reset` results are never
+  candidates;
+- a set built before an IN-PLACE history replacement (`/compact`, `/clear`, a
+  reset) fires on nothing, and `estimateGain` counts nothing for it;
 - stubs are deterministic (two computations → identical bytes);
 - `modelView(applyPrune(h))` reports zero repairs.
 
@@ -338,8 +351,9 @@ S2 (agent loop with a fake provider capturing `request.messages`):
 - crossing threshold → one batch; the next N requests share the exact pruned
   prefix bytes (pins cache stability); a second batch only after the gain gate;
 - stored `session.messages` byte-identical to an unpruned run (pins "log intact");
-- `context_reset` / `compact` drop the state; a fresh `Agent` over a reloaded
-  history recomputes;
+- `context_reset` / `compact` / `/clear` drop the state EXPLICITLY (the array is
+  reused in place, so the WeakMap entry survives otherwise); a fresh `Agent`
+  over a reloaded history recomputes;
 - the guard: `fs_write` with the sentinel → `isError`, file untouched;
 - mutation check (§9): wire `prune` to also mutate `messages` → the
   log-intact test fails; disable the trigger → the batch test fails.
@@ -525,6 +539,106 @@ confirms that (its only failures were the concurrently-corrupted snapshot file,
 repaired and re-run green).
 
 **Slice status.** S1 **DONE**. S2, S3, S4 not started (out of this scope).
+
+### Fix round 1
+
+*— deepseek-v4.1-flash-1017 (executor, `tentacle --profile deepseek`), 2026-11-17 · addresses the
+Review's three MEDIUMs and both nits*
+
+**Red before green (§9).** Every fix's test was written first and run against the unfixed `prune.ts`:
+`35 pass / 3 fail`, red on the ASSERTION, not an import — `a PDF read with 'pages' is covered only by
+the SAME 'pages'`, `a set built before an IN-PLACE history replacement fires on nothing`, `a stale
+entry does not hide a live one in the same set`. Those 3 own the three MEDIUMs. The 8 other cases
+added this round are guard/negative cases that a correct implementation already passes (one of them,
+the failed-earlier-read case, was added after the red run): their non-vacuity is established by the
+mutation run below — each has a mutation under which it is among the failing tests — not by a red
+run. The suite went 28 → 39 cases.
+
+**M1 — R5 and the R1 read rules were under-tested (finding 1).** No behaviour change in `prune.ts`:
+the reviewer's seven survivors were real test gaps, so the fix is the missing cases, in
+`prune.test.ts`. Cause, confirmed by mutation: the only positive R5 case used `fs_read` (R1 stubs it
+first, and `"call r2"` matches both stubs) and the negative one used an 11-char body the
+`savedChars > 0` gate refuses whatever R5 decides. Added: R5 positive/negative on `search` (no path,
+not a shell, body far larger than its stub) — identical→stubbed, different bytes→not, different
+arguments→not; "only the EARLIER of two identical results is stubbed" (so no stub points at another
+stub); a `covers` case with a later start (`offset 40` vs `lines 1-50`); a later FAILED read; a
+FAILED earlier read; a `context_reset` exemption case. Fixing the *tests* exposed nothing broken in
+the rules for these — `A/E/F/G/I/B/K` now all fail the suite (below).
+
+**M2 — a set survived an in-place history replacement (finding 2).** The premise was FALSE:
+`Session.compact` (`session.ts:366-367`) and `clearConversation` (`:390-391`) reuse the array
+(`length = 0`, `push`), as `context_reset` does, so a `WeakMap<ChatMessage[], …>` entry survives and
+a monotonic index-only set then overwrote a `/compact` SUMMARY at index 1 with an old `fs_read` stub.
+Fix, in `prune.ts`: `PruneEntry.original` carries the stored message (by reference) and both
+`applyPrune` and `estimateGain` compare `history[index] !== entry.original` and skip a mismatch — the
+index bound check is gone, since it could not detect this class. Doc corrected in four places
+(Design §6, Failure modes, Tests S1/S2) so S2 drops the state explicitly on compact AND `/clear`,
+the entry comparison being the belt to that brace. Checked the one other in-place message write — the
+`contextUsage` copy at `agent.ts:1834` — it only replaces messages at index >= `unseen` (the current
+turn's, never candidates), so identity is stable for every index a set can name.
+
+**M3 — R1 ignored `fs_read`'s `pages` (finding 3).** `readRangeOf` saw only a line range, so a later
+`fs_read doc.pdf` (default first 100 pages) "covered" an earlier `pages: "101-200"` read. Fix, in
+`prune.ts`: a `ReadSpan` (`{range?}` or `{pages?}`) replaces the bare `ReadRange` in `CallSite`;
+`readSpanOf` yields `{pages}` when the argument is present; `spanCovers` compares `pages` strings
+verbatim when either side is a page window and only otherwise falls back to `covers`; `spanText`
+reports `pages 101-200` in the stub instead of a line range.
+
+**Nits.** `changelog.d/smart-compaction.added.md` **deleted**: it announced an unwired internal
+module, which §10 excludes ("internal/dev/test-only work adds no fragment"); the fragment belongs to
+S4, when the default is decided and behaviour changes. The Execution signature above claims
+`claude-sonnet-4-5-20250929` for work committed as `exec (deepseek)`; it is left as-is rather than
+rewritten (that is the previous round's record) and this section is signed with the real model id.
+
+**Mutation checks (§9, pasted).** Script `mutate-r1.ts` (in this worktree's `.tentacle/tmp/
+smart-compaction/`, run `bun mutate-r1.ts`): each mutation applied to `prune.ts`, the suite run, the
+original restored — `restored: true`, and `git status` shows only this round's files. **Twelve
+mutations, twelve caught**, including all seven that survived the original Execution:
+
+```
+A  R5 ignores content: 3 fail  (also kills the two new fs_read-failure cases)
+E  R5 either direction: 2 fail  (two identical results outside the tail | stale entry beside a live one)
+G  R5 ignores arguments: 1 fail  (same tool+bytes but DIFFERENT arguments)
+F  covers ignores from: 1 fail  (NOT after a later read that STARTS LATER)
+I  R1 after a FAILED read: 1 fail
+B  fs_read failure = success: 2 fail
+K  exempt list drops context_reset: 1 fail
+P  pages ignored (all reads are line windows): 1 fail
+S  applyPrune ignores `original`: 3 fail  (other-history index | in-place replacement | stale beside live)
+T  estimateGain ignores `original`: 1 fail  (in-place replacement)
+C  R3 keeps no tail: 1 fail   H  R1 by a FAILED write: 1 fail   (pre-existing, still holding)
+```
+
+`T` initially re-mutated `applyPrune` (the two fixes shared a marker and only the first `replace`
+fired) — it reported 2 fail, which is the tell; narrowed to `estimateGain`'s own body it is 1 fail on
+the test that owns it. Worth recording: a mutation script that silently re-applies the previous
+mutation over-states its coverage, which is exactly the flaw finding 1 named.
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run lint` clean (1857 files, the §6 baseline) ·
+`bun test packages/agent packages/tools` 1105 pass / 0 fail · full `bun test`:
+
+```
+ 13578 pass
+ 5 skip
+ 0 fail
+ 33 snapshots, 106806 expect() calls
+Ran 13583 tests across 964 files. [465.20s]
+```
+
+The 5 skips are the §6 baseline opt-in/root-only set, not new. This run took 465 s on a tree shared
+with three other agents' suites; it accounts for the count exactly — the previous Execution's run was
+13547 pass + 5 skip + 20 fail = 13572, and this one is 13578 pass + 5 skip = 13583, the +11 tests added
+this round (the 20 chart-lines failures recorded there were the concurrently-corrupted snapshot file,
+and are gone).
+
+**Files (this round).** `packages/agent/src/prune.ts` (modified: `original`, `ReadSpan`/
+`readSpanOf`/`spanCovers`/`spanText`, `applyPrune`, `estimateGain`, docblocks),
+`packages/agent/test/prune.test.ts` (modified: +11 cases and 3 assertions tightened, 28 → 39),
+`changelog.d/smart-compaction.added.md` (deleted), this doc.
+
+**Still not verified.** Nothing new: S1 remains unreachable from the loop until S2 wires it, so the
+fixes cannot move any existing test, and the properties S2 owns (the state actually being dropped on
+compact/`/clear`, not merely harmless if kept) are S2's tests, listed in the Tests section.
 
 ## Review
 

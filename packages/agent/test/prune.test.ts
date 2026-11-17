@@ -160,6 +160,78 @@ describe("R1 — a superseded fs_read", () => {
     const out = pruned(history);
     expect(contentAt(out, 2)).toContain("docs/x.md lines 5-9");
   });
+
+  test("NOT after a later read that STARTS LATER (it never contained the first lines)", () => {
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round(
+        [read("r1", "docs/x.md", { offset: 1, limit: 50 })],
+        new Map([["r1", `1-50\n${"x".repeat(2000)}`]]),
+      ),
+      ...filler(0, 6),
+      // To the end of the file, but from line 40: lines 1-39 are in neither read.
+      ...round(
+        [read("r2", "docs/x.md", { offset: 40 })],
+        new Map([["r2", `40-\n${"x".repeat(2000)}`]]),
+      ),
+      { role: "user", content: "next" },
+    ];
+    expect(pruned(history)).toBe(history);
+  });
+
+  test("NOT after a later FAILED read of P (nothing superseded)", () => {
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round([read("r1", "docs/x.md")], new Map([["r1", body("OLD")]])),
+      ...filler(0, 6),
+      ...round(
+        [read("r2", "docs/x.md")],
+        new Map([["r2", "tool fs_read failed: ENOENT: no such file or directory"]]),
+      ),
+      { role: "user", content: "next" },
+    ];
+    expect(pruned(history)).toBe(history);
+  });
+
+  test("a FAILED earlier read is never stubbed (there was no content to supersede)", () => {
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round(
+        [read("r1", "docs/x.md")],
+        new Map([["r1", `tool fs_read failed: ENOENT\n${"x".repeat(2000)}`]]),
+      ),
+      ...filler(0, 6),
+      ...round([read("r2", "docs/x.md")], new Map([["r2", body("NEW")]])),
+      { role: "user", content: "next" },
+    ];
+    expect(pruned(history)).toBe(history);
+  });
+
+  test("a PDF read with `pages` is covered only by the SAME `pages`", () => {
+    const older: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round(
+        [read("r1", "doc.pdf", { pages: "101-200" })],
+        new Map([["r1", body("PAGES 101-200")]]),
+      ),
+      ...filler(0, 6),
+      // A default read (the first 100 pages) does NOT contain pages 101-200.
+      ...round([read("r2", "doc.pdf")], new Map([["r2", body("PAGES 1-100")]])),
+      { role: "user", content: "next" },
+    ];
+    expect(pruned(older)).toBe(older);
+
+    const same: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round([read("r1", "doc.pdf", { pages: "101-200" })], new Map([["r1", body("PAGES")]])),
+      ...filler(0, 6),
+      ...round([read("r2", "doc.pdf", { pages: "101-200" })], new Map([["r2", body("PAGES")]])),
+      { role: "user", content: "next" },
+    ];
+    const out = pruned(same);
+    expect(contentAt(out, 2)).toContain(PRUNE_MARKER);
+    expect(contentAt(out, 2)).toContain("pages 101-200");
+  });
 });
 
 describe("R2 — a successful write/edit's payload", () => {
@@ -355,6 +427,70 @@ describe("R5 — an exact duplicate", () => {
     ];
     expect(pruned(history)).toBe(history);
   });
+
+  // The cases below use `search` (no `path`, not a `shell`, so R1/R3/R4 cannot
+  // reach them) with bodies larger than the stub: R5 itself decides, and the
+  // `savedChars > 0` gate cannot mask a wrong answer.
+
+  test("a non-`fs_read` result identical to a later one IS a duplicate", () => {
+    const args = { query: "needle" };
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round([call("q1", "search", args)], new Map([["q1", body("SAME HITS")]])),
+      ...filler(0, 6),
+      ...round([call("q2", "search", args)], new Map([["q2", body("SAME HITS")]])),
+      { role: "user", content: "next" },
+    ];
+    const out = pruned(history);
+    expect(contentAt(out, 2)).toContain(PRUNE_MARKER);
+    expect(contentAt(out, 2)).toContain("call q2");
+    expect(pruneCandidates(history).get(2)?.rule).toBe("duplicate");
+    // The LATER copy is the one still carrying the content.
+    expect(out.at(-2)?.content).toContain("SAME HITS");
+  });
+
+  test("two identical results outside the tail: only the EARLIER is stubbed", () => {
+    const args = { query: "needle" };
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round([call("q1", "search", args)], new Map([["q1", body("SAME HITS")]])),
+      ...round([call("q2", "search", args)], new Map([["q2", body("SAME HITS")]])),
+      ...filler(0, 8),
+      { role: "user", content: "next" },
+    ];
+    // Both results are candidates (both before the protected tail).
+    const candidates = [...pruneCandidates(history).entries()];
+    expect(candidates.map(([index]) => index)).toEqual([2]);
+    const out = pruned(history);
+    // A stub must never point at another stub: the claim "that one is still in
+    // the conversation" has to be TRUE.
+    expect(contentAt(out, 2)).toContain(PRUNE_MARKER);
+    expect(contentAt(out, 2)).toContain("call q2");
+    expect(contentAt(out, 4)).toBe(body("SAME HITS"));
+  });
+
+  test("same tool+arguments but DIFFERENT bytes: not a duplicate", () => {
+    const args = { query: "needle" };
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round([call("q1", "search", args)], new Map([["q1", body("FIRST HITS")]])),
+      ...filler(0, 6),
+      ...round([call("q2", "search", args)], new Map([["q2", body("SECOND HITS")]])),
+      { role: "user", content: "next" },
+    ];
+    expect(pruned(history)).toBe(history);
+  });
+
+  test("same tool+bytes but DIFFERENT arguments: not a duplicate", () => {
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round([call("q1", "search", { query: "a" })], new Map([["q1", body("SAME HITS")]])),
+      ...round([call("q2", "search", { query: "b" })], new Map([["q2", body("SAME HITS")]])),
+      ...filler(0, 6),
+      { role: "user", content: "next" },
+    ];
+    expect(pruned(history)).toBe(history);
+  });
 });
 
 describe("the protected tail and the exempt tools", () => {
@@ -375,6 +511,17 @@ describe("the protected tail and the exempt tools", () => {
       ...round([call("k1", "skill", args)], new Map([["k1", body("SKILL BODY")]])),
       ...filler(0, 6),
       ...round([call("k2", "skill", args)], new Map([["k2", body("SKILL BODY")]])),
+      { role: "user", content: "next" },
+    ];
+    expect(pruned(history)).toBe(history);
+  });
+
+  test("a context_reset result is never a candidate, even when it is an exact duplicate", () => {
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round([call("c1", "context_reset", { prompt: "p" })], new Map([["c1", body("RESET")]])),
+      ...filler(0, 6),
+      ...round([call("c2", "context_reset", { prompt: "p" })], new Map([["c2", body("RESET")]])),
       { role: "user", content: "next" },
     ];
     expect(pruned(history)).toBe(history);
@@ -497,9 +644,83 @@ describe("determinism and validity", () => {
   });
 
   test("a set naming a message the history no longer has is ignored", () => {
-    const set = pruneCandidates(history);
-    const grown = history.slice(0, 3);
-    expect(() => applyPrune(grown, set)).not.toThrow();
-    expect(applyPrune(grown, set).length).toBe(3);
+    const long = Array.from({ length: 400 }, (_, i) => `line ${i}`).join("\n");
+    const source: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round(
+        [call("s1", "shell", { command: "bun test" })],
+        new Map([["s1", `exit=1\n${long}`]]),
+      ),
+      ...filler(0, 6),
+      { role: "user", content: "next" },
+    ];
+    const set = pruneCandidates(source);
+    expect(set.has(2)).toBe(true);
+    // A SHORTER history whose index 2 is a different message.
+    const other: ChatMessage[] = [
+      { role: "user", content: "a different chat" },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "and another" },
+    ];
+    expect(() => applyPrune(other, set)).not.toThrow();
+    // Nothing applies, so the array comes back untouched — same reference.
+    expect(applyPrune(other, set)).toBe(other);
+  });
+
+  test("a set built before an IN-PLACE history replacement fires on nothing", () => {
+    // `/compact`, `/clear` and `context_reset` reuse the SAME array
+    // (`messages.length = 0; push(...)` — session.ts:366-367, :390-391), so
+    // index-only staleness is not detectable by length: the entry must carry
+    // the message it was built from.
+    const replaced: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round([call("r1", "fs_read", { path: "docs/x.md" })], new Map([["r1", body("OLD")]])),
+      ...filler(0, 6),
+      ...round([call("r2", "fs_read", { path: "docs/x.md" })], new Map([["r2", body("NEW")]])),
+      { role: "user", content: "next" },
+    ];
+    const set = pruneCandidates(replaced);
+    expect(set.size).toBeGreaterThan(0);
+    // What `/compact` leaves behind: a DIFFERENT conversation, same array, and
+    // the summary sits exactly where the old `fs_read` result was.
+    const after: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "SUMMARY OF THE OLD CHAT" },
+      { role: "assistant", content: "ok" },
+    ];
+    replaced.length = 0;
+    replaced.push(...after);
+    // The set belongs to the OLD history: nothing of it applies to the new one.
+    expect(applyPrune(replaced, set)).toBe(replaced);
+    expect(estimateGain(replaced, set).chars).toBe(0);
+    expect(replaced[1]?.content).toBe("SUMMARY OF THE OLD CHAT");
+  });
+
+  test("a stale entry does not hide a live one in the same set", () => {
+    const long = Array.from({ length: 400 }, (_, i) => `line ${i}`).join("\n");
+    const old: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round(
+        [call("s1", "shell", { command: "bun test" })],
+        new Map([["s1", `exit=1\n${long}`]]),
+      ),
+      ...round([call("r1", "search", { query: "a" })], new Map([["r1", body("HITS")]])),
+      ...round([call("r2", "search", { query: "a" })], new Map([["r2", body("HITS")]])),
+      ...filler(0, 6),
+      { role: "user", content: "next" },
+    ];
+    const set = pruneCandidates(old);
+    const rules = [...set.entries()].map(([index, entry]) => [index, entry.rule]);
+    expect(rules).toEqual([
+      [2, "long_output"],
+      [4, "duplicate"],
+    ]);
+    // Index 4 is now a different message; index 2 is still the one it named.
+    const mixed: ChatMessage[] = [...old];
+    mixed[4] = { role: "user", content: "a NEW message at index 4" };
+    const out = applyPrune(mixed, set);
+    expect(out[4]?.content).toBe("a NEW message at index 4");
+    expect(contentAt(out, 2)).toContain(PRUNE_MARKER);
+    expect(out[2]?.content).toContain("exit=1");
   });
 });
