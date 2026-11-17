@@ -107,6 +107,18 @@ describe("the Pinned group (docs/feat/mobile-session-actions.md S2)", () => {
     expect(groupSessions(pinned, "nothing like it").noMatch).toBe(true);
   });
 
+  test("a search ONLY a pinned row matches is not 'no matches' (review finding 1)", () => {
+    // "Old spike" (z, archived, not pinned) does not match "pinned spike", so
+    // nothing outside the Pinned group matches: before the fix `noMatch` summed
+    // only active + archived and said "No matches" above a visible pinned row.
+    const groups = groupSessions(pinned, "pinned spike");
+    expect(groups.pinned.map((r) => r.sessionId)).toEqual(["p"]);
+    expect(groups.running).toEqual([]);
+    expect(groups.idle).toEqual([]);
+    expect(groups.archived).toEqual([]);
+    expect(groups.noMatch).toBe(false);
+  });
+
   test("a pinned archived row shows in Pinned, not in Archived (Owner Q3)", () => {
     const old = row({ sessionId: "z2", archived: true, pinned: true });
     const groups = groupSessions({ pinned: [old], active: [a], archived: [z, old] }, "");

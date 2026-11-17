@@ -172,6 +172,49 @@ describe("row actions: delete", () => {
     expect(navigated).toEqual([null]);
   });
 
+  test("the open check is READ BEFORE the await: a move during the delete still navigates", async () => {
+    // Review finding 2: the open screen gets `session_closed{deleted}` while the
+    // delete is in flight and moves away, so `currentId()` has changed by the
+    // time the call resolves. Reading it after the await would skip `navigate`
+    // and strand the person wherever the screen sent them (Owner Q2 says: go to
+    // the row after the one deleted).
+    let open: string | null = "open-1";
+    const { actions, navigated } = harness(
+      { currentId: () => open },
+      {
+        remove: () =>
+          new Promise<void>((resolve) => {
+            queueMicrotask(() => {
+              open = "other-1";
+              resolve();
+            });
+          }),
+      },
+    );
+    await actions.confirmDelete("a", { id: "open-1" });
+    expect(open).toBe("other-1");
+    expect(navigated).toEqual(["next-1"]);
+  });
+
+  test("a session that was NOT open is not navigated to, even if one becomes current later", async () => {
+    // The mirror case: `wasOpen` false must stay false, so no navigate.
+    let open: string | null = "other-1";
+    const { actions, navigated } = harness(
+      { currentId: () => open },
+      {
+        remove: () =>
+          new Promise<void>((resolve) => {
+            queueMicrotask(() => {
+              open = "deleted-row";
+              resolve();
+            });
+          }),
+      },
+    );
+    await actions.confirmDelete("a", { id: "deleted-row" });
+    expect(navigated).toEqual([]);
+  });
+
   test("a row already deleted elsewhere (SessionDeleted) is a SUCCESS: re-read, row gone", async () => {
     const { actions, reread, navigated } = harness(
       {},

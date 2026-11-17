@@ -645,6 +645,62 @@ sheet's native look) and the delete confirmation's layout on a small screen —
 `26-drawer.yaml` now asserts the menu's items and the flow still needs a run on
 the simulator. To verify: run flow 26 against the harness `serve`.
 
+### Fix round 1
+
+*— claude-code 2.1.323 (model `opus`), 2026-11-17 (executor, S2 review findings 1–2)*
+
+Both MEDIUM findings from the S2 review are fixed; nothing else was touched.
+
+**Finding 1 (MEDIUM) — `session-groups.ts` `noMatch` ignored the Pinned group.**
+FIXED, `apps/mobile/src/session-groups.ts:44-53`. `noMatch` summed only
+`active.length + archived.length`, and both exclude the rows hoisted into
+`pinned`, so a query that only a pinned row matched said "No matches" directly
+above that row. It now sums the post-filter `pinned.length + active.length +
+archived.length` (one `matched` value), with `total > 0` and a non-empty query
+unchanged. The new case is in
+`apps/mobile/test/session-groups.test.ts` ("a search ONLY a pinned row matches is
+not 'no matches'"): the fixture's other titles do not contain "pinned spike", so
+`running`/`idle`/`archived` are all empty there and the pin is the only match.
+**RED first:** `expect(groups.noMatch).toBe(false)` → `Received: true`, 15 pass /
+1 fail, on the unpatched line.
+
+**Finding 2 (MEDIUM) — the "read `wasOpen` BEFORE the await" property was
+untested.** The code was already correct (`drawer-row-actions.ts:173`, read
+before `run`), so this is a test-only fix, per the review's own wording ("the
+mutation SURVIVED"). Two cases added to
+`apps/mobile/test/drawer-row-actions.test.ts`, both using a `remove` whose
+resolution flips `currentId()` in a microtask so the change lands strictly
+between the read and the success callback:
+- `currentId` moves away during the delete → `navigate(["next-1"])` is still
+  called (the reviewer's R2 scenario).
+- the mirror: `currentId()` BECOMES the deleted id during the delete → no
+  navigate (a late read would wrongly navigate).
+
+**Mutations (each file restored from a copy in
+`.tentacle/tmp/mobile-session-actions/`, `git status` back to the 3 expected
+files afterwards):**
+- M1 (finding 1): `matched` reverted to `active.length + archived.length` →
+  **KILLED, 15 pass / 1 fail** (the new `noMatch` case).
+- M2 (finding 2, the reviewer's R2 shape): `wasOpen` read after the await, in
+  the success callback → **KILLED, 16 pass / 2 fail** — both new timing cases
+  fail, the pre-existing 16 still pass, which is exactly why R2 had survived.
+
+**Gate (fix round, branch top):** `bunx tsc --noEmit` clean · `bunx tsc -p
+apps/mobile` clean · `bunx tsc -p apps/relay` clean · `bun run lint` clean (1845
+files, 0 errors/warnings) · `bun test` **13448 pass / 5 skip / 0 fail** (956
+files), the 5 skips being the pre-existing opt-in ones. No `skip`/`todo` added;
+fix round 1 adds no test file. No protocol, schema or persistence change, so no
+`protocol.d/` note and no `protocol:bump` needed beyond the merge-time run.
+
+**Drift from Implementation:** none. `noMatch` had no wording in the Design
+(it was not part of S2's list), so the fix only makes the existing predicate
+agree with the hoist the review found already in place; no design decision was
+reopened.
+
+**Not verified:** unchanged from S2 — the simulator run of `26-drawer.yaml`.
+The new `noMatch` case is pure and needs no device; the reviewer's point was a
+projection bug, so the unit test is the whole check.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S1 only)*

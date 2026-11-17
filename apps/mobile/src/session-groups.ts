@@ -38,12 +38,16 @@ export function groupSessions(sections: SessionSections, query: string): Session
   const idle = active.filter((row) => !row.running);
   const archived = sections.archived.filter((row) => keep(row) && !isPinned.has(row.sessionId));
   const total = sections.active.length + sections.archived.length;
+  // Pinned rows are hoisted OUT of `active`/`archived` above, so a query only a
+  // pin matches must count it: otherwise the screen says "No matches" above the
+  // very row that matched (review finding 1).
+  const matched = pinned.length + active.length + archived.length;
   return {
     pinned,
     running,
     idle,
     archived,
-    noMatch: query.trim() !== "" && total > 0 && active.length + archived.length === 0,
+    noMatch: query.trim() !== "" && total > 0 && matched === 0,
   };
 }
 
