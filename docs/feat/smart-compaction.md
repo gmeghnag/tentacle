@@ -1,6 +1,6 @@
 # feat/smart-compaction — Lossless-first pruning of the model's context
 
-> **Status:** implementation (plan written, NOT approved — see Owner questions)
+> **Status:** implementation APPROVED (orchestrator, night delegation 2026-11-17); S1–S3 tonight, S4 (A/B + default) after
 > **Branch:** `feat/smart-compaction`
 > **Size:** M (split into slices S1–S4, each S/M) · **Blast:** load-bearing (agent loop / the request every round sends) · **Suited:** strong model executes S2; S1/S3 may go to a weaker model; mandatory fresh-context Review on S2 and S4
 > **Changelog:** `changelog.d/smart-compaction.added.md` (written in S4, when the default is decided)
@@ -381,6 +381,10 @@ S2 (agent loop with a fake provider capturing `request.messages`):
 7. **Treat `shell` `sed -n`/`cat` file reads as reads for R1?** Rec: no in
    v1 (staleness is not knowable from a command line); they fall under R3 when
    long (orchestrator).
+
+**Answers (orchestrator, 2026-11-17, owner asleep — night delegation):** Q1–Q7 all as recommended (default OFF until the S4 A/B passes; no recall tool in v1; prune write/edit args with the placeholder guard; NO persisted `prune` entry — nothing changes on disk; /compact on the pruned view in a later slice; 60/15/6/2000 retuned by S3's replay; no sed/cat reads in v1). The owner may overrule on waking.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-17*
 
 ## Execution
 
