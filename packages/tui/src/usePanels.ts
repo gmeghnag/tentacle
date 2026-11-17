@@ -54,7 +54,8 @@ export interface PanelsHost {
   readonly switchingRef: { readonly current: boolean };
   /** A panel's width, for `applyPanel` (a render value, as it was inline). */
   readonly columns: number;
-  readonly pushNotice: (text: string) => void;
+  /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
+  readonly pushNotice: (text: string, level?: "warn") => void;
   /** The live session (the `/schedule` delete goes through its client). */
   readonly sessionRef: { readonly current: SessionController | null };
   /**

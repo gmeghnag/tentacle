@@ -104,7 +104,8 @@ export interface QuitClearHost {
   readonly runQuit: RunQuit | undefined;
   /** `connect`: quitting only detaches, so a job or a turn is not lost. */
   readonly detachOnQuit: boolean;
-  readonly pushNotice: (text: string) => void;
+  /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
+  readonly pushNotice: (text: string, level?: "warn") => void;
   readonly wakeIfPending: () => void;
   /** Quit the TUI (Ink's `useApp().exit`). */
   readonly exit: () => void;

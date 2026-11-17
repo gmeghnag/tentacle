@@ -1063,8 +1063,8 @@ export function App({
   }, [total, viewport, scrollOffset]);
 
   const pushNotice = useCallback(
-    (text: string) => {
-      stateRef.current = pushNoticeItem(stateRef.current, text);
+    (text: string, level?: "warn") => {
+      stateRef.current = pushNoticeItem(stateRef.current, text, level);
       setScrollOffset(0);
       flushNow();
     },

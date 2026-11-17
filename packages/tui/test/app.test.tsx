@@ -575,8 +575,10 @@ describe("App", () => {
     await delay(60);
     const shown = stripAnsi(lastFrame() ?? "");
     expect(shown).toContain('"maxIterations": 5 // this terminal: 3');
+    // A `NoticeItem` (multi-line, from `appendNotice`): the block hangs under
+    // one `◇`, its hint on the last row (docs/feat/harness-notices.md S2).
     expect(shown).toContain(
-      "● 1 differs from this terminal (/settings sync to use this terminal's values)",
+      "  1 differs from this terminal (/settings sync to use this terminal's values)",
     );
     expect(synced).toBe(0);
     stdin.write("/settings sync");
@@ -584,7 +586,9 @@ describe("App", () => {
     stdin.write("\r");
     await delay(60);
     expect(synced).toBe(1);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("● Session settings synced.");
+    // The outcome joins the block above it (two harness lines group: no blank
+    // row, no second glyph — docs/feat/harness-notices.md S2.5).
+    expect(stripAnsi(lastFrame() ?? "")).toContain("  Session settings synced.");
     unmount();
   });
 
@@ -613,16 +617,17 @@ describe("App", () => {
     await delay(30);
     stdin.write("\r");
     await delay(60);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("● Syncing this terminal's settings…");
+    expect(stripAnsi(lastFrame() ?? "")).toContain("◇ Syncing this terminal's settings…");
     stdin.write("/settings sync");
     await delay(30);
     stdin.write("\r");
     await delay(60);
     expect(synced).toBe(1);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("● Already syncing this terminal's settings…");
+    expect(stripAnsi(lastFrame() ?? "")).toContain("  Already syncing this terminal's settings…");
     finish([{ text: "Session settings synced." }]);
     await delay(60);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("● Session settings synced.");
+    // Replaced IN ITS OWN ENTRY (round 3), so this item still opens the block.
+    expect(stripAnsi(lastFrame() ?? "")).toContain("◇ Session settings synced.");
     // Settled: another apply goes through.
     stdin.write("/settings sync");
     await delay(30);
@@ -662,10 +667,10 @@ describe("App", () => {
     stdin.write("\r");
     await delay(60);
     const rows = stripAnsi(lastFrame() ?? "").split("\n");
-    const start = rows.findIndex((row) => row.startsWith("● Session settings:"));
+    const start = rows.findIndex((row) => row.startsWith("◇ Session settings:"));
     expect(start).toBeGreaterThanOrEqual(0);
     expect(rows.slice(start, start + 8).map((row) => row.trimEnd())).toEqual([
-      "● Session settings:",
+      "◇ Session settings:",
       "  {",
       '    "model": {',
       '      "contextWindow": 1000 // this terminal: 2000',
@@ -712,9 +717,12 @@ describe("App", () => {
       await delay(60);
       const frame = stripAnsi(lastFrame() ?? "");
       expect(frame).not.toContain("Syncing this terminal's settings…");
-      expect(frame.match(/●/g)).toHaveLength(3); // ready, the outcome, the show
-      expect(frame.indexOf(`● ${outcome}`)).toBeGreaterThan(-1);
-      expect(frame.indexOf(`● ${outcome}`)).toBeLessThan(frame.indexOf("● SHOWN MEANWHILE"));
+      // ONE glyph for the run: the outcome opens the block and `SHOWN MEANWHILE`
+      // hangs under it — two consecutive harness lines group
+      // (docs/feat/harness-notices.md S2.5). The ready line is the model's `●`.
+      expect(frame.match(/◇/g)).toHaveLength(1);
+      expect(frame.indexOf(`◇ ${outcome}`)).toBeGreaterThan(-1);
+      expect(frame.indexOf("  SHOWN MEANWHILE")).toBeGreaterThan(frame.indexOf(`◇ ${outcome}`));
       unmount();
     });
   }

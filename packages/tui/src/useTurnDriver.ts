@@ -315,7 +315,8 @@ export interface TurnHost {
   /** A new turn starts at the bottom of the transcript. */
   readonly setScrollOffset: (offset: number) => void;
   readonly scheduleFlush: () => void;
-  readonly pushNotice: (text: string) => void;
+  /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
+  readonly pushNotice: (text: string, level?: "warn") => void;
   readonly restoreInput: (text: string, why: string) => void;
 
   // --- the neighbours a turn hands off to
@@ -1189,7 +1190,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         sendNowOwns: compactionOwnedRef.current,
         turnRunning: stateRef.current.running,
       });
-      pushNotice(out.notice);
+      pushNotice(out.notice, out.level);
       if (out.send !== null) {
         setRows(() => []);
         wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start

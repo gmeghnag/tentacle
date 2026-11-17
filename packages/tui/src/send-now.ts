@@ -104,20 +104,30 @@ export function onCompactionSettled(input: {
   readonly rows: QueuedRows;
   readonly sendNowOwns: boolean;
   readonly turnRunning: boolean;
-}): { readonly notice: string; readonly send: string | null; readonly restore: string | null } {
+}): {
+  readonly notice: string;
+  /**
+   * `warn` when the compaction FAILED (docs/feat/harness-notices.md S2.2): a
+   * `▲` is the one shape the person must see; a cancel and a success are info.
+   */
+  readonly level?: "warn";
+  readonly send: string | null;
+  readonly restore: string | null;
+} {
   const { result } = input;
   const notice = result.ok
     ? `_Context compacted — ${result.before} → ${result.after} messages._`
     : input.sendNowOwns && errorCode(result.error) === SendNowErrorCode.Cancelled
       ? "_Compaction cancelled — sending now._"
       : `_Compact failed: ${String(result.error)}_`;
+  const level = result.ok ? undefined : "warn";
   const { text } = takeAll(input.rows);
   if (input.sendNowOwns || text === "") {
-    return { notice, send: null, restore: null };
+    return { notice, ...(level ? { level } : {}), send: null, restore: null };
   }
   return input.turnRunning
-    ? { notice, send: null, restore: text }
-    : { notice, send: text, restore: null };
+    ? { notice, ...(level ? { level } : {}), send: null, restore: text }
+    : { notice, ...(level ? { level } : {}), send: text, restore: null };
 }
 
 /**

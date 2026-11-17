@@ -451,12 +451,19 @@ function applyAgentEvent(state: State, event: StreamEvent, at: At): State {
     // must act on).
     case "truncated_reply": {
       // A re-asked round repeats its cause: said ONCE per turn, as the TUI does
-      // (`noticeSeenThisTurn`) — a re-ask that cuts again has its own wording,
-      // so the dedupe is by TEXT, never by kind.
+      // (`noticeSeenThisTurn`). A re-ask that cuts AGAIN is the same fact
+      // continued, so it REPLACES that line in place (docs/feat/harness-notices.md
+      // S2.6) — the phone folds the same agent events as the TUI and a parity
+      // test pins the two agrees.
+      const again = saidContinueThisTurn(state);
       const text = describeTruncation(event.reason, {
         answered: hasAnswerText(state),
         retrying: event.retrying,
+        ...(again ? { again: true } : {}),
       });
+      if (again) {
+        return replaceContinueNotice(state, text);
+      }
       return noticeSeenThisTurn(state, text) ? state : pushNotice(state, text);
     }
     case "empty_turn":
@@ -558,6 +565,32 @@ function hasAnswerText(state: State): boolean {
 function noticeSeenThisTurn(state: State, text: string): boolean {
   const at = state.rows.findLastIndex((row) => row.kind === "user");
   return state.rows.slice(at + 1).some((row) => row.kind === "notice" && row.text === text);
+}
+
+/** Whether this turn already said the loop is asking the model to continue. */
+function saidContinueThisTurn(state: State): boolean {
+  const at = state.rows.findLastIndex((row) => row.kind === "user");
+  return state.rows
+    .slice(at + 1)
+    .some((row) => row.kind === "notice" && row.text.endsWith("asking it to continue"));
+}
+
+/**
+ * Swap this turn's "asking it to continue" notice for the merged `again`
+ * sentence, IN PLACE (the TUI's `replaceContinueNotice`): the block keeps its
+ * position above the reply instead of a second line appearing below it.
+ */
+function replaceContinueNotice(state: State, text: string): State {
+  const at = state.rows.findLastIndex(
+    (row) => row.kind === "notice" && row.text.endsWith("asking it to continue"),
+  );
+  const prev = at < 0 ? undefined : state.rows[at];
+  if (prev === undefined || prev.kind !== "notice") {
+    return pushNotice(state, text);
+  }
+  const rows = state.rows.slice();
+  rows[at] = { ...prev, text };
+  return { ...state, rows };
 }
 
 function pushTool(state: State, make: (key: string) => ToolRow): State {

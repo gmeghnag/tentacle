@@ -542,6 +542,117 @@ files (client clear-attach/reattach/reattach.e2e, agent/, protocol/, core, daemo
 tui app.test) → 1379 pass, 0 fail. The full suite was not re-run (token budget: once). The 5 skips: this slice adds
 no skip. **Unverified:** a full `bun test` after the last fix — run `bun test 2>&1 | tail -n 15`.
 
+### S2 — DONE
+
+*— claude-sonnet-4-5-20250929 (executor), 2026-11-17*
+
+**Load-bearing check (first, before any edit)** — `.tentacle/tmp/harness-notices/s2-check.ts`:
+1. `stringWidth("◇") === 1`, `stringWidth("▲") === 1` (and `●` 1) — the glyph is single-width,
+   so the swap cannot re-flow a row (Design S2.4's pin HOLDS).
+2. Parity of the two layout paths on today's code: `layoutTranscript(items).total === 11`
+   and `wrapLines(transcriptLines(items)).length === 11` over
+   `[reply, notice, notice, separator, notice, user]` — the property the parity test pins
+   HOLDS before the change.
+3. **The plan's claim "`notice`'s only consumer is `noticeLines`" is FALSE.**
+   `components/dock-tone.ts:33` paints the dock's `you → sa-1` label from `t.notice`
+   (`background-list.ts:685`, `DockTone = "notice"`). So the `notice` TOKEN is KEPT
+   (its styler too — `dock-tone` reads the token, and `dock-tone` is not a transcript
+   path); only its use by harness lines is replaced.
+
+**As built, in dependency order** (each unit's test written first and shown red on its
+assertion; red evidence in the mutation table below):
+1. `packages/tui/src/harness-group.ts` (new) — `isHarness`, `harnessLevel`,
+   `joinsPrevious`, `showsGlyph` (`harness-group.test.ts`, red as a missing module, then
+   red on M3).
+2. `packages/tui/src/theme.ts` — new token `harness` = `#b2b2b2` dark / `#4e4e4e` light
+   plus its styler; `notice` KEPT (see drift). `theme.test.ts` pins both new SGRs and the
+   light/dark key-set equality; `theme-contrast.test.ts` gates the light value (4.5:1
+   after the 256 downgrade) and the dark one (3:1 on `#1e1e1e`).
+3. `packages/core/src/truncation.ts` — `TruncationContext.again?: boolean` and the merged
+   sentence `…— asked it to continue, cut again; this answer is incomplete`
+   (`truncation-again.test.ts`; `again` is ignored for `cut`, which is never re-asked).
+4. `packages/tui/src/harness-text.ts` (new) — `stripInlineMarkdown` (inline code, bold,
+   and markdown escapes; a LONE `*`/`_` is punctuation and stays)
+   (`harness-text.test.ts`).
+5. `packages/tui/src/state.ts` — `NoticeItem.level?: "warn"`; `appendNotice` takes
+   `level`; `harnessNoticeOf` (ONE line wholly `_…_` → a harness line, its text
+   markdown-stripped; anything else stays `AssistantItem{notice:true}`); `pushNoticeItem(
+   state, text, level?)` routes through it; `turnNotices`/`saidContinueThisTurn`/
+   `replaceContinueNotice` merge a second cut IN PLACE; `truncated_reply` and `empty_turn`
+   are `warn` (`harness-lines.test.ts`).
+6. `packages/tui/src/render-lines.ts` — `HARNESS_GLYPHS`, `headGlyph` (`◇` grey, `▲`
+   amber), `noticeLines` on the harness grey with a two-space hang, `itemLines` → new
+   `itemLinesAt(item, opts, glyph)`; grouping in BOTH `transcriptLines` (logical rows) and
+   `layoutTranscript` (wrapped rows) from `harness-group.ts`, with the glyph dropped by a
+   post-wrap cached swap (`hangCache`, the `offPhaseCache` pattern); `LaidItem.gap` so
+   `sliceLaid` no longer assumes `start - 1` is always a separator
+   (`harness-render.test.ts`, incl. the parity test at widths 12/20/40/80, and
+   `harness-block-frame.test.tsx` for the real App frame).
+7. `packages/tui/src/send-now.ts` + `useTurnDriver.ts` + the 8 `pushNotice` prop types +
+   `App.tsx` — `onCompactionSettled` returns `level: "warn"` when the compaction FAILED
+   (`send-now.test.ts`); `pushNotice(text, level?)` threads it.
+8. `apps/mobile/src/transcript.ts` — mirrored the merge (`saidContinueThisTurn`/
+   `replaceContinueNotice`), see drift.
+9. `changelog.d/harness-notices.changed.md` — rewritten to describe this branch's shipped
+   behaviour (the old fragment still promised the S3 slot/separator wording as done).
+
+**Drift from Implementation (and why):**
+- **The `notice` token is KEPT, not removed** (Design S2.1 said removed). Its second, live
+  consumer is the dock's `you → sa-1` label (`dock-tone.ts:33`), which is not a harness
+  line; deleting the token would delete that colour. Only `noticeLines` moved off it.
+- **The old `●`/periwinkle contract was re-pinned, not deleted**:
+  `notice-palette.test.ts` and its probe now assert the `◇`/harness-grey contract, with the
+  hint/separator-subtle and hint-is-a-field pins carried over verbatim.
+- **`stripInlineMarkdown` was not in the plan at all.** It was forced by two real
+  regressions the plan missed: `/attach`'s usage (`_Usage: `/attach <path>`…_`) and
+  `/rename`'s showed their backticks (`app-commands.test.tsx`), and `session-hop` D2
+  showed `/\_ping` (the `noticeText` escape) — the `_…_` texts are markdown SOURCE, which
+  used to be rendered and is now printed literally.
+- **`apps/mobile/src/transcript.ts` was not in the plan's S2 file list.** The pre-existing
+  shared parity test (`apps/mobile/test/transcript-parity.test.ts`, "the app's fold agrees
+  with the TUI's on shared fixtures") fails the gate on its cut-reply fixture unless the
+  phone folds the same merge. This is S2.6's fold only — the phone's own harness-line
+  look/grouping stays the follow-up `feat/mobile-harness-notices`.
+- **`LaidItem.gap`** (not in the plan): `sliceLaid` derived "a separator sits above this
+  item" from `start - 1`, which is false for a joined item. The flag is the layout's own
+  record of it, so both readers stay in agreement.
+- **Existing assertions widened/renamed, no expectation removed**: `app.test.tsx`'s four
+  `/settings` frames (`●` → `◇`, and a grouped outcome/sibling hangs two spaces),
+  `truncated-reply-notice.test.tsx`'s two-notice pair → one merged line,
+  `mouse-stream.test.ts`'s `LAID` fixture gains `gap`.
+- **`/settings` renders as a hanging grey block** (it is an `appendNotice` with several
+  lines): correct per the owner's answer 5 ("every `NoticeItem` is a harness line"), but
+  it is the most visible consequence of the rule — worth the reviewer's eye.
+- **Disk was full mid-task** (117 MiB); I removed Bun's download cache
+  (`~/.bun/install/cache`) to write files. No repo content was touched.
+
+**Mutations (each run, shown red, then reverted — files restored from `.tentacle/tmp/harness-notices/*.bak` and re-verified):**
+| Mutation | Red test(s) |
+|---|---|
+| M1 `transcriptLines` keeps a blank row always | harness-render + harness-block-frame: 3 fail |
+| M2 `layoutTranscript` never conceals the glyph | harness-render + harness-block-frame: 2 fail |
+| M3 `showsGlyph` always `true` | harness-group: 2 fail |
+| M4 `harnessNoticeOf` disabled (old `AssistantItem` path) | harness-lines + app-commands: 4 fail |
+| M5 no `stripInlineMarkdown` | harness-text + harness-lines: 1 fail |
+| M6 truncation never merges (always appends) | harness-lines + truncated-reply-notice: 2 fail |
+| M7 `noticeLines` back to `theme.notice(BULLET)` | harness-render + notice-palette: 10 fail |
+
+**Tests added:** `harness-group.test.ts` (5), `harness-lines.test.ts` (12),
+`harness-render.test.ts` + probe (10), `harness-block-frame.test.tsx` (2),
+`harness-text.test.ts` (5), `core/test/truncation-again.test.ts` (4); re-pinned
+`notice-palette`, `theme`, `theme-contrast`, `send-now`, `truncated-reply-notice`,
+`app`, `mouse-stream`.
+
+**Gate:**
+- `bunx tsc --noEmit` clean; `bunx tsc -p apps/mobile` clean; `bunx tsc -p apps/relay` clean.
+- `bun run lint` clean — `Checked 2008 files`, 0 errors 0 warnings (matches the §6 baseline).
+- full `bun test` (once, final tree): **14605 tests, 14600 pass, 0 fail, 5 skip**
+  (the three known opt-ins — live-k8s, live-docker, the real-socket keepalive — plus two
+  pre-existing skips; none added by S2). An earlier run of the same tree showed the one
+  mobile parity failure described below; it is green in this final run.
+- No `protocol.d/` note (no wire change: no schema, no new method, no new update kind);
+  `packages/protocol/schema/protocol.json` untouched.
+
 ### Fix round 1
 
 *— claude-opus-5-5, 2026-11-17* (fixes Review round 1; S1 Execution above is also opus — the "exec (deepseek)" commit title is the mislabel)

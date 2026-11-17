@@ -18,6 +18,7 @@ import type {
 } from "@tentacle/core";
 import { describeEmptyTurn, describeRepairs, describeTruncation } from "@tentacle/core";
 import { imageRowText } from "./attach-draft.ts";
+import { stripInlineMarkdown } from "./harness-text.ts";
 import { HOP_WAKE_ROW } from "./hop-wake.ts";
 import { type ArtifactCardMap, messagesToItems } from "./resume.ts";
 import { nextToolStatus } from "./tool-phase-view.ts";
@@ -69,6 +70,13 @@ export interface AssistantItem {
 export interface NoticeItem {
   readonly kind: "notice";
   readonly text: string;
+  /**
+   * `warn` for something that went WRONG and the person should see (a reply cut
+   * at its output limit, an empty turn, a failed compaction); absent means info.
+   * It picks the glyph (`▲` vs `◇`, docs/feat/harness-notices.md S2) — the
+   * owner is colour-blind, so the SHAPE is the signal and amber only a cue.
+   */
+  readonly level?: "warn";
   /** A grey aside after the text (`(/settings sync to use this terminal's values, or /clear)`): its own field, never parsed from `text`. */
   readonly hint?: string;
   /** Identifies a background-job notice so the live + event paths dedupe. */
@@ -211,15 +219,23 @@ export function backgroundExitNotice(
 export function appendNotice(
   state: DisplayState,
   text: string,
-  opts: { readonly host?: true; readonly hint?: string } = {},
+  opts: { readonly host?: true; readonly hint?: string; readonly level?: "warn" } = {},
 ): DisplayState {
   const item: NoticeItem = {
     kind: "notice",
     text,
     ...(opts.hint ? { hint: opts.hint } : {}),
     ...(opts.host ? { host: true as const } : {}),
+    ...(opts.level ? { level: opts.level } : {}),
   };
   return { ...state, items: append(state.items, item) };
+}
+
+/** This TURN's notices (after the last user item): the dedupe + merge scope. */
+function turnNotices(state: DisplayState): readonly NoticeItem[] {
+  const at = state.items.findLastIndex((item) => item.kind === "user");
+  const rest = state.items.slice(at + 1);
+  return rest.filter((item) => item.kind === "notice");
 }
 
 /**
@@ -229,8 +245,37 @@ export function appendNotice(
  * round (a re-asked round repeats its cause, docs/fix/truncated-reply-silent.md).
  */
 function noticeSeenThisTurn(state: DisplayState, text: string): boolean {
-  const at = state.items.findLastIndex((item) => item.kind === "user");
-  return state.items.slice(at + 1).some((item) => item.kind === "notice" && item.text === text);
+  return turnNotices(state).some((item) => item.text === text);
+}
+
+/**
+ * Whether this turn already told the user the loop is asking the model to
+ * continue (`…; asking it to continue`): the marker that a second cut is the
+ * SAME fact continued, not a new one (docs/feat/harness-notices.md S2.6).
+ */
+function saidContinueThisTurn(state: DisplayState): boolean {
+  return turnNotices(state).some((item) => item.text.endsWith("asking it to continue"));
+}
+
+/** The shared `warn` option for `appendNotice`'s spread. */
+const WARN = { level: "warn" } as const;
+
+/**
+ * Swap the turn's "asked it to continue" notice for the merged `again` sentence,
+ * IN PLACE: the block keeps its position in the transcript (above the reply that
+ * follows the cut) instead of a second line appearing below it. If it is gone —
+ * a history reset took it — the merged line is appended, never lost.
+ */
+function replaceContinueNotice(state: DisplayState, text: string): DisplayState {
+  const at = state.items.findLastIndex(
+    (item) => item.kind === "notice" && item.text.endsWith("asking it to continue"),
+  );
+  if (at < 0) {
+    return appendNotice(state, text, WARN);
+  }
+  const prev = state.items[at] as NoticeItem;
+  const merged: NoticeItem = { ...prev, text };
+  return { ...state, items: [...state.items.slice(0, at), merged, ...state.items.slice(at + 1)] };
 }
 
 /**
@@ -407,8 +452,45 @@ export function endWithoutOutcome(state: DisplayState): DisplayState {
   };
 }
 
+/**
+ * Whether a `pushNotice` text is a HARNESS line, and its text without the
+ * italics marks: ONE line wholly wrapped in `_…_` (the convention 40+ call sites
+ * use: `pushNotice("_Can't compact while a turn is running._")`).
+ *
+ * Everything else stays a command reply — the multi-line markdown of `/help`,
+ * `/model`, `/mcp`, `/tokens` keeps the model's styling (owner Q5) — and so does
+ * a bare text with no italics, or a half-wrapped one. The rule is deliberately
+ * syntactic and narrow: a misclassified reply would repaint a whole panel as a
+ * grey aside.
+ *
+ * `null` = not a harness line. An empty `__` is not one either: there is nothing
+ * to say, and an empty notice would draw a glyph with no text.
+ */
+export function harnessNoticeOf(text: string): string | null {
+  if (text.includes("\n") || text.length < 3) {
+    return null;
+  }
+  if (!text.startsWith("_") || !text.endsWith("_")) {
+    return null;
+  }
+  const inner = text.slice(1, -1);
+  // `__` (empty) and `___` (a bare mark left by an odd caller) say nothing; a
+  // lone `_` pair around real text is the shape we want.
+  if (inner === "" || inner.startsWith("_") || inner.endsWith("_")) {
+    return null;
+  }
+  // The source is markdown (the module this text used to be drawn by): a
+  // harness line is PLAIN, so the inline markers and escapes go
+  // (`harness-text.ts` — the `/attach` usage's backticks, the hop's `\_`).
+  return stripInlineMarkdown(inner);
+}
+
 /** Append a command's reply (see `AssistantItem.notice`). */
-export function pushNoticeItem(state: DisplayState, text: string): DisplayState {
+export function pushNoticeItem(state: DisplayState, text: string, level?: "warn"): DisplayState {
+  const harness = harnessNoticeOf(text);
+  if (harness !== null) {
+    return appendNotice(state, harness, level === "warn" ? { level: "warn" } : {});
+  }
   return { ...state, items: append(state.items, { kind: "assistant", text, notice: true }) };
 }
 
@@ -589,20 +671,27 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
     // App's own error path adds the failure line.
     case "truncated_reply": {
       // The loop says whether a re-ask is coming; the frontends no longer guess
-      // it from the reason (Review MEDIUM-2). So a re-ask that cuts again says
-      // "incomplete" WITHOUT promising a continuation, and the text-keyed
-      // dedupe lets that second, different sentence through.
+      // it from the reason (Review MEDIUM-2). A re-ask that cuts AGAIN is the
+      // same fact continued, not a second one: it REPLACES the line it belongs
+      // to (in place, so the block keeps its position above the reply) with the
+      // merged wording, instead of printing two near-identical lines
+      // (docs/feat/harness-notices.md S2.6).
+      const again = saidContinueThisTurn(state);
       const text = describeTruncation(event.reason, {
         answered: turnHasAnswerText(state),
         retrying: event.retrying,
+        ...(again ? { again: true } : {}),
       });
-      return noticeSeenThisTurn(state, text) ? state : appendNotice(state, text);
+      if (again) {
+        return replaceContinueNotice(state, text);
+      }
+      return noticeSeenThisTurn(state, text) ? state : appendNotice(state, text, WARN);
     }
 
     // The turn is ending with nothing produced: SAY so, never leave the screen
     // as it was (the reported "looks hung").
     case "empty_turn":
-      return appendNotice(state, describeEmptyTurn());
+      return appendNotice(state, describeEmptyTurn(), WARN);
 
     // The model was sent a repaired copy of the history (once per session;
     // docs/feat/history-validity-invariant.md). The saved session is unchanged.

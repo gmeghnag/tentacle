@@ -57,7 +57,8 @@ export interface MouseHost {
   readonly setSelection: (next: Selection | null) => void;
   readonly field: LineEditor;
   readonly clipboard: (text: string) => Promise<void>;
-  readonly pushNotice: (text: string) => void;
+  /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
+  readonly pushNotice: (text: string, level?: "warn") => void;
   readonly setScrollOffset: (f: (offset: number) => number) => void;
   readonly setPanel: (f: (panel: OpenPanel | null) => OpenPanel | null) => void;
   readonly setDock: (next: DockState) => void;

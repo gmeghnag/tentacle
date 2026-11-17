@@ -22,6 +22,7 @@ import { truncateCells } from "./cells.ts";
 import { type ChartGlyphs, chartToolBody } from "./chart-lines.ts";
 import { diagramToolBody } from "./diagram-lines.ts";
 import { formatDurationMs } from "./format.ts";
+import { harnessLevel, isHarness, joinsPrevious, showsGlyph } from "./harness-group.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
@@ -903,12 +904,31 @@ function separatorLines(text: string, width: number): string[] {
   return [theme.subtle(`${head}${"─".repeat(rest)}`)];
 }
 
-function noticeLines(text: string, expanded: boolean, hint?: string, body?: string): string[] {
+/** The harness glyphs: info `◇`, warn `▲` (docs/feat/harness-notices.md S2). */
+export const HARNESS_GLYPHS = { info: "◇", warn: "▲" } as const;
+
+/**
+ * One harness line's rows (`NoticeItem`, docs/feat/harness-notices.md S2).
+ *
+ * `glyph` is what `harness-group.showsGlyph` decided for this item: the block's
+ * head carries `◇`/`▲` (a warn's glyph painted amber, the extra cue beside the
+ * SHAPE that carries the meaning — the owner is colour-blind), and every
+ * continuation row hangs two spaces under it. `glyph: false` (a run of the same
+ * level) keeps the cells OCCUPIED with two spaces, so nothing re-flows when the
+ * glyph appears or disappears: the swap is post-wrap, exactly like the tool
+ * bullet's OFF phase (`offPhaseRows`).
+ */
+function noticeLines(
+  text: string,
+  expanded: boolean,
+  hint?: string,
+  body?: string,
+  level: "info" | "warn" = "info",
+  glyph = true,
+): string[] {
   const [first = "", ...rest] = text.split("\n");
-  const lines = [
-    `${theme.notice(BULLET)} ${theme.notice(first)}`,
-    ...rest.map((l) => `  ${theme.notice(l)}`),
-  ];
+  const head = glyph ? `${headGlyph(level)} ` : "  ";
+  const lines = [`${head}${theme.harness(first)}`, ...rest.map((l) => `  ${theme.harness(l)}`)];
   if (hint) {
     // The hint ends the last line, grey: a separate field, never cut out of the text.
     lines[lines.length - 1] += ` ${theme.subtle(hint)}`;
@@ -917,7 +937,7 @@ function noticeLines(text: string, expanded: boolean, hint?: string, body?: stri
     // A note's body (a finished sub-agent's report): shown when expanded (Ctrl+O),
     // else only hinted at, so a resume stays compact.
     if (expanded) {
-      lines.push(...body.split("\n").map((l) => `  ${theme.notice(l)}`));
+      lines.push(...body.split("\n").map((l) => `  ${theme.harness(l)}`));
     } else {
       lines[lines.length - 1] += ` ${theme.subtle(EXPAND_HINT)}`;
     }
@@ -925,8 +945,24 @@ function noticeLines(text: string, expanded: boolean, hint?: string, body?: stri
   return lines;
 }
 
+/** A harness line's glyph cell: the grey `◇`, or a warn's amber `▲`. */
+function headGlyph(level: "info" | "warn"): string {
+  const glyph = HARNESS_GLYPHS[level];
+  return level === "warn" ? theme.warn(glyph) : theme.harness(glyph);
+}
+
 /** Logical (pre-wrap) lines for a single display item. */
 export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
+  return itemLinesAt(item, opts, true);
+}
+
+/**
+ * `itemLines` with the harness glyph decided by the CALLER: a notice whose
+ * neighbour is a harness line of its own level hangs two spaces instead of
+ * opening with `◇` (`harness-group.showsGlyph`). The default `true` keeps
+ * `itemLines` the item-in-isolation view (a renamed body row, a single notice).
+ */
+export function itemLinesAt(item: DisplayItem, opts: RenderOptions, glyph: boolean): string[] {
   switch (item.kind) {
     case "user": {
       // An attachment-only prompt has no text: its rows are the attachment lines
@@ -961,22 +997,37 @@ export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
     case "notice":
       return item.separator
         ? separatorLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH))
-        : noticeLines(item.text, opts.expandAll === true, item.hint, item.body);
+        : noticeLines(
+            item.text,
+            opts.expandAll === true,
+            item.hint,
+            item.body,
+            item.level === "warn" ? "warn" : "info",
+            glyph,
+          );
   }
 }
 
-/** Logical lines for the whole transcript, with a blank line between items. */
+/**
+ * Logical lines for the whole transcript: a blank row between items, EXCEPT
+ * between two harness lines, which group into one block
+ * (`harness-group.joinsPrevious`; docs/feat/harness-notices.md S2.5).
+ */
 export function transcriptLines(items: readonly DisplayItem[], opts: RenderOptions): string[] {
   const out: string[] = [];
+  // The last item that DREW rows: an item with none is not a neighbour (it is
+  // invisible), so grouping looks past it — and this stays one O(n) pass.
+  let prev: DisplayItem | undefined;
   for (const item of items) {
-    const lines = itemLines(item, opts);
+    const lines = itemLinesAt(item, opts, showsGlyph(prev, item));
     if (lines.length === 0) {
       continue;
     }
-    if (out.length > 0) {
+    if (out.length > 0 && !joinsPrevious(prev, item)) {
       out.push("");
     }
     out.push(...lines);
+    prev = item;
   }
   return out;
 }
@@ -1113,6 +1164,33 @@ function offPhaseRows(rows: readonly string[]): readonly string[] {
   return swapped;
 }
 
+/**
+ * The HANG variant of a harness line's wrapped rows: the head glyph cell (the
+ * glyph plus its one space) becomes two spaces, so a run of same-level lines
+ * reads as one block under a single `◇`. Memoised on the row array — which is
+ * itself cached per item + width + slot — exactly like `offPhaseCache`, so
+ * `itemRows`' cache key stays item identity while the glyph follows its
+ * NEIGHBOUR (docs/feat/harness-notices.md S2.5, the failure mode "cache
+ * staleness": the flag is computed per layout from `prev`, never stored on the
+ * item).
+ */
+const hangCache = new WeakMap<readonly string[], readonly string[]>();
+
+/** The same rows with the head glyph cell concealed (two spaces, same width). */
+function hangRows(rows: readonly string[], level: "info" | "warn"): readonly string[] {
+  const hit = hangCache.get(rows);
+  if (hit) {
+    return hit;
+  }
+  const [first = "", ...rest] = rows;
+  // The glyph is single-width and so is the cell it sits in (AGENTS §6: `◇` and
+  // `▲` measure 1), so this cannot re-flow a row: only the first cell's bytes
+  // change, and the swap is made after the wrap.
+  const swapped = [first.replace(`${headGlyph(level)} `, "  "), ...rest];
+  hangCache.set(rows, swapped);
+  return swapped;
+}
+
 /** This item's final wrapped rows, memoised on its identity + layout options. */
 function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   const width = Math.max(1, Math.floor(opts.width ?? DEFAULT_WIDTH));
@@ -1179,12 +1257,18 @@ export interface LaidItem {
    * (`tool-hit.ts: toolCallAt`).
    */
   readonly id: string;
+  /**
+   * Whether a blank separator row sits just above this item's first row. An
+   * item that JOINS its predecessor (two harness lines, `harness-group.ts`) has
+   * none, so `sliceLaid` must not assume `start - 1` is one.
+   */
+  readonly gap: boolean;
 }
 
 /**
  * A positional index of the whole transcript: each non-empty item's cached rows
- * plus its global start offset (with one blank separator row between items), and
- * the grand `total` row count.
+ * plus its global start offset (with one blank separator row between items),
+ * and the grand `total` row count.
  *
  * This is the cheap half of the layout: it walks every item but only does O(1)
  * cache lookups (`itemRows`) and offset arithmetic — it never materialises the
@@ -1204,16 +1288,24 @@ export function layoutTranscript(
 ): TranscriptLayout {
   const laid: LaidItem[] = [];
   let cursor = 0;
+  // The last item that DREW rows — the same neighbour rule `transcriptLines`
+  // uses (`harness-group.ts`), because the two must agree row for row (a parity
+  // test pins it): the scroll/selection maths reads THIS layout.
+  let prev: DisplayItem | undefined;
   for (const item of items) {
-    const rows = itemRows(item, opts);
+    const own = itemRows(item, opts);
+    const rows =
+      showsGlyph(prev, item) || !isHarness(item) ? own : hangRows(own, harnessLevel(item));
     if (rows.length === 0) {
       continue;
     }
-    if (laid.length > 0) {
+    const gap = laid.length > 0 && !joinsPrevious(prev, item);
+    if (gap) {
       cursor += 1; // blank separator row between items (matches transcriptLines)
     }
-    laid.push({ rows, start: cursor, id: item.kind === "tool" ? item.id : "" });
+    laid.push({ rows, start: cursor, id: item.kind === "tool" ? item.id : "", gap });
     cursor += rows.length;
+    prev = item;
   }
   return { laid, total: cursor };
 }
@@ -1226,10 +1318,9 @@ export function layoutTranscript(
  */
 export function sliceLaid(laid: readonly LaidItem[], start: number, end: number): string[] {
   const out: string[] = [];
-  let i = 0;
-  for (const { rows, start: s } of laid) {
-    if (i > 0) {
-      const sep = s - 1; // the separator row sits just before this item
+  for (const { rows, start: s, gap } of laid) {
+    if (gap) {
+      const sep = s - 1; // the separator row sits just above this item
       if (sep >= start && sep < end) {
         out.push("");
       }
@@ -1242,7 +1333,6 @@ export function sliceLaid(laid: readonly LaidItem[], start: number, end: number)
         out.push(row);
       }
     }
-    i += 1;
   }
   return out;
 }
