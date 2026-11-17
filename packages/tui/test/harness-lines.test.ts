@@ -128,6 +128,70 @@ describe("the truncated pair collapses into ONE line (S2.6)", () => {
     ]);
   });
 
+  test("a LATER cut of the same turn is a NEW line, never a rewrite far up the transcript", () => {
+    // The re-ask's own round ended NORMALLY (it ran a tool), so a later round's
+    // cut is a second, separate fact. Mutation: merge on any turn notice (the
+    // round-3 bug) → the notice above the tool row is rewritten and nothing is
+    // appended at the turn's end.
+    let s = startTurn(initialState, "q", 1);
+    s = fold(s, [
+      { type: "text", delta: "part one" },
+      { type: "truncated_reply", reason: "length", retrying: true },
+      { type: "text", delta: " continued, calling a tool" },
+      { type: "tool_start", id: "t1", name: "fs_read", arguments: '{"path":"a"}' },
+      { type: "tool_result", id: "t1", name: "fs_read", result: { content: "hi" } },
+      { type: "text", delta: "final round" },
+      { type: "truncated_reply", reason: "length", retrying: false },
+    ]);
+    const notices = s.items.filter((i) => i.kind === "notice");
+    expect(notices).toHaveLength(2);
+    expect(notices[0]).toEqual({
+      kind: "notice",
+      level: "warn",
+      text: "the reply was cut at the model's output limit — this answer is incomplete; asking it to continue",
+    });
+    expect(notices[1]).toMatchObject({ level: "warn" });
+    expect(s.items.at(-1)).toMatchObject({ kind: "notice", level: "warn" });
+  });
+
+  test("a `cut` never merges: the first fact stays, the stream-cut line is appended", () => {
+    // A `cut` fails the turn and is a DIFFERENT fact from the output limit that
+    // was re-asked. Mutation: merge on the structure alone (no reason gate) →
+    // the output-limit line is overwritten by "the stream was cut".
+    let s = startTurn(initialState, "q", 1);
+    s = fold(s, [
+      { type: "text", delta: "part one" },
+      { type: "truncated_reply", reason: "length", retrying: true },
+      { type: "text", delta: " and more" },
+      { type: "truncated_reply", reason: "cut", retrying: false },
+    ]);
+    expect(s.items.filter((i) => i.kind === "notice").map((i) => i.text)).toEqual([
+      "the reply was cut at the model's output limit — this answer is incomplete; asking it to continue",
+      "the model's stream was cut before it finished — this answer is incomplete",
+    ]);
+  });
+
+  test("a NEW turn's cut never merges into the previous turn's line", () => {
+    // A new turn appends a `user` item, which is not an answer item, so the
+    // structural rule rejects the earlier line on its own — this pins that no
+    // separate per-turn check is needed. Mutation: match on ANY turn notice
+    // text (the round-3 rule) → the old turn's line is rewritten.
+    let s = startTurn(initialState, "q1", 1);
+    s = fold(s, [
+      { type: "text", delta: "part one" },
+      { type: "truncated_reply", reason: "length", retrying: true },
+    ]);
+    const first = s.items.length;
+    s = startTurn(s, "q2", 2);
+    s = fold(s, [{ type: "truncated_reply", reason: "length", retrying: false }]);
+    const notices = s.items.filter((i) => i.kind === "notice").map((i) => i.text);
+    expect(notices).toEqual([
+      "the reply was cut at the model's output limit — this answer is incomplete; asking it to continue",
+      "the model returned nothing: it hit its output limit before writing anything",
+    ]);
+    expect(s.items.length).toBe(first + 2); // the new user item + the new notice
+  });
+
   test("a cut stream fails the turn: its notice is a warn, and is not merged", () => {
     let s = startTurn(initialState, "q", 1);
     s = fold(s, [

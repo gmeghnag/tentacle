@@ -248,31 +248,46 @@ function noticeSeenThisTurn(state: DisplayState, text: string): boolean {
   return turnNotices(state).some((item) => item.text === text);
 }
 
-/**
- * Whether this turn already told the user the loop is asking the model to
- * continue (`…; asking it to continue`): the marker that a second cut is the
- * SAME fact continued, not a new one (docs/feat/harness-notices.md S2.6).
- */
-function saidContinueThisTurn(state: DisplayState): boolean {
-  return turnNotices(state).some((item) => item.text.endsWith("asking it to continue"));
-}
-
 /** The shared `warn` option for `appendNotice`'s spread. */
 const WARN = { level: "warn" } as const;
 
 /**
+ * The index of THIS turn's "asked it to continue" notice when the cut being
+ * reported is the re-ask's OWN round — else `-1`, and the cut is a new line.
+ *
+ * Two conditions, because the re-ask budget is per TURN (`MAX_TRUNCATION_REASKS`)
+ * while the re-ask itself may run tools and further rounds afterwards
+ * (Review round 3 MEDIUM-1):
+ * - it is the turn's LAST notice, so nothing has been said since it;
+ * - nothing but the re-ask's own reply follows it: at most ONE answer item and
+ *   no other item. A tool row (or a second answer item) means a round ENDED in
+ *   between, so a cut now is a separate fact far below this line, and rewriting
+ *   the line in place would move it (and lose the first fact).
+ *
+ * "This turn's" falls out of the structure, no separate check: a new turn
+ * appends a `user` item, which is neither an answer item nor absent — so an
+ * earlier turn's line can never qualify.
+ */
+function reaskContinueAt(state: DisplayState): number {
+  const at = state.items.findLastIndex((item) => item.kind === "notice");
+  const notice = at < 0 ? undefined : state.items[at];
+  if (notice === undefined || notice.kind !== "notice") {
+    return -1;
+  }
+  if (!notice.text.endsWith("asking it to continue")) {
+    return -1;
+  }
+  const after = state.items.slice(at + 1);
+  const answers = after.filter((item) => item.kind === "assistant").length;
+  return after.length === answers && answers <= 1 ? at : -1;
+}
+
+/**
  * Swap the turn's "asked it to continue" notice for the merged `again` sentence,
  * IN PLACE: the block keeps its position in the transcript (above the reply that
- * follows the cut) instead of a second line appearing below it. If it is gone —
- * a history reset took it — the merged line is appended, never lost.
+ * follows the cut) instead of a second line appearing below it.
  */
-function replaceContinueNotice(state: DisplayState, text: string): DisplayState {
-  const at = state.items.findLastIndex(
-    (item) => item.kind === "notice" && item.text.endsWith("asking it to continue"),
-  );
-  if (at < 0) {
-    return appendNotice(state, text, WARN);
-  }
+function mergeContinueNotice(state: DisplayState, at: number, text: string): DisplayState {
   const prev = state.items[at] as NoticeItem;
   const merged: NoticeItem = { ...prev, text };
   return { ...state, items: [...state.items.slice(0, at), merged, ...state.items.slice(at + 1)] };
@@ -676,14 +691,21 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
       // to (in place, so the block keeps its position above the reply) with the
       // merged wording, instead of printing two near-identical lines
       // (docs/feat/harness-notices.md S2.6).
-      const again = saidContinueThisTurn(state);
+      //
+      // Only the re-ask's OWN round merges (`reaskContinueAt`): a cut LATER in
+      // the turn — after the re-asked reply ran tools or was followed by more
+      // text — is a separate fact and is appended at its own place, never
+      // rewritten onto the line near the top of the turn (Review round 3
+      // MEDIUM-1). A `cut` reason is a different fact too (the stream died, no
+      // re-ask follows), so it never merges either.
+      const at = event.reason === "length" ? reaskContinueAt(state) : -1;
       const text = describeTruncation(event.reason, {
         answered: turnHasAnswerText(state),
         retrying: event.retrying,
-        ...(again ? { again: true } : {}),
+        ...(at >= 0 ? { again: true } : {}),
       });
-      if (again) {
-        return replaceContinueNotice(state, text);
+      if (at >= 0) {
+        return mergeContinueNotice(state, at, text);
       }
       return noticeSeenThisTurn(state, text) ? state : appendNotice(state, text, WARN);
     }

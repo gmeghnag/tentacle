@@ -418,6 +418,64 @@ test("the daemon's explanations become notices, never silence", () => {
   expect(nudge.rows).toHaveLength(0);
 });
 
+describe("the truncation merge is scoped to the re-ask's OWN round (Review round 3 MEDIUM-1)", () => {
+  const noticeTexts = (s: State) => s.rows.flatMap((r) => (r.kind === "notice" ? [r.text] : []));
+
+  test("a LATER cut of the same turn appends a new line, it does not rewrite the first", () => {
+    // The re-ask's round ended normally (it ran a tool), so what follows is a
+    // second, separate cut. Mutation: merge on any turn notice → one line, the
+    // first one rewritten far above the tool row.
+    const s = fold([
+      { type: "turn_started", turnId: "t1", own: true },
+      text("part one"),
+      { type: "truncated_reply", reason: "length", retrying: true },
+      text(" continued"),
+      { type: "tool_start", id: "t1", name: "fs_read", arguments: '{"path":"a"}' },
+      { type: "tool_result", id: "t1", name: "fs_read", result: { content: "hi" } },
+      text("final round"),
+      { type: "truncated_reply", reason: "length", retrying: false },
+    ]);
+    expect(noticeTexts(s)).toEqual([
+      "the reply was cut at the model's output limit — this answer is incomplete; asking it to continue",
+      "the reply was cut at the model's output limit — this answer is incomplete",
+    ]);
+    expect(s.rows.at(-1)?.kind).toBe("notice");
+  });
+
+  test("a NEW turn's cut never merges into the previous turn's line", () => {
+    // The new turn's `user` row is not an answer row, so the structural rule
+    // rejects the earlier line with no separate per-turn check. Mutation: merge
+    // on any turn notice text (the round-3 rule) → the old line is rewritten.
+    const s = fold([
+      { type: "turn_started", turnId: "t1", own: true },
+      text("part one"),
+      { type: "truncated_reply", reason: "length", retrying: true },
+      { type: "turn_ended", outcome: "ended" },
+      { type: "user_message", text: "another question" },
+      { type: "turn_started", turnId: "t2", own: true },
+      { type: "truncated_reply", reason: "length", retrying: false },
+    ]);
+    expect(noticeTexts(s)).toEqual([
+      "the reply was cut at the model's output limit — this answer is incomplete; asking it to continue",
+      "the model returned nothing: it hit its output limit before writing anything",
+    ]);
+  });
+
+  test("a `cut` never merges: the output-limit line stays, the stream-cut one is appended", () => {
+    const s = fold([
+      { type: "turn_started", turnId: "t1", own: true },
+      text("part one"),
+      { type: "truncated_reply", reason: "length", retrying: true },
+      text(" and more"),
+      { type: "truncated_reply", reason: "cut", retrying: false },
+    ]);
+    expect(noticeTexts(s)).toEqual([
+      "the reply was cut at the model's output limit — this answer is incomplete; asking it to continue",
+      "the model's stream was cut before it finished — this answer is incomplete",
+    ]);
+  });
+});
+
 describe("a foreground sub-agent's progress lands on its Agent row (docs/fix/mobile-chat-glitches.md, item 10)", () => {
   // The owner's "stuck on Running": every `subagent_*` event fell into the fold's
   // `default` and changed nothing, so a minutes-long legitimate wait looked like
