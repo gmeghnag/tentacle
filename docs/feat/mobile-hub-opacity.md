@@ -1,6 +1,6 @@
 # feat/mobile-hub-opacity — Floating hub button opacity (Settings slider)
 
-> **Status:** implementation (awaiting approval)
+> **Status:** implementation approved (owner 17/11)
 > **Branch:** `feat/mobile-hub-opacity`
 > **Type:** feat · **Size:** M · **Blast:** contained · **Suited:** DeepSeek exec + standard review
 > **Changelog:** `changelog.d/mobile-hub-opacity.added.md`
@@ -221,6 +221,10 @@ this on the simulator, with the 30 % running-turn screenshot (Tests).
 2. **Default for existing and new users:** 100 % (today's look, dimming is
    opt-in) or a dimmer value such as 70 %? *Rec: 100 %. Nothing changes
    until the user moves the slider.*
+
+### Owner answers (2026-11-17)
+
+Owner confirmed both recommendations: Q1 Header mode → the "Button opacity" band is HIDDEN (the stored value is kept); Q2 default 100 %. Implementation APPROVED. Owner also: no number inside the header context ring.
 
 ## Execution
 
