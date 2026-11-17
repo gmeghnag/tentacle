@@ -183,6 +183,8 @@ export function reduce(state: SessionListState, action: SessionListAction): Sess
 export interface SessionRow {
   readonly sessionId: string;
   readonly title: string;
+  /** The session's working folder, raw (`folder-label.ts` shapes it to show). */
+  readonly cwd: string;
   /** Relative time from `updatedAt`, e.g. "3m ago". */
   readonly subtitle: string;
   readonly badges: readonly string[];
@@ -275,6 +277,7 @@ export function rows(
     const row: SessionRow = {
       sessionId: entry.sessionId,
       title: entry.title,
+      cwd: entry.cwd,
       subtitle: relativeTime(entry.updatedAt, now),
       badges: badgesFor(entry),
       wakes: entry.schedules ?? 0,
@@ -307,6 +310,7 @@ export function rows(
     pinned.push({
       sessionId: entry.sessionId,
       title: entry.title,
+      cwd: entry.cwd,
       subtitle: relativeTime(entry.updatedAt, now),
       badges: badgesFor(entry),
       wakes: entry.schedules ?? 0,

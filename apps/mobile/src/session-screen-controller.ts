@@ -336,6 +336,12 @@ export interface SessionScreenDeps {
   readonly archived: boolean;
   readonly title: string;
   readonly project: string;
+  /**
+   * The session's working folder as the tapped list row knew it (`SessionRoute.cwd`).
+   * Absent → the screen asks `session/list` once after an attach
+   * (docs/feat/mobile-header-status.md).
+   */
+  readonly cwd?: string;
   readonly controller: SessionController<SendableHandle>;
   /**
    * The client's ONE broker: the sheet's requester is set on it on open and
@@ -575,6 +581,33 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    * handle LIVE: the attach that creates it happens after this.
    */
   const infoPort = deps.info === undefined ? null : deps.info(() => handle);
+  /**
+   * The header's folder when the route brought none: the session's own
+   * `session/list` entry, asked once per attach until one answer lands. A
+   * failure or a session off the first page leaves it unknown (no folder).
+   */
+  let lookedUpCwd: string | undefined;
+  let cwdAsking = false;
+  function lookUpCwd(): void {
+    if (infoPort === null || deps.cwd !== undefined || lookedUpCwd !== undefined || cwdAsking) {
+      return;
+    }
+    cwdAsking = true;
+    void infoPort
+      .sessionList()
+      .then((page) => {
+        lookedUpCwd = page.sessions.find((row) => row.sessionId === infoPort.sessionId)?.cwd ?? "";
+        emit();
+      })
+      .catch(() => {})
+      .finally(() => {
+        cwdAsking = false;
+      });
+  }
+  /** The folder the header shows: Session info's fresh entry, else the lookup, else the route's. */
+  function headerCwd(): string | undefined {
+    return info?.state().entryCwd ?? lookedUpCwd ?? deps.cwd;
+  }
   /** This phone's own turn's abort (Stop, for `own: true`). */
   let ownControl: AbortController | null = null;
   let disposed = false;
@@ -811,6 +844,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
 
   function view(): SessionView {
     const composeState = composeView().bar;
+    const cwd = headerCwd();
     return sessionView({
       title: shownTitle,
       project: deps.project,
@@ -821,6 +855,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       ended: transcript.closed,
       draft,
       archived: deps.archived,
+      ...(cwd === undefined ? {} : { cwd }),
       // The header's model and context bar (Owner 2/4): the daemon's handshake
       // facts re-read per open (F7), and the fill THIS session measured — never
       // a fabricated 0 (the bar is absent until there is something to fill).
@@ -1169,6 +1204,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     if (info !== null) {
       void info.loadContext().catch(() => {});
     }
+    // The header's folder, when the route brought none (a push, a new session).
+    lookUpCwd();
     // The cards of a resumed transcript (docs/feat/model-artifacts.md D9): the
     // history that landed has no tool details, so the daemon's list is the only
     // source. Asked at every attach — a live turn's card arrives by itself.

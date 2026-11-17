@@ -14,6 +14,7 @@ function row(sessionId: string, over: Partial<SessionRow> = {}): SessionRow {
   return {
     sessionId,
     title: `t-${sessionId}`,
+    cwd: "/work/alpha",
     subtitle: "3m ago",
     badges: [],
     wakes: 0,
@@ -272,5 +273,20 @@ describe("nextAfterCurrent (the row a delete of the open session lands on, Owner
   test("nothing left → null (the empty drawer with its New session pill)", () => {
     expect(listOf("i1", [row("i1")])).toBeNull();
     expect(listOf(null, [row("i1")])).toBeNull();
+  });
+});
+
+describe("the drawer row's folder line (docs/feat/mobile-header-status.md)", () => {
+  const options = { currentId: null, archivedOpen: null };
+
+  test("the row shows its session's folder, home as ~, middle-cut", () => {
+    const deep = "/Users/me/tentacle/.tentacle/worktrees/hop-live/proj";
+    const list = drawerList(source([row("r1", { cwd: deep })]), options);
+    expect(list.recent.map((r) => r.folder)).toEqual(["~/tentacle/…/hop-live/proj"]);
+  });
+
+  test("an empty cwd is no folder line", () => {
+    const list = drawerList(source([row("r1", { cwd: "" })]), options);
+    expect(list.recent.map((r) => r.folder)).toEqual([""]);
   });
 });

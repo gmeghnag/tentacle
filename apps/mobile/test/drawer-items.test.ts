@@ -20,6 +20,8 @@ function r(id: string, over: Partial<DrawerRow> = {}): DrawerRow {
   return {
     id,
     title: id,
+    folder: "",
+    cwd: "",
     meta: "",
     tone: "idle",
     archived: false,
