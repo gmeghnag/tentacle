@@ -32,18 +32,36 @@ describe("H4a: the sheet is handed the reveal's two seams", () => {
     expect(source).toContain("scrollRef={(node) => {");
     expect(source).toContain("infoScroller.current = node;");
     // …and the scroll is issued on that scroller, with the step's y.
-    expect(source).toContain(
-      "infoScroller.current?.scrollTo({ y: step.scrollTo, animated: true });",
-    );
+    expect(source).toContain("infoScroller.current?.scrollTo({ y, animated: true });");
   });
 
   test("the reveal's arithmetic lives in `session-info.ts`, never in the screen", () => {
-    // AGENTS §7: the screen holds the value and scrolls; the RULE is pure. If the
-    // step were inlined here, `revealStep`'s tests would stop covering it.
+    // AGENTS §7: the screen holds no arithmetic; the RULE is pure. If the step
+    // were inlined here, `revealStep`'s tests would stop covering it.
     const source = screen();
-    expect(source).toContain("revealStep(reveal, { id, y })");
-    expect(source).toContain("setReveal(revealStart(revealTo));");
+    expect(source).toContain("reportReveal(revealTrack.current, { id, y }");
     expect(read("src", "session-info.ts")).toContain("export function revealStep(");
+    // …and the fold itself is the pure tracker's, so the batched-pass behaviour
+    // is executable (reveal-report.test.ts) rather than a claim about a closure.
+    expect(read("src", "reveal-report.ts")).toContain("export function reportReveal(");
+  });
+
+  test("fix M1: no `useState` for the reveal — a render value loses a batched pass", () => {
+    // THE BUG. `onLayout` callbacks of one layout pass all saw the same rendered
+    // `reveal`, so the last write won, the want was never spent, and the sheet
+    // re-scrolled to the wakes band on every relayout above it. The reveal draws
+    // nothing, so it must not be render state: the tracker is read and written
+    // synchronously, outside React.
+    const source = screen();
+    expect(source).not.toContain("useState<RevealState>");
+    expect(source).not.toMatch(/setReveal\(/);
+    expect(source).toContain("useRef<RevealTrack>(trackReveal())");
+    expect(source).toContain("startReveal(revealTrack.current, revealTo);");
+    // The scroll is issued from the report's result, never from inside an
+    // updater (StrictMode calls those twice).
+    expect(source).toMatch(
+      /reportReveal\(revealTrack\.current, \{ id, y \}, \(y\) => \{[\s\S]{0,120}scrollTo\(/,
+    );
   });
 });
 

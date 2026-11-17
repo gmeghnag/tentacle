@@ -71,14 +71,8 @@ import {
 import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import { linkPrompt } from "../links.ts";
-import {
-  REVEAL_IDLE,
-  type RevealState,
-  type SectionId,
-  revealStart,
-  revealStep,
-  scheduledSection,
-} from "../session-info.ts";
+import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
+import { type SectionId, scheduledSection } from "../session-info.ts";
 import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
 import { dictationLocale } from "../speech-locale.ts";
@@ -514,8 +508,12 @@ export function SessionScreen({
   const info = state.info;
   // A reveal in flight (docs/feat/mobile-hub.md H4a): the hub's Scheduled item
   // opens this sheet scrolled to SCHEDULED WAKES. The rule is `session-info.ts`'s
-  // (`revealStart`/`revealStep`); the screen only holds the value and scrolls.
-  const [reveal, setReveal] = useState<RevealState>(REVEAL_IDLE);
+  // (`revealStart`/`revealStep`) and the fold is `reveal-report.ts`'s; the screen
+  // only holds the value and scrolls. It is NOT render state: the reveal draws
+  // nothing, and a render value would lose every report but the last of one
+  // layout pass (fix M1 — the sheet then re-scrolled on every relayout above the
+  // band, because the want was never spent).
+  const revealTrack = useRef<RevealTrack>(trackReveal());
   const infoScroller = useRef<ComponentRef<typeof RNScrollView>>(null);
   // Owner decision 5: tapping the TITLE renames it (the field is the screen's).
   const renaming = state.renaming;
@@ -559,7 +557,7 @@ export function SessionScreen({
   // draw.
   const openInfo = (revealTo: SectionId | null = null) => {
     setExpanded(null);
-    setReveal(revealStart(revealTo));
+    startReveal(revealTrack.current, revealTo);
     setInfoOpen(true);
     void controller.openInfo();
   };
@@ -568,13 +566,14 @@ export function SessionScreen({
   // growing a second wakes screen.
   const openScheduled = () => openInfo(scheduledSection(info?.view ?? null));
   // One band laid out in the sheet: scroll once, when the WANTED band has reported
-  // (the rule — "once", "only the wanted one" — is `revealStep`'s).
+  // (the rules — "once", "only the wanted one" — are `revealStep`'s, folded by
+  // `reveal-report.ts`). The report is read and written synchronously, so the
+  // several bands of ONE pass are each folded in rather than overwriting a render
+  // value; the scroll is issued here, outside any React updater.
   const revealOnLayout = (id: SectionId, y: number) => {
-    const step = revealStep(reveal, { id, y });
-    setReveal(step.state);
-    if (step.scrollTo !== null) {
-      infoScroller.current?.scrollTo({ y: step.scrollTo, animated: true });
-    }
+    reportReveal(revealTrack.current, { id, y }, (y) => {
+      infoScroller.current?.scrollTo({ y, animated: true });
+    });
   };
   return (
     <View

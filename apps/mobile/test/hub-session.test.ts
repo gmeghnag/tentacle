@@ -34,6 +34,16 @@ describe("hubContextOf", () => {
       unseenArtifacts: 0,
     });
   });
+
+  test("`dictation` is the setting's value, not a constant (Review round 3's survivor)", () => {
+    // The Dictate entry is offered from it (`hub-actions.ts:120`), so a
+    // hard-coded `false` hides Dictate even with the setting on. Both directions,
+    // because a hard-coded `true` would be the same bug mirrored.
+    const withIt = (dictation: boolean) =>
+      hubContextOf({ link: "up", turn: null, ended: null, editable: true, dictation });
+    expect(withIt(true).dictation).toBe(true);
+    expect(withIt(false).dictation).toBe(false);
+  });
 });
 
 const NOW = new Date(2026, 10, 17, 12, 0, 0).getTime();

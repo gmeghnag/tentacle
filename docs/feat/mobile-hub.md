@@ -1172,3 +1172,104 @@ reads yet.
 - No protocol, persistence or daemon surface is touched.
 
 **Executor behaviour.** The as-built record is honest and detailed, and its mutation log was real. It missed that the pure rule's guarantee depends on how the component feeds it state.
+
+### Fix round 1 (H4a)
+
+*— claude-opus-5-5, 2026-11-17*
+
+**Findings addressed:** the H4a Review's one MEDIUM (HIGH: none: M1). Also the
+two nits that Review logged as surviving mutations (they are cheap to pin and
+each is a real "a test that passes on both proves nothing" gap, AGENTS §9).
+
+1. **M1 — the "scroll once" rule broke at the real screen. FIXED.** The cause is
+   exactly as the Review stated: `revealOnLayout` folded each band's `onLayout`
+   against `reveal` **from the render closure** and wrote it back with
+   `setReveal(step.state)`, so every band of one layout pass folded onto the same
+   stale state and the last write won. The last writer was a band *after*
+   `schedules` in tree order, whose state still had `want: "schedules"` — so the
+   want was never spent and the sheet re-scrolled on every later relayout.
+   The fix is structural, not a `prev =>` patch, because the value was never
+   render state to begin with: **the reveal draws nothing, it only decides one
+   scroll.** It now lives in `apps/mobile/src/reveal-report.ts`, a pure module
+   (AGENTS §7) holding a `RevealTrack` (`{ current: RevealState }`) that
+   `SessionScreen` keeps in a `useRef`. `reportReveal(track, {id,y}, scroll)`
+   reads **and** writes that ref synchronously, one report at a time, so the
+   several reports of one batched pass are each folded in rather than
+   overwriting one another, and the side effect (the scroll) is issued by the
+   caller **outside** any React updater (StrictMode calls those twice — a
+   functional-update patch would have scrolled on the discarded run too).
+   `startReveal(track, id)` resets the measurements on each open, so a second
+   open re-measures instead of scrolling to the previous open's stale y.
+   The rule itself is unchanged and still `revealStep`'s: this module only owns
+   *where the state lives* and *when the scroll is issued*.
+2. **Review round 3's survivor — `stopTurn`'s `ended` guard.** FIXED (test only):
+   `stopTurn` passing `ended: null` was 25/0. Now pinned with an OWN turn still
+   streaming when the daemon's `closed` activity lands: a Stop that ignored
+   `ended` aborts that stream (a local cancel the composer's own truth table
+   refuses), and the test fails on exactly that.
+3. **Review round 3's survivor — `hubContextOf`'s `dictation`.** FIXED (test
+   only): hard-coding `dictation: false` was 9/0. Now asserted in both
+   directions (the Dictate entry is offered from it, `hub-actions.ts:120`).
+
+**Red before green.** The wiring guard was written first and run against the
+unfixed screen:
+
+```
+bun test apps/mobile/test/hub-scheduled-wiring.test.ts   (fix NOT applied)
+(fail) … the reveal's arithmetic lives in `session-info.ts`, never in the screen
+       Expected to contain: "reportReveal(revealTrack.current, { id, y }"
+(fail) … fix M1: no `useState` for the reveal — a render value loses a batched pass
+ 4 pass · 3 fail
+```
+
+The design assertion lives in `hub-scheduled-wiring.test.ts` (it is the source
+guard for this screen, and it is what says the fold is the tracker's, not a
+captured value); the behaviour lives in `reveal-report.test.ts`, which drives a
+whole pass — every band reporting in tree order, which is the exact shape the M1
+simulation used.
+
+**Mutation checks** (`.tentacle/tmp/mobile-hub/fix1-m1-mut.ts`: apply one, run
+`reveal-report.test.ts` + `hub-scheduled-wiring.test.ts`, restore the exact
+bytes — `git status` was re-verified clean of the mutated files after each):
+
+```
+S1 the screen folds onto a captured copy (the render-value class): 15 pass · 2 fail
+S2 the tracker never spends the want (a relayout re-scrolls):      11 pass · 6 fail
+S3 startReveal keeps the old measurements (a new open scrolls early): 16 pass · 1 fail
+S4 the fold loses earlier reports of the same pass:                16 pass · 1 fail
+S5 a scroll for EVERY report, not only the wanted band:             9 pass · 8 fail
+restored (unmutated):                                              17 pass · 0 fail
+```
+
+S3 survived the first run (17/0 before the test existed): that is what produced
+the *"a second open re-measures"* case. The two nit mutations were run by hand
+against `session-screen.test.ts` / `hub-session.test.ts`:
+
+```
+stopTurn's ended: transcript.closed → null:   24 pass · 1 fail
+hubContextOf's dictation: input.dictation → false:  13 pass · 1 fail
+restored:                                     25 pass · 0 fail / 14 pass · 0 fail
+```
+
+S1 is killed by the source guard, not by the pure tests — and that is the honest
+division: the pure module cannot observe how a component captures its value. The
+Review's own finding was found that way too (a source-independent rule that the
+caller fed wrong), so the guard is where the class is pinned.
+
+**Files.** `apps/mobile/src/reveal-report.ts` (new, 68 lines) ·
+`apps/mobile/src/screens/SessionScreen.tsx:75-79,514-521,563-566,572-582` ·
+`apps/mobile/test/reveal-report.test.ts` (new, 10 cases) ·
+`apps/mobile/test/hub-scheduled-wiring.test.ts:41-62` ·
+`apps/mobile/test/session-screen.test.ts` (+1 case) ·
+`apps/mobile/test/hub-session.test.ts` (+1 case). No `useState` for the reveal
+remains; `RevealState`/`REVEAL_IDLE`/`revealStart` are untouched in
+`session-info.ts`, so `session-info-reveal.test.ts` still covers the rule as
+before.
+
+**Gate.** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bunx tsc -p apps/relay --noEmit` clean · `bun run lint` clean (1784 files, no
+fixes) · `bun test` (full): **12996 pass, 5 skip, 0 fail** (13001 tests / 926
+files; the 5 skips are the pre-existing opt-in docker/k8s/slow-socket set). No
+protocol schema, persistence or daemon surface is touched, and the changelog
+fragment is unchanged: H3's fan UI is still unbuilt, so the reveal is unreachable
+from a shipped build and nothing user-visible changes in this round.
