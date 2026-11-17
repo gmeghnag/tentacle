@@ -15,7 +15,8 @@ export function cellWidth(s: string): number {
   return stringWidth(s);
 }
 
-function graphemes(s: string): string[] {
+/** `s` as grapheme clusters: the units a cell count or a colour span may split at. */
+export function graphemes(s: string): string[] {
   return [...segmenter.segment(s)].map((part) => part.segment);
 }
 

@@ -135,6 +135,11 @@ const TEXT_ROWS: readonly Row[] = [
   { name: "meter.low", value: tokens.light.meter.low },
   { name: "meter.mid", value: tokens.light.meter.mid },
   { name: "meter.high", value: tokens.light.meter.high },
+  // The thinking shimmer's sweep (docs/feat/tui-thinking-shimmer.md): a highlight
+  // that dimmed the word would be unreadable on paper, so both tones are gated
+  // exactly like text. `base` is `accent`, already a row above.
+  { name: "shimmer.mid", value: tokens.light.shimmer.mid },
+  { name: "shimmer.peak", value: tokens.light.shimmer.peak },
   { name: "syntax.keyword", value: tokens.light.syntax.keyword },
   { name: "syntax.string", value: tokens.light.syntax.string },
   { name: "syntax.number", value: tokens.light.syntax.number },
