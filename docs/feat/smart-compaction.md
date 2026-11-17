@@ -267,7 +267,8 @@ command. A dedicated recall tool is Owner question 2.
 - Context awareness: the `[context: …]` line and the client's context meter
   now report the pruned size (correct: it is what is sent).
 
-**7. Config** (`context.prune`, resolved like `contextAwareness`):
+**7. Config** (`contextPrune` — a top-level section like its siblings
+`contextAwareness`/`contextReset`; there is no `context` object — resolved like `contextAwareness`):
 `enabled` (default: Owner question 1), `pruneAtPercent` 60, `minGainPercent`
 15, `keepRecentRounds` 6, `pruneOutputChars` 2 000. Carried to pod daemons.
 
@@ -293,8 +294,15 @@ Slices, in dependency order. Each is S/M with its own tests; S2 needs S1.
 - **S4 — DeepSeek A/B, default, changelog (S).** Validation below; the
   default per Owner question 1; `changelog.d/smart-compaction.added.md`.
 
-No change to `packages/protocol`, `packages/daemon`, `packages/client`, the
-TUI, or the session log. No `protocol.d/` note.
+No change to `packages/daemon`, `packages/client`, the TUI, or the session
+log. No `protocol.d/` note. **Corrected in S2 (executor):** carrying the keys
+to a pod daemon goes through `SessionSettingsSchema`
+(`packages/protocol/src/session.ts`, the `session/open.settings` the CARRIED
+table is typed by), so S2 adds five OPTIONAL fields there — additive, a strip
+schema, "fields are free" (AGENTS §7): an older pod drops them, i.e. pruning
+stays off there; `protocol.json` is regenerated, no version bump. And the
+sub-agent runner (`packages/agent/src/subagent.ts`) must forward the config
+to each child, as it does `contextAwareness`.
 
 ### Failure modes
 
@@ -640,6 +648,146 @@ and are gone).
 fixes cannot move any existing test, and the properties S2 owns (the state actually being dropped on
 compact/`/clear`, not merely harmless if kept) are S2's tests, listed in the Tests section.
 
+### S2 — wire into the loop + guard + config
+
+*— claude-opus-5-5 (executor), 2026-11-17 · **S2 only** (nothing of S3/S4)*
+
+**Load-bearing check (re-run first).** Re-proved, not trusted: `rg 'projectedHistory\('` still
+gives exactly the four sites (round request, forced final report, `noteContextUsage`,
+`contextUsage`). Running the S1 scratch script needed an approval this session did not have, so
+the check became the first case of the new suite (it survives, unlike a scratch script):
+`prune-loop.test.ts` › "load-bearing" — a scripted provider deep-copies each request; after a
+pruned run the LAST request carries stubs while all six stored `tool` messages still start with
+`exit 0\nline 0000` and carry no marker. It went red before the wiring (0 stubs) and green after.
+Hook precondition checked: `forgetModelRequestBaseline` keeps a per-session message COUNT
+(`hooks.ts:680-687`, "a length-based delta"), not bytes, so a batch (same length) needs no
+baseline reset — none added.
+
+**As built, in dependency order.**
+1. `packages/tools/src/builtins.ts:216-240` — `PRUNE_SENTINEL` (the ONE value; `prune.ts`'s
+   `PRUNE_MARKER` now re-exports it, `prune.ts:36-42`) and `prunedPlaceholderRefusal`, called first
+   in `fs_write` (`:249`), `fs_edit` (`:327`), `fs_multi_edit` (`:368`): refused before the path lock,
+   the read and the write, so the file is untouched.
+2. `packages/agent/src/agent.ts` — `AgentConfig.contextPrune` (`window`, `pruneAtPercent`,
+   `minGainPercent`, `keepRecentRounds?`, `outputChars?`, `counter?`); `pruneState`
+   `WeakMap<ChatMessage[], PruneSet>` beside `anchors`/`spend`; `requestHistory` (`:1016`) =
+   `applyPrune(projectedHistory(…), set)`, now used at all four sites (`:1506`, `:1831`, `:1941`,
+   `:1999`); `maybePrune` (`:1033`) called at the round boundary BEFORE `noteContextUsage`
+   (`:1501`), so the context line reports what is sent; `forgetPrune` (`:1083`, public) called by the
+   reset path (`:2669`, beside `anchors.delete`) and by `Session.compact` / `clearConversation`
+   (`session.ts:369`, `:394`).
+3. `packages/agent/src/subagent.ts` — `deps.contextPrune` forwarded to each child, on the child's
+   window when it has one (mirrors `contextAwareness`).
+4. Config: `schema.ts` (`contextPrune` section, strict, ints with bounds), `defaults.ts` (five
+   `DEFAULT_CONTEXT_PRUNE_*`, `enabled` false per Q1, + the commented sample), `resolve.ts`
+   (`ContextPruneConfig`, file-only like `contextAwareness`, five sources), `load.ts`, `profile.ts`
+   (per-key merge, + the three places that list per-key sections), `key-docs.ts` (section + five
+   leaves, `carried: "workspace"`); `README.md` table regenerated (`bun run docs:config`).
+5. `packages/protocol/src/session.ts` — five optional `contextPrune*` fields on
+   `SessionSettingsSchema`; `protocol.json` regenerated (`bun run schema:export`).
+6. `packages/cli/src/carried-settings.ts` (five W rows), `wiring.ts` (`contextPrune` on
+   `contextWindow` when enabled, to the main agent AND the sub-agent runner).
+7. `changelog.d/smart-compaction.added.md` — written now on the owner's explicit S2 instruction
+   (the plan header said S4); it says "off by default until measured".
+
+**Trigger semantics (as built).** `used` = `estimateUsed` over the CURRENT request (set applied)
+with the anchor; below `pruneAtPercent` → nothing. Else `fresh` = candidates whose index is not
+already a LIVE entry; their `estimateGain` below `minGainPercent` → nothing. Else the new set is
+the live prior entries (never re-stubbed, never removed) + all fresh ones, and the anchor is
+deleted. No window (`window <= 0`) → off.
+
+**Drift from the Implementation (and why).**
+1. **Protocol fields added** — the plan said "no change to `packages/protocol`" AND "carried to pod
+   daemons"; the second needs `SessionSettingsSchema` (the CARRIED table's type). Additive optional
+   fields, no `protocol.d/` note (AGENTS §7: fields are free). Plan's Files corrected.
+2. **Key is `contextPrune`, not `context.prune`** — no `context` object exists; the siblings are
+   top-level `contextAwareness`/`contextReset`. Design §7 corrected. Leaf `pruneOutputChars` maps to
+   the S1 option `outputChars`.
+3. **`subagent.ts` touched** — not in the plan's Files; without it no child would ever prune.
+   Forwarding is three lines mirroring `contextAwareness`; **no dedicated test** (see below).
+4. **The guard checks only text that would be WRITTEN** (`content`, `new_string`, every
+   `edits[].new_string`), and only the marker WITH the stub's colon (`⟪pruned by tentacle:`).
+   An `old_string` with a placeholder cannot corrupt a file (it fails "not found"), and the
+   bare marker must stay writable: `prune.ts` and docs name it. Pinned by a test both ways.
+5. **Session tests use contextAwareness OFF for "log intact"**: with it on, the stored
+   `contextUsage` values legitimately differ (the meter reports the pruned size, Design §6), so
+   "byte-identical to an unpruned run" is only the right property with the meter off.
+
+**Red before green.** `prune-loop.test.ts` (12 cases) written first: **7 of 9 red** on assertions
+(no `contextPrune` in the loop yet; bun does not typecheck) — the two greens were "below threshold
+= today" (true before the feature, by design) and `/compact`, which lacked a pre-assertion that a
+batch happened; tightened, then red too. `prune-guard.test.ts` first failed on the import
+(`PRUNE_SENTINEL` missing); I added only the constant and re-ran: **3 of 4 red on assertions**
+(the 4th, "bare marker is writable", is green before and after by design; mutation M8b shows it is
+not vacuous). Two cases were added after mutations survived (below), each shown red under that
+mutation, green without it.
+
+**Mutation checks (§9, pasted; each applied by hand, the narrow suite run, then reverted —
+`rg MUTATION packages/agent/src packages/tools/src` empty at the end).**
+
+```
+M1  requestHistory also writes stubs into `messages`      -> 5 fail (load-bearing, log intact,
+                                                              client size, /clear, /compact)
+M2  trigger disabled (maybePrune not called)              -> 8 fail
+M3  gain gate removed                                     -> 1 fail (batch/prefix: [3,5])
+M4  set not monotonic (prior entries dropped)             -> 1 fail (batch/prefix)
+M5  no forgetPrune in clearConversation                   -> 1 fail (/clear)
+M6  no forgetPrune in compact                             -> 1 fail (/compact)
+M7  no forgetPrune in the context_reset path              -> 1 fail (context_reset)
+M8  guard never refuses                                   -> 3 fail (fs_write, fs_edit, fs_multi_edit)
+M8b guard on the bare marker (no colon)                   -> 1 fail (bare marker writable)
+M9  pruneAtPercent ignored                                -> SURVIVED -> added "under pruneAtPercent
+                                                              nothing is pruned…": 1 fail
+M10 anchor not deleted on a batch                         -> SURVIVED (a FIXED measure made both
+                                                              lines equal, so none was emitted) ->
+                                                              added "a batch drops the anchor" with a
+                                                              growing measure: 1 fail (12416 ≥ 9000)
+```
+
+**Gate.** `bunx tsc --noEmit`: clean except 2 errors in `packages/tools/src/diagram-parse.ts`
+(`linkedom`/`mermaid` modules not installed in this worktree) — a file this slice does not touch.
+`bun run lint`: clean (1964 files). Narrow: `bun test packages/agent packages/config
+packages/protocol packages/tools/test/prune-guard.test.ts packages/cli/test/carried-settings.test.ts`
+green (agent 791/0 incl. carried-settings; config+protocol+carried 1049/0 before the last two loop
+cases). Full `bun test` (run ONCE, per the token budget):
+
+```
+ 14222 pass
+ 5 skip
+ 121 fail
+Ran 14348 tests across 1020 files. [472.74s]
+```
+
+Triage, without a second full run: **mine** — `CARRIED` count pinned in
+`cli/test/key-docs-carried.test.ts` (24→29), and five hand-built `TentacleConfig` fixtures with no
+`contextPrune` (`cli/test/engine-{runtime,k8s,docker}.test.ts`, `session-hop-targets.test.ts`,
+`session-hop.docker.test.ts`), so `CARRIED.read` threw in every pod/engine test (tsc does not
+catch it: those fixtures are not checked against the full type). Both fixed. Re-run `bun test
+packages/tools packages/cli`: **3971 pass / 21 fail**, and all 21 are `diagram`/mermaid tests plus
+`pod-binary-build` (2) failing on `Could not resolve: "linkedom"` — `linkedom`/`mermaid` are not
+installed in this worktree (`node_modules/{linkedom,mermaid}` absent; the same cause as the two
+tsc errors). The diagram-related files across core/tui/cli/tools give 19 fail on their own.
+**To verify on a full install:** `bun test 2>&1 | tail -15` should be the §6 baseline (5 opt-in
+skips, 0 fail); I could not prove the 0 here.
+
+**Files (S2).** `packages/agent/src/{agent,session,subagent,prune}.ts`,
+`packages/tools/src/builtins.ts`, `packages/config/src/{schema,defaults,resolve,load,profile,key-docs}.ts`,
+`packages/protocol/src/session.ts`, `packages/protocol/schema/protocol.json` (generated),
+`packages/cli/src/{carried-settings,wiring}.ts`, `README.md` (generated table); tests new
+`packages/agent/test/prune-loop.test.ts`, `packages/tools/test/prune-guard.test.ts`, updated
+`packages/cli/test/carried-settings.test.ts` (5 W rows, counts 23→28 / 22→27),
+`key-docs-carried.test.ts` (24→29) and the five config fixtures named in the Gate;
+`changelog.d/smart-compaction.added.md`; this doc. `TODO.md` untouched.
+
+**Not verified.** (a) Sub-agent forwarding has no test — verify with a `createSubagentRunner`
+child whose scripted provider sees a stub after enough rounds. (b) End-to-end in a real
+session/pod (config → wiring → carried to a pod): only the unit seams are tested
+(`carried-settings` W rows, `wiring` by typecheck); S4's A/B exercises it. (c) The guard makes
+any file whose NEW text contains `⟪pruned by tentacle:` unwritable through the fs tools (e.g. a
+doc quoting a full stub) — accepted for the safety it buys; `shell` still can.
+
+**Slice status.** S2 **DONE**; the full-suite 0-fail is unproven here (missing deps, see Gate). S3, S4 not started.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17 · fresh context · scope: S1 only (`git diff main...HEAD`)*
@@ -734,3 +882,15 @@ Opus (shared blind spot possible on finding 2's premise, which this review caugh
   files) and `bun run typecheck` is clean. One residual risk for S2, not S1: `compactedHistory` may carry a message object
   over at the SAME index. The identity check would then still apply that entry, but the candidates there (skills, system) are exempt,
   so it is not a finding.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17 · fresh context · scope: **S2 only** (`git diff main...HEAD`) · same model family as the S2 executor: shared blind spots possible*
+
+**Verdict: PASS** (no HIGH, no MEDIUM).
+
+- **Gate.** Touched files (`prune-loop`, `prune`, `prune-guard`, `carried-settings`, `key-docs-carried`): 166 pass / 0 fail. `bun run lint` clean (1964 files). `bun run typecheck`: only 2 errors in `packages/tools/src/diagram-parse.ts` (`linkedom`/`mermaid` missing from this worktree's `node_modules`; file not in the diff). Full `bun test` not re-run: the 0-fail baseline on a full install is still unproven.
+- **Mutations (reverted, tree clean).** Round request built from `projectedHistory` (prune set ignored) → 7/11 fail. `forgetPrune` removed from `clearConversation` → `/clear` fails. Bulk perl mutations were blocked by permissions, so only these two ran; the executor's M1–M10 table was not re-run.
+- **Attacks that found nothing.** (1) §7 persistence: `requestHistory` only copies messages, and `session.messages` stays untouched (pinned by the log-intact test). (2) In-place replacements: the only `length = 0` sites are `session.ts:366/391` and `agent.ts:2665`, all three call `forgetPrune`. The `messages.pop()` at `agent.ts:1742/1754` only touches the protected tail. (3) Anchor: `ref` is the last stored message, which is never pruned, so the anchor stays valid between batches and is dropped on a batch. (4) Pod: the config bounds (`schema.ts`) match `SessionSettingsSchema`, so a carried value cannot fail `session/open`. The fields are additive and optional, so no bump is needed. (5) Guard: every write tool (`fs_write`/`fs_edit`/`fs_multi_edit`) refuses the placeholder before `lockPath`. No other fs write tool exists in `packages/tools/src`. (6) Hooks: the baseline counts messages, so a batch (same length) needs no reset.
+- **Nits.** The doc says `prune-loop.test.ts` has 12 cases, but it has 11. Sub-agent forwarding is untested (the executor said so).
+- **Executor:** honest. It disclosed its drift, mutation survivors and the unproven full suite.

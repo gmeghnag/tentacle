@@ -31,14 +31,15 @@
  * is replaced IN PLACE by `/compact`, `/clear` and `context_reset`).
  */
 import type { ChatMessage, ToolCall } from "@tentacle/core";
-import { CONTEXT_RESET_TOOL_NAME, SKILL_TOOL_NAME } from "@tentacle/tools";
+import { CONTEXT_RESET_TOOL_NAME, PRUNE_SENTINEL, SKILL_TOOL_NAME } from "@tentacle/tools";
 
 /**
- * The unmistakable sentinel every stub carries. `PRUNE_MARKER` is the part the
- * write tools refuse as input (S2): a model that copies a placeholder into a
- * real write gets a clear error instead of corrupting a file.
+ * The unmistakable sentinel every stub carries — `@tentacle/tools`'
+ * `PRUNE_SENTINEL`, ONE value: the write tools refuse it (followed by the
+ * stub's colon) as input, so a model that copies a placeholder into a real
+ * write gets a clear error instead of corrupting a file.
  */
-export const PRUNE_MARKER = "⟪pruned by tentacle";
+export const PRUNE_MARKER = PRUNE_SENTINEL;
 
 /** What a candidate is pruned by. */
 export type PruneRule =

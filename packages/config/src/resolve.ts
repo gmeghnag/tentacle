@@ -13,6 +13,11 @@ import {
   DEFAULT_AUTO_WAKE,
   DEFAULT_BASE_URL,
   DEFAULT_CONTEXT_AWARENESS,
+  DEFAULT_CONTEXT_PRUNE_AT_PERCENT,
+  DEFAULT_CONTEXT_PRUNE_ENABLED,
+  DEFAULT_CONTEXT_PRUNE_KEEP_RECENT_ROUNDS,
+  DEFAULT_CONTEXT_PRUNE_MIN_GAIN_PERCENT,
+  DEFAULT_CONTEXT_PRUNE_OUTPUT_CHARS,
   DEFAULT_CONTEXT_RESET_ENABLED,
   DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE,
   DEFAULT_CONTEXT_STEP_PERCENT,
@@ -66,6 +71,15 @@ export interface ContextAwarenessConfig {
 export interface ContextResetConfig {
   readonly enabled: boolean;
   readonly maxPerMessage: number;
+}
+
+/** `contextPrune`, resolved (docs/feat/smart-compaction.md): when `enabled`, the loop prunes the model's copy in batches. */
+export interface ContextPruneConfig {
+  readonly enabled: boolean;
+  readonly pruneAtPercent: number;
+  readonly minGainPercent: number;
+  readonly keepRecentRounds: number;
+  readonly pruneOutputChars: number;
 }
 
 /**
@@ -123,6 +137,8 @@ export interface ResolvedConfig {
   readonly contextAwareness: ContextAwarenessConfig;
   /** The model's `context_reset` tool and its anti-loop cap (docs/feat/context-reset.md). */
   readonly contextReset: ContextResetConfig;
+  /** Smart compaction of the model's copy (file-only, docs/feat/smart-compaction.md). */
+  readonly contextPrune: ContextPruneConfig;
   /** The agent's `move_session` proposal tool (docs/feat/session-hop.md D9). */
   readonly sessionHop: SessionHopConfig;
   /** The agent's `workload_shell` tool (docs/fix/workload-shell-live.md, owner decision 1). */
@@ -283,6 +299,11 @@ export interface ResolvedConfig {
     readonly contextAwarenessStepPercent: Source;
     readonly contextResetEnabled: Source;
     readonly contextResetMaxPerMessage: Source;
+    readonly contextPruneEnabled: Source;
+    readonly contextPruneAtPercent: Source;
+    readonly contextPruneMinGainPercent: Source;
+    readonly contextPruneKeepRecentRounds: Source;
+    readonly contextPruneOutputChars: Source;
     readonly sessionHopTool: Source;
     readonly workloadShellTool: Source;
     readonly schedulesMaxJobs: Source;
@@ -588,6 +609,29 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.contextReset?.maxPerMessage,
     DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE,
   );
+  // File-only, like `contextAwareness`: no env form.
+  const prune = fileConfig.contextPrune;
+  const contextPruneEnabled = pick(undefined, prune?.enabled, DEFAULT_CONTEXT_PRUNE_ENABLED);
+  const contextPruneAtPercent = pick(
+    undefined,
+    prune?.pruneAtPercent,
+    DEFAULT_CONTEXT_PRUNE_AT_PERCENT,
+  );
+  const contextPruneMinGainPercent = pick(
+    undefined,
+    prune?.minGainPercent,
+    DEFAULT_CONTEXT_PRUNE_MIN_GAIN_PERCENT,
+  );
+  const contextPruneKeepRecentRounds = pick(
+    undefined,
+    prune?.keepRecentRounds,
+    DEFAULT_CONTEXT_PRUNE_KEEP_RECENT_ROUNDS,
+  );
+  const contextPruneOutputChars = pick(
+    undefined,
+    prune?.pruneOutputChars,
+    DEFAULT_CONTEXT_PRUNE_OUTPUT_CHARS,
+  );
   // Laptop-side (D9): it decides whether the agent is OFFERED `move_session`.
   // A pod reads its own value — the tool only proposes, and the owner's answer
   // still comes from the laptop's prompt. OFF by default (session-hop-ux OD8):
@@ -733,6 +777,13 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       enabled: contextResetEnabled.value,
       maxPerMessage: contextResetMaxPerMessage.value,
     },
+    contextPrune: {
+      enabled: contextPruneEnabled.value,
+      pruneAtPercent: contextPruneAtPercent.value,
+      minGainPercent: contextPruneMinGainPercent.value,
+      keepRecentRounds: contextPruneKeepRecentRounds.value,
+      pruneOutputChars: contextPruneOutputChars.value,
+    },
     sessionHop: { tool: sessionHopTool.value },
     workloadShell: { tool: workloadShellTool.value },
     schedules: {
@@ -808,6 +859,11 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       contextAwarenessStepPercent: contextAwarenessStepPercent.source,
       contextResetEnabled: contextResetEnabled.source,
       contextResetMaxPerMessage: contextResetMaxPerMessage.source,
+      contextPruneEnabled: contextPruneEnabled.source,
+      contextPruneAtPercent: contextPruneAtPercent.source,
+      contextPruneMinGainPercent: contextPruneMinGainPercent.source,
+      contextPruneKeepRecentRounds: contextPruneKeepRecentRounds.source,
+      contextPruneOutputChars: contextPruneOutputChars.source,
       sessionHopTool: sessionHopTool.source,
       workloadShellTool: workloadShellTool.source,
       schedulesMaxJobs: schedulesMaxJobs.source,

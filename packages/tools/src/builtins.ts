@@ -208,6 +208,32 @@ async function readPdf(
   return { content: verdict.kind === "partial" ? `${text}\n${verdict.message}` : text };
 }
 
+/**
+ * The marker every smart-compaction stub starts with (docs/feat/smart-compaction.md;
+ * `PRUNE_MARKER` in `@tentacle/agent` is this value). A stub is the marker, a
+ * colon, then what was there — `⟪pruned by tentacle: …⟫`.
+ */
+export const PRUNE_SENTINEL = "⟪pruned by tentacle";
+
+/**
+ * Text a write would put on disk that carries a stub: the model copied a
+ * placeholder, not file content. Refused before the file is read or written,
+ * so nothing changes. Only the marker WITH the stub's colon counts: source
+ * that merely names the marker stays writable.
+ */
+function prunedPlaceholderRefusal(
+  path: string,
+  written: readonly string[],
+): { content: string; isError: true } | undefined {
+  if (!written.some((text) => text.includes(`${PRUNE_SENTINEL}:`))) {
+    return undefined;
+  }
+  return {
+    content: `refused: the text to write contains a pruned placeholder ("${PRUNE_SENTINEL}: …⟫"), which is not file content — fs_read ${path} first and write the real text (nothing was written)`,
+    isError: true,
+  };
+}
+
 const fsWriteInput = z.object({
   path: z.string().min(1).describe("Path to the file to write (created or overwritten)."),
   content: z.string().describe("Full UTF-8 contents to write."),
@@ -220,6 +246,10 @@ export const fsWriteTool: Tool<z.infer<typeof fsWriteInput>> = {
   permission: "ask",
   concurrency: pathConcurrency("write"),
   execute(input, ctx) {
+    const refused = prunedPlaceholderRefusal(input.path, [input.content]);
+    if (refused) {
+      return Promise.resolve(refused);
+    }
     return lockPath(ctx, input.path, async () => {
       let before = "";
       try {
@@ -294,6 +324,10 @@ export const fsEditTool: Tool<z.infer<typeof fsEditInput>> = {
   permission: "ask",
   concurrency: pathConcurrency("write"),
   execute(input, ctx) {
+    const refused = prunedPlaceholderRefusal(input.path, [input.new_string]);
+    if (refused) {
+      return Promise.resolve(refused);
+    }
     return lockPath(ctx, input.path, async () => {
       const before = await ctx.env.readFile(input.path);
       const result = applyOneEdit(before, input);
@@ -331,6 +365,13 @@ export const fsMultiEditTool: Tool<z.infer<typeof fsMultiEditInput>> = {
   permission: "ask",
   concurrency: pathConcurrency("write"),
   execute(input, ctx) {
+    const refused = prunedPlaceholderRefusal(
+      input.path,
+      input.edits.map((e) => e.new_string),
+    );
+    if (refused) {
+      return Promise.resolve(refused);
+    }
     return lockPath(ctx, input.path, async () => {
       const before = await ctx.env.readFile(input.path);
       let current = before;

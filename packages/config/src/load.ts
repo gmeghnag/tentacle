@@ -149,6 +149,8 @@ export interface TentacleConfig {
   readonly contextAwareness: ResolvedConfig["contextAwareness"];
   /** The model's `context_reset` tool and its cap (on a pod: its own env and file, else the laptop's, carried). */
   readonly contextReset: ResolvedConfig["contextReset"];
+  /** Smart compaction of the model's copy (on a pod: its own file, else the laptop's, carried). */
+  readonly contextPrune: ResolvedConfig["contextPrune"];
   /** Whether the agent is offered `move_session` (docs/feat/session-hop.md D9). */
   readonly sessionHop: ResolvedConfig["sessionHop"];
   /** Whether the agent is offered `workload_shell` (docs/fix/workload-shell-live.md). */
@@ -874,6 +876,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     contextWindow: resolved.contextWindow,
     contextAwareness: resolved.contextAwareness,
     contextReset: resolved.contextReset,
+    contextPrune: resolved.contextPrune,
     sessionHop: resolved.sessionHop,
     workloadShell: resolved.workloadShell,
     schedules: resolved.schedules,

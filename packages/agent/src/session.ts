@@ -366,6 +366,7 @@ export class Session {
     this.messages.length = 0;
     this.messages.push(...next);
     this.agent.forgetModelRequestBaseline(this.id);
+    this.agent.forgetPrune(this.messages);
     onReplaced?.();
     this.persist();
     return { summary, before, after: this.messages.length };
@@ -390,6 +391,7 @@ export class Session {
     this.messages.length = 0;
     this.messages.push(...next);
     this.agent.forgetModelRequestBaseline(this.id);
+    this.agent.forgetPrune(this.messages);
     onReplaced?.();
     // The daemon's `HostedSession.clear` persists again after its own changes
     // (title, approvals): this one serves every other caller (nit9).

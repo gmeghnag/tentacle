@@ -586,6 +586,17 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   const contextAwareness = config.contextAwareness.enabled
     ? { window: config.contextWindow, stepPercent: config.contextAwareness.stepPercent }
     : undefined;
+  // Smart compaction (docs/feat/smart-compaction.md) on the same window; each
+  // sub-agent prunes its own history. Off unless `contextPrune.enabled`.
+  const contextPrune = config.contextPrune.enabled
+    ? {
+        window: config.contextWindow,
+        pruneAtPercent: config.contextPrune.pruneAtPercent,
+        minGainPercent: config.contextPrune.minGainPercent,
+        keepRecentRounds: config.contextPrune.keepRecentRounds,
+        outputChars: config.contextPrune.pruneOutputChars,
+      }
+    : undefined;
 
   // One store of approvals and one ask at a time for this session's whole tree
   // (docs/feat/parallel-agents.md, Design 3). The ONE broker is still the only
@@ -636,6 +647,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       resultTransforms,
       ...(hooks ? { hooks } : {}),
       ...(contextAwareness ? { contextAwareness } : {}),
+      ...(contextPrune ? { contextPrune } : {}),
       grants,
       // A child's own rounds follow `tools.*` (task 7, owner decision 4).
       toolExecution: config.toolExecution,
@@ -775,6 +787,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     ...(hooks ? { hooks } : {}),
     ...(options.askHooksTrust ? { askHooksTrust: options.askHooksTrust } : {}),
     ...(contextAwareness ? { contextAwareness } : {}),
+    ...(contextPrune ? { contextPrune } : {}),
     ...(contextReset ? { contextReset } : {}),
     grants,
     toolExecution: config.toolExecution,
