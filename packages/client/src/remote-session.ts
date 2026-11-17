@@ -1376,11 +1376,16 @@ export class RemoteSession implements SessionStreamListener {
    * the texts it did not get, a continuation, or `NoTurnRunning`. While the
    * first `send` is still opening the session it waits for the id. Refused
    * locally only when there is no daemon-side session or turn at all.
+   *
+   * `turnId`: the new turn's key, when the caller must name it before the ack
+   * (the phone folds the turn under it — docs/fix/mobile-queued-stuck.md); a
+   * fresh one when omitted.
    */
   async sendNow(
     messages: readonly SendNowMessage[],
     target: "turn" | "compaction",
     signal?: AbortSignal,
+    turnId?: string,
   ): Promise<AsyncIterable<SessionEvent>> {
     if (messages.length === 0) {
       throw new RpcError(JsonRpcErrorCode.InvalidParams, "send-now needs at least one message");
@@ -1414,7 +1419,7 @@ export class RemoteSession implements SessionStreamListener {
         ? { kind: "turn", turnId: bound }
         : { kind: "compaction" };
     const turn: ActiveTurn = {
-      turnId: crypto.randomUUID(),
+      turnId: turnId ?? crypto.randomUUID(),
       prompt: "",
       queue: new AsyncQueue<SessionEvent>(),
       toolNames: new Map(),

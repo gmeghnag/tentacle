@@ -131,11 +131,19 @@ export function onQueued(
       // queue state — the reclaim's own echo — hid it a second after it appeared
       // (13d's flow 14's failure).
       notice: step.notice === "" ? state.notice : step.notice,
-      // A row the daemon no longer lists leaves the local list too (delivered,
-      // carried by a send-now, or returned — the queue is the truth).
-      local: state.local.filter(
-        (row) => queue.entries.some((e) => e.id === row.id) || row.acked !== true,
-      ),
+      // A row the daemon LISTS is the daemon's: acked, whatever our request's
+      // answer says yet (a send-now's resolves only at its ack, a steer's can
+      // land after the daemon already drained it). So the next report that no
+      // longer lists it — delivered, carried by a send-now, returned — drops
+      // it; a row never listed and never acked is still in flight and stays
+      // (docs/fix/mobile-queued-stuck.md: the device kept a listed row for ever).
+      local: state.local
+        .map((row) =>
+          row.acked !== true && queue.entries.some((e) => e.id === row.id)
+            ? { ...row, acked: true as const }
+            : row,
+        )
+        .filter((row) => queue.entries.some((e) => e.id === row.id) || row.acked !== true),
     },
     reclaim: [...step.reclaim, ...retries],
     give: step.text,
@@ -171,6 +179,17 @@ export function enqueueStarted(state: ComposeState, id: string, text: string): C
 export const enqueueAcked = (state: ComposeState, id: string): ComposeState => ({
   ...state,
   local: markAcked(state.local, id),
+});
+
+/**
+ * The daemon accepted a send-now (its request resolved, at the ack): it holds
+ * every message now — in the new turn's prompt or still in its queue — so each
+ * row is acked and from here on only the daemon's list shows it. The fallback
+ * for a row no report ever listed (docs/fix/mobile-queued-stuck.md).
+ */
+export const sendNowAccepted = (state: ComposeState, ids: readonly string[]): ComposeState => ({
+  ...state,
+  local: ids.reduce(markAcked, state.local),
 });
 
 /** The enqueue never reached the daemon (`NoTurnRunning`, a drop): its row goes. */

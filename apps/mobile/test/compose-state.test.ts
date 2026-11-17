@@ -21,6 +21,7 @@ import {
   ownIdList,
   queueRows,
   reclaimed,
+  sendNowAccepted,
   take,
 } from "../src/compose-state.ts";
 
@@ -74,6 +75,102 @@ describe("rows above the input (D2)", () => {
     const owned = enqueueRejected(state, "e1", new Set(["e1"]));
     expect(owned.notify).toBe(false);
     expect(owned.state.own.get("e1")).toBe("text"); // the send-now carries it
+  });
+});
+
+describe("a row the daemon LISTED leaves when it stops listing it (docs/fix/mobile-queued-stuck.md)", () => {
+  const ids = (state: ComposeState): readonly string[] => queueRows(state).map((r) => r.id);
+
+  test("the device capture: a send-now's minted row, listed n=1, then n=0 → gone", () => {
+    // capture-1: `act=send-now row=9cbd2fa8` (minted, no enqueue ack ever comes:
+    // the send-now's promise is the whole new turn) → `queued n=1 id0=9cbd2fa8`
+    // → turn-end → `queued n=0` → the phone still showed `rows n=1`.
+    // Mutation: drop the listed ⇒ acked rule in `onQueued` → red.
+    let state = enqueueStarted(initialCompose, "9cbd2fa8", "now please");
+    state = onQueued(state, queue({ entries: [{ id: "9cbd2fa8", text: "now please" }] })).state;
+    expect(ids(state)).toEqual(["9cbd2fa8"]);
+    state = onQueued(state, queue()).state;
+    expect(ids(state)).toEqual([]);
+    expect(state.local).toEqual([]);
+  });
+
+  test("a plain steer consumed at the next step BEFORE its enqueue ack resolves → gone", () => {
+    // The daemon can list and drain a steer before its `session/enqueue` answer
+    // lands; the late ack then finds no row and changes nothing.
+    let state = enqueueStarted(initialCompose, "e1", "steer");
+    state = onQueued(state, queue({ entries: [{ id: "e1", text: "steer" }] })).state;
+    state = onQueued(state, queue()).state;
+    expect(ids(state)).toEqual([]);
+    expect(ids(enqueueAcked(state, "e1"))).toEqual([]);
+  });
+
+  test("a row never listed and never acked stays: it is still in flight", () => {
+    const state = onQueued(enqueueStarted(initialCompose, "e1", "steer"), queue()).state;
+    expect(ids(state)).toEqual(["e1"]);
+  });
+
+  test("send-now accepted with NO report ever listing its row → hidden at once, dropped next", () => {
+    // The fallback when the daemon carried the text straight into the new turn.
+    // Mutation: `sendNowAccepted` returns the state unchanged → red.
+    let state = enqueueStarted(initialCompose, "s1", "now");
+    state = onQueued(state, queue()).state;
+    expect(ids(state)).toEqual(["s1"]);
+    state = sendNowAccepted(state, ["s1"]);
+    expect(ids(state)).toEqual([]);
+    state = onQueued(state, queue()).state;
+    expect(state.local).toEqual([]);
+  });
+
+  test("two queued (mine + another device's), send-now carries mine → only the other stays", () => {
+    let state = enqueueAcked(enqueueStarted(initialCompose, "e1", "mine"), "e1");
+    state = onQueued(
+      state,
+      queue({
+        entries: [
+          { id: "o1", text: "theirs" },
+          { id: "e1", text: "mine" },
+        ],
+      }),
+    ).state;
+    state = enqueueStarted(state, "s1", "field");
+    state = onQueued(
+      state,
+      queue({
+        entries: [
+          { id: "o1", text: "theirs" },
+          { id: "e1", text: "mine" },
+          { id: "s1", text: "field" },
+        ],
+      }),
+    ).state;
+    state = onQueued(state, queue({ entries: [{ id: "o1", text: "theirs" }] })).state;
+    expect(queueRows(state).map((r) => `${r.id}:${r.mine}`)).toEqual(["o1:false"]);
+  });
+
+  test("cancel: the listed row comes back RETURNED → given back once, not left as a row", () => {
+    let state = enqueueStarted(initialCompose, "e1", "my steer");
+    state = onQueued(state, queue({ entries: [{ id: "e1", text: "my steer" }] })).state;
+    const step = onQueued(state, queue({ returned: [returnedRow("e1")] }), { stoppedHere: true });
+    expect(ids(step.state)).toEqual([]);
+    expect(step.give).toBe("my steer");
+    expect(step.reclaim).toEqual(["e1"]);
+  });
+
+  test("re-attach with the row STILL queued on the daemon → it stays", () => {
+    let state = enqueueStarted(initialCompose, "e1", "my steer");
+    state = onQueued(state, queue({ entries: [{ id: "e1", text: "my steer" }] })).state;
+    // The link dropped; the re-attach's replay lists it again.
+    state = onQueued(state, queue({ entries: [{ id: "e1", text: "my steer" }] })).state;
+    expect(queueRows(state).map((r) => `${r.id}:${r.text}:${r.mine}`)).toEqual([
+      "e1:my steer:true",
+    ]);
+  });
+
+  test("re-attach AFTER it was consumed while away → the replay drops it", () => {
+    let state = enqueueStarted(initialCompose, "e1", "my steer");
+    state = onQueued(state, queue({ entries: [{ id: "e1", text: "my steer" }] })).state;
+    state = onQueued(state, queue()).state; // the replay: drained meanwhile
+    expect(ids(state)).toEqual([]);
   });
 });
 

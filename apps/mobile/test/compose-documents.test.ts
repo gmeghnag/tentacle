@@ -97,7 +97,9 @@ function fakeHandle(
       prompted.push({ text, documents: [] });
     },
     async steer() {},
-    async sendNow() {},
+    async sendNow() {
+      return (async function* () {})();
+    },
     onQueued() {
       return () => {};
     },

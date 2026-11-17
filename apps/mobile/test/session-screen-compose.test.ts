@@ -8,6 +8,7 @@
  * between them is exactly what this slice adds.
  */
 import { describe, expect, test } from "bun:test";
+import type { SessionEvent } from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
 import type { AttachmentRef, QueueState } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
@@ -96,6 +97,14 @@ function harness(
     },
     /** How many times a running turn was cancelled (the Stop path). */
     cancels: 0,
+    /** Each send-now request: the ids it carried, the turn it cancels, the successor's key. */
+    sendNows: [] as {
+      readonly ids: readonly string[];
+      readonly turnId: string;
+      readonly next: string;
+    }[],
+    /** The send-now's successor events (what the real client hands back at the ack). */
+    successor: null as AsyncIterable<SessionEvent> | null,
     activity: null as ((activity: unknown) => void) | null,
   };
   const handle: ComposeHandle = {
@@ -112,7 +121,10 @@ function harness(
     steer: async (text, id, turnId) => {
       session.steers.push({ text, id, turnId });
     },
-    sendNow: async () => {},
+    sendNow: async (messages, turnId, next) => {
+      session.sendNows.push({ ids: messages.map((m) => m.id), turnId, next: next.turnId });
+      return session.successor ?? (async function* () {})();
+    },
     // The client REPLAYS what it holds at subscribe (a real one does): the first
     // queue report is its snapshot, not a live change.
     onQueued: (listener) => {
@@ -244,6 +256,59 @@ describe("the compose half on the screen", () => {
     await settle();
     h.session.queueListener({ entries: [{ id: "theirs", text: "waiting" }], returned: [] });
     expect(screen.state().view.queued.map((row) => row.id)).toEqual(["theirs"]);
+  });
+
+  test("docs/fix/mobile-queued-stuck.md (b): a send-now's successor turn folds HERE, after the cancelled turn's end", async () => {
+    // Device capture 2: the send-now's turn ran daemon-side (108 → 111 messages)
+    // while the phone traced no `turn-start` and showed no answer — the handle
+    // drained its events. Mutations: drain in `compose-handle`/skip
+    // `followSendNow` → no successor turn, no answer (red); fold it at once
+    // instead of after the running fold → the old `turn_ended` closes the new
+    // bracket (red at the "still running" line).
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    let endOld = (): void => {};
+    const oldEnds = new Promise<void>((resolve) => {
+      endOld = resolve;
+    });
+    h.session.activity?.({
+      kind: "turn",
+      turnId: "c5ad2a4a",
+      events: (async function* () {
+        await oldEnds;
+        yield { type: "turn_end", reason: "cancelled" } as never;
+      })(),
+      cancel: () => {},
+    });
+    let endNew = (): void => {};
+    const newEnds = new Promise<void>((resolve) => {
+      endNew = resolve;
+    });
+    h.session.successor = (async function* () {
+      yield { type: "user_message", text: "now please" } as never;
+      yield { type: "text", delta: "the answer" } as never;
+      await newEnds;
+      yield { type: "turn_end", reason: "end_turn" } as never;
+    })();
+    screen.setDraft("now please");
+    await screen.sendNow();
+    await settle();
+    expect(h.session.sendNows.map((s) => s.turnId)).toEqual(["c5ad2a4a"]);
+    const next = h.session.sendNows[0]?.next ?? "";
+    // The cancelled turn has not ended yet: it is still the one shown.
+    expect(screen.state().transcript.turn?.turnId).toBe("c5ad2a4a");
+    endOld();
+    await settle();
+    expect(screen.state().transcript.turn?.turnId).toBe(next);
+    expect(screen.state().transcript.turn?.own).toBe(true);
+    const rows = screen.state().transcript.rows;
+    expect(rows.some((row) => row.kind === "user" && row.text === "now please")).toBe(true);
+    expect(rows.some((row) => row.kind === "assistant" && row.text === "the answer")).toBe(true);
+    endNew();
+    await settle();
+    expect(screen.state().transcript.turn).toBeNull();
   });
 
   test("the photo button picks and the chip reaches the view (13c's pipeline)", async () => {
