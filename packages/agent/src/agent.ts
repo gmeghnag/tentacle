@@ -396,7 +396,20 @@ export type AgentEvent =
   // the call starts (every executed call; never one that did not start).
   // Rendering-only: never persisted.
   | { readonly type: "tool_phase"; readonly id: string; readonly phase: "queued" | "running" }
-  | { readonly type: "usage"; readonly usage: Usage }
+  | {
+      readonly type: "usage";
+      readonly usage: Usage;
+      /**
+       * 0-based index of this model round inside the turn, and how many messages
+       * the request carried — the two facts the daemon cannot see, recorded per
+       * round in the session log (docs/feat/token-usage-log.md). Optional: an
+       * agent built elsewhere (tests) yields the provider's numbers alone.
+       */
+      readonly round?: number;
+      /** The ONE no-tools report a spent step budget forces, so it has no round. */
+      readonly final?: true;
+      readonly messages?: number;
+    }
   // Nested sub-agent progress (the `agent_task` tool), keyed by the parent tool-call id.
   | {
       readonly type: "subagent_start";
@@ -1422,7 +1435,10 @@ export class Agent {
               if (event.usage) {
                 this.anchorContext(messages, sent, event.usage);
                 this.addSpend(messages, event.usage);
-                yield { type: "usage", usage: event.usage };
+                // `round`/`messages` ride the event too (docs/feat/token-usage-log.md):
+                // the daemon logs them per round; the provider's own numbers are
+                // `usage`, unchanged for every other consumer.
+                yield { type: "usage", usage: event.usage, round: iteration, messages: sent };
               }
               break;
           }
@@ -1741,7 +1757,12 @@ export class Agent {
             // and the NEXT pass (a `twoWay` continuation) runs a productive
             // round it should have been refused.
             this.addSpend(messages, event.usage);
-            yield { type: "usage", usage: event.usage };
+            yield {
+              type: "usage",
+              usage: event.usage,
+              final: true,
+              messages: finalMessages.length,
+            };
           }
           // tool_call events are ignored: no tools were offered.
         }

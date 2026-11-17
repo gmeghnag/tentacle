@@ -65,6 +65,7 @@ import { lockHolder } from "./pod-resident.ts";
 import { laptopProc, readOwner } from "./run-state.ts";
 import { relayLogPath, runDirFor } from "./run-state.ts";
 import { untrustedText } from "./untrusted-text.ts";
+import { formatUsage, usageReport } from "./usage-report.ts";
 import { CLIENT_INFO } from "./version.ts";
 
 export interface LogsOptions {
@@ -74,6 +75,8 @@ export interface LogsOptions {
   readonly only?: readonly LogCategory[];
   readonly json: boolean;
   readonly summary: boolean;
+  /** `--usage`: the per-round token table + totals instead of the event stream (docs/feat/token-usage-log.md). */
+  readonly usage?: boolean;
   readonly follow: boolean;
   /**
    * `--connect <url>`: follow a `serve` daemon's session LIVE (`session/watch`)
@@ -855,11 +858,14 @@ export async function logsCommand(opts: LogsOptions, deps: LogsDeps): Promise<nu
       deps.err(`[error] ${JSON.stringify(opts.uid)} is not a valid session id\n`);
       return 1;
     }
-    if (opts.summary) {
-      // A summary is a FILE's facts (its path, its project, its kept segments):
-      // a remote read has none of them, so say what to run instead.
+    if (opts.summary || opts.usage === true) {
+      // A summary / a usage table are a FILE's facts (its path, its kept
+      // segments, the rounds it recorded): a remote read has neither, so say
+      // what to run instead.
       deps.err(
-        "[logs] --summary reads a session's log file on THIS laptop; for a serve session, run it on that host\n",
+        opts.summary
+          ? "[logs] --summary reads a session's log file on THIS laptop; for a serve session, run it on that host\n"
+          : "[logs] --usage reads a session's log file on THIS laptop; for a serve session, run it on that host\n",
       );
       return 1;
     }
@@ -900,6 +906,12 @@ export async function logsCommand(opts: LogsOptions, deps: LogsDeps): Promise<nu
   if (opts.summary) {
     const summary = await summaryOf(deps, found.read, found.uid);
     deps.out(opts.json ? `${jsonLine(summary)}\n` : formatSummary(summary));
+    return 0;
+  }
+  if (opts.usage === true) {
+    // docs/feat/token-usage-log.md: what each model round cost, in the order it ran.
+    const report = usageReport(found.read.entries);
+    deps.out(opts.json ? `${jsonLine(report)}\n` : formatUsage(report));
     return 0;
   }
   if (opts.follow) {

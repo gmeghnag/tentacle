@@ -251,6 +251,11 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1reclaim/result": [{}],
   "methods/session~1rename/params": [{ sessionId: "s", title: " Fix\tlogin " }],
   "methods/session~1rename/result": [{ title: { text: "Fix login", source: "user" } }],
+  "methods/session~1pin/params": [
+    { sessionId: "s", pinned: true },
+    { sessionId: "s", pinned: false },
+  ],
+  "methods/session~1pin/result": [{ pinned: true }, { pinned: false }],
   // feat/subagent-panel: the user writes to / stops one background child.
   "methods/session~1subagent_message/params": [
     { sessionId: "s", agentId: "sa-1", text: "skip the tests folder" },
