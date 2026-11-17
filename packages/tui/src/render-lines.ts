@@ -805,6 +805,15 @@ function diagramRow(
   if (tool.status === "running" || tool.status === "queued") {
     return undefined;
   }
+  // A FAILED call does not draw: OUR gate (below, `diagramToolBody` →
+  // `parseDiagramArgs`) is only `lintDiagram`, while the daemon runs mermaid's own
+  // parser (docs/feat/model-diagrams.md D4), and a denial lands here as `error`
+  // too. Drawing it would show a diagram the renderer refused as if it had
+  // worked, with the reason gone — the generic error row (`● Diagram …` + the
+  // tool's text) is the honest row.
+  if (tool.status === "error") {
+    return undefined;
+  }
   const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
   const key = `${width}|${expanded ? 1 : 0}`;
   let slots = diagramCache.get(tool);

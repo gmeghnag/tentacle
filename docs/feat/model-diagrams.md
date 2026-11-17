@@ -1320,7 +1320,12 @@ Two mutations earned a test rather than a shrug, which is the point of the exerc
 - Full `bun test`, run once at the end: **14467 pass, 5 skip, 0 fail** (same 5 skips as the D3 gate: 3 opt-in + 2 pre-existing).
 - No schema change, no `protocol.d/` note (a tool name and its arguments are data on the wire, D9). `protocol.json` untouched.
 
-*— claude-opus-5-5, 2026-11-17*
+*— deepseek (variant not recorded), 2026-11-17* — this slice's executor per the
+routing table (`:425`) and its commit (`27d396eb exec (deepseek)`). The
+`claude-opus-5-5` signature this line originally carried was a wrong
+self-attribution (fix round 1, finding 2); no log of that session survives, so
+the variant is stated as unrecorded rather than invented — the same form the
+`## Execution` section above already uses.
 
 ## Review — slice D4
 
@@ -1342,3 +1347,54 @@ Two mutations earned a test rather than a shrug, which is the point of the exerc
 *Reviewer: claude-opus-5-5 (fresh context). If the executor really was opus, this review shares its model family: blind spots may be shared.*
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Fix round 1
+
+**Finding 1 (HIGH) — a FAILED `diagram` call drew as if valid: FIXED.**
+- `packages/tui/src/render-lines.ts:808-816`: `diagramRow` now returns `undefined` for `tool.status === "error"`, right after the `running`/`queued` guard, so the generic row (`● Diagram <title>` + the tool's text, red bullet, red body) renders instead. The premise the review re-checked is written into the comment: our own gate (`diagramToolBody` → `parseDiagramArgs` → `lintDiagram`) is only a lint, the daemon runs mermaid's own parser, and a denial (`docs/feat/permission-reply.md`) arrives as the same status.
+- Chosen site: the guard in `diagramRow`, not a change to `diagramToolBody`. `diagramToolBody` is a pure "what does this source draw" renderer, and the status is not part of a source; the row is where a call's status decides whether it draws. Same shape as the existing `running`/`queued` guard, one line away.
+
+**Repro, before any edit** (`.tentacle/tmp/model-diagrams/fix-d4/repro.ts`, run from the repo root; the reviewer's own repro is kept at `rev-d4/err2.ts`). Four sources at `ok` and `error`, through `itemLines` at width 80.
+
+BEFORE (from `rev-d4/err2.ts`, before the fix): every `error` row is byte-identical to its `ok` row — the caption plus the drawing (flowchart), or the caption plus "source only" — with the tool's error text nowhere:
+```
+ok    "flowchart TD\n  A --> B"  →  Login · flowchart            + the ╭─╮─◇ drawing
+error "flowchart TD\n  A --> B"  →  Login · flowchart            + the same drawing
+ok    "sequenceDiagram…"         →  Login · sequenceDiagram · source only in the terminal + │ source
+error "sequenceDiagram…"         →  the same
+(erDiagram, gitGraph: the same two-way identity)
+```
+AFTER (the same script, post-fix):
+```
+ok    "flowchart TD\n  A --> B"    errText=false drawing=true   first="Login · flowchart"
+error "flowchart TD\n  A --> B"    errText=true  drawing=false  first="● Diagram Login"
+ok    "sequenceDiagram..."         errText=false drawing=false  first="Login · sequenceDiagram · source only in"
+error "sequenceDiagram..."         errText=true  drawing=false  first="● Diagram Login"
+ok    "erDiagram..."               errText=false drawing=false  first="Login · erDiagram · source only in the t"
+error "erDiagram..."               errText=true  drawing=false  first="● Diagram Login"
+ok    "gitGraph..."                errText=false drawing=false  first="Login · gitGraph · source only in the te"
+error "gitGraph..."                errText=true  drawing=false  first="● Diagram Login"
+```
+The `ok` rows are unchanged (so the fix does not disturb a working diagram); every `error` row now carries the reason and never a drawing.
+
+**Finding 2 (MEDIUM) — the D4 Execution's signature: CORRECTED.** Every commit here is authored by the same human, so the commit SUBJECT is the only record of which model ran a slice — and both it (`27d396eb exec (deepseek)`) and the routing table (`:425`) say deepseek. The `claude-opus-5-5` line came from an agent session, not from the slice: this worktree's only Claude transcript (`~/.claude/projects/…worktrees-model-diagrams/01d42b3a….jsonl`, 279 entries, all `"model":"claude-opus-5-5"`) ends at 06:30 with 2 mentions of `diagramRow` — a D3-era session, not the 10:40-10:57 D4 one, whose transcript is not on disk. The signature is now `*— deepseek (variant not recorded)*`, the same honest form `## Execution` already uses at `:523` after review round 1 corrected this same mistake there. Nothing invented: deepseek is what the routing table and the commit say, the missing variant is stated as missing. (Consequence for the Review above: its closing note "if the executor really was opus … blind spots may be shared" does not hold — the reviewer was a different family from the slice's executor. It is left as written; the reviewer's own words are not mine to edit.)
+
+**Red before green (§9).** Two tests, both red on the assertion of the property, not on an import:
+1. `packages/tui/test/diagram-row.test.ts`, "a FAILED diagram keeps the generic error row, so the refusal is visible". Before the fix: `1 fail — Expected to contain: "●" / Received: "                       Flusso di login · flowchart"`, i.e. it drew. Green after. It also pins the two neighbours: `expandAll` does not buy a refused call a drawing, the denial text (`Denied`) wins, and the SAME args at `ok` still draw.
+2. `packages/tui/test/app-diagram.test.tsx`, "live: a source mermaid REFUSES shows the generic error row, not a diagram" — the end-to-end path the finding is about (a real `createDiagramTool` whose `parse` refuses, driven through the App). The mutation output below shows its red frame: the full `╭───────╮` login flowchart drawn for a call the parser refused.
+
+**Mutations** (`.tentacle/tmp/model-diagrams/fix-d4/mutate.ts` and `mutate-app.ts`, run from the main repo root's `.tentacle/tmp`; each applied by exact match with a uniqueness assert, narrow test run, the file restored → `restored: true`, and `git status` afterwards shows only the intended files):
+```
+M-A error guard dropped (the review's bug), diagram-row:  KILLED (1 fail) … > a FAILED diagram keeps the generic error row
+M-B guard over-broad (no status draws), diagram-row:      KILLED (4 fail) … > the row IS the diagram | ctrl+o expands | width is the memo key | a FAILED diagram
+M-C error guard dropped, app-diagram frames:              KILLED (1 fail) … > live: a source mermaid REFUSES
+```
+M-B is the non-vacuity guard in the other direction: a guard that killed ALL drawing fails four tests, so the suite pins "failed calls do not draw" AND "successful ones do", not just "something returns undefined".
+
+**Drift:** none from the review's instruction, which named the guard and the generic row. One deliberate choice inside it: the guard sits in `diagramRow` rather than in `toolLines`'s dispatch, so `chartRow` is untouched — a chart's client-side validation DOES equal its tool's (the review's own reasoning), so copying the guard there would be a behaviour change nobody asked for.
+
+**Not done, deliberately:** the phone's counterpart is `apps/mobile/src/chart-row.ts:41`, which already excludes `error`/`denied`, and D5's diagram row does not exist yet — the reviewer's cross-reference is a constraint for D5, not a D4 fix. Recorded here so D5 inherits it.
+
+**Gate:** `bun run typecheck` (`tsc --noEmit`, `apps/mobile`, `apps/relay`) clean; `bun run lint` clean, 1986 files, no fixes (one `biome check --write` on `diagram-row.test.ts` after a hand-written line was too long to format); full `bun test`, run once at the end: **14469 pass, 5 skip, 0 fail** (the same 5 opt-in/pre-existing skips as the D4 gate; the only edit after it is a comment reflow in `render-lines.ts`, which no test reads). Narrow during the work: `diagram-row` 10 pass, `app-diagram` 8 pass. The three mutations were re-run against the final code shape and still KILLED.
+
+*— claude-opus-5-5, 2026-11-17* (executor of this fix round; branch `feat/model-diagrams`, uncommitted working tree. The id is this session's own harness report — `AI_AGENT=claude-code_2-1-323_agent` with `modelSettings["claude-opus-5-5"]` — and names the FIX executor; finding 2 above corrects the separate D4 slice signature.)

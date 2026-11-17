@@ -108,6 +108,40 @@ describe("a diagram in the transcript (D4)", () => {
     }
   });
 
+  test("a FAILED diagram keeps the generic error row, so the refusal is visible", () => {
+    // The client-side gate is the lint, not mermaid's own parser, so
+    // a source can pass here and still be refused by the daemon (`status:
+    // "error"`, the tool's error text its result). Drawing it would show a
+    // diagram the renderer refused as if it had worked, with the reason gone
+    // (review D4 finding 1). Mutation: drop the `error` guard in `diagramRow`
+    // → this call draws byte-identical to the `ok` one.
+    const refused = rowsOf(
+      diagramTool({
+        status: "error",
+        resultText: 'line 2: unknown diagram type ""theme":"dark""',
+      }),
+    );
+    expect(refused[0]).toContain("●");
+    expect(refused.join("\n")).not.toContain(BOX);
+    expect(refused.join("\n")).toContain("unknown diagram type");
+    // Expanded too (Ctrl+O / a click): the guard is about the status, not the
+    // format — a refused diagram must not gain a drawing when it grows.
+    const expanded = rowsOf(
+      diagramTool({ status: "error", resultText: 'line 2: unknown diagram type ""theme":"dark""' }),
+      120,
+      { expandAll: true },
+    );
+    expect(expanded.join("\n")).not.toContain(BOX);
+    expect(expanded.join("\n")).toContain("unknown diagram type");
+    // A denial is the same status (docs/feat/permission-reply.md): the reason wins.
+    const denied = rowsOf(diagramTool({ status: "error", denialReply: "no, not this one" }));
+    expect(denied.join("\n")).toContain("Denied");
+    expect(denied.join("\n")).not.toContain(BOX);
+    // …and the very same args at `ok` DO draw: the guard is about the status,
+    // not the source.
+    expect(rowsOf(diagramTool()).join("\n")).toContain(BOX);
+  });
+
   test("every OTHER tool keeps its own row (the branch is the diagram's alone)", () => {
     // Mutation: drop the `tool.name !== DIAGRAM_TOOL` guard → every call is
     // handed to the diagram renderer (a `shell` call loses its label).

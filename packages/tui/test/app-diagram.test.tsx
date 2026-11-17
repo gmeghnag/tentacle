@@ -166,6 +166,48 @@ describe("a diagram in the App (T4)", () => {
     }
   });
 
+  test("live: a source mermaid REFUSES shows the generic error row, not a diagram", async () => {
+    // The whole point of D2's daemon-side parse: the lint can pass and mermaid
+    // still refuse. That call is `status: "error"`, and drawing it would show a
+    // diagram that never existed, its reason gone (review D4 finding 1).
+    // Mutation: drop the `error` guard in `diagramRow` → this frame draws the
+    // box and loses the error text.
+    const refusing = createDiagramTool({
+      parse: async () => ({
+        ok: false,
+        reason: "invalid",
+        error: new Error('Parse error on line 2: unknown diagram type ""theme":"dark""'),
+      }),
+    });
+    const agent = new Agent({
+      model: new ScriptedProvider([
+        [
+          { type: "tool_call", toolCall: { id: "d1", name: "diagram", arguments: LOGIN_ARGS } },
+          { type: "done" },
+        ],
+        [{ type: "text", delta: "Riprovo." }, { type: "done" }],
+      ]),
+      tools: new ToolRegistry().register(refusing),
+      env: noopEnv,
+    });
+    const app = await mountApp({ agent, model: "qwen3", cwd: "/tmp/work" });
+    try {
+      app.stdin.write("disegna il flusso");
+      await delay(30);
+      app.stdin.write("\r");
+      await delay(400);
+      const frame = app.lastFrame() ?? "";
+      const text = rowsOf(frame).join("\n");
+      expect(text).toContain("● Diagram");
+      expect(text).not.toContain(BOX);
+      expect(text).not.toContain(DECISION);
+      // The reason mermaid gave is still on screen, not swallowed by a drawing.
+      expect(text).toMatch(/unknown diagram type|does not seem to be a valid diagram|not valid/i);
+    } finally {
+      app.unmount();
+    }
+  });
+
   test("after a resume: the same diagram, from the stored arguments", async () => {
     // Mutation: draw only from a live `tool_start` item (read something other
     // than `args`) → red: a resumed row has only `args`.
