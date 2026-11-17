@@ -11,6 +11,8 @@
  * state that decided them.
  */
 import type { PermissionResponse } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ArtifactIntent } from "../artifact-open.ts";
 import type { DockState } from "../background-focus.ts";
 import type { ChordState } from "../chord.ts";
 import type { QuitConfirmFacts } from "../commands.ts";
@@ -61,6 +63,21 @@ export type KeyEffect =
   | { readonly kind: "switchCapability" }
   /** Write the sessions panel's state (`sessionsDelete`'s arm/answer). */
   | { readonly kind: "setSessionsState"; readonly state: SessionsState }
+  /**
+   * Enter in `/artifacts`: open the version the panel's cursor is on
+   * (docs/feat/model-artifacts.md D8). The META is the panel's own decision
+   * (`artifactAt`), never an index the App resolves again.
+   */
+  | {
+      readonly kind: "openArtifact";
+      readonly artifact: ArtifactMeta;
+      /** `n` (with the network) or `s` (save a copy); absent: a plain open. */
+      readonly intent?: ArtifactIntent;
+    }
+  /** `Ctrl+X Ctrl+O`: open the newest artifact in the transcript (D8). */
+  | { readonly kind: "openNewestArtifact" }
+  /** The artifact open confirm (a pod's bytes, or the network) was answered. */
+  | { readonly kind: "answerArtifactConfirm"; readonly yes: boolean }
   /** Write the `/schedule` panel's own state (its arm/answer, cron-tool S5). */
   | { readonly kind: "setSchedulesState"; readonly state: SchedulesState }
   /** Switch to another session (the panel already closed). */

@@ -139,6 +139,7 @@ import {
   watchAccepts,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import { ArtifactBudget, ArtifactStore } from "./artifact-store.ts";
 import { AttachmentStore, UploadBudget } from "./attachment-store.ts";
 import type { ModelLink } from "./connection.ts";
 import { jobRows, sameJobs } from "./jobs-view.ts";
@@ -634,6 +635,12 @@ export class HostedSession {
    * detached-then-reattached client resumes where it stopped.
    */
   readonly uploads: AttachmentStore;
+  /**
+   * What `present` showed the user in this session (docs/feat/model-artifacts.md
+   * D4): `artifact/list` / `artifact/read` serve it. The SESSION's, like
+   * `uploads`, so a re-attach or a settings sync keeps it.
+   */
+  readonly artifacts: ArtifactStore;
   /** What the factory did with `session/open.settings`; told to whoever attaches. */
   settingsReport: SessionSettingsReport | undefined;
   /**
@@ -888,10 +895,12 @@ export class HostedSession {
     logOptions: SessionLogOptions = {},
     agentRuntime?: AgentJobs,
     uploads: AttachmentStore = new AttachmentStore(new UploadBudget()),
+    artifacts: ArtifactStore = new ArtifactStore(new ArtifactBudget()),
     schedules?: SessionSchedules,
   ) {
     this.id = id;
     this.uploads = uploads;
+    this.artifacts = artifacts;
     this.now = now;
     this.wake = wake;
     this.scheduling = schedules;
@@ -3079,6 +3088,25 @@ export class HostedSession {
         if (event.type === "tool_phase" && event.phase === "running") {
           this.log.callStarted(event.id);
         }
+        // One model round's spend, as the provider measured it
+        // (docs/feat/token-usage-log.md): a NON-critical log entry that projects
+        // nothing, so it rides the next committed boundary's capture like any
+        // other. No entry at all when the provider reported no usage.
+        if (event.type === "usage") {
+          const model = this.mainModelId();
+          this.log.usage({
+            turnId,
+            ...(event.round !== undefined ? { round: event.round } : {}),
+            ...(event.final === true ? { final: true as const } : {}),
+            ...(model !== undefined ? { model } : {}),
+            promptTokens: event.usage.promptTokens,
+            completionTokens: event.usage.completionTokens,
+            ...(event.usage.cachedPromptTokens !== undefined
+              ? { cachedPromptTokens: event.usage.cachedPromptTokens }
+              : {}),
+            ...(event.messages !== undefined ? { messages: event.messages } : {}),
+          });
+        }
         if (event.type === "history_repaired") {
           // Synchronous, no await: the drive-loop invariant holds. The user is
           // told ONCE per loaded session (a restart notifies again, once).
@@ -3915,6 +3943,8 @@ export class HostedSession {
     // The single END of a live session covers close, archive, the reaper, the
     // detached cap and delete (P4): the upload reservations go back here.
     this.uploads.dispose();
+    // Memory only: the artifact bytes go back to the daemon's budget.
+    this.artifacts.dispose();
     this.unsubscribeExit?.();
     this.unsubscribeStart?.();
     this.jobs?.dispose();

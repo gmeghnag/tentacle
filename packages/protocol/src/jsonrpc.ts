@@ -75,6 +75,14 @@ export const DomainErrorCode = {
    * is half-written (the store writes through a temp file).
    */
   PushStoreFailed: -32019,
+  /**
+   * An `artifact/read` this session's store cannot answer: `data.reason` is an
+   * `ArtifactUnavailableReason` (`unknown` | `evicted` | `store_failed`,
+   * docs/feat/model-artifacts.md). The gallery reports it as "no longer
+   * available — ask to present it again"; an unknown reason reads as a generic
+   * failure, so adding one is additive.
+   */
+  ArtifactUnavailable: -32020,
 } as const;
 
 /**

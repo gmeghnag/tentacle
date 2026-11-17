@@ -43,13 +43,16 @@ export type IconName =
   | "arrow.clockwise"
   | "arrow.down"
   | "photo"
+  | "square.and.arrow.up"
   | "hand.raised"
   | "trash"
   | "mic"
   | "mic.fill"
   | "waveform"
   | "speaker.wave.2"
-  | "stop.circle";
+  | "stop.circle"
+  /** A pinned session in the sessions list (docs/feat/mobile-session-actions.md). */
+  | "pin";
 
 export interface IconProps {
   readonly name: IconName;

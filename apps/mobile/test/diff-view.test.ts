@@ -5,7 +5,7 @@
  * and truncation.
  */
 import { describe, expect, test } from "bun:test";
-import type { ToolResultDetail } from "@tentacle/core";
+import type { ToolDiffDetail } from "@tentacle/core";
 import { DIFF_MAX_LINES, countDiff, diffView } from "../src/diff-view.ts";
 
 /**
@@ -26,7 +26,7 @@ function clientCountDiff(patch: string): { added: number; removed: number } {
   return { added, removed };
 }
 
-function detail(patch: string, path = "x.txt"): ToolResultDetail {
+function detail(patch: string, path = "x.txt"): ToolDiffDetail {
   const { added, removed } = clientCountDiff(patch);
   return { kind: "diff", path, patch, added, removed };
 }

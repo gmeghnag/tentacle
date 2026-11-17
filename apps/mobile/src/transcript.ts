@@ -12,8 +12,9 @@ import type { EndReason, SessionEvent } from "@tentacle/client";
  * `SessionEvent`s, its `history` activity, the turn bracket, the link status and
  * the session's end. No React, no client, no I/O.
  */
-import type { AttachmentRef, ChatMessage, ToolResultDetail } from "@tentacle/core";
+import type { AttachmentRef, ChatMessage, ToolDiffDetail } from "@tentacle/core";
 import { describeEmptyTurn, describeRepairs, describeTruncation, toolLabel } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 import { historyRows, restartPromptOf } from "./transcript-history.ts";
 import {
   type ImageRef,
@@ -584,7 +585,12 @@ function applyToolResult(
   when: At,
 ): State {
   const at = state.rows.findLastIndex((row) => row.kind === "tool" && row.id === event.id);
-  const settled: ToolResultDetail | undefined = event.result.details;
+  // A diff and an artifact are the two details an own card carries; each stays
+  // in its own field (`diff` opens below the row, `artifact` IS the card).
+  const settled: ToolDiffDetail | undefined =
+    event.result.details?.kind === "diff" ? event.result.details : undefined;
+  const artifact: ArtifactMeta | undefined =
+    event.result.details?.kind === "artifact" ? event.result.details.artifact : undefined;
   const update = (row: ToolRow): ToolRow => ({
     ...row,
     // A refusal with a reply is its own status (the TUI shows `✗ Denied · <text>`).
@@ -596,6 +602,7 @@ function applyToolResult(
           : "ok",
     output: event.result.content,
     ...(settled !== undefined ? { diff: settled } : {}),
+    ...(artifact !== undefined ? { artifact } : {}),
     ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
     ...(event.result.hook !== undefined ? { hook: event.result.hook } : {}),
     ...(event.result.spill !== undefined ? { spill: event.result.spill } : {}),

@@ -11,6 +11,8 @@
 import type { AskHooksTrust } from "@tentacle/agent";
 import {
   type AgentKillParams,
+  type ArtifactListParams,
+  type ArtifactReadParams,
   type AttachmentPutParams,
   type CancelParams,
   type ClearParams,
@@ -98,6 +100,7 @@ import {
   RpcError,
   RpcPeer,
 } from "@tentacle/transport";
+import { artifactListResult } from "./artifact-store.ts";
 import type { Attachment, HostedSession } from "./hosted-session.ts";
 import { type PairHandler, pairingRefusedError } from "./pairing-handler.ts";
 import { hasDocuments, resolvePromptDocuments } from "./prompt-documents.ts";
@@ -461,6 +464,17 @@ export class Connection {
       case Method.AttachmentPut: {
         const { sessionId, ...chunk } = params as AttachmentPutParams;
         return this.lookup(sessionId).uploads.put(chunk);
+      }
+      // The session's artifacts (docs/feat/model-artifacts.md D4). Only a session
+      // open on THIS connection (P8), never a lock: a 20 MiB read is many
+      // independent chunk requests, interleaving with prompts and answers.
+      case Method.ArtifactList: {
+        const { sessionId } = params as ArtifactListParams;
+        return artifactListResult(this.lookup(sessionId).artifacts.list());
+      }
+      case Method.ArtifactRead: {
+        const { sessionId, sha256, offset } = params as ArtifactReadParams;
+        return this.lookup(sessionId).artifacts.read(sha256, offset);
       }
       // A read of the registry: does not attach this connection to anything.
       case Method.SessionList:

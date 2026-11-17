@@ -350,6 +350,13 @@ export interface TurnHost {
   readonly model: string;
   /** A `context_reset` re-reads the skills (`skills-sync.ts`'s one settle). */
   readonly skillsSync: SkillsSync;
+  /**
+   * A history that just replaced (or appended to) the transcript, with the
+   * cards this TUI already knows attached (S6a review finding 2). A rebuild
+   * from `ChatMessage`s carries no `present` detail, so the App's
+   * `ArtifactJoin` supplies it — and asks the daemon when it cannot.
+   */
+  readonly joinCards: (state: DisplayState) => DisplayState;
   /** Ask the daemon for the context figure (never awaited by render). */
   readonly askContext: (session: SessionController | null) => void;
   /** Fire a deferred autonomous wake (idle-gated; the settle asks again). */
@@ -441,6 +448,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     restoreDocuments,
     model,
     skillsSync,
+    joinCards,
     askContext,
     wakeIfPending,
     exit,
@@ -534,13 +542,13 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         setLoading(null);
         warmingRef.current = false;
       }
-      stateRef.current = {
+      stateRef.current = joinCards({
         ...next,
         items: commitWarmed(before, stateRef.current.items, next.items),
         running: stateRef.current.running,
-      };
+      });
     },
-    [layoutOptsRef, setLoading, stateRef, warmingRef],
+    [joinCards, layoutOptsRef, setLoading, stateRef, warmingRef],
   );
 
   /**
@@ -624,6 +632,12 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
           }
           if (event.type === "history_reset" && needsWarm(event.messages.length)) {
             await commitHistory((s) => applySessionEvent(s, event, Date.now()));
+          } else if (event.type === "history_reset" || event.type === "context_reset") {
+            // A resync's replace — and a context reset's APPENDED history —
+            // rebuilds rows from `ChatMessage`s: the cards this TUI knows are
+            // re-attached (S6a review finding 2). Gated on these two events so
+            // the streaming hot path pays nothing.
+            stateRef.current = joinCards(applySessionEvent(stateRef.current, event, Date.now()));
           } else {
             stateRef.current = applySessionEvent(stateRef.current, event, Date.now());
           }
@@ -801,6 +815,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       flushNow,
       foreignRef,
       handedWakeRef,
+      joinCards,
       model,
       pushNotice,
       restoreChips,

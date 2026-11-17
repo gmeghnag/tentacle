@@ -10,6 +10,7 @@
 import type { SessionRecord, TitleState } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
 import type { LogMeta, LogSessionStore, LogWrite } from "@tentacle/daemon";
+import type { ArtifactMeta } from "@tentacle/protocol";
 
 /**
  * All the saver needs from a store (the laptop's `LogSessionStore`): `write`
@@ -17,7 +18,18 @@ import type { LogMeta, LogSessionStore, LogWrite } from "@tentacle/daemon";
  * `saveAside` when the store can keep a diverged copy.
  */
 export type SaveTarget = Pick<LogSessionStore, "write" | "remove"> &
-  Partial<Pick<LogSessionStore, "saveAside" | "fork" | "putBlob" | "readBlob" | "blobIndex">>;
+  Partial<
+    Pick<
+      LogSessionStore,
+      | "saveAside"
+      | "fork"
+      | "putBlob"
+      | "readBlob"
+      | "blobIndex"
+      | "putArtifact"
+      | "artifactManifest"
+    >
+  >;
 
 /** A uid's last save outcome: fine, or failing with the latest error. */
 export type SaveState =
@@ -200,6 +212,25 @@ export class SessionSaver {
   /** `id`'s images on this laptop's disk, id → size (the per-session cap's used side). */
   blobIndex(id: string): ReadonlyMap<string, number> {
     return this.target.blobIndex ? this.target.blobIndex(id) : new Map();
+  }
+
+  /**
+   * Keep one artifact version beside `id`'s log (docs/feat/model-artifacts.md
+   * D11), in the store's per-uid queue — so a `remove` queued after it leaves no
+   * orphan dir. Resolves at once when there is nothing to do (the uid was
+   * removed, the store keeps no artifacts); REJECTS when the write failed.
+   */
+  putArtifact(id: string, meta: ArtifactMeta, bytes: Uint8Array): Promise<void> {
+    if (!this.target.putArtifact || this.removed.has(id)) {
+      return Promise.resolve();
+    }
+    return this.target.putArtifact(id, meta, bytes);
+  }
+
+  /** The artifact versions already kept for `id`, oldest first (`"refused"`: a newer tentacle's format). */
+  artifactManifest(id: string): readonly ArtifactMeta[] | "refused" {
+    if (!this.target.artifactManifest || this.removed.has(id)) return [];
+    return this.target.artifactManifest(id);
   }
 
   /** Whether `id`'s local copy was removed (nothing of it is written again). */

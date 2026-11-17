@@ -5,6 +5,8 @@
  */
 import { restartPromptOf } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
+import { joinKnownArtifacts } from "./artifacts-panel.ts";
 import { imageRowText } from "./attach-draft.ts";
 import { userMessageView } from "./pdf-attach.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
@@ -33,8 +35,28 @@ function noteItem(m: ChatMessage): DisplayItem {
  * A restart message (a context reset's first user message) is shown as the
  * separator, then the model's prompt alone — tentacle's appended notes
  * (jobs, skills) are the model's, not the user's.
+ *
+ * `artifactsByCall` (docs/feat/model-artifacts.md D8) is the daemon's
+ * `artifact/list`, keyed by the `present` call that produced each version: a
+ * reloaded transcript carries no `details` (they are not in `ChatMessage`), so
+ * the card's metadata can only come from there. Absent → the rows stay plain,
+ * exactly as before; the MAP ITSELF is the App's `ArtifactJoin` ref, so what it
+ * learns here is still there for the next history replace (S6a review finding 2).
  */
-export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[] {
+/** The card map a history rebuild joins through (`ArtifactJoin.byCall`). */
+export type ArtifactCardMap = ReadonlyMap<string, ArtifactMeta>;
+
+export function messagesToItems(
+  messages: readonly ChatMessage[],
+  artifactsByCall?: ReadonlyMap<string, ArtifactMeta>,
+): DisplayItem[] {
+  return itemsOf(messages, artifactsByCall);
+}
+
+function itemsOf(
+  messages: readonly ChatMessage[],
+  artifactsByCall?: ReadonlyMap<string, ArtifactMeta>,
+): DisplayItem[] {
   const items: DisplayItem[] = [];
   const toolAt = new Map<string, number>(); // toolCallId → index in `items`
 
@@ -103,5 +125,5 @@ export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[]
       }
     }
   }
-  return items;
+  return artifactsByCall === undefined ? items : [...joinKnownArtifacts(items, artifactsByCall)];
 }

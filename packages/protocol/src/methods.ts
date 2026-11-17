@@ -5,6 +5,12 @@
  * place keeps client and daemon provably in sync.
  */
 import type { z } from "zod";
+import {
+  ArtifactListParamsSchema,
+  ArtifactListResultSchema,
+  ArtifactReadParamsSchema,
+  ArtifactReadResultSchema,
+} from "./artifact.ts";
 import { AttachmentPutParamsSchema, AttachmentPutResultSchema } from "./attachment-upload.ts";
 import {
   DaemonDiscoverParamsSchema,
@@ -173,6 +179,14 @@ export const Method = {
   /** Client → daemon: one chunk of an image's bytes into the session's store (docs/feat/attachments-upload.md). */
   AttachmentPut: "attachment/put",
   /**
+   * The artifacts the model PRESENTED in this session — every version, oldest
+   * first (docs/feat/model-artifacts.md). An older daemon answers
+   * `MethodNotFound`, which the client shows as "needs a newer tentacle".
+   */
+  ArtifactList: "artifact/list",
+  /** One chunk of an artifact version's bytes, content-addressed by `sha256`. */
+  ArtifactRead: "artifact/read",
+  /**
    * A NEW device proves a one-time pairing code inside the secure channel
    * (docs/feat/device-pairing.md 9c). Reachable only on a pairing connection.
    */
@@ -301,6 +315,8 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: AttachmentPutParamsSchema,
     result: AttachmentPutResultSchema,
   },
+  [Method.ArtifactList]: { params: ArtifactListParamsSchema, result: ArtifactListResultSchema },
+  [Method.ArtifactRead]: { params: ArtifactReadParamsSchema, result: ArtifactReadResultSchema },
   [Method.DevicePair]: { params: DevicePairParamsSchema, result: DevicePairResultSchema },
   [Method.DevicePushRegister]: {
     params: DevicePushRegisterParamsSchema,

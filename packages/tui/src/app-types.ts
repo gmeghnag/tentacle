@@ -6,8 +6,13 @@
  */
 import type { Agent } from "@tentacle/agent";
 import type { AttachmentRef, JobController, PermissionBroker } from "@tentacle/core";
-import type { JobOutputResult, JobRow } from "@tentacle/protocol";
-import type { DocumentContent } from "@tentacle/protocol";
+import type {
+  ArtifactListResult,
+  ArtifactMeta,
+  DocumentContent,
+  JobOutputResult,
+  JobRow,
+} from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
@@ -16,6 +21,7 @@ import type { ChartGlyphs } from "./chart-lines.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
+import type { ArtifactOpener } from "./os-open.ts";
 import type { DocumentMode } from "./pdf-attach.ts";
 import type { AutoAcceptFeed, AutoAcceptSharedFeed } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedMessage, ReturnedCause } from "./queued.ts";
@@ -48,6 +54,16 @@ export type { RunQuit } from "./useQuitClear.ts";
 export interface SettingsNoticeLine {
   readonly text: string;
   readonly hint?: string;
+}
+
+/**
+ * How an artifact read is driven (structurally the client's
+ * `ArtifactReadOptions`): `signal` stops issuing chunks, `onProgress` reports
+ * `(have, size)` against the META's own size.
+ */
+export interface ArtifactOpenOptions {
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (have: number, size: number) => void;
 }
 
 export interface SessionController {
@@ -182,6 +198,20 @@ export interface SessionController {
    * answer. Rejects on a refusal.
    */
   setCapability?(kind: CapKind, name: string, enabled: boolean): Promise<unknown>;
+  /**
+   * The artifacts the model presented in this session
+   * (docs/feat/model-artifacts.md D6/D8), as the daemon's `artifact/list`
+   * answered — `truncated` passed on, never dropped. Optional: absent on an
+   * older daemon AND on a session whose runtime has no artifact store, and the
+   * `/artifacts` panel says so instead of opening empty.
+   */
+  listArtifacts?(): Promise<ArtifactListResult>;
+  /**
+   * One artifact version's bytes, verified against `meta` (every chunk's length,
+   * the answer's `size`, and the whole's sha256) — docs/feat/model-artifacts.md
+   * D6. The opener (S6b) reads through THIS; absent with `listArtifacts` above.
+   */
+  readArtifact?(meta: ArtifactMeta, options?: ArtifactOpenOptions): Promise<Uint8Array>;
   /**
    * The session is open daemon-side (a fresh or resumed one opens at its first
    * message): no switches yet means "not started", not "not supported".
@@ -588,6 +618,15 @@ export interface AppProps {
    */
   readonly localCwd?: string;
   readonly saveFile?: (path: string, content: string) => Promise<void>;
+  /**
+   * The OS side of opening an artifact (docs/feat/model-artifacts.md D8, S6b):
+   * write the planned temp file and spawn the OS opener, or save a copy to
+   * `~/Downloads`. The DECISION (name, CSP wrap, a pod's confirm) is
+   * `artifact-open.ts`'s and the bytes come from `readArtifact` (verified); this
+   * port only executes. `startTui` passes `createArtifactOpener()`. Absent → the
+   * App says opening is not available here, and nothing is read or opened.
+   */
+  readonly artifactOpener?: ArtifactOpener;
   /** Transcript to seed on start (a resumed session); replaces the welcome line. */
   readonly initialItems?: readonly DisplayItem[];
   /**

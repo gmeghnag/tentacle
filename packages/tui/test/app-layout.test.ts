@@ -83,6 +83,7 @@ const base = (over: Partial<FrameInput> = {}): FrameInput => ({
   jobOutput: {},
   dockFinished: null,
   quitConfirm: null,
+  artifactConfirm: null,
   panel: null,
   sessionId: "s-1",
   field: { value: "", cursor: 0 },
@@ -165,6 +166,24 @@ describe("S10 app-layout: the frame's geometry, as the inline code computed it",
     const quitting = frameLayout(base({ quitConfirm: { running: 0, others: 0 } as never }));
     expect(quitting.activeRows).toBe(3); // QUIT_CONFIRM_ROWS (the dialog's rule+rows)
     expect(quitting.dockTop).toBe(null);
+  });
+
+  test("the artifact open confirm owns the same slot (model-artifacts S6b)", () => {
+    const ROW = { id: "sa-1", agentType: "explore", description: "d", state: "running" };
+    const withList = {
+      dock: {
+        ...IDLE_DOCK,
+        focus: { kind: "list", selected: "sa-1", armed: false, typing: false },
+      } as DockState,
+      subagents: [ROW] as never,
+      subagentsRef: { current: [ROW] as never },
+    };
+    // Non-vacuity: the same focused dock DOES paint while nothing asks.
+    expect(frameLayout(base(withList)).dockTop).not.toBe(null);
+    const asking = frameLayout(base({ ...withList, artifactConfirm: { text: "Open? (y/N)" } }));
+    expect(asking.activeRows).toBe(3);
+    expect(asking.dockTop).toBe(null);
+    expect(asking.dockView).toBe(null);
   });
 
   // The palette only opens while idle, on "/"-prefixed text, and it closes on an

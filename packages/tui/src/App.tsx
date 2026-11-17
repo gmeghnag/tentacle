@@ -6,10 +6,26 @@ import {
   initialWake,
   wakeStep,
 } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 import { useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { AppView } from "./AppView.tsx";
 import { frameLayout } from "./app-layout.ts";
+import {
+  type ArtifactJoin,
+  checkArtifacts,
+  forgetArtifacts,
+  newArtifactJoin,
+} from "./artifact-join.ts";
+import {
+  type ArtifactConfirm,
+  type ArtifactStep,
+  NO_ARTIFACT_IN_TRANSCRIPT,
+  artifactOpenError,
+  artifactStep,
+  newestArtifact,
+} from "./artifact-open.ts";
+import { NO_ARTIFACT_OPENER, joinKnownArtifacts } from "./artifacts-panel.ts";
 import { type AttachDraft, EMPTY_DRAFT, removeLastChip, uploadDone } from "./attach-draft.ts";
 import { type AttachedImage, type FileProbe, nodeFileProbe } from "./attach-files.ts";
 import {
@@ -212,6 +228,7 @@ export function App({
   home = defaultHome(),
   localCwd = defaultLocalCwd(),
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
+  artifactOpener,
   initialItems,
   initialPrompt,
   daemonInPod = false,
@@ -400,6 +417,20 @@ export function App({
     quitConfirmRef.current = facts;
     setQuitConfirmState(facts);
   }, []);
+  // The artifact open confirm (docs/feat/model-artifacts.md D8: a pod's bytes,
+  // or a page with the network): the line and what `y` opens, or null. The ref
+  // is the truth for the key handler; the state renders. Never remembered.
+  const [artifactConfirm, setArtifactConfirmState] = useState<ArtifactConfirm | null>(null);
+  const artifactConfirmRef = useRef<ArtifactConfirm | null>(null);
+  const setArtifactConfirm = useCallback((next: ArtifactConfirm | null) => {
+    artifactConfirmRef.current = next;
+    setArtifactConfirmState(next);
+  }, []);
+  // What this TUI has learned of the followed session's artifacts, by `present`
+  // call. It must outlive a transcript rebuild (S6a review finding 2: a resync
+  // or a `/sessions` swap rebuilds rows from `ChatMessage`s, which carry no
+  // card), so it is a ref, not a prop of the one frame that fetched it.
+  const artifactJoinRef = useRef<ArtifactJoin>(newArtifactJoin());
   // The controller of the FOREIGN turn being streamed (another device's), or
   // null: `/exit` leaves it running (docs/feat/tui-foreign-turns.md C4).
   const foreignRef = useRef<AbortController | null>(null);
@@ -616,6 +647,44 @@ export function App({
 
   // --- throttled rendering -------------------------------------------------
   const { scheduleFlush, flushNow } = usePaintScheduler(FRAME_MS);
+
+  /**
+   * A history that just landed, with the cards this TUI already knows attached
+   * (S6a review finding 2). Every path that rebuilds rows from `ChatMessage`s —
+   * a resync's `history_reset`, a `history` replace, a `/sessions` swap — runs
+   * it, so a resumed session's cards survive the rebuild instead of going plain
+   * (and `Ctrl+X Ctrl+O` finding nothing). The decision and the request are
+   * `artifact-join.ts`'s; this is the App's half: which session, which ref, and
+   * a repaint once an answer arrives.
+   */
+  const joinCards = useCallback(
+    (state: DisplayState): DisplayState => {
+      const session = sessionRef.current;
+      const items = checkArtifacts(artifactJoinRef.current, state.items, session, () => {
+        if (sessionRef.current !== session) {
+          return;
+        }
+        // The answer has just been folded into the join's map: attach it to the
+        // rows on screen NOW (they are the ones the request was made for).
+        const learned = joinKnownArtifacts(stateRef.current.items, artifactJoinRef.current.byCall);
+        if (learned !== stateRef.current.items) {
+          stateRef.current = { ...stateRef.current, items: [...learned] };
+        }
+        flushNow();
+      });
+      return items === state.items ? state : { ...state, items: [...items] };
+    },
+    [flushNow],
+  );
+
+  /**
+   * A session SWAP: the artifacts learned for the old session must not attach
+   * cards in the new one (a `callId` can repeat), so the store is emptied —
+   * `joinCards` then asks the new session's own list (S6a review finding 2).
+   */
+  const forgetJoinedArtifacts = useCallback(() => {
+    forgetArtifacts(artifactJoinRef.current);
+  }, []);
   const linkView = useLinkIndicator(link);
 
   // `wakeIfPending`, through a ref: the exit handler below is declared first.
@@ -857,6 +926,7 @@ export function App({
     jobOutput: jobOutputRef.current,
     dockFinished: dockFinishedRef.current,
     quitConfirm,
+    artifactConfirm,
     panel,
     sessionId: sessionRef.current?.sessionId ?? null,
     capsPhase: sessionCapsPhase(sessionRef.current, caps),
@@ -1390,6 +1460,7 @@ export function App({
       restoreDocuments,
       model,
       skillsSync,
+      joinCards,
       askContext,
       wakeIfPending,
       exit,
@@ -1451,6 +1522,8 @@ export function App({
     onActivityRef,
     watchReturned,
     flushNow,
+    forgetArtifacts: forgetJoinedArtifacts,
+    joinCards,
     pushNotice,
     restoreInput,
     setCompacting,
@@ -1481,6 +1554,30 @@ export function App({
   useEffect(() => {
     watchSession(sessionRef.current);
     watchedRef.current = true;
+    // The session's artifacts, ONCE per watched session (docs/feat/model-artifacts.md
+    // D8): a resumed transcript holds no card metadata (it is not in a
+    // `ChatMessage`), so the daemon's list supplies it and the rows join on
+    // `callId`. Asked ONLY when a `present` row is still waiting for its card,
+    // so a fresh or card-less session says nothing on the wire. A failure (an
+    // older daemon: `ArtifactsUnsupportedError`) leaves the transcript exactly
+    // as it was — no notice, nothing invented.
+    // `checkArtifacts` is the SAME join every later history replace runs
+    // (S6a review finding 2), and it remembers what it learns in
+    // `artifactJoinRef`: a rebuild from `ChatMessage`s can attach the cards again.
+    const watched = sessionRef.current;
+    const joined = checkArtifacts(artifactJoinRef.current, stateRef.current.items, watched, () => {
+      if (sessionRef.current !== watched) {
+        return;
+      }
+      const learned = joinKnownArtifacts(stateRef.current.items, artifactJoinRef.current.byCall);
+      if (learned !== stateRef.current.items) {
+        stateRef.current = { ...stateRef.current, items: [...learned] };
+      }
+      flushNow();
+    });
+    if (joined !== stateRef.current.items) {
+      stateRef.current = { ...stateRef.current, items: [...joined] };
+    }
     return () => {
       activitySubRef.current?.();
       activitySubRef.current = null;
@@ -1497,7 +1594,7 @@ export function App({
       capsSubRef.current?.();
       capsSubRef.current = null;
     };
-  }, [watchSession]);
+  }, [watchSession, flushNow]);
 
   // --- quit and clear (S8) --------------------------------------------------
   // The three executors live in `useQuitClear.ts`. The hook owns no state and no
@@ -1733,6 +1830,40 @@ export function App({
     return () => clearPasteTimeout();
   }, [clearPasteTimeout]);
 
+  /**
+   * Carry out one artifact decision (`artifactStep`, pure — docs/feat/model-artifacts.md
+   * D8): a notice, the confirm line, or a verified read handed to the runtime's
+   * OS opener. The origin is the RUNTIME's (`shownInPod`), never the meta's. No
+   * byte is read before the decision says go: a pod's confirm reads only on `y`.
+   */
+  const runArtifact = (artifact: ArtifactMeta, step: ArtifactStep): void => {
+    if (step.kind === "notice") {
+      pushNotice(step.text);
+      return;
+    }
+    if (step.kind === "confirm") {
+      setArtifactConfirm({ text: step.text, meta: artifact, plan: step.plan });
+      return;
+    }
+    const session = sessionRef.current;
+    if (artifactOpener === undefined || session?.readArtifact === undefined) {
+      pushNotice(NO_ARTIFACT_OPENER);
+      return;
+    }
+    const opener = artifactOpener;
+    void session
+      .readArtifact(artifact)
+      .then((bytes) =>
+        step.kind === "open"
+          ? opener.open(step.plan, bytes)
+          : opener
+              .save({ name: step.name, wrap: step.wrap }, bytes)
+              .then((path) => pushNotice(`Saved "${artifact.title}" to ${path}`)),
+      )
+      .catch((error: unknown) => pushNotice(artifactOpenError(artifact, error)));
+  };
+  const artifactOrigin = shownInPod ? "pod" : "local";
+
   // --- the key router's executor port (S3) ---------------------------------
   // The ONE place a routing decision becomes a call into the App. Every field is
   // an existing stable callback (the App's own `useCallback`s) or a decision
@@ -1824,6 +1955,27 @@ export function App({
       });
     },
     setSessionsState,
+    // `/artifacts`' Enter / `s` / `n`: the panel already decided WHICH version
+    // (`artifactAt`); `artifactStep` decides what happens to it. Absent seam
+    // (no opener or no read) says so, never a silent swallow.
+    openArtifact: (artifact, intent) =>
+      runArtifact(artifact, artifactStep(artifact, artifactOrigin, intent ?? "open")),
+    openNewestArtifact: () => {
+      const newest = newestArtifact(stateRef.current.items);
+      if (newest === undefined) {
+        pushNotice(NO_ARTIFACT_IN_TRANSCRIPT);
+        return;
+      }
+      runArtifact(newest, artifactStep(newest, artifactOrigin, "open"));
+    },
+    // `y` opens exactly what the line asked about, once; anything else drops it.
+    answerArtifactConfirm: (yes) => {
+      const asked = artifactConfirmRef.current;
+      setArtifactConfirm(null);
+      if (yes && asked !== null) {
+        runArtifact(asked.meta, { kind: "open", plan: asked.plan });
+      }
+    },
     setSchedulesState,
     switchTo,
     sessionsDelete,
@@ -1905,6 +2057,7 @@ export function App({
         char,
         key,
         quitConfirm: () => quitConfirmRef.current,
+        artifactConfirm: () => artifactConfirmRef.current,
         dock: () => dockRef.current,
         chord: () => chordRef.current,
         running: () => stateRef.current.running,
@@ -2019,6 +2172,7 @@ export function App({
         expandAll,
         selection,
         quitConfirm,
+        artifactConfirm,
         hopRow,
         loading,
         compacting,

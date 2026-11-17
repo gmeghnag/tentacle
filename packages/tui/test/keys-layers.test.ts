@@ -39,6 +39,7 @@ function snap(over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}
     char,
     key: { ...NO_KEY, ...key },
     quitConfirm: () => null,
+    artifactConfirm: () => null,
     dock: () => IDLE_DOCK as never,
     chord: () => ({ armedAt: null }),
     running: () => false,
@@ -79,6 +80,66 @@ function snap(over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}
 const route = (s: KeySnapshot) => routeKey(s, PURE_LAYERS);
 const kinds = (s: KeySnapshot) => route(s).effects.map((e) => e.kind);
 
+describe("artifact-confirm (model-artifacts S6b: the pod / network open)", () => {
+  const confirm = () => ({ text: "Open? (y/N)" });
+
+  test("a plain `y` answers yes, and nothing below sees the key", () => {
+    const r = route(snap({ artifactConfirm: confirm }, "y"));
+    expect(r.stoppedAt).toBe("artifactConfirm");
+    expect(r.effects).toEqual([{ kind: "answerArtifactConfirm", yes: true }]);
+  });
+
+  test("anything else — Enter, `n`, Ctrl+Y, Esc — is No", () => {
+    for (const [char, key] of [
+      ["", { return: true }],
+      ["n", {}],
+      ["y", { ctrl: true }],
+      ["", { escape: true }],
+    ] as const) {
+      expect(route(snap({ artifactConfirm: confirm }, char, key)).effects).toEqual([
+        { kind: "answerArtifactConfirm", yes: false },
+      ]);
+    }
+  });
+
+  test("it answers BEFORE a permission prompt: its `y` can never approve an ask", () => {
+    const r = route(
+      snap(
+        {
+          artifactConfirm: confirm,
+          permission: {
+            pending: { tool: "shell" } as never,
+            choices: [],
+            selected: 0,
+            mode: () => ({ mode: "menu" }),
+            shownAt: () => 0,
+          },
+        },
+        "y",
+      ),
+    );
+    expect(r.stoppedAt).toBe("artifactConfirm");
+    expect(r.effects).toEqual([{ kind: "answerArtifactConfirm", yes: true }]);
+  });
+
+  test("the quit dialog still comes first", () => {
+    const r = route(
+      snap(
+        {
+          artifactConfirm: confirm,
+          quitConfirm: () => ({ others: 0, agents: 0, jobs: 0, names: [] }),
+        },
+        "y",
+      ),
+    );
+    expect(r.stoppedAt).toBe("quitConfirm");
+  });
+
+  test("closed: the layer passes", () => {
+    expect(route(snap({}, "y")).stoppedAt).not.toBe("artifactConfirm");
+  });
+});
+
 describe("quit-confirm", () => {
   test("`y` closes, and closes for all when the dialog spoke for others", () => {
     const r = route(
@@ -113,6 +174,12 @@ describe("the chord", () => {
     const r = route(snap({ chord: () => ({ armedAt: Date.now() }) }, "s", { ctrl: true }));
     expect(r.stoppedAt).toBe("chord");
     expect(r.effects.map((e) => e.kind)).toEqual(["setChord", "sendNow"]);
+  });
+
+  test("ctrl+x then ctrl+o opens the newest artifact (model-artifacts S6b)", () => {
+    const r = route(snap({ chord: () => ({ armedAt: Date.now() }) }, "o", { ctrl: true }));
+    expect(r.stoppedAt).toBe("chord");
+    expect(r.effects.map((e) => e.kind)).toEqual(["setChord", "openNewestArtifact"]);
   });
 
   test("ctrl+x alone arms and is swallowed", () => {

@@ -196,6 +196,15 @@ export function editTarget(prompt: string): string | null {
  */
 export const AGENTS_PROMPT = "AGENTS27";
 export const SHELLJOB_PROMPT = "SHELLJOB27";
+/**
+ * Flow 30 (T8.1): `present` the escape fixture as artifact id `escape`, so the
+ * card is addressable as `artifact-card-escape`. The bytes are a WORKSPACE file
+ * (`present`'s `path`), which the harness writes with `__PROBE__` substituted for
+ * its own probe listener — the fixture itself stays a fixture.
+ */
+export const ESCAPE_PROMPT = "ESCAPE30";
+/** The artifact id the escape fixture is presented under (the flow's card id). */
+export const ESCAPE_ARTIFACT_ID = "escape";
 /** Flow 31 (docs/feat/model-charts.md T6): the model calls `chart` with `CHART_SPEC`. */
 export const CHART_PROMPT = "CHART31";
 export const CHART_SPEC = {
@@ -355,6 +364,19 @@ function stream(
           send(frame({ content: `Child report: ${steps} steps done.` }));
           send(frame({}, "stop"));
         }
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      if (!followUp && promptLine(prompt, ESCAPE_PROMPT)) {
+        for (const chunk of toolCallFrames(0, mint(), "present", {
+          title: "escape probes",
+          path: `${ESCAPE_ARTIFACT_ID}.html`,
+          id: ESCAPE_ARTIFACT_ID,
+        })) {
+          send(chunk);
+        }
+        send(frame({}, "tool_calls"));
         send(DONE_FRAME);
         controller.close();
         return;

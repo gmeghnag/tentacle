@@ -187,6 +187,7 @@ describe("`SessionInfoSheet` renders the wakes band, and measures every single b
         onDeleteSchedule: (id: string) => {
           deleted.push(id);
         },
+        onOpenArtifacts: () => {},
         ...(onLayout === undefined ? {} : { onSectionLayout: onLayout }),
       }),
     );
@@ -310,6 +311,7 @@ describe("`SessionInfoSheet` renders the wakes band, and measures every single b
         expanded: null,
         onExpand: () => {},
         onDeleteSchedule: () => {},
+        onOpenArtifacts: () => {},
         scrollRef: onRef,
       }),
     );

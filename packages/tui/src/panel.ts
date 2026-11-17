@@ -23,10 +23,12 @@ import type { PanelView, TreeAction } from "./tree-panel.ts";
 // and importing them from here would be a value cycle). Re-exported so every
 // pre-S7 import of `panel.ts` keeps working.
 export {
+  type ArtifactsPanel,
   type OpenPanel,
   type SchedulesPanel,
   type SessionsPanel,
   type TreePanel,
+  artifactsPanel,
   mcpPanel,
   schedulesPanel,
   sessionsPanel,
