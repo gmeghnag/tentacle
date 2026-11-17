@@ -235,4 +235,104 @@ above is the red evidence for the render ones).
 
 ## Execution
 
+### 1. Load-bearing check — PASS
+
+Re-ran the Context **Repro** verbatim on this branch (`main` 6f154644 +
+plan/orchestrator commits; `.tentacle/tmp/scheduled-fire-row/repro.ts`,
+`bun run repro.ts`), output unchanged from the doc:
+
+```
+text        : [scheduled sc-1 · at 2026-11-17T15:54 · fire 1] saluta l'utente
+tui  live   : "◷ scheduled · sc-1 at 2026-11-17T15:54 · fire 1" + body "[scheduled sc-1 · at …] …"
+tui  reload : "" + body "[scheduled sc-1 · at …] saluta l'utente"
+phone live  : "◷ Scheduled · at 2026-11-17T15:54" + body "[scheduled sc-1 · at …] saluta l'utente"
+phone reload: "" + body "[scheduled sc-1 · at …] saluta l'utente"
+```
+
+So the capability is genuinely missing: bracket in every body, raw ISO, live ≠
+reload, TUI ≠ phone. And the Implementation's load-bearing assumption is
+**verified against the code**: the fired turn's only text part is exactly
+`schedulePromptText` (`daemon/src/hosted-session.ts:3427`), and that same text is
+the persisted user `ChatMessage` (`core/src/schedule.ts:476-478`) that both
+reload paths project (`tui/src/resume.ts:74` via `messagesToItems`;
+`apps/mobile/src/transcript-history.ts:82` via `historyRows`). One pure parser is
+indeed a sufficient, durable source — **for the bracket, the spec and the fire
+ordinal**.
+
+### 2. BLOCKED on the binding revision's fire time — owner decision needed
+
+The revision requires the row to be
+`◷ Wake <fire time> · <prompt one line…>` where `<fire time>` is **the instant
+the wake fired**, "for `at` AND for every fire of an `every` wake", identical
+live / after reload / on the Mac (and the earlier owner decision of 2026-11-17
+adds: "source that time from data the log already carries for the fired turn …
+never from parsing the model text; if no such field exists, say so in the plan
+and propose the smallest addition").
+
+**No such field exists on any client path.** Verified:
+
+- The wire ref carries no instant — only `{id, spec}`
+  (`protocol/src/updates.ts:274`), and it is live-only anyway (absent on reload
+  by construction, which is the plan's whole starting point).
+- The spec string carries no clock for `every`: it is literally `every 10m`
+  (`core/src/schedule.ts:77-96`; `spec` is the model's request). For `at` the
+  spec does carry one (`at 2026-11-17T15:54`), so `at` alone is satisfiable by
+  reformatting — which is all the approved Implementation's `scheduleSpecText`
+  does.
+- The snapshot's `times` (`protocol/src/session.ts:915`) is the closest thing,
+  but (a) a log `base` zeroes every one of them — `this.times =
+  messages.map(() => 0)` at `daemon/src/session-log.ts:371-374`, i.e. exactly the
+  reload/resume/restart path — and (b) the TUI has no per-item time at all
+  (`tui/src/state.ts:32-59`, `UserItem` has `text`/`images`/`documents`/
+  `restart`/`schedule` and nothing temporal), so phone/Mac parity is impossible
+  from it even when the values are real.
+- The log entry envelope's `ts` **is** the arrival instant, but the laptop's
+  reader keeps only `{inc, head, messages, digests}` (`client/src/session-log-reader.ts:198`),
+  and a resumed `SessionRecord` has no per-message times
+  (`agent/src/session-store.ts:15-37`). The datum is written and then dropped.
+
+Consequently `Wake 15:54` renders for an `every` wake **live only** — it would
+again be live ≠ reload, the exact defect this task exists to kill. I did not
+implement a head I know to be wrong, and did not reach for a value outside the
+approved Implementation.
+
+**Smallest addition that satisfies the revision (proposal, NOT implemented):**
+one FAIL-SOFT display-only field on the user message, the `note`/`media`/
+`compacted` pattern (`protocol/src/session.ts:95-141`):
+`scheduled?: { id, spec, fire, at }`, `.catch(undefined)`, set by the daemon in
+`fireSchedule` (`daemon/src/hosted-session.ts:3412-3437`) from the instant it
+actually fires. Being on `ChatMessage` it rides the CRITICAL `message` entry, so
+the log carries it and **every** reload path gets it — live = reload = phone =
+Mac by construction. Additive + optional on strip schemas, so no
+`PROTOCOL_VERSION` bump and no `protocol.d/` note; an older build drops the
+unknown field and keeps today's rendering (honest degradation). But it puts a
+new field on the **CRITICAL message entry** and on the on-disk format, which
+AGENTS §7 reserves to the owner — hence this stop rather than a unilateral edit.
+
+### 3. Nothing else was changed
+
+No production code, test or changelog fragment was written — every slice of the
+plan depends on the head's wording, so implementing against the superseded
+`Scheduled · at 15:54` / `· fire N` text would have built the wrong thing and
+cost a rewrite. No `changelog.d/` fragment: no user-visible change was made.
+Tree otherwise untouched (this doc excepted). Plan left as written — the
+contradiction is with available DATA, not with the code, so the fix is a plan
+(and protocol/format) decision, not an executor edit.
+
+**Per-slice status:** S1 core parser — BLOCKED (its `scheduleSpecText` is sound,
+but the view-model contract it feeds is undecided). S2 TUI view-model + render —
+BLOCKED. S3 phone view-model + row — BLOCKED. S4 tests/frames — BLOCKED.
+Changelog — BLOCKED. **Mutations:** none run (no code to mutate). **Gate:** no
+code changed, so `tsc`/`lint`/`test` remain at the untouched baseline; nothing
+introduced.
+
+**Decision needed (one line):** approve `ChatMessage.scheduled{id,spec,fire,at}`
+(FAIL-SOFT, daemon-set) as the durable fire instant — then this task proceeds as
+planned with `Wake <fire time>` on all three surfaces — **or** keep the plan's
+approved no-persistence design, in which case the revision must be narrowed to
+`at` wakes (fire time) + `every` wakes (`every 10m · fire N`), accepting that a
+recurring wake shows no clock.
+
+*— claude-opus-5-5, 2026-11-17 (executor; CLI settings model `opus`, exact build suffix not readable from the environment)*
+
 ## Review
