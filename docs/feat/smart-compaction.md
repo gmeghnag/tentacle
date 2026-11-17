@@ -1664,3 +1664,16 @@ flake S3 recorded did not recur).
 trigger on stored logs: the anchor is recomputed, and no corpus log has a `usage` entry, so the
 production magnitude — and now explicitly the *sign* of the anchor error — is settled only by S4's live
 A/B. Untested forwarding to sub-agents (S2's own gap) also stands.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17 · fresh context · scope: `git diff HEAD~1` (76b15a09, doc-only) · S3 only*
+
+**Verdict: PASS** (no HIGH, no MEDIUM).
+
+- **Finding 1 (cost model): fixed.** `replay.final.ts:82,91` now compares `wireOf` = `JSON.stringify(renderForModel(m))`, and the doc's verbatim copy has the same lines. `replay.contentonly.ts:88` keeps the old content-only compare as the red arm. I checked `prefixdiff.ts:59-62` by reading it: it counts the batches whose earliest fresh entry has unchanged `content`. That is exactly the case where a content-only prefix over-extends, because everything after the first change is billed at 1 either way. So "0 of 31 at the defaults, ≤ 0.1 pp elsewhere" is a sound method.
+- **Finding 2 ("conservative"): fixed.** No "conservative" claim is left in S3. The direction is stated as UNKNOWN, both reasons are given, and S4 is named as the step that settles it. `context-awareness.ts:129-131` is cited for the anchor.
+- **Nit: fixed.** The S3 Execution now sits under its own `## Execution` heading.
+- **Gate.** Prune tests: 50 pass / 0 fail. `bun run lint`: clean (1966 files). `bun run typecheck`: root and relay clean. The only errors are 4 pre-existing ones in `apps/mobile` (`react-native-webview` is not installed in this worktree), and the diff touches no code.
+- **Not re-run by me.** Running `bun <script>` needs a permission this session does not have, so `bill.redgreen.ts`, the re-measured sweep cells and `replay-mutate.ts` were checked by reading the code, not by running it.
+- **Nits.** `prefixdiff.ts:1-25` is dead scaffolding. The doc now has two `## Execution` and three `## Review` headings in interleaved order, so it is hard to follow but nothing is lost.
