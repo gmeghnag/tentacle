@@ -1097,3 +1097,20 @@ Two gate findings fixed on the way, both pre-existing on this branch, neither ca
 
 **Unverified:** the reviewer's LOW (`compactedTimerRef` pending up to 3 s after unmount) is left as
 is — out of scope for F1 and not a MEDIUM.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-17* (S3 fix round, `git diff HEAD~1` = 79c85762; same reviewer context and same model family as before)
+
+**Verdict: PASS** (S3).
+- F1 is fixed. `packages/tui/src/render-lines.ts:903-925` now subtracts the hint's width from the rule's fill. It drops the
+  hint when head + hint + 2 cells do not fit, and it budgets the hint while expanded too, so Ctrl+O does not re-flow
+  the rule. The new test in `compaction-resume.test.ts:80-114` checks the measured width of each wrapped row at widths
+  40, 60 and 100, and checks that exactly 2 non-empty rows remain.
+- Mutations (each red, then reverted; `git status` clean): (A) the old fill without the hint's width → 1 fail.
+  (B) the hint always budgeted, with no fit check → 1 fail (at width 40).
+- Regressions: `compaction-resume`, `compaction-slot-frame`, `clear-resume`, `foreign-turns`, `app`, `harness-render`,
+  `harness-block-frame` + `scripts` → 261 pass, 0 fail. The changelog split (`harness-notices-compaction.changed.md`
+  takes the S3 bullet) uses a valid slug and category, and the bullet is not duplicated. `bun run typecheck` is clean,
+  and `bun run lint` is clean (2018 files). I did not re-run the full suite.
+- LOW, carried over and not blocking: `compactedTimerRef` is not cleared on unmount.
