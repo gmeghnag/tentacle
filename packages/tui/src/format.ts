@@ -5,28 +5,8 @@
  * number; past 60 seconds a duration reads `1m 50s`.
  */
 
-function compact(n: number, unit: number, suffix: string): string {
-  const v = n / unit;
-  // One decimal while it stays under 10 once rounded (9.96k is "10k", not "10.0k").
-  // A whole value drops its ".0": 1000 → "1k".
-  const one = v.toFixed(1);
-  if (Number(one) < 10) {
-    return `${one.endsWith(".0") ? one.slice(0, -2) : one}${suffix}`;
-  }
-  return `${Math.round(v)}${suffix}`;
-}
-
-/** 999 → "999", 1000 → "1k", 1234 → "1.2k", 54000 → "54k", 1234567 → "1.2M". */
-export function formatTokens(n: number): string {
-  if (n < 1000) {
-    return String(n);
-  }
-  // 999,600 would round to "1000k": switch to M once k rounds to 1000.
-  if (Math.round(n / 1000) < 1000) {
-    return compact(n, 1000, "k");
-  }
-  return compact(n, 1_000_000, "M");
-}
+/** Moved to core (docs/feat/harness-notices.md S1: the compaction separator shares it with mobile). */
+export { formatTokens } from "@tentacle/core";
 
 /**
  * A character count, one decimal (owner, docs/feat/tui-spill-note.md Q3):

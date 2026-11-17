@@ -83,6 +83,21 @@ export interface ChatMessage {
    * the model's copy (`renderForModel`). Non-empty when present.
    */
   readonly media?: readonly MessageMedia[];
+  /**
+   * ONLY on the summary `user` message a compaction writes: the context size
+   * before and after it (docs/feat/harness-notices.md S1). Display only, like
+   * `spill`: the provider mappers copy field by field, so the model never sees
+   * it. Rides the critical `message` log entry fail-soft (a malformed value is
+   * dropped, the entry still loads), so every replay path draws the separator.
+   */
+  readonly compacted?: CompactionFact;
+}
+
+/** A compaction's context sizes, in tokens. `toExact` only when the provider counted. */
+export interface CompactionFact {
+  readonly fromTokens: number;
+  readonly toTokens: number;
+  readonly toExact?: true;
 }
 
 /** One attached file on a user message (the wire's `MessageMediaSchema`; `kind` is a free string). */
