@@ -1016,3 +1016,15 @@ LOW, not blocking: `compactedTimerRef` is not cleared on unmount, so a timer can
 **Executor behaviour:** the drift is well documented and the widened assertions are honest. One caveat on the
 "load-bearing check": an `.tentacle/tmp` script that uses `../../../packages/…` resolves to the MAIN checkout, not this
 worktree. My first repro hit exactly that. So the executor's pre-S3 capability check may have read `main`'s sources.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* (S3 round 2, `git diff HEAD~1`; same reviewer context and same model family as round 1)
+
+**Verdict: REQUEST-CHANGES** (S3). No fix has landed.
+- `git diff HEAD~1` (66eacab3) touches only this doc: it commits the round-1 Review and nothing in `packages/`.
+  The working tree is clean.
+- F1 is still open: `packages/tui/src/render-lines.ts:902-915` has not changed. `.tentacle/tmp/harness-notices/rev-s3-wrap.ts`
+  still draws the collapsed rule full-width, with `" ctrl+o to expand"` wrapped onto a second row (width 100).
+  There is no fix to mutate, and no width assertion was added to `compaction-resume.test.ts`.
+- Gate: `bun run typecheck` is clean and `bun run lint` is clean (2018 files). There is no code diff, so there is nothing to regress.
