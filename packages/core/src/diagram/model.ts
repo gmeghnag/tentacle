@@ -15,7 +15,14 @@
  */
 
 /** The box a node is drawn in. The model keeps it; the client chooses glyphs. */
-export type NodeShape = "rect" | "round" | "stadium" | "decision" | "cylinder" | "circle";
+export type NodeShape =
+  | "rect"
+  | "round"
+  | "stadium"
+  | "decision"
+  | "cylinder"
+  | "circle"
+  | "subroutine";
 
 /** One node of a flowchart, or one participant of a sequence diagram. */
 export interface DiagramNode {
@@ -101,6 +108,7 @@ export type DiagramModel = FlowModel | SequenceModel | OtherModel;
 
 /** Shape openers, longest first, so `([` never reads as `(`. */
 const SHAPES: readonly { opener: string; closer: string; shape: NodeShape }[] = [
+  { opener: "[[", closer: "]]", shape: "subroutine" },
   { opener: "([", closer: "])", shape: "stadium" },
   { opener: "[(", closer: ")]", shape: "cylinder" },
   { opener: "((", closer: "))", shape: "circle" },
@@ -117,6 +125,50 @@ function unquote(label: string): string {
   const trimmed = label.trim();
   const quoted = /^"(.*)"$/s.exec(trimmed);
   return quoted?.[1] === undefined ? trimmed : quoted[1];
+}
+
+/**
+ * A `subgraph`'s title: `Title`, `id [Title]` or `id ["Title"]` (Mermaid's own
+ * three spellings; the id is not part of the title). An empty title is kept —
+ * `drawFrames` then draws an untitled frame.
+ */
+function subgraphTitle(rest: string): string {
+  const text = rest.trim();
+  // `id [Title]` / `id ["Title"]`: the id is a word before the bracket.
+  const bracketed = /^[A-Za-z_][\w-]*\s*(\[[\s\S]*\])$/.exec(text);
+  const inner = bracketed?.[1] === undefined ? text : (bracketed[1] as string);
+  const shape = SHAPES.find((candidate) => inner.startsWith(candidate.opener));
+  if (shape !== undefined) {
+    const label = labelOf(inner, shape.opener, shape.closer);
+    if (
+      label !== null &&
+      inner.slice(shape.opener.length + label.length + shape.closer.length).trim() === ""
+    ) {
+      return multiline(unquote(label));
+    }
+  }
+  return multiline(unquote(text));
+}
+
+/**
+ * A label's line breaks: Mermaid's `<br/>` (also `<br>`, `<br />`), all one
+ * break. A label's own lines are drawn on separate rows (D8); a one-line place
+ * (an edge label) turns the break into a space.
+ */
+const BR = /<br\s*\/?>/gi;
+
+/** A multi-line label (a box's or a subgraph's title): `<br/>` → `\n`. */
+function multiline(label: string): string {
+  return label
+    .replace(BR, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .join("\n");
+}
+
+/** A one-line label (an edge's): `<br/>` → one space. */
+function oneline(label: string): string {
+  return label.replace(BR, " ").replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -160,7 +212,7 @@ function nodeOf(chunk: string): DiagramNode | null {
   if (rest.slice(shape.opener.length + inner.length + shape.closer.length).trim() !== "") {
     return null;
   }
-  return { id, label: unquote(inner), shape: shape.shape };
+  return { id, label: multiline(unquote(inner)), shape: shape.shape };
 }
 
 /**
@@ -203,7 +255,7 @@ function linkOf(operator: string): { style: EdgeStyle; arrow: boolean; label?: s
   const inline = /^--\s*([^-|\n][^-|\n]*?)\s*-->$/.exec(operator);
   const label = unquote(piped?.[1] ?? inline?.[1] ?? "");
   const arrow = operator.includes(">");
-  return { style, arrow, ...(label === "" ? {} : { label }) };
+  return { style, arrow, ...(oneline(label) === "" ? {} : { label: oneline(label) }) };
 }
 
 /** A statement that says nothing about the drawing (a directive, a style). */
@@ -294,7 +346,10 @@ function flowOf(lines: readonly string[]): FlowModel | null {
       const text = statement.trim();
       if (text === "" || isIgnoredFlowStatement(text)) continue;
       if (/^subgraph\b/.test(text)) {
-        const frame = { title: unquote(text.replace(/^subgraph\s*/, "")), nodes: [] as string[] };
+        const frame = {
+          title: subgraphTitle(text.replace(/^subgraph\s*/, "")),
+          nodes: [] as string[],
+        };
         subgraphs.push(frame);
         open.push(frame);
         continue;

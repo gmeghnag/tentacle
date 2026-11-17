@@ -14,9 +14,25 @@ import type { ArtifactMeta, ScheduleRow } from "@tentacle/protocol";
 import { unseenArtifacts } from "./artifact-gallery.ts";
 import type { ArtifactSeen } from "./artifact-seen-store.ts";
 import { FLOAT_SIZE, type FloatBounds, type FloatPosition, place } from "./floating-button.ts";
-import type { HubContext, HubItem } from "./hub-actions.ts";
+import {
+  type HubActionId,
+  type HubContext,
+  type HubEntries,
+  type HubEntryId,
+  type HubItem,
+  type HubOpen,
+  resolveCommit,
+} from "./hub-actions.ts";
 import { type Point, fanLayout } from "./hub-fan.ts";
-import type { HubMenu } from "./hub-gesture.ts";
+import {
+  type GestureEffect,
+  type GestureEvent,
+  type GestureState,
+  type HubMenu,
+  IDLE,
+  LONG_MS,
+  reduce,
+} from "./hub-gesture.ts";
 import type { TurnRow } from "./transcript-rows.ts";
 
 /**
@@ -148,4 +164,151 @@ export function mustCancel(prev: HubWorld, next: HubWorld): boolean {
     prev.width !== next.width ||
     prev.height !== next.height
   );
+}
+
+/** What a released item (or a VoiceOver action) does, re-read against the world NOW. */
+export type HubCommitPlan =
+  | { readonly kind: "run"; readonly id: HubEntryId }
+  | { readonly kind: "more" }
+  | { readonly kind: "notice"; readonly text: string }
+  | { readonly kind: "none" };
+
+/**
+ * `resolveCommit` turned into what the screen does (Design 5): run the entry,
+ * open the overflow menu (M14), show why nothing happened (M7/M8), or nothing.
+ */
+export function commitPlan(
+  id: HubActionId,
+  ctx: HubContext,
+  entries: HubEntries,
+  open: HubOpen,
+): HubCommitPlan {
+  const verdict = resolveCommit(id, ctx, entries, open);
+  if (verdict.kind === "noop") {
+    return verdict.notice === null ? { kind: "none" } : { kind: "notice", text: verdict.notice };
+  }
+  return verdict.id === "more" ? { kind: "more" } : { kind: "run", id: verdict.id };
+}
+
+/** "Show all actions": VoiceOver's way to the plain menu (Design 7). */
+export const SHOW_ALL = "show-all";
+const ITEM_ACTION = "hub-";
+
+/**
+ * The button's accessibility actions (Design 7): the two standard ones (so
+ * `onAccessibilityAction` receives them), every hub action with no six cap, and
+ * "Show all actions". The fan never opens under VoiceOver.
+ */
+export function hubA11yActions(
+  all: readonly HubItem[],
+): readonly { readonly name: string; readonly label?: string }[] {
+  return [
+    { name: "activate" },
+    { name: "longpress" },
+    ...all.map((item) => ({ name: `${ITEM_ACTION}${item.id}`, label: item.label })),
+    { name: SHOW_ALL, label: "Show all actions" },
+  ];
+}
+
+const ENTRY_IDS: readonly string[] = [
+  "stop",
+  "steer",
+  "attach",
+  "activity",
+  "artifacts",
+  "sessions",
+  "info",
+  "scheduled",
+  "dictate",
+  "new",
+] satisfies readonly HubEntryId[];
+
+/** An accessibility action's name → what it does: activate = tap (Activity), long-press = the menu. */
+export function hubA11yRoute(
+  name: string,
+):
+  | { readonly kind: "tap" }
+  | { readonly kind: "menu" }
+  | { readonly kind: "commit"; readonly id: HubEntryId }
+  | { readonly kind: "none" } {
+  if (name === "activate") {
+    return { kind: "tap" };
+  }
+  if (name === "longpress" || name === SHOW_ALL) {
+    return { kind: "menu" };
+  }
+  const id = name.startsWith(ITEM_ACTION) ? name.slice(ITEM_ACTION.length) : "";
+  return ENTRY_IDS.includes(id) ? { kind: "commit", id: id as HubEntryId } : { kind: "none" };
+}
+
+/** The fan is up (finger down on it, or lifted in place): the back-swipe is off (M2). */
+export function isFanOpen(state: GestureState): boolean {
+  return state.kind === "fanTracking" || state.kind === "fanSticky";
+}
+
+export interface HubDriver {
+  down(p: Point, t: number): void;
+  move(p: Point, t: number): void;
+  up(p: Point, t: number): void;
+  /** The system took the touch (call, background, terminate) or the world changed (M6/M10/M15). */
+  cancel(): void;
+  tapOverlay(p: Point): void;
+  /** Unmount: the timer is cleared and an open fan is closed (its `close` still applies). */
+  dispose(): void;
+  state(): GestureState;
+}
+
+/**
+ * The machine (`hub-gesture.reduce`) with its ONE timer: armed on the down that
+ * starts a press, cleared on every way out of `pressing` (up, drag, cancel,
+ * dispose — M12/M13). A second finger's down is the reducer's to ignore (M16);
+ * it arms nothing. Clock and timers are injected, so this is tested with fakes.
+ */
+export function createHubDriver(deps: {
+  readonly solve: () => HubMenu;
+  readonly now: () => number;
+  readonly arm: (fire: () => void, ms: number) => unknown;
+  readonly disarm: (handle: unknown) => void;
+  readonly apply: (effects: readonly GestureEffect[]) => void;
+}): HubDriver {
+  let state: GestureState = IDLE;
+  let timer: { readonly handle: unknown } | null = null;
+  const clear = () => {
+    if (timer !== null) {
+      deps.disarm(timer.handle);
+      timer = null;
+    }
+  };
+  const feed = (event: GestureEvent) => {
+    const was = state.kind;
+    const step = reduce(state, event, deps.solve);
+    state = step.state;
+    if (state.kind !== "pressing") {
+      clear();
+    } else if (was === "idle") {
+      timer = {
+        handle: deps.arm(() => {
+          timer = null;
+          feed({ type: "timer", t: deps.now() });
+        }, LONG_MS),
+      };
+    }
+    if (step.effects.length > 0) {
+      deps.apply(step.effects);
+    }
+  };
+  return {
+    down: (p, t) => feed({ type: "down", p, t }),
+    move: (p, t) => feed({ type: "move", p, t }),
+    up: (p, t) => feed({ type: "up", p, t }),
+    cancel: () => feed({ type: "cancel" }),
+    tapOverlay: (p) => feed({ type: "tapOverlay", p }),
+    dispose: () => {
+      clear();
+      if (state.kind !== "idle") {
+        feed({ type: "cancel" });
+      }
+    },
+    state: () => state,
+  };
 }

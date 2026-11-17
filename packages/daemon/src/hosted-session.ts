@@ -93,6 +93,7 @@ import {
 import {
   type AttachmentRef,
   BLOCKING_UPDATE_TYPES,
+  type CompactResult,
   type HistoryCut,
   type JobOutputResult,
   type JobRow,
@@ -738,6 +739,13 @@ export class HostedSession {
    * for a reload.
    */
   private compactionSummary: ChatMessage | undefined;
+  /**
+   * The main agent's last measured prompt tokens (its `usage` events; a
+   * sub-agent's are `subagent_usage`, never here): a compaction's "before"
+   * (docs/feat/harness-notices.md S1). Dropped at every history replacement —
+   * it described a history that is gone. Memory only.
+   */
+  private lastPromptTokens: number | undefined;
   private readonly errorPolicy: TurnErrorPolicy;
   /**
    * A TRUST bit (docs/fix/serve-autoaccept-unattended.md D1): this daemon
@@ -3093,6 +3101,10 @@ export class HostedSession {
         // nothing, so it rides the next committed boundary's capture like any
         // other. No entry at all when the provider reported no usage.
         if (event.type === "usage") {
+          // Providers default a missing prompt count to 0: that is unmeasured,
+          // never a size (nor a reason to keep an older round's figure).
+          this.lastPromptTokens =
+            event.usage.promptTokens > 0 ? event.usage.promptTokens : undefined;
           const model = this.mainModelId();
           this.log.usage({
             turnId,
@@ -3693,7 +3705,7 @@ export class HostedSession {
    * with a turn, and `cancel` — or `signal` (the request's own cancel) — aborts
    * it: it then rejects `Cancelled` and leaves the history untouched.
    */
-  async compact(signal?: AbortSignal): Promise<{ before: number; after: number }> {
+  async compact(signal?: AbortSignal): Promise<CompactResult> {
     this.assertIdle();
     // Cancelled before it started: no slot, no model call.
     if (signal?.aborted) {
@@ -3707,13 +3719,22 @@ export class HostedSession {
     const onAbort = (): void => controller.abort();
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      const { before, after } = await this.session.compact(controller.signal, () =>
-        this.historyReplaced("compact"),
+      const { before, after, fromTokens, toTokens, toExact } = await this.session.compact(
+        controller.signal,
+        () => this.historyReplaced("compact"),
+        // The status bar's figure, when a turn measured one since the last replacement.
+        this.lastPromptTokens !== undefined ? { fromTokens: this.lastPromptTokens } : {},
       );
       // Only a compaction that replaced the history is a conversation change:
       // a failed or cancelled one left it as it was (the `finally` writes it).
       this.lastChangeAt = this.now();
-      return { before, after };
+      return {
+        before,
+        after,
+        ...(fromTokens !== undefined ? { fromTokens } : {}),
+        ...(toTokens !== undefined ? { toTokens } : {}),
+        ...(toExact ? { toExact: true } : {}),
+      };
     } catch (error) {
       // Providers throw anything on abort; give the client one clean code.
       if (controller.signal.aborted) {
@@ -3820,6 +3841,8 @@ export class HostedSession {
     // reset `[system, restart message, (skill call, result)*]`: their first
     // user message is the head this session installed.
     this.compactionSummary = this.session.messages.find((m) => m.role === "user");
+    // The measured prompt described the history just replaced.
+    this.lastPromptTokens = undefined;
     this.epochStart = this.seq + 1;
     this.cut = {
       epoch: crypto.randomUUID(),

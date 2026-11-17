@@ -2970,7 +2970,7 @@ export class RemoteClient {
   }
 
   /** Not re-sent after a drop (no idempotency key: a second compaction would summarise a summary). */
-  compact(sessionId: string): Promise<{ before: number; after: number }> {
+  compact(sessionId: string): Promise<CompactResult> {
     return this.sessionCall(sessionId, Method.Compact, { sessionId }, "once").then(
       (result) => result as CompactResult,
     );

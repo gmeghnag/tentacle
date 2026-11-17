@@ -199,11 +199,14 @@ export async function connectChartGlyphs(options: ConnectOptions): Promise<Chart
  * `connect`'s voice settings (docs/feat/voice-dictation.md, Review round 1 HIGH
  * 4). `connect` reads no model config, so — exactly like the palette — the voice
  * settings come from the config FILE, and a broken file must never block a
- * connection: those settings fall back to `VOICE_DEFAULTS` silently (the palette
- * call right beside this one already WARNED about the file).
+ * connection: those settings fall back to `VOICE_DEFAULTS` (docs/fix/
+ * tui-voice-off-despite-config, which is why that fallback is a NOTICE and not
+ * silence: it means OFF, so the person would otherwise see Ctrl+R answer "voice
+ * is off" with no clue that their file was unreadable).
  */
 export async function connectVoice(
   options: ConnectOptions,
+  write: (line: string) => void = () => {},
 ): Promise<{ readonly config: VoiceConfig; readonly configDir?: string }> {
   try {
     const file = await readFileConfig({
@@ -218,7 +221,10 @@ export async function connectVoice(
       config: { ...VOICE_DEFAULTS, ...(file.voice ?? {}) },
       ...(options.configDir !== undefined ? { configDir: options.configDir } : {}),
     };
-  } catch {
+  } catch (error) {
+    write(
+      `[config] ${error instanceof Error ? error.message : String(error)} — using the voice defaults (off)\n`,
+    );
     return {
       config: VOICE_DEFAULTS,
       ...(options.configDir !== undefined ? { configDir: options.configDir } : {}),
@@ -249,8 +255,10 @@ export async function connectTui(
   // a broken config must warn before anything else can fail for another reason.
   const theme = await connectTheme(options, write);
   // Voice dictation on the laptop the person is sitting at (Review HIGH 4): a
-  // LAPTOP-ONLY input setting read from the same file the palette comes from.
-  const voice = await connectVoice(options);
+  // LAPTOP-ONLY input setting read from the same file the palette comes from —
+  // and its unreadable-file fallback is said through the same pre-mount `write`
+  // (docs/fix/tui-voice-off-despite-config).
+  const voice = await connectVoice(options, write);
   // A chart's glyphs: the same local file, same rule (docs/feat/model-charts.md D5).
   const chartGlyphs = await connectChartGlyphs(options);
   // RPC path: hold a daemon's request until the TUI's prompt is mounted.

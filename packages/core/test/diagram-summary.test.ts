@@ -22,6 +22,18 @@ const SEQ = [
 ].join("\n");
 
 describe("summarizeDiagram: the result line", () => {
+  test("a multi-line (`<br/>`) label stays ONE line in the result and the a11y text", () => {
+    // fix/tui-diagram-complex-flow: the model keeps a label's lines, and this
+    // line is a single sentence (a `\n` would break the transcript row / a11y).
+    const src = 'flowchart TD\n  A["Token in ingresso<br/>(es. ciao)"] --> B[Fine]';
+    const model = diagramModel(src, "flowchart");
+    const { line } = summarizeDiagram(model, "flowchart", { title: "Token" });
+    expect(line).not.toContain("\n");
+    const spoken = describeDiagram(model, "flowchart", { title: "Token" });
+    expect(spoken).not.toContain("\n");
+    expect(spoken).toContain("Token in ingresso (es. ciao)");
+  });
+
   test("a flowchart says its size, its links and its direction", () => {
     const { line } = summarizeDiagram(diagramModel(FLOW, "flowchart"), "flowchart", {
       title: "Flusso di login",

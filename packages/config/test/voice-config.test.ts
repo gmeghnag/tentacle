@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadConfig } from "../src/load.ts";
 import { FileConfigSchema } from "../src/schema.ts";
 
 /**
@@ -94,5 +98,56 @@ describe("T9: the block resolves through the config as a whole", () => {
       profiles: { dictation: { voice: { language: "en" } } },
     });
     expect(parsed.success).toBe(true);
+  });
+});
+
+// docs/fix/tui-voice-off-despite-config: `TentacleConfig.voice` was DECLARED and
+// `resolveConfig` did produce it, but `loadConfig` never projected it into the
+// object it returns — so EVERY consumer (`main`'s three `startTui` sites, all
+// reading `config.voice`) saw `undefined` and fell back to `VOICE_DEFAULTS`
+// (`enabled: false`). Ctrl+R then said "voice is off" although the file said
+// `"voice": { "enabled": true }`. The projection is the fixed property here; the
+// TUI-level behaviour is pinned in `packages/cli/test/voice-tui-config.test.ts`.
+describe("loadConfig PROJECTS the voice block (tui-voice-off-despite-config)", () => {
+  const withConfig = async (
+    text: string | null,
+    run: (configDir: string) => Promise<void>,
+  ): Promise<void> => {
+    const dir = await mkdtemp(join(tmpdir(), "tentacle-voice-load-"));
+    const configDir = join(dir, "cfg");
+    try {
+      if (text !== null) {
+        await mkdir(configDir, { recursive: true });
+        await writeFile(join(configDir, "config.jsonc"), text, "utf8");
+      }
+      await run(configDir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+
+  test("the file's `voice` reaches `TentacleConfig.voice` — `enabled: true` included", async () => {
+    // Mutation: drop the `...(resolved.voice !== undefined ? { voice: resolved.voice } : {})`
+    // line from `loadConfig` → `cfg.voice` is undefined → red.
+    await withConfig('{ "voice": { "enabled": true, "key": "ctrl+k" } }', async (configDir) => {
+      const cfg = await loadConfig({ env: { HOME: tmpdir() }, configDir, scaffold: false });
+      expect(cfg.voice).toEqual({ enabled: true, key: "ctrl+k" });
+    });
+  });
+
+  test("a `voice` block without `enabled` keeps meaning OFF: the projection adds no default", async () => {
+    // The defaults stay the TUI's job (`VOICE_DEFAULTS`): the config layer only
+    // carries what the FILE said, exactly as it does for `tui`/`sessions`.
+    await withConfig('{ "voice": { "key": "ctrl+k" } }', async (configDir) => {
+      const cfg = await loadConfig({ env: { HOME: tmpdir() }, configDir, scaffold: false });
+      expect(cfg.voice).toEqual({ key: "ctrl+k" });
+    });
+  });
+
+  test("absent `voice` stays absent (the TUI's own defaults apply)", async () => {
+    await withConfig(null, async (configDir) => {
+      const cfg = await loadConfig({ env: { HOME: tmpdir() }, configDir, scaffold: false });
+      expect("voice" in cfg).toBe(false);
+    });
   });
 });

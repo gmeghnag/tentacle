@@ -68,3 +68,36 @@ describe("Fix 4 (HIGH 4): connect reads the laptop's voice settings", () => {
     });
   });
 });
+
+/**
+ * tui-voice-off-despite-config: degrading to `VOICE_DEFAULTS` is degrading to
+ * **OFF**, the opposite of what a user who wrote `"enabled": true` asked for. So
+ * this one catch — unlike `connectChartGlyphs`'s, whose fallback is a visible
+ * glyph choice — may not be SILENT: a file that cannot be read must say so, or
+ * the person is back to a Ctrl+R that answers "voice is off" with no clue why.
+ */
+describe("tui-voice-off-despite-config: a config error is a NOTICE, never a silent default", () => {
+  test("a broken file says why voice fell back, and still connects", async () => {
+    // Mutation: the bare `catch { return VOICE_DEFAULTS }` → `written` is empty
+    // and the user sees "voice is off" with no explanation.
+    await withConfig('{ "voice": { "key": "nonsense" } }', async (configDir) => {
+      const written: string[] = [];
+      const voice = await connectVoice({ url: "ws://127.0.0.1:9", configDir }, (line) =>
+        written.push(line),
+      );
+      expect(voice.config).toEqual(VOICE_DEFAULTS);
+      expect(written).toHaveLength(1);
+      expect(written[0]).toContain("[config]");
+      expect(written[0]).toContain("config.jsonc");
+      expect(written[0]).toContain("voice");
+    });
+  });
+
+  test("a readable file writes nothing", async () => {
+    await withConfig('{ "voice": { "enabled": true } }', async (configDir) => {
+      const written: string[] = [];
+      await connectVoice({ url: "ws://127.0.0.1:9", configDir }, (line) => written.push(line));
+      expect(written).toEqual([]);
+    });
+  });
+});
