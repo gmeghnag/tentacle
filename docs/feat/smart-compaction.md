@@ -895,9 +895,13 @@ Opus (shared blind spot possible on finding 2's premise, which this review caugh
 - **Nits.** The doc says `prune-loop.test.ts` has 12 cases, but it has 11. Sub-agent forwarding is untested (the executor said so).
 - **Executor:** honest. It disclosed its drift, mutation survivors and the unproven full suite.
 
+## Execution
+
 ### S3 — offline replay
 
 *— claude-opus-5-5 (executor), 2026-11-18 · **S3 only** (nothing of S4)*
+
+*(Re-filed under `## Execution` — it sat under the S2 `## Review` heading; S3 Review nit.)*
 
 **Load-bearing check (re-run first, §1/§9).** Passed, twice over, and the second
 one is the one that matters: the S3 plan's premise is that a *replay* of the
@@ -923,11 +927,19 @@ MATCH: the replay models the real loop exactly
 
 An exact match on all seven requests. The one thing the equivalence cannot
 compare is the **anchor** (the real loop's `estimateUsed` uses the provider's
-measured `promptTokens` once one exists, `agent.ts:1958`); a replay has no
-provider, so it recomputes with the counter every round. This makes the replay's
-`used` an OVER-estimate exactly when a real run measured a smaller prompt, i.e.
-it can only fire a batch EARLIER than the loop would, never later — and the
-numbers below are therefore conservative. Stated as the one unverified piece.
+measured `promptTokens` once one exists, `agent.ts:1958`; `estimateUsed` returns
+`anchor.promptTokens + counter.countMessages(tail)`, `context-awareness.ts:129-131`);
+a replay has no provider, so it recomputes with the counter every round.
+
+**The direction of that error is UNKNOWN, not conservative.** Two facts point
+opposite ways and nothing in this corpus settles them: the heuristic counter may
+over- or under-count the provider's own tokenizer (so `used` can sit either side
+of the measured prompt), and even if a batch does fire earlier, an earlier batch
+prunes for *more* rounds, which makes the savings larger, not smaller. No log
+here carries a `usage` entry (`grep -l '"usage"'` over the corpus: **0 of 12**
+files), so there is nothing to calibrate against. This is the one unverified
+piece; **S4's live `usage` reading is what settles it**, and until then the
+numbers below are a measurement of the replay, not a bound on production.
 
 **As built.** `.tentacle/tmp/smart-compaction/replay.final.ts` (234 lines,
 pasted below; gitignored, so this doc is its only home). It imports the REAL
@@ -1006,15 +1018,27 @@ retuned by S3's replay"). Cost saved at `r = 0.1` / batches per round:
 
 | | minGain 10 | minGain 15 | minGain 25 |
 |---|---|---|---|
-| pruneAt 40 | 29.7 % / 69 | 27.7 % / 95 | 24.3 % / 186 |
-| pruneAt 50 | — | 27.5 % / 101 | — |
+| pruneAt 40 | 29.6 % / 69 | 27.7 % / 95 | 24.3 % / 186 |
+| pruneAt 50 | 29.3 % / 74 | 27.8 % / 101 | 24.8 % / 186 |
 | **pruneAt 60** | 28.4 % / 91 | **27.3 % / 114** | 24.6 % / 186 |
-| pruneAt 70 | — | 26.8 % / 131 | — |
+| pruneAt 70 | 26.4 % / 110 | 25.8 % / 131 | 23.9 % / 208 |
 
 `r` sensitivity (the cache ratio is DeepSeek's published ≈ 0.1, unverified here):
 cost saved is **+22.8 % at r=0.05, +27.3 % at r=0.1, +29.8 % at r=0.2, +31.3 % at
-r=0.5** — pruning never loses money at any ratio, which is the property the
-design's §3 arithmetic claimed and this measures. `window` matters more than any
+r=0.5** (re-measured in fix round 1 with the corrected `bill()`; every one of the
+four is numerically unchanged — the content-only bug only bites when an R2
+rewrite is the batch's *earliest* changed message, which at the defaults is **0
+of 31 batches**). That pruning never loses money at any ratio is what these
+numbers show, and it is the property the design's §3 arithmetic claimed.
+
+**Cost model caveat (fix round 1).** With the old content-only compare it did
+cost *something* at looser triggers, where an R2-first batch does occur: at
+`pruneAt 40 / minGain 10` (7 of 51 batches R2-first) the fix moves 29.7 % → 29.6 %,
+and `pruneAt 70 / minGain 15` (1 of 27) leaves 25.8 % unchanged. The correction is
+worth ≤ 0.1 pp here, i.e. it changes no conclusion — but the old model was
+unconservative in principle and is now right in principle.
+
+`window` matters more than any
 of these (128 k → 31.8 %, 64 k → 36.5 %, 200 k → 23.6 %): the trigger is only as
 good as the window it is told about. `keepRecentRounds` 3/6/10 → 32.2/31.8/31.3 %
 and `pruneOutputChars` 1000/2000/4000 → 31.9/31.8/29.5 %, both flat-to-mildly-
@@ -1077,16 +1101,22 @@ comments as the reason each exists.
    `used` is ~1.2 k low, which moves the batch POINTS. It is a flag
    (`--tools-tokens`) with the measured builtin default, and its effect is
    ±1 batch over 3,530 rounds.
-3. **The anchor is recomputed, not measured** (see the load-bearing note). Noted
-   as the one conservative approximation; a real `usage` entry exists only where
-   a provider reported one, and no log in this corpus carries `usage` entries
-   (`grep '"type":"usage"'` = 0 files), so there is nothing to replay it from.
-4. **The cost model is my own** (`bill()`: longest unchanged-content prefix at
+3. **The anchor is recomputed, not measured** (see the load-bearing note). Its
+   error has **no known direction** (fix round 1, finding 2); a real `usage`
+   entry exists only where a provider reported one, and no log in this corpus
+   carries `usage` entries (`grep '"type":"usage"'` = 0 files over all 12), so
+   there is nothing to replay it from. S4's live `usage` is what settles it.
+4. **The cost model is my own** (`bill()`: longest unchanged-wire prefix at
    `r`, the rest at 1, tool prefix at `r` after round 0). The plan asks for "the
    modelled cost with r" without specifying the model, so it is stated here:
    it is a prefix-cache model, correct for DeepSeek/OpenAI-style automatic
    prefix caching and an over-estimate of the saving for a provider that caches
-   per-message.
+   per-message. The prefix compare is over the **whole** message (content AND
+   `toolCalls`, via `wireOf` = `JSON.stringify(renderForModel(m))`), not content
+   alone: R2 `call_payload` rewrites `toolCalls` and leaves `content` intact
+   (`prune.ts:527-529`), so a content-only compare billed a pruned call's
+   message as a cached prefix. That was fix round 1's finding 1 — see there for
+   why the corpus numbers did not move.
 5. **`--prune-at`/`--min-gain`/`--keep`/`--output-chars`/`--window`/`--r` flags**
    were added beyond the plan's "prints per round" so the Q6 retune and the
    sensitivity tables are one command each, not a code edit per run.
@@ -1209,11 +1239,25 @@ function segmentsOf(path: string): { header: Record<string, unknown>; segments: 
   return { header, segments: segments.filter((s) => s.length > 0) };
 }
 
+/**
+ * The bytes the provider sees for `m`, as one comparable string. Content alone
+ * is NOT enough: R2 (`call_payload`) rewrites `toolCalls` and leaves `content`
+ * untouched, so a content-only compare calls a pruned call's message an
+ * unchanged prefix and bills it at `r` when the cache really broke there.
+ */
+const wireOf = (m: ChatMessage): string => JSON.stringify(renderForModel(m));
+
 /** One billed request: the unchanged prefix at the cache price r, the rest at 1. */
-type Arm = { prev: readonly ChatMessage[]; cost: number };
-function bill(arm: Arm, request: readonly ChatMessage[], opts: Opts): void {
+export type Arm = { prev: readonly ChatMessage[]; cost: number };
+export function bill(arm: Arm, request: readonly ChatMessage[], opts: Opts): void {
   let i = 0;
-  while (i < arm.prev.length && i < request.length && arm.prev[i]?.content === request[i]?.content) i++;
+  while (
+    i < arm.prev.length &&
+    i < request.length &&
+    wireOf(arm.prev[i] as ChatMessage) === wireOf(request[i] as ChatMessage)
+  ) {
+    i++;
+  }
   const tools = arm.prev.length === 0 ? opts.toolsTokens : opts.r * opts.toolsTokens;
   arm.cost += opts.r * tokensOf(request.slice(0, i)) + tokensOf(request.slice(i)) + tools;
   arm.prev = request;
@@ -1524,3 +1568,99 @@ A/B, the default flip and the spot-check are S4's; S3 only measured).
 **Nit.** The S3 Execution was filed under the S2 `## Review` heading (after line 886), not under `## Execution`.
 
 **Executor.** Thorough and mostly honest: it flagged the M5 survivor, the unrelated flake and the anchor approximation. But it stated the direction of the anchor error with more confidence than it had.
+
+### Fix round 1
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, `tentacle --profile deepseek`), 2026-11-18 · **the S3 Review's** fix round (the earlier `### Fix round 1` at the top of this Execution section addresses the S1 Review) · 2 MEDIUMs + its structural nit. No S4 work.*
+
+**Scope note.** The S3 Review's verdict is REQUEST-CHANGES on 2 MEDIUMs, neither of which moves the
+load-bearing token gate (31.8 % saved, 1 batch per 113.9 rounds — both unchanged by these fixes). Both
+findings are about the **cost** figures and one **claim about the direction of an error**, i.e. wording
+and a measurement model, not the pruner. S3 has no tracked code but the doc, so the whole fix round is
+Markdown: the script lives in `.tentacle/tmp/smart-compaction/` (gitignored) and the doc carries its
+verbatim copy, which was re-synced and re-verified byte-identical after the change.
+
+**Finding 1 (MEDIUM) — the cost model missed R2 cache breaks.** FIXED, and its magnitude is reported
+honestly rather than inflated.
+
+- *Cause, confirmed at the source.* `bill()`'s prefix loop compared
+  `prev[i].content === request[i].content`. R2 `call_payload` rewrites **`toolCalls` only**
+  (`prune.ts:529`: `message: { ...message, toolCalls: pruned }`) and leaves `content` alone, so a batch
+  that prunes a write/edit payload kept counting the pruned assistant message as an unchanged cached
+  prefix.
+- *Fix.* The compare is now over the whole message: `wireOf(m) = JSON.stringify(renderForModel(m))`
+  (with `renderForModel` imported from `@tentacle/agent`, the same call `estimateUsed` makes), so a
+  changed `toolCalls` breaks the prefix there. `Arm`/`bill` are exported so the property can be driven
+  directly (that is what the red/green below does).
+- *Red before green (§9), on the property itself.* `bill.redgreen.ts` builds the exact scenario — an
+  assistant message whose `toolCalls.arguments` are replaced by a stub, `content` intact — and asserts
+  index 0 is billed at `r` while index 1 is billed at **1**, because the cache breaks there:
+
+```
+=== RED (content-only bill, pre-fix):        === GREEN (whole-message bill, fixed):
+billed                 : 2.4                 billed                 : 19.5
+expected (r on 0, 1 on 1): 19.5              expected (r on 0, 1 on 1): 19.5
+if fully cached (WRONG) : 2.4                if fully cached (WRONG) : 2.4
+RED: the pruned call was billed as cached    GREEN: the pruned call's message is billed at 1, as an R2 cache break
+```
+
+  Red on the assertion, not on a compile error: the same script, only the `bill` import swapped
+  (`replay.contentonly.ts` is the pre-fix function, kept for exactly this).
+- *Corpus effect: 0.0 pp at the defaults, and I can say why.* `final.out` diffs **identical** to the
+  re-run with the fixed model (`diff final.out final2.out` → empty), and the whole `r` sweep is
+  unchanged (22.8 / 27.3 / 29.8 / 31.3 % at r = 0.05/0.1/0.2/0.5). The mechanism, measured
+  (`prefixdiff.ts`): a content-only compare can only over-extend when an R2 rewrite is the batch's
+  **earliest** changed message; at the defaults that is **0 of 31 batches**. The reviewer's "over-states
+  at every batch" is therefore true in principle but not in effect here — the batch's first change is
+  always an R1/R3/R4 content stub.
+- *Where it did bite, it is now corrected.* At looser triggers an R2-first batch does occur —
+  `pruneAt 40 / minGain 10` has **7 of 51**, and there the fix moves cost saved 29.7 % → **29.6 %**
+  (24.2 % → 24.1 % at r=0.05); `pruneAt 70 / minGain 15` (1 of 27) is unchanged at 25.8 %. So the
+  correction is worth **≤ 0.1 pp**, and it changes no conclusion — but it is now right in principle,
+  which is what the finding asked for.
+- *Two sweep cells were wrong independently of this finding*, found while re-measuring, and fixed:
+  `pruneAt 50 / minGain 15` was 27.5 %/101 and is **27.8 %/101**; `pruneAt 70 / minGain 15` was
+  26.8 %/131 and is **25.8 %/131**. The `—` cells are now filled from actual runs (29.3/74, 24.8/186,
+  26.4/110, 23.9/208), so no cell is a guess.
+- *Mutation check re-run with the fixed model* (`replay-mutate.ts`, `prune.ts` restored byte-identical
+  — verified against a pre-run copy and by `git status`): baseline 31.8 %/31 batches, **M1 −12.30 ·
+  M2 −0.10 · M3 −13.80 · M4 +0.70 · M5 0.00 (SURVIVED) · M6 −9.40 → 5/6 caught**, i.e. exactly the
+  S3 table. M5's survival is unchanged and still a category error to "fix" (a size-equal stub removes
+  zero tokens; it is pinned in `prune.test.ts`, not here).
+
+**Finding 2 (MEDIUM) — "conservative" was unproven and the reasoning pointed the other way.** FIXED.
+
+- The doc no longer claims a direction. It now says the direction of the anchor error is **UNKNOWN**,
+  states both reasons (the heuristic counter may sit either side of the provider's tokenizer; and an
+  earlier batch prunes for *more* rounds, so it makes the saving LARGER, not smaller), and hands the
+  question to S4's live `usage`. The evidence that nothing here can settle it: **0 of 12** corpus logs
+  contain a `usage` entry (checked file by file), so there is nothing to calibrate against.
+- Citation added for the mechanism: `estimateUsed` returns `anchor.promptTokens +
+  counter.countMessages(tail)` (`context-awareness.ts:129-131`), which is why a replay without a
+  provider must recompute and cannot reproduce the measured prompt.
+- The matching drift note (§ "The anchor is recomputed, not measured") was corrected from "the one
+  conservative approximation" to "no known direction", so the doc has no surviving "conservative" claim.
+
+**Nit — S3's Execution was filed under the S2 `## Review` heading.** FIXED: it now sits under
+`## Execution`, with a one-line note saying so.
+
+**Drift from the Implementation.** None in behaviour. The only functional change is inside a
+gitignored measurement script; `packages/` is untouched (`git status` shows this doc alone), and the
+doc's verbatim script copy was regenerated and byte-compared to the file (`byte-identical: True`).
+
+**Also verified, so the numbers below are re-measured rather than inherited.** The corpus table's own
+totals reproduce byte-for-byte (`final2.out` == `final.out`), the sensitivity axes reproduce
+(keep 3/6/10 → 32.2/31.8/31.3 %, outputChars 1000/2000/4000 → 31.9/31.8/29.5 %, window 64 k/128 k/200 k
+→ 36.5/31.8/23.6 %), and the `keep 6` / `outputChars 2000` / `window 128000` defaults remain the
+recommendation.
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run lint` clean (1,966 files) ·
+`bun test packages/agent/test/prune.test.ts packages/agent/test/prune-loop.test.ts` **50 pass / 0 fail**
+· full `bun test` **14,356 pass / 5 skip / 0 fail** across 1,022 files (5 skips = the documented
+opt-in live-k8s / live-docker / real-socket keepalive; no flake this run — the `session-log-store` T4
+flake S3 recorded did not recur).
+
+**Still not verified (unchanged, and not this round's to fix).** S3 remains a replay of the *heuristic*
+trigger on stored logs: the anchor is recomputed, and no corpus log has a `usage` entry, so the
+production magnitude — and now explicitly the *sign* of the anchor error — is settled only by S4's live
+A/B. Untested forwarding to sub-agents (S2's own gap) also stands.
