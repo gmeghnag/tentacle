@@ -24,7 +24,6 @@ import type {
 } from "@tentacle/protocol";
 import { unseenArtifacts } from "./artifact-gallery.ts";
 import type { ArtifactSeen } from "./artifact-seen-store.ts";
-import type { ChatStatus } from "./chat-header.ts";
 import { sanitizeDisplay } from "./display-text.ts";
 import { keyedScheduleRows, scheduleMetaText, scheduleTitle } from "./schedule-view.ts";
 import type { StatusTone } from "./ui/StatusDot.tsx";
@@ -278,13 +277,6 @@ export function rowIdentity(row: InfoRow): string {
   return row.key ?? row.title;
 }
 
-/** The header's subtitle: the status word, then the model (Owner decision 2). */
-export interface HeaderModel {
-  readonly status: ChatStatus;
-  /** Already shortened for the header, or `null` (no model known: status only). */
-  readonly model: string | null;
-}
-
 /** The sheet's own caps (the wire's are larger; see F9). */
 export const MAX_SKILL_ROWS = 100;
 
@@ -338,11 +330,6 @@ export function shortModel(model: string | undefined): string | null {
   }
   const at = model.lastIndexOf("/");
   return at === -1 ? model : model.slice(at + 1) || model;
-}
-
-/** The header's subtitle value: the status FIRST so the word never clips. */
-export function headerModel(status: ChatStatus, model: string | undefined): HeaderModel {
-  return { status, model: shortModel(model) };
 }
 
 /**

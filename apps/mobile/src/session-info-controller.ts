@@ -161,6 +161,12 @@ export interface SessionInfoState {
    * rather than kept privately.
    */
   readonly openContext: { readonly used: number; readonly exact: boolean } | null;
+  /**
+   * The session's `cwd` from the sheet's own `session/list` entry, or `null`
+   * before it landed / when it failed or the session is off the first page. The
+   * HEADER's folder prefers it (fresher than the route's copy).
+   */
+  readonly entryCwd: string | null;
   /** A failed auto-accept set, shown until the next attempt (F11). */
   readonly autoAcceptError: string | null;
 }
@@ -399,6 +405,7 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
       link,
       autoAcceptError,
       openContext: pulled === null ? null : { used: pulled.used, exact: pulled.exact },
+      entryCwd: entry.state === "ready" && entry.value !== null ? entry.value.cwd : null,
     };
   }
 

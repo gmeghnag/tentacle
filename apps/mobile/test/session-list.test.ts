@@ -429,3 +429,19 @@ describe("pins (docs/feat/mobile-session-actions.md S2)", () => {
     expect(next.pinnedEntries.map((e) => e.sessionId)).toEqual(["pin-old"]);
   });
 });
+
+describe("the row's working folder (docs/feat/mobile-header-status.md)", () => {
+  test("every row — active, archived, a first-page pin — carries its entry's cwd", () => {
+    const sections = rows(
+      [
+        entry({ sessionId: "a", cwd: "/Users/me/tentacle" }),
+        entry({ sessionId: "z", cwd: "/srv/old", archived: true }),
+      ],
+      NOW,
+      [entry({ sessionId: "p", cwd: "/workspace/pod", pinned: true })],
+    );
+    expect(sections.active.map((r) => r.cwd)).toEqual(["/Users/me/tentacle"]);
+    expect(sections.archived.map((r) => r.cwd)).toEqual(["/srv/old"]);
+    expect(sections.pinned.map((r) => r.cwd)).toEqual(["/workspace/pod"]);
+  });
+});

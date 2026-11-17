@@ -17,6 +17,7 @@
  */
 import type { ComputerRecordLike, ComputerRow } from "./computer-rows.ts";
 import { type ComputerTone, computerStatus } from "./computer-status.ts";
+import { folderLabel } from "./folder-label.ts";
 import { sessionLine } from "./session-groups.ts";
 import type { SessionListState, SessionRow, SessionSections } from "./session-list.ts";
 
@@ -34,6 +35,10 @@ export interface DrawerSource {
 export interface DrawerRow {
   readonly id: string;
   readonly title: string;
+  /** The session's working folder under the title (`folderLabel`); "" → no line. */
+  readonly folder: string;
+  /** The raw cwd, carried to the session screen's header (its route). */
+  readonly cwd: string;
   /** The visible meta line (`sessionLine`: "Running · 2 attached · 3m ago" / "3m ago"). */
   readonly meta: string;
   readonly tone: "running" | "idle" | "archived";
@@ -86,6 +91,8 @@ function toRow(row: SessionRow, currentId: string | null): DrawerRow {
   return {
     id: row.sessionId,
     title: row.title,
+    folder: folderLabel(row.cwd),
+    cwd: row.cwd,
     meta: sessionLine(row),
     tone: row.archived ? "archived" : row.running ? "running" : "idle",
     archived: row.archived,

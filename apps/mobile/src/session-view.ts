@@ -19,6 +19,7 @@ import {
   composerAction,
   sendNowOffered,
 } from "./composer.ts";
+import { folderLabel } from "./folder-label.ts";
 import type { OutboxItem } from "./outbox.ts";
 import type { SessionOpenFailure } from "./session-controller.ts";
 import { headerContext, shortModel } from "./session-info.ts";
@@ -90,6 +91,11 @@ export interface SessionViewInput {
     readonly open: { readonly used: number; readonly exact: boolean } | null;
     readonly window: number | undefined;
   };
+  /**
+   * The session's working folder (`session/list` `cwd`), as the route or the
+   * screen's own lookup found it. Absent/empty → no folder in the header.
+   */
+  readonly cwd?: string;
   /** The queue rows above the input (13a's `shownRows`): mine and other devices'. */
   readonly queued?: readonly ShownRow[];
   /** Other devices' returned rows, each with an explicit Take (D3, F11). */
@@ -183,11 +189,13 @@ export interface SessionView {
   readonly title: string;
   readonly project: string;
   /**
-   * The header's subtitle runs (docs/feat/mobile-session-info.md Owner decision
-   * 2): the status word FIRST, then the model — shortened, and dropped entirely
-   * when the daemon reports none (the header then looks exactly as before).
+   * The header's subtitle (docs/feat/mobile-header-status.md): the folder, then
+   * the model — shortened, and dropped when the daemon reports none. No status
+   * word: the state is the dot before the title (`chat-header.ts`).
    */
   readonly headerModel: string | null;
+  /** The folder run: `label` (mono, `folderLabel`) and the full `path` (VoiceOver). */
+  readonly headerFolder: { readonly label: string; readonly path: string } | null;
   /**
    * The header's thin context bar (Owner decision 4): a FILL only, no text. `null`
    * → no bar is drawn (nothing measured yet, or no window to divide by).
@@ -260,6 +268,12 @@ function endedBanner(reason: EndReason): Banner {
   }
 }
 
+/** The header's folder run, or null when no folder is known. */
+function headerFolder(cwd: string | undefined): SessionView["headerFolder"] {
+  const label = folderLabel(cwd ?? "");
+  return label === "" || cwd === undefined ? null : { label, path: cwd };
+}
+
 /**
  * The whole screen as a value. Precedence, in this order (each step is a case a
  * flow asserts):
@@ -281,6 +295,7 @@ export function sessionView(input: SessionViewInput): SessionView {
     title: input.title,
     project: input.project,
     headerModel: shortModel(input.header?.model),
+    headerFolder: headerFolder(input.cwd),
     headerContext: bar.percent === null ? null : { percent: bar.percent, approx: bar.approx },
     rows: input.rows,
     turn: input.turn,

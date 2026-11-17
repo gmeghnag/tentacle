@@ -1296,6 +1296,7 @@ function SessionDrawerHost({
             sessionId: row.id,
             title: row.title,
             archived: row.archived,
+            cwd: row.cwd,
           }),
         );
       }}
@@ -1361,6 +1362,7 @@ function SessionRoute({
   title,
   archived,
   focus,
+  cwd,
   onOpenDrawer,
   drawerOpen,
   onOpenArtifacts,
@@ -1371,6 +1373,8 @@ function SessionRoute({
   readonly title: string;
   readonly archived: boolean;
   readonly focus: boolean;
+  /** The tapped row's working folder (`SessionRoute.cwd`), for the header. */
+  readonly cwd: string | undefined;
   readonly onOpenDrawer: () => void;
   readonly drawerOpen: boolean;
   /** The artifacts gallery's ONE entry (docs/feat/model-artifacts.md D9). */
@@ -1401,6 +1405,7 @@ function SessionRoute({
         archived,
         title,
         project: RECORDS.get(computerId)?.name ?? "",
+        ...(cwd === undefined ? {} : { cwd }),
         // This phone's own label, for an ask's "also asked on" note never naming
         // the device it is shown on (docs/feat/session-auto-accept.md D7): the
         // name this phone paired under. Absent on a record an older build wrote.
@@ -2172,6 +2177,7 @@ function AppShell(): JSX.Element {
                     // banner and a Reopen button, and taps open WITHOUT reopening
                     // (Owner Q4: browsing never revives a session).
                     archived: row.archived,
+                    ...(row.cwd === "" ? {} : { cwd: row.cwd }),
                   })
                 }
               />
@@ -2214,6 +2220,7 @@ function AppShell(): JSX.Element {
                     title={route.params.title}
                     archived={route.params.archived}
                     focus={route.params.focus === true}
+                    cwd={route.params.cwd}
                     onOpenArtifacts={(from) =>
                       openArtifactGallery(navigation, {
                         computerId: route.params.computerId,

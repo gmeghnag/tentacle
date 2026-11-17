@@ -16,7 +16,6 @@ import {
   capabilityChanges,
   contextMeter,
   devicesText,
-  headerModel,
   rowIdentity,
   sanitizeDisplay,
   sessionInfoView,
@@ -80,21 +79,7 @@ const section = (f: InfoFacts, id: string) => {
   return found;
 };
 
-describe("headerModel (Owner decision 2: model under the title)", () => {
-  test("the status word comes first, the model after it", () => {
-    expect(headerModel({ text: "Idle", tone: "online" }, "claude-sonnet-4-5")).toEqual({
-      status: { text: "Idle", tone: "online" },
-      model: "claude-sonnet-4-5",
-    });
-  });
-
-  test("no model known → the status alone (today's look)", () => {
-    expect(headerModel({ text: "Idle", tone: "online" }, undefined)).toEqual({
-      status: { text: "Idle", tone: "online" },
-      model: null,
-    });
-  });
-
+describe("shortModel (Owner decision 2: model under the title)", () => {
   test("a slashed id shows only its last segment (owner)", () => {
     expect(shortModel("rits/deepseek-ai/DeepSeek-V4.1-Flash-1017")).toBe(
       "DeepSeek-V4.1-Flash-1017",

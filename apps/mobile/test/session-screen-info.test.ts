@@ -73,6 +73,10 @@ function harness(
     readonly mcp?: () => Promise<readonly McpServerStatus[]>;
     /** The handle's MCP/skill switches (session-capabilities S5); absent: none. */
     readonly capabilities?: InfoCapabilities;
+    /** The route's `cwd` (a list/drawer tap); absent: a push / new-session open. */
+    readonly cwd?: string;
+    /** Overrides the port's `session/list` page. */
+    readonly list?: () => Promise<SessionListResult>;
   } = {},
 ) {
   const calls = { skills: 0, context: 0, mcp: 0, list: 0 };
@@ -135,6 +139,9 @@ function harness(
     },
     sessionList: () => {
       calls.list += 1;
+      if (options.list !== undefined) {
+        return options.list();
+      }
       return Promise.resolve({
         sessions: [
           {
@@ -174,6 +181,7 @@ function harness(
       now: () => 1,
       info: () => port,
       onChange: (next) => emitted.push(next),
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     });
   return {
     screen,
@@ -230,7 +238,9 @@ describe("opening Session info", () => {
     await screen.openInfo();
     await settle();
     expect(h.calls.mcp).toBe(1);
-    expect(h.calls.list).toBe(1);
+    // The attach's own lookup (the header's folder: this harness's route carries
+    // no cwd), then the sheet's pull — a SECOND, fresh one.
+    expect(h.calls.list).toBe(2);
     expect(h.calls.skills).toBe(1);
     // The attach already asked for the context (the header's bar): the sheet's
     // pull is a SECOND, fresh one — never reusing a figure a turn has outdated.
@@ -269,6 +279,97 @@ describe("opening Session info", () => {
     const screen = h.screen();
     await screen.open();
     expect(screen.state().view.headerModel).toBe("claude-sonnet-4-5");
+  });
+});
+
+describe("the header's folder (docs/feat/mobile-header-status.md)", () => {
+  test("the route's cwd shows at once, and costs no session/list", async () => {
+    const h = harness({ cwd: "/Users/me/tentacle" });
+    const screen = h.screen();
+    expect(screen.state().view.headerFolder?.label).toBe("~/tentacle");
+    await screen.open();
+    await settle();
+    expect(h.calls.list).toBe(0);
+  });
+
+  test("no route cwd → ONE session/list after the attach, then the entry's folder", async () => {
+    const h = harness();
+    const screen = h.screen();
+    expect(screen.state().view.headerFolder).toBeNull();
+    await screen.open();
+    await settle();
+    expect(screen.state().view.headerFolder).toEqual({ label: "/srv/app", path: "/srv/app" });
+    expect(h.calls.list).toBe(1);
+    // A re-attach does not ask again: the folder is known.
+    await screen.retry();
+    await settle();
+    expect(h.calls.list).toBe(1);
+  });
+
+  test("a failed lookup leaves no folder and throws nothing (asked again at the next attach)", async () => {
+    let fail = true;
+    const h = harness({
+      list: () =>
+        fail
+          ? Promise.reject(new Error("boom"))
+          : Promise.resolve({
+              sessions: [
+                {
+                  sessionId: "s1",
+                  title: "Alpha",
+                  cwd: "/srv/late",
+                  createdAt: 0,
+                  updatedAt: 0,
+                  running: false,
+                  attached: 1,
+                  archived: false,
+                },
+              ],
+            }),
+    });
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    expect(screen.state().view.headerFolder).toBeNull();
+    fail = false;
+    await screen.retry();
+    await settle();
+    expect(screen.state().view.headerFolder?.label).toBe("/srv/late");
+  });
+
+  test("a session not on the first page has no folder (never another session's)", async () => {
+    const h = harness({ list: () => Promise.resolve({ sessions: [] }) });
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    expect(screen.state().view.headerFolder).toBeNull();
+  });
+
+  test("Session info's own entry refreshes a stale route folder", async () => {
+    const h = harness({ cwd: "/srv/old" });
+    const screen = h.screen();
+    await screen.open();
+    await screen.openInfo();
+    await settle();
+    expect(screen.state().view.headerFolder?.label).toBe("/srv/app");
+  });
+
+  test("a lookup landing after the screen is gone paints nothing", async () => {
+    let land: (page: SessionListResult) => void = () => {};
+    const h = harness({
+      list: () =>
+        new Promise<SessionListResult>((resolve) => {
+          land = resolve;
+        }),
+    });
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    screen.dispose();
+    const before = h.emitted.length;
+    land({ sessions: [] });
+    await settle();
+    expect(h.emitted.length).toBe(before);
   });
 });
 
