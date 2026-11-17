@@ -528,4 +528,72 @@ repaired and re-run green).
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-17 · fresh context · scope: S1 only (`git diff main...HEAD`)*
+
+**Verdict: REQUEST-CHANGES** (no HIGH; three MEDIUM).
+
+**Gate (re-run).** `bun test packages/agent/test/prune.test.ts` 28 pass / 0 fail · `bun run lint` clean
+(1857 files) · `bun run typecheck` clean. Full suite not re-run (S1 is unreachable from the loop).
+
+**Findings.**
+
+1. **MEDIUM — R5 and parts of R1 are untested; the Execution's "7/7 mutations caught" does not
+   generalise.** Ten further mutations of `prune.ts` (script `.tentacle/tmp/smart-compaction/mutate.ts`,
+   tree restored byte-identical), seven SURVIVE the suite:
+   - `prune.ts:568-569` R5 ignores the content (`later.result === content` → `true`): 0 fail.
+   - `prune.ts:566` R5 in either direction (`>` → `!==`): 0 fail. Failure scenario: two identical
+     1.5k-char `shell` outputs outside the tail are BOTH stubbed, each "identical to the later result
+     … still in the conversation" — the output is gone from the request and each stub points at the other.
+   - `prune.ts:568` R5 ignores the arguments: 0 fail.
+   - `prune.ts:239-241` `covers` ignores `from`: 0 fail. Scenario: read `lines 1-50`, later read
+     `offset 40` (to EOF) → the first read is stubbed "superseded" though lines 1-39 are in neither.
+   - `prune.ts:527` / `:279` a later FAILED `fs_read` supersedes a good one: 0 fail.
+   - `prune.ts:83` `context_reset` dropped from the exempt list: 0 fail.
+   Cause: the only positive R5 test (`prune.test.ts:334`) uses `fs_read`, so R1 stubs it first (and its
+   `"call r2"` assertion also matches the R1 stub); the negative R5 test (`:348`) uses a 11-char body
+   that the `savedChars > 0` gate refuses whatever R5 decides. Needed: R5 positive/negative cases on a
+   non-`fs_read` tool with bodies larger than a stub, "the LATER copy is never stubbed", a
+   `covers` case with a later start, a later failed read, a `context_reset` exemption case.
+2. **MEDIUM — false plan premise + an S1 API that turns it into a silent wrong state.** Design §6 and
+   Failure modes say `/compact`'s state "dies with the old objects"; FALSE: `Session.compact`
+   (`session.ts:366-367`) and `clearConversation` (`:390-391`) reuse the same array (`length = 0`,
+   `push`), exactly like `context_reset` — so a `WeakMap<ChatMessage[], …>` entry survives them.
+   `PruneSet` is keyed by index only and `applyPrune` (`prune.ts:592-598`) guards only out-of-range
+   indices (its comment claims stale sets are handled). Scenario: a batch prunes indices 1..40; the
+   user runs `/compact`; the new history is `[system, summary, …]`; the surviving monotonic set
+   replaces index 1 (the summary) with an old `fs_read` stub — the summary silently vanishes from the
+   request and a `tool` message without its call goes to `repairHistory`. Fix in S1: `PruneEntry`
+   carries the `original` message and `applyPrune`/`estimateGain` skip an entry whose
+   `history[index] !== original` (+ test); fix the doc so S2 drops the state on compact AND `/clear`.
+3. **MEDIUM — R1 ignores `fs_read`'s `pages` argument** (`readRangeOf`, `prune.ts:219-230`).
+   Scenario: `fs_read doc.pdf {pages:"101-200"}` then `fs_read doc.pdf` (default first 100 pages):
+   both are "whole file", `covers` is true, the earlier pages are stubbed "superseded by a later
+   read" though the later read never contained them (recoverable by re-reading, but the stub lies).
+   Treat any read with `pages` as covered only by an identical `pages` value.
+
+**Nits (not blocking).** The changelog fragment (`changelog.d/smart-compaction.added.md`) announces an
+unwired internal module ("behaviour is unchanged"), against §10 "internal work adds no fragment" and the
+plan's "written in S4". The Execution is signed `claude-sonnet-4-5-20250929` while the commit says
+`exec (deepseek)` — the signature should name the model that actually ran.
+
+**Premise table (S1-relevant).** `parsePathRange` builtins.ts:84 — TRUE (same regex) · `fs_read`
+whole-file read has no line cap (builtins.ts:123-125) — TRUE, so `covers(undefined, x)` is sound for text
+· success phrasings builtins.ts:233/305/354 — TRUE, match `SUCCESS_SHAPES` · registry error prefix
+`tool fs_read failed:` registry.ts:107 — TRUE · `toolMessage` stores no `isError` agent.ts:266-278 — TRUE
+· `spill.path` optional core/tool.ts:40 — TRUE · `/compact` drops the state with the old objects — **FALSE**
+(finding 2).
+
+**Attacks tried.** (a) Mutation of ten untested properties — 7 survive (finding 1). (b) Index
+stability across in-place history replacement — finding 2. (c) PDF `pages` reads — finding 3. (d) R5
+chains / a later duplicate pruned by a different rule — nothing: identical content+tool+args means the
+same rule applies to both. (e) R2 output validity: `JSON.stringify` of a parsed object, id/name kept,
+multi-line success results refused by `$` without `m` — holds. (f) Store mutation: `applyPrune` copies,
+stubs spread the original — holds (M2 in Execution confirmed).
+
+**What holds.** Pure, no wiring, store never mutated; prose never touched; protected tail correct (fewer
+than N rounds protects from the first assistant); success detection is positive-match (safe direction);
+stubs deterministic and marker-bearing.
+
+**Executor behaviour.** Honest Execution with real red-before-green and documented drift; the mutation set
+was chosen around what was tested, so it over-states coverage. Reviewer is Opus; the plan's author is also
+Opus (shared blind spot possible on finding 2's premise, which this review caught on re-reading the code).
