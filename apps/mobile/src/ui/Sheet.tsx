@@ -9,8 +9,8 @@
  *  - a FULL sheet is the ground a section band sits on (`infoE2`, line 390: the
  *    sheet's ground moves one step down to the grouped ground, `bg` in both
  *    palettes, so its `bandOnSheet` bands read one step above it and two sections
- *    never merge). In light that is `#F2F2F7` with white bands, in dark `#1F1F1E`
- *    with `#2A2A28` bands.
+ *    never merge). In light that is `#F2F2F7` with white bands, in dark `#1E1F21`
+ *    with `#28292C` bands.
  *  - a FLOATING sheet is a card over a scrim (the `Pair` compare sheet, line 348),
  *    so it keeps its own `sheet` surface: it is not a band's ground.
  *
