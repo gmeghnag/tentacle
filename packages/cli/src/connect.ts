@@ -23,6 +23,7 @@ import { MAX_SESSION_LIST } from "@tentacle/protocol";
 import type { InitializeResult } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import {
+  type ChartGlyphs,
   type SessionPick,
   type ThemeSetting,
   VOICE_DEFAULTS,
@@ -55,6 +56,11 @@ export interface ConnectOptions {
   readonly configDir?: string;
   /** An explicit `tui.theme` (beats the file); absent → the file's, else `auto`. */
   readonly theme?: ThemeSetting;
+  /**
+   * An explicit `tui.chartGlyphs` (beats the file); absent → the file's, else
+   * `braille` (docs/feat/model-charts.md D5).
+   */
+  readonly chartGlyphs?: ChartGlyphs;
 }
 
 /**
@@ -137,6 +143,31 @@ export async function connectTheme(
 }
 
 /**
+ * A chart's plot glyphs for a `connect` session (`tui.chartGlyphs`,
+ * docs/feat/model-charts.md D5). Same rule as the palette: the config FILE, and
+ * a broken file never blocks the connection — `connectTheme`, called beside
+ * this one, already warned about it, so `braille` is used silently.
+ */
+export async function connectChartGlyphs(options: ConnectOptions): Promise<ChartGlyphs> {
+  if (options.chartGlyphs !== undefined) {
+    return options.chartGlyphs;
+  }
+  try {
+    const file = await readFileConfig({
+      ...(options.configDir !== undefined
+        ? {
+            configDir: options.configDir,
+            env: { ...process.env, TENTACLE_CONFIG_DIR: options.configDir },
+          }
+        : {}),
+    });
+    return file.tui?.chartGlyphs ?? "braille";
+  } catch {
+    return "braille";
+  }
+}
+
+/**
  * `connect`'s voice settings (docs/feat/voice-dictation.md, Review round 1 HIGH
  * 4). `connect` reads no model config, so — exactly like the palette — the voice
  * settings come from the config FILE, and a broken file must never block a
@@ -192,6 +223,8 @@ export async function connectTui(
   // Voice dictation on the laptop the person is sitting at (Review HIGH 4): a
   // LAPTOP-ONLY input setting read from the same file the palette comes from.
   const voice = await connectVoice(options);
+  // A chart's glyphs: the same local file, same rule (docs/feat/model-charts.md D5).
+  const chartGlyphs = await connectChartGlyphs(options);
   // RPC path: hold a daemon's request until the TUI's prompt is mounted.
   const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
   const dial = deps.dial(options.url, {
@@ -322,6 +355,7 @@ export async function connectTui(
       mcpStatus: () => client.mcpStatus(),
       detachOnQuit: true,
       theme,
+      chartGlyphs,
       autoAccept,
       autoAcceptShared: autoAccept,
       sessions: {

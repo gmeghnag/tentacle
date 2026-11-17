@@ -63,6 +63,12 @@ const CASES: readonly {
   { name: "shell_output", args: '{"job_id":"j1"}', subtitle: "j1" },
   { name: "agent_control", args: '{"action":"kill","agent_id":"a2"}', subtitle: "kill a2" },
   { name: "skill", args: '{"name":"review"}', subtitle: "review" },
+  // docs/feat/model-charts.md D3: a chart row names the chart, never its spec.
+  {
+    name: "chart",
+    args: '{"type":"line","title":"Ricavi 2026","datasets":[{"label":"R","data":[1]}]}',
+    subtitle: "Ricavi 2026",
+  },
   { name: "shell", args: "not json at all", subtitle: "" },
   { name: "mystery_tool", args: "raw args", subtitle: "raw args" },
 ];

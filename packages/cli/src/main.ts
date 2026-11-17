@@ -1408,6 +1408,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             model: config.model,
             // The palette (`tui.theme`): a LAPTOP-ONLY display setting.
             theme: config.tui?.theme ?? "auto",
+            // A chart's glyphs (`tui.chartGlyphs`): LAPTOP-ONLY too — the font is
+            // this terminal's.
+            chartGlyphs: config.tui?.chartGlyphs ?? "braille",
             // Voice dictation (`voice.*`): a LAPTOP-ONLY input setting. The TUI
             // itself decides whether this terminal can use it at all (F11).
             voice: { ...VOICE_DEFAULTS, ...(config.voice ?? {}) },
@@ -2256,6 +2259,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         (io.startTui ?? startTui)(null, {
           model: config.model,
           theme: config.tui?.theme ?? "auto",
+          chartGlyphs: config.tui?.chartGlyphs ?? "braille",
           cwd: config.cwd,
           contextWindow: config.contextWindow,
           permissions,

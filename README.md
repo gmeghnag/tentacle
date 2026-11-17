@@ -451,6 +451,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `tools.summarizeLargeOutput` | `TENTACLE_SUMMARIZE_OUTPUT` | false | Replace large output with a model-written summary (full text still spilled). |
 | `tools.tabulateJson` | `TENTACLE_TABULATE_JSON` | false | Render a JSON array-of-objects result as a compact table. |
 | `tools.writableDirs` | `TENTACLE_WRITABLE_DIRS` (`:`-separated; empty = `[]`) | the system temp dir (`$TMPDIR`) and `/tmp` | Where `fs_write`/`fs_edit`/`fs_multi_edit` may write besides the project. |
+| `tui.chartGlyphs` | — | "braille" | A chart's plot glyphs: `braille` (2×4 dots per cell) or `blocks` for a font with no braille. |
 | `tui.theme` | — | "auto" | The palette: `auto` probes the terminal, `dark`/`light` force one; never carried to a pod. |
 | `voice.autoStop` | — | false | Finish the dictation on a pause instead of on the key. |
 | `voice.autoStopSilenceMs` | — | 500 | The pause that ends a dictation when `voice.autoStop` is on. |

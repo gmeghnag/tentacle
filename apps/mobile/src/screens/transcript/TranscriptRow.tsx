@@ -13,7 +13,8 @@
  * `tool-<callId>-reply`, `diff-<callId>`, `image-<imageId>`.
  */
 import { type JSX, type ReactNode, useState } from "react";
-import { Image, Pressable, StyleSheet, Text, View } from "react-native";
+import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { CHART_TOOL, chartRowView } from "../../chart-row.ts";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
@@ -25,6 +26,7 @@ import { type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { ToolRow } from "../../ui/ToolRow.tsx";
 import { animateNextLayout } from "../../ui/animate.ts";
+import { ChartBlock } from "../../ui/chart/ChartBlock.tsx";
 import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MediaViewer } from "./MediaViewer.tsx";
@@ -253,6 +255,41 @@ function ReasoningRowView({ row, palette, onLink }: RowProps): JSX.Element {
   );
 }
 
+/** The device's language, for the chart's numbers and dates (Hermes' Intl reads the device). */
+function deviceLocale(): string {
+  return Intl.DateTimeFormat().resolvedOptions().locale;
+}
+
+/**
+ * A `chart` call (docs/feat/model-charts.md slice C6): the chart itself takes the
+ * row's place, full width on the page — no tool chrome (owner rule). A spec that
+ * does not re-validate, or a failed / refused call, is the generic tool row.
+ */
+function ChartRowView(props: RowProps): JSX.Element {
+  const tool = props.row as Extract<Row, { kind: "tool" }>;
+  const screen = useWindowDimensions();
+  const view = chartRowView(tool, {
+    width: screen.width - 2 * space.inset,
+    fontScale: screen.fontScale,
+    locale: deviceLocale(),
+    palette: props.palette,
+  });
+  if (view === null) {
+    return <ToolRowView {...props} />;
+  }
+  return (
+    <Shell row={tool}>
+      <ChartBlock
+        view={view}
+        tool={tool}
+        palette={props.palette}
+        locale={deviceLocale()}
+        testID={`chart-${tool.id}`}
+      />
+    </Shell>
+  );
+}
+
 function ToolRowView({ row, palette, agent }: RowProps): JSX.Element {
   const tool = row as Extract<Row, { kind: "tool" }>;
   const [open, setOpen] = useState(false);
@@ -372,7 +409,11 @@ export function TranscriptRow(props: RowProps): JSX.Element | null {
     case "reasoning":
       return <ReasoningRowView {...props} />;
     case "tool":
-      return <ToolRowView {...props} />;
+      return props.row.name === CHART_TOOL ? (
+        <ChartRowView {...props} />
+      ) : (
+        <ToolRowView {...props} />
+      );
     case "notice":
       return <NoticeRowView {...props} />;
     default:

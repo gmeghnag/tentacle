@@ -74,6 +74,11 @@ function subtitleOf(name: string, raw: string): string {
       return str("agent_id") ?? "";
     case "skill":
       return str("name") ?? "";
+    // A chart's row names the chart, not its JSON (docs/feat/model-charts.md
+    // D3). A missing title falls back to the raw args, exactly as the TUI's case
+    // does — a forged spec still shows something rather than an empty row.
+    case "chart":
+      return str("title") ?? raw;
     default:
       return raw;
   }

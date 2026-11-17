@@ -1,0 +1,54 @@
+appId: so.tentacle.app
+---
+# 31 (docs/feat/model-charts.md T6, slice C6): the model draws a chart in the
+# conversation. `CHART31` makes the mock model call `chart` (mock-model.ts
+# `CHART_SPEC`); the row is the chart itself (`chart-<callId>`), never the
+# generic tool row. A relaunch rebuilds the transcript from the daemon's history
+# (`session/open`), and the chart is still drawn there: the spec rides the tool
+# call's own arguments (the plan's load-bearing assumption).
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${CHART_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "CHART31"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "chart-mocked-.*"
+    timeout: 30000
+- assertNotVisible:
+    id: "tool-mocked-.*"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "31-chart-inline-live"
+# Reopen: a cold launch, so the row comes from history, not the live stream.
+- launchApp
+- runFlow: _unlock.yaml
+- extendedWaitUntil:
+    visible:
+      id: "computer-${output.computerId}"
+    timeout: 30000
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${CHART_ID}"
+- extendedWaitUntil:
+    visible:
+      id: "chart-mocked-.*"
+    timeout: 30000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "31-chart-inline-reopened"
