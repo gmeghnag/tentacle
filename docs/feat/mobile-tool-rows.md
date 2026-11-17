@@ -606,4 +606,27 @@ No schema touched, so `protocol.json` is not regenerated and there is no `protoc
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-17* — **S1 only**, fresh context. This is the same model as the plan author and the S1 executor (Opus), so shared blind spots are possible.
+
+**Verdict: REQUEST-CHANGES.** One MEDIUM finding, about tests only. The S1 code is correct.
+
+**Findings**
+1. **MEDIUM: test gap (§9).** `apps/mobile/src/tool-steps.ts:158` limits the tail's `down` to the LAST run (`tailJoins && run === last`). Mutation: drop `run === last` → **0 of 26 tests fail**. Failure scenario: rows `tool A, assistant text, tool B` while thinking. Under the mutation, A also gets `down: true`, so S2 would draw a thread segment that hangs below A into the text, and nothing would catch it. Fix: one `tool-steps.test.ts` case with two runs plus a tail, asserting that the first run's last node has `down: false`.
+
+**Gate (touched files):** `tool-steps` + `tool-summary` tests 74/74 pass · `bun run lint` clean (1792 files) · `bun run typecheck` clean. I did not re-run the full suite.
+
+**Mutations (each reverted, `git status` clean after):**
+- Tail `down` on every run → **survived** (finding 1).
+- Remove `user` from `isThinking` → 1 fail.
+- MCP path shown without basename → 1 fail.
+- Read range end off by one → 2 fail.
+- Batch thought `batchOpen ? null : thought` → `thought` → survived, but this is **benign**. `pending` is emptied by the first tool, so a later tool in the batch can never receive a thought. `batchOpen` is redundant (a nit), not a gap.
+
+**Attacks tried**
+- `fs_read` `path:A:B` against `parsePathRange` (`packages/tools/src/builtins.ts:84-96`): same regex and same clamp. Holds.
+- Thinking after a user row or after text: `tailJoins` is false because the last run is empty. Holds.
+- Partial or streaming args (`{}`, non-JSON): no crash, no empty name. Holds.
+- Odd MCP names: raw label is used. Holds.
+- §7 scope: pure, React-free modules; no protocol, persistence or terminal paths touched. Holds.
+
+**Executor behaviour:** honest. The Execution names its drift and the flaky unrelated CLI failure, and lists mutations M1–M4. It missed the over-extension direction of the tail rule.
