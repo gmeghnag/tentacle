@@ -74,12 +74,25 @@ export function hubOpacity(input: {
 /**
  * A touch on the slider's track → a percentage. A zero (or negative) width is the
  * floor rather than a division by zero, and an overshoot past either end clamps.
+ *
+ * `x` is measured from the TRACK: the rail, the fill and the thumb are all
+ * `pointerEvents="none"` (`HubOpacityBand.tsx`), so the track is the touch's
+ * target and `locationX` is never measured inside the 22 pt thumb.
  */
 export function opacityAt(x: number, width: number): number {
   if (!(width > 0)) {
     return OPACITY_MIN;
   }
   return clampOpacity(OPACITY_MIN + (x / width) * (OPACITY_MAX - OPACITY_MIN));
+}
+
+/**
+ * What the slider shows, and what a VoiceOver step starts from: the finger's own
+ * value while a gesture is live, the STORED one after it ends (`released` is
+ * null). The stored value is clamped here too, so a raw record never leaks out.
+ */
+export function shownOpacity(released: number | null, stored: number | undefined): number {
+  return released ?? clampOpacity(stored ?? OPACITY_DEFAULT);
 }
 
 /** VoiceOver's `adjustable`: one step up (+1) or down (−1), clamped. */

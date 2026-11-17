@@ -17,6 +17,7 @@ import {
   OPACITY_MIN,
   clampOpacity,
   opacityAt,
+  shownOpacity,
   stepOpacity,
 } from "../hub-opacity.ts";
 import { DENSE_FONT_SCALE, type Palette, shadow, space, typography } from "../theme.ts";
@@ -45,12 +46,13 @@ export function HubOpacityBand({
 }: HubOpacityBandProps): JSX.Element {
   const value = clampOpacity(opacity ?? OPACITY_DEFAULT);
   // The finger's own value while it drags: the label and the preview follow it,
-  // the record does not (one write, on release).
+  // the record does not (one write, on release). `null` outside a gesture, so
+  // `shown` follows the stored value again (a VoiceOver step must move).
   const [dragging, setDragging] = useState<number | null>(null);
   // The finger's live value, mirrored outside React: an updater must not write
   // (StrictMode may call it twice, which would be two Keychain writes).
   const dragged = useRef<number | null>(null);
-  const shown = dragging ?? value;
+  const shown = shownOpacity(dragging, value);
   const width = useRef(0);
   const ratio = (shown - OPACITY_MIN) / (OPACITY_MAX - OPACITY_MIN);
   const canDrag = useRef(writable);
@@ -71,16 +73,22 @@ export function HubOpacityBand({
     onChange,
   });
 
-  /** The finger's value at the last move: the label and the preview, no write. */
+  /** The finger's value at this move: the label and the preview, no write. */
   const dragTo = (x: number) => {
     const next = latest.current.at(x);
     dragged.current = next;
     setDragging(next);
   };
 
-  /** The gesture's END: ONE write, and only when the value actually moved. */
+  /**
+   * The gesture's END: drop the local value (so `shown` follows the stored one
+   * again — a VoiceOver step after a drag must move, not re-write the same
+   * number) and make ONE write, only when the value actually moved.
+   */
   const commit = () => {
     const local = dragged.current;
+    dragged.current = null;
+    setDragging(null);
     if (local !== null && local !== committedValue.current) {
       latest.current.onChange(local);
     }
@@ -98,7 +106,9 @@ export function HubOpacityBand({
       onStartShouldSetPanResponder: () => canDrag.current,
       onMoveShouldSetPanResponder: () => canDrag.current,
       // Through `latest`: the responder is built ONCE, so a direct call would keep
-      // the first render's closure forever.
+      // the first render's closure forever. `locationX` is the TRACK's own x: the
+      // rail, the fill and the thumb are `pointerEvents="none"`, so they never
+      // become the touch's target (a hit on the thumb read 0–22, not the spot).
       onPanResponderGrant: (event) => latest.current.dragTo(event.nativeEvent.locationX),
       onPanResponderMove: (event) => latest.current.dragTo(event.nativeEvent.locationX),
       onPanResponderRelease: () => latest.current.commit(),
@@ -155,14 +165,19 @@ export function HubOpacityBand({
           style={[styles.track, writable ? {} : styles.disabled]}
           {...(writable ? pan.panHandlers : {})}
         >
-          <View style={[styles.rail, { backgroundColor: palette.switchOff }]} />
           <View
+            pointerEvents="none"
+            style={[styles.rail, { backgroundColor: palette.switchOff }]}
+          />
+          <View
+            pointerEvents="none"
             style={[
               styles.fill,
               { backgroundColor: palette.accentFill, width: `${Math.round(ratio * 100)}%` },
             ]}
           />
           <View
+            pointerEvents="none"
             style={[
               styles.thumb,
               { backgroundColor: palette.page, left: `${Math.round(ratio * 100)}%` },

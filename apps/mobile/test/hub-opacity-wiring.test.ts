@@ -90,8 +90,13 @@ function element(src: string, marker: string): { full: string; inner: string } {
 describe("the arc is outside the opacity layer (RN multiplies a parent's opacity down)", () => {
   const outer = element(BODY, 'testID="floating-activity"');
   const body = element(outer.inner, "styles.body");
-  /** The outer view with the body layer taken OUT: everything else is the shell. */
-  const shell = outer.inner.replace(body.full, "");
+  const cast = element(outer.inner, "styles.cast");
+  /**
+   * The outer view with the body and the shadow's layer taken OUT: everything else
+   * is the shell. The cast carries the body's level on purpose (the shadow fades
+   * with it), so it is not part of what the shell may not carry.
+   */
+  const shell = outer.inner.replace(body.full, "").replace(cast.full, "");
 
   test("the rest level is on the body layer, not on the outer view", () => {
     // The outer view keeps the show/hide fade and the transform ONLY: it is the
@@ -112,15 +117,36 @@ describe("the arc is outside the opacity layer (RN multiplies a parent's opacity
     expect(element(shell, 'testID="hub-arc"').full).not.toContain("opacity");
   });
 
-  test("the glass, the border and the shadow are on the body (a faint body casts a faint shadow)", () => {
+  test("the shadow is on an UNCLIPPED layer at the body's level (a clipped layer loses its shadow on iOS)", () => {
+    expect(cast.full).toContain("shadowOpacity: palette.shadowOpacity");
+    // The shadow fades with the body: a faint body does not cast a full one.
+    expect(cast.full).toContain("opacity: bodyLevel");
+    // It is NOT the body's own shadow: the body clips (`overflow: hidden`, for its
+    // glass fill), and that clips the layer's shadow too.
+    expect(body.full).not.toContain("shadowOpacity");
+    expect(/body:\s*\{[^}]*\}/.exec(BODY)?.[0]).not.toContain("shadow.glass");
+    expect(/circle:\s*\{[^}]*\}/.exec(BODY)?.[0]).not.toContain("shadow.glass");
+    // The cast layer paints nothing and clips nothing: it only casts.
+    const castStyle = /cast:\s*\{[\s\S]*?\n {2}\}/.exec(BODY)?.[0];
+    expect(castStyle).toContain("...shadow.glass");
+    expect(castStyle).not.toContain("overflow");
+    expect(castStyle).not.toContain("backgroundColor");
+    // The outer box no longer casts either (a full shadow under a faint body).
+    expect(shell).not.toContain("shadowOpacity");
+  });
+
+  test("the body keeps the 1 pt edge (owner Q2: at 100 % the look is unchanged)", () => {
+    const bodyStyle = /body:\s*\{[\s\S]*?\n {2}\}/.exec(BODY)?.[0];
+    expect(bodyStyle).toContain("borderWidth: 1");
+    // The edge is painted by the component's `borderColor`, and it survives at every
+    // level (the body's opacity does not remove a border).
+    expect(body.full).toContain("palette.glassBorder");
+  });
+
+  test("the box, the glass and the border stay on the body, not on the outer view", () => {
     expect(shell).not.toContain("palette.glass");
     expect(shell).not.toContain("glassBorder");
     expect(body.full).toContain("palette.glassBorder");
-    expect(body.full).toContain("shadowOpacity: palette.shadowOpacity");
-    expect(BODY).toMatch(/body:\s*\{[\s\S]*?\.\.\.shadow\.glass/);
-    // ...and the outer box no longer carries the shadow itself (it would paint a
-    // full one under a faint body).
-    expect(/circle:\s*\{[^}]*\}/.exec(BODY)?.[0]).not.toContain("shadow.glass");
   });
 
   test("the arc's width and halo come from `hubOpacity`, never from a literal in the view", () => {
@@ -215,6 +241,32 @@ describe("Settings: the band is hidden in Header mode (Owner Q1) and writes once
     expect(BAND_UI).toContain("local !== committedValue.current");
     // The write itself is outside a state updater (StrictMode could call it twice).
     expect(BAND_UI).not.toMatch(/setDragging\(\(/);
+  });
+
+  test("the release/terminate drops the local value, so `shown` follows the stored one again", () => {
+    // Stuck otherwise: a VoiceOver step after a drag would re-write the same
+    // number (the label does not move) and a later stored change stays hidden.
+    expect(BAND_UI).toContain("setDragging(null)");
+    const commit = BAND_UI.slice(
+      BAND_UI.indexOf("const commit = "),
+      BAND_UI.indexOf("latest.current = {"),
+    );
+    const reset = commit.indexOf("setDragging(null)");
+    expect(reset).toBeGreaterThan(-1);
+    // ...after the value is read (the one write still needs it) and before the write.
+    expect(reset).toBeGreaterThan(commit.indexOf("const local = dragged.current"));
+    expect(reset).toBeLessThan(commit.indexOf("latest.current.onChange(local)"));
+    expect(BAND_UI).toContain("shownOpacity(dragging, value)");
+  });
+
+  test("the drag reads x from the TRACK: rail, fill and thumb are pointerEvents none", () => {
+    // `locationX` is measured inside the deepest view touched: a drag starting on
+    // the 22 pt thumb read 0–22 and the value snapped.
+    for (const layer of ["styles.rail", "styles.fill", "styles.thumb"]) {
+      const tag = element(BAND_UI, layer).full;
+      expect(tag).toContain('pointerEvents="none"');
+    }
+    expect(BAND_UI).toContain("latest.current.dragTo(event.nativeEvent.locationX)");
   });
 
   test("VoiceOver: an adjustable with both actions, stepping through `hub-opacity.ts`", () => {

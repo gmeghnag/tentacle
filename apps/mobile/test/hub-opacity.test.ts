@@ -20,6 +20,7 @@ import {
   clampOpacity,
   hubOpacity,
   opacityAt,
+  shownOpacity,
   stepOpacity,
 } from "../src/hub-opacity.ts";
 import { hubContextOf, solveHub } from "../src/hub-session.ts";
@@ -48,6 +49,31 @@ describe("rest: the body is the setting", () => {
   test("the value is clamped at render too, not only at write", () => {
     expect(at(0).body).toBeCloseTo(0.3, 5);
     expect(at(1000).body).toBe(1);
+  });
+});
+
+describe("the slider's shown value: the finger's while it drags, the stored one after", () => {
+  test("no gesture → the stored value", () => {
+    expect(shownOpacity(null, 55)).toBe(55);
+    expect(shownOpacity(null, undefined)).toBe(OPACITY_DEFAULT);
+    expect(shownOpacity(null, 0)).toBe(OPACITY_MIN);
+    expect(shownOpacity(null, 1000)).toBe(OPACITY_MAX);
+    expect(shownOpacity(null, Number.NaN)).toBe(OPACITY_MIN);
+  });
+
+  test("a live drag wins over the stored value", () => {
+    expect(shownOpacity(42, 90)).toBe(42);
+  });
+
+  test("the release drops it: a VoiceOver step after a drag moves again", () => {
+    // The stuck bug: with the dragged value kept, the step re-wrote the same
+    // number (the label did not move) and a later stored change stayed hidden.
+    const storedAfterDrag = 45;
+    const dropped = shownOpacity(null, storedAfterDrag);
+    expect(stepOpacity(dropped, 1)).toBe(50);
+    expect(stepOpacity(dropped, -1)).toBe(40);
+    // ...and a change to the stored value is visible again.
+    expect(shownOpacity(null, 70)).toBe(70);
   });
 });
 

@@ -272,3 +272,43 @@ Executor: stayed inside the plan's scope. The regressions are on the visual side
 **Verdict: REQUEST-CHANGES. Still no fix commit.** HEAD is `4bd20bcb`, "review round 2 (opus)". `git diff HEAD~1` touches only this doc. `git diff 0ed101ec HEAD -- apps` is empty: no code has changed since the exec commit. Findings 1–4 from Round 1 are all still open, and there is nothing to mutation-test. Lint and typecheck are clean, on unchanged code.
 
 **Escalation (AGENTS §0):** this is the second round with no executor commit. The fix is not reaching this branch, or not reaching this worktree. The orchestrator should confirm that the executor ran, and in which worktree, before another review round.
+
+### Fix round (deepseek)
+
+*— deepseek, 2026-11-17*
+
+Round 1's four MEDIUM findings, fixed in place (no commit). Each now has a red-before-green
+witness: I re-broke the code for every finding and the new assertion failed (56 pass / 1 fail each time).
+
+1. **The glass border is gone** → `styles.body` takes `borderWidth: 1` (`FloatingActivity.tsx:590`), matching
+   main's 1 pt (not `hairlineWidth`). The component keeps `borderColor: palette.glassBorder` on that layer
+   (`:485`) and `styles.circle` stays the unpainted box (owner Q2: 100 % is unchanged).
+   Witness: `hub-opacity-wiring.test.ts` "the body keeps the 1 pt edge".
+2. **The shadow is gone** → the shadow moved to a new UNCLIPPED, unpainted `styles.cast` layer
+   (`FloatingActivity.tsx:465-472`, style `:576`): `...shadow.glass` plus `shadowOpacity` and `opacity:
+   bodyLevel` at the call site. The body keeps `styles.clip` (`overflow: "hidden"`) for its glass fill only,
+   so `clipsToBounds` no longer eats the shadow. Carrying `bodyLevel` keeps the plan's property (a faint body
+   casts a faint shadow); at 100 % both layers are at 1, i.e. main's look.
+   Witness: "the shadow is on an UNCLIPPED layer at the body's level".
+3. **The slider value stays stuck after a drag** → `commit()` resets `dragged.current` and `setDragging(null)`
+   on release/terminate (`HubOpacityBand.tsx:86-93`), after reading the value it writes, so `shown` follows the
+   stored value again. The selection is now the pure `shownOpacity(released, stored)` (`hub-opacity.ts:94`),
+   unit-tested (`hub-opacity.test.ts`, "the release drops it: a VoiceOver step after a drag moves again").
+   Witness: "the release/terminate drops the local value".
+4. **The value jumps when the drag starts on the thumb** → the rail, the fill and the thumb are
+   `pointerEvents="none"` (`HubOpacityBand.tsx:169/173/180`), so the track is the touch's target and
+   `locationX` is the track's own x (0 → 30 %, the end → 100 %). No `pageX`/track-layout bookkeeping needed.
+   Witness: "the drag reads x from the TRACK: rail, fill and thumb are pointerEvents none".
+
+Files: `src/hub-opacity.ts`, `src/ui/FloatingActivity.tsx`, `src/ui/HubOpacityBand.tsx`,
+`test/hub-opacity.test.ts`, `test/hub-opacity-wiring.test.ts`.
+
+Verification actually run (the touched files only, no full `bun test`):
+`bun test apps/mobile/test/hub-opacity.test.ts apps/mobile/test/hub-opacity-wiring.test.ts
+apps/mobile/test/floating-button.test.ts` → 82 pass, 0 fail;
+`bunx tsc -p apps/mobile` → clean; `bunx biome check apps/mobile` → clean.
+
+Not verified: the visual result (the 1 pt edge and the shadow at 100 % on iOS, and the thumb-start drag) is
+render-side only — no iOS build was run here, and the Bun harness cannot render the button. The mutations above
+prove the code holds the structure, not that the pixels match main; the plan's Tests-list screenshots at 30 %
+still have to be attached.
