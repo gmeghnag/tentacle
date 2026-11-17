@@ -7,9 +7,21 @@ import { describe, expect, test } from "bun:test";
 import type { ArtifactMeta, ScheduleRow } from "@tentacle/protocol";
 import { NOTHING_SEEN, markArtifactOpened, markGalleryOpened } from "../src/artifact-seen-store.ts";
 import { FLOAT_SIZE, place } from "../src/floating-button.ts";
-import { DUE_SOON_MS, buttonBadge, hubActions } from "../src/hub-actions.ts";
+import { DUE_SOON_MS, buttonBadge, hubActions, hubOpen } from "../src/hub-actions.ts";
 import { ITEM_SIZE } from "../src/hub-fan.ts";
-import { bandPoint, hubContextOf, mustCancel, solveHub, wakeContext } from "../src/hub-session.ts";
+import { LONG_MS } from "../src/hub-gesture.ts";
+import {
+  bandPoint,
+  commitPlan,
+  createHubDriver,
+  hubA11yActions,
+  hubA11yRoute,
+  hubContextOf,
+  isFanOpen,
+  mustCancel,
+  solveHub,
+  wakeContext,
+} from "../src/hub-session.ts";
 
 const BAND = { width: 390, height: 600 };
 const noop = () => {};
@@ -229,5 +241,185 @@ describe("mustCancel — a world change closes an open fan (M6, M10, M15)", () =
   test("the band changed: keyboard, rotation, Dynamic Type relayout (M15)", () => {
     expect(mustCancel(world, { ...world, height: 320 })).toBe(true);
     expect(mustCancel(world, { ...world, width: 844 })).toBe(true);
+  });
+});
+
+describe("commitPlan — what a released item does (Design 5, M7/M8, M14)", () => {
+  const running = hubContextOf({
+    link: "up",
+    turn: { turnId: "t1" } as never,
+    ended: null,
+    editable: true,
+    dictation: false,
+  });
+  const withStop = { ...ENTRIES, stop: noop, steer: noop };
+  test("a live entry runs; More opens the overflow", () => {
+    expect(commitPlan("attach", idle, ENTRIES, hubOpen(idle))).toEqual({
+      kind: "run",
+      id: "attach",
+    });
+    expect(commitPlan("more", idle, ENTRIES, hubOpen(idle))).toEqual({ kind: "more" });
+  });
+  test("Stop on a turn that ended since the open says so and does nothing (M7)", () => {
+    expect(commitPlan("stop", idle, withStop, hubOpen(running))).toEqual({
+      kind: "notice",
+      text: "Already finished",
+    });
+  });
+  test("Stop/Steer seen on turn A never act on turn B started before the release", () => {
+    const runningB = hubContextOf({
+      link: "up",
+      turn: { turnId: "t2" } as never,
+      ended: null,
+      editable: true,
+      dictation: false,
+    });
+    for (const id of ["stop", "steer"] as const) {
+      expect(commitPlan(id, runningB, withStop, hubOpen(running))).toEqual({
+        kind: "notice",
+        text: "Already finished",
+      });
+    }
+    // The same turn still running does run: the guard is the turn, not "running".
+    expect(commitPlan("stop", running, withStop, hubOpen(running))).toEqual({
+      kind: "run",
+      id: "stop",
+    });
+  });
+  test("an entry gone since the open is a silent no-op (P6)", () => {
+    expect(commitPlan("info", idle, { attach: noop }, hubOpen(idle))).toEqual({ kind: "none" });
+  });
+});
+
+describe("hub accessibility actions (Design 7) — never the fan under VoiceOver", () => {
+  const all = hubActions(idle, ENTRIES).all;
+  test("every action (no six cap) + Show all, plus the two standard ones", () => {
+    const actions = hubA11yActions(all);
+    expect(actions.map((a) => a.name)).toEqual([
+      "activate",
+      "longpress",
+      ...all.map((item) => `hub-${item.id}`),
+      "show-all",
+    ]);
+    expect(actions.at(-1)?.label).toBe("Show all actions");
+  });
+  test("activate = tap (Activity); long-press and Show all = the menu; an item = its commit", () => {
+    expect(hubA11yRoute("activate")).toEqual({ kind: "tap" });
+    expect(hubA11yRoute("longpress")).toEqual({ kind: "menu" });
+    expect(hubA11yRoute("show-all")).toEqual({ kind: "menu" });
+    expect(hubA11yRoute("hub-attach")).toEqual({ kind: "commit", id: "attach" });
+    expect(hubA11yRoute("hub-bogus")).toEqual({ kind: "none" });
+    expect(hubA11yRoute("magicTap")).toEqual({ kind: "none" });
+  });
+});
+
+describe("createHubDriver — the 400 ms timer and the machine, wired (M12, M13, M16)", () => {
+  function rig() {
+    let now = 0;
+    const timers = new Map<number, () => void>();
+    let nextId = 1;
+    const effects: string[] = [];
+    const items = hubActions(idle, ENTRIES).fan;
+    const driver = createHubDriver({
+      solve: () => solveHub({ bounds: BAND, position: undefined, items }),
+      now: () => now,
+      arm: (fn, ms) => {
+        expect(ms).toBe(LONG_MS);
+        const id = nextId++;
+        timers.set(id, fn);
+        return id;
+      },
+      disarm: (id) => {
+        timers.delete(id as number);
+      },
+      apply: (list) => {
+        for (const e of list) {
+          effects.push(e.kind);
+        }
+      },
+    });
+    return {
+      driver,
+      effects,
+      timers,
+      at: (t: number) => {
+        now = t;
+      },
+      fire: () => {
+        // A fired timer is gone, like a real `setTimeout`'s.
+        for (const [id, fn] of [...timers.entries()]) {
+          timers.delete(id);
+          fn();
+        }
+      },
+    };
+  }
+  const p = { x: 350, y: 450 };
+
+  test("a hold arms ONE timer; its firing opens the fan with the lift haptic", () => {
+    const r = rig();
+    r.driver.down(p, 0);
+    expect(r.timers.size).toBe(1);
+    r.at(400);
+    r.fire();
+    expect(r.effects).toEqual(["haptic", "open"]);
+    expect(isFanOpen(r.driver.state())).toBe(true);
+  });
+
+  test("lifted in place after the open, the fan stays up: sticky is open (M2)", () => {
+    const r = rig();
+    const items = hubActions(idle, ENTRIES).fan;
+    const { layout } = solveHub({ bounds: BAND, position: undefined, items });
+    const at = layout.kind === "fan" ? layout.anchor : p; // the button's centre
+    r.driver.down(at, 0);
+    r.at(400);
+    r.fire();
+    r.driver.up(at, 450);
+    expect(r.effects).toEqual(["haptic", "open"]);
+    expect(r.driver.state().kind).toBe("fanSticky");
+    expect(isFanOpen(r.driver.state())).toBe(true);
+  });
+
+  test("a release before 400 ms clears the timer: a tap, never a late open (M13)", () => {
+    const r = rig();
+    r.driver.down(p, 0);
+    r.driver.up(p, 120);
+    expect(r.timers.size).toBe(0);
+    expect(r.effects).toEqual(["tap"]);
+  });
+
+  test("a drag clears the timer (M4)", () => {
+    const r = rig();
+    r.driver.down(p, 0);
+    r.driver.move({ x: p.x - 30, y: p.y }, 50);
+    expect(r.timers.size).toBe(0);
+    expect(r.effects).toEqual(["dragTo"]);
+  });
+
+  test("a system cancel mid-press clears the timer and stays silent (M12)", () => {
+    const r = rig();
+    r.driver.down(p, 0);
+    r.driver.cancel();
+    expect(r.timers.size).toBe(0);
+    expect(r.effects).toEqual([]);
+  });
+
+  test("dispose with the fan open closes it (the screen restores the back-swipe, M2)", () => {
+    const r = rig();
+    r.driver.down(p, 0);
+    r.at(400);
+    r.fire();
+    r.driver.dispose();
+    expect(r.effects.at(-1)).toBe("close");
+    expect(isFanOpen(r.driver.state())).toBe(false);
+    expect(r.timers.size).toBe(0);
+  });
+
+  test("a second finger's down mid-press is ignored and arms nothing (M16)", () => {
+    const r = rig();
+    r.driver.down(p, 0);
+    r.driver.down({ x: 10, y: 10 }, 50);
+    expect(r.timers.size).toBe(1);
+    expect(r.effects).toEqual([]);
   });
 });

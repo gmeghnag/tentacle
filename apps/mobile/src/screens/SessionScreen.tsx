@@ -17,7 +17,7 @@
  * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`, `session-drawer`,
  * `jump-latest`, `session-menu`, `session-menu-sheet`, `session-menu-copy-last|copy-all`.
  */
-import { useIsFocused } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import {
   type ComponentRef,
@@ -52,6 +52,8 @@ import { ACTIVITY_SETTINGS } from "../activity-settings-expo.ts";
 import type { ActivitySettings } from "../activity-settings-store.ts";
 import { activityView, agentCardTarget } from "../activity.ts";
 import type { AppLogField } from "../app-log.ts";
+import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
+import { seenFor } from "../artifact-seen-store.ts";
 import { chatStatus, titleLabel } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
@@ -79,6 +81,16 @@ import {
 } from "../follow.ts";
 import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
+import {
+  type HubActionId,
+  type HubEntries,
+  type HubOpen,
+  buttonBadge,
+  hubA11yLabel,
+  hubActions,
+  hubOpen,
+} from "../hub-actions.ts";
+import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
 import type { ArtifactGalleryRoute } from "../routes.ts";
@@ -138,6 +150,14 @@ export interface SessionScreenProps {
   readonly focusComposer?: boolean;
   /** The sessions drawer is open over this screen: the floating button hides (F20). */
   readonly drawerOpen?: boolean;
+  /** The drawer's New session (S7), reached from the hub too. Absent: no hub item (P6). */
+  readonly onNewSession?: () => void;
+  /**
+   * This session's key in the artifacts-seen record (`sessionKey`): the hub's
+   * Artifacts badge counts what this device has not seen, by the gallery's own
+   * rule. Absent: no badge (the item, when offered, shows unbadged).
+   */
+  readonly artifactsSeenKey?: string;
   /**
    * The artifacts gallery (docs/feat/model-artifacts.md D9): Session info's row
    * and a transcript card both lead there, and so does the hub's Artifacts item
@@ -182,6 +202,8 @@ export function SessionScreen({
   focusComposer = false,
   drawerOpen = false,
   onOpenArtifacts,
+  onNewSession,
+  artifactsSeenKey,
   onRowError,
 }: SessionScreenProps): JSX.Element {
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
@@ -649,6 +671,13 @@ export function SessionScreen({
   // The header's "…" menu (owner feedback #3 + Session info): it opens with the
   // sheet's read, then the phone-local copy actions.
   const [menuOpen, setMenuOpen] = useState(false);
+  // The hub's state (docs/feat/mobile-hub.md H3): Steer's focus request, its
+  // plain menu (`more` = the overflow, `all` = everything) and a commit's notice.
+  const [steerFocus, setSteerFocus] = useState(0);
+  const [hubMenu, setHubMenu] = useState<"all" | "more" | null>(null);
+  const [hubNotice, setHubNotice] = useState<string | null>(null);
+  const [artifactsSeen, setArtifactsSeen] = useState(() => ARTIFACT_SEEN.current());
+  useEffect(() => ARTIFACT_SEEN.subscribe(setArtifactsSeen), []);
   const menu = menuOpen ? sessionMenu(rows, state.schedules?.length ?? 0) : [];
   // Session info (docs/feat/mobile-session-info.md): the sheet, and which row the
   // person expanded. Every value it draws is decided in `session-info.ts`.
@@ -690,6 +719,7 @@ export function SessionScreen({
       activityOpen ||
       infoOpen ||
       menuOpen ||
+      hubMenu !== null ||
       renaming !== null ||
       decision !== null ||
       state.sheet.kind !== "idle",
@@ -714,6 +744,79 @@ export function SessionScreen({
   // place the wakes live and can be deleted, so the hub reaches it rather than
   // growing a second wakes screen.
   const openScheduled = () => openInfo(scheduledSection(info?.view ?? null));
+  // The hub (docs/feat/mobile-hub.md H3): the attach chooser, shared with the
+  // composer's photo button — one path, not two.
+  const openAttach = () =>
+    Alert.alert("Add an attachment", state.compose.attach.reason ?? undefined, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Photo Library", onPress: () => void controller.pickPhoto("library") },
+      { text: "Camera", onPress: () => void controller.pickPhoto("camera") },
+      // Offered ONLY when this session can read one (D7's pure `attachSheet`): a
+      // row that refuses at send is worse than no row, and on a pod session it
+      // would put PDF bytes on a wire AGENTS §7 forbids.
+      ...(state.compose.attach.items.includes("pdf")
+        ? [{ text: "File (PDF)", onPress: () => void controller.pickDocument() }]
+        : []),
+    ]);
+  // What the hub offers is `hub-actions.ts`'s; a missing callback is a missing
+  // item (P6). The context is read NOW for the items, and again at a commit.
+  const hubCtx = hubContextOf({
+    link: state.transcript.link,
+    turn: state.transcript.turn,
+    ended: state.transcript.closed,
+    editable: state.view.editable,
+    dictation: voiceSettings.dictation,
+    schedules: { rows: state.schedules, now: activityNow },
+    ...(artifactsSeenKey === undefined
+      ? {}
+      : {
+          artifacts: {
+            list: state.artifacts.list,
+            seen: seenFor(artifactsSeen, artifactsSeenKey),
+          },
+        }),
+  });
+  const hubEntries: HubEntries = {
+    stop: () => controller.stopTurn(),
+    steer: () => setSteerFocus((n) => n + 1),
+    attach: openAttach,
+    activity: () => openActivity(),
+    info: () => openInfo(),
+    scheduled: openScheduled,
+    ...(onOpenDrawer === undefined ? {} : { sessions: onOpenDrawer }),
+    ...(onNewSession === undefined ? {} : { new: onNewSession }),
+    ...(onOpenArtifacts === undefined ? {} : { artifacts: () => onOpenArtifacts("hub") }),
+    ...(voice === null || voice === undefined ? {} : { dictate: () => voice.tapMic() }),
+  };
+  const hub = hubActions(hubCtx, hubEntries);
+  const hubOpenAt = useRef<HubOpen>(hubOpen(hubCtx));
+  const navigation = useNavigation();
+  const hubFanOpen = useRef(false);
+  const onHubFan = (open: boolean) => {
+    hubFanOpen.current = open;
+    if (open) {
+      hubOpenAt.current = hubOpen(hubCtx);
+    }
+    // M2: no native back-swipe under the scrim; restored on every close path.
+    navigation.setOptions({ gestureEnabled: !open });
+  };
+  const commitHub = (id: HubActionId) => {
+    // A fan commit acts on the world seen at the open (M7); a VoiceOver action on now.
+    const seen = hubFanOpen.current ? hubOpenAt.current : hubOpen(hubCtx);
+    const plan = commitPlan(id, hubCtx, hubEntries, seen);
+    setHubNotice(plan.kind === "notice" ? plan.text : null);
+    if (plan.kind === "more") {
+      setHubMenu("more");
+    } else if (plan.kind === "run") {
+      hubEntries[plan.id]?.();
+    }
+  };
+  const hubMenuItems = hubMenu === "more" ? hub.more : hubMenu === "all" ? hub.all : [];
+  const hubBadgeInput = {
+    running: activityVm.count,
+    unseenArtifacts: hubCtx.unseenArtifacts,
+    unreadReport: activityVm.unread > 0,
+  };
   // One band laid out in the sheet: scroll once, when the WANTED band has reported
   // (the rules — "once", "only the wanted one" — are `revealStep`'s, folded by
   // `reveal-report.ts`). The report is read and written synchronously, so the
@@ -1069,11 +1172,19 @@ export function SessionScreen({
               bounds={band}
               position={activitySettings.position}
               shown={floatShown}
-              label={activityVm.badgeLabel}
-              running={activityVm.count > 0}
-              accessibilityLabel={activityVm.accessibilityLabel}
+              badge={buttonBadge(hubBadgeInput)}
+              turnRunning={state.view.composer.running}
+              accessibilityLabel={hubA11yLabel(hubBadgeInput)}
               voiceOver={a11yFlags.voiceOver}
               reduceMotion={a11yFlags.reduceMotion}
+              fanItems={hub.fan}
+              allItems={hub.all}
+              solve={() =>
+                solveHub({ bounds: band, position: activitySettings.position, items: hub.fan })
+              }
+              onFanChange={onHubFan}
+              onCommit={commitHub}
+              onMenu={() => setHubMenu("all")}
               onPress={openActivity}
               onDrop={(position) => {
                 // Written on drop only; a failed write keeps the spot for this run (F22).
@@ -1094,6 +1205,14 @@ export function SessionScreen({
         >
           {" "}
         </Text>
+        {hubNotice === null ? null : (
+          <Text
+            testID="hub-notice"
+            style={[typography.footnote, styles.notice, { color: palette.sec }]}
+          >
+            {hubNotice}
+          </Text>
+        )}
         {state.notice === null ? null : (
           <Text
             testID="composer-notice"
@@ -1183,20 +1302,8 @@ export function SessionScreen({
           mic={state.view.editable ? voiceView.mic : "hidden"}
           onMic={() => voice?.tapMic()}
           level={voiceView.level}
-          onPhoto={() =>
-            Alert.alert("Add an attachment", state.compose.attach.reason ?? undefined, [
-              { text: "Cancel", style: "cancel" },
-              { text: "Photo Library", onPress: () => void controller.pickPhoto("library") },
-              { text: "Camera", onPress: () => void controller.pickPhoto("camera") },
-              // Offered ONLY when this session can read one (D7's pure
-              // `attachSheet`): a row that refuses at send is worse than no row,
-              // and on a pod session it would put PDF bytes on a wire AGENTS §7
-              // forbids.
-              ...(state.compose.attach.items.includes("pdf")
-                ? [{ text: "File (PDF)", onPress: () => void controller.pickDocument() }]
-                : []),
-            ])
-          }
+          onPhoto={openAttach}
+          focusKey={steerFocus}
           bottomPadding={bottomPadding}
         />
         {state.view.composer.photosNotice === null ? null : (
@@ -1218,6 +1325,25 @@ export function SessionScreen({
           onDiscard={() => void controller.outbox("discard", deciding ?? "")}
           onEdit={() => void controller.outbox("edit", deciding ?? "")}
           onClose={() => setDeciding(null)}
+        />
+        {/* The hub's plain menu (Design 5/7): "More" (the overflow), no fan fits,
+          or VoiceOver's long-press / Show all (everything). */}
+        <ActionSheet
+          palette={palette}
+          visible={hubMenu !== null}
+          testID="hub-menu-sheet"
+          cancelTestID="hub-menu-cancel"
+          actions={hubMenuItems.map((item) => ({
+            label: item.label,
+            testID: `hub-menu-${item.id}`,
+            ...(item.danger ? { destructive: true } : {}),
+            onPress: () => {
+              setHubMenu(null);
+              playHaptic("light");
+              commitHub(item.id);
+            },
+          }))}
+          onCancel={() => setHubMenu(null)}
         />
         <ActionSheet
           palette={palette}

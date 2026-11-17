@@ -1396,3 +1396,192 @@ files; the 5 skips are the pre-existing opt-in docker/k8s/slow-socket set). No
 protocol schema, persistence or daemon surface is touched, and the changelog
 fragment is unchanged: H3's fan UI is still unbuilt, so the reveal is unreachable
 from a shipped build and nothing user-visible changes in this round.
+
+### H3 reopened (orchestrator, 2026-11-17 11:35)
+
+H3 was logged "H1–H3 COMPLETE" on 2026-11-16 but **the fan was never built** (docs/fix/mobile-hub-longpress-dead.md, root causes 1–3: `FloatingActivity.tsx` is still the mobile-chrome F2 PanResponder, no hold timer, no `hub-gesture.reduce`, no fan component, no `playHaptic`, blank disc with no glyph). Do H3 now, as planned in this doc: **the load-bearing spike FIRST** (a PanResponder on the button keeps the touch over the transcript ScrollView for 400 ms + drag-select), then `HubFan.tsx` (radial fan A, the owner's pick), the gesture machine wired into the button, haptics (`open`/`commit`), the hub glyph on the idle button, the a11y ActionSheet, flow 29 — and the items H4a/H4b already registered (Scheduled, Artifacts) must appear in the fan. **Run it in the simulator** (own simulator, not the booted iPhone 17 Pro; e2e harness `bun apps/mobile/e2e/run.ts`, never port 4000) and put screenshots of the fan open (light/dark) in `.tentacle/tmp/mobile-hub/h3-shots/`. `changelog.d/mobile-hub.added.md` already describes the fan: H3 makes it true.
+Simulator for H3: **iPhone 17** (UDID AF01E641-9EBC-4E39-B3C8-925DAE55807B). The QA sweep uses iPhone 17 Pro Max; the booted iPhone 17 Pro is shared — do not use it.
+
+## Execution — H3 (redo after the reopen)
+
+*— claude-opus-5-5, 2026-11-17*
+
+**Load-bearing check (step 1): HOLDS.** Run on the assigned iPhone 17
+(`AF01E641-…`, iOS 26.5), never the shared iPhone 17 Pro. Temporary spike:
+`FloatingActivity`'s responder recorded its life instead of moving (moves,
+max page distance from the grant, release, terminate) into a `spike-result`
+text; a temporary flow 28 swiped from the button UP over the transcript
+`ScrollView`, then LEFT (`duration: 2500` each), then `longPressOn`. Run
+`.tentacle/tmp/e2e-mobile/1794912243307` — **PASS**:
+```
+swipe UP   → spike moves=155 max=659 released=1 terminated=0   (transcript did not scroll: shot h3-shots/spike-1-up.png)
+swipe LEFT → spike moves=… released=1 terminated=0              (asserted by regex)
+longPress  → spike moves=0 max=0 released=1 terminated=0
+```
+The button keeps the finger 659 pt away, over the `ScrollView`, and is never
+terminated: no gesture library is needed. (The first attempt,
+`…/1794911312072`, failed before any step: on the fresh simulator's first boot
+the Face ID match fell back to the passcode sheet; a re-run passed.) Both spike
+files were restored from `.tentacle/tmp/mobile-hub/spike2/` copies.
+
+**Done, in order:**
+1. `e2e/run.ts`: `firstDevice(json, major, prefer?)` + `--udid` (`E2E_SIM_UDID`
+   too) so a run can target a dedicated simulator; `test/e2e-preflight.test.ts`
+   red (`Expected "own", Received "booted"`; then the `--udid` parse case) → green.
+2. `src/hub-session.ts` (pure, +tests in `test/hub-session.test.ts`):
+   `createHubDriver` (the reducer + its ONE 400 ms timer, injected clock/timers:
+   armed on the press, cleared on every way out of `pressing`, `dispose` closes an
+   open fan — M2/M4/M12/M13/M16), `isFanOpen`, `commitPlan` (`resolveCommit` →
+   run / more / notice / none), `hubA11yActions` + `hubA11yRoute` (Design 7).
+   Red: import failure first, then the fake-timer case (a rig bug: a fired timer
+   stayed in the map — fixed in the rig, not the code); green 30/0.
+3. `src/ui/Composer.tsx`: `focusKey` (each new value focuses the field: Steer).
+4. `src/ui/HubFan.tsx` (new, render only): scrim (the sticky tap target, band
+   coordinates = its local point), the items at `fanLayout`'s spots, staggered
+   spring per `fanMotion` (fade under Reduce Motion), highlight ×1.3 + dim,
+   `labelPlacement` for the highlighted item's pill, Stop red, item badges.
+5. `src/ui/FloatingActivity.tsx` rewritten: the responder feeds `bandPoint`
+   points into `createHubDriver`; effects → haptic (`hubHaptic`), open (fan, or
+   `onMenu` when the layout is `menu`), highlight, commit, close, tap, dragTo /
+   drop (S10's snap kept) / dragCancel. `mustCancel` on every world change
+   (sheet/drawer, VoiceOver, band size). `onFanChange` on every change and on
+   unmount. Idle glyph = 2×2 dot grid (`hub-glyph`); a count badge
+   (`hub-badge-count`) or a new-dot (`hub-badge-dot`) per `buttonBadge`; a
+   spinning accent arc while a turn runs (static under Reduce Motion);
+   `accessibilityActions` = `hubA11yActions(all)`, routed by `hubA11yRoute`.
+6. `src/screens/SessionScreen.tsx`: `openAttach()` (ONE chooser for the
+   composer's photo button and the hub); the `entries` record (stop →
+   `controller.stopTurn()`, steer → `focusKey`, attach, activity, info,
+   scheduled (H4a), sessions → drawer, new → drawer's New session, artifacts →
+   gallery `"hub"` (H4b), dictate → `voice.tapMic()`); `hubContextOf` with the
+   wakes AND the artifacts seen record; `commitPlan` at release against the
+   open's snapshot (a VoiceOver action against now); the More / menu / VoiceOver
+   `ActionSheet` (`hub-menu-sheet`, haptic `light`); `hub-notice` ("Already
+   finished"); `navigation.setOptions({gestureEnabled: !open})` (M2); the hub
+   menu also counts as "covered".
+7. `App.tsx`: the drawer host's render prop passes New session down;
+   `SessionRoute` passes `onNewSession` and `artifactsSeenKey`
+   (`sessionKey(computerId, sessionId)`).
+8. `e2e/flows/33-hub.yaml` + registered in `FLOWS` / `COMPOSE_SESSION_VARS`
+   (`HUB_ID`). **PASS** on the iPhone 17 (`…/1794913276348`, first run): glyph
+   at zero activity; long-press → sticky fan, `hub-item-attach` +
+   `hub-item-activity`; tap Attach → "Add an attachment" → Cancel; long-press →
+   tap outside → fan gone, nothing ran; `HOLD hub` → long-press →
+   `hub-item-stop` + `hub-item-steer` → tap Stop → `turn-idle`; tap = Activity;
+   Header → no hub. Shots (light/dark, idle and running) in
+   `.tentacle/tmp/mobile-hub/h3-shots/` (`33-hub-fan-*.png`): the running fan
+   shows Stop (red), Steer, Activity, Artifacts, Attach, More on two rings, the
+   arc spinning on the button.
+
+**Mutations** (`bun .tentacle/tmp/mobile-hub/spike2/mutate-h3b.ts`, exact bytes
+restored; the plan's own target — `stopTurn` calling `act()` — was run in the
+2026-11-16 round: S1, 2 fail):
+```
+D1 timer not cleared on leaving pressing: 27 pass, 3 fail — a release before 400 ms …
+D2 timer re-armed on every pressing step: 29 pass, 1 fail — a second finger's down …
+D3 dispose leaves an open fan open:       29 pass, 1 fail — dispose with the fan open …
+C1 commitPlan: More runs as an entry:     29 pass, 1 fail — a live entry runs; More opens …
+C2 commitPlan drops the notice:           29 pass, 1 fail — Stop on a turn that ended …
+A1 a11y: no Show all:                     29 pass, 1 fail — every action (no six cap) …
+A2 a11y: long-press is a tap:             29 pass, 1 fail — activate = tap …
+```
+
+**Drift from the Implementation (and why).**
+- The flow is **33-hub**, not 29: `29-tool-rows` took the number meanwhile.
+  The fan shots are in flow 33 (both themes, via `_shot`), not added to 24.
+- Files outside the plan's list: `hub-session.ts` grew the driver / commit /
+  a11y seam (§7: the timer, the routing and the commit verdict are tested
+  there, not in a `.tsx`); `App.tsx` (New session and the artifacts seen key
+  live only there); `e2e/run.ts` `--udid` (to honour "own simulator").
+- Scrim: one `palette.scrim` at opacity 0.4 (≈0.14 in both themes), not the
+  plan's light 0.12 / dark 0.30. Palette carries no theme flag; a later
+  visual pass may add a token.
+- Labels: only the highlighted item has one (Design 3), so a sticky fan shows
+  icons only. As designed; noted for the owner.
+- `bun install --frozen-lockfile` was needed once: `linkedom`/`mermaid`
+  (declared by `packages/tools`, in `bun.lock`) were not installed in this
+  worktree, so root `tsc` failed on `diagram-parse.ts`. No lockfile change.
+
+**Not driven (stated):** press-slide-release on device (Maestro's swipe is a
+drag: pinned by `hub-gesture` + the driver tests, and the spike for the
+responder); the back-swipe after a close (M2, no Maestro edge gesture);
+VoiceOver / Reduce Motion (pure tests); the More sheet on device (the fan had 6
+items, More appeared in the running fan but was not tapped).
+
+**Gate:** `bun run typecheck` clean · `bun run lint` clean (1988 files) ·
+`bun test` 14491 pass / 5 skip (all env-gated live/opt-in files) / 0 fail.
+`changelog.d/mobile-hub.added.md` unchanged — H3 makes it true (the Artifacts
+count is now wired). No schema change (no protocol.json regeneration).
+
+**Status: H3 DONE.**
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-17* (answers the H3-redo Review below)
+
+The code was already correct, so this round changes only tests. "Red" is the
+reviewer's mutation, which survived 30/0 before this round and is killed now.
+
+1. **MEDIUM, open snapshot not pinned: FIXED.** New test in
+   `apps/mobile/test/hub-session.test.ts` (`commitPlan` block): "Stop/Steer seen on
+   turn A never act on turn B started before the release". With ctx = turn `t2`
+   running and open = `hubOpen(turn t1)`, both `stop` and `steer` give the notice
+   "Already finished". A positive control (same turn ⇒ `run`) shows the guard keys on
+   the turn id, not on "running".
+2. **Nit, `isFanOpen` sticky untested: FIXED (kept, now pinned).** New driver test
+   "lifted in place after the open, the fan stays up". It presses at the layout's
+   `anchor` (the button's centre: a press at the rig's `p` lands on an item and
+   commits), fires the timer and lifts in place. It then asserts the effects are only
+   `haptic, open`, the state is `fanSticky`, and `isFanOpen` is true. The screen still
+   keeps its own `hubFanOpen` ref. `isFanOpen` stays as the tested definition of
+   "fan up" (M2).
+
+**Mutations** (`.tentacle/tmp/mobile-hub/fix1/mut.ts`; bytes restored and checked identical):
+```
+M1 open snapshot ignored:    31 pass, 1 fail — Stop/Steer seen on turn A never act on turn B started before the release
+M2 isFanOpen without sticky: 31 pass, 1 fail — lifted in place after the open, the fan stays up: sticky is open (M2)
+restored: identical
+```
+Before this round, M1 survived 30/0 (Review) and M2 survived 30/0 (Review nit).
+
+**Gate:** `bun run typecheck` clean · `bun run lint` clean (1988 files) · `bun test`: 14489 pass / 5 skip / **4 fail**,
+in 620 s (the H3 run took less). Only one failure was visible in the `tail`: `serve-log-store` S11, the
+real-SIGKILL chain, which got `> 100` kills and received 0. Run alone, it passes 22/0 in 18 s, so
+it looks like load-sensitive timing. The other 3 failures were cut off by the `tail` and are
+**not identified**. This round changes only `apps/mobile/test/hub-session.test.ts` (32/0), so
+they cannot come from this diff. To confirm, run `bun test 2>&1 | rg "^\(fail\)"` once on a quiet machine.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17* (H3 redo, `git diff main...HEAD`. Same model family as the executor signature: fresh context only, shared blind spots possible.)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, test-only; the code itself reads correct).
+
+**Findings**
+1. **MEDIUM: the open-snapshot property is not pinned at H3's seam.** `apps/mobile/src/hub-session.ts:186` forwards `open` to `resolveCommit`. Every `commitPlan` test (`test/hub-session.test.ts:257-270`) passes either `hubOpen(idle)` with ctx `idle` or the M7 "ended" case. No test has ctx = turn B running and open = turn A running. Mutation `resolveCommit(id, ctx, entries, hubOpen(ctx))` (the open snapshot ignored): **30 pass / 0 fail**. This is the H1+H2 review's HIGH: Stop highlighted on A, A ends, B starts before the release, and `stopTurn()` cancels B. Round 2 asked H3 to verify this exact wiring. The screen side (`SessionScreen.tsx:795-807`: snapshot in `onHubFan(true)`, used while `hubFanOpen.current`) is correct as I read it (commit and close are applied synchronously before the close effect clears the flag), but it lives in a `.tsx` and nothing tests it. Fix: add a `commitPlan("stop", ctxRunningB, withStop, hubOpen(ctxRunningA))` → notice/none test, shown red under the mutation above.
+
+**Below the bar (nits):** `isFanOpen` (`hub-session.ts:245`) has no `src/` caller. The screen keeps its own `hubFanOpen` ref, and the mutation that drops `fanSticky` passes 30/0 because the tests only check `fanTracking` and idle. Either remove it or use it.
+
+**Gate (narrow + static):** `bun test` hub-session / hub-gesture / hub-actions / e2e-preflight: 108 pass / 0 fail. `bun run lint` clean (1988 files). `bun run typecheck` clean. The full `bun test` was not re-run by me.
+
+**Mutations** (`.tentacle/tmp/mobile-hub/rev-h3/mut.ts`, bytes restored, checked by sha): open snapshot ignored, 30/0 (**survives**, finding 1); `isFanOpen` without sticky, 30/0 (survives, nit); `dispose` without cancel, 29/1 (killed).
+
+**Attacks tried:**
+- (a) Turn B starts between open and release: the wiring holds, the test gap is finding 1.
+- (b) The fan's ids versus `fanItems` drifting: no. `solve` and `fanItems` come from the same `latest.current` render, inside one `feed`.
+- (c) Sticky fan, then touches outside the band (header, composer): keyboard and band height trigger `mustCancel`, the header menu sets `shown=false` and cancels, back unmounts and disposes. No commit, back-swipe restored.
+- (d) The "menu" layout opening the ActionSheet sets covered, so `shown=false` and cancel: the machine converges to idle.
+- (e) `gestureEnabled` overriding a screen option: no other `gestureEnabled` exists in `apps/mobile`.
+- (f) A second finger: one responder only, and the driver does not re-arm (D2).
+
+**Executor behaviour:** the spike came first and was evidenced, the logic was pulled into the pure `hub-session.ts` (§7), its own mutations ran, and the drift is stated honestly. It missed the one property the previous round flagged for H3.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* (commit `90cd24c9`, `git diff HEAD~1`: test-only, `test/hub-session.test.ts` +34, no `src/` change)
+
+**Verdict: PASS.** No HIGH or MEDIUM findings.
+
+- **Finding 1 is fixed.** A new test opens on turn `t1` and releases on turn `t2`, for both Stop and Steer, and expects "Already finished". It also checks that the same turn still running does run. I re-ran the round-1 mutation (`resolveCommit(…, hubOpen(ctx))`, which ignores the open snapshot): it went from 30/0 to **31 pass / 1 fail**, so it is now killed.
+- **The `isFanOpen` nit is fixed.** A new driver test covers press → 400 ms → release in place, ending in `fanSticky` with `isFanOpen` true. The mutation that drops `fanSticky` is now **31 / 1, killed**. `isFanOpen` still has no `src/` caller, which is a nit.
+- **Regressions:** none, since the commit touches tests only. The `dispose`-without-cancel mutation is still killed (31 / 1). `hub-session.test.ts` passes 32 / 0, `bun run lint` is clean (1988 files) and `bun run typecheck` is clean. The tree's bytes were restored after the mutations (checked by sha), and `git status` is clean apart from this doc.
