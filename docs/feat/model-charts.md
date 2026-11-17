@@ -2526,3 +2526,19 @@ audio is not).
 - **Reviewer = same model family as the orchestrator** (fresh context only).
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Review
+
+### Review — C8 (fresh context)
+
+**Verdict: REQUEST-CHANGES** — two MEDIUM. Scope: `git diff main...HEAD`, slice C8 only.
+
+- **Gate (narrow):** the 12 C8 test files → 219 pass / 0 fail (681 expects); `bun run lint` clean (1937 files); `bun run typecheck`: root clean, `tsc -p apps/mobile` fails on the 5 missing-module errors (`expo-document-picker`, `react-native-webview`) — none in C8's files, as the executor recorded. Full `bun test` not re-run.
+- **MEDIUM 1 — a stale chart read re-opens or mislabels the preview** (`packages/tui/src/App.tsx:1986-1999`, guard `packages/tui/src/usePanels.ts:174`): the read is guarded only by the PANEL generation, and esc (`setArtifactsPreview(gen, null)`) or a second enter does not bump it. Repro `.tentacle/tmp/model-charts/c8-race.test.ts` (deferred `readArtifact`): enter → esc (tree shown) → the read resolves → the frame is `artifact · chart` again with the chart drawn, i.e. the preview pops back after the person left it. The same path paints chart A's bytes into chart B's preview (enter A, esc, enter B, A answers first). Fix: a per-preview token (or bump on every preview open/close) compared at the answer, plus an App test with a deferred read.
+- **MEDIUM 2 — the loading state claims the spec is invalid** (`packages/tui/src/panels/artifacts.ts:40` → `artifacts-panel.ts:239`): the empty `{}` preview is drawn as `chartPreviewView({ bytes: "" })`, so while the read is in flight the panel shows `this build can't draw this chart (its spec did not validate)` (repro frame "LOADING FRAME"). The plan's "a slow read is visible" turns into a false error. Fix: a distinct loading view when `bytes === undefined`, and test it.
+- **Mutation:** `presentChart` sending `JSON.stringify(spec)` instead of `canonicalChartJson(spec)` → `chart.test.ts` 18 pass / 0 fail (it SURVIVED; for the fixture the two may be byte-equal, so this is low, not blocking). Reverted, `git status` clean. The executor's 9 recorded mutations were not re-run.
+- **Attacks tried:** (a) §7 pod not trusted — the TUI preview re-validates through `chartToolBody`, the mobile tile through `chartThumbView`→`chartRowView`, the size cap is checked before any fetch: holds. (b) Protocol — `chart` is a client-side `ARTIFACT_KINDS` entry, the wire kind stays free, an older client narrows to `other`: no bump needed, holds. (c) Sink failure — a throwing `present` becomes a note, no sink → unchanged result: holds. (d) Preview key routing — every tree key is spent while a preview is open; mouse clicks/wheel are not gated (`panels/artifacts.ts` click handler moves the invisible cursor) — low.
+- **Executor behaviour:** thorough Execution with RED evidence and mutation table; the race and the loading copy were missed because the App test uses an immediately-resolving read.
+- **Reviewer = Claude (claude-opus-5-5), the executor DeepSeek:** different model families.
+
+*— claude-opus-5-5, 2026-11-17*
