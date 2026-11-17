@@ -101,3 +101,43 @@ spawned ssh child's pid file. Unverified by me: whether that flake is environmen
 this host; it is not this branch's.
 
 ## Review
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff c6b21370..HEAD` (the branch's own two
+commits; `main...HEAD` has two merge bases and pulls in unrelated mobile-header-status files).
+
+**Gate (re-run here).** The 6 touched test files: 101 pass, 0 fail, 14 snapshots ·
+`bun run lint` clean · `bun run typecheck` clean. Full `bun test` was not re-run.
+
+**Findings.**
+1. **HIGH — `diagram-ascii-flow.ts:436-437` (`sizeVertex`, sideways branch).** A box's
+   height in LR/RL is still `crossSize = max(base, k+2)`, so it never counts `boxLines`,
+   but `drawBox` (`:678-690`) now stacks every line. The first and last lines are drawn
+   over the top and bottom borders. Repro (`.tentacle/tmp/tui-diagram-complex-flow/rev/lr.ts`):
+   `flowchart LR; A["uno<br/>due<br/>tre"] --> B[fine]` → `╭─uno─╮ / │ due ├► / ╰─tre─╯`.
+   This is also a **regression on main**: an LR label longer than 46 cells drew fine in one
+   wide box before, and is now wrapped into a broken box at 200 columns
+   (`╭─a very long label that certainly goes past─╮`). Fix: in the sideways branch, set
+   the height to `base + lines.length - 1` (taken with the k-based max), and add an LR test.
+2. **MEDIUM — test gap behind #1.** None of the new tests (`diagram-complex-flow.test.ts`,
+   snapshots) uses an LR/RL flowchart with a multi-line or wrapped label. That is how a
+   broken drawing got through as "drawn".
+
+**Premises.** The doc says the bail-out was `drawFrames` and that two model bugs sat behind
+it (subgraph id in the title, `[[ ]]` missing). Both are TRUE in the diff (`model.ts:130`,
+`:111`). The `FlowReason` mapping (`diagram-lines.ts:38-42`) matches the refusal sites.
+
+**Attacks tried.** (a) LR/RL multi-line or wrapped label → broken (#1). (b) TD subroutine
+plus a `<br/>` decision → drawn correctly (`◇` on the middle row). (c) A flowchart with one
+node → draws. The `too-big` reason for a zero-node model reads oddly, but it is very
+unlikely to be reached past lint. (d) Can `boxLines` loop forever? No: `outer ≥ 12` gives
+a non-empty `head`. (e) §7: the modules stay pure, there are no protocol or persistence
+changes, and nothing writes to the terminal. Holds.
+
+**Mutation.** I could NOT re-run any: the mutation script needs a permission that was not
+granted in this session. The executor's mutation claims are unverified by me.
+
+**Executor behaviour.** A careful repro-first diagnosis that corrected the Context's guess.
+But it pinned only the owner's TD fixture, and it missed the sideways path, which shares
+`boxLines`/`drawBox`.
+
+*— claude-opus-5-5, 2026-11-17 (different model family from the deepseek executor; fresh context)*
