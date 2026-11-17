@@ -121,7 +121,54 @@ function render(
   return { tree: walk(ChartView({ view, testID: "chart-c1" })), view };
 }
 
+// Every group of sibling element keys under `element` (React warns on a repeat among siblings).
+const siblingKeys = (element: unknown, out: string[][] = []): string[][] => {
+  if (Array.isArray(element)) {
+    const keys = element.flatMap((c) =>
+      isValidElement(c) && c.key !== null ? [String(c.key)] : [],
+    );
+    if (keys.length > 0) out.push(keys);
+    for (const c of element) siblingKeys(c, out);
+    return out;
+  }
+  if (!isValidElement(element)) return out;
+  const { type, props } = element as { type: unknown; props: Record<string, unknown> };
+  if (typeof type === "function") {
+    return siblingKeys((type as (p: Record<string, unknown>) => unknown)(props), out);
+  }
+  return siblingKeys(props.children, out);
+};
+
 describe("ChartView — a dumb renderer of the layout", () => {
+  test("a repeated scatter point does not repeat a React key among its siblings", () => {
+    const view = row.chartRowView(
+      {
+        name: "chart",
+        args: JSON.stringify({
+          type: "scatter",
+          title: "Dup",
+          datasets: [
+            {
+              label: "s",
+              data: [
+                { x: 1, y: 1 },
+                { x: 1, y: 1 },
+                { x: 2, y: 3 },
+              ],
+            },
+          ],
+        }),
+        status: "ok",
+      },
+      { width: 358, fontScale: 1, locale: "it-IT", palette: theme.lightPalette },
+    );
+    if (view === null) throw new Error("no view");
+    expect(view.layout.dots.length).toBe(3);
+    for (const keys of siblingKeys(ChartView({ view, testID: "chart-c1" }))) {
+      expect(new Set(keys).size).toBe(keys.length);
+    }
+  });
+
   test("one <Path> per layout path, same `d`, in order; stroked paths are not filled", () => {
     const { tree, view } = render(REVENUE);
     const paths = all(tree, "Path");

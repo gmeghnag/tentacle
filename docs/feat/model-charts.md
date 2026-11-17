@@ -2097,3 +2097,12 @@ before *Fix round 1* below, which is the round that answers them.
 - **Reviewer = same model family as the C5/C6 executor** (claude-opus-5-5, fresh context only): shared blind spots possible.
 
 *— claude-opus-5-5, 2026-11-16*
+
+### Fix round 1 (C5+C6)
+
+- **MEDIUM fixed — duplicate React keys for repeated scatter points** (`apps/mobile/src/ui/chart/ChartView.tsx`): a dot's key is now `dot:${i}` (the list is static per layout; equal `{x,y}` are legal), with a `biome-ignore noArrayIndexKey` and its reason.
+- **Red → green:** new test in `apps/mobile/test/chart-view.test.ts` ("a repeated scatter point does not repeat a React key among its siblings", a 3-point scatter with `{x:1,y:1}` twice, checks sibling element keys) failed on the old key (`Expected: 3, Received: 2`), passes on the fix.
+- **Mutation:** restoring the old `${series}:${x}:${y}:${r}` key → RED (1 fail); reverted, fix back.
+- **Gate:** tsc root + mobile clean; lint clean; chart/e2e-mock-chart tests green.
+
+*— claude-sonnet-5-5, 2026-11-17*

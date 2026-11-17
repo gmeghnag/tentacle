@@ -154,8 +154,10 @@ export function ChartView({ view, testID }: ChartViewProps): JSX.Element {
               />
             ),
           )}
-          {layout.dots.map((d) => (
-            <G key={`${d.series}:${d.x}:${d.y}:${d.r}`}>
+          {layout.dots.map((d, i) => (
+            // By index: the list is static per layout, and equal points are legal.
+            // biome-ignore lint/suspicious/noArrayIndexKey: see above
+            <G key={`dot:${i}`}>
               {d.halo === undefined ? null : (
                 <Circle cx={d.x} cy={d.y} r={d.halo.r} fill={color(d)} opacity={d.halo.opacity} />
               )}
