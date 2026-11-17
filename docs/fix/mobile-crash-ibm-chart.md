@@ -165,3 +165,25 @@ Against Review round 1 (2 MEDIUM, no HIGH).
 *Same model family as the executor (fresh context only): shared blind spots are possible.*
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Round 2
+
+**Verdict: APPROVE** (diff `HEAD~1`, commit 139708c2). Both round-1 findings are fixed; no new HIGH or MEDIUM.
+
+1. **R1-1 (artifact viewer unguarded) — fixed.** `ArtifactViewerModal.tsx:182-204` now wraps `ChartFullScreen` in `RowGuard`, with `resetKey={phase.text}`, a viewer-sized fallback, and `rowErrorFields("artifact-chart", …)`. That reaches `APP_LOG` "client-error" through `ArtifactGallery.tsx:319` → `App.tsx:2253`. Mutation: removing the viewer's `onError` → the wiring test fails (1 fail); reverted.
+2. **R1-2 (fallback never resets) — fixed.** `RowGuard.tsx:31-36` uses `getDerivedStateFromProps` to reset `failed` when `resetKey !==` the stored key. `SessionScreen.tsx:893` passes `resetKey={item}`. Mutations:
+   - never resetting → "recovers when its row changes" fails;
+   - resetting on every render (the loop) → "same resetKey stays failed" fails.
+   Both reverted.
+3. **Real-reconciler trace** (`.tentacle/tmp/mobile-crash-ibm-chart/e2e-reset.ts`, Ink/React 18 driving the actual `RowGuard.tsx`):
+   - same key, re-rendered twice → `FALLBACK`, **0 extra throws, 1 log**;
+   - new key with fixed content → `ok`;
+   - new key with broken content → `FALLBACK`, 2 logs.
+   React applies `getDerivedStateFromProps` on the error re-render without clearing the failure, so there is no loop.
+4. **Regression check, row identity:** `SessionScreen.tsx:512` `rows = state.view.rows` ← `session-screen-controller.ts:818` `transcript.rows`, and `transcript.ts:201/211` appends with spread, which keeps unchanged row objects. So `resetKey={item}` retries only when a row's content changes, or once per full replace (resync, `/clear`). That is bounded and not per update.
+
+**Gate (reviewer-run):** `row-guard.test.ts` + `row-guard-wiring.test.ts` 17 pass / 0 fail. `bun run lint` clean (1970 files). `bun run typecheck` clean. `git status` clean after every mutation. Full `bun test` not re-run.
+
+**Still open (debt, not blocking):** the root cause (Intl under Hermes-iOS) is unverified. The next on-device failure will log its error class. The gallery thumbnail's promise path (`ArtifactGallery.tsx:126`) is unguarded, but it rejects rather than aborting the app.
+
+*— claude-opus-5-5, 2026-11-17*
