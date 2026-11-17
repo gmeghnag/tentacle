@@ -72,8 +72,8 @@ import {
 } from "./outbox.ts";
 import { documentBlocksOf, refsOf as itemRefsOf, localPhotosOf } from "./outbox.ts";
 import type { PdfRefusal } from "./pdf-input.ts";
+import type { QueueTrace, TraceSource } from "./queue-trace.ts";
 import type { LocalPhoto } from "./transcript-rows.ts";
-
 /** The chat handle the compose acts use (a seam: tests pass a fake). */
 export interface ComposeHandle {
   /** The session's id on this client (null until open). */
@@ -207,6 +207,11 @@ export interface ComposeDeps {
   readonly onChange: () => void;
   /** A sentence to show (a refusal's reason), cleared by the next act. */
   readonly notify: (text: string | null) => void;
+  /**
+   * The queue-diagnosis trace (docs/fix/mobile-queued-stuck.md). Absent: nothing
+   * is traced, and every line below is skipped — no behaviour depends on it.
+   */
+  readonly trace?: QueueTrace;
 }
 
 /** The compose state, as the screen reads it. */
@@ -237,6 +242,11 @@ export interface Compose {
   stop(): void;
   /** A tap on the one button, with `composerAction`'s answer. */
   press(action: ComposerAction): Promise<void>;
+  /**
+   * The turn bracket closed: trace the rows still shown. DIAGNOSTIC only — a row
+   * is never cleared here (see `docs/fix/mobile-queued-stuck.md`).
+   */
+  turnClosed(): void;
   /** **Send now**: my queued rows + the field, as ONE prompt (the TUI's chord). */
   sendNow(): Promise<void>;
   /** Take another device's returned row into my field (an explicit act). */
@@ -297,8 +307,22 @@ export function createCompose(deps: ComposeDeps): Compose {
     deps.flushDraft(text, chipFiles(chips));
   };
 
+  /** The rows the UI SHOWS, as the pure view function answers for the state now. */
+  const traceRows = (where: string): void => {
+    deps.trace?.({ kind: "rows", where, ids: queueRows(state).map((row) => row.id) });
+  };
+
   /** The queue, applied: rows, hand-backs, and the reclaims it asks for. */
-  const applyQueued = (queue: QueueState, stoppedHere: boolean): void => {
+  const applyQueued = (queue: QueueState, stoppedHere: boolean, source: TraceSource): void => {
+    // BEFORE the fold: every id the daemon LISTED in this report, and how many
+    // rows it returns. The pair (this report, the rows shown after it) is what
+    // says whether a row that never left was even told to leave.
+    deps.trace?.({
+      kind: "queued-received",
+      source,
+      entries: queue.entries.map((entry) => entry.id),
+      returned: queue.returned.length,
+    });
     const step = onQueued(state, queue, { stoppedHere, keep: carried });
     state = step.state;
     if (step.give !== "") {
@@ -312,6 +336,7 @@ export function createCompose(deps: ComposeDeps): Compose {
     }
     void persistOwn();
     refresh();
+    traceRows(`after-queued-${source}`);
   };
 
   /** A reclaim, through the client (never a frame built here). */
@@ -589,6 +614,8 @@ export function createCompose(deps: ComposeDeps): Compose {
     }
     const refused = enqueueRejected(state, id, new Set());
     state = refused.state;
+    deps.trace?.({ kind: "compose", act: "reject", row: id });
+    traceRows("after-reject");
     if (refusal.kind === "offline") {
       // No answer from the daemon: the item is `waiting` with its key, so it goes
       // again at the next `up` — the person does not retype its words (F1).
@@ -638,6 +665,10 @@ export function createCompose(deps: ComposeDeps): Compose {
       };
     },
     busy: () => busy,
+    /** The turn bracket closed: what the composer still shows (diagnostic only). */
+    turnClosed() {
+      traceRows("after-turn-end");
+    },
     async start(handle) {
       if (started) {
         return;
@@ -658,7 +689,7 @@ export function createCompose(deps: ComposeDeps): Compose {
             pending.push(queue);
             return;
           }
-          applyQueued(queue, false);
+          applyQueued(queue, false, "live");
         });
       }
       const loaded = await deps.store.load();
@@ -669,14 +700,14 @@ export function createCompose(deps: ComposeDeps): Compose {
       state = { ...state, own: ownFromIds(deps.store.data.ownIds, deps.store.data.ownTexts) };
       // The held reports, oldest first: the last one wins (each is a FULL state).
       for (const queue of pending) {
-        applyQueued(queue, false);
+        applyQueued(queue, false, "replay");
       }
       // A client that does not replay: read what it holds (the one report that
       // never arrives through a subscription). From here on, live reports apply.
       if (pending.length === 0) {
         const current = handle?.queued();
         if (current !== undefined) {
-          applyQueued(current, false);
+          applyQueued(current, false, "current");
         }
       }
       pending = null;
@@ -750,8 +781,10 @@ export function createCompose(deps: ComposeDeps): Compose {
           return;
         }
         state = enqueueStarted(state, item.enqueueId, text);
+        deps.trace?.({ kind: "compose", act: "enqueue", row: item.enqueueId });
         await persistOwn();
         refresh();
+        traceRows("after-enqueue");
         const claimed = await deps.driver.claim(item.itemId);
         if (claimed === null) {
           return;
@@ -769,6 +802,7 @@ export function createCompose(deps: ComposeDeps): Compose {
         }
         await persistOwn();
         refresh();
+        traceRows("after-steer-ack");
         return;
       }
       // A send. With ready chips it goes through the outbox's RUN (its uploads are
@@ -837,10 +871,12 @@ export function createCompose(deps: ComposeDeps): Compose {
         if (!state.own.has(message.id)) {
           state = enqueueStarted(state, message.id, message.text);
         }
+        deps.trace?.({ kind: "compose", act: "send-now", row: message.id });
       }
       deps.setDraft("");
       saveDraft("");
       refresh();
+      traceRows("after-send-now");
       await persistOwn();
       try {
         await handle.sendNow(messages, turnId);
@@ -856,6 +892,7 @@ export function createCompose(deps: ComposeDeps): Compose {
         // a restored text is the field's, so its row goes now.
         for (const id of back) {
           state = enqueueRejected(state, id, new Set()).state;
+          deps.trace?.({ kind: "compose", act: "reject", row: id });
         }
         if (texts.length > 0) {
           // Joined like the TUI (`afterRefusal` over `join`), then merged into
