@@ -1885,6 +1885,12 @@ export class HostedSession {
     let changed = false;
     const next = this.successor;
     for (const id of ids) {
+      // A reserved send-now's own message is its prompt, even when it is
+      // still a queued row too: `startSuccessor` sends `next.messages`.
+      if (next?.messages.some((m) => m.id === id)) {
+        delivered.push(id);
+        continue;
+      }
       if (this.unqueued.has(id)) {
         removed.push(id);
         continue;

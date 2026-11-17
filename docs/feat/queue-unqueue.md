@@ -296,6 +296,32 @@ re-run green (4/4). Unverified: the 5 skips vs the 3 opt-ins in AGENTS §6 — t
 diff adds no `skip`/`skipIf` (grep 0), so they predate this branch; check with
 `bun test 2>&1 | grep -i skip`.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-18*
+
+- **F1 (HIGH) — FIXED.** `HostedSession.unqueue` (`packages/daemon/src/hosted-session.ts:1888-1893`)
+  first answers `delivered` for an id in the reserved successor's `messages`
+  (`startSuccessor` sends them as the prompt even when they are still queued rows).
+  Test T5e (`daemon/test/queued.test.ts`): `enqueue a` → `sendNow(T2,[a])` →
+  `unqueue([a])`. Red on the old code (`removed:["a"]`, expected `delivered:["a"]`) →
+  green; also pins that the model read `A` exactly once.
+- **F2 (MEDIUM) — FIXED.** `afterUnqueue` (`packages/tui/src/queued.ts:187-196`): a
+  `removed` answer for a target no longer in `rows` returns `{rows, text: null,
+  notice: null}`, so a double ↑ restores the text once. Safe because `rowsRef` is
+  written synchronously by `setRows` (`App.tsx:292-294`), so the second answer sees
+  the first's drop. Pure test in `tui/test/queued.test.ts`: red (`text: "B"`) → green.
+
+**Mutations (each reverted, green again)**
+| # | mutation | result |
+|---|---|---|
+| M9 | F1 guard checks `next.steers` instead of `next.messages` | T5e + T5c red |
+| M10 | F2 guard weakened to `rows.length === 0` | F2 test red |
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (one `useOptionalChain` on
+the F1 guard, fixed to `next?.messages.some(...)`, re-run clean; the touched daemon
+file re-run 26/26) · `bun test` (one full run): 14907 pass, 5 skip, 0 fail.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-18* (fresh context; SAME model as executor/planner — shared blind spots possible)

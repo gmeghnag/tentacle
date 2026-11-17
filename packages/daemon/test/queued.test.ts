@@ -564,6 +564,18 @@ describe("unqueue: take a queued row back (docs/feat/queue-unqueue.md)", () => {
     expect(userTexts(t.hosted.snapshotPage().messages)).toEqual(["go", "A"]);
   });
 
+  test("T5e a queued row a reserved send-now cites is delivered, not removed (review F1)", async () => {
+    const t = await blockedT1();
+    t.hosted.enqueue("a", "T1", "A"); // queued first, then sent now
+    t.hosted.sendNow("T2", turn("T1"), [msg("a", "A")]);
+    expect(t.hosted.unqueue(["a"])).toEqual({ removed: [], delivered: ["a"] });
+    t.gate.release();
+    await until(() => t.c.ended("T2"));
+    // The model read it once, as the send-now's prompt: "delivered" is the truth.
+    const texts = t.model.calls.flatMap((c) => userTexts(c.messages));
+    expect(texts.filter((x) => x === "A")).toHaveLength(1);
+  });
+
   test("T7 session/unqueue over the wire: answered, every client sees the row leave; empty ids → invalid", async () => {
     const t = await blockedT1();
     t.hosted.enqueue("a", "T1", "A");
