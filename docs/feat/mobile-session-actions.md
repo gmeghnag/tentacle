@@ -762,3 +762,14 @@ projection bug, so the unit test is the whole check.
 **What holds:** Logic sits in pure modules and the components only render (§7). There is no protocol or persistence change. The Execution's account matches the code.
 
 **Executor behaviour:** The Execution is thorough and honest (17 mutations, two corrected harness errors). Its mutation set missed the timing property in finding 2. The commit says deepseek, but the Execution is signed `opus`. I am claude-opus-5-5 with a fresh context, so if the executor was Opus, we may share blind spots.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context re-review of `7a23f2ff`, S2 only)*
+
+**Verdict: APPROVE (S2).** Both round-1 findings are fixed, and I found no regressions.
+
+- **Finding 1 is fixed.** `session-groups.ts:44` now counts `pinned` in `matched`. Mutation: I dropped `pinned.length` from that sum and the new test "a search ONLY a pinned row matches…" FAILED (KILLED, 1 red). The rest of the `noMatch` rule is unchanged: an empty query and `total > 0` work as before.
+- **Finding 2 is fixed.** There are two new tests, one where the session was open and one where it was not. Mutation R2 again: moving the `wasOpen` read to after the await now fails both of them (KILLED, 2 red).
+- I restored both mutations, and `git status` was clean afterwards. The commit changes no production code except `session-groups.ts`.
+- **Gate:** `session-groups` + `drawer-row-actions`: 34 pass, 0 fail. `bun run lint` is clean (1845 files). `bun run typecheck` is clean (root + mobile + relay). I did not run the full `bun test`.
