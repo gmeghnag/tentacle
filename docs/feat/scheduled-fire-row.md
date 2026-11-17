@@ -335,6 +335,10 @@ recurring wake shows no clock.
 
 *— claude-opus-5-5, 2026-11-17 (executor; CLI settings model `opus`, exact build suffix not readable from the environment)*
 
+### Owner decision (2026-11-18 ~00:20) — persisted fire instant
+APPROVED: option 1 of Execution §2. Add the FAIL-SOFT, display-only optional field `scheduled?: { id, spec, fire, at }` on the user `ChatMessage` a wake produces (protocol `session.ts` message schema, `.catch(undefined)`, the `note`/`media`/`compacted` pattern), set by the daemon in `fireSchedule` from the instant it actually fires; it rides the critical `message` entry, so live = reload = phone = Mac. Additive on strip schemas → no PROTOCOL_VERSION bump (confirm, and write a protocol.d note only if the executor finds a real break). Old logs without the field fall back to the parser (`at` → its spec time; `every` → `#N`). The executor implements S1–S4 with this field; tests must cover: live, reload from log, old log without the field, unknown-field tolerance of an older reader.
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-18*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES** (not mergeable: no code, the feature is not built;
