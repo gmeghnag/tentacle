@@ -520,9 +520,194 @@ this session); the owner's look is the visual check.
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-sonnet-4-5-20250929, 2026-11-17*
 
-(empty — not started)
+Scope: **slice D1 only** (pure lint + error explainer + structural model + summary,
+`Files` item 1). D2–D7 untouched: no `diagram` tool, no mural dependency, no TUI
+renderer, no phone code, no artifact kind, no `TODO.md` edit.
+
+### 0. The load-bearing check, re-run before anything else
+
+The plan's own first D2 step, run early because D1's error explainer is built on
+its **recorded shapes** (the explainer must be written against real mermaid
+errors, not imagined ones). Probe: `.tentacle/tmp/model-diagrams/probe-d1/`
+(gitignored, outside `tsconfig`/`bun test`, `bun add mermaid@11.4.1`).
+
+```
+$ bun shapes.ts            # no DOM shim
+=== paren
+  message: "DOMPurify.addHook is not a function. (In 'DOMPurify.addHook(\"beforeSanitizeAttributes\", …', 'DOMPurify.addHook' is undefined)"
+=== endId / shortArrow / unclosedSub   → the same DOMPurify crash
+=== seqNoColon → "Parse error on line 2: … Expecting 'TXT', got 'NEWLINE'"   ← real
+```
+
+**Bare Bun does NOT work**: every flowchart-class parse dies inside DoMPurify
+before the grammar is reached, so the real error is masked. Per the plan's
+decision rule, the shim was tried next (`bun add linkedom`, `parseHTML` →
+`globalThis.window/document/DOMParser/Element/Node/HTMLElement`):
+
+```
+$ bun shim.ts              # with the linkedom shim
+=== validFlow: OK   === paren: OK   === seqValid: OK   === classValid: OK
+=== erValid: OK     === gitValid: OK (a chevrotain ambiguity warning on stderr)
+=== pieValid: OK
+=== endId THROWS    hash.loc {first_line:2, first_column:10}, token "end", expected ['AMP',…]
+=== shortArrow THROWS  token "MINUS", loc {2,10}, expected ['SEMI','NEWLINE','EOF',…]
+=== unclosedSub THROWS loc {5,0}, token 1 (a number, not a name)
+=== seqNoColon THROWS  token "NEWLINE", expected ["'TXT'"]
+=== erBroken THROWS    token "ALPHANUM", expected ['ZERO_OR_ONE',…]
+```
+
+Recorded facts D1's explainer is built on (mermaid 11.4.1):
+
+1. **There are two error families, as the plan predicted.** jison →
+   `err.hash.loc.first_line/first_column`, `err.hash.token`, `err.hash.expected`.
+   chevrotain/langium (gitGraph, pie) → **`err.result.parserErrors[].token.startLine/startColumn`**,
+   with `err.hash` absent; `err.result` is **cyclic** (never `JSON.stringify` it).
+2. **A third shape exists**: a lexical error (`sequenceDiagram` + a bare
+   `participant`) carries only `Lexical error on line 2` in the message, and its
+   `hash.line` is **0-based and wrong** (`1` for line 2) — so it is read from the
+   message, and the `hash` branch is guarded on `hash.loc` existing.
+3. **A fourth**: an unknown type line throws a plain string-ish
+   `No diagram type detected matching given configuration for text: …`, with no
+   `hash` and no `result` at all.
+4. **`C(sessione)` is legal** (a round node): the plan's first fixture row
+   ("a label with parentheses") only fails inside `[ ]`. The explainer therefore
+   keys on a bracket *inside* the label, and a test pins that a round node is
+   never reported as a parenthesis problem.
+5. `await mermaid.parse(src)` resolves to `{diagramType:"flowchart-v2", config}`
+   on success — not a boolean — so "no throw" is the ok signal.
+6. `linkedom@0.18.15` + `mermaid@11.4.1` install in ~2 s / 138 + 20 packages.
+   **No repo dependency was added**: `packages/tools/package.json` and `bun.lock`
+   are untouched (that is D2's, with the size delta the plan asks for there).
+
+The plan's *load-bearing assumption* therefore **holds with the shim, not bare** —
+which is exactly the plan's second branch ⇒ D2 must put `linkedom` behind its lazy
+import. Recorded for D2; not acted on here.
+
+### 1. As built (dependency order)
+
+| File | What |
+|---|---|
+| `packages/core/src/diagram/types.ts` | `DiagramType`, `DiagramKeywords`, the alias table (`sequence`→`sequenceDiagram`, `state`→`stateDiagram-v2`, `graph`→`flowchart`, …), the refused-numbers set (`pie`, `xychart(-beta)`, `quadrantChart`, `sankey(-beta)`, `radar(-beta)`), the unsupported set (`architecture`, `block`, `C4*`, `packet`, `kanban`, `requirementDiagram`, `zenuml`, `info`), Levenshtein `nearestKeyword`. |
+| `packages/core/src/diagram/lint.ts` | `lintDiagram(raw)` → `{ok:true, canonical, type, notes, lineMap}` \| `{ok:false, errors}`. Normalises BOM/CRLF/tabs/NBSP/trailing space silently; strips a fence, a config front-matter, `%%{init}%%` (multi-line too), `style`/`classDef`/`linkStyle`/`class A foo`/`:::cls`/`click` each as a **note**; canonicalises the type line; `DIAGRAM_CAPS` (20 KiB / 400 lines / 8 errors) each naming its advice. |
+| `packages/core/src/diagram/explain.ts` | `explainMermaidError(err, canonical, lineMap)` → `string[]`. Reads all four shapes, rewrites the five recognisable mistakes (a bracketed label, a reserved id, a `->`, a colon-less sequence message, an unclosed block), else a sentence + the model's line + a caret. `lineMap` maps back to the model's lines. Never a JSON dump. |
+| `packages/core/src/diagram/model.ts` | `diagramModel(canonical, type)` → `FlowModel` \| `SequenceModel` \| `OtherModel`. Tolerant flowchart reader (6 shapes, 9 link forms, edge labels in both spellings, `;`-separated statements, subgraphs, direction) and sequence reader (participants/actors with `as`, 8 arrows → call/reply/cross, notes, `alt/opt/loop/par/critical/break`). Anything outside the subset → `other`. |
+| `packages/core/src/diagram/summary.ts` | `summarizeDiagram(model, type, {title, notes})` → `{line, shape}` (the tool's result line, notes appended) and `describeDiagram(...)` (the VoiceOver label, a 4-box reading order / the first 3 messages). |
+| `packages/core/src/diagram/index.ts`, `packages/core/src/index.ts` | one export root, re-exported by `@tentacle/core` (the app's existing dependency). |
+| `packages/core/src/tool-labels.ts:24` | `diagram: "Diagram"` (P5 — the label the TUI and permission prompt will read). |
+| `packages/core/test/diagram-{lint,explain,model,summary}.test.ts` | 51 tests (T1.1–T1.8). |
+| `packages/core/test/tool-labels.test.ts:22` | `diagram` → `Diagram`. |
+| `changelog.d/model-diagrams.added.md` | one bullet (see the drift note below). |
+
+### 2. Red before green (§9)
+
+No file of `packages/core/src/diagram/` existed before this slice, so the RED
+state was the import itself; to make the red **an assertion, not a compile
+error**, the assertions themselves were driven to red on first run and each red
+named a real defect:
+
+- first `bun test packages/core/test/diagram-lint.test.ts` → **13 pass / 5 fail**:
+  `class A {` in a classDiagram counted as a styling line (it is a *declaration*
+  there, styling only in a flowchart); `graph` (no direction) came back as
+  `flowchart` with no `TD`; my own count of dropped lines was wrong (5, not 4).
+- first `bun test packages/core/test/diagram-explain.test.ts` → **6 pass / 4 fail**:
+  the caret row was indented by two relative to the line it marks; the
+  no-shape branch dropped `err.message` (a bare string error had nothing to say);
+  and the parenthesis fixture was wrong (see probe fact 4 — `C(sessione)` is legal,
+  the failure is only inside `[ ]`), which the test now pins explicitly.
+- first `bun test packages/core/test/diagram-model.test.ts` → **8 pass / 3 fail**:
+  an edge label was swallowed (`A -- no --> C` read as the link `-- no -->` but
+  `A -->|si| B` produced the label `> B` — the piped forms were missing from the
+  link table); a bare id did not keep a later `B[X]` label; `A[x] y` was accepted
+  as a node.
+- first `bun test packages/core/test/diagram-summary.test.ts` → **5 pass / 3 fail**:
+  an `other` diagram reported its `title` line as its shape, and the reading
+  order was 4 boxes where I expected 3 (the test was wrong; fixed).
+
+### 3. Mutation checks (§9, the plan's D1 target plus one per module)
+
+Each applied to the real file, suite run, then reverted (`cp` backup, `git status`
+clean of backups afterwards).
+
+| # | Mutation | Result |
+|---|---|---|
+| **M1** | the plan's named target: strip a fenced source but **accept it without a note** (`notes.fence = false`) | **2 fail** — "a Markdown fence is stripped, and lineMap still names the model's lines", "a bare ``` fence is stripped too" |
+| M2 | `lineMap` returns the identity instead of the model's lines | **3 fail** — the fence, `%%{init}%%` and front-matter lineMap tests |
+| M3 | the parenthesis rule is disabled (`parenthesisedLabel` → `null`) | **1 fail** — "a label with parentheses is quoted for it" |
+| M4a | junk after a shape is accepted (`A[x] y` becomes a node) | **1 fail** — "a flowchart construct it does not model falls back to `other`" |
+| M4b | an unclosed `subgraph` is drawn anyway | **1 fail** — same test (**and it exposed a gap**: that case was not in the list, so it was added, then re-mutated to confirm it bites) |
+| M4c | `box` is accepted as a sequence block keyword (a construct we would draw wrongly) | **1 fail** — "a sequence construct it does not model falls back to `other`" |
+| M5 | the notes are dropped from the result line | **1 fail** — "the notes ride the line, because that is where the model reads them" |
+
+One mutation **did not bite on the first try** (an early M4 hit a guard that the
+tests do not reach through that path); it was re-aimed at the three honesty
+guards above rather than left as a passing mutation.
+
+### 4. Drift from the Implementation (and why)
+
+1. **`class A foo` is only styling in a flowchart.** The plan's table lists
+   `class A foo` among the always-dropped styling lines (D3), but in a
+   **classDiagram** `class A { … }` / `class A : +x int` is the diagram itself.
+   Dropping it stripped whole class diagrams. Now: `style`/`classDef`/`linkStyle`
+   always; `class <id> <id>` only when the type is `flowchart`. Same note text.
+2. **`lineMap` is `readonly number[]`, not a function.** The plan writes
+   `lineMap` without a shape; an array indexed by the canonical line (1-based
+   value = the model's line) is what `explainMermaidError` consumes, and it is
+   what a test asserts byte-for-byte.
+3. **A fifth error shape was added to the explainer** (the lexical one, and the
+   keyless "No diagram type detected") because the probe found them; the plan
+   named two.
+4. **`DiagramType` lives in `types.ts`**, re-exported by `lint.ts`, so the model,
+   the summary and the lint share one type (the plan lists `type` on the lint's
+   result without saying where the union lives).
+5. **`sequenceDiagram` blocks `box`/`rect` are `other`, not modelled.** The plan's
+   D5 list does not include them; modelling a participant box wrongly would draw
+   a lie, so they fall back to the source (honest degradation, per D5's own rule).
+6. **No `explain.ts`-level mermaid dependency, no `core` test importing mermaid**
+   — the fixtures are hand-built records of the probe's shapes, as D1's *Tests*
+   note requires.
+7. **The changelog fragment was written now**, on this slice. The plan schedules
+   it for D7. The owner's brief for this execution asks for one fragment, so it
+   exists and describes **only what D1 ships** (the pure layer; "nothing is drawn
+   yet"). **D7 must extend this same file** rather than create a second one —
+   the slug+category is the designed collision point, and a second writer of
+   `model-diagrams.added.md` is a real merge conflict, not a silent overwrite.
+8. **`packages/core/src/index.ts` gained one line** (`export * from "./diagram/index.ts"`)
+   and `tool-labels.ts` one entry, both in the plan's Files item 1.
+
+Not done, deliberately (later slices): the `diagram` tool and its schema
+description (D2), `parseMermaid` (D2), the TUI ASCII renderers and highlight
+(D3/D4), the phone modules (D5), the WebView renderer (D6), the artifact kind
+and `present` (D7). No `protocol.d/` note: no wire or on-disk shape changed
+(no new method, no new update kind, no new log entry type).
+
+### 5. Gate
+
+```
+$ bunx tsc --noEmit                      → clean (no output)
+$ bun run lint                           → Checked 1856 files. No fixes applied.   (0 errors)
+$ bun test packages/core/test/diagram-*.test.ts packages/core/test/tool-labels.test.ts
+  51 pass · 0 fail · 147 expect() calls   (5 files)
+$ bun test
+  13478 pass · 5 skip · 0 fail · 33 snapshots · 106471 expect() calls
+  Ran 13483 tests across 960 files. [445.30s]
+```
+
+The 5 skips are the opt-in ones (live-k8s, live-docker, the real-socket
+keepalive, and the two that ride them) — none from this slice, which has no
+`skip`/`todo` at all (`rg 'test\.skip|test\.todo' packages/core/test/diagram-*.ts`
+→ 0).
+
+No `packages/protocol/schema/protocol.json` regeneration: no schema changed.
+
+**Unverified:** the plan's T1 fixtures are "recorded mermaid error fixtures"; the
+five the explainer recognises are pinned (M3 shows they bite), but an error shape
+outside them falls to the generic sentence by design, and a *fifth* family (a
+future mermaid version) would degrade to that sentence, not crash — there is no
+test for an unknown family because there is no fixture for one. Verify by adding
+a recorded shape to `diagram-explain.test.ts` when D2's probe meets one.
+
 
 ## Review
 
