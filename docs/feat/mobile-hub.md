@@ -1514,3 +1514,28 @@ items, More appeared in the running fan but was not tapped).
 count is now wired). No schema change (no protocol.json regeneration).
 
 **Status: H3 DONE.**
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17* (H3 redo, `git diff main...HEAD`. Same model family as the executor signature: fresh context only, shared blind spots possible.)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, test-only; the code itself reads correct).
+
+**Findings**
+1. **MEDIUM: the open-snapshot property is not pinned at H3's seam.** `apps/mobile/src/hub-session.ts:186` forwards `open` to `resolveCommit`. Every `commitPlan` test (`test/hub-session.test.ts:257-270`) passes either `hubOpen(idle)` with ctx `idle` or the M7 "ended" case. No test has ctx = turn B running and open = turn A running. Mutation `resolveCommit(id, ctx, entries, hubOpen(ctx))` (the open snapshot ignored): **30 pass / 0 fail**. This is the H1+H2 review's HIGH: Stop highlighted on A, A ends, B starts before the release, and `stopTurn()` cancels B. Round 2 asked H3 to verify this exact wiring. The screen side (`SessionScreen.tsx:795-807`: snapshot in `onHubFan(true)`, used while `hubFanOpen.current`) is correct as I read it (commit and close are applied synchronously before the close effect clears the flag), but it lives in a `.tsx` and nothing tests it. Fix: add a `commitPlan("stop", ctxRunningB, withStop, hubOpen(ctxRunningA))` → notice/none test, shown red under the mutation above.
+
+**Below the bar (nits):** `isFanOpen` (`hub-session.ts:245`) has no `src/` caller. The screen keeps its own `hubFanOpen` ref, and the mutation that drops `fanSticky` passes 30/0 because the tests only check `fanTracking` and idle. Either remove it or use it.
+
+**Gate (narrow + static):** `bun test` hub-session / hub-gesture / hub-actions / e2e-preflight: 108 pass / 0 fail. `bun run lint` clean (1988 files). `bun run typecheck` clean. The full `bun test` was not re-run by me.
+
+**Mutations** (`.tentacle/tmp/mobile-hub/rev-h3/mut.ts`, bytes restored, checked by sha): open snapshot ignored, 30/0 (**survives**, finding 1); `isFanOpen` without sticky, 30/0 (survives, nit); `dispose` without cancel, 29/1 (killed).
+
+**Attacks tried:**
+- (a) Turn B starts between open and release: the wiring holds, the test gap is finding 1.
+- (b) The fan's ids versus `fanItems` drifting: no. `solve` and `fanItems` come from the same `latest.current` render, inside one `feed`.
+- (c) Sticky fan, then touches outside the band (header, composer): keyboard and band height trigger `mustCancel`, the header menu sets `shown=false` and cancels, back unmounts and disposes. No commit, back-swipe restored.
+- (d) The "menu" layout opening the ActionSheet sets covered, so `shown=false` and cancel: the machine converges to idle.
+- (e) `gestureEnabled` overriding a screen option: no other `gestureEnabled` exists in `apps/mobile`.
+- (f) A second finger: one responder only, and the driver does not re-arm (D2).
+
+**Executor behaviour:** the spike came first and was evidenced, the logic was pulled into the pure `hub-session.ts` (§7), its own mutations ran, and the drift is stated honestly. It missed the one property the previous round flagged for H3.
