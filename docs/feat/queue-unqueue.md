@@ -341,3 +341,14 @@ file re-run 26/26) · `bun test` (one full run): 14907 pass, 5 skip, 0 fail.
 **Mutation:** relied on executor's M1–M8 table; my own mutation-style probe was finding 1's test (red on current code for the property it should hold).
 
 **Executor behaviour:** disciplined, honest drift section (seed ids unpinned, `unqueued` memory-only) and mutation table; missed the cited-row case because its T5c used a non-enqueued message.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18* (fresh context, same model family as before)
+
+**Verdict: REQUEST-CHANGES**
+
+- **F1 fixed** (`hosted-session.ts:1888-1893`): a reserved send-now's own message is answered `delivered` first. Mutation (guard → `false`) turns T5e red; reverted, green.
+- **F2 fixed as reported** (`tui/src/queued.ts:188-193`): a second `removed` answer for a row no longer in `rows` writes nothing. Mutation turns the new test red; reverted, green. Tree byte-identical after both mutations (`git status` clean).
+- **R2-1 MEDIUM — regression from the F2 fix: the pulled-back text can be lost silently** (`tui/src/queued.ts:191`). The guard reads "row absent from local `rows`" as "a duplicate answer". But local rows are also cleared by the turn's end (`useTurnDriver.ts:763,767` `setRows(onTurnEnd)`). The daemon removes the row and publishes it synchronously, while the RPC answer waits on `persisted()` (`connection.ts` `unqueue`; on `serve` that is a disk write). If `turn_end` reaches the TUI in that window, the first and only answer finds no row and returns `text: null, notice: null`. The text is gone daemon-side (not in `returned`), never put back in the field, and nothing is shown. Round 1 code restored it. Fix: dedupe by in-flight id at the call site (a pending set in the key layer or App, so a second ↑ on the same id sends nothing), not by row presence. Pin it: an answer with the row already cleared still returns the text.
+- No other regression found in the diff. `bun run lint` clean · `bun run typecheck` clean · daemon + TUI queue tests 1445 pass / 0 fail (one earlier run of the same set showed 1 fail, 1 skip and could not be reproduced on two re-runs. It looks flaky and I could not attribute it to this diff).
