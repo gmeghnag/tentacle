@@ -1019,6 +1019,52 @@ The 5 skips are the opt-in ones. The full suite was not re-run after the pin upd
 
 **Per slice: D2 DONE.**
 
+### Semantic fix after main merge (D2)
+
+*— claude-code_2-1-323_agent, 2026-11-17*
+
+**Symptom (reproduced first, §1).** After merging `main` (carrying
+`apps/mobile/src/tool-summary.ts` from `feat/mobile-tool-rows`), two tests in
+`apps/mobile/test/tool-summary.test.ts` went red — both from ONE cause:
+
+```
+(fail) SUMMARISED_TOOLS is the TUI's `toolSubtitle` switch, name for name
+       > a `toolSubtitle` case missing from SUMMARISED_TOOLS fails here
+  @@ -7,3 +7,2 @@  "chart", -  "diagram",  "fs_edit",     Expected - 1 / Received + 0
+(fail) rowSubtitle: the ONE line on a step > shell, search, jobs, agents, skill
+  Expected: "Flusso di login"
+  Received: "title Flusso di login · mermaid flowchart TD A --> B"
+```
+
+**Root cause (one sentence).** D2 added the `diagram` arm to the TUI's
+`toolSubtitle` switch, and the mobile side's `subtitleOf` *did* merge with a
+mirrored `diagram` case — but `SUMMARISED_TOOLS` (the phone's gate that routes a
+name to `subtitleOf` at all, `tool-summary.ts:205`, `:46`) still ended at
+`chart`, so `rowSubtitle` sent `diagram` down the MCP flattening instead.
+
+**Fix.** `apps/mobile/src/tool-summary.ts:65-67` — `"diagram"` added to
+`SUMMARISED_TOOLS`, with a comment pointing at D2. Nothing else was missing: the
+guard now names nothing beyond `diagram`, and `CASES` already carried the two
+diagram cases added with D2, both consistent with the TUI's
+`str("title") ?? tool.args` (`render-lines.ts:673-677`) — the titled one
+(`"Flusso di login"`) and the untitled one (the raw args, unchanged).
+
+Both guard tests are non-vacuous here: they were red before this one-line edit
+and green after, with the diff showing exactly `-   "diagram",`.
+
+**Gate.**
+
+```
+$ bun test apps/mobile/test/tool-summary.test.ts  → 54 pass · 0 fail
+$ bun test packages/tui                           → 2593 pass · 0 fail (178 files)
+$ bunx tsc -p apps/mobile --noEmit                → clean (no output)
+$ bun run lint                                    → Checked 1955 files. No fixes applied.
+```
+
+The full `bun test` was not re-run for this fix (it was green apart from these
+two on `main` before the merge); the two packages that own the changed file and
+the mirrored rule were re-run on their own, both green.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17* (fresh-context adversarial reviewer, slice D2 only; diff `main...HEAD`)

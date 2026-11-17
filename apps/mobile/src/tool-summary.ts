@@ -62,6 +62,9 @@ export const SUMMARISED_TOOLS: readonly string[] = [
   // not draw as a chart (an error, a spec it cannot re-validate; `chart-row.ts`)
   // falls back to this generic row, where the title is the honest line.
   "chart",
+  // A diagram's row likewise names the diagram, never its Mermaid source
+  // (docs/feat/model-diagrams.md D2) — the TUI's case, name for name.
+  "diagram",
 ];
 
 /** The TUI's `toolSubtitle`, case for case. */
