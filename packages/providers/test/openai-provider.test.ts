@@ -133,6 +133,23 @@ describe("OpenAIProvider.stream prompt-cache usage", () => {
     });
   });
 
+  test("a null cached_tokens (LiteLLM-style proxy) ⇒ the field is absent, never null", async () => {
+    // Mutation: back to `!== undefined` at the spread → `cachedPromptTokens: null`,
+    // which `LogUsageEntrySchema` refuses and so poisons the session log (fix round 1).
+    const done = await doneOf({
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      prompt_tokens_details: { cached_tokens: null },
+    });
+    expect(done).toEqual({
+      type: "done",
+      usage: { promptTokens: 10, completionTokens: 5 },
+      stopReason: "stop",
+    });
+    const usage = done?.type === "done" ? done.usage : undefined;
+    expect(usage !== undefined && "cachedPromptTokens" in usage).toBe(false);
+  });
+
   test("no cache split ⇒ the field is absent, not 0", async () => {
     // Mutation: `cached_tokens … ?? 0` → `in` becomes true.
     const done = await doneOf({ prompt_tokens: 10, completion_tokens: 5 });

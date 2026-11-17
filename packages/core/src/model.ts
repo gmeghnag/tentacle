@@ -144,6 +144,19 @@ export interface Usage {
 }
 
 /**
+ * A token count from a provider's raw JSON, or `undefined` when it is not one.
+ * Providers must pass every usage field through this: the same field is
+ * `null` on some servers (LiteLLM-style proxies send
+ * `prompt_tokens_details: {cached_tokens: null}`; the Anthropic API types its
+ * cache counts nullable), and a `null` reaching the log writes an entry every
+ * reader REFUSES — which poisons the whole session log, not just that field
+ * (docs/feat/token-usage-log.md, fix round 1).
+ */
+export function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+/**
  * Why a model's streamed reply ended, as the provider's own stop reason reads
  * (docs/fix/truncated-reply-silent.md). `length`: the reply was CUT at the
  * model's output limit (`finish_reason: "length"`, `max_tokens`, `refusal`);

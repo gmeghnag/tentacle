@@ -26,7 +26,7 @@ import type {
   ToolDefinition,
   Usage,
 } from "@tentacle/core";
-import { wireArguments } from "@tentacle/core";
+import { tokenCount, wireArguments } from "@tentacle/core";
 import {
   type ImageBuildOptions,
   MAX_INLINE_IMAGES,
@@ -215,16 +215,18 @@ export class AnthropicProvider implements ModelProvider {
           // With prompt caching `input_tokens` is only the uncached tail: the
           // prompt's size adds what was written to and read from the cache
           // (docs/feat/context-awareness.md; it feeds the context count).
-          if (start?.input_tokens !== undefined) {
+          // Every count goes through `tokenCount`: the API types the cache ones
+          // NULLABLE, and a `null` (or a junk number) must never reach the log
+          // (docs/feat/token-usage-log.md, fix round 1).
+          const input = tokenCount(start?.input_tokens);
+          if (input !== undefined) {
             promptTokens =
-              start.input_tokens +
-              (start.cache_creation_input_tokens ?? 0) +
-              (start.cache_read_input_tokens ?? 0);
+              input +
+              (tokenCount(start?.cache_creation_input_tokens) ?? 0) +
+              (tokenCount(start?.cache_read_input_tokens) ?? 0);
             // Only a cache READ is a hit: a created cache entry was written,
             // so those tokens cost a full prompt this time.
-            if (start.cache_read_input_tokens !== undefined) {
-              cachedPromptTokens = start.cache_read_input_tokens;
-            }
+            cachedPromptTokens = tokenCount(start?.cache_read_input_tokens);
           }
           break;
         }
@@ -281,8 +283,9 @@ export class AnthropicProvider implements ModelProvider {
         }
         case "message_delta": {
           const delta = event.usage;
-          if (delta?.output_tokens !== undefined) {
-            completionTokens = delta.output_tokens;
+          const output = tokenCount(delta?.output_tokens);
+          if (output !== undefined) {
+            completionTokens = output;
           }
           if (event.delta?.stop_reason) {
             stopReason = event.delta.stop_reason;
@@ -380,8 +383,8 @@ interface AnthropicEvent {
     readonly usage?: {
       readonly input_tokens?: number;
       readonly output_tokens?: number;
-      readonly cache_creation_input_tokens?: number;
-      readonly cache_read_input_tokens?: number;
+      readonly cache_creation_input_tokens?: number | null;
+      readonly cache_read_input_tokens?: number | null;
     };
   };
   readonly content_block?: {

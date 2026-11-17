@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { Agent } from "@tentacle/agent";
 import {
+  type ChatMessage,
   type ChatRequest,
   type ExecutionEnvironment,
   type ModelProvider,
@@ -8,11 +10,17 @@ import {
   type StreamEvent,
   type Usage,
 } from "@tentacle/core";
-import { LOG_ENTRY_CRITICAL, type LogResult } from "@tentacle/protocol";
+import {
+  type KnownLogEntry,
+  KnownLogEntrySchema,
+  LOG_ENTRY_CRITICAL,
+  type LogResult,
+} from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import type { DaemonSessionRecord } from "../src/persisted-session.ts";
 import { type AgentFactory, SessionHost } from "../src/session-host.ts";
 import { parseLogFile } from "../src/session-log-file.ts";
+import { SessionLog, type UsageBody } from "../src/session-log.ts";
 import { SessionPersister } from "../src/session-persister.ts";
 import { SpyDaemonStore } from "./support/daemon-store-spy.ts";
 
@@ -42,12 +50,12 @@ class Scripted implements ModelProvider {
   }
 }
 
-function rig(model: ModelProvider, store = new SpyDaemonStore()) {
+function rig(model: ModelProvider, store = new SpyDaemonStore(), modelId = "test-model") {
   const createAgent: AgentFactory = () => {
     const permissions = new PermissionBroker();
     const agent = new Agent({
       model,
-      modelId: "test-model",
+      modelId,
       tools: new ToolRegistry().register(shellTool),
       env,
       requestPermission: (req, options) => permissions.request(req, options),
@@ -72,6 +80,30 @@ type Entry = LogResult["entries"][number] & {
 const cold = (hosted: { logRead(): LogResult }): Entry[] => hosted.logRead().entries as Entry[];
 const usageEntries = (entries: readonly Entry[]) => entries.filter((e) => e.type === "usage");
 
+const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
+const m = (role: ChatMessage["role"], content: string): ChatMessage => ({ role, content });
+
+/** A pure log over plain arrays (no daemon session around it). */
+function pureLog() {
+  let t = 1000;
+  const log = new SessionLog("inc-1", () => t++);
+  const entries = (): KnownLogEntry[] => {
+    const out: KnownLogEntry[] = [];
+    let after: { seq: number; id: string } | undefined;
+    for (;;) {
+      const page = log.read(after, 1 << 20, sha256);
+      out.push(...(page.entries as KnownLogEntry[]));
+      const tip = page.entries.at(-1);
+      if (!page.more || tip === undefined) {
+        break;
+      }
+      after = { seq: tip.seq, id: tip.id };
+    }
+    return out;
+  };
+  return { log, entries };
+}
+
 async function until(cond: () => boolean, ms = 2000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!cond()) {
@@ -87,6 +119,64 @@ const durableLog = (store: SpyDaemonStore, id: string): string => {
   if (files?.log === undefined) throw new Error(`${id}: no log text`);
   return files.log;
 };
+
+describe("a usage entry can never be written malformed (fix round 1: one bad entry refused the whole log)", () => {
+  test("an unmeasurable field is DROPPED, and the entry still parses as a known entry", () => {
+    // Mutation: `this.push({ type: "usage", critical: false, ...body })` unchecked
+    // → `cachedPromptTokens: null` lands in the log and `KnownLogEntrySchema`
+    // refuses it, so every later read of the file fails (`malformed usage entry N`).
+    const { log, entries } = pureLog();
+    log.start([m("system", "S")], "create");
+    log.usage({
+      promptTokens: 10,
+      completionTokens: 5,
+      // A provider's raw JSON, before its own guard (a LiteLLM-style `null`).
+      cachedPromptTokens: null as unknown as number,
+      model: "",
+      round: 1,
+    });
+    const usage = entries().filter((e) => e.type === "usage");
+    expect(usage).toHaveLength(1);
+    const [row] = usage;
+    expect(row !== undefined && "cachedPromptTokens" in row).toBe(false);
+    expect(row !== undefined && "model" in row).toBe(false);
+    expect(row?.round).toBe(1);
+    // The point of the guard: the entry PARSES, so no reader refuses the file.
+    for (const entry of entries()) {
+      expect(KnownLogEntrySchema.safeParse(entry).success).toBe(true);
+    }
+    // The required counts are the entry's identity: without them there is no row.
+    expect(row?.promptTokens).toBe(10);
+    expect(row?.completionTokens).toBe(5);
+  });
+
+  test("no measurable prompt/completion ⇒ NO entry at all (never a 0/0 row)", () => {
+    // Mutation: drop the `result.success` guard → an unparsable entry is pushed.
+    const { log, entries } = pureLog();
+    log.start([m("system", "S")], "create");
+    log.usage({ promptTokens: undefined, completionTokens: undefined } as unknown as UsageBody);
+    expect(entries().filter((e) => e.type === "usage")).toEqual([]);
+  });
+  test("a null cache count a provider let through never reaches the file (the durable log still parses)", async () => {
+    // Mutation: drop the sanitizer in `SessionLog.usage` → the written entry is
+    // malformed and `parseLogFile` refuses the whole file (fix round 1).
+    const model = new Scripted([
+      // What a LiteLLM-style proxy yields before the provider's own guard.
+      { promptTokens: 9, completionTokens: 4, cachedPromptTokens: null as unknown as number },
+    ]);
+    const r = rig(model);
+    const { hosted } = r.host.open({ create: true }, { send: () => {} });
+    hosted.prompt("t1", [{ type: "text", text: "go" }]);
+    await until(() => usageEntries(cold(hosted)).length >= 1);
+    await hosted.persisted();
+    const parsed = parseLogFile(durableLog(r.store, hosted.id), hosted.id);
+    if (!parsed.ok) throw new Error(parsed.reason);
+    expect(parsed.skipped).toBe(0);
+    const onDisk = parsed.segments.flatMap((s) => s.entries).filter((e) => e.type === "usage");
+    expect(onDisk).toHaveLength(1);
+    expect(onDisk[0] !== undefined && "cachedPromptTokens" in onDisk[0]).toBe(false);
+  });
+});
 
 describe("one usage entry per measured round", () => {
   test("a turn's rounds each log round/tokens/messages, non-critical; the projection is untouched", async () => {

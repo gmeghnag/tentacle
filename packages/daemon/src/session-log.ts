@@ -33,12 +33,14 @@ import {
   type SessionTitle,
   type Sha256,
   type StopReason,
+  type UsageEntryBody,
   type WireChatMessage,
   appendEntryBody,
   digestOfDigests,
   isAppendEntry,
   messageDigest,
   replaceEntryBody,
+  sanitizeUsageBody,
 } from "@tentacle/protocol";
 
 /** One retained entry: its wire object (a checkpoint's built on first read) and its size, once known. */
@@ -58,16 +60,7 @@ export interface Slot {
 export type LogBase = LogCursor;
 
 /** What a `usage` entry carries (the round's facts, without its envelope; docs/feat/token-usage-log.md). */
-export type UsageBody = {
-  readonly turnId?: string;
-  readonly round?: number;
-  readonly final?: true;
-  readonly model?: string;
-  readonly promptTokens: number;
-  readonly completionTokens: number;
-  readonly cachedPromptTokens?: number;
-  readonly messages?: number;
-};
+export type UsageBody = UsageEntryBody;
 
 export class SessionLog {
   private readonly slots: Slot[] = [];
@@ -185,9 +178,18 @@ export class SessionLog {
    * One model round's measured spend (docs/feat/token-usage-log.md). NOT
    * critical and projects nothing: it is a fact about the conversation's cost,
    * not part of its history. An unmeasured field is absent, never 0.
+   *
+   * The body is SANITIZED against the entry's own schema first
+   * (`sanitizeUsageBody`): a malformed known entry is fatal to every reader of
+   * the log, so a field a provider reported oddly (a `null` cache count) is
+   * dropped here rather than written — the file stays readable (fix round 1).
    */
   usage(body: UsageBody): void {
-    this.push({ type: "usage", critical: false, ...body });
+    const kept = sanitizeUsageBody(body);
+    if (kept === null) {
+      return;
+    }
+    this.push({ type: "usage", critical: false, ...kept });
   }
 
   /** Assert the projection here; its digest is computed by the first read that serves it. */

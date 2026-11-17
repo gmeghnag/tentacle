@@ -202,6 +202,82 @@ test) — no new skip, no new failure.
 
 *— Claude via Claude Code 2.1.323 — the harness does not expose the exact model id (executor), 2026-11-17*
 
+### Fix round 1
+
+Review round 1 found one HIGH: a `null` cache count from a server becomes
+`cachedPromptTokens: null`, which `LogUsageEntrySchema` refuses, and a malformed
+KNOWN entry makes every reader refuse the WHOLE file — so one odd number from a
+proxy permanently breaks that session's save (and the `serve` reload). Fixed in
+two layers, plus the same failure class for `model`.
+
+**Reproduced first** (`.tentacle/tmp/token-usage-log/null-cache.ts`, run on this
+branch): `usage: {"promptTokens":10,"completionTokens":5,"cachedPromptTokens":null}`
+→ `cachedPromptTokens: Expected number, received null`. End to end, the daemon
+test's durable file refused with exactly the reviewer's error —
+`line 6 is a malformed usage entry` — when the new guard is mutated away.
+
+1. **Providers accept only a real token count.** New `tokenCount(value)` in
+   `packages/core/src/model.ts:155` (`typeof number && Number.isInteger && >= 0`,
+   else `undefined`). `openai-provider.ts:284` spreads `cachedPromptTokens` from
+   it (the raw type widened to `number | null`); `anthropic-provider.ts:218-229`
+   runs `input_tokens`, both cache counts and `output_tokens` through it (both
+   cache fields typed `number | null`, as the API types them). A `null` is
+   therefore ABSENT, never 0 — the plan's absent-not-0 rule holds.
+2. **The log entry is validated where it is built.** New
+   `sanitizeUsageBody(body)` in `packages/protocol/src/session-log.ts:320`: it
+   iterates `LogUsageEntrySchema.shape` and keeps only a field that schema
+   accepts (its own rules — no second copy), drops the envelope keys (the
+   emitter owns them), and returns `null` unless both counts survive. It is
+   judged by the schema, so a new field is covered the day it is added.
+   `SessionLog.usage` (`packages/daemon/src/session-log.ts:187`) writes through
+   it, so no emitter — present or future, in-house or not — can put a malformed
+   `usage` entry on disk. `UsageBody` is now
+   `UsageEntryBody = Omit<LogUsageEntry, envelope>` (the schema's own type), so
+   the daemon's body cannot drift from the wire shape.
+3. `model` (empty/over-200-chars) is the same class and is handled by the same
+   two nets: the sanitizer drops it, and the row still records.
+
+Tests (each RED before its fix, then GREEN):
+
+- `providers/test/openai-provider.test.ts` — `cached_tokens: null` ⇒ absent.
+- `providers/test/anthropic-provider.test.ts` — `cache_read_input_tokens: null`
+  ⇒ absent.
+- `protocol/test/session-log.test.ts` — the sanitizer drops a refused field and
+  keeps the rest (and what it keeps parses); a body with no measurable counts
+  (absent, negative, a string) yields `null`; the envelope keys of a body never
+  come through.
+- `daemon/test/token-usage-log.test.ts` — a `null` cache count through the real
+  `drive()` reaches the durable file as a PARSEABLE entry (`parseLogFile` ok,
+  `skipped === 0`), and two pure-log tests over `SessionLog.usage` directly
+  (`null` dropped; no counts ⇒ no entry).
+
+Mutation checks (applied temporarily, narrow file run, reverted — §9):
+
+| mutation | result |
+|---|---|
+| `openai-provider`: back to `!== undefined` on `cached_tokens` | 1 fail |
+| `anthropic-provider`: back to `!== undefined` on the cache read | 1 fail |
+| `SessionLog.usage`: spread `body` without the sanitizer | 3 fail (incl. `line 6 is a malformed usage entry`) |
+| `sanitizeUsageBody`: no schema check per field | 2 fail |
+| `sanitizeUsageBody`: keep the counts guard removed | 1 fail |
+| `sanitizeUsageBody`: no envelope skip | 1 fail |
+
+The first envelope test I wrote was vacuous (a `critical: true` fails the
+literal anyway); it was replaced by one whose mutation is caught, and that is
+the version above.
+
+Drift from the Implementation: none of the four numbered fixes changes the
+Design; the audit found the second net was missing, which is what item 2 adds.
+
+Gate: `bunx tsc --noEmit` clean, `bun run lint` `Checked 1850 files … No fixes
+applied`, `bun test` **13462 pass, 5 skip, 0 fail** (959 files; the 5 skips are
+the documented opt-in ones — docker ×2, live-k8s ×2, the real-socket keepalive
+slow test). `bun run schema:export` rerun: no `protocol.json` change (the
+sanitizer is not a schema; no `PROTOCOL_VERSION` bump, the entry stays
+non-critical).
+
+*— claude-opus-5-5 (executor), 2026-11-17*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES** (one HIGH).

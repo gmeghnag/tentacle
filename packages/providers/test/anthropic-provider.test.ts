@@ -645,6 +645,19 @@ describe("prompt usage with prompt caching", () => {
     expect(usage !== undefined && "cachedPromptTokens" in usage).toBe(false);
   });
 
+  test("a null cache read (the API types it nullable) carries no cached count", async () => {
+    // Mutation: `start.cache_read_input_tokens !== undefined` alone → assigns `null`,
+    // which `LogUsageEntrySchema` refuses and poisons the session log (fix round 1).
+    const event = await done({ input_tokens: 40, cache_read_input_tokens: null });
+    expect(event).toEqual({
+      type: "done",
+      usage: { promptTokens: 40, completionTokens: 30 },
+      stopReason: "stop",
+    });
+    const usage = event?.type === "done" ? event.usage : undefined;
+    expect(usage !== undefined && "cachedPromptTokens" in usage).toBe(false);
+  });
+
   test("absent cache counts add nothing", async () => {
     const event = await done({ input_tokens: 40 });
     expect(event).toEqual({

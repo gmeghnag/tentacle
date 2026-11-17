@@ -20,6 +20,7 @@ import {
   projectEntry,
   projectionDigest,
   replaceEntryType,
+  sanitizeUsageBody,
 } from "../src/index.ts";
 
 // docs/feat/session-log.md — the `session/log` wire schemas and the shared digest.
@@ -358,6 +359,48 @@ describe("usage entries (docs/feat/token-usage-log.md: non-critical, projects no
     const final = KnownLogEntrySchema.parse({ ...bare, final: true });
     expect("round" in final).toBe(false);
     expect(KnownLogEntrySchema.safeParse({ ...bare, final: false }).success).toBe(false);
+  });
+
+  test("the emitter's sanitizer drops a field the schema refuses, and keeps the rest", () => {
+    // Mutation: `if (value !== undefined)` in `sanitizeUsageBody` (no schema check)
+    // → `cachedPromptTokens: null` survives and the written entry is malformed,
+    // which makes every later read of that file FAIL (fix round 1).
+    const kept = sanitizeUsageBody({
+      promptTokens: 10,
+      completionTokens: 5,
+      cachedPromptTokens: null,
+      model: "",
+      round: 1,
+      messages: 3,
+    });
+    expect(kept).toEqual({ promptTokens: 10, completionTokens: 5, round: 1, messages: 3 });
+    // Whatever it keeps, the schema accepts: the entry it builds is never malformed.
+    expect(KnownLogEntrySchema.safeParse({ ...row, ...kept }).success).toBe(true);
+  });
+
+  test("the sanitizer refuses a body with no measurable counts (never a 0/0 row)", () => {
+    expect(sanitizeUsageBody({ promptTokens: undefined, completionTokens: 5 })).toBeNull();
+    expect(sanitizeUsageBody({})).toBeNull();
+    // A junk number is no measurement either — it is dropped, not passed on.
+    expect(sanitizeUsageBody({ promptTokens: -1, completionTokens: 5 })).toBeNull();
+    expect(sanitizeUsageBody({ promptTokens: "10", completionTokens: 5 })).toBeNull();
+  });
+
+  test("the sanitizer never lets a body set the envelope (the emitter owns seq/id/ts)", () => {
+    // A body may be a whole entry (e.g. one re-read from another log): its
+    // envelope keys must not be carried into the new entry's own envelope.
+    // Mutation: drop the `envelope.has(key)` skip in `sanitizeUsageBody` → the
+    // foreign `seq`/`ts` come through and the emitter's own values are spread over.
+    const kept = sanitizeUsageBody({
+      promptTokens: 1,
+      completionTokens: 1,
+      seq: 99,
+      id: "other/99",
+      ts: 12345,
+      prev: "other/98",
+      critical: true,
+    });
+    expect(kept).toEqual({ promptTokens: 1, completionTokens: 1 });
   });
 });
 

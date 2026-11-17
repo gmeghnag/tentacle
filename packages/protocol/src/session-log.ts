@@ -40,7 +40,7 @@
  * too: the session's MCP/skill switches; an older build skips it and shows the
  * model everything.
  */
-import { z } from "zod";
+import { type ZodTypeAny, z } from "zod";
 import {
   ChatMessageSchema,
   type MessageWithAttachments,
@@ -297,6 +297,47 @@ export const LogUsageEntrySchema = z.object({
   /** How many messages the request carried: the context this round sent. */
   messages: z.number().int().nonnegative().optional(),
 });
+export type LogUsageEntry = z.infer<typeof LogUsageEntrySchema>;
+/** A `usage` entry's body: what it says, without the envelope (the emitter fills that in). */
+export type UsageEntryBody = Omit<
+  LogUsageEntry,
+  "type" | "critical" | "seq" | "id" | "prev" | "ts"
+>;
+
+/**
+ * The emitter's own guard: the `usage` fields its schema ACCEPTS, from a body
+ * that may carry anything (a provider's raw JSON), or `null` when nothing
+ * measurable is left.
+ *
+ * A malformed KNOWN entry is fatal to a reader — it refuses the whole file
+ * (`session-log-file.ts`) — so a single unexpected number from a server would
+ * poison that session's log for good (docs/feat/token-usage-log.md, fix round
+ * 1). Providers guard their own numbers (`core`'s `tokenCount`); this is the
+ * second net, at the ONE place an entry is built, and it judges with the schema
+ * itself so there is no second copy of the rules. A field it refuses is
+ * dropped, never replaced by a 0 (an unmeasured value stays absent).
+ */
+export function sanitizeUsageBody(body: Readonly<Record<string, unknown>>): UsageEntryBody | null {
+  const shape = LogUsageEntrySchema.shape as unknown as Readonly<Record<string, ZodTypeAny>>;
+  const envelope = new Set(Object.keys(envelopeShape()));
+  const kept: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(shape)) {
+    // The envelope is the emitter's: a body never sets it, and a stray
+    // `critical: true` must not survive the spread below.
+    if (envelope.has(key)) {
+      continue;
+    }
+    const value = body[key];
+    if (value !== undefined && field.safeParse(value).success) {
+      kept[key] = value;
+    }
+  }
+  // The two counts ARE the row: without both there is nothing to record (never a 0/0 row).
+  if (typeof kept.promptTokens !== "number" || typeof kept.completionTokens !== "number") {
+    return null;
+  }
+  return kept as UsageEntryBody;
+}
 
 /** Every entry type this protocol version knows, parsed strictly by its own schema (strip). */
 export const KnownLogEntrySchema = z.discriminatedUnion("type", [

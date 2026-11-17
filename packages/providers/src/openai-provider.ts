@@ -19,7 +19,12 @@ import type {
   ToolDefinition,
   Usage,
 } from "@tentacle/core";
-import { DsmlToolCallLeakError, hasDsmlToolCallMarkup, wireArguments } from "@tentacle/core";
+import {
+  DsmlToolCallLeakError,
+  hasDsmlToolCallMarkup,
+  tokenCount,
+  wireArguments,
+} from "@tentacle/core";
 import {
   type ImageBuildOptions,
   MAX_INLINE_IMAGES,
@@ -109,7 +114,7 @@ interface WireChunk {
     readonly prompt_tokens?: number;
     readonly completion_tokens?: number;
     /** `prompt_tokens_details.cached_tokens`: the served-from-cache part (OpenAI, vLLM, …). */
-    readonly prompt_tokens_details?: { readonly cached_tokens?: number } | null;
+    readonly prompt_tokens_details?: { readonly cached_tokens?: number | null } | null;
   } | null;
 }
 
@@ -276,8 +281,8 @@ export class OpenAIProvider implements ModelProvider {
           completionTokens: chunk.usage.completion_tokens ?? 0,
           // A server that does not report the cache split omits it; 0 here
           // would claim a full cache miss (docs/feat/token-usage-log.md).
-          ...(chunk.usage.prompt_tokens_details?.cached_tokens !== undefined
-            ? { cachedPromptTokens: chunk.usage.prompt_tokens_details.cached_tokens }
+          ...(tokenCount(chunk.usage.prompt_tokens_details?.cached_tokens) !== undefined
+            ? { cachedPromptTokens: tokenCount(chunk.usage.prompt_tokens_details?.cached_tokens) }
             : {}),
         };
       }
