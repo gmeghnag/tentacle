@@ -22,6 +22,9 @@ Owner 2026-11-17 09:14, on the iOS build of main 32dcf4fb: "sembra che qui i tes
 
 **Orchestrator addendum (09:45):** fix/mobile-crash-ibm-chart merged (b7bba9f4) with a per-row error boundary, but its **root cause is UNVERIFIED** (no Hermes VM off-device). The simulator runs Hermes with Apple's Intl, so: replay the IBM chart (`.tentacle/tmp/mobile-crash-ibm-chart/session.jsonl`; chart args: line, x type date, y decimals 2, unit "$") in the simulator, confirm whether one of the three Intl calls in `docs/fix/mobile-crash-ibm-chart.md` (DateTimeFormat with `timeZone: undefined`, NumberFormat 2-decimals grouping, currency formatToParts) throws under Hermes-iOS, then fix the cause (the chart must render, not just fall back) with a regression test, and record the verified cause in that doc's Review or here.
 
+
+**Orchestrator addendum (09:52, device evidence):** the owner exported the app log after reopening the IBM session on the 09:45 build: `2026-11-17T08:47:47Z error client-error source=row row=tool error=TypeError` — the row that fails is the **tool** row of the `chart` call (not a chart block row) and the class is **TypeError** (not RangeError). Strong candidate: a method missing on Hermes-iOS's Intl, e.g. `Intl.NumberFormat.prototype.formatToParts` (used by `currencyFirst`, `core/chart/format.ts:84`, only for a currency unit like "$") → `undefined is not a function`. Verify in the simulator (Hermes): `typeof new Intl.NumberFormat('it-IT',{style:'currency',currency:'USD'}).formatToParts`, then fix with a feature-detected fallback that still renders the chart correctly, and a regression test that stubs a formatToParts-less Intl (red first).
+
 *— claude-opus-5-5 (orchestrator), 2026-11-17*
 
 ## Implementation
@@ -142,6 +145,57 @@ test. Full `bun test`: 14362 pass / 5 skip / 0 fail. The round-0 daemon flake di
 The 5 skips are the same as in round 0 and were not investigated.
 
 *— claude-opus-5-5 (executor, fix round 1), 2026-11-17*
+
+### Fix round 2
+Review round 2 left one MEDIUM open (finding 3, the sweep), plus the orchestrator
+addenda that this branch still owed.
+- **Finding 3 (no simulator sweep): NOT FIXED.** The permission gate refused
+  `E2E_DEVICE=0B43D716-… bun apps/mobile/e2e/run.ts --ios 26 --only 01-shell` for
+  the third time (device `0B43D716` is shut down; a different session's `0FA4B51F`
+  is booted). Per §0 I did not retry. The owner or the orchestrator must run it,
+  or accept the task without it.
+- **Addendum 09:45/09:52 (IBM chart TypeError): FIXED off-device, cause NOT
+  verified on Hermes.** Two `formatToParts` call sites exist in the chart code:
+  `currencyFirst` (`packages/core/src/chart/format.ts:81`, reached for a currency
+  unit such as "$") and `monthTicks` (`packages/core/src/chart/scale.ts:111`,
+  reached for a date x axis too long for a fixed step). Both now feature-detect
+  `formatToParts`. When it is missing, `currencyFirst` reads the symbol's side
+  from `format(1)`, and `monthTicks` parses en-US `M/YYYY`. The regression test
+  `packages/core/test/chart-intl-fallback.test.ts` removes `formatToParts` from
+  both prototypes and asserts that the labels and ticks are **identical** to the
+  real-Intl output. RED on the old code: 0 pass / 2 fail, both with `TypeError:
+  … formatToParts is not a function`, the same class as the device log. Still
+  unverified: whether Hermes-iOS really lacks the method. To verify, run `typeof
+  new Intl.NumberFormat('it-IT',{style:'currency',currency:'USD'}).formatToParts`
+  in the simulator, then reopen the IBM session.
+- **Addendum 09:33 (∴ too small): FIXED in source, pixels unverified.**
+  `apps/mobile/src/ui/StepNode.tsx:23` adds `THEREFORE_SIZE = 13`. It is used by
+  the node (`therefore`, now lineHeight 14 to fit the 14 pt `nodeBox`, centred),
+  by the row marker and by the folded thought's mark. All three were 10 pt
+  before. The pin is in `apps/mobile/test/tool-rows-wiring.test.ts` ("every ∴ …
+  12–13 pt"). RED on the old code: `Expected: >= 12, Received: 0`. There are no
+  light/dark screenshots, for the same reason as finding 3.
+- **Addendum 09:36 (Thinking… B+D animation): NOT DONE.** It is a Reanimated
+  feature that needs a real-screen render test and simulator frames, and without
+  simulator access it cannot be verified. Split it into its own task, or run it
+  after the sweep is unblocked.
+- Changelog: `changelog.d/mobile-qa-sweep.fixed.md` gained one sentence about
+  these changes.
+
+Mutations. Each was applied by editing the source, run against the narrow test,
+and then edited back:
+| mutation | result |
+|---|---|
+| M4: `currencyFirst` fallback `symbolAt < digit` → `>` | 1 pass / **1 fail** (currency labels) |
+| M5: `monthTicks` fallback, month/year groups swapped | 1 pass / **1 fail** (date ticks) |
+| M6: row `marker` back to `fontSize: 10` | 12 pass / **1 fail** (∴ size pin) |
+| restored | 15 pass / 0 fail across both files |
+
+Gate: `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bun run lint` clean (1967 files) · full `bun test`: 14365 pass / 5 skip / 0 fail
+(the same 5 skips as rounds 0–1).
+
+*— claude-opus-5-5 (executor, fix round 2), 2026-11-17*
 
 ## Review
 

@@ -19,6 +19,8 @@ export type NodeKind = StepDot | "thought" | "thinking";
 const GUTTER = 10;
 /** The node sits on the first line's centre; the line is one touch target tall. */
 const NODE_Y = size.touch / 2;
+/** Every ∴ (the thought node, the row marker, a folded thought): owner asked a bit larger than 10. */
+const THEREFORE_SIZE = 13;
 
 /** Milliseconds since `from`, re-read once a second; null when there is no `from`. */
 function useElapsed(from: number | undefined): number | null {
@@ -371,7 +373,7 @@ const styles = StyleSheet.create({
   dot: { width: 13, height: 13, borderRadius: 6.5, borderWidth: 3 },
   ring: { width: 9, height: 9, borderRadius: 4.5, borderWidth: 1.2 },
   spinner: { width: 10, height: 10, borderRadius: 5, borderWidth: 1.5 },
-  therefore: { fontSize: 10, lineHeight: 12 },
+  therefore: { fontSize: THEREFORE_SIZE, lineHeight: 14, textAlign: "center" },
   column: { flex: 1, marginLeft: GUTTER },
   line: { minHeight: size.touch, flexDirection: "row", alignItems: "center", gap: 6 },
   pressed: { opacity: 0.6 },
@@ -380,10 +382,10 @@ const styles = StyleSheet.create({
   italic: { fontStyle: "italic" },
   subtitle: { flex: 1 },
   thoughtLine: { fontStyle: "italic", fontWeight: "400" },
-  marker: { fontSize: 10, opacity: 0.8 },
+  marker: { fontSize: THEREFORE_SIZE, opacity: 0.8 },
   body: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 8, paddingBottom: 10, gap: 8 },
   thought: { flexDirection: "row", gap: 6 },
-  thoughtMark: { fontSize: 10, lineHeight: 19 },
+  thoughtMark: { fontSize: THEREFORE_SIZE, lineHeight: 19 },
   thoughtText: { flex: 1, fontSize: 13.5, lineHeight: 19, fontStyle: "italic" },
   code: { fontSize: 12, lineHeight: 17, fontFamily: MONO },
   footer: { paddingHorizontal: space.inset, marginBottom: 6 },

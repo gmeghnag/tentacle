@@ -108,6 +108,12 @@ function monthTicks(lo: number, hi: number, rows: number, zone?: string): number
     month: "numeric",
   });
   const months = (t: number): number => {
+    // Hermes on iOS has no `formatToParts` (a TypeError crashed the chart's
+    // row, docs/fix/mobile-qa-sweep.md): parse en-US numeric "M/YYYY" instead.
+    if (typeof format.formatToParts !== "function") {
+      const match = /(\d+)\D+(\d+)/.exec(format.format(new Date(t)));
+      return match ? Number(match[2]) * 12 + (Number(match[1]) - 1) : 1970 * 12;
+    }
     const parts = format.formatToParts(new Date(t));
     const year = Number(parts.find((p) => p.type === "year")?.value ?? 1970);
     const month = Number(parts.find((p) => p.type === "month")?.value ?? 1);

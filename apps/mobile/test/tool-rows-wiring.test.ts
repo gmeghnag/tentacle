@@ -105,4 +105,15 @@ describe("StepNode replaces ToolRow", () => {
     expect(node).toContain("accessibilityElementsHidden");
     expect(node).toContain("maxFontSizeMultiplier={DENSE_FONT_SCALE}");
   });
+
+  test("every ∴ (node, row marker, thought) is one size, 12–13 pt (owner 09:33)", () => {
+    const node = read("ui", "StepNode.tsx");
+    const size = /const THEREFORE_SIZE = ([\d.]+);/.exec(node);
+    expect(size === null ? 0 : Number(size[1])).toBeGreaterThanOrEqual(12);
+    expect(size === null ? 99 : Number(size[1])).toBeLessThanOrEqual(13);
+    for (const style of ["therefore", "marker", "thoughtMark"]) {
+      const line = new RegExp(`^  ${style}: \\{[^\\n]*\\}`, "m").exec(node)?.[0] ?? "";
+      expect(line).toContain("fontSize: THEREFORE_SIZE");
+    }
+  });
 });
