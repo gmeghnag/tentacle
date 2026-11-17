@@ -2945,3 +2945,29 @@ need a simulator. The PDF-by-extension cause is fixed, but "a PDF renders" is a
 pixel claim and this round did not run it.
 
 *— claude-sonnet-4-5-20250929, 2026-11-17*
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES (1 MEDIUM).** I reviewed `git diff HEAD~1` (`4adf1a8a`). The code fixes both Round-3 findings, but the key property of finding 1, deleting a computer's cache on unpair, has no test.
+
+- **Gate:** `bun run typecheck` is clean, and `bun run lint` is clean (1919 files). `bun test apps/mobile/test` gives **2682 pass, 0 fail**.
+- **Mutations:** I reverted each one, and `git status --porcelain` is empty afterwards.
+  - Removing nothing on eviction (`step.evict` → `[]`) turned the store and wiring tests RED.
+  - Making `shareCopy` reuse the hash name instead of `shareName` turned them RED (6 fail with the eviction mutation together).
+  - Deleting the two `forgetComputer` calls in `computer-memory.ts:71-72` **SURVIVED: 2682 pass, 0 fail.**
+1. **MEDIUM: the unpair delete is not pinned (AGENTS §9).** `artifact-cache-wiring.test.ts:87-88` only checks that `App.tsx` passes `artifactCache`/`feeds` into `MEMORY`. The executor's "forgetComputer deletes nothing → 1 fail" mutation was on the STORE's method. Nothing asserts that `forgetComputer(memory, id)` calls it, and both fields are optional (`?.`), so dropping the call fails silently. A later refactor of `computer-memory.ts` would bring back exactly the privacy defect from finding 1, with the suite green. To fix: add a behavioural test in `computer-memory.test.ts` with spy `artifactCache`/`feeds` that asserts both are called with the unpaired id, and show it RED with the two lines removed.
+- **Holds:**
+  - Finding 2: Share now hands over `<sanitized title>.<ext>` and deletes it after the sheet closes. The delete is limited to `artifacts/`.
+  - Versions are written as `<sha>.<ext>`, so WKWebView gets a `.pdf`.
+  - Thumbnails now go through the same store, so the 200 MB cap counts them.
+  - A file too big to keep shows the note and offers no Share.
+- **Attacks that found nothing blocking:**
+  - (a) A title of `..`: `shareName` gives `...bin`, so there is no traversal.
+  - (b) A copy left behind when Share fails is not counted by `VERSION_RE`, and the unpair delete removes it.
+  - (c) A held version is skipped by eviction, and the hold is released on close.
+- **Not blocking:**
+  - `usedAt` is the file's mtime and a re-arrival does not touch it, so the LRU behaves as FIFO by write time.
+  - A model-chosen title equal to another version's `<sha>.<ext>` would overwrite that version file while the share sheet is open.
+  - "Delete when this phone deletes the session" (D9) is still unbuilt, since the cache is per computer, not per session. It should be either recorded as debt or dropped from D9.
+
+*— claude-opus-5-5, 2026-11-17*
