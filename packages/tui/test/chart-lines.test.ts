@@ -94,7 +94,7 @@ describe("T3.1 no line wider than the width", () => {
     }
     chalk.level = level;
     expect(failures).toEqual([]);
-  });
+  }, 60_000); // ~7 s alone, more under a loaded gate: bun's 5 s default timed it out (17/11)
 
   test("a narrow table drops whole columns, never cuts a number", () => {
     const lines = plain(fixture("stacked"), { width: 18 });
