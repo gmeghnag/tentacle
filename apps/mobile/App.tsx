@@ -105,6 +105,7 @@ import {
   newSessionPill,
 } from "./src/drawer-new-session.ts";
 import { createDrawerRename } from "./src/drawer-rename.ts";
+import { createDrawerRowActions } from "./src/drawer-row-actions.ts";
 import type { ActivityButtonMode } from "./src/floating-button.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
@@ -1118,6 +1119,67 @@ function SessionDrawerHost({
   );
   const [renaming, setRenaming] = useState(() => rename.state());
   useEffect(() => rename.subscribe(() => setRenaming(rename.state())), [rename]);
+  // Row actions — Pin/Unpin and Delete — on the ROW's computer
+  // (docs/feat/mobile-session-actions.md S2): never queued, one per row, a
+  // success re-reads that computer's list, and deleting the OPEN session
+  // navigates to the next row the drawer chose (`DrawerList.nextAfterCurrent`).
+  const [deleteTarget, setDeleteTarget] = useState<DrawerRow | null>(null);
+  // In a ref: the controller is built ONCE (a re-created one would drop an
+  // in-flight action), so it reads the drawer's CURRENT state through this.
+  const rowActionsRef = useRef({
+    currentId: null as string | null,
+    next: null as string | null,
+    listed: "",
+    name: "",
+    rows: [] as readonly DrawerRow[],
+  });
+  const rowActions = useMemo(
+    () =>
+      createDrawerRowActions({
+        pin: async (computerId, sessionId, pinned) => {
+          const link = await LINKS.get(computerId);
+          // The daemon's state after applying (a SET): the list re-read below is
+          // still the authority, so the answer is not applied locally.
+          return await link.client.pinSession(sessionId, pinned);
+        },
+        remove: async (computerId, sessionId) => {
+          const link = await LINKS.get(computerId);
+          await link.client.deleteSession(sessionId);
+        },
+        // That computer's list, never a local guess — and only while the drawer
+        // still lists it (a switch already replaced the controller).
+        reread: (computerId) => {
+          if (computerId === rowActionsRef.current.listed) {
+            void controllerRef.current.refresh();
+          }
+        },
+        navigate: (nextRowId) => {
+          setDeleteTarget(null);
+          const at = rowActionsRef.current;
+          const next = at.rows.find((row) => row.id === nextRowId);
+          if (next === undefined) {
+            // Nothing left to open: the drawer stays where it is, its list now
+            // empty, with its New session pill (Owner Q2's `null`).
+            return;
+          }
+          dispatch({ type: "close" });
+          navigateRef.current.onNavigate(
+            drawerTarget(navigateRef.current.from, {
+              computerId: at.listed,
+              computerName: at.name,
+              sessionId: next.id,
+              title: next.title,
+              archived: next.archived,
+            }),
+          );
+        },
+        currentId: () => rowActionsRef.current.currentId,
+        nextAfterCurrent: () => rowActionsRef.current.next,
+      }),
+    [],
+  );
+  const [rowActionState, setRowActionState] = useState(() => rowActions.state());
+  useEffect(() => rowActions.subscribe(() => setRowActionState(rowActions.state())), [rowActions]);
   // New session (S7): created at the tap on the LISTED computer (the phone's
   // open and outbox attach only), then opened like a row, composer focused.
   const navigateRef = useRef({ from, onNavigate, names: new Map<string, string>() });
@@ -1167,6 +1229,14 @@ function SessionDrawerHost({
   const title = drawerTitle(records, rows, listed);
   const name = title?.name ?? listed;
   navigateRef.current.names.set(listed, name);
+  // What the row actions read at call time: the drawer's present truth.
+  rowActionsRef.current = {
+    currentId: drawerCurrentId(drawer, from),
+    next: list.nextAfterCurrent?.id ?? null,
+    listed,
+    name,
+    rows: [...list.pinned, ...list.running, ...list.recent, ...(list.archived.rows ?? [])],
+  };
   const canCreate = title?.canCreate === true;
   const close = (): void => dispatch({ type: "close" });
   return (
@@ -1207,10 +1277,31 @@ function SessionDrawerHost({
       onRowMenu={setRowMenu}
       rowMenu={rowMenu}
       onRowMenuClosed={() => setRowMenu(null)}
-      onRename={(row) => {
+      onRowAction={(row, kind) => {
         setRowMenu(null);
-        rename.begin(listed, row);
+        if (kind === "rename") {
+          rename.begin(listed, row);
+          return;
+        }
+        if (kind === "delete") {
+          // The confirmation first (Owner Q2: the open session is allowed, said).
+          setDeleteTarget(row);
+          return;
+        }
+        // Pin / Unpin: a SET, sent at once on the row's computer.
+        void rowActions.pin(listed, { id: row.id, pinned: row.pinned });
       }}
+      deleteTarget={deleteTarget}
+      onDeleteConfirmed={() => {
+        const row = deleteTarget;
+        setDeleteTarget(null);
+        if (row !== null) {
+          void rowActions.confirmDelete(listed, { id: row.id });
+        }
+      }}
+      onDeleteCancelled={() => setDeleteTarget(null)}
+      actionError={rowActionState.error}
+      onDismissActionError={() => rowActions.dismiss()}
       rename={renaming?.field ?? null}
       onRenameText={(text) => rename.setText(text)}
       onRenameSave={() => void rename.submit()}

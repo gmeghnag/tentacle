@@ -367,3 +367,65 @@ describe("describeError", () => {
     expect(describeError("a string").message).toBe("a string");
   });
 });
+
+describe("pins (docs/feat/mobile-session-actions.md S2)", () => {
+  const PINNED = entry({ sessionId: "pin-old", updatedAt: NOW - 10 * 86_400_000, pinned: true });
+
+  test("a pinned entry carries `pinned: true` on its row; an absent field is not pinned", () => {
+    const sections = rows([PINNED, entry({ sessionId: "plain" })], NOW);
+    expect(sections.active.map((r) => [r.sessionId, r.pinned])).toEqual([
+      ["pin-old", true],
+      ["plain", false],
+    ]);
+  });
+
+  test("`pinned` unions the first-page list with the loaded entries, deduped, in its own order", () => {
+    const loadedOnly = entry({ sessionId: "pin-loaded", pinned: true, updatedAt: NOW });
+    const sections = rows([loadedOnly], NOW, [PINNED, entry({ sessionId: "unpinned-elsewhere" })]);
+    expect(sections.pinned.map((r) => r.sessionId)).toEqual(["pin-old", "pin-loaded"]);
+    // ...and the pins stay in `active` too: hoisting them is a renderer's job.
+    expect(sections.active.map((r) => r.sessionId)).toEqual(["pin-loaded"]);
+  });
+
+  test("a pin whose recency page is NOT loaded still shows (the first page carries it)", () => {
+    const sections = rows([entry({ sessionId: "recent" })], NOW, [PINNED]);
+    expect(sections.pinned.map((r) => [r.sessionId, r.pinned])).toEqual([["pin-old", true]]);
+    expect(sections.active.map((r) => r.sessionId)).toEqual(["recent"]);
+    // A pinned ARCHIVED session is in the pinned projection (Owner Q3).
+    const archivedPin = entry({ sessionId: "old", archived: true, pinned: true });
+    expect(rows([], NOW, [archivedPin]).pinned.map((r) => r.archived)).toEqual([true]);
+  });
+
+  test("the reducer keeps the first page's pins and REPLACES them on a re-read", () => {
+    const asking = refresh(initialSessionList);
+    const first = reduce(asking, {
+      type: "page",
+      page: { sessions: [PINNED], pinned: [PINNED] },
+      generation: asking.generation,
+    });
+    expect(first.pinnedEntries.map((e) => e.sessionId)).toEqual(["pin-old"]);
+    // Another device unpinned it: the next first page says so, so the pin goes.
+    const again = reduce(refresh(first), {
+      type: "page",
+      page: { sessions: [entry({ sessionId: "pin-old" })] },
+      generation: first.generation + 1,
+    });
+    expect(again.pinnedEntries).toEqual([]);
+  });
+
+  test("a later page carries no pins, so it never edits the pinned list", () => {
+    const asking = refresh(initialSessionList);
+    const first = reduce(asking, {
+      type: "page",
+      page: { sessions: [PINNED], cursor: `${NOW}:pin-old`, pinned: [PINNED] },
+      generation: asking.generation,
+    });
+    const more = reduce(first, { type: "more" });
+    const next = reduce(more, {
+      type: "page",
+      page: { sessions: [entry({ sessionId: "later" })] },
+      generation: more.generation,
+    });
+    expect(next.pinnedEntries.map((e) => e.sessionId)).toEqual(["pin-old"]);
+  });
+});

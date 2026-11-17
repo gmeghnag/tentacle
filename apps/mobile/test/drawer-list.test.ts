@@ -20,6 +20,7 @@ function row(sessionId: string, over: Partial<SessionRow> = {}): SessionRow {
     archived: false,
     running: false,
     attached: 0,
+    pinned: false,
     ...over,
   };
 }
@@ -30,6 +31,7 @@ function source(rows: readonly SessionRow[], over: Partial<DrawerSource> = {}): 
     stale: false,
     empty: rows.length === 0,
     sections: {
+      pinned: rows.filter((r) => r.pinned),
       active: rows.filter((r) => !r.archived),
       archived: rows.filter((r) => r.archived),
     },
@@ -185,5 +187,90 @@ describe("drawerTitle", () => {
 
   test("a computer no longer paired: no title (the drawer never invents one)", () => {
     expect(drawerTitle([A], [computer("a")], "gone")).toBeNull();
+  });
+});
+
+describe("the Pinned section (docs/feat/mobile-session-actions.md S2)", () => {
+  /** `source` with a pinned projection over the same rows (the drawer hoists by id). */
+  function withPins(pinnedIds: readonly string[], rows: readonly SessionRow[]): DrawerSource {
+    const base = source(rows);
+    return {
+      ...base,
+      sections: { ...base.sections, pinned: rows.filter((r) => pinnedIds.includes(r.sessionId)) },
+    };
+  }
+
+  test("Pinned comes first and its rows leave Running/Recent/Archived (one row each)", () => {
+    const list = drawerList(withPins(["i1", "a1"], ROWS), { currentId: null, archivedOpen: true });
+    expect(list.pinned.map((r) => r.id)).toEqual(["i1", "a1"]);
+    expect(list.running.map((r) => r.id)).toEqual(["r1"]);
+    expect(list.recent.map((r) => r.id)).toEqual(["i2"]);
+    expect(list.archived.rows?.map((r) => r.id)).toEqual(["a2"]);
+  });
+
+  test("a running pinned row keeps its running tone and its place in Pinned", () => {
+    const list = drawerList(withPins(["r1"], ROWS), closed);
+    expect(list.pinned.map((r) => [r.id, r.tone])).toEqual([["r1", "running"]]);
+    expect(list.running).toEqual([]);
+  });
+
+  test("a pinned ARCHIVED row shows in Pinned dimmed, and is not counted twice", () => {
+    const list = drawerList(withPins(["a1"], ROWS), { currentId: null, archivedOpen: true });
+    expect(list.pinned.map((r) => [r.id, r.tone, r.archived])).toEqual([["a1", "archived", true]]);
+    expect(list.archived.count).toBe(1);
+    expect(list.archived.rows?.map((r) => r.id)).toEqual(["a2"]);
+  });
+
+  test("the open session is found in Pinned first (currentIn, F5 never hidden)", () => {
+    const list = drawerList(withPins(["i1"], ROWS), { currentId: "i1", archivedOpen: null });
+    expect(list.currentIn).toBe("pinned");
+    expect(list.pinned[0]?.current).toBe(true);
+  });
+
+  test("no pins: the Pinned section is empty and every section is as before", () => {
+    const list = drawerList(source(ROWS), closed);
+    expect(list.pinned).toEqual([]);
+    expect(list.recent.map((r) => r.id)).toEqual(["i1", "i2"]);
+  });
+
+  test("an empty list is still empty once pins are projected (nothing invented)", () => {
+    const empty = drawerList(
+      { ...source([]), sections: { pinned: [], active: [], archived: [] } },
+      closed,
+    );
+    expect(empty.empty).toBe(true);
+    expect(empty.pinned).toEqual([]);
+  });
+});
+
+describe("nextAfterCurrent (the row a delete of the open session lands on, Owner Q2)", () => {
+  const PIN = row("p1", { pinned: true });
+
+  function listOf(currentId: string | null, rows: readonly SessionRow[]): string | null {
+    const base = source(rows);
+    return (
+      drawerList(
+        { ...base, sections: { ...base.sections, pinned: rows.filter((r) => r.pinned) } },
+        { currentId, archivedOpen: null },
+      ).nextAfterCurrent?.id ?? null
+    );
+  }
+
+  test("the first remaining row after it, in the drawer's own visible order", () => {
+    expect(listOf("p1", [PIN, row("i1"), row("i2")])).toBe("i1");
+    expect(listOf("i1", [PIN, row("i1"), row("i2")])).toBe("i2");
+  });
+
+  test("the last row falls back to the first one before it (the list shifts up)", () => {
+    expect(listOf("i2", [PIN, row("i1"), row("i2")])).toBe("p1");
+  });
+
+  test("archived rows are never 'the next session' (browsing is not a switch)", () => {
+    expect(listOf("i1", [row("i1"), row("a1", { archived: true })])).toBeNull();
+  });
+
+  test("nothing left → null (the empty drawer with its New session pill)", () => {
+    expect(listOf("i1", [row("i1")])).toBeNull();
+    expect(listOf(null, [row("i1")])).toBeNull();
   });
 });

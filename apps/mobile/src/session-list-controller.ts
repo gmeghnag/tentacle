@@ -143,7 +143,7 @@ export function viewModel(
   readonly sections: SessionSections;
   readonly canLoadMore: boolean;
 } {
-  const sections = rowsOf(state.entries, now);
+  const sections = rowsOf(state.entries, now, state.pinnedEntries);
   return {
     status: state.status,
     stale: state.stale,

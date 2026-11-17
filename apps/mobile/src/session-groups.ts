@@ -12,6 +12,11 @@ import { wakesMeta } from "./schedule-view.ts";
 import type { SessionRow, SessionSections } from "./session-list.ts";
 
 export interface SessionGroups {
+  /**
+   * The daemon's pins, first, and removed from the three sections below
+   * (docs/feat/mobile-session-actions.md: one projection, two renderers).
+   */
+  readonly pinned: readonly SessionRow[];
   readonly running: readonly SessionRow[];
   readonly idle: readonly SessionRow[];
   readonly archived: readonly SessionRow[];
@@ -26,12 +31,15 @@ function matcher(query: string): (row: SessionRow) => boolean {
 
 export function groupSessions(sections: SessionSections, query: string): SessionGroups {
   const keep = matcher(query);
-  const active = sections.active.filter(keep);
+  const pinned = sections.pinned.filter(keep);
+  const isPinned = new Set(pinned.map((row) => row.sessionId));
+  const active = sections.active.filter((row) => keep(row) && !isPinned.has(row.sessionId));
   const running = active.filter((row) => row.running);
   const idle = active.filter((row) => !row.running);
-  const archived = sections.archived.filter(keep);
+  const archived = sections.archived.filter((row) => keep(row) && !isPinned.has(row.sessionId));
   const total = sections.active.length + sections.archived.length;
   return {
+    pinned,
     running,
     idle,
     archived,

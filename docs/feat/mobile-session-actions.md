@@ -488,6 +488,163 @@ the new test files contains a skip.
 the spy store's real decoders and `loadState`. To verify, pin a session over
 `connect`, restart `serve`, then run `session/list`.
 
+### S2 — Long-press row actions on the phone: Pin, Delete, the Pinned section
+
+*— claude-code 2.1.323 (model `opus`), 2026-11-17 (executor, slice S2 only)*
+
+**S2 — DONE.** S1 was already merged into this branch; S3 not started.
+
+**Load-bearing check (the plan's own "to verify first in S2"): holds, and S2
+needed no new re-read.** The drawer already re-reads the listed computer's list
+on EVERY open, and on a computer switch while open
+(`App.tsx:1081-1087`, `useEffect(() => { if (drawer.open) void controller.refresh() },
+[drawer.open, controller])`; the controller is rebuilt per `listed` computer at
+`App.tsx:1054-1066`). This is pinned by `drawer-seam.test.ts` ("a late page of a
+previous open is dropped (F3: refresh on every open)"). So the other device's pin
+shows at the drawer's next open, which is what Owner Q6 accepted — no live push,
+no new update kind, and nothing added here. The Context repro also re-ran on the
+branch as expected: the sheet had exactly one item (`label: "Rename"`), no
+`playHaptic` on the long-press, and nothing in the drawer knew a pin.
+
+**As built (dependency order), all inside the plan's S2 file list:**
+1. `session-list.ts`: `SessionRow.pinned`, `SessionSections.pinned`,
+   `SessionPage.pinned?`, `SessionListState.pinnedEntries`. The reducer REPLACES
+   `pinnedEntries` on a first page only and leaves it alone on a later page; a
+   `fail` keeps it (the pins last read stay, like the rows). `rows()` unions the
+   first-page list with any loaded entry flagged `pinned`, deduped by id in the
+   first-page order, and builds a row for a pin whose recency page is not loaded
+   (the daemon sends the whole entry on the first page). Pins ALSO stay in
+   `active`/`archived` — hoisting is the renderers' decision, not the
+   projector's, so paging and the daemon's order are untouched.
+2. `session-list-controller.ts`: `viewModel` passes `state.pinnedEntries`
+   through. One line; no new lifecycle.
+3. `drawer-list.ts`: `DrawerRow` gains `running`, `attached`, `pinned` (what the
+   menu words itself from); `DrawerList` gains `pinned`, `DrawerSection` gains
+   `"pinned"`, `nextAfterCurrent`, and the hoist (pinned rows are removed from
+   Running/Recent/Archived and keep their tone). `drawerItems` emits the
+   **Pinned** label first, only when non-empty.
+4. `session-groups.ts`: the same group for the full Sessions screen.
+5. `drawer-row-menu.ts` (new, pure): `rowMenu(row)` → Unpin|Pin to top, Rename,
+   Delete (destructive, last), with the plan's testIDs; `deleteConfirm(row,
+   {isOpen})` → `{title, message, confirmLabel}` with the TUI's R3 wording plus
+   the attached and open-yourself notes.
+6. `drawer-row-actions.ts` (new, pure controller): `pin` / `confirmDelete` on the
+   ROW's computer, never queued, one per row (busy set), re-read on success,
+   `SessionDeleted` on a delete = success, `navigate(next | null)` only for the
+   row that was open, and `rowActionErrorText` (class/code only).
+7. `haptic-rules.ts`: `rowMenuHaptic() === "firm"`.
+8. `SessionsDrawer.tsx` (render only): the menu is `rowMenu`'s items through
+   `menuActions`, a second `ActionSheet` is the confirmation, a `pin` glyph
+   (11 pt, `light`, `palette.sec`) marks a pinned row, the a11y hint is
+   "Long-press for actions", `playHaptic(rowMenuHaptic())` runs before the sheet,
+   and a failed action shows `drawer-action-error`.
+9. `SessionsScreen.tsx`: the `section-pinned` BandSection, above Running.
+10. `App.tsx`: the controller wired to `link.client.pinSession` /
+    `deleteSession`, `reread` to the listed computer's controller, `navigate` to
+    `drawerTarget` (and the drawer closes on a switch), with the drawer's
+    present order and `nextAfterCurrent` read through a ref so the controller is
+    built once (a re-created one would drop an in-flight action).
+11. `ui/Icon.tsx`: the `pin` SF Symbol name.
+12. `changelog.d/mobile-session-actions.added.md` (S1's bullet, unchanged);
+    `docs/feat/mobile-chrome.md` "Archive/Delete stay out" now points here;
+    `apps/mobile/e2e/flows/26-drawer.yaml` asserts the new menu before Rename.
+
+**Drift from Implementation (and why):**
+- *The delete confirmation is its own sheet testID (`drawer-delete-sheet`) plus
+  the plan's `drawer-delete-confirm` / `drawer-delete-cancel`.* The plan named
+  the two buttons only; a sheet needs an id a flow can assert visible.
+- *`DrawerRowActions.confirmDelete` takes `(computerId, row)`, and `pin` takes
+  `(computerId, {id, pinned})`.* Same shape as `drawer-rename.ts` (`begin(computerId,
+  row)`): the component never re-derives the computer or the wanted state.
+- *`rowActionErrorText` says "Update tentacle on this computer to pin sessions."
+  — no computer NAME.* The controller is pure and the plan's wording (`on
+  <computer>`) needs a name; the drawer's banner has the listed computer's name
+  on screen right beside it, so the name would be duplicated, and passing it in
+  would make the controller depend on the probe's result. Same sentence for
+  delete.
+- *`navigate(null)` leaves the drawer open rather than navigating away.* "The
+  existing empty drawer state with the New session pill" IS the drawer, so
+  closing it or inventing a route would be worse; the drawer re-reads on its own
+  next open and shows "No sessions yet".
+- *`App.tsx`'s `navigate` closes the drawer only when it lands on another
+  session* (a switch is a navigation; the empty case is not).
+- *`SessionListState.pinnedEntries` is a new field*, not a second map beside
+  `entries`: it is the first page's `pinned`, replaced wholesale, so an unpin on
+  another device clears it at the next read instead of lingering.
+- *A pinned row whose recency page is not loaded gets its own row built from the
+  first-page entry.* The plan says the `pinned` array carries every pin; without
+  this the row would be in `pinned` (ids) but nowhere renderable.
+- *No `Rename` prop left on the drawer*: rename is now one `onRowAction` kind, so
+  the sheet cannot offer an item with no handler.
+
+**Red before green.** New files (`drawer-row-menu.ts`, `drawer-row-actions.ts`)
+cannot be red as imports, so their non-vacuity is shown by mutation. The edits to
+existing modules were red first in the real sense: `drawer-list.test.ts`,
+`drawer-items.test.ts`, `session-groups.test.ts`, `session-list.test.ts` and
+`haptic-rules.test.ts` failed on their assertions against the pre-change code —
+`list.pinned` was `undefined` (`TypeError: undefined is not an object (evaluating
+'list.pinned.length')`), `rowMenuHaptic` was not exported, and `groupSessions`
+returned no `pinned` group. Those failures were the shape of the gap, not an
+import error in a test file that never ran.
+
+**Mutation checks.** `.tentacle/tmp/mobile-session-actions/mutate-s2.ts`
+(back up, replace one exact site, run the narrow files, restore; `git diff --stat`
+identical afterwards). 17/17 killed:
+
+```
+M1  drawerList does not hoist pins                        KILLED, 8 red
+M2  rows() ignores the first page's pinned list           KILLED, 4 red
+M3  a later page overwrites the pins                      KILLED, 2 red
+M4  session-groups does not hoist pins                    KILLED, 4 red
+M5  the menu offers Pin on an already pinned row          KILLED, 2 red
+M6  the confirmation drops the running-turn warning       KILLED, 4 red
+M7  the confirmation never says it is the open session    KILLED, 4 red
+M8  pin sends the row's current state, not its opposite   KILLED, 4 red
+M9  no re-read after a successful action                  KILLED, 6 red
+M10 the busy gate is dropped (double tap sends twice)     KILLED, 4 red
+M11 SessionDeleted on a delete is a failure               KILLED, 2 red
+M12 deleting the open session does not navigate           KILLED, 6 red
+M13 the row's own computer is ignored                     KILLED, 4 red
+M14 nextAfterCurrent may return an archived row           KILLED, 2 red
+M15 rowMenuHaptic is the hub's tick, not "firm"           KILLED, 2 red
+M16 a failed action's error is dropped (no banner)        KILLED, 10 red
+M17 the row's pinned flag never reaches the view-model    KILLED, 2 red
+```
+
+Two rounds were needed, honestly:
+- **M4 survived at first** and the TEST was wrong, not the code: my
+  `session-groups` case put the pinned row only in `pinned`, while the real
+  projector keeps it in `active` too (`session-list.ts:rows()`), so removing the
+  hoist filter changed nothing. The fixture now carries the same row in both
+  (the real shape), and M4 is killed.
+- **M3 and several early runs reported "SURVIVED as a crash"**: the harness ran
+  `bun test apps/mobile/test/<file>` with `cwd=apps/mobile` (no file matched, so
+  every run "failed") and then read only stdout, while bun writes the failure
+  report to stderr. Both are fixed (`cwd` = repo root; the report is read from
+  stderr and `(fail)` matched anywhere in the line, past the ANSI reset). Every
+  "KILLED" above is a real assertion failure.
+
+**Tests added:** `test/drawer-row-menu.test.ts` (8),
+`test/drawer-row-actions.test.ts` (16), `test/drawer-row-actions-wiring.test.ts`
+(9, source-pinned like `icon-weights.test.ts` — the `.tsx` seam Bun cannot
+import), plus new cases in `session-list.test.ts` (5), `drawer-list.test.ts`
+(10), `drawer-items.test.ts` (2), `session-groups.test.ts` (4) and
+`haptic-rules.test.ts` (1). Every line of the plan's S2 failure-mode table that
+is decidable without a simulator is a case: offline, `MethodNotFound`, an
+already-deleted row, a double tap, an archived pin, a pin older than the loaded
+pages, a replaced (not merged) pin list, and the open session's delete.
+
+**Gate:** `bun run typecheck` clean (root + mobile + relay) · `bun run lint`
+clean (1845 files, 0 errors/warnings) · `bun test` 13445 pass / 5 skip / 0 fail.
+The 5 skips are the pre-existing opt-in ones (live docker/k8s, slow keepalive);
+none of the new test files contains a skip. `packages/protocol/schema/protocol.json`
+was NOT regenerated: S2 changes no schema (it only consumes S1's `pinned` fields).
+
+**Not verified:** the drawer's long-press on a real device (haptic feel, the
+sheet's native look) and the delete confirmation's layout on a small screen —
+`26-drawer.yaml` now asserts the menu's items and the flow still needs a run on
+the simulator. To verify: run flow 26 against the harness `serve`.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S1 only)*

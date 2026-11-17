@@ -36,9 +36,15 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "26-drawer"
-# F7: long-press → Rename → `session/rename` by id; the field closes on success.
+# F7 + docs/feat/mobile-session-actions.md S2: long-press → the row menu (Pin to
+# top / Rename / Delete) → Rename → `session/rename` by id; the field closes on
+# success. The menu's full wording is pinned by `drawer-row-menu.test.ts`.
 - longPressOn:
     id: "drawer-current-${DRAWER_ID}"
+- assertVisible:
+    id: "drawer-row-pin"
+- assertVisible:
+    id: "drawer-row-delete"
 - tapOn:
     id: "drawer-row-rename"
 - assertVisible:
