@@ -1245,3 +1245,166 @@ F2 source lines not cleaned: KILLED (3 fail) … > flowchart label | … > sourc
 - **Correction to round 1:** the executor commits are tagged `deepseek`, so the reviewer is a DIFFERENT model family, not the same one.
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Execution — slice D4
+
+*TUI wiring only: the `diagramRow` branch in `render-lines.ts` (a sibling of `chartRow`), its tests, and the changelog sentence D3 deferred. Nothing of D5–D7 (no phone, no artifacts, no `openHint`). `TODO.md` untouched.*
+
+### 0. Load-bearing check, re-run first — **HOLDS**
+
+The D4 plan names P3 as its seam: *a tool may draw itself in its row's place* — `chartRow` → an early return in `toolLines` (`render-lines.ts:788-793`), a per-item memo keyed on the layout inputs, per-id expand via `expandedIds` + Ctrl+O via `expandAll`. Re-run on this branch:
+
+- `bun test packages/tui/test/app.test.tsx -t "a chart in the App"` → **7 pass, 0 fail**. The seam is real and reachable through the App.
+- `bun test packages/tui/test/diagram-lines.test.ts` (D3's renderer, the thing D4 wires) → **45 pass, 0 fail**.
+- `bun test packages/tools/test/diagram.test.ts` (D2's tool, whose `args` D4 reads) → **30 pass, 0 fail**.
+
+So a `diagram` call's arguments reach the TUI and the renderer draws them; what was missing is only the branch. Confirmed empirically, not by reading: before the change a `diagram` call rendered `● Diagram Flusso di login` (see §2).
+
+### 1. As built (dependency order)
+
+1. **Red first (§9).** `packages/tui/test/app-diagram.test.tsx` (7 tests) was written and run against the un-branched code: **1 pass, 6 fail**. The one pass is honest and vacuous — the forged-source test asserts the row is the generic one, which is what every row was. Its non-vacuity is shown by mutation M1/M8 below, not by that red run.
+2. `packages/tui/src/render-lines.ts`:
+   - `DIAGRAM_TOOL = "diagram"` (`:100-101`), a literal for the reason `CHART_TOOL` is one (`:94-98`): the TUI does not depend on `@tentacle/tools`, and the name is data on the wire.
+   - `diagramRow(tool, width, opts)` (`:785-828`): name guard → settled-call guard (`running`/`queued` keep the generic row) → the same `expanded` computation the other rows use → a `WeakMap<ToolItem, Map<key, rows|null>>` memo keyed `${width}|${expanded?1:0}` → `diagramToolBody(tool.args, { width, expanded })` → `undefined` when the renderer refuses.
+   - the branch in `toolLines` (`:839-848`), right after the chart's, returning the rows in the item's place (no bullet, no `● Diagram` header, no `⎿` connector).
+   - `openHint` is deliberately **not** passed: the `^X^O` chord cannot open a diagram until D7 adds the artifact kind, and a hint the key does not honour would be a lie (D3's caption already supports it; D7 turns it on).
+3. `packages/tui/test/diagram-row.test.ts` (9 tests): the narrow, pure seam — no chrome, caption is row 0, `expandedIds` ≡ `expandAll`, the width in the memo key (drawing ⇄ source on the SAME item), forged args → generic row (6 shapes), `running`/`queued` → generic row, another tool's row untouched (including one whose args are diagram-shaped), every row within the width at 8 widths × 2 tiers, no `process.stdout` write.
+4. `packages/tui/test/app-diagram.test.tsx` (7 tests): the frames T4 names — live through the real `Agent` + `createDiagramTool({ parse })`; after a resume from `messagesToItems`; Ctrl+O expand/collapse; a click on the caption (row 0) expanding it; a resize 120 → 50 → 120; a forged source; a `process.stdout` spy.
+5. `changelog.d/model-diagrams.added.md`: D3's deferred sentence replaced — the terminal drawing (flowchart boxes/decisions, sequence lifelines), `ctrl+o`/caption-click for the source, and the source fallback for a type the terminal cannot draw; the phone renderer still "follows".
+
+### 2. Red before green (§9)
+
+`bun test packages/tui/test/app-diagram.test.tsx` on the code without the branch: **1 pass, 6 fail**, each on its own assertion (not an import):
+- live: `Expected to contain: "╭"` (received `● Diagram Flusso di login`);
+- resume: the same;
+- Ctrl+O: no source rows;
+- click: `captionRow` found no caption → `Expected: > 0, Received: 0`;
+- resize: no box at 120;
+- stdout spy: no box drawn.
+
+Two honest adjustments made during the red→green loop, both stated rather than hidden:
+- `ink-testing-library`'s terminal is 24 rows × 100 cols, and a drawn diagram is taller: an overflowing frame loses its **top** rows (the caption, so the click target). The tests now mount, then commit an 80-row screen at 120 cols (`mountApp`), the order `app.test.tsx` uses so the App's resize subscription is already live.
+- The resize fixture's first draft was a 6-node flowchart that still fit 50 cols; it gained a seventh node and an extra edge so the tier really changes (verified by `.tentacle/tmp/model-diagrams/d4/probe3.ts`: `wide @120 drawn=true`, `wide @50 sourceOnly=true`).
+- Three assertions were wrong about the house style, not about the code, and were corrected after the run: the queued row's glyph is `◌` (not `●`) and it carries the title as a *subtitle*; the `shell` tool's label is `Bash`; `SOURCE_ONLY` is cut at narrow widths, so only `source only` is pinned.
+
+### 3. Mutation checks (§9; `.tentacle/tmp/model-diagrams/d4/mutate.ts` — each applied by exact match, both narrow files run, the file restored from a copy; `git status` after shows only the intended three files)
+
+```
+M1 diagramRow branch dropped from toolLines:                  KILLED (9 fail)
+M2 memo key drops the width:                                   KILLED (2 fail)  ← resize, on one item
+M3 expanded ignored (always compact):                          KILLED (3 fail)
+M4 tool chrome kept above the drawing:                         KILLED (3 fail)
+M5 diagramRow used for every tool:                             KILLED (1 fail)  ← the impostor-tool test
+M6 a raw terminal write inside the branch:                     KILLED (2 fail)  ← the stdout spies
+M7 only a settled call draws (running guard dropped):          KILLED (1 fail)
+M8 the generic-row fallback removed (return [""] on refusal):  KILLED (2 fail)
+```
+
+Two mutations earned a test rather than a shrug, which is the point of the exercise:
+- **M5 first SURVIVED.** The `shell` case alone could not kill it: hand the diagram renderer a `{"command":"ls -la"}` arg and it refuses, so the row is generic either way. A second case was added — a tool NAMED `draw` carrying valid diagram args — and M5 then died. The guard is pinned on the name, which is what it actually is.
+- **M6/M7 first matched the WRONG site.** Their `from` strings existed in `chartRow` too, so the first replacement mutated the chart and the diagram tests stayed green — a false SURVIVED that would have read as "this code is untested". The anchors were widened to the diagram-specific context and both then died. One mutation (M8) was then killed only after its anchor was made unique to `diagramRow`: `bun -e` on the mutated build showed `["● Diagram not json"]`, i.e. the `return [""]` path is swallowed by the generic row below it, and the test that catches it is the forged-args one.
+
+### 4. Drift from the Implementation (and why)
+
+1. **A second test file, `diagram-row.test.ts`.** The plan lists T4's checks only as ink frames. Three of them (the name guard, the `running`/`queued` guard, "every row within the width at 8 widths") are pure `itemLines` properties: an App frame cannot state them, and the first two cannot even fail in a frame. This is the same split `render-lines.ts` already has for the chart (narrow unit tests + `app.test.tsx` frames), so it is the house pattern rather than a new one.
+2. **No `openHint`.** The plan's D8 mentions `^X^O apri` in the caption; D4's own T4 does not, and the chord needs D7's artifact kind. Passing `openHint: true` now would advertise a key that does nothing. D7 flips one option.
+3. **The changelog fragment is edited, not added.** D3's drift item 7 asked for exactly this; the fragment title and its D1/D2 content are unchanged.
+4. **The memo keys on `width|expanded` only** — no glyphs/locale analogue, because a diagram's drawing depends on nothing else. `openHint` will be a third component when D7 passes it.
+5. The Review nit about `parseDiagramArgs` returning the raw title is honoured structurally: `toolLines` never shows `call.title` for a diagram — only `diagramView`'s cleaned caption reaches a row (the caption in these frames comes from the renderer, not from `toolSubtitle`).
+
+### 5. Gate
+
+- `bunx tsc --noEmit`: clean.
+- `bun run lint`: clean, 1986 files (2 files auto-formatted by `biome check --write`; no hand fixes needed, no `noControlCharactersInRegex` suppression added — the control-byte rule already lives in `diagram-lines.ts`).
+- Narrow: `app-diagram` 7 pass, `diagram-row` 9 pass, `diagram-lines` 45 pass, `render-lines`+`chart-lines`+`tool-hit` 222 pass, `app.test.tsx` 123 pass.
+- Full `bun test`, run once at the end: **14467 pass, 5 skip, 0 fail** (same 5 skips as the D3 gate: 3 opt-in + 2 pre-existing).
+- No schema change, no `protocol.d/` note (a tool name and its arguments are data on the wire, D9). `protocol.json` untouched.
+
+*— deepseek (variant not recorded), 2026-11-17* — this slice's executor per the
+routing table (`:425`) and its commit (`27d396eb exec (deepseek)`). The
+`claude-opus-5-5` signature this line originally carried was a wrong
+self-attribution (fix round 1, finding 2); no log of that session survives, so
+the variant is stated as unrecorded rather than invented — the same form the
+`## Execution` section above already uses.
+
+## Review — slice D4
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff main...HEAD` (D4 only), fresh context.
+
+1. **HIGH — a FAILED `diagram` call draws as if it were valid, and its error disappears** (`render-lines.ts:806` guard + `:845-847` early return). `diagramRow` skips only `running`/`queued`. A call whose status is `error` still draws, because the client-side gate (`parseDiagramArgs` → `lintDiagram`, `diagram-lines.ts:70`) is only the lint, not mermaid's parser. Two cases reach `error`: the daemon's mermaid refusal (D4's whole point), and a denial (`resume.ts:114` maps it to `error`). The early return drops the bullet, the red status and the tool's error text. Repro (`.tentacle/tmp/model-diagrams/rev-d4/err2.ts`, run through `itemLines` at width 100): `flowchart TD\n  A --> B` and the tools test's mermaid-rejected fixtures (`sequenceDiagram\n  A->>B…`, `erDiagram\n  A ||--o B : has`, `gitGraph…branch`) render **byte-identical for `status:"ok"` and `status:"error"`**: the caption plus a drawing or "source only", with no error anywhere. Result: when the model retries, the user sees two "good" diagrams, and the first is one mermaid refused. This contradicts T5's "decision (name/status/lint) mirrors `chartRowSpec`". The phone's gate is `apps/mobile/src/chart-row.ts:41`, which excludes `error`/`denied`. `chartRow` gets away with the same guard only because the chart's client-side validation equals the tool's. Fix: also return `undefined` when `tool.status === "error"`, so the generic error row shows. Add a test (status `error` + lint-passing, mermaid-rejected args → `● Diagram …` row containing the error output) and show it red first.
+2. **MEDIUM — the Execution's signature is in doubt** (§10). The plan's routing table (`:425`) and the commit `27d396eb "exec (deepseek)"` name deepseek, but the Execution section is signed `claude-opus-5-5`. One of them is wrong, and the signature exists so drift can be traced to a model. Correct it.
+
+**Gate (reviewer-run):** `app-diagram` + `diagram-row` 16 pass / 0 fail. `bun run lint`: clean, 1986 files. `bun run typecheck`: clean. Full `bun test` not re-run: the finding is decisive.
+
+**Mutation (independent of the executor's set):** I set the memo key to a constant (`const key = "k"`). Result: **KILLED**, 4 fail (Ctrl+O, click, resize ×2). The file was restored from a scratch copy and `git status` is clean.
+
+**Attacks tried:** (a) error/denied status → **found #1**; (b) memo staleness across running→ok: the cache is never filled while `running`, so it holds; (c) control bytes in the title/labels: cleaned in `diagramView` (`diagram-lines.ts:97-101`), and `toolLines` never shows `call.title`, so it holds; (d) a raw stdout write: the spies cover it, and M6 confirms them, so it holds; (e) the name guard against an impostor tool: covered by the `draw` case, so it holds.
+
+**What holds:** the P3 seam is reused rather than copied (§7 "logic in pure modules": the branch is pure and the component untouched). No protocol/persistence change. Tests are non-vacuous for what they cover. The `openHint` omission is justified.
+
+**Executor behaviour:** honest red/green log; surviving mutations were turned into tests (M5) rather than shrugged off. But the status guard was copied from `chartRow` without re-checking its premise (that the client-side validation equals the tool's), and that premise does not hold for `diagram`.
+
+*Reviewer: claude-opus-5-5 (fresh context). If the executor really was opus, this review shares its model family: blind spots may be shared.*
+
+*— claude-opus-5-5, 2026-11-17*
+
+### Fix round 1
+
+**Finding 1 (HIGH) — a FAILED `diagram` call drew as if valid: FIXED.**
+- `packages/tui/src/render-lines.ts:808-816`: `diagramRow` now returns `undefined` for `tool.status === "error"`, right after the `running`/`queued` guard, so the generic row (`● Diagram <title>` + the tool's text, red bullet, red body) renders instead. The premise the review re-checked is written into the comment: our own gate (`diagramToolBody` → `parseDiagramArgs` → `lintDiagram`) is only a lint, the daemon runs mermaid's own parser, and a denial (`docs/feat/permission-reply.md`) arrives as the same status.
+- Chosen site: the guard in `diagramRow`, not a change to `diagramToolBody`. `diagramToolBody` is a pure "what does this source draw" renderer, and the status is not part of a source; the row is where a call's status decides whether it draws. Same shape as the existing `running`/`queued` guard, one line away.
+
+**Repro, before any edit** (`.tentacle/tmp/model-diagrams/fix-d4/repro.ts`, run from the repo root; the reviewer's own repro is kept at `rev-d4/err2.ts`). Four sources at `ok` and `error`, through `itemLines` at width 80.
+
+BEFORE (from `rev-d4/err2.ts`, before the fix): every `error` row is byte-identical to its `ok` row — the caption plus the drawing (flowchart), or the caption plus "source only" — with the tool's error text nowhere:
+```
+ok    "flowchart TD\n  A --> B"  →  Login · flowchart            + the ╭─╮─◇ drawing
+error "flowchart TD\n  A --> B"  →  Login · flowchart            + the same drawing
+ok    "sequenceDiagram…"         →  Login · sequenceDiagram · source only in the terminal + │ source
+error "sequenceDiagram…"         →  the same
+(erDiagram, gitGraph: the same two-way identity)
+```
+AFTER (the same script, post-fix):
+```
+ok    "flowchart TD\n  A --> B"    errText=false drawing=true   first="Login · flowchart"
+error "flowchart TD\n  A --> B"    errText=true  drawing=false  first="● Diagram Login"
+ok    "sequenceDiagram..."         errText=false drawing=false  first="Login · sequenceDiagram · source only in"
+error "sequenceDiagram..."         errText=true  drawing=false  first="● Diagram Login"
+ok    "erDiagram..."               errText=false drawing=false  first="Login · erDiagram · source only in the t"
+error "erDiagram..."               errText=true  drawing=false  first="● Diagram Login"
+ok    "gitGraph..."                errText=false drawing=false  first="Login · gitGraph · source only in the te"
+error "gitGraph..."                errText=true  drawing=false  first="● Diagram Login"
+```
+The `ok` rows are unchanged (so the fix does not disturb a working diagram); every `error` row now carries the reason and never a drawing.
+
+**Finding 2 (MEDIUM) — the D4 Execution's signature: CORRECTED.** Every commit here is authored by the same human, so the commit SUBJECT is the only record of which model ran a slice — and both it (`27d396eb exec (deepseek)`) and the routing table (`:425`) say deepseek. The `claude-opus-5-5` line came from an agent session, not from the slice: this worktree's only Claude transcript (`~/.claude/projects/…worktrees-model-diagrams/01d42b3a….jsonl`, 279 entries, all `"model":"claude-opus-5-5"`) ends at 06:30 with 2 mentions of `diagramRow` — a D3-era session, not the 10:40-10:57 D4 one, whose transcript is not on disk. The signature is now `*— deepseek (variant not recorded)*`, the same honest form `## Execution` already uses at `:523` after review round 1 corrected this same mistake there. Nothing invented: deepseek is what the routing table and the commit say, the missing variant is stated as missing. (Consequence for the Review above: its closing note "if the executor really was opus … blind spots may be shared" does not hold — the reviewer was a different family from the slice's executor. It is left as written; the reviewer's own words are not mine to edit.)
+
+**Red before green (§9).** Two tests, both red on the assertion of the property, not on an import:
+1. `packages/tui/test/diagram-row.test.ts`, "a FAILED diagram keeps the generic error row, so the refusal is visible". Before the fix: `1 fail — Expected to contain: "●" / Received: "                       Flusso di login · flowchart"`, i.e. it drew. Green after. It also pins the two neighbours: `expandAll` does not buy a refused call a drawing, the denial text (`Denied`) wins, and the SAME args at `ok` still draw.
+2. `packages/tui/test/app-diagram.test.tsx`, "live: a source mermaid REFUSES shows the generic error row, not a diagram" — the end-to-end path the finding is about (a real `createDiagramTool` whose `parse` refuses, driven through the App). The mutation output below shows its red frame: the full `╭───────╮` login flowchart drawn for a call the parser refused.
+
+**Mutations** (`.tentacle/tmp/model-diagrams/fix-d4/mutate.ts` and `mutate-app.ts`, run from the main repo root's `.tentacle/tmp`; each applied by exact match with a uniqueness assert, narrow test run, the file restored → `restored: true`, and `git status` afterwards shows only the intended files):
+```
+M-A error guard dropped (the review's bug), diagram-row:  KILLED (1 fail) … > a FAILED diagram keeps the generic error row
+M-B guard over-broad (no status draws), diagram-row:      KILLED (4 fail) … > the row IS the diagram | ctrl+o expands | width is the memo key | a FAILED diagram
+M-C error guard dropped, app-diagram frames:              KILLED (1 fail) … > live: a source mermaid REFUSES
+```
+M-B is the non-vacuity guard in the other direction: a guard that killed ALL drawing fails four tests, so the suite pins "failed calls do not draw" AND "successful ones do", not just "something returns undefined".
+
+**Drift:** none from the review's instruction, which named the guard and the generic row. One deliberate choice inside it: the guard sits in `diagramRow` rather than in `toolLines`'s dispatch, so `chartRow` is untouched — a chart's client-side validation DOES equal its tool's (the review's own reasoning), so copying the guard there would be a behaviour change nobody asked for.
+
+**Not done, deliberately:** the phone's counterpart is `apps/mobile/src/chart-row.ts:41`, which already excludes `error`/`denied`, and D5's diagram row does not exist yet — the reviewer's cross-reference is a constraint for D5, not a D4 fix. Recorded here so D5 inherits it.
+
+**Gate:** `bun run typecheck` (`tsc --noEmit`, `apps/mobile`, `apps/relay`) clean; `bun run lint` clean, 1986 files, no fixes (one `biome check --write` on `diagram-row.test.ts` after a hand-written line was too long to format); full `bun test`, run once at the end: **14469 pass, 5 skip, 0 fail** (the same 5 opt-in/pre-existing skips as the D4 gate; the only edit after it is a comment reflow in `render-lines.ts`, which no test reads). Narrow during the work: `diagram-row` 10 pass, `app-diagram` 8 pass. The three mutations were re-run against the final code shape and still KILLED.
+
+*— claude-opus-5-5, 2026-11-17* (executor of this fix round; branch `feat/model-diagrams`, uncommitted working tree. The id is this session's own harness report — `AI_AGENT=claude-code_2-1-323_agent` with `modelSettings["claude-opus-5-5"]` — and names the FIX executor; finding 2 above corrects the separate D4 slice signature.)
+
+### Round 2
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (`6dd5a41e`).
+
+1. **Finding 1 (HIGH): FIXED.** `render-lines.ts:814` now returns the generic row when `status === "error"`. Re-running my repro (`.tentacle/tmp/model-diagrams/rev-d4/err2.ts`): all four error-status cases now print `● Diagram Login` instead of a drawing. **Mutation:** I disabled the guard (`if (false)`). Result: **KILLED**, 2 fail (`diagram-row` "a FAILED diagram keeps the generic error row", `app-diagram` "live: a source mermaid REFUSES…"). The file was restored from a scratch copy and `git status` is clean. The new tests cover compact, expanded (`expandAll`) and denial (`denialReply` → `Denied`). They also check that the same args at `ok` still draw, so the guard is pinned on status, not on the source.
+2. **Finding 2 (MEDIUM): FIXED.** The D4 Execution is now signed `deepseek (variant not recorded)`, which matches `:425` and `27d396eb`. Note for the orchestrator, not blocking: the fix round is signed `claude-opus-5-5` (with harness evidence), while its commit subject `6dd5a41e … (deepseek)` says otherwise. The commit subject is the orchestrator's label, so the orchestrator should make the two agree.
+3. **Regressions:** the guard sits after the `running`/`queued` check and before the memo, so no error row is ever cached. `ok` rows are unchanged. `app-diagram` + `diagram-row` + `render-lines` + `app.test.tsx`: **257 pass, 0 fail**. `bun run lint`: clean, 1986 files. `bun run typecheck`: clean. Full `bun test` not re-run by me (the executor reports 14469 pass / 5 skip / 0 fail).
+
+*— claude-opus-5-5, 2026-11-17*
