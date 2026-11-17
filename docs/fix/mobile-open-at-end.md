@@ -758,3 +758,53 @@ specifically that a session whose attach takes ~1 s (a real relay round trip)
 still opens at its end with no visible scroll.
 
 *— claude-opus-5-5 (fix round 2), 2026-11-17*
+
+### Round 3
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (`eedb071f`).
+
+**Gate.** `bun test apps/mobile/test` + the client, daemon and protocol
+snapshot-times tests: 2837 pass, 0 fail. `bun run lint`: clean (1785 files).
+`bun run typecheck`: clean.
+
+**Round-2 NEW HIGH (slow attach): fixed.** `landingStep` and `landingReveal`
+now take `hasRows`. The screen sets it to `rows > 0 || phase !== "opening"`
+(`SessionScreen.tsx:327-328`).
+- Repro (`.tentacle/tmp/mobile-open-at-end/r3-slow-attach.ts`, real order:
+  empty state → timer → history → quiet), with the fix:
+
+```
+timer:   {"settling":false,"silent":true,"last":0,"rounds":0,"awaiting":true}
+history: {...,"scrollTo":39200,"animated":false} settling true
+reveal:  {...,"scrollTo":39800,"animated":false} settling false
+```
+
+  The history hides again, lands silently and is revealed at the true end.
+  Before the fix the same order gave an animated scroll to 39200.
+
+**Mutations.** All were reverted and `git status` is empty.
+- Disabling the `!hasRows` early return in `landingStep` → 1 fail. The
+  end-to-end order is still covered by `landingReveal`'s guard, which is
+  intended defence in depth.
+- Dropping `|| !hasRows` in `landingReveal` → 2 fails, including the
+  real-order test.
+- `hasRows.current = true` in the screen → 1 fail in the wiring test.
+
+**Regression attacks.**
+- **Empty session** (`open`, 0 rows): `hasRows` is true, so it lands on the
+  empty state, is revealed, and later messages follow normally. OK.
+- **Failed attach** (0 rows): `hasRows` is true, so the error state is
+  revealed and never stays hidden. OK.
+- **Order:** `hasRows` is updated during render, before the commit's
+  `onContentSizeChange`. OK.
+- **Unverified residual:** if a non-empty session's status became `open` more
+  than 120 ms before its history rows were folded, the old animated path would
+  come back. `attach` sets `open` only after `controller.open` resolves
+  (`session-screen-controller.ts:921-946`), and the snapshot's history is
+  delivered through `watch` during that open, so it should not happen. Confirm
+  in the device check: open a long session over the relay.
+
+**Still open:** the device check on the owner's iPhone (Execution's list). The
+executor's signatures still need correcting (round 1 and 2 notes).
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, round 3)
