@@ -848,3 +848,29 @@ fragment: D1 is pure core code and adds no user-visible behaviour by itself
 (the fragment rides the tool slice, D2).
 
 Per finding: **1 FIXED**, **2 FIXED**, **3 FIXED**, **4 FIXED**.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* (fresh-context reviewer; diff `HEAD~1`, commit 9d99fc6c)
+
+**Verdict: PASS (APPROVE-WITH-NITS).**
+
+Gate (reviewer reran it): touched tests 66 pass / 0 fail (5 files); `bun run typecheck` clean; `bun run lint` clean (1856 files). The full suite was not rerun.
+
+Each round-1 finding was re-broken by a mutation. Every mutation made tests fail; all were reverted, and `git status` is empty:
+- #1: `canonicalTypeLine` cuts the line at the first `;` → the one-liner and "stays on its line" lint tests fail.
+- #2: the directive pass skips line 0 → 2 fail, including the multi-line init test.
+- #3a: `section`/`state` put back in `BLOCK_KEYWORDS` → the gantt and state tests fail.
+- #3b: the fault-at-EOF guard is neutralised → the mid-source test fails.
+- #4: `splitStatements` no longer splits → 3 fail (`;` click/style, quoted href, click on the type line).
+
+Regression probes (`.tentacle/tmp/model-diagrams/review/b.ts`):
+- `graph TD;A-->B;B-->C`: lint keeps it, and the model reads 3 nodes / 2 edges.
+- `graph LR;…;style A …;…`: the style is dropped with a note, and the direction stays LR.
+- A one-line init: dropped with a note.
+- A sequence message with `;`: kept intact.
+- erDiagram: unchanged.
+
+Nits (LOW, not blocking):
+- (a) A free-text type (timeline/mindmap) with `…; style x` loses that text. It does come with a note, so the loss is not silent.
+- (b) An unbalanced `"` hides a later `; click`. The source would not parse in mermaid anyway, and strict mode plus the sandbox still apply.
