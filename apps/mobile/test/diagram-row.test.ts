@@ -8,7 +8,13 @@
  * source is re-linted on every draw and a refused one keeps the generic row.
  */
 import { describe, expect, test } from "bun:test";
-import { DIAGRAM_CAPS } from "@tentacle/core";
+import {
+  DIAGRAM_CAPS,
+  DIAGRAM_RESULT_PREFIX,
+  diagramModel,
+  lintDiagram,
+  summarizeDiagram,
+} from "@tentacle/core";
 import { chartRowSpec } from "../src/chart-row.ts";
 import { diagramCacheKey } from "../src/diagram-cache.ts";
 import {
@@ -25,38 +31,58 @@ const SOURCE =
   "flowchart TD\n  A[Richiesta] --> B{Token valido?}\n  B -->|si| C[Ok]\n  B -->|no| D[Errore]";
 const ARGS = JSON.stringify({ title: "Flusso di login", mermaid: SOURCE });
 
+/** The tool's OWN result line for {@link SOURCE} (core's one summary), i.e. what an accepted call carries. */
+const ACCEPTED = (() => {
+  const lint = lintDiagram(SOURCE);
+  if (!lint.ok) throw new Error("the fixture source must lint");
+  return summarizeDiagram(diagramModel(lint.canonical, lint.type), lint.type, {
+    title: "Flusso di login",
+  }).line;
+})();
+
 const chartRow = (status: string) =>
   chartRowSpec({ name: "chart", args: JSON.stringify(REVENUE), status });
 
+// `output` is the daemon's verdict: only a call mermaid ACCEPTED carries the
+// tool's result line (see the two fix-round-1 tests at the end of this block).
 const row = (over: Partial<DiagramToolRow> = {}): DiagramToolRow => ({
   name: DIAGRAM_TOOL,
   args: ARGS,
   status: "ok",
+  output: ACCEPTED,
   ...over,
 });
 
 describe("diagramRowSpec — the transcript branch's decision", () => {
-  test("the status half is exactly `chartRowSpec`'s, status for status (T5.1)", () => {
-    // The plan's words: it "mirrors `chartRowSpec`". Pinned rather than asserted in
-    // prose, so a future status added to one decision cannot silently skip the other.
-    const statuses = ["queued", "running", "ok", "error", "denied", "who-knows"] as const;
-    for (const status of statuses) {
+  test("the status half matches `chartRowSpec` where the two must agree (T5.1)", () => {
+    // The plan's words were "mirrors `chartRowSpec`". It does, where a chart and a
+    // diagram have the same evidence — the NAME, and the two statuses that carry a
+    // verdict of their own (`error`, `denied`) — and it deliberately does NOT where
+    // they differ: a chart's client-side validation IS its tool's, so a running
+    // chart already draws; a diagram's is only a lint, and mermaid's verdict is
+    // daemon-side (finding 2 of the D5 review, so no flicker on the phone).
+    for (const status of ["ok", "error", "denied", "who-knows"] as const) {
       const chart = chartRow("ok") !== null && chartRow(status) !== null;
       expect({
         status,
         mirrors: chart === (diagramRowSpec(row({ status })) !== null),
       }).toEqual({ status, mirrors: true });
     }
-    // …and the two cases that must NOT draw, stated as themselves.
     expect(chartRow("error")).toBeNull();
     expect(diagramRowSpec(row({ status: "error" }))).toBeNull();
   });
 
-  test("a `diagram` call with a drawable source is drawn (ok and running)", () => {
+  test("a `diagram` call mermaid accepted is drawn", () => {
     const spec = diagramRowSpec(row());
     expect(spec?.title).toBe("Flusso di login");
     expect(spec?.type).toBe("flowchart");
-    expect(diagramRowSpec(row({ status: "running" }))?.title).toBe("Flusso di login");
+  });
+
+  test("a call that is still running keeps the generic row, as the TUI does (D5 fix 2)", () => {
+    // No verdict yet: mermaid has not ruled, so a phone that drew now would send a
+    // source to the renderer and then flicker to the error row when it refuses.
+    expect(diagramRowSpec(row({ status: "running" }))).toBeNull();
+    expect(diagramRowSpec(row({ status: "queued" }))).toBeNull();
   });
 
   test("a FAILED or DENIED call keeps the generic row, so the reason stays visible", () => {
@@ -95,6 +121,27 @@ describe("diagramRowSpec — the transcript branch's decision", () => {
         spec: null,
       });
     }
+  });
+
+  test("a REFUSED call keeps the generic row after a reopen, when its status is gone (D5 fix 1)", () => {
+    // The history projection rebuilds every non-denied result as `ok`
+    // (`transcript-history.ts`: "any other error flag is not stored"), so the
+    // daemon's mermaid refusal arrives here as a settled `ok` row. What survives
+    // is the OUTPUT, and only an accepted call's output is the tool's result line.
+    const refused = row({
+      output: "line 2, col 5: Parse error — expected a direction after the type",
+    });
+    expect(diagramRowSpec(refused)).toBeNull();
+    // The two shapes a refusal can take, both refused: an empty output (a call
+    // whose result was lost) and one that merely mentions the prefix.
+    expect(diagramRowSpec(row({ output: "" }))).toBeNull();
+    expect(diagramRowSpec(row({ output: undefined }))).toBeNull();
+    expect(
+      diagramRowSpec(row({ output: `the tool would say ${DIAGRAM_RESULT_PREFIX}…` })),
+    ).toBeNull();
+    // …and the accepted call, same status, still draws: the guard is the verdict,
+    // not the mere presence of an output.
+    expect(diagramRowSpec(row({ output: ACCEPTED }))?.title).toBe("Flusso di login");
   });
 
   test("a fenced source is accepted once the lint strips it (the tool's own rule)", () => {

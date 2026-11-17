@@ -5,14 +5,18 @@
  *
  * Owner rule, chart's (2026-11-16): a `diagram` call does NOT render as a tool
  * row — the diagram itself takes the row's place, with its title as a caption. A
- * call that is still running, one that FAILED (the daemon's mermaid refusal, or a
+ * call that is still running (mermaid has not ruled yet, so a drawing would
+ * flicker to an error), one that FAILED (the daemon's mermaid refusal, or a
  * denial: our own gate is a lint, not mermaid's parser), and a source that does
- * not re-validate (a pod can forge `rawInput`) keep the generic tool row.
+ * not re-validate (a pod can forge `rawInput`) keep the generic tool row. So
+ * does a call reopened from history whose output is not the tool's result line:
+ * the stored status cannot tell an accepted call from a refused one.
  *
  * The caption and the VoiceOver label come from core's ONE summary — the same
  * strings the tool's result line and the TUI caption use, so they cannot drift.
  */
 import {
+  DIAGRAM_RESULT_PREFIX,
   type DiagramSource,
   type DiagramType,
   describeDiagram,
@@ -38,6 +42,12 @@ export interface DiagramToolRow {
   readonly name: string;
   readonly args: string;
   readonly status: string;
+  /**
+   * The call's result text — the daemon's verdict, and the only evidence of it
+   * after a reopen (`transcript-history.ts` rebuilds every non-denied result as
+   * `ok`; the TUI's `resume.ts` does the same). Absent while a call runs.
+   */
+  readonly output?: string;
 }
 
 /** A validated call: its caption, its canonical source, and the type it is. */
@@ -72,7 +82,20 @@ export function diagramRowSpec(tool: DiagramToolRow): DiagramSpec | null {
 
 /** The name/status half of the decision (the source's validity is the other half). */
 function drawsAsDiagram(tool: DiagramToolRow): boolean {
-  return tool.name === DIAGRAM_TOOL && tool.status !== "error" && tool.status !== "denied";
+  if (tool.name !== DIAGRAM_TOOL) return false;
+  // A settled call only, as the TUI does (`render-lines.ts`: "only a settled call
+  // draws"): mermaid's verdict is the daemon's, so drawing while a call still runs
+  // would send a source to the renderer that the next event may refute — the row
+  // would flicker from a drawing to an error.
+  if (tool.status === "running" || tool.status === "queued") return false;
+  // `error` is the daemon's mermaid refusal AND a denial (permission-reply): our
+  // re-lint cannot tell them apart from a good source, so the status decides.
+  if (tool.status === "error" || tool.status === "denied") return false;
+  // …and after a reopen the status no longer says: the projection rebuilds every
+  // non-denied result as `ok`, so a refused call and an accepted one are both
+  // `ok`. The output is what still separates them — an accepted call's is the
+  // tool's own result line and nothing else's (`DIAGRAM_RESULT_PREFIX`).
+  return tool.output?.startsWith(DIAGRAM_RESULT_PREFIX) === true;
 }
 
 /** The VoiceOver label (and the full screen's single accessibility element). */
