@@ -1,6 +1,6 @@
 # feat/mobile-tool-rows — Tool calls as a thread of steps, thinking folded (mockup C)
 
-> **Status:** implementation (plan written, NOT approved)
+> **Status:** implementation APPROVED (orchestrator, night delegation 2026-11-17; owner chose mockup C)
 > **Branch:** `feat/mobile-tool-rows`
 > **Size:** M overall, as 3 slices (S1 S · S2 M · S3 S, see Slices) · **Blast:** cross-module (mobile only: the transcript's tool and reasoning rows, the Session screen's list cell and footer; no protocol, persistence or §7 invariant moved) · **Suited:** Opus executes; mandatory fresh-context Review + visual check of simulator screenshots against mockup C
 > **Changelog:** `changelog.d/mobile-tool-rows.changed.md` — one bullet: "**Tool calls on iPhone read like steps.** One line per call on a thin thread, readable MCP names and arguments, thinking folded into a ∴ marker; tap a step for its thought, command and result."
@@ -528,6 +528,10 @@ asleep); the owner may overrule them on waking.
 8. **Output cut and `⎿`: C's body has no `⎿`; today's cut is 12 lines.**
    *Rec:* the TUI's rule (over 8 lines → 6 + `… +N more lines`, tap for all)
    and `⎿` on the result's first line, as the brief asks.
+
+**Answers (orchestrator, 2026-11-17, owner asleep — night delegation):** Q1–Q8 all as recommended. The owner may overrule on waking. Persisting reasoning + tool error status (Notes/debt 1) is a separate task: it adds session-log entries, so the owner decides it (critical entries).
+
+*— claude-opus-5-5 (orchestrator), 2026-11-17*
 
 ## Execution
 
