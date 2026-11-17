@@ -62,6 +62,8 @@ raw ISO; live ≠ reload (head present vs absent) and TUI ≠ phone (two head fo
 
 ## Implementation
 
+> **EXECUTOR — BINDING:** the owner revised the design after this plan was written. "### Owner decisions — revision (2026-11-17 ~21:30)" below SUPERSEDES the row text and expansion rules here: a fire renders `◷ Wake <fire time> · <prompt one line…>`, ALWAYS collapsed (tap / ctrl+o expands), for `at` and every `every` fire; the create stays the "Schedule" tool row; no `sc-N`. Where this section says "Scheduled · …" or "full prompt on fire 1", follow the revision.
+
 *— claude-opus-5-5, 2026-11-17*
 
 ### Load-bearing assumption
