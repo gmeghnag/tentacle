@@ -1024,6 +1024,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ...(categories?.ok === true ? { only: categories.categories } : {}),
         json: parsed.bools.has("json"),
         summary: parsed.bools.has("summary"),
+        // docs/feat/token-usage-log.md: per-round tokens instead of the event stream.
+        ...(parsed.bools.has("usage") ? { usage: true } : {}),
         follow: parsed.bools.has("follow"),
         ...(connect !== undefined ? { connect } : {}),
         ...(token !== undefined ? { token } : {}),
@@ -2178,7 +2180,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     try {
       runtime = await (io.startWorkerRuntime ?? startWorkerRuntime)(
         config,
-        { permissions, saver, resume: resumeRecord },
+        {
+          permissions,
+          saver,
+          resume: resumeRecord,
+          // D11: the worker keeps nothing, so a resumed session's artifacts come
+          // back from the copy THIS main thread keeps beside its log. Only this
+          // runtime reads it: a pod's artifacts are pod-supplied.
+          artifactsDir: sessions.store.directory,
+        },
         err,
       );
     } catch (error) {

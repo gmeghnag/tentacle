@@ -139,6 +139,7 @@ import {
   watchAccepts,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import { ArtifactBudget, ArtifactStore } from "./artifact-store.ts";
 import { AttachmentStore, UploadBudget } from "./attachment-store.ts";
 import type { ModelLink } from "./connection.ts";
 import { jobRows, sameJobs } from "./jobs-view.ts";
@@ -364,6 +365,8 @@ export interface RestoredSessionState {
    * at the first idle check (catch-up, D3). Absent → none.
    */
   readonly schedules?: readonly ScheduledJob[];
+  /** When the session was pinned (`DaemonSessionRecord.pinnedAt`): a restart and a reopen keep it. */
+  readonly pinnedAt?: number;
   /**
    * The session's MCP/skill switches at the restart, from its log's last
    * `capabilities` entry (`DaemonSessionRecord.capabilities`,
@@ -632,6 +635,12 @@ export class HostedSession {
    * detached-then-reattached client resumes where it stopped.
    */
   readonly uploads: AttachmentStore;
+  /**
+   * What `present` showed the user in this session (docs/feat/model-artifacts.md
+   * D4): `artifact/list` / `artifact/read` serve it. The SESSION's, like
+   * `uploads`, so a re-attach or a settings sync keeps it.
+   */
+  readonly artifacts: ArtifactStore;
   /** What the factory did with `session/open.settings`; told to whoever attaches. */
   settingsReport: SessionSettingsReport | undefined;
   /**
@@ -664,6 +673,11 @@ export class HostedSession {
    * Off at creation unless `session/open{autoAccept}` seeded it.
    */
   autoAccept = false;
+  /**
+   * When the session was pinned (`session/pin`, docs/feat/mobile-session-actions.md);
+   * undefined = not pinned. List metadata: never the conversation, never `lastChangeAt`.
+   */
+  pinnedAt: number | undefined;
   /**
    * The session's MCP/skill switches (docs/feat/session-capabilities.md): what
    * the model is NOT offered. Held here, not only on the agent, because a
@@ -881,10 +895,12 @@ export class HostedSession {
     logOptions: SessionLogOptions = {},
     agentRuntime?: AgentJobs,
     uploads: AttachmentStore = new AttachmentStore(new UploadBudget()),
+    artifacts: ArtifactStore = new ArtifactStore(new ArtifactBudget()),
     schedules?: SessionSchedules,
   ) {
     this.id = id;
     this.uploads = uploads;
+    this.artifacts = artifacts;
     this.now = now;
     this.wake = wake;
     this.scheduling = schedules;
@@ -927,6 +943,7 @@ export class HostedSession {
     this.watchers = new SessionWatchers(now);
     const resume = restored?.resume;
     this.autoAccept = restored?.autoAccept === true;
+    this.pinnedAt = restored?.pinnedAt;
     // The switches a restart reloads (before the log's first segment, which
     // states them again: `logSegmentFacts`).
     if (restored?.capabilities !== undefined) {
@@ -1655,6 +1672,7 @@ export class HostedSession {
       returned: this.returned.map((r) => ({ ...r })),
       ...(head >= 0 ? { head } : {}),
       autoAccept: this.autoAccept,
+      ...(this.pinnedAt !== undefined ? { pinnedAt: this.pinnedAt } : {}),
       // The table as of NOW (D6): written only when non-empty (the sidecar's v3).
       ...(this.scheduleTable.length > 0 ? { schedules: [...this.scheduleTable] } : {}),
       ...(withLog ? { log: this.logCapture(after) } : {}),
@@ -1885,6 +1903,7 @@ export class HostedSession {
         (this.agentRuntime?.list().length ?? 0),
       // A count, only where the session schedules (docs/feat/cron-tool.md D5).
       ...(this.scheduling ? { schedules: this.scheduleTable.length } : {}),
+      ...(this.pinnedAt !== undefined ? { pinnedAt: this.pinnedAt } : {}),
     };
   }
 
@@ -2023,6 +2042,9 @@ export class HostedSession {
     const messages = this.session.messages.slice(start, end) as SnapshotResult["messages"];
     return {
       messages,
+      // In step with `messages` by construction (`timesOf` is that same committed
+      // prefix), so a client may pair them by index (docs/fix/mobile-open-at-end.md).
+      times: this.log.timesOf(start, end),
       ...(cursor === undefined ? { since: { epoch: cut.epoch, seq: cut.seq } } : {}),
       ...(cursor === undefined && cut.turnId !== null ? { turn: { turnId: cut.turnId } } : {}),
       ...(start > 0 ? { cursor: `${cut.epoch}/${start}` } : {}),
@@ -2891,6 +2913,21 @@ export class HostedSession {
     return { on: this.autoAccept };
   }
 
+  /**
+   * `session/pin` of this live session (a set; the cap is `SessionHost.pin`'s):
+   * stamped when it becomes pinned, cleared when unpinned, persisted only when
+   * it CHANGED (`serve`: the sidecar). Moves no `lastChangeAt` and emits
+   * nothing (list metadata, docs/feat/mobile-session-actions.md). Synchronous.
+   */
+  setPinned(on: boolean): boolean {
+    this.assertKnown();
+    if ((this.pinnedAt !== undefined) !== on) {
+      this.pinnedAt = on ? this.now() : undefined;
+      this.persist();
+    }
+    return this.pinnedAt !== undefined;
+  }
+
   /** The session's switches now: the `OpenResult.capabilities` snapshot (F5). */
   capabilities(): SessionCapabilitiesWire {
     return toWireCapabilities(this.caps);
@@ -3050,6 +3087,25 @@ export class HostedSession {
         // pull): the log says it may have run — "interrupted", never "not run".
         if (event.type === "tool_phase" && event.phase === "running") {
           this.log.callStarted(event.id);
+        }
+        // One model round's spend, as the provider measured it
+        // (docs/feat/token-usage-log.md): a NON-critical log entry that projects
+        // nothing, so it rides the next committed boundary's capture like any
+        // other. No entry at all when the provider reported no usage.
+        if (event.type === "usage") {
+          const model = this.mainModelId();
+          this.log.usage({
+            turnId,
+            ...(event.round !== undefined ? { round: event.round } : {}),
+            ...(event.final === true ? { final: true as const } : {}),
+            ...(model !== undefined ? { model } : {}),
+            promptTokens: event.usage.promptTokens,
+            completionTokens: event.usage.completionTokens,
+            ...(event.usage.cachedPromptTokens !== undefined
+              ? { cachedPromptTokens: event.usage.cachedPromptTokens }
+              : {}),
+            ...(event.messages !== undefined ? { messages: event.messages } : {}),
+          });
         }
         if (event.type === "history_repaired") {
           // Synchronous, no await: the drive-loop invariant holds. The user is
@@ -3887,6 +3943,8 @@ export class HostedSession {
     // The single END of a live session covers close, archive, the reaper, the
     // detached cap and delete (P4): the upload reservations go back here.
     this.uploads.dispose();
+    // Memory only: the artifact bytes go back to the daemon's budget.
+    this.artifacts.dispose();
     this.unsubscribeExit?.();
     this.unsubscribeStart?.();
     this.jobs?.dispose();

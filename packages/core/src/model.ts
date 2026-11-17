@@ -130,8 +130,30 @@ export interface ContextUsage {
 }
 
 export interface Usage {
+  /** The whole prompt, cache hits included (what the context count uses). */
   readonly promptTokens: number;
   readonly completionTokens: number;
+  /**
+   * The part of `promptTokens` the provider served from its prompt cache
+   * (Anthropic's `cache_read_input_tokens`, an OpenAI-compatible server's
+   * `prompt_tokens_details.cached_tokens`). Absent when the server does not
+   * report it — never 0, which would claim a full cache miss
+   * (docs/feat/token-usage-log.md).
+   */
+  readonly cachedPromptTokens?: number;
+}
+
+/**
+ * A token count from a provider's raw JSON, or `undefined` when it is not one.
+ * Providers must pass every usage field through this: the same field is
+ * `null` on some servers (LiteLLM-style proxies send
+ * `prompt_tokens_details: {cached_tokens: null}`; the Anthropic API types its
+ * cache counts nullable), and a `null` reaching the log writes an entry every
+ * reader REFUSES — which poisons the whole session log, not just that field
+ * (docs/feat/token-usage-log.md, fix round 1).
+ */
+export function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 /**

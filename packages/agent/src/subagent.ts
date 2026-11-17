@@ -35,6 +35,7 @@ import {
   CONTEXT_RESET_TOOL_NAME,
   DIAGRAM_TOOL_NAME,
   MOVE_SESSION_TOOL_NAME,
+  PRESENT_TOOL_NAME,
   SCHEDULE_CONTROL_TOOL_NAME,
   SCHEDULE_CREATE_TOOL_NAME,
   ToolRegistry,
@@ -400,6 +401,9 @@ export function createSubagentRunner(deps: SubagentDeps): {
         tool.name === spawnToolName ||
         tool.name === CONTEXT_RESET_TOOL_NAME ||
         tool.name === MOVE_SESSION_TOOL_NAME ||
+        // `present` shows the USER an artifact: a child's output is its report
+        // to the parent, one origin per card (docs/feat/model-artifacts.md Q13).
+        tool.name === PRESENT_TOOL_NAME ||
         // A chart is drawn in the USER's transcript, and a child's steps are not
         // rows there: the parent can chart the report it is given
         // (docs/feat/model-charts.md D3, Owner Q7).
@@ -639,6 +643,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
         toolName === spawnToolName ||
         toolName === CONTEXT_RESET_TOOL_NAME ||
         toolName === MOVE_SESSION_TOOL_NAME ||
+        toolName === PRESENT_TOOL_NAME ||
         toolName === CHART_TOOL_NAME ||
         toolName === DIAGRAM_TOOL_NAME ||
         toolName === AGENT_CONTROL_TOOL_NAME ||

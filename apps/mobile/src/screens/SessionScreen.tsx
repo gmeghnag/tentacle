@@ -58,12 +58,20 @@ import { type FloatBounds, fits, visible as floatVisible, headerPill } from "../
 import {
   type Follow,
   type FollowStep,
+  LANDING_REVEAL_MS,
+  type Landing,
   type ListSize,
   contentGrew,
   endTarget,
   initialFollow,
   jumpPill,
   jumped,
+  landingDone,
+  landingQuiet,
+  landingReveal,
+  landingStart,
+  landingStep,
+  reattachLanding,
   scrolled,
   shown,
   viewportChanged,
@@ -72,6 +80,8 @@ import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import { linkPrompt } from "../links.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
+import type { ArtifactGalleryRoute } from "../routes.ts";
+import { rowTimeLabel } from "../row-swipe.ts";
 import { type SectionId, scheduledSection } from "../session-info.ts";
 import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
@@ -106,6 +116,7 @@ import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
+import { SwipeTime } from "./transcript/SwipeTime.tsx";
 import { TranscriptRow } from "./transcript/TranscriptRow.tsx";
 
 export interface SessionScreenProps {
@@ -122,6 +133,13 @@ export interface SessionScreenProps {
   readonly focusComposer?: boolean;
   /** The sessions drawer is open over this screen: the floating button hides (F20). */
   readonly drawerOpen?: boolean;
+  /**
+   * The artifacts gallery (docs/feat/model-artifacts.md D9): Session info's row
+   * and a transcript card both lead there, and so does the hub's Artifacts item
+   * (`"hub"`, docs/feat/mobile-hub.md H4b). Absent: none is offered (a screen with
+   * no router, e.g. a unit test's).
+   */
+  readonly onOpenArtifacts?: (from: ArtifactGalleryRoute["from"]) => void;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -153,6 +171,7 @@ export function SessionScreen({
   onOpenDrawer,
   focusComposer = false,
   drawerOpen = false,
+  onOpenArtifacts,
 }: SessionScreenProps): JSX.Element {
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
@@ -221,6 +240,26 @@ export function SessionScreen({
       setVoice(null);
       setVoiceState(null);
     };
+  }, [controller]);
+
+  // Item 2 (docs/fix/mobile-open-at-end.md): the app's foreground transition
+  // reaches the controller, which decides (silently resync when a session is
+  // open and the link is up). Its own listener, not the voice effect's: voice
+  // is absent when the Beta port is null, and this must work without it.
+  useEffect(() => {
+    const app = AppState.addEventListener("change", (next) => {
+      if (next !== "active" && next !== "inactive" && next !== "background") {
+        return;
+      }
+      // `true` means the controller IS re-attaching (item 2): that re-attach lands
+      // the same way a pull does, so it must re-arm the silent landing too —
+      // otherwise its new history went through `contentGrew`, ANIMATED and seen
+      // (Review round 1, MEDIUM 3). The decision stays the controller's.
+      if (controller.appState(next)) {
+        landing.current = reattachLanding(followRef.current.following);
+      }
+    });
+    return () => app.remove();
   }, [controller]);
 
   // A switch that went OFF stops what it was running, so no invisible surface is
@@ -292,6 +331,20 @@ export function SessionScreen({
   const showRetry = useRef(false);
   /** The list's native content height and viewport (0 until measured). */
   const size = useRef<ListSize>({ content: 0, viewport: 0 });
+  // Whether a landing has anything to land yet (Review round 2, HIGH): the list
+  // has rows, or the attach is no longer `opening`. A content HEIGHT cannot
+  // answer it — the empty list's `flexGrow: 1` reports about the VIEWPORT, so a
+  // slow attach looked already settled and the history that then arrived went
+  // through `contentGrew` ANIMATED: the visible scroll this fix exists to stop.
+  const hasRows = useRef(false);
+  hasRows.current = state.view.rows.length > 0 || state.status.phase !== "opening";
+  // Item 1 (docs/fix/mobile-open-at-end.md): a session opens ALREADY at its end.
+  // `landingStep` re-scrolls, never animated, until the end stops moving (a
+  // FlatList renders the first cells only, so the end moves as the silent scroll
+  // renders more) and the list is hidden until then — no visible scroll through
+  // the whole transcript.
+  const landing = useRef<Landing>(landingStart);
+  const [settling, setSettling] = useState(landingStart.settling);
   const setFollowState = useCallback((next: Follow) => {
     if (next !== followRef.current) {
       followRef.current = next;
@@ -302,11 +355,71 @@ export function SessionScreen({
     (step: FollowStep) => {
       setFollowState(step.state);
       if (step.scrollTo !== null) {
-        list.current?.scrollToOffset({ offset: step.scrollTo, animated: true });
+        list.current?.scrollToOffset({ offset: step.scrollTo, animated: step.animated });
       }
     },
     [setFollowState],
   );
+  /** A measurement while a landing (opening or re-attaching) is pending; false when none is. */
+  // The reveal timer (Review round 1, HIGH 1). `settling` used to end only on a
+  // REPEATED content height, but RN fires `onContentSizeChange`/`onLayout` only
+  // when a size CHANGES: on a short session the repeat never arrives and the list
+  // stayed at `opacity: 0`. Every landing scroll re-arms this timer, so
+  // measurements going QUIET is what shows the list (the decision is
+  // `follow.ts`'s `landingReveal`).
+  const reveal = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disarmReveal = useCallback(() => {
+    if (reveal.current !== null) {
+      clearTimeout(reveal.current);
+      reveal.current = null;
+    }
+  }, []);
+  const armReveal = useCallback(() => {
+    disarmReveal();
+    reveal.current = setTimeout(() => {
+      reveal.current = null;
+      const next = landingReveal(
+        landing.current,
+        size.current,
+        followRef.current.following,
+        hasRows.current,
+      );
+      const changed = next.state.settling !== landing.current.settling;
+      landing.current = next.state;
+      if (next.step !== null) {
+        perform(next.step);
+      }
+      if (changed) {
+        setSettling(next.state.settling);
+      }
+    }, LANDING_REVEAL_MS);
+  }, [disarmReveal, perform]);
+  useEffect(() => disarmReveal, [disarmReveal]);
+  // The opening landing is armed at the MOUNT too: a list whose size never
+  // changes (one short message, or an empty one) sends no measurement at all, and
+  // an unseen "Opening the session…" is the same bug.
+  useEffect(() => {
+    armReveal();
+  }, [armReveal]);
+  const land = useCallback((): boolean => {
+    const next = landingStep(
+      landing.current,
+      size.current,
+      followRef.current.following,
+      hasRows.current,
+    );
+    const changed = next.state.settling !== landing.current.settling;
+    landing.current = next.state;
+    if (next.step !== null) {
+      perform(next.step);
+      // More measurements may follow this scroll: wait for them to go quiet.
+      armReveal();
+    }
+    if (changed) {
+      setSettling(next.state.settling);
+    }
+    return next.step !== null;
+  }, [perform, armReveal]);
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -328,19 +441,28 @@ export function SessionScreen({
   const onContentSize = useCallback(
     (_width: number, height: number) => {
       size.current = { ...size.current, content: height };
+      // A landing (opening, re-attach) owns the scroll until it settles: it is
+      // never animated, and the list stays hidden meanwhile (item 1).
+      if (land()) {
+        return;
+      }
       perform(contentGrew(followRef.current, size.current));
     },
-    [perform],
+    [perform, land],
   );
   const onListLayout = useCallback(
     (event: LayoutChangeEvent) => {
       size.current = { ...size.current, viewport: event.nativeEvent.layout.height };
+      if (land()) {
+        return;
+      }
       perform(viewportChanged(followRef.current, size.current));
     },
-    [perform],
+    [perform, land],
   );
   const onJump = useCallback(() => {
-    perform({ state: jumped(), scrollTo: endTarget(size.current) });
+    // The person asked to go to the latest: animated (they are watching it go).
+    perform({ state: jumped(), scrollTo: endTarget(size.current), animated: true });
   }, [perform]);
 
   // B1(b): `KeyboardAvoidingView` measures its frame relative to its PARENT. The
@@ -674,7 +796,11 @@ export function SessionScreen({
                 ? {
                     action: {
                       label: "Retry",
-                      onPress: () => controller.retry(),
+                      onPress: () => {
+                        // A Retry re-attaches: the history lands silently (item 1).
+                        landing.current = reattachLanding(followRef.current.following);
+                        controller.retry();
+                      },
                       testID: "banner-retry",
                     },
                   }
@@ -682,7 +808,10 @@ export function SessionScreen({
                   ? {
                       action: {
                         label: "Reopen",
-                        onPress: () => controller.reopen(),
+                        onPress: () => {
+                          landing.current = reattachLanding(followRef.current.following);
+                          controller.reopen();
+                        },
                         testID: "reopen",
                       },
                     }
@@ -697,116 +826,131 @@ export function SessionScreen({
             setBand({ width, height });
           }}
         >
-          <FlatList
-            ref={list}
-            testID="transcript"
-            data={rows}
-            keyExtractor={(row: Row) => row.key}
-            renderItem={({ item }) => {
-              const speak = speakButtonOf(
-                voiceState,
-                item,
-                rows,
-                state.view.composer.running,
-                voiceSettings,
-              );
-              const child =
-                item.kind === "tool"
-                  ? agentCardTarget(
-                      item.id,
-                      item.sub?.movedTo,
-                      activity.subagents,
-                      activity.memory.finished,
-                    )
-                  : null;
-              return (
-                <TranscriptRow
-                  row={item}
-                  palette={palette}
-                  onLink={onLink}
-                  thumbnails={state.thumbnails}
-                  {...(child === null
-                    ? {}
-                    : {
-                        agent: {
-                          id: child,
-                          onOpen: () => {
-                            focusActivity({ kind: "child", id: child });
-                            setActivityOpen(true);
-                          },
-                        },
-                      })}
-                  {...(speak === undefined || voice === null
-                    ? {}
-                    : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
+          {/* Item 1 (docs/fix/mobile-open-at-end.md): the list is laid out and
+              scrolled to its end HIDDEN, and shown once the end stops moving —
+              so a long history is never seen scrolling through. */}
+          <View style={settling ? styles.hidden : styles.screen}>
+            <FlatList
+              ref={list}
+              testID="transcript"
+              data={rows}
+              keyExtractor={(row: Row) => row.key}
+              renderItem={({ item }) => {
+                const speak = speakButtonOf(
+                  voiceState,
+                  item,
+                  rows,
+                  state.view.composer.running,
+                  voiceSettings,
+                );
+                const child =
+                  item.kind === "tool"
+                    ? agentCardTarget(
+                        item.id,
+                        item.sub?.movedTo,
+                        activity.subagents,
+                        activity.memory.finished,
+                      )
+                    : null;
+                return (
+                  <SwipeTime row={item} palette={palette} label={rowTimeLabel(item)}>
+                    <TranscriptRow
+                      row={item}
+                      palette={palette}
+                      onLink={onLink}
+                      thumbnails={state.thumbnails}
+                      {...(child === null
+                        ? {}
+                        : {
+                            agent: {
+                              id: child,
+                              onOpen: () => {
+                                focusActivity({ kind: "child", id: child });
+                                setActivityOpen(true);
+                              },
+                            },
+                          })}
+                      {...(speak === undefined || voice === null
+                        ? {}
+                        : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
+                      {...(onOpenArtifacts === undefined
+                        ? {}
+                        : { onArtifact: (meta) => onOpenArtifacts("card") })}
+                    />
+                  </SwipeTime>
+                );
+              }}
+              extraData={rowExtraData}
+              onViewableItemsChanged={onViewable}
+              viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
+              contentContainerStyle={rows.length === 0 ? styles.emptyList : styles.list}
+              keyboardDismissMode="interactive"
+              keyboardShouldPersistTaps="handled"
+              onScroll={onScroll}
+              scrollEventThrottle={32}
+              onScrollBeginDrag={() => {
+                dragging.current = true;
+              }}
+              // Pull-to-refresh (item 3): the owner's own recovery — re-read the
+              // session from the daemon. The look is the chrome's, the decision is
+              // `controller.resync()`'s (never a second session path).
+              refreshControl={
+                <RefreshControl
+                  refreshing={state.refreshing}
+                  onRefresh={() => {
+                    // A re-attach lands silently at the end (item 1): never a second
+                    // visible scroll through the transcript.
+                    landing.current = reattachLanding(followRef.current.following);
+                    void controller.resync();
+                  }}
+                  tintColor={palette.sec}
                 />
-              );
-            }}
-            extraData={rowExtraData}
-            onViewableItemsChanged={onViewable}
-            viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
-            contentContainerStyle={rows.length === 0 ? styles.emptyList : styles.list}
-            keyboardDismissMode="interactive"
-            keyboardShouldPersistTaps="handled"
-            onScroll={onScroll}
-            scrollEventThrottle={32}
-            onScrollBeginDrag={() => {
-              dragging.current = true;
-            }}
-            // Pull-to-refresh (item 3): the owner's own recovery — re-read the
-            // session from the daemon. The look is the chrome's, the decision is
-            // `controller.resync()`'s (never a second session path).
-            refreshControl={
-              <RefreshControl
-                refreshing={state.refreshing}
-                onRefresh={() => void controller.resync()}
-                tintColor={palette.sec}
-              />
-            }
-            onScrollEndDrag={() => {
-              dragging.current = false;
-            }}
-            onMomentumScrollBegin={() => {
-              dragging.current = true;
-            }}
-            onMomentumScrollEnd={() => {
-              dragging.current = false;
-            }}
-            onContentSizeChange={onContentSize}
-            onLayout={onListLayout}
-            onScrollToIndexFailed={(info) => {
-              // "Show in chat" on a row not rendered yet (no `getItemLayout`):
-              // jump near it by the average row, then try once more.
-              list.current?.scrollToOffset({
-                offset: info.averageItemLength * info.index,
-                animated: false,
-              });
-              if (showRetry.current) {
-                showRetry.current = false;
-                setTimeout(() => {
-                  list.current?.scrollToIndex({
-                    index: info.index,
-                    animated: true,
-                    viewPosition: 0.2,
-                  });
-                }, 50);
               }
-            }}
-            ListEmptyComponent={
-              <View testID="transcript-empty">
-                {state.status.phase === "open" ? (
-                  <EmptyState
-                    palette={palette}
-                    icon="bubble.left"
-                    title="Nothing here yet"
-                    body="Say something below."
-                  />
-                ) : state.status.phase === "opening" ? (
-                  <EmptyState palette={palette} loading title="Opening the session…" />
-                ) : null}
-              </View>
-            }
-          />
+              onScrollEndDrag={() => {
+                dragging.current = false;
+              }}
+              onMomentumScrollBegin={() => {
+                dragging.current = true;
+              }}
+              onMomentumScrollEnd={() => {
+                dragging.current = false;
+              }}
+              onContentSizeChange={onContentSize}
+              onLayout={onListLayout}
+              onScrollToIndexFailed={(info) => {
+                // "Show in chat" on a row not rendered yet (no `getItemLayout`):
+                // jump near it by the average row, then try once more.
+                list.current?.scrollToOffset({
+                  offset: info.averageItemLength * info.index,
+                  animated: false,
+                });
+                if (showRetry.current) {
+                  showRetry.current = false;
+                  setTimeout(() => {
+                    list.current?.scrollToIndex({
+                      index: info.index,
+                      animated: true,
+                      viewPosition: 0.2,
+                    });
+                  }, 50);
+                }
+              }}
+              ListEmptyComponent={
+                <View testID="transcript-empty">
+                  {state.status.phase === "open" ? (
+                    <EmptyState
+                      palette={palette}
+                      icon="bubble.left"
+                      title="Nothing here yet"
+                      body="Say something below."
+                    />
+                  ) : state.status.phase === "opening" ? (
+                    <EmptyState palette={palette} loading title="Opening the session…" />
+                  ) : null}
+                </View>
+              }
+            />
+          </View>
           {jumpPill(follow) ? (
             <Pressable
               testID="jump-latest"
@@ -1031,6 +1175,14 @@ export function SessionScreen({
             onRetry={() => void controller.refreshInfo()}
             expanded={expanded}
             onExpand={setExpanded}
+            onOpenArtifacts={() => {
+              // The sheet is a way IN: the gallery needs the whole frame, so the
+              // sheet closes before the route pushes (docs D9).
+              setInfoOpen(false);
+              setExpanded(null);
+              controller.closeInfo();
+              onOpenArtifacts?.("session-info");
+            }}
             onClose={() => {
               setInfoOpen(false);
               setExpanded(null);
@@ -1072,6 +1224,8 @@ export function SessionScreen({
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
+  /** Laid out (and scrolled) but not yet shown: the opening landing. */
+  hidden: { flex: 1, opacity: 0 },
   list: { paddingTop: 8, paddingBottom: 16 },
   emptyList: { flexGrow: 1, justifyContent: "center" },
   status: { flexDirection: "row", alignItems: "center", gap: 5 },

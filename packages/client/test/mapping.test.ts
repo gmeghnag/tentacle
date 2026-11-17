@@ -102,6 +102,39 @@ describe("updateToEvent", () => {
     }
   });
 
+  // docs/feat/model-artifacts.md D6 (T5.5): the card's meta rides the free `artifact` field.
+  test("an `artifact` on tool_call_update becomes details {kind: artifact}, nested", () => {
+    const artifact = {
+      artifactId: "report",
+      version: 2,
+      sha256: "a".repeat(64),
+      size: 1200,
+      mimeType: "text/html",
+      kind: "html",
+      title: "report.html",
+      callId: "c9",
+      createdAt: 1,
+    };
+    const update = (extra: object): SessionUpdate => ({
+      type: "tool_call_update",
+      toolCallId: "c9",
+      status: "completed",
+      content: [{ type: "text", text: 'Presented "report.html"' }],
+      ...extra,
+    });
+    const event = updateToEvent(update({ artifact }), names);
+    expect(event?.type === "tool_result" ? event.result.details : undefined).toEqual({
+      kind: "artifact",
+      artifact,
+    });
+    expect(event?.type === "tool_result" ? event.result.content : undefined).toBe(
+      'Presented "report.html"',
+    );
+    // An older daemon (no field): text only, no detail derived from it.
+    const older = updateToEvent(update({}), names);
+    expect(older?.type === "tool_result" ? older.result.details : "x").toBeUndefined();
+  });
+
   // docs/feat/tui-spill-note.md: the spill comes from the update's field, never from the text.
   test("a spill on tool_call_update becomes result.spill; banner text alone never does", () => {
     // Mutation (red, verified): drop the spill spread in mapping.ts → the first assertion fails.

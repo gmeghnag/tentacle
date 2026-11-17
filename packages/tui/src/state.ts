@@ -19,7 +19,7 @@ import type {
 import { describeEmptyTurn, describeRepairs, describeTruncation } from "@tentacle/core";
 import { imageRowText } from "./attach-draft.ts";
 import { HOP_WAKE_ROW } from "./hop-wake.ts";
-import { messagesToItems } from "./resume.ts";
+import { type ArtifactCardMap, messagesToItems } from "./resume.ts";
 import { nextToolStatus } from "./tool-phase-view.ts";
 
 /**
@@ -681,23 +681,39 @@ export function forgetContextFill(state: DisplayState): DisplayState {
  * A call with no result in a turn that is still running is running (or waiting
  * for approval), not done — `messagesToItems` marks every historical call `ok`.
  * The host's notices are kept, after the history.
+ *
+ * `byCall` is the card metadata this TUI already learned (`artifact/list`): the
+ * rebuilt rows carry no `detail`, so it is attached here — a resync must not
+ * blank the cards of a session that had them (docs S6a review finding 2).
  */
-export function resetHistory(state: DisplayState, messages: readonly ChatMessage[]): DisplayState {
+export function resetHistory(
+  state: DisplayState,
+  messages: readonly ChatMessage[],
+  byCall?: ArtifactCardMap,
+): DisplayState {
   const hosted = state.items.filter((item) => item.kind === "notice" && item.host === true);
-  return { ...state, items: [...historyItems(state, messages), ...hosted] };
+  return { ...state, items: [...historyItems(state, messages, byCall), ...hosted] };
 }
 
 /**
  * Append `messages` after the transcript (a context reset: the old transcript
  * stays on screen, decision 9 of docs/eval/context-reset.md), the turn's state
- * kept — the same item rules as `resetHistory`.
+ * kept — the same item rules as `resetHistory` (and the same `byCall` join).
  */
-export function appendHistory(state: DisplayState, messages: readonly ChatMessage[]): DisplayState {
-  return { ...state, items: [...state.items, ...historyItems(state, messages)] };
+export function appendHistory(
+  state: DisplayState,
+  messages: readonly ChatMessage[],
+  byCall?: ArtifactCardMap,
+): DisplayState {
+  return { ...state, items: [...state.items, ...historyItems(state, messages, byCall)] };
 }
 
-function historyItems(state: DisplayState, messages: readonly ChatMessage[]): DisplayItem[] {
-  return messagesToItems(messages).map((item) =>
+function historyItems(
+  state: DisplayState,
+  messages: readonly ChatMessage[],
+  byCall?: ArtifactCardMap,
+): DisplayItem[] {
+  return messagesToItems(messages, byCall).map((item) =>
     state.running && item.kind === "tool" && item.resultText === undefined
       ? { ...item, status: "running" as const }
       : item,

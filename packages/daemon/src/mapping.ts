@@ -278,6 +278,11 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
         status: event.result.isError ? "failed" : "completed",
         content: toolResultContent(event.result),
         ...(event.result.spill ? { spill: event.result.spill } : {}),
+        // `present`'s card (docs/feat/model-artifacts.md D1): a free field, so an
+        // older client drops it and shows the tool's text.
+        ...(event.result.details?.kind === "artifact"
+          ? { artifact: event.result.details.artifact }
+          : {}),
         ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
         ...(event.result.denialReply !== undefined
           ? { denialReply: event.result.denialReply }

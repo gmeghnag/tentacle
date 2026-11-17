@@ -33,12 +33,14 @@ import {
   type SessionTitle,
   type Sha256,
   type StopReason,
+  type UsageEntryBody,
   type WireChatMessage,
   appendEntryBody,
   digestOfDigests,
   isAppendEntry,
   messageDigest,
   replaceEntryBody,
+  sanitizeUsageBody,
 } from "@tentacle/protocol";
 
 /** One retained entry: its wire object (a checkpoint's built on first read) and its size, once known. */
@@ -57,6 +59,9 @@ export interface Slot {
 /** Where a lineage continues from (`open{logBase}`): the client's head for the messages it seeded. */
 export type LogBase = LogCursor;
 
+/** What a `usage` entry carries (the round's facts, without its envelope; docs/feat/token-usage-log.md). */
+export type UsageBody = UsageEntryBody;
+
 export class SessionLog {
   private readonly slots: Slot[] = [];
   /** `seq` of `slots[0]`. */
@@ -66,6 +71,14 @@ export class SessionLog {
   private previous = -1;
   /** The committed prefix as of the last derivation. */
   private ref: ChatMessage[] = [];
+  /**
+   * Each committed message's ARRIVAL time, parallel to `ref` (docs/fix/
+   * mobile-open-at-end.md, slice B): epoch ms, `0` = not known (a message a
+   * `base` re-logged was not received now — a reload or a compaction is not an
+   * arrival). Append stamps the injected clock; a REPLACE keeps the first time
+   * (editing a message is not receiving it); a truncate slices.
+   */
+  private times: number[] = [];
   private lastTitle: string | undefined;
   /** The digest of a message object (immutable: the object is the key). */
   private readonly digests = new WeakMap<object, string>();
@@ -119,7 +132,34 @@ export class SessionLog {
         this.push(appendEntryBody(wire(message)));
       }
     }
+    // Arrival times, in step with the derivation above (docs/fix/
+    // mobile-open-at-end.md, slice B): a message REACHED the session when it was
+    // appended; a replace (an edit, an annotation) is not a second arrival, and
+    // a truncate drops what went with it.
+    this.times = this.commitTimes(old, length);
     this.ref = messages.slice(0, length);
+  }
+
+  /** The next `times`, given the derivation's old/new prefix lengths. */
+  private commitTimes(old: number, length: number): number[] {
+    if (length <= old) {
+      return this.times.slice(0, length);
+    }
+    const now = this.now();
+    const next = this.times.slice(0, old);
+    for (let i = old; i < length; i += 1) {
+      next.push(now);
+    }
+    return next;
+  }
+
+  /**
+   * The arrival times of `ref[start, end)` (docs/fix/mobile-open-at-end.md, slice
+   * B): always the same length as the messages `snapshotPage` slices, so a client
+   * can pair them by index. Clamped to the committed prefix.
+   */
+  timesOf(start: number, end: number): number[] {
+    return this.times.slice(Math.max(0, start), Math.max(0, Math.min(end, this.times.length)));
   }
 
   /** A `title` entry when the wire title differs from the last one logged. */
@@ -167,6 +207,24 @@ export class SessionLog {
   /** A background sub-agent ended (`report`: its capped work product). */
   subagentEnd(body: SubagentEndBody): void {
     this.push({ type: "subagent_end", critical: false, ...body });
+  }
+
+  /**
+   * One model round's measured spend (docs/feat/token-usage-log.md). NOT
+   * critical and projects nothing: it is a fact about the conversation's cost,
+   * not part of its history. An unmeasured field is absent, never 0.
+   *
+   * The body is SANITIZED against the entry's own schema first
+   * (`sanitizeUsageBody`): a malformed known entry is fatal to every reader of
+   * the log, so a field a provider reported oddly (a `null` cache count) is
+   * dropped here rather than written — the file stays readable (fix round 1).
+   */
+  usage(body: UsageBody): void {
+    const kept = sanitizeUsageBody(body);
+    if (kept === null) {
+      return;
+    }
+    this.push({ type: "usage", critical: false, ...kept });
   }
 
   /** Assert the projection here; its digest is computed by the first read that serves it. */
@@ -310,6 +368,10 @@ export class SessionLog {
       this.push(appendEntryBody(wire(message)));
     }
     this.ref = messages.slice();
+    // A base is not an arrival (docs/fix/mobile-open-at-end.md, slice B): every
+    // message it re-logs was received earlier (or before this incarnation),
+    // whichever `reason` brought it here, so none of them has a known time.
+    this.times = messages.map(() => 0);
     // Every segment carries the title again (the caller logs it next): a cold
     // read from this base knows it.
     this.lastTitle = undefined;

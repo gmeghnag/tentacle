@@ -224,6 +224,73 @@ describe("logsCommand: the file it reads", () => {
     expect(summary.turns).toBe(1);
   });
 
+  test("--usage prints the per-round token table and totals; --json one object", async () => {
+    // docs/feat/token-usage-log.md: the analysis view of a run. Mutation: fall
+    // through to the event stream (no rows), or print a row's absent cache split
+    // as 0 → the table either shows nothing or claims a full cache miss.
+    const id = "c1c1c1c1-2222-4333-8444-555566667777";
+    const next = chain("u");
+    await writeLaptop(id, [
+      next({ type: "base", critical: true, inc: "u", reason: "create", count: 0 }),
+      next({ type: "turn_start", turnId: "t1" }),
+      next({
+        type: "usage",
+        turnId: "t1",
+        round: 0,
+        model: "m1",
+        promptTokens: 100,
+        completionTokens: 7,
+        cachedPromptTokens: 90,
+        messages: 2,
+      }),
+      next({
+        type: "usage",
+        turnId: "t1",
+        round: 1,
+        model: "m1",
+        promptTokens: 160,
+        completionTokens: 9,
+        messages: 6,
+      }),
+      next({ type: "turn_end", turnId: "t1", stopReason: "end_turn" }),
+    ]);
+    const run = await logs([id, "--usage"]);
+    expect(run.code).toBe(0);
+    expect(run.out).toContain("round  model  msgs  input  output  cached");
+    expect(run.out).toContain("total");
+    expect(run.out).toContain("2 round(s), 260 in / 16 out");
+    // The table REPLACES the event stream.
+    expect(run.out).not.toContain("turn end t1");
+    const json = await logs([id, "--usage", "--json"]);
+    const report = JSON.parse(json.out.trimEnd()) as {
+      rows: { round: number; cachedPromptTokens?: number }[];
+      totals: { rounds: number; promptTokens: number; cachedRows: number };
+    };
+    expect(report.rows.map((r) => r.round)).toEqual([0, 1]);
+    expect(report.totals).toMatchObject({ rounds: 2, promptTokens: 260, cachedRows: 1 });
+    // Absent stays absent through the JSON too (never 0).
+    expect("cachedPromptTokens" in (report.rows[1] ?? {})).toBe(false);
+  });
+
+  test("--usage on a session that recorded none says so and exits 0", async () => {
+    // Mutation: print an empty table (or a 0/0 total) → a run that measured
+    // nothing reads as a free one.
+    const id = "c2c2c2c2-2222-4333-8444-555566667777";
+    await writeLaptop(id, sampleLog("n"));
+    const run = await logs([id, "--usage"]);
+    expect(run.code).toBe(0);
+    expect(run.out).toContain("no token usage was recorded");
+    expect(run.out).not.toContain("total");
+  });
+
+  test("--usage is refused with --connect, naming where to run it", async () => {
+    // Mutation: read the local file for a remote session → silently the wrong
+    // session's numbers.
+    const run = await logs([UID, "--usage", "--connect", "ws://x"]);
+    expect(run.code).toBe(1);
+    expect(run.err).toContain("on that host");
+  });
+
   test("--summary names a detached run's daemon/relay logs, never merging them", async () => {
     // Owner Q6: the free-text logs are not merged in v1 — their PATH is printed,
     // and it comes from the laptop's kept index (never a workload, AGENTS §7).

@@ -18,8 +18,10 @@
  * `drawer-pair`, `drawer-search`, `drawer-session-<id>` / `drawer-current-<id>`
  * (the open session), `drawer-archived`, `drawer-more`, `drawer-loading`,
  * `drawer-error`, `drawer-retry`, `drawer-stale`, `drawer-empty`,
- * `drawer-settings`, `drawer-row-menu`, `drawer-row-rename`, `drawer-new`,
- * `drawer-new-error`.
+ * `drawer-settings`, `drawer-row-menu`, `drawer-row-pin` / `drawer-row-unpin` /
+ * `drawer-row-rename` / `drawer-row-delete` (docs/feat/mobile-session-actions.md),
+ * `drawer-delete-confirm` / `drawer-delete-cancel`, `drawer-pinned` (the
+ * section), `drawer-action-error`, `drawer-new`, `drawer-new-error`.
  */
 import { type JSX, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -36,9 +38,12 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { DrawerComputer, DrawerItem, DrawerRow, DrawerTitle } from "../drawer-list.ts";
 import { DRAWER_WIDTH, drawerMotion, swipeCloses, swipeIsHorizontal } from "../drawer-nav.ts";
+import { type RowMenuItem, deleteConfirm, rowMenu } from "../drawer-row-menu.ts";
+import { rowMenuHaptic } from "../haptic-rules.ts";
+import { playHaptic } from "../haptics.ts";
 import type { RenameState } from "../session-rename.ts";
 import { DENSE_FONT_SCALE, type Palette } from "../theme.ts";
-import { ActionSheet } from "../ui/ActionSheet.tsx";
+import { ActionSheet, type SheetAction } from "../ui/ActionSheet.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
@@ -65,7 +70,15 @@ export interface SessionsDrawerProps {
   /** The row whose long-press menu is showing. */
   readonly rowMenu: DrawerRow | null;
   readonly onRowMenuClosed: () => void;
-  readonly onRename: (row: DrawerRow) => void;
+  /** A menu item was picked (docs/feat/mobile-session-actions.md S2). */
+  readonly onRowAction: (row: DrawerRow, kind: RowMenuItem["kind"]) => void;
+  /** The row whose delete confirmation is showing. */
+  readonly deleteTarget: DrawerRow | null;
+  readonly onDeleteConfirmed: () => void;
+  readonly onDeleteCancelled: () => void;
+  /** A failed pin/delete, in the drawer's banner until dismissed or replaced. */
+  readonly actionError: string | null;
+  readonly onDismissActionError: () => void;
   readonly rename: RenameState | null;
   readonly onRenameText: (text: string) => void;
   readonly onRenameSave: () => void;
@@ -240,6 +253,22 @@ function Panel(props: SessionsDrawerProps & { readonly bottom: number }): JSX.El
         </View>
       )}
       {menuOpen ? <ComputerMenu {...props} computers={computers} /> : null}
+      {props.actionError === null ? null : (
+        <Pressable
+          testID="drawer-action-error"
+          accessibilityRole="button"
+          accessibilityHint="Dismisses this message"
+          onPress={props.onDismissActionError}
+          style={styles.banner}
+        >
+          <Banner
+            palette={palette}
+            tone="error"
+            icon="exclamationmark.triangle"
+            body={props.actionError}
+          />
+        </Pressable>
+      )}
       <FlatList
         style={styles.list}
         data={items}
@@ -290,18 +319,26 @@ function Panel(props: SessionsDrawerProps & { readonly bottom: number }): JSX.El
         visible={props.rowMenu !== null}
         testID="drawer-row-menu"
         {...(props.rowMenu === null ? {} : { title: props.rowMenu.title })}
+        actions={menuActions(props)}
+        onCancel={props.onRowMenuClosed}
+      />
+      <ActionSheet
+        palette={palette}
+        visible={props.deleteTarget !== null}
+        testID="drawer-delete-sheet"
+        {...(props.deleteTarget === null
+          ? {}
+          : deleteConfirm(props.deleteTarget, { isOpen: props.deleteTarget.current }))}
         actions={[
           {
-            label: "Rename",
-            testID: "drawer-row-rename",
-            onPress: () => {
-              if (props.rowMenu !== null) {
-                props.onRename(props.rowMenu);
-              }
-            },
+            label: "Delete",
+            testID: "drawer-delete-confirm",
+            destructive: true,
+            onPress: props.onDeleteConfirmed,
           },
         ]}
-        onCancel={props.onRowMenuClosed}
+        cancelTestID="drawer-delete-cancel"
+        onCancel={props.onDeleteCancelled}
       />
       <RenameSheet
         palette={palette}
@@ -312,6 +349,24 @@ function Panel(props: SessionsDrawerProps & { readonly bottom: number }): JSX.El
       />
     </>
   );
+}
+
+/**
+ * The row menu's items as `ActionSheet` actions (docs/feat/mobile-session-actions.md
+ * S2). The labels, their order and which one is red are `drawer-row-menu.ts`'s;
+ * this only forwards the tap with the row and the kind it named.
+ */
+function menuActions(props: SessionsDrawerProps): SheetAction[] {
+  if (props.rowMenu === null) {
+    return [];
+  }
+  const row = props.rowMenu;
+  return rowMenu(row).map((item) => ({
+    label: item.label,
+    testID: item.testID,
+    ...(item.destructive === true ? { destructive: true } : {}),
+    onPress: () => props.onRowAction(row, item.kind),
+  }));
 }
 
 function ComputerMenu(props: SessionsDrawerProps): JSX.Element {
@@ -364,7 +419,14 @@ function Item(props: SessionsDrawerProps & { readonly item: DrawerItem }): JSX.E
   const { palette, item } = props;
   switch (item.kind) {
     case "label":
-      return <Text style={[styles.section, { color: palette.sec }]}>{item.text}</Text>;
+      return (
+        <Text
+          testID={item.text === "Pinned" ? "drawer-pinned" : undefined}
+          style={[styles.section, { color: palette.sec }]}
+        >
+          {item.text}
+        </Text>
+      );
     case "row":
       return <SessionRowView {...props} row={item.row} />;
     case "archived":
@@ -449,9 +511,13 @@ function SessionRowView(props: SessionsDrawerProps & { readonly row: DrawerRow }
       accessibilityRole="button"
       accessibilityState={{ selected: row.current }}
       accessibilityLabel={row.meta === "" ? row.title : `${row.title}, ${row.meta}`}
-      accessibilityHint="Long-press to rename"
+      accessibilityHint="Long-press for actions"
       onPress={() => props.onOpenRow(row)}
-      onLongPress={() => props.onRowMenu(row)}
+      onLongPress={() => {
+        // docs/feat/mobile-session-actions.md S2: the impact, then the menu.
+        playHaptic(rowMenuHaptic());
+        props.onRowMenu(row);
+      }}
       style={({ pressed }) => [
         styles.row,
         row.current || pressed ? { backgroundColor: palette.fill } : null,
@@ -475,6 +541,7 @@ function SessionRowView(props: SessionsDrawerProps & { readonly row: DrawerRow }
       >
         {row.title}
       </Text>
+      {row.pinned ? <Icon name="pin" color={palette.sec} size={11} weight="light" /> : null}
       {row.meta === "" ? null : (
         <Text
           numberOfLines={1}

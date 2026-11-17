@@ -8,6 +8,7 @@
     "allowImportingTsExtensions": true,
     "types": ["bun"],
     "paths": {
+      "@tentacle/protocol": ["../../packages/protocol/src/index.ts"],
       "react": ["./node_modules/@types/react/index.d.ts"],
       "react/*": ["./node_modules/@types/react/*"]
     }

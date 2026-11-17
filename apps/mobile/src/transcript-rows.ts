@@ -3,8 +3,8 @@
  * history mapper (`transcript-history.ts`) and the fold share one definition
  * without a cycle.
  */
-import type { AttachmentRef, MessageMedia, ToolResult, ToolResultDetail } from "@tentacle/core";
-import type { DocumentContent } from "@tentacle/protocol";
+import type { AttachmentRef, MessageMedia, ToolDiffDetail, ToolResult } from "@tentacle/core";
+import type { ArtifactMeta, DocumentContent } from "@tentacle/protocol";
 
 /** A tool row's status: the TUI's four, plus the person's own reply-refusal. */
 export type ToolStatus = "queued" | "running" | "ok" | "error" | "denied";
@@ -29,6 +29,13 @@ export interface UserRow {
   /** Stable across updates: a virtualised list keys on it. */
   readonly key: string;
   readonly text: string;
+  /**
+   * When this message ARRIVED (epoch ms; docs/fix/mobile-open-at-end.md, slice
+   * B), shown by the row's swipe. Absent = not known — an older daemon, a
+   * message a reload re-logged (`times[i]` 0), a notice, or a live row folded
+   * with no clock. Never `0` itself: the fold never stores a `0`.
+   */
+  readonly at?: number;
   /** The prompt's images (rendered as `[image: name]`, plan Owner requirement). */
   readonly images: readonly ImageRef[];
   /**
@@ -58,6 +65,8 @@ export interface AssistantRow {
   readonly kind: "assistant";
   readonly key: string;
   readonly text: string;
+  /** As `UserRow.at`: the arrival time, when one is known. */
+  readonly at?: number;
   /**
    * A monotonically growing token per text change (`text.length`: the deltas only
    * append), and what a markdown parse is cached on. Chosen over a counter so a
@@ -79,6 +88,12 @@ export interface ToolRow {
   readonly key: string;
   /** The call id (the screen's `tool-<id>-<status>` testID). */
   readonly id: string;
+  /**
+   * The arrival time of the assistant message that LISTED this call — never its
+   * result's (the result is folded onto this row, and a restamp would move the
+   * label each time a delta of that message arrived).
+   */
+  readonly at?: number;
   /** The tool's name, as the model called it. */
   readonly name: string;
   /** The display label (`toolLabel`). */
@@ -88,7 +103,14 @@ export interface ToolRow {
   /** The result text: collapsed on screen until tapped. */
   readonly output?: string;
   /** A file diff, when the tool produced one (live only, plan P7). */
-  readonly diff?: ToolResultDetail;
+  readonly diff?: ToolDiffDetail;
+  /**
+   * The artifact this call presented (docs/feat/model-artifacts.md D9): LIVE, from
+   * the tool result's own `details` — the present call's answer, never a guess. A
+   * row rebuilt from history carries none (the `ChatMessage` holds no details); the
+   * screen joins those onto `artifact/list` by call id (`artifact-join.ts`).
+   */
+  readonly artifact?: ArtifactMeta;
   readonly durationMs?: number;
   readonly hook?: ToolResult["hook"];
   readonly spill?: ToolResult["spill"];

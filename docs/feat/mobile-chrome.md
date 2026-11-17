@@ -224,8 +224,8 @@ switch to `HeaderIcon` too — one weight across the app.
   with the search focused.
 - *Row actions:* tap → open; long-press → action sheet **Rename** (the
   existing `RenameSheet` + `renamePlan`, `session/rename` by id — no open
-  needed). Archive/Delete stay out (they need daemon-side session lifecycle
-  from the phone — a separate task).
+  needed). Archive stays out. Pin and Delete, with the delete confirmation and the
+  **Pinned** section, are `docs/feat/mobile-session-actions.md` (S2).
 - *New session:* the primary pill bottom-right — creates a session on the
   drawer's selected computer (lazy create on first send, S7),
   navigates to it with title "(new)" and the composer focused.

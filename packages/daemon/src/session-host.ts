@@ -17,6 +17,7 @@ import {
 } from "@tentacle/agent";
 import type {
   AgentJobs,
+  ArtifactSink,
   AttachmentSource,
   ChatMessage,
   JobController,
@@ -36,6 +37,7 @@ import {
   type DevicePushRegisterResult,
   JsonRpcErrorCode,
   type LiveActivityStatus,
+  MAX_PINNED_SESSIONS,
   type McpServerStatus,
   type OpenParams,
   type PushRegisterStatus,
@@ -51,6 +53,12 @@ import {
   type UpdateSettingsResult,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import {
+  ARTIFACT_MEMORY_BYTES,
+  ArtifactBudget,
+  type ArtifactSeed,
+  ArtifactStore,
+} from "./artifact-store.ts";
 import { AttachmentStore, DAEMON_UPLOAD_BYTES, UploadBudget } from "./attachment-store.ts";
 import type { ModelLink } from "./connection.ts";
 import {
@@ -118,6 +126,13 @@ export interface AgentContext {
    * the bytes itself (`"client"`, docs/feat/attachments-prompt.md D2/D6).
    */
   readonly attachments?: AttachmentSource;
+  /**
+   * The session's artifact store (docs/feat/model-artifacts.md D4), on EVERY
+   * session-hosting daemon: a factory that offers `present` hands it to the
+   * agent (`AgentConfig.artifacts`). Session-owned like `attachments`, so a
+   * settings sync rebuilds on the same one.
+   */
+  readonly artifacts?: ArtifactSink;
   /**
    * A LIVE session's state the new agent must take over instead of building
    * its own (`session/update_settings`, docs/feat/session-settings-apply.md):
@@ -233,6 +248,20 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * `DAEMON_UPLOAD_BYTES`).
    */
   readonly uploadBytes?: number;
+  /**
+   * This daemon's in-memory artifact allowance, shared by every session's store
+   * (docs/feat/model-artifacts.md D4; default `ARTIFACT_MEMORY_BYTES`). Over
+   * it, the oldest versions are evicted (their metas stay listed).
+   */
+  readonly artifactBytes?: number;
+  /**
+   * This daemon keeps nothing on disk, so a RESUMED session's gallery would be
+   * empty; the laptop hands its own copy back through this
+   * (docs/feat/model-artifacts.md D11). Only the WORKER path sets it (this
+   * laptop's own code, beside its own store); a pod daemon never does — a pod's
+   * artifacts are never read from the laptop (AGENTS §7).
+   */
+  readonly artifactSeed?: (id: string) => ArtifactSeed | undefined;
   /**
    * What this daemon does with image prompts: where the bytes live, and the
    * capability `initialize` advertises (docs/feat/attachments-prompt.md D2).
@@ -448,6 +477,10 @@ interface ArchivedEntry {
    * rewrite (no reopen), and from a reopen even one racing that write.
    */
   readonly reclaimed: Set<string>;
+  /** Listed pin (the record's, or a `session/pin`'s): authoritative for the listing and a reopen. */
+  pinnedAt: number | undefined;
+  /** A `session/pin` changed `pinnedAt`: the record is rewritten with it (a write, no reopen). */
+  pinChanged: boolean;
   readonly cwd: string;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -466,6 +499,8 @@ function archivedEntry(
     title: recordTitleText(record),
     renamed: undefined,
     reclaimed: new Set(),
+    pinnedAt: record.pinnedAt,
+    pinChanged: false,
     cwd: record.cwd,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -484,6 +519,15 @@ function withoutReclaimed(
   return returned.length === record.returned.length ? record : { ...record, returned };
 }
 
+/** `value` with its `pinnedAt` set to `pinnedAt` (the key removed when undefined). */
+function withPin<T extends { readonly pinnedAt?: number }>(
+  value: T,
+  pinnedAt: number | undefined,
+): T {
+  const { pinnedAt: _old, ...rest } = value;
+  return (pinnedAt !== undefined ? { ...rest, pinnedAt } : rest) as T;
+}
+
 export class SessionHost {
   private readonly opts: SessionHostOptions;
   /**
@@ -495,6 +539,14 @@ export class SessionHost {
   /** Bytes every session's image store holds together (the daemon cap's used side). */
   get uploadBytesUsed(): number {
     return this.uploadBudget.used;
+  }
+
+  /** ONE per daemon, like `uploadBudget`: every session's artifact store draws on it. */
+  private readonly artifactBudget: ArtifactBudget;
+
+  /** Bytes every session's artifact store holds together. */
+  get artifactBytesUsed(): number {
+    return this.artifactBudget.used;
   }
 
   /**
@@ -541,6 +593,7 @@ export class SessionHost {
   constructor(opts: SessionHostOptions) {
     this.opts = opts;
     this.uploadBudget = new UploadBudget(opts.uploadBytes ?? DAEMON_UPLOAD_BYTES);
+    this.artifactBudget = new ArtifactBudget(opts.artifactBytes ?? ARTIFACT_MEMORY_BYTES);
     this.identity = opts.identity;
     this.modelInfo = opts.modelInfo;
   }
@@ -567,9 +620,13 @@ export class SessionHost {
     seed?: readonly ChatMessage[],
     settings?: SessionSettings,
   ): Promise<SessionContextResult> {
+    // A throwaway store, so the probe offers the same tools (`present`) a real
+    // session would and counts them; nothing is ever presented into it.
+    const artifacts = new ArtifactStore(this.artifactBudget);
     const { agent, jobs, agentJobs, workloadShells } = this.opts.createAgent(this.opts.defaultCwd, {
       modelLink: () => link,
       ...(settings ? { settings } : {}),
+      artifacts,
     });
     // Read in the same stretch as the agent's tool list is built.
     const complete = this.opts.toolsReady?.() ?? true;
@@ -583,6 +640,7 @@ export class SessionHost {
       const usage = await session.contextUsage(signal);
       return complete ? usage : { used: usage.used, exact: false };
     } finally {
+      artifacts.dispose();
       jobs?.dispose();
       agentJobs?.dispose();
       // The probe's shells are not the session's (docs/feat/workload-shell.md D4).
@@ -827,6 +885,7 @@ export class SessionHost {
         title: entry.title,
         cwd: entry.cwd,
         archived: true,
+        ...(entry.pinnedAt !== undefined ? { pinnedAt: entry.pinnedAt } : {}),
       });
     }
     return toSessionList(summaries, params);
@@ -924,8 +983,13 @@ export class SessionHost {
       // A rename (or a reclaim) of the archived session wins over the record it was read from.
       // A reopen of an ARCHIVED session starts auto-accept OFF (owner Q3): an old
       // switch must not silently come back on, so the record's value is dropped here.
+      // Its pin is the ENTRY's (a `session/pin` may have changed it after the
+      // record was read): a reopen keeps it.
       const hosted = this.restore(
-        { ...withoutReclaimed(record, entry.reclaimed), autoAccept: undefined },
+        withPin(
+          { ...withoutReclaimed(record, entry.reclaimed), autoAccept: undefined },
+          entry.pinnedAt,
+        ),
         entry.renamed,
       );
       const { resync, epoch } = hosted.attach(attachment, params.since);
@@ -1045,6 +1109,49 @@ export class SessionHost {
   }
 
   /**
+   * `session/pin` (rules: `@tentacle/protocol`). A set, synchronous with no
+   * await between the cap count and the set, so two devices pinning the 20th
+   * and 21st at once get exactly one cap error. A live session pins itself
+   * (`setPinned`: persisted); an ARCHIVED one is changed in place — listed at
+   * once, its state file rewritten in the background, never reopened. A
+   * deleted id → `SessionDeleted`; else `UnknownSession`.
+   */
+  pin(id: string, on: boolean): { pinned: boolean } {
+    if (this.deleted.has(id)) {
+      throw new RpcError(DomainErrorCode.SessionDeleted, `session ${id} was deleted`);
+    }
+    const live = this.sessions.get(id);
+    const entry = live ? undefined : this.archived.get(id);
+    if (!live && !entry) {
+      throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${id}`);
+    }
+    const already = (live ? live.pinnedAt : entry?.pinnedAt) !== undefined;
+    if (on && !already && this.pinnedCount() >= MAX_PINNED_SESSIONS) {
+      throw new RpcError(
+        JsonRpcErrorCode.InvalidParams,
+        `at most ${MAX_PINNED_SESSIONS} pinned sessions: unpin one first`,
+      );
+    }
+    if (live) {
+      return { pinned: live.setPinned(on) };
+    }
+    if (entry && already !== on) {
+      entry.pinnedAt = on ? this.now() : undefined;
+      entry.pinChanged = true;
+      void this.rewriteArchived(entry, on ? "pinned" : "unpinned");
+    }
+    return { pinned: on };
+  }
+
+  /** Pinned sessions now, live and archived (the registry, never a counter that could drift). */
+  private pinnedCount(): number {
+    let n = 0;
+    for (const hosted of this.sessions.values()) if (hosted.pinnedAt !== undefined) n++;
+    for (const entry of this.archived.values()) if (entry.pinnedAt !== undefined) n++;
+    return n;
+  }
+
+  /**
    * `session/reclaim` of a session that is no longer live (owner F2): a
    * closed / archived one only marks the rows reclaimed in its record — no
    * reopen, no revival, like an archived rename. Resolves once that write
@@ -1084,10 +1191,11 @@ export class SessionHost {
     if (resident) {
       const renamed = entry.renamed;
       const kept = withoutReclaimed(resident, entry.reclaimed);
-      if (!renamed && kept === resident) {
+      if (!renamed && kept === resident && !entry.pinChanged) {
         return;
       }
-      const record: DaemonSessionRecord = { ...kept, ...(renamed ? { title: renamed } : {}) };
+      const titled: DaemonSessionRecord = { ...kept, ...(renamed ? { title: renamed } : {}) };
+      const record = entry.pinChanged ? withPin(titled, entry.pinnedAt) : titled;
       entry.record = record;
       entry.unwritten = false;
       const ok = await persister.writeRecord(record, !quiet);
@@ -1111,13 +1219,14 @@ export class SessionHost {
     const sidecar = loaded.sidecar;
     const renamed = entry.renamed;
     const returned = sidecar.returned.filter((r) => !entry.reclaimed.has(r.id));
-    if (!renamed && returned.length === sidecar.returned.length) {
+    if (!renamed && returned.length === sidecar.returned.length && !entry.pinChanged) {
       return;
     }
     entry.unwritten = false;
+    const next = { ...sidecar, ...(renamed ? { title: renamed } : {}), returned };
     const ok = await persister.writeState(
       entry.id,
-      { ...sidecar, ...(renamed ? { title: renamed } : {}), returned },
+      entry.pinChanged ? withPin(next, entry.pinnedAt) : next,
       !quiet,
     );
     if (this.archived.get(entry.id) === entry && !entry.record) {
@@ -1260,6 +1369,8 @@ export class SessionHost {
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
       // A restart KEEPS the session's auto-accept (owner Q3).
       ...(record.autoAccept === true ? { autoAccept: true } : {}),
+      // Its pin, restart and reopen alike (docs/feat/mobile-session-actions.md).
+      ...(record.pinnedAt !== undefined ? { pinnedAt: record.pinnedAt } : {}),
       // Its scheduled wakes too, restart and reopen alike (D6): re-armed, an
       // overdue one fires once (catch-up).
       ...(record.schedules !== undefined ? { schedules: record.schedules } : {}),
@@ -1406,6 +1517,13 @@ export class SessionHost {
     // (docs/feat/attachments-durable.md D2); every other host: memory only.
     const disk = this.opts.persister?.blobs(id);
     const uploads = new AttachmentStore(this.uploadBudget, disk ? { disk } : {});
+    // The session's artifact store (docs/feat/model-artifacts.md D4), likewise
+    // created BEFORE the agent and owned by the session. Memory only here; the
+    // `serve` disk copy is D5, and a resumed WORKER session's gallery comes back
+    // from the laptop's copy (`artifactSeed`, D11) — never a pod's.
+    const artifacts = new ArtifactStore(this.artifactBudget, {
+      ...(this.opts.artifactSeed ? { seed: this.opts.artifactSeed(id) } : {}),
+    });
     const {
       agent,
       permissions,
@@ -1419,6 +1537,7 @@ export class SessionHost {
       modelLink: () => bound.hosted?.modelLink() ?? null,
       ...(settings ? { settings } : {}),
       ...(this.opts.images?.source === "store" ? { attachments: uploads } : {}),
+      artifacts,
       // D8/D9: the client that CREATED this session can ask its owner about a
       // `move_session` proposal, so this factory may offer the tool. Unset →
       // never offered (a `run`/`attach` TUI has no `/move` feed).
@@ -1462,6 +1581,7 @@ export class SessionHost {
       log,
       agentJobs,
       uploads,
+      artifacts,
       this.opts.schedules,
     );
     bound.hosted = hosted;
@@ -1505,6 +1625,8 @@ export class SessionHost {
       reuse,
       // A settings sync must not silently turn every image into a placeholder.
       ...(this.opts.images?.source === "store" ? { attachments: hosted.uploads } : {}),
+      // The session's artifacts are its own, not the agent's: the same store.
+      artifacts: hosted.artifacts,
       // A settings sync rebuilds the agent: the session's `hop` fact is its own
       // (the CREATING client's), so the rebuilt agent offers the tool exactly when
       // the first one did (D8/D9).

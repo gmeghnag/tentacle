@@ -16,6 +16,8 @@
 import type { RemoteSession, SessionEvent } from "@tentacle/client";
 import type { PermissionBroker, PermissionRequester } from "@tentacle/core";
 import type {
+  ArtifactListResult,
+  ArtifactMeta,
   AttachmentRef,
   DocumentContent,
   JobOutputResult,
@@ -28,6 +30,16 @@ import type {
 import { DomainErrorCode } from "@tentacle/transport";
 import { RpcError } from "@tentacle/transport";
 import { type ActivityMemory, emptyMemory, markOpened, onSubagents } from "./activity-memory.ts";
+import type { AppStateName } from "./app-lock.ts";
+import type { ArtifactFeed } from "./artifact-feed.ts";
+import {
+  type ArtifactJoin,
+  EMPTY_JOIN,
+  joinRows,
+  phaseOfError,
+  withList,
+  withPhase,
+} from "./artifact-join.ts";
 import type { Compose, ComposeHandle, DocumentPort, PhotoPort } from "./compose-controller.ts";
 import { createCompose } from "./compose-controller.ts";
 import {
@@ -185,6 +197,21 @@ export interface SendableHandle extends SessionHandle, ActivityHandle, WakeHandl
   context?(): Promise<SessionContextResult>;
   /** Rename it (`session/rename`, the TUI's `/rename` path). */
   rename?(title: string): Promise<string>;
+  /**
+   * The artifacts presented in this session (`RemoteSession.listArtifacts`,
+   * docs/feat/model-artifacts.md D9): what puts a card under a resumed
+   * transcript's `present` row and fills the gallery. Absent on a fake handle —
+   * the screen then reads `unsupported`, exactly like an older daemon.
+   */
+  listArtifacts?(): Promise<ArtifactListResult>;
+  /**
+   * One version's verified bytes (`RemoteSession.readArtifact`): the card's
+   * thumbnail and the viewer's file. Optional for the same reason.
+   */
+  readArtifact?(
+    meta: ArtifactMeta,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<Uint8Array>;
 }
 
 /**
@@ -239,6 +266,12 @@ export interface SessionScreenState {
    * until the re-attach settles, so the gesture never looks ignored.
    */
   readonly refreshing: boolean;
+  /**
+   * The session's artifacts (docs/feat/model-artifacts.md D9): the list the
+   * gallery reads, the per-call join its rows carry, and the phase a screen says
+   * when it cannot have them (an older daemon, a dropped link).
+   */
+  readonly artifacts: ArtifactJoin;
 }
 
 /**
@@ -333,6 +366,13 @@ export interface SessionScreenDeps {
    * are the handle's), and the screen is built first.
    */
   readonly info?: (handle: () => SendableHandle | null) => InfoPort;
+  /**
+   * The artifacts feed this screen PUBLISHES on (docs/feat/model-artifacts.md D9):
+   * the gallery screen holds no handle of its own (a second `RemoteSession` of
+   * one id steals this screen's stream), so it reads what this one learned.
+   * Absent: the join still reaches the rows and the sheet, nothing is published.
+   */
+  readonly artifacts?: { readonly feed: ArtifactFeed };
 }
 
 export interface SessionScreenController {
@@ -361,12 +401,34 @@ export interface SessionScreenController {
   pressReturn(): void;
   /** Up/Down (the client's `onLinkStatus`): the banner's `reconnecting`. */
   link(up: boolean): void;
+  /**
+   * The app came FOREGROUND (docs/fix/mobile-open-at-end.md, item 2): resync
+   * silently, once per transition, when a session is open and the link is up.
+   * The bug class `docs/fix/mobile-media-live.md` fixed (updates lost while the
+   * link stayed up) had no automatic recovery; this is it — the same
+   * `resync()` the pull-to-refresh runs, through the same attach path.
+   *
+   * The input is the app state itself, not a bare "active" edge: iOS delivers
+   * `active` twice for one foreground, and only the transition that FOLLOWS a
+   * departure may resync (the first `active` is the mount's own open).
+   *
+   * Returns whether this call STARTED a re-attach: the screen then re-arms its
+   * silent landing (Review round 1, MEDIUM 3), so a foreground resync's history
+   * lands at the end without being seen scrolling — exactly what a pull does.
+   */
+  appState(state: AppStateName): boolean;
   /** Session info opened: start every pull (F1–F5 live in the controller). */
   openInfo(): Promise<void>;
   /** The sheet closed: drop in-flight answers and stop following the link (F5). */
   closeInfo(): void;
   /** Pull-to-refresh, and a `Retry` row (and the port's link `up`, its own). */
   refreshInfo(): Promise<void>;
+  /**
+   * Re-read `artifact/list` (docs/feat/model-artifacts.md D9). Single-flight: a
+   * gallery mount, a refresh request and a landed list at the same moment cost
+   * ONE call. Resolves when it settled (never rejects).
+   */
+  refreshArtifacts(): Promise<void>;
   /** The auto-accept switch (Owner Q3, F11). */
   setAutoAccept(on: boolean): Promise<void>;
   /** The switch's value NOW (the session's shared link: a flip elsewhere is here). */
@@ -433,7 +495,7 @@ export interface SessionScreenController {
    * the owner did by hand. Replaces the rows from the daemon's history, never
    * appends them; a failed re-attach keeps the rows and says so once.
    */
-  resync(): Promise<void>;
+  resync(silent?: boolean): Promise<void>;
   /** Unsubscribe everything (the screen's cleanup, after `leave`). */
   dispose(): void;
 }
@@ -464,6 +526,15 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   /** One attach at a time (a `Retry`/`Reopen` during one is a no-op tap). */
   let attaching = false;
   let transcript: State = initialState;
+  /**
+   * The session's artifacts (docs/feat/model-artifacts.md D9): the daemon's list,
+   * the per-call join, and the phase that says why there is none. `loading` until
+   * the first answer — never `ready` with an empty list, which would claim a
+   * session has no artifacts before anyone looked.
+   */
+  let join: ArtifactJoin = EMPTY_JOIN;
+  /** The `artifact/list` call in flight: one at a time (a gallery mount + a resync). */
+  let joinPending: Promise<void> | null = null;
   let draft = "";
   /** Presses that sent the field (`SessionScreenState.sends`). */
   let sends = 0;
@@ -508,6 +579,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   let ownControl: AbortController | null = null;
   let disposed = false;
   const unmount = new AbortController();
+  /**
+   * The controller object itself, held here because the `appState` method below
+   * needs to reach it (a foreground return runs `resync`). Assigned once, at the
+   * end; only ever read at call time.
+   */
+  const holder: { current: SessionScreenController | null } = { current: null };
   /** THIS screen's requester: the identity `releaseRequester` withdraws by. */
   const mounted: PermissionRequester = (req, options) => sheet.requester(req, options);
 
@@ -551,7 +628,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   const feed = createSessionFeed({
     state: () => transcript,
     put: (next) => {
-      transcript = next;
+      // A REPLACED history rebuilds every row from `ChatMessage`s, which carry no
+      // tool details: the cards this screen already knows are joined back on HERE,
+      // the one place every folded state passes, so a resync never loses them.
+      transcript = joinedRows(next);
       emit();
     },
     setForeign: (turn) => {
@@ -568,6 +648,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         void info.loadContext().catch(() => {});
       }
     },
+    // A live row's arrival time (docs/fix/mobile-open-at-end.md, slice B): the
+    // stamp a swipe shows. Taken when the fold CREATES the row, never on upsert.
+    now: () => deps.now(),
   });
 
   /**
@@ -779,7 +862,23 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    * Deliberately not a new session path (AGENTS §7): it is `attach(false)`, the
    * same call the screen's mount makes.
    */
+  /**
+   * The pull-to-refresh GUARD (one re-attach at a time), and `pulling`, which is
+   * the spinner the person sees: a foreground resync (item 2) runs without one.
+   */
   let refreshing = false;
+  let pulling = false;
+  /**
+   * The app's foreground transition (item 2): whether it has been AWAY since the
+   * screen was built. Only a RETURN resyncs — the screen is built while the app
+   * is on screen, so a plain `active` with no departure before it is not one.
+   * Only `background` sets it: iOS reports `inactive` without the app leaving
+   * (Control Center, the notification shade, a call banner, a permission alert,
+   * the Face ID prompt itself), and the repo already decided that `inactive` is
+   * not leaving the app (`app-lock.ts`). Counting it cost a second full re-read
+   * on a single return with the app lock on (Review round 5, MEDIUM 1).
+   */
+  let appWasAway = false;
 
   function state(): SessionScreenState {
     return {
@@ -796,7 +895,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       sends,
       activity,
       schedules,
-      refreshing,
+      refreshing: pulling,
+      artifacts: join,
     };
   }
 
@@ -887,6 +987,101 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
 
   const listeners = new Set<(state: SessionScreenState) => void>();
 
+  /**
+   * The transcript a fold produced, with every card this screen knows attached.
+   * A REPLACE (a resync, a `/clear`, a `history_reset`) rebuilds rows from
+   * `ChatMessage`s, which carry no tool details, so without this a session's
+   * cards vanish the moment the link resyncs (the TUI's `joinKnownArtifacts`,
+   * docs S6a review finding 2). A row that already carries one is left alone —
+   * the live result's is the present call's own answer — and a no-op is the SAME
+   * state object, so it cannot re-render.
+   */
+  function joinedRows(next: State): State {
+    if (join.byCall.size === 0) {
+      return next;
+    }
+    const rows = joinRows(next.rows, join.byCall);
+    return rows === next.rows ? next : { ...next, rows };
+  }
+
+  /** Publish what this screen knows: the gallery screen reads it (it has no handle). */
+  function publishJoin(): void {
+    deps.artifacts?.feed.publish({ list: join.list, phase: join.phase });
+  }
+
+  /**
+   * Publish the handle's own verified read for the gallery's viewer (D9). The
+   * closure reads the CURRENT `handle` on every call, so one publication serves
+   * the whole screen life and a screen with no handle (before the attach, after a
+   * resync's `leave`) refuses instead of reading through a dead session.
+   */
+  function publishReader(): void {
+    deps.artifacts?.feed.provideRead((meta, options) => {
+      const session = handle;
+      const read = session?.readArtifact?.bind(session);
+      if (read === undefined) {
+        return Promise.reject(new Error("no artifact reader on this session"));
+      }
+      return read(meta, options);
+    });
+  }
+
+  /**
+   * Re-read `artifact/list` (docs/feat/model-artifacts.md D9). Single-flight: a
+   * gallery mount, a refresh request and a landed list can collide, and one
+   * answer serves all three. A failure is a PHASE, never a throw — the screen
+   * says "needs a newer tentacle" or "offline" and keeps the rows it had.
+   */
+  function refreshArtifacts(): Promise<void> {
+    if (joinPending !== null) {
+      return joinPending;
+    }
+    const session = handle;
+    const listed = session?.listArtifacts?.bind(session);
+    if (listed === undefined) {
+      // An older daemon (no `artifact/list`) or a handle that offers none: no
+      // call to make, and retrying could never help.
+      join = withPhase(join, "unsupported");
+      publishJoin();
+      emit();
+      return Promise.resolve();
+    }
+    const run = (async () => {
+      try {
+        const result = await listed();
+        if (disposed) {
+          return;
+        }
+        join = withList(join, result.artifacts);
+        // The cards reach the rows through the ONE path that rebuilds them.
+        transcript = joinedRows(transcript);
+      } catch (error) {
+        if (disposed) {
+          return;
+        }
+        join = withPhase(join, phaseOfError(error));
+      } finally {
+        joinPending = null;
+      }
+      publishJoin();
+      emit();
+    })();
+    joinPending = run;
+    return run;
+  }
+
+  /**
+   * The gallery asks for fresh bytes when it mounts or is pulled: the owner of
+   * the handle answers (the gallery cannot — a second session of one id steals
+   * this screen's stream).
+   */
+  const unwatchRefresh =
+    deps.artifacts === undefined
+      ? undefined
+      : deps.artifacts.feed.onRefresh(() => {
+          void refreshArtifacts();
+        });
+
   function emit(): void {
     if (disposed) {
       return;
@@ -974,6 +1169,11 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     if (info !== null) {
       void info.loadContext().catch(() => {});
     }
+    // The cards of a resumed transcript (docs/feat/model-artifacts.md D9): the
+    // history that landed has no tool details, so the daemon's list is the only
+    // source. Asked at every attach — a live turn's card arrives by itself.
+    publishReader();
+    void refreshArtifacts();
     // Asks reach the person from now on. Set AFTER the attach, so a replayed ask
     // is queued by the broker until the sheet is up and then delivered in order
     // (F1) — never to a half-built screen.
@@ -1177,7 +1377,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     );
   }
 
-  return {
+  const controller: SessionScreenController = {
     state,
     subscribe(listener) {
       listeners.add(listener);
@@ -1208,6 +1408,35 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     link(up) {
       feed.link(up);
     },
+    appState(name) {
+      // The app's foreground gate (item 2). The FIRST `active` is the mount, not
+      // a return: nothing to recover, and the open's own attach is the read. A
+      // return runs the SAME `resync()` the pull does — silently (no pull
+      // spinner: `resync`'s own re-entry guard makes a concurrent pull a no-op)
+      // — and never while offline, where the redial re-attach owns the recovery.
+      // ONLY `background` is a departure: `inactive` is Control Center, a call
+      // banner, a permission alert or the Face ID prompt itself, not the app
+      // leaving (`app-lock.ts`) — counting it resynced twice per return with the
+      // app lock on (Review round 5, MEDIUM 1).
+      if (name !== "active") {
+        if (name === "background") {
+          appWasAway = true;
+        }
+        return false;
+      }
+      if (!appWasAway) {
+        return false; // a duplicate `active` (iOS) — at most one resync per return
+      }
+      appWasAway = false;
+      if (disposed || refreshing || attaching || status.phase !== "open") {
+        return false; // a pull is already re-reading, or there is no live attach
+      }
+      if (transcript.link === "down") {
+        return false;
+      }
+      void holder.current?.resync(true);
+      return true;
+    },
     async openInfo() {
       await info?.open();
       emit();
@@ -1219,6 +1448,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     async refreshInfo() {
       await info?.refresh();
       emit();
+    },
+    async refreshArtifacts() {
+      await refreshArtifacts();
     },
     async setAutoAccept(on) {
       await info?.setAutoAccept(on);
@@ -1451,14 +1683,19 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       await deps.controller.leave(deps.sessionId);
       emit();
     },
-    async resync() {
+    async resync(silent = false) {
       // Already running, or nothing to re-read: a second pull is a no-op (the
       // list would otherwise re-enter `attach` and be refused by its own guard).
       if (refreshing || disposed) {
         return;
       }
       refreshing = true;
-      emit();
+      // A FOREGROUND resync (item 2) is silent: no pull spinner, because the
+      // person made no gesture and nothing is left to look ignored.
+      if (!silent) {
+        pulling = true;
+        emit();
+      }
       const before = transcript.rows.length;
       try {
         // The owner's own recovery: leave, then re-attach. `attach` is the ONE
@@ -1481,6 +1718,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         }
       } finally {
         refreshing = false;
+        pulling = false;
         emit();
       }
     },
@@ -1488,6 +1726,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       disposed = true;
       listeners.clear();
       unwatchInfo();
+      unwatchRefresh?.();
       unmount.abort();
       compose?.stop();
       info?.close();
@@ -1500,4 +1739,6 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       releaseRequester();
     },
   };
+  holder.current = controller;
+  return controller;
 }

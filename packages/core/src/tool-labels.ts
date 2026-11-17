@@ -15,6 +15,7 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   search: "Search",
   agent_task: "Agent",
   skill: "Skill",
+  present: "Present",
   schedule_create: "Schedule",
   schedule_control: "Schedules",
   // A chart is shown, never acted on: the row reads `Chart`, the way `Read`/

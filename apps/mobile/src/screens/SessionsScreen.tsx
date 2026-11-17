@@ -220,8 +220,15 @@ export function SessionsScreen({
               body={`Nothing called “${query.trim()}”.`}
             />
           ) : null}
-          {groups.running.length + groups.idle.length > 0 ? (
+          {groups.running.length + groups.idle.length > 0 || groups.pinned.length > 0 ? (
             <View testID="section-active" style={styles.sections}>
+              <Section
+                testID="section-pinned"
+                title="Pinned"
+                rows={groups.pinned}
+                palette={palette}
+                onOpen={onOpen}
+              />
               <Section title="Running" rows={groups.running} palette={palette} onOpen={onOpen} />
               <Section title="Idle" rows={groups.idle} palette={palette} onOpen={onOpen} />
             </View>

@@ -11,6 +11,8 @@
  */
 import type { AttachmentRef, ChatMessage } from "@tentacle/core";
 import {
+  type ArtifactListResult,
+  type ArtifactMeta,
   type DocumentContent,
   DomainErrorCode,
   type JobOutputResult,
@@ -45,6 +47,7 @@ import { turnRecovery } from "./link-machine.ts";
 import { type SessionEvent, stopReasonFromProtocol, updateToEvent } from "./mapping.ts";
 import { AsyncQueue } from "./queue.ts";
 import {
+  type ArtifactReadOptions,
   DocumentsUnavailableError,
   ImagesUnavailableError,
   type ReadBack,
@@ -151,6 +154,14 @@ export type SessionActivity =
   | {
       readonly kind: "history";
       readonly messages: readonly ChatMessage[];
+      /**
+       * Each message's arrival time, index-aligned with `messages`
+       * (docs/fix/mobile-open-at-end.md, slice B). Absent when the daemon does not
+       * report it, or when a page of the snapshot was unusable — a frontend then
+       * shows no times at all, never a mispaired one. Display-only: nothing is
+       * persisted from it (§7).
+       */
+      readonly times?: readonly number[];
       readonly reason: "compact" | "context_reset" | "clear" | null;
     }
   /** The session ended daemon-side (another device's close / delete, the reaper). */
@@ -644,6 +655,38 @@ export class RemoteSession implements SessionStreamListener {
   /** What this session may do with an image right now (the daemon's capability, D5). */
   imageInput(): ImageInput {
     return this.client.imageInput();
+  }
+
+  /**
+   * The artifacts the model presented in this session
+   * (docs/feat/model-artifacts.md D6/D8): the daemon's `artifact/list`, in its
+   * own order (oldest first), `truncated` passed on. Like `skills()`/
+   * `context()`, it needs a daemon-side id — one that is still opening waits for
+   * it; a session nothing has opened yet (a `--resume` before its first prompt)
+   * has none, and the answer is the empty list, not a spurious open.
+   *
+   * An older daemon → `ArtifactsUnsupportedError` (caught by the `/artifacts`
+   * panel, which says "needs a newer tentacle").
+   */
+  async listArtifacts(): Promise<ArtifactListResult> {
+    const id = this.id ?? (this.opening ? await this.opening : null);
+    if (id === null) {
+      return { artifacts: [] };
+    }
+    return this.client.listArtifacts(id);
+  }
+
+  /**
+   * One version's bytes, VERIFIED against `meta` (`RemoteClient.readArtifact`:
+   * every chunk's length, the answer's `size`, and the whole's sha256). Same
+   * lazy-id rule as `listArtifacts`: nothing is open ⇒ there is nothing to read.
+   */
+  async readArtifact(meta: ArtifactMeta, options: ArtifactReadOptions = {}): Promise<Uint8Array> {
+    const id = this.id ?? (this.opening ? await this.opening : null);
+    if (id === null) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "the session is not open");
+    }
+    return this.client.readArtifact(id, meta, options);
   }
 
   /**
@@ -1825,6 +1868,7 @@ export class RemoteSession implements SessionStreamListener {
       this.raise({
         kind: "history",
         messages: out.messages,
+        ...(out.times ? { times: out.times } : {}),
         reason: replaced !== null ? replaced.reason : null,
       });
       return;
@@ -1839,7 +1883,11 @@ export class RemoteSession implements SessionStreamListener {
     for (const m of out.messages) {
       for (const call of m.toolCalls ?? []) turn.toolNames.set(call.id, call.name);
     }
-    turn.queue.push({ type: "history_reset", messages: out.messages });
+    turn.queue.push({
+      type: "history_reset",
+      messages: out.messages,
+      ...(out.times ? { times: out.times } : {}),
+    });
   }
 
   /**
@@ -1879,7 +1927,12 @@ export class RemoteSession implements SessionStreamListener {
         this.endedBehindCut(turn);
       }
     } else {
-      this.raise({ kind: "history", messages: out.messages, reason: "context_reset" });
+      this.raise({
+        kind: "history",
+        messages: out.messages,
+        ...(out.times ? { times: out.times } : {}),
+        reason: "context_reset",
+      });
     }
     if (shown && !shown.ended && shown.turnId !== out.turn) {
       this.closeWithoutOutcome(shown);

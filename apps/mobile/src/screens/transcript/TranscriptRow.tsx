@@ -1,3 +1,5 @@
+import { type ArtifactCardView, artifactCard } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 /**
  * One transcript row (docs/feat/mobile-session-view.md 12c): a DUMB renderer per
  * row kind (AGENTS §7). Every string is daemon-supplied data — plain `Text`,
@@ -20,7 +22,7 @@ import { type Parsed, parse } from "../../markdown.ts";
 import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
 import { firedScheduleHead } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
-import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
+import { type Thumbnail, type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
 import { subAgentLine, toolMeta, toolSummary } from "../../tool-summary.ts";
 import { type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
@@ -67,6 +69,12 @@ export interface RowProps {
    * Absent: a plain tool row.
    */
   readonly agent?: { readonly id: string; readonly onOpen: () => void };
+  /**
+   * A `present` row's card was tapped (docs/feat/model-artifacts.md D9): its
+   * version's meta, which the screen routes to the gallery/viewer. Absent: the
+   * card is still drawn, just not pressable (a test with no router).
+   */
+  readonly onArtifact?: (meta: ArtifactMeta) => void;
 }
 
 function Shell({
@@ -309,7 +317,7 @@ function ChartRowView(props: RowProps): JSX.Element {
   );
 }
 
-function ToolRowView({ row, palette, agent }: RowProps): JSX.Element {
+function ToolRowView({ row, palette, agent, thumbnails, onArtifact }: RowProps): JSX.Element {
   const tool = row as Extract<Row, { kind: "tool" }>;
   const [open, setOpen] = useState(false);
   const [all, setAll] = useState(false);
@@ -320,23 +328,37 @@ function ToolRowView({ row, palette, agent }: RowProps): JSX.Element {
   const shown = all ? lines : lines.slice(0, OUTPUT_PREVIEW_LINES);
   const view = tool.diff === undefined ? null : diffView(tool.diff);
   const progress = subAgentLine(tool.sub);
+  // A presented artifact IS this row's visible body (docs/feat/model-artifacts.md
+  // D9): a band row, not a tool call with a blob of text under it.
+  const card = tool.artifact === undefined ? null : artifactCard(tool.artifact);
+  const artifact = tool.artifact;
   return (
     <Shell row={tool}>
       <View style={styles.tool}>
-        <ToolRow
-          palette={palette}
-          label={summary.label}
-          subtitle={summary.subtitle}
-          trailing={meta.trailing}
-          tone={meta.tone}
-          expandable={lines.length > 0}
-          expanded={open}
-          onPress={() => {
-            animateNextLayout();
-            setOpen((was) => !was);
-          }}
-          labelTestID={`tool-${tool.id}-${tool.status}`}
-        />
+        {card === null || artifact === undefined ? (
+          <ToolRow
+            palette={palette}
+            label={summary.label}
+            subtitle={summary.subtitle}
+            trailing={meta.trailing}
+            tone={meta.tone}
+            expandable={lines.length > 0}
+            expanded={open}
+            onPress={() => {
+              animateNextLayout();
+              setOpen((was) => !was);
+            }}
+            labelTestID={`tool-${tool.id}-${tool.status}`}
+          />
+        ) : (
+          <ArtifactCardRow
+            card={card}
+            artifactId={artifact.artifactId}
+            palette={palette}
+            thumbnail={thumbnailFor(thumbnails, artifact.sha256)}
+            {...(onArtifact === undefined ? {} : { onPress: () => onArtifact(artifact) })}
+          />
+        )}
         {progress === null ? null : (
           // Item 10: a foreground sub-agent's latest activity, so a long child
           // does not look like a hang.
@@ -396,6 +418,79 @@ function ToolRowView({ row, palette, agent }: RowProps): JSX.Element {
   );
 }
 
+/**
+ * The artifact card, as a minimal BAND row (docs/feat/model-artifacts.md D9,
+ * owner choice A): a 40 pt tile — the image's thumbnail when this phone has its
+ * bytes, else the kind's glyph — the title, the card's type-and-size line, and a
+ * chevron. No rounded inset card, no border: it sits in the transcript like any
+ * other band row.
+ *
+ * Everything shown is `@tentacle/core`'s card (`artifactCard`): the kind narrowed
+ * once, the words the Mac uses too. A `save` card (`other`: a .zip, an extension
+ * this build does not know) shows the Share glyph instead of a chevron, because
+ * tapping it SHARES — it never opens a viewer.
+ */
+function ArtifactCardRow({
+  card,
+  artifactId,
+  palette,
+  thumbnail,
+  onPress,
+}: {
+  readonly card: ArtifactCardView;
+  /** The artifact's id: the e2e flow's own handle (`artifact-card-<artifactId>`). */
+  readonly artifactId: string;
+  readonly palette: Palette;
+  readonly thumbnail: Thumbnail | undefined;
+  readonly onPress?: () => void;
+}): JSX.Element {
+  return (
+    <Pressable
+      testID={`artifact-card-${artifactId}`}
+      accessibilityRole="button"
+      accessibilityLabel={`${card.title}, ${card.line2}`}
+      disabled={onPress === undefined}
+      onPress={onPress}
+      style={[styles.card, { borderColor: palette.sep }]}
+    >
+      <View style={[styles.cardTile, { backgroundColor: palette.code }]}>
+        {thumbnail === undefined ? (
+          <Text style={[typography.subhead, { color: palette.sec }]}>{card.glyph}</Text>
+        ) : (
+          <Image
+            testID="artifact-card-thumbnail"
+            source={{ uri: thumbnail.uri }}
+            style={styles.cardThumb}
+            resizeMode="cover"
+          />
+        )}
+      </View>
+      <View style={styles.cardBody}>
+        <Text
+          numberOfLines={1}
+          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+          style={[typography.subhead, { color: palette.label }]}
+        >
+          {card.title}
+        </Text>
+        <Text
+          numberOfLines={1}
+          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+          style={[typography.footnote, { color: palette.sec }]}
+        >
+          {card.line2}
+        </Text>
+      </View>
+      <Icon
+        name={card.action === "save" ? "square.and.arrow.up" : "chevron.right"}
+        color={palette.sec}
+        size={14}
+        weight="bold"
+      />
+    </Pressable>
+  );
+}
+
 function NoticeRowView({ row, palette }: RowProps): JSX.Element {
   const notice = row as Extract<Row, { kind: "notice" }>;
   return (
@@ -442,6 +537,20 @@ export function TranscriptRow(props: RowProps): JSX.Element | null {
 
 const styles = StyleSheet.create({
   row: { paddingHorizontal: space.inset, paddingVertical: space.transcript / 2 },
+  // The artifact card (D9): a band row — a 40 pt tile, the title and its type
+  // line, a chevron. No inset card and no border of its own: it sits in the
+  // transcript like any other row, which is the owner's choice A.
+  card: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 8 },
+  cardTile: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.tile,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  cardThumb: { width: "100%", height: "100%" },
+  cardBody: { flex: 1, gap: 2 },
   speak: { alignSelf: "flex-start", paddingTop: 4, paddingRight: 8 },
   bubble: {
     alignSelf: "flex-end",

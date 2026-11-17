@@ -148,6 +148,13 @@ export interface SessionLinkHost {
 
   // --- painting, the notice sink and the input line
   readonly flushNow: () => void;
+  /**
+   * A history that just rebuilt the transcript, cards attached (S6a review
+   * finding 2) — and, on a session SWAP, the per-session join forgotten so the
+   * new session's own list is asked (`forgetArtifacts`).
+   */
+  readonly joinCards: (state: DisplayState) => DisplayState;
+  readonly forgetArtifacts: () => void;
   readonly pushNotice: (text: string) => void;
   readonly restoreInput: (text: string, why: string) => void;
   readonly setCompacting: (on: boolean) => void;
@@ -246,6 +253,8 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
     onActivityRef,
     watchReturned,
     flushNow,
+    forgetArtifacts,
+    joinCards,
     pushNotice,
     restoreInput,
     setCompacting,
@@ -345,6 +354,10 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
           pushNotice(FOREIGN_COMPACTED_NOTICE);
         } else if (action === "replace" || action === "append") {
           const apply = action === "append" ? appendHistory : resetHistory;
+          // `joinCards` inside the compute: the repo's cards are attached BEFORE
+          // the rows are warmed, so the screenshot-in-progress frame already has
+          // them (S6a review finding 2). The commit's own tail joins again,
+          // which is a no-op once the map is filled.
           void commitHistory((s) => apply(s, activity.messages)).then(() => {
             setScrollOffset(0);
             if (cleared) {
@@ -547,6 +560,11 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       opts: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void } = {},
     ): void => {
       sessionRef.current = next;
+      // The NEW session's artifacts are not the old one's: forget what was
+      // learned (a `callId` from another session must never attach a card here),
+      // and re-join what the new transcript already holds — for a kept
+      // transcript, and for whatever its eager open brings (S6a review finding 2).
+      forgetArtifacts();
       // An open `/sessions` panel marks the live session as current, and must be
       // re-read at the next render: its "current" row is read live (Review R2-1,
       // R3-1). The rule is the `/sessions` kind's own (`panels/sessions.ts`).
@@ -577,6 +595,10 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
         restoreInput(takeAll(rowsRef.current).text, "_your queued messages are back in the input_");
         setRows(() => []);
       }
+      // Whatever the new view holds NOW is joined against the new session's list
+      // (a kept transcript: its `present` rows have no card either). The history
+      // its eager open brings joins at its own commit.
+      stateRef.current = joinCards(stateRef.current);
       flushNow();
     },
     [
@@ -584,7 +606,9 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       clearingRef,
       fallbackNoticedRef,
       flushNow,
+      forgetArtifacts,
       handedWakeRef,
+      joinCards,
       ownClearsRef,
       ownCompactionsRef,
       restoreInput,

@@ -11,6 +11,8 @@
 import type { AskHooksTrust } from "@tentacle/agent";
 import {
   type AgentKillParams,
+  type ArtifactListParams,
+  type ArtifactReadParams,
   type AttachmentPutParams,
   type CancelParams,
   type ClearParams,
@@ -55,6 +57,8 @@ import {
   type OpenParams,
   type OpenResult,
   PROTOCOL_VERSION,
+  type PinParams,
+  type PinResult,
   type PromptParams,
   type PromptResult,
   type ReclaimParams,
@@ -96,6 +100,7 @@ import {
   RpcError,
   RpcPeer,
 } from "@tentacle/transport";
+import { artifactListResult } from "./artifact-store.ts";
 import type { Attachment, HostedSession } from "./hosted-session.ts";
 import { type PairHandler, pairingRefusedError } from "./pairing-handler.ts";
 import { hasDocuments, resolvePromptDocuments } from "./prompt-documents.ts";
@@ -460,6 +465,17 @@ export class Connection {
         const { sessionId, ...chunk } = params as AttachmentPutParams;
         return this.lookup(sessionId).uploads.put(chunk);
       }
+      // The session's artifacts (docs/feat/model-artifacts.md D4). Only a session
+      // open on THIS connection (P8), never a lock: a 20 MiB read is many
+      // independent chunk requests, interleaving with prompts and answers.
+      case Method.ArtifactList: {
+        const { sessionId } = params as ArtifactListParams;
+        return artifactListResult(this.lookup(sessionId).artifacts.list());
+      }
+      case Method.ArtifactRead: {
+        const { sessionId, sha256, offset } = params as ArtifactReadParams;
+        return this.lookup(sessionId).artifacts.read(sha256, offset);
+      }
       // A read of the registry: does not attach this connection to anything.
       case Method.SessionList:
         return this.host.list(params as SessionListParams);
@@ -467,6 +483,11 @@ export class Connection {
       case Method.Rename: {
         const { sessionId, title } = params as RenameParams;
         return { title: this.host.rename(sessionId, title) } satisfies RenameResult;
+      }
+      // Host-level and synchronous, like `rename`: no `open`, live or archived.
+      case Method.Pin: {
+        const { sessionId, pinned } = params as PinParams;
+        return this.host.pin(sessionId, pinned) satisfies PinResult;
       }
       // Daemon-wide: reads/sets the reaper's TTL, attaches this connection to nothing.
       case Method.SessionTtl:

@@ -14,12 +14,14 @@ import {
   AGENT_NOTIFY_TOOL_NAME,
   AGENT_STATUS_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
+  PRESENT_TOOL_NAME,
   ToolRegistry,
   createAgentControlTool,
   createAgentNotifyTool,
   createContextResetTool,
   createTaskTool,
   fsReadTool,
+  presentTool,
   shellTool,
 } from "@tentacle/tools";
 import { z } from "zod";
@@ -310,6 +312,38 @@ describe("createSubagentRunner", () => {
     await run({ description: "d", prompt: "go", type: "general" });
     expect(offered[0]?.length).toBeGreaterThan(0);
     expect(offered[0]).not.toContain(CONTEXT_RESET_TOOL_NAME);
+  });
+
+  // docs/feat/model-artifacts.md D2 / Owner Q13: a child's output is its report
+  // to the parent, so `present` is never offered to it (and its context has no
+  // artifact store anyway — the tool's own test pins that half).
+  test("a child is never offered present, and a type naming it stays read-only", async () => {
+    const { env } = recordingEnv();
+    const offered: string[][] = [];
+    const model: ModelProvider = {
+      id: "rec",
+      async *stream(request) {
+        offered.push((request.tools ?? []).map((t) => t.name));
+        yield { type: "text", delta: "report" };
+        yield { type: "done" };
+      },
+    };
+    const reader = {
+      name: "reader",
+      description: "r",
+      prompt: "p",
+      tools: ["fs_read", PRESENT_TOOL_NAME],
+    };
+    const { run, readOnlyType } = createSubagentRunner({
+      model,
+      env,
+      tools: fullRegistry().register(presentTool),
+      types: [...BUILTIN_AGENT_TYPES, reader],
+    });
+    await run({ description: "d", prompt: "go", type: "general" });
+    expect(offered[0]?.length).toBeGreaterThan(0);
+    expect(offered[0]).not.toContain(PRESENT_TOOL_NAME);
+    expect(readOnlyType("reader")).toBe(true);
   });
 
   test("a child is never offered agent_control, even in a registry that holds it", async () => {

@@ -28,7 +28,16 @@ import { DIFF_SCHEME, HOOK_SCHEME } from "./constants.ts";
  */
 export type SessionEvent =
   | AgentEvent
-  | { readonly type: "history_reset"; readonly messages: readonly ChatMessage[] }
+  | {
+      readonly type: "history_reset";
+      readonly messages: readonly ChatMessage[];
+      /**
+       * Each message's arrival time, index-aligned (docs/fix/mobile-open-at-end.md,
+       * slice B); absent for an older daemon or a page that could not be paired.
+       * Display-only: the TUI ignores it, nothing is written to disk (§7).
+       */
+      readonly times?: readonly number[];
+    }
   /**
    * The turn's prompt, re-delivered after a reset (or another device's, on a
    * turn this client attached to). `attachments`: the image refs it named
@@ -277,6 +286,12 @@ export function updateToEvent(
         name: toolNames.get(update.toolCallId) ?? "tool",
         result: {
           ...toolResultFromContent(update.content, update.status === "failed"),
+          // `present`'s card: the free field only, NESTED (the meta has its own
+          // `kind`), never parsed from the "Presented …" text
+          // (docs/feat/model-artifacts.md D6). An older daemon sends no field.
+          ...(update.artifact
+            ? { details: { kind: "artifact" as const, artifact: update.artifact } }
+            : {}),
           // The field only, never derived from the banner text (docs/feat/tui-spill-note.md).
           ...(update.spill ? { spill: update.spill } : {}),
           // Likewise: the field only, never parsed from the denial text (docs/feat/permission-reply.md).

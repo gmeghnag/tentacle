@@ -83,6 +83,14 @@ export interface SessionFeedDeps {
    * MEDIUM 2). The fold owns the RULE, the caller owns the request.
    */
   readonly onHistoryReplaced?: () => void;
+  /**
+   * The RECEIPT clock of a live row (epoch ms; docs/fix/mobile-open-at-end.md,
+   * slice B). Called when the fold CREATES a row — a prompt, the first delta of
+   * a message, a tool call — and never on an upsert, so a streaming message's
+   * time is when it started arriving. Absent (a unit fold): no live row carries a
+   * time; history rows always take the daemon's.
+   */
+  readonly now?: () => number;
 }
 
 /**
@@ -147,7 +155,13 @@ function foldStream(
   accepted?: Promise<void>,
 ): Promise<void> {
   deps.put(apply(deps.state(), { type: "turn_started", turnId, own }));
-  /** The own prompt, drawn once at the ack or the first event (null once drawn or skipped). */
+  /**
+   * The receipt time of a row this fold CREATES (slice B). `apply` only stamps a
+   * row it creates, so an upsert (a later delta of the same message) keeps the
+   * time it first had — the whole point of passing it per input.
+   */
+  const now = (): number | undefined =>
+    deps.now?.(); /** The own prompt, drawn once at the ack or the first event (null once drawn or skipped). */
   let pending: OwnPrompt | null =
     prompt !== undefined &&
     (prompt.text !== "" ||
@@ -165,19 +179,23 @@ function foldStream(
       return;
     }
     deps.put(
-      apply(deps.state(), {
-        // `own_prompt`, not `user_message`: this one carries the phone's LOCAL
-        // files too, so the bubble draws the photo it just sent (item 2).
-        type: "own_prompt",
-        text: own.text,
-        ...(own.attachments !== undefined && own.attachments.length > 0
-          ? { attachments: own.attachments }
-          : {}),
-        ...(own.photos !== undefined && own.photos.length > 0 ? { photos: own.photos } : {}),
-        ...(own.documents !== undefined && own.documents.length > 0
-          ? { documents: own.documents }
-          : {}),
-      } as TranscriptInput),
+      apply(
+        deps.state(),
+        {
+          // `own_prompt`, not `user_message`: this one carries the phone's LOCAL
+          // files too, so the bubble draws the photo it just sent (item 2).
+          type: "own_prompt",
+          text: own.text,
+          ...(own.attachments !== undefined && own.attachments.length > 0
+            ? { attachments: own.attachments }
+            : {}),
+          ...(own.photos !== undefined && own.photos.length > 0 ? { photos: own.photos } : {}),
+          ...(own.documents !== undefined && own.documents.length > 0
+            ? { documents: own.documents }
+            : {}),
+        } as TranscriptInput,
+        now(),
+      ),
     );
   };
   /** The bracket closed: a late ack draws nothing after the turn's end. */
@@ -204,7 +222,10 @@ function foldStream(
           ended = true;
           reason = event.reason;
         }
-        deps.put(apply(deps.state(), event as TranscriptInput));
+        // The receipt clock: a row this event CREATES takes it (a delta that only
+        // extends an existing row keeps that row's own time). A `history_reset`
+        // ignores it — its rows take the daemon's `times`.
+        deps.put(apply(deps.state(), event as TranscriptInput, now()));
         if (event.type === "history_reset") {
           // The reset REPLACED the history mid-turn: its fill is gone with it.
           deps.onHistoryReplaced?.();
@@ -231,6 +252,7 @@ export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
             apply(deps.state(), {
               type: "history",
               messages: activity.messages,
+              ...(activity.times ? { times: activity.times } : {}),
               reason: activity.reason,
             }),
           );

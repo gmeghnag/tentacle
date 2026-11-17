@@ -59,6 +59,25 @@ export const quitConfirmLayer: KeyLayer = {
 };
 
 /**
+ * 2b. The artifact open confirm (docs/feat/model-artifacts.md D8: a pod's bytes,
+ * or a local page with the network). Every key answers it, right after the quit
+ * dialog and BEFORE the chord and the permission prompt — so its `y` can never
+ * approve an ask that opened meanwhile, and what is shown is what `y` answers.
+ * Only a plain `y` opens (`quitConfirmKey`'s rule); anything else is No.
+ */
+export const artifactConfirmLayer: KeyLayer = {
+  name: "artifactConfirm",
+  step: (snap): LayerStep => {
+    if (snap.artifactConfirm() === null) {
+      return NOTHING;
+    }
+    const yes =
+      quitConfirmKey(snap.char, snap.key.ctrl === true || snap.key.meta === true) === "yes";
+    return consumed({ kind: "answerArtifactConfirm", yes });
+  },
+};
+
+/**
  * 3. The `Ctrl+X Ctrl+S` chord. A key that breaks the chord goes on below
  * unchanged — EXCEPT while the LIST has the keys: there `ctrl+x` is the dock's
  * stop (arm, then confirm), so the chord keeps its idle state and passes.
@@ -86,6 +105,9 @@ export const chordLayer: KeyLayer = {
     }
     if (chord.action === "sendNow") {
       return consumed(...write, { kind: "sendNow" });
+    }
+    if (chord.action === "openArtifact") {
+      return consumed(...write, { kind: "openNewestArtifact" });
     }
     // "pass": the key goes on, with the (possibly reset) state applied first.
     return write.length === 0 ? NOTHING : passThrough(...write);

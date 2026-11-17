@@ -51,6 +51,17 @@ describe("stepChord (Ctrl+X Ctrl+S)", () => {
     expect(res).toEqual({ state: idleChord, action: "pass" });
   });
 
+  test("Ctrl+X Ctrl+O opens the newest artifact (model-artifacts S6b); a late or bare Ctrl+O passes", () => {
+    const fired = second("o", ctrl, 0, 10);
+    expect(fired.action).toBe("openArtifact");
+    expect(fired.state).toEqual(idleChord);
+    expect(second("O", ctrl, 0, 10).action).toBe("openArtifact");
+    expect(second("o", ctrl, 0, 1501).action).toBe("pass");
+    // A bare Ctrl+O stays the expand toggle: the chord never takes it unarmed.
+    expect(stepChord(idleChord, "o", ctrl, 0)).toEqual({ state: idleChord, action: "pass" });
+    expect(second("o", plain, 0, 10).action).toBe("pass");
+  });
+
   test("Ctrl+X again re-arms from the latest press", () => {
     const first = stepChord(idleChord, "x", ctrl, 0);
     const again = stepChord(first.state, "x", ctrl, 1400);

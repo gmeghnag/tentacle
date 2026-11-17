@@ -24,12 +24,16 @@ function r(id: string, over: Partial<DrawerRow> = {}): DrawerRow {
     tone: "idle",
     archived: false,
     current: false,
+    running: false,
+    attached: 0,
+    pinned: false,
     ...over,
   };
 }
 
 function list(over: Partial<DrawerList> = {}): DrawerList {
   return {
+    pinned: [],
     running: [],
     recent: [],
     archived: { count: 0, rows: null },
@@ -38,6 +42,7 @@ function list(over: Partial<DrawerList> = {}): DrawerList {
     stale: false,
     empty: false,
     canLoadMore: false,
+    nextAfterCurrent: null,
     ...over,
   };
 }
@@ -167,5 +172,28 @@ describe("drawer motion and swipe (F11, Design 3)", () => {
     expect(swipeCloses(-30, 0)).toBe(false);
     expect(swipeCloses(80, 0)).toBe(false);
     expect(swipeCloses(-60, 90)).toBe(false);
+  });
+});
+
+describe("the Pinned section's row (docs/feat/mobile-session-actions.md S2)", () => {
+  test("Pinned is drawn first, above Running, and only when non-empty", () => {
+    const pinned = r("p", { pinned: true });
+    const items = drawerItems(
+      list({ pinned: [pinned], running: [r("a", { tone: "running" })], recent: [r("b")] }),
+    );
+    expect(items.slice(0, 2).map((i) => (i.kind === "label" ? i.text : i.kind))).toEqual([
+      "Pinned",
+      "row",
+    ]);
+    expect(items[1 as number]).toMatchObject({ kind: "row", row: { id: "p" } });
+    expect(items.map((i) => i.kind)).toEqual(["label", "row", "label", "row", "label", "row"]);
+    expect(kinds(list({ running: [r("a")] }))).toEqual(["label", "row"]);
+  });
+
+  test("a pinned row is one row: it is not drawn again under Running", () => {
+    const items = drawerItems(list({ pinned: [r("p", { pinned: true })], running: [] }));
+    expect(items.filter((i) => i.kind === "row").map((i) => i.kind === "row" && i.row.id)).toEqual([
+      "p",
+    ]);
   });
 });

@@ -882,6 +882,15 @@ export const SnapshotResultSchema = z.object({
    * not report them", never "none left".
    */
   schedules: z.array(ScheduleRowSchema).optional(),
+  /**
+   * Each message's ARRIVAL time (docs/fix/mobile-open-at-end.md, slice B):
+   * epoch ms, same length and order as `messages`, `0` = not known (a message a
+   * reload/compaction re-logged was not received now). Display-only — a client
+   * that does not know the field drops it (§7 strip schemas), an older daemon
+   * sends none and every row simply shows no time. Never persisted on the
+   * laptop; never a `null` (the envelope convention for "no time").
+   */
+  times: z.array(z.number().int().min(0)).optional(),
 });
 export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 
@@ -1294,6 +1303,34 @@ export const RenameResultSchema = z.object({
 });
 export type RenameResult = z.infer<typeof RenameResultSchema>;
 
+// --- session/pin (docs/feat/mobile-session-actions.md) -------------------
+// Pin a session to the top of every device's list, or unpin it. A SET, not a
+// toggle: `pinned` is the state wanted, the result the state after applying
+// (idempotent, so two devices sending the same intent converge; opposite
+// intents: the last applied wins). Works on live and ARCHIVED sessions (an
+// archived one is changed in place, not reopened) and needs no prior `open`.
+// List metadata, not conversation: it does not move `updatedAt` and emits no
+// update (another device sees it at its next `session/list`). Kept by a
+// `serve` daemon across restarts; elsewhere in memory with the session. At
+// most MAX_PINNED_SESSIONS pinned per daemon: pinning one more →
+// `InvalidParams` (re-pinning a pinned one, or unpinning, always passes). A
+// deleted id → `SessionDeleted`; an unknown one → `UnknownSession`. Additive
+// (an older daemon answers `MethodNotFound`). Any authenticated client may pin.
+
+/** At most this many pinned sessions per daemon (bounds `SessionListResult.pinned`). */
+export const MAX_PINNED_SESSIONS = 20;
+
+export const PinParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  pinned: z.boolean(),
+});
+export type PinParams = z.infer<typeof PinParamsSchema>;
+
+export const PinResultSchema = z.object({
+  pinned: z.boolean(),
+});
+export type PinResult = z.infer<typeof PinResultSchema>;
+
 // --- session/context (docs/feat/tui-target-badge.md) ---------------------
 // The size of the context a session would send NOW (system prompt, tools and
 // history), for a client's meter before any turn measured it. Read-only,
@@ -1482,6 +1519,8 @@ export const SessionListEntrySchema = z.object({
   jobs: z.number().int().nonnegative().optional(),
   /** The session's armed scheduled wakes (a COUNT: the rows are the `schedules` list). Absent: an older daemon, or one that never holds a schedule. */
   schedules: z.number().int().nonnegative().optional(),
+  /** Pinned (`session/pin`). Absent: not pinned, or an older daemon. */
+  pinned: z.literal(true).optional(),
 });
 export type SessionListEntry = z.infer<typeof SessionListEntrySchema>;
 
@@ -1490,5 +1529,13 @@ export const SessionListResultSchema = z.object({
   sessions: z.array(SessionListEntrySchema).max(MAX_SESSION_LIST),
   /** Present iff more entries follow: pass it back for the next page. */
   cursor: z.string().min(1).optional(),
+  /**
+   * The FIRST page only (no `cursor` asked): EVERY pinned session on the
+   * daemon, live or archived, in list order — so a pin older than the loaded
+   * pages still shows. Each also stays in its normal place in `sessions`
+   * (paging is unchanged): dedupe by `sessionId`. Absent: none pinned, a
+   * later page, or an older daemon.
+   */
+  pinned: z.array(SessionListEntrySchema).max(MAX_PINNED_SESSIONS).optional(),
 });
 export type SessionListResult = z.infer<typeof SessionListResultSchema>;

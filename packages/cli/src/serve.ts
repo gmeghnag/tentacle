@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
 import { DEFAULT_PUSH_GRACE_SECONDS } from "@tentacle/config";
-import type { AttachmentSource, ScheduleLink } from "@tentacle/core";
+import type { ArtifactSink, AttachmentSource, ScheduleLink } from "@tentacle/core";
 import {
   type AgentReuse,
   Connection,
@@ -208,6 +208,7 @@ export function createServeAgent(
   ctx: {
     readonly cwd: string;
     readonly attachments?: AttachmentSource;
+    readonly artifacts?: ArtifactSink;
     /** The session's scheduled wakes (docs/feat/cron-tool.md D1): `serve` schedules. */
     readonly schedules?: () => ScheduleLink | null;
   },
@@ -226,6 +227,8 @@ export function createServeAgent(
       // The session's store, so the provider can read a ref's bytes
       // (docs/feat/attachments-prompt.md D4). Absent when images are off.
       ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+      // The session's artifact store: the model may `present` (model-artifacts D4).
+      ...(ctx.artifacts ? { artifacts: ctx.artifacts } : {}),
       // `workload_shell` (docs/feat/workload-shell.md D3): a `serve` daemon runs
       // on the user's own host, so it holds the credentials the tool dials with.
       // `tunnelledAgent` (the pod daemon) never passes this.
@@ -1169,6 +1172,8 @@ export function tunnelledAgent(
     readonly skillScan?: SkillScan;
     /** A live session's broker, jobs and approvals: a settings sync rebuilds its agent on them. */
     readonly reuse?: AgentReuse;
+    /** The session's artifact store: offered `present` (docs/feat/model-artifacts.md D4). */
+    readonly artifacts?: ArtifactSink;
     /**
      * Offer `move_session` (docs/feat/session-hop.md D9). Set by the pod DAEMON
      * only, never by a plain `serve` (which builds through `createServeAgent`):
@@ -1233,6 +1238,7 @@ export function tunnelledAgent(
       : {}),
     // D9: only a pod daemon sets this (`podSessionHost`); a `serve` never does.
     ...(options.moveSession === true ? { moveSession: true as const } : {}),
+    ...(options.artifacts ? { artifacts: options.artifacts } : {}),
   });
   return { ...wired, ...(report ? { settingsReport: report } : {}), pinnedOver };
 }
@@ -1299,7 +1305,7 @@ export function podSessionHost(
     // than it needs, and stays symmetric with `serve`); the real one goes to
     // the daemon's stderr log (piped + routed by the laptop, never inherited).
     ...(log ? { onTurnError: (error: Error) => log(`error: ${error.message}`) } : {}),
-    createAgent: (cwd, { modelLink, settings, reuse, attachments, hop }) => {
+    createAgent: (cwd, { modelLink, settings, reuse, attachments, artifacts, hop }) => {
       if (!options.modelProxy) {
         // It reports nothing: a settings sync answers `applied: false`.
         return buildAgent(
@@ -1311,6 +1317,9 @@ export function podSessionHost(
             // A pod daemon without `--model-proxy` runs its OWN model, so it
             // holds the bytes (D4, Orchestrator decision 8).
             ...(attachments ? { attachments } : {}),
+            // The session's artifact store, in the POD: what it presents is
+            // pod-supplied, and the laptop treats it so (model-artifacts D8).
+            ...(artifacts ? { artifacts } : {}),
             // D8/D9: a pod daemon may PROPOSE a move — but only for a session
             // whose client declared it can ASK the owner (H5 review finding 1).
             // `run`/`attach` have no `/move` feed, so their model must never be
@@ -1324,6 +1333,7 @@ export function podSessionHost(
         ...(log ? { log } : {}),
         skillScan,
         ...(reuse ? { reuse } : {}),
+        ...(artifacts ? { artifacts } : {}),
         // The same rule as above: the pod daemon is hop-capable, this SESSION is
         // only if its client can put the proposal to its owner (D8/D9).
         ...(hop ? { moveSession: true as const } : {}),
