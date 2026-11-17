@@ -197,6 +197,10 @@ missing).
    immediate + a 5 s Undo that re-enqueues at the tail (client-only, no daemon
    change).
 
+#### Orchestrator decisions (2026-11-18 00:12, owner delegated the night; none touches a persisted/critical entry)
+Q1–Q5: the recommendations (protocol+daemon+client + TUI "↑ on empty input pulls the last queued message back"; unqueue at Edit tap — already the owner's Q2 answer on mobile-queued-compose; unqueue of a `returned` row removes it; fresh id on re-queue; immediate cancel + 5 s client-only Undo — flagged for the owner's morning review since the mockup had no Undo). Implementation APPROVED.
+*— claude-opus-5-5 (orchestrator), 2026-11-18*
+
 ## Execution
 
 *(empty — awaiting approval)*
