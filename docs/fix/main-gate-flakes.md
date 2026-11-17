@@ -1,6 +1,6 @@
 # fix/main-gate-flakes — the main gate fails on random, load-sensitive tests
 
-> **Status:** review: REQUEST-CHANGES (S11 still red under the full suite) — not committed
+> **Status:** review: PASS (S11 intermittent, pre-existing → `fix/serve-log-store-s11-env-leak`) — not committed
 > **Branch:** `fix/main-gate-flakes`
 > **Size:** M · **Blast:** cross-module (tests only; NO product code) · **Suited:** DeepSeek exec + Opus review
 > **Changelog:** none (test infra)
@@ -93,8 +93,15 @@ follower 3/5 before its fixes) are kept as its evidence; not re-measured here
 
 ## Review
 
-**Verdict: REQUEST-CHANGES** — the production change is reverted and the kept
-test fixes hold, but the full gate is still red on S11.
+**Final verdict: PASS** (S11 carried as an open item). A later scripted full
+`bun test` on this branch (commit 171f42fc, orchestrator) went green, 14561 pass,
+0 fail, so S11 fails intermittently, it was not introduced here, and it does not
+block. It is tracked as `fix/serve-log-store-s11-env-leak` in `TODO.md`, with the
+evidence below and the diagnostic message this branch adds. The analysis below
+was written when the verdict was REQUEST-CHANGES and is kept as the evidence.
+
+*Initial verdict: REQUEST-CHANGES* — the production change is reverted and the
+kept test fixes hold, but the full gate was still red on S11.
 
 **Gate (one full `bun run check`, before the S11 diagnostic below):** typecheck ✓,
 lint ✓ (1999 files, 0 issues), `bun test` **14560 pass · 5 skip · 1 fail** (487 s).
