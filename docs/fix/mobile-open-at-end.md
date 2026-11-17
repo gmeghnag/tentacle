@@ -938,3 +938,23 @@ it: with the app lock on, a single return should now cause ONE re-read, not two.
 *— claude-opus-5-5 (executor, fix round 1 of review round 5), 2026-11-17. The id
 is what the client config reports (`"model": "opus"` → `claude-opus-5-5`), not a
 guess; the branch's commit subjects are the only other evidence available here.*
+
+### Round 2
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (`483b210b`).
+
+**MEDIUM 1 (`inactive` counted as leaving the app): fixed.**
+- `session-screen-controller.ts:1263-1265`: now only `background` sets `appWasAway`.
+- New test: `session-screen.test.ts:974`. It covers an `inactive` → `active` pair, repeated blips and the real `inactive` → `background` → `active` departure.
+- Mutation: I set `appWasAway` on any state other than `active` again. Result: 1 fail, the new test. I reverted it and `git status` was empty.
+
+**Regressions checked (nothing found).**
+- **Android:** RN reports only `active` and `background`, so its returns still resync.
+- **Real iOS return** (`inactive` → `background` → `active`): resyncs once (asserted in the test).
+- **Other callers:** the screen's `AppState` listener is the only one.
+
+**Gate.** `bun test apps/mobile/test`: 2634 pass, 0 fail. `bun run lint`: 1858 files, clean. `bun run typecheck`: clean.
+
+**Still open.** The iPhone device check (Execution).
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, round 2 of this review)
