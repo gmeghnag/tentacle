@@ -200,10 +200,10 @@ parses on a schema without it (strip) — red if a mapper ever spreads.
    - `compactionOf(m: ChatMessage): { fromTokens?, toTokens?, toExact? } | null`
      — structural (`m.compacted`) first; a legacy summary (user role, content
      starts with the head, no field) → `{}` (separator without figures).
-   - `compactionSeparatorText(fact, opts?: { foreign?: boolean })` →
+   - `compactionSeparatorText(fact)` →
      `compacted · ctx 182k → 9k` (`~9k` when `toExact` is absent, Q2),
-     `compacted` alone with no figures; `foreign` → `compacted on another device
-     · …` (Q6).
+     `compacted` alone with no figures. NO foreign variant: a compaction from
+     another device reads exactly like an own one (Q6, owner override).
    - `formatTokens` moves to core (`format.ts` re-exports it, no TUI churn).
 3. **Agent**: `Session.compact(signal, onReplaced, opts?: { fromTokens?: number })`
    — after `compactedHistory(...)` builds `next` and BEFORE `this.messages.length
@@ -433,8 +433,8 @@ All red on current `main` first (§9), mutation-checked where noted.
   `Compacting…`, no transcript line; resolve → separator `compacted · ctx 182k
   → 9k` + slot `Compacted ✓`; after 3 s (fake clock) gone; a prompt before then
   → `Thinking…` at once. Frame height constant across all phases.
-- Foreign compaction history → separator `compacted on another device · …`,
-  no notice. Own compaction → exactly one separator (no double from history).
+- Foreign compaction history → the SAME separator as an own compaction
+  (`compacted · ctx …`, Q6), no notice. Own compaction → exactly one separator (no double from history).
 - `messagesToItems` on a compacted history → separator + body (expanded only);
   legacy head → separator `compacted`; `/clear` history → no separator.
 - Failure / cancel → `▲ Compact failed…` / `◇ Compaction cancelled…`.
@@ -467,7 +467,7 @@ All red on current `main` first (§9), mutation-checked where noted.
 
 ### Owner answers (2026-11-17)
 
-Owner: "ok" to every recommendation — Q1 (A) display-only fail-soft `compacted` field on the summary message, no new log entry type; Q2 `~` when estimated, never updated later; Q3 resumed summary → separator, body on Ctrl+O; Q4 mobile = follow-up `feat/mobile-harness-notices` (shared logic in `@tentacle/core`); Q5 one-line notices + all `NoticeItem`s, multi-line command replies unchanged; Q6 foreign compaction → `compacted on another device · ctx …` separator. Also (17/11): `Compacted ✓` shows ~3 s then disappears (already in Context). Implementation APPROVED.
+Owner: "ok" to every recommendation — Q1 (A) display-only fail-soft `compacted` field on the summary message, no new log entry type; Q2 `~` when estimated, never updated later; Q3 resumed summary → separator, body on Ctrl+O; Q4 mobile = follow-up `feat/mobile-harness-notices` (shared logic in `@tentacle/core`); Q5 one-line notices + all `NoticeItem`s, multi-line command replies unchanged; Q6 foreign compaction → the SAME separator as an own compaction — **owner override 17/11: no "on another device" wording, it reads exactly as when the user compacted on this device** (not the rec). Q4 mobile follow-up: low priority, "senza fretta". Also (17/11): `Compacted ✓` shows ~3 s then disappears (already in Context). Implementation APPROVED.
 
 ## Execution
 
