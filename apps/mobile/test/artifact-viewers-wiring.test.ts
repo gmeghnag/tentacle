@@ -148,12 +148,20 @@ describe("react-native-webview: pinned and contained", () => {
     expect(pkg.dependencies["react-native-webview"]).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  test("imported only by the two isolated viewers", () => {
-    const importers = sources(join(APP, "src"))
+  // + the diagram pair (docs/feat/model-diagrams.md D6): the hidden renderer and
+  // the inert display, pinned in `diagram-wiring.test.ts` the same way.
+  test("imported only by the two isolated viewers and the two diagram views", () => {
+    const src = join(APP, "src");
+    const importers = sources(src)
       .filter((f) => read(f).includes('from "react-native-webview"'))
-      .map((f) => f.slice(DIR.length + 1))
+      .map((f) => f.slice(src.length + 1))
       .sort();
-    expect(importers).toEqual(["HtmlViewer.tsx", "PdfViewer.tsx"]);
+    expect(importers).toEqual([
+      "screens/artifacts/HtmlViewer.tsx",
+      "screens/artifacts/PdfViewer.tsx",
+      "ui/diagram/DiagramRenderer.tsx",
+      "ui/diagram/DiagramView.tsx",
+    ]);
   });
 
   // docs/fix/mobile-qa-sweep.md bug 2: the body is the pure `viewerBody`'s, and

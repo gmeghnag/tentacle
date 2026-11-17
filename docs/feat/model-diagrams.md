@@ -1698,3 +1698,64 @@ Both mutations were reverted, and `git status` is clean.
 - I did not re-run the full `bun test`.
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Execution — slice D6
+
+*Phone renderer, inert display, full screen, transcript branch. Nothing of D7 (no `"mermaid"` artifact kind, no `present`, no gallery thumbnail). `TODO.md` untouched.*
+
+### 0. Load-bearing check, re-run first — **HOLDS**
+
+D6 is gated on model-artifacts S8 being on `main` (*Slices*). `git rev-list --count main..feat/model-artifacts` → `0`, `git merge-base --is-ancestor feat/model-artifacts HEAD` → true; `artifact-viewer.ts` (`htmlViewerProps`, `navigationPredicate`, `webViewParts`), `HtmlViewer.tsx` and `react-native-webview` 14.0.1 (exact) are present. The plan's "first check": `html` is in Metro's default `assetExts` (`metro-config@0.87.1/src/defaults/defaults.js:50`), so no `metro.config.js` and no `.txt` fallback (checked against the config only, not a real bundle). `mermaid.min.js` 11.17.2: no `<script`/`</script` sequence (inlined unchanged), no `new Function(`/`eval(`. Its four `Function("return this")` calls all come after a `typeof self=="object"&&self` guard, so the CSP's missing `'unsafe-eval'` should not be reached (static evidence only).
+
+### 1. As built (dependency order)
+
+1. `apps/mobile/src/diagram-renderer-page.ts` (pure): `DIAGRAM_DRIVER` (a serial queue; `mermaid.initialize({startOnLoad:false, securityLevel:"strict", theme:"base", themeVariables, fontFamily, maxEdges:500})`; one `render` and one answer per request, using exactly `parseDiagramReply`'s two shapes; the size comes from the root `viewBox`; a refusal carries jison's `hash.loc.first_line`, else 0), `renderRequestScript` (one `JSON.stringify` literal + `;true;`), `rendererPage` (header with the version, the library, the driver; it refuses a library with a `<script` sequence), `rendererPageVersion`, `svgViewBoxSize`.
+2. `apps/mobile/scripts/gen-diagram-renderer.ts` + generated `apps/mobile/assets/diagram/renderer.html` (3.57 MB, mermaid 11.17.2 from `packages/tools/node_modules`, the daemon's pin). The CSP is not in the file: `htmlViewerProps` puts it in front at load time.
+3. `apps/mobile/src/diagram-render-service.ts` (pure): one render in flight; an answer counts only through `parseDiagramReply` with the in-flight id; memory LRU (D5's), then the file copy, then the renderer; a render is written back; a stored file must be a sized SVG the bridge would accept; a store failure is never a render failure. A mermaid refusal → `failed`, never retried. No answer in 8 s → `failed` (retryable) + the page is reloaded. A renderer that goes away mid-render → the job is put first in the queue for the next attach.
+4. `apps/mobile/src/diagram-display.ts` (pure): `diagramInlineBox` (fits the width, never upscales, 420 pt cap → `clipped`, a placeholder estimate), `diagramDisplayProps` (`htmlViewerProps({…, scripts:false})`; zoom up to 6× in full screen only; the background must be a hex colour, else `transparent`), `diagramRendererProps` (`scripts:true`, the one place), `diagramUiWords` (it/en), `diagramCaption`, `diagramShare`, `diagramA11yActions`/`diagramA11yEffect`.
+5. `apps/mobile/src/diagram-render-expo.ts`: the app-wide service + an `expo-file-system` store (`Paths.cache/diagrams/`), `diagramFileUri`, `loadRendererPage`.
+6. Dumb components in `ui/diagram/`: `DiagramRenderer.tsx` (hidden 320×2 WebView, opacity 0, hidden from VoiceOver; `onLoadEnd` → attach, `onMessage` → `service.receive`, reload = a new `key`), `DiagramView.tsx` (inert display), `DiagramBlock.tsx` (caption; then a placeholder, the drawing, or the source when it failed; fade + "tocca per ingrandire"; one VoiceOver element with activate/"Mostra sorgente"), `DiagramFullScreen.tsx` (a modal that can turn to landscape, `Diagramma | Sorgente`, Share, "Copia sorgente").
+7. `TranscriptRow.tsx`: a `DIAGRAM_TOOL` branch → `DiagramRowView` (`null` ⇒ `ToolRowView`). `SessionScreen.tsx`: one `<DiagramRenderer />`.
+8. `test/artifact-viewers-wiring.test.ts`: the `react-native-webview` importer pin now lists the two diagram views.
+9. `changelog.d/model-diagrams.added.md`: the existing fragment extended (D5 drift 6), and its "phone follows" clause replaced by the iPhone sentence.
+
+### 2. Red before green (§9)
+
+`diagram-renderer-page`, `diagram-render-service`, `diagram-display` tests: each written before its module, and each first run was red. For the first two the red was an import error. The display test's later block was red as `Export named 'diagramA11yActions' not found`. The asset pins were red as `ENOENT renderer.html` until the generator ran. One red was in my test, not the code (`return <script>` is not the script's completion value), and the test was fixed. **Drift:** `diagram-wiring.test.ts` was written after the components and never ran red on its own; its non-vacuity comes from mutations M1/M2/M10. `artifact-viewers-wiring` went red on the new importers (`+ Received + 2`) before its list was updated.
+
+### 3. Mutation checks (`.tentacle/tmp/model-diagrams/d6/mutate.ts`: exact-match apply, the 5 narrow files run, the file restored; `git diff --stat` unchanged after)
+
+```
+M1 display scripts ON ............ KILLED (2)   M8 no 420 cap (×2) ........... KILLED (1)*
+M2 display gets onMessage ........ KILLED (2)   M9 driver drops jison line .... KILLED (2)
+M3 service accepts any id ........ KILLED (2)   M10 transcript branch removed . KILLED (1)
+M4 source spliced into script .... KILLED (10)  M11 lost page not re-asked .... KILLED (1)
+M5 timeout does not reload ....... KILLED (1)   M12 corrupt file accepted ..... KILLED (1)
+M6 not serial .................... KILLED (2)   M13 library may close <script>  KILLED (1)
+M7 refusal retryable ............. KILLED (1)
+* M8 SURVIVED the first run (only a 1200 pt case); a 421 pt case was added → KILLED.
+```
+
+### 4. Drift from the Implementation (and why)
+
+1. **No `expo-asset`.** It is only transitive: not in `apps/mobile/package.json`, and it does not resolve from `apps/mobile` with the isolated install. `readAsStringAsync` is the legacy API, which `expo-file-system` 58 now throws on. The loader instead uses RN's `Image.resolveAssetSource(require(asset))` + `fetch(uri).text()`. That adds no dependency and no native module.
+2. **The CSP is added at load time, not written into the file.** One CSP string and one flag set serve the renderer, the display and the artifacts viewer.
+3. **Request ids are per-render nonces, and the driver is fed one at a time.** A page drawing A never holds B's id. Accepted residual risk (written in the service header): a mermaid XSS in A could hook the driver and answer B's later request with a wrong picture. That picture is shown inert (scripts off, CSP, no bridge), so it is a spoof, not an escape.
+4. **The file cache stores the SVG alone; its size is re-read from the `viewBox`** through the same validator as a live answer.
+5. **The owner's `diagrams.style: outline | filled` is NOT built.** It is not in D6's Design/Files: the owner's answer came after the plan was approved. Building it needs a filled theme variant, a style part in the cache key, the iPhone Settings toggle + store, and a config key. Nothing on the Mac would read that key (the TUI ASCII has no fills, D3 drift 6). **Decision needed:** a D6b sub-slice, or fold it into D7.
+6. **The e2e flow `32-diagram-inline.yaml` is not written** (see *Unverified*).
+
+### 5. Gate
+
+```
+$ bunx tsc --noEmit / bun run typecheck   → clean (root + apps/mobile + apps/relay)
+$ bun run lint                            → Checked 2033 files. No fixes applied.
+$ bun test <9 diagram + artifact-wiring files> → 89 pass, 0 fail, 463 expect()
+$ bun test                                → 14696 pass, 5 skip, 1 fail (1056 files, 507 s)
+```
+
+The 5 skips are the same set as D5's gate. **The 1 fail is `apps/mobile/test/chart-view.test.ts`.** It fails at load (`SyntaxError: Export named 'EventEmitter' not found in …/expo-modules-core@58.0.24/…/ts-declarations/EventEmitter.js`), and fails the same way alone. Evidence it is not from this diff: its import graph (`ui/chart/*`, `chart-*.ts`, `haptics.ts`, `theme.ts`) and `package.json`/`bun.lock` have zero diff against HEAD (`git diff HEAD --stat` prints nothing), and none of them imports a file this slice added. *Unverified:* that it also fails on clean `main`. Verify with `bun test apps/mobile/test/chart-view.test.ts` in a clean `main` checkout. `protocol.json` is untouched; no `protocol.d/` note.
+
+**Pixels unverified:** nothing was run on a simulator or device. The booted simulators may be other sessions', so I did not take them over. Still open: mermaid actually drawing under `artifactCsp()` in WKWebView, `fetch` of the asset in a release build, the look, fade, pinch/double-tap, landscape and VoiceOver. To check: a dev build, a `diagram` call, a reopen, a tap into full screen, Sorgente, back.
+
+*— claude-opus-5-5, 2026-11-17*
