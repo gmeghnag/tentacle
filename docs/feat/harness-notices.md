@@ -729,3 +729,43 @@ suite stated). Commit is titled "exec (deepseek)" while Execution is signed opus
   `FOREIGN_COMPACTED_NOTICE` is S3 scope). Mutation C (foreign wording re-added) → 1 fail; reverted, tree clean.
 - Gate: touched files 114 pass / 0 fail; `bun run typecheck` clean; `bun run lint` clean (1997 files). Full `bun test`
   not re-run by the reviewer. No regression found in the round-2 diff.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17* (S2 only, `git diff main...HEAD`; fresh context. The executor signature reads
+claude-sonnet-4-5 but the commit says "exec (deepseek)" — reconcile)
+
+**Verdict: REQUEST-CHANGES** (S2).
+
+**Findings**
+1. **MEDIUM — a later, separate cut in the same turn rewrites the FIRST notice, far up the transcript.**
+   `packages/tui/src/state.ts:679-687` (`again = saidContinueThisTurn(state)`) and `replaceContinueNotice` (`:268-279`)
+   treat ANY truncation after a "…asking it to continue" line in the turn as "the re-ask was cut again". But the
+   re-ask budget is per TURN (`agent.ts:1426`, `MAX_TRUNCATION_REASKS = 1`), and the re-ask can go on to run tools and
+   further rounds. Repro (`.tentacle/tmp/harness-notices/rev-s2-later-cut.ts`): [user, reply, cut (re-ask), reply,
+   tool, reply] then a later `truncated_reply{reason:"length", retrying:false}` (e.g. the refused cut tool call,
+   `agent.ts:1620`) → item 2, ABOVE the tool row, becomes "…asked it to continue, cut again; this answer is
+   incomplete"; nothing is appended at the turn's end. With `reason:"cut"` (`agent.ts:1609`) the first fact
+   (output limit + re-ask) is overwritten by "the model's stream was cut before it finished" — first fact lost,
+   second misplaced. On `main` that second sentence was appended at the end. `apps/mobile/src/transcript.ts:458-466`
+   mirrors the same bug. Fix: merge only when the continue notice is the turn's last notice AND nothing but the
+   re-ask's own reply follows it (or the loop flags the re-ask's cut explicitly), and never merge a `cut` reason;
+   add a test for the later-round cut on both TUI and phone.
+
+**Gate (re-run by reviewer):** touched test files + `app-commands` + mobile `transcript-parity` → 272 pass, 0 fail
+(15 files). `bun run typecheck` clean. `bun run lint` clean (2008 files). Full `bun test` not re-run.
+
+**Mutation (each red, then reverted; `git status` clean):** `layoutTranscript` gap ignores `joinsPrevious` →
+2 fail (PARITY, App frame). `sliceLaid` back to "a separator above every non-first item" → 2 fail. Executor's M1–M7
+table not re-run.
+
+**Attacks tried:** (a) parity of the two layout paths / `sliceLaid` gap — holds, mutation-pinned. (b) glyph cache
+staleness: `hangCache` keyed on the item's row array, level is item-derived, `prev` recomputed per layout — holds.
+(c) other `kind === "notice"` readers now seeing ex-`AssistantItem` lines (`resetHistory` host filter,
+`transcriptToMarkdown`, job dedupe, `turnHasAnswerText`) — no wrong state found. (d) truncation merge across rounds
+→ finding 1. §7 invariants: pure-module split respected (`harness-group.ts`, `harness-text.ts`); no wire,
+persistence or terminal-IO change.
+
+**Executor behaviour:** honest, well-documented drift (`notice` token kept for `dock-tone.ts:33`; `stripInlineMarkdown`
+added for real regressions; mobile mirror forced by the parity test). The happy path is well tested; the merge rule's
+scope was not challenged beyond the immediate re-ask.
