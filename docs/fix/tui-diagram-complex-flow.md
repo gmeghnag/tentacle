@@ -193,3 +193,24 @@ sense — a fresh-context round on a different family is still worth it for #1, 
 sideways geometry is shared by every LR/RL flowchart.
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Round 2
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (`dcd9dfc6`).
+
+- **#1 (HIGH) fixed.** `diagram-ascii-flow.ts:439`: in LR/RL the box's cross size is now
+  `max(height, k+2…)`, so it counts the label's rows. Re-running the round-1 repro
+  (`.tentacle/tmp/tui-diagram-complex-flow/rev/lr.ts`): the `<br/>` box and the wrapped
+  long label now draw intact, with the borders above and below the text.
+- **#2 (MEDIUM) fixed.** New test `a sideways (LR) box is tall enough for every label row`.
+  **Mutation:** with the fix reverted to `max(base, …)`, that test FAILS (11 pass / 1 fail).
+  After restoring it, `git status` is clean.
+- **Regression probes** (`rev/lr2.ts`): a multi-line LR cylinder plus a decision with three
+  outgoing edges, and an RL subgraph with a back edge into a 3-row box. Both draw, with no
+  label over a border. The cosmetics left in those probes come from the round-1 code, not
+  from this diff: the decision's `◇` sits on an edge port row, and an edge label runs
+  through a frame border. Not blocking.
+- **Gate:** the 6 touched test files: 102 pass, 0 fail · `bun run lint` clean ·
+  `bun run typecheck` clean. Full `bun test` not re-run.
+
+*— claude-opus-5-5, 2026-11-17*
