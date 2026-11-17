@@ -1443,6 +1443,192 @@ both fails are flakes. To check, run `bun test 2>&1 | grep '^(fail)'`.
 
 *— claude-opus-5-5, 2026-11-16*
 
+### P5 — TUI attach PDF (upload / laptop-extract for pods), chip, transcript row · executed by Claude (see the note), 2026-11-16
+
+**What was built (client seam first, as the plan ordered).**
+
+1. **`packages/client/src/document-input.ts` (new, pure).** `documentsInput(capability, local)` →
+   `{kind:"upload"|"laptop", maxBytes} | {kind:"off", reason}`. `upload` = the daemon holds
+   the bytes and extracts; `laptop` = a pod, so THIS laptop extracts and only text crosses.
+   The AGENTS §7 gate is the images one applied to documents: an `upload` claimed while
+   `local.servesModel` is **OFF** ("the daemon's claim is not trustworthy"), never an upload
+   into a pod. Absent capability = the D6 sentence `OLD_DAEMON_DOCUMENTS`
+   ("this session's daemon cannot read PDFs (update it)"); a capability that does not name
+   `pdf`, or an unknown `input`, is off too — never guessed. A `client` daemon with no
+   injected extractor is off as well (the alternative would be an upload).
+2. **`RemoteClient`** (`remote-client.ts`): `documentsInput()`, and
+   `attachDocument(sessionId, bytes, {name}, opts)` → the **wire block**
+   (`{type:"document",kind:"pdf",name,source}`), not just a ref. Mode `upload` → `upload()`
+   then `document{ref}`; mode `laptop` → the **injected** extractor
+   (`RemoteClientOptions.extractDocument`, injected by the CLI because `@tentacle/client` is
+   in the phone's bundle) → `attachedPdfText` (the same pure builder the daemon uses) →
+   `document{text}`. Size / empty / `%PDF-` are refused before any frame; extraction
+   failures throw `DocumentExtractError` carrying the extractor's own sentence. New
+   `DocumentsUnavailableError`, `CLIENT_EXTRACTS_DOCUMENTS`.
+   `prompt(...)` already took `documents` (P4) — unchanged.
+3. **`RemoteSession`**: `documentsInput()`, `attachDocument()` (lazy open first, like
+   `attachImage`, and it opens nothing when the mode is off), `opts.documents` on `send`,
+   `ActiveTurn.documents` (so a keyed re-send after a drop carries them, exactly as
+   `attachments` does), and `sendPrompt` passes them. **This closes the DRIFT the brief
+   named:** `client.prompt` took `documents` since P4 but `RemoteSession` never passed them.
+4. **`packages/tui/src/pdf-attach.ts` (new, pure)**: `DocumentMode` (structural — no client
+   import), `NO_DOCUMENT_SEAM`, `DOCUMENT_GLYPH`, `documentChipLabel` (`report.pdf · 2 pp` /
+   `report.pdf · reading…`), `documentUploadText`, `documentRowText` (`[pdf: name · N pp]`),
+   `mediaRowText`, and **`userMessageView(content, media)`** — the D5 view-model: with
+   `media`, `splitFileBlocks` strips the `<file>` block and each chip becomes a row; with
+   **no** `media` the content is returned RAW (honest degradation, never a guess).
+5. **Detection (`attach-files.ts`)**: `inspectPath` gains the `%PDF-` branch **before** the
+   `not-image` refusal (`isPdf(bytes.subarray(0, PDF_HEAD_BYTES))`), yielding
+   `{ok:true, kind:"document", document:{path,name,bytes,size}}` from the SAME one read and
+   the same cap. `InspectResult` gained a `kind` discriminator (an image ref cannot carry
+   `application/pdf`), `collectAttachments` now returns `documents` beside `images` and
+   counts both against `MAX_ATTACHMENTS_PER_MESSAGE`; `attachPaths`' `attachments` variant
+   carries them.
+6. **Draft/row (`attach-draft.ts`)**: `AttachDraft.documents` (one draft, one
+   cap, one row — the images then the PDFs), `withDocuments`, `removeLastChip` pops a
+   document first, `submitPlan` returns `documents`, `attachRowView` renders the PDF chips
+   with the glyph. `routeDecision(draft, decision, mode, text, documentMode)`: the two gates
+   are **independent** (a model without vision still reads a `<file>` block), a PDF with
+   documents off is refused with `_PDFs are off: <reason>_` and no chip, and an image paste
+   says nothing about PDFs. `attach-refusal.ts`: two new reasons (`documents-off`,
+   `extract-failed`), `claimsPdfPath`, and `refusalMeansText` treats `.pdf` like `.png` for
+   `empty`/`unreadable`.
+7. **`useAttachments.ts`**: `documentMode()`, `restoreDocuments()`, and `sendWithImages(text,
+   images, documents?)` — it calls only the SESSION's seams (`attachImage`, then
+   `attachDocument`), one at a time with one progress row over both, then
+   `run(text, {attachments, images, documents, documentChips})`. The hook never decides
+   where an extraction happens and never touches bytes itself.
+8. **Turn plumbing**: `SessionController.send` opts gain `documents`; `attachDocument` /
+   `documentsInput` are REQUIRED members (a session with no PDFs says so through the mode);
+   `useTurnDriver.run` passes `documents` in `sendOpts` and the chips' `[pdf: …]` rows to
+   `startTurn`; a lost slot / a pre-start refusal restores the PDF chips beside the images
+   (`restoreDocuments`); `state.UserItem.documents` + `startTurn(..., documents)` +
+   `render-lines` paint them (subtle rows; an attachment-only prompt still has no blank text
+   row); `resume.ts` uses `userMessageView(m.content, m.media)`. Fakes/passthroughs updated:
+   `test/session-stub.ts` (`inertSession`), `local-session.ts` (documents off + a rejecting
+   `attachDocument`), `cli/src/local-runtime.ts` (`PersistingController` forwards both, and
+   injects `extractPdf` **only** beside a model provider).
+
+**DRIFT from Implementation, recorded.** (a) `attachDocument` returns the wire BLOCK, not
+`{id,size}`: with two modes one return type has to describe both sources, and the TUI must
+not build a `document` itself (the brief's §3 builder was folded into the client instead —
+one constructor, both modes). (b) `routeDecision`/`submitPlan`/`attachRowView` take an
+optional `documentMode` (defaulting to `mode`), so the pure API stays additive for every
+existing caller. (c) `InspectResult` gained `kind` (above). (d) The brief's `documentBlock`
+builders in `pdf-attach.ts` were dropped for the same reason as (a). (e) The **transcript
+chip on a LIVE turn is `[pdf: report.pdf]`** (no page count): `turn_start` carries only
+`p`+attachments`, the daemon never puts `media` on the wire, and this laptop does not see
+the count in either mode — so the count appears on RESUME (`ChatMessage.media`), which is
+exactly what the daemon persisted. Said in `state.ts`'s `user_message` branch rather than
+invented. (f) Changelog: `changelog.d/pdf-read.added.md` already covers "attach a PDF from the
+TUI or the iPhone" — **not edited**, and no new fragment was added.
+
+**Tests (all red-first; 1298 lines of test new/changed).**
+`packages/client/test/document-input.test.ts` (10) — the table, incl. the §7 gate, an
+unknown kind/input, the clamp. `packages/client/test/document-attach.test.ts` (10) — real
+`RemoteClient`↔`Connection` with a frame spy: upload mode uploads then `document{ref}`
+(the `attachment/put` frame carries the sha and size), a non-PDF and an over-cap file are
+refused with **zero frames**, `laptop` mode sends `document{text}` with the page markers and
+**no** `attachment/put` frame at all, an encrypted PDF fails locally as
+`DocumentExtractError`, a `client` daemon with no extractor is off, an `upload` claim from a
+serving client is refused, no capability is the one sentence — and `RemoteSession.send`
+reaches `session/prompt` with the documents (plus a document-only prompt: no empty text
+block). `packages/tui/test/pdf-attach-pure.test.ts` (12) — chips/rows/`userMessageView`
+(block hidden, raw without `media`, PDF-only prompt, one parser). `packages/tui/test/
+pdf-attach.test.tsx` (7, real `App` frames + a fake controller) — the chip renders
+`report.pdf · reading…` and Enter sends the block with the file's exact bytes; a bare
+`/tmp/report.pdf` + Enter converts and sends nothing; `laptop` mode yields `document{text}`
+and calls no upload; no capability shows `PDFs are off: … cannot read PDFs` with no chip and
+sends nothing. Updated deliberately (an old assertion encoded the OLD behaviour): 
+`attach-files.test.ts` (a `%PDF-` file is a document, not `not-image`; the cap text says
+"files"), `attach-draft.test.ts`/`app-layout.test.ts`/`attach-app.test.tsx` (the draft's
+`documents` key; "can't send an attachment"), `app-attachments-structure.test.ts` (the
+destructure now names the document pair), `clear-connect-unbound.test.tsx` (two new required
+members), `cli/test/subagent-panel-controller.test.ts` (the forward guard's exact list).
+`session-stub.ts` answers documents **off**, so a test that forgets to script the mode gets a
+refusal rather than a silent success.
+
+**Mutations** (`.tentacle/tmp/pdf-read/p5/mut.sh`: each applied, the owning test run,
+restored; `git status` clean each time apart from this slice's own files):
+
+| mutation | result |
+|---|---|
+| `attach-files.ts`: the `%PDF-` branch never taken (`false &&`) | RED 3 (`pdf-attach.test.tsx` P5b/P5c + the chip) |
+| `document-input.ts`: `client` mode returns `upload` | RED 2 (`document{text}` + the encrypted-PDF test) |
+| `document-input.ts`: absent capability → `upload` | RED 1 (the one update sentence) |
+| `pdf-attach.ts`: `userMessageView` returns the content raw | RED 3 (the block-hiding cases) |
+| `attach-draft.ts`: a PDF chip added while documents are off | RED 1 (the refusal line/frame) |
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` **1782 files, clean** ·
+`bun test packages/client` 799 pass · `bun test packages/tui` **2424 pass** ·
+`bun test packages/cli` 3422 pass · full `bun test` (one run) **12977 pass, 5 skip, 0
+fail** (the 5 skips are the branch's existing opt-ins). No protocol schema changed, so
+`packages/protocol/schema/protocol.json` was not regenerated.
+
+**Executor note.** §Slices assigns P5 to DeepSeek; this execution was done by a **Claude**
+agent (the spawning harness's choice). Blast is `cross-module`, so standard Review applies.
+
+*— claude-opus-5-5, 2026-11-16* (per the harness's settings; this runtime exposes no exact
+model id)
+
+### Fix round 1 — P5 review (one MEDIUM: the laptop's `too-many-pages` retry had no test) · executed by `claude-opus-5-5`, 2026-11-16
+
+**Finding (MEDIUM, `packages/client/src/remote-client.ts:2318-2324`).** The laptop's copy
+of the attach retry was untested: mutating `extraction.reason === "too-many-pages"` to a
+value that never matches left `document-attach.test.ts` green. A pod session attaching a
+PDF over 2000 pages would then fail with "too many pages" instead of sending the first 100
+pages plus the `[pages … not included]` footer, and no test would notice.
+
+**Fixed at the root, not by copying the test.** The retry existed TWICE — the daemon's
+(`prompt-documents.ts`, on a stored `ref`) and the laptop's (on a pod's `text`) — which is
+why one copy could lose it silently. It is now ONE pure helper,
+`extractAttachedPdf(extract, {signal})` (`packages/core/src/pdf-text.ts:579`): it calls the
+extractor once, retries a `too-many-pages` answer once with
+`pages: "1-${MAX_PAGES_PER_READ}"`, and passes the caller's signal to BOTH calls. Both ends
+call it (`prompt-documents.ts:143`, `remote-client.ts:2316`) and neither keeps a copy, so
+the two paths cannot drift (the reviewer's "better still").
+
+**Three tests, each shown RED before green:**
+
+1. `packages/core/test/pdf-text.test.ts` — the helper itself: `[{}, {pages:"1-100"}]`, and
+   the signal reaches both calls; a failure that is not `too-many-pages` is answered
+   undredged (exactly one call).
+2. `packages/client/test/document-attach.test.ts` — "over the page limit, the attach retries
+   with the first read's worth and names the cut": a fake extractor answering
+   `too-many-pages`, asserting `calls == [{}, {pages:"1-100"}]`, `page 100` and
+   `[pages 101-2500 not included]` in `document{text}`, and an empty frame log (still no
+   bytes to the pod). **RED before the code changed** — the assertion on the retry's own
+   property, not an import error: `DocumentExtractError: big.pdf: 2500 pages: pass pages`,
+   `10 pass · 1 fail`.
+3. The daemon's existing test (`prompt-documents.test.ts:302`) stays green through the
+   refactor, which is the point of one helper.
+
+**Mutations** (`.tentacle/tmp/pdf-read/p5r/`; each restored, `git status` afterwards showed
+only this round's five files):
+
+| mutation | result |
+|---|---|
+| laptop: `reason === "too-many-pages"` → `"never-matches"` (pre-refactor code) | RED 1 (the new client test) |
+| helper: `first.reason !== "too-many-pages"` → `"never-matches"` | RED 2 (client test + daemon unit test) |
+| helper: the retry drops `...request` (the signal is lost on the second call) | RED 1 (the helper's signal test) |
+
+The first two are the pre/post view of the same property; the third pins the part of the
+helper a hand-inlined copy would get wrong.
+
+**Gate (this round).** `bunx tsc --noEmit` exit 0 · `bun run lint` 1782 files, clean
+(`biome check --write` reformatted one type alias I added) · the five touched test files
+(`pdf-text`, `document-attach`, `prompt-documents`, `pdf-attach`, `pdf-attach-pure`)
+**102 pass, 0 fail** · full `bun test` **12981 pass, 5 skip (the branch's opt-ins), 0 fail**
+(923 files; the two unattributed fails the P4 review could not reproduce did not recur).
+
+**Drift from the review's suggested fix.** It offered "port the P4 test" as the fix and
+"move the retry into one pure helper" as the better one; this round did the helper, so the
+ported test is a second pin rather than the only one. No protocol, schema or persisted-format
+change: nothing to bump. No changelog change (the fragment `changelog.d/pdf-read.added.md`
+already covers the feature; this is a test/doc gap).
+
+*— claude-opus-5-5, 2026-11-16*
+
 ## Review
 
 ### P1 — fresh-context adversarial review
@@ -1833,3 +2019,65 @@ deduplicated"), which misses the case where the retry is refused. Its own mutati
   Full suite not re-run.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; SAME model as the P4 executor)
+
+### P5 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM finding, a test gap; nothing at HIGH).
+
+1. **MEDIUM: the laptop-mode `too-many-pages` retry is not covered by any test.**
+   `packages/client/src/remote-client.ts:2318-2324` copies the daemon's retry once with
+   `pages: "1-${MAX_PAGES_PER_READ}"`. The daemon's copy got a test in P4 round 1 (MEDIUM #2b).
+   This one has none. Mutation `extraction.reason === "too-many-pages"` → a value that never matches:
+   **`document-attach.test.ts` stays green**. Failure scenario: in a pod session (`run`/`attach`),
+   a user attaches a PDF of more than 2000 pages. If this branch regresses, the attach fails with
+   "too many pages" instead of sending the first 100 pages plus the `[pages … not included]`
+   footer. No test would catch it. Fix: port the P4 test (a fake extractor that answers
+   `too-many-pages`; assert the calls `[{}, {pages:"1-100"}]` and the footer in `document{text}`).
+   Better still, move the retry into one pure helper that both ends call, so the two copies cannot drift.
+
+**Gate:** the 11 touched test files: 208 pass, 0 fail. `bun run typecheck` exit 0.
+`bun run lint`: 1782 files, clean. The full suite was not re-run.
+
+**Mutations** (each applied with a direct edit, the owning tests run, then reverted. Afterwards
+`git status --porcelain` was empty):
+
+| mutation | result |
+|---|---|
+| `RemoteSession.sendPrompt` passes `undefined` instead of `turn.documents` | RED 2 (the RemoteSession→`session/prompt` tests) |
+| `useAttachments` runs with `documents: []` | RED 2 (P5a, P5b frames) |
+| `document-input.ts` §7 gate (`servesModel` + `upload`) disabled | RED 2 (unit test + the `RemoteClient` test) |
+| laptop `too-many-pages` retry never taken | **survives**: finding 1 |
+
+**Attacks tried:**
+- **PDF bytes reaching a pod.** The pod daemon advertises `input:"client"` (`connection.ts:774`), which maps to `laptop`, and only `document{text}` is sent. An `upload` claim from a client that serves the model is OFF. Holds.
+- **The extractor on the Ink thread.** `extractPdf` is the worker-backed `createPdfExtractor` (`tools/src/pdf/extract.ts:110`), and it is injected only beside `modelProvider` (`local-runtime.ts:1050`). Holds.
+- **A keyed re-send after a drop.** `ActiveTurn.documents` is carried, and M1 is killed. Holds.
+- **Opening the session when documents are off.** `RemoteSession.attachDocument` checks the mode before `open()`. Holds.
+- **Single broker and RPC peer.** P5 does not touch them. Holds.
+- **A mixed image+PDF drop with images off** (`attach-draft.ts:115`). The whole drop is refused with the images notice. This is loud and documented, not silent. Low; not raised.
+- **The `withDocuments` overCap value is discarded** (`attach-draft.ts:130`). The image path has the same race behaviour. Low.
+
+**Executor behaviour:** the Execution section is honest, and its drift notes (a)–(f) match the
+code. Its mutation table omits the duplicated retry, which is the only branch that escapes the tests.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; the SAME model family as the P5 executor, so
+shared blind spots are possible)
+
+### Round 2 (P5)
+
+**Verdict: APPROVE.** The P5 finding is fixed and pinned. `git diff HEAD~1` has nothing new at HIGH or MEDIUM.
+
+- **#1 fixed, and done the better way.** The retry is now a single pure helper,
+  `extractAttachedPdf` (`packages/core/src/pdf-text.ts:579`). Both ends call it: the daemon
+  (`prompt-documents.ts:143`) and the laptop (`remote-client.ts:2316`). The behaviour is unchanged:
+  the same signal goes to both calls, and only `too-many-pages` is retried.
+- **Mutation: the retry in the helper never triggers.** RED 4: two core unit tests, the daemon's
+  `resolvePromptDocuments` test, and the new laptop-mode test (`[{}, {pages:"1-100"}]` + the footer
+  `[pages 101-2500 not included]` + zero frames).
+- **Mutation: the client skips the helper and calls `extract` directly.** RED 1 (the new laptop test).
+- Both mutations were reverted, and `git status --porcelain` was empty.
+- **Regressions:** `packages/client` + `pdf-text` + `prompt-documents` + the two `pdf-attach` TUI
+  files: 891 pass, 0 fail. `bun run typecheck` exit 0. `bun run lint`: 1782 files, clean.
+  The full suite was not re-run.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; the SAME model family as the executor)

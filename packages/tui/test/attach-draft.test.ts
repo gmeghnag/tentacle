@@ -43,7 +43,11 @@ const anonymous = (mimeType = "image/png", size = 10): AttachedImage => ({
   ref: { id: sha(mimeType), mimeType, size },
   bytes: new Uint8Array([1]),
 });
-const draftWith = (...chips: AttachedImage[]): AttachDraft => ({ chips, upload: null });
+const draftWith = (...chips: AttachedImage[]): AttachDraft => ({
+  chips,
+  documents: [],
+  upload: null,
+});
 
 describe("routeDecision", () => {
   test("plain text is inserted, nothing else changes", () => {
@@ -61,7 +65,12 @@ describe("routeDecision", () => {
     const a = chipOf("a.png");
     const r = routeDecision(
       EMPTY_DRAFT,
-      { kind: "attachments", images: [a], refusals: [{ reason: "heic", path: "/tmp/i.heic" }] },
+      {
+        kind: "attachments",
+        images: [a],
+        documents: [],
+        refusals: [{ reason: "heic", path: "/tmp/i.heic" }],
+      },
       UPLOAD,
       "/tmp/a.png /tmp/i.heic",
     );
@@ -87,7 +96,7 @@ describe("routeDecision", () => {
     const a = chipOf("a.png");
     const r = routeDecision(
       EMPTY_DRAFT,
-      { kind: "attachments", images: [a], refusals: [] },
+      { kind: "attachments", images: [a], documents: [], refusals: [] },
       OFF,
       "/tmp/a.png",
     );
@@ -112,7 +121,7 @@ describe("routeDecision", () => {
     const b = chipOf("b.png");
     const r = routeDecision(
       draftWith(a),
-      { kind: "attachments", images: [b], refusals: [] },
+      { kind: "attachments", images: [b], documents: [], refusals: [] },
       UPLOAD,
     );
     expect(r.draft.chips).toEqual([a, b]);
@@ -176,6 +185,7 @@ describe("submitPlan", () => {
       kind: "send",
       text: "what?",
       images: [a],
+      documents: [],
     });
   });
 
@@ -193,7 +203,7 @@ describe("submitPlan", () => {
       running: true,
     });
     expect(plan.kind).toBe("refuse");
-    if (plan.kind === "refuse") expect(plan.notice).toContain("can't send an image");
+    if (plan.kind === "refuse") expect(plan.notice).toContain("can't send an attachment");
   });
 
   test("chips during a /compact, or with a child open: refuse too", () => {

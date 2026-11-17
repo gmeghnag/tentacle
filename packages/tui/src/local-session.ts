@@ -20,9 +20,13 @@ import { Session } from "@tentacle/agent";
 import type { Agent } from "@tentacle/agent";
 import type { SessionController } from "./app-types.ts";
 import { NO_IMAGE_SEAM } from "./attach-draft.ts";
+import { NO_DOCUMENT_SEAM } from "./pdf-attach.ts";
 
 /** A local session cannot upload images: the reason the chip row shows. */
 export const LOCAL_NO_IMAGES = "a local session cannot take images";
+
+/** The same for a PDF (docs/feat/pdf-read.md D6): a local session has no daemon to read it. */
+export const LOCAL_NO_DOCUMENTS = "a local session cannot read PDFs";
 
 /**
  * `sendNow`'s refusal from a local session. `-32601` is JSON-RPC's
@@ -48,6 +52,14 @@ export function localSession(agent: Agent): SessionController {
     attachImage: () =>
       Promise.reject(
         new Error(`${LOCAL_NO_IMAGES} (attachImage is unreachable when imageInput() is off)`),
+      ),
+    // The same pair for a PDF (docs/feat/pdf-read.md D6).
+    documentsInput: () => ({ ...NO_DOCUMENT_SEAM, reason: LOCAL_NO_DOCUMENTS }),
+    attachDocument: () =>
+      Promise.reject(
+        new Error(
+          `${LOCAL_NO_DOCUMENTS} (attachDocument is unreachable when documentsInput() is off)`,
+        ),
       ),
     sendNow: () =>
       Promise.reject(

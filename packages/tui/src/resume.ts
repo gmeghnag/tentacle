@@ -6,6 +6,7 @@
 import { restartPromptOf } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
 import { imageRowText } from "./attach-draft.ts";
+import { userMessageView } from "./pdf-attach.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 
 /** The separator before a context reset's restart prompt (decision 9, docs/eval/context-reset.md). */
@@ -49,13 +50,21 @@ export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[]
       } else if (m.note !== undefined) {
         items.push(noteItem(m));
       } else {
-        // A resumed image prompt says so: `[image: name]` under the text, and
+        // A resumed attachment prompt says so: `[image: name]` under the text, and
         // the ONLY rows of an image-only prompt (docs/feat/attachments-tui.md D7).
+        // A PDF (docs/feat/pdf-read.md D5) is the same idea one field over: the
+        // `media` chip the daemon persisted, and the `<file>` block HIDDEN — the
+        // model has that text, the user has the file. Without `media` (an older
+        // log) `userMessageView` returns the content RAW, which is the honest
+        // degradation: a build cannot guess which block was a PDF.
         const images = (m.attachments ?? []).map(imageRowText);
+        const view = userMessageView(m.content, m.media);
+        const documents = view.rows;
         items.push({
           kind: "user",
-          text: m.content,
+          text: view.text,
           ...(images.length > 0 ? { images } : {}),
+          ...(documents.length > 0 ? { documents } : {}),
         });
       }
     } else if (m.role === "assistant") {

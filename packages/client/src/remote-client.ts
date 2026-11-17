@@ -24,10 +24,14 @@ import {
   type ChatRequest,
   DISMISSED,
   type ModelProvider,
+  PDF_HEAD_BYTES,
   type PermissionBroker,
+  attachedPdfText,
   checkAttachmentRefs,
   countTokensBounded,
+  extractAttachedPdf,
   formatBytes,
+  isPdf,
 } from "@tentacle/core";
 import type { PermissionResponse } from "@tentacle/core";
 import {
@@ -105,6 +109,7 @@ import {
 } from "@tentacle/transport";
 import { ATTACH_TIMEOUT_MS, UPLOAD_RECONNECT_MS } from "./constants.ts";
 import { type DiscoveryState, foldDiscovery } from "./discovery.ts";
+import { type DocumentsInput, type ExtractDocumentHere, documentsInput } from "./document-input.ts";
 import {
   type ImageInput,
   type ImageModelScope,
@@ -207,6 +212,36 @@ export class ImagesUnavailableError extends Error {
   constructor(reason: string) {
     super(reason);
     this.name = "ImagesUnavailableError";
+  }
+}
+
+/**
+ * This client may not upload a PDF to this daemon (docs/feat/pdf-read.md D6):
+ * no `documents` capability, a `client` mode (a pod — the laptop extracts and
+ * sends TEXT, AGENTS §7), or an `input` this build does not know. Raised BEFORE
+ * any frame; the message is the sentence a user reads.
+ */
+export class DocumentsUnavailableError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "DocumentsUnavailableError";
+  }
+}
+
+/** The refusal `attachDocument` gives a `client`-mode daemon: it takes text, never bytes. */
+export const CLIENT_EXTRACTS_DOCUMENTS =
+  "this session takes PDF text only (the laptop extracts it) — nothing is uploaded";
+
+/**
+ * The extraction of an attached PDF failed (docs/feat/pdf-read.md D6): encrypted,
+ * a scan, corrupt, too large. Its `message` is the sentence a user reads, built
+ * by the same pure verdicts the daemon uses, so a pod session and a `serve` one
+ * word a failure the same way.
+ */
+export class DocumentExtractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DocumentExtractError";
   }
 }
 
@@ -533,6 +568,14 @@ export interface RemoteClientOptions {
    * client takes no images even when the daemon says `client`.
    */
   readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
+  /**
+   * A PDF extractor THIS client may run, for a `client`-mode daemon (a pod:
+   * the laptop extracts and only text crosses, docs/feat/pdf-read.md D6,
+   * AGENTS §7). Injected by the CLI — `@tentacle/tools` is not a dependency of
+   * this package (it is in the phone's bundle, where the parser must not be).
+   * Absent → `client` mode is OFF with a reason, never an upload.
+   */
+  readonly extractDocument?: ExtractDocumentHere;
   /**
    * THIS laptop's model id (`config.model`), display-only: the name a "config
    * has images off" reason repeats when the turns run on OUR model (a
@@ -929,6 +972,8 @@ export class RemoteClient {
   private readonly sha256Bytes: ((bytes: Uint8Array) => string) | undefined;
   /** This laptop's own vision config (see the option): the `client`-mode gate. */
   private readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
+  /** The injected PDF extractor (see the option): the `laptop`-mode document path. */
+  private readonly extractDocument?: ExtractDocumentHere;
   /** This laptop's model id, for a display-only "images are off" reason. */
   private readonly modelName?: string;
   /** Whose model/config that reason is about (`"daemon"` unless told). */
@@ -1003,6 +1048,9 @@ export class RemoteClient {
     this.sha256Bytes = options.sha256Bytes ?? bunSha256Bytes();
     if (options.localImages) {
       this.localImages = options.localImages;
+    }
+    if (options.extractDocument) {
+      this.extractDocument = options.extractDocument;
     }
     if (options.modelName) {
       this.modelName = options.modelName;
@@ -2194,6 +2242,98 @@ export class RemoteClient {
     this.images.add(id, bytes);
     options.onProgress?.(size, size);
     return ref;
+  }
+
+  /**
+   * What this client may do with an attached PDF on THIS daemon right now
+   * (docs/feat/pdf-read.md D6): the one entry point the TUI/mobile call before
+   * they offer a PDF. Pure — it reads the last handshake, nothing else.
+   */
+  documentsInput(): DocumentsInput {
+    return documentsInput(this.capabilities?.documents, {
+      // A client with a model provider is a `--model-proxy` pod's laptop, so
+      // the daemon that may not hold bytes is the one it talks to.
+      servesModel: this.modelProvider !== undefined,
+      // Injected (the CLI passes the extractor): this package is in the phone's
+      // bundle, where the PDF parser must not be.
+      extracts: this.extractDocument !== undefined,
+    });
+  }
+
+  /**
+   * Turn ONE attached PDF into the wire block a prompt names
+   * (docs/feat/pdf-read.md D6) — exactly one `document`, never both sources.
+   *
+   * The MODE decides where the bytes go, never the caller:
+   * - `upload` (the daemon runs the model): the bytes go by `attachment/put`,
+   *   and the block names a `ref` (`{id, size}` from THIS laptop's bytes). The
+   *   daemon extracts them.
+   * - `laptop` (a pod): the bytes NEVER leave this machine (AGENTS §7) — the
+   *   injected extractor reads them here and the block carries `text`, built by
+   *   the same pure `attachedPdfText` the daemon uses for a `ref`, so the model
+   *   reads the same markers either way.
+   *
+   * Everything checkable without a daemon is checked FIRST and sends zero
+   * frames: the mode (`DocumentsUnavailableError`), the size against the mode's
+   * cap, and the PDF's own `%PDF-` header (a `.pdf` that is not one is refused
+   * before an upload the daemon would then refuse).
+   */
+  async attachDocument(
+    sessionId: string,
+    bytes: Uint8Array,
+    meta: { readonly name: string },
+    options: UploadOptions = {},
+  ): Promise<DocumentContent> {
+    const mode = this.documentsInput();
+    if (mode.kind === "off") {
+      throw new DocumentsUnavailableError(mode.reason);
+    }
+    const size = bytes.length;
+    if (size === 0) {
+      throw new RangeError(`document ${meta.name} has no bytes to attach`);
+    }
+    if (size > mode.maxBytes) {
+      throw new RangeError(
+        `document ${meta.name} is ${formatBytes(size)}, over the ${formatBytes(mode.maxBytes)} limit`,
+      );
+    }
+    // The bytes decide, never the extension (the daemon re-checks a ref, and a
+    // text source cannot be re-read at all: this is the only check it gets).
+    if (!isPdf(bytes.subarray(0, PDF_HEAD_BYTES))) {
+      throw new RangeError(`document ${meta.name} is not a PDF`);
+    }
+    const name = meta.name;
+    if (mode.kind === "upload") {
+      const { id, size: uploaded } = await this.upload(sessionId, bytes, options);
+      return { type: "document", kind: "pdf", name, source: { type: "ref", id, size: uploaded } };
+    }
+    const extract = this.extractDocument;
+    if (extract === undefined) {
+      // `documentsInput` already refused this; kept for the type narrowing.
+      throw new DocumentsUnavailableError(CLIENT_EXTRACTS_DOCUMENTS);
+    }
+    const signal = options.signal;
+    const extraction = await extractAttachedPdf((request) => extract(bytes, request), {
+      ...(signal ? { signal } : {}),
+    });
+    if (!extraction.ok) {
+      throw new DocumentExtractError(`${name}: ${extraction.message}`);
+    }
+    const text = attachedPdfText({
+      name,
+      numPages: extraction.numPages,
+      pages: extraction.pages,
+    });
+    if (!text.ok) {
+      throw new DocumentExtractError(text.message);
+    }
+    options.onProgress?.(size, size);
+    return {
+      type: "document",
+      kind: "pdf",
+      name,
+      source: { type: "text", text: text.text, pages: text.pages },
+    };
   }
 
   /**
