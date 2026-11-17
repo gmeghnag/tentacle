@@ -72,6 +72,7 @@ import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import { linkPrompt } from "../links.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
+import type { ArtifactGalleryRoute } from "../routes.ts";
 import { type SectionId, scheduledSection } from "../session-info.ts";
 import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
@@ -124,10 +125,11 @@ export interface SessionScreenProps {
   readonly drawerOpen?: boolean;
   /**
    * The artifacts gallery (docs/feat/model-artifacts.md D9): Session info's row
-   * and a transcript card both lead there. Absent: neither is offered (a screen
-   * with no router, e.g. a unit test's).
+   * and a transcript card both lead there, and so does the hub's Artifacts item
+   * (`"hub"`, docs/feat/mobile-hub.md H4b). Absent: none is offered (a screen with
+   * no router, e.g. a unit test's).
    */
-  readonly onOpenArtifacts?: (from: "session-info" | "card") => void;
+  readonly onOpenArtifacts?: (from: ArtifactGalleryRoute["from"]) => void;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
