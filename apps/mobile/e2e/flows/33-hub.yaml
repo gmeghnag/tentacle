@@ -4,10 +4,11 @@ appId: so.tentacle.app
 # Settings → Activity button → Floating; in a session the hub shows at zero
 # activity (its glyph, no badge).
 #
-# Driven: a long-press (Maestro's releases in place) opens the fan STICKY: the
-# items stay, a tap on one commits it (Attach → the attachment chooser), a tap
+# Driven: a TAP opens the fan (the items stay — mobile-hub-tap); a long-press
+# opens the same fan; a tap on one commits it (Attach → the attachment chooser), a tap
 # elsewhere closes it; a HOLD turn puts Stop first, and Stop stops the turn; a
-# tap is still Activity; Header mode has no hub. Light/dark shots of the open fan.
+# tapped Activity says "Nothing running" when it is empty; Header mode has no hub.
+# Light/dark shots of the open fan.
 #
 # Opacity (docs/feat/mobile-hub-opacity.md): with Floating picked, a new
 # "Button opacity" band appears; a drag to its left end reads 30 %, and the
@@ -147,12 +148,23 @@ appId: so.tentacle.app
     visible:
       id: "turn-idle"
     timeout: 20000
-# A tap is still Activity.
+# A TAP opens the fan (mobile-hub-tap), and it is the only path to Activity now.
+# Nothing runs here (the turn above was stopped, no sub-agent, job, schedule or
+# finished report), so Activity is DIMMED: a tap on it opens no sheet, it says
+# "Nothing running" inline. The sheet's own path (something running) is 27's.
 - tapOn:
     id: "floating-activity"
-- assertVisible:
-    id: "activity-sheet-close"
+- extendedWaitUntil:
+    visible:
+      id: "hub-item-activity"
+    timeout: 5000
 - tapOn:
+    id: "hub-item-activity"
+- extendedWaitUntil:
+    visible:
+      id: "hub-notice"
+    timeout: 5000
+- assertNotVisible:
     id: "activity-sheet-close"
 # Back to 100 %: the band's right end, so the last shots show today's look.
 - tapOn:

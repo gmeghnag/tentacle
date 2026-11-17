@@ -6,10 +6,10 @@
  *
  * | the finger                                   | result                         |
  * |----------------------------------------------|--------------------------------|
- * | up before LONG_MS, travel < SLOP             | tap (Activity)                 |
+ * | up before LONG_MS, travel < SLOP             | the fan opens STICKY (firm)    |
  * | travel ≥ SLOP before LONG_MS                 | drag (reposition), never a fan |
- * | held LONG_MS, travel < SLOP                  | fan opens (haptic firm)        |
- * | fan open, up on an item                      | commit (haptic commit)         |
+ * | held LONG_MS, travel < SLOP                  | the fan opens, finger tracking |
+ * | fan open, up on an item                      | commit (commit/light haptic)   |
  * | fan open, moved ≥ SLOP, up on no item        | close (cancel, silent)         |
  * | fan open, up having moved < SLOP since open  | sticky: a tap commits / closes |
  * | system cancel                                | idle, silent                   |
@@ -17,6 +17,12 @@
  * Travel is measured from the down point (before the open) or from the finger's
  * point at the open (after it), as the farthest it got, so a wobble that comes
  * back still counts.
+ *
+ * A TAP opens the same fan a long-press does (docs/feat/mobile-hub-tap.md
+ * Design 1): the long-press is reserved for the hands-free voice conversation,
+ * so until that exists it only adds slide-to-select on top of the tap's sticky
+ * fan — one "the hub opened" feel either way, and a tap never leaves the button
+ * doing something else.
  */
 import { type FanLayout, type Point, pickItem } from "./hub-fan.ts";
 
@@ -39,13 +45,15 @@ export function classifyPress(path: {
   return path.ms < LONG_MS ? "tap" : "long";
 }
 
-/** The three hub haptics; `haptic-rules.ts` plays them. Cancel, sticky and drag are silent. */
-export type HubCue = "firm" | "tick" | "commit";
+/** The three hub haptics, plus `light` for a commit that has nothing to show; `haptic-rules.ts` plays them. Cancel, sticky and drag are silent. */
+export type HubCue = "firm" | "tick" | "commit" | "light";
 
-/** What the fan shows, snapshotted at the open: the layout and the item ids in its order. */
+/** What the fan shows, snapshotted at the open: the layout, the item ids in its order, and which of them have nothing to show. */
 export interface HubMenu {
   readonly layout: FanLayout;
   readonly ids: readonly string[];
+  /** Ids that were dimmed at the open: their commit plays `light`, not `commit` (Design 3). */
+  readonly dimmed: readonly string[];
 }
 
 export type GestureState =
@@ -82,7 +90,6 @@ export type GestureEffect =
   | { readonly kind: "highlight"; readonly index: number | null }
   | { readonly kind: "commit"; readonly id: string }
   | { readonly kind: "close" }
-  | { readonly kind: "tap" }
   /** The button follows the finger: `delta` from the down point. */
   | { readonly kind: "dragTo"; readonly delta: Point }
   /** The drag ended here (`delta` from the down point): snap it. */
@@ -154,9 +161,12 @@ function commit(menu: HubMenu, index: number): Step {
   if (id === undefined) {
     return CLOSE;
   }
+  // A dimmed item still commits (the screen turns it into its notice): it only
+  // FEELS different — one haptic per release, never two (Design 3).
+  const cue: HubCue = menu.dimmed.includes(id) ? "light" : "commit";
   return {
     state: IDLE,
-    effects: [{ kind: "haptic", cue: "commit" }, { kind: "commit", id }, { kind: "close" }],
+    effects: [{ kind: "haptic", cue }, { kind: "commit", id }, { kind: "close" }],
   };
 }
 
@@ -180,13 +190,12 @@ function pressing(
     case "up": {
       const d = delta(state.down, event.p);
       const kind = classifyPress({ dx: d.x, dy: d.y, ms: event.t - state.t0 });
-      if (kind === "tap") {
-        return { state: IDLE, effects: [{ kind: "tap" }] };
-      }
       if (kind === "drag") {
         return { state: IDLE, effects: [{ kind: "drop", delta: d }] };
       }
-      // Held long enough but the timer was late: open where the finger let go.
+      // A tap and a long-press whose timer was late both open the fan STICKY:
+      // lifted in place, the items stay for the next tap (mobile-hub-tap
+      // Design 1). Only a drag is different — it repositions the button.
       return open(event.p, solve, "sticky");
     }
     case "cancel":

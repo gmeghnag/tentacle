@@ -135,6 +135,36 @@ function scriptBody(file: string): string {
   return readFileSync(join(FLOWS_DIR, file), "utf8");
 }
 
+describe("flow 33 asserts the hub state it actually sets up (mobile-hub-tap review round 1)", () => {
+  const body = readFileSync(join(FLOWS_DIR, "33-hub.yaml"), "utf8");
+  const flow = readFlow("33-hub");
+
+  test("tapping Activity asserts the inline notice, never a sheet it cannot open", () => {
+    // By this point the `HOLD hub` turn has been STOPPED and nothing else runs
+    // (no sub-agent, job, schedule or finished report in this flow): Activity is
+    // dimmed, so a commit is `resolveCommit`'s no-op, not the sheet. Asserting
+    // the sheet were VISIBLE here would fail on device — the round-1 finding.
+    expect(flow.some((a) => a.id === "hub-notice" && a.kind === "assertVisible")).toBe(true);
+    expect(flow.some((a) => a.id === "activity-sheet-close" && a.kind === "assertVisible")).toBe(
+      false,
+    );
+  });
+
+  test("the tap really reached the fan's Activity item first", () => {
+    // The notice can only come from committing it: a flow that never taps the
+    // item proves nothing about the dimmed commit.
+    expect(body).toContain('id: "hub-item-activity"');
+    expect(body.indexOf('id: "hub-item-activity"')).toBeLessThan(body.indexOf('id: "hub-notice"'));
+  });
+
+  test("no comment still claims a tap opens Activity", () => {
+    // The header said "a tap is still Activity", which this task makes false.
+    expect(body).not.toContain("tap is still Activity");
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    expect(runner).not.toContain("tap = Activity");
+  });
+});
+
 describe("flow 05: the daemon-down recovery is actually asserted", () => {
   const flow = readFlow("05-daemon-down");
   const afterRestart = flow.filter((a) => a.afterScript === "05-start-serve.js");

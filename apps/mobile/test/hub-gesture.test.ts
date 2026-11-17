@@ -38,7 +38,7 @@ const LAYOUT: FanLayout = {
   steps: [STEP],
   items: ITEMS,
 };
-const MENU: HubMenu = { layout: LAYOUT, ids: ["stop", "steer", "activity"] };
+const MENU: HubMenu = { layout: LAYOUT, ids: ["stop", "steer", "activity"], dimmed: [] };
 const solve = () => MENU;
 
 function item(i: number): Point {
@@ -93,9 +93,57 @@ describe("classifyPress", () => {
 });
 
 describe("tap and drag", () => {
-  test("9 pt / 390 ms → tap, nothing else", () => {
-    const r = run([down(ANCHOR), move(at(-9), 200), up(at(-9), 390)]);
-    expect(r.effects).toEqual([{ kind: "tap" }]);
+  test("9 pt / 390 ms → the sticky fan: open(layout) + firm, solve called once", () => {
+    let calls = 0;
+    const counting = () => {
+      calls += 1;
+      return MENU;
+    };
+    const r = run([down(ANCHOR), move(at(-9), 200), up(at(-9), 390)], IDLE, counting);
+    expect(r.effects).toEqual([
+      { kind: "haptic", cue: "firm" },
+      { kind: "open", layout: LAYOUT },
+    ]);
+    expect(r.state.kind).toBe("fanSticky");
+    expect(calls).toBe(1);
+  });
+
+  test("a tap then a tap on an item commits it; a tap elsewhere closes", () => {
+    const tapped = run([down(ANCHOR), up(at(-2), 120)]).state;
+    expect(tapped.kind).toBe("fanSticky");
+    const hit = run([{ type: "tapOverlay", p: item(1) }], tapped);
+    expect(hit.effects).toEqual([
+      { kind: "haptic", cue: "commit" },
+      { kind: "commit", id: "steer" },
+      { kind: "close" },
+    ]);
+    expect(hit.state).toEqual(IDLE);
+    const miss = run([{ type: "tapOverlay", p: { x: 40, y: 80 } }], tapped);
+    expect(miss.effects).toEqual([{ kind: "close" }]);
+    expect(miss.state).toEqual(IDLE);
+  });
+
+  test("a tap then touching the button again closes; its release is ignored", () => {
+    const tapped = run([down(ANCHOR), up(at(-2), 120)]).state;
+    const r = run([down(ANCHOR, 900), up(ANCHOR, 950)], tapped);
+    expect(r.effects).toEqual([{ kind: "close" }]);
+    expect(r.state).toEqual(IDLE);
+  });
+
+  test("a tap where the fan does not fit → the menu + firm (the ActionSheet takes over)", () => {
+    const menu: HubMenu = { layout: { kind: "menu" }, ids: ["activity"], dimmed: [] };
+    const r = run([down(ANCHOR), up(at(-2), 120)], IDLE, () => menu);
+    expect(r.effects).toEqual([
+      { kind: "haptic", cue: "firm" },
+      { kind: "open", layout: { kind: "menu" } },
+    ]);
+    expect(r.state).toEqual(IDLE);
+  });
+
+  test("a tap with no actions at all → nothing opens, silent", () => {
+    const empty: HubMenu = { layout: { kind: "menu" }, ids: [], dimmed: [] };
+    const r = run([down(ANCHOR), up(ANCHOR, 120)], IDLE, () => empty);
+    expect(r.effects).toEqual([]);
     expect(r.state).toEqual(IDLE);
   });
 
@@ -115,7 +163,7 @@ describe("tap and drag", () => {
 
   test("a wobble out past SLOP and back is still a drag (travel is the farthest point)", () => {
     const r = run([down(ANCHOR), move(at(-12), 100), move(at(-2), 150), up(at(-2), 200)]);
-    expect(kinds(r.effects)).not.toContain("tap");
+    expect(kinds(r.effects)).not.toContain("open");
     expect(r.effects.at(-1)?.kind).toBe("drop");
   });
 
@@ -241,7 +289,7 @@ describe("long-press → fan", () => {
   });
 
   test("no fit → open(menu) + firm, and the machine is done (the ActionSheet takes over)", () => {
-    const menu: HubMenu = { layout: { kind: "menu" }, ids: ["activity"] };
+    const menu: HubMenu = { layout: { kind: "menu" }, ids: ["activity"], dimmed: [] };
     const r = run([...OPEN, move(at(-50), 500), up(at(-50), 600)], IDLE, () => menu);
     expect(r.effects).toEqual([
       { kind: "haptic", cue: "firm" },
@@ -251,18 +299,50 @@ describe("long-press → fan", () => {
   });
 
   test("no actions at all → nothing opens, silent", () => {
-    const empty: HubMenu = { layout: { kind: "menu" }, ids: [] };
+    const empty: HubMenu = { layout: { kind: "menu" }, ids: [], dimmed: [] };
     const r = run(OPEN, IDLE, () => empty);
     expect(r.effects).toEqual([]);
     expect(r.state).toEqual(IDLE);
   });
 });
 
+describe("a dimmed item still commits, with the light cue (Design 3)", () => {
+  /** Activity is dimmed (nothing running): it keeps its slot and its commit. */
+  const DIMMED: HubMenu = { ...MENU, dimmed: ["activity"] };
+  const dim = () => DIMMED;
+
+  test("commit of a dimmed id → light + commit + close, never the commit cue", () => {
+    const r = run([...OPEN, up(ANCHOR, 600)], IDLE, dim);
+    const hit = run([{ type: "tapOverlay", p: { x: item(2).x + 20, y: item(2).y } }], r.state);
+    expect(hit.effects).toEqual([
+      { kind: "haptic", cue: "light" },
+      { kind: "commit", id: "activity" },
+      { kind: "close" },
+    ]);
+    expect(hit.state).toEqual(IDLE);
+  });
+
+  test("a lifted-on commit of a dimmed item is also light (the slide path)", () => {
+    const r = run([...OPEN, move(item(2), 500), up(item(2), 600)], IDLE, dim);
+    expect(haptics(r.effects)).toEqual(["firm", "tick", "light"]);
+    expect(r.effects.slice(-2)).toEqual([{ kind: "commit", id: "activity" }, { kind: "close" }]);
+  });
+
+  test("a live id next to it keeps the commit cue", () => {
+    const r = run([...OPEN, move(item(1), 500), up(item(1), 600)], IDLE, dim);
+    expect(haptics(r.effects)).toEqual(["firm", "tick", "commit"]);
+    expect(r.effects.at(-2)).toEqual({ kind: "commit", id: "steer" });
+  });
+});
+
 describe("timers, extra touches and cancels", () => {
-  test("M13: a timer after up does nothing", () => {
+  test("M13: a timer after up does nothing (a tap already opened the fan sticky)", () => {
     const r = run([down(ANCHOR), up(ANCHOR, 100), timer(LONG_MS)]);
-    expect(r.effects).toEqual([{ kind: "tap" }]);
-    expect(r.state).toEqual(IDLE);
+    expect(r.effects).toEqual([
+      { kind: "haptic", cue: "firm" },
+      { kind: "open", layout: LAYOUT },
+    ]);
+    expect(r.state.kind).toBe("fanSticky");
   });
 
   test("M13: a stale timer (an earlier press's) that fires early in a new press is ignored", () => {
