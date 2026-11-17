@@ -20,6 +20,8 @@ import { ARTIFACT_CACHE } from "../../artifact-cache-expo.ts";
 import { openTarget, viewerText } from "../../artifact-open.ts";
 import { viewerFor, viewerSubtitle } from "../../artifact-viewer.ts";
 import { type Palette, typography } from "../../theme.ts";
+import { useReduceMotion } from "../../ui/chart/ChartAppear.tsx";
+import { ChartFullScreen } from "../../ui/chart/ChartFullScreen.tsx";
 import { HtmlViewer } from "./HtmlViewer.tsx";
 import { ImageViewer } from "./ImageViewer.tsx";
 import { MarkdownViewer } from "./MarkdownViewer.tsx";
@@ -65,6 +67,9 @@ export interface ArtifactViewerModalProps {
 export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Element {
   const { palette, meta, computerId, readBytes } = props;
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  // Reduce Motion is the app's ONE hook (C7); `null` (not read yet) animates, as
+  // the chart components' own default does.
+  const reduceMotion = useReduceMotion();
   const card = artifactCard(meta);
   const choice = viewerFor(meta);
   const target = openTarget(card);
@@ -160,6 +165,21 @@ export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Elemen
             onShare={share}
           />
         </View>
+      ) : choice.kind === "chart" ? (
+        // D6: opening a chart artifact opens the SAME full-screen chart a
+        // `chart` transcript row's tap does (docs/feat/model-charts.md C8). The
+        // bytes ARE the spec — the tool presents its canonical arguments — so
+        // the artifact's text is the tool's args, and the component
+        // re-validates them: a forged or newer-than-this-build spec renders
+        // nothing at all rather than half a chart.
+        <ChartFullScreen
+          tool={{ name: "chart", args: phase.text ?? "", status: "ok" }}
+          palette={palette}
+          locale={deviceLocale()}
+          reduceMotion={reduceMotion === true}
+          testID="artifact-chart"
+          onClose={props.onClose}
+        />
       ) : phase.fileUri === "" ? (
         // A file kind whose bytes are not on disk: too big for the cache. The
         // note says what it is and why there is nothing to render or share.
@@ -196,6 +216,11 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
   note: { paddingHorizontal: 24, paddingTop: 12, textAlign: "center" },
 });
+
+/** The device's language, for a chart's numbers and dates (as the transcript row does). */
+function deviceLocale(): string {
+  return Intl.DateTimeFormat().resolvedOptions().locale;
+}
 
 /**
  * The cache's one-line note (D9): the file is too big to keep on this phone. It

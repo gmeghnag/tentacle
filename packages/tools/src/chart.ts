@@ -15,7 +15,14 @@
  * forgery does is draw nothing).
  */
 import type { Tool, ToolContext, ToolResult } from "@tentacle/core";
-import { CHART_JSON_SCHEMA, summarizeChart, validateChartSpec } from "@tentacle/core";
+import {
+  CHART_JSON_SCHEMA,
+  CHART_MIME_TYPE,
+  type ChartSpec,
+  canonicalChartJson,
+  summarizeChart,
+  validateChartSpec,
+} from "@tentacle/core";
 import { z } from "zod";
 
 export const CHART_TOOL_NAME = "chart";
@@ -63,13 +70,47 @@ export const chartTool: Tool<Record<string, unknown>> = {
   // A chart touches no resource: it writes nothing, reads nothing, and two of
   // them never conflict (the round executor may run them together).
   concurrency: () => [],
-  async execute(input: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const validation = validateChartSpec(input);
     if (!validation.ok) {
       // Every error at once, each with its fix: a small model repairs it in one
       // retry instead of rediscovering the same mistake.
       return { content: validation.errors.join("\n"), isError: true };
     }
-    return { content: summarizeChart(validation.spec, { notes: validation.notes }).line };
+    const spec = validation.spec;
+    // Register the spec as a `chart` artifact (docs/feat/model-charts.md D3/C8) so
+    // the gallery, the hub and compaction keep it. The CANONICAL JSON, never the
+    // model's own text: the bytes are what a client's thumbnail and the TUI's
+    // panel RE-VALIDATE before drawing, so they must be the validator's own form.
+    // A present that fails is a NOTE, never an error: the chart a person sees is
+    // drawn from the arguments (D1), so the drawing is unaffected either way.
+    const note = await presentChart(spec, ctx);
+    const notes = note === undefined ? validation.notes : [...validation.notes, note];
+    return { content: summarizeChart(spec, { notes }).line };
   },
 };
+
+/**
+ * The artifact registration: `undefined` when there is no store (a sub-agent, a
+ * one-shot, an older daemon) or when it accepted the spec, else the note the
+ * model reads. Never throws — a store failure may not cost the model its chart.
+ */
+async function presentChart(spec: ChartSpec, ctx: ToolContext): Promise<string | undefined> {
+  const sink = ctx.artifacts;
+  if (sink === undefined) {
+    return undefined;
+  }
+  try {
+    await sink.present({
+      title: spec.title,
+      bytes: new TextEncoder().encode(canonicalChartJson(spec)),
+      mimeType: CHART_MIME_TYPE,
+      kind: "chart",
+      callId: ctx.toolCallId ?? CHART_TOOL_NAME,
+    });
+    return undefined;
+  } catch (error) {
+    const why = error instanceof Error ? error.message : String(error);
+    return `not added to the gallery (the chart is still shown): ${why}`;
+  }
+}

@@ -25,7 +25,7 @@ import { type ArtifactKind, type ArtifactMeta, artifactKindOf } from "@tentacle/
 export const ARTIFACT_BASE_URL = "about:blank";
 
 /** Which viewer renders an artifact. `none` = only Share/save (kind `other`). */
-export type ViewerKind = "image" | "webview" | "pdf" | "markdown" | "text" | "none";
+export type ViewerKind = "image" | "webview" | "pdf" | "markdown" | "text" | "chart" | "none";
 
 export interface ViewerChoice {
   readonly kind: ViewerKind;
@@ -52,6 +52,10 @@ const VIEWER: Readonly<Record<ArtifactKind, ViewerKind>> = {
   pdf: "pdf",
   markdown: "markdown",
   text: "text",
+  // A chart's bytes are its canonical spec JSON, and its viewer is the SAME
+  // full-screen chart a `chart` transcript row opens (docs/feat/model-charts.md
+  // D6/C8) — not `none` (which would only Share the JSON) and not `text`.
+  chart: "chart",
   other: "none",
 };
 

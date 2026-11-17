@@ -7,6 +7,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { artifactCsp } from "@tentacle/core";
+import { viewerText } from "../src/artifact-open.ts";
 import {
   ARTIFACT_BASE_URL,
   allowNavigation,
@@ -62,6 +63,19 @@ describe("viewerFor", () => {
   test("a kind named on the prototype is not a kind (no `__proto__` lookup)", () => {
     expect(viewerFor(meta("__proto__")).kind).toBe("none");
     expect(viewerFor(meta("constructor")).kind).toBe("none");
+  });
+
+  test("`chart` is its OWN viewer — not `none`, not a file kind (T8.1/C8)", () => {
+    // The bytes are the spec JSON, so the artifact opens as the full-screen
+    // chart (ArtifactViewerModal's branch), never Share-only and never a PDF/
+    // image uri: a chart this build cannot draw is still `chart`, and the
+    // component decides what to say about it.
+    expect(viewerFor(meta("chart"))).toEqual({
+      kind: "chart",
+      scripts: false,
+      canRunScripts: false,
+    });
+    expect(viewerText(viewerFor(meta("chart")).kind, new TextEncoder().encode("{}"))).toBe("{}");
   });
 
   /**

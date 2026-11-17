@@ -48,6 +48,13 @@ export interface ArtifactsPanel {
   readonly tree: TreeState;
   /** When the list was read (the rows' `3m ago`). */
   readonly now: number;
+  /**
+   * A CHART artifact opened for reading (docs/feat/model-charts.md C8): its
+   * spec bytes, drawn expanded in the panel's place. Absent/null = the tree.
+   * `error` says a read failed — the panel says so and offers the way back,
+   * never a tree that looks as if the key did nothing.
+   */
+  readonly preview?: { readonly bytes?: string; readonly error?: string } | null;
 }
 
 /** `/schedule` (docs/feat/cron-tool.md S5, mockup M3): a flat list with its own cursor and delete confirm. */

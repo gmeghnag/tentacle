@@ -16,14 +16,22 @@
  *   the JSON Schema the model is offered is the hand-written one (`jsonSchema`),
  *   not a zod-derived guard that lost the rules.
  *
- * T2.3 (the artifact registration) is NOT here: it needs `ToolContext.artifacts`,
- * which arrives with feat/model-artifacts (plan P8). It moved to C8 — see the
- * task doc's Execution, drift 1.
+ * - T2.3 the spec is ALSO presented as a `chart` artifact (docs §C8), so the
+ *   gallery, the hub and compaction keep it: the present carries the CANONICAL
+ *   bytes (every client's thumbnail and panel re-validate them) and a failed
+ *   present is a note — the chart in the conversation is the arguments', so the
+ *   person still sees it.
  *
- * RED before the code: `chart` did not exist and `toolLabel("chart")` was "chart".
+ * RED before the code: `chart` did not exist, `toolLabel("chart")` was "chart",
+ * and the tool never touched `ctx.artifacts`.
  */
 import { describe, expect, test } from "bun:test";
-import type { ExecutionEnvironment, ToolContext } from "@tentacle/core";
+import {
+  type ExecutionEnvironment,
+  type ToolContext,
+  canonicalChartJson,
+  validateChartSpec,
+} from "@tentacle/core";
 import { z } from "zod";
 import { CHART_TOOL_NAME, chartTool } from "../src/chart.ts";
 import { ToolRegistry } from "../src/index.ts";
@@ -139,6 +147,110 @@ describe("T2.2 NaN / Infinity (not JSON) get the hint once", () => {
     });
     const result = await plain.execute("plain", "NaN", ctx());
     expect(result.content).toBe("invalid JSON arguments for plain");
+  });
+});
+
+describe("T2.3 the spec is registered as a `chart` artifact (C8)", () => {
+  /** A spy sink: what `present` was called with, and what it should do. */
+  function sink(options: { readonly throws?: string } = {}) {
+    const calls: unknown[] = [];
+    return {
+      calls,
+      sink: {
+        present: (input: unknown) => {
+          calls.push(input);
+          return options.throws === undefined
+            ? Promise.resolve({
+                artifactId: "chart-1",
+                version: 1,
+                sha256: "b".repeat(64),
+                size: 10,
+                mimeType: "application/vnd.tentacle.chart+json",
+                kind: "chart",
+                title: REVENUE.title,
+                callId: "c1",
+                createdAt: 0,
+              })
+            : Promise.reject(new Error(options.throws));
+        },
+      },
+    };
+  }
+
+  test("one `present`: kind `chart`, the CANONICAL bytes, its mime, the call's own id", async () => {
+    const { calls, sink: artifacts } = sink();
+    const result = await chartTool.execute(REVENUE, ctx({ artifacts } as Partial<ToolContext>));
+    expect(result.isError).toBeUndefined();
+    expect(calls.length).toBe(1);
+    const input = calls[0] as {
+      title: string;
+      bytes: Uint8Array;
+      mimeType: string;
+      kind: string;
+      callId: string;
+    };
+    expect(input.kind).toBe("chart");
+    expect(input.mimeType).toBe("application/vnd.tentacle.chart+json");
+    expect(input.title).toBe(REVENUE.title);
+    // The call that made it, so a resumed transcript joins the card to its row.
+    expect(input.callId).toBe("c1");
+    // CANONICAL, not the model's own JSON: the store's bytes are what every
+    // client's thumbnail/panel re-validates, so they are the validator's own
+    // serialisation (and they fit the 64 KiB cap the same way).
+    const text = new TextDecoder().decode(input.bytes);
+    expect(JSON.parse(text)).toEqual({
+      type: "line",
+      title: REVENUE.title,
+      labels: ["gen", "feb", "mar"],
+      datasets: [{ label: "Ricavi", data: [11800, 14000, 20800] }],
+      y: { unit: "€", format: "compact" },
+    });
+    const revalidated = validateChartSpec(REVENUE);
+    expect(revalidated.ok).toBe(true);
+    if (revalidated.ok) {
+      expect(text).toBe(canonicalChartJson(revalidated.spec));
+    }
+  });
+
+  test("the result line is unchanged by a successful present (one shape for the model)", async () => {
+    const plain = await chartTool.execute(REVENUE, ctx());
+    const { sink: artifacts } = sink();
+    const presented = await chartTool.execute(REVENUE, ctx({ artifacts } as Partial<ToolContext>));
+    expect(presented.content).toBe(plain.content);
+  });
+
+  test("a sink that FAILS is a note, never an error: the chart is still shown", async () => {
+    const { sink: artifacts } = sink({ throws: "the store is full" });
+    const { sink: ok } = sink();
+    const result = await chartTool.execute(REVENUE, ctx({ artifacts } as Partial<ToolContext>));
+    expect(result.isError).toBeUndefined();
+    const baseline = await chartTool.execute(
+      REVENUE,
+      ctx({ artifacts: ok } as Partial<ToolContext>),
+    );
+    expect(result.content).toContain("not added to the gallery");
+    expect(result.content).toContain("the store is full");
+    // The drawing is the arguments' (D1), so a failed present changes nothing
+    // about what the person sees: the summary's own first sentence is intact.
+    expect(result.content.startsWith(baseline.content.split("\n")[0] ?? "")).toBe(true);
+  });
+
+  test("no sink (a sub-agent, an older daemon): no note, the same result as before", async () => {
+    const result = await chartTool.execute(REVENUE, ctx());
+    expect(result.content).not.toContain("gallery");
+    expect(result.content).toBe(
+      'Chart shown to the user: line "Ricavi mensili 2025 vs 2026" · 1 series × 3 · y €11.8k–€20.8k',
+    );
+  });
+
+  test("an INVALID spec presents nothing (a store never holds what cannot be drawn)", async () => {
+    const { calls, sink: artifacts } = sink();
+    const result = await chartTool.execute(
+      { type: "line", title: "T", labels: [], datasets: [] },
+      ctx({ artifacts } as Partial<ToolContext>),
+    );
+    expect(result.isError).toBe(true);
+    expect(calls.length).toBe(0);
   });
 });
 

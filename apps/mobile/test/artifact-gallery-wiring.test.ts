@@ -100,4 +100,26 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
       expect({ banned, found: code.includes(banned) }).toEqual({ banned, found: false });
     }
   });
+
+  test("a chart artifact OPENS as the full-screen chart, and the gallery draws it (T8.1/C8)", () => {
+    const viewer = read("src", "screens", "artifacts", "ArtifactViewerModal.tsx");
+    // D6: "opening a chart artifact opens the same full-screen chart" — the SAME
+    // component a `chart` transcript row's tap opens, given the artifact's own
+    // bytes as the tool's args (the spec is the arguments, in both places).
+    expect(viewer).toContain('choice.kind === "chart"');
+    expect(viewer).toContain("<ChartFullScreen");
+    expect(viewer).toContain('name: "chart"');
+    expect(viewer).toContain("phase.text");
+    // Reduce Motion is the app's single hook, never a second prop read.
+    expect(viewer).toContain("useReduceMotion");
+    // A `chart` viewer's bytes are TEXT: it must not take the image/PDF uri path.
+    expect(viewer).toContain("viewerText(choice.kind, bytes)");
+    const gallery = read("src", "screens", "ArtifactGallery.tsx");
+    // The thumbnail is the PURE module's decision (caps, decode, re-validation).
+    expect(gallery).toContain("chartThumbView");
+    expect(gallery).toContain("wantsChartThumbnail");
+    // The chip exists and passes `only` to the ONE view, never a second list.
+    expect(gallery).toContain("CHART_FILTER_LABEL");
+    expect(gallery).toContain("GRAFICI_CHIP");
+  });
 });

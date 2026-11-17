@@ -1330,6 +1330,8 @@ export function App({
     setSessionsState,
     setSchedulesState,
     setSchedulesData,
+    claimArtifactsPreview,
+    setArtifactsPreview,
     deleteSchedule: deleteScheduleInPanel,
     touchPanel,
     closePanel,
@@ -1967,6 +1969,39 @@ export function App({
         return;
       }
       runArtifact(newest, artifactStep(newest, artifactOrigin, "open"));
+    },
+    // Enter on a CHART artifact in `/artifacts` (docs/feat/model-charts.md C8):
+    // its bytes ARE the spec, so the panel draws them expanded instead of
+    // handing a temp file to an OS browser. `null` is the preview's esc/q: it
+    // closes the preview, not the panel (the tree is where they came from).
+    previewArtifact: (artifact) => {
+      // Every OPEN and every CLOSE claims the slot first, so a read that answers
+      // after the person left it (esc) — or after a second `enter` replaced it —
+      // is stale, even though the panel generation is unchanged (fix round 1, M1).
+      const claim = claimArtifactsPreview();
+      if (artifact === null) {
+        setArtifactsPreview(panelGenRef.current, claim, null);
+        return;
+      }
+      const read = sessionRef.current?.readArtifact;
+      if (read === undefined) {
+        pushNotice(NO_ARTIFACT_OPENER);
+        return;
+      }
+      // The generation the key landed in: a read answering after the panel
+      // closed (or another opened) is dropped, never painted elsewhere.
+      const gen = panelGenRef.current;
+      // The preview opens EMPTY and fills on the answer, so `esc` works at once
+      // and a slow read is visible rather than a frozen tree.
+      setArtifactsPreview(gen, claim, {});
+      void read.call(sessionRef.current, artifact).then(
+        (bytes) => {
+          setArtifactsPreview(gen, claim, { bytes: new TextDecoder().decode(bytes) });
+        },
+        (error: unknown) => {
+          setArtifactsPreview(gen, claim, { error: artifactOpenError(artifact, error) });
+        },
+      );
     },
     // `y` opens exactly what the line asked about, once; anything else drops it.
     answerArtifactConfirm: (yes) => {

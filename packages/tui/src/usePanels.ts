@@ -36,8 +36,12 @@ import {
   withSessionsRefresh,
   withSessionsState,
 } from "./panels/sessions.ts";
+import type { ArtifactsPanel } from "./panels/types.ts";
 import type { ScheduleDockRow, SchedulesState } from "./schedule-view.ts";
 import type { SessionsState } from "./sessions-panel.ts";
+
+/** A chart preview's answer (docs/feat/model-charts.md C8): the bytes, or the failure. */
+export type ArtifactsPreview = NonNullable<ArtifactsPanel["preview"]>;
 
 /** The narrow port the panels execute through: the App's own state, setters and refs. */
 export interface PanelsHost {
@@ -91,6 +95,24 @@ export interface PanelsLayer {
   setSchedulesData(rows: readonly ScheduleDockRow[] | undefined, now: number): void;
   /** Delete one scheduled wake; the row leaves on the daemon's own frame. */
   deleteSchedule(id: string, startedGen: number): void;
+  /**
+   * Claim the `/artifacts` preview slot: every OPEN and every CLOSE bumps it, so
+   * a read that answers later is stale even though the panel never closed (fix
+   * round 1, M1: esc and a second `enter` leave the panel generation alone).
+   */
+  claimArtifactsPreview(): number;
+  /**
+   * Write the open `/artifacts` panel's chart preview (docs/feat/model-charts.md
+   * C8): `null` closes it back to the tree. The PANEL generation and the preview
+   * claim the read started in are compared first, so an answer landing after the
+   * panel closed, another opened, or THIS preview was left/doubled is DROPPED
+   * rather than painted on someone else's screen.
+   */
+  setArtifactsPreview(
+    startedGen: number,
+    startedClaim: number,
+    preview: ArtifactsPreview | null,
+  ): void;
 }
 
 export function usePanels(host: PanelsHost): PanelsLayer {
@@ -99,6 +121,10 @@ export function usePanels(host: PanelsHost): PanelsLayer {
   const { ownScheduleDeletesRef } = host;
 
   const panelGenRef = useRef(0);
+  // The preview's own generation (fix round 1, M1): a chart read is guarded by
+  // the PANEL generation alone only while the panel stays what it was, and esc
+  // or a second `enter` change nothing there. Every preview open/close claims.
+  const previewClaimRef = useRef(0);
 
   const closePanel = useCallback(() => {
     panelGenRef.current += 1;
@@ -153,6 +179,22 @@ export function usePanels(host: PanelsHost): PanelsLayer {
   const setSchedulesData = useCallback(
     (rows: readonly ScheduleDockRow[] | undefined, now: number) =>
       setPanel((p) => withSchedulesData(p, rows, now)),
+    [setPanel],
+  );
+
+  const claimArtifactsPreview = useCallback((): number => {
+    previewClaimRef.current += 1;
+    return previewClaimRef.current;
+  }, []);
+
+  /** Write the `/artifacts` chart preview, only if that panel AND that claim are live. */
+  const setArtifactsPreview = useCallback(
+    (startedGen: number, startedClaim: number, preview: ArtifactsPreview | null): void => {
+      if (panelGenRef.current !== startedGen || previewClaimRef.current !== startedClaim) {
+        return;
+      }
+      setPanel((p) => (p !== null && p.kind === "artifacts" ? { ...p, preview } : p));
+    },
     [setPanel],
   );
 
@@ -242,6 +284,8 @@ export function usePanels(host: PanelsHost): PanelsLayer {
     setSessionsState,
     setSchedulesState,
     setSchedulesData,
+    claimArtifactsPreview,
+    setArtifactsPreview,
     deleteSchedule,
     touchPanel: touch,
     closePanel,

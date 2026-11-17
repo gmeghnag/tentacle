@@ -67,6 +67,10 @@ const KIND_EXT: Readonly<Record<Exclude<ArtifactKind, "image" | "other">, string
   pdf: "pdf",
   markdown: "md",
   text: "txt",
+  // A chart artifact's bytes ARE its canonical spec JSON
+  // (`canonicalChartJson`, docs/feat/model-charts.md D3/C8): the copy a person
+  // keeps is the data the tool takes back, never a `.bin` or a prose `.txt`.
+  chart: "json",
 };
 
 /** A saved `other`: a known archive/data type keeps its extension, else `.bin`. */

@@ -9,7 +9,13 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ArtifactMeta } from "@tentacle/protocol";
-import { gallerySummary, galleryView, unseenArtifacts } from "../src/artifact-gallery.ts";
+import {
+  CHART_FILTER_LABEL,
+  galleryKindCount,
+  gallerySummary,
+  galleryView,
+  unseenArtifacts,
+} from "../src/artifact-gallery.ts";
 import { markArtifactOpened, markGalleryOpened, sessionKey } from "../src/artifact-seen-store.ts";
 
 const NOW = Date.UTC(2026, 10, 16, 15, 0, 0);
@@ -172,6 +178,72 @@ describe("filter", () => {
 
   test("a filter that hits nothing is empty (the screen has its own 'no match' words)", () => {
     expect(galleryView(list, NOTHING_SEEN, NOW, "zzz").empty).toBe(true);
+  });
+});
+
+describe("the `only` kind filter (C8: the `Grafici` chip)", () => {
+  const list = [
+    meta({ artifactId: "revenue", version: 1, title: "Ricavi 2026", kind: "chart" }),
+    meta({ artifactId: "latency", version: 1, title: "latency-p99.png" }),
+    meta({ artifactId: "charts2", version: 1, title: "Copertura", kind: "chart" }),
+  ];
+
+  test('`only: "chart"` keeps the charts and drops everything else', () => {
+    const all = galleryView(list, NOTHING_SEEN, NOW, "");
+    // One `createdAt`, so the id is the tie-break (`groupArtifacts`): charts2,
+    // latency, revenue — the order is preserved through every filter.
+    expect(all.sections.flatMap((s) => s.items.map((i) => i.key))).toEqual([
+      "charts2",
+      "latency",
+      "revenue",
+    ]);
+    const charts = galleryView(list, NOTHING_SEEN, NOW, "", "chart");
+    expect(charts.sections.flatMap((s) => s.items.map((i) => i.key))).toEqual([
+      "charts2",
+      "revenue",
+    ]);
+    expect(charts.empty).toBe(false);
+    // Absent = every kind (the screen's default state).
+    expect(galleryView(list, NOTHING_SEEN, NOW, "", undefined).sections.length).toBe(
+      all.sections.length,
+    );
+  });
+
+  test("it COMPOSES with the title needle: both must match", () => {
+    expect(
+      galleryView(list, NOTHING_SEEN, NOW, "cop", "chart")
+        .sections.flatMap((s) => s.items.map((i) => i.key))
+        .join(),
+    ).toBe("charts2");
+    // A title hit of another kind is not a hit for the chart chip.
+    expect(galleryView(list, NOTHING_SEEN, NOW, "latency", "chart").empty).toBe(true);
+  });
+
+  test("the chip narrows the ROWS; the unseen badge stays the session's count (D9)", () => {
+    const charts = galleryView(list, NOTHING_SEEN, NOW, "", "chart");
+    expect(gallerySummary(charts)).toBe("2 artifacts · 3 new");
+    expect(gallerySummary(galleryView(list, NOTHING_SEEN, NOW, ""))).toBe("3 artifacts · 3 new");
+  });
+
+  test("`galleryKindCount` is the chip's number, over ARTIFACTS (versions folded)", () => {
+    const versioned = [
+      ...list,
+      meta({ artifactId: "revenue", version: 2, title: "Ricavi 2026", kind: "chart" }),
+    ];
+    expect(galleryKindCount(versioned, "chart")).toBe(2);
+    expect(galleryKindCount(versioned, "image")).toBe(1);
+    expect(galleryKindCount(versioned, "pdf")).toBe(0);
+    expect(galleryKindCount([], "chart")).toBe(0);
+  });
+
+  test("the chip's label is the Italian the rest of the gallery uses", () => {
+    expect(CHART_FILTER_LABEL).toBe("Grafici");
+  });
+
+  test("an artifact filed as `other` (an old build's view) is not a chart", () => {
+    const forged = [meta({ artifactId: "hologram", version: 1, kind: "hologram" })];
+    expect(galleryView(forged, NOTHING_SEEN, NOW, "", "chart").empty).toBe(true);
+    expect(galleryKindCount(forged, "other")).toBe(1);
   });
 });
 
