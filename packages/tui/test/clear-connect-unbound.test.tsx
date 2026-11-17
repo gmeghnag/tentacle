@@ -126,6 +126,14 @@ class ClassSession {
     return Promise.reject(new Error("this test drives no images"));
   }
 
+  documentsInput(): { readonly kind: "off"; readonly reason: string } {
+    return { kind: "off", reason: "this test drives no PDFs" };
+  }
+
+  attachDocument(): Promise<never> {
+    return Promise.reject(new Error("this test drives no PDFs"));
+  }
+
   sendNow(): Promise<never> {
     return Promise.reject(new Error("this test drives no send-now"));
   }

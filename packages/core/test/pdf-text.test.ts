@@ -3,6 +3,7 @@ import {
   MAX_PAGES_PER_READ,
   PDF_HEAD_BYTES,
   buildPageText,
+  extractAttachedPdf,
   fileBlock,
   formatPdfText,
   isPdf,
@@ -546,6 +547,49 @@ describe("isPdf — real headers the tight sniff must still accept", () => {
 
 // Fix round 2, the spec-literal variant: a `%` after the version starts a
 // comment that runs to the end of the line, so ASCII on it is a real header.
+describe("extractAttachedPdf — an attachment has no pages to pass, so a big one is retried once", () => {
+  const ok = (numPages: number) => ({
+    ok: true as const,
+    numPages,
+    pages: Array.from({ length: numPages }, (_, i) => ({ n: i + 1, text: `p${i + 1}` })),
+  });
+  test("too-many-pages → retried with the first read's worth, once", async () => {
+    const calls: { pages?: string }[] = [];
+    const got = await extractAttachedPdf(async (options) => {
+      calls.push(options.pages === undefined ? {} : { pages: options.pages });
+      return options.pages === undefined
+        ? { ok: false as const, reason: "too-many-pages", message: "big: pass pages" }
+        : ok(2500);
+    });
+    expect(calls).toEqual([{}, { pages: `1-${MAX_PAGES_PER_READ}` }]);
+    expect(got.ok).toBe(true);
+  });
+
+  test("the signal reaches BOTH calls; any other failure is not retried", async () => {
+    const controller = new AbortController();
+    const seen: (AbortSignal | undefined)[] = [];
+    const got = await extractAttachedPdf(
+      async (options) => {
+        seen.push(options.signal);
+        return { ok: false as const, reason: "too-many-pages", message: "big" };
+      },
+      { signal: controller.signal },
+    );
+    expect(got).toEqual({ ok: false, reason: "too-many-pages", message: "big" });
+    expect(seen).toEqual([controller.signal, controller.signal]);
+  });
+
+  test("a failure that is not too-many-pages is answered undredged", async () => {
+    const reasons: string[] = [];
+    const got = await extractAttachedPdf(async () => {
+      reasons.push("encrypted");
+      return { ok: false as const, reason: "encrypted", message: "locked" };
+    });
+    expect(got).toEqual({ ok: false, reason: "encrypted", message: "locked" });
+    expect(reasons).toHaveLength(1);
+  });
+});
+
 describe("isPdf — a same-line comment after the version", () => {
   const enc = (s: string) => new TextEncoder().encode(s);
   test("`%PDF-1.4 %<anything>` is a header, prose after a space is not", () => {

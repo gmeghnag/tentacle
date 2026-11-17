@@ -86,7 +86,7 @@ const base = (over: Partial<FrameInput> = {}): FrameInput => ({
   panel: null,
   sessionId: "s-1",
   field: { value: "", cursor: 0 },
-  attach: { chips: [], upload: null } as FrameInput["attach"],
+  attach: { chips: [], documents: [], upload: null } as FrameInput["attach"],
   skills: [],
   commandIndex: 0,
   sizeColumns: 80,
@@ -237,7 +237,7 @@ describe("S10 app-layout: the frame's geometry, as the inline code computed it",
     expect(empty.inputBoxRows).toBe(3);
     const chipped = frameLayout(
       base({
-        attach: { chips: [CHIP], upload: null } as never,
+        attach: { chips: [CHIP], documents: [], upload: null } as never,
       }),
     );
     expect(chipped.attachRow).not.toBe(null);
@@ -264,7 +264,9 @@ describe("S10 app-layout: the frame's geometry, as the inline code computed it",
     // counting that row INSIDE the input box (P8): the viewport shrinks by one
     // exactly as the box grows by one, so the bar — and a click on the pill —
     // stays where it was while a chip appears or an upload starts.
-    const chipped = frameLayout(base({ attach: { chips: [CHIP], upload: null } as never }));
+    const chipped = frameLayout(
+      base({ attach: { chips: [CHIP], documents: [], upload: null } as never }),
+    );
     expect(chipped.inputBoxRows).toBe(at.inputBoxRows + 1);
     expect(chipped.viewport).toBe(at.viewport - 1);
     expect(chipped.statusRowY).toBe(at.statusRowY);

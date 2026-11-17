@@ -72,8 +72,8 @@ describe("inspectPath — the happy path", () => {
     const probe = fakeProbe({ "/a/Shot 1.png": { kind: "file", bytes } });
     const result = await inspectPath(probe, "/a/Shot 1.png");
     expect(result.ok).toBe(true);
-    if (!result.ok) {
-      throw new Error("expected ok");
+    if (!result.ok || result.kind !== "image") {
+      throw new Error("expected an image");
     }
     expect(result.image.ref).toEqual({
       id: createHash("sha256").update(bytes).digest("hex"),
@@ -89,7 +89,7 @@ describe("inspectPath — the happy path", () => {
   test("the TYPE comes from the bytes, not the name: PNG bytes named .heic are image/png", async () => {
     const probe = fakeProbe({ "/a/mislabelled.heic": { kind: "file", bytes: sized(PNG_SIG, 64) } });
     const result = await inspectPath(probe, "/a/mislabelled.heic");
-    expect(result.ok && result.image.ref.mimeType).toBe("image/png");
+    expect(result.ok && result.kind === "image" && result.image.ref.mimeType).toBe("image/png");
   });
 
   test("the TYPE comes from the bytes: JPEG/GIF/WebP all pass", async () => {
@@ -112,14 +112,14 @@ describe("inspectPath — the happy path", () => {
     expect((await inspectPath(probe, "/a/x.jpg")).ok).toBe(true);
     expect((await inspectPath(probe, "/a/y.gif")).ok).toBe(true);
     const result = await inspectPath(probe, "/a/z.webp");
-    expect(result.ok && result.image.ref.mimeType).toBe("image/webp");
+    expect(result.ok && result.kind === "image" && result.image.ref.mimeType).toBe("image/webp");
   });
 
   test("a path with no basename (the root) drops the name", async () => {
     const probe = fakeProbe({ "/": { kind: "file", bytes: sized(PNG_SIG, 32) } });
     const result = await inspectPath(probe, "/");
     expect(result.ok).toBe(true);
-    expect(result.ok && "name" in result.image.ref).toBe(false);
+    expect(result.ok && result.kind === "image" && "name" in result.image.ref).toBe(false);
   });
 });
 
@@ -183,17 +183,20 @@ describe("inspectPath — every failure mode", () => {
         ),
       },
     });
-    const renamed = await inspectPath(probe, "/a/doc.png");
+    const renamed = await inspectPath(probe, "/a/notes.txt");
     expect(renamed.ok === false && renamed.refusal.reason).toBe("not-image");
-    expect(refusalText({ reason: "not-image", path: "/a/doc.png" })).toContain(
+    expect(refusalText({ reason: "not-image", path: "/a/notes.txt" })).toContain(
       "not a PNG, JPEG, GIF or WebP",
     );
-    expect((await inspectPath(probe, "/a/notes.txt")).ok).toBe(false);
   });
 
-  test("a non-image is refused from the SAME one buffer — no second read to compare", async () => {
+  test("a non-image (text) is refused from the SAME one buffer — no second read to compare", async () => {
     const calls: number[] = [];
-    const probe = fakeProbe({ "/a/doc.png": { kind: "file", bytes: sized(PDF, 64) } });
+    const text = sized(
+      [..."hello\n"].map((c) => c.charCodeAt(0)),
+      64,
+    );
+    const probe = fakeProbe({ "/a/doc.png": { kind: "file", bytes: text } });
     const counting: FileProbe = {
       read: (path, cap) => {
         calls.push(cap);
@@ -203,6 +206,27 @@ describe("inspectPath — every failure mode", () => {
     const result = await inspectPath(counting, "/a/doc.png");
     expect(result.ok === false && result.refusal.reason).toBe("not-image");
     // ONE read, bounded by the cap: the type cannot describe other bytes.
+    expect(calls).toEqual([MAX_IMAGE_BYTES + 1]);
+  });
+
+  test("a PDF is a DOCUMENT from the same ONE read, never a not-image refusal", async () => {
+    // The `%PDF-` branch sits before `not-image` (docs/feat/pdf-read.md D6), and
+    // it costs no extra read: the name and the bytes come from one buffer.
+    const calls: number[] = [];
+    const probe = fakeProbe({ "/a/report.pdf": { kind: "file", bytes: sized(PDF, 64) } });
+    const counting: FileProbe = {
+      read: (path, cap) => {
+        calls.push(cap);
+        return probe.read(path, cap);
+      },
+    };
+    const result = await inspectPath(counting, "/a/report.pdf");
+    expect(result.ok && result.kind).toBe("document");
+    if (!result.ok || result.kind !== "document") {
+      throw new Error("expected a document");
+    }
+    expect(result.document.name).toBe("report.pdf");
+    expect(result.document.size).toBe(result.document.bytes.length);
     expect(calls).toEqual([MAX_IMAGE_BYTES + 1]);
   });
 });
@@ -220,8 +244,8 @@ describe("inspectPath — one read, one buffer (M2)", () => {
     const result = await inspectPath(counting, "/a/one.png");
     expect(result.ok).toBe(true);
     expect(opens).toBe(1);
-    if (!result.ok) {
-      throw new Error("expected ok");
+    if (!result.ok || result.kind !== "image") {
+      throw new Error("expected an image");
     }
     // The ref describes exactly the buffer returned, and the type is sniffed
     // from it: `size` is the buffer's length and the id its sha256.
@@ -238,12 +262,15 @@ describe("inspectPath — one read, one buffer (M2)", () => {
 
   test("a file that changed under us is never a PNG ref over non-PNG bytes", async () => {
     // A probe whose ONLY answer is PDF bytes: whatever the caller learned
-    // earlier, the type must describe the bytes actually carried.
+    // earlier, the type must describe the bytes actually carried. A PDF is now a
+    // DOCUMENT (docs/feat/pdf-read.md D6), never a PNG ref — which is the same
+    // guarantee one kind over.
     const probe = fakeProbe({
       "/a/swapped.png": { kind: "file", bytes: new TextEncoder().encode("%PDF-1.7") },
     });
     const result = await inspectPath(probe, "/a/swapped.png");
-    expect(result.ok === false && result.refusal.reason).toBe("not-image");
+    expect(result.ok && result.kind).toBe("document");
+    expect(result.ok && result.kind === "document" && result.document.name).toBe("swapped.png");
   });
 
   test("a short read (file shrank / FUSE) yields the bytes it GOT, never a hole", async () => {
@@ -253,14 +280,16 @@ describe("inspectPath — one read, one buffer (M2)", () => {
     });
     const result = await inspectPath(probe, "/a/short.png");
     expect(result.ok).toBe(true);
-    if (!result.ok) {
-      throw new Error("expected ok");
+    if (!result.ok || result.kind !== "image") {
+      throw new Error("expected an image");
     }
     // The ref describes the bytes sent, not what `size` claimed.
     expect(result.image.ref.size).toBe(64);
     expect(result.image.bytes.length).toBe(64);
     expect(() =>
-      checkAttachmentRefs(refsOf({ images: [result.image], refusals: [], outcomes: [] })),
+      checkAttachmentRefs(
+        refsOf({ images: [result.image], documents: [], refusals: [], outcomes: [] }),
+      ),
     ).not.toThrow();
   });
 
@@ -329,7 +358,7 @@ describe("the size cap (MAX_IMAGE_BYTES = 15 MB, owner override)", () => {
 describe("collectAttachments", () => {
   const image = imageBytes;
 
-  test("keeps the images that pass and reports the ones that do not", async () => {
+  test("keeps the attachments that pass and reports the ones that do not", async () => {
     const probe = fakeProbe({
       "/a/one.png": { kind: "file", bytes: image(1) },
       "/a/bad.png": { kind: "file", bytes: sized(PDF, 40) },
@@ -337,12 +366,15 @@ describe("collectAttachments", () => {
     });
     const collected = await collectAttachments(probe, ["/a/one.png", "/a/bad.png", "/a/two.png"]);
     expect(collected.images.map((i) => i.path)).toEqual(["/a/one.png", "/a/two.png"]);
-    expect(collected.refusals.map((r) => r.reason)).toEqual(["not-image"]);
+    // PDF bytes named `.png` are a DOCUMENT (docs/feat/pdf-read.md D6): the
+    // bytes decide, and a document is not an image refusal.
+    expect(collected.documents.map((d) => d.name)).toEqual(["bad.png"]);
+    expect(collected.refusals).toEqual([]);
     // The refs it produced are exactly what the wire accepts.
     expect(() => checkAttachmentRefs(refsOf(collected))).not.toThrow();
-    expect(refusalLines(collected)[0]).toContain("/a/bad.png");
     // Every candidate has a disposition, in the order given.
-    expect(collected.outcomes.map((o) => o.kind)).toEqual(["image", "refused", "image"]);
+    expect(collected.outcomes.map((o) => o.kind)).toEqual(["image", "document", "image"]);
+    expect(collected.outcomes[1]).toMatchObject({ kind: "document" });
   });
 
   test("the 6th image is refused by the wire's per-message cap; the first 5 stay", async () => {
@@ -353,7 +385,8 @@ describe("collectAttachments", () => {
     expect(collected.refusals).toEqual([
       { reason: "too-many", count: MAX_ATTACHMENTS_PER_MESSAGE + 1, dropped: 1 },
     ]);
-    expect(refusalLines(collected)[0]).toContain("5 images per message");
+    // "files", not "images": a PDF counts toward the same cap (pdf-read D6).
+    expect(refusalLines(collected)[0]).toContain("5 files per message");
   });
 
   test("M3: 8 candidates give ONE refusal, not three identical ones", async () => {
@@ -408,7 +441,7 @@ describe("collectAttachments", () => {
 
   test("an empty candidate list attaches nothing and says nothing", async () => {
     const collected = await collectAttachments(fakeProbe({}), []);
-    expect(collected).toEqual({ images: [], refusals: [], outcomes: [] });
+    expect(collected).toEqual({ images: [], documents: [], refusals: [], outcomes: [] });
   });
 
   test("every refusal has an actionable, one-line text naming its subject", async () => {
@@ -418,6 +451,13 @@ describe("collectAttachments", () => {
       "/a/heic.HEIC": { kind: "file", bytes: sized(HEIC, 40) },
       "/a/big.png": { kind: "file", bytes: sized(PNG_SIG, MAX_IMAGE_BYTES + 1) },
       "/a/doc.png": { kind: "file", bytes: sized(PDF, 40) },
+      "/a/prose.png": {
+        kind: "file",
+        bytes: sized(
+          [..."hi\n"].map((c) => c.charCodeAt(0)),
+          40,
+        ),
+      },
       "/a/denied.png": { kind: "file", bytes: image(9), openError: true },
       "/a/fifo": { kind: "other" },
     });
@@ -427,16 +467,21 @@ describe("collectAttachments", () => {
       "/a/heic.HEIC",
       "/a/big.png",
       "/a/doc.png",
+      "/a/prose.png",
       "/a/denied.png",
       "/a/fifo",
       "/a/missing.png",
     ];
     const collected = await collectAttachments(probe, paths);
     expect(collected.images).toEqual([]);
+    // …and the PDF named `.png` did NOT refuse: it is a document.
+    expect(collected.documents.map((d) => d.name)).toEqual(["doc.png"]);
     const lines = refusalLines(collected);
-    expect(lines.length).toBe(paths.length);
+    // Every path but the PDF, which is not a refusal (docs/feat/pdf-read.md D6).
+    const refused = paths.filter((path) => path !== "/a/doc.png");
+    expect(lines.length).toBe(refused.length);
     for (const [index, line] of lines.entries()) {
-      const path = paths[index] ?? "";
+      const path = refused[index] ?? "";
       expect(line).toContain(path);
       expect(line.includes("\n")).toBe(false);
     }
@@ -774,7 +819,7 @@ describe("nodeFileProbe — the production seam (one real file, then deleted)", 
       // Bounded by the cap the caller asked for, never more.
       expect((await probe.read(file, 12))?.bytes.length).toBe(12);
       const result = await inspectPath(probe, file);
-      expect(result.ok && result.image.ref.name).toBe("Shot 1.png");
+      expect(result.ok && result.kind === "image" && result.image.ref.name).toBe("Shot 1.png");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

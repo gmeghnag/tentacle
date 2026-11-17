@@ -20,6 +20,7 @@ export * from "./version-mismatch.ts";
 export * from "./upload-window.ts";
 export * from "./watch.ts";
 export * from "./image-input.ts";
+export * from "./document-input.ts";
 export * from "./laptop-images.ts";
 export * from "./restore-images.ts";
 export * from "./discovery.ts";

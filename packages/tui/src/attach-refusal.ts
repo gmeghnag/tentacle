@@ -23,7 +23,15 @@ export type AttachRefusal =
   | { readonly reason: "too-large"; readonly path: string; readonly size: number }
   | { readonly reason: "heic"; readonly path: string }
   | { readonly reason: "not-image"; readonly path: string }
-  /** `count` = how many images the message would hold; `dropped` = how many were left out. */
+  /**
+   * A PDF this session cannot take (docs/feat/pdf-read.md D6): no `documents`
+   * capability, or an `upload` claim from a daemon this client serves the model
+   * for. The SENTENCE is the session's own — the client already words it once.
+   */
+  | { readonly reason: "documents-off"; readonly path: string; readonly why: string }
+  /** The extraction failed (`encrypted`, `corrupt`, a scan): the extractor's own sentence. */
+  | { readonly reason: "extract-failed"; readonly path: string; readonly why: string }
+  /** `count` = how many attachments the message would hold; `dropped` = how many were left out. */
   | { readonly reason: "too-many"; readonly count: number; readonly dropped: number };
 
 /** A refusal as the one line the TUI shows (`StatusLine`/a notice row). */
@@ -49,8 +57,12 @@ export function refusalText(refusal: AttachRefusal): string {
       return `cannot attach ${refusal.path}: HEIC/HEIF images are not supported yet — export it as PNG or JPEG first (macOS: sips -s format png "${refusal.path}" --out out.png)`;
     case "not-image":
       return `cannot attach ${refusal.path}: it is not a PNG, JPEG, GIF or WebP image`;
+    case "documents-off":
+      return `cannot attach ${refusal.path}: ${refusal.why}`;
+    case "extract-failed":
+      return `cannot attach ${refusal.path}: ${refusal.why}`;
     case "too-many":
-      return `cannot attach more than ${MAX_ATTACHMENTS_PER_MESSAGE} images per message (${refusal.count} were given, ${refusal.dropped} dropped)`;
+      return `cannot attach more than ${MAX_ATTACHMENTS_PER_MESSAGE} files per message (${refusal.count} were given, ${refusal.dropped} dropped)`;
   }
 }
 
@@ -61,6 +73,16 @@ const IMAGE_FILE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"
 export function claimsImagePath(path: string): boolean {
   const lower = path.toLowerCase();
   return IMAGE_FILE_EXTENSIONS.some((extension) => lower.endsWith(extension));
+}
+
+/**
+ * True when the path claims a PDF (docs/feat/pdf-read.md D6): the same
+ * extension-only rule as `claimsImagePath`, for the one decision that cannot
+ * wait for bytes — whether an unbracketed drop + Enter should probe the disk at
+ * all. The bytes still decide WHAT it is.
+ */
+export function claimsPdfPath(path: string): boolean {
+  return path.toLowerCase().endsWith(".pdf");
 }
 
 /**
@@ -85,11 +107,13 @@ export function refusalMeansText(refusal: AttachRefusal): boolean {
       return true;
     case "empty":
     case "unreadable":
-      return !claimsImagePath(refusal.path);
+      return !claimsImagePath(refusal.path) && !claimsPdfPath(refusal.path);
     case "too-large":
     case "heic":
     case "duplicate":
     case "too-many":
+    case "documents-off":
+    case "extract-failed":
       return false;
   }
 }
