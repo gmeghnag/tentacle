@@ -815,6 +815,11 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    * The app's foreground transition (item 2): whether it has been AWAY since the
    * screen was built. Only a RETURN resyncs — the screen is built while the app
    * is on screen, so a plain `active` with no departure before it is not one.
+   * Only `background` sets it: iOS reports `inactive` without the app leaving
+   * (Control Center, the notification shade, a call banner, a permission alert,
+   * the Face ID prompt itself), and the repo already decided that `inactive` is
+   * not leaving the app (`app-lock.ts`). Counting it cost a second full re-read
+   * on a single return with the app lock on (Review round 5, MEDIUM 1).
    */
   let appWasAway = false;
 
@@ -1251,8 +1256,14 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       // return runs the SAME `resync()` the pull does — silently (no pull
       // spinner: `resync`'s own re-entry guard makes a concurrent pull a no-op)
       // — and never while offline, where the redial re-attach owns the recovery.
+      // ONLY `background` is a departure: `inactive` is Control Center, a call
+      // banner, a permission alert or the Face ID prompt itself, not the app
+      // leaving (`app-lock.ts`) — counting it resynced twice per return with the
+      // app lock on (Review round 5, MEDIUM 1).
       if (name !== "active") {
-        appWasAway = true;
+        if (name === "background") {
+          appWasAway = true;
+        }
         return false;
       }
       if (!appWasAway) {

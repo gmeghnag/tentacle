@@ -867,3 +867,74 @@ executor's signatures still need correcting (round 1 and 2 notes).
 **Unverified.** The iPhone device check (Execution) is still open.
 
 *— claude-opus-5-5, 2026-11-17* (fresh context, round 5. Same family as the plan author, so shared blind spots are possible.)
+
+### Fix round 1
+
+Scope: Review round 5's one finding (**MEDIUM 1**) and its LOW signature note.
+This is fix round 1 of review round 5 (the task already has fix rounds 1–2 for
+review rounds 1–2); repro files stay in `.tentacle/tmp/mobile-open-at-end/`.
+
+**MEDIUM 1 — an `inactive` → `active` pair counted as a return. FIXED.**
+Review's premise is right, and the code said so in two places already:
+`app-lock.ts:196-198` — "`inactive` is not leaving the app" (Control Center, the
+notification shade, a call banner, a system permission alert, the Face ID
+prompt itself) — while `session-screen-controller.ts:1254-1256` set `appWasAway`
+on *any* non-`active` state. So a blip that never left the app started a full
+re-attach: every snapshot page re-read over the relay, every row replaced and
+re-keyed. With the app lock on, one return resynced **twice** (background →
+active, then the Face ID prompt's own `inactive` → `active`), breaking the plan's
+"at most once per foreground transition".
+
+- `session-screen-controller.ts:1254-1266` — only `background` sets
+  `appWasAway`; `inactive` is ignored and returns `false` (no re-attach). The
+  comment on the state (`:812-820`) now records why, citing `app-lock.ts`.
+- `session-screen.test.ts:975-999` — new case: `inactive` → `active` reports
+  `false` and leaves `opens()` at 1; a repeated blip does not accumulate a
+  departure; and a real `background` → `active` after an `inactive` still
+  reports `true` and re-reads once (`opens()` 2).
+
+**LOW — the signature.** This block is signed with the id the client actually
+ran (`claude-opus-5-5`, from `~/.claude/settings.json: "model": "opus"`) rather
+than a guess. Still open from Review round 3, untouched here (it needs a commit
+message, and this round may not rewrite history): round 3's block is signed
+`claude-opus-5-5` while `git log` shows `e9d3038e` authored as the owner's
+generic identity for the whole branch — the per-model id is only recoverable
+from the commit *subject* (`(opus)` / `(deepseek)`), so every signature in this
+doc should be re-checked against its subject at merge, not just round 3's.
+
+**Red before green.** The new case, run against the round-5 sources, fails on the
+property, not on a compile error:
+
+```
+$ bun test apps/mobile/test/session-screen.test.ts
+Expected: false
+Received: true
+      at session-screen.test.ts:984
+(fail) … an `inactive` → `active` pair is NOT a return …
+ 34 pass
+ 1 fail
+```
+
+Green after the fix: 35 pass, 0 fail.
+
+**Mutations (each reverted; `git status` left with only this round's two files):**
+
+| # | Mutation | Fails |
+|---|---|---|
+| M14 | drop the `background`-only guard — the round-5 code (`appWasAway = true` for any non-`active`) | 1 (`session-screen.test.ts`, the new case) |
+| M15 | invert it (`name === "inactive"`), i.e. `background` stops counting | 5 (`session-screen.test.ts`: the new case + the four existing return-resync cases) |
+
+M14 reproduces Review's probe exactly (`inactive` → `active` → `started true`), so
+the new test is the reviewer's finding, pinned.
+
+**Gate.** `bunx tsc --noEmit` clean; `bunx tsc -p apps/mobile --noEmit` clean;
+`bun run lint` — 1858 files, 0 errors / 0 warnings (§6 baseline is clean);
+`bun test` — **13 595 pass, 5 skip, 0 fail** (965 files, 33 snapshots). The 5
+skips are the three opt-in ones plus the two conditional skips recorded above.
+
+**Still open (unchanged):** the device check on the owner's iPhone. Knock-on for
+it: with the app lock on, a single return should now cause ONE re-read, not two.
+
+*— claude-opus-5-5 (executor, fix round 1 of review round 5), 2026-11-17. The id
+is what the client config reports (`"model": "opus"` → `claude-opus-5-5`), not a
+guess; the branch's commit subjects are the only other evidence available here.*

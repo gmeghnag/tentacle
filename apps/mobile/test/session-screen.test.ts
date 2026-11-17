@@ -971,6 +971,32 @@ describe("foreground resync (docs/fix/mobile-open-at-end.md, item 2)", () => {
     expect(h.opens()).toBe(2);
   });
 
+  test("an `inactive` → `active` pair is NOT a return (Control Center, a call banner, the Face ID prompt) [mutation: any non-active state sets appWasAway]", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    expect(h.opens()).toBe(1);
+    h.screen.appState("active"); // the mount's own `active`
+    // iOS reports `inactive` without the app ever leaving — the repo already
+    // decided this (`app-lock.ts`: "`inactive` is not leaving the app").
+    h.screen.appState("inactive");
+    expect(h.screen.appState("active")).toBe(false);
+    await settle();
+    expect(h.opens()).toBe(1); // no re-attach, no re-read of every snapshot page
+    // Repeated blips do not accumulate a departure either.
+    h.screen.appState("inactive");
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(1);
+    // A real departure still counts — even after an `inactive` that preceded it.
+    h.screen.appState("inactive");
+    h.screen.appState("background");
+    expect(h.screen.appState("active")).toBe(true);
+    await settle();
+    expect(h.opens()).toBe(2);
+  });
+
   test("offline: no foreground resync (the redial re-attach owns the recovery)", async () => {
     const h = countingHarness();
     h.setHistory(["first"]);
