@@ -163,3 +163,15 @@ Attacks tried: (a) other hosts of the absolute-root modal: none, holds. (b) svg/
 Executor behaviour: honest. It marked the task PARTIAL, stated what was unverified, and kept the business logic in a pure module (§7). The two weak pins above are its §9 lapses.
 
 *— claude-opus-5-5, 2026-11-17* (fresh context, same model family as the executor: shared blind spots possible)
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES** (the code is fine; finding 3 remains).
+
+- **Finding 1: FIXED, verified by mutation.** I added `presentation: "modal"` to the gallery route's options at `App.tsx:2235`. The new test at `artifact-gallery-wiring.test.ts:136` then fails ("the gallery header takes the top inset unless the route is a sheet"). Reverted.
+- **Finding 2: FIXED, verified by mutation.** I changed the chart's `args: text` to `args: failedText` at `ArtifactViewerModal.tsx:183`. The chart test then fails ("a chart artifact OPENS as the full-screen chart…"). Reverted. The two mutations ran together and gave 2 fail / 7 pass, one fail for each pin.
+- **Finding 3: STILL OPEN.** There is no simulator sweep, no `shots/` and no `### Sweep results`. The pixels for bugs 1–2 are unverified, and bugs 3–4 have not been re-checked. The executor cannot close this without approval to run the harness. The owner or the orchestrator must run `E2E_DEVICE=0B43D716-9670-421A-BE51-9162004F2963 E2E_HOLD=1 bun apps/mobile/e2e/run.ts --ios 26 --only 01-shell`, or explicitly accept the task without the sweep.
+- **Regressions in this round's diff:** none. The diff touches tests only. After the reverts the tree is unchanged (`git status` is empty). The 3 touched test files pass 30/0, `bun run lint` is clean (1966 files), and `bun run typecheck` is clean (root, mobile, relay).
+- **Not yet done:** the orchestrator addenda added in this commit (09:33 ∴ size, 09:36 Thinking animation, 09:45 IBM chart cause) have no implementation on this branch yet. They are scope still owed by the task, not defects in this diff.
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, same model family as the executor)
