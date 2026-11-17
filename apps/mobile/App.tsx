@@ -1474,6 +1474,7 @@ function SessionRoute({
       focusComposer={focus}
       drawerOpen={drawerOpen}
       onOpenArtifacts={onOpenArtifacts}
+      onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
     />
   );
 }
@@ -2249,6 +2250,7 @@ function AppShell(): JSX.Element {
                   // `report.zip`, never `3f2a…e9`.
                   void shareCachedCopy(fileUri);
                 }}
+                onRenderError={(fields) => APP_LOG.log("error", "client-error", fields)}
               />
             )}
           </Stack.Screen>

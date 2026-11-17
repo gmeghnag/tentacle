@@ -51,6 +51,7 @@ import { reportsOf } from "../activity-memory.ts";
 import { ACTIVITY_SETTINGS } from "../activity-settings-expo.ts";
 import type { ActivitySettings } from "../activity-settings-store.ts";
 import { activityView, agentCardTarget } from "../activity.ts";
+import type { AppLogField } from "../app-log.ts";
 import { chatStatus } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
@@ -81,6 +82,7 @@ import { playHaptic } from "../haptics.ts";
 import { linkPrompt } from "../links.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
 import type { ArtifactGalleryRoute } from "../routes.ts";
+import { rowErrorFields } from "../row-guard.ts";
 import { rowTimeLabel } from "../row-swipe.ts";
 import { type SectionId, scheduledSection } from "../session-info.ts";
 import { sessionMenu } from "../session-menu.ts";
@@ -118,8 +120,9 @@ import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
+import { RowGuard } from "./transcript/RowGuard.tsx";
 import { SwipeTime } from "./transcript/SwipeTime.tsx";
-import { TranscriptRow } from "./transcript/TranscriptRow.tsx";
+import { RowFallback, TranscriptRow } from "./transcript/TranscriptRow.tsx";
 
 export interface SessionScreenProps {
   readonly palette: Palette;
@@ -142,6 +145,11 @@ export interface SessionScreenProps {
    * no router, e.g. a unit test's).
    */
   readonly onOpenArtifacts?: (from: ArtifactGalleryRoute["from"]) => void;
+  /**
+   * A row threw while drawing and shows its fallback instead (`RowGuard`,
+   * docs/fix/mobile-crash-ibm-chart.md): the app log's fields for it.
+   */
+  readonly onRowError?: (fields: Readonly<Record<string, AppLogField>>) => void;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -174,6 +182,7 @@ export function SessionScreen({
   focusComposer = false,
   drawerOpen = false,
   onOpenArtifacts,
+  onRowError,
 }: SessionScreenProps): JSX.Element {
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
@@ -875,46 +884,56 @@ export function SessionScreen({
                         activity.memory.finished,
                       )
                     : null;
+                // One row that throws while drawing is its fallback, never an
+                // app abort (docs/fix/mobile-crash-ibm-chart.md).
                 return (
-                  <SwipeTime row={item} palette={palette} label={rowTimeLabel(item)}>
-                    <TranscriptRow
-                      row={item}
-                      palette={palette}
-                      onLink={onLink}
-                      thumbnails={state.thumbnails}
-                      step={{
-                        cell,
-                        open: isOpen(openSteps, item.key),
-                        full: isOpen(fullSteps, item.key),
-                        reduceMotion: a11yFlags.reduceMotion,
-                        onToggle: () => {
-                          animateNextLayout(a11yFlags.reduceMotion);
-                          setOpenSteps((ids) => toggleOpen(ids, item.key));
-                        },
-                        onShowAll: () =>
-                          setFullSteps((ids) =>
-                            isOpen(ids, item.key) ? ids : toggleOpen(ids, item.key),
-                          ),
-                      }}
-                      {...(child === null
-                        ? {}
-                        : {
-                            agent: {
-                              id: child,
-                              onOpen: () => {
-                                focusActivity({ kind: "child", id: child });
-                                setActivityOpen(true);
+                  <RowGuard
+                    // A row object is replaced only when its content changes
+                    // (transcript.ts keeps unchanged rows): that one retries.
+                    resetKey={item}
+                    fallback={<RowFallback palette={palette} />}
+                    onError={(error) => onRowError?.(rowErrorFields(item.kind, error))}
+                  >
+                    <SwipeTime row={item} palette={palette} label={rowTimeLabel(item)}>
+                      <TranscriptRow
+                        row={item}
+                        palette={palette}
+                        onLink={onLink}
+                        thumbnails={state.thumbnails}
+                        step={{
+                          cell,
+                          open: isOpen(openSteps, item.key),
+                          full: isOpen(fullSteps, item.key),
+                          reduceMotion: a11yFlags.reduceMotion,
+                          onToggle: () => {
+                            animateNextLayout(a11yFlags.reduceMotion);
+                            setOpenSteps((ids) => toggleOpen(ids, item.key));
+                          },
+                          onShowAll: () =>
+                            setFullSteps((ids) =>
+                              isOpen(ids, item.key) ? ids : toggleOpen(ids, item.key),
+                            ),
+                        }}
+                        {...(child === null
+                          ? {}
+                          : {
+                              agent: {
+                                id: child,
+                                onOpen: () => {
+                                  focusActivity({ kind: "child", id: child });
+                                  setActivityOpen(true);
+                                },
                               },
-                            },
-                          })}
-                      {...(speak === undefined || voice === null
-                        ? {}
-                        : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
-                      {...(onOpenArtifacts === undefined
-                        ? {}
-                        : { onArtifact: (meta) => onOpenArtifacts("card") })}
-                    />
-                  </SwipeTime>
+                            })}
+                        {...(speak === undefined || voice === null
+                          ? {}
+                          : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
+                        {...(onOpenArtifacts === undefined
+                          ? {}
+                          : { onArtifact: (meta) => onOpenArtifacts("card") })}
+                      />
+                    </SwipeTime>
+                  </RowGuard>
                 );
               }}
               extraData={rowExtraData}

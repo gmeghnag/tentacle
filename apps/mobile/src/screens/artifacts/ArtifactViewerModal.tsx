@@ -16,12 +16,15 @@ import type { ArtifactMeta } from "@tentacle/protocol";
  */
 import { type JSX, useEffect, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
+import type { AppLogField } from "../../app-log.ts";
 import { ARTIFACT_CACHE } from "../../artifact-cache-expo.ts";
 import { openTarget, viewerText } from "../../artifact-open.ts";
 import { viewerFor, viewerSubtitle } from "../../artifact-viewer.ts";
+import { ROW_FALLBACK_TEXT, rowErrorFields } from "../../row-guard.ts";
 import { type Palette, typography } from "../../theme.ts";
 import { useReduceMotion } from "../../ui/chart/ChartAppear.tsx";
 import { ChartFullScreen } from "../../ui/chart/ChartFullScreen.tsx";
+import { RowGuard } from "../transcript/RowGuard.tsx";
 import { HtmlViewer } from "./HtmlViewer.tsx";
 import { ImageViewer } from "./ImageViewer.tsx";
 import { MarkdownViewer } from "./MarkdownViewer.tsx";
@@ -62,6 +65,8 @@ export interface ArtifactViewerModalProps {
   /** Another version was picked (the header's `v2 ▾`): the caller swaps `meta`. */
   readonly onPickVersion?: () => void;
   readonly onShare?: (fileUri: string) => void;
+  /** The chart threw while drawing: its log fields (class only, never the message). */
+  readonly onRenderError?: (fields: Record<string, AppLogField>) => void;
 }
 
 export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Element {
@@ -172,14 +177,31 @@ export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Elemen
         // the artifact's text is the tool's args, and the component
         // re-validates them: a forged or newer-than-this-build spec renders
         // nothing at all rather than half a chart.
-        <ChartFullScreen
-          tool={{ name: "chart", args: phase.text ?? "", status: "ok" }}
-          palette={palette}
-          locale={deviceLocale()}
-          reduceMotion={reduceMotion === true}
-          testID="artifact-chart"
-          onClose={props.onClose}
-        />
+        // Guarded like a transcript row (docs/fix/mobile-crash-ibm-chart.md): a
+        // chart that throws while drawing is a notice, never an app abort.
+        <RowGuard
+          resetKey={phase.text}
+          fallback={
+            <View style={styles.center}>
+              <Text
+                testID="artifact-chart-error"
+                style={[typography.subhead, { color: palette.sec }]}
+              >
+                {ROW_FALLBACK_TEXT}
+              </Text>
+            </View>
+          }
+          onError={(error) => props.onRenderError?.(rowErrorFields("artifact-chart", error))}
+        >
+          <ChartFullScreen
+            tool={{ name: "chart", args: phase.text ?? "", status: "ok" }}
+            palette={palette}
+            locale={deviceLocale()}
+            reduceMotion={reduceMotion === true}
+            testID="artifact-chart"
+            onClose={props.onClose}
+          />
+        </RowGuard>
       ) : phase.fileUri === "" ? (
         // A file kind whose bytes are not on disk: too big for the cache. The
         // note says what it is and why there is nothing to render or share.
