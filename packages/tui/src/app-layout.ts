@@ -62,6 +62,7 @@ import type { DaemonQueue, QueuedRows } from "./queued.ts";
 import { shownRows } from "./queued.ts";
 import type { ScheduleDockRow } from "./schedule-view.ts";
 import type { Selection } from "./selection.ts";
+import { slotView } from "./spinner-slot.ts";
 import type { DisplayState } from "./state.ts";
 import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
 import type { TargetBadge } from "./target-view.ts";
@@ -139,6 +140,15 @@ export interface FrameInput {
   readonly loading: { readonly done: number; readonly total: number } | null;
   readonly compacting: boolean;
   /**
+   * When this TUI's own `/compact` began, and when it last succeeded — the
+   * spinner slot's two figures (`spinner-slot.ts`, docs/feat/harness-notices.md
+   * S3). `null`: none runs / nothing to celebrate.
+   */
+  readonly compactingSince: number | null;
+  readonly compactedAt: number | null;
+  /** The frame's clock for the slot's 3 s window (a test hands it a fake one). */
+  readonly now: number;
+  /**
    * The dictation strip's view-model (`voice-view.ts`), or null when it draws
    * nothing. Its rows are INSIDE the input box and counted HERE, once, so the
    * frame's height never changes while a dictation runs (P8, same rule as the
@@ -183,6 +193,9 @@ export function frameLayout(input: FrameInput) {
     daemonQueue,
     loading,
     compacting,
+    compactingSince,
+    compactedAt,
+    now,
     voiceStrip,
   } = input;
 
@@ -226,8 +239,23 @@ export function frameLayout(input: FrameInput) {
   // hint row under them + one blank row between the hint and the thinking line.
   // The rows shown: the daemon's list (every writer's) + my rows not acked yet (C7).
   const shown = shownRows(queued, daemonQueue);
+  // The slot's ONE decision (docs/feat/harness-notices.md S3.1): the row above
+  // the input says `loading history`, `Thinking…`/`Working…`, `Compacting…` or
+  // `Compacted ✓`. BOTH the row budget below and `AppView` read THIS view — the
+  // second rule that used to hold ("a row exists while running or loading") is
+  // what left a compaction drawing transcript lines and the frame a row short.
+  const slot = slotView({
+    loading,
+    running: st.running,
+    reasoning: st.reasoning,
+    reasoningStartedAt: st.reasoningStartedAt,
+    turnStartedAt: st.turnStartedAt,
+    compactingSince,
+    compactedAt,
+    now,
+  });
   const runningRows =
-    (st.running || loading ? 1 : 0) +
+    (slot === null ? 0 : 1) +
     (st.running || compacting ? shown.length + (shown.length > 0 ? 1 : 0) : 0) +
     (st.running && shown.length > 0 ? 1 : 0);
   // Rows the bottom area occupies: the permission dialog; or the running rows,
@@ -384,6 +412,7 @@ export function frameLayout(input: FrameInput) {
     listView,
     capsShown,
     shown,
+    slot,
     runningRows,
     dockListVisible,
     dockView,

@@ -3,6 +3,7 @@
  * sends, atomically or by the fallback, and what a refusal or a finished old
  * turn leads to. The App only executes them.
  */
+import { compactionSeparatorText as coreCompactionText } from "@tentacle/core";
 import { type QueuedRows, afterRefusal, requeue, takeAll } from "./queued.ts";
 
 /** The error codes it acts on: a copy of `@tentacle/protocol`'s (the TUI does not depend on it). */
@@ -84,10 +85,38 @@ export function onSendNowError(error: unknown): "fallback" | "delivered" | "rest
   }
 }
 
-/** How this TUI's `/compact` settled: `session.compact()`'s one outcome. */
+/**
+ * How this TUI's `/compact` settled: `session.compact()`'s one outcome. On
+ * success the token sizes are optional — an older daemon omits them, and the
+ * separator then reads `compacted` with no figures (never a fake number).
+ */
 export type CompactionResult =
-  | { readonly ok: true; readonly before: number; readonly after: number }
+  | {
+      readonly ok: true;
+      readonly before: number;
+      readonly after: number;
+      readonly fromTokens?: number;
+      readonly toTokens?: number;
+      readonly toExact?: boolean;
+    }
   | { readonly ok: false; readonly error: unknown };
+
+/**
+ * A success's separator text, from the figures the daemon returned
+ * (`@tentacle/core`'s wording, shared with mobile; owner Q6: no foreign
+ * variant). An older daemon omits them → `compacted` alone, never a fake 0.
+ */
+function compactionSeparatorText(result: {
+  readonly fromTokens?: number;
+  readonly toTokens?: number;
+  readonly toExact?: boolean;
+}): string {
+  return coreCompactionText({
+    ...(result.fromTokens === undefined ? {} : { fromTokens: result.fromTokens }),
+    ...(result.toTokens === undefined ? {} : { toTokens: result.toTokens }),
+    ...(result.toExact === true ? { toExact: true as const } : {}),
+  });
+}
 
 /**
  * This TUI's `/compact` settled (D3c, docs/feat/send-now-d.md): its notice,
@@ -98,6 +127,11 @@ export type CompactionResult =
  * send-now's doing, not a failure. `turnRunning`: a turn already streams here
  * (one the user started during the compaction): a second prompt cannot start,
  * so the texts go back to the input field instead (`restore`).
+ *
+ * A SUCCESS writes no transcript line (docs/feat/harness-notices.md S3, owner
+ * decision 3): the slot says `Compacted ✓` and the transcript gets a separator
+ * rule at the compaction point, whose text is `separator` here. A failure and a
+ * cancel keep their harness lines.
  */
 export function onCompactionSettled(input: {
   readonly result: CompactionResult;
@@ -105,22 +139,35 @@ export function onCompactionSettled(input: {
   readonly sendNowOwns: boolean;
   readonly turnRunning: boolean;
 }): {
-  readonly notice: string;
+  /** The harness line to append; `null` on success (the slot and the separator say it). */
+  readonly notice: string | null;
   /**
    * `warn` when the compaction FAILED (docs/feat/harness-notices.md S2.2): a
-   * `▲` is the one shape the person must see; a cancel and a success are info.
+   * `▲` is the one shape the person must see; a cancel is info.
    */
   readonly level?: "warn";
+  /** A success's separator text (`compacted · ctx 182k → 9k`); absent on failure. */
+  readonly separator?: string;
   readonly send: string | null;
   readonly restore: string | null;
 } {
   const { result } = input;
-  const notice = result.ok
-    ? `_Context compacted — ${result.before} → ${result.after} messages._`
-    : input.sendNowOwns && errorCode(result.error) === SendNowErrorCode.Cancelled
-      ? "_Compaction cancelled — sending now._"
-      : `_Compact failed: ${String(result.error)}_`;
-  const level = result.ok ? undefined : "warn";
+  if (result.ok) {
+    const { text } = takeAll(input.rows);
+    const separator = compactionSeparatorText(result);
+    if (input.sendNowOwns || text === "") {
+      return { notice: null, separator, send: null, restore: null };
+    }
+    return input.turnRunning
+      ? { notice: null, separator, send: null, restore: text }
+      : { notice: null, separator, send: text, restore: null };
+  }
+  // A cancel is the person's own doing (their send-now): info, never `▲`.
+  const state = input.sendNowOwns && errorCode(result.error) === SendNowErrorCode.Cancelled;
+  const notice = state
+    ? "_Compaction cancelled — sending now._"
+    : `_Compact failed: ${String(result.error)}_`;
+  const level = state ? undefined : ("warn" as const);
   const { text } = takeAll(input.rows);
   if (input.sendNowOwns || text === "") {
     return { notice, ...(level ? { level } : {}), send: null, restore: null };

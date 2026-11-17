@@ -219,7 +219,18 @@ export function backgroundExitNotice(
 export function appendNotice(
   state: DisplayState,
   text: string,
-  opts: { readonly host?: true; readonly hint?: string; readonly level?: "warn" } = {},
+  opts: {
+    readonly host?: true;
+    readonly hint?: string;
+    readonly level?: "warn";
+    /**
+     * Drawn as a full-width grey rule instead of a harness line: the context
+     * reset's separator and a compaction's (docs/feat/harness-notices.md S3).
+     */
+    readonly separator?: true;
+    /** The rule's body, shown only when expanded (a resumed compaction's brief). */
+    readonly body?: string;
+  } = {},
 ): DisplayState {
   const item: NoticeItem = {
     kind: "notice",
@@ -227,6 +238,8 @@ export function appendNotice(
     ...(opts.hint ? { hint: opts.hint } : {}),
     ...(opts.host ? { host: true as const } : {}),
     ...(opts.level ? { level: opts.level } : {}),
+    ...(opts.separator ? { separator: true as const } : {}),
+    ...(opts.body === undefined || opts.body === "" ? {} : { body: opts.body }),
   };
   return { ...state, items: append(state.items, item) };
 }

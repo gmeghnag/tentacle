@@ -813,7 +813,7 @@ describe("D3c — queue while /compact runs (docs/feat/send-now-d.md)", () => {
     unmount();
   });
 
-  test("T-D2: the compaction succeeds → the rows go out as ONE joined prompt, after its notice", async () => {
+  test("T-D2: the compaction succeeds → the rows go out as ONE joined prompt, after its separator", async () => {
     const c = heldCompaction();
     const { ctrl, log } = fakeSession({ compact: c.compact });
     const { lastFrame, unmount } = await compactingWithRows(ctrl, ["A", "B"]);
@@ -822,9 +822,12 @@ describe("D3c — queue while /compact runs (docs/feat/send-now-d.md)", () => {
     expect(log.sends).toEqual(["first", "A\n\nB"]);
     const frame = lastFrame() ?? "";
     expect(frame).not.toMatch(queuedRow("A"));
-    const notice = frame.indexOf("Context compacted — 9 → 2 messages");
-    expect(notice).toBeGreaterThan(-1);
-    expect(frame.indexOf("reply to A")).toBeGreaterThan(notice);
+    // S3: the success's place marker is the separator rule (no transcript line);
+    // an older result has no sizes, so it reads `compacted` alone.
+    const separator = frame.indexOf("── compacted");
+    expect(separator).toBeGreaterThan(-1);
+    expect(frame).not.toContain("Context compacted");
+    expect(frame.indexOf("reply to A")).toBeGreaterThan(separator);
     unmount();
   });
 
