@@ -774,6 +774,72 @@ are the same 5 as in S1. No schema is touched, so there is no
   - `bun test`: **14203 pass, 5 skip, 0 fail** (1013 files). These are the same 5 skips as S1 and S2.
 - **Left as is:** the LOW issue (a chart whose `chartLayout` is null falls back to a LONE step) and the S3 simulator checks are out of scope for this round.
 
+### S3 — mock turn, flow 29, screenshots
+
+*— claude-opus-5-5, 2026-11-17* — **S3 only.**
+
+**Load-bearing check (simulator half): the 0 pt half holds; the `scrollToIndex` half was NOT run.**
+- `bun install --frozen-lockfile` installed the mobile deps that were missing from this worktree. It left `bun.lock` and `git status` unchanged. After that, `bun run typecheck` is fully clean, `apps/mobile` included: the 6 environmental errors from S2 are gone.
+- The real e2e harness ran on iOS 26 (iPhone 17 Pro sim): `bun run e2e:mobile --ios 26 --only 08-permission,29-tool-rows`. Result: **`✓ 08-permission`, `✓ 29-tool-rows`, PASS**.
+- **0 pt cell, observed.** In flow 29 the round-2 reasoning row is folded into `Read`, so its cell renders `null`. The gap `Bash ls missing-dir` → `Read` matches every other step gap (~100 px at 3×) in both the collapsed and the open shots. A hidden cell adds no height.
+- **Not run: "Show in chat" → `scrollToIndex` past hidden rows.** It needs a sub-agent report below hidden reasoning, and flow 29 has none. To verify: a flow-27 child's report under a `TOOLROWS29` turn, then tap "Show in chat".
+
+**As built:**
+1. **Red first.** `apps/mobile/test/e2e-mock-toolrows.test.ts` goes through the real `OpenAIProvider` against a stub `TOOLROWS_PROMPT` export with no handler: **4 fail / 1 pass**, all on assertions. The pass is the "another prompt is untouched" guard.
+2. **`apps/mobile/e2e/mock-model.ts`:**
+   - `TOOLROWS29` is a three-round turn. The round is picked by `toolResultsThisTurn(body)`: tool results after the LAST user message, so an earlier turn's results do not count.
+     - Round 1: reasoning, the text "Checking the workspace first.", then `shell` `seq 1 40 > notes.txt && wc -l notes.txt` (ok) and `shell` `ls missing-dir` (fails).
+     - Round 2: reasoning with **no text**, so it folds; then `fs_read {path: notes.txt, offset 1, limit 20}` and `mcp__demo__browser_resize {430×932}`. The registry answers that one with `unknown tool:` and `isError`.
+     - Round 3: 4 reasoning chunks spaced by `thinkMs`, then the markdown reply.
+   - A new `MockModelOptions.thinkMs` option (default `TOOLROWS_THINK_MS` = 2500 ms) keeps the footer on screen for `_shot`. The unit test uses 5 ms.
+   - Result: 5/5.
+3. **`apps/mobile/e2e/flows/29-tool-rows.yaml`** (new):
+   - Runs on its own session, `TOOLROWS_ID` in `run.ts` (`FLOWS` + `COMPOSE_SESSION_VARS`).
+   - Approves the 2 shell asks, waits for `thinking-footer`, and asserts `tool-mocked-.*-ok` / `-error`.
+   - Shoots `running`, then waits for `turn-idle` and asserts the footer is gone; shoots `collapsed`.
+   - Taps an ok step (`-output` visible): `open`. Taps the error step: `error-open`. Each shot is light + dark.
+4. **Changelog:** the existing `changelog.d/mobile-tool-rows.changed.md` now also names the live "Thinking…" node.
+
+**Drift:**
+- `thinkMs` is a new option, so the unit suite does not wait 10 s.
+- The flow uses regex ids (`tool-mocked-.*`), because the mock mints ids across the whole run.
+- No `steps → reply → chart → steps` shot (see below).
+
+**Mutations (§9)** — `.tentacle/tmp/mobile-tool-rows/mutate-s3.ts`. It applies each mutation, runs the toolrows test, then restores the file byte-for-byte. `git status` afterwards showed only the intended files.
+
+| Mutation | Result |
+|---|---|
+| M1 count every tool result (no `break` at the user) | 4 pass / 1 fail |
+| M2 round 1 drops its text line | 4 pass / 1 fail |
+| M3 round 2 says a line (no fold) | 4 pass / 1 fail |
+| M4 round 2 read unranged | 4 pass / 1 fail |
+| M5 round 3 never thinks | 4 pass / 1 fail |
+
+**Visual check: what I compared, and the verdict.** Shots are in the worktree's run dir, `.tentacle/tmp/e2e-mobile/1794896889063/ios26/29-tool-rows/…/takeScreenshot/` (8 PNGs). They were NOT copied into `.tentacle/tmp/mobile-tool-rows/shots/`: the sandbox refused the copy.
+- `collapsed-light`, `running-dark` and `open-light` match mockup C's structure:
+  - a 1 px thread at the left, joining the 4 steps and the trailing Thought;
+  - 7 pt dots, green ok and red error, with a red trailing duration on errors;
+  - one line per step: `Bash <cmd>`, `Read notes.txt · 1–20`, `demo · browser_resize 430 × 932`;
+  - ∴ on `Read` (the folded thought);
+  - no boxes;
+  - the first Thought standing ALONE, because text follows it (Q3);
+  - the footer `○ Thinking… 3 s` as the thread's last node, and gone at idle;
+  - the open body indented under the label: command, then `⎿ exit=0 / 40 notes.txt`.
+- **Not done:**
+  - the accessibility-extra-large shot;
+  - VoiceOver / Accessibility Inspector;
+  - a 300-row scroll (no jump while streaming, open state kept);
+  - the `steps → reply → chart → steps` shot;
+  - a pixel comparison against `.tentacle/mockups/mobile-tool-rows/index.html` (I compared structure only, not exact x or spacing).
+  
+  These are left for the mandatory fresh-context visual Review.
+
+**Gate:**
+- `bunx tsc --noEmit` clean, and `bun run typecheck` (root + mobile + relay) clean.
+- `bun run lint` clean (1958 files).
+- `bun test`: **14244 pass, 5 skip, 0 fail** (1016 files); the same 5 skips as before.
+- No schema touched: no `protocol.json` regen, no `protocol.d/` note.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17* — **S1 only**, fresh context. This is the same model as the plan author and the S1 executor (Opus), so shared blind spots are possible.

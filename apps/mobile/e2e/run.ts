@@ -1221,6 +1221,10 @@ export const FLOWS: readonly string[] = [
   // docs/feat/mobile-chrome.md S10: the floating Activity button (opt-in) — drag,
   // snap, kept across a relaunch, back to Header — on a session of its own.
   "28-floating-activity",
+  // docs/feat/mobile-tool-rows.md S3: tool calls as a thread of steps (running,
+  // collapsed, open, error) — the mock model's `TOOLROWS29` turn, on a session
+  // of its own.
+  "29-tool-rows",
   // docs/feat/model-artifacts.md T8.1: the HTML artifact's escape suite — the
   // hostile fixture in the isolated WebView, every probe counted by a real
   // listener. It runs the mock model's `ESCAPE30` turn on a session of its own,
@@ -1307,6 +1311,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "26-drawer": "DRAWER_ID",
   "27-activity": "ACTIVITY_ID",
   "28-floating-activity": "FLOAT_ID",
+  "29-tool-rows": "TOOLROWS_ID",
   // docs/feat/model-artifacts.md T8.1 (flow 30): its own session, because the
   // `present` card is daemon-side state that outlives `clearState`.
   "30-artifact-escape": "ESCAPE_ID",

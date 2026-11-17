@@ -1,0 +1,84 @@
+appId: so.tentacle.app
+---
+# 29 (docs/feat/mobile-tool-rows.md S3): tool calls as a thread of steps, the
+# thinking folded into them. `TOOLROWS29` makes the mock model run a three-round
+# turn (mock-model.ts `TOOLROWS_PROMPT`): a thought + a line + two `shell` calls
+# (one ok, one failing), a thought folded into a ranged `fs_read` + an unknown MCP
+# tool (an error step), then a slow thought (the live `Thinking…` footer) and the
+# reply. The shots are the visual review's evidence (light/dark): running,
+# collapsed, one step open, an error step open. Ids are regexes: the mock's call
+# ids are minted across the whole run.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${TOOLROWS_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "TOOLROWS29"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+# The two shell calls are ask tools: approve each.
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-allow_once"
+# Round 3 thinks slowly: the footer is the thread's last node while it does.
+- extendedWaitUntil:
+    visible:
+      id: "thinking-footer"
+    timeout: 20000
+- assertVisible:
+    id: "tool-mocked-.*-ok"
+- assertVisible:
+    id: "tool-mocked-.*-error"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "29-tool-rows-running"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 30000
+- assertNotVisible:
+    id: "thinking-footer"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "29-tool-rows-collapsed"
+# One step open: the body (thought, command, `⎿` result) on tap.
+- tapOn:
+    id: "tool-mocked-.*-ok"
+    index: 0
+- assertVisible:
+    id: "tool-mocked-.*-output"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "29-tool-rows-open"
+- tapOn:
+    id: "tool-mocked-.*-ok"
+    index: 0
+# The failing shell step, open.
+- tapOn:
+    id: "tool-mocked-.*-error"
+    index: 0
+- assertVisible:
+    id: "tool-mocked-.*-output"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "29-tool-rows-error-open"
