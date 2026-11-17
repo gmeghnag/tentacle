@@ -16,6 +16,12 @@ Owner 2026-11-17 09:14, on the iOS build of main 32dcf4fb: "sembra che qui i tes
 
 **Orchestrator addendum (09:33, owner):** the ∴ glyph beside "Thought" (and the ∴ marker on tool rows) is too small — "anche un filo più grandi" (owner screenshot `/Users/gmeghnag/Desktop/Screenshot 2026-11-17 at 09.31.19.png`, light mode). Make it a bit larger (≈ 12–13 pt instead of 10, centred on the thread line, the dots still thin), same change on the row marker; screenshot before/after in light + dark.
 
+
+**Orchestrator addendum (09:36, owner pick):** the running turn's live "Thinking…" node (today a static hollow ring) becomes mockup **B + D** (`.tentacle/mockups/mobile-thinking-anim/index.html`): the ∴ glyph (new larger size, above) with its three dots breathing in sequence (top → right → left, ~1.5 s, accent) AND the shimmer sweep across the word "Thinking…" (~2.2 s). When a tool starts the node becomes the tool's spinner row and the ∴ stays as the small static marker on that row; Reduce Motion → static ∴ in accent + plain grey word. Use Reanimated/Animated on the native driver (no JS-thread timers per frame); a real-screen render test + simulator screenshots/video frames.
+
+
+**Orchestrator addendum (09:45):** fix/mobile-crash-ibm-chart merged (b7bba9f4) with a per-row error boundary, but its **root cause is UNVERIFIED** (no Hermes VM off-device). The simulator runs Hermes with Apple's Intl, so: replay the IBM chart (`.tentacle/tmp/mobile-crash-ibm-chart/session.jsonl`; chart args: line, x type date, y decimals 2, unit "$") in the simulator, confirm whether one of the three Intl calls in `docs/fix/mobile-crash-ibm-chart.md` (DateTimeFormat with `timeZone: undefined`, NumberFormat 2-decimals grouping, currency formatToParts) throws under Hermes-iOS, then fix the cause (the chart must render, not just fall back) with a regression test, and record the verified cause in that doc's Review or here.
+
 *— claude-opus-5-5 (orchestrator), 2026-11-17*
 
 ## Implementation
@@ -106,6 +112,36 @@ alone passes 43/43, so it looks like a timing flake under full-suite load. The
 skip count is 5, against the 3 opt-in skips in AGENTS §6; not investigated.
 
 *— claude-opus-5-5 (executor), 2026-11-17*
+
+### Fix round 1
+Only `apps/mobile/test/artifact-gallery-wiring.test.ts` changed. No production code changed.
+- **R1 (inset pin vacuous) — FIXED.** The test slices `App.tsx` from
+  `name="ArtifactGallery"` to `<ArtifactGalleryScreen`, so it gets the whole
+  `options={({ route }) => …}` arrow. Before, it cut at the arrow's `>`. It also asserts that the
+  slice holds `options=`.
+- **R2 (chart-bytes pin vacuous) — FIXED.** `toContain("phase.text")` is replaced by
+  two pins: `const text = ready?.text ?? "";` and a match for
+  `<ChartFullScreen … tool={{ name: "chart", args: text, status: "ok" }}`.
+- **R3 (sweep not run) — NOT FIXED.** The permission gate refused
+  `E2E_DEVICE=0B43D716-… bun apps/mobile/e2e/run.ts --ios 26 --only 01-shell` again.
+  There are still no `shots/` and no `### Sweep results`. Bugs 1–2 have no pixel
+  check, and bugs 3–4 have not been re-checked. Someone with harness approval must run it.
+
+Red → green. Each mutation is applied to the source, then reverted from a backup
+copy in `.tentacle/tmp/mobile-qa-sweep/`. "Old test" means the HEAD version of the test file:
+| mutation | old test | new test |
+|---|---|---|
+| M1: `App.tsx` gallery options gets `presentation: "modal"` | 9 pass / 0 fail (vacuous) | **1 fail**: "the gallery header takes the top inset unless the route is a sheet", `Expected: true Received: false` |
+| M2: modal `args: text` → `args: ""` | 9 pass / 0 fail (vacuous) | **1 fail**: "a chart artifact OPENS as the full-screen chart…" |
+| M3: modal `args: text` → `args: failedText` | — | **1 fail**: same test |
+| restored | — | 9 pass / 0 fail |
+
+Gate: `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bun run lint` clean (1966 files). The formatter fix came from `biome check --write` on the
+test. Full `bun test`: 14362 pass / 5 skip / 0 fail. The round-0 daemon flake did not recur.
+The 5 skips are the same as in round 0 and were not investigated.
+
+*— claude-opus-5-5 (executor, fix round 1), 2026-11-17*
 
 ## Review
 

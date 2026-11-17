@@ -110,7 +110,11 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     expect(viewer).toContain('body === "chart"');
     expect(viewer).toContain("<ChartFullScreen");
     expect(viewer).toContain('name: "chart"');
-    expect(viewer).toContain("phase.text");
+    // The chart is given the READY read's bytes (not the failure text, not "").
+    expect(viewer).toContain('const text = ready?.text ?? "";');
+    expect(viewer).toMatch(
+      /<ChartFullScreen[\s\S]*?tool=\{\{ name: "chart", args: text, status: "ok" \}\}/,
+    );
     // Reduce Motion is the app's single hook, never a second prop read.
     expect(viewer).toContain("useReduceMotion");
     // A `chart` viewer's bytes are TEXT: it must not take the image/PDF uri path.
@@ -132,7 +136,12 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     const app = read("App.tsx");
     const at = app.indexOf('name="ArtifactGallery"');
     expect(at).toBeGreaterThan(-1);
-    const options = app.slice(at, app.indexOf(">", app.indexOf("options=", at)));
+    // The route's whole declaration, from its name to the screen it renders: an
+    // `options={({ route }) => …}` arrow contains a ">", so never cut there.
+    const end = app.indexOf("<ArtifactGalleryScreen", at);
+    expect(end).toBeGreaterThan(at);
+    const options = app.slice(at, end);
+    expect(options).toContain("options=");
     const sheet = /presentation:\s*"(modal|formSheet|pageSheet)"/.test(options);
     const gallery = read("src", "screens", "ArtifactGallery.tsx");
     expect(gallery.includes("insetTop={false}")).toBe(sheet);
