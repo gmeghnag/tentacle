@@ -1,8 +1,9 @@
 /**
  * The chart's data table (docs/feat/model-charts.md D6, table A, slice C7): a
  * dumb renderer of `tableView` — header, then one row per x, tabular figures,
- * monospace (owner, rev 2). It has no accessibility of its own: it sits inside
- * the chart's ONE element, whose label is the summary.
+ * monospace (owner, rev 2). It is NOT inside the chart's one accessibility
+ * element in table mode (ChartView drops it there): the header row reads the
+ * summary and each row is its own VoiceOver stop.
  */
 import type { JSX } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
@@ -16,9 +17,24 @@ export interface ChartTableProps {
   readonly testID: string;
   /** Full screen bounds the table's height (it scrolls); inline it grows. */
   readonly maxHeight?: number;
+  /** The chart's computed summary: spoken once, on the header row. */
+  readonly summary?: string;
+  /** VoiceOver's custom actions, carried by the header row (the chart's own
+   * root is not an accessibility element in table mode — this is the way back
+   * to the chart). */
+  readonly actions?: readonly { readonly name: string; readonly label: string }[];
+  readonly onAction?: (name: string) => void;
 }
 
-export function ChartTable({ table, tokens, testID, maxHeight }: ChartTableProps): JSX.Element {
+export function ChartTable({
+  table,
+  tokens,
+  testID,
+  maxHeight,
+  summary,
+  actions,
+  onAction,
+}: ChartTableProps): JSX.Element {
   const cell = (text: string, c: number, head: boolean) => (
     <Text
       // Columns are positional; a header may repeat a name.
@@ -40,13 +56,26 @@ export function ChartTable({ table, tokens, testID, maxHeight }: ChartTableProps
       style={maxHeight === undefined ? undefined : { maxHeight }}
       scrollEnabled={maxHeight !== undefined}
     >
-      <View style={[styles.row, { borderBottomColor: tokens.guideStrong }]}>
+      <View
+        style={[styles.row, { borderBottomColor: tokens.guideStrong }]}
+        // The header reads the summary (once) and carries the actions.
+        accessible
+        accessibilityLabel={summary ?? table.header.filter(Boolean).join(", ")}
+        accessibilityActions={actions === undefined ? undefined : [...actions]}
+        onAccessibilityAction={(e) => onAction?.(e.nativeEvent.actionName)}
+      >
         {table.header.map((h, c) => cell(h, c, true))}
       </View>
       {table.rows.map((r, i) => (
         // Rows are positional (one per x; x labels may repeat).
-        // biome-ignore lint/suspicious/noArrayIndexKey: see above
-        <View key={`r${i}`} style={[styles.row, { borderBottomColor: tokens.guide }]}>
+        <View
+          // biome-ignore lint/suspicious/noArrayIndexKey: see above
+          key={`r${i}`}
+          style={[styles.row, { borderBottomColor: tokens.guide }]}
+          // One VoiceOver stop per row (the cells alone would be one stop each).
+          accessible
+          accessibilityLabel={[table.header[0], ...r].filter(Boolean).join(", ")}
+        >
           {r.map((v, c) => cell(v, c, false))}
         </View>
       ))}

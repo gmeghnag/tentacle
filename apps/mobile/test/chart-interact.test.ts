@@ -122,6 +122,20 @@ describe("tableView — table A's Δ column", () => {
     expect(t?.rows[9]?.at(-1)).toBe("▲ 26,8%");
     expect(t?.rows[11]?.at(-1)).toBe("");
   });
+  test("three series keep the plain table: Δ is a two-series statement only", () => {
+    const three = spec({
+      type: "line",
+      title: "t",
+      labels: ["a", "b"],
+      datasets: [
+        { label: "A", data: [1, 2] },
+        { label: "B", data: [2, 3] },
+        { label: "C", data: [3, 4] },
+      ],
+    });
+    const plain = { header: ["", "A", "B", "C"], rows: [["a", "1", "2", "3"]] };
+    expect(tableView(three, plain, IT)).toBe(plain);
+  });
   test("stacked, single-series and pie keep the plain table", () => {
     const stacked = spec({
       type: "bar",
@@ -152,6 +166,26 @@ describe("chartCsv — Share", () => {
     expect(csvCell(-5)).toBe("-5");
     expect(csvCell("a\nb")).toBe('"a\nb"');
     expect(csvCell(null)).toBe("");
+  });
+  test("a negative numeric x / label stays a number, not a formula-quoted text cell", () => {
+    const sc = spec({
+      type: "scatter",
+      title: "t",
+      x: { type: "number" },
+      datasets: [
+        { label: "A", data: [{ x: -3, y: 1 }] },
+        { label: "B", data: [{ x: 2, y: -4 }] },
+      ],
+    });
+    expect(chartCsv(sc).split("\n")).toEqual(["x,A,B", "-3,1,", "2,,-4"]);
+    const line = spec({
+      type: "line",
+      title: "t",
+      x: { type: "number" },
+      labels: [-2, -1, 0],
+      datasets: [{ label: "s", data: [1, 2, 3] }],
+    });
+    expect(chartCsv(line).split("\n")).toEqual(["x,s", "-2,1", "-1,2", "0,3"]);
   });
   test("point form: one row per point, its own column", () => {
     const sc = spec({

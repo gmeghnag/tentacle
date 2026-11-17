@@ -2255,3 +2255,71 @@ before *Fix round 1* below, which is the round that answers them.
 - **Reviewer = same model family as the C7 executor** (claude-opus-5-5, fresh context only): shared blind spots possible.
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Fix round 1
+
+Scope: the C7 review's two MEDIUMs + its MEDIUM test gap. Branch `feat/model-charts`,
+red before green for each, mutation-checked (all reverted; tree left holding only the fixes).
+
+**MEDIUM 1 — FIXED: Share CSV no longer corrupts a numeric x** (`apps/mobile/src/chart-interact.ts:98`, `:103`).
+`chartCsv` pushed `String(p.x)` / `String(label)`, so a negative numeric coordinate reached
+`csvCell` as TEXT and got the formula guard's `'`. Both now pass the value through
+(`lines.push([p.x, …])`, `lines.push([label, …])`) and `csvCell` writes a number raw. Text
+labels keep the guard (`-x` → `'-x`).
+
+- Repro before (`bun .tentacle/tmp/model-charts/c7-csv.ts`): `'-3,1` / `'-2,1`, `'-1,2` — y column raw.
+- Test (RED first): `chart-interact.test.ts` "a negative numeric x / label stays a number, not a
+  formula-quoted text cell" — scatter `{x:-3,y:1}` → `-3,1,`, line `labels:[-2,-1,0]` → `-2,1`.
+  Failed `Expected -3,1, / Received '-3,1,` before the fix.
+- Mutation: M1 (`p.x` → `String(p.x)`) RED; M1b (`label` → `String(label)`) RED.
+
+**MEDIUM 2 — FIXED: the table is reachable by VoiceOver in table mode, and the way back survives.**
+`apps/mobile/src/ui/chart/ChartView.tsx:69` — the root is now `accessible={mode === "chart"}`
+(and `accessibilityRole` likewise; `accessibilityActions` move off it in table mode), so the
+table's children are no longer swallowed by one element. `apps/mobile/src/ui/chart/ChartTable.tsx`
+gives the header row the summary as its label and each DATA row its own `accessible` stop
+(`label = x, v1, v2, Δ`). Carrying the actions onto the header row (new `actions`/`onAction`
+props) keeps `showChart`/`activate` usable — otherwise the toggle would be a one-way trip for a
+screen-reader user; `ChartFullScreen.tsx:211` wires the same for the full-screen table
+(`showChart` → `onMode("chart")`).
+
+- Tests (RED first): `chart-view.test.ts` "table mode: the chart's one element lets go, so the
+  cells are focusable" (root `accessible === false`; stops = 1 header + 12 rows; the first row's
+  label is `gennaio, 11.800 €, 10.200 €, ▲ 15,7%`), "table mode: VoiceOver can still get back to
+  the chart (the header carries the actions)" and the full-screen twin. Both failed on the old
+  code (`Expected: false / Received: true`).
+- Mutations: M2 (`accessible` back on the root) RED ×2; M2b (row labels dropped) RED;
+  M2c (inline actions dropped) RED; M2d (full-screen actions dropped) RED; M2e (root keeps the
+  actions in table mode) RED.
+
+**MEDIUM 3 — FIXED: the two-series Δ boundary is pinned.** `chart-interact.test.ts`
+"three series keep the plain table: Δ is a two-series statement only" (3 datasets → the caller's
+table returned by identity). Mutation M3 (`!== 2` → `< 2`) RED on it — the exact mutation the
+review reported surviving.
+
+**Drift from the Implementation:** none in the plan's shape. Two additions beyond the review's
+literal "fix": the row-level accessibility stops in `ChartTable` (without them `accessible={false}`
+on the root would expose 13 unlabelled leaf `Text`s rather than a readable table) and carrying the
+custom actions onto the header row (see MEDIUM 2) — both inside the reviewer's "or give the table
+its own accessible rows".
+
+**Untouched (review's `Low` items, still open):** the `ChartAppear` replay on a table → chart
+toggle, and the KPI Δ when series 1 is hidden.
+
+**Gate:** `bunx tsc --noEmit` + `tsc -p apps/mobile` + `tsc -p apps/relay` clean;
+`bun run lint` clean (1837 files); `bun test` → 13366 pass / 5 skip / 0 fail (13371 across 950
+files; the 5 skips are the opt-in k8s ×2, docker ×2, slow ×1). Note: a full-suite run under
+bun 1.4.3 prepends `{"resident":false}` to the repo's only `.snap` file
+(`packages/tui/test/__snapshots__/chart-lines.test.ts.snap`); it is a bun artifact, not a
+behaviour change, and was removed.
+The full-suite run was taken after all code fixes; the only changes after it were
+`biome check --write` formatting of one test and a comment line in `ChartTable.tsx`
+(no behaviour), re-confirmed by `tsc` + `lint` green and the 52 narrow chart tests green
+on the final tree. Mutation runner: `.tentacle/tmp/model-charts/fixr1-mut.ts` (its own copy needed
+under the main checkout — the sandbox only writes inside this worktree).
+
+**Still unverified (unchanged from the review):** P9 on a device, e2e flow `32`, the scrub's
+native-scroll interplay, and how VoiceOver actually announces the rows (the tree is pinned, the
+audio is not).
+
+*— claude-opus-5-5, 2026-11-17*

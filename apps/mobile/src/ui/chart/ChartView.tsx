@@ -66,10 +66,13 @@ export function ChartView({
     <View
       testID={testID}
       style={styles.root}
-      accessible
-      accessibilityRole="image"
+      // One element reads the summary — in CHART mode only. In table mode the
+      // table must be reachable row by row (its rows are their own elements),
+      // so the root stops being an accessibility element there.
+      accessible={mode === "chart"}
+      accessibilityRole={mode === "chart" ? "image" : undefined}
       accessibilityLabel={layout.summary}
-      accessibilityActions={chartA11yActions(mode, locale)}
+      accessibilityActions={mode === "table" ? undefined : chartA11yActions(mode, locale)}
       onAccessibilityAction={(e) => {
         const action = chartA11yEffect(e.nativeEvent.actionName);
         if (action !== null) onAction?.(action);
@@ -96,6 +99,12 @@ export function ChartView({
           table={tableView(view.spec, layout.table, locale)}
           tokens={tokens}
           testID={`${testID}-table`}
+          summary={layout.summary}
+          actions={chartA11yActions("table", locale)}
+          onAction={(name) => {
+            const action = chartA11yEffect(name);
+            if (action !== null) onAction?.(action);
+          }}
         />
       ) : (
         <View testID={`${testID}-plot`} {...plotHandlers}>

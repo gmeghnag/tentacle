@@ -95,15 +95,14 @@ export function chartCsv(spec: ChartSpec): string {
     spec.datasets.forEach((dataset, k) => {
       for (const p of dataset.data) {
         if (typeof p !== "object" || p === null) continue;
-        lines.push([String(p.x), ...spec.datasets.map((_, c) => (c === k ? p.y : null))]);
+        // A numeric x stays a number: stringifying it would get it the formula
+        // guard's `'` and turn a coordinate into text.
+        lines.push([p.x, ...spec.datasets.map((_, c) => (c === k ? p.y : null))]);
       }
     });
   } else {
     (spec.labels ?? []).forEach((label, i) => {
-      lines.push([
-        String(label),
-        ...spec.datasets.map((_, k) => datasetValues(spec, k)[i] ?? null),
-      ]);
+      lines.push([label, ...spec.datasets.map((_, k) => datasetValues(spec, k)[i] ?? null)]);
     });
   }
   return lines.map((cells) => cells.map(csvCell).join(",")).join("\n");

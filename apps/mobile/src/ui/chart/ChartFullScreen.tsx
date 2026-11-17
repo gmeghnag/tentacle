@@ -21,6 +21,8 @@ import {
   type ChartUiWords,
   type Kpi,
   type SeriesChip,
+  chartA11yActions,
+  chartA11yEffect,
   chartCsv,
   chartUiWords,
   fullScreenKpis,
@@ -209,6 +211,11 @@ export function ChartFullScreenView(p: ChartFullScreenViewProps): JSX.Element {
             tokens={tokens}
             testID={`${testID}-table`}
             maxHeight={p.tableHeight}
+            summary={view.layout.summary}
+            actions={chartA11yActions("table", p.locale)}
+            onAction={(name) => {
+              if (chartA11yEffect(name) === "showChart") p.onMode("chart");
+            }}
           />
         ) : (
           <View

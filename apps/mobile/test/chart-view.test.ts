@@ -317,6 +317,46 @@ describe("ChartView — C7: scrub, table, VoiceOver actions, gestures", () => {
     expect(tree[0]?.props.accessibilityLabel).toBe(view.layout.summary);
   });
 
+  test("table mode: the chart's one element lets go, so the cells are focusable", () => {
+    const view = viewOf(REVENUE);
+    const chart = walk(ChartView({ view, testID: "chart-c1" }));
+    const table = walk(ChartView({ view, testID: "chart-c1", mode: "table" }));
+    // Chart mode: one element (the summary). Table mode: NOT one element, else
+    // the table's cells are children of a single VoiceOver element.
+    expect(chart[0]?.props.accessible).toBe(true);
+    expect(table[0]?.props.accessible).toBe(false);
+    // …and the table is reachable: the header reads the summary, and every
+    // data row is its own stop (else the table would be one silent block).
+    const stops = all(table, "View").filter((v) => v.props.accessible === true);
+    expect(stops[0]?.props.accessibilityLabel).toBe(view.layout.summary);
+    expect(stops.length).toBe(1 + view.layout.table.rows.length);
+    expect(stops[1]?.props.accessibilityLabel).toBe("gennaio, 11.800 €, 10.200 €, ▲ 15,7%");
+  });
+
+  test("table mode: VoiceOver can still get back to the chart (the header carries the actions)", () => {
+    const view = viewOf(REVENUE);
+    const got: string[] = [];
+    const tree = walk(
+      ChartView({
+        view,
+        testID: "chart-c1",
+        mode: "table",
+        onAction: (a) => got.push(a),
+      }),
+    );
+    // The root is no longer the element: the way back lives on the table's
+    // first (header) stop, otherwise the toggle would be a one-way trip.
+    expect(tree[0]?.props.accessibilityActions).toBeUndefined();
+    const stops = all(tree, "View").filter((v) => v.props.accessible === true);
+    const head = stops[0];
+    const names = (head?.props.accessibilityActions as { name: string }[]).map((a) => a.name);
+    expect(names).toEqual(["activate", "showChart"]);
+    (head?.props.onAccessibilityAction as (e: unknown) => void)({
+      nativeEvent: { actionName: "showChart" },
+    });
+    expect(got).toEqual(["showChart"]);
+  });
+
   test("VoiceOver actions: open + show table, routed to onAction by name", () => {
     const view = viewOf(REVENUE);
     const got: string[] = [];
@@ -418,7 +458,21 @@ describe("ChartFullScreenView — T7: landscape modal, toggles, table, share, cl
     expect(JSON.stringify(texts(scrubbing))).toContain(scrub?.hero.num ?? "∅");
   });
 
-  test("table mode: the table with Δ in the plot's place", () => {
+  test("table mode: the full screen's table also carries the way back (showChart → chart)", () => {
+    const { tree, calls } = setup({ mode: "table" });
+    const stops = all(tree, "View").filter(
+      (v) => v.props.accessible === true && v.props.accessibilityActions !== undefined,
+    );
+    const head = stops[0];
+    const names = (head?.props.accessibilityActions as { name: string }[]).map((a) => a.name);
+    expect(names).toEqual(["activate", "showChart"]);
+    (head?.props.onAccessibilityAction as (e: unknown) => void)({
+      nativeEvent: { actionName: "showChart" },
+    });
+    expect(calls).toEqual(["mode:chart"]);
+  });
+
+  test("table mode: the table with Δ in the plot's place (the plot was the element, the table is reachable)", () => {
     const { tree } = setup({ mode: "table" });
     expect(all(tree, "Svg")).toEqual([]);
     expect(byId(tree, "ScrollView", "chart-c1-full-table")?.props.style).toEqual({
