@@ -229,3 +229,15 @@ Executor behaviour: honest. It marked the task PARTIAL, stated what was unverifi
 - **Not yet done:** the orchestrator addenda added in this commit (09:33 ∴ size, 09:36 Thinking animation, 09:45 IBM chart cause) have no implementation on this branch yet. They are scope still owed by the task, not defects in this diff.
 
 *— claude-opus-5-5, 2026-11-17* (fresh context, same model family as the executor)
+
+### Round 3
+
+**Verdict: REQUEST-CHANGES.**
+
+- **The ∴ size change (09:33): verified by mutation.** I set `THEREFORE_SIZE` back to 10 (`StepNode.tsx:23`) and the "every ∴ … 12–13 pt" test fails. Reverted. The pixels are still unverified.
+- **The IBM chart TypeError fix (09:45/09:52): its test has teeth.** I removed the `typeof` guard in `scale.ts:113` and "month date ticks are identical…" fails. Reverted. The two `formatToParts` call sites in `src` are the only ones (grep), and both are guarded.
+- **NEW MEDIUM: the guard catches only a *missing* method, not a broken one** (`format.ts:87`, `scale.ts:113`). The root cause on Hermes-iOS is still unverified. If Apple-platform Hermes *has* `formatToParts` but it is a stub returning `[]` (plausible for a partial Intl), the guard does not fire, and the chart renders silently wrong. My probe `.tentacle/tmp/mobile-qa-sweep/rev/empty-parts.ts` gave `before ["$187.25", [2023,2024,2025 Jan 1]]` and `after ["187.25 $", [0]]`: the "$" moves after the number, and the date axis collapses to one 1970 tick. No crash, no fallback, nothing in the logs. This is the "silent wrong state" the brief forbids. Fix: also fall back when the parts lack what the code needs, i.e. no `currency` or `integer` part, or no `year` or `month` part. Add a test that stubs `formatToParts` to return `[]`. The alternative is to prove in the simulator, before closing, that the method is `undefined` on Hermes-iOS.
+- **Finding 3 (no simulator sweep) and the Thinking B+D animation (09:36): still OPEN, and not code defects.** They need harness access, or the owner's acceptance to split them into their own task.
+- **Regressions:** none. `packages/core/test` + `tool-rows-wiring` pass 682/0, `bun run lint` is clean (1967 files), and `bun run typecheck` is clean. After the reverts the tree is unchanged.
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, same model family as the executor)
