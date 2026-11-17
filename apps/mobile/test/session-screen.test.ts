@@ -881,3 +881,238 @@ describe("pull-to-refresh (fix/mobile-media-live item 3)", () => {
     expect(screen.state().refreshing).toBe(false);
   });
 });
+
+describe("foreground resync (docs/fix/mobile-open-at-end.md, item 2)", () => {
+  /** A session whose opens are counted, and whose history the test rewrites. */
+  function countingHarness() {
+    const sessions: FakeSession[] = [];
+    let opens = 0;
+    let history: { id: string; role: "user"; content: string; createdAt: string }[] = [];
+    let offline = false;
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "mac",
+      controller: createSessionController<SendableHandle>({
+        newSession: (id) => {
+          opens += 1;
+          const base = fakeSession(sessions, id);
+          return {
+            ...base,
+            open: offline ? () => Promise.reject(new Error("no link")) : base.open,
+            watch: (fn: (activity: SessionActivity) => void) => {
+              const off = base.watch(fn);
+              fn({ kind: "history", messages: history as never, reason: null });
+              return off;
+            },
+          } satisfies FakeSession;
+        },
+      }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    return {
+      screen,
+      sessions,
+      opens: () => opens,
+      setHistory: (texts: readonly string[]) => {
+        history = texts.map((text, i) => ({
+          id: `m${i}`,
+          role: "user" as const,
+          content: text,
+          createdAt: new Date().toISOString(),
+        }));
+      },
+      goOffline: () => {
+        offline = true;
+      },
+      goOnline: () => {
+        offline = false;
+      },
+    };
+  }
+
+  test("a return to `active` resyncs once, silently (no pull spinner) [mutation: emit it → a spinner nobody pulled]", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    expect(h.opens()).toBe(1);
+    h.setHistory(["first", "second"]);
+    // The app leaves and comes back: the mount's own `active` is not a return.
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(1);
+    h.screen.appState("background");
+    h.screen.appState("active");
+    // Silent: the state the screen renders never says "refreshing".
+    const seen: boolean[] = [];
+    h.screen.subscribe((s) => seen.push(s.refreshing));
+    await settle();
+    expect(h.opens()).toBe(2);
+    expect(seen.every((refreshing) => !refreshing)).toBe(true);
+    expect(h.screen.state().transcript.rows.filter((r) => r.kind === "user")).toHaveLength(2);
+  });
+
+  test("the `inactive` then `background` pair is ONE departure; a later duplicate `active` is no resync", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.appState("inactive");
+    h.screen.appState("background");
+    h.screen.appState("active");
+    await settle(); // the resync settled
+    expect(h.opens()).toBe(2); // the mount + ONE resync
+    // A duplicate `active` (iOS) is not a new return: the departure was consumed.
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(2);
+  });
+
+  test("an `inactive` → `active` pair is NOT a return (Control Center, a call banner, the Face ID prompt) [mutation: any non-active state sets appWasAway]", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    expect(h.opens()).toBe(1);
+    h.screen.appState("active"); // the mount's own `active`
+    // iOS reports `inactive` without the app ever leaving — the repo already
+    // decided this (`app-lock.ts`: "`inactive` is not leaving the app").
+    h.screen.appState("inactive");
+    expect(h.screen.appState("active")).toBe(false);
+    await settle();
+    expect(h.opens()).toBe(1); // no re-attach, no re-read of every snapshot page
+    // Repeated blips do not accumulate a departure either.
+    h.screen.appState("inactive");
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(1);
+    // A real departure still counts — even after an `inactive` that preceded it.
+    h.screen.appState("inactive");
+    h.screen.appState("background");
+    expect(h.screen.appState("active")).toBe(true);
+    await settle();
+    expect(h.opens()).toBe(2);
+  });
+
+  test("offline: no foreground resync (the redial re-attach owns the recovery)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.link(false);
+    h.screen.appState("background");
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(1);
+    expect(h.screen.state().notice).toBeNull();
+  });
+
+  test("a screen that never attached (a failed open) does not resync on foreground", async () => {
+    const h = countingHarness();
+    h.goOffline();
+    await h.screen.open();
+    await settle();
+    expect(h.screen.state().status.phase).toBe("failed");
+    h.goOnline();
+    h.screen.appState("active");
+    h.screen.appState("background");
+    h.screen.appState("active");
+    await settle();
+    // Never attached: the Retry row is what re-attaches, not a silent re-read.
+    expect(h.opens()).toBe(1);
+  });
+
+  test("a return to `active` reports that it STARTED the re-attach, so the screen can re-arm its silent landing (Review round 1, MEDIUM 3)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    // The mount's own `active`, then a duplicate: neither re-attaches.
+    expect(h.screen.appState("active")).toBe(false);
+    h.screen.appState("background");
+    // A real return: true, exactly once (the screen arms its landing on it).
+    expect(h.screen.appState("active")).toBe(true);
+    await settle();
+    expect(h.opens()).toBe(2);
+    // And a duplicate `active` after it reports nothing (no arming, no resync).
+    expect(h.screen.appState("active")).toBe(false);
+  });
+
+  test("a foreground that cannot re-attach reports false (offline, or no live attach)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.link(false);
+    h.screen.appState("background");
+    expect(h.screen.appState("active")).toBe(false); // the link is down: the redial owns recovery
+    h.screen.link(true);
+    // A screen that never attached (a failed open) has no live attach to re-read.
+    const failed = countingHarness();
+    failed.goOffline();
+    await failed.screen.open();
+    await settle();
+    failed.goOnline();
+    expect(failed.screen.state().status.phase).toBe("failed");
+    failed.screen.appState("background");
+    expect(failed.screen.appState("active")).toBe(false);
+  });
+
+  test("a foreground resync that appends nothing does not move or complain", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.appState("background");
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(2);
+    expect(h.screen.state().notice).toBeNull();
+    expect(h.screen.state().transcript.rows).toHaveLength(1);
+  });
+
+  test("a foreground resync WHILE A TURN STREAMS shows each row once (no duplicate rows)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    // Another device's turn is running (or this one's, read back by the re-attach).
+    h.sessions[0]?.emitActivity({
+      kind: "turn",
+      turnId: "t-live",
+      events: (async function* () {
+        yield { type: "user_message", text: "streaming" } as SessionEvent;
+        yield { type: "text", delta: "an answer" } as SessionEvent;
+      })(),
+      cancel: () => {},
+    });
+    await settle();
+    const users = () =>
+      h.screen.state().transcript.rows.flatMap((r) => (r.kind === "user" ? [r.text] : []));
+    expect(users()).toEqual(["first", "streaming"]);
+    // The daemon's snapshot already has the streaming prompt: the re-attach's
+    // history replaces the rows, so it must not appear a second time.
+    h.setHistory(["first", "streaming"]);
+    h.screen.appState("background");
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(2);
+    expect(users()).toEqual(["first", "streaming"]);
+  });
+
+  test("an already-running pull makes the foreground resync a no-op (one re-read, not two)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.appState("background");
+    h.screen.appState("active");
+    const pull = h.screen.resync();
+    await settle();
+    await pull;
+    expect(h.opens()).toBe(2); // one resync from the foreground edge, the pull's was refused
+  });
+});

@@ -30,6 +30,7 @@ import type {
 import { DomainErrorCode } from "@tentacle/transport";
 import { RpcError } from "@tentacle/transport";
 import { type ActivityMemory, emptyMemory, markOpened, onSubagents } from "./activity-memory.ts";
+import type { AppStateName } from "./app-lock.ts";
 import type { ArtifactFeed } from "./artifact-feed.ts";
 import {
   type ArtifactJoin,
@@ -400,6 +401,22 @@ export interface SessionScreenController {
   pressReturn(): void;
   /** Up/Down (the client's `onLinkStatus`): the banner's `reconnecting`. */
   link(up: boolean): void;
+  /**
+   * The app came FOREGROUND (docs/fix/mobile-open-at-end.md, item 2): resync
+   * silently, once per transition, when a session is open and the link is up.
+   * The bug class `docs/fix/mobile-media-live.md` fixed (updates lost while the
+   * link stayed up) had no automatic recovery; this is it — the same
+   * `resync()` the pull-to-refresh runs, through the same attach path.
+   *
+   * The input is the app state itself, not a bare "active" edge: iOS delivers
+   * `active` twice for one foreground, and only the transition that FOLLOWS a
+   * departure may resync (the first `active` is the mount's own open).
+   *
+   * Returns whether this call STARTED a re-attach: the screen then re-arms its
+   * silent landing (Review round 1, MEDIUM 3), so a foreground resync's history
+   * lands at the end without being seen scrolling — exactly what a pull does.
+   */
+  appState(state: AppStateName): boolean;
   /** Session info opened: start every pull (F1–F5 live in the controller). */
   openInfo(): Promise<void>;
   /** The sheet closed: drop in-flight answers and stop following the link (F5). */
@@ -478,7 +495,7 @@ export interface SessionScreenController {
    * the owner did by hand. Replaces the rows from the daemon's history, never
    * appends them; a failed re-attach keeps the rows and says so once.
    */
-  resync(): Promise<void>;
+  resync(silent?: boolean): Promise<void>;
   /** Unsubscribe everything (the screen's cleanup, after `leave`). */
   dispose(): void;
 }
@@ -562,6 +579,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   let ownControl: AbortController | null = null;
   let disposed = false;
   const unmount = new AbortController();
+  /**
+   * The controller object itself, held here because the `appState` method below
+   * needs to reach it (a foreground return runs `resync`). Assigned once, at the
+   * end; only ever read at call time.
+   */
+  const holder: { current: SessionScreenController | null } = { current: null };
   /** THIS screen's requester: the identity `releaseRequester` withdraws by. */
   const mounted: PermissionRequester = (req, options) => sheet.requester(req, options);
 
@@ -625,6 +648,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         void info.loadContext().catch(() => {});
       }
     },
+    // A live row's arrival time (docs/fix/mobile-open-at-end.md, slice B): the
+    // stamp a swipe shows. Taken when the fold CREATES the row, never on upsert.
+    now: () => deps.now(),
   });
 
   /**
@@ -836,7 +862,23 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    * Deliberately not a new session path (AGENTS §7): it is `attach(false)`, the
    * same call the screen's mount makes.
    */
+  /**
+   * The pull-to-refresh GUARD (one re-attach at a time), and `pulling`, which is
+   * the spinner the person sees: a foreground resync (item 2) runs without one.
+   */
   let refreshing = false;
+  let pulling = false;
+  /**
+   * The app's foreground transition (item 2): whether it has been AWAY since the
+   * screen was built. Only a RETURN resyncs — the screen is built while the app
+   * is on screen, so a plain `active` with no departure before it is not one.
+   * Only `background` sets it: iOS reports `inactive` without the app leaving
+   * (Control Center, the notification shade, a call banner, a permission alert,
+   * the Face ID prompt itself), and the repo already decided that `inactive` is
+   * not leaving the app (`app-lock.ts`). Counting it cost a second full re-read
+   * on a single return with the app lock on (Review round 5, MEDIUM 1).
+   */
+  let appWasAway = false;
 
   function state(): SessionScreenState {
     return {
@@ -853,7 +895,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       sends,
       activity,
       schedules,
-      refreshing,
+      refreshing: pulling,
       artifacts: join,
     };
   }
@@ -1335,7 +1377,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     );
   }
 
-  return {
+  const controller: SessionScreenController = {
     state,
     subscribe(listener) {
       listeners.add(listener);
@@ -1365,6 +1407,35 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     link(up) {
       feed.link(up);
+    },
+    appState(name) {
+      // The app's foreground gate (item 2). The FIRST `active` is the mount, not
+      // a return: nothing to recover, and the open's own attach is the read. A
+      // return runs the SAME `resync()` the pull does — silently (no pull
+      // spinner: `resync`'s own re-entry guard makes a concurrent pull a no-op)
+      // — and never while offline, where the redial re-attach owns the recovery.
+      // ONLY `background` is a departure: `inactive` is Control Center, a call
+      // banner, a permission alert or the Face ID prompt itself, not the app
+      // leaving (`app-lock.ts`) — counting it resynced twice per return with the
+      // app lock on (Review round 5, MEDIUM 1).
+      if (name !== "active") {
+        if (name === "background") {
+          appWasAway = true;
+        }
+        return false;
+      }
+      if (!appWasAway) {
+        return false; // a duplicate `active` (iOS) — at most one resync per return
+      }
+      appWasAway = false;
+      if (disposed || refreshing || attaching || status.phase !== "open") {
+        return false; // a pull is already re-reading, or there is no live attach
+      }
+      if (transcript.link === "down") {
+        return false;
+      }
+      void holder.current?.resync(true);
+      return true;
     },
     async openInfo() {
       await info?.open();
@@ -1612,14 +1683,19 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       await deps.controller.leave(deps.sessionId);
       emit();
     },
-    async resync() {
+    async resync(silent = false) {
       // Already running, or nothing to re-read: a second pull is a no-op (the
       // list would otherwise re-enter `attach` and be refused by its own guard).
       if (refreshing || disposed) {
         return;
       }
       refreshing = true;
-      emit();
+      // A FOREGROUND resync (item 2) is silent: no pull spinner, because the
+      // person made no gesture and nothing is left to look ignored.
+      if (!silent) {
+        pulling = true;
+        emit();
+      }
       const before = transcript.rows.length;
       try {
         // The owner's own recovery: leave, then re-attach. `attach` is the ONE
@@ -1642,6 +1718,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         }
       } finally {
         refreshing = false;
+        pulling = false;
         emit();
       }
     },
@@ -1662,4 +1739,6 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       releaseRequester();
     },
   };
+  holder.current = controller;
+  return controller;
 }

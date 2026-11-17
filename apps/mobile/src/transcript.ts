@@ -72,6 +72,13 @@ export type TranscriptInput =
   | {
       readonly type: "history";
       readonly messages: readonly ChatMessage[];
+      /**
+       * Each message's arrival time, index-aligned with `messages`
+       * (docs/fix/mobile-open-at-end.md, slice B), `0` = not known. Absent for an
+       * older daemon or a page the client could not pair, and then no row shows
+       * a time — never a mispaired one.
+       */
+      readonly times?: readonly number[];
       /** The barrier that caused it (`RemoteSession`'s activity reason). */
       readonly reason: "compact" | "context_reset" | "clear" | null;
       /** This client caused the compaction: another device's notice is not ours. */
@@ -218,8 +225,12 @@ function photosById(photos: readonly LocalPhoto[] | undefined): ReadonlyMap<stri
   return new Map((photos ?? []).map((photo) => [photo.id, photo]));
 }
 
-/** Fold one input into the transcript. */
-export function apply(state: State, input: TranscriptInput): State {
+/** Fold one input into the transcript. `now` is the RECEIPT time (epoch ms) a
+ * row created by this input takes as its arrival time (slice B) — absent when the
+ * caller has no clock (a unit fold), and then the row carries none. A history's
+ * rows never use it: their times are the daemon's (`input.times`). */
+export function apply(state: State, input: TranscriptInput, now?: number): State {
+  const at = now === undefined || now <= 0 ? {} : { at: now };
   switch (input.type) {
     case "history":
       return applyHistory(state, input);
@@ -240,7 +251,7 @@ export function apply(state: State, input: TranscriptInput): State {
       // fill goes with it, the session's totals stay.
       return apply(
         { ...state, lastTurnTokens: null },
-        { type: "history", messages: input.messages, reason: null },
+        { type: "history", messages: input.messages, ...withTimes(input.times), reason: null },
       );
     case "own_prompt":
       // The phone's own message: the refs AND the local files behind them, so
@@ -255,6 +266,7 @@ export function apply(state: State, input: TranscriptInput): State {
         ...(input.documents === undefined || input.documents.length === 0
           ? {}
           : { documents: input.documents }),
+        ...at,
       }));
     case "user_message":
       return push(state, (key) => ({
@@ -271,12 +283,18 @@ export function apply(state: State, input: TranscriptInput): State {
         // the client already trust-gated and sanitized, carried as sent. Absent
         // for every ordinary prompt and after a reload (option A).
         ...(input.schedule === undefined ? {} : { schedule: input.schedule }),
+        ...at,
       }));
     case "unsupported":
       return applyUnsupported(state, input.kind);
     default:
-      return applyAgentEvent(state, input);
+      return applyAgentEvent(state, input, at);
   }
+}
+
+/** `{times}` spreadable, or `{}` when the caller carries none (an older daemon). */
+function withTimes(times: readonly number[] | undefined): { times?: readonly number[] } {
+  return times === undefined ? {} : { times };
 }
 
 /** Begin a turn: the bracket the screen draws as its running indicator. */
@@ -320,24 +338,32 @@ function applyUnsupported(state: State, kind: string): State {
 }
 
 /** Append the daemon's history after what is shown (a context reset keeps the old transcript). */
-function appendHistory(state: State, messages: readonly ChatMessage[]): State {
-  return append(state, (nextKey) => historyRows(messages, nextKey));
+function appendHistory(
+  state: State,
+  messages: readonly ChatMessage[],
+  times?: readonly number[],
+): State {
+  return append(state, (nextKey) => historyRows(messages, nextKey, times));
 }
 
 /** The daemon's history replaced what is shown (a resync, `/clear`, a fresh attach). */
-function withHistory(state: State, messages: readonly ChatMessage[]): State {
+function withHistory(
+  state: State,
+  messages: readonly ChatMessage[],
+  times?: readonly number[],
+): State {
   // The measured fill described the chat this replace just dropped: forgotten,
   // or the header's bar would sit at the old conversation's figure for ever
   // (the TUI's `forgetContextFill`, `packages/tui/src/state.ts:645-654`).
   return append({ ...state, rows: [], lastTurnTokens: null }, (nextKey) =>
-    historyRows(messages, nextKey),
+    historyRows(messages, nextKey, times),
   );
 }
 
 function applyHistory(state: State, input: Extract<TranscriptInput, { type: "history" }>): State {
   if (input.reason === "context_reset") {
     // The old transcript stays; the new history follows it (decision 9).
-    return appendHistory(state, input.messages);
+    return appendHistory(state, input.messages, input.times);
   }
   if (input.reason === "compact") {
     // The transcript stays; another device's compaction says so once.
@@ -345,15 +371,19 @@ function applyHistory(state: State, input: Extract<TranscriptInput, { type: "his
       ? state
       : push(state, (key) => ({ kind: "notice", key, text: FOREIGN_COMPACTED_NOTICE }));
   }
-  return withHistory(state, input.messages);
+  return withHistory(state, input.messages, input.times);
 }
 
+/** The `at` a live row created by this fold input takes (`{}` when there is no clock). */
+type At = { readonly at?: number };
+
 /** Fold one `StreamEvent` (the turn's own stream, from here or another device). */
-function applyAgentEvent(state: State, event: StreamEvent): State {
+function applyAgentEvent(state: State, event: StreamEvent, at: At): State {
   switch (event.type) {
     case "text": {
       const last = lastTextRow(state, "assistant");
       if (last !== undefined) {
+        // An UPSERT: the row already has its time, and a delta never restamps it.
         return {
           ...state,
           rows: [
@@ -371,6 +401,7 @@ function applyAgentEvent(state: State, event: StreamEvent): State {
         key,
         text: event.delta,
         version: event.delta.length,
+        ...at,
       }));
     }
     case "reasoning": {
@@ -404,6 +435,7 @@ function applyAgentEvent(state: State, event: StreamEvent): State {
         label: toolLabel(event.name),
         args: event.arguments,
         status: "running",
+        ...at,
       }));
     case "tool_phase":
       return updateTool(state, event.id, (row) => {
@@ -411,7 +443,7 @@ function applyAgentEvent(state: State, event: StreamEvent): State {
         return status === row.status ? row : { ...row, status };
       });
     case "tool_result":
-      return applyToolResult(state, event);
+      return applyToolResult(state, event, at);
     // The daemon's OWN explanation for something the person would otherwise see
     // as a silent anomaly. Each is a notice, as in the TUI: dropping one hides
     // why a reply was cut, why the history was repaired, or that a turn produced
@@ -440,7 +472,7 @@ function applyAgentEvent(state: State, event: StreamEvent): State {
     case "steer":
       // A queued message was injected mid-turn: it belongs in the transcript at
       // the point it entered the conversation.
-      return push(state, (key) => ({ kind: "user", key, text: event.text, images: [] }));
+      return push(state, (key) => ({ kind: "user", key, text: event.text, images: [], ...at }));
     case "history_commit":
       // A bookkeeping marker: nothing to show.
       return state;
@@ -550,6 +582,7 @@ function subLabel(label: string): string {
 function applyToolResult(
   state: State,
   event: Extract<StreamEvent, { type: "tool_result" }>,
+  when: At,
 ): State {
   const at = state.rows.findLastIndex((row) => row.kind === "tool" && row.id === event.id);
   // A diff and an artifact are the two details an own card carries; each stays
@@ -590,6 +623,8 @@ function applyToolResult(
       label: toolLabel(event.name),
       args: "",
       status: "running",
+      // No call row existed (a truncated history): THIS is its creation.
+      ...when,
     }),
   );
 }

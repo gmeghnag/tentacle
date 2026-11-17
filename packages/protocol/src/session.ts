@@ -882,6 +882,15 @@ export const SnapshotResultSchema = z.object({
    * not report them", never "none left".
    */
   schedules: z.array(ScheduleRowSchema).optional(),
+  /**
+   * Each message's ARRIVAL time (docs/fix/mobile-open-at-end.md, slice B):
+   * epoch ms, same length and order as `messages`, `0` = not known (a message a
+   * reload/compaction re-logged was not received now). Display-only — a client
+   * that does not know the field drops it (§7 strip schemas), an older daemon
+   * sends none and every row simply shows no time. Never persisted on the
+   * laptop; never a `null` (the envelope convention for "no time").
+   */
+  times: z.array(z.number().int().min(0)).optional(),
 });
 export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 

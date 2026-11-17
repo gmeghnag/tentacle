@@ -5040,6 +5040,13 @@
           },
           "type": "array"
         },
+        "times": {
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
         "title": {
           "$ref": "#/$defs/SessionTitle"
         },
