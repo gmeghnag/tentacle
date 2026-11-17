@@ -113,6 +113,15 @@ function describe(model: DiagramModel): { headline: string; shape: string } {
 }
 
 /**
+ * How the tool's result line starts (`summarizeDiagram`). Exported because the
+ * clients read it back: a `diagram` call draws only when the daemon's mermaid
+ * ACCEPTED it, and this line — the accepted call's result, and nothing else's —
+ * is the only surviving evidence of that after a session is reopened
+ * (`transcript-history.ts` rebuilds every non-denied result as `ok`).
+ */
+export const DIAGRAM_RESULT_PREFIX = "Diagram shown to the user: ";
+
+/**
  * The diagram as a sentence: `Diagram shown to the user: flowchart "Flusso di
  * login" · 6 nodes · 6 links` — the tool's result, and what an old client reads.
  */
@@ -127,8 +136,8 @@ export function summarizeDiagram(
   const notes = options.notes ?? [];
   const line =
     notes.length > 0
-      ? `Diagram shown to the user: ${head} · ${notes.join(" · ")}`
-      : `Diagram shown to the user: ${head}`;
+      ? `${DIAGRAM_RESULT_PREFIX}${head} · ${notes.join(" · ")}`
+      : `${DIAGRAM_RESULT_PREFIX}${head}`;
   return { line, shape };
 }
 

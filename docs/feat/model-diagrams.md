@@ -335,7 +335,8 @@ Dependency order (slice in brackets):
    `diagram-highlight.ts` · `diagram-lines.ts` · `tui/src/theme.ts` (diagram tokens) [D3]
 4. `packages/tui/src/render-lines.ts` (branch + memo + expand) [D4]
 5. `apps/mobile/src/diagram-row.ts` · `diagram-theme.ts` · `diagram-bridge.ts` ·
-   `diagram-cache.ts` (pure) [D5]
+   `diagram-cache.ts` (pure) [D5] · `packages/core/src/diagram/summary.ts`
+   (`DIAGRAM_RESULT_PREFIX`, the accepted call's output, shared with both clients)
 6. `apps/mobile/scripts/gen-diagram-renderer.ts` · `assets/diagram/renderer.html`
    (generated) · `ui/diagram/DiagramRenderer.tsx` · `DiagramView.tsx` ·
    `DiagramFullScreen.tsx` · `screens/transcript/TranscriptRow.tsx` (branch at `:431`) [D6]
@@ -401,8 +402,13 @@ ink-testing-library frames (D4), recorded mermaid error fixtures (D1, no mermaid
   caption + drawing, no `● Diagram` header; Ctrl+O and a caption click expand to drawing
   + source; 2 resize 120 → 50 → 120 re-lays out; 3 a forged source → generic row;
   4 nothing written to `process.stdout` (spy).
-- **T5 (phone pure, D5)** 1 `diagramRow` decision (name/status/lint) mirrors
-  `chartRowSpec`; 2 `diagram-bridge` accepts exactly the shape, drops oversize/NaN/unknown
+- **T5 (phone pure, D5)** 1 `diagramRow` decision (name/status/lint) matches
+  `chartRowSpec` where the two have the same evidence (name, `error`, `denied`), and
+  adds the two a diagram needs: only a SETTLED call draws (`running`/`queued` keep the
+  generic row, as the TUI does — mermaid's verdict is daemon-side), and a reopened
+  call draws only when its output is the tool's result line (`DIAGRAM_RESULT_PREFIX`),
+  because the stored status cannot tell an accepted call from a refused one;
+  2 `diagram-bridge` accepts exactly the shape, drops oversize/NaN/unknown
   id/extra keys; 3 forged args → `null`; 4 cache key includes scheme + fontScale, LRU
   bound; 5 `diagram-theme` both schemes use mono and only chart tokens (no pure black).
 - **T6 (phone render, D6)** wiring test (the artifacts pattern): the display WebView has
@@ -1406,5 +1412,289 @@ M-B is the non-vacuity guard in the other direction: a guard that killed ALL dra
 1. **Finding 1 (HIGH): FIXED.** `render-lines.ts:814` now returns the generic row when `status === "error"`. Re-running my repro (`.tentacle/tmp/model-diagrams/rev-d4/err2.ts`): all four error-status cases now print `● Diagram Login` instead of a drawing. **Mutation:** I disabled the guard (`if (false)`). Result: **KILLED**, 2 fail (`diagram-row` "a FAILED diagram keeps the generic error row", `app-diagram` "live: a source mermaid REFUSES…"). The file was restored from a scratch copy and `git status` is clean. The new tests cover compact, expanded (`expandAll`) and denial (`denialReply` → `Denied`). They also check that the same args at `ok` still draw, so the guard is pinned on status, not on the source.
 2. **Finding 2 (MEDIUM): FIXED.** The D4 Execution is now signed `deepseek (variant not recorded)`, which matches `:425` and `27d396eb`. Note for the orchestrator, not blocking: the fix round is signed `claude-opus-5-5` (with harness evidence), while its commit subject `6dd5a41e … (deepseek)` says otherwise. The commit subject is the orchestrator's label, so the orchestrator should make the two agree.
 3. **Regressions:** the guard sits after the `running`/`queued` check and before the memo, so no error row is ever cached. `ok` rows are unchanged. `app-diagram` + `diagram-row` + `render-lines` + `app.test.tsx`: **257 pass, 0 fail**. `bun run lint`: clean, 1986 files. `bun run typecheck`: clean. Full `bun test` not re-run by me (the executor reports 14469 pass / 5 skip / 0 fail).
+
+*— claude-opus-5-5, 2026-11-17*
+## Execution — slice D5
+
+*Phone pure layer only: `diagram-row.ts`, `diagram-theme.ts`, `diagram-bridge.ts`,
+`diagram-cache.ts` and their four test files. Nothing of D6/D7 (no WebView, no
+renderer page, no artifact kind, no `present`) and nothing of D1–D4. `TODO.md` untouched.*
+
+### 0. Load-bearing check, re-run first — **HOLDS**
+
+D5's plan names P4 (the phone draws a call in its row's place: `chartRowSpec` →
+`null` → `ToolRowView`) and P8 (chart tokens + palette are the only colours) as its
+seams, plus D1's pure layer as its input. Re-run on this branch
+(`.tentacle/tmp/model-diagrams/d5/loadcheck.ts`, run under `bun`, i.e. the phone's
+own package graph):
+
+```
+lint.type            : flowchart
+model.kind           : flowchart
+summary.line         : Diagram shown to the user: flowchart "Login" · 3 nodes · 2 links · top to bottom
+describeDiagram      : flowchart Login: Richiesta → Token valido? → Ok
+DIAGRAM_CAPS.bytes   : 20480
+light tokens.label   : #000000 | page: #FFFFFF
+dark  tokens.label   : #F2F1EC | page: #1F1F1E
+sha256Hex('a')       : ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb
+chartRowSpec(ok)     : null
+chartRowSpec(error)  : null
+```
+
+So: core's diagram layer (lint → model → `summarizeDiagram`/`describeDiagram`) is
+reachable and runs from `apps/mobile`; the row decision this slice mirrors exists
+and returns `null` for the fixture above (its `args` are `{}` — the call is real,
+the fixture is not a chart, which is what "another tool / invalid spec → generic
+row" means); the chart tokens and both palettes are readable, and the phone's own
+sha-256 (`hash.ts`, `@noble/hashes`) works off `Bun`. What was missing is only the
+four modules.
+
+Narrow baselines before any edit: `apps/mobile/test/chart-row.test.ts` **12 pass**,
+`packages/core/test/diagram-*` **66 pass**.
+
+### 1. As built (dependency order)
+
+1. **Red first (§9).** The four test files were written before any module existed,
+   so the first run is the RED state — honestly an import error for each
+   (`Cannot find module '../src/diagram-bridge.ts'`, ×4). To make the red *an
+   assertion* rather than a compile error, each module was then written and the
+   tests re-run: **36 pass / 2 fail**, and each failure named a real defect:
+   - `diagram-cache`: a `|`-containing key was sanitised segment-wise, so
+     `base|../../etc|1` still passed `..` through → `diagrams/` was escapable
+     (the artifact cache's dot-rule was applied to the WHOLE name only for a
+     dot-only segment; a key's free parts are not segments). Fixed: any run of
+     2+ dots becomes `_`.
+   - `diagram-row`: the VoiceOver label was `describeDiagram`'s sentence RAW, so a
+     `<control byte>` inside a forged source's label reached a spoken string (the
+     caption was cleaned, the label was not). Fixed: the label goes through the
+     same C0/C1 filter; the canonical source deliberately does NOT (the `Sorgente`
+     tab must show what the model wrote).
+   After both fixes: **38 pass / 0 fail**.
+2. `apps/mobile/src/diagram-bridge.ts` — `parseDiagramReply(raw, asked)` plus the
+   four caps. Exactly two accepted shapes: `{id, ok: true, svg, w, h}` and
+   `{id, ok: false, line, message}`, with `hasExactly` (no extra key), an id from
+   the set the app asked for, an SVG that is one closed `<svg …>…</svg>` within
+   512 KiB **in bytes**, dimensions finite in `(0, 20000]`, a `line` that is an
+   integer in `[0, 10000]`, and a sentence with C0/C1 stripped and cut to 300
+   chars. A fresh object is returned, never the renderer's.
+3. `apps/mobile/src/diagram-row.ts` — `DIAGRAM_TOOL`, `diagramRowSpec` (name
+   guard → status guard `error`/`denied` → JSON shape → caption cleaned and
+   capped at 120 → `lintDiagram`; a refused source → `null`), `diagramSummary`
+   (core's `describeDiagram`, filtered), `diagramRowView` (spec + scheme + chart
+   tokens + `renderKey` + `accessibilityLabel`), and a 32-entry memo for the
+   render key (a sha-256 over up to 20 KiB must not run every frame).
+4. `apps/mobile/src/diagram-theme.ts` — `diagramThemeVariables(palette)`: 36
+   mermaid `themeVariables` for the `base` theme, every colour a chart token or a
+   palette field or a `seriesColor` slot; `diagramTheme` + `diagramThemeKey`
+   (`base|dark`).
+5. `apps/mobile/src/diagram-cache.ts` — `DIAGRAM_CACHE_MAX = 32`,
+   `diagramCacheKey(canonical, scheme, fontScale)` = `base|<scheme>|<scale>|<sha256>`,
+   `createDiagramCache(max?)` (a `Map`-order LRU with an injectable bound),
+   `diagramCachePath(key)` = `diagrams/<sanitised>.svg` (relative to
+   `FileSystem.cacheDirectory`; D6 supplies the port).
+6. **The tests**, 40 in four files: `diagram-bridge.test.ts` (11),
+   `diagram-row.test.ts` (13), `diagram-theme.test.ts` (7),
+   `diagram-cache.test.ts` (9).
+
+### 2. Red before green (§9)
+
+Stated honestly, as D3 did: the four modules and their tests were written in the
+same pass, so there is **no "fails on missing code, then passes"** run for each
+assertion — the only red of that kind is the import error. Non-vacuity is instead
+shown by the 14 mutations in §3, each of which makes a NAMED test fail, plus the
+two defects the first green loop actually caught (§1.1), which were real
+assertions on real wrong code rather than imports.
+
+### 3. Mutation checks (§9; `.tentacle/tmp/model-diagrams/d5/mutate.ts` — each applied by exact match, the four narrow files run, the file restored from a copy, `cmp` confirmed identical after and `git status` shows only the 8 intended files)
+
+```
+M1  bridge: the asked-id check dropped                    KILLED (39 pass / 1 fail)
+M2  bridge: SVG cap by String.length, not bytes            KILLED (39 pass / 1 fail)
+M3  bridge: extra-key check disabled                       KILLED (39 pass / 1 fail)
+M4  bridge: sentence not stripped of control bytes         KILLED (39 pass / 1 fail)
+M5  row: name guard dropped                                KILLED (39 pass / 1 fail)
+M6  row: a refused lint still returns a spec               KILLED (39 pass / 1 fail)
+M7  row: guard over-broad (only `running` refuses)         KILLED (36 pass / 4 fail)
+M8  cache: scheme left out of the key                      KILLED (36 pass / 4 fail)
+M9  cache: LRU bound removed                               KILLED (38 pass / 2 fail)
+M10 theme: mono font replaced                              KILLED (39 pass / 1 fail)
+M11 theme: a new colour invented (#000000 for text)        KILLED (39 pass / 1 fail)
+M12 theme: surface a literal white, not the page           KILLED (38 pass / 2 fail)
+M13 row: renderKey hardcodes fontScale 1                   KILLED (39 pass / 1 fail)
+M14 row: renderKey hand-rolled, not the cache's key        KILLED (39 pass / 1 fail)
+```
+
+All 14 died; none survived. The harness asserts each anchor is **present and
+unique** before mutating (a lesson D4 paid for: an anchor that also matches
+`chartRow` mutates the wrong site and reads as a false SURVIVED). Named failures
+for the two security targets, checked by hand:
+- M6 → `diagramRowSpec — the transcript branch's decision > forged arguments (a pod's rawInput) fall back to the generic row`.
+- M1–M4 are the bridge's own, e.g. M1 → `… the FORGED message (mermaid XSS) > an id we did not ask for is dropped`.
+
+### 4. Drift from the Implementation (and why)
+
+1. **`diagramRowView` gained `renderKey`.** The plan's D5 lists the four modules
+   but not the row view's fields; `fontScale` (which the plan's cache key names)
+   had no consumer without it, and D6's renderer needs exactly "which render am I
+   being asked for". The key is computed through `diagramCacheKey` (one definition)
+   and memoised 32-deep.
+2. **`diagram-cache.ts`'s file half is a NAME, not a store.** The plan says "an
+   in-memory LRU (32) + `FileSystem.cacheDirectory/diagrams/`". `FileSystem` is a
+   native module, and D6 is where the renderer exists, so this slice ships the
+   pure naming/keys and an injectable bound; D6 injects the port and writes. No
+   behaviour is deferred — a store with no renderer to store would be dead code.
+3. **`diagramThemeVariables` is a flat map, not a typed mermaid interface.**
+   Mermaid's own type lives in `mermaid`, which the app does not depend on
+   (`tools`/`mermaid` are daemon-side). The variable NAMES are mermaid's; a name
+   mermaid ignores is invisible, which is why the theme test pins the ones that
+   matter (page, mono, label, the two accents) as values.
+4. **No `diagramTokens` group in `theme.ts`.** The plan's P8 says "no new colours",
+   and D3 already made the same call for the TUI: `ChartTokens` +
+   `seriesColor` are the tokens, so the row carries `ChartTokens`.
+5. **The bridge does NOT sanitise SVG markup.** The plan's D6 puts the isolation in
+   the display (`javaScriptEnabled={false}`, no `onMessage`, `artifactCsp()`), so
+   this module's job is exactly the message shape and its caps. Written in the
+   module's header so the next reader cannot mistake the boundary.
+6. **No changelog fragment of its own.** D5 changes nothing a user can see: the
+   phone row renders only once D6 draws it, and `changelog.d/model-diagrams.added.md`
+   already carries that sentence ("the phone's renderer follows with the
+   model-artifacts work") from D1's drift 7. A second fragment for an invisible
+   layer would be a commit mirror, which `docs/feat/changelog-fragments.md:223`
+   rules out. **D7 must extend the existing file** (D1's note), not add one.
+7. **`DIAGRAM_TOOL` is a string literal here, and `TITLE_MAX = 120` is mirrored.**
+   The app does not depend on `@tentacle/tools` (plan P8 / `tool-summary.ts:8`) —
+   the same reason the TUI keeps its own `CHART_TOOL`/`DIAGRAM_TOOL`. The cap is
+   the tool's `DIAGRAM_TITLE_MAX` (`tools/src/diagram.ts:31`).
+
+Not done, deliberately (later slices): the WebView renderer and its `onMessage`
+driver (D6), the inert display and the full screen (D6), the `diagrams.style`
+setting read (D6, where there is a fill to switch), the `"mermaid"` artifact kind
++ `wantsDiagramThumbnail` + `present` (D7), the `TranscriptRow` branch (D6, at
+`:431`). No `protocol.d/` note: no wire, no on-disk shape, no update kind.
+
+### 5. Gate
+
+```
+$ bunx tsc --noEmit                     → clean (no output)
+$ bunx tsc -p apps/mobile --noEmit      → clean (no output)
+$ bunx tsc -p apps/relay                → clean (no output)
+$ bun run lint                          → Checked 2011 files. No fixes applied. (0 errors, 0 warnings)
+$ bun test apps/mobile/test/diagram-*.test.ts
+                                        → 40 pass, 0 fail, 205 expect() calls
+$ bun test                              → 14635 pass, 5 skip, 0 fail (1046 files, 494 s)
+```
+
+The 5 skips are the three opt-in ones (live-k8s, live-docker, real-socket
+keepalive) plus the 2 pre-existing — the same set D4's gate recorded, not new.
+Two files were auto-formatted by `biome check --write` (import order, line
+width); no hand fixes, no suppression added (the control-byte regexes carry the
+repo's existing `noControlCharactersInRegex` justification comment).
+`protocol.json` untouched (no schema change).
+
+*— claude-opus-5-5, 2026-11-17* — this slice's executor per the environment
+(`AI_AGENT=claude-code_2-1-323_agent`, `CLAUDE_CODE_ENTRYPOINT=cli`, and
+`~/.claude/settings.json`'s `"model": "opus"` / `modelSettings.claude-opus-5-5`).
+Recorded honestly: the routing table (`:426`) names `deepseek` for D5, so the
+executing model and the plan's assignment differ. The doc's table is the
+orchestrator's to correct; this line states what actually ran.
+
+### Fix round 1
+
+**Finding 1 (MEDIUM) — a refused `diagram` call drew again after a reopen: FIXED.** The premise the finding named is confirmed: `transcript-history.ts:156` rebuilds every non-denied result as `status: "ok"`, so a call the daemon's mermaid refused arrives at `diagramRowSpec` indistinguishable from an accepted one. The decision now reads the row's **output**: only an accepted call's result is the tool's own result line, so `drawsAsDiagram` requires `output.startsWith(DIAGRAM_RESULT_PREFIX)`. The prefix moved into core (`packages/core/src/diagram/summary.ts:118`) instead of being a literal in the phone, because it is one shared truth — `summarizeDiagram` builds the line with it, and both clients are meant to read it back (the TUI's counterpart is the TODO entry below).
+
+Chosen over persisting the error flag: the flag is a **wire and on-disk** concern (`ChatMessage`, the log format, both clients), while the verdict is already in the output every client has. It also works on today's daemon, and it cannot be spoofed into a drawing by a pod — a forged `rawInput` still has to re-lint (unchanged, `diagramRowSpec`).
+
+**Failure mode, decided rather than ignored:** an accepted call whose output the history lost (a truncated log) no longer draws — it shows the generic row with its source. That is the safe direction (a refusal is never drawn as a diagram), and it is pinned by the `output: ""` / `output: undefined` cases in the test.
+
+**Finding 2 (MEDIUM) — a running call drew, against the header and the TUI: FIXED,** by taking the TUI's rule (option 1 of the two the finding offered): `running`/`queued` keep the generic row. Reason the chart's mirror does not transfer: `chartRowSpec`'s client-side validation IS its tool's, so a running chart already has the same verdict the tool will reach; a diagram's is only `lintDiagram`, and mermaid's verdict is daemon-side — drawing before it lands is exactly the flicker the finding describes, on the phone that D6 is about to build. So T5.1's "mirrors `chartRowSpec`" is now stated with its scope: the NAME and the two statuses that carry a verdict of their own agree; the settled-call rule and the output verdict are the diagram's own additions. The plan's T5.1 (`:404`) and the header (`diagram-row.ts:7-13`) say this now instead of contradicting the code.
+
+**Red before green (§9), stated honestly:** the tests and the fix were written in the same pass, so the *literal* red-before-green is the mutation run below, where the review's exact bug is restored on the final code and the new tests fail on their own assertions. The separate confirmation that the tests are not vacuous is M-D (a guard that draws nothing fails four tests).
+
+**Repro, before any edit** — `.tentacle/tmp/model-diagrams/fix-d5/repro.ts` (this worktree's own gitignored slug folder; its `sum.ts` supplies the tool's own result line through core). Both blocks below are the SAME script: BEFORE is the honest baseline the review's code gives (the old guard swapped in for one run, then restored, `cmp`-identical), AFTER is the fix.
+```
+BEFORE
+F1 reopened refused → status: ok | draws: true        ← the finding
+F1 reopened ok      → status: ok | draws: true
+F2 status=queued  → draws: true                       ← the finding
+F2 status=running → draws: true                       ← the finding
+F2 status=ok      → draws: true
+F2 status=error   → draws: false
+F2 status=denied  → draws: false
+F3 settled+accepted → draws: true
+```
+AFTER (the same script, post-fix):
+```
+F1 reopened refused → status: ok | draws: false
+F1 reopened ok      → status: ok | draws: true
+F2 status=queued  → draws: false
+F2 status=running → draws: false
+F2 status=ok      → draws: false          ← no output ⇒ no verdict, so no drawing
+F2 status=error   → draws: false
+F2 status=denied  → draws: false
+F3 settled+accepted (the tool's result line) → draws: true
+```
+The `F2 status=ok` line is the failure mode above, made visible by the same script: a bare `ok` with no output is a call whose verdict is unknown, and it no longer draws. F3 is the neighbour that must keep drawing.
+
+**Mutations** (`.tentacle/tmp/model-diagrams/fix-d5/mutate.ts`; each anchor asserted present and unique, the narrow test run, the file restored and `cmp`-verified identical: `restored: true (cmp identical)`):
+```
+M-A the review's bug restored (status-only guard)        KILLED (2 fail) — BOTH fix-1 and fix-2 tests
+M-B fix 2 only reverted (running/queued draw again)      KILLED (1 fail) — "a call that is still running keeps the generic row"
+M-C fix 1 only reverted (the output verdict ignored)     KILLED (1 fail) — "a REFUSED call keeps the generic row after a reopen"
+M-D the verdict guard over-broad (nothing draws)         KILLED (4 fail) — the accepted call, the fenced source, T5.1
+M-E the prefix check loose (`includes` for `startsWith`) KILLED (1 fail) — the mention-the-prefix case
+```
+M-A and M-B/M-C are the point: each finding is pinned by a mutation that reverts **only that finding**, so neither test is passing for the other's reason. M-E pins that the check is a prefix, not a substring (a refusal that quotes our own line does not buy a drawing).
+
+**Drift:** finding 2 was fixed by choosing the TUI's rule, as the finding allowed; finding 1's site is the row's decision, not the history projection — the projection is a shared, parity-pinned copy (`transcript-parity.test.ts`) used by every row type, and an `isError` it invented would be a persisted-shape claim this slice cannot make. One ripple: `diagramRowSpec` gained an optional `output` field and the test file's shared `row()` fixture now carries the accepted output, which is the point (a fixture with no output is now a call with no verdict). Outcomes that change: a bare `ok` row with no output no longer draws — see the `F2 status=ok` line above.
+
+**Not done, deliberately:** the TUI's `resume.ts:114` has the same reopened gap (the D5 review's own note: outside this diff). Carried into the `TODO.md` entry for this feature, with the shape of the fix named. No changelog fragment (D5's drift 6: nothing user-visible until D6 draws).
+
+**Gate:** `bunx tsc --noEmit` clean; `bunx tsc -p apps/mobile --noEmit` clean; `bun run lint` clean, 2011 files (two `biome check --write`: import order + one long import); `bun test` full, run once at the end: **14637 pass, 5 skip, 0 fail** (14642 tests, 1046 files; the same 5 opt-in/pre-existing skips the D5 gate recorded — the count is D5's 14635 plus this round's 2 new tests). Narrow during the work: `diagram-row` 15 pass; `diagram-summary`+`tools/diagram`+TUI `diagram-row`+`app-diagram` 57 pass; the 7 phone transcript/diagram files 92 pass. The mutation set was re-run after the final formatting pass and still all KILLED.
+
+*— claude-opus-5-5, 2026-11-17* (executor of this fix round; harness evidence: `AI_AGENT=claude-code_2-1-323_agent`, `CLAUDE_CODE_ENTRYPOINT=cli`, `~/.claude/settings.json` `modelSettings["claude-opus-5-5"]`, and this session's own transcript is 100% `"model":"claude-opus-5-5"`. Note for the orchestrator: the commit subject for this round is theirs to label; the D5 slice's own signature question is separate and untouched here.)
+
+## Review — slice D5
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff main...HEAD` (`169ae810`), the four phone modules and their tests.
+
+1. **MEDIUM: a call that mermaid refused draws again after the session is reopened** (`apps/mobile/src/diagram-row.ts:75` with `apps/mobile/src/transcript-history.ts:156`). The history projection rebuilds every non-denied result as `status: "ok"` ("any other error flag is not stored"), so `drawsAsDiagram` cannot see the daemon's mermaid refusal. That refusal is the D4 Finding 1 class, which D4's Execution (`:1396`) handed to D5 as a constraint. Repro (`.tentacle/tmp/model-diagrams/rev-d5/hist.ts`, a `diagram` call whose result is `isError: true`, sent through `historyRows`) prints `history status: ok` and `phone draws refused call after reopen: true`. In D6 the row would then show the caption and the source, and the refusal's reason would be gone. The module header (`:8-9`) promises the opposite. Possible fixes: decide from the row's `output` (the success result line), or persist the error flag. The TUI has the same gap at `packages/tui/src/resume.ts:114`. That is outside D5's diff; carry it to TODO.
+2. **MEDIUM: a running call draws on the phone, but the header says it does not, and the TUI refuses it** (`diagram-row.ts:75` vs its own header `:8`, "A call that is still running … keep the generic tool row"). The TUI returns `undefined` for `running`/`queued` (`render-lines.ts:807`, "only a settled call draws"). Here the test pins the opposite (`diagram-row.test.ts:55-59`). So D6 would send a source to the renderer before the daemon's mermaid has ruled on it. A refused call then flickers from the drawing to the error row. Pick one rule before D6 builds on it: either refuse `running`/`queued` (TUI parity), or keep the chart mirror and correct the header plus the plan's T5.1 wording.
+
+**Gate (mine):** the four D5 test files: **40 pass, 0 fail**. `bun run lint`: 2011 files checked, no fixes. `bun run typecheck`: 0 `error TS`. I did not re-run the full `bun test`; the executor reports 14635 pass, 5 skip, 0 fail.
+
+**Mutations (mine; each a temporary edit, reverted, `git status` clean afterwards):**
+- R1, LRU `get` no longer moves the entry to the young end: KILLED ("drops the least recently used").
+- R2, the bridge's closing-`</svg>` check dropped: KILLED ("not one closed <svg> element").
+
+The executor's M1–M14 cover the rest. I did not re-run them.
+
+**Attacks that found nothing:**
+- Bridge: `__proto__` or extra keys are rejected by `hasExactly`. The byte cap is in bytes. `0`, `NaN`, `±Infinity` and string dimensions are dropped. A fresh object is returned.
+- Cache path: `..` runs are folded, and the key is content-addressed, so a title never becomes a filename.
+- Theme: the light `#000000` is the app's own label token. The test allows it in light mode only, and the dark scheme has no pure black.
+
+**Executor:** the drift notes are honest. The signature (`claude-opus-5-5`) does not match the commit subject (`exec (deepseek)`), as the executor itself flagged; the orchestrator should reconcile the two. My review is the same model family as the stated executor, with a fresh context only.
+
+*— claude-opus-5-5, 2026-11-17*
+
+### Round 2
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (`e3c1f579`).
+
+1. **Finding 1 (MEDIUM): FIXED.** `diagram-row.ts:98` now draws only when `output` starts with `DIAGRAM_RESULT_PREFIX`. That prefix is now exported from `core/src/diagram/summary.ts`, so the tool's result line and the client's check share one constant. The string is byte-identical to before. The tool's success content is exactly that line (`tools/src/diagram.ts:145`). Its error contents (`:136-142`) never start with it. I re-ran my repro (`rev-d5/hist.ts`, a refused call sent through `historyRows`): `phone draws refused call after reopen: false`. **Mutation:** the output check forced to `|| true`. KILLED: "a REFUSED call keeps the generic row after a reopen".
+2. **Finding 2 (MEDIUM): FIXED.** `running` and `queued` now return the generic row, as the TUI does. The header comment and the T5.1 test now state the deliberate split from `chartRowSpec`. **Mutation:** the `running` refusal dropped. KILLED: "a call that is still running keeps the generic row".
+
+Both mutations were reverted, and `git status` is clean.
+
+**Regressions:**
+- An accepted history row still draws, because its `output` is the result line (the `ACCEPTED` fixture comes from core's own `summarizeDiagram`).
+- The phone's `ToolRow` already carries `output`, so D6 needs no new field.
+- The TUI's identical gap is carried to TODO with the same remedy (`resultText`), and stays out of scope.
+
+**Gate:**
+- Narrow tests (the four D5 files, plus `core` diagram-summary and `tools` diagram): **81 pass, 0 fail**.
+- `bun run lint`: 2011 files checked, no fixes.
+- `bun run typecheck`: 0 `error TS`.
+- I did not re-run the full `bun test`.
 
 *— claude-opus-5-5, 2026-11-17*
