@@ -2,7 +2,9 @@
  * One node on the thread of steps (docs/feat/mobile-tool-rows.md Design 3,
  * mockup C): a 1 px `sep` thread in a 10 pt gutter, the node on the first line's
  * centre (a dot, a spinner, a hollow ring, or ∴), then ONE line — name, mono
- * subtitle, ∴, trailing text — and, when open, the body under it. A dumb
+ * subtitle, the duration — and, when open, the body under it. The line carries
+ * NO ∴: owner 17/11 sent it away from a command's duration, so the ∴ on this
+ * thread is a thought's node and the folded thought's in the open body. A dumb
  * renderer: every string and decision comes from `tool-steps.ts` /
  * `tool-summary.ts`; this file owns only the look, the 1 s clock and the spin.
  */
@@ -28,7 +30,7 @@ export type NodeKind = StepDot | "thought" | "thinking";
 const GUTTER = 10;
 /** The node sits on the first line's centre; the line is one touch target tall. */
 const NODE_Y = size.touch / 2;
-/** Every ∴ (the thought node, the row marker, a folded thought): owner asked a bit larger than 10. */
+/** Every ∴ (a thought's node, a folded thought): owner asked a bit larger than 10. */
 const THEREFORE_SIZE = 13;
 
 /** Milliseconds since `from`, re-read once a second; null when there is no `from`. */
@@ -108,7 +110,7 @@ const DOT_AT: Readonly<Record<DotPos, { left: number; top: number }>> = {
 };
 
 /**
- * A static ∴ (the thought node, the row marker, a folded thought), DRAWN as the
+ * A static ∴ (a thought's node, a folded thought), DRAWN as the
  * live node's three dots: the font's glyph stays tiny even at 13 pt (simulator
  * sweep, docs/fix/mobile-qa-sweep.md), and drawn, every ∴ is the same size.
  */
@@ -258,8 +260,6 @@ export interface StepNodeProps {
   readonly subtitle: string;
   /** Sans italic (a thought's first line) instead of mono (a command). */
   readonly subtitleItalic?: boolean;
-  /** The ∴ after the subtitle: a thought is folded into this step. */
-  readonly marker: boolean;
   readonly trailing: string;
   readonly trailingRed: boolean;
   /** A running step's start (`row.at`): the trailing text is its live clock. */
@@ -285,7 +285,6 @@ export function StepNode({
   nameItalic,
   subtitle,
   subtitleItalic,
-  marker,
   trailing,
   trailingRed,
   liveFrom,
@@ -364,7 +363,6 @@ export function StepNode({
           >
             {subtitle}
           </Text>
-          {marker ? <ThereforeDots color={palette.sec} style={styles.marker} /> : null}
           {shown === "" ? null : (
             <Text
               numberOfLines={1}
@@ -480,7 +478,6 @@ export function ThinkingNode({
         name={{ tool: "Thinking…" }}
         nameItalic
         subtitle=""
-        marker={false}
         trailing={liveElapsed(ms)}
         trailingRed={false}
         thread={{ up, down: false }}
@@ -530,7 +527,6 @@ const styles = StyleSheet.create({
   italic: { fontStyle: "italic" },
   subtitle: { flex: 1 },
   thoughtLine: { fontStyle: "italic", fontWeight: "400" },
-  marker: { opacity: 0.8 },
   body: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 8, paddingBottom: 10, gap: 8 },
   thought: { flexDirection: "row", gap: 6 },
   // The first text line is 19 pt tall: centre the 13 pt box on it.

@@ -106,7 +106,7 @@ describe("StepNode replaces ToolRow", () => {
     expect(node).toContain("maxFontSizeMultiplier={DENSE_FONT_SCALE}");
   });
 
-  test("every ∴ (node, row marker, thought) is one size, 12–13 pt (owner 09:33)", () => {
+  test("every ∴ (a thought's node, a folded thought) is one size, 12–13 pt (owner 09:33)", () => {
     const node = read("ui", "StepNode.tsx");
     const size = /const THEREFORE_SIZE = ([\d.]+);/.exec(node);
     expect(size === null ? 0 : Number(size[1])).toBeGreaterThanOrEqual(12);
@@ -114,7 +114,10 @@ describe("StepNode replaces ToolRow", () => {
     // The font's ∴ glyph stays tiny even at 13 pt (simulator, 29-tool-rows-running
     // shots): every ∴ is DRAWN as three dots in a THEREFORE_SIZE box, like the live node.
     expect(node).not.toMatch(/>\s*∴\s*</);
-    expect(node.match(/<ThereforeDots\b/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    // Two, since 17/11: a thought's node and the folded thought in the open body.
+    // A tool step's line carries NONE — it sat next to the command's duration
+    // (docs/fix/mobile-step-thought-marker.md, `step-thought-marker.test.ts`).
+    expect(node.match(/<ThereforeDots\b/g)?.length ?? 0).toBe(2);
     expect(node).toMatch(/dotBox: \{ width: THEREFORE_SIZE, height: THEREFORE_SIZE/);
   });
 
