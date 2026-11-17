@@ -2866,3 +2866,82 @@ M9 the mock model stops presenting the fixture         RED
 **Executor behaviour:** the fix round was honest about what it had not run. The cache and Share gap predates it (S8/S9) and was missed by both earlier reviews, including mine.
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Execution
+
+### Fix round 1
+
+Round 3 of the S8+S9 Review raised 2 MEDIUM. Both are wired here; the pure
+decisions were already tested, so what these tests pin is that something applies
+them (the class of failure the review found: a tested decision with no caller).
+
+**Finding 1 — the D9 cache contract was not wired (MEDIUM).** Three separate
+gaps, and a fourth the same paragraph named (`ARTIFACT_FEEDS.forget`).
+- `apps/mobile/src/artifact-cache-store.ts` (new): the plan made real — `put`
+  (plans over the DISK via `state()`, writes, then removes exactly
+  `step.evict`; `wontFit` writes nothing and returns the note), `hold`
+  (the version a viewer has open is what eviction skips), `shareCopy`,
+  `forgetComputer` (`removeDir`), plus `artifactFileExt`. Port-shaped
+  (`CacheFiles`), so every rule is tested over an in-memory disk.
+- `apps/mobile/src/artifact-cache-expo.ts` (new): the `expo-file-system` binding,
+  the ONE module that writes under `Caches/artifacts/`, and `shareCachedCopy`
+  (share, then delete the copy — the `app-log-fs` F18 rule; a named copy is not
+  a cached version, so nothing else would ever remove it).
+- `ArtifactViewerModal.tsx`: writes through `ARTIFACT_CACHE.put` and holds its
+  version for the modal's lifetime (released on unmount); renders the note
+  (`testID="artifact-cache-note"`) instead of a blank page when the bytes cannot
+  be kept. `artifact-thumbnail.ts` uses the same writer, so the cap sees
+  thumbnail bytes too.
+- Unpair: `computer-memory.ts`'s `ComputerMemory` grew `artifactCache` and
+  `feeds`, dropped in `forgetComputer` — so "Remove" and a re-pair both apply
+  them, through the one step that already orders the forget before the re-read.
+  `artifact-feed.ts` grew `FeedRegistry.forgetComputer` for that.
+
+**Finding 2 — Share handed over a nameless blob (MEDIUM).**
+- `shareName` now has a production caller: `shareCopy` copies the cached version
+  to `<sanitized title>.<ext>` and the modal shares THAT uri.
+- The extension problem was not only Share's: `PdfViewer` loads the cached file
+  into WKWebView, which picks a PDF's renderer from the extension. So the
+  cached version's own name now carries the type's extension —
+  `cachePath(computerId, sha256, ext)` (identity is still the hash; the
+  extension is added on top), `artifact-cache.ts:147-153`. The review's "whether
+  a PDF renders at all is unverified" is therefore addressed at the cause; the
+  pixel check itself is still T8.2 (needs a simulator, unchanged).
+
+**Drift from the Implementation:** none in behaviour. The Design said
+`<sha256>` for the cached file; it is now `<sha256>.<ext>`. That is a deliberate
+extension of the design forced by finding 2 (WKWebView's MIME-by-extension), and
+D9's `Cache` paragraph is read as "content-addressed", which still holds: the
+hash is the identity, the extension is a suffix the plan ignores.
+
+**Tests** (`apps/mobile/test/artifact-cache-store.test.ts`,
+`artifact-cache-wiring.test.ts`): 26 new. Red first, on the ASSERTS, not on a
+missing import: a stub store that wrote straight to disk without planning was
+put in place of the real one, and the wiring pins were run against the unchanged
+sources (`6 pass / 10 fail`, then `6 pass / 6 fail`).
+
+**Mutations (§9)** — each applied, the narrow file run, then reverted
+(`git status --porcelain` shows only this task's own files):
+- modal writes the file itself instead of `ARTIFACT_CACHE.put` →
+  `artifact-cache-wiring` 1 fail.
+- modal shares the hash path instead of `shareCopy` → 1 fail.
+- App.tsx's Share handler drops `shareCachedCopy` → 1 fail.
+- store ignores `hold` (`keep` → `null`) → `artifact-cache-store` 1 fail.
+- store plans but never removes the evicted file → 2 fail.
+- store's `state()` returns `EMPTY_CACHE` (an in-memory state) → 6 fail.
+- `shareCopy` returns the hash path under the title's name → 2 fail.
+- `forgetComputer` deletes nothing → 1 fail.
+- version path loses the extension → 9 fail.
+- `MEMORY` without `artifactCache`/`feeds` → wiring 1 fail.
+
+**Gate:** `bunx tsc --noEmit` clean; `bunx tsc --noEmit -p apps/mobile` clean;
+`bunx tsc --noEmit -p apps/relay` clean; `bun run lint` clean (1919 files);
+`bun test apps/mobile/test` **2682 pass, 0 fail**; full `bun test` **13846 pass,
+5 skip, 0 fail** — the 5 are the documented opt-ins (live-k8s ×2, live-docker
+×2, the slow real-socket keepalive), which is the baseline AGENTS §6 pins.
+
+**Not verified (unchanged):** T8.1 (the escape suite) and T8.2 (pixels) still
+need a simulator. The PDF-by-extension cause is fixed, but "a PDF renders" is a
+pixel claim and this round did not run it.
+
+*— claude-sonnet-4-5-20250929, 2026-11-17*

@@ -62,6 +62,11 @@ export interface FeedRegistry {
   feed(computerId: string, sessionId: string): ArtifactFeed;
   /** The pairing or the session is gone: drop its feed and its listeners. */
   forget(computerId: string, sessionId: string): void;
+  /**
+   * The COMPUTER is unpaired: every session's feed goes with it, so nothing of
+   * that computer — its list, its reader — outlives the record it came from.
+   */
+  forgetComputer(computerId: string): void;
 }
 
 export function createFeedRegistry(): FeedRegistry {
@@ -113,6 +118,14 @@ export function createFeedRegistry(): FeedRegistry {
     },
     forget(computerId, sessionId) {
       feeds.delete(feedKey(computerId, sessionId));
+    },
+    forgetComputer(computerId) {
+      const prefix = `${computerId}/`;
+      for (const key of [...feeds.keys()]) {
+        if (key.startsWith(prefix)) {
+          feeds.delete(key);
+        }
+      }
     },
   };
 }

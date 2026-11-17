@@ -47,7 +47,6 @@ import {
   Linking,
   Platform,
   Pressable,
-  Share,
   StyleSheet,
   Text,
   View,
@@ -67,6 +66,7 @@ import { APP_LOG_FILES } from "./src/app-log-fs-expo.ts";
 import { createAppLogFile } from "./src/app-log-fs.ts";
 import { type AppLog, createAppLog, errorShape } from "./src/app-log.ts";
 import { exportFileName, exportText } from "./src/app-log.ts";
+import { ARTIFACT_CACHE, shareCachedCopy } from "./src/artifact-cache-expo.ts";
 import { ARTIFACT_FEEDS } from "./src/artifact-feed.ts";
 import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
 import { composeHandleOf, foldingOutboxSession } from "./src/compose-handle.ts";
@@ -597,6 +597,11 @@ const MEMORY: ComputerMemory<ComputerLink> = {
   links: LINKS,
   diagnoses: DIAGNOSES,
   records: RECORDS,
+  // The artifacts that came from that computer go with it (model-artifacts D9 /
+  // Review round 3, finding 1): the cached bytes may hold workspace content, and
+  // a live feed would outlive the record it was published from.
+  artifactCache: ARTIFACT_CACHE,
+  feeds: ARTIFACT_FEEDS,
   // The extension's copy of the paired computers and their pinned keys follows
   // every store change (docs/feat/mobile-notifications.md Design 6 / N4).
   pushDirectory: () =>
@@ -2147,7 +2152,10 @@ function AppShell(): JSX.Element {
                 onBack={() => navigation.goBack()}
                 onLink={openConfirmedLink}
                 onShare={(fileUri) => {
-                  void Share.share({ url: fileUri });
+                  // A NAMED copy handed over, then removed once the sheet closes
+                  // (D9, finding 2): the file a person saves or AirDrops is
+                  // `report.zip`, never `3f2a…e9`.
+                  void shareCachedCopy(fileUri);
                 }}
               />
             )}

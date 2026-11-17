@@ -12,8 +12,7 @@
  *   would steal the screen's stream — then a verified copy in the phone's cache.
  */
 import type { ArtifactMeta } from "@tentacle/protocol";
-import { Directory, File, Paths } from "expo-file-system";
-import { cacheDir, cachePath } from "./artifact-cache.ts";
+import { ARTIFACT_CACHE } from "./artifact-cache-expo.ts";
 import type { ThumbnailSource } from "./thumbnails.ts";
 
 /** The sha256 a card image's `ImageRef.id` is (the meta's content hash, not a title). */
@@ -46,13 +45,11 @@ export function createArtifactThumbnailSource(deps: {
         if (signal.aborted) {
           return null;
         }
-        // The path IS the content hash, so an overwrite cannot mix two files.
-        const dir = new Directory(Paths.cache, cacheDir(deps.computerId));
-        dir.create({ intermediates: true, idempotent: true });
-        const file = new File(Paths.cache, cachePath(deps.computerId, meta.sha256));
-        file.create({ overwrite: true });
-        file.write(bytes);
-        return { id: ref.id, uri: file.uri };
+        // The SAME one writer as the viewer, so the 200 MB cap sees these bytes
+        // too: a thumbnail is a cached version like any other (and a card whose
+        // bytes are too big to keep draws its glyph, exactly as before).
+        const kept = ARTIFACT_CACHE.put(deps.computerId, meta, bytes);
+        return kept.uri === null ? null : { id: ref.id, uri: kept.uri };
       } catch {
         // An abandoned read or a refused one: no thumbnail, and never a throw at
         // the driver (it records the id as failed, which is what this is).

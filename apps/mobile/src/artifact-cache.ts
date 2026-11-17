@@ -144,8 +144,13 @@ export function cacheDir(computerId: string): string {
 }
 
 /** The cached copy's path for one version: content-addressed, never the model's name. */
-export function cachePath(computerId: string, sha256: string): string {
-  return `${cacheDir(computerId)}/${sha256}`;
+export function cachePath(computerId: string, sha256: string, ext?: string): string {
+  // The extension is optional and NOT part of the identity: the hash is. A
+  // viewer that reads the file rather than the bytes (WKWebView renders a PDF
+  // by extension, and the Share sheet's recipient opens by it too) asks for it.
+  return ext === undefined
+    ? `${cacheDir(computerId)}/${sha256}`
+    : `${cacheDir(computerId)}/${sha256}.${ext}`;
 }
 
 /** The Name a Share sheet shows: the title's own extension, else the kind's (`other` only). */
