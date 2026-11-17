@@ -890,3 +890,26 @@ visual result (a `·` before the title) has only been read as text. To verify:
 - **Finding 2 is fixed.** There are two new tests, one where the session was open and one where it was not. Mutation R2 again: moving the `wasOpen` read to after the await now fails both of them (KILLED, 2 red).
 - I restored both mutations, and `git status` was clean afterwards. The commit changes no production code except `session-groups.ts`.
 - **Gate:** `session-groups` + `drawer-row-actions`: 34 pass, 0 fail. `bun run lint` is clean (1845 files). `bun run typecheck` is clean (root + mobile + relay). I did not run the full `bun test`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S3 only, `git diff main...HEAD`)*
+
+**Verdict: REQUEST-CHANGES (S3).** There is one MEDIUM finding: a test gap. The code is correct as built.
+
+1. **MEDIUM — two changed code paths in `packages/tui/src/panels/sessions.ts:44` (`apply`) and `:53` (`click`) have no test that pins them.** Mutation M7: in the move, `sessionRows(panel.data).length` → `panel.data?.sessions.length ?? 0`. Mutation M8: the same change in `click`'s `count`. Both SURVIVE `sessions-panel`, `panels-registry` and `app-panels-structure` (0 red). Failure scenario if either line regresses: say the page is `[a,b]` and `pinned` holds one more session `[c]`. The panel shows 3 rows, but ↑↓ would wrap at 2 and a click on row 3 would be ignored. The last hoisted rows would become unreachable, and nothing would catch it. Fix: add a `panels-registry`-style test for `sessionsKind.apply` (down from the last page index reaches row 3) and for `click` on a row past `data.sessions.length`. §9: each changed behaviour needs a test that goes red on the bug.
+
+**Gate:** `sessions-panel` + `connect-sessions-view`: 22 pass, 0 fail. `bun run lint` is clean (1846 files). `bun run typecheck` is clean (root + mobile + relay). I did not run the full `bun test`.
+
+**Mutations** (`.tentacle/tmp/mobile-session-actions/mut.ts`): KILLED: M1 no dedupe (1 red), M2 `sessionsAt` reads the page (1), M3 `refreshedSessions` reads the page (1), M4 no marker (2), M5 `connect` drops the `pinned` array (1), M6 no flag normalisation (2). SURVIVED: M7 and M8 (finding 1). One run was killed by a timeout while M6 was still applied. I found it in `git status` and restored it by hand. The tree is clean now.
+
+**Attacks tried:**
+- Is a hoisted pin's delete armed on the wrong id? No: `sessionsAt` and `armed` both read `sessionRows`, and a test pins it.
+- An archived pin through `choose`: `sessionsChoose` already handles `archived` → reopen. OK.
+- A pod/untrusted daemon: `pinned` is a boolean, the array is bounded by `MAX_PINNED_SESSIONS`, and titles go through `oneLine`. OK.
+- An older daemon (no `pinned`): the view is unchanged, and the order is returned by reference. Tested.
+- The footer count stays on the page length. Correct.
+
+**Holds:** §7 "logic in pure modules": `sessionRows` and `sessionsViewFrom` are pure. There is no protocol or persistence change.
+
+**Executor:** The Execution is accurate, and its listed mutations are real. It did not mutate the two panel call sites. I am the same model family as the executor (fresh context only).
