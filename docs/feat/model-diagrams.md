@@ -1321,3 +1321,24 @@ Two mutations earned a test rather than a shrug, which is the point of the exerc
 - No schema change, no `protocol.d/` note (a tool name and its arguments are data on the wire, D9). `protocol.json` untouched.
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Review — slice D4
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff main...HEAD` (D4 only), fresh context.
+
+1. **HIGH — a FAILED `diagram` call draws as if it were valid, and its error disappears** (`render-lines.ts:806` guard + `:845-847` early return). `diagramRow` skips only `running`/`queued`. A call whose status is `error` still draws, because the client-side gate (`parseDiagramArgs` → `lintDiagram`, `diagram-lines.ts:70`) is only the lint, not mermaid's parser. Two cases reach `error`: the daemon's mermaid refusal (D4's whole point), and a denial (`resume.ts:114` maps it to `error`). The early return drops the bullet, the red status and the tool's error text. Repro (`.tentacle/tmp/model-diagrams/rev-d4/err2.ts`, run through `itemLines` at width 100): `flowchart TD\n  A --> B` and the tools test's mermaid-rejected fixtures (`sequenceDiagram\n  A->>B…`, `erDiagram\n  A ||--o B : has`, `gitGraph…branch`) render **byte-identical for `status:"ok"` and `status:"error"`**: the caption plus a drawing or "source only", with no error anywhere. Result: when the model retries, the user sees two "good" diagrams, and the first is one mermaid refused. This contradicts T5's "decision (name/status/lint) mirrors `chartRowSpec`". The phone's gate is `apps/mobile/src/chart-row.ts:41`, which excludes `error`/`denied`. `chartRow` gets away with the same guard only because the chart's client-side validation equals the tool's. Fix: also return `undefined` when `tool.status === "error"`, so the generic error row shows. Add a test (status `error` + lint-passing, mermaid-rejected args → `● Diagram …` row containing the error output) and show it red first.
+2. **MEDIUM — the Execution's signature is in doubt** (§10). The plan's routing table (`:425`) and the commit `27d396eb "exec (deepseek)"` name deepseek, but the Execution section is signed `claude-opus-5-5`. One of them is wrong, and the signature exists so drift can be traced to a model. Correct it.
+
+**Gate (reviewer-run):** `app-diagram` + `diagram-row` 16 pass / 0 fail. `bun run lint`: clean, 1986 files. `bun run typecheck`: clean. Full `bun test` not re-run: the finding is decisive.
+
+**Mutation (independent of the executor's set):** I set the memo key to a constant (`const key = "k"`). Result: **KILLED**, 4 fail (Ctrl+O, click, resize ×2). The file was restored from a scratch copy and `git status` is clean.
+
+**Attacks tried:** (a) error/denied status → **found #1**; (b) memo staleness across running→ok: the cache is never filled while `running`, so it holds; (c) control bytes in the title/labels: cleaned in `diagramView` (`diagram-lines.ts:97-101`), and `toolLines` never shows `call.title`, so it holds; (d) a raw stdout write: the spies cover it, and M6 confirms them, so it holds; (e) the name guard against an impostor tool: covered by the `draw` case, so it holds.
+
+**What holds:** the P3 seam is reused rather than copied (§7 "logic in pure modules": the branch is pure and the component untouched). No protocol/persistence change. Tests are non-vacuous for what they cover. The `openHint` omission is justified.
+
+**Executor behaviour:** honest red/green log; surviving mutations were turned into tests (M5) rather than shrugged off. But the status guard was copied from `chartRow` without re-checking its premise (that the client-side validation equals the tool's), and that premise does not hold for `diagram`.
+
+*Reviewer: claude-opus-5-5 (fresh context). If the executor really was opus, this review shares its model family: blind spots may be shared.*
+
+*— claude-opus-5-5, 2026-11-17*
