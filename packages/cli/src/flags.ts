@@ -243,6 +243,8 @@ export const ARGS = {
     bools: {
       json: {},
       summary: {},
+      // docs/feat/token-usage-log.md: the per-round token table + totals.
+      usage: {},
       follow: { short: "f" },
       "insecure-skip-tls-verify": {},
     },
@@ -868,6 +870,6 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   pair: "tentacle pair [--address ws(s)://host:port/e2e]... [--name <name>]",
   devices: "tentacle devices | revoke <name|id-prefix> | reset [--yes]",
   voice: "tentacle voice setup [--yes] | status",
-  logs: "tentacle logs [<uid>|<run-name>] [--tail N] [--only ask,error,tool] [--json] [--summary] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
+  logs: "tentacle logs [<uid>|<run-name>] [--tail N] [--only ask,error,tool] [--json] [--summary] [--usage] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--model <id>] [--profile <name>]",
 };

@@ -1024,6 +1024,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ...(categories?.ok === true ? { only: categories.categories } : {}),
         json: parsed.bools.has("json"),
         summary: parsed.bools.has("summary"),
+        // docs/feat/token-usage-log.md: per-round tokens instead of the event stream.
+        ...(parsed.bools.has("usage") ? { usage: true } : {}),
         follow: parsed.bools.has("follow"),
         ...(connect !== undefined ? { connect } : {}),
         ...(token !== undefined ? { token } : {}),
