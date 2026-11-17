@@ -47,6 +47,12 @@ describe("SessionScreen: one layout, the open state, the footer", () => {
     );
   });
 
+  test("the footer node gets the tail's thought and its up segment (Review S2 #1)", () => {
+    const footer = src.slice(src.indexOf("<ThinkingNode"));
+    expect(footer).toMatch(/^<ThinkingNode[^>]*thought=\{layout\.tail\.thought\}/);
+    expect(footer).toMatch(/^<ThinkingNode[^>]*up=\{layout\.tail\.up\}/);
+  });
+
   test("a toggle animates, unless Reduce Motion is on", () => {
     expect(src).toContain("animateNextLayout(a11yFlags.reduceMotion)");
   });
@@ -64,6 +70,18 @@ describe("TranscriptRow: tool and reasoning views draw a StepNode", () => {
     expect(fnBody(src, "ToolRowView")).toContain("<StepNode");
     expect(fnBody(src, "ReasoningRowView")).toContain("<StepNode");
     expect(src).not.toContain("OUTPUT_PREVIEW_LINES");
+  });
+
+  test("the layout's cell reaches the node: the folded thought and the thread (Review S2 #1)", () => {
+    const tool = fnBody(src, "ToolRowView");
+    expect(tool).toMatch(
+      /stepRowView\(\s*tool,\s*cell\?\.kind === "step" \? cell\.thought : null,/,
+    );
+    expect(tool).toContain('const thread = cell?.kind === "step" ? cell.thread : LONE;');
+    expect(tool.match(/thread=\{thread\}/g)?.length).toBe(2);
+    const reasoning = fnBody(src, "ReasoningRowView");
+    expect(reasoning).toContain('const thread = cell?.kind === "thought" ? cell.thread : LONE;');
+    expect(reasoning.match(/thread=\{thread\}/g)?.length).toBe(2);
   });
 
   test("the flows' testIDs survive: status on the label, output, reply, progress, activity", () => {

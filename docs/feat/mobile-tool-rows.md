@@ -745,6 +745,35 @@ files). `bun test`: **14201 pass, 5 skip, 0 fail** (1013 files). The skips
 are the same 5 as in S1. No schema is touched, so there is no
 `protocol.json` regeneration and no `protocol.d/` note.
 
+### Fix round 1 (S2)
+
+*— claude-opus-5-5, 2026-11-17* — addresses Review — S2 (one MEDIUM, a test gap). Only a test changed; no `src` change.
+
+- **Finding 1 (MEDIUM): FIXED.** There are two new source pins in `apps/mobile/test/tool-rows-wiring.test.ts`:
+  - `the footer node gets the tail's thought and its up segment`: `<ThinkingNode` carries `thought={layout.tail.thought}` and `up={layout.tail.up}`.
+  - `the layout's cell reaches the node: the folded thought and the thread`:
+    - `ToolRowView` passes `cell.thought` into `stepRowView` and derives `thread` from `cell.thread`.
+    - `ReasoningRowView` derives `thread` from `cell.thread`.
+    - Each view hands `thread={thread}` to both `StepShell` and `StepNode` (exactly 2 sites).
+- **Red → green, by mutation** (`.tentacle/tmp/mobile-tool-rows/mutate-r1.ts`: it applies each mutation, runs wiring + step-view + steps, then restores the file byte-for-byte). The same 6 mutations ran against the HEAD test and against the new test:
+
+  | Mutation | HEAD test | new test |
+  |---|---|---|
+  | F1 `ToolRowView` drops `cell.thought` | 53/0 (survived) | 54/1 |
+  | F2 `ReasoningRowView` `cell.thread` → `LONE` | 53/0 | 54/1 |
+  | F3 footer `up` → `false` | 53/0 | 54/1 |
+  | F4 footer `thought` → `""` | 53/0 | 54/1 |
+  | F5 `ToolRowView` `cell.thread` → `LONE` | 53/0 | 54/1 |
+  | F6 `ReasoningRowView` node `thread={LONE}` | 53/0 | 54/1 |
+
+  Every fail is on the matching new case's assertion. `git status` after the runs shows only the test file.
+- **Gate:**
+  - `bunx tsc --noEmit`: clean.
+  - `bun run lint`: clean (1953 files).
+  - Narrow tests (wiring, step-view, steps, summary): 107/107.
+  - `bun test`: **14203 pass, 5 skip, 0 fail** (1013 files). These are the same 5 skips as S1 and S2.
+- **Left as is:** the LOW issue (a chart whose `chartLayout` is null falls back to a LONE step) and the S3 simulator checks are out of scope for this round.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17* — **S1 only**, fresh context. This is the same model as the plan author and the S1 executor (Opus), so shared blind spots are possible.
