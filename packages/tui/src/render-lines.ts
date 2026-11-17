@@ -20,6 +20,7 @@ import wrapAnsi from "wrap-ansi";
 import { BULLET, blinkOn, hiddenBullet } from "./blink.ts";
 import { truncateCells } from "./cells.ts";
 import { type ChartGlyphs, chartToolBody } from "./chart-lines.ts";
+import { diagramToolBody } from "./diagram-lines.ts";
 import { formatDurationMs } from "./format.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
@@ -96,6 +97,8 @@ const connector = (): string => `${theme.subtle("⎿")} `;
  * `toolSubtitle` case spells it out), and the name is data on the wire anyway.
  */
 const CHART_TOOL = "chart";
+/** The `diagram` tool's name, for the same reason (docs/feat/model-diagrams.md D4). */
+const DIAGRAM_TOOL = "diagram";
 // An expanded call's command, on the rows under its header (owner mockup):
 // 4 display columns, so the command never wraps under the bullet.
 const COMMAND_PREFIX = "  │ ";
@@ -779,6 +782,53 @@ function chartRow(
   return shown;
 }
 
+/**
+ * A `diagram` call's rows, drawn from its own arguments — or `undefined` for
+ * every other call, and for a `diagram` whose arguments are not a source this
+ * build can draw (invalid JSON, a cap lowered since, another model's forgery):
+ * that one falls back to the generic tool row, never a crash and never an error
+ * in the transcript (docs/feat/model-diagrams.md D4/T4.3). The sibling of
+ * {@link chartRow}, memoised the same way (the layout runs every frame).
+ */
+const diagramCache = new WeakMap<ToolItem, Map<string, readonly string[] | null>>();
+
+function diagramRow(
+  tool: ToolItem,
+  width: number,
+  opts: RenderOptions,
+): readonly string[] | undefined {
+  if (tool.name !== DIAGRAM_TOOL) {
+    return undefined;
+  }
+  // Only a settled call draws: a running diagram has no args yet, and the
+  // generic row's spinner is the honest row.
+  if (tool.status === "running" || tool.status === "queued") {
+    return undefined;
+  }
+  const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
+  const key = `${width}|${expanded ? 1 : 0}`;
+  let slots = diagramCache.get(tool);
+  if (!slots) {
+    slots = new Map();
+    diagramCache.set(tool, slots);
+  } else {
+    const hit = slots.get(key);
+    if (hit !== undefined) {
+      return hit ?? undefined;
+    }
+  }
+  // `openHint` stays off until the artifacts chord can open a diagram (D7): a
+  // hint the key cannot honour would be a lie.
+  const lines = diagramToolBody(tool.args, { width, expanded });
+  if (lines === undefined || lines.length === 0) {
+    slots.set(key, null);
+    return undefined;
+  }
+  const shown = [...lines];
+  slots.set(key, shown);
+  return shown;
+}
+
 function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const cols = Math.max(1, Math.floor(opts.width ?? DEFAULT_WIDTH));
   // A chart draws ITSELF in the row's place: no bullet, no `● Chart …` header, no
@@ -788,6 +838,13 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const chart = chartRow(tool, cols, opts);
   if (chart !== undefined) {
     return [...chart];
+  }
+  // A diagram draws itself in the row's place too, for the same reason: it is
+  // part of the reply, not a tool block. Its caption (the title · type) is row
+  // 0, so it is the row a click toggles.
+  const diagram = diagramRow(tool, cols, opts);
+  if (diagram !== undefined) {
+    return [...diagram];
   }
   if (tool.status === "queued") {
     // Approved, not started: one dim row, no body, no spinner.

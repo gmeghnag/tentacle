@@ -1245,3 +1245,79 @@ F2 source lines not cleaned: KILLED (3 fail) … > flowchart label | … > sourc
 - **Correction to round 1:** the executor commits are tagged `deepseek`, so the reviewer is a DIFFERENT model family, not the same one.
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Execution — slice D4
+
+*TUI wiring only: the `diagramRow` branch in `render-lines.ts` (a sibling of `chartRow`), its tests, and the changelog sentence D3 deferred. Nothing of D5–D7 (no phone, no artifacts, no `openHint`). `TODO.md` untouched.*
+
+### 0. Load-bearing check, re-run first — **HOLDS**
+
+The D4 plan names P3 as its seam: *a tool may draw itself in its row's place* — `chartRow` → an early return in `toolLines` (`render-lines.ts:788-793`), a per-item memo keyed on the layout inputs, per-id expand via `expandedIds` + Ctrl+O via `expandAll`. Re-run on this branch:
+
+- `bun test packages/tui/test/app.test.tsx -t "a chart in the App"` → **7 pass, 0 fail**. The seam is real and reachable through the App.
+- `bun test packages/tui/test/diagram-lines.test.ts` (D3's renderer, the thing D4 wires) → **45 pass, 0 fail**.
+- `bun test packages/tools/test/diagram.test.ts` (D2's tool, whose `args` D4 reads) → **30 pass, 0 fail**.
+
+So a `diagram` call's arguments reach the TUI and the renderer draws them; what was missing is only the branch. Confirmed empirically, not by reading: before the change a `diagram` call rendered `● Diagram Flusso di login` (see §2).
+
+### 1. As built (dependency order)
+
+1. **Red first (§9).** `packages/tui/test/app-diagram.test.tsx` (7 tests) was written and run against the un-branched code: **1 pass, 6 fail**. The one pass is honest and vacuous — the forged-source test asserts the row is the generic one, which is what every row was. Its non-vacuity is shown by mutation M1/M8 below, not by that red run.
+2. `packages/tui/src/render-lines.ts`:
+   - `DIAGRAM_TOOL = "diagram"` (`:100-101`), a literal for the reason `CHART_TOOL` is one (`:94-98`): the TUI does not depend on `@tentacle/tools`, and the name is data on the wire.
+   - `diagramRow(tool, width, opts)` (`:785-828`): name guard → settled-call guard (`running`/`queued` keep the generic row) → the same `expanded` computation the other rows use → a `WeakMap<ToolItem, Map<key, rows|null>>` memo keyed `${width}|${expanded?1:0}` → `diagramToolBody(tool.args, { width, expanded })` → `undefined` when the renderer refuses.
+   - the branch in `toolLines` (`:839-848`), right after the chart's, returning the rows in the item's place (no bullet, no `● Diagram` header, no `⎿` connector).
+   - `openHint` is deliberately **not** passed: the `^X^O` chord cannot open a diagram until D7 adds the artifact kind, and a hint the key does not honour would be a lie (D3's caption already supports it; D7 turns it on).
+3. `packages/tui/test/diagram-row.test.ts` (9 tests): the narrow, pure seam — no chrome, caption is row 0, `expandedIds` ≡ `expandAll`, the width in the memo key (drawing ⇄ source on the SAME item), forged args → generic row (6 shapes), `running`/`queued` → generic row, another tool's row untouched (including one whose args are diagram-shaped), every row within the width at 8 widths × 2 tiers, no `process.stdout` write.
+4. `packages/tui/test/app-diagram.test.tsx` (7 tests): the frames T4 names — live through the real `Agent` + `createDiagramTool({ parse })`; after a resume from `messagesToItems`; Ctrl+O expand/collapse; a click on the caption (row 0) expanding it; a resize 120 → 50 → 120; a forged source; a `process.stdout` spy.
+5. `changelog.d/model-diagrams.added.md`: D3's deferred sentence replaced — the terminal drawing (flowchart boxes/decisions, sequence lifelines), `ctrl+o`/caption-click for the source, and the source fallback for a type the terminal cannot draw; the phone renderer still "follows".
+
+### 2. Red before green (§9)
+
+`bun test packages/tui/test/app-diagram.test.tsx` on the code without the branch: **1 pass, 6 fail**, each on its own assertion (not an import):
+- live: `Expected to contain: "╭"` (received `● Diagram Flusso di login`);
+- resume: the same;
+- Ctrl+O: no source rows;
+- click: `captionRow` found no caption → `Expected: > 0, Received: 0`;
+- resize: no box at 120;
+- stdout spy: no box drawn.
+
+Two honest adjustments made during the red→green loop, both stated rather than hidden:
+- `ink-testing-library`'s terminal is 24 rows × 100 cols, and a drawn diagram is taller: an overflowing frame loses its **top** rows (the caption, so the click target). The tests now mount, then commit an 80-row screen at 120 cols (`mountApp`), the order `app.test.tsx` uses so the App's resize subscription is already live.
+- The resize fixture's first draft was a 6-node flowchart that still fit 50 cols; it gained a seventh node and an extra edge so the tier really changes (verified by `.tentacle/tmp/model-diagrams/d4/probe3.ts`: `wide @120 drawn=true`, `wide @50 sourceOnly=true`).
+- Three assertions were wrong about the house style, not about the code, and were corrected after the run: the queued row's glyph is `◌` (not `●`) and it carries the title as a *subtitle*; the `shell` tool's label is `Bash`; `SOURCE_ONLY` is cut at narrow widths, so only `source only` is pinned.
+
+### 3. Mutation checks (§9; `.tentacle/tmp/model-diagrams/d4/mutate.ts` — each applied by exact match, both narrow files run, the file restored from a copy; `git status` after shows only the intended three files)
+
+```
+M1 diagramRow branch dropped from toolLines:                  KILLED (9 fail)
+M2 memo key drops the width:                                   KILLED (2 fail)  ← resize, on one item
+M3 expanded ignored (always compact):                          KILLED (3 fail)
+M4 tool chrome kept above the drawing:                         KILLED (3 fail)
+M5 diagramRow used for every tool:                             KILLED (1 fail)  ← the impostor-tool test
+M6 a raw terminal write inside the branch:                     KILLED (2 fail)  ← the stdout spies
+M7 only a settled call draws (running guard dropped):          KILLED (1 fail)
+M8 the generic-row fallback removed (return [""] on refusal):  KILLED (2 fail)
+```
+
+Two mutations earned a test rather than a shrug, which is the point of the exercise:
+- **M5 first SURVIVED.** The `shell` case alone could not kill it: hand the diagram renderer a `{"command":"ls -la"}` arg and it refuses, so the row is generic either way. A second case was added — a tool NAMED `draw` carrying valid diagram args — and M5 then died. The guard is pinned on the name, which is what it actually is.
+- **M6/M7 first matched the WRONG site.** Their `from` strings existed in `chartRow` too, so the first replacement mutated the chart and the diagram tests stayed green — a false SURVIVED that would have read as "this code is untested". The anchors were widened to the diagram-specific context and both then died. One mutation (M8) was then killed only after its anchor was made unique to `diagramRow`: `bun -e` on the mutated build showed `["● Diagram not json"]`, i.e. the `return [""]` path is swallowed by the generic row below it, and the test that catches it is the forged-args one.
+
+### 4. Drift from the Implementation (and why)
+
+1. **A second test file, `diagram-row.test.ts`.** The plan lists T4's checks only as ink frames. Three of them (the name guard, the `running`/`queued` guard, "every row within the width at 8 widths") are pure `itemLines` properties: an App frame cannot state them, and the first two cannot even fail in a frame. This is the same split `render-lines.ts` already has for the chart (narrow unit tests + `app.test.tsx` frames), so it is the house pattern rather than a new one.
+2. **No `openHint`.** The plan's D8 mentions `^X^O apri` in the caption; D4's own T4 does not, and the chord needs D7's artifact kind. Passing `openHint: true` now would advertise a key that does nothing. D7 flips one option.
+3. **The changelog fragment is edited, not added.** D3's drift item 7 asked for exactly this; the fragment title and its D1/D2 content are unchanged.
+4. **The memo keys on `width|expanded` only** — no glyphs/locale analogue, because a diagram's drawing depends on nothing else. `openHint` will be a third component when D7 passes it.
+5. The Review nit about `parseDiagramArgs` returning the raw title is honoured structurally: `toolLines` never shows `call.title` for a diagram — only `diagramView`'s cleaned caption reaches a row (the caption in these frames comes from the renderer, not from `toolSubtitle`).
+
+### 5. Gate
+
+- `bunx tsc --noEmit`: clean.
+- `bun run lint`: clean, 1986 files (2 files auto-formatted by `biome check --write`; no hand fixes needed, no `noControlCharactersInRegex` suppression added — the control-byte rule already lives in `diagram-lines.ts`).
+- Narrow: `app-diagram` 7 pass, `diagram-row` 9 pass, `diagram-lines` 45 pass, `render-lines`+`chart-lines`+`tool-hit` 222 pass, `app.test.tsx` 123 pass.
+- Full `bun test`, run once at the end: **14467 pass, 5 skip, 0 fail** (same 5 skips as the D3 gate: 3 opt-in + 2 pre-existing).
+- No schema change, no `protocol.d/` note (a tool name and its arguments are data on the wire, D9). `protocol.json` untouched.
+
+*— claude-opus-5-5, 2026-11-17*
