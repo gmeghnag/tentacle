@@ -48,3 +48,13 @@ export function turnEndHaptic(wasRunning: boolean, running: boolean): HapticKind
 export function hubHaptic(effect: GestureEffect): HapticKind | null {
   return effect.kind === "haptic" ? effect.cue : null;
 }
+
+/**
+ * A drawer row's long-press (docs/feat/mobile-session-actions.md S2): the row
+ * menu's feedback. `firm` is a medium impact — the weight iOS uses to lift a
+ * context menu — so it is distinguishable from the selection `tick` of a hub
+ * highlight without a new `HapticKind`.
+ */
+export function rowMenuHaptic(): HapticKind {
+  return "firm";
+}

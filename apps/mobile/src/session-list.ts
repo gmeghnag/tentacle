@@ -23,6 +23,13 @@ export interface SessionPage {
   readonly sessions: readonly SessionListEntry[];
   /** Present iff more entries follow. */
   readonly cursor?: string;
+  /**
+   * The FIRST page only: EVERY pinned session on that daemon, live or archived
+   * (`session/list`'s own `pinned`, docs/feat/mobile-session-actions.md) — so a
+   * pin older than the loaded pages still shows. Absent: none pinned, a later
+   * page, or a daemon that cannot pin.
+   */
+  readonly pinned?: readonly SessionListEntry[];
 }
 
 /** What the in-flight request will deliver: the first page, or one more page. */
@@ -40,6 +47,12 @@ export interface SessionListState {
   readonly generation: number;
   /** Null when nothing is in flight. */
   readonly pending: PendingPage | null;
+  /**
+   * The first page's `pinned` list, REPLACED by each first-page read (a later
+   * page carries none, so it never edits this): an unpin made on another device
+   * therefore clears it at the next re-read, never half-way.
+   */
+  readonly pinnedEntries: readonly SessionListEntry[];
 }
 
 export type SessionListAction =
@@ -59,6 +72,7 @@ export const initialSessionList: SessionListState = {
   stale: false,
   generation: 0,
   pending: null,
+  pinnedEntries: [],
 };
 
 /** The newer of two records of the same session. */
@@ -129,6 +143,7 @@ export function reduce(state: SessionListState, action: SessionListAction): Sess
         ...rest,
         status: "loaded",
         entries: merge(state.entries, action.page.sessions, state.pending),
+        pinnedEntries: state.pending === "first" ? (action.page.pinned ?? []) : state.pinnedEntries,
         error: undefined,
         // A page arrived, so the link is up and the rows are the daemon's
         // current truth: the "Reconnecting…" mark a failed refresh set is over.
@@ -182,9 +197,18 @@ export interface SessionRow {
   readonly running: boolean;
   /** Clients attached now (the row's meta line). */
   readonly attached: number;
+  /** Pinned to the top of every device's list (`session/pin`). */
+  readonly pinned: boolean;
 }
 
 export interface SessionSections {
+  /**
+   * The daemon's pins, in the list's own order (`updatedAt` desc): every one the
+   * first page reported, whether or not its recency page was loaded. They stay
+   * in `active` / `archived` too — paging is untouched; only the renderers hoist
+   * them out (`drawer-list.ts`, `session-groups.ts`).
+   */
+  readonly pinned: readonly SessionRow[];
   readonly active: readonly SessionRow[];
   readonly archived: readonly SessionRow[];
 }
@@ -236,11 +260,17 @@ function badgesFor(entry: SessionListEntry): readonly string[] {
 /**
  * The view-model the list screen renders: rows split into the Active and
  * Archived sections the mockups show, in the daemon's order (most recent
- * first). Nothing here interprets a daemon string.
+ * first), plus the `pinned` projection both renderers hoist to the top.
+ * Nothing here interprets a daemon string.
  */
-export function rows(entries: readonly SessionListEntry[], now: number): SessionSections {
+export function rows(
+  entries: readonly SessionListEntry[],
+  now: number,
+  pinnedEntries: readonly SessionListEntry[] = [],
+): SessionSections {
   const active: SessionRow[] = [];
   const archived: SessionRow[] = [];
+  const byId = new Map<string, SessionRow>();
   for (const entry of entries) {
     const row: SessionRow = {
       sessionId: entry.sessionId,
@@ -251,10 +281,42 @@ export function rows(entries: readonly SessionListEntry[], now: number): Session
       archived: entry.archived,
       running: entry.running,
       attached: entry.attached,
+      pinned: entry.pinned === true,
     };
+    byId.set(row.sessionId, row);
     (entry.archived ? archived : active).push(row);
   }
-  return { active, archived };
+  // The first page's pins: EVERY pin the daemon reported, in its order, whether
+  // or not that row's recency page was read. A pin only in the loaded entries
+  // (`pinned: true` with no first-page list, e.g. an older caller) still counts,
+  // so the two sources are UNIONED by id, in the first-page order.
+  const pinned: SessionRow[] = [];
+  const seen = new Set<string>();
+  for (const entry of [...pinnedEntries, ...entries]) {
+    if (entry.pinned !== true || seen.has(entry.sessionId)) {
+      continue;
+    }
+    seen.add(entry.sessionId);
+    const row = byId.get(entry.sessionId);
+    if (row !== undefined) {
+      pinned.push(row);
+      continue;
+    }
+    // A pin whose recency page is not loaded yet still shows (its own row, from
+    // the first page's copy: the daemon sends the whole entry).
+    pinned.push({
+      sessionId: entry.sessionId,
+      title: entry.title,
+      subtitle: relativeTime(entry.updatedAt, now),
+      badges: badgesFor(entry),
+      wakes: entry.schedules ?? 0,
+      archived: entry.archived,
+      running: entry.running,
+      attached: entry.attached,
+      pinned: true,
+    });
+  }
+  return { pinned, active, archived };
 }
 
 /**

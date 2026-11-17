@@ -41,11 +41,21 @@ export interface DrawerRow {
   readonly archived: boolean;
   /** The open session: highlighted with `fill`. */
   readonly current: boolean;
+  /**
+   * Daemon facts the row's menu words itself from (`drawer-row-menu.ts`): a
+   * running row's delete says its turn will stop, an attached one's says it is
+   * open elsewhere. Never derived from a title.
+   */
+  readonly running: boolean;
+  readonly attached: number;
+  readonly pinned: boolean;
 }
 
-export type DrawerSection = "running" | "recent" | "archived";
+export type DrawerSection = "pinned" | "running" | "recent" | "archived";
 
 export interface DrawerList {
+  /** The daemon's pins, above everything (docs/feat/mobile-session-actions.md). */
+  readonly pinned: readonly DrawerRow[];
   readonly running: readonly DrawerRow[];
   readonly recent: readonly DrawerRow[];
   /** `rows` is null while the section is collapsed (the "Archived · n" row only). */
@@ -58,6 +68,11 @@ export interface DrawerList {
   /** A fresh, successful read with no sessions — the only case for "No sessions". */
   readonly empty: boolean;
   readonly canLoadMore: boolean;
+  /**
+   * The row a delete of the OPEN session lands on (Owner Q2): the first remaining
+   * non-archived row of the drawer's own order, or null for the empty state.
+   */
+  readonly nextAfterCurrent: DrawerRow | null;
 }
 
 export interface DrawerListOptions {
@@ -75,27 +90,45 @@ function toRow(row: SessionRow, currentId: string | null): DrawerRow {
     tone: row.archived ? "archived" : row.running ? "running" : "idle",
     archived: row.archived,
     current: currentId !== null && row.sessionId === currentId,
+    running: row.running,
+    attached: row.attached,
+    pinned: row.pinned,
   };
 }
 
+/**
+ * The drawer's sections (Owner Q3: a pinned ARCHIVED row shows in Pinned too,
+ * dimmed, and its tap browses it without reviving).
+ *
+ * Pinned comes first and its rows are REMOVED from Running/Recent/Archived — the
+ * daemon keeps them in their own place in `session/list` (paging is unchanged),
+ * so the hoist is a renderer's decision, taken here and nowhere else. A running
+ * pinned row keeps its running tone (and its dot).
+ */
 export function drawerList(source: DrawerSource, options: DrawerListOptions): DrawerList {
   const { currentId } = options;
-  const running = source.sections.active
-    .filter((row) => row.running)
+  const pinned = source.sections.pinned.map((row) => toRow(row, currentId));
+  const isPinned = new Set(pinned.map((row) => row.id));
+  const unpinned = source.sections.active.filter((row) => !isPinned.has(row.sessionId));
+  const running = unpinned.filter((row) => row.running).map((row) => toRow(row, currentId));
+  const recent = unpinned.filter((row) => !row.running).map((row) => toRow(row, currentId));
+  const archivedRows = source.sections.archived
+    .filter((row) => !isPinned.has(row.sessionId))
     .map((row) => toRow(row, currentId));
-  const recent = source.sections.active
-    .filter((row) => !row.running)
-    .map((row) => toRow(row, currentId));
-  const archivedRows = source.sections.archived.map((row) => toRow(row, currentId));
-  const currentIn: DrawerSection | null = running.some((row) => row.current)
-    ? "running"
-    : recent.some((row) => row.current)
-      ? "recent"
-      : archivedRows.some((row) => row.current)
-        ? "archived"
-        : null;
+  const currentIn: DrawerSection | null = pinned.some((row) => row.current)
+    ? "pinned"
+    : running.some((row) => row.current)
+      ? "running"
+      : recent.some((row) => row.current)
+        ? "recent"
+        : archivedRows.some((row) => row.current)
+          ? "archived"
+          : null;
+  // A pinned ARCHIVED current row is shown whatever the toggle: its highlight is
+  // never hidden (F5). That is why the auto-open rule reads Pinned too.
   const archivedShown = options.archivedOpen ?? currentIn === "archived";
   return {
+    pinned,
     running,
     recent,
     archived: {
@@ -108,7 +141,27 @@ export function drawerList(source: DrawerSource, options: DrawerListOptions): Dr
     ...(source.error === undefined ? {} : { error: source.error }),
     empty: source.empty && !source.stale && source.error === undefined,
     canLoadMore: source.canLoadMore,
+    nextAfterCurrent: nextAfterCurrent(
+      [...pinned, ...running, ...recent, ...archivedRows],
+      currentId,
+    ),
   };
+}
+
+/**
+ * Where a delete of the open session lands (Owner Q2): the first NON-archived row
+ * after it in the drawer's own visible order, else the first one before it (the
+ * list shifted up), else null — the empty drawer with its New session pill. An
+ * archived row is never "the next session": opening one only browses it.
+ */
+function nextAfterCurrent(rows: readonly DrawerRow[], currentId: string | null): DrawerRow | null {
+  if (currentId === null) {
+    return null;
+  }
+  const at = rows.findIndex((row) => row.id === currentId);
+  const candidates =
+    at >= 0 ? [...rows.slice(at + 1), ...rows.slice(0, at)] : [...rows.filter((r) => !r.current)];
+  return candidates.find((row) => !row.archived) ?? null;
 }
 
 /** The drawer's title block: the computer it lists, its status line, the switcher. */
@@ -168,7 +221,11 @@ export function drawerTitle(
  * kind to one element and decides nothing (AGENTS §7).
  */
 export type DrawerItem =
-  | { readonly kind: "label"; readonly key: string; readonly text: "Running" | "Recent" }
+  | {
+      readonly kind: "label";
+      readonly key: string;
+      readonly text: "Pinned" | "Running" | "Recent";
+    }
   | { readonly kind: "row"; readonly key: string; readonly row: DrawerRow }
   /** "Archived · n": a toggle; its rows follow only while `open`. */
   | {
@@ -196,14 +253,15 @@ export function drawerItems(list: DrawerList): readonly DrawerItem[] {
   } else if (list.stale) {
     items.push({ kind: "stale", key: "stale", text: list.error ?? STALE_TEXT });
   }
-  const anyRows = list.running.length + list.recent.length + list.archived.count > 0;
+  const anyRows =
+    list.pinned.length + list.running.length + list.recent.length + list.archived.count > 0;
   if ((list.status === "loading" || list.status === "idle") && !anyRows) {
     items.push({ kind: "loading", key: "loading" });
   }
   if (list.empty) {
     items.push({ kind: "empty", key: "empty" });
   }
-  const section = (text: "Running" | "Recent", rows: readonly DrawerRow[]): void => {
+  const section = (text: "Pinned" | "Running" | "Recent", rows: readonly DrawerRow[]): void => {
     if (rows.length === 0) {
       return;
     }
@@ -212,6 +270,7 @@ export function drawerItems(list: DrawerList): readonly DrawerItem[] {
       items.push({ kind: "row", key: `row-${row.id}`, row });
     }
   };
+  section("Pinned", list.pinned);
   section("Running", list.running);
   section("Recent", list.recent);
   if (list.archived.count > 0) {

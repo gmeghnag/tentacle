@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ComposerAction } from "../src/composer.ts";
-import { hubHaptic, pressHaptic, turnEndHaptic } from "../src/haptic-rules.ts";
+import { hubHaptic, pressHaptic, rowMenuHaptic, turnEndHaptic } from "../src/haptic-rules.ts";
 
 const send: ComposerAction = { kind: "send", text: "hi" };
 const queue: ComposerAction = { kind: "queue", text: "hi" };
@@ -56,5 +56,11 @@ describe("hubHaptic (docs/feat/mobile-hub.md Design 2)", () => {
     expect(hubHaptic({ kind: "dragTo", delta: { x: 1, y: 1 } })).toBeNull();
     expect(hubHaptic({ kind: "dragCancel" })).toBeNull();
     expect(hubHaptic({ kind: "tap" })).toBeNull();
+  });
+});
+
+describe("rowMenuHaptic (docs/feat/mobile-session-actions.md S2)", () => {
+  test("a drawer row's long-press is firm — a medium impact, never the hub's tick", () => {
+    expect(rowMenuHaptic()).toBe("firm");
   });
 });
