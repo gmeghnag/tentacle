@@ -318,7 +318,6 @@ function ReasoningRowView({ row, palette, step }: RowProps): JSX.Element | null 
         name={{ tool: "Thought" }}
         subtitle={view.subtitle}
         subtitleItalic
-        marker={false}
         trailing=""
         trailingRed={false}
         thread={thread}
@@ -441,7 +440,6 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
         reduceMotion={step?.reduceMotion ?? false}
         name={view.name}
         subtitle={view.subtitle}
-        marker={view.thought !== null}
         trailing={view.trailing}
         trailingRed={view.trailingRed}
         {...(view.live && tool.at !== undefined ? { liveFrom: tool.at } : {})}

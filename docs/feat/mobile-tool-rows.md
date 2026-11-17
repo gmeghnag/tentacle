@@ -26,8 +26,11 @@ chart, then more steps). The owner said "facciamolo bene": do it properly.
   (ok green, error red, running spinner, queued hollow ring), a human name
   (`playwright · resize`, the server part in `sec`), a mono `sec` argument
   summary, an optional small **∴**, and the duration (`5 ms`, red for an error).
+  *(The ∴ is gone: owner 17/11, `docs/fix/mobile-step-thought-marker.md` — a
+  step's line is name, subtitle and duration only.)*
 - **No "Thinking" rows.** A ∴ on a step means the model thought before that
-  call.
+  call. *(Superseded the same day: a folded thought is the open body's first
+  line, and the row is tappable because of it — no marker on the line.)*
 - **Tap opens the step**: its thought (italic, with a ∴), the full command, and
   the result. Errors are red. No card, no box: full width, on the conversation
   background, under a hairline `sepChat` rule, indented 20 pt.
@@ -309,7 +312,8 @@ trailing, ∴, thread, open, a11y label) and draws:
   tappable; no chevron, as in C):
   - the name: 14/500 sans `label`, with the `server · ` part 14/400 `sec`;
   - the subtitle: mono 12.5 `sec`, `flex: 1`, one line;
-  - an optional ∴ (10 pt `sec`, opacity 0.8);
+  - an optional ∴ (10 pt `sec`, opacity 0.8); *(removed 17/11: see
+    `docs/fix/mobile-step-thought-marker.md`)*
   - the trailing text: 12 `sec`, or `red` for error/denied. A running step
     shows a live elapsed time from `row.at` (after open-at-end), ticking once
     a second inside this node only; when `at` is absent, it shows none rather
