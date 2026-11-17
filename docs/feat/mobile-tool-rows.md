@@ -837,3 +837,18 @@ are the same 5 as in S1. No schema is touched, so there is no
 **Still owed (S3):** the simulator half of the load-bearing check (a 0 pt `null` cell, and `scrollToIndex` past hidden rows). The flow-08 edit has not been run.
 
 **Executor behaviour:** honest. The drift is named, and the 7 mutations it lists are real. It missed the cell → node seams above.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* — covers only `git diff HEAD~1` (8c0b17bb). That commit adds 2 wiring tests and changes no source file.
+
+**Verdict: PASS.**
+
+- **S2 #1 is fixed.** I re-applied the three mutations from round 1. Each now **fails** one test:
+  - `cell.thought` → `null`;
+  - `cell.thread` → `LONE` in ReasoningRowView;
+  - `up={layout.tail.up}` → `up={false}`.
+  
+  The earlier R1–R4 mutations still fail too. After the mutations, `git status` is clean.
+- **No regressions found.** No `src` file changed. The touched tests give 107 pass / 0 fail, and `bun run lint` is clean (1953 files). `bun run typecheck` gives the same 6 errors as round 1. They are the environment-only ones, in untouched files, from modules missing in this worktree. There are no new errors.
+- **Still owed by S3:** the simulator half of the load-bearing check, and running flow 08.
