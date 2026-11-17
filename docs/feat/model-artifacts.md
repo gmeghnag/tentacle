@@ -3053,3 +3053,17 @@ need a simulator, so "a PDF renders in WKWebView now that the cached file
 carries `.pdf`" remains a pixel claim this round did not run.
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Round 3
+
+**Verdict: PASS.** I reviewed `git diff HEAD~1` (`3b530612`). It changes tests only: `computer-memory.test.ts` gains 4 tests. The Round-2 MEDIUM is fixed.
+
+- **Gate:** `bun run typecheck` is clean, and `bun run lint` is clean (1919 files). `bun test apps/mobile/test` gives **2686 pass, 0 fail**.
+- **Mutations:** I reverted both, and `git status --porcelain` is empty afterwards.
+  - M1: dropping `memory.artifactCache?.forgetComputer(id)` in `computer-memory.ts` made the test RED (2 fail).
+  - M2: passing the wrong id to `feeds.forgetComputer` made it RED (2 fail).
+  - The unpair delete that SURVIVED in Round 2 is now pinned by behaviour, including the ordering before a re-pair (`withForgottenRecord`).
+- **Regressions:** none. No production code changed, and the "a memory without the hooks" test keeps every other caller working.
+- **Carried, not blocking (Round 2):** the LRU orders by mtime (in effect FIFO by write time), and a title can collide with a version file name. D9's "delete when this phone deletes the session" is still unbuilt. T8.1 and T8.2 have still not run on a device, so scripts-off ships.
+
+*— claude-opus-5-5, 2026-11-17*
