@@ -422,11 +422,11 @@ row on upsert → 1. `row-swipe.ts`: dropping the `hasTime` gate → 1; dropping
    `useConst`/`noAssignInExpressions` refuse the `return (self = {…})` shape slice
    A introduced. Behaviour identical (the only reader is `appState`, at call
    time).
-5. **The `SwipeTime` label width is `REVEAL` and the row is NOT clipped**
-   (`overflow: "visible"`): the label sits outside the row's box, which is what
-   keeps a swipe from changing any height the follow machinery measures. On a
-   device the row is at most `REVEAL` narrower than the page for its duration;
-   the label is drawn in the list's own gutter.
+5. **The `SwipeTime` label was `right: -REVEAL` with the row NOT clipped**
+   (`overflow: "visible"`): the label sat outside the row's box, which the
+   author believed kept a swipe from changing any height the follow machinery
+   measures. **Wrong, and Review round 1 HIGH 2 fixed it** — see "Fix round 1"
+   below (`right: 0`, clipped frame, opaque row).
 
 ### Validation (gate, at the end of slice B)
 
@@ -446,7 +446,8 @@ row on upsert → 1. `row-swipe.ts`: dropping the `hasTime` gate → 1; dropping
   (springs back); the left-edge back-swipe still pops; a tool row still expands
   on tap; text selection unaffected.
 
-*— claude-opus-5-5 (executor), 2026-11-17*
+*— deepseek (executor for slices A + B; the signature previously read
+`claude-opus-5-5`, which was wrong — Review round 1, LOW), 2026-11-17*
 
 ## Review
 
@@ -517,3 +518,91 @@ Fix the signature so it is honest (§10).
 
 *— claude-opus-5-5, 2026-11-17* (fresh context. Same family as the plan's
 author, so it may share the plan's blind spots, e.g. finding 2 came from the plan.)
+
+### Fix round 1
+
+Scope: Review round 1's three findings (1 HIGH, 2 HIGH, 3 MEDIUM) + its LOW
+signature note. Repro/temp files in `.tentacle/tmp/mobile-open-at-end/`.
+
+**F1 (HIGH) — the opening list could stay invisible. FIXED.**
+The root cause is what Review said: `settling` ended only on a REPEATED content
+height, and RN fires `onContentSizeChange`/`onLayout` only when a size CHANGES,
+so a short session never produced the repeat and the list stayed at
+`opacity: 0` (empty state included). The signal is now **time**, not a repeat:
+
+- `follow.ts` — `landingReveal(state, m, following)` + `LANDING_REVEAL_MS = 120`:
+  measurements going QUIET reveals the list and performs its final landing
+  (silent, at the sizes known then). Not following → revealed in place, never
+  yanked. Nothing measured → `landingAwaiting`: the empty state IS shown and the
+  rows that finally arrive hide the list again for their own silent landing (so
+  a slow attach never shows the transcript at its TOP). A new
+  `Landing.awaiting` field carries that; `landingStep` honours it.
+- `SessionScreen.tsx` — a `setTimeout` re-armed after every landing scroll, armed
+  at the MOUNT (an empty or one-message list sends no measurement at all) and
+  cleared on unmount. The repeat-height rule stays as the fast path; the timer is
+  the bound.
+- Tests: `follow.test.ts` pins the REAL event sequence (two distinct heights,
+  then silence) and the reveal's own cases; `session-screen-follow-wiring.test.ts`
+  pins the timer, the re-arm and the mount arm.
+
+**F2 (HIGH) — the swipe revealed nothing. FIXED.**
+Review's geometry is right: the cell is full width, so `right: -REVEAL` put the
+label at `[W, W+64]` — past the ScrollView's edge, clipped — while the row slid
+left to uncover an empty strip. Now `right: 0` (inside the frame, in the strip
+the row gives up), `frame: overflow: "hidden"` (the travelling row cannot draw
+past its cell) and the row is OPAQUE (`backgroundColor: palette.page`, maximum
+blur radius), drawn over the label as a later sibling — so the time only shows
+where the row has moved off it. It stays absolutely positioned, so no height
+changes and the follow machinery still never fires from a swipe.
+`swipe-time-wiring.test.ts` now pins `right: 0` (and asserts the old
+`right: -REVEAL` is gone, scoped to the `label` style) plus the opaque row.
+
+**F3 (MEDIUM) — a foreground resync did not re-arm the silent landing. FIXED.**
+`SessionScreenController.appState` now returns whether it actually STARTED a
+re-attach (false for a duplicate `active`, offline, a running pull, or no live
+attach — the same guards as before, only reported), and the screen arms
+`reattachLanding(...)` off that verdict. The four re-attach sites (pull, Retry,
+Reopen, foreground) now go through that ONE helper instead of three copies of the
+ternary, so they cannot drift apart again. Pure decision tested in
+`session-screen.test.ts` (true once per return, false when it cannot attach);
+the wiring in `session-screen-follow-wiring.test.ts`.
+
+**Review's LOW (the signature).** Fixed: Execution is signed `deepseek`, which is
+what commit `24d47937` says; drift item 5 now records that its geometry was wrong.
+
+**Red before green.** With the new tests and the ORIGINAL sources restored from
+`git show HEAD:` (no checkout/restore/stash), 5 fail — the two swipe geometry
+tests, the land timer, the foreground arming, and `appState`'s return
+(`session-screen.test.ts`, 2 fail). `follow.test.ts` failed on import (it names
+the new exports), so those cases are proved by mutation instead.
+
+**Mutations (each reverted; 4 files, 9 mutations, all red):**
+
+| # | Mutation | Fails |
+|---|---|---|
+| M1 | drop the mount-time `armReveal()` | 1 |
+| M2 | drop the `armReveal()` after a landing scroll | 1 |
+| M3 | drop `landingReveal`'s not-following guard | 1 |
+| M4 | `landingReveal` never shows (settling kept) | 2 |
+| M5 | ignore `awaiting` (awaited rows not re-hidden) | 1 |
+| M6 | `right: -REVEAL` (the old geometry) | 1 |
+| M7 | drop the row's `backgroundColor` | 1 |
+| M8 | `appState` returns false while it resyncs | 1 |
+| M9 | screen ignores `appState`'s verdict | 2 |
+
+**Gate.** `bunx tsc --noEmit` clean; `bunx tsc -p apps/mobile` clean;
+`bunx tsc -p apps/relay` clean; `bun run lint` 1785 files, 0 errors, 0 warnings
+(the §6 baseline); `bun test` — **13 036 pass, 5 skip, 0 fail** (926 files). The 5
+skips are the three opt-in ones plus the two conditional skips already recorded
+above. Two files failed in an intermediate full run and both are unrelated to
+this round: `changelog-guard.test.ts` (this round had put a SECOND bullet in
+`changelog.d/mobile-open-at-end.fixed.md` — forbidden, one bullet per file; the
+swipe already has `mobile-swipe-timestamps.added.md`, so the extra bullet was
+removed) and `session-log-store.test.ts` / `main.test.ts` (load flakes under the
+130 k-test run; both pass on rerun, twice).
+
+**Still open (unchanged from Review):** the device check on the owner's iPhone —
+now also: a 2-message session opens visibly at the end, and a swipe left on a
+message row shows its time inside the row's strip.
+
+*— claude-opus-5-5 (fix round 1), 2026-11-17*

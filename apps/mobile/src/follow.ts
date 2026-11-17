@@ -125,20 +125,57 @@ export interface Landing {
   readonly last: number;
   /** How many measurements this landing has taken. */
   readonly rounds: number;
+  /**
+   * The reveal timer fired with NOTHING measured (a slow attach), so the empty
+   * state was seen: the rows that finally arrive hide again for their landing
+   * rather than appearing at the TOP. Never set on a re-attach.
+   */
+  readonly awaiting: boolean;
 }
 
 /** A fresh screen's landing: hidden until the end stops moving. */
-export const landingStart: Landing = { settling: true, silent: true, last: 0, rounds: 0 };
+export const landingStart: Landing = {
+  settling: true,
+  silent: true,
+  last: 0,
+  rounds: 0,
+  awaiting: false,
+};
 
 /**
  * A RE-ATTACH (a resync, a Retry, a foreground resync): the rows are already
  * shown, so nothing is hidden — but the jump to the end must not be animated
  * either, or the person watches the transcript scroll past again.
  */
-export const landingQuiet: Landing = { settling: false, silent: true, last: 0, rounds: 0 };
+export const landingQuiet: Landing = {
+  settling: false,
+  silent: true,
+  last: 0,
+  rounds: 0,
+  awaiting: false,
+};
 
 /** Nothing pending: the ordinary follow rules apply. */
-export const landingDone: Landing = { settling: false, silent: false, last: 0, rounds: 0 };
+export const landingDone: Landing = {
+  settling: false,
+  silent: false,
+  last: 0,
+  rounds: 0,
+  awaiting: false,
+};
+
+/**
+ * The reveal timer fired with nothing measured (a slow attach): the empty state
+ * was seen, so the list is SHOWN now — and the rows that finally arrive hide it
+ * again for their own silent landing (`awaiting`).
+ */
+export const landingAwaiting: Landing = {
+  settling: false,
+  silent: true,
+  last: 0,
+  rounds: 0,
+  awaiting: true,
+};
 
 /**
  * How many measurements a landing may take before the list is shown anyway: a
@@ -170,15 +207,69 @@ export function landingStep(
   }
   const rounds = state.rounds + 1;
   const next: Landing = {
-    settling: state.settling && m.content !== state.last && rounds < LANDING_ROUNDS,
+    settling:
+      (state.settling || state.awaiting) && m.content !== state.last && rounds < LANDING_ROUNDS,
     silent: false,
     last: m.content,
     rounds,
+    awaiting: false,
   };
   return {
     state: next,
     step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
   };
+}
+
+/**
+ * How long a hidden landing waits after its last scroll before it is REVEALED
+ * (Review round 1, HIGH 1). `settling` used to end only on a REPEATED content
+ * height, and React Native fires `onContentSizeChange`/`onLayout` only when a
+ * size CHANGES — so on a short session (one to three distinct heights) the
+ * repeat never arrives and the transcript stayed at `opacity: 0` for ever. The
+ * screen re-arms this timer on every landing scroll, so the list is shown once
+ * the measurements have gone quiet — a signal that DOES arrive.
+ */
+export const LANDING_REVEAL_MS = 120;
+
+/**
+ * The timer's step: the measurements have gone quiet for `LANDING_REVEAL_MS`, so
+ * the list is SHOWN (whatever is still unknown is not worth an invisible
+ * transcript) and its final landing — silent, so it is not seen moving — is
+ * performed at the sizes known NOW. Nothing is pending → nothing happens.
+ *
+ * The person reading further up is never yanked: not following → reveal in
+ * place, no scroll (`landingDone`, like `landingStep`'s own early exit).
+ */
+export function landingReveal(
+  state: Landing,
+  m: ListSize,
+  following: boolean,
+): { readonly state: Landing; readonly step: FollowStep | null } {
+  if (!state.settling) {
+    return { state, step: null };
+  }
+  if (!following) {
+    return { state: landingDone, step: null };
+  }
+  if (m.content <= 0 || m.viewport <= 0) {
+    // Nothing measured (a screen still being laid out, or an attach slower than
+    // the timer): show the empty state, and hide again when the rows arrive.
+    return { state: landingAwaiting, step: null };
+  }
+  return {
+    state: landingDone,
+    step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
+  };
+}
+
+/**
+ * The landing to arm for a RE-ATTACH: a pull, a Retry, a Reopen, and a
+ * FOREGROUND RETURN (Review round 1, MEDIUM 3 — its resync lands through the
+ * same path). Following → the jump to the end is silent but nothing is hidden;
+ * reading further up → nothing lands at all.
+ */
+export function reattachLanding(following: boolean): Landing {
+  return following ? landingQuiet : landingDone;
 }
 
 /**

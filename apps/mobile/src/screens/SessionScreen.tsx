@@ -57,6 +57,7 @@ import { type FloatBounds, fits, visible as floatVisible, headerPill } from "../
 import {
   type Follow,
   type FollowStep,
+  LANDING_REVEAL_MS,
   type Landing,
   type ListSize,
   contentGrew,
@@ -66,8 +67,10 @@ import {
   jumped,
   landingDone,
   landingQuiet,
+  landingReveal,
   landingStart,
   landingStep,
+  reattachLanding,
   scrolled,
   shown,
   viewportChanged,
@@ -233,8 +236,15 @@ export function SessionScreen({
   // is absent when the Beta port is null, and this must work without it.
   useEffect(() => {
     const app = AppState.addEventListener("change", (next) => {
-      if (next === "active" || next === "inactive" || next === "background") {
-        controller.appState(next);
+      if (next !== "active" && next !== "inactive" && next !== "background") {
+        return;
+      }
+      // `true` means the controller IS re-attaching (item 2): that re-attach lands
+      // the same way a pull does, so it must re-arm the silent landing too —
+      // otherwise its new history went through `contentGrew`, ANIMATED and seen
+      // (Review round 1, MEDIUM 3). The decision stays the controller's.
+      if (controller.appState(next)) {
+        landing.current = reattachLanding(followRef.current.following);
       }
     });
     return () => app.remove();
@@ -332,18 +342,55 @@ export function SessionScreen({
     [setFollowState],
   );
   /** A measurement while a landing (opening or re-attaching) is pending; false when none is. */
+  // The reveal timer (Review round 1, HIGH 1). `settling` used to end only on a
+  // REPEATED content height, but RN fires `onContentSizeChange`/`onLayout` only
+  // when a size CHANGES: on a short session the repeat never arrives and the list
+  // stayed at `opacity: 0`. Every landing scroll re-arms this timer, so
+  // measurements going QUIET is what shows the list (the decision is
+  // `follow.ts`'s `landingReveal`).
+  const reveal = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disarmReveal = useCallback(() => {
+    if (reveal.current !== null) {
+      clearTimeout(reveal.current);
+      reveal.current = null;
+    }
+  }, []);
+  const armReveal = useCallback(() => {
+    disarmReveal();
+    reveal.current = setTimeout(() => {
+      reveal.current = null;
+      const next = landingReveal(landing.current, size.current, followRef.current.following);
+      const changed = next.state.settling !== landing.current.settling;
+      landing.current = next.state;
+      if (next.step !== null) {
+        perform(next.step);
+      }
+      if (changed) {
+        setSettling(next.state.settling);
+      }
+    }, LANDING_REVEAL_MS);
+  }, [disarmReveal, perform]);
+  useEffect(() => disarmReveal, [disarmReveal]);
+  // The opening landing is armed at the MOUNT too: a list whose size never
+  // changes (one short message, or an empty one) sends no measurement at all, and
+  // an unseen "Opening the session…" is the same bug.
+  useEffect(() => {
+    armReveal();
+  }, [armReveal]);
   const land = useCallback((): boolean => {
     const next = landingStep(landing.current, size.current, followRef.current.following);
     const changed = next.state.settling !== landing.current.settling;
     landing.current = next.state;
     if (next.step !== null) {
       perform(next.step);
+      // More measurements may follow this scroll: wait for them to go quiet.
+      armReveal();
     }
     if (changed) {
       setSettling(next.state.settling);
     }
     return next.step !== null;
-  }, [perform]);
+  }, [perform, armReveal]);
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -688,7 +735,7 @@ export function SessionScreen({
                       label: "Retry",
                       onPress: () => {
                         // A Retry re-attaches: the history lands silently (item 1).
-                        landing.current = followRef.current.following ? landingQuiet : landingDone;
+                        landing.current = reattachLanding(followRef.current.following);
                         controller.retry();
                       },
                       testID: "banner-retry",
@@ -699,9 +746,7 @@ export function SessionScreen({
                       action: {
                         label: "Reopen",
                         onPress: () => {
-                          landing.current = followRef.current.following
-                            ? landingQuiet
-                            : landingDone;
+                          landing.current = reattachLanding(followRef.current.following);
                           controller.reopen();
                         },
                         testID: "reopen",
@@ -789,7 +834,7 @@ export function SessionScreen({
                   onRefresh={() => {
                     // A re-attach lands silently at the end (item 1): never a second
                     // visible scroll through the transcript.
-                    landing.current = followRef.current.following ? landingQuiet : landingDone;
+                    landing.current = reattachLanding(followRef.current.following);
                     void controller.resync();
                   }}
                   tintColor={palette.sec}

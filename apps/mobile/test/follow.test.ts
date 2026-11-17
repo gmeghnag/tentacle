@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   type Follow,
+  LANDING_REVEAL_MS,
   LANDING_ROUNDS,
   NEAR_BOTTOM_PT,
   contentGrew,
@@ -13,11 +14,14 @@ import {
   initialFollow,
   jumpPill,
   jumped,
+  landingAwaiting,
   landingDone,
   landingQuiet,
+  landingReveal,
   landingStart,
   landingStep,
   nearBottom,
+  reattachLanding,
   scrolled,
   shown,
   viewportChanged,
@@ -174,6 +178,95 @@ describe("the initial landing (docs/fix/mobile-open-at-end.md, item 1)", () => {
     expect(step.step).toBeNull();
     expect(contentGrew(initialFollow, LONG).animated).toBe(true);
     expect(viewportChanged(initialFollow, LONG).animated).toBe(true);
+  });
+});
+
+describe("the reveal timer: the list is shown even when no measurement repeats (Review round 1, HIGH 1)", () => {
+  test("a SILENT session's real event sequence never repeats a height — the timer is what shows it", () => {
+    // The exact sequence the screen receives opening a 2-message session: two
+    // measurements of DISTINCT heights, then silence. `onContentSizeChange` and
+    // `onLayout` fire only when a size CHANGES, so the repeated measurement
+    // `settling` used to wait for never arrives.
+    const first = landingStep(landingStart, { content: 300, viewport: 800 }, true);
+    expect(first.state.settling).toBe(true);
+    const second = landingStep(first.state, { content: 420, viewport: 800 }, true);
+    expect(second.state.settling).toBe(true); // still hidden: 420 ≠ 300
+    // Silence. The timer is the only thing left that can show the list.
+    const revealed = landingReveal(second.state, { content: 420, viewport: 800 }, true);
+    expect(revealed.state.settling).toBe(false);
+    // It lands at the end it knows NOW, and never animates it: the person must
+    // not see the transcript scroll after they thought it had settled.
+    expect(revealed.step).toEqual({ state: initialFollow, scrollTo: 0, animated: false });
+    // Settled for good: the next content event is ordinary follow, animated.
+    expect(landingReveal(revealed.state, LONG, true).step).toBeNull();
+  });
+
+  test("a long history the timer reaches before it settles still lands at the TRUE end", () => {
+    const one = landingStep(landingStart, { content: 40000, viewport: 800 }, true);
+    const revealed = landingReveal(one.state, { content: 44000, viewport: 800 }, true);
+    expect(revealed.step).toEqual({ state: initialFollow, scrollTo: 43200, animated: false });
+    expect(revealed.state).toEqual(landingDone);
+  });
+
+  test("nothing measured: the empty state is still SHOWN, and the rows hide it again for their own landing", () => {
+    const revealed = landingReveal(landingStart, { content: 0, viewport: 0 }, true);
+    expect(revealed.state.settling).toBe(false); // shown: an invisible empty state is the bug
+    expect(revealed.state).toEqual(landingAwaiting);
+    expect(revealed.step).toBeNull(); // a scroll to 0 is the bug it fixes
+    // And the first real measurement lands, not animated.
+    const landed = landingStep(revealed.state, LONG, true);
+    expect(landed.step?.animated).toBe(false);
+    expect(landed.step?.scrollTo).toBe(39200);
+  });
+
+  test("a person reading further up is shown where they are, never yanked (mutation: drop the guard → a scroll they did not ask for)", () => {
+    const revealed = landingReveal(landingStart, LONG, false);
+    expect(revealed.state).toEqual(landingDone);
+    expect(revealed.step).toBeNull();
+  });
+
+  test("a reveal is BOUNDED: it is a duration, not a round count", () => {
+    expect(LANDING_REVEAL_MS).toBeGreaterThan(0);
+    // Short enough to be a settle, long enough to cover a landing scroll's frame.
+    expect(LANDING_REVEAL_MS).toBeLessThanOrEqual(500);
+  });
+});
+
+describe("a RE-ATTACH arms the landing the same way the pull does (Review round 1, MEDIUM 3)", () => {
+  test("following → silent landing; reading further up → nothing pending", () => {
+    expect(reattachLanding(true)).toEqual(landingQuiet);
+    expect(reattachLanding(false)).toEqual(landingDone);
+  });
+
+  test("a re-attach never hides the list it just re-read (mutation: arm `landingStart` → the rows flicker out)", () => {
+    const step = landingStep(reattachLanding(true), { content: 1300, viewport: 800 }, true);
+    expect(step.state.settling).toBe(false); // silent, never hidden: the rows are already up
+    expect(step.state.silent).toBe(false); // and this landing is now done
+    expect(step.step).toEqual({ state: initialFollow, scrollTo: 500, animated: false });
+  });
+
+  test("but an OPENING landing revealed while it waited for a slow attach hides again for the rows that arrive", () => {
+    // A slow attach: the reveal timer fired with nothing measured, so the empty
+    // state was seen. The history that finally lands must not be seen at the TOP.
+    const shown = landingReveal(landingStart, { content: 0, viewport: 800 }, true);
+    expect(shown.state).toEqual(landingAwaiting);
+    expect(shown.state.settling).toBe(false); // the empty state IS shown
+    const first = landingStep(shown.state, { content: 900, viewport: 800 }, true);
+    expect(first.state.settling).toBe(true); // hidden for the landing, silently
+    expect(first.step).toEqual({ state: initialFollow, scrollTo: 100, animated: false });
+    // It settles the ordinary way (a repeated height), and is then shown.
+    const settled = landingStep(first.state, { content: 900, viewport: 800 }, true);
+    expect(settled.state.settling).toBe(false);
+    expect(settled.state.awaiting).toBe(false);
+  });
+
+  test("a foreground resync's content change lands silently, not through the animated follow", () => {
+    // The bug: the screen re-armed `landingQuiet` only for pull/Retry/Reopen, so
+    // a resync's new history went through `contentGrew` — ANIMATED, seen.
+    const armed = reattachLanding(true);
+    const step = landingStep(armed, LONG, true);
+    expect(step.step?.animated).toBe(false);
+    expect(step.step?.scrollTo).toBe(39200);
   });
 });
 

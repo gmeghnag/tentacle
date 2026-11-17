@@ -345,8 +345,12 @@ export interface SessionScreenController {
    * The input is the app state itself, not a bare "active" edge: iOS delivers
    * `active` twice for one foreground, and only the transition that FOLLOWS a
    * departure may resync (the first `active` is the mount's own open).
+   *
+   * Returns whether this call STARTED a re-attach: the screen then re-arms its
+   * silent landing (Review round 1, MEDIUM 3), so a foreground resync's history
+   * lands at the end without being seen scrolling — exactly what a pull does.
    */
-  appState(state: AppStateName): void;
+  appState(state: AppStateName): boolean;
   /** Session info opened: start every pull (F1–F5 live in the controller). */
   openInfo(): Promise<void>;
   /** The sheet closed: drop in-flight answers and stop following the link (F5). */
@@ -1174,19 +1178,20 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       // — and never while offline, where the redial re-attach owns the recovery.
       if (name !== "active") {
         appWasAway = true;
-        return;
+        return false;
       }
       if (!appWasAway) {
-        return; // a duplicate `active` (iOS) — at most one resync per return
+        return false; // a duplicate `active` (iOS) — at most one resync per return
       }
       appWasAway = false;
       if (disposed || refreshing || attaching || status.phase !== "open") {
-        return; // a pull is already re-reading, or there is no live attach
+        return false; // a pull is already re-reading, or there is no live attach
       }
       if (transcript.link === "down") {
-        return;
+        return false;
       }
       void holder.current?.resync(true);
+      return true;
     },
     async openInfo() {
       await info?.open();

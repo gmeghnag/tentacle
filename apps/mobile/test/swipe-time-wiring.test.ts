@@ -34,11 +34,26 @@ describe("SwipeTime: the gesture is the pure module's, the wiring is safe", () =
     expect(src).toMatch(/Animated\.spring\([\s\S]{0,120}useNativeDriver: true/);
   });
 
-  test("the label is ABSOLUTE, outside the row, and fixed to REVEAL's width", () => {
+  test("the label is ABSOLUTE, INSIDE the frame at its right edge, and fixed to REVEAL's width (Review round 1, HIGH 2)", () => {
     expect(src).toMatch(/position: "absolute"/);
-    expect(src).toMatch(/right: -REVEAL/);
+    // `right: 0`, never `-REVEAL`: the cell is FULL WIDTH (styles.list has no
+    // horizontal padding), so a label at `-REVEAL` sat OUTSIDE the row — the row
+    // slid left to uncover an empty strip while the label itself was past the
+    // ScrollView's edge and clipped. It sits in the strip the row gives up.
+    expect(src).toMatch(/right: 0/);
+    // Scoped to the styles: the doc comment above still NAMES the old geometry.
+    expect(src).toMatch(/label: \{[\s\S]*?right: 0,/);
+    expect(src).not.toMatch(/label: \{[\s\S]*?right: -REVEAL/);
     expect(src).toMatch(/width: REVEAL/);
     expect(src).toContain('pointerEvents="none"');
+  });
+
+  test("the row is OPAQUE and slides OVER the label (a transparent row would show it at rest)", () => {
+    // The label is a sibling BEFORE the translating view, so it is underneath —
+    // but only an opaque row hides it until the swipe gives it up.
+    expect(src).toMatch(
+      /Animated\.View\s+style=\{\[\{ backgroundColor: palette\.page \}, \{ transform: \[\{ translateX \}\] \}\]\}/,
+    );
   });
 
   test("no clock here: the label is a prop (the caller computes it)", () => {

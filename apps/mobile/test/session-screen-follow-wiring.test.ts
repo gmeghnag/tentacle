@@ -84,17 +84,39 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
     expect(src).toMatch(/hidden: \{ flex: 1, opacity: 0 \}/);
   });
 
-  test("a re-attach (pull, Retry, Reopen) lands SILENTLY: no second visible scroll", () => {
-    expect(src).toMatch(
-      /landing\.current = followRef\.current\.following \? landingQuiet : landingDone/,
-    );
-    // The pull, the Retry row and the Reopen button all re-arm it.
-    expect(src.match(/landing\.current = followRef\.current\.following/g) ?? []).toHaveLength(3);
+  test("a re-attach (pull, Retry, Reopen, a foreground return) lands SILENTLY: no second visible scroll", () => {
+    // ONE helper, so the four re-attach sites cannot drift apart (Review round 1,
+    // MEDIUM 3: the foreground return was the one that did).
+    expect(src).toMatch(/landing\.current = reattachLanding\(followRef\.current\.following\)/);
+    expect(src).not.toMatch(/landing\.current = followRef\.current\.following \?/);
+    // The pull, the Retry row, the Reopen button and the foreground return.
+    expect(src.match(/landing\.current = reattachLanding\(/g) ?? []).toHaveLength(4);
   });
 
-  test("the app's foreground transition reaches the controller (item 2)", () => {
+  test("the app's foreground transition reaches the controller, and only an ACTUAL re-attach re-arms the landing (item 2, Review round 1 MEDIUM 3)", () => {
     expect(src).toMatch(
-      /AppState\.addEventListener\("change"[\s\S]{0,200}controller\.appState\(next\)/,
+      /AppState\.addEventListener\("change"[\s\S]{0,900}controller\.appState\(next\)/,
     );
+    // `appState` returns whether it STARTED a re-attach: arming on a duplicate
+    // `active` (iOS sends two) would arm a landing nothing lands.
+    expect(src).toMatch(/if \(controller\.appState\(next\)\) \{/);
+  });
+
+  test("the hidden landing is REVEALED on a quiet timer, not only on a repeated measurement (Review round 1, HIGH 1)", () => {
+    // `settling` used to end only when two measurements saw the same height, and
+    // RN fires a content/layout event only on a CHANGE — so a short session never
+    // repeated one and the list stayed invisible.
+    expect(src).toMatch(
+      /landingReveal\(landing\.current, size\.current, followRef\.current\.following\)/,
+    );
+    expect(src).toMatch(/setTimeout\(\(\) => \{[\s\S]{0,600}LANDING_REVEAL_MS\)/);
+    // Every landing scroll re-arms it: the reveal waits for the measurements to
+    // go quiet, so it never chops a landing loop in half.
+    expect(src).toMatch(/armReveal\(\);[\s\S]{0,120}if \(changed\) \{/);
+    // Armed at the mount too: an EMPTY (or one-short-message) list sends no
+    // measurement at all, and the empty state is inside the hidden View.
+    expect(src).toMatch(/useEffect\(\(\) => \{\s*armReveal\(\);\s*\}, \[armReveal\]\)/);
+    // Unmounted while landing: the timer never fires into a gone screen.
+    expect(src).toMatch(/useEffect\(\(\) => disarmReveal, \[disarmReveal\]\)/);
   });
 });

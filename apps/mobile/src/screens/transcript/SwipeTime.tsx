@@ -16,9 +16,13 @@
  *   (a scroll that starts first, a cell being recycled), we spring back rather
  *   than hold a stuck offset;
  * - the row's layout is untouched: `translateX` is a transform and the label is
- *   absolutely positioned OUTSIDE the row at `right: -REVEAL`, so neither extends
- *   the content height (`follow.ts`'s `contentGrew` never fires from a swipe) nor
- *   changes a row's cell size.
+ *   absolutely positioned INSIDE the frame at its right edge (`right: 0`), so
+ *   neither extends the content height (`follow.ts`'s `contentGrew` never fires
+ *   from a swipe) nor changes a row's cell size. The row is OPAQUE and drawn over
+ *   the label, so the time only shows where the row has given up its strip
+ *   (Review round 1, HIGH 2: at `right: -REVEAL` the label sat outside the
+ *   full-width cell — past the ScrollView's edge, clipped — and the row uncovered
+ *   an empty strip instead).
  *
  * The label has no `Date`/`Intl` of its own: `timeLabel(item.at)` is computed by
  * the caller (which already reads the row), so this component stays a renderer.
@@ -73,8 +77,10 @@ export function SwipeTime({ palette, label, children }: SwipeTimeProps): JSX.Ele
 
   return (
     <View style={styles.frame}>
-      {/* Absolutely positioned and OUTSIDE the row (right: -REVEAL): it can never
-          change the row's height, so the follow machinery sees no growth. */}
+      {/* Absolutely positioned INSIDE the frame at its right edge, and a SIBLING
+          BEFORE the translating view: it can never change the row's height (so
+          the follow machinery sees no growth), and the opaque row covers it until
+          the swipe gives up that strip. */}
       <View pointerEvents="none" style={styles.label}>
         <Text
           maxFontSizeMultiplier={1}
@@ -84,7 +90,10 @@ export function SwipeTime({ palette, label, children }: SwipeTimeProps): JSX.Ele
           {label ?? ""}
         </Text>
       </View>
-      <Animated.View style={{ transform: [{ translateX }] }} {...pan.panHandlers}>
+      <Animated.View
+        style={[{ backgroundColor: palette.page }, { transform: [{ translateX }] }]}
+        {...pan.panHandlers}
+      >
         {children}
       </Animated.View>
     </View>
@@ -92,10 +101,11 @@ export function SwipeTime({ palette, label, children }: SwipeTimeProps): JSX.Ele
 }
 
 const styles = StyleSheet.create({
-  frame: { overflow: "visible" },
+  /** Clipped: the row translating left must not draw past its own cell. */
+  frame: { overflow: "hidden" },
   label: {
     position: "absolute",
-    right: -REVEAL,
+    right: 0,
     width: REVEAL,
     top: 0,
     bottom: 0,

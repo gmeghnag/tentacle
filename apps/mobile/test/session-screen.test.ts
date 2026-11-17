@@ -946,6 +946,42 @@ describe("foreground resync (docs/fix/mobile-open-at-end.md, item 2)", () => {
     expect(h.opens()).toBe(1);
   });
 
+  test("a return to `active` reports that it STARTED the re-attach, so the screen can re-arm its silent landing (Review round 1, MEDIUM 3)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    // The mount's own `active`, then a duplicate: neither re-attaches.
+    expect(h.screen.appState("active")).toBe(false);
+    h.screen.appState("background");
+    // A real return: true, exactly once (the screen arms its landing on it).
+    expect(h.screen.appState("active")).toBe(true);
+    await settle();
+    expect(h.opens()).toBe(2);
+    // And a duplicate `active` after it reports nothing (no arming, no resync).
+    expect(h.screen.appState("active")).toBe(false);
+  });
+
+  test("a foreground that cannot re-attach reports false (offline, or no live attach)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.link(false);
+    h.screen.appState("background");
+    expect(h.screen.appState("active")).toBe(false); // the link is down: the redial owns recovery
+    h.screen.link(true);
+    // A screen that never attached (a failed open) has no live attach to re-read.
+    const failed = countingHarness();
+    failed.goOffline();
+    await failed.screen.open();
+    await settle();
+    failed.goOnline();
+    expect(failed.screen.state().status.phase).toBe("failed");
+    failed.screen.appState("background");
+    expect(failed.screen.appState("active")).toBe(false);
+  });
+
   test("a foreground resync that appends nothing does not move or complain", async () => {
     const h = countingHarness();
     h.setHistory(["first"]);
