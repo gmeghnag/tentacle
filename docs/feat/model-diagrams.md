@@ -1759,3 +1759,29 @@ The 5 skips are the same set as D5's gate. **The 1 fail is `apps/mobile/test/cha
 **Pixels unverified:** nothing was run on a simulator or device. The booted simulators may be other sessions', so I did not take them over. Still open: mermaid actually drawing under `artifactCsp()` in WKWebView, `fetch` of the asset in a release build, the look, fade, pinch/double-tap, landscape and VoiceOver. To check: a dev build, a `diagram` call, a reopen, a tap into full screen, Sorgente, back.
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Review — slice D6
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM; no HIGH).
+
+**Finding 1 (MEDIUM): T6.2 "render failure → caption + source" is not built as tested, and that decision sits in a component.** In `apps/mobile/src/ui/diagram/DiagramBlock.tsx:65-73`, the choice between source, placeholder and drawing is render-time branching inside a `.tsx`. No test pins it, and no test file mentions `failed`, `CodeBlock` or `-source`. Mutation: `const failed = false;` (`DiagramBlock.tsx:65`) → `bun test apps/mobile/test/` gives 3076 pass, 1 fail, and that one fail is the existing `chart-view.test.ts` load error. So the mutation **survives**. Failure scenario: a refactor drops the branch, and a diagram that mermaid refused (or that timed out) shows an empty hairline placeholder forever instead of its source. That breaks the plan's "never an error in the transcript / the row shows the source" (D6 bridge rule 2, T6.2). Fix: put the body choice (`source | placeholder | drawing`, plus the tap's target tab) in `diagram-display.ts` as a pure function with a test. Then the component only maps it. This is the AGENTS §7 "logic lives in pure modules" rule.
+
+**Gate (narrow, as scoped):** the 5 D6 test files: 47 pass, 0 fail. `bun run lint`: clean (2033 files). `bun run typecheck`: clean. I did not re-run the full suite. `chart-view.test.ts` fails alone with the `EventEmitter` load error, as Execution says.
+
+**Mutations (mine, restored byte-identical, `git status` clean):** display gets `onMessage` → KILLED (2). Detach does not requeue the in-flight job → KILLED (1). Background colour not sanitised → KILLED (1). A retryable failure is never retried → KILLED (1). Failure branch forced off → **SURVIVED** (Finding 1).
+
+**Attacks tried, nothing found:**
+- *Forged or stale answers:* `receive` accepts only `parseDiagramReply` with the in-flight id. A late answer after a timeout is dropped, because `inFlight` is null.
+- *Display isolation:* `htmlViewerProps({scripts:false})` puts the CSP first, and `javaScriptEnabled=false`. The display has no `onMessage` and no injected script, and it uses the artifacts predicate. A hostile SVG is inert, and the background colour is sanitised before it is spliced into the style.
+- *Source as code:* the source goes in only through one `JSON.stringify` literal.
+- *Library escaping its `<script>`:* the library is refused if it has a `<script` sequence.
+- *Timeout and reload:* the reload's own detach is a no-op, because the port was already nulled.
+- *Two renderers fighting over the one app-wide service:* `<SessionScreen>` is mounted once (`App.tsx:1483`).
+- *CSP vs mermaid:* `style-src 'unsafe-inline'` is allowed. The lack of `'unsafe-eval'` was checked only statically, which Execution already says.
+- *Version skew:* the asset header is pinned to the tools install.
+
+**How the executor behaved:** the record is honest about what is unverified (pixels, the e2e flow, `diagrams.style`) and about the `diagram-wiring` test that never ran red. Its mutation table checks out where I re-ran it, but it missed the one untested branch above.
+
+Same model as the executor (claude-opus-5-5, fresh context only), so blind spots may be shared.
+
+*— claude-opus-5-5, 2026-11-17*
