@@ -203,3 +203,36 @@ test) — no new skip, no new failure.
 *— Claude via Claude Code 2.1.323 — the harness does not expose the exact model id (executor), 2026-11-17*
 
 ## Review
+
+**Verdict: REQUEST-CHANGES** (one HIGH).
+
+### Findings
+
+1. **HIGH — a `null` cache count from the server permanently breaks the session's log read (laptop persistence, and the `serve` reload).** `packages/providers/src/openai-provider.ts:279` tests `cached_tokens !== undefined`, so `prompt_tokens_details: { cached_tokens: null }` (the shape LiteLLM-style proxies send) yields `cachedPromptTokens: null`. The same applies to `anthropic-provider.ts:225` with `cache_read_input_tokens: null`, which the Anthropic API types as nullable; the pre-existing `?? 0` on `:222` handled null, but the new guard does not. `hosted-session.ts:3058` writes it into the log without validating it, and `LogUsageEntrySchema` rejects `null` (`.optional()` only). A malformed KNOWN entry is fatal, not skipped: `client/session-log-reader.ts:263-265` returns `malformed usage entry N`, `remote-client.ts:2585` retries cold, gets the same error, and after `LOG_ATTEMPTS` throws `session/log: the daemon's log was refused`. So every later save of that session fails until the segment is rebased. A `serve` daemon's own file hits the same refusal at `session-log-file.ts:259-261` on reload. Repro output (`.tentacle/tmp/token-usage-log/null-cache.ts`, worktree imports): `usage: {"promptTokens":10,"completionTokens":5,"cachedPromptTokens":null}` → `Expected number, received null` at `cachedPromptTokens`. This contradicts the plan's claim that the entry is purely additive. Fix: accept only non-negative integers at both providers (`typeof x === "number"`). Also make `SessionLog.usage` validate the entry against `LogUsageEntrySchema` and drop any invalid field or entry instead of pushing it, so a provider can never write a log entry that poisons the log. A `model` id that is empty or over 200 chars has the same failure class. Add a test for the `null` case at both providers, plus a daemon-side test.
+
+### Gate / evidence
+
+- 8 touched test files: **109 pass, 0 fail**. `bun run lint`: clean (1850 files). `bun run typecheck`: clean, all three tsconfigs. I did not re-run the full suite (the executor reports 13454 pass / 5 opt-in skips).
+- Mutation (mine): removed the `model` spread in `hosted-session.ts` `drive()`. `daemon/test/token-usage-log.test.ts` went **1 fail / 3 pass**. Reverted; `git status` is clean.
+
+### Premises
+
+- The skip rule for an unknown non-critical entry, `LOG_ENTRY_CRITICAL.usage=false`, the `drive()` site and the provider sites: **TRUE**. An older reader skips the entry: TRUE.
+- Implied premise: the `usage` entry is always well-formed. **FALSE**: see finding 1.
+
+### Attacks tried
+
+- (a) Null or absent provider fields → finding 1.
+- (b) `tentacle logs` stream and `--summary` with a usage entry present: `log-events.ts` `default:` cases drop it. Nothing found.
+- (c) A client reader that switches on update types (`mobile/transcript.ts`, `tui/state.ts`): the usage entry is log-only and does not reach them. Nothing found.
+- (d) No `PROTOCOL_VERSION` bump: correct for a non-critical type.
+
+### What holds
+
+The non-critical type, the absent-not-0 rule for the happy path, the pure `usage-report.ts`, and the refusal of `--connect`. The tests are non-vacuous (the executor's mutations plus mine).
+
+### Executor behaviour
+
+Disciplined: plan cited, drift recorded honestly. One gap: its proof script imported `@tentacle/*` from `.tentacle/tmp`, which resolves to **main's** packages, not the worktree. That was right for the "older reader" claim, but it means nothing it ran exercised the new schema. Reviewer and executor are both Claude-family; only the context is fresh.
+
+*— claude-opus-5-5, 2026-11-17*
