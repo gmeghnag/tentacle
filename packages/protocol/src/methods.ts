@@ -65,6 +65,8 @@ import {
   JobOutputResultSchema,
   OpenParamsSchema,
   OpenResultSchema,
+  PinParamsSchema,
+  PinResultSchema,
   PromptParamsSchema,
   PromptResultSchema,
   ReclaimParamsSchema,
@@ -124,6 +126,8 @@ export const Method = {
   SendNow: "session/send_now",
   SessionList: "session/list",
   Rename: "session/rename",
+  /** Pin a session to the top of every device's list (docs/feat/mobile-session-actions.md). */
+  Pin: "session/pin",
   Reclaim: "session/reclaim",
   ResolvePermission: "session/resolve_permission",
   /** The user writes to a RUNNING background child (docs/feat/subagent-panel.md). */
@@ -252,6 +256,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.SendNow]: { params: SendNowParamsSchema, result: PromptResultSchema },
   [Method.SessionList]: { params: SessionListParamsSchema, result: SessionListResultSchema },
   [Method.Rename]: { params: RenameParamsSchema, result: RenameResultSchema },
+  [Method.Pin]: { params: PinParamsSchema, result: PinResultSchema },
   [Method.Reclaim]: { params: ReclaimParamsSchema, result: ReclaimResultSchema },
   [Method.ResolvePermission]: {
     params: ResolvePermissionParamsSchema,

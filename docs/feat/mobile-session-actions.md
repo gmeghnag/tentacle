@@ -374,7 +374,119 @@ includes `tsc -p apps/mobile`).
 
 ## Execution
 
-*(empty: Implementation not approved yet)*
+*— claude-opus-5-5, 2026-11-17 (executor, slice S1 only)*
+
+**S1 — DONE.** S2 and S3 not started.
+
+**Load-bearing check (re-run first): holds.** Every cited site is as described:
+`autoAccept?`/`archivedAt?` in the sidecar (`daemon-state-file.ts`), written
+only when set, and `parseSidecar` rebuilds the value from known fields only, so
+an unknown optional field is ignored rather than refused. `setAutoAccept` →
+`this.persist()` (`hosted-session.ts`). `rename` → `rewriteArchived`, which
+rewrites only the state file when the record is not resident
+(`session-host.ts`). `toSessionList` keys on `lastChangeAt`. Live and archived
+summaries both pass through `SessionSummary`. The archive path is
+`persistedState` → `toRecord`, so a pin captured there survives archiving.
+The `serve` start path reads `loadState().meta` (archived) and
+`load().record` (live) (`cli/src/serve.ts:884,900`), so both now carry the pin.
+
+**As built (dependency order):**
+1. Protocol: `session.ts` adds `MAX_PINNED_SESSIONS = 20`,
+   `PinParamsSchema {sessionId, pinned: boolean}`, `PinResultSchema {pinned}`,
+   entry `pinned: z.literal(true).optional()`, and result
+   `pinned: SessionListEntry[] (max 20).optional()`. `methods.ts` adds
+   `Method.Pin` and registers it in `RequestSchemas`. Additive, so there is no
+   `protocol.d/` note. `protocol.json` was regenerated (`bun run schema:export`).
+2. Persistence: `pinnedAt?` on `DaemonSessionState`, `DaemonSessionRecord`,
+   `DaemonSidecar` and `ArchivedMeta`. It is written only when set
+   (`sidecarOf`, `toRecord`). `parseSidecar` keeps it only if `isWireStamp`;
+   anything else is dropped, never refused. It is carried by the loader and by
+   `loadState`'s meta. No `DAEMON_STATE_VERSION` bump. No log entry.
+3. `HostedSession`: `pinnedAt` field, restored from `RestoredSessionState`,
+   carried in `persistedState` and `summary`. `setPinned(on)` is a set:
+   it stamps `now()` only on a change and persists only on a change.
+   It moves no `lastChangeAt` and emits nothing.
+4. `session-list.ts`: `pinned: true` on the entry. On the first page only
+   (no cursor), `pinned` holds every pinned summary, sorted with `compare`
+   and sliced to the cap. `sessions` and `cursor` are untouched.
+5. `SessionHost.pin(id, on)`: tombstone → `SessionDeleted`; then live or
+   archived; else `UnknownSession`. The cap is counted over live + archived
+   in the same synchronous call, and is skipped when the session is already
+   pinned or the call unpins. An archived pin sets `entry.pinnedAt` +
+   `entry.pinChanged`, then `void rewriteArchived`. Both `rewriteArchived`
+   paths (resident record and loaded state file) and their "nothing
+   changed" guards now account for the pin (`withPin` helper). A reopen
+   restores with the ENTRY's pin. `restore` passes `record.pinnedAt` on
+   (restart and reopen).
+6. `Connection`: `case Method.Pin` → `host.pin` (host-level, no `open`).
+7. Client: `RemoteClient.pinSession(id, pinned): Promise<boolean>`, shaped
+   like `rename`: it rejects while down, and maps `MethodNotFound` to "this
+   daemon is too old to pin sessions — update tentacle".
+8. `changelog.d/mobile-session-actions.added.md` (the plan's bullet).
+
+**Drift from Implementation (and why):**
+- *Client "list mapping"*: no code. `sessionList` is a schema-validated
+  pass-through, so `pinned` (entry and array) reaches callers through the
+  schema alone. This is pinned by `packages/client/test/session-pin.test.ts`.
+- *`restore` also carries the pin*: the plan named only the reopen site, but a
+  `serve` restart goes through `restore(loaded.record)` too.
+- *`ArchivedEntry.pinChanged`* is the plan's "mark it changed". It is
+  sticky, like `renamed`, so every later rewrite of that entry keeps the pin.
+- *`json-schema.test.ts`* gained `session/pin` fixtures. The drift gate
+  requires one per method; the plan did not list it.
+- *Docs pointer in `docs/feat/mobile-chrome.md`*: left for S2, because it is
+  about the phone UI.
+- *Changelog fragment*: it describes the finished phone feature (S2). On its
+  own, S1 ships no user-visible change, so this branch must not be released
+  before S2 lands.
+
+**Red before green.** Before the implementation,
+`daemon/test/session-list.test.ts` P1/P2 and both
+`client/test/session-pin.test.ts` cases failed on their assertions.
+`daemon/test/session-pin.test.ts` and `protocol/test/session-pin.test.ts`
+failed at import (`MAX_PINNED_SESSIONS` / `PinParamsSchema` did not exist), so
+their non-vacuity is shown by mutation instead (below).
+
+**Mutation checks** (`.tentacle/tmp/mobile-session-actions/mutate.ts`: back
+up, replace one exact site, run the narrow file, restore; `git diff --stat`
+was unchanged afterwards):
+
+```
+M1 sidecarOf drops pinnedAt (the plan's named one): KILLED, 5 red, incl. "a restart keeps the pin (decoded from the files by the real decoders)"
+M2 setPinned without persist: KILLED, 3 red
+M3 loaded-path guard ignores pin: KILLED, 2 red
+M4 resident path ignores pin: KILLED, 1 red
+M5 persistedState drops pinnedAt: KILLED, 5 red (incl. "archiving a pinned session keeps the pin")
+M6 reopen uses the record's pin: KILLED, 1 red
+M7 loadState meta drops pinnedAt: KILLED, 1 red
+M8 cap counts live only: KILLED, 1 red
+M9 parse passes a malformed pin: KILLED, 1 red
+M10 pinned array from the page only: KILLED, 1 red (P2)
+M11 no case Method.Pin: KILLED, 1 red (wire test)
+M12 restart restore drops pin: KILLED, 3 red
+M13 pinned array on every page: KILLED, 1 red (P3)
+M14 pins hoisted out of sessions: KILLED, 3 red (P1, P2, P4)
+```
+
+(A first M10 variant survived because it was not a faithful mutation:
+`entries` holds every entry after the cursor, not the page. It was replaced by
+the version above.)
+
+**Tests added:** `packages/daemon/test/session-pin.test.ts` (15: live/archived/
+resident/reopen/restart/archived-restart/no persister/errors/cap/sidecar
+round-trip and malformed/wire), `daemon/test/session-list.test.ts` (+4, P1–P4),
+`protocol/test/session-pin.test.ts` (4), `client/test/session-pin.test.ts` (2),
+plus `json-schema.test.ts` fixtures.
+
+**Gate:** `bun run typecheck` clean (root + mobile + relay) · `bun run lint`
+clean (1840 files, 0 errors/warnings) · `bun test` 13390 pass / 5 skip / 0
+fail. The 5 skips come from pre-existing opt-in `skipIf` sites (live
+docker/k8s, slow keepalive). I did not match them name by name, but none of
+the new test files contains a skip.
+
+**Not verified:** a real `serve` restart on disk. It is covered only through
+the spy store's real decoders and `loadState`. To verify, pin a session over
+`connect`, restart `serve`, then run `session/list`.
 
 ## Review
 

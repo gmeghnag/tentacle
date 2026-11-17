@@ -105,6 +105,12 @@ export interface DaemonSidecar {
    * fail-closed rule as the laptop's shared-auto-accept file).
    */
   readonly autoAccept?: boolean;
+  /**
+   * When the session was pinned (docs/feat/mobile-session-actions.md), present
+   * ONLY when pinned: an older build ignores it (a lost pin, nothing else), and
+   * a malformed value loads as not pinned — never a refusal.
+   */
+  readonly pinnedAt?: number;
   /** The scheduled wakes, present ONLY when there is one (and then the file is v3). */
   readonly schedules?: readonly ScheduledJob[];
 }
@@ -146,6 +152,7 @@ export function sidecarOf(record: DaemonSessionRecord): DaemonSidecar {
     ...(record.archivedAt !== undefined ? { archivedAt: record.archivedAt } : {}),
     ...(record.head !== undefined ? { head: record.head } : {}),
     ...(record.autoAccept === true ? { autoAccept: true } : {}),
+    ...(record.pinnedAt !== undefined ? { pinnedAt: record.pinnedAt } : {}),
     ...(schedules ? { schedules: record.schedules } : {}),
   };
 }
@@ -415,6 +422,9 @@ export function parseSidecar(text: string, id: string): Result<DaemonSidecar> {
       // auto-accept ON). Never a refusal: the conversation is intact, and the
       // value is one switch nobody depends on to be preserved.
       ...(value.autoAccept === true ? { autoAccept: true } : {}),
+      // A stamp is a pin; anything else is none (dropped, like `autoAccept`:
+      // the conversation is intact and a lost pin is harmless).
+      ...(isWireStamp(value.pinnedAt) ? { pinnedAt: value.pinnedAt } : {}),
       ...(schedules !== undefined && schedules.length > 0 ? { schedules } : {}),
     },
   };
@@ -515,6 +525,7 @@ export function rebuild(
       ...(sidecar.archivedAt !== undefined ? { archivedAt: sidecar.archivedAt } : {}),
       ...(head !== undefined ? { head } : {}),
       ...(sidecar.autoAccept === true ? { autoAccept: true } : {}),
+      ...(sidecar.pinnedAt !== undefined ? { pinnedAt: sidecar.pinnedAt } : {}),
       ...(sidecar.schedules !== undefined ? { schedules: sidecar.schedules } : {}),
       ...(capabilities !== undefined ? { capabilities } : {}),
       logged,
