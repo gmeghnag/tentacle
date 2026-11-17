@@ -89,6 +89,13 @@ import {
 import { EventQueue } from "./event-queue.ts";
 import { type AskHooksTrust, type HookRunner, hookNote } from "./hooks.ts";
 import { type GateOutcome, PermissionGate } from "./permission-gate.ts";
+import {
+  type PruneEntry,
+  type PruneSet,
+  applyPrune,
+  estimateGain,
+  pruneCandidates,
+} from "./prune.ts";
 import { type ResultTransform, applyResultTransforms } from "./result-pipeline.ts";
 import { suspendedCalls } from "./resume.ts";
 import {
@@ -636,6 +643,20 @@ export interface AgentConfig {
     readonly counter?: TokenCounter;
   };
   /**
+   * Lossless-first pruning of the model's copy (docs/feat/smart-compaction.md):
+   * once the request reaches `pruneAtPercent` of `window` and the not-yet-pruned
+   * candidates would save `minGainPercent` of it, ONE batch stubs them all. The
+   * stored history is never touched; the set only grows. Absent → off.
+   */
+  readonly contextPrune?: {
+    readonly window: number;
+    readonly pruneAtPercent: number;
+    readonly minGainPercent: number;
+    readonly keepRecentRounds?: number;
+    readonly outputChars?: number;
+    readonly counter?: TokenCounter;
+  };
+  /**
    * The model may renew its own context (`context_reset`, registered in
    * `tools`; docs/feat/context-reset.md): the loop runs it — refusals, the
    * approval, then the history and the skill set replaced between rounds.
@@ -798,6 +819,13 @@ export class Agent {
    * reload cannot resume a child's count.
    */
   private readonly spend = new WeakMap<ChatMessage[], { tokens: number }>();
+  /**
+   * Each conversation's prune set (keyed like `anchors`; docs/feat/smart-compaction.md).
+   * Memory only: a reload recomputes it in one batch. The history is replaced
+   * IN PLACE (`/compact`, `/clear`, `context_reset` reuse the array), so every
+   * replacement drops it explicitly (`forgetPrune`).
+   */
+  private readonly pruneState = new WeakMap<ChatMessage[], PruneSet>();
   /** Spill names already used on the env fallback path: see `spillId`. Memory only. */
   private readonly spillNames = new Set<string>();
   /**
@@ -978,6 +1006,82 @@ export class Agent {
     }
     const content = projectSystem(first.content, this.catalogSkills, caps);
     return content === first.content ? messages : [{ ...first, content }, ...messages.slice(1)];
+  }
+
+  /**
+   * What a request built under `caps` sends: the projection with the
+   * conversation's prune set applied. A copy when anything is stubbed; every
+   * other message keeps its identity (a context anchor still matches it).
+   */
+  private requestHistory(
+    messages: ChatMessage[],
+    caps: SessionCapabilities,
+  ): readonly ChatMessage[] {
+    const projected = this.projectedHistory(messages, caps);
+    const set = this.pruneState.get(messages);
+    return set === undefined ? projected : applyPrune(projected, set);
+  }
+
+  /**
+   * The batch trigger, at a round boundary: when the request would be at least
+   * `pruneAtPercent` of the window AND the candidates not yet pruned would save
+   * at least `minGainPercent` of it, add them ALL to the set (never removing an
+   * entry, never re-stubbing one: the earlier bytes stay) and drop the anchor,
+   * which measured the larger request. Otherwise nothing changes, so every
+   * request between two batches repeats the previous one's bytes.
+   */
+  private maybePrune(
+    messages: ChatMessage[],
+    tools: readonly ToolDefinition[],
+    caps: SessionCapabilities,
+  ): void {
+    const prune = this.config.contextPrune;
+    if (prune === undefined || !(prune.window > 0)) {
+      return;
+    }
+    const used = estimateUsed(
+      this.requestHistory(messages, caps),
+      tools,
+      this.anchors.get(messages),
+      prune.counter ?? DEFAULT_COUNTER,
+    );
+    if (used * 100 < prune.window * prune.pruneAtPercent) {
+      return;
+    }
+    const prior = this.pruneState.get(messages);
+    const fresh = new Map<number, PruneEntry>();
+    for (const [index, entry] of pruneCandidates(messages, {
+      ...(prune.keepRecentRounds !== undefined ? { keepRecentRounds: prune.keepRecentRounds } : {}),
+      ...(prune.outputChars !== undefined ? { outputChars: prune.outputChars } : {}),
+    })) {
+      if (prior?.get(index)?.original !== messages[index]) {
+        fresh.set(index, entry);
+      }
+    }
+    if (estimateGain(messages, fresh).tokens * 100 < prune.window * prune.minGainPercent) {
+      return;
+    }
+    const next = new Map<number, PruneEntry>();
+    for (const [index, entry] of prior ?? []) {
+      // Live entries only: a stale one (the history was replaced) fires on nothing.
+      if (messages[index] === entry.original) {
+        next.set(index, entry);
+      }
+    }
+    for (const [index, entry] of fresh) {
+      next.set(index, entry);
+    }
+    this.pruneState.set(messages, next);
+    this.anchors.delete(messages);
+  }
+
+  /**
+   * The conversation's history was replaced in place (`/compact`, `/clear`):
+   * its prune set describes the old one. The array is reused, so the
+   * `WeakMap` entry would otherwise survive the replacement.
+   */
+  forgetPrune(messages: ChatMessage[]): void {
+    this.pruneState.delete(messages);
   }
 
   /** Why a call is refused under the round's `caps`: a hidden server's tool or skill; else undefined. */
@@ -1392,11 +1496,14 @@ export class Agent {
       // round (F1/F2) and rapid toggles coalesce.
       const caps = this.capabilities();
       const tools = this.projectedTools(caps);
+      // A prune batch first (it changes what is sent), so the context line
+      // below reports the request the model actually gets.
+      this.maybePrune(messages, tools, caps);
       this.noteContextUsage(messages, unseen, tools, caps);
       // The model's copy: stored context lines rendered into `content`, always
       // (enabled or not), so every request repeats the same bytes for a
       // message an earlier one sent — the provider's prompt cache holds.
-      const view = modelView(this.projectedHistory(messages, caps));
+      const view = modelView(this.requestHistory(messages, caps));
       const voiceTurn = voiceRequest(view.messages);
       const request: ChatRequest = {
         messages: voiceTurn.messages,
@@ -1721,7 +1828,7 @@ export class Agent {
       markVoice();
       try {
         // No tools are sent, but the system prompt is: its catalog is projected.
-        const view = modelView(this.projectedHistory(messages, this.capabilities()));
+        const view = modelView(this.requestHistory(messages, this.capabilities()));
         if (view.repairs !== null) {
           yield { type: "history_repaired", ...view.repairs };
         }
@@ -1831,7 +1938,7 @@ export class Agent {
     }
     const current: ContextUsage = {
       used: estimateUsed(
-        this.projectedHistory(messages, caps),
+        this.requestHistory(messages, caps),
         tools,
         this.anchors.get(messages),
         awareness.counter ?? DEFAULT_COUNTER,
@@ -1889,7 +1996,7 @@ export class Agent {
     // What the next request would really send: the same projection as a round.
     const caps = this.capabilities();
     const tools = this.projectedTools(caps);
-    const sent = this.projectedHistory(messages, caps);
+    const sent = this.requestHistory(messages, caps);
     // Bounded and silent (`countTokensBounded`): a count that cannot, fails or
     // is slow falls through to the estimate.
     const exact = await countTokensBounded(
@@ -2559,6 +2666,7 @@ export class Agent {
     messages.push(...next);
     this.installSkills(fresh.skills);
     this.anchors.delete(messages);
+    this.forgetPrune(messages);
     this.config.hooks?.forgetModelRequestBaseline(toolContext.sessionId);
     this.resetsThisMessage++;
     this.otherCallSinceReset = false;

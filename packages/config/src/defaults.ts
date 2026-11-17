@@ -52,6 +52,16 @@ export const DEFAULT_CONTEXT_AWARENESS = true;
 export const DEFAULT_CONTEXT_STEP_PERCENT = 1;
 /** The model may renew its own context with `context_reset` (docs/feat/context-reset-refresh.md). */
 export const DEFAULT_CONTEXT_RESET_ENABLED = true;
+/** Smart compaction (docs/feat/smart-compaction.md): OFF until its A/B decides. */
+export const DEFAULT_CONTEXT_PRUNE_ENABLED = false;
+/** A batch starts once the request reaches this percent of the window… */
+export const DEFAULT_CONTEXT_PRUNE_AT_PERCENT = 60;
+/** …and only if it would save at least this percent of the window. */
+export const DEFAULT_CONTEXT_PRUNE_MIN_GAIN_PERCENT = 15;
+/** The last this-many assistant rounds are never pruned. */
+export const DEFAULT_CONTEXT_PRUNE_KEEP_RECENT_ROUNDS = 6;
+/** A shell output over this many chars keeps only its head and tail once old. */
+export const DEFAULT_CONTEXT_PRUNE_OUTPUT_CHARS = 2000;
 
 /**
  * `sessionHop.tool`: the agent may PROPOSE moving its session (docs/feat/session-hop.md
@@ -205,6 +215,14 @@ export const DEFAULT_CONFIG_JSONC = `{
   // resets per user message (-1 = unlimited).
   // "contextReset": { "enabled": ${DEFAULT_CONTEXT_RESET_ENABLED}, "maxPerMessage": ${DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE} },
 
+  // Smart compaction: once the request reaches "pruneAtPercent" of the window, the
+  // model's copy drops what later rounds superseded (old file reads, write/edit
+  // payloads, long shell output, spill previews, duplicates), each replaced by a
+  // short stub saying how to get it back — in one batch, only if it saves
+  // "minGainPercent". Conversation text and the last "keepRecentRounds" rounds are
+  // never touched; the stored history and the session log are never changed.
+  // "contextPrune": { "enabled": ${DEFAULT_CONTEXT_PRUNE_ENABLED}, "pruneAtPercent": ${DEFAULT_CONTEXT_PRUNE_AT_PERCENT}, "minGainPercent": ${DEFAULT_CONTEXT_PRUNE_MIN_GAIN_PERCENT}, "keepRecentRounds": ${DEFAULT_CONTEXT_PRUNE_KEEP_RECENT_ROUNDS}, "pruneOutputChars": ${DEFAULT_CONTEXT_PRUNE_OUTPUT_CHARS} },
+
   // Auto-wake: when a background job exits while idle, automatically start a
   // turn so the agent reacts to it (reads output, continues). On by default;
   // set false to require a manual prompt instead.
@@ -327,7 +345,7 @@ export const DEFAULT_CONFIG_JSONC = `{
   //  - "model" merges per key, but provider/baseURL/apiKey/apiKeyCommand move as
   //    one unit: set any of them and the others are NOT inherited (a key is never
   //    sent to an endpoint it was not configured for);
-  //  - "subagents"/"tools"/"contextAwareness"/"contextReset" merge per key; other settings replace;
+  //  - "subagents"/"tools"/"contextAwareness"/"contextReset"/"contextPrune" merge per key; other settings replace;
   //  - "mcpServers" merge by name: a server is replaced whole, null removes it.
   // "profiles": {
   //   "anthropic": {

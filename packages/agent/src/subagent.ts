@@ -314,6 +314,8 @@ export interface SubagentDeps {
   readonly hooks?: HookRunner;
   /** Each child's own context lines over its own history (the parent's window). */
   readonly contextAwareness?: AgentConfig["contextAwareness"];
+  /** Each child prunes its own history the same way (docs/feat/smart-compaction.md; the parent's window). */
+  readonly contextPrune?: AgentConfig["contextPrune"];
   /**
    * The session tree's approvals and ask lane: one "always" covers the parent
    * and every child (docs/feat/parallel-agents.md, Design 3). Absent → one
@@ -444,6 +446,10 @@ export function createSubagentRunner(deps: SubagentDeps): {
       deps.contextAwareness && window !== undefined
         ? { ...deps.contextAwareness, window }
         : deps.contextAwareness;
+    const contextPrune =
+      deps.contextPrune && window !== undefined
+        ? { ...deps.contextPrune, window }
+        : deps.contextPrune;
     const child = new Agent({
       model,
       tools: childTools,
@@ -482,6 +488,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
       ...(deps.toolExecution ? { toolExecution: deps.toolExecution } : {}),
       ...(deps.resultTransforms ? { resultTransforms: deps.resultTransforms } : {}),
       ...(contextAwareness ? { contextAwareness } : {}),
+      ...(contextPrune ? { contextPrune } : {}),
       ...(deps.hooks
         ? {
             hooks: deps.hooks.forAgent(

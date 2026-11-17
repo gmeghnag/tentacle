@@ -1003,6 +1003,12 @@ export const SessionSettingsSchema = z.object({
   contextAwarenessStepPercent: z.number().int().min(1).max(100).optional(),
   contextResetEnabled: z.boolean().optional(),
   contextResetMaxPerMessage: IterationLimitSchema.optional(),
+  /** Smart compaction (docs/feat/smart-compaction.md); an older pod drops them = pruning off. */
+  contextPruneEnabled: z.boolean().optional(),
+  contextPruneAtPercent: z.number().int().min(1).max(100).optional(),
+  contextPruneMinGainPercent: z.number().int().min(1).max(100).optional(),
+  contextPruneKeepRecentRounds: z.number().int().positive().optional(),
+  contextPruneOutputChars: z.number().int().positive().optional(),
   maxInlineOutputChars: z.number().int().nonnegative().optional(),
   redactSecrets: z.boolean().optional(),
   dedupOutput: z.boolean().optional(),

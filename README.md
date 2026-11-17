@@ -375,6 +375,11 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `autoWake` | `TENTACLE_AUTO_WAKE` | true | Start a continuation turn when a background job exits while idle. |
 | `contextAwareness.enabled` | — | true | Whether the model is told how full its context is. |
 | `contextAwareness.stepPercent` | — | 1 | A line per this many percent of the window (1–100). |
+| `contextPrune.enabled` | — | false | Whether the model's copy of the history is pruned in batches. |
+| `contextPrune.keepRecentRounds` | — | 6 | The last this-many assistant rounds are never pruned. |
+| `contextPrune.minGainPercent` | — | 15 | …and only if it saves at least this percent of the window (1–100). |
+| `contextPrune.pruneAtPercent` | — | 60 | A batch starts once the request reaches this percent of the window (1–100). |
+| `contextPrune.pruneOutputChars` | — | 2000 | A shell output longer than this keeps only its head and tail once pruned. |
 | `contextReset.enabled` | `TENTACLE_CONTEXT_RESET` | true | The model's `context_reset` tool renews its own context, asked like any other tool. |
 | `contextReset.maxPerMessage` | `TENTACLE_CONTEXT_RESET_MAX` | -1 | Resets allowed per user message (-1 = unlimited). |
 | `detach.keepAwake` | — | true | Hold a macOS sleep assertion while a turn of a detached run runs. |

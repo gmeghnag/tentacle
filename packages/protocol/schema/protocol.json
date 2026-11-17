@@ -4466,6 +4466,27 @@
           "minimum": 1,
           "type": "integer"
         },
+        "contextPruneAtPercent": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "contextPruneEnabled": {
+          "type": "boolean"
+        },
+        "contextPruneKeepRecentRounds": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "contextPruneMinGainPercent": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "contextPruneOutputChars": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
         "contextResetEnabled": {
           "type": "boolean"
         },

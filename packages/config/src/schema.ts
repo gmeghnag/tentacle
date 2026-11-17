@@ -382,6 +382,22 @@ const settingsShape = {
     })
     .strict()
     .optional(),
+  /** Smart compaction: lossless-first pruning of the model's copy (docs/feat/smart-compaction.md). */
+  contextPrune: z
+    .object({
+      /** Default: disabled. */
+      enabled: z.boolean().optional(),
+      /** A batch once the request reaches this percent of the window; 1..100, default 60. */
+      pruneAtPercent: z.number().int().min(1).max(100).optional(),
+      /** …and only if it saves at least this percent of the window; 1..100, default 15. */
+      minGainPercent: z.number().int().min(1).max(100).optional(),
+      /** The last this-many assistant rounds are never pruned; >= 1, default 6. */
+      keepRecentRounds: z.number().int().min(1).optional(),
+      /** A shell output over this many chars keeps its head and tail; >= 1, default 2000. */
+      pruneOutputChars: z.number().int().min(1).optional(),
+    })
+    .strict()
+    .optional(),
   /**
    * Session hop (docs/feat/session-hop.md D9): the agent may PROPOSE moving this
    * session with `move_session`. It never moves anything itself — the owner is
