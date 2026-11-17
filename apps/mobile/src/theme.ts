@@ -124,21 +124,21 @@ const light: Palette = {
 };
 
 const dark: Palette = {
-  bg: "#1F1F1E",
-  page: "#1F1F1E",
-  card: "#2A2A28",
-  sheet: "#2A2A28",
-  drawer: "#1A1A19",
-  band: "#2A2A28",
-  bandOnSheet: "#2A2A28",
-  fill: "#33332F",
-  code: "#2A2A28",
-  codeOnSheet: "#33332F",
-  label: "#F2F1EC",
-  sec: "#A3A19B",
-  sep: "#3A3936",
-  sepChat: "#33322F",
-  sepSheet: "#403F3B",
+  bg: "#1E1F21",
+  page: "#1E1F21",
+  card: "#28292C",
+  sheet: "#28292C",
+  drawer: "#19191B",
+  band: "#242528",
+  bandOnSheet: "#28292C",
+  fill: "#313236",
+  code: "#28292C",
+  codeOnSheet: "#313236",
+  label: "#EDEEF0",
+  sec: "#A0A3A8",
+  sep: "#37383C",
+  sepChat: "#313236",
+  sepSheet: "#3D3E42",
   accent: "#22D3EE",
   accentFill: "#06B6D4",
   onAccent: "#00191F",
@@ -147,10 +147,11 @@ const dark: Palette = {
   orange: "#FF9F0A",
   // `#FF6961` measures 4.4977:1 on B1's `fill` (#33332F) — under the 4.5 floor
   // F9 pins — so the red is lifted to #FF6D65 (4.61:1 on `fill`, 5.23 on `card`).
+  // B3's lighter `fill` (#313236) keeps it above the floor.
   red: "#FF6D65",
   warnBg: "#3A2A0C",
   warnText: "#FFD08A",
-  glass: "rgba(42,42,40,0.86)",
+  glass: "rgba(40,41,44,0.86)",
   glassBorder: "rgba(255,255,255,0.07)",
   shadowOpacity: 0.35,
   scrim: "rgba(0,0,0,0.45)",
@@ -165,7 +166,7 @@ const dark: Palette = {
   delStrong: "#64222B",
   delText: "#FFA3A8",
   dash: "#636366",
-  switchOff: "#45443F",
+  switchOff: "#434448",
 };
 
 /** The palette for a scheme; an unknown/null scheme is the light one. */

@@ -135,7 +135,7 @@ describe("artifact viewers: the WebView isolation is the pure module's", () => {
   test("the image viewer zooms natively on the soft dark ground (never pure black)", () => {
     const image = source("ImageViewer.tsx");
     expect(image).toContain("maximumZoomScale={6}");
-    expect(image).toContain('"#1F1F1E"');
+    expect(image).toContain('"#1E1F21"');
     expect(image).not.toMatch(/#000\b|#000000|"black"/);
   });
 });

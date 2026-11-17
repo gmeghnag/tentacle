@@ -1,13 +1,13 @@
 /**
  * Image artifact viewer (docs/feat/model-artifacts.md D9): native pinch and
  * double-tap zoom (a `ScrollView` with `maximumZoomScale={6}`) over the soft
- * dark ground (B1 `#1F1F1E`, never pure black). Render only.
+ * dark ground (B3 `#1E1F21`, never pure black). Render only.
  */
 import type { JSX } from "react";
 import { Image, ScrollView, StyleSheet, useWindowDimensions } from "react-native";
 
-/** B1's soft dark ground (the mockups' image viewer). */
-const GROUND = "#1F1F1E";
+/** B3's soft dark ground (the mockups' image viewer). */
+const GROUND = "#1E1F21";
 
 export interface ImageViewerProps {
   /** `file:` uri of the cached, sha-verified copy. */

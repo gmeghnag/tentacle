@@ -109,42 +109,60 @@ describe("theme tokens (aliases removed in Slice 6)", () => {
 });
 
 /**
- * S1 of docs/feat/mobile-chrome.md — the B1 "warm graphite" dark ramp, the new
- * `drawer`/`band` surfaces, the E2 radii and the thinner header row. The hexes
- * are pinned so a later token tweak cannot quietly undo the owner's choice
- * (Owner Q-B) or land on a worse ground than the one F9 measured.
+ * S1 of docs/feat/mobile-chrome.md, retuned by docs/feat/mobile-dark-ardesia.md:
+ * the dark ramp is now B3 "Ardesia neutra" (cool-neutral, sits next to the cyan
+ * accent) instead of B1's warm graphite. The hexes are pinned so a later token
+ * tweak cannot quietly undo the owner's choice (Owner Q-B, 17/11) or land on a
+ * worse ground than the one F9 measured.
  */
-describe("S1 · the dark ramp is B1 (Owner Q-B)", () => {
-  const B1 = {
-    bg: "#1F1F1E",
-    page: "#1F1F1E",
-    card: "#2A2A28",
-    sheet: "#2A2A28",
-    fill: "#33332F",
-    code: "#2A2A28",
-    codeOnSheet: "#33332F",
-    label: "#F2F1EC",
-    sec: "#A3A19B",
-    sep: "#3A3936",
-    sepChat: "#33322F",
-    sepSheet: "#403F3B",
-    glass: "rgba(42,42,40,0.86)",
+describe("S1 · the dark ramp is B3 · Ardesia neutra (Owner, 17/11)", () => {
+  const B3 = {
+    bg: "#1E1F21",
+    page: "#1E1F21",
+    card: "#28292C",
+    sheet: "#28292C",
+    fill: "#313236",
+    code: "#28292C",
+    codeOnSheet: "#313236",
+    label: "#EDEEF0",
+    sec: "#A0A3A8",
+    sep: "#37383C",
+    sepChat: "#313236",
+    sepSheet: "#3D3E42",
+    glass: "rgba(40,41,44,0.86)",
     glassBorder: "rgba(255,255,255,0.07)",
     scrim: "rgba(0,0,0,0.45)",
-    switchOff: "#45443F",
-    drawer: "#1A1A19",
+    switchOff: "#434448",
+    drawer: "#19191B",
   } as const satisfies Partial<Palette>;
 
-  test("every B1 token is the approved value", () => {
+  test("every B3 token is the approved value", () => {
     const got = Object.fromEntries(
-      Object.keys(B1).map((k) => [k, darkPalette[k as keyof typeof B1]]),
+      Object.keys(B3).map((k) => [k, darkPalette[k as keyof typeof B3]]),
     );
-    expect(got).toEqual(B1);
+    expect(got).toEqual(B3);
   });
 
-  test("the dark page is soft graphite, never pure black (the restyle's whole point)", () => {
+  test("the owner's six: page, card, fill, label, sec, sep", () => {
+    // The exact hexes the owner gave on 17/11 (B3 · Ardesia neutra).
+    expect(darkPalette.page).toBe("#1E1F21");
+    expect(darkPalette.card).toBe("#28292C");
+    expect(darkPalette.fill).toBe("#313236");
+    expect(darkPalette.label).toBe("#EDEEF0");
+    expect(darkPalette.sec).toBe("#A0A3A8");
+    expect(darkPalette.sep).toBe("#37383C");
+  });
+
+  test("the dark page is cool slate, never pure black nor B1's warm graphite", () => {
     expect(darkPalette.page).not.toBe("#000000");
-    expect(darkPalette.bg).toBe("#1F1F1E");
+    expect(darkPalette.bg).toBe("#1E1F21");
+    expect(darkPalette.page).not.toBe("#1F1F1E");
+    // Cool-neutral: the blue channel is the largest one, unlike B1's warm ramp.
+    const r = Number.parseInt(darkPalette.page.slice(1, 3), 16);
+    const g = Number.parseInt(darkPalette.page.slice(3, 5), 16);
+    const b = Number.parseInt(darkPalette.page.slice(5, 7), 16);
+    expect(b).toBeGreaterThan(r);
+    expect(b).toBeGreaterThan(g);
     expect(darkPalette.shadowOpacity).toBe(0.35);
   });
 
@@ -159,7 +177,7 @@ describe("S1 · the dark ramp is B1 (Owner Q-B)", () => {
     expect(luminance(hexToRgb(darkPalette.drawer))).toBeLessThan(page);
   });
 
-  test("B1's ground left the semantic colours readable (the 4.4977 near-miss)", () => {
+  test("B3's ground left the semantic colours readable (the 4.4977 near-miss)", () => {
     // `#FF6961` on B1's `fill` measured 4.4977:1 — under F9's floor by 0.002, so
     // the dark `red` was lightened. Pinned here so it cannot drift back.
     expect(contrast(darkPalette.red, darkPalette.fill)).toBeGreaterThanOrEqual(4.5);
@@ -169,8 +187,8 @@ describe("S1 · the dark ramp is B1 (Owner Q-B)", () => {
 
 describe("S1 · `band` is one step above what it sits on (E2)", () => {
   test("dark: a band on the page, and a band on a sheet", () => {
-    expect(darkPalette.band).toBe("#2A2A28");
-    expect(darkPalette.bandOnSheet).toBe("#2A2A28");
+    expect(darkPalette.band).toBe("#242528");
+    expect(darkPalette.bandOnSheet).toBe("#28292C");
     // The sheet's own ground becomes the page, so the band still reads above it.
     expect(contrast(darkPalette.band, darkPalette.page)).toBeGreaterThan(1);
     expect(contrast(darkPalette.bandOnSheet, darkPalette.page)).toBeGreaterThan(1);
@@ -184,7 +202,7 @@ describe("S1 · `band` is one step above what it sits on (E2)", () => {
   });
 
   test("a band is never its own ground in either palette (it would be invisible)", () => {
-    // A band's ground is the grouped screen's `bg`: dark #1F1F1E, light #F2F2F7.
+    // A band's ground is the grouped screen's `bg`: dark #1E1F21, light #F2F2F7.
     // A BANDED SHEET's bg is that same ground — its ground is no longer `sheet`
     // — so both band tokens are measured against `bg`, not against `sheet`.
     for (const palette of [lightPalette, darkPalette]) {
