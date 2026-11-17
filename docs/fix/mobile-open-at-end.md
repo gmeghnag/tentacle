@@ -834,3 +834,36 @@ executor's signatures still need correcting (round 1 and 2 notes).
 **Unverified.** The iPhone device check listed in Execution is still open.
 
 *— claude-opus-5-5, 2026-11-17* (fresh context, round 4; same family as the plan author)
+
+## Review
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff main...HEAD` (slices A + B), at `269265f2`.
+
+**Gate.** `bun test apps/mobile/test` + the client, daemon and protocol snapshot-times tests + json-schema: **2683 pass, 0 fail**. The `tool-summary` failure from round 4 is gone after the merge of `main`. `bun run lint`: 1858 files, clean. `bun run typecheck`: clean.
+
+**Mutation.** I dropped `!hasTime` from `claimsPan` (`row-swipe.ts:35`). Result: `row-swipe.test.ts` 1 fail. I reverted it and `git status` was empty.
+
+**Findings**
+1. **MEDIUM: an `inactive` → `active` pair counts as a return to the app and starts a full resync.**
+   - Where: `session-screen-controller.ts:1254-1256`. Any state other than `active` sets `appWasAway`.
+   - iOS reports `inactive` without the app ever leaving: Control Center, the notification shade, a call banner, a system permission alert, and the Face ID prompt itself.
+   - The repo already decided this: "`inactive` is not leaving the app" (`app-lock.ts:196-198`).
+   - Probe, through the test harness: `appState("inactive")` then `appState("active")` → `started true, opens 2`. That is a full re-attach: every snapshot page is read again over the relay, and every row is replaced and re-keyed.
+   - With the app lock on, a single return resyncs twice: background → active, then the Face ID prompt's own `inactive` → `active`. This breaks the plan's "at most once per foreground transition".
+   - No test pins it. The existing test (`session-screen.test.ts:958`) always sends `background`.
+   - Fix: only `background` should set `appWasAway`. Add a test where `inactive` → `active` gives no resync.
+
+**Attacks tried (nothing else found).**
+- **Daemon `commitTimes`.** A replace keeps the old time and a truncate slices. `segment` gives 0. `timesOf` is clamped, so a log that lags the cut makes the client drop the times. Holds.
+- **Client page pairing.** Any missing or misaligned page drops all times. The arrays are joined in the same reversed order as the messages. Holds.
+- **§7 checks.**
+  - Persistence: nothing is written.
+  - Untrusted pod: a lie changes only a label.
+  - Protocol: the field is additive, so no note is needed.
+  - Session path: the times ride the existing snapshot → reset → history chain.
+  - All hold.
+- **Live stamping.** A row gets its time only when the fold creates it. An upsert or a `tool_phase` never restamps it. Holds.
+
+**Unverified.** The iPhone device check (Execution) is still open.
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, round 5. Same family as the plan author, so shared blind spots are possible.)
