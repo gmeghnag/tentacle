@@ -274,6 +274,50 @@ export type Styler = ReturnType<typeof chalk.hex>;
 /** A token colour value as a chalk styler — the export `read-highlight.ts` needs. */
 export const colorStyler = (color: Color): Styler => ink(color) as Styler;
 
+/**
+ * A diagram's roles (docs/feat/model-diagrams.md D8, mockup 5A) mapped onto
+ * EXISTING tokens — no new colour: boxes, edges and frames dim, a decision in
+ * the accent, edge labels and the source's labels as strings, the source's
+ * keywords/ids/arrows/comments as the syntax tokens. `undefined` = default fg.
+ */
+export type DiagramRole =
+  | "border"
+  | "decision"
+  | "label"
+  | "frame"
+  | "title"
+  | "subtle"
+  | "keyword"
+  | "id"
+  | "arrow"
+  | "string"
+  | "comment";
+
+export function diagramColor(role: DiagramRole, t: Tokens): Color | undefined {
+  switch (role) {
+    case "border":
+    case "frame":
+      return t.dim;
+    case "decision":
+      return t.accent;
+    case "label":
+    case "string":
+      return t.syntax.string;
+    case "subtle":
+      return t.subtle;
+    case "keyword":
+      return t.syntax.keyword;
+    case "id":
+      return t.syntax.title;
+    case "arrow":
+      return t.syntax.meta;
+    case "comment":
+      return t.syntax.comment;
+    default:
+      return undefined;
+  }
+}
+
 /** A message row's two stylers for a mode (what `theme.message` becomes). */
 export function messageStyle(mode: ThemeMode): MessageStyle {
   return { bg: bg(tokens[mode].message.bg), queuedFg: ink(tokens[mode].message.queuedFg) };

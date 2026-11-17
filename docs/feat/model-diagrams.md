@@ -1088,3 +1088,90 @@ Nits (LOW):
 - (c) Attribution mismatch. The commit `ac95a936` says "exec (deepseek)", but the Execution section is signed `claude-opus-5-5`. One of them is wrong, and §10 signatures exist precisely to track this. The orchestrator should correct it.
 
 The executor behaved well. It reported honestly: the full-suite run before the pin fix, the M6 mutant that did not bite at first and was then fixed, and the unverified items it named. The reviewer is the same model family as the signed executor, so shared blind spots are possible.
+
+## Execution — slice D3
+
+*TUI ASCII renderer only: flowchart, sequence, source highlighting, the `diagram-lines` entry, theme roles. Nothing of D4–D7 (no `render-lines` branch). `TODO.md` untouched.*
+
+### 0. Load-bearing check, re-run first — **HOLDS**
+- `bun test packages/tools/test/diagram.test.ts` (it contains T2.0, mermaid parsing in `bun test`): **30 pass, 0 fail**.
+- D3 relies on D1's `diagramModel` reading the mockup sources. `.tentacle/tmp/model-diagrams/d3/check-model.ts` on the 5A and 6A sources gives a `flowchart` (6 nodes; shapes rect/decision/cylinder; labels `sì`/`no`) and a `sequence` (3 participants, 4 messages, call/reply).
+
+### 1. As built (dependency order)
+1. `packages/tui/src/diagram-canvas.ts` (**new, drift 1**): the shared grid. A line cell stores its DIRECTIONS, so junctions merge by themselves (a box border hit by an edge becomes `┬`, a crossing becomes `┼`). Dotted and thick weights give `╎╌` / `┃━`. A wide grapheme takes 2 cells. Cells carry style names, not colours.
+2. `diagram-ascii-flow.ts` — `drawFlow(model, maxWidth) → {rows, width, boxes} | undefined`. Layout steps:
+   - Layers: DFS back edges are reversed (their arrowhead is drawn at the start), ranks by longest path, dummy slots for long edges, 2 barycentre sweeps.
+   - Cross positions: the average of a left-packed and a right-packed placement, relaxed 4×.
+   - Ports: one per edge (`┬`); boxes are widened to `2k+3`.
+   - Gaps: stub rows hold the labels, beside their vertical run. Channel rows are ordered so that no two vertical runs share a column. Then the arrow row.
+   - One router for all four directions: everything is laid out on an abstract main×cross grid and mapped to TD/BT/LR/RL at draw time. Sideways labels sit on their line (`─ yes ─►`).
+   - Subgraphs: a dim titled frame. The title slides past any edge crossing the border.
+   - Returns `undefined`, so the caller shows the source, for:
+     - a self-loop;
+     - a column conflict;
+     - a label with no room;
+     - a frame that would hold a non-member box;
+     - frames that touch or nest;
+     - more than 60 nodes;
+     - a drawing wider than `maxWidth`.
+3. `diagram-ascii-seq.ts` — `drawSequence(model, maxWidth)`. The 6A lifelines draw:
+   - calls as `├──►│` and replies as `│◄╌╌┤`;
+   - a lost message with `×`;
+   - a self-message as a loop;
+   - notes as a dim box that hides the lifelines under it.
+
+   It switches to the 6B list (arrows aligned) under 50 cols, or when the lifelines don't fit.
+4. `diagram-highlight.ts` — a tolerant tokenizer that splits each line into keyword/id/arrow/string/comment runs; the runs always join back to the line.
+5. `theme.ts` — `DiagramRole` + `diagramColor(role, tokens)`. This maps roles onto **existing** tokens: borders/edges/frames dim, decision in the accent, labels as `syntax.string`, source tokens as the syntax tokens. No new colour, and the pinned `Tokens` table is unchanged.
+6. `diagram-lines.ts`:
+   - `parseDiagramArgs` re-lints the call's own args (a forged call gives `undefined`, so the generic row shows).
+   - `diagramToolBody` / `diagramLines` / `diagramView` build the view: a centred caption `title · type` (plus ` · source only in the terminal` when nothing is drawn; ` · ^X^O open` only with `openHint`), then the drawing.
+   - Compact with no drawing: `│ `-prefixed highlighted source, cut at 5 lines with the generic `… +N more lines · ctrl+o to expand`.
+   - Expanded: the drawing + the whole source.
+   - Every row is cut to `width`.
+7. Tests: `packages/tui/test/diagram-lines.test.ts` (41 tests, 12 snapshots) + `diagram-fixtures.ts`. They include a seeded random-flowchart generator covering all four directions, cycles, dotted/thick lines, labels, and the cylinder/decision/round shapes.
+
+Frame comparison against the mockups. Snapshot `login 80 — colour off` has the 5A structure:
+- `◇  Token valido?  ◇`;
+- two exits `╰─┬───┬─╯`;
+- `│ sì   │ no` beside their vertical runs;
+- the cylinder lip `├───┤`.
+
+It differs from the hand-placed mockup in one way: F (Risposta) is entered from above by two `▼`, not from the sides. Snapshot `phone 80` has the 6A structure; spacing is 2 cells tighter than the mockup. Pixels were not looked at in a terminal (no screenshot this session).
+
+### 2. Red before green (§9) — **drift 2, honest**
+The modules were written before the tests, so there is no "test fails on missing code" run. Non-vacuity is instead shown by the 9 mutations below: each was applied by exact match and made a named test fail. T3.4 is the one exception, covered only by its fixture assertions. One test added during the mutation pass (stranger box inside a frame) was RED against mutation M8 before it counted.
+
+### 3. Mutation checks (`.tentacle/tmp/model-diagrams/d3/mutate.ts`; each applied, narrow test run, file restored — `git status` after shows only the intended files)
+```
+M1 channel order constraint dropped: KILLED (1 fail)   ← T3.2 fuzz walk
+M2 in-rank min spacing dropped: KILLED (9 fail)        ← snapshots + T3.3
+M3 sequence list fallback removed: KILLED (2 fail)     ← T3.5 <50 cols
+M4 width by code units, not cells: KILLED (1 fail)     ← T3.8 CJK
+M5 rows not cut to the width: KILLED (1 fail)          ← T3.1 fuzz 20..200
+M6 decision ◇ not drawn: KILLED (7 fail)               ← 5A + T3.6
+M7 comment not highlighted: KILLED (1 fail)            ← highlighting
+M8 frame drawn over a stranger box: KILLED (1 fail)    ← (first SURVIVED → test added)
+M9 forged args not re-linted: KILLED (2 fail)          ← forged → generic row
+```
+T3.2 walks each arrowhead back along the glyphs to a box border. It requires the multiset of `from>to` pairs to equal the model's arrow edges, over 200 seeded random flowcharts. 176 of the 200 are drawn at 400 cols, and the test asserts more than 120 so the property cannot pass vacuously. The other 24 honestly fall back to the source view.
+
+### 4. Drift from the Implementation (and why)
+1. **An extra file, `diagram-canvas.ts`.** Flow and sequence share the direction-merging grid; duplicating it would split one behaviour across two modules (§7 "logic in pure modules").
+2. **Red-first replaced by mutation evidence** (§2 above).
+3. **Theme "diagram tokens"** are a role→existing-token function, not a new `Tokens.diagram` group. The plan (P8) says "no new colours". A new group would also change the byte-pinned dark table.
+4. **Sequence `alt`/`loop` blocks are not framed.** The D1 model keeps their kind and title but not which messages they wrap, so a frame would be a guess. A dim line under the drawing names them and points to the source (ctrl+o). Follow-up: add message spans to `SequenceBlock` in core.
+5. **Flowchart width tier.** The plan says "a flowchart that does not fit the width". The renderer also falls back for graphs it cannot draw faithfully (see the list in §1.2). The caption says `source only in the terminal` in both cases.
+6. **Owner's `diagrams.style: outline|filled`.** The ASCII drawing has no fills, so there is nothing to switch in D3. It concerns the phone (D5/D6) and config (where it is read).
+7. **Changelog.** `changelog.d/model-diagrams.added.md` already exists, and D3 has no user-visible effect until D4 wires it. The fragment is left unchanged; D4 should edit its "drawing it inline … follows" sentence.
+8. The Review nit (a) about the edge-cap sentence is in core's explainer (D1 code). It is not a D3 renderer change, so it is left for the orchestrator/D4.
+
+### 5. Gate
+- `bunx tsc --noEmit`: clean.
+- `bun run lint`: clean (0 errors; `biome check --write` was used for formatting; two `noAssignInExpressions` were hand-fixed).
+- `bun test packages/tui/test/diagram-lines.test.ts`: 41 pass.
+- Theme tests (`theme`, `theme-no-stray`, `theme-contrast`): 19 pass.
+- Full `bun test`, run once: **14414 pass, 5 skip, 0 fail**. No skip is in the D3 files. AGENTS §6 pins 3 opt-in skips, and this run did not attribute the other 2 (unverified; `bun test 2>&1 | grep -i skip` names them).
+- No schema change, so `protocol.json` was not regenerated; no `protocol.d/` note.
+
+*— claude-opus-5-5, 2026-11-17*
