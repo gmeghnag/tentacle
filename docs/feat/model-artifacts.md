@@ -2819,3 +2819,23 @@ M9 the mock model stops presenting the fixture         RED
   once the disk has room.
 - **T8.2 (pixels)**: untouched by this round.
 
+
+### Round 2
+
+**Verdict: PASS.** All four Round-1 findings are fixed, and I found no HIGH or MEDIUM regression in `git diff HEAD~1`.
+
+- **Gate:** `bun run typecheck` is clean. `bun run lint` is clean (1853 files). `bun test apps/mobile` gives **2431 pass, 0 fail**.
+- **Mutations:** I applied four, ran the four narrow files, and reverted them; `git status` is clean afterwards. Every one turned its test RED.
+  - F1: renaming the `name="ArtifactGallery"` route in `App.tsx` makes `artifact-gallery-wiring` fail 2.
+  - F1 (reader): dropping `publishReader()` in `session-screen-controller.ts` makes `session-screen-artifacts` fail 2.
+  - F2: setting `viewerFor` back to `scripts: viewer === "webview"` makes `artifact-viewer` fail 3.
+  - F2: `useState(true)` for `runScripts` in `HtmlViewer.tsx` makes `artifact-viewers-wiring` fail 1.
+- **F3:** a "Fix round 1" Execution record exists. **F4:** the "no dialling" pin now strips comments before matching, and it bans `openSession`/`webSocketChannelFactory` as well.
+- **Attacks on the diff:**
+  - (a) "Allow network" does not turn scripts on: `scripts && runScripts` is independent of it (holds).
+  - (b) The WebView `key` now carries both per-open states, so one tap does not reload away the other (holds).
+  - (c) The published reader reads the CURRENT handle, so a gallery with no live handle rejects loudly instead of reading a dead session (holds).
+- **Residual (not blocking):** T8.1 has still not been RUN. That is acceptable now, because the safe fallback (scripts OFF plus a one-tap "Run scripts") is what ships, and flipping to the primary needs a green T8.1.
+- **Nits:** organizeImports placed an `import type` above the file doc comment in `artifact-feed.ts:1`, `ArtifactGallery.tsx:1` and `ArtifactViewerModal.tsx:1-3`. `viewerFor` has a duplicated JSDoc block (`artifact-viewer.ts:58-71`). The scripts gate `scripts && runScripts` is component logic, but it is trivial.
+
+*— claude-opus-5-5, 2026-11-17*
