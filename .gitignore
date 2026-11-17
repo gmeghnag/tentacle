@@ -38,3 +38,4 @@ apps/mobile/.expo/
 apps/mobile/targets/live-activity/Info.plist
 # SwiftPM's build products for the NSE's test package (docs/feat/mobile-notifications.md N5)
 apps/mobile/native-tests/PushCoreTests/.build/
+.playwright-mcp/
