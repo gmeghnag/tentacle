@@ -126,6 +126,19 @@ describe("groups", () => {
     expect(v.groups.map((g) => g.kind)).toEqual([]);
   });
 
+  test("no groups at all (no wake feed, nothing running) → a sheet-level empty state, never a blank sheet", () => {
+    const v = activityView({ ...NONE, schedules: undefined }, 0);
+    expect(v.groups).toEqual([]);
+    expect(v.empty).toBe("Nothing running");
+  });
+
+  test("any group present → no sheet-level empty state (Scheduled draws its own)", () => {
+    expect(activityView({ ...NONE, schedules: [] }, 0).empty).toBeNull();
+    expect(
+      activityView({ ...NONE, schedules: undefined, subagents: [child("sa-1")] }, 0).empty,
+    ).toBeNull();
+  });
+
   test("Scheduled shows the real wakes: the count and the SOONEST wake, one tappable row", () => {
     const now = Date.UTC(2026, 10, 17, 9, 0);
     const late: ScheduleRow = {

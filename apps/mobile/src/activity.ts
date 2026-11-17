@@ -67,6 +67,8 @@ export interface ActivityView {
   readonly badgeLabel: string;
   readonly accessibilityLabel: string;
   readonly groups: readonly ActivityGroup[];
+  /** The dimmed line drawn when `groups` is empty (no wake feed, nothing running); else `null`. */
+  readonly empty: string | null;
 }
 
 /** One line of plain text: control characters and line breaks become spaces. */
@@ -234,6 +236,7 @@ export function activityView(input: ActivityInput, now: number): ActivityView {
     badgeLabel,
     accessibilityLabel,
     groups,
+    empty: groups.length === 0 ? "Nothing running" : null,
   };
 }
 

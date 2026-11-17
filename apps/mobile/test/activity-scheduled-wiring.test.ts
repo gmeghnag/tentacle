@@ -27,6 +27,11 @@ describe("Activity ▸ Scheduled wiring", () => {
     expect(sheet).toContain("group.empty");
   });
 
+  test("the sheet draws the view's sheet-level empty state (never a blank sheet)", () => {
+    const sheet = src("ActivitySheet.tsx");
+    expect(sheet).toContain("title={view.empty}");
+  });
+
   test("the Scheduled row closes Activity and opens Session info via openScheduled", () => {
     const sheet = src("ActivitySheet.tsx");
     expect(sheet).toMatch(/row\.kind === "scheduled"\s*\?\s*onScheduled\(\)/);

@@ -375,6 +375,34 @@ probed; both branches now render the same labels.
 
 *— claude-opus-5-5 (executor, fix round 3), 2026-11-17*
 
+### Fix round 1 (for Review round 4: the blank Activity sheet)
+
+**MEDIUM 1, the Activity sheet can open blank: FIXED.**
+- Root cause: when there is no wake feed (`schedules: undefined`) and nothing is running, `activityView` returns zero groups, and the sheet has no empty state of its own.
+- `apps/mobile/src/activity.ts`: `ActivityView` gains `empty: string | null`. `activityView` sets it to `"Nothing running"` when `groups` is empty and to `null` otherwise. This is pure, in the view-model as the review asked.
+- `apps/mobile/src/screens/ActivitySheet.tsx`: when `view.empty !== null`, the scroll draws one dimmed row in a `Running` band (`testID="activity-empty"`). It uses the same `BandSection` + `Row dimmed` as a group's own empty line.
+- Tests:
+  - `apps/mobile/test/activity.test.ts`: `schedules: undefined` with no rows gives `groups: []` and `empty: "Nothing running"`. Any group present (Scheduled with `[]`, or one sub-agent) gives `empty: null`.
+  - `apps/mobile/test/activity-scheduled-wiring.test.ts`: the sheet renders `title={view.empty}`.
+- **Red before the fix:** `activity.test.ts` ran 26 pass / 2 fail, failing on the assertion (`Expected: "Nothing running"`, `Received: undefined`).
+
+**Mutations (each reverted, and the files re-run green afterwards):**
+
+| # | Mutation | Result |
+|---|---|---|
+| M12 | `activity.ts`: `groups.length === 0` → `=== 1` | both new `activity.test.ts` tests fail (26 pass / 2 fail) |
+| M13 | `ActivitySheet.tsx`: `title={view.empty}` → `title={"Nothing"}` | the wiring test fails (3 pass / 1 fail) |
+
+**Gate:**
+- `bun run typecheck` is clean (root, mobile, relay).
+- `bun run lint` is clean (1991 files).
+- `bun test` gives 14513 pass / 5 skip / 0 fail. That is review round 4's 14510 plus the 3 new tests.
+- The touched files pass 39/0.
+
+**Not verified:** the empty row was not seen in the simulator. To check it, open Activity on a pod `run` session with nothing running.
+
+*— claude-opus-5-5 (executor, fix round 1 for review round 4), 2026-11-17*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES.**

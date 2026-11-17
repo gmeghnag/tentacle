@@ -140,6 +140,11 @@ export function ActivitySheet({
         >
           {detail === null ? (
             <ScrollView testID="activity-scroll" showsVerticalScrollIndicator>
+              {view.empty === null ? null : (
+                <BandSection palette={palette} title="Running" onSheet testID="activity-empty">
+                  <Row palette={palette} title={view.empty} dimmed first onSheet />
+                </BandSection>
+              )}
               {view.groups.map((group) => (
                 <Group
                   key={group.kind}
