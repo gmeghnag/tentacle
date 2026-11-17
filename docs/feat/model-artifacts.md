@@ -425,10 +425,13 @@ unreadable.
     monospaced block; no WebView (chosen: rendered with a `Source` toggle).
   - *Other* — a sheet: glyph, title, `ZIP · 3.4 MB`, **Share…** (RN core
     `Share.share({ url: fileUri })` → Save to Files, AirDrop…) — never executed.
-- **Cache:** bytes land in `FileSystem.cacheDirectory/artifacts/<computerId>/<sha256>`
-  (content-addressed; pure LRU plan `artifact-cache.ts`, 200 MB cap); deleted on
-  unpair of that computer and when this phone deletes the session. Share uses a
-  copy named `<sanitized title>.<ext>`.
+- **Cache:** bytes land in `FileSystem.cacheDirectory/artifacts/<computerId>/<sha256>.<ext>`
+  (content-addressed — the hash IS the identity, the extension is a suffix the
+  LRU plan ignores; pure LRU plan `artifact-cache.ts`, 200 MB cap); deleted on
+  unpair of that computer (the whole directory). Share uses a
+  copy named `<sanitized title>.<ext>`, deleted after the sheet closes. A per
+  SESSION delete is not part of the contract: the files are shared between
+  sessions, so the phone has nothing sound to key it on (Notes/debt).
 - **Gallery** — a self-contained screen with a pure view-model and ONE entry:
   - `apps/mobile/src/artifact-gallery.ts` (pure): `galleryView(list, seen, now, filter) → { sections: [{ day, items: [{ key, card, versions, unseen }] }], unseen: number, empty }`
     (artifacts newest first, versions folded, `unseen` = versions presented after
@@ -737,6 +740,19 @@ gallery opened from the floating hub (A half sheet / B full screen), TUI card ro
   viewers use today's `Row`/`Sheet` with the approved tokens and inherit the
   bands when those slices land.
 - Browser-side WebRTC on the Mac is a documented residual (Q10).
+- **D9's per-session cache delete is recorded as debt and dropped from the
+  contract** (Review round 2, not blocking). D9 line 429-430 promised deletion
+  "when this phone deletes the session"; the built cache is per COMPUTER, not
+  per session, and its files are content-addressed and therefore shared between
+  sessions — a session delete cannot know which files another session still
+  needs, and the phone has no session-delete step to hook (no
+  `session/delete` caller in `apps/mobile/src`). What ships is the two
+  lifecycle steps that are well defined: the 200 MB LRU (`ARTIFACT_CACHE.put`),
+  and the whole per-computer directory on unpair (`ComputerMemory.forgetComputer`
+  → `ARTIFACT_CACHE.forgetComputer`, pinned by
+  `apps/mobile/test/computer-memory.test.ts`). The pure helper a future
+  session-scoped delete would use (`missingFrom`, `artifact-cache.ts:122`) stays,
+  with its test, for a session-delete step that does not exist yet.
 
 ### Mockup render-check
 
@@ -2969,5 +2985,71 @@ pixel claim and this round did not run it.
   - `usedAt` is the file's mtime and a re-arrival does not touch it, so the LRU behaves as FIFO by write time.
   - A model-chosen title equal to another version's `<sha>.<ext>` would overwrite that version file while the share sheet is open.
   - "Delete when this phone deletes the session" (D9) is still unbuilt, since the cache is per computer, not per session. It should be either recorded as debt or dropped from D9.
+
+*— claude-opus-5-5, 2026-11-17*
+
+## Execution
+
+### Fix round 2
+
+Round 2 (Review `5ae4a13e`) raised 1 MEDIUM; the same review left a
+"not blocking" item that had to be resolved one way or the other. Both are
+addressed here.
+
+**Finding 1 — the unpair delete was not pinned (MEDIUM).** The review's own
+mutation proved it: deleting `memory.artifactCache?.forgetComputer(id)` and
+`memory.feeds?.forgetComputer(id)` from `computer-memory.ts:71-72` **survived**
+the whole mobile suite. Both hooks are optional on `ComputerMemory`, so the
+calls could vanish silently and bring back the privacy defect of round 3's
+finding 1 with a green suite. Nothing asserted the caller; round 3's pin was on
+the STORE's own `forgetComputer` method.
+- `apps/mobile/test/computer-memory.test.ts` grew a
+  `forgetComputer drops that computer's artifacts (D9)` block: spying
+  `artifactCache`/`feeds` hooked through the real `forgetComputer` and
+  `withForgottenRecord`. It pins (a) both are called, with the unpaired id, in
+  the cache-then-feeds order, (b) the re-pair path forgets them BEFORE the
+  caller's next step runs, (c) the id passed is the computer being forgotten
+  (nothing ending `:c2`), and (d) a memory without the hooks is still a no-op.
+- **Red first**, on the assertion, not on a missing import: the two call lines
+  were removed from the (already correct) source and the file run — `9 pass,
+  2 fail` (`cache:c1` missing, then `then` at index 2 instead of 4). Each call
+  was then dropped ALONE: `artifactCache` only → 2 fail; `feeds` only → 2 fail.
+  Restored, `11 pass, 0 fail` (`git status --porcelain` shows only this task's
+  test file).
+
+**D9's per-session cache delete: dropped from the contract, recorded as debt.**
+The review asked for one or the other and did not say which; dropping it from
+D9 is the honest one, because the built cache cannot soundly implement it.
+Files are per COMPUTER and content-addressed, so a version is shared between
+sessions; a session delete cannot know which files another session still needs,
+and the phone has no session-delete step to hook at all (no `session/delete`
+caller in `apps/mobile/src`; `missingFrom` and `forget` are pure helpers with no
+production caller — exactly the class of gap round 3 found). So D9's `Cache`
+paragraph (`:428-431`) now says what ships — the 200 MB LRU, the whole
+per-computer directory on unpair, the named Share copy deleted after the sheet
+— and `Notes / debt` records the drop and its reason, keeping `missingFrom`
+(with its test) for a session-delete step that does not exist yet. No code
+changed for this: the changelog's `added` bullet already describes exactly the
+two lifecycle steps that ship, so it stays true.
+
+**Drift from the Implementation:** the Design's `Cache` line lost a promise it
+never had the seams to keep. Everything else is unchanged.
+
+**Mutations (§9)** — each applied, the narrow file run, then reverted; all
+against `computer-memory.ts`:
+- both `forgetComputer(id)` calls removed → `9 pass, 2 fail`.
+- `artifactCache?.forgetComputer(id)` only removed → `9 pass, 2 fail`.
+- `feeds?.forgetComputer(id)` only removed → `9 pass, 2 fail`.
+- restored → `11 pass, 0 fail`.
+
+**Gate:** `bunx tsc --noEmit` clean; `bunx tsc --noEmit -p apps/mobile` clean;
+`bunx tsc --noEmit -p apps/relay` clean; `bun run lint` clean (1919 files);
+`bun test apps/mobile/test` **2686 pass, 0 fail**; full `bun test` **13850 pass,
+5 skip, 0 fail** — the 5 are the documented opt-ins (live-k8s ×2, live-docker
+×2, the slow real-socket keepalive), the AGENTS §6 baseline.
+
+**Not verified (unchanged):** T8.1 (the escape suite) and T8.2 (pixels) still
+need a simulator, so "a PDF renders in WKWebView now that the cached file
+carries `.pdf`" remains a pixel claim this round did not run.
 
 *— claude-opus-5-5, 2026-11-17*
