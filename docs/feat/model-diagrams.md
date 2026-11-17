@@ -1231,3 +1231,17 @@ F2 source lines not cleaned: KILLED (3 fail) … > flowchart label | … > sourc
 **Executor:** candid about the red-first drift, and backed it with 9 mutations. **Reviewer = same model (claude-opus-5-5) as the executor:** only the context is fresh, so blind spots may be shared.
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Round 2
+
+**Verdict: PASS.** Finding 1 is fixed in `b389554c`.
+
+- **Fix:** `diagram-lines.ts:47-49,94-101` replaces C0/C1 controls with a space in the title and in each source line. It does this BEFORE `diagramModel`, so labels, caption and source view are all cleaned. The round-1 repro (`rev-d3/esc.ts`) is now clean in all 4 cases.
+- **Mutations** (each restored from a copy; `git status` clean afterwards):
+  - title cleaning dropped → KILLED (`title`);
+  - source cleaning dropped → KILLED (3 fails: flowchart label, source view, sequence message).
+- **Regressions:** `diagram-lines` + theme tests: 81 pass / 0 fail. All 12 snapshots are unchanged, so the drawings did not change. `bun run lint` and `bun run typecheck` are clean. Full `bun test` was not re-run.
+- **Nit, not blocking:** the exported `parseDiagramArgs` still returns the raw title. D4 must render it only through `diagramView`, and should not show `call.title` in its own row.
+- **Correction to round 1:** the executor commits are tagged `deepseek`, so the reviewer is a DIFFERENT model family, not the same one.
+
+*— claude-opus-5-5, 2026-11-17*
