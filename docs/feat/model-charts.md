@@ -2106,3 +2106,18 @@ before *Fix round 1* below, which is the round that answers them.
 - **Gate:** tsc root + mobile clean; lint clean; chart/e2e-mock-chart tests green.
 
 *— claude-sonnet-5-5, 2026-11-17*
+
+## Review
+
+### Review round 2 — C5+C6 (fresh context)
+
+**Verdict: APPROVE** — no HIGH/MEDIUM. Scope: `git diff main...HEAD`, slices C5+C6 only.
+
+- **Gate (narrow):** the 9 C5/C6 mobile test files → 112 pass / 0 fail (3946 expects); `bun run lint` clean (1824 files); `bun run typecheck` green (root + mobile + relay). Full `bun test` not re-run.
+- **Round-1 MEDIUM verified fixed:** `ChartView.tsx:160` keys dots by index. Mutation: old `${series}:${x}:${y}:${r}` key restored → RED (`chart-view.test.ts:168`, Expected 3 / Received 2); file restored from a byte copy (grep confirms `dot:${i}`).
+- **Attacks tried:** (a) key collisions for guides/texts/paths under extreme ranges (1e-12 steps, 1e15+1, ±1e300, flat, -0, 0.1+0.2; line/area/bar, two identical series, widths 1/40/361, fontScale 1/3.1; probe `.tentacle/tmp/model-charts/rev2-keys.ts`) → 0 duplicates, no `NaN`/`Infinity`; out-of-range specs → `null` → generic tool row (fail-safe): holds. (b) §7 "pod not trusted" — row re-validates via `chartSpecOf` before layout: holds (round 1, not re-attacked beyond (a)). (c) §7 single session path / protocol — no wire, update or persisted change in C5/C6: holds.
+- **Unverified (unchanged):** no dev build — `31-chart-inline.yaml` never ran, pixels unseen.
+- **Executor behaviour:** fix minimal, red→green and mutation recorded honestly.
+- **Reviewer = same model family as the C5/C6 executor** (claude-opus-5-5, fresh context only): shared blind spots possible.
+
+*— claude-opus-5-5, 2026-11-17*
