@@ -501,3 +501,15 @@ Attacks that found nothing:
 - Round 4's findings 1–2 stay fixed: the code is unchanged since `7e3bb83a`.
 - The fix: restore that file from `main` (`git show main:<path> > <path>`) in a commit.
 - **Escalation (AGENTS §0):** this is the second time a round has had no executor commit (rounds 2–3 were the first). The orchestrator should confirm that the executor runs in this worktree.
+
+### Round 5 (re-review of `4da6ff3a`)
+
+*— claude-opus-5-5, 2026-11-17* (fresh context; same model as rounds 1–4 and as the Fix round 4 executor — shared blind spots possible)
+
+**Verdict: PASS (APPROVE-WITH-NITS).** No HIGH/MEDIUM open.
+
+- Round 2/3 HIGH fixed: `git diff main...HEAD --name-only` has nothing outside `apps/mobile/`, `docs/`, `changelog.d/`; `diagram-lines.test.ts` 47/47.
+- Gate: touched tests (`hub-opacity`, `hub-opacity-wiring`, `activity-settings-store`, `diagram-lines`) 136 pass / 0 fail; `bun run lint` clean (1996 files); `bun run typecheck` clean. Full `bun test` not re-run here.
+- Mutations (reverted, `git status` clean): drop `gesture !== "idle"` from `hubOpacity` → 7 unit tests FAIL; drop `setEngaged` after `tapOverlay` → wiring test FAILS.
+- Attacks that found nothing: parse fail-safe (NaN/±Inf/string → absent, clamp, no `v` bump, mode/position kept); every machine entry point syncs `engaged` (`move` only goes pressing→dragging, both solid); arc is the body's sibling so `fade × 1`; hold-after-release settles on both success and failed-write publish; §7 untouched (phone-local).
+- Nits / unverified (not blocking): (a) iOS `UIVisualEffectView` under an ancestor alpha < 1 may render the blur wrong or not at all — the body now rests below 1 persistently; (b) RN borders grow inward, so the halo (`arc.width + 3`) extends only inward, not centred like the mockup's SVG stroke; (c) a position/mode write racing an in-flight opacity write spreads a stale `current()` and can drop the opacity (pre-existing holder pattern). All three need the owed 30 %/100 % simulator shots.
