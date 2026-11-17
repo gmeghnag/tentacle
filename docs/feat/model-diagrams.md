@@ -1676,3 +1676,25 @@ The executor's M1–M14 cover the rest. I did not re-run them.
 **Executor:** the drift notes are honest. The signature (`claude-opus-5-5`) does not match the commit subject (`exec (deepseek)`), as the executor itself flagged; the orchestrator should reconcile the two. My review is the same model family as the stated executor, with a fresh context only.
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Round 2
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (`e3c1f579`).
+
+1. **Finding 1 (MEDIUM): FIXED.** `diagram-row.ts:98` now draws only when `output` starts with `DIAGRAM_RESULT_PREFIX`. That prefix is now exported from `core/src/diagram/summary.ts`, so the tool's result line and the client's check share one constant. The string is byte-identical to before. The tool's success content is exactly that line (`tools/src/diagram.ts:145`). Its error contents (`:136-142`) never start with it. I re-ran my repro (`rev-d5/hist.ts`, a refused call sent through `historyRows`): `phone draws refused call after reopen: false`. **Mutation:** the output check forced to `|| true`. KILLED: "a REFUSED call keeps the generic row after a reopen".
+2. **Finding 2 (MEDIUM): FIXED.** `running` and `queued` now return the generic row, as the TUI does. The header comment and the T5.1 test now state the deliberate split from `chartRowSpec`. **Mutation:** the `running` refusal dropped. KILLED: "a call that is still running keeps the generic row".
+
+Both mutations were reverted, and `git status` is clean.
+
+**Regressions:**
+- An accepted history row still draws, because its `output` is the result line (the `ACCEPTED` fixture comes from core's own `summarizeDiagram`).
+- The phone's `ToolRow` already carries `output`, so D6 needs no new field.
+- The TUI's identical gap is carried to TODO with the same remedy (`resultText`), and stays out of scope.
+
+**Gate:**
+- Narrow tests (the four D5 files, plus `core` diagram-summary and `tools` diagram): **81 pass, 0 fail**.
+- `bun run lint`: 2011 files checked, no fixes.
+- `bun run typecheck`: 0 `error TS`.
+- I did not re-run the full `bun test`.
+
+*— claude-opus-5-5, 2026-11-17*
