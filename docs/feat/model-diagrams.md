@@ -1176,6 +1176,30 @@ T3.2 walks each arrowhead back along the glyphs to a box border. It requires the
 
 *— claude-opus-5-5, 2026-11-17*
 
+### Fix round 1
+
+**Finding 1 (MEDIUM), forged control/escape bytes reach the drawn rows: FIXED.**
+- `packages/tui/src/diagram-lines.ts`: a `CONTROL` regex `[\u0000-\u001f\u007f-\u009f]/g` (the `subagent-notify.ts:29` rule). `diagramView` now replaces every C0/C1 control with a space before anything is laid out:
+  - in the title;
+  - in each line of the canonical source (newlines kept), which `diagramModel`, the drawings and the source view all read.
+
+  This is the one point every row passes through, so a `DiagramCall` built by hand is cleaned too, not only one that came through `parseDiagramArgs`.
+- Test: `diagram-lines.test.ts`, block "forged control bytes never reach a drawn row". It forges OSC 52 + `ESC[2J` + C1 CSI + CR in 4 places: title, flowchart node label, `classDiagram` source line, sequence message. Each is checked compact and expanded, with `color: false` so any control byte in the output can only come from the input. It asserts no line matches `[\u0000-\u001f\u007f-\u009f]`.
+
+**Red before green:** on the unfixed code, 4 of 4 failed on the `not.toMatch` assertion (not on an import). The sequence case also failed, through its source view. After the fix: 45 of 45 pass.
+
+**Mutations** (`.tentacle/tmp/model-diagrams/fix-d3/mutate.ts`, run from the main repo root's `.tentacle/tmp`; each applied by exact match, narrow test run, file restored → `restored: true`, `git status` shows only the two intended files):
+```
+F1 title not cleaned: KILLED (1 fail) … > title
+F2 source lines not cleaned: KILLED (3 fail) … > flowchart label | … > source view | … > sequence message
+```
+
+**Drift:** the cleaning is in `diagramView`, not in `parseDiagramArgs`. Both are pure, and `diagramView` is the single path to a row. The review's "not checked" item is still unverified: whether Ink 5 passes OSC through. The fix makes that moot for this view.
+
+**Gate:** `bunx tsc --noEmit` clean. `bun run lint`: 1977 files, no fixes. Full `bun test`: 14418 pass, 5 skip, 0 fail (the same 5 skips as in the D3 gate).
+
+*— claude-opus-5-5, 2026-11-17*
+
 ## Review
 
 **Slice D3, fresh-context adversarial review. Verdict: REQUEST-CHANGES** (1 MEDIUM).

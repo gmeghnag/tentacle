@@ -44,6 +44,10 @@ export interface DiagramLineOptions {
   readonly openHint?: boolean;
 }
 
+/** C0/C1 controls (a tab too → a space), the rule `subagent-notify.ts` applies to a row. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: a terminal must never receive one
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
+
 /** A validated call: its caption and lint result. */
 export interface DiagramCall {
   readonly title: string;
@@ -87,7 +91,14 @@ export function diagramLines(call: DiagramCall, options: DiagramLineOptions): st
 export function diagramView(call: DiagramCall, options: DiagramLineOptions): DiagramRow[] {
   const width = Math.max(1, Math.floor(options.width));
   const expanded = options.expanded === true;
-  const { canonical, type } = call.source;
+  const { type } = call.source;
+  // Every text that reaches a row (caption, labels, source) is cleaned first:
+  // the args may come from a pod, and a terminal must never receive an escape.
+  const canonical = call.source.canonical
+    .split("\n")
+    .map((line) => line.replace(CONTROL, " "))
+    .join("\n");
+  const title = call.title.replace(CONTROL, " ");
   const model = diagramModel(canonical, type);
 
   let drawing: { rows: DiagramRow[]; width: number; indent: boolean } | undefined;
@@ -100,7 +111,7 @@ export function diagramView(call: DiagramCall, options: DiagramLineOptions): Dia
   }
 
   const caption: DiagramSeg[] = [
-    ["title", call.title],
+    ["title", title],
     ["subtle", ` · ${type}`],
   ];
   if (drawing === undefined) caption.push(["subtle", " · source only in the terminal"]);

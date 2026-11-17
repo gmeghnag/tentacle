@@ -475,6 +475,28 @@ describe("forged or refused arguments → the generic row", () => {
   }
 });
 
+describe("forged control bytes never reach a drawn row (a pod is not trusted)", () => {
+  // OSC 52 (clipboard write) + clear screen, plus a C1 CSI and a bare CR.
+  const EVIL = `${ESC}]52;c;aGk=\u0007${ESC}[2J\u009b31m\r`;
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the property under test
+  const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+  const cases: Array<[string, string, string]> = [
+    ["title", `T${EVIL}x`, LOGIN],
+    ["flowchart label", "T", `flowchart TD\n  A["x${EVIL}y"] --> B`],
+    ["source view", "T", `classDiagram\n  class A${EVIL}`],
+    ["sequence message", "T", `sequenceDiagram\n  A->>B: hi${EVIL}there`],
+  ];
+  for (const [name, title, src] of cases) {
+    test(name, () => {
+      for (const expanded of [false, true]) {
+        const out = diagramToolBody(args(title, src), { width: 80, expanded, color: false });
+        expect(out).toBeDefined();
+        for (const line of out ?? []) expect(line).not.toMatch(CONTROL);
+      }
+    });
+  }
+});
+
 describe("source highlighting", () => {
   test("runs join back to the line", () => {
     for (const line of [
