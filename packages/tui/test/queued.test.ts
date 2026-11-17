@@ -3,11 +3,13 @@ import {
   type QueuedRows,
   addRow,
   afterRefusal,
+  afterUnqueue,
   handOff,
   markAcked,
   onReject,
   onSteer,
   onTurnEnd,
+  pullBackTarget,
   requeue,
   rowTexts,
   shownRows,
@@ -147,5 +149,32 @@ describe("shownRows / markAcked (C7)", () => {
 
   test("no report yet (or a local session): the local rows, as before", () => {
     expect(shownRows(three(), undefined)).toEqual(three());
+  });
+});
+
+describe("pull a queued message back (docs/feat/queue-unqueue.md)", () => {
+  test("the target is my newest ACKED row no send-now took; none → null", () => {
+    const acked = markAcked(markAcked(three(), "a"), "b");
+    expect(pullBackTarget(acked)).toEqual({ id: "b", text: "B" });
+    // c is not acked: its enqueue may still be in flight (an unqueue could overtake it).
+    expect(pullBackTarget(three())).toBeNull();
+    const sending = acked.map((r) => (r.id === "b" ? { ...r, state: "sending" as const } : r));
+    expect(pullBackTarget(sending)).toEqual({ id: "a", text: "A" });
+    expect(pullBackTarget([])).toBeNull();
+  });
+
+  test("removed → the row goes, its text to the field; delivered/unsupported → it stays, a notice", () => {
+    const target = { id: "b", text: "B" };
+    const removed = afterUnqueue(three(), target, { removed: ["b"], delivered: [] });
+    expect(rowTexts(removed.rows)).toEqual(["A", "C"]);
+    expect(removed).toMatchObject({ text: "B", notice: null });
+    const delivered = afterUnqueue(three(), target, { removed: [], delivered: ["b"] });
+    expect(delivered.rows).toEqual(three());
+    expect(delivered.text).toBeNull();
+    expect(delivered.notice).toContain("already sent");
+    const old = afterUnqueue(three(), target, "unsupported");
+    expect(old.rows).toEqual(three());
+    expect(old.text).toBeNull();
+    expect(old.notice).toContain("can't cancel queued messages");
   });
 });

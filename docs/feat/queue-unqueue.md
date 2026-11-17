@@ -1,6 +1,6 @@
 # feat/queue-unqueue — Take a queued message back (cancel / edit) before the model reads it
 
-> **Status:** implementation (plan written, NOT approved — see Owner questions)
+> **Status:** executed — awaiting fresh-context Review (Implementation approved 2026-11-18)
 > **Branch:** `feat/queue-unqueue`
 > **Size:** M · **Blast:** load-bearing (the steering queue/drain seam of a running turn, §7 "steering window") · **Suited:** Opus exec + mandatory fresh-context Opus review
 > **Changelog:** `changelog.d/queue-unqueue.added.md` — "**Cancel or edit a queued message.** A message queued while the model runs can be taken back before the model reads it."
@@ -203,7 +203,98 @@ Q1–Q5: the recommendations (protocol+daemon+client + TUI "↑ on empty input p
 
 ## Execution
 
-*(empty — awaiting approval)*
+*— claude-opus-5-5, 2026-11-18*
+
+**Load-bearing check re-run: holds.** `Session.drainSteering` is still a
+synchronous `splice(0)` of `steering` + `voiceMarks` (`agent/src/session.ts`),
+the loop's only intake (`agent.ts` drain sites unchanged); `HostedSession.enqueue`
+is synchronous. Line numbers drifted (successor seed is now ~`hosted-session.ts:2770-2830`).
+
+**Repro (capability missing, before any edit)** — `.tentacle/tmp/queue-unqueue/repro.ts`:
+```ts
+const methods = Object.values(Method).filter((m) => /unqueue/i.test(String(m)));
+console.log("methods removing a queued row:", methods);
+console.log("Session.unqueue:", typeof Reflect.get(Session.prototype, "unqueue"));
+console.log("HostedSession.unqueue:", typeof Reflect.get(HostedSession.prototype, "unqueue"));
+```
+```
+methods removing a queued row: []
+Session.unqueue: undefined
+HostedSession.unqueue: undefined
+```
+
+**As built, in order**
+1. *Agent* — `Session` keeps a third parallel array `steeringIds`; `enqueue(text, voice?, id?)`;
+   `unqueue(id): boolean` splices text + voice mark + id at one index; `drainSteering`
+   splices ids too; `SendOptions.steeringIds` keys a `send`'s seed. Test T1
+   (`agent/test/steering.test.ts`): red (`unqueue is not a function`) → green.
+2. *Protocol* — `session/unqueue` (`UnqueueParams{sessionId, ids[1..]}`,
+   `UnqueueResult{removed, delivered}`) in `session.ts` + `methods.ts`; queue
+   comment updated. Additive → no `protocol.d/` note. `protocol.json` regenerated
+   with `bun run schema:export` (NOT `protocol:bump`: that is the orchestrator's at
+   merge); fixtures added to `json-schema.test.ts` (its coverage test went red first).
+3. *Daemon* — `HostedSession.unqueue(ids)` (after `reclaim`): per id, removed if it
+   was a successor steer, still in the AGENT's array (`session.unqueue`, then the
+   mirror filtered by id) or in `returned` (Q3); a retry hits the new `unqueued`
+   set → removed again; else delivered. `persist()` then `publishQueue()` only if
+   something left. A dropped successor steer's id goes into `enqueued`, so a
+   retried enqueue of it stays a no-op. Ids passed at the restore site and the
+   successor seed (`steeringIds`). `Connection.unqueue`: lookup, call, await
+   `persisted()`, return the facts. Tests T2, T3, T4, T5, T5b, T5c, T7
+   (`daemon/test/queued.test.ts`) all red (`unqueue is not a function`) → green;
+   T6 (`daemon/test/persistence.test.ts`) written after the code, its red shown by
+   mutations M4/M5 below.
+4. *Client* — `RemoteClient.unqueue` ("keyed"; `MethodNotFound` → `"unsupported"`,
+   type `UnqueueOutcome`, notice text `UNQUEUE_OLD_DAEMON`); `RemoteSession.unqueue`
+   (drops removed ids from `mine`; no daemon session → all `delivered`). Tests T7/T7b
+   (`client/test/queued-broadcast.test.ts`).
+5. *CLI + TUI (Q1)* — runtime forwards `unqueue` (`local-runtime.ts`);
+   `SessionController.unqueue?`; pure `pullBackTarget` (newest ACKED `queued` row of
+   mine — an unacked enqueue could be overtaken) and `afterUnqueue` (removed → row
+   dropped, text to the field; delivered / unsupported → row stays + notice) in
+   `tui/src/queued.ts`; `line-layer.ts`: ↑ on an empty input at the history draft
+   slot with a target → effect `pullBackQueued` (before history recall); App only
+   calls and writes. Tests: `tui/test/queued.test.ts`, `keys-line-layer.test.ts`
+   (red first), `tui/test/queue-unqueue-app.test.tsx` (frames: removed / delivered /
+   no-`unqueue` controller → history).
+6. `changelog.d/queue-unqueue.added.md`.
+
+**Drift from Implementation**
+- Archived (non-live) session: `session/unqueue` uses `lookup` (no archived
+  path, unlike `reclaim`). Its rows are `returned`; the client drops those with
+  `session/reclaim`. Not in the plan's list; noted as debt.
+- `unqueued` (retry set) is memory only: a retry after a daemon restart answers
+  `delivered` for an id already removed (the row is still gone — the answer is
+  the conservative one).
+- Seed ids (`steeringIds`) are NOT pinned by a test: the seed is drained at the
+  top of the first round, in the same synchronous stretch as `send`'s first pull
+  when no hook awaits, so the window cannot be reached deterministically. Two
+  attempts (daemon T5d, agent T1b) failed on the precondition, i.e. vacuously —
+  dropped (AGENTS §0 two-strike). Kept as plan-mandated plumbing (it matters when
+  `turn_start` hooks await before the first drain).
+- Plan's T5 "empty turn" folded into T5 (idle unqueue answered from facts) and T5b.
+- `cli/test/subagent-panel-controller.test.ts` GUARD lists forwarded controller
+  members exactly: `"unqueue"` added (the full run caught it; its own comment says
+  a new member is a deliberate entry).
+- No mobile UI here (Q1); Q5's Undo is client-side in `feat/mobile-queued-compose`.
+
+**Mutations (each reverted, test green again)**
+| # | mutation | result |
+|---|---|---|
+| M1 | `Session.unqueue` leaves the voice mark | T1 red (`VOICE_SPOKEN_LINE` present) |
+| M2 | `HostedSession.unqueue` checks the mirror `this.queue`, not `Session.steering` (plan's target) | T2 red, only T2 |
+| M4 | restore site enqueues without the id | T6 red |
+| M5 | no `persist()` in `unqueue` | T6 red |
+| M6 | removed id not recorded in `unqueued` | T5 red |
+| M7 | `MethodNotFound` → silent success | T7b red |
+| M8 | App snapshot `pullBack: null` | App tests removed + delivered red |
+| M3 | successor `send` without `steeringIds` | vacuous (precondition failed on correct code too) — see drift |
+
+**Gate:** `bun run typecheck` clean · `bun run lint` clean (0/0) · `bun test`
+(one full run): 14904 pass, 5 skip, 1 fail → the GUARD above, fixed and its file
+re-run green (4/4). Unverified: the 5 skips vs the 3 opt-ins in AGENTS §6 — this
+diff adds no `skip`/`skipIf` (grep 0), so they predate this branch; check with
+`bun test 2>&1 | grep -i skip`.
 
 ## Review
 

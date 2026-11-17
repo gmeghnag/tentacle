@@ -48,6 +48,8 @@ export interface SendOptions {
    * undrained steers over (docs/feat/send-now-a.md). Absent → empty.
    */
   readonly steering?: readonly string[];
+  /** Each `steering` text's caller key, by index (so `unqueue` can take it back). */
+  readonly steeringIds?: readonly string[];
   /** Makes a parallel group's start durable before it runs (see `RunOptions.beforeRun`). */
   readonly beforeRun?: BeforeRun;
   /**
@@ -101,6 +103,11 @@ export class Session {
    * Drained in step with `steering` (the loop asks for it once per round).
    */
   private voiceMarks: (VoiceTurn | null)[] = [];
+  /**
+   * Each queued steer's caller key (`null` = none), in step with `steering`:
+   * what `unqueue` takes a steer back by (docs/feat/queue-unqueue.md).
+   */
+  private steeringIds: (string | null)[] = [];
   /**
    * The voice mark handed to the loop at the next round: `taken` at the turn's
    * first round and again after every steer drain, then cleared by the loop's
@@ -186,6 +193,7 @@ export class Session {
     // items from a previous turn; a caller that keeps them passes them).
     this.steering = [...(opts.steering ?? [])];
     this.voiceMarks = this.steering.map(() => null);
+    this.steeringIds = this.steering.map((_, i) => opts.steeringIds?.[i] ?? null);
     this.pendingVoice = null;
     // What this turn adds starts here (its context line may ride on it).
     const newFrom = this.messages.length;
@@ -294,9 +302,27 @@ export class Session {
    * `voice` (docs/feat/voice-conversation.md §4): a voice STEER, which marks the
    * rest of its turn a voice turn with its own `reasoning`.
    */
-  enqueue(text: string, voice?: VoiceTurn): void {
+  enqueue(text: string, voice?: VoiceTurn, id?: string): void {
     this.steering.push(text);
     this.voiceMarks.push(voice ?? null);
+    this.steeringIds.push(id ?? null);
+  }
+
+  /**
+   * Take back the queued steer keyed `id` (docs/feat/queue-unqueue.md):
+   * `true` iff it was still queued — then the model never reads it in this
+   * turn (the loop takes steers only through the drain's synchronous splice).
+   * Its voice mark goes with it. `false`: drained already, or unknown.
+   */
+  unqueue(id: string): boolean {
+    const at = this.steeringIds.indexOf(id);
+    if (at < 0) {
+      return false;
+    }
+    this.steering.splice(at, 1);
+    this.voiceMarks.splice(at, 1);
+    this.steeringIds.splice(at, 1);
+    return true;
   }
 
   /** The messages queued and not yet drained, in order (a copy, for persisting). */
@@ -313,6 +339,7 @@ export class Session {
    */
   private drainSteering(): readonly string[] {
     const marks = this.voiceMarks.splice(0);
+    this.steeringIds.splice(0);
     const texts = this.steering.splice(0);
     for (const mark of marks) {
       if (mark !== null) {

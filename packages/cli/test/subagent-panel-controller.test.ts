@@ -373,6 +373,8 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       "clear",
       "openForReset",
       "enqueue",
+      // Take a queued row back (docs/feat/queue-unqueue.md): ↑ on an empty input.
+      "unqueue",
       "sendNow",
       "close",
       "skills",

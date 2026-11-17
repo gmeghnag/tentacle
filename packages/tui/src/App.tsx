@@ -95,7 +95,13 @@ import { tryWake } from "./wake-gate.ts";
 
 export type { AutoAcceptFeed, AutoAcceptSharedFeed };
 
-import { type DaemonQueue, type QueuedRows, handBackRows } from "./queued.ts";
+import {
+  type DaemonQueue,
+  type QueuedRows,
+  afterUnqueue,
+  handBackRows,
+  pullBackTarget,
+} from "./queued.ts";
 import { type RenderOptions, layoutTranscript, sliceLaid, warmRowsChunk } from "./render-lines.ts";
 import { runChunked } from "./run-chunked.ts";
 import { anchorOffset, applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
@@ -2125,6 +2131,21 @@ export function App({
     },
     submit: (text) => submit(text),
     removeLastChip: () => setAttach((draft) => removeLastChip(draft)),
+    // ↑ on an empty input (docs/feat/queue-unqueue.md): what the answer does is
+    // `afterUnqueue`'s; here only the call and its writes.
+    pullBackQueued: (id, text) => {
+      sessionRef.current?.unqueue?.([id]).then(
+        (answer) => {
+          const res = afterUnqueue(rowsRef.current, { id, text }, answer);
+          setRows(() => res.rows);
+          const back = res.text;
+          if (back !== null) field.update((draft) => withRestored(draft, back));
+          if (res.notice !== null) pushNotice(res.notice);
+        },
+        (error: unknown) =>
+          pushNotice(`_not taken back: ${error instanceof Error ? error.message : String(error)}_`),
+      );
+    },
     // Voice dictation (docs/feat/voice-dictation.md): the hook owns the child and
     // the reducer; the layer only decided WHICH intent this chunk was.
     voiceToggle: voice.toggle,
@@ -2234,6 +2255,7 @@ export function App({
         dockVisible: dockVisible(),
         dockFocus: dockRef.current.focus,
         chipCount: attachRef.current.chips.length,
+        pullBack: sessionRef.current?.unqueue ? pullBackTarget(rowsRef.current) : null,
       }),
       keyHost,
     );

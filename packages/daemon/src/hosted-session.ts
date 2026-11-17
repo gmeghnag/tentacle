@@ -704,6 +704,8 @@ export class HostedSession {
   private readonly sendNowTurns = new Set<string>();
   /** Every accepted `enqueue` id, for its lifetime (retries). */
   private readonly enqueued = new Set<string>();
+  /** Ids `unqueue` took back (memory only): a retry answers `removed` again. */
+  private readonly unqueued = new Set<string>();
   /**
    * The agent's steering queue, mirrored in order with each text's enqueue id
    * (a resumed turn's restored steer: its record's id, or one minted at the
@@ -1104,7 +1106,7 @@ export class HostedSession {
         // A v4 record kept the id (its writer still knows it); an older one
         // did not: minted, nobody's. Queued again, so not in the history.
         const id = resume.steeringIds?.[i] ?? crypto.randomUUID();
-        session.enqueue(text);
+        session.enqueue(text, undefined, id);
         this.queue.push({ id, text });
         this.restoredIds.delete(id);
       });
@@ -1865,6 +1867,60 @@ export class HostedSession {
     this.returned = kept;
     this.persist();
     this.publishQueue();
+  }
+
+  /**
+   * `session/unqueue` (docs/feat/queue-unqueue.md): take rows back before the
+   * model reads them. Synchronous, like `enqueue`, so it lands strictly before
+   * or after a drain's `splice(0)`. "Not read" is asked of the AGENT's array,
+   * never of the mirror: the mirror is shifted only when a `steer` reaches
+   * `drive`, so it can still hold a row already drained. Per id: a reserved
+   * send-now's steer, an undrained row, or a returned row (Q3) → removed;
+   * anything else (drained, a send-now's own message, unknown) → delivered.
+   * On disk (a capture), then streamed — only when something left.
+   */
+  unqueue(ids: readonly string[]): { removed: string[]; delivered: string[] } {
+    const removed: string[] = [];
+    const delivered: string[] = [];
+    let changed = false;
+    const next = this.successor;
+    for (const id of ids) {
+      if (this.unqueued.has(id)) {
+        removed.push(id);
+        continue;
+      }
+      let gone = false;
+      const at = next === null ? -1 : next.steers.findIndex((s) => s.id === id);
+      if (next !== null && at >= 0) {
+        next.steers.splice(at, 1);
+        // A retried enqueue of it stays a no-op: it never comes back.
+        this.enqueued.add(id);
+        gone = true;
+      }
+      if (this.session.unqueue(id)) {
+        // An undrained row sits behind every drained one: dropping it by id
+        // keeps the head-shift pairing on `steer` right for the others.
+        this.queue = this.queue.filter((r) => r.id !== id);
+        gone = true;
+      }
+      const kept = this.returned.filter((r) => r.id !== id);
+      if (kept.length !== this.returned.length) {
+        this.returned = kept;
+        gone = true;
+      }
+      if (gone) {
+        this.unqueued.add(id);
+        removed.push(id);
+        changed = true;
+      } else {
+        delivered.push(id);
+      }
+    }
+    if (changed) {
+      this.persist();
+      this.publishQueue();
+    }
+    return { removed, delivered };
   }
 
   /** A turn or a compaction is active. */
@@ -2812,6 +2868,7 @@ export class HostedSession {
       next.turnId,
       this.session.send(prompt, controller.signal, {
         steering: seed,
+        steeringIds: seedRows.map((r) => r.id),
         ...(next.askHooksTrust !== undefined ? { askHooksTrust: next.askHooksTrust } : {}),
         beforeRun: this.beforeRunFn,
       }),
@@ -3687,7 +3744,7 @@ export class HostedSession {
       throw new RpcError(DomainErrorCode.NoTurnRunning, "no turn is running");
     }
     this.enqueued.add(id);
-    this.session.enqueue(text, voice);
+    this.session.enqueue(text, voice, id);
     this.queue.push({ id, text });
     // A person wrote while a foreground child runs: it moves to the background
     // NOW, in this synchronous stretch, so the call it holds is answered in

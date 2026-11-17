@@ -147,6 +147,49 @@ export function afterRefusal(
 export const requeue = (rows: QueuedRows): QueuedRows =>
   rows.map((r) => ({ ...r, state: "queued" as const }));
 
+/**
+ * `session/unqueue`'s answer as the TUI sees it (structurally the client's
+ * `UnqueueOutcome`): the daemon's per-id facts, or an older daemon.
+ */
+export type UnqueueAnswer =
+  | { readonly removed: readonly string[]; readonly delivered: readonly string[] }
+  | "unsupported";
+
+/**
+ * ↑ on an empty input pulls the last queued message back to edit
+ * (docs/feat/queue-unqueue.md, Q1): my newest row the daemon ACCEPTED (an
+ * unacked enqueue may still be in flight — an unqueue could overtake it and
+ * miss) that no send-now has taken. `null`: ↑ keeps its history meaning.
+ */
+export function pullBackTarget(rows: QueuedRows): QueuedMessage | null {
+  const row = rows.findLast((r) => r.acked === true && r.state === "queued");
+  return row ? { id: row.id, text: row.text } : null;
+}
+
+/**
+ * What a pull-back's answer does: `removed` → the row goes and its text comes
+ * back to the field (edit, ↑ queues it again under a new id); otherwise the
+ * row stays — the model reads it (`delivered`) or this daemon cannot take it
+ * back — and the user is told, never a silent no-op.
+ */
+export function afterUnqueue(
+  rows: QueuedRows,
+  target: QueuedMessage,
+  answer: UnqueueAnswer,
+): { readonly rows: QueuedRows; readonly text: string | null; readonly notice: string | null } {
+  if (answer === "unsupported") {
+    return {
+      rows,
+      text: null,
+      notice: "_this daemon can't cancel queued messages (older version)_",
+    };
+  }
+  if (answer.removed.includes(target.id)) {
+    return { rows: dropIds(rows, [target.id]), text: target.text, notice: null };
+  }
+  return { rows, text: null, notice: "_already sent to the model — not taken back_" };
+}
+
 /** The rows minus `ids` (the ones the daemon gave back). */
 export function dropIds(rows: QueuedRows, ids: readonly string[]): QueuedRows {
   const gone = new Set(ids);

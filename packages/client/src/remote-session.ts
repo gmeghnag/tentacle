@@ -55,6 +55,7 @@ import {
   type RemoteClient,
   type SessionStreamListener,
   type SessionTitleNotice,
+  type UnqueueOutcome,
   type UploadOptions,
 } from "./remote-client.ts";
 import { SCHEDULE_UNTRUSTED_DAEMON, firedScheduleRef } from "./schedules.ts";
@@ -1318,6 +1319,24 @@ export class RemoteSession implements SessionStreamListener {
       return this.opening.then((id) => this.client.enqueue(id, key, turnId, text, voice));
     }
     return Promise.resolve();
+  }
+
+  /**
+   * Take queued rows back before the model reads them (docs/feat/queue-unqueue.md).
+   * A removed row of mine is mine no more (the daemon never returns it). With
+   * no daemon session, nothing was queued there to take back: every id
+   * answers `delivered` ("not taken back"), never a fake `removed`.
+   */
+  async unqueue(ids: readonly string[]): Promise<UnqueueOutcome> {
+    const id = this.id ?? (this.opening ? await this.opening : undefined);
+    if (!id) {
+      return { removed: [], delivered: [...ids] };
+    }
+    const outcome = await this.client.unqueue(id, ids);
+    if (outcome !== "unsupported") {
+      for (const key of outcome.removed) this.mine.delete(key);
+    }
+    return outcome;
   }
 
   /**
