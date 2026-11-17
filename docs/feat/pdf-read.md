@@ -1629,6 +1629,127 @@ already covers the feature; this is a test/doc gap).
 
 *— claude-opus-5-5, 2026-11-16*
 
+### P6 — iPhone PDF attach (expo-document-picker, pdf-input.ts, chip, bubble) · executed by `claude-sonnet-4-5-20250929` (tentacle), 2026-11-16
+
+**What was built** (items/ports first, renderers last, as the plan ordered).
+
+1. **`apps/mobile/src/pdf-input.ts` (new, pure).** `nextPdfStep({bytes, name?, taken, maxBytes,
+   declaredSize?})` → `{kind:"ready", pdf:{name,size}} | {kind:"refuse", reason, detail}`. Order:
+   empty (`empty`) → cap (`taken >= MAX_ATTACHMENTS_PER_MESSAGE`, photos and files together) →
+   iCloud placeholder (`declaredSize > 0` but the copy is 0 bytes, `not-downloaded`) →
+   `!isPdf(bytes.subarray(0, PDF_SNIFF_BYTES))` (`not-a-pdf`) → `size > maxBytes` (`too-large`,
+   the sentence names `formatBytes`). `pdfName` = `sanitizeAttachmentName(...) ?? "document.pdf"`;
+   `pdfCopyName(name, {stamp, seq})` keeps `.pdf` and clips to ASCII; `MAX_PDF_ATTACH_BYTES`
+   = 15 MiB. The type comes from the BYTES, never the extension or the picker's MIME hint.
+2. **`apps/mobile/src/pdf-source.ts` (new, effects only).** The ONLY `expo-document-picker`
+   importer: `getDocumentAsync({type:"application/pdf", copyToCacheDirectory:true, multiple:false})`
+   → `new File(uri).bytes()` → `nextPdfStep` → copy into `<documents>/pdfs/<pdfCopyName>`
+   (`create({overwrite:false})` so a collision throws rather than swapping documents).
+   Every refusal is a `PickedPdf` of kind `refused` — never an exception.
+3. **`apps/mobile/src/attach-sheet.ts` (new, pure).** `attachSheet(capability)` → `{items, reason}`:
+   `kind === "upload"` is the ONLY mode the phone offers (`pdf` added, `reason: null`);
+   `laptop` and `off` both omit the row and carry a sentence (the `laptop` one says the phone
+   cannot hand a pod text, `off` reuses the client's own words verbatim).
+4. **`compose-chips.ts`**: `Chip`/`Picked` gained `kind: "image" | "document"`;
+   `chipDocumentReady(chips, key, block: DocumentContent)`; `TakenDocument`/`TakenAttachment`
+   and `splitTaken`; `CHIP_CAP` counts both. **`outbox.ts`**: `OutboxItem.documents?` →
+   `{file, name, block?}`, with `documentsOf`/`pendingDocuments`/`withDocumentBlock`/
+   `documentBlocksOf`. **`outbox-store.ts`**: `isDocument` guard (the wire's
+   `DocumentContentSchema`), `schemaVersion` stays 1. **`outbox-driver.ts`**:
+   `OutboxSession.attachDocument` + `prompt(..., documents?)`, and `attachDocuments` runs AFTER
+   the photos, persisting each block before the next file. **`outbox-session.ts`**: the port
+   wires `attachDocument` → `session.attachDocument`; `unavailableSessionPort` refuses.
+5. **`compose-controller.ts`**: `DocumentPort {pickPdf, documentsInput}`, `pickDocument()`,
+   `applyPdfs`, `uploadPicked` by kind, `photosOf`/`documentsOf` via `splitTaken`, both enqueue
+   sites carry `documents`, `deps.prompt` gained a fifth argument.
+6. **Renderers.** `session-view.ts` (`ChipView.kind`), `ComposeBar.tsx` (glyph by kind:
+   `doc.on.doc` for a document, `photo` for an image), `SessionScreen.tsx` (the `+` sheet from
+   pure `attachSheet`, "File (PDF)" only when offered), `TranscriptRow.tsx` (one `[pdf: …]`
+   line per `user.documents` entry, `sec`-coloured, its own `row-documents` view).
+7. **`transcript-rows.ts`** gained `UserRow.documents?`, `documentRowText(name, pages?)`,
+   `mediaRowText(media)` and `documentLabels(blocks)`; **`transcript-history.ts`** strips the
+   `<file>` blocks when `media` is present (`splitFileBlocks(content).text`) and never otherwise;
+   **`transcript.ts`** carries the labels on `own_prompt`, and `session-feed.ts` draws a
+   PDF-only prompt (its guard was `text !== "" || attachments.length > 0`).
+8. **`App.tsx`**: the `documents` port wired (`pickPdf` → `pdf-source.ts`,
+   `documentsInput` → `link.client.documentsInput()` — never re-derived in the app), and the
+   PDF copies swept by the SAME `photo-copies.ts` rule in their own folder.
+   **`app.json`**: the `expo-document-picker` plugin entry. **`docs/BUILD.md`**: one section —
+   a new native module needs a rebuilt dev build (`expo prebuild` + `expo run:ios`).
+
+**DRIFT from Implementation, recorded.**
+- **(a) The plan's step list missed the LIVE send path, and the first red test found it.** The
+  screen's folding prompt was `promptWithRefs(text, turnId, refs, photos)` — no `documents` —
+  so every phone PDF was dropped between the chip and the wire, while
+  `compose-documents.test.ts` (whose fake prompt took a fifth argument) stayed green. Fixed at
+  the source: `SendableHandle.send` opts gained `documents`, `ComposeWiring.driver`'s prompt
+  and `ComposeDeps.prompt` gained it, `promptWithRefs` passes it and folds the row labels.
+  Its own regression test is `test/session-screen-documents.test.ts` (M5).
+- **(b) A PDF-only prompt drew NO row at all.** `session-feed.ts` skipped an own prompt whose
+  text and attachments were both empty; a PDF-only send (the plan's own D7 case) is exactly
+  that. The guard now counts `documents` too, and the label list is what the bubble shows.
+- **(c) `ChipView.kind` is OPTIONAL, and absent on a `refused` chip.** A cap refusal (or a pick
+  the adapter rejected) never learned what the pick was, and inventing one would put a photo
+  glyph on a refused PDF. The controller therefore omits `kind` on refused chips rather than
+  forwarding a value the union does not have (this is what `tsc` caught in three pre-existing
+  test fakes, now typed).
+- **(d) `DocumentPort.pickPdf` answers `readonly PickedPdf[]`** (`PickedDocument | Picked`),
+  not `PickedDocument[]`: the adapter's refusal is a `refused` pick, and `applyPdfs` hands both
+  to the same `applyEntries` (a refusal is a chip with its reason, never an exception).
+- **(e) PDF copies are bounded like photo copies.** `inUseCopies` now also names an item's
+  document files, and `outboxOf` sweeps `pdfsRoot()` with the same rule — otherwise every pick
+  would leak a copy for ever (the plan did not name it).
+- **(f) A wiring guard went stale, not the code.** `mobile-media-live-wiring.test.ts` asserted
+  over fixed character windows (`app.slice(start, start + 600/900/1600)`); adding the PDF port
+  pushed `sendPhotoOriginalSize` and `handle:` outside them, so two green invariants turned red
+  for a reason that had nothing to do with them. Both now read the whole function
+  (`composeWiring()` helper), and the mutation that drops `sendPhotoOriginalSize` still fails it
+  (M6) — the guard is wider, not weaker.
+- **(g) No native/simulator run in this slice.** The picker itself cannot be exercised under
+  `bun test` (React Native has no renderer); `pdf-source.ts` is the only importer and stays
+  untested by design (its decisions live in `pdf-input.ts`). The dev build is described in
+  `docs/BUILD.md`; running it on the owner's iPhone is the remaining manual step.
+
+**Tests (all red-first; 6 files new or extended, +10 tests net).**
+`apps/mobile/test/pdf-input.test.ts` (20, P6 step 1) — sniff (`%PDF-` ok; a `.pdf` that is text
+→ `not-a-pdf`; a header cut below its version line refused), the caps, zero bytes → `empty`,
+the iCloud placeholder → `not-downloaded`, `taken=5` → `too-many`, name sanitising,
+`pdfCopyName` uniqueness. `attach-sheet.test.ts` (4) — upload offers `pdf` with no reason;
+`off` and `laptop` omit it and each carry their sentence. `compose-documents.test.ts` (9) —
+pick → `attachDocument` → ready chip → send carries the block; `laptop`/`off` refuse and pick
+NOTHING (0 picker calls); a refusal is a chip; offline send-later keeps the block on the item.
+`transcript-pdf.test.ts` (8, new) — the block hidden and `[pdf: report.pdf · 2 pp]` shown with
+`media`; the raw text with no `media` (and with `[]`); a PDF-only stored prompt; an unknown
+`media` kind labelled `[audio: memo.m4a]`; the row's wording pinned to the TUI's own
+`documentRowText`/`mediaRowText`; `TranscriptRow.tsx` renders the field. `session-screen-documents.test.ts`
+(2, new) — the SCREEN's real folding prompt sends the documents and the bubble names the file;
+a text-less PDF is still a sendable message. `session-screen-compose.test.ts`,
+`compose-controller.test.ts`, `compose-chips.test.ts`, `outbox-driver.test.ts`,
+`compose-motion.test.ts`, `session-view-compose.test.ts` updated for the new port members
+(`documents: []` on two `toEqual`s, `kind` on the chip fakes, `attach` on the bar fake).
+
+**Mutations** (each applied by direct edit, the owning test run, then re-edited back):
+
+| mutation | result |
+|---|---|
+| M1 `pdf-input.ts`: the `isPdf` branch never taken (`false &&`) | RED 2 (`pdf-input.test.ts`: a text `.pdf`, and a header cut below its version) |
+| M2 `attach-sheet.ts`: offer `pdf` regardless of the capability | RED 3 (`attach-sheet.test.ts` off + laptop, and `compose-documents.test.ts`'s sheet test) |
+| M3 `transcript-history.ts`: ignore `media` | RED 2 (`transcript-pdf.test.ts`: the block-hiding case and the PDF-only case) |
+| M4 `compose-controller.ts`: `driver.enqueue` without `documents` (both sites) | RED 2 (`compose-documents.test.ts`: the send carries the block, and the offline item keeps it) |
+| M5 `session-screen-controller.ts`: the folding prompt drops `documents` | RED 2 (`session-screen-documents.test.ts`, both cases) |
+| M6 `App.tsx`: drop `sendPhotoOriginalSize` (a WIDENED guard, not the code) | RED 1 (`mobile-media-live-wiring.test.ts` item 5) — the non-vacuity check for drift (f) |
+
+**Gate** (`bun run typecheck`, `bun run lint`, full `bun test`, run once after the last edit):
+`tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay` **clean** · `biome check .`
+**1792 files, no fixes applied, 0 errors** · `bun test` **13051 pass, 5 skip** (the three
+opt-ins: live-k8s, live-docker, the real-socket keepalive — not failures), **0 fail**, 930
+files. No protocol schema change (`expo-document-picker` is a phone dependency, `documents`
+and `media` were P4's): no `protocol.d/` note and no `protocol:bump`. Changelog:
+`changelog.d/pdf-read.added.md` extended (the `+` sheet's File (PDF), and the message showing
+the file's name instead of its text) — `CHANGELOG.md` untouched.
+
+*— claude-sonnet-4-5-20250929 (tentacle), 2026-11-16*
+
 ## Review
 
 ### P1 — fresh-context adversarial review

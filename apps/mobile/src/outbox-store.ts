@@ -22,9 +22,13 @@
  * a computer's outbox is meaningless to another one, and one file keeps the
  * write atomic across the three collections.
  */
-import type { AttachmentRef } from "@tentacle/protocol";
+import {
+  type AttachmentRef,
+  type DocumentContent,
+  DocumentContentSchema,
+} from "@tentacle/protocol";
 import type { Draft } from "./drafts.ts";
-import type { Basis, OutboxItem, OutboxPhoto, OutboxState } from "./outbox.ts";
+import type { Basis, OutboxDocument, OutboxItem, OutboxPhoto, OutboxState } from "./outbox.ts";
 
 /** The on-disk schema this build writes; anything else is refused untouched. */
 export const OUTBOX_SCHEMA_VERSION = 1;
@@ -166,6 +170,22 @@ function isPhoto(value: unknown): value is OutboxPhoto {
   );
 }
 
+/**
+ * A document as a previous build wrote it (docs/feat/pdf-read.md D7). Its
+ * `block` is stored whole: a build that could not READ it would have to re-put
+ * bytes the daemon may already hold, so the block is checked by the protocol's
+ * own schema rather than restated here.
+ */
+function isDocument(value: unknown): value is OutboxDocument {
+  if (!isObject(value) || typeof value.file !== "string" || typeof value.name !== "string") {
+    return false;
+  }
+  if (value.block === undefined) {
+    return true;
+  }
+  return DocumentContentSchema.safeParse(value.block).success;
+}
+
 const isBasis = (value: unknown): value is Basis =>
   isObject(value) &&
   typeof value.historyLength === "number" &&
@@ -181,6 +201,8 @@ function isItem(value: unknown): value is OutboxItem {
     typeof value.text === "string" &&
     Array.isArray(value.photos) &&
     value.photos.every(isPhoto) &&
+    (value.documents === undefined ||
+      (Array.isArray(value.documents) && value.documents.every(isDocument))) &&
     typeof value.turnId === "string" &&
     typeof value.enqueueId === "string" &&
     (value.steerTurnId === null || typeof value.steerTurnId === "string") &&

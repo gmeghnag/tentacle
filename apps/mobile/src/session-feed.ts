@@ -104,6 +104,13 @@ export interface OwnPrompt {
    * outbox retry whose copies are gone, and any ref from another device.
    */
   readonly photos?: readonly LocalPhoto[];
+  /**
+   * The attached files' row labels (`[pdf: report.pdf]`), docs/feat/pdf-read.md
+   * D7: the compose half knows their NAMES, and that is all it knows — the page
+   * count is the daemon's fact and never travels back on the turn. A PDF-only
+   * prompt ("" + these) IS a row: the labels alone say what was asked.
+   */
+  readonly documents?: readonly string[];
 }
 
 export interface SessionFeed {
@@ -142,7 +149,10 @@ function foldStream(
   deps.put(apply(deps.state(), { type: "turn_started", turnId, own }));
   /** The own prompt, drawn once at the ack or the first event (null once drawn or skipped). */
   let pending: OwnPrompt | null =
-    prompt !== undefined && (prompt.text !== "" || (prompt.attachments?.length ?? 0) > 0)
+    prompt !== undefined &&
+    (prompt.text !== "" ||
+      (prompt.attachments?.length ?? 0) > 0 ||
+      (prompt.documents?.length ?? 0) > 0)
       ? prompt
       : null;
   const drawPrompt = (first: SessionEvent | null): void => {
@@ -164,6 +174,9 @@ function foldStream(
           ? { attachments: own.attachments }
           : {}),
         ...(own.photos !== undefined && own.photos.length > 0 ? { photos: own.photos } : {}),
+        ...(own.documents !== undefined && own.documents.length > 0
+          ? { documents: own.documents }
+          : {}),
       } as TranscriptInput),
     );
   };

@@ -87,6 +87,10 @@ function fakeHandle(
         size: bytes.length,
       } as AttachmentRef;
     },
+    // No PDF in this test: `compose-documents.test.ts` owns that pick path.
+    async attachDocument() {
+      throw new Error("no PDF in this test");
+    },
     async send(text, refs) {
       acts.push(`send:${text}:${refs.length}`);
       quoted.push(text);
@@ -140,6 +144,9 @@ function fakeHandle(
       },
       prompt: async (text, turnId) => {
         acts.push(`port-prompt:${text}:${turnId}`);
+      },
+      attachDocument: async () => {
+        throw new Error("no PDF in this test");
       },
       steer: async (text, id, turnId) => {
         acts.push(`port-steer:${id}`);

@@ -176,6 +176,25 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
             })}
           </View>
         )}
+        {/* The attached files, one line each (docs/feat/pdf-read.md D5/D7), under
+            the media and inside the same bubble: the `<file>` block they became
+            is the model's, so the file is named, never quoted. */}
+        {user.documents === undefined || user.documents.length === 0 ? null : (
+          <View testID="row-documents" style={styles.documents}>
+            {user.documents.map((line) => (
+              <View key={line} style={styles.document}>
+                <Icon name="doc.on.doc" color={palette.sec} size={14} />
+                <Text
+                  numberOfLines={2}
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  style={[typography.caption, { color: palette.sec }]}
+                >
+                  {line}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
         {/* The caption, BELOW the media and inside the same bubble — and never an
             empty block: a photo-only bubble has no text area at all (item 4).
             `hasText` is the words' own presence; the markdown source is its truth. */}
@@ -392,6 +411,10 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   images: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  // The attached files' rows (docs/feat/pdf-read.md D5): a glyph and one line
+  // each, `sec`-coloured so they read as facts about the message, not prose.
+  documents: { gap: 2 },
+  document: { flexDirection: "row", alignItems: "center", gap: 6 },
   // The image fills its own box (whose shape `mediaBox` decided): full bubble
   // width, rounded to the bubble (item 4).
   image: { borderRadius: radius.bubble, overflow: "hidden" },

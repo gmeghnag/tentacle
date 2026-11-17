@@ -17,6 +17,7 @@ import type { RemoteSession, SessionEvent } from "@tentacle/client";
 import type { PermissionBroker, PermissionRequester } from "@tentacle/core";
 import type {
   AttachmentRef,
+  DocumentContent,
   JobOutputResult,
   JobRow,
   SessionContextResult,
@@ -26,7 +27,7 @@ import type {
 import { DomainErrorCode } from "@tentacle/transport";
 import { RpcError } from "@tentacle/transport";
 import { type ActivityMemory, emptyMemory, markOpened, onSubagents } from "./activity-memory.ts";
-import type { Compose, ComposeHandle, PhotoPort } from "./compose-controller.ts";
+import type { Compose, ComposeHandle, DocumentPort, PhotoPort } from "./compose-controller.ts";
 import { createCompose } from "./compose-controller.ts";
 import {
   type ComposerAction,
@@ -80,7 +81,7 @@ import {
   createThumbnailDriver,
   initialThumbnails,
 } from "./thumbnails.ts";
-import type { LocalPhoto } from "./transcript-rows.ts";
+import { type LocalPhoto, documentLabels } from "./transcript-rows.ts";
 import { type State, initialState } from "./transcript.ts";
 
 /**
@@ -147,6 +148,8 @@ export interface SendableHandle extends SessionHandle, ActivityHandle {
     opts?: {
       readonly turnId?: string;
       readonly attachments?: readonly AttachmentRef[];
+      /** The prompt's attached PDFs (docs/feat/pdf-read.md D7, the wire's blocks). */
+      readonly documents?: readonly DocumentContent[];
       /** The daemon's ack (`RemoteSession.send`): it holds the turn's key. */
       readonly onAccepted?: () => void;
     },
@@ -241,6 +244,8 @@ export interface ComposeWiring {
       turnId: string,
       refs: readonly AttachmentRef[],
       photos?: readonly LocalPhoto[],
+      /** The attached PDFs' wire blocks (D7): the driver's own prompt names them. */
+      documents?: readonly DocumentContent[],
     ) => Promise<void>;
     /** 13b's hand-back: an item whose text belongs in the field (F7/F20). */
     readonly onDraft: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
@@ -254,6 +259,11 @@ export interface ComposeWiring {
     readonly handle: () => ComposeHandle | null;
   }) => OutboxDriver;
   readonly photos: PhotoPort;
+  /**
+   * The PDF adapter (docs/feat/pdf-read.md D7). Absent: this build cannot pick a
+   * file — the `+` sheet then offers no PDF row and says so.
+   */
+  readonly documents?: DocumentPort;
   /**
    * The person's "Send photos at original size" (item 5), read at every pick.
    * Absent = the downscale (the default).
@@ -386,6 +396,8 @@ export interface SessionScreenController {
   sheet(): PermissionSheet;
   /** The photo button's answer: the Library picker or the Camera (13d, D5). */
   pickPhoto(source: "library" | "camera"): Promise<void>;
+  /** The `+` sheet's "File (PDF)" (docs/feat/pdf-read.md D7). */
+  pickDocument(): Promise<void>;
   /** A chip's × : forget that photo (13d). */
   removeChip(key: string): Promise<void>;
   /** **Send now**, beside the queue (13d, D1). */
@@ -551,7 +563,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           // turn it starts must stream into this transcript (a drained stream shows
           // nothing — 13d's flow 07/18). The app passes a factory, not a driver.
           driver: deps.compose.driver({
-            prompt: (text, turnId, refs, photos) => promptWithRefs(text, turnId, refs, photos),
+            prompt: (text, turnId, refs, photos, documents) =>
+              promptWithRefs(text, turnId, refs, photos, documents),
             // 13b's own hand-back (F7/F20): the item is gone and its text is the
             // field's again — APPENDED, never overwriting what the person typed.
             onDraft: (item) => {
@@ -568,6 +581,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
                 : null,
           }),
           photos: deps.compose.photos,
+          ...(deps.compose.documents === undefined ? {} : { documents: deps.compose.documents }),
           ...(deps.compose.sendPhotoOriginalSize === undefined
             ? {}
             : { sendPhotoOriginalSize: deps.compose.sendPhotoOriginalSize }),
@@ -654,6 +668,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           outbox: [],
           notSaved: false,
           chips: [],
+          attach: { items: ["photo", "camera"], reason: null },
           ownQueue: 0,
           sendNow: false,
         },
@@ -680,6 +695,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         }),
         notSaved: value.notSaved,
         chips: value.chips,
+        attach: value.attach,
         ownQueue: value.ownQueue,
         sendNow: value.sendNow,
       },
@@ -720,6 +736,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       notSaved: composeState.notSaved,
       photos: composeState.chips.map((chip) => ({
         key: chip.key,
+        ...(chip.state === "refused" ? {} : { kind: chip.kind }),
         state: chip.state,
         ...(chip.name === undefined ? {} : { name: chip.name }),
         ...(chip.state === "refused" ? { detail: chip.detail } : {}),
@@ -1008,6 +1025,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     turnId: string,
     refs: readonly AttachmentRef[],
     photos?: readonly LocalPhoto[],
+    /** The attached PDFs' wire blocks (docs/feat/pdf-read.md D7), when there are any. */
+    documents?: readonly DocumentContent[],
   ): Promise<void> {
     const session = handle;
     if (session === null) {
@@ -1017,12 +1036,32 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     ownControl = control;
     notice = null;
     emit();
+    /** The live row's own labels: the file's name, and a page count only when
+     * THIS client extracted it (`document{text}` — the daemon's count for an
+     * uploaded PDF never travels back on the turn). */
+    const labels = documents === undefined ? undefined : documentLabels(documents);
     const run = untilAccepted(
-      (onAccepted) => session.send(text, control.signal, { turnId, attachments: refs, onAccepted }),
+      (onAccepted) =>
+        session.send(text, control.signal, {
+          turnId,
+          attachments: refs,
+          ...(documents === undefined ? {} : { documents }),
+          onAccepted,
+        }),
       // Folded as LOST by the feed on a throw; what the CALLER does about it is
       // `accepted`'s rejection.
       (events, accepted) =>
-        feed.ownTurn(turnId, events, { text, attachments: refs, photos }, accepted),
+        feed.ownTurn(
+          turnId,
+          events,
+          {
+            text,
+            attachments: refs,
+            photos,
+            ...(labels === undefined ? {} : { documents: labels }),
+          },
+          accepted,
+        ),
     );
     void run.done.then(() => {
       if (ownControl === control) {
@@ -1320,6 +1359,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         return;
       }
       await (source === "library" ? compose.pickLibrary() : compose.pickCamera());
+      emit();
+    },
+    async pickDocument() {
+      await compose?.pickDocument();
       emit();
     },
     async removeChip(key) {

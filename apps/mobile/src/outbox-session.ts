@@ -120,15 +120,24 @@ export function outboxSessionOf(
   return {
     upload: (bytes, meta) => session.attachImage(bytes, meta),
     // Done at the daemon's ack; the turn keeps draining detached (no screen folds it).
-    prompt: (text, turnId, attachments) =>
+    prompt: (text, turnId, attachments, _photos, documents) =>
       untilAccepted(
-        (onAccepted) => session.send(text, undefined, { turnId, attachments, onAccepted }),
+        (onAccepted) =>
+          session.send(text, undefined, {
+            turnId,
+            attachments,
+            ...(documents === undefined || documents.length === 0 ? {} : { documents }),
+            onAccepted,
+          }),
         async (events) => {
           for await (const _event of events) {
             // drain: the daemon's ack is all the driver needs
           }
         },
       ).accepted,
+    // ONE session path (AGENTS §7): the client's own method decides upload vs
+    // laptop-extract from the daemon's capability — nothing is built here.
+    attachDocument: (bytes, meta) => session.attachDocument(bytes, meta),
     steer: (text, id, turnId) => {
       const sessionId = session.sessionId;
       if (sessionId === null) {
@@ -161,6 +170,7 @@ export function unavailableSessionPort(
   return {
     upload: refuse,
     prompt: refuse,
+    attachDocument: refuse,
     steer: refuse,
     facts: () => Promise.resolve({ availability, historyLength: 0, runningTurnId: null }),
   };

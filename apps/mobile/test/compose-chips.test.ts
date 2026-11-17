@@ -8,6 +8,7 @@ import {
   type Chip,
   type Chips,
   addPicks,
+  chipDocumentReady,
   chipFiles,
   chipRefused,
   chipRemoved,
@@ -15,6 +16,7 @@ import {
   chipUploaded,
   counted,
   pickRoom,
+  splitTaken,
   takeChips,
 } from "../src/compose-chips.ts";
 
@@ -59,6 +61,7 @@ describe("a pick becomes chips (F13–F15, F22)", () => {
         { length: CHIP_CAP - 1 },
         (_, i): Chip => ({
           key: `r${i}`,
+          kind: "image",
           state: "uploading",
           file: `f${i}`,
           mimeType: "image/png",
@@ -86,7 +89,16 @@ describe("a pick becomes chips (F13–F15, F22)", () => {
   test("the picker's room is what is left of the five", () => {
     expect(pickRoom([])).toBe(CHIP_CAP);
     expect(
-      pickRoom([{ key: "a", state: "uploading", file: "f", mimeType: "image/png", name: "a.png" }]),
+      pickRoom([
+        {
+          key: "a",
+          kind: "image",
+          state: "uploading",
+          file: "f",
+          mimeType: "image/png",
+          name: "a.png",
+        },
+      ]),
     ).toBe(CHIP_CAP - 1);
     // A refused chip takes no room.
     expect(pickRoom([{ key: "a", state: "refused", detail: "x" }])).toBe(CHIP_CAP);
@@ -136,8 +148,8 @@ describe("a send takes the chips ONCE (D1, F4: a double tap sends one message)",
 
   test("ready chips are taken and cleared in the same call", () => {
     const first = takeChips(uploaded());
-    expect(first.taken.map((chip) => chip.id)).toEqual(["b1", "b2"]);
-    expect(first.taken[0]?.mimeType).toBe("image/jpeg");
+    expect(first.taken.map((chip) => (chip.kind === "image" ? chip.id : ""))).toEqual(["b1", "b2"]);
+    expect(first.taken[0]).toMatchObject({ kind: "image", mimeType: "image/jpeg" });
     expect(first.chips).toEqual([]);
     // The second call has nothing left: the same message cannot go twice.
     expect(takeChips(first.chips).taken).toEqual([]);
@@ -156,5 +168,87 @@ describe("a send takes the chips ONCE (D1, F4: a double tap sends one message)",
   test("a refused chip is dropped on send (it was never going out)", () => {
     const chips = addPicks([], [{ kind: "refused", detail: "nope" }], counter()).chips;
     expect(takeChips(chips).chips).toEqual([]);
+  });
+});
+describe("a PDF is a chip too (docs/feat/pdf-read.md D7)", () => {
+  /** What `attachDocument` answers: the block a prompt names (D6/D7). */
+  const BLOCK = {
+    type: "document",
+    kind: "pdf",
+    name: "report.pdf",
+    source: { type: "ref", id: "a".repeat(64), size: 2048 },
+  } as const;
+  const PDF_PICK = {
+    kind: "document" as const,
+    file: "file:///pdfs/7-1-report.pdf",
+    name: "report.pdf",
+    size: 2048,
+    bytes: new Uint8Array([1, 2, 3]),
+  };
+
+  test("the chip keeps its KIND, so the glyph is not guessed from the extension", () => {
+    // Mutation: drop `kind` from the chip → `undefined` here → red.
+    const { chips } = addPicks([], [PICK], counter());
+    expect(chips[0]).toMatchObject({ kind: "image" });
+    expect(addPicks([], [PDF_PICK], counter()).chips[0]).toMatchObject({
+      kind: "document",
+      name: "report.pdf",
+      size: 2048,
+    });
+  });
+
+  test("a document chip has no mime type (the wire's block names a kind, not a type)", () => {
+    const chip = addPicks([], [PDF_PICK], counter()).chips[0];
+    expect(chip === undefined ? undefined : "mimeType" in chip).toBe(false);
+  });
+
+  test("a PDF counts toward the same five as a photo", () => {
+    // Mutation: count only images → a sixth attachment would be accepted → red.
+    const photos = addPicks(
+      [],
+      Array.from({ length: CHIP_CAP }, () => PICK),
+      counter(),
+    ).chips;
+    expect(counted(photos)).toBe(CHIP_CAP);
+    const { chips, refused } = addPicks(photos, [PDF_PICK], counter());
+    expect(refused).toBe(1);
+    expect(counted(chips)).toBe(CHIP_CAP);
+  });
+
+  test("an unattached document takes no slot on a send; the attached one carries its block", () => {
+    const chips = addPicks([], [PDF_PICK], counter()).chips;
+    expect(takeChips(chips).taken).toEqual([]);
+    const ready = chipDocumentReady(chips, "k1", BLOCK);
+    expect(takeChips(ready).taken).toEqual([
+      {
+        kind: "document",
+        key: "k1",
+        file: "file:///pdfs/7-1-report.pdf",
+        name: "report.pdf",
+        size: 2048,
+        block: BLOCK,
+      },
+    ]);
+  });
+
+  test("a send splits the taken chips back into photos and documents", () => {
+    const ready = chipDocumentReady(addPicks([], [PICK, PDF_PICK], counter()).chips, "k2", BLOCK);
+    const { taken } = takeChips(chipUploaded(ready, "k1", "blob-1", 10));
+    const split = splitTaken(taken);
+    expect(split.photos).toHaveLength(1);
+    expect(split.documents).toEqual([
+      {
+        key: "k2",
+        file: "file:///pdfs/7-1-report.pdf",
+        name: "report.pdf",
+        size: 2048,
+        block: BLOCK,
+      },
+    ]);
+  });
+
+  test("a document chip's testID is unchanged (the Maestro contract)", () => {
+    const chip = addPicks([], [PDF_PICK], counter()).chips[0];
+    expect(chip === undefined ? "" : chipTestId(0, chip)).toBe("chip-0-uploading");
   });
 });
