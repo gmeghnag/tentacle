@@ -960,6 +960,94 @@ badges it, `wakeContext` already fills its context, and `openScheduled` is
 already the one path to the revealed sheet. H4b (the Artifacts entry) is not
 started: `feat/model-artifacts` is not on `main`.
 
+### H4b — Artifacts entry
+
+*— claude-opus-5-5, 2026-11-17*
+
+**Load-bearing check (run FIRST, passed).** feat/model-artifacts IS on `main`:
+`main` = `HEAD` = `10838ee4 Merge branch 'feat/model-artifacts'`, and its doc
+hands the hub exactly two things (`model-artifacts.md:439,443-449`):
+`unseenArtifacts(list, seen)` (`artifact-gallery.ts:99`, "the count the hub
+badges") and the ONE entry `openArtifactGallery(nav, {…, from})`
+(`routes.ts:88`), whose `from` union already includes `"hub"` (`routes.ts:67`).
+The capability was missing: `hubContextOf` hard-coded `unseenArtifacts: 0`
+(`hub-session.ts:75` before), and the screen's opener was typed
+`(from: "session-info" | "card")` (`SessionScreen.tsx:130`, `App.tsx:1285`), so
+no caller could open the gallery `from: "hub"`. No protocol work, no new seam.
+
+**Done, in order, red → green.**
+1. `test/hub-session.test.ts` +5 tests (the H4b describe): no feed / an empty
+   list → 0 and the item unbadged; the count is ARTIFACTS with something new,
+   not versions; the seen record is honoured (gallery opened → 0, a new version
+   → 1, the version itself opened → 0); three unseen → the item first with
+   `{count: 3}` and the button's dot (flow 29's step, as a pure test); no
+   `artifacts` entry → no item (P6). RED first: 16 pass, 3 fail (the count
+   stayed 0).
+2. `src/hub-session.ts`: `hubContextOf` takes an optional
+   `artifacts: {list, seen}` and fills `unseenArtifacts` with the gallery's OWN
+   `unseenArtifacts` — never a second rule, so the hub, the Session-info row and
+   the gallery cannot disagree on "new". `undefined` list → 0. Green: 19/0.
+3. `test/hub-artifacts-wiring.test.ts` (new): `openArtifactGallery` carries
+   `from: "hub"` unchanged; both hand-offs (`SessionScreen.tsx`, `App.tsx`) type
+   the origin as `ArtifactGalleryRoute["from"]`, not a copied union; and a
+   compile-time assignment (`tsc -p apps/mobile` includes tests) that fails while
+   the screen's prop is narrower than the route's union. RED first: 1 pass,
+   1 fail + `TS2322 '"hub"' is not assignable to '"session-info" | "card"'`.
+4. `src/screens/SessionScreen.tsx:132` and `App.tsx:1286`: `onOpenArtifacts`
+   typed `(from: ArtifactGalleryRoute["from"]) => void`. Green: 2/0, tsc clean.
+5. `changelog.d/mobile-hub.added.md`: one clause ("Artifacts carries the count of
+   new artifacts and opens the gallery") in H1's hub fragment, which already
+   names the Artifacts item. No new fragment: nothing is visible until H3's fan
+   ships, so a separate bullet would announce an unreachable feature.
+
+**Mutations — 5/5 killed** (`.tentacle/tmp/mobile-hub/h4b/mutate.ts`: apply one,
+run the two H4b files (+ `tsc -p apps/mobile` for type ones), restore the bytes):
+```
+B1 hubContextOf ignores the artifacts feed (always 0): 18 pass, 3 fail
+B2 the badge counts VERSIONS, not artifacts: 20 pass, 1 fail
+B3 the device's seen record is ignored: 20 pass, 1 fail
+B4 the screen's opener narrowed back to the pre-H4b union: 20 pass, 1 fail · tsc -p apps/mobile: 1 error(s)
+B5 App's hand-off typed as a COPIED literal union: 20 pass, 1 fail · tsc -p apps/mobile: 0 error(s)
+restored (unmutated): 21 pass, 0 fail
+```
+
+**Drift from the Implementation.**
+1. **No `entries.artifacts` and no live context in `SessionScreen`.** Item 11
+   puts the entry "in `SessionScreen.tsx`", but H3 is PARTIAL: there is no
+   `entries` record and no `hubContextOf` call in the screen to add it to (rg:
+   `hubContextOf` has no caller in `src/`). Adding an unused callback would be
+   dead code. H3's hand-off, all already typed and tested:
+   - entry: `artifacts: onOpenArtifacts === undefined ? undefined : () => onOpenArtifacts("hub")`
+     (absent without a router: P6);
+   - context: `hubContextOf({…, artifacts: {list: state.artifacts.list, seen}})`,
+     with `seen = seenFor(ARTIFACT_SEEN.current(), sessionKey(computerId, sessionId))`
+     (`artifact-seen-store.ts:58,63`, `artifact-seen-expo.ts:71`). The screen has
+     no `computerId`/`sessionId` props today, so H3 passes a `() => ArtifactSeen`
+     reader from the session route in `App.tsx` (which has both);
+   - the button: `buttonBadge`/`hubA11yLabel` take the same `ctx.unseenArtifacts`.
+2. **No "…" menu trigger** (unlike H4a's Scheduled wakes): Session info's own
+   Artifacts row and a transcript card are model-artifacts' triggers already.
+
+**Found, not fixed (outside H4b; model-artifacts' wiring).** In the real app,
+Session info's Artifacts row is never drawn: `infoWiring` (`App.tsx:446-519`)
+offers neither `artifacts()` nor `artifactSeen()`, and the controller draws the
+section only when `port.artifacts` exists (`session-info-controller.ts:316-325,
+427-430`). So today the gallery is reachable only from a transcript card. Verify:
+`rg -n "artifactSeen|artifacts:" apps/mobile/App.tsx`. A fix task should wire both
+(the seen reader is the same one H3 needs above).
+
+**Gate.** `bunx tsc --noEmit`, `bunx tsc -p apps/mobile`, `bunx tsc -p apps/relay
+--noEmit`: clean (apps/mobile first showed 6 errors for missing
+`expo-document-picker`/`react-native-webview`/`react-native-svg` in this worktree;
+gone after `bun install --frozen-lockfile`, no lockfile change). `bun run lint`:
+clean (1929 files). `bun test` (full): **13966 pass, 5 skip, 0 fail** (13971 tests
+/ 999 files; the 5 skips are the opt-in set). No schema touched:
+`protocol.json` not regenerated, no `protocol.d/` note.
+
+**Status: H4b DONE** (as far as H3's absence allows: the context and the entry's
+origin are wired and tested; the fan item appears the moment H3 adds the two lines
+above).
+
 ## Review
 
 *(empty — fresh-context review after H3/H4)*

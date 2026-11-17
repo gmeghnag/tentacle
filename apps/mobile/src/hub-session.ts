@@ -10,7 +10,9 @@
  * its bounds and the finger all use it.
  */
 import type { EndReason } from "@tentacle/client";
-import type { ScheduleRow } from "@tentacle/protocol";
+import type { ArtifactMeta, ScheduleRow } from "@tentacle/protocol";
+import { unseenArtifacts } from "./artifact-gallery.ts";
+import type { ArtifactSeen } from "./artifact-seen-store.ts";
 import { FLOAT_SIZE, type FloatBounds, type FloatPosition, place } from "./floating-button.ts";
 import type { HubContext, HubItem } from "./hub-actions.ts";
 import { type Point, fanLayout } from "./hub-fan.ts";
@@ -47,9 +49,12 @@ export function wakeContext(
 }
 
 /**
- * What the screen knows today. Artifacts are H4b's (feat/model-artifacts is not on
- * `main`): zero here, so that item stays absent (P6). Wakes come from the daemon's
- * table (`wakeContext`).
+ * What the screen knows today. Wakes come from the daemon's table (`wakeContext`);
+ * the artifacts badge (H4b) is the gallery's OWN rule (`unseenArtifacts`: artifacts
+ * with a version this device has not seen, never versions), so the hub, the
+ * Session-info row and the gallery can never disagree on "new". No feed (an older
+ * daemon, nothing listed yet) is 0: the item, when its entry exists, shows
+ * unbadged (P6).
  */
 export function hubContextOf(input: {
   readonly link: "up" | "down";
@@ -62,6 +67,11 @@ export function hubContextOf(input: {
     readonly rows: readonly ScheduleRow[] | undefined;
     readonly now: number;
   };
+  /** The session's artifacts and this device's seen record for it (H4b). */
+  readonly artifacts?: {
+    readonly list: readonly ArtifactMeta[] | undefined;
+    readonly seen: ArtifactSeen;
+  };
 }): HubContext {
   const wakes = wakeContext(input.schedules?.rows, input.schedules?.now ?? 0);
   return {
@@ -72,7 +82,10 @@ export function hubContextOf(input: {
     dictation: input.dictation,
     schedules: wakes.schedules,
     nextWakeInMs: wakes.nextWakeInMs,
-    unseenArtifacts: 0,
+    unseenArtifacts:
+      input.artifacts?.list === undefined
+        ? 0
+        : unseenArtifacts(input.artifacts.list, input.artifacts.seen),
   };
 }
 

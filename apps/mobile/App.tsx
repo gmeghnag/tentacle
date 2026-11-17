@@ -141,6 +141,7 @@ import { createPushManager } from "./src/push-manager.ts";
 import type { PushPermission } from "./src/push-registration.ts";
 import { createPushToggleStore } from "./src/push-toggle-store.ts";
 import {
+  type ArtifactGalleryRoute,
   type RootStackParams,
   type SessionRoute as SessionRouteParams,
   initialRoute,
@@ -1282,7 +1283,7 @@ function SessionRoute({
   readonly onOpenDrawer: () => void;
   readonly drawerOpen: boolean;
   /** The artifacts gallery's ONE entry (docs/feat/model-artifacts.md D9). */
-  readonly onOpenArtifacts: (from: "session-info" | "card") => void;
+  readonly onOpenArtifacts: (from: ArtifactGalleryRoute["from"]) => void;
 }): JSX.Element {
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
