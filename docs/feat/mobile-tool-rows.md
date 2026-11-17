@@ -638,3 +638,13 @@ No schema touched, so `protocol.json` is not regenerated and there is no `protoc
 - §7 scope: pure, React-free modules; no protocol, persistence or terminal paths touched. Holds.
 
 **Executor behaviour:** honest. The Execution names its drift and the flaky unrelated CLI failure, and lists mutations M1–M4. It missed the over-extension direction of the tail rule.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* — this round covers only `git diff HEAD~1` (c2182960), which adds one test and no source changes.
+
+**Verdict: PASS.**
+
+- **Finding 1 is fixed.** The new case `the tail extends ONLY the last run` (`apps/mobile/test/tool-steps.test.ts:180`) catches the change. I re-applied the round-1 mutation (drop `run === last` at `tool-steps.ts:158`), and that test now **fails** (1 fail). After reverting, `git status` is clean.
+- **No regressions found.** No `src` file changed. The touched tests pass 75/75. `bun run lint` is clean (1792 files) and `bun run typecheck` is clean.
+- **Still open, as a nit only:** `batchOpen` is redundant.
