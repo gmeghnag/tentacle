@@ -6,9 +6,11 @@
  * Each test names its mutation.
  */
 import { describe, expect, test } from "bun:test";
+import type { DocumentContent } from "@tentacle/protocol";
 import type { Draft } from "../src/drafts.ts";
 import {
   OUTBOX_SCHEMA_VERSION,
+  OUTBOX_SCHEMA_VERSION_DOCUMENTS,
   type OutboxFs,
   createOutboxStore,
   outboxPaths,
@@ -182,15 +184,16 @@ describe("the crash windows", () => {
 
 describe("what it refuses", () => {
   test("an unknown schemaVersion is refused and the file is NOT touched (mutation: overwrite → red)", async () => {
+    const unknown = OUTBOX_SCHEMA_VERSION_DOCUMENTS + 1;
     const newer = JSON.stringify({
-      schemaVersion: OUTBOX_SCHEMA_VERSION + 1,
+      schemaVersion: unknown,
       items: [],
       drafts: [],
       ownIds: [],
     });
     const fs = memoryFs({ [paths.state]: newer });
     const store = createOutboxStore(fs, paths);
-    expect(await store.load()).toEqual({ kind: "refused", version: OUTBOX_SCHEMA_VERSION + 1 });
+    expect(await store.load()).toEqual({ kind: "refused", version: unknown });
     // A write is refused too: a newer build's unsent text is not ours to destroy.
     expect(await store.setItems([item("a")])).toBe(false);
     expect(await store.removeItem("a")).toBe(false);
@@ -251,6 +254,64 @@ describe("what it refuses", () => {
     const fs = memoryFs({ [paths.state]: text });
     const store = createOutboxStore(fs, paths, () => 6);
     expect((await store.load()).kind).toBe("corrupt");
+  });
+
+  test("a file with a DOCUMENT is written as v2, so an older build refuses it instead of dropping the PDF (mutation: always `OUTBOX_SCHEMA_VERSION` → red)", () => {
+    // The whole point of the bump: P6 review item 2. An older build's `isItem`
+    // does not know `documents`, so a v1 file naming one would load and send
+    // the item as text plus photos — the PDF gone, and a PDF-only item going
+    // out as an EMPTY prompt. Saying `2` makes it refuse the file untouched.
+    const withPdf = serializeOutbox({
+      items: [{ ...item("a"), documents: [{ file: "/c/a.pdf", name: "a.pdf" }] }],
+      drafts: [],
+      ownIds: [],
+    });
+    expect(JSON.parse(withPdf).schemaVersion).toBe(OUTBOX_SCHEMA_VERSION_DOCUMENTS);
+    // A file with no PDF stays v1: a downgrade keeps working for everyone it
+    // CAN work for, instead of refusing an outbox it reads perfectly.
+    const plain = serializeOutbox({ items: [item("a")], drafts: [], ownIds: [] });
+    expect(JSON.parse(plain).schemaVersion).toBe(OUTBOX_SCHEMA_VERSION);
+  });
+
+  test("a v2 file loads whole, its blocks intact (mutation: accept v1 only → red)", async () => {
+    const BLOCK: DocumentContent = {
+      type: "document",
+      kind: "pdf",
+      name: "report.pdf",
+      source: { type: "text", text: "page one", pages: 1 },
+    };
+    const items = [
+      { ...item("a"), documents: [{ file: "/c/a.pdf", name: "a.pdf", block: BLOCK }] },
+    ];
+    const fs = memoryFs({ [paths.state]: serializeOutbox({ items, drafts: [], ownIds: [] }) });
+    const loaded = await createOutboxStore(fs, paths).load();
+    expect(loaded.kind).toBe("loaded");
+    if (loaded.kind !== "loaded") return;
+    // The block is what a resume must NOT redo (it names an `attachment/put`
+    // already paid for, or text a pod's daemon awaits): losing it re-uploads.
+    expect(loaded.data.items[0]?.documents).toEqual([
+      { file: "/c/a.pdf", name: "a.pdf", block: BLOCK },
+    ]);
+  });
+
+  test("a v2 file whose stored block is not the wire's shape is corrupt (mutation: `isDocument` → accept anything → red)", async () => {
+    // The block is handed straight to `session/prompt`, so a garbage one would
+    // be refused by the daemon only AFTER the whole prompt was sent.
+    const text = JSON.stringify({
+      schemaVersion: OUTBOX_SCHEMA_VERSION_DOCUMENTS,
+      items: [
+        {
+          ...item("a"),
+          documents: [{ file: "/c/a.pdf", name: "a.pdf", block: { type: "document" } }],
+        },
+      ],
+      drafts: [],
+      ownIds: [],
+    });
+    const fs = memoryFs({ [paths.state]: text });
+    const store = createOutboxStore(fs, paths, () => 8);
+    expect((await store.load()).kind).toBe("corrupt");
+    expect(store.data.items).toEqual([]);
   });
 });
 

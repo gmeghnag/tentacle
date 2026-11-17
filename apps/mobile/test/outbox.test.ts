@@ -8,7 +8,7 @@
  * and never re-minted per attempt).
  */
 import { describe, expect, test } from "bun:test";
-import type { AttachmentRef } from "@tentacle/protocol";
+import type { AttachmentRef, DocumentContent } from "@tentacle/protocol";
 import {
   type Basis,
   type ComposeInput,
@@ -18,12 +18,17 @@ import {
   asSteer,
   createItem,
   decide,
+  documentBlocksOf,
+  documentsOf,
+  pendingDocuments,
   pendingUploads,
   pruneOwnIds,
   refsOf,
   refusalOf,
   restoredOf,
+  reuploaded,
   unchanged,
+  withDocumentBlock,
   withRef,
   withState,
 } from "../src/outbox.ts";
@@ -294,5 +299,59 @@ describe("photos, own ids and the restore", () => {
     expect(restored.photos.map((p) => p.file)).toEqual(["/a"]);
     // An item with photos only (an image-only prompt) restores no text.
     expect(restoredOf([promptItem({ text: "" })]).text).toBe("");
+  });
+});
+
+describe("a prompt's documents (docs/feat/pdf-read.md D7)", () => {
+  const BLOCK: DocumentContent = {
+    type: "document",
+    kind: "pdf",
+    name: "report.pdf",
+    source: { type: "ref", id: "d".repeat(64), size: 99 },
+  };
+  const withPdf = (over: Partial<OutboxItem> = {}): OutboxItem => ({
+    ...promptItem({ text: "read this" }),
+    documents: [{ file: "/c/report.pdf", name: "report.pdf" }],
+    ...over,
+  });
+
+  test("`documentsOf` reads an item composed before D7 as none (no field, not corrupt)", () => {
+    expect(documentsOf(promptItem({ text: "old" }))).toEqual([]);
+    expect(documentBlocksOf(promptItem({ text: "old" }))).toEqual([]);
+  });
+
+  test("a document is pending until its block is recorded, then the prompt names it", () => {
+    const item = withPdf();
+    expect(pendingDocuments(item)).toEqual([0]);
+    expect(documentBlocksOf(item)).toEqual([]); // nothing to send yet
+    const attached = withDocumentBlock(item, 0, BLOCK);
+    expect(pendingDocuments(attached)).toEqual([]);
+    expect(documentBlocksOf(attached)).toEqual([BLOCK]);
+    // The copy's own fields survive (a resume re-reads the file by path).
+    expect(documentsOf(attached)[0]).toEqual({
+      file: "/c/report.pdf",
+      name: "report.pdf",
+      block: BLOCK,
+    });
+  });
+
+  test("`reuploaded` DROPS the stale block with the photo refs (mutation: keep it → red)", () => {
+    // The block may name a `document{ref}` blob the daemon no longer holds —
+    // exactly the `not_uploaded` case. Keeping it would make the one re-upload
+    // a no-op (`pendingDocuments` finds nothing) and the item refused for good,
+    // with the PDF never re-put.
+    const item = withPdf({
+      documents: [{ file: "/c/report.pdf", name: "report.pdf", block: BLOCK }],
+    });
+    const again = reuploaded(item);
+    expect(pendingDocuments(again)).toEqual([0]);
+    // The FILE and name stay: they are the local copy `attachDocument` re-reads.
+    expect(documentsOf(again)).toEqual([{ file: "/c/report.pdf", name: "report.pdf" }]);
+    expect(again.reuploaded).toBe(true);
+  });
+
+  test("`reuploaded` on an item with no documents adds no `documents` field", () => {
+    const again = reuploaded(promptItem({ text: "images only" }));
+    expect("documents" in again).toBe(false);
   });
 });

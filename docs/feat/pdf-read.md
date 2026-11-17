@@ -1655,7 +1655,10 @@ already covers the feature; this is a test/doc gap).
    and `splitTaken`; `CHIP_CAP` counts both. **`outbox.ts`**: `OutboxItem.documents?` →
    `{file, name, block?}`, with `documentsOf`/`pendingDocuments`/`withDocumentBlock`/
    `documentBlocksOf`. **`outbox-store.ts`**: `isDocument` guard (the wire's
-   `DocumentContentSchema`), `schemaVersion` stays 1. **`outbox-driver.ts`**:
+   `DocumentContentSchema`), and `schemaVersion` stays `1` for a file with no documents but
+   becomes `2` (`OUTBOX_SCHEMA_VERSION_DOCUMENTS`) for one that has them — amended in fix
+   round 1 (P6 review item 2): a v1 file naming a document is half-loaded by an older build,
+   which drops the PDF and sends a PDF-only item as an empty prompt. **`outbox-driver.ts`**:
    `OutboxSession.attachDocument` + `prompt(..., documents?)`, and `attachDocuments` runs AFTER
    the photos, persisting each block before the next file. **`outbox-session.ts`**: the port
    wires `attachDocument` → `session.attachDocument`; `unavailableSessionPort` refuses.
@@ -2237,3 +2240,70 @@ swapping files (`overwrite:false` + seq).
 mutation table left out the driver's own session port.
 
 *— claude-opus-5-5, 2026-11-17* (fresh context; same model family as the P4/P5 reviewers, different from the P6 executor)
+
+### Fix round 1 — P6 review (two MEDIUM: the unpinned driver port, the half-loaded older build) · executed by `claude-opus-5-5`, 2026-11-17
+
+Both findings were test/logic gaps, not broken paths: nothing in this round
+changed a happy-path behaviour except the outbox file's version.
+
+**#1 (MEDIUM) — the driver's session port is now pinned.** New file
+`apps/mobile/test/outbox-session.test.ts` (3 tests) drives `outboxSessionOf`'s
+`prompt` against a fake `RemoteSession` that records what `send` was given:
+an item's documents reach `session.send`; an item with none passes NO
+`documents` key at all (not `[]`, so a pre-D7 frame is byte-identical); and the
+call settles at `onAccepted` (a turn running on does not hold the item).
+Red-first: with `documents.length === 0` mutated to `>= 0` in
+`outbox-session.ts:127` the first test fails on `documents` (`undefined` vs the
+block) — the reviewer's exact mutation, which previously survived all 2340
+`apps/mobile` tests.
+
+The finding's two smaller unpinned gaps are also pinned, in
+`apps/mobile/test/outbox.test.ts` (`a prompt's documents`):
+- `reuploaded()` drops a stale `document{ref}` block with the photo refs (a
+  kept block makes the one re-upload a no-op — `pendingDocuments` finds nothing
+  — so the item is refused for good and the PDF is never re-put). Mutation:
+  `{...document}` instead of `{file, name}` → red.
+- plus the neighbours a future edit would break first: `documentsOf` on an
+  item composed before D7, `pendingDocuments` → `withDocumentBlock` →
+  `documentBlocksOf`, and `reuploaded` adding no `documents` field when there
+  is nothing to clear.
+- `apps/mobile/test/outbox-store.test.ts`: a stored block that is not the
+  wire's shape is corrupt. Mutation: `DocumentContentSchema.safeParse(...).success
+  || true` in `isDocument` → red.
+
+**#2 (MEDIUM) — the outbox file's version now follows its content.**
+`OUTBOX_SCHEMA_VERSION` stays `1`; a new `OUTBOX_SCHEMA_VERSION_DOCUMENTS = 2`
+(`outbox-store.ts:34`) is written by `serializeOutbox` when any item carries a
+document, and `parseFile` accepts both (`READABLE_VERSIONS`). The asymmetry is
+the point: a file with no PDFs stays v1, so a downgrade keeps working for every
+outbox it CAN read; a file with one says v2, so an older build answers
+`refused` and leaves it untouched instead of loading the item, dropping the PDF
+silently and sending a PDF-only item as an empty prompt (AGENTS §7). Tests: a
+document file serialises as v2 while a plain one stays v1 (mutation: always
+`OUTBOX_SCHEMA_VERSION` → red), and a v2 file loads whole with its blocks
+intact.
+
+**Deliberately NOT done** (a rejected shape, recorded so it is not re-proposed):
+re-deriving the version on load and refusing a mismatch (`v1` with documents ⇒
+corrupt). It buys nothing a reader needs — this build reads such a file whole —
+and costs a `corrupt` verdict on a person's pending message, which sets it
+aside. The version is a WRITER's promise, checked on the older side that cannot
+read it; that is where the refusal belongs.
+
+**Drift from the Implementation:** its Design bullet said "`schemaVersion`
+stays 1". Amended in place (Files §4) rather than left stale — it is the one
+line the plan got wrong, and the P6 review is why.
+
+**Gate:** `bunx tsc --noEmit` exit 0; `bunx tsc -p apps/mobile` exit 0;
+`bun run lint` 1793 files, clean (0 errors, 0 warnings — the baseline). The
+touched files: 48 pass, 0 fail (`outbox` + `outbox-store` + `outbox-session`),
+and the wider 5-file outbox set 103 pass, 0 fail. Full `bun test`: 13060 pass,
+5 skip, **1 fail** —
+`packages/daemon/test/session-log-store.test.ts:815` (fork T4,
+`forkTemps` 1 vs 2). Not mine: my diff is `apps/mobile` + this doc only, that
+file passes in isolation twice and as a whole directory (1316 pass, 0 fail), and
+it reads a clock-free `Bun.sleep(60)` against an async write — a load-dependent
+flake under a 931-file run. Unverified beyond that (it did not reproduce), and
+worth a `docs/library-bugs.md` entry rather than a silent re-run.
+
+*— claude-opus-5-5, 2026-11-17*
