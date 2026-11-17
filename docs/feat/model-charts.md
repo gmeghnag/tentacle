@@ -2616,3 +2616,14 @@ audio is not).
 - **Reviewer = Claude (claude-opus-5-5), the executor DeepSeek:** different model families.
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Round 2
+
+**Verdict: APPROVE** — both round-1 MEDIUMs fixed, no new HIGH/MEDIUM. Scope: `git diff HEAD~1`.
+
+- **M1 (stale read) fixed:** `usePanels.ts` `claimArtifactsPreview` bumps a per-preview claim on every open/close; `setArtifactsPreview` checks panel gen AND claim. Reviewer repro `c8-race.test.ts`: enter → esc → late read now leaves `artifacts · 1` (tree). Mutation (drop the claim check) → 2 fail (after-esc, stale-over-newer); reverted.
+- **M2 (false loading error) fixed:** `panels/artifacts.ts:45` routes `bytes === undefined` to `chartPreviewLoadingView` ("reading this chart…"). Mutation (back to `bytes ?? ""`) → 2 fail; reverted. `git status` clean after both.
+- **Gate:** `app-panels-structure` + `artifacts-panel` 37 pass / 0 fail; lint clean (1937 files); root `tsc` clean; mobile `tsc` still has only the pre-existing missing-module errors (`pdf-source.ts`, `HtmlViewer.tsx`, `PdfViewer.tsx`), none in this diff.
+- **Regression check:** the NO_ARTIFACT_OPENER path claims without writing (harmless: it invalidates any older read); mouse clicks while a preview is open remain ungated (low, unchanged).
+
+*— claude-opus-5-5, 2026-11-17*
