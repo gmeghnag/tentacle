@@ -218,6 +218,10 @@ above is the red evidence for the render ones).
 4. **Head content:** hide the id `sc-N`, and on the phone hide `fire 1`. *Rec: yes* — `◷ scheduled · every 10m · fire 5` / `◷ scheduled · at 15:54`; the id stays in the model text and in Session info.
 5. **`at` time format:** `at 15:54` when it is today, `at 17 Nov 15:54` otherwise, with no time zone conversion (the daemon's wall clock as written). *Rec: yes.*
 
+### Owner decisions (2026-11-17)
+- Phone, recurring fire ≥ 2: the head shows the FIRE time instead of the count — `Scheduled · every 10m · 16:14`, not `Scheduled · every 10m · fire 2`. The planner must source that time from data the log already carries for the fired turn (e.g. the turn marker / entry timestamp), never from parsing the model text; if no such field exists, say so in the plan and propose the smallest addition. Same local short format as Q5.
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-17*
+
 ## Execution
 
 ## Review
