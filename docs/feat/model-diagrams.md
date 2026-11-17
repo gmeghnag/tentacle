@@ -1591,3 +1591,27 @@ repo's existing `noControlCharactersInRegex` justification comment).
 Recorded honestly: the routing table (`:426`) names `deepseek` for D5, so the
 executing model and the plan's assignment differ. The doc's table is the
 orchestrator's to correct; this line states what actually ran.
+
+## Review — slice D5
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff main...HEAD` (`169ae810`), the four phone modules and their tests.
+
+1. **MEDIUM: a call that mermaid refused draws again after the session is reopened** (`apps/mobile/src/diagram-row.ts:75` with `apps/mobile/src/transcript-history.ts:156`). The history projection rebuilds every non-denied result as `status: "ok"` ("any other error flag is not stored"), so `drawsAsDiagram` cannot see the daemon's mermaid refusal. That refusal is the D4 Finding 1 class, which D4's Execution (`:1396`) handed to D5 as a constraint. Repro (`.tentacle/tmp/model-diagrams/rev-d5/hist.ts`, a `diagram` call whose result is `isError: true`, sent through `historyRows`) prints `history status: ok` and `phone draws refused call after reopen: true`. In D6 the row would then show the caption and the source, and the refusal's reason would be gone. The module header (`:8-9`) promises the opposite. Possible fixes: decide from the row's `output` (the success result line), or persist the error flag. The TUI has the same gap at `packages/tui/src/resume.ts:114`. That is outside D5's diff; carry it to TODO.
+2. **MEDIUM: a running call draws on the phone, but the header says it does not, and the TUI refuses it** (`diagram-row.ts:75` vs its own header `:8`, "A call that is still running … keep the generic tool row"). The TUI returns `undefined` for `running`/`queued` (`render-lines.ts:807`, "only a settled call draws"). Here the test pins the opposite (`diagram-row.test.ts:55-59`). So D6 would send a source to the renderer before the daemon's mermaid has ruled on it. A refused call then flickers from the drawing to the error row. Pick one rule before D6 builds on it: either refuse `running`/`queued` (TUI parity), or keep the chart mirror and correct the header plus the plan's T5.1 wording.
+
+**Gate (mine):** the four D5 test files: **40 pass, 0 fail**. `bun run lint`: 2011 files checked, no fixes. `bun run typecheck`: 0 `error TS`. I did not re-run the full `bun test`; the executor reports 14635 pass, 5 skip, 0 fail.
+
+**Mutations (mine; each a temporary edit, reverted, `git status` clean afterwards):**
+- R1, LRU `get` no longer moves the entry to the young end: KILLED ("drops the least recently used").
+- R2, the bridge's closing-`</svg>` check dropped: KILLED ("not one closed <svg> element").
+
+The executor's M1–M14 cover the rest. I did not re-run them.
+
+**Attacks that found nothing:**
+- Bridge: `__proto__` or extra keys are rejected by `hasExactly`. The byte cap is in bytes. `0`, `NaN`, `±Infinity` and string dimensions are dropped. A fresh object is returned.
+- Cache path: `..` runs are folded, and the key is content-addressed, so a title never becomes a filename.
+- Theme: the light `#000000` is the app's own label token. The test allows it in light mode only, and the dark scheme has no pure black.
+
+**Executor:** the drift notes are honest. The signature (`claude-opus-5-5`) does not match the commit subject (`exec (deepseek)`), as the executor itself flagged; the orchestrator should reconcile the two. My review is the same model family as the stated executor, with a fresh context only.
+
+*— claude-opus-5-5, 2026-11-17*
