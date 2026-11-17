@@ -7,6 +7,7 @@ import {
   artifactsTreeGroups,
   artifactsView,
   chartPreviewErrorView,
+  chartPreviewLoadingView,
   chartPreviewView,
 } from "../artifacts-panel.ts";
 import type { LayerStep } from "../keys/contract.ts";
@@ -29,7 +30,8 @@ const isChart = (meta: ArtifactMeta | undefined): meta is ArtifactMeta =>
  * Rows: the chart preview when one is open (docs/feat/model-charts.md C8), else
  * the artifact tree, else the honest placeholder. A preview that was ASKED for
  * and whose read FAILED says so — it never falls back to the tree, which would
- * make the key look as if nothing happened.
+ * make the key look as if nothing happened — and one still IN FLIGHT says it is
+ * reading, which is a different thing from a spec that did not validate.
  */
 function view(panel: ArtifactsPanel, at: PanelAt): PanelView {
   const preview = panel.preview;
@@ -37,7 +39,12 @@ function view(panel: ArtifactsPanel, at: PanelAt): PanelView {
     if (preview.error !== undefined) {
       return chartPreviewErrorView(preview.error, at.width);
     }
-    return chartPreviewView({ bytes: preview.bytes ?? "" }, at.width, at.maxBody);
+    // No bytes YET is a read in flight (the empty preview `enter` writes), not
+    // an empty spec: saying "did not validate" here was a false error (fix
+    // round 1, M2).
+    return preview.bytes === undefined
+      ? chartPreviewLoadingView(at.width)
+      : chartPreviewView({ bytes: preview.bytes }, at.width, at.maxBody);
   }
   return artifactsView(panel.data, panel.tree, panel.now, at.width, at.maxBody);
 }

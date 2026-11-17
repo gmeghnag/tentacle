@@ -2297,6 +2297,80 @@ snapshots, so this was collateral from an earlier `--update-snapshots` run.
 
 **C8: DONE** on the code and its tests; the pixels are the owner's look.
 
+### Fix round 1
+
+*(C8's two MEDIUMs from Review — C8. Both FIXED, red before green, each
+mutation-checked.)*
+
+**FINDING 1 (MEDIUM, stale-read race) — FIXED.** The chart preview read was guarded by
+the PANEL generation alone (`App.tsx`'s `gen`, compared in
+`usePanels.setArtifactsPreview`), and neither `esc` (`setArtifactsPreview(gen, null)`)
+nor a second `enter` bumps it: a read answering after the person left the preview
+re-opened it, and a stale answer painted its bytes over a newer preview.
+
+- Fix: a **per-preview claim** kept beside the panel generation. `usePanels.ts` gains
+  `claimArtifactsPreview(): number` (a `previewClaimRef` bump, `:127`, `:185-189`) and
+  `setArtifactsPreview(startedGen, startedClaim, preview)` now compares BOTH
+  (`:191-197`). `App.previewArtifact` claims on **every** open and **every** close —
+  taken before the `artifact === null` early return, so `esc` always invalidates the read
+  in flight — and passes that claim to all three writes (`App.tsx:1977-2005`).
+- Why both gates and not the claim alone: the panel generation still answers "another
+  panel opened / this one closed", which the claim never sees (it counts previews only).
+  Each gates its own question.
+- **RED** (`packages/tui/test/app-panels-structure.test.tsx`, describe `C8`), both on the
+  deferred `readArtifact` the reviewer asked for:
+  1. *"a read answering AFTER esc never re-opens the preview"* — enter → esc (tree
+     shown) → resolve. RED on `expect(after).toContain("Chart · 400 B")`: the frame came
+     back as `artifact · chart` with the chart drawn.
+  2. *"a stale answer never paints over a NEWER preview"* — enter (read 1) → esc → enter
+     (read 2) → read 2 answers, then read 1. RED on
+     `expect(frame).toContain("━━ deals")`: the frame showed read 1's `Headcount`.
+- **Mutation** (claim comparison dropped at `usePanels.ts:193`, restored from
+  `.tentacle/tmp/model-charts/fixr1-usePanels.bak`): **2 fail / 9 pass** — test 1's
+  frame is the re-opened chart, test 2's the stale `Headcount`. Green after the restore.
+
+**FINDING 2 (MEDIUM, false error while loading) — FIXED.** `enter` writes the empty
+preview `{}` and the view drew it as `chartPreviewView({ bytes: "" })`, so a read still
+in flight claimed *"this build can't draw this chart (its spec did not validate)"*.
+
+- Fix: `panels/artifacts.ts:44-47` branches on `preview.bytes === undefined` → the new
+  pure `chartPreviewLoadingView(width)` (`artifacts-panel.ts:257-264`), which says
+  `reading this chart…` and keeps the same `esc/q` hint. A RESOLVED empty answer still
+  goes through `chartPreviewView({ bytes: "" })` and still says "can't draw": the two
+  states stay distinct, which is the whole point.
+- **RED** (`packages/tui/test/artifacts-panel.test.ts`): *"a read still IN FLIGHT says
+  so — never that the spec did not validate"* — `panelView({ ...ONE(), preview: {} })` →
+  RED on `expect(text.toLowerCase()).toContain("reading")`, received exactly the false
+  "can't draw" line. The same test pins the empty-but-answered contrast (green on both
+  sides on purpose: it is the branch's non-vacuity check, not the bug). The M1 App test
+  also asserts the loading copy at the frame level (`reading this chart`,
+  `not.toContain("can't draw")`) while the read is out.
+- **Mutations**: (a) the `bytes === undefined` branch reverted to
+  `preview.bytes ?? ""` → the pure test RED (`reading` missing) **and** the App test RED
+  (frame-level `reading this chart` missing); (b) restored from
+  `.tentacle/tmp/model-charts/fixr1-artifacts.bak`.
+
+**Gate.** `bunx tsc --noEmit` clean. `bun run typecheck`: root clean, `tsc -p apps/mobile`
+still fails on the 5 pre-existing missing-module errors (`expo-document-picker`,
+`react-native-webview` — the C8 executor's and the reviewer's recorded baseline), none in
+this round's files. `bun run lint` clean (1937 files, 0 warnings — §6's baseline). Narrow:
+`artifacts-panel` + `app-panels-structure` + `app-artifacts` + `keys-execute` + `app`
+→ **236 pass / 0 fail** (763 expects). Full suite **14064 pass / 5 skip / 0 fail**
+(108427 expects, 452 s); the 5 skips are §6's three opt-in groups.
+
+**Drift from the review's suggested fix:** the reviewer offered "a per-preview token *or*
+bump on every preview open/close". Taken literally as one counter, a bump on close still
+needs a value claimed at the close to compare against — which is the token. So the claim
+is taken at every open and every close, and the panel generation is kept alongside it
+rather than replaced.
+
+**Not touched (deliberately):** the reviewer's LOW items — mouse clicks/wheel on the tree
+while a preview is open still move the invisible cursor, and the `presentChart`
+`canonicalChartJson` mutation survives its fixture. Neither was in this round's scope;
+both are recorded in the C8 Review.
+
+*— claude-opus-5-5, 2026-11-17*
+
 ## Review
 *(empty — mandatory fresh-context review after C8)*
 

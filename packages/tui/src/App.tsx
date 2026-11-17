@@ -1330,6 +1330,7 @@ export function App({
     setSessionsState,
     setSchedulesState,
     setSchedulesData,
+    claimArtifactsPreview,
     setArtifactsPreview,
     deleteSchedule: deleteScheduleInPanel,
     touchPanel,
@@ -1974,8 +1975,12 @@ export function App({
     // handing a temp file to an OS browser. `null` is the preview's esc/q: it
     // closes the preview, not the panel (the tree is where they came from).
     previewArtifact: (artifact) => {
+      // Every OPEN and every CLOSE claims the slot first, so a read that answers
+      // after the person left it (esc) — or after a second `enter` replaced it —
+      // is stale, even though the panel generation is unchanged (fix round 1, M1).
+      const claim = claimArtifactsPreview();
       if (artifact === null) {
-        setArtifactsPreview(panelGenRef.current, null);
+        setArtifactsPreview(panelGenRef.current, claim, null);
         return;
       }
       const read = sessionRef.current?.readArtifact;
@@ -1988,13 +1993,13 @@ export function App({
       const gen = panelGenRef.current;
       // The preview opens EMPTY and fills on the answer, so `esc` works at once
       // and a slow read is visible rather than a frozen tree.
-      setArtifactsPreview(gen, {});
+      setArtifactsPreview(gen, claim, {});
       void read.call(sessionRef.current, artifact).then(
         (bytes) => {
-          setArtifactsPreview(gen, { bytes: new TextDecoder().decode(bytes) });
+          setArtifactsPreview(gen, claim, { bytes: new TextDecoder().decode(bytes) });
         },
         (error: unknown) => {
-          setArtifactsPreview(gen, { error: artifactOpenError(artifact, error) });
+          setArtifactsPreview(gen, claim, { error: artifactOpenError(artifact, error) });
         },
       );
     },

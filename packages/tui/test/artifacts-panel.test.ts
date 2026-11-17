@@ -272,6 +272,23 @@ describe("C8: a chart artifact opens as an EXPANDED chart in the panel", () => {
     expect(panelView(previewing(null), 100, 20).rows.some((r) => r.kind === "head")).toBe(true);
   });
 
+  test("a read still IN FLIGHT says so — never that the spec did not validate", () => {
+    // `bytes === undefined` is "asking the daemon", not "0 bytes of a spec":
+    // the empty preview is what `enter` writes before the answer arrives.
+    const view = panelView({ ...ONE(), preview: {} }, 100, 20);
+    const text = view.rows.map((r) => r.text).join("\n");
+    expect(text.toLowerCase()).toContain("reading");
+    expect(text).not.toContain("can't draw");
+    expect(view.hint).toContain("esc");
+    // An EMPTY answer (a 0-byte artifact) is a resolved read, and still says
+    // its spec did not validate — the two states are not the same thing.
+    expect(
+      chartPreviewView({ bytes: "" }, 100, 20)
+        .rows.map((r) => r.text)
+        .join("\n"),
+    ).toContain("can't draw");
+  });
+
   test("a preview read that FAILED has its own words (never a silent tree)", () => {
     const view = panelView(previewing(null, "artifact evicted"), 100, 20);
     expect(view.rows.map((r) => r.text).join("\n")).toContain("artifact evicted");

@@ -253,6 +253,16 @@ export function chartPreviewView(
   return { title, rows: previewRows(shown.join("\n")), hint: PREVIEW_HINT, start: 0 };
 }
 
+/** A read in FLIGHT: the pixels, honestly, and never a verdict on the spec. */
+export function chartPreviewLoadingView(width: number): PanelView {
+  return {
+    title: "artifact · chart",
+    rows: previewRows(fit("  reading this chart…", width)),
+    hint: PREVIEW_HINT,
+    start: 0,
+  };
+}
+
 /** A read that failed: the reason, and the way back (never a silent tree). */
 export function chartPreviewErrorView(error: string, width: number): PanelView {
   return {
