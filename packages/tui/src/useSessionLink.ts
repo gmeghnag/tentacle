@@ -73,9 +73,9 @@ import {
 import type { ContextOpen } from "./status-view.ts";
 import { subagentNotifyNotice, userToSubagentNotice } from "./subagent-notify.ts";
 import {
-  FOREIGN_COMPACTED_NOTICE,
   type SessionActivity,
   closedNotice,
+  compactionSeparatorOf,
   historyAction,
   nextStep,
 } from "./turn-feed.ts";
@@ -157,6 +157,8 @@ export interface SessionLinkHost {
   readonly forgetArtifacts: () => void;
   /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
   readonly pushNotice: (text: string, level?: "warn") => void;
+  /** A compaction's grey rule (S3); `pushNotice` cannot draw one. */
+  readonly pushSeparator: (text: string) => void;
   readonly restoreInput: (text: string, why: string) => void;
   readonly setCompacting: (on: boolean) => void;
 
@@ -257,6 +259,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
     forgetArtifacts,
     joinCards,
     pushNotice,
+    pushSeparator,
     restoreInput,
     setCompacting,
     skillsSync,
@@ -351,8 +354,11 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
         if (activity.reason === null) {
           ownClearsRef.current = 0;
         }
-        if (action === "notice") {
-          pushNotice(FOREIGN_COMPACTED_NOTICE);
+        if (action === "separator") {
+          // Another device compacted (owner Q6: the SAME rule as my own, never a
+          // device-blaming notice). The figures come from the new history's
+          // summary message: a legacy one gives `compacted` alone.
+          pushSeparator(compactionSeparatorOf(activity.messages));
         } else if (action === "replace" || action === "append") {
           const apply = action === "append" ? appendHistory : resetHistory;
           // `joinCards` inside the compute: the repo's cards are attached BEFORE
@@ -408,6 +414,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       ownClearsRef,
       ownCompactionsRef,
       pushNotice,
+      pushSeparator,
       runQuit,
       sendNowRef,
       sessionRef,

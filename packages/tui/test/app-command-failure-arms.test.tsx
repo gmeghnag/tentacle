@@ -95,7 +95,9 @@ describe("S2 command failure arms (commands/<name>.ts)", () => {
       },
     );
     await u.line("/compact");
-    expect(u.frame()).toContain("Compacting the conversation");
+    // S3: the start is the SLOT's line (one row, framed), not a transcript push.
+    expect(u.frame()).toContain("Compacting…");
+    expect(u.frame()).not.toContain("Compacting the conversation");
     await u.line("/compact");
     expect(u.frame()).toContain("A compaction is already running.");
     expect(calls).toBe(1);
@@ -108,17 +110,22 @@ describe("S2 command failure arms (commands/<name>.ts)", () => {
     // `startCompaction()` pushed it again (it was copied out of the old `case`
     // body together with the machinery), so the line appeared twice where main
     // shows it once. `toContain` cannot see a doubled line, so this counts it.
-    // Mutations: put the push back in `commands/compact.ts` → 2 (red); drop the
-    // one in `startCompaction` → 0 (red). Only the machinery announces the
-    // start it owns: it is the one place that knows the compaction really began
-    // (its early return on a gone session must stay silent).
+    // S3 moved the announcement out of the transcript entirely (it is the
+    // slot's `Compacting…` row now, docs/feat/harness-notices.md S3): the
+    // count is still 1 — a stale `pushNoticeItem` in either half would make the
+    // transcript carry a second, non-slot line — and the transcript must carry
+    // no compaction line at all. Mutations: put a `pushNoticeItem("_…Compacting…")`
+    // back in `commands/compact.ts` or `startCompaction` → the
+    // `not.toContain("Compacting the conversation")` arm goes red; drop the
+    // slot's fallback → the count goes to 0 (red).
     const u = await mount(
       {},
       { compact: () => new Promise<{ before: number; after: number }>(() => {}) },
     );
     await u.line("/compact");
-    const count = u.frame().split("Compacting the conversation").length - 1;
-    expect(count).toBe(1);
+    const frame = u.frame();
+    expect(frame.split("Compacting…").length - 1).toBe(1);
+    expect(frame).not.toContain("Compacting the conversation");
     u.app.unmount();
   });
 

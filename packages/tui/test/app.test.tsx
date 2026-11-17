@@ -541,7 +541,13 @@ describe("App", () => {
     stdin.write("\r");
     await delay(80);
     expect(compacted).toBe(1);
-    expect(lastFrame() ?? "").toContain("8 → 2 messages");
+    // S3: success writes no transcript LINE — a separator rule at the
+    // compaction point, and `Compacted ✓` in the slot for ~3 s. An older
+    // daemon returns no sizes, so the rule has no figures (never a fake 0).
+    const frame = lastFrame() ?? "";
+    expect(frame).toMatch(/^── compacted /m);
+    expect(frame).not.toContain("Context compacted");
+    expect(frame).toContain("Compacted ✓");
     unmount();
   });
 

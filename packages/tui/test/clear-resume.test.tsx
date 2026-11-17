@@ -268,9 +268,15 @@ test("M2 (App): /compact on a resumed session nothing has opened really compacts
   await type(app.stdin, "/compact");
   await delay(800);
   const frame = strip(app.lastFrame());
-  // It really compacted the seeded 6-message chat (never the hollow 0 → 0).
-  expect(frame).toContain("Context compacted — 6 → 2 messages");
-  expect(frame).not.toContain("0 → 0");
+  // S3: the success line became a separator rule carrying the daemon's sizes,
+  // so the hollow `{0, 0}` shows up as a rule with no figures (`compacted`
+  // alone) — this one has them, and they are not zero.
+  expect(frame).toMatch(/^── compacted · ctx /m);
+  expect(frame).not.toContain("ctx 0 →");
+  expect(frame).not.toContain("Context compacted");
+  expect(frame).toContain("Compacted ✓");
+  const separators = (f: string) => f.split("\n── compacted").length - 1;
+  expect(separators(frame)).toBe(1);
 
   // The model's next request carries the compacted history, not the old chat.
   await type(app.stdin, "next");
@@ -288,7 +294,9 @@ test("M2 (App): /compact on a resumed session nothing has opened really compacts
   }
   await otherSession.compact?.();
   await delay(400);
-  expect(strip(app.lastFrame())).toContain("compacted on another device");
+  // Its compaction appends its OWN separator rule (S3, one wording whatever
+  // device compacted): ours is still there, so the count goes 1 → 2.
+  expect(separators(strip(app.lastFrame()))).toBe(2);
 
   app.unmount();
   await r.runtime.dispose();

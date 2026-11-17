@@ -742,6 +742,135 @@ tool row and the final text — for both `length` and `cut`.
 are the same ones S2's run listed). No `protocol.d/` note and no `changelog.d/` change: this round fixes display
 behaviour inside the task's own scope.
 
+### S3 — DONE
+
+*— claude-opus-5-5 (executor), 2026-11-17*
+
+**Load-bearing check (first, on the pre-S3 tree)** — `.tentacle/tmp/harness-notices/s3-check.ts`,
+GREEN as a capability check: every line says the capability the slice adds is MISSING, so the
+plan's premises hold. Its 8 lines:
+```
+1. spinner-slot.ts exists: false
+2. settled(ok).notice: "_Context compacted — 97 → 2 messages." separator: false
+3. historyAction(compact, foreign): "notice" | FOREIGN_COMPACTED_NOTICE: "compacted on another device"
+4. messagesToItems(summary, compacted=true): [{"kind":"user","text":"Summary of the earlier conversation (compacted to save context):\n\n- goal: fix the test"}]
+4. messagesToItems(summary, compacted=false): [{"kind":"user","text":"Summary of the earlier conversation (compacted to save context):\n\n- goal: fix the test"}]
+5. app-layout reserves the slot row as `(st.running || loading ? 1 : 0)` (a second rule): true | AppView picks the slot inline: true
+6. separatorLines(text, width) only: true
+7. onCompactionSettled call sites: 1 | `_Compacting the conversation…_` pushes: 1 | messagesToItems' user branch is one place: 1
+8. transcript rows today: ["◇ Compacting the conversation…","  Context compacted — 97 → 2 messages."]
+```
+So: no slot module; a success is a transcript NOTICE; a foreign compaction has its own wording and
+its own notice path; a compacted summary projects to a `›` user row; the slot's row is reserved by
+a SECOND rule (the drift the slice removes); `separatorLines` cannot carry a body; and the two
+compaction lines are one push each in one place, so removing them removes them everywhere.
+
+**As built, in dependency order:**
+1. `packages/tui/src/spinner-slot.ts` (NEW) — `COMPACTED_SHOWN_MS` (3000), `SlotFacts`, `SlotView`,
+   `slotView(facts)`: loading > running > `compactingSince` > `compactedAt` inside the EXCLUSIVE
+   window. One decision, two consumers (`app-layout`'s row budget, `AppView`'s paint)
+   (`spinner-slot.test.ts`, 7).
+2. `packages/tui/src/send-now.ts` — `CompactionResult`'s `ok` branch gains the optional
+   `fromTokens`/`toTokens`/`toExact`; private `compactionSeparatorText(result)` delegating to core;
+   `onCompactionSettled` now returns `notice: string | null` + optional `separator?: string`
+   (success → `{notice: null, separator}`; cancel → notice, no level; failure → notice + `warn`)
+   (`compaction-separator.test.ts`, 5).
+3. `packages/tui/src/turn-feed.ts` — `historyAction` answers `"replace"|"append"|"separator"|"none"`
+   (a foreign compaction → `"separator"`); `FOREIGN_COMPACTED_NOTICE` DELETED; new
+   `compactionSeparatorOf(messages)` reads the figures off the new history's summary
+   (`foreign-compaction-separator.test.ts`, 5).
+4. `packages/tui/src/render-lines.ts` — `separatorLines(text, width, body?, expanded = false)`:
+   no body → the rule; collapsed → the rule + the `Ctrl+O` hint; expanded → the rule then each body
+   line two spaces in, in `theme.subtle`. `itemLinesAt`'s notice branch passes `item.body` and
+   `opts.expandAll === true`.
+5. `packages/tui/src/resume.ts` — the user branch tries `restartPromptOf`, then `compactionOf` →
+   `compactionItem(m)` (`{kind:"notice", text: compactionSeparatorText(view), separator: true}`,
+   `body` = the brief beyond `COMPACTION_SUMMARY_HEAD`, omitted when empty), then `m.note`, then the
+   plain user row (`compaction-resume.test.ts`, 5).
+6. `packages/tui/src/state.ts` — `appendNotice`'s opts gain `separator?: true` and `body?: string`.
+7. `packages/tui/src/useTurnDriver.ts` — `startCompaction` no longer pushes
+   `_Compacting the conversation…_`; its `settled` passes the sizes through, pushes the notice ONLY
+   when non-null, and on `separator !== undefined` calls `pushSeparator` + `markCompacted`; `run`
+   calls `clearCompacted()` after the `refuse` branch.
+8. `packages/tui/src/app-layout.ts` — `FrameInput` gains `compactingSince`, `compactedAt`, `now`;
+   `runningRows` starts from `slotView`'s one answer (`slot === null ? 0 : 1`), and `slot` is part of
+   the returned layout.
+9. `packages/tui/src/AppView.tsx` — the inline `loading`/`running` block becomes a paint of `slot`
+   (`loading` → `loadingLabel`, `compacted` → `Compacted ✓` in `subtle`, else `<Thinking since
+   label={Thinking…|Working…|Compacting…}>`).
+10. `packages/tui/src/App.tsx` — `compactingSince`/`compactedAt` state; `setCompacting` keeps the
+    first beside the latch and clears the second; `pushSeparator`; `markCompacted`/`clearCompacted`
+    on a REF timer; the layout gets the two figures + `now: Date.now()`.
+11. `packages/tui/src/useSessionLink.ts` — the foreign-compaction branch is `action ===
+    "separator"` → `pushSeparator(compactionSeparatorOf(activity.messages))`.
+12. `packages/tui/test/compaction-slot-frame.test.tsx` (NEW, 4) — the App-seam frames: running →
+    `Compacting…` with no transcript line; success → `── compacted · ctx 182k → 9k` + `Compacted ✓`;
+    the frame HEIGHT constant across idle → running → compacted → gone (fake clock); and a prompt
+    during the 3 s → `Thinking…` at once.
+
+**Drift from Implementation (and why):**
+- **`historyAction`'s third value is `"separator"`, not the plan's `notice`-shaped wording.** The
+  union is the shared truth between `turn-feed.ts` and `useSessionLink.ts`, and the value is what the
+  link DOES; naming it `separator` keeps the "no notice for a compaction" rule visible at the switch.
+- **`pushSeparator` / `markCompacted` / `clearCompacted` are HOST members**, not inline App closures:
+  the settle lives in `useTurnDriver` and the foreign path in `useSessionLink`, so the App must hand
+  both hooks the same three (the §7 "logic in a pure module, components render" split — a hook cannot
+  reach App state any other way).
+- **The 3 s timer is a REF (`compactedTimerRef`), not an effect.** App's effect list is pinned at 22
+  in their order (`app-structural-order`), and this needs no render-time subscription. `markCompacted`
+  disarms any older timer first, so a stale fire cannot blank a fresh figure.
+- **`compactedAt` is cleared by `setCompacting`, not by a new prompt path.** Goal 4's "a prompt
+  before then replaces it at once" needed no edit: `slotView`'s priority already puts a running turn
+  above `Compacted ✓` (`spinner-slot.test.ts`'s priority case, and the frame test). `setCompacting`
+  clears it so a NEW compaction never paints beside the previous `✓`.
+- **`slot` is not an `AppViewModel` field.** It rides the frame layout (it is the layout's row budget),
+  so `AppView` destructures it from `frame`; passing it twice would be the second rule again.
+- **Existing assertions WIDENED, none deleted** (§9): `send-now.test.ts` (old notice shape →
+  `{notice: null, separator}` + a sized case), `app-command-failure-arms.test.tsx` (the `/compact`
+  count is now the SLOT's `Compacting…` row, plus `not.toContain("Compacting the conversation")`),
+  `app.test.tsx`'s `/compact` frame (`8 → 2` → the rule + `Compacted ✓`), `send-now-app.test.tsx`
+  T-D2, `clear-resume.test.tsx` M2 + the foreign case, `foreign-turns.test.tsx` T-C11 (rule counts
+  1 → 2 → 0 instead of notice counts), and `queued-row.ts` (`Thinking|Working` → `+Compacting`, the
+  slot is the row above the input whatever it says). `harness-block-frame.test.tsx`'s
+  `pushNoticeItem(s, "_Compacting the conversation…_")` stays as a plain unit of the state function
+  — it never mirrored the App (that coordination was the bug), and the frame tests above own it now.
+
+**RED first (§9):**
+- The migrations were shown red on the pre-S3 code before the change: `compaction-separator.test.ts`
+  on `notice: "_Context compacted — 97 → 2 messages._"`, `compaction-resume.test.ts` on
+  `{kind: "user"}`, `spinner-slot.test.ts` as a missing module, and `app-layout.test.ts` on the frame
+  height. The BEHAVIOURAL App frames (slice 12) had no pre-code run: they are proven non-vacuously by
+  the mutations below instead (M3 reddens the height case, M5 the success case).
+
+**Mutations (each run, shown red, then reverted — files restored from
+`.tentacle/tmp/harness-notices/bak/` and re-verified identical, `git diff --stat` unchanged):**
+| Mutation | Red test(s) |
+|---|---|
+| M1 `slotView`: `<=` at the 3 s boundary | spinner-slot: 1 fail (the 2999/3000 case) |
+| M2 `slotView`: `compactingSince` before `running` | spinner-slot: 1 fail (priority) |
+| M3 `app-layout`: `((st.running \|\| loading) && slot !== null ? 1 : 0)` for the slot row | compaction-slot-frame: 1 fail (heights 1 vs 2) |
+| M4 `historyAction`: `"none"` for a foreign compaction | foreign-compaction-separator: 1 fail |
+| M5 `onCompactionSettled`: the old notice returned on success | compaction-separator: 2 fail |
+| M6 `resume.ts`: the `compactionOf` branch skipped | compaction-resume: 3 fail |
+| M7 `separatorLines`: `body` ignored | compaction-resume: 1 fail (the expanded brief) |
+
+**Tests added:** `spinner-slot.test.ts` (7), `compaction-separator.test.ts` (5),
+`foreign-compaction-separator.test.ts` (5), `compaction-resume.test.ts` (5),
+`compaction-slot-frame.test.tsx` (4); re-pinned `turn-feed`, `app-layout`, `send-now`, `app`,
+`send-now-app`, `clear-resume`, `foreign-turns`, `app-command-failure-arms`, `queued-row`.
+
+**Gate:**
+- `bunx tsc --noEmit` clean; `bunx tsc -p apps/mobile` clean; `bunx tsc -p apps/relay` clean.
+- `bun run lint` clean — `Checked 2018 files`, 0 errors 0 warnings (matches the §6 baseline).
+- full `bun test` (once, final tree): **14671 tests, 14666 pass, 0 fail, 5 skip** across 1053 files —
+  the three known opt-ins (live-k8s, live-docker, the real-socket keepalive) plus the two pre-existing
+  skips; none added by S3.
+- No `protocol.d/` note (no wire change: the sizes are S1's, already shipped);
+  `packages/protocol/schema/protocol.json` untouched. `changelog.d/harness-notices.changed.md`: checked,
+  and the pre-S3 claim in the brief was WRONG — S2's text says nothing about the slot or the separator
+  (`grep -c "slot\|separator"` = 0), so S3 added a second `changed` bullet to the SAME fragment (no
+  second file, same category) describing the slot and the rule.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17* (S1 only; fresh context, but the SAME model family as the S1 executor ⇒ shared blind spots possible)

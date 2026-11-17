@@ -5,6 +5,7 @@
  * `App.tsx` only executes these decisions.
  */
 import type { ChatMessage } from "@tentacle/core";
+import { compactionOf, compactionSeparatorText } from "@tentacle/core";
 import { SendNowErrorCode, errorCode } from "./send-now.ts";
 import type { DisplayItem, SessionEvent } from "./state.ts";
 
@@ -63,18 +64,21 @@ export function nextStep(input: {
 }
 
 /**
- * A `history` activity: a compaction keeps the transcript (owner QR1), with a
- * notice unless it was mine (`ownCompaction`: a `/compact` of this TUI whose
- * history has not arrived yet — it says "Context compacted" itself). A context
- * reset keeps it too and APPENDS the new history (its separator and restart
- * prompt come with it: context-reset decision 9). Any other history (eager
- * open, a resync after a gap) replaces the transcript: the daemon's history is
- * the truth, and this TUI may have missed turns.
+ * A `history` activity: a compaction keeps the transcript (owner QR1), and the
+ * compaction point is marked with a grey separator rule (docs/feat/harness-notices.md
+ * S3) unless it was mine (`ownCompaction`: a `/compact` of this TUI whose history
+ * has not arrived yet — its settle already wrote the rule, so a second one would
+ * double it). Owner Q6 (override): another device's compaction reads EXACTLY as
+ * an own one — no "on another device" wording. A context reset keeps the
+ * transcript too and APPENDS the new history (its separator and restart prompt
+ * come with it: context-reset decision 9). Any other history (eager open, a
+ * resync after a gap) replaces the transcript: the daemon's history is the
+ * truth, and this TUI may have missed turns.
  */
 export function historyAction(input: {
   readonly reason: "compact" | "context_reset" | "clear" | null;
   readonly ownCompaction: boolean;
-}): "replace" | "append" | "notice" | "none" {
+}): "replace" | "append" | "separator" | "none" {
   // A `/clear` (own or another device's) is a new, empty chat: the daemon's
   // history replaces the transcript.
   if (input.reason === null || input.reason === "clear") {
@@ -83,11 +87,23 @@ export function historyAction(input: {
   if (input.reason === "context_reset") {
     return "append";
   }
-  return input.ownCompaction ? "none" : "notice";
+  return input.ownCompaction ? "none" : "separator";
 }
 
-export const FOREIGN_COMPACTED_NOTICE = "_the conversation was compacted on another device_";
-
+/**
+ * The separator's text for a compaction that was NOT mine, read off the history
+ * the daemon just sent: its summary message carries the figures (S1's
+ * `compacted` field), and a legacy head gives `compacted` alone. Always the one
+ * wording (`compactionSeparatorText`, shared with my own compaction's settle and
+ * with mobile).
+ */
+export function compactionSeparatorOf(messages: readonly ChatMessage[]): string {
+  const summary = messages.find((m) => m.role === "user" && compactionOf(m) !== null);
+  if (summary === undefined) {
+    return compactionSeparatorText({});
+  }
+  return compactionSeparatorText(compactionOf(summary) ?? {});
+}
 /**
  * The session ended elsewhere: what happened, and that the next prompt starts
  * a fresh session (the App swaps to one; docs/feat/connect-sessions.md). A

@@ -293,6 +293,16 @@ export interface TurnHost {
   readonly ownCompactionsRef: MutableRefObject<number>;
   /** Set the compaction flag: the latch and the state the frame renders together. */
   readonly setCompacting: (on: boolean) => void;
+  /**
+   * A compaction's grey separator rule at the transcript's end
+   * (docs/feat/harness-notices.md S3): the App appends `{kind:"notice",
+   * separator: true, text}` — never a harness line, so it takes no glyph.
+   */
+  readonly pushSeparator: (text: string) => void;
+  /** The slot's `Compacted ✓` for 3 s (S3): the App owns the figure and its timer. */
+  readonly markCompacted: () => void;
+  /** A new turn replaced the slot: a lingering `Compacted ✓` must not come back. */
+  readonly clearCompacted: () => void;
 
   // --- the input line and the prompt history (`submit` writes them)
   readonly field: LineEditor;
@@ -423,6 +433,9 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     compactingRef,
     ownCompactionsRef,
     setCompacting,
+    pushSeparator,
+    markCompacted,
+    clearCompacted,
     field,
     historyRef,
     histIndexRef,
@@ -886,6 +899,9 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         pushNotice(COMPACTING_NO_TURN);
         return;
       }
+      // A turn replaces the slot at once: a lingering `Compacted ✓` must not
+      // reappear after this turn ends (docs/feat/harness-notices.md S3).
+      clearCompacted();
       // OD6: a hop's wake is a REAL prompt (it carries the hop line, and it is saved
       // as conversation) that shows NO user bubble — the dim row below says why a
       // turn started by itself. It is not a continuation: a continuation takes no
@@ -971,6 +987,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     },
     [
       abortRef,
+      clearCompacted,
       compactingRef,
       flushNow,
       lastHadImagesRef,
@@ -1166,7 +1183,6 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     if (!session) {
       return;
     }
-    pushNotice("_Compacting the conversation…_");
     setCompacting(true);
     compactionOwnedRef.current = false;
     // Whether THIS handler raised its own-compaction count: only then may
@@ -1190,7 +1206,18 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         sendNowOwns: compactionOwnedRef.current,
         turnRunning: stateRef.current.running,
       });
-      pushNotice(out.notice, out.level);
+      // The transcript says nothing while it runs or on success
+      // (docs/feat/harness-notices.md S3, owner decision 3): the slot says
+      // `Compacted ✓` and one grey rule marks the compaction point, which
+      // survives `--resume` (a replay builds the same rule from the history).
+      // A failure and a cancel keep their harness line.
+      if (out.notice !== null) {
+        pushNotice(out.notice, out.level);
+      }
+      if (out.separator !== undefined) {
+        pushSeparator(out.separator);
+        markCompacted();
+      }
       if (out.send !== null) {
         setRows(() => []);
         wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
@@ -1219,7 +1246,16 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         armed = true;
         void session.compact?.().then(
           (r) => {
-            settled({ ok: true, before: r.before, after: r.after });
+            settled({
+              ok: true,
+              before: r.before,
+              after: r.after,
+              // The sizes the daemon measured (S1): absent on an older daemon,
+              // and the separator then reads `compacted` with no figures.
+              ...(r.fromTokens === undefined ? {} : { fromTokens: r.fromTokens }),
+              ...(r.toTokens === undefined ? {} : { toTokens: r.toTokens }),
+              ...(r.toExact === true ? { toExact: true as const } : {}),
+            });
             // The history shrank: the open figure is stale until a turn measures.
             askContext(session);
           },
@@ -1230,8 +1266,10 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     );
   }, [
     askContext,
+    markCompacted,
     ownCompactionsRef,
     pushNotice,
+    pushSeparator,
     restoreInput,
     rowsRef,
     run,

@@ -898,10 +898,21 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
 }
 
 /** A full-width grey rule with `text` in it: `── text ─────…`. */
-function separatorLines(text: string, width: number): string[] {
+function separatorLines(text: string, width: number, body?: string, expanded = false): string[] {
   const head = `── ${text} `;
   const rest = Math.max(2, width - stringWidth(head));
-  return [theme.subtle(`${head}${"─".repeat(rest)}`)];
+  const rule = theme.subtle(`${head}${"─".repeat(rest)}`);
+  // `body` (docs/feat/harness-notices.md S3.4): what the rule stands for, shown
+  // only when expanded (Ctrl+O) — a resumed compaction's brief, which used to be
+  // a `›` user row carrying the whole thing. Hung two spaces under the rule, the
+  // same indent a harness line's continuation uses; `itemRows`' `expandMatters`
+  // already keys on `body`, so both slots are cached.
+  if (body === undefined || body === "") {
+    return [rule];
+  }
+  return expanded
+    ? [rule, ...body.split("\n").map((l) => `  ${theme.subtle(l)}`)]
+    : [`${rule} ${theme.subtle(EXPAND_HINT)}`];
 }
 
 /** The harness glyphs: info `◇`, warn `▲` (docs/feat/harness-notices.md S2). */
@@ -996,7 +1007,12 @@ export function itemLinesAt(item: DisplayItem, opts: RenderOptions, glyph: boole
       return toolLines(item, opts);
     case "notice":
       return item.separator
-        ? separatorLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH))
+        ? separatorLines(
+            item.text,
+            Math.floor(opts.width ?? DEFAULT_WIDTH),
+            item.body,
+            opts.expandAll === true,
+          )
         : noticeLines(
             item.text,
             opts.expandAll === true,
