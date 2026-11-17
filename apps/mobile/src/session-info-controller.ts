@@ -11,6 +11,8 @@
  * section, so a slow or refused one never blanks the others.
  */
 import type {
+  ArtifactListResult,
+  ArtifactMeta,
   McpServerStatus,
   ScheduleDeleteResult,
   ScheduleRow,
@@ -22,6 +24,7 @@ import type {
 import { JsonRpcErrorCode } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import { type ErrorShape, errorShape } from "./app-log.ts";
+import { type ArtifactSeen, NOTHING_SEEN } from "./artifact-seen-store.ts";
 import {
   type CapabilityKind,
   type CapabilityOp,
@@ -117,6 +120,17 @@ export interface InfoPort {
    * drawn (a build without the feature).
    */
   readonly offersSchedules?: boolean;
+  /**
+   * The session's artifacts (`session/handle.listArtifacts`, docs/feat/
+   * model-artifacts.md D9). Absent: the port offers no artifacts pull at all, and
+   * no section is drawn — never an empty one, which would read as "no artifacts".
+   */
+  artifacts?(): Promise<ArtifactListResult>;
+  /**
+   * What this device has already shown for the session (the gallery's seen
+   * record): the row's `· N new`. Absent: nothing is new (a build without it).
+   */
+  artifactSeen?(): ArtifactSeen;
   mcpStatus(): Promise<readonly McpServerStatus[]>;
   sessionList(): Promise<SessionListResult>;
   /** The open handle, or `null` (no attach answered yet). */
@@ -134,7 +148,7 @@ export interface InfoPort {
 }
 
 /** Which pull a failure came from. */
-export type InfoSection = "mcp" | "entry" | "skills" | "context" | "schedules";
+export type InfoSection = "mcp" | "entry" | "skills" | "context" | "schedules" | "artifacts";
 
 export interface SessionInfoState {
   readonly view: SessionInfoView;
@@ -237,6 +251,11 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
   let skills: Pull<SessionSkillsResult> = { state: "loading" };
   let context: Pull<SessionContextResult> = { state: "loading" };
   let entry: Pull<SessionListResult["sessions"][number] | null> = { state: "loading" };
+  /**
+   * The session's artifacts (docs/feat/model-artifacts.md D9). `null`: the port
+   * offers no pull, so the section is not drawn at all.
+   */
+  let artifactsPull: Pull<readonly ArtifactMeta[]> | null = port.artifacts === undefined ? null : { state: "loading" };
   let link: "up" | "down" = "up";
   let autoAcceptError: string | null = null;
   /**
@@ -293,6 +312,16 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
         changedBy,
         error: capsError,
       },
+      // No feed offered by this wiring at all: no artifacts section either.
+      ...(artifactsPull === null
+        ? {}
+        : {
+            artifacts: {
+              pull: artifactsPull,
+              seen: port.artifactSeen?.() ?? NOTHING_SEEN,
+              now: port.now(),
+            },
+          }),
       // No feed offered by this wiring at all: the section is not drawn.
       ...(feedAvailable ? { schedules: { rows: scheduleRows, error: schedulesError } } : {}),
       now: port.now(),
@@ -394,6 +423,12 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
     entry = { state: "loading" };
     skills = handle === null ? notOpen<SessionSkillsResult>() : { state: "loading" };
     context = handle === null ? notOpen<SessionContextResult>() : { state: "loading" };
+    artifactsPull =
+      port.artifacts === undefined
+        ? null
+        : handle === null
+          ? notOpen<readonly ArtifactMeta[]>()
+          : { state: "loading" };
     emit();
 
     /**
@@ -420,8 +455,7 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
         apply(value);
         linkFrom(value);
         emit();
-      };
-    const paintMcp = paint<{ readonly servers: readonly McpServerStatus[] }>((value) => {
+      };    const paintMcp = paint<{ readonly servers: readonly McpServerStatus[] }>((value) => {
       mcp = value;
     });
     const paintEntry = paint<SessionListResult["sessions"][number] | null>((value) => {
@@ -433,7 +467,9 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
     const paintContext = paint<SessionContextResult>((value) => {
       context = value;
     });
-
+    const paintArtifacts = paint<readonly ArtifactMeta[]>((value) => {
+      artifactsPull = value;
+    });
     await Promise.all([
       pull(async () => ({ servers: await port.mcpStatus() }), reportFor("mcp")).then(paintMcp),
       pull(async () => {
@@ -448,6 +484,23 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
         ? Promise.resolve(notOpen<SessionContextResult>())
         : pull(() => handle.context(), reportFor("context"))
       ).then(paintContext),
+      (port.artifacts === undefined
+        ? Promise.resolve(null)
+        : handle === null
+          ? Promise.resolve<Pull<readonly ArtifactMeta[]> | null>(notOpen<readonly ArtifactMeta[]>())
+          : pull<ArtifactListResult>(() => (port.artifacts as () => Promise<ArtifactListResult>)(), reportFor("artifacts")).then(
+              // The pull's magnitude is the ANSWER (`ArtifactListResult`); the
+              // section reads the versions alone, so it is unwrapped here, once.
+              (value): Pull<readonly ArtifactMeta[]> =>
+                value.state === "ready"
+                  ? { state: "ready", value: value.value.artifacts }
+                  : value,
+            )
+      ).then((value) => {
+        if (value !== null) {
+          paintArtifacts(value);
+        }
+      }),
     ]);
   }
 

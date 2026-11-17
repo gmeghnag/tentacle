@@ -16,6 +16,8 @@
 import type { RemoteSession, SessionEvent } from "@tentacle/client";
 import type { PermissionBroker, PermissionRequester } from "@tentacle/core";
 import type {
+  ArtifactListResult,
+  ArtifactMeta,
   AttachmentRef,
   JobOutputResult,
   JobRow,
@@ -26,6 +28,15 @@ import type {
 import { DomainErrorCode } from "@tentacle/transport";
 import { RpcError } from "@tentacle/transport";
 import { type ActivityMemory, emptyMemory, markOpened, onSubagents } from "./activity-memory.ts";
+import type { ArtifactFeed } from "./artifact-feed.ts";
+import {
+  EMPTY_JOIN,
+  type ArtifactJoin,
+  joinRows,
+  phaseOfError,
+  withList,
+  withPhase,
+} from "./artifact-join.ts";
 import type { Compose, ComposeHandle, PhotoPort } from "./compose-controller.ts";
 import { createCompose } from "./compose-controller.ts";
 import {
@@ -172,6 +183,21 @@ export interface SendableHandle extends SessionHandle, ActivityHandle {
   context?(): Promise<SessionContextResult>;
   /** Rename it (`session/rename`, the TUI's `/rename` path). */
   rename?(title: string): Promise<string>;
+  /**
+   * The artifacts presented in this session (`RemoteSession.listArtifacts`,
+   * docs/feat/model-artifacts.md D9): what puts a card under a resumed
+   * transcript's `present` row and fills the gallery. Absent on a fake handle —
+   * the screen then reads `unsupported`, exactly like an older daemon.
+   */
+  listArtifacts?(): Promise<ArtifactListResult>;
+  /**
+   * One version's verified bytes (`RemoteSession.readArtifact`): the card's
+   * thumbnail and the viewer's file. Optional for the same reason.
+   */
+  readArtifact?(
+    meta: ArtifactMeta,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<Uint8Array>;
 }
 
 /**
@@ -219,6 +245,12 @@ export interface SessionScreenState {
    * until the re-attach settles, so the gesture never looks ignored.
    */
   readonly refreshing: boolean;
+  /**
+   * The session's artifacts (docs/feat/model-artifacts.md D9): the list the
+   * gallery reads, the per-call join its rows carry, and the phase a screen says
+   * when it cannot have them (an older daemon, a dropped link).
+   */
+  readonly artifacts: ArtifactJoin;
 }
 
 /**
@@ -306,6 +338,13 @@ export interface SessionScreenDeps {
    * are the handle's), and the screen is built first.
    */
   readonly info?: (handle: () => SendableHandle | null) => InfoPort;
+  /**
+   * The artifacts feed this screen PUBLISHES on (docs/feat/model-artifacts.md D9):
+   * the gallery screen holds no handle of its own (a second `RemoteSession` of
+   * one id steals this screen's stream), so it reads what this one learned.
+   * Absent: the join still reaches the rows and the sheet, nothing is published.
+   */
+  readonly artifacts?: { readonly feed: ArtifactFeed };
 }
 
 export interface SessionScreenController {
@@ -340,6 +379,12 @@ export interface SessionScreenController {
   closeInfo(): void;
   /** Pull-to-refresh, and a `Retry` row (and the port's link `up`, its own). */
   refreshInfo(): Promise<void>;
+  /**
+   * Re-read `artifact/list` (docs/feat/model-artifacts.md D9). Single-flight: a
+   * gallery mount, a refresh request and a landed list at the same moment cost
+   * ONE call. Resolves when it settled (never rejects).
+   */
+  refreshArtifacts(): Promise<void>;
   /** The auto-accept switch (Owner Q3, F11). */
   setAutoAccept(on: boolean): Promise<void>;
   /** The switch's value NOW (the session's shared link: a flip elsewhere is here). */
@@ -435,6 +480,15 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   /** One attach at a time (a `Retry`/`Reopen` during one is a no-op tap). */
   let attaching = false;
   let transcript: State = initialState;
+  /**
+   * The session's artifacts (docs/feat/model-artifacts.md D9): the daemon's list,
+   * the per-call join, and the phase that says why there is none. `loading` until
+   * the first answer — never `ready` with an empty list, which would claim a
+   * session has no artifacts before anyone looked.
+   */
+  let join: ArtifactJoin = EMPTY_JOIN;
+  /** The `artifact/list` call in flight: one at a time (a gallery mount + a resync). */
+  let joinPending: Promise<void> | null = null;
   let draft = "";
   /** Presses that sent the field (`SessionScreenState.sends`). */
   let sends = 0;
@@ -515,7 +569,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   const feed = createSessionFeed({
     state: () => transcript,
     put: (next) => {
-      transcript = next;
+      // A REPLACED history rebuilds every row from `ChatMessage`s, which carry no
+      // tool details: the cards this screen already knows are joined back on HERE,
+      // the one place every folded state passes, so a resync never loses them.
+      transcript = joinedRows(next);
       emit();
     },
     setForeign: (turn) => {
@@ -755,6 +812,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       sends,
       activity,
       refreshing,
+      artifacts: join,
     };
   }
 
@@ -833,6 +891,84 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   }
 
   const listeners = new Set<(state: SessionScreenState) => void>();
+
+  /**
+   * The transcript a fold produced, with every card this screen knows attached.
+   * A REPLACE (a resync, a `/clear`, a `history_reset`) rebuilds rows from
+   * `ChatMessage`s, which carry no tool details, so without this a session's
+   * cards vanish the moment the link resyncs (the TUI's `joinKnownArtifacts`,
+   * docs S6a review finding 2). A row that already carries one is left alone —
+   * the live result's is the present call's own answer — and a no-op is the SAME
+   * state object, so it cannot re-render.
+   */
+  function joinedRows(next: State): State {
+    if (join.byCall.size === 0) {
+      return next;
+    }
+    const rows = joinRows(next.rows, join.byCall);
+    return rows === next.rows ? next : { ...next, rows };
+  }
+
+  /** Publish what this screen knows: the gallery screen reads it (it has no handle). */
+  function publishJoin(): void {
+    deps.artifacts?.feed.publish({ list: join.list, phase: join.phase });
+  }
+
+  /**
+   * Re-read `artifact/list` (docs/feat/model-artifacts.md D9). Single-flight: a
+   * gallery mount, a refresh request and a landed list can collide, and one
+   * answer serves all three. A failure is a PHASE, never a throw — the screen
+   * says "needs a newer tentacle" or "offline" and keeps the rows it had.
+   */
+  function refreshArtifacts(): Promise<void> {
+    if (joinPending !== null) {
+      return joinPending;
+    }
+    const session = handle;
+    const listed = session?.listArtifacts?.bind(session);
+    if (listed === undefined) {
+      // An older daemon (no `artifact/list`) or a handle that offers none: no
+      // call to make, and retrying could never help.
+      join = withPhase(join, "unsupported");
+      publishJoin();
+      emit();
+      return Promise.resolve();
+    }
+    const run = (async () => {
+      try {
+        const result = await listed();
+        if (disposed) {
+          return;
+        }
+        join = withList(join, result.artifacts);
+        // The cards reach the rows through the ONE path that rebuilds them.
+        transcript = joinedRows(transcript);
+      } catch (error) {
+        if (disposed) {
+          return;
+        }
+        join = withPhase(join, phaseOfError(error));
+      } finally {
+        joinPending = null;
+      }
+      publishJoin();
+      emit();
+    })();
+    joinPending = run;
+    return run;
+  }
+
+  /**
+   * The gallery asks for fresh bytes when it mounts or is pulled: the owner of
+   * the handle answers (the gallery cannot — a second session of one id steals
+   * this screen's stream).
+   */
+  const unwatchRefresh =
+    deps.artifacts === undefined
+      ? undefined
+      : deps.artifacts.feed.onRefresh(() => {
+          void refreshArtifacts();
+        });
 
   function emit(): void {
     if (disposed) {
@@ -921,6 +1057,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     if (info !== null) {
       void info.loadContext().catch(() => {});
     }
+    // The cards of a resumed transcript (docs/feat/model-artifacts.md D9): the
+    // history that landed has no tool details, so the daemon's list is the only
+    // source. Asked at every attach — a live turn's card arrives by itself.
+    void refreshArtifacts();
     // Asks reach the person from now on. Set AFTER the attach, so a replayed ask
     // is queued by the broker until the sheet is up and then delivered in order
     // (F1) — never to a half-built screen.
@@ -1144,6 +1284,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     async refreshInfo() {
       await info?.refresh();
       emit();
+    },
+    async refreshArtifacts() {
+      await refreshArtifacts();
     },
     async setAutoAccept(on) {
       await info?.setAutoAccept(on);
@@ -1409,6 +1552,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       disposed = true;
       listeners.clear();
       unwatchInfo();
+      unwatchRefresh?.();
       unmount.abort();
       compose?.stop();
       info?.close();

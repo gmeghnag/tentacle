@@ -14,6 +14,7 @@
  * another section's (F2, F3, F4).
  */
 import type {
+  ArtifactMeta,
   McpServerStatus,
   ScheduleRow,
   SessionCapabilitiesWire,
@@ -21,6 +22,8 @@ import type {
   SessionListEntry,
   SessionSkillsResult,
 } from "@tentacle/protocol";
+import type { ArtifactSeen } from "./artifact-seen-store.ts";
+import { unseenArtifacts } from "./artifact-gallery.ts";
 import type { ChatStatus } from "./chat-header.ts";
 import { sanitizeDisplay } from "./display-text.ts";
 import { keyedScheduleRows, scheduleMetaText, scheduleTitle } from "./schedule-view.ts";
@@ -83,10 +86,15 @@ export interface InfoFacts {
    * Absent: no switch is drawn at all (a port that offers none).
    */
   readonly capabilities?: CapabilitySwitches;
+  /**
+   * The session's artifacts (docs/feat/model-artifacts.md D9): its own pull, the
+   * seen record and a clock. Absent: the section is not drawn at all (a sheet
+   * built without the pull, like a build that has no artifacts).
+   */
+  readonly artifacts?: ArtifactFacts;
 }
 
-/** Which kind of thing a switch hides from the model. */
-export type CapabilityKind = "mcp" | "skill";
+/** Which kind of thing a switch hides from the model. */export type CapabilityKind = "mcp" | "skill";
 
 /** One `session/set_capability` this phone sent and has not had answered yet. */
 export interface CapabilityOp {
@@ -146,7 +154,20 @@ export interface RowSwitch {
   readonly accessibilityLabel: string;
 }
 
-export type SectionId = "model" | "session" | "schedules" | "mcp" | "skills";
+/**
+ * The artifacts section's facts (docs/feat/model-artifacts.md D9): the pull's own
+ * state, what this device has already seen, and the clock the seen rule reads.
+ * One bundle, so the section's phases are decided in one place.
+ */
+export interface ArtifactFacts {
+  /** Every version `artifact/list` answered, oldest first. */
+  readonly pull: Pull<readonly ArtifactMeta[]>;
+  readonly seen: ArtifactSeen;
+  /** The clock: display only (`unseenArtifacts` compares daemon stamps to it). */
+  readonly now: number;
+}
+
+export type SectionId = "model" | "session" | "artifacts" | "schedules" | "mcp" | "skills";
 
 export type SectionPhase =
   | "loading"
@@ -200,6 +221,11 @@ export interface InfoRow {
    * daemon) — a control that cannot send is worse than no control.
    */
   readonly delete?: RowDelete;
+  /**
+   * A tap OPENS another screen (docs/feat/model-artifacts.md D9): this row is a
+   * way in, never a value — the sheet calls the route and closes itself.
+   */
+  readonly opens?: "artifacts";
 }
 
 /** The trailing Delete of one row (the schedule section's own control). */
@@ -661,6 +687,85 @@ function sessionSection(facts: InfoFacts): InfoSection {
 }
 
 /**
+ * The ARTIFACTS section (docs/feat/model-artifacts.md D9): ONE row — `3 artifacts
+ * · 1 new ›` — that opens the gallery, and its own pull, so an older daemon's
+ * `MethodNotFound` reads "needs a newer tentacle on <computer>" instead of taking
+ * the sheet down (F2's rule).
+ *
+ * `artifacts` absent in `facts` means the sheet was built without the pull at all
+ * (a port that offers none): the section is not drawn, never faked.
+ */
+export function artifactsSection(facts: InfoFacts): InfoSection | null {
+  const feed = facts.artifacts;
+  if (feed === undefined) {
+    return null;
+  }
+  const title = "Artifacts";
+  if (facts.phase !== "open") {
+    return {
+      id: "artifacts",
+      title,
+      phase: "not-open",
+      rows: [],
+      empty: { title: "Open the session to see its artifacts" },
+    };
+  }
+  if (feed.pull.state === "loading") {
+    return { id: "artifacts", title, phase: "loading", rows: [] };
+  }
+  if (feed.pull.state === "error") {
+    const kind = feed.pull.kind;
+    return {
+      id: "artifacts",
+      title,
+      phase: kind === "unsupported" ? "unsupported" : kind,
+      rows: [],
+      empty: {
+        title:
+          kind === "unsupported"
+            ? errorWords("unsupported", sanitizeDisplay(facts.computerName))
+            : kind === "offline"
+              ? "Offline"
+              : "Couldn't load",
+      },
+      // An older daemon can never answer, so a retry would be a lie (F2's rule).
+      ...(kind === "error" ? { retry: true } : {}),
+    };
+  }
+  const list = feed.pull.value;
+  const count = new Set(list.map((meta) => meta.artifactId)).size;
+  if (count === 0) {
+    return {
+      id: "artifacts",
+      title,
+      phase: "empty",
+      rows: [],
+      empty: { title: "No artifacts yet", footnote: "Ask the agent to present a file" },
+    };
+  }
+  // ARTIFACTS, not versions: three new versions of one artifact is one thing to
+  // look at (the hub badge's own rule).
+  const unseen = unseenArtifacts(list, feed.seen);
+  const artifacts = `${count} ${count === 1 ? "artifact" : "artifacts"}`;
+  return {
+    id: "artifacts",
+    title,
+    phase: "ready",
+    rows: [
+      {
+        title,
+        key: "artifacts",
+        value: unseen === 0 ? artifacts : `${artifacts} · ${unseen} new`,
+        opens: "artifacts",
+        accessibilityLabel: "Open the artifacts gallery",
+      },
+    ],
+    // A link that drops dims a list this device already has: it never empties it.
+    dim: facts.link === "down",
+  };
+}
+
+/**
  * The SCHEDULED WAKES section (docs/feat/cron-tool.md S6, mockup M7): the
  * session's armed wakes, each with its own Delete, in the daemon's order.
  *
@@ -963,9 +1068,13 @@ function skippedText(count: number): string {
 /** The whole sheet, from the facts the controller gathered. */
 export function sessionInfoView(facts: InfoFacts): SessionInfoView {
   const schedules = schedulesSection(facts);
+  const artifacts = artifactsSection(facts);
   const sections = [
     modelSection(facts),
     sessionSection(facts),
+    // What this session produced, before the computer-wide lists: an artifact is
+    // work ON this session (model-artifacts D9's mockup order).
+    ...(artifacts === null ? [] : [artifacts]),
     // After the session's own facts and before the computer-wide ones: a wake is
     // pending work ON this session (mockup M7's order).
     ...(schedules === null ? [] : [schedules]),

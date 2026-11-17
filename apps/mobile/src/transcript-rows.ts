@@ -4,6 +4,7 @@
  * without a cycle.
  */
 import type { AttachmentRef, ToolDiffDetail, ToolResult } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 
 /** A tool row's status: the TUI's four, plus the person's own reply-refusal. */
 export type ToolStatus = "queued" | "running" | "ok" | "error" | "denied";
@@ -79,6 +80,13 @@ export interface ToolRow {
   readonly output?: string;
   /** A file diff, when the tool produced one (live only, plan P7). */
   readonly diff?: ToolDiffDetail;
+  /**
+   * The artifact this call presented (docs/feat/model-artifacts.md D9): LIVE, from
+   * the tool result's own `details` — the present call's answer, never a guess. A
+   * row rebuilt from history carries none (the `ChatMessage` holds no details); the
+   * screen joins those onto `artifact/list` by call id (`artifact-join.ts`).
+   */
+  readonly artifact?: ArtifactMeta;
   readonly durationMs?: number;
   readonly hook?: ToolResult["hook"];
   readonly spill?: ToolResult["spill"];

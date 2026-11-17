@@ -53,6 +53,20 @@ export interface PairRouteParam {
   readonly linkText?: string;
 }
 
+/**
+ * The artifacts gallery's route (docs/feat/model-artifacts.md D9). It carries the
+ * session it lists and how the person got there, so the screen can say "Reopen to
+ * view" on an archived session and a flow can tell the three entries apart.
+ */
+export interface ArtifactGalleryRoute {
+  readonly computerId: string;
+  readonly sessionId: string;
+  readonly title: string;
+  /** The session was in the Archived section: its bytes need an explicit reopen. */
+  readonly archived: boolean;
+  readonly from: "session-info" | "hub" | "card";
+}
+
 /** The stack's route table (`@react-navigation/native-stack` params). */
 export type RootStackParams = {
   Pair: PairRouteParam | undefined;
@@ -61,7 +75,28 @@ export type RootStackParams = {
   Session: SessionRoute;
   /** The Settings screen (docs/feat/mobile-lock.md D6): app lock + Export logs. No params. */
   Settings: undefined;
+  /** The artifacts gallery (docs/feat/model-artifacts.md D9): a session's artifacts. */
+  ArtifactGallery: ArtifactGalleryRoute;
 };
+
+/**
+ * The artifacts gallery's ONE entry (D9): Session info's row, a transcript card,
+ * and — in `feat/mobile-hub` — the hub's badge all call this, so the route's
+ * params are built in one place. Nothing is dialled here; the screen reads the
+ * feed the session screen already published.
+ */
+export function openArtifactGallery(
+  nav: { navigate(name: "ArtifactGallery", params: ArtifactGalleryRoute): void },
+  input: ArtifactGalleryRoute,
+): void {
+  nav.navigate("ArtifactGallery", {
+    computerId: input.computerId,
+    sessionId: input.sessionId,
+    title: input.title,
+    archived: input.archived,
+    from: input.from,
+  });
+}
 
 /**
  * Which screen the app opens on: `Pair` with no computer to show, else

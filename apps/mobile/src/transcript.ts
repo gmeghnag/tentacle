@@ -14,6 +14,7 @@ import type { EndReason, SessionEvent } from "@tentacle/client";
  */
 import type { AttachmentRef, ChatMessage, ToolDiffDetail } from "@tentacle/core";
 import { describeEmptyTurn, describeRepairs, describeTruncation, toolLabel } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 import { historyRows, restartPromptOf } from "./transcript-history.ts";
 import {
   type ImageRef,
@@ -535,9 +536,12 @@ function applyToolResult(
   event: Extract<StreamEvent, { type: "tool_result" }>,
 ): State {
   const at = state.rows.findLastIndex((row) => row.kind === "tool" && row.id === event.id);
-  // Only a diff is a row's `diff`: an artifact detail is its own card (S9).
+  // A diff and an artifact are the two details an own card carries; each stays
+  // in its own field (`diff` opens below the row, `artifact` IS the card).
   const settled: ToolDiffDetail | undefined =
     event.result.details?.kind === "diff" ? event.result.details : undefined;
+  const artifact: ArtifactMeta | undefined =
+    event.result.details?.kind === "artifact" ? event.result.details.artifact : undefined;
   const update = (row: ToolRow): ToolRow => ({
     ...row,
     // A refusal with a reply is its own status (the TUI shows `✗ Denied · <text>`).
@@ -549,6 +553,7 @@ function applyToolResult(
           : "ok",
     output: event.result.content,
     ...(settled !== undefined ? { diff: settled } : {}),
+    ...(artifact !== undefined ? { artifact } : {}),
     ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
     ...(event.result.hook !== undefined ? { hook: event.result.hook } : {}),
     ...(event.result.spill !== undefined ? { spill: event.result.spill } : {}),

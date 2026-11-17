@@ -25,8 +25,11 @@ import {
   plan,
   thumbnailFor,
   visibleRefs,
+  wantsThumbnail,
+  artifactImageRef,
+  THUMBNAIL_MAX_BYTES,
 } from "../src/thumbnails.ts";
-import type { ImageRef, UserRow } from "../src/transcript.ts";
+import type { ImageRef, ToolRow, UserRow } from "../src/transcript.ts";
 
 function ref(name: string): ImageRef {
   return { id: `${"a".repeat(63)}${name}`, mimeType: "image/png", size: 10, name: `${name}.png` };
@@ -62,6 +65,57 @@ describe("only the visible rows' images are wanted", () => {
     const withDupe = [userRow([shared]), NOTICE, userRow([shared])];
     expect(visibleRefs(withDupe, 0, 2)).toHaveLength(1);
     expect(visibleRefs([NOTICE, NOTICE], 0, 1)).toHaveLength(0);
+  });
+
+  test("a presented IMAGE on a tool row is wanted too (model-artifacts D9, Owner Q6)", () => {
+    const card = (over: Record<string, unknown>): ToolRow => ({
+      kind: "tool",
+      key: "t",
+      id: "call-1",
+      name: "present",
+      label: "present",
+      args: "",
+      status: "ok",
+      artifact: {
+        artifactId: "a",
+        version: 1,
+        sha256: "b".repeat(64),
+        size: 1000,
+        mimeType: "image/png",
+        kind: "image",
+        title: "chart.png",
+        callId: "call-1",
+        createdAt: 0,
+        ...over,
+      },
+    });
+    expect(visibleRefs([card({})], 0, 0).map((ref) => ref.id)).toEqual(["b".repeat(64)]);
+    // An image over the 1 MiB line draws its glyph: it is opened, not fetched.
+    expect(visibleRefs([card({ size: 2 * 1024 * 1024 })], 0, 0)).toHaveLength(0);
+    // Another kind is never a thumbnail, however small.
+    expect(visibleRefs([card({ kind: "html", size: 10 })], 0, 0)).toHaveLength(0);
+  });
+
+  test("Owner Q6's 1 MiB line: an image at or under it is fetched, a bigger one is opened", () => {
+    expect(wantsThumbnail({ kind: "image", size: THUMBNAIL_MAX_BYTES })).toBe(true);
+    expect(wantsThumbnail({ kind: "image", size: THUMBNAIL_MAX_BYTES + 1 })).toBe(false);
+    expect(wantsThumbnail({ kind: "html", size: 10 })).toBe(false);
+  });
+
+  test("a presented image's ref is keyed by its sha, the title only a label", () => {
+    const ref = artifactImageRef({
+      artifactId: "a",
+      version: 1,
+      sha256: "b".repeat(64),
+      size: 10,
+      mimeType: "image/png",
+      kind: "image",
+      title: "übersicht.png",
+      callId: "call-1",
+      createdAt: 0,
+    });
+    expect(ref.id).toBe("b".repeat(64));
+    expect(ref.name).toBe("übersicht.png");
   });
 
   test("the window is clamped at both ends (no negative or past-the-end indexes)", () => {

@@ -27,7 +27,29 @@
  * draws the label `[image: name]`, which is what this build can honestly show.
  * Recorded in the task doc's Execution (§ Drift) rather than guessed at here.
  */
+import type { ArtifactMeta } from "@tentacle/protocol";
 import type { ImageRef } from "./transcript-rows.ts";
+
+/** The largest presented image whose thumbnail is fetched unopened (Owner Q6). */
+export const THUMBNAIL_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Whether a presented artifact's image earns a thumbnail (`visibleRefs`' rule):
+ * an image at or under 1 MiB. A bigger one, and every other kind, draws its kind
+ * glyph until the person opens it — a 20 MiB photo is not quietly downloaded onto
+ * a phone (Owner Q6).
+ */
+export function wantsThumbnail(meta: { readonly kind: string; readonly size: number }): boolean {
+  return meta.kind === "image" && meta.size <= THUMBNAIL_MAX_BYTES;
+}
+
+/**
+ * The `ImageRef` a presented image contributes to this driver: the sha256 is its
+ * id (the cache key and the daemon's handle), the title only a label.
+ */
+export function artifactImageRef(meta: ArtifactMeta): ImageRef {
+  return { id: meta.sha256, mimeType: meta.mimeType, size: meta.size, name: meta.title };
+}
 
 /** Thumbnails held at once: an id is dropped in LRU order past this. */
 export const MAX_CACHED = 60;
@@ -97,7 +119,21 @@ export function visibleRefs(
   const out: ImageRef[] = [];
   for (let at = from; at <= to; at += 1) {
     const row = rows[at];
-    if (row === undefined || row.kind !== "user") {
+    if (row === undefined) {
+      continue;
+    }
+    // A presented IMAGE brings a thumbnail too (model-artifacts D9, Owner Q6):
+    // only up to 1 MiB (`artifact-thumbnail.ts` `THUMBNAIL_MAX_BYTES`), so a big
+    // image is opened rather than quietly downloaded onto the phone.
+    if (row.kind === "tool") {
+      const meta = (row as { readonly artifact?: ArtifactMeta }).artifact;
+      if (meta !== undefined && wantsThumbnail(meta) && !seen.has(meta.sha256)) {
+        seen.add(meta.sha256);
+        out.push(artifactImageRef(meta));
+      }
+      continue;
+    }
+    if (row.kind !== "user") {
       continue;
     }
     for (const ref of (row as { readonly images?: readonly ImageRef[] }).images ?? []) {

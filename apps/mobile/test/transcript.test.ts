@@ -247,6 +247,10 @@ describe("a turn's stream", () => {
     const tool = state.rows[0] as ToolRow;
     expect(tool.status).toBe("ok");
     expect(tool.diff).toBeUndefined();
+    // It is the row's CARD instead (S9, T9.1): the live `present` result's own
+    // meta, which the band row draws — never a reload's guess.
+    expect(tool.artifact?.artifactId).toBe("a1");
+    expect(tool.artifact?.callId).toBe("c1");
   });
 
   test("the turn bracket: started → ended, and a lost turn says so", () => {
