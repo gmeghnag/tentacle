@@ -1173,6 +1173,28 @@ reads yet.
 
 **Executor behaviour.** The as-built record is honest and detailed, and its mutation log was real. It missed that the pure rule's guarantee depends on how the component feeds it state.
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* (fix commit `e372699a`, `git diff HEAD~1`. Same model as round 1, fresh context only.)
+
+**Verdict: PASS.**
+
+**M1 is fixed.** The reveal state now lives in a `useRef` tracker (`apps/mobile/src/reveal-report.ts`, `SessionScreen.tsx:516`). `reportReveal` reads and writes `track.current` synchronously, one report at a time, so every band reported in one layout pass is folded in turn. The scroll runs outside any React updater. `reveal-report.test.ts` runs whole passes in tree order: the band is reached once, and a relayout afterwards never scrolls again.
+
+**Mutations** (each reverted by hand; `git status` clean afterwards). Each of these makes a test fail:
+- `reportReveal` no longer writes `track.current` (the stale-state bug): `reveal-report.test.ts` 6 pass, 4 fail.
+- The screen folds into a fresh tracker on every layout instead of `revealTrack.current`: `hub-scheduled-wiring.test.ts` 5 pass, 2 fail.
+
+**Other additions in the commit.** These are extras on top of M1: two earlier nits are now pinned (`dictation` passthrough, and the `ended` guard on the hub's Stop).
+
+**Regressions.**
+- `bun test apps/mobile/test/`: 2329 pass, 0 fail.
+- `bun run lint`: clean (1784 files).
+- `bun run typecheck`: clean (root, mobile and relay).
+- Full `bun test`: not re-run.
+
+**Note (not a finding).** The commit still says "(deepseek)", while this round's doc text is not signed. The model attribution (§10) is still worth reconciling.
+
 ### Fix round 1 (H4a)
 
 *— claude-opus-5-5, 2026-11-17*
