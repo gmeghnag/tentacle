@@ -416,3 +416,32 @@ Attacks that found nothing:
 - No §7 invariant is touched (phone-local UI only).
 
 Executor: fixed rounds 1–4 as asked, with red-before-green witnesses, and stated honestly that nothing was checked visually. Fix 2 is the one structural test that a visual check would have caught.
+
+### Round 2 (re-review of `7e3bb83a`)
+
+*— claude-opus-5-5, 2026-11-17* (fresh context; same model as the earlier rounds, different from the executor)
+
+**Verdict: REQUEST-CHANGES.** Both of round 4's findings are fixed and mutation-proven. The commit also breaks a TUI test.
+
+1. **HIGH, regression: `packages/tui/test/__snapshots__/diagram-lines.test.ts.snap:1` is corrupted.**
+   - The header `// Bun Snapshot v1` was overwritten with a terminal escape sequence, `ESC[?25h Snapshot v1` (a stray "show cursor" control code).
+   - `bun test packages/tui/test/diagram-lines.test.ts` gives **33 pass / 14 fail**.
+   - With the HEAD~1 snapshot put in its place it gives 47 pass / 0 fail. The HEAD version was then put back.
+   - This file is outside this task's scope. Drop the change from the commit.
+2. Round 4, finding 1 (shadow): **fixed.** The shadow is now on the body layer. The body is unclipped (only the glass fill keeps `styles.clip`), and it has children (glass, glyph), so iOS has pixels to draw the shadow from. This is the same structure as main.
+   - Mutation: putting `styles.clip` back on the body → the shadow test FAILED.
+   - The pixels are still not confirmed: no simulator screenshot is attached.
+3. Round 4, finding 2 (jump back on release): **fixed.** `commit` now keeps the released value. The pure `settledReleased` releases it during render once the stored value equals it, and a VoiceOver step drops it first.
+   - Mutation: `commit` clears to `null` → 2 wiring tests FAILED.
+   - Mutation: `settledReleased` always returns `null` → 2 unit tests FAILED.
+   - The tree was byte-clean after reverting.
+
+Gate:
+- Touched mobile tests: 89/89 pass.
+- `bun run lint` is clean and `bun run typecheck` is clean.
+- The full `bun test` would fail because of finding 1.
+
+Attacks that found nothing:
+- A second drag while the first write is still in flight: the hold stays until its own value is published.
+- A release that did not move the value: there is no write, and the hold clears on the next render.
+- A failed write: the store still publishes the value (F22), so the hold clears.
