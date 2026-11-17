@@ -29,6 +29,12 @@ export interface SessionRoute {
   readonly archived: boolean;
   /** Just created by the drawer's New session (mobile-chrome S7): the composer is focused. */
   readonly focus?: boolean;
+  /**
+   * The session's working folder, as the list row knew it (`session/list`
+   * `cwd`): the header shows it at once. Absent (a push, a new session) → the
+   * screen asks `session/list` once (docs/feat/mobile-header-status.md).
+   */
+  readonly cwd?: string;
 }
 
 /**

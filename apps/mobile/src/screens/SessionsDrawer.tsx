@@ -42,7 +42,7 @@ import { type RowMenuItem, deleteConfirm, rowMenu } from "../drawer-row-menu.ts"
 import { rowMenuHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import type { RenameState } from "../session-rename.ts";
-import { DENSE_FONT_SCALE, type Palette } from "../theme.ts";
+import { DENSE_FONT_SCALE, MONO, type Palette } from "../theme.ts";
 import { ActionSheet, type SheetAction } from "../ui/ActionSheet.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
@@ -535,12 +535,30 @@ function SessionRowView(props: SessionsDrawerProps & { readonly row: DrawerRow }
           />
         )}
       </View>
-      <Text
-        numberOfLines={1}
-        style={[styles.rowTitle, { color: palette.label }, row.current ? styles.current : null]}
-      >
-        {row.title}
-      </Text>
+      <View style={styles.rowText}>
+        <Text
+          numberOfLines={1}
+          style={[
+            styles.rowTitleText,
+            { color: palette.label },
+            row.current ? styles.current : null,
+          ]}
+        >
+          {row.title}
+        </Text>
+        {/* The session's working folder, small mono (docs/feat/mobile-header-status.md). */}
+        {row.folder === "" ? null : (
+          <Text
+            testID={`drawer-folder-${row.id}`}
+            numberOfLines={1}
+            ellipsizeMode="middle"
+            maxFontSizeMultiplier={DENSE_FONT_SCALE}
+            style={[styles.rowFolder, { color: palette.sec }]}
+          >
+            {row.folder}
+          </Text>
+        )}
+      </View>
       {row.pinned ? <Icon name="pin" color={palette.sec} size={11} weight="light" /> : null}
       {row.meta === "" ? null : (
         <Text
@@ -611,6 +629,9 @@ const styles = StyleSheet.create({
   },
   lead: { width: 19, alignItems: "center" },
   rowTitle: { flex: 1, minWidth: 0, fontSize: 16, lineHeight: 21 },
+  rowText: { flex: 1, minWidth: 0 },
+  rowTitleText: { fontSize: 16, lineHeight: 21 },
+  rowFolder: { fontFamily: MONO, fontSize: 11, lineHeight: 14 },
   current: { fontWeight: "600" },
   meta: { fontSize: 12 },
   rowMeta: { flexShrink: 0, maxWidth: 110 },

@@ -2,36 +2,86 @@ import { describe, expect, test } from "bun:test";
 import {
   type ChatFacts,
   chatStatus,
+  dotLook,
   ringArcs,
   ringHalfRotation,
   ringLabel,
+  titleLabel,
 } from "../src/chat-header.ts";
 
-const open: ChatFacts = { phase: "open", link: "up", running: false, closed: null };
+const open: ChatFacts = {
+  phase: "open",
+  link: "up",
+  running: false,
+  asking: false,
+  closed: null,
+};
 
-describe("chatStatus (the chat header's status line)", () => {
-  test("idle and running, with their tones", () => {
-    expect(chatStatus(open)).toEqual({ text: "Idle", tone: "online" });
-    expect(chatStatus({ ...open, running: true })).toEqual({ text: "Running", tone: "running" });
+describe("chatStatus (the dot before the title; no status word)", () => {
+  test("idle has NO dot and a plain title", () => {
+    expect(chatStatus(open)).toEqual({ dot: null, state: "idle", dimTitle: false });
   });
 
-  test("the link down wins over a running turn (the phone cannot see it run)", () => {
-    expect(chatStatus({ ...open, running: true, link: "down" })).toEqual({
-      text: "Offline",
-      tone: "offline",
+  test("every state maps to its dot", () => {
+    expect(chatStatus({ ...open, running: true }).dot).toBe("running");
+    expect(chatStatus({ ...open, asking: true }).dot).toBe("ask");
+    expect(chatStatus({ ...open, phase: "opening", link: "down" }).dot).toBe("connecting");
+    expect(chatStatus({ ...open, link: "down" }).dot).toBe("offline");
+    expect(chatStatus({ ...open, phase: "failed" }).dot).toBe("attention");
+  });
+
+  test("an ask wins over the running turn it suspends", () => {
+    expect(chatStatus({ ...open, running: true, asking: true })).toEqual({
+      dot: "ask",
+      state: "waiting for approval",
+      dimTitle: false,
     });
+  });
+
+  test("the link down wins over a running turn and an ask (the phone cannot see or answer)", () => {
+    expect(chatStatus({ ...open, running: true, asking: true, link: "down" }).dot).toBe("offline");
   });
 
   test("an attach in flight or failed says so before anything else", () => {
-    expect(chatStatus({ ...open, phase: "opening", link: "down" }).text).toBe("Connecting…");
-    expect(chatStatus({ ...open, phase: "failed" })).toEqual({
-      text: "Not connected",
-      tone: "attention",
-    });
+    expect(chatStatus({ ...open, phase: "opening", running: true }).state).toBe("connecting");
+    expect(chatStatus({ ...open, phase: "failed", link: "down" }).state).toBe("not connected");
   });
 
-  test("an ended session is Ended, not Idle", () => {
-    expect(chatStatus({ ...open, closed: "deleted" }).text).toBe("Ended");
+  test("an ended session has no dot and a dimmed title, even mid-turn", () => {
+    expect(chatStatus({ ...open, closed: "deleted", running: true, asking: true })).toEqual({
+      dot: null,
+      state: "ended",
+      dimTitle: true,
+    });
+  });
+});
+
+describe("dotLook (what the component draws, decided here)", () => {
+  test("running pulses in the accent, filled", () => {
+    expect(dotLook("running")).toEqual({ tone: "running", hollow: false, pulse: true });
+  });
+  test("ask is amber and steady", () => {
+    expect(dotLook("ask")).toEqual({ tone: "attention", hollow: false, pulse: false });
+  });
+  test("connecting is grey hollow and pulses; offline is grey hollow and steady", () => {
+    expect(dotLook("connecting")).toEqual({ tone: "offline", hollow: true, pulse: true });
+    expect(dotLook("offline")).toEqual({ tone: "offline", hollow: true, pulse: false });
+  });
+  test("not connected is amber hollow", () => {
+    expect(dotLook("attention")).toEqual({ tone: "attention", hollow: true, pulse: false });
+  });
+});
+
+describe("titleLabel (VoiceOver: the dot is visual only)", () => {
+  test("the state rides the title", () => {
+    expect(titleLabel("Test", chatStatus({ ...open, running: true }))).toBe("Test, running");
+    expect(titleLabel("Test", chatStatus({ ...open, asking: true }))).toBe(
+      "Test, waiting for approval",
+    );
+    expect(titleLabel("Test", chatStatus({ ...open, closed: "ended" }))).toBe("Test, ended");
+  });
+  test("idle is the bare title", () => {
+    expect(titleLabel("Test", chatStatus(open))).toBe("Test");
   });
 });
 

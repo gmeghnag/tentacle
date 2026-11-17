@@ -24,6 +24,27 @@ function input(over: Partial<SessionViewInput> = {}): SessionViewInput {
   };
 }
 
+describe("headerFolder (docs/feat/mobile-header-status.md: `<folder> · <model>`)", () => {
+  test("the session's cwd, shaped for the header; the raw path rides along for VoiceOver", () => {
+    const view = sessionView(input({ cwd: "/Users/me/tentacle/.tentacle/worktrees/hop/proj" }));
+    expect(view.headerFolder).toEqual({
+      label: "~/tentacle/…/hop/proj",
+      path: "/Users/me/tentacle/.tentacle/worktrees/hop/proj",
+    });
+  });
+
+  test("no cwd known, or an empty one → null (the subtitle is the model alone)", () => {
+    expect(sessionView(input()).headerFolder).toBeNull();
+    expect(sessionView(input({ cwd: "" })).headerFolder).toBeNull();
+  });
+
+  test("the folder survives the attach phases (opening, failed, ended)", () => {
+    const cwd = "/srv/app";
+    expect(sessionView(input({ cwd, status: { phase: "opening" } })).headerFolder?.label).toBe(cwd);
+    expect(sessionView(input({ cwd, ended: "deleted" })).headerFolder?.label).toBe(cwd);
+  });
+});
+
 describe("headerModel (Owner decision 2)", () => {
   test("the model the daemon reported, shortened to its last segment", () => {
     const view = sessionView(

@@ -24,6 +24,8 @@ export interface DrawerPick {
   readonly archived: boolean;
   /** Just created by New session (S7): opened with the composer focused. */
   readonly focus?: boolean;
+  /** The row's working folder (`session/list` `cwd`), for the header. */
+  readonly cwd?: string;
 }
 
 export type DrawerStackRoute =
@@ -50,6 +52,7 @@ export function drawerTarget(from: SessionRoute, pick: DrawerPick): DrawerNav {
       title: pick.title,
       archived: pick.archived,
       ...(pick.focus === true ? { focus: true } : {}),
+      ...(pick.cwd === undefined || pick.cwd === "" ? {} : { cwd: pick.cwd }),
     },
   };
   if (sameComputer) {

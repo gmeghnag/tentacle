@@ -62,6 +62,15 @@ interface MeterTokens {
   readonly high: Color;
 }
 
+/**
+ * The thinking-shimmer sweep's two highlight tones (docs/feat/tui-thinking-shimmer.md).
+ * `base` is `accent` — the label's colour today — so only the moving window is new.
+ */
+interface ShimmerTokens {
+  readonly mid: Color;
+  readonly peak: Color;
+}
+
 interface SyntaxTokens {
   readonly keyword: Color;
   readonly string: Color;
@@ -110,6 +119,7 @@ export interface Tokens {
   readonly border: Color;
   readonly status: StatusTokens;
   readonly meter: MeterTokens;
+  readonly shimmer: ShimmerTokens;
   readonly diff: DiffTokens;
   readonly message: MessageTokens;
   readonly syntax: SyntaxTokens;
@@ -139,6 +149,8 @@ const DARK: Tokens = {
   border: "gray",
   status: { linkError: "red", linkWarn: "yellow", scrolled: "yellow" },
   meter: { low: "green", mid: "yellow", high: "red" },
+  // Brighter cyan on a dark terminal: the sweep lights the word up.
+  shimmer: { mid: "#22d3ee", peak: "#67e8f9" },
   diff: {
     addBg: "#022800",
     addFg: "#f8f8f2",
@@ -198,6 +210,9 @@ const LIGHT: Tokens = {
   border: "#8c8c8c",
   status: { linkError: "#b21428", linkWarn: "#8f4c00", scrolled: "#8f4c00" },
   meter: { low: "#084718", mid: "#8f4c00", high: "#b21428" },
+  // Darker = "brighter" on paper. Measured 9.85 / 13.40 truecolor, 7.03 / 7.49 at
+  // chalk's 256 on white and Solarized Light (theme-contrast.test.ts).
+  shimmer: { mid: "#0b4a57", peak: "#083344" },
   diff: {
     addBg: "#dafbe1",
     addFg: "#1a1a1a",
@@ -273,6 +288,50 @@ export type Styler = ReturnType<typeof chalk.hex>;
 
 /** A token colour value as a chalk styler — the export `read-highlight.ts` needs. */
 export const colorStyler = (color: Color): Styler => ink(color) as Styler;
+
+/**
+ * A diagram's roles (docs/feat/model-diagrams.md D8, mockup 5A) mapped onto
+ * EXISTING tokens — no new colour: boxes, edges and frames dim, a decision in
+ * the accent, edge labels and the source's labels as strings, the source's
+ * keywords/ids/arrows/comments as the syntax tokens. `undefined` = default fg.
+ */
+export type DiagramRole =
+  | "border"
+  | "decision"
+  | "label"
+  | "frame"
+  | "title"
+  | "subtle"
+  | "keyword"
+  | "id"
+  | "arrow"
+  | "string"
+  | "comment";
+
+export function diagramColor(role: DiagramRole, t: Tokens): Color | undefined {
+  switch (role) {
+    case "border":
+    case "frame":
+      return t.dim;
+    case "decision":
+      return t.accent;
+    case "label":
+    case "string":
+      return t.syntax.string;
+    case "subtle":
+      return t.subtle;
+    case "keyword":
+      return t.syntax.keyword;
+    case "id":
+      return t.syntax.title;
+    case "arrow":
+      return t.syntax.meta;
+    case "comment":
+      return t.syntax.comment;
+    default:
+      return undefined;
+  }
+}
 
 /** A message row's two stylers for a mode (what `theme.message` becomes). */
 export function messageStyle(mode: ThemeMode): MessageStyle {

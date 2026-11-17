@@ -21,6 +21,7 @@ import { CHART_TOOL, chartRowView } from "../../chart-row.ts";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
+import { ROW_FALLBACK_TEXT } from "../../row-guard.ts";
 import { firedScheduleHead } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { type Thumbnail, type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
@@ -566,6 +567,20 @@ function NoticeRowView({ row, palette }: RowProps): JSX.Element {
   );
 }
 
+/**
+ * What a row that threw while drawing reads as (`RowGuard`,
+ * docs/fix/mobile-crash-ibm-chart.md): a quiet notice in the row's place.
+ */
+export function RowFallback({ palette }: { readonly palette: Palette }): JSX.Element {
+  return (
+    <View testID="row-fallback" style={styles.row}>
+      <Text style={[typography.footnote, styles.notice, styles.fallback, { color: palette.sec }]}>
+        {ROW_FALLBACK_TEXT}
+      </Text>
+    </View>
+  );
+}
+
 /** One row, by kind. A missing kind renders nothing (never a crash on new data). */
 export function TranscriptRow(props: RowProps): JSX.Element | null {
   switch (props.row.kind) {
@@ -639,5 +654,6 @@ const styles = StyleSheet.create({
   below: { gap: 4, paddingBottom: 6 },
   tool: { gap: 8 },
   notice: { textAlign: "center" },
+  fallback: { fontStyle: "italic" },
   rule: { height: StyleSheet.hairlineWidth, marginVertical: 6 },
 });

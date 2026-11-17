@@ -51,7 +51,8 @@ import { reportsOf } from "../activity-memory.ts";
 import { ACTIVITY_SETTINGS } from "../activity-settings-expo.ts";
 import type { ActivitySettings } from "../activity-settings-store.ts";
 import { activityView, agentCardTarget } from "../activity.ts";
-import { chatStatus } from "../chat-header.ts";
+import type { AppLogField } from "../app-log.ts";
+import { chatStatus, titleLabel } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
 import { type FloatBounds, fits, visible as floatVisible, headerPill } from "../floating-button.ts";
@@ -81,6 +82,7 @@ import { playHaptic } from "../haptics.ts";
 import { linkPrompt } from "../links.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
 import type { ArtifactGalleryRoute } from "../routes.ts";
+import { rowErrorFields } from "../row-guard.ts";
 import { rowTimeLabel } from "../row-swipe.ts";
 import { type SectionId, scheduledSection } from "../session-info.ts";
 import { sessionMenu } from "../session-menu.ts";
@@ -88,7 +90,7 @@ import type { SessionScreenController, SessionScreenState } from "../session-scr
 import { dictationLocale } from "../speech-locale.ts";
 import { SPEECH_PORT } from "../speech-native-expo.ts";
 import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
-import { DENSE_FONT_SCALE, type Palette, typography } from "../theme.ts";
+import { DENSE_FONT_SCALE, MONO, type Palette, typography } from "../theme.ts";
 import { isBlockRow, isOpen, stepLayout, toggleOpen } from "../tool-steps.ts";
 import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
@@ -98,10 +100,10 @@ import { Composer } from "../ui/Composer.tsx";
 import { ContextRing } from "../ui/ContextRing.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
 import { FloatingActivity, useAccessibilityFlags } from "../ui/FloatingActivity.tsx";
+import { HeaderDot } from "../ui/HeaderDot.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
-import { StatusDot } from "../ui/StatusDot.tsx";
 import { ThinkingNode } from "../ui/StepNode.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
 import {
@@ -118,8 +120,9 @@ import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
+import { RowGuard } from "./transcript/RowGuard.tsx";
 import { SwipeTime } from "./transcript/SwipeTime.tsx";
-import { TranscriptRow } from "./transcript/TranscriptRow.tsx";
+import { RowFallback, TranscriptRow } from "./transcript/TranscriptRow.tsx";
 
 export interface SessionScreenProps {
   readonly palette: Palette;
@@ -142,6 +145,11 @@ export interface SessionScreenProps {
    * no router, e.g. a unit test's).
    */
   readonly onOpenArtifacts?: (from: ArtifactGalleryRoute["from"]) => void;
+  /**
+   * A row threw while drawing and shows its fallback instead (`RowGuard`,
+   * docs/fix/mobile-crash-ibm-chart.md): the app log's fields for it.
+   */
+  readonly onRowError?: (fields: Readonly<Record<string, AppLogField>>) => void;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -174,6 +182,7 @@ export function SessionScreen({
   focusComposer = false,
   drawerOpen = false,
   onOpenArtifacts,
+  onRowError,
 }: SessionScreenProps): JSX.Element {
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
@@ -628,6 +637,7 @@ export function SessionScreen({
     phase: state.status.phase,
     link: state.transcript.link,
     running: state.view.composer.running,
+    asking: state.sheet.kind === "asking",
     closed: state.transcript.closed,
   });
   // A turn that ends (own or another device's) taps the hand once (Owner Q4).
@@ -732,6 +742,9 @@ export function SessionScreen({
           title={state.view.title}
           onTitlePress={() => controller.beginRename()}
           titleTestID="session-title"
+          titleLead={status.dot === null ? null : <HeaderDot palette={palette} dot={status.dot} />}
+          titleDim={status.dimTitle}
+          titleLabel={titleLabel(state.view.title, status)}
           left={
             onOpenDrawer === undefined ? undefined : (
               <HeaderIcon
@@ -779,28 +792,47 @@ export function SessionScreen({
             </>
           }
           subtitle={
-            <View testID="session-header-status" style={styles.headerLines}>
-              <View style={styles.status} accessibilityLabel={status.text}>
-                <StatusDot palette={palette} tone={status.tone} size={6} />
-                <Text
-                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                  numberOfLines={1}
-                  style={[typography.caption, { color: palette.sec }]}
-                >
-                  {status.text}
-                </Text>
-                {state.view.headerModel === null ? null : (
-                  <Text
-                    testID="session-header-model"
-                    maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                    numberOfLines={1}
-                    style={[typography.caption, styles.headerModel, { color: palette.sec }]}
-                  >
-                    {`· ${state.view.headerModel}`}
-                  </Text>
-                )}
-              </View>
-            </View>
+            state.view.headerFolder === null && state.view.headerModel === null ? undefined : (
+              // `<folder> · <model>` (docs/feat/mobile-header-status.md): no status
+              // word — the state is the dot before the title. Tap → Session info,
+              // which shows the full path.
+              <Pressable
+                testID="session-header-status"
+                style={styles.headerLines}
+                accessibilityRole="button"
+                accessibilityLabel={[state.view.headerFolder?.path, state.view.headerModel]
+                  .filter((part) => part !== undefined && part !== null)
+                  .join(", ")}
+                accessibilityHint="Opens Session info"
+                onPress={() => openInfo()}
+              >
+                <View style={styles.status}>
+                  {state.view.headerFolder === null ? null : (
+                    <Text
+                      testID="session-header-folder"
+                      maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                      numberOfLines={1}
+                      ellipsizeMode="middle"
+                      style={[styles.headerFolder, { color: palette.sec }]}
+                    >
+                      {state.view.headerFolder.label}
+                    </Text>
+                  )}
+                  {state.view.headerModel === null ? null : (
+                    <Text
+                      testID="session-header-model"
+                      maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                      numberOfLines={1}
+                      style={[typography.caption, styles.headerModel, { color: palette.sec }]}
+                    >
+                      {state.view.headerFolder === null
+                        ? state.view.headerModel
+                        : `· ${state.view.headerModel}`}
+                    </Text>
+                  )}
+                </View>
+              </Pressable>
+            )
           }
         />
         {banner === null ? null : (
@@ -875,46 +907,56 @@ export function SessionScreen({
                         activity.memory.finished,
                       )
                     : null;
+                // One row that throws while drawing is its fallback, never an
+                // app abort (docs/fix/mobile-crash-ibm-chart.md).
                 return (
-                  <SwipeTime row={item} palette={palette} label={rowTimeLabel(item)}>
-                    <TranscriptRow
-                      row={item}
-                      palette={palette}
-                      onLink={onLink}
-                      thumbnails={state.thumbnails}
-                      step={{
-                        cell,
-                        open: isOpen(openSteps, item.key),
-                        full: isOpen(fullSteps, item.key),
-                        reduceMotion: a11yFlags.reduceMotion,
-                        onToggle: () => {
-                          animateNextLayout(a11yFlags.reduceMotion);
-                          setOpenSteps((ids) => toggleOpen(ids, item.key));
-                        },
-                        onShowAll: () =>
-                          setFullSteps((ids) =>
-                            isOpen(ids, item.key) ? ids : toggleOpen(ids, item.key),
-                          ),
-                      }}
-                      {...(child === null
-                        ? {}
-                        : {
-                            agent: {
-                              id: child,
-                              onOpen: () => {
-                                focusActivity({ kind: "child", id: child });
-                                setActivityOpen(true);
+                  <RowGuard
+                    // A row object is replaced only when its content changes
+                    // (transcript.ts keeps unchanged rows): that one retries.
+                    resetKey={item}
+                    fallback={<RowFallback palette={palette} />}
+                    onError={(error) => onRowError?.(rowErrorFields(item.kind, error))}
+                  >
+                    <SwipeTime row={item} palette={palette} label={rowTimeLabel(item)}>
+                      <TranscriptRow
+                        row={item}
+                        palette={palette}
+                        onLink={onLink}
+                        thumbnails={state.thumbnails}
+                        step={{
+                          cell,
+                          open: isOpen(openSteps, item.key),
+                          full: isOpen(fullSteps, item.key),
+                          reduceMotion: a11yFlags.reduceMotion,
+                          onToggle: () => {
+                            animateNextLayout(a11yFlags.reduceMotion);
+                            setOpenSteps((ids) => toggleOpen(ids, item.key));
+                          },
+                          onShowAll: () =>
+                            setFullSteps((ids) =>
+                              isOpen(ids, item.key) ? ids : toggleOpen(ids, item.key),
+                            ),
+                        }}
+                        {...(child === null
+                          ? {}
+                          : {
+                              agent: {
+                                id: child,
+                                onOpen: () => {
+                                  focusActivity({ kind: "child", id: child });
+                                  setActivityOpen(true);
+                                },
                               },
-                            },
-                          })}
-                      {...(speak === undefined || voice === null
-                        ? {}
-                        : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
-                      {...(onOpenArtifacts === undefined
-                        ? {}
-                        : { onArtifact: (meta) => onOpenArtifacts("card") })}
-                    />
-                  </SwipeTime>
+                            })}
+                        {...(speak === undefined || voice === null
+                          ? {}
+                          : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
+                        {...(onOpenArtifacts === undefined
+                          ? {}
+                          : { onArtifact: (meta) => onOpenArtifacts("card") })}
+                      />
+                    </SwipeTime>
+                  </RowGuard>
                 );
               }}
               extraData={rowExtraData}
@@ -1278,8 +1320,11 @@ const styles = StyleSheet.create({
   list: { paddingTop: 8, paddingBottom: 16 },
   emptyList: { flexGrow: 1, justifyContent: "center" },
   status: { flexDirection: "row", alignItems: "center", gap: 5 },
-  headerLines: { alignItems: "center", gap: 4 },
-  headerModel: { flexShrink: 1 },
+  headerLines: { alignItems: "center", gap: 4, maxWidth: "100%" },
+  // The MODEL gives way first (a far larger shrink factor); the folder then
+  // middle-ellipsizes, so its last component stays (owner addendum).
+  headerModel: { flexShrink: 100 },
+  headerFolder: { fontFamily: MONO, fontSize: 11, lineHeight: 16, flexShrink: 1 },
   jump: {
     position: "absolute",
     alignSelf: "center",

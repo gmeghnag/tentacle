@@ -1,9 +1,10 @@
 /**
- * The chat header's status line (mockup `Conversation`: `Running` with an
- * accent dot, `Offline`, …), from facts the screen already holds — the attach
- * phase, the link, the running turn, the session's end — plus the context ring's
- * geometry (docs/feat/mobile-chrome.md A1/S2). Pure and React-free (AGENTS §7);
- * `SessionScreen.tsx` only draws the dot, the word and the ring.
+ * The chat header's state, as a small dot BEFORE the title (docs/feat/
+ * mobile-header-status.md: no "Idle/Running" word; idle has no dot at all),
+ * from facts the screen already holds — the attach phase, the link, the running
+ * turn, a pending ask, the session's end — plus the context ring's geometry
+ * (docs/feat/mobile-chrome.md A1/S2). Pure and React-free (AGENTS §7);
+ * `SessionScreen.tsx` / `HeaderDot.tsx` only draw what this decides.
  */
 import type { StatusTone } from "./ui/StatusDot.tsx";
 
@@ -11,33 +12,74 @@ export interface ChatFacts {
   readonly phase: "opening" | "open" | "failed";
   readonly link: "up" | "down";
   readonly running: boolean;
+  /** A permission ask is on screen (`SheetState.kind === "asking"`). */
+  readonly asking: boolean;
   /** The session ended (closed / deleted / archived): its reason, or null. */
   readonly closed: string | null;
 }
 
+/** The dot before the title; `null` = none (idle, ended). */
+export type HeaderDot = "running" | "ask" | "connecting" | "offline" | "attention";
+
 export interface ChatStatus {
-  readonly text: string;
-  readonly tone: StatusTone;
+  readonly dot: HeaderDot | null;
+  /** The state in words, for VoiceOver only (the dot is visual). */
+  readonly state: string;
+  /** An ended session: no dot, the title in the secondary colour. */
+  readonly dimTitle: boolean;
 }
 
 /** Most specific first: an attach problem, then the link, then the session. */
 export function chatStatus(facts: ChatFacts): ChatStatus {
   if (facts.phase === "opening") {
-    return { text: "Connecting…", tone: "offline" };
+    return { dot: "connecting", state: "connecting", dimTitle: false };
   }
   if (facts.phase === "failed") {
-    return { text: "Not connected", tone: "attention" };
+    return { dot: "attention", state: "not connected", dimTitle: false };
   }
   if (facts.link === "down") {
-    return { text: "Offline", tone: "offline" };
+    return { dot: "offline", state: "offline", dimTitle: false };
   }
   if (facts.closed !== null) {
-    return { text: "Ended", tone: "offline" };
+    return { dot: null, state: "ended", dimTitle: true };
+  }
+  // An ask suspends the turn: what the person must do wins over "it runs".
+  if (facts.asking) {
+    return { dot: "ask", state: "waiting for approval", dimTitle: false };
   }
   if (facts.running) {
-    return { text: "Running", tone: "running" };
+    return { dot: "running", state: "running", dimTitle: false };
   }
-  return { text: "Idle", tone: "online" };
+  return { dot: null, state: "idle", dimTitle: false };
+}
+
+export interface DotLook {
+  readonly tone: StatusTone;
+  /** A ring instead of a filled dot. */
+  readonly hollow: boolean;
+  /** Pulses (Reduce Motion → steady, the component's call). */
+  readonly pulse: boolean;
+}
+
+/** How each dot is drawn (the owner's pick, variant C). */
+export function dotLook(dot: HeaderDot): DotLook {
+  switch (dot) {
+    case "running":
+      return { tone: "running", hollow: false, pulse: true };
+    case "ask":
+      return { tone: "attention", hollow: false, pulse: false };
+    case "connecting":
+      return { tone: "offline", hollow: true, pulse: true };
+    case "offline":
+      return { tone: "offline", hollow: true, pulse: false };
+    case "attention":
+      return { tone: "attention", hollow: true, pulse: false };
+  }
+}
+
+/** The title's VoiceOver label: `"Test, running"`; idle is the bare title. */
+export function titleLabel(title: string, status: ChatStatus): string {
+  return status.state === "idle" ? title : `${title}, ${status.state}`;
 }
 
 /** The ring's arc colour: `accent`, or `orange` from 80% up (the bar's old rule). */

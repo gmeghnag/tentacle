@@ -10,6 +10,7 @@ import type { SessionRow } from "../src/session-list.ts";
 
 const row = (over: Partial<SessionRow> & { sessionId: string }): SessionRow => ({
   title: over.sessionId,
+  cwd: "",
   subtitle: "5m ago",
   badges: [],
   wakes: 0,

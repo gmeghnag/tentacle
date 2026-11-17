@@ -151,6 +151,46 @@ describe("S2 · the context ring (A1 + F11)", () => {
   });
 });
 
+describe("mobile-header-status · the dot before the title, `<folder> · <model>` under it", () => {
+  const HEADER_DOT = read("src", "ui", "HeaderDot.tsx");
+  const DRAWER = read("src", "screens", "SessionsDrawer.tsx");
+
+  test("no status WORD and no StatusDot in the subtitle any more", () => {
+    expect(SESSION_SCREEN).not.toMatch(/status\.text/);
+    expect(SESSION_SCREEN).not.toMatch(/<StatusDot\b/);
+  });
+
+  test("the dot is the pure module's: the ask fact is wired, the title gets lead/dim/label", () => {
+    expect(SESSION_SCREEN).toMatch(/asking: state\.sheet\.kind === "asking"/);
+    expect(SESSION_SCREEN).toMatch(/titleLead=\{status\.dot === null \? null : <HeaderDot/);
+    expect(SESSION_SCREEN).toMatch(/titleDim=\{status\.dimTitle\}/);
+    expect(SESSION_SCREEN).toMatch(/titleLabel=\{titleLabel\(state\.view\.title, status\)\}/);
+    // The look comes from `dotLook`, the pulse is native and Reduce Motion holds it.
+    expect(HEADER_DOT).toMatch(/dotLook\(dot\)/);
+    expect(HEADER_DOT).toMatch(/useNativeDriver: true/);
+    expect(HEADER_DOT).toMatch(/look\.pulse && !reduce/);
+    // ScreenHeader reads the label and dims the title.
+    expect(SCREEN_HEADER).toMatch(/accessibilityLabel=\{spoken\}/);
+    expect(SCREEN_HEADER).toMatch(/titleDim \? palette\.sec : palette\.label/);
+  });
+
+  test("the subtitle's folder is mono, middle-cut, and the tap opens Session info", () => {
+    const at = SESSION_SCREEN.indexOf('testID="session-header-folder"');
+    expect(at).toBeGreaterThan(-1);
+    expect(SESSION_SCREEN.slice(at, at + 400)).toMatch(/ellipsizeMode="middle"/);
+    expect(SESSION_SCREEN).toMatch(/headerFolder: \{ fontFamily: MONO/);
+    const press = SESSION_SCREEN.indexOf('testID="session-header-status"');
+    expect(SESSION_SCREEN.slice(press, press + 600)).toMatch(/onPress=\{\(\) => openInfo\(\)\}/);
+  });
+
+  test("the drawer row draws its folder under the title, mono, middle-cut", () => {
+    const at = DRAWER.indexOf("drawer-folder-");
+    expect(at).toBeGreaterThan(-1);
+    expect(DRAWER.slice(at, at + 300)).toMatch(/ellipsizeMode="middle"/);
+    expect(DRAWER).toMatch(/rowFolder: \{ fontFamily: MONO/);
+  });
+});
+
 describe("S2 · the compact header's hairline (A1)", () => {
   test("the compact row ends in a `sepChat` hairline; the large variant does not", () => {
     // The hairline reads the palette, not a hard-coded colour (tokens are the

@@ -15,6 +15,7 @@ import type { ArtifactKind } from "@tentacle/protocol";
 import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import type { AppLogField } from "../app-log.ts";
 import { ARTIFACT_FEEDS, type ArtifactSnapshot } from "../artifact-feed.ts";
 import {
   CHART_FILTER_LABEL,
@@ -57,6 +58,8 @@ export interface ArtifactGalleryScreenProps {
   readonly onBack: () => void;
   readonly onLink: (href: string) => void;
   readonly onShare?: (fileUri: string) => void;
+  /** A viewer that threw while drawing (its log fields: class only, never the message). */
+  readonly onRenderError?: (fields: Record<string, AppLogField>) => void;
 }
 
 /** What the screen says when it has no rows to show, and why. */
@@ -312,6 +315,7 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
           onClose={() => setOpen(null)}
           onLink={props.onLink}
           {...(props.onShare === undefined ? {} : { onShare: props.onShare })}
+          {...(props.onRenderError === undefined ? {} : { onRenderError: props.onRenderError })}
         />
       )}
     </View>

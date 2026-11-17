@@ -30,6 +30,12 @@ export interface ScreenHeaderProps {
    * the screen's own name, not something a person names.
    */
   readonly onTitlePress?: () => void;
+  /** Compact only: drawn BEFORE the title (the chat's state dot). */
+  readonly titleLead?: ReactNode;
+  /** Compact only: the title in the secondary colour (an ended session). */
+  readonly titleDim?: boolean;
+  /** Compact only: what VoiceOver reads for the title (the dot is visual only). */
+  readonly titleLabel?: string;
 }
 
 export function ScreenHeader({
@@ -42,21 +48,39 @@ export function ScreenHeader({
   insetTop = true,
   titleTestID,
   onTitlePress,
+  titleLead,
+  titleDim = false,
+  titleLabel,
 }: ScreenHeaderProps): JSX.Element {
   const insets = useSafeAreaInsets();
   const top = insetTop ? insets.top : 0;
   if (variant === "compact") {
-    const heading = (
+    const spoken = titleLabel ?? title;
+    const text = (
       <Text
         testID={titleTestID}
         accessibilityRole="header"
+        accessibilityLabel={spoken}
         numberOfLines={1}
         maxFontSizeMultiplier={DENSE_FONT_SCALE}
-        style={[typography.headline, { color: palette.label }]}
+        style={[
+          typography.headline,
+          styles.compactHeading,
+          { color: titleDim ? palette.sec : palette.label },
+        ]}
       >
         {title}
       </Text>
     );
+    const heading =
+      titleLead === undefined || titleLead === null ? (
+        text
+      ) : (
+        <View style={styles.titleLine}>
+          {titleLead}
+          {text}
+        </View>
+      );
     return (
       <View
         style={[
@@ -79,7 +103,7 @@ export function ScreenHeader({
             <Pressable
               testID={`${titleTestID ?? "header-title"}-tap`}
               accessibilityRole="button"
-              accessibilityLabel={`${title}. Rename`}
+              accessibilityLabel={`${spoken}. Rename`}
               accessibilityHint="Opens a field to rename this session"
               onPress={onTitlePress}
             >
@@ -133,4 +157,7 @@ const styles = StyleSheet.create({
   side: { minWidth: 96, flexDirection: "row", gap: 10, alignItems: "center" },
   sideRight: { justifyContent: "flex-end" },
   compactTitle: { flex: 1, alignItems: "center" },
+  // The dot and the title, centred together; the title shrinks, the dot never.
+  titleLine: { flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%" },
+  compactHeading: { flexShrink: 1 },
 });
