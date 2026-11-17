@@ -20,11 +20,12 @@ import {
 import { readFileConfig } from "@tentacle/config";
 import { PermissionBroker } from "@tentacle/core";
 import { MAX_SESSION_LIST } from "@tentacle/protocol";
-import type { InitializeResult } from "@tentacle/protocol";
+import type { InitializeResult, SessionListEntry, SessionListResult } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import {
   type ChartGlyphs,
   type SessionPick,
+  type SessionsView,
   type ThemeSetting,
   VOICE_DEFAULTS,
   type VoiceConfig,
@@ -44,6 +45,33 @@ import { createHooksTrustResolver } from "./hooks-trust.ts";
 import { remoteJobsView } from "./local-runtime.ts";
 import { routingAutoAccept } from "./session-auto-accept.ts";
 import { CLIENT_INFO } from "./version.ts";
+
+/**
+ * One `session/list` result as the `/sessions` view
+ * (docs/feat/mobile-session-actions.md S3): the page, and the first page's
+ * `pinned` array — EVERY pinned session on the daemon, so a pin older than the
+ * page still shows. A pod daemon is untrusted, but these are booleans and
+ * schema-bounded entries; `pinned: true` is carried only when the daemon said it.
+ */
+export function sessionsViewFrom(result: SessionListResult): SessionsView {
+  const rows = (
+    entries: readonly SessionListEntry[],
+  ): readonly SessionsView["sessions"][number][] =>
+    entries.map((s) => ({
+      id: s.sessionId,
+      title: s.title,
+      updatedAt: s.updatedAt,
+      running: s.running,
+      attached: s.attached,
+      archived: s.archived,
+      ...(s.pinned === true ? { pinned: true } : {}),
+    }));
+  return {
+    sessions: rows(result.sessions),
+    ...(result.pinned !== undefined ? { pinned: rows(result.pinned) } : {}),
+    more: result.cursor !== undefined,
+  };
+}
 
 export interface ConnectOptions {
   readonly url: string;
@@ -359,18 +387,7 @@ export async function connectTui(
       autoAccept,
       autoAcceptShared: autoAccept,
       sessions: {
-        list: () =>
-          client.sessionList({ limit: MAX_SESSION_LIST }).then((result) => ({
-            sessions: result.sessions.map((s) => ({
-              id: s.sessionId,
-              title: s.title,
-              updatedAt: s.updatedAt,
-              running: s.running,
-              attached: s.attached,
-              archived: s.archived,
-            })),
-            more: result.cursor !== undefined,
-          })),
+        list: () => client.sessionList({ limit: MAX_SESSION_LIST }).then(sessionsViewFrom),
         open: (id, reopen) => {
           const session = track(
             client.newSession(undefined, id, undefined, { attach: reopen ? { reopen } : {} }),

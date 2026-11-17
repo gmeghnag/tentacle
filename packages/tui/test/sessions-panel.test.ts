@@ -7,6 +7,7 @@ import {
   SWITCH_BUSY_NOTICE,
   type SessionsEntry,
   refreshedSessions,
+  sessionRows,
   sessionsAt,
   sessionsChoose,
   sessionsDelete,
@@ -131,6 +132,110 @@ describe("sessionsView", () => {
       10,
     );
     expect(view.hint).toBe("press x again to delete running turn · any other key cancels");
+  });
+});
+
+describe("pinned sessions first (docs/feat/mobile-session-actions.md S3)", () => {
+  test("the first page's `pinned` array leads the list, deduped by id against the page", () => {
+    // Mutation: render `data.sessions` alone → c arrives last (or not at all).
+    // Mutation: no dedupe → `a` twice.
+    const view = sessionsView(
+      {
+        sessions: [entry("a", { pinned: true }), entry("b")],
+        pinned: [entry("a"), entry("c")],
+        more: false,
+      },
+      SESSIONS_START,
+      null,
+      NOW,
+      80,
+      10,
+    );
+    expect(view.rows.map((r) => r.text.trimEnd())).toEqual([
+      "❯ · title a  5m ago · a",
+      "  · title c  5m ago · c",
+      "  title b  5m ago · b",
+    ]);
+    expect(view.title).toBe("Sessions (3)");
+  });
+
+  test("a pin older than the page still shows, first and marked with a thin ·, not an emoji", () => {
+    // Mutation: drop the `entry.pinned` lead → the row is unmarked.
+    const view = sessionsView(
+      { sessions: [entry("new"), entry("mid")], pinned: [entry("old")], more: true },
+      SESSIONS_START,
+      null,
+      NOW,
+      80,
+      10,
+    );
+    expect(view.rows[0]?.text.trimEnd()).toBe("❯ · title old  5m ago · old");
+    // A pinned archived row keeps its own markers (owner Q3).
+    expect(sessionsRowText(entry("z", { pinned: true, archived: true }), null, NOW)).toBe(
+      "· title z  5m ago · z · archived",
+    );
+    expect(view.rows.some((r) => r.text.includes("📌"))).toBe(false);
+  });
+
+  test("with no pins the order and the text are exactly today's", () => {
+    // Mutation: reorder unconditionally → b before a.
+    const view = sessionsView(
+      { sessions: [entry("a"), entry("b")], more: false },
+      SESSIONS_START,
+      null,
+      NOW,
+      80,
+      10,
+    );
+    expect(view.rows.map((r) => r.text.trimEnd())).toEqual([
+      "❯ title a  5m ago · a",
+      "  title b  5m ago · b",
+    ]);
+    expect(
+      sessionRows({ sessions: [entry("a"), entry("b")], more: false }).map((e) => e.id),
+    ).toEqual(["a", "b"]);
+  });
+
+  test("the cursor, the armed delete and a refresh all follow the shown order", () => {
+    // Mutation: `sessionsAt`/`refreshedSessions` keep reading `data.sessions` → cursor picks `a`, not the hoisted `c`.
+    const data = { sessions: [entry("a"), entry("b")], pinned: [entry("c")], more: false };
+    expect(sessionRows(data).map((e) => e.id)).toEqual(["c", "a", "b"]);
+    expect(sessionsAt(data, { cursor: 0, armed: null })?.id).toBe("c");
+    expect(sessionsAt(data, { cursor: 2, armed: null })?.id).toBe("b");
+    expect(refreshedSessions({ cursor: 9, armed: null }, data)).toEqual({ cursor: 2, armed: null });
+    // A delete armed on a hoisted pin names THAT pin's id, never the page row
+    // under the cursor — the wrong-session hazard of reordering (M4).
+    const at = sessionsAt(data, { cursor: 0, armed: null });
+    expect(at === undefined ? null : sessionsDelete(SESSIONS_START, at, null)).toMatchObject({
+      kind: "arm",
+      state: { armed: "c" },
+    });
+  });
+
+  test("the panel's own MOVE and CLICK reach a row the page alone does not hold", () => {
+    // Review fix round 1, finding 1: `apply` and `click` are the two call sites
+    // outside `sessions-panel.ts`, and they must count the rows SHOWN. Page
+    // [a,b] plus one hoisted pin c ⇒ 3 rows; a page-length count would wrap ↑↓
+    // at 2 and ignore a click on row 3, making the last hoisted row unreachable.
+    // Mutation: `sessionRows(panel.data).length` → `panel.data?.sessions.length ?? 0`
+    // in `apply` (M7) or in `click`'s `count` (M8) → this test reds.
+    const data = { sessions: [entry("a"), entry("b")], pinned: [entry("c")], more: false };
+    // The rows shown are c, a, b (3); a page-length count would see only 2 and
+    // wrap a step early. From row 1: "down" reaches the last row (2), not 0...
+    const atOne = { ...sessionsPanel(NOW, data), state: { cursor: 1, armed: null } };
+    expect(applyPanel(atOne, "down", 80)).toMatchObject({ state: { cursor: 2 } });
+    // ...and "up" from the first row reaches 2, not 1.
+    const atZero = { ...sessionsPanel(NOW, data), state: { cursor: 0, armed: null } };
+    expect(applyPanel(atZero, "up", 80)).toMatchObject({ state: { cursor: 2 } });
+    // A click on body row 2 (the last shown) moves the cursor there; with a
+    // page-length bound `2 < 2` is false and the click is ignored.
+    const view = panelView(sessionsPanel(NOW, data), 80, 10);
+    expect(view.rows).toHaveLength(3);
+    const clicked = panelClick(sessionsPanel(NOW, data), view, 2, 80);
+    expect(clicked.kind === "sessions" ? clicked.state.cursor : null).toBe(2);
+    expect(clicked.kind === "sessions" ? sessionsAt(clicked.data, clicked.state)?.id : null).toBe(
+      "b",
+    );
   });
 });
 

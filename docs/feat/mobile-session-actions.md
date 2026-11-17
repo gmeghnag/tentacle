@@ -701,6 +701,181 @@ reopened.
 The new `noMatch` case is pure and needs no device; the reviewer's point was a
 projection bug, so the unit test is the whole check.
 
+### S3 — TUI parity: `/sessions` shows pinned sessions first
+
+*— claude-opus-5-5 (claude-code 2.1.323, `settings.json` model `opus`), 2026-11-17 (executor, slice S3 only)*
+
+**S3 — DONE.**
+
+**Load-bearing check (re-run first, as asked): holds.** The plan's premise is
+that the first page's `pinned` array carries every pin, including one that sorts
+past `limit`, and that the TUI path drops it. Repro
+(`.tentacle/tmp/mobile-session-actions/s3-loadcheck.ts`, on the branch top
+`b10cb468` before any edit) builds the list with the daemon's real
+`toSessionList` — three sessions, `limit: 2`, the OLDEST pinned — then walks the
+`connect` mapping and `sessionsView`:
+
+```
+first page sessions: [ "new", "mid" ]
+first page pinned  : [ "old:true" ]
+cursor present     : true
+TUI rows           : ["❯ title new  just now · new","  title mid  just now · mid","  … more on the daemon (the newest 2 shown)"]
+TUI shows the pin  : false
+```
+
+So S1's `pinned` array does reach the client and the TUI loses it in two places:
+the `connect.ts` mapping (which rebuilds each entry field by field, so `pinned`
+and the whole `pinned` array were dropped) and `sessions-panel.ts` (which renders
+`data.sessions` only). Both are fixed; no plan step was contradicted.
+
+The same script over the fixed path
+(`.tentacle/tmp/mobile-session-actions/s3-after.ts`, `toSessionList` →
+`sessionsViewFrom` → `sessionsView`):
+
+```
+rows: ["❯ · title old  just now · old","  title new  just now · new","  title mid  just now · mid","  … more on the daemon (the newest 2 shown)"]
+```
+
+**As built, in order.**
+
+1. `packages/tui/src/sessions-panel.ts` — `SessionsEntry.pinned?: boolean`;
+   `SessionsView.pinned?: readonly SessionsEntry[]` (absent = none pinned, or an
+   older daemon); `PIN_MARK = "·"`; and the one new pure function
+   `sessionRows(view)`: the `pinned` array first (deduped by id against the
+   page, and flagging each entry it hoists, since being IN the array is the
+   pin), then the page's own order — and, with no pins, `data.sessions` **by
+   reference**, so today's order, cursor and keys are untouched. `sessionsRowText`
+   prefixes a pinned row's title with `· `; `sessionsView`, `sessionsAt` and
+   `refreshedSessions` read `sessionRows` instead of `data.sessions`, so the
+   cursor, the armed delete and a delete's refresh all follow the SHOWN order
+   (the wrong-session hazard of reordering). The `… more` footer still counts
+   `data.sessions.length`: `data.more` is a property of the page, not of the
+   hoisted pins.
+2. `packages/tui/src/panels/sessions.ts` — `apply` (a move's wrap count) and
+   `click` (the body index) use `sessionRows(panel.data).length`; the body index
+   already mapped 1:1 onto the rendered rows, which are now the hoisted ones.
+3. `packages/cli/src/connect.ts` — the mapping moved out of the inline
+   `list:` arrow into the exported pure `sessionsViewFrom(result)`
+   (`connect.ts:56-79`): each entry carries `pinned: true` only when the daemon
+   said so, and the first page's `pinned` array is passed through only when
+   present (so an older daemon's view is byte-identical to today's). Its `list:`
+   is now `client.sessionList({ limit: MAX_SESSION_LIST }).then(sessionsViewFrom)`.
+4. `changelog.d/mobile-session-actions.added.md` — the existing bullet (same
+   task slug) gained the one Mac-side sentence rather than a second file.
+5. Tests: `packages/tui/test/sessions-panel.test.ts` (a new `describe`, 4 cases)
+   and a new `packages/cli/test/connect-sessions-view.test.ts` (3 cases).
+
+**Drift from Implementation.** One, and it is additive: the plan named only
+`sessions-panel.ts` (+ its test) for S3, but the view it renders is built in
+`packages/cli/src/connect.ts`, and that mapping is where the entry flag and the
+`pinned` array were being dropped — a panel-only change would have rendered
+nothing. The plan's `sessionsView` wording ("from the same first-page `pinned`
+array") already presupposes those fields arrive, so this completes the stated
+design rather than changing it. The mapping also became a pure exported function
+instead of an inline arrow, per AGENTS §7 (computation in a testable module):
+`connectTui` is not importable in a unit test without a daemon.
+
+**RED first.** `packages/tui/test/sessions-panel.test.ts` was red before the
+panel change on the two marker cases (`Expected "❯ · title a …" / Received
+"❯ title a …"`, 17 pass / 2 fail) — the hoist and dedupe already worked, the
+marker did not, which is what located the flag question in step 1. The CLI test
+file was written after `sessionsViewFrom` existed, so its red proof is the
+mutation set below (M5/M6/M7), not a compile error.
+
+**Mutations** (each file restored from an in-memory copy; `git status` showed
+only the 6 intended paths afterwards):
+
+`packages/tui/src/sessions-panel.ts` (`.tentacle/tmp/mobile-session-actions/mut.py`):
+- M1 the view renders `data.sessions` (no hoist) → **KILLED, 17 pass / 2 fail**.
+- M2 no dedupe (`[...pinned, ...data.sessions]`) → **KILLED, 18 pass / 1 fail**.
+- M3 no pin marker (title unprefixed) → **KILLED, 17 pass / 2 fail**.
+- M4 `sessionsAt` reads `data.sessions` (cursor and armed delete on the page
+  order, not the shown one) → **KILLED, 18 pass / 1 fail**.
+- M8 `refreshedSessions` clamps to `view.sessions.length` (a delete's refresh
+  on the page order) → **KILLED, 18 pass / 1 fail**.
+
+`packages/cli/src/connect.ts` (`…/mut2.py`):
+- M5 the entry's `pinned` dropped (today's mapping) → **KILLED, 2 pass / 1 fail**.
+- M6 the first-page `pinned` array dropped → **KILLED, 2 pass / 1 fail**.
+- M7 `more` hard-wired to `false` → **KILLED, 2 pass / 1 fail**.
+
+All five panel and all three CLI mutations were killed by their own assertions
+(M4/M8 by the hoisted-cursor and refresh cases, M6 by the off-page pin), never
+by a compile error.
+
+**Gate (branch top, after S3):** `bun run typecheck` clean (root + `apps/mobile`
++ `apps/relay`) · `bun run lint` clean, 1846 files, 0 errors/warnings ·
+`bun test` **13455 pass / 5 skip / 0 fail** (957 files). The 5 skips are the
+pre-existing opt-in ones (live-k8s, live-docker, the real-socket keepalive); I
+added no `skip`, `skipIf` or `todo`. No protocol schema, wire or persistence
+change in S3 (`SessionListEntry.pinned` / `SessionListResult.pinned` were S1's),
+so `protocol.json` needed no regeneration and no `protocol.d/` note is implied;
+`packages/protocol/test/json-schema.test.ts` stays green.
+
+**Not verified:** the panel on a real terminal against a real `serve` daemon
+with 20+ pinned sessions. The width/window behaviour is inherited unchanged
+(`paletteWindow` over the hoisted count) and covered by unit tests, but the
+visual result (a `·` before the title) has only been read as text. To verify:
+`serve` with a pinned session, `tentacle connect`, `/sessions`.
+
+### Fix round 1
+
+*— claude-opus-5-5 (claude-code 2.1.323, `settings.json` model `opus`), 2026-11-17 (executor, S3 review finding 1)*
+
+One finding in this round (MEDIUM, S3), a test-gap one: the code was correct as
+built and nothing in `packages/tui/src` changed.
+
+**Finding 1 (MEDIUM) — `panels/sessions.ts` `apply` and `click` were unpinned.**
+FIXED, test only: `packages/tui/test/sessions-panel.test.ts` (new case "the
+panel's own MOVE and CLICK reach a row the page alone does not hold", in the S3
+`describe`). The review had already reproduced it: with the page `[a,b]` plus a
+hoisted pin `c`, replacing `sessionRows(panel.data).length` with
+`panel.data?.sessions.length ?? 0` at `:44` (M7) or `:53` (M8) left
+`sessions-panel` + `panels-registry` at 0 red. I confirmed that first, on the
+branch as it stood: **both mutations survived, 30 pass / 0 fail each**
+(`.tentacle/tmp/mobile-session-actions/fix1/mut.sh`).
+
+The case uses the off-page pin shape the review named (`pinned: [c]`, page
+`[a,b]`, so 3 rows shown against a 2-row page) and pins the two behaviours a
+page-length count would break: ↑ from row 0 reaches row 2 (not 1) and ↓ from row 1
+reaches row 2 (not 0), so no 2-row cycle; and `panelClick` on body row 2 (the
+last shown, index 2 = the page's row `b`) moves the cursor to 2. Both are read
+back through `applyPanel`/`panelClick` — the facades the TUI actually calls, not
+the descriptor directly — so the assertion is on the real seam.
+
+**RED/GREEN:** the code was already right, so red comes from the mutation (§9's
+non-vacuity requirement, the reviewer's own M7/M8):
+- **M7** `apply` → `panel.data?.sessions.length ?? 0` → **KILLED, 19 pass / 1
+  fail**; the failure is `toMatchObject` on `{ state: { cursor: 2 } }` (the
+  move wrapped at 2 rows instead of 3).
+- **M8** `click`'s `count` → the same expression → **KILLED, 19 pass / 1 fail**;
+  `expect(clicked.state.cursor).toBe(2)` → `Received: 0` (the click was
+  ignored, exactly the unreachable-row hazard).
+- Unmutated: 20 pass, 73 `expect()` calls. Both files restored from
+  `.tentacle/tmp/mobile-session-actions/fix1/`; `git status` shows only the one
+  test file modified afterwards.
+
+**Gate (fix round, branch top):** `bunx tsc --noEmit` clean · `bunx tsc -p
+apps/mobile` clean · `bunx tsc -p apps/relay` clean · `bun run lint` clean (1846
+files, 0 errors/warnings) · `bun test` **13455 pass / 5 skip / 1 fail** (13461
+tests, 957 files), the 5 skips the pre-existing opt-in ones. The 1 fail is NOT
+from this change: `packages/docker/test/ssh-dialer.test.ts:316` ("close() kills a
+child the ssh spawned"), a timing flake — its own 50×20 ms wait for the spawned
+child's pid file expired (`expect(childPid).toBeGreaterThan(0)` → `Received: 0`)
+under full-suite load. Re-run alone: **24 pass / 0 fail**; the whole
+`packages/docker` suite: **153 pass / 1 skip / 0 fail**. It is a pre-existing
+timing test this task does not touch: the branch changes no `packages/docker`
+file, and S3's own full run was green. No `skip`/`todo` added; the fix round
+adds no NEW test file (the case joins `sessions-panel.test.ts`).
+
+**Drift from Implementation:** none. The Design never said which module counts
+the rows; the fix pins the two call sites that must agree with `sessionRows`,
+which is the hoist S2/S3 already established, so no decision was reopened.
+
+**Not verified:** unchanged from S3 — the panel on a real terminal against a
+real `serve` daemon. The new case is pure (no Ink, no daemon) and is the whole
+check for the finding.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S1 only)*
@@ -773,3 +948,36 @@ projection bug, so the unit test is the whole check.
 - **Finding 2 is fixed.** There are two new tests, one where the session was open and one where it was not. Mutation R2 again: moving the `wasOpen` read to after the await now fails both of them (KILLED, 2 red).
 - I restored both mutations, and `git status` was clean afterwards. The commit changes no production code except `session-groups.ts`.
 - **Gate:** `session-groups` + `drawer-row-actions`: 34 pass, 0 fail. `bun run lint` is clean (1845 files). `bun run typecheck` is clean (root + mobile + relay). I did not run the full `bun test`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S3 only, `git diff main...HEAD`)*
+
+**Verdict: REQUEST-CHANGES (S3).** There is one MEDIUM finding: a test gap. The code is correct as built.
+
+1. **MEDIUM — two changed code paths in `packages/tui/src/panels/sessions.ts:44` (`apply`) and `:53` (`click`) have no test that pins them.** Mutation M7: in the move, `sessionRows(panel.data).length` → `panel.data?.sessions.length ?? 0`. Mutation M8: the same change in `click`'s `count`. Both SURVIVE `sessions-panel`, `panels-registry` and `app-panels-structure` (0 red). Failure scenario if either line regresses: say the page is `[a,b]` and `pinned` holds one more session `[c]`. The panel shows 3 rows, but ↑↓ would wrap at 2 and a click on row 3 would be ignored. The last hoisted rows would become unreachable, and nothing would catch it. Fix: add a `panels-registry`-style test for `sessionsKind.apply` (down from the last page index reaches row 3) and for `click` on a row past `data.sessions.length`. §9: each changed behaviour needs a test that goes red on the bug.
+
+**Gate:** `sessions-panel` + `connect-sessions-view`: 22 pass, 0 fail. `bun run lint` is clean (1846 files). `bun run typecheck` is clean (root + mobile + relay). I did not run the full `bun test`.
+
+**Mutations** (`.tentacle/tmp/mobile-session-actions/mut.ts`): KILLED: M1 no dedupe (1 red), M2 `sessionsAt` reads the page (1), M3 `refreshedSessions` reads the page (1), M4 no marker (2), M5 `connect` drops the `pinned` array (1), M6 no flag normalisation (2). SURVIVED: M7 and M8 (finding 1). One run was killed by a timeout while M6 was still applied. I found it in `git status` and restored it by hand. The tree is clean now.
+
+**Attacks tried:**
+- Is a hoisted pin's delete armed on the wrong id? No: `sessionsAt` and `armed` both read `sessionRows`, and a test pins it.
+- An archived pin through `choose`: `sessionsChoose` already handles `archived` → reopen. OK.
+- A pod/untrusted daemon: `pinned` is a boolean, the array is bounded by `MAX_PINNED_SESSIONS`, and titles go through `oneLine`. OK.
+- An older daemon (no `pinned`): the view is unchanged, and the order is returned by reference. Tested.
+- The footer count stays on the page length. Correct.
+
+**Holds:** §7 "logic in pure modules": `sessionRows` and `sessionsViewFrom` are pure. There is no protocol or persistence change.
+
+**Executor:** The Execution is accurate, and its listed mutations are real. It did not mutate the two panel call sites. I am the same model family as the executor (fresh context only).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context re-review of `2ef03451`, S3 only)*
+
+**Verdict: APPROVE (S3).** Finding 1 is fixed, and I found no regressions.
+
+- **Finding 1 is fixed.** The new test "the panel's own MOVE and CLICK reach a row the page alone does not hold" (`sessions-panel.test.ts`) now kills both mutations. M7 (`apply` counts the page) → KILLED, 1 red. M8 (`click` counts the page) → KILLED, 1 red. M6 was re-run and is still KILLED (2 red). I restored every mutation, and `git status` was clean afterwards.
+- **No regressions:** the commit adds only a test and doc text. It changes no production code.
+- **Gate:** `sessions-panel` passes 20/20. `bun run lint` is clean (1846 files). `bun run typecheck` is clean (root + mobile + relay). I did not run the full `bun test`.
