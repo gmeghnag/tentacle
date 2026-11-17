@@ -874,3 +874,147 @@ Regression probes (`.tentacle/tmp/model-diagrams/review/b.ts`):
 Nits (LOW, not blocking):
 - (a) A free-text type (timeline/mindmap) with `…; style x` loses that text. It does come with a note, so the loss is not silent.
 - (b) An unbalanced `"` hides a later `; click`. The source would not parse in mermaid anyway, and strict mode plus the sandbox still apply.
+
+## Execution — slice D2
+
+*— claude-opus-5-5, 2026-11-17* (executor; branch `feat/model-diagrams`, uncommitted working tree)
+
+Scope: **slice D2 only** (Files item 2): the probe, then the `diagram` tool, the
+daemon-side `parseMermaid`, registration, the child-agent exclusion and the
+subtitle cases. Nothing of D3–D7. `TODO.md` untouched. Note: D1 is already merged
+to `main` (`425fb610`); this branch is behind `main` and was not re-merged (no
+commits by the executor). `main..feat/model-artifacts` is now 0 commits, so D6/D7's
+"artifacts merged" gate looks open — the orchestrator should confirm.
+
+### 0. Load-bearing check, re-run first — **HOLDS (with a shim scoped to the import)**
+
+Probe `.tentacle/tmp/model-diagrams/probe-d2/` (`mermaid@11.17.2` exact, `linkedom@0.18.15`):
+
+```
+$ bun parse.ts            # bare bun
+flowchart  valid:THROWS DOMPurify.addHook is not a function …   (same for class, state, gantt, mindmap, timeline, journey; gitGraph: DOMPurify.sanitize)
+sequence   valid:ok | er valid:ok
+$ bun parse.ts shim       # linkedom → window/document/DOMParser/Element/Node/HTMLElement
+flowchart  valid:ok | broken:throws [jison {"first_line":2,…,"first_column":10}] Parse error on line 2:
+sequence   valid:ok | broken:throws [jison {"first_line":2,…,"first_column":6}]
+class      valid:ok | broken:throws [jison {"first_line":3,…}]
+state      valid:ok | broken:throws [jison {"first_line":2,…,"first_column":10}]
+er         valid:ok | broken:throws [jison {"first_line":2,…,"first_column":6}]
+gantt      valid:ok | broken:throws [jison {"first_line":4,"last_line":5,…}] Parse error on line 5:
+mindmap    valid:ok | broken:throws [jison {"first_line":2,"last_line":4,…}] Parse error on line 4:
+timeline   valid:ok | broken:throws [jison {"first_line":2,"last_line":3,…}] Parse error on line 3:
+journey    valid:ok | broken:ACCEPTED        ← fixture too weak; "Do it 5 Me" (no colons) is refused, used in T2.0
+gitGraph   valid:ok | broken:throws [langium line 3 col 9] Parsing failed: Parse error on line 3, column 9
+$ bun scoped.ts           # shim set for the IMPORT only, globals deleted after, then parse
+after import: typeof window = undefined
+flowchart ok · flowchart-bad throws · sequence/class/state/er/gantt/mindmap/timeline/journey/gitGraph ok · journey-bad, gitGraph-bad throw
+--- writes (0)            ← no console.* / stderr write from mermaid 11.17.2 (11.4.1 printed a chevrotain warning)
+$ bun size.ts             # Bun.build compile + minify (the repo's buildBinary options)
+empty 67.6 MiB · entry 71.4 MiB · delta 3.8 MiB · compiled run: ok
+$ bun size2.ts            # scoped.ts compiled → the same 13 results as above, writes (0)
+```
+
+Decision rule → "shim works": the shim lives in the lazily imported path of
+`diagram-parse.ts`, and only for the duration of mermaid's import. Binary size
+delta (Owner Q3): **+3.8 MiB**.
+
+### 1. As built (dependency order)
+
+| File | What |
+|---|---|
+| `packages/tools/package.json` · `bun.lock` | `mermaid` `11.17.2` and `linkedom` `0.18.15`, exact. Lockfile: +260 lines additive; two existing entries (`entities@4.5.0`, `uuid@8.3.2`) only re-nested under their dependents. |
+| `packages/tools/src/diagram-parse.ts` | `parseMermaid(src, {loader?, budgetMs?}) → {ok:true} \| {ok:false, reason:"invalid", error} \| {…"unavailable", detail} \| {…"timeout"}`, never throws. `loadMermaid` sets the 6 DOM globals, imports mermaid, `initialize({startOnLoad:false, securityLevel:"strict", logLevel:"fatal", maxEdges:500})`, and restores the globals' previous descriptors in a `finally`. `cachedMermaidLoader` = one load per process, a failed load forgotten. Budget `MERMAID_PARSE_BUDGET_MS = 2000` races the parse only (not the import). |
+| `packages/tools/src/diagram.ts` | `diagram` tool: `DIAGRAM_JSON_SCHEMA` (`title` 1..120, `mermaid` ≤ `DIAGRAM_CAPS.bytes`, both required, no extra keys), `DIAGRAM_ARGUMENTS_HINT` + `diagramArgumentsHint` (a raw line break inside the `mermaid` string, or a backtick-quoted value), the ~1 KB description, `createDiagramTool({parse?})` (seam) and `diagramTool`. `execute`: field errors (all at once) → `lintDiagram` → `parseMermaid(canonical)` → `explainMermaidError(error, canonical, lineMap)` / "not available" / "too complex — split it" → else `summarizeDiagram(diagramModel(…), type, {title, notes}).line`. `permission: "none"`, `concurrency: () => []`. |
+| `packages/tools/src/index.ts` | exports both modules (mermaid stays behind the dynamic import). |
+| `packages/cli/src/wiring.ts` | `tools.register(diagramTool)` right after `chartTool`. |
+| `packages/agent/src/subagent.ts` | `DIAGRAM_TOOL_NAME` in both "never a child" lists (P6). |
+| `packages/tui/src/render-lines.ts` · `apps/mobile/src/tool-summary.ts` | `case "diagram":` falls through to chart's `str("title") ?? args`. |
+| tests | `packages/tools/test/diagram.test.ts` (30), `packages/cli/test/diagram-wiring.test.ts` (3), a diagram pair in `apps/mobile/test/tool-summary.test.ts`'s TUI-parity table, one test in `packages/tui/test/render-lines.test.ts`, and `"diagram"` added to the pinned start-up tool list in `packages/cli/test/wiring.test.ts:986`. |
+| `changelog.d/model-diagrams.added.md` | D1's fragment (still unreleased on `main`) rewritten to describe the tool — the one fragment for this slug. |
+
+### 2. Red before green (§9)
+
+Tests written first against stubs with the real types (`parseMermaid` → `{ok:true}`,
+the tool → `{content:""}`, the hint → `undefined`):
+`bun test packages/tools/test/diagram.test.ts` → **25 fail / 4 pass**, every fail on
+an assertion. The 4 green on the stub: the "no `window` left" and "settles in time"
+guards and the "no hint" negatives (their mutants M2/M5/M9 bite below), and the T2.6
+pin (green from the `package.json` edit, made before the stubs). Then the wiring test
+→ **1 fail** (T2.7: the child got `diagram`) before the `subagent.ts` edit; the two
+subtitle tests → **2 fail** (the raw JSON as subtitle) before the `case`. After the
+code: 30 + 3 + 144 pass.
+
+### 3. Mutation checks (`.tentacle/tmp/model-diagrams/probe-d2/mutate.ts`; each applied by exact match, narrow test run, file restored; `cmp` against backups after → identical)
+
+| # | Mutant | Result |
+|---|---|---|
+| **M1** | no DOM shim (the load-bearing target) | **10 fail** — T2.0 for every DOMPurify-dependent type |
+| M2 | shim globals never restored | 1 fail — "the DOM shim does not outlive the import" |
+| M3 | `lineMap` not passed to the explainer | 1 fail — "a fenced source keeps the MODEL's line numbers" |
+| M4 | a failed import throws instead of `unavailable` | 1 fail — T2.4 |
+| M5 | no budget race | 1 fail — T2.5 |
+| M6 | a failed load stays cached | **0 fail on the first run** — T2.4 injected its own loader and bypassed the cache. Fixed: the cache became `cachedMermaidLoader` and a test drives it (fail → retry → cached). Re-run: **1 fail** |
+| M6b | no cache at all | 1 fail — the same test |
+| M7 | notes dropped from the result | 1 fail — T2.1 notes |
+| M8 | lint skipped (raw source to mermaid) | 3 fail — notes, fenced line, `pie` → chart |
+| M9 | the hint never offered | 2 fail — newline and backtick hints |
+| M10 | `wiring.ts` does not register it | 3 fail — the wiring tests |
+| M11 | the child filter misses it (`subagent.ts:408`) | 1 fail — T2.7 |
+| M12 | TUI subtitle case removed | 1 fail — the render-lines test (the phone's parity table bites the same way) |
+
+Not mutable: the `readOnlyType` list (`subagent.ts:643`). `diagram`'s concurrency is
+`[]`, which is read-class whether or not it is listed, so removing it is an
+equivalent mutant (same as `chart`'s entry there).
+
+### 4. Drift from the Implementation (and why)
+
+1. **mermaid `11.17.2`, not D1's probe version `11.4.1`.** It is the latest 11.x
+   (the plan says "`mermaid@11` exact"). D1's explainer was built from 11.4.1
+   errors, so T2.0/T2.2 run **real** 11.17.2 errors through it: the `->` sentence
+   (`line 2, col 12`), the colon-less message, and a `line ≥ 2` for every type's
+   broken fixture all hold. D6/D8 must pin the same version (T2.6's other halves).
+2. **The shim is scoped to the import, not resident.** The plan puts it "in a
+   lazily imported daemon-only module". The probe showed DOMPurify binds `window`
+   only when its module is evaluated. So the globals are restored right after the
+   import (pinned by a test and M2): a resident `window` would flip every
+   browser-sniffing library in the daemon. The remaining exposure is the import's
+   own `await`, once per process.
+3. **`parseMermaid` returns no `stats`.** The plan's own D4 says the stats come from
+   the D5 model. The tool reads them through `summarizeDiagram(diagramModel(…))`,
+   so there is one counter, not two.
+4. **The budget does not include the import**, and `Promise.race` only cuts an
+   **async** hang. A synchronous loop inside mermaid would block the daemon's
+   thread regardless; fixing that needs a worker (not in the plan). Unverified: no
+   pathological mermaid input that loops was found or tried.
+5. **T2.6 is the daemon half only**: `package.json` pins the version exactly, and
+   it is the installed one. The phone bundle header (D6) and the TUI page (D8) do
+   not exist yet; their halves join that test then.
+6. **`maxEdges: 500`** is set in `initialize` (Owner Q8). It is mermaid's default,
+   and no test drives a 501-edge source. Unverified that 11.17 enforces it at
+   `parse` rather than at render.
+7. **The changelog fragment** was rewritten now (the brief asks for one; D1's
+   fragment is still unreleased). D7 must extend this same file.
+8. Until D3/D4 (TUI) and D6 (phone), a `diagram` call shows as the generic row
+   `Diagram <title>` + the result line, which is D9's old-client path.
+
+No `protocol.d/` note, no `protocol.json` regeneration: no schema, update kind or
+log entry changed (a new tool name and its arguments are data, D9).
+
+### 5. Gate
+
+```
+$ bunx tsc --noEmit        → clean (no output)
+$ bun run lint             → Checked 1860 files. No fixes applied.
+$ bun test packages/tools/test/diagram.test.ts                   → 30 pass · 0 fail
+$ bun test packages/cli/test/diagram-wiring.test.ts              → 3 pass · 0 fail
+$ bun test apps/mobile/test/tool-summary.test.ts packages/tui/test/render-lines.test.ts → 144 pass · 0 fail
+$ bun test                 → 13528 pass · 5 skip · 1 fail   (465.71s)
+    the 1 fail: packages/cli/test/wiring.test.ts "start-up output pinned" — the pinned
+    tool list lacked "diagram" (expected: the tool IS new). Pin updated (:986, with a comment), then
+$ bun test packages/cli/test/wiring.test.ts                      → 42 pass · 0 fail
+```
+
+The 5 skips are the opt-in ones. The full suite was not re-run after the pin update
+(budget: once); the one changed file was re-run on its own, green.
+
+**Per slice: D2 DONE.**

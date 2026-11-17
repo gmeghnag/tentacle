@@ -623,6 +623,9 @@ function toolSubtitle(
     // reads above it, and the spec itself is many hundred characters
     // (docs/feat/model-charts.md D3). The phone mirrors this case for case.
     case "chart":
+    // A diagram's row likewise names it, not its Mermaid source
+    // (docs/feat/model-diagrams.md D2).
+    case "diagram":
       return str("title") ?? tool.args;
     default:
       return tool.args;

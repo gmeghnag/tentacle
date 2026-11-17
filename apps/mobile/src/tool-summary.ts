@@ -78,6 +78,9 @@ function subtitleOf(name: string, raw: string): string {
     // D3). A missing title falls back to the raw args, exactly as the TUI's case
     // does — a forged spec still shows something rather than an empty row.
     case "chart":
+    // A diagram's row likewise names it, not its Mermaid source
+    // (docs/feat/model-diagrams.md D2) — the TUI's case, mirrored.
+    case "diagram":
       return str("title") ?? raw;
     default:
       return raw;

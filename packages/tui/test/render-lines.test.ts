@@ -1319,6 +1319,17 @@ describe("toolTitle labels", () => {
     expect(toolTitle(tool("chart", '{"type":"line"}')).subtitle).toBe('{"type":"line"}');
   });
 
+  // docs/feat/model-diagrams.md D2 (T2.8): the same for a diagram — its source is
+  // many lines of Mermaid, and the title is what the user reads above it.
+  test("diagram shows its title, and the raw args when it has none", () => {
+    expect(
+      toolTitle(
+        tool("diagram", '{"title":"Flusso di login","mermaid":"flowchart TD\\n  A --> B"}'),
+      ),
+    ).toEqual({ label: "Diagram", subtitle: "Flusso di login" });
+    expect(toolTitle(tool("diagram", '{"mermaid":"x"}')).subtitle).toBe('{"mermaid":"x"}');
+  });
+
   test("an unlabelled (MCP) tool keeps its name and raw args", () => {
     expect(toolTitle(tool("mcp__x__y", '{"q":1}'))).toEqual({
       label: "mcp__x__y",

@@ -73,6 +73,7 @@ import {
   createSkillTool,
   createTaskTool,
   createWorkloadShellTool,
+  diagramTool,
   subagentExtraTools,
 } from "@tentacle/tools";
 import { logDaemonError } from "./daemon-log.ts";
@@ -701,6 +702,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // `context_reset`; never to a child agent (its steps are not transcript rows —
   // `subagent.ts`'s "never a child" list, pinned by T2.5).
   tools.register(chartTool);
+  // The model's Mermaid diagram (docs/feat/model-diagrams.md D2): chart's path —
+  // the source rides the call's arguments; mermaid parses it daemon-side, loaded
+  // on first use. Same scope as `chart`: every session-hosting build, never a child.
+  tools.register(diagramTool);
   // Session hop (docs/feat/session-hop.md D9): the model's ONE way to ask for
   // its session to move. It has no daemon-side effect at all — the laptop watches
   // the turn's events and asks the owner at its end — so `serve`, one-shot and

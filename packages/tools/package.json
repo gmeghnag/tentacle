@@ -11,6 +11,8 @@
   "dependencies": {
     "@tentacle/core": "workspace:*",
     "diff": "5.2.0",
+    "linkedom": "0.18.15",
+    "mermaid": "11.17.2",
     "pdfjs-dist": "6.5.438",
     "zod": "3.23.8",
     "zod-to-json-schema": "3.23.5"
