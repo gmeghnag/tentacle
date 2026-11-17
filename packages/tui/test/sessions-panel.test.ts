@@ -7,6 +7,7 @@ import {
   SWITCH_BUSY_NOTICE,
   type SessionsEntry,
   refreshedSessions,
+  sessionRows,
   sessionsAt,
   sessionsChoose,
   sessionsDelete,
@@ -131,6 +132,84 @@ describe("sessionsView", () => {
       10,
     );
     expect(view.hint).toBe("press x again to delete running turn · any other key cancels");
+  });
+});
+
+describe("pinned sessions first (docs/feat/mobile-session-actions.md S3)", () => {
+  test("the first page's `pinned` array leads the list, deduped by id against the page", () => {
+    // Mutation: render `data.sessions` alone → c arrives last (or not at all).
+    // Mutation: no dedupe → `a` twice.
+    const view = sessionsView(
+      {
+        sessions: [entry("a", { pinned: true }), entry("b")],
+        pinned: [entry("a"), entry("c")],
+        more: false,
+      },
+      SESSIONS_START,
+      null,
+      NOW,
+      80,
+      10,
+    );
+    expect(view.rows.map((r) => r.text.trimEnd())).toEqual([
+      "❯ · title a  5m ago · a",
+      "  · title c  5m ago · c",
+      "  title b  5m ago · b",
+    ]);
+    expect(view.title).toBe("Sessions (3)");
+  });
+
+  test("a pin older than the page still shows, first and marked with a thin ·, not an emoji", () => {
+    // Mutation: drop the `entry.pinned` lead → the row is unmarked.
+    const view = sessionsView(
+      { sessions: [entry("new"), entry("mid")], pinned: [entry("old")], more: true },
+      SESSIONS_START,
+      null,
+      NOW,
+      80,
+      10,
+    );
+    expect(view.rows[0]?.text.trimEnd()).toBe("❯ · title old  5m ago · old");
+    // A pinned archived row keeps its own markers (owner Q3).
+    expect(sessionsRowText(entry("z", { pinned: true, archived: true }), null, NOW)).toBe(
+      "· title z  5m ago · z · archived",
+    );
+    expect(view.rows.some((r) => r.text.includes("📌"))).toBe(false);
+  });
+
+  test("with no pins the order and the text are exactly today's", () => {
+    // Mutation: reorder unconditionally → b before a.
+    const view = sessionsView(
+      { sessions: [entry("a"), entry("b")], more: false },
+      SESSIONS_START,
+      null,
+      NOW,
+      80,
+      10,
+    );
+    expect(view.rows.map((r) => r.text.trimEnd())).toEqual([
+      "❯ title a  5m ago · a",
+      "  title b  5m ago · b",
+    ]);
+    expect(
+      sessionRows({ sessions: [entry("a"), entry("b")], more: false }).map((e) => e.id),
+    ).toEqual(["a", "b"]);
+  });
+
+  test("the cursor, the armed delete and a refresh all follow the shown order", () => {
+    // Mutation: `sessionsAt`/`refreshedSessions` keep reading `data.sessions` → cursor picks `a`, not the hoisted `c`.
+    const data = { sessions: [entry("a"), entry("b")], pinned: [entry("c")], more: false };
+    expect(sessionRows(data).map((e) => e.id)).toEqual(["c", "a", "b"]);
+    expect(sessionsAt(data, { cursor: 0, armed: null })?.id).toBe("c");
+    expect(sessionsAt(data, { cursor: 2, armed: null })?.id).toBe("b");
+    expect(refreshedSessions({ cursor: 9, armed: null }, data)).toEqual({ cursor: 2, armed: null });
+    // A delete armed on a hoisted pin names THAT pin's id, never the page row
+    // under the cursor — the wrong-session hazard of reordering (M4).
+    const at = sessionsAt(data, { cursor: 0, armed: null });
+    expect(at === undefined ? null : sessionsDelete(SESSIONS_START, at, null)).toMatchObject({
+      kind: "arm",
+      state: { armed: "c" },
+    });
   });
 });
 

@@ -701,6 +701,123 @@ reopened.
 The new `noMatch` case is pure and needs no device; the reviewer's point was a
 projection bug, so the unit test is the whole check.
 
+### S3 — TUI parity: `/sessions` shows pinned sessions first
+
+*— claude-opus-5-5 (claude-code 2.1.323, `settings.json` model `opus`), 2026-11-17 (executor, slice S3 only)*
+
+**S3 — DONE.**
+
+**Load-bearing check (re-run first, as asked): holds.** The plan's premise is
+that the first page's `pinned` array carries every pin, including one that sorts
+past `limit`, and that the TUI path drops it. Repro
+(`.tentacle/tmp/mobile-session-actions/s3-loadcheck.ts`, on the branch top
+`b10cb468` before any edit) builds the list with the daemon's real
+`toSessionList` — three sessions, `limit: 2`, the OLDEST pinned — then walks the
+`connect` mapping and `sessionsView`:
+
+```
+first page sessions: [ "new", "mid" ]
+first page pinned  : [ "old:true" ]
+cursor present     : true
+TUI rows           : ["❯ title new  just now · new","  title mid  just now · mid","  … more on the daemon (the newest 2 shown)"]
+TUI shows the pin  : false
+```
+
+So S1's `pinned` array does reach the client and the TUI loses it in two places:
+the `connect.ts` mapping (which rebuilds each entry field by field, so `pinned`
+and the whole `pinned` array were dropped) and `sessions-panel.ts` (which renders
+`data.sessions` only). Both are fixed; no plan step was contradicted.
+
+The same script over the fixed path
+(`.tentacle/tmp/mobile-session-actions/s3-after.ts`, `toSessionList` →
+`sessionsViewFrom` → `sessionsView`):
+
+```
+rows: ["❯ · title old  just now · old","  title new  just now · new","  title mid  just now · mid","  … more on the daemon (the newest 2 shown)"]
+```
+
+**As built, in order.**
+
+1. `packages/tui/src/sessions-panel.ts` — `SessionsEntry.pinned?: boolean`;
+   `SessionsView.pinned?: readonly SessionsEntry[]` (absent = none pinned, or an
+   older daemon); `PIN_MARK = "·"`; and the one new pure function
+   `sessionRows(view)`: the `pinned` array first (deduped by id against the
+   page, and flagging each entry it hoists, since being IN the array is the
+   pin), then the page's own order — and, with no pins, `data.sessions` **by
+   reference**, so today's order, cursor and keys are untouched. `sessionsRowText`
+   prefixes a pinned row's title with `· `; `sessionsView`, `sessionsAt` and
+   `refreshedSessions` read `sessionRows` instead of `data.sessions`, so the
+   cursor, the armed delete and a delete's refresh all follow the SHOWN order
+   (the wrong-session hazard of reordering). The `… more` footer still counts
+   `data.sessions.length`: `data.more` is a property of the page, not of the
+   hoisted pins.
+2. `packages/tui/src/panels/sessions.ts` — `apply` (a move's wrap count) and
+   `click` (the body index) use `sessionRows(panel.data).length`; the body index
+   already mapped 1:1 onto the rendered rows, which are now the hoisted ones.
+3. `packages/cli/src/connect.ts` — the mapping moved out of the inline
+   `list:` arrow into the exported pure `sessionsViewFrom(result)`
+   (`connect.ts:56-79`): each entry carries `pinned: true` only when the daemon
+   said so, and the first page's `pinned` array is passed through only when
+   present (so an older daemon's view is byte-identical to today's). Its `list:`
+   is now `client.sessionList({ limit: MAX_SESSION_LIST }).then(sessionsViewFrom)`.
+4. `changelog.d/mobile-session-actions.added.md` — the existing bullet (same
+   task slug) gained the one Mac-side sentence rather than a second file.
+5. Tests: `packages/tui/test/sessions-panel.test.ts` (a new `describe`, 4 cases)
+   and a new `packages/cli/test/connect-sessions-view.test.ts` (3 cases).
+
+**Drift from Implementation.** One, and it is additive: the plan named only
+`sessions-panel.ts` (+ its test) for S3, but the view it renders is built in
+`packages/cli/src/connect.ts`, and that mapping is where the entry flag and the
+`pinned` array were being dropped — a panel-only change would have rendered
+nothing. The plan's `sessionsView` wording ("from the same first-page `pinned`
+array") already presupposes those fields arrive, so this completes the stated
+design rather than changing it. The mapping also became a pure exported function
+instead of an inline arrow, per AGENTS §7 (computation in a testable module):
+`connectTui` is not importable in a unit test without a daemon.
+
+**RED first.** `packages/tui/test/sessions-panel.test.ts` was red before the
+panel change on the two marker cases (`Expected "❯ · title a …" / Received
+"❯ title a …"`, 17 pass / 2 fail) — the hoist and dedupe already worked, the
+marker did not, which is what located the flag question in step 1. The CLI test
+file was written after `sessionsViewFrom` existed, so its red proof is the
+mutation set below (M5/M6/M7), not a compile error.
+
+**Mutations** (each file restored from an in-memory copy; `git status` showed
+only the 6 intended paths afterwards):
+
+`packages/tui/src/sessions-panel.ts` (`.tentacle/tmp/mobile-session-actions/mut.py`):
+- M1 the view renders `data.sessions` (no hoist) → **KILLED, 17 pass / 2 fail**.
+- M2 no dedupe (`[...pinned, ...data.sessions]`) → **KILLED, 18 pass / 1 fail**.
+- M3 no pin marker (title unprefixed) → **KILLED, 17 pass / 2 fail**.
+- M4 `sessionsAt` reads `data.sessions` (cursor and armed delete on the page
+  order, not the shown one) → **KILLED, 18 pass / 1 fail**.
+- M8 `refreshedSessions` clamps to `view.sessions.length` (a delete's refresh
+  on the page order) → **KILLED, 18 pass / 1 fail**.
+
+`packages/cli/src/connect.ts` (`…/mut2.py`):
+- M5 the entry's `pinned` dropped (today's mapping) → **KILLED, 2 pass / 1 fail**.
+- M6 the first-page `pinned` array dropped → **KILLED, 2 pass / 1 fail**.
+- M7 `more` hard-wired to `false` → **KILLED, 2 pass / 1 fail**.
+
+All five panel and all three CLI mutations were killed by their own assertions
+(M4/M8 by the hoisted-cursor and refresh cases, M6 by the off-page pin), never
+by a compile error.
+
+**Gate (branch top, after S3):** `bun run typecheck` clean (root + `apps/mobile`
++ `apps/relay`) · `bun run lint` clean, 1846 files, 0 errors/warnings ·
+`bun test` **13455 pass / 5 skip / 0 fail** (957 files). The 5 skips are the
+pre-existing opt-in ones (live-k8s, live-docker, the real-socket keepalive); I
+added no `skip`, `skipIf` or `todo`. No protocol schema, wire or persistence
+change in S3 (`SessionListEntry.pinned` / `SessionListResult.pinned` were S1's),
+so `protocol.json` needed no regeneration and no `protocol.d/` note is implied;
+`packages/protocol/test/json-schema.test.ts` stays green.
+
+**Not verified:** the panel on a real terminal against a real `serve` daemon
+with 20+ pinned sessions. The width/window behaviour is inherited unchanged
+(`paletteWindow` over the hoisted count) and covered by unit tests, but the
+visual result (a `·` before the title) has only been read as text. To verify:
+`serve` with a pinned session, `tentacle connect`, `/sessions`.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S1 only)*

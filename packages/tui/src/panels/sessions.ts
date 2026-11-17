@@ -11,6 +11,7 @@ import type { KeySnapshot } from "../keys/snapshot.ts";
 import {
   type SessionsState,
   type SessionsView,
+  sessionRows,
   sessionsMove,
   sessionsView,
 } from "../sessions-panel.ts";
@@ -40,7 +41,7 @@ export const sessionsKind: PanelKind<SessionsPanel> = {
   apply: (panel: SessionsPanel, action: TreeAction, _width: number): SessionsPanel =>
     // Only the moves apply here; every other session key is this kind's `key`.
     action === "up" || action === "down"
-      ? { ...panel, state: sessionsMove(panel.state, action, panel.data?.sessions.length ?? 0) }
+      ? { ...panel, state: sessionsMove(panel.state, action, sessionRows(panel.data).length) }
       : panel,
   click: (
     panel: SessionsPanel,
@@ -49,7 +50,7 @@ export const sessionsKind: PanelKind<SessionsPanel> = {
     _width: number,
   ): SessionsPanel => {
     const row = at.rows[bodyIndex];
-    const count = panel.data?.sessions.length ?? 0;
+    const count = sessionRows(panel.data).length;
     const index = at.start + bodyIndex;
     return row?.kind === "head" && index < count
       ? { ...panel, state: { cursor: index, armed: null } }
