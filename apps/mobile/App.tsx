@@ -1474,6 +1474,7 @@ function SessionRoute({
       focusComposer={focus}
       drawerOpen={drawerOpen}
       onOpenArtifacts={onOpenArtifacts}
+      onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
     />
   );
 }
