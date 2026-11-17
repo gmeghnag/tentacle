@@ -264,3 +264,11 @@ Executor: stayed inside the plan's scope. The regressions are on the visual side
 4. The drag still reads `locationX` from whichever child the finger is on.
 
 `bun run lint` is clean and `bun run typecheck` is clean, both on unchanged code.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-17*
+
+**Verdict: REQUEST-CHANGES. Still no fix commit.** HEAD is `4bd20bcb`, "review round 2 (opus)". `git diff HEAD~1` touches only this doc. `git diff 0ed101ec HEAD -- apps` is empty: no code has changed since the exec commit. Findings 1–4 from Round 1 are all still open, and there is nothing to mutation-test. Lint and typecheck are clean, on unchanged code.
+
+**Escalation (AGENTS §0):** this is the second round with no executor commit. The fix is not reaching this branch, or not reaching this worktree. The orchestrator should confirm that the executor ran, and in which worktree, before another review round.
