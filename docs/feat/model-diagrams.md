@@ -1018,3 +1018,25 @@ The 5 skips are the opt-in ones. The full suite was not re-run after the pin upd
 (budget: once); the one changed file was re-run on its own, green.
 
 **Per slice: D2 DONE.**
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17* (fresh-context adversarial reviewer, slice D2 only; diff `main...HEAD`)
+
+**Verdict: APPROVE-WITH-NITS** — no HIGH or MEDIUM finding.
+
+Gate (re-run by the reviewer): `bun test` on the 5 touched files → **219 pass · 0 fail**. `bun run lint` → 1860 files, clean. `bun run typecheck` → clean. The full suite was not re-run.
+
+Mutation: **M1** (the DOM shim never installed) → **10 fail / 20 pass** in `diagram.test.ts`. The file was restored from a backup, `cmp` shows it identical, and `git status` is clean.
+
+Attacks tried:
+1. **A synchronous hang blocks the daemon thread.** A dense flowchart (399 lines, 9 KiB, about 1,200 edges) is refused in 7–115 ms. The source never reaches mermaid's layout, because `maxEdges: 500` IS enforced at `parse` in 11.17.2. This settles Execution drift 6, which it marked unverified. The residual risk (a jison loop) is unproven and is documented as drift 4.
+2. **The shim leaks.** After the load, `typeof window` is `"undefined"` in a separate process. M2 is pinned by a test.
+3. **§7 invariants.** Child exclusion: both lists in `subagent.ts` (:407, :643). No terminal write: `logLevel: "fatal"`, and the probe recorded 0 writes. No protocol or persistence change: correct, no `protocol.d/` note is needed. Every tool is registered in `buildAgent`. Pods get no provider credentials. All hold.
+
+Nits (LOW):
+- (a) An edge-cap refusal reads `line 1: Edge limit exceeded… — check the type line and the syntax around it`. The fix it names is wrong; it should say "split it / group into subgraphs". This comes from D1's explainer fallback (`core/diagram/`). Add a fixture when D3/D4 touch it.
+- (b) During mermaid's one-time import `await`, `window`/`document` exist process-wide. Concurrent daemon code could observe them. This is documented as drift 2 and accepted.
+- (c) Attribution mismatch. The commit `ac95a936` says "exec (deepseek)", but the Execution section is signed `claude-opus-5-5`. One of them is wrong, and §10 signatures exist precisely to track this. The orchestrator should correct it.
+
+The executor behaved well. It reported honestly: the full-suite run before the pin fix, the M6 mutant that did not bite at first and was then fixed, and the unverified items it named. The reviewer is the same model family as the signed executor, so shared blind spots are possible.
