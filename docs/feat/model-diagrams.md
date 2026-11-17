@@ -1785,6 +1785,22 @@ Gate: `bun run typecheck` clean. `bun run lint`: Checked 2033 files, no fixes. `
 
 *— claude-opus-5-5, 2026-11-17*
 
+### Gate fix
+
+**Post-merge gate, ONE failure, deterministic (`apps/mobile/test/chart-view.test.ts`, `SyntaxError: Export named 'EventEmitter' not found in …/expo-modules-core@58.0.24/…/ts-declarations/EventEmitter.js`).** D6's §5 called this "pre-existing"; it is not — it is this branch's, and the mechanism was §5's blind spot. `chart-view.test.ts` imports `screens/transcript/TranscriptRow.tsx`, which now imports `ui/diagram/DiagramBlock.tsx` → `diagram-render-expo.ts` → `expo-file-system` (the module-level `createDiagramRenderService` needs `File`/`Paths`). That is the first *value* import of a native expo module in the graph, so the file dies at load — before any `mock.module` in `beforeAll` runs, because the static imports of a test file are evaluated first, and `mock.module` only intercepts *later* dynamic imports. `package.json`/`bun.lock` were indeed undiffed; the changed link was the import edge in `TranscriptRow.tsx`.
+
+Containment, the repo's way rather than a global expo mock: `diagram-render-service.ts` (the decisions) and `diagram-display.ts` stay native-free; `diagram-render-expo.ts` is the wiring leaf nobody imports except the two components. The leak was therefore fixed at the test seam, like the four stubs already there for the same reason (`expo-symbols`, `expo-clipboard`, `haptics.ts`): `chart-view.test.ts`'s `beforeAll` registers `mock.module("expo-file-system", () => ({ File: class {}, Paths: { cache: "" } }))`. The test still loads the real `TranscriptRow` and its real diagram row; only the native file binding is a stub, exactly as `react-native`/`react-native-svg` already are. No test deleted or skipped, no behaviour changed.
+
+```
+$ bun test apps/mobile/test/chart-view.test.ts → 23 pass, 0 fail, 81 expect()
+$ bunx tsc -p apps/mobile --noEmit             → clean (exit 0)
+$ bunx biome check apps/mobile/test/chart-view.test.ts → clean
+```
+
+Not re-run (out of this fix's scope): the full `bun test` — the orchestrator's gate. Residual risk, stated honestly: the `mock.module` is order-sensitive (Bun keeps the first export shape for a module across files); `File: class {}`/`Paths` must stay a superset if another file starts stubbing `expo-file-system`.
+
+*— claude-opus-5-5, 2026-11-18*
+
 ## Review — slice D6
 
 **Verdict: REQUEST-CHANGES** (one MEDIUM; no HIGH).
