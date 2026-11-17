@@ -54,6 +54,8 @@ const children = new Set<Child>();
 export function parseArgs(argv: readonly string[]): {
   readonly only?: IosMajor;
   readonly flows?: string;
+  readonly device?: string;
+  readonly hold?: true;
 } {
   const flowsAt = argv.indexOf("--only");
   let flows: string | undefined;
@@ -64,7 +66,21 @@ export function parseArgs(argv: readonly string[]): {
     }
     flows = value;
   }
-  const withFlows = flows === undefined ? {} : { flows };
+  // `--device <udid>` / `--hold`: the env-free forms of `E2E_DEVICE` / `E2E_HOLD=1`.
+  const deviceAt = argv.indexOf("--device");
+  let device: string | undefined;
+  if (deviceAt !== -1) {
+    const value = argv[deviceAt + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("--device needs a value (a simulator udid)");
+    }
+    device = value;
+  }
+  const withFlows = {
+    ...(flows === undefined ? {} : { flows }),
+    ...(device === undefined ? {} : { device }),
+    ...(argv.includes("--hold") ? { hold: true as const } : {}),
+  };
   const at = argv.indexOf("--ios");
   if (at === -1) {
     return withFlows;
@@ -617,7 +633,7 @@ async function main(): Promise<number> {
     let worst = 0;
     for (const major of majors) {
       // `E2E_DEVICE=<udid>` pins the simulator (parallel agents each own one).
-      const device = process.env.E2E_DEVICE || firstDevice(devicesJson, major);
+      const device = args.device || process.env.E2E_DEVICE || firstDevice(devicesJson, major);
       if (device === undefined) {
         console.error(`no available iOS ${major} simulator (preflight passed: check simctl)`);
         return 2;
@@ -668,7 +684,7 @@ async function main(): Promise<number> {
     // `E2E_HOLD=1`: keep serve, the mock and the hooks up after the flows, for a
     // hand-driven sweep (`maestro --device <udid> test -e MAESTRO_HOOKS=… <flow>`);
     // Ctrl+C ends it through the same teardown.
-    if (process.env.E2E_HOLD === "1") {
+    if (args.hold === true || process.env.E2E_HOLD === "1") {
       console.log(`\nHOLD — hooks ${hooks.address}, run dir ${runDir}; Ctrl+C to end`);
       await new Promise<void>((resolve) => process.once("SIGINT", () => resolve()));
     }

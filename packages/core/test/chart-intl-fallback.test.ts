@@ -10,14 +10,19 @@ import { dateTicks, formatNumber, formatParts } from "../src/index.ts";
 const numberParts = Intl.NumberFormat.prototype.formatToParts;
 const dateParts = Intl.DateTimeFormat.prototype.formatToParts;
 
-function dropFormatToParts(): void {
+/** `missing`: no method at all; `empty`: a stub that returns no parts. */
+type Broken = "missing" | "empty";
+const BROKEN: Broken[] = ["missing", "empty"];
+
+function breakFormatToParts(how: Broken): void {
+  const value = how === "missing" ? undefined : () => [];
   Object.defineProperty(Intl.NumberFormat.prototype, "formatToParts", {
-    value: undefined,
+    value,
     configurable: true,
     writable: true,
   });
   Object.defineProperty(Intl.DateTimeFormat.prototype, "formatToParts", {
-    value: undefined,
+    value,
     configurable: true,
     writable: true,
   });
@@ -46,21 +51,21 @@ const CASES: [number, { unit: string; locale: string; decimals?: number }][] = [
 ];
 
 describe("chart formatting without Intl formatToParts (Hermes-iOS)", () => {
-  test("currency labels are identical with and without formatToParts", () => {
+  test.each(BROKEN)("currency labels are identical when formatToParts is %s", (how) => {
     const expected = CASES.map(([v, f]) => [formatNumber(v, f), formatParts(v, f)]);
-    dropFormatToParts();
+    breakFormatToParts(how);
     const actual = CASES.map(([v, f]) => [formatNumber(v, f), formatParts(v, f)]);
     expect(actual).toEqual(expected);
   });
 
-  test("month date ticks are identical with and without formatToParts", () => {
+  test.each(BROKEN)("month date ticks are identical when formatToParts is %s", (how) => {
     const spans: [number, number, string | undefined][] = [
       [Date.UTC(2023, 0, 15), Date.UTC(2025, 10, 3), undefined],
       [Date.UTC(2010, 5, 1), Date.UTC(2025, 5, 1), "America/New_York"],
       [Date.UTC(2024, 0, 1), Date.UTC(2024, 11, 31), "Asia/Tokyo"],
     ];
     const expected = spans.map(([a, b, z]) => dateTicks(a, b, 6, z));
-    dropFormatToParts();
+    breakFormatToParts(how);
     const actual = spans.map(([a, b, z]) => dateTicks(a, b, 6, z));
     expect(actual).toEqual(expected);
   });

@@ -71,6 +71,8 @@ export interface ArtifactGalleryRoute {
   /** The session was in the Archived section: its bytes need an explicit reopen. */
   readonly archived: boolean;
   readonly from: "session-info" | "hub" | "card";
+  /** A card's artifact id: the gallery opens ITS viewer at once (`galleryItemFor`). */
+  readonly open?: string;
 }
 
 /** The stack's route table (`@react-navigation/native-stack` params). */
@@ -101,6 +103,7 @@ export function openArtifactGallery(
     title: input.title,
     archived: input.archived,
     from: input.from,
+    ...(input.open === undefined ? {} : { open: input.open }),
   });
 }
 

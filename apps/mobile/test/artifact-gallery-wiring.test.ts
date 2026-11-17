@@ -33,6 +33,34 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     });
   });
 
+  test("a card opens ITS artifact: the id rides the route into the gallery (sweep: flow 30)", () => {
+    const calls: { params: Record<string, unknown> }[] = [];
+    openArtifactGallery(
+      { navigate: (_name, params) => calls.push({ params: { ...params } }) },
+      {
+        computerId: "c1",
+        sessionId: "s1",
+        title: "A",
+        archived: false,
+        from: "card",
+        open: "page",
+      },
+    );
+    expect(calls[0]?.params.open).toBe("page");
+    const screen = read("src", "screens", "SessionScreen.tsx");
+    expect(screen).toContain('onOpenArtifacts("card", meta.artifactId)');
+    const app = read("App.tsx");
+    expect(app).toMatch(/onOpenArtifacts=\{\(from, open\) =>/);
+    expect(app).toContain("open: route.params.open");
+    const gallery = read("src", "screens", "ArtifactGallery.tsx");
+    expect(gallery).toContain("galleryItemFor(view, wanted.current)");
+    expect(gallery).toMatch(/openArtifact\(target, true\)/);
+    // …and closing that viewer goes back to the session (flow 30's last step).
+    expect(gallery).toMatch(
+      /viewerCloseTarget\(\{ fromCard: fromCard\.current \}\) === "back"\s*\?\s*props\.onBack\(\)/,
+    );
+  });
+
   test("the hub and a card reach the same function (no second entry)", () => {
     const routes = read("src", "routes.ts");
     // Exactly one exported opener, and the route registered once in the stack.
@@ -64,10 +92,10 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     //    which is exactly the Review's finding 1.
     expect(app.match(/onOpenArtifacts=/g) ?? []).toHaveLength(2);
     expect(app).toMatch(
-      /onOpenArtifacts=\{\(from\) =>[\s\S]{0,300}openArtifactGallery\(navigation/,
+      /onOpenArtifacts=\{\(from, open\) =>[\s\S]{0,300}openArtifactGallery\(navigation/,
     );
     const session = read("src", "screens", "SessionScreen.tsx");
-    expect(session).toMatch(/onArtifact: \(meta\) => onOpenArtifacts\("card"\)/);
+    expect(session).toMatch(/onArtifact: \(meta\) => onOpenArtifacts\("card", meta\.artifactId\)/);
   });
 
   test("the sheet calls it for a row whose `opens` is `artifacts`", () => {

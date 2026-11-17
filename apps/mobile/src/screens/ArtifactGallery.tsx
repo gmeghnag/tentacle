@@ -20,9 +20,11 @@ import { ARTIFACT_FEEDS, type ArtifactSnapshot } from "../artifact-feed.ts";
 import {
   CHART_FILTER_LABEL,
   type GalleryItem,
+  galleryItemFor,
   galleryKindCount,
   gallerySummary,
   galleryView,
+  viewerCloseTarget,
 } from "../artifact-gallery.ts";
 import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
 import {
@@ -53,6 +55,8 @@ export interface ArtifactGalleryScreenProps {
   readonly computerId: string;
   readonly sessionId: string;
   readonly title: string;
+  /** A transcript card's artifact id: open its viewer at once. */
+  readonly open?: string;
   /** The session was in the Archived section: its bytes need an explicit reopen. */
   readonly archived: boolean;
   readonly onBack: () => void;
@@ -168,8 +172,11 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
     });
   }, [key, now, seenVersion]);
 
+  // Whether the open viewer came from a transcript card (closing it goes back).
+  const fromCard = useRef(false);
   const openArtifact = useCallback(
-    (item: GalleryItem) => {
+    (item: GalleryItem, card = false) => {
+      fromCard.current = card;
       setOpen({ meta: item.newest, versions: item.versions });
       const current = seenFor(ARTIFACT_SEEN.current(), key);
       void ARTIFACT_SEEN.set({
@@ -179,6 +186,17 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
     },
     [key],
   );
+
+  // A transcript card's artifact (`open`): its viewer opens once, as soon as its
+  // row is listed (the list may still be loading on the first render).
+  const wanted = useRef(props.open);
+  const target = galleryItemFor(view, wanted.current);
+  useEffect(() => {
+    if (target !== null) {
+      wanted.current = undefined;
+      openArtifact(target, true);
+    }
+  }, [target, openArtifact]);
 
   const listable = snapshot.phase === "ready" && !view.empty;
   return (
@@ -312,7 +330,11 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
           meta={open.meta}
           versions={open.versions}
           readBytes={readBytes}
-          onClose={() => setOpen(null)}
+          onClose={() =>
+            viewerCloseTarget({ fromCard: fromCard.current }) === "back"
+              ? props.onBack()
+              : setOpen(null)
+          }
           onLink={props.onLink}
           {...(props.onShare === undefined ? {} : { onShare: props.onShare })}
           {...(props.onRenderError === undefined ? {} : { onRenderError: props.onRenderError })}

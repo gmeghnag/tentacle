@@ -1,11 +1,11 @@
 /**
  * The Activity sheet's view (docs/feat/mobile-chrome.md Design 5, slice S8):
  * count, badge rule, groups (running first, empty live groups hidden, Scheduled
- * a ghost), elapsed from `startedAt` with an injected clock, a free `state`
+ * the real wakes or an empty state), elapsed from `startedAt` with an injected clock, a free `state`
  * shown as is, and the agent card's target.
  */
 import { describe, expect, test } from "bun:test";
-import type { JobRow, SubagentRow } from "@tentacle/protocol";
+import type { JobRow, ScheduleRow, SubagentRow } from "@tentacle/protocol";
 import type { ChildReport, FinishedChild } from "../src/activity-memory.ts";
 import {
   type ActivityInput,
@@ -14,6 +14,7 @@ import {
   elapsed,
   reportRow,
 } from "../src/activity.ts";
+import { scheduleMetaText } from "../src/schedule-view.ts";
 
 function child(id: string, over: Partial<SubagentRow> = {}): SubagentRow {
   return {
@@ -40,6 +41,7 @@ const NONE: ActivityInput = {
   finished: [],
   reports: new Map(),
   opened: [],
+  schedules: [],
 };
 
 describe("count and badge", () => {
@@ -109,12 +111,52 @@ describe("groups", () => {
     expect(v.groups[1]?.title).toBe("Shell jobs · 1 running");
   });
 
-  test("a live group with nothing in it is hidden; Scheduled is always a ghost", () => {
-    const v = activityView({ ...NONE, subagents: [], jobs: { rows: [], count: 0 } }, 0);
+  test("a live group with nothing in it is hidden; Scheduled with no wakes is an empty state", () => {
+    const v = activityView(
+      { ...NONE, subagents: [], jobs: { rows: [], count: 0 }, schedules: [] },
+      0,
+    );
     expect(v.groups.map((g) => g.kind)).toEqual(["scheduled"]);
-    expect(v.groups[0]?.ghost).toBe(true);
     expect(v.groups[0]?.rows).toEqual([]);
-    expect(v.groups.filter((g) => g.kind !== "scheduled").every((g) => !g.ghost)).toBe(true);
+    expect(v.groups[0]?.empty).toBe("No scheduled wakes");
+  });
+
+  test("a daemon with no wake feed (never reported) draws no Scheduled group, never a fake one", () => {
+    const v = activityView({ ...NONE, schedules: undefined }, 0);
+    expect(v.groups.map((g) => g.kind)).toEqual([]);
+  });
+
+  test("Scheduled shows the real wakes: the count and the SOONEST wake, one tappable row", () => {
+    const now = Date.UTC(2026, 10, 17, 9, 0);
+    const late: ScheduleRow = {
+      id: "sc-1",
+      kind: "every",
+      spec: "every 1h",
+      prompt: "check CI",
+      nextAt: now + 3_600_000,
+      fires: 2,
+      createdAt: 0,
+    };
+    const soon: ScheduleRow = {
+      ...late,
+      id: "sc-2",
+      spec: "every 10m",
+      prompt: "poll the deploy",
+      nextAt: now + 600_000,
+      fires: 4,
+    };
+    const v = activityView({ ...NONE, schedules: [late, soon] }, now);
+    const group = v.groups.find((g) => g.kind === "scheduled");
+    expect(group?.title).toBe("Scheduled · 2 wakes");
+    expect(group?.empty).toBeNull();
+    expect(group?.rows.length).toBe(1);
+    const row = group?.rows[0];
+    expect(row?.kind).toBe("scheduled");
+    expect(row?.title).toBe("poll the deploy");
+    expect(row?.meta).toBe(`next · ${scheduleMetaText(soon, now)}`);
+    // Scheduled is not "running": it never counts toward the header pill.
+    expect(v.count).toBe(0);
+    expect(v.badge).toBe(false);
   });
 
   test("a sub-agent row: description, meta with id · type · model · steps · elapsed, latest step", () => {

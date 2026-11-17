@@ -473,7 +473,8 @@ function stream(
       if (!followUp && promptLine(prompt, ESCAPE_PROMPT)) {
         for (const chunk of toolCallFrames(0, mint(), "present", {
           title: "escape probes",
-          path: `${ESCAPE_ARTIFACT_ID}.html`,
+          // Relative to the session cwd (the run dir); the harness writes `project/`.
+          path: `project/${ESCAPE_ARTIFACT_ID}.html`,
           id: ESCAPE_ARTIFACT_ID,
         })) {
           send(chunk);

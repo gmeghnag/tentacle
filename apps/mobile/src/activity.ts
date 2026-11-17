@@ -2,17 +2,19 @@
  * The Activity sheet's view-model (docs/feat/mobile-chrome.md Design 5, slice S8):
  * what runs beside the conversation, grouped by kind, running first — background
  * sub-agents (`subagents` update), background shell jobs (`jobs` update), the
- * phone's own Finished memory (`activity-memory.ts`) and a Scheduled ghost (cron
- * has no protocol yet). Also the header pill's rule and the transcript card's
- * target.
+ * phone's own Finished memory (`activity-memory.ts`) and the session's armed
+ * scheduled wakes (`schedules` update; one summary row that opens Session info's
+ * SCHEDULED WAKES, docs/fix/mobile-qa-sweep.md). Also the header pill's rule and
+ * the transcript card's target.
  *
  * Every string here may come from a pod (§7, "a pod is not trusted"): it is
  * flattened to one line of plain text and never interpreted (F16).
  *
  * Pure, React-free (AGENTS §7).
  */
-import type { JobRow, SubagentRow } from "@tentacle/protocol";
+import type { JobRow, ScheduleRow, SubagentRow } from "@tentacle/protocol";
 import type { ChildReport, FinishedChild } from "./activity-memory.ts";
+import { scheduleMetaText, scheduleTitle, wakesBadge } from "./schedule-view.ts";
 
 export interface ActivityInput {
   /** The live list; `null` until the daemon reports one (an older daemon never does). */
@@ -22,11 +24,14 @@ export interface ActivityInput {
   readonly finished: readonly FinishedChild[];
   readonly reports: ReadonlyMap<string, ChildReport>;
   readonly opened: readonly string[];
+  /** The armed wakes; `undefined` until the daemon reports them (one without the feed never does). */
+  readonly schedules: readonly ScheduleRow[] | undefined;
 }
 
 export interface ActivityRowView {
   readonly key: string;
-  readonly kind: "subagent" | "job" | "finished";
+  /** `scheduled`: the wakes' one summary row, a tap opens Session info's SCHEDULED WAKES. */
+  readonly kind: "subagent" | "job" | "finished" | "scheduled";
   /** `sa-N` / `bg-N`. */
   readonly id: string;
   readonly title: string;
@@ -48,8 +53,8 @@ export interface ActivityGroup {
   readonly kind: ActivityGroupKind;
   readonly title: string;
   readonly rows: readonly ActivityRowView[];
-  /** Greyed, "soon": nothing behind it yet. */
-  readonly ghost: boolean;
+  /** The dimmed line drawn when `rows` is empty (Scheduled only); `null` for a live group. */
+  readonly empty: string | null;
 }
 
 export interface ActivityView {
@@ -144,6 +149,46 @@ function finishedRow(
   };
 }
 
+/**
+ * The Scheduled group: the count and the SOONEST wake (the daemon's order is not
+ * the firing order), as ONE row — the wakes live, and are deleted, in Session
+ * info's SCHEDULED WAKES, which the row opens. No wakes → an empty state; a
+ * daemon that never reported the feed → no group (never a fake "soon").
+ */
+function scheduledGroup(
+  rows: readonly ScheduleRow[] | undefined,
+  now: number,
+): ActivityGroup | null {
+  if (rows === undefined) {
+    return null;
+  }
+  const soonest = rows.reduce<ScheduleRow | undefined>(
+    (best, row) => (best === undefined || row.nextAt < best.nextAt ? row : best),
+    undefined,
+  );
+  if (soonest === undefined) {
+    return { kind: "scheduled", title: "Scheduled", rows: [], empty: "No scheduled wakes" };
+  }
+  return {
+    kind: "scheduled",
+    title: `Scheduled · ${wakesBadge(rows.length)}`,
+    rows: [
+      {
+        key: "scheduled",
+        kind: "scheduled",
+        id: "scheduled",
+        title: scheduleTitle(soonest),
+        mono: false,
+        meta: `next · ${scheduleMetaText(soonest, now)}`,
+        running: false,
+        hasReport: false,
+        unread: false,
+      },
+    ],
+    empty: null,
+  };
+}
+
 export function activityView(input: ActivityInput, now: number): ActivityView {
   const agents = (input.subagents ?? []).map((row) => subagentRow(row, now));
   const jobs = (input.jobs?.rows ?? []).map((row) => jobRow(row, now));
@@ -157,7 +202,7 @@ export function activityView(input: ActivityInput, now: number): ActivityView {
       kind: "subagents",
       title: `Sub-agents · ${agents.length} running`,
       rows: agents,
-      ghost: false,
+      empty: null,
     });
   }
   if (jobCount > 0) {
@@ -165,13 +210,16 @@ export function activityView(input: ActivityInput, now: number): ActivityView {
       kind: "jobs",
       title: `Shell jobs · ${jobCount} running`,
       rows: jobs,
-      ghost: false,
+      empty: null,
     });
   }
   if (finished.length > 0) {
-    groups.push({ kind: "finished", title: "Finished", rows: finished, ghost: false });
+    groups.push({ kind: "finished", title: "Finished", rows: finished, empty: null });
   }
-  groups.push({ kind: "scheduled", title: "Scheduled", rows: [], ghost: true });
+  const scheduled = scheduledGroup(input.schedules, now);
+  if (scheduled !== null) {
+    groups.push(scheduled);
+  }
   const badgeLabel = count > 0 ? String(count) : unread > 0 ? `${unread} new` : "";
   const accessibilityLabel =
     count > 0

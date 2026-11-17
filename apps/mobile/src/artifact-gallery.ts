@@ -188,6 +188,37 @@ export function galleryView(
 }
 
 /**
+ * The row a transcript card asked to open (`ArtifactGalleryRoute.open`, the
+ * card's artifact id): the gallery opens its viewer at the NEWEST version. No
+ * id (the hub, Session info) or an id not listed (yet) → null: the gallery shows
+ * its list.
+ */
+export function galleryItemFor(
+  view: GalleryView,
+  artifactId: string | undefined,
+): GalleryItem | null {
+  if (artifactId === undefined) {
+    return null;
+  }
+  for (const section of view.sections) {
+    const item = section.items.find((it) => it.key === artifactId);
+    if (item !== undefined) {
+      return item;
+    }
+  }
+  return null;
+}
+
+/**
+ * Where closing the viewer lands: a viewer a transcript CARD opened was, to the
+ * person, opened over the conversation, so it goes `back` there (the list was
+ * never asked for); one opened from the list returns to the `list`.
+ */
+export function viewerCloseTarget(opened: { readonly fromCard: boolean }): "back" | "list" {
+  return opened.fromCard ? "back" : "list";
+}
+
+/**
  * The chip's number: how many ARTIFACTS are of `kind` (versions folded, like
  * every other count in this file — three versions of one chart is one chart).
  * A chip whose count is 0 is not offered: it would only ever produce `empty`.

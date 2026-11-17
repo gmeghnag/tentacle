@@ -83,16 +83,18 @@ function currencyFirst(locale: string): boolean {
   // Hermes on iOS (Apple's Intl) has no `formatToParts`: calling it threw a
   // TypeError and crashed the chart's row (docs/fix/mobile-qa-sweep.md). Read
   // the side off the plain string instead — the symbol is the first character
-  // that is neither a digit, a separator nor a sign.
-  if (typeof format.formatToParts !== "function") {
+  // that is neither a digit, a separator nor a sign. The same when the method
+  // exists but returns parts without a currency or a number (a partial Intl):
+  // trusting them would silently move the symbol.
+  const parts = typeof format.formatToParts === "function" ? format.formatToParts(1) : [];
+  const currencyAt = parts.findIndex((part) => part.type === "currency");
+  const numberAt = parts.findIndex((part) => part.type === "integer" || part.type === "decimal");
+  if (currencyAt < 0 || numberAt < 0) {
     const text = format.format(1);
     const symbolAt = text.search(/[^\d\s.,'  +\-−]/u);
     return symbolAt >= 0 && symbolAt < text.search(/\d/);
   }
-  const parts = format.formatToParts(1);
-  const currencyAt = parts.findIndex((part) => part.type === "currency");
-  const numberAt = parts.findIndex((part) => part.type === "integer" || part.type === "decimal");
-  return currencyAt >= 0 && currencyAt < numberAt;
+  return currencyAt < numberAt;
 }
 
 /**

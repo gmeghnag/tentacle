@@ -173,6 +173,17 @@ describe("parseArgs (--only)", () => {
     expect(() => parseArgs(["--only", "--ios", "26"])).toThrow("--only needs");
   });
 
+  test("--device <udid> pins the simulator and --hold keeps the run up (env-free forms)", () => {
+    expect(parseArgs(["--ios", "26", "--device", "0B43D716", "--hold"])).toEqual({
+      only: 26,
+      device: "0B43D716",
+      hold: true,
+    });
+    expect(parseArgs(["--ios", "26"])).toEqual({ only: 26 });
+    expect(() => parseArgs(["--device"])).toThrow("--device needs");
+    expect(() => parseArgs(["--device", "--hold"])).toThrow("--device needs");
+  });
+
   test("main loops over the SELECTED flow names (a shadowing string iterated its chars)", () => {
     const run = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
     const named = /const (\w+) = selectedFlows\(args\.flows\);/.exec(run)?.[1];

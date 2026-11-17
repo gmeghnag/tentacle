@@ -199,6 +199,182 @@ Gate: `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
 
 *— claude-opus-5-5 (executor, fix round 2), 2026-11-17*
 
+### Fix round 3 (11:38 addendum: sweep, `[]` parts, Thinking B+D, Scheduled)
+
+**Harness:** the permission gate refuses env-prefixed commands
+(`E2E_DEVICE=… bun …`), the same reason `--only` exists. So `parseArgs`
+(`apps/mobile/e2e/run.ts:54`) gained `--device <udid>` and `--hold`, the env-free
+forms of `E2E_DEVICE` / `E2E_HOLD=1`. Test: `e2e-preflight.test.ts` "--device
+<udid> pins…", red first (`Expected - 2`), green after. Run 1:
+`bun apps/mobile/e2e/run.ts --ios 26 --device 0B43D716-… --only
+24-ui-shots,25-session-info,26-drawer,27-activity,29-tool-rows,30-artifact-escape,31-chart-inline,32-chart-interact --hold`,
+run dir `.tentacle/tmp/e2e-mobile/1794911368033/` (in this worktree).
+
+### Sweep results
+Simulator iPhone 17 Pro Max, iOS 26, Release build of this branch. The shots are under
+`<run dir>/ios26/<flow>/<stamp>/<flow>/{takeScreenshot,screenshots}/`.
+| feature | expected | seen | OK/BUG | screenshot |
+|---|---|---|---|---|
+| tool rows variant C (ok, error, ranged read, MCP error, collapsed/open/error-open) | thread, dots, trailing, ∴ marker | as expected, light + dark | OK | `29-tool-rows/…/takeScreenshot/29-tool-rows-{running,collapsed,open,error-open}-{light,dark}.png` |
+| live Thinking node (B + D) | breathing accent ∴, shimmer on the word | dots mid-breath (light), shimmer band on "ing" (dark) | OK | `29-tool-rows-running-{light,dark}.png` |
+| static ∴ size (09:33) | ≈ 12–13 pt, readable | the font's ∴ is still tiny at 13 pt (beside "Thought", on the Read row) | **BUG → fixed** (below) | `29-tool-rows-running-light.png` |
+| chart inline (€ unit, date axis) + reopen | renders on Hermes-iOS, no row error | renders live and after reopen, light + dark | OK | `31-chart-inline/…/31-chart-inline-{live,reopened}-{light,dark}.png` |
+| chart interactions | flow 32 asserts | passed | OK | `32-chart-interact/…` |
+| chart headline locale | one locale per chart | headline `€16,200` (en grouping) beside Italian axis `gen/apr/giu` | BUG? → Follow-ups | `31-chart-inline-reopened-dark.png` |
+| Activity ▸ Scheduled (item 4) | real wakes or an empty state | "No scheduled wakes", no "soon" | OK | `.tentacle/tmp/mobile-qa-sweep/shots/10-activity-scheduled-empty-light.png` |
+| Session info | SCHEDULED WAKES empty state, MCP rows | as expected; the flow then fails on the off-screen SKILLS row (`session-info-skills-/e2e-demo` not visible) | flow issue | `25-session-info/…/step-052-…png` |
+| drawer long-press rename + switch | rename lands, scrim closes the drawer | rename and switch OK; Maestro cannot find `drawer-scrim` (it lives under the content view that is `accessibilityElementsHidden` while open, `SessionsDrawer.tsx:163`) | flow issue | `26-drawer/…/step-060-…png` |
+| Activity sheet rows | flow 27 taps "long child" | the row is on screen; Maestro's text match fails (the Pressable merges its labels) | flow issue | `27-activity/…/step-039-…png` |
+| app lock on the first flow | Face ID match | the passcode sheet (the first boot of this simulator; flow 25 onward unlocked) | env | `24-ui-shots/…/step-028-…png` |
+| artifacts (30) | card → HTML viewer, inert, scripts-on with no network, Allow → fetch, close → session | runs 2–6 each exposed one defect (below); **run 7 (`.tentacle/tmp/e2e-mobile/1794915939410/`) PASSES end to end** | 2 app BUGs + 3 harness/flow BUGs → fixed | runs 3–6 shots cited below |
+| owner bug 1 (gallery ✕) | below the clock | below the clock | OK (pixels) | run 3 `step-034-…png` |
+| owner bug 2 (HTML "Couldn't keep this file") | the HTML page opens | opens full screen, "Network off · Scripts off" | OK (pixels) | run 4 `step-038-runScript.png` |
+
+### Item 2: `formatToParts` that returns no parts — FIXED
+- Root cause: both guards caught only a *missing* method; a stub that returns `[]`
+  moved the currency symbol and collapsed the date axis onto 1970, silently.
+- Fix: `currencyFirst` (`packages/core/src/chart/format.ts:81`) and `monthTicks`'s
+  `months` (`scale.ts:111`) read the parts and take the string fallback whenever a
+  needed part (currency + integer/decimal; year + month) is absent.
+- Test: `chart-intl-fallback.test.ts` runs each case for `missing` AND `empty`
+  (`test.each`). Red: 2 pass / **2 fail** (the two `empty` cases). Green: 4/0.
+- Hermes-iOS itself: a currency chart with a date axis renders on the simulator
+  (flow 31). I did NOT probe `typeof …formatToParts` in Hermes: the harness has
+  no JS-eval hook. Either branch now renders the same labels.
+
+### Item 4: Activity ▸ Scheduled shows the real wakes — FIXED
+- `activity.ts` `ActivityInput.schedules` (the `schedules` feed, `undefined` until
+  reported) → `scheduledGroup`: no feed → no group (never a fake "soon"); none →
+  the empty state "No scheduled wakes"; some → `Scheduled · N wakes` and ONE row,
+  the SOONEST wake (`scheduleTitle` + `next · scheduleMetaText`). The `ghost` field
+  became `empty: string | null`.
+- `ActivitySheet.tsx`: no `value="soon"`; the Scheduled row calls `onScheduled`.
+  `SessionScreen.tsx` passes `schedules: state.schedules` and `onScheduled` closes
+  Activity, then calls `openScheduled()` (the hub's one path into SCHEDULED WAKES).
+  No hub/FloatingActivity file was touched.
+- Tests: `activity.test.ts` (3 new, red 3 fail → green) and
+  `activity-scheduled-wiring.test.ts` (source pins).
+
+### Item 3: Thinking node B + D — DONE (pixels: run 1 shots)
+- Pure `apps/mobile/src/thinking-motion.ts`: `breatheCurve(i)` (the mockup's
+  keyframes `.28 → 1 @30 % → .28 @60 %`, shifted 250 ms per dot and wrapped, so a
+  loop meets its own start), `shimmerSweep(width)`, `thinkingLook(reduceMotion)`.
+  `thinking-motion.test.ts`: red against placeholders (4 fail), green 6/0; the
+  peaks land at 450 / 700 / 950 ms in the order top → right → left.
+- `ui/StepNode.tsx`: `useLoop` (one `Animated.loop`, `useNativeDriver: true`);
+  `BreathingTherefore` (3 dots, opacity only); `ShimmerWord` (a clipping band
+  translated right while its bright copy is translated left by the same value;
+  transforms only). Reduce Motion: both clocks are null → static accent ∴, plain
+  grey word. There is no Reanimated in the app, so it uses `Animated` on the
+  native driver (the addendum allowed either).
+- Pins in `tool-rows-wiring.test.ts` (B + D wiring; native driver; no JS timers).
+- When a tool starts, the footer unmounts and the tool's spinner row draws, with
+  its static ∴ marker when a thought is folded in. That is the existing behaviour,
+  seen in the run 1 shots.
+
+### Sweep BUG: the static ∴ is still tiny — FIXED
+- Root cause: `fontSize: 13` scales the em box, but the system font's ∴ glyph
+  inks at about a third of it. **Fix:** `ThereforeDots` draws every static ∴ (the
+  thought node, the row marker, the folded thought) as the live node's three
+  dots in a `THEREFORE_SIZE` box; the `Text` glyphs are gone.
+- Pin (`tool-rows-wiring.test.ts`, "every ∴ … one size"): red on the glyph code
+  (1 fail), green after.
+- Re-screenshot, run 2 (`.tentacle/tmp/e2e-mobile/1794912918030/`, flow 29 ✓):
+  `29-tool-rows-running-light.png` shows the ∴ beside "Thought" and on the Read row at
+  the live node's size, and the shimmer band on "Thinking…".
+
+### Sweep BUG (harness): flow 30 presents a file that is not there — FIXED
+- Root cause: `run.ts:307` writes the fixture to `<run>/project/escape.html`, but
+  the daemon's cwd, which is every session's cwd, is `<run>` (`run.ts:379`), and the
+  mock model presented `escape.html` relative to it.
+- Fix: `mock-model.ts` presents `project/escape.html`. Pin:
+  `e2e-escape-probes.test.ts` "`present` reads the fixture where the harness
+  writes it…", red (1 fail), then green. The old pin asserted the wrong path and was
+  green on the bug; it is updated to the new path.
+
+### Sweep BUG (harness): `/escape-hits` answered 404 — FIXED
+- Evidence: run 4 (`.tentacle/tmp/e2e-mobile/1794914369819/`): the card opened the
+  HTML viewer ("Network off · Scripts off", full screen; this is owner bug 2 in
+  pixels, `step-038-runScript.png`), and then `30-escape-hits.js` threw
+  `escape-hits failed: 404`.
+- Root cause: `hooks.ts` `hookFor` had no `"escape-hits"` case, so the
+  route was never reached, although the handler existed (`hooks.ts:534`).
+  Flow 30's daemon-truth checks could never have passed.
+- Fix: the case is added. Test: `e2e-escape-probes.test.ts` "the hooks server routes
+  /escape-hits": red (1 fail), then green.
+
+### Sweep BUG (flow): the network confirm's "Allow" was ambiguous — FIXED
+- Evidence: run 5 (`.tentacle/tmp/e2e-mobile/1794914893999/`): the inert and the
+  scripts-on checks PASSED, so the listener got no hit. The page's
+  self-report says `sendBeacon` / `webrtc-blank-iframe` "NOT BLOCKED", which only
+  means the call did not throw; the listener is the truth. Then `tapOn: "Allow"`
+  hit the bar's own "Allow" link again, leaving the Alert up
+  (`step-046-…artifact-network-on.png`).
+- Fix: the flow taps the "Allow" that sits `below` the "Allow network?" title.
+  The pin in `e2e-escape-probes.test.ts` is updated to match.
+
+### Sweep BUG: a transcript card opens the gallery, not its artifact — FIXED
+- Evidence: run 3 (`.tentacle/tmp/e2e-mobile/1794913645867/`, flow 30): the card
+  tap lands on the Artifacts list (`step-034-…artifact-html-viewer.png`); flow 30
+  expects `artifact-html-viewer`. This is the drift that round 0 noted.
+- Root cause: `SessionScreen.tsx` `onArtifact: (meta) => onOpenArtifacts("card")`
+  dropped `meta`, so the route never said which artifact to open. The old
+  wiring pin asserted exactly that call.
+- Fix: `ArtifactGalleryRoute.open?` (`routes.ts`), set by the card from
+  `meta.artifactId` and forwarded by `App.tsx`. The gallery opens the row that
+  the pure `galleryItemFor(view, id)` (`artifact-gallery.ts`) returns, at its
+  newest version, once, as soon as it is listed. The hub and Session info pass
+  no id and are unchanged.
+- Tests: `artifact-gallery.test.ts` (2 new; red on a `null` placeholder, 1 fail, then
+  green); `artifact-gallery-wiring.test.ts` (the id rides the route, end to end). Mutation:
+  the card drops the id again → 2 fail. Restored → green.
+- Also seen in that shot: owner bug 1 is fixed in pixels. The gallery's ✕ sits
+  below the status-bar clock.
+- Follow-on (run 6, `.tentacle/tmp/e2e-mobile/1794915414237/`): every escape check
+  passed, including the non-vacuous `fetch` one after Allow. But closing the viewer
+  left the person on the gallery, which they never asked for (`session-view` not
+  visible). Fix: the pure `viewerCloseTarget({ fromCard })` → `back` for a
+  card-opened viewer (the gallery calls `onBack`), `list` for a row tap. Test:
+  `artifact-gallery.test.ts`, red on a `"list"` placeholder (1 fail), then green.
+  The wiring is pinned too.
+
+### Mutations (round 3)
+| mutation | result |
+|---|---|
+| M7: both chart guards back to `typeof formatToParts !== "function"` | 2 pass / **2 fail** (`empty` cases) |
+| M8: `scheduledGroup` takes the FIRST row, not the soonest | 25 pass / **1 fail** |
+| M9: screen feeds `schedules: undefined`; the sheet routes `subagent` rows to `onScheduled` | 1 pass / **2 fail** |
+| M10: `useLoop` `useNativeDriver: false`; the `"thinking"` case removed | 13 pass / **2 fail** |
+| M11: the card calls `onOpenArtifacts("card")` again (no id) | 8 pass / **2 fail** |
+| restored | all green |
+
+### Gate (round 3)
+`bun run typecheck` clean (root, mobile, relay) · `bun run lint` clean (1991 files) ·
+full `bun test` (once): **14509 pass / 5 skip / 1 fail**. The fail was
+`hub-artifacts-wiring.test.ts:43`, a pin on the exact text of the `onOpenArtifacts`
+signature, which this round widened with `open?: string`. Its regex now allows that
+parameter, and the file passes 2/0. The full suite was not re-run after that one-line
+test edit. The 5 skips are the same as rounds 0–2.
+e2e on iPhone 17 Pro Max / iOS 26: 29 ✓ (runs 1 and 2), 31 ✓, 32 ✓, 30 ✓ (run 7);
+24/25/26/27 ✗ on env/flow issues (table, Follow-ups).
+
+**Status: DONE for the 11:38 items 1–4, with these remaining gaps.** (a) Flows 24–27 are not
+green on this simulator (env/flow, listed in Follow-ups). (b) The hub (bug 3) was not
+re-checked; it is H3's to rebuild. (c) `typeof formatToParts` on Hermes-iOS was not
+probed; both branches now render the same labels.
+
+### Follow-ups
+- Chart headline locale: `€16,200` (en) under Italian axis labels (flow 31 shot).
+  Check which locale `formatNumber` gets for the headline vs the axis.
+- e2e flows 25/26/27 on iOS 26 + this simulator: the SKILLS row needs a
+  `scrollUntilVisible`; `drawer-scrim` is outside the a11y tree while open
+  (`SessionsDrawer.tsx:163`, so tap a point, or move the scrim out of the hidden
+  view); "long child" needs an id match, not text. These are harness fixes, not app bugs.
+- Bugs 3 (hub) and 4 (IBM chart crash): not re-checked by a flow of their own in
+  this run. The chart side is covered by flow 31 (a currency + date chart renders on Hermes).
+
+*— claude-opus-5-5 (executor, fix round 3), 2026-11-17*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES.**

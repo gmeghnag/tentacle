@@ -109,15 +109,18 @@ function monthTicks(lo: number, hi: number, rows: number, zone?: string): number
   });
   const months = (t: number): number => {
     // Hermes on iOS has no `formatToParts` (a TypeError crashed the chart's
-    // row, docs/fix/mobile-qa-sweep.md): parse en-US numeric "M/YYYY" instead.
-    if (typeof format.formatToParts !== "function") {
+    // row, docs/fix/mobile-qa-sweep.md): parse en-US numeric "M/YYYY" instead —
+    // also when its parts lack a year or a month (a partial Intl would
+    // otherwise collapse the axis onto 1970, silently).
+    const parts =
+      typeof format.formatToParts === "function" ? format.formatToParts(new Date(t)) : [];
+    const year = parts.find((p) => p.type === "year")?.value;
+    const month = parts.find((p) => p.type === "month")?.value;
+    if (year === undefined || month === undefined) {
       const match = /(\d+)\D+(\d+)/.exec(format.format(new Date(t)));
       return match ? Number(match[2]) * 12 + (Number(match[1]) - 1) : 1970 * 12;
     }
-    const parts = format.formatToParts(new Date(t));
-    const year = Number(parts.find((p) => p.type === "year")?.value ?? 1970);
-    const month = Number(parts.find((p) => p.type === "month")?.value ?? 1);
-    return year * 12 + (month - 1);
+    return Number(year) * 12 + (Number(month) - 1);
   };
   const from = months(lo);
   const to = months(hi);

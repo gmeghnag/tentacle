@@ -1,7 +1,8 @@
 /**
  * The Activity sheet (docs/feat/mobile-chrome.md Design 5, slice S8): everything
  * that runs beside the conversation, one band per group, running first —
- * Sub-agents, Shell jobs, Finished, Scheduled (a ghost: cron has no protocol yet).
+ * Sub-agents, Shell jobs, Finished, Scheduled (the wakes' count + the soonest;
+ * a tap opens Session info's SCHEDULED WAKES, `onScheduled`).
  * Every row opens its detail (S9): a child's (`SubagentDetail` — live steps,
  * message, Stop; or a Finished child's report) or a shell job's (`JobDetail`).
  *
@@ -37,6 +38,8 @@ export interface ActivitySheetProps {
   /** Stop the open child or job — the screen confirms first (F17). */
   readonly onStop: () => void;
   readonly onRefreshJob: () => void;
+  /** The Scheduled row: close this sheet, open Session info at SCHEDULED WAKES. */
+  readonly onScheduled: () => void;
   /** Absent: the open report's row is not in the transcript. */
   readonly onShow?: () => void;
   readonly onLink: (href: string) => void;
@@ -47,15 +50,17 @@ function Group({
   palette,
   group,
   onOpen,
+  onScheduled,
 }: {
   readonly palette: Palette;
   readonly group: ActivityGroup;
   readonly onOpen: (focus: ActivityFocus) => void;
+  readonly onScheduled: () => void;
 }): JSX.Element {
-  if (group.ghost) {
+  if (group.rows.length === 0 && group.empty !== null) {
     return (
       <BandSection palette={palette} title={group.title} onSheet testID={`activity-${group.kind}`}>
-        <Row palette={palette} title={group.title} value="soon" dimmed first onSheet />
+        <Row palette={palette} title={group.empty} dimmed first onSheet />
       </BandSection>
     );
   }
@@ -74,7 +79,11 @@ function Group({
             row.running ? <ActivityIndicator size="small" color={palette.accent} /> : undefined
           }
           chevron
-          onPress={() => onOpen({ kind: row.kind === "job" ? "job" : "child", id: row.id })}
+          onPress={() =>
+            row.kind === "scheduled"
+              ? onScheduled()
+              : onOpen({ kind: row.kind === "job" ? "job" : "child", id: row.id })
+          }
           {...(row.kind === "finished"
             ? { value: row.unread ? "Report · new" : row.hasReport ? "Report" : "" }
             : {})}
@@ -106,6 +115,7 @@ export function ActivitySheet({
   onSend,
   onStop,
   onRefreshJob,
+  onScheduled,
   onShow,
   onLink,
   onClose,
@@ -131,7 +141,13 @@ export function ActivitySheet({
           {detail === null ? (
             <ScrollView testID="activity-scroll" showsVerticalScrollIndicator>
               {view.groups.map((group) => (
-                <Group key={group.kind} palette={palette} group={group} onOpen={onFocus} />
+                <Group
+                  key={group.kind}
+                  palette={palette}
+                  group={group}
+                  onOpen={onFocus}
+                  onScheduled={onScheduled}
+                />
               ))}
               <View style={{ height: insets.bottom + 20 }} />
             </ScrollView>
