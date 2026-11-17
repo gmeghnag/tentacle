@@ -711,6 +711,19 @@ a recorded shape to `diagram-explain.test.ts` when D2's probe meets one.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-17* (fresh context; slice D1 only; a different model family from the executor)
 
-(empty)
+**Verdict: REQUEST-CHANGES.**
+
+Gate (rerun by the reviewer): touched tests 51 pass / 0 fail (5 files); `bun run lint` clean (1856 files); `bun run typecheck` clean. The full suite was not rerun (D1 is pure core code; Execution reports 13478 pass / 5 opt-in skips).
+Mutation: M1 (fence stripped without its note) → 2 fail, reverted, tree clean (`git status` empty).
+Repro scratch: `.tentacle/tmp/model-diagrams/review/a.ts` (outputs quoted below).
+
+Findings:
+1. **HIGH — content after the type line is silently dropped** (`packages/core/src/diagram/lint.ts:309-313`). The rewrite replaces the whole type line with `keyword + direction`. So the common one-liner `graph TD;A-->B;B-->C` returns `{ok:true, canonical:"flowchart TD", notes:[]}`: every edge is gone, with no note and no error. That is a silent wrong state. Clients would draw an empty diagram, and the tool's stats would say 0 nodes. Fix: canonicalise only the leading keyword and keep the rest of the line. Add a T1.1 test for it.
+2. **MEDIUM — a multi-line `%%{init}%%` before the type line is refused** (`lint.ts:243-248`). `isComment` skips only the opening `%%{` line. The type-line search runs BEFORE the directive pass (step 4), so `%%{init: {\n "theme":"dark"\n}}%%\nflowchart TD` → `line 2: unknown diagram type ""theme":"`. The plan says init is "dropped + note" (D3, T1.2). Multi-line init at the top is the usual form.
+3. **MEDIUM — wrong "add end" advice** (`packages/core/src/diagram/explain.ts:204-235, 335-341`). `BLOCK_KEYWORDS` includes `section` (gantt/journey/timeline have no `end`) and `state` (`state "Idle" as I` is a declaration, and a composite state closes with `}`). So ANY parse error in a gantt with a section, or in a stateDiagram with a `state … as`, becomes `"section A" (line 3) is never closed — add "end"`. Following that advice breaks the source further, and the retry loop never converges. The rule also ignores whether the fault is related to the block. Scope the rule to the diagram type (flowchart: subgraph; sequence: alt/opt/loop/par/critical/break/rect/box), or require the fault to be at EOF.
+4. **MEDIUM — `click` is not "always dropped"** (`lint.ts:123,282`). `CLICK_LINE` matches only at the start of a line, so `A-->B; click A href "javascript:…"` survives into `canonical` with no note. The same applies to `style`/`classDef` after `;`. Mermaid `securityLevel:"strict"` (D4) and the phone sandbox still stop the click, so this is defence-in-depth, not an exploit. But the plan's D3 table and the "pod forges rawInput → clients re-lint" failure mode both rely on this guarantee.
+
+Attacks tried: one-liner flowchart (#1); multi-line init before the type line (#2); explain on gantt/state fixtures (#3); `;`-joined click (#4); `sequenceDiagram autonumber` on the type line (dropped silently, the same root cause as #1); the fence mutation (bites). Holds: no mermaid import in core; explain never dumps JSON or a cyclic `result`; caps fail loud; no protocol/persistence/§7 surface touched (blast `contained` confirmed); lint and typecheck clean.
+Executor behaviour: thorough Execution notes and honest drift notes. But the Execution signature reads `claude-sonnet-4-5-20250929`, while the commit says `exec (deepseek)`. Fix the signature so model attribution is truthful (AGENTS §10).
