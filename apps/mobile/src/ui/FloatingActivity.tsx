@@ -457,30 +457,29 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
         ]}
         {...(a11y(voiceOver).draggable ? pan.panHandlers : {})}
       >
-        {/* The cast: an UNCLIPPED, unpainted ring that only casts the shadow. The
-            body below clips (its glass fill must not spill past the circle), and
-            on iOS `overflow: hidden` clips the layer's own shadow too — so the
-            shadow cannot live there. It carries the body's level, so a faint body
-            casts a faint shadow (at 100 %: the look of before this setting). */}
+        {/* The BODY layer: the shadow, blur, glass, border, glyph/badge — and the
+            rest opacity. RN multiplies a layer's opacity into it, so the badge and
+            the glyph fade with it, and it carries the body's level on the shadow
+            too, so a faint body casts a faint one (at 100 %: the look of before
+            this setting).
+
+            The shadow is on THIS layer, not on a child ring: iOS clips a layer's
+            shadow to the layer, so a child of a clipped box loses it (RN sets
+            `layer.mask` for `overflow: hidden`, RN `RCTView.m`
+            `updateClippingForLayer`), and a child that paints nothing at all gets
+            no shadow either — RN only computes a `shadowPath` for a view with a
+            solid background (`RCTUpdateShadowPathForView`), and otherwise falls
+            back to the layer's own pixels, which an empty layer does not have.
+            So the clip lives on the glass fill below, and this box — rounded, but
+            never `overflow: hidden` — casts. */}
         <Animated.View
           pointerEvents="none"
           style={[
             StyleSheet.absoluteFill,
-            styles.cast,
-            { shadowOpacity: palette.shadowOpacity, opacity: bodyLevel },
-          ]}
-        />
-        {/* The BODY layer: blur, glass, border, glyph/badge — and the rest
-            opacity. RN multiplies a layer's opacity into it, so the badge and the
-            glyph fade with it. */}
-        <Animated.View
-          pointerEvents="none"
-          style={[
-            StyleSheet.absoluteFill,
-            styles.clip,
             styles.body,
             {
               borderColor: palette.glassBorder,
+              shadowOpacity: palette.shadowOpacity,
               opacity: bodyLevel,
             },
           ]}
@@ -570,24 +569,25 @@ const styles = StyleSheet.create({
     height: FLOAT_SIZE,
     borderRadius: FLOAT_SIZE / 2,
   },
+  // The clip belongs to the PAINTED layers only: a layer's shadow is clipped by
+  // the layer itself, so a clipped box that casts has no shadow.
   clip: { borderRadius: FLOAT_SIZE / 2, overflow: "hidden" },
-  // The shadow's own layer: rounded, unpainted and UNCLIPPED (no `overflow`), so
-  // iOS draws the shadow the body's clip would otherwise swallow.
-  cast: {
-    borderRadius: FLOAT_SIZE / 2,
-    ...shadow.glass,
-  },
-  // The body layer fills the circle exactly; it is clipped (the glass fill) and
-  // carries the 1 pt edge, which `borderWidth` draws at any level.
+  // The body layer fills the circle exactly and carries the shadow: rounded, but
+  // deliberately UNCLIPPED (no `overflow`) — it must also have CONTENT for the
+  // shadow to exist, which is why the shadow is here and not on an empty ring
+  // beside it (the glass fill and the glyph are this layer's children, exactly
+  // the structure that cast the shadow before this setting existed).
   body: {
     position: "absolute",
     left: 0,
     top: 0,
     width: FLOAT_SIZE,
     height: FLOAT_SIZE,
+    borderRadius: FLOAT_SIZE / 2,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
+    ...shadow.glass,
   },
   count: { fontWeight: "600", fontVariant: ["tabular-nums"] },
   // The spinning box (the arc and its halo, one turn per 1.2 s). Square, so the

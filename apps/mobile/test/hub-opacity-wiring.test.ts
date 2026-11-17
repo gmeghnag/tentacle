@@ -90,13 +90,10 @@ function element(src: string, marker: string): { full: string; inner: string } {
 describe("the arc is outside the opacity layer (RN multiplies a parent's opacity down)", () => {
   const outer = element(BODY, 'testID="floating-activity"');
   const body = element(outer.inner, "styles.body");
-  const cast = element(outer.inner, "styles.cast");
   /**
-   * The outer view with the body and the shadow's layer taken OUT: everything else
-   * is the shell. The cast carries the body's level on purpose (the shadow fades
-   * with it), so it is not part of what the shell may not carry.
+   * The outer view with the body taken OUT: everything else is the shell.
    */
-  const shell = outer.inner.replace(body.full, "").replace(cast.full, "");
+  const shell = outer.inner.replace(body.full, "");
 
   test("the rest level is on the body layer, not on the outer view", () => {
     // The outer view keeps the show/hide fade and the transform ONLY: it is the
@@ -117,22 +114,36 @@ describe("the arc is outside the opacity layer (RN multiplies a parent's opacity
     expect(element(shell, 'testID="hub-arc"').full).not.toContain("opacity");
   });
 
-  test("the shadow is on an UNCLIPPED layer at the body's level (a clipped layer loses its shadow on iOS)", () => {
-    expect(cast.full).toContain("shadowOpacity: palette.shadowOpacity");
+  test("the shadow is on a layer that PAINTS and does NOT clip (iOS clips a layer's shadow)", () => {
+    // Two iOS facts, both in RN's own source (`RCTView.m`), and each one alone
+    // loses the shadow:
+    //  1. a layer's shadow is clipped by the layer, so a casting view must not be
+    //     `overflow: hidden` (RN sets `layer.mask` for it, `updateClippingForLayer`);
+    //  2. RN computes a `shadowPath` only for a view with a SOLID background and
+    //     otherwise falls back to the layer's own pixels
+    //     (`RCTUpdateShadowPathForView`) — an EMPTY layer casts nothing.
+    // Round 4's finding: the shadow lived on a `styles.cast` ring that painted
+    // nothing and had no children, so it passed "unclipped" and still cast
+    // nothing. The property is therefore "paints nothing" being FORBIDDEN here.
+    expect(body.full).toContain("shadowOpacity: palette.shadowOpacity");
     // The shadow fades with the body: a faint body does not cast a full one.
-    expect(cast.full).toContain("opacity: bodyLevel");
-    // It is NOT the body's own shadow: the body clips (`overflow: hidden`, for its
-    // glass fill), and that clips the layer's shadow too.
-    expect(body.full).not.toContain("shadowOpacity");
-    expect(/body:\s*\{[^}]*\}/.exec(BODY)?.[0]).not.toContain("shadow.glass");
-    expect(/circle:\s*\{[^}]*\}/.exec(BODY)?.[0]).not.toContain("shadow.glass");
-    // The cast layer paints nothing and clips nothing: it only casts.
-    const castStyle = /cast:\s*\{[\s\S]*?\n {2}\}/.exec(BODY)?.[0];
-    expect(castStyle).toContain("...shadow.glass");
-    expect(castStyle).not.toContain("overflow");
-    expect(castStyle).not.toContain("backgroundColor");
-    // The outer box no longer casts either (a full shadow under a faint body).
+    expect(body.full).toContain("opacity: bodyLevel");
+    const bodyStyle = /body:\s*\{[\s\S]*?\n {2}\}/.exec(BODY)?.[0];
+    expect(bodyStyle).toContain("...shadow.glass");
+    // Fact 1: unclipped. `styles.clip` is the glass fill's, never the body's.
+    const bodyTag = body.full.slice(0, body.full.indexOf(">"));
+    expect(bodyTag).not.toContain("styles.clip");
+    expect(bodyStyle).not.toContain("overflow");
+    // Fact 2: the casting layer has content. Its glass fill and its glyph are
+    // children; the shadow is not on a sibling ring with nothing in it.
+    expect(body.inner).toContain("palette.glass");
+    expect(body.inner).toContain('testID="hub-glyph"');
+    // No empty shadow-casting ring is left behind anywhere.
+    expect(BODY).not.toContain("styles.cast");
+    // The outer box does not cast either (a full shadow under a faint body).
     expect(shell).not.toContain("shadowOpacity");
+    // Nor does the clipped glass fill (its own clip would swallow it).
+    expect(element(body.inner, "palette.glass").full).not.toContain("shadowOpacity");
   });
 
   test("the body keeps the 1 pt edge (owner Q2: at 100 % the look is unchanged)", () => {
@@ -243,20 +254,47 @@ describe("Settings: the band is hidden in Header mode (Owner Q1) and writes once
     expect(BAND_UI).not.toMatch(/setDragging\(\(/);
   });
 
-  test("the release/terminate drops the local value, so `shown` follows the stored one again", () => {
-    // Stuck otherwise: a VoiceOver step after a drag would re-write the same
-    // number (the label does not move) and a later stored change stays hidden.
-    expect(BAND_UI).toContain("setDragging(null)");
+  test("the release HOLDS the local value until the record catches up (no flash back)", () => {
+    // Review round 4, finding 2: `commit` used to clear `dragging` synchronously,
+    // while the store publishes only after `await store.write` — so every release
+    // showed the OLD stored number for the Keychain round-trip and then jumped.
     const commit = BAND_UI.slice(
       BAND_UI.indexOf("const commit = "),
       BAND_UI.indexOf("latest.current = {"),
     );
-    const reset = commit.indexOf("setDragging(null)");
-    expect(reset).toBeGreaterThan(-1);
-    // ...after the value is read (the one write still needs it) and before the write.
-    expect(reset).toBeGreaterThan(commit.indexOf("const local = dragged.current"));
-    expect(reset).toBeLessThan(commit.indexOf("latest.current.onChange(local)"));
-    expect(BAND_UI).toContain("shownOpacity(dragging, value)");
+    // The released value is KEPT, and kept as the finger's own value...
+    expect(commit).toContain("setDragging(local)");
+    // ...and the old clear-at-release is gone (a `setDragging(null)` HERE is the bug).
+    expect(commit).not.toContain("setDragging(null)");
+    // The hold ends when the stored prop equals it — during render, so the frame
+    // that shows the new record never shows the released value again. The rule is
+    // the pure `settledReleased` (`hub-opacity.ts`, unit-tested there).
+    expect(BAND_UI).toContain("const settled = settledReleased(dragging, value)");
+    expect(BAND_UI).toMatch(/if \(settled !== dragging\) \{\s*setDragging\(settled\);/);
+    // A VoiceOver step is authoritative: it drops a held value before it writes.
+    const action = BAND_UI.slice(
+      BAND_UI.indexOf("const onAccessibilityAction = "),
+      BAND_UI.indexOf("return ("),
+    );
+    expect(action).toContain("setDragging(null)");
+  });
+
+  test("the release/terminate still makes ONE write, and only when the value moved", () => {
+    const commit = BAND_UI.slice(
+      BAND_UI.indexOf("const commit = "),
+      BAND_UI.indexOf("latest.current = {"),
+    );
+    const local = commit.indexOf("const local = dragged.current");
+    expect(local).toBeGreaterThan(-1);
+    // Read once, before the hold is published and before the write.
+    expect(commit.indexOf("dragged.current = null")).toBeGreaterThan(local);
+    expect(commit.indexOf("setDragging(local)")).toBeGreaterThan(local);
+    expect(commit.indexOf("latest.current.onChange(local)")).toBeGreaterThan(local);
+    expect(commit).toContain("local !== committedValue.current");
+    expect(BAND_UI).toContain("onPanResponderRelease: () => latest.current.commit()");
+    expect(BAND_UI).toContain("onPanResponderTerminate: () => latest.current.commit()");
+    // The write itself is outside a state updater (StrictMode could call it twice).
+    expect(BAND_UI).not.toMatch(/setDragging\(\(/);
   });
 
   test("the drag reads x from the TRACK: rail, fill and thumb are pointerEvents none", () => {

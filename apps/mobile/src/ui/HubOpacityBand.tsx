@@ -17,6 +17,7 @@ import {
   OPACITY_MIN,
   clampOpacity,
   opacityAt,
+  settledReleased,
   shownOpacity,
   stepOpacity,
 } from "../hub-opacity.ts";
@@ -45,13 +46,26 @@ export function HubOpacityBand({
   onChange,
 }: HubOpacityBandProps): JSX.Element {
   const value = clampOpacity(opacity ?? OPACITY_DEFAULT);
-  // The finger's own value while it drags: the label and the preview follow it,
-  // the record does not (one write, on release). `null` outside a gesture, so
-  // `shown` follows the stored value again (a VoiceOver step must move).
+  // The finger's own value while it drags, AND the value it released afterwards:
+  // the label and the preview follow it, the record does not (one write, on
+  // release). It is NOT cleared at release — the write is one async Keychain
+  // round-trip (`set` awaits `store.write` before it publishes), so clearing it
+  // there would show the old stored number for that whole round-trip and then
+  // jump (review round 4, finding 2). It is cleared once the record has caught
+  // up with it, below — `null` then, so a VoiceOver step after a drag moves.
   const [dragging, setDragging] = useState<number | null>(null);
   // The finger's live value, mirrored outside React: an updater must not write
   // (StrictMode may call it twice, which would be two Keychain writes).
   const dragged = useRef<number | null>(null);
+  // The record has caught up with the released value (or the write failed and
+  // published it anyway): let `shown` follow the stored value again. During
+  // render, not in an effect, so the frame that shows the new record shows it
+  // (an effect would paint one more frame of the released value). The rule itself
+  // is `settledReleased` (`hub-opacity.ts`), where it is unit-tested.
+  const settled = settledReleased(dragging, value);
+  if (settled !== dragging) {
+    setDragging(settled);
+  }
   const shown = shownOpacity(dragging, value);
   const width = useRef(0);
   const ratio = (shown - OPACITY_MIN) / (OPACITY_MAX - OPACITY_MIN);
@@ -81,14 +95,22 @@ export function HubOpacityBand({
   };
 
   /**
-   * The gesture's END: drop the local value (so `shown` follows the stored one
-   * again — a VoiceOver step after a drag must move, not re-write the same
-   * number) and make ONE write, only when the value actually moved.
+   * The gesture's END: make ONE write, only when the value actually moved.
+   *
+   * The released value is KEPT (`dragging` stays set) until the stored prop
+   * equals it: the write is one async round-trip, and the store publishes only
+   * after it, so dropping the value here would flash the old stored one and then
+   * jump. A write that FAILS still publishes the pick (F22), so the value settles
+   * either way; a refused one (`ActivitySettingsPreserved`) throws before it
+   * publishes, and then the hold simply stays — the slider is disabled in that
+   * case (`writable` false), so nothing re-arms the value.
    */
   const commit = () => {
     const local = dragged.current;
     dragged.current = null;
-    setDragging(null);
+    if (local !== null) {
+      setDragging(local);
+    }
     if (local !== null && local !== committedValue.current) {
       latest.current.onChange(local);
     }
@@ -115,12 +137,16 @@ export function HubOpacityBand({
       onPanResponderTerminate: () => latest.current.commit(),
     }),
   ).current;
-  // VoiceOver's `adjustable`: one 5 % step per increment / decrement.
+  // VoiceOver's `adjustable`: one 5 % step per increment / decrement. It drops any
+  // held released value first: a step is authoritative, so `shown` must follow the
+  // record again as soon as this step's write lands.
   const onAccessibilityAction = (event: AccessibilityActionEvent) => {
     const name = event.nativeEvent.actionName;
     if (!writable || (name !== "increment" && name !== "decrement")) {
       return;
     }
+    setDragging(null);
+    dragged.current = null;
     onChange(stepOpacity(shown, name === "increment" ? 1 : -1));
   };
 

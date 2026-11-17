@@ -126,7 +126,11 @@ this on the simulator, with the 30 % running-turn screenshot (Tests).
      when `arc.halo` is true. The halo is a View behind the arc with the same
      geometry, `borderTopColor: palette.page`, and width `arc.width + 3`.
    - The shadow's opacity is scaled by `body`, so a faint body does not cast
-     a full shadow.
+     a full shadow. (Fix round 1: it lives on the BODY layer itself — rounded,
+     but never `overflow: hidden`, and with the glass fill and the glyph as its
+     children. iOS clips a layer's shadow to that layer, and computes it from the
+     layer's pixels unless the layer has a solid background, so an empty unpainted
+     ring casts nothing.)
 4. **Settings** (`SettingsScreen.tsx`): a "Button opacity" `BandSection`
    right after the Activity band (`:346-384`), shown only when
    `activityMode === "floating"` (Owner Q1). It contains:
@@ -330,6 +334,79 @@ Both tests are therefore non-vacuous, but only as checks of the source's structu
 Findings:
 1. **MEDIUM (plausible: iOS render, not run): the round 1 shadow fix still casts no shadow.** The `cast` layer (`FloatingActivity.tsx:489-498`, style `:628`) has no `backgroundColor`, no border and no children. RN iOS sets `shadowPath` only when the view has an opaque background. Otherwise the shadow is computed from the pixels of the layer's content. This layer has no content, so the shadow is empty. On main the shadow came from the outer view's border and its glass children. The wiring test checks only that the layer is unclipped, so it still passes while the shadow is missing. Fix: give the shadow-casting layer content, for example the glass fill itself on a layer that is not clipped. Then check it with a simulator screenshot at 100 % against main.
 2. **MEDIUM: the slider jumps back on release.** `commit` (`HubOpacityBand.tsx:754-760`) clears `dragging` synchronously. The holder publishes only after `await store.write` (`activity-settings-store.ts`, `set`: `try { await store.write } finally { publish }`). So for the whole Keychain round-trip, the label, thumb and preview show the OLD stored value, and then they jump to the new one. The same happens on every release. Fix: keep the released value until the stored prop equals it (or until the write fails). `shownOpacity` is the pure place for that rule, and it needs a test.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-17* (executor, fresh session — the same model id as the reviewer of rounds 1–4, but a separate context: worth noting, since this round was not independently reviewed)
+
+Round 4's two MEDIUM findings. Both were structural, so both got a red-before-green witness and a
+mutation re-check on the fixed code. No commit (AGENTS §6: only on the owner's OK); the branch is left dirty.
+
+1. **MEDIUM — the shadow still casts nothing (round 1's fix was on an empty, unpainted layer).**
+   Root cause confirmed in RN's own source, not by analogy: `RCTUpdateShadowPathForView`
+   (`apps/mobile/node_modules/react-native/React/Views/RCTView.m:883-899`) computes a `shadowPath` only when
+   `CGColorGetAlpha(view.backgroundColor) > 0.999`, and otherwise sets `shadowPath = nil` and falls back to a
+   pixel shadow over the layer's content; `updateClippingForLayer` (`:939-961`) sets `layer.mask` for
+   `clipsToBounds`. Round 1 had made a `styles.cast` sibling ring that had no background, no border and no
+   children → no `shadowPath` and no pixels → no shadow, while the test only checked that it was unclipped.
+   **Fix:** deleted `styles.cast` and moved the shadow onto the body layer itself (`FloatingActivity.tsx:471-486`),
+   which is rounded but carries no `overflow` (the clip stays on the glass fill and the blur, `:489-496`), and
+   which has the content the shadow is computed from (its glass fill and glyph are children — main's structure).
+   `styles.body` now takes `borderRadius: FLOAT_SIZE / 2` and `...shadow.glass` (`:575-591`), `styles.clip` stays
+   the painted children's (`:572-573`).
+   Witness (`hub-opacity-wiring.test.ts:117`, "the shadow is on a layer that PAINTS and does NOT clip"):
+   red on HEAD's component (fails at `:128`), green on the fix. It asserts the two iOS facts rather than one —
+   the casting tag is not `styles.clip`, its style has no `overflow`, its children paint, and `styles.cast` no
+   longer exists at all.
+   Mutation (fixed code + HEAD's empty ring put back beside the body): fails at `:142` — the "paints nothing"
+   ring is now rejected, where round 1's assertion accepted it.
+   Visual check NOT done: no iOS build of this worktree was made (the installed `so.tentacle.app` on the booted
+   simulator predates it), so "the pixels look like main at 100 %" is still unverified — see below.
+
+2. **MEDIUM — the slider jumped back on release.**
+   Root cause: `commit` cleared `dragging` synchronously, but the store publishes only after
+   `await store.write` (`activity-settings-store.ts:172-180`), and `App.tsx:1635-1640` hands the write to the
+   holder without a local optimistic copy — so for the whole Keychain round-trip `shown` read the OLD stored
+   value, then jumped.
+   **Fix:** the released value is now HELD, not dropped. `commit` keeps it (`HubOpacityBand.tsx:97-117`, the
+   `setDragging(local)` at `:112`), and the hold is released during render once the record has caught up
+   (`:59-68`) — so the frame that shows the new record never shows the released value, and a settled slider
+   follows the stored value again. The rule is the pure `settledReleased` (`hub-opacity.ts`), per §7,
+   not an inline branch in the component. Both settle paths are covered: a write that SUCCEEDS publishes the
+   value, and a write that FAILS still publishes the pick (F22), so the held value matches either way. A refused
+   write (`ActivitySettingsPreserved`, the unreadable record) throws before publishing — but the slider is
+   disabled there (`writable` false), so nothing re-arms it.
+   A VoiceOver step is authoritative and clears the hold first (`:141-151`), so a step right after a drag moves
+   from the stored value, not the finger's.
+   `shownOpacity`'s contract is restated to match (`hub-opacity.ts:102-107`): `released` wins while the caller
+   still holds it, clamped like a stored value.
+   Witness: `hub-opacity.test.ts:69` "a JUST-RELEASED value wins over a stored one that has not caught up yet",
+   `:110` "the record catching up ends it", and the wiring test `:257` "the release HOLDS the local value until
+   the record catches up".
+   Mutation 1 (back to round 4: `setDragging(null)` in `commit` plus `released ?? …` in `shownOpacity`): fails
+   three tests — both new wiring tests and "a held value is clamped like a stored one".
+   Mutation 2 (the extracted rule gutted to `return released`): fails `hub-opacity.test.ts:110`.
+
+Files: `src/hub-opacity.ts`, `src/ui/FloatingActivity.tsx`, `src/ui/HubOpacityBand.tsx`,
+`test/hub-opacity.test.ts`, `test/hub-opacity-wiring.test.ts`. No API, protocol, store-format or §7 surface
+touched: the store's `opacity` field, the one write per gesture and the two writers are unchanged. The new
+`settledReleased` is a pure addition to `hub-opacity.ts` (§7: branching goes in the pure module, not the view).
+
+Drift from the Implementation: none in intent. Two notes on HOW it landed:
+- the Design's "the shadow's opacity is scaled by `body`" is implemented on the body layer itself instead of a
+  separate casting layer — Design 3 left the layer implicit and round 1's choice of an empty ring was the bug;
+  the note added to that bullet records the corrected shape.
+- finding 2's rule was first written inline in the component and then moved out to `settledReleased`, because
+  §7 puts branching in the pure module — the wiring test now pins the CALL, and the rule itself has unit tests.
+The arc stays outside both layers, so its effective opacity is still `fade × 1`.
+
+Gate on this worktree: `bunx tsc --noEmit` and `bunx tsc -p apps/mobile` clean; `bun run lint` clean
+(1996 files); touched tests 85 pass / 0 fail (`hub-opacity`, `hub-opacity-wiring`,
+`activity-settings-store`); full `bun test` below.
+
+**Not verified (one line):** the iOS pixels — the shadow at 100 % against main, and the release no longer
+flashing — were not looked at on a simulator (no build of this worktree); verify with
+`apps/mobile/e2e/flows/33-hub.yaml`'s `33-hub-opacity-30` shot plus a 100 % shot on a fresh build.
 
 Attacks that found nothing:
 - `parseOpacity` handles NaN, ±Infinity and strings, there is no `v` bump, and the mode and position are kept.

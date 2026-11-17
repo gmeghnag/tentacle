@@ -20,6 +20,7 @@ import {
   clampOpacity,
   hubOpacity,
   opacityAt,
+  settledReleased,
   shownOpacity,
   stepOpacity,
 } from "../src/hub-opacity.ts";
@@ -52,7 +53,7 @@ describe("rest: the body is the setting", () => {
   });
 });
 
-describe("the slider's shown value: the finger's while it drags, the stored one after", () => {
+describe("the slider's shown value: the finger's while it drags, the released one until the record catches up", () => {
   test("no gesture → the stored value", () => {
     expect(shownOpacity(null, 55)).toBe(55);
     expect(shownOpacity(null, undefined)).toBe(OPACITY_DEFAULT);
@@ -65,15 +66,63 @@ describe("the slider's shown value: the finger's while it drags, the stored one 
     expect(shownOpacity(42, 90)).toBe(42);
   });
 
-  test("the release drops it: a VoiceOver step after a drag moves again", () => {
-    // The stuck bug: with the dragged value kept, the step re-wrote the same
-    // number (the label did not move) and a later stored change stayed hidden.
+  test("a JUST-RELEASED value wins over a stored one that has not caught up yet", () => {
+    // Review round 4, finding 2: the write is one async Keychain round-trip, and
+    // the store publishes only after it. Passing `null` here (the round 4 code)
+    // showed the OLD stored number for that whole round-trip and then jumped.
+    expect(shownOpacity(45, 90)).toBe(45);
+    // It is the same value, not a re-derivation: a stored change mid-flight
+    // (another surface) does not yank the label away from the finger's pick.
+    expect(shownOpacity(45, 30)).toBe(45);
+  });
+
+  test("the release settles: once the record holds it, `null` follows the stored value again", () => {
+    // The caller drops the held value when `stored === released` (`settledReleased`);
+    // then a VoiceOver step after a drag moves again instead of re-writing the same
+    // number.
     const storedAfterDrag = 45;
-    const dropped = shownOpacity(null, storedAfterDrag);
-    expect(stepOpacity(dropped, 1)).toBe(50);
-    expect(stepOpacity(dropped, -1)).toBe(40);
-    // ...and a change to the stored value is visible again.
+    expect(stepOpacity(shownOpacity(null, storedAfterDrag), 1)).toBe(50);
+    expect(stepOpacity(shownOpacity(null, storedAfterDrag), -1)).toBe(40);
+    // ...and a later change to the stored value is visible again.
     expect(shownOpacity(null, 70)).toBe(70);
+  });
+
+  test("a failed write still settles: it publishes the pick (F22), so the held value matches", () => {
+    expect(shownOpacity(45, 45)).toBe(45);
+    expect(shownOpacity(45, 45)).toBe(shownOpacity(null, 45));
+  });
+
+  test("a held value is clamped like a stored one (never a raw number on the label)", () => {
+    expect(shownOpacity(1000, 50)).toBe(OPACITY_MAX);
+    expect(shownOpacity(0, 50)).toBe(OPACITY_MIN);
+  });
+});
+
+describe("when the hold ends: `settledReleased` keeps the released value until the record catches up", () => {
+  test("the Keychain round-trip keeps it (the round 4 bug: it was dropped here)", () => {
+    // Released 45, the record still says 90 for the length of the write.
+    expect(settledReleased(45, 90)).toBe(45);
+    // Mid-flight stored changes from another surface do not settle it either.
+    expect(settledReleased(45, 30)).toBe(45);
+    expect(settledReleased(45, undefined)).toBe(45);
+  });
+
+  test("the record catching up ends it — success or a failed write (both publish, F22)", () => {
+    expect(settledReleased(45, 45)).toBeNull();
+    // The stored record is clamped on read, so a raw one still settles.
+    expect(settledReleased(45, 45.4)).toBeNull();
+  });
+
+  test("nothing held stays nothing held", () => {
+    expect(settledReleased(null, 70)).toBeNull();
+    expect(settledReleased(null, undefined)).toBeNull();
+  });
+
+  test("the settled value is what `shownOpacity` then reads from the record", () => {
+    const stored = 45;
+    expect(shownOpacity(settledReleased(45, stored), stored)).toBe(stored);
+    // ...and while it is NOT settled, the released value is what shows.
+    expect(shownOpacity(settledReleased(45, 90), 90)).toBe(45);
   });
 });
 

@@ -88,11 +88,43 @@ export function opacityAt(x: number, width: number): number {
 
 /**
  * What the slider shows, and what a VoiceOver step starts from: the finger's own
- * value while a gesture is live, the STORED one after it ends (`released` is
- * null). The stored value is clamped here too, so a raw record never leaks out.
+ * value while a gesture is live, and — after it ends — the value it released,
+ * for as long as the record has not caught up with it. That hold is the whole
+ * point: the write is one async Keychain round-trip
+ * (`activity-settings-store.ts`, `set`: `await store.write` then `publish`), so
+ * dropping the local value at release would show the OLD stored number for the
+ * length of that round-trip and then jump. Callers pass the released value only
+ * until `value === released` (or forever, if the write fails — a failed write
+ * still publishes the pick, F22), and `null` once it is settled, so a VoiceOver
+ * step after a drag moves again. The stored value is clamped here too, so a raw
+ * record never leaks out.
  */
 export function shownOpacity(released: number | null, stored: number | undefined): number {
-  return released ?? clampOpacity(stored ?? OPACITY_DEFAULT);
+  if (released !== null) {
+    return clampOpacity(released);
+  }
+  return clampOpacity(stored ?? OPACITY_DEFAULT);
+}
+
+/**
+ * The slider's `released` slot after a render: the held value while the record
+ * has not caught up with it yet, and `null` once it has — so `shownOpacity`
+ * follows the stored value again (a VoiceOver step, another surface's change).
+ *
+ * The write is one async Keychain round-trip (`activity-settings-store.ts`,
+ * `set` awaits `store.write` then `publish`), so the stored prop lags the
+ * finger by that round-trip; clearing the hold at release (round 4's bug) showed
+ * the OLD number for its length and then jumped. The hold ends on both settle
+ * paths: a successful write publishes the value, and a FAILED one publishes the
+ * pick anyway (F22), so the two match either way.
+ */
+export function settledReleased(
+  released: number | null,
+  stored: number | undefined,
+): number | null {
+  return released === null || clampOpacity(stored ?? OPACITY_DEFAULT) !== clampOpacity(released)
+    ? released
+    : null;
 }
 
 /** VoiceOver's `adjustable`: one step up (+1) or down (−1), clamped. */
