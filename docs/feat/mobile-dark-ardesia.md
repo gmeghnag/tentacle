@@ -77,3 +77,38 @@ fail (no contrast threshold weakened).
    `CHANGELOG.md` untouched. Not committed (per the brief).
 
 ## Review
+
+### Review (opus, paired)
+*— claude-opus-5-5, 2026-11-17*
+
+**Verdict: PASS** (two comment nits, non-blocking).
+
+- **Exact values.** The `dark` block in `theme.ts` matches the plan token by token,
+  and the plan matches the mockup's `darkB3` (`.tentacle/mockups/mobile-chrome/index.html:182-186`):
+  page/bg `#1E1F21`, card/sheet/code `#28292C`, fill `#313236`, band `#242528`, drawer
+  `#19191B`, label `#EDEEF0`, sec `#A0A3A8`, sep `#37383C`, sepChat `#313236`, sepSheet
+  `#3D3E42`, glass `rgba(40,41,44,0.86)`, switchOff `#434448`. The plan-only keys are right
+  too: bandOnSheet `#28292C`, codeOnSheet `#313236`. glassBorder, shadowOpacity 0.35 and
+  scrim are unchanged. `sheetBehind` is not a `Palette` key, so skipping it is correct.
+- **Light untouched.** The `theme.ts` diff touches only the `dark` object. Accent,
+  semantic, diff and syntax tokens are unchanged.
+- **No leftovers.** I ran `rg` for the B1 hexes in `apps/mobile` and found only the
+  `theme.ts:148` history comment, the intentional `not.toBe("#1F1F1E")` guard and one
+  stale test comment (nit 2). `ImageViewer` `GROUND` follows. `app.json` has no splash
+  colour.
+- **Red→green, re-run by me.** `theme.test.ts` + `artifact-viewers-wiring.test.ts`:
+  115 pass on HEAD. I restored `theme.ts` + `ImageViewer.tsx` to the merge-base
+  (`83b4e275`) and 5 tests failed: the B3 pins, the owner's six, cool-slate, band and
+  the viewer ground. Reverted, tree clean.
+- **No weakened contrast test.** The contrast thresholds in the diff are unchanged
+  (`≥ 4.5`, `> 1`); only names and pins changed.
+- **Changelog** `changelog.d/mobile-dark-ardesia.changed.md` is present, one bullet.
+- **Gate (scoped per brief):** `bunx tsc -p apps/mobile` clean.
+- **Nit 1 (factually wrong comment):** `theme.ts:150` ("B3's *lighter* `fill`") and
+  Execution step 6 say B3's fill is lighter than B1's. It is slightly *darker*
+  (relative luminance ≈0.0320 vs ≈0.0328). That is exactly why red's contrast on it
+  went up, so the conclusion holds but the reason is wrong. Fix the word to "darker".
+- **Nit 2:** `test/band-screens.test.ts:321` comment still quotes B1's `#403F3B` /
+  `#3A3936`. It should say `#3D3E42` / `#37383C`.
+- **Executor behaviour:** accurate and in scope. The Execution signature doesn't give
+  a model id, while the commit says deepseek. The orchestrator should record the real id.
