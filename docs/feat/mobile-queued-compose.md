@@ -279,6 +279,10 @@ Flows: `apps/mobile/e2e/flows/12-steer.*`, `13-send-now.*` (`composer-queue` /
 6. **Order:** start Execution only after fix/mobile-queued-stuck is merged.
    *Recommendation:* yes — a stuck row would become a stuck bubble.
 
+### Owner answers (2026-11-17 ~22:10)
+Q1–Q6: all recommendations accepted (split `feat/queue-unqueue`, Opus exec, lands first; edit = withdraw; other devices labelled, not tappable; bubble Send now sends only that message; ↑ when typed / ■ on empty field while running; execution only after fix/mobile-queued-stuck merges). Implementation APPROVED.
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-17*
+
 ## Execution
 
 *(empty — awaiting approval)*
