@@ -1177,6 +1177,8 @@ export function SessionScreen({
               accessibilityLabel={hubA11yLabel(hubBadgeInput)}
               voiceOver={a11yFlags.voiceOver}
               reduceMotion={a11yFlags.reduceMotion}
+              reduceTransparency={a11yFlags.reduceTransparency}
+              opacity={activitySettings.opacity}
               fanItems={hub.fan}
               allItems={hub.all}
               solve={() =>

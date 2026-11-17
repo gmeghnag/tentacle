@@ -53,6 +53,110 @@ describe("round-trip", () => {
   });
 });
 
+/**
+ * docs/feat/mobile-hub-opacity.md Design 1: `opacity` is an ADDITIVE optional
+ * field inside the same v1 record. Bumping `v` would make every older build
+ * treat the record as unreadable and refuse to write it (rule 2), which is worse
+ * than an old build dropping a field it does not know.
+ */
+describe("opacity: an additive optional field in the same v1 record", () => {
+  test("round-trip: mode + position + opacity read back", async () => {
+    const f = fake();
+    const s = {
+      mode: "floating" as const,
+      position: { edge: "right" as const, yFraction: 0.5 },
+      opacity: 55,
+    };
+    await f.store.write(s);
+    expect(await f.store.read()).toEqual({ settings: s, writable: true });
+    // Still v1: an older build keeps reading this record instead of preserving it.
+    expect(JSON.parse(f.items.get(ACTIVITY_SETTINGS_KEY) ?? "")).toEqual({ v: 1, ...s });
+  });
+
+  test("an absent opacity reads back absent (→ the 100 % default)", async () => {
+    const f = fake(JSON.stringify({ v: 1, mode: "floating" }));
+    expect(await f.store.read()).toEqual({ settings: { mode: "floating" }, writable: true });
+  });
+
+  test("a bad opacity drops the opacity ONLY: the mode and position are kept", async () => {
+    for (const opacity of ["50", null, Number.NaN, [55], {}]) {
+      const raw = JSON.stringify({
+        v: 1,
+        mode: "floating",
+        position: { edge: "left", yFraction: 0.25 },
+        opacity,
+      });
+      expect(await fake(raw).store.read()).toEqual({
+        settings: { mode: "floating", position: { edge: "left", yFraction: 0.25 } },
+        writable: true,
+      });
+    }
+  });
+
+  test("an out-of-range opacity is clamped: 10 → 30, 150 → 100, 62.6 → 63", async () => {
+    for (const [opacity, expected] of [
+      [10, 30],
+      [150, 100],
+      [62.6, 63],
+    ] as const) {
+      const raw = JSON.stringify({ v: 1, mode: "floating", opacity });
+      expect(await fake(raw).store.read()).toEqual({
+        settings: { mode: "floating", opacity: expected },
+        writable: true,
+      });
+    }
+  });
+
+  test("a MODE write keeps the opacity (the holder spread, App.tsx:1626)", async () => {
+    const f = fake();
+    const h = createActivitySettingsHolder(f.store);
+    await h.load();
+    await h.set({ mode: "floating" });
+    await h.set({ ...h.current(), opacity: 40 });
+    expect(h.current()).toEqual({ mode: "floating", opacity: 40 });
+    // The next mode change spreads `current()`, so the opacity survives it.
+    await h.set({ ...h.current(), mode: "header" });
+    expect(h.current()).toEqual({ mode: "header", opacity: 40 });
+    expect(await f.store.read()).toEqual({
+      settings: { mode: "header", opacity: 40 },
+      writable: true,
+    });
+  });
+
+  test("a POSITION write keeps the opacity (the holder spread, SessionScreen.tsx:1191)", async () => {
+    const f = fake();
+    const h = createActivitySettingsHolder(f.store);
+    await h.load();
+    await h.set({ mode: "floating", opacity: 35 });
+    await h.set({ ...h.current(), position: { edge: "left", yFraction: 0.5 } });
+    expect(h.current()).toEqual({
+      mode: "floating",
+      opacity: 35,
+      position: { edge: "left", yFraction: 0.5 },
+    });
+  });
+
+  test("a newer build's record still wins: a refused write keeps the bytes", async () => {
+    const newer = JSON.stringify({ v: 9, mode: "orbit", opacity: 30 });
+    const f = fake(newer);
+    await f.store.read();
+    await expect(f.store.write({ mode: "floating", opacity: 40 })).rejects.toBeInstanceOf(
+      ActivitySettingsPreserved,
+    );
+    expect(f.items.get(ACTIVITY_SETTINGS_KEY)).toBe(newer);
+  });
+
+  test("an older build's record (no opacity) is not preserved — it is writable", async () => {
+    const f = fake(
+      JSON.stringify({ v: 1, mode: "floating", position: { edge: "left", yFraction: 0.1 } }),
+    );
+    const read = await f.store.read();
+    expect(read.writable).toBe(true);
+    await f.store.write({ ...read.settings, opacity: 70 });
+    expect(JSON.parse(f.items.get(ACTIVITY_SETTINGS_KEY) ?? "").opacity).toBe(70);
+  });
+});
+
 describe("rule 1: unreadable / missing / unknown v → the defaults (Header, no position)", () => {
   test("the default is Header", () => {
     expect(DEFAULT_ACTIVITY_SETTINGS).toEqual({ mode: "header" });
