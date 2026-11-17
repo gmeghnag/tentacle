@@ -474,3 +474,16 @@ export function spokenDuration(ms: number): string {
   const min = unit(Math.floor(seconds / 60), "minute");
   return seconds % 60 === 0 ? min : `${min} ${unit(seconds % 60, "second")}`;
 }
+
+/**
+ * A clock that ticks once a second (a running step, the "Thinking…" footer):
+ * "" under a second, then whole seconds `12 s`, then `2 min 5 s` — `elapsed()`'s
+ * shape without its tenths, which would flicker on a 1 s tick.
+ */
+export function liveElapsed(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 1) {
+    return "";
+  }
+  return seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min ${seconds % 60} s`;
+}

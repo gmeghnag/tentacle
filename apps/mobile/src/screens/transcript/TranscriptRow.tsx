@@ -6,8 +6,9 @@ import type { ArtifactMeta } from "@tentacle/protocol";
  * never executed, never a link unless the markdown tree says so.
  *
  * Look (mockup `Conversation`): the person's message is a right-aligned `fill`
- * bubble; the answer is full-width text on the page; reasoning is one collapsed
- * line; a tool call is a `ToolRow` whose output opens below it.
+ * bubble; the answer is full-width text on the page; a tool call — and a thought
+ * — is a `StepNode` on a thread of steps (docs/feat/mobile-tool-rows.md, mockup
+ * C) whose body opens below it.
  *
  * The `testID`s are the contract the Maestro flows assert on (text is invisible
  * to XCUITest under RN's new architecture, plan P9):
@@ -23,18 +24,15 @@ import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-la
 import { firedScheduleHead } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { type Thumbnail, type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
-import { subAgentLine, toolMeta, toolSummary } from "../../tool-summary.ts";
+import { type StepCell, type ThreadPos, stepRowView, thoughtRowView } from "../../tool-steps.ts";
+import { subAgentLine } from "../../tool-summary.ts";
 import { type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
-import { ToolRow } from "../../ui/ToolRow.tsx";
-import { animateNextLayout } from "../../ui/animate.ts";
+import { StepBody, StepNode } from "../../ui/StepNode.tsx";
 import { ChartBlock } from "../../ui/chart/ChartBlock.tsx";
 import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MediaViewer } from "./MediaViewer.tsx";
-
-/** Lines of a tool's output shown before "show more" (plan F21's bound on screen). */
-export const OUTPUT_PREVIEW_LINES = 12;
 
 /**
  * The width a bubble's media is laid out at, in points (item 4). The bubble caps
@@ -75,6 +73,53 @@ export interface RowProps {
    * card is still drawn, just not pressable (a test with no router).
    */
   readonly onArtifact?: (meta: ArtifactMeta) => void;
+  /**
+   * How a tool or reasoning row draws on the thread of steps
+   * (docs/feat/mobile-tool-rows.md S2). Absent: a lone, closed step.
+   */
+  readonly step?: StepProps;
+}
+
+/**
+ * The screen-owned half of a step: its cell from `stepLayout` and the open /
+ * show-all state, which lives in the SCREEN so a virtualised cell that unmounts
+ * does not lose it.
+ */
+export interface StepProps {
+  readonly cell: StepCell | undefined;
+  readonly open: boolean;
+  /** Every output line (the "… +N more lines" row was tapped). */
+  readonly full: boolean;
+  readonly reduceMotion: boolean;
+  readonly onToggle: () => void;
+  readonly onShowAll: () => void;
+}
+
+/** A step with no neighbour on its thread: just the node. */
+const LONE: ThreadPos = { up: false, down: false };
+
+/**
+ * A step's cell: no vertical padding, so the thread touches the next cell; the
+ * run's 12 pt margin is split at its two ends (6 above its first node, 6 below
+ * its last).
+ */
+function StepShell({
+  row,
+  thread,
+  children,
+}: { readonly row: Row; readonly thread: ThreadPos; readonly children: ReactNode }): JSX.Element {
+  return (
+    <View
+      testID={`row-${row.key}`}
+      style={[
+        styles.step,
+        thread.up ? undefined : styles.runStart,
+        thread.down ? undefined : styles.runEnd,
+      ]}
+    >
+      {children}
+    </View>
+  );
 }
 
 function Shell({
@@ -249,36 +294,39 @@ function AssistantRowView({ row, palette, onLink, speak, onSpeak }: RowProps): J
   );
 }
 
-/** Reasoning: one collapsed `sec` line that opens on tap (presentation state). */
-function ReasoningRowView({ row, palette, onLink }: RowProps): JSX.Element {
+/**
+ * Reasoning: nothing when it is folded into a step or the live footer
+ * (`hidden`), else a `Thought` node — ∴ in the dot's place, its first line in
+ * italic, the whole thought on tap (Owner Q1).
+ */
+function ReasoningRowView({ row, palette, step }: RowProps): JSX.Element | null {
   const reasoning = row as Extract<Row, { kind: "reasoning" }>;
-  const [open, setOpen] = useState(false);
+  const cell = step?.cell;
+  if (cell?.kind === "hidden") {
+    return null;
+  }
+  const text = cell?.kind === "thought" ? cell.text : reasoning.text;
+  const thread = cell?.kind === "thought" ? cell.thread : LONE;
+  const view = thoughtRowView(text);
   return (
-    <Shell row={reasoning}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityState={{ expanded: open }}
-        onPress={() => {
-          animateNextLayout();
-          setOpen((was) => !was);
-        }}
-        hitSlop={8}
-        style={styles.reasoningHead}
-      >
-        <Text
-          maxFontSizeMultiplier={DENSE_FONT_SCALE}
-          style={[typography.subhead, { color: palette.sec }]}
-        >
-          Thinking
-        </Text>
-        <Icon name={open ? "chevron.down" : "chevron.right"} color={palette.sec} size={12} />
-      </Pressable>
-      {open ? (
-        <View style={[styles.reasoning, { borderLeftColor: palette.sep }]}>
-          <Markdown parsed={parsedOf(reasoning.text)} palette={palette} onLink={onLink} />
-        </View>
-      ) : null}
-    </Shell>
+    <StepShell row={reasoning} thread={thread}>
+      <StepNode
+        palette={palette}
+        node="thought"
+        reduceMotion={step?.reduceMotion ?? false}
+        name={{ tool: "Thought" }}
+        subtitle={view.subtitle}
+        subtitleItalic
+        marker={false}
+        trailing=""
+        trailingRed={false}
+        thread={thread}
+        open={step?.open ?? false}
+        {...(step === undefined || text.trim() === "" ? {} : { onToggle: step.onToggle })}
+        a11yLabel={view.a11yLabel}
+        body={<StepBody palette={palette} thought={text} command={[]} output={null} />}
+      />
+    </StepShell>
   );
 }
 
@@ -317,48 +365,26 @@ function ChartRowView(props: RowProps): JSX.Element {
   );
 }
 
-function ToolRowView({ row, palette, agent, thumbnails, onArtifact }: RowProps): JSX.Element {
+/**
+ * A tool call: one `StepNode` on the thread (its cell from the screen's
+ * `stepLayout`), the thought, command, result, diff and reply in its open body;
+ * the sub-agent progress and Activity link always under the line. A presented
+ * artifact is its card instead (a block: `isBlockRow`, no thread).
+ */
+function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowProps): JSX.Element {
   const tool = row as Extract<Row, { kind: "tool" }>;
-  const [open, setOpen] = useState(false);
-  const [all, setAll] = useState(false);
-  const summary = toolSummary(tool);
-  const meta = toolMeta(tool);
-  const lines = summary.output === "" ? [] : summary.output.split("\n");
-  const hidden = Math.max(0, lines.length - OUTPUT_PREVIEW_LINES);
-  const shown = all ? lines : lines.slice(0, OUTPUT_PREVIEW_LINES);
-  const view = tool.diff === undefined ? null : diffView(tool.diff);
+  const cell = step?.cell;
+  const thread = cell?.kind === "step" ? cell.thread : LONE;
+  const view = stepRowView(tool, cell?.kind === "step" ? cell.thought : null, step?.full ?? false);
+  const diff = tool.diff === undefined ? null : diffView(tool.diff);
   const progress = subAgentLine(tool.sub);
   // A presented artifact IS this row's visible body (docs/feat/model-artifacts.md
   // D9): a band row, not a tool call with a blob of text under it.
   const card = tool.artifact === undefined ? null : artifactCard(tool.artifact);
   const artifact = tool.artifact;
-  return (
-    <Shell row={tool}>
-      <View style={styles.tool}>
-        {card === null || artifact === undefined ? (
-          <ToolRow
-            palette={palette}
-            label={summary.label}
-            subtitle={summary.subtitle}
-            trailing={meta.trailing}
-            tone={meta.tone}
-            expandable={lines.length > 0}
-            expanded={open}
-            onPress={() => {
-              animateNextLayout();
-              setOpen((was) => !was);
-            }}
-            labelTestID={`tool-${tool.id}-${tool.status}`}
-          />
-        ) : (
-          <ArtifactCardRow
-            card={card}
-            artifactId={artifact.artifactId}
-            palette={palette}
-            thumbnail={thumbnailFor(thumbnails, artifact.sha256)}
-            {...(onArtifact === undefined ? {} : { onPress: () => onArtifact(artifact) })}
-          />
-        )}
+  const below =
+    progress === null && agent === undefined ? null : (
+      <View style={styles.below}>
         {progress === null ? null : (
           // Item 10: a foreground sub-agent's latest activity, so a long child
           // does not look like a hang.
@@ -388,33 +414,60 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact }: RowProps):
             </Text>
           </Pressable>
         )}
-        {tool.denialReply !== undefined ? (
-          <Text
-            testID={`tool-${tool.id}-reply`}
-            style={[typography.footnote, { color: palette.red }]}
-          >
-            {`Your reply: ${tool.denialReply}`}
-          </Text>
-        ) : null}
-        {view === null ? null : <DiffView view={view} palette={palette} callId={tool.id} />}
-        {open && shown.length > 0 ? (
-          <Pressable
-            testID={`tool-${tool.id}-output`}
-            accessibilityRole="button"
-            disabled={hidden === 0}
-            onPress={() => setAll((was) => !was)}
-            style={[styles.output, { backgroundColor: palette.code }]}
-          >
-            <Text style={[typography.monoCode, { color: palette.label }]}>{shown.join("\n")}</Text>
-            {hidden > 0 && !all ? (
-              <Text style={[typography.footnote, { color: palette.accent }]}>
-                {`Show ${hidden} more lines`}
-              </Text>
-            ) : null}
-          </Pressable>
-        ) : null}
       </View>
-    </Shell>
+    );
+  if (card !== null && artifact !== undefined) {
+    return (
+      <Shell row={tool}>
+        <View style={styles.tool}>
+          <ArtifactCardRow
+            card={card}
+            artifactId={artifact.artifactId}
+            palette={palette}
+            thumbnail={thumbnailFor(thumbnails, artifact.sha256)}
+            {...(onArtifact === undefined ? {} : { onPress: () => onArtifact(artifact) })}
+          />
+          {below}
+        </View>
+      </Shell>
+    );
+  }
+  return (
+    <StepShell row={tool} thread={thread}>
+      <StepNode
+        palette={palette}
+        node={view.dot}
+        reduceMotion={step?.reduceMotion ?? false}
+        name={view.name}
+        subtitle={view.subtitle}
+        marker={view.thought !== null}
+        trailing={view.trailing}
+        trailingRed={view.trailingRed}
+        {...(view.live && tool.at !== undefined ? { liveFrom: tool.at } : {})}
+        thread={thread}
+        open={step?.open ?? false}
+        {...(view.tappable && step !== undefined ? { onToggle: step.onToggle } : {})}
+        a11yLabel={view.a11yLabel}
+        labelTestID={`tool-${tool.id}-${tool.status}`}
+        below={below}
+        body={
+          <StepBody
+            palette={palette}
+            thought={view.thought}
+            command={view.command}
+            output={view.output}
+            outputTestID={`tool-${tool.id}-output`}
+            {...(step === undefined ? {} : { onShowAll: step.onShowAll })}
+            diff={
+              diff === null ? null : <DiffView view={diff} palette={palette} callId={tool.id} />
+            }
+            {...(tool.denialReply === undefined
+              ? {}
+              : { reply: tool.denialReply, replyTestID: `tool-${tool.id}-reply` })}
+          />
+        }
+      />
+    </StepShell>
   );
 }
 
@@ -577,10 +630,14 @@ const styles = StyleSheet.create({
     gap: 4,
     padding: 6,
   },
-  reasoningHead: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 28 },
-  reasoning: { borderLeftWidth: 2, paddingLeft: 12, marginTop: 4 },
+  // A step's cell (docs/feat/mobile-tool-rows.md): no vertical padding, so the
+  // thread touches its neighbour; 6 pt at each end of a run.
+  step: { paddingHorizontal: space.inset },
+  runStart: { marginTop: 6 },
+  runEnd: { marginBottom: 6 },
+  // The sub-agent progress line and Activity link, under the step's line.
+  below: { gap: 4, paddingBottom: 6 },
   tool: { gap: 8 },
-  output: { borderRadius: radius.tile, padding: 12, gap: 6 },
   notice: { textAlign: "center" },
   rule: { height: StyleSheet.hairlineWidth, marginVertical: 6 },
 });
