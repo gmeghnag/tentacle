@@ -2307,3 +2307,22 @@ flake under a 931-file run. Unverified beyond that (it did not reproduce), and
 worth a `docs/library-bugs.md` entry rather than a silent re-run.
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Round 2
+
+**Verdict: APPROVE** — both findings are fixed, and each one is pinned by a test that I made fail with a mutation.
+
+- **Finding 1 (background-send port):** with `outbox-session.ts:129` mutated to `>= 0`, the new
+  `outbox-session.test.ts` fails. With `reuploaded` keeping the old block, `outbox.test.ts` fails.
+  With `isDocument` accepting anything, `outbox-store.test.ts` (the corrupt-block test) fails.
+- **Finding 2 (downgrade):** `serializeOutbox` writes `schemaVersion: 2` exactly when an item
+  carries a document (`outbox-store.ts:313`). It writes 1 otherwise, so an older build keeps
+  reading outboxes without PDFs. Mutation "always v1" → the v2-write test fails. Mutation
+  "read v1 only" (tried alone) → the v2-load test fails. An older build refuses the whole file
+  and leaves it untouched. That makes all of that computer's pending items unsendable on the
+  old build, but loudly and with nothing lost, which is what §7 asks for.
+- **Regressions:** `apps/mobile/test` 2350 pass, 0 fail; `bun run typecheck` clean; `bun run
+  lint` 1793 files, clean. Each mutation was reverted, and `git status` was clean afterwards.
+  Full `bun test` was not re-run (the diff touches only the mobile outbox).
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, same reviewer as round 1)
