@@ -122,9 +122,18 @@ describe("S2 · the context ring (A1 + F11)", () => {
     // Declaring `onPress?` is not the feature: an unwired ring falls into the
     // `onPress === undefined` branch and renders as a non-interactive
     // progressbar, losing Design 2 / F11's tap target without a type error.
+    //
+    // H4a (docs/feat/mobile-hub.md) turned the ring's tap into the SAME opening
+    // path as the hub's Scheduled item: `openInfo()`, which is the one place that
+    // sets `infoOpen` and starts the pulls. The guard pins the seam, not the
+    // literal setter, so a second way into the sheet still fails it.
     const call = ringCallSite();
     expect(call).toMatch(/onPress=\{/);
-    expect(call).toMatch(/setInfoOpen\(true\)/);
+    expect(call).toMatch(/openInfo\(\)/);
+    // …and `openInfo` still is what opens it, with no reveal by default.
+    expect(SESSION_SCREEN).toMatch(
+      /const openInfo = \(revealTo: SectionId \| null = null\) => \{[\s\S]{0,200}setInfoOpen\(true\);/,
+    );
   });
 
   test("the arc stays the `borderTop`+`borderLeft` half the rotation bases assume", () => {

@@ -9,7 +9,7 @@
  */
 import type { Row } from "./transcript-rows.ts";
 
-export type SessionMenuId = "info" | "copy-last" | "copy-all";
+export type SessionMenuId = "info" | "scheduled" | "copy-last" | "copy-all";
 
 export interface SessionMenuAction {
   readonly id: SessionMenuId;
@@ -31,11 +31,17 @@ function said(rows: readonly Row[]): readonly { who: "You" | "tentacle"; text: s
 
 /**
  * The menu's actions: **Session info** always first (it needs nothing to be on
- * screen), then each copy action only when it has something to copy.
+ * screen), then **Scheduled wakes** when the daemon reports armed wakes
+ * (docs/feat/mobile-hub.md H4a: the one path to the wakes today — the hub's own
+ * Scheduled item lands on the same revealed sheet), then each copy action only
+ * when it has something to copy.
  */
-export function sessionMenu(rows: readonly Row[]): readonly SessionMenuAction[] {
+export function sessionMenu(rows: readonly Row[], wakes = 0): readonly SessionMenuAction[] {
   const words = said(rows);
   const actions: SessionMenuAction[] = [{ id: "info", label: "Session info", text: "" }];
+  if (wakes > 0) {
+    actions.push({ id: "scheduled", label: "Scheduled wakes", text: "" });
+  }
   const last = [...words].reverse().find((line) => line.who === "tentacle");
   if (last !== undefined) {
     actions.push({ id: "copy-last", label: "Copy last answer", text: last.text });

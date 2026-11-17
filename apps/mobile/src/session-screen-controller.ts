@@ -19,6 +19,7 @@ import type {
   AttachmentRef,
   JobOutputResult,
   JobRow,
+  ScheduleRow,
   SessionContextResult,
   SessionSkillsResult,
   SubagentRow,
@@ -104,6 +105,15 @@ export type ActivityHandle = Partial<
 >;
 
 /**
+ * The session's armed scheduled wakes (docs/feat/cron-tool.md S6; the hub's
+ * Scheduled item, docs/feat/mobile-hub.md H4a). The SAME client seam the Session
+ * info sheet follows (`RemoteSession.schedules`/`onSchedules`, gated by the
+ * client's `daemonWakes` trust bit) — not a second subscription mechanism.
+ * Optional: a fake handle, or a client whose daemon must not be trusted, has none.
+ */
+export type WakeHandle = Partial<Pick<RemoteSession, "schedules" | "onSchedules">>;
+
+/**
  * What the Activity sheet reads (slice S8): the daemon's live lists as last
  * reported (`null` until one is), and the phone's Finished memory.
  */
@@ -140,7 +150,7 @@ export interface JobAction {
 export const ACTIVITY_UNSUPPORTED = "This computer's tentacle cannot do this.";
 
 /** A handle this screen can also prompt (what the composer's Send needs). */
-export interface SendableHandle extends SessionHandle, ActivityHandle {
+export interface SendableHandle extends SessionHandle, ActivityHandle, WakeHandle {
   send(
     prompt: string,
     signal?: AbortSignal,
@@ -214,6 +224,13 @@ export interface SessionScreenState {
   readonly sends: number;
   /** Background sub-agents and shell jobs (docs/feat/mobile-chrome.md S8). */
   readonly activity: ActivityState;
+  /**
+   * The session's armed scheduled wakes as the daemon last reported them
+   * (docs/feat/cron-tool.md S6): `undefined` when no table was reported — no
+   * report yet, an older daemon, or a daemon this client must not trust. The
+   * hub's Scheduled item is absent on `undefined` (P6/M9), never a dead button.
+   */
+  readonly schedules: readonly ScheduleRow[] | undefined;
   /**
    * A pull-to-refresh is running (item 3): the `RefreshControl` stays spinning
    * until the re-attach settles, so the gesture never looks ignored.
@@ -460,6 +477,13 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   };
   /** The last attached handle's `onSubagents`/`onJobs` subscriptions. */
   let activityWatch: (() => void) | undefined;
+  /**
+   * The daemon's wake table as last reported (docs/feat/cron-tool.md S6):
+   * `undefined` = none reported yet, an older daemon, or an untrusted one (its
+   * table is dropped client-side). The hub's Scheduled item is absent on it (P6).
+   */
+  let schedules: readonly ScheduleRow[] | undefined;
+  let wakeWatch: (() => void) | undefined;
   /** The rename field (Owner decision 5): `null` while it is closed. */
   let renaming: RenameState | null = null;
   /**
@@ -754,6 +778,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       renaming,
       sends,
       activity,
+      schedules,
       refreshing,
     };
   }
@@ -764,6 +789,15 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    * handle without them (an older client, a fake) leaves both `null` (F15).
    */
   function watchActivity(session: SendableHandle): () => void {
+    // The wake table rides the SAME attach (cron-tool S6): `onSchedules` hands the
+    // table it already knows AT ONCE (`RemoteSession.onSchedules`), then every
+    // change — so one subscription carries both, and there is no second read to
+    // fall out of step with it.
+    wakeWatch?.();
+    wakeWatch = session.onSchedules?.((report) => {
+      schedules = report.rows;
+      emit();
+    });
     const offAgents = session.onSubagents?.((rows) => {
       const memory = onSubagents(activity.memory, rows, deps.now());
       // A child's messages live as long as it is live or Finished (bounded with it).
@@ -791,6 +825,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       offAgents?.();
       offJobs?.();
       offSent?.();
+      wakeWatch?.();
+      wakeWatch = undefined;
     };
   }
 

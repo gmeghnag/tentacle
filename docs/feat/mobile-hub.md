@@ -457,6 +457,7 @@ toggle them reliably. This is stated here, not hidden.
 | H2 | **Action list + haptic kinds** | S · contained · `deepseek` | 4, 5 | `hub-actions` + `haptic-rules` tests red→green + mutation |
 | H3 | **Hub UI + wiring of what is on `main`** | M · contained (setting-gated) · `opus` | step 1 = the load-bearing spike; then 6–10, 12 | spike output pasted; controller test; flow 29 green in both themes; `bun run check` |
 | H4 | **Artifacts + Scheduled entries** | S · contained · `deepseek` | 11, once feat/model-artifacts and feat/cron-tool S6 are on `main` (else the slice waits; the hub ships without them, P6) | `hub-actions` cases for both badges; flow 29 step: an unseen artifact → the dot + the item badge |
+| H4a | **Scheduled entry only** (owner 2026-11-16: ship it now, cron-tool is on `main`) | S · contained · `deepseek` | the Scheduled-wakes half of H4: `hub-actions` case + badge (`schedules`, `nextWakeInMs`), Session info scrolled to SCHEDULED WAKES; tests incl. a real-screen render. The Artifacts entry stays for H4b, after feat/model-artifacts merges. | |
 
 Then the Review: a fresh-context `/code-review` that red-teams M1–M17 and
 §7 "logic lives in pure modules" (no threshold, hit-test or ordering in a
@@ -785,6 +786,180 @@ space is freed.
 **Status: H3 PARTIAL** (controller `stopTurn` + the pure wiring seam done; the
 spike and all UI blocked by a full disk). H4 not started.
 
+### H4a — Scheduled entry only
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Load-bearing check (run FIRST, passed).**
+`.tentacle/tmp/mobile-hub/h4a/repro.ts`. Two facts the slice stands on, both
+verified before any code:
+
+- **L1 — cron-tool S6 IS on `main`.** `git merge-base --is-ancestor 57a6dc91 main`
+  holds, and the rows reach the phone: `RemoteSession.schedules`/`onSchedules`
+  (`@tentacle/client`), gated by the client's `daemonWakes` trust bit (AGENTS §7:
+  a pod's table is dropped there). So no protocol work, no new seam.
+- **L2 — the table is enough.** `schedules` is its length and `nextWakeInMs` the
+  distance to the soonest `nextAt`; nothing else on the wire is needed.
+
+The CAPABILITY was missing, which is what the slice exists to add. Output
+(before):
+
+```
+hubContextOf → {"schedules":0,"nextWakeInMs":null}
+ids with a `scheduled` entry wired: ["attach","activity","sessions","info"]
+Session info sections: ["model","session","schedules","mcp","skills"]
+rows exist but there is no reveal API: undefined
+```
+
+`hubContextOf` hard-coded `schedules: 0, nextWakeInMs: null`, so
+`hub-actions`' `holds("scheduled")` was never true and the item could not appear
+(not a bug — P6's rule — but a missing input). And Session info had no way to be
+opened AT a band, so even a wired item could only have opened the sheet at the
+top, four screens above the wakes.
+
+**Done, in order, red → green.**
+1. `src/hub-session.ts`: new pure `wakeContext(rows, now) → {schedules,
+   nextWakeInMs}` — the count is the table's length, the delay is measured to the
+   SOONEST `nextAt` (the daemon's order is not the firing order), clamped with
+   `Math.max(0, …)` so an already-due wake reads `0` rather than a negative
+   "in −40 s", and empty/`undefined` → `0`/`null` (an older daemon, M9).
+   `hubContextOf` takes an optional `schedules: {rows, now}` and fills the two
+   fields from it. `test/hub-session.test.ts`: 13 pass.
+2. `src/session-info.ts`: new pure `scheduledSection(view | null) → "schedules" |
+   null` — the band only when the sheet actually DRAWS it, so a reveal is never a
+   scroll to empty air. Plus the reveal rule: `revealStart`, `revealStep`,
+   `REVEAL_IDLE`, `RevealState`, and a module-private `revealOffset`. It scrolls
+   ONCE (reaching the wanted band spends the want, so later layouts never
+   re-scroll under the person's own scrolling), only when the WANTED band
+   reports (the bands lay out in any order), and a measured `y = 0` is a real
+   offset, not "unmeasured". `test/session-info-reveal.test.ts` (new): 7 pass.
+3. `src/screens/SessionInfoSheet.tsx`: stays HOOK-FREE — the real-element walker
+   in `test/band-notes.test.ts` calls it directly, and hooks broke it, which is
+   why the reveal lives in the parent. Two new optional props: `scrollRef` (a
+   callback ref onto the `ScrollView`) and `onSectionLayout(id, y)` (an
+   `onLayout` on each section's own `<View>`).
+4. `src/screens/SessionScreen.tsx`: ONE `openInfo(revealTo)` path — the header
+   ring, the "…" menu and `openScheduled()` all come through it, so a reveal is
+   never a second way into the sheet; `revealOnLayout` calls `revealStep` and
+   scrolls `infoScroller`. The menu is built with
+   `sessionMenu(rows, state.schedules?.length ?? 0)` and handles the new
+   `"scheduled"` action by calling `openScheduled()`; its "Nothing to copy yet"
+   footnote now keys on `action.text === ""` (a reveal action copies nothing).
+5. `src/session-menu.ts`: `sessionMenu(rows, wakes = 0)` adds
+   `{id: "scheduled", label: "Scheduled wakes", text: ""}` right after Session
+   info when `wakes > 0`. `test/session-menu.test.ts` +2 tests.
+6. `src/session-screen-controller.ts`: `WakeHandle`
+   (`Partial<Pick<RemoteSession, "schedules" | "onSchedules">>`) → `SendableHandle`
+   extends it; `SessionScreenState.schedules`; `watchActivity` also subscribes
+   `onSchedules`, cleared on leave, `emit()`ing each report.
+   `test/session-screen-wakes.test.ts` (new): 5 tests.
+7. `test/session-info-schedules-render.test.ts` (new: the slice's required
+   "real-screen render"): the sheet's REAL element tree, walked the way
+   `band-notes.test.ts` does (one function stub call per element, host stubs as
+   string types). It asserts the band's rows are host nodes with
+   `session-info-schedules-<key>` and `…-delete`, that the delete sends the RAW
+   id (a fixture whose id is longer than `scheduleIdLabel`'s 24-char bound, so the
+   row KEY and the wire id differ — an earlier fixture of mine had them equal and
+   the mutation survived), that no switch is drawn, that an older daemon's
+   `rows: undefined` is the `unsupported` empty row, and that
+   `onSectionLayout`/`scrollRef` reach the sheet and report each band's own y.
+8. `test/hub-scheduled-wiring.test.ts` (new): the source-reading guard for
+   `.tsx` (the `schedule-wiring.test.ts` pattern), because `SessionScreen.tsx`
+   cannot run under `bun test`. It pins the two seams, that the band id is typed
+   `SectionId`, that `openScheduled` goes through `openInfo`, that exactly ONE
+   place sets `infoOpen`, and that the menu's `scheduled` action calls
+   `openScheduled` and the menu is built with the wake count.
+9. `test/header-wiring.test.ts`: F11's guard asserted the ring's `onPress`
+   contains a literal `setInfoOpen(true)`. Step 4 moved that into `openInfo`, so
+   the guard went RED (`Found: "onPress={() => openInfo()}"`), and it was
+   re-pinned to the new truth (`onPress={() => openInfo()}` AND `openInfo` still
+   being what sets `infoOpen`) — the same invariant, one seam further out.
+
+**Mutations — 14/14 killed**, by `.tentacle/tmp/mobile-hub/h4a/mutate.ts`
+(applies one mutation to the source, runs the files, restores the exact bytes;
+the last line is `restored (unmutated): 33 pass, 0 fail`):
+```
+M1 the wake feed is never followed (onSchedules unused): 29 pass, 4 fail
+M2 the report is applied without telling the screen (no emit): 32 pass, 1 fail
+M3 an empty REPORTED table reads as 'no feed' (undefined): 32 pass, 1 fail
+M4 the wake feed is never unsubscribed on leave: 32 pass, 1 fail
+W1 wakeContext counts rows but takes the FIRST wake, not the soonest: 32 pass, 1 fail
+W2 an already-due wake reads a negative delay: 32 pass, 1 fail
+W3 an empty table still reports one wake: 32 pass, 1 fail
+W4 hubContextOf ignores the wake feed: 32 pass, 1 fail
+S1 scheduledSection scrolls even when the sheet draws no such band: 32 pass, 1 fail
+S2 revealStep re-scrolls on every layout (the want is never spent): 32 pass, 1 fail
+S3 revealStep treats a measured 0 as "unmeasured": 32 pass, 1 fail
+S4 revealStep scrolls before the wanted band reports: 29 pass, 4 fail
+N1 the menu offers Scheduled with no wakes armed (P6/M9): 29 pass, 4 fail
+N2 the Scheduled action carries text (it would copy, not reveal): 32 pass, 1 fail
+```
+Two of them (`W1`, `S1`) first reported `TARGET NOT FOUND` because
+`biome check --write` had re-wrapped the very expressions they patched; both were
+re-pinned to the formatted text and re-run, and each then killed its test.
+
+Red before green, the render and the wiring guard specifically:
+- `session-info-schedules-render` — `onSectionLayout(section.id, 0)` (report a
+  constant instead of the measured y): 5 pass, 1 fail, `"y": 400 → "y": 0`.
+- `hub-scheduled-wiring` — with `onSectionLayout={revealOnLayout}` deleted:
+  5 pass, 1 fail (`Expected to contain: "onSectionLayout={revealOnLayout}"`);
+  with `openInfo(scheduledSection(...))` → `openInfo(null)`: 4 pass, 2 fail; with
+  the menu's `openScheduled()` call deleted: 5 pass, 1 fail.
+
+**Changelog.** A NEW fragment `changelog.d/mobile-hub-scheduled.added.md`.
+H1's `changelog.d/mobile-hub.added.md` describes the fan, which H3 has not
+shipped, so folding a shipped fact into it would be the dishonest shape; a
+separate bullet names only what a person can see today. `CHANGELOG.md` untouched.
+
+**Drift from the Implementation.**
+1. **The reveal lives in `SessionScreen`, not the sheet**, and rides a callback
+   ref + `onSectionLayout` rather than any sheet-side state. The sheet must stay
+   hook-free: `test/band-notes.test.ts` calls `SessionInfoSheet` as a plain
+   function and walks the returned elements, and a `useState`/`useRef` there
+   throws outside a renderer (it broke that file). This is the honest reading of
+   §7 anyway — the rule is pure (`revealStep`), the component only reports y and
+   the screen only scrolls.
+2. **The "…" menu gains "Scheduled wakes"** as the reachable trigger for the
+   reveal. H4's trigger is the hub's fan item, and H3's fan UI is not on this
+   branch, so without the menu the reveal would be unreachable code and the slice
+   could not be demonstrated at all. It is also the right place on its own: the
+   sheet is the only screen that can read and delete a wake. The menu entry
+   disappears when no wakes are armed (P6/M9), exactly as the fan item does.
+3. **New pure rules not in the Files list** (`wakeContext`, `scheduledSection`,
+   `revealStart`/`revealStep`/`REVEAL_IDLE`/`RevealState`): item 11 names
+   `SessionScreen.tsx`/`hub-actions.ts` only, but AGENTS §7 puts every branch
+   that matters in a pure, React-free, unit-tested module. The alternative was
+   arithmetic and a scroll rule buried in a `.tsx` the harness cannot execute.
+4. **No separate `session.schedules` read.** The controller subscribes
+   `onSchedules` and the seam hands the known table at once, so a redundant
+   `session.schedules` read was removed during the work (it was in the first
+   draft).
+5. **`header-wiring.test.ts` was edited** (F11's guard): unavoidable collateral
+   of the one-path refactor, and re-pinned rather than loosened (it now asserts
+   `openInfo()` calls the setter, so a second way in still fails).
+
+**Gate.** `bunx tsc --noEmit`, `bunx tsc -p apps/mobile --noEmit` and
+`bunx tsc -p apps/relay --noEmit`: clean. `bun run lint`: clean (1782 files,
+`biome check --write` applied to the H4a files). `bun test` (full): **12983 pass,
+5 skip, 0 fail** (12988 tests / 925 files) — the 5 skips are the pre-existing
+opt-in set (`main` runs 12953 pass / 5 skip / 0 fail), and the +30 passes are
+H4a's. Two runs were lost first, both to the environment, not the code: the disk
+was momentarily 100 % full (`buildBinary` failed with
+`failed to write compiled executable tentacle` / `Error writing standalone module
+graph: Io`, and both tests pass once space returned), and the worktree was
+missing `packages/tools/node_modules/pdfjs-dist` until `bun install --frozen-lockfile`
+(one root-tsc error, gone after). No protocol schema was touched, so
+`packages/protocol/schema/protocol.json` is NOT regenerated — `git status`
+confirms it does not appear.
+
+**Status: H4a DONE.** H3 remains PARTIAL (its fan UI is still unbuilt and
+disk-blocked), so **the hub's own Scheduled fan item is not reachable yet**: the
+moment H3's `entries` record lands with `scheduled` → `openScheduled()`, the item
+appears, badged, with nothing else to write — `hub-actions` already gates and
+badges it, `wakeContext` already fills its context, and `openScheduled` is
+already the one path to the revealed sheet. H4b (the Artifacts entry) is not
+started: `feat/model-artifacts` is not on `main`.
+
 ## Review
 
 *(empty — fresh-context review after H3/H4)*
@@ -961,3 +1136,162 @@ reads yet.
 - It stopped and reported the ENOSPC block honestly rather than faking the spike.
 - It wrote the tests red first and pasted the mutation log.
 - One discrepancy: the commit message says "exec (deepseek)", but the Execution section is signed claude-opus-5-5, and the owner note requires Opus. This should be reconciled so the model attribution (§10) is true.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17* (H4a, `git diff main...HEAD`. Same model as the Execution signature, so only the context is fresh. The commit says "deepseek": the attribution is still unreconciled.)
+
+**Verdict: REQUEST-CHANGES.** There is one MEDIUM finding.
+
+**M1 — the "scroll once" rule breaks when it reaches the real screen** (`apps/mobile/src/screens/SessionScreen.tsx:572-578`).
+- **Cause.** `revealOnLayout` reads `reveal` from the render closure and calls `setReveal(step.state)` with a plain value. All of the bands' `onLayout` callbacks in one layout pass see the same stale `reveal`, and the last write wins. The bands report in tree order (`schedules` before `mcp`/`skills`), so the state that sticks is the one from a later band. That state still has `want: "schedules"`, so the want is never spent.
+- **Evidence.** `.tentacle/tmp/mobile-hub/rev-h4a/stale.ts` runs the real `revealStep` and simulates the batched pass:
+  - `pass1 [200] want after: schedules`
+  - `pass2 [290] want after: schedules`
+- **Failure scenario.**
+  1. The user taps "Scheduled wakes" and the sheet lands on the band.
+  2. The user scrolls up to read Model or Session.
+  3. Something moves or resizes the schedules band: the Session pull lands (its `loading` single row becomes Project/Devices), a row above it is expanded, or a wake fires and the table changes.
+  4. The schedules band fires `onLayout` again, and the sheet yanks the user back to the band. This repeats every time until the band happens to be the last one to report in a pass.
+- **Rule broken.** The Execution's own rule says "never re-scroll under the person's own scrolling". The pure tests pass because they never exercise the screen's closure, and `hub-scheduled-wiring` reads only the source.
+- **Fix.** Use a functional update: `setReveal(prev => { const s = revealStep(prev, …); … })`, with the scroll side-effect taken out of the updater. Pin it with a test that drives two reports through the same captured state.
+
+**Gate.**
+- Touched files plus `band-notes`/`header-wiring`: 64 pass, 0 fail.
+- `bun run lint`: clean (1782 files).
+- `bun run typecheck`: clean (root, mobile and relay).
+- Full `bun test`: not re-run.
+
+**Mutations.** My mutation run was not approved in this session. I relied on the executor's log (14/14 killed, `S2` covers the want-spend rule in the pure module). Point M1 is exactly the gap that mutation does not reach.
+
+**Attacks that found nothing.**
+- §7 trust: wakes come only through `RemoteSession.onSchedules`, which is gated by `daemonWakes`, so a pod's table is never used. There is no new seam.
+- `onSchedules` gives the current table immediately (`remote-session.ts:878-882`), so dropping the separate read is sound.
+- `scheduledSection` uses `state.info.view`, which is always computed (it is not gated on the sheet being open). So the menu path does reach the band on first use.
+- `wakeContext` uses the soonest wake and never reports a negative delay.
+- No protocol, persistence or daemon surface is touched.
+
+**Executor behaviour.** The as-built record is honest and detailed, and its mutation log was real. It missed that the pure rule's guarantee depends on how the component feeds it state.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* (fix commit `e372699a`, `git diff HEAD~1`. Same model as round 1, fresh context only.)
+
+**Verdict: PASS.**
+
+**M1 is fixed.** The reveal state now lives in a `useRef` tracker (`apps/mobile/src/reveal-report.ts`, `SessionScreen.tsx:516`). `reportReveal` reads and writes `track.current` synchronously, one report at a time, so every band reported in one layout pass is folded in turn. The scroll runs outside any React updater. `reveal-report.test.ts` runs whole passes in tree order: the band is reached once, and a relayout afterwards never scrolls again.
+
+**Mutations** (each reverted by hand; `git status` clean afterwards). Each of these makes a test fail:
+- `reportReveal` no longer writes `track.current` (the stale-state bug): `reveal-report.test.ts` 6 pass, 4 fail.
+- The screen folds into a fresh tracker on every layout instead of `revealTrack.current`: `hub-scheduled-wiring.test.ts` 5 pass, 2 fail.
+
+**Other additions in the commit.** These are extras on top of M1: two earlier nits are now pinned (`dictation` passthrough, and the `ended` guard on the hub's Stop).
+
+**Regressions.**
+- `bun test apps/mobile/test/`: 2329 pass, 0 fail.
+- `bun run lint`: clean (1784 files).
+- `bun run typecheck`: clean (root, mobile and relay).
+- Full `bun test`: not re-run.
+
+**Note (not a finding).** The commit still says "(deepseek)", while this round's doc text is not signed. The model attribution (§10) is still worth reconciling.
+
+### Fix round 1 (H4a)
+
+*— claude-opus-5-5, 2026-11-17*
+
+**Findings addressed:** the H4a Review's one MEDIUM (HIGH: none: M1). Also the
+two nits that Review logged as surviving mutations (they are cheap to pin and
+each is a real "a test that passes on both proves nothing" gap, AGENTS §9).
+
+1. **M1 — the "scroll once" rule broke at the real screen. FIXED.** The cause is
+   exactly as the Review stated: `revealOnLayout` folded each band's `onLayout`
+   against `reveal` **from the render closure** and wrote it back with
+   `setReveal(step.state)`, so every band of one layout pass folded onto the same
+   stale state and the last write won. The last writer was a band *after*
+   `schedules` in tree order, whose state still had `want: "schedules"` — so the
+   want was never spent and the sheet re-scrolled on every later relayout.
+   The fix is structural, not a `prev =>` patch, because the value was never
+   render state to begin with: **the reveal draws nothing, it only decides one
+   scroll.** It now lives in `apps/mobile/src/reveal-report.ts`, a pure module
+   (AGENTS §7) holding a `RevealTrack` (`{ current: RevealState }`) that
+   `SessionScreen` keeps in a `useRef`. `reportReveal(track, {id,y}, scroll)`
+   reads **and** writes that ref synchronously, one report at a time, so the
+   several reports of one batched pass are each folded in rather than
+   overwriting one another, and the side effect (the scroll) is issued by the
+   caller **outside** any React updater (StrictMode calls those twice — a
+   functional-update patch would have scrolled on the discarded run too).
+   `startReveal(track, id)` resets the measurements on each open, so a second
+   open re-measures instead of scrolling to the previous open's stale y.
+   The rule itself is unchanged and still `revealStep`'s: this module only owns
+   *where the state lives* and *when the scroll is issued*.
+2. **Review round 3's survivor — `stopTurn`'s `ended` guard.** FIXED (test only):
+   `stopTurn` passing `ended: null` was 25/0. Now pinned with an OWN turn still
+   streaming when the daemon's `closed` activity lands: a Stop that ignored
+   `ended` aborts that stream (a local cancel the composer's own truth table
+   refuses), and the test fails on exactly that.
+3. **Review round 3's survivor — `hubContextOf`'s `dictation`.** FIXED (test
+   only): hard-coding `dictation: false` was 9/0. Now asserted in both
+   directions (the Dictate entry is offered from it, `hub-actions.ts:120`).
+
+**Red before green.** The wiring guard was written first and run against the
+unfixed screen:
+
+```
+bun test apps/mobile/test/hub-scheduled-wiring.test.ts   (fix NOT applied)
+(fail) … the reveal's arithmetic lives in `session-info.ts`, never in the screen
+       Expected to contain: "reportReveal(revealTrack.current, { id, y }"
+(fail) … fix M1: no `useState` for the reveal — a render value loses a batched pass
+ 4 pass · 3 fail
+```
+
+The design assertion lives in `hub-scheduled-wiring.test.ts` (it is the source
+guard for this screen, and it is what says the fold is the tracker's, not a
+captured value); the behaviour lives in `reveal-report.test.ts`, which drives a
+whole pass — every band reporting in tree order, which is the exact shape the M1
+simulation used.
+
+**Mutation checks** (`.tentacle/tmp/mobile-hub/fix1-m1-mut.ts`: apply one, run
+`reveal-report.test.ts` + `hub-scheduled-wiring.test.ts`, restore the exact
+bytes — `git status` was re-verified clean of the mutated files after each):
+
+```
+S1 the screen folds onto a captured copy (the render-value class): 15 pass · 2 fail
+S2 the tracker never spends the want (a relayout re-scrolls):      11 pass · 6 fail
+S3 startReveal keeps the old measurements (a new open scrolls early): 16 pass · 1 fail
+S4 the fold loses earlier reports of the same pass:                16 pass · 1 fail
+S5 a scroll for EVERY report, not only the wanted band:             9 pass · 8 fail
+restored (unmutated):                                              17 pass · 0 fail
+```
+
+S3 survived the first run (17/0 before the test existed): that is what produced
+the *"a second open re-measures"* case. The two nit mutations were run by hand
+against `session-screen.test.ts` / `hub-session.test.ts`:
+
+```
+stopTurn's ended: transcript.closed → null:   24 pass · 1 fail
+hubContextOf's dictation: input.dictation → false:  13 pass · 1 fail
+restored:                                     25 pass · 0 fail / 14 pass · 0 fail
+```
+
+S1 is killed by the source guard, not by the pure tests — and that is the honest
+division: the pure module cannot observe how a component captures its value. The
+Review's own finding was found that way too (a source-independent rule that the
+caller fed wrong), so the guard is where the class is pinned.
+
+**Files.** `apps/mobile/src/reveal-report.ts` (new, 68 lines) ·
+`apps/mobile/src/screens/SessionScreen.tsx:75-79,514-521,563-566,572-582` ·
+`apps/mobile/test/reveal-report.test.ts` (new, 10 cases) ·
+`apps/mobile/test/hub-scheduled-wiring.test.ts:41-62` ·
+`apps/mobile/test/session-screen.test.ts` (+1 case) ·
+`apps/mobile/test/hub-session.test.ts` (+1 case). No `useState` for the reveal
+remains; `RevealState`/`REVEAL_IDLE`/`revealStart` are untouched in
+`session-info.ts`, so `session-info-reveal.test.ts` still covers the rule as
+before.
+
+**Gate.** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bunx tsc -p apps/relay --noEmit` clean · `bun run lint` clean (1784 files, no
+fixes) · `bun test` (full): **12996 pass, 5 skip, 0 fail** (13001 tests / 926
+files; the 5 skips are the pre-existing opt-in docker/k8s/slow-socket set). No
+protocol schema, persistence or daemon surface is touched, and the changelog
+fragment is unchanged: H3's fan UI is still unbuilt, so the reveal is unreachable
+from a shipped build and nothing user-visible changes in this round.
