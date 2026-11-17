@@ -888,6 +888,9 @@ export function SessionScreen({
                 // app abort (docs/fix/mobile-crash-ibm-chart.md).
                 return (
                   <RowGuard
+                    // A row object is replaced only when its content changes
+                    // (transcript.ts keeps unchanged rows): that one retries.
+                    resetKey={item}
                     fallback={<RowFallback palette={palette} />}
                     onError={(error) => onRowError?.(rowErrorFields(item.kind, error))}
                   >

@@ -90,6 +90,51 @@ Bun's Intl is complete; the phone runs Hermes with Apple's Intl, which this work
 
 *— claude-opus-5-5 (executor), 2026-11-17*
 
+### Fix round 1
+
+Against Review round 1 (2 MEDIUM, no HIGH).
+
+**Finding 2 (MEDIUM): a failed row never recovered. FIXED.**
+- `RowGuard.tsx`: new optional `resetKey` prop. `state.resetKey` starts from props. `getDerivedStateFromProps` clears `failed` only when `resetKey !==` the stored key; with the same key the row stays failed (no throw/log loop).
+- `SessionScreen.tsx` (`renderItem`): `resetKey={item}`.
+- Why the row object is the right key: `transcript.ts` keeps unchanged rows by identity and makes a new object only for a row whose content changed. Repro `identity.ts`:
+  ```
+  history rows kept identity across stream: [ true, false ]   ← the user row kept; the assistant row the delta extended is new
+  streaming row same object after a delta (expect false): false
+  ```
+- Red first: `row-guard.test.ts` "a failed row recovers when its row changes (resetKey)" failed on the old guard (`Expected: <Row id="fixed" />  Received: <Fallback id="fallback" />`, 10 pass / 1 fail), then passed after the fix.
+- Real-reconciler trace `e2e-reset.ts` (Ink/React 18 driving the real `RowGuard.tsx`):
+  ```
+  1 throw: "row-1\nFALLBACK\nrow-3" onError 1
+  2 same key re-render: "row-1\nFALLBACK\nrow-3" onError 1 new throws 0
+  3 new key, valid content: "row-1\nok\nrow-3" onError 1
+  ```
+
+**Finding 1 (MEDIUM): the artifact viewer's chart was unguarded. FIXED.**
+- `ArtifactViewerModal.tsx`: `ChartFullScreen` is now wrapped in `RowGuard`, with `resetKey={phase.text}` (a new version retries).
+- Its fallback is viewer-sized: centred `ROW_FALLBACK_TEXT`, `testID="artifact-chart-error"`.
+- On error it calls `onRenderError?.(rowErrorFields("artifact-chart", error))`. That is a new optional prop, passed through `ArtifactGallery.tsx` to `App.tsx`, which does `APP_LOG.log("error", "client-error", fields)`. It is the same ONE log, and it records the class only.
+- Red first: the new wiring test failed on the unguarded viewer (`row-guard-wiring.test.ts`: 5 pass / 1 fail, on the `toMatch` assertion).
+- Drift: none of substance. The wiring regexes had to match the gallery's spread form (`onRenderError: props.onRenderError`), and the first match had to be the JSX tag, not the import.
+- Debt (as the reviewer noted): the gallery thumbnail (`ArtifactGallery.tsx`, `chartThumbView` in a promise callback) rejects rather than aborting. It is not guarded here.
+
+**Mutations** (`mutate.ts`: apply, run both row-guard test files, restore; ends with 17 pass / 0 fail):
+| Mutation | Caught by |
+|---|---|
+| M3 `getDerivedStateFromProps` never resets | "recovers when its row changes" (1 fail) |
+| M4 resets on every render | "same row (same resetKey) stays failed" (1 fail) |
+| M5 `resetKey={item}` removed from `SessionScreen` | wiring "retries when its row object changes" (1 fail) |
+| M6 `App` drops `onRenderError` | wiring "artifact viewer … guarded" (1 fail) |
+| M7 viewer's `<RowGuard>` replaced by `<View>` | wiring "artifact viewer … guarded" (1 fail) |
+
+**Gate:**
+- `bun run typecheck` clean (root + mobile + relay).
+- `bun run lint`: 1970 files, no fixes.
+- `bun test`: 14373 pass / 5 skip / 0 fail.
+- The 5 skips are not in this branch's files (`rg skip apps/mobile/test/row-guard*` finds nothing). The difference from AGENTS §6's "3" is still for the orchestrator to confirm on `main`.
+
+*— claude-opus-5-5 (executor, fix round 1), 2026-11-17*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH).

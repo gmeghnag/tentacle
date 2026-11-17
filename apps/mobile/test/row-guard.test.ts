@@ -56,6 +56,32 @@ describe("RowGuard — one row's throw stays in that row", () => {
     expect(g.render()).toBe(fallback);
   });
 
+  /** What React does on a parent re-render: derive from the new props, then render. */
+  function rerender(g: RowGuard, props: RowGuard["props"]): unknown {
+    const derive = (
+      RowGuard as unknown as {
+        getDerivedStateFromProps?: (p: unknown, s: unknown) => object | null;
+      }
+    ).getDerivedStateFromProps;
+    const next = typeof derive === "function" ? derive(props, g.state) : null;
+    (g as unknown as { props: unknown }).props = props;
+    if (next !== null) g.state = { ...g.state, ...next };
+    return g.render();
+  }
+
+  test("a failed row recovers when its row changes (resetKey): the new content renders", () => {
+    const g = new RowGuard({ children: child, fallback, resetKey: "v1" });
+    afterThrow(g, new Error("transient"));
+    const fixed = createElement("Row", { id: "fixed" });
+    expect(rerender(g, { children: fixed, fallback, resetKey: "v2" })).toBe(fixed);
+  });
+
+  test("the same row (same resetKey) stays failed on re-render: no throw/log loop", () => {
+    const g = new RowGuard({ children: child, fallback, resetKey: "v1" });
+    afterThrow(g, new Error("x"));
+    expect(rerender(g, { children: child, fallback, resetKey: "v1" })).toBe(fallback);
+  });
+
   test("no onError: catching still works and does not throw", () => {
     const g = guard();
     afterThrow(g, new Error("x"));

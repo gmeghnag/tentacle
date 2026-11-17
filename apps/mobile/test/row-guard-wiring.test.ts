@@ -20,6 +20,25 @@ describe("every transcript row is guarded", () => {
     );
   });
 
+  test("a failed row retries when its row object changes (resetKey is the row itself)", () => {
+    expect(screen).toMatch(/<RowGuard[\s\S]{0,300}resetKey=\{item\}[\s\S]{0,300}>\s*<SwipeTime/);
+  });
+
+  test("the artifact viewer's full-screen chart is guarded too, and logs a client-error", () => {
+    const viewer = read("src", "screens", "artifacts", "ArtifactViewerModal.tsx");
+    expect(viewer).toMatch(
+      /<RowGuard[\s\S]{0,800}onError=\{\(error\) => props\.onRenderError\?\.\(rowErrorFields\("artifact-chart", error\)\)\}[\s\S]{0,200}>\s*<ChartFullScreen[\s\S]*?\/>\s*<\/RowGuard>/,
+    );
+    const gallery = read("src", "screens", "ArtifactGallery.tsx");
+    expect(gallery).toMatch(
+      /<ArtifactViewerModal\s+palette=[\s\S]{0,800}onRenderError: props\.onRenderError/,
+    );
+    const app = read("App.tsx");
+    expect(app).toMatch(
+      /<ArtifactGalleryScreen[\s\S]{0,1200}onRenderError=\{\(fields\) => APP_LOG\.log\("error", "client-error", fields\)\}/,
+    );
+  });
+
   test("a caught row error is reported with the row's kind", () => {
     expect(screen).toMatch(
       /onError=\{\(error\) => onRowError\?\.\(rowErrorFields\(item\.kind, error\)\)\}/,
