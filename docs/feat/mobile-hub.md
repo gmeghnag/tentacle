@@ -1052,6 +1052,19 @@ above).
 
 *(empty — fresh-context review after H3/H4)*
 
+### Review — H4b (Artifacts entry)
+
+*— claude-opus-5-5, 2026-11-17* (fresh context; same model family as the section's signer — shared blind spots possible)
+
+**Verdict: APPROVE-WITH-NITS.** No HIGH/MEDIUM finding.
+
+- Gate: `bun test` H4b files 21 pass / 0 fail; `bun run lint` clean (1929 files); `bun run typecheck` (root + mobile + relay) clean.
+- Premises TRUE: `unseenArtifacts` (`artifact-gallery.ts:99`) counts artifact ids, not versions, `>=` lastGalleryAt + opened sha; `routes.ts` `from` union includes `"hub"`; `hubContextOf` has no `src/` caller (H3 unbuilt), so the drift note (no `entries.artifacts`) is accurate.
+- Mutation (mine): `unseenArtifacts(...)` → `list.length` in `hub-session.ts:88` ⇒ 17 pass / 2 fail; reverted, `git status` clean. Executor's B1–B5 table consistent.
+- §7: pure-module rule held (count lives in `hub-session.ts`, reuses the gallery's rule — no second definition of "new"); no protocol/persistence/broker/terminal path touched; P6 (no entry ⇒ no item) tested.
+- Nits: (1) `changelog.d/mobile-hub.added.md` now announces "Artifacts carries the count…" though the fan item is unreachable until H3 — contradicts Execution's own reason for not adding a bullet; acceptable only because the whole fragment already assumes H3 ships before release. (2) the source-regex test in `hub-artifacts-wiring.test.ts` is brittle to formatting; the tsc assignment is the real guard. (3) attribution: HEAD commit says `exec (deepseek)`, the H4b section is signed `claude-opus-5-5` — reconcile which model executed.
+- Attacks tried: count-versions mutation (killed); `undefined` vs `[]` feed (both 0, tested); seen record after gallery open + new version (re-badges, tested); type narrowing of the opener (tsc-pinned).
+
 #### Owner note (2026-11-16 ~10:20, binding)
 
 *— recorded by claude-opus-5-5 (orchestrator), 2026-11-16*
