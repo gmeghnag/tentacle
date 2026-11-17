@@ -541,4 +541,39 @@ no skip. **Unverified:** a full `bun test` after the last fix — run `bun test 
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-17* (S1 only; fresh context, but the SAME model family as the S1 executor ⇒ shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES** (S1).
+
+**Findings**
+1. **MEDIUM — a fake `0` reaches the separator.** `packages/daemon/src/hosted-session.ts:3104` takes
+   `event.usage.promptTokens` as-is, but both providers default a missing prompt count to `0`
+   (`anthropic-provider.ts:336` `promptTokens ?? 0`, `openai-provider.ts:280` `prompt_tokens ?? 0`). Scenario: an
+   OpenAI-compatible server that sends `usage` without `prompt_tokens` (or an Anthropic stream without
+   `message_start.input_tokens`) → `lastPromptTokens = 0` → `/compact` passes `fromTokens: 0` → persisted
+   `compacted.fromTokens: 0` → separator `compacted · ctx 0 → ~9k`, forever, on every replay. This contradicts the
+   plan's own failure mode ("never 0 (an unmeasured value is omitted)") and the agent's existing guard
+   (`agent/src/agent.ts:1957` `promptTokens > 0`). Fix: only record `> 0`; add a daemon test with a `usage` of
+   `promptTokens: 0` → `fromTokens` measured.
+2. **MEDIUM — the owner-rejected foreign variant was shipped and pinned.** `packages/core/src/compaction-view.ts:38-44`
+   keeps `opts.foreign` → `"compacted on another device"`, and `core/test/compaction-view.test.ts:47-51` pins it,
+   although Design S1.2 says "NO foreign variant … (Q6, owner override)". S3 (DeepSeek, contained) would be invited to
+   wire the wording the owner rejected. Fix: drop the option and its test (Tests §S1 "`foreign`" bullet is stale too).
+
+**Gate (re-run by reviewer):** touched files (agent/daemon/protocol/providers/core compaction tests, client
+clear-attach/remote/reattach, protocol json-schema) → 196 pass, 0 fail. `bun run typecheck` clean. `bun run lint`
+clean (1997 files). Full `bun test` NOT re-run by the reviewer (still the executor's open "Unverified" item).
+
+**Mutation:** agent `session.ts` stamp removed (`built.map` → identity) → agent+daemon compaction-fact 4/9 fail;
+reverted, `git status` clean.
+
+**Attacks tried:** (a) other history mutation paths leaving `lastPromptTokens` stale — only `compact`/`clear`/
+`context_reset`, all through `historyReplaced` (`:3842`): holds. (b) stamping a non-summary user message —
+`compactedHistory` writes exactly one user message (system, summary, assistant/tool skill rounds): holds.
+(c) model leak — providers test byte-identical bodies; field only copied explicitly: holds. (d) abort between
+summary and replacement — `throwIfAborted` after `Promise.all`, history untouched: holds. (e) zero/missing usage →
+finding 1. (f) design vs code on Q6 → finding 2. Single-broker / RPC-peer / persistence invariants: untouched
+(no lock, no await on the peer, field rides the existing critical `message` entry fail-soft).
+
+**Executor behaviour:** honest Execution (drift on `from` timing explained and reflected in Design; unverified full
+suite stated). Commit is titled "exec (deepseek)" while Execution is signed opus — reconcile the signature.
