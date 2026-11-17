@@ -121,6 +121,31 @@ const CLASS_ASSIGNMENT = /^class\s+[\w-]+\s+[\w-]+\s*$/;
 /** `:::` + a class id, inline on a node: the flowchart spelling of `class`. */
 const INLINE_CLASS = /:::[\w-]+/g;
 const CLICK_LINE = /^click\s/;
+/**
+ * A line's statements: `;` joins them, but one inside a quoted string (a `click`
+ * href, a label) is text, not a separator.
+ */
+function splitStatements(line: string): string[] {
+  const out: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (const char of line) {
+    if (char === '"') quoted = !quoted;
+    if (char === ";" && !quoted) {
+      out.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  out.push(current);
+  return out;
+}
+
+/** Whether one statement (a `;`-separated piece) is pure styling. */
+function isStyleStatement(text: string, type: DiagramType): boolean {
+  return STYLE_LINE.test(text) || (type === "flowchart" && CLASS_ASSIGNMENT.test(text));
+}
 
 /** `flowchart TD`, `graph LR`, `sequenceDiagram`, … → the line's type. */
 function typeOf(line: string): { type: DiagramType; keyword: string; direction?: string } | null {
@@ -134,8 +159,24 @@ function typeOf(line: string): { type: DiagramType; keyword: string; direction?:
 }
 
 function directionOf(line: string): string | undefined {
-  const match = /\b(TB|TD|BT|RL|LR)\b/.exec(line);
+  // Only the statement that carries the type: `graph;A --> TD` has no direction.
+  const head = line.split(";")[0] ?? line;
+  const match = /\b(TB|TD|BT|RL|LR)\b/.exec(head);
   return match?.[1];
+}
+
+/**
+ * The type line, spelled canonically — the leading keyword ONLY, so a one-liner
+ * (`graph TD;A-->B;B-->C`) keeps the statements that follow it. A flowchart also
+ * gets its direction, defaulted to `TD` when the line does not say one.
+ */
+function canonicalTypeLine(line: string, typed: { keyword: string; direction?: string }): string {
+  const token = /^\s*[\w-]+/.exec(line)?.[0] ?? "";
+  const after = line.slice(token.length);
+  if (typed.direction === undefined) return `${typed.keyword}${after}`;
+  const stated = /^\s*(?:TB|TD|BT|RL|LR)\b/.exec(after);
+  const tail = stated === null ? after : after.slice(stated[0].length);
+  return `${typed.keyword} ${typed.direction}${tail}`;
 }
 
 /** The raw line's type, or why it is refused. */
@@ -239,7 +280,23 @@ export function lintDiagram(raw: string): DiagramLint {
     }
   }
 
-  // 3. The type line: the first line that says something.
+  // 3. Directives: dropped, counted, never an error. They run BEFORE the type
+  // line is looked for, because the usual form spans lines (`%%{init: {` …
+  // `}}%%`), whose inner lines would otherwise read as the diagram.
+  for (let i = 0; i < lines.length; i++) {
+    if (drop.has(i)) continue;
+    const trimmed = (lines[i] ?? "").trim();
+    if (!trimmed.startsWith("%%{")) continue;
+    const keyword = /^\{(?:[^:}]*:\s*)?("?)([\w-]+)/.exec(trimmed.slice(3))?.[2] ?? "init";
+    notes.directives.push(keyword);
+    // A directive may span lines until `}%%`.
+    let j = i;
+    while (j < lines.length && !(lines[j] ?? "").includes("}%%")) j++;
+    for (let k = i; k <= Math.min(j, lines.length - 1); k++) drop.add(k);
+    i = Math.min(j, lines.length - 1);
+  }
+
+  // 4. The type line: the first line that says something.
   let typeLine = -1;
   for (let i = 0; i < lines.length; i++) {
     if (drop.has(i) || isComment(lines[i] ?? "")) continue;
@@ -255,43 +312,50 @@ export function lintDiagram(raw: string): DiagramLint {
   const typed = typeOf(lines[typeLine] ?? "");
   if (!typed) return { ok: false, errors: refuseType(lines[typeLine] ?? "", typeLine + 1) };
 
-  // 4. Directives, styling and clicks: dropped, counted, never an error.
+  // 5. Styling and clicks: dropped, counted, never an error. `;` joins
+  // statements, so `A-->B; click A href "…"` loses the click, not the line.
   const sequential = typed.type === "flowchart" || typed.type === "stateDiagram";
   for (let i = 0; i < lines.length; i++) {
     if (drop.has(i)) continue;
-    const trimmed = (lines[i] ?? "").trim();
-    if (trimmed.startsWith("%%{")) {
-      const keyword = /^\{(?:[^:}]*:\s*)?("?)([\w-]+)/.exec(trimmed.slice(3))?.[2] ?? "init";
-      notes.directives.push(keyword);
-      // A directive may span lines until `}%%`.
-      let j = i;
-      while (j < lines.length && !(lines[j] ?? "").includes("}%%")) j++;
-      for (let k = i; k <= Math.min(j, lines.length - 1); k++) drop.add(k);
-      i = Math.min(j, lines.length - 1);
-      continue;
+    const line = lines[i] ?? "";
+    // A comment says nothing about the diagram: its `;` is prose, not a join.
+    if (line.trim().startsWith("%%")) continue;
+    const statements = splitStatements(line);
+    const keptStatements: string[] = [];
+    let lost = false;
+    for (let s = 0; s < statements.length; s++) {
+      const statement = statements[s] ?? "";
+      const text = statement.trim();
+      // The type line's own statement is never styling, whatever it spells.
+      const isTypeStatement = i === typeLine && s === 0;
+      if (text !== "" && !isTypeStatement && isStyleStatement(text, typed.type)) {
+        notes.style++;
+        lost = true;
+        continue;
+      }
+      if (text !== "" && CLICK_LINE.test(text)) {
+        notes.click++;
+        lost = true;
+        continue;
+      }
+      keptStatements.push(statement);
+    }
+    if (lost) {
+      if (keptStatements.every((statement) => statement.trim() === "")) {
+        drop.add(i);
+        continue;
+      }
+      lines[i] = keptStatements.join(";").replace(/\s+$/, "");
     }
     if (i === typeLine) continue;
-    if (
-      STYLE_LINE.test(trimmed) ||
-      (typed.type === "flowchart" && CLASS_ASSIGNMENT.test(trimmed))
-    ) {
-      notes.style++;
-      drop.add(i);
-      continue;
-    }
-    if (CLICK_LINE.test(trimmed)) {
-      notes.click++;
-      drop.add(i);
-      continue;
-    }
-    if (sequential && INLINE_CLASS.test(trimmed)) {
+    if (sequential && INLINE_CLASS.test(lines[i] ?? "")) {
       notes.style++;
       lines[i] = (lines[i] ?? "").replace(INLINE_CLASS, "");
     }
     INLINE_CLASS.lastIndex = 0;
   }
 
-  // 5. The canonical source, and where each of its lines came from.
+  // 6. The canonical source, and where each of its lines came from.
   for (let i = 0; i < lines.length; i++) {
     if (drop.has(i)) continue;
     kept.push({ text: lines[i] ?? "", raw: i + 1 });
@@ -308,8 +372,7 @@ export function lintDiagram(raw: string): DiagramLint {
   // The type line, spelled canonically (an alias becomes its real name).
   const head = kept.findIndex((line) => line.raw === typeLine + 1);
   if (head >= 0) {
-    const direction = typed.direction === undefined ? "" : ` ${typed.direction}`;
-    kept[head] = { text: `${typed.keyword}${direction}`, raw: typeLine + 1 };
+    kept[head] = { text: canonicalTypeLine(lines[typeLine] ?? "", typed), raw: typeLine + 1 };
   }
 
   return {

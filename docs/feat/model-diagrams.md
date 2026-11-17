@@ -520,7 +520,15 @@ this session); the owner's look is the visual check.
 
 ## Execution
 
-*— claude-sonnet-4-5-20250929, 2026-11-17*
+*— deepseek (variant not recorded), 2026-11-17* — this section was written by
+the executor whose commit reads `exec (deepseek)`. Its original signature
+(`claude-sonnet-4-5-20250929`) was a wrong self-attribution; review round 1 asked
+for it to be corrected, and no log of that session names its exact variant, so
+none is invented here.
+
+---
+
+*— claude-sonnet-4-5-20250929, 2026-11-17* (superseded signature, see above)
 
 Scope: **slice D1 only** (pure lint + error explainer + structural model + summary,
 `Files` item 1). D2–D7 untouched: no `diagram` tool, no mural dependency, no TUI
@@ -727,3 +735,116 @@ Findings:
 
 Attacks tried: one-liner flowchart (#1); multi-line init before the type line (#2); explain on gantt/state fixtures (#3); `;`-joined click (#4); `sequenceDiagram autonumber` on the type line (dropped silently, the same root cause as #1); the fence mutation (bites). Holds: no mermaid import in core; explain never dumps JSON or a cyclic `result`; caps fail loud; no protocol/persistence/§7 surface touched (blast `contained` confirmed); lint and typecheck clean.
 Executor behaviour: thorough Execution notes and honest drift notes. But the Execution signature reads `claude-sonnet-4-5-20250929`, while the commit says `exec (deepseek)`. Fix the signature so model attribution is truthful (AGENTS §10).
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-17* (executor of fix round 1; branch `feat/model-diagrams`)
+
+Scope: the four review-1 findings, plus the two gaps the fixes themselves
+exposed. No test weakened, no finding deferred.
+
+#### Repro, before any edit (`.tentacle/tmp/model-diagrams/fix1/repro.ts`)
+
+All four reproduced exactly as the review described:
+
+```
+#1a {"ok":true,"canonical":"flowchart TD","type":"flowchart","notes":[],"lineMap":[1]}   ← graph TD;A-->B;B-->C: edges gone, no note
+#1b {"ok":true,"canonical":"sequenceDiagram\nA->>B: hi", ...}                            ← `autonumber` silently dropped
+#2  {"ok":false,"errors":["line 2: unknown diagram type \"\"theme\":\"dark\"\" — …"]}     ← multi-line init refused
+#3a ["line 5: \"section A\" (line 3) is never closed — add \"end\""]                      ← gantt: wrong advice
+#3b ["line 4: \"state \\\"Idle\\\" as I\" (line 2) is never closed — add \"end\""]          ← stateDiagram: wrong advice
+#4a {"ok":true,"canonical":"flowchart TD\nA-->B; click A href \"javascript:alert(1)\"", …} ← click survives, no note
+#4b {"ok":true,"canonical":"flowchart TD\nA-->B; style A fill:#f00", …}                    ← style survives, no note
+```
+
+#### Finding 1 (HIGH) — content after the type line is dropped
+
+`lint.ts` `canonicalTypeLine`: only the leading keyword is rewritten; the rest of
+the line (statements, `autonumber`, …) is kept. The flowchart direction is
+defaulted to `TD` only when the type statement does not state one, and
+`directionOf` now reads the type statement only (so `flowchart;A --> LR` is a node
+named `LR`, not `RL`/`LR` direction).
+
+This exposed **two downstream gaps** the review's "0 nodes" cue points at, both
+fixed here as part of the same finding — a kept one-liner that the model still
+reads as empty is the same silent wrong state:
+
+- `model.ts` `flowOf`/`sequenceOf` read the body from `lines.slice(1)` only, so a
+  one-liner came back `kind: "other"` (tool stats `0 nodes`). They now read the
+  type line's statements too (`model1.ts` before → `kind: other`; after →
+  `flowchart 3 nodes, 2 links`, `sequence 1 messages`).
+- `flowOf`'s direction was read from the whole type line, so `flowchart;A --> LR`
+  became `LR`. Scoped to the type statement.
+
+#### Finding 2 (MEDIUM) — a multi-line `%%{init}%%` before the type line
+
+`lint.ts`: the directive pass now runs **before** the type-line search (was step
+4 after step 3), so a directive's inner lines are dropped before anything reads
+them as the diagram. `lineMap` still maps to the model's lines.
+
+#### Finding 3 (MEDIUM) — wrong "add end" advice
+
+`explain.ts`: `BLOCK_KEYWORDS` is now keyed by diagram type
+(`flowchart → subgraph`; `sequenceDiagram → alt/opt/loop/par/critical/break/rect/box`)
+— `section` and `state` are gone. And the rule fires only when the fault is at
+the source's **last content line** (where a missing `end` actually surfaces): a
+mid-source fault is explained as itself, so the retry loop converges. A real
+unclosed `subgraph`/`alt` at EOF still gets the advice (pinned).
+
+#### Finding 4 (MEDIUM) — `click`/`style` after `;`
+
+`lint.ts`: a line is split into `;`-separated statements (quote-aware, so a `;`
+inside a `click A href "…"` or a label is text) and each statement is judged on
+its own; the styling/click statements are dropped and counted, the rest of the
+line is kept. A `;` inside a `%%` comment is prose, not a join. The type line's
+own statement is never styled away.
+
+#### Red before green (§9) and mutation checks
+
+Red: `.tentacle/tmp/model-diagrams/fix1/red.ts` — 9 assertions failing on the
+buggy tree, and after the fixes `ALL PASS` plus 3 extra cases (unclosed
+`subgraph`/`alt` still bite; a mid-source fault is not blamed on a block).
+
+Each fix's test was shown failing with the fix mutated back out, then reverted
+(`rg MUTANT packages/core/src` → 0 after):
+
+| Mutant | Reverted fix | Result |
+|---|---|---|
+| `canonicalTypeLine` returns keyword+direction only | finding 1 | 1 fail — `a one-liner keeps the statements after its type line` |
+| directive's `}%%` scan disabled | finding 2 | 1 fail — `a multi-line %%{init}%% … is dropped too` |
+| `if (statements.length > 1 && false)` | finding 4 | 2 fail — both `;` tests |
+| `if (lost && false)` | finding 4 (unified loop) | 4 fail — both `;` tests + the existing styling test + the type-line click test |
+| `if (false && faultLine < lastContentLine(lines))` | finding 3 (EOF half) | 1 fail — `a mid-source fault is explained as itself` |
+| `BLOCK_KEYWORDS` replaced by the flat old list | finding 3 (type half) | 2 fail — gantt and state `as` tests |
+| `typeHead.slice(0)` in `flowOf` | finding 1 (model gap) | 8 fail incl. `a one-line flowchart keeps its nodes and links` |
+| direction read from the whole type line | finding 1 (direction) | 1 fail — `a direction is read from the type statement only` |
+
+The first EOF mutant did **not** bite: my initial "closed subgraph further down"
+test was vacuous (the `end` pops the frame regardless). Replaced with a source
+that has an unclosed block *and* a mid-source fault, which is the property the
+EOF condition actually decides.
+
+#### Drift from the Implementation
+
+The Implementation's D3 table says `click` is "always dropped"; its wording
+implies whole lines. The as-built drops a `;`-joined *statement*, which is what
+the guarantee needs (no click reaches a renderer) without losing the edges that
+share the line. No plan section needed changing beyond that reading.
+
+#### Gate
+
+```
+$ bunx tsc --noEmit    → clean (no output)
+$ bun run lint         → Checked 1856 files. No fixes applied.   (0 errors)
+$ bun test packages/core/test/diagram-{lint,explain,model,summary}.test.ts
+  63 pass · 0 fail · 160 expect() calls   (4 files)
+$ bun test             → 13493 pass · 5 skip · 0 fail · 106501 expect() calls
+                         Ran 13498 tests across 960 files. [444.70s]
+```
+
+The 5 skips are the opt-in ones (live-k8s, live-docker, the real-socket
+keepalive and the two that ride them). No `protocol.d/` note and no changelog
+fragment: D1 is pure core code and adds no user-visible behaviour by itself
+(the fragment rides the tool slice, D2).
+
+Per finding: **1 FIXED**, **2 FIXED**, **3 FIXED**, **4 FIXED**.

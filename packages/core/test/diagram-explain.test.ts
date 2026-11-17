@@ -108,6 +108,47 @@ describe("explainMermaidError: the mistakes a small model actually makes", () =>
       'line 4: "subgraph Auth" (line 2) is never closed — add "end"',
     ]);
   });
+
+  test("an unclosed alt in a sequence is named too", () => {
+    const source = "sequenceDiagram\n  alt si\n    A->>B: x\n  bad !!";
+    expect(explainMermaidError(jison({ line: 4, column: 0 }), source)).toEqual([
+      'line 4: "alt si" (line 2) is never closed — add "end"',
+    ]);
+  });
+
+  test("a gantt section is not a block: no add-end advice", () => {
+    // `section` opens no `end`-closed block, so the advice would break the
+    // source further and the retry loop would never converge (review 1, #3).
+    const source = "gantt\n  title Piano\n  section A\n  Task :a1, 2024-01-01, 1d\n  bad !!";
+    const sentences = explainMermaidError(jison({ line: 5, column: 0 }), source);
+    expect(sentences.join(" ")).not.toContain('add "end"');
+    expect(sentences[0]).toStartWith("line 5, col 1: Mermaid could not parse this");
+  });
+
+  test('a state "…" as I declaration is not a block: no add-end advice', () => {
+    const source = 'stateDiagram-v2\n  state "Idle" as I\n  I --> J\n  bad !!';
+    const sentences = explainMermaidError(jison({ line: 4, column: 0 }), source);
+    expect(sentences.join(" ")).not.toContain('add "end"');
+    expect(sentences[0]).toStartWith("line 4, col 1: Mermaid could not parse this");
+  });
+
+  test("a fault nowhere near the end is never blamed on a missing end", () => {
+    // The subgraph IS closed further down: adding an `end` at the fault would
+    // break a source that only needed its bad line fixed.
+    const source = "flowchart TD\n  subgraph Auth\n    A --> || B\n  end";
+    const sentences = explainMermaidError(jison({ line: 2, column: 0 }), source);
+    expect(sentences[0]).toStartWith("line 2, col 1: Mermaid could not parse this");
+  });
+
+  test("a mid-source fault is explained as itself, even with an unclosed block", () => {
+    // The subgraph is ALSO unclosed, but mermaid failed on line 2 first: fixing
+    // that line is what unblocks the model, and the missing `end` surfaces on
+    // the next parse. Blaming line 2 on the block sends it to edit line 4.
+    const source = "flowchart TD\n  subgraph Auth\n    A --> || B";
+    const sentences = explainMermaidError(jison({ line: 2, column: 0 }), source);
+    expect(sentences[0]).toStartWith("line 2, col 1: Mermaid could not parse this");
+    expect(sentences.join(" ")).not.toContain('add "end"');
+  });
 });
 
 describe("explainMermaidError: never a raw dump", () => {

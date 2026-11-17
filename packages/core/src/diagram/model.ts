@@ -258,12 +258,18 @@ function bracketIsClosed(chunk: string): boolean {
 
 /** The flowchart body, or `null` when it steps outside the modelled subset. */
 function flowOf(lines: readonly string[]): FlowModel | null {
-  const direction = (/\b(TB|TD|BT|RL|LR)\b/.exec(lines[0] ?? "")?.[1] ?? "TD") as FlowDirection;
+  const direction = (/\b(TB|TD|BT|RL|LR)\b/.exec((lines[0] ?? "").split(";")[0] ?? "")?.[1] ??
+    "TD") as FlowDirection;
   const nodes: DiagramNode[] = [];
   const edges: DiagramEdge[] = [];
   const subgraphs: { title: string; nodes: string[] }[] = [];
   const byId = new Map<string, DiagramNode>();
   const open: { title: string; nodes: string[] }[] = [];
+
+  // The type line carries statements too: `graph TD;A-->B;B-->C` is a whole
+  // diagram on one line, and a body read only from line 2 would lose it.
+  const typeHead = (lines[0] ?? "").split(";");
+  const body = [...typeHead.slice(1), ...lines.slice(1)];
 
   const addNode = (node: DiagramNode): void => {
     const existing = byId.get(node.id);
@@ -281,7 +287,7 @@ function flowOf(lines: readonly string[]): FlowModel | null {
     for (const frame of open) frame.nodes.push(node.id);
   };
 
-  for (const rawLine of lines.slice(1)) {
+  for (const rawLine of body) {
     const trimmed = rawLine.trim();
     if (isIgnoredFlowStatement(trimmed)) continue;
     for (const statement of trimmed.split(";")) {
@@ -393,7 +399,9 @@ function sequenceOf(lines: readonly string[]): SequenceModel | null {
     participants.push(node);
   };
 
-  for (const rawLine of lines.slice(1)) {
+  // The type line may carry the first statement: `sequenceDiagram;A->>B: x`.
+  const typeHead = (lines[0] ?? "").split(";");
+  for (const rawLine of [...typeHead.slice(1), ...lines.slice(1)]) {
     const trimmed = rawLine.trim();
     if (trimmed === "" || trimmed.startsWith("%%") || trimmed === "autonumber") continue;
     const declared = /^(?:participant|actor)\s+([A-Za-z_][\w-]*)(?:\s+as\s+(.+))?$/.exec(trimmed);

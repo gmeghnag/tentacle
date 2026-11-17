@@ -85,6 +85,15 @@ describe("lintDiagram: forgiveness, with a note (§ sibling of chart's dropped s
     expect(result.lineMap).toEqual([2, 3]);
   });
 
+  test("a multi-line %%{init}%% before the type line is dropped too, never refused", () => {
+    // The usual form spans lines; its inner lines must not read as the diagram
+    // (review round 1, finding 2).
+    const result = canonical('%%{init: {\n  "theme":"dark"\n}}%%\nflowchart TD\n  A --> B');
+    expect(result.canonical).toBe("flowchart TD\n  A --> B");
+    expect(result.notes).toEqual(["%%{init}%% (the app chooses theme and fonts)"]);
+    expect(result.lineMap).toEqual([4, 5]);
+  });
+
   test("a config front-matter is dropped", () => {
     const result = canonical("---\nconfig:\n  theme: dark\n---\nflowchart TD\n  A --> B");
     expect(result.canonical).toBe("flowchart TD\n  A --> B");
@@ -119,6 +128,42 @@ describe("lintDiagram: forgiveness, with a note (§ sibling of chart's dropped s
     ]);
   });
 
+  test("click, style and classDef after a `;` are dropped, not smuggled through", () => {
+    // A `;` joins statements: the styling/click statement goes, the rest of the
+    // line stays (review round 1, finding 4).
+    const result = canonical(
+      [
+        "flowchart TD",
+        '  A[Start] --> B[Fine]; click A href "javascript:alert(1)"',
+        "  B --> C; style B fill:#f00; classDef bad fill:#0f0",
+      ].join("\n"),
+    );
+    expect(result.canonical).toBe("flowchart TD\n  A[Start] --> B[Fine]\n  B --> C");
+    expect(result.notes).toEqual([
+      "2 style lines (the app chooses colours and fonts)",
+      "1 click line (a diagram is not interactive)",
+    ]);
+    expect(result.canonical).not.toContain("javascript:");
+  });
+
+  test("a `;` inside a quoted click href is not a statement separator", () => {
+    const result = canonical('flowchart TD\n  A --> B; click A href "x?a=1;b=2"');
+    expect(result.canonical).toBe("flowchart TD\n  A --> B");
+    expect(result.notes).toEqual(["1 click line (a diagram is not interactive)"]);
+  });
+
+  test("a `;` in a comment is prose, not a statement join", () => {
+    const result = canonical("flowchart TD\n  %% A --> B; style A fill:#f00\n  A --> B");
+    expect(result.canonical).toBe("flowchart TD\n  %% A --> B; style A fill:#f00\n  A --> B");
+    expect(result.notes).toEqual([]);
+  });
+
+  test("a click on the type line's own line is still dropped, the type kept", () => {
+    const result = canonical('flowchart TD; click A href "x"');
+    expect(result.canonical).toBe("flowchart TD");
+    expect(result.notes).toEqual(["1 click line (a diagram is not interactive)"]);
+  });
+
   test("tabs, CRLF, a BOM and NBSP are normalised silently", () => {
     const result = canonical("\uFEFFflowchart TD\r\n\tA[A\u00a0B] --> B\r\n");
     expect(result.canonical).toBe("flowchart TD\n  A[A B] --> B");
@@ -128,6 +173,21 @@ describe("lintDiagram: forgiveness, with a note (§ sibling of chart's dropped s
   test("graph is spelled flowchart canonically, keeping its direction", () => {
     expect(canonical("graph LR\n  A --> B").canonical).toBe("flowchart LR\n  A --> B");
     expect(canonical("graph\n  A --> B").canonical).toBe("flowchart TD\n  A --> B");
+  });
+
+  test("a one-liner keeps the statements after its type line", () => {
+    // Only the leading keyword is canonicalised: `graph TD;A-->B` is a whole
+    // diagram on one line (review round 1, finding 1).
+    expect(canonical("graph TD;A-->B;B-->C").canonical).toBe("flowchart TD;A-->B;B-->C");
+    expect(canonical("graph;A-->B").canonical).toBe("flowchart TD;A-->B");
+  });
+
+  test("what follows a non-flowchart type keyword stays on its line", () => {
+    expect(canonical("sequenceDiagram autonumber\n  A->>B: ciao").canonical).toBe(
+      "sequenceDiagram autonumber\n  A->>B: ciao",
+    );
+    expect(canonical("sequenceDiagram;A->>B: ciao").canonical).toBe("sequenceDiagram;A->>B: ciao");
+    expect(canonical("gantt\n  title Piano").canonical).toBe("gantt\n  title Piano");
   });
 
   test("a habitually misspelt type is spelled canonically", () => {

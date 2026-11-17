@@ -14,6 +14,7 @@
  * this module does not recognise still gets a sentence, the offending line and
  * a caret under the column — never a raw object dump.
  */
+import { aliasType } from "./types.ts";
 
 /** One failure, as this module reads it out of whichever shape arrived. */
 interface Fault {
@@ -200,31 +201,58 @@ function messageWithoutText(line: string): { arrow: string } | null {
   return { arrow: match[2] ?? "->>" };
 }
 
-/** The keywords that open a block a model forgets to close. */
-const BLOCK_KEYWORDS: readonly string[] = [
-  "subgraph",
-  "alt",
-  "opt",
-  "loop",
-  "par",
-  "critical",
-  "break",
-  "rect",
-  "box",
-  "state",
-  "section",
-];
+/**
+ * The keywords that open a block closed by `end`, PER DIAGRAM TYPE. Scoping it
+ * matters: `section` (gantt/journey/timeline) and `state` (a declaration, and a
+ * composite state closes with `}`) are NOT `end`-blocks, so advising "add end"
+ * for them sends the model further from a parse.
+ */
+const BLOCK_KEYWORDS: Readonly<Record<string, readonly string[]>> = {
+  flowchart: ["subgraph"],
+  sequenceDiagram: ["alt", "opt", "loop", "par", "critical", "break", "rect", "box"],
+};
 
-/** The innermost unclosed block: its opener line and keyword. */
-function unclosedBlock(source: string): { keyword: string; title: string; line: number } | null {
-  const stack: { keyword: string; title: string; line: number }[] = [];
+/** The diagram type a source's first line says, or `null` for an unknown one. */
+function typeOfSource(source: string): string | null {
+  for (const line of source.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "" || trimmed.startsWith("%%") || trimmed === "---") continue;
+    return aliasType((trimmed.split(/[\s;]/)[0] ?? "").trim())?.type ?? null;
+  }
+  return null;
+}
+
+/** Where the source's last line that says something is (1-based), for EOF. */
+function lastContentLine(lines: readonly string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = (lines[i] ?? "").trim();
+    if (trimmed !== "" && !trimmed.startsWith("%%")) return i + 1;
+  }
+  return 0;
+}
+
+/**
+ * The innermost unclosed block: its opener line and keyword. `null` unless the
+ * source's type HAS such blocks, and the fault is at end-of-input — which is
+ * where a missing `end` surfaces. A fault in the middle is something else, and
+ * telling the model to add an `end` there would break the source further.
+ */
+function unclosedBlock(
+  source: string,
+  faultLine: number,
+): { keyword: string; title: string; line: number } | null {
+  const type = typeOfSource(source);
+  const keywords = type === null ? undefined : BLOCK_KEYWORDS[type];
+  if (keywords === undefined) return null;
   const lines = source.split("\n");
+  if (faultLine < lastContentLine(lines)) return null;
+  const stack: { keyword: string; title: string; line: number }[] = [];
   for (let i = 0; i < lines.length; i++) {
     const trimmed = (lines[i] ?? "").trim();
-    const opener = BLOCK_KEYWORDS.find(
+    const opener = keywords.find(
       (keyword) => trimmed === keyword || trimmed.startsWith(`${keyword} `),
     );
-    if (opener !== undefined && !(opener === "state" && trimmed.includes("-->"))) {
+    if (opener !== undefined) {
       stack.push({ keyword: opener, title: trimmed, line: i + 1 });
       continue;
     }
@@ -332,7 +360,7 @@ export function explainMermaidError(
   }
 
   // 5. An unclosed block: the source has more openers than `end`s.
-  const unclosed = unclosedBlock(source);
+  const unclosed = unclosedBlock(source, fault.line);
   if (unclosed) {
     const opened = `${unclosed.keyword} "${unclosed.title.slice(unclosed.keyword.length).trim()}"`;
     return [

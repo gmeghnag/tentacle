@@ -151,6 +151,29 @@ describe("diagramModel: sequence", () => {
   });
 });
 
+describe("diagramModel: the type line may carry the body", () => {
+  test("a one-line flowchart keeps its nodes and links", () => {
+    // The lint keeps a one-liner's statements (review round 1, finding 1); the
+    // reader must not then report an empty diagram.
+    const model = flow("flowchart TD;A-->B;B-->C");
+    expect(model.nodes.map((node) => node.id)).toEqual(["A", "B", "C"]);
+    expect(model.edges.map((edge) => `${edge.from}->${edge.to}`)).toEqual(["A->B", "B->C"]);
+  });
+
+  test("a one-line sequence keeps its message", () => {
+    const model = sequence("sequenceDiagram;A->>B: ciao");
+    expect(
+      model.messages.map((message) => `${message.from}->${message.to}:${message.text}`),
+    ).toEqual(["A->B:ciao"]);
+  });
+
+  test("a direction is read from the type statement only", () => {
+    // `A --> LR` is a node named LR, not a direction (the lint writes TD here).
+    expect(flow("flowchart LR;A-->B").direction).toBe("LR");
+    expect(flow("flowchart;A --> LR").direction).toBe("TD");
+  });
+});
+
 describe("diagramModel: other, never a guess", () => {
   test("a type it does not model is `other`, with its lines", () => {
     for (const type of [
