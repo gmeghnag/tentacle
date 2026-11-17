@@ -364,6 +364,8 @@ export interface RestoredSessionState {
    * at the first idle check (catch-up, D3). Absent → none.
    */
   readonly schedules?: readonly ScheduledJob[];
+  /** When the session was pinned (`DaemonSessionRecord.pinnedAt`): a restart and a reopen keep it. */
+  readonly pinnedAt?: number;
   /**
    * The session's MCP/skill switches at the restart, from its log's last
    * `capabilities` entry (`DaemonSessionRecord.capabilities`,
@@ -665,6 +667,11 @@ export class HostedSession {
    */
   autoAccept = false;
   /**
+   * When the session was pinned (`session/pin`, docs/feat/mobile-session-actions.md);
+   * undefined = not pinned. List metadata: never the conversation, never `lastChangeAt`.
+   */
+  pinnedAt: number | undefined;
+  /**
    * The session's MCP/skill switches (docs/feat/session-capabilities.md): what
    * the model is NOT offered. Held here, not only on the agent, because a
    * settings sync builds a fresh agent (everything on) and `swapAgent`
@@ -927,6 +934,7 @@ export class HostedSession {
     this.watchers = new SessionWatchers(now);
     const resume = restored?.resume;
     this.autoAccept = restored?.autoAccept === true;
+    this.pinnedAt = restored?.pinnedAt;
     // The switches a restart reloads (before the log's first segment, which
     // states them again: `logSegmentFacts`).
     if (restored?.capabilities !== undefined) {
@@ -1655,6 +1663,7 @@ export class HostedSession {
       returned: this.returned.map((r) => ({ ...r })),
       ...(head >= 0 ? { head } : {}),
       autoAccept: this.autoAccept,
+      ...(this.pinnedAt !== undefined ? { pinnedAt: this.pinnedAt } : {}),
       // The table as of NOW (D6): written only when non-empty (the sidecar's v3).
       ...(this.scheduleTable.length > 0 ? { schedules: [...this.scheduleTable] } : {}),
       ...(withLog ? { log: this.logCapture(after) } : {}),
@@ -1885,6 +1894,7 @@ export class HostedSession {
         (this.agentRuntime?.list().length ?? 0),
       // A count, only where the session schedules (docs/feat/cron-tool.md D5).
       ...(this.scheduling ? { schedules: this.scheduleTable.length } : {}),
+      ...(this.pinnedAt !== undefined ? { pinnedAt: this.pinnedAt } : {}),
     };
   }
 
@@ -2889,6 +2899,21 @@ export class HostedSession {
       }
     }
     return { on: this.autoAccept };
+  }
+
+  /**
+   * `session/pin` of this live session (a set; the cap is `SessionHost.pin`'s):
+   * stamped when it becomes pinned, cleared when unpinned, persisted only when
+   * it CHANGED (`serve`: the sidecar). Moves no `lastChangeAt` and emits
+   * nothing (list metadata, docs/feat/mobile-session-actions.md). Synchronous.
+   */
+  setPinned(on: boolean): boolean {
+    this.assertKnown();
+    if ((this.pinnedAt !== undefined) !== on) {
+      this.pinnedAt = on ? this.now() : undefined;
+      this.persist();
+    }
+    return this.pinnedAt !== undefined;
   }
 
   /** The session's switches now: the `OpenResult.capabilities` snapshot (F5). */

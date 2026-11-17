@@ -96,6 +96,8 @@ export interface DaemonSessionState {
    * D3): absent = off, so an older build's file and this one read the same.
    */
   readonly autoAccept?: boolean;
+  /** When the session was pinned (`session/pin`); absent = not pinned. */
+  readonly pinnedAt?: number;
   /** The scheduled wakes (docs/feat/cron-tool.md D6), written only when non-empty. */
   readonly schedules?: readonly ScheduledJob[];
   /** The session log's part (absent: none — e.g. `archive`'s capture after the close, which reuses the one before). */
@@ -139,6 +141,12 @@ export interface DaemonSessionRecord extends SessionRecord {
    * which `SessionHost.restore` decides by not handing it to a reopen.
    */
   readonly autoAccept?: boolean;
+  /**
+   * When the session was pinned (`session/pin`, docs/feat/mobile-session-actions.md):
+   * list metadata in the state file only, never a log entry. Absent = not
+   * pinned. A restart, an archive and a reopen all keep it.
+   */
+  readonly pinnedAt?: number;
   /**
    * The scheduled wakes at the last write (docs/feat/cron-tool.md D6): a
    * restart re-arms them, an ARCHIVED session keeps them frozen and a reopen
