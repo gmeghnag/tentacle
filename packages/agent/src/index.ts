@@ -12,6 +12,7 @@ export * from "./context-awareness.ts";
 export * from "./context-reset.ts";
 export * from "./session-skills.ts";
 export * from "./result-pipeline.ts";
+export * from "./prune.ts";
 export * from "./redact.ts";
 export * from "./permission-gate.ts";
 export * from "./session-grants.ts";
