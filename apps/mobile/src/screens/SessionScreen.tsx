@@ -118,6 +118,7 @@ import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { ThinkingNode } from "../ui/StepNode.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
+import { DiagramRenderer } from "../ui/diagram/DiagramRenderer.tsx";
 import {
   type VoiceController,
   type VoiceState,
@@ -767,6 +768,7 @@ export function SessionScreen({
     ended: state.transcript.closed,
     editable: state.view.editable,
     dictation: voiceSettings.dictation,
+    activityEmpty: activityVm.groups.length === 0,
     schedules: { rows: state.schedules, now: activityNow },
     ...(artifactsSeenKey === undefined
       ? {}
@@ -834,6 +836,8 @@ export function SessionScreen({
       style={[styles.screen, { backgroundColor: palette.page }]}
       onLayout={measureTop}
     >
+      {/* The ONE hidden mermaid renderer of this screen (model-diagrams D6). */}
+      <DiagramRenderer />
       <KeyboardAvoidingView
         testID="session-view"
         style={styles.screen}
@@ -1178,6 +1182,8 @@ export function SessionScreen({
               accessibilityLabel={hubA11yLabel(hubBadgeInput)}
               voiceOver={a11yFlags.voiceOver}
               reduceMotion={a11yFlags.reduceMotion}
+              reduceTransparency={a11yFlags.reduceTransparency}
+              opacity={activitySettings.opacity}
               fanItems={hub.fan}
               allItems={hub.all}
               solve={() =>
@@ -1186,7 +1192,6 @@ export function SessionScreen({
               onFanChange={onHubFan}
               onCommit={commitHub}
               onMenu={() => setHubMenu("all")}
-              onPress={openActivity}
               onDrop={(position) => {
                 // Written on drop only; a failed write keeps the spot for this run (F22).
                 ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), position }).catch(

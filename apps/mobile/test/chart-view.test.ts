@@ -112,6 +112,7 @@ beforeAll(async () => {
     useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
   }));
   mock.module("expo-symbols", () => ({ SymbolView: "SymbolView" }));
+  mock.module("expo-file-system", () => ({ File: class {}, Paths: { cache: "" } }));
   mock.module("expo-clipboard", () => ({ setStringAsync: async () => true }));
   mock.module("../src/haptics.ts", () => ({ playHaptic: () => {} }));
   mock.module("react-native-svg", () => ({

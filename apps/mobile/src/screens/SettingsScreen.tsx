@@ -22,6 +22,7 @@ import { BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
+import { HubOpacityBand } from "../ui/HubOpacityBand.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
@@ -92,6 +93,12 @@ export interface SettingsScreenProps {
   readonly activityError?: string;
   readonly onActivityMode?: (mode: ActivityButtonMode) => void;
   /**
+   * How see-through the floating button is (docs/feat/mobile-hub-opacity.md):
+   * absent → 100 %, the boolean itself absent = no band at all.
+   */
+  readonly activityOpacity?: number;
+  readonly onActivityOpacity?: (opacity: number) => void;
+  /**
    * Photos (fix/mobile-media-live item 5): the "Send photos at original size"
    * switch. Absent = no Photos card (a build without the setting).
    */
@@ -143,6 +150,8 @@ export function SettingsScreen({
   activityWritable = true,
   activityError,
   onActivityMode,
+  activityOpacity,
+  onActivityOpacity,
   photoSettings,
   photoWritable = true,
   photoError,
@@ -383,6 +392,17 @@ export function SettingsScreen({
                 />
               )}
             </View>
+          )}
+          {/* The opacity band (docs/feat/mobile-hub-opacity.md, Owner Q1): only
+              with the floating button, which is the only thing it affects. The
+              stored value is kept while the button is in the header. */}
+          {onActivityOpacity === undefined || activityMode !== "floating" ? null : (
+            <HubOpacityBand
+              palette={palette}
+              opacity={activityOpacity}
+              writable={activityWritable}
+              onChange={onActivityOpacity}
+            />
           )}
           {voice === undefined || onVoice === undefined ? null : (
             <View style={styles.section}>

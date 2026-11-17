@@ -142,6 +142,7 @@ import { readAsked, readPermission, readPushFacts, requestPermission } from "./s
 import { createPushManager } from "./src/push-manager.ts";
 import type { PushPermission } from "./src/push-registration.ts";
 import { createPushToggleStore } from "./src/push-toggle-store.ts";
+import { queueTrace } from "./src/queue-trace.ts";
 import {
   type ArtifactGalleryRoute,
   type RootStackParams,
@@ -1418,6 +1419,11 @@ function SessionRoute({
         // the device it is shown on (docs/feat/session-auto-accept.md D7): the
         // name this phone paired under. Absent on a record an older build wrote.
         phoneName: () => RECORDS.get(computerId)?.thisDeviceName,
+        // The queue-diagnosis trace (docs/fix/mobile-queued-stuck.md): every
+        // `queued` report, turn bracket, attach and compose act this session sees,
+        // into the ONE exported log (`Settings → Export logs`, `grep qtrace`).
+        // Diagnostic only: nothing here changes a behaviour.
+        trace: queueTrace(sessionId, APP_LOG),
         controller: RUNTIMES.controller(link.client),
         broker: link.permissions,
         now: () => Date.now(),
@@ -1624,6 +1630,17 @@ function AppShell(): JSX.Element {
   const selectActivityMode = useCallback((mode: ActivityButtonMode) => {
     setActivityError(undefined);
     ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), mode }).catch(() =>
+      setActivityError("That Activity button setting didn't save"),
+    );
+  }, []);
+  /**
+   * docs/feat/mobile-hub-opacity.md: ONE write per slider gesture (on release),
+   * spreading the current settings so the mode and the spot survive it. A failed
+   * write reuses the existing banner.
+   */
+  const selectActivityOpacity = useCallback((opacity: number) => {
+    setActivityError(undefined);
+    ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), opacity }).catch(() =>
       setActivityError("That Activity button setting didn't save"),
     );
   }, []);
@@ -2143,6 +2160,10 @@ function AppShell(): JSX.Element {
                 activityWritable={activityWritable}
                 {...(activityError === undefined ? {} : { activityError })}
                 onActivityMode={selectActivityMode}
+                {...(activitySettings.opacity === undefined
+                  ? {}
+                  : { activityOpacity: activitySettings.opacity })}
+                onActivityOpacity={selectActivityOpacity}
                 // Item 5's switch (fix/mobile-media-live): the downscale is the
                 // default, and a newer build's record is never written over.
                 photoSettings={photoSettings}

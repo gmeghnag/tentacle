@@ -97,6 +97,11 @@ const base = (over: Partial<FrameInput> = {}): FrameInput => ({
   daemonQueue: undefined,
   loading: null,
   compacting: false,
+  // The slot's two compaction figures + its clock (docs/feat/harness-notices.md
+  // S3): at rest, nothing to show.
+  compactingSince: null,
+  compactedAt: null,
+  now: 1_000,
   ...over,
 });
 

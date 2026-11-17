@@ -898,10 +898,31 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
 }
 
 /** A full-width grey rule with `text` in it: `── text ─────…`. */
-function separatorLines(text: string, width: number): string[] {
+function separatorLines(text: string, width: number, body?: string, expanded = false): string[] {
   const head = `── ${text} `;
-  const rest = Math.max(2, width - stringWidth(head));
-  return [theme.subtle(`${head}${"─".repeat(rest)}`)];
+  const hasBody = body !== undefined && body !== "";
+  // The collapsed `Ctrl+O` hint rides the rule's row, so its cells come OUT of
+  // the rule's fill (review S3 F1): a full-width rule with the hint appended
+  // wrapped onto a SECOND row on every resume/resync of a compacted session.
+  // It is budgeted in the expanded state too, so Ctrl+O does not re-flow the rule.
+  const hintText = ` ${EXPAND_HINT}`;
+  // Budgeted only when it FITS beside at least 2 rule cells: a hint that would
+  // wrap is dropped (a narrow terminal, where it could never be read whole),
+  // never truncated and never pushed onto a second row.
+  const hint = hasBody && width - stringWidth(head) - stringWidth(hintText) >= 2 ? hintText : "";
+  const rest = Math.max(2, width - stringWidth(head) - stringWidth(hint));
+  const rule = theme.subtle(`${head}${"─".repeat(rest)}`);
+  // `body` (docs/feat/harness-notices.md S3.4): what the rule stands for, shown
+  // only when expanded (Ctrl+O) — a resumed compaction's brief, which used to be
+  // a `›` user row carrying the whole thing. Hung two spaces under the rule, the
+  // same indent a harness line's continuation uses; `itemRows`' `expandMatters`
+  // already keys on `body`, so both slots are cached.
+  if (!hasBody) {
+    return [rule];
+  }
+  return expanded
+    ? [rule, ...body.split("\n").map((l) => `  ${theme.subtle(l)}`)]
+    : [`${rule}${theme.subtle(hint)}`];
 }
 
 /** The harness glyphs: info `◇`, warn `▲` (docs/feat/harness-notices.md S2). */
@@ -996,7 +1017,12 @@ export function itemLinesAt(item: DisplayItem, opts: RenderOptions, glyph: boole
       return toolLines(item, opts);
     case "notice":
       return item.separator
-        ? separatorLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH))
+        ? separatorLines(
+            item.text,
+            Math.floor(opts.width ?? DEFAULT_WIDTH),
+            item.body,
+            opts.expandAll === true,
+          )
         : noticeLines(
             item.text,
             opts.expandAll === true,

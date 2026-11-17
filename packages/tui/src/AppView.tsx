@@ -70,7 +70,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
     quitConfirm,
     artifactConfirm,
     hopRow,
-    loading,
+    slot,
     compacting,
     columns,
     tokensShown,
@@ -154,18 +154,25 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
             ) : null}
             {/* One blank row between the send-now hint and the thinking line. */}
             {st.running && shown.length > 0 ? <Text> </Text> : null}
-            {loading ? (
-              <Text {...dimProps()}>{loadingLabel(loading.done, loading.total)}</Text>
-            ) : st.running ? (
+            {/* The slot: ONE row, decided by `spinner-slot.ts` (S3) — never
+                re-decided here, or the row budget above it and this paint drift
+                apart. */}
+            {slot === null ? null : slot.kind === "loading" ? (
+              <Text {...dimProps()}>{loadingLabel(slot.done, slot.total)}</Text>
+            ) : slot.kind === "compacted" ? (
+              <Text color={palette().subtle}>Compacted ✓</Text>
+            ) : (
               <Thinking
-                since={
-                  st.reasoning && st.reasoningStartedAt !== null
-                    ? st.reasoningStartedAt
-                    : (st.turnStartedAt ?? Date.now())
+                since={slot.since}
+                label={
+                  slot.kind === "thinking"
+                    ? "Thinking…"
+                    : slot.kind === "working"
+                      ? "Working…"
+                      : "Compacting…"
                 }
-                label={st.reasoning ? "Thinking…" : "Working…"}
               />
-            ) : null}
+            )}
             {listView ? (
               <ListPanel view={listView} columns={columns} />
             ) : (

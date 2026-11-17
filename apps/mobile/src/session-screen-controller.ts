@@ -60,6 +60,7 @@ import {
   type SheetState,
   createPermissionSheet,
 } from "./permission-sheet.ts";
+import type { QueueTrace } from "./queue-trace.ts";
 import type { SessionController, SessionHandle, SessionOpenFailure } from "./session-controller.ts";
 import { type ForeignTurn, createSessionFeed } from "./session-feed.ts";
 import {
@@ -352,6 +353,12 @@ export interface SessionScreenDeps {
    */
   readonly broker: Pick<PermissionBroker, "setRequester" | "reset">;
   readonly now: () => number;
+  /**
+   * The queue-diagnosis trace (docs/fix/mobile-queued-stuck.md): the app's ONE
+   * app-log sink, already bound to this session's id. Absent: nothing is traced
+   * and no behaviour changes (every test that predates it passes it not at all).
+   */
+  readonly trace?: QueueTrace;
   /** Injectable for tests: the sheet's clock/arm window and the thumbnail port. */
   readonly sheet?: (deps: { readonly now: () => number }) => PermissionSheet;
   readonly thumbnails?: ThumbnailSource;
@@ -684,6 +691,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     // A live row's arrival time (docs/fix/mobile-open-at-end.md, slice B): the
     // stamp a swipe shows. Taken when the fold CREATES the row, never on upsert.
     now: () => deps.now(),
+    ...(deps.trace === undefined ? {} : { trace: deps.trace }),
+    // The turn is over: the DIAGNOSTIC asks the composer what it still shows.
+    // Nothing is cleared here — mobile has no turn-end reconciliation yet, and
+    // inventing one before the capture would hide the very frame it hunts
+    // (docs/fix/mobile-queued-stuck.md).
+    onTurnClosed: () => compose?.turnClosed(),
   });
 
   /**
@@ -758,6 +771,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
             notice = text;
             emit();
           },
+          ...(deps.trace === undefined ? {} : { trace: deps.trace }),
         });
 
   /**
@@ -1163,6 +1177,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     }
     attaching = true;
     status = { phase: "opening", ...(reopen ? { reopenRequested: true as const } : {}) };
+    deps.trace?.({ kind: "attach", state: "start", reopen });
     emit();
     const result = await deps.controller.open(deps.sessionId, {
       ...(reopen ? { reopen: true } : {}),
@@ -1173,6 +1188,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       return;
     }
     if (!result.ok) {
+      deps.trace?.({ kind: "attach", state: "fail", reopen, reason: result.reason });
       status = {
         phase: "failed",
         failure: result.reason,
@@ -1189,6 +1205,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     }
     queuedReopen = false;
     handle = result.session;
+    deps.trace?.({ kind: "attach", state: "ok", reopen });
     status = { phase: "open" };
     // The daemon's title can move while this screen is open (another device's
     // rename, or this one's): the header follows it, never the route's copy.
@@ -1726,6 +1743,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       if (refreshing || disposed) {
         return;
       }
+      deps.trace?.({ kind: "resync", state: "start" });
       refreshing = true;
       // A FOREGROUND resync (item 2) is silent: no pull spinner, because the
       // person made no gesture and nothing is left to look ignored.
@@ -1748,10 +1766,14 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           // KEPT (never an empty transcript) and the failure is honest — the
           // banner already shows its reason, so this only says why nothing moved.
           notice = RESYNC_FAILED_NOTICE;
+          deps.trace?.({ kind: "resync", state: "failed" });
         } else if (transcript.rows.length === before && before > 0) {
           // The daemon answered with exactly what is shown: worth saying only
           // when there was something to compare, so a fresh empty session is quiet.
           notice = null;
+          deps.trace?.({ kind: "resync", state: "kept" });
+        } else {
+          deps.trace?.({ kind: "resync", state: "done" });
         }
       } finally {
         refreshing = false;

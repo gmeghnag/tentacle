@@ -419,10 +419,13 @@ describe("foreign turns in the TUI", () => {
     app.unmount();
   });
 
-  test("T-C11: an idle compaction not mine keeps the transcript + notice; mine adds no extra notice; any other history replaces it", async () => {
+  test("T-C11: an idle compaction not mine keeps the transcript + its separator; mine adds its own; any other history replaces it", async () => {
     const s = sharedSession({ compact: async () => ({ before: 9, after: 2 }) });
     const app = await mount(s.ctrl);
     await type(app.stdin, "hello");
+    // S3: a compaction's place marker is the separator rule at the compaction
+    // point, one wording whatever device compacted (no foreign variant).
+    const rules = (f: string): number => f.split("\n── compacted").length - 1;
     s.raise({
       kind: "history",
       messages: [{ role: "user", content: "summary" }],
@@ -431,7 +434,8 @@ describe("foreign turns in the TUI", () => {
     await delay(30);
     let frame = app.lastFrame() ?? "";
     expect(frame).toContain("› hello");
-    expect(frame).toContain("compacted on another device");
+    expect(rules(frame)).toBe(1);
+    expect(frame).not.toContain("compacted on another device");
     await type(app.stdin, "/compact");
     s.raise({
       kind: "history",
@@ -440,7 +444,9 @@ describe("foreign turns in the TUI", () => {
     });
     await delay(30);
     frame = app.lastFrame() ?? "";
-    expect(frame.split("compacted on another device").length - 1).toBe(1);
+    // Ours, then theirs: exactly one each — a leaked own-compaction count would
+    // swallow theirs (the notice this test was written for), not add one.
+    expect(rules(frame)).toBe(2);
     expect(frame).toContain("› hello");
     s.raise({
       kind: "history",
@@ -451,6 +457,7 @@ describe("foreign turns in the TUI", () => {
     frame = app.lastFrame() ?? "";
     expect(frame).toContain("› the daemon's");
     expect(frame).not.toContain("› hello");
+    expect(rules(frame)).toBe(0);
     app.unmount();
   });
 

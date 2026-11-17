@@ -1,8 +1,9 @@
 /**
  * The floating hub button (docs/feat/mobile-chrome.md Design 6, F2 opt-in;
  * docs/feat/mobile-hub.md H3): a 54 pt glass circle on an edge of the band
- * between the header and the composer. Tap = Activity; hold 400 ms = the radial
- * fan; drag = move it. Render + gesture plumbing only: the press machine and its
+ * between the header and the composer. Tap = the hub fan (as does the 400 ms
+ * hold, which adds slide-to-select); drag = move it. Render + gesture plumbing
+ * only: the press machine and its
  * timer are `hub-session.ts`'s `createHubDriver` (over `hub-gesture.reduce`),
  * the fan's geometry `hub-fan.ts`'s, where it rests and when it shows
  * `floating-button.ts`'s. `PanResponder` (core RN, no gesture library) feeds raw
@@ -35,7 +36,8 @@ import { hubHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import type { HubActionId, HubBadge, HubItem } from "../hub-actions.ts";
 import { type FanLayout, type Point, fanMotion } from "../hub-fan.ts";
-import type { GestureEffect, HubMenu } from "../hub-gesture.ts";
+import type { GestureEffect, GestureState, HubMenu } from "../hub-gesture.ts";
+import { hubOpacity } from "../hub-opacity.ts";
 import {
   type HubWorld,
   bandPoint,
@@ -47,23 +49,40 @@ import {
 import { DENSE_FONT_SCALE, type Palette, shadow, typography } from "../theme.ts";
 import { HubFan } from "./HubFan.tsx";
 
-/** VoiceOver and Reduce Motion, read live (F23): toggling either converges without a restart. */
-export function useAccessibilityFlags(): { voiceOver: boolean; reduceMotion: boolean } {
+/**
+ * VoiceOver, Reduce Motion and Reduce Transparency, read live (F23;
+ * docs/feat/mobile-hub-opacity.md): toggling any of them converges without a
+ * restart.
+ */
+export function useAccessibilityFlags(): {
+  voiceOver: boolean;
+  reduceMotion: boolean;
+  reduceTransparency: boolean;
+} {
   const [voiceOver, setVoiceOver] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(false);
+  const [reduceTransparency, setReduceTransparency] = useState(false);
   useEffect(() => {
     let live = true;
     void AccessibilityInfo.isScreenReaderEnabled().then((on) => live && setVoiceOver(on));
     void AccessibilityInfo.isReduceMotionEnabled().then((on) => live && setReduceMotion(on));
+    void AccessibilityInfo.isReduceTransparencyEnabled().then(
+      (on) => live && setReduceTransparency(on),
+    );
     const reader = AccessibilityInfo.addEventListener("screenReaderChanged", setVoiceOver);
     const reduce = AccessibilityInfo.addEventListener("reduceMotionChanged", setReduceMotion);
+    const transparency = AccessibilityInfo.addEventListener(
+      "reduceTransparencyChanged",
+      setReduceTransparency,
+    );
     return () => {
       live = false;
       reader.remove();
       reduce.remove();
+      transparency.remove();
     };
   }, []);
-  return { voiceOver, reduceMotion };
+  return { voiceOver, reduceMotion, reduceTransparency };
 }
 
 export interface FloatingActivityProps {
@@ -80,13 +99,22 @@ export interface FloatingActivityProps {
   readonly accessibilityLabel: string;
   readonly voiceOver: boolean;
   readonly reduceMotion: boolean;
+  /**
+   * iOS Reduce Transparency: the body is always solid
+   * (docs/feat/mobile-hub-opacity.md). Read live, like the other two.
+   */
+  readonly reduceTransparency: boolean;
+  /**
+   * How see-through the body is at rest, as a percentage (`hub-opacity.ts`);
+   * absent → 100 %, today's look. Solid while touched or while the fan is open.
+   */
+  readonly opacity: number | undefined;
   /** The fan's items NOW (`hubActions(...).fan`); `solve` snapshots them at the open. */
   readonly fanItems: readonly HubItem[];
   /** Everything (no six cap): VoiceOver's actions. */
   readonly allItems: readonly HubItem[];
   /** `hub-session.ts` `solveHub` for the current band, spot and items. */
   readonly solve: () => HubMenu;
-  readonly onPress: () => void;
   readonly onDrop: (position: FloatPosition) => void;
   /** The fan opened (true) or closed by any path (false): the screen guards the back-swipe (M2). */
   readonly onFanChange: (open: boolean) => void;
@@ -102,16 +130,34 @@ interface OpenFan {
 }
 
 export function FloatingActivity(props: FloatingActivityProps): JSX.Element | null {
-  const { palette, bounds, position, shown, badge, turnRunning, voiceOver, reduceMotion } = props;
+  const {
+    palette,
+    bounds,
+    position,
+    shown,
+    badge,
+    turnRunning,
+    voiceOver,
+    reduceMotion,
+    reduceTransparency,
+    opacity: setting,
+  } = props;
   const at = bounds === null ? null : place(position, bounds);
   const xy = useRef(new Animated.ValueXY(at ?? { x: 0, y: 0 })).current;
   const opacity = useRef(new Animated.Value(0)).current;
+  /** The body layer's own level, under the outer fade (`hub-opacity.ts`). */
+  const bodyLevel = useRef(new Animated.Value(1)).current;
   // While a finger holds it, the fan is up or the snap runs, a re-placement must not yank it.
   const moving = useRef(false);
   // The responder and the driver are created once; they read the latest props through this.
   const latest = useRef(props);
   latest.current = props;
   const [fan, setFan] = useState<OpenFan | null>(null);
+  // Whether it is engaged (a finger on it, a drag, the fan): solid while it is
+  // (`hub-opacity.ts`). A press emits NO effect on down (`hub-gesture.ts:108`),
+  // so this cannot come from an effect — it is the machine's state, synced by
+  // the one wrapper below (docs/feat/mobile-hub-opacity.md Design 3).
+  const [engaged, setEngaged] = useState<GestureState["kind"]>("idle");
 
   // Re-placed when the stored spot or the band changes (keyboard, rotation).
   const atX = at?.x;
@@ -140,6 +186,25 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
       }
     });
   }, [shown, fadeMs, opacity]);
+
+  // How see-through the BODY is (docs/feat/mobile-hub-opacity.md): the setting at
+  // rest, 1 while touched / with the fan open / under Reduce Transparency. It is a
+  // level of its own, INSIDE the outer fade, and the arc is its sibling — so the
+  // arc's effective opacity is `fade × 1`, the body's `fade × level`.
+  const level = hubOpacity({
+    setting,
+    gesture: engaged,
+    fanOpen: fan !== null,
+    reduceTransparency,
+  });
+  useEffect(() => {
+    Animated.timing(bodyLevel, {
+      // Up is instant (feedback at once); back down takes the fade.
+      toValue: level.body,
+      duration: level.body === 1 ? 0 : fadeMs,
+      useNativeDriver: false,
+    }).start();
+  }, [level.body, fadeMs, bodyLevel]);
 
   // The press: the button's spot at the grant, and the menu solved at the open.
   const press = useRef<{ start: Point; menu: HubMenu | null }>({
@@ -209,10 +274,6 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
           setFan(null);
           moving.current = false;
           break;
-        case "tap":
-          back();
-          latest.current.onPress();
-          break;
         case "dragTo":
           xy.setValue({
             x: press.current.start.x + effect.delta.x,
@@ -229,6 +290,10 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
           break;
       }
     }
+    // The state AFTER the effects is the whole answer: a 400 ms hold that opened
+    // the fan, a commit, a close, a tap-overlay — every path ends here, so the
+    // body can never stay solid after one (`docs/feat/mobile-hub-opacity.md`).
+    setEngaged(driver.state().kind);
   };
   const applyRef = useRef(apply);
   applyRef.current = apply;
@@ -275,10 +340,13 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
     if (mustCancel(prevWorld.current, world)) {
       driver.cancel();
       settle();
+      setEngaged(driver.state().kind);
     }
     prevWorld.current = world;
   });
 
+  // A press emits no effect on down (`hub-gesture.ts:108`), so `apply` alone
+  // cannot see it: every direct call into the machine syncs the body's level too.
   const pan = useMemo(() => {
     let local: Point = { x: 0, y: 0 };
     const pointOf = (g: { dx: number; dy: number }) =>
@@ -297,11 +365,16 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
           moving.current = true;
         }
         driver.down(pointOf({ dx: 0, dy: 0 }), Date.now());
+        setEngaged(driver.state().kind);
       },
       onPanResponderMove: (_event, g) => driver.move(pointOf(g), Date.now()),
-      onPanResponderRelease: (_event, g) => driver.up(pointOf(g), Date.now()),
+      onPanResponderRelease: (_event, g) => {
+        driver.up(pointOf(g), Date.now());
+        setEngaged(driver.state().kind);
+      },
       onPanResponderTerminate: () => {
         driver.cancel();
+        setEngaged(driver.state().kind);
         if (driver.state().kind === "idle") {
           moving.current = false;
         }
@@ -332,11 +405,10 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
   if (at === null || !rendered || bounds === null) {
     return null;
   }
+  const { arc } = level;
   const onAccessibilityAction = (event: AccessibilityActionEvent) => {
     const route = hubA11yRoute(event.nativeEvent.actionName);
-    if (route.kind === "tap") {
-      props.onPress();
-    } else if (route.kind === "menu") {
+    if (route.kind === "menu") {
       props.onMenu();
     } else if (route.kind === "commit") {
       props.onCommit(route.id);
@@ -352,7 +424,10 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
           hi={fan.hi}
           motion={fanMotion(reduceMotion)}
           band={bounds}
-          onTapOverlay={(p) => driver.tapOverlay(p)}
+          onTapOverlay={(p) => {
+            driver.tapOverlay(p);
+            setEngaged(driver.state().kind);
+          }}
         />
       )}
       <Animated.View
@@ -361,41 +436,91 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
         accessibilityRole="button"
         accessibilityLabel={props.accessibilityLabel}
         accessibilityHint={
-          voiceOver ? "Double-tap for Activity. Swipe up or down for more actions." : undefined
+          voiceOver ? "Double-tap for actions. Swipe up or down for more actions." : undefined
         }
         accessibilityActions={hubA11yActions(props.allItems).map((action) => ({ ...action }))}
         onAccessibilityAction={onAccessibilityAction}
-        onAccessibilityTap={props.onPress}
         pointerEvents={shown ? "auto" : "none"}
         style={[
           styles.circle,
           {
-            borderColor: palette.glassBorder,
-            shadowOpacity: palette.shadowOpacity,
             opacity,
             transform: xy.getTranslateTransform(),
           },
         ]}
         {...(a11y(voiceOver).draggable ? pan.panHandlers : {})}
       >
-        <BlurView
-          pointerEvents="none"
-          intensity={60}
-          tint="systemUltraThinMaterial"
-          style={[StyleSheet.absoluteFill, styles.clip]}
-        />
+        {/* The BODY layer: the shadow, blur, glass, border, glyph/badge — and the
+            rest opacity. RN multiplies a layer's opacity into it, so the badge and
+            the glyph fade with it, and it carries the body's level on the shadow
+            too, so a faint body casts a faint one (at 100 %: the look of before
+            this setting).
+
+            The shadow is on THIS layer, not on a child ring: iOS clips a layer's
+            shadow to the layer, so a child of a clipped box loses it (RN sets
+            `layer.mask` for `overflow: hidden`, RN `RCTView.m`
+            `updateClippingForLayer`), and a child that paints nothing at all gets
+            no shadow either — RN only computes a `shadowPath` for a view with a
+            solid background (`RCTUpdateShadowPathForView`), and otherwise falls
+            back to the layer's own pixels, which an empty layer does not have.
+            So the clip lives on the glass fill below, and this box — rounded, but
+            never `overflow: hidden` — casts. */}
         <Animated.View
           pointerEvents="none"
-          style={[StyleSheet.absoluteFill, styles.clip, { backgroundColor: palette.glass }]}
-        />
+          style={[
+            StyleSheet.absoluteFill,
+            styles.body,
+            {
+              borderColor: palette.glassBorder,
+              shadowOpacity: palette.shadowOpacity,
+              opacity: bodyLevel,
+            },
+          ]}
+        >
+          <BlurView
+            pointerEvents="none"
+            intensity={60}
+            tint="systemUltraThinMaterial"
+            style={[StyleSheet.absoluteFill, styles.clip]}
+          />
+          <Animated.View
+            pointerEvents="none"
+            style={[StyleSheet.absoluteFill, styles.clip, { backgroundColor: palette.glass }]}
+          />
+          {badge?.kind === "count" ? (
+            <Text
+              testID="hub-badge-count"
+              maxFontSizeMultiplier={DENSE_FONT_SCALE}
+              numberOfLines={1}
+              style={[typography.footnote, styles.count, { color: palette.accent }]}
+            >
+              {badge.n}
+            </Text>
+          ) : (
+            <View testID="hub-glyph" pointerEvents="none" style={styles.grid}>
+              {[0, 1, 2, 3].map((i) => (
+                <View key={i} style={[styles.dot, { backgroundColor: palette.accent }]} />
+              ))}
+            </View>
+          )}
+          {badge?.kind === "dot" ? (
+            <View
+              testID="hub-badge-dot"
+              pointerEvents="none"
+              style={[styles.newDot, { backgroundColor: palette.accentFill }]}
+            />
+          ) : null}
+        </Animated.View>
+        {/* The arc is the body's SIBLING: it follows the outer fade only, so it
+            stays solid at any setting. Below 75 % it thickens and gains a
+            page-coloured halo, which is why it has to be outside the body. */}
         {turnRunning ? (
           <Animated.View
             testID="hub-arc"
             pointerEvents="none"
             style={[
-              styles.arc,
+              styles.arcBox,
               {
-                borderTopColor: palette.accent,
                 transform: [
                   {
                     rotate: spin.interpolate({
@@ -406,30 +531,18 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
                 ],
               },
             ]}
-          />
-        ) : null}
-        {badge?.kind === "count" ? (
-          <Text
-            testID="hub-badge-count"
-            maxFontSizeMultiplier={DENSE_FONT_SCALE}
-            numberOfLines={1}
-            style={[typography.footnote, styles.count, { color: palette.accent }]}
           >
-            {badge.n}
-          </Text>
-        ) : (
-          <View testID="hub-glyph" pointerEvents="none" style={styles.grid}>
-            {[0, 1, 2, 3].map((i) => (
-              <View key={i} style={[styles.dot, { backgroundColor: palette.accent }]} />
-            ))}
-          </View>
-        )}
-        {badge?.kind === "dot" ? (
-          <View
-            testID="hub-badge-dot"
-            pointerEvents="none"
-            style={[styles.newDot, { backgroundColor: palette.accentFill }]}
-          />
+            {arc.halo ? (
+              <View
+                testID="hub-arc-halo"
+                pointerEvents="none"
+                style={[styles.arc, { borderTopColor: palette.page, borderWidth: arc.width + 3 }]}
+              />
+            ) : null}
+            <View
+              style={[styles.arc, { borderTopColor: palette.accent, borderWidth: arc.width }]}
+            />
+          </Animated.View>
         ) : null}
       </Animated.View>
     </>
@@ -437,6 +550,10 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
 }
 
 const styles = StyleSheet.create({
+  // The outer box: position, size and the show/hide fade — nothing painted. The
+  // body layer owns the glass, the border and the shadow, and the arc is its
+  // sibling, so the fade multiplies into both and the rest level into the body
+  // only.
   circle: {
     position: "absolute",
     left: 0,
@@ -444,13 +561,39 @@ const styles = StyleSheet.create({
     width: FLOAT_SIZE,
     height: FLOAT_SIZE,
     borderRadius: FLOAT_SIZE / 2,
-    borderWidth: 1,
+  },
+  // The clip belongs to the PAINTED layers only: a layer's shadow is clipped by
+  // the layer itself, so a clipped box that casts has no shadow.
+  clip: { borderRadius: FLOAT_SIZE / 2, overflow: "hidden" },
+  // The body layer fills the circle exactly and carries the shadow: rounded, but
+  // deliberately UNCLIPPED (no `overflow`) — it must also have CONTENT for the
+  // shadow to exist, which is why the shadow is here and not on an empty ring
+  // beside it (the glass fill and the glyph are this layer's children, exactly
+  // the structure that cast the shadow before this setting existed).
+  body: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    width: FLOAT_SIZE,
+    height: FLOAT_SIZE,
+    borderRadius: FLOAT_SIZE / 2,
     alignItems: "center",
     justifyContent: "center",
+    borderWidth: 1,
     ...shadow.glass,
   },
-  clip: { borderRadius: FLOAT_SIZE / 2, overflow: "hidden" },
   count: { fontWeight: "600", fontVariant: ["tabular-nums"] },
+  // The spinning box (the arc and its halo, one turn per 1.2 s). Square, so the
+  // rotation is a pure spin around the circle's centre.
+  arcBox: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: FLOAT_SIZE,
+    height: FLOAT_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   arc: {
     position: "absolute",
     top: 2,

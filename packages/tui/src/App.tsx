@@ -102,6 +102,7 @@ import { anchorOffset, applyScroll, clampOffset, isScrolledUp, windowFor } from 
 import type { Selection } from "./selection.ts";
 import { withRestored } from "./send-now.ts";
 import { SkillsSync } from "./skills-sync.ts";
+import { COMPACTED_SHOWN_MS } from "./spinner-slot.ts";
 import {
   type DisplayItem,
   type DisplayState,
@@ -303,9 +304,19 @@ export function App({
   /** The session a `/settings sync` is in flight on (docs/feat/session-settings-apply.md F4). */
   const syncingRef = useRef<SessionController | null>(null);
   const [compacting, setCompactingState] = useState(false);
+  /**
+   * When this TUI's own `/compact` began (`null`: none runs), and when it last
+   * succeeded — the spinner slot's two figures (docs/feat/harness-notices.md S3).
+   * `setCompacting` keeps the first beside the latch (they are one fact), and a
+   * compaction starting replaces a lingering `Compacted ✓` at once.
+   */
+  const [compactingSince, setCompactingSince] = useState<number | null>(null);
+  const [compactedAt, setCompactedAt] = useState<number | null>(null);
   const setCompacting = useCallback((on: boolean) => {
     compactingRef.current = on;
     setCompactingState(on);
+    setCompactingSince(on ? Date.now() : null);
+    setCompactedAt(null);
   }, []);
   const compactionOwnedRef = useRef(false);
   // Interactive tool-approval dialog + auto-accept (Shift+Tab), all self-contained.
@@ -941,6 +952,11 @@ export function App({
     daemonQueue,
     loading,
     compacting,
+    compactingSince,
+    compactedAt,
+    // The frame needs a clock for the slot's 3 s window; it is read ONCE per
+    // render (a `setCompactedAt(null)` from the timer is what re-renders).
+    now: Date.now(),
     // The strip's contents, computed by the pure view-model; `null` = no rows.
     voiceStrip: voiceStripView(voice.model, { columns: size.columns }),
   });
@@ -1071,6 +1087,43 @@ export function App({
     [flushNow],
   );
   pushNoticeRef.current = pushNotice;
+
+  /**
+   * The compaction's grey rule at the transcript's end (docs/feat/harness-notices.md
+   * S3): a `NoticeItem` with `separator: true`, so it takes no glyph and no place
+   * in a harness block. `markCompacted` starts the 3 s `Compacted ✓`.
+   */
+  const pushSeparator = useCallback(
+    (text: string) => {
+      stateRef.current = appendNotice(stateRef.current, text, { separator: true });
+      setScrollOffset(0);
+      flushNow();
+    },
+    [flushNow],
+  );
+  /**
+   * `Compacted ✓`'s one timer. A REF, not an effect: App's effect list is frozen
+   * at 22 in their order (H1, `app-structural-order`/`app-tidy-structure`), and
+   * this needs no render-time subscription — it clears the figure 3 s after it
+   * was set (owner: ~3 s). Any newer compaction (or a turn, `clearCompacted`)
+   * disarms it first, so a stale fire can never blank a fresh figure.
+   */
+  const compactedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearCompacted = useCallback(() => {
+    if (compactedTimerRef.current !== null) {
+      clearTimeout(compactedTimerRef.current);
+      compactedTimerRef.current = null;
+    }
+    setCompactedAt(null);
+  }, []);
+  const markCompacted = useCallback(() => {
+    clearCompacted();
+    setCompactedAt(Date.now());
+    compactedTimerRef.current = setTimeout(() => {
+      compactedTimerRef.current = null;
+      setCompactedAt(null);
+    }, COMPACTED_SHOWN_MS);
+  }, [clearCompacted]);
 
   /**
    * The daemon reported the session's switches (a snapshot, an echo, another
@@ -1436,6 +1489,9 @@ export function App({
       compactingRef,
       ownCompactionsRef,
       setCompacting,
+      pushSeparator,
+      markCompacted,
+      clearCompacted,
       field,
       historyRef,
       histIndexRef,
@@ -1527,6 +1583,7 @@ export function App({
     forgetArtifacts: forgetJoinedArtifacts,
     joinCards,
     pushNotice,
+    pushSeparator,
     restoreInput,
     setCompacting,
     skillsSync,

@@ -11,11 +11,14 @@
  *   this build cannot change it;
  * - a bad `position` inside our own v1 record drops the position only (the
  *   button goes back to its default spot; the mode is kept);
+ * - a bad `opacity` (docs/feat/mobile-hub-opacity.md) drops the opacity only and
+ *   a number is clamped to the 30–100 floor: the button is never invisible.
  * - a write failure rejects, so Settings says "didn't save" — the holder keeps
  *   the pick in memory for this run.
  */
 import type { SecureKV } from "./computer-store.ts";
 import type { ActivityButtonMode, FloatPosition } from "./floating-button.ts";
+import { clampOpacity } from "./hub-opacity.ts";
 
 export const ACTIVITY_SETTINGS_KEY = "tentacle.activity-button";
 export const ACTIVITY_SETTINGS_VERSION = 1;
@@ -24,6 +27,13 @@ export interface ActivitySettings {
   readonly mode: ActivityButtonMode;
   /** Where the floating button rests; absent → its default spot. */
   readonly position?: FloatPosition;
+  /**
+   * How see-through the floating button is at rest, as a percentage inside
+   * 30–100; absent → 100 (today's look). ADDITIVE inside the same v1 record: an
+   * older build ignores it and its next write drops it, which is safer than a
+   * `v` bump, where every older build would refuse to write at all (rule 2).
+   */
+  readonly opacity?: number;
 }
 
 export const DEFAULT_ACTIVITY_SETTINGS: ActivitySettings = { mode: "header" };
@@ -55,6 +65,10 @@ function parsePosition(value: unknown): FloatPosition | undefined {
   return { edge: p.edge, yFraction: p.yFraction };
 }
 
+function parseOpacity(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? clampOpacity(value) : undefined;
+}
+
 function parse(raw: string | null): ActivitySettingsRead {
   if (raw === null) {
     return { settings: DEFAULT_ACTIVITY_SETTINGS, writable: true };
@@ -69,13 +83,18 @@ function parse(raw: string | null): ActivitySettingsRead {
   if (typeof parsed !== "object" || parsed === null) {
     return unreadable;
   }
-  const r = parsed as { v?: unknown; mode?: unknown; position?: unknown };
+  const r = parsed as { v?: unknown; mode?: unknown; position?: unknown; opacity?: unknown };
   if (r.v !== ACTIVITY_SETTINGS_VERSION || (r.mode !== "header" && r.mode !== "floating")) {
     return unreadable;
   }
   const position = parsePosition(r.position);
+  const opacity = parseOpacity(r.opacity);
   return {
-    settings: position === undefined ? { mode: r.mode } : { mode: r.mode, position },
+    settings: {
+      mode: r.mode,
+      ...(position === undefined ? {} : { position }),
+      ...(opacity === undefined ? {} : { opacity }),
+    },
     writable: true,
   };
 }

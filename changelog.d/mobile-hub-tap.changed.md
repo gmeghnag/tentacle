@@ -1,0 +1,1 @@
+- **A tap on the floating button opens the hub.** On the iPhone, with the Floating Activity button, a single tap now opens the fan of actions (with a haptic) instead of the full-screen Activity sheet; Activity is one of the fan's items, and it stays dimmed and says "Nothing running" when there is nothing to show.

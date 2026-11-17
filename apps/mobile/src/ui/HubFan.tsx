@@ -38,6 +38,12 @@ const GLYPH: Readonly<Record<HubActionId, IconName>> = {
   more: "ellipsis",
 };
 
+/**
+ * How faint a dimmed item is drawn (mobile-hub-tap Design 5). A placeholder: the
+ * solid discs of feat/mobile-hub-badges replace it (owner Q5).
+ */
+const DIMMED_OPACITY = 0.45;
+
 export interface HubFanProps {
   readonly palette: Palette;
   readonly layout: Extract<FanLayout, { kind: "fan" }>;
@@ -102,13 +108,22 @@ export function HubFan(props: HubFanProps): JSX.Element {
           outputRange: [motion.fromScale, lit ? motion.highlightScale : 1],
         });
         const fg = lit ? palette.onAccent : item.danger ? palette.red : palette.accent;
+        // A dimmed item has nothing to show: it KEEPS its slot, drawn faint
+        // (mobile-hub-tap Design 5 — badges restyles this into a solid disc).
+        // The faint level MULTIPLIES the item's own animated opacity (its spring/
+        // fade `value`, or the highlight dim): both are opacities of the same
+        // view, so a second `opacity` style would win over the animation and draw
+        // the disc before the fan opens and behind it after it closes.
+        const base = hi !== null && !lit ? motion.dimOpacity : value;
+        const opacity = item.dimmed && !lit ? Animated.multiply(base, DIMMED_OPACITY) : base;
         return (
           <Animated.View
             key={item.id}
             testID={`hub-item-${item.id}`}
             accessible
             accessibilityRole="button"
-            accessibilityLabel={item.label}
+            accessibilityLabel={item.dimmed ? `${item.label}, nothing running` : item.label}
+            accessibilityState={{ disabled: item.dimmed }}
             pointerEvents="none"
             style={[
               styles.item,
@@ -122,7 +137,7 @@ export function HubFan(props: HubFanProps): JSX.Element {
                   : palette.glass,
                 borderColor: palette.glassBorder,
                 shadowOpacity: palette.shadowOpacity,
-                opacity: hi !== null && !lit ? motion.dimOpacity : value,
+                opacity,
                 transform: [{ scale }],
               },
             ]}

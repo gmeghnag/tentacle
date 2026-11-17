@@ -24,6 +24,7 @@
  */
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import type { AttachmentRef } from "@tentacle/protocol";
+import type { QueueTrace } from "./queue-trace.ts";
 import {
   type LocalPhoto,
   type State,
@@ -83,6 +84,21 @@ export interface SessionFeedDeps {
    * MEDIUM 2). The fold owns the RULE, the caller owns the request.
    */
   readonly onHistoryReplaced?: () => void;
+  /**
+   * The turn bracket CLOSED (any outcome). The TUI reconciles there
+   * (`packages/tui/src/queued.ts` `onTurnEnd` = "nothing stays queued"); this
+   * frontend does not yet (that is the bug `docs/fix/mobile-queued-stuck.md`
+   * exists to locate), so today only the DIAGNOSTIC reads it: the rows the
+   * composer still shows the moment the turn is over.
+   */
+  readonly onTurnClosed?: () => void;
+  /**
+   * The queue-diagnosis trace (docs/fix/mobile-queued-stuck.md). This module is
+   * the one place a TURN BRACKET opens and closes, so the turn's own lines are
+   * emitted here — a screen-side diff of the folded state would have to guess
+   * the outcome the bracket already decided.
+   */
+  readonly trace?: QueueTrace;
   /**
    * The RECEIPT clock of a live row (epoch ms; docs/fix/mobile-open-at-end.md,
    * slice B). Called when the fold CREATES a row — a prompt, the first delta of
@@ -155,6 +171,7 @@ function foldStream(
   accepted?: Promise<void>,
 ): Promise<void> {
   deps.put(apply(deps.state(), { type: "turn_started", turnId, own }));
+  deps.trace?.({ kind: "turn-start", turnId, own });
   /**
    * The receipt time of a row this fold CREATES (slice B). `apply` only stamps a
    * row it creates, so an upsert (a later delta of the same message) keeps the
@@ -207,7 +224,10 @@ function foldStream(
   });
   const finish = (facts: TurnEndFacts): void => {
     closed = true;
-    deps.put(apply(deps.state(), { type: "turn_ended", outcome: turnOutcome(facts) }));
+    const outcome = turnOutcome(facts);
+    deps.put(apply(deps.state(), { type: "turn_ended", outcome }));
+    deps.trace?.({ kind: "turn-end", turnId, outcome });
+    deps.onTurnClosed?.();
     if (!own) {
       deps.setForeign(null);
     }
@@ -248,6 +268,11 @@ export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
     activity(activity) {
       switch (activity.kind) {
         case "history":
+          deps.trace?.({
+            kind: "history",
+            reason: activity.reason,
+            messages: activity.messages.length,
+          });
           deps.put(
             apply(deps.state(), {
               type: "history",
@@ -282,6 +307,7 @@ export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
     ownTurn: (turnId, events, prompt, accepted) =>
       foldStream(deps, turnId, true, events, prompt, accepted),
     link(up) {
+      deps.trace?.({ kind: "link", state: up ? "up" : "down" });
       deps.put(apply(deps.state(), { type: "link", status: up ? "up" : "down" }));
     },
   };

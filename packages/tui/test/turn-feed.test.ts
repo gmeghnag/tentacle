@@ -46,8 +46,10 @@ describe("nextStep (C2)", () => {
 });
 
 describe("historyAction (C6, owner QR1)", () => {
-  test("a compaction keeps the transcript: a notice unless mine; any other history replaces it", () => {
-    expect(historyAction({ reason: "compact", ownCompaction: false })).toBe("notice");
+  test("a compaction keeps the transcript: a separator unless mine; any other history replaces it", () => {
+    // Was `"notice"`: docs/feat/harness-notices.md S3 replaced the device-blaming
+    // notice with the same grey separator an own compaction writes (owner Q6).
+    expect(historyAction({ reason: "compact", ownCompaction: false })).toBe("separator");
     expect(historyAction({ reason: "compact", ownCompaction: true })).toBe("none");
     expect(historyAction({ reason: null, ownCompaction: false })).toBe("replace");
     expect(historyAction({ reason: null, ownCompaction: true })).toBe("replace");

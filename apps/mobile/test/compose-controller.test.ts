@@ -9,11 +9,13 @@
 import { describe, expect, test } from "bun:test";
 import type { AttachmentRef, QueueState } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import { type AppLog, createAppLog, entriesToText } from "../src/app-log.ts";
 import { type ComposeHandle, type PickedPhoto, createCompose } from "../src/compose-controller.ts";
 import { createOutboxDriver } from "../src/outbox-driver.ts";
 import { createOutboxStore, outboxPaths } from "../src/outbox-store.ts";
 import type { OutboxFs } from "../src/outbox-store.ts";
 import type { OutboxItem } from "../src/outbox.ts";
+import { queueTrace } from "../src/queue-trace.ts";
 
 /** An in-memory `OutboxFs` (the store's own contract, 13b's tests' shape). */
 function memoryFs(): OutboxFs & { readonly files: Map<string, string> } {
@@ -175,6 +177,11 @@ async function harness(
       readonly ownIds: readonly string[];
       readonly ownTexts?: Readonly<Record<string, string>>;
     };
+    /**
+     * The app's ONE log, as the app wires it (docs/fix/mobile-queued-stuck.md):
+     * present, the compose half traces into it exactly as the device does.
+     */
+    readonly log?: AppLog;
   } = {},
 ) {
   const fs = memoryFs();
@@ -262,6 +269,7 @@ async function harness(
     notify: (text) => {
       notices.push(text);
     },
+    ...(options.log === undefined ? {} : { trace: queueTrace("s1", options.log) }),
   });
   await compose.start(handle);
   return {
@@ -728,5 +736,89 @@ describe("the outbox's sheet (D4: a person settles what changed)", () => {
     expect(item?.photos).toHaveLength(1);
     await h2.compose.outboxDiscard(item?.itemId ?? "");
     expect(h2.items()).toEqual([]);
+  });
+});
+
+describe("the queue-diagnosis trace (docs/fix/mobile-queued-stuck.md)", () => {
+  /** The `qtrace` lines the harness's log recorded, as one greppable text. */
+  const traceText = (log: AppLog): string =>
+    entriesToText(log.entries().filter((entry) => entry.kind === "qtrace"));
+
+  test("a `queued` update REACHING the phone becomes a qtrace line (ids + count)", async () => {
+    // The diagnostic's whole premise: the capture must record the frame ARRIVING.
+    // Without this the owner's export cannot tell "the frame was lost" from "the
+    // frame came and the screen ignored it" — the two candidates for the bug.
+    const log = createAppLog({ now: () => 1_700_000_000_000, capacity: 200 });
+    const h = await harness({ log });
+    h.handle.emitQueue({
+      entries: [{ id: "row-0123456789abcdef", text: "steer me" }],
+      returned: [],
+    });
+    const text = traceText(log);
+    expect(text).toContain("ev=queued-received");
+    expect(text).toContain("src=live");
+    expect(text).toContain("n=1");
+    expect(text).toContain("id0=row-0123");
+    // The row's text is NOT in the export: a shared file carries ids, never words.
+    expect(text).not.toContain("steer me");
+    // And the rows the UI shows after it, from the pure view function.
+    expect(text).toContain("ev=rows where=after-queued-live n=1 id0=row-0123");
+  });
+
+  test("the report that CLEARS a row is recorded as empty — the healthy path", async () => {
+    // Non-vacuity for the fix's own question: a drained row leaves only on a
+    // report that no longer lists it, so the capture must show `n=0` and then no
+    // rows. If the device's export lacks that pair, the frame is the suspect.
+    const log = createAppLog({ now: () => 1_700_000_000_000, capacity: 200 });
+    const h = await harness({ log });
+    h.handle.emitQueue({ entries: [{ id: "r1", text: "steer me" }], returned: [] });
+    h.handle.emitQueue({ entries: [], returned: [] });
+    const lines = traceText(log).split("\n");
+    // Two reports, each followed by the rows shown: 4 lines, in order.
+    expect(lines).toHaveLength(4);
+    expect(lines[2]).toContain("ev=queued-received");
+    expect(lines[2]).toContain("n=0");
+    expect(lines[3]).toContain("ev=rows where=after-queued-live n=0");
+    expect(lines[3]).not.toContain("id0=");
+  });
+
+  test("a local enqueue and a send-now name the row they minted", async () => {
+    const log = createAppLog({ now: () => 1_700_000_000_000, capacity: 200 });
+    const h = await harness({ log });
+    h.setTurn("t1");
+    h.setField("steer me");
+    await h.compose.press({ kind: "queue", text: "steer me" });
+    const text = traceText(log);
+    expect(text).toContain("act=enqueue");
+    // The minted key is `k<n>` in this harness; named 8 characters at most.
+    expect(text).toMatch(/act=enqueue row=k\d+/);
+    expect(text).toContain("where=after-enqueue");
+    // A send-now of that row names it too.
+    h.setField("");
+    await h.compose.sendNow();
+    expect(traceText(log)).toContain("act=send-now");
+    expect(traceText(log)).toContain("where=after-send-now");
+  });
+
+  test("the turn's end asks the composer what it still shows, and never clears it", async () => {
+    // The reconciliation mobile LACKS (the TUI has `onTurnEnd`). The trace records
+    // the state; the rows survive, so the capture shows the bug as it is.
+    const log = createAppLog({ now: () => 1_700_000_000_000, capacity: 200 });
+    const h = await harness({ log });
+    h.handle.emitQueue({ entries: [{ id: "r1", text: "steer me" }], returned: [] });
+    h.compose.turnClosed();
+    expect(traceText(log)).toContain("ev=rows where=after-turn-end n=1 id0=r1");
+    // No behaviour change: the row is still the view's.
+    expect(h.compose.view().queued.map((row) => row.id)).toEqual(["r1"]);
+  });
+
+  test("with no sink wired nothing is logged, and the acts still happen", async () => {
+    // The seam's own contract: every test that predates the diagnostic passes no
+    // log, so its absence must be a silent no-op (never a crash, never a change).
+    const h = await harness();
+    h.setTurn("t1");
+    h.setField("steer me");
+    await h.compose.press({ kind: "queue", text: "steer me" });
+    expect(h.compose.view().queued).toHaveLength(1);
   });
 });

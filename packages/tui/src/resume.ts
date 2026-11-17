@@ -4,15 +4,40 @@
  * The agent history remains the source of truth; this is a presentation view.
  */
 import { restartPromptOf } from "@tentacle/agent";
-import type { ChatMessage } from "@tentacle/core";
+import {
+  COMPACTION_SUMMARY_HEAD,
+  type ChatMessage,
+  compactionOf,
+  compactionSeparatorText,
+} from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
 import { joinKnownArtifacts } from "./artifacts-panel.ts";
 import { imageRowText } from "./attach-draft.ts";
 import { userMessageView } from "./pdf-attach.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 
-/** The separator before a context reset's restart prompt (decision 9, docs/eval/context-reset.md). */
+/**
+ * The separator before a context reset's restart prompt (decision 9, docs/eval/context-reset.md).
+ */
 export const CONTEXT_RESET_SEPARATOR = "↻ context reset by the model";
+
+/**
+ * A compaction's summary message as the separator rule (docs/feat/harness-notices.md
+ * S3.4, owner Q3): the rule at the compaction point, the brief as its `body`
+ * (shown only with Ctrl+O). It used to project to a `›` user row carrying the
+ * whole summary — something the person never typed. A summary with no brief
+ * beyond the head gets no body (an empty `<Text>` measures 0×0, AGENTS §6).
+ */
+function compactionItem(m: ChatMessage): DisplayItem {
+  const view = compactionOf(m) ?? {};
+  const brief = m.content.slice(COMPACTION_SUMMARY_HEAD.length).trim();
+  return {
+    kind: "notice",
+    text: compactionSeparatorText(view),
+    separator: true,
+    ...(brief === "" ? {} : { body: brief }),
+  };
+}
 
 /**
  * A tentacle-written note (a job's exit, a sub-agent's report/loss) as a
@@ -66,9 +91,12 @@ function itemsOf(
     }
     if (m.role === "user") {
       const restart = restartPromptOf(m.content);
+      const compaction = compactionOf(m);
       if (restart !== null) {
         items.push({ kind: "notice", text: CONTEXT_RESET_SEPARATOR, separator: true });
         items.push({ kind: "user", text: restart, restart: true });
+      } else if (compaction !== null) {
+        items.push(compactionItem(m));
       } else if (m.note !== undefined) {
         items.push(noteItem(m));
       } else {
