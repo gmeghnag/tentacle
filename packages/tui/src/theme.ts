@@ -110,6 +110,16 @@ export interface Tokens {
   /** `dim` as an Ink prop: dark keeps `dimColor`, light passes the measured grey. */
   readonly dimIsAttribute: boolean;
   readonly gutter: Color;
+  /**
+   * Harness lines — what the MACHINE says about the session (a cut reply, a job
+   * exit, a repair, "Can't compact…"), never the model's own text
+   * (docs/feat/harness-notices.md S2). ONE neutral grey: the owner is
+   * colour-blind, so a warning differs by GLYPH first (`◇`/`▲`) and only then
+   * by amber on the glyph. Exactly grey, so chalk's 256 downgrade takes the
+   * ramp (249 dark / 239 light), per this file's header rule.
+   */
+  readonly harness: Color;
+  /** The dock's `you → sa-1` label (docs/feat/subagent-panel.md); NOT a harness line. */
   readonly notice: Color;
   readonly hidden: Color;
   readonly success: Color;
@@ -140,6 +150,7 @@ const DARK: Tokens = {
   dim: "dim",
   dimIsAttribute: true,
   gutter: "gray",
+  harness: "#b2b2b2",
   notice: "#8caaee",
   hidden: "hidden",
   success: "#4ec974",
@@ -193,6 +204,10 @@ const DARK: Tokens = {
  * the owner accepted (Q3: no cyan-like 256 bucket reaches 4.5). `notice` was a
  * second for one round; the owner's fix-round answer settled it at `#2f4ba8`
  * (7.80 / 7.23 / 5.61), so the gate is "all but the accent" again.
+ *
+ * `harness` (`#4e4e4e`, docs/feat/harness-notices.md S2) is a harness line's one
+ * grey: exact grey, so the 256 downgrade takes the ramp (239) rather than the
+ * cube, and it clears the 4.5 gate there (`theme-contrast.test.ts`).
  */
 const LIGHT: Tokens = {
   accent: "#0e7490",
@@ -201,6 +216,7 @@ const LIGHT: Tokens = {
   dim: "#6b6b6b",
   dimIsAttribute: false,
   gutter: "#6b6b6b",
+  harness: "#4e4e4e",
   notice: "#2f4ba8",
   hidden: "hidden",
   success: "#084718",
@@ -360,6 +376,7 @@ function buildTheme(t: Tokens) {
     autoAccept: fg(t.autoAccept),
     /** De-emphasised grey for metadata, context, hints. */
     subtle: fg(t.subtle),
+    harness: fg(t.harness),
     notice: fg(t.notice),
     /**
      * SGR conceal ("hidden"): draws the characters in the background colour, so

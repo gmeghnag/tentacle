@@ -71,8 +71,11 @@ describe("onCompactionSettled (D3c)", () => {
       send: "A\n\nB",
       restore: null,
     });
+    // A failure is the ONE harness line the person must notice: `level: "warn"`
+    // (docs/feat/harness-notices.md S2.2). Success carries none.
     expect(onCompactionSettled({ ...idle, result: failed(new Error("down")) })).toEqual({
       notice: "_Compact failed: Error: down_",
+      level: "warn",
       send: "A\n\nB",
       restore: null,
     });
@@ -89,6 +92,7 @@ describe("onCompactionSettled (D3c)", () => {
     const cancelled = failed(rpc(DomainErrorCode.Cancelled));
     expect(onCompactionSettled({ ...idle, result: cancelled, sendNowOwns: true })).toEqual({
       notice: "_Compaction cancelled — sending now._",
+      level: "warn",
       send: null,
       restore: null,
     });

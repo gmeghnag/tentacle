@@ -137,10 +137,14 @@ describe("a reply cut at the output limit (case 1)", () => {
 
   test("a re-ask that is ALSO cut says so, and does not promise another one (Review MEDIUM-2)", async () => {
     // The owner's own case: the first reply is cut and the loop re-asks; the
-    // continuation is cut too and the budget is spent. The second notice must
-    // differ from the first — on the buggy code the wording was identical
-    // ("asking it to continue") and the dedupe dropped it, so the screen ended
-    // promising a continuation that never came.
+    // continuation is cut too and the budget is spent.
+    //
+    // docs/feat/harness-notices.md S2.6 CHANGED this contract: the two facts are
+    // ONE notice, merged in place, instead of two near-identical lines (the
+    // wording had to differ to beat the text dedupe, which is why the pair
+    // existed). The property that must survive is that the screen never keeps
+    // promising a continuation that was already spent: exactly one line, and it
+    // says the re-ask was cut again.
     const app = render(
       <App
         createSession={sessionOf([
@@ -161,9 +165,11 @@ describe("a reply cut at the output limit (case 1)", () => {
       app.stdin.write("\r");
       await delay(200);
       const last = app.lastFrame() ?? "";
-      // Two DISTINCT notices, not one repeated.
-      expect(last.split("cut at the model's output limit").length - 1).toBe(2);
-      expect(last.split("asking it to continue").length - 1).toBe(1);
+      // ONE notice, the merged sentence; no stale "asking it to continue".
+      expect(last.split("cut at the model's output limit").length - 1).toBe(1);
+      expect(last.split("asking it to continue").length - 1).toBe(0);
+      expect(last).toContain("asked it to continue, cut again");
+      expect(last).toContain("incomplete");
     } finally {
       app.unmount();
     }

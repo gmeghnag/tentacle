@@ -108,7 +108,8 @@ export interface HopHost {
   readonly hop: HopFeed | undefined;
   readonly permission: PermissionController;
   readonly swapSession: HopSwap;
-  readonly pushNotice: (text: string) => void;
+  /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
+  readonly pushNotice: (text: string, level?: "warn") => void;
   readonly flushNow: () => void;
 }
 

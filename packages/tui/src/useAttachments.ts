@@ -86,7 +86,8 @@ export interface AttachHost {
   readonly uploadCtrlRef: MutableRefObject<AbortController | null>;
   readonly sessionRef: RefObject<SessionController | null>;
   readonly runRef: RefObject<AttachRun | null>;
-  readonly pushNotice: (text: string) => void;
+  /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
+  readonly pushNotice: (text: string, level?: "warn") => void;
   readonly restoreInput: (text: string, why: string) => void;
   readonly fileProbe: FileProbe;
   /** `~` expansion for a pasted path (`undefined` on a host that cannot answer). */

@@ -451,12 +451,21 @@ function applyAgentEvent(state: State, event: StreamEvent, at: At): State {
     // must act on).
     case "truncated_reply": {
       // A re-asked round repeats its cause: said ONCE per turn, as the TUI does
-      // (`noticeSeenThisTurn`) — a re-ask that cuts again has its own wording,
-      // so the dedupe is by TEXT, never by kind.
+      // (`noticeSeenThisTurn`). A re-ask that cuts AGAIN is the same fact
+      // continued, so it REPLACES that line in place (docs/feat/harness-notices.md
+      // S2.6) — the phone folds the same agent events as the TUI and a parity
+      // test pins the two agrees. Only the re-ask's OWN round merges, and a
+      // `cut` never does: a cut later in the turn is a separate fact
+      // (Review round 3 MEDIUM-1).
+      const at = event.reason === "length" ? reaskContinueAt(state) : -1;
       const text = describeTruncation(event.reason, {
         answered: hasAnswerText(state),
         retrying: event.retrying,
+        ...(at >= 0 ? { again: true } : {}),
       });
+      if (at >= 0) {
+        return mergeContinueNotice(state, at, text);
+      }
       return noticeSeenThisTurn(state, text) ? state : pushNotice(state, text);
     }
     case "empty_turn":
@@ -558,6 +567,42 @@ function hasAnswerText(state: State): boolean {
 function noticeSeenThisTurn(state: State, text: string): boolean {
   const at = state.rows.findLastIndex((row) => row.kind === "user");
   return state.rows.slice(at + 1).some((row) => row.kind === "notice" && row.text === text);
+}
+
+/**
+ * The index of this turn's "asking it to continue" notice when the cut being
+ * reported is the re-ask's OWN round — else `-1` (the TUI's `reaskContinueAt`).
+ * The re-ask budget is per turn while the re-ask may run tools and further
+ * rounds, so only a cut with nothing but the re-ask's own reply after the line
+ * is the same fact continued (Review round 3 MEDIUM-1).
+ */
+function reaskContinueAt(state: State): number {
+  const at = state.rows.findLastIndex((row) => row.kind === "notice");
+  const row = at < 0 ? undefined : state.rows[at];
+  if (row === undefined || row.kind !== "notice" || !row.text.endsWith("asking it to continue")) {
+    return -1;
+  }
+  // `reasoning` is a ROW here and a flag in the TUI, so it is not a round
+  // boundary: leaving it in would make the two folds disagree on the same events
+  // (the parity test's own normalization, `transcript-parity.test.ts`).
+  const after = state.rows.slice(at + 1).filter((r) => r.kind !== "reasoning");
+  const answers = after.filter((r) => r.kind === "assistant").length;
+  return after.length === answers && answers <= 1 ? at : -1;
+}
+
+/**
+ * Swap this turn's "asking it to continue" notice for the merged `again`
+ * sentence, IN PLACE (the TUI's `mergeContinueNotice`): the block keeps its
+ * position above the reply instead of a second line appearing below it.
+ */
+function mergeContinueNotice(state: State, at: number, text: string): State {
+  const prev = state.rows[at];
+  if (prev === undefined || prev.kind !== "notice") {
+    return pushNotice(state, text);
+  }
+  const rows = state.rows.slice();
+  rows[at] = { ...prev, text };
+  return { ...state, rows };
 }
 
 function pushTool(state: State, make: (key: string) => ToolRow): State {

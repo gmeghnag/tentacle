@@ -38,6 +38,7 @@ afterAll(() => {
 const DARK_GOLDEN: Record<string, string> = {
   accent: "\u001b[38;2;6;182;212mX\u001b[39m",
   subtle: "\u001b[38;2;140;140;140mX\u001b[39m",
+  harness: "\u001b[38;2;178;178;178mX\u001b[39m",
   notice: "\u001b[38;2;140;170;238mX\u001b[39m",
   hidden: "\u001b[8mX\u001b[28m",
   success: "\u001b[38;2;78;201;116mX\u001b[39m",
@@ -61,6 +62,7 @@ function probe(): Record<string, string> {
   return {
     accent: theme.accent("X"),
     subtle: theme.subtle("X"),
+    harness: theme.harness("X"),
     notice: theme.notice("X"),
     hidden: theme.hidden("X"),
     success: theme.success("X"),
@@ -113,6 +115,7 @@ describe("setThemeMode changes what is painted", () => {
       return [
         theme.accent("X"),
         theme.subtle("X"),
+        theme.harness("X"),
         theme.autoAccept("X"),
         theme.notice("X"),
         theme.success("X"),

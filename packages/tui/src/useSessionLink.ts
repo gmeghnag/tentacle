@@ -155,7 +155,8 @@ export interface SessionLinkHost {
    */
   readonly joinCards: (state: DisplayState) => DisplayState;
   readonly forgetArtifacts: () => void;
-  readonly pushNotice: (text: string) => void;
+  /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
+  readonly pushNotice: (text: string, level?: "warn") => void;
   readonly restoreInput: (text: string, why: string) => void;
   readonly setCompacting: (on: boolean) => void;
 

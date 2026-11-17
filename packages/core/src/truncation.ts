@@ -24,6 +24,13 @@ export interface TruncationContext {
   readonly answered: boolean;
   /** Whether the loop is re-asking the model once, from where it stopped. */
   readonly retrying: boolean;
+  /**
+   * The re-ask itself was cut too: this is the SECOND cut of the same turn
+   * (docs/feat/harness-notices.md S2.6). One sentence then says both facts
+   * (it was asked to continue, and it was cut again), instead of the two
+   * near-identical lines the old dedupe forced the caller to print.
+   */
+  readonly again?: boolean;
 }
 
 /**
@@ -33,9 +40,16 @@ export interface TruncationContext {
  */
 export function describeTruncation(reason: TruncationReason, context: TruncationContext): string {
   if (reason === "cut") {
+    // Never `again`: the loop does not re-ask a stream that was cut outright
+    // (`agent.ts`, owner Q2a), so claiming a continuation would be a lie.
     return context.answered
       ? "the model's stream was cut before it finished — this answer is incomplete"
       : "the model's stream was cut before it produced anything";
+  }
+  if (context.again) {
+    return context.answered
+      ? "the reply was cut at the model's output limit — asked it to continue, cut again; this answer is incomplete"
+      : "the model returned nothing: it hit its output limit, and was cut again when asked to continue — nothing was produced";
   }
   const what = context.answered
     ? "the reply was cut at the model's output limit — this answer is incomplete"

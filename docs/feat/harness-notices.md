@@ -271,10 +271,15 @@ new seam per client. That is why A is recommended.
 6. **Truncation merge**: core `describeTruncation` gains `context.again?: true`
    → `the reply was cut at the model's output limit — asked it to continue, cut
    again; this answer is incomplete` (mockup wording). `state.ts`
-   `truncated_reply`: when this turn already holds a truncation notice ending in
-   `asking it to continue`, the new one REPLACES it (same index) with the
-   `again` wording, instead of appending. Mobile can adopt the same core
-   function in its follow-up.
+   `truncated_reply`: when this cut belongs to the re-ask's OWN round — the
+   turn's last notice is the `asking it to continue` line and nothing but that
+   re-ask's own reply (at most one answer item) follows it — the new one
+   REPLACES it (same index) with the `again` wording, instead of appending. A
+   LATER cut in the same turn (the re-ask's round ran a tool, or more text
+   followed: the re-ask budget is per TURN, `agent.ts:1426`) is a separate
+   fact and is appended in place, never rewritten onto the earlier line; a
+   `cut` reason never merges (the stream died, no re-ask follows). Mobile
+   adopts the same core function and rule in its follow-up.
 
 #### S3 — compaction in the slot + the separator (TUI) · contained
 
@@ -379,8 +384,8 @@ Plus `changelog.d/harness-notices.changed.md`.
   `harness-group.ts`; a parity test over mixed sequences pins equality.
 - **Cache staleness**: a notice's glyph depends on its neighbour; appending an
   item after it never changes it (only `prev` matters), but REPLACING the
-  previous item (truncation merge, `replaceWithNotices` `state.ts:257-272`)
-  can — the swap is computed per layout from `prev`, not stored in the item's
+  previous item (truncation merge, `replaceWithNotices` `state.ts:317`) can —
+  the swap is computed per layout from `prev`, not stored in the item's
   cached rows.
 - **`Compacted ✓` timer vs a new turn**: the slot's priority makes a running
   turn win immediately; the timer only triggers a re-render, a stale fire is a
@@ -428,7 +433,13 @@ All red on current `main` first (§9), mutation-checked where noted.
 - `pushNoticeItem("_Can't compact…_")` → `NoticeItem`; `/help`'s multi-line
   text → `AssistantItem{notice}`.
 - Truncation: re-ask then cut again → ONE notice with the merged wording;
-  re-ask then success → the single `asking it to continue` line.
+  re-ask then success → the single `asking it to continue` line; a LATER cut in
+  the same turn (the re-ask's round ran a tool) → a SECOND notice appended at
+  its own place, the first line untouched; a `cut` after an output-limit re-ask
+  → never merged. TUI (`harness-lines.test.ts`) AND phone (`transcript.test.ts`),
+  the same two cases.
+  Mutation: merge on any turn notice (the round-3 rule) → the later-cut case
+  fails on both.
 - ink-testing-library frame (`packages/tui/test/app.test.tsx` pattern): reply +
   three harness lines render as one block, no blank rows, no `●` on harness lines.
 
@@ -542,9 +553,120 @@ files (client clear-attach/reattach/reattach.e2e, agent/, protocol/, core, daemo
 tui app.test) → 1379 pass, 0 fail. The full suite was not re-run (token budget: once). The 5 skips: this slice adds
 no skip. **Unverified:** a full `bun test` after the last fix — run `bun test 2>&1 | tail -n 15`.
 
-### Fix round 1
+### S2 — DONE
 
-*— claude-opus-5-5, 2026-11-17* (fixes Review round 1; S1 Execution above is also opus — the "exec (deepseek)" commit title is the mislabel)
+*— claude-sonnet-4-5-20250929 (executor), 2026-11-17*
+
+**Load-bearing check (first, before any edit)** — `.tentacle/tmp/harness-notices/s2-check.ts`:
+1. `stringWidth("◇") === 1`, `stringWidth("▲") === 1` (and `●` 1) — the glyph is single-width,
+   so the swap cannot re-flow a row (Design S2.4's pin HOLDS).
+2. Parity of the two layout paths on today's code: `layoutTranscript(items).total === 11`
+   and `wrapLines(transcriptLines(items)).length === 11` over
+   `[reply, notice, notice, separator, notice, user]` — the property the parity test pins
+   HOLDS before the change.
+3. **The plan's claim "`notice`'s only consumer is `noticeLines`" is FALSE.**
+   `components/dock-tone.ts:33` paints the dock's `you → sa-1` label from `t.notice`
+   (`background-list.ts:685`, `DockTone = "notice"`). So the `notice` TOKEN is KEPT
+   (its styler too — `dock-tone` reads the token, and `dock-tone` is not a transcript
+   path); only its use by harness lines is replaced.
+
+**As built, in dependency order** (each unit's test written first and shown red on its
+assertion; red evidence in the mutation table below):
+1. `packages/tui/src/harness-group.ts` (new) — `isHarness`, `harnessLevel`,
+   `joinsPrevious`, `showsGlyph` (`harness-group.test.ts`, red as a missing module, then
+   red on M3).
+2. `packages/tui/src/theme.ts` — new token `harness` = `#b2b2b2` dark / `#4e4e4e` light
+   plus its styler; `notice` KEPT (see drift). `theme.test.ts` pins both new SGRs and the
+   light/dark key-set equality; `theme-contrast.test.ts` gates the light value (4.5:1
+   after the 256 downgrade) and the dark one (3:1 on `#1e1e1e`).
+3. `packages/core/src/truncation.ts` — `TruncationContext.again?: boolean` and the merged
+   sentence `…— asked it to continue, cut again; this answer is incomplete`
+   (`truncation-again.test.ts`; `again` is ignored for `cut`, which is never re-asked).
+4. `packages/tui/src/harness-text.ts` (new) — `stripInlineMarkdown` (inline code, bold,
+   and markdown escapes; a LONE `*`/`_` is punctuation and stays)
+   (`harness-text.test.ts`).
+5. `packages/tui/src/state.ts` — `NoticeItem.level?: "warn"`; `appendNotice` takes
+   `level`; `harnessNoticeOf` (ONE line wholly `_…_` → a harness line, its text
+   markdown-stripped; anything else stays `AssistantItem{notice:true}`); `pushNoticeItem(
+   state, text, level?)` routes through it; `turnNotices`/`saidContinueThisTurn`/
+   `replaceContinueNotice` merge a second cut IN PLACE; `truncated_reply` and `empty_turn`
+   are `warn` (`harness-lines.test.ts`).
+6. `packages/tui/src/render-lines.ts` — `HARNESS_GLYPHS`, `headGlyph` (`◇` grey, `▲`
+   amber), `noticeLines` on the harness grey with a two-space hang, `itemLines` → new
+   `itemLinesAt(item, opts, glyph)`; grouping in BOTH `transcriptLines` (logical rows) and
+   `layoutTranscript` (wrapped rows) from `harness-group.ts`, with the glyph dropped by a
+   post-wrap cached swap (`hangCache`, the `offPhaseCache` pattern); `LaidItem.gap` so
+   `sliceLaid` no longer assumes `start - 1` is always a separator
+   (`harness-render.test.ts`, incl. the parity test at widths 12/20/40/80, and
+   `harness-block-frame.test.tsx` for the real App frame).
+7. `packages/tui/src/send-now.ts` + `useTurnDriver.ts` + the 8 `pushNotice` prop types +
+   `App.tsx` — `onCompactionSettled` returns `level: "warn"` when the compaction FAILED
+   (`send-now.test.ts`); `pushNotice(text, level?)` threads it.
+8. `apps/mobile/src/transcript.ts` — mirrored the merge (`saidContinueThisTurn`/
+   `replaceContinueNotice`), see drift.
+9. `changelog.d/harness-notices.changed.md` — rewritten to describe this branch's shipped
+   behaviour (the old fragment still promised the S3 slot/separator wording as done).
+
+**Drift from Implementation (and why):**
+- **The `notice` token is KEPT, not removed** (Design S2.1 said removed). Its second, live
+  consumer is the dock's `you → sa-1` label (`dock-tone.ts:33`), which is not a harness
+  line; deleting the token would delete that colour. Only `noticeLines` moved off it.
+- **The old `●`/periwinkle contract was re-pinned, not deleted**:
+  `notice-palette.test.ts` and its probe now assert the `◇`/harness-grey contract, with the
+  hint/separator-subtle and hint-is-a-field pins carried over verbatim.
+- **`stripInlineMarkdown` was not in the plan at all.** It was forced by two real
+  regressions the plan missed: `/attach`'s usage (`_Usage: `/attach <path>`…_`) and
+  `/rename`'s showed their backticks (`app-commands.test.tsx`), and `session-hop` D2
+  showed `/\_ping` (the `noticeText` escape) — the `_…_` texts are markdown SOURCE, which
+  used to be rendered and is now printed literally.
+- **`apps/mobile/src/transcript.ts` was not in the plan's S2 file list.** The pre-existing
+  shared parity test (`apps/mobile/test/transcript-parity.test.ts`, "the app's fold agrees
+  with the TUI's on shared fixtures") fails the gate on its cut-reply fixture unless the
+  phone folds the same merge. This is S2.6's fold only — the phone's own harness-line
+  look/grouping stays the follow-up `feat/mobile-harness-notices`.
+- **`LaidItem.gap`** (not in the plan): `sliceLaid` derived "a separator sits above this
+  item" from `start - 1`, which is false for a joined item. The flag is the layout's own
+  record of it, so both readers stay in agreement.
+- **Existing assertions widened/renamed, no expectation removed**: `app.test.tsx`'s four
+  `/settings` frames (`●` → `◇`, and a grouped outcome/sibling hangs two spaces),
+  `truncated-reply-notice.test.tsx`'s two-notice pair → one merged line,
+  `mouse-stream.test.ts`'s `LAID` fixture gains `gap`.
+- **`/settings` renders as a hanging grey block** (it is an `appendNotice` with several
+  lines): correct per the owner's answer 5 ("every `NoticeItem` is a harness line"), but
+  it is the most visible consequence of the rule — worth the reviewer's eye.
+- **Disk was full mid-task** (117 MiB); I removed Bun's download cache
+  (`~/.bun/install/cache`) to write files. No repo content was touched.
+
+**Mutations (each run, shown red, then reverted — files restored from `.tentacle/tmp/harness-notices/*.bak` and re-verified):**
+| Mutation | Red test(s) |
+|---|---|
+| M1 `transcriptLines` keeps a blank row always | harness-render + harness-block-frame: 3 fail |
+| M2 `layoutTranscript` never conceals the glyph | harness-render + harness-block-frame: 2 fail |
+| M3 `showsGlyph` always `true` | harness-group: 2 fail |
+| M4 `harnessNoticeOf` disabled (old `AssistantItem` path) | harness-lines + app-commands: 4 fail |
+| M5 no `stripInlineMarkdown` | harness-text + harness-lines: 1 fail |
+| M6 truncation never merges (always appends) | harness-lines + truncated-reply-notice: 2 fail |
+| M7 `noticeLines` back to `theme.notice(BULLET)` | harness-render + notice-palette: 10 fail |
+
+**Tests added:** `harness-group.test.ts` (5), `harness-lines.test.ts` (12),
+`harness-render.test.ts` + probe (10), `harness-block-frame.test.tsx` (2),
+`harness-text.test.ts` (5), `core/test/truncation-again.test.ts` (4); re-pinned
+`notice-palette`, `theme`, `theme-contrast`, `send-now`, `truncated-reply-notice`,
+`app`, `mouse-stream`.
+
+**Gate:**
+- `bunx tsc --noEmit` clean; `bunx tsc -p apps/mobile` clean; `bunx tsc -p apps/relay` clean.
+- `bun run lint` clean — `Checked 2008 files`, 0 errors 0 warnings (matches the §6 baseline).
+- full `bun test` (once, final tree): **14605 tests, 14600 pass, 0 fail, 5 skip**
+  (the three known opt-ins — live-k8s, live-docker, the real-socket keepalive — plus two
+  pre-existing skips; none added by S2). An earlier run of the same tree showed the one
+  mobile parity failure described below; it is green in this final run.
+- No `protocol.d/` note (no wire change: no schema, no new method, no new update kind);
+  `packages/protocol/schema/protocol.json` untouched.
+
+### Fix round 1 (S1)
+
+*— claude-opus-5-5, 2026-11-17* (fixes Review round 1; "exec (deepseek)" is the mislabel of the opus exec commit)
 
 1. **MEDIUM 1 (fake `0`) — FIXED.** `daemon/src/hosted-session.ts:3104-3107`: a `usage` with
    `promptTokens <= 0` sets `lastPromptTokens = undefined` (unmeasured ⇒ `compact` measures the old
@@ -567,6 +689,58 @@ no skip. **Unverified:** a full `bun test` after the last fix — run `bun test 
 **Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (1997 files) · full `bun test` (once): 14530 pass,
 5 skip, 0 fail — closes S1's "Unverified" full-suite item. The 5 skips are the same count as S1's run (no skip
 added by this round).
+
+### Fix round 1 (S2)
+
+*— claude-opus-5-5, 2026-11-18* (fixes Review round 3, S2 MEDIUM-1; the earlier `### Fix round 1` above is S1's)
+
+**Finding MEDIUM-1 (a later cut in the same turn rewrote the first notice, far up the transcript) — FIXED, both
+frontends.** Root cause: the merge was keyed on ANY `…; asking it to continue` notice anywhere in the turn, but the
+re-ask budget is per TURN while the re-asked round may run tools and further rounds — so a cut in a later round is a
+separate fact, and merging it moved that fact up to the top of the turn (and, with `reason: "cut"`, overwrote the
+output-limit fact with the stream-cut one).
+
+- `packages/tui/src/state.ts`: `saidContinueThisTurn`/`replaceContinueNotice` are replaced by
+  `reaskContinueAt` (`:271-283`) + `mergeContinueNotice` (`:290-294`). A cut merges ONLY when the turn's LAST notice
+  is the `asking it to continue` line and nothing but the re-ask's own reply follows it (at most one answer item) —
+  i.e. the cut is the re-ask's own round. The `truncated_reply` case (`:687-709`) gates the merge on
+  `event.reason === "length"` too: a `cut` never merges (no re-ask follows one, `agent.ts:1609`), and
+  `again: true` is passed only when merging. "This turn's" is structural, not a second check: a new turn appends a
+  `user` item, which is neither an answer item nor absent, so an earlier turn's line can never qualify.
+- `apps/mobile/src/transcript.ts`: the same two functions (`:579-590`, `:598-605`) and the same case (`:452-471`),
+  mirroring the TUI (the parity test
+  pins the two folds agree). One mobile-only difference, documented there: a `reasoning` ROW is not a round boundary
+  (it is a spinner flag in the TUI), so reasoning rows are filtered out before the "only the re-ask's reply follows"
+  check — otherwise the two folds would disagree on the same events.
+- Doc: Design S2.6 and Tests §S2's truncation bullet now state the rule and the reason it is scoped that way (drift
+  from the plan as written: the plan said "when this turn already holds a truncation notice ending in `asking it to
+  continue`", which is exactly the over-broad rule the review broke).
+
+**RED first (§9), on the pre-fix code, on the assertion of the property:**
+- TUI `harness-lines.test.ts` "a LATER cut of the same turn is a NEW line, never a rewrite far up the transcript":
+  `expect(notices).toHaveLength(2)` → `Received length: 1`; "a `cut` never merges: the first fact stays…": received
+  `["the model's stream was cut before it finished — this answer is incomplete"]` (the output-limit line was
+  overwritten). GREEN after the fix: `15 pass, 0 fail`.
+- Phone `transcript.test.ts`, the same two cases (`:424-461`): same two failures, then GREEN —
+  `35 pass, 0 fail`.
+- `a NEW turn's cut never merges into the previous turn's line` (both frontends) is the companion pin for the
+  per-turn scope: it is red under the round-3 rule and needs no separate check in the fix.
+
+**Mutations (each red, then reverted; the tree after = only this fix):**
+| Mutation | Red |
+|---|---|
+| TUI: no reason gate (`reaskContinueAt(state)` for every reason) | TUI `cut`-never-merges: 1 fail |
+| TUI: structure guard dropped (`return at` after the notice checks) | TUI later-cut + new-turn: 2 fail |
+| Phone: structure guard dropped (`return at`) | phone later-cut + new-turn: 2 fail |
+
+**Reviewer's own repro, re-run on the fix** (`.tentacle/tmp/harness-notices/rev-s2-later-cut.ts`, its exact
+sequence): index 2 keeps `… asking it to continue`, and the later cut lands at index 6 — the turn's end, after the
+tool row and the final text — for both `length` and `cut`.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean · `bun run lint` clean (2008 files) · full
+`bun test` (once, final tree): **14606 pass, 5 skip, 0 fail** across 1045 files. No skip added by this round (the 5
+are the same ones S2's run listed). No `protocol.d/` note and no `changelog.d/` change: this round fixes display
+behaviour inside the task's own scope.
 
 ## Review
 
@@ -618,3 +792,60 @@ suite stated). Commit is titled "exec (deepseek)" while Execution is signed opus
   `FOREIGN_COMPACTED_NOTICE` is S3 scope). Mutation C (foreign wording re-added) → 1 fail; reverted, tree clean.
 - Gate: touched files 114 pass / 0 fail; `bun run typecheck` clean; `bun run lint` clean (1997 files). Full `bun test`
   not re-run by the reviewer. No regression found in the round-2 diff.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17* (S2 only, `git diff main...HEAD`; fresh context. The executor signature reads
+claude-sonnet-4-5 but the commit says "exec (deepseek)" — reconcile)
+
+**Verdict: REQUEST-CHANGES** (S2).
+
+**Findings**
+1. **MEDIUM — a later, separate cut in the same turn rewrites the FIRST notice, far up the transcript.**
+   `packages/tui/src/state.ts:679-687` (`again = saidContinueThisTurn(state)`) and `replaceContinueNotice` (`:268-279`)
+   treat ANY truncation after a "…asking it to continue" line in the turn as "the re-ask was cut again". But the
+   re-ask budget is per TURN (`agent.ts:1426`, `MAX_TRUNCATION_REASKS = 1`), and the re-ask can go on to run tools and
+   further rounds. Repro (`.tentacle/tmp/harness-notices/rev-s2-later-cut.ts`): [user, reply, cut (re-ask), reply,
+   tool, reply] then a later `truncated_reply{reason:"length", retrying:false}` (e.g. the refused cut tool call,
+   `agent.ts:1620`) → item 2, ABOVE the tool row, becomes "…asked it to continue, cut again; this answer is
+   incomplete"; nothing is appended at the turn's end. With `reason:"cut"` (`agent.ts:1609`) the first fact
+   (output limit + re-ask) is overwritten by "the model's stream was cut before it finished" — first fact lost,
+   second misplaced. On `main` that second sentence was appended at the end. `apps/mobile/src/transcript.ts:458-466`
+   mirrors the same bug. Fix: merge only when the continue notice is the turn's last notice AND nothing but the
+   re-ask's own reply follows it (or the loop flags the re-ask's cut explicitly), and never merge a `cut` reason;
+   add a test for the later-round cut on both TUI and phone.
+
+**Gate (re-run by reviewer):** touched test files + `app-commands` + mobile `transcript-parity` → 272 pass, 0 fail
+(15 files). `bun run typecheck` clean. `bun run lint` clean (2008 files). Full `bun test` not re-run.
+
+**Mutation (each red, then reverted; `git status` clean):** `layoutTranscript` gap ignores `joinsPrevious` →
+2 fail (PARITY, App frame). `sliceLaid` back to "a separator above every non-first item" → 2 fail. Executor's M1–M7
+table not re-run.
+
+**Attacks tried:** (a) parity of the two layout paths / `sliceLaid` gap — holds, mutation-pinned. (b) glyph cache
+staleness: `hangCache` keyed on the item's row array, level is item-derived, `prev` recomputed per layout — holds.
+(c) other `kind === "notice"` readers now seeing ex-`AssistantItem` lines (`resetHistory` host filter,
+`transcriptToMarkdown`, job dedupe, `turnHasAnswerText`) — no wrong state found. (d) truncation merge across rounds
+→ finding 1. §7 invariants: pure-module split respected (`harness-group.ts`, `harness-text.ts`); no wire,
+persistence or terminal-IO change.
+
+**Executor behaviour:** honest, well-documented drift (`notice` token kept for `dock-tone.ts:33`; `stripInlineMarkdown`
+added for real regressions; mobile mirror forced by the parity test). The happy path is well tested; the merge rule's
+scope was not challenged beyond the immediate re-ask.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* (S2 fix round, `git diff HEAD~1`; same reviewer context, same model family as round 1)
+
+**Verdict: PASS** (S2).
+- F1 fixed: `reaskContinueAt` (`packages/tui/src/state.ts:272-284`, mirrored in `apps/mobile/src/transcript.ts:579-591`)
+  merges only when the continue line is the last notice, nothing except one answer item follows it, and the reason
+  is `length`. The round-1 repro now appends the stream-cut line at the end and leaves the first line as it was.
+  The real re-ask flow still merges: `context_note{continue}` adds no item on either side.
+- Mutations, each red and then reverted, with `git status` clean afterwards: dropping the structural check fails 2
+  tests in the TUI and 2 on the phone; dropping the `length` gate fails 1 in the TUI and 1 on the phone.
+- Gate: `harness-lines`, `truncated-reply-notice`, `harness-render`, `harness-block-frame` and mobile `transcript` +
+  `transcript-parity` → 76 pass, 0 fail. `bun run typecheck` and `bun run lint` (2008 files) are clean. I did not
+  re-run the full suite. No regression found in the fix diff.
+- LOW, not blocking: an empty re-ask, then a stall nudge (adds no item), then a cut still merges as "cut again".
+  The wording stays truthful.

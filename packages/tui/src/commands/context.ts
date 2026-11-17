@@ -30,7 +30,8 @@ export interface Live<T> {
 
 export interface CommandContext {
   /** Append a system line (scrolls to the bottom and flushes the frame). */
-  readonly pushNotice: (text: string) => void;
+  /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
+  readonly pushNotice: (text: string, level?: "warn") => void;
   /** Put `text` back in the input after any draft, and say why. */
   readonly restoreInput: (text: string, why: string) => void;
   /** The PROMPT's input line: its history, the recall index, and the draft. */
