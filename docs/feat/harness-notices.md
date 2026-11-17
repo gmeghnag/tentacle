@@ -606,3 +606,15 @@ finding 1. (f) design vs code on Q6 → finding 2. Single-broker / RPC-peer / pe
 
 **Executor behaviour:** honest Execution (drift on `from` timing explained and reflected in Design; unverified full
 suite stated). Commit is titled "exec (deepseek)" while Execution is signed opus — reconcile the signature.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, same model family as the executor)
+
+**Verdict: PASS** (S1).
+- F1 fixed: `hosted-session.ts:3106-3107` stores `promptTokens > 0`, else `undefined`. New daemon test (`[50k, 0]` → measured 7777).
+  Mutation A (guard removed) → 1 fail; mutation B (a 0 keeps the older 50k) → 1 fail; both reverted.
+- F2 fixed: `compaction-view.ts:41` takes only the view; no `foreign` caller left in `packages/` (the TUI's
+  `FOREIGN_COMPACTED_NOTICE` is S3 scope). Mutation C (foreign wording re-added) → 1 fail; reverted, tree clean.
+- Gate: touched files 114 pass / 0 fail; `bun run typecheck` clean; `bun run lint` clean (1997 files). Full `bun test`
+  not re-run by the reviewer. No regression found in the round-2 diff.
