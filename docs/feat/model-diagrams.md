@@ -1408,3 +1408,186 @@ M-B is the non-vacuity guard in the other direction: a guard that killed ALL dra
 3. **Regressions:** the guard sits after the `running`/`queued` check and before the memo, so no error row is ever cached. `ok` rows are unchanged. `app-diagram` + `diagram-row` + `render-lines` + `app.test.tsx`: **257 pass, 0 fail**. `bun run lint`: clean, 1986 files. `bun run typecheck`: clean. Full `bun test` not re-run by me (the executor reports 14469 pass / 5 skip / 0 fail).
 
 *— claude-opus-5-5, 2026-11-17*
+## Execution — slice D5
+
+*Phone pure layer only: `diagram-row.ts`, `diagram-theme.ts`, `diagram-bridge.ts`,
+`diagram-cache.ts` and their four test files. Nothing of D6/D7 (no WebView, no
+renderer page, no artifact kind, no `present`) and nothing of D1–D4. `TODO.md` untouched.*
+
+### 0. Load-bearing check, re-run first — **HOLDS**
+
+D5's plan names P4 (the phone draws a call in its row's place: `chartRowSpec` →
+`null` → `ToolRowView`) and P8 (chart tokens + palette are the only colours) as its
+seams, plus D1's pure layer as its input. Re-run on this branch
+(`.tentacle/tmp/model-diagrams/d5/loadcheck.ts`, run under `bun`, i.e. the phone's
+own package graph):
+
+```
+lint.type            : flowchart
+model.kind           : flowchart
+summary.line         : Diagram shown to the user: flowchart "Login" · 3 nodes · 2 links · top to bottom
+describeDiagram      : flowchart Login: Richiesta → Token valido? → Ok
+DIAGRAM_CAPS.bytes   : 20480
+light tokens.label   : #000000 | page: #FFFFFF
+dark  tokens.label   : #F2F1EC | page: #1F1F1E
+sha256Hex('a')       : ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb
+chartRowSpec(ok)     : null
+chartRowSpec(error)  : null
+```
+
+So: core's diagram layer (lint → model → `summarizeDiagram`/`describeDiagram`) is
+reachable and runs from `apps/mobile`; the row decision this slice mirrors exists
+and returns `null` for the fixture above (its `args` are `{}` — the call is real,
+the fixture is not a chart, which is what "another tool / invalid spec → generic
+row" means); the chart tokens and both palettes are readable, and the phone's own
+sha-256 (`hash.ts`, `@noble/hashes`) works off `Bun`. What was missing is only the
+four modules.
+
+Narrow baselines before any edit: `apps/mobile/test/chart-row.test.ts` **12 pass**,
+`packages/core/test/diagram-*` **66 pass**.
+
+### 1. As built (dependency order)
+
+1. **Red first (§9).** The four test files were written before any module existed,
+   so the first run is the RED state — honestly an import error for each
+   (`Cannot find module '../src/diagram-bridge.ts'`, ×4). To make the red *an
+   assertion* rather than a compile error, each module was then written and the
+   tests re-run: **36 pass / 2 fail**, and each failure named a real defect:
+   - `diagram-cache`: a `|`-containing key was sanitised segment-wise, so
+     `base|../../etc|1` still passed `..` through → `diagrams/` was escapable
+     (the artifact cache's dot-rule was applied to the WHOLE name only for a
+     dot-only segment; a key's free parts are not segments). Fixed: any run of
+     2+ dots becomes `_`.
+   - `diagram-row`: the VoiceOver label was `describeDiagram`'s sentence RAW, so a
+     `<control byte>` inside a forged source's label reached a spoken string (the
+     caption was cleaned, the label was not). Fixed: the label goes through the
+     same C0/C1 filter; the canonical source deliberately does NOT (the `Sorgente`
+     tab must show what the model wrote).
+   After both fixes: **38 pass / 0 fail**.
+2. `apps/mobile/src/diagram-bridge.ts` — `parseDiagramReply(raw, asked)` plus the
+   four caps. Exactly two accepted shapes: `{id, ok: true, svg, w, h}` and
+   `{id, ok: false, line, message}`, with `hasExactly` (no extra key), an id from
+   the set the app asked for, an SVG that is one closed `<svg …>…</svg>` within
+   512 KiB **in bytes**, dimensions finite in `(0, 20000]`, a `line` that is an
+   integer in `[0, 10000]`, and a sentence with C0/C1 stripped and cut to 300
+   chars. A fresh object is returned, never the renderer's.
+3. `apps/mobile/src/diagram-row.ts` — `DIAGRAM_TOOL`, `diagramRowSpec` (name
+   guard → status guard `error`/`denied` → JSON shape → caption cleaned and
+   capped at 120 → `lintDiagram`; a refused source → `null`), `diagramSummary`
+   (core's `describeDiagram`, filtered), `diagramRowView` (spec + scheme + chart
+   tokens + `renderKey` + `accessibilityLabel`), and a 32-entry memo for the
+   render key (a sha-256 over up to 20 KiB must not run every frame).
+4. `apps/mobile/src/diagram-theme.ts` — `diagramThemeVariables(palette)`: 36
+   mermaid `themeVariables` for the `base` theme, every colour a chart token or a
+   palette field or a `seriesColor` slot; `diagramTheme` + `diagramThemeKey`
+   (`base|dark`).
+5. `apps/mobile/src/diagram-cache.ts` — `DIAGRAM_CACHE_MAX = 32`,
+   `diagramCacheKey(canonical, scheme, fontScale)` = `base|<scheme>|<scale>|<sha256>`,
+   `createDiagramCache(max?)` (a `Map`-order LRU with an injectable bound),
+   `diagramCachePath(key)` = `diagrams/<sanitised>.svg` (relative to
+   `FileSystem.cacheDirectory`; D6 supplies the port).
+6. **The tests**, 40 in four files: `diagram-bridge.test.ts` (11),
+   `diagram-row.test.ts` (13), `diagram-theme.test.ts` (7),
+   `diagram-cache.test.ts` (9).
+
+### 2. Red before green (§9)
+
+Stated honestly, as D3 did: the four modules and their tests were written in the
+same pass, so there is **no "fails on missing code, then passes"** run for each
+assertion — the only red of that kind is the import error. Non-vacuity is instead
+shown by the 14 mutations in §3, each of which makes a NAMED test fail, plus the
+two defects the first green loop actually caught (§1.1), which were real
+assertions on real wrong code rather than imports.
+
+### 3. Mutation checks (§9; `.tentacle/tmp/model-diagrams/d5/mutate.ts` — each applied by exact match, the four narrow files run, the file restored from a copy, `cmp` confirmed identical after and `git status` shows only the 8 intended files)
+
+```
+M1  bridge: the asked-id check dropped                    KILLED (39 pass / 1 fail)
+M2  bridge: SVG cap by String.length, not bytes            KILLED (39 pass / 1 fail)
+M3  bridge: extra-key check disabled                       KILLED (39 pass / 1 fail)
+M4  bridge: sentence not stripped of control bytes         KILLED (39 pass / 1 fail)
+M5  row: name guard dropped                                KILLED (39 pass / 1 fail)
+M6  row: a refused lint still returns a spec               KILLED (39 pass / 1 fail)
+M7  row: guard over-broad (only `running` refuses)         KILLED (36 pass / 4 fail)
+M8  cache: scheme left out of the key                      KILLED (36 pass / 4 fail)
+M9  cache: LRU bound removed                               KILLED (38 pass / 2 fail)
+M10 theme: mono font replaced                              KILLED (39 pass / 1 fail)
+M11 theme: a new colour invented (#000000 for text)        KILLED (39 pass / 1 fail)
+M12 theme: surface a literal white, not the page           KILLED (38 pass / 2 fail)
+M13 row: renderKey hardcodes fontScale 1                   KILLED (39 pass / 1 fail)
+M14 row: renderKey hand-rolled, not the cache's key        KILLED (39 pass / 1 fail)
+```
+
+All 14 died; none survived. The harness asserts each anchor is **present and
+unique** before mutating (a lesson D4 paid for: an anchor that also matches
+`chartRow` mutates the wrong site and reads as a false SURVIVED). Named failures
+for the two security targets, checked by hand:
+- M6 → `diagramRowSpec — the transcript branch's decision > forged arguments (a pod's rawInput) fall back to the generic row`.
+- M1–M4 are the bridge's own, e.g. M1 → `… the FORGED message (mermaid XSS) > an id we did not ask for is dropped`.
+
+### 4. Drift from the Implementation (and why)
+
+1. **`diagramRowView` gained `renderKey`.** The plan's D5 lists the four modules
+   but not the row view's fields; `fontScale` (which the plan's cache key names)
+   had no consumer without it, and D6's renderer needs exactly "which render am I
+   being asked for". The key is computed through `diagramCacheKey` (one definition)
+   and memoised 32-deep.
+2. **`diagram-cache.ts`'s file half is a NAME, not a store.** The plan says "an
+   in-memory LRU (32) + `FileSystem.cacheDirectory/diagrams/`". `FileSystem` is a
+   native module, and D6 is where the renderer exists, so this slice ships the
+   pure naming/keys and an injectable bound; D6 injects the port and writes. No
+   behaviour is deferred — a store with no renderer to store would be dead code.
+3. **`diagramThemeVariables` is a flat map, not a typed mermaid interface.**
+   Mermaid's own type lives in `mermaid`, which the app does not depend on
+   (`tools`/`mermaid` are daemon-side). The variable NAMES are mermaid's; a name
+   mermaid ignores is invisible, which is why the theme test pins the ones that
+   matter (page, mono, label, the two accents) as values.
+4. **No `diagramTokens` group in `theme.ts`.** The plan's P8 says "no new colours",
+   and D3 already made the same call for the TUI: `ChartTokens` +
+   `seriesColor` are the tokens, so the row carries `ChartTokens`.
+5. **The bridge does NOT sanitise SVG markup.** The plan's D6 puts the isolation in
+   the display (`javaScriptEnabled={false}`, no `onMessage`, `artifactCsp()`), so
+   this module's job is exactly the message shape and its caps. Written in the
+   module's header so the next reader cannot mistake the boundary.
+6. **No changelog fragment of its own.** D5 changes nothing a user can see: the
+   phone row renders only once D6 draws it, and `changelog.d/model-diagrams.added.md`
+   already carries that sentence ("the phone's renderer follows with the
+   model-artifacts work") from D1's drift 7. A second fragment for an invisible
+   layer would be a commit mirror, which `docs/feat/changelog-fragments.md:223`
+   rules out. **D7 must extend the existing file** (D1's note), not add one.
+7. **`DIAGRAM_TOOL` is a string literal here, and `TITLE_MAX = 120` is mirrored.**
+   The app does not depend on `@tentacle/tools` (plan P8 / `tool-summary.ts:8`) —
+   the same reason the TUI keeps its own `CHART_TOOL`/`DIAGRAM_TOOL`. The cap is
+   the tool's `DIAGRAM_TITLE_MAX` (`tools/src/diagram.ts:31`).
+
+Not done, deliberately (later slices): the WebView renderer and its `onMessage`
+driver (D6), the inert display and the full screen (D6), the `diagrams.style`
+setting read (D6, where there is a fill to switch), the `"mermaid"` artifact kind
++ `wantsDiagramThumbnail` + `present` (D7), the `TranscriptRow` branch (D6, at
+`:431`). No `protocol.d/` note: no wire, no on-disk shape, no update kind.
+
+### 5. Gate
+
+```
+$ bunx tsc --noEmit                     → clean (no output)
+$ bunx tsc -p apps/mobile --noEmit      → clean (no output)
+$ bunx tsc -p apps/relay                → clean (no output)
+$ bun run lint                          → Checked 2011 files. No fixes applied. (0 errors, 0 warnings)
+$ bun test apps/mobile/test/diagram-*.test.ts
+                                        → 40 pass, 0 fail, 205 expect() calls
+$ bun test                              → 14635 pass, 5 skip, 0 fail (1046 files, 494 s)
+```
+
+The 5 skips are the three opt-in ones (live-k8s, live-docker, real-socket
+keepalive) plus the 2 pre-existing — the same set D4's gate recorded, not new.
+Two files were auto-formatted by `biome check --write` (import order, line
+width); no hand fixes, no suppression added (the control-byte regexes carry the
+repo's existing `noControlCharactersInRegex` justification comment).
+`protocol.json` untouched (no schema change).
+
+*— claude-opus-5-5, 2026-11-17* — this slice's executor per the environment
+(`AI_AGENT=claude-code_2-1-323_agent`, `CLAUDE_CODE_ENTRYPOINT=cli`, and
+`~/.claude/settings.json`'s `"model": "opus"` / `modelSettings.claude-opus-5-5`).
+Recorded honestly: the routing table (`:426`) names `deepseek` for D5, so the
+executing model and the plan's assignment differ. The doc's table is the
+orchestrator's to correct; this line states what actually ran.
