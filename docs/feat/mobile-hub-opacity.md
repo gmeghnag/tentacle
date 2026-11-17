@@ -312,3 +312,30 @@ Not verified: the visual result (the 1 pt edge and the shadow at 100 % on iOS, a
 render-side only — no iOS build was run here, and the Bun harness cannot render the button. The mutations above
 prove the code holds the structure, not that the pixels match main; the plan's Tests-list screenshots at 30 %
 still have to be attached.
+
+### Round 4 (re-review of `e1c2f04a`)
+
+*— claude-opus-5-5, 2026-11-17* (fresh context; same model as rounds 1–3 and the plan, different from the executor)
+
+**Verdict: REQUEST-CHANGES.**
+
+Gate: the touched tests pass (81/81 across `hub-opacity`, `hub-opacity-wiring` and `activity-settings-store`). `bun run lint` is clean (1996 files) and `bun run typecheck` is clean. The full `bun test` was not run.
+
+Mutations (reverted afterwards, `git status` clean):
+- removing `setDragging(null)` from `commit` → "release/terminate drops the local value" FAILED;
+- adding `overflow: "hidden"` to `styles.cast` → "the shadow is on an UNCLIPPED layer" FAILED.
+
+Both tests are therefore non-vacuous, but only as checks of the source's structure.
+
+Findings:
+1. **MEDIUM (plausible: iOS render, not run): the round 1 shadow fix still casts no shadow.** The `cast` layer (`FloatingActivity.tsx:489-498`, style `:628`) has no `backgroundColor`, no border and no children. RN iOS sets `shadowPath` only when the view has an opaque background. Otherwise the shadow is computed from the pixels of the layer's content. This layer has no content, so the shadow is empty. On main the shadow came from the outer view's border and its glass children. The wiring test checks only that the layer is unclipped, so it still passes while the shadow is missing. Fix: give the shadow-casting layer content, for example the glass fill itself on a layer that is not clipped. Then check it with a simulator screenshot at 100 % against main.
+2. **MEDIUM: the slider jumps back on release.** `commit` (`HubOpacityBand.tsx:754-760`) clears `dragging` synchronously. The holder publishes only after `await store.write` (`activity-settings-store.ts`, `set`: `try { await store.write } finally { publish }`). So for the whole Keychain round-trip, the label, thumb and preview show the OLD stored value, and then they jump to the new one. The same happens on every release. Fix: keep the released value until the stored prop equals it (or until the write fails). `shownOpacity` is the pure place for that rule, and it needs a test.
+
+Attacks that found nothing:
+- `parseOpacity` handles NaN, ±Infinity and strings, there is no `v` bump, and the mode and position are kept.
+- Every path that leaves the gesture syncs `engaged`.
+- After fix 4, `locationX` is measured from the track.
+- The holder spread keeps the opacity across writes of the mode and of the position.
+- No §7 invariant is touched (phone-local UI only).
+
+Executor: fixed rounds 1–4 as asked, with red-before-green witnesses, and stated honestly that nothing was checked visually. Fix 2 is the one structural test that a visual check would have caught.
