@@ -449,3 +449,71 @@ row on upsert → 1. `row-swipe.ts`: dropping the `hasTime` gate → 1; dropping
 *— claude-opus-5-5 (executor), 2026-11-17*
 
 ## Review
+
+**Verdict: REQUEST-CHANGES** (scope: `git diff main...HEAD`, slices A + B).
+
+**Gate (re-run by the reviewer).** Touched test files (11): 156 pass, 0 fail.
+`bun run lint`: 1785 files, clean. `bun run typecheck`: clean. Full `bun test`
+was not re-run (out of scope for this pass). Mutation: `segment()` stamping
+`now()` instead of `0` → `session-log.test.ts` 5 fail; reverted, tree
+byte-identical (`git status` empty).
+
+**Findings**
+1. **HIGH: the opening list can stay invisible.** `follow.ts:112` ends `settling`
+   only when two `land()` calls in a row see the SAME content height (or after 12
+   rounds). `land()` runs only from `onContentSizeChange` and `onLayout`
+   (`SessionScreen.tsx:365-383`). RN fires both only when a size CHANGES, so
+   the repeat the machine waits for never arrives. Example: a short session gives
+   1–3 content events, the last one differs from the one before, and the
+   transcript stays at `opacity: 0` (`SessionScreen.tsx:724`) until a keyboard or
+   rotation re-lays it out. The "Opening the session…" empty state sits inside
+   the same hidden View, so it is never seen either. `follow.test.ts:117-121`
+   passes only because it feeds a repeated measurement that the screen cannot
+   produce. That proves a weaker property than "the list is shown" (§2/§9). Fix:
+   settle on a signal that does arrive, e.g. a frame or short timer after the
+   last landing scroll, with a time-bounded reveal. Pin the real event sequence
+   (distinct heights, then silence) in a test. Not verified on a device: RN is
+   not installed in this tree. Verify by opening a 2-message session.
+2. **HIGH: the swipe reveals nothing.** `SwipeTime.tsx:487,505-508` puts the
+   label at `right: -REVEAL`. That is OUTSIDE the cell, which is full-width
+   (`styles.list` has no horizontal padding). The label is also a SIBLING of the
+   translating `Animated.View`, so it never moves. The row slides left and
+   uncovers an empty strip `[W−64, W]`, while the label sits at `[W, W+64]`,
+   which the iOS ScrollView clips. Plan design 6 made this geometry error; the
+   executor followed it, and `swipe-time-wiring.test.ts:37` pins the wrong
+   geometry. Fix: `right: 0` inside the frame, behind the row. It stays absolute,
+   so the row height still never changes.
+3. **MEDIUM: a foreground resync does not re-arm the silent landing.**
+   `session-screen-controller.ts:639` runs `resync(true)`. The screen re-arms
+   `landingQuiet` only for pull, Retry and Reopen (`SessionScreen.tsx:691,702,792`).
+   So any content change that a foreground resync causes goes through
+   `contentGrew` with `animated: true`. That misses the plan's
+   "re-attach/foreground lands silently" (`follow.test.ts:158`). No test covers
+   this path.
+
+**Premises checked.** `SessionLog.commit` is the single append/replace/truncate
+site (`session-log.ts:112-135`) — TRUE. `snapshotPage` pairs
+`messages.slice(start,end)` with `timesOf(start,end)` (`hosted-session.ts:2023-2028`)
+— TRUE. The client drops ALL times on any missing or misaligned page
+(`remote-client.ts:3872-3888`) — TRUE. The strip schema is additive, with no
+version bump (`protocol/session.ts:893`) — TRUE.
+
+**Attacks tried.**
+- **Hostile pod times:** display-only, never persisted, nothing reaches the
+  laptop. Holds (§7).
+- **Log lagging the cut:** `times` comes back shorter, so the client drops it
+  rather than mispairing. Holds.
+- **Upsert restamping:** `apply` stamps only rows it creates. Holds.
+- **Rightward back-swipe:** `claimsPan` is false for it. Holds.
+- **Landing termination:** findings 1 and 3.
+- **Label geometry:** finding 2.
+
+**Executor behaviour.** The work is careful and well documented, and the
+mutation claims are plausible (one re-checked). The executor tested the pure
+machine against inputs RN never delivers, and copied the plan's label geometry
+without questioning it. Sign-off mismatch: Execution is signed
+`claude-opus-5-5 (executor)`, but commit `24d47937` says `exec (deepseek)`.
+Fix the signature so it is honest (§10).
+
+*— claude-opus-5-5, 2026-11-17* (fresh context. Same family as the plan's
+author, so it may share the plan's blind spots, e.g. finding 2 came from the plan.)
