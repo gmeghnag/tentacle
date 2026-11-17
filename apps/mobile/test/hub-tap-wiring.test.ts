@@ -73,11 +73,22 @@ describe("the button no longer opens Activity itself", () => {
 describe("a dimmed item keeps its slot and is drawn faint (Design 2, 5)", () => {
   test("the fan reads the flag the hub set, and never filters the item out", () => {
     expect(FAN).toContain("item.dimmed");
-    expect(FAN).toContain("styles.dimmed");
     // It is a style on the item that is still mapped and rendered: no `filter`
     // on `layout.items`, which would shift every later item's slot.
     expect(FAN).toMatch(/layout\.items\.map\(/);
     expect(FAN).not.toMatch(/layout\.items\.filter/);
+  });
+
+  test("the faint level MULTIPLIES the item's animated opacity, never overrides it", () => {
+    // Review round 1 finding 2: a `styles.dimmed` entry placed after the animated
+    // styles wins on a fixed 0.45, so the disc is drawn at full strength from frame
+    // 0 of the open fade and stays behind after the fan collapses. One opacity is
+    // the item's own (grow value, or the highlight dim) TIMES the faint factor.
+    expect(FAN).not.toContain("styles.dimmed");
+    expect(FAN).toContain("const base = hi !== null && !lit ? motion.dimOpacity : value");
+    expect(FAN).toContain("Animated.multiply(base, DIMMED_OPACITY)");
+    // …and the animated style reads that one value, not a second opacity.
+    expect(FAN).toContain("opacity,");
   });
 
   test("the faint level is one constant, and a highlighted dimmed item is NOT faint", () => {

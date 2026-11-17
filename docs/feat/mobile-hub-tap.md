@@ -384,6 +384,95 @@ are updated but not driven, and the dimmed look (0.45) is a placeholder the owne
 sees for the first time on device — verify by running `33-hub.yaml`, which now
 opens the fan by tapping and asserts the fan, then `28-floating-activity.yaml`.
 
+### Fix round 1
+
+*— claude-sonnet-4-5, 2026-11-17* (my own model id. Note: `~/.claude/settings.json`
+says `model: "opus"`, which is the launcher's config, not this agent's identity —
+the same contradiction Review flagged against the Execution signature above. I am
+signing what I am.)
+
+Both round-1 findings reproduced in source before any edit, then fixed red-first.
+
+**Finding 1 (MEDIUM) — flow 33 asserted a sheet it cannot open.**
+
+*Confirmed:* `33-hub.yaml:146-149` stops the `HOLD hub` turn → `turn-idle`;
+`mock-model.ts` starts sub-agents/jobs only for `SUBAGENT27`/`SHELLJOB27`
+(`:491-504`), the flow arms no schedule and finishes nothing, so
+`activityView(...).groups` is empty ⇒ `activityEmpty` ⇒ `activity.dimmed`, and
+`commitPlan("activity", …)` is `{kind:"notice", text:"Nothing running"}`.
+`assertVisible activity-sheet-close` could never pass. The header (`:10`) and
+`run.ts:1272` still said "tap is still Activity".
+
+*Fixed:* the tap block now taps `hub-item-activity` and asserts the **inline
+notice** (`extendedWaitUntil visible hub-notice`) plus
+`assertNotVisible activity-sheet-close` — the state the flow actually sets up
+(the comment says so, and points at 27 for the sheet's own path). Header and
+`run.ts` comments corrected to "a tapped empty Activity says Nothing running".
+`28-floating-activity.yaml` needed no change: it only opens and closes the fan.
+
+*Regression tests* (`test/e2e-flows.test.ts`, new describe "flow 33 asserts the
+hub state it actually sets up"): (a) `hub-notice` is asserted visible and
+`activity-sheet-close` is not asserted visible anywhere in the flow — parsed
+through the file's existing `assertions()` helper, so a commented-out or
+`assertNotVisible` line cannot satisfy it; (b) the `hub-item-activity` tap
+precedes the `hub-notice` assertion (the notice can only come from committing
+it); (c) neither the flow nor the runner still carries a "tap … Activity"
+comment. *Red on buggy:* with `git show HEAD:…/33-hub.yaml` restored, **3 fail**;
+with only the sheet assertion flipped back to `assertVisible`, 1 fail; with only
+`run.ts`'s comment restored, 1 fail. Green with the fix.
+
+**Finding 2 (MEDIUM) — a dimmed item's opacity overrode the fan's animation.**
+
+*Confirmed:* `HubFan.tsx:138` put `faint` (`{opacity: DIMMED_OPACITY}`) **after**
+the animated `{opacity: hi !== null && !lit ? motion.dimOpacity : value}` in the
+style array, so RN's last-wins flattened it to a constant 0.45 — the disc drawn
+before the fan's spring/fade starts, left standing while the others fade, and
+ignoring the 0.55 highlight dim.
+
+*Fixed:* one `opacity`, computed per item: `base` is still the animated value (or
+the highlight dim), and a dimmed, non-lit item's opacity is
+`Animated.multiply(base, DIMMED_OPACITY)` — an `AnimatedMultiplication` node
+(`AnimatedImplementation.js:93`), so both factors stay on the native driver and
+multiply on the UI thread. The `styles.dimmed` entry is gone; the constant is
+still the one named placeholder (owner Q5). `!lit` keeps the highlight rule: a
+dimmed item under the finger is drawn solid, as before.
+
+*Regression test* (`hub-tap-wiring.test.ts`, replacing the weaker "the faint
+level is one constant" case which the buggy code passed): `styles.dimmed` is
+absent, `base` is the animated value, the opacity is
+`Animated.multiply(base, DIMMED_OPACITY)`, and the style reads that one
+`opacity,`. *Red on buggy:* **1 fail** on `not.toContain("styles.dimmed")` (an
+assertion failure, not an import error). Green after.
+
+**Mutations (§9 non-vacuity, all reverted from `.tentacle/tmp/mobile-hub-tap/`).**
+
+| mutation | result |
+|---|---|
+| pre-fix flow 33 restored (`git show HEAD`) | 3 fail (e2e-flows) |
+| flow 33's sheet assertion flipped back to `assertVisible` | 1 fail |
+| `run.ts`'s "tap = Activity" comment restored | 1 fail |
+| HubFan's overriding `faint` style restored | 1 fail (hub-tap-wiring) |
+
+**Gate** (worktree): `bunx tsc --noEmit` clean, `bunx tsc -p apps/mobile` clean,
+`bun run lint` clean (2045 files, 0 errors/warnings — the AGENTS §6 baseline),
+`bun test apps/mobile` **3208 pass / 0 fail** (226 files), and the full suite:
+
+```
+ 14855 pass
+ 5 skip
+ 0 fail
+ 47 snapshots, 177783 expect() calls
+Ran 14860 tests across 1065 files. [463.50s]
+```
+
+Zero failures, only the five documented opt-in skips, and no snapshot file is
+modified (`git status` is clean of them).
+
+**Unverified (one line).** Still nothing driven on a device: finding 1's fix is
+verified against the flow's state machine and `activityView`'s own emptiness rule,
+not against a simulator — `33-hub.yaml` is the check, and it now asserts what the
+flow can actually reach.
+
 
 ## Review
 

@@ -110,7 +110,12 @@ export function HubFan(props: HubFanProps): JSX.Element {
         const fg = lit ? palette.onAccent : item.danger ? palette.red : palette.accent;
         // A dimmed item has nothing to show: it KEEPS its slot, drawn faint
         // (mobile-hub-tap Design 5 — badges restyles this into a solid disc).
-        const faint = item.dimmed && !lit ? styles.dimmed : null;
+        // The faint level MULTIPLIES the item's own animated opacity (its spring/
+        // fade `value`, or the highlight dim): both are opacities of the same
+        // view, so a second `opacity` style would win over the animation and draw
+        // the disc before the fan opens and behind it after it closes.
+        const base = hi !== null && !lit ? motion.dimOpacity : value;
+        const opacity = item.dimmed && !lit ? Animated.multiply(base, DIMMED_OPACITY) : base;
         return (
           <Animated.View
             key={item.id}
@@ -132,10 +137,9 @@ export function HubFan(props: HubFanProps): JSX.Element {
                   : palette.glass,
                 borderColor: palette.glassBorder,
                 shadowOpacity: palette.shadowOpacity,
-                opacity: hi !== null && !lit ? motion.dimOpacity : value,
+                opacity,
                 transform: [{ scale }],
               },
-              faint,
             ]}
           >
             <Icon name={GLYPH[item.id]} color={fg} size={20} />
@@ -214,8 +218,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   badgeText: { fontSize: 9, fontWeight: "700" },
-  /** A dimmed item (`HubItem.dimmed`): same slot, same geometry, plainly inert. */
-  dimmed: { opacity: DIMMED_OPACITY },
   label: {
     position: "absolute",
     paddingHorizontal: 10,
