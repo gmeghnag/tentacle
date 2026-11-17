@@ -81,12 +81,6 @@ export interface HostExecutionConfig {
   readonly beforeRename?: (realPath: string) => void | Promise<void>;
   /** TEST SEAM ONLY: runs right before the in-place fallback opens the target. */
   readonly beforeInPlaceOpen?: (realPath: string) => void | Promise<void>;
-  /**
-   * TEST SEAM ONLY: wraps every path-resolving syscall (`realpath`, `lstat` of
-   * an entry) — throw from here to make ONE call fail the way a loaded machine
-   * does (`EMFILE`), deterministically, without exhausting real fds.
-   */
-  readonly pathCall?: <T>(op: () => T) => T;
 }
 
 /** Thrown when a write would escape the workspace root. */
@@ -94,8 +88,8 @@ export class WorkspaceWriteError extends Error {
   override readonly name = "WorkspaceWriteError";
   /** The OS errno behind a permission refusal (`EACCES`, `EPERM`), as an in-place write reported it. */
   readonly code: string | undefined;
-  constructor(message: string, code?: string, options?: { cause?: unknown }) {
-    super(message, options);
+  constructor(message: string, code?: string) {
+    super(message);
     this.code = code;
   }
 }
@@ -128,95 +122,22 @@ function mib(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, "")} MiB`;
 }
 
-/**
- * Errnos that are a verdict about the PATH (absent, not a directory, a loop, no
- * permission, too long): resolving it again would say the same thing.
- */
-const PATH_VERDICT = new Set(["ENOENT", "ENOTDIR", "ELOOP", "EACCES", "EPERM", "ENAMETOOLONG"]);
-
-/**
- * Whether `error` is a transient RESOURCE failure rather than a verdict about the
- * path — `EMFILE` above all (a loaded machine, or a suite that opens many files
- * at once). Resolving the path again later would succeed, so it must never be
- * turned into a decision about where a write is allowed to go.
- */
-function transientFsError(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return code !== undefined && !PATH_VERDICT.has(code);
-}
-
-/** How many times a transient fs failure is retried before it is reported. */
-const TRANSIENT_RETRIES = 5;
-
-/** A path-resolving syscall wrapper: a TEST SEAM, the identity in production. */
-type PathCall = <T>(op: () => T) => T;
-const IDENTITY: PathCall = (op) => op();
-
-/**
- * Run `op`, retrying a TRANSIENT fs failure with a growing pause; `null` when it
- * keeps failing that way (never a verdict about the path — the caller must not
- * turn it into one).
- */
-function retrying<T>(op: () => T): T | null {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return op();
-    } catch (error) {
-      if (!transientFsError(error)) {
-        throw error;
-      }
-      if (attempt >= TRANSIENT_RETRIES) {
-        return null;
-      }
-      Bun.sleepSync(2 ** attempt);
-    }
+/** Realpath `p` if it exists, else return it unchanged (normalized by caller). */
+function safeRealpath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
   }
-}
-
-/**
- * Realpath `p`, or `p` unchanged when the path genuinely cannot be resolved
- * (absent, dangling, a loop): the caller handles that itself.
- *
- * A TRANSIENT failure (`EMFILE` on a loaded machine) is retried, and if it keeps
- * failing the call fails — it never falls back to the lexical path. That fallback
- * compared a LEXICAL path against a realpath'd root (`/var/…` vs `/private/var/…`
- * on macOS), so a write INSIDE the project was refused as "outside the workspace"
- * — the gate flake, and a wrong answer to the model in the product.
- */
-function safeRealpath(p: string, call: PathCall = IDENTITY): string {
-  const real = retrying(() => call(() => realpathSync(p)));
-  if (real !== null) {
-    return real;
-  }
-  // A transient failure never becomes the lexical path: comparing `/var/…` with
-  // a realpath'd `/private/var/…` root is what refused writes inside the project.
-  throw Object.assign(new Error(`could not resolve ${p} (no resources for it)`), {
-    code: "EAGAIN",
-  });
 }
 
 /** Whether `p` exists as a directory entry — a dangling symlink counts (no follow). */
-function entryExists(p: string, call: PathCall = IDENTITY): boolean {
+function entryExists(p: string): boolean {
   try {
-    call(() => lstatSync(p));
+    lstatSync(p);
     return true;
-  } catch (error) {
-    if (!transientFsError(error)) {
-      return false; // genuinely not there (or not a directory on the way)
-    }
-    // A transient failure is not an answer: retry it, and if it persists say so
-    // instead of "absent" — reading it as absent walked up to a parent and
-    // confined the write against a path that was never real (see `safeRealpath`).
-    const present = retrying(() => {
-      call(() => lstatSync(p));
-      return true;
-    });
-    if (present !== null) {
-      return present;
-    }
-    throw Object.assign(new Error(`could not inspect ${p} (no resources for it)`), {
-      code: "EAGAIN",
-    });
+  } catch {
+    return false;
   }
 }
 
@@ -234,10 +155,10 @@ type RealTarget =
  * kernel takes it, which only the kernel can say. It is refused, whatever it
  * points at (review F1: a hand-written `readlink` walk got `..` wrong).
  */
-function realTarget(abs: string, call: PathCall = IDENTITY): RealTarget {
+function realTarget(abs: string): RealTarget {
   let existing = abs;
   const tail: string[] = [];
-  while (!entryExists(existing, call)) {
+  while (!entryExists(existing)) {
     const parent = dirname(existing);
     if (parent === existing) {
       break;
@@ -245,7 +166,7 @@ function realTarget(abs: string, call: PathCall = IDENTITY): RealTarget {
     tail.unshift(basename(existing));
     existing = parent;
   }
-  if (entryExists(existing, call) && !existsSync(existing)) {
+  if (entryExists(existing) && !existsSync(existing)) {
     let loop = false;
     try {
       statSync(existing);
@@ -254,7 +175,7 @@ function realTarget(abs: string, call: PathCall = IDENTITY): RealTarget {
     }
     return { ok: false, dangling: existing, loop };
   }
-  const real = safeRealpath(existing, call);
+  const real = safeRealpath(existing);
   return { ok: true, path: tail.length > 0 ? resolve(real, ...tail) : real };
 }
 
@@ -296,10 +217,7 @@ function within(root: string, target: string): boolean {
  * absolute, that resolves to the filesystem root (it would make "confined"
  * meaningless), or that is a dangling link or a loop, is dropped and reported.
  */
-function writableRootsOf(
-  dirs: readonly string[],
-  call: PathCall = IDENTITY,
-): {
+function writableRootsOf(dirs: readonly string[]): {
   readonly roots: readonly string[];
   readonly dropped: readonly string[];
 } {
@@ -312,7 +230,7 @@ function writableRootsOf(
     }
     // Canonicalised like a target: a dir that does not exist yet still gets its
     // existing ancestors realpath'd (`/var/…` → `/private/var/…` on macOS).
-    const resolved = realTarget(resolve(dir), call);
+    const resolved = realTarget(resolve(dir));
     const real = resolved.ok ? resolved.path : undefined;
     if (real === undefined || dirname(real) === real) {
       dropped.push(dir);
@@ -339,8 +257,6 @@ export class HostExecution implements ExecutionEnvironment {
   private readonly beforeRename: ((realPath: string) => void | Promise<void>) | undefined;
   private readonly beforeInPlaceOpen: ((realPath: string) => void | Promise<void>) | undefined;
   private readonly beforeRead: ((realPath: string) => void | Promise<void>) | undefined;
-  /** The test seam's path-call wrapper (the identity in production). */
-  private readonly pathCall: PathCall;
   /** Commands whose leader exited (their group was handed to `releaseGroup`). */
   private readonly released = new WeakSet<Subprocess>();
 
@@ -352,10 +268,9 @@ export class HostExecution implements ExecutionEnvironment {
     this.beforeRename = config?.beforeRename;
     this.beforeInPlaceOpen = config?.beforeInPlaceOpen;
     this.beforeRead = config?.beforeRead;
-    this.pathCall = config?.pathCall ?? IDENTITY;
     this.defaultCwd = resolve(config?.cwd ?? process.cwd());
-    this.root = safeRealpath(resolve(config?.root ?? this.defaultCwd), this.pathCall);
-    const writable = writableRootsOf(config?.writableDirs ?? [], this.pathCall);
+    this.root = safeRealpath(resolve(config?.root ?? this.defaultCwd));
+    const writable = writableRootsOf(config?.writableDirs ?? []);
     this.writableRoots = writable.roots.filter((r) => r !== this.root);
     this.droppedWritableDirs = writable.dropped;
   }
@@ -618,7 +533,7 @@ export class HostExecution implements ExecutionEnvironment {
    * inside `root` (only), not secret-looking (judged workspace-relative).
    */
   private confineRead(abs: string, path: string): string {
-    const target = realTarget(abs, this.pathCall);
+    const target = realTarget(abs);
     if (!target.ok) {
       throw new WorkspaceReadError(
         "unresolvable",
@@ -677,7 +592,7 @@ export class HostExecution implements ExecutionEnvironment {
       throw new WorkspaceWriteError(`refused: not a regular file: ${path}`);
     }
     const parent = dirname(target);
-    if (!entryExists(root, this.pathCall)) {
+    if (!entryExists(root)) {
       // A configured writable dir that does not exist yet (its realpath'd
       // ancestors were pinned at construction; if it is later created as a
       // link outward, `confineWrite` resolves through it and refuses).
@@ -931,19 +846,7 @@ export class HostExecution implements ExecutionEnvironment {
   /** The checked REAL write path, or throw if it escapes the workspace root and every writable dir. */
   private confineWrite(path: string): string {
     const abs = resolve(this.defaultCwd, path);
-    let target: RealTarget;
-    try {
-      target = realTarget(abs, this.pathCall);
-    } catch (error) {
-      // No free fd to resolve the path (a loaded machine), after retrying: say so
-      // as a refusal the model can act on, never as "outside the workspace"
-      // (which would be a lie) and never as the raw errno.
-      throw new WorkspaceWriteError(
-        `could not check ${path} (the machine is out of file descriptors): try again`,
-        undefined,
-        { cause: error },
-      );
-    }
+    const target = realTarget(abs);
     if (!target.ok) {
       throw new WorkspaceWriteError(
         target.loop
