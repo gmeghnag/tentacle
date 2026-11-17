@@ -25,4 +25,83 @@ Executor (Opus):
 
 ## Execution
 
+**Status: PARTIAL.** Owner bugs 1 and 2 are fixed with red→green tests. The live
+simulator sweep was **NOT run**: starting the harness (`bun apps/mobile/e2e/run.ts`)
+was refused by the session's permission gate (no approval available), so there
+are no `shots/`, no `### Sweep results` table, no re-screenshot after the fixes,
+and no re-check of bugs 3 and 4.
+
+### Harness prep (for the sweep, unused so far)
+- `apps/mobile/e2e/run.ts` (device pick + after the flow loop): `E2E_DEVICE=<udid>`
+  pins the simulator (the harness otherwise takes the FIRST iOS-26 device, which is
+  the other agents' booted iPhone 17 Pro); `E2E_HOLD=1` keeps serve, the mock and
+  the hooks up after the flows until Ctrl+C, for a hand-driven sweep.
+- `apps/mobile/e2e/mock-model.ts` `callDirectives`: a prompt line
+  `CALL <tool> <json>` makes the round call that tool with those arguments (any
+  `present`/`chart`/`diagram`/`shell` row on demand, without a new constant per flow).
+- Intended command (not run):
+  `E2E_DEVICE=0B43D716-9670-421A-BE51-9162004F2963 E2E_HOLD=1 bun apps/mobile/e2e/run.ts --ios 26 --only 01-shell`.
+
+### Bug 2: HTML artifact shows "Couldn't keep this file"
+- **Root cause:** the viewer read sets `fileUri: ""` for every TEXT kind (html, svg,
+  markdown, text: decoded, never cached), and the modal tested `phase.fileUri === ""`
+  ("too big to keep") BEFORE the html/markdown branches, so every text artifact hit
+  the error.
+- **Fix:** the branching moved to a pure `viewerBody(phase, viewer, target)` in
+  `apps/mobile/src/artifact-open.ts` (AGENTS §7); `too-big` now applies only to the
+  file kinds (image, pdf). `ArtifactViewerModal.tsx` only maps `body` to elements.
+- **Red** (`viewerBody` extracted with the buggy order unchanged, modal wired to it,
+  before the fix): `apps/mobile/test/artifact-open.test.ts`
+  `Expected: "webview" Received: "too-big"` (1 fail). Green after the one-condition fix.
+- Pin: `artifact-viewers-wiring.test.ts`: the modal calls `viewerBody(phase,
+  choice.kind, target)` and has no `fileUri === ""` or `choice.kind === …` branch.
+  The existing chart pin in `artifact-gallery-wiring.test.ts` moved from
+  `choice.kind === "chart"` to `body === "chart"`.
+
+### Bug 1: gallery ✕ on the status-bar clock; viewer opens as a half sheet
+- **Root cause (✕):** `ArtifactGallery` is a full-screen stack screen
+  (`App.tsx` `name="ArtifactGallery"`, `headerShown: false`, no `presentation`),
+  but it passed `insetTop={false}` to `ScreenHeader`, which is only meant for sheets.
+  **Fix:** the prop is removed.
+- **Root cause (half sheet):** the gallery mounts `ArtifactViewerModal` as a plain
+  sibling of its list, and the viewer's root was `flex: 1`, so it shared the column
+  with the list. **Fix:** the root is absolutely positioned over the whole host
+  (`position: "absolute"`, all edges 0, `zIndex: 1`); `ViewerHeader` already adds
+  `insets.top`.
+- Tests (`artifact-gallery-wiring.test.ts`): (a) the gallery passes
+  `insetTop={false}` iff its route is a sheet presentation; (b) the viewer root is
+  absolutely positioned. (b) was **red** on `root: { flex: 1 }` before the fix.
+  (a) was **mutation-checked**: putting `insetTop={false}` back → 1 fail; reverted.
+- These are source pins (`.tsx` cannot be imported from Bun). The pixels are
+  unverified until the simulator sweep runs.
+
+### Mutations
+| target | mutation | result |
+|---|---|---|
+| `viewerBody` | buggy order (`fileUri === ""` → too-big for every kind) | red: `Expected "webview" Received "too-big"` |
+| gallery header | re-add `insetTop={false}` | red: "the gallery header takes the top inset…" |
+| viewer root | `flex: 1` (pre-fix) | red: "the artifact viewer covers the whole screen…" |
+
+### Drift from Implementation
+- "Sweep FIRST" could not be done, because the harness launch was refused. The fixes
+  for the two owner-reported bugs went ahead on the owner's screenshot as evidence.
+- A row card's tap opens the gallery, not the artifact itself
+  (`SessionScreen.tsx` `onArtifact: (meta) => onOpenArtifacts("card")`: `meta` is
+  ignored). Noted only, not changed; the sweep should decide whether this is a bug.
+
+### Follow-ups
+- Run the sweep (command above), fill `### Sweep results`, and re-screenshot
+  bugs 1–2 in light and dark; re-check bugs 3 (hub) and 4 (chart crash).
+
+### Gate
+`bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bun run lint` clean (1966 files) · `bun test apps/mobile` 2934 pass / 0 fail ·
+full `bun test`: 14361 pass / 5 skip / **1 fail**. The fail is
+`packages/daemon/test/session-log-store.test.ts:815` (fork T4, `forkTemps` 2 vs 1),
+in a package this branch does not touch (`git diff -- packages` is empty). That file
+alone passes 43/43, so it looks like a timing flake under full-suite load. The
+skip count is 5, against the 3 opt-in skips in AGENTS §6; not investigated.
+
+*— claude-opus-5-5 (executor), 2026-11-17*
+
 ## Review

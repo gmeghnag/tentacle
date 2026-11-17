@@ -106,7 +106,8 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     // D6: "opening a chart artifact opens the same full-screen chart" — the SAME
     // component a `chart` transcript row's tap opens, given the artifact's own
     // bytes as the tool's args (the spec is the arguments, in both places).
-    expect(viewer).toContain('choice.kind === "chart"');
+    // The branch is `viewerBody`'s `chart` (artifact-open.test.ts pins the value).
+    expect(viewer).toContain('body === "chart"');
     expect(viewer).toContain("<ChartFullScreen");
     expect(viewer).toContain('name: "chart"');
     expect(viewer).toContain("phase.text");
@@ -121,5 +122,26 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     // The chip exists and passes `only` to the ONE view, never a second list.
     expect(gallery).toContain("CHART_FILTER_LABEL");
     expect(gallery).toContain("GRAFICI_CHIP");
+  });
+
+  // docs/fix/mobile-qa-sweep.md bug 1 (owner screenshot): the gallery is a
+  // FULL-SCREEN stack screen, so its header needs the safe-area top (else the ✕
+  // sits on the status-bar clock), and the viewer it mounts must cover the
+  // screen, not share the column with the list (the "half sheet").
+  test("the gallery header takes the top inset unless the route is a sheet", () => {
+    const app = read("App.tsx");
+    const at = app.indexOf('name="ArtifactGallery"');
+    expect(at).toBeGreaterThan(-1);
+    const options = app.slice(at, app.indexOf(">", app.indexOf("options=", at)));
+    const sheet = /presentation:\s*"(modal|formSheet|pageSheet)"/.test(options);
+    const gallery = read("src", "screens", "ArtifactGallery.tsx");
+    expect(gallery.includes("insetTop={false}")).toBe(sheet);
+  });
+
+  test("the artifact viewer covers the whole screen (an overlay, not a flex sibling)", () => {
+    const viewer = read("src", "screens", "artifacts", "ArtifactViewerModal.tsx");
+    expect(viewer).toMatch(
+      /root:\s*\{\s*position:\s*"absolute",\s*top:\s*0,\s*right:\s*0,\s*bottom:\s*0,\s*left:\s*0/,
+    );
   });
 });

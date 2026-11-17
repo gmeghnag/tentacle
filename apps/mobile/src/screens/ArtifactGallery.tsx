@@ -184,7 +184,6 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
         palette={palette}
         title="Artifacts"
         subtitle={props.title}
-        insetTop={false}
         left={
           <Pressable
             testID="artifact-gallery-close"
