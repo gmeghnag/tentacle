@@ -386,3 +386,30 @@ opens the fan by tapping and asserts the fan, then `28-floating-activity.yaml`.
 
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-17* (fresh context; if the executor really was Opus, as Execution's signature says, this is the same model, so blind spots we share can survive both passes. Note that commit `2ec557ac` says "exec (deepseek)", which contradicts that signature.)
+
+**Verdict: REQUEST-CHANGES**
+
+**Findings**
+
+1. **MEDIUM: the updated e2e flow 33 is wrong, and the change will make it fail.** `apps/mobile/e2e/flows/33-hub.yaml:150-161`: once the `HOLD hub` turn is stopped (`turn-idle`), nothing is running. `mock-model.ts` starts sub-agents/jobs only for flow 27 (`:15`, `:491-504`), there are no schedules, and nothing has finished. So `activityView(...).groups` is empty, `activity` is dimmed, and `tapOn hub-item-activity` gives `resolveCommit`'s "Nothing running" notice instead of the sheet. The `assertVisible activity-sheet-close` step then fails. The new comment ("reaches the sheet while something runs") describes a state the flow never sets up. The header at `:10` still says "a tap is still Activity". Fix: either assert the dimmed item plus the notice text `Nothing running` here, or run something first. Execution's line "e2e flows updated" was never run.
+2. **MEDIUM: a dimmed item's opacity overrides the fan's animated opacity.** At `apps/mobile/src/ui/HubFan.tsx:138`, `faint` comes after the `{ opacity: hi… ? motion.dimOpacity : value }` style in the array, so the later entry wins. The dimmed disc therefore sits at a fixed 0.45 from frame 0 of the open fade, stays at 0.45 while the other items fade out on collapse, and ignores the highlight dim (0.55). Visible effect: the Activity disc shows up before the fan and stays behind after it closes. Fix: multiply the two opacities (e.g. an inner `View` that carries the 0.45) instead of overriding.
+
+**Gate** (worktree): the touched suites gave 153 pass / 0 fail across 6 files. `bun run lint` is clean (2045 files). `bun run typecheck` is clean (root, mobile, relay). I did not re-run the full suite; Execution reports 14851 pass / 5 skip / 0 fail.
+
+**Mutations** (all reverted; `git status` is clean afterwards):
+- tap → idle with no effects: 7 fail (gesture/session/opacity).
+- `commit()` cue always `commit`: 2 fail.
+- `resolveCommit`'s dimmed branch nulled: 2 fail.
+
+The new tests are not vacuous.
+
+**Attacks tried**
+- (a) Other paths to Activity: the ActionSheet/"Show all", the rotor `item:activity` and VoiceOver activate (now → menu) all go through `commitHub` → `resolveCommit`, so they all get the notice. Holds.
+- (b) Is `groups` empty while the sheet would still show something? `finished` and `scheduled` are both groups, so empty means truly empty. Holds.
+- (c) Double tap / late timer: the `fanSticky` close and the M13 no-op are pinned. Holds.
+- (d) §7 invariants: mobile-only and pure plus rendering, with no protocol, persistence or terminal I/O touched. Holds.
+- (e) e2e coherence: fails (finding 1).
+
+**Executor behaviour:** the work is disciplined. It went red-first, mutated its own tests, disclosed the snapshot and `git checkout` incidents, and recorded its drift. But it edited e2e flows it never drove without checking the state they assume, and its model signature contradicts the commit message.
