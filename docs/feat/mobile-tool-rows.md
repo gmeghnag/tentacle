@@ -918,3 +918,22 @@ are the same 5 as in S1. No schema is touched, so there is no
   The earlier R1–R4 mutations still fail too. After the mutations, `git status` is clean.
 - **No regressions found.** No `src` file changed. The touched tests give 107 pass / 0 fail, and `bun run lint` is clean (1953 files). `bun run typecheck` gives the same 6 errors as round 1. They are the environment-only ones, in untouched files, from modules missing in this worktree. There are no new errors.
 - **Still owed by S3:** the simulator half of the load-bearing check, and running flow 08.
+
+## Review
+
+### Review — S3
+
+*— claude-opus-5-5, 2026-11-17*
+
+**Verdict: PASS** (S3 only, scope `git diff main...HEAD`; no HIGH or MEDIUM findings).
+
+- **Gate (re-run):** the touched mobile e2e/mock tests give 97 pass / 0 fail (10 files). `bun run lint` is clean (1958 files). `bun run typecheck` (root + mobile + relay) is clean.
+- **Mutation (§9), my own:** round 2's `done < 4` changed to `done < 2` → 4 pass / 1 fail; reverted, and `git status` is clean. This agrees with the executor's M1–M5.
+- **Attacks tried:**
+  - Testid wiring: `thinking-footer` (`StepNode.tsx:328`), `tool-${id}-output` (`TranscriptRow.tsx:459`), `turn-idle` (`SessionScreen.tsx:1050`) and the `mocked-` prefix (`mock-model.ts:350`) all exist. Holds.
+  - Round selection across turns: `toolResultsThisTurn` stops at the last user message, and a test pins it. Holds.
+  - The `TOOLROWS29` handler runs before the other prompts' `!followUp` guards, but only on its own prompt word, so the other flows are untouched (the "another prompt" test). Holds.
+- **§7:** no protocol, persistence or terminal path is touched; the changes are e2e harness, flow, test and changelog only.
+- **LOW (not blocking):** at `29-tool-rows.yaml:85` the second `-output` assert can pass vacuously if the first step failed to close, because the regex then matches the still-open ok body.
+- **Not re-done by me:** the simulator run and the visual items the Execution lists as not done (AX-XL shot, VoiceOver, 300-row scroll, `steps → reply → chart → steps`, the `scrollToIndex` half). They are still owed before merge, as the plan's mandatory visual check.
+- **Executor behaviour:** honest. The Execution lists every gap and drift explicitly, and its claims matched the code.
