@@ -14,6 +14,8 @@
  * - `SHOWCASE …` answers with `SHOWCASE_MD` (the screenshot flow's markdown);
  * - `AGENTS27` / `SHELLJOB27` (flow 27) launch two background children and a
  *   background shell job; a child (`CHILDSTEPS n`) takes n slow `fs_read` steps;
+ * - `TOOLROWS29` (flow 29) is a three-round turn with reasoning and four calls
+ *   (`TOOLROWS_PROMPT`);
  * - anything else answers in five chunks, fast.
  *
  * The tool call is streamed the way a real server streams one (a `tool_calls`
@@ -28,6 +30,8 @@ export interface MockModelOptions {
   readonly holdMs?: number;
   /** The spacing of a flow-27 child's rounds (ms; `CHILD_STEP_MS` by default). */
   readonly childStepMs?: number;
+  /** Flow 29's round-3 thinking spacing (ms; `TOOLROWS_THINK_MS` by default). */
+  readonly thinkMs?: number;
 }
 
 export interface MockModel {
@@ -217,6 +221,16 @@ export const CHART_SPEC = {
     { label: "2025", data: [10200, 10900, 11500, 11800, 12600, 13100] },
   ],
 } as const;
+/**
+ * Flow 29 (docs/feat/mobile-tool-rows.md S3): a turn of three rounds that draws
+ * the thread of steps. Round 1 thinks, says a line, then runs two `shell` calls
+ * (one ok, one failing); round 2 thinks (folded into the next step) and calls a
+ * ranged `fs_read` and an MCP tool the daemon does not have (an error row);
+ * round 3 thinks SLOWLY (the live `Thinking…` footer) and answers.
+ */
+export const TOOLROWS_PROMPT = "TOOLROWS29";
+/** Round 3's thinking spacing (ms): long enough for a flow to shoot the footer. */
+export const TOOLROWS_THINK_MS = 2500;
 /** A child's prompt: `CHILDSTEPS <n>` — it calls `fs_read` n times, one per round, then reports. */
 export const CHILD_MARK = "CHILDSTEPS";
 /** The spacing of a child's rounds (ms): slow enough for a flow to see its steps advance. */
@@ -261,6 +275,25 @@ export function toolResults(body: unknown): number {
   return messages.filter((m) => (m as { role?: unknown }).role === "tool").length;
 }
 
+/** How many tool results follow the LAST user message: the rounds this turn already ran. */
+export function toolResultsThisTurn(body: unknown): number {
+  const messages = (body as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) {
+    return 0;
+  }
+  let count = 0;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const role = (messages[i] as { role?: unknown }).role;
+    if (role === "user") {
+      break;
+    }
+    if (role === "tool") {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 /** One streamed tool call at `index` (id, name, then the arguments). */
 function toolCallFrames(index: number, id: string, name: string, args: object): string[] {
   return [
@@ -272,6 +305,7 @@ function toolCallFrames(index: number, id: string, name: string, args: object): 
 export function startMockModel(options: MockModelOptions = {}): MockModel {
   const holdMs = options.holdMs ?? 60_000;
   const childStepMs = options.childStepMs ?? CHILD_STEP_MS;
+  const thinkMs = options.thinkMs ?? TOOLROWS_THINK_MS;
   let holding = false;
   const prompts: string[] = [];
   const replies: string[] = [];
@@ -288,6 +322,7 @@ export function startMockModel(options: MockModelOptions = {}): MockModel {
         stream(req, {
           holdMs,
           childStepMs,
+          thinkMs,
           setHeld: (v) => {
             holding = v;
           },
@@ -319,6 +354,7 @@ function stream(
   ctx: {
     readonly holdMs: number;
     readonly childStepMs: number;
+    readonly thinkMs: number;
     readonly setHeld: (v: boolean) => void;
     readonly prompts: string[];
     readonly replies: string[];
@@ -362,6 +398,51 @@ function stream(
           send(frame({}, "tool_calls"));
         } else {
           send(frame({ content: `Child report: ${steps} steps done.` }));
+          send(frame({}, "stop"));
+        }
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      // Flow 29: the round is picked by how many of this turn's tools already ran.
+      if (promptLine(prompt, TOOLROWS_PROMPT)) {
+        const done = toolResultsThisTurn(body);
+        const think = (text: string) => send(frame({ reasoning_content: text }));
+        if (done === 0) {
+          think("The person wants a look at the workspace. ");
+          think("Make a notes file first, then check a folder that may not exist.");
+          send(frame({ content: "Checking the workspace first." }));
+          for (const chunk of [
+            ...toolCallFrames(0, mint(), "shell", {
+              command: "seq 1 40 > notes.txt && wc -l notes.txt",
+            }),
+            ...toolCallFrames(1, mint(), "shell", { command: "ls missing-dir" }),
+          ]) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
+        } else if (done < 4) {
+          think("notes.txt has 40 lines; read the first 20. ");
+          think("Then size the browser to a phone.");
+          for (const chunk of [
+            ...toolCallFrames(0, mint(), "fs_read", { path: "notes.txt", offset: 1, limit: 20 }),
+            ...toolCallFrames(1, mint(), "mcp__demo__browser_resize", { width: 430, height: 932 }),
+          ]) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
+        } else {
+          for (const part of [
+            "missing-dir does not exist, ",
+            "and there is no browser server here. ",
+            "The notes file is fine. ",
+            "Summarise that.",
+          ]) {
+            think(part);
+            await Bun.sleep(ctx.thinkMs);
+          }
+          send(frame({ content: "The workspace has **notes.txt** (40 lines). " }));
+          send(frame({ content: "`missing-dir` is not there, and no browser tool is set up." }));
           send(frame({}, "stop"));
         }
         send(DONE_FRAME);
