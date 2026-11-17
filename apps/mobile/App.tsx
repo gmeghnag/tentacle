@@ -129,6 +129,7 @@ import {
   reduce,
   runPairing,
 } from "./src/pairing-flow.ts";
+import { pdfsRoot, pickPdf } from "./src/pdf-source.ts";
 import { handlePairingText, takePendingLink } from "./src/pending-link.ts";
 import { inUseCopies, prunePhotoCopies } from "./src/photo-copies.ts";
 import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
@@ -335,22 +336,26 @@ function outboxOf(computerId: string): OutboxRuntime {
     return known;
   }
   const store = createOutboxStore(createExpoOutboxFs(), outboxPaths(outboxRoot(), computerId));
-  // Bounding the photo folder is THIS store's job now, not `removeItem`'s (fix
-  // round 2, R2-1): a copy outlives its item because the transcript's row draws
-  // it, so what may go is decided by `photo-copies.ts` — its grace window, its
-  // newest-copies tail, and everything this store still names. Once, at start,
-  // after the load (the items and drafts it keeps are what must not be touched).
+  // Bounding the two COPY folders is THIS store's job now, not `removeItem`'s
+  // (fix round 2, R2-1): a copy outlives its item because the transcript's row
+  // draws it, so what may go is decided by `photo-copies.ts` — its grace window,
+  // its newest-copies tail, and everything this store still names. The PDF
+  // copies (`pdfsRoot`, docs/feat/pdf-read.md D7) are swept by the SAME rule, in
+  // their own folder. Once, at start, after the load (the items and drafts it
+  // keeps are what must not be touched).
   void store.load().then((loaded) => {
     if (loaded.kind === "refused") {
       // A newer build's file: its items are unreadable, so NOTHING here knows
       // which copies are in use. The tail and the grace are the only guard, and
       // a wrong guess would delete a photo that build still needs: skip it.
-      return [];
+      return null;
     }
-    return prunePhotoCopies(createExpoOutboxFs(), photosRoot(), {
-      now: Date.now(),
-      inUse: inUseCopies(store.data),
-    });
+    const inUse = inUseCopies(store.data);
+    const now = Date.now();
+    return Promise.all([
+      prunePhotoCopies(createExpoOutboxFs(), photosRoot(), { now, inUse }),
+      prunePhotoCopies(createExpoOutboxFs(), pdfsRoot(), { now, inUse }),
+    ]);
   });
   const driver = (folding: FoldingPrompt) =>
     createOutboxDriver(
@@ -403,6 +408,14 @@ function composeWiring(computerId: string, sessionId: string, link: ComputerLink
       pickFromLibrary: async (taken, sendOriginal) =>
         adaptPick(await pickFromLibrary(taken, sendOriginal)),
       takePhoto: async (taken, sendOriginal) => adaptPick(await takePhoto(taken, sendOriginal)),
+    },
+    // The PDF adapter (docs/feat/pdf-read.md D7): the picker is the phone's own,
+    // and WHERE an attached PDF's bytes may go is the client's decision
+    // (`documentsInput()` over the daemon's capability) — never re-derived here.
+    documents: {
+      pickPdf: async (taken, maxBytes) =>
+        maxBytes === undefined ? pickPdf(taken) : pickPdf(taken, maxBytes),
+      documentsInput: () => link.client.documentsInput(),
     },
     // The screen's OWN attach handle (owner B4): the port reads its facts, and no
     // second handle of this id is ever opened (it would steal the screen's stream).

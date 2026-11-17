@@ -62,6 +62,26 @@ describe("sessionMenu", () => {
     ]);
   });
 
+  /**
+   * docs/feat/mobile-hub.md H4a: the wakes are reachable in ONE tap from the chat
+   * — Session info, landed on SCHEDULED WAKES. Today the menu is that path (the
+   * hub's own fan is H3); with no wakes armed there is no such action, so the
+   * menu never offers a sheet section the daemon did not report (P6/M9).
+   */
+  test("armed wakes add ONE action, right after Session info — and it copies nothing", () => {
+    const ids = sessionMenu([user("u1", "hi")], 2).map((action) => action.id);
+    expect(ids).toEqual(["info", "scheduled", "copy-all"]);
+    const scheduled = sessionMenu([user("u1", "hi")], 2).find((a) => a.id === "scheduled");
+    expect(scheduled?.label).toBe("Scheduled wakes");
+    // It is a READ, not a copy: an empty text is what "nothing to copy" reads.
+    expect(scheduled?.text).toBe("");
+  });
+
+  test("no wakes (or an older daemon) → no Scheduled action at all", () => {
+    expect(sessionMenu([]).map((action) => action.id)).toEqual(["info"]);
+    expect(sessionMenu([], 0).map((action) => action.id)).toEqual(["info"]);
+  });
+
   test("blank texts are skipped, never copied as empty lines", () => {
     const rows: Row[] = [user("u1", "  "), answer("a1", "ok"), answer("a2", "")];
     const menu = sessionMenu(rows);

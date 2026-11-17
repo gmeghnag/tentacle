@@ -133,6 +133,7 @@ export interface KeyDoc {
 const PROVIDER_VALUES = ["openai", "anthropic"] as const;
 const EXECUTION_VALUES = ["sequential", "read-only", "parallel"] as const;
 const THEME_VALUES = ["auto", "dark", "light"] as const;
+const CHART_GLYPH_VALUES = ["braille", "blocks"] as const;
 const ENGINE_VALUES = ["kubernetes", "docker", "podman"] as const;
 
 /**
@@ -918,6 +919,19 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "`auto` reads the terminal's background before the first frame and picks a light or dark palette; the others skip that query (useful on a slow link, or when the guess is wrong). A display setting of this laptop — never carried to a pod.",
     example: '"dark"',
+  },
+  "tui.chartGlyphs": {
+    summary:
+      "A chart's plot glyphs: `braille` (2×4 dots per cell) or `blocks` for a font with no braille.",
+    kind: "leaf",
+    type: "enum",
+    values: [...CHART_GLYPH_VALUES],
+    scope: "both",
+    carried: "no",
+    default: () => "braille",
+    details:
+      "A terminal cannot report that its font lacks the braille patterns, so a chart would draw as boxes; `blocks` uses the quadrant blocks instead (2×2 dots per cell, less detail but present in most fonts). A display setting of this laptop — never carried to a pod.",
+    example: '"blocks"',
   },
   sessions: {
     summary: "The laptop's session logs: what they keep of a history that was replaced.",

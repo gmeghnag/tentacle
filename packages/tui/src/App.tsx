@@ -240,6 +240,7 @@ export function App({
   hop,
   targetFeed,
   columns: fixedColumns,
+  chartGlyphs = "braille",
   jobRefreshMs,
   voice: voiceConfig = VOICE_DEFAULTS,
   voiceConfigDir,
@@ -573,6 +574,7 @@ export function App({
     expandAll: false,
     width: 80,
     spillInPod: shownInPod,
+    chartGlyphs,
   });
   const lastUserRef = useRef<string | null>(null);
   const prevRowsRef = useRef(0);
@@ -850,7 +852,13 @@ export function App({
       const items = stateRef.current.items;
       // Including `expandedIds`: the warm must fill the slot the committing
       // render will ask for, a clicked call's expanded command too.
-      const opts = { expandAll, width: next.columns, spillInPod: shownInPod, expandedIds };
+      const opts = {
+        expandAll,
+        width: next.columns,
+        spillInPod: shownInPod,
+        expandedIds,
+        chartGlyphs,
+      };
       runChunked(items.length, (from, budgetMs) => warmRowsChunk(items, opts, from, budgetMs), {
         isStale: () => warmGenRef.current !== gen,
         onDone: () => setSize(next),
@@ -862,7 +870,7 @@ export function App({
       stdout.off?.("resize", onResize);
       warmGenRef.current += 1; // cancel any in-flight warm on unmount/resubscribe
     };
-  }, [stdout, size.columns, expandAll, shownInPod, expandedIds]);
+  }, [stdout, size.columns, expandAll, shownInPod, expandedIds, chartGlyphs]);
 
   // Reset the palette selection whenever the typed text changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on field.value
@@ -977,6 +985,7 @@ export function App({
     spillInPod: shownInPod,
     blinkPhase: blinkPhase(blinkClock, blink),
     expandedIds,
+    chartGlyphs,
   });
   // ARM the ONE blink clock: `blink.running` is the whole gate (the turn runs AND
   // a call is unanswered), so an idle transcript has no timer at all and a dead
@@ -998,7 +1007,13 @@ export function App({
     setBlinkClock((c) => syncBlink(c, { calls: blinkCalls, running: blinkRuns }));
   }, [blinkRuns, blinkCalls]);
   // The layout options a history warm uses (read off the render thread).
-  layoutOptsRef.current = { expandAll, width: columns, spillInPod: shownInPod, expandedIds };
+  layoutOptsRef.current = {
+    expandAll,
+    width: columns,
+    spillInPod: shownInPod,
+    expandedIds,
+    chartGlyphs,
+  };
   // Once the transcript is quiet, fill the cache for the OTHER Ctrl+O view in
   // small chunks (idle-warm.ts) so the first toggle is a hit. Any change to the
   // deps (new items, a turn starting, a resize commit, Ctrl+O) cleans up and
@@ -1010,14 +1025,14 @@ export function App({
     idleWarmCancelRef.current = startIdleWarm(
       {
         items: idleItems,
-        opts: { expandAll, width: columns, spillInPod: shownInPod, expandedIds },
+        opts: { expandAll, width: columns, spillInPod: shownInPod, expandedIds, chartGlyphs },
         running: idleRunning,
         busy: idleBusy,
       },
       { onError: (error) => warmErrorRef.current(error) },
     );
     return idleWarmCancelRef.current;
-  }, [idleItems, idleRunning, idleBusy, expandAll, columns, shownInPod, expandedIds]);
+  }, [idleItems, idleRunning, idleBusy, expandAll, columns, shownInPod, expandedIds, chartGlyphs]);
   const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
   const visible = sliceLaid(layout.laid, win.start, win.end);

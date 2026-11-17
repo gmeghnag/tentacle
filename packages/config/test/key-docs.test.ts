@@ -326,7 +326,7 @@ describe("T2: the documented default is what an empty config resolves to", () =>
 });
 
 describe("T2b: the defaults `resolveConfig` does not apply are exactly the CLI's", () => {
-  test("engine, rm, detach.keepAwake and tui.theme default on the CLI side", () => {
+  test("engine, rm, detach.keepAwake and tui.* default on the CLI side", () => {
     const cliDefaults = baseEntries()
       .filter(([, doc]) => doc.default !== undefined && doc.sourceKey === undefined)
       .map(([path]) => path)
@@ -335,10 +335,13 @@ describe("T2b: the defaults `resolveConfig` does not apply are exactly the CLI's
     // CLI (or the TUI) applies its own default — a documented default only.
     // The `voice.*` leaves default in `tui/src/voice-config.ts` (`VOICE_DEFAULTS`),
     // which the TUI reads once at mount: a local input device, not a runtime knob.
+    // `tui.chartGlyphs` is the same shape as `tui.theme`: a display setting of
+    // this laptop, defaulted where the TUI is launched (`braille`).
     expect(cliDefaults).toEqual([
       "detach.keepAwake",
       "engine",
       "rm",
+      "tui.chartGlyphs",
       "tui.theme",
       "voice.autoStop",
       "voice.autoStopSilenceMs",

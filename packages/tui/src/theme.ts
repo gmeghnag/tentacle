@@ -19,6 +19,7 @@
  * 3.59:1) while the exact grey `#6b6b6b` lands on the ramp (5.25:1). Keep the
  * greys exactly grey.
  */
+import { CHART_PALETTE } from "@tentacle/core";
 import chalk from "chalk";
 import { type Rgb, type ThemeSetting, resolveMode } from "./terminal-background.ts";
 
@@ -81,6 +82,15 @@ interface MarkdownTokens {
   readonly link: Color;
 }
 
+/**
+ * A chart's series colours: the shared, validated palette A (`@tentacle/core`
+ * `CHART_PALETTE`, docs/feat/model-charts.md D4/D5) — the SAME slots the phone
+ * paints, so a series is one colour on both. Colour follows the dataset index.
+ */
+interface ChartTokens {
+  readonly series: readonly Color[];
+}
+
 /** Every colour the TUI paints. Both modes hold exactly these keys. */
 export interface Tokens {
   readonly accent: Color;
@@ -104,6 +114,7 @@ export interface Tokens {
   readonly message: MessageTokens;
   readonly syntax: SyntaxTokens;
   readonly md: MarkdownTokens;
+  readonly chart: ChartTokens;
 }
 
 /**
@@ -161,6 +172,7 @@ const DARK: Tokens = {
     del: "gray",
     link: "blue",
   },
+  chart: { series: CHART_PALETTE.dark },
 };
 
 /**
@@ -218,6 +230,7 @@ const LIGHT: Tokens = {
     del: "#6b6b6b",
     link: "#1446c8",
   },
+  chart: { series: CHART_PALETTE.light },
 };
 
 export const tokens: Readonly<Record<ThemeMode, Tokens>> = { dark: DARK, light: LIGHT };

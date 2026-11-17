@@ -214,6 +214,19 @@ export interface Tool<Input = unknown> {
    */
   readonly jsonSchema?: Record<string, unknown>;
   /**
+   * A sentence to append to the registry's `invalid JSON arguments for <name>`
+   * when the RAW text could not be parsed, or `undefined` to say nothing
+   * (docs/feat/model-charts.md D3). A FUNCTION of the raw text, so a tool only
+   * speaks when it recognises its own offender — a wrong diagnosis costs more
+   * than silence.
+   *
+   * It exists for the mistake JSON cannot even express: a model writing `NaN`,
+   * `Infinity` or `undefined` for a missing value gets "invalid JSON arguments"
+   * and resends the same bytes, because that sentence names neither the cause
+   * nor the fix. The tool knows its own usual offender, so it says it.
+   */
+  readonly argumentsHint?: (rawArguments: string) => string | undefined;
+  /**
    * The MCP server this tool came from (docs/feat/session-capabilities.md): it
    * is what a session's per-server switch filters on. Tagged here rather than
    * parsed from `name`, because a server name may itself contain `__`. Absent

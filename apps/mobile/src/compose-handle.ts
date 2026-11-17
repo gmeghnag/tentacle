@@ -55,6 +55,9 @@ export function composeHandleOf(deps: ComposeHandleDeps): ComposeHandle {
   return {
     sessionId,
     attachImage: (bytes, meta) => session.attachImage(bytes, meta),
+    // ONE session path (AGENTS §7): the session decides upload vs laptop-extract
+    // from the daemon's capability and awaits its own open — the app never does.
+    attachDocument: (bytes, meta) => session.attachDocument(bytes, meta),
     send: async (text, refs) => {
       for await (const _event of session.send(text, undefined, {
         turnId: mint(),

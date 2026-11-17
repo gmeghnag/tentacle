@@ -1067,6 +1067,71 @@ function skippedText(count: number): string {
   return `${count} ${count === 1 ? "skill" : "skills"} skipped — open /skills on the computer for details`;
 }
 
+/**
+ * The section a REVEAL asks for (docs/feat/mobile-hub.md H4a: the hub's Scheduled
+ * item opens Session info at SCHEDULED WAKES). The sheet is the only place the
+ * wakes live, so the hub reaches it rather than growing a second wakes screen.
+ *
+ * A sheet that does not draw that band at all (no feed wired, an older daemon)
+ * answers `null`: `revealStep` then never scrolls and the person lands at the top
+ * rather than on empty space. The section order stays `sessionInfoView`'s.
+ */
+export function scheduledSection(view: SessionInfoView | null): SectionId | null {
+  return view?.sections.some((section) => section.id === "schedules") === true ? "schedules" : null;
+}
+
+/**
+ * Where a reveal scrolls to: the wanted section's measured y in the sheet's
+ * `ScrollView`, or `null` while it has not been laid out (never a guess).
+ */
+function revealOffset(
+  offsets: Readonly<Partial<Record<SectionId, number>>>,
+  id: SectionId | null,
+): number | null {
+  if (id === null) {
+    return null;
+  }
+  const at = offsets[id];
+  return at === undefined ? null : at;
+}
+
+/**
+ * A reveal in flight: which section is wanted, and what has been measured so far.
+ * ONE step per `onLayout` the sheet reports, so the caller holds no arithmetic
+ * (AGENTS §7 — the shot is a value, the component only asks).
+ */
+export interface RevealState {
+  /** The section to land on; null when nothing is pending (or it was reached). */
+  readonly want: SectionId | null;
+  readonly at: Readonly<Partial<Record<SectionId, number>>>;
+}
+
+export const REVEAL_IDLE: RevealState = { want: null, at: {} };
+
+/** A reveal asked for: it scrolls as soon as that band lays out, not before. */
+export function revealStart(id: SectionId | null): RevealState {
+  return { want: id, at: {} };
+}
+
+/**
+ * One band laid out. `scrollTo` is the y to scroll to (once), or null while the
+ * wanted band has not reported yet — a section below the top has no offset until
+ * it lays out, and the bands may report in any order. Reaching the wanted band
+ * CLEARS the want, so later layouts never re-scroll (the person may have scrolled
+ * away in the meantime).
+ */
+export function revealStep(
+  state: RevealState,
+  laid: { readonly id: SectionId; readonly y: number },
+): { readonly state: RevealState; readonly scrollTo: number | null } {
+  const at = { ...state.at, [laid.id]: laid.y };
+  const scrollTo = revealOffset(at, state.want);
+  if (scrollTo === null) {
+    return { state: { want: state.want, at }, scrollTo: null };
+  }
+  return { state: { want: null, at }, scrollTo };
+}
+
 /** The whole sheet, from the facts the controller gathered. */
 export function sessionInfoView(facts: InfoFacts): SessionInfoView {
   const schedules = schedulesSection(facts);

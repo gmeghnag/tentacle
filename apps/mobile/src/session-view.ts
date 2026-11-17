@@ -10,6 +10,7 @@
  * button does — each named by the plan's failure-mode table (F12–F16, F24).
  */
 import type { EndReason } from "@tentacle/client";
+import type { AttachSheet } from "./attach-sheet.ts";
 import type { ShownRow } from "./compose-queue.ts";
 import {
   type ComposerAction,
@@ -99,7 +100,7 @@ export interface SessionViewInput {
   readonly outbox?: readonly OutboxItem[];
   /** An outbox write did not land: the `not-saved` banner (F21). */
   readonly notSaved?: boolean;
-  /** The photo chips (13c's pipeline states, in pick order). */
+  /** The attachment chips (13c's pipeline states, in pick order). */
   readonly photos?: readonly ChipView[];
   /** How many waiting rows of MINE the queue holds (Send now's other trigger). */
   readonly ownQueue?: number;
@@ -109,8 +110,17 @@ export interface SessionViewInput {
 export interface ChipView {
   /** Stable per pick, so a flow can name `chip-<index>-<state>`. */
   readonly key: string;
+  /**
+   * What the chip IS (docs/feat/pdf-read.md D7): its glyph, never guessed from
+   * the name's extension (a picked `report.pdf` is a document even when the
+   * filesystem called it something else, and vice versa). ABSENT on a chip
+   * refused before anything said what the pick was (a cap refusal, a pick the
+   * adapter rejected): the chip draws its refusal glyph, and nothing here
+   * invents the kind it never learned.
+   */
+  readonly kind?: "image" | "document";
   readonly state: "uploading" | "ready" | "refused";
-  /** The photo's name, for the chip's own label (13c sanitised it). */
+  /** The file's name, for the chip's own label (13c sanitised it). */
   readonly name?: string;
   /** `refused` only: the person-facing reason (13c's `detail`). */
   readonly detail?: string;
@@ -135,6 +145,11 @@ export interface ComposeBarView {
   readonly outbox: readonly OutboxRowView[];
   readonly notSaved: boolean;
   readonly chips: readonly ChipView[];
+  /**
+   * The `+` sheet's offer (docs/feat/pdf-read.md D7): the rows it shows and,
+   * when the PDF row is absent, the sentence that says why. Pure `attachSheet`.
+   */
+  readonly attach: AttachSheet;
   readonly ownQueue: number;
   readonly sendNow: boolean;
 }
@@ -196,7 +211,7 @@ export interface SessionView {
   readonly returnedOthers: readonly { readonly id: string; readonly text: string }[];
   /** This session's outbox rows (13b's items). */
   readonly outbox: readonly OutboxRowView[];
-  /** The photo chips, in pick order (13c). */
+  /** The attachment chips, in pick order (13c, extended by D7). */
   readonly photos: readonly ChipView[];
   /** The notices above the input, in the order the person must read them. */
   readonly notices: readonly ComposeNotice[];

@@ -9,7 +9,7 @@ import {
   type PermissionRequest,
   type StreamEvent,
 } from "@tentacle/core";
-import { ToolRegistry, shellTool } from "@tentacle/tools";
+import { ToolRegistry, chartTool, shellTool } from "@tentacle/tools";
 import chalk from "chalk";
 import { render } from "ink-testing-library";
 import stringWidth from "string-width";
@@ -4025,6 +4025,254 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
     } finally {
       chalk.level = level;
       clock.useRealTimers();
+    }
+  });
+});
+
+// docs/feat/model-charts.md C4/T4: a `chart` call DRAWS in the transcript — live
+// and after a resume, at every width, with no raw stdout write.
+describe("a chart in the App (C4/T4)", () => {
+  const SPEC = {
+    type: "line",
+    title: "Ricavi mensili 2025 vs 2026",
+    labels: ["gen", "feb", "mar", "apr", "mag", "giu"],
+    datasets: [
+      { label: "2026", data: [12500, 14100, 13800, 15200, 16900, 17400] },
+      { label: "2025", data: [11800, 12400, 13100, 12900, 14200, 15100] },
+    ],
+    y: { unit: "€", format: "compact" },
+  };
+  const ARGS = JSON.stringify(SPEC);
+  // Braille (the default glyphs) and the quadrant blocks (`tui.chartGlyphs`).
+  const BRAILLE = /[\u2800-\u28ff]/;
+  const BLOCKS = /[▘▝▀▖▌▞▛▗▚▐▜▄▙▟█]/;
+
+  /** A model that calls `chart` once, then answers. */
+  const liveAgent = () =>
+    new Agent({
+      model: new ScriptedProvider([
+        [
+          { type: "tool_call", toolCall: { id: "c1", name: "chart", arguments: ARGS } },
+          { type: "done" },
+        ],
+        [{ type: "text", delta: "Ecco il grafico." }, { type: "done" }],
+      ]),
+      tools: new ToolRegistry().register(chartTool),
+      env: noopEnv,
+    });
+
+  /** The same call, as a resumed conversation (`--resume`). */
+  const history: ChatMessage[] = [
+    { role: "user", content: "grafico dei ricavi" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c1", name: "chart", arguments: ARGS }],
+    },
+    { role: "tool", content: "line chart: 2 series", toolCallId: "c1" },
+  ];
+
+  test("live: the chart draws in place of the tool row", async () => {
+    // Mutation: drop the `chartRow` branch in `toolLines` → the frame shows
+    // `● Chart Ricavi mensili …` and no braille.
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={liveAgent()} model="qwen3" cwd="/tmp/work" />,
+    );
+    try {
+      await delay(30);
+      stdin.write("grafico dei ricavi");
+      await delay(30);
+      stdin.write("\r");
+      await delay(300);
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("Ricavi mensili 2025 vs 2026");
+      expect(BRAILLE.test(frame)).toBe(true);
+      // No tool chrome on that row: the bullet belongs to the reply, not the chart.
+      expect(frame).not.toContain("● Chart");
+      expect(frame).not.toContain("line chart: 2 series");
+    } finally {
+      unmount();
+    }
+  });
+
+  test("after a resume: the same chart, from the stored arguments", async () => {
+    // Mutation: draw only when a live `tool_start` set the item (i.e. read
+    // something other than `args`) → red: a resumed row has only `args`.
+    const { lastFrame, unmount } = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+      />,
+    );
+    try {
+      await delay(50);
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("Ricavi mensili 2025 vs 2026");
+      expect(BRAILLE.test(frame)).toBe(true);
+      expect(frame).not.toContain("● Chart");
+    } finally {
+      unmount();
+    }
+  });
+
+  test("ctrl+o expands it, and a second ctrl+o collapses it again", async () => {
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+      />,
+    );
+    try {
+      await delay(50);
+      const collapsed = (lastFrame() ?? "").split("\n").length;
+      stdin.write("\u000F"); // Ctrl+O
+      await delay(80);
+      const expandedLines = (lastFrame() ?? "").split("\n");
+      const expanded = expandedLines.length;
+      // The expanded form adds the per-series stats and the data table, so more
+      // rows and a table header the compact form does not have.
+      expect(expandedLines.join("\n")).toContain("gen");
+      expect(expanded).toBeGreaterThanOrEqual(collapsed);
+      stdin.write("\u000F");
+      await delay(80);
+      expect((lastFrame() ?? "").split("\n").length).toBe(collapsed);
+    } finally {
+      unmount();
+    }
+  });
+
+  test("`chartGlyphs: blocks` reaches the renderer through the App", async () => {
+    // Mutation: drop `chartGlyphs` from the App's layout options → braille again.
+    const { lastFrame, unmount } = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+        chartGlyphs="blocks"
+      />,
+    );
+    try {
+      await delay(50);
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("Ricavi mensili 2025 vs 2026");
+      expect(BLOCKS.test(frame)).toBe(true);
+      expect(BRAILLE.test(frame)).toBe(false);
+    } finally {
+      unmount();
+    }
+  });
+
+  test("a resize re-lays the chart out at the new width (form changes tier)", async () => {
+    // The renderer is a pure function of width: at ≥ 60 cols a line chart is the
+    // braille plot (with the `┤` y gutter), at 40–59 it is one sparkline row per
+    // series (D5, *Forms by width*). Mutation: memoise the chart on the item
+    // alone, or pass a fixed width to `chartToolBody` → the frame keeps the
+    // 100-column plot and the tier never changes (red).
+    const app = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+      />,
+    );
+    const widest = (frame: string): number =>
+      frame
+        .split("\n")
+        .filter((r) => BRAILLE.test(r) || r.includes("┤") || r.includes("▁"))
+        .reduce((w, r) => Math.max(w, stringWidth(stripAnsi(r))), 0);
+    try {
+      await delay(50);
+      const at100 = app.lastFrame() ?? "";
+      expect(at100).toContain("┤"); // the plot tier
+      expect(widest(at100)).toBeGreaterThan(60);
+
+      Object.defineProperty(app.stdout, "columns", { value: 50, configurable: true });
+      app.stdout.emit("resize");
+      await delay(150);
+      const at50 = app.lastFrame() ?? "";
+      // The narrow tier: sparklines, no y gutter, no braille plot anywhere.
+      expect(at50).toContain("▁");
+      expect(at50).not.toContain("┤");
+      expect(BRAILLE.test(at50)).toBe(false);
+      expect(widest(at50)).toBeLessThanOrEqual(50);
+
+      Object.defineProperty(app.stdout, "columns", { value: 100, configurable: true });
+      app.stdout.emit("resize");
+      await delay(150);
+      const back = app.lastFrame() ?? "";
+      // Back to the plot: no stale sparkline rows left behind.
+      expect(back).toContain("┤");
+      expect(BRAILLE.test(back)).toBe(true);
+      expect(widest(back)).toBeGreaterThan(60);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  test("an invalid (forged) spec at the daemon is a generic row, never a crash", async () => {
+    const forged: ChatMessage[] = [
+      { role: "user", content: "grafico" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "c9", name: "chart", arguments: '{"type":"line","labels":["a"],"datasets":[]}' },
+        ],
+      },
+    ];
+    const { lastFrame, unmount } = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(forged)}
+      />,
+    );
+    try {
+      await delay(50);
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("● Chart");
+      expect(BRAILLE.test(frame)).toBe(false);
+    } finally {
+      unmount();
+    }
+  });
+
+  test("nothing is written to process.stdout while a chart draws (AGENTS §7)", async () => {
+    const spy = spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { lastFrame, unmount } = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+      />,
+    );
+    try {
+      await delay(80);
+      expect(BRAILLE.test(lastFrame() ?? "")).toBe(true);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      unmount();
+      spy.mockRestore();
     }
   });
 });

@@ -163,8 +163,8 @@ describe("the photo chips (13c's states)", () => {
     const view = sessionView(
       input({
         photos: [
-          { key: "a", state: "uploading" },
-          { key: "b", state: "ready" },
+          { key: "a", kind: "image", state: "uploading" },
+          { key: "b", kind: "image", state: "ready" },
           { key: "c", state: "refused", detail: "too large" },
         ],
       }),

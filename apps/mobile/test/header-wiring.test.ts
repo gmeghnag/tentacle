@@ -103,8 +103,9 @@ describe("S2 · the context ring (A1 + F11)", () => {
     expect(SESSION_SCREEN).not.toMatch(/session-header-context[\s\S]{0,200}height: 2/);
   });
 
-  test("the ring is plain Views — no `react-native-svg` dependency (Design 2)", () => {
-    expect(pkg.dependencies["react-native-svg"]).toBeUndefined();
+  test("the ring is plain Views — it does not use `react-native-svg` (Design 2)", () => {
+    // The package itself IS a dependency since docs/feat/model-charts.md C6 (the
+    // chart, owner Q8); what Design 2 pins is that the RING does not need it.
     expect(RING).toMatch(/from "react-native"/);
     // No IMPORT of it (the file names it in prose to say why it is absent).
     expect(RING).not.toMatch(/from "react-native-svg"/);
@@ -122,9 +123,18 @@ describe("S2 · the context ring (A1 + F11)", () => {
     // Declaring `onPress?` is not the feature: an unwired ring falls into the
     // `onPress === undefined` branch and renders as a non-interactive
     // progressbar, losing Design 2 / F11's tap target without a type error.
+    //
+    // H4a (docs/feat/mobile-hub.md) turned the ring's tap into the SAME opening
+    // path as the hub's Scheduled item: `openInfo()`, which is the one place that
+    // sets `infoOpen` and starts the pulls. The guard pins the seam, not the
+    // literal setter, so a second way into the sheet still fails it.
     const call = ringCallSite();
     expect(call).toMatch(/onPress=\{/);
-    expect(call).toMatch(/setInfoOpen\(true\)/);
+    expect(call).toMatch(/openInfo\(\)/);
+    // …and `openInfo` still is what opens it, with no reveal by default.
+    expect(SESSION_SCREEN).toMatch(
+      /const openInfo = \(revealTo: SectionId \| null = null\) => \{[\s\S]{0,200}setInfoOpen\(true\);/,
+    );
   });
 
   test("the arc stays the `borderTop`+`borderLeft` half the rotation bases assume", () => {

@@ -64,6 +64,7 @@ import {
   ToolRegistry,
   WorkloadShells,
   builtinTools,
+  chartTool,
   createAgentControlTool,
   createContextResetTool,
   createMoveSessionTool,
@@ -703,6 +704,12 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   if (contextReset) {
     tools.register(createContextResetTool());
   }
+  // The model's chart (docs/feat/model-charts.md D3): a spec that rides the tool
+  // call's own arguments, so every client draws it inline with no wire change
+  // and no `artifacts` sink. Offered in every session-hosting build beside
+  // `context_reset`; never to a child agent (its steps are not transcript rows —
+  // `subagent.ts`'s "never a child" list, pinned by T2.5).
+  tools.register(chartTool);
   // Session hop (docs/feat/session-hop.md D9): the model's ONE way to ask for
   // its session to move. It has no daemon-side effect at all — the laptop watches
   // the turn's events and asks the owner at its end — so `serve`, one-shot and

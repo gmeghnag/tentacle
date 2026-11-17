@@ -1226,6 +1226,12 @@ export const FLOWS: readonly string[] = [
   // listener. It runs the mock model's `ESCAPE30` turn on a session of its own,
   // so its card cannot leak into another flow's transcript.
   "30-artifact-escape",
+  // docs/feat/model-charts.md T6: a `chart` call draws inline, live and after a
+  // relaunch (from history) — on a session of its own.
+  "31-chart-inline",
+  // docs/feat/model-charts.md T7: the chart's table toggle and full screen
+  // (series chip, table, close) — on a session of its own.
+  "32-chart-interact",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -1304,6 +1310,8 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   // docs/feat/model-artifacts.md T8.1 (flow 30): its own session, because the
   // `present` card is daemon-side state that outlives `clearState`.
   "30-artifact-escape": "ESCAPE_ID",
+  "31-chart-inline": "CHART_ID",
+  "32-chart-interact": "CHART2_ID",
 };
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */

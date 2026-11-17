@@ -80,7 +80,17 @@ export class ToolRegistry {
     try {
       parsed = rawArguments.trim() === "" ? {} : JSON.parse(rawArguments);
     } catch {
-      return { content: `invalid JSON arguments for ${name}`, isError: true };
+      // The hint is the tool's own, and it sees the RAW text: a NaN/Infinity is
+      // not a typo but a model reaching for "no value", and only the tool knows
+      // that. Every other tool says nothing extra (chart.test.ts T2.2).
+      const hint = tool.argumentsHint?.(rawArguments);
+      return {
+        content:
+          hint === undefined
+            ? `invalid JSON arguments for ${name}`
+            : `invalid JSON arguments for ${name}\n${hint}`,
+        isError: true,
+      };
     }
 
     const validation = tool.inputSchema.safeParse(parsed);

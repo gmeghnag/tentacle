@@ -976,6 +976,11 @@ describe("start-up output pinned (docs/feat/context-reset-refresh.md)", () => {
       "agent_control",
       // Slice 3 (docs/feat/context-reset.md): the one intended change, on by default.
       "context_reset",
+      // docs/feat/model-charts.md D3 (slice C2): the model's chart, in every
+      // session-hosting build. Last, because it is registered beside
+      // `context_reset`; a pure presentational tool, so it costs the tool list
+      // one name and its hand-written schema (`jsonSchema`, not zod-derived).
+      "chart",
     ]);
     expect(JSON.stringify(defs.find((d) => d.name === "skill"))).toBe(
       '{"name":"skill","description":"Load a skill: packaged instructions for a specific kind of task. When the task matches a skill listed under \\"# Skills\\" in the system prompt, call this FIRST with the skill\'s name, then follow the instructions it returns. A skill already loaded in this conversation does not need loading again.","parameters":{"type":"object","properties":{"name":{"type":"string","enum":["alpha","beta"],"description":"The skill to load, from the Skills list"}},"required":["name"],"additionalProperties":false}}',
