@@ -141,3 +141,55 @@ But it pinned only the owner's TD fixture, and it missed the sideways path, whic
 `boxLines`/`drawBox`.
 
 *— claude-opus-5-5, 2026-11-17 (different model family from the deepseek executor; fresh context)*
+
+### Fix round 1
+
+**Repro first (passed).** The reviewer's `.tentacle/tmp/tui-diagram-complex-flow/rev/lr.ts`
+re-ran unchanged on this branch and reproduced #1 verbatim:
+`A["uno<br/>due<br/>tre"] --> B[fine]` at 120 → `╭─uno─╮ / │ due ├► / ╰─tre─╯`, and the
+>46-cell LR label at 200 → `╭─…goes past─╮ / │ … │ / ╰─…╯`. Root cause confirmed by
+reading `sizeVertex` (`diagram-ascii-flow.ts:429-443`): the TD branch
+(`v.mainSize = height`) counted `boxLines`, the sideways branch still set the box's
+cross size (its HEIGHT in LR/RL) to `max(base, k + 2 + …)`, i.e. never counted them.
+
+**HIGH #1 — FIXED.** `diagram-ascii-flow.ts:436-441`: the sideways branch's cross size is
+now `Math.max(height, k + 2 + (cylinder ? 1 : 0))`, `height` the same `base + lines - 1`
+the TD branch uses, so a box grows *down* in LR/RL exactly as it grows down in TD. A
+wrapped LR label also keeps one wide box's rows inside its borders again (the repro's
+second case draws both label rows inside a 5-row box rather than over the top/bottom).
+`k` is kept in the max: a box with many edge channels still reserves the room it needs.
+
+**MEDIUM #2 — FIXED.** New test `packages/tui/test/diagram-complex-flow.test.ts`
+("a sideways (LR) box is tall enough for every label row") covers BOTH shapes the review
+named: an LR `uno<br/>due<br/>tre` and an LR wrapped `parola ×20` label. It asserts the
+*property*, not a rendering string: the box's own top and bottom rows are pure borders
+(`/^[╭╮][─┬┴┼]*[╭╮]$/`) and every label word sits strictly between them — so any future
+row-over-border regression fails regardless of the glyphs chosen.
+
+**Red → green.** The new test was red on the buggy code **on the assertion of the
+property**: `Expected … /^[╭╮][─┬┴┼]*[╭╮]$/ — Received: "╭─uno─╮"` (the label painted
+over the top border). Green after the one-line branch change.
+
+**Mutation check (non-vacuity).** Reverting the fix to
+`v.crossSize = Math.max(base, k + 2 + (cylinder ? 1 : 0))` → **1 fail** in
+`diagram-complex-flow.test.ts` (the new test); restored immediately, tree re-verified by
+`git diff --stat` (only the intended two files).
+
+**No regression in the drawn output elsewhere.** The sideways cross size only ever
+grows, and only when a label needs the rows: the TD path is untouched, and
+`diagram-lines.test.ts`'s `transform 200` / `transform 80` snapshots are unchanged.
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run lint` clean (1990 files, no fixes) ·
+`bun test` **14513 pass, 5 opt-in skips, 1 fail** — the same
+`packages/docker/test/ssh-dialer.test.ts` failure the previous round recorded, still
+unrelated (a spawned ssh child's pid/process-group assertion; this branch touches only
+`packages/tui`). Re-running that file alone on this branch gives 22 pass / 2 fail with a
+*different* failing test each run, i.e. it is host-flaky, not caused by this diff. The
+diagram suites in full: 69 + 90 pass, 0 fail, 14 snapshots.
+
+Note for round 2: this executor ran on the **same model family as Review round 1**
+(`claude-opus-5-5`, fresh context), so the fixes above are self-reviewed only in the weak
+sense — a fresh-context round on a different family is still worth it for #1, since the
+sideways geometry is shared by every LR/RL flowchart.
+
+*— claude-opus-5-5, 2026-11-17*

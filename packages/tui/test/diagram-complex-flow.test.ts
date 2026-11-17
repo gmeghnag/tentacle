@@ -130,6 +130,40 @@ describe("a wrapped / multi-line box", () => {
     expect(all.split("parola").length - 1).toBe(20);
   });
 
+  // Review round 1, HIGH: in LR/RL the box's HEIGHT is its cross size, and
+  // `sizeVertex` kept that at the 3-row minimum while `drawBox` stacked every
+  // label row — so the first and last row of the label were painted over the
+  // top and bottom borders. Same bug class as TD, different axis.
+  test("a sideways (LR) box is tall enough for every label row", () => {
+    const cases = [
+      // a `<br/>` label: 3 rows in a box that was 3 rows tall
+      { src: 'flowchart LR\n  A["uno<br/>due<br/>tre"] --> B[fine]', words: ["uno", "due", "tre"] },
+      // a wrapped single-line label (one wide box before this branch)
+      {
+        src: `flowchart LR\n  A["${"parola ".repeat(20).trim()}"] --> B[fine]`,
+        words: ["parola"],
+      },
+    ];
+    for (const { src, words } of cases) {
+      const d = drawFlow(flowOf(src), 200);
+      expect(d).toBeDefined();
+      if (d === undefined) return;
+      const box = d.boxes.find((b) => b.id === "A");
+      expect(box).toBeDefined();
+      if (box === undefined) return;
+      const own = text(d)
+        .split("\n")
+        .slice(box.row, box.row + box.height)
+        .map((line) => line.slice(box.col, box.col + box.width));
+      // the box's outer rows are BORDERS: inside the corners, only border glyphs
+      expect(own[0]).toMatch(/^[╭╮][─┬┴┼]*[╭╮]$/);
+      expect(own[own.length - 1]).toMatch(/^[╰╯][─┬┴┼]*[╰╯]$/);
+      // and the label's rows are strictly between them, all of it visible
+      const inner = own.slice(1, -1).join(" ");
+      for (const word of words) expect(inner).toContain(word);
+    }
+  });
+
   test("a `[[ ]]` subroutine keeps its brackets around the label", () => {
     const d = drawFlow(flowOf(TRANSFORMER), 200);
     expect(text(d)).toContain("[+ residuo (skip connection)]");

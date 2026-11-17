@@ -432,8 +432,11 @@ function sizeVertex(v: Vertex, sideways: boolean, labelCap: number): void {
   const base = cylinder ? 4 : 3;
   const height = base + lines.length - 1;
   if (sideways) {
+    // sideways: `width` runs along the rank, `height` across it — so the box's
+    // CROSS size is the height, and it must count the label's rows (`drawBox`
+    // stacks them), else they are painted over its top and bottom borders
     v.mainSize = width;
-    v.crossSize = Math.max(base, k + 2 + (cylinder ? 1 : 0));
+    v.crossSize = Math.max(height, k + 2 + (cylinder ? 1 : 0));
   } else {
     v.mainSize = height;
     v.crossSize = Math.max(width, 2 * k + 3);
