@@ -419,3 +419,22 @@ Executor behaviour: honest. It marked the task PARTIAL, stated what was unverifi
 - **Regressions:** none. `packages/core/test` + `tool-rows-wiring` pass 682/0, `bun run lint` is clean (1967 files), and `bun run typecheck` is clean. After the reverts the tree is unchanged.
 
 *— claude-opus-5-5, 2026-11-17* (fresh context, same model family as the executor)
+
+### Round 4 (fix round 3: sweep, `[]` parts, Thinking B+D, Scheduled, card → artifact)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM; everything else holds).
+
+- **Gate (re-run):** full `bun test` gives 14510 pass / 5 skip / 0 fail. This closes round 3's "not re-run after the hub pin edit". The 13 touched test files pass 152/0. `bun run lint` is clean (1991 files). `bun run typecheck` is clean (root, mobile, relay).
+- **MEDIUM 1: the Activity sheet can open blank.** `apps/mobile/src/activity.ts:163` returns no Scheduled group when `schedules` is `undefined`, and `ActivitySheet.tsx:143` has no sheet-level empty state. Before this change the always-present ghost band meant the sheet was never empty. Scenario: Activity mode is `floating`, so `FloatingActivity` is shown with no badge needed (`SessionScreen.tsx:687`). The session is a pod `run`/`attach`, where the untrusted table is dropped and `schedules` stays `undefined` (`session-screen-controller.ts:570`), or it runs on an older daemon. Nothing is running. The person taps the float and gets an "Activity" title over an empty scroll, with no line saying why. Fix (pure, in `activityView`): when there are no groups, emit an empty state (for example "Nothing running"). Pin it with a test that has `schedules: undefined` and no rows.
+- **Mutations:** I could NOT run them myself. The permission gate refused both the inline `sed`/`cp` and the scratch script `.tentacle/tmp/mobile-qa-sweep/rev4/mut.sh`. The tree stayed clean (`git status` empty). I am relying on the executor's M7–M11 table. From reading the tests, each targeted property has a direct assertion: `viewerCloseTarget`, `galleryItemFor`, soonest-not-first, the empty-case `formatToParts`, and the native driver.
+- **Attacks tried:**
+  - (a) A partial-Intl `[]` in both chart sites: the guards now check for the needed parts. Holds.
+  - (b) A card id not yet listed (the list is still loading): the `useRef` plus the `galleryItemFor` effect opens it once when the row lands, and never re-opens it after a list tap, because `wanted` is cleared. Holds.
+  - (c) A list tap after a card open: `fromCard` is reset to false. Holds.
+  - (d) The Scheduled tap: it closes Activity, then takes the single `openScheduled` path. No second Session-info path. Holds.
+  - (e) Hub/FloatingActivity files: not touched. Holds.
+  - (f) §7: there are no protocol, persistence or broker changes. The schedule strings go through `scheduleTitle`/`scheduleMetaText`, the existing flattening. Holds.
+- **Below the bar (not blocking):** if `monthTicks`'s string fallback fails to match, it returns `1970*12` (`scale.ts:121`), which is silent. It is only reached when both `formatToParts` and the en-US format are broken.
+- **Executor behaviour:** honest and thorough. It ran the simulator sweep, gave every row a shot and a run dir, and reported the flow/env failures (24–27) and the unprobed Hermes `typeof` as gaps instead of hiding them. Its one lapse is the missing whole-sheet empty state when it removed the ghost.
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, same model family as the executor: shared blind spots possible)
