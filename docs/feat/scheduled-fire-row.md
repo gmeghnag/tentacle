@@ -223,6 +223,14 @@ above is the red evidence for the render ones).
 - Owner questions 1–5: all recommendations accepted (label "Scheduled", full prompt under fire 1, no `sc-N`, `at 15:54` / `at 17 Nov 15:54`). Implementation APPROVED; execution after the owner's pause.
 *— recorded by claude-opus-5-5 (orchestrator), 2026-11-17*
 
+### Owner decisions — revision (2026-11-17 ~21:30, SUPERSEDES the label/expansion parts above)
+- Creating a wake (the agent's schedule tool call) shows as the tool row "Schedule" (unchanged).
+- A wake firing shows as `Wake 15:54 · <prompt, one line, truncated…>` — `15:54` = the FIRE time (local short format of Q5), for `at` AND for every fire of an `every` wake (this replaces both `Scheduled · at 15:54` and `Scheduled · every 10m · 16:14`).
+- ALWAYS collapsed: nothing is expanded unless the user taps (phone) / expands (TUI: ctrl+o). This replaces Q3 "full prompt under fire 1".
+- Mac TUI follows the same text (`◷ Wake 15:54 · <prompt…>`, harness-grey) for parity — orchestrator's reading; confirm with the owner if the planner sees a reason to differ.
+- Q1, Q2, Q4 (no `sc-N`), Q5 (time format) stand.
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-17*
+
 ## Execution
 
 ## Review
