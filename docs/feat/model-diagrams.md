@@ -1810,3 +1810,30 @@ Gate: `bun run typecheck` clean. `bun run lint`: Checked 2033 files, no fixes. `
 Same model as the executor (claude-opus-5-5, fresh context only), so blind spots may be shared.
 
 *— claude-opus-5-5, 2026-11-17*
+
+### Round 2
+
+**Verdict: PASS.** Finding 1 is fixed. Commit `1e4138b1` moves the body choice into the pure `diagramBlockBody` (`apps/mobile/src/diagram-display.ts:59-74`). `DiagramBlock.tsx` now only maps it: `body.kind` picks the content, and `body.tapTab` is the tab a tap opens.
+
+**Mutations (mine; files restored, `git status` clean).** Each mutation was run against `diagram-display.test.ts` and `diagram-wiring.test.ts`:
+
+| Mutation | Result |
+|---|---|
+| The `failed` → source line is dropped from `diagramBlockBody` | KILLED |
+| The failed body's `tapTab` becomes `"diagram"` | KILLED |
+| The component's `source` branch never matches | KILLED (by the wiring regex) |
+| `onPress` hard-codes `"diagram"` | KILLED |
+
+**Regressions on the diff:** none found. The refactor is behaviour-preserving:
+- `render` is non-null only for `drawing`, so `fileUri` and the full screen get the same inputs as before.
+- `DrawingBody` is the same JSX, moved out.
+- The placeholder box is unchanged.
+
+The component side is pinned by its source text, not by a render. That is a stated limitation and the same approach as the other wiring pins.
+
+**Gate (narrow):**
+- 5 D6 test files: 51 pass, 0 fail.
+- `bun run lint`: clean (2033 files).
+- `bun run typecheck`: clean.
+
+*— claude-opus-5-5, 2026-11-17*
