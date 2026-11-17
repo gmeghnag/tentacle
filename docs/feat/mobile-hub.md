@@ -1396,3 +1396,7 @@ files; the 5 skips are the pre-existing opt-in docker/k8s/slow-socket set). No
 protocol schema, persistence or daemon surface is touched, and the changelog
 fragment is unchanged: H3's fan UI is still unbuilt, so the reveal is unreachable
 from a shipped build and nothing user-visible changes in this round.
+
+### H3 reopened (orchestrator, 2026-11-17 11:35)
+
+H3 was logged "H1–H3 COMPLETE" on 2026-11-16 but **the fan was never built** (docs/fix/mobile-hub-longpress-dead.md, root causes 1–3: `FloatingActivity.tsx` is still the mobile-chrome F2 PanResponder, no hold timer, no `hub-gesture.reduce`, no fan component, no `playHaptic`, blank disc with no glyph). Do H3 now, as planned in this doc: **the load-bearing spike FIRST** (a PanResponder on the button keeps the touch over the transcript ScrollView for 400 ms + drag-select), then `HubFan.tsx` (radial fan A, the owner's pick), the gesture machine wired into the button, haptics (`open`/`commit`), the hub glyph on the idle button, the a11y ActionSheet, flow 29 — and the items H4a/H4b already registered (Scheduled, Artifacts) must appear in the fan. **Run it in the simulator** (own simulator, not the booted iPhone 17 Pro; e2e harness `bun apps/mobile/e2e/run.ts`, never port 4000) and put screenshots of the fan open (light/dark) in `.tentacle/tmp/mobile-hub/h3-shots/`. `changelog.d/mobile-hub.added.md` already describes the fan: H3 makes it true.
