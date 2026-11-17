@@ -18,6 +18,7 @@ import type { ArtifactMeta } from "@tentacle/protocol";
 import { type JSX, type ReactNode, useState } from "react";
 import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { CHART_TOOL, chartRowView } from "../../chart-row.ts";
+import { DIAGRAM_TOOL, diagramRowView } from "../../diagram-row.ts";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
@@ -31,6 +32,7 @@ import { type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { StepBody, StepNode } from "../../ui/StepNode.tsx";
 import { ChartBlock } from "../../ui/chart/ChartBlock.tsx";
+import { DiagramBlock } from "../../ui/diagram/DiagramBlock.tsx";
 import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MediaViewer } from "./MediaViewer.tsx";
@@ -366,6 +368,31 @@ function ChartRowView(props: RowProps): JSX.Element {
 }
 
 /**
+ * A `diagram` call (docs/feat/model-diagrams.md D6): the diagram takes the row's
+ * place, like a chart. A call that is running, failed, refused after a reopen,
+ * or does not re-lint is the generic tool row (`diagramRowView` → `null`).
+ */
+function DiagramRowView(props: RowProps): JSX.Element {
+  const tool = props.row as Extract<Row, { kind: "tool" }>;
+  const screen = useWindowDimensions();
+  const view = diagramRowView(tool, { palette: props.palette, fontScale: screen.fontScale });
+  if (view === null) {
+    return <ToolRowView {...props} />;
+  }
+  return (
+    <Shell row={tool}>
+      <DiagramBlock
+        view={view}
+        palette={props.palette}
+        width={screen.width - 2 * space.inset}
+        locale={deviceLocale()}
+        testID={`diagram-${tool.id}`}
+      />
+    </Shell>
+  );
+}
+
+/**
  * A tool call: one `StepNode` on the thread (its cell from the screen's
  * `stepLayout`), the thought, command, result, diff and reply in its open body;
  * the sub-agent progress and Activity link always under the line. A presented
@@ -589,11 +616,9 @@ export function TranscriptRow(props: RowProps): JSX.Element | null {
     case "reasoning":
       return <ReasoningRowView {...props} />;
     case "tool":
-      return props.row.name === CHART_TOOL ? (
-        <ChartRowView {...props} />
-      ) : (
-        <ToolRowView {...props} />
-      );
+      if (props.row.name === CHART_TOOL) return <ChartRowView {...props} />;
+      if (props.row.name === DIAGRAM_TOOL) return <DiagramRowView {...props} />;
+      return <ToolRowView {...props} />;
     case "notice":
       return <NoticeRowView {...props} />;
     default:
