@@ -119,6 +119,17 @@ describe("diagram WebViews: one renderer with a bridge, an inert display", () =>
     }
   });
 
+  test("the inline block maps the pure body choice; it does not branch on the state itself", () => {
+    const block = code("ui/diagram/DiagramBlock.tsx");
+    expect(block).toContain("const body = diagramBlockBody(state, width);");
+    expect(block).toContain("onPress={() => setTab(body.tapTab)}");
+    // The source body is the source: a CodeBlock of the canonical mermaid text.
+    expect(block).toMatch(
+      /body\.kind === "source" \? \(\s*<CodeBlock\s+text=\{view\.source\.canonical\}/,
+    );
+    expect(block).not.toMatch(/status ===|\bfailed\b/);
+  });
+
   test("the renderer is asked only through the request script (the source as JSON)", () => {
     expect(code("diagram-render-service.ts")).toContain("port.inject(renderRequestScript({");
     expect(code(RENDERER)).toContain("inject: (script) => view.current?.injectJavaScript(script)");

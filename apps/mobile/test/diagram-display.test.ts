@@ -11,6 +11,7 @@ import {
   DIAGRAM_INLINE_MAX_HEIGHT,
   diagramA11yActions,
   diagramA11yEffect,
+  diagramBlockBody,
   diagramCaption,
   diagramDisplayProps,
   diagramInlineBox,
@@ -122,6 +123,38 @@ describe("words, caption, share, VoiceOver", () => {
     expect(diagramA11yEffect("activate")).toBe("diagram");
     expect(diagramA11yEffect("showSource")).toBe("source");
     expect(diagramA11yEffect("magicTap")).toBeNull();
+  });
+});
+
+describe("the inline body (T6.2: a failed render shows its source, never an error)", () => {
+  const render = { svg: SVG, width: 400, height: 200 };
+
+  test("failed (refused or retryable) → the source; a tap opens the Sorgente tab", () => {
+    for (const retry of [false, true]) {
+      expect(diagramBlockBody({ status: "failed", retry }, 300)).toEqual({
+        kind: "source",
+        tapTab: "source",
+      });
+    }
+  });
+
+  test("not yet asked or rendering → the placeholder box; a tap opens the diagram", () => {
+    for (const state of [undefined, { status: "rendering" } as const]) {
+      expect(diagramBlockBody(state, 300)).toEqual({
+        kind: "placeholder",
+        box: diagramInlineBox(null, 300),
+        tapTab: "diagram",
+      });
+    }
+  });
+
+  test("done → the drawing in its inline box", () => {
+    expect(diagramBlockBody({ status: "done", render }, 300)).toEqual({
+      kind: "drawing",
+      render,
+      box: { width: 300, height: 150, clipped: false },
+      tapTab: "diagram",
+    });
   });
 });
 

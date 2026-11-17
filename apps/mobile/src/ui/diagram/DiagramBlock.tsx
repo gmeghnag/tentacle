@@ -6,17 +6,18 @@
  * that failed: the source (never an error in the transcript). A tap, or
  * VoiceOver's activate / "Mostra sorgente", opens the full screen.
  *
- * It holds state only; `diagram-display.ts` and `diagram-render-service.ts`
- * decide.
+ * It holds state only; `diagramBlockBody` (diagram-display.ts) picks the body
+ * and the tap's tab, `diagram-render-service.ts` renders; this only maps them.
  */
 import { type JSX, useEffect, useState, useSyncExternalStore } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
 import {
+  type DiagramBlockBody,
   diagramA11yActions,
   diagramA11yEffect,
+  diagramBlockBody,
   diagramCaption,
-  diagramInlineBox,
   diagramUiWords,
 } from "../../diagram-display.ts";
 import { diagramFileUri, diagramRenderService } from "../../diagram-render-expo.ts";
@@ -62,28 +63,80 @@ export function DiagramBlock({
     });
   }, [key, view.source.canonical, palette]);
 
-  const render = state?.status === "done" ? state.render : null;
-  const failed = state?.status === "failed";
-  const box = diagramInlineBox(render, width);
+  const body = diagramBlockBody(state, width);
+  const render = body.kind === "drawing" ? body.render : null;
   const caption = (
     <Text numberOfLines={1} style={[styles.caption, { color: palette.sec }]}>
       {diagramCaption(view)}
     </Text>
   );
-  const body = failed ? (
-    <CodeBlock
-      text={view.source.canonical}
-      lang="mermaid"
-      palette={palette}
-      background={view.tokens.surface}
-      testID={`${testID}-source`}
-    />
-  ) : render === null ? (
-    <View
-      testID={`${testID}-placeholder`}
-      style={[styles.placeholder, { height: box.height, borderColor: palette.sep }]}
-    />
-  ) : (
+  const content =
+    body.kind === "source" ? (
+      <CodeBlock
+        text={view.source.canonical}
+        lang="mermaid"
+        palette={palette}
+        background={view.tokens.surface}
+        testID={`${testID}-source`}
+      />
+    ) : body.kind === "placeholder" ? (
+      <View
+        testID={`${testID}-placeholder`}
+        style={[styles.placeholder, { height: body.box.height, borderColor: palette.sep }]}
+      />
+    ) : (
+      <DrawingBody body={body} palette={palette} hint={words.zoomHint} testID={testID} />
+    );
+  return (
+    <View style={styles.block}>
+      <Pressable
+        testID={testID}
+        accessible
+        accessibilityRole="image"
+        accessibilityLabel={view.accessibilityLabel}
+        accessibilityActions={[...diagramA11yActions(words)]}
+        onAccessibilityAction={(event) => {
+          const effect = diagramA11yEffect(event.nativeEvent.actionName);
+          if (effect !== null) setTab(effect);
+        }}
+        onPress={() => setTab(body.tapTab)}
+        style={styles.press}
+      >
+        {caption}
+        {content}
+      </Pressable>
+      {tab === null ? null : (
+        <DiagramFullScreen
+          view={view}
+          render={render}
+          tab={tab}
+          fileUri={render === null ? null : diagramFileUri(key)}
+          words={words}
+          palette={palette}
+          reduceMotion={reduceMotion !== false}
+          testID={`${testID}-full`}
+          onTab={setTab}
+          onClose={() => setTab(null)}
+        />
+      )}
+    </View>
+  );
+}
+
+/** The drawing, cut at the cap with a bottom fade and the zoom hint. */
+function DrawingBody({
+  body,
+  palette,
+  hint,
+  testID,
+}: {
+  readonly body: Extract<DiagramBlockBody, { kind: "drawing" }>;
+  readonly palette: Palette;
+  readonly hint: string;
+  readonly testID: string;
+}): JSX.Element {
+  const { render, box } = body;
+  return (
     <View style={{ width: box.width, height: box.height }} pointerEvents="none">
       <DiagramView
         svg={render.svg}
@@ -104,43 +157,9 @@ export function DiagramBlock({
             </Defs>
             <Rect width={box.width} height={FADE} fill="url(#fade)" />
           </Svg>
-          <Text style={[styles.hint, { color: palette.sec }]}>{words.zoomHint}</Text>
+          <Text style={[styles.hint, { color: palette.sec }]}>{hint}</Text>
         </View>
       ) : null}
-    </View>
-  );
-  return (
-    <View style={styles.block}>
-      <Pressable
-        testID={testID}
-        accessible
-        accessibilityRole="image"
-        accessibilityLabel={view.accessibilityLabel}
-        accessibilityActions={[...diagramA11yActions(words)]}
-        onAccessibilityAction={(event) => {
-          const effect = diagramA11yEffect(event.nativeEvent.actionName);
-          if (effect !== null) setTab(effect);
-        }}
-        onPress={() => setTab(failed ? "source" : "diagram")}
-        style={styles.press}
-      >
-        {caption}
-        {body}
-      </Pressable>
-      {tab === null ? null : (
-        <DiagramFullScreen
-          view={view}
-          render={render}
-          tab={tab}
-          fileUri={render === null ? null : diagramFileUri(key)}
-          words={words}
-          palette={palette}
-          reduceMotion={reduceMotion !== false}
-          testID={`${testID}-full`}
-          onTab={setTab}
-          onClose={() => setTab(null)}
-        />
-      )}
     </View>
   );
 }

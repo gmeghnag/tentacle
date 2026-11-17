@@ -1760,6 +1760,31 @@ The 5 skips are the same set as D5's gate. **The 1 fail is `apps/mobile/test/cha
 
 *— claude-opus-5-5, 2026-11-17*
 
+### Fix round 1
+
+**Review D6 Finding 1 (MEDIUM) — FIXED.** The body choice is now pure. `diagramBlockBody(state, width)` in `apps/mobile/src/diagram-display.ts` returns `source` (any `failed`, retryable or not; a tap opens `source`), `placeholder` (not asked yet or `rendering`, with the box) or `drawing` (`done`, with the render and box; a tap opens `diagram`). `ui/diagram/DiagramBlock.tsx` calls it once and maps `body.kind` to `CodeBlock` / hairline / `DrawingBody`. The tap uses `body.tapTab`. The component no longer reads `state.status`. The drawing+fade JSX moved, unchanged, into a local `DrawingBody`.
+
+Tests: `diagram-display.test.ts`, "the inline body", has 3 tests: failed ×2 retry values, placeholder ×2 states, done. `diagram-wiring.test.ts` has a static pin. It checks that the block calls `diagramBlockBody(state, width)`, taps `body.tapTab`, maps `source` to `<CodeBlock text={view.source.canonical}`, and has no `status ===` / `failed` left in its code.
+
+Red before green: the wiring pin was red **on its assertion** (`Expected to contain: "const body = diagramBlockBody(state, width);"`). The pure test was red as `Export named 'diagramBlockBody' not found`, which is an import red, because the function is new. Its non-vacuity comes from F1–F3 below.
+
+Mutations (`.tentacle/tmp/model-diagrams/d6fix1/mutate.ts`: exact-match apply, the 2 narrow files run, restore; `git diff --stat` identical before/after):
+
+```
+F1 pure: failed not detected             KILLED (1)
+F2 pure: failed tap opens diagram        KILLED (1)
+F3 pure: done shown as placeholder       KILLED (1)
+F4 block: state ignored (reviewer's)     KILLED (1)
+F5 block: source branch off              KILLED (1)
+F6 block: tap fixed to diagram           KILLED (1)
+```
+
+Limitation: the component side is pinned statically (source text), not by rendering. RN components are not rendered under `bun test` in this app, which is the same approach as the other `diagram-wiring` pins.
+
+Gate: `bun run typecheck` clean. `bun run lint`: Checked 2033 files, no fixes. `bun test`: 14700 pass, 5 skip, 1 fail (1056 files). The fail is the same pre-existing `chart-view.test.ts` `EventEmitter` load error recorded in D6 §5. The 5 skips are the same set.
+
+*— claude-opus-5-5, 2026-11-17*
+
 ## Review — slice D6
 
 **Verdict: REQUEST-CHANGES** (one MEDIUM; no HIGH).

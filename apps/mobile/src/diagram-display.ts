@@ -9,6 +9,7 @@
 import { type WebViewPropsData, htmlViewerProps } from "./artifact-viewer.ts";
 import { chartLang } from "./chart-hero.ts";
 import type { DiagramRender } from "./diagram-cache.ts";
+import type { DiagramRenderState } from "./diagram-render-service.ts";
 
 /** Owner Q6: a diagram taller than this inline is cut, faded, and opens full screen. */
 export const DIAGRAM_INLINE_MAX_HEIGHT = 420;
@@ -41,6 +42,35 @@ export function diagramInlineBox(
     height: Math.round(clipped ? DIAGRAM_INLINE_MAX_HEIGHT : natural),
     clipped,
   };
+}
+
+/** What the inline row shows under its caption, and which tab a tap opens. */
+export type DiagramBlockBody =
+  /** T6.2: a failed render shows the source (never an error in the transcript). */
+  | { readonly kind: "source"; readonly tapTab: "source" }
+  | { readonly kind: "placeholder"; readonly box: DiagramInlineBox; readonly tapTab: "diagram" }
+  | {
+      readonly kind: "drawing";
+      readonly render: DiagramRender;
+      readonly box: DiagramInlineBox;
+      readonly tapTab: "diagram";
+    };
+
+/** The inline body for a render state (`undefined`: not asked yet) in `available` points. */
+export function diagramBlockBody(
+  state: DiagramRenderState | undefined,
+  available: number,
+): DiagramBlockBody {
+  if (state?.status === "failed") return { kind: "source", tapTab: "source" };
+  if (state?.status === "done") {
+    return {
+      kind: "drawing",
+      render: state.render,
+      box: diagramInlineBox(state.render, available),
+      tapTab: "diagram",
+    };
+  }
+  return { kind: "placeholder", box: diagramInlineBox(null, available), tapTab: "diagram" };
 }
 
 /** A palette colour, or `transparent` (the value is spliced into a `<style>`). */
