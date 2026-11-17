@@ -10,13 +10,14 @@
  * every row says `onSheet`, so the ground and the hairlines are the sheet's own
  * tokens (`bandOnSheet`, `sepSheet`).
  */
-import type { JSX, ReactNode } from "react";
+import type { ComponentRef, JSX, ReactNode } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { sectionNotes } from "../band-notes.ts";
 import {
   type InfoRow,
   type InfoSection,
+  type SectionId,
   type SessionInfoView,
   rowIdentity,
 } from "../session-info.ts";
@@ -51,6 +52,17 @@ export interface SessionInfoSheetProps {
   /** An expanded row (tool names, a full error): its id, or null. */
   readonly expanded: string | null;
   readonly onExpand: (id: string | null) => void;
+  /**
+   * The scroller, so the caller can reveal a section (docs/feat/mobile-hub.md
+   * H4a: the hub's Scheduled item lands on SCHEDULED WAKES). A plain callback ref,
+   * not a hook: this component stays hook-free so the element walker can call it.
+   */
+  readonly scrollRef?: (node: ComponentRef<typeof ScrollView> | null) => void;
+  /**
+   * A band's y inside the content, as it lays out. The caller decides what (if
+   * anything) to scroll to — `revealOffset` is its rule, never this component's.
+   */
+  readonly onSectionLayout?: (id: SectionId, y: number) => void;
 }
 
 /** The shimmer/`Checking…` row of a section still loading. */
@@ -323,6 +335,8 @@ export function SessionInfoSheet({
   onClose,
   expanded,
   onExpand,
+  scrollRef,
+  onSectionLayout,
 }: SessionInfoSheetProps): JSX.Element {
   const insets = useSafeAreaInsets();
   return (
@@ -345,6 +359,7 @@ export function SessionInfoSheet({
         >
           <ScrollView
             testID="session-info-scroll"
+            {...(scrollRef === undefined ? {} : { ref: scrollRef })}
             contentContainerStyle={styles.content}
             showsVerticalScrollIndicator
           >
@@ -358,7 +373,16 @@ export function SessionInfoSheet({
               />
             )}
             {view.sections.map((section) => (
-              <View key={section.id} style={styles.sectionGroup}>
+              <View
+                key={section.id}
+                style={styles.sectionGroup}
+                {...(onSectionLayout === undefined
+                  ? {}
+                  : {
+                      onLayout: (event: { nativeEvent: { layout: { y: number } } }) =>
+                        onSectionLayout(section.id, event.nativeEvent.layout.y),
+                    })}
+              >
                 <Section
                   palette={palette}
                   section={section}
