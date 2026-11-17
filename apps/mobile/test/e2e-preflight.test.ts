@@ -150,6 +150,11 @@ describe("parseArgs (--ios)", () => {
     expect(parseArgs(["--ios", "18"])).toEqual({ only: 18 });
     expect(() => parseArgs(["--ios", "17"])).toThrow();
     expect(() => parseArgs(["--ios"])).toThrow();
+    // `--udid`: a dedicated simulator (E2E_SIM_UDID's flag form).
+    expect(parseArgs(["--ios", "26", "--udid", "AF01"])).toEqual({ only: 26, udid: "AF01" });
+    expect(parseArgs(["--udid", "AF01"])).toEqual({ udid: "AF01" });
+    expect(() => parseArgs(["--udid"])).toThrow();
+    expect(() => parseArgs(["--udid", "--ios", "26"])).toThrow();
   });
 });
 
@@ -232,6 +237,23 @@ describe("firstDevice", () => {
       },
     });
     expect(firstDevice(json, 26)).toBe("usable");
+  });
+
+  test("a preferred udid (E2E_SIM_UDID) wins only inside the wanted major and when available", () => {
+    const json = JSON.stringify({
+      devices: {
+        "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
+          { udid: "booted", isAvailable: true },
+          { udid: "own", isAvailable: true },
+          { udid: "broken", isAvailable: false },
+        ],
+        "com.apple.CoreSimulator.SimRuntime.iOS-18-6": [{ udid: "iphone-18", isAvailable: true }],
+      },
+    });
+    expect(firstDevice(json, 26, "own")).toBe("own");
+    expect(firstDevice(json, 18, "own")).toBe("iphone-18");
+    expect(firstDevice(json, 26, "broken")).toBe("booted");
+    expect(firstDevice(json, 26, "missing")).toBe("booted");
   });
 });
 

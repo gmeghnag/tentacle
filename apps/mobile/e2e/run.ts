@@ -49,12 +49,23 @@ const children = new Set<Child>();
  * `--ios 18|26` picks one simulator; default is every required major (Owner Q3).
  * `--only a,b` narrows the flows, like `E2E_ONLY_FLOWS` (the flag wins); it exists
  * because some shells refuse an env-prefixed command. Names are checked by
- * `selectedFlows`.
+ * `selectedFlows`. `--udid X` is `E2E_SIM_UDID`'s flag form (`firstDevice`'s
+ * `prefer`), for the same reason.
  */
 export function parseArgs(argv: readonly string[]): {
   readonly only?: IosMajor;
   readonly flows?: string;
+  readonly udid?: string;
 } {
+  const udidAt = argv.indexOf("--udid");
+  let udid: string | undefined;
+  if (udidAt !== -1) {
+    const value = argv[udidAt + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("--udid needs a value (a simulator udid)");
+    }
+    udid = value;
+  }
   const flowsAt = argv.indexOf("--only");
   let flows: string | undefined;
   if (flowsAt !== -1) {
@@ -64,7 +75,10 @@ export function parseArgs(argv: readonly string[]): {
     }
     flows = value;
   }
-  const withFlows = flows === undefined ? {} : { flows };
+  const withFlows = {
+    ...(flows === undefined ? {} : { flows }),
+    ...(udid === undefined ? {} : { udid }),
+  };
   const at = argv.indexOf("--ios");
   if (at === -1) {
     return withFlows;
@@ -171,8 +185,13 @@ export function maestroEnv(
   return { ...env, JAVA_HOME: javaHome, PATH: `${javaHome}/bin:${base.PATH ?? ""}` };
 }
 
-/** The first booted-or-bootable simulator of an iOS major, by `simctl list -j devices`. */
-export function firstDevice(json: string, major: IosMajor): string | undefined {
+/**
+ * The first booted-or-bootable simulator of an iOS major, by `simctl list -j devices`.
+ * `prefer` (`E2E_SIM_UDID`) picks a dedicated simulator instead, so a run never
+ * drives the one someone is using — only when it is an available device of that
+ * major; otherwise the first one still wins.
+ */
+export function firstDevice(json: string, major: IosMajor, prefer?: string): string | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -187,11 +206,13 @@ export function firstDevice(json: string, major: IosMajor): string | undefined {
     if (!runtime.includes(`iOS-${major}-`) || !Array.isArray(list)) {
       continue;
     }
-    for (const raw of list) {
-      const device = raw as { udid?: unknown; isAvailable?: unknown };
-      if (typeof device.udid === "string" && device.isAvailable !== false) {
-        return device.udid;
-      }
+    const usable = list
+      .map((raw) => raw as { udid?: unknown; isAvailable?: unknown })
+      .filter((device) => typeof device.udid === "string" && device.isAvailable !== false)
+      .map((device) => device.udid as string);
+    const chosen = usable.find((udid) => udid === prefer) ?? usable[0];
+    if (chosen !== undefined) {
+      return chosen;
     }
   }
   return undefined;
@@ -616,7 +637,7 @@ async function main(): Promise<number> {
     const flows = `${REPO}/apps/mobile/e2e/flows`;
     let worst = 0;
     for (const major of majors) {
-      const device = firstDevice(devicesJson, major);
+      const device = firstDevice(devicesJson, major, args.udid ?? process.env.E2E_SIM_UDID);
       if (device === undefined) {
         console.error(`no available iOS ${major} simulator (preflight passed: check simctl)`);
         return 2;
@@ -1236,6 +1257,9 @@ export const FLOWS: readonly string[] = [
   // docs/feat/model-charts.md T7: the chart's table toggle and full screen
   // (series chip, table, close) — on a session of its own.
   "32-chart-interact",
+  // docs/feat/mobile-hub.md H3: the floating button as the hub (sticky fan,
+  // Attach, Stop on a HOLD turn, tap = Activity) — on a session of its own.
+  "33-hub",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -1317,6 +1341,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "30-artifact-escape": "ESCAPE_ID",
   "31-chart-inline": "CHART_ID",
   "32-chart-interact": "CHART2_ID",
+  "33-hub": "HUB_ID",
 };
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */

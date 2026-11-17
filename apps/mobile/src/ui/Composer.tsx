@@ -41,6 +41,8 @@ export interface ComposerProps {
   readonly fieldKey: number;
   /** Take focus once the field is editable (a session just created, mobile-chrome S7). */
   readonly focus?: boolean;
+  /** Each new value (> 0) focuses the field again: the hub's Steer (docs/feat/mobile-hub.md H3). */
+  readonly focusKey?: number;
 }
 
 const LABEL: Readonly<Record<ComposerButton, string>> = {
@@ -75,6 +77,7 @@ export function Composer({
   level,
   fieldKey,
   focus = false,
+  focusKey = 0,
 }: ComposerProps): JSX.Element {
   // Focused when it first becomes editable (the attach answered), never again:
   // the person's own taps decide after that.
@@ -86,6 +89,11 @@ export function Composer({
       input.current?.focus();
     }
   }, [focus, editable]);
+  useEffect(() => {
+    if (focusKey > 0) {
+      input.current?.focus();
+    }
+  }, [focusKey]);
   const stop = button === "stop";
   const disabled = button === "disabled";
   const actionBg = stop ? palette.label : disabled ? palette.fill : palette.accentFill;
