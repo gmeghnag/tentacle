@@ -13,7 +13,8 @@
  * `tool-<callId>-reply`, `diff-<callId>`, `image-<imageId>`.
  */
 import { type JSX, type ReactNode, useState } from "react";
-import { Image, Pressable, StyleSheet, Text, View } from "react-native";
+import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { CHART_TOOL, chartRowView } from "../../chart-row.ts";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
@@ -25,6 +26,7 @@ import { type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { ToolRow } from "../../ui/ToolRow.tsx";
 import { animateNextLayout } from "../../ui/animate.ts";
+import { ChartBlock } from "../../ui/chart/ChartBlock.tsx";
 import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MediaViewer } from "./MediaViewer.tsx";
@@ -176,6 +178,25 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
             })}
           </View>
         )}
+        {/* The attached files, one line each (docs/feat/pdf-read.md D5/D7), under
+            the media and inside the same bubble: the `<file>` block they became
+            is the model's, so the file is named, never quoted. */}
+        {user.documents === undefined || user.documents.length === 0 ? null : (
+          <View testID="row-documents" style={styles.documents}>
+            {user.documents.map((line) => (
+              <View key={line} style={styles.document}>
+                <Icon name="doc.on.doc" color={palette.sec} size={14} />
+                <Text
+                  numberOfLines={2}
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  style={[typography.caption, { color: palette.sec }]}
+                >
+                  {line}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
         {/* The caption, BELOW the media and inside the same bubble — and never an
             empty block: a photo-only bubble has no text area at all (item 4).
             `hasText` is the words' own presence; the markdown source is its truth. */}
@@ -249,6 +270,41 @@ function ReasoningRowView({ row, palette, onLink }: RowProps): JSX.Element {
           <Markdown parsed={parsedOf(reasoning.text)} palette={palette} onLink={onLink} />
         </View>
       ) : null}
+    </Shell>
+  );
+}
+
+/** The device's language, for the chart's numbers and dates (Hermes' Intl reads the device). */
+function deviceLocale(): string {
+  return Intl.DateTimeFormat().resolvedOptions().locale;
+}
+
+/**
+ * A `chart` call (docs/feat/model-charts.md slice C6): the chart itself takes the
+ * row's place, full width on the page — no tool chrome (owner rule). A spec that
+ * does not re-validate, or a failed / refused call, is the generic tool row.
+ */
+function ChartRowView(props: RowProps): JSX.Element {
+  const tool = props.row as Extract<Row, { kind: "tool" }>;
+  const screen = useWindowDimensions();
+  const view = chartRowView(tool, {
+    width: screen.width - 2 * space.inset,
+    fontScale: screen.fontScale,
+    locale: deviceLocale(),
+    palette: props.palette,
+  });
+  if (view === null) {
+    return <ToolRowView {...props} />;
+  }
+  return (
+    <Shell row={tool}>
+      <ChartBlock
+        view={view}
+        tool={tool}
+        palette={props.palette}
+        locale={deviceLocale()}
+        testID={`chart-${tool.id}`}
+      />
     </Shell>
   );
 }
@@ -372,7 +428,11 @@ export function TranscriptRow(props: RowProps): JSX.Element | null {
     case "reasoning":
       return <ReasoningRowView {...props} />;
     case "tool":
-      return <ToolRowView {...props} />;
+      return props.row.name === CHART_TOOL ? (
+        <ChartRowView {...props} />
+      ) : (
+        <ToolRowView {...props} />
+      );
     case "notice":
       return <NoticeRowView {...props} />;
     default:
@@ -392,6 +452,10 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   images: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  // The attached files' rows (docs/feat/pdf-read.md D5): a glyph and one line
+  // each, `sec`-coloured so they read as facts about the message, not prose.
+  documents: { gap: 2 },
+  document: { flexDirection: "row", alignItems: "center", gap: 6 },
   // The image fills its own box (whose shape `mediaBox` decided): full bubble
   // width, rounded to the bubble (item 4).
   image: { borderRadius: radius.bubble, overflow: "hidden" },

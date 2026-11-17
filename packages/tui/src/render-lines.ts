@@ -14,6 +14,7 @@ import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import { BULLET, blinkOn, hiddenBullet } from "./blink.ts";
 import { truncateCells } from "./cells.ts";
+import { type ChartGlyphs, chartToolBody } from "./chart-lines.ts";
 import { formatDurationMs } from "./format.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
@@ -64,6 +65,13 @@ export interface RenderOptions {
    * shows every call's command, which subsumes this set.
    */
   readonly expandedIds?: readonly string[];
+  /**
+   * A chart's plot glyphs (`tui.chartGlyphs`, docs/feat/model-charts.md D5):
+   * `braille` (default) or `blocks` for a font without braille. Constant for an
+   * App's lifetime (a display setting, decided at launch), so it is not part of
+   * the row-cache key.
+   */
+  readonly chartGlyphs?: ChartGlyphs;
 }
 
 const DEFAULT_THRESHOLD = 8;
@@ -75,6 +83,12 @@ const DEFAULT_WIDTH = 80;
 const INDENT = "  ";
 /** Read at CALL time: a module-load capture would freeze the palette (and the mode). */
 const connector = (): string => `${theme.subtle("⎿")} `;
+/**
+ * The `chart` tool's name (`@tentacle/tools`' `CHART_TOOL_NAME`). A literal, not
+ * an import: the TUI never depends on the tools package (the same reason the
+ * `toolSubtitle` case spells it out), and the name is data on the wire anyway.
+ */
+const CHART_TOOL = "chart";
 // An expanded call's command, on the rows under its header (owner mockup):
 // 4 display columns, so the command never wraps under the bullet.
 const COMMAND_PREFIX = "  │ ";
@@ -605,6 +619,11 @@ function toolSubtitle(
       return str("agent_id") ?? "";
     case "skill":
       return str("name") ?? "";
+    // A chart's row names the chart, not its JSON: the title is what the user
+    // reads above it, and the spec itself is many hundred characters
+    // (docs/feat/model-charts.md D3). The phone mirrors this case for case.
+    case "chart":
+      return str("title") ?? tool.args;
     default:
       return tool.args;
   }
@@ -661,8 +680,64 @@ interface BodyFit extends CollapseFit {
   readonly limit: number | undefined;
 }
 
+/**
+ * A `chart` call's rows, drawn from its own arguments — or `undefined` for every
+ * other call, and for a `chart` whose arguments are not a spec this build can
+ * draw (invalid JSON, a cap lowered since, another model's forgery): that one
+ * falls back to the generic tool row, never a crash and never an error in the
+ * transcript (docs/feat/model-charts.md C4/T4.3).
+ *
+ * Drawn ONCE per (item, width, expand, glyphs) by a tiny memo, like the other
+ * per-item caches: the layout runs on every blink tick and every frame.
+ */
+const chartCache = new WeakMap<ToolItem, Map<string, readonly string[] | null>>();
+
+function chartRow(
+  tool: ToolItem,
+  width: number,
+  opts: RenderOptions,
+): readonly string[] | undefined {
+  if (tool.name !== CHART_TOOL) {
+    return undefined;
+  }
+  // Only a settled call draws: a running chart has no args yet (the tool call is
+  // complete before it starts), and the generic row's spinner is the honest row.
+  if (tool.status === "running" || tool.status === "queued") {
+    return undefined;
+  }
+  const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
+  const glyphs = opts.chartGlyphs ?? "braille";
+  const key = `${width}|${expanded ? 1 : 0}|${glyphs}`;
+  let slots = chartCache.get(tool);
+  if (!slots) {
+    slots = new Map();
+    chartCache.set(tool, slots);
+  } else {
+    const hit = slots.get(key);
+    if (hit !== undefined) {
+      return hit ?? undefined;
+    }
+  }
+  const lines = chartToolBody(tool.args, { width, expanded, glyphs });
+  if (lines === undefined || lines.length === 0) {
+    slots.set(key, null);
+    return undefined;
+  }
+  const shown = [...lines];
+  slots.set(key, shown);
+  return shown;
+}
+
 function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const cols = Math.max(1, Math.floor(opts.width ?? DEFAULT_WIDTH));
+  // A chart draws ITSELF in the row's place: no bullet, no `● Chart …` header, no
+  // body connector — the chart is part of the reply, not a tool block (owner
+  // requirement, docs/feat/model-charts.md D5). Its caption is its first row, so
+  // it is also the row a click toggles (`tool-hit.ts`: a header is row 0).
+  const chart = chartRow(tool, cols, opts);
+  if (chart !== undefined) {
+    return [...chart];
+  }
   if (tool.status === "queued") {
     // Approved, not started: one dim row, no body, no spinner.
     const row = queuedRow(toolTitle(tool));
@@ -737,14 +812,17 @@ function noticeLines(text: string, expanded: boolean, hint?: string, body?: stri
 export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
   switch (item.kind) {
     case "user": {
-      // An image-only prompt has no text: its rows are the image lines alone
-      // (a blank text row would collapse — Ink measures an empty <Text> 0×0, P9).
-      const hasImages = (item.images ?? []).length > 0;
-      const rows =
-        item.text === "" && hasImages
-          ? []
-          : userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
+      // An attachment-only prompt has no text: its rows are the attachment lines
+      // alone (a blank text row would collapse — Ink measures an empty <Text> 0×0, P9).
+      const onlyAttachments =
+        item.text === "" && ((item.images ?? []).length > 0 || (item.documents ?? []).length > 0);
+      const rows = onlyAttachments
+        ? []
+        : userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
       const images = (item.images ?? []).map((row) => theme.subtle(row));
+      // A PDF's row (docs/feat/pdf-read.md D5) is the same subtle line, after the
+      // images: the user sees the file's name; the text lives with the model.
+      const documents = (item.documents ?? []).map((row) => theme.subtle(row));
       // A fired turn's own head (cron-tool S5, M4 option B): the styled row the
       // `turn_start.schedule` ref earns. No ref → nothing here, and the durable
       // `[scheduled …]` prefix in the text is the whole row (option A).
@@ -756,6 +834,7 @@ export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
         ...(item.restart ? [theme.subtle("restart prompt")] : []),
         ...rows,
         ...images,
+        ...documents,
       ];
     }
     case "assistant":

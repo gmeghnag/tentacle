@@ -10,6 +10,7 @@
  * its bounds and the finger all use it.
  */
 import type { EndReason } from "@tentacle/client";
+import type { ScheduleRow } from "@tentacle/protocol";
 import { FLOAT_SIZE, type FloatBounds, type FloatPosition, place } from "./floating-button.ts";
 import type { HubContext, HubItem } from "./hub-actions.ts";
 import { type Point, fanLayout } from "./hub-fan.ts";
@@ -17,8 +18,38 @@ import type { HubMenu } from "./hub-gesture.ts";
 import type { TurnRow } from "./transcript-rows.ts";
 
 /**
- * What the screen knows today. Schedules and artifacts are H4's (their tasks
- * are not on `main`): zero here, so their items stay absent (P6).
+ * The session's armed wakes as the hub needs them (cron-tool S6, M7): how many,
+ * and how long until the next one fires. Pure: the rows are the daemon's table as
+ * the client reported it (`RemoteSession.schedules`), `now` the injected clock.
+ *
+ * `undefined`/empty is "no table, or an older daemon" — zero wakes, so the
+ * Scheduled item is absent (P6/M9), never a dead button. A wake already due (a
+ * `nextAt` behind `now`: a pod/host clock skew, or one about to fire) reads 0 ms,
+ * never a negative "in −40 s": it is due NOW, which is what the badge says.
+ */
+export function wakeContext(
+  rows: readonly ScheduleRow[] | undefined,
+  now: number,
+): { readonly schedules: number; readonly nextWakeInMs: number | null } {
+  if (rows === undefined || rows.length === 0) {
+    return { schedules: 0, nextWakeInMs: null };
+  }
+  // The SOONEST wake, not the table's first row: the daemon's order is not the
+  // firing order (a one-shot can sit ahead of a recurring wake's next turn).
+  const next = rows.reduce(
+    (soonest, row) => (row.nextAt < soonest ? row.nextAt : soonest),
+    Number.POSITIVE_INFINITY,
+  );
+  return {
+    schedules: rows.length,
+    nextWakeInMs: Number.isFinite(next) ? Math.max(0, next - now) : null,
+  };
+}
+
+/**
+ * What the screen knows today. Artifacts are H4b's (feat/model-artifacts is not on
+ * `main`): zero here, so that item stays absent (P6). Wakes come from the daemon's
+ * table (`wakeContext`).
  */
 export function hubContextOf(input: {
   readonly link: "up" | "down";
@@ -26,15 +57,21 @@ export function hubContextOf(input: {
   readonly ended: EndReason | null;
   readonly editable: boolean;
   readonly dictation: boolean;
+  /** The session's wake feed and the clock to measure it against (H4a). */
+  readonly schedules?: {
+    readonly rows: readonly ScheduleRow[] | undefined;
+    readonly now: number;
+  };
 }): HubContext {
+  const wakes = wakeContext(input.schedules?.rows, input.schedules?.now ?? 0);
   return {
     link: input.link,
     turn: input.turn,
     ended: input.ended,
     editable: input.editable,
     dictation: input.dictation,
-    schedules: 0,
-    nextWakeInMs: null,
+    schedules: wakes.schedules,
+    nextWakeInMs: wakes.nextWakeInMs,
     unseenArtifacts: 0,
   };
 }

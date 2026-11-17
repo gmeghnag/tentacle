@@ -241,6 +241,9 @@ export const DEFAULT_CONFIG_JSONC = `{
   // first frame and picks a light or dark palette; "dark"/"light" force one and skip
   // that query (useful on a slow link, or when the guess is wrong).
   // "tui": { "theme": "auto" },
+  // A chart's plot glyphs: "braille" (default) or "blocks" for a font without the
+  // braille patterns (a terminal cannot report a missing glyph, so it is a setting).
+  // "tui": { "chartGlyphs": "braille" },
 
   // Session files (one log per conversation under <configDir>/sessions/): keep the
   // history a compaction or a context reset replaced in the file too (resume still

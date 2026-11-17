@@ -15,6 +15,8 @@ describe("toolLabel", () => {
     expect(toolLabel("skill")).toBe("Skill");
     expect(toolLabel("schedule_create")).toBe("Schedule");
     expect(toolLabel("schedule_control")).toBe("Schedules");
+    // docs/feat/model-charts.md D3: the chart row reads `Chart`.
+    expect(toolLabel("chart")).toBe("Chart");
   });
 
   test("an unknown name (MCP, future tool) displays as itself", () => {

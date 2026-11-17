@@ -1443,6 +1443,316 @@ both fails are flakes. To check, run `bun test 2>&1 | grep '^(fail)'`.
 
 *— claude-opus-5-5, 2026-11-16*
 
+### P5 — TUI attach PDF (upload / laptop-extract for pods), chip, transcript row · executed by Claude (see the note), 2026-11-16
+
+**What was built (client seam first, as the plan ordered).**
+
+1. **`packages/client/src/document-input.ts` (new, pure).** `documentsInput(capability, local)` →
+   `{kind:"upload"|"laptop", maxBytes} | {kind:"off", reason}`. `upload` = the daemon holds
+   the bytes and extracts; `laptop` = a pod, so THIS laptop extracts and only text crosses.
+   The AGENTS §7 gate is the images one applied to documents: an `upload` claimed while
+   `local.servesModel` is **OFF** ("the daemon's claim is not trustworthy"), never an upload
+   into a pod. Absent capability = the D6 sentence `OLD_DAEMON_DOCUMENTS`
+   ("this session's daemon cannot read PDFs (update it)"); a capability that does not name
+   `pdf`, or an unknown `input`, is off too — never guessed. A `client` daemon with no
+   injected extractor is off as well (the alternative would be an upload).
+2. **`RemoteClient`** (`remote-client.ts`): `documentsInput()`, and
+   `attachDocument(sessionId, bytes, {name}, opts)` → the **wire block**
+   (`{type:"document",kind:"pdf",name,source}`), not just a ref. Mode `upload` → `upload()`
+   then `document{ref}`; mode `laptop` → the **injected** extractor
+   (`RemoteClientOptions.extractDocument`, injected by the CLI because `@tentacle/client` is
+   in the phone's bundle) → `attachedPdfText` (the same pure builder the daemon uses) →
+   `document{text}`. Size / empty / `%PDF-` are refused before any frame; extraction
+   failures throw `DocumentExtractError` carrying the extractor's own sentence. New
+   `DocumentsUnavailableError`, `CLIENT_EXTRACTS_DOCUMENTS`.
+   `prompt(...)` already took `documents` (P4) — unchanged.
+3. **`RemoteSession`**: `documentsInput()`, `attachDocument()` (lazy open first, like
+   `attachImage`, and it opens nothing when the mode is off), `opts.documents` on `send`,
+   `ActiveTurn.documents` (so a keyed re-send after a drop carries them, exactly as
+   `attachments` does), and `sendPrompt` passes them. **This closes the DRIFT the brief
+   named:** `client.prompt` took `documents` since P4 but `RemoteSession` never passed them.
+4. **`packages/tui/src/pdf-attach.ts` (new, pure)**: `DocumentMode` (structural — no client
+   import), `NO_DOCUMENT_SEAM`, `DOCUMENT_GLYPH`, `documentChipLabel` (`report.pdf · 2 pp` /
+   `report.pdf · reading…`), `documentUploadText`, `documentRowText` (`[pdf: name · N pp]`),
+   `mediaRowText`, and **`userMessageView(content, media)`** — the D5 view-model: with
+   `media`, `splitFileBlocks` strips the `<file>` block and each chip becomes a row; with
+   **no** `media` the content is returned RAW (honest degradation, never a guess).
+5. **Detection (`attach-files.ts`)**: `inspectPath` gains the `%PDF-` branch **before** the
+   `not-image` refusal (`isPdf(bytes.subarray(0, PDF_HEAD_BYTES))`), yielding
+   `{ok:true, kind:"document", document:{path,name,bytes,size}}` from the SAME one read and
+   the same cap. `InspectResult` gained a `kind` discriminator (an image ref cannot carry
+   `application/pdf`), `collectAttachments` now returns `documents` beside `images` and
+   counts both against `MAX_ATTACHMENTS_PER_MESSAGE`; `attachPaths`' `attachments` variant
+   carries them.
+6. **Draft/row (`attach-draft.ts`)**: `AttachDraft.documents` (one draft, one
+   cap, one row — the images then the PDFs), `withDocuments`, `removeLastChip` pops a
+   document first, `submitPlan` returns `documents`, `attachRowView` renders the PDF chips
+   with the glyph. `routeDecision(draft, decision, mode, text, documentMode)`: the two gates
+   are **independent** (a model without vision still reads a `<file>` block), a PDF with
+   documents off is refused with `_PDFs are off: <reason>_` and no chip, and an image paste
+   says nothing about PDFs. `attach-refusal.ts`: two new reasons (`documents-off`,
+   `extract-failed`), `claimsPdfPath`, and `refusalMeansText` treats `.pdf` like `.png` for
+   `empty`/`unreadable`.
+7. **`useAttachments.ts`**: `documentMode()`, `restoreDocuments()`, and `sendWithImages(text,
+   images, documents?)` — it calls only the SESSION's seams (`attachImage`, then
+   `attachDocument`), one at a time with one progress row over both, then
+   `run(text, {attachments, images, documents, documentChips})`. The hook never decides
+   where an extraction happens and never touches bytes itself.
+8. **Turn plumbing**: `SessionController.send` opts gain `documents`; `attachDocument` /
+   `documentsInput` are REQUIRED members (a session with no PDFs says so through the mode);
+   `useTurnDriver.run` passes `documents` in `sendOpts` and the chips' `[pdf: …]` rows to
+   `startTurn`; a lost slot / a pre-start refusal restores the PDF chips beside the images
+   (`restoreDocuments`); `state.UserItem.documents` + `startTurn(..., documents)` +
+   `render-lines` paint them (subtle rows; an attachment-only prompt still has no blank text
+   row); `resume.ts` uses `userMessageView(m.content, m.media)`. Fakes/passthroughs updated:
+   `test/session-stub.ts` (`inertSession`), `local-session.ts` (documents off + a rejecting
+   `attachDocument`), `cli/src/local-runtime.ts` (`PersistingController` forwards both, and
+   injects `extractPdf` **only** beside a model provider).
+
+**DRIFT from Implementation, recorded.** (a) `attachDocument` returns the wire BLOCK, not
+`{id,size}`: with two modes one return type has to describe both sources, and the TUI must
+not build a `document` itself (the brief's §3 builder was folded into the client instead —
+one constructor, both modes). (b) `routeDecision`/`submitPlan`/`attachRowView` take an
+optional `documentMode` (defaulting to `mode`), so the pure API stays additive for every
+existing caller. (c) `InspectResult` gained `kind` (above). (d) The brief's `documentBlock`
+builders in `pdf-attach.ts` were dropped for the same reason as (a). (e) The **transcript
+chip on a LIVE turn is `[pdf: report.pdf]`** (no page count): `turn_start` carries only
+`p`+attachments`, the daemon never puts `media` on the wire, and this laptop does not see
+the count in either mode — so the count appears on RESUME (`ChatMessage.media`), which is
+exactly what the daemon persisted. Said in `state.ts`'s `user_message` branch rather than
+invented. (f) Changelog: `changelog.d/pdf-read.added.md` already covers "attach a PDF from the
+TUI or the iPhone" — **not edited**, and no new fragment was added.
+
+**Tests (all red-first; 1298 lines of test new/changed).**
+`packages/client/test/document-input.test.ts` (10) — the table, incl. the §7 gate, an
+unknown kind/input, the clamp. `packages/client/test/document-attach.test.ts` (10) — real
+`RemoteClient`↔`Connection` with a frame spy: upload mode uploads then `document{ref}`
+(the `attachment/put` frame carries the sha and size), a non-PDF and an over-cap file are
+refused with **zero frames**, `laptop` mode sends `document{text}` with the page markers and
+**no** `attachment/put` frame at all, an encrypted PDF fails locally as
+`DocumentExtractError`, a `client` daemon with no extractor is off, an `upload` claim from a
+serving client is refused, no capability is the one sentence — and `RemoteSession.send`
+reaches `session/prompt` with the documents (plus a document-only prompt: no empty text
+block). `packages/tui/test/pdf-attach-pure.test.ts` (12) — chips/rows/`userMessageView`
+(block hidden, raw without `media`, PDF-only prompt, one parser). `packages/tui/test/
+pdf-attach.test.tsx` (7, real `App` frames + a fake controller) — the chip renders
+`report.pdf · reading…` and Enter sends the block with the file's exact bytes; a bare
+`/tmp/report.pdf` + Enter converts and sends nothing; `laptop` mode yields `document{text}`
+and calls no upload; no capability shows `PDFs are off: … cannot read PDFs` with no chip and
+sends nothing. Updated deliberately (an old assertion encoded the OLD behaviour): 
+`attach-files.test.ts` (a `%PDF-` file is a document, not `not-image`; the cap text says
+"files"), `attach-draft.test.ts`/`app-layout.test.ts`/`attach-app.test.tsx` (the draft's
+`documents` key; "can't send an attachment"), `app-attachments-structure.test.ts` (the
+destructure now names the document pair), `clear-connect-unbound.test.tsx` (two new required
+members), `cli/test/subagent-panel-controller.test.ts` (the forward guard's exact list).
+`session-stub.ts` answers documents **off**, so a test that forgets to script the mode gets a
+refusal rather than a silent success.
+
+**Mutations** (`.tentacle/tmp/pdf-read/p5/mut.sh`: each applied, the owning test run,
+restored; `git status` clean each time apart from this slice's own files):
+
+| mutation | result |
+|---|---|
+| `attach-files.ts`: the `%PDF-` branch never taken (`false &&`) | RED 3 (`pdf-attach.test.tsx` P5b/P5c + the chip) |
+| `document-input.ts`: `client` mode returns `upload` | RED 2 (`document{text}` + the encrypted-PDF test) |
+| `document-input.ts`: absent capability → `upload` | RED 1 (the one update sentence) |
+| `pdf-attach.ts`: `userMessageView` returns the content raw | RED 3 (the block-hiding cases) |
+| `attach-draft.ts`: a PDF chip added while documents are off | RED 1 (the refusal line/frame) |
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` **1782 files, clean** ·
+`bun test packages/client` 799 pass · `bun test packages/tui` **2424 pass** ·
+`bun test packages/cli` 3422 pass · full `bun test` (one run) **12977 pass, 5 skip, 0
+fail** (the 5 skips are the branch's existing opt-ins). No protocol schema changed, so
+`packages/protocol/schema/protocol.json` was not regenerated.
+
+**Executor note.** §Slices assigns P5 to DeepSeek; this execution was done by a **Claude**
+agent (the spawning harness's choice). Blast is `cross-module`, so standard Review applies.
+
+*— claude-opus-5-5, 2026-11-16* (per the harness's settings; this runtime exposes no exact
+model id)
+
+### Fix round 1 — P5 review (one MEDIUM: the laptop's `too-many-pages` retry had no test) · executed by `claude-opus-5-5`, 2026-11-16
+
+**Finding (MEDIUM, `packages/client/src/remote-client.ts:2318-2324`).** The laptop's copy
+of the attach retry was untested: mutating `extraction.reason === "too-many-pages"` to a
+value that never matches left `document-attach.test.ts` green. A pod session attaching a
+PDF over 2000 pages would then fail with "too many pages" instead of sending the first 100
+pages plus the `[pages … not included]` footer, and no test would notice.
+
+**Fixed at the root, not by copying the test.** The retry existed TWICE — the daemon's
+(`prompt-documents.ts`, on a stored `ref`) and the laptop's (on a pod's `text`) — which is
+why one copy could lose it silently. It is now ONE pure helper,
+`extractAttachedPdf(extract, {signal})` (`packages/core/src/pdf-text.ts:579`): it calls the
+extractor once, retries a `too-many-pages` answer once with
+`pages: "1-${MAX_PAGES_PER_READ}"`, and passes the caller's signal to BOTH calls. Both ends
+call it (`prompt-documents.ts:143`, `remote-client.ts:2316`) and neither keeps a copy, so
+the two paths cannot drift (the reviewer's "better still").
+
+**Three tests, each shown RED before green:**
+
+1. `packages/core/test/pdf-text.test.ts` — the helper itself: `[{}, {pages:"1-100"}]`, and
+   the signal reaches both calls; a failure that is not `too-many-pages` is answered
+   undredged (exactly one call).
+2. `packages/client/test/document-attach.test.ts` — "over the page limit, the attach retries
+   with the first read's worth and names the cut": a fake extractor answering
+   `too-many-pages`, asserting `calls == [{}, {pages:"1-100"}]`, `page 100` and
+   `[pages 101-2500 not included]` in `document{text}`, and an empty frame log (still no
+   bytes to the pod). **RED before the code changed** — the assertion on the retry's own
+   property, not an import error: `DocumentExtractError: big.pdf: 2500 pages: pass pages`,
+   `10 pass · 1 fail`.
+3. The daemon's existing test (`prompt-documents.test.ts:302`) stays green through the
+   refactor, which is the point of one helper.
+
+**Mutations** (`.tentacle/tmp/pdf-read/p5r/`; each restored, `git status` afterwards showed
+only this round's five files):
+
+| mutation | result |
+|---|---|
+| laptop: `reason === "too-many-pages"` → `"never-matches"` (pre-refactor code) | RED 1 (the new client test) |
+| helper: `first.reason !== "too-many-pages"` → `"never-matches"` | RED 2 (client test + daemon unit test) |
+| helper: the retry drops `...request` (the signal is lost on the second call) | RED 1 (the helper's signal test) |
+
+The first two are the pre/post view of the same property; the third pins the part of the
+helper a hand-inlined copy would get wrong.
+
+**Gate (this round).** `bunx tsc --noEmit` exit 0 · `bun run lint` 1782 files, clean
+(`biome check --write` reformatted one type alias I added) · the five touched test files
+(`pdf-text`, `document-attach`, `prompt-documents`, `pdf-attach`, `pdf-attach-pure`)
+**102 pass, 0 fail** · full `bun test` **12981 pass, 5 skip (the branch's opt-ins), 0 fail**
+(923 files; the two unattributed fails the P4 review could not reproduce did not recur).
+
+**Drift from the review's suggested fix.** It offered "port the P4 test" as the fix and
+"move the retry into one pure helper" as the better one; this round did the helper, so the
+ported test is a second pin rather than the only one. No protocol, schema or persisted-format
+change: nothing to bump. No changelog change (the fragment `changelog.d/pdf-read.added.md`
+already covers the feature; this is a test/doc gap).
+
+*— claude-opus-5-5, 2026-11-16*
+
+### P6 — iPhone PDF attach (expo-document-picker, pdf-input.ts, chip, bubble) · executed by `claude-sonnet-4-5-20250929` (tentacle), 2026-11-16
+
+**What was built** (items/ports first, renderers last, as the plan ordered).
+
+1. **`apps/mobile/src/pdf-input.ts` (new, pure).** `nextPdfStep({bytes, name?, taken, maxBytes,
+   declaredSize?})` → `{kind:"ready", pdf:{name,size}} | {kind:"refuse", reason, detail}`. Order:
+   empty (`empty`) → cap (`taken >= MAX_ATTACHMENTS_PER_MESSAGE`, photos and files together) →
+   iCloud placeholder (`declaredSize > 0` but the copy is 0 bytes, `not-downloaded`) →
+   `!isPdf(bytes.subarray(0, PDF_SNIFF_BYTES))` (`not-a-pdf`) → `size > maxBytes` (`too-large`,
+   the sentence names `formatBytes`). `pdfName` = `sanitizeAttachmentName(...) ?? "document.pdf"`;
+   `pdfCopyName(name, {stamp, seq})` keeps `.pdf` and clips to ASCII; `MAX_PDF_ATTACH_BYTES`
+   = 15 MiB. The type comes from the BYTES, never the extension or the picker's MIME hint.
+2. **`apps/mobile/src/pdf-source.ts` (new, effects only).** The ONLY `expo-document-picker`
+   importer: `getDocumentAsync({type:"application/pdf", copyToCacheDirectory:true, multiple:false})`
+   → `new File(uri).bytes()` → `nextPdfStep` → copy into `<documents>/pdfs/<pdfCopyName>`
+   (`create({overwrite:false})` so a collision throws rather than swapping documents).
+   Every refusal is a `PickedPdf` of kind `refused` — never an exception.
+3. **`apps/mobile/src/attach-sheet.ts` (new, pure).** `attachSheet(capability)` → `{items, reason}`:
+   `kind === "upload"` is the ONLY mode the phone offers (`pdf` added, `reason: null`);
+   `laptop` and `off` both omit the row and carry a sentence (the `laptop` one says the phone
+   cannot hand a pod text, `off` reuses the client's own words verbatim).
+4. **`compose-chips.ts`**: `Chip`/`Picked` gained `kind: "image" | "document"`;
+   `chipDocumentReady(chips, key, block: DocumentContent)`; `TakenDocument`/`TakenAttachment`
+   and `splitTaken`; `CHIP_CAP` counts both. **`outbox.ts`**: `OutboxItem.documents?` →
+   `{file, name, block?}`, with `documentsOf`/`pendingDocuments`/`withDocumentBlock`/
+   `documentBlocksOf`. **`outbox-store.ts`**: `isDocument` guard (the wire's
+   `DocumentContentSchema`), and `schemaVersion` stays `1` for a file with no documents but
+   becomes `2` (`OUTBOX_SCHEMA_VERSION_DOCUMENTS`) for one that has them — amended in fix
+   round 1 (P6 review item 2): a v1 file naming a document is half-loaded by an older build,
+   which drops the PDF and sends a PDF-only item as an empty prompt. **`outbox-driver.ts`**:
+   `OutboxSession.attachDocument` + `prompt(..., documents?)`, and `attachDocuments` runs AFTER
+   the photos, persisting each block before the next file. **`outbox-session.ts`**: the port
+   wires `attachDocument` → `session.attachDocument`; `unavailableSessionPort` refuses.
+5. **`compose-controller.ts`**: `DocumentPort {pickPdf, documentsInput}`, `pickDocument()`,
+   `applyPdfs`, `uploadPicked` by kind, `photosOf`/`documentsOf` via `splitTaken`, both enqueue
+   sites carry `documents`, `deps.prompt` gained a fifth argument.
+6. **Renderers.** `session-view.ts` (`ChipView.kind`), `ComposeBar.tsx` (glyph by kind:
+   `doc.on.doc` for a document, `photo` for an image), `SessionScreen.tsx` (the `+` sheet from
+   pure `attachSheet`, "File (PDF)" only when offered), `TranscriptRow.tsx` (one `[pdf: …]`
+   line per `user.documents` entry, `sec`-coloured, its own `row-documents` view).
+7. **`transcript-rows.ts`** gained `UserRow.documents?`, `documentRowText(name, pages?)`,
+   `mediaRowText(media)` and `documentLabels(blocks)`; **`transcript-history.ts`** strips the
+   `<file>` blocks when `media` is present (`splitFileBlocks(content).text`) and never otherwise;
+   **`transcript.ts`** carries the labels on `own_prompt`, and `session-feed.ts` draws a
+   PDF-only prompt (its guard was `text !== "" || attachments.length > 0`).
+8. **`App.tsx`**: the `documents` port wired (`pickPdf` → `pdf-source.ts`,
+   `documentsInput` → `link.client.documentsInput()` — never re-derived in the app), and the
+   PDF copies swept by the SAME `photo-copies.ts` rule in their own folder.
+   **`app.json`**: the `expo-document-picker` plugin entry. **`docs/BUILD.md`**: one section —
+   a new native module needs a rebuilt dev build (`expo prebuild` + `expo run:ios`).
+
+**DRIFT from Implementation, recorded.**
+- **(a) The plan's step list missed the LIVE send path, and the first red test found it.** The
+  screen's folding prompt was `promptWithRefs(text, turnId, refs, photos)` — no `documents` —
+  so every phone PDF was dropped between the chip and the wire, while
+  `compose-documents.test.ts` (whose fake prompt took a fifth argument) stayed green. Fixed at
+  the source: `SendableHandle.send` opts gained `documents`, `ComposeWiring.driver`'s prompt
+  and `ComposeDeps.prompt` gained it, `promptWithRefs` passes it and folds the row labels.
+  Its own regression test is `test/session-screen-documents.test.ts` (M5).
+- **(b) A PDF-only prompt drew NO row at all.** `session-feed.ts` skipped an own prompt whose
+  text and attachments were both empty; a PDF-only send (the plan's own D7 case) is exactly
+  that. The guard now counts `documents` too, and the label list is what the bubble shows.
+- **(c) `ChipView.kind` is OPTIONAL, and absent on a `refused` chip.** A cap refusal (or a pick
+  the adapter rejected) never learned what the pick was, and inventing one would put a photo
+  glyph on a refused PDF. The controller therefore omits `kind` on refused chips rather than
+  forwarding a value the union does not have (this is what `tsc` caught in three pre-existing
+  test fakes, now typed).
+- **(d) `DocumentPort.pickPdf` answers `readonly PickedPdf[]`** (`PickedDocument | Picked`),
+  not `PickedDocument[]`: the adapter's refusal is a `refused` pick, and `applyPdfs` hands both
+  to the same `applyEntries` (a refusal is a chip with its reason, never an exception).
+- **(e) PDF copies are bounded like photo copies.** `inUseCopies` now also names an item's
+  document files, and `outboxOf` sweeps `pdfsRoot()` with the same rule — otherwise every pick
+  would leak a copy for ever (the plan did not name it).
+- **(f) A wiring guard went stale, not the code.** `mobile-media-live-wiring.test.ts` asserted
+  over fixed character windows (`app.slice(start, start + 600/900/1600)`); adding the PDF port
+  pushed `sendPhotoOriginalSize` and `handle:` outside them, so two green invariants turned red
+  for a reason that had nothing to do with them. Both now read the whole function
+  (`composeWiring()` helper), and the mutation that drops `sendPhotoOriginalSize` still fails it
+  (M6) — the guard is wider, not weaker.
+- **(g) No native/simulator run in this slice.** The picker itself cannot be exercised under
+  `bun test` (React Native has no renderer); `pdf-source.ts` is the only importer and stays
+  untested by design (its decisions live in `pdf-input.ts`). The dev build is described in
+  `docs/BUILD.md`; running it on the owner's iPhone is the remaining manual step.
+
+**Tests (all red-first; 6 files new or extended, +10 tests net).**
+`apps/mobile/test/pdf-input.test.ts` (20, P6 step 1) — sniff (`%PDF-` ok; a `.pdf` that is text
+→ `not-a-pdf`; a header cut below its version line refused), the caps, zero bytes → `empty`,
+the iCloud placeholder → `not-downloaded`, `taken=5` → `too-many`, name sanitising,
+`pdfCopyName` uniqueness. `attach-sheet.test.ts` (4) — upload offers `pdf` with no reason;
+`off` and `laptop` omit it and each carry their sentence. `compose-documents.test.ts` (9) —
+pick → `attachDocument` → ready chip → send carries the block; `laptop`/`off` refuse and pick
+NOTHING (0 picker calls); a refusal is a chip; offline send-later keeps the block on the item.
+`transcript-pdf.test.ts` (8, new) — the block hidden and `[pdf: report.pdf · 2 pp]` shown with
+`media`; the raw text with no `media` (and with `[]`); a PDF-only stored prompt; an unknown
+`media` kind labelled `[audio: memo.m4a]`; the row's wording pinned to the TUI's own
+`documentRowText`/`mediaRowText`; `TranscriptRow.tsx` renders the field. `session-screen-documents.test.ts`
+(2, new) — the SCREEN's real folding prompt sends the documents and the bubble names the file;
+a text-less PDF is still a sendable message. `session-screen-compose.test.ts`,
+`compose-controller.test.ts`, `compose-chips.test.ts`, `outbox-driver.test.ts`,
+`compose-motion.test.ts`, `session-view-compose.test.ts` updated for the new port members
+(`documents: []` on two `toEqual`s, `kind` on the chip fakes, `attach` on the bar fake).
+
+**Mutations** (each applied by direct edit, the owning test run, then re-edited back):
+
+| mutation | result |
+|---|---|
+| M1 `pdf-input.ts`: the `isPdf` branch never taken (`false &&`) | RED 2 (`pdf-input.test.ts`: a text `.pdf`, and a header cut below its version) |
+| M2 `attach-sheet.ts`: offer `pdf` regardless of the capability | RED 3 (`attach-sheet.test.ts` off + laptop, and `compose-documents.test.ts`'s sheet test) |
+| M3 `transcript-history.ts`: ignore `media` | RED 2 (`transcript-pdf.test.ts`: the block-hiding case and the PDF-only case) |
+| M4 `compose-controller.ts`: `driver.enqueue` without `documents` (both sites) | RED 2 (`compose-documents.test.ts`: the send carries the block, and the offline item keeps it) |
+| M5 `session-screen-controller.ts`: the folding prompt drops `documents` | RED 2 (`session-screen-documents.test.ts`, both cases) |
+| M6 `App.tsx`: drop `sendPhotoOriginalSize` (a WIDENED guard, not the code) | RED 1 (`mobile-media-live-wiring.test.ts` item 5) — the non-vacuity check for drift (f) |
+
+**Gate** (`bun run typecheck`, `bun run lint`, full `bun test`, run once after the last edit):
+`tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay` **clean** · `biome check .`
+**1792 files, no fixes applied, 0 errors** · `bun test` **13051 pass, 5 skip** (the three
+opt-ins: live-k8s, live-docker, the real-socket keepalive — not failures), **0 fail**, 930
+files. No protocol schema change (`expo-document-picker` is a phone dependency, `documents`
+and `media` were P4's): no `protocol.d/` note and no `protocol:bump`. Changelog:
+`changelog.d/pdf-read.added.md` extended (the `+` sheet's File (PDF), and the message showing
+the file's name instead of its text) — `CHANGELOG.md` untouched.
+
+*— claude-sonnet-4-5-20250929 (tentacle), 2026-11-16*
+
 ## Review
 
 ### P1 — fresh-context adversarial review
@@ -1833,3 +2143,186 @@ deduplicated"), which misses the case where the retry is refused. Its own mutati
   Full suite not re-run.
 
 *— claude-opus-5-5, 2026-11-16* (fresh context; SAME model as the P4 executor)
+
+### P5 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM finding, a test gap; nothing at HIGH).
+
+1. **MEDIUM: the laptop-mode `too-many-pages` retry is not covered by any test.**
+   `packages/client/src/remote-client.ts:2318-2324` copies the daemon's retry once with
+   `pages: "1-${MAX_PAGES_PER_READ}"`. The daemon's copy got a test in P4 round 1 (MEDIUM #2b).
+   This one has none. Mutation `extraction.reason === "too-many-pages"` → a value that never matches:
+   **`document-attach.test.ts` stays green**. Failure scenario: in a pod session (`run`/`attach`),
+   a user attaches a PDF of more than 2000 pages. If this branch regresses, the attach fails with
+   "too many pages" instead of sending the first 100 pages plus the `[pages … not included]`
+   footer. No test would catch it. Fix: port the P4 test (a fake extractor that answers
+   `too-many-pages`; assert the calls `[{}, {pages:"1-100"}]` and the footer in `document{text}`).
+   Better still, move the retry into one pure helper that both ends call, so the two copies cannot drift.
+
+**Gate:** the 11 touched test files: 208 pass, 0 fail. `bun run typecheck` exit 0.
+`bun run lint`: 1782 files, clean. The full suite was not re-run.
+
+**Mutations** (each applied with a direct edit, the owning tests run, then reverted. Afterwards
+`git status --porcelain` was empty):
+
+| mutation | result |
+|---|---|
+| `RemoteSession.sendPrompt` passes `undefined` instead of `turn.documents` | RED 2 (the RemoteSession→`session/prompt` tests) |
+| `useAttachments` runs with `documents: []` | RED 2 (P5a, P5b frames) |
+| `document-input.ts` §7 gate (`servesModel` + `upload`) disabled | RED 2 (unit test + the `RemoteClient` test) |
+| laptop `too-many-pages` retry never taken | **survives**: finding 1 |
+
+**Attacks tried:**
+- **PDF bytes reaching a pod.** The pod daemon advertises `input:"client"` (`connection.ts:774`), which maps to `laptop`, and only `document{text}` is sent. An `upload` claim from a client that serves the model is OFF. Holds.
+- **The extractor on the Ink thread.** `extractPdf` is the worker-backed `createPdfExtractor` (`tools/src/pdf/extract.ts:110`), and it is injected only beside `modelProvider` (`local-runtime.ts:1050`). Holds.
+- **A keyed re-send after a drop.** `ActiveTurn.documents` is carried, and M1 is killed. Holds.
+- **Opening the session when documents are off.** `RemoteSession.attachDocument` checks the mode before `open()`. Holds.
+- **Single broker and RPC peer.** P5 does not touch them. Holds.
+- **A mixed image+PDF drop with images off** (`attach-draft.ts:115`). The whole drop is refused with the images notice. This is loud and documented, not silent. Low; not raised.
+- **The `withDocuments` overCap value is discarded** (`attach-draft.ts:130`). The image path has the same race behaviour. Low.
+
+**Executor behaviour:** the Execution section is honest, and its drift notes (a)–(f) match the
+code. Its mutation table omits the duplicated retry, which is the only branch that escapes the tests.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; the SAME model family as the P5 executor, so
+shared blind spots are possible)
+
+### Round 2 (P5)
+
+**Verdict: APPROVE.** The P5 finding is fixed and pinned. `git diff HEAD~1` has nothing new at HIGH or MEDIUM.
+
+- **#1 fixed, and done the better way.** The retry is now a single pure helper,
+  `extractAttachedPdf` (`packages/core/src/pdf-text.ts:579`). Both ends call it: the daemon
+  (`prompt-documents.ts:143`) and the laptop (`remote-client.ts:2316`). The behaviour is unchanged:
+  the same signal goes to both calls, and only `too-many-pages` is retried.
+- **Mutation: the retry in the helper never triggers.** RED 4: two core unit tests, the daemon's
+  `resolvePromptDocuments` test, and the new laptop-mode test (`[{}, {pages:"1-100"}]` + the footer
+  `[pages 101-2500 not included]` + zero frames).
+- **Mutation: the client skips the helper and calls `extract` directly.** RED 1 (the new laptop test).
+- Both mutations were reverted, and `git status --porcelain` was empty.
+- **Regressions:** `packages/client` + `pdf-text` + `prompt-documents` + the two `pdf-attach` TUI
+  files: 891 pass, 0 fail. `bun run typecheck` exit 0. `bun run lint`: 1782 files, clean.
+  The full suite was not re-run.
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; the SAME model family as the executor)
+
+### P6 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (two MEDIUM; the code paths are right, but tests don't pin them).
+
+1. **MEDIUM — the background (offline / send-later) wire path for PDFs has no test pinning it.**
+   `apps/mobile/src/outbox-session.ts:129` is the only place where `documents` reaches
+   `session.send` for a driver-run item. Mutation: `documents.length === 0` → `>= 0` (so PDFs are
+   always dropped) → **2340 pass, 0 fail** across `apps/mobile/test`. Failure scenario: a PDF
+   queued while offline goes out with no document. The send succeeds and nothing says the file
+   was lost. M4/M5 cover the controller and the screen's folding prompt, but not this port. The
+   same mutation run also left two smaller gaps unpinned, also surviving: `reuploaded()` keeping
+   the stale `document{ref}` block (`outbox.ts:275`), so one re-upload is wasted and the item is
+   then refused; and `isDocument` not validating the stored block (`outbox-store.ts:205`).
+2. **MEDIUM — an older build half-loads a new outbox file.** `OUTBOX_SCHEMA_VERSION` stays 1
+   (`outbox-store.ts:34`), and the old `isItem` ignores unknown fields. After a downgrade (a
+   dev build or TestFlight rollback), a pending item with `documents` loads and is sent as text
+   plus photos only. The PDF disappears without a word, and a PDF-only item goes out as an empty
+   prompt. That breaks §7's on-disk rule ("refuses loudly; never half-loads"). Fix: bump the
+   version when an item carries documents, or write such items so an old build refuses them.
+
+**Gate** (P6 scope): the 8 touched/new test files: 106 pass, 0 fail; `apps/mobile/test`:
+2340 pass, 0 fail; `bun run typecheck` clean; `bun run lint` 1792 files, clean. Full `bun test`
+was not re-run.
+**Mutations** (temporary edits, reverted; `git status` clean afterwards): the 3 above all survived.
+**Attacks that found nothing:** `laptop`/`off` never pick (checked at the pick, not only the
+sheet; §7 pod rule holds; `attachDocument` stays the client's one session path);
+`takeChips` sends only `ready` chips, so `documentBlocksOf` never drops an un-attached file
+from a live send; PDF copies are protected from pruning (`photo-copies.ts:148`); full-file read
+before the size check matches `photo-source.ts:99` (not new); copy collisions throw instead of
+swapping files (`overwrite:false` + seq).
+**Executor:** honest drift log (a–g), and the screen-path bug was found red-first (M5). The
+mutation table left out the driver's own session port.
+
+*— claude-opus-5-5, 2026-11-17* (fresh context; same model family as the P4/P5 reviewers, different from the P6 executor)
+
+### Fix round 1 — P6 review (two MEDIUM: the unpinned driver port, the half-loaded older build) · executed by `claude-opus-5-5`, 2026-11-17
+
+Both findings were test/logic gaps, not broken paths: nothing in this round
+changed a happy-path behaviour except the outbox file's version.
+
+**#1 (MEDIUM) — the driver's session port is now pinned.** New file
+`apps/mobile/test/outbox-session.test.ts` (3 tests) drives `outboxSessionOf`'s
+`prompt` against a fake `RemoteSession` that records what `send` was given:
+an item's documents reach `session.send`; an item with none passes NO
+`documents` key at all (not `[]`, so a pre-D7 frame is byte-identical); and the
+call settles at `onAccepted` (a turn running on does not hold the item).
+Red-first: with `documents.length === 0` mutated to `>= 0` in
+`outbox-session.ts:127` the first test fails on `documents` (`undefined` vs the
+block) — the reviewer's exact mutation, which previously survived all 2340
+`apps/mobile` tests.
+
+The finding's two smaller unpinned gaps are also pinned, in
+`apps/mobile/test/outbox.test.ts` (`a prompt's documents`):
+- `reuploaded()` drops a stale `document{ref}` block with the photo refs (a
+  kept block makes the one re-upload a no-op — `pendingDocuments` finds nothing
+  — so the item is refused for good and the PDF is never re-put). Mutation:
+  `{...document}` instead of `{file, name}` → red.
+- plus the neighbours a future edit would break first: `documentsOf` on an
+  item composed before D7, `pendingDocuments` → `withDocumentBlock` →
+  `documentBlocksOf`, and `reuploaded` adding no `documents` field when there
+  is nothing to clear.
+- `apps/mobile/test/outbox-store.test.ts`: a stored block that is not the
+  wire's shape is corrupt. Mutation: `DocumentContentSchema.safeParse(...).success
+  || true` in `isDocument` → red.
+
+**#2 (MEDIUM) — the outbox file's version now follows its content.**
+`OUTBOX_SCHEMA_VERSION` stays `1`; a new `OUTBOX_SCHEMA_VERSION_DOCUMENTS = 2`
+(`outbox-store.ts:34`) is written by `serializeOutbox` when any item carries a
+document, and `parseFile` accepts both (`READABLE_VERSIONS`). The asymmetry is
+the point: a file with no PDFs stays v1, so a downgrade keeps working for every
+outbox it CAN read; a file with one says v2, so an older build answers
+`refused` and leaves it untouched instead of loading the item, dropping the PDF
+silently and sending a PDF-only item as an empty prompt (AGENTS §7). Tests: a
+document file serialises as v2 while a plain one stays v1 (mutation: always
+`OUTBOX_SCHEMA_VERSION` → red), and a v2 file loads whole with its blocks
+intact.
+
+**Deliberately NOT done** (a rejected shape, recorded so it is not re-proposed):
+re-deriving the version on load and refusing a mismatch (`v1` with documents ⇒
+corrupt). It buys nothing a reader needs — this build reads such a file whole —
+and costs a `corrupt` verdict on a person's pending message, which sets it
+aside. The version is a WRITER's promise, checked on the older side that cannot
+read it; that is where the refusal belongs.
+
+**Drift from the Implementation:** its Design bullet said "`schemaVersion`
+stays 1". Amended in place (Files §4) rather than left stale — it is the one
+line the plan got wrong, and the P6 review is why.
+
+**Gate:** `bunx tsc --noEmit` exit 0; `bunx tsc -p apps/mobile` exit 0;
+`bun run lint` 1793 files, clean (0 errors, 0 warnings — the baseline). The
+touched files: 48 pass, 0 fail (`outbox` + `outbox-store` + `outbox-session`),
+and the wider 5-file outbox set 103 pass, 0 fail. Full `bun test`: 13060 pass,
+5 skip, **1 fail** —
+`packages/daemon/test/session-log-store.test.ts:815` (fork T4,
+`forkTemps` 1 vs 2). Not mine: my diff is `apps/mobile` + this doc only, that
+file passes in isolation twice and as a whole directory (1316 pass, 0 fail), and
+it reads a clock-free `Bun.sleep(60)` against an async write — a load-dependent
+flake under a 931-file run. Unverified beyond that (it did not reproduce), and
+worth a `docs/library-bugs.md` entry rather than a silent re-run.
+
+*— claude-opus-5-5, 2026-11-17*
+
+### Round 2
+
+**Verdict: APPROVE** — both findings are fixed, and each one is pinned by a test that I made fail with a mutation.
+
+- **Finding 1 (background-send port):** with `outbox-session.ts:129` mutated to `>= 0`, the new
+  `outbox-session.test.ts` fails. With `reuploaded` keeping the old block, `outbox.test.ts` fails.
+  With `isDocument` accepting anything, `outbox-store.test.ts` (the corrupt-block test) fails.
+- **Finding 2 (downgrade):** `serializeOutbox` writes `schemaVersion: 2` exactly when an item
+  carries a document (`outbox-store.ts:313`). It writes 1 otherwise, so an older build keeps
+  reading outboxes without PDFs. Mutation "always v1" → the v2-write test fails. Mutation
+  "read v1 only" (tried alone) → the v2-load test fails. An older build refuses the whole file
+  and leaves it untouched. That makes all of that computer's pending items unsendable on the
+  old build, but loudly and with nothing lost, which is what §7 asks for.
+- **Regressions:** `apps/mobile/test` 2350 pass, 0 fail; `bun run typecheck` clean; `bun run
+  lint` 1793 files, clean. Each mutation was reverted, and `git status` was clean afterwards.
+  Full `bun test` was not re-run (the diff touches only the mobile outbox).
+
+*— claude-opus-5-5, 2026-11-17* (fresh context, same reviewer as round 1)

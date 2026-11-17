@@ -23,7 +23,7 @@
  *   (only the person's own "Queue as steer" does that, and that is a new act
  *   with its own key against the turn it is bound to).
  */
-import type { AttachmentRef } from "@tentacle/protocol";
+import type { AttachmentRef, DocumentContent } from "@tentacle/protocol";
 import type { LocalPhoto } from "./transcript-rows.ts";
 
 /** One photo of an item: the COPY in the app's sandbox, and its ref once uploaded. */
@@ -36,6 +36,25 @@ export interface OutboxPhoto {
   readonly name: string;
   /** Present once the daemon holds the whole blob (content-addressed: recomputed on a resume). */
   readonly ref?: AttachmentRef;
+}
+
+/**
+ * One document of an item (docs/feat/pdf-read.md D7): the COPY in the app's
+ * sandbox, and the wire block it became.
+ *
+ * There is no blob of our own here: `RemoteSession.attachDocument` decides at
+ * send whether the bytes go up (`document{ref}`) or the daemon expects this
+ * client to extract (`document{text}`), and its answer is what `block` keeps.
+ * A `block` on disk is therefore what a resume must NOT redo: it can name an
+ * `attachment/put` this phone already paid for, or text a pod's daemon awaits.
+ */
+export interface OutboxDocument {
+  /** Path of the copy (`pdf-source.ts` writes it `overwrite: false`). */
+  readonly file: string;
+  /** Sanitised by `pdf-input.ts`'s `pdfName` (never empty: the wire requires one). */
+  readonly name: string;
+  /** Present once `attachDocument` answered (the two wire shapes share nothing else). */
+  readonly block?: DocumentContent;
 }
 
 /** A prompt (a new turn) or a steer (a message into the turn it was typed during). */
@@ -87,6 +106,12 @@ export interface OutboxItem {
   readonly kind: OutboxKind;
   readonly text: string;
   readonly photos: readonly OutboxPhoto[];
+  /**
+   * The prompt's attached PDFs (docs/feat/pdf-read.md D7), in the person's pick
+   * order after the photos. Absent in an item composed before this build (and
+   * in every item with no file), which is not corrupt: `documentsOf` reads both.
+   */
+  readonly documents?: readonly OutboxDocument[];
   /** The prompt's idempotency key (`session/prompt` `turnId`). */
   readonly turnId: string;
   /** The steer's key (`session/enqueue` `id`). */
@@ -109,6 +134,7 @@ export interface ComposeInput {
   readonly kind: OutboxKind;
   readonly text: string;
   readonly photos?: readonly OutboxPhoto[];
+  readonly documents?: readonly OutboxDocument[];
   readonly basis: Basis;
   /** For a steer: the turn the person typed it during. */
   readonly steerTurnId?: string | null;
@@ -130,6 +156,9 @@ export function createItem(input: ComposeInput, mint: MintKey): OutboxItem {
     kind: input.kind,
     text: input.text,
     photos: input.photos ?? [],
+    ...(input.documents === undefined || input.documents.length === 0
+      ? {}
+      : { documents: input.documents }),
     turnId: mint(),
     enqueueId: mint(),
     steerTurnId: input.kind === "steer" ? (input.steerTurnId ?? null) : null,
@@ -237,6 +266,14 @@ export const reuploaded = (item: OutboxItem): OutboxItem => ({
     mimeType: photo.mimeType,
     name: photo.name,
   })),
+  // A document's block goes with them: a `document{ref}` a daemon no longer
+  // holds is exactly the `not_uploaded` case, and re-running `attachDocument`
+  // is what re-puts the bytes (its own capability check is repeated too).
+  ...(item.documents === undefined
+    ? {}
+    : {
+        documents: item.documents.map((document) => ({ file: document.file, name: document.name })),
+      }),
   reuploaded: true,
 });
 
@@ -270,6 +307,42 @@ export const localPhotosOf = (item: OutboxItem): readonly LocalPhoto[] =>
 /** The photos still to upload, by index (one at a time: ≤ 15 MiB of bytes in JS memory). */
 export const pendingUploads = (item: OutboxItem): readonly number[] =>
   item.photos.flatMap((photo, index) => (photo.ref === undefined ? [index] : []));
+
+/** The item's documents, `[]` when it has none (an item composed before D7). */
+export const documentsOf = (item: OutboxItem): readonly OutboxDocument[] => item.documents ?? [];
+
+/**
+ * The documents still to hand to the session, by index — the PDF counterpart of
+ * `pendingUploads`. `attachDocument` is what uploads (or extracts), so a
+ * document counts as done once its block is on the item.
+ */
+export const pendingDocuments = (item: OutboxItem): readonly number[] =>
+  documentsOf(item).flatMap((document, index) => (document.block === undefined ? [index] : []));
+
+/** The item with one document's wire block recorded (idempotent; the copy stays until it is sent). */
+export function withDocumentBlock(
+  item: OutboxItem,
+  index: number,
+  block: DocumentContent,
+): OutboxItem {
+  return {
+    ...item,
+    documents: documentsOf(item).map((document, at) =>
+      at === index ? { file: document.file, name: document.name, block } : document,
+    ),
+  };
+}
+
+/**
+ * The `document` blocks a prompt names, in the item's order.
+ *
+ * A document with no block is NOT named: the driver only prompts once every one
+ * of them has been attached, so a missing block here is a bug, not a partial
+ * prompt (and the wire would refuse a half-attached message only after it was
+ * sent).
+ */
+export const documentBlocksOf = (item: OutboxItem): readonly DocumentContent[] =>
+  documentsOf(item).flatMap((document) => (document.block === undefined ? [] : [document.block]));
 
 /**
  * A typed refusal, as what the outbox does with it — by error CLASS or CODE,

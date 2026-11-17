@@ -138,12 +138,14 @@ export async function prunePhotoCopies(
 }
 
 /**
- * Every copy one computer's store still names: its items' photo files and its
- * drafts' chips. What `prunePhotoCopies` must never remove.
+ * Every copy one computer's store still names: its items' photo files, its items'
+ * DOCUMENT files (a PDF pick's copy, docs/feat/pdf-read.md D7) and its drafts'
+ * chips. What `prunePhotoCopies` must never remove.
  */
 export function inUseCopies(data: OutboxData): readonly string[] {
   return [
     ...data.items.flatMap((item) => item.photos.map((photo) => photo.file)),
+    ...data.items.flatMap((item) => (item.documents ?? []).map((document) => document.file)),
     ...data.drafts.flatMap((draft) => draft.photos),
   ];
 }

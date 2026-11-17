@@ -40,6 +40,7 @@ import {
   type NativeSyntheticEvent,
   Platform,
   Pressable,
+  type ScrollView as RNScrollView,
   RefreshControl,
   StyleSheet,
   Text,
@@ -78,7 +79,9 @@ import {
 import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import { linkPrompt } from "../links.ts";
+import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
 import { rowTimeLabel } from "../row-swipe.ts";
+import { type SectionId, scheduledSection } from "../session-info.ts";
 import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
 import { dictationLocale } from "../speech-locale.ts";
@@ -610,12 +613,21 @@ export function SessionScreen({
   // The header's "…" menu (owner feedback #3 + Session info): it opens with the
   // sheet's read, then the phone-local copy actions.
   const [menuOpen, setMenuOpen] = useState(false);
-  const menu = menuOpen ? sessionMenu(rows) : [];
+  const menu = menuOpen ? sessionMenu(rows, state.schedules?.length ?? 0) : [];
   // Session info (docs/feat/mobile-session-info.md): the sheet, and which row the
   // person expanded. Every value it draws is decided in `session-info.ts`.
   const [infoOpen, setInfoOpen] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const info = state.info;
+  // A reveal in flight (docs/feat/mobile-hub.md H4a): the hub's Scheduled item
+  // opens this sheet scrolled to SCHEDULED WAKES. The rule is `session-info.ts`'s
+  // (`revealStart`/`revealStep`) and the fold is `reveal-report.ts`'s; the screen
+  // only holds the value and scrolls. It is NOT render state: the reveal draws
+  // nothing, and a render value would lose every report but the last of one
+  // layout pass (fix M1 — the sheet then re-scrolled on every relayout above the
+  // band, because the want was never spent).
+  const revealTrack = useRef<RevealTrack>(trackReveal());
+  const infoScroller = useRef<ComponentRef<typeof RNScrollView>>(null);
   // Owner decision 5: tapping the TITLE renames it (the field is the screen's).
   const renaming = state.renaming;
   // The decision sheet's own state (which item the person tapped, and why).
@@ -650,6 +662,31 @@ export function SessionScreen({
   const openActivity = () => {
     focusActivity(null);
     setActivityOpen(true);
+  };
+  // Session info has ONE opening path (docs/feat/mobile-hub.md H4a): the header's
+  // ring, the "…" menu and the hub's Scheduled item all come through here, so a
+  // reveal is never a second way in. `revealTo` is the section to land on —
+  // already resolved by `scheduledSection`, so it is never one the sheet will not
+  // draw.
+  const openInfo = (revealTo: SectionId | null = null) => {
+    setExpanded(null);
+    startReveal(revealTrack.current, revealTo);
+    setInfoOpen(true);
+    void controller.openInfo();
+  };
+  // The hub's Scheduled item: Session info, scrolled to SCHEDULED WAKES — the one
+  // place the wakes live and can be deleted, so the hub reaches it rather than
+  // growing a second wakes screen.
+  const openScheduled = () => openInfo(scheduledSection(info?.view ?? null));
+  // One band laid out in the sheet: scroll once, when the WANTED band has reported
+  // (the rules — "once", "only the wanted one" — are `revealStep`'s, folded by
+  // `reveal-report.ts`). The report is read and written synchronously, so the
+  // several bands of ONE pass are each folded in rather than overwriting a render
+  // value; the scroll is issued here, outside any React updater.
+  const revealOnLayout = (id: SectionId, y: number) => {
+    reportReveal(revealTrack.current, { id, y }, (y) => {
+      infoScroller.current?.scrollTo({ y, animated: true });
+    });
   };
   return (
     <View
@@ -702,7 +739,7 @@ export function SessionScreen({
                 <ContextRing
                   palette={palette}
                   percent={state.view.headerContext.percent}
-                  onPress={() => setInfoOpen(true)}
+                  onPress={() => openInfo()}
                   testID="session-header-context"
                 />
               )}
@@ -1044,10 +1081,17 @@ export function SessionScreen({
           onMic={() => voice?.tapMic()}
           level={voiceView.level}
           onPhoto={() =>
-            Alert.alert("Add a photo", undefined, [
+            Alert.alert("Add an attachment", state.compose.attach.reason ?? undefined, [
               { text: "Cancel", style: "cancel" },
               { text: "Photo Library", onPress: () => void controller.pickPhoto("library") },
               { text: "Camera", onPress: () => void controller.pickPhoto("camera") },
+              // Offered ONLY when this session can read one (D7's pure
+              // `attachSheet`): a row that refuses at send is worse than no row,
+              // and on a pod session it would put PDF bytes on a wire AGENTS §7
+              // forbids.
+              ...(state.compose.attach.items.includes("pdf")
+                ? [{ text: "File (PDF)", onPress: () => void controller.pickDocument() }]
+                : []),
             ])
           }
           bottomPadding={bottomPadding}
@@ -1077,7 +1121,7 @@ export function SessionScreen({
           visible={menuOpen}
           testID="session-menu-sheet"
           cancelTestID="session-menu-cancel"
-          message={menu.every((action) => action.id === "info") ? "Nothing to copy yet" : undefined}
+          message={menu.every((action) => action.text === "") ? "Nothing to copy yet" : undefined}
           actions={menu.map((action) => ({
             label: action.label,
             testID: `session-menu-${action.id}`,
@@ -1085,8 +1129,12 @@ export function SessionScreen({
               setMenuOpen(false);
               if (action.id === "info") {
                 // A READ, never a copy: it opens the sheet and starts the pulls.
-                setInfoOpen(true);
-                void controller.openInfo();
+                openInfo();
+                return;
+              }
+              if (action.id === "scheduled") {
+                // The same sheet, landed on its wakes band (H4a).
+                openScheduled();
                 return;
               }
               void Clipboard.setStringAsync(action.text).then(
@@ -1107,6 +1155,10 @@ export function SessionScreen({
             onAutoAccept={(on) => void controller.setAutoAccept(on)}
             onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
             onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}
+            scrollRef={(node) => {
+              infoScroller.current = node;
+            }}
+            onSectionLayout={revealOnLayout}
             onRefresh={() => void controller.refreshInfo()}
             onRetry={() => void controller.refreshInfo()}
             expanded={expanded}

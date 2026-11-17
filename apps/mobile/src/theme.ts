@@ -176,6 +176,59 @@ export function paletteFor(scheme: "light" | "dark" | null | undefined): Palette
 export const lightPalette: Palette = light;
 export const darkPalette: Palette = dark;
 
+/**
+ * The chart's own tokens (docs/feat/model-charts.md, *iPhone visual language
+ * (rev 2)*): the picked mockup's chrome values per mode (`modern-manifest.json`),
+ * plus the app's own text colours and the page the chart sits on (no card: the
+ * dot rings cut out of `page`). Series colours are core's `CHART_PALETTE`.
+ */
+export interface ChartTokens {
+  readonly guide: string;
+  readonly guideStrong: string;
+  readonly track: string;
+  readonly mutedBar: string;
+  readonly mutedLine: string;
+  /** Slot 1 at 12 % (light) / 20 % (dark). */
+  readonly seriesSoft: string;
+  readonly label: string;
+  readonly secondary: string;
+  readonly surface: string;
+  /** The hero pill's rise / fall. */
+  readonly up: string;
+  readonly down: string;
+}
+
+const chartLight = {
+  guide: "rgba(60,60,67,0.22)",
+  guideStrong: "rgba(60,60,67,0.35)",
+  track: "#F0F0F3",
+  mutedBar: "#D5D5DA",
+  mutedLine: "#AEAEB2",
+  seriesSoft: "rgba(7,134,166,0.12)",
+} as const;
+
+const chartDark = {
+  guide: "rgba(242,241,236,0.16)",
+  guideStrong: "rgba(242,241,236,0.28)",
+  track: "#2B2B29",
+  mutedBar: "#4A4945",
+  mutedLine: "#77756F",
+  seriesSoft: "rgba(15,160,189,0.2)",
+} as const;
+
+/** The chart tokens for the palette's mode. */
+export function chartTokensFor(palette: Palette): ChartTokens {
+  const chrome = palette === dark ? chartDark : chartLight;
+  return {
+    ...chrome,
+    label: palette.label,
+    secondary: palette.sec,
+    surface: palette.page,
+    up: palette.green,
+    down: palette.red,
+  };
+}
+
 /** One iOS text style: size / line height / weight (+ tracking). */
 export interface TextStyleToken {
   readonly fontSize: number;

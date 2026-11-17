@@ -7,13 +7,16 @@
 import type { Agent } from "@tentacle/agent";
 import type { AttachmentRef, JobController, PermissionBroker } from "@tentacle/core";
 import type { JobOutputResult, JobRow } from "@tentacle/protocol";
+import type { DocumentContent } from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
 import type { CapKind, CapsView } from "./capability-toggles.ts";
+import type { ChartGlyphs } from "./chart-lines.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
+import type { DocumentMode } from "./pdf-attach.ts";
 import type { AutoAcceptFeed, AutoAcceptSharedFeed } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedMessage, ReturnedCause } from "./queued.ts";
 import type { ScheduleDockRow } from "./schedule-view.ts";
@@ -55,7 +58,15 @@ export interface SessionController {
   send(
     prompt: string,
     signal?: AbortSignal,
-    opts?: { readonly skill?: string; readonly attachments?: readonly AttachmentRef[] },
+    opts?: {
+      readonly skill?: string;
+      readonly attachments?: readonly AttachmentRef[];
+      /**
+       * Attached PDFs, already turned into wire blocks by `attachDocument`
+       * (docs/feat/pdf-read.md D6) — the TUI never builds one itself.
+       */
+      readonly documents?: readonly DocumentContent[];
+    },
   ): AsyncIterable<SessionEvent>;
   /**
    * Attach one image to this session and resolve its ref
@@ -77,6 +88,25 @@ export interface SessionController {
   ): Promise<AttachmentRef>;
   /** What this session may do with an image right now (structurally `ImageInput`). */
   imageInput(): AttachMode;
+  /**
+   * Attach one PDF to this session and resolve the wire block a prompt names
+   * (docs/feat/pdf-read.md D6): upload-then-`ref` when the daemon extracts, or
+   * the LAPTOP's own extraction as `text` for a pod (AGENTS §7). Rejects with
+   * a typed error (`DocumentsUnavailableError`, `RangeError`,
+   * `DocumentExtractError`) — never a silent drop. Required for the same reason
+   * as `attachImage`: a session that takes no PDFs says so THROUGH
+   * `documentsInput()` (`{kind: "off", reason}`).
+   */
+  attachDocument(
+    bytes: Uint8Array,
+    meta: { readonly name: string },
+    opts?: {
+      readonly signal?: AbortSignal;
+      readonly onProgress?: (sent: number, size: number) => void;
+    },
+  ): Promise<DocumentContent>;
+  /** What this session may do with a PDF right now (structurally `DocumentsInput`). */
+  documentsInput(): DocumentMode;
   /** Compact the conversation (summarise + replace history); optional. */
   compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
   /**
@@ -607,4 +637,11 @@ export interface AppProps {
    * tier (the dock's 100/80/56, docs/feat/subagent-panel.md).
    */
   readonly columns?: number;
+  /**
+   * A chart's plot glyphs (`tui.chartGlyphs`, docs/feat/model-charts.md D5):
+   * absent → `braille` (2×4 dots per cell); `blocks` is for a font with no
+   * braille, which a terminal cannot report. A LAPTOP-ONLY display setting:
+   * constant for the App's lifetime, never carried to a pod.
+   */
+  readonly chartGlyphs?: ChartGlyphs;
 }

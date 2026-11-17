@@ -365,6 +365,10 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       // image-less controller with no reason shown.
       "attachImage",
       "imageInput",
+      // The same seam one kind over (docs/feat/pdf-read.md D6): a PDF's block
+      // comes from the session (it alone knows upload vs laptop-extraction).
+      "attachDocument",
+      "documentsInput",
       "compact",
       "clear",
       "openForReset",

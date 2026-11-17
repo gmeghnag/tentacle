@@ -16,6 +16,7 @@ export * from "./workload-shell-frame.ts";
 export * from "./concurrency.ts";
 export * from "./search.ts";
 export * from "./search-tool.ts";
+export * from "./chart.ts";
 export * from "./subagent-tools.ts";
 // PDF text extraction (docs/feat/pdf-read.md D2). Main-thread API only: pdf.js
 // itself loads inside the worker, never through this index.

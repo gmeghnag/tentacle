@@ -30,6 +30,15 @@ function outboxOf(): string {
   return app.slice(start, end);
 }
 
+/** `App.tsx`'s `composeWiring`, from its declaration to the session-info wiring that follows it. */
+function composeWiring(): string {
+  const start = app.indexOf("function composeWiring(");
+  expect(start).toBeGreaterThan(-1);
+  const end = app.indexOf("function infoWiring(", start);
+  expect(end).toBeGreaterThan(start);
+  return app.slice(start, end);
+}
+
 describe("item 1: the outbox drives the SCREEN's session, never a second handle", () => {
   test("the driver's session source is the folding handle (mutation: `client.newSession` here → the screen's turn never ends)", () => {
     const body = outboxOf();
@@ -44,19 +53,20 @@ describe("item 1: the outbox drives the SCREEN's session, never a second handle"
   });
 
   test("the screen hands the driver its handle accessor (mutation: drop `handle` → the port has no session)", () => {
-    const start = app.indexOf("function composeWiring(");
-    expect(start).toBeGreaterThan(-1);
+    const body = composeWiring();
     // The screen's own bindings: `driver: outbox.driver` and `handle: …` — the
     // accessor `foldingOutboxSession` reads.
-    expect(app.slice(start, start + 600)).toContain("driver: outbox.driver");
-    expect(app.slice(start, start + 900)).toContain("handle:");
+    expect(body).toContain("driver: outbox.driver");
+    expect(body).toContain("handle:");
   });
 });
 
 describe("item 5: the 'Send photos at original size' switch reaches the picker", () => {
   test("the photo port is built with the stored setting (mutation: drop it → every photo downscaled)", () => {
-    const start = app.indexOf("function composeWiring(");
-    const body = app.slice(start, start + 1600);
+    // The whole function body, not a fixed character window: a slice of N chars
+    // goes stale the moment an unrelated port is added above (it did, when the
+    // PDF adapter landed — the guard then read text it never aimed at).
+    const body = composeWiring();
     expect(body).toContain("sendPhotoOriginalSize");
     expect(body).toContain("adaptPick(await pickFromLibrary(taken, ");
   });

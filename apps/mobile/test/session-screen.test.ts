@@ -500,6 +500,59 @@ describe("stopTurn — the hub's Stop (docs/feat/mobile-hub.md P2)", () => {
     expect(() => screen.stopTurn()).not.toThrow();
     expect(screen.state().transcript.turn).toBeNull();
   });
+
+  test("a session closed from another device: the hub's Stop aborts nothing", async () => {
+    // Review round 3's surviving mutation: `stopTurn` passing `ended: null` was
+    // 22/0, i.e. the ended guard of the hub's Stop was unpinned. With an OWN turn
+    // still streaming, a Stop that ignored `ended` would abort that stream — a
+    // local cancel of a turn the daemon has already closed the session under,
+    // which the composer's own truth table refuses (`ended` ⇒ nothing).
+    const signals: AbortSignal[] = [];
+    const listeners: ((activity: SessionActivity) => void)[] = [];
+    const handle: SendableHandle = {
+      open: () => Promise.resolve(),
+      detach: () => Promise.resolve(),
+      watch: (fn) => {
+        listeners[0] = fn;
+        return () => {
+          listeners.length = 0;
+        };
+      },
+      send: async function* (prompt: string, signal?: AbortSignal) {
+        yield { type: "user_message", text: prompt } as SessionEvent;
+        if (signal !== undefined) {
+          signals.push(signal);
+        }
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        yield { type: "turn_end", reason: "cancelled" } as SessionEvent;
+      },
+    };
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "e2e-mac",
+      controller: createSessionController<SendableHandle>({ newSession: () => handle }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    await screen.open();
+    screen.setDraft("a long turn");
+    screen.press();
+    await settle();
+    expect(signals.length).toBe(1);
+    expect(signals[0]?.aborted).toBe(false);
+    expect(screen.state().view.composer.button).toBe("stop");
+    // The close travels the same listener this screen folded its turn on.
+    listeners[0]?.({ kind: "closed", reason: "deleted" });
+    await settle();
+    expect(screen.state().view.editable).toBe(false);
+    screen.stopTurn();
+    await settle();
+    expect(signals[0]?.aborted).toBe(false);
+  });
 });
 
 describe("sending and stopping, continued", () => {

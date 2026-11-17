@@ -1,0 +1,59 @@
+appId: so.tentacle.app
+---
+# 32 (docs/feat/model-charts.md T7, slice C7): the chart's interactions. The
+# in-place `Grafico | Tabella` toggle swaps the plot for the data table; a tap on
+# the plot opens the full screen (a landscape-capable modal), where a series
+# chip switches a series off, `Tabella` shows the table, and ✕ closes it.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${CHART2_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "CHART31"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "chart-mocked-.*-plot"
+    timeout: 30000
+# In place: the table, then back to the chart.
+- tapOn:
+    id: "chart-mocked-.*-seg-table"
+- assertVisible:
+    id: "chart-mocked-.*-table"
+- tapOn:
+    id: "chart-mocked-.*-seg-chart"
+- assertVisible:
+    id: "chart-mocked-.*-plot"
+# Full screen: a tap on the plot.
+- tapOn:
+    id: "chart-mocked-.*-plot"
+- extendedWaitUntil:
+    visible:
+      id: "chart-mocked-.*-full-close"
+    timeout: 5000
+- assertVisible:
+    id: "chart-mocked-.*-full-kpis"
+- tapOn:
+    id: "chart-mocked-.*-full-chip-1"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "32-chart-full-series-off"
+- tapOn:
+    id: "chart-mocked-.*-full-table-toggle"
+- assertVisible:
+    id: "chart-mocked-.*-full-table"
+- tapOn:
+    id: "chart-mocked-.*-full-close"
+- assertNotVisible:
+    id: "chart-mocked-.*-full-close"
+- assertVisible:
+    id: "chart-mocked-.*-plot"

@@ -14,15 +14,27 @@
  */
 import { MAX_ATTACHMENTS_PER_MESSAGE, formatBytes } from "@tentacle/core";
 import { attachmentCandidateText } from "./attach-candidates.ts";
-import type { AttachedImage } from "./attach-files.ts";
-import { type AttachRefusal, claimsImagePath, refusalText } from "./attach-refusal.ts";
+import type { AttachedDocument, AttachedImage } from "./attach-files.ts";
+import {
+  type AttachRefusal,
+  claimsImagePath,
+  claimsPdfPath,
+  refusalText,
+} from "./attach-refusal.ts";
+import { DOCUMENT_GLYPH, type DocumentMode, documentChipLabel } from "./pdf-attach.ts";
 
 /**
  * What the input box holds besides its text: the chips (each with the bytes a
- * submit uploads) and, while an upload runs, which one and how far it got.
+ * submit sends) and, while an upload runs, which one and how far it got.
+ *
+ * `chips` (images) and `documents` (PDFs, docs/feat/pdf-read.md D6) are two
+ * lists on ONE draft: both count toward the same per-message cap, both are sent
+ * by the same Enter, and both are shown on the same row — a second draft would
+ * be a second cap and a second row to keep in sync.
  */
 export interface AttachDraft {
   readonly chips: readonly AttachedImage[];
+  readonly documents: readonly AttachedDocument[];
   readonly upload: null | {
     /** 0-based chip index, `count` chips in this submit. */
     readonly index: number;
@@ -33,7 +45,7 @@ export interface AttachDraft {
   };
 }
 
-export const EMPTY_DRAFT: AttachDraft = { chips: [], upload: null };
+export const EMPTY_DRAFT: AttachDraft = { chips: [], documents: [], upload: null };
 
 /** What this session may do with an image (structurally `ImageInput`; the TUI does not depend on the client). */
 export type AttachMode =
@@ -51,6 +63,8 @@ export type AttachDecision =
   | {
       readonly kind: "attachments";
       readonly images: readonly AttachedImage[];
+      /** PDFs the paste attached (docs/feat/pdf-read.md D6). */
+      readonly documents: readonly AttachedDocument[];
       readonly refusals: readonly AttachRefusal[];
     }
   | { readonly kind: "text" }
@@ -70,31 +84,64 @@ export interface RouteResult {
  * become chips (and their refusals notices); with images OFF nothing is
  * attached and nothing is inserted — the user is told WHY (decision 10), and a
  * path never silently becomes prompt text.
+ *
+ * A PDF needs BOTH gates (docs/feat/pdf-read.md D6): the session must take
+ * documents (`documentMode`) and images must not be off — one row, one draft,
+ * one Enter, so one refusal decision.
  */
 export function routeDecision(
   draft: AttachDraft,
   decision: AttachDecision,
   mode: AttachMode,
   text = "",
+  documentMode: DocumentMode = mode,
 ): RouteResult {
   if (decision.kind === "text") {
     return { draft, ...(text !== "" ? { insert: text } : {}), notices: [] };
   }
-  if (mode.kind === "off") {
-    // ONE notice: the mode's own sentence, then any refusal that explains a file.
+  if (decision.kind === "refused") {
+    // Nothing attached: the mode's own sentence when images are off (the reason a
+    // file was refused may be the mode, not the file), then the refusals.
+    return {
+      draft,
+      notices: [
+        ...(mode.kind === "off" ? [offNotice(mode.reason)] : []),
+        ...decision.refusals.map(refusalText),
+      ],
+    };
+  }
+  // Images first: an image the session cannot take is refused WHOLE (today's
+  // behaviour), never half attached.
+  if (decision.images.length > 0 && mode.kind === "off") {
     return { draft, notices: [offNotice(mode.reason), ...decision.refusals.map(refusalText)] };
   }
-  if (decision.kind === "refused") {
-    return { draft, notices: decision.refusals.map(refusalText) };
-  }
+  const kept = withChips(draft, decision.images).draft;
+  // A PDF with the session taking none: the chip is NOT added and the sentence
+  // says why (never a chip that could only fail at Enter). With none in the
+  // decision — an image paste, a prose paste — no notice at all: a user who
+  // pasted a PNG must not be told about PDFs.
+  //
+  // The two gates are INDEPENDENT on purpose: a session that takes PDFs answers
+  // `documentsInput` even when `imageInput` is off (a model without vision still
+  // reads a `<file>` block), so a PDF-only paste must not be refused by the
+  // image gate.
+  const documentsOff = decision.documents.length > 0 && documentMode.kind === "off";
+  const reason = documentMode.kind === "off" ? documentMode.reason : "";
+  const next = documentsOff ? kept : withDocuments(kept, decision.documents).draft;
   return {
-    draft: withChips(draft, decision.images).draft,
-    notices: decision.refusals.map(refusalText),
+    draft: next,
+    notices: [
+      ...(documentsOff ? [documentsOffNotice(reason)] : []),
+      ...decision.refusals.map(refusalText),
+    ],
   };
 }
 
 /** `_<reason>_`: the italic shape every notice row uses. */
 const offNotice = (reason: string): string => `_images are off: ${reason}_`;
+
+/** The same shape for a PDF: it is refused WHOLE, never half-attached. */
+const documentsOffNotice = (reason: string): string => `_PDFs are off: ${reason}_`;
 
 /**
  * Append chips, honouring the per-message cap for the whole MESSAGE (the
@@ -105,7 +152,10 @@ export function withChips(
   draft: AttachDraft,
   images: readonly AttachedImage[],
 ): { readonly draft: AttachDraft; readonly overCap: number } {
-  const room = Math.max(0, MAX_ATTACHMENTS_PER_MESSAGE - draft.chips.length);
+  const room = Math.max(
+    0,
+    MAX_ATTACHMENTS_PER_MESSAGE - draft.chips.length - draft.documents.length,
+  );
   const kept = images.slice(0, room);
   if (kept.length === 0) {
     return { draft, overCap: images.length };
@@ -116,8 +166,38 @@ export function withChips(
   };
 }
 
-/** Backspace on an EMPTY input: the last chip goes (decision 13). */
+/**
+ * Append PDFs, against the SAME per-message cap (docs/feat/pdf-read.md D6: the
+ * daemon refuses a prompt with more than `MAX_ATTACHMENTS_PER_MESSAGE`
+ * documents, and one message may hold images and documents together).
+ */
+export function withDocuments(
+  draft: AttachDraft,
+  documents: readonly AttachedDocument[],
+): { readonly draft: AttachDraft; readonly overCap: number } {
+  const room = Math.max(
+    0,
+    MAX_ATTACHMENTS_PER_MESSAGE - draft.chips.length - draft.documents.length,
+  );
+  const kept = documents.slice(0, room);
+  if (kept.length === 0) {
+    return { draft, overCap: documents.length };
+  }
+  return {
+    draft: { ...draft, documents: [...draft.documents, ...kept] },
+    overCap: documents.length - kept.length,
+  };
+}
+
+/**
+ * Backspace on an EMPTY input: the last chip goes (decision 13). Documents go
+ * first when there are any — the row shows images then PDFs, so the rightmost
+ * chip (the one Backspace is aiming at) is the last document.
+ */
 export function removeLastChip(draft: AttachDraft): AttachDraft {
+  if (draft.documents.length > 0) {
+    return { ...draft, documents: draft.documents.slice(0, -1) };
+  }
   if (draft.chips.length === 0) {
     return draft;
   }
@@ -125,6 +205,11 @@ export function removeLastChip(draft: AttachDraft): AttachDraft {
 }
 
 /** The draft as it is while chip `index` of `count` uploads (`sent` of `size` bytes). */
+/**
+ * Upload progress, for a draft of one kind or the other. `kind` is which list the
+ * index counts in — an image upload and a PDF extraction are the SAME row (one at
+ * a time, docs/feat/pdf-read.md D6), so the draft holds one in-flight marker.
+ */
 export function uploadProgress(
   draft: AttachDraft,
   index: number,
@@ -148,9 +233,15 @@ export function draftRefs(draft: AttachDraft): readonly AttachedImage["ref"][] {
 
 /** What Enter does, decided once (never re-derived in the App). */
 export type SubmitPlan =
-  /** Send this text with these chips' refs (the text may be `""` when chips exist). */
-  | { readonly kind: "send"; readonly text: string; readonly images: readonly AttachedImage[] }
-  /** The input is only image PATHS: become chips, send nothing (decision 5). */
+  /** Send this text with these attachments (the text may be `""` when some exist). */
+  | {
+      readonly kind: "send";
+      readonly text: string;
+      readonly images: readonly AttachedImage[];
+      /** PDFs to attach (docs/feat/pdf-read.md D6): the session turns each into a block. */
+      readonly documents: readonly AttachedDocument[];
+    }
+  /** The input is only attachment PATHS: become chips, send nothing (decision 5). */
   | { readonly kind: "convert" }
   /** Refused, with the reason: the text and the chips stay where they are. */
   | { readonly kind: "refuse"; readonly notice: string }
@@ -167,6 +258,8 @@ export interface SubmitInput {
   /** The dock targets an open child (its text is the child's). */
   readonly dockOpen: boolean;
   readonly mode: AttachMode;
+  /** What the session takes as a PDF (docs/feat/pdf-read.md D6); defaults to `mode`. */
+  readonly documentMode?: DocumentMode;
   /** `attachmentCandidateText(text).kind === "paths"` for this text. */
   readonly onlyPaths: boolean;
 }
@@ -195,22 +288,37 @@ export const NOT_AN_IMAGE_NOTICE =
  * the prompt twice (review round 1, finding 2).
  */
 export function submitPlan(input: SubmitInput): SubmitPlan {
+  const documentMode = input.documentMode ?? input.mode;
   if (input.draft.upload !== null) {
     return { kind: "refuse", notice: UPLOADING_NOTICE };
   }
-  if (input.draft.chips.length === 0) {
+  if (input.draft.chips.length === 0 && input.draft.documents.length === 0) {
     return input.onlyPaths ? { kind: "convert" } : { kind: "text" };
   }
-  if (input.mode.kind === "off") {
+  // Each gate applies to its OWN kind, never to the other: a session whose model
+  // takes no images still reads a `<file>` block (docs/feat/pdf-read.md D6), so a
+  // PDF-only message must not be refused by the image gate.
+  if (input.draft.chips.length > 0 && input.mode.kind === "off") {
     return { kind: "refuse", notice: offNotice(input.mode.reason) };
+  }
+  if (input.draft.documents.length > 0 && documentMode.kind === "off") {
+    // The mode changed under the chip (a reconnect, a replaced daemon): the
+    // honest sentence, and the chip stays — never a send that cannot land.
+    return { kind: "refuse", notice: documentsOffNotice(documentMode.reason) };
   }
   if (input.running || input.compacting || input.dockOpen) {
     return {
       kind: "refuse",
-      notice: "_can't send an image while a turn runs — the message is kept here (stop it first)_",
+      notice:
+        "_can't send an attachment while a turn runs — the message is kept here (stop it first)_",
     };
   }
-  return { kind: "send", text: input.text, images: input.draft.chips };
+  return {
+    kind: "send",
+    text: input.text,
+    images: input.draft.chips,
+    documents: input.draft.documents,
+  };
 }
 
 /** The one row the input box shows for the draft, or none. */
@@ -238,7 +346,7 @@ export function looksLikeCommand(text: string): boolean {
     return false;
   }
   const [first = "", ...rest] = trimmed.split(/\s+/);
-  if (claimsImagePath(first)) {
+  if (claimsImagePath(first) || claimsPdfPath(first)) {
     return false;
   }
   // A bare word, or a command with arguments: a command. Several words whose
@@ -250,19 +358,23 @@ export function looksLikeCommand(text: string): boolean {
  * Is this text an unbracketed DRAG that Enter should probe — decision 5's
  * `convert`?
  *
- * Only paths, and at least one of them CLAIMS an image by its extension: the
- * same fact `looksLikeCommand` rests on (a dragged file keeps its extension in
- * every terminal's form). Without it a typed `~/notes.md` + Enter would clear
- * the field, probe the disk and say nothing — a sent message silently lost
- * (review round 1, finding 1). A path with no image extension keeps today's
- * meaning: text to send.
+ * Only paths, and at least one of them CLAIMS an attachment by its extension
+ * (an image or a PDF, docs/feat/pdf-read.md D6): the same fact
+ * `looksLikeCommand` rests on (a dragged file keeps its extension in every
+ * terminal's form). Without it a typed `~/notes.md` + Enter would clear the
+ * field, probe the disk and say nothing — a sent message silently lost
+ * (review round 1, finding 1). A path with no attachment extension keeps
+ * today's meaning: text to send.
  */
 export function imageDropOnly(text: string, options: { readonly home?: string } = {}): boolean {
   if (looksLikeCommand(text)) {
     return false;
   }
   const candidate = attachmentCandidateText(text, options);
-  return candidate.kind === "paths" && candidate.paths.some(claimsImagePath);
+  return (
+    candidate.kind === "paths" &&
+    candidate.paths.some((path) => claimsImagePath(path) || claimsPdfPath(path))
+  );
 }
 
 /**
@@ -301,10 +413,10 @@ export function attachRowView(draft: AttachDraft, width: number): AttachRow | nu
       text: `uploading ${upload.name} ${pct}% (${upload.index + 1}/${upload.count})`,
     };
   }
-  if (draft.chips.length === 0) {
+  if (draft.chips.length === 0 && draft.documents.length === 0) {
     return null;
   }
-  const items = draft.chips.map(chipLabel);
+  const items = [...draft.chips.map(chipLabel), ...draft.documents.map(documentChip)];
   const shown: string[] = [];
   let used = 0;
   for (const [i, item] of items.entries()) {
@@ -326,6 +438,16 @@ export function chipLabel(chip: AttachedImage): string {
   const name =
     chip.ref.name !== undefined && chip.ref.name !== "" ? chip.ref.name : chip.ref.mimeType;
   return `${name} ${formatBytes(chip.ref.size)}`;
+}
+
+/**
+ * A PDF's chip: `report.pdf · reading…` (docs/feat/pdf-read.md D5) for now — the
+ * page count is the DAEMON's fact (it extracts), so the composer never claims
+ * one it has not been told. The glyph says which chip is the document (same row
+ * as the images, no second row).
+ */
+export function documentChip(document: AttachedDocument): string {
+  return `${DOCUMENT_GLYPH} ${documentChipLabel(document.name)}`;
 }
 
 /** How many rows the draft needs (0 or 1): what `inputBoxRows` adds (P8). */

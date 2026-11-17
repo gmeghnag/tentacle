@@ -305,7 +305,7 @@ describe("T8g: Enter with chips mid-turn refuses, keeps both, and sends nothing"
     await m.paste(PNG_PATH); // a chip can be prepared while it runs
     await m.type("what?"); // refused: a turn runs
     const frame = m.frame();
-    expect(frame).toContain("can't send an image");
+    expect(frame).toContain("can't send an attachment");
     expect(frame).toContain("a.png"); // the chip is kept
     for (const r of released.splice(0)) r();
     await delay(120);

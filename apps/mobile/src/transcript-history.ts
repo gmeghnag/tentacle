@@ -8,8 +8,8 @@
  * pinned to the real function by `test/transcript-parity.test.ts`.
  */
 import type { ChatMessage } from "@tentacle/core";
-import { toolLabel } from "@tentacle/core";
-import { type ImageRef, type Row, imageRef } from "./transcript-rows.ts";
+import { splitFileBlocks, toolLabel } from "@tentacle/core";
+import { type ImageRef, type Row, imageRef, mediaRowText } from "./transcript-rows.ts";
 
 /** The context reset's header (mirrors `agent/src/context-reset.ts`; pinned by a test). */
 export const CONTEXT_RESET_HEADER =
@@ -58,6 +58,22 @@ function atOf(times: readonly number[] | undefined, index: number): { at?: numbe
 }
 
 /**
+ * A stored user message's text and its document rows (D5, the TUI's
+ * `userMessageView`): WITH `media` the `<file …>` blocks are stripped — the
+ * model has that text, the person has the file it came from — and each entry
+ * becomes one row. WITHOUT `media` (an older log, a build that dropped the
+ * field) the content is shown RAW: honest degradation, never a guess about
+ * which `<file>` block was a PDF.
+ */
+function userMessageOf(m: ChatMessage): { text: string; documents?: readonly string[] } {
+  const media = m.media;
+  if (media === undefined || media.length === 0) {
+    return { text: m.content };
+  }
+  return { text: splitFileBlocks(m.content).text, documents: media.map(mediaRowText) };
+}
+
+/**
  * Rows for `messages`; `nextKey` mints one key per row (the fold's own counter).
  * `times` is the daemon's `SnapshotResult.times`, index-aligned with `messages`
  * (docs/fix/mobile-open-at-end.md, slice B): a row whose time is `0` (not known
@@ -96,11 +112,13 @@ export function historyRows(
       } else if (m.note !== undefined) {
         rows.push(noteRow(nextKey(), m));
       } else {
+        const own = userMessageOf(m);
         rows.push({
           kind: "user",
           key: nextKey(),
-          text: m.content,
+          text: own.text,
           images: (m.attachments ?? []).map((ref): ImageRef => imageRef(ref)),
+          ...(own.documents === undefined ? {} : { documents: own.documents }),
           ...at,
         });
       }
