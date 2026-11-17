@@ -178,6 +178,17 @@ describe("parseArgs (--only)", () => {
     expect(() => parseArgs(["--only", "--ios", "26"])).toThrow("--only needs");
   });
 
+  test("--hold keeps the run up, the env-free form of E2E_HOLD=1", () => {
+    expect(parseArgs(["--ios", "26", "--udid", "0B43D716", "--hold"])).toEqual({
+      only: 26,
+      udid: "0B43D716",
+      hold: true,
+    });
+    expect(parseArgs(["--ios", "26"])).toEqual({ only: 26 });
+    // One flag picks the simulator: `--device` (a branch-local duplicate) is gone.
+    expect(parseArgs(["--device", "0B43D716"])).toEqual({});
+  });
+
   test("main loops over the SELECTED flow names (a shadowing string iterated its chars)", () => {
     const run = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
     const named = /const (\w+) = selectedFlows\(args\.flows\);/.exec(run)?.[1];

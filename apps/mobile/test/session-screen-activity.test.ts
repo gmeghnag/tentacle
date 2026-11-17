@@ -86,6 +86,7 @@ const view = (state: ReturnType<ReturnType<typeof harness>["screen"]["state"]>) 
       finished: state.activity.memory.finished,
       reports: reportsOf(state.transcript.rows),
       opened: state.activity.memory.opened,
+      schedules: state.schedules,
     },
     0,
   );

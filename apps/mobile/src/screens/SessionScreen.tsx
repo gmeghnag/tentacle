@@ -164,7 +164,7 @@ export interface SessionScreenProps {
    * (`"hub"`, docs/feat/mobile-hub.md H4b). Absent: none is offered (a screen with
    * no router, e.g. a unit test's).
    */
-  readonly onOpenArtifacts?: (from: ArtifactGalleryRoute["from"]) => void;
+  readonly onOpenArtifacts?: (from: ArtifactGalleryRoute["from"], open?: string) => void;
   /**
    * A row threw while drawing and shows its fallback instead (`RowGuard`,
    * docs/fix/mobile-crash-ibm-chart.md): the app log's fields for it.
@@ -574,6 +574,7 @@ export function SessionScreen({
       finished: activity.memory.finished,
       reports,
       opened: activity.memory.opened,
+      schedules: state.schedules,
     },
     activityNow,
   );
@@ -1056,7 +1057,7 @@ export function SessionScreen({
                           : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
                         {...(onOpenArtifacts === undefined
                           ? {}
-                          : { onArtifact: (meta) => onOpenArtifacts("card") })}
+                          : { onArtifact: (meta) => onOpenArtifacts("card", meta.artifactId) })}
                       />
                     </SwipeTime>
                   </RowGuard>
@@ -1419,6 +1420,14 @@ export function SessionScreen({
           onSend={() => void controller.messageChild()}
           onStop={confirmStop}
           onRefreshJob={() => void controller.refreshJob()}
+          onScheduled={() => {
+            // One sheet at a time: leave Activity, then the ONE path into
+            // Session info (`openScheduled`, the hub's Scheduled item's too).
+            setActivityOpen(false);
+            setActivityFocus(null);
+            controller.closeDetail();
+            openScheduled();
+          }}
           {...(showIndex === null ? {} : { onShow: showInChat })}
           onLink={onLink}
           onClose={() => {

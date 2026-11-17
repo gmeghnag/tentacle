@@ -33,6 +33,34 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     });
   });
 
+  test("a card opens ITS artifact: the id rides the route into the gallery (sweep: flow 30)", () => {
+    const calls: { params: Record<string, unknown> }[] = [];
+    openArtifactGallery(
+      { navigate: (_name, params) => calls.push({ params: { ...params } }) },
+      {
+        computerId: "c1",
+        sessionId: "s1",
+        title: "A",
+        archived: false,
+        from: "card",
+        open: "page",
+      },
+    );
+    expect(calls[0]?.params.open).toBe("page");
+    const screen = read("src", "screens", "SessionScreen.tsx");
+    expect(screen).toContain('onOpenArtifacts("card", meta.artifactId)');
+    const app = read("App.tsx");
+    expect(app).toMatch(/onOpenArtifacts=\{\(from, open\) =>/);
+    expect(app).toContain("open: route.params.open");
+    const gallery = read("src", "screens", "ArtifactGallery.tsx");
+    expect(gallery).toContain("galleryItemFor(view, wanted.current)");
+    expect(gallery).toMatch(/openArtifact\(target, true\)/);
+    // …and closing that viewer goes back to the session (flow 30's last step).
+    expect(gallery).toMatch(
+      /viewerCloseTarget\(\{ fromCard: fromCard\.current \}\) === "back"\s*\?\s*props\.onBack\(\)/,
+    );
+  });
+
   test("the hub and a card reach the same function (no second entry)", () => {
     const routes = read("src", "routes.ts");
     // Exactly one exported opener, and the route registered once in the stack.
@@ -64,10 +92,10 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     //    which is exactly the Review's finding 1.
     expect(app.match(/onOpenArtifacts=/g) ?? []).toHaveLength(2);
     expect(app).toMatch(
-      /onOpenArtifacts=\{\(from\) =>[\s\S]{0,300}openArtifactGallery\(navigation/,
+      /onOpenArtifacts=\{\(from, open\) =>[\s\S]{0,300}openArtifactGallery\(navigation/,
     );
     const session = read("src", "screens", "SessionScreen.tsx");
-    expect(session).toMatch(/onArtifact: \(meta\) => onOpenArtifacts\("card"\)/);
+    expect(session).toMatch(/onArtifact: \(meta\) => onOpenArtifacts\("card", meta\.artifactId\)/);
   });
 
   test("the sheet calls it for a row whose `opens` is `artifacts`", () => {
@@ -106,10 +134,15 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     // D6: "opening a chart artifact opens the same full-screen chart" — the SAME
     // component a `chart` transcript row's tap opens, given the artifact's own
     // bytes as the tool's args (the spec is the arguments, in both places).
-    expect(viewer).toContain('choice.kind === "chart"');
+    // The branch is `viewerBody`'s `chart` (artifact-open.test.ts pins the value).
+    expect(viewer).toContain('body === "chart"');
     expect(viewer).toContain("<ChartFullScreen");
     expect(viewer).toContain('name: "chart"');
-    expect(viewer).toContain("phase.text");
+    // The chart is given the READY read's bytes (not the failure text, not "").
+    expect(viewer).toContain('const text = ready?.text ?? "";');
+    expect(viewer).toMatch(
+      /<ChartFullScreen[\s\S]*?tool=\{\{ name: "chart", args: text, status: "ok" \}\}/,
+    );
     // Reduce Motion is the app's single hook, never a second prop read.
     expect(viewer).toContain("useReduceMotion");
     // A `chart` viewer's bytes are TEXT: it must not take the image/PDF uri path.
@@ -121,5 +154,31 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     // The chip exists and passes `only` to the ONE view, never a second list.
     expect(gallery).toContain("CHART_FILTER_LABEL");
     expect(gallery).toContain("GRAFICI_CHIP");
+  });
+
+  // docs/fix/mobile-qa-sweep.md bug 1 (owner screenshot): the gallery is a
+  // FULL-SCREEN stack screen, so its header needs the safe-area top (else the ✕
+  // sits on the status-bar clock), and the viewer it mounts must cover the
+  // screen, not share the column with the list (the "half sheet").
+  test("the gallery header takes the top inset unless the route is a sheet", () => {
+    const app = read("App.tsx");
+    const at = app.indexOf('name="ArtifactGallery"');
+    expect(at).toBeGreaterThan(-1);
+    // The route's whole declaration, from its name to the screen it renders: an
+    // `options={({ route }) => …}` arrow contains a ">", so never cut there.
+    const end = app.indexOf("<ArtifactGalleryScreen", at);
+    expect(end).toBeGreaterThan(at);
+    const options = app.slice(at, end);
+    expect(options).toContain("options=");
+    const sheet = /presentation:\s*"(modal|formSheet|pageSheet)"/.test(options);
+    const gallery = read("src", "screens", "ArtifactGallery.tsx");
+    expect(gallery.includes("insetTop={false}")).toBe(sheet);
+  });
+
+  test("the artifact viewer covers the whole screen (an overlay, not a flex sibling)", () => {
+    const viewer = read("src", "screens", "artifacts", "ArtifactViewerModal.tsx");
+    expect(viewer).toMatch(
+      /root:\s*\{\s*position:\s*"absolute",\s*top:\s*0,\s*right:\s*0,\s*bottom:\s*0,\s*left:\s*0/,
+    );
   });
 });

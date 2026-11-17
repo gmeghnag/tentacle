@@ -244,6 +244,27 @@ export function promptLine(prompt: string, word: string): boolean {
 }
 
 /**
+ * `CALL <tool> <json args>` lines (the QA sweep, docs/fix/mobile-qa-sweep.md):
+ * the round calls each named tool with those arguments, in order. `[]`: none.
+ * A line whose JSON does not parse is not a call.
+ */
+export function callDirectives(prompt: string): { name: string; args: object }[] {
+  const calls: { name: string; args: object }[] = [];
+  for (const line of prompt.split("\n")) {
+    const match = /^CALL\s+(\S+)\s+(\{.*\})\s*$/.exec(line.trim());
+    if (match?.[1] === undefined || match[2] === undefined) {
+      continue;
+    }
+    try {
+      calls.push({ name: match[1], args: JSON.parse(match[2]) });
+    } catch {
+      // not a call
+    }
+  }
+  return calls;
+}
+
+/**
  * A child's plan: how many steps its prompt asks for, from ANY of its user
  * messages (the person's own message to it arrives as a later user message, like
  * a steer, so the LAST one is not always the prompt). `null`: not a child.
@@ -452,7 +473,8 @@ function stream(
       if (!followUp && promptLine(prompt, ESCAPE_PROMPT)) {
         for (const chunk of toolCallFrames(0, mint(), "present", {
           title: "escape probes",
-          path: `${ESCAPE_ARTIFACT_ID}.html`,
+          // Relative to the session cwd (the run dir); the harness writes `project/`.
+          path: `project/${ESCAPE_ARTIFACT_ID}.html`,
           id: ESCAPE_ARTIFACT_ID,
         })) {
           send(chunk);
@@ -491,6 +513,18 @@ function stream(
       if (!followUp && promptLine(prompt, CHART_PROMPT)) {
         for (const chunk of toolCallFrames(0, mint(), "chart", CHART_SPEC)) {
           send(chunk);
+        }
+        send(frame({}, "tool_calls"));
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      const directed = followUp ? [] : callDirectives(prompt);
+      if (directed.length > 0) {
+        for (const [index, call] of directed.entries()) {
+          for (const chunk of toolCallFrames(index, mint(), call.name, call.args)) {
+            send(chunk);
+          }
         }
         send(frame({}, "tool_calls"));
         send(DONE_FRAME);

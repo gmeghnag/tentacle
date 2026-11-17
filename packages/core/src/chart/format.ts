@@ -79,12 +79,22 @@ export function autoFormat(maxAbs: number): "compact" | "full" {
  * not think of is still right.
  */
 function currencyFirst(locale: string): boolean {
-  const parts = new Intl.NumberFormat(locale, { style: "currency", currency: "EUR" }).formatToParts(
-    1,
-  );
+  const format = new Intl.NumberFormat(locale, { style: "currency", currency: "EUR" });
+  // Hermes on iOS (Apple's Intl) has no `formatToParts`: calling it threw a
+  // TypeError and crashed the chart's row (docs/fix/mobile-qa-sweep.md). Read
+  // the side off the plain string instead — the symbol is the first character
+  // that is neither a digit, a separator nor a sign. The same when the method
+  // exists but returns parts without a currency or a number (a partial Intl):
+  // trusting them would silently move the symbol.
+  const parts = typeof format.formatToParts === "function" ? format.formatToParts(1) : [];
   const currencyAt = parts.findIndex((part) => part.type === "currency");
   const numberAt = parts.findIndex((part) => part.type === "integer" || part.type === "decimal");
-  return currencyAt >= 0 && currencyAt < numberAt;
+  if (currencyAt < 0 || numberAt < 0) {
+    const text = format.format(1);
+    const symbolAt = text.search(/[^\d\s.,'  +\-−]/u);
+    return symbolAt >= 0 && symbolAt < text.search(/\d/);
+  }
+  return currencyAt < numberAt;
 }
 
 /**

@@ -56,6 +56,7 @@ export function parseArgs(argv: readonly string[]): {
   readonly only?: IosMajor;
   readonly flows?: string;
   readonly udid?: string;
+  readonly hold?: true;
 } {
   const udidAt = argv.indexOf("--udid");
   let udid: string | undefined;
@@ -75,9 +76,11 @@ export function parseArgs(argv: readonly string[]): {
     }
     flows = value;
   }
+  // `--hold`: the env-free form of `E2E_HOLD=1` (`--udid` is `E2E_SIM_UDID`'s).
   const withFlows = {
     ...(flows === undefined ? {} : { flows }),
     ...(udid === undefined ? {} : { udid }),
+    ...(argv.includes("--hold") ? { hold: true as const } : {}),
   };
   const at = argv.indexOf("--ios");
   if (at === -1) {
@@ -637,6 +640,7 @@ async function main(): Promise<number> {
     const flows = `${REPO}/apps/mobile/e2e/flows`;
     let worst = 0;
     for (const major of majors) {
+      // `--udid` / `E2E_SIM_UDID` pins the simulator (parallel agents each own one).
       const device = firstDevice(devicesJson, major, args.udid ?? process.env.E2E_SIM_UDID);
       if (device === undefined) {
         console.error(`no available iOS ${major} simulator (preflight passed: check simctl)`);
@@ -684,6 +688,13 @@ async function main(): Promise<number> {
           console.log(`✓ ${flow} (iOS ${major})`);
         }
       }
+    }
+    // `E2E_HOLD=1`: keep serve, the mock and the hooks up after the flows, for a
+    // hand-driven sweep (`maestro --device <udid> test -e MAESTRO_HOOKS=… <flow>`);
+    // Ctrl+C ends it through the same teardown.
+    if (args.hold === true || process.env.E2E_HOLD === "1") {
+      console.log(`\nHOLD — hooks ${hooks.address}, run dir ${runDir}; Ctrl+C to end`);
+      await new Promise<void>((resolve) => process.once("SIGINT", () => resolve()));
     }
     await pairing.stop();
     await hooks.stop();

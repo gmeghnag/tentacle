@@ -335,6 +335,8 @@ export function hookFor(path: string): HookName | undefined {
       return name;
     case "notify-payload":
       return name;
+    case "escape-hits":
+      return name;
     default:
       return undefined;
   }

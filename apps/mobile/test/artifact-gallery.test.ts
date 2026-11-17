@@ -11,10 +11,12 @@ import { describe, expect, test } from "bun:test";
 import type { ArtifactMeta } from "@tentacle/protocol";
 import {
   CHART_FILTER_LABEL,
+  galleryItemFor,
   galleryKindCount,
   gallerySummary,
   galleryView,
   unseenArtifacts,
+  viewerCloseTarget,
 } from "../src/artifact-gallery.ts";
 import { markArtifactOpened, markGalleryOpened, sessionKey } from "../src/artifact-seen-store.ts";
 
@@ -267,5 +269,31 @@ describe("sessionKey", () => {
   test("one key per computer+session, so two computers never share a seen record", () => {
     expect(sessionKey("mbp", "s1")).toBe("mbp/s1");
     expect(sessionKey("mbp", "s1")).not.toBe(sessionKey("studio", "s1"));
+  });
+});
+
+describe("a transcript card opens ITS artifact (sweep: flow 30)", () => {
+  const list = [
+    meta({ artifactId: "page", version: 1, kind: "html", mimeType: "text/html" }),
+    meta({ artifactId: "page", version: 2, kind: "html", mimeType: "text/html", createdAt: NOW }),
+    meta({ artifactId: "shot", version: 1 }),
+  ];
+  const view = galleryView(list, NOTHING_SEEN, NOW, "");
+
+  test("the card's id picks its row, opened at the NEWEST version", () => {
+    const item = galleryItemFor(view, "page");
+    expect(item?.key).toBe("page");
+    expect(item?.newest.version).toBe(2);
+  });
+
+  test("closing a viewer a CARD opened goes back to the session; one opened from the list stays", () => {
+    expect(viewerCloseTarget({ fromCard: true })).toBe("back");
+    expect(viewerCloseTarget({ fromCard: false })).toBe("list");
+  });
+
+  test("no id (hub, Session info) or an id not listed (yet) opens nothing", () => {
+    expect(galleryItemFor(view, undefined)).toBeNull();
+    expect(galleryItemFor(view, "gone")).toBeNull();
+    expect(galleryItemFor(galleryView([], NOTHING_SEEN, NOW, ""), "page")).toBeNull();
   });
 });

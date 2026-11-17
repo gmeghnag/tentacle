@@ -68,7 +68,12 @@ appId: so.tentacle.app
 # Network ON for this open: the fetch probe must now arrive (the listener works).
 - tapOn:
     id: "artifact-network-allow"
-- tapOn: "Allow"
+# The dialog's "Allow", not the bar's own "Allow" link (same text; a bare
+# `tapOn: "Allow"` hit the bar again, sweep run 5): the one under the title.
+- tapOn:
+    text: "Allow"
+    below:
+      text: "Allow network\\?"
 - assertVisible:
     id: "artifact-network-on"
 - waitForAnimationToEnd:

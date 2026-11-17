@@ -9,16 +9,27 @@
 import { type JSX, type ReactNode, useEffect, useRef, useState } from "react";
 import { Animated, Easing, Pressable, StyleSheet, Text, View } from "react-native";
 import { DENSE_FONT_SCALE, MONO, type Palette, size, space, typography } from "../theme.ts";
+import {
+  BREATHE_MS,
+  DOT_ORDER,
+  type DotPos,
+  SHIMMER_MS,
+  breatheCurve,
+  shimmerSweep,
+  thinkingLook,
+} from "../thinking-motion.ts";
 import { type StepDot, type ThreadPos, thinkingA11yLabel } from "../tool-steps.ts";
 import { type ToolNameParts, liveElapsed } from "../tool-summary.ts";
 import { animateNextLayout } from "./animate.ts";
 
-/** The node's look: a tool's status, an orphan thought (∴), the live footer (ring). */
+/** The node's look: a tool's status, an orphan thought (∴), the live footer (breathing ∴). */
 export type NodeKind = StepDot | "thought" | "thinking";
 
 const GUTTER = 10;
 /** The node sits on the first line's centre; the line is one touch target tall. */
 const NODE_Y = size.touch / 2;
+/** Every ∴ (the thought node, the row marker, a folded thought): owner asked a bit larger than 10. */
+const THEREFORE_SIZE = 13;
 
 /** Milliseconds since `from`, re-read once a second; null when there is no `from`. */
 function useElapsed(from: number | undefined): number | null {
@@ -67,6 +78,144 @@ function Spinner({ color, page, still }: { color: string; page: string; still: b
   );
 }
 
+/** A 0→1 clock looping every `ms` on the native driver; null under Reduce Motion. */
+function useLoop(ms: number, still: boolean): Animated.Value | null {
+  const clock = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (still) {
+      return;
+    }
+    clock.setValue(0);
+    const loop = Animated.loop(
+      Animated.timing(clock, {
+        toValue: 1,
+        duration: ms,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [ms, still, clock]);
+  return still ? null : clock;
+}
+
+/** Where each ∴ dot sits in its 13 pt box (thin dots, the glyph's own shape). */
+const DOT_AT: Readonly<Record<DotPos, { left: number; top: number }>> = {
+  top: { left: 5, top: 1.5 },
+  right: { left: 8.5, top: 8 },
+  left: { left: 1.5, top: 8 },
+};
+
+/**
+ * A static ∴ (the thought node, the row marker, a folded thought), DRAWN as the
+ * live node's three dots: the font's glyph stays tiny even at 13 pt (simulator
+ * sweep, docs/fix/mobile-qa-sweep.md), and drawn, every ∴ is the same size.
+ */
+function ThereforeDots({
+  color,
+  background,
+  style,
+}: {
+  color: string;
+  background?: string;
+  style?: object;
+}) {
+  return (
+    <View
+      style={[
+        styles.dotBox,
+        background === undefined ? undefined : { backgroundColor: background },
+        style,
+      ]}
+    >
+      {DOT_ORDER.map((pos) => (
+        <View key={pos} style={[styles.breathDot, DOT_AT[pos], { backgroundColor: color }]} />
+      ))}
+    </View>
+  );
+}
+
+/** The live node (mockup B): ∴ in accent, its dots breathing top → right → left. */
+function BreathingTherefore({ palette, still }: { palette: Palette; still: boolean }) {
+  const look = thinkingLook(still);
+  const clock = useLoop(BREATHE_MS, !look.animate);
+  return (
+    <View testID="thinking-therefore" style={[styles.dotBox, { backgroundColor: palette.page }]}>
+      {DOT_ORDER.map((pos, i) => (
+        <Animated.View
+          key={pos}
+          style={[
+            styles.breathDot,
+            DOT_AT[pos],
+            { backgroundColor: palette[look.glyph] },
+            clock === null ? undefined : { opacity: clock.interpolate(breatheCurve(i)) },
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
+/**
+ * The word "Thinking…" (mockup D): grey, with a brighter band sweeping across it.
+ * The band is a clipping window moving right while its copy of the word moves
+ * left by the same amount, so the bright copy stays on the grey one — two
+ * transforms of one native-driver clock. Plain grey under Reduce Motion.
+ */
+function ShimmerWord({
+  palette,
+  word,
+  reduceMotion,
+  testID,
+}: {
+  palette: Palette;
+  word: string;
+  reduceMotion: boolean;
+  testID?: string;
+}) {
+  const look = thinkingLook(reduceMotion);
+  const [width, setWidth] = useState(0);
+  const clock = useLoop(SHIMMER_MS, !look.animate);
+  const sweep = shimmerSweep(width);
+  const textStyle = [typography.step, styles.italic, { color: palette[look.word] }];
+  const x =
+    clock === null
+      ? null
+      : clock.interpolate({ inputRange: [0, 1], outputRange: [sweep.from, sweep.to] });
+  return (
+    <View style={styles.name}>
+      <Text
+        testID={testID}
+        numberOfLines={1}
+        maxFontSizeMultiplier={DENSE_FONT_SCALE}
+        style={textStyle}
+        onLayout={(e) => setWidth(Math.round(e.nativeEvent.layout.width))}
+      >
+        {word}
+      </Text>
+      {x === null || sweep.band === 0 ? null : (
+        <Animated.View
+          pointerEvents="none"
+          style={[styles.band, { width: sweep.band, transform: [{ translateX: x }] }]}
+        >
+          <Animated.Text
+            numberOfLines={1}
+            maxFontSizeMultiplier={DENSE_FONT_SCALE}
+            style={[
+              textStyle,
+              { color: palette.label, width },
+              { transform: [{ translateX: Animated.multiply(x, -1) }] },
+            ]}
+          >
+            {word}
+          </Animated.Text>
+        </Animated.View>
+      )}
+    </View>
+  );
+}
+
 function Node({
   kind,
   palette,
@@ -89,16 +238,11 @@ function Node({
     case "running":
       return <Spinner color={palette.accent} page={palette.page} still={reduceMotion} />;
     case "thought":
-      return (
-        <Text
-          maxFontSizeMultiplier={DENSE_FONT_SCALE}
-          style={[styles.therefore, { color: palette.sec, backgroundColor: palette.page }]}
-        >
-          ∴
-        </Text>
-      );
+      return <ThereforeDots color={palette.sec} background={palette.page} />;
+    case "thinking":
+      return <BreathingTherefore palette={palette} still={reduceMotion} />;
     default:
-      // queued, and the live "Thinking…" footer: a hollow ring.
+      // queued: a hollow ring.
       return (
         <View style={[styles.ring, { borderColor: palette.sec, backgroundColor: palette.page }]} />
       );
@@ -184,22 +328,31 @@ export function StepNode({
           onPress={onToggle}
           style={({ pressed }) => [styles.line, pressed ? styles.pressed : undefined]}
         >
-          <Text
-            testID={labelTestID}
-            numberOfLines={1}
-            maxFontSizeMultiplier={DENSE_FONT_SCALE}
-            style={[
-              typography.step,
-              styles.name,
-              { color: palette.label },
-              nameItalic === true ? styles.italic : undefined,
-            ]}
-          >
-            {name.server === undefined ? null : (
-              <Text style={[styles.server, { color: palette.sec }]}>{`${name.server} · `}</Text>
-            )}
-            {name.tool}
-          </Text>
+          {node === "thinking" ? (
+            <ShimmerWord
+              palette={palette}
+              word={name.tool}
+              reduceMotion={reduceMotion}
+              {...(labelTestID === undefined ? {} : { testID: labelTestID })}
+            />
+          ) : (
+            <Text
+              testID={labelTestID}
+              numberOfLines={1}
+              maxFontSizeMultiplier={DENSE_FONT_SCALE}
+              style={[
+                typography.step,
+                styles.name,
+                { color: palette.label },
+                nameItalic === true ? styles.italic : undefined,
+              ]}
+            >
+              {name.server === undefined ? null : (
+                <Text style={[styles.server, { color: palette.sec }]}>{`${name.server} · `}</Text>
+              )}
+              {name.tool}
+            </Text>
+          )}
           <Text
             numberOfLines={1}
             maxFontSizeMultiplier={DENSE_FONT_SCALE}
@@ -211,14 +364,7 @@ export function StepNode({
           >
             {subtitle}
           </Text>
-          {marker ? (
-            <Text
-              maxFontSizeMultiplier={DENSE_FONT_SCALE}
-              style={[styles.marker, { color: palette.sec }]}
-            >
-              ∴
-            </Text>
-          ) : null}
+          {marker ? <ThereforeDots color={palette.sec} style={styles.marker} /> : null}
           {shown === "" ? null : (
             <Text
               numberOfLines={1}
@@ -271,7 +417,7 @@ export function StepBody({
     <>
       {thought === null ? null : (
         <View style={styles.thought}>
-          <Text style={[styles.thoughtMark, { color: palette.sec }]}>∴</Text>
+          <ThereforeDots color={palette.sec} style={styles.thoughtMark} />
           <Text style={[styles.thoughtText, { color: palette.sec }]}>{thought}</Text>
         </View>
       )}
@@ -306,7 +452,8 @@ export function StepBody({
 }
 
 /**
- * The live "Thinking…" node, the list's footer (Owner Q2): a hollow ring, the
+ * The live "Thinking…" node, the list's footer (Owner Q2): a breathing ∴ and a
+ * shimmering word (mockup B + D, `thinking-motion.ts`; static under Reduce Motion), the
  * seconds since it appeared (its mount is the tail's identity: a tool or text in
  * between unmounts it), and a tap that opens the live thought.
  */
@@ -371,7 +518,10 @@ const styles = StyleSheet.create({
   dot: { width: 13, height: 13, borderRadius: 6.5, borderWidth: 3 },
   ring: { width: 9, height: 9, borderRadius: 4.5, borderWidth: 1.2 },
   spinner: { width: 10, height: 10, borderRadius: 5, borderWidth: 1.5 },
-  therefore: { fontSize: 10, lineHeight: 12 },
+  // The live ∴ (B): the glyph's size (`THEREFORE_SIZE`), drawn as three thin dots.
+  dotBox: { width: THEREFORE_SIZE, height: THEREFORE_SIZE },
+  breathDot: { position: "absolute", width: 3, height: 3, borderRadius: 1.5 },
+  band: { position: "absolute", top: 0, bottom: 0, left: 0, overflow: "hidden" },
   column: { flex: 1, marginLeft: GUTTER },
   line: { minHeight: size.touch, flexDirection: "row", alignItems: "center", gap: 6 },
   pressed: { opacity: 0.6 },
@@ -380,10 +530,11 @@ const styles = StyleSheet.create({
   italic: { fontStyle: "italic" },
   subtitle: { flex: 1 },
   thoughtLine: { fontStyle: "italic", fontWeight: "400" },
-  marker: { fontSize: 10, opacity: 0.8 },
+  marker: { opacity: 0.8 },
   body: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 8, paddingBottom: 10, gap: 8 },
   thought: { flexDirection: "row", gap: 6 },
-  thoughtMark: { fontSize: 10, lineHeight: 19 },
+  // The first text line is 19 pt tall: centre the 13 pt box on it.
+  thoughtMark: { marginTop: (19 - THEREFORE_SIZE) / 2 },
   thoughtText: { flex: 1, fontSize: 13.5, lineHeight: 19, fontStyle: "italic" },
   code: { fontSize: 12, lineHeight: 17, fontFamily: MONO },
   footer: { paddingHorizontal: space.inset, marginBottom: 6 },

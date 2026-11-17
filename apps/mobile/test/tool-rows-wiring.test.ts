@@ -105,4 +105,39 @@ describe("StepNode replaces ToolRow", () => {
     expect(node).toContain("accessibilityElementsHidden");
     expect(node).toContain("maxFontSizeMultiplier={DENSE_FONT_SCALE}");
   });
+
+  test("every ∴ (node, row marker, thought) is one size, 12–13 pt (owner 09:33)", () => {
+    const node = read("ui", "StepNode.tsx");
+    const size = /const THEREFORE_SIZE = ([\d.]+);/.exec(node);
+    expect(size === null ? 0 : Number(size[1])).toBeGreaterThanOrEqual(12);
+    expect(size === null ? 99 : Number(size[1])).toBeLessThanOrEqual(13);
+    // The font's ∴ glyph stays tiny even at 13 pt (simulator, 29-tool-rows-running
+    // shots): every ∴ is DRAWN as three dots in a THEREFORE_SIZE box, like the live node.
+    expect(node).not.toMatch(/>\s*∴\s*</);
+    expect(node.match(/<ThereforeDots\b/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(node).toMatch(/dotBox: \{ width: THEREFORE_SIZE, height: THEREFORE_SIZE/);
+  });
+
+  test("the live Thinking node is mockup B + D: a breathing ∴ and a shimmering word (09:36)", () => {
+    const node = read("ui", "StepNode.tsx");
+    // B: the "thinking" node is the breathing ∴, no longer the queued ring.
+    expect(node).toMatch(/case "thinking":\s*return <BreathingTherefore /);
+    expect(node).toContain("clock.interpolate(breatheCurve(i))");
+    // D: the footer's word is the shimmer, fed by the pure sweep.
+    expect(node).toMatch(/node === "thinking" \? \(\s*<ShimmerWord/);
+    expect(node).toContain("shimmerSweep(width)");
+    // Reduce Motion stops both clocks (useLoop returns null when still).
+    expect(node).toContain("useLoop(BREATHE_MS, !look.animate)");
+    expect(node).toContain("useLoop(SHIMMER_MS, !look.animate)");
+  });
+
+  test("the Thinking motion runs on the native driver, never a JS timer per frame", () => {
+    const node = read("ui", "StepNode.tsx");
+    const loop = node.slice(node.indexOf("function useLoop("), node.indexOf("const DOT_AT"));
+    expect(loop).toContain("useNativeDriver: true");
+    const motion = node.slice(node.indexOf("function useLoop("), node.indexOf("function Node("));
+    expect(motion).not.toMatch(/setInterval|requestAnimationFrame|setTimeout/);
+    // Only transform + opacity are animated (both native-driver properties).
+    expect(motion).not.toMatch(/(left|top|width|color): (clock|x)\b/);
+  });
 });

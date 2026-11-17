@@ -72,3 +72,44 @@ export function cacheStep(
 export function tooBigNote(meta: ArtifactMeta): string {
   return `Too big to keep on this phone (${Math.round(meta.size / (1024 * 1024))} MB)`;
 }
+
+/**
+ * What the viewer modal's body renders, decided from the read's phase
+ * (docs/fix/mobile-qa-sweep.md): the component only maps this to elements.
+ * `too-big` is a FILE kind (image, PDF) whose bytes the cache could not keep.
+ */
+export type ViewerBody =
+  | "loading"
+  | "failed"
+  | "share"
+  | "chart"
+  | "too-big"
+  | "image"
+  | "pdf"
+  | "webview"
+  | "markdown"
+  | "text";
+
+/** The read's phase as `viewerBody` needs it. */
+export type ViewerPhase =
+  | { readonly kind: "loading" }
+  | { readonly kind: "failed" }
+  | { readonly kind: "ready"; readonly fileUri: string; readonly text: string | null };
+
+export function viewerBody(phase: ViewerPhase, viewer: ViewerKind, target: OpenTarget): ViewerBody {
+  if (phase.kind !== "ready") {
+    return phase.kind;
+  }
+  if (target.kind === "share" || viewer === "none") {
+    return "share";
+  }
+  if (viewer === "chart") {
+    return "chart";
+  }
+  // Only a FILE kind is rendered from the cache: a text kind (html, svg,
+  // markdown, text) has no file by design, so `""` there is not "too big".
+  if ((viewer === "image" || viewer === "pdf") && phase.fileUri === "") {
+    return "too-big";
+  }
+  return viewer;
+}

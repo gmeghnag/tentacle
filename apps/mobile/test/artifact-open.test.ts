@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 import type { ArtifactCardView } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
 import { EMPTY_CACHE } from "../src/artifact-cache.ts";
-import { cacheStep, openTarget, tooBigNote, viewerText } from "../src/artifact-open.ts";
+import { cacheStep, openTarget, tooBigNote, viewerBody, viewerText } from "../src/artifact-open.ts";
 
 const MB = 1024 * 1024;
 
@@ -103,5 +103,37 @@ describe("cacheStep", () => {
     expect(step.note).toBe("Too big to keep on this phone (21 MB)");
     // Nothing is taken: the state holds only what was already there.
     expect(step.state.entries).toEqual([]);
+  });
+});
+
+// docs/fix/mobile-qa-sweep.md bug 2: a text kind's read has NO file (its bytes
+// are decoded, never cached), so `fileUri === ""` must not mean "too big".
+describe("viewerBody", () => {
+  const view = { kind: "viewer", viewer: "webview" } as const;
+  const textReady = { kind: "ready", fileUri: "", text: "<p>hi</p>" } as const;
+
+  test("a text kind with its text renders its viewer, not the too-big note", () => {
+    expect(viewerBody(textReady, "webview", view)).toBe("webview");
+    expect(viewerBody(textReady, "markdown", { kind: "viewer", viewer: "markdown" })).toBe(
+      "markdown",
+    );
+    expect(viewerBody(textReady, "text", { kind: "viewer", viewer: "text" })).toBe("text");
+  });
+
+  test("a file kind with no kept file is too big; with one it renders", () => {
+    const noFile = { kind: "ready", fileUri: "", text: null } as const;
+    const kept = { kind: "ready", fileUri: "file:///c/x", text: null } as const;
+    expect(viewerBody(noFile, "image", { kind: "viewer", viewer: "image" })).toBe("too-big");
+    expect(viewerBody(noFile, "pdf", { kind: "viewer", viewer: "pdf" })).toBe("too-big");
+    expect(viewerBody(kept, "image", { kind: "viewer", viewer: "image" })).toBe("image");
+    expect(viewerBody(kept, "pdf", { kind: "viewer", viewer: "pdf" })).toBe("pdf");
+  });
+
+  test("loading, failed, share and chart win before any file check", () => {
+    expect(viewerBody({ kind: "loading" }, "webview", view)).toBe("loading");
+    expect(viewerBody({ kind: "failed" }, "webview", view)).toBe("failed");
+    expect(viewerBody(textReady, "none", { kind: "share" })).toBe("share");
+    expect(viewerBody(textReady, "webview", { kind: "share" })).toBe("share");
+    expect(viewerBody(textReady, "chart", { kind: "viewer", viewer: "chart" })).toBe("chart");
   });
 });

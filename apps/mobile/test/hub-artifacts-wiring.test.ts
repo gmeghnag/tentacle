@@ -39,7 +39,9 @@ describe("H4b: the hub reaches the gallery through its one entry", () => {
 
   test("both hand-offs type the origin as the route's own union, never a copy", () => {
     // A copied literal union would silently drop the next origin the route adds.
-    const typed = /onOpenArtifacts\??: \(from: ArtifactGalleryRoute\["from"\]\) => void/g;
+    // (`open?`: a card's artifact id, docs/fix/mobile-qa-sweep.md.)
+    const typed =
+      /onOpenArtifacts\??: \(from: ArtifactGalleryRoute\["from"\](, open\?: string)?\) => void/g;
     expect(read("src", "screens", "SessionScreen.tsx").match(typed) ?? []).toHaveLength(1);
     expect(read("App.tsx").match(typed) ?? []).toHaveLength(1);
     expect(EVERY_ORIGIN).toContain("hub");

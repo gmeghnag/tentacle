@@ -1384,7 +1384,7 @@ function SessionRoute({
   readonly onOpenDrawer: () => void;
   readonly drawerOpen: boolean;
   /** The artifacts gallery's ONE entry (docs/feat/model-artifacts.md D9). */
-  readonly onOpenArtifacts: (from: ArtifactGalleryRoute["from"]) => void;
+  readonly onOpenArtifacts: (from: ArtifactGalleryRoute["from"], open?: string) => void;
   /** The drawer's New session, reached from the hub too (docs/feat/mobile-hub.md H3). */
   readonly onNewSession: () => void;
 }): JSX.Element {
@@ -2233,13 +2233,14 @@ function AppShell(): JSX.Element {
                     archived={route.params.archived}
                     focus={route.params.focus === true}
                     cwd={route.params.cwd}
-                    onOpenArtifacts={(from) =>
+                    onOpenArtifacts={(from, open) =>
                       openArtifactGallery(navigation, {
                         computerId: route.params.computerId,
                         sessionId: route.params.sessionId,
                         title: route.params.title,
                         archived: route.params.archived,
                         from,
+                        ...(open === undefined ? {} : { open }),
                       })
                     }
                   />
@@ -2261,6 +2262,7 @@ function AppShell(): JSX.Element {
                 sessionId={route.params.sessionId}
                 title={route.params.title}
                 archived={route.params.archived}
+                {...(route.params.open === undefined ? {} : { open: route.params.open })}
                 onBack={() => navigation.goBack()}
                 onLink={openConfirmedLink}
                 onShare={(fileUri) => {

@@ -155,4 +155,13 @@ describe("react-native-webview: pinned and contained", () => {
       .sort();
     expect(importers).toEqual(["HtmlViewer.tsx", "PdfViewer.tsx"]);
   });
+
+  // docs/fix/mobile-qa-sweep.md bug 2: the body is the pure `viewerBody`'s, and
+  // the modal keeps no file check of its own (the one that hid every HTML page).
+  test("the modal's body is decided by viewerBody, with no inline file check", () => {
+    const modal = source("ArtifactViewerModal.tsx");
+    expect(modal).toContain("viewerBody(phase, choice.kind, target)");
+    expect(modal).not.toMatch(/fileUri === ""/);
+    expect(modal).not.toMatch(/choice\.kind === "(image|pdf|webview|chart|none)"/);
+  });
 });

@@ -18,7 +18,7 @@ import { type JSX, useEffect, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import type { AppLogField } from "../../app-log.ts";
 import { ARTIFACT_CACHE } from "../../artifact-cache-expo.ts";
-import { openTarget, viewerText } from "../../artifact-open.ts";
+import { openTarget, viewerBody, viewerText } from "../../artifact-open.ts";
 import { viewerFor, viewerSubtitle } from "../../artifact-viewer.ts";
 import { ROW_FALLBACK_TEXT, rowErrorFields } from "../../row-guard.ts";
 import { type Palette, typography } from "../../theme.ts";
@@ -135,6 +135,13 @@ export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Elemen
     }
   };
 
+  const body = viewerBody(phase, choice.kind, target);
+  const failedText = phase.kind === "failed" ? phase.text : "";
+  const ready = phase.kind === "ready" ? phase : null;
+  const note = ready?.note ?? null;
+  const text = ready?.text ?? "";
+  const fileUri = ready?.fileUri ?? "";
+
   return (
     <View style={[styles.root, { backgroundColor: palette.bg }]} testID="artifact-viewer">
       <ViewerHeader
@@ -149,19 +156,19 @@ export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Elemen
           : {})}
         {...(props.onPickVersion === undefined ? {} : { onPickVersion: props.onPickVersion })}
       />
-      {phase.kind === "loading" ? (
+      {body === "loading" ? (
         <View style={styles.center} testID="artifact-loading">
           <ActivityIndicator color={palette.accent} />
         </View>
-      ) : phase.kind === "failed" ? (
+      ) : body === "failed" ? (
         <View style={styles.center}>
           <Text testID="artifact-error" style={[typography.subhead, { color: palette.red }]}>
-            {phase.text}
+            {failedText}
           </Text>
         </View>
-      ) : target.kind === "share" || choice.kind === "none" ? (
+      ) : body === "share" ? (
         <View style={styles.fill}>
-          {phase.note === null ? null : <CacheNote palette={palette} note={phase.note} />}
+          {note === null ? null : <CacheNote palette={palette} note={note} />}
           <OtherSheet
             palette={palette}
             title={card.title}
@@ -170,7 +177,7 @@ export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Elemen
             onShare={share}
           />
         </View>
-      ) : choice.kind === "chart" ? (
+      ) : body === "chart" ? (
         // D6: opening a chart artifact opens the SAME full-screen chart a
         // `chart` transcript row's tap does (docs/feat/model-charts.md C8). The
         // bytes ARE the spec — the tool presents its canonical arguments — so
@@ -180,7 +187,7 @@ export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Elemen
         // Guarded like a transcript row (docs/fix/mobile-crash-ibm-chart.md): a
         // chart that throws while drawing is a notice, never an app abort.
         <RowGuard
-          resetKey={phase.text}
+          resetKey={text}
           fallback={
             <View style={styles.center}>
               <Text
@@ -194,7 +201,7 @@ export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Elemen
           onError={(error) => props.onRenderError?.(rowErrorFields("artifact-chart", error))}
         >
           <ChartFullScreen
-            tool={{ name: "chart", args: phase.text ?? "", status: "ok" }}
+            tool={{ name: "chart", args: text, status: "ok" }}
             palette={palette}
             locale={deviceLocale()}
             reduceMotion={reduceMotion === true}
@@ -202,29 +209,29 @@ export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Elemen
             onClose={props.onClose}
           />
         </RowGuard>
-      ) : phase.fileUri === "" ? (
+      ) : body === "too-big" ? (
         // A file kind whose bytes are not on disk: too big for the cache. The
         // note says what it is and why there is nothing to render or share.
         <View style={styles.center}>
-          {phase.note === null ? (
+          {note === null ? (
             <Text testID="artifact-error" style={[typography.subhead, { color: palette.sec }]}>
               Couldn't keep this file
             </Text>
           ) : (
-            <CacheNote palette={palette} note={phase.note} />
+            <CacheNote palette={palette} note={note} />
           )}
         </View>
-      ) : choice.kind === "image" ? (
-        <ImageViewer fileUri={phase.fileUri} title={card.title} />
-      ) : choice.kind === "pdf" ? (
-        <PdfViewer fileUri={phase.fileUri} />
-      ) : choice.kind === "webview" ? (
-        <HtmlViewer palette={palette} body={phase.text ?? ""} scripts={choice.canRunScripts} />
+      ) : body === "image" ? (
+        <ImageViewer fileUri={fileUri} title={card.title} />
+      ) : body === "pdf" ? (
+        <PdfViewer fileUri={fileUri} />
+      ) : body === "webview" ? (
+        <HtmlViewer palette={palette} body={text} scripts={choice.canRunScripts} />
       ) : (
         <MarkdownViewer
           palette={palette}
-          text={phase.text ?? ""}
-          kind={choice.kind === "markdown" ? "markdown" : "text"}
+          text={text}
+          kind={body === "markdown" ? "markdown" : "text"}
           onLink={props.onLink}
         />
       )}
@@ -233,7 +240,9 @@ export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Elemen
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
+  // An overlay over its whole host screen (the gallery): a flex child would
+  // share the column with the list and open as a half sheet under it.
+  root: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0, zIndex: 1 },
   fill: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
   note: { paddingHorizontal: 24, paddingTop: 12, textAlign: "center" },
