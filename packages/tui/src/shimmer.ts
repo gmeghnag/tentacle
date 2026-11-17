@@ -31,7 +31,7 @@ export interface ShimmerSpan {
 export const SHIMMER_WINDOW = 3;
 
 /** The label rests, fully base, for this many ticks after a sweep. */
-export const SHIMMER_PAUSE_TICKS = 5;
+export const SHIMMER_PAUSE_TICKS = 14;
 
 /**
  * One sweep step. The spinner already re-renders every 80 ms, so the sweep rides

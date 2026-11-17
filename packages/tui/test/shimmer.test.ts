@@ -123,18 +123,18 @@ describe("the pause", () => {
 });
 
 describe("the period fits the plan's budget at the spinner's 80 ms tick", () => {
-  test("one full sweep of Thinking… / Working… takes 1.2–1.6 s", () => {
+  test("one full sweep of Thinking… / Working… takes about 2 s (owner 2026-11-17: 1.8–2.2 s)", () => {
     expect(SHIMMER_TICK_MS).toBe(80);
     for (const label of ["Thinking…", "Working…"]) {
       const ms = shimmerPeriod(label) * SHIMMER_TICK_MS;
-      expect(ms).toBeGreaterThanOrEqual(1200);
-      expect(ms).toBeLessThanOrEqual(1600);
+      expect(ms).toBeGreaterThanOrEqual(1800);
+      expect(ms).toBeLessThanOrEqual(2200);
     }
   });
 
-  // Mutation: pause 20 → 2.5 s; pause 0 → 0.88 s. Both outside the owner's band.
+  // Mutation: pause 20 → 2.48 s; pause 5 → 1.28 s. Both outside the owner's band.
   test("the pause is what puts it in the band (pinned, not accidental)", () => {
-    expect(SHIMMER_PAUSE_TICKS).toBe(5);
+    expect(SHIMMER_PAUSE_TICKS).toBe(14);
   });
 });
 
