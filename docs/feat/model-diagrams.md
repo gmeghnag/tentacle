@@ -2,7 +2,7 @@
 
 > **Status:** implementation — plan written, **NOT approved** (owner questions below; visual picks wait for the owner on the mockup page).
 > **Branch:** `feat/model-diagrams`
-> **Size:** L (split into 7 slices, each S or M) · **Blast:** cross-module (a new model tool with no I/O; a new third-party runtime — mermaid — in the daemon binary and the app bundle; no protocol bump, no new update type, no session-log type) · **Suited:** per slice (below): `opus` for the load-bearing probe and the visual/native slices, `deepseek` for the pure/contained ones; mandatory fresh-context Review of the whole branch (L).
+> **Type:** feat · **Size:** L (split into 7 slices, each S or M) · **Blast:** cross-module (a new model tool with no I/O; a new third-party runtime — mermaid — in the daemon binary and the app bundle; no protocol bump, no new update type, no session-log type) · **Suited:** per slice (below): `opus` for the load-bearing probe and the visual/native slices, `deepseek` for the pure/contained ones; mandatory fresh-context Review of the whole branch (L).
 > **Changelog:** `changelog.d/model-diagrams.added.md` (written by D7).
 
 ## Context
@@ -496,7 +496,7 @@ frame 0: 30 lines, max width 72
 frame 1: 16 lines, max width 72
 frame 2: 17 lines, max width 65
 frame 3: 8 lines, max width 44
-frame 4: 9 lines, max width 74
+frame 4: 9 lines, max width 73
 frame 5: 6 lines, max width 75
 ALL PASS
 ```
