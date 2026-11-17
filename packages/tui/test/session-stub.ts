@@ -16,20 +16,24 @@ import { Session } from "@tentacle/agent";
 import type { Agent } from "@tentacle/agent";
 import type { SessionController } from "../src/app-types.ts";
 import { NO_IMAGE_SEAM } from "../src/attach-draft.ts";
+import { NO_DOCUMENT_SEAM } from "../src/pdf-attach.ts";
 
 /**
  * The members a `SessionController` cannot omit, as no-ops: a test spreads this
- * into its own literal. `imageInput` answers "off" with the TUI's own reason (an
- * honest mode, not a absent seam); the two that would start a turn reject
- * loudly, because a test hitting one it did not script is a broken test.
+ * into its own literal. `imageInput`/`documentsInput` answer "off" with the
+ * TUI's own reason (an honest mode, not an absent seam); the two that would
+ * start a turn reject loudly, because a test hitting one it did not script is a
+ * broken test.
  */
 export function inertSession(): Pick<
   SessionController,
-  "attachImage" | "imageInput" | "clear" | "sendNow"
+  "attachImage" | "attachDocument" | "imageInput" | "documentsInput" | "clear" | "sendNow"
 > {
   return {
     attachImage: () => Promise.reject(new Error("attachImage: not scripted by this test")),
+    attachDocument: () => Promise.reject(new Error("attachDocument: not scripted by this test")),
     imageInput: () => NO_IMAGE_SEAM,
+    documentsInput: () => NO_DOCUMENT_SEAM,
     clear: () => Promise.resolve({ before: 0, after: 0 }),
     sendNow: () => Promise.reject(new Error("sendNow: not scripted by this test")),
   };

@@ -46,11 +46,13 @@ import { applyGroupMessage } from "@tentacle/exec";
 import {
   type ArtifactListResult,
   type ArtifactMeta,
+  type DocumentContent,
   DomainErrorCode,
   type McpServerStatus,
   type SessionSettings,
   type SessionTitle,
 } from "@tentacle/protocol";
+import { extractPdf } from "@tentacle/tools";
 import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import type { SessionController } from "@tentacle/tui";
 import { createSettingsNotifier } from "./carried-settings.ts";
@@ -292,12 +294,18 @@ export interface PersistingController extends SessionController {
       readonly skill?: string;
       readonly turnId?: string;
       readonly attachments?: readonly AttachmentRef[];
+      /** The prompt's attached PDFs (docs/feat/pdf-read.md D6). */
+      readonly documents?: readonly DocumentContent[];
     },
   ): AsyncIterable<SessionEvent>;
   /** `RemoteSession.attachImage`: the ref a prompt then names (docs/feat/attachments-tui.md D4). */
   attachImage: RemoteSession["attachImage"];
   /** `RemoteSession.imageInput`: what this session may do with an image right now. */
   imageInput: RemoteSession["imageInput"];
+  /** `RemoteSession.attachDocument`: the wire block a prompt then names (docs/feat/pdf-read.md D6). */
+  attachDocument: RemoteSession["attachDocument"];
+  /** `RemoteSession.documentsInput`: what this session may do with a PDF right now. */
+  documentsInput: RemoteSession["documentsInput"];
   /** `RemoteSession.enqueue`: `id` is the caller's key for the text (a `sendNow` cites it). */
   enqueue(text: string, id?: string): Promise<void>;
   /** `RemoteSession.sendNow`; the new turn is saved once it settles, like `send`'s. */
@@ -804,6 +812,17 @@ export function persistingController(
     imageInput() {
       return inner.imageInput();
     },
+    // The document seam, the same way (docs/feat/pdf-read.md D6): the session
+    // decides upload vs laptop-extraction and builds the wire block; nothing
+    // here needs saving (the block only becomes history at the prompt, where
+    // the daemon persists its TEXT, never a PDF ref).
+    async attachDocument(bytes, meta, options) {
+      await restored();
+      return inner.attachDocument(bytes, meta, options);
+    },
+    documentsInput() {
+      return inner.documentsInput();
+    },
     async compact() {
       const result = await inner.compact();
       flush();
@@ -1171,6 +1190,12 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     // Only beside a model provider: a client that serves no model cannot hold a
     // pod's image bytes (docs/feat/attachments-prompt.md D5's table).
     ...(deps.modelProvider && deps.localImages ? { localImages: deps.localImages } : {}),
+    // The PDF extractor for a `client`-mode daemon (docs/feat/pdf-read.md D6):
+    // a pod takes TEXT only, so the laptop that serves its model reads the PDF.
+    // Injected — `@tentacle/client` has no dependency on `@tentacle/tools` (it is
+    // in the phone's bundle). Only where a model link exists: without one, no
+    // daemon may ask this client to extract.
+    ...(deps.modelProvider ? { extractDocument: extractPdf } : {}),
     // The name a "model's config has images off" reason repeats, and the PLACE
     // it points at (docs/feat/images-off-reason.md): `modelName` is only ever
     // this laptop's own model id, and `modelScope` says whether the daemon runs

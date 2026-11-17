@@ -13,6 +13,7 @@ import type { AttachmentRef, ChatMessage } from "@tentacle/core";
 import {
   type ArtifactListResult,
   type ArtifactMeta,
+  type DocumentContent,
   DomainErrorCode,
   type JobOutputResult,
   type JobRow,
@@ -39,6 +40,7 @@ import {
   type AutoAcceptLink,
   createAutoAcceptHandle,
 } from "./auto-accept-link.ts";
+import type { DocumentsInput } from "./document-input.ts";
 import { type ReturnedRow, handBack, restoredByRefusal, stayingRows } from "./hand-back.ts";
 import type { ImageInput } from "./image-input.ts";
 import { turnRecovery } from "./link-machine.ts";
@@ -46,6 +48,7 @@ import { type SessionEvent, stopReasonFromProtocol, updateToEvent } from "./mapp
 import { AsyncQueue } from "./queue.ts";
 import {
   type ArtifactReadOptions,
+  DocumentsUnavailableError,
   ImagesUnavailableError,
   type ReadBack,
   type RemoteClient,
@@ -77,6 +80,14 @@ interface ActiveTurn {
    * whose images vanished would be a different turn.
    */
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * The attached PDFs this prompt names (docs/feat/pdf-read.md D6): a
+   * `document{ref}` after an upload, or `document{text}` this laptop extracted
+   * for a pod. Stored on the TURN for the same reason as `attachments`: every
+   * keyed re-send after a drop carries the same documents under the same
+   * `turnId`.
+   */
+  readonly documents?: readonly DocumentContent[];
   /**
    * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3).
    * Stored on the TURN for the same reason as `attachments`: every keyed
@@ -668,6 +679,49 @@ export class RemoteSession implements SessionStreamListener {
       throw new RpcError(DomainErrorCode.UnknownSession, "the session is not open");
     }
     return this.client.readArtifact(id, meta, options);
+  }
+
+  /**
+   * Turn one attached PDF into the wire block a prompt names (docs/feat/pdf-read.md
+   * D6) — the SESSION does it, because a fresh one is LAZY (an upload's
+   * `attachment/put` only knows a session opened on this connection, and only
+   * the session can await its own open). It delegates to
+   * `RemoteClient.attachDocument`, which alone decides upload vs laptop-extract
+   * from the daemon's capability — no second session path (AGENTS §7).
+   *
+   * Rejects with `DocumentsUnavailableError` (off, zero frames — not even an
+   * open), `RangeError` (size, not a PDF), `DocumentExtractError` (encrypted,
+   * scanned, corrupt), upload errors.
+   */
+  async attachDocument(
+    bytes: Uint8Array,
+    meta: { readonly name: string },
+    options: UploadOptions = {},
+  ): Promise<DocumentContent> {
+    if (this.closed) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "this session was closed");
+    }
+    this.refuseIfRemoteClosed();
+    const mode = this.client.documentsInput();
+    if (mode.kind === "off") {
+      // Nothing is sent at all — not even an open.
+      throw new DocumentsUnavailableError(mode.reason);
+    }
+    if (this.attach) {
+      await this.open();
+    } else {
+      await this.createOrAttach();
+    }
+    const id = this.id;
+    if (id === null) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "the session is not open");
+    }
+    return this.client.attachDocument(id, bytes, meta, options);
+  }
+
+  /** What this session may do with an attached PDF right now (docs/feat/pdf-read.md D6). */
+  documentsInput(): DocumentsInput {
+    return this.client.documentsInput();
   }
 
   private raise(activity: SessionActivity): void {
@@ -1275,6 +1329,8 @@ export class RemoteSession implements SessionStreamListener {
       readonly skill?: string;
       readonly turnId?: string;
       readonly attachments?: readonly AttachmentRef[];
+      /** The prompt's attached PDFs (docs/feat/pdf-read.md D6); see `ActiveTurn.documents`. */
+      readonly documents?: readonly DocumentContent[];
       /**
        * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3):
        * the edge's own reasoning setting, read at send time. Absent → an
@@ -1470,6 +1526,8 @@ export class RemoteSession implements SessionStreamListener {
     opts: {
       readonly skill?: string;
       readonly attachments?: readonly AttachmentRef[];
+      /** The prompt's attached PDFs (docs/feat/pdf-read.md D6); see `ActiveTurn.documents`. */
+      readonly documents?: readonly DocumentContent[];
       /**
        * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3):
        * the edge's own reasoning setting, read at send time. Absent → an
@@ -1508,6 +1566,9 @@ export class RemoteSession implements SessionStreamListener {
       ...(opts.skill !== undefined ? { skill: opts.skill } : {}),
       ...(opts.attachments !== undefined && opts.attachments.length > 0
         ? { attachments: opts.attachments }
+        : {}),
+      ...(opts.documents !== undefined && opts.documents.length > 0
+        ? { documents: opts.documents }
         : {}),
       ...(opts.voice !== undefined ? { voice: opts.voice } : {}),
       queue: new AsyncQueue<SessionEvent>(),
@@ -1560,6 +1621,7 @@ export class RemoteSession implements SessionStreamListener {
           turn.skill,
           turn.attachments,
           turn.voice,
+          turn.documents,
         );
     request.then(
       // A plain ack: the stream ends the turn. `ended` (a retried turn that

@@ -103,8 +103,10 @@ describe("S6: the attach decisions and their executor leave App.tsx", () => {
     expect(app).toMatch(/import \{ useAttachments \} from "\.\/useAttachments\.ts";/);
     // The frozen identifiers (Fable M1): destructured under the SAME names, which
     // is what keeps every use-site below unchanged.
+    // P5 (docs/feat/pdf-read.md D6) added the document pair BESIDE the image
+    // ones — the same one-call shape, one more destructured name.
     expect(app).toMatch(
-      /const \{ attachMode, restoreChips, routeAttach, attachCommand, convertToChips, sendWithImages \}/,
+      /const \{\s+attachMode,\s+documentMode,\s+restoreChips,\s+restoreDocuments,\s+routeAttach,\s+attachCommand,\s+convertToChips,\s+sendWithImages,\s+\} = useAttachments\(\{/,
     );
   });
 

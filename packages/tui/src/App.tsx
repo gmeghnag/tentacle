@@ -1212,22 +1212,30 @@ export function App({
   // Backspace edit it — the same shape S4 gave `selection`. The refs other layers
   // read (`probedTextRef`, `uploadCtrlRef`, `attachGenRef`) stay here too, so
   // effect 1 below keeps its index and every use-site keeps its identifier.
-  const { attachMode, restoreChips, routeAttach, attachCommand, convertToChips, sendWithImages } =
-    useAttachments({
-      field,
-      attachRef,
-      setAttach,
-      attachGenRef,
-      probedTextRef,
-      uploadCtrlRef,
-      sessionRef,
-      runRef,
-      pushNotice,
-      restoreInput,
-      fileProbe,
-      home,
-      localCwd,
-    });
+  const {
+    attachMode,
+    documentMode,
+    restoreChips,
+    restoreDocuments,
+    routeAttach,
+    attachCommand,
+    convertToChips,
+    sendWithImages,
+  } = useAttachments({
+    field,
+    attachRef,
+    setAttach,
+    attachGenRef,
+    probedTextRef,
+    uploadCtrlRef,
+    sessionRef,
+    runRef,
+    pushNotice,
+    restoreInput,
+    fileProbe,
+    home,
+    localCwd,
+  });
   routeAttachRef.current = routeAttach;
 
   /**
@@ -1433,6 +1441,8 @@ export function App({
       sendWithImages,
       submitToTarget,
       restoreChips,
+      documentMode,
+      restoreDocuments,
       model,
       skillsSync,
       joinCards,
