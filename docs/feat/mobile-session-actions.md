@@ -818,6 +818,64 @@ with 20+ pinned sessions. The width/window behaviour is inherited unchanged
 visual result (a `·` before the title) has only been read as text. To verify:
 `serve` with a pinned session, `tentacle connect`, `/sessions`.
 
+### Fix round 1
+
+*— claude-opus-5-5 (claude-code 2.1.323, `settings.json` model `opus`), 2026-11-17 (executor, S3 review finding 1)*
+
+One finding in this round (MEDIUM, S3), a test-gap one: the code was correct as
+built and nothing in `packages/tui/src` changed.
+
+**Finding 1 (MEDIUM) — `panels/sessions.ts` `apply` and `click` were unpinned.**
+FIXED, test only: `packages/tui/test/sessions-panel.test.ts` (new case "the
+panel's own MOVE and CLICK reach a row the page alone does not hold", in the S3
+`describe`). The review had already reproduced it: with the page `[a,b]` plus a
+hoisted pin `c`, replacing `sessionRows(panel.data).length` with
+`panel.data?.sessions.length ?? 0` at `:44` (M7) or `:53` (M8) left
+`sessions-panel` + `panels-registry` at 0 red. I confirmed that first, on the
+branch as it stood: **both mutations survived, 30 pass / 0 fail each**
+(`.tentacle/tmp/mobile-session-actions/fix1/mut.sh`).
+
+The case uses the off-page pin shape the review named (`pinned: [c]`, page
+`[a,b]`, so 3 rows shown against a 2-row page) and pins the two behaviours a
+page-length count would break: ↑ from row 0 reaches row 2 (not 1) and ↓ from row 1
+reaches row 2 (not 0), so no 2-row cycle; and `panelClick` on body row 2 (the
+last shown, index 2 = the page's row `b`) moves the cursor to 2. Both are read
+back through `applyPanel`/`panelClick` — the facades the TUI actually calls, not
+the descriptor directly — so the assertion is on the real seam.
+
+**RED/GREEN:** the code was already right, so red comes from the mutation (§9's
+non-vacuity requirement, the reviewer's own M7/M8):
+- **M7** `apply` → `panel.data?.sessions.length ?? 0` → **KILLED, 19 pass / 1
+  fail**; the failure is `toMatchObject` on `{ state: { cursor: 2 } }` (the
+  move wrapped at 2 rows instead of 3).
+- **M8** `click`'s `count` → the same expression → **KILLED, 19 pass / 1 fail**;
+  `expect(clicked.state.cursor).toBe(2)` → `Received: 0` (the click was
+  ignored, exactly the unreachable-row hazard).
+- Unmutated: 20 pass, 73 `expect()` calls. Both files restored from
+  `.tentacle/tmp/mobile-session-actions/fix1/`; `git status` shows only the one
+  test file modified afterwards.
+
+**Gate (fix round, branch top):** `bunx tsc --noEmit` clean · `bunx tsc -p
+apps/mobile` clean · `bunx tsc -p apps/relay` clean · `bun run lint` clean (1846
+files, 0 errors/warnings) · `bun test` **13455 pass / 5 skip / 1 fail** (13461
+tests, 957 files), the 5 skips the pre-existing opt-in ones. The 1 fail is NOT
+from this change: `packages/docker/test/ssh-dialer.test.ts:316` ("close() kills a
+child the ssh spawned"), a timing flake — its own 50×20 ms wait for the spawned
+child's pid file expired (`expect(childPid).toBeGreaterThan(0)` → `Received: 0`)
+under full-suite load. Re-run alone: **24 pass / 0 fail**; the whole
+`packages/docker` suite: **153 pass / 1 skip / 0 fail**. It is a pre-existing
+timing test this task does not touch: the branch changes no `packages/docker`
+file, and S3's own full run was green. No `skip`/`todo` added; the fix round
+adds no NEW test file (the case joins `sessions-panel.test.ts`).
+
+**Drift from Implementation:** none. The Design never said which module counts
+the rows; the fix pins the two call sites that must agree with `sessionRows`,
+which is the hoist S2/S3 already established, so no decision was reopened.
+
+**Not verified:** unchanged from S3 — the panel on a real terminal against a
+real `serve` daemon. The new case is pure (no Ink, no daemon) and is the whole
+check for the finding.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S1 only)*

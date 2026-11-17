@@ -211,6 +211,32 @@ describe("pinned sessions first (docs/feat/mobile-session-actions.md S3)", () =>
       state: { armed: "c" },
     });
   });
+
+  test("the panel's own MOVE and CLICK reach a row the page alone does not hold", () => {
+    // Review fix round 1, finding 1: `apply` and `click` are the two call sites
+    // outside `sessions-panel.ts`, and they must count the rows SHOWN. Page
+    // [a,b] plus one hoisted pin c ⇒ 3 rows; a page-length count would wrap ↑↓
+    // at 2 and ignore a click on row 3, making the last hoisted row unreachable.
+    // Mutation: `sessionRows(panel.data).length` → `panel.data?.sessions.length ?? 0`
+    // in `apply` (M7) or in `click`'s `count` (M8) → this test reds.
+    const data = { sessions: [entry("a"), entry("b")], pinned: [entry("c")], more: false };
+    // The rows shown are c, a, b (3); a page-length count would see only 2 and
+    // wrap a step early. From row 1: "down" reaches the last row (2), not 0...
+    const atOne = { ...sessionsPanel(NOW, data), state: { cursor: 1, armed: null } };
+    expect(applyPanel(atOne, "down", 80)).toMatchObject({ state: { cursor: 2 } });
+    // ...and "up" from the first row reaches 2, not 1.
+    const atZero = { ...sessionsPanel(NOW, data), state: { cursor: 0, armed: null } };
+    expect(applyPanel(atZero, "up", 80)).toMatchObject({ state: { cursor: 2 } });
+    // A click on body row 2 (the last shown) moves the cursor there; with a
+    // page-length bound `2 < 2` is false and the click is ignored.
+    const view = panelView(sessionsPanel(NOW, data), 80, 10);
+    expect(view.rows).toHaveLength(3);
+    const clicked = panelClick(sessionsPanel(NOW, data), view, 2, 80);
+    expect(clicked.kind === "sessions" ? clicked.state.cursor : null).toBe(2);
+    expect(clicked.kind === "sessions" ? sessionsAt(clicked.data, clicked.state)?.id : null).toBe(
+      "b",
+    );
+  });
 });
 
 describe("sessionsKey", () => {
