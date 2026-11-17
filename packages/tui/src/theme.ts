@@ -62,6 +62,15 @@ interface MeterTokens {
   readonly high: Color;
 }
 
+/**
+ * The thinking-shimmer sweep's two highlight tones (docs/feat/tui-thinking-shimmer.md).
+ * `base` is `accent` — the label's colour today — so only the moving window is new.
+ */
+interface ShimmerTokens {
+  readonly mid: Color;
+  readonly peak: Color;
+}
+
 interface SyntaxTokens {
   readonly keyword: Color;
   readonly string: Color;
@@ -110,6 +119,7 @@ export interface Tokens {
   readonly border: Color;
   readonly status: StatusTokens;
   readonly meter: MeterTokens;
+  readonly shimmer: ShimmerTokens;
   readonly diff: DiffTokens;
   readonly message: MessageTokens;
   readonly syntax: SyntaxTokens;
@@ -139,6 +149,8 @@ const DARK: Tokens = {
   border: "gray",
   status: { linkError: "red", linkWarn: "yellow", scrolled: "yellow" },
   meter: { low: "green", mid: "yellow", high: "red" },
+  // Brighter cyan on a dark terminal: the sweep lights the word up.
+  shimmer: { mid: "#22d3ee", peak: "#67e8f9" },
   diff: {
     addBg: "#022800",
     addFg: "#f8f8f2",
@@ -198,6 +210,9 @@ const LIGHT: Tokens = {
   border: "#8c8c8c",
   status: { linkError: "#b21428", linkWarn: "#8f4c00", scrolled: "#8f4c00" },
   meter: { low: "#084718", mid: "#8f4c00", high: "#b21428" },
+  // Darker = "brighter" on paper. Measured 9.85 / 13.40 truecolor, 7.03 / 7.49 at
+  // chalk's 256 on white and Solarized Light (theme-contrast.test.ts).
+  shimmer: { mid: "#0b4a57", peak: "#083344" },
   diff: {
     addBg: "#dafbe1",
     addFg: "#1a1a1a",
