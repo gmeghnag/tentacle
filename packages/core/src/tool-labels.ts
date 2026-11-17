@@ -21,6 +21,9 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // A chart is shown, never acted on: the row reads `Chart`, the way `Read`/
   // `Edit` are the display names of the fs tools (docs/feat/model-charts.md D3).
   chart: "Chart",
+  // A diagram is shown, never acted on either: the row reads `Diagram`
+  // (docs/feat/model-diagrams.md D2).
+  diagram: "Diagram",
 };
 
 /** The display label for a tool name; the name itself when it has none. */

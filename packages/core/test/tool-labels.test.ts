@@ -20,6 +20,8 @@ describe("toolLabel", () => {
     expect(toolLabel("schedule_control")).toBe("Schedules");
     // docs/feat/model-charts.md D3: the chart row reads `Chart`.
     expect(toolLabel("chart")).toBe("Chart");
+    // docs/feat/model-diagrams.md D2: a diagram is shown, never acted on either.
+    expect(toolLabel("diagram")).toBe("Diagram");
   });
 
   test("an unknown name (MCP, future tool) displays as itself", () => {
