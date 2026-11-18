@@ -33,8 +33,8 @@ import {
 } from "../floating-button.ts";
 import { hubHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
-import type { HubActionId, HubBadge, HubItem } from "../hub-actions.ts";
-import { dropPlan, fadePlan, levelPlan } from "../hub-button-motion.ts";
+import type { HubActionId, HubItem } from "../hub-actions.ts";
+import { dropPlan, fadePlan, glowPlan, levelPlan } from "../hub-button-motion.ts";
 import { type FanLayout, type Point, fanMotion } from "../hub-fan.ts";
 import type { GestureEffect, GestureState, HubMenu } from "../hub-gesture.ts";
 import { hubOpacity } from "../hub-opacity.ts";
@@ -92,8 +92,14 @@ export interface FloatingActivityProps {
   readonly position: FloatPosition | undefined;
   /** `floating-button.ts` `visible`: fades out (and stops taking touches) when false. */
   readonly shown: boolean;
-  /** `hub-actions.ts` `buttonBadge`: one badge at most; none → the hub glyph. */
-  readonly badge: HubBadge | null;
+  /** `hub-actions.ts` `buttonBadge`: only a running count, never a dot; null → the hub glyph. */
+  readonly count: number | null;
+  /**
+   * How many news pulses have happened in this session (`hub-actions.ts`
+   * `hubPulse`): the button glows once, then nothing (mobile-hub-badges Q1 C).
+   * 0 — the first render's baseline — never glows.
+   */
+  readonly pulse: number;
   /** A turn runs: the thin accent arc spins around the button (not a badge). */
   readonly turnRunning: boolean;
   readonly accessibilityLabel: string;
@@ -135,7 +141,8 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
     bounds,
     position,
     shown,
-    badge,
+    count,
+    pulse,
     turnRunning,
     voiceOver,
     reduceMotion,
@@ -392,6 +399,28 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
     return () => loop.stop();
   }, [turnRunning, reduceMotion, spin]);
 
+  // The one-shot glow of news arriving (mobile-hub-badges Design 5, owner Q1 C):
+  // a sibling of the body like the running arc, so it follows the outer fade. It
+  // plays on a CHANGE of `pulse`; the first render (pulse 0) is the baseline and
+  // never glows (F1). A second pulse stops the running one and restarts from 0, so
+  // two increases never stack two rings (F5).
+  const pulseAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (pulse === 0) {
+      return;
+    }
+    const plan = glowPlan(reduceMotion);
+    pulseAnim.stopAnimation();
+    pulseAnim.setValue(0);
+    const anim = Animated.sequence(
+      plan.fade.map((step) =>
+        Animated.timing(pulseAnim, { ...step, useNativeDriver: plan.native }),
+      ),
+    );
+    anim.start();
+    return () => anim.stop();
+  }, [pulse, reduceMotion, pulseAnim]);
+
   if (at === null || !rendered || bounds === null) {
     return null;
   }
@@ -477,30 +506,47 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
             pointerEvents="none"
             style={[StyleSheet.absoluteFill, styles.clip, { backgroundColor: palette.glass }]}
           />
-          {badge?.kind === "count" ? (
+          {count === null ? (
+            <View testID="hub-glyph" pointerEvents="none" style={styles.grid}>
+              {[0, 1, 2, 3].map((i) => (
+                <View key={i} style={[styles.dot, { backgroundColor: palette.accent }]} />
+              ))}
+            </View>
+          ) : (
             <Text
               testID="hub-badge-count"
               maxFontSizeMultiplier={DENSE_FONT_SCALE}
               numberOfLines={1}
               style={[typography.footnote, styles.count, { color: palette.accent }]}
             >
-              {badge.n}
+              {count}
             </Text>
-          ) : (
-            <View testID="hub-glyph" pointerEvents="none" style={styles.grid}>
-              {[0, 1, 2, 3].map((i) => (
-                <View key={i} style={[styles.dot, { backgroundColor: palette.accent }]} />
-              ))}
-            </View>
           )}
-          {badge?.kind === "dot" ? (
-            <View
-              testID="hub-badge-dot"
-              pointerEvents="none"
-              style={[styles.newDot, { backgroundColor: palette.accentFill }]}
-            />
-          ) : null}
         </Animated.View>
+        {/* The news glow: the same place as the running arc and for the same
+            reason — a sibling of the body, so it follows the outer fade only, and
+            nothing of it is left behind once it has played (owner Q1 C). */}
+        {pulse === 0 ? null : (
+          <Animated.View
+            testID="hub-glow"
+            pointerEvents="none"
+            style={[
+              styles.glow,
+              {
+                borderColor: palette.accent,
+                opacity: pulseAnim,
+                transform: [
+                  {
+                    scale: pulseAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [1, glowPlan(reduceMotion).scale],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          />
+        )}
         {/* The arc is the body's SIBLING: it follows the outer fade only, so it
             stays solid at any setting. Below 75 % it thickens and gains a
             page-coloured halo, which is why it has to be outside the body. */}
@@ -596,5 +642,15 @@ const styles = StyleSheet.create({
   },
   grid: { width: 14, height: 14, flexDirection: "row", flexWrap: "wrap", gap: 4 },
   dot: { width: 5, height: 5, borderRadius: 2.5 },
-  newDot: { position: "absolute", top: 6, right: 6, width: 9, height: 9, borderRadius: 4.5 },
+  // The news glow: an accent ring just outside the body (FLOAT_SIZE + 8), sized
+  // so its peak scale grows outward from the button's centre.
+  glow: {
+    position: "absolute",
+    top: -4,
+    left: -4,
+    width: FLOAT_SIZE + 8,
+    height: FLOAT_SIZE + 8,
+    borderRadius: (FLOAT_SIZE + 8) / 2,
+    borderWidth: 2,
+  },
 });

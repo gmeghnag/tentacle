@@ -249,15 +249,54 @@ export interface ButtonBadgeInput {
   readonly unreadReport: boolean;
 }
 
-/** One badge at most (Design 6): a number for running work, else a dot for something new. */
-export function buttonBadge(input: ButtonBadgeInput): HubBadge | null {
-  if (input.running > 0) {
-    return { kind: "count", n: input.running };
+/** The button's mark: a running count, or nothing (mobile-hub-badges Q1 C — no dot). */
+export type ButtonCount = { readonly kind: "count"; readonly n: number } | null;
+
+/**
+ * The button's only mark: the running count (Design 6, kept by owner Q1). News
+ * draws NO mark on the button any more — the dot is gone (mobile-hub-badges Q1 C);
+ * it is the one-shot glow (`hubPulse`) and the fan items' rims that carry it.
+ */
+export function buttonBadge(input: ButtonBadgeInput): ButtonCount {
+  return input.running > 0 ? { kind: "count", n: input.running } : null;
+}
+
+export interface PulseInput {
+  readonly unseenArtifacts: number;
+  readonly unreadReport: boolean;
+}
+
+/**
+ * Whether the hub should glow NOW (mobile-hub-badges Design 2, owner Q1 C): true
+ * iff there is a previous reading and the news GREW since it — more unseen
+ * artifacts, or a report that was not unread and is. `prev === null` is the
+ * session's first render (or the moment its link came back), so opening a
+ * session that already holds news never pulses (F1), and a resync that relists
+ * the same news does not either (F2: 3 → 3 is not an increase).
+ */
+export function hubPulse(prev: PulseInput | null, next: PulseInput): boolean {
+  if (prev === null) {
+    return false;
   }
-  if (input.unseenArtifacts > 0 || input.unreadReport) {
-    return { kind: "dot" };
+  return next.unseenArtifacts > prev.unseenArtifacts || (!prev.unreadReport && next.unreadReport);
+}
+
+/**
+ * A fan item's VoiceOver label (mobile-hub-badges Design 10). The count bubble
+ * was visual-only and the rim is too, so what it means is SPOKEN here: the
+ * number of new artifacts, or that a wake is due. A dimmed item says why it has
+ * nothing to show, and that wins — it is what its commit would report.
+ */
+export function itemA11yLabel(item: HubItem): string {
+  if (item.dimmed) {
+    return `${item.label}, nothing running`;
   }
-  return null;
+  if (item.badge === null) {
+    return item.label;
+  }
+  return item.badge.kind === "count"
+    ? `${item.label}, ${item.badge.n} new`
+    : `${item.label}, due soon`;
 }
 
 /** VoiceOver says everything the badge stands for: "Tentacle hub, 2 running, 3 new artifacts". */

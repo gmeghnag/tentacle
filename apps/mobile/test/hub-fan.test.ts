@@ -5,6 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { Edge } from "../src/floating-button.ts";
+import type { HubBadge, HubItem } from "../src/hub-actions.ts";
 import {
   FAN_PAD,
   type FanItem,
@@ -14,12 +15,16 @@ import {
   ITEM_SIZE,
   LABEL_GAP,
   REACH,
+  RIM_FULL,
   type Rect,
+  fanItemLook,
   fanLayout,
   fanMotion,
   labelPlacement,
   pickItem,
+  rimFraction,
 } from "../src/hub-fan.ts";
+import { darkPalette, lightPalette } from "../src/theme.ts";
 
 const EPS = 1e-6;
 const DEG = Math.PI / 180;
@@ -369,5 +374,109 @@ describe("fanMotion (Design 4; Reduce Motion is read per open, M11)", () => {
     expect(m.fromScale).toBe(1);
     expect(m.highlightScale).toBe(1);
     expect(m.fadeMs).toBe(120);
+  });
+});
+
+describe("rimFraction + fanItemLook (mobile-hub-badges Design 6–7, 9)", () => {
+  test("RIM_FULL pins the owner's 36°-per-item scale (Q2 C)", () => {
+    // 360° / 36° per item: a count of RIM_FULL is exactly one full rim.
+    expect(RIM_FULL).toBe(10);
+  });
+
+  test("no badge → no rim", () => {
+    expect(rimFraction(null)).toBeNull();
+  });
+
+  test("a count is proportional and clamps: 1 → 0.1, 5 → 0.5, 10 → 1, 99 → 1", () => {
+    expect(rimFraction({ kind: "count", n: 1 })).toBeCloseTo(0.1, 6);
+    expect(rimFraction({ kind: "count", n: 5 })).toBeCloseTo(0.5, 6);
+    expect(rimFraction({ kind: "count", n: RIM_FULL })).toBe(1);
+    expect(rimFraction({ kind: "count", n: 99 })).toBe(1);
+  });
+
+  test("a count of nothing is no rim; a negative never draws backwards (F7)", () => {
+    expect(rimFraction({ kind: "count", n: 0 })).toBeNull();
+    expect(rimFraction({ kind: "count", n: -3 })).toBeNull();
+    expect(rimFraction({ kind: "count", n: Number.NaN })).toBeNull();
+  });
+
+  test("a due scheduled wake is a full rim (Q2: the dot's meaning, as a shape)", () => {
+    expect(rimFraction({ kind: "dot" })).toBe(1);
+  });
+
+  const item = (over: Partial<HubItem> = {}): HubItem => ({
+    id: "artifacts",
+    label: "Artifacts",
+    badge: null,
+    danger: false,
+    dimmed: false,
+    ...over,
+  });
+
+  /** Every combination the fan can draw: the mix that must never produce glass again. */
+  const ALL: readonly { readonly item: HubItem; readonly lit: boolean }[] = [false, true].flatMap(
+    (danger) =>
+      [false, true].flatMap((dimmed) =>
+        [null, { kind: "dot" } as const, { kind: "count", n: 3 } as const].flatMap((badge) =>
+          [false, true].map((lit) => ({ item: item({ danger, dimmed, badge }), lit })),
+        ),
+      ),
+  );
+
+  test("Q3 B: no combination of danger/dimmed/badge/lit draws a glass disc", () => {
+    for (const { item: it, lit } of ALL) {
+      expect(fanItemLook(it, lit).bg).not.toBe("glass");
+    }
+  });
+
+  test("a resting item is an opaque card disc: card bg, accent glyph (red for Stop)", () => {
+    expect(fanItemLook(item(), false)).toEqual({
+      bg: "card",
+      fg: "accent",
+      rim: null,
+      rimTone: "accent",
+    });
+    expect(fanItemLook(item({ danger: true }), false)).toMatchObject({ bg: "card", fg: "red" });
+  });
+
+  test("a dimmed item is a FILL disc with a secondary glyph — never faint glass (Design 7)", () => {
+    const look = fanItemLook(item({ id: "activity", dimmed: true }), false);
+    expect(look.bg).toBe("fill");
+    expect(look.fg).toBe("sec");
+    // A dimmed item has nothing to show, so it never draws a rim.
+    expect(
+      fanItemLook(item({ dimmed: true, badge: { kind: "count", n: 3 } }), false).rim,
+    ).toBeNull();
+  });
+
+  test("the highlighted item is a solid accent disc, red for Stop, on-accent glyph and rim (F9)", () => {
+    expect(fanItemLook(item({ badge: { kind: "count", n: 4 } }), true)).toEqual({
+      bg: "accentFill",
+      fg: "onAccent",
+      rim: 0.4,
+      rimTone: "onAccent",
+    });
+    expect(fanItemLook(item({ danger: true }), true)).toEqual({
+      bg: "red",
+      fg: "onAccent",
+      rim: null,
+      rimTone: "onAccent",
+    });
+    // The highlight wins over dimmed: the disc is still lit while the finger is on it.
+    expect(fanItemLook(item({ dimmed: true }), true).bg).toBe("accentFill");
+  });
+
+  test("a resting badged item carries its rim; a due wake draws the whole one", () => {
+    expect(fanItemLook(item({ badge: { kind: "count", n: 2 } }), false).rim).toBeCloseTo(0.2, 6);
+    expect(fanItemLook(item({ badge: { kind: "dot" } }), false).rim).toBe(1);
+  });
+
+  test("Q3 B's premise, pinned: the disc tokens are opaque hex in BOTH palettes", () => {
+    for (const palette of [lightPalette, darkPalette]) {
+      expect(palette.card).toMatch(/^#[0-9A-F]{6}$/i);
+      expect(palette.fill).toMatch(/^#[0-9A-F]{6}$/i);
+      expect(palette.accentFill).toMatch(/^#[0-9A-F]{6}$/i);
+      expect(palette.red).toMatch(/^#[0-9A-F]{6}$/i);
+    }
   });
 });

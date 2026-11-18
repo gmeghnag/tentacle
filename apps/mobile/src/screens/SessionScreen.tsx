@@ -94,16 +94,18 @@ import {
   shown,
   viewportChanged,
 } from "../follow.ts";
-import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
+import { pressHaptic, pulseHaptic, turnEndHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import {
   type HubActionId,
   type HubEntries,
   type HubOpen,
+  type PulseInput,
   buttonBadge,
   hubA11yLabel,
   hubActions,
   hubOpen,
+  hubPulse,
 } from "../hub-actions.ts";
 import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
@@ -773,12 +775,14 @@ export function SessionScreen({
     asking: state.sheet.kind === "asking",
     closed: state.transcript.closed,
   });
-  // A turn that ends (own or another device's) taps the hand once (Owner Q4).
+  // A turn that ends (own or another device's) taps the hand once (Owner Q4);
+  // news landing on the hub glows once (mobile-hub-badges Q1 C). Both are decided
+  // by ONE effect below, because they usually happen in the same render and the
+  // moment must play one haptic, never two (F4).
   const wasRunning = useRef(state.view.composer.running);
-  useEffect(() => {
-    playHaptic(turnEndHaptic(wasRunning.current, state.view.composer.running));
-    wasRunning.current = state.view.composer.running;
-  }, [state.view.composer.running]);
+  /** The previous news reading; null is "no baseline yet" (first render, link drop, new session). */
+  const pulsePrev = useRef<PulseInput | null>(null);
+  const [pulseSeq, setPulseSeq] = useState(0);
   // The header's "…" menu (owner feedback #3 + Session info): it opens with the
   // sheet's read, then the phone-local copy actions.
   const [menuOpen, setMenuOpen] = useState(false);
@@ -940,6 +944,40 @@ export function SessionScreen({
     unseenArtifacts: hubCtx.unseenArtifacts,
     unreadReport: activityVm.unread > 0,
   };
+  // The moment news arrives (mobile-hub-badges Design 4, Q1 C + Q4): one glow on
+  // the button, one light haptic — unless a turn ended in this same render, whose
+  // `success` is the moment's one haptic (F4). `pulsePrev` is the baseline; it is
+  // reset on a link drop (F2: a reconnect's refill is not news) and on a session
+  // switch (F1: a new session starts without a baseline).
+  const newsNow: PulseInput = {
+    unseenArtifacts: hubBadgeInput.unseenArtifacts,
+    unreadReport: hubBadgeInput.unreadReport,
+  };
+  const unseen = newsNow.unseenArtifacts;
+  const unread = newsNow.unreadReport;
+  const linkUp = state.transcript.link === "up";
+  useEffect(() => {
+    if (!linkUp) {
+      pulsePrev.current = null;
+    }
+  }, [linkUp]);
+  // F1: another session's seen record is a new baseline too, never a pulse.
+  useEffect(() => {
+    pulsePrev.current = null;
+  }, [artifactsSeenKey]);
+  useEffect(() => {
+    const ended = turnEndHaptic(wasRunning.current, state.view.composer.running);
+    playHaptic(ended);
+    wasRunning.current = state.view.composer.running;
+    // A hidden button plays no glow and defers none — a late glow would be stale
+    // (F3) — but `prev` still advances, so the news is not replayed when it returns.
+    const pulse = linkUp && hubPulse(pulsePrev.current, { unseenArtifacts: unseen, unreadReport: unread });
+    pulsePrev.current = { unseenArtifacts: unseen, unreadReport: unread };
+    playHaptic(pulseHaptic(pulse && floatShown, ended !== null));
+    if (pulse && floatShown) {
+      setPulseSeq((n) => n + 1);
+    }
+  }, [unseen, unread, linkUp, floatShown, state.view.composer.running]);
   // One band laid out in the sheet: scroll once, when the WANTED band has reported
   // (the rules — "once", "only the wanted one" — are `revealStep`'s, folded by
   // `reveal-report.ts`). The report is read and written synchronously, so the
@@ -1329,7 +1367,8 @@ export function SessionScreen({
               bounds={band}
               position={activitySettings.position}
               shown={floatShown}
-              badge={buttonBadge(hubBadgeInput)}
+              count={buttonBadge(hubBadgeInput)?.n ?? null}
+              pulse={pulseSeq}
               turnRunning={state.view.composer.running}
               accessibilityLabel={hubA11yLabel(hubBadgeInput)}
               voiceOver={a11yFlags.voiceOver}

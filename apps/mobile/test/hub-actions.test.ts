@@ -8,15 +8,20 @@ import {
   ALREADY_FINISHED,
   type ButtonBadgeInput,
   DUE_SOON_MS,
+  type HubBadge,
   type HubContext,
   type HubEntries,
+  type HubItem,
   type HubOpen,
   NOTHING_RUNNING,
   NO_CONNECTION,
+  type PulseInput,
   buttonBadge,
   hubA11yLabel,
   hubActions,
   hubOpen,
+  hubPulse,
+  itemA11yLabel,
   resolveCommit,
 } from "../src/hub-actions.ts";
 import { commitPlan } from "../src/hub-session.ts";
@@ -329,13 +334,14 @@ describe("a dimmed item: nothing to show, but its slot stays (Design 2)", () => 
 describe("buttonBadge + hubA11yLabel", () => {
   const none: ButtonBadgeInput = { running: 0, unseenArtifacts: 0, unreadReport: false };
 
-  test("priority: a number (running) > a dot (unseen / unread) > none", () => {
+  test("only a running count: news is the glow's business, never a dot (mobile-hub-badges Q1 C)", () => {
     expect(buttonBadge({ running: 2, unseenArtifacts: 3, unreadReport: true })).toEqual({
       kind: "count",
       n: 2,
     });
-    expect(buttonBadge({ ...none, unseenArtifacts: 3 })).toEqual({ kind: "dot" });
-    expect(buttonBadge({ ...none, unreadReport: true })).toEqual({ kind: "dot" });
+    // The dot is gone: nothing new draws a mark on the button.
+    expect(buttonBadge({ ...none, unseenArtifacts: 3 })).toBeNull();
+    expect(buttonBadge({ ...none, unreadReport: true })).toBeNull();
     expect(buttonBadge(none)).toBeNull();
   });
 
@@ -347,5 +353,84 @@ describe("buttonBadge + hubA11yLabel", () => {
       "Tentacle hub, 1 running, 1 new artifact, unread report",
     );
     expect(hubA11yLabel(none)).toBe("Tentacle hub");
+  });
+});
+
+describe("hubPulse (mobile-hub-badges Design 2: one-shot glow, Q1 C)", () => {
+  const quiet: PulseInput = { unseenArtifacts: 0, unreadReport: false };
+
+  test("a first render has no baseline: opening a session with news never pulses (F1, Q3)", () => {
+    expect(hubPulse(null, quiet)).toBe(false);
+    expect(hubPulse(null, { unseenArtifacts: 4, unreadReport: true })).toBe(false);
+  });
+
+  test("an increase pulses", () => {
+    expect(
+      hubPulse(
+        { unseenArtifacts: 2, unreadReport: false },
+        { unseenArtifacts: 3, unreadReport: false },
+      ),
+    ).toBe(true);
+    expect(hubPulse(quiet, { unseenArtifacts: 1, unreadReport: false })).toBe(true);
+    expect(hubPulse(quiet, { unseenArtifacts: 0, unreadReport: true })).toBe(true);
+  });
+
+  test("no change, or a decrease, is silent (F2: a resync that relists the same news)", () => {
+    expect(
+      hubPulse(
+        { unseenArtifacts: 3, unreadReport: false },
+        { unseenArtifacts: 3, unreadReport: false },
+      ),
+    ).toBe(false);
+    expect(
+      hubPulse(
+        { unseenArtifacts: 3, unreadReport: false },
+        { unseenArtifacts: 2, unreadReport: false },
+      ),
+    ).toBe(false);
+    // Reading the report is not news either: true → true is unchanged.
+    expect(
+      hubPulse(
+        { unseenArtifacts: 0, unreadReport: true },
+        { unseenArtifacts: 0, unreadReport: true },
+      ),
+    ).toBe(false);
+  });
+
+  test("a count that drops while the report lands is still news (the report went false → true)", () => {
+    expect(
+      hubPulse(
+        { unseenArtifacts: 3, unreadReport: false },
+        { unseenArtifacts: 1, unreadReport: true },
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("itemA11yLabel (mobile-hub-badges Design 10: the rim is spoken)", () => {
+  const item = (badge: HubBadge | null, dimmed = false): HubItem => ({
+    id: "artifacts",
+    label: "Artifacts",
+    badge,
+    danger: false,
+    dimmed,
+  });
+
+  test("a count says how many are new (the bubble's number, now in words)", () => {
+    expect(itemA11yLabel(item({ kind: "count", n: 3 }))).toBe("Artifacts, 3 new");
+    expect(itemA11yLabel(item({ kind: "count", n: 1 }))).toBe("Artifacts, 1 new");
+  });
+
+  test("a dot (a wake due) says due soon", () => {
+    expect(itemA11yLabel(item({ kind: "dot" }))).toBe("Artifacts, due soon");
+  });
+
+  test("a dimmed item says why, and that wins over a badge (it has nothing to show)", () => {
+    expect(itemA11yLabel(item(null, true))).toBe("Artifacts, nothing running");
+    expect(itemA11yLabel(item({ kind: "count", n: 2 }, true))).toBe("Artifacts, nothing running");
+  });
+
+  test("otherwise the plain label", () => {
+    expect(itemA11yLabel(item(null))).toBe("Artifacts");
   });
 });

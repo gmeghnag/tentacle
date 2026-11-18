@@ -51,8 +51,39 @@ export type DropPlan =
       readonly fade: TimingPlan;
     };
 
-/** Where a dropped button goes: a spring, or (Reduce Motion) a placement + a fade. */
-export function dropPlan(target: Point, reduceMotion: boolean): DropPlan {
+/** The one-shot glow of news arriving (mobile-hub-badges Design 5, owner Q1 C). */
+export interface GlowPlan {
+  /** Opacity steps, played in order: peak, then back to nothing. */
+  readonly fade: readonly { readonly toValue: number; readonly duration: number }[];
+  /** The glow's scale at its peak. */
+  readonly scale: number;
+  readonly native: true;
+}
+
+/**
+ * How the button's glow plays: 0 → 0.9 over 220 ms, then back to 0 over 480 ms
+ * (≈ 700 ms in all), so it is SEEN once and leaves nothing behind — the whole
+ * point of Q1 C over the dot it replaces. Reduce Motion keeps the fade (its width
+ * is what carries the news) and drops the growth: `scale` 1, i.e. no motion.
+ */
+export function glowPlan(reduceMotion: boolean): GlowPlan {
+  return {
+    fade: [
+      { toValue: 0.9, duration: 220 },
+      { toValue: 0, duration: 480 },
+    ],
+    scale: reduceMotion ? 1 : GLOW_SCALE,
+    native: true,
+  };
+}
+
+/** How much the glow grows at its peak (Design 5: 1 → 1.18). */
+export const GLOW_SCALE = 1.18;
+
+/** Where a dropped button goes: a spring, or (Reduce Motion) a placement + a fade. */ export function dropPlan(
+  target: Point,
+  reduceMotion: boolean,
+): DropPlan {
   if (motion(reduceMotion).spring) {
     return { kind: "spring", spring: { toValue: target, useNativeDriver: true } };
   }
