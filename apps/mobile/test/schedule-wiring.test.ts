@@ -78,12 +78,13 @@ describe("the app wires the REAL client seams (no stub)", () => {
 });
 
 describe("M8: the fired bubble and the list badge", () => {
-  test("the transcript row paints the styled head, and only from a ref", () => {
+  test("a fired user row is routed to the timeline node, an ordinary one to the bubble", () => {
+    // docs/feat/scheduled-fire-row.md: decided by the pure `firedRowView` from
+    // the row itself (live ref or stored record), never painted in the bubble.
     const row = read("src", "screens", "transcript", "TranscriptRow.tsx");
-    expect(row).toContain("firedScheduleHead(user.schedule)");
-    // No ref → nothing at all (option A: the durable `[scheduled …]` prefix is
-    // the whole bubble), so the head is never painted unconditionally.
-    expect(row).toContain('fired === "" ? null : (');
+    expect(row).toContain("firedRowView(props.row.text, props.row.schedule, Date.now())");
+    expect(row).toContain("<FiredRowView {...props} fired={fired} />");
+    expect(row).not.toContain("row-scheduled-head");
   });
 
   test("the list row's meta line (what a person reads) carries the wake count", () => {

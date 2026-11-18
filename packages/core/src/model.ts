@@ -7,6 +7,7 @@
  * native Anthropic Messages API (`/v1/messages`). See ADR-003.
  */
 import type { AttachmentRef } from "@tentacle/protocol";
+import type { ScheduledFire } from "./scheduled-fire.ts";
 import type { ToolResultSpill } from "./tool.ts";
 
 export type { AttachmentRef };
@@ -98,6 +99,14 @@ export interface ChatMessage {
    * dropped, the entry still loads), so every replay path draws the separator.
    */
   readonly compacted?: CompactionFact;
+  /**
+   * ONLY on the user message a fired scheduled wake writes: which wake, its
+   * ordinal and the instant it fired (docs/feat/scheduled-fire-row.md). Display
+   * only, like `compacted`: the model reads the `[scheduled …]` prefix in
+   * `content`, never this. Rides the critical `message` entry fail-soft, so a
+   * reload draws the same `Wake 15:54` row as live.
+   */
+  readonly scheduled?: ScheduledFire;
 }
 
 /** A compaction's context sizes, in tokens. `toExact` only when the provider counted. */

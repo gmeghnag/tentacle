@@ -25,7 +25,8 @@ import { type ToolNameParts, liveElapsed } from "../tool-summary.ts";
 import { animateNextLayout } from "./animate.ts";
 
 /** The node's look: a tool's status, an orphan thought (∴), the live footer (breathing ∴). */
-export type NodeKind = StepDot | "thought" | "thinking";
+/** `wake`: a fired scheduled wake's `◷` (docs/feat/scheduled-fire-row.md). */
+export type NodeKind = StepDot | "thought" | "thinking" | "wake";
 
 const GUTTER = 10;
 /** The node sits on the first line's centre; the line is one touch target tall. */
@@ -243,6 +244,16 @@ function Node({
       return <ThereforeDots color={palette.sec} background={palette.page} />;
     case "thinking":
       return <BreathingTherefore palette={palette} still={reduceMotion} />;
+    case "wake":
+      // The clock glyph, harness-grey on the page (it masks the rail like a dot).
+      return (
+        <Text
+          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+          style={[styles.wake, { color: palette.sec, backgroundColor: palette.page }]}
+        >
+          ◷
+        </Text>
+      );
     default:
       // queued: a hollow ring.
       return (
@@ -515,6 +526,7 @@ const styles = StyleSheet.create({
   dot: { width: 13, height: 13, borderRadius: 6.5, borderWidth: 3 },
   ring: { width: 9, height: 9, borderRadius: 4.5, borderWidth: 1.2 },
   spinner: { width: 10, height: 10, borderRadius: 5, borderWidth: 1.5 },
+  wake: { fontSize: 13, lineHeight: 15, textAlign: "center" },
   // The live ∴ (B): the glyph's size (`THEREFORE_SIZE`), drawn as three thin dots.
   dotBox: { width: THEREFORE_SIZE, height: THEREFORE_SIZE },
   breathDot: { position: "absolute", width: 3, height: 3, borderRadius: 1.5 },

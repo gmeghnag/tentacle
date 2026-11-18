@@ -276,9 +276,9 @@ export function apply(state: State, input: TranscriptInput, now?: number): State
         // `turn_start`, so another device's PDF prompt shows its text here and
         // its row when the transcript is reloaded from the log
         // (`transcript-history.ts`). Said plainly rather than guessed at.
-        // The fired turn's own ref (docs/feat/cron-tool.md S6, M8): display data
-        // the client already trust-gated and sanitized, carried as sent. Absent
-        // for every ordinary prompt and after a reload (option A).
+        // The fired turn's own ref (docs/feat/scheduled-fire-row.md): display data
+        // the client already trust-gated and sanitized, carried as sent — the
+        // same record a reload reads from `ChatMessage.scheduled`.
         ...(input.schedule === undefined ? {} : { schedule: input.schedule }),
         ...at,
       }));

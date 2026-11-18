@@ -2156,3 +2156,33 @@ describe("a chart in the transcript (C4)", () => {
     expect(rows[0]).toContain("●");
   });
 });
+
+describe("fired scheduled wake row — Ctrl+O through the row cache (docs/feat/scheduled-fire-row.md)", () => {
+  // The SAME item object is laid out twice: `itemRows` memoises on identity, so a
+  // slot keyed without `expandAll` would replay the first layout (review round 2).
+  const fired = (): DisplayItem => ({
+    kind: "user",
+    text: "[scheduled sc-1 · every 10m · fire 2] line one\nline two",
+  });
+  const rows = (items: DisplayItem[], expandAll: boolean): string[] =>
+    transcriptRows(items, { expandAll, width: 80 }).map(strip);
+  const collapsed = ["◷ Wake #2 · line one line two"];
+  const expanded = ["◷ Wake #2", "  line one", "  line two"];
+
+  test("collapsed, then Ctrl+O on, on one item: the row expands", () => {
+    const items = [fired()];
+    expect(rows(items, false)).toEqual(collapsed);
+    expect(rows(items, true)).toEqual(expanded);
+  });
+
+  test("painted with Ctrl+O on first, then off: the row collapses", () => {
+    const items = [fired()];
+    expect(rows(items, true)).toEqual(expanded);
+    expect(rows(items, false)).toEqual(collapsed);
+  });
+
+  test("a typed prompt is unaffected by Ctrl+O", () => {
+    const items: DisplayItem[] = [{ kind: "user", text: "hello" }];
+    expect(rows(items, true)).toEqual(rows(items, false));
+  });
+});

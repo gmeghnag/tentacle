@@ -8,7 +8,13 @@
  * diff render identical to a local one. Pure and unit-tested.
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
-import type { AttachmentRef, ChatMessage, ToolResult, ToolResultDetail } from "@tentacle/core";
+import type {
+  AttachmentRef,
+  ChatMessage,
+  ScheduledRef,
+  ToolResult,
+  ToolResultDetail,
+} from "@tentacle/core";
 import {
   type ContentBlock,
   type SessionUpdate,
@@ -52,9 +58,11 @@ export type SessionEvent =
        * docs/feat/cron-tool.md D5, owner Q9 = B): display data for a styled
        * fired row. Absent for an ordinary turn, for an older daemon, and on a
        * reload (the durable `[scheduled sc-1 · …]` prefix in `text` is then the
-       * only truth, M4 option A).
+       * only truth, M4 option A). With `fire`/`at` from a current daemon
+       * (docs/feat/scheduled-fire-row.md), the same record the stored message
+       * carries in `ChatMessage.scheduled`.
        */
-      readonly schedule?: { readonly id: string; readonly spec: string };
+      readonly schedule?: ScheduledRef;
     }
   /**
    * The daemon sent an update type this client does not know (a newer

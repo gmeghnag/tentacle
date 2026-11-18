@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ScheduleRow } from "@tentacle/protocol";
 import {
-  firedScheduleHead,
+  firedRowView,
   scheduleMetaText,
   scheduleTitle,
   wakesBadge,
@@ -60,18 +60,39 @@ describe("wakesBadge / wakesMeta", () => {
   });
 });
 
-describe("firedScheduleHead (M8 option B)", () => {
-  test("a ref paints the styled head", () => {
-    expect(firedScheduleHead({ id: "sc-1", spec: "every 10m" })).toBe("◷ Scheduled · every 10m");
+describe("firedRowView: a fired wake as a timeline node (docs/feat/scheduled-fire-row.md)", () => {
+  const AT = new Date(2026, 10, 17, 11, 54).getTime();
+  const text = "[scheduled sc-1 · every 10m · fire 5] check CI\non PR #412";
+
+  test("the stored/live record gives the fire time; one line collapsed, the prompt in full open", () => {
+    expect(firedRowView(text, { id: "sc-1", spec: "every 10m", fire: 5, at: AT }, NOW)).toEqual({
+      name: "Wake 11:54",
+      subtitle: "check CI on PR #412",
+      body: "check CI\non PR #412",
+      a11yLabel: "Wake 11:54: check CI on PR #412",
+    });
   });
 
-  test("no ref at all paints NOTHING", () => {
-    expect(firedScheduleHead(undefined)).toBe("");
+  test("an older daemon or log (no instant): every → #N, at → its spec time", () => {
+    expect(firedRowView(text, { id: "sc-1", spec: "every 10m" }, NOW)?.name).toBe("Wake #5");
+    expect(firedRowView(text, undefined, NOW)?.name).toBe("Wake #5");
+    expect(
+      firedRowView("[scheduled sc-2 · at 2026-11-16T09:05 · fire 1] go", undefined, NOW)?.name,
+    ).toBe("Wake 16 Nov 09:05");
   });
 
-  test("a hostile ref is sanitized, one line", () => {
-    const head = firedScheduleHead({ id: "sc-1", spec: "every\n10m\u001b[2J" });
-    expect(head).toBe("◷ Scheduled · every 10m [2J");
-    expect(head).not.toContain("\n");
+  test("an ordinary message is not a fired node", () => {
+    expect(firedRowView("hello", undefined, NOW)).toBeNull();
+  });
+
+  test("a hostile prompt's labels are one sanitized line", () => {
+    const view = firedRowView(
+      `[scheduled sc-1 · every 10m · fire 1] a\u001b[2J‮${"z".repeat(400)}`,
+      undefined,
+      NOW,
+    );
+    expect(view?.subtitle).not.toContain("\u001b");
+    expect(view?.subtitle).not.toContain("‮");
+    expect(view?.subtitle.length).toBeLessThanOrEqual(80);
   });
 });
