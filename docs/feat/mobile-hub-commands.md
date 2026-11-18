@@ -629,3 +629,33 @@ Carried over, not findings: the two clocks for one flash (Low, left on purpose i
 - **Mutation:** with that line removed, 3 tests in `hub-gesture.test.ts` fail, including the new "slide-release then a tap on ANOTHER dimmed item" test, which checks the pill through `pillIndex`. The mutation was reverted and the tree is clean.
 - **Regressions:** `FloatingActivity.tsx:284` is the only place that reads `highlight`, and it only sets `hi`, so the change adds no haptic and no announcement. A sticky tap already had `hi === null`, so the extra effect does nothing there. `apps/mobile/test` passes, 3680 / 0. `bun run lint` and `bun run typecheck` are clean.
 - Round 1's low note (the machine's `flash.at` is never read by the renderer) and the interim `commandsOpen` note still stand, and neither blocks.
+
+### Slice C2 — fresh-context adversarial review
+
+*— claude-opus-5-5, 2026-11-18* (a fresh context, but the same model as the C2 executor: our blind spots may overlap, so a review by a different model family would add coverage.)
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM).
+
+1. **MEDIUM — a compaction or clear that FAILS on the daemon is reported as a dropped link.** `isTransportLoss` (`apps/mobile/src/compact-slot.ts:72-77`) treats every `JsonRpcErrorCode.InternalError` as a lost link. But a failure inside the daemon arrives with that same code. `HostedSession.compact` rethrows a provider or model error unchanged (`packages/daemon/src/hosted-session.ts:3810-3814`), and the peer turns any non-`RpcError` into `InternalError "internal error"` (`packages/transport/src/peer.ts:357-376`). Repro (`.tentacle/tmp/mobile-hub-commands/c2-internal.ts`): `compactOutcome({ok:false, error: new RpcError(InternalError, "internal error")})` returns `{"text":"the link dropped during the compaction — the history after reconnect shows whether it ran"}` with no `warn`. `clearOutcome` returns the same kind of line.
+   - **What the person sees:** the model call fails (a 5xx or a rate limit) while the link stays up. The phone shows a `◇` news line about a reconnect that will never come. `compactFailed` stays null, so the row never reaches `failed` and C3 never offers Retry. A failure that should be loud becomes a false, quiet message.
+   - **Fix:** match only real link losses — `DROPPED_NOT_RETRIED`, `"connection closed"`, `"peer is closed"` (or a typed marker) — or an error that is not an `RpcError` at all. Let any other `InternalError` fall through to `▲ Compact failed: …` / `▲ Couldn't clear: …`.
+   - **Missing test:** none of the existing tests feed a daemon-side `InternalError`. Add a red test for it in `compact-slot.test.ts` and in the controller's file.
+
+**Gate (the touched files):** 9 files, 217 pass / 0 fail. `bun run lint`: clean (2097 files). `bun run typecheck`: clean. I did not run the full `bun test`.
+
+**Mutation:** in `remote-session.ts`, the abort's `client.cancel(id)` was changed to `client.cancel(id, "MUTATION")` (it now names a turn). `compact-signal.test.ts` went red, 1 fail ("…WITHOUT a turnId…"). The change was reverted and `git status` is clean.
+
+**Attacks tried:**
+- (a) Daemon-side failure misclassified → **finding 1**.
+- (b) Is the phone's OWN compaction separator dropped by `transcript.ts:399` (`own === true ? state`)? No: no producer ever sets `own` (`session-feed.ts:298-304`), so the separator is drawn. This holds.
+- (c) Does the abort listener leak, or does an abort after settling send a stray cancel? `finally` removes the listener (`remote-session.ts:1279-1281`). This holds.
+- (d) Can a second compact or clear start while one runs? `rowReady` sees `running`, and Clear and Compact dim each other. This holds.
+- (e) Stop with the link down: the hub hides `stop` unless `link === "up"` (`hub-actions.ts:177`). This holds.
+- (f) The §7 "don't serialize the RPC peer" rule: the cancel is a separate notification, and nothing awaits it. This holds.
+- (g) Protocol: only an optional client parameter was added, with no wire change. Correctly, there is no `protocol.d/` note.
+
+**How the executor behaved:**
+- It recorded its drift honestly (the Retry `fieldBusy` input, the clear wording module, mutual exclusion).
+- Its mutation table is real. I re-checked one row of it.
+- It named the unverified device rendering.
+- It missed that `InternalError` is also the daemon's opaque failure code.
