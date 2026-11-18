@@ -51,6 +51,32 @@ describe("C · labels inside the plot (default)", () => {
     });
   }
 
+  test("a stacked label sits inside its OWN band, not on top of the stack", () => {
+    // Review round 1, finding 2 (D2's "band's mid"): the y target is the band's
+    // middle, so it must lie between the cumulative value at k and the one below.
+    const l = must(chartLayout(TRAFFIC, { width: W, locale: "en" }));
+    // Y(v) — the layout's value→pt map, recovered from two of its own guides.
+    const gs = [...l.guides].sort((a, b) => a.value - b.value);
+    const g0 = gs[0];
+    const g1 = gs[gs.length - 1];
+    if (!g0 || !g1) throw new Error("expected guides");
+    const Y = (v: number): number =>
+      g0.y + ((v - g0.value) * (g1.y - g0.y)) / (g1.value - g0.value);
+    const data = TRAFFIC.datasets.map((d) => d.data[5] as number);
+    for (const t of labels(l)) {
+      const k = t.series ?? -1;
+      if (k < 0) throw new Error("expected a series");
+      const below = data.slice(0, k).reduce((s, v) => s + v, 0);
+      const cum = below + (data[k] as number);
+      const top = Y(cum);
+      const bottom = Y(below);
+      // Inside the band, dodge or no dodge: strictly below its ceiling, and no
+      // further than one row height below its floor (the band's mid is the target).
+      expect(t.y).toBeGreaterThan(top);
+      expect(t.y).toBeLessThan(bottom + 1e-6);
+    }
+  });
+
   test("a series with a gap is labelled at its own last DEFEND point, not the last x", () => {
     const l = must(chartLayout(LATENCY, { width: W, locale: "en" }));
     const auth = labels(l).find((t) => t.text === "auth");

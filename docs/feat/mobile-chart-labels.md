@@ -457,6 +457,37 @@ markers and the legend's wrapping actually LOOK on a device — this repo's mobi
 tests stub the host components, so nothing here proves pixels. The design is the
 mockup's; a simulator pass is the remaining check.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-18*
+
+Both Review findings fixed, red before green (§9), each mutation-checked.
+
+**1 (MEDIUM) — point-form highlight read series k at series 0's index.** Root
+cause: a scrub index is an index into series 0's points (`chart-layout.ts`
+`pos0`), but `ownSeriesHero` used it raw on `datasetValues(spec, k)`. Fix:
+`chart-hero.ts:137` new `pointIndexAt(spec, series, at)` — the index at which
+series `series` has the x of series 0's point `at` (`-1` when it has none) — and
+`ownSeriesHero` (`chart-hero.ts:167-169`) maps through it when
+`usesPoints(spec)`, returning `EMPTY` (`—`) when k has no point at that x.
+Series-1-only and dense/shared-x specs are unchanged (the mapping is the
+identity there). Regression test: `chart-highlight.test.ts:66` — `b`'s two-point
+series, scrubs at every index of `a`: x=3 → `300 · "3 b"`, x=4 → `400 · "4 b ·
+vs 3"`, x=1/2 → `—`. RED on the old code ("400" at index 2);
+mutation (`pointIndexAt` bypassed, `at` passed raw) → 1 fail.
+
+**2 (MEDIUM) — stacked band-mid was untested.** No production change: the code
+was right, the coverage was not. Regression test: `chart-labels.test.ts:54` —
+`TRAFFIC` (stacked area), each direct label's `y` must be strictly below its own
+band's ceiling `Y(cum_k)` and not below its floor `Y(cum_{k-1})`, with `Y`
+recovered from two of the layout's own guides. Mutation — Review's exact one,
+`chart-layout.ts` stacked target → `end - 8` → 1 fail (`Expected > 103.43,
+Received 95.43`, on `web`); reverted, re-run green.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean ·
+`bun run lint` clean (2057 files) · `bun test apps/mobile/test/chart-*` 189 pass /
+0 fail (15 files).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-18* (fresh context; same model family as the plan

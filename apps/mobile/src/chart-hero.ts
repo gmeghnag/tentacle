@@ -129,6 +129,26 @@ function heroNumber(spec: ChartSpec, value: number, locale: string): Omit<Hero, 
 const EMPTY: Hero = { num: "—", unit: "", unitBefore: false, context: "" };
 
 /**
+ * The index at which a point-form series has the same x as series 0's point
+ * `at`, or `-1` when it has none there. A scrub index is an index into series
+ * 0's points (`chart-layout.ts` `pos0`), so reading series k at that raw index
+ * would show the value of a different x (review round 1, finding 1).
+ */
+function pointIndexAt(spec: ChartSpec, series: number, at: number): number {
+  const xOf = (k: number, i: number): string | null => {
+    const p = spec.datasets[k]?.data[i];
+    return typeof p === "object" && p !== null ? String(p.x) : null;
+  };
+  const x = xOf(0, at);
+  if (x === null) return -1;
+  const data = spec.datasets[series]?.data ?? [];
+  for (let i = 0; i < data.length; i++) {
+    if (xOf(series, i) === x) return i;
+  }
+  return -1;
+}
+
+/**
  * One series' hero: its value at `at` (or at its last defined point) against its
  * own previous DEFINED point — the mockup's "a series vs itself" rule, used for
  * a highlighted series in A and for a 3+-series line/area
@@ -142,7 +162,11 @@ function ownSeriesHero(
   xs: readonly (readonly string[])[],
 ): Hero {
   const values = datasetValues(spec, series);
-  const i = at !== undefined && at >= 0 && at < values.length ? at : lastIndex(values);
+  // A point-form series is indexed by x, not by series 0's index: it may have
+  // more, fewer or differently spaced points.
+  const at0 = at !== undefined && at >= 0 && usesPoints(spec) ? pointIndexAt(spec, series, at) : at;
+  if (at0 !== undefined && at0 < 0) return EMPTY;
+  const i = at0 !== undefined && at0 < values.length ? at0 : lastIndex(values);
   const cur = values[i];
   if (i < 0 || typeof cur !== "number") return EMPTY;
   let p = -1;

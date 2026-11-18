@@ -63,6 +63,42 @@ describe("highlightLayout", () => {
     expect(hi.scrubAt(4)?.hero.context).toBe("Nov 14 api · vs Nov 13");
   });
 
+  test("a point-form series is read at that x, not at its own i-th point", () => {
+    // Review round 1, finding 1: the scrub index is an index into series 0's
+    // points, so it must be mapped to series k by x — b has no point at x=1.
+    const raw = spec({
+      type: "line",
+      title: "punti",
+      x: { type: "number" },
+      datasets: [
+        {
+          label: "a",
+          data: [
+            { x: 1, y: 10 },
+            { x: 2, y: 20 },
+            { x: 3, y: 30 },
+            { x: 4, y: 40 },
+          ],
+        },
+        {
+          label: "b",
+          data: [
+            { x: 3, y: 300 },
+            { x: 4, y: 400 },
+          ],
+        },
+      ],
+    });
+    const hi = highlightLayout(layoutOf(raw), raw, 1, "en");
+    expect(hi.scrubAt(2)?.hero.num).toBe("300");
+    expect(hi.scrubAt(2)?.hero.context).toBe("3 b");
+    expect(hi.scrubAt(3)?.hero.num).toBe("400");
+    expect(hi.scrubAt(3)?.hero.context).toBe("4 b · vs 3");
+    // No point of b at x=1 / x=2: an honest empty hero, never b's value at x=3.
+    expect(hi.scrubAt(0)?.hero.num).toBe("—");
+    expect(hi.scrubAt(1)?.hero.num).toBe("—");
+  });
+
   test("a scrub hero of another series is not left behind by the highlight", () => {
     const l = layoutOf(LATENCY);
     const hi = highlightLayout(l, RAW, 0, "en");
