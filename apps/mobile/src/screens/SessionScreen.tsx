@@ -59,6 +59,8 @@ import type { ChartSettings } from "../chart-settings-store.ts";
 import { chatStatus, titleLabel } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
+import { DIAGRAM_SETTINGS } from "../diagram-settings-expo.ts";
+import type { DiagramStyle } from "../diagram-settings-store.ts";
 import { type FloatBounds, fits, visible as floatVisible, headerPill } from "../floating-button.ts";
 import {
   type Follow,
@@ -66,6 +68,7 @@ import {
   LANDING_REVEAL_MS,
   type Landing,
   type ListSize,
+  SETTLE_MS,
   contentGrew,
   endTarget,
   initialFollow,
@@ -78,6 +81,7 @@ import {
   landingStep,
   reattachLanding,
   scrolled,
+  settleStep,
   shown,
   viewportChanged,
 } from "../follow.ts";
@@ -456,10 +460,38 @@ export function SessionScreen({
     }
     return next.step !== null;
   }, [perform, armReveal]);
+  // Bug 5 (docs/fix/mobile-qa-1117.md): where the list really is, and the settle
+  // re-check armed by every size change — `follow.ts`'s `settleStep` decides.
+  const offset = useRef(0);
+  const settle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const armSettle = useCallback(() => {
+    if (settle.current !== null) {
+      clearTimeout(settle.current);
+    }
+    settle.current = setTimeout(() => {
+      settle.current = null;
+      if (dragging.current) {
+        return;
+      }
+      const step = settleStep(followRef.current, { offset: offset.current, ...size.current });
+      if (step !== null) {
+        perform(step);
+      }
+    }, SETTLE_MS);
+  }, [perform]);
+  useEffect(
+    () => () => {
+      if (settle.current !== null) {
+        clearTimeout(settle.current);
+      }
+    },
+    [],
+  );
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
       size.current = { content: contentSize.height, viewport: layoutMeasurement.height };
+      offset.current = contentOffset.y;
       setFollowState(
         scrolled(
           followRef.current,
@@ -483,8 +515,9 @@ export function SessionScreen({
         return;
       }
       perform(contentGrew(followRef.current, size.current));
+      armSettle();
     },
-    [perform, land],
+    [perform, land, armSettle],
   );
   const onListLayout = useCallback(
     (event: LayoutChangeEvent) => {
@@ -493,8 +526,9 @@ export function SessionScreen({
         return;
       }
       perform(viewportChanged(followRef.current, size.current));
+      armSettle();
     },
-    [perform, land],
+    [perform, land, armSettle],
   );
   const onJump = useCallback(() => {
     // The person asked to go to the latest: animated (they are watching it go).
@@ -644,8 +678,15 @@ export function SessionScreen({
     showRetry.current = true;
     list.current?.scrollToIndex({ index: showIndex, animated: true, viewPosition: 0.2 });
   };
+  // The diagram look (docs/fix/mobile-qa-1117.md, bug 3): the Settings choice,
+  // read live like the Activity button's, handed to each row.
+  const [diagramStyle, setDiagramStyle] = useState<DiagramStyle>(
+    () => DIAGRAM_SETTINGS.current().style,
+  );
+  useEffect(() => DIAGRAM_SETTINGS.subscribe((next) => setDiagramStyle(next.style)), []);
   const rowExtraData = useMemo(
     () => ({
+      diagramStyle,
       readAloud: voiceState?.readAloud,
       speakShown: voiceSettings.readAloudButton,
       // An agent card's link follows the live/Finished lists.
@@ -656,7 +697,15 @@ export function SessionScreen({
       fullSteps,
       layout,
     }),
-    [voiceState?.readAloud, voiceSettings.readAloudButton, activity, openSteps, fullSteps, layout],
+    [
+      diagramStyle,
+      voiceState?.readAloud,
+      voiceSettings.readAloudButton,
+      activity,
+      openSteps,
+      fullSteps,
+      layout,
+    ],
   );
   const compose = state.compose;
   const status = chatStatus({
@@ -1036,6 +1085,7 @@ export function SessionScreen({
                       <TranscriptRow
                         row={item}
                         palette={palette}
+                        diagramStyle={diagramStyle}
                         onLink={onLink}
                         thumbnails={state.thumbnails}
                         chartLabels={chartSettings.labels}

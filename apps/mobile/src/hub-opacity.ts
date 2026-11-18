@@ -26,6 +26,14 @@ export const OPACITY_MAX = 100;
 /** Today's look: nothing changes until the user moves the slider (owner Q2). */
 export const OPACITY_DEFAULT = 100;
 
+/**
+ * The preview's sample: two lines of an ordinary reply under the button, so the
+ * person judges the level against chat text (docs/fix/mobile-qa-1117.md, bug 1:
+ * the first build showed a developer's note about a test suite instead).
+ */
+export const PREVIEW_SAMPLE =
+  "Done — the summary is ready. Two files changed, and both of them could use a quick read.";
+
 /** Below this the arc thickens and gains a halo (mockup: `low = o < 0.75`). */
 const ARC_FAINT_BELOW = 0.75;
 const ARC_WIDTH = 2;

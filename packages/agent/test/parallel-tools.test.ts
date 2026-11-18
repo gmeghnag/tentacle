@@ -122,12 +122,15 @@ describe("round executor — sequential golden (T-S1)", () => {
         role: "tool",
         content: expect.stringContaining("denied") as unknown as string,
         toolCallId: "c2",
+        // A refusal is an error result, and the history says so (docs/fix/mobile-qa-1117.md).
+        isError: true,
       },
       { role: "tool", content: "edited c.ts", toolCallId: "c3", durationMs: 0 },
       {
         role: "tool",
         content: "Cancelled by the user before this tool ran.",
         toolCallId: "c4",
+        isError: true,
       },
     ]);
   });

@@ -14,6 +14,7 @@ import type { JSX } from "react";
 import { ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
 import type { LabelMode } from "../chart-layout-kit.ts";
+import type { DiagramStyle } from "../diagram-settings-store.ts";
 import type { ActivityButtonMode } from "../floating-button.ts";
 import type { PhotoSettings } from "../photo-settings-store.ts";
 import type { SpeechRate } from "../read-aloud.ts";
@@ -111,6 +112,16 @@ export interface SettingsScreenProps {
   readonly activityOpacity?: number;
   readonly onActivityOpacity?: (opacity: number) => void;
   /**
+   * How the iPhone draws diagrams (docs/fix/mobile-qa-1117.md, bug 3; the owner's
+   * model-diagrams Q1 setting): outline (default) or filled. Absent = no section.
+   */
+  readonly diagramStyle?: DiagramStyle;
+  /** False over a newer build's record: the rows are disabled and say why. */
+  readonly diagramWritable?: boolean;
+  /** A write that did not stick (the pick still holds for this run). */
+  readonly diagramError?: string;
+  readonly onDiagramStyle?: (style: DiagramStyle) => void;
+  /**
    * Photos (fix/mobile-media-live item 5): the "Send photos at original size"
    * switch. Absent = no Photos card (a build without the setting).
    */
@@ -121,6 +132,15 @@ export interface SettingsScreenProps {
   readonly photoError?: string;
   readonly onPhotoSettings?: (next: PhotoSettings) => void;
 }
+
+/** The diagram looks, in the order Settings lists them (the mockups' A then B). */
+export const DIAGRAM_STYLE_ROWS: readonly {
+  readonly value: DiagramStyle;
+  readonly label: string;
+}[] = [
+  { value: "outline", label: "Outline" },
+  { value: "filled", label: "Filled" },
+];
 
 export const ACTIVITY_BUTTON_ROWS: readonly {
   readonly value: ActivityButtonMode;
@@ -174,6 +194,10 @@ export function SettingsScreen({
   onChartLabels,
   activityOpacity,
   onActivityOpacity,
+  diagramStyle,
+  diagramWritable = true,
+  diagramError,
+  onDiagramStyle,
   photoSettings,
   photoWritable = true,
   photoError,
@@ -415,6 +439,17 @@ export function SettingsScreen({
               )}
             </View>
           )}
+          {/* The opacity band (docs/feat/mobile-hub-opacity.md, Owner Q1): only
+              with the floating button, which is the only thing it affects. The
+              stored value is kept while the button is in the header. */}
+          {onActivityOpacity === undefined || activityMode !== "floating" ? null : (
+            <HubOpacityBand
+              palette={palette}
+              opacity={activityOpacity}
+              writable={activityWritable}
+              onChange={onActivityOpacity}
+            />
+          )}
           {chartLabels === undefined || onChartLabels === undefined ? null : (
             <View style={styles.section}>
               <BandSection
@@ -456,16 +491,46 @@ export function SettingsScreen({
               )}
             </View>
           )}
-          {/* The opacity band (docs/feat/mobile-hub-opacity.md, Owner Q1): only
-              with the floating button, which is the only thing it affects. The
-              stored value is kept while the button is in the header. */}
-          {onActivityOpacity === undefined || activityMode !== "floating" ? null : (
-            <HubOpacityBand
-              palette={palette}
-              opacity={activityOpacity}
-              writable={activityWritable}
-              onChange={onActivityOpacity}
-            />
+          {diagramStyle === undefined || onDiagramStyle === undefined ? null : (
+            <View style={styles.section}>
+              <BandSection
+                palette={palette}
+                title="Diagrams"
+                footnote={
+                  diagramWritable
+                    ? "How diagrams in a reply are drawn: thin outlines, or soft-filled shapes with the caption below."
+                    : "Set by a newer version of tentacle — this version cannot change it."
+                }
+              >
+                {DIAGRAM_STYLE_ROWS.map((row, index) => (
+                  <Row
+                    key={row.value}
+                    testID={`diagram-style-${row.value}`}
+                    palette={palette}
+                    first={index === 0}
+                    minHeight={size.rowSetting}
+                    title={row.label}
+                    accessibilityLabel={`Diagrams: ${row.label}`}
+                    dimmed={!diagramWritable}
+                    {...(diagramWritable ? { onPress: () => onDiagramStyle(row.value) } : {})}
+                    trailing={
+                      diagramStyle === row.value ? (
+                        <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
+                      ) : undefined
+                    }
+                  />
+                ))}
+              </BandSection>
+              {diagramError === undefined ? null : (
+                <Banner
+                  palette={palette}
+                  tone="error"
+                  icon="exclamationmark.triangle"
+                  testID="diagram-style-error"
+                  body={diagramError}
+                />
+              )}
+            </View>
           )}
           {voice === undefined || onVoice === undefined ? null : (
             <View style={styles.section}>

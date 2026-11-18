@@ -25,6 +25,7 @@ import {
 } from "@tentacle/core";
 import { type ChartScheme, chartScheme } from "./chart-row.ts";
 import { diagramCacheKey } from "./diagram-cache.ts";
+import type { DiagramStyle } from "./diagram-settings-store.ts";
 import { type ChartTokens, type Palette, chartTokensFor } from "./theme.ts";
 
 /** The tool's name (`packages/tools/src/diagram.ts`). The app never imports `tools`. */
@@ -111,6 +112,8 @@ export interface DiagramRowOptions {
   readonly palette: Palette;
   /** The iOS type scale: mermaid bakes text metrics into the SVG, so it is part of the render's key. */
   readonly fontScale: number;
+  /** The look picked in Settings (docs/fix/mobile-qa-1117.md, bug 3); absent → outline. */
+  readonly style?: DiagramStyle;
 }
 
 export interface DiagramRowView {
@@ -126,6 +129,8 @@ export interface DiagramRowView {
    * — which is why the two inputs are here and not read by the component.
    */
   readonly renderKey: string;
+  /** The look this view draws in (the theme and the caption's place follow it). */
+  readonly style: DiagramStyle;
   /** VoiceOver: what the diagram is and what it says, one element (`describeDiagram`). */
   readonly accessibilityLabel: string;
 }
@@ -138,11 +143,16 @@ export interface DiagramRowView {
 const keyCache = new Map<string, string>();
 const KEY_CACHE_MAX = 32;
 
-function renderKeyFor(spec: DiagramSpec, scheme: ChartScheme, fontScale: number): string {
-  const key = `${scheme}|${fontScale}|${spec.source.canonical}`;
+function renderKeyFor(
+  spec: DiagramSpec,
+  scheme: ChartScheme,
+  fontScale: number,
+  style: DiagramStyle,
+): string {
+  const key = `${style}|${scheme}|${fontScale}|${spec.source.canonical}`;
   const hit = keyCache.get(key);
   if (hit !== undefined) return hit;
-  const computed = diagramCacheKey(spec.source.canonical, scheme, fontScale);
+  const computed = diagramCacheKey(spec.source.canonical, scheme, fontScale, style);
   keyCache.set(key, computed);
   if (keyCache.size > KEY_CACHE_MAX) {
     const oldest = keyCache.keys().next().value;
@@ -159,13 +169,15 @@ export function diagramRowView(
   const spec = diagramRowSpec(tool);
   if (spec === null) return null;
   const scheme = chartScheme(options.palette);
+  const style = options.style ?? "outline";
   return {
     title: spec.title,
     source: spec.source,
     type: spec.type,
     scheme,
     tokens: chartTokensFor(options.palette),
-    renderKey: renderKeyFor(spec, scheme, options.fontScale),
+    renderKey: renderKeyFor(spec, scheme, options.fontScale, style),
+    style,
     accessibilityLabel: diagramSummary(spec),
   };
 }

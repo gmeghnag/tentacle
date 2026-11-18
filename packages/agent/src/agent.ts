@@ -270,7 +270,8 @@ const TURN_STOPPED_INTERRUPTED_NOTE =
  * A finished call's history message. A spill rides with it, so a resume or a
  * snapshot shows the same note as the live row (docs/feat/tui-spill-note.md);
  * the model never sees it (providers copy field by field). So does the run's
- * measured duration, when the tool actually ran (docs/fix/tool-duration.md).
+ * measured duration, when the tool actually ran (docs/fix/tool-duration.md),
+ * and a failed result's error flag (docs/fix/mobile-qa-1117.md).
  */
 function toolMessage(callId: string, result: ToolResult, durationMs?: number): ChatMessage {
   return {
@@ -280,6 +281,9 @@ function toolMessage(callId: string, result: ToolResult, durationMs?: number): C
     ...(result.spill ? { spill: result.spill } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(result.denialReply !== undefined ? { denialReply: result.denialReply } : {}),
+    // A failed run says so in the history too: a reload projects the step red,
+    // as live did (docs/fix/mobile-qa-1117.md, bug 2). Display only.
+    ...(result.isError === true ? { isError: true as const } : {}),
   };
 }
 
@@ -2141,17 +2145,11 @@ export class Agent {
           // permission either (`authorizeCall` asks). Answer it
           // synthetically so the assistant's `toolCalls` stay valid in the
           // history; the next iteration top ends the turn as cancelled.
-          messages.push({
-            role: "tool",
-            content: CANCELLED_TOOL_NOTE,
-            toolCallId: call.id,
-          });
-          yield {
-            type: "tool_result",
-            id: call.id,
-            name: call.name,
-            result: { content: CANCELLED_TOOL_NOTE, isError: true },
-          };
+          // ONE result for the event and the history, so a reload shows the
+          // same failed step the live row did (docs/fix/mobile-qa-1117.md).
+          const cancelled: ToolResult = { content: CANCELLED_TOOL_NOTE, isError: true };
+          messages.push(toolMessage(call.id, cancelled));
+          yield { type: "tool_result", id: call.id, name: call.name, result: cancelled };
           yield { type: "history_commit" };
           continue;
         }

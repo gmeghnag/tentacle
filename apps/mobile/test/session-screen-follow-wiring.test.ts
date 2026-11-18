@@ -130,3 +130,20 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
     expect(src).toMatch(/landingReveal\(\s*landing\.current,[\s\S]{0,140}hasRows\.current,?\s*\)/);
   });
 });
+
+describe("the settle re-check (docs/fix/mobile-qa-1117.md, bug 5)", () => {
+  const src = read("screens", "SessionScreen.tsx");
+
+  test("every content or viewport change re-arms it, after its own follow step", () => {
+    expect(src).toMatch(/perform\(contentGrew\([^)]*\)\);\s*armSettle\(\);/);
+    expect(src).toMatch(/perform\(viewportChanged\([^)]*\)\);\s*armSettle\(\);/);
+  });
+
+  test("it reads the list's real offset and lets `settleStep` decide; a drag skips it", () => {
+    expect(src).toContain("offset.current = contentOffset.y;");
+    expect(src).toContain(
+      "settleStep(followRef.current, { offset: offset.current, ...size.current })",
+    );
+    expect(src).toMatch(/if \(dragging\.current\) \{\s*return;\s*\}\s*const step = settleStep/);
+  });
+});

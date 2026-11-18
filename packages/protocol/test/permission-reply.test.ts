@@ -119,3 +119,17 @@ describe("denialReply on the refused call", () => {
     expect(UPDATE_CLASS.tool_call_update).toBe("display");
   });
 });
+
+describe("isError on a failed tool message (docs/fix/mobile-qa-1117.md, bug 2)", () => {
+  const tool = { role: "tool", content: "ls: missing-dir", toolCallId: "c1" };
+  test("`isError: true` is kept: a reload draws the step as failed", () => {
+    const m = ChatMessageSchema.safeParse({ ...tool, isError: true });
+    expect(m.success && m.data.isError).toBe(true);
+  });
+
+  test("a malformed value is DROPPED, never a refusal of the message (fail-soft)", () => {
+    const m = ChatMessageSchema.safeParse({ ...tool, isError: "yes" });
+    expect(m.success).toBe(true);
+    expect(m.success && m.data.isError).toBeUndefined();
+  });
+});

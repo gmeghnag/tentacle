@@ -2792,6 +2792,22 @@ describe("the v8 record: a refused call's reply and the installed head (docs/fea
     expect(tool?.denialReply).toBe("try bun run build");
   });
 
+  test("a failed tool message's isError survives a restart (docs/fix/mobile-qa-1117.md, bug 2)", () => {
+    const messages: ChatMessage[] = [
+      { role: "user", content: "go" },
+      { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "shell", arguments: "{}" }] },
+      { role: "tool", content: "ls: missing-dir", toolCallId: "c1", isError: true },
+    ];
+    const bytes = JSON.parse(
+      JSON.stringify(
+        record({ messages, turns: [{ turnId: "t1", end: { stopReason: "end_turn" } }] }),
+      ),
+    );
+    const restored = rig([], () => []).host.restore(parsed(bytes));
+    const tool = restored.snapshotPage().messages.find((m) => m.role === "tool");
+    expect(tool?.isError).toBe(true);
+  });
+
   test("V8-3 `head` must name a user message of the history", () => {
     expect(parse(record({ head: 1 })).ok).toBe(true);
     for (const head of [0, 2, -1, 1.5, "1", null]) {

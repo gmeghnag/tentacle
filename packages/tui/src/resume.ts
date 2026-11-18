@@ -138,8 +138,9 @@ function itemsOf(
         items[idx as number] = {
           ...tool,
           resultText: m.content,
-          // A refused call is known from its reply; any other result's error flag is not stored.
-          status: m.denialReply !== undefined ? "error" : "ok",
+          // A refused call is known from its reply, a failed one from its stored
+          // flag (docs/fix/mobile-qa-1117.md): the same status the live row had.
+          status: m.denialReply !== undefined || m.isError === true ? "error" : "ok",
           // A spilled result shows the same note as live (docs/feat/tui-spill-note.md).
           ...(m.spill ? { spill: m.spill } : {}),
           // So does a refusal with a reply (docs/feat/permission-reply.md).

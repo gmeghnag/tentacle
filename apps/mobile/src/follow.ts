@@ -100,6 +100,38 @@ export function viewportChanged(state: Follow, m: ListSize): FollowStep {
   return { state, scrollTo: state.following ? endTarget(m) : null, animated: true };
 }
 
+/** How far from the true end a settled, following list may sit (sub-point rounding). */
+export const SETTLE_SLACK_PT = 2;
+
+/**
+ * How long after the last size change the screen re-checks where the list
+ * settled (`settleStep`): past RN's animated scroll (~300 ms), so the check never
+ * fights a scroll still in flight.
+ */
+export const SETTLE_MS = 450;
+
+/**
+ * The settle check (docs/fix/mobile-qa-1117.md, bug 5). A scroll to the end that
+ * is issued in the same frame as a layout change — the Queued panel appearing or
+ * leaving, a reply arriving — can land at the end the NATIVE view had before that
+ * change was mounted: short by the change, while `following` stays true, so no
+ * later step corrects it (the reply left under the composer). Once the sizes have
+ * gone quiet, a following list that is not at its true end is scrolled there.
+ * Not following → never moved (the person is reading further up).
+ */
+export function settleStep(state: Follow, m: ScrollMetrics): FollowStep | null {
+  if (!state.following) {
+    return null;
+  }
+  const end = endTarget(m);
+  if (end === null || m.content <= m.viewport) {
+    return null;
+  }
+  return Math.abs(m.offset - end) > SETTLE_SLACK_PT
+    ? { state, scrollTo: end, animated: true }
+    : null;
+}
+
 /** The pill's tap: back to the end, following again. */
 export function jumped(): Follow {
   return initialFollow;

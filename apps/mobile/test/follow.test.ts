@@ -353,3 +353,42 @@ describe("the follow TARGET is the true end (docs/fix/mobile-chat-glitches.md, b
     expect(step.state).toBe(up);
   });
 });
+
+/**
+ * docs/fix/mobile-qa-1117.md, bug 5: a scroll to the end that RN issues in the
+ * same frame as a layout change (the Queued panel appearing or leaving, a reply
+ * arriving) can land at the end the native view had BEFORE that change — short
+ * by the panel's height — while `following` stays true, so nothing ever corrects
+ * it. `settleStep` is the check the screen runs once the measurements go quiet.
+ */
+describe("settleStep — following, but parked short of the true end", () => {
+  test("following and short of the end by more than the slack → scroll to the true end", async () => {
+    const { settleStep } = await import("../src/follow.ts");
+    // The QA's case: content 3000, viewport 600 → end 2400; the list sat at 2140
+    // (the end before a 260 pt panel shrank the viewport).
+    expect(settleStep(initialFollow, { offset: 2140, content: 3000, viewport: 600 })).toEqual({
+      state: initialFollow,
+      scrollTo: 2400,
+      animated: true,
+    });
+  });
+
+  test("at the end (within the slack) → nothing to do", async () => {
+    const { SETTLE_SLACK_PT, settleStep } = await import("../src/follow.ts");
+    const m = { content: 3000, viewport: 600 };
+    expect(settleStep(initialFollow, { ...m, offset: 2400 })).toBeNull();
+    expect(settleStep(initialFollow, { ...m, offset: 2400 - SETTLE_SLACK_PT })).toBeNull();
+  });
+
+  test("the person scrolled up (not following) → never yanked", async () => {
+    const { settleStep } = await import("../src/follow.ts");
+    const reading: Follow = { following: false, unseen: true };
+    expect(settleStep(reading, { offset: 100, content: 3000, viewport: 600 })).toBeNull();
+  });
+
+  test("nothing measured yet, or content shorter than the viewport → nothing", async () => {
+    const { settleStep } = await import("../src/follow.ts");
+    expect(settleStep(initialFollow, { offset: 0, content: 0, viewport: 600 })).toBeNull();
+    expect(settleStep(initialFollow, { offset: 0, content: 400, viewport: 600 })).toBeNull();
+  });
+});
