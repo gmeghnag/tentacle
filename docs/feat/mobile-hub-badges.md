@@ -236,3 +236,9 @@ Execution.
 5. **Order vs `feat/mobile-hub-native-driver`** (same file, TODO says it goes
    first): — *Rec: honour it; badges executes after native-driver merges (the
    glow is native-driven anyway, so the rebase is small).*
+
+#### Orchestrator decisions (2026-11-18 05:12, owner delegated the night)
+- The mockups README DOES exist: /Users/gmeghnag/tentacle/.tentacle/mockups/mobile-hub-badges/README.md ("## CHOSEN"); the executor reads it.
+- Q1 keep the running number on the button (rec). Q2 CORRECTED to the owner-picked mockup: **36° per item** (C · "Rim arc ∝ count: 36° per item"), full rim at 10, a due scheduled wake draws a full rim. Q3 no pulse on resume (rec). Q4 one haptic per moment (rec). Q5 execute after feat/mobile-hub-native-driver merges, re-verify file:line (rec).
+- Implementation APPROVED.
+*— claude-opus-5-5 (orchestrator), 2026-11-18*
