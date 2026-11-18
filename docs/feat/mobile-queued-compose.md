@@ -582,3 +582,62 @@ convergence on reject (holds via `enqueueRejected`), not on a never-sent row (#3
 **Executor behaviour:** thorough doc and drift list, honest about the B0
 amendment; but claimed a green gate without running the repo's `typecheck`
 script, and its D6 tests never interleave a report with the unqueue await.
+
+### Fix round 1
+
+*— claude-sonnet-4-5, 2026-11-18* (executor of the fixes; same branch)
+
+**F1 (HIGH) — gate red: `tsc -p apps/mobile` failed.** All three sites fixed:
+`compose-controller.ts:47` imports the `PendingBubble` type;
+`queue-trace.ts:89` adds `"unqueue"` to the compose act union;
+`SessionScreen.tsx` gets `editBanner` (a row: label + ×, 12 pt radius) and
+`flex` (`flexShrink: 1`) in `styles`, so the banner now has a layout instead of
+`undefined`. *Verified:* `bunx tsc -p apps/mobile --noEmit` → no output.
+
+**F2 (HIGH) — Edit/Cancel applied a STALE state and field.** Root cause in one
+sentence: `unqueueFor(state, { field, reply: await … })` evaluated both
+arguments before the await, so a `queued` report landing during the RTT was
+overwritten by `state = step.state` and text typed meanwhile was lost.
+`unqueueApplied` (`compose-controller.ts:404-410`) now awaits the reply FIRST
+and reads `deps.draft()` and `state` after it. *Red before green:*
+`compose-controller.test.ts` "Edit applies what the queue says AFTER the
+answer" (another device's row + typed text during the RTT) — red on the old
+code (`rows []`, field `"mine"`), green now (`["other-1"]`, field
+`"typed during rtt\nmine"`).
+
+**F3 (MEDIUM) — × with the link down dropped the words.** Root cause:
+`enqueueStarted` + the field reset ran before `handle === null → return`, so a
+row the daemon never heard of stayed "mine" (B0 keeps unacked ids in `own`) and
+the field was cleared on top. `editCanceled` now reads `deps.handle()` BEFORE
+`deps.mint()`/`enqueueStarted`, and with no link it only says so and leaves the
+field alone (the row is not created at all). *Red before green:* "× with the
+link down: the words stay in the field, no bubble is left behind" — red before
+(`field ""`, a row left), green now.
+
+**F4 (MEDIUM) — the bubble's Send now carried the field (owner Q4).** Root
+cause: `SessionScreen.tsx:1163` called `controller.sendNow()`, the in-field act
+that folds the field's text in too. The send-now body was factored into one
+shared `sendNowMessages(handle, messages, takeField)`
+(`compose-controller.ts:759-830`) — the in-field `sendNow()` keeps today's
+semantics (`takeField: true`), and a new `sendNowRow(id)` sends that message
+alone with `takeField: false`. Wired through
+`session-screen-controller.ts:508`/`:1773`. *Red before green:* "a BUBBLE's
+Send now carries only that message, never the field (owner Q4)" — red before
+(field emptied, no `sendnow:<id>` for the bubble's act), green now.
+
+**Mutation checks (§9 non-vacuity), each reverted immediately:**
+- read `state`/`field` before the await → red: F2's test (`47 pass, 1 fail`).
+- accept the × with `handle === null` (the old order) → red: F3's test
+  (`47 pass, 1 fail`).
+- `sendNowRow` with `takeField: true` → red: F4's test (`47 pass, 1 fail`).
+F1 is a typecheck failure, i.e. its own red (the gate line above).
+
+**No drift beyond the above:** no protocol, schema, or persisted format
+touched; no `changelog.d/` change (the fragment already exists and its wording
+still holds — the bubble's ⇥ now does what it says).
+
+**Gate:** `bunx tsc --noEmit` → clean; `tsc -p apps/mobile --noEmit` → clean;
+`bun run lint` → Checked 2066 files, 0 errors; `bun test apps/mobile/test` →
+3396 pass / 0 fail; full `bun test` → **15069 pass, 5 skip, 0 fail** (1078
+files, 495 s; the 5 skips are the documented `skipIf` opt-ins — live-k8s ×2,
+live-docker ×2, the real-socket keepalive).

@@ -1161,7 +1161,7 @@ export function SessionScreen({
                             void controller.cancel(id);
                             return;
                           case "send-now":
-                            void controller.sendNow();
+                            void controller.sendNowRow(id);
                             return;
                         }
                       }}
@@ -1591,6 +1591,19 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
   },
   notice: { paddingHorizontal: 16, paddingBottom: 6 },
+  // The editing banner above the field (D6): the label takes the row, the × keeps
+  // its own width (it was `styles.flex`, i.e. undefined).
+  editBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 16,
+    marginBottom: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  flex: { flexShrink: 1 },
   // The turn observable: on screen (XCUITest sees it), takes no room. 1×1 and
   // absolute, not 0×0: iOS 26 drops an empty-frame element from the
   // accessibility tree, so `turn-idle` vanished (slice 6 walk, flows 23/24).

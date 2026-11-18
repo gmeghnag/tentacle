@@ -68,6 +68,8 @@ function fakeHandle(
     readonly unqueueRemoved?: readonly string[];
     /** `session/unqueue` throws (a dropped link). */
     readonly refuseUnqueue?: unknown;
+    /** The unqueue's answer lands only when this resolves (the reply in flight). */
+    readonly holdUnqueue?: Promise<void>;
     /** An older daemon: `MethodNotFound` → the client's `"unsupported"`. */
     readonly unqueueUnsupported?: boolean;
   } = {},
@@ -152,6 +154,8 @@ function fakeHandle(
       if (options.refuseUnqueue !== undefined) {
         throw options.refuseUnqueue;
       }
+      // The answer is held by a test that needs the request still in flight.
+      await options.holdUnqueue;
       const removed = options.unqueueRemoved ?? ids;
       return { removed: [...removed], delivered: ids.filter((id) => !removed.includes(id)) };
     },
@@ -214,6 +218,8 @@ async function harness(
     await store.setOwnIds(options.persisted.ownIds, options.persisted.ownTexts ?? {});
   }
   const handle = options.handle ?? fakeHandle();
+  /** The link the compose half reads NOW (a test drops it mid-flight). */
+  let live: ReturnType<typeof fakeHandle> | null = handle;
   if (options.heldQueue !== undefined) {
     // A relaunch: the client's own resync snapshot is in hand before any subscription.
     (handle as unknown as { queue: QueueState | undefined }).queue = options.heldQueue;
@@ -260,7 +266,7 @@ async function harness(
         return picks;
       },
     },
-    handle: () => handle,
+    handle: () => live,
     turnId: () => turn,
     stopTurn: (turnId) => {
       stops.push(turnId);
@@ -306,6 +312,10 @@ async function harness(
     field: () => field,
     setField: (text: string) => {
       field = text;
+    },
+    /** Drop or restore the link under the compose half's feet. */
+    setLink: (up: boolean) => {
+      live = up ? handle : null;
     },
     setTurn: (id: string | null) => {
       turn = id;
@@ -586,6 +596,23 @@ describe("Send now (D1's secondary button)", () => {
     expect(h.compose.view().sendNow).toBe(false); // the field is NOT enough
     await h.compose.press({ kind: "queue", text: "typed" });
     expect(h.compose.view().sendNow).toBe(true); // a message of mine is pending
+  });
+
+  test("a BUBBLE's Send now carries only that message, never the field (owner Q4)", async () => {
+    // Review round 1, finding 4: the bubble's ⇥ called the composer's `sendNow`,
+    // which folds the field's text in too — the person tapped a MESSAGE. The
+    // in-field ⇥ keeps today's behaviour (the test above). Mutation: call the
+    // row-less `sendNow()` → red (the typed text leaves the field).
+    const h = await harness({ draft: "steer one" });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "steer one" });
+    const id = h.compose.view().queued[0]?.id ?? "";
+    h.setField("still typing");
+    await h.compose.sendNowRow(id);
+    const sent = h.handle.acts.find((act) => act.startsWith("sendnow:"));
+    expect(sent).toBe(`sendnow:${id}:t-run`);
+    // The field is untouched: those words are not this act's.
+    expect(h.field()).toBe("still typing");
   });
 });
 
@@ -1019,5 +1046,56 @@ describe("Edit and Cancel through the controller (D6)", () => {
       `${id}:true:pending`,
       "theirs:false:pending",
     ]);
+  });
+
+  test("Edit applies what the queue says AFTER the answer, not what it said before", async () => {
+    // Review round 1, finding 2: `state` and `field` were read BEFORE the await,
+    // so a `queued` report landing during the unqueue RTT was overwritten and
+    // text typed meanwhile was lost. Mutation: read `state`/`field` before the
+    // await → red (the other device's row vanishes, the typed words go).
+    const held = Promise.withResolvers<void>();
+    const h = await harness({
+      draft: "mine",
+      handle: fakeHandle({ holdUnqueue: held.promise }),
+    });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "mine" });
+    const id = queuedId(h);
+    const editing = h.compose.edit(id);
+    // During the RTT: another device queues a row, and the person types.
+    h.handle.emitQueue({
+      entries: [
+        { id, text: "mine" },
+        { id: "other-1", text: "their words" },
+      ],
+      returned: [],
+    });
+    h.setField("typed during rtt");
+    held.resolve();
+    await editing;
+    expect(h.compose.view().pending.map((b) => b.id)).toEqual(["other-1"]);
+    expect(h.compose.view().editing?.text).toBe("mine");
+    // My withdrawn words follow what was typed meanwhile (never a silent drop).
+    expect(h.field()).toBe("typed during rtt\nmine");
+  });
+
+  test("× with the link down: the words stay in the field, no bubble is left behind", async () => {
+    // Review round 1, finding 3: the × marked the row enqueued and cleared the
+    // field before noticing there was no handle — a "mine" bubble that could
+    // never deliver, and words gone from the field. Mutation: accept the act
+    // with `handle === null` → red (a row stays, the field is empty).
+    const h = await harness({ draft: "brought back" });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "brought back" });
+    const id = queuedId(h);
+    await h.compose.edit(id);
+    h.setLink(false);
+    await h.compose.editCanceled();
+    expect(h.compose.view().editing).toBeNull();
+    expect(h.field()).toBe("brought back");
+    expect(h.compose.view().queued).toEqual([]);
+    expect(h.compose.view().pending).toEqual([]);
+    expect(h.compose.view().ownPending).toBe(0);
+    expect(h.notices.at(-1)).toBeTruthy();
   });
 });

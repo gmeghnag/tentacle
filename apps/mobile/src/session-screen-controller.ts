@@ -500,6 +500,8 @@ export interface SessionScreenController {
   removeChip(key: string): Promise<void>;
   /** **Send now**, beside the queue (13d, D1). */
   sendNow(): Promise<void>;
+  /** A pending bubble's ⇥ Send now: that message alone, the field untouched (Q4). */
+  sendNowRow(id: string): Promise<void>;
   /** **Edit** a pending message (docs/feat/mobile-queued-compose.md D6). */
   edit(id: string): Promise<void>;
   /** **Cancel** a pending message (D6). */
@@ -1768,6 +1770,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     async sendNow() {
       await compose?.sendNow();
+      emit();
+    },
+    async sendNowRow(id) {
+      await compose?.sendNowRow(id);
       emit();
     },
     async edit(id) {

@@ -44,7 +44,7 @@ import {
   splitTaken,
   takeChips,
 } from "./compose-chips.ts";
-import { pendingBubbles, restoredByRefusal } from "./compose-queue.ts";
+import { type PendingBubble, pendingBubbles, restoredByRefusal } from "./compose-queue.ts";
 import {
   type ComposeState,
   type Editing,
@@ -307,6 +307,12 @@ export interface Compose {
   /** **Send now**: my queued rows + the field, as ONE prompt (the TUI's chord). */
   sendNow(): Promise<void>;
   /**
+   * A pending BUBBLE's ⇥ Send now (owner Q4): that message alone, as one prompt —
+   * the field keeps its words, because the person tapped a message, not the
+   * composer. Nothing happens unless the row is mine and still waiting.
+   */
+  sendNowRow(id: string): Promise<void>;
+  /**
    * **Edit** a pending message (D6): withdraw it (`session/unqueue`) and put MY
    * words in the field, after anything typed since. Not removed (the agent has
    * it), unsupported (an older daemon) or no answer → the row stays, and the
@@ -406,8 +412,13 @@ export function createCompose(deps: ComposeDeps): Compose {
 
   /** One Edit/Cancel's answer applied: state, field, banner (all pure, D6). */
   const unqueueApplied = async (what: "edit" | "cancel", id: string): Promise<void> => {
+    // BOTH read AFTER the await (review round 1, finding 2): a `queued` report
+    // landing during the unqueue RTT, and anything typed meanwhile, are what the
+    // answer must apply to. Read before it, `state = step.state` overwrote the
+    // report (another device's row vanished) and the field lost the typed words.
+    const reply = await unqueueNow([id]);
     const field = deps.draft();
-    const step = unqueueFor(state, { what, id, field, reply: await unqueueNow([id]) });
+    const step = unqueueFor(state, { what, id, field, reply });
     state = step.state;
     deps.trace?.({ kind: "compose", act: "unqueue", row: id });
     if (step.draft !== field) {
@@ -746,6 +757,75 @@ export function createCompose(deps: ComposeDeps): Compose {
     }
   };
 
+  /**
+   * One send-now: the messages, their turn, and every answer applied. Shared by
+   * the in-field ⇥ (`sendNow`: my queued rows AND the field, today's semantics)
+   * and a bubble's ⇥ (`sendNowRow`: that message only, owner Q4). `takeField` is
+   * the one thing the two do not share — the bubble leaves the field alone.
+   */
+  const sendNowMessages = async (
+    handle: ComposeHandle,
+    messages: readonly { readonly id: string; readonly text: string }[],
+    takeField: boolean,
+  ): Promise<void> => {
+    const turnId = deps.turnId();
+    if (messages.length === 0 || turnId === null) {
+      return;
+    }
+    for (const message of messages) {
+      carried.add(message.id);
+      if (!state.own.has(message.id)) {
+        state = enqueueStarted(state, message.id, message.text);
+      }
+      deps.trace?.({ kind: "compose", act: "send-now", row: message.id });
+    }
+    if (takeField) {
+      deps.setDraft("");
+      saveDraft("");
+    }
+    refresh();
+    traceRows("after-send-now");
+    await persistOwn();
+    try {
+      // Resolves at the daemon's ACK; the successor turn folds on the screen.
+      await (deps.followSendNow ?? drainSendNow(deps.mint))((next) =>
+        handle.sendNow(messages, turnId, next),
+      );
+      // The daemon holds every message now (in the new prompt, or still queued
+      // and so listed): no row of this send-now waits on anything local any
+      // more — a row no report ever listed must not stay for ever.
+      state = sendNowAccepted(
+        state,
+        messages.map((message) => message.id),
+      );
+    } catch (error) {
+      // F12, exactly as the TUI (`afterRefusal`): a text the daemon REPORTS it
+      // still holds is queued — it will be delivered as a steer — so it is NOT
+      // the field's, and putting it there as well would send it twice on the
+      // next tap. Only the messages it does not hold come back.
+      const back = restoredByRefusal(error, messages);
+      const backIds = new Set(back);
+      const texts = messages.filter((m) => backIds.has(m.id)).map((m) => m.text);
+      // The ones it holds stay rows of mine (its `returned` will settle them);
+      // a restored text is the field's, so its row goes now.
+      for (const id of back) {
+        state = enqueueRejected(state, id, new Set()).state;
+        deps.trace?.({ kind: "compose", act: "reject", row: id });
+      }
+      if (texts.length > 0) {
+        // Joined like the TUI (`afterRefusal` over `join`), then merged into
+        // whatever the person typed meanwhile (never overwriting it).
+        deps.setDraft(restoreAfterFailure(deps.draft(), texts.join("\n\n")));
+        saveDraft(deps.draft());
+      }
+      deps.notify(refusalText(error));
+    } finally {
+      carried = new Set();
+      await persistOwn();
+      refresh();
+    }
+  };
+
   return {
     view(): ComposeView {
       const rows = queueRows(state);
@@ -976,63 +1056,23 @@ export function createCompose(deps: ComposeDeps): Compose {
         ...rows.map((row) => ({ id: row.id, text: row.text })),
         ...(field.trim() === "" ? [] : [{ id: deps.mint(), text: field }]),
       ];
-      if (messages.length === 0) {
+      await sendNowMessages(handle, messages, true);
+    },
+    async sendNowRow(id) {
+      // Owner Q4 (review round 1, finding 4): the bubble's ⇥ sends THAT message
+      // only. The field keeps its words — the person tapped a pending message,
+      // not the composer.
+      const handle = deps.handle();
+      if (handle === null) {
         return;
       }
-      const turnId = deps.turnId();
-      if (turnId === null) {
+      const row = queueRows(state).find(
+        (candidate) => candidate.id === id && candidate.mine && candidate.state === "queued",
+      );
+      if (row === undefined) {
         return;
       }
-      for (const message of messages) {
-        carried.add(message.id);
-        if (!state.own.has(message.id)) {
-          state = enqueueStarted(state, message.id, message.text);
-        }
-        deps.trace?.({ kind: "compose", act: "send-now", row: message.id });
-      }
-      deps.setDraft("");
-      saveDraft("");
-      refresh();
-      traceRows("after-send-now");
-      await persistOwn();
-      try {
-        // Resolves at the daemon's ACK; the successor turn folds on the screen.
-        await (deps.followSendNow ?? drainSendNow(deps.mint))((next) =>
-          handle.sendNow(messages, turnId, next),
-        );
-        // The daemon holds every message now (in the new prompt, or still queued
-        // and so listed): no row of this send-now waits on anything local any
-        // more — a row no report ever listed must not stay for ever.
-        state = sendNowAccepted(
-          state,
-          messages.map((message) => message.id),
-        );
-      } catch (error) {
-        // F12, exactly as the TUI (`afterRefusal`): a text the daemon REPORTS it
-        // still holds is queued — it will be delivered as a steer — so it is NOT
-        // the field's, and putting it there as well would send it twice on the
-        // next tap. Only the messages it does not hold come back.
-        const back = restoredByRefusal(error, messages);
-        const backIds = new Set(back);
-        const texts = messages.filter((m) => backIds.has(m.id)).map((m) => m.text);
-        // The ones it holds stay rows of mine (its `returned` will settle them);
-        // a restored text is the field's, so its row goes now.
-        for (const id of back) {
-          state = enqueueRejected(state, id, new Set()).state;
-          deps.trace?.({ kind: "compose", act: "reject", row: id });
-        }
-        if (texts.length > 0) {
-          // Joined like the TUI (`afterRefusal` over `join`), then merged into
-          // whatever the person typed meanwhile (never overwriting it).
-          deps.setDraft(restoreAfterFailure(deps.draft(), texts.join("\n\n")));
-          saveDraft(deps.draft());
-        }
-        deps.notify(refusalText(error));
-      } finally {
-        carried = new Set();
-        await persistOwn();
-        refresh();
-      }
+      await sendNowMessages(handle, [{ id: row.id, text: row.text }], false);
     },
     async take(id) {
       const plan = take(state, id);
@@ -1069,6 +1109,18 @@ export function createCompose(deps: ComposeDeps): Compose {
       // because the old one is gone daemon-side. The field returns to what the
       // edit found, unless something was typed since (that is kept: never a
       // silent drop).
+      //
+      // With no link there is no queue to put it back in (review round 1,
+      // finding 3): nothing is marked enqueued and the field is left ALONE, so
+      // the words stay where the person can act on them. Accepting the act here
+      // would leave a "mine" pending row the daemon never heard of (B0 keeps an
+      // unacked id in `own`) and clear the field on top of it.
+      const handle = deps.handle();
+      if (handle === null) {
+        deps.notify("not queued again — the link is down: your message is in the field");
+        refresh();
+        return;
+      }
       const id = deps.mint();
       const fieldNow = deps.draft();
       state = enqueueStarted(state, id, editing.text);
@@ -1077,10 +1129,6 @@ export function createCompose(deps: ComposeDeps): Compose {
         saveDraft(editing.prior);
       }
       refresh();
-      const handle = deps.handle();
-      if (handle === null) {
-        return;
-      }
       try {
         await handle.steer(editing.text, id, turnId);
         state = enqueueAcked(state, id);
