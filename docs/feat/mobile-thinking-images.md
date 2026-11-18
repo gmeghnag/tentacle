@@ -230,3 +230,21 @@ issue in the runner, not a behaviour change).
 **Attacks tried:** (a) the §7 invariants: the code is a pure, React-free module, no protocol/persistence/terminal path is touched, and nothing is wired yet, so no invariant is at risk. (b) Boundaries of `thinkingElapsed`: negative → "0 s", 59 999 → "59 s", 3 599 000 → "59 min 59 s", 2 h → "2 h 02 min", all correct. `NaN` → "NaN s" is a nit, because the caller's input is `Date.now()`-based. (c) The executor's width-test rewrite: honest, because tabular figures cannot remove a digit, and the step at 10 s / 10 min is asserted explicitly.
 
 **How the executor behaved:** `thinkingElapsed` and `thinkingLabel` are correct and well tested. However, it shipped speculative, untested code ahead of the slice it belongs to, and the Execution note claims more than the diff contains.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18* (scope: `git diff HEAD~1`, commit `72a0caed`)
+
+**Verdict: PASS** (APPROVE-WITH-NITS for the S1 slice; S0/S2–S4 remain unbuilt, as Fix round 1 records).
+
+**Gate:** `thinking-motion` + `tool-rows-wiring` + `tool-step-view` tests: 45 pass / 0 fail. `bun run lint` is clean (2084 files), and `bun run typecheck` is clean.
+
+- **F1 (HIGH) is fixed.** `shimmerStops` was removed, and a new export-allowlist test pins it. Mutation: I re-added a dead `export function shimmerStops`, the test went red (1 fail), I reverted it, and the test went green again.
+- **F2 (MEDIUM) is fixed.** The `shimmerSweep` and `ShimmerWord` comments now describe the code as it is (the band is still the rectangle the task removes). This is pinned in `tool-rows-wiring.test.ts`. Mutation: I put the claim "CLIPPED to the glyphs" back into the `ShimmerWord` comment, the test went red (1 fail), and I reverted it.
+- **F3 (MEDIUM) is fixed.** Fix round 1 records honestly that S0 did not run, that there is no `fontVariant` consumer, and that `shimmerSweep` is unchanged.
+- After both reverts, `git status` is clean.
+- **Regressions:** the diff changes no runtime code, only comments plus a function deletion with no caller (checked with `rg`), so I found none.
+- **Nits (not blocking):**
+  1. The export-list regex (`thinking-motion.test.ts`) does not see `export class`, `export let`, `export enum`, `export { … }` or `export default`.
+  2. Fix round 1 writes `shimmerElapsed` where it means `thinkingElapsed`, and "The web's pin" is unclear.
+  3. Commit `72a0caed` is labelled "(deepseek)", but its doc section is signed `claude-opus-5-5`. One of the two is wrong, and §10 attribution depends on it.
