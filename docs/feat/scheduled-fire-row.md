@@ -459,6 +459,28 @@ changelog — DONE.
 
 *— claude-opus-5-5, 2026-11-18 (executor)*
 
+### Round 3 — verification of the interrupted WIP (`ac3dbfe0`)
+
+The Round 2 edits were committed by the orchestrator as "partial … (interrupted)";
+this pass checked whether anything was left half-done. **Nothing was:** every file
+Round 2 lists is in `git diff main...HEAD`, and no production code was changed in
+this round (the doc is the only edit).
+
+- `bun run typecheck` clean (root + mobile + relay); `bun run lint` clean (2077
+  files, 0 diagnostics); the 11 touched/related test files 182 pass / 0 fail
+  (includes `protocol/test/json-schema.test.ts`, so `protocol.json` has not drifted).
+- Mutations re-run here (Edit-applied, then reverted; `git status` clean afterwards):
+  | # | mutation | result |
+  |---|---|---|
+  | M1 | `scheduledPromptOf` always returns `null` | 15 fail across core, TUI view + frames, phone view + transcript |
+  | M2+M3 | `resume.ts` and `transcript-history.ts` drop `schedule: m.scheduled` (M1 reverted) | exactly the 2 live = reload tests fail (TUI frame, phone fold) |
+- Full `bun test`: **15162 pass, 5 skip, 0 fail** (the same env-gated skips as Round 2).
+
+**Per-slice:** S1–S6 + changelog — DONE (as in Round 2). Still not checked on a
+device: how the phone node looks (needs an iOS build).
+
+*— claude-opus-5-5, 2026-11-18 (executor, round 3)*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES** (not mergeable: no code, the feature is not built;
