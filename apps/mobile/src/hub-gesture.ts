@@ -186,6 +186,12 @@ function commit(menu: HubMenu, index: number, at: number): Step {
       state: { kind: "fanSticky", menu, flash: { index, at } },
       effects: [
         { kind: "haptic", cue: "light" },
+        // A slide-release reaches this branch with the finger's highlight still
+        // on the dimmed item (`tracking` `up`). Left standing, that `hi`
+        // outranks the flash in `pillIndex`, so the reason never shows and the
+        // item keeps a highlighted look for good (fix round 1, finding 1). The
+        // flash is the only pill from here on.
+        { kind: "highlight", index: null },
         { kind: "flash", index },
       ],
     };

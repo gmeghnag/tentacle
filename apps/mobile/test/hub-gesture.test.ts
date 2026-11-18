@@ -5,6 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { FanItem, FanLayout, Point } from "../src/hub-fan.ts";
+import { FLASH_MS, pillIndex } from "../src/hub-flash.ts";
 import {
   type GestureEffect,
   type GestureEvent,
@@ -66,6 +67,9 @@ const at = (dx: number, dy = 0): Point => ({ x: ANCHOR.x + dx, y: ANCHOR.y + dy 
 const haptics = (effects: readonly GestureEffect[]) =>
   effects.flatMap((e) => (e.kind === "haptic" ? [e.cue] : []));
 const kinds = (effects: readonly GestureEffect[]) => effects.map((e) => e.kind);
+/** The `hi` `FloatingActivity` holds after applying `effects`: the LAST highlight's index. */
+const lastHighlight = (effects: readonly GestureEffect[]) =>
+  effects.reduce<number | null>((hi, e) => (e.kind === "highlight" ? e.index : hi), null);
 
 /** Pressed and held: the fan is open, the finger still on the button. */
 const OPEN = [down(ANCHOR), timer(LONG_MS)];
@@ -319,12 +323,31 @@ describe("a dimmed item flashes its own label in place (owner Q3 A + Q6)", () =>
     const hit = run([{ type: "tapOverlay", p: item(2), t: 700 }], r.state, dim);
     expect(hit.effects).toEqual([
       { kind: "haptic", cue: "light" },
+      { kind: "highlight", index: null },
       { kind: "flash", index: 2 },
     ]);
     expect(hit.state.kind).toBe("fanSticky");
     // The old behaviour (commit + close) is what made an in-place label impossible.
     expect(hit.effects.some((e) => e.kind === "commit")).toBe(false);
     expect(hit.effects.some((e) => e.kind === "close")).toBe(false);
+  });
+
+  test("a slide-release then a tap on ANOTHER dimmed item puts the pill on the second (fix round 1)", () => {
+    // Both dimmed: Activity via a slide-release, then Steer by a sticky tap.
+    const both: HubMenu = { ...MENU, dimmed: ["steer", "activity"] };
+    const b = () => both;
+    const released = run([...OPEN, move(item(2), 500), up(item(2), 600)], IDLE, b);
+    const tapped = run([{ type: "tapOverlay", p: item(1), t: 4000 }], released.state, b);
+    expect(tapped.effects).toContainEqual({ kind: "flash", index: 1 });
+    // Applied the way `FloatingActivity` does: `hi` from the last highlight, the
+    // flash from the last flash, and the ONE pill from `hub-flash.ts`. The
+    // release's own highlight must be DROPPED, or that stale `hi` outranks the
+    // flash in `pillIndex` and the second item's reason never shows.
+    const hi = lastHighlight([...released.effects, ...tapped.effects]);
+    expect(hi).toBeNull();
+    expect(pillIndex(hi, { index: 1, at: 4000 }, 4100)).toBe(1);
+    // And nothing is left dimmed-looking once the flash is over.
+    expect(pillIndex(hi, { index: 1, at: 4000 }, 4000 + FLASH_MS)).toBeNull();
   });
 
   test("a slide-release on a dimmed id flashes too, and the fan turns sticky (the pill needs it open)", () => {
@@ -342,6 +365,7 @@ describe("a dimmed item flashes its own label in place (owner Q3 A + Q6)", () =>
     const again = run([{ type: "tapOverlay", p: item(2), t: 2500 }], first.state, dim);
     expect(again.effects).toEqual([
       { kind: "haptic", cue: "light" },
+      { kind: "highlight", index: null },
       { kind: "flash", index: 2 },
     ]);
     // The wait is measured from the LATEST tap: `hub-flash.ts` reads `at`.

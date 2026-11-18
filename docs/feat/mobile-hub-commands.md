@@ -445,6 +445,45 @@ Changelog: `changelog.d/mobile-hub-commands.added.md`. No protocol, daemon, pers
 
 Unverified: the light/dark simulator screenshots the plan asks the executor to attach (no simulator in this run) — the visual state is pinned by `hub-fan.test.ts` (dashed + 0.38, glyph path) and `hub-commands-wiring.test.ts` (the wiring) instead.
 
+### Fix round 1
+
+*— claude-opus-5-5 (executor, fix round 1), 2026-11-18*
+
+**One finding, one MEDIUM — FIXED.** The adversarial Review's Finding 1 (stale highlight after a dimmed slide-release hides the next flash) reproduced exactly as written, on the branch as it stood (`.tentacle/tmp/mobile-hub-commands/stale-hi.ts`, real reducer + `hub-flash`):
+
+```
+before:  after dimmed slide-release on Activity : fanSticky hi=2 flash=2 pill#2="Nothing running"
+         after flash expires (t=3000)          : hi=2 flash=2 pill#2="Activity"
+         sticky tap on dimmed Steer (t=4100)    : hi=2 flash=1 pill#2="Activity"   <- reason lost
+after :  after dimmed slide-release on Activity : fanSticky hi=null flash=2 pill#2="Nothing running"
+         after flash expires (t=3000)          : hi=null flash=2 pill#null=""
+         sticky tap on dimmed Steer (t=4100)    : hi=null flash=1 pill#1="Nothing to steer"
+```
+
+Root cause in one sentence: `commit`'s dimmed branch (`hub-gesture.ts:184`) is reachable from `tracking` `up` (`:272-275`) with the finger's highlight still standing, and it emitted no `highlight`, while `pillIndex` (`hub-flash.ts:73`) lets `hi` win over the flash — so the release's item kept the pill *and* the highlighted look for good, and every later dimmed tap's reason was masked.
+
+**Fix** (`apps/mobile/src/hub-gesture.ts:184-197`): the dimmed branch now emits `{ highlight, index: null }` before `{ flash, index }`. That is the whole change — `FloatingActivity` already applies `highlight` (`FloatingActivity.tsx:284`), and `hub-flash.ts` is untouched: the machine owns `hi`, so it must clear it (the Review offered either this or moving `hi` into `fanSticky`; clearing at the source is the smaller diff and leaves `hi` in one place, which is `pillIndex`'s premise). Live items, the sticky tap on a live item, `close`, `cancel` and the menu/VoiceOver notice path are all unchanged.
+
+**Tests** (`apps/mobile/test/hub-gesture.test.ts`): a new case, "a slide-release then a tap on ANOTHER dimmed item puts the pill on the second" — drives the real reducer through both gestures and feeds the applied `hi`/flash into the real `pillIndex`, asserting the pill lands on the item tapped second and on nothing once the flash expires. Two existing assertions extended for the extra effect (dimmed sticky tap, second tap on the same item). Red first, on the property, not a compile error:
+
+```
+(fail) … > a slide-release then a tap on ANOTHER dimmed item puts the pill on the second (fix round 1)
+error: expect(received).toBeNull()   Received: 2      <- the release's hi, exactly the finding
+```
+
+**Mutations** (each reverted; `git status` clean of them after):
+
+| mutation | result |
+|---|---|
+| drop the new `{ kind: "highlight", index: null }` (i.e. the pre-fix source) | red — 3 in `hub-gesture.test.ts`, the new one on `hi` = 2 |
+| `pillIndex` → `return highlighted;` (drop the flash fallback, `hub-flash.ts:73`) | red — the new case fails on `expect(pillIndex(hi, …)).toBe(1)`, plus 2 in `hub-flash.test.ts` |
+
+The second mutation is the non-vacuity check the fix needs: the new test binds the real `pillIndex` rather than re-deriving the pill rule, so it dies if the rule's precedence changes under it.
+
+**Deliberately left:** the Review's Low note (two clocks for one flash — the machine's `flash.at` is never read, the renderer stamps its own `Date.now()`). Not blocking, and collapsing them means threading a clock through `HubFan`'s props; it belongs with C2/C3 if at all. **Not fixed, not a finding:** the interim `commandsOpen` no-op (C1 must not ship without C3, per plan).
+
+`apps/mobile/test` 3680 pass / 0 fail; `biome check` clean on the two touched files; `tsc -p apps/mobile` clean. The full `bun run check` gate is the orchestrator's, per the token budget — not run here.
+
 ## Review
 
 ### Slice C1 — verification round (a second executor, same slice, no behaviour change)
