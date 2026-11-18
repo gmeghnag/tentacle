@@ -15,6 +15,7 @@ import type {
   ScheduleRow,
   SessionContextResult,
   SessionSkillsResult,
+  SkillListEntry,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import {
@@ -23,6 +24,7 @@ import {
   type SessionInfoState,
   createSessionInfo,
 } from "../src/session-info-controller.ts";
+import { toolsSummary } from "../src/tools-view.ts";
 
 const emptySkills: SessionSkillsResult = { slash: [], skills: [], problems: [], moreProblems: 0 };
 
@@ -1013,6 +1015,27 @@ describe("pullTools re-runs ONLY the MCP and skill pulls (D4)", () => {
     const names = servers.state === "ready" ? servers.value.servers.map((s) => s.name) : [];
     // The reopen's own answer (served-3) is painted; the stale one is not.
     expect(names).toEqual(["served-3"]);
+  });
+
+  test("a dimmed tap un-sticks the item: a fresh answer replaces the last known list", async () => {
+    // The starting state D4 is about: attach answered "nothing to switch", so
+    // the hub's Tools item is dimmed (`toolsEmpty`) and a tap on it only
+    // re-pulls (`pullTools`) instead of opening the sheet. The pull's answer
+    // must reach `state().tools`, or the item can never undim itself.
+    let servers: readonly McpServerStatus[] = [];
+    const { port: p } = port({ mcpStatus: () => Promise.resolve(servers) });
+    const info = createSessionInfo(p);
+    await info.open();
+    expect(toolsSummary(info.state().tools).known).toBe(true);
+    expect(toolsSummary(info.state().tools).total).toBe(0);
+
+    // A server appeared (started in another window, say). The tap's pull lands:
+    servers = [{ name: "fs", state: "connected", tools: ["read_file"], moreTools: 0 }];
+    await info.pullTools();
+
+    const mcp = info.state().tools.mcp;
+    expect(mcp.state === "ready" ? mcp.value.servers.map((s) => s.name) : null).toEqual(["fs"]);
+    expect(toolsSummary(info.state().tools).total).toBe(1);
   });
 
   test("not attached: the skill pull reads `not-open` and nothing is sent", async () => {

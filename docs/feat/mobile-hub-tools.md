@@ -324,7 +324,11 @@ in `session-info-controller.test.ts` and `hub-tap-wiring.test.ts`.
 
 ## Execution
 
-*— claude-sonnet-4-5, 2026-11-18*
+*— deepseek (executor), 2026-11-18* (signed by the model that actually ran this
+round: the commits `c17a24ab`/`3477ac28` say "(deepseek)", and the `Suited:` line
+names DeepSeek. The `claude-sonnet-4-5` signature was a copy-paste from the
+template's example; corrected in review round 2, F3. The exact deepseek version
+was not recorded in those commits.)
 
 ### As built, in order (dependency order, red before green per slice)
 
@@ -486,3 +490,99 @@ and calls `pullTools()` on the dimmed (notice) commit path.
 3. **MEDIUM — Round-1 F3 is not addressed.** The Execution is still signed `claude-sonnet-4-5` (`:327`), but the commits say DeepSeek.
 
 Tree byte-identical after mutations (`git status` shows only this doc).
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-18* (executor of fix round 2; the round it repairs
+was executed by deepseek — see the corrected Execution signature under F3)
+
+Three fixes, each with its test **red before green** and the review's own
+mutation re-run to prove it is now **killed** (§9 non-vacuity). Only two test
+files changed: **no production code**.
+
+**F1 (HIGH) — the new test did not compile: `loadingTools` existed nowhere.**
+`apps/mobile/test/hub-actions.test.ts:33` (import order) and `:69-83` (the
+missing fixture). The attach facts are now built explicitly and **typed**, so the
+fixture cannot silently drift from `SwitchFacts`:
+
+```ts
+const LOADING_TOOLS = {
+  link: "up", computerName: "MacBook Pro",
+  mcp: { state: "loading" }, skills: { state: "loading" },
+  capabilities: undefined,
+} as const satisfies SwitchFacts;
+```
+
+The test reads `toolsSummary(LOADING_TOOLS)` (`:593-601`) instead of the
+undefined name, and the `tools-view.ts` import moved after `hub-session.ts`
+(organizeImports). The three previously-red gates:
+
+```
+$ bun test apps/mobile/test/hub-actions.test.ts      → 54 pass · 0 fail
+$ ./node_modules/.bin/tsc -p apps/mobile --noEmit    → clean (was 3 × TS2304)
+$ bun run lint                                       → clean (was 1 error)
+```
+
+F1 is now **verified**, not merely compiled: mutation `hub-session.ts:121`
+`toolsEmpty: input.tools?.total === 0` (the `known` guard dropped) →
+
+```
+$ bun test apps/mobile/test/hub-actions.test.ts
+(fail) the Tools item (docs/feat/mobile-hub-tools.md D3) > unknown counts never dim: a count not seen yet is not zero
+ 53 pass · 1 fail
+```
+
+Red on the **assertion of the property** (`:593`
+`expect(toolsSummary(LOADING_TOOLS).known).toBe(false)`), not on a missing name —
+exactly what `3477ac28` failed to show. Reverted (byte-compared back from the
+scratch copy in `.tentacle/tmp/mobile-hub-tools/`); `git status` shows only the
+two test files.
+
+**F2 (MEDIUM) — D4's convergence was not pinned: a dimmed tap re-pulls, and the
+fresh answer must un-dim the item.** New test,
+`apps/mobile/test/session-info-controller.test.ts:1020-1039`, in the D4 describe.
+It is the whole loop, not a call count: open with `[]` (so `known` is true and
+`total` is 0 — the state that dims the item), a server appears, `pullTools()`,
+then `state().tools.mcp` lists it and `toolsSummary(state().tools).total` is 1.
+`toolsSummary` is imported at `:27` — the hub's own reader — so the two
+projections are asserted to agree, not just the raw pull.
+
+Mutation (the one rounds 1 and 2 both used), `session-info-controller.ts:621`
+`if (mine !== generation)` → `if (mine !== generation + 99)` (the paint never
+fires) →
+
+```
+$ bun test apps/mobile/test/session-info-controller.test.ts
+(fail) pullTools re-runs ONLY the MCP and skill pulls (D4) > a dimmed tap un-sticks the item: a fresh answer replaces the last known list
+ 47 pass · 1 fail
+```
+
+**Survived** in rounds 1 and 2; **killed** now. Reverted; the other 47 still pass.
+
+**F3 (MEDIUM, process) — the Execution was mis-signed.** It said
+`claude-sonnet-4-5` while `c17a24ab`/`3477ac28` say "(deepseek)" and the doc's
+`Suited:` line names DeepSeek. It now reads `*— deepseek (executor), 2026-11-18*`,
+with a note that the exact deepseek version was not recorded in those commits (I
+did not invent one). No code change.
+
+**Gate** (run after the edits above, on this worktree):
+
+```
+$ bunx tsc --noEmit                     → clean (exit 0)
+$ tsc -p apps/mobile --noEmit           → clean (exit 0)   (was 3 × TS2304)
+$ tsc -p apps/relay --noEmit            → clean (exit 0)
+$ bun run lint                          → clean, 2083 files (was 1 error)
+$ bun test                              → 15255 pass · 5 skip · 0 fail, 47 snapshots
+                                          (15260 tests, 1088 files, 501.87 s)
+```
+
+The 5 skips are the opt-in / environment ones AGENTS §6 lists (live-k8s,
+live-docker, the real-socket keepalive, plus `skipIf` guards such as `isRoot`);
+the count is unchanged from the pre-fix run, and no test I added is skipped.
+
+**Not addressed (deliberately).** The Review's closing low ("with the sheet
+closed, `stopCaps` means another device's flip does not repaint the hub rim until
+the next emit") was marked non-blocking. It is a design note for *Notes/debt*:
+fixing it needs a feed the closed sheet deliberately drops, which is a larger
+change than a fix round should make unplanned.
+

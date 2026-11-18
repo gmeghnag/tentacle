@@ -28,9 +28,9 @@ import {
   pulseStep,
   resolveCommit,
 } from "../src/hub-actions.ts";
-import { toolsSummary } from "../src/tools-view.ts";
 import { fanItemLook } from "../src/hub-fan.ts";
 import { commitPlan, hubContextOf } from "../src/hub-session.ts";
+import { type SwitchFacts, toolsSummary } from "../src/tools-view.ts";
 
 const noop = (): void => undefined;
 const TURN = { kind: "turn", key: "t1", turnId: "t1", own: true } as const;
@@ -66,6 +66,19 @@ const IDLE_CTX: HubContext = {
   toolsEmpty: false,
   toolsRim: null,
 };
+/**
+ * The facts right after attach, before either pull answers: both still
+ * `loading`, so `toolsSummary` says `{known:false,total:0}` (D4's starting
+ * point). Typed, so a pull that stops being `loading` breaks the build too.
+ */
+const LOADING_TOOLS = {
+  link: "up",
+  computerName: "MacBook Pro",
+  mcp: { state: "loading" },
+  skills: { state: "loading" },
+  capabilities: undefined,
+} as const satisfies SwitchFacts;
+
 const RUNNING: HubContext = { ...IDLE_CTX, turn: TURN };
 /** The snapshot a fan opened while `TURN` ran carries (H3 passes the `HubMenu` itself). */
 const OPENED_RUNNING: HubOpen = { turnId: TURN.turnId };
@@ -577,15 +590,15 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
     // The attach state itself: both pulls still `loading`, so the summary is
     // `{known:false,total:0}`. Without the `known` guard that reads as empty
     // and dims Tools from attach until a dimmed tap's own pull lands (D4).
-    expect(toolsSummary({ ...loadingTools }).known).toBe(false);
-    expect(toolsSummary({ ...loadingTools }).total).toBe(0);
+    expect(toolsSummary(LOADING_TOOLS).known).toBe(false);
+    expect(toolsSummary(LOADING_TOOLS).total).toBe(0);
     const loading = hubContextOf({
       link: "up",
       turn: null,
       ended: null,
       editable: true,
       dictation: false,
-      tools: toolsSummary({ ...loadingTools }),
+      tools: toolsSummary(LOADING_TOOLS),
     });
     expect(loading.toolsEmpty).toBe(false);
     expect(loading.toolsRim).toBeNull();
