@@ -492,3 +492,29 @@ The last is a gap in this slice's tests, not in the plan: C1 Design 8 gives the 
 Tests: `apps/mobile/test/hub-*.test.ts` 336 pass / 0 fail; the 36 files importing `FloatingActivity`/`HubFan`/`SessionScreen` 508 pass / 0 fail. `tsc -p apps/mobile` clean; `biome check` on the touched files clean. The full gate is the orchestrator's (§4, token budget) — not run here.
 
 Still unverified, as above: the simulator screenshots (no simulator in this run).
+
+### Slice C1 — adversarial review (fresh context)
+
+*— claude-opus-5-5, 2026-11-18*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM). Same model family as the verification round above — only a fresh context, so shared blind spots may survive.
+
+Gate (narrow, as scoped): the 7 touched `hub-*` test files 245 pass / 0 fail; `apps/mobile/test` 3679 pass / 0 fail; `bun run lint` clean (2091 files); `bun run typecheck` clean. Full `bun test` not run (scope).
+
+**Finding 1 (MEDIUM) — stale highlight after a dimmed slide-release hides the next flash.** `hub-gesture.ts:184-191` (`commit`, dimmed branch) is reached from `tracking` `up` (`:266-269`) but emits no `{highlight, index: null}`; before C1 every tracking release closed the fan, so a stale `hi` was impossible. `FloatingActivity` keeps `fan.hi` at the dimmed index, and `hub-flash.ts:73` `pillIndex` lets `hi` win over the flash. Repro (`.tentacle/tmp/mobile-hub-commands/stale-hi.ts`, real reducer + `hub-flash`, effects applied as `FloatingActivity` does):
+```
+after dimmed slide-release on Activity : fanSticky hi=2 flash=2 pill#2="Nothing running"
+after flash expires (t=3000)          : hi=2 flash=2 pill#2="Activity"
+sticky tap on dimmed Steer (t=4100)    : hi=2 flash=1 pill#2="Activity"
+```
+The second dimmed item's reason never shows (the plan's whole point, Design 5–6), and the expired item keeps its pill + highlighted look indefinitely. Fix: emit `highlight(null)` in the dimmed branch (or have the sticky state own `hi`), plus a test that a slide-release then a sticky tap on another dimmed item puts the pill on the second one — red first.
+
+Mutations (each reverted; `git status` clean after):
+| mutation | result |
+|---|---|
+| drop `disarmFlash()` on `close` (`FloatingActivity.tsx`) | red — 1 in `hub-commands-wiring.test.ts` |
+| `tapOverlay` clock `t: deps.now()` → `t: 0` (`hub-session.ts:327`) | **green** — survives: the renderer stamps `flash.at` from its own `Date.now()` (`FloatingActivity.tsx:290`), so the machine's `flash.at` is never read. Low: two clocks for one flash; not blocking. |
+
+Attacks tried: (a) dimmed slide-release → second dimmed tap — **found Finding 1**; (b) flash timer surviving fan close / unmount — held (pinned, mutation red); (c) menu/VoiceOver path still gets the notice line — held (`resolveCommit` unchanged, verification round's `noop` notice); (d) UNKNOWN artifacts list dims Artifacts — held (`hub-session.ts:121`). §7 "logic in pure modules": held — text/visibility decisions in `hub-flash.ts`, the `.tsx` only times. No protocol/persistence/broker invariant touched.
+
+Note (not a finding, interim by plan): `commandsOpen` (`SessionScreen.tsx:840`) is set but never read until C3 mounts the sheet, so in C1 alone the Commands disc is a silent no-op tap — C1 must not ship without C3.
