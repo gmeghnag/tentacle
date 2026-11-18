@@ -165,7 +165,7 @@ appId: so.tentacle.app
       id: "hub-notice"
     timeout: 5000
 - assertNotVisible:
-    id: "activity-sheet-close"
+    id: "activity-sheet"
 # Back to 100 %: the band's right end, so the last shots show today's look.
 - tapOn:
     id: "session-drawer"
