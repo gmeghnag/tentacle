@@ -11,6 +11,7 @@ import {
   PHOTOS_NEXT_PROMPT,
   composerAction,
   sendNowOffered,
+  sendSlot,
 } from "../src/composer.ts";
 import type { TurnRow } from "../src/transcript-rows.ts";
 
@@ -125,25 +126,72 @@ describe("an ended session offers nothing at all (F14)", () => {
 
 describe("Send now (D1's secondary button)", () => {
   test("offered only while a turn runs", () => {
-    expect(sendNowOffered(input({ ownQueue: 2 }))).toBe(false);
-    expect(sendNowOffered(input({ ownQueue: 2, turn: OWN }))).toBe(true);
+    expect(sendNowOffered(input({ ownPending: 2 }))).toBe(false);
+    expect(sendNowOffered(input({ ownPending: 2, turn: OWN }))).toBe(true);
   });
 
-  test("offered when my queue is non-empty, or when the field has text", () => {
+  test("offered when MY pending (queued) rows exist — the typed text NO longer offers it", () => {
+    // Owner Q2: Send now appears ONLY while a message of mine is pending, not
+    // merely while typing during a turn. Mutation: keep the `text` trigger → red.
     expect(sendNowOffered(input({ turn: OWN }))).toBe(false);
-    expect(sendNowOffered(input({ turn: OWN, ownQueue: 1 }))).toBe(true);
-    expect(sendNowOffered(input({ turn: OWN, text: "typed" }))).toBe(true);
+    expect(sendNowOffered(input({ turn: OWN, ownPending: 1 }))).toBe(true);
+    expect(sendNowOffered(input({ turn: OWN, text: "typed" }))).toBe(false);
   });
 
-  test("NOT offered with photos and no text: a send-now cannot carry them (P4)", () => {
-    // Mutation: ignore `photos` → red (a tap would silently drop the image).
+  test("a row already in flight does not offer it: `ownPending` counts `queued` only", () => {
+    // The `sending` rows are the send-now's own: it "left the composer". The
+    // COUNT is the caller's (compose-controller/session-view filter `queued`).
+    expect(sendNowOffered(input({ turn: OWN, ownPending: 0 }))).toBe(false);
+  });
+
+  test("photos alone never offer it, and no longer block it when a row is pending", () => {
+    // Mutation: bring back the photo clause → red.
     expect(sendNowOffered(input({ turn: OWN, photos: 1 }))).toBe(false);
-    expect(sendNowOffered(input({ turn: OWN, photos: 1, ownQueue: 1 }))).toBe(true);
+    expect(sendNowOffered(input({ turn: OWN, photos: 1, ownPending: 1 }))).toBe(true);
   });
 
   test("not offered when the session ended, or when the link is down", () => {
-    expect(sendNowOffered(input({ turn: OWN, ownQueue: 1, ended: "closed" }))).toBe(false);
-    expect(sendNowOffered(input({ turn: OWN, ownQueue: 1, link: "down" }))).toBe(false);
+    expect(sendNowOffered(input({ turn: OWN, ownPending: 1, ended: "closed" }))).toBe(false);
+    expect(sendNowOffered(input({ turn: OWN, ownPending: 1, link: "down" }))).toBe(false);
+  });
+});
+
+describe("the send slot (D4, owner Q5)", () => {
+  test("is a TOTAL map of composerAction: every kind has its glyph", () => {
+    // Mutation: make the default return "up-dim" for `stop` too → red (a running
+    // turn with an empty field would look like a dead ↑, not ■).
+    expect(sendSlot({ kind: "send", text: "x" })).toBe("up");
+    expect(sendSlot({ kind: "queue", text: "x" })).toBe("up");
+    expect(sendSlot({ kind: "send-later", text: "x" })).toBe("clock");
+    expect(sendSlot({ kind: "stop", turnId: "t", own: true })).toBe("stop");
+    expect(sendSlot({ kind: "none", why: "blank" })).toBe("up-dim");
+  });
+
+  test("agrees with the real truth table in every state it can be asked in", () => {
+    const states: readonly Partial<ComposerInput>[] = [
+      { text: "hi" },
+      { photos: 1 },
+      { turn: OWN, text: "typed" },
+      { turn: OWN },
+      { turn: OWN, ownPending: 1 },
+      { link: "down", text: "kept" },
+      { link: "down", turn: OWN },
+      { link: "down" },
+      { ended: "closed", text: "x" },
+    ];
+    for (const over of states) {
+      const action = composerAction(input(over));
+      const slot = sendSlot(action);
+      // Q5: typed text while a turn runs stays ↑ (queue), never ■.
+      if (action.kind === "queue") {
+        expect(slot).toBe("up");
+      }
+      // ■ only on a running turn with an EMPTY field.
+      if (slot === "stop") {
+        expect(action.kind).toBe("stop");
+        expect((over.text ?? "").trim()).toBe("");
+      }
+    }
   });
 });
 

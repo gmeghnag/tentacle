@@ -147,6 +147,12 @@ export interface ActivityState {
   readonly child: ChildAction | null;
   /** The open shell job's detail: its last output read (S9). */
   readonly job: JobAction | null;
+  /**
+   * The last ROW Stop's refusal/doubt, by row id (mobile-activity-panel Design 4):
+   * a stop fired from a row has no detail to show it in, so it rides the row's
+   * meta and is cleared by the next activity update (or a new stop).
+   */
+  readonly stopNotices: Readonly<Record<string, string>>;
 }
 
 export interface ChildAction {
@@ -484,6 +490,12 @@ export interface SessionScreenController {
   refreshJob(): Promise<void>;
   /** Stop the open job (after the confirm), then read how it ended (F19). */
   stopJob(): Promise<void>;
+  /**
+   * Stop a ROW's child or job without opening its detail (mobile-activity-panel
+   * Design 4): the row's two-tap arm IS the confirmation. Reuses the detail's
+   * kill path (same handling, same wording); the outcome lands on the row.
+   */
+  stopRow(kind: "child" | "job", id: string): Promise<void>;
   /** The detail closed (back to the list, or the sheet closed). */
   closeDetail(): void;
   /** The person's tap on a link: the sheet's confirmation is the screen's job. */
@@ -500,6 +512,14 @@ export interface SessionScreenController {
   removeChip(key: string): Promise<void>;
   /** **Send now**, beside the queue (13d, D1). */
   sendNow(): Promise<void>;
+  /** A pending bubble's ⇥ Send now: that message alone, the field untouched (Q4). */
+  sendNowRow(id: string): Promise<void>;
+  /** **Edit** a pending message (docs/feat/mobile-queued-compose.md D6). */
+  edit(id: string): Promise<void>;
+  /** **Cancel** a pending message (D6). */
+  cancel(id: string): Promise<void>;
+  /** The editing banner's × (D6): the message is queued again, a new id. */
+  editCanceled(): Promise<void>;
   /** A tap on another device's returned row (13d, D3: an explicit act). */
   take(id: string): Promise<void>;
   /** The outbox's four answers, for one item (13d, D4). */
@@ -576,9 +596,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     sent: {},
     child: null,
     job: null,
+    stopNotices: {},
   };
   /** The last attached handle's `onSubagents`/`onJobs` subscriptions. */
   let activityWatch: (() => void) | undefined;
+  /** The rows whose kill is in flight (mobile-activity-panel Design 4): one per row. */
+  const rowStops = new Set<string>();
   /**
    * The daemon's wake table as last reported (docs/feat/cron-tool.md S6):
    * `undefined` = none reported yet, an older daemon, or an untrusted one (its
@@ -830,8 +853,11 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           notSaved: false,
           chips: [],
           attach: { items: ["photo", "camera"], reason: null },
-          ownQueue: 0,
+          ownPending: 0,
           sendNow: false,
+          pending: [],
+          editing: null,
+          unqueueOff: false,
         },
       };
     }
@@ -857,8 +883,11 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         notSaved: value.notSaved,
         chips: value.chips,
         attach: value.attach,
-        ownQueue: value.ownQueue,
+        ownPending: value.ownPending,
         sendNow: value.sendNow,
+        pending: value.pending,
+        editing: value.editing,
+        unqueueOff: value.unqueueOff,
       },
     };
   }
@@ -904,7 +933,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         ...(chip.name === undefined ? {} : { name: chip.name }),
         ...(chip.state === "refused" ? { detail: chip.detail } : {}),
       })),
-      ownQueue: composeState.ownQueue,
+      ownPending: composeState.ownPending,
+      // The pending messages as the TRANSCRIPT draws them (D1) and the edit's
+      // banner state (D6): values, never decisions.
+      pending: composeState.pending,
+      editing: composeState.editing,
+      unqueueOff: composeState.unqueueOff,
     });
   }
 
@@ -983,11 +1017,22 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       const memory = onSubagents(activity.memory, rows, deps.now());
       // A child's messages live as long as it is live or Finished (bounded with it).
       const keep = new Set([...rows.map((r) => r.id), ...memory.finished.map((f) => f.row.id)]);
-      activity = { ...activity, subagents: rows, memory, sent: pruneSent(activity.sent, keep) };
+      activity = {
+        ...activity,
+        subagents: rows,
+        memory,
+        sent: pruneSent(activity.sent, keep),
+        stopNotices: {},
+      };
       emit();
     });
     const offJobs = session.onJobs?.((report) => {
-      activity = { ...activity, jobs: { rows: report.rows, count: report.count } };
+      // A replaced list is the newest truth: the row stops it spoke for are gone.
+      activity = {
+        ...activity,
+        jobs: { rows: report.rows, count: report.count },
+        stopNotices: {},
+      };
       emit();
     });
     // S9: the person's messages to a child, from the daemon's echo only (a
@@ -1654,6 +1699,31 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       // How it ended (or that it already had): the detail shows it (F19).
       await readJob(open.id);
     },
+    async stopRow(kind, id) {
+      // One in-flight stop per row: a second tap would overwrite a success with
+      // "already finished" (the detail's own `busy` rule, S9).
+      if (rowStops.has(id)) {
+        return;
+      }
+      rowStops.add(id);
+      const kill =
+        kind === "job" ? handle?.killJob?.bind(handle) : handle?.killSubagent?.bind(handle);
+      try {
+        const notice =
+          kill === undefined
+            ? ACTIVITY_UNSUPPORTED
+            : kind === "job"
+              ? killJobOutcome(id, await kill(id).catch((e: unknown) => asError(e)))
+              : killChildOutcome(id, await kill(id).catch((e: unknown) => asError(e)));
+        // A detail's own notice is its state's (S9): a row never writes there.
+        if (notice !== null) {
+          activity = { ...activity, stopNotices: { ...activity.stopNotices, [id]: notice } };
+          emit();
+        }
+      } finally {
+        rowStops.delete(id);
+      }
+    },
     closeDetail() {
       if (activity.child !== null || activity.job !== null) {
         activity = { ...activity, child: null, job: null };
@@ -1751,6 +1821,22 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     async sendNow() {
       await compose?.sendNow();
+      emit();
+    },
+    async sendNowRow(id) {
+      await compose?.sendNowRow(id);
+      emit();
+    },
+    async edit(id) {
+      await compose?.edit(id);
+      emit();
+    },
+    async cancel(id) {
+      await compose?.cancel(id);
+      emit();
+    },
+    async editCanceled() {
+      await compose?.editCanceled();
       emit();
     },
     async take(id) {

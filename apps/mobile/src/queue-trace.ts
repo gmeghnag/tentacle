@@ -86,7 +86,7 @@ export type QueueTraceEvent =
   /** A local compose act, and the local row id it minted or moved. */
   | {
       readonly kind: "compose";
-      readonly act: "enqueue" | "send-now" | "reject";
+      readonly act: "enqueue" | "send-now" | "reject" | "unqueue";
       readonly row: string;
     }
   /** Stop: a turn cancelled from this phone (`own`: its own stream, not another's). */

@@ -42,9 +42,18 @@ describe("SessionScreen: one layout, the open state, the footer", () => {
   });
 
   test("the footer is the live tail, drawn only when there is one", () => {
+    // docs/feat/mobile-queued-compose.md D1 added the pending bubbles to the same
+    // footer (a queued message is read at the next step, so it is the thread's last
+    // node): the tail is still drawn only when there IS one, under the rows.
     expect(src).toMatch(
-      /ListFooterComponent=\{\s*layout\.tail === null \? undefined : \(\s*<ThinkingNode/,
+      /ListFooterComponent=\{\s*layout\.tail === null && state\.view\.pending\.length === 0\s*\? undefined/,
     );
+    expect(src).toMatch(/\{layout\.tail === null \? null : \(\s*<ThinkingNode/);
+  });
+
+  test("the pending bubbles ride the same footer, after the tail (D1)", () => {
+    const footer = src.slice(src.indexOf("ListFooterComponent="));
+    expect(footer.indexOf("<ThinkingNode")).toBeLessThan(footer.indexOf("<PendingBubbles"));
   });
 
   test("the footer node gets the tail's thought and its up segment (Review S2 #1)", () => {

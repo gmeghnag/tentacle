@@ -692,6 +692,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "isError": {
+          "const": true,
+          "type": "boolean"
+        },
         "media": {
           "items": {
             "$ref": "#/$defs/MessageMedia"
@@ -2669,6 +2673,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "isError": {
+          "const": true,
+          "type": "boolean"
+        },
         "media": {
           "items": {
             "$ref": "#/$defs/MessageMedia"
@@ -2752,6 +2760,10 @@
         "durationMs": {
           "minimum": 0,
           "type": "integer"
+        },
+        "isError": {
+          "const": true,
+          "type": "boolean"
         },
         "media": {
           "items": {

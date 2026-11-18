@@ -105,6 +105,9 @@ function fakeHandle(
     },
     queued: () => undefined as QueueState | undefined,
     async reclaim() {},
+    async unqueue() {
+      return { removed: [], delivered: [] };
+    },
     port: {
       async upload() {
         throw new Error("no image in this test");

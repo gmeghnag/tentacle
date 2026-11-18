@@ -458,3 +458,80 @@ describe("an older daemon / a handle without the members (F15)", () => {
     });
   });
 });
+
+describe("Stop from a ROW, without opening its detail (mobile-activity-panel Design 4)", () => {
+  test("a child: the kill reaches the daemon and no detail opens", async () => {
+    const h = await attached({});
+    await h.screen.stopRow("child", "sa-2");
+    // The two-tap arm IS the confirmation: no `openChild`, no detail state.
+    expect(h.calls).toEqual(["kill sa-2"]);
+    expect(h.screen.state().activity.child).toBeNull();
+    expect(h.screen.state().activity.stopNotices).toEqual({});
+  });
+
+  test("a job: killed by id, and nothing is read for a detail nobody opened", async () => {
+    const h = await attached({});
+    await h.screen.stopRow("job", "bg-1");
+    expect(h.calls).toEqual(["killJob bg-1"]);
+    expect(h.screen.state().activity.job).toBeNull();
+  });
+
+  test("{killed:false} says why on the ROW, keyed by its id", async () => {
+    const h = await attached({ kill: () => Promise.resolve({ killed: false }) });
+    await h.screen.stopRow("child", "sa-2");
+    expect(h.screen.state().activity.stopNotices).toEqual({ "sa-2": "sa-2 already finished" });
+  });
+
+  test("a thrown kill is the row's notice, never a throw at the UI", async () => {
+    const h = await attached({ killJob: () => Promise.reject(new Error("offline")) });
+    await h.screen.stopRow("job", "bg-1");
+    expect(h.screen.state().activity.stopNotices).toEqual({ "bg-1": "Not stopped: offline" });
+  });
+
+  test("a handle without the members refuses typed (F15)", async () => {
+    const h = await attached(null);
+    await h.screen.stopRow("child", "sa-2");
+    await h.screen.stopRow("job", "bg-1");
+    expect(h.screen.state().activity.stopNotices).toEqual({
+      "sa-2": "This computer's tentacle cannot do this.",
+      "bg-1": "This computer's tentacle cannot do this.",
+    });
+  });
+
+  test("a second Stop on a row already in flight sends no second kill", async () => {
+    let release: (v: { killed: boolean }) => void = () => {};
+    let kills = 0;
+    const h = await attached({
+      kill: () => {
+        kills += 1;
+        return kills === 1
+          ? new Promise((resolve) => {
+              release = resolve;
+            })
+          : Promise.resolve({ killed: false });
+      },
+    });
+    const first = h.screen.stopRow("child", "sa-2");
+    await h.screen.stopRow("child", "sa-2");
+    expect(h.calls).toEqual(["kill sa-2"]);
+    release({ killed: true });
+    await first;
+  });
+
+  test("the next activity update clears the notices (the notice is not sticky)", async () => {
+    const h = await attached({ kill: () => Promise.resolve({ killed: false }) });
+    await h.screen.stopRow("child", "sa-2");
+    expect(h.screen.state().activity.stopNotices["sa-2"]).toBeDefined();
+    h.agents([child("sa-1")]);
+    expect(h.screen.state().activity.stopNotices).toEqual({});
+  });
+
+  test("a row Stop leaves an OPEN detail alone", async () => {
+    const h = await attached({});
+    h.screen.openChild("sa-1");
+    h.screen.setChildDraft("keep me");
+    await h.screen.stopRow("child", "sa-2");
+    expect(h.screen.state().activity.child).toMatchObject({ id: "sa-1", draft: "keep me" });
+    expect(h.calls).toEqual(["kill sa-2"]);
+  });
+});

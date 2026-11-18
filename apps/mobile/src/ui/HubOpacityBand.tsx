@@ -15,6 +15,7 @@ import {
   OPACITY_DEFAULT,
   OPACITY_MAX,
   OPACITY_MIN,
+  PREVIEW_SAMPLE,
   clampOpacity,
   opacityAt,
   settledReleased,
@@ -206,7 +207,14 @@ export function HubOpacityBand({
             pointerEvents="none"
             style={[
               styles.thumb,
-              { backgroundColor: palette.page, left: `${Math.round(ratio * 100)}%` },
+              // The accent fill, not the page: on the page colour the thumb was
+              // white on the white light band (docs/fix/mobile-qa-1117.md, bug 1).
+              // `shadow.glass` has no opacity of its own: iOS draws none without it.
+              {
+                backgroundColor: palette.accentFill,
+                shadowOpacity: palette.shadowOpacity,
+                left: `${Math.round(ratio * 100)}%`,
+              },
             ]}
           />
         </View>
@@ -236,8 +244,7 @@ export function HubOpacityBand({
           numberOfLines={2}
           style={[typography.footnote, styles.sample, { color: palette.label }]}
         >
-          The relay answers, but the first ping arrives after the 5 s the test allows when the suite
-          runs in parallel.
+          {PREVIEW_SAMPLE}
         </Text>
         <View style={[styles.circle, { opacity: shown / 100 }]}>
           <View

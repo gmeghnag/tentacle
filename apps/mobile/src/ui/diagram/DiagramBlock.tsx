@@ -59,9 +59,9 @@ export function DiagramBlock({
     diagramRenderService.request({
       key,
       source: view.source.canonical,
-      variables: diagramTheme(palette).variables,
+      variables: diagramTheme(palette, view.style).variables,
     });
-  }, [key, view.source.canonical, palette]);
+  }, [key, view.source.canonical, palette, view.style]);
 
   const body = diagramBlockBody(state, width);
   const render = body.kind === "drawing" ? body.render : null;
@@ -102,8 +102,10 @@ export function DiagramBlock({
         onPress={() => setTab(body.tapTab)}
         style={styles.press}
       >
-        {caption}
+        {/* 1A/2A put the caption above; the filled look (1B/2B) below. */}
+        {view.style === "filled" ? null : caption}
         {content}
+        {view.style === "filled" ? caption : null}
       </Pressable>
       {tab === null ? null : (
         <DiagramFullScreen

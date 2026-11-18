@@ -50,6 +50,16 @@ import { useChartScrub } from "./useChartScrub.ts";
 /** Portrait and landscape: the app sets no `orientation` (P9). */
 export const FULL_SCREEN_ORIENTATIONS = ["portrait", "landscape"] as const;
 
+/**
+ * How a full screen is presented (docs/fix/mobile-qa-1117.md, bug 3): OVER the
+ * app, not instead of it. `fullScreen` takes the presenting view out of the
+ * window, so iOS stops sending it trait changes and `useColorScheme` (read at the
+ * app's root) keeps the old scheme until the modal closes — a light↔dark switch
+ * while a diagram or chart was open left it in the old look. The page is opaque,
+ * so it looks the same.
+ */
+export const FULL_SCREEN_PRESENTATION = "overFullScreen" as const;
+
 export interface ChartFullScreenViewProps {
   readonly view: ChartRowView;
   readonly testID: string;
@@ -90,7 +100,7 @@ export function ChartFullScreenView(p: ChartFullScreenViewProps): JSX.Element {
       visible
       testID={testID}
       animationType={p.reduceMotion ? "none" : "fade"}
-      presentationStyle="fullScreen"
+      presentationStyle={FULL_SCREEN_PRESENTATION}
       supportedOrientations={[...FULL_SCREEN_ORIENTATIONS]}
       onRequestClose={p.onClose}
     >

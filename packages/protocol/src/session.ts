@@ -105,6 +105,13 @@ const chatMessageShape = () => ({
   /** On a refused tool call: the person's reply with the refusal (display only, docs/feat/permission-reply.md). */
   denialReply: PermissionReplyTextSchema.optional(),
   /**
+   * On a tool result that failed: `true` (display only, docs/fix/mobile-qa-1117.md),
+   * so a reload draws the step as failed, as live did. FAIL-SOFT like `note`: any
+   * other value is DROPPED and the message still loads (shown as a success, the
+   * pre-field look), never a refusal of the CRITICAL entry.
+   */
+  isError: z.literal(true).optional().catch(undefined),
+  /**
    * On a user/tool message: the context fill the model was told about (NOT
    * display-only — rendered into the model's prompt; docs/feat/context-awareness.md).
    */

@@ -48,6 +48,15 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { reportsOf } from "../activity-memory.ts";
+import {
+  STOP_ARM_MS,
+  STOP_IDLE,
+  type StopArm,
+  panelAutoClose,
+  panelOpensFor,
+  pruneArm,
+  stopTap,
+} from "../activity-panel.ts";
 import { ACTIVITY_SETTINGS } from "../activity-settings-expo.ts";
 import type { ActivitySettings } from "../activity-settings-store.ts";
 import { activityView, agentCardTarget } from "../activity.ts";
@@ -59,6 +68,8 @@ import type { ChartSettings } from "../chart-settings-store.ts";
 import { chatStatus, titleLabel } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
+import { DIAGRAM_SETTINGS } from "../diagram-settings-expo.ts";
+import type { DiagramStyle } from "../diagram-settings-store.ts";
 import { type FloatBounds, fits, visible as floatVisible, headerPill } from "../floating-button.ts";
 import {
   type Follow,
@@ -66,6 +77,7 @@ import {
   LANDING_REVEAL_MS,
   type Landing,
   type ListSize,
+  SETTLE_MS,
   contentGrew,
   endTarget,
   initialFollow,
@@ -78,6 +90,7 @@ import {
   landingStep,
   reattachLanding,
   scrolled,
+  settleStep,
   shown,
   viewportChanged,
 } from "../follow.ts";
@@ -135,6 +148,7 @@ import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
+import { PendingBubbles } from "./compose/PendingBubble.tsx";
 import { RowGuard } from "./transcript/RowGuard.tsx";
 import { SwipeTime } from "./transcript/SwipeTime.tsx";
 import { RowFallback, TranscriptRow } from "./transcript/TranscriptRow.tsx";
@@ -456,10 +470,38 @@ export function SessionScreen({
     }
     return next.step !== null;
   }, [perform, armReveal]);
+  // Bug 5 (docs/fix/mobile-qa-1117.md): where the list really is, and the settle
+  // re-check armed by every size change — `follow.ts`'s `settleStep` decides.
+  const offset = useRef(0);
+  const settle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const armSettle = useCallback(() => {
+    if (settle.current !== null) {
+      clearTimeout(settle.current);
+    }
+    settle.current = setTimeout(() => {
+      settle.current = null;
+      if (dragging.current) {
+        return;
+      }
+      const step = settleStep(followRef.current, { offset: offset.current, ...size.current });
+      if (step !== null) {
+        perform(step);
+      }
+    }, SETTLE_MS);
+  }, [perform]);
+  useEffect(
+    () => () => {
+      if (settle.current !== null) {
+        clearTimeout(settle.current);
+      }
+    },
+    [],
+  );
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
       size.current = { content: contentSize.height, viewport: layoutMeasurement.height };
+      offset.current = contentOffset.y;
       setFollowState(
         scrolled(
           followRef.current,
@@ -483,8 +525,9 @@ export function SessionScreen({
         return;
       }
       perform(contentGrew(followRef.current, size.current));
+      armSettle();
     },
-    [perform, land],
+    [perform, land, armSettle],
   );
   const onListLayout = useCallback(
     (event: LayoutChangeEvent) => {
@@ -493,8 +536,9 @@ export function SessionScreen({
         return;
       }
       perform(viewportChanged(followRef.current, size.current));
+      armSettle();
     },
-    [perform, land],
+    [perform, land, armSettle],
   );
   const onJump = useCallback(() => {
     // The person asked to go to the latest: animated (they are watching it go).
@@ -630,6 +674,54 @@ export function SessionScreen({
       { text: ask.confirm, style: "destructive", onPress: stop },
     ]);
   };
+  // The row Stop's two-tap arm (mobile-activity-panel Design 4). `stopTap` is
+  // pure: the first tap arms, the second within 3 s fires. The arm is pruned of
+  // rows the view no longer has, so a re-arriving row starts unarmed.
+  const [arm, setArm] = useState<StopArm>(STOP_IDLE);
+  const rowIds = useMemo(
+    () => activityVm.groups.flatMap((g) => g.rows.map((r) => r.id)),
+    [activityVm],
+  );
+  useEffect(() => {
+    setArm((prev) => pruneArm(prev, rowIds));
+  }, [rowIds]);
+  // The armed pill reverts on its own: one timer, only while something is armed
+  // (it bumps the panel's clock, which is what `stopArmed` reads).
+  useEffect(() => {
+    if (arm.id === null) {
+      return;
+    }
+    const timer = setTimeout(() => setActivityNow(Date.now()), STOP_ARM_MS + 20);
+    return () => clearTimeout(timer);
+  }, [arm]);
+  const stopRow = (kind: "child" | "job", id: string) => {
+    const tap = stopTap(arm, id, Date.now());
+    setArm(tap.state);
+    setActivityNow(Date.now());
+    if (tap.fire) {
+      playHaptic("firm");
+      void controller.stopRow(kind, id);
+    } else {
+      playHaptic("light");
+    }
+  };
+  // ONE close for the panel (Design 5): the scrim, the swipe, Android's back and
+  // the auto-close below all end here, so `activityOpen`/`activityFocus` and the
+  // controller's detail can never disagree.
+  const closeActivity = useCallback(() => {
+    setActivityOpen(false);
+    setActivityFocus(null);
+    setArm(STOP_IDLE);
+    controller.closeDetail();
+  }, [controller]);
+  // The panel never stays open on an empty list (Design 1, Owner Q3): the last
+  // row ending closes it — never out from under an open detail, whose child may
+  // just have flipped to its report (F14).
+  useEffect(() => {
+    if (activityOpen && panelAutoClose(activityVm, activityFocus)) {
+      closeActivity();
+    }
+  }, [activityOpen, activityVm, activityFocus, closeActivity]);
   // "Show in chat": the report's own row, scrolled to with the sheet closed; the
   // list stops following so the next delta does not pull it back (`shown`).
   const showIndex = showRow(rows, shownReport);
@@ -644,8 +736,15 @@ export function SessionScreen({
     showRetry.current = true;
     list.current?.scrollToIndex({ index: showIndex, animated: true, viewPosition: 0.2 });
   };
+  // The diagram look (docs/fix/mobile-qa-1117.md, bug 3): the Settings choice,
+  // read live like the Activity button's, handed to each row.
+  const [diagramStyle, setDiagramStyle] = useState<DiagramStyle>(
+    () => DIAGRAM_SETTINGS.current().style,
+  );
+  useEffect(() => DIAGRAM_SETTINGS.subscribe((next) => setDiagramStyle(next.style)), []);
   const rowExtraData = useMemo(
     () => ({
+      diagramStyle,
       readAloud: voiceState?.readAloud,
       speakShown: voiceSettings.readAloudButton,
       // An agent card's link follows the live/Finished lists.
@@ -656,7 +755,15 @@ export function SessionScreen({
       fullSteps,
       layout,
     }),
-    [voiceState?.readAloud, voiceSettings.readAloudButton, activity, openSteps, fullSteps, layout],
+    [
+      diagramStyle,
+      voiceState?.readAloud,
+      voiceSettings.readAloudButton,
+      activity,
+      openSteps,
+      fullSteps,
+      layout,
+    ],
   );
   const compose = state.compose;
   const status = chatStatus({
@@ -735,6 +842,12 @@ export function SessionScreen({
     fits: band !== null && fits(band),
   });
   const openActivity = () => {
+    // Never an empty panel (mobile-activity-panel Design 1): the hub already says
+    // "Nothing running", and a sheet with only that line is what the owner
+    // called "a huge sheet" for nothing.
+    if (!panelOpensFor(activityVm, null)) {
+      return;
+    }
     focusActivity(null);
     setActivityOpen(true);
   };
@@ -1036,6 +1149,7 @@ export function SessionScreen({
                       <TranscriptRow
                         row={item}
                         palette={palette}
+                        diagramStyle={diagramStyle}
                         onLink={onLink}
                         thumbnails={state.thumbnails}
                         chartLabels={chartSettings.labels}
@@ -1077,15 +1191,45 @@ export function SessionScreen({
               }}
               extraData={rowExtraData}
               // The live "Thinking…" node (Owner Q2): the thread's last node while
-              // the turn thinks, under the rows so their keys never shift.
+              // the turn thinks, under the rows so their keys never shift. The
+              // PENDING bubbles follow it (docs/feat/mobile-queued-compose.md D1):
+              // a queued message is read at the next step, so it IS the thread's last
+              // node — and it leaves in the `queued` that drops its row.
               ListFooterComponent={
-                layout.tail === null ? undefined : (
-                  <ThinkingNode
-                    palette={palette}
-                    thought={layout.tail.thought}
-                    up={layout.tail.up}
-                    reduceMotion={a11yFlags.reduceMotion}
-                  />
+                layout.tail === null && state.view.pending.length === 0 ? undefined : (
+                  <>
+                    {layout.tail === null ? null : (
+                      <ThinkingNode
+                        palette={palette}
+                        thought={layout.tail.thought}
+                        up={layout.tail.up}
+                        reduceMotion={a11yFlags.reduceMotion}
+                      />
+                    )}
+                    <PendingBubbles
+                      bubbles={state.view.pending}
+                      palette={palette}
+                      ctx={{
+                        link: state.view.state === "Live",
+                        turn: state.view.composer.running,
+                        sendNow: compose.sendNow,
+                        unqueue: !compose.unqueueOff,
+                      }}
+                      onAction={(id, action) => {
+                        switch (action) {
+                          case "edit":
+                            void controller.edit(id);
+                            return;
+                          case "cancel":
+                            void controller.cancel(id);
+                            return;
+                          case "send-now":
+                            void controller.sendNowRow(id);
+                            return;
+                        }
+                      }}
+                    />
+                  </>
                 )
               }
               onViewableItemsChanged={onViewable}
@@ -1242,12 +1386,30 @@ export function SessionScreen({
           <NoticeRow key={notice.testId} notice={notice} palette={palette} />
         ))}
         <QueueRows
-          view={{ queued: compose.queued, returnedOthers: compose.returnedOthers }}
+          view={{ returnedOthers: compose.returnedOthers }}
           palette={palette}
           onTake={(id) => void controller.take(id)}
-          sendNow={compose.sendNow}
-          onSendNow={() => void controller.sendNow()}
         />
+        {compose.editing === null ? null : (
+          <View style={[styles.editBanner, { backgroundColor: palette.tint }]}>
+            <Text
+              testID="composer-editing"
+              numberOfLines={1}
+              style={[typography.footnote, styles.flex, { color: palette.accent }]}
+            >
+              Editing pending message
+            </Text>
+            <Pressable
+              testID="composer-editing-cancel"
+              accessibilityRole="button"
+              accessibilityLabel="Stop editing and queue it again"
+              hitSlop={10}
+              onPress={() => void controller.editCanceled()}
+            >
+              <Icon name="xmark" color={palette.accent} size={14} />
+            </Pressable>
+          </View>
+        )}
         <OutboxRows rows={compose.outbox} palette={palette} onDecide={setDeciding} />
         <Chips
           chips={compose.chips}
@@ -1292,6 +1454,9 @@ export function SessionScreen({
               : (voiceView.placeholder ?? "Message tentacle")
           }
           button={state.view.composer.button}
+          slot={state.view.composer.slot}
+          sendNow={compose.sendNow}
+          onSendNow={() => void controller.sendNow()}
           onChange={(text) => {
             // The person typed: dictation yields first (F8), then the compose seam.
             voice?.userEdit(text);
@@ -1426,12 +1591,17 @@ export function SessionScreen({
           visible={activityOpen}
           view={activityVm}
           detail={activityDetail}
+          focus={activityFocus}
+          now={activityNow}
           child={activity.child}
           job={activity.job}
           onFocus={focusActivity}
           onDraft={(text) => controller.setChildDraft(text)}
           onSend={() => void controller.messageChild()}
           onStop={confirmStop}
+          onStopRow={stopRow}
+          arm={arm}
+          stopNotices={activity.stopNotices}
           onRefreshJob={() => void controller.refreshJob()}
           onScheduled={() => {
             // One sheet at a time: leave Activity, then the ONE path into
@@ -1443,11 +1613,8 @@ export function SessionScreen({
           }}
           {...(showIndex === null ? {} : { onShow: showInChat })}
           onLink={onLink}
-          onClose={() => {
-            setActivityOpen(false);
-            setActivityFocus(null);
-            controller.closeDetail();
-          }}
+          onClose={closeActivity}
+          reduceMotion={a11yFlags.reduceMotion}
         />
         <RenameSheet
           palette={palette}
@@ -1489,6 +1656,19 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
   },
   notice: { paddingHorizontal: 16, paddingBottom: 6 },
+  // The editing banner above the field (D6): the label takes the row, the × keeps
+  // its own width (it was `styles.flex`, i.e. undefined).
+  editBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 16,
+    marginBottom: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  flex: { flexShrink: 1 },
   // The turn observable: on screen (XCUITest sees it), takes no room. 1×1 and
   // absolute, not 0×0: iOS 26 drops an empty-frame element from the
   // accessibility tree, so `turn-idle` vanished (slice 6 walk, flows 23/24).
