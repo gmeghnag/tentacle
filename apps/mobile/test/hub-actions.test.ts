@@ -8,15 +8,23 @@ import {
   ALREADY_FINISHED,
   type ButtonBadgeInput,
   DUE_SOON_MS,
+  type HubBadge,
   type HubContext,
   type HubEntries,
+  type HubItem,
   type HubOpen,
   NOTHING_RUNNING,
   NO_CONNECTION,
+  PULSE_START,
+  type PulseInput,
+  type PulseState,
   buttonBadge,
   hubA11yLabel,
   hubActions,
   hubOpen,
+  hubPulse,
+  itemA11yLabel,
+  pulseStep,
   resolveCommit,
 } from "../src/hub-actions.ts";
 import { commitPlan } from "../src/hub-session.ts";
@@ -329,13 +337,14 @@ describe("a dimmed item: nothing to show, but its slot stays (Design 2)", () => 
 describe("buttonBadge + hubA11yLabel", () => {
   const none: ButtonBadgeInput = { running: 0, unseenArtifacts: 0, unreadReport: false };
 
-  test("priority: a number (running) > a dot (unseen / unread) > none", () => {
+  test("only a running count: news is the glow's business, never a dot (mobile-hub-badges Q1 C)", () => {
     expect(buttonBadge({ running: 2, unseenArtifacts: 3, unreadReport: true })).toEqual({
       kind: "count",
       n: 2,
     });
-    expect(buttonBadge({ ...none, unseenArtifacts: 3 })).toEqual({ kind: "dot" });
-    expect(buttonBadge({ ...none, unreadReport: true })).toEqual({ kind: "dot" });
+    // The dot is gone: nothing new draws a mark on the button.
+    expect(buttonBadge({ ...none, unseenArtifacts: 3 })).toBeNull();
+    expect(buttonBadge({ ...none, unreadReport: true })).toBeNull();
     expect(buttonBadge(none)).toBeNull();
   });
 
@@ -347,5 +356,157 @@ describe("buttonBadge + hubA11yLabel", () => {
       "Tentacle hub, 1 running, 1 new artifact, unread report",
     );
     expect(hubA11yLabel(none)).toBe("Tentacle hub");
+  });
+});
+
+describe("hubPulse (mobile-hub-badges Design 2: one-shot glow, Q1 C)", () => {
+  const quiet: PulseInput = { unseenArtifacts: 0, unreadReport: false };
+
+  test("a first render has no baseline: opening a session with news never pulses (F1, Q3)", () => {
+    expect(hubPulse(null, quiet)).toBe(false);
+    expect(hubPulse(null, { unseenArtifacts: 4, unreadReport: true })).toBe(false);
+  });
+
+  test("an increase pulses", () => {
+    expect(
+      hubPulse(
+        { unseenArtifacts: 2, unreadReport: false },
+        { unseenArtifacts: 3, unreadReport: false },
+      ),
+    ).toBe(true);
+    expect(hubPulse(quiet, { unseenArtifacts: 1, unreadReport: false })).toBe(true);
+    expect(hubPulse(quiet, { unseenArtifacts: 0, unreadReport: true })).toBe(true);
+  });
+
+  test("no change, or a decrease, is silent (F2: a resync that relists the same news)", () => {
+    expect(
+      hubPulse(
+        { unseenArtifacts: 3, unreadReport: false },
+        { unseenArtifacts: 3, unreadReport: false },
+      ),
+    ).toBe(false);
+    expect(
+      hubPulse(
+        { unseenArtifacts: 3, unreadReport: false },
+        { unseenArtifacts: 2, unreadReport: false },
+      ),
+    ).toBe(false);
+    // Reading the report is not news either: true → true is unchanged.
+    expect(
+      hubPulse(
+        { unseenArtifacts: 0, unreadReport: true },
+        { unseenArtifacts: 0, unreadReport: true },
+      ),
+    ).toBe(false);
+  });
+
+  test("a count that drops while the report lands is still news (the report went false → true)", () => {
+    expect(
+      hubPulse(
+        { unseenArtifacts: 3, unreadReport: false },
+        { unseenArtifacts: 1, unreadReport: true },
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("pulseStep (mobile-hub-badges Design 4: the screen's ONE pulse decision, F1–F3)", () => {
+  const quiet: PulseInput = { unseenArtifacts: 0, unreadReport: false };
+  const three: PulseInput = { unseenArtifacts: 3, unreadReport: false };
+  const KEY = "session-a";
+  /** One render: feed the retained state back in, as the screen's ref does. */
+  const run = (state: PulseState, link: "up" | "down", news: PulseInput, sessionKey = KEY) =>
+    pulseStep(state, { sessionKey, link, news });
+
+  test("a first render takes a baseline and does not pulse (F1: opening a session with news)", () => {
+    const step = run(PULSE_START, "up", three);
+    expect(step.pulse).toBe(false);
+    expect(step.state).toEqual({ sessionKey: KEY, prev: three });
+  });
+
+  test("the increase AFTER that first render pulses (F1: the reset must not swallow it)", () => {
+    // The old wiring reset the baseline to `null` on a session switch and left the
+    // comparison to a later render, which then saw `null` and stayed silent.
+    const opened = run(PULSE_START, "up", three);
+    expect(run(opened.state, "up", { unseenArtifacts: 4, unreadReport: false }).pulse).toBe(true);
+  });
+
+  test("a session switch is a new baseline, and the next real increase still pulses (F1)", () => {
+    const onA = run(run(PULSE_START, "up", three).state, "up", three);
+    // Switching to a session that already holds MORE news: baseline, not news.
+    const switched = run(onA.state, "up", { unseenArtifacts: 7, unreadReport: false }, "session-b");
+    expect(switched.pulse).toBe(false);
+    expect(switched.state).toEqual({
+      sessionKey: "session-b",
+      prev: { unseenArtifacts: 7, unreadReport: false },
+    });
+    // And the very next increase — the property the old reset swallowed.
+    expect(
+      run(switched.state, "up", { unseenArtifacts: 8, unreadReport: false }, "session-b").pulse,
+    ).toBe(true);
+  });
+
+  test("a link drop clears the baseline, so the reconnect's refill is not news (F2)", () => {
+    const live = run(run(PULSE_START, "up", three).state, "up", three);
+    // Down: no baseline retained, nothing pulses.
+    const down = run(live.state, "down", { unseenArtifacts: 0, unreadReport: false });
+    expect(down.pulse).toBe(false);
+    expect(down.state.prev).toBeNull();
+    // Reconnect relists the SAME three artifacts: a fresh baseline, not a 0 → 3 jump.
+    const back = run(down.state, "up", three);
+    expect(back.pulse).toBe(false);
+    expect(back.state.prev).toEqual(three);
+  });
+
+  test("a resync that relists the same news is silent (F2: 3 → 3)", () => {
+    const live = run(run(PULSE_START, "up", three).state, "up", three);
+    expect(run(live.state, "up", three).pulse).toBe(false);
+  });
+
+  test("the baseline advances while down as nothing, never as the reading (F2)", () => {
+    // Advancing the baseline during the outage is what made the refill silent in
+    // the WRONG direction (a drop-time 0 became the baseline); it must be cleared.
+    const down = run({ sessionKey: KEY, prev: three }, "down", {
+      unseenArtifacts: 9,
+      unreadReport: true,
+    });
+    expect(down.state.prev).toBeNull();
+  });
+
+  test("the verdict ignores whether the button is shown, so a hidden button still advances (F3)", () => {
+    // F3 is the screen's: the rule has no `shown` input at all, and the same step
+    // both decides and re-baselines, so nothing is deferred and nothing replayed.
+    const live = run(run(PULSE_START, "up", three).state, "up", three);
+    const grown = run(live.state, "up", { unseenArtifacts: 4, unreadReport: false });
+    expect(grown.pulse).toBe(true);
+    expect(grown.state.prev).toEqual({ unseenArtifacts: 4, unreadReport: false });
+  });
+});
+
+describe("itemA11yLabel (mobile-hub-badges Design 10: the rim is spoken)", () => {
+  const item = (badge: HubBadge | null, dimmed = false): HubItem => ({
+    id: "artifacts",
+    label: "Artifacts",
+    badge,
+    danger: false,
+    dimmed,
+  });
+
+  test("a count says how many are new (the bubble's number, now in words)", () => {
+    expect(itemA11yLabel(item({ kind: "count", n: 3 }))).toBe("Artifacts, 3 new");
+    expect(itemA11yLabel(item({ kind: "count", n: 1 }))).toBe("Artifacts, 1 new");
+  });
+
+  test("a dot (a wake due) says due soon", () => {
+    expect(itemA11yLabel(item({ kind: "dot" }))).toBe("Artifacts, due soon");
+  });
+
+  test("a dimmed item says why, and that wins over a badge (it has nothing to show)", () => {
+    expect(itemA11yLabel(item(null, true))).toBe("Artifacts, nothing running");
+    expect(itemA11yLabel(item({ kind: "count", n: 2 }, true))).toBe("Artifacts, nothing running");
+  });
+
+  test("otherwise the plain label", () => {
+    expect(itemA11yLabel(item(null))).toBe("Artifacts");
   });
 });

@@ -4,7 +4,7 @@
  * cannot stutter them, and each keeps the timing it had on the JS driver.
  */
 import { describe, expect, test } from "bun:test";
-import { dropPlan, fadePlan, levelPlan } from "../src/hub-button-motion.ts";
+import { dropPlan, fadePlan, glowPlan, levelPlan } from "../src/hub-button-motion.ts";
 
 describe("fadePlan: the show/hide fade (150 ms, native)", () => {
   test("in and out take the fade, on the native driver", () => {
@@ -40,5 +40,22 @@ describe("dropPlan: where a dropped button goes (F23)", () => {
       fadeFrom: 0,
       fade: { toValue: 1, duration: 150, useNativeDriver: true },
     });
+  });
+});
+
+describe("glowPlan: the one-shot pulse of news arriving (mobile-hub-badges Design 5)", () => {
+  test("it peaks then fades back to nothing, on the native driver", () => {
+    const plan = glowPlan(false);
+    expect(plan.fade).toEqual([
+      { toValue: 0.9, duration: 220 },
+      { toValue: 0, duration: 480 },
+    ]);
+    expect(plan.native).toBe(true);
+    expect(plan.scale).toBeGreaterThan(1);
+  });
+
+  test("Reduce Motion keeps the fade and drops the scale (no growth, same news)", () => {
+    expect(glowPlan(true).scale).toBe(1);
+    expect(glowPlan(true).fade).toEqual(glowPlan(false).fade);
   });
 });
