@@ -77,6 +77,37 @@ describe("every close path converges on one handler (Design 5)", () => {
     expect(SHEET).toContain("closeRef.current()");
   });
 
+  test("a close finishes on ANY end of its motion, never only on a finished spring", () => {
+    // An interrupted spring ends with `{finished:false}`: anything else touching
+    // the same `Animated.Value` mid-close does it — a row arriving (the content
+    // re-measures), a tap on a row (`focus` → the detent effect), a re-grab of
+    // the header (`height.setValue`). A continuation gated on `finished` then
+    // never runs, so `closing` stayed `true`, every later close returned at its
+    // guard and the sheet was a modal overlay nobody could dismiss.
+    const at = SHEET.indexOf("(to: number, done?: () => void) => {");
+    expect(at).toBeGreaterThan(-1);
+    const body = SHEET.slice(at, SHEET.indexOf("[height, reduceMotion]", at));
+    expect(body).toContain("done?.()");
+    expect(body).not.toContain("if (finished)");
+  });
+
+  test("nothing re-opens a sheet whose close is in flight", () => {
+    // Both effects that animate the sheet unbidden (the open/detent one and the
+    // content-follow one) stand down while `closing`: otherwise the close's
+    // spring is interrupted and the sheet springs back open first.
+    const head = (marker: string) => {
+      const at = SHEET.indexOf(marker);
+      expect(at).toBeGreaterThan(-1);
+      return SHEET.slice(SHEET.lastIndexOf("useEffect(", at), at);
+    };
+    expect(head('animateTo(wanted === "tall"')).toContain("closing.current");
+    expect(head("panelFollowsContent(shown, lastLow.current")).toContain("closing.current");
+    // ...and the third trigger the Review named is the header's own grab: it
+    // drives `height.setValue`, so it must not claim a pan on a closing sheet.
+    const grab = SHEET.slice(SHEET.indexOf("onMoveShouldSetPanResponder"));
+    expect(grab.slice(0, 200)).toContain("!closing.current");
+  });
+
   test("the screen's own close clears the panel, the focus AND the controller's detail", () => {
     const at = SCREEN.indexOf("const closeActivity = ");
     expect(at).toBeGreaterThan(-1);

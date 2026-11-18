@@ -227,11 +227,13 @@ export function ActivitySheet({
         damping: 26,
         stiffness: 260,
         mass: 0.8,
-      }).start(({ finished }) => {
-        if (finished) {
-          done?.();
-        }
-      });
+        // ANY end runs the continuation, not only a `finished` spring: an
+        // interrupted one ends with `{finished:false}` (anything else touching
+        // this `Animated.Value` stops it — a re-measure, a re-grab, a retarget),
+        // and a close whose continuation never ran stayed latched, so every
+        // later close returned at its guard: the sheet became a modal overlay
+        // nobody could dismiss. The close intent wins over the interruption.
+      }).start(() => done?.());
     },
     [height, reduceMotion],
   );
@@ -254,8 +256,10 @@ export function ActivitySheet({
   // Opening: the sheet rises from 0 to its detent (or jumps there under Reduce
   // Motion). A detail opened on an already-open sheet moves to `tall`, and a
   // detail's "back" returns the list to `low`.
+  // ...and neither effect animates the sheet while a close is in flight: it
+  // would STOP the close's spring and spring the sheet back open.
   useEffect(() => {
-    if (!visible || screen === 0) {
+    if (!visible || screen === 0 || closing.current) {
       return;
     }
     animateTo(wanted === "tall" ? detents.tall : detents.low);
@@ -265,7 +269,7 @@ export function ActivitySheet({
   // where the person put it (`panelFollowsContent`).
   const lastLow = useRef(0);
   useEffect(() => {
-    if (!visible || screen === 0 || detail !== null || shown === 0) {
+    if (!visible || screen === 0 || detail !== null || shown === 0 || closing.current) {
       return;
     }
     if (panelFollowsContent(shown, lastLow.current, detents.low)) {
@@ -279,7 +283,9 @@ export function ActivitySheet({
       PanResponder.create({
         // The header claims a pan on ANY vertical move: it is not a scroller, so
         // there is no gesture to lose (a row's list keeps its own — Design 2).
-        onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dy) > 4,
+        // ...except on a sheet already leaving: a grab there would re-target the
+        // very value the close is animating, springing it back open.
+        onMoveShouldSetPanResponder: (_e, g) => !closing.current && Math.abs(g.dy) > 4,
         onPanResponderGrant: () => {
           panStart.current = shown;
         },

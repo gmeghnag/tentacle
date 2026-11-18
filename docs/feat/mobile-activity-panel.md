@@ -422,3 +422,86 @@ in the component and is exactly where the bug is (another argument for §7).
 **Executor behaviour:** honest drift list and mutation table; the detent-cap
 drift is a real fix of a plan error. It missed the animation-interruption path
 of its own "one close door".
+
+### Fix round 1
+
+*— claude-sonnet-4-5, 2026-11-19*
+
+Finding 1 (HIGH) is FIXED, in two layers, both pinned by red-first wiring tests
+(`ActivitySheet.tsx` is `.tsx`/RN Flow, so unimportable from Bun — the repo's
+`hub-tap-wiring.test.ts` pattern):
+
+1. **The continuation no longer gates on `finished`.** `animateTo`'s spring
+   `.start(() => done?.())` (was `({finished}) => { if (finished) done?.() }`,
+   `ActivitySheet.tsx:215-236`). An interrupted spring ends
+   `{finished:false}`; the close intent now wins over the interruption, so
+   `closing` can never latch. This is the durable half: it holds for ANY
+   present or future interrupter, including ones I did not enumerate.
+2. **Nothing re-opens a sheet whose close is in flight.** All three of the
+   Review's named interrupters stand down while `closing.current`: the
+   open/detent effect (`:262`), the content-follow effect (`:272`), and the
+   header's pan (`onMoveShouldSetPanResponder`, `:288`) — that last one is what
+   drives `height.setValue` mid-drag. Without this, fix 1 alone
+   would let the close *complete* — but only after the interrupting spring
+   (a re-measure, a tap's retarget, a re-grab's `setValue`) had visibly
+   sprung the sheet back open first. So fix 1 is correctness, fix 2 is
+   behaviour.
+
+Tests: `activity-panel-wiring.test.ts` +
+`"a close finishes on ANY end of its motion, never only on a finished spring"`
++ `"nothing re-opens a sheet whose close is in flight"`.
+
+**Red (§9), on the buggy code — printed before the fix:**
+`18 pass / 2 fail`, both on the assertion of the property, not an import:
+```
+error: expect(received).not.toContain(expected)
+Expected to not contain: "if (finished)"
+Received: "(to: number, done?: () => void) => { … }).start(({ finished }) => {
+        if (finished) {\n          done?.();\n        }\n      });"
+(fail) … > a close finishes on ANY end of its motion, never only on a finished spring
+```
+```
+error: expect(received).toContain(expected)
+Expected to contain: "closing.current"
+Received: "useEffect(() => {\n    if (!visible || screen === 0) {\n      return;\n    }\n    "
+(fail) … > nothing re-opens a sheet whose close is in flight
+```
+Green after: `19 pass / 0 fail` (wiring), `49 pass / 0 fail` with
+`activity-panel.test.ts`.
+
+**Mutations (each applied, shown failing, reverted to the committed text —
+`git diff --stat` back to `11 insertions(+), 7 deletions(-)` after all three):**
+
+| # | Mutation | Result |
+|---|---|---|
+| M10 | `animateTo` continuation gated on `finished` again | 1 fail ("ANY end") |
+| M11 | open/detent effect without `closing.current` | 1 fail ("nothing re-opens") |
+| M12 | content-follow effect without `closing.current` | 1 fail ("nothing re-opens") |
+| M13 | header pan without `!closing.current` (the `setValue` trigger) | 1 fail ("nothing re-opens") |
+
+M11, M12 and M13 each fail independently, so all three interrupters are
+separately pinned, not one pin covering several edits.
+
+**Not changed, deliberately:** the sheet's close state machine still lives in
+the component (`useRef` + effect guards). Moving it into
+`activity-panel.ts` would make it unit-testable in Bun rather than
+source-pinned — real, but a refactor outside a fix round's mandate; recorded
+here as debt for the follow-up the Review implied.
+
+**Adjacent, out of this branch's diff (reported, untouched):**
+`SessionsDrawer.tsx:137` and `FloatingActivity.tsx:183` gate a
+`setMounted(false)` / `setHidden` on `finished`, the same shape. Both are
+guarded by "only act when closing" and re-fire from the effect that depends on
+`open`/`shown`, so an interrupted end self-heals on the next animation rather
+than latching a one-shot boolean — a weaker instance, and pre-existing code
+this task did not author.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean ·
+`bun run lint` clean (2051 files, no fixes) · `bun test` **14931 pass / 5 skip
+/ 0 fail** (14936 tests, 1068 files, 471 s).
+
+One earlier full run reported a single failure —
+`packages/cli/test/connect-model-error.test.ts` "a restarted daemon" with
+`EADDRINUSE` at `ws-server.ts:318`. That file alone is 7 pass / 0 fail and the
+re-run above is clean: a port collision from other worktrees on the machine,
+not this branch.
