@@ -48,6 +48,7 @@ curl -fsSL tentacle.so/install | sh
 
 It installs the CLI in `~/.local/bin` (no sudo), checks it against the
 release's `SHA256SUMS`, then runs `tentacle update` to fetch the pod binaries.
+On macOS it also installs the voice-dictation helper `tentacle-voice` next to it.
 Options, as environment variables: `TENTACLE_VERSION=v0.1.0` (pin a release;
 0.1.0 is the oldest), `TENTACLE_INSTALL_DIR`, and `TENTACLE_NO_POD_BINARIES=1`
 (skip the pod binaries). The script is
@@ -701,7 +702,7 @@ Ctrl+R then says so instead of capturing the wrong machine.
 | listening or transcribing | **Esc** | discard; a running agent turn is untouched |
 
 ```sh
-bun run voice:build          # builds native/voice-mac → dist/tentacle-voice
+bun run voice:build          # from source only (the installer ships it): → dist/tentacle-voice
 tentacle voice status        # recogniser, installed languages, mic permission
 tentacle voice setup         # install Apple's speech asset for a missing language
 ```

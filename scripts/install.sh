@@ -5,6 +5,8 @@
 #
 # Downloads the tentacle binary for this machine from the GitHub release,
 # checks it against the release's SHA256SUMS and installs it without sudo.
+# On macOS it also installs the voice-dictation helper (tentacle-voice) next to
+# it, when the release has one; a missing or bad helper never fails the install.
 # Then it runs `tentacle update` for the same version, which fetches the Linux
 # binaries that `tentacle run` / `tentacle attach` inject into pods.
 #
@@ -63,11 +65,53 @@ sha256_of() { # file -> hex digest
   fi
 }
 
+listed_sum() { # asset-name -> its digest in SHA256SUMS (empty when not listed)
+  awk -v n="$1" '$2 == n || $2 == "*"n { print $1 }' "$tmp/SHA256SUMS"
+}
+
 verify() { # file asset-name
-  want=$(awk -v n="$2" '$2 == n || $2 == "*"n { print $1 }' "$tmp/SHA256SUMS")
+  want=$(listed_sum "$2")
   [ -n "$want" ] || err "$2 is not listed in the release's SHA256SUMS"
   got=$(sha256_of "$1")
   [ "$got" = "$want" ] || err "checksum mismatch for $2 (expected $want, got $got)"
+}
+
+# The macOS voice-dictation helper (docs/feat/voice-release.md): ONE universal
+# binary, installed next to tentacle, where the TUI looks for it first. Optional
+# by design: every failure here prints one line and returns, the CLI install
+# never fails on it.
+install_voice() {
+  asset=tentacle-voice-darwin
+  want=$(listed_sum "$asset")
+  if [ -z "$want" ]; then
+    say "  - voice helper not in this release (voice dictation needs a newer one)"
+    return 0
+  fi
+  if ! download "$base/$asset" "$voice_staged" 2>/dev/null; then
+    say "  ! voice helper skipped: download failed ($base/$asset)" >&2
+    rm -f "$voice_staged"
+    return 0
+  fi
+  got=$(sha256_of "$voice_staged")
+  if [ "$got" != "$want" ]; then
+    say "  ! voice helper skipped: checksum mismatch for $asset (expected $want, got $got)" >&2
+    rm -f "$voice_staged"
+    return 0
+  fi
+  chmod 755 "$voice_staged"
+  # The helper targets macOS 26 (SpeechTranscriber); an older macOS refuses to
+  # load it, so `--version` failing is the "does it run here" check.
+  voice_installed=$("$voice_staged" --version 2>/dev/null) || voice_installed=""
+  case "$voice_installed" in
+    "tentacle-voice "*) ;;
+    *)
+      say "  - voice helper skipped: it does not run on this Mac (voice dictation needs macOS 26)"
+      rm -f "$voice_staged"
+      return 0
+      ;;
+  esac
+  mv -f "$voice_staged" "$install_dir/tentacle-voice"
+  say "  ✓ $install_dir/tentacle-voice ($voice_installed)"
 }
 
 detect_target() {
@@ -131,7 +175,8 @@ main() {
   # atomic rename on one filesystem: an interrupted install never leaves a
   # truncated tentacle, and a running tentacle keeps its old inode.
   staged="$install_dir/.tentacle.install.$$"
-  trap 'rm -rf "$tmp" "$staged"' EXIT
+  voice_staged="$install_dir/.tentacle-voice.install.$$"
+  trap 'rm -rf "$tmp" "$staged" "$voice_staged"' EXIT
   trap 'exit 130' INT TERM
 
   say "Installing tentacle ($version, $target)"
@@ -155,7 +200,13 @@ main() {
   mv -f "$staged" "$install_dir/tentacle"
   say "  ✓ $install_dir/tentacle ($installed)"
 
-  # 2) The Linux binaries tentacle injects into pods (run / attach): the same
+  # 2) macOS: the voice helper — before the pod binaries, so a failure there
+  # (which ends the script) never costs the helper.
+  if [ "$os" = darwin ]; then
+    install_voice
+  fi
+
+  # 3) The Linux binaries tentacle injects into pods (run / attach): the same
   # code path as a later `tentacle update` (checksums, version marker, atomic).
   if [ "${TENTACLE_NO_POD_BINARIES:-0}" != 1 ]; then
     "$install_dir/tentacle" update --version "v$installed_version" ||

@@ -45,7 +45,7 @@ export function helperMissingNotice(searched: readonly string[]): string {
   return [
     "[error] the voice helper (tentacle-voice) was not found",
     `searched: ${searched.join(", ")}`,
-    "build it with: bun run voice:build   (or set voice.helperPath)",
+    "install it with: curl -fsSL tentacle.so/install | sh   (from source: bun run voice:build; or set voice.helperPath)",
   ].join("\n");
 }
 

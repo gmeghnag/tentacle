@@ -105,6 +105,8 @@ describe("T10 (F3): a missing helper says how to build it", () => {
     expect(await voiceCommand(["status"], d.base)).toBe(1);
     expect(d.err.join("")).toContain("tentacle-voice");
     expect(d.err.join("")).toContain("bun run voice:build");
+    // A user who installed the binary has no repo to build in: the installer ships it.
+    expect(d.err.join("")).toContain("curl -fsSL tentacle.so/install | sh");
     expect(d.runs).toEqual([]);
   });
 
