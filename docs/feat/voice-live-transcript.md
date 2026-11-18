@@ -296,3 +296,30 @@ new risk class. The real-mic path is still unexercised (Execution says so).
 evidence is concrete. Scope is tight (TUI changes are pure-module + dumb
 renderer, per §7). No protocol or persistence change, so no `protocol.d/` note
 is needed (`partial` already existed).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18* (fresh-context reviewer; same model as the round-1 reviewer, while the fix was written by a different model)
+
+**Verdict: PASS.** Finding 1 (MEDIUM) is resolved.
+
+- **Fix:** `Live.swift:178` `LiveTranscription.reportingOptions = [.volatileResults]`,
+  which `open` now uses. The live final no longer comes from a `.fastResults`
+  transcriber.
+- **Mutation (run by me, then reverted; `git diff --quiet -- native` → clean):**
+  `.fastResults` put back → `testTheLiveFinalIsTheBatchTranscriptAndNoFastReportingOption`
+  **fails 3 asserts**. Two are the option-set pin (`LiveTests.swift:124-125`).
+  The third is the behavioural one (`:161`): the live final was "Zorblack's
+  quaintively fram…" where batch gave "Zorblack squintively fram…". So the test
+  shows the accuracy difference directly; it is not only a check on the constant.
+  After the revert: 29 tests, 0 failures.
+- **Regressions on the diff:** the partials-before-end test still passes with
+  the longer take, so partials still arrive without `.fastResults`. The cost is
+  fewer partials (≈ 1 per 3–4 s of speech). That is documented in `Live.swift`,
+  acceptable, and not a finding.
+- **Gate:** `bun run voice:test` 29 / 0 fail; `bun run lint` clean (2083 files);
+  `bun run typecheck` clean. The TS sources are unchanged in this round.
+- **Note (not a finding):** the equality test depends on Apple's on-device
+  model. A future OS update could make the two paths differ even without
+  `.fastResults`. If that happens, the test fails loudly rather than letting a
+  wrong final through silently, which is the right direction.
