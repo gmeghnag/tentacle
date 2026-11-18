@@ -108,15 +108,17 @@ describe("S4 · each screen's sections are E2 bands", () => {
 describe("S4 · Settings · one band per section, the note under it", () => {
   const settings = src("SettingsScreen");
 
-  test("the nine sections are bands, each with its own small label", () => {
+  test("the ten sections are bands, each with its own small label", () => {
     // S10 adds "Activity button" (docs/feat/mobile-chrome.md Design 6);
-    // fix/mobile-media-live item 5 adds "Photos" (the send-at-original-size switch).
+    // fix/mobile-media-live item 5 adds "Photos" (the send-at-original-size switch);
+    // `feat/mobile-chart-labels` D7 adds "Charts".
     const bands = tags(settings, "BandSection");
-    expect(bands.length).toBe(9);
+    expect(bands.length).toBe(10);
     for (const label of [
       "App lock",
       "Notifications",
       "Activity button",
+      "Charts",
       "Photos",
       "Beta",
       "Read aloud",

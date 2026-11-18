@@ -28,8 +28,10 @@ import {
   chartSummary,
   chartTable,
   guideItems,
-  labelsFit,
+  insideFits,
   legendOf,
+  markDash,
+  markShape,
   pickXLabels,
   seriesPositions,
 } from "./chart-layout-axis.ts";
@@ -73,6 +75,7 @@ export function chartLayout(raw: unknown, options: LayoutOptions): ChartLayout |
     locale: options.locale ?? "en",
     hidden: options.hidden ?? new Set(),
     measure: options.measure ?? monoWidth,
+    labels: options.labels ?? "inside",
   };
   switch (spec.type) {
     case "line":
@@ -92,6 +95,23 @@ export function chartLayout(raw: unknown, options: LayoutOptions): ChartLayout |
 function lastDefined(ys: readonly (number | null)[]): number {
   for (let i = ys.length - 1; i >= 0; i--) if (typeof ys[i] === "number") return i;
   return -1;
+}
+
+/**
+ * D4: the mockup's y ceiling for an area — 2 × the first nice half-step at or
+ * above `max / 2` (1,033 → 1,200; 455 → 500). `null` when there is nothing to
+ * scale (empty, all-zero or negative data keeps `domain()`'s answer).
+ */
+function niceCeiling(values: readonly number[]): number | undefined {
+  if (values.length === 0) return undefined;
+  const max = Math.max(...values);
+  if (!(max > 0) || !Number.isFinite(max)) return undefined;
+  const half = max / 2;
+  const p = 10 ** Math.floor(Math.log10(half));
+  for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) {
+    if (m * p >= half) return Number((2 * m * p).toPrecision(12));
+  }
+  return undefined;
 }
 
 /** Line (direction A) and area (direction B). */
@@ -117,31 +137,36 @@ function lineLayout(spec: ChartSpec, ctx: Ctx, area: boolean): ChartLayout {
   const values = visible.flatMap((k) =>
     (ys[k] ?? []).filter((v): v is number => typeof v === "number"),
   );
-  const [lo, hi] = domain(values, area);
+  const [lo, hi0] = domain(values, area);
+  // D4: a stacked area's ceiling must include the stack (the repro's 1,033 was
+  // drawn above a 1,000 guide, which reads as the line overshooting the scale).
+  // The ceiling is the mockup's even-nice value, and `guideItems` puts the top
+  // hairline ON it. `domain()` itself is untouched — bars share it.
+  const ceiling = area ? niceCeiling(values) : undefined;
+  const hi = ceiling ?? hi0;
   const top = Math.round(8 + SIZE.guide * fs);
   const bottom = height - Math.round(10 + SIZE.x * fs);
   const multi = visible.length >= 2;
   const yCompact = yFormat(spec, locale);
-  const endText = (k: number): string => {
-    const label = spec.datasets[k]?.label ?? "";
-    const raw = datasetValues(spec, k);
-    const v = raw[lastDefined(raw)];
-    return A || typeof v !== "number" ? label : `${label} ${formatNumber(v, yCompact)}`;
-  };
-  const reaches = (k: number): boolean => {
-    const p = pos[k] ?? [];
-    const i = lastDefined(ys[k] ?? []);
-    return i >= 0 && (p[i] ?? 0) >= 1 - 1e-9;
-  };
   const dSize = SIZE.direct * fs;
   const lineH = dSize * 1.2;
-  const gutterIdx = multi ? visible.filter(reaches) : [];
-  const gutterW =
-    gutterIdx.length > 0
-      ? Math.max(...gutterIdx.map((k) => ctx.measure(endText(k), dSize))) + 10
-      : 0;
-  const useLegend = multi && !labelsFit(gutterIdx.length, lineH, bottom - top, gutterW, width);
-  const right = useLegend ? width : width - gutterW;
+  /** A series' last defined value, formatted the axis' way (`"148 k req"`). */
+  const lastText = (k: number): string => {
+    const raw = datasetValues(spec, k);
+    const v = raw[lastDefined(raw)];
+    return typeof v === "number" ? formatNumber(v, yCompact) : "";
+  };
+  const names = visible.map((k) => spec.datasets[k]?.label ?? "");
+  // Where the series are named (docs/feat/mobile-chart-labels.md D1-D3): inside
+  // the plot at each line's end (C, the default) or in a legend above it (A).
+  // Either way the plot is FULL WIDTH — the gutter the old direct labels paid for
+  // took up to 35 % of it on a stacked area.
+  const inside =
+    multi &&
+    ctx.labels === "inside" &&
+    insideFits(names, lineH, bottom - 3 - (top + dSize * 0.8), width, dSize, ctx.measure);
+  const useLegend = multi && !inside;
+  const right = width;
   const X = (p: number): number => 2 + p * (right - 4);
   const Y = (v: number): number => top + (1 - (v - lo) / (hi - lo || 1)) * (bottom - top);
   const paintOf = (k: number): Paint =>
@@ -203,6 +228,7 @@ function lineLayout(spec: ChartSpec, ctx: Ctx, area: boolean): ChartLayout {
         paint: paintOf(k),
         opacity: 1,
         strokeWidth: strokeOf(k),
+        ...(markDash(k) === undefined ? {} : { dash: markDash(k) }),
         length: curveLength(run),
       });
     }
@@ -231,42 +257,74 @@ function lineLayout(spec: ChartSpec, ctx: Ctx, area: boolean): ChartLayout {
     }
   }
 
-  // Direct labels: in the gutter for series reaching the last x, above (or below) the end otherwise.
+  // Direct labels (C): the series name just above each line's end — inside its
+  // own band for a stacked area — dodged apart vertically, haloed so the data
+  // underneath stays readable, with the series' own marker beside it.
   const direct: LayoutText[] = [];
-  if (multi && !useLegend) {
-    const yLabels = gutterIdx.map(
-      (k) => Y((ys[k] ?? [])[lastDefined(ys[k] ?? [])] as number) + dSize / 3,
-    );
-    const placed = dodge(yLabels, lineH, top + dSize * 0.8, bottom);
-    gutterIdx.forEach((k, j) => {
-      direct.push({
-        x: right + 8,
-        y: placed[j] as number,
-        text: endText(k),
-        anchor: "start",
-        size: dSize,
-        role: "direct",
-        series: k,
-        strong: k === 0,
-      });
-    });
-    for (const k of visible) {
-      if (gutterIdx.includes(k)) continue;
+  if (inside) {
+    const cumBelow = (k: number): number => {
+      const idx = visible.indexOf(k);
+      const prev = idx > 0 ? visible[idx - 1] : undefined;
+      if (prev === undefined) return 0;
+      return (ys[prev] ?? [])[lastDefined(ys[k] ?? [])] ?? 0;
+    };
+    const items = visible.flatMap((k) => {
       const y = ys[k] ?? [];
       const i = lastDefined(y);
       const at = pos[k]?.[i];
-      if (i < 0 || at === null || at === undefined) continue;
-      const ey = Y(y[i] as number);
-      const above = ey - 12 - dSize > top - dSize;
+      if (i < 0 || at === null || at === undefined) return [];
+      const end = Y(y[i] as number);
+      return [
+        {
+          k,
+          i,
+          at,
+          // Stacked: the middle of its own band, not the top of the stack.
+          target: stacked ? (end + Y(cumBelow(k))) / 2 + dSize / 3 : end - 8,
+        },
+      ];
+    });
+    const placed = dodge(
+      items.map((it) => it.target),
+      lineH,
+      top + dSize * 0.8,
+      bottom - 3,
+    );
+    items.forEach((it, j) => {
+      const name = spec.datasets[it.k]?.label ?? "";
+      const w = ctx.measure(name, dSize);
+      const y = placed[j] as number;
+      // Anchor `end` at the line's end, but never let the text leave the plot:
+      // past the left edge it flips to `start` and keeps room for its marker.
+      const endX = X(it.at) - 10;
+      const flip = endX - w < 12;
       direct.push({
-        x: X(at),
-        y: above ? ey - 12 : ey + 12 + dSize,
-        text: endText(k),
-        anchor: "middle",
+        x: flip ? 12 : endX,
+        y,
+        text: name,
+        anchor: flip ? "start" : "end",
         size: dSize,
         role: "direct",
-        series: k,
-        strong: k === 0,
+        series: it.k,
+        halo: true,
+        shape: markShape(it.k),
+      });
+    });
+    // One marker per label, in the series' colour: the text is the page colour's
+    // neighbour, so the dot is what ties a name to its line.
+    for (const t of direct) {
+      if (t.series === undefined) continue;
+      const w = ctx.measure(t.text, t.size);
+      const left = t.anchor === "end" ? t.x - w : t.x;
+      dots.push({
+        x: left - 8,
+        y: t.y - t.size / 3,
+        r: 3.2,
+        series: t.series,
+        paint: { series: t.series },
+        opacity: 1,
+        ring: 1.5,
+        shape: markShape(t.series),
       });
     }
   }
@@ -276,8 +334,9 @@ function lineLayout(spec: ChartSpec, ctx: Ctx, area: boolean): ChartLayout {
     ctx,
     { lo, hi, x1: 0, x2: right, style: A ? "dotted" : "solid" },
     Y,
-    A ? "end" : "start",
+    A && !inside ? "end" : "start",
     direct,
+    ceiling,
   );
 
   // x labels: A first · middle · last; B every k (≤ 5).
@@ -361,7 +420,7 @@ function lineLayout(spec: ChartSpec, ctx: Ctx, area: boolean): ChartLayout {
     dots,
     texts: [...g.texts, ...xLabels, ...direct],
     guides: g.guides,
-    legend: useLegend ? legendOf(spec, visible, paintOf) : null,
+    legend: useLegend ? legendOf(spec, visible, paintOf, lastText) : null,
     summary: chartSummary(spec, locale),
     table: chartTable(spec, locale),
     hit,

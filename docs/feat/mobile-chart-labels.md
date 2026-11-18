@@ -1,6 +1,6 @@
 # feat/mobile-chart-labels — Series labels on phone charts (C inside the plot, A legend as a setting)
 
-> **Status:** implementation (awaiting owner answers + approval — NOT approved)
+> **Status:** implemented — awaiting Review
 > **Branch:** `feat/mobile-chart-labels`
 > **Size:** M · **Blast:** contained · **Suited:** Opus plan + DeepSeek exec; standard in-context Review
 > **Changelog:** `changelog.d/mobile-chart-labels.changed.md`
@@ -333,7 +333,129 @@ capability is absent).
 
 ## Execution
 
-*— (pending)*
+*— claude-opus-5-5, 2026-11-18*
+
+As built, in dependency order; the two plan drifts first, because they changed
+what the later slices draw.
+
+**Plan drift 1 — D4 as written cannot satisfy its own test.** D4 said "replace
+`hi` with the first nice tick ≥ the max (the `niceTicks` used by `guides`)".
+`guides` keeps only the ticks INSIDE the domain it is handed
+(`chart-geometry.ts:157`: `v <= hi + 1e-9`), and the domain's own `hi` is what
+the plan left alone — so nothing could reach above it and the top guide stayed
+at 1,000 while the repro's 1,033 still overshot, the very bug D4 exists to kill.
+Built instead: the mockup's ceiling ladder (`niceCeiling`, `chart-layout.ts:105`:
+2 × the first nice half-step ≥ `max/2`, so 1,033 → 1,200 and 455 → 500) becomes
+the area's `hi`, and `guideItems` was given a `ceiling` so its top hairline IS
+that value (`chart-layout-axis.ts:110`). `domain()` is untouched, so bars keep
+their axis (pinned by the deep-equal test).
+
+**Plan drift 2 — D2 put C's label exactly where the top guide label sits.** D2
+kept the guide labels at `x2` (the right edge) while C's label anchors `end` at
+`X(lastAt) - 10`; with no gutter, the two overlap and `guideItems`' collision
+test dropped the top guide label entirely — the chart lost its ceiling reading.
+Built instead: with C on, guide labels anchor `start` at the left edge
+(`chart-layout.ts:337`), which is where nothing else is drawn. No visible
+regression on the plot: the right edge is now the series' end.
+
+**1. Pure layer** (already landed before this session's remaining slices):
+`chart-layout-kit.ts` (`LayoutOptions.labels`, `LabelMode`, `Ctx.labels`,
+`LayoutText.halo`/`.shape`, `LayoutDot.shape`, `DotShape`, `LegendItem.value`/
+`.shape`); `chart-layout-axis.ts` (`markShape`, `markDash`, `insideFits`,
+`legendOf` emitting value + shape, `guideItems(…, avoid, ceiling?)`);
+`chart-hero.ts` (`heroOf(…, series?)` + `ownSeriesHero`); `chart-layout.ts`
+(no gutter, the `inside` gate, C's name-only haloed labels dodged by `dodge`,
+one marker `LayoutDot` per label, `useLegend`, D4's ceiling, D5's dashes,
+`start`-anchored guides under C); `chart-row.ts` (`labels` + cache key).
+
+**2. `chart-interact.ts`** — `toggleHighlight`, `highlightLayout` (a projection
+of the same layout: non-`k` line/fill/dot paints → `mutedLine` at ×0.55/×0.6,
+hero → `heroOf(spec, …, k)`, `scrubAt` re-reads the hero for `k`).
+
+**3. `chart-settings-store.ts` / `chart-settings-expo.ts`** — `tentacle.charts`
+behind `SecureKV`, `{v:1, labels}`, unreadable/unknown-`v` → `inside` and never
+overwritten (`ChartSettingsPreserved`), holder with `subscribe`.
+
+**4. Renderer.** New `ui/chart/SeriesGlyph.tsx`: ● `<Circle>`, ■ `<Rect>`,
+▲ `<Path>`, from `DotShape` alone. `ChartView.tsx` draws a haloed text twice —
+a surface-coloured copy (fill AND stroke, `strokeWidth` 3, round joins) then the
+readable one, because **`react-native-svg` 15.16 has no `paint-order`** (checked:
+no `paintOrder` anywhere in its `src/`), so the halo cannot be a stroke on the
+same node. Dots go through `SeriesGlyph`; the legend moved ABOVE the plot
+(`ChartLegend`, between `<ChartHero>` and the plot view), each item a 24×12
+`<Svg>` glyph (line at 2 pt with the series' dash + its marker) · name
+(`numberOfLines={1}`, max width) · value (omitted when `""`), and an item is a
+`Pressable` with `accessibilityRole="button"` + `accessibilityState={{selected}}`
+ONLY when `onHighlight` is passed — otherwise a plain `View`, so a tile, the
+gallery and table mode are unchanged. The old below-plot legend is gone.
+`ChartThumbnail.tsx` shares `SeriesGlyph` (hollow markers stay hollow).
+
+**5. State.** `ChartBlock` holds `highlight` and applies `highlightLayout` only
+when the layout HAS a legend (C has no item to tap — the scrub is its gesture);
+the scrub reads the shown layout, so a scrubbed hero is `k`'s too.
+`ChartFullScreen` gains `labels`, its own `highlight`, `toggleHighlight` on an
+item, and clears the highlight when that series is hidden. Both take `labels`
+from the screen rather than reading the Keychain themselves.
+
+**6. The setting's consumers.** The subscription is owned ONE level up so one
+listener serves a screen of charts — `SessionScreen` (`ChartSettings` state +
+`subscribe`, `chartLabels={chartSettings.labels}` into every `TranscriptRow`,
+whose `ChartRowView` passes it to `chartRowView` and `ChartBlock`), and
+`ArtifactGallery` (`useChartLabels`, a new `ui/chart/useChartLabels.ts`) →
+`ArtifactViewerModal.chartLabels` → the artifact's `ChartFullScreen`. **Drift
+from Files 10-11:** the plan said the chart row itself would `useState` +
+`subscribe`; that is one listener per chart in a transcript, so the screen owns
+it and the row takes a prop (default `inside`). `ChartFullScreen`'s own default
+is `inside` too, which keeps its dumb half walkable by the render test.
+
+**7. Settings + launch.** `SettingsScreen`: a "Charts" `BandSection`
+(`CHART_LABEL_ROWS`: "Labels on the lines" / "Legend above the chart"), rows
+`chart-labels-inside` / `chart-labels-legend`, `dimmed` when not writable (a
+newer build's record), a `Banner` for a failed write. `App.tsx` loads
+`CHART_SETTINGS` next to `ACTIVITY_SETTINGS` and passes
+`chartLabels`/`chartWritable`/`chartError`/`onChartLabels`.
+
+**Tests.** Pure: `chart-labels.test.ts` (17), `chart-hero-labels.test.ts` (7),
+`chart-highlight.test.ts` (8), `chart-settings-store.test.ts` (12), a
+`labels` cache-key case in `chart-row.test.ts`. Render: new
+`chart-labels-render.test.ts` (10: the halo pair and its surface stroke, the
+marker shapes, the legend's position in the tree, glyph dash/value, pressability
+with and without a handler, `selected`, and the full screen's own three).
+Wiring-as-source: new `chart-labels-wiring.test.ts` (6 — who subscribes, who
+passes the mode, the full screen's two taps, the Settings rows, the launch
+load). Edited pre-existing tests, each because this task changes the behaviour
+they pin: `chart-layout.test.ts` (guide labels `start` under C, name-only direct
+texts, 3 dots on its line fixture, `Ctx.labels` in a hand-built ctx),
+`chart-view.test.ts` (a marker is a small `<Rect>` now, so "no card" means
+"no big rectangle"; a haloed text appears twice), `chart-thumbnail-render.test.ts`
+(+`Rect` in its svg mock), `band-screens.test.ts` (ten bands), `pairing-guards`
+(a seventh Keychain wiring file).
+
+**Mutation results** (§9 non-vacuity; every mutation reverted, file restored and
+re-run green afterwards):
+
+| mutation | test | result |
+| --- | --- | --- |
+| `const right = width` → `width - 40` (the gutter back) | `chart-labels` | 5 fail |
+| the cache key loses `\|${labels}` | `chart-row` | 1 fail |
+| the area ceiling → `undefined` (back to `domain()`) | `chart-labels` | 1 fail |
+| `insideFits` → always `true` (no fallback to A) | `chart-labels` | 2 fail |
+| `if (t.halo !== true)` → `if (true)` (no halo copy) | `chart-labels-render` | 1 fail |
+| legend moved back below the plot | `chart-labels-render` | 1 fail |
+| every marker drawn as a circle (shape ignored) | `chart-labels-render` | 1 fail |
+| legend items never `Pressable` | `chart-labels-render` | 3 fail |
+| `SessionScreen` stops passing `chartLabels` | `chart-labels-wiring` | 1 fail |
+| full screen's `onHighlight` removed | `chart-labels-wiring` | 1 fail |
+
+The two wiring mutations failed as source assertions, not runtime ones — that is
+the intended shape for a listener the render walk cannot mount (no React
+renderer in this harness); the pure and render mutations above fail at the
+behaviour, and every file was restored and re-run green after each.
+
+**Still unverified (by nature, not by omission):** how the halo, `Rect`/`Path`
+markers and the legend's wrapping actually LOOK on a device — this repo's mobile
+tests stub the host components, so nothing here proves pixels. The design is the
+mockup's; a simulator pass is the remaining check.
 
 ## Review
 

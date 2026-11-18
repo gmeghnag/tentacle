@@ -6,7 +6,14 @@
  */
 import { type JSX, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { type ChartA11yAction, chartUiWords, claimAppear } from "../../chart-interact.ts";
+import {
+  type ChartA11yAction,
+  chartUiWords,
+  claimAppear,
+  highlightLayout,
+  toggleHighlight,
+} from "../../chart-interact.ts";
+import type { LabelMode } from "../../chart-layout-kit.ts";
 import type { ChartRowView, ChartToolRow } from "../../chart-row.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius } from "../../theme.ts";
 import { ChartAppear, useReduceMotion } from "./ChartAppear.tsx";
@@ -23,13 +30,33 @@ export interface ChartBlockProps {
   readonly palette: Palette;
   readonly locale: string;
   readonly testID: string;
+  /** The Charts setting in force (D7), so full screen lays out the same way. */
+  readonly labels?: LabelMode;
 }
 
-export function ChartBlock({ view, tool, palette, locale, testID }: ChartBlockProps): JSX.Element {
+export function ChartBlock({
+  view,
+  tool,
+  palette,
+  locale,
+  testID,
+  labels,
+}: ChartBlockProps): JSX.Element {
   const [mode, setMode] = useState<"chart" | "table">("chart");
   const [full, setFull] = useState(false);
+  // A (docs/feat/mobile-chart-labels.md D3): the series the reader tapped in the
+  // legend. `null` at rest; a second tap on the same item goes back to rest.
+  const [highlight, setHighlight] = useState<number | null>(null);
   const [animate] = useState(() => claimAppear(APPEARED, tool.id, tool.status));
-  const { scrub, handlers } = useChartScrub(view.layout, () => setFull(true));
+  // Only A's legend can be tapped, so a highlight is only ever a projection of a
+  // legend layout (C has no item to tap; the scrub is its interaction).
+  const shown =
+    highlight === null || view.layout.legend === null
+      ? view
+      : { ...view, layout: highlightLayout(view.layout, view.spec, highlight, locale) };
+  // The scrub reads the SHOWN layout, so a scrubbed hero is `k`'s too (D6) and the
+  // rest of the plot stays muted while a finger is down.
+  const { scrub, handlers } = useChartScrub(shown.layout, () => setFull(true));
   // Unknown yet (null) counts as reduced: no transition is the safe default.
   const reduceMotion = useReduceMotion();
   const words = chartUiWords(locale);
@@ -59,13 +86,16 @@ export function ChartBlock({ view, tool, palette, locale, testID }: ChartBlockPr
   return (
     <View>
       <ChartView
-        view={view}
+        view={shown}
         testID={testID}
         scrub={scrub}
         mode={mode}
         onAction={onAction}
         plotHandlers={handlers}
         locale={locale}
+        {...(view.layout.legend === null
+          ? {}
+          : { onHighlight: (k: number) => setHighlight((h) => toggleHighlight(h, k)), highlight })}
         wrapPlot={(plot) => (
           <ChartAppear kind={view.layout.kind} animate={animate} width={view.layout.width}>
             {plot}
@@ -83,6 +113,7 @@ export function ChartBlock({ view, tool, palette, locale, testID }: ChartBlockPr
           locale={locale}
           reduceMotion={reduceMotion !== false}
           testID={`${testID}-full`}
+          {...(labels === undefined ? {} : { labels })}
           onClose={() => setFull(false)}
         />
       ) : null}
