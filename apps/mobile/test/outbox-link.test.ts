@@ -1070,13 +1070,25 @@ describe("owner B9-b: a mid-turn resync does not duplicate the prompt row", () =
     screen.setDraft("hold Cosa vedi?");
     screen.press();
     await until(() => d.model.held === 1);
+    // Counted from the cut: the outbox's `facts()` reads `session/snapshot`
+    // BEFORE it, so "any snapshot frame" is no proof of a reconnect (that stale
+    // wait passed at once and raced the redial). The re-attach is the post-cut
+    // `session/open`. NB: mid-turn the daemon's ring pins the running turn's
+    // updates (`ring.ts` `evict(pinSeq)`), so this reconnect is a REPLAY, not a
+    // snapshot reset — the property below holds across that path.
+    const before = phone.frames.length;
     phone.cut();
-    // The client reconnects by itself and must resync (its ring lost the tail).
-    await until(() => methods(phone.frames).filter((m) => m === Method.Snapshot).length > 0);
+    await until(() => methods(phone.frames.slice(before)).includes(Method.Open));
+    expect(methods(phone.frames.slice(before))).toContain(Method.Open);
     // The turn was still running at the cut: the screen keeps following it.
     expect(screen.state().view.turn).not.toBeNull();
     d.model.open();
-    await until(() => userRows(screen).length === 2);
+    await until(() =>
+      screen
+        .state()
+        .view.rows.some((row) => row.kind === "assistant" && row.text.includes("hold Cosa vedi?")),
+    );
+    // Room for a late re-delivered `user_message` to land before counting.
     await sleep(100);
     const rows = screen.state().view.rows;
     const mine = rows.filter((row) => row.kind === "user" && row.text === "hold Cosa vedi?");

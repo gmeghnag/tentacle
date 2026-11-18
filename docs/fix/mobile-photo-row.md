@@ -367,6 +367,33 @@ signatures) and the merge of `main` (`a3a25d84`, 3 days ahead).
     verified:** whether the merged tests pass. To check, run `bun install
     --frozen-lockfile`, then `bun test apps/mobile/test/outbox-link.test.ts`.
 
+### Post-merge red: B9-b's wait was vacuous (test fixed, no code change)
+
+*— claude-opus-5-5, 2026-11-18* — after `e81c47d9`, the B9-b test failed at
+`outbox-link.test.ts:1085` (no assistant row below the prompt). **The test was
+wrong, not the merged code.** Its "reconnect resynced" wait was
+`any session/snapshot frame > 0`. The outbox's `facts()`
+(`outbox-session.ts:149`) sends that frame *before* the cut, so the wait passed
+at once. The test then gave the reply a fixed 100 ms, which raced the redial.
+Evidence, from rows logged every 10 ms: the redial's `session/open` and the reply
+land about 130 ms after `d.model.open()`. After that the screen shows
+`hi / ok:hi / hold Cosa vedi? / ok:hold Cosa vedi?`, one prompt row above its
+reply. So the B9/B10 property holds on the merged code.
+
+There is a second finding, which confirms Review round 2's caveat. This reconnect
+is a ring **replay**, not a snapshot reset. A temporary log in `onReset` and the
+`turn.reset` branch showed no reset after the cut, even with `ringBytes: 64`: the
+ring does not evict the running turn's updates (`ring.ts` `evict(pinSeq)`).
+`turn.reset`'s mid-turn re-delivery path therefore still has no test, and this test
+does not claim to cover it any more.
+
+The fix is in the test only. The wait is now for the post-cut `session/open`
+(asserted), then for the reply row with `until`, then 100 ms for any late
+duplicate. A comment states that the path is a replay. Non-vacuity: with
+`session-feed.ts:205` `pending = null` removed, the test fails with `Received
+length: 3`; restored, it is green. Gate: `bunx tsc -p apps/mobile --noEmit` exit 0
+· `bun run lint` 2083 files clean · `bun test apps/mobile` 3561 pass, 0 fail.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-15* (fresh context; same model family as the orchestrator)
