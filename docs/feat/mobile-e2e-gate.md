@@ -119,6 +119,49 @@ The e2e evidence is the full run in Execution (the known-bug `34-hub-*` red on `
 
 (pending the first full run)
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-19* (resumed a stopped DeepSeek attempt: kept its `deviceChoice` and `runAttempt` shape, fixed what did not work)
+
+- **F1 (HIGH) — FIXED.** `TODO.md:36`: an `e2e flow \`34-hub-commands\`` sub-item under
+  feat/mobile-hub-commands (the Commands disc sets `commandsOpen`, `SessionScreen.tsx:840`,
+  but nothing reads it). Red before: `the real flows' gate tags > every quarantined or
+  known-bug flow has a TODO.md line naming it` → `"listed": false` for `34-hub-commands`;
+  green after.
+- **F2 (MEDIUM) — FIXED.** New pure `deviceChoice` (`gate.ts:110-149`, fn at `:125`): a UDID is validated
+  whether or not `--ios` is given; `--ios N --udid X` where X is unknown/unavailable or of
+  the other major → exit 2 with a message. `run.ts:323-333` uses it. Tests: 4 in
+  `deviceChoice: a UDID is validated with --ios too`. Mutations: (a) the original
+  behaviour (`udid === undefined || only !== undefined` → `majors`) → 2 fail; (b) the
+  major-mismatch check disabled (`&& false`) → 2 fail. Both reverted.
+- **F3 (MEDIUM) — FIXED.** `runAttempt` (`run.ts`, exported for test) spawns the attempt
+  `detached: true` (setsid → it leads its own group; probed: `pid 44230 pgid 44230 self
+  pgid 44228`, `kill(-pid)` then `pgrep -g` → none) and the timeout SIGKILLs the GROUP
+  (`killFlowTree`); the harness `finally` also group-kills each child. DeepSeek's draft
+  omitted `detached`, so `kill(-pid)` hit ESRCH and the leader was never killed (the test
+  hung to its 5 s timeout). Also fixed in its draft: `children.delete(...children)` (Set
+  `delete` takes ONE arg — it dropped the first child, i.e. `serve`, from the reap set
+  instead of the attempt) → the attempt's own child is deleted. Tests: `nothing of the
+  attempt outlives the timeout` (`sh -c "sleep & sleep"`, 400 ms, then `pgrep` → `[]`, code
+  137), `an attempt that ends in time keeps its own exit code`, `killFlowTree never signals
+  pid ≤ 1 or its own process`. Mutation: the timeout back to leader-only
+  `child.kill("SIGKILL")` → `expected [] / received ["44481","44482"]` (both sleeps
+  orphaned). Reverted.
+- **F4 (MEDIUM) — PARTIAL.** The only full gate run on disk is
+  `.tentacle/tmp/e2e-mobile/1795030151557/` (this worktree, iOS 26, 2026-11-18 21:34, branch
+  code before this round): `GATE FAIL — 27 passed, 32 failed, 1 known-bug, 0 quarantined (of
+  60; 3917 s)`; `34-hub-commands` reported `FAIL (known-bug)` and listed with its reason.
+  Sample causes: `05-daemon-down` *pair-paste-input is visible* false; `33-hub` *hub-glyph is
+  visible* false; `34-hub-new` *transcript-empty is visible* false; `22-notify-deny`
+  *Element not found: session-…*. Not diagnosed in this round (out of a fix round's scope,
+  ~65 min per run). **Unverified:** a green (or triaged) full run on this code, and the
+  `34-hub-*` red-on-`main` evidence — verify with `scripts/e2e-gate.sh <udid>` and paste its
+  `summary.txt`.
+
+Narrow gate: `bun test apps/mobile/test/e2e-gate.test.ts apps/mobile/test/e2e-flows.test.ts`
+→ 73 pass, 0 fail; `bunx biome check` on the 3 changed TS files → clean; `tsc -p apps/mobile`
+→ clean.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-18* (fresh context; same model as the executor: shared blind spots possible)

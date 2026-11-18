@@ -20,6 +20,8 @@
  *                  `TODO.md` line.
  */
 
+import { type IosMajor, REQUIRED_IOS_MAJORS } from "./preflight.ts";
+
 export const GATE_TAGS = ["flaky", "known-bug", "quarantine"] as const;
 export type GateTag = (typeof GATE_TAGS)[number];
 
@@ -103,6 +105,47 @@ export function flowMetaErrors(meta: FlowMeta): string[] {
     errors.push(`${meta.name}: \`quarantine\` is not run, so no other tag can apply`);
   }
   return errors;
+}
+
+/**
+ * What a run's `--udid` / `--ios` pair means (docs/feat/mobile-e2e-gate.md,
+ * Review round 1 finding 2). A UDID names ONE simulator, so it names its major
+ * too — and it is honoured the same way whether `--ios` was given or not: the
+ * run drives that simulator or nothing. `--ios N --udid X` where X is not an
+ * available iOS N device is an error (exit 2), never "drive X and call it N".
+ */
+export type DeviceChoice =
+  /** No UDID: every required major (`--ios` narrows to one). */
+  | { readonly kind: "majors"; readonly only: IosMajor | undefined }
+  /** A UDID, validated as an available device of a required major. */
+  | { readonly kind: "device"; readonly udid: string; readonly major: IosMajor }
+  /** Unusable: the message to print, exit 2. */
+  | { readonly kind: "unknown"; readonly message: string };
+
+export function deviceChoice(
+  devicesJson: string,
+  udid: string | undefined,
+  only: IosMajor | undefined,
+): DeviceChoice {
+  if (udid === undefined) {
+    return { kind: "majors", only };
+  }
+  const major = majorOfDevice(devicesJson, udid);
+  if (major === undefined || !REQUIRED_IOS_MAJORS.includes(major as IosMajor)) {
+    return {
+      kind: "unknown",
+      message: `e2e:mobile: simulator ${udid} is not an available iOS ${REQUIRED_IOS_MAJORS.join("/")} device (simctl list devices)`,
+    };
+  }
+  // `--ios N` must AGREE with the simulator, not stand in for it: a run given
+  // one device drives it as the major it actually is, or refuses.
+  if (only !== undefined && only !== major) {
+    return {
+      kind: "unknown",
+      message: `e2e:mobile: simulator ${udid} is an iOS ${major} device, not the iOS ${only} this run was told (--ios)`,
+    };
+  }
+  return { kind: "device", udid, major: major as IosMajor };
 }
 
 export type AttemptStatus = "pass" | "fail" | "timeout";

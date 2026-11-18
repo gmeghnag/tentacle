@@ -30,9 +30,9 @@ import {
   type AttemptStatus,
   type FlowMeta,
   type FlowResult,
+  deviceChoice,
   finalStatus,
   flowMetaErrors,
-  majorOfDevice,
   parseFlowMeta,
   shouldRetry,
   summaryText,
@@ -323,18 +323,14 @@ async function main(): Promise<number> {
   // A UDID names ONE simulator, so it names the major too: the gate runs that
   // simulator only (the other required runtime need not be installed), and
   // never falls back to another device — a run must not drive one it was not
-  // given (parallel agents each own one).
-  let only: IosMajor | undefined = args.only;
-  if (udid !== undefined && args.only === undefined) {
-    const major = majorOfDevice(devicesJson, udid);
-    if (major === undefined || !REQUIRED_IOS_MAJORS.includes(major as IosMajor)) {
-      console.error(
-        `e2e:mobile: simulator ${udid} is not an available iOS ${REQUIRED_IOS_MAJORS.join("/")} device (simctl list devices)`,
-      );
-      return 2;
-    }
-    only = major as IosMajor;
+  // given (parallel agents each own one). `--ios N --udid X` is checked the same
+  // way: X must BE an iOS N device (docs/feat/mobile-e2e-gate.md, review F2).
+  const choice = deviceChoice(devicesJson, udid, args.only);
+  if (choice.kind === "unknown") {
+    console.error(choice.message);
+    return 2;
   }
+  const only: IosMajor | undefined = choice.kind === "device" ? choice.major : choice.only;
   const missing = preflight(
     {
       platform: process.platform,
@@ -833,6 +829,9 @@ async function main(): Promise<number> {
   } finally {
     for (const child of children) {
       child.kill();
+      // A flow attempt leads its own group (`runAttempt`, detached): reap the
+      // JVM/driver it started too. A no-op for a child that leads no group.
+      killFlowTree(child.pid);
     }
     children.clear();
     mock.stop();
@@ -1508,6 +1507,66 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "34-hub-new": "HUBITEM_ID",
 };
 
+/** One attempt's spawn + timeout, in a form a test can drive (review round 1 F3). */
+export interface AttemptOptions {
+  readonly cwd: string;
+  readonly env: Record<string, string>;
+  readonly stdoutPath: string;
+  readonly stderrPath: string;
+  /** The attempt is killed after this long. */
+  readonly timeoutMs: number;
+  /** Called with the live child, so the caller can tear it down in `finally`. */
+  readonly onSpawn?: (child: Child) => void;
+}
+
+/**
+ * One attempt of one flow: spawn it, bound it with a timeout, report what
+ * happened. Maestro is a LAUNCHER — it starts a JVM, which starts the XCTest
+ * driver — so the attempt is spawned in its OWN process group and a timeout
+ * kills the GROUP, not just the leader: an orphaned driver keeps the
+ * simulator's driver port, and the next flow then hangs too (review round 1 F3).
+ */
+export async function runAttempt(
+  argv: readonly string[],
+  opts: AttemptOptions,
+): Promise<{ readonly code: number | null; readonly timedOut: boolean }> {
+  const child = Bun.spawn([...argv], {
+    cwd: opts.cwd,
+    env: opts.env,
+    stdout: Bun.file(opts.stdoutPath),
+    stderr: Bun.file(opts.stderrPath),
+    // setsid(): the attempt LEADS its own process group, so `kill(-pid)`
+    // reaches the JVM and the driver too (without it, `-pid` names no group).
+    detached: true,
+  }) as unknown as Child;
+  opts.onSpawn?.(child);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    killFlowTree(child.pid);
+  }, opts.timeoutMs);
+  const code = await child.exited;
+  clearTimeout(timer);
+  if (timedOut) {
+    // The leader may be gone while what it started is not.
+    killFlowTree(child.pid);
+  }
+  return { code, timedOut };
+}
+
+/** SIGKILL the process group led by `pid`; false when it is already gone. */
+export function killFlowTree(pid: number | undefined): boolean {
+  if (pid === undefined || !Number.isInteger(pid) || pid <= 1 || pid === process.pid) {
+    return false;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Run one flow on one simulator with Maestro, returning its exit code. */
 async function spawnFlow(
   flow: string,
@@ -1539,7 +1598,8 @@ async function spawnFlow(
         ?.replace(/\.yaml$/, "") ?? ""
     ];
   const fresh = compose === undefined ? {} : { [compose]: await newComposeSession() };
-  const child = Bun.spawn(
+  let attempt: Child | undefined;
+  const { code, timedOut } = await runAttempt(
     [
       "maestro",
       "--device",
@@ -1573,19 +1633,19 @@ async function spawnFlow(
     {
       cwd: REPO,
       env: { ...maestroEnv(), RUN_DIR: runDir },
-      stdout: Bun.file(join(outDir, "maestro.log")),
-      stderr: Bun.file(join(outDir, "maestro.err.log")),
+      stdoutPath: join(outDir, "maestro.log"),
+      stderrPath: join(outDir, "maestro.err.log"),
+      timeoutMs,
+      onSpawn: (child) => {
+        attempt = child;
+        children.add(child);
+      },
     },
-  ) as unknown as Child;
-  children.add(child);
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGKILL");
-  }, timeoutMs);
-  const code = await child.exited;
-  clearTimeout(timer);
-  children.delete(child);
+  );
+  // Only THIS attempt: the set also holds `serve`, which must still be reaped.
+  if (attempt !== undefined) {
+    children.delete(attempt);
+  }
   if (timedOut) {
     await writeFile(
       join(outDir, "timeout.txt"),
