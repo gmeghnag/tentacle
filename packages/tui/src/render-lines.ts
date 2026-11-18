@@ -28,7 +28,7 @@ import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
 import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
-import { firedScheduleHead } from "./schedule-view.ts";
+import { firedRowLines } from "./schedule-view.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 import {
@@ -49,6 +49,13 @@ export interface RenderOptions {
   readonly expandAll: boolean;
   /** Display width in columns, used to size full-width diff bars. */
   readonly width?: number;
+  /**
+   * The clock a fired wake's time is read against (`15:54` today vs
+   * `17 Nov 15:54`, docs/feat/scheduled-fire-row.md). Default `Date.now()`;
+   * tests pin it. Not part of the row-cache key: it only moves a date prefix
+   * across midnight.
+   */
+  readonly now?: number;
   /** Collapse a tool body longer than this many lines (default 8). */
   readonly collapseThreshold?: number;
   /** Lines shown in a collapsed preview (default 6). */
@@ -986,6 +993,17 @@ export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
 export function itemLinesAt(item: DisplayItem, opts: RenderOptions, glyph: boolean): string[] {
   switch (item.kind) {
     case "user": {
+      // A fired scheduled wake is a harness-grey timeline row, not a `>` row the
+      // person typed (docs/feat/scheduled-fire-row.md) — the same rows live and
+      // reloaded, decided from the message itself.
+      const fired = firedRowLines(item.text, item.schedule, {
+        width: opts.width ?? DEFAULT_WIDTH,
+        expanded: opts.expandAll === true,
+        now: opts.now ?? Date.now(),
+      });
+      if (fired !== null) {
+        return fired.map((row) => theme.subtle(row));
+      }
       // An attachment-only prompt has no text: its rows are the attachment lines
       // alone (a blank text row would collapse — Ink measures an empty <Text> 0×0, P9).
       const onlyAttachments =
@@ -997,14 +1015,7 @@ export function itemLinesAt(item: DisplayItem, opts: RenderOptions, glyph: boole
       // A PDF's row (docs/feat/pdf-read.md D5) is the same subtle line, after the
       // images: the user sees the file's name; the text lives with the model.
       const documents = (item.documents ?? []).map((row) => theme.subtle(row));
-      // A fired turn's own head (cron-tool S5, M4 option B): the styled row the
-      // `turn_start.schedule` ref earns. No ref → nothing here, and the durable
-      // `[scheduled …]` prefix in the text is the whole row (option A).
-      const fired = firedScheduleHead(item.schedule, item.text);
       return [
-        ...(fired === ""
-          ? []
-          : [theme.accent(truncateCells(fired, Math.floor(opts.width ?? DEFAULT_WIDTH)))]),
         ...(item.restart ? [theme.subtle("restart prompt")] : []),
         ...rows,
         ...images,

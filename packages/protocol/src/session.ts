@@ -54,6 +54,22 @@ export const MessageNoteSchema = z.object({
 export type MessageNote = z.infer<typeof MessageNoteSchema>;
 
 /**
+ * A fired scheduled wake, as the daemon stamped it when it fired
+ * (docs/feat/scheduled-fire-row.md): which wake (`sc-N` + its spec), the
+ * fire's ordinal, and the instant (`at`, epoch ms). Display only. Its own
+ * schema because the field on `ChatMessageSchema` is FAIL-SOFT (the
+ * `MessageNote` reason); the live `turn_start.schedule` ref carries the same
+ * `fire`/`at`. The bounds mirror `ScheduleIdSchema` and `SCHEDULE_LABEL_MAX`.
+ */
+export const ScheduledFireSchema = z.object({
+  id: z.string().min(1).max(64),
+  spec: z.string().max(200),
+  fire: z.number().int().positive(),
+  at: z.number().int().nonnegative(),
+});
+export type WireScheduledFire = z.infer<typeof ScheduledFireSchema>;
+
+/**
  * One file attached to a user message, for the chip (display only,
  * docs/feat/pdf-read.md D4): the file's TEXT is in `content` (a `<file>`
  * block); this only names it. `kind` is a bounded FREE string (`pdf` today,
@@ -132,6 +148,14 @@ const chatMessageShape = () => ({
     })
     .optional()
     .catch(undefined),
+  /**
+   * ONLY on the user message a fired scheduled wake writes: the wake and the
+   * instant it fired (display only, docs/feat/scheduled-fire-row.md). FAIL-SOFT
+   * like `note`: a value outside these bounds is DROPPED (the message still
+   * loads and its row falls back to the `[scheduled …]` prefix), never a
+   * refusal of the CRITICAL entry.
+   */
+  scheduled: ScheduledFireSchema.optional().catch(undefined),
   /**
    * On a USER message: image refs to send with it (docs/feat/attachments-core.md).
    * Refs, never bytes — the bytes live behind an `AttachmentSource` on the side

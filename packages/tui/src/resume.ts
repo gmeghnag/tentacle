@@ -115,6 +115,9 @@ function itemsOf(
           text: view.text,
           ...(images.length > 0 ? { images } : {}),
           ...(documents.length > 0 ? { documents } : {}),
+          // A fired wake's record (docs/feat/scheduled-fire-row.md): the same
+          // `schedule` a live turn's ref gives, so the row is identical.
+          ...(m.scheduled !== undefined ? { schedule: m.scheduled } : {}),
         });
       }
     } else if (m.role === "assistant") {

@@ -7,6 +7,7 @@
  *
  * Pure: no React, no I/O.
  */
+import type { ScheduledRef } from "@tentacle/core";
 import type { ScheduleRow } from "@tentacle/protocol";
 import { progressText } from "./mapping.ts";
 
@@ -74,14 +75,18 @@ export function boundSchedules(rows: readonly ScheduleRow[]): ScheduleRow[] {
  *   same treatment a list row does — one line, escapes gone, bounded.
  */
 export function firedScheduleRef(
-  schedule: { readonly id: string; readonly spec: string } | undefined,
+  schedule: ScheduledRef | undefined,
   trusted: boolean,
-): { schedule?: { id: string; spec: string } } {
+): { schedule?: ScheduledRef } {
   if (schedule === undefined || !trusted) return {};
   return {
     schedule: {
       id: sanitizeScheduleText(schedule.id, SCHEDULE_ID_CLIENT_MAX),
       spec: sanitizeScheduleText(schedule.spec),
+      // The fire's ordinal and instant (docs/feat/scheduled-fire-row.md): numbers
+      // the wire schema already bounded; absent from an older daemon.
+      ...(schedule.fire !== undefined ? { fire: schedule.fire } : {}),
+      ...(schedule.at !== undefined ? { at: schedule.at } : {}),
     },
   };
 }

@@ -12,6 +12,7 @@ import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
 import type {
   AttachmentRef,
   ChatMessage,
+  ScheduledRef,
   ToolResult,
   ToolResultDetail,
   ToolResultSpill,
@@ -45,13 +46,13 @@ export interface UserItem {
   /** The model's restart prompt after a context reset (labelled "restart prompt"). */
   readonly restart?: true;
   /**
-   * The scheduled wake that started this turn (`turn_start.schedule`,
-   * docs/feat/cron-tool.md S5, mockup M4 option B): the id and the interval the
-   * daemon says fired it. Absent for an ordinary turn, for an older daemon, and
-   * after a reload — the durable `[scheduled sc-1 · …]` prefix in `text` is then
-   * the whole row (option A).
+   * The scheduled wake that started this turn (docs/feat/scheduled-fire-row.md):
+   * live, the `turn_start.schedule` ref; reloaded, `ChatMessage.scheduled` —
+   * the same record, so the row is the same. Absent for an ordinary turn and
+   * for an older daemon or log: the row then reads the durable
+   * `[scheduled sc-1 · …]` prefix in `text` (`firedRowLines`).
    */
-  readonly schedule?: { readonly id: string; readonly spec: string };
+  readonly schedule?: ScheduledRef;
 }
 
 export interface AssistantItem {
@@ -774,7 +775,7 @@ export type SessionEvent =
        * and sanitized by the CLIENT (`firedScheduleRef`, which gates on
        * `daemonWakes`), so this is display data and nothing here acts on it.
        */
-      readonly schedule?: { readonly id: string; readonly spec: string };
+      readonly schedule?: ScheduledRef;
     }
   /** A newer daemon's update type this client does not know (once per type per session). */
   | { readonly type: "unsupported"; readonly kind: string };

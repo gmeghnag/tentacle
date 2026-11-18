@@ -339,6 +339,126 @@ recurring wake shows no clock.
 APPROVED: option 1 of Execution §2. Add the FAIL-SOFT, display-only optional field `scheduled?: { id, spec, fire, at }` on the user `ChatMessage` a wake produces (protocol `session.ts` message schema, `.catch(undefined)`, the `note`/`media`/`compacted` pattern), set by the daemon in `fireSchedule` from the instant it actually fires; it rides the critical `message` entry, so live = reload = phone = Mac. Additive on strip schemas → no PROTOCOL_VERSION bump (confirm, and write a protocol.d note only if the executor finds a real break). Old logs without the field fall back to the parser (`at` → its spec time; `every` → `#N`). The executor implements S1–S4 with this field; tests must cover: live, reload from log, old log without the field, unknown-field tolerance of an older reader.
 *— recorded by claude-opus-5-5 (orchestrator), 2026-11-18*
 
+### Round 2 — as built (on the 2026-11-18 owner decision)
+
+**Load-bearing re-check — PASS.** Re-read on this branch: the fire's only text
+part is still `schedulePromptText(job)` (`daemon/src/hosted-session.ts` `fireSchedule`),
+`prompt()` → `session.send(text, …, opts)` → the agent pushes ONE user
+`ChatMessage` (`agent/src/session.ts` `send`), and both reload paths still project
+`ChatMessage` (`tui/src/resume.ts` `itemsOf`, `apps/mobile/src/transcript-history.ts`
+`historyRows`). No field-by-field copy of a message exists between the agent and
+the log (`rg "\.media\b"` shows only renderers), so a new optional field rides
+the critical `message` entry untouched.
+
+**Slices, in dependency order:**
+
+1. **core** — new `packages/core/src/scheduled-fire.ts` (exported from the index):
+   `ScheduledFire {id, spec, fire, at}`, `ScheduledRef` (fire/at optional — an older
+   daemon's ref), `scheduledPromptOf` (the anchored inverse of `schedulePromptText`),
+   `wakeTimeText` (instant → `15:54` today / `17 Nov 15:54`, viewer's local clock),
+   `scheduleFallbackWhen` (no record: `at YYYY-MM-DDTHH:MM` reformatted as a
+   STRING, `every` → `#N`, anything else as given, ≤ 32), `firedWakeOf` (record
+   first, prefix second — the `compactionOf` shape), `firedWakeLine`.
+   `ChatMessage.scheduled?: ScheduledFire` (`core/src/model.ts`).
+2. **protocol** — `ScheduledFireSchema` (`session.ts`, bounds = `ScheduleIdSchema` /
+   `SCHEDULE_LABEL_MAX`); `ChatMessage.scheduled` = `.optional().catch(undefined)`
+   (FAIL-SOFT); `turn_start.schedule` gains optional `fire`/`at` (`updates.ts`).
+   `protocol.json` regenerated (`bun run protocol:bump`, no notes).
+   **No `protocol.d/` note:** both changes are optional fields on strip schemas — an
+   older peer drops them (tested), a newer client accepts an older daemon's
+   `{id, spec}` (tested). No break found.
+3. **agent + daemon** — `SendOptions.scheduled` stored on the pushed user message;
+   `fireSchedule` passes `{id, spec, fire: job.fires, at: this.now()}` (the job is
+   already advanced, so `fire ≥ 1`); `prompt()` sends it on `turn_start` AND as
+   `scheduled` to `send`.
+4. **client** — `firedScheduleRef` keeps `fire`/`at` (still behind the
+   `daemonWakes` trust gate); `user_message.schedule` / `startForeign` typed `ScheduledRef`.
+5. **TUI** — `firedRowLines` (`tui/src/schedule-view.ts`) **replaces**
+   `firedScheduleHead`: collapsed `◷ Wake 16:14 · <prompt one line>` cut to width;
+   Ctrl+O (`expandAll`) → `◷ Wake 16:14` + the prompt's lines indented (blank → `" "`).
+   `render-lines.ts` `user` case returns them in `theme.subtle` INSTEAD of the `>`
+   rows; `RenderOptions.now?` (default `Date.now()`). `resume.ts` sets
+   `schedule: m.scheduled`; `UserItem.schedule` / the event typed `ScheduledRef`.
+6. **phone** — `firedRowView` (`apps/mobile/src/schedule-view.ts`) **replaces**
+   `firedScheduleHead` → `{name: "Wake 16:14", subtitle, body, a11yLabel}`.
+   `UserRow.schedule: ScheduledRef`, set live (`transcript.ts`, unchanged line) and
+   on reload (`transcript-history.ts`: `m.scheduled`). `TranscriptRow.tsx` routes a
+   fired `user` row to `FiredRowView`: `StepNode` with a new `wake` node kind (`◷`,
+   `palette.sec`, `ui/StepNode.tsx`), lone thread, collapsed until tapped (local
+   `useState`), the full prompt as the body. The in-bubble cyan head is removed.
+7. `changelog.d/scheduled-fire-row.changed.md`.
+
+**Drift from the Implementation (and why):**
+- The superseded wording (`scheduled · at 15:54 · fire N`, full prompt on fire 1)
+  is replaced by the binding revision (`Wake <fire time>`, always collapsed) plus the
+  approved persisted field — so `DisplayItem.schedule` / `UserRow.schedule` are
+  **kept and widened** to `ScheduledRef` rather than deleted (Design 5): they now
+  carry the record on BOTH paths, which is what makes live = reload.
+- Parser lives in its own `core/src/scheduled-fire.ts`, not inside `schedule.ts`
+  (one display concern, one module; the round-trip test still pins it to
+  `schedulePromptText`).
+- Phone: the row's `text` stays the FULL message text (prefix included) instead of
+  the prompt only; the view strips the prefix at render. Reason: the fallback for
+  an older log must parse the prefix, and keeping the row data raw keeps live and
+  reload rows field-identical. Cost: a long-press copy of the node's body copies
+  the prompt (body = prompt), but a row-level copy action, if any reads
+  `row.text`, would include the prefix — unverified, no such action found on the
+  fired node.
+- Phone node: lone thread (not joined into the tool/thought rail of
+  `tool-steps.ts`) — joining would widen the change into the step-threading
+  module; out of scope.
+- "today" is read at render (`Date.now()`); a TUI row cached across midnight keeps
+  `HH:MM` until it re-renders (documented on `RenderOptions.now`).
+- Trust: the live ref stays behind `daemonWakes`; the stored field has no gate
+  (owner Q1). On an untrusted (pod) daemon the live row falls back to the prefix
+  while a laptop-log reload would show the stored time — pods never schedule, so
+  this is a forged-label case only.
+
+**Repro after** (`.tentacle/tmp/scheduled-fire-row/after.ts`, every 10m, fire 2, fired 16:14):
+```
+tui  live (ref)     : ["◷ Wake 16:14 · saluta l'utente"]
+tui  reload (stored): ["◷ Wake 16:14 · saluta l'utente"]
+tui  old log        : ["◷ Wake #2 · saluta l'utente"]
+phone live/reload   : {"name":"Wake 16:14","subtitle":"saluta l'utente","body":"saluta l'utente","a11yLabel":"Wake 16:14: saluta l'utente"}
+phone old log       : "Wake #2"
+```
+
+**Tests (owner's four + plan's):** live — daemon T-D1b (`turn_start.schedule` =
+`{id, spec, fire:1, at:T0+10m}`), TUI frame, phone fold; reload from log — daemon
+T-D1b (snapshot's stored user message carries the same record), TUI frame
+(`history_reset` → identical `◷` rows), phone `history` fold deep-equal to live;
+old log without the field — core/TUI/phone `#N` and `at` spec time; unknown-field
+tolerance of an older reader — `protocol/test/scheduled-fire.test.ts` (older schema
+strips it; malformed value dropped, critical entry still loads; old `{id, spec}` ref
+parses). Model never sees it — `providers/test/compaction-fact.test.ts` (Anthropic
+payload byte-identical). New files: `core/test/scheduled-fire.test.ts`,
+`protocol/test/scheduled-fire.test.ts`; updated: daemon `schedules.test.ts`, client
+`schedules.test.ts`, TUI `schedule-view.test.ts` + `schedule-panel-frames.test.tsx`,
+mobile `schedule-view.test.ts` + `schedule-wiring.test.ts` + `transcript.test.ts`.
+
+**Red / mutations (each reverted, then green):**
+| # | mutation | result |
+|---|---|---|
+| M1 | `scheduledPromptOf` always null | 14 fail (core round-trips, TUI view + both frame tests, phone view) |
+| M2 | `resume.ts` drops `schedule: m.scheduled` | TUI "live and reloaded … SAME row" fails |
+| M3 | `transcript-history.ts` drops it | phone "SAME live and reloaded" fails |
+| M4 | daemon drops `scheduled` into `send` | daemon T-D1b fails |
+| M5 | protocol drops `.catch(undefined)` | 2 protocol fail-soft tests fail |
+| M6 | client drops the `at` spread | client "keeps the fire's ordinal and instant" fails |
+Render red on the old code = the Context repro (bracket in every body, live ≠ reload).
+
+**Gate:** `bun run typecheck` clean (root + mobile + relay) · `bun run lint` clean
+(2061 files, 0 diagnostics) · `bun test` **14993 pass, 5 skip, 0 fail** (the skips
+are all env-gated files this branch does not touch: live k8s/docker, confinement,
+ws-server, session-hop docker — AGENTS §6's "three" is stale, not a regression).
+
+**Per-slice:** S1 core — DONE · S2 protocol — DONE · S3 agent/daemon — DONE ·
+S4 client — DONE · S5 TUI — DONE · S6 phone — DONE (not run on a device: the node's
+geometry/glyph alignment is unverified visually; verify with an iOS build) ·
+changelog — DONE.
+
+*— claude-opus-5-5, 2026-11-18 (executor)*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES** (not mergeable: no code, the feature is not built;

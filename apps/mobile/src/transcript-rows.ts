@@ -3,7 +3,13 @@
  * history mapper (`transcript-history.ts`) and the fold share one definition
  * without a cycle.
  */
-import type { AttachmentRef, MessageMedia, ToolDiffDetail, ToolResult } from "@tentacle/core";
+import type {
+  AttachmentRef,
+  MessageMedia,
+  ScheduledRef,
+  ToolDiffDetail,
+  ToolResult,
+} from "@tentacle/core";
 import type { ArtifactMeta, DocumentContent } from "@tentacle/protocol";
 
 /** A tool row's status: the TUI's four, plus the person's own reply-refusal. */
@@ -50,15 +56,15 @@ export interface UserRow {
   /** The model's restart prompt after a context reset (labelled "restart prompt"). */
   readonly restart?: true;
   /**
-   * The scheduled wake that started this turn (docs/feat/cron-tool.md S6, M8
-   * option B): DISPLAY data for the styled `◷ Scheduled · every 10m` head. Set
-   * only from a live `turn_start.schedule` ref the client already gated on the
-   * trust bit and sanitized (`client/schedules.ts` `firedScheduleRef`) — so its
-   * absence is the normal case: an ordinary prompt, an older daemon, a pod's
-   * daemon, or a RELOAD (the durable `[scheduled sc-1 · …]` prefix in `text` is
-   * then the whole row, option A).
+   * The scheduled wake that started this turn (docs/feat/scheduled-fire-row.md):
+   * live, the `turn_start.schedule` ref the client trust-gated and sanitized
+   * (`client/schedules.ts` `firedScheduleRef`); reloaded, the stored
+   * `ChatMessage.scheduled` — the same record, so the `◷ Wake 15:54` node is
+   * the same. Absent for an ordinary prompt and an older daemon or log: the
+   * node then reads the durable `[scheduled …]` prefix in `text`
+   * (`firedRowView`).
    */
-  readonly schedule?: { readonly id: string; readonly spec: string };
+  readonly schedule?: ScheduledRef;
 }
 
 export interface AssistantRow {

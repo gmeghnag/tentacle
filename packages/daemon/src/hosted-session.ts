@@ -72,6 +72,7 @@ import {
   type ScheduleLimits,
   type ScheduleLink,
   type ScheduleRequest,
+  type ScheduledFire,
   type ScheduledJob,
   type SubagentBackgroundBody,
   type SubagentEndBody,
@@ -2627,8 +2628,11 @@ export class HostedSession {
     skill?: string,
     askHooksTrust?: AskHooksTrust,
     voice?: VoiceTurn,
-    /** The scheduled wake that fires this turn (`fireSchedule` only; display data for `turn_start`). */
-    schedule?: { readonly id: string; readonly spec: string },
+    /**
+     * The scheduled wake that fires this turn, stamped (`fireSchedule` only):
+     * display data for `turn_start` AND the user message it stores.
+     */
+    schedule?: ScheduledFire,
     /** Attached documents' chips (`resolvePromptDocuments`); their text is already in `content`. */
     media?: readonly MessageMedia[],
   ): PromptResult {
@@ -2686,6 +2690,7 @@ export class HostedSession {
         ...(skill !== undefined ? { skill } : {}),
         ...(refs.length > 0 ? { attachments: refs } : {}),
         ...(media !== undefined && media.length > 0 ? { media } : {}),
+        ...(schedule !== undefined ? { scheduled: schedule } : {}),
         ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
         ...(voice !== undefined ? { voice } : {}),
         beforeRun: this.beforeRunFn,
@@ -3494,6 +3499,10 @@ export class HostedSession {
         {
           id: job.id,
           spec: job.spec.slice(0, SCHEDULE_LABEL_MAX),
+          // The fire itself, stamped now: stored on the user message (the row's
+          // time, live = reload) and sent on `turn_start` (scheduled-fire-row).
+          fire: job.fires,
+          at: this.now(),
         },
       );
     } catch (error) {

@@ -24,7 +24,7 @@ import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
 import { ROW_FALLBACK_TEXT } from "../../row-guard.ts";
-import { firedScheduleHead } from "../../schedule-view.ts";
+import { type FiredRow, firedRowView } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { type Thumbnail, type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
 import { type StepCell, type ThreadPos, stepRowView, thoughtRowView } from "../../tool-steps.ts";
@@ -151,11 +151,6 @@ function parsedOf(text: string): Parsed {
 
 function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Element {
   const user = row as Extract<Row, { kind: "user" }>;
-  // A fired turn's own head (cron-tool S6, M8 option B): the styled row a LIVE
-  // `turn_start.schedule` ref earns. No ref → nothing here, and the durable
-  // `[scheduled …]` prefix inside the bubble's text is the whole message (option
-  // A, which is also what a reload shows: the ref is display data, never stored).
-  const fired = firedScheduleHead(user.schedule);
   /** Item 4's geometry: media boxes at the bubble's width, caption below iff there are words. */
   const layout = layoutMedia(user.images, {
     width: MEDIA_BUBBLE_WIDTH,
@@ -174,16 +169,6 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
   return (
     <Shell row={user}>
       <View style={[styles.bubble, { backgroundColor: palette.fill }]}>
-        {fired === "" ? null : (
-          <Text
-            testID="row-scheduled-head"
-            numberOfLines={1}
-            maxFontSizeMultiplier={DENSE_FONT_SCALE}
-            style={[typography.caption, { color: palette.accent }]}
-          >
-            {fired}
-          </Text>
-        )}
         {user.restart === true ? (
           <Text style={[typography.caption, { color: palette.sec }]}>restart prompt</Text>
         ) : null}
@@ -310,6 +295,44 @@ function AssistantRowView({ row, palette, onLink, speak, onSpeak }: RowProps): J
  * (`hidden`), else a `Thought` node — ∴ in the dot's place, its first line in
  * italic, the whole thought on tap (Owner Q1).
  */
+/**
+ * A fired scheduled wake (docs/feat/scheduled-fire-row.md): the tool/thought
+ * rows' timeline node with a `◷`, `Wake 15:54` and the prompt on one line —
+ * collapsed until tapped, then the prompt in full under it. No bubble.
+ */
+function FiredRowView({
+  row,
+  palette,
+  step,
+  fired,
+}: RowProps & { readonly fired: FiredRow }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  return (
+    <StepShell row={row} thread={LONE}>
+      <StepNode
+        palette={palette}
+        node="wake"
+        reduceMotion={step?.reduceMotion ?? false}
+        name={{ tool: fired.name }}
+        subtitle={fired.subtitle}
+        subtitleItalic
+        trailing=""
+        trailingRed={false}
+        thread={LONE}
+        open={open}
+        {...(fired.body.trim() === "" ? {} : { onToggle: () => setOpen((was) => !was) })}
+        a11yLabel={fired.a11yLabel}
+        labelTestID="row-fired-wake"
+        body={
+          <Text selectable style={[typography.body, styles.firedBody, { color: palette.sec }]}>
+            {fired.body}
+          </Text>
+        }
+      />
+    </StepShell>
+  );
+}
+
 function ReasoningRowView({ row, palette, step }: RowProps): JSX.Element | null {
   const reasoning = row as Extract<Row, { kind: "reasoning" }>;
   const cell = step?.cell;
@@ -620,8 +643,16 @@ export function RowFallback({ palette }: { readonly palette: Palette }): JSX.Ele
 /** One row, by kind. A missing kind renders nothing (never a crash on new data). */
 export function TranscriptRow(props: RowProps): JSX.Element | null {
   switch (props.row.kind) {
-    case "user":
-      return <UserRowView {...props} />;
+    case "user": {
+      // A fired scheduled wake is a timeline node, not a bubble the person typed
+      // (docs/feat/scheduled-fire-row.md): decided in `firedRowView`, live = reload.
+      const fired = firedRowView(props.row.text, props.row.schedule, Date.now());
+      return fired === null ? (
+        <UserRowView {...props} />
+      ) : (
+        <FiredRowView {...props} fired={fired} />
+      );
+    }
     case "assistant":
       return <AssistantRowView {...props} />;
     case "reasoning":
@@ -639,6 +670,8 @@ export function TranscriptRow(props: RowProps): JSX.Element | null {
 
 const styles = StyleSheet.create({
   row: { paddingHorizontal: space.inset, paddingVertical: space.transcript / 2 },
+  // A fired wake's prompt, opened under its node (scheduled-fire-row).
+  firedBody: { paddingTop: 2, paddingBottom: space.transcript / 2 },
   // The artifact card (D9): a band row — a 40 pt tile, the title and its type
   // line, a chevron. No inset card and no border of its own: it sits in the
   // transcript like any other row, which is the owner's choice A.

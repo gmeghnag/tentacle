@@ -287,7 +287,14 @@ describe("a session fires its own scheduled wakes (S3)", () => {
     const start = a.of("turn_start").at(-1);
     expect(start?.turnId.startsWith("wake-")).toBe(true);
     expect(start?.prompt).toBe("[scheduled sc-1 · every 10m · fire 1] check CI");
-    expect(start?.schedule).toEqual({ id: "sc-1", spec: "every 10m" });
+    // The fire stamped with its ordinal and instant (scheduled-fire-row): the
+    // same record on the wire ref and on the stored user message.
+    const fired = { id: "sc-1", spec: "every 10m", fire: 1, at: T0 + 10 * MIN };
+    expect(start?.schedule).toEqual(fired);
+    await settle();
+    const stored = (await a.snapshot()).messages.filter((m) => m.role === "user").at(-1);
+    expect(stored?.content).toBe("[scheduled sc-1 · every 10m · fire 1] check CI");
+    expect(stored?.scheduled).toEqual(fired);
     // One frame for the create, one for the fire (fires 0 → 1).
     const lists = a.of("schedules").map((u) => u.schedules.map((row) => [row.id, row.fires]));
     expect(lists).toEqual([[["sc-1", 0]], [["sc-1", 1]]]);

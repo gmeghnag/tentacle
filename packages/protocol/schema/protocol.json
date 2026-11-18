@@ -707,6 +707,9 @@
           "enum": ["system", "user", "assistant", "tool"],
           "type": "string"
         },
+        "scheduled": {
+          "$ref": "#/$defs/ScheduledFire"
+        },
         "spill": {
           "$ref": "#/$defs/ToolResultSpill"
         },
@@ -2681,6 +2684,9 @@
           "enum": ["system", "user", "assistant", "tool"],
           "type": "string"
         },
+        "scheduled": {
+          "$ref": "#/$defs/ScheduledFire"
+        },
         "spill": {
           "$ref": "#/$defs/ToolResultSpill"
         },
@@ -2761,6 +2767,9 @@
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
           "type": "string"
+        },
+        "scheduled": {
+          "$ref": "#/$defs/ScheduledFire"
         },
         "spill": {
           "$ref": "#/$defs/ToolResultSpill"
@@ -4212,6 +4221,30 @@
       "required": ["createdAt", "fires", "id", "kind", "nextAt", "prompt", "spec"],
       "type": "object"
     },
+    "ScheduledFire": {
+      "additionalProperties": true,
+      "properties": {
+        "at": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fire": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "spec": {
+          "maxLength": 200,
+          "type": "string"
+        }
+      },
+      "required": ["at", "fire", "id", "spec"],
+      "type": "object"
+    },
     "SchedulesUpdate": {
       "additionalProperties": true,
       "properties": {
@@ -5612,6 +5645,14 @@
         "schedule": {
           "additionalProperties": true,
           "properties": {
+            "at": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "fire": {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
             "id": {
               "$ref": "#/$defs/ScheduleId"
             },
