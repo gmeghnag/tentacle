@@ -1,25 +1,31 @@
 /**
  * The "Button opacity" band (docs/feat/mobile-hub-opacity.md Design 4, mockup
- * variant B): a continuous 30–100 % slider with a live preview of the floating
- * button over chat text.
+ * variant B): a STEPPED slider — 20 · 40 · 60 · 80 · 100 %
+ * (docs/feat/mobile-hub-defaults.md) — with a live preview of the floating
+ * button over chat text, and a selection tick each time the drag lands on
+ * another step.
  *
- * Render + drag plumbing only (AGENTS §7): the track→percentage maths, the floor,
- * the clamp and the VoiceOver step are `hub-opacity.ts`'s. The drag keeps a LOCAL
+ * Render + drag plumbing only (AGENTS §7): the track→percentage maths, the steps,
+ * the snap and the VoiceOver step are `hub-opacity.ts`'s; when to tick is
+ * `haptic-rules.ts`'s (`opacityStepHaptic`). The drag keeps a LOCAL
  * value so the label and the preview move with the finger; ONE write reaches the
  * Keychain, on release — a write per move would be a write per frame.
  */
 import type { JSX } from "react";
 import { useRef, useState } from "react";
 import { type AccessibilityActionEvent, PanResponder, StyleSheet, Text, View } from "react-native";
+import { opacityStepHaptic } from "../haptic-rules.ts";
+import { playHaptic } from "../haptics.ts";
 import {
   OPACITY_DEFAULT,
   OPACITY_MAX,
   OPACITY_MIN,
+  OPACITY_STEPS,
   PREVIEW_SAMPLE,
-  clampOpacity,
   opacityAt,
   settledReleased,
   shownOpacity,
+  snapOpacity,
   stepOpacity,
 } from "../hub-opacity.ts";
 import { DENSE_FONT_SCALE, type Palette, shadow, space, typography } from "../theme.ts";
@@ -29,6 +35,8 @@ import { BandSection } from "./BandSection.tsx";
 const PREVIEW_SIZE = 54;
 const TRACK_HEIGHT = 22;
 const THUMB = 22;
+/** A step's mark on the rail. */
+const DETENT = 6;
 
 export interface HubOpacityBandProps {
   readonly palette: Palette;
@@ -46,7 +54,7 @@ export function HubOpacityBand({
   writable,
   onChange,
 }: HubOpacityBandProps): JSX.Element {
-  const value = clampOpacity(opacity ?? OPACITY_DEFAULT);
+  const value = snapOpacity(opacity ?? OPACITY_DEFAULT);
   // The finger's own value while it drags, AND the value it released afterwards:
   // the label and the preview follow it, the record does not (one write, on
   // release). It is NOT cleared at release — the write is one async Keychain
@@ -68,6 +76,10 @@ export function HubOpacityBand({
     setDragging(settled);
   }
   const shown = shownOpacity(dragging, value);
+  // What the slider showed as of the last render: a grant's haptic compares
+  // against it (the held released value included), not against the record.
+  const shownNow = useRef(shown);
+  shownNow.current = shown;
   const width = useRef(0);
   const ratio = (shown - OPACITY_MIN) / (OPACITY_MAX - OPACITY_MIN);
   const canDrag = useRef(writable);
@@ -88,9 +100,10 @@ export function HubOpacityBand({
     onChange,
   });
 
-  /** The finger's value at this move: the label and the preview, no write. */
+  /** The finger's value at this move: the label, the preview and a step's tick; no write. */
   const dragTo = (x: number) => {
     const next = latest.current.at(x);
+    playHaptic(opacityStepHaptic(dragged.current ?? shownNow.current, next));
     dragged.current = next;
     setDragging(next);
   };
@@ -138,7 +151,7 @@ export function HubOpacityBand({
       onPanResponderTerminate: () => latest.current.commit(),
     }),
   ).current;
-  // VoiceOver's `adjustable`: one 5 % step per increment / decrement. It drops any
+  // VoiceOver's `adjustable`: one 20 % step per increment / decrement. It drops any
   // held released value first: a step is authoritative, so `shown` must follow the
   // record again as soon as this step's write lands.
   const onAccessibilityAction = (event: AccessibilityActionEvent) => {
@@ -196,6 +209,21 @@ export function HubOpacityBand({
             pointerEvents="none"
             style={[styles.rail, { backgroundColor: palette.switchOff }]}
           />
+          {/* The five steps' marks: the thumb can rest on these only. */}
+          {OPACITY_STEPS.map((step) => (
+            <View
+              key={step}
+              testID={`hub-opacity-detent-${step}`}
+              pointerEvents="none"
+              style={[
+                styles.detent,
+                {
+                  backgroundColor: step <= shown ? palette.accentFill : palette.switchOff,
+                  left: `${Math.round(((step - OPACITY_MIN) / (OPACITY_MAX - OPACITY_MIN)) * 100)}%`,
+                },
+              ]}
+            />
+          ))}
           <View
             pointerEvents="none"
             style={[
@@ -274,6 +302,13 @@ const styles = StyleSheet.create({
   disabled: { opacity: 0.4 },
   rail: { position: "absolute", left: 0, right: 0, height: 2, borderRadius: 1 },
   fill: { position: "absolute", left: 0, height: 2, borderRadius: 1 },
+  detent: {
+    position: "absolute",
+    width: DETENT,
+    height: DETENT,
+    borderRadius: DETENT / 2,
+    marginLeft: -DETENT / 2,
+  },
   thumb: {
     position: "absolute",
     width: THUMB,

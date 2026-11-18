@@ -37,6 +37,13 @@ export interface PendingBubblesProps {
   readonly palette: Palette;
   /** Whether a bubble can be acted on right now (link, turn, unqueue, send-now). */
   readonly ctx: BubbleContext;
+  /**
+   * The screen edge's clearance (`floating-button.ts` `footClearance`): the
+   * column the floating hub occupies, on BOTH edges because the button can rest
+   * at either one. A pending action under the fan is a tap that opens Activity
+   * instead of cancelling the message (QA bug 1).
+   */
+  readonly clearance: number;
   readonly onAction: (id: string, action: BubbleAction) => void;
 }
 
@@ -73,6 +80,7 @@ function BubbleView({
   bubble,
   palette,
   ctx,
+  clearance,
   open,
   onToggle,
   onAction,
@@ -80,6 +88,7 @@ function BubbleView({
   readonly bubble: Bubble;
   readonly palette: Palette;
   readonly ctx: BubbleContext;
+  readonly clearance: number;
   readonly open: boolean;
   onToggle: () => void;
   readonly onAction: (action: BubbleAction) => void;
@@ -88,7 +97,7 @@ function BubbleView({
   const testID = `pending-${bubble.id}-${bubble.mine ? "mine" : "other"}`;
   const face = <BubbleBody bubble={bubble} palette={palette} />;
   return (
-    <View style={styles.row}>
+    <View style={[styles.row, { paddingHorizontal: clearance }]}>
       {actions.length === 0 ? (
         // Another writer's words (or one already in flight): shown, never acted
         // on (owner Q3) — and still observable, which is what a flow asserts.
@@ -141,6 +150,7 @@ export function PendingBubbles({
   bubbles,
   palette,
   ctx,
+  clearance,
   onAction,
 }: PendingBubblesProps): JSX.Element | null {
   const [open, setOpen] = useState<string | null>(null);
@@ -155,6 +165,7 @@ export function PendingBubbles({
           bubble={bubble}
           palette={palette}
           ctx={ctx}
+          clearance={clearance}
           open={open === bubble.id}
           onToggle={() => setOpen((current) => (current === bubble.id ? null : bubble.id))}
           onAction={(action) => {
@@ -170,7 +181,8 @@ export function PendingBubbles({
 const styles = StyleSheet.create({
   stack: { gap: 6, paddingTop: 6 },
   row: { alignItems: "flex-end", gap: 4 },
-  // The bubble keeps the user bubble's own width rule (the tap target is it).
+  // The bubble keeps the user bubble's own width rule (the tap target is it) —
+  // 77 % of what the hub clearance leaves, because `styles.row` owns the padding.
   rowInner: { maxWidth: "77%", alignSelf: "flex-end" },
   bubble: {
     borderRadius: radius.bubble,
@@ -181,5 +193,5 @@ const styles = StyleSheet.create({
     opacity: 0.72,
   },
   footnote: { flexDirection: "row", alignItems: "center", gap: 4 },
-  menu: { flexDirection: "row", gap: 18, paddingRight: 6, paddingBottom: 2 },
+  menu: { flexDirection: "row", flexWrap: "wrap", gap: 18, paddingRight: 6, paddingBottom: 2 },
 });

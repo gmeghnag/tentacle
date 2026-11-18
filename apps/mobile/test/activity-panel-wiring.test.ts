@@ -39,6 +39,18 @@ describe("the sheet is a JS bottom sheet, not a native page sheet (Design 2)", (
     expect(SHEET).toContain("useRef(new Animated.Value(0))");
   });
 
+  test("the DRAWN height never goes below 0, with the spring the pure test simulates", () => {
+    // docs/fix/mobile-activity-sheet-reclose.md: the close's spring undershoots
+    // 0 and a negative height lays the sheet out at its content height, so it
+    // closed, re-opened and closed. `activity-sheet-close.test.ts` computes the
+    // drawn frames from `PANEL_SPRING` + `PANEL_HEIGHT`: these are the ones used.
+    expect(SHEET).toContain("height.interpolate(PANEL_HEIGHT)");
+    expect(SHEET).toContain("{ height: drawn,");
+    expect(SHEET).not.toMatch(/\{ height, /);
+    expect(SHEET).toContain("...PANEL_SPRING");
+    expect(SHEET).not.toMatch(/damping: \d/);
+  });
+
   test("Reduce Motion is honoured by the motion itself", () => {
     expect(SHEET).toContain("reduceMotion");
     expect(SHEET).toContain("Animated.timing(");

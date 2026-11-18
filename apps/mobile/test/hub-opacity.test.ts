@@ -4,24 +4,28 @@
  * applies (AGENTS §7).
  *
  * The rules, all from the owner's decision (mockup variant B):
- *  - at rest the body is the setting; the floor is 30 %, so it is never invisible;
+ *  - at rest the body is the setting; the floor is 20 %, so it is never invisible;
+ *    the setting is one of five steps, 20 · 40 · 60 · 80 · 100
+ *    (docs/feat/mobile-hub-defaults.md);
  *  - it is solid (1) while it is touched (press, drag, fan) and while the fan is
  *    open, and while iOS Reduce Transparency is on;
  *  - the running-turn arc is ALWAYS solid — below 75 % it gets thicker (2 → 3 pt)
  *    and gains a page-coloured halo, so it stays readable over a faint body.
  */
 import { describe, expect, test } from "bun:test";
+import { opacityStepHaptic } from "../src/haptic-rules.ts";
 import { hubActions } from "../src/hub-actions.ts";
 import { type GestureEvent, type GestureState, reduce } from "../src/hub-gesture.ts";
 import {
   OPACITY_DEFAULT,
   OPACITY_MAX,
   OPACITY_MIN,
-  clampOpacity,
+  OPACITY_STEPS,
   hubOpacity,
   opacityAt,
   settledReleased,
   shownOpacity,
+  snapOpacity,
   stepOpacity,
 } from "../src/hub-opacity.ts";
 import { hubContextOf, solveHub } from "../src/hub-session.ts";
@@ -37,25 +41,27 @@ const at = (setting: number | undefined) =>
 
 describe("rest: the body is the setting", () => {
   test("the setting, as a fraction", () => {
-    expect(at(55).body).toBeCloseTo(0.55, 5);
-    expect(at(OPACITY_MIN).body).toBeCloseTo(0.3, 5);
+    expect(at(60).body).toBeCloseTo(0.6, 5);
+    expect(at(OPACITY_MIN).body).toBeCloseTo(0.2, 5);
     expect(at(OPACITY_MAX).body).toBe(1);
   });
 
-  test("absent means the default, 100 % (today's look)", () => {
+  test("absent in a STORED record means 100 % (the look it had before the slider)", () => {
     expect(OPACITY_DEFAULT).toBe(100);
     expect(at(undefined).body).toBe(1);
   });
 
-  test("the value is clamped at render too, not only at write", () => {
-    expect(at(0).body).toBeCloseTo(0.3, 5);
+  test("the value is snapped at render too, not only at read", () => {
+    expect(at(0).body).toBeCloseTo(0.2, 5);
+    expect(at(35).body).toBeCloseTo(0.4, 5);
     expect(at(1000).body).toBe(1);
   });
 });
 
 describe("the slider's shown value: the finger's while it drags, the released one until the record catches up", () => {
   test("no gesture → the stored value", () => {
-    expect(shownOpacity(null, 55)).toBe(55);
+    expect(shownOpacity(null, 60)).toBe(60);
+    expect(shownOpacity(null, 35)).toBe(40);
     expect(shownOpacity(null, undefined)).toBe(OPACITY_DEFAULT);
     expect(shownOpacity(null, 0)).toBe(OPACITY_MIN);
     expect(shownOpacity(null, 1000)).toBe(OPACITY_MAX);
@@ -63,36 +69,36 @@ describe("the slider's shown value: the finger's while it drags, the released on
   });
 
   test("a live drag wins over the stored value", () => {
-    expect(shownOpacity(42, 90)).toBe(42);
+    expect(shownOpacity(40, 100)).toBe(40);
   });
 
   test("a JUST-RELEASED value wins over a stored one that has not caught up yet", () => {
     // Review round 4, finding 2: the write is one async Keychain round-trip, and
     // the store publishes only after it. Passing `null` here (the round 4 code)
     // showed the OLD stored number for that whole round-trip and then jumped.
-    expect(shownOpacity(45, 90)).toBe(45);
+    expect(shownOpacity(40, 100)).toBe(40);
     // It is the same value, not a re-derivation: a stored change mid-flight
     // (another surface) does not yank the label away from the finger's pick.
-    expect(shownOpacity(45, 30)).toBe(45);
+    expect(shownOpacity(40, 20)).toBe(40);
   });
 
   test("the release settles: once the record holds it, `null` follows the stored value again", () => {
     // The caller drops the held value when `stored === released` (`settledReleased`);
     // then a VoiceOver step after a drag moves again instead of re-writing the same
     // number.
-    const storedAfterDrag = 45;
-    expect(stepOpacity(shownOpacity(null, storedAfterDrag), 1)).toBe(50);
-    expect(stepOpacity(shownOpacity(null, storedAfterDrag), -1)).toBe(40);
+    const storedAfterDrag = 40;
+    expect(stepOpacity(shownOpacity(null, storedAfterDrag), 1)).toBe(60);
+    expect(stepOpacity(shownOpacity(null, storedAfterDrag), -1)).toBe(20);
     // ...and a later change to the stored value is visible again.
-    expect(shownOpacity(null, 70)).toBe(70);
+    expect(shownOpacity(null, 80)).toBe(80);
   });
 
   test("a failed write still settles: it publishes the pick (F22), so the held value matches", () => {
-    expect(shownOpacity(45, 45)).toBe(45);
-    expect(shownOpacity(45, 45)).toBe(shownOpacity(null, 45));
+    expect(shownOpacity(40, 40)).toBe(40);
+    expect(shownOpacity(40, 40)).toBe(shownOpacity(null, 40));
   });
 
-  test("a held value is clamped like a stored one (never a raw number on the label)", () => {
+  test("a held value is snapped like a stored one (never a raw number on the label)", () => {
     expect(shownOpacity(1000, 50)).toBe(OPACITY_MAX);
     expect(shownOpacity(0, 50)).toBe(OPACITY_MIN);
   });
@@ -100,38 +106,38 @@ describe("the slider's shown value: the finger's while it drags, the released on
 
 describe("when the hold ends: `settledReleased` keeps the released value until the record catches up", () => {
   test("the Keychain round-trip keeps it (the round 4 bug: it was dropped here)", () => {
-    // Released 45, the record still says 90 for the length of the write.
-    expect(settledReleased(45, 90)).toBe(45);
+    // Released 40, the record still says 100 for the length of the write.
+    expect(settledReleased(40, 100)).toBe(40);
     // Mid-flight stored changes from another surface do not settle it either.
-    expect(settledReleased(45, 30)).toBe(45);
-    expect(settledReleased(45, undefined)).toBe(45);
+    expect(settledReleased(40, 20)).toBe(40);
+    expect(settledReleased(40, undefined)).toBe(40);
   });
 
   test("the record catching up ends it — success or a failed write (both publish, F22)", () => {
-    expect(settledReleased(45, 45)).toBeNull();
-    // The stored record is clamped on read, so a raw one still settles.
-    expect(settledReleased(45, 45.4)).toBeNull();
+    expect(settledReleased(40, 40)).toBeNull();
+    // The stored record is snapped on read, so a raw off-step one still settles.
+    expect(settledReleased(40, 35)).toBeNull();
   });
 
   test("nothing held stays nothing held", () => {
-    expect(settledReleased(null, 70)).toBeNull();
+    expect(settledReleased(null, 80)).toBeNull();
     expect(settledReleased(null, undefined)).toBeNull();
   });
 
   test("the settled value is what `shownOpacity` then reads from the record", () => {
-    const stored = 45;
-    expect(shownOpacity(settledReleased(45, stored), stored)).toBe(stored);
+    const stored = 40;
+    expect(shownOpacity(settledReleased(40, stored), stored)).toBe(stored);
     // ...and while it is NOT settled, the released value is what shows.
-    expect(shownOpacity(settledReleased(45, 90), 90)).toBe(45);
+    expect(shownOpacity(settledReleased(40, 100), 100)).toBe(40);
   });
 });
 
 describe("engaged: solid while it is touched or the fan is up", () => {
   for (const gesture of ["pressing", "dragging", "fanTracking", "fanSticky"] as const) {
     test(`${gesture} → 1`, () => {
-      expect(at(30).body).toBeCloseTo(0.3, 5);
+      expect(at(20).body).toBeCloseTo(0.2, 5);
       expect(
-        hubOpacity({ setting: 30, gesture, fanOpen: false, reduceTransparency: false }).body,
+        hubOpacity({ setting: 20, gesture, fanOpen: false, reduceTransparency: false }).body,
       ).toBe(1);
     });
   }
@@ -147,19 +153,20 @@ describe("engaged: solid while it is touched or the fan is up", () => {
 
   test("fan open → 1, and closing it returns to the setting", () => {
     const open = hubOpacity({
-      setting: 30,
+      setting: 80,
       gesture: "idle",
       fanOpen: true,
       reduceTransparency: false,
     });
+    // The fan is solid at any step, the new 80 % default included (owner 2026-11-18).
     expect(open.body).toBe(1);
-    expect(at(30).body).toBeCloseTo(0.3, 5);
+    expect(at(80).body).toBeCloseTo(0.8, 5);
   });
 
-  test("Reduce Transparency on → 1, even at the 30 % floor", () => {
+  test("Reduce Transparency on → 1, even at the 20 % floor", () => {
     expect(
       hubOpacity({
-        setting: 30,
+        setting: 20,
         gesture: "idle",
         fanOpen: false,
         reduceTransparency: true,
@@ -169,9 +176,9 @@ describe("engaged: solid while it is touched or the fan is up", () => {
 });
 
 describe("the arc: always solid, thicker with a halo below 75 %", () => {
-  test("74 / 75 / 100", () => {
-    expect(at(74).arc).toEqual({ width: 3, halo: true });
-    expect(at(75).arc).toEqual({ width: 2, halo: false });
+  test("60 / 80 / 100: the 80 % default keeps the plain arc", () => {
+    expect(at(60).arc).toEqual({ width: 3, halo: true });
+    expect(at(80).arc).toEqual({ width: 2, halo: false });
     expect(at(100).arc).toEqual({ width: 2, halo: false });
   });
 
@@ -181,7 +188,7 @@ describe("the arc: always solid, thicker with a halo below 75 %", () => {
 
   test("touching it (body 1) thins the arc back, so a solid button is never haloed", () => {
     expect(
-      hubOpacity({ setting: 30, gesture: "pressing", fanOpen: false, reduceTransparency: false })
+      hubOpacity({ setting: 20, gesture: "pressing", fanOpen: false, reduceTransparency: false })
         .arc,
     ).toEqual({ width: 2, halo: false });
   });
@@ -189,42 +196,77 @@ describe("the arc: always solid, thicker with a halo below 75 %", () => {
   test("the arc has no opacity of its own: it follows the outer fade only", () => {
     // The property the split into two layers exists for — the plan's
     // load-bearing assumption, pinned here so a component regression shows up.
-    expect(Object.keys(at(30))).toEqual(["body", "arc"]);
-    expect(at(30).arc).not.toHaveProperty("opacity");
+    expect(Object.keys(at(20))).toEqual(["body", "arc"]);
+    expect(at(20).arc).not.toHaveProperty("opacity");
   });
 });
 
-describe("clampOpacity: an integer inside [30, 100]", () => {
-  test("in range rounds", () => {
-    expect(clampOpacity(55.4)).toBe(55);
-    expect(clampOpacity(55.5)).toBe(56);
-    expect(clampOpacity(30)).toBe(30);
-    expect(clampOpacity(100)).toBe(100);
+describe("snapOpacity: the nearest of the five steps, a tie going UP", () => {
+  test("the steps are 20 · 40 · 60 · 80 · 100: the floor is 20", () => {
+    expect(OPACITY_STEPS).toEqual([20, 40, 60, 80, 100]);
+    expect(OPACITY_MIN).toBe(20);
+    expect(OPACITY_MAX).toBe(100);
+    for (const step of OPACITY_STEPS) {
+      expect(snapOpacity(step)).toBe(step);
+    }
+  });
+
+  test("an off-step value goes to the NEAREST step (the old continuous slider's records)", () => {
+    expect(snapOpacity(35)).toBe(40);
+    expect(snapOpacity(45)).toBe(40);
+    expect(snapOpacity(49.9)).toBe(40);
+    expect(snapOpacity(63)).toBe(60);
+    expect(snapOpacity(71)).toBe(80);
+    expect(snapOpacity(89)).toBe(80);
+    expect(snapOpacity(91)).toBe(100);
+  });
+
+  test("a tie goes UP: 30 → 40, 50 → 60, 70 → 80, 90 → 100, 10 → 20", () => {
+    expect(snapOpacity(30)).toBe(40);
+    expect(snapOpacity(50)).toBe(60);
+    expect(snapOpacity(70)).toBe(80);
+    expect(snapOpacity(90)).toBe(100);
+    expect(snapOpacity(10)).toBe(20);
   });
 
   test("0 and below → the floor; above the top → the top", () => {
-    expect(clampOpacity(0)).toBe(30);
-    expect(clampOpacity(-40)).toBe(30);
-    expect(clampOpacity(29.6)).toBe(30);
-    expect(clampOpacity(101)).toBe(100);
-    expect(clampOpacity(1e9)).toBe(100);
+    expect(snapOpacity(0)).toBe(20);
+    expect(snapOpacity(-40)).toBe(20);
+    expect(snapOpacity(29.9)).toBe(20);
+    expect(snapOpacity(101)).toBe(100);
+    expect(snapOpacity(1e9)).toBe(100);
   });
 
-  test("NaN → the floor (never an invisible button)", () => {
-    expect(clampOpacity(Number.NaN)).toBe(30);
-    expect(clampOpacity(Number.POSITIVE_INFINITY)).toBe(100);
-    expect(clampOpacity(Number.NEGATIVE_INFINITY)).toBe(30);
+  test("NaN → the floor (never an invisible button), ±Infinity → its end", () => {
+    expect(snapOpacity(Number.NaN)).toBe(20);
+    expect(snapOpacity(Number.POSITIVE_INFINITY)).toBe(100);
+    expect(snapOpacity(Number.NEGATIVE_INFINITY)).toBe(20);
   });
 });
 
-describe("opacityAt: the slider's track position → a percentage", () => {
+describe("opacityAt: the slider's track position → a step", () => {
   test("both ends", () => {
     expect(opacityAt(0, 200)).toBe(OPACITY_MIN);
     expect(opacityAt(200, 200)).toBe(OPACITY_MAX);
   });
 
-  test("the middle, and past either end (a drag can overshoot)", () => {
-    expect(opacityAt(100, 200)).toBe(65);
+  test("each step owns a band of the track around its mark (200 pt: a mark every 50 pt)", () => {
+    expect(opacityAt(24, 200)).toBe(20);
+    expect(opacityAt(25, 200)).toBe(40);
+    expect(opacityAt(50, 200)).toBe(40);
+    expect(opacityAt(100, 200)).toBe(60);
+    expect(opacityAt(150, 200)).toBe(80);
+    expect(opacityAt(174, 200)).toBe(80);
+    expect(opacityAt(175, 200)).toBe(100);
+  });
+
+  test("every value it returns is a step", () => {
+    for (let x = -20; x <= 220; x += 1) {
+      expect(OPACITY_STEPS).toContain(opacityAt(x, 200));
+    }
+  });
+
+  test("past either end (a drag can overshoot)", () => {
     expect(opacityAt(-30, 200)).toBe(OPACITY_MIN);
     expect(opacityAt(400, 200)).toBe(OPACITY_MAX);
   });
@@ -237,19 +279,49 @@ describe("opacityAt: the slider's track position → a percentage", () => {
 });
 
 describe("stepOpacity: VoiceOver's adjustable increment / decrement", () => {
-  test("±5", () => {
-    expect(stepOpacity(55, 1)).toBe(60);
-    expect(stepOpacity(55, -1)).toBe(50);
+  test("±20: one step", () => {
+    expect(stepOpacity(60, 1)).toBe(80);
+    expect(stepOpacity(60, -1)).toBe(40);
+  });
+
+  test("an off-step value snaps first, then steps", () => {
+    expect(stepOpacity(35, 1)).toBe(60);
+    expect(stepOpacity(35, -1)).toBe(20);
   });
 
   test("both bounds", () => {
     expect(stepOpacity(OPACITY_MIN, -1)).toBe(OPACITY_MIN);
     expect(stepOpacity(OPACITY_MAX, 1)).toBe(OPACITY_MAX);
-    expect(stepOpacity(OPACITY_MAX - 2, 1)).toBe(OPACITY_MAX);
   });
 
   test("a junk value steps from the floor, not from NaN", () => {
-    expect(stepOpacity(Number.NaN, 1)).toBe(35);
+    expect(stepOpacity(Number.NaN, 1)).toBe(40);
+  });
+});
+
+describe("opacityStepHaptic: a tick per step the drag lands on, silence inside one", () => {
+  test("another step → the selection tick (the light detent click)", () => {
+    expect(opacityStepHaptic(80, 60)).toBe("tick");
+    expect(opacityStepHaptic(20, 100)).toBe("tick");
+  });
+
+  test("the same step → nothing (moves inside its band are silent)", () => {
+    expect(opacityStepHaptic(60, 60)).toBeNull();
+    // A raw off-step record compares as its step: 35 IS 40, so landing on 40 is silent.
+    expect(opacityStepHaptic(35, 40)).toBeNull();
+  });
+
+  test("a drag across the whole track ticks four times, one per step crossed", () => {
+    let shown = 20;
+    let ticks = 0;
+    for (let x = 0; x <= 200; x += 1) {
+      const next = opacityAt(x, 200);
+      if (opacityStepHaptic(shown, next) !== null) {
+        ticks += 1;
+      }
+      shown = next;
+    }
+    expect(ticks).toBe(4);
   });
 });
 
@@ -337,7 +409,7 @@ describe("every close path lands in `idle` (so the body returns to the setting)"
   test("while engaged the level is 1, so a state that never resets fails SAFE (solid, not faint)", () => {
     for (const kind of ["pressing", "dragging", "fanTracking", "fanSticky"] as const) {
       expect(
-        hubOpacity({ setting: 30, gesture: kind, fanOpen: false, reduceTransparency: false }).body,
+        hubOpacity({ setting: 20, gesture: kind, fanOpen: false, reduceTransparency: false }).body,
       ).toBe(1);
     }
   });

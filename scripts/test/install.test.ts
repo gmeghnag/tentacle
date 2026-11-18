@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -137,5 +145,133 @@ describe("scripts/install.sh", () => {
     expect(r.code).toBe(0);
     expect(updateLog()).toBe("");
     expect(r.out).toContain("pod binaries skipped");
+  });
+});
+
+// The macOS voice helper (docs/feat/voice-release.md). `uname` is faked on PATH,
+// so the Darwin path runs on a Linux CI host too (every asset is a shell stub).
+describe("scripts/install.sh — the voice helper", () => {
+  const VOICE = "tentacle-voice-darwin";
+  const voiceStub = (runs = true) =>
+    runs
+      ? '#!/bin/sh\n[ "$1" = --version ] && echo "tentacle-voice protocol 1"\n'
+      : "#!/bin/sh\nexit 1\n"; // what dyld does on a Mac older than the helper's macOS 26
+
+  function fakeUname(os: string, arch: string): string {
+    const bin = join(dir, "fakebin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(
+      join(bin, "uname"),
+      `#!/bin/sh\ncase "$1" in -s) echo ${os} ;; -m) echo ${arch} ;; esac\n`,
+    );
+    chmodSync(join(bin, "uname"), 0o755);
+    return `${bin}:${process.env.PATH ?? ""}`;
+  }
+
+  /** A release for `target`, optionally with the helper (listed, and with a good or bad sum). */
+  function publishFor(
+    target: string,
+    voice: { body?: string; badSum?: boolean; listedOnly?: boolean } | null,
+  ): void {
+    const cli = stub("0.1.0", join(dir, "update.log"));
+    const name = `tentacle-${target}`;
+    assets[name] = cli;
+    let sums = `${sha(cli)}  ${name}\n`;
+    if (voice) {
+      const body = voice.body ?? voiceStub();
+      if (!voice.listedOnly) assets[VOICE] = body;
+      sums += `${voice.badSum ? sha("other") : sha(body)}  ${VOICE}\n`;
+    }
+    assets.SHA256SUMS = sums;
+  }
+
+  const helper = () => join(dir, "bin", "tentacle-voice");
+  const mac = () => ({ PATH: fakeUname("Darwin", "arm64"), TENTACLE_NO_POD_BINARIES: "1" });
+
+  test("on macOS the verified helper is installed next to tentacle, executable", async () => {
+    publishFor("bun-darwin-arm64", {});
+    const r = await install(mac());
+    expect(r.code).toBe(0);
+    expect(readFileSync(installed(), "utf8")).toBe(assets["tentacle-bun-darwin-arm64"] ?? "");
+    expect(readFileSync(helper(), "utf8")).toBe(assets[VOICE] ?? "");
+    expect(statSync(helper()).mode & 0o111).not.toBe(0);
+    expect(r.out).toContain(`✓ ${helper()}`);
+    expect(leftovers()).toEqual([]);
+  });
+
+  test("a release without the helper (older) installs the CLI and says so in one line", async () => {
+    publishFor("bun-darwin-arm64", null);
+    const r = await install(mac());
+    expect(r.code).toBe(0);
+    expect(existsSync(installed())).toBe(true);
+    expect(existsSync(helper())).toBe(false);
+    expect(hits).not.toContain(VOICE); // known absent from SHA256SUMS: not even requested
+    expect(r.out.split("\n").filter((l) => l.includes("voice helper"))).toHaveLength(1);
+  });
+
+  test("a helper checksum mismatch keeps the old helper, installs the CLI, exits 0", async () => {
+    publishFor("bun-darwin-arm64", { badSum: true });
+    mkdirSync(join(dir, "bin"), { recursive: true });
+    writeFileSync(helper(), "old helper");
+    const r = await install(mac());
+    expect(r.code).toBe(0);
+    expect(existsSync(installed())).toBe(true);
+    expect(readFileSync(helper(), "utf8")).toBe("old helper");
+    expect(r.out).toContain("checksum mismatch for tentacle-voice-darwin");
+    expect(leftovers()).toEqual([]);
+  });
+
+  test("a helper listed but not downloadable is skipped, not fatal", async () => {
+    publishFor("bun-darwin-arm64", { listedOnly: true });
+    const r = await install(mac());
+    expect(r.code).toBe(0);
+    expect(existsSync(installed())).toBe(true);
+    expect(existsSync(helper())).toBe(false);
+    expect(r.out).toContain("voice helper");
+    expect(leftovers()).toEqual([]);
+  });
+
+  test("a helper that does not run here (macOS older than 26) is not installed", async () => {
+    publishFor("bun-darwin-arm64", { body: voiceStub(false) });
+    const r = await install(mac());
+    expect(r.code).toBe(0);
+    expect(existsSync(installed())).toBe(true);
+    expect(existsSync(helper())).toBe(false);
+    expect(r.out).toContain("macOS 26");
+    expect(leftovers()).toEqual([]);
+  });
+
+  test("the helper is installed before the pod binaries, so their failure does not lose it", async () => {
+    publishFor("bun-darwin-arm64", {});
+    // The CLI stub fails `update`, as a network error fetching the pod binaries would.
+    const failing =
+      '#!/bin/sh\ncase "$1" in\n  --version) echo "tentacle 0.1.0" ;;\n  *) exit 1 ;;\nesac\n';
+    assets["tentacle-bun-darwin-arm64"] = failing;
+    assets.SHA256SUMS = `${sha(failing)}  tentacle-bun-darwin-arm64\n${sha(voiceStub())}  ${VOICE}\n`;
+    const r = await install({ PATH: fakeUname("Darwin", "arm64") });
+    expect(r.code).not.toBe(0);
+    expect(readFileSync(helper(), "utf8")).toBe(voiceStub());
+  });
+
+  test("the asset name is one truth: CI builds, uploads and requires the name install.sh fetches", () => {
+    const yml = readFileSync(resolve(import.meta.dir, "../../.github/workflows/build.yml"), "utf8");
+    const sh = readFileSync(SCRIPT, "utf8");
+    expect(sh).toContain(`asset=${VOICE}`);
+    expect(yml).toContain(`mv dist/tentacle-voice dist/${VOICE}`);
+    expect(yml).toMatch(new RegExp(`upload-artifact@v4\\s+with:\\s+name: ${VOICE}\\b`));
+    // The release job refuses to publish without it, and it lands in SHA256SUMS
+    // through the `tentacle-*` download pattern + `sha256sum tentacle-*`.
+    expect(yml).toMatch(new RegExp(`for f in [^;]*\\b${VOICE}\\b[^;]*; do`));
+    expect(yml).toContain("needs: [build, voice]");
+  });
+
+  test("on Linux the helper is never fetched, even when the release lists it", async () => {
+    publishFor("bun-linux-x64", {});
+    const r = await install({ PATH: fakeUname("Linux", "x86_64"), TENTACLE_NO_POD_BINARIES: "1" });
+    expect(r.code).toBe(0);
+    expect(existsSync(installed())).toBe(true);
+    expect(hits).not.toContain(VOICE);
+    expect(existsSync(helper())).toBe(false);
+    expect(r.out).not.toContain("voice helper");
   });
 });
