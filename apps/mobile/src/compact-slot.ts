@@ -64,15 +64,28 @@ export type CompactSettled =
   | { readonly ok: false; readonly error: unknown };
 
 /**
- * The link's loss, not the daemon's answer: a `"once"` call cut by a drop
- * (`DROPPED_NOT_RETRIED`, an `InternalError`), the peer closing, or anything
- * that is not an `RpcError` at all. Its outcome is UNKNOWN — never a `▲`.
+ * The link-loss messages the transport and client raise (`peer.ts` `"peer is
+ * closed"` / `"connection closed"` / `request … timed out`, `remote-client.ts`
+ * `DROPPED_NOT_RETRIED`). `InternalError` alone is NOT a link loss: the peer
+ * also answers it for any failure thrown inside the daemon's handler (a model
+ * error during the compaction), with the link up.
+ */
+const LINK_LOST = new Set([DROPPED_NOT_RETRIED, "connection closed", "peer is closed"]);
+const TIMED_OUT = /^request \S+ timed out$/;
+
+/**
+ * The link's loss, not the daemon's answer: a `"once"` call cut by a drop, the
+ * peer closing, a request timeout, or anything that is not an `RpcError` at all.
+ * Its outcome is UNKNOWN — never a `▲`. Any other `RpcError` is the daemon's.
  */
 export function isTransportLoss(error: unknown): boolean {
   if (!(error instanceof RpcError)) {
     return true;
   }
-  return error.code === JsonRpcErrorCode.InternalError || error.message === DROPPED_NOT_RETRIED;
+  return (
+    error.code === JsonRpcErrorCode.InternalError &&
+    (LINK_LOST.has(error.message) || TIMED_OUT.test(error.message))
+  );
 }
 
 function messageOf(error: unknown): string {

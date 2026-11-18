@@ -525,6 +525,29 @@ Tests: `apps/mobile/test` 3735 pass / 1 fail before the footer-regex update (`to
 
 Unverified: the footer slot's rendering on a device (no simulator; `CompactSlotNode` is presentation only, its decision is `slotView`'s and tested); the real client raising `history{compact}` for the phone's own compaction is the plan's cited assumption (TUI `useSessionLink.ts:332-338`), exercised here only through the fake handle. The sheet itself (C3) is not built: until it is, nothing on screen calls the new actions.
 
+### Fix round 1
+
+*— claude-opus-5-5 (executor), 2026-11-18* — fixes the Slice C2 fresh-context review (one MEDIUM).
+
+**Finding 1 (MEDIUM, daemon-side `InternalError` read as a dropped link) — FIXED.** `apps/mobile/src/compact-slot.ts` `isTransportLoss` no longer treats every `InternalError` as a link loss: only a non-`RpcError`, or an `InternalError` whose message is one the transport/client raises for a lost link — `DROPPED_NOT_RETRIED` (`remote-client.ts:305`/`:4240`), `"connection closed"` (`peer.ts:254`, `remote-client.ts:3096`/`:3344`), `"peer is closed"` (`peer.ts:148`), `request <method> timed out` (`peer.ts:166`, outcome unknown too). Any other `InternalError` — the peer's opaque `"internal error"` for a handler throw, a model failure the client maps (`remote-client.ts:4410`/`:4427`) — falls through to `▲ Compact failed: …` / `▲ Couldn't clear: …`, so `compactFailed` is set and the row reaches `failed` (Retry).
+
+Tests (red first: 2 fail on the old rule, then 33/0):
+- `compact-slot.test.ts` "a daemon-side failure (the peer's opaque InternalError) is a ▲, not a dropped link" — `"internal error"` and a model-endpoint message, for both `compactOutcome` and `clearOutcome`.
+- `compact-slot.test.ts` "every way the link itself is lost stays UNKNOWN" — `"peer is closed"` and a request timeout (green on both old and new code by design: it pins the boundary the narrowing must keep; its non-vacuity is the M2/M3 mutations).
+- `session-screen-commands.test.ts` "a daemon-side failure (opaque InternalError, link up) is ▲ with Retry" — the controller's notice line and `row("compact") = failed`.
+
+Mutations (each reverted; `rg MUTATION` empty afterwards):
+
+| mutation | red |
+|---|---|
+| any `InternalError` is a link loss again (`&&` → `\|\|`) | 2 (both daemon-side tests) |
+| drop the timeout rule | 1 ("every way the link itself is lost") |
+| drop `"peer is closed"` from the set | 1 (same) |
+
+Drift: the reviewer's list plus the request timeout (same unknown outcome). A link that the client gives up on (`remote-client.ts:3374`, `stopped` with a free-form reason) now reads `▲ Compact failed: <reason>` rather than the unknown line. Unverified: whether a call can still be in flight when that rejection reaches it (I expect the earlier drop to have rejected it with `DROPPED_NOT_RETRIED` first); to check, drive a `RemoteClient` link to `stopped` with a `session/compact` pending.
+
+Gate (narrow): `compact-slot`, `session-screen-commands`, `transcript-parity` 43 pass / 0 fail; `bunx biome check` on the 3 touched files clean; `tsc -p apps/mobile` clean. Full `bun run check` is the orchestrator's.
+
 ## Review
 
 ### Slice C1 — verification round (a second executor, same slice, no behaviour change)

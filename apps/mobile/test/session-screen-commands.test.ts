@@ -255,6 +255,17 @@ describe("Compact", () => {
     screen.dispose();
   });
 
+  test("a daemon-side failure (opaque InternalError, link up) is ▲ with Retry, not the unknown line", async () => {
+    const { screen, handle } = await harness(CHAT);
+    const run = screen.compact();
+    handle.settleCompact?.(new RpcError(JsonRpcErrorCode.InternalError, "internal error"));
+    await run;
+    const failed = "Compact failed: internal error";
+    expect(notices(screen.state().transcript.rows)).toEqual([`▲ ${failed}`]);
+    expect(row(screen, "compact")).toEqual({ kind: "failed", text: failed });
+    screen.dispose();
+  });
+
   test("refused locally while a turn runs, on a dead link, or twice at once", async () => {
     const { screen, handle } = await harness(CHAT);
     screen.link(false);

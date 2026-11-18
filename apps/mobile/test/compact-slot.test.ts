@@ -77,6 +77,32 @@ describe("compactOutcome — the line a settle leaves", () => {
       expect(compactOutcome({ ok: false, error })).toEqual({ text: COMPACT_LINK_DROPPED });
     }
   });
+  test("a daemon-side failure (the peer's opaque InternalError) is a ▲, not a dropped link", () => {
+    // peer.ts maps any non-RpcError thrown by a handler to InternalError "internal error";
+    // the client maps a model failure to an InternalError too — the link stayed up.
+    for (const error of [
+      new RpcError(JsonRpcErrorCode.InternalError, "internal error"),
+      new RpcError(JsonRpcErrorCode.InternalError, "the model endpoint answered 503"),
+    ]) {
+      expect(compactOutcome({ ok: false, error })).toEqual({
+        text: `Compact failed: ${error.message}`,
+        level: "warn",
+      });
+      expect(clearOutcome({ ok: false, error }, true)).toEqual({
+        text: `Couldn't clear: ${error.message}`,
+        level: "warn",
+      });
+    }
+  });
+  test("every way the link itself is lost stays UNKNOWN", () => {
+    for (const error of [
+      new RpcError(JsonRpcErrorCode.InternalError, "peer is closed"),
+      new RpcError(JsonRpcErrorCode.InternalError, "request session/compact timed out"),
+    ]) {
+      expect(compactOutcome({ ok: false, error })).toEqual({ text: COMPACT_LINK_DROPPED });
+      expect(clearOutcome({ ok: false, error }, true)).toEqual({ text: CLEAR_LINK_DROPPED });
+    }
+  });
 });
 
 describe("clearOutcome", () => {
