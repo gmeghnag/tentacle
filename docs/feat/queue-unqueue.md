@@ -386,3 +386,14 @@ the file passed 8/8 on a re-run, so it is flaky and unrelated.
 - **F2 fixed as reported** (`tui/src/queued.ts:188-193`): a second `removed` answer for a row no longer in `rows` writes nothing. Mutation turns the new test red; reverted, green. Tree byte-identical after both mutations (`git status` clean).
 - **R2-1 MEDIUM — regression from the F2 fix: the pulled-back text can be lost silently** (`tui/src/queued.ts:191`). The guard reads "row absent from local `rows`" as "a duplicate answer". But local rows are also cleared by the turn's end (`useTurnDriver.ts:763,767` `setRows(onTurnEnd)`). The daemon removes the row and publishes it synchronously, while the RPC answer waits on `persisted()` (`connection.ts` `unqueue`; on `serve` that is a disk write). If `turn_end` reaches the TUI in that window, the first and only answer finds no row and returns `text: null, notice: null`. The text is gone daemon-side (not in `returned`), never put back in the field, and nothing is shown. Round 1 code restored it. Fix: dedupe by in-flight id at the call site (a pending set in the key layer or App, so a second ↑ on the same id sends nothing), not by row presence. Pin it: an answer with the row already cleared still returns the text.
 - No other regression found in the diff. `bun run lint` clean · `bun run typecheck` clean · daemon + TUI queue tests 1445 pass / 0 fail (one earlier run of the same set showed 1 fail, 1 skip and could not be reproduced on two re-runs. It looks flaky and I could not attribute it to this diff).
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-18* (fresh context, same model family as before)
+
+**Verdict: PASS**
+
+- **R2-1 fixed** (`tui/src/queued.ts:187-191`): a `removed` answer gives the text back even when the turn's end already cleared the local rows. Mutation (row-presence guard reinstated) turns the new pure test red; reverted, green.
+- **F2 still fixed, now at the right layer** (`tui/src/App.tsx:2140-2157`): `pullingRef` allows one in-flight unqueue per id and is cleared on both the answer and the error. Mutation (drop the `pullingRef.has` check) turns the App test "↑ twice before the answer" red (2 unqueues, text twice); reverted, green. Tree byte-identical after both mutations.
+- No new HIGH/MEDIUM in the diff. Nit (not blocking): an unqueue that never settles keeps its id in `pullingRef`, so ↑ on that row does nothing until the next session. That needs a hung RPC, which the transport surfaces elsewhere anyway.
+- `bun run lint` clean · `bun run typecheck` clean · `packages/tui` + daemon `queued.test.ts` 2822 pass / 0 fail.
