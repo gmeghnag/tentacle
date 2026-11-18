@@ -1,0 +1,398 @@
+# feat/mobile-hub-commands — a "Commands" hub item (Compact, Clear, …), Session info under More, empty items dimmed with an in-place label
+
+> **Status:** implementation (plan written, awaiting owner approval — see *Owner questions*)
+> **Branch:** `feat/mobile-hub-commands`
+> **Size:** M (C1 S–M, C2 M, C3 S–M) · **Blast:** contained (mobile) + one additive optional parameter in `packages/client` (C2) — no protocol, persistence or TUI change · **Suited:** C1 + C3 DeepSeek exec; C2 Opus exec (RPC call paths, races); fresh-context Review of C2
+> **Changelog:** `changelog.d/mobile-hub-commands.added.md` — one bullet: the iPhone hub gains **Commands** (Compact with `Compacting…` → `Compacted ✓`, Clear with an inline confirm — the cleared chat is kept as an archived session —, Rename, Retry last prompt, Auto-accept); Session info moves under More; an empty Activity or Artifacts is dimmed and says so in place.
+
+## Context
+
+*— claude-opus-5-5, 2026-11-18*
+
+Owner 18/11 (TODO): replace `feat/mobile-harness-notices` S2's "Compact in the
+hub overflow" with a hub fan item **Commands** opening a small sheet of the
+session commands the protocol already has; move **Session info** under More;
+dim **Activity and Artifacts** when empty, a tap giving a light haptic and an
+inline label — never an empty sheet (owner standard).
+
+**Spec (binding):** owner-picked mockups,
+`.tentacle/mockups/mobile-hub-commands/index.html` + `README.md` "## CHOSEN"
+(18/11 ~14:20):
+- **Q1** glyph A — a bare `>_` (1.5 stroke, same weight as the plug/paperclip);
+  fan order **O1**: Attach · Activity · Artifacts · Tools · Commands · More; More
+  = Sessions · **Session info** · Scheduled · Dictate · New session.
+- **Q2** A — a **list** sheet: one-line explanation per command, live state
+  inside the row; Clear confirms **inline** (the row opens into Cancel / Clear);
+  Compact runs `Compacting…` + Stop, then `Compacted ✓ ctx A → B`, or
+  `▲ Couldn't compact` + Retry; while it runs, the turn-bound rows dim and say why.
+  Model & effort is **needs backend** (out).
+- **Q3** A in place — the tapped empty item's OWN label becomes "Nothing
+  running" / "No artifacts yet" for ~1.6 s + a light haptic.
+
+**What is there today** (verified 2026-11-18):
+- Fan composition: `apps/mobile/src/hub-actions.ts:116-126` (`CANONICAL`, Session
+  info 4th), `FAN_MAX = 6` (`:88`), overflow `:225-229`. No `commands` id (`:12-23`).
+- Only Activity and Tools dim (`dimmedBecause`, `:195-203`); Artifacts never does.
+- A dimmed commit is a `noop` with a notice (`resolveCommit` `:277-281`) shown in
+  the hub notice line (`screens/SessionScreen.tsx:1007`, `:1487`), and the
+  gesture machine **closes the fan** on it (`hub-gesture.ts:159-171`: `light`
+  haptic, `commit`, `close`) — so an in-place label has nowhere to show.
+- `itemA11yLabel` says "nothing running" for ANY dimmed item, Tools included
+  (`hub-actions.ts:401-404`) — wrong for Tools today, and for Artifacts once dimmed.
+- The phone cannot compact or clear: no caller of `RemoteSession.compact()` /
+  `clear()` in `apps/mobile/src` (grep), and `SendableHandle` declares neither
+  (`session-screen-controller.ts:180-229`).
+
+**Repro** (2026-11-18, `.tentacle/tmp/mobile-hub-commands/repro.ts`, run with
+`bun <abs path>/repro.ts` from the worktree):
+
+```ts
+// Repro: today's hub — no Commands item, Session info in the fan, an empty Artifacts NOT dimmed,
+// and a dimmed commit CLOSES the fan (so no in-place label can show).
+import { hubActions, resolveCommit, hubOpen } from "../../worktrees/mobile-hub-commands/apps/mobile/src/hub-actions.ts";
+import { reduce } from "../../worktrees/mobile-hub-commands/apps/mobile/src/hub-gesture.ts";
+import { fanLayout } from "../../worktrees/mobile-hub-commands/apps/mobile/src/hub-fan.ts";
+
+const noop = () => {};
+const entries = Object.fromEntries(
+  ["stop", "steer", "attach", "activity", "artifacts", "sessions", "info", "tools", "scheduled", "dictate", "new"].map((k) => [k, noop]),
+);
+const ctx = {
+  link: "up" as const, turn: null, ended: null, editable: true, dictation: true, schedules: 0,
+  nextWakeInMs: null, unseenArtifacts: 0, activityEmpty: true, toolsEmpty: false, toolsRim: null,
+};
+const hub = hubActions(ctx, entries);
+console.log("fan :", hub.fan.map((i) => `${i.id}${i.dimmed ? "(dim)" : ""}`).join(" · "));
+console.log("more:", hub.more.map((i) => i.id).join(" · "));
+console.log("commit activity:", JSON.stringify(resolveCommit("activity", ctx, entries, hubOpen(ctx))));
+const layout = fanLayout({
+  anchor: { x: 350, y: 700 },
+  edge: "right" as never,
+  bounds: { left: 0, top: 0, right: 393, bottom: 852 } as never,
+  n: hub.fan.length,
+});
+const menu = { layout, ids: hub.fan.map((i) => i.id), dimmed: ["activity"] };
+const at = layout.kind === "fan" ? layout.items[1] : undefined;
+if (at) {
+  const step = reduce({ kind: "fanSticky", menu }, { type: "tapOverlay", p: { x: at.x, y: at.y } }, () => menu);
+  console.log("sticky tap on dimmed activity -> state:", step.state.kind, "effects:", JSON.stringify(step.effects));
+}
+```
+
+Output:
+
+```
+fan : attach · activity(dim) · artifacts · info · tools · more
+more: sessions · dictate · new
+commit activity: {"kind":"noop","notice":"Nothing running"}
+sticky tap on dimmed activity -> state: idle effects: [{"kind":"haptic","cue":"light"},{"kind":"commit","id":"activity"},{"kind":"close"}]
+```
+
+No Commands; Session info in the fan; the empty artifact list (`unseenArtifacts:
+0`, nothing presented) does not dim Artifacts; a dimmed tap closes the fan.
+
+## Implementation
+
+*— claude-opus-5-5, 2026-11-18*
+
+Three slices, one branch, in this order. Executes **after**
+`feat/mobile-thinking-images` (C2 draws in the Thinking footer slot it rewrites)
+and **after `feat/mobile-harness-notices` S1** merges (C2 folds its `▲`/`◇`
+outcome lines through S1's `NoticeRow.level`). This task **absorbs
+mobile-harness-notices S2** (its Design items 5, 6, 7, 9; item 8 "Compact in the
+overflow" is replaced by the Commands sheet) — Owner question 1.
+
+### Load-bearing assumption
+
+**The daemon behind the phone already does everything the commands need — the
+phone only calls and renders.** Proof:
+- Every method exists: `session/compact`, `session/clear`, `session/rename`,
+  `session/set_auto_accept`, `session/cancel` (`packages/protocol/src/methods.ts:121-136`, `:232`).
+- `/clear` keeps the dropped chat as a NEW archived session **daemon-side** on a
+  `serve` daemon: `HostedSession.clear()` captures the chat before the barrier
+  and hands it to `keepFork` (`packages/daemon/src/hosted-session.ts:3844-3892`),
+  wired only when a persister exists (`session-host.ts:1565-1569`, `keepFork`
+  `:1302`). The phone reaches only `serve` sessions (TODO
+  `eval/container-sessions-mobile`: "today NO: the phone sees only `serve`
+  sessions"), and `serve` is the daemon with a persister (AGENTS §7
+  persistence) — so the phone's Clear has the TUI's semantics with no client fork.
+- Compaction and clear both refuse while a turn runs (`assertIdle`,
+  `hosted-session.ts:3781`, `:3845`; codes `TurnInProgress` / `CompactInProgress`
+  `:3087-3090`), and a cancel during a compaction rejects it `Cancelled` with the
+  history untouched (`:3810-3814`).
+- The client raises `history{reason:"compact"|"clear"}` for every replacement,
+  own included (mobile-harness-notices load-bearing assumption, TUI
+  `useSessionLink.ts:332-338`); the phone folds `clear` as a replacement
+  (`session-feed.ts:298-312`) and draws a compaction's separator from `compact`
+  (`transcript.ts:365-372`). So no command draws its own transcript row except
+  the outcome line.
+
+The executor re-checks the `clear` point empirically first: a controller test
+whose fake `clear()` raises `history{clear, messages: [system]}` before resolving
+must leave an empty transcript + the one `◇` line (C2 Tests).
+
+### Preconditions
+
+- Client methods: `RemoteSession.clear()` (`packages/client/src/remote-session.ts:1217-1224`),
+  `compact()` (`:1260-1266`), `rename()` (`:755`); `RemoteClient.cancel(sessionId,
+  turnId?)` (`remote-client.ts:3033`). `compact`/`clear` are sent `"once"` — never
+  re-sent after a drop (`remote-client.ts:2995-3006`).
+- `RemoteSession.compact()` takes **no** `AbortSignal` today, unlike the TUI's
+  in-process port (`packages/tui/src/app-types.ts:128` `compact?(signal?)`) — the
+  one client change (C2, additive).
+- The phone already renames (`controller.beginRename`, header title tap,
+  `SessionScreen.tsx:1085`; `session-screen-controller.ts:1804`) and flips
+  auto-accept (`controller.setAutoAccept`, Session info, `SessionScreen.tsx:1682`):
+  the sheet REUSES both, no second path.
+- The phone never ends a session: "no `session/close` is ever sent (decision 4,
+  Hazard 3)" (`apps/mobile/src/connection.ts:132-137`) — why End & archive stays
+  out (Owner question 4).
+- TUI `/retry` = re-send the last prompt's TEXT (images not re-sent, said so)
+  (`packages/tui/src/commands/retry.ts`, `commands.ts:117-130`, `App.tsx:340`);
+  waits for an idle turn (`commands.ts:181-184`).
+- Fan mechanics: the label pill is placed per highlighted index
+  (`hub-fan.ts:244` `labelPlacement`); a dimmed id is already carried in the
+  menu snapshot (`hub-gesture.ts:52-57`) and `light` is already a cue (`:49`).
+- §7 "logic in pure modules": composition, empty state, command availability,
+  the Clear confirm and the compaction slot are pure, tested modules; the
+  `.tsx` only renders their view-models.
+
+### Design
+
+**C1 — the fan (contained, S–M)**
+
+1. `hub-actions.ts`: new `HubEntryId` `"commands"` (label `Commands`).
+   `CANONICAL` becomes `attach, activity, artifacts, tools, commands, sessions,
+   info, scheduled, dictate, new`. With `FAN_MAX = 6` the idle fan is exactly O1
+   (5 + More) and More starts Sessions · Session info; during a turn Stop · Steer
+   push Tools and Commands into More (README Q1, accepted there). Badge promotion
+   unchanged.
+2. `holds("commands")` = `ctx.ended === null` (an ended session has nothing to
+   run; Rename stays reachable from the title).
+3. `HubContext.artifactsEmpty` (`state.artifacts.list` known and of length 0 —
+   UNKNOWN is never empty, the Tools rule D3) computed in `hub-session.ts`
+   `hubContextOf`. `dimmedBecause("artifacts")` → `NO_ARTIFACTS = "No artifacts yet"`.
+4. `HubItem.emptyLabel: string | null` = `dimmedBecause(...)` (replaces reading
+   `dimmed` alone); `dimmed` stays `emptyLabel !== null`. `itemA11yLabel` speaks
+   `${label}, ${emptyLabel}` — fixes the Tools "nothing running" misread.
+5. `hub-gesture.ts`: a commit on a **dimmed** id no longer commits or closes.
+   It returns `{ state: fanSticky(menu, flash: { index, at: t }), effects: [haptic
+   light, { kind: "flash", index }] }` — from `fanSticky` and from
+   `fanTracking` (a slide-release on a dimmed item turns the fan sticky). A
+   second dimmed tap restarts the flash; any other tap behaves as today.
+   `FLASH_MS = 1600`.
+6. New pure `hub-flash.ts`: `pillText(item, flash, now)` → the item's
+   `emptyLabel` while `now - flash.at < FLASH_MS` (exclusive), else `label`; and
+   `pillVisible(index, highlighted, flash, now)` (the pill shows for the
+   highlighted OR the flashing item).
+7. `ui/FloatingActivity.tsx` (render only): the `>_` glyph (two strokes, 1.5
+   width, the plug/paperclip's viewbox); dimmed look = dashed hairline + glyph at
+   38 % + grey label (README Q3, no hue); the pill text from `pillText`, one
+   timer of `FLASH_MS` to re-render back; the `flash` effect plays nothing else.
+8. `SessionScreen.tsx`: `commands: openCommands` in `hubEntries`. A dimmed
+   commit reaching `commitHub` now comes only from the **menu/VoiceOver**
+   fallback (layout `menu`, `hub-gesture.ts:149-151`) — it keeps today's notice
+   line there (no fan, no pill). Tools' dimmed `pullTools()` (`:1016-1018`) moves
+   to the flash path (the screen gets the flashed id from the effect).
+
+**C2 — the commands engine (contained + 1 client param, M) — ex-harness-notices S2**
+
+9. `packages/client/src/remote-session.ts`: `compact(signal?: AbortSignal)` —
+   on abort, `this.client.cancel(id)` with no `turnId` ("whatever runs, a
+   compaction included", `protocol/src/session.ts:495-503`). Mirrors the TUI port
+   (`app-types.ts:128`). Additive, no wire change, no `protocol.d/` note.
+10. `apps/mobile/src/compact-slot.ts` (new, = harness-notices Design 5):
+    `slotView` (a running turn > my compaction `Compacting…` > `Compacted ✓` for
+    `COMPACTED_SHOWN_MS = 3000`, exclusive > nothing) and
+    `compactOutcome(result | error)` (success → no line, the separator says it;
+    `Cancelled` → `◇ compaction cancelled`; domain refusal → `▲ Compact failed:
+    <message>`, `CompactInProgress` worded "another device is compacting"; a
+    transport loss → `◇ the link dropped during the compaction — the history
+    after reconnect shows whether it ran`). Strings mirrored from
+    `packages/tui/src/send-now.ts:146-170`, pinned by the parity test
+    (harness-notices Q4).
+11. `apps/mobile/src/session-commands.ts` (new, pure): the sheet's view-model.
+    `commandRows(ctx) → CommandRow[]`, `CommandRow = { id: "compact" | "clear" |
+    "rename" | "retry" | "autoAccept"; label; explain; state }`, `state` one of
+    `ready` · `dimmed(reason)` · `confirming` (Clear) · `running` (Compact,
+    Clear) · `done(text)` · `failed(text)` · `toggle(on)` (Auto-accept). Inputs:
+    link, turn, ended, slot view, `confirmClear: boolean`, last user prompt (for
+    Retry), auto-accept value. Rules: Compact/Clear/Retry dimmed "Waits for the
+    turn to end" while a turn runs, "Not connected" on a dead link, and all three
+    dimmed "Compacting…" while compacting; Retry dimmed "Nothing to retry" with
+    no earlier prompt; Rename and Auto-accept never turn-bound. Plus
+    `clearConfirm(state, event)` (arm / cancel / confirm; disarmed by a turn
+    start or a link drop).
+12. `transcript.ts`: `{ type: "local_notice"; text; level? }` → `pushNotice`
+    (harness-notices Design 6) — the compaction outcome and Clear's
+    `◇ chat cleared — the earlier chat is kept as an archived session` (only when
+    the result's `before > after`; a no-op clear says `◇ nothing to clear`).
+13. `session-screen-controller.ts`: `SendableHandle` gains optional
+    `compact?(signal?)` and `clear?()` (a missing one → the row is absent, P6).
+    Actions: `compact()` (refuses unless link up, idle, not compacting; holds one
+    `AbortController`; folds `compactOutcome`; `compactedAt` + ONE 3 s timer),
+    `cancelCompaction()`, `clear()` (same guards; folds the clear line on
+    resolve; `onHistoryReplaced` already resets the context figure,
+    `session-feed.ts:310-312`), `retryLast()` (the last user row's text through
+    the composer's OWN send path — outbox, queue, refusal handling unchanged;
+    photos not re-sent, a `◇ the photos were not re-sent` line when it had some,
+    TUI parity). State exposes `slot` and `commands` (from `commandRows`).
+14. `hub-actions.ts`: `stop` also holds while the phone compacts and runs
+    `cancelCompaction()` (harness-notices Q7). `HubContext.compacting`.
+15. Footer: the slot (`Compacting…` with elapsed seconds in the Thinking node's
+    place, the thinking-images shimmer/static fallback; `Compacted ✓` static) —
+    harness-notices Design 9.
+
+**C3 — the Commands sheet (contained, S–M)**
+
+16. `screens/CommandsSheet.tsx` (render only), the existing sheet chrome (the
+    Tools/Activity sheet's): one row per `CommandRow` — title, one-line
+    `explain` in `sec`, the state at the trailing edge (spinner + `Stop` while
+    running; `✓ ctx A → B` from the separator's own core text,
+    `compactionSeparatorText`; `▲` + `Retry` on failure; a switch for
+    Auto-accept). Clear's `confirming` expands the row in place into the question
+    + `Cancel` / `Clear` (Clear in `palette.red` + the word, never hue alone).
+    Rename closes the sheet and calls `controller.beginRename()`. The sheet stays
+    open while Compact runs (the row is its live state) and a closed sheet
+    leaves the footer slot as the only state.
+
+### Files
+
+C1:
+1. `apps/mobile/src/hub-actions.ts` — `commands`, order, `artifactsEmpty`, `emptyLabel`, a11y.
+2. `apps/mobile/src/hub-session.ts` — `artifactsEmpty` in `hubContextOf`.
+3. `apps/mobile/src/hub-gesture.ts` — dimmed commit → sticky + `flash`.
+4. `apps/mobile/src/hub-flash.ts` (new).
+5. `apps/mobile/src/ui/FloatingActivity.tsx` — glyph, dimmed look, pill text.
+6. `apps/mobile/src/screens/SessionScreen.tsx` — `commands` entry, flash wiring.
+7. Tests: `hub-actions`, `hub-session`, `hub-gesture` (existing files),
+   `hub-flash.test.ts` (new).
+
+C2:
+8. `packages/client/src/remote-session.ts` — `compact(signal?)` (+ its test).
+9. `apps/mobile/src/compact-slot.ts` (new).
+10. `apps/mobile/src/session-commands.ts` (new).
+11. `apps/mobile/src/transcript.ts` — `local_notice`.
+12. `apps/mobile/src/session-screen-controller.ts` — compact / cancel / clear / retryLast, state.
+13. `apps/mobile/src/hub-actions.ts` — `stop` while compacting.
+14. Footer: `tool-steps.ts` and/or `SessionScreen.tsx`, `ui/StepNode.tsx` (as thinking-images left them).
+15. Tests: `compact-slot.test.ts`, `session-commands.test.ts` (new), the
+    controller's test file, `transcript.test.ts`, `transcript-parity.test.ts`
+    (outcome strings), `packages/client` remote-session test.
+
+C3:
+16. `apps/mobile/src/screens/CommandsSheet.tsx` (new) + `SessionScreen.tsx` mount.
+17. Test: `commands-sheet.test.ts` (the host-stub render walk of
+    `notice-row.test.ts` / `chart-view.test.ts`).
+18. `changelog.d/mobile-hub-commands.added.md`.
+
+No protocol, daemon, persistence or TUI file changes.
+
+### Failure modes
+
+- **Command while a turn runs** (own or another device's): the rows are dimmed
+  with the reason; a race (turn starts between tap and send) is refused
+  `TurnInProgress` by the daemon → `▲ Compact failed: …` / `▲ Couldn't clear: …`
+  line, no state change. Clear's armed confirm is disarmed by `turn_started`.
+- **Compact rejected / failed**: `compactOutcome` → `▲` line + the row's Retry;
+  slot cleared. Cancelled → `◇` line, row back to ready.
+- **Two phones / phone + Mac**: the daemon announces no compaction start, so
+  device B's Compact row is enabled during A's compaction; B's tap is refused
+  `CompactInProgress` → "another device is compacting". B sees A's separator
+  (`transcript.ts:365-372`); B's Clear during A's compaction: same refusal.
+- **Disconnect mid-command**: `compact`/`clear` are `"once"` (never re-sent).
+  The promise rejects with a transport error → slot cleared, an info line says
+  the outcome is unknown; the resync history (`reason: null`) shows the truth
+  (separator, or the cleared chat). Rows dim "Not connected" until link up.
+- **Clear on a pod/connect session**: unreachable from the phone today (serve
+  only, Load-bearing). If a future path exposes a pod session, its daemon has no
+  persister → no fork, and the line would lie — so `session-commands.ts` takes a
+  `forkKept: boolean` input, today always true; a test pins the false wording
+  (`◇ chat cleared`, nothing about a kept copy). Eval
+  `container-sessions-mobile` owns the real answer.
+- **Clear with nothing to drop** (`before === after`): `◇ nothing to clear`, no
+  fork claim.
+- **Stop during my compaction**: hub `stop` → `cancelCompaction()` → `Cancelled`
+  (`hosted-session.ts:3810-3814`). Stop after it already resolved: the abort
+  finds nothing; the outcome already folded wins.
+- **Retry while the link is down**: goes through the composer's send path, so it
+  queues in the outbox exactly as a typed prompt (no new path).
+- **Screen unmount / session switch mid-command**: controller `dispose` aborts
+  nothing on the daemon (the compaction keeps running there, as for the TUI's
+  detach), clears the 3 s and flash timers, ignores late resolutions.
+- **Flash vs fan close**: the flash timer belongs to the fan; closing the fan
+  (any path) drops it, so no stale label on the next open (test).
+- **Menu / VoiceOver fallback**: no pill exists → the notice line, as today.
+- **Older daemon**: every method exists since early protocol versions; a
+  `MethodNotFound` lands in the `▲ … failed` branch — honest, not silent.
+
+### Tests
+
+Red first: every new assertion fails on today's code (no id, no module, the
+repro's `close`).
+
+C1:
+- `hub-actions`: idle fan ids === `attach, activity, artifacts, tools, commands,
+  more`; More starts `sessions, info`; during a turn `stop, steer, attach,
+  activity, artifacts, more` with `tools, commands` in More; empty artifact list
+  → Artifacts dimmed with `No artifacts yet`, UNKNOWN list → not dimmed; a11y
+  label of a dimmed Tools ≠ "nothing running". Ended session → no Commands.
+- `hub-gesture`: sticky tap on a dimmed item → state `fanSticky`, effects exactly
+  `[haptic light, flash]`, no `commit`, no `close`; same from tracking release; a
+  non-dimmed tap unchanged. Mutation: restore `close` → red.
+- `hub-flash`: label at 1599 ms is the empty label, at 1600 the item label;
+  a re-tap restarts.
+
+C2:
+- `compact-slot`: priority table; 2999/3000 ms boundary; `compactOutcome` for
+  success / `Cancelled` / `TurnInProgress` / `CompactInProgress` / transport.
+- `session-commands`: availability table per (turn, link, compacting, ended,
+  last prompt); `clearConfirm` arm → cancel / confirm, disarm on turn start and
+  link drop; `forkKept: false` wording.
+- Controller (existing fakes of its test file): fake `compact()` raises
+  `history{compact}` then resolves → ONE separator, slot `compacted`, then null
+  after the fake clock passes 3 s; fake `clear()` raises `history{clear}` →
+  empty transcript + ONE `◇ chat cleared — …`; abort during compact → the fake
+  sees the signal, `◇ compaction cancelled`; transport reject → unknown line, no
+  `▲`; `retryLast()` enqueues through the composer port with the last text.
+- Client: `compact(signal)` abort sends `session/cancel` without `turnId`
+  (the existing RemoteSession fake transport).
+- Parity: mobile outcome strings === TUI's `send-now.ts` (minus markdown).
+
+C3:
+- `commands-sheet`: a `confirming` Clear renders Cancel + Clear in the row and
+  no second sheet; a running Compact renders `Compacting…` + Stop; failure
+  renders `▲` + Retry; dimmed rows render their reason. Mutation: drop the
+  `confirming` branch → red.
+
+Executor attaches **simulator screenshots** (light + dark): idle fan, a dimmed
+Artifacts flashing "No artifacts yet", the sheet idle / Clear confirming /
+Compacting… / Compacted ✓, More with Session info.
+
+### Owner questions
+
+1. **Absorb harness-notices S2 here.** The compaction engine (slot, controller,
+   outcome lines, footer) moves into this task's C2; harness-notices closes at S1
+   and its changelog fragment drops the "compaction from the phone" clause.
+   **Rec: yes — one branch owns compaction end to end; S2's only entry point
+   (overflow) is what this task replaces.**
+2. **Retry last prompt in v1** (TUI `/retry`: text only, photos not re-sent, said
+   in a `◇` line; through the normal send/outbox path). **Rec: include it, text
+   only like the TUI.**
+3. **Auto-accept row duplicates Session info's switch.** **Rec: keep both (the
+   mockup has it); one controller method, one source of truth.**
+4. **End & archive (`session/close`)** — the phone has never ended a session
+   (`connection.ts:132-137`, decision 4). **Rec: leave it out of this task; a
+   separate task if wanted (it needs the archive/reopen UX on the phone).**
+5. **Tools' empty state** uses today's notice line; Q3-A covers Activity and
+   Artifacts only. **Rec: give Tools the same in-place label ("No tools") — one
+   rule for every dimmed item; the long sentence stays the VoiceOver label.**
+6. **After a dimmed tap the fan stays open** (sticky) so the label can show.
+   **Rec: yes, it stays open; the next tap commits or closes as usual.**
+7. **Clear wording** — `◇ chat cleared — the earlier chat is kept as an archived
+   session` (the result carries no fork id/title, so no link to it). **Rec:
+   accept; a tappable link to the fork is a later task (needs `session/clear` to
+   return the fork id — a protocol change).**
+8. **Slicing / executors.** **Rec: C1 and C3 DeepSeek; C2 Opus (RPC paths,
+   races) with a fresh-context Review; order C1 → C2 → C3, after
+   thinking-images and harness-notices S1 merge.**
