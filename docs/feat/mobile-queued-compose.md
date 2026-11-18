@@ -717,3 +717,27 @@ disk after it is gone.
 3397 pass / 0 fail; full `bun test` → **15070 pass, 5 skip, 0 fail** (1078
 files; the 5 skips are the documented `skipIf` opt-ins — live-k8s ×2,
 live-docker ×2, the real-socket keepalive).
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-18* (fresh context, different model family from the executor)
+
+**Verdict: APPROVE.**
+
+- Round-2 HIGH (Edit lost the words when the daemon's `queued` came before
+  the `removed` reply) **fixed**: `compose-controller.ts:428-436` keeps the id
+  in `withdrawing` until the reply comes back, and `:465-468` passes
+  `withdrawing` to `onQueued`'s `keep`. My repro
+  (`race2-tail.ts`, the daemon's real order) now gives `field "mine"`,
+  `editing.text "mine"`. The round-1 race repro still passes (`other-1` kept,
+  typed text kept, my words appended).
+- Mutation: dropping `withdrawing` from `keep` → red ("Edit keeps my words when
+  the daemon's queue report lands BEFORE its reply"); restored from backup,
+  `git status` clean.
+- Regressions on the diff: none found. `finally` clears the id on every
+  outcome. After a `delivered` or `failed` reply the id stays in `own` only
+  until the next report drops it, which does no harm. Cancel takes the same
+  path and still never touches the field.
+- Gate: `bun run typecheck` clean, `bun run lint` clean (2066 files),
+  `bun test apps/mobile/test` 3397 pass / 0 fail. Full `bun test` not re-run by
+  the reviewer.
