@@ -481,6 +481,33 @@ device: how the phone node looks (needs an iOS build).
 
 *— claude-opus-5-5, 2026-11-18 (executor, round 3)*
 
+### Fix round 1
+
+On review round 2 (one MEDIUM; no HIGH).
+
+**M1 (MEDIUM): Ctrl+O never toggled a fired row — FIXED.** Root cause: `itemRows`
+keyed every non-tool item on the `collapsed` slot only, so a fired row, whose
+layout depends on `expandAll`, replayed whatever was painted first.
+- `packages/tui/src/schedule-view.ts` `isFiredWake(text, schedule)`: a pure
+  predicate (`firedWakeOf(…, 0) !== null`). Whether a message is fired never depends on the clock.
+- `packages/tui/src/render-lines.ts` `itemRows` `expandMatters`: also true for
+  `kind: "user"` with `isFiredWake`. Typed prompts keep the width-only cache.
+- Test `packages/tui/test/render-lines.test.ts` "fired scheduled wake row — Ctrl+O
+  through the row cache": lays out the SAME item through `transcriptRows` twice,
+  with the flag flipped in both orders, plus a check that a typed prompt does not change.
+  - **Red on the old code**, failing on the assertion: off→on received
+    `["◷ Wake #2 · line one line two"]`, expected 3 rows; on→off received
+    3 rows, expected 1. 2 fail / 1 pass.
+  - **Green** after the fix: `render-lines` + `schedule-view` +
+    `schedule-panel-frames`, 173 pass / 0 fail.
+- **Mutation:** with `isFiredWake` forced to `return false && …`, the same
+  2 tests fail (the off→on and on→off cases). After the revert, 3/3 pass.
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (2077 files) · full `bun test`
+**15165 pass, 5 skip, 0 fail** (the same env-gated skips as Round 2/3).
+
+*— claude-opus-5-5, 2026-11-18 (executor, fix round 1)*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES** (not mergeable: no code, the feature is not built;

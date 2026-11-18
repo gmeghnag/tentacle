@@ -270,6 +270,15 @@ export function scheduleDeleteStep(
 }
 
 /**
+ * Whether a user message paints as a fired-wake row — the row whose layout
+ * depends on Ctrl+O, so the renderer's row cache must key it on `expandAll`
+ * (`render-lines.ts` `itemRows`). The answer never depends on the clock.
+ */
+export function isFiredWake(text: string, schedule: ScheduledRef | undefined): boolean {
+  return firedWakeOf(text, schedule, 0) !== null;
+}
+
+/**
  * A fired scheduled wake's transcript rows (docs/feat/scheduled-fire-row.md):
  * a timeline event, never a `>` user row. Collapsed (the default):
  * `◷ Wake 15:54 · <prompt on one line…>` cut to `width`. Expanded (Ctrl+O):

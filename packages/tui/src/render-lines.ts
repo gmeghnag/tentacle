@@ -28,7 +28,7 @@ import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
 import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
-import { firedRowLines } from "./schedule-view.ts";
+import { firedRowLines, isFiredWake } from "./schedule-view.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 import {
@@ -1238,8 +1238,12 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   // expand/threshold/preview/expandedIds; every other kind is a function of
   // width alone (always the `collapsed` slot) — except a notice with a BODY
   // (a sub-agent's report), whose body shows only when expanded.
-  // (docs/feat/subagent-ledger-log.md)
-  const expandMatters = item.kind === "tool" || (item.kind === "notice" && item.body !== undefined);
+  // (docs/feat/subagent-ledger-log.md) — and a fired scheduled wake, whose
+  // prompt lines show only when expanded (docs/feat/scheduled-fire-row.md).
+  const expandMatters =
+    item.kind === "tool" ||
+    (item.kind === "notice" && item.body !== undefined) ||
+    (item.kind === "user" && isFiredWake(item.text, item.schedule));
   const slot: "collapsed" | "expanded" | "command" = !expandMatters
     ? "collapsed"
     : expand
