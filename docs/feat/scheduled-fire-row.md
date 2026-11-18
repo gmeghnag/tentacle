@@ -529,3 +529,47 @@ Same model family as the doc's signed executor (fresh context only), so blind
 spots may be shared.
 
 *— claude-opus-5-5, 2026-11-17*
+
+## Review
+
+**Verdict: REQUEST-CHANGES** (round 2, the built code `main...HEAD`).
+
+**Gate.** 11 touched test files: 182 pass / 0 fail. `bun run lint` clean (2077
+files). `bun run typecheck` clean (root + mobile + relay). I did not re-run the full suite.
+
+**Findings.**
+1. MEDIUM — Ctrl+O never toggles a fired row in the real TUI.
+   `render-lines.ts` `itemRows` (~1238-1248) caches every non-tool item in the
+   `"collapsed"` slot only (`expandMatters` is false for `kind: "user"`), but
+   `itemLinesAt`'s new branch (`render-lines.ts:996-1006`) now depends on
+   `expandAll`. Repro (`.tentacle/tmp/scheduled-fire-row/cache.ts`, same item object,
+   `transcriptRows` with expandAll false and then true):
+   `collapsed : ["◷ Wake #2 · line one line two"]` /
+   `ctrl+o on : ["◷ Wake #2 · line one line two"]` (a fresh object gives
+   `["◷ Wake #2","  line one","  line two"]`). The reverse also holds: a row first
+   painted with Ctrl+O on stays expanded. The owner's revision requires "ctrl+o
+   expands". The tests miss it because `schedule-view.test.ts` calls `firedRowLines`
+   directly and the frame test never toggles Ctrl+O on a mounted App. Fix: make
+   `expandMatters` true for a user item that `firedWakeOf` recognises, and add a
+   test that renders the same item twice with the flag flipped.
+
+**Holds.** The load-bearing claim holds: `fireSchedule` (`hosted-session.ts:3494-3505`)
+stamps `{id, spec≤200, fire≥1, at: now()}` and that one object reaches
+`turn_start` and `Session.send`, so it lands on the stored message.
+`ChatMessage.scheduled` is `.optional().catch(undefined)`. A bad value is dropped
+and the critical entry still loads (the protocol test pins this). No
+`PROTOCOL_VERSION` bump is needed: both changes add optional fields to strip schemas.
+Trust: the live ref stays behind `daemonWakes`, which is on for the worker,
+`connect` and the phone. The stored field is not gated (owner Q1), but
+only its `at` is painted and the prompt goes through `oneLine`/`scheduleLabel`.
+The provider payload is unchanged (`compaction-fact.test.ts`).
+
+**Mutation (§9).** Making `firedWakeOf` ignore the stored record made 5 tests fail
+(core, TUI view ×2, TUI frame, phone view). After the revert, `git status` is clean.
+
+**Executor behaviour.** Faithful to the owner's decision. The as-built record and
+the M1–M6 mutation table are honest. It missed the cache interaction, an
+integration seam that no unit test covers. Reviewer is the same model family (fresh
+context only).
+
+*— claude-opus-5-5, 2026-11-18*
