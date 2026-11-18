@@ -682,3 +682,23 @@ Carried over, not findings: the two clocks for one flash (Low, left on purpose i
 - Its mutation table is real. I re-checked one row of it.
 - It named the unverified device rendering.
 - It missed that `InternalError` is also the daemon's opaque failure code.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18* (the same model as the C2 executor, in a fresh context)
+
+**Verdict: PASS.**
+
+- **Finding 1 is fixed.** `isTransportLoss` (`apps/mobile/src/compact-slot.ts:73-89`) now treats an `InternalError` as a lost link only when its message is a link-loss message: `DROPPED_NOT_RETRIED`, `connection closed`, `peer is closed`, or `request … timed out`.
+  - The repro `c2-internal.ts` now prints `{"text":"Compact failed: internal error","level":"warn"}` and `{"text":"Couldn't clear: internal error","level":"warn"}`.
+- **Mutations (each reverted; `git status` clean):**
+  - Restoring the old `code === InternalError ||` rule makes 2 tests fail: the `compact-slot` daemon-failure test and the controller test that expects `▲` and a `failed` row.
+  - Removing the `TIMED_OUT` match makes 1 test fail: the "link itself is lost" test.
+- **Regressions, checked against every `InternalError` the client and transport can raise:**
+  - An in-flight `"once"` call cut by a drop always becomes `DROPPED_NOT_RETRIED` (`remote-client.ts:4236-4240`), so it is still reported as a lost link.
+  - `invalid response/result for …` (`peer.ts:304`, `:453`) and the model-error texts (`remote-client.ts:4410`, `:4427`) now show as `▲`. That is correct, because the daemon did answer.
+- **Not blocking (Low):** the reconnect give-up error carries a free-form `step.status.reason` (`remote-client.ts:3372-3376`), so it would show as `▲` if it ever reached an in-flight compact. The `DROPPED` path normally catches it first.
+- **Gate:**
+  - The 6 related test files pass, 129 / 0.
+  - `bun run lint` is clean (2097 files).
+  - `bun run typecheck` is clean.
