@@ -134,54 +134,36 @@ public struct StreamResampler {
 
 // MARK: - the streaming session
 
-/// One dictation's analyzer, fed while the user speaks.
-///
-/// Built per dictation (a `SpeechTranscriber` must never drive a second
-/// analyzer — S1), and opened with the SAME preflight as the batch path, so a
-/// missing asset is the same `models_missing`. Any failure here is not reported
-/// by itself: the caller falls back to the batch path at `stop`, which owns
-/// every error the TUI knows how to explain.
-public final class LiveTranscription: @unchecked Sendable {
+/// One recogniser fed the live take: its own transcriber + analyzer + input
+/// stream, and the transcript its results build. A live session runs TWO
+/// (`LiveTranscription`), each in its OWN analyzer — a `SpeechTranscriber` must
+/// never drive a second analyzer (S1), and two modules in ONE analyzer gave an
+/// unstable final (docs/feat/voice-live-transcript.md, Fix round 1 (a)).
+final class LiveLane: @unchecked Sendable {
     private let lock = NSLock()
     private var transcript = TranscriptAccumulator()
     private var failure: Error?
-    private var resampler: StreamResampler
-    private let format: AVAudioFormat
+    let format: AVAudioFormat
     private let analyzer: SpeechAnalyzer
     private let continuation: AsyncStream<AnalyzerInput>.Continuation
     private var collectorTask: Task<Void, Never>?
-    public let lang: String
 
     private init(
         format: AVAudioFormat,
-        nativeRate: Double,
         analyzer: SpeechAnalyzer,
-        continuation: AsyncStream<AnalyzerInput>.Continuation,
-        lang: String
+        continuation: AsyncStream<AnalyzerInput>.Continuation
     ) {
         self.format = format
         self.analyzer = analyzer
         self.continuation = continuation
-        self.lang = lang
-        resampler = StreamResampler(from: nativeRate, to: format.sampleRate)
     }
 
-    /// The reporting options the live analyzer is opened with.
-    ///
-    /// `.fastResults` is deliberately NOT here. It trades accuracy for latency,
-    /// and it made the live `final` differ from the batch transcript of the SAME
-    /// take (measured: "Zorblack's quaintively fram is the Bunderblist" live vs
-    /// "Zorblack squintively fram is the Bunderblist" batch, 5/5 runs). The final
-    /// is what lands in the user's draft, so it must be the batch path's answer;
-    /// the price is a coarser partial cadence (≈ 1 per 3–4 s of speech instead of
-    /// ≈ 1 per 1.2 s), which the feature can afford. Pinned by `LiveTests`.
-    public static let reportingOptions: Set<SpeechTranscriber.ReportingOption> = [.volatileResults]
-
-    /// Open a live session for a take captured at `nativeRate`. Throws a
-    /// `HelperError` for what the batch path would report the same way, and
-    /// `sttFailed` when the analyzer's format is one this path does not feed.
-    public static func open(language: Language, nativeRate: Double) async throws -> LiveTranscription {
-        let (localeId, locale) = try await Transcriber.preflight(language: language)
+    /// Build and start a lane. Throws `sttFailed` when the analyzer's format is
+    /// one this path does not feed.
+    static func open(
+        locale: Locale,
+        reportingOptions: Set<SpeechTranscriber.ReportingOption>
+    ) async throws -> LiveLane {
         let transcriber = SpeechTranscriber(
             locale: locale,
             transcriptionOptions: [],
@@ -193,77 +175,33 @@ public final class LiveTranscription: @unchecked Sendable {
               format.channelCount == 1, format.sampleRate > 0,
               format.commonFormat == .pcmFormatFloat32 || format.commonFormat == .pcmFormatInt16
         else {
-            // Measured on macOS 26 (this task): 16 kHz/1ch/Int16. Mono float32
-            // or int16 is written here sample by sample; anything else would
-            // need a stateful `AVAudioConverter` (which drops frames across
-            // calls, Capture.swift) — the batch path handles it instead.
+            // Measured on macOS 26: 16 kHz/1ch/Int16. Mono float32 or int16 is
+            // written here sample by sample; anything else would need a stateful
+            // `AVAudioConverter` (which drops frames across calls, Capture.swift)
+            // — the batch path handles it instead.
             throw HelperError.sttFailed("the recogniser's format is not streamable")
         }
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
-        let lang = language == .auto ? String(localeId.prefix(2)) : language.rawValue
-        let live = LiveTranscription(
-            format: format,
-            nativeRate: nativeRate,
-            analyzer: analyzer,
-            continuation: continuation,
-            lang: lang
-        )
-        live.startCollecting(transcriber)
-        try await analyzer.start(inputSequence: stream)
-        return live
-    }
-
-    private func startCollecting(_ transcriber: SpeechTranscriber) {
-        collectorTask = Task { [self] in
+        let lane = LiveLane(format: format, analyzer: analyzer, continuation: continuation)
+        lane.collectorTask = Task { [lane] in
             do {
                 for try await result in transcriber.results {
                     let text = String(result.text.characters)
-                    lock.withLock { transcript.apply(text, isFinal: result.isFinal) }
+                    lane.lock.withLock { lane.transcript.apply(text, isFinal: result.isFinal) }
                 }
             } catch {
-                lock.withLock { failure = error }
+                lane.lock.withLock { lane.failure = error }
             }
         }
+        try await analyzer.start(inputSequence: stream)
+        return lane
     }
 
-    /// The transcript so far (finalized + volatile), for a `partial`.
-    public var current: String {
-        lock.lock()
-        defer { lock.unlock() }
-        return transcript.current
-    }
+    /// Finalized + volatile so far.
+    var current: String { lock.withLock { transcript.current } }
 
-    /// Feed native-rate samples (resampled here, statefully).
-    public func feed(_ native: [Float]) {
-        lock.lock()
-        let samples = resampler.push(native)
-        lock.unlock()
-        yield(samples)
-    }
-
-    /// Finalize: feed the resampler's tail, end the input, wait for the last
-    /// results. Returns the finalized transcript.
-    public func finish() async throws -> String {
-        let tail = lock.withLock { resampler.finish() }
-        yield(tail)
-        continuation.finish()
-        try await analyzer.finalizeAndFinishThroughEndOfInput()
-        await collectorTask?.value
-        let (failed, text) = lock.withLock { (failure, transcript.current) }
-        if let failed { throw failed }
-        // After finalization every result is final; `current` also covers a
-        // volatile one the recogniser never finalized.
-        return text
-    }
-
-    /// Abandon the session (cancel, EOF, or a fallback to batch).
-    public func cancel() async {
-        continuation.finish()
-        await analyzer.cancelAndFinishNow()
-        collectorTask?.cancel()
-    }
-
-    private func yield(_ samples: [Float]) {
+    /// Hand the analyzer samples already at `format.sampleRate`.
+    func yield(_ samples: [Float]) {
         guard !samples.isEmpty,
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))
         else { return }
@@ -283,6 +221,118 @@ public final class LiveTranscription: @unchecked Sendable {
         // The analyzer's OWN format, never another shape: `AnalyzerInput` traps
         // on a mismatched buffer (S1), which is a crash, not an error.
         continuation.yield(AnalyzerInput(buffer: buffer))
+    }
+
+    /// End the input, wait for the last results, return the transcript.
+    func finish() async throws -> String {
+        continuation.finish()
+        try await analyzer.finalizeAndFinishThroughEndOfInput()
+        await collectorTask?.value
+        let (failed, text) = lock.withLock { (failure, transcript.current) }
+        if let failed { throw failed }
+        // After finalization every result is final; `current` also covers a
+        // volatile one the recogniser never finalized.
+        return text
+    }
+
+    func cancel() async {
+        continuation.finish()
+        await analyzer.cancelAndFinishNow()
+        collectorTask?.cancel()
+    }
+}
+
+/// One dictation's live recognition, fed while the user speaks.
+///
+/// Two lanes on the same audio (docs/fix/voice-live-volatile.md):
+///  - the FINAL lane, opened exactly as before (`finalReportingOptions`): its
+///    transcript is what `finish()` returns and what lands in the draft, so it
+///    stays the batch path's answer (no `.fastResults`, Fix round 1);
+///  - the PARTIAL lane, with `.fastResults`: without it the recogniser holds
+///    every volatile result until the end of input (measured: 24 volatile
+///    results, all in the 50 ms after the last chunk ⇒ 0 partials on a 5.3 s
+///    take), so it is the only one that reports WHILE the user speaks. Its text
+///    is preview only and is never returned.
+///
+/// Built per dictation, opened with the SAME preflight as the batch path, so a
+/// missing asset is the same `models_missing`. Any failure here is not reported
+/// by itself: the caller falls back to the batch path at `stop`, which owns
+/// every error the TUI knows how to explain.
+public final class LiveTranscription: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resampler: StreamResampler
+    private let finalLane: LiveLane
+    private let partialLane: LiveLane
+    public let lang: String
+
+    private init(nativeRate: Double, finalLane: LiveLane, partialLane: LiveLane, lang: String) {
+        self.finalLane = finalLane
+        self.partialLane = partialLane
+        self.lang = lang
+        resampler = StreamResampler(from: nativeRate, to: finalLane.format.sampleRate)
+    }
+
+    /// The final lane's reporting options: the decision Fix round 1 pinned —
+    /// `.fastResults` made the live final differ from the batch transcript of the
+    /// same take ("Zorblack's quaintively" vs "Zorblack squintively", 5/5 runs).
+    public static let finalReportingOptions: Set<SpeechTranscriber.ReportingOption> = [.volatileResults]
+
+    /// The partial lane's: `.fastResults` is what makes the recogniser report
+    /// before the end of input (≈ 1 partial per second of speech). Preview only.
+    public static let partialReportingOptions: Set<SpeechTranscriber.ReportingOption> = [
+        .volatileResults, .fastResults,
+    ]
+
+    /// Open a live session for a take captured at `nativeRate`. Throws a
+    /// `HelperError` for what the batch path would report the same way, and
+    /// `sttFailed` when the analyzer's format is one this path does not feed.
+    public static func open(language: Language, nativeRate: Double) async throws -> LiveTranscription {
+        let (localeId, locale) = try await Transcriber.preflight(language: language)
+        let finalLane = try await LiveLane.open(locale: locale, reportingOptions: finalReportingOptions)
+        let partialLane: LiveLane
+        do {
+            partialLane = try await LiveLane.open(locale: locale, reportingOptions: partialReportingOptions)
+        } catch {
+            await finalLane.cancel()
+            throw error
+        }
+        // One resampler feeds both: the lanes must want the same rate.
+        guard partialLane.format.sampleRate == finalLane.format.sampleRate else {
+            await finalLane.cancel()
+            await partialLane.cancel()
+            throw HelperError.sttFailed("the live recognisers want different sample rates")
+        }
+        let lang = language == .auto ? String(localeId.prefix(2)) : language.rawValue
+        return LiveTranscription(nativeRate: nativeRate, finalLane: finalLane, partialLane: partialLane, lang: lang)
+    }
+
+    /// What the user should see now, for a `partial`: the partial lane's text.
+    public var current: String { partialLane.current }
+
+    /// Feed native-rate samples (resampled here, statefully, once for both).
+    public func feed(_ native: [Float]) {
+        let samples = lock.withLock { resampler.push(native) }
+        finalLane.yield(samples)
+        partialLane.yield(samples)
+    }
+
+    /// Finalize: feed the resampler's tail, end the input, wait for the last
+    /// results. Returns the FINAL lane's transcript (the batch path's answer).
+    public func finish() async throws -> String {
+        let tail = lock.withLock { resampler.finish() }
+        finalLane.yield(tail)
+        partialLane.yield(tail)
+        // The preview is over: its tail is not worth waiting for.
+        async let dropped: Void = partialLane.cancel()
+        let text = try await finalLane.finish()
+        await dropped
+        return text
+    }
+
+    /// Abandon the session (cancel, EOF, or a fallback to batch).
+    public func cancel() async {
+        await finalLane.cancel()
+        await partialLane.cancel()
     }
 }
 

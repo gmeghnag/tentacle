@@ -121,8 +121,9 @@ final class LiveTests: XCTestCase {
     /// Bunderblist") on every one.
     func testTheLiveFinalIsTheBatchTranscriptAndNoFastReportingOption() async throws {
         // The option set itself, first: it is the decision, not a proxy for it.
-        XCTAssertEqual(LiveTranscription.reportingOptions, [.volatileResults])
-        XCTAssertFalse(LiveTranscription.reportingOptions.contains(.fastResults))
+        // The FINAL lane's options: the partial lane may be fast, never the final one.
+        XCTAssertEqual(LiveTranscription.finalReportingOptions, [.volatileResults])
+        XCTAssertFalse(LiveTranscription.finalReportingOptions.contains(.fastResults))
 
         guard FileManager.default.isExecutableFile(atPath: "/usr/bin/say") else {
             throw XCTSkip("no /usr/bin/say to synthesize a take")
@@ -185,8 +186,7 @@ final class LiveTests: XCTestCase {
         say.arguments = [
             "-o", wav.path, "--data-format=LEF32@16000",
             "Hello, this is a test of live dictation. The words appear while I am still speaking. "
-                + "This sentence is here so the take comfortably outlasts the first volatile result, "
-                + "which arrives a few seconds in now that the fast reporting option is gone.",
+                + "This sentence is here so the take is long enough to show the partials keep coming.",
         ]
         try say.run()
         say.waitUntilExit()
@@ -209,6 +209,14 @@ final class LiveTests: XCTestCase {
         XCTAssertFalse(partials.isEmpty, "no partial while the take was fed")
         let first = try XCTUnwrap(partials.first)
         XCTAssertLessThan(first.ms, takeMs, "the first partial came only at the end")
+        // The cadence the owner sees (docs/fix/voice-live-volatile.md): without
+        // the fast partial lane the recogniser held every volatile result until
+        // the end of input — 0–1 partial on a 5 s take. Several, the first one
+        // within ~1.5 s of audio, and all of them well before the end.
+        XCTAssertGreaterThanOrEqual(takeMs, 5000, "the take is too short to measure a cadence")
+        XCTAssertLessThan(first.ms, 1500, "first partial at \(first.ms) ms of audio")
+        let early = partials.filter { $0.ms < takeMs - 1000 }
+        XCTAssertGreaterThanOrEqual(early.count, 3, "partials: \(partials.map(\.ms))")
         XCTAssertTrue(first.text.lowercased().contains("hello"), "first partial: \(first.text)")
         XCTAssertTrue(output.text.lowercased().contains("still speaking"), "final: \(output.text)")
         XCTAssertEqual(output.lang, "en")
