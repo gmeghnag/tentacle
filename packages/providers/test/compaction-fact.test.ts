@@ -55,4 +55,12 @@ describe("a summary message's compacted fact never reaches the model", () => {
     expect(bodies[1]).not.toContain("compacted");
     expect(bodies[1]).not.toContain("fromTokens");
   });
+
+  test("a fired wake's scheduled record never reaches the model either (scheduled-fire-row)", () => {
+    const wake = { scheduled: { id: "sc-1", spec: "every 10m", fire: 5, at: 1_763_394_840_000 } };
+    const plain = JSON.stringify(buildPayload("m", { messages: history({}) }));
+    const marked = JSON.stringify(buildPayload("m", { messages: history(wake) }));
+    expect(marked).toBe(plain);
+    expect(marked).not.toContain("1763394840000");
+  });
 });

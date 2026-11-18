@@ -270,8 +270,20 @@ export const TurnStartSchema = z.object({
    * durable `[scheduled sc-1 · …]` prefix in `prompt` (M4 option A). Absent for
    * every turn no schedule started, and on a reload of a fired turn (the
    * conversation is the truth there).
+   * `fire`/`at` (docs/feat/scheduled-fire-row.md): the ordinal and the instant
+   * it fired, the same values the daemon stores on the message
+   * (`ChatMessage.scheduled`), so the live row equals the reloaded one.
+   * Optional: an older daemon sends `{id, spec}` and the row falls back to the
+   * prompt's prefix.
    */
-  schedule: z.object({ id: ScheduleIdSchema, spec: z.string() }).optional(),
+  schedule: z
+    .object({
+      id: ScheduleIdSchema,
+      spec: z.string(),
+      fire: z.number().int().positive().optional(),
+      at: z.number().int().nonnegative().optional(),
+    })
+    .optional(),
 });
 
 /** A turn ended (last update of every turn): the turn's outcome, in the stream. */

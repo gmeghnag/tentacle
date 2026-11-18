@@ -107,6 +107,7 @@ function harness() {
     },
     queued: () => session.queue ?? undefined,
     reclaim: async () => {},
+    unqueue: async (ids) => ({ removed: [...ids], delivered: [] }),
     port: {
       upload: async (_bytes, meta) =>
         ({ id: "port", mimeType: meta.mimeType, size: 3 }) as AttachmentRef,

@@ -9,6 +9,7 @@
  * are the daemon's labels; the id is a daemon's claim, AGENTS §7), so each is
  * `oneLine`d and cut in CELLS before it is painted — never left to Ink to wrap.
  */
+import { type ScheduledRef, firedWakeLine, firedWakeOf } from "@tentacle/core";
 import { cellWidth, truncateCells } from "./cells.ts";
 import { oneLine, paletteWindow } from "./commands.ts";
 import { formatDuration } from "./format.ts";
@@ -18,8 +19,6 @@ import { type PanelKeyState, type PanelView, fit, noteView } from "./tree-panel.
 export const SCHEDULE_TITLE_COLS = 56;
 /** An id as a row's paint cuts it: the wire's bound has no say over a terminal's cells. */
 export const SCHEDULE_QUIT_ID_MAX = 12;
-/** The fired head's own cap: it rides ONE transcript row above the prompt. */
-export const SCHEDULE_HEAD_MAX = 120;
 /** A departure notice names an id; a hostile one is cut here, never wrapped. */
 const NOTICE_ID_MAX = 40;
 
@@ -271,25 +270,41 @@ export function scheduleDeleteStep(
 }
 
 /**
- * The fired turn's own head row (M4 option B): `◷ scheduled · sc-1 every 10m ·
- * fire 5`. The ORDINAL is read out of the durable prompt prefix, because the
- * wire's ref carries only `{id, spec}` and one source of truth is enough. No ref
- * (a reload, an older daemon) paints nothing at all: the durable prefix in the
- * prompt text is then the whole row (option A).
+ * Whether a user message paints as a fired-wake row — the row whose layout
+ * depends on Ctrl+O, so the renderer's row cache must key it on `expandAll`
+ * (`render-lines.ts` `itemRows`). The answer never depends on the clock.
  */
-export function firedScheduleHead(
-  schedule: { readonly id: string; readonly spec: string } | undefined,
+export function isFiredWake(text: string, schedule: ScheduledRef | undefined): boolean {
+  return firedWakeOf(text, schedule, 0) !== null;
+}
+
+/**
+ * A fired scheduled wake's transcript rows (docs/feat/scheduled-fire-row.md):
+ * a timeline event, never a `>` user row. Collapsed (the default):
+ * `◷ Wake 15:54 · <prompt on one line…>` cut to `width`. Expanded (Ctrl+O):
+ * `◷ Wake 15:54`, then the prompt's lines indented. The SAME decision for a
+ * live turn (`schedule` = the wire ref) and a reload (`schedule` =
+ * `ChatMessage.scheduled`): `firedWakeOf` reads the record first and the
+ * durable `[scheduled …]` prefix as the fallback. Not a fired message → null.
+ * Uncoloured: the renderer paints them harness-grey.
+ */
+export function firedRowLines(
   text: string,
-): string {
-  if (schedule === undefined) {
-    return "";
+  schedule: ScheduledRef | undefined,
+  opts: { readonly width: number; readonly expanded: boolean; readonly now: number },
+): string[] | null {
+  const view = firedWakeOf(text, schedule, opts.now);
+  if (view === null) {
+    return null;
   }
-  const fire = /\[scheduled [^\]]*?· fire (\d+)\]/.exec(text)?.[1];
-  const id = fit(oneLine(schedule.id), SCHEDULE_QUIT_ID_MAX);
-  const spec = truncateCells(oneLine(schedule.spec), 32);
-  const head = `◷ scheduled · ${id} ${spec}`;
-  const head_ = fire === undefined ? head : `${head} · fire ${fire}`;
-  return truncateCells(head_, SCHEDULE_HEAD_MAX);
+  const width = Math.max(1, Math.floor(opts.width));
+  if (!opts.expanded) {
+    return [truncateCells(`◷ ${oneLine(firedWakeLine(view))}`, width)];
+  }
+  const head = truncateCells(`◷ ${oneLine(`Wake ${view.when}`)}`, width);
+  // A blank prompt line stays a row (" ": Ink drops an empty one, AGENTS §6).
+  const body = view.prompt === "" ? [] : view.prompt.split("\n").map((l) => `  ${oneLine(l)}`);
+  return [head, ...body.map((l) => (l.trim() === "" ? " " : l))];
 }
 
 /**

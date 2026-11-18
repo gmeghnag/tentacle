@@ -9,7 +9,7 @@
  * it). It is its session's stream listener: `RemoteClient` hands it the
  * ordered outputs of the pure reducer.
  */
-import type { AttachmentRef, ChatMessage } from "@tentacle/core";
+import type { AttachmentRef, ChatMessage, ScheduledRef } from "@tentacle/core";
 import {
   type ArtifactListResult,
   type ArtifactMeta,
@@ -1802,7 +1802,7 @@ export class RemoteSession implements SessionStreamListener {
     turnId: string,
     prompt: string,
     attachments?: readonly AttachmentRef[],
-    schedule?: { readonly id: string; readonly spec: string },
+    schedule?: ScheduledRef,
   ): ActiveTurn {
     const turn: ActiveTurn = {
       turnId,

@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test";
 import type { QueueState, ReturnCause } from "@tentacle/protocol";
 import {
   type ComposeState,
+  editingCleared,
   enqueueAcked,
   enqueueRejected,
   enqueueStarted,
@@ -23,6 +24,7 @@ import {
   reclaimed,
   sendNowAccepted,
   take,
+  unqueueFor,
 } from "../src/compose-state.ts";
 
 const queue = (over: Partial<QueueState> = {}): QueueState => ({
@@ -107,6 +109,21 @@ describe("a row the daemon LISTED leaves when it stops listing it (docs/fix/mobi
   test("a row never listed and never acked stays: it is still in flight", () => {
     const state = onQueued(enqueueStarted(initialCompose, "e1", "steer"), queue()).state;
     expect(ids(state)).toEqual(["e1"]);
+  });
+
+  test("an in-flight row stays MINE across a report that does not list it yet", () => {
+    // A `queued` broadcast between the mint and the daemon's enqueue (a drain, a
+    // turn end, another device's enqueue) used to drop the id from `own` — the
+    // row then showed as "from another device" for ever, even once listed, since
+    // `mine` is `own.has(id)`. Feeds D2/D3: Send now and Edit/Cancel are hidden.
+    // Mutation: drop the `inflight` clause of `onQueued`'s `keep` → red.
+    let state = enqueueStarted(initialCompose, "e1", "my steer");
+    state = onQueued(state, queue()).state;
+    expect(queueRows(state).map((r) => `${r.id}:${r.mine}`)).toEqual(["e1:true"]);
+    expect(state.own.get("e1")).toBe("my steer");
+    // …and it is still mine once the daemon lists it.
+    state = onQueued(state, queue({ entries: [{ id: "e1", text: "my steer" }] })).state;
+    expect(queueRows(state).map((r) => `${r.id}:${r.mine}`)).toEqual(["e1:true"]);
   });
 
   test("send-now accepted with NO report ever listing its row → hidden at once, dropped next", () => {
@@ -288,5 +305,157 @@ describe("another device's returned rows (F11, QR2)", () => {
     ).state;
     expect(take(state, "mine")).toMatchObject({ text: "", reclaim: [] });
     expect(take(state, "unknown")).toMatchObject({ text: "", reclaim: [] });
+  });
+});
+
+describe("Edit and Cancel on a pending message (D6)", () => {
+  /** My queued row, listed by the daemon (so `shownRows` shows it). */
+  const queuedMine = (id = "e1", text = "my words"): ComposeState =>
+    onQueued(enqueueStarted(withOwn([[id, text]]), id, text), queue({ entries: [{ id, text }] }))
+      .state;
+
+  test("Cancel removed: the row is gone at once, its id too, nothing to the field", () => {
+    const before = queuedMine();
+    expect(queueRows(before).map((r) => r.id)).toEqual(["e1"]);
+    const step = unqueueFor(before, {
+      what: "cancel",
+      id: "e1",
+      field: "typed",
+      reply: { removed: ["e1"] },
+    });
+    // Mutation: keep the row (drop `dropPending`) → red: a cancelled message
+    // would sit in the transcript until the daemon's next report.
+    expect(queueRows(step.state)).toEqual([]);
+    expect(step.state.own.has("e1")).toBe(false);
+    expect(step.draft).toBe("typed");
+    expect(step.notice).toBe("");
+    expect(step.state.editing).toBeNull();
+  });
+
+  test("Cancel removed, of a row I minted that no report lists yet: it goes too", () => {
+    // Mutation: filter the daemon's entries only → red (a local row would stay).
+    const local = enqueueStarted(withOwn([["e9", "in flight"]]), "e9", "in flight");
+    const step = unqueueFor(local, {
+      what: "cancel",
+      id: "e9",
+      field: "",
+      reply: { removed: ["e9"] },
+    });
+    expect(queueRows(step.state)).toEqual([]);
+    expect(step.state.local).toEqual([]);
+  });
+
+  test("Cancel not removed: the row stays and the person is told the agent has it", () => {
+    const before = queuedMine();
+    const step = unqueueFor(before, {
+      what: "cancel",
+      id: "e1",
+      field: "",
+      reply: { removed: [] },
+    });
+    expect(step.state).toBe(before);
+    expect(queueRows(step.state).map((r) => r.id)).toEqual(["e1"]);
+    expect(step.notice).toContain("already read by the agent");
+  });
+
+  test("Edit removed: MY text into the field, the row gone, the edit banner remembers the field", () => {
+    const before = queuedMine();
+    const step = unqueueFor(before, {
+      what: "edit",
+      id: "e1",
+      field: "",
+      reply: { removed: ["e1"] },
+    });
+    expect(step.draft).toBe("my words");
+    expect(queueRows(step.state)).toEqual([]);
+    expect(step.state.editing).toEqual({ id: "e1", text: "my words", prior: "" });
+    expect(step.notice).toBe("");
+  });
+
+  test("Edit never overwrites text typed since, and puts mine after it", () => {
+    const step = unqueueFor(queuedMine(), {
+      what: "edit",
+      id: "e1",
+      field: "typed meanwhile",
+      reply: { removed: ["e1"] },
+    });
+    expect(step.draft).toBe("typed meanwhile\nmy words");
+    expect(step.state.editing?.prior).toBe("typed meanwhile");
+  });
+
+  test("the field never holds a DAEMON-supplied text (a pod is not trusted)", () => {
+    // The daemon lists the row with different words: the field must show what I
+    // typed, from `own`. Mutation: read the entry's text → red.
+    const state = onQueued(
+      enqueueStarted(withOwn([["e1", "my words"]]), "e1", "my words"),
+      queue({ entries: [{ id: "e1", text: "not what I typed" }] }),
+    ).state;
+    const step = unqueueFor(state, {
+      what: "edit",
+      id: "e1",
+      field: "",
+      reply: { removed: ["e1"] },
+    });
+    expect(step.draft).toBe("my words");
+  });
+
+  test("Edit not removed: the row stays and nothing goes into the field", () => {
+    const step = unqueueFor(queuedMine(), {
+      what: "edit",
+      id: "e1",
+      field: "typed",
+      reply: { removed: [] },
+    });
+    expect(step.draft).toBe("typed");
+    expect(step.state.editing).toBeNull();
+    expect(step.notice).toContain("already read by the agent");
+  });
+
+  test("an older daemon: unsupported once, the row stays, Edit/Cancel are then hidden", () => {
+    const before = queuedMine();
+    expect(before.unqueueOff).toBe(false);
+    const step = unqueueFor(before, {
+      what: "edit",
+      id: "e1",
+      field: "",
+      reply: "unsupported",
+    });
+    expect(step.state.unqueueOff).toBe(true);
+    expect(queueRows(step.state).map((r) => r.id)).toEqual(["e1"]);
+    expect(step.notice).not.toBe("");
+    // Once is enough: a second answer does not change the flag again.
+    const again = unqueueFor(step.state, {
+      what: "cancel",
+      id: "e1",
+      field: "",
+      reply: "unsupported",
+    });
+    expect(again.state.unqueueOff).toBe(true);
+  });
+
+  test("a dropped answer: a notice and the row kept — never a half-done cancel", () => {
+    const before = queuedMine();
+    const step = unqueueFor(before, {
+      what: "cancel",
+      id: "e1",
+      field: "",
+      reply: "failed",
+    });
+    expect(step.state).toBe(before);
+    expect(queueRows(step.state).map((r) => r.id)).toEqual(["e1"]);
+    expect(step.notice).not.toBe("");
+  });
+
+  test("the edit ends (× or ↑): the banner goes, the edit's own words are what returns", () => {
+    const edited = unqueueFor(queuedMine(), {
+      what: "edit",
+      id: "e1",
+      field: "",
+      reply: { removed: ["e1"] },
+    }).state;
+    const ended = editingCleared(edited);
+    // Mutation: keep `editing` → red (the banner would stay over an empty edit).
+    expect(ended.editing).toBeNull();
+    expect(ended.unqueueOff).toBe(false);
   });
 });

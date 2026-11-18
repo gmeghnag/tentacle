@@ -94,16 +94,19 @@ import {
   shown,
   viewportChanged,
 } from "../follow.ts";
-import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
+import { pressHaptic, pulseHaptic, turnEndHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import {
   type HubActionId,
   type HubEntries,
   type HubOpen,
+  PULSE_START,
+  type PulseState,
   buttonBadge,
   hubA11yLabel,
   hubActions,
   hubOpen,
+  pulseStep,
 } from "../hub-actions.ts";
 import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
@@ -148,6 +151,7 @@ import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
+import { PendingBubbles } from "./compose/PendingBubble.tsx";
 import { RowGuard } from "./transcript/RowGuard.tsx";
 import { SwipeTime } from "./transcript/SwipeTime.tsx";
 import { RowFallback, TranscriptRow } from "./transcript/TranscriptRow.tsx";
@@ -772,12 +776,14 @@ export function SessionScreen({
     asking: state.sheet.kind === "asking",
     closed: state.transcript.closed,
   });
-  // A turn that ends (own or another device's) taps the hand once (Owner Q4).
+  // A turn that ends (own or another device's) taps the hand once (Owner Q4);
+  // news landing on the hub glows once (mobile-hub-badges Q1 C). Both are decided
+  // by ONE effect below, because they usually happen in the same render and the
+  // moment must play one haptic, never two (F4).
   const wasRunning = useRef(state.view.composer.running);
-  useEffect(() => {
-    playHaptic(turnEndHaptic(wasRunning.current, state.view.composer.running));
-    wasRunning.current = state.view.composer.running;
-  }, [state.view.composer.running]);
+  /** The pulse state (baseline + the session it belongs to); `null` prev is "no baseline" (F1/F2). */
+  const pulsePrev = useRef<PulseState>(PULSE_START);
+  const [pulseSeq, setPulseSeq] = useState(0);
   // The header's "…" menu (owner feedback #3 + Session info): it opens with the
   // sheet's read, then the phone-local copy actions.
   const [menuOpen, setMenuOpen] = useState(false);
@@ -939,6 +945,37 @@ export function SessionScreen({
     unseenArtifacts: hubCtx.unseenArtifacts,
     unreadReport: activityVm.unread > 0,
   };
+  const unseen = hubBadgeInput.unseenArtifacts;
+  const unread = hubBadgeInput.unreadReport;
+  const linkUp = state.transcript.link === "up";
+  // The moment news arrives (mobile-hub-badges Design 4, Q1 C + Q4): one glow on
+  // the button, one light haptic — unless a turn ended in this same render, whose
+  // `success` is the moment's one haptic (F4). ONE effect and ONE pure step decide
+  // it: `pulseStep` both compares the news and re-takes the baseline, so a session
+  // switch or a link drop is a fresh baseline in the SAME step. Two separate reset
+  // effects ran BEFORE this comparison in one commit, and it then simply
+  // re-advanced the baseline over them — which made F1 and F2 dead (the refill
+  // after a reconnect pulsed; the reset swallowed the next real increase), and a
+  // dep list that could drift from the body is how the resets got out of sync.
+  useEffect(() => {
+    const ended = turnEndHaptic(wasRunning.current, state.view.composer.running);
+    wasRunning.current = state.view.composer.running;
+    // F1/F2 are `pulseStep`'s; F3 is here: the verdict never sees `floatShown`, so a
+    // hidden button's baseline still advances and its news is never replayed later —
+    // only the glow and the light are dropped, and never deferred.
+    const step = pulseStep(pulsePrev.current, {
+      sessionKey: artifactsSeenKey,
+      link: linkUp ? "up" : "down",
+      // Read from the primitives, not from `newsNow`: the deps below are those two.
+      news: { unseenArtifacts: unseen, unreadReport: unread },
+    });
+    pulsePrev.current = step.state;
+    playHaptic(ended);
+    playHaptic(pulseHaptic(step.pulse && floatShown, ended !== null));
+    if (step.pulse && floatShown) {
+      setPulseSeq((n) => n + 1);
+    }
+  }, [unseen, unread, linkUp, artifactsSeenKey, floatShown, state.view.composer.running]);
   // One band laid out in the sheet: scroll once, when the WANTED band has reported
   // (the rules — "once", "only the wanted one" — are `revealStep`'s, folded by
   // `reveal-report.ts`). The report is read and written synchronously, so the
@@ -1190,15 +1227,45 @@ export function SessionScreen({
               }}
               extraData={rowExtraData}
               // The live "Thinking…" node (Owner Q2): the thread's last node while
-              // the turn thinks, under the rows so their keys never shift.
+              // the turn thinks, under the rows so their keys never shift. The
+              // PENDING bubbles follow it (docs/feat/mobile-queued-compose.md D1):
+              // a queued message is read at the next step, so it IS the thread's last
+              // node — and it leaves in the `queued` that drops its row.
               ListFooterComponent={
-                layout.tail === null ? undefined : (
-                  <ThinkingNode
-                    palette={palette}
-                    thought={layout.tail.thought}
-                    up={layout.tail.up}
-                    reduceMotion={a11yFlags.reduceMotion}
-                  />
+                layout.tail === null && state.view.pending.length === 0 ? undefined : (
+                  <>
+                    {layout.tail === null ? null : (
+                      <ThinkingNode
+                        palette={palette}
+                        thought={layout.tail.thought}
+                        up={layout.tail.up}
+                        reduceMotion={a11yFlags.reduceMotion}
+                      />
+                    )}
+                    <PendingBubbles
+                      bubbles={state.view.pending}
+                      palette={palette}
+                      ctx={{
+                        link: state.view.state === "Live",
+                        turn: state.view.composer.running,
+                        sendNow: compose.sendNow,
+                        unqueue: !compose.unqueueOff,
+                      }}
+                      onAction={(id, action) => {
+                        switch (action) {
+                          case "edit":
+                            void controller.edit(id);
+                            return;
+                          case "cancel":
+                            void controller.cancel(id);
+                            return;
+                          case "send-now":
+                            void controller.sendNowRow(id);
+                            return;
+                        }
+                      }}
+                    />
+                  </>
                 )
               }
               onViewableItemsChanged={onViewable}
@@ -1298,7 +1365,8 @@ export function SessionScreen({
               bounds={band}
               position={activitySettings.position}
               shown={floatShown}
-              badge={buttonBadge(hubBadgeInput)}
+              count={buttonBadge(hubBadgeInput)?.n ?? null}
+              pulse={pulseSeq}
               turnRunning={state.view.composer.running}
               accessibilityLabel={hubA11yLabel(hubBadgeInput)}
               voiceOver={a11yFlags.voiceOver}
@@ -1355,12 +1423,30 @@ export function SessionScreen({
           <NoticeRow key={notice.testId} notice={notice} palette={palette} />
         ))}
         <QueueRows
-          view={{ queued: compose.queued, returnedOthers: compose.returnedOthers }}
+          view={{ returnedOthers: compose.returnedOthers }}
           palette={palette}
           onTake={(id) => void controller.take(id)}
-          sendNow={compose.sendNow}
-          onSendNow={() => void controller.sendNow()}
         />
+        {compose.editing === null ? null : (
+          <View style={[styles.editBanner, { backgroundColor: palette.tint }]}>
+            <Text
+              testID="composer-editing"
+              numberOfLines={1}
+              style={[typography.footnote, styles.flex, { color: palette.accent }]}
+            >
+              Editing pending message
+            </Text>
+            <Pressable
+              testID="composer-editing-cancel"
+              accessibilityRole="button"
+              accessibilityLabel="Stop editing and queue it again"
+              hitSlop={10}
+              onPress={() => void controller.editCanceled()}
+            >
+              <Icon name="xmark" color={palette.accent} size={14} />
+            </Pressable>
+          </View>
+        )}
         <OutboxRows rows={compose.outbox} palette={palette} onDecide={setDeciding} />
         <Chips
           chips={compose.chips}
@@ -1405,6 +1491,9 @@ export function SessionScreen({
               : (voiceView.placeholder ?? "Message tentacle")
           }
           button={state.view.composer.button}
+          slot={state.view.composer.slot}
+          sendNow={compose.sendNow}
+          onSendNow={() => void controller.sendNow()}
           onChange={(text) => {
             // The person typed: dictation yields first (F8), then the compose seam.
             voice?.userEdit(text);
@@ -1604,6 +1693,19 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
   },
   notice: { paddingHorizontal: 16, paddingBottom: 6 },
+  // The editing banner above the field (D6): the label takes the row, the × keeps
+  // its own width (it was `styles.flex`, i.e. undefined).
+  editBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 16,
+    marginBottom: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  flex: { flexShrink: 1 },
   // The turn observable: on screen (XCUITest sees it), takes no room. 1×1 and
   // absolute, not 0×0: iOS 26 drops an empty-frame element from the
   // accessibility tree, so `turn-idle` vanished (slice 6 walk, flows 23/24).

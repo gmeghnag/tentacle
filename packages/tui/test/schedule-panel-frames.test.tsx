@@ -50,9 +50,20 @@ interface WakeApi {
   readonly deletes: string[];
   /** Push a new table, as the daemon's `schedules` frame would. */
   readonly report: (rows: readonly ScheduleDockRow[] | undefined) => void;
-  /** Another device's turn starts (a `turn_start` with a schedule ref). */
-  readonly fire: () => void;
+  /** Another device's turn starts (a `turn_start` with a schedule ref), or the given events. */
+  readonly fire: (events?: readonly unknown[]) => void;
 }
+
+/** The fired turn's prompt, exactly as `schedulePromptText` writes it. */
+const FIRED_TEXT = "[scheduled sc-1 · every 10m · fire 5] check CI on PR #412";
+/** Today at 16:14, local: the fire instant the daemon stamped. */
+const FIRED_AT = new Date(new Date().setHours(16, 14, 0, 0)).getTime();
+const FIRED = { id: "sc-1", spec: "every 10m", fire: 5, at: FIRED_AT };
+const LIVE_FIRE: readonly unknown[] = [
+  { type: "user_message", text: FIRED_TEXT, schedule: FIRED },
+  { type: "text", delta: "CI is still running." },
+  { type: "turn_end", reason: "end_turn" },
+];
 
 /**
  * A session whose armed wakes this test drives: `onSchedules` delivers the first
@@ -95,18 +106,12 @@ function fake(opts: { readonly schedules?: readonly ScheduleDockRow[] } = {}): W
     session,
     deletes,
     report: (rows) => listener?.({ rows: rows ?? [], count: rows?.length ?? 0 }),
-    fire: () =>
+    fire: (events = LIVE_FIRE) =>
       turn?.({
         kind: "turn",
         turnId: "wake-1",
         events: (async function* () {
-          yield {
-            type: "user_message",
-            text: "[scheduled sc-1 · every 10m · fire 5] check CI on PR #412",
-            schedule: { id: "sc-1", spec: "every 10m" },
-          };
-          yield { type: "text", delta: "CI is still running." };
-          yield { type: "turn_end", reason: "end_turn" };
+          yield* events;
         })(),
       }),
   };
@@ -360,18 +365,47 @@ describe("S5 M3: the /schedule panel", () => {
   });
 });
 
-describe("S5 M4: the fired turn's styled row (option B)", () => {
-  test("a `turn_start.schedule` paints its own head above the prompt", async () => {
+describe("a fired wake is a timeline row (docs/feat/scheduled-fire-row.md)", () => {
+  /** The transcript rows a fire paints: the `◷` row(s) — what must not differ. */
+  async function firedRows(events: readonly unknown[]): Promise<{ rows: string[]; frame: string }> {
     const api = fake({ schedules: [WAKE_1] });
     const t = await mount(api);
-    api.fire();
+    api.fire(events);
     await delay(120);
     const frame = t.frame();
-    // The styled head, with the ordinal read out of the durable prefix.
-    expect(frame).toContain("◷ scheduled · sc-1 every 10m · fire 5");
-    // The prompt itself is still the durable text (option A is inside it).
-    expect(frame).toContain("check CI on PR #412");
     t.term.unmount();
+    return { rows: frame.split("\n").filter((l) => l.includes("◷ Wake")), frame };
+  }
+  const reload = (message: unknown): readonly unknown[] => [
+    {
+      type: "history_reset",
+      messages: [message, { role: "assistant", content: "CI is still running." }],
+    },
+    { type: "turn_end", reason: "end_turn" },
+  ];
+
+  test("live and reloaded from the stored message paint the SAME row: fire time, no bracket, no `>`", async () => {
+    // Mutation: drop `schedule: m.scheduled` in resume.ts → the reload says `#5` → red.
+    const live = await firedRows(LIVE_FIRE);
+    const reloaded = await firedRows(
+      reload({ role: "user", content: FIRED_TEXT, scheduled: FIRED }),
+    );
+    expect(live.rows.map((r) => r.trim())).toEqual(["◷ Wake 16:14 · check CI on PR #412"]);
+    expect(reloaded.rows).toEqual(live.rows);
+    for (const { frame } of [live, reloaded]) {
+      expect(frame).not.toContain("[scheduled");
+      expect(frame).not.toContain("> check CI");
+    }
+  });
+
+  test("an older log without the field (and an older daemon's ref) falls back to `#N`", async () => {
+    const old = await firedRows(reload({ role: "user", content: FIRED_TEXT }));
+    expect(old.rows.map((r) => r.trim())).toEqual(["◷ Wake #5 · check CI on PR #412"]);
+    const oldLive = await firedRows([
+      { type: "user_message", text: FIRED_TEXT, schedule: { id: "sc-1", spec: "every 10m" } },
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    expect(oldLive.rows).toEqual(old.rows);
   });
 });
 

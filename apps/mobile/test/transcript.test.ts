@@ -383,6 +383,26 @@ test("a fired turn's ref is carried on its row; an ordinary prompt's row has non
   expect(plain?.kind === "user" && "schedule" in plain).toBe(false);
 });
 
+test("a fired turn's row is the SAME live and reloaded from the stored message (scheduled-fire-row)", () => {
+  // Mutation: drop `schedule: m.scheduled` in transcript-history.ts → the reloaded
+  // row has no record (its node would say `#5`, not the fire time) → red.
+  const record = { id: "sc-1", spec: "every 10m", fire: 5, at: 1_763_394_840_000 };
+  const text = "[scheduled sc-1 · every 10m · fire 5] check CI";
+  const live = fold([{ type: "user_message", text, schedule: record }]).rows[0];
+  const stored: ChatMessage = { role: "user", content: text, scheduled: record };
+  const reloaded = fold([{ type: "history", messages: [stored], reason: null }]).rows[0];
+  const shape = (row: typeof live) =>
+    row?.kind === "user"
+      ? { text: row.text, images: row.images, schedule: row.schedule }
+      : "not a user row";
+  expect(shape(reloaded)).toEqual(shape(live));
+  expect(shape(live)).toEqual({ text, images: [], schedule: record });
+  // An older log (no field): no record, the node falls back to the text prefix.
+  const old = fold([{ type: "history", messages: [{ role: "user", content: text }], reason: null }])
+    .rows[0];
+  expect(old?.kind === "user" && "schedule" in old).toBe(false);
+});
+
 test("a closed session keeps the transcript and adds one notice", () => {
   const before = fold([
     { type: "history", messages: [{ role: "user", content: "hi" }], reason: null },

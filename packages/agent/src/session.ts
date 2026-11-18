@@ -10,6 +10,7 @@ import {
   type ChatMessage,
   type MessageMedia,
   NOTE_KIND,
+  type ScheduledFire,
   type VoiceTurn,
   checkAttachmentRefs,
 } from "@tentacle/core";
@@ -65,6 +66,12 @@ export interface SendOptions {
    * Ignored when nothing is pushed.
    */
   readonly media?: readonly MessageMedia[];
+  /**
+   * The scheduled wake that fires this turn, stamped with its fire instant
+   * (docs/feat/scheduled-fire-row.md): stored on the user message for the row.
+   * Display only. Ignored when nothing is pushed.
+   */
+  readonly scheduled?: ScheduledFire;
   /**
    * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3);
    * see `RunOptions.voice`. A voice `enqueue` (`enqueueVoice`) marks the rest of
@@ -203,6 +210,7 @@ export class Session {
         content: text,
         ...(refs.length > 0 ? { attachments: [...refs] } : {}),
         ...(opts.media !== undefined && opts.media.length > 0 ? { media: [...opts.media] } : {}),
+        ...(opts.scheduled !== undefined ? { scheduled: opts.scheduled } : {}),
       });
     }
     try {

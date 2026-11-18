@@ -5,7 +5,13 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ComposerAction } from "../src/composer.ts";
-import { hubHaptic, pressHaptic, rowMenuHaptic, turnEndHaptic } from "../src/haptic-rules.ts";
+import {
+  hubHaptic,
+  pressHaptic,
+  pulseHaptic,
+  rowMenuHaptic,
+  turnEndHaptic,
+} from "../src/haptic-rules.ts";
 
 const send: ComposerAction = { kind: "send", text: "hi" };
 const queue: ComposerAction = { kind: "queue", text: "hi" };
@@ -59,6 +65,21 @@ describe("hubHaptic (docs/feat/mobile-hub.md Design 2)", () => {
 
   test("light is played as is: the cue of a dimmed commit (mobile-hub-tap Design 3)", () => {
     expect(hubHaptic({ kind: "haptic", cue: "light" })).toBe("light");
+  });
+});
+
+describe("pulseHaptic (mobile-hub-badges Design 3, owner Q4)", () => {
+  test("news arriving live is a light tap", () => {
+    expect(pulseHaptic(true, false)).toBe("light");
+  });
+
+  test("one haptic per moment: a turn that ended in the same render keeps its success (F4)", () => {
+    expect(pulseHaptic(true, true)).toBeNull();
+  });
+
+  test("no pulse is always silent", () => {
+    expect(pulseHaptic(false, false)).toBeNull();
+    expect(pulseHaptic(false, true)).toBeNull();
   });
 });
 

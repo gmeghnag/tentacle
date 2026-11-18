@@ -124,6 +124,17 @@ describe("firedScheduleRef: the ONE gate both doors of `turn_start.schedule` sha
     expect(schedule.spec.endsWith("…")).toBe(true);
   });
 
+  test("a trusted ref keeps the fire's ordinal and instant; an older daemon's has neither", () => {
+    // Mutation: drop the `fire`/`at` spreads → the live row loses its fire time.
+    const ref = { id: "sc-1", spec: "every 10m", fire: 5, at: 1_763_394_840_000 };
+    expect(firedScheduleRef(ref, true).schedule).toEqual(ref);
+    expect(firedScheduleRef({ id: "sc-1", spec: "every 10m" }, true).schedule).toEqual({
+      id: "sc-1",
+      spec: "every 10m",
+    });
+    expect(firedScheduleRef(ref, false)).toEqual({});
+  });
+
   test("no claim, or an older daemon's absent one: nothing to spread", () => {
     expect(firedScheduleRef(undefined, true)).toEqual({});
     expect(firedScheduleRef(undefined, false)).toEqual({});

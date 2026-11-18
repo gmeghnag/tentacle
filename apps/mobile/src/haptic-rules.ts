@@ -40,6 +40,16 @@ export function turnEndHaptic(wasRunning: boolean, running: boolean): HapticKind
 }
 
 /**
+ * News arriving on the hub while it is on screen (mobile-hub-badges Design 3,
+ * owner Q1 C + Q4): a light tap with the glow. `turnEnded` is the SAME render's
+ * `turnEndHaptic` verdict — news usually lands exactly when a turn ends — so the
+ * moment plays one haptic, the turn's success, never two (§F4).
+ */
+export function pulseHaptic(pulse: boolean, turnEnded: boolean): HapticKind | null {
+  return pulse && !turnEnded ? "light" : null;
+}
+
+/**
  * The hub machine's effect → the haptic it plays (docs/feat/mobile-hub.md
  * Design 2): open = firm (the lift), a new highlight = tick, commit = commit.
  * The machine already decides WHEN (no tick on a cleared highlight, silence on

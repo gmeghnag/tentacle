@@ -135,6 +135,9 @@ export function historyRows(
           text: own.text,
           images: (m.attachments ?? []).map((ref): ImageRef => imageRef(ref)),
           ...(own.documents === undefined ? {} : { documents: own.documents }),
+          // A fired wake's record (docs/feat/scheduled-fire-row.md): the same
+          // `schedule` a live turn's ref gives, so the node is identical.
+          ...(m.scheduled === undefined ? {} : { schedule: m.scheduled }),
           ...at,
         });
       }

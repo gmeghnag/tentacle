@@ -10,6 +10,7 @@
  * (`client/schedules.ts`), and this is the phone's own gate, the rule
  * `sanitizeDisplay` applies to every other daemon string in the sheet.
  */
+import { type ScheduledRef, firedWakeOf } from "@tentacle/core";
 import type { ScheduleRow } from "@tentacle/protocol";
 import { sanitizeDisplay } from "./session-info.ts";
 
@@ -92,24 +93,48 @@ export function wakesMeta(count: number): string {
   return wakesBadge(count);
 }
 
-/** How long the fired head may be: it rides one line above the bubble's own text. */
+/** How long the fired row's one-line summary may be (the node line cuts it further). */
 export const FIRED_HEAD_MAX = 80;
 
+/** A fired scheduled wake as a timeline node: what `FiredRowView` draws. */
+export interface FiredRow {
+  /** `Wake 15:54` (the fire time; `#5` / the spec for an older message). */
+  readonly name: string;
+  /** The prompt on one line (collapsed, the default). */
+  readonly subtitle: string;
+  /** The prompt in full, shown only when tapped open. */
+  readonly body: string;
+  readonly a11yLabel: string;
+}
+
 /**
- * A fired turn's bubble head (M8 option B): `◷ Scheduled · every 10m`.
- *
- * The ref exists only for a LIVE fired turn of a daemon this client trusts
- * (`firedScheduleRef`, the client's one gate). No ref paints NOTHING, so a
- * reloaded turn shows its durable `[scheduled sc-1 · …]` prefix as the message
- * text — option A, unchanged.
+ * A user message that a scheduled wake fired, as a timeline node
+ * (docs/feat/scheduled-fire-row.md): `◷ Wake 15:54 · <prompt…>`, ALWAYS
+ * collapsed until tapped, never a bubble. The SAME decision live
+ * (`schedule` = the trust-gated `turn_start.schedule` ref) and reloaded
+ * (`schedule` = `ChatMessage.scheduled`): `firedWakeOf` reads the record first
+ * and the durable `[scheduled …]` prefix as the fallback. Not a fired message
+ * → null (the ordinary bubble).
  */
-export function firedScheduleHead(
-  schedule: { readonly id: string; readonly spec: string } | undefined,
-): string {
-  if (schedule === undefined) {
-    return "";
+export function firedRowView(
+  text: string,
+  schedule: ScheduledRef | undefined,
+  now: number,
+): FiredRow | null {
+  const view = firedWakeOf(text, schedule, now);
+  if (view === null) {
+    return null;
   }
-  return scheduleLabel(`◷ Scheduled · ${schedule.spec}`, FIRED_HEAD_MAX);
+  const name = scheduleLabel(`Wake ${view.when}`, FIRED_HEAD_MAX);
+  const subtitle = scheduleLabel(view.prompt.replace(/\s+/g, " ").trim(), FIRED_HEAD_MAX);
+  return {
+    name,
+    subtitle,
+    // In full, as the ordinary bubble shows a message's text (an RN `<Text>`
+    // paints no escapes); only the one-line labels are sanitized and cut.
+    body: view.prompt,
+    a11yLabel: subtitle === "" ? name : `${name}: ${subtitle}`,
+  };
 }
 
 /** An id as a row's delete control names it (the wire bounds it at 64; a screen bounds it harder). */

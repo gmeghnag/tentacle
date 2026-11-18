@@ -164,7 +164,7 @@ describe("hubContextOf — the session's artifacts, as the hub reads them (H4b)"
     expect(a.all[0]?.badge).toEqual({ kind: "count", n: 3 });
     expect(
       buttonBadge({ running: 0, unseenArtifacts: ctx.unseenArtifacts, unreadReport: false }),
-    ).toEqual({ kind: "dot" });
+    ).toBeNull();
   });
 
   test("no `artifacts` entry (no router on the screen) → no item, whatever the count (P6)", () => {

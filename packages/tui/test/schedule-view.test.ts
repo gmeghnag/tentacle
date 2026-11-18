@@ -12,7 +12,7 @@ import {
   SCHEDULES_START,
   type ScheduleDockRow,
   departedScheduleNotice,
-  firedScheduleHead,
+  firedRowLines,
   refreshedSchedules,
   scheduleDeleteStep,
   scheduleKey,
@@ -220,32 +220,50 @@ describe("S5: the /schedule panel FOLLOWS the table (fix round 1)", () => {
   });
 });
 
-describe("S5: the fired turn's head (M4 option B, degrading to A)", () => {
-  test("names the id and the interval, and reads `fire N` out of the durable prefix", () => {
-    const head = firedScheduleHead(
-      { id: "sc-1", spec: "every 10m" },
-      "[scheduled sc-1 · every 10m · fire 5] check CI on PR #412",
+describe("the fired wake's timeline rows (docs/feat/scheduled-fire-row.md)", () => {
+  const NOW = new Date(2026, 10, 17, 18, 0).getTime();
+  const AT = new Date(2026, 10, 17, 16, 14).getTime();
+  const text = "[scheduled sc-1 · every 10m · fire 5] check CI\non PR #412";
+  const record = { id: "sc-1", spec: "every 10m", fire: 5, at: AT };
+  const collapsed = { width: 80, expanded: false, now: NOW };
+
+  test("collapsed by default: ONE row with the fire time and the prompt on one line, no sc-N", () => {
+    expect(firedRowLines(text, record, collapsed)).toEqual(["◷ Wake 16:14 · check CI on PR #412"]);
+  });
+
+  test("expanded (Ctrl+O): the head, then the prompt's lines indented, a blank kept as a row", () => {
+    expect(
+      firedRowLines("[scheduled sc-1 · every 10m · fire 5] a\n\nb", record, {
+        ...collapsed,
+        expanded: true,
+      }),
+    ).toEqual(["◷ Wake 16:14", "  a", " ", "  b"]);
+  });
+
+  test("an older daemon's ref or log (no instant): every → #N, at → its spec time", () => {
+    expect(firedRowLines(text, { id: "sc-1", spec: "every 10m" }, collapsed)?.[0]).toBe(
+      "◷ Wake #5 · check CI on PR #412",
     );
-    expect(head).toBe("◷ scheduled · sc-1 every 10m · fire 5");
+    expect(
+      firedRowLines("[scheduled sc-2 · at 2026-11-17T15:54 · fire 1] go", undefined, collapsed),
+    ).toEqual(["◷ Wake 15:54 · go"]);
   });
 
-  test("no `fire N` in the text (a reworded daemon): the ordinal leaves, the head stays", () => {
-    const head = firedScheduleHead({ id: "sc-1", spec: "every 10m" }, "[scheduled sc-1] go");
-    expect(head).toBe("◷ scheduled · sc-1 every 10m");
+  test("an ordinary message is not a fired row", () => {
+    expect(firedRowLines("hello", undefined, collapsed)).toBeNull();
   });
 
-  test("no ref at all (a reload, an older daemon) paints NOTHING: option A is the row itself", () => {
-    expect(firedScheduleHead(undefined, "[scheduled sc-1 · every 10m · fire 5] go")).toBe("");
-  });
-
-  test("a hostile ref is one bounded line", () => {
-    const head = firedScheduleHead(
-      { id: "sc-\u001b[2Jx".repeat(200), spec: "e\n".repeat(400) },
-      "",
+  test("a hostile prompt is one bounded line, escapes gone", () => {
+    const rows = firedRowLines(
+      `[scheduled sc-1 · every 10m · fire 1] ${"x\u001b[2J‮".repeat(200)}`,
+      record,
+      { ...collapsed, width: 40 },
     );
-    expect(head).not.toContain("\u001b");
-    expect(head).not.toContain("\n");
-    expect(head.length).toBeLessThanOrEqual(120);
+    expect(rows?.length).toBe(1);
+    const [row = ""] = rows ?? [];
+    expect(row).not.toContain("\u001b");
+    expect(row).not.toContain("‮");
+    expect(row.length).toBeLessThanOrEqual(40);
   });
 });
 

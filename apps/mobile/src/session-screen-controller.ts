@@ -512,6 +512,14 @@ export interface SessionScreenController {
   removeChip(key: string): Promise<void>;
   /** **Send now**, beside the queue (13d, D1). */
   sendNow(): Promise<void>;
+  /** A pending bubble's ⇥ Send now: that message alone, the field untouched (Q4). */
+  sendNowRow(id: string): Promise<void>;
+  /** **Edit** a pending message (docs/feat/mobile-queued-compose.md D6). */
+  edit(id: string): Promise<void>;
+  /** **Cancel** a pending message (D6). */
+  cancel(id: string): Promise<void>;
+  /** The editing banner's × (D6): the message is queued again, a new id. */
+  editCanceled(): Promise<void>;
   /** A tap on another device's returned row (13d, D3: an explicit act). */
   take(id: string): Promise<void>;
   /** The outbox's four answers, for one item (13d, D4). */
@@ -845,8 +853,11 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           notSaved: false,
           chips: [],
           attach: { items: ["photo", "camera"], reason: null },
-          ownQueue: 0,
+          ownPending: 0,
           sendNow: false,
+          pending: [],
+          editing: null,
+          unqueueOff: false,
         },
       };
     }
@@ -872,8 +883,11 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         notSaved: value.notSaved,
         chips: value.chips,
         attach: value.attach,
-        ownQueue: value.ownQueue,
+        ownPending: value.ownPending,
         sendNow: value.sendNow,
+        pending: value.pending,
+        editing: value.editing,
+        unqueueOff: value.unqueueOff,
       },
     };
   }
@@ -919,7 +933,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         ...(chip.name === undefined ? {} : { name: chip.name }),
         ...(chip.state === "refused" ? { detail: chip.detail } : {}),
       })),
-      ownQueue: composeState.ownQueue,
+      ownPending: composeState.ownPending,
+      // The pending messages as the TRANSCRIPT draws them (D1) and the edit's
+      // banner state (D6): values, never decisions.
+      pending: composeState.pending,
+      editing: composeState.editing,
+      unqueueOff: composeState.unqueueOff,
     });
   }
 
@@ -1802,6 +1821,22 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     async sendNow() {
       await compose?.sendNow();
+      emit();
+    },
+    async sendNowRow(id) {
+      await compose?.sendNowRow(id);
+      emit();
+    },
+    async edit(id) {
+      await compose?.edit(id);
+      emit();
+    },
+    async cancel(id) {
+      await compose?.cancel(id);
+      emit();
+    },
+    async editCanceled() {
+      await compose?.editCanceled();
       emit();
     },
     async take(id) {
