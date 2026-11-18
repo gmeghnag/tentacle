@@ -166,6 +166,17 @@ public final class LiveTranscription: @unchecked Sendable {
         resampler = StreamResampler(from: nativeRate, to: format.sampleRate)
     }
 
+    /// The reporting options the live analyzer is opened with.
+    ///
+    /// `.fastResults` is deliberately NOT here. It trades accuracy for latency,
+    /// and it made the live `final` differ from the batch transcript of the SAME
+    /// take (measured: "Zorblack's quaintively fram is the Bunderblist" live vs
+    /// "Zorblack squintively fram is the Bunderblist" batch, 5/5 runs). The final
+    /// is what lands in the user's draft, so it must be the batch path's answer;
+    /// the price is a coarser partial cadence (≈ 1 per 3–4 s of speech instead of
+    /// ≈ 1 per 1.2 s), which the feature can afford. Pinned by `LiveTests`.
+    public static let reportingOptions: Set<SpeechTranscriber.ReportingOption> = [.volatileResults]
+
     /// Open a live session for a take captured at `nativeRate`. Throws a
     /// `HelperError` for what the batch path would report the same way, and
     /// `sttFailed` when the analyzer's format is one this path does not feed.
@@ -174,7 +185,7 @@ public final class LiveTranscription: @unchecked Sendable {
         let transcriber = SpeechTranscriber(
             locale: locale,
             transcriptionOptions: [],
-            reportingOptions: [.volatileResults, .fastResults],
+            reportingOptions: reportingOptions,
             attributeOptions: []
         )
         let analyzer = SpeechAnalyzer(modules: [transcriber])

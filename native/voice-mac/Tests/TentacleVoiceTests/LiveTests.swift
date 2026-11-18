@@ -110,6 +110,57 @@ final class LiveTests: XCTestCase {
         XCTAssertEqual(int16Sample(-3), -32767)
     }
 
+    // MARK: - the final's accuracy
+
+    /// The live path's `final` must be the batch path's answer for the same
+    /// audio: the final is what lands in the user's draft, so a lower-accuracy
+    /// reporting option (`.fastResults`) must never reach it. Review round 1,
+    /// MEDIUM 1 — this test replayed the take for five runs and the live final
+    /// carried the fast-transcriber's words ("Zorblack's quaintively fram is the
+    /// Bunderblist") instead of the batch one ("Zorblack squintively fram is the
+    /// Bunderblist") on every one.
+    func testTheLiveFinalIsTheBatchTranscriptAndNoFastReportingOption() async throws {
+        // The option set itself, first: it is the decision, not a proxy for it.
+        XCTAssertEqual(LiveTranscription.reportingOptions, [.volatileResults])
+        XCTAssertFalse(LiveTranscription.reportingOptions.contains(.fastResults))
+
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/say") else {
+            throw XCTSkip("no /usr/bin/say to synthesize a take")
+        }
+        let installed = await SpeechTranscriber.installedLocales.map(\.identifier)
+        guard installed.contains("en_US") else { throw XCTSkip("en_US speech asset not installed") }
+
+        // Nonce words, so the recogniser cannot get them right by guessing from
+        // context — a less accurate transcriber has to mangle at least one.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tentacle-voice-live-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let wav = dir.appendingPathComponent("take.wav")
+        let say = Process()
+        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        say.arguments = [
+            "-o", wav.path, "--data-format=LEF32@16000",
+            "Zorblax quentively frammist the bunderplast. Vexlorian smurfs granted by the quingboat.",
+        ]
+        try say.run()
+        say.waitUntilExit()
+        let file = try AVAudioFile(forReading: wav)
+        let buffer = try XCTUnwrap(
+            AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))
+        )
+        try file.read(into: buffer)
+        let channel = try XCTUnwrap(buffer.floatChannelData?[0])
+        let samples = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+
+        let batch = try await Transcriber().transcribe(samples: samples, sampleRate: 16000, language: .en)
+        let live = try await replayLive(
+            native: Capture.resample(samples, from: 16000, to: 48000), nativeRate: 48000,
+            language: .en, speed: 2
+        ) { _, _ in }
+        XCTAssertEqual(live.text, batch.text, "the live final is not the batch transcript")
+    }
+
     // MARK: a recorded take through the live path
 
     /// The mic cannot be driven from a test, so a synthesized take goes through
@@ -133,7 +184,9 @@ final class LiveTests: XCTestCase {
         say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
         say.arguments = [
             "-o", wav.path, "--data-format=LEF32@16000",
-            "Hello, this is a test of live dictation. The words appear while I am still speaking.",
+            "Hello, this is a test of live dictation. The words appear while I am still speaking. "
+                + "This sentence is here so the take comfortably outlasts the first volatile result, "
+                + "which arrives a few seconds in now that the fast reporting option is gone.",
         ]
         try say.run()
         say.waitUntilExit()
