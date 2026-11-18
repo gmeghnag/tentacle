@@ -753,3 +753,20 @@ Carried over, not findings: the two clocks for one flash (Low, left on purpose i
   - The 6 related test files pass, 129 / 0.
   - `bun run lint` is clean (2097 files).
   - `bun run typecheck` is clean.
+
+## Review
+
+### Slice C3 — fresh-context adversarial review
+
+**Verdict: APPROVE** (no HIGH/MEDIUM finding). Scope: `git diff main...HEAD` (C3 only).
+
+- **Gate (narrow, re-run):** `commands-sheet` + `session-commands` + `hub-commands-wiring` 40 pass / 0 fail; `bun run lint` clean (2103 files); `bun run typecheck` clean (root + mobile + relay). Full `bun test` not run here.
+- **§7 render-only:** `CommandsSheet.tsx` branches only on `CommandRow.state.kind` / `id` for placement; availability, reasons and texts come from `commandRows`. Every handler at the mount (`SessionScreen.tsx:1789-1802`) is the controller's own; no second command path. Holds.
+- **Mutations (Edit tool, reverted, `git status` clean, 17/17 green after):** failed-row Retry → `onRetry` (red: the failure test); running Stop → `onCompact` (red: the running test); non-ready rows made tappable (red: the dimmed test). The executor's four mutations not repeated.
+- **Attacks tried:** (1) Retry on `failed` runs `onCompact` — correct, only Compact reaches `failed` (`session-commands.ts:82-97`; `clearState` has none); (2) dead controls — Stop only on Compact's running row, Clear has no abort, correct; (3) guards bypass from the sheet — `armClear`/`clear`/`retryLast` re-check `rowReady` in the controller (`session-screen-controller.ts:2126-2170`), so a stale render cannot run a command; (4) floating button over the sheet — `commandsOpen` in `covered`, holds.
+- **Note (Low, not blocking):** closing the sheet (or Rename) does not `cancelClear()`, so an armed Clear survives and the reopened sheet shows `Clear this chat?` still asked. Still needs the explicit red `Clear` tap, and is disarmed by a turn start or a link drop; worth disarming in `closeCommands` later.
+- **Unverified:** simulator screenshots (light/dark) — none in this run either.
+- **Executor behaviour:** honest drift notes (`Compacted ✓` instead of figures, Stop only on Compact) match the code; the mutation table reproduces.
+- Same model family as the C3 executor (fresh context only): shared blind spots are possible; blast is contained, so acceptable.
+
+*— claude-opus-5-5, 2026-11-18*
