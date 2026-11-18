@@ -481,3 +481,81 @@ Not a finding (LOW): `joined` drops only the row's `paddingTop`. The row above k
 `paddingBottom` (`styles.row` `paddingVertical`), so a block shows half the gap, not none.
 
 Executor: scoped to S1 and disclosed its drift honestly. One drift claim (the `failed` one) is wrong.
+
+### Fix round 1
+
+*— claude-opus-5-5 (executor), 2026-11-18 · Review round 1's one MEDIUM*
+
+**Repro first.** `.tentacle/tmp/mobile-harness-notices/fix1-failed.ts` — the
+Review's own event pair (`failed "boom"` then a `lost` turn) folded and projected
+on the pre-fix code:
+
+```
+{"text":"⚠ boom",                  "level":null,   "harness":true,"harnessLevel":"info","glyph":"◇","joined":false}
+{"text":"that turn's stream …",    "level":"warn", "harness":true,"harnessLevel":"warn","glyph":"null","joined":true}
+```
+
+Confirms the finding exactly, including its second half: the failure is `◇` info
+**and** the warning after it joins under it, so the block's head wears the wrong
+shape. The TUI's counterpart is not a harness line at all (`state.ts:393` appends
+an `assistant` item), which is why parity never caught it — the phone folds the
+same fact into a `notice` row.
+
+**Fix** (`apps/mobile/src/transcript.ts:333-342`, one function): `outcomeNotice`'s
+`failed` branch now returns `warn: true`, like `lost`. Chosen over "keep it out of
+`isHarness`" (the Review's other option): the daemon's failure words are the one
+line the person must not miss, and `isHarness` is the mobile mirror of a TUI
+predicate whose shape is pinned by the parity test — carving a mobile-only
+exemption out of it would make the two folds disagree by construction. A failure
+is a fault, so it takes the fault shape.
+
+**Second decision, from the same repro:** the text loses its `⚠ ` prefix. The
+glyph IS the warning marker now; keeping both would draw `▲ ⚠ boom` — the same
+signal twice, and the review's "mixed signal" complaint in a new disguise. The
+row therefore reads `▲ boom`, and VoiceOver hears "Warning: boom" from the row's
+label (`TranscriptRow.tsx:670-676`). The daemon's words are unchanged.
+
+**Red before green (§9).** Both new assertions were shown failing on the pre-fix
+code first (2 fails in `transcript.test.ts`, on the level assertion — not on a
+compile error):
+
+```
+(fail) a turn's stream > a failed turn surfaces the daemon's words as a WARNING notice
+       Expected: "warn" · Received: undefined
+(fail) harness levels … > the phone-only notices …      Expected: "warn" · Received: undefined
+```
+
+**Mutation checks** (each reverted immediately, `git diff` clean of it):
+
+| mutation | failed test(s) |
+|---|---|
+| `failed` → drop `warn: true` (back to info) | `transcript.test.ts` "…a WARNING notice" + "the phone-only notices…"; `notice-row.test.ts` "a failed turn is drawn as a warning block…" (3 fails) |
+| `failed` text keeps `⚠ ${message}` (marker doubled on the `▲`) | the same 3 fails |
+
+The render test earns its place: it failed on the *level* mutation too, because
+it asserts the drawn tree (`▲` in `palette.orange`, label "Warning: boom", no `◇`
+anywhere, the next warning a `null`-glyph continuation) rather than only the
+field.
+
+**Files.** `apps/mobile/src/transcript.ts` (fix + the comment that stated the
+wrong rule — the drift note the Review called out), `apps/mobile/test/transcript.test.ts`
+(two assertions corrected to `warn` and to the unprefixed text), `apps/mobile/test/notice-row.test.ts`
+(new `describe`: fold → project → draw for a failed-then-lost pair). No other
+file: the Review's LOW (half a gap between a block's rows) is not a finding and is
+left as is.
+
+**Narrow verification.**
+
+```
+bun test apps/mobile/test/{transcript,transcript-parity,notice-group,notice-row,
+  transcript-reload,session-feed}.test.ts                     100 pass, 0 fail
+bunx tsc -p apps/mobile                                        clean
+bunx biome check <the 3 changed files>                          clean
+```
+
+NOT fixed, deliberately: Review's LOW (a `joined` row keeps the predecessor's
+`paddingBottom`, so a block shows half a gap) — the Review itself filed it as not
+a finding, and changing the spacing is presentation the owner approved as-is.
+
+S2 is still not started (it waits for `feat/mobile-thinking-images`, Owner Q6):
+this round touched S1 only.

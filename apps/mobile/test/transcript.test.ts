@@ -269,7 +269,7 @@ describe("a turn's stream", () => {
     expect(stopped?.kind === "notice" ? stopped.text : undefined).toBe(TURN_INTERRUPTED_NOTICE);
   });
 
-  test("a failed turn surfaces the daemon's words as a notice", () => {
+  test("a failed turn surfaces the daemon's words as a WARNING notice", () => {
     const state = fold([
       { type: "turn_started", turnId: "t", own: true },
       { type: "turn_ended", outcome: "failed", message: "the model refused" },
@@ -277,7 +277,10 @@ describe("a turn's stream", () => {
     expect(state.rows.at(-1)).toEqual({
       kind: "notice",
       key: state.rows.at(-1)?.key as string,
-      text: "⚠ the model refused",
+      // The daemon's words as they came; the WARNING marker is the `▲` glyph
+      // (Review round 1, finding 1 — `◇ ⚠ boom` mixed the two signals).
+      text: "the model refused",
+      level: "warn",
     });
   });
 
@@ -475,7 +478,9 @@ describe("harness levels: the TUI's table, so the phone can draw `▲` vs `◇`"
     const unsupported = fold([{ type: "unsupported", kind: "brand_new_update" }]);
     expect(levelOfRow(unsupported.rows[0])).toBeUndefined();
     const failed = apply(lost, { type: "turn_ended", outcome: "failed", message: "boom" });
-    expect(failed.rows[0]?.kind === "notice" ? failed.rows[0].text : "").toBe("⚠ boom");
+    expect(failed.rows[0]?.kind === "notice" ? failed.rows[0].text : "").toBe("boom");
+    // ...and it is a fault, so it warns like a lost stream (Review round 1).
+    expect(levelOfRow(failed.rows[0])).toBe("warn");
   });
 
   test("the merged `again` line keeps the warn level AND its key (FlatList identity)", () => {

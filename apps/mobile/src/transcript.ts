@@ -319,8 +319,10 @@ export function endTurn(
 /**
  * The line an unexplained outcome leaves, with its harness level
  * (docs/feat/mobile-harness-notices.md Owner Q3): a LOST turn stream is something
- * that went wrong (`▲`), an interrupted one is news (`◇`). A `failed` turn keeps
- * its own `⚠ …` line, which is the TUI's assistant text — not a harness line.
+ * that went wrong (`▲`), an interrupted one is news (`◇`). A `failed` turn went
+ * wrong too, so it WARNS as well — the glyph is its warning shape, so its text
+ * carries the daemon's words with no `⚠` of its own (Review round 1: a `◇ ⚠ …`
+ * line mixed the two signals, and `▲ ⚠ …` would draw the same marker twice).
  */
 function outcomeNotice(
   input: Extract<TranscriptInput, { type: "turn_ended" }>,
@@ -332,7 +334,9 @@ function outcomeNotice(
       return { text: TURN_LOST_NOTICE, warn: true };
     case "failed":
       return {
-        text: `⚠ ${input.message !== undefined && input.message !== "" ? input.message : "the turn failed"}`,
+        text:
+          input.message !== undefined && input.message !== "" ? input.message : "the turn failed",
+        warn: true,
       };
     default:
       return null; // ended / cancelled: the transcript says what happened

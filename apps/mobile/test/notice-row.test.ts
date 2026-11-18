@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Fragment, isValidElement } from "react";
+import { apply, initialState as foldInitial } from "../src/transcript.ts";
 
 interface Node {
   readonly type: unknown;
@@ -210,6 +211,57 @@ describe("a harness line is left-aligned behind a glyph column", () => {
     // row's `level`, so a component test or a row outside a list reads correctly.
     expect(texts(draw({ text: "cut", level: "warn" }))).toContain(group.NOTICE_GLYPHS.warn);
     expect(texts(draw({ text: "a repair" }))).toContain(group.NOTICE_GLYPHS.info);
+  });
+});
+
+/**
+ * Review round 1, finding 1 — the whole drawn shape of a FAILED turn, folded and
+ * projected for real: a failure is a fault, so it opens a `▲` block and its text
+ * speaks the level; the line after it hangs under that glyph instead of opening a
+ * second one. Asserting only the row's `level` would pass while the screen still
+ * drew `◇ ⚠ …`, so this walks the actual row tree.
+ */
+describe("a failed turn is drawn as a warning block, not an info footnote", () => {
+  /** Fold a failed turn and the lost one right after it, as the daemon sends them. */
+  function failedThenLost(): readonly import("../src/transcript-rows.ts").Row[] {
+    let state = foldInitial;
+    for (const event of [
+      { type: "turn_started", turnId: "t1", own: true },
+      { type: "turn_ended", outcome: "failed", message: "boom" },
+      { type: "turn_started", turnId: "t2", own: false },
+      { type: "turn_ended", outcome: "lost" },
+    ]) {
+      state = apply(state, event as never);
+    }
+    return state.rows;
+  }
+
+  test("the failure opens `▲` and speaks its level; the next warning hangs under it", () => {
+    const rows = failedThenLost();
+    const looks = group.noticeLooks(rows);
+    expect(rows.map((row) => looks.get(row.key))).toEqual([
+      { glyph: group.NOTICE_GLYPHS.warn, joined: false },
+      { glyph: null, joined: true },
+    ]);
+    const [failure, lost] = rows;
+    const nodes = draw(
+      failure as unknown as Record<string, unknown>,
+      looks.get(failure?.key ?? "") as { glyph: string | null; joined: boolean },
+    );
+    const glyph = textNode(nodes, group.NOTICE_GLYPHS.warn);
+    expect(glyph).toBeDefined();
+    expect((glyph?.props.style as readonly unknown[])[2]).toEqual({
+      color: theme.lightPalette.orange,
+    });
+    expect(textNode(nodes, "boom")?.props.accessibilityLabel).toBe("Warning: boom");
+    // No info glyph anywhere in the failure's own tree: one signal, not two.
+    expect(texts(nodes)).not.toContain(group.NOTICE_GLYPHS.info);
+    // The lost line is a CONTINUATION: empty column, no second `▲`.
+    const cont = draw(
+      lost as unknown as Record<string, unknown>,
+      looks.get(lost?.key ?? "") as { glyph: string | null; joined: boolean },
+    );
+    expect(texts(cont)).not.toContain(group.NOTICE_GLYPHS.warn);
   });
 });
 
