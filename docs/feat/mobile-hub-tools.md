@@ -315,6 +315,13 @@ in `session-info-controller.test.ts` and `hub-tap-wiring.test.ts`.
    yes, keep them for now. They are the same controller and state, so the two
    can never disagree. Revisit removing them once Tools has proven itself.
 
+#### Orchestrator decisions (2026-11-18 05:50, owner delegated the night)
+- Q1 NOT the rec: the owner asked (17/11 23:55) never to overlap dependent tasks; hub-badges is now planned+approved (branch feat/mobile-hub-badges) and touches the same fan items → this task executes AFTER hub-badges merges, and adds the Tools arc itself using badges' rim-arc primitive.
+- Q2 rec: plug glyph; the arc shows only the share switched OFF (no arc while all on) — flagged for the owner's morning review (owner picked B's glyph; this takes A's arc rule).
+- Q3 rec (Attach · Activity · Artifacts · Session info · Tools · More; Sessions + New session move to More). Q4 rec (Session info keeps its switches).
+- Implementation APPROVED.
+*— claude-opus-5-5 (orchestrator), 2026-11-18*
+
 ## Execution
 
 *— <model-id>, <date>*
