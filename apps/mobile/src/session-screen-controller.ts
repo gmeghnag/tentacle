@@ -38,6 +38,7 @@ import {
   joinRows,
   phaseOfError,
   withList,
+  withLiveCards,
   withPhase,
 } from "./artifact-join.ts";
 import type {
@@ -707,6 +708,14 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       // tool details: the cards this screen already knows are joined back on HERE,
       // the one place every folded state passes, so a resync never loses them.
       transcript = joinedRows(next);
+      // A card that arrived LIVE joins the list too: the list is the hub's count
+      // (rim + glow) and the gallery's source, and it is only ASKED at the attach
+      // (docs/fix/mobile-qa-1118.md, bug 3). De-duplicated by id + version.
+      const live = withLiveCards(join, transcript.rows);
+      if (live !== join) {
+        join = live;
+        publishJoin();
+      }
       emit();
     },
     setForeign: (turn) => {
