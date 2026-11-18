@@ -1,3 +1,4 @@
+import type { DiagramStyle } from "./diagram-settings-store.ts";
 /**
  * The phone's diagram render cache (docs/feat/model-diagrams.md D5/D6): an
  * in-memory LRU of 32 renders, keyed `(sha256(canonical), scheme, fontScale)`,
@@ -40,8 +41,12 @@ export function diagramCacheKey(
   canonical: string,
   scheme: "light" | "dark",
   fontScale: number,
+  style: DiagramStyle = "outline",
 ): string {
-  return `base|${scheme}|${fontScale}|${sha256Hex(new TextEncoder().encode(canonical))}`;
+  // The look is part of a render's identity (docs/fix/mobile-qa-1117.md, bug 3);
+  // `outline` keeps the key it always had, so no render is redone for it.
+  const theme = style === "filled" ? "base+filled" : "base";
+  return `${theme}|${scheme}|${fontScale}|${sha256Hex(new TextEncoder().encode(canonical))}`;
 }
 
 /** A bounded LRU over `Map`'s insertion order (re-inserting a key moves it last). */

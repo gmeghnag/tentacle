@@ -86,6 +86,8 @@ import {
 } from "./src/computers.ts";
 import { type ComputerLink, openComputer } from "./src/connection.ts";
 import { pairingTextFromUrl } from "./src/deep-link.ts";
+import { DIAGRAM_SETTINGS } from "./src/diagram-settings-expo.ts";
+import type { DiagramSettings, DiagramStyle } from "./src/diagram-settings-store.ts";
 import { createDraftScheduler } from "./src/drafts.ts";
 import {
   type DrawerRow,
@@ -1645,6 +1647,25 @@ function AppShell(): JSX.Element {
     );
   }, []);
 
+  // Diagrams (docs/fix/mobile-qa-1117.md, bug 3): outline | filled, loaded once;
+  // the transcript reads the holder itself (`useDiagramStyle`), Settings shows it.
+  const [diagramSettings, setDiagramSettings] = useState<DiagramSettings>(() =>
+    DIAGRAM_SETTINGS.current(),
+  );
+  const [diagramWritable, setDiagramWritable] = useState(true);
+  const [diagramError, setDiagramError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = DIAGRAM_SETTINGS.subscribe(setDiagramSettings);
+    void DIAGRAM_SETTINGS.load().then(() => setDiagramWritable(DIAGRAM_SETTINGS.writable()));
+    return unsubscribe;
+  }, []);
+  const selectDiagramStyle = useCallback((style: DiagramStyle) => {
+    setDiagramError(undefined);
+    DIAGRAM_SETTINGS.set({ style }).catch(() =>
+      setDiagramError("That diagram setting didn't save"),
+    );
+  }, []);
+
   // Photos (fix/mobile-media-live item 5): the "Send photos at original size"
   // switch, loaded once. A failed write leaves the copy unchanged and says so;
   // a newer build's record is never written over.
@@ -2164,6 +2185,10 @@ function AppShell(): JSX.Element {
                   ? {}
                   : { activityOpacity: activitySettings.opacity })}
                 onActivityOpacity={selectActivityOpacity}
+                diagramStyle={diagramSettings.style}
+                diagramWritable={diagramWritable}
+                {...(diagramError === undefined ? {} : { diagramError })}
+                onDiagramStyle={selectDiagramStyle}
                 // Item 5's switch (fix/mobile-media-live): the downscale is the
                 // default, and a newer build's record is never written over.
                 photoSettings={photoSettings}

@@ -8,7 +8,7 @@
  * pinned to the real function by `test/transcript-parity.test.ts`.
  */
 import type { ChatMessage } from "@tentacle/core";
-import { splitFileBlocks, toolLabel } from "@tentacle/core";
+import { compactionOf, compactionSeparatorText, splitFileBlocks, toolLabel } from "@tentacle/core";
 import { type ImageRef, type Row, imageRef, mediaRowText } from "./transcript-rows.ts";
 
 /** The context reset's header (mirrors `agent/src/context-reset.ts`; pinned by a test). */
@@ -32,6 +32,20 @@ export function restartPromptOf(content: string): string | null {
   }
   const end = content.lastIndexOf(CLOSE);
   return end < head.length ? null : content.slice(head.length, end);
+}
+
+/**
+ * A compaction as ONE separator (docs/fix/mobile-qa-1117.md, bug 4; the TUI's
+ * `compactionItem`, docs/feat/harness-notices.md S3.4): `compacted · ctx A → B`
+ * from the summary's `compacted` figures, `compacted` alone for a legacy one.
+ * The SAME row whether the compaction is seen live from another device or after
+ * a reopen. The brief is NOT shown: it is the model's note to itself, which the
+ * TUI keeps behind Ctrl+O — and a phone notice has no expand.
+ */
+export function compactionSeparatorRow(key: string, messages: readonly ChatMessage[]): Row {
+  const summary = messages.find((m) => compactionOf(m) !== null);
+  const view = summary === undefined ? {} : (compactionOf(summary) ?? {});
+  return { kind: "notice", key, text: compactionSeparatorText(view), separator: true };
 }
 
 /** A tentacle-written note (a job's exit, a sub-agent's report): a notice, never a user row. */
@@ -109,6 +123,8 @@ export function historyRows(
           restart: true,
           ...at,
         });
+      } else if (compactionOf(m) !== null) {
+        rows.push(compactionSeparatorRow(nextKey(), [m]));
       } else if (m.note !== undefined) {
         rows.push(noteRow(nextKey(), m));
       } else {
@@ -152,8 +168,9 @@ export function historyRows(
         rows[at] = {
           ...tool,
           output: m.content,
-          // A refused call is known from its reply; any other error flag is not stored.
-          status: m.denialReply !== undefined ? "denied" : "ok",
+          // A refused call is known from its reply, a failed one from its stored
+          // flag (docs/fix/mobile-qa-1117.md, bug 2): the status live showed.
+          status: m.denialReply !== undefined ? "denied" : m.isError === true ? "error" : "ok",
           ...(m.spill !== undefined ? { spill: m.spill } : {}),
           ...(m.denialReply !== undefined ? { denialReply: m.denialReply } : {}),
           ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),

@@ -19,6 +19,7 @@ import { type JSX, type ReactNode, useState } from "react";
 import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { CHART_TOOL, chartRowView } from "../../chart-row.ts";
 import { DIAGRAM_TOOL, diagramRowView } from "../../diagram-row.ts";
+import type { DiagramStyle } from "../../diagram-settings-store.ts";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
@@ -81,6 +82,8 @@ export interface RowProps {
    * (docs/feat/mobile-tool-rows.md S2). Absent: a lone, closed step.
    */
   readonly step?: StepProps;
+  /** The diagram look picked in Settings (docs/fix/mobile-qa-1117.md, bug 3); absent → outline. */
+  readonly diagramStyle?: DiagramStyle;
 }
 
 /**
@@ -375,7 +378,11 @@ function ChartRowView(props: RowProps): JSX.Element {
 function DiagramRowView(props: RowProps): JSX.Element {
   const tool = props.row as Extract<Row, { kind: "tool" }>;
   const screen = useWindowDimensions();
-  const view = diagramRowView(tool, { palette: props.palette, fontScale: screen.fontScale });
+  const view = diagramRowView(tool, {
+    palette: props.palette,
+    fontScale: screen.fontScale,
+    ...(props.diagramStyle === undefined ? {} : { style: props.diagramStyle }),
+  });
   if (view === null) {
     return <ToolRowView {...props} />;
   }

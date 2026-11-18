@@ -39,6 +39,22 @@ describe("messagesToItems", () => {
     });
   });
 
+  test("a stored failed result resumes as error, as it was live (docs/fix/mobile-qa-1117.md)", () => {
+    const items = messagesToItems([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "bad", name: "shell", arguments: '{"command":"ls missing-dir"}' },
+          { id: "good", name: "shell", arguments: '{"command":"ls"}' },
+        ],
+      },
+      { role: "tool", content: "ls: missing-dir: No such file", toolCallId: "bad", isError: true },
+      { role: "tool", content: "a.txt", toolCallId: "good" },
+    ]);
+    expect(items.map((i) => (i.kind === "tool" ? i.status : i.kind))).toEqual(["error", "ok"]);
+  });
+
   test("an assistant with both text and a tool call yields two items", () => {
     const items = messagesToItems([
       {
