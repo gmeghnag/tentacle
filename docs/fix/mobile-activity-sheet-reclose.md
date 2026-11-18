@@ -172,3 +172,16 @@ until the spring came back above 0.
    the scrim covers the hub, so a tap there is a scrim tap (cycle 1).
 8. **Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
    `bun run lint` clean (2084 files, no fixes) · `bun test` **15262 pass / 5 skip / 0 fail** (15267 tests, 1089 files, 485 s; 5 skips = the same count main's last full run reported in docs/feat/mobile-activity-panel.md).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-18*
+
+**Verdict: APPROVE.** No HIGH/MEDIUM findings. Scope: `git diff main...HEAD` only.
+
+- **Gate (narrow):** `activity-sheet-close.test.ts` + `activity-panel-wiring.test.ts` → 24 pass / 0 fail · `bun run lint` clean (2084 files) · `bun run typecheck` clean (root, mobile, relay). I did not re-run the full `bun test`. Execution reports 15262 pass / 5 skip / 0 fail.
+- **Premises:** RN 0.88's `AnimatedInterpolation.js:57-61,127-131` really does support `extrapolateLeft: "clamp"` separately from the right side → TRUE. `height` (`ActivitySheet.tsx:201`) has no other reader that would need the unclamped value: no `addListener`, and the scrim does not interpolate it. The drag writes the raw value through `panelDrag` (`:296`), which is already clamped → TRUE. Only the drawn style changes (`:342`). The state machine and the close guard are untouched → TRUE.
+- **Mutation:** `extrapolateLeft` changed to `"extend"` → `activity-sheet-close.test.ts` 2 fail. Restored from a scratch copy, and `git status` was clean afterwards. Execution's M1–M5 are consistent with this.
+- **Attacks tried:** (1) Could the clamp hide the open's overshoot? No: `extrapolateRight: "extend"`, pinned by test 4. (2) Does Reduce Motion / `timing` still go through `drawn`? Yes: the same view, and it never goes negative. (3) §7 invariants: none touched. Mobile presentation only, with the constants extracted to a pure module per the "logic in pure modules" rule. (4) Is the pure test vacuous? It restates RN's spring formula, not RN itself, so the source-text wiring pin carries the "real code uses these constants" half. Weak but acceptable for RN, which `bun test` cannot render.
+- **Residual (not blocking):** swipe-down close not verified on frames (Execution §7). It shares `close()` → spring → clamp. To verify: a flick on the header on a device. The doc header still reads `Status: execution`.
+- **Executor behaviour:** evidence-first, as AGENTS §1 asks. It falsified two hypotheses empirically and removed both failed attempts. It reported a simulator collision honestly. Same model family as the executor (fresh context only), so shared blind spots are possible. The blast is contained, so that is acceptable.
