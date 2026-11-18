@@ -149,4 +149,51 @@ other two are pre-existing on `main`, not checked here).
 
 ## Review
 
-*(pending — fresh-context Opus review)*
+*— claude-opus-5-5, 2026-11-18* (fresh context, but the **same model** as the
+executor: blind spots they share survive both passes. Blast is `contained`, so
+§10 allows it.)
+
+**Verdict: APPROVE.** No HIGH or MEDIUM findings. Scope: `git diff main...HEAD` only.
+
+**Gate (run by the reviewer):** the 3 touched test files pass 13/13 (27
+expects) · `bun run lint` clean (2072 files) · `bun run typecheck` clean (root
++ mobile + relay). I did not re-run the full `bun test`; the count in Execution
+is the executor's.
+
+**Premises (checked against the code):**
+- No `Animated.event` in `FloatingActivity.tsx`: TRUE. `xy` changes only through
+  `setValue` (re-placement, `back`, `dragTo`, Reduce-Motion drop) and the drop
+  spring.
+- One props node per view, all native: TRUE. The outer view animates `opacity`
+  plus `xy.getTranslateTransform()`, both native now. The body animates only
+  `bodyLevel`. The arc animates only `spin`, which was already native.
+- Nothing reads a JS-side animated value: TRUE. The press start comes from
+  `place(p.position, p.bounds)` (`onPanResponderGrant`), not from `xy`, so a JS
+  value that lags a native spring cannot give a wrong start.
+- No other JS-driven animation on these values: TRUE (grep).
+
+**Mutation (non-vacuity), reverted afterwards (tree byte-identical, `git status` clean):**
+spring given `useNativeDriver: false`, then `levelPlan` up-duration changed
+0→150, then the THINKHOLD trigger renamed. Result: 4 tests fail (the two wiring
+tests, `levelPlan` up, THINKHOLD reasoning).
+
+**Attacks tried:**
+1. A new grant while the native drop spring runs: the start comes from props,
+   and `setValue` stops the running animation. Nothing found.
+2. A fade-out completion that unmounts: the `finished` callback still fires on
+   the JS side when the native animation ends. Nothing found.
+3. A Reduce-Motion toggle now re-runs the fade effect (the dependency changed
+   from `fadeMs` to `reduceMotion`). It re-targets the same value, so it is
+   harmless.
+4. THINKHOLD after Stop: `send` on a cancelled stream behaves like the existing
+   HOLD delta loop (an e2e mock, pre-existing pattern). THINKHOLD also runs about
+   2× `holdMs` in total (the reasoning loop, then the held answer). This is
+   test-harness only and below the reporting bar.
+
+**What is still unverified:** the owner's stutter on a real iPhone. The
+simulator did not reproduce it before or after the change (Context table).
+The late-turn tap observation is still open.
+
+**How the executor behaved:** measured before changing anything, reported the
+negative simulator result honestly, kept the logic in a pure module (§7), and
+showed tests going red before green.
