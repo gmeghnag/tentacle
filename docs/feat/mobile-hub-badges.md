@@ -242,3 +242,17 @@ Execution.
 - Q1 keep the running number on the button (rec). Q2 CORRECTED to the owner-picked mockup: **36° per item** (C · "Rim arc ∝ count: 36° per item"), full rim at 10, a due scheduled wake draws a full rim. Q3 no pulse on resume (rec). Q4 one haptic per moment (rec). Q5 execute after feat/mobile-hub-native-driver merges, re-verify file:line (rec).
 - Implementation APPROVED.
 *— claude-opus-5-5 (orchestrator), 2026-11-18*
+
+## Review
+
+*— claude-opus-5-5, 2026-11-18* (fresh context; same model family as the planner, different from the deepseek executor)
+
+**Verdict: REQUEST-CHANGES.** Gate is red.
+
+1. **HIGH — test red.** `apps/mobile/test/hub-badges-wiring.test.ts` "no glow while the button is hidden (F3)" expects `pulsePrev.current = newsNow`; `SessionScreen.tsx:975` writes an object literal instead (`newsNow` computed at :952 is then only read for `unseen`/`unread`). Touched files: 163 pass / 1 fail.
+2. **HIGH — lint red (baseline is 0).** `SessionScreen.tsx:965` `useExhaustiveDependencies` (the `[artifactsSeenKey]` effect never reads its dep) + format of `SessionScreen.tsx:974`. `bun run check` cannot be green. Typecheck passes.
+3. **MEDIUM — F2 guard is dead code.** The link-drop reset effect (`SessionScreen.tsx:960-963`) runs before the main effect (:968-980) in the same commit, and the main effect also depends on `linkUp`, so it immediately overwrites `pulsePrev` with the link-down reading: the baseline is never `null` on reconnect, and is advanced during the outage — contrary to Design F2 ("fed only while link up; prev reset on drop"). A drop-time empty list (0) then a refill after reconnect pulses spuriously. The wiring test's "≥2 `pulsePrev.current = null`" counts text, not behaviour (vacuous for this property).
+4. **MEDIUM — F1 reset can swallow the next real pulse.** The `artifactsSeenKey` reset (:964-967) is a separate effect; if the switch leaves `unseen/unread/linkUp/floatShown/running` unchanged, the main effect doesn't run, `prev` stays `null`, and the next genuine increase compares against `null` → no glow (F1 says "the next real increase pulses").
+5. **MEDIUM — no Execution section.** No as-built, no red-before-green evidence, no mutation record (§9/§10). Plan Tests also asked for a `theme` opacity property test (card/fill `#RRGGBB`) — not present on the branch.
+
+Attacks tried: haptic F4 (one effect, `ended !== null`) — holds; `rimFraction` clamp/NaN/≤0 — holds; `fanItemLook` never `glass` — holds; ContextRing pixel parity (20/1.8, track `sep`) — holds; glow on native driver (opacity + transform only) — holds. Mutation not run beyond reading: the gate is already red, so non-vacuity is moot until fixed.
