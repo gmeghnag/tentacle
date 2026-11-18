@@ -93,6 +93,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
     hiddenAbove,
     attachRow,
     voiceStrip,
+    voiceGhost,
     onPillRange,
   } = model;
 
@@ -252,6 +253,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
                     placeholder={st.running ? "Queue a task…" : INPUT_PLACEHOLDER}
                     maxRows={MAX_INPUT_ROWS}
                     width={columns}
+                    ghost={voiceGhost}
                   />
                 </Box>
               </>

@@ -89,28 +89,15 @@ public final class Transcriber {
         sampleRate: Double,
         language: Language
     ) async throws -> Output {
-        guard SpeechTranscriber.isAvailable else {
-            throw HelperError.modelLoadFailed("this Mac has no on-device speech recogniser")
+        guard !samples.isEmpty else {
+            // Still checked FIRST among the audio checks, after availability, as
+            // before: an unavailable recogniser outranks an empty take.
+            guard SpeechTranscriber.isAvailable else {
+                throw HelperError.modelLoadFailed("this Mac has no on-device speech recogniser")
+            }
+            throw HelperError.sttFailed("no audio")
         }
-        guard !samples.isEmpty else { throw HelperError.sttFailed("no audio") }
-
-        let localeId = Self.localeId(for: language)
-        let locale = Locale(identifier: localeId)
-        let supported = await SpeechTranscriber.supportedLocales
-        guard supported.contains(where: { $0.identifier == localeId }) else {
-            throw HelperError.modelsMissing("no speech model for \(localeId)")
-        }
-        // A supported-but-uninstalled locale yields an EMPTY transcript, which
-        // would read as "didn't catch anything" — say what is wrong instead.
-        //
-        // Checked against `installedLocales` (the system's own truth) and not
-        // `AssetInventory.status(forModules:)`: that one answers for locales
-        // RESERVED IN THIS PROCESS, so a healthy Mac reports "not installed"
-        // until something reserves one (S1 hit exactly this in `trace`).
-        let installed = await SpeechTranscriber.installedLocales.map(\.identifier)
-        guard installed.contains(localeId) else {
-            throw HelperError.modelsMissing("the speech asset for \(localeId) is not installed")
-        }
+        let (localeId, locale) = try await Self.preflight(language: language)
 
         // A FRESH transcriber per call: reusing one across analyzers traps (S1).
         let transcriber = Self.makeTranscriber(locale: locale)
@@ -193,6 +180,33 @@ public final class Transcriber {
         let text = try await collector.value
         let ms = Int(Date().timeIntervalSince(started) * 1000)
         return Output(text: text, lang: language == .auto ? localeId.prefix(2).description : language.rawValue, sttMs: ms)
+    }
+
+    /// The checks every transcription makes before it builds an analyzer — the
+    /// batch path's and the live path's (docs/feat/voice-live-transcript.md), so
+    /// both report a missing recogniser or asset the same way.
+    static func preflight(language: Language) async throws -> (String, Locale) {
+        guard SpeechTranscriber.isAvailable else {
+            throw HelperError.modelLoadFailed("this Mac has no on-device speech recogniser")
+        }
+        let localeId = Self.localeId(for: language)
+        let locale = Locale(identifier: localeId)
+        let supported = await SpeechTranscriber.supportedLocales
+        guard supported.contains(where: { $0.identifier == localeId }) else {
+            throw HelperError.modelsMissing("no speech model for \(localeId)")
+        }
+        // A supported-but-uninstalled locale yields an EMPTY transcript, which
+        // would read as "didn't catch anything" — say what is wrong instead.
+        //
+        // Checked against `installedLocales` (the system's own truth) and not
+        // `AssetInventory.status(forModules:)`: that one answers for locales
+        // RESERVED IN THIS PROCESS, so a healthy Mac reports "not installed"
+        // until something reserves one (S1 hit exactly this in `trace`).
+        let installed = await SpeechTranscriber.installedLocales.map(\.identifier)
+        guard installed.contains(localeId) else {
+            throw HelperError.modelsMissing("the speech asset for \(localeId) is not installed")
+        }
+        return (localeId, locale)
     }
 
     static func makeTranscriber(locale: Locale) -> SpeechTranscriber {
