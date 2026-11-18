@@ -470,3 +470,19 @@ and calls `pullTools()` on the dimmed (notice) commit path.
 - `pullTools` when not attached: skills reads `not-open`, so `known` is false and the item is not dimmed, so a tap opens the sheet. Converges.
 - No protocol, persistence or invariant change. Blast `contained` confirmed.
 - Low, not blocking: with the sheet closed, `stopCaps` means another device's flip does not repaint the hub rim until the next emit. The value is read live (`current()`), so it is only stale until some other repaint.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18* (reviewing `3477ac28`, `git diff HEAD~1`, which touches only `apps/mobile/test/hub-actions.test.ts`)
+
+**Verdict: REQUEST-CHANGES** — the fix commit breaks the gate, and two of the three findings are not addressed.
+
+1. **HIGH — the new test does not compile and fails on unchanged code.** `apps/mobile/test/hub-actions.test.ts:580,581,588` use `loadingTools`, which is defined nowhere. Results:
+   - `bun test apps/mobile/test/hub-actions.test.ts` → 53 pass · **1 fail** (`ReferenceError: loadingTools is not defined`).
+   - `bun run typecheck` → 3 × TS2304.
+   - `bun run lint` → 1 error (organizeImports: the `tools-view.ts` import at `:31` is out of order).
+   F1 is therefore **not verified**. The `known`-guard mutation does turn the suite red, but the test is already red without it, so that proves nothing (§9). Fix: build the loading facts in the test, e.g. `{ mcp: { state: "loading" }, skills: { state: "loading" } }` plus whatever `SwitchFacts` requires. Then show it green, and red under the mutation `toolsEmpty: input.tools?.total === 0`.
+2. **MEDIUM — Round-1 F2 is not addressed.** Re-ran the mutation: the `pullTools` paint guard made always-true (it never paints) → `session-info-controller.test.ts` still 47 pass · 0 fail. D4's convergence (a dimmed tap re-pulls and un-dims) is still not tested.
+3. **MEDIUM — Round-1 F3 is not addressed.** The Execution is still signed `claude-sonnet-4-5` (`:327`), but the commits say DeepSeek.
+
+Tree byte-identical after mutations (`git status` shows only this doc).
