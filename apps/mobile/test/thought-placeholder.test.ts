@@ -94,6 +94,34 @@ describe("live: the same row as the reload", () => {
     }
   });
 
+  test("whitespace-only reasoning: no Thought row (a reload shows none either)", () => {
+    let s = apply(initialState, { type: "reasoning", delta: "  \n" } as never, 1_000);
+    s = apply(s, { type: "text", delta: "hello" } as never, 5_000);
+    expect(thoughtCells(s.rows)).toHaveLength(0);
+    expect(s.rows.map((r) => r.kind)).toEqual(["assistant"]);
+  });
+
+  test("blank deltas after real reasoning still extend the row", () => {
+    let s = apply(initialState, { type: "reasoning", delta: "plan" } as never, 1_000);
+    s = apply(s, { type: "reasoning", delta: "  " } as never, 2_000);
+    s = apply(s, { type: "text", delta: "hello" } as never, 3_000);
+    const found = thoughtCells(s.rows);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.row.kind === "reasoning" ? found[0].row.text : "").toBe("plan  ");
+  });
+
+  test("a run that starts blank is timed from its first non-blank delta", () => {
+    let s = apply(initialState, { type: "reasoning", delta: " " } as never, 1_000);
+    s = apply(s, { type: "reasoning", delta: "let me think" } as never, 5_000);
+    s = apply(s, { type: "text", delta: "hello" } as never, 9_000);
+    const found = thoughtCells(s.rows);
+    expect(found).toHaveLength(1);
+    const cell = found[0]?.cell;
+    if (cell?.kind === "thought") {
+      expect(`Thought ${thoughtRowView(cell).subtitle}`).toBe("Thought · 4 s");
+    }
+  });
+
   test("reasoning then a tool: folded into the step with its text (live body)", () => {
     let s = apply(initialState, { type: "reasoning", delta: "plan" } as never, 1_000);
     s = apply(s, { type: "tool_start", id: "c1", name: "shell", arguments: "{}" } as never, 2_000);

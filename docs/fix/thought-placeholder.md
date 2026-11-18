@@ -231,3 +231,52 @@ needed (display, additive): holds. (e) whitespace live path: finding 1.
 
 **Executor behaviour:** thorough plan, honest debt notes; one failure-mode row claimed tested
 on both sides when only the agent side was.
+
+### Fix round 1
+
+*— claude-sonnet-4-5, 2026-11-18*
+
+Round 1 = Review's 1 MEDIUM (no HIGH was raised). Two changes, one source, one test:
+
+1. **Live whitespace-only reasoning draws no row at all** (`apps/mobile/src/transcript.ts:464-469`):
+   in `applyAgentEvent`'s `reasoning` case, a delta whose `trim()` is empty and that
+   would OPEN a row (no reasoning row to extend) returns the state unchanged. The
+   fold keeps no row whose `text` says nothing, so `placeheld` (`tool-steps.ts:73`)
+   can no longer manufacture a `Thought · N s` cell that a reload never shows —
+   and the phone's rule is now the agent's (`thinking-clock.ts` stores no fact for
+   a blank run). Blank deltas arriving AFTER a row exists still extend it (test).
+   The alternative in the finding — "a placeholder is a row with `text === ""` AND
+   `ms`" — was rejected: it fixes the cell but leaves a phantom reasoning row in
+   the fold that no other path creates (the reload projects none), i.e. it treats
+   the symptom. Dropping the row makes live and reload agree on the ROWS, and with
+   it the second half of the finding (start edge = first non-blank delta) falls out
+   for free: the run's `at` is now necessarily its first non-blank delta's receipt.
+2. **`apps/mobile/test/step-thought-marker.test.ts` gets the `expo-file-system`
+   stub** (`:67-72`, the line `notice-row.test.ts` carries): the Review's
+   not-a-finding isolation gap, closed while the file was open — it failed ALONE
+   (`Export named 'EventEmitter' not found`) and passed only by mock leakage from
+   an earlier file in the full run.
+
+**Red → green** (`apps/mobile/test/thought-placeholder.test.ts`, +2 tests, the
+whitespace repro the finding names):
+- `red` before the edit: `expect(received).toHaveLength(expected)` — `Expected
+  length: 0 / Received length: 1` (`:100`) ⇒ live drew a `Thought` cell for
+  `"  \n"` @1000 → `text` @5000.
+- `green` after: 8 pass / 0 fail in that file (was 5 pass).
+
+**Mutation (§9, each alone, revert verified by `git diff --stat`):**
+```
+guard disabled (`if (false && event.delta.trim()`):  2 fail  (the new tests, thought-placeholder)
+```
+A second mutation was tried for the timing half (`const starts = false;` in a
+first-draft "restamp `at` at the first non-blank delta" block) and it **did not
+fail** — that block was dead code, since a row is now only ever created by a
+non-blank delta. It was removed rather than kept as an untested branch; the
+timing test (`· 4 s`, blank @1000 → `let me think` @5000 → `text` @9000) is green
+on the shipped code, and it is what the guard protects: with the guard disabled
+the row starts at 1000 ⇒ `· 8 s` (the pre-fix reading).
+
+**Gate (this round, run by the orchestrator):** not run here beyond the narrow
+scope — `biome check` on the 3 touched files clean; `bunx tsc -p
+apps/mobile --noEmit` ✓; `bun test apps/mobile/test` → 3688 pass / 0 fail (252
+files, 16.6 s), which also shows the `step-thought-marker` stub holds in-file.

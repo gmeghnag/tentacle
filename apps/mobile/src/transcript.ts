@@ -461,6 +461,12 @@ function applyAgentEvent(state: State, event: StreamEvent, at: At): State {
           ],
         };
       }
+      if (event.delta.trim() === "") {
+        // Reasoning that says nothing is not a thought: no row at all, so there
+        // is no `Thought · N s` here that a reload would never show — the agent
+        // stores no placeholder for such a run either (Review round 1 MEDIUM-1).
+        return state;
+      }
       return push(state, (key) => ({
         kind: "reasoning",
         key,
