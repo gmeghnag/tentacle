@@ -194,3 +194,40 @@ order/format) · `bun test` → `15426 pass, 5 skip, 0 fail` (1097 files, 610 s)
 - Live `ms` is measured on the phone's receipt clock, the stored one on the
   agent's; they share edges but can differ by network jitter (a second at most
   at a boundary).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-18* (fresh context; same model as the executor — shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM).
+
+1. **MEDIUM — live whitespace-only reasoning draws a `Thought · N s` row that a reload never shows.**
+   `apps/mobile/src/transcript.ts:469` stamps `at` on a reasoning row even when its delta is
+   whitespace; `closeThought` (`transcript.ts:300-311`) then sets `ms`; `placeheld`
+   (`apps/mobile/src/tool-steps.ts:73-75`) counts ANY row with `ms`, so `flushOrphan`
+   (`tool-steps.ts:148`) makes an orphan node though `joined()` is null. The agent stores no
+   field for that round (`thinking-clock.ts:25`). Repro (`.tentacle/tmp/thought-placeholder/ws.ts`):
+   `reasoning "  \n"` @1100 → `text "hello"` @5000 ⇒ cell `{kind:"thought", ms:3900}` live; reload:
+   no row. The Failure-modes row "Whitespace-only … no row (phone) — same rule both sides (test)"
+   is FALSE on the phone side: no phone test covers it (`tool-steps.test.ts:71` has no `ms`).
+   Fix: a placeholder is a row with `text === ""` and `ms` (or stamp `at` only at the first
+   non-blank delta, which also aligns the start edge with the agent), plus a live red→green test.
+
+**Gate:** `bun run lint` clean (2095 files); `bun run typecheck` ✓; touched files 244 pass / 1 fail —
+the fail is `step-thought-marker.test.ts` run ALONE (`Export named 'EventEmitter' not found`,
+expo-modules-core): it lacks the `expo-file-system` mock that `notice-row.test.ts:103` has, an
+isolation gap since `b7b6de2b` (model-diagrams), not this diff (no import changes in
+`apps/mobile/src`); passes inside the full suite. Worth a one-line mock add, not a finding.
+
+**Mutations (reverted, tree clean):** drop the agent whitespace guard → 1 fail; drop `ms` in
+`historyRows` → 2 fail.
+
+**Attacks tried:** (a) other provider mappers spreading `ChatMessage` — only anthropic/openai exist,
+both field-by-field: holds. (b) `usage` arriving mid-reasoning and freezing the live clock — the
+agent yields `usage` only at `done` (`agent.ts:1548-1556`): holds. (c) fields copied by
+whitelist elsewhere (`scheduled` sites: `tui/resume.ts:120`, `hosted-session.ts:2693`) — none
+needed for `thought` (TUI decision 2): holds. (d) protocol: strip + `.catch`, no version bump
+needed (display, additive): holds. (e) whitespace live path: finding 1.
+
+**Executor behaviour:** thorough plan, honest debt notes; one failure-mode row claimed tested
+on both sides when only the agent side was.
