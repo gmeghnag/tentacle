@@ -236,9 +236,14 @@ describe("ChartView — a dumb renderer of the layout", () => {
     expect(all(tree, "Path").length).toBeGreaterThan(0);
   });
 
-  test("no card: no frame <Rect>, and the container has no background, radius, border or shadow", () => {
+  test("no card: no frame, and the container has no background, radius, border or shadow", () => {
     const { tree } = render(REVENUE);
-    expect(all(tree, "Rect")).toEqual([]);
+    // `feat/mobile-chart-labels` D5 draws a series marker as a <Rect> (■), so
+    // "no <Rect> at all" is no longer the same claim: what a card would be is a
+    // rectangle spanning the chart, and every rect here is a ~7 pt marker.
+    for (const r of all(tree, "Rect")) {
+      expect(Number(r.props.width)).toBeLessThanOrEqual(10);
+    }
     const root = flat(tree[0]?.props.style);
     for (const key of ["backgroundColor", "borderRadius", "borderWidth", "shadowOpacity"]) {
       expect(root[key]).toBeUndefined();
@@ -247,9 +252,11 @@ describe("ChartView — a dumb renderer of the layout", () => {
 
   test("every layout text and dot is drawn; chart text is monospace", () => {
     const { tree, view } = render(REVENUE);
-    const texts = all(tree, "SvgText");
+    // A haloed (C) label is drawn twice: the surface-coloured halo the test
+    // identifies by its `halo:` testID, then the readable copy on top of it.
+    const texts = all(tree, "SvgText").filter((t) => t.props.testID === undefined);
     expect(texts.map((t) => t.props.children)).toEqual(view.layout.texts.map((t) => t.text));
-    for (const t of texts) expect(t.props.fontFamily).toBe(theme.MONO);
+    for (const t of all(tree, "SvgText")) expect(t.props.fontFamily).toBe(theme.MONO);
     expect(all(tree, "Circle").length).toBeGreaterThanOrEqual(view.layout.dots.length);
   });
 

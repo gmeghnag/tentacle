@@ -13,6 +13,7 @@
 import type { JSX } from "react";
 import { ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
+import type { LabelMode } from "../chart-layout-kit.ts";
 import type { DiagramStyle } from "../diagram-settings-store.ts";
 import type { ActivityButtonMode } from "../floating-button.ts";
 import type { PhotoSettings } from "../photo-settings-store.ts";
@@ -94,6 +95,17 @@ export interface SettingsScreenProps {
   readonly activityError?: string;
   readonly onActivityMode?: (mode: ActivityButtonMode) => void;
   /**
+   * Where a line/area chart names its series (docs/feat/mobile-chart-labels.md
+   * D7): on the lines (default) or in a legend above the chart. Absent = no
+   * Charts section (a build without the setting).
+   */
+  readonly chartLabels?: LabelMode;
+  /** False over a newer build's record: the rows are disabled and say why. */
+  readonly chartWritable?: boolean;
+  /** A write that did not stick (the pick still holds for this run). */
+  readonly chartError?: string;
+  readonly onChartLabels?: (labels: LabelMode) => void;
+  /**
    * How see-through the floating button is (docs/feat/mobile-hub-opacity.md):
    * absent → 100 %, the boolean itself absent = no band at all.
    */
@@ -138,6 +150,12 @@ export const ACTIVITY_BUTTON_ROWS: readonly {
   { value: "floating", label: "Floating" },
 ];
 
+/** The Charts rows (docs/feat/mobile-chart-labels.md D7), in the same order as the design. */
+export const CHART_LABEL_ROWS: readonly { readonly value: LabelMode; readonly label: string }[] = [
+  { value: "inside", label: "Labels on the lines" },
+  { value: "legend", label: "Legend above the chart" },
+];
+
 export const LANGUAGE_ROWS: readonly { readonly value: LanguageSetting; readonly label: string }[] =
   [
     { value: "auto", label: "Auto" },
@@ -170,6 +188,10 @@ export function SettingsScreen({
   activityWritable = true,
   activityError,
   onActivityMode,
+  chartLabels,
+  chartWritable = true,
+  chartError,
+  onChartLabels,
   activityOpacity,
   onActivityOpacity,
   diagramStyle,
@@ -427,6 +449,47 @@ export function SettingsScreen({
               writable={activityWritable}
               onChange={onActivityOpacity}
             />
+          )}
+          {chartLabels === undefined || onChartLabels === undefined ? null : (
+            <View style={styles.section}>
+              <BandSection
+                palette={palette}
+                title="Charts"
+                footnote={
+                  chartWritable
+                    ? "Where a line chart names its series: next to each line, or in a legend above the chart you can tap to single a series out."
+                    : "Set by a newer version of tentacle — this version cannot change it."
+                }
+              >
+                {CHART_LABEL_ROWS.map((row, index) => (
+                  <Row
+                    key={row.value}
+                    testID={`chart-labels-${row.value}`}
+                    palette={palette}
+                    first={index === 0}
+                    minHeight={size.rowSetting}
+                    title={row.label}
+                    accessibilityLabel={row.label}
+                    dimmed={!chartWritable}
+                    {...(chartWritable ? { onPress: () => onChartLabels(row.value) } : {})}
+                    trailing={
+                      chartLabels === row.value ? (
+                        <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
+                      ) : undefined
+                    }
+                  />
+                ))}
+              </BandSection>
+              {chartError === undefined ? null : (
+                <Banner
+                  palette={palette}
+                  tone="error"
+                  icon="exclamationmark.triangle"
+                  testID="chart-labels-error"
+                  body={chartError}
+                />
+              )}
+            </View>
           )}
           {diagramStyle === undefined || onDiagramStyle === undefined ? null : (
             <View style={styles.section}>

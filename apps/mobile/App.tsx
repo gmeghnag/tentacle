@@ -69,6 +69,8 @@ import { exportFileName, exportText } from "./src/app-log.ts";
 import { ARTIFACT_CACHE, shareCachedCopy } from "./src/artifact-cache-expo.ts";
 import { ARTIFACT_FEEDS } from "./src/artifact-feed.ts";
 import { sessionKey } from "./src/artifact-seen-store.ts";
+import { CHART_SETTINGS } from "./src/chart-settings-expo.ts";
+import type { ChartSettings } from "./src/chart-settings-store.ts";
 import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
 import { composeHandleOf, foldingOutboxSession } from "./src/compose-handle.ts";
 import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
@@ -1666,6 +1668,24 @@ function AppShell(): JSX.Element {
     );
   }, []);
 
+  // The Charts setting (docs/feat/mobile-chart-labels.md D7): loaded once, next
+  // to the Activity button's; a failed write keeps the pick for this run and
+  // says so, and a newer build's record is never written over.
+  const [chartSettings, setChartSettings] = useState<ChartSettings>(() => CHART_SETTINGS.current());
+  const [chartWritable, setChartWritable] = useState(true);
+  const [chartError, setChartError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = CHART_SETTINGS.subscribe(setChartSettings);
+    void CHART_SETTINGS.load().then(() => setChartWritable(CHART_SETTINGS.writable()));
+    return unsubscribe;
+  }, []);
+  const selectChartLabels = useCallback((labels: ChartSettings["labels"]) => {
+    setChartError(undefined);
+    CHART_SETTINGS.set({ ...CHART_SETTINGS.current(), labels }).catch(() =>
+      setChartError("That Charts setting didn't save"),
+    );
+  }, []);
+
   // Photos (fix/mobile-media-live item 5): the "Send photos at original size"
   // switch, loaded once. A failed write leaves the copy unchanged and says so;
   // a newer build's record is never written over.
@@ -2185,6 +2205,10 @@ function AppShell(): JSX.Element {
                   ? {}
                   : { activityOpacity: activitySettings.opacity })}
                 onActivityOpacity={selectActivityOpacity}
+                chartLabels={chartSettings.labels}
+                chartWritable={chartWritable}
+                {...(chartError === undefined ? {} : { chartError })}
+                onChartLabels={selectChartLabels}
                 diagramStyle={diagramSettings.style}
                 diagramWritable={diagramWritable}
                 {...(diagramError === undefined ? {} : { diagramError })}

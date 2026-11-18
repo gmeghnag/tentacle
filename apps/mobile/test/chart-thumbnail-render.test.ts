@@ -63,6 +63,7 @@ beforeAll(async () => {
     G: "G",
     Line: "Line",
     Path: "Path",
+    Rect: "Rect",
   }));
   thumb = await import("../src/ui/chart/ChartThumbnail.tsx");
   row = await import("../src/chart-row.ts");

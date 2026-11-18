@@ -8,6 +8,7 @@ import {
   PermissionBroker,
   type StreamEvent,
   type Tool,
+  VOICE_SPOKEN_LINE,
 } from "@tentacle/core";
 import {
   DomainErrorCode,
@@ -448,5 +449,150 @@ describe("the queue is broadcast (docs/feat/queued-broadcast.md)", () => {
     await expect(
       peer.request("session/reclaim", { sessionId: "nope", ids: ["a"] }),
     ).rejects.toMatchObject({ code: DomainErrorCode.UnknownSession });
+  });
+});
+
+describe("unqueue: take a queued row back (docs/feat/queue-unqueue.md)", () => {
+  test("T2 the drain race: drained but its steer not yet streamed → delivered, and the model DOES read it", async () => {
+    // Mutation: `HostedSession.unqueue` checks the mirror (`this.queue`) instead of the agent's array → red.
+    const t = await blockedT1([call("c1", "block"), say("done")]);
+    const answers: unknown[] = [];
+    const watcher: Attachment = {
+      send: (p) => {
+        // Inside `drive`, between A's steer and B's: both are spliced already.
+        if (p.update.type === "steer" && p.update.id === "a") {
+          answers.push(t.hosted.unqueue(["b"]));
+        }
+      },
+    };
+    t.host.open({ sessionId: t.hosted.id }, watcher);
+    t.hosted.enqueue("a", "T1", "A");
+    t.hosted.enqueue("b", "T1", "B");
+    t.gate.release();
+    await until(() => t.c.ended("T1"));
+    expect(answers).toEqual([{ removed: [], delivered: ["b"] }]);
+    expect(userTexts(t.model.calls[1]?.messages ?? [])).toEqual(["go", "A", "B"]);
+    expect(t.c.stream().filter((u) => u.type === "steer")).toEqual([
+      { type: "steer", text: "A", id: "a" },
+      { type: "steer", text: "B", id: "b" },
+    ]);
+  });
+
+  test("T3 the middle row taken back before the boundary: the model reads [A, C], steers carry a, c", async () => {
+    const t = await blockedT1([call("c1", "block"), say("done")]);
+    t.hosted.enqueue("a", "T1", "A");
+    t.hosted.enqueue("b", "T1", "B");
+    t.hosted.enqueue("c", "T1", "C");
+    expect(t.hosted.unqueue(["b"])).toEqual({ removed: ["b"], delivered: [] });
+    expect(t.c.queued().at(-1)).toEqual({
+      entries: [
+        { id: "a", text: "A" },
+        { id: "c", text: "C" },
+      ],
+      returned: [],
+    });
+    t.gate.release();
+    await until(() => t.c.ended("T1"));
+    expect(userTexts(t.model.calls[1]?.messages ?? [])).toEqual(["go", "A", "C"]);
+    expect(t.c.stream().filter((u) => u.type === "steer")).toEqual([
+      { type: "steer", text: "A", id: "a" },
+      { type: "steer", text: "C", id: "c" },
+    ]);
+    expect(t.hosted.snapshotPage().queued).toEqual({ entries: [], returned: [] });
+  });
+
+  test("T4 a voice steer taken back never marks the turn", async () => {
+    const t = await blockedT1([call("c1", "block"), say("done")]);
+    t.hosted.enqueue("v", "T1", "V", { reasoning: "off" });
+    t.hosted.enqueue("a", "T1", "A");
+    expect(t.hosted.unqueue(["v"]).removed).toEqual(["v"]);
+    t.gate.release();
+    await until(() => t.c.ended("T1"));
+    const round2 = t.model.calls[1]?.messages ?? [];
+    expect(userTexts(round2)).toEqual(["go", "A"]);
+    expect(round2.some((m) => m.role === "system" && m.content === VOICE_SPOKEN_LINE)).toBe(false);
+  });
+
+  test("T5 retry answers removed again (no second queued); drained/unknown → delivered", async () => {
+    const t = await blockedT1([call("c1", "block"), say("done")]);
+    t.hosted.enqueue("a", "T1", "A");
+    t.hosted.enqueue("b", "T1", "B");
+    expect(t.hosted.unqueue(["b", "nope"])).toEqual({ removed: ["b"], delivered: ["nope"] });
+    const count = t.c.updates.length;
+    expect(t.hosted.unqueue(["b"])).toEqual({ removed: ["b"], delivered: [] });
+    expect(t.c.updates.length).toBe(count);
+    // A retry of the original enqueue never brings it back.
+    t.hosted.enqueue("b", "T1", "B");
+    expect(t.c.queued().at(-1)?.entries).toEqual([{ id: "a", text: "A" }]);
+    t.gate.release();
+    await until(() => t.c.ended("T1"));
+    // Idle: answered from the facts, never NoTurnRunning.
+    expect(t.hosted.unqueue(["a"])).toEqual({ removed: [], delivered: ["a"] });
+    expect(userTexts(t.hosted.snapshotPage().messages)).toEqual(["go", "A"]);
+  });
+
+  test("T5b a returned row (turn cancelled) is removed from returned (Q3)", async () => {
+    const t = await blockedT1();
+    t.hosted.enqueue("a", "T1", "A");
+    t.hosted.enqueue("b", "T1", "B");
+    t.hosted.cancel();
+    t.gate.release();
+    await until(() => t.c.ended("T1"));
+    expect(t.c.queued().at(-1)?.returned).toHaveLength(2);
+    expect(t.hosted.unqueue(["a"])).toEqual({ removed: ["a"], delivered: [] });
+    expect(t.c.queued().at(-1)).toEqual({
+      entries: [],
+      returned: [{ id: "b", text: "B", cause: "cancelled" }],
+    });
+  });
+
+  test("T5c reserved send-now: its steer and a carried row are removable; its own message is not", async () => {
+    const t = await blockedT1();
+    t.hosted.enqueue("x", "T1", "X"); // carried over by the send-now
+    t.hosted.sendNow("T2", turn("T1"), [msg("a", "A")]);
+    t.hosted.enqueue("s", "T2", "S"); // typed for the reserved turn
+    expect(t.hosted.unqueue(["s", "x", "a"])).toEqual({ removed: ["s", "x"], delivered: ["a"] });
+    expect(t.c.queued().at(-1)).toEqual({ entries: [{ id: "a", text: "A" }], returned: [] });
+    // A retried enqueue of the dropped successor steer does not come back.
+    t.hosted.enqueue("s", "T2", "S");
+    expect(t.c.queued().at(-1)?.entries).toEqual([{ id: "a", text: "A" }]);
+    t.gate.release();
+    await until(() => t.c.ended("T2"));
+    const texts = t.model.calls.flatMap((c) => userTexts(c.messages));
+    expect(texts).not.toContain("S");
+    expect(texts).not.toContain("X");
+    expect(userTexts(t.hosted.snapshotPage().messages)).toEqual(["go", "A"]);
+  });
+
+  test("T5e a queued row a reserved send-now cites is delivered, not removed (review F1)", async () => {
+    const t = await blockedT1();
+    t.hosted.enqueue("a", "T1", "A"); // queued first, then sent now
+    t.hosted.sendNow("T2", turn("T1"), [msg("a", "A")]);
+    expect(t.hosted.unqueue(["a"])).toEqual({ removed: [], delivered: ["a"] });
+    t.gate.release();
+    await until(() => t.c.ended("T2"));
+    // The model read it once, as the send-now's prompt: "delivered" is the truth.
+    const texts = t.model.calls.flatMap((c) => userTexts(c.messages));
+    expect(texts.filter((x) => x === "A")).toHaveLength(1);
+  });
+
+  test("T7 session/unqueue over the wire: answered, every client sees the row leave; empty ids → invalid", async () => {
+    const t = await blockedT1();
+    t.hosted.enqueue("a", "T1", "A");
+    const [d, cl] = createChannelPair();
+    new Connection(d, t.host);
+    const peer = new RpcPeer(cl, {});
+    await peer.request("initialize", { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+    await peer.request("session/open", { sessionId: t.hosted.id });
+    const params = { sessionId: t.hosted.id, ids: ["a", "z"] };
+    expect(await peer.request("session/unqueue", params)).toEqual({
+      removed: ["a"],
+      delivered: ["z"],
+    });
+    expect(t.c.queued().at(-1)).toEqual({ entries: [], returned: [] });
+    await expect(peer.request("session/unqueue", { ...params, ids: [] })).rejects.toMatchObject({
+      code: -32602,
+    });
+    t.gate.release();
   });
 });

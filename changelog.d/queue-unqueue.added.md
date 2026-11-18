@@ -1,0 +1,1 @@
+- **Take back a queued message.** A message queued while the model works can be taken back before the model reads it: in the TUI, ↑ on an empty input pulls the last queued message back into the field to edit or drop (`session/unqueue`; if the model already read it, you are told so).

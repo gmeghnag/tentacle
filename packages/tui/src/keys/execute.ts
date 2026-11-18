@@ -116,6 +116,7 @@ export interface KeyHost {
   pasteClipboard(): void;
   submit(text: string): void;
   removeLastChip(): void;
+  pullBackQueued(id: string, text: string): void;
 }
 
 /** Apply ONE effect. Never returns a verdict: the router already decided. */
@@ -292,6 +293,9 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "removeLastChip":
       host.removeLastChip();
+      return;
+    case "pullBackQueued":
+      host.pullBackQueued(effect.id, effect.text);
       return;
   }
 }

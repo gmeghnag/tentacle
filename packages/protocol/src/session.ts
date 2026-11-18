@@ -602,9 +602,11 @@ export type SnapshotTurn = z.infer<typeof SnapshotTurnSchema>;
 // the send-now `turn_start` whose prompt carries it (sent now), or its turn's
 // `turn_end`: then it is in `returned` — back with its WRITER, never re-sent
 // by itself — or, the row of a send-now cancelled before it started, restored
-// by that send-now's own client (`delivered: false`). A row leaves `returned`
-// in the `queued` that follows a `session/reclaim` of it, or a send-now that
-// carries it in its prompt. Nothing else removes one: no expiry.
+// by that send-now's own client (`delivered: false`), or the `queued` that
+// follows a `session/unqueue` of it (taken back before the model read it). A
+// row leaves `returned` in the `queued` that follows a `session/reclaim` or a
+// `session/unqueue` of it, or a send-now that carries it in its prompt.
+// Nothing else removes one: no expiry.
 
 /** One queued row: its writer's key and text. */
 export const QueuedEntrySchema = z.object({
@@ -1506,6 +1508,29 @@ export type ReclaimParams = z.infer<typeof ReclaimParamsSchema>;
 
 export const ReclaimResultSchema = z.object({});
 export type ReclaimResult = z.infer<typeof ReclaimResultSchema>;
+
+// --- session/unqueue -----------------------------------------------------
+// Take queued rows back before the model reads them (cancel, or edit = take
+// back then enqueue again under a NEW id; docs/feat/queue-unqueue.md). Per id:
+// `removed` — it was still undrained (or in `returned`, or a send-now waiting
+// for the slot held it as a steer), and now it never reaches the model; a
+// retry of a removed id answers `removed` again. `delivered` — anything else:
+// drained already, a send-now's own prompt, or unknown; the client shows what
+// really happened. Never `NoTurnRunning`. Not gated by who asks (one token,
+// one principal, as `session/reclaim`). Additive: an older daemon answers
+// `MethodNotFound`.
+
+export const UnqueueParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  ids: z.array(z.string().min(1).max(128)).min(1),
+});
+export type UnqueueParams = z.infer<typeof UnqueueParamsSchema>;
+
+export const UnqueueResultSchema = z.object({
+  removed: z.array(z.string()),
+  delivered: z.array(z.string()),
+});
+export type UnqueueResult = z.infer<typeof UnqueueResultSchema>;
 
 // --- session/list --------------------------------------------------------
 // The daemon's sessions, one page at a time (docs/feat/session-list.md). A

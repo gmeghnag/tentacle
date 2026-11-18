@@ -17,6 +17,7 @@ import type { ArtifactMeta } from "@tentacle/protocol";
  */
 import { type JSX, type ReactNode, useState } from "react";
 import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import type { LabelMode } from "../../chart-layout-kit.ts";
 import { CHART_TOOL, chartRowView } from "../../chart-row.ts";
 import { DIAGRAM_TOOL, diagramRowView } from "../../diagram-row.ts";
 import type { DiagramStyle } from "../../diagram-settings-store.ts";
@@ -59,6 +60,13 @@ export interface RowProps {
   readonly onLink: (href: string) => void;
   /** The loaded thumbnails (the driver's state): a ref with no bytes draws its label. */
   readonly thumbnails: ThumbnailState;
+  /**
+   * The Charts setting in force (docs/feat/mobile-chart-labels.md D7): where a
+   * line/area chart names its series. The SESSION SCREEN owns the subscription
+   * (`ACTIVITY_SETTINGS`'s pattern) so one chart row is not one listener, and
+   * absent = the default (`inside`).
+   */
+  readonly chartLabels?: LabelMode;
   /**
    * The read-aloud button under an assistant row (docs/feat/mobile-voice.md
    * Design §5): `readAloudOffered` / `speakingRowKey` decide it; absent = none.
@@ -348,11 +356,13 @@ function deviceLocale(): string {
 function ChartRowView(props: RowProps): JSX.Element {
   const tool = props.row as Extract<Row, { kind: "tool" }>;
   const screen = useWindowDimensions();
+  const labels = props.chartLabels ?? "inside";
   const view = chartRowView(tool, {
     width: screen.width - 2 * space.inset,
     fontScale: screen.fontScale,
     locale: deviceLocale(),
     palette: props.palette,
+    labels,
   });
   if (view === null) {
     return <ToolRowView {...props} />;
@@ -365,6 +375,7 @@ function ChartRowView(props: RowProps): JSX.Element {
         palette={props.palette}
         locale={deviceLocale()}
         testID={`chart-${tool.id}`}
+        labels={labels}
       />
     </Shell>
   );
