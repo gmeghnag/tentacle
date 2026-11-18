@@ -448,4 +448,25 @@ and calls `pullTools()` on the dimmed (notice) commit path.
 
 ## Review
 
-*— <model-id>, <date>*
+*— claude-opus-5-5, 2026-11-18* (fresh context; same model family as the plan author, different from the executor)
+
+**Verdict: REQUEST-CHANGES** — the code is sound; two of the plan's named properties are not pinned by any test (§9).
+
+**Gate:** touched tests (`tools-view`, `hub-actions`, `hub-session`, `hub-tools-wiring`, `session-info-controller`, `session-info`, `hub-fan`): 265 pass · 0 fail. `bun run lint`: clean (2083 files). `bun run typecheck`: clean. I did not re-run the full `bun test` (the executor reports 15252 pass · 2 daemon load flakes, which pass on their own).
+
+**Findings**
+1. **MEDIUM — "unknown never dims" is not pinned.** `apps/mobile/src/hub-session.ts:121`. Mutation: `toolsEmpty: input.tools?.total === 0` (the `known` guard dropped) → `hub-session` + `hub-actions` still **87 pass · 0 fail**. That is exactly the state before the first open: both pulls are `loading`, so `toolsSummary` gives `{known:false,total:0}`. Under the mutation, Tools would be dimmed from attach until a dimmed tap's `pullTools` lands, with the "No MCP servers or skills" notice shown wrongly. The executor's Mutation 2 (`tools === undefined || …`) tests a different property. Needed: a test where `hubContextOf({…, tools:{known:false,total:0,on:0}})` is not `toolsEmpty`.
+2. **MEDIUM — D4's convergence ("a dimmed tap un-sticks the item") is not pinned.** `apps/mobile/src/session-info-controller.ts:621`. Mutation: the `pullTools` paint guard made always-true (`mine !== generation + 99`, so the method never paints) → `session-info-controller.test.ts` still **47 pass · 0 fail**. The tests only count calls, check the stale-drop case and check `not-open`. None checks that a fresh answer replaces the last known (empty) list. Needed: open with `[]`, server added, `pullTools()`, then `state().tools.mcp` lists it, and `toolsSummary(...).total` is 1.
+3. **MEDIUM (process, AGENTS §10 signing)** — the Execution is signed `claude-sonnet-4-5`, but the commit `c17a24ab` says "exec (deepseek)" and the doc's `Suited:` line says DeepSeek. The signature is how model drift is tracked, so correct it to the model that actually executed.
+
+**Mutations (all reverted; `git status` clean afterwards):** search force-expand dropped → killed (tools-view, 2 fail); rim drawn while all on → killed; `pullTools` stale-generation guard removed → killed; `pullTools` never paints → **survived** (F2); `known` guard dropped → **survived** (F1). Executor's onSwitch mutation was not re-run: the wiring test pins that string literally.
+
+**Attacks tried:**
+- §7 "logic in pure modules": `ToolsSheet.tsx` only does presentation (the `+N more` string, the placeholder). Holds.
+- One write path: `onSwitch` goes to `controller.setCapability`. Holds.
+- One source: `state().tools` comes from the same `facts()` call as the view. Holds.
+- Stale `pullTools` after close+open: it is dropped. Holds.
+- Dimmed commit from the More/All menu: it goes through the same `commitHub`, so `pullTools` runs. Holds.
+- `pullTools` when not attached: skills reads `not-open`, so `known` is false and the item is not dimmed, so a tap opens the sheet. Converges.
+- No protocol, persistence or invariant change. Blast `contained` confirmed.
+- Low, not blocking: with the sheet closed, `stopCaps` means another device's flip does not repaint the hub rim until the next emit. The value is read live (`current()`), so it is only stale until some other repaint.
