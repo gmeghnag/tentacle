@@ -459,4 +459,45 @@ mockup's; a simulator pass is the remaining check.
 
 ## Review
 
-*— (pending)*
+*— claude-opus-5-5, 2026-11-18* (fresh context; same model family as the plan
+author — shared blind spots possible; executor was DeepSeek)
+
+**Verdict: REQUEST-CHANGES** (2 × MEDIUM, no HIGH).
+
+**Gate:** `bun test apps/mobile/test` 3288 pass / 0 fail (233 files);
+`bun run lint` clean; `bun run typecheck` clean (root + mobile + relay).
+
+**Findings**
+
+1. **MEDIUM — highlight + scrub shows another x's value on point-form lines.**
+   `apps/mobile/src/chart-interact.ts:461` passes the scrub index `i` (an index
+   into series 0's points, `chart-layout.ts:386` `pos0[i]`) to
+   `heroOf(spec, i, locale, k)`, and `ownSeriesHero`
+   (`apps/mobile/src/chart-hero.ts:144`) reads `datasetValues(spec, k)[i]` —
+   series k's i-th point, not its point at that x. The pre-existing YoY path
+   matches by label for `usesPoints` (`chart-hero.ts:261`); the new path does
+   not. Repro (`.tentacle/tmp/mobile-chart-labels/rev.ts`): line, `x:{type:"number"}`,
+   a = x 1..4, b = x 3..4; legend mode, highlight b, scrub at x=1 → hero
+   `300 · "3 b"` (b's value at x=3, while the finger is on x=1). Fix: map `i`
+   to series k by x (as the YoY branch does) and return EMPTY/no-hero when k
+   has no point there; add a test.
+2. **MEDIUM — stacked band-mid placement is untested (§9 non-vacuity).**
+   Mutation `chart-layout.ts:283` stacked target → `end - 8` (top of the
+   stack, D2's "inside its own band" gone): `chart-labels`, `chart-layout`,
+   `chart-labels-render` stay 52/52 green. Add an assertion that each stacked
+   label's target lies between `Y(cum_k)` and `Y(cum_{k-1})` before dodge
+   (e.g. a two-band chart with wide bands so dodge does not move them).
+
+**Mutations re-run by Review:** scrub hero for `k` dropped in
+`highlightLayout` → `chart-highlight` 1 fail (good); band-mid → 0 fail
+(finding 2). Both reverted; `git status` clean.
+
+**Attacks tried:** (a) stacked + hidden series — `ys` accumulates over
+`visible` only and `cumBelow` uses the previous visible series: holds.
+(b) `highlightLayout` builds a new layout each render fed to `useChartScrub`
+— the hook reads it via a ref, no identity-keyed effect: holds. (c) D4
+ceiling on the traffic stack → guides `0 … 1,200`, top hairline = ceiling,
+bars untouched (deep-equal test): holds. (d) point-form highlight scrub:
+finding 1. §7: mobile-only, no protocol/persistence/terminal path touched;
+"logic in pure modules" respected (decisions in `chart-layout`/`chart-interact`,
+components map). Executor's two plan drifts are documented and justified.
