@@ -200,3 +200,37 @@ Gate (2026-11-18):
     (last change `e8ed1c62`, feat/mobile-activity-panel), so this predates
     the branch; not fixed here (out of scope) — follow-up: match
     `long child.*` or the row's testID.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-18* (fresh context, SAME model as the executor:
+shared blind spots possible; acceptable for `contained`, S)
+
+**Verdict: APPROVE** — no HIGH/MEDIUM findings.
+
+- **Gate (scoped):** the 4 touched test files `108 pass · 0 fail`; `bun run lint`
+  clean (2084 files); `bun run typecheck` (root + mobile + relay) clean. Full
+  `bun test` not re-run by this review.
+- **Load-bearing premise TRUE:** `parse` / `read` (`activity-settings-store.ts`)
+  return `DEFAULT_ACTIVITY_SETTINGS` only for missing / unreadable / unknown-`v`
+  / a throwing `kv.get`; a readable record is never merged with it, so a stored
+  `"header"` stays and a stored record without `opacity` stays 100 %.
+- **Mutations (all caught, reverted, tree byte-clean):** ties DOWN in
+  `snapOpacity` → 3 fails (snap, opacityAt bands, store snap); haptic AFTER
+  `dragged.current = next` → steps-wiring fail; default back to `"header"` →
+  2 store fails.
+- **Attacks tried:** (1) off-step 35 then a drag that ends on 40 → `commit`
+  compares against the snapped `committedValue`, no write — matches decision 3;
+  (2) grant on the held released value → `dragged` is null after `commit`, so
+  the grant compares against `shownNow`, no spurious tick; (3) ±∞ / NaN →
+  100 / 20 / 20, never invisible; (4) other `clampOpacity` callers → none left;
+  (5) a throwing Keychain read now shows the floating hub (not Header) with the
+  setting disabled — a transient read failure overrides a stored Header for that
+  run. Covered by the doc's "unreadable → defaults" failure mode; the hub is
+  still a usable entry point, so noted, not a finding.
+- **Not verified here:** e2e flows 27/33 (the executor's two e2e failures are
+  attributed to untouched components but not checked on `main` — run flow 33
+  on `main` before merge to confirm).
+- **Executor behaviour:** red-first tests shown, drift recorded honestly
+  (source pin rename, below-the-fold scroll), e2e failures reported rather
+  than hidden.
