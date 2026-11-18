@@ -77,6 +77,33 @@ export function panelDetents(m: PanelMetrics): PanelDetents {
   return { low, tall: scrollable ? tall : low, scrollable };
 }
 
+/**
+ * The sheet's spring (Design 2): a touch under-damped (ζ ≈ 0.9), so it settles
+ * with a hint of life — and so it OVERSHOOTS its target on the way, by under a
+ * point, for ~0.4 s (RN `SpringAnimation`). Going to 0, that is a negative height.
+ */
+export const PANEL_SPRING = { damping: 26, stiffness: 260, mass: 0.8 } as const;
+
+/**
+ * How the spring's value becomes the drawn height (an `Animated` interpolation):
+ * never below 0. A negative `height` is not a size to Yoga — it lays the sheet
+ * out at its CONTENT height — so a close's undershoot drew the whole sheet again
+ * for ~0.4 s before it vanished: the owner's "closes, re-opens, closes"
+ * (docs/fix/mobile-activity-sheet-reclose.md). Above 0 it is the value itself,
+ * the open's overshoot included.
+ */
+export const PANEL_HEIGHT: {
+  readonly inputRange: number[];
+  readonly outputRange: number[];
+  readonly extrapolateLeft: "clamp";
+  readonly extrapolateRight: "extend";
+} = {
+  inputRange: [0, 1],
+  outputRange: [0, 1],
+  extrapolateLeft: "clamp",
+  extrapolateRight: "extend",
+};
+
 /** The height while a drag is in flight: clamped to `[0, tall]` — never above the screen. */
 export function panelDrag(shown: number, dy: number, detents: PanelDetents): number {
   return Math.min(Math.max(shown - dy, 0), detents.tall);

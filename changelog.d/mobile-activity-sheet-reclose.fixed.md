@@ -1,0 +1,1 @@
+- **Mobile: closing the Activity sheet no longer flashes it back open.** One close now closes it once: the sheet slides down and is gone. Before, it came back for a moment and then disappeared.
