@@ -328,6 +328,10 @@ S2:
 7. **Stop during a phone compaction.** **Rec: yes — the hub's Stop is offered
    while the phone compacts and cancels it (`◇ compaction cancelled`).**
 
+### Owner answers (2026-11-18 ~13:50)
+Q1–Q7: all recommendations accepted (Compact action in the hub overflow; left-aligned notices with the glyph column, centred separators; ▲ for a lost turn stream, ◇ for the rest; outcome strings mirrored + parity test; group over visible rows; S1 now beside thinking-images, S2 after it merges; hub Stop cancels a phone compaction). Implementation APPROVED.
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-18*
+
 ## Execution
 
 *(empty — after approval)*
