@@ -8,7 +8,9 @@ import {
   BAND_MARGIN,
   EDGE_INSET,
   FLOAT_SIZE,
+  HUB_COLUMN,
   a11y,
+  footClearance,
   headerPill,
   isTap,
   motion,
@@ -157,5 +159,45 @@ describe("a11y + headerPill: VoiceOver gets a fixed button AND the pill (F23)", 
     expect(headerPill({ mode: "header", voiceOver: true })).toBe(true);
     expect(headerPill({ mode: "floating", voiceOver: false })).toBe(false);
     expect(headerPill({ mode: "floating", voiceOver: true })).toBe(true);
+  });
+});
+
+/**
+ * QA bug 1 (simulator, 2026-11-18): the pending message's inline actions ran to
+ * the screen edge, and with the hub on the right the Cancel item sat at x
+ * 384–434 pt — entirely under the floating button (376–430) — so a tap there
+ * opened the fan instead of cancelling the message. The footer now keeps the
+ * hub's column clear at BOTH edges (the button can rest on either).
+ */
+describe("footClearance: the transcript's foot never sits under the hub (QA bug 1)", () => {
+  test("the reserved column is the button's own: its edge inset plus its diameter", () => {
+    expect(HUB_COLUMN).toBe(EDGE_INSET + FLOAT_SIZE);
+    expect(footClearance(true)).toBe(HUB_COLUMN);
+  });
+
+  test("nothing is reserved when the button is not drawn (header mode, covered, too short a band)", () => {
+    expect(footClearance(false)).toBe(0);
+  });
+
+  test("the QA's own numbers: the Cancel item cleared the button it used to sit under", () => {
+    // The report: the screen is 440 pt wide (iPhone 17 Pro Max in portrait at
+    // its scale), the button spans x 376–430, Cancel sat at 384–434.
+    const screen = 440;
+    const buttonRight = screen - EDGE_INSET - FLOAT_SIZE; // 376
+    // Before: the action row was padded only by 6 pt of its own, so its last item
+    // could end at the screen edge — 10 pt past the button's right edge and 4 pt
+    // inside its left one. After: the row ends at the clearance.
+    const beforeRight = screen;
+    const afterRight = screen - footClearance(true);
+    expect(beforeRight).toBeGreaterThan(buttonRight); // the overlap that was
+    expect(afterRight).toBeLessThanOrEqual(buttonRight); // no overlap now
+    expect(afterRight).toBe(376);
+  });
+
+  test("the LEFT edge is reserved too: the hub can be dragged to it", () => {
+    // `snap` puts the button at EDGE_INSET when it rests on the left, so an
+    // action flush to x 0 would sit under it there — the same bug, other side.
+    const clearance = footClearance(true);
+    expect(clearance).toBeGreaterThanOrEqual(EDGE_INSET + FLOAT_SIZE);
   });
 });

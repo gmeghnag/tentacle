@@ -16,6 +16,7 @@ import {
   jumped,
   landingAwaiting,
   landingDone,
+  landingPending,
   landingQuiet,
   landingReveal,
   landingStart,
@@ -166,17 +167,25 @@ describe("the initial landing (docs/fix/mobile-open-at-end.md, item 1)", () => {
   });
 
   test("a RE-ATTACH (resync, Retry, foreground) lands silently too: no second visible scroll", () => {
+    // Its measurements are ABSORBED, not scrolled (bug 4: the replace re-keys
+    // every row, so scrolling on each measurement IS the owner's loop). The one
+    // silent scroll comes when the sizes go quiet — `landingReveal`.
     const step = landingStep(landingQuiet, LONG, true, ROWS);
-    expect(step.step?.animated).toBe(false);
-    expect(step.step?.scrollTo).toBe(39200);
+    expect(step.step).toBeNull();
     // Nothing was hidden: the rows were already shown before the re-attach.
     expect(step.state.settling).toBe(false);
+    expect(landingPending(step.state)).toBe(true); // still owed
+    const landed = landingReveal(step.state, LONG, true, ROWS);
+    expect(landed.step).toEqual({ state: initialFollow, scrollTo: 39200, animated: false });
+    expect(landingPending(landed.state)).toBe(false);
   });
 
   test("a foreground resync while the person reads further up does NOT yank them to the end", () => {
     const step = landingStep(landingQuiet, LONG, false, ROWS);
     expect(step.step).toBeNull();
     expect(step.state.silent).toBe(false);
+    // Not even the timer: nothing is owed, so the loop is closed for good.
+    expect(landingReveal(step.state, LONG, false, ROWS).step).toBeNull();
   });
 
   test("with nothing pending the ordinary rules apply (a later append IS animated)", () => {
@@ -247,8 +256,12 @@ describe("a RE-ATTACH arms the landing the same way the pull does (Review round 
   test("a re-attach never hides the list it just re-read (mutation: arm `landingStart` → the rows flicker out)", () => {
     const step = landingStep(reattachLanding(true), { content: 1300, viewport: 800 }, true, ROWS);
     expect(step.state.settling).toBe(false); // silent, never hidden: the rows are already up
-    expect(step.state.silent).toBe(false); // and this landing is now done
-    expect(step.step).toEqual({ state: initialFollow, scrollTo: 500, animated: false });
+    // One measurement never lands a re-attach: the replace is still re-measuring
+    // (bug 4 — a scroll here, then an ANIMATED one per later measurement, is the loop).
+    expect(step.step).toBeNull();
+    const landed = landingReveal(step.state, { content: 1300, viewport: 800 }, true, ROWS);
+    expect(landed.state.settling).toBe(false); // still never hidden
+    expect(landed.step).toEqual({ state: initialFollow, scrollTo: 500, animated: false });
   });
 
   test("but an OPENING landing revealed while it waited for a slow attach hides again for the rows that arrive", () => {
@@ -271,8 +284,119 @@ describe("a RE-ATTACH arms the landing the same way the pull does (Review round 
     // a resync's new history went through `contentGrew` — ANIMATED, seen.
     const armed = reattachLanding(true);
     const step = landingStep(armed, LONG, true, ROWS);
-    expect(step.step?.animated).toBe(false);
-    expect(step.step?.scrollTo).toBe(39200);
+    expect(step.step).toBeNull(); // absorbed (bug 4)
+    const landed = landingReveal(step.state, LONG, true, ROWS);
+    expect(landed.step?.animated).toBe(false);
+    expect(landed.step?.scrollTo).toBe(39200);
+  });
+});
+
+/**
+ * Owner, real iPhone 2026-11-18 09:50 (bug 4, HIGHEST): coming back from another
+ * app made the transcript scroll "up and down in a loop" trying to reach the old
+ * position. Expected: it is simply where it was, with NO scroll at all.
+ *
+ * The hole `landingQuiet` had: it is a ONE-SHOT. Its `silent` flag cleared on the
+ * first measurement, so every later content change of that same re-attach fell
+ * through to `contentGrew` — ANIMATED. A re-attach REPLACES the rows (`withHistory`
+ * re-keys them all), so a FlatList unmounts its cells and the content height
+ * moves for several measurements in a row: the loop the owner saw.
+ *
+ * Acceptance (the fix brief): a foreground return never issues more than ONE
+ * scroll command, and none at all when the person was not at the end.
+ */
+describe("a RE-ATTACH lands in ONE silent scroll, never the foreground loop (bug 4)", () => {
+  /** The measurements a replaced history reports: dropped, grown back, repeated. */
+  const RETURN: readonly { content: number; viewport: number }[] = [
+    { content: 800, viewport: 800 }, // the replace: every cell unmounted
+    { content: 12000, viewport: 800 },
+    { content: 40000, viewport: 800 },
+    { content: 42000, viewport: 800 },
+    { content: 42000, viewport: 800 },
+    { content: 42000, viewport: 800 },
+  ];
+
+  /** What the screen does per measurement: land if a landing is owed, else follow. */
+  const replay = (following: boolean): { scrollTo: number; animated: boolean }[] => {
+    let landing = reattachLanding(following);
+    const commands: { scrollTo: number; animated: boolean }[] = [];
+    for (const size of RETURN) {
+      const landed = landingStep(landing, size, following, ROWS);
+      landing = landed.state;
+      if (landed.step?.scrollTo != null) {
+        commands.push({ scrollTo: landed.step.scrollTo, animated: landed.step.animated });
+        continue;
+      }
+      if (landed.step !== null) {
+        continue; // a landing step that scrolls nowhere is still the landing's own
+      }
+      // The landing OWNS the measurements while it is owed: the screen never falls
+      // through to the animated follow (that is the bug this pins).
+      if (landingPending(landing)) {
+        continue;
+      }
+      const step = contentGrew({ following, unseen: false }, size);
+      if (step.scrollTo !== null) {
+        commands.push({ scrollTo: step.scrollTo, animated: step.animated });
+      }
+    }
+    // The reveal timer, once the sizes go quiet: the ONE silent scroll.
+    const last = RETURN[RETURN.length - 1];
+    if (last !== undefined) {
+      const revealed = landingReveal(landing, last, following, ROWS);
+      if (revealed.step?.scrollTo != null) {
+        commands.push({ scrollTo: revealed.step.scrollTo, animated: revealed.step.animated });
+      }
+    }
+    return commands;
+  };
+
+  test("at the end: one silent scroll to the true end, nothing seen moving", () => {
+    const commands = replay(true);
+    // The bug: 1 silent then 5 ANIMATED (0 → 11200 → 39200 → 41200 …), the loop.
+    expect(commands.filter((c) => c.animated)).toEqual([]);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]?.scrollTo).toBe(41200); // the height it settled on
+  });
+
+  test("reading further up: not a single scroll command (they are never yanked)", () => {
+    expect(replay(false)).toEqual([]);
+  });
+
+  test("the landing stays silent until the end STOPS moving, then hands over to the ordinary rules", () => {
+    // It absorbs every measurement of the replace: nothing is scrolled while
+    // the list is still re-measuring.
+    let landing = reattachLanding(true);
+    for (const size of RETURN.slice(0, 5)) {
+      const step = landingStep(landing, size, true, ROWS);
+      expect(step.step).toBeNull();
+      landing = step.state;
+    }
+    expect(landingPending(landing)).toBe(true);
+    // The sizes went quiet → ONE silent scroll, and the landing is done.
+    const landed = landingReveal(landing, RETURN[RETURN.length - 1] ?? LONG, true, ROWS);
+    expect(landed.step?.animated).toBe(false);
+    expect(landingPending(landed.state)).toBe(false);
+    // From here a NEW row is the ordinary animated follow, once.
+    expect(contentGrew(initialFollow, { content: 42060, viewport: 800 })).toEqual({
+      state: initialFollow,
+      scrollTo: 41260,
+      animated: true,
+    });
+  });
+
+  test("the re-attach's landing is still BOUNDED (a turn streaming through it cannot silence it for ever)", () => {
+    let landing = reattachLanding(true);
+    let rounds = 0;
+    for (; rounds < 100; rounds += 1) {
+      const next = landingStep(landing, { content: 40000 + rounds * 7, viewport: 800 }, true, ROWS);
+      landing = next.state;
+      if (!landing.silent) {
+        break;
+      }
+    }
+    expect(landing.silent).toBe(false);
+    expect(rounds).toBeLessThan(100);
   });
 });
 

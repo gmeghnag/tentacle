@@ -147,3 +147,37 @@ describe("the settle re-check (docs/fix/mobile-qa-1117.md, bug 5)", () => {
     expect(src).toMatch(/if \(dragging\.current\) \{\s*return;\s*\}\s*const step = settleStep/);
   });
 });
+
+/**
+ * QA bug 1: the pending bubbles' inline actions must not sit under the floating
+ * hub (a tap there opens the fan, so a queued message cannot be cancelled). The
+ * decision is `floating-button.ts`'s `footClearance` (tested there); this pins
+ * that the screen hands it to the footer, from the SAME verdict that decides the
+ * button is drawn.
+ */
+describe("the transcript's foot clears the hub (QA bug 1)", () => {
+  const src = read("screens", "SessionScreen.tsx");
+
+  test("the footer receives the clearance, computed from whether the button is drawn", () => {
+    expect(src).toMatch(/<PendingBubbles[\s\S]{0,800}clearance=\{footClearance\(floatShown\)\}/);
+    expect(src).toMatch(
+      /import \{[\s\S]{0,200}footClearance,[\s\S]{0,200}\} from "\.\.\/floating-button\.ts"/,
+    );
+  });
+
+  test("both edges are padded, so either hub side is safe, and the actions wrap rather than run off", () => {
+    const footer = read("screens", "compose", "PendingBubble.tsx");
+    // The padding is on the ROW that holds the bubble and its menu, not the bubble.
+    expect(footer).toMatch(/<View style=\{\[styles\.row, \{ paddingHorizontal: clearance \}\]\}>/);
+    expect(footer).toMatch(/menu: \{[^}]*flexWrap: "wrap"/);
+    // `readonly` on the props, repo style.
+    expect(footer).toMatch(/readonly clearance: number;/);
+  });
+
+  test("the open menu still pairs its state (a regression I introduced and reverted)", () => {
+    const footer = read("screens", "compose", "PendingBubble.tsx");
+    expect(footer).toMatch(/const \[open, setOpen\] = useState<string \| null>\(null\);/);
+    expect(footer).toMatch(/onToggle=\{\(\) => setOpen\(/);
+    expect(footer).not.toMatch(/useState<string \| null>\(null\)\[1\]/);
+  });
+});
