@@ -577,3 +577,14 @@ Mutations (each one reverted from a scratch copy; `git status` clean afterwards)
 Attacks tried: (a) Finding 1 (dimmed slide-release, then a second dimmed tap): fixed at the source. `commit` now clears `hi` before `flash` (`hub-gesture.ts:184-197`), and the test is bound to the real `pillIndex`. (b) Every way out of a sticky fan (`tapOverlay` miss, `down`, `cancel`) goes through `CLOSE`, which calls `disarmFlash`, and unmount clears the timer too. Held. (c) `moving.current` is left true after a dimmed slide-release turns the fan sticky. That is the same as an ordinary sticky open, and the later `close` resets it. Held. (d) §7 "logic in pure modules": the text, visibility and index decisions are in `hub-flash.ts`; the `.tsx` only runs the one timer. Held. C1 touches no protocol, persistence, broker or terminal invariant.
 
 Carried over, not findings: the two clocks for one flash (Low, left on purpose in fix round 1), and the `commandsOpen` no-op until C3 mounts the sheet. C1 must not ship without C3.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18*
+
+**Verdict: PASS.** Fix under review: `e3418064` (HEAD~1 is a docs-only commit).
+
+- **Finding 1 — fixed.** `hub-gesture.ts:194` now emits `{highlight, index: null}` in the dimmed `commit` branch, before `flash`. The round-1 repro (`stale-hi.ts`) now prints `hi=null … pill#1="Nothing to steer"` for the second dimmed tap, and no pill is left after the flash expires.
+- **Mutation:** with that line removed, 3 tests in `hub-gesture.test.ts` fail, including the new "slide-release then a tap on ANOTHER dimmed item" test, which checks the pill through `pillIndex`. The mutation was reverted and the tree is clean.
+- **Regressions:** `FloatingActivity.tsx:284` is the only place that reads `highlight`, and it only sets `hi`, so the change adds no haptic and no announcement. A sticky tap already had `hi === null`, so the extra effect does nothing there. `apps/mobile/test` passes, 3680 / 0. `bun run lint` and `bun run typecheck` are clean.
+- Round 1's low note (the machine's `flash.at` is never read by the renderer) and the interim `commandsOpen` note still stand, and neither blocks.
