@@ -600,3 +600,21 @@ integration seam that no unit test covers. Reviewer is the same model family (fr
 context only).
 
 *— claude-opus-5-5, 2026-11-18*
+
+### Round 2
+
+**Verdict: PASS.** Commit `3b6859d1` fixes finding 1. `itemRows` now treats a
+user item as Ctrl+O-sensitive when `isFiredWake` recognises it
+(`render-lines.ts:1243-1246`, `schedule-view.ts` `isFiredWake`). `isFiredWake`
+calls the same `firedWakeOf` that `firedRowLines` uses, so the two cannot disagree
+about which messages are wakes. The round-1 repro (`cache.ts`) now shows
+`ctrl+o on : ["◷ Wake #2","  line one","  line two"]`.
+**Mutation:** dropping the user clause from `expandMatters` made the 2 new
+`render-lines.test.ts` tests fail (expand, then collapse). After the revert,
+`git status` is clean.
+**Regressions:** an ordinary user prompt still uses the collapsed slot (pinned
+by the third new test). `render-lines`, `schedule-view`, `schedule-panel-frames`
+and `app.test.tsx`: 296 pass / 0 fail. `bun run lint` clean (2077 files) and
+`bun run typecheck` clean (root + mobile + relay). Not re-run: the full `bun test`.
+
+*— claude-opus-5-5, 2026-11-18*
