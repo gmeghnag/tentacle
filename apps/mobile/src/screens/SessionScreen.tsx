@@ -118,6 +118,7 @@ import {
 } from "../hub-actions.ts";
 import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
+import { noticeLooks } from "../notice-group.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
 import type { ArtifactGalleryRoute } from "../routes.ts";
 import { rowErrorFields } from "../row-guard.ts";
@@ -621,6 +622,11 @@ export function SessionScreen({
   // the live "Thinking…" footer. Still ONE cell per row: keys, "Show in chat"
   // indices and open-at-end's follow read `rows` unchanged.
   const layout = useMemo(() => stepLayout(rows, running, isBlockRow), [rows, running]);
+  // Each harness line's glyph and whether it joins the block above
+  // (docs/feat/mobile-harness-notices.md S1). Over the VISIBLE rows: a cell the
+  // step layout hides (`layout.cells`) is transparent, so a hidden reasoning row
+  // never re-opens a glyph mid-block.
+  const looks = useMemo(() => noticeLooks(rows, layout.cells), [rows, layout]);
   // The open steps and the steps showing every output line, by row key. In the
   // SCREEN: a virtualised cell that scrolls out of the window unmounts, and its
   // own state would die with it.
@@ -791,6 +797,9 @@ export function SessionScreen({
       openSteps,
       fullSteps,
       layout,
+      // A notice's glyph/join (docs/feat/mobile-harness-notices.md S1): a block's
+      // head changes when a neighbour arrives, with the row itself unchanged.
+      looks,
     }),
     [
       diagramStyle,
@@ -800,6 +809,7 @@ export function SessionScreen({
       openSteps,
       fullSteps,
       layout,
+      looks,
     ],
   );
   const compose = state.compose;
@@ -1267,6 +1277,9 @@ export function SessionScreen({
                         onLink={onLink}
                         thumbnails={state.thumbnails}
                         chartLabels={chartSettings.labels}
+                        {...(item.kind === "notice" && looks.has(item.key)
+                          ? { look: looks.get(item.key) }
+                          : {})}
                         step={{
                           cell,
                           open: isOpen(openSteps, item.key),

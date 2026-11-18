@@ -236,6 +236,7 @@ export function apply(state: State, input: TranscriptInput, now?: number): State
     case "turn_ended":
       return endTurn(state, input);
     case "closed":
+      // A session ending elsewhere is news, not a fault (Owner Q3: `◇`).
       return push({ ...state, closed: input.reason }, (key) => ({
         kind: "notice",
         key,
@@ -310,20 +311,41 @@ export function endTurn(
 ): State {
   const base: State = { ...state, turn: null };
   const notice = outcomeNotice(input);
-  return notice === null ? base : push(base, (key) => ({ kind: "notice", key, text: notice }));
+  return notice === null
+    ? base
+    : push(base, (key) => ({ kind: "notice", key, text: notice.text, ...levelOf(notice) }));
 }
 
-function outcomeNotice(input: Extract<TranscriptInput, { type: "turn_ended" }>): string | null {
+/**
+ * The line an unexplained outcome leaves, with its harness level
+ * (docs/feat/mobile-harness-notices.md Owner Q3): a LOST turn stream is something
+ * that went wrong (`▲`), an interrupted one is news (`◇`). A `failed` turn went
+ * wrong too, so it WARNS as well — the glyph is its warning shape, so its text
+ * carries the daemon's words with no `⚠` of its own (Review round 1: a `◇ ⚠ …`
+ * line mixed the two signals, and `▲ ⚠ …` would draw the same marker twice).
+ */
+function outcomeNotice(
+  input: Extract<TranscriptInput, { type: "turn_ended" }>,
+): { readonly text: string; readonly warn?: true } | null {
   switch (input.outcome) {
     case "interrupted":
-      return TURN_INTERRUPTED_NOTICE;
+      return { text: TURN_INTERRUPTED_NOTICE };
     case "lost":
-      return TURN_LOST_NOTICE;
+      return { text: TURN_LOST_NOTICE, warn: true };
     case "failed":
-      return `⚠ ${input.message !== undefined && input.message !== "" ? input.message : "the turn failed"}`;
+      return {
+        text:
+          input.message !== undefined && input.message !== "" ? input.message : "the turn failed",
+        warn: true,
+      };
     default:
       return null; // ended / cancelled: the transcript says what happened
   }
+}
+
+/** `{level}` spreadable for a notice that is a WARNING (`{}` for info). */
+function levelOf(notice: { readonly warn?: true }): { level?: "warn" } {
+  return notice.warn === true ? { level: "warn" } : {};
 }
 
 function applyUnsupported(state: State, kind: string): State {
@@ -465,10 +487,10 @@ function applyAgentEvent(state: State, event: StreamEvent, at: At): State {
       if (at >= 0) {
         return mergeContinueNotice(state, at, text);
       }
-      return noticeSeenThisTurn(state, text) ? state : pushNotice(state, text);
+      return noticeSeenThisTurn(state, text) ? state : pushNotice(state, text, "warn");
     }
     case "empty_turn":
-      return pushNotice(state, describeEmptyTurn());
+      return pushNotice(state, describeEmptyTurn(), "warn");
     case "history_repaired":
       return pushNotice(state, describeRepairs(event));
     case "dsml_leak":
@@ -550,9 +572,16 @@ function applyAgentEvent(state: State, event: StreamEvent, at: At): State {
   }
 }
 
-/** Append a standalone notice (the TUI's `appendNotice`, same wording). */
-function pushNotice(state: State, text: string): State {
-  return push(state, (key) => ({ kind: "notice", key, text }));
+/** Append a standalone notice (the TUI's `appendNotice`, same wording).
+ * `level` is the TUI's own table (`packages/tui/src/state.ts:724`, `:730`): a
+ * cut reply and an empty turn WARN, everything else is info. */
+function pushNotice(state: State, text: string, level?: "warn"): State {
+  return push(state, (key) => ({
+    kind: "notice",
+    key,
+    text,
+    ...(level === "warn" ? { level } : {}),
+  }));
 }
 /** Whether this turn's MODEL text reached the screen (a cut reply with none must not claim an answer). */
 function hasAnswerText(state: State): boolean {
@@ -592,12 +621,14 @@ function reaskContinueAt(state: State): number {
 /**
  * Swap this turn's "asking it to continue" notice for the merged `again`
  * sentence, IN PLACE (the TUI's `mergeContinueNotice`): the block keeps its
- * position above the reply instead of a second line appearing below it.
+ * position above the reply instead of a second line appearing below it — and
+ * its KEY (a virtualised list's identity: docs/feat/mobile-harness-notices.md
+ * failure modes) and its LEVEL (the merged line is the same warning continued).
  */
 function mergeContinueNotice(state: State, at: number, text: string): State {
   const prev = state.rows[at];
   if (prev === undefined || prev.kind !== "notice") {
-    return pushNotice(state, text);
+    return pushNotice(state, text, "warn");
   }
   const rows = state.rows.slice();
   rows[at] = { ...prev, text };

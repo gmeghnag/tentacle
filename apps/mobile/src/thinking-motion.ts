@@ -64,6 +64,11 @@ export function breatheCurve(dot: number): Curve {
  * The shimmer's bright band over a word `width` pt wide: it starts wholly off
  * the word's left edge and ends wholly off its right one. Width 0 (not measured
  * yet) sweeps nothing.
+ *
+ * Still the `overflow: "hidden"` window of `ui/StepNode.tsx` today — which is
+ * the rectangle docs/feat/mobile-thinking-images.md (Owner Q1 = "B") removes.
+ * S2 replaces this with the glyph-clipped sweep; until S0's verdict and S2 land,
+ * this comment describes the code as it IS, not as the plan wants it.
  */
 export function shimmerSweep(width: number): {
   readonly band: number;
@@ -72,6 +77,43 @@ export function shimmerSweep(width: number): {
 } {
   const band = width > 0 ? Math.round(width * 0.4) : 0;
   return { band, from: -band, to: width };
+}
+
+/**
+ * The elapsed clock beside the word, written with a STEADY width so the row does
+ * not jump as it counts: `0 s` … `59 s`, then `1 min 05 s` (the seconds
+ * zero-padded), then `1 h 02 min` from the first hour. The consumer that draws
+ * it in `palette.sec` and tabular figures is S2 of
+ * docs/feat/mobile-thinking-images.md — not built yet, so the text here is what
+ * the row passes to it, and nothing renders it today.
+ *
+ * `liveElapsed` (`tool-summary.ts`) stays as it is for a tool row's duration —
+ * that one is NOT tabular, does not pad, and reads `120 min` after two hours;
+ * the live Thinking row is the one place the width has to hold.
+ */
+export function thinkingElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) {
+    return `${seconds} s`;
+  }
+  if (seconds < 3600) {
+    const sec = seconds % 60;
+    return `${Math.floor(seconds / 60)} min ${sec < 10 ? `0${sec}` : `${sec}`} s`;
+  }
+  const min = Math.floor((seconds % 3600) / 60);
+  return `${Math.floor(seconds / 3600)} h ${min < 10 ? `0${min}` : `${min}`} min`;
+}
+
+/**
+ * What the live row says: the word (no ellipsis — the clock is what says "still
+ * going") and the elapsed time to set beside it. S2 wires both into
+ * `ui/StepNode.tsx`; no caller exists yet.
+ */
+export function thinkingLabel(ms: number): {
+  readonly word: "Thinking";
+  readonly seconds: string;
+} {
+  return { word: "Thinking", seconds: thinkingElapsed(ms) };
 }
 
 /**
