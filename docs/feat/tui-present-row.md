@@ -176,3 +176,32 @@ dispatch) · `useMouse.ts` (port + effect) · `App.tsx` (snapshot field, port wi
 - Unverified: a real terminal + `open` on macOS (the opener port is spied in
   tests; `os-open.ts` is unchanged). Verify with `tentacle`, ask for a `present`,
   click the header.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-18* (fresh context, SAME model as the executor: shared blind spots possible)
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH; one MEDIUM, non-blocking, pre-existing class).
+
+- **Gate (touched files):** `artifact-card` + `mouse-stream` + `app-artifacts`: 69 pass / 0 fail;
+  `bun run lint` clean (2085 files); `bun run typecheck` clean. Full `bun test` not re-run by the reviewer.
+- **Mutations (all reverted, `git status` clean):** (1) open branch gated on `!expandAll` →
+  "with Ctrl+O on, a `present` header click still opens" fails; (2) toggle guard dropped
+  (`!snapshot.expandAll` removed) → 2 fails (`app.test.tsx` review-finding-3, `mouse-stream`
+  Ctrl+O) — the moved `expandAll` check is pinned; (3) no-card `ok` body suppression disabled →
+  "a `present` row with no card shows NO body" fails. Executor's two App mutations not repeated.
+- **Premises:** `toolCallAtViewport` (`tool-hit.ts:74`) returns an id only for an item's row 0 —
+  TRUE; `artifactStep` (`artifact-open.ts:151`) routes `other` → notice, pod → confirm — TRUE;
+  the click reuses `runArtifact` + `artifactOrigin` (`App.tsx`), no second path — TRUE.
+- **§7 attacks:** single artifact decision path — holds (ref-backed callback, stable identity);
+  pod-origin gate on the laptop — holds (origin from the runtime, not the meta; confirm before read);
+  logic in pure modules — holds (`artifactOfCall`, `dispatchMouse`); no protocol/persistence touch.
+- **M1 (MEDIUM, non-blocking) — raw control bytes in the header.** `render-lines.ts:691`
+  (`str("title")`) puts the parsed title into the header verbatim; before, the raw JSON args
+  escaped them (`\u001b`). Repro (`.tentacle/tmp/tui-present-row/rev-nl.test.ts`): title
+  `"A\nB\u001b[2JRED"` renders `● Present A B\u001b[2JRED` — a live ESC sequence from a
+  model/pod-chosen string reaches the terminal. Same class already exists for `diagram`'s title
+  and `shell`'s command, so the fix belongs in `toolTitle` for every tool (strip C0/C1 control
+  bytes) — a follow-up task, not this branch.
+- **Executor behaviour:** plan matched the code; red→green and mutation claims credible and
+  partially reproduced; scope disciplined.
