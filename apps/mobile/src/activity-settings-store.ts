@@ -5,20 +5,23 @@
  *
  * Fail-safe rules, each pinned by a test (F22):
  * - an unreadable, missing or unknown-version record reads the DEFAULTS
- *   ("header", no position): the user always has the header pill;
+ *   ("floating" at 80 %, no position — docs/feat/mobile-hub-defaults.md; was
+ *   "header" until 2026-11-18). A READABLE record keeps what it says: a phone
+ *   that stored "header" stays on the header pill;
  * - an unknown `v` (or bytes that are not the record) is left untouched: a
  *   write over it is refused (`ActivitySettingsPreserved`), and Settings says
  *   this build cannot change it;
  * - a bad `position` inside our own v1 record drops the position only (the
  *   button goes back to its default spot; the mode is kept);
  * - a bad `opacity` (docs/feat/mobile-hub-opacity.md) drops the opacity only and
- *   a number is clamped to the 30–100 floor: the button is never invisible.
+ *   a number snaps to the nearest of the 20 · 40 · 60 · 80 · 100 steps
+ *   (`snapOpacity`): the button is never invisible.
  * - a write failure rejects, so Settings says "didn't save" — the holder keeps
  *   the pick in memory for this run.
  */
 import type { SecureKV } from "./computer-store.ts";
 import type { ActivityButtonMode, FloatPosition } from "./floating-button.ts";
-import { clampOpacity } from "./hub-opacity.ts";
+import { OPACITY_FIRST_RUN, snapOpacity } from "./hub-opacity.ts";
 
 export const ACTIVITY_SETTINGS_KEY = "tentacle.activity-button";
 export const ACTIVITY_SETTINGS_VERSION = 1;
@@ -28,15 +31,23 @@ export interface ActivitySettings {
   /** Where the floating button rests; absent → its default spot. */
   readonly position?: FloatPosition;
   /**
-   * How see-through the floating button is at rest, as a percentage inside
-   * 30–100; absent → 100 (today's look). ADDITIVE inside the same v1 record: an
+   * How see-through the floating button is at rest: one of the steps
+   * 20 · 40 · 60 · 80 · 100; absent in a stored record → 100 (the look it had). ADDITIVE inside the same v1 record: an
    * older build ignores it and its next write drops it, which is safer than a
    * `v` bump, where every older build would refuse to write at all (rule 2).
    */
   readonly opacity?: number;
 }
 
-export const DEFAULT_ACTIVITY_SETTINGS: ActivitySettings = { mode: "header" };
+/**
+ * A phone with NO readable record (owner 2026-11-18): the floating hub, at 80 %.
+ * Only the absence of a choice gets it — a stored record, `"header"` included,
+ * and a stored record without an opacity (→ 100) read as they always did.
+ */
+export const DEFAULT_ACTIVITY_SETTINGS: ActivitySettings = {
+  mode: "floating",
+  opacity: OPACITY_FIRST_RUN,
+};
 
 export interface ActivitySettingsRead {
   readonly settings: ActivitySettings;
@@ -66,7 +77,7 @@ function parsePosition(value: unknown): FloatPosition | undefined {
 }
 
 function parseOpacity(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? clampOpacity(value) : undefined;
+  return typeof value === "number" && Number.isFinite(value) ? snapOpacity(value) : undefined;
 }
 
 function parse(raw: string | null): ActivitySettingsRead {
