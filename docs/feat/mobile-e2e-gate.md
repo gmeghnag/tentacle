@@ -178,3 +178,19 @@ Gate: `bun test apps/mobile/test/e2e-gate.test.ts apps/mobile/test/e2e-flows.tes
 Mutations (each reverted, tree byte-identical, `git status` clean): `shouldRetry` `=== 1`→`<= 2` → caught; `verdictOf` ignoring `known-bug` → caught (4 tests).
 Attacks with no finding: tag parsing (block/inline/reason-without-tag), `quarantine`+other exclusivity, last-attempt-decides, port 4000 guard, hooks routing (pinned by a union-vs-`hookFor` test). §7 invariants: none touched (harness/tooling only).
 Executor: careful pure-module split and tests, but declared done-able with its own test red and Execution unwritten.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; same model family as the round-1 fixer)
+
+**Verdict: REQUEST-CHANGES**
+
+Gate: `bun test apps/mobile/test/e2e-gate.test.ts apps/mobile/test/e2e-flows.test.ts` → 73 pass, 0 fail; `bun run lint` clean; `bun run typecheck` clean.
+
+- **F1 — FIXED.** `TODO.md` names ``e2e flow `34-hub-commands` ``; the TODO test is green.
+- **F2 — FIXED.** `deviceChoice` (`gate.ts`) refuses an unknown UDID or one from the other major, whether or not `--ios` is given. Mutation (major-mismatch check → `if (false)`) → 2 tests fail; reverted.
+- **F3 — FIXED.** `runAttempt` uses `detached: true` plus a group kill. Mutation (`detached: false`) → `nothing of the attempt outlives the timeout` fails; reverted. `git status` clean afterwards.
+- **F4 — OPEN (now the blocker).** The only full run on record is `GATE FAIL — 27 passed, 32 failed` of 60, and none of the 32 is triaged. A gate that is always red cannot refuse a publish (the Context's own goal), and `34-hub-new` (the reported bug) is neither tagged `known-bug` nor shown red on `main`. Needed: triage every red (fix it, or tag it with a reason and add a TODO line), then paste a `summary.txt` from this code.
+- **R1 (MEDIUM, new regression) — Ctrl+C now leaves Maestro running.** `detached: true` takes the attempt out of the terminal's process group, and `run.ts` installs no SIGINT handler (the only one is for `E2E_HOLD`, `run.ts:817`). Ctrl+C therefore ends Bun without its `finally`, so `killFlowTree` never runs. The Maestro JVM and XCTest driver keep driving the simulator. Before this round they got the terminal's SIGINT. Fix: on SIGINT/SIGTERM, kill each attempt's group (e.g. through the `finally`) before exiting.
+
+What holds: `killFlowTree` refuses pid ≤ 1 and its own pid. The `finally` group-kill is harmless for `serve`: it leads no group, so the kill gets ESRCH, which is caught. `children.delete(attempt)` keeps `serve` in the reap set.
