@@ -268,3 +268,26 @@ rather than hidden.
 instead of starting a persisted-format change, which is the intended outcome; it
 could not produce the task's named deliverable (screenshots) because of the
 environment, and said so rather than substituting prose for evidence.
+
+## Review (fresh-context)
+
+*— claude-opus-5-5, 2026-11-18*
+
+**Verdict: REQUEST-CHANGES.** Fresh context, but the same model as the executor's own Review, so blind spots may be shared.
+
+**Gate (re-run):** the 4 touched test files → 101 pass / 0 fail; `bun run lint` → clean (2083 files); `bun run typecheck` → clean. The full `bun test` was NOT re-run in this pass.
+
+**Mutations** (scratch `.tentacle/tmp/mobile-qa-1118-fix/mut.ts`; tree byte-identical after, `git status` clean):
+M1 drop the absorb branch → 5 fail ✔ · M2 `landingReveal` ignores `silent` → 5 fail ✔ · M5 `clearance={0}` → 1 fail ✔ · M6 drop `withLiveCards` → 1 fail ✔ ·
+**M3 `land()` returns `next.step !== null` (the pre-fix line) → 0 fail ✘** · **M4 re-arm the reveal only when it scrolled → 0 fail ✘**.
+
+**Findings**
+
+1. **MEDIUM — the screen half of the bug 4 fix is not pinned by any test** (`apps/mobile/src/screens/SessionScreen.tsx:482-488`). `follow.test.ts:335` copies the screen's routing into the test instead of asserting the screen's own source. So M3 (put back the exact pre-fix `return next.step !== null`) stays green: every absorbed measurement then falls through to `contentGrew` (animated) plus `armSettle`, which is the owner's loop again. M4 also stays green: an absorbed landing is then never landed by the timer. That breaks AGENTS §9. It also makes the earlier Review's claim "reverting `landingPending` … turns the new tests red" **false**. Fix: add wiring assertions in `session-screen-follow-wiring.test.ts` (in the style of its line 113) for `if (landingPending(next.state)) { armReveal()` and `return landingPending(next.state)`. Show M3/M4 red.
+2. **MEDIUM — measurements that arrive AFTER the reveal still scroll animated, and neither the repro nor any test covers them** (`follow.ts:353`, `SessionScreen.tsx:541-545`). The reveal does ONE silent scroll, then hands over to `landingDone`. A FlatList that jumps renders new end cells, so the content height moves again. `follow.ts:143-146` documents exactly this for the opening landing. Each of those measurements then goes through `contentGrew` + `settleStep`, both animated. `bug4-repro.ts` stops at the reveal (its line 58-61), so "6 → 1, 0 animated" never puts this path to the test. The opening landing repeats until a measurement repeats; the re-attach does not. Either keep the silent landing for the post-scroll re-measures (bounded) or show on a device that none arrive. As the Review's item 1 already says, the loop has not been seen fixed on a phone.
+
+**Premises:** `landingQuiet` silent and not settling — TRUE. `land()` pre-fix returned "did it scroll" — TRUE. The 440 pt arithmetic (440 − 10 − 54 = 376) — TRUE. The `landingQuiet` doc comment (`follow.ts:182-186`, "`last` is the content height measured BEFORE the re-attach … see `reattachLanding`") — **FALSE**: `last` is 0 and `reattachLanding` never sets it (stale comment, low). The bug4 repro is not pasted into the doc (AGENTS §6), low.
+
+**Attacks tried with nothing found:** a re-attach while reading up (landingStep/landingReveal → `landingDone` with no command, so `contentGrew` still runs). `landingAwaiting` and `landingStart` cannot enter the absorb branch (`settling`/`awaiting` guards). A streaming turn is bounded by `LANDING_ROUNDS`. `withLiveCards` returns the same join on a no-op and dedups by id + version. No §7 invariant touched (mobile-only, no protocol or persistence change).
+
+**How the executor behaved:** honest about missing screenshots and the bug 2 park. But it overstated non-vacuity for the screen wiring, and its repro models only the phase it fixed.
