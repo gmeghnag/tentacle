@@ -289,6 +289,13 @@ export const radius = {
   tile: 14,
   banner: 18,
   queue: 20,
+  /**
+   * The composer's ONE field (docs/feat/mobile-queued-compose.md D4, Q3): a 22 pt
+   * rect holding the input and the 36 pt row under it. Its own token because the
+   * field is not a bubble, a card or a sheet, and `size.composer / 2` (24) drew
+   * the old glass capsule.
+   */
+  composer: 22,
   iconTile: 8,
   iconTileLarge: 12,
   pill: 11,

@@ -1,17 +1,26 @@
 /**
- * The chat's composer (mockup `Conversation` / `Compose`): a glass capsule
- * (≥ 48 pt) with the photo button and a 17 pt field, beside a round 48 pt
- * action — send `arrow.up` on `accentFill`, queue the same arrow (accent while a
- * turn runs), Stop a `label` disc with a `page` square, disabled `fill`/`sec`.
- * WHAT the action does is `composerAction`'s; this file only draws `button`.
+ * The chat's composer (docs/feat/mobile-queued-compose.md D4, owner Q3): ONE
+ * field — `fill`, a 1 pt separator stroke, a 22 pt radius — with the `TextInput`
+ * on top and a 36 pt row under it: `+` on the left (the attach sheet), then the
+ * `⇥ Send now` pill while Send now is offered, the mic, and the send slot at the
+ * right. The slot's GLYPH is `sendSlot`'s (`composer.ts`), a total map of
+ * `composerAction` — WHAT a tap does is the truth table's, this file only draws
+ * `slot`.
  *
- * testIDs (the flows' contract, unchanged): `composer-input`, `composer-photo`,
- * `composer-send` / `composer-stop` / `composer-send-later`, `composer-filled`.
+ * The old shape was a glass capsule with the photo button and the mic beside a
+ * round button outside it; the mockup puts everything in one field, and the sheet
+ * (`+`) is where a photo, a camera shot and a PDF already live (`openAttach`).
+ *
+ * testIDs (the flows' contract, unchanged): `composer-input`, `composer-photo`
+ * (the `+`), `composer-send` / `composer-stop` / `composer-send-later` (the one
+ * slot), `composer-mic` / `composer-mic-listening`, `composer-send-now` (now
+ * INSIDE the field), `composer-filled`.
  */
 import { type ComponentRef, type JSX, useEffect, useRef } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import type { SendSlot } from "../composer.ts";
 import type { MicButton } from "../dictation.ts";
-import { type Palette, shadow, size, typography } from "../theme.ts";
+import { type Palette, radius, shadow, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
 
 export type ComposerButton = "send" | "queue" | "send-later" | "stop" | "disabled";
@@ -22,10 +31,16 @@ export interface ComposerProps {
   readonly editable: boolean;
   readonly placeholder: string;
   readonly button: ComposerButton;
+  /** The slot's face (`sendSlot`): ↑, a dimmed ↑, ■, or a clock. */
+  readonly slot: SendSlot;
   readonly onChange: (text: string) => void;
   readonly onReturn: () => void;
   readonly onPress: () => void;
+  /** The `+`: the attach sheet (photo, camera, PDF — 13c/D7). */
   readonly onPhoto: () => void;
+  /** **Send now** offered (`sendNowOffered`, D3): the pill in the field. */
+  readonly sendNow: boolean;
+  readonly onSendNow: () => void;
   /** Below the bar: the home indicator when the keyboard is closed (B1). */
   readonly bottomPadding: number;
   /** The dictation button (`micButtonOf`, docs/feat/mobile-voice.md Design §5). */
@@ -67,10 +82,13 @@ export function Composer({
   editable,
   placeholder,
   button,
+  slot,
   onChange,
   onReturn,
   onPress,
   onPhoto,
+  sendNow,
+  onSendNow,
   bottomPadding,
   mic,
   onMic,
@@ -94,33 +112,20 @@ export function Composer({
       input.current?.focus();
     }
   }, [focusKey]);
-  const stop = button === "stop";
   const disabled = button === "disabled";
-  const actionBg = stop ? palette.label : disabled ? palette.fill : palette.accentFill;
   const listening = mic === "listening";
   return (
     <View style={[styles.bar, { paddingBottom: bottomPadding }]}>
       <View
         style={[
-          styles.capsule,
+          styles.field,
           {
-            backgroundColor: palette.glass,
-            borderColor: listening ? palette.accent : palette.glassBorder,
+            backgroundColor: palette.fill,
+            borderColor: listening ? palette.accent : palette.sep,
             shadowOpacity: palette.shadowOpacity,
           },
         ]}
       >
-        <Pressable
-          testID="composer-photo"
-          accessibilityRole="button"
-          accessibilityLabel="Add a photo"
-          disabled={!editable}
-          onPress={onPhoto}
-          hitSlop={6}
-          style={styles.photo}
-        >
-          <Icon name="photo" color={editable ? palette.accent : palette.sec} size={20} />
-        </Pressable>
         <TextInput
           key={fieldKey}
           testID="composer-input"
@@ -139,29 +144,96 @@ export function Composer({
           onSubmitEditing={onReturn}
           accessibilityLabel="Message"
         />
-        {mic === "hidden" ? null : (
+        {/* The 36 pt row: `+`, then (right) Send now, the mic and the slot. */}
+        <View style={styles.row}>
           <Pressable
-            testID={listening ? "composer-mic-listening" : "composer-mic"}
+            testID="composer-photo"
             accessibilityRole="button"
-            accessibilityLabel={listening ? "Stop dictation" : "Dictate"}
+            accessibilityLabel="Add a photo or a file"
             disabled={!editable}
-            onPress={onMic}
+            onPress={onPhoto}
             hitSlop={6}
-            style={styles.photo}
+            style={styles.round}
           >
-            {listening ? (
-              <View style={{ opacity: 0.4 + 0.6 * level }}>
-                <Icon name="waveform" color={palette.accent} size={20} />
-              </View>
+            <Icon name="plus" color={editable ? palette.label : palette.sec} size={19} />
+          </Pressable>
+          <View style={styles.flex} />
+          {sendNow ? (
+            <Pressable
+              testID="composer-send-now"
+              accessibilityRole="button"
+              accessibilityLabel="Send now: stop the current step and send these"
+              hitSlop={6}
+              onPress={onSendNow}
+              style={({ pressed }) => [
+                styles.sendNow,
+                { backgroundColor: palette.tint },
+                pressed ? { opacity: 0.6 } : undefined,
+              ]}
+            >
+              <Icon name="bolt.fill" color={palette.accent} size={13} />
+              <Text style={[typography.caption, { color: palette.accent }]}>Send now</Text>
+            </Pressable>
+          ) : null}
+          {mic === "hidden" ? null : (
+            <Pressable
+              testID={listening ? "composer-mic-listening" : "composer-mic"}
+              accessibilityRole="button"
+              accessibilityLabel={listening ? "Stop dictation" : "Dictate"}
+              disabled={!editable}
+              onPress={onMic}
+              hitSlop={6}
+              style={styles.round}
+            >
+              {listening ? (
+                <View style={{ opacity: 0.4 + 0.6 * level }}>
+                  <Icon name="waveform" color={palette.accent} size={19} />
+                </View>
+              ) : (
+                <Icon
+                  name="mic"
+                  color={editable && mic === "idle" ? palette.accent : palette.sec}
+                  size={19}
+                />
+              )}
+            </Pressable>
+          )}
+          <Pressable
+            testID={testIdOf(button)}
+            accessibilityRole="button"
+            accessibilityLabel={LABEL[button]}
+            accessibilityState={{ disabled }}
+            disabled={disabled}
+            onPress={onPress}
+            style={({ pressed }) => [
+              styles.slot,
+              {
+                backgroundColor:
+                  slot === "stop"
+                    ? palette.label
+                    : slot === "up-dim"
+                      ? palette.fill
+                      : slot === "clock"
+                        ? palette.fill
+                        : palette.accentFill,
+              },
+              pressed ? { opacity: 0.7 } : undefined,
+            ]}
+          >
+            {slot === "stop" ? (
+              <View style={[styles.stopSquare, { backgroundColor: palette.page }]} />
+            ) : slot === "clock" ? (
+              <Icon name="clock" color={palette.label} size={17} />
             ) : (
               <Icon
-                name="mic"
-                color={editable && mic === "idle" ? palette.accent : palette.sec}
-                size={20}
+                name="arrow.up"
+                color={slot === "up-dim" ? palette.sec : palette.onAccent}
+                size={18}
+                weight="bold"
               />
             )}
           </Pressable>
-        )}
+        </View>
         {/* Maestro cannot read the field's text (P9): this is how a flow proves
           the field is NOT empty (a hand-back, a Take, an Edit). */}
         {draft === "" ? null : (
@@ -170,69 +242,40 @@ export function Composer({
           </Text>
         )}
       </View>
-      <Pressable
-        testID={testIdOf(button)}
-        accessibilityRole="button"
-        accessibilityLabel={LABEL[button]}
-        accessibilityState={{ disabled }}
-        disabled={disabled}
-        onPress={onPress}
-        style={({ pressed }) => [
-          styles.action,
-          { backgroundColor: actionBg },
-          pressed ? { opacity: 0.7 } : undefined,
-        ]}
-      >
-        {stop ? (
-          <View style={[styles.stopSquare, { backgroundColor: palette.page }]} />
-        ) : button === "send-later" ? (
-          <Icon name="clock" color={palette.onAccent} size={20} />
-        ) : (
-          <Icon
-            name="arrow.up"
-            color={disabled ? palette.sec : palette.onAccent}
-            size={20}
-            weight="bold"
-          />
-        )}
-      </Pressable>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  bar: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingTop: 8,
-  },
-  capsule: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "flex-end",
-    minHeight: size.composer,
-    borderRadius: size.composer / 2,
-    borderWidth: StyleSheet.hairlineWidth * 2,
+  bar: { paddingHorizontal: 12, paddingTop: 8 },
+  field: {
+    borderWidth: 1,
+    borderRadius: radius.composer,
+    paddingTop: 4,
+    paddingBottom: 6,
     paddingHorizontal: 6,
     ...shadow.glass,
   },
-  photo: {
+  input: { maxHeight: 132, paddingTop: 8, paddingBottom: 4, paddingHorizontal: 10 },
+  row: { flexDirection: "row", alignItems: "center", height: 36, gap: 4, paddingHorizontal: 2 },
+  flex: { flex: 1 },
+  round: { width: 32, height: 36, alignItems: "center", justifyContent: "center" },
+  sendNow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    height: 26,
+    paddingHorizontal: 10,
+    borderRadius: 13,
+  },
+  slot: {
     width: 36,
-    height: size.composer - 2,
+    height: 36,
+    borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
   },
-  input: { flex: 1, maxHeight: 132, paddingTop: 13, paddingBottom: 12, paddingRight: 10 },
-  action: {
-    width: size.composer,
-    height: size.composer,
-    borderRadius: size.composer / 2,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  stopSquare: { width: 15, height: 15, borderRadius: 3 },
+  stopSquare: { width: 14, height: 14, borderRadius: 3 },
   // `composer-filled` is an OBSERVABLE, not decoration: zero-size keeps the row
   // where it was (P9's contract needs the id only).
   // 1×1 and absolute, not 0×0: iOS 26 drops an empty-frame element from the

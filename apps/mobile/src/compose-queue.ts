@@ -194,6 +194,76 @@ export function restoredByRefusal(
   return messages.map((m) => m.id).filter((id) => !kept.has(id));
 }
 
+/**
+ * One pending message as the TRANSCRIPT draws it (docs/feat/mobile-queued-compose.md
+ * D1): the queued row, where it will land. `phase` is the row's own state —
+ * `queued` is waiting ("Pending · next step"), `sending` is a send-now already
+ * in flight ("⇥ Sending now · stopping the step"). `mine` is the same `own.has`
+ * the card used: only my rows are actionable (D2).
+ */
+export interface PendingBubble {
+  readonly id: string;
+  readonly text: string;
+  readonly mine: boolean;
+  readonly phase: "pending" | "sending";
+}
+
+/**
+ * The pending bubbles, in delivery order — a PURE projection of the rows the
+ * phone already holds (no new state, no timer): a bubble appears in the
+ * `queued` that lists its row and leaves in the one that drops it, exactly as
+ * the row does. Both writers' rows appear (today's card shows both); whose it
+ * is decides only whether it can be acted on.
+ */
+export function pendingBubbles(rows: readonly ShownRow[]): readonly PendingBubble[] {
+  return rows.map((row) => ({
+    id: row.id,
+    text: row.text,
+    mine: row.mine,
+    phase: row.state === "sending" ? "sending" : "pending",
+  }));
+}
+
+/** What the E1 menu on a pending bubble offers (D2). */
+export type BubbleAction = "edit" | "send-now" | "cancel";
+
+/** What the screen knows that decides whether a bubble can be acted on. */
+export interface BubbleContext {
+  /** The link is up (nothing travels otherwise). */
+  readonly link: boolean;
+  /** A turn runs: without one the message is not queued, it is sent. */
+  readonly turn: boolean;
+  /** Whether ⇥ Send now is offered right now (`sendNowOffered`, D3). */
+  readonly sendNow: boolean;
+  /** The daemon answers `session/unqueue` (false once it said `MethodNotFound`). */
+  readonly unqueue: boolean;
+}
+
+/**
+ * The E1 menu's items (D2), in the order the mockup draws them. Empty unless
+ * the bubble is MINE and still `pending` — another writer's words are shown,
+ * never edited or cancelled (owner Q3), and a bubble already `sending` is in
+ * flight (the send-now owns it; a withdraw there would be a lie). Edit and
+ * Cancel need the daemon to support unqueue (D5, an older one hides them);
+ * Send now reuses D3's rule, so it never appears on its own.
+ */
+export function bubbleActions(bubble: PendingBubble, ctx: BubbleContext): readonly BubbleAction[] {
+  if (!bubble.mine || bubble.phase !== "pending" || !ctx.link || !ctx.turn) {
+    return [];
+  }
+  const actions: BubbleAction[] = [];
+  if (ctx.unqueue) {
+    actions.push("edit");
+  }
+  if (ctx.sendNow) {
+    actions.push("send-now");
+  }
+  if (ctx.unqueue) {
+    actions.push("cancel");
+  }
+  return actions;
+}
+
 /** A row back with me: my id, my text, why (the daemon's fact, for the banner). */
 export interface ReturnedRow {
   readonly id: string;

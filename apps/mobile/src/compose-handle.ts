@@ -1,8 +1,8 @@
 /**
  * The compose half's chat handle (13d) over the client and the SCREEN's own
  * attach handle: `attachImage`, `send`, `enqueue`, `sendNow`, `onQueued`,
- * `reclaim` and 13b's outbox port — never a frame built in the app (AGENTS §7
- * "one session path").
+ * `reclaim`, `unqueue` and 13b's outbox port — never a frame built in the app
+ * (AGENTS §7 "one session path").
  *
  * Owner B4 (2026-11-15): this used to live in `App.tsx`, where the port was
  * built over an object holding only `sessionId` (`as never`), so its `facts()`
@@ -86,6 +86,10 @@ export function composeHandleOf(deps: ComposeHandleDeps): ComposeHandle {
     reclaim: async (ids) => {
       await client.reclaim(sessionId, ids);
     },
+    // `session/unqueue` (docs/feat/mobile-queued-compose.md D5): the client's own
+    // answer, `"unsupported"` included — an older daemon is shown as such, never
+    // thrown, so Edit/Cancel are hidden instead of failing.
+    unqueue: (ids) => client.unqueue(sessionId, ids),
     // 13b's port over the SAME handle: `facts()` reads its snapshot and `busy`.
     port: outboxSessionOf(session, client, () => null),
   };

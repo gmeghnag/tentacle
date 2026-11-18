@@ -28,12 +28,18 @@ appId: so.tentacle.app
 # A turn runs with text in the field: the button QUEUES (D1), it does not send.
 - tapOn:
     id: "composer-send"
+# The queued message is a PENDING BUBBLE in the transcript's footer now
+# (docs/feat/mobile-queued-compose.md D1), not a card above the field. Its own id
+# carries the daemon's key, which a flow cannot know: `pending-bubbles` is the
+# footer, and the bubble inside it is `pending-<id>-mine`.
 - extendedWaitUntil:
     visible:
-      id: "composer-queue"
+      id: "pending-bubbles"
     timeout: 20000
+- assertVisible:
+    id: "pending-.*-mine"
 # The tap QUEUED it: the field is cleared in the same step (D1's synchronous
-# clear, so a double tap cannot queue twice) and the row is what carries the text.
+# clear, so a double tap cannot queue twice) and the bubble is what carries the text.
 - assertNotVisible:
     id: "composer-filled"
 - runFlow:

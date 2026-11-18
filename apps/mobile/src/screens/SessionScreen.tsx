@@ -148,6 +148,7 @@ import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
+import { PendingBubbles } from "./compose/PendingBubble.tsx";
 import { RowGuard } from "./transcript/RowGuard.tsx";
 import { SwipeTime } from "./transcript/SwipeTime.tsx";
 import { RowFallback, TranscriptRow } from "./transcript/TranscriptRow.tsx";
@@ -1190,15 +1191,45 @@ export function SessionScreen({
               }}
               extraData={rowExtraData}
               // The live "Thinking…" node (Owner Q2): the thread's last node while
-              // the turn thinks, under the rows so their keys never shift.
+              // the turn thinks, under the rows so their keys never shift. The
+              // PENDING bubbles follow it (docs/feat/mobile-queued-compose.md D1):
+              // a queued message is read at the next step, so it IS the thread's last
+              // node — and it leaves in the `queued` that drops its row.
               ListFooterComponent={
-                layout.tail === null ? undefined : (
-                  <ThinkingNode
-                    palette={palette}
-                    thought={layout.tail.thought}
-                    up={layout.tail.up}
-                    reduceMotion={a11yFlags.reduceMotion}
-                  />
+                layout.tail === null && state.view.pending.length === 0 ? undefined : (
+                  <>
+                    {layout.tail === null ? null : (
+                      <ThinkingNode
+                        palette={palette}
+                        thought={layout.tail.thought}
+                        up={layout.tail.up}
+                        reduceMotion={a11yFlags.reduceMotion}
+                      />
+                    )}
+                    <PendingBubbles
+                      bubbles={state.view.pending}
+                      palette={palette}
+                      ctx={{
+                        link: state.view.state === "Live",
+                        turn: state.view.composer.running,
+                        sendNow: compose.sendNow,
+                        unqueue: !compose.unqueueOff,
+                      }}
+                      onAction={(id, action) => {
+                        switch (action) {
+                          case "edit":
+                            void controller.edit(id);
+                            return;
+                          case "cancel":
+                            void controller.cancel(id);
+                            return;
+                          case "send-now":
+                            void controller.sendNowRow(id);
+                            return;
+                        }
+                      }}
+                    />
+                  </>
                 )
               }
               onViewableItemsChanged={onViewable}
@@ -1355,12 +1386,30 @@ export function SessionScreen({
           <NoticeRow key={notice.testId} notice={notice} palette={palette} />
         ))}
         <QueueRows
-          view={{ queued: compose.queued, returnedOthers: compose.returnedOthers }}
+          view={{ returnedOthers: compose.returnedOthers }}
           palette={palette}
           onTake={(id) => void controller.take(id)}
-          sendNow={compose.sendNow}
-          onSendNow={() => void controller.sendNow()}
         />
+        {compose.editing === null ? null : (
+          <View style={[styles.editBanner, { backgroundColor: palette.tint }]}>
+            <Text
+              testID="composer-editing"
+              numberOfLines={1}
+              style={[typography.footnote, styles.flex, { color: palette.accent }]}
+            >
+              Editing pending message
+            </Text>
+            <Pressable
+              testID="composer-editing-cancel"
+              accessibilityRole="button"
+              accessibilityLabel="Stop editing and queue it again"
+              hitSlop={10}
+              onPress={() => void controller.editCanceled()}
+            >
+              <Icon name="xmark" color={palette.accent} size={14} />
+            </Pressable>
+          </View>
+        )}
         <OutboxRows rows={compose.outbox} palette={palette} onDecide={setDeciding} />
         <Chips
           chips={compose.chips}
@@ -1405,6 +1454,9 @@ export function SessionScreen({
               : (voiceView.placeholder ?? "Message tentacle")
           }
           button={state.view.composer.button}
+          slot={state.view.composer.slot}
+          sendNow={compose.sendNow}
+          onSendNow={() => void controller.sendNow()}
           onChange={(text) => {
             // The person typed: dictation yields first (F8), then the compose seam.
             voice?.userEdit(text);
@@ -1604,6 +1656,19 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
   },
   notice: { paddingHorizontal: 16, paddingBottom: 6 },
+  // The editing banner above the field (D6): the label takes the row, the × keeps
+  // its own width (it was `styles.flex`, i.e. undefined).
+  editBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 16,
+    marginBottom: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  flex: { flexShrink: 1 },
   // The turn observable: on screen (XCUITest sees it), takes no room. 1×1 and
   // absolute, not 0×0: iOS 26 drops an empty-frame element from the
   // accessibility tree, so `turn-idle` vanished (slice 6 walk, flows 23/24).

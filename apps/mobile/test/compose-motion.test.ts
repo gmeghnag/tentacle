@@ -16,8 +16,11 @@ const empty: ComposeBarView = {
   notSaved: false,
   chips: [],
   attach: { items: ["photo", "camera"], reason: null },
-  ownQueue: 0,
+  ownPending: 0,
   sendNow: false,
+  pending: [],
+  editing: null,
+  unqueueOff: false,
 };
 
 const queued = (id: string, state: "queued" | "sending" = "queued") =>
@@ -54,5 +57,12 @@ describe("composeRowsMoved", () => {
       composeRowsMoved(empty, { ...empty, chips: [{ key: "c", kind: "image", state: "ready" }] }),
     ).toBe(true);
     expect(composeRowsMoved(empty, { ...empty, sendNow: true })).toBe(true);
+  });
+
+  test("the editing banner appears and leaves (D6)", () => {
+    const editing = { ...empty, editing: { id: "q1", text: "t", prior: "" } };
+    expect(composeRowsMoved(empty, editing)).toBe(true);
+    expect(composeRowsMoved(editing, empty)).toBe(true);
+    expect(composeRowsMoved(editing, { ...editing })).toBe(false);
   });
 });

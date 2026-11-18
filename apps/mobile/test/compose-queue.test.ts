@@ -19,10 +19,12 @@ import {
   type QueuedRows,
   addRow,
   afterRefusal,
+  bubbleActions,
   handBackStep,
   handOff,
   markAcked,
   onReject,
+  pendingBubbles,
   planHandBack,
   restoredByRefusal,
   returnedNotice,
@@ -322,5 +324,66 @@ describe("my persisted ids (D4 bound)", () => {
     expect([...settleOwn(ownIds, state({ returned: [["back", "", "cancelled"]] }))]).toEqual([
       ["back", "txt"],
     ]);
+  });
+});
+
+describe("pending bubbles in the transcript (D1)", () => {
+  const rows = (...specs: readonly (readonly [string, string, boolean, "queued" | "sending"])[]) =>
+    specs.map(([id, text, mine, state]) => ({ id, text, mine, state }));
+
+  test("one bubble per row, in delivery order, from the rows the phone holds", () => {
+    // Mutation: return them reversed / sorted by id → red.
+    expect(
+      pendingBubbles(rows(["b", "second", true, "queued"], ["a", "first", false, "queued"])),
+    ).toEqual([
+      { id: "b", text: "second", mine: true, phase: "pending" },
+      { id: "a", text: "first", mine: false, phase: "pending" },
+    ]);
+  });
+
+  test("a row's state becomes the bubble's phase", () => {
+    // Mutation: map `sending` to `pending` → red (the footnote would say "next step").
+    expect(pendingBubbles(rows(["q", "w", true, "queued"]))[0]?.phase).toBe("pending");
+    expect(pendingBubbles(rows(["s", "w", true, "sending"]))[0]?.phase).toBe("sending");
+  });
+
+  test("another device's row appears and stays labelled not-mine", () => {
+    expect(pendingBubbles(rows(["o", "theirs", false, "queued"]))[0]?.mine).toBe(false);
+  });
+
+  test("no rows → no bubbles (nothing invented, no placeholder)", () => {
+    expect(pendingBubbles([])).toEqual([]);
+  });
+});
+
+describe("the E1 menu on a pending bubble (D2)", () => {
+  const mine = { id: "e1", text: "my words", mine: true, phase: "pending" as const };
+  const all = { link: true, turn: true, sendNow: true, unqueue: true };
+
+  test("mine, pending, on a live link, during a turn, daemon supports unqueue → the three", () => {
+    // Mutation: drop any clause below → red.
+    expect(bubbleActions(mine, all)).toEqual(["edit", "send-now", "cancel"]);
+  });
+
+  test("another writer's words are shown, never acted on (owner Q3)", () => {
+    expect(bubbleActions({ ...mine, mine: false }, all)).toEqual([]);
+  });
+
+  test("a bubble already in flight (sending) offers nothing", () => {
+    expect(bubbleActions({ ...mine, phase: "sending" }, all)).toEqual([]);
+  });
+
+  test("no link, or no turn: nothing (nothing travels / nothing is queued)", () => {
+    expect(bubbleActions(mine, { ...all, link: false })).toEqual([]);
+    expect(bubbleActions(mine, { ...all, turn: false })).toEqual([]);
+  });
+
+  test("an older daemon hides Edit and Cancel, keeping Send now", () => {
+    // Mutation: gate nothing on `unqueue` → red (a tap would hit MethodNotFound).
+    expect(bubbleActions(mine, { ...all, unqueue: false })).toEqual(["send-now"]);
+  });
+
+  test("Send now is D3's rule, so it never appears on its own", () => {
+    expect(bubbleActions(mine, { ...all, sendNow: false })).toEqual(["edit", "cancel"]);
   });
 });
