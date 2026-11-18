@@ -36,6 +36,7 @@ import { playHaptic } from "../haptics.ts";
 import type { HubActionId, HubItem } from "../hub-actions.ts";
 import { dropPlan, fadePlan, glowPlan, levelPlan } from "../hub-button-motion.ts";
 import { type FanLayout, type Point, fanMotion } from "../hub-fan.ts";
+import { FLASH_MS, type Flash } from "../hub-flash.ts";
 import type { GestureEffect, GestureState, HubMenu } from "../hub-gesture.ts";
 import { hubOpacity } from "../hub-opacity.ts";
 import {
@@ -125,6 +126,12 @@ export interface FloatingActivityProps {
   /** The fan opened (true) or closed by any path (false): the screen guards the back-swipe (M2). */
   readonly onFanChange: (open: boolean) => void;
   readonly onCommit: (id: HubActionId) => void;
+  /**
+   * A dimmed item was tapped in the fan (mobile-hub-commands C1 Design 8): the
+   * pill already says why, so this is only what the SCREEN still owes it (the
+   * Tools re-pull). Never a sheet, never a notice line — the fan stays open.
+   */
+  readonly onFlash: (id: HubActionId) => void;
   /** The plain menu with everything: no fan fits, or VoiceOver's long-press / Show all. */
   readonly onMenu: () => void;
 }
@@ -133,6 +140,10 @@ interface OpenFan {
   readonly layout: Extract<FanLayout, { kind: "fan" }>;
   readonly items: readonly HubItem[];
   readonly hi: number | null;
+  /** The dimmed item's in-place label, while it lasts (`hub-flash.ts`). */
+  readonly flash: Flash | null;
+  /** The clock reading the pill is drawn against (re-read when the timer fires). */
+  readonly now: number;
 }
 
 export function FloatingActivity(props: FloatingActivityProps): JSX.Element | null {
@@ -160,6 +171,15 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
   const latest = useRef(props);
   latest.current = props;
   const [fan, setFan] = useState<OpenFan | null>(null);
+  // The dimmed item's label flash has ONE timer (mobile-hub-commands C1 Design 7):
+  // armed by the machine's `flash` effect, cleared on every way out of the fan.
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disarmFlash = () => {
+    if (flashTimer.current !== null) {
+      clearTimeout(flashTimer.current);
+      flashTimer.current = null;
+    }
+  };
   // Whether it is engaged (a finger on it, a drag, the fan): solid while it is
   // (`hub-opacity.ts`). A press emits NO effect on down (`hub-gesture.ts:108`),
   // so this cannot come from an effect — it is the machine's state, synced by
@@ -254,7 +274,7 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
           if (effect.layout.kind === "fan" && menu !== null) {
             const byId = new Map(latest.current.fanItems.map((item) => [item.id, item]));
             const items = menu.ids.flatMap((id) => byId.get(id as HubActionId) ?? []);
-            setFan({ layout: effect.layout, items, hi: null });
+            setFan({ layout: effect.layout, items, hi: null, flash: null, now: Date.now() });
           } else {
             moving.current = false;
             latest.current.onMenu();
@@ -264,10 +284,33 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
         case "highlight":
           setFan((open) => (open === null ? null : { ...open, hi: effect.index }));
           break;
+        // A dimmed item was tapped: its own pill says why for FLASH_MS and the
+        // fan stays open (`hub-flash.ts` decides the text; this only times it).
+        case "flash": {
+          const flash = { index: effect.index, at: Date.now() };
+          // The screen's side of a dimmed tap (the Tools re-pull), before the
+          // pill is timed: the id is the fan's own snapshot (`press.menu`), as a
+          // commit's is.
+          const id = press.current.menu?.ids[effect.index];
+          if (id !== undefined) {
+            latest.current.onFlash(id as HubActionId);
+          }
+          disarmFlash();
+          setFan((open) => (open === null ? null : { ...open, flash, now: flash.at }));
+          flashTimer.current = setTimeout(() => {
+            flashTimer.current = null;
+            // One re-render past the window: the pill falls back to the label.
+            setFan((open) =>
+              open === null ? null : { ...open, flash: null, now: flash.at + FLASH_MS },
+            );
+          }, FLASH_MS);
+          break;
+        }
         case "commit":
           latest.current.onCommit(effect.id as HubActionId);
           break;
         case "close":
+          disarmFlash();
           setFan(null);
           moving.current = false;
           break;
@@ -319,6 +362,11 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
   useEffect(
     () => () => {
       driver.dispose();
+      // The flash is the fan's: it never outlives it or the button (C1 Design 7).
+      if (flashTimer.current !== null) {
+        clearTimeout(flashTimer.current);
+        flashTimer.current = null;
+      }
       latest.current.onFanChange(false);
     },
     [driver],
@@ -443,6 +491,8 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
           hi={fan.hi}
           motion={fanMotion(reduceMotion)}
           band={bounds}
+          flash={fan.flash}
+          now={fan.now}
           onTapOverlay={(p) => {
             driver.tapOverlay(p);
             setEngaged(driver.state().kind);

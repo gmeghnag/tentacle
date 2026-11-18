@@ -835,6 +835,9 @@ export function SessionScreen({
   // plain menu (`more` = the overflow, `all` = everything) and a commit's notice.
   const [steerFocus, setSteerFocus] = useState(0);
   const [hubMenu, setHubMenu] = useState<"all" | "more" | null>(null);
+  // The Commands sheet (docs/feat/mobile-hub-commands.md): C1 wires the entry and
+  // the flag, C3 mounts the sheet that reads it.
+  const [commandsOpen, setCommandsOpen] = useState(false);
   const [hubNotice, setHubNotice] = useState<string | null>(null);
   const [artifactsSeen, setArtifactsSeen] = useState(() => ARTIFACT_SEEN.current());
   useEffect(() => ARTIFACT_SEEN.subscribe(setArtifactsSeen), []);
@@ -943,6 +946,7 @@ export function SessionScreen({
     setToolsExpanded(new Set());
     controller.closeInfo();
   };
+  const openCommands = () => setCommandsOpen(true);
   /** A pull-to-refresh or a Retry: the same `refreshInfo` Session info uses. */
   const refreshTools = () => {
     setToolsRefreshing(true);
@@ -992,6 +996,7 @@ export function SessionScreen({
     info: () => openInfo(),
     // No info port, no Tools: a missing callback is a missing item (P6).
     ...(info === null ? {} : { tools: openTools }),
+    commands: openCommands,
     scheduled: openScheduled,
     ...(onOpenDrawer === undefined ? {} : { sessions: onOpenDrawer }),
     ...(onNewSession === undefined ? {} : { new: onNewSession }),
@@ -1024,6 +1029,18 @@ export function SessionScreen({
     // sheet that would refresh them — so its own tap does (D4), or a server
     // added on the laptop would keep it dimmed forever.
     if (id === "tools" && plan.kind === "notice") {
+      void controller.pullTools();
+    }
+  };
+  /**
+   * A dimmed item was tapped in the FAN: its own pill says why (`hub-flash.ts`),
+   * and the fan stays open. The one side effect a dimmed tap still owes is the
+   * Tools re-pull — the item is dimmed by counts it last saw, and a server added
+   * on the laptop would keep it dimmed forever (hub-tools D4). The same call as
+   * the notice path above: one pull, two entry points.
+   */
+  const flashHub = (id: HubActionId) => {
+    if (id === "tools") {
       void controller.pullTools();
     }
   };
@@ -1475,6 +1492,7 @@ export function SessionScreen({
               }
               onFanChange={onHubFan}
               onCommit={commitHub}
+              onFlash={flashHub}
               onMenu={() => setHubMenu("all")}
               onDrop={(position) => {
                 // Written on drop only; a failed write keeps the spot for this run (F22).
