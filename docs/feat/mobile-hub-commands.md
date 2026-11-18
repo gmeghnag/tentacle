@@ -396,3 +396,11 @@ Compacting… / Compacted ✓, More with Session info.
 8. **Slicing / executors.** **Rec: C1 and C3 DeepSeek; C2 Opus (RPC paths,
    races) with a fresh-context Review; order C1 → C2 → C3, after
    thinking-images and harness-notices S1 merge.**
+
+### Owner answers (2026-11-18 ~14:40)
+Q1–Q8: all recommendations accepted (absorb harness-notices S2; Retry text-only; Auto-accept in both places; End & archive out; Tools "No tools" in place; fan stays open after a dimmed tap; Clear wording without a link — fork-id link is a later task; C1 DS → C2 Opus + fresh Review → C3 DS, after thinking-images + harness-notices S1 merge). Implementation APPROVED.
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-18*
+
+## Execution
+
+## Review
