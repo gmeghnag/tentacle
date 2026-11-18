@@ -222,7 +222,7 @@ export async function runRelease(argv: readonly string[], deps: ReleaseDeps): Pr
     }
 
     write(
-      `released ${tag} locally:\n${summary}\n\nNothing was pushed. To publish:\n  git push origin main && git push origin ${tag}\n\nCI (.github/workflows/build.yml) then builds the four binaries, checks that ${tag} matches packages/cli/package.json, and publishes the GitHub release with SHA256SUMS${version.includes("-") ? " (as a pre-release: the version has a pre-release suffix)" : ' (it becomes "latest", which `tentacle update` installs)'}.\n`,
+      `released ${tag} locally:\n${summary}\n\nNothing was pushed. To publish:\n  git push origin main && git push origin ${tag}\n\nCI (.github/workflows/build.yml) then builds the four binaries and the macOS voice helper, checks that ${tag} matches packages/cli/package.json, and publishes the GitHub release with SHA256SUMS${version.includes("-") ? " (as a pre-release: the version has a pre-release suffix)" : ' (it becomes "latest", which `tentacle update` installs)'}.\n`,
     );
     return 0;
   } catch (error) {
