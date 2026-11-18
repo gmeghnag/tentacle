@@ -91,6 +91,9 @@ describe("TranscriptRow: tool and reasoning views draw a StepNode", () => {
     const reasoning = fnBody(src, "ReasoningRowView");
     expect(reasoning).toContain('const thread = cell?.kind === "thought" ? cell.thread : LONE;');
     expect(reasoning.match(/thread=\{thread\}/g)?.length).toBe(2);
+    // docs/fix/thought-placeholder.md: collapsed, never expandable (no toggle, no body).
+    expect(reasoning).not.toContain("onToggle");
+    expect(reasoning).not.toContain("body=");
   });
 
   test("the flows' testIDs survive: status on the label, output, reply, progress, activity", () => {

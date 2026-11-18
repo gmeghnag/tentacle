@@ -183,10 +183,13 @@ describe("a tool step's line carries no ∴ (owner 17/11)", () => {
       kind: "reasoning" as const,
       key: "r1",
       text: "Weighing the options\nand the cost",
+      ms: 12_000,
     };
     const props = stepNodeOf(reasoning);
     expect(props.node).toBe("thought");
-    expect(props.subtitle).toBe("Weighing the options");
+    // docs/fix/thought-placeholder.md: the duration, never the text; no toggle.
+    expect(props.subtitle).toBe("· 12 s");
+    expect("onToggle" in props).toBe(false);
     expect("marker" in props).toBe(false);
   });
 });

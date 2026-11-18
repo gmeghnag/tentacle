@@ -717,6 +717,18 @@
         "spill": {
           "$ref": "#/$defs/ToolResultSpill"
         },
+        "thought": {
+          "additionalProperties": true,
+          "properties": {
+            "ms": {
+              "maximum": 86400000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["ms"],
+          "type": "object"
+        },
         "toolCallId": {
           "type": "string"
         },
@@ -2698,6 +2710,18 @@
         "spill": {
           "$ref": "#/$defs/ToolResultSpill"
         },
+        "thought": {
+          "additionalProperties": true,
+          "properties": {
+            "ms": {
+              "maximum": 86400000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["ms"],
+          "type": "object"
+        },
         "toolCallId": {
           "type": "string"
         },
@@ -2785,6 +2809,18 @@
         },
         "spill": {
           "$ref": "#/$defs/ToolResultSpill"
+        },
+        "thought": {
+          "additionalProperties": true,
+          "properties": {
+            "ms": {
+              "maximum": 86400000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["ms"],
+          "type": "object"
         },
         "toolCallId": {
           "type": "string"

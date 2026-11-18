@@ -110,6 +110,7 @@ import {
 } from "./round-plan.ts";
 import type { SessionGrants } from "./session-grants.ts";
 import { EMPTY_SKILL_LISTING, type SkillListing, userRescanListing } from "./session-skills.ts";
+import { ThinkingClock } from "./thinking-clock.ts";
 import type { ToolOutputSink } from "./tool-output.ts";
 
 export type AgentStopReason = "end_turn" | "cancelled" | "max_iterations" | "max_token_budget";
@@ -1527,9 +1528,12 @@ export class Agent {
       const toolCalls: ToolCall[] = [];
       /** Why the provider's stream ended; `undefined` from a provider that does not say. */
       let stopReason: ModelStopReason | undefined;
+      /** How long this round thought: a placeholder kept with its message (thought-placeholder). */
+      const thinking = new ThinkingClock(this.config.now ?? (() => performance.now()));
       this.notifyModelRequest(sessionId, iteration, request);
       try {
         for await (const event of this.config.model.stream(request)) {
+          thinking.see(event);
           switch (event.type) {
             case "text":
               text += event.delta;
@@ -1587,7 +1591,7 @@ export class Agent {
         // connection) keeps what the user already saw, so a later attach or
         // resume shows it too (docs/fix/detach-live.md round 10, owner B).
         if (text !== "" && !(error instanceof DsmlToolCallLeakError)) {
-          messages.push({ role: "assistant", content: text });
+          messages.push({ role: "assistant", content: text, ...thinking.fact() });
         }
         throw error;
       }
@@ -1612,7 +1616,7 @@ export class Agent {
         // answer, so no re-ask follows (owner Q2a).
         yield { type: "truncated_reply", reason: "cut", retrying: false };
         if (text !== "") {
-          messages.push({ role: "assistant", content: text });
+          messages.push({ role: "assistant", content: text, ...thinking.fact() });
         }
         throw new ModelStreamCutError("no-stop-reason", text.trim() !== "");
       }
@@ -1649,8 +1653,8 @@ export class Agent {
 
       messages.push(
         toolCalls.length > 0
-          ? { role: "assistant", content: text, toolCalls }
-          : { role: "assistant", content: text },
+          ? { role: "assistant", content: text, toolCalls, ...thinking.fact() }
+          : { role: "assistant", content: text, ...thinking.fact() },
       );
 
       // Any real progress (text or a tool call) resets the stall counter.
@@ -1856,7 +1860,9 @@ export class Agent {
           // the spoken line still applies to it.
         };
         this.notifyModelRequest(sessionId, "final", finalRequest);
+        const finalThinking = new ThinkingClock(this.config.now ?? (() => performance.now()));
         for await (const event of this.config.model.stream(finalRequest)) {
+          finalThinking.see(event);
           if (event.type === "text") {
             finalText += event.delta;
             yield { type: "text", delta: event.delta };
@@ -1887,7 +1893,7 @@ export class Agent {
         }
         // Persist only the summary (not the synthetic nudge), so history stays clean.
         if (finalText.trim() !== "") {
-          messages.push({ role: "assistant", content: finalText });
+          messages.push({ role: "assistant", content: finalText, ...finalThinking.fact() });
         }
       } catch (error) {
         if (signal?.aborted) {

@@ -2808,6 +2808,21 @@ describe("the v8 record: a refused call's reply and the installed head (docs/fea
     expect(tool?.isError).toBe(true);
   });
 
+  test("an assistant's thought placeholder survives a restart (docs/fix/thought-placeholder.md)", () => {
+    const messages: ChatMessage[] = [
+      { role: "user", content: "go" },
+      { role: "assistant", content: "hello", thought: { ms: 12_400 } },
+    ];
+    const bytes = JSON.parse(
+      JSON.stringify(
+        record({ messages, turns: [{ turnId: "t1", end: { stopReason: "end_turn" } }] }),
+      ),
+    );
+    const restored = rig([], () => []).host.restore(parsed(bytes));
+    const reply = restored.snapshotPage().messages.find((m) => m.role === "assistant");
+    expect(reply?.thought).toEqual({ ms: 12_400 });
+  });
+
   test("V8-3 `head` must name a user message of the history", () => {
     expect(parse(record({ head: 1 })).ok).toBe(true);
     for (const head of [0, 2, -1, 1.5, "1", null]) {

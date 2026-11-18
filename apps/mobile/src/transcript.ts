@@ -226,8 +226,9 @@ function photosById(photos: readonly LocalPhoto[] | undefined): ReadonlyMap<stri
  * row created by this input takes as its arrival time (slice B) — absent when the
  * caller has no clock (a unit fold), and then the row carries none. A history's
  * rows never use it: their times are the daemon's (`input.times`). */
-export function apply(state: State, input: TranscriptInput, now?: number): State {
+export function apply(stateIn: State, input: TranscriptInput, now?: number): State {
   const at = now === undefined || now <= 0 ? {} : { at: now };
+  const state = closeThought(stateIn, input, at.at);
   switch (input.type) {
     case "history":
       return applyHistory(state, input);
@@ -288,6 +289,26 @@ export function apply(state: State, input: TranscriptInput, now?: number): State
     default:
       return applyAgentEvent(state, input, at);
   }
+}
+
+/**
+ * A live thought ends at the next input that is not more of it (text, a tool,
+ * the turn's end…): its duration is fixed then, first delta → this receipt —
+ * the edges the agent measures the stored `thought.ms` between
+ * (docs/fix/thought-placeholder.md), so live and reload read the same.
+ */
+function closeThought(state: State, input: TranscriptInput, now: number | undefined): State {
+  if (now === undefined || input.type === "reasoning" || input.type === "link") {
+    return state;
+  }
+  const last = state.rows[state.rows.length - 1];
+  if (last?.kind !== "reasoning" || last.at === undefined || last.ms !== undefined) {
+    return state;
+  }
+  return {
+    ...state,
+    rows: [...state.rows.slice(0, -1), { ...last, ms: Math.max(0, now - last.at) }],
+  };
 }
 
 /** `{times}` spreadable, or `{}` when the caller carries none (an older daemon). */
@@ -445,6 +466,7 @@ function applyAgentEvent(state: State, event: StreamEvent, at: At): State {
         key,
         text: event.delta,
         version: event.delta.length,
+        ...at,
       }));
     }
     case "tool_start":

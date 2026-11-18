@@ -107,6 +107,19 @@ export interface ChatMessage {
    * reload draws the same `Wake 15:54` row as live.
    */
   readonly scheduled?: ScheduledFire;
+  /**
+   * On an ASSISTANT message whose round streamed reasoning: how long the model
+   * thought (ms, agent-side monotonic clock, summed over the round's reasoning
+   * runs) — a PLACEHOLDER, never the reasoning text (docs/fix/thought-placeholder.md,
+   * owner option 3). Display only, like `scheduled`: the provider mappers copy
+   * field by field, so the model never sees it. A reload draws `Thought · 12 s`.
+   */
+  readonly thought?: ThoughtFact;
+}
+
+/** A round's thinking, as a placeholder: its duration only (docs/fix/thought-placeholder.md). */
+export interface ThoughtFact {
+  readonly ms: number;
 }
 
 /** A compaction's context sizes, in tokens. `toExact` only when the provider counted. */

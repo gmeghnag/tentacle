@@ -235,3 +235,19 @@ describe("resumed image prompts", () => {
     expect(items[0]).toMatchObject({ images: ["[image: image/gif]"] });
   });
 });
+
+// docs/fix/thought-placeholder.md, owner decision 2 (option B): the Mac TUI
+// draws NO Thought row on resume — the stored placeholder is phone-only.
+describe("resume: a stored thought placeholder adds nothing on the TUI", () => {
+  test("an assistant message with `thought` resumes exactly as one without it", () => {
+    const plain: ChatMessage[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ];
+    const marked: ChatMessage[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello", thought: { ms: 12_400 } },
+    ];
+    expect(messagesToItems(marked)).toEqual(messagesToItems(plain));
+  });
+});
