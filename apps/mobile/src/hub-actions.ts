@@ -270,15 +270,76 @@ export interface PulseInput {
  * Whether the hub should glow NOW (mobile-hub-badges Design 2, owner Q1 C): true
  * iff there is a previous reading and the news GREW since it — more unseen
  * artifacts, or a report that was not unread and is. `prev === null` is the
- * session's first render (or the moment its link came back), so opening a
- * session that already holds news never pulses (F1), and a resync that relists
- * the same news does not either (F2: 3 → 3 is not an increase).
+ * session's first render, so opening a session that already holds news never
+ * pulses (F1), and a resync that relists the same news does not either (F2: 3 → 3
+ * is not an increase).
  */
 export function hubPulse(prev: PulseInput | null, next: PulseInput): boolean {
   if (prev === null) {
     return false;
   }
   return next.unseenArtifacts > prev.unseenArtifacts || (!prev.unreadReport && next.unreadReport);
+}
+
+/**
+ * The pulse effect's retained state (Design 4): the baseline, and WHICH session's
+ * baseline it is. The session key is part of the state, not of a second effect,
+ * so a switch and the comparison it invalidates happen in the SAME step — a
+ * separate reset effect runs before the comparison in one commit and lets the
+ * comparison re-advance the baseline (it did: F1/F2 were both dead that way).
+ */
+export interface PulseState {
+  readonly sessionKey: string | undefined;
+  readonly prev: PulseInput | null;
+}
+
+/** No baseline yet: the screen's first render (F1 — opening a session with news never pulses). */
+export const PULSE_START: PulseState = { sessionKey: undefined, prev: null };
+
+export interface PulseStep {
+  /** What the screen must retain for the next render. */
+  readonly state: PulseState;
+  /** Whether news arrived live in this step — the glow's and the light haptic's verdict. */
+  readonly pulse: boolean;
+}
+
+/**
+ * One render's whole pulse decision (Design 4), pure — the ONE place F1, F2 and
+ * F3's "the baseline still advances" are decided:
+ *
+ * - a different session key (or no baseline at all) RESETS the baseline to this
+ *   reading and never pulses: opening a session that already holds news is not
+ *   news (F1), and because the new baseline is taken in the same step, the next
+ *   real increase still pulses (a reset to `null` alone swallowed it).
+ * - a link that is down also resets to `null` and never pulses, so the refill a
+ *   reconnect delivers is a fresh baseline (F2): a list that emptied during the
+ *   outage and came back is not news.
+ * - otherwise the news is compared with the live baseline: only an increase
+ *   pulses, so a resync relisting the same count is silent (F2).
+ *
+ * The verdict does not depend on the button being shown: a hidden button draws no
+ * glow and plays no haptic, but the baseline advances, so the news is not
+ * replayed when the button returns (F3).
+ */
+export function pulseStep(
+  state: PulseState,
+  input: {
+    readonly sessionKey: string | undefined;
+    readonly link: "up" | "down";
+    readonly news: PulseInput;
+  },
+): PulseStep {
+  const fresh = input.link !== "up" || state.sessionKey !== input.sessionKey || state.prev === null;
+  if (fresh) {
+    return {
+      state: { sessionKey: input.sessionKey, prev: input.link === "up" ? input.news : null },
+      pulse: false,
+    };
+  }
+  return {
+    state: { sessionKey: input.sessionKey, prev: input.news },
+    pulse: hubPulse(state.prev, input.news),
+  };
 }
 
 /**

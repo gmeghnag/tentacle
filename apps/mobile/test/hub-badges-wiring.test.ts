@@ -120,18 +120,34 @@ describe("the screen wires the pulse (Design 4, failure modes F1–F6)", () => {
     expect(effect).toContain("setPulseSeq");
   });
 
-  test("the baseline resets on a session switch and on a link drop (F1, F2)", () => {
-    expect(SCREEN).toContain("pulsePrev = useRef<PulseInput | null>(null)");
-    // Reset, not "advance": a reconnect's refill must be a fresh baseline.
-    const resets = [...SCREEN.matchAll(/pulsePrev\.current = null/g)].length;
-    expect(resets).toBeGreaterThanOrEqual(2);
-  });
-
-  test("no glow while the button is hidden, and none deferred (F3)", () => {
+  test("the baseline resets on a session switch and on a link drop, in the one step that compares (F1, F2)", () => {
+    expect(SCREEN).toContain("useRef<PulseState>(PULSE_START)");
+    // ONE effect: a separate reset effect runs BEFORE the comparison in a commit
+    // and the comparison re-advances the baseline, which made both resets dead.
     const at = SCREEN.indexOf("const ended = turnEndHaptic(");
     const block = SCREEN.slice(at, SCREEN.indexOf("}, [", at));
-    expect(block).toContain("floatShown");
-    // The baseline advances either way, so the news is not replayed later.
-    expect(block).toContain("pulsePrev.current = newsNow");
+    // The switch (F1) and the drop (F2) are INPUTS of the step, not sibling effects.
+    expect(block).toContain("sessionKey: artifactsSeenKey");
+    expect(block).toContain('link: linkUp ? "up" : "down"');
+    // The dead pattern: a reset effect of its own outside the comparison.
+    expect(SCREEN).not.toMatch(/pulsePrev\.current = null/);
+  });
+
+  test("the baseline advances on every render the rule sees — the verdict never sees `floatShown` (F3)", () => {
+    const at = SCREEN.indexOf("const ended = turnEndHaptic(");
+    const block = SCREEN.slice(at, SCREEN.indexOf("}, [", at));
+    // The glow and the light are gated on the button being shown...
+    expect(block).toContain("pulseHaptic(step.pulse && floatShown");
+    expect(block).toContain("step.pulse && floatShown");
+    // ...but the STEP (which re-takes the baseline) does not: the reading is its
+    // input, so the news is consumed and never replayed when the button returns.
+    expect(block).toContain("news: { unseenArtifacts: unseen, unreadReport: unread }");
+    // ONE write per render: the step's own next state, unconditionally. A write
+    // inside the `floatShown` branch would restore an older baseline (deferring
+    // the glow to when the button returns — exactly what F3 forbids).
+    expect([...block.matchAll(/pulsePrev\.current\s*=/g)]).toHaveLength(1);
+    expect(block).toContain("pulsePrev.current = step.state");
+    expect(block).not.toMatch(/pulseStep\([^)]*floatShown/);
+    expect(block).not.toContain("deferred");
   });
 });

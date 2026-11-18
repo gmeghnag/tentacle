@@ -85,6 +85,19 @@ for (const [mode, palette] of [
   });
 }
 
+describe("the fan's opaque discs (mobile-hub-badges Q3 B: no glass, no bleed)", () => {
+  // The premise of `fanItemLook`: a disc is a SOLID surface, so the transcript
+  // behind the open fan cannot show through it. A token drifting to an `rgba`
+  // (or an 8-digit hex) would silently bring the bleed back — hence this pin.
+  test("`card` and `fill` are opaque #RRGGBB in both palettes", () => {
+    for (const palette of [lightPalette, darkPalette]) {
+      for (const token of ["card", "fill"] as const) {
+        expect(palette[token]).toMatch(/^#[0-9a-fA-F]{6}$/);
+      }
+    }
+  });
+});
+
 describe("theme tokens (aliases removed in Slice 6)", () => {
   test("no pre-restyle alias name is left on the palette", () => {
     const aliases = [

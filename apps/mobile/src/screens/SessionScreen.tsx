@@ -100,12 +100,13 @@ import {
   type HubActionId,
   type HubEntries,
   type HubOpen,
-  type PulseInput,
+  PULSE_START,
+  type PulseState,
   buttonBadge,
   hubA11yLabel,
   hubActions,
   hubOpen,
-  hubPulse,
+  pulseStep,
 } from "../hub-actions.ts";
 import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
@@ -780,8 +781,8 @@ export function SessionScreen({
   // by ONE effect below, because they usually happen in the same render and the
   // moment must play one haptic, never two (F4).
   const wasRunning = useRef(state.view.composer.running);
-  /** The previous news reading; null is "no baseline yet" (first render, link drop, new session). */
-  const pulsePrev = useRef<PulseInput | null>(null);
+  /** The pulse state (baseline + the session it belongs to); `null` prev is "no baseline" (F1/F2). */
+  const pulsePrev = useRef<PulseState>(PULSE_START);
   const [pulseSeq, setPulseSeq] = useState(0);
   // The header's "…" menu (owner feedback #3 + Session info): it opens with the
   // sheet's read, then the phone-local copy actions.
@@ -944,40 +945,37 @@ export function SessionScreen({
     unseenArtifacts: hubCtx.unseenArtifacts,
     unreadReport: activityVm.unread > 0,
   };
+  const unseen = hubBadgeInput.unseenArtifacts;
+  const unread = hubBadgeInput.unreadReport;
+  const linkUp = state.transcript.link === "up";
   // The moment news arrives (mobile-hub-badges Design 4, Q1 C + Q4): one glow on
   // the button, one light haptic — unless a turn ended in this same render, whose
-  // `success` is the moment's one haptic (F4). `pulsePrev` is the baseline; it is
-  // reset on a link drop (F2: a reconnect's refill is not news) and on a session
-  // switch (F1: a new session starts without a baseline).
-  const newsNow: PulseInput = {
-    unseenArtifacts: hubBadgeInput.unseenArtifacts,
-    unreadReport: hubBadgeInput.unreadReport,
-  };
-  const unseen = newsNow.unseenArtifacts;
-  const unread = newsNow.unreadReport;
-  const linkUp = state.transcript.link === "up";
-  useEffect(() => {
-    if (!linkUp) {
-      pulsePrev.current = null;
-    }
-  }, [linkUp]);
-  // F1: another session's seen record is a new baseline too, never a pulse.
-  useEffect(() => {
-    pulsePrev.current = null;
-  }, [artifactsSeenKey]);
+  // `success` is the moment's one haptic (F4). ONE effect and ONE pure step decide
+  // it: `pulseStep` both compares the news and re-takes the baseline, so a session
+  // switch or a link drop is a fresh baseline in the SAME step. Two separate reset
+  // effects ran BEFORE this comparison in one commit, and it then simply
+  // re-advanced the baseline over them — which made F1 and F2 dead (the refill
+  // after a reconnect pulsed; the reset swallowed the next real increase), and a
+  // dep list that could drift from the body is how the resets got out of sync.
   useEffect(() => {
     const ended = turnEndHaptic(wasRunning.current, state.view.composer.running);
-    playHaptic(ended);
     wasRunning.current = state.view.composer.running;
-    // A hidden button plays no glow and defers none — a late glow would be stale
-    // (F3) — but `prev` still advances, so the news is not replayed when it returns.
-    const pulse = linkUp && hubPulse(pulsePrev.current, { unseenArtifacts: unseen, unreadReport: unread });
-    pulsePrev.current = { unseenArtifacts: unseen, unreadReport: unread };
-    playHaptic(pulseHaptic(pulse && floatShown, ended !== null));
-    if (pulse && floatShown) {
+    // F1/F2 are `pulseStep`'s; F3 is here: the verdict never sees `floatShown`, so a
+    // hidden button's baseline still advances and its news is never replayed later —
+    // only the glow and the light are dropped, and never deferred.
+    const step = pulseStep(pulsePrev.current, {
+      sessionKey: artifactsSeenKey,
+      link: linkUp ? "up" : "down",
+      // Read from the primitives, not from `newsNow`: the deps below are those two.
+      news: { unseenArtifacts: unseen, unreadReport: unread },
+    });
+    pulsePrev.current = step.state;
+    playHaptic(ended);
+    playHaptic(pulseHaptic(step.pulse && floatShown, ended !== null));
+    if (step.pulse && floatShown) {
       setPulseSeq((n) => n + 1);
     }
-  }, [unseen, unread, linkUp, floatShown, state.view.composer.running]);
+  }, [unseen, unread, linkUp, artifactsSeenKey, floatShown, state.view.composer.running]);
   // One band laid out in the sheet: scroll once, when the WANTED band has reported
   // (the rules — "once", "only the wanted one" — are `revealStep`'s, folded by
   // `reveal-report.ts`). The report is read and written synchronously, so the

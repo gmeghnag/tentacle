@@ -243,6 +243,121 @@ Execution.
 - Implementation APPROVED.
 *— claude-opus-5-5 (orchestrator), 2026-11-18*
 
+## Execution
+
+### Round 0 (deepseek, commit `dd203739`) — as-built
+Reconstructed from that commit's diff, since it was not recorded here. It wrote
+the whole Design: `haptic-rules.ts` `pulseHaptic`; `hub-actions.ts` `buttonBadge`
+narrowed to `ButtonCount`, `hubPulse`, `itemA11yLabel`; `hub-fan.ts` `RIM_FULL`,
+`rimFraction`, `fanItemLook`; `hub-button-motion.ts` `glowPlan`; the new
+`ui/RingArc.tsx` with `ContextRing.tsx` moved onto it; `HubFan.tsx` solid discs +
+rim + `palette.card` label pill; `FloatingActivity.tsx` `count` prop, dot and
+`newDot` deleted, `hub-glow`; `SessionScreen.tsx` the pulse ref/props. Drift from
+Implementation: the lookup key for "is the pulse input what I retained" stayed a
+`useRef<PulseInput|null>` plus two sibling reset effects, and the F1/F2/F3 wiring
+tests were text-shaped (they counted `pulsePrev.current = null` occurrences) —
+both the source and the symptom of the round-1 findings. No Execution record, no
+red-before-green, no mutation run (finding 5).
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-18*
+
+Symptom first: `bun test apps/mobile/test/hub-badges-wiring.test.ts` → **13 pass,
+1 fail** (`no glow while the button is hidden (F3)` expects
+`pulsePrev.current = newsNow`); `bun run lint` → **2 errors** (one
+`useExhaustiveDependencies` on the `[artifactsSeenKey]` effect, one format).
+
+**The one root cause behind findings 3 and 4** (I did not fix them separately —
+they are the same defect): the F1 and F2 resets lived in effects of their OWN,
+declared BEFORE the comparison effect. In one commit React runs effects in
+declaration order, so the reset nulled the baseline and the comparison effect then
+re-baselined from the reading — the reset was always overwritten. Worse, the
+comparison effect's dep list did not contain `artifactsSeenKey`, so a session
+switch whose count was unchanged never ran it at all: the baseline stayed `null`
+and the NEXT increase compared against `null` and stayed silent (F1 inverted).
+Fixing each reset in place would have kept the ordering hazard, so the decision
+moved into ONE pure function.
+
+Changes, in order:
+
+1. `apps/mobile/src/hub-actions.ts:286-343` — `PulseState`
+   (`{ sessionKey, prev }`), `PULSE_START`, `PulseStep`, and `pulseStep(state,
+   { sessionKey, link, news })`, which returns both the verdict and the state to
+   retain. Fresh (no baseline, a different session key, or a link that is down) →
+   never pulses, and the baseline becomes the reading only while the link is up
+   (`null` while down, so a reconnect's refill is a baseline, not a 0 → 3 jump).
+   Otherwise `hubPulse(prev, news)`. `hubPulse` itself is untouched (already
+   correct, and its suite holds).
+2. `apps/mobile/src/screens/SessionScreen.tsx:785` — the ref becomes
+   `useRef<PulseState>(PULSE_START)`; `:947-978` — the two reset effects are
+   deleted and the one remaining effect feeds `pulseStep` and applies
+   `step.state`, `step.pulse && floatShown` (glow + light), `ended !== null`
+   (F4). The comment records why the two-effect shape was wrong. The body reads
+   the two primitives (not a fresh `newsNow` object) so the dep list
+   `[unseen, unread, linkUp, artifactsSeenKey, floatShown, running]` is exact and
+   lint-clean.
+3. Tests: `hub-actions.test.ts:413-484` — seven `pulseStep` tests (F1 first
+   render, F1 switch then increase, F2 drop clears, F2 refill, F2 3 → 3, F2 no
+   advance while down, F3 baseline advances). `hub-badges-wiring.test.ts` — the
+   F3 test now asserts the shape of that property (one write per render, and the
+   rule never sees `floatShown`) instead of a stale string; the F1/F2 test asserts
+   the session key and the link are the step's INPUTS and that no
+   `pulsePrev.current = null` reset effect is left. `theme.test.ts:88-99` — the
+   `card`/`fill` opacity pin the Implementation's Tests asked for.
+
+**Red before green** (§9 — red on the property, not on an import). The bug is in
+a `.tsx` that Bun cannot import (RN sources are Flow), so the OLD wiring's effect
+semantics are transcribed into
+`.tentacle/tmp/mobile-hub-badges/red-wiring.test.ts` (three effects, declaration
+order, a mutable ref, dep-gated main effect) and the same scenarios are driven
+through both it and `pulseStep`:
+
+```
+$ bun test ./.tentacle/tmp/mobile-hub-badges/red-wiring.test.ts
+(fail) F1 · OLD wiring: expected true, received false     <- the reset swallowed the next increase
+(fail) F2 · OLD wiring: expected false, received true     <- the refill after reconnect pulsed
+ 2 pass (the two NEW pulseStep halves, green)  2 fail
+```
+
+**Mutations** (§9 non-vacuity — each fix's test killed by breaking the fix):
+
+| mutation | result |
+|---|---|
+| `pulseStep`: drop `state.sessionKey !== input.sessionKey` from `fresh` | `(fail) a session switch is a new baseline, and the next real increase still pulses (F1)` |
+| `pulseStep`: drop `input.link !== "up"` from `fresh` | `(fail) a link drop clears the baseline, so the reconnect's refill is not news (F2)` + `(fail) the baseline advances while down as nothing` |
+| `theme.ts` `card` → `"#28292CBF"` (alpha hex) | `(fail) the fan's opaque discs … opaque #RRGGBB in both palettes` — on the exact regex, and only that pin (a `rgba` card additionally trips the B3-token and contrast suites, so the alpha hex isolates it) |
+| `SessionScreen.tsx`: add `else if (step.pulse) pulsePrev.current = PULSE_START` (a deferred re-baseline, F3) | `(fail) the baseline advances on every render the rule sees — the verdict never sees floatShown (F3)` |
+
+The last mutation initially PASSED, which showed my first F3 assertion was too
+weak; it was strengthened to "exactly one `pulsePrev.current =` write in the
+effect, and it is `step.state`" and then caught the mutation. All mutations
+reverted (`git diff --stat` re-checked; `theme.ts` and `SessionScreen.tsx` are
+byte-identical to before the mutation).
+
+**Drift from the Implementation** (and why): Design 4 says "a `useRef<PulseInput
+| null>`, reset to `null` when the session uid changes" and "one effect (merged
+with the turn-end one)". The effect count and the F-outcomes are as designed, but
+the ref now holds `PulseState` (the baseline plus the session it belongs to) and
+the reset is a branch of `pulseStep` rather than a write of `null`; and the
+session key is `artifactsSeenKey` (the prop the plan's own F2 text uses — the
+screen has no `uid`). Reason: two pieces of state written from two effects in one
+commit cannot express "reset, then compare" safely, and the review proved it.
+`hubPulse` keeps its Design-2 signature and is still the rule.
+
+Gate (all green):
+
+```
+$ bunx tsc --noEmit && bunx tsc -p apps/mobile   -> 0 errors
+$ bun run lint                                   -> Checked 2076 files. No fixes applied. (0/0, baseline held)
+$ bun test                                       -> 15185 pass, 5 skip, 0 fail, 47 snapshots, 178812 expect()
+```
+
+The 5 skips are the opt-in live-k8s / live-docker / slow-socket tests (§6
+baseline), not new ones. Not verified here: the simulator's eye (the glow's
+timing, the rim over a dense transcript) — `docs/feat/mobile-hub-badges.md`
+Tests' "Manual" line still stands.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-18* (fresh context; same model family as the planner, different from the deepseek executor)
