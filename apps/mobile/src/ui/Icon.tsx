@@ -52,7 +52,9 @@ export type IconName =
   | "speaker.wave.2"
   | "stop.circle"
   /** A pinned session in the sessions list (docs/feat/mobile-session-actions.md). */
-  | "pin";
+  | "pin"
+  /** The hub's Tools item (docs/feat/mobile-hub-tools.md): what the sheet switches. */
+  | "powerplug";
 
 export interface IconProps {
   readonly name: IconName;

@@ -17,6 +17,7 @@ export type HubEntryId =
   | "artifacts"
   | "sessions"
   | "info"
+  | "tools"
   | "scheduled"
   | "dictate"
   | "new";
@@ -40,6 +41,12 @@ export interface HubItem {
    * — never hidden, so the order never shifts under the finger (owner Q-H5).
    */
   readonly dimmed: boolean;
+  /**
+   * The rim arc, when the item's own figure is not a badge count
+   * (docs/feat/mobile-hub-tools.md: the Tools item's share switched off). Absent:
+   * the rim comes from the badge, as every other item's does (`rimFraction`).
+   */
+  readonly rim?: number | null;
 }
 
 export interface HubContext {
@@ -59,6 +66,14 @@ export interface HubContext {
   readonly unseenArtifacts: number;
   /** `activityView(...).groups.length === 0`: Activity has nothing to open (mobile-hub-tap Design 2). */
   readonly activityEmpty: boolean;
+  /**
+   * `toolsSummary(...).known && total === 0`: there is nothing to switch, so the
+   * Tools item is dimmed. UNKNOWN is never empty: a count not seen yet must not
+   * dim an item whose tap is what fetches it (docs/feat/mobile-hub-tools.md D3).
+   */
+  readonly toolsEmpty: boolean;
+  /** The Tools item's rim: the share switched OFF, or null for no arc (all on). */
+  readonly toolsRim: number | null;
 }
 
 export interface HubActions {
@@ -77,6 +92,8 @@ export const ALREADY_FINISHED = "Already finished";
 export const NO_CONNECTION = "Not connected — the turn keeps running";
 /** A commit of an empty Activity says so inline; the modal never opens (mobile-hub-tap Design 2). */
 export const NOTHING_RUNNING = "Nothing running";
+/** The same rule for Tools: nothing to switch, so the sheet would be two empty lists. */
+export const NO_TOOLS = "No MCP servers or skills in this session";
 
 const LABELS: Readonly<Record<HubActionId, string>> = {
   stop: "Stop",
@@ -86,6 +103,7 @@ const LABELS: Readonly<Record<HubActionId, string>> = {
   artifacts: "Artifacts",
   sessions: "Sessions",
   info: "Session info",
+  tools: "Tools",
   scheduled: "Scheduled",
   dictate: "Dictate (Beta)",
   new: "New session",
@@ -99,8 +117,9 @@ const CANONICAL: readonly HubEntryId[] = [
   "attach",
   "activity",
   "artifacts",
-  "sessions",
   "info",
+  "tools",
+  "sessions",
   "scheduled",
   "dictate",
   "new",
@@ -132,6 +151,8 @@ function holds(id: HubEntryId, ctx: HubContext): boolean {
     case "artifacts":
     case "sessions":
     case "info":
+    // Tools is offered wherever Session info is: its own content decides.
+    case "tools":
     case "new":
       return true;
   }
@@ -151,19 +172,48 @@ function present(id: HubEntryId, ctx: HubContext, entries: HubEntries): boolean 
   return entries[id] !== undefined && holds(id, ctx);
 }
 
-function item(id: HubActionId, badge: HubBadge | null, dimmed = false): HubItem {
-  return { id, label: LABELS[id], badge, danger: id === "stop", dimmed };
+function item(
+  id: HubActionId,
+  badge: HubBadge | null,
+  dimmed = false,
+  rim?: number | null,
+): HubItem {
+  return {
+    id,
+    label: LABELS[id],
+    badge,
+    danger: id === "stop",
+    dimmed,
+    ...(rim === undefined ? {} : { rim }),
+  };
 }
 
-/** Why this entry has nothing to show RIGHT NOW, or null when it does (today: only an empty Activity, owner Q3). */
+/**
+ * Why this entry has nothing to show RIGHT NOW, or null when it does: an empty
+ * Activity (owner Q3), and Tools with nothing to switch (hub-tools D3).
+ */
 function dimmedBecause(id: HubEntryId, ctx: HubContext): string | null {
-  return id === "activity" && ctx.activityEmpty ? NOTHING_RUNNING : null;
+  if (id === "activity") {
+    return ctx.activityEmpty ? NOTHING_RUNNING : null;
+  }
+  if (id === "tools") {
+    return ctx.toolsEmpty ? NO_TOOLS : null;
+  }
+  return null;
+}
+
+/**
+ * The figure an item's rim draws. Tools carries its own (the share switched off);
+ * every other item's rim is its badge's (`rimFraction`).
+ */
+function rimOf(id: HubEntryId, ctx: HubContext): number | null | undefined {
+  return id === "tools" ? ctx.toolsRim : undefined;
 }
 
 export function hubActions(ctx: HubContext, entries: HubEntries): HubActions {
   const pair = TURN_PAIR.filter((id) => present(id, ctx, entries)).map((id) => item(id, null));
   const canonical = CANONICAL.filter((id) => present(id, ctx, entries)).map((id) =>
-    item(id, badgeOf(id, ctx), dimmedBecause(id, ctx) !== null),
+    item(id, badgeOf(id, ctx), dimmedBecause(id, ctx) !== null, rimOf(id, ctx)),
   );
   // Badge promotion: a badged item moves up to the first unbadged canonical
   // slot (a stable partition), so new things are reachable — after the pair.
