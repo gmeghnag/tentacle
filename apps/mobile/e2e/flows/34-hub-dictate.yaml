@@ -1,0 +1,42 @@
+appId: so.tentacle.app
+---
+# 34-hub-dictate (docs/feat/mobile-e2e-gate.md): with Settings → Beta →
+# Dictation on, More offers Dictate (Beta), and a tap starts dictation — on the
+# simulator that is the voice card (permission or "unavailable"), never nothing.
+- runFlow: _pair.yaml
+- extendedWaitUntil:
+    visible:
+      id: "computers-list"
+    timeout: 30000
+- tapOn:
+    id: "open-settings"
+- scrollUntilVisible:
+    element:
+      id: "beta-dictation"
+    direction: DOWN
+- tapOn:
+    id: "beta-dictation"
+- scrollUntilVisible:
+    element:
+      id: "settings-back"
+    direction: UP
+- tapOn:
+    id: "settings-back"
+- tapOn:
+    id: "computer-${output.computerId}"
+- tapOn:
+    id: "session-${HUBITEM_ID}"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- runFlow:
+    file: _hub-more.yaml
+    env:
+      ITEM: "dictate"
+- tapOn:
+    id: "hub-menu-dictate"
+- extendedWaitUntil:
+    visible:
+      id: "voice-card"
+    timeout: 10000

@@ -1,0 +1,10 @@
+appId: so.tentacle.app
+---
+# `_hub-fan` (docs/feat/mobile-e2e-gate.md): a TAP on the hub opens the fan
+# (docs/feat/mobile-hub-tap.md), and `ITEM` is in it. The caller taps it.
+- tapOn:
+    id: "floating-activity"
+- extendedWaitUntil:
+    visible:
+      id: "hub-item-${ITEM}"
+    timeout: 5000

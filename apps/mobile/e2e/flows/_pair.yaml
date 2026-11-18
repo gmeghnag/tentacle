@@ -20,9 +20,11 @@ appId: so.tentacle.app
 # with the older computer's (F-H2).
 - runScript:
     file: "pair-start.js"
+# BEFORE the launch: the app reads the Keychain as it starts, so a clear after
+# `launchApp` races it (docs/feat/mobile-e2e-gate.md; the harness also resets it).
+- clearKeychain
 - launchApp:
     clearState: true
-- clearKeychain
 # docs/feat/mobile-lock.md: the shipped default LOCKS AT COLD START (Owner Q1),
 # so the lock comes first here — `_unlock` asserts it and gets past it with a
 # scripted Face ID match (Step 0). Every flow that pairs therefore runs the real

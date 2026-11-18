@@ -92,7 +92,9 @@ export const SLOW_MS = 900;
  * to TYPE AND QUEUE a steer into it (13d's flow 12), and still ENDS, so the steer is
  * injected at its next model-round boundary.
  */
-export const STEADY_MS = 2500;
+// 4 s (was 2.5 s): on iOS 26 Maestro's type + hide-keyboard + tap took longer
+// than a 12.5 s turn, so the steer landed after it ended (docs/feat/mobile-e2e-gate.md).
+export const STEADY_MS = 4000;
 
 /**
  * The user text of an OpenAI chat request's last user message. The content may be

@@ -25,11 +25,20 @@ appId: so.tentacle.app
     id: "row-r2"
 - assertVisible:
     id: "turn-idle"
+# Leaving: the session screen has no back button since docs/feat/mobile-chrome.md
+# (its header is the drawer), and Maestro has no iOS edge swipe — so the flow
+# leaves the way a person does now, by switching to another session in the
+# drawer: same computer → `replace`, which unmounts ALPHA's screen (its `leave()`).
+# (Found by the first gate run, docs/feat/mobile-e2e-gate.md: `BackButton` gone.)
 - tapOn:
-    id: "BackButton"
+    id: "session-drawer"
+- tapOn:
+    id: "drawer-session-${CHARLIE_ID}"
 - waitForAnimationToEnd
 - assertVisible:
-    id: "sessions-list"
+    id: "session-view"
+- assertNotVisible:
+    id: "drawer"
 # The laptop is still attached (the seeder keeps it), so the phone leaving must
 # take `attached` back to 1 — a `session/close` instead would set archived: true.
 - runScript:

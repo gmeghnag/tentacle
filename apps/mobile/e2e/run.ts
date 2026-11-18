@@ -14,6 +14,7 @@
  * Exit codes: 0 = every flow passed; 2 = a prerequisite is missing (named, with
  * its install command — never a silent skip); anything else = Maestro's own.
  */
+import { readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
@@ -25,6 +26,18 @@ import { $, type Subprocess } from "bun";
 import { createApnsClient } from "../../relay/src/apns-client.ts";
 import type { ApnsJwtSource } from "../../relay/src/apns.ts";
 import { type ProbeListener, escapeFixture, startProbeListener } from "./escape-probes.ts";
+import {
+  type AttemptStatus,
+  type FlowMeta,
+  type FlowResult,
+  finalStatus,
+  flowMetaErrors,
+  majorOfDevice,
+  parseFlowMeta,
+  shouldRetry,
+  summaryText,
+  verdictOf,
+} from "./gate.ts";
 import { startHooks } from "./hooks.ts";
 import { payloadFor, sealPushMessage } from "./notify-steps.ts";
 import { createPairingHooks } from "./pairing.ts";
@@ -57,7 +70,30 @@ export function parseArgs(argv: readonly string[]): {
   readonly flows?: string;
   readonly udid?: string;
   readonly hold?: true;
+  readonly app?: string;
+  readonly flowTimeoutS?: number;
 } {
+  // `--app <path.app>`: install THIS simulator build instead of building one
+  // (docs/feat/mobile-e2e-gate.md) — still a clean reinstall, once per run.
+  const appAt = argv.indexOf("--app");
+  let app: string | undefined;
+  if (appAt !== -1) {
+    const value = argv[appAt + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("--app needs a value (a simulator .app path)");
+    }
+    app = value;
+  }
+  // `--flow-timeout <s>`: one attempt of one flow is killed after this long.
+  const timeoutAt = argv.indexOf("--flow-timeout");
+  let flowTimeoutS: number | undefined;
+  if (timeoutAt !== -1) {
+    const value = Number(argv[timeoutAt + 1]);
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new Error("--flow-timeout needs a positive number of seconds");
+    }
+    flowTimeoutS = value;
+  }
   const udidAt = argv.indexOf("--udid");
   let udid: string | undefined;
   if (udidAt !== -1) {
@@ -81,6 +117,8 @@ export function parseArgs(argv: readonly string[]): {
     ...(flows === undefined ? {} : { flows }),
     ...(udid === undefined ? {} : { udid }),
     ...(argv.includes("--hold") ? { hold: true as const } : {}),
+    ...(app === undefined ? {} : { app }),
+    ...(flowTimeoutS === undefined ? {} : { flowTimeoutS }),
   };
   const at = argv.indexOf("--ios");
   if (at === -1) {
@@ -226,8 +264,13 @@ export function freePort(): number {
   const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
   const port = server.port;
   server.stop(true);
-  return port;
+  // 4000 is the owner's own `serve` (docs/feat/mobile-e2e-gate.md): an ephemeral
+  // port never lands there on macOS, but a gate must not even be able to.
+  return port === OWNER_SERVE_PORT ? freePort() : port;
 }
+
+/** The port a person's own `serve` listens on; the harness never takes it. */
+export const OWNER_SERVE_PORT = 4000;
 
 /** Wait until a TCP port answers (the daemon binds asynchronously). */
 export async function waitForPort(port: number, timeoutMs = 20_000): Promise<void> {
@@ -257,6 +300,15 @@ async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   // Checked before any build, so a typo fails in a second, not after one.
   const runFlows = selectedFlows(args.flows);
+  // The gate's tags (docs/feat/mobile-e2e-gate.md), read from each flow's own
+  // header; a tag without its reason is refused before anything runs.
+  const metas = flowMetas(runFlows);
+  const metaErrors = [...metas.values()].flatMap(flowMetaErrors);
+  if (metaErrors.length > 0) {
+    console.error(metaErrors.join("\n"));
+    return 2;
+  }
+  const udid = args.udid ?? process.env.E2E_SIM_UDID;
   const [xcode, cocoapods, maestro, runtimesJson, devicesJson] = await Promise.all([
     versionOf("xcodebuild", "-version"),
     versionOf("pod", "--version"),
@@ -268,6 +320,21 @@ async function main(): Promise<number> {
     simctlRuntimes(),
     simctlDevices(),
   ]);
+  // A UDID names ONE simulator, so it names the major too: the gate runs that
+  // simulator only (the other required runtime need not be installed), and
+  // never falls back to another device — a run must not drive one it was not
+  // given (parallel agents each own one).
+  let only: IosMajor | undefined = args.only;
+  if (udid !== undefined && args.only === undefined) {
+    const major = majorOfDevice(devicesJson, udid);
+    if (major === undefined || !REQUIRED_IOS_MAJORS.includes(major as IosMajor)) {
+      console.error(
+        `e2e:mobile: simulator ${udid} is not an available iOS ${REQUIRED_IOS_MAJORS.join("/")} device (simctl list devices)`,
+      );
+      return 2;
+    }
+    only = major as IosMajor;
+  }
   const missing = preflight(
     {
       platform: process.platform,
@@ -276,7 +343,7 @@ async function main(): Promise<number> {
       ...(cocoapods === undefined ? {} : { cocoapods }),
       ...(maestro === undefined ? {} : { maestro }),
     },
-    ...(args.only === undefined ? [] : [args.only]),
+    ...(only === undefined ? [] : [only]),
   );
   if (missing.length > 0) {
     console.error(missingText(missing));
@@ -528,21 +595,7 @@ async function main(): Promise<number> {
           return { payload: placed.payload, token: placed.token };
         },
         pushPlace: () => pushSteps.place(),
-        faceIdEnroll: async () => {
-          // Two commits, as Step 0 found: the `-s` alone only SETS the default;
-          // the `-p` post is what makes `isEnrolledAsync()` flip to true.
-          await simctl(currentDevice.udid, [
-            "notifyutil",
-            "-s",
-            "com.apple.BiometricKit.enrollmentChanged",
-            "1",
-          ]);
-          await simctl(currentDevice.udid, [
-            "notifyutil",
-            "-p",
-            "com.apple.BiometricKit.enrollmentChanged",
-          ]);
-        },
+        faceIdEnroll: () => enrollFaceId(currentDevice.udid),
         faceIdMatch: async () => {
           await simctl(currentDevice.udid, [
             "notifyutil",
@@ -636,18 +689,31 @@ async function main(): Promise<number> {
     await hooks.ready;
 
     // Every flow, on each simulator this run covers.
-    const majors: readonly IosMajor[] = args.only === undefined ? REQUIRED_IOS_MAJORS : [args.only];
+    const majors: readonly IosMajor[] = only === undefined ? REQUIRED_IOS_MAJORS : [only];
     const flows = `${REPO}/apps/mobile/e2e/flows`;
-    let worst = 0;
+    const flowTimeoutMs =
+      (args.flowTimeoutS ?? Number(process.env.E2E_FLOW_TIMEOUT_S ?? DEFAULT_FLOW_TIMEOUT_S)) *
+      1000;
+    const allResults: FlowResult[] = [];
     for (const major of majors) {
       // `--udid` / `E2E_SIM_UDID` pins the simulator (parallel agents each own one).
-      const device = firstDevice(devicesJson, major, args.udid ?? process.env.E2E_SIM_UDID);
+      const device = udid ?? firstDevice(devicesJson, major);
       if (device === undefined) {
         console.error(`no available iOS ${major} simulator (preflight passed: check simctl)`);
         return 2;
       }
       console.log(`\n=== iOS ${major} (${device}) ===`);
       currentDevice.udid = device;
+      // Unattended: the simulator may be shut down. Booting a booted one is a
+      // no-op error, so it is not checked; `bootstatus -b` waits for it.
+      await $`xcrun simctl boot ${device}`.quiet().nothrow();
+      await $`xcrun simctl bootstatus ${device} -b`.quiet().nothrow();
+      // A just-booted simulator takes a while to honour the enrolment: the FIRST
+      // flow of the first gate run on a cold simulator met the passcode sheet
+      // instead of Face ID (docs/feat/mobile-e2e-gate.md, Execution). Enrol once
+      // here, well before any flow's `_unlock` enrols again (idempotent).
+      await enrollFaceId(device);
+      await Bun.sleep(FACEID_SETTLE_MS);
       // 13d's flow 18 needs photos in the simulator's library: `addmedia` seeds a
       // PNG and a JPEG (fixtures, never real photos — the harness owns them under
       // its own scratch dir).
@@ -656,12 +722,30 @@ async function main(): Promise<number> {
         console.error(`addmedia failed for iOS ${major} (exit ${mediaCode})`);
         return mediaCode;
       }
-      const buildCode = await buildAndInstall(device, runDir, major);
+      // A CLEAN install once per run: whatever an earlier run (or a person) left
+      // on this simulator goes first, so the run starts from the build it tests.
+      await $`xcrun simctl uninstall ${device} so.tentacle.app`.quiet().nothrow();
+      const buildCode =
+        args.app === undefined
+          ? await buildAndInstall(device, runDir, major)
+          : (await $`xcrun simctl install ${device} ${args.app}`.nothrow()).exitCode;
       if (buildCode !== 0) {
         console.error(`build/install failed for iOS ${major} (exit ${buildCode})`);
         return buildCode;
       }
       for (const flow of runFlows) {
+        const meta = metas.get(flow) ?? parseFlowMeta(flow, "");
+        if (meta.tags.includes("quarantine")) {
+          console.log(`- ${flow} (iOS ${major}) quarantined: ${meta.reasons.quarantine ?? ""}`);
+          allResults.push({
+            name: flow,
+            status: "quarantined",
+            seconds: 0,
+            attempts: 0,
+            tags: meta.tags,
+          });
+          continue;
+        }
         // Each flow gets its own pairing scope. "One window at a time" (F-H3) is
         // a rule INSIDE a flow: a flow that failed between `pair-start` and its
         // answer leaves a window open, and the next flow's `pair-start` would be
@@ -669,24 +753,64 @@ async function main(): Promise<number> {
         // `14-pair-bad-text` leaves its window unclaimed, and 15–17 all failed
         // before their first assertion). Teardown answers a waiting `ask` with
         // `n`, so nothing is ever silently registered.
-        await pairing.stop();
-        const outDir = join(runDir, `ios${major}`, flow);
-        await mkdir(outDir, { recursive: true });
-        const code = await spawnFlow(
-          `${flows}/${flow}.yaml`,
-          device,
+        const attempts: AttemptStatus[] = [];
+        const started = Date.now();
+        let outDir = join(runDir, `ios${major}`, flow);
+        do {
+          await pairing.stop();
+          // No state carried between flows (or attempts): the app is stopped, and
+          // the flow itself relaunches with `clearState` + `clearKeychain` (`_pair`).
+          await $`xcrun simctl terminate ${device} so.tentacle.app`.quiet().nothrow();
+          // And its Keychain is EMPTY at the flow's launch: `_pair` clears it only
+          // AFTER `launchApp`, so the app could read the previous flow's computer
+          // first (the second gate run: 05 and 16 opened on `Computers`, already
+          // paired). Apple keeps Keychain items across `clearState`.
+          await $`xcrun simctl keychain ${device} reset`.quiet().nothrow();
+          outDir = join(runDir, `ios${major}`, attempts.length === 0 ? flow : `${flow}.retry`);
+          await mkdir(outDir, { recursive: true });
+          // A flow that stops `serve` (05, 16, 17) and dies before its restart
+          // step must not take the rest of the run with it: `serve` is brought
+          // back before every attempt (the first gate run crashed whole at 17,
+          // `cannot reach the daemon`, after 16 failed mid-outage).
+          let outcome: AttemptStatus;
+          try {
+            await waitForPort(daemonPort, 1_000).catch(async () => {
+              console.error(`  serve was down before ${flow}: restarting it`);
+              serving = startServe();
+              await waitForPort(daemonPort);
+            });
+            outcome = await spawnFlow(
+              `${flows}/${flow}.yaml`,
+              device,
+              outDir,
+              runDir,
+              seeded,
+              hooks.address,
+              () => composeSessionOf(endpoint),
+              flowTimeoutMs,
+            );
+          } catch (error) {
+            // A setup step (the flow's own session, a restart) failed: this
+            // flow is red, the run goes on.
+            const text = error instanceof Error ? error.message : String(error);
+            await writeFile(join(outDir, "setup-error.txt"), `${text}\n`);
+            console.error(`  ${flow} setup failed: ${text}`);
+            outcome = "fail";
+          }
+          attempts.push(outcome);
+          const mark = outcome === "pass" ? "✓" : "✗";
+          const retry = attempts.length > 1 ? " (retry)" : "";
+          const line = `${mark} ${flow} (iOS ${major})${retry} ${outcome}`;
+          (outcome === "pass" ? console.log : console.error)(line);
+        } while (shouldRetry(meta, attempts));
+        allResults.push({
+          name: flow,
+          status: finalStatus(attempts),
+          seconds: (Date.now() - started) / 1000,
+          attempts: attempts.length,
+          tags: meta.tags,
           outDir,
-          runDir,
-          seeded,
-          hooks.address,
-          () => composeSessionOf(endpoint),
-        );
-        worst = Math.max(worst, code);
-        if (code !== 0) {
-          console.error(`✗ ${flow} (iOS ${major}) exit ${code}`);
-        } else {
-          console.log(`✓ ${flow} (iOS ${major})`);
-        }
+        });
       }
     }
     // `E2E_HOLD=1`: keep serve, the mock and the hooks up after the flows, for a
@@ -699,8 +823,13 @@ async function main(): Promise<number> {
     await pairing.stop();
     await hooks.stop();
     await seeded.close();
-    console.log(`\n${worst === 0 ? "PASS" : "FAIL"} — logs in ${runDir}`);
-    return worst;
+    // The one summary (docs/feat/mobile-e2e-gate.md): printed AND kept in the
+    // run dir with a machine-readable twin, next to every failed flow's output.
+    const summary = summaryText(allResults, metas);
+    await writeFile(join(runDir, "summary.txt"), summary);
+    await writeFile(join(runDir, "summary.json"), `${JSON.stringify(allResults, null, 2)}\n`);
+    console.log(`\n${summary}\nresults in ${runDir}`);
+    return verdictOf(allResults).exitCode;
   } finally {
     for (const child of children) {
       child.kill();
@@ -1272,6 +1401,18 @@ export const FLOWS: readonly string[] = [
   // Attach, Stop on a HOLD turn, a tapped empty Activity saying "Nothing
   // running") — on a session of its own.
   "33-hub",
+  // docs/feat/mobile-e2e-gate.md: one flow per hub item (fan + More), each
+  // asserting the item opens what it names — on a session of its own.
+  "34-hub-attach",
+  "34-hub-activity",
+  "34-hub-artifacts",
+  "34-hub-tools",
+  "34-hub-commands",
+  "34-hub-sessions",
+  "34-hub-info",
+  "34-hub-scheduled",
+  "34-hub-dictate",
+  "34-hub-new",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -1354,6 +1495,17 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "31-chart-inline": "CHART_ID",
   "32-chart-interact": "CHART2_ID",
   "33-hub": "HUB_ID",
+  // docs/feat/mobile-e2e-gate.md: ONE variable, a fresh session per flow.
+  "34-hub-attach": "HUBITEM_ID",
+  "34-hub-activity": "HUBITEM_ID",
+  "34-hub-artifacts": "HUBITEM_ID",
+  "34-hub-tools": "HUBITEM_ID",
+  "34-hub-commands": "HUBITEM_ID",
+  "34-hub-sessions": "HUBITEM_ID",
+  "34-hub-info": "HUBITEM_ID",
+  "34-hub-scheduled": "HUBITEM_ID",
+  "34-hub-dictate": "HUBITEM_ID",
+  "34-hub-new": "HUBITEM_ID",
 };
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */
@@ -1371,7 +1523,9 @@ async function spawnFlow(
   hooks: string,
   /** Create one compose session on demand (the harness's own client). */
   newComposeSession: () => Promise<string>,
-): Promise<number> {
+  /** One attempt is killed after this long (a hung driver must not stall the run). */
+  timeoutMs: number,
+): Promise<AttemptStatus> {
   // A 13d compose flow gets a session of its OWN, created JUST BEFORE it runs: a
   // queued or returned row is daemon-side state that outlives `clearState`, and
   // seeding all of them up front pushed the earlier flows' rows off the visible
@@ -1424,10 +1578,50 @@ async function spawnFlow(
     },
   ) as unknown as Child;
   children.add(child);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGKILL");
+  }, timeoutMs);
   const code = await child.exited;
+  clearTimeout(timer);
   children.delete(child);
-  return code;
+  if (timedOut) {
+    await writeFile(
+      join(outDir, "timeout.txt"),
+      `killed after ${Math.round(timeoutMs / 1000)} s (--flow-timeout / E2E_FLOW_TIMEOUT_S)\n`,
+    );
+    return "timeout";
+  }
+  return code === 0 ? "pass" : "fail";
 }
+
+/**
+ * Enrol a face on the simulator (docs/feat/mobile-lock.md Step 0). Two commits:
+ * the `-s` alone only SETS the default; the `-p` post is what makes
+ * `isEnrolledAsync()` flip to true. Idempotent.
+ */
+async function enrollFaceId(udid: string): Promise<void> {
+  await simctl(udid, ["notifyutil", "-s", "com.apple.BiometricKit.enrollmentChanged", "1"]);
+  await simctl(udid, ["notifyutil", "-p", "com.apple.BiometricKit.enrollmentChanged"]);
+}
+
+/** How long a fresh enrolment is given to settle before the first flow. */
+const FACEID_SETTLE_MS = 5_000;
+
+/** Each flow's gate metadata, read from its yaml (docs/feat/mobile-e2e-gate.md). */
+export function flowMetas(names: readonly string[]): Map<string, FlowMeta> {
+  const dir = join(REPO, "apps", "mobile", "e2e", "flows");
+  return new Map(
+    names.map((name) => [
+      name,
+      parseFlowMeta(name, readFileSync(join(dir, `${name}.yaml`), "utf8")),
+    ]),
+  );
+}
+
+/** One attempt of one flow, by default (the longest green flow, 24-ui-shots, takes ~4 min). */
+export const DEFAULT_FLOW_TIMEOUT_S = 600;
 
 if (import.meta.main) {
   const code = await main().catch((error: unknown) => {

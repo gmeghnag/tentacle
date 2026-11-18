@@ -27,6 +27,64 @@ bun run e2e:mobile --ios 26 --only 24-ui-shots,18-photos # just these flows
 
 `--only` is the same as `E2E_ONLY_FLOWS=…` (the flag wins when both are set).
 
+## The gate (docs/feat/mobile-e2e-gate.md)
+
+```sh
+scripts/e2e-gate.sh <udid>                 # the WHOLE suite, unattended, on that simulator
+scripts/e2e-gate.sh <udid> --app <x.app>   # install a ready simulator build instead of building
+```
+
+`--udid` (or `E2E_SIM_UDID`) names one simulator and therefore its iOS major: only
+that simulator runs, it is booted if shut down, and the run never falls back to
+another device. The app is uninstalled and installed ONCE per run; each flow
+attempt is killed after `--flow-timeout` / `E2E_FLOW_TIMEOUT_S` seconds (default
+600). The end is one table (`flow · result · seconds · tries`), also written to
+`<runDir>/summary.txt` and `summary.json`; a failed flow keeps Maestro's
+screenshots + `maestro.log` in `<runDir>/ios<major>/<flow>/`.
+
+Exit: `0` every counted flow passed · `1` a counted flow failed or timed out ·
+`2` a missing prerequisite, a bad UDID or a tag without its reason · other = build.
+
+**Tags** — in the flow's own header (before `---`), each with its reason line:
+
+```yaml
+appId: so.tentacle.app
+tags:
+  - known-bug
+# known-bug: More → New session opens nothing (fix task: …)
+---
+```
+
+| Tag | Effect |
+|---|---|
+| `flaky` | ONE retry; listed. Nothing untagged is ever retried. |
+| `known-bug` | a real APP bug a fix task owns: runs, NOT counted, listed; a pass says "drop the tag" |
+| `quarantine` | the FLOW cannot work today: not run, listed; needs a `TODO.md` line |
+
+`test/e2e-gate.test.ts` refuses a tag with no reason and a known-bug/quarantine
+with no `TODO.md` line (`e2e flow \`<name>\``).
+
+**Before publishing an iOS build** (the orchestrator wires it): in the build
+script, after the worktree is at the ref and before the upload,
+
+```sh
+$W/scripts/e2e-gate.sh <the build's own simulator udid> \
+  || { echo "$(date +%H:%M) E2E GATE FAILED — see $W/.tentacle/tmp/e2e-mobile/" >> $L; exit 1; }
+```
+
+It builds its own simulator Release in `$W/apps/mobile` (`expo prebuild` is
+idempotent, so `build.sh`'s device archive is unaffected) and never touches a
+`serve` on port 4000.
+
+**Nightly** (doc only — a `launchd` agent or `crontab -e` on the build Mac):
+
+```sh
+# 03:00 every night, from a dedicated worktree on main, a dedicated simulator
+0 3 * * * cd $HOME/tentacle/.tentacle/worktrees/e2e-nightly && git fetch -q && git checkout -q --detach origin/main && bun install >/dev/null && scripts/e2e-gate.sh <udid> > .tentacle/tmp/e2e-nightly-$(date +\%F).log 2>&1 || osascript -e 'display notification "mobile e2e gate RED" with title "tentacle"'
+```
+
+The log's tail is the summary table; the run dir it names holds the evidence.
+
 ## What it does
 
 1. **Preflight** — macOS, Xcode, CocoaPods, Maestro, both runtimes.
@@ -79,6 +137,7 @@ bun run e2e:mobile --ios 26 --only 24-ui-shots,18-photos # just these flows
 | `22-notify-deny.yaml` | Deny needs no authentication, raises no Face ID, and refuses the ask |
 | `22-notify-reply.yaml` | Reply carries the person's words to the MODEL (the mock's prompt list) |
 | `22-notify-forged.yaml` | a push sealed with a NON-pinned key answers NOTHING: the ask stays pending |
+| `34-hub-<item>.yaml` | each hub fan / More item opens what it names (Attach, Activity, Artifacts, Tools, Commands, Sessions, Session info, Scheduled, Dictate, New session) |
 
 11b.2's three flows (`18-camera-denied`, `19-deep-link`, `20-camera-close`) keep
 11b.1's numbers because they were written first; the lock's flows keep THEIR
