@@ -20,6 +20,7 @@ import { xTexts } from "./chart-hero.ts";
 import {
   type ChartTable,
   type Ctx,
+  type DotShape,
   type GuideLine,
   type LayoutText,
   type LegendItem,
@@ -113,8 +114,14 @@ export function guideItems(
   y: (v: number) => number,
   labelAt: "start" | "end",
   avoid: readonly LayoutText[],
+  ceiling?: number,
 ): { guides: GuideLine[]; texts: LayoutText[] } {
-  const values = guides(span.lo, span.hi, 3);
+  // `ceiling`: the top hairline is the axis' ceiling itself, so a stacked area
+  // never draws its stack above the top guide (docs/feat/mobile-chart-labels.md D4).
+  const values =
+    ceiling === undefined
+      ? guides(span.lo, span.hi, 3)
+      : [...guides(span.lo, ceiling, 3).filter((v) => v < ceiling), ceiling];
   const format = yFormat(spec, ctx.locale);
   const lines = values.map((value) => ({
     y: y(value),
@@ -140,6 +147,38 @@ export function guideItems(
   return { guides: lines, texts };
 }
 
+/**
+ * The series marker for slot `k`: solid ● / dashed ■ / dotted ▲, cycling every
+ * three (docs/feat/mobile-chart-labels.md D5). Colour alone is not a readable
+ * channel for every reader, and this is what ties a label to its line.
+ */
+export function markShape(k: number): DotShape {
+  return (["circle", "square", "triangle"] as const)[k % 3] as DotShape;
+}
+
+/** The stroke dash of series `k`, in the same three slots (round caps make `0.1 4` dots). */
+export function markDash(k: number): string | undefined {
+  return [undefined, "6 4", "0.1 4"][k % 3];
+}
+
+/**
+ * Whether C (labels inside the plot) fits this chart at all: `n` labels of
+ * `h` pt must fit the plot's height, and no name may take more than 45 % of the
+ * width — else the chart falls back to A (the legend above). Pure, so the
+ * decision is testable without a renderer.
+ */
+export function insideFits(
+  names: readonly string[],
+  h: number,
+  room: number,
+  width: number,
+  size: number,
+  measure: (text: string, size: number) => number,
+): boolean {
+  if (names.length * h > room) return false;
+  return names.every((name) => measure(name, size) <= width * 0.45);
+}
+
 /** Whether direct labels fit: `n` lines of `h` pt in `room` pt, and a gutter ≤ 40 % of the width. */
 export function labelsFit(
   n: number,
@@ -155,10 +194,13 @@ export function legendOf(
   spec: ChartSpec,
   visible: readonly number[],
   paintOf: (k: number) => Paint,
+  valueText: (k: number) => string = () => "",
 ): LegendItem[] {
   return visible.map((k) => ({
     series: k,
     label: spec.datasets[k]?.label ?? "",
     paint: paintOf(k),
+    value: valueText(k),
+    shape: markShape(k),
   }));
 }
