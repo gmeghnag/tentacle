@@ -154,4 +154,33 @@ Re-running the installer refreshes it today.
 
 ## Review
 
-*— pending*
+*— claude-opus-5-5, 2026-11-18* (fresh context, SAME model as the executor: shared blind spots possible)
+
+**Verdict: APPROVE** — no HIGH/MEDIUM findings.
+
+- **Gate:** touched files (`install.test.ts`, `voice-cmd.test.ts`) 32 pass / 0 fail;
+  `bun run lint` clean; `bun run typecheck` clean. Full `bun test`: 15282 pass,
+  5 skip, 2 fail on run 1, 1 fail on run 2. Both were
+  `local-runtime.test.ts` "persists the session after a turn, under a stable uid"
+  (timing-flaky: it passes alone and in 3 re-runs of its own file). The diff does not touch that
+  path (its only TS changes are two hint strings), so it is not attributable to
+  this task. Still, it is a pre-existing flake worth a TODO.
+- **Premise:** `helperPathCandidates` (`packages/tui/src/voice-spawn.ts:52-67`)
+  puts the sibling of `execPath` second, and `voice-cmd.ts:91` uses the same
+  function. **TRUE**.
+- **Mutations (each reverted, tree clean):** (1) `install_voice` moved after the pod
+  binaries → "installed before the pod binaries" FAILS. (2) `--version` gate
+  accepting any output → "does not run here (macOS < 26)" FAILS. (The executor
+  also did a checksum mutation, reported in its Execution.)
+- **Attacks tried:** `$os` in `main` is the lowercased `darwin` set by
+  `detect_target`: holds. `set -eu` with failing `download` and `--version` stays
+  non-fatal (inside `if !` / `||`): holds. A new `SHA256SUMS` line breaks
+  `parseSha256Sums` / `update`? No, they look names up: holds. Can the release
+  publish without the helper? No: `needs: [build, voice]` plus the asset loop:
+  holds. Rosetta x64 shell: universal binary, no mapping: holds.
+- **Residual (not findings):** the `voice` job runs on every push/PR, so if the
+  `macos-26` label were unavailable ALL CI would go red, not just releases.
+  The doc already flags this as CI-only proof. The `tentacle update` gap
+  (helper not refreshed) is in Debt.
+- **Executor:** red→green shown, mutation done, drift honestly "none", and the
+  CI-only proofs called out explicitly. Behaved well.
