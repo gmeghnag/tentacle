@@ -142,3 +142,65 @@ pump → `stop` with `AVAudioEngine`) — it uses the same `LiveFeed` as
 `trace --live`, but the tap's timing and the orange-dot device cannot be driven
 from a test here. Verify by hand: `tentacle` → Ctrl+R, speak, words appear
 greyed; Ctrl+R → the final replaces them.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-18* (fresh context; SAME model as the executor, so shared blind spots are possible)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM finding, no HIGH).
+
+**Findings**
+
+1. **MEDIUM — the final now comes from a `.fastResults` transcriber.**
+   `native/voice-mac/Sources/TentacleVoice/Live.swift:176` opens the live
+   analyzer with `reportingOptions: [.volatileResults, .fastResults]`, and
+   `main.swift` `stop` → `finishLive` uses that session's transcript as the
+   `final` whenever it is non-blank. Before this change the final came from
+   `Transcriber.makeTranscriber` (`Transcribe.swift:212`, `reportingOptions: []`).
+   Apple documents `fastResults` as trading accuracy for latency. Failure
+   scenario: real mic speech (noise, accents, long takes) gets a less accurate
+   final than it did on `main`, and nothing falls back because the text is
+   non-blank. The only evidence that the two match is a single clean `say` TTS
+   take (`LiveTests`, Execution). Fix: drop `.fastResults` (`.volatileResults`
+   alone already yields partials), or show the finals are as accurate on real
+   speech. As it stands this is an unmeasured quality regression in the
+   feature's main output.
+
+**Gate (run by me):** the 4 touched TS files → 111 pass / 0 fail;
+`bun run voice:test` → 28 XCTest, 0 failures; `bun run lint` → clean (2083
+files); `bun run typecheck` → clean. Full `bun test` not re-run here
+(Execution reports 15270 pass / 5 opt-in skips).
+
+**Mutation:** my mutation script (M1 `partial: ""` back in `toTranscribing`;
+M2 `inputRowCount` ignores the ghost; M3 the selection no longer suppresses the
+ghost) was **blocked by the permission sandbox**, so it never ran. Each of
+M1–M3 corresponds to an assertion in the new tests that looks like it pins
+that property (`voice-session.test.ts` "the stop KEEPS…", `input-view.test.ts`
+row-count / selection cases). This is unverified by execution. Execution's
+`voiceGhost → ""` mutation is the executor's claim only.
+
+**Premises:** `voice-session.ts` partial handled only in starting/listening → TRUE
+(test "a partial after the stop is ignored"); the batch check order is kept →
+TRUE (`Transcribe.swift` empty-take branch still checks availability first);
+the feed index lines up with the take → TRUE (`Capture.start` clears `native`
+before `listening`, so the feed opened afterwards starts at 0; `stop` hands the
+same array to `finishLive`); the box height agrees with the render → TRUE
+(`App.tsx` passes the `field` object, anchor included, to `frameLayout`, and
+`LineInput` gets the same anchor).
+
+**Attacks tried:** (a) a selection plus a ghost: row count vs render
+mismatch → none, both suppress it through the same `withGhost`. (b) Stop with
+an empty take while live is open → discarded, batch says `no audio`. (c) Cancel,
+restart or EOF mid-take → `discard` on every path, nothing leaks into the next
+id. (d) A retraction to `""` → the throttle sends it and the TUI clears the
+ghost. (e) The live final throws → `finishLive` returns nil and batch runs on
+the same take. (f) The final's accuracy → finding 1.
+
+**Not covered / debt (not findings):** `finishLive` has no timeout. A hung
+finalize blocks `stop` the same way a hung batch did before, so this is not a
+new risk class. The real-mic path is still unexercised (Execution says so).
+
+**Executor behaviour:** honest. The not-exercised mic path is declared and the
+evidence is concrete. Scope is tight (TUI changes are pure-module + dumb
+renderer, per §7). No protocol or persistence change, so no `protocol.d/` note
+is needed (`partial` already existed).
