@@ -65,7 +65,7 @@ describe("opacity: an additive optional field in the same v1 record", () => {
     const s = {
       mode: "floating" as const,
       position: { edge: "right" as const, yFraction: 0.5 },
-      opacity: 55,
+      opacity: 60,
     };
     await f.store.write(s);
     expect(await f.store.read()).toEqual({ settings: s, writable: true });
@@ -93,11 +93,16 @@ describe("opacity: an additive optional field in the same v1 record", () => {
     }
   });
 
-  test("an out-of-range opacity is clamped: 10 → 30, 150 → 100, 62.6 → 63", async () => {
+  test("an off-step or out-of-range opacity snaps to the nearest step (ties up)", async () => {
+    // docs/feat/mobile-hub-defaults.md: the continuous 30–100 slider of
+    // mobile-hub-opacity wrote any whole number; on read it lands on a step.
     for (const [opacity, expected] of [
-      [10, 30],
+      [35, 40],
+      [30, 40],
+      [62.6, 60],
+      [70, 80],
+      [10, 20],
       [150, 100],
-      [62.6, 63],
     ] as const) {
       const raw = JSON.stringify({ v: 1, mode: "floating", opacity });
       expect(await fake(raw).store.read()).toEqual({
@@ -157,9 +162,35 @@ describe("opacity: an additive optional field in the same v1 record", () => {
   });
 });
 
-describe("rule 1: unreadable / missing / unknown v → the defaults (Header, no position)", () => {
-  test("the default is Header", () => {
-    expect(DEFAULT_ACTIVITY_SETTINGS).toEqual({ mode: "header" });
+describe("rule 1: unreadable / missing / unknown v → the defaults (Floating at 80 %, no position)", () => {
+  test("the default is the floating hub at 80 % (owner 2026-11-18; was Header)", () => {
+    expect(DEFAULT_ACTIVITY_SETTINGS).toEqual({ mode: "floating", opacity: 80 });
+  });
+  test("a fresh install reads the floating hub at 80 %", async () => {
+    expect((await fake().store.read()).settings).toEqual({ mode: "floating", opacity: 80 });
+  });
+  test("a STORED Header record keeps Header: only the absence of a choice gets the new default", async () => {
+    expect(await fake(JSON.stringify({ v: 1, mode: "header" })).store.read()).toEqual({
+      settings: { mode: "header" },
+      writable: true,
+    });
+  });
+  test("a stored Floating record WITHOUT an opacity keeps its solid look (100 %, not 80)", async () => {
+    expect(await fake(JSON.stringify({ v: 1, mode: "floating" })).store.read()).toEqual({
+      settings: { mode: "floating" },
+      writable: true,
+    });
+  });
+  test("switching mode on a fresh install keeps the 80 % (the holder spread writes it)", async () => {
+    const f = fake();
+    const h = createActivitySettingsHolder(f.store);
+    await h.load();
+    await h.set({ ...h.current(), mode: "header" });
+    expect(JSON.parse(f.items.get(ACTIVITY_SETTINGS_KEY) ?? "")).toEqual({
+      v: 1,
+      mode: "header",
+      opacity: 80,
+    });
   });
   test("missing → defaults, writable", async () => {
     expect(await fake().store.read()).toEqual({
@@ -231,23 +262,23 @@ describe("rule 3: a write failure rejects (Settings says didn't save)", () => {
 
 describe("the holder (F22)", () => {
   test("loads, publishes, and reports writability", async () => {
-    const f = fake(JSON.stringify({ v: 1, mode: "floating" }));
+    const f = fake(JSON.stringify({ v: 1, mode: "header" }));
     const h = createActivitySettingsHolder(f.store);
     const seen: string[] = [];
     h.subscribe((s) => seen.push(s.mode));
     expect(h.current()).toEqual(DEFAULT_ACTIVITY_SETTINGS);
     await h.load();
-    expect(h.current().mode).toBe("floating");
+    expect(h.current().mode).toBe("header");
     expect(h.writable()).toBe(true);
-    expect(seen).toEqual(["floating"]);
+    expect(seen).toEqual(["header"]);
   });
 
   test("a failed write rejects but KEEPS the pick for this run", async () => {
     const f = fake(null, { failSet: true });
     const h = createActivitySettingsHolder(f.store);
     await h.load();
-    await expect(h.set({ mode: "floating" })).rejects.toThrow("disk full");
-    expect(h.current().mode).toBe("floating");
+    await expect(h.set({ mode: "header" })).rejects.toThrow("disk full");
+    expect(h.current().mode).toBe("header");
   });
 
   test("a preserved record: not writable, a set is refused and changes nothing", async () => {

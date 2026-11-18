@@ -315,8 +315,8 @@ describe("Settings: the band is hidden in Header mode (Owner Q1) and writes once
     expect(BAND_UI).toContain("stepOpacity(shown,");
   });
 
-  test("the level and the label are the clamped setting, never a raw stored number", () => {
-    expect(BAND_UI).toContain("clampOpacity(opacity ?? OPACITY_DEFAULT)");
+  test("the level and the label are the snapped setting, never a raw stored number", () => {
+    expect(BAND_UI).toContain("snapOpacity(opacity ?? OPACITY_DEFAULT)");
     // A drag's x goes through the track maths (and the floor), not straight to a value.
     expect(BAND_UI).toMatch(/at: \(x: number\) => opacityAt\(x, width\.current\)/);
     expect(BAND_UI).toContain("latest.current.dragTo(event.nativeEvent.locationX)");
