@@ -28,13 +28,13 @@ import {
   type FloatBounds,
   type FloatPosition,
   a11y,
-  motion,
   place,
   snap,
 } from "../floating-button.ts";
 import { hubHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import type { HubActionId, HubBadge, HubItem } from "../hub-actions.ts";
+import { dropPlan, fadePlan, levelPlan } from "../hub-button-motion.ts";
 import { type FanLayout, type Point, fanMotion } from "../hub-fan.ts";
 import type { GestureEffect, GestureState, HubMenu } from "../hub-gesture.ts";
 import { hubOpacity } from "../hub-opacity.ts";
@@ -169,23 +169,20 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
   }, [atX, atY, xy]);
 
   // Fades in/out (150 ms); once faded OUT it unmounts, so neither VoiceOver nor
-  // a test finds an invisible button.
-  const fadeMs = motion(reduceMotion).fadeMs;
+  // a test finds an invisible button. Every animation here is on the native
+  // driver (`hub-button-motion.ts`): a JS thread busy with a streaming turn
+  // cannot stutter it.
   const [rendered, setRendered] = useState(shown);
   useEffect(() => {
     if (shown) {
       setRendered(true);
     }
-    Animated.timing(opacity, {
-      toValue: shown ? 1 : 0,
-      duration: fadeMs,
-      useNativeDriver: false,
-    }).start(({ finished }) => {
+    Animated.timing(opacity, fadePlan(shown, reduceMotion)).start(({ finished }) => {
       if (finished && !shown) {
         setRendered(false);
       }
     });
-  }, [shown, fadeMs, opacity]);
+  }, [shown, reduceMotion, opacity]);
 
   // How see-through the BODY is (docs/feat/mobile-hub-opacity.md): the setting at
   // rest, 1 while touched / with the fan open / under Reduce Transparency. It is a
@@ -198,13 +195,9 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
     reduceTransparency,
   });
   useEffect(() => {
-    Animated.timing(bodyLevel, {
-      // Up is instant (feedback at once); back down takes the fade.
-      toValue: level.body,
-      duration: level.body === 1 ? 0 : fadeMs,
-      useNativeDriver: false,
-    }).start();
-  }, [level.body, fadeMs, bodyLevel]);
+    // Up is instant (feedback at once); back down takes the fade (`levelPlan`).
+    Animated.timing(bodyLevel, levelPlan(level.body, reduceMotion)).start();
+  }, [level.body, reduceMotion, bodyLevel]);
 
   // The press: the button's spot at the grant, and the menu solved at the open.
   const press = useRef<{ start: Point; menu: HubMenu | null }>({
@@ -231,18 +224,15 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
       back();
       return;
     }
-    if (motion(p.reduceMotion).spring) {
-      Animated.spring(xy, { toValue: target, useNativeDriver: false }).start(() => {
+    const plan = dropPlan(target, p.reduceMotion);
+    if (plan.kind === "spring") {
+      Animated.spring(xy, plan.spring).start(() => {
         moving.current = false;
       });
     } else {
-      xy.setValue(target);
-      opacity.setValue(0);
-      Animated.timing(opacity, {
-        toValue: 1,
-        duration: motion(true).fadeMs,
-        useNativeDriver: false,
-      }).start();
+      xy.setValue(plan.at);
+      opacity.setValue(plan.fadeFrom);
+      Animated.timing(opacity, plan.fade).start();
       moving.current = false;
     }
     p.onDrop(dropped);
