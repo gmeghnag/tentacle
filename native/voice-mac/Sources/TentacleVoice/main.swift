@@ -7,9 +7,10 @@ import Foundation
 /// stdin reaches EOF — and stdin EOF is the LIFETIME rule: the TUI owns this
 /// child, so no orphan can keep the microphone open (F13).
 ///
-/// Three non-protocol modes, all of which print plain lines and exit:
-/// `setup [--yes] [--models-dir DIR]`, `status [--engine E]`, and
-/// `trace <wav>…` (replays a file instead of the mic, for a fixture or a test).
+/// Four non-protocol modes, all of which print plain lines and exit:
+/// `setup [--yes] [--models-dir DIR]`, `status [--engine E]`,
+/// `trace <wav>…` (replays a file instead of the mic, for a fixture or a test),
+/// and `--version`.
 
 // MARK: - the protocol loop
 
@@ -497,6 +498,11 @@ struct TentacleVoice {
         switch args.first {
         case nil:
             code = runProtocolOffMain()
+        case "--version":
+            // No side effect (no mic, no speech assets): the release smoke test and
+            // the installer's "does it run on this Mac" check (docs/feat/voice-release.md).
+            print("tentacle-voice protocol \(VOICE_PROTOCOL_VERSION)")
+            code = 0
         case "status":
             code = await runStatus(modelsDir: modelsDir, engine: engine)
         case "setup":

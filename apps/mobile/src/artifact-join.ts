@@ -133,3 +133,33 @@ export function galleryListable(
   }
   return { ok: false, phase: join.phase };
 }
+
+/**
+ * The join with every card the LIVE transcript carries that its list lacks
+ * (docs/fix/mobile-qa-1118.md, bug 3). `artifact/list` is asked at the attach
+ * only, so an artifact `present`ed while the person watches reached its row's
+ * card (the live `tool_result` details) but never the list — and the list is the
+ * hub's count source (`hubContextOf` → `unseenArtifacts`): no rim and no glow
+ * until a re-entry relisted it. A version already listed (same id + version) is
+ * never added twice, so a reconnect's relist or a replayed result counts once;
+ * the phase is kept (a live card is a fact, not a daemon answer), and the SAME
+ * join comes back when nothing is new, so a no-op cannot re-render.
+ */
+export function withLiveCards(join: ArtifactJoin, rows: readonly Row[]): ArtifactJoin {
+  let added: ArtifactMeta[] | null = null;
+  const known = (meta: ArtifactMeta): boolean =>
+    join.list.some((m) => m.artifactId === meta.artifactId && m.version === meta.version) ||
+    (added?.some((m) => m.artifactId === meta.artifactId && m.version === meta.version) ?? false);
+  for (const row of rows) {
+    if (row.kind !== "tool" || row.artifact === undefined || known(row.artifact)) {
+      continue;
+    }
+    added = added ?? [];
+    added.push(row.artifact);
+  }
+  if (added === null) {
+    return join;
+  }
+  const list = [...join.list, ...added];
+  return { list, byCall: artifactsByCall(list), phase: join.phase };
+}

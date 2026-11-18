@@ -11,7 +11,9 @@ appId: so.tentacle.app
 # Light/dark shots of the open fan.
 #
 # Opacity (docs/feat/mobile-hub-opacity.md): with Floating picked, a new
-# "Button opacity" band appears; a drag to its left end reads 30 %, and the
+# "Button opacity" band appears. A fresh install is ALREADY Floating at 80 %
+# (docs/feat/mobile-hub-defaults.md): the band reads 80 % before any drag, the
+# slider has five step marks, and a drag to its left end reads 20 %; the
 # session's shots show the faint body with the arc still solid (the arc's own
 # solidity is the point: it is OUTSIDE the dimmed layer).
 #
@@ -31,15 +33,29 @@ appId: so.tentacle.app
 - tapOn:
     id: "activity-button-floating"
 # Hidden in Header mode (Owner Q1), shown with Floating. Maestro's text match is
-# a FULL regex, so the label is given in full.
+# a FULL regex, so the label is given in full. The band sits below the fold, so
+# scroll until its preview (the band's last element) is on screen.
+- scrollUntilVisible:
+    element:
+      id: "hub-opacity-preview"
+    direction: DOWN
 - extendedWaitUntil:
     visible:
       id: "hub-opacity-slider"
     timeout: 5000
+# The fresh-install default (mobile-hub-defaults): Floating at 80 %, stepped.
 - assertVisible:
     id: "hub-opacity-value"
-    text: "100%"
-# Drag the thumb to the track's left end: the floor, 30 %.
+    text: "80%"
+- assertVisible:
+    id: "hub-opacity-detent-20"
+- assertVisible:
+    id: "hub-opacity-detent-100"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "33-hub-opacity-band-80"
+# Drag the thumb to the track's left end: the floor, 20 %.
 - swipe:
     from:
       id: "hub-opacity-slider"
@@ -47,15 +63,20 @@ appId: so.tentacle.app
 - extendedWaitUntil:
     visible:
       id: "hub-opacity-value"
-      text: "30%"
+      text: "20%"
     timeout: 5000
 - assertVisible:
     id: "hub-opacity-preview"
-# Light/dark of the band at 30 % (`_shot` flips the appearance and back).
+# Light/dark of the band at 20 % (`_shot` flips the appearance and back).
 - runFlow:
     file: _shot.yaml
     env:
       SHOT: "33-hub-opacity-band"
+# Scrolled down to the band (above): bring the back button back on screen.
+- scrollUntilVisible:
+    element:
+      id: "settings-back"
+    direction: UP
 - tapOn:
     id: "settings-back"
 - tapOn:
@@ -71,12 +92,12 @@ appId: so.tentacle.app
     timeout: 30000
 - assertVisible:
     id: "hub-glyph"
-# At 30 % (set above): the body is faint but the button is still there, and the
+# At 20 % (set above): the body is faint but the button is still there, and the
 # arc — when a turn runs — is at full opacity (it is outside the dimmed layer).
 - runFlow:
     file: _shot.yaml
     env:
-      SHOT: "33-hub-opacity-30"
+      SHOT: "33-hub-opacity-20"
 # Long-press → the sticky fan; Attach is in it; a tap commits → the chooser.
 - longPressOn:
     id: "floating-activity"
@@ -124,12 +145,12 @@ appId: so.tentacle.app
     visible:
       id: "turn-running"
     timeout: 20000
-# 30 % and a turn running, at rest: the faint body with the arc still solid — the
+# 20 % and a turn running, at rest: the faint body with the arc still solid — the
 # one thing this feature must not lose (the arc is outside the dimmed layer).
 - runFlow:
     file: _shot.yaml
     env:
-      SHOT: "33-hub-opacity-30-running"
+      SHOT: "33-hub-opacity-20-running"
 - longPressOn:
     id: "floating-activity"
 - extendedWaitUntil:

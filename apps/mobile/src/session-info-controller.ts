@@ -32,6 +32,7 @@ import {
   type InfoFacts,
   type Pull,
   type SessionInfoView,
+  type ToolsFacts,
   capabilityChanges,
   sessionInfoView,
   settledOp,
@@ -169,6 +170,12 @@ export interface SessionInfoState {
   readonly entryCwd: string | null;
   /** A failed auto-accept set, shown until the next attempt (F11). */
   readonly autoAcceptError: string | null;
+  /**
+   * The Tools sheet's own facts (docs/feat/mobile-hub-tools.md D1): the same
+   * MCP/skill pulls and switches Session info reads, not a second source. Read
+   * after the sheet closes too (the hub's own summary), which is why it is here.
+   */
+  readonly tools: ToolsFacts;
 }
 
 export interface SessionInfoController {
@@ -194,6 +201,14 @@ export interface SessionInfoController {
   loadContext(): Promise<void>;
   /** Drop every in-flight answer and stop following the link (F5). */
   close(): void;
+  /**
+   * Re-run ONLY the MCP and skill pulls (docs/feat/mobile-hub-tools.md D4): the
+   * hub's Tools item is dimmed from the last known counts, and a dimmed item
+   * never opens the sheet that would refresh them — so its own tap refreshes
+   * them. No follows are installed, the other pulls are untouched, and the
+   * answer is stamped with the current generation (a reopen drops it, F5).
+   */
+  pullTools(): Promise<void>;
   /** The switch's value now (the LINK's, so a flip elsewhere is already here). */
   autoAcceptOn(): boolean;
   /** Flip it; a rejection reverts and records why (F11). */
@@ -400,12 +415,21 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
 
   function state(): SessionInfoState {
     const pulled = context.state === "ready" ? context.value : null;
+    const gathered = facts();
     return {
-      view: sessionInfoView(facts()),
+      view: sessionInfoView(gathered),
       link,
       autoAcceptError,
       openContext: pulled === null ? null : { used: pulled.used, exact: pulled.exact },
       entryCwd: entry.state === "ready" && entry.value !== null ? entry.value.cwd : null,
+      tools: {
+        phase: gathered.phase,
+        link: gathered.link,
+        computerName: gathered.computerName,
+        mcp: gathered.mcp,
+        skills: gathered.skills,
+        capabilities: gathered.capabilities,
+      },
     };
   }
 
@@ -578,6 +602,41 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
       }
       context = value;
       emit();
+    },
+    async pullTools() {
+      const mine = generation;
+      const handle = port.phase() === "open" ? port.session() : null;
+      // The last known counts STAY painted until an answer lands: resetting to
+      // `loading` would make the hub's own item briefly "unknown" (undimmed)
+      // while the person is looking at exactly that item.
+      if (handle === null) {
+        // Not attached: asking would describe a session that does not exist (F4).
+        skills = notOpen<SessionSkillsResult>();
+        emit();
+      }
+      /** Paint one pull, unless a newer open/close owns the state now (F5). */
+      const paint =
+        <T>(apply: (value: Pull<T>) => void) =>
+        (value: Pull<T>): void => {
+          if (mine !== generation) {
+            return;
+          }
+          apply(value);
+          emit();
+        };
+      const paintMcp = paint<{ readonly servers: readonly McpServerStatus[] }>((value) => {
+        mcp = value;
+      });
+      const paintSkills = paint<SessionSkillsResult>((value) => {
+        skills = value;
+      });
+      await Promise.all([
+        pull(async () => ({ servers: await port.mcpStatus() }), reportFor("mcp")).then(paintMcp),
+        (handle === null
+          ? Promise.resolve(notOpen<SessionSkillsResult>())
+          : pull(() => handle.skills(), reportFor("skills"))
+        ).then(paintSkills),
+      ]);
     },
     close() {
       generation += 1;

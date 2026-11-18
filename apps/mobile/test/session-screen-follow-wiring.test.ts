@@ -131,6 +131,59 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
   });
 });
 
+/**
+ * Review round 1, finding 1: the SCREEN half of bug 4's fix had no test of its
+ * own — `follow.test.ts` copies the screen's routing instead of asserting it — so
+ * putting back the pre-fix `return next.step !== null` (and re-arming the reveal
+ * only when the measurement scrolled) stayed green while restoring the loop.
+ */
+describe("the screen routes a landing through `landingPending`, not 'did it scroll?' (bug 4)", () => {
+  const src = read("screens", "SessionScreen.tsx");
+
+  test("`land()` returns the landing's verdict AND re-arms the reveal whenever one is owed", () => {
+    // A re-attach ABSORBS its measurements without scrolling, so "did this one
+    // scroll?" is `false` for it: that verdict sent the next measurement through
+    // `contentGrew` — ANIMATED, the owner's loop — and never re-armed the timer
+    // that lands the absorbed landing.
+    expect(src).toMatch(/if \(landingPending\(next\.state\)\) \{\s*armReveal\(\);\s*\}/);
+    // The consumed measurement is the landing's too: the one that ENDS it repeats
+    // the height its own silent scroll already reached (an animated scroll to that
+    // offset is the loop's echo) — decided by `follow.ts`, `following` included
+    // (Review round 2, finding 3: a bare `owed ||` swallowed the "new below" pill).
+    expect(src).toMatch(/const before = landing\.current;/);
+    expect(src).toMatch(
+      /return landingOwns\(before, next\.state, followRef\.current\.following\);/,
+    );
+    expect(src).not.toMatch(/return owed \|\|/);
+    // The pre-fix line, and any equivalent of it, is gone for good.
+    expect(src).not.toMatch(/return next\.step !== null;/);
+    expect(src).not.toMatch(/if \(next\.step !== null\) \{\s*armReveal\(\);/);
+    expect(src).toMatch(/landingOwns,[\s\S]{0,200}\} from "\.\.\/follow\.ts"/);
+  });
+
+  test("the reveal re-arms itself while the landing it landed is still owed (the hand-over after a re-attach)", () => {
+    // A re-attach whose scroll caused NO re-measure gets no further `land()` call:
+    // without this second, quiet fire the landing stayed owed for ever, and the
+    // next row a stream appended was absorbed (silent) instead of followed.
+    expect(src).toMatch(
+      /if \(next\.step !== null && landingPending\(next\.state\)\) \{\s*fire\(\);\s*\}/,
+    );
+    expect(src).toMatch(/const fire: \(\) => void = \(\) => \{\s*reveal\.current = setTimeout/);
+    expect(src).toMatch(/reveal\.current = null;[\s\S]{0,300}landingReveal\(/);
+  });
+
+  test("both measurements ask `land()` first and RETURN when it owns the list (no fall-through to the animated follow)", () => {
+    expect(src).toMatch(
+      /onContentSize = useCallback\([\s\S]{0,500}if \(land\(\)\) \{\s*return;\s*\}/,
+    );
+    expect(src).toMatch(
+      /onListLayout = useCallback\([\s\S]{0,400}if \(land\(\)\) \{\s*return;\s*\}/,
+    );
+    // The builder's own `next.state` is what is asked, before it is dropped.
+    expect(src).toMatch(/const next = landingStep\([\s\S]{0,300}landing\.current = next\.state;/);
+  });
+});
+
 describe("the settle re-check (docs/fix/mobile-qa-1117.md, bug 5)", () => {
   const src = read("screens", "SessionScreen.tsx");
 
@@ -145,5 +198,39 @@ describe("the settle re-check (docs/fix/mobile-qa-1117.md, bug 5)", () => {
       "settleStep(followRef.current, { offset: offset.current, ...size.current })",
     );
     expect(src).toMatch(/if \(dragging\.current\) \{\s*return;\s*\}\s*const step = settleStep/);
+  });
+});
+
+/**
+ * QA bug 1: the pending bubbles' inline actions must not sit under the floating
+ * hub (a tap there opens the fan, so a queued message cannot be cancelled). The
+ * decision is `floating-button.ts`'s `footClearance` (tested there); this pins
+ * that the screen hands it to the footer, from the SAME verdict that decides the
+ * button is drawn.
+ */
+describe("the transcript's foot clears the hub (QA bug 1)", () => {
+  const src = read("screens", "SessionScreen.tsx");
+
+  test("the footer receives the clearance, computed from whether the button is drawn", () => {
+    expect(src).toMatch(/<PendingBubbles[\s\S]{0,800}clearance=\{footClearance\(floatShown\)\}/);
+    expect(src).toMatch(
+      /import \{[\s\S]{0,200}footClearance,[\s\S]{0,200}\} from "\.\.\/floating-button\.ts"/,
+    );
+  });
+
+  test("both edges are padded, so either hub side is safe, and the actions wrap rather than run off", () => {
+    const footer = read("screens", "compose", "PendingBubble.tsx");
+    // The padding is on the ROW that holds the bubble and its menu, not the bubble.
+    expect(footer).toMatch(/<View style=\{\[styles\.row, \{ paddingHorizontal: clearance \}\]\}>/);
+    expect(footer).toMatch(/menu: \{[^}]*flexWrap: "wrap"/);
+    // `readonly` on the props, repo style.
+    expect(footer).toMatch(/readonly clearance: number;/);
+  });
+
+  test("the open menu still pairs its state (a regression I introduced and reverted)", () => {
+    const footer = read("screens", "compose", "PendingBubble.tsx");
+    expect(footer).toMatch(/const \[open, setOpen\] = useState<string \| null>\(null\);/);
+    expect(footer).toMatch(/onToggle=\{\(\) => setOpen\(/);
+    expect(footer).not.toMatch(/useState<string \| null>\(null\)\[1\]/);
   });
 });

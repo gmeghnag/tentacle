@@ -21,6 +21,9 @@ const pkg = JSON.parse(read("package.json")) as { dependencies: Record<string, s
 
 const HEADER_ICON = read("src", "ui", "HeaderIcon.tsx");
 const RING = read("src", "ui", "ContextRing.tsx");
+// The arc's GEOMETRY lives in the shared renderer since docs/feat/mobile-hub-badges.md
+// Design 8 (a fan item's count rim draws it too); the ring keeps the reading.
+const RING_ARC = read("src", "ui", "RingArc.tsx");
 const SCREEN_HEADER = read("src", "ui", "ScreenHeader.tsx");
 const SESSION_SCREEN = read("src", "screens", "SessionScreen.tsx");
 
@@ -107,10 +110,12 @@ describe("S2 · the context ring (A1 + F11)", () => {
     // The package itself IS a dependency since docs/feat/model-charts.md C6 (the
     // chart, owner Q8); what Design 2 pins is that the RING does not need it.
     expect(RING).toMatch(/from "react-native"/);
-    // No IMPORT of it (the file names it in prose to say why it is absent).
+    // No IMPORT of it, in either half of the renderer (the files name it in prose
+    // to say why it is absent).
     expect(RING).not.toMatch(/from "react-native-svg"/);
+    expect(RING_ARC).not.toMatch(/from "react-native-svg"/);
     // Its geometry comes from the pure module, not from numbers in the component.
-    expect(RING).toMatch(/ringHalfRotation\(/);
+    expect(RING_ARC).toMatch(/ringHalfRotation\(/);
     expect(RING).toMatch(/ringLabel\(/);
   });
 
@@ -144,10 +149,10 @@ describe("S2 · the context ring (A1 + F11)", () => {
     // starts empty: the ring shows a phantom 90° at 0% and a wrong sweep
     // everywhere. The bases are tested in chat-header.test.ts; this is the other
     // half of that coupling, which lives in the component.
-    expect(RING).toMatch(/borderTopColor: tone/);
-    expect(RING).toMatch(/borderLeftColor: tone/);
-    expect(RING).not.toMatch(/borderRightColor/);
-    expect(RING).not.toMatch(/borderBottomColor/);
+    expect(RING_ARC).toMatch(/borderTopColor: tone/);
+    expect(RING_ARC).toMatch(/borderLeftColor: tone/);
+    expect(RING_ARC).not.toMatch(/borderRightColor/);
+    expect(RING_ARC).not.toMatch(/borderBottomColor/);
   });
 });
 

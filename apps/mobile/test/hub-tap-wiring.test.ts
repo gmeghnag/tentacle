@@ -79,30 +79,21 @@ describe("a dimmed item keeps its slot and is drawn faint (Design 2, 5)", () => 
     expect(FAN).not.toMatch(/layout\.items\.filter/);
   });
 
-  test("the faint level MULTIPLIES the item's animated opacity, never overrides it", () => {
-    // Review round 1 finding 2: a `styles.dimmed` entry placed after the animated
-    // styles wins on a fixed 0.45, so the disc is drawn at full strength from frame
-    // 0 of the open fade and stays behind after the fan collapses. One opacity is
-    // the item's own (grow value, or the highlight dim) TIMES the faint factor.
-    expect(FAN).not.toContain("styles.dimmed");
-    expect(FAN).toContain("const base = hi !== null && !lit ? motion.dimOpacity : value");
-    expect(FAN).toContain("Animated.multiply(base, DIMMED_OPACITY)");
-    // …and the animated style reads that one value, not a second opacity.
+  test("faintness is a COLOUR now, not an opacity (mobile-hub-badges Q3 B)", () => {
+    // The discs are opaque so the transcript cannot bleed through; an opacity
+    // level here would put the glass back (`hub-fan.test.ts` pins the look,
+    // `ui/HubFan.tsx` only applies it). No second opacity may override the
+    // animated one either — that was review round 1's finding.
+    expect(FAN).not.toContain("Animated.multiply");
+    expect(FAN).not.toContain("DIMMED_OPACITY");
+    expect(FAN).toContain("fanItemLook(item, lit)");
     expect(FAN).toContain("opacity,");
   });
 
-  test("the faint level is one constant, and a highlighted dimmed item is NOT faint", () => {
-    // While the finger is on it the item must look selected, not inert.
-    expect(FAN).toContain("item.dimmed && !lit");
-    const constant = /const DIMMED_OPACITY = ([\d.]+);/.exec(FAN)?.[1];
-    expect(constant).toBeDefined();
-    const level = Number(constant);
-    expect(level).toBeGreaterThan(0);
-    expect(level).toBeLessThan(1);
-  });
-
   test("its VoiceOver label says why, and it is announced as not actionable", () => {
-    expect(FAN).toContain("`${item.label}, nothing running`");
+    // The sentence moved into the pure module when the bubble went away, so the
+    // rim's meaning is testable (`hub-actions.test.ts` `itemA11yLabel`).
+    expect(FAN).toContain("itemA11yLabel(item)");
     expect(FAN).toContain("accessibilityState={{ disabled: item.dimmed }}");
   });
 });

@@ -1,0 +1,1 @@
+- **Voice helper ships with every release.** On macOS, `curl -fsSL tentacle.so/install | sh` now also installs the dictation helper `tentacle-voice` next to `tentacle` (checked against `SHA256SUMS`), so voice dictation works without building it by hand; an older release without it, or a Mac older than macOS 26, just skips it with one line.

@@ -10,6 +10,7 @@
  * here guesses where the header, composer or keyboard are.
  */
 import type { Edge } from "./floating-button.ts";
+import type { HubBadge, HubItem } from "./hub-actions.ts";
 
 /** An item's diameter (pt): ≥ 44 pt touch target. */
 export const ITEM_SIZE = 48;
@@ -262,6 +263,78 @@ export function labelPlacement(
   return {
     x: clamp(it.x - size.width / 2, minX, maxX),
     y: clamp(it.y - LABEL_GAP - size.height, minY, maxY),
+  };
+}
+
+/** A count this large already draws the whole rim (owner Q2 C: 36° per item, 360/36 = 10). */
+export const RIM_FULL = 10;
+
+/**
+ * How much of an item's rim the badge fills, 0–1, or null for no rim
+ * (mobile-hub-badges Design 6, owner Q2 C). A count is one 36° step per item
+ * (1 → 0.1, clamped at 10), and a `dot` — a scheduled wake that is due — is the
+ * whole rim: the dot's meaning expressed as a shape. A count ≤ 0 is no news at
+ * all (F7: never a backwards arc, never NaN).
+ */
+export function rimFraction(badge: HubBadge | null): number | null {
+  if (badge === null) {
+    return null;
+  }
+  if (badge.kind === "dot") {
+    return 1;
+  }
+  if (!Number.isFinite(badge.n) || badge.n <= 0) {
+    return null;
+  }
+  return Math.min(badge.n, RIM_FULL) / RIM_FULL;
+}
+
+/**
+ * How one fan item is drawn (mobile-hub-badges Design 7, owner Q3 B): SOLID
+ * discs, so the transcript can never bleed through — `glass` is never returned.
+ * Colours are palette KEYS, not hex values: the choice is a rule (and is tested),
+ * the colour itself is `theme.ts`'s.
+ *
+ * Not lit: a `card` disc with an accent glyph (`red` for Stop), or, dimmed, a
+ * `fill` disc with a `sec` glyph — the dimmed item's faintness is a COLOUR now,
+ * no longer an opacity, so the item's opacity stays purely its own motion.
+ * Lit: an `accentFill` (`red` for Stop) disc, everything `onAccent`, so its rim
+ * never disappears into its own disc (F9).
+ */
+export interface FanItemLook {
+  readonly bg: "card" | "fill" | "accentFill" | "red";
+  readonly fg: "accent" | "red" | "onAccent" | "sec";
+  /**
+   * 0–1, or null → draw no rim. `item.rim` is an item's OWN figure (the Tools
+   * item's share switched off); every other item's rim is its badge's.
+   */
+  readonly rim: number | null;
+  readonly rimTone: "accent" | "onAccent";
+}
+
+/** The figure an item's rim draws: its own (`item.rim`), else its badge's. */
+function itemRim(item: HubItem): number | null {
+  return item.rim === undefined ? rimFraction(item.badge) : item.rim;
+}
+
+/** The look of one item; `lit` is the finger's highlight (the only state that grows). */
+export function fanItemLook(item: HubItem, lit: boolean): FanItemLook {
+  if (lit) {
+    return {
+      bg: item.danger ? "red" : "accentFill",
+      fg: "onAccent",
+      rim: itemRim(item),
+      rimTone: "onAccent",
+    };
+  }
+  if (item.dimmed) {
+    return { bg: "fill", fg: "sec", rim: null, rimTone: "accent" };
+  }
+  return {
+    bg: "card",
+    fg: item.danger ? "red" : "accent",
+    rim: itemRim(item),
+    rimTone: "accent",
   };
 }
 

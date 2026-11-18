@@ -70,7 +70,13 @@ import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
 import { DIAGRAM_SETTINGS } from "../diagram-settings-expo.ts";
 import type { DiagramStyle } from "../diagram-settings-store.ts";
-import { type FloatBounds, fits, visible as floatVisible, headerPill } from "../floating-button.ts";
+import {
+  type FloatBounds,
+  fits,
+  visible as floatVisible,
+  footClearance,
+  headerPill,
+} from "../floating-button.ts";
 import {
   type Follow,
   type FollowStep,
@@ -84,6 +90,8 @@ import {
   jumpPill,
   jumped,
   landingDone,
+  landingOwns,
+  landingPending,
   landingQuiet,
   landingReveal,
   landingStart,
@@ -94,16 +102,19 @@ import {
   shown,
   viewportChanged,
 } from "../follow.ts";
-import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
+import { pressHaptic, pulseHaptic, turnEndHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import {
   type HubActionId,
   type HubEntries,
   type HubOpen,
+  PULSE_START,
+  type PulseState,
   buttonBadge,
   hubA11yLabel,
   hubActions,
   hubOpen,
+  pulseStep,
 } from "../hub-actions.ts";
 import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
@@ -119,6 +130,7 @@ import { SPEECH_PORT } from "../speech-native-expo.ts";
 import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, typography } from "../theme.ts";
 import { isBlockRow, isOpen, stepLayout, toggleOpen } from "../tool-steps.ts";
+import { type ToolsSegmentId, toolsSummary, toolsView } from "../tools-view.ts";
 import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
 import { ActivityBadge } from "../ui/ActivityBadge.tsx";
@@ -146,6 +158,7 @@ import { ActivitySheet } from "./ActivitySheet.tsx";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
+import { ToolsSheet } from "./ToolsSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
 import { PendingBubbles } from "./compose/PendingBubble.tsx";
@@ -426,23 +439,35 @@ export function SessionScreen({
   }, []);
   const armReveal = useCallback(() => {
     disarmReveal();
-    reveal.current = setTimeout(() => {
-      reveal.current = null;
-      const next = landingReveal(
-        landing.current,
-        size.current,
-        followRef.current.following,
-        hasRows.current,
-      );
-      const changed = next.state.settling !== landing.current.settling;
-      landing.current = next.state;
-      if (next.step !== null) {
-        perform(next.step);
-      }
-      if (changed) {
-        setSettling(next.state.settling);
-      }
-    }, LANDING_REVEAL_MS);
+    // The reveal can fire TWICE for one re-attach (Review round 1, finding 2): the
+    // first lands the silent scroll, which renders the end's cells and so moves the
+    // content height again — those re-measures stay with the landing, silently. This
+    // re-arm is what HANDS IT BACK when none of them arrive: the second quiet fire
+    // finds the landing already revealed and ends it, so a row a stream appends
+    // after the return is the ordinary animated follow, not an absorbed one.
+    const fire: () => void = () => {
+      reveal.current = setTimeout(() => {
+        reveal.current = null;
+        const next = landingReveal(
+          landing.current,
+          size.current,
+          followRef.current.following,
+          hasRows.current,
+        );
+        const changed = next.state.settling !== landing.current.settling;
+        landing.current = next.state;
+        if (next.step !== null) {
+          perform(next.step);
+        }
+        if (next.step !== null && landingPending(next.state)) {
+          fire();
+        }
+        if (changed) {
+          setSettling(next.state.settling);
+        }
+      }, LANDING_REVEAL_MS);
+    };
+    fire();
   }, [disarmReveal, perform]);
   useEffect(() => disarmReveal, [disarmReveal]);
   // The opening landing is armed at the MOUNT too: a list whose size never
@@ -452,6 +477,13 @@ export function SessionScreen({
     armReveal();
   }, [armReveal]);
   const land = useCallback((): boolean => {
+    // A measurement a pending landing CONSUMES — whether it scrolls, is absorbed, or
+    // ENDS the landing — must never reach the animated follow below: the ending one
+    // repeats the height the landing's own silent scroll already reached, and an
+    // animated scroll to the offset the list is already at is the same loop's echo.
+    // `landingOwns` decides it, `following` included: scrolled up mid-landing, the
+    // history that arrives IS news for the pill (Review round 2, finding 3).
+    const before = landing.current;
     const next = landingStep(
       landing.current,
       size.current,
@@ -462,13 +494,18 @@ export function SessionScreen({
     landing.current = next.state;
     if (next.step !== null) {
       perform(next.step);
-      // More measurements may follow this scroll: wait for them to go quiet.
+    }
+    // A landing OWNS the list until it is done: `landingPending`, never "did it
+    // scroll?". A re-attach absorbs its measurements without scrolling (bug 4),
+    // and one that fell through to `contentGrew` here would be scrolled ANIMATED —
+    // the owner's foreground loop. `armReveal` is what lands it once, silently.
+    if (landingPending(next.state)) {
       armReveal();
     }
     if (changed) {
       setSettling(next.state.settling);
     }
-    return next.step !== null;
+    return landingOwns(before, next.state, followRef.current.following);
   }, [perform, armReveal]);
   // Bug 5 (docs/fix/mobile-qa-1117.md): where the list really is, and the settle
   // re-check armed by every size change — `follow.ts`'s `settleStep` decides.
@@ -773,12 +810,14 @@ export function SessionScreen({
     asking: state.sheet.kind === "asking",
     closed: state.transcript.closed,
   });
-  // A turn that ends (own or another device's) taps the hand once (Owner Q4).
+  // A turn that ends (own or another device's) taps the hand once (Owner Q4);
+  // news landing on the hub glows once (mobile-hub-badges Q1 C). Both are decided
+  // by ONE effect below, because they usually happen in the same render and the
+  // moment must play one haptic, never two (F4).
   const wasRunning = useRef(state.view.composer.running);
-  useEffect(() => {
-    playHaptic(turnEndHaptic(wasRunning.current, state.view.composer.running));
-    wasRunning.current = state.view.composer.running;
-  }, [state.view.composer.running]);
+  /** The pulse state (baseline + the session it belongs to); `null` prev is "no baseline" (F1/F2). */
+  const pulsePrev = useRef<PulseState>(PULSE_START);
+  const [pulseSeq, setPulseSeq] = useState(0);
   // The header's "…" menu (owner feedback #3 + Session info): it opens with the
   // sheet's read, then the phone-local copy actions.
   const [menuOpen, setMenuOpen] = useState(false);
@@ -795,6 +834,14 @@ export function SessionScreen({
   const [infoOpen, setInfoOpen] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const info = state.info;
+  // The Tools sheet (docs/feat/mobile-hub-tools.md D5/D6): its own surface, its
+  // own controls. Every value it draws is decided in `tools-view.ts` (from the
+  // SAME controller facts Session info reads: one source, two projections).
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [toolsSegment, setToolsSegment] = useState<ToolsSegmentId>("mcp");
+  const [toolsQuery, setToolsQuery] = useState("");
+  const [toolsExpanded, setToolsExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [toolsRefreshing, setToolsRefreshing] = useState(false);
   // A reveal in flight (docs/feat/mobile-hub.md H4a): the hub's Scheduled item
   // opens this sheet scrolled to SCHEDULED WAKES. The rule is `session-info.ts`'s
   // (`revealStart`/`revealStep`) and the fold is `reveal-report.ts`'s; the screen
@@ -834,6 +881,8 @@ export function SessionScreen({
       drawerOpen ||
       activityOpen ||
       infoOpen ||
+      // Tools is a sheet like any other: the button hides under it (D6).
+      toolsOpen ||
       menuOpen ||
       hubMenu !== null ||
       renaming !== null ||
@@ -866,6 +915,29 @@ export function SessionScreen({
   // place the wakes live and can be deleted, so the hub reaches it rather than
   // growing a second wakes screen.
   const openScheduled = () => openInfo(scheduledSection(info?.view ?? null));
+  /**
+   * Tools opened (D6): its controls always start fresh (a segment, a search and
+   * an accordion are about the visit, not the session), and the controller is
+   * told, so the counts the sheet draws are asked for. It is the SAME
+   * `openInfo` pull: the two surfaces never run two.
+   */
+  const openTools = () => {
+    setToolsSegment("mcp");
+    setToolsQuery("");
+    setToolsExpanded(new Set());
+    setToolsOpen(true);
+    void controller.openInfo();
+  };
+  const closeTools = () => {
+    setToolsOpen(false);
+    setToolsExpanded(new Set());
+    controller.closeInfo();
+  };
+  /** A pull-to-refresh or a Retry: the same `refreshInfo` Session info uses. */
+  const refreshTools = () => {
+    setToolsRefreshing(true);
+    void controller.refreshInfo().finally(() => setToolsRefreshing(false));
+  };
   // The hub (docs/feat/mobile-hub.md H3): the attach chooser, shared with the
   // composer's photo button — one path, not two.
   const openAttach = () =>
@@ -890,6 +962,9 @@ export function SessionScreen({
     dictation: voiceSettings.dictation,
     activityEmpty: activityVm.groups.length === 0,
     schedules: { rows: state.schedules, now: activityNow },
+    // The Tools item's own figures, from the sheet's OWN summary (one source,
+    // D1/D3): unknown until the controller has pulled both lists.
+    ...(info === null ? {} : { tools: toolsSummary(info.tools) }),
     ...(artifactsSeenKey === undefined
       ? {}
       : {
@@ -905,6 +980,8 @@ export function SessionScreen({
     attach: openAttach,
     activity: () => openActivity(),
     info: () => openInfo(),
+    // No info port, no Tools: a missing callback is a missing item (P6).
+    ...(info === null ? {} : { tools: openTools }),
     scheduled: openScheduled,
     ...(onOpenDrawer === undefined ? {} : { sessions: onOpenDrawer }),
     ...(onNewSession === undefined ? {} : { new: onNewSession }),
@@ -933,6 +1010,12 @@ export function SessionScreen({
     } else if (plan.kind === "run") {
       hubEntries[plan.id]?.();
     }
+    // A dimmed Tools is dimmed by counts it last SAW, and it never opens the
+    // sheet that would refresh them — so its own tap does (D4), or a server
+    // added on the laptop would keep it dimmed forever.
+    if (id === "tools" && plan.kind === "notice") {
+      void controller.pullTools();
+    }
   };
   const hubMenuItems = hubMenu === "more" ? hub.more : hubMenu === "all" ? hub.all : [];
   const hubBadgeInput = {
@@ -940,6 +1023,37 @@ export function SessionScreen({
     unseenArtifacts: hubCtx.unseenArtifacts,
     unreadReport: activityVm.unread > 0,
   };
+  const unseen = hubBadgeInput.unseenArtifacts;
+  const unread = hubBadgeInput.unreadReport;
+  const linkUp = state.transcript.link === "up";
+  // The moment news arrives (mobile-hub-badges Design 4, Q1 C + Q4): one glow on
+  // the button, one light haptic — unless a turn ended in this same render, whose
+  // `success` is the moment's one haptic (F4). ONE effect and ONE pure step decide
+  // it: `pulseStep` both compares the news and re-takes the baseline, so a session
+  // switch or a link drop is a fresh baseline in the SAME step. Two separate reset
+  // effects ran BEFORE this comparison in one commit, and it then simply
+  // re-advanced the baseline over them — which made F1 and F2 dead (the refill
+  // after a reconnect pulsed; the reset swallowed the next real increase), and a
+  // dep list that could drift from the body is how the resets got out of sync.
+  useEffect(() => {
+    const ended = turnEndHaptic(wasRunning.current, state.view.composer.running);
+    wasRunning.current = state.view.composer.running;
+    // F1/F2 are `pulseStep`'s; F3 is here: the verdict never sees `floatShown`, so a
+    // hidden button's baseline still advances and its news is never replayed later —
+    // only the glow and the light are dropped, and never deferred.
+    const step = pulseStep(pulsePrev.current, {
+      sessionKey: artifactsSeenKey,
+      link: linkUp ? "up" : "down",
+      // Read from the primitives, not from `newsNow`: the deps below are those two.
+      news: { unseenArtifacts: unseen, unreadReport: unread },
+    });
+    pulsePrev.current = step.state;
+    playHaptic(ended);
+    playHaptic(pulseHaptic(step.pulse && floatShown, ended !== null));
+    if (step.pulse && floatShown) {
+      setPulseSeq((n) => n + 1);
+    }
+  }, [unseen, unread, linkUp, artifactsSeenKey, floatShown, state.view.composer.running]);
   // One band laid out in the sheet: scroll once, when the WANTED band has reported
   // (the rules — "once", "only the wanted one" — are `revealStep`'s, folded by
   // `reveal-report.ts`). The report is read and written synchronously, so the
@@ -1215,6 +1329,10 @@ export function SessionScreen({
                         sendNow: compose.sendNow,
                         unqueue: !compose.unqueueOff,
                       }}
+                      // The hub can rest at either edge (`floating-button.ts`
+                      // `snap`), and a pending action under the fan is a tap that
+                      // opens Activity instead of cancelling the message (QA bug 1).
+                      clearance={footClearance(floatShown)}
                       onAction={(id, action) => {
                         switch (action) {
                           case "edit":
@@ -1329,7 +1447,8 @@ export function SessionScreen({
               bounds={band}
               position={activitySettings.position}
               shown={floatShown}
-              badge={buttonBadge(hubBadgeInput)}
+              count={buttonBadge(hubBadgeInput)?.n ?? null}
+              pulse={pulseSeq}
               turnRunning={state.view.composer.running}
               accessibilityLabel={hubA11yLabel(hubBadgeInput)}
               voiceOver={a11yFlags.voiceOver}
@@ -1584,6 +1703,34 @@ export function SessionScreen({
               setExpanded(null);
               controller.closeInfo();
             }}
+          />
+        )}
+        {info === null ? null : (
+          <ToolsSheet
+            palette={palette}
+            visible={toolsOpen}
+            view={toolsView(info.tools, {
+              segment: toolsSegment,
+              query: toolsQuery,
+              open: toolsExpanded,
+            })}
+            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
+            onSegment={setToolsSegment}
+            onQuery={setToolsQuery}
+            onToggle={(key, open) =>
+              setToolsExpanded((prev) => {
+                const next = new Set(prev);
+                if (open) {
+                  next.add(key);
+                } else {
+                  next.delete(key);
+                }
+                return next;
+              })
+            }
+            onRefresh={refreshTools}
+            refreshing={toolsRefreshing}
+            onClose={closeTools}
           />
         )}
         <ActivitySheet

@@ -13,16 +13,18 @@
  */
 import { type JSX, useEffect, useRef, useState } from "react";
 import { Animated, StyleSheet, Text, View } from "react-native";
-import type { HubActionId, HubItem } from "../hub-actions.ts";
+import { type HubActionId, type HubItem, itemA11yLabel } from "../hub-actions.ts";
 import {
   type FanLayout,
   type FanMotion,
   ITEM_SIZE,
   type Point,
+  fanItemLook,
   labelPlacement,
 } from "../hub-fan.ts";
-import { DENSE_FONT_SCALE, type Palette, shadow, typography } from "../theme.ts";
+import { type Palette, shadow, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
+import { RingArc } from "./RingArc.tsx";
 
 const GLYPH: Readonly<Record<HubActionId, IconName>> = {
   stop: "stop.fill",
@@ -32,6 +34,7 @@ const GLYPH: Readonly<Record<HubActionId, IconName>> = {
   artifacts: "doc.on.doc",
   sessions: "folder",
   info: "laptopcomputer",
+  tools: "powerplug",
   scheduled: "clock",
   dictate: "mic",
   new: "square.and.pencil",
@@ -39,11 +42,10 @@ const GLYPH: Readonly<Record<HubActionId, IconName>> = {
 };
 
 /**
- * How faint a dimmed item is drawn (mobile-hub-tap Design 5). A placeholder: the
- * solid discs of feat/mobile-hub-badges replace it (owner Q5).
+ * How faint a dimmed item is: a COLOUR (`fanItemLook`'s `fill`/`sec`), not an
+ * opacity — the discs are solid (mobile-hub-badges Q3 B), so a faint layer would
+ * let the transcript through again, which is the bug this task fixes.
  */
-const DIMMED_OPACITY = 0.45;
-
 export interface HubFanProps {
   readonly palette: Palette;
   readonly layout: Extract<FanLayout, { kind: "fan" }>;
@@ -107,22 +109,20 @@ export function HubFan(props: HubFanProps): JSX.Element {
           inputRange: [0, 1],
           outputRange: [motion.fromScale, lit ? motion.highlightScale : 1],
         });
-        const fg = lit ? palette.onAccent : item.danger ? palette.red : palette.accent;
-        // A dimmed item has nothing to show: it KEEPS its slot, drawn faint
-        // (mobile-hub-tap Design 5 — badges restyles this into a solid disc).
-        // The faint level MULTIPLIES the item's own animated opacity (its spring/
-        // fade `value`, or the highlight dim): both are opacities of the same
-        // view, so a second `opacity` style would win over the animation and draw
-        // the disc before the fan opens and behind it after it closes.
-        const base = hi !== null && !lit ? motion.dimOpacity : value;
-        const opacity = item.dimmed && !lit ? Animated.multiply(base, DIMMED_OPACITY) : base;
+        // What this disc and its rim LOOK like is `fanItemLook`'s (Design 7); a
+        // dimmed item is a `fill` disc with a `sec` glyph — faintness is a colour,
+        // so the item's opacity stays purely its own spring/fade/highlight motion
+        // (a second `opacity` style would win over the animation and draw the disc
+        // before the fan opens and behind it after it closes).
+        const look = fanItemLook(item, lit);
+        const opacity = hi !== null && !lit ? motion.dimOpacity : value;
         return (
           <Animated.View
             key={item.id}
             testID={`hub-item-${item.id}`}
             accessible
             accessibilityRole="button"
-            accessibilityLabel={item.dimmed ? `${item.label}, nothing running` : item.label}
+            accessibilityLabel={itemA11yLabel(item)}
             accessibilityState={{ disabled: item.dimmed }}
             pointerEvents="none"
             style={[
@@ -130,11 +130,7 @@ export function HubFan(props: HubFanProps): JSX.Element {
               {
                 left: at.x - ITEM_SIZE / 2,
                 top: at.y - ITEM_SIZE / 2,
-                backgroundColor: lit
-                  ? item.danger
-                    ? palette.red
-                    : palette.accentFill
-                  : palette.glass,
+                backgroundColor: palette[look.bg],
                 borderColor: palette.glassBorder,
                 shadowOpacity: palette.shadowOpacity,
                 opacity,
@@ -142,17 +138,17 @@ export function HubFan(props: HubFanProps): JSX.Element {
               },
             ]}
           >
-            <Icon name={GLYPH[item.id]} color={fg} size={20} />
-            {item.badge === null ? null : (
-              <View style={[styles.badge, { backgroundColor: palette.accentFill }]}>
-                {item.badge.kind === "count" ? (
-                  <Text
-                    maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                    style={[typography.caption, styles.badgeText, { color: palette.onAccent }]}
-                  >
-                    {item.badge.n}
-                  </Text>
-                ) : null}
+            <Icon name={GLYPH[item.id]} color={palette[look.fg]} size={20} />
+            {/* The count as a shape (owner Q2 C): 36° per item, the hub's running
+                arc's own language. No track — the disc is the track. */}
+            {look.rim === null ? null : (
+              <View testID={`hub-rim-${item.id}`} pointerEvents="none" style={styles.rim}>
+                <RingArc
+                  diameter={ITEM_SIZE}
+                  stroke={2}
+                  fraction={look.rim}
+                  tone={palette[look.rimTone]}
+                />
               </View>
             )}
           </Animated.View>
@@ -171,7 +167,7 @@ export function HubFan(props: HubFanProps): JSX.Element {
           style={[
             styles.label,
             {
-              backgroundColor: palette.glass,
+              backgroundColor: palette.card,
               borderColor: palette.glassBorder,
               maxWidth: band.width - 16,
               left: labelAt?.x ?? 0,
@@ -206,18 +202,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     ...shadow.glass,
   },
-  badge: {
-    position: "absolute",
-    top: -2,
-    right: -2,
-    minWidth: 12,
-    height: 12,
-    borderRadius: 6,
-    paddingHorizontal: 3,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  badgeText: { fontSize: 9, fontWeight: "700" },
+  // The count rim: the shared partial ring laid over the disc (the disc is the
+  // track), so the count never moves the glyph.
+  rim: { position: "absolute", top: 0, left: 0 },
   label: {
     position: "absolute",
     paddingHorizontal: 10,

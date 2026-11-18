@@ -5,6 +5,7 @@
  */
 import { type ComposerAction, returnKeyAction } from "./composer.ts";
 import type { GestureEffect } from "./hub-gesture.ts";
+import { snapOpacity } from "./hub-opacity.ts";
 
 /**
  * `tick` = the selection click (a new highlighted hub item), `commit` = a crisp
@@ -40,6 +41,16 @@ export function turnEndHaptic(wasRunning: boolean, running: boolean): HapticKind
 }
 
 /**
+ * News arriving on the hub while it is on screen (mobile-hub-badges Design 3,
+ * owner Q1 C + Q4): a light tap with the glow. `turnEnded` is the SAME render's
+ * `turnEndHaptic` verdict — news usually lands exactly when a turn ends — so the
+ * moment plays one haptic, the turn's success, never two (§F4).
+ */
+export function pulseHaptic(pulse: boolean, turnEnded: boolean): HapticKind | null {
+  return pulse && !turnEnded ? "light" : null;
+}
+
+/**
  * The hub machine's effect → the haptic it plays (docs/feat/mobile-hub.md
  * Design 2): open = firm (the lift), a new highlight = tick, commit = commit.
  * The machine already decides WHEN (no tick on a cleared highlight, silence on
@@ -57,4 +68,16 @@ export function hubHaptic(effect: GestureEffect): HapticKind | null {
  */
 export function rowMenuHaptic(): HapticKind {
   return "firm";
+}
+
+/**
+ * The opacity slider's drag (docs/feat/mobile-hub-defaults.md): the selection
+ * `tick` — the lightest iOS feedback, the one a stepped `UISlider` / picker
+ * detent plays — each time the finger lands the setting on ANOTHER of its five
+ * steps. `from` is what the slider showed before this touch event (the stored
+ * value at the grant, the previous step after it); moving inside one step's
+ * band is silent, so a drag across the whole track ticks at most four times.
+ */
+export function opacityStepHaptic(from: number, to: number): HapticKind | null {
+  return snapOpacity(from) === snapOpacity(to) ? null : "tick";
 }

@@ -377,11 +377,19 @@ describe("generation (docs/feat/session-titles.md)", () => {
     const hosted = await firstExchange(r, a);
     await until(() => r.errors.length === 1);
     expect(r.errors[0]?.message).toBe("title generation failed: boom");
-    for (const turnId of ["t2", "t3"]) {
-      hosted.prompt(turnId, go("more"));
-      await until(() => !hosted.running);
-      await tick(5);
-    }
+    // Each turn end's attempt is awaited by its own OUTCOME, never by a fixed
+    // sleep: under load the sleep ended while the attempt was still in flight,
+    // the next prompt aborted it (an abort is not a failure, D3) and a third
+    // attempt was allowed — the count was 3 (main gate, 17/11).
+    hosted.prompt("t2", go("more"));
+    await until(() => !hosted.running);
+    // The unusable reply is the second failure: the cap is now reached.
+    await until(() => r.errors.length === 2);
+    // A turn end past the cap still kicks, and must not call again: a bounded
+    // wait for the violation (the file's negative-wait idiom), not a fence.
+    hosted.prompt("t3", go("more"));
+    await until(() => !hosted.running);
+    await until(() => title.calls !== 2, 500).catch(() => {});
     expect(title.calls).toBe(2);
     expect(r.errors.map((e) => e.message)).toEqual([
       "title generation failed: boom",
