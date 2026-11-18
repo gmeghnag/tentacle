@@ -641,3 +641,32 @@ still holds — the bubble's ⇥ now does what it says).
 3396 pass / 0 fail; full `bun test` → **15069 pass, 5 skip, 0 fail** (1078
 files, 495 s; the 5 skips are the documented `skipIf` opt-ins — live-k8s ×2,
 live-docker ×2, the real-socket keepalive).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18* (fresh context, different model family from the executor)
+
+**Verdict: REQUEST-CHANGES.**
+
+Round-1 findings: #1 typecheck **fixed** (`bun run typecheck` clean, lint
+clean, `bun test apps/mobile/test` 3396/0). #2, #3 and #4 are **fixed as
+specified**. Each new test fails when its fix is reverted: stale read → red
+"Edit applies what the queue says AFTER the answer"; bubble send-now
+carrying the field → red "a BUBBLE's Send now carries only that message";
+old × link-down path → red "× with the link down". All reverted from a
+backup copy, `git status` clean.
+
+**New finding (HIGH, regression of the #2 fix):** `compose-controller.ts:419-421`
+now reads `state` after the await. But `HostedSession.unqueue`
+(`hosted-session.ts:1925-1927`) calls `publishQueue()` synchronously before it
+returns, so the `queued` without the id always reaches the phone BEFORE the
+`removed` reply. `onQueued` then drops the acked id from `own` (the stuck
+fix's rule), and `unqueueFor` reads `state.own.get(id) ?? ""`
+(`compose-state.ts:247`) → empty. Repro
+(`.tentacle/tmp/mobile-queued-compose/race2-tail.ts`, the real event order):
+queue "mine" → edit → `field ""`, `editing {"text":""}`. The daemon has
+withdrawn the message and the phone no longer holds the words: a **silent
+loss on every successful Edit** (Cancel is unaffected). No test emits the daemon's
+real order (a report without the id, then the reply). Fix direction: capture `own.get(id)` before the await (or keep the id in
+`own` while its unqueue is in flight, as B0 does for enqueues), and pin it with
+a test that emits `{entries: []}` before the reply.
