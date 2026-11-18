@@ -559,3 +559,14 @@ a finding, and changing the spacing is presentation the owner approved as-is.
 
 S2 is still not started (it waits for `feat/mobile-thinking-images`, Owner Q6):
 this round touched S1 only.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18* (fresh context; scope: `git diff HEAD~1`)
+
+**Verdict: APPROVE.**
+
+- **Finding 1 (MEDIUM, a failed turn drawn as `◇ ⚠ …`): fixed.** `transcript.ts:335-339` now gives `failed` `warn: true` and drops the `⚠` prefix, so a failure opens a `▲` block and VoiceOver says "Warning: …". Mutation: removing `warn: true` makes 3 tests fail (`notice-row` failed-turn block, `transcript` "WARNING notice", `transcript` phone-only levels). Reverted; `git status` is clean.
+- **Regressions:** nothing else in `apps/mobile/src` reads a `⚠` prefix from a notice. `notice` rows are drawn only by `TranscriptRow`; no PDF/export/copy path matches. The changelog fragment now lists "a failed turn". No issue.
+- **Gate (narrow):** `notice-group`, `notice-row`, `transcript`, `transcript-parity`, `transcript-reload`, `session-screen`: 115 pass / 0 fail. `bun run lint`: clean (2088 files). `bun run typecheck`: clean. The full `bun run check` stays with the orchestrator.
+- **LOW, round 1** (half-gap on `joined`): left by the executor as approved presentation. Agreed.
