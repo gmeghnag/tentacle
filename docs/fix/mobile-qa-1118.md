@@ -473,3 +473,30 @@ Finding 1 is now pinned by source assertions in `session-screen-follow-wiring.te
 - The second `fire()` happens only after a scroll with the landing still owed, so the timer cannot loop.
 - A stream through the tail is bounded (R7).
 - `onListLayout` with unchanged content ends the tail early. That is benign: what follows is ordinary follow.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-18*
+
+**Verdict: PASS.** This reviews `b172b276` (the round-2 fix) and `8f6b37a5` (the gate flake fix).
+
+**Gate:** the 5 touched test files → 131 pass / 0 fail; `bun run lint` → clean (2083 files); `bun run typecheck` → clean. The full `bun test` was not re-run.
+
+**Finding 3: fixed, checked by mutation** (`.tentacle/tmp/mobile-qa-1118-fix/mut3.ts`; tree clean after):
+- S1 `landingOwns` ignores `following` → 1 fail.
+- S2 ignores `before` → 1 fail.
+- S3 ignores `after` → 1 fail.
+- S4 the screen passes `true` instead of `followRef.current.following` → 1 fail.
+
+The scenario from Round 2 is now handled: the person scrolls up mid-landing → `landingStep` returns `landingDone` → `landingOwns` returns `false` → `contentGrew` sets `unseen`, so the pill shows. A person still at the end keeps the silent landing, so bug 4 still holds.
+
+**Regression check:** `land()` reads `followRef.current.following` after `perform`. That is safe on both paths:
+- A landing step only performs while following, and it sets `initialFollow`, which is still following.
+- The absorb and `!following` exits perform nothing.
+
+`onListLayout` uses the same `land()`. No new findings.
+
+**Gate fix (`session-titles` D5):**
+- Out of this task's scope, but test-only and recorded in `docs/fix/main-gate-flakes.md`.
+- It waits on each attempt's own outcome (`errors.length === 2`) instead of a 5 ms fence. That is sound.
+- Mutation S5 (put back the fence) stayed green on one idle run. That is expected for a race that needs CPU load, so the executor's "red 5/5" is not reproduced here.
