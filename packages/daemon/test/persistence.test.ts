@@ -2428,6 +2428,35 @@ describe("the v4 record: steer ids and returned rows (docs/feat/queued-broadcast
     expect(reread(r2.store.durable.get(restored.id)).returned).toEqual([]);
   });
 
+  test("T6 unqueue is on disk: the reload never restores the removed row; a restored row is removable too (docs/feat/queue-unqueue.md)", async () => {
+    // Mutation: the restore site enqueues without the id → the last unqueue answers delivered → red.
+    const runs: string[] = [];
+    const tools = () => [tool("look", "none", runs), tool("run", "ask", runs)];
+    const r = rig([[call("c1", "look"), call("c2", "run", { n: 2 }), { type: "done" }]], tools);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 1);
+    hosted.enqueue("e1", "T1", "steer-1");
+    hosted.enqueue("e2", "T1", "steer-2");
+    expect(hosted.unqueue(["e1"])).toEqual({ removed: ["e1"], delivered: [] });
+    await hosted.persisted();
+    const record = reread(r.store.durable.get(hosted.id));
+    expect(record.turn).toMatchObject({ steering: ["steer-2"], steeringIds: ["e2"] });
+    const r2 = rig([], tools);
+    const restored = r2.host.restore(record);
+    expect(restored.snapshotPage().queued).toEqual({
+      entries: [{ id: "e2", text: "steer-2" }],
+      returned: [],
+    });
+    expect(restored.unqueue(["e2"])).toEqual({ removed: ["e2"], delivered: [] });
+    await restored.persisted();
+    const after = reread(r2.store.durable.get(restored.id));
+    expect(after.turn).toMatchObject({ steering: [], steeringIds: [] });
+    expect(after.returned).toEqual([]);
+    restored.cancel();
+  });
+
   test("Q-R2 a turn suspended on its own permission is RE-RUN, not cut: its steers stay its queue (v4 ids), returned only if it is stopped", async () => {
     const runs: string[] = [];
     const tools = () => [tool("look", "none", runs), tool("run", "ask", runs)];

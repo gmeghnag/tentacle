@@ -5646,6 +5646,44 @@
       "required": ["type"],
       "type": "object"
     },
+    "UnqueueParams": {
+      "additionalProperties": true,
+      "properties": {
+        "ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["ids", "sessionId"],
+      "type": "object"
+    },
+    "UnqueueResult": {
+      "additionalProperties": true,
+      "properties": {
+        "delivered": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "removed": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["delivered", "removed"],
+      "type": "object"
+    },
     "UnwatchParams": {
       "additionalProperties": true,
       "properties": {
@@ -6402,6 +6440,14 @@
       },
       "result": {
         "$ref": "#/$defs/SubagentMessageResult"
+      }
+    },
+    "session/unqueue": {
+      "params": {
+        "$ref": "#/$defs/UnqueueParams"
+      },
+      "result": {
+        "$ref": "#/$defs/UnqueueResult"
       }
     },
     "session/unwatch": {

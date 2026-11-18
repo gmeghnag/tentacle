@@ -99,6 +99,7 @@ import {
   type Sha256,
   type SnapshotResult,
   type SubagentRow,
+  type UnqueueResult,
   type UpdateSettingsResult,
   type VoiceTurn,
   type WireStreamEvent,
@@ -185,6 +186,15 @@ import { type DaemonKind, explainVersionMismatch } from "./version-mismatch.ts";
 /** A daemon that predates `session/subagent_message`: a typed refusal, never a throw at a UI. */
 export const SUBAGENT_MESSAGE_OLD_DAEMON =
   "this daemon cannot message sub-agents (older version) — nothing was sent";
+
+/**
+ * `RemoteClient.unqueue`'s answer: the daemon's per-id facts, or
+ * `"unsupported"` (a daemon that predates `session/unqueue`: nothing removed).
+ */
+export type UnqueueOutcome = UnqueueResult | "unsupported";
+
+/** A daemon that predates `session/unqueue`: shown as a notice; the row stays queued. */
+export const UNQUEUE_OLD_DAEMON = "this daemon can't cancel queued messages (older version)";
 
 /** A daemon that predates `session/job_output`: a typed refusal, shown as a notice. */
 export const JOB_OUTPUT_OLD_DAEMON = "this daemon cannot show a job's output (older version)";
@@ -1676,6 +1686,25 @@ export class RemoteClient {
   reclaim(sessionId: string, ids: readonly string[]): Promise<void> {
     return this.sessionCall(sessionId, Method.Reclaim, { sessionId, ids: [...ids] }, "keyed").then(
       () => undefined,
+    );
+  }
+
+  /**
+   * `session/unqueue`: take queued rows back before the model reads them
+   * (docs/feat/queue-unqueue.md). Idempotent daemon-side (a retry of a removed
+   * id answers `removed` again), so re-sent after a drop. An older daemon
+   * (`MethodNotFound`) → `"unsupported"`: never a silent success — the row
+   * stays queued and the caller says so.
+   */
+  unqueue(sessionId: string, ids: readonly string[]): Promise<UnqueueOutcome> {
+    return this.sessionCall(sessionId, Method.Unqueue, { sessionId, ids: [...ids] }, "keyed").then(
+      (result) => result as UnqueueResult,
+      (error: unknown): UnqueueOutcome => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return "unsupported";
+        }
+        throw error;
+      },
     );
   }
 
