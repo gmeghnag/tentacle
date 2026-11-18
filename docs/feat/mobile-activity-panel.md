@@ -505,3 +505,23 @@ One earlier full run reported a single failure —
 `EADDRINUSE` at `ws-server.ts:318`. That file alone is 7 pass / 0 fail and the
 re-run above is clean: a port collision from other worktrees on the machine,
 not this branch.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18*
+
+**Verdict: PASS.** Finding 1 (HIGH, interrupted close latching `closing`) is fixed at all three sites named:
+`ActivitySheet.tsx` spring `.start(() => done?.())` (any end runs the continuation), the open/detent
+effect and the content-follow effect skip while `closing.current`, and `onMoveShouldSetPanResponder`
+refuses a grab on a closing sheet.
+
+- **Mutations (each reverted, `git status` clean):** restore `if (finished)` gate → 1 fail; drop
+  `closing.current` from the open effect → 1 fail; from the follow effect → 1 fail; from the pan
+  claim → 1 fail (`activity-panel-wiring.test.ts`, 18 pass / 1 fail each).
+- **Regressions checked:** only `close()` passes a `done`, so "any end" changes no other caller;
+  `closing` is a ref, so after `onClose` the parent flips `visible` and the next open re-runs the
+  effect normally; a row tap during a close is swallowed and `closeActivity` clears the focus — no
+  stale state. None found.
+- **Gate:** touched tests 114 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean.
+  Limit: the wiring tests are source-pinned (RN is unimportable in Bun); the runtime behaviour is
+  still for the owner to check on the simulator.
