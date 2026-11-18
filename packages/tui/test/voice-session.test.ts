@@ -52,6 +52,48 @@ const helper = (message: HelperMessage): VoiceEvent => ({ kind: "helper", messag
 const ready = { t: "ready", v: 1, engine: "apple", device: "MacBook Pro Microphone" } as const;
 const listening = { t: "listening", id: 1, device: "MacBook Pro Microphone" } as const;
 
+describe("the live partial (feat/voice-live-transcript)", () => {
+  const partial = (text: string) => helper({ t: "partial", id: 1, text });
+  const live = [key("toggle"), helper(ready), helper(listening), partial("ciao a")];
+
+  test("a partial is the preview, never an insert", () => {
+    const r = drive(live);
+    expect(r.model.partial).toBe("ciao a");
+    expect(r.commands.filter((c) => c.kind === "insert")).toEqual([]);
+  });
+
+  test("the stop KEEPS the preview until the final replaces it", () => {
+    // Mutation: `partial: ""` back in `toTranscribing` → red (the words blank
+    // out between the second Ctrl+R and the insert).
+    const stopped = drive([...live, key("toggle")]);
+    expect(stopped.model.phase).toBe("transcribing");
+    expect(stopped.model.partial).toBe("ciao a");
+    const done = drive([
+      ...live,
+      key("toggle"),
+      helper({ t: "final", id: 1, text: "ciao a tutti" }),
+    ]);
+    expect(done.model.partial).toBe("");
+    expect(done.commands).toContainEqual({ kind: "insert", text: "ciao a tutti" });
+  });
+
+  test("a partial after the stop is ignored (the final is what lands)", () => {
+    const r = drive([...live, key("toggle"), partial("ciao a tu")]);
+    expect(r.model.partial).toBe("ciao a");
+  });
+
+  test("cancel and error clear the preview", () => {
+    expect(drive([...live, key("cancel")]).model.partial).toBe("");
+    const err = drive([
+      ...live,
+      key("toggle"),
+      helper({ t: "error", id: 1, code: "stt_failed", message: "boom" }),
+    ]);
+    expect(err.model.partial).toBe("");
+    expect(err.model.phase).toBe("idle");
+  });
+});
+
 describe("T2: the toggle walks idle -> starting -> listening -> transcribing -> idle", () => {
   test("a toggle from idle spawns the helper and sends start", () => {
     const r = drive([key("toggle")]);

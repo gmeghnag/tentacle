@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { VOICE_DEFAULTS, voiceInit } from "../src/voice-session.ts";
-import { VOICE_STRIP_ROWS, voiceStripView } from "../src/voice-view.ts";
+import { VOICE_STRIP_ROWS, voiceGhost, voiceStripView } from "../src/voice-view.ts";
 
 /** T4 — the strip's view-model. Presentation only; all decisions are pure here. */
 
@@ -83,19 +83,27 @@ describe("T4: the meter buckets dBFS into a fixed set of heights", () => {
   });
 });
 
-describe("T4: the partial preview is truncated to the field width", () => {
-  test("a long partial is cut with an ellipsis, never wrapped", () => {
-    const v = view(model({ phase: "listening", partial: "x".repeat(300) }), 60);
-    expect(v).not.toBeNull();
-    if (v === null) return;
-    expect(v.partial.length).toBeLessThanOrEqual(60);
-    expect(v.partial.endsWith("…")).toBe(true);
+describe("the live partial is a ghost in the input, not a strip row (feat/voice-live-transcript)", () => {
+  test("the strip is ONE row and carries no partial", () => {
+    expect(VOICE_STRIP_ROWS).toBe(1);
+    const v = view(model({ phase: "listening", partial: "ciao" }), 60);
+    expect(v === null ? null : Object.keys(v)).not.toContain("partial");
   });
 
-  test("a short partial is shown whole", () => {
-    expect(view(model({ phase: "listening", partial: "ciao" }), 60)?.partial).toBe("ciao");
+  test("the ghost is the partial while listening, starting and transcribing", () => {
+    for (const phase of ["starting", "listening", "transcribing"] as const) {
+      expect(voiceGhost(model({ phase, partial: "ciao" }) as never)).toBe("ciao");
+    }
   });
 
+  test("no ghost once the dictation is over (idle) or voice is off", () => {
+    for (const phase of ["idle", "off"] as const) {
+      expect(voiceGhost(model({ phase, partial: "ciao" }) as never)).toBe("");
+    }
+  });
+});
+
+describe("T4: the strip stays within the terminal width", () => {
   test("the whole strip never exceeds the terminal width", () => {
     const v = view(
       model({

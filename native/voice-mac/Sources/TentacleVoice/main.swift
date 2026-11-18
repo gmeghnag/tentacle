@@ -9,7 +9,8 @@ import Foundation
 ///
 /// Three non-protocol modes, all of which print plain lines and exit:
 /// `setup [--yes] [--models-dir DIR]`, `status [--engine E]`, and
-/// `trace <wav>…` (replays a file instead of the mic, for a fixture or a test).
+/// `trace [--live] <wav>…` (replays a file instead of the mic, for a fixture or a
+/// test; `--live` streams it through the dictation's live path, paced like the mic).
 
 // MARK: - the protocol loop
 
@@ -202,6 +203,11 @@ func runProtocolSync() -> Int32 {
     // round 1, HIGH 3).
     var levelClock = 0.0
     let op = CaptureOptions.current
+    // The live analyzer of the dictation in flight (docs/feat/voice-live-transcript.md),
+    // nil when none could be opened — then `stop` takes the batch path, which
+    // owns every error the TUI explains, exactly as before.
+    var feed: LiveFeed?
+    let since: (Int) -> [Float] = { capture.nativeSince($0) }
 
     write(.ready(engine: Transcriber.engineName(), device: Capture.currentInputName(preferred: op.input)))
 
@@ -222,6 +228,12 @@ func runProtocolSync() -> Int32 {
                 levelClock = 0
                 write(.level(id: live.id, dbfs: window.dbfs))
             }
+        }
+        // Feed the analyzer what the tap produced, and send what it heard so far
+        // (throttled to ≤ 10/s, only on change — `PartialThrottle`).
+        if let live = session, let feed,
+           let text = feed.pump(since: since, nowMs: Date().timeIntervalSince1970 * 1000) {
+            write(.partial(id: live.id, text: text))
         }
         guard let batch = source.drain() else { break poll }  // EOF: the TUI is gone.
         if batch.isEmpty {
@@ -260,6 +272,14 @@ func runProtocolSync() -> Int32 {
                     audioMs = 0
                     audioQueue.sync { captured = [] }
                     write(.listening(id: id, device: capture.deviceName))
+                    // Opened AFTER `listening`: the tap is already filling the
+                    // take, so nothing said meanwhile is lost (the feed starts
+                    // at sample 0). A failure is silent here on purpose.
+                    if let stale = feed { discard(stale) }
+                    let rate = capture.currentNativeRate
+                    feed = (try? runBlocking {
+                        try await LiveTranscription.open(language: lang, nativeRate: rate)
+                    }).map { LiveFeed(live: $0) }
 
                 case let .turn(id):
                     // Auto-stop only: the endpointing decision is the TUI's pure
@@ -278,16 +298,31 @@ func runProtocolSync() -> Int32 {
                     let language = live.language
                     session = nil
                     audioMs = result.samples.count * 1000 / 16000
-                    let started = Date()
-                    do {
-                        let output = try runBlocking {
-                            try await transcriber.transcribe(
-                                samples: result.samples,
-                                sampleRate: result.sampleRate,
-                                language: language
-                            )
+                    let liveFeed = feed
+                    feed = nil
+                    // The live path first: the audio is already analysed, so
+                    // only the tail is left to finalize.
+                    var finished: Transcriber.Output?
+                    if let liveFeed {
+                        if result.samples.isEmpty {
+                            discard(liveFeed)  // the batch path says "no audio"
+                        } else {
+                            finished = finishLive(liveFeed, native: result.native)
                         }
-                        _ = started
+                    }
+                    do {
+                        let output: Transcriber.Output
+                        if let finished {
+                            output = finished
+                        } else {
+                            output = try runBlocking {
+                                try await transcriber.transcribe(
+                                    samples: result.samples,
+                                    sampleRate: result.sampleRate,
+                                    language: language
+                                )
+                            }
+                        }
                         write(
                             .final(
                                 id: id,
@@ -308,6 +343,8 @@ func runProtocolSync() -> Int32 {
                         _ = capture.stop()
                         session = nil
                         audioQueue.sync { captured = [] }
+                        if let stale = feed { discard(stale) }
+                        feed = nil
                     }
                     // A cancel is silent by design: the TUI already moved to idle.
                 }
@@ -316,7 +353,32 @@ func runProtocolSync() -> Int32 {
     }
     // stdin EOF: stop the engine, which turns the orange mic dot off.
     if session != nil { _ = capture.stop() }
+    if let stale = feed { discard(stale) }
     return 0
+}
+
+/// Finalize a live session over the whole take. nil — and the caller takes the
+/// batch path — when it failed or heard nothing: an empty live transcript of a
+/// non-empty take is re-checked by the batch pass rather than trusted.
+func finishLive(_ feed: LiveFeed, native: [Float]) -> Transcriber.Output? {
+    let started = Date()
+    let text = try? runBlocking {
+        try await feed.finish(since: { index in
+            index < native.count ? Array(native[index...]) : []
+        })
+    }
+    guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        discard(feed)
+        return nil
+    }
+    let ms = Int(Date().timeIntervalSince(started) * 1000)
+    return Transcriber.Output(text: text, lang: feed.live.lang, sttMs: ms)
+}
+
+/// Abandon a live session without waiting for it (cancel, a new start, EOF).
+func discard(_ feed: LiveFeed) {
+    let live = feed.live
+    Task.detached { await live.cancel() }
 }
 
 // MARK: - status / setup
@@ -384,7 +446,7 @@ func runSetup(modelsDir: String, yes: Bool) async -> Int32 {
 
 // MARK: - trace (a WAV instead of the mic)
 
-func runTrace(paths: [String], language: Language) async -> Int32 {
+func runTrace(paths: [String], language: Language, live: Bool = false) async -> Int32 {
     for path in paths {
         // A FRESH transcriber per file: `SpeechAnalyzer` traps when the same
         // `SpeechTranscriber` drives a second analyzer (S1 finding, reproduced
@@ -437,6 +499,25 @@ func runTrace(paths: [String], language: Language) async -> Int32 {
             if let outChannel = out.floatChannelData?[0] {
                 samples = Array(UnsafeBufferPointer(start: outChannel, count: Int(out.frameLength)))
             }
+        }
+        if live {
+            // The mic's path, fed from the file: upsampled to 48 kHz first so the
+            // streaming resampler does real work, as it does for a device take.
+            let native = Capture.resample(samples, from: 16000, to: 48000)
+            do {
+                let output = try await replayLive(
+                    native: native, nativeRate: 48000, language: language
+                ) { ms, text in
+                    print("partial\t\(ms)\t\(text)")
+                }
+                let audioMs = samples.count * 1000 / 16000
+                print("final\taudioMs=\(audioMs)\tsttMs=\(output.sttMs)\tlang=\(output.lang)\t\(output.text)")
+            } catch let error as HelperError {
+                print("\(path)\tERROR=\(error.text)")
+            } catch {
+                print("\(path)\tERROR=\(error)")
+            }
+            continue
         }
         do {
             let output = try await transcriber.transcribe(
@@ -502,7 +583,14 @@ struct TentacleVoice {
         case "setup":
             code = await runSetup(modelsDir: modelsDir, yes: yes)
         case "trace":
-            code = await runTrace(paths: Array(args.dropFirst()), language: language)
+            // `trace --live <wav>`: the file through the live path, paced like
+            // the mic (docs/feat/voice-live-transcript.md).
+            let rest = Array(args.dropFirst())
+            code = await runTrace(
+                paths: rest.filter { $0 != "--live" },
+                language: language,
+                live: rest.contains("--live")
+            )
         case let other?:
             FileHandle.standardError.write(Data("unknown mode \(other)\n".utf8))
             code = 2

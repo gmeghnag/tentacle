@@ -175,6 +175,43 @@ describe("T7: Ctrl+R dictates, and the transcript lands in the field", () => {
     unmount();
   });
 
+  test("a live partial shows greyed AFTER the cursor, survives the stop, and the final replaces it", async () => {
+    // feat/voice-live-transcript: the partial is a preview in the INPUT row
+    // (never inserted), it stays while the final is computed, and the final is
+    // the only thing that lands in the field.
+    const helper = fakeHelper();
+    const { stdin, frames, unmount } = renderApp(helper);
+    await delay(40);
+    stdin.write("hello");
+    await delay(60);
+    stdin.write("\u0012");
+    await delay(80);
+    helper.say({ t: "listening", id: 1, device: "fake" });
+    await delay(60);
+    helper.say({ t: "partial", id: 1, text: "wor" });
+    await delay(80);
+    const inputRow = (frame: string) =>
+      frame.split("\n").find((line) => line.includes("❯ hello")) ?? "";
+    // `hello` + the cursor cell + the ghost, on the prompt's own row.
+    expect(inputRow(frames.at(-1) ?? "")).toContain("hello wor");
+
+    // The second Ctrl+R stops; the preview stays while the final is computed.
+    stdin.write("\u0012");
+    await delay(80);
+    expect(helper.sent).toContainEqual({ t: "stop", id: 1 });
+    expect(frames.at(-1) ?? "").toContain("transcribing");
+    expect(inputRow(frames.at(-1) ?? "")).toContain("hello wor");
+
+    helper.say({ t: "final", id: 1, text: "world" });
+    await delay(120);
+    const last = frames.at(-1) ?? "";
+    expect(inputRow(last)).toContain("hello world");
+    // The partial was never inserted: no `wor` left over in front of the final.
+    expect(last).not.toContain("wor world");
+    expect(last).not.toContain("worworld");
+    unmount();
+  });
+
   test("over SSH no helper is spawned and the notice says why (the host is read, not assumed)", async () => {
     // Review round 1, MEDIUM 6: T7 used to depend on the RUNNER's env.
     const helper = fakeHelper();

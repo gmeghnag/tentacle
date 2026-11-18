@@ -18,6 +18,7 @@ export function LineInput({
   placeholder,
   maxRows = 10,
   width,
+  ghost = "",
 }: {
   value: string;
   cursor: number;
@@ -27,9 +28,12 @@ export function LineInput({
   maxRows?: number;
   /** The box width in cells, for soft-wrapping (rows are wrapped here, never by Ink). */
   width: number;
+  /** A dictation's live partial, drawn dim after the cursor (`withGhost`). */
+  ghost?: string;
 }): ReactElement {
-  const { rows } = inputRender(value, cursor, anchor, maxRows, width);
-  const empty = value === "";
+  const { rows } = inputRender(value, cursor, anchor, maxRows, width, ghost);
+  // The placeholder is for an EMPTY box: a ghost is content on screen.
+  const empty = value === "" && ghost === "";
   const t = palette();
   return (
     <Box flexDirection="column">
@@ -41,7 +45,7 @@ export function LineInput({
               {row.prefix}
             </Text>
             {row.segments.map((seg, s) => (
-              <Text key={`${r}-${s}`} inverse={seg.inverse}>
+              <Text key={`${r}-${s}`} inverse={seg.inverse} {...(seg.ghost ? dimProps() : {})}>
                 {seg.text}
               </Text>
             ))}

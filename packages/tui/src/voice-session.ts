@@ -362,7 +362,8 @@ function toTranscribing(
   return {
     ...model,
     phase: "transcribing",
-    partial: "",
+    // The partial STAYS: it is previewed until the final replaces it
+    // (feat/voice-live-transcript); `idle` clears it on final/error/cancel.
     dbfs: null,
     transcribingAt: now,
     lastActivityAt: now ?? model.lastActivityAt,

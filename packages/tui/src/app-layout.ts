@@ -127,7 +127,11 @@ export interface FrameInput {
    * the panels' switch column and the status-line marker. Absent: none.
    */
   readonly capsPhase?: CapsPhase;
-  readonly field: { readonly value: string; readonly cursor: number };
+  readonly field: {
+    readonly value: string;
+    readonly cursor: number;
+    readonly anchor?: number | null;
+  };
   readonly attach: AttachDraft;
   readonly skills: readonly SlashSkill[];
   readonly commandIndex: number;
@@ -155,6 +159,12 @@ export interface FrameInput {
    * attach row above it).
    */
   readonly voiceStrip?: VoiceStripView | null;
+  /**
+   * A dictation's live partial, previewed greyed after the cursor
+   * (`voiceGhost`, docs/feat/voice-live-transcript.md); `""`/absent for none.
+   * It may wrap, so the input box's height counts it HERE, like the text.
+   */
+  readonly voiceGhost?: string;
 }
 
 /**
@@ -197,6 +207,7 @@ export function frameLayout(input: FrameInput) {
     compactedAt,
     now,
     voiceStrip,
+    voiceGhost = "",
   } = input;
 
   const tokensShown = statusTokens(st);
@@ -219,7 +230,10 @@ export function frameLayout(input: FrameInput) {
   // The input box grows with a multi-line prompt (paste / `\`-continuation),
   // (and with a soft-wrapped long line), capped at MAX_INPUT_ROWS content rows;
   // +2 for its top/bottom borders.
-  const inputContentLines = inputRowCount(field.value, field.cursor, columns, MAX_INPUT_ROWS);
+  const inputContentLines = inputRowCount(field.value, field.cursor, columns, MAX_INPUT_ROWS, {
+    ghost: voiceGhost,
+    anchor: field.anchor ?? null,
+  });
   // One more row while the draft holds chips or an upload: the attach row sits
   // INSIDE the input box and is counted HERE, once — so the viewport shrinks by
   // one and the frame's height never changes (P8).
@@ -407,6 +421,7 @@ export function frameLayout(input: FrameInput) {
     inputContentLines,
     attachRow,
     voiceStrip,
+    voiceGhost,
     voiceRows,
     inputBoxRows,
     listView,

@@ -90,7 +90,7 @@ import { useSessionLink } from "./useSessionLink.ts";
 import { type HopTurnPort, useTurnDriver } from "./useTurnDriver.ts";
 import { useVoice } from "./useVoice.ts";
 import { VOICE_DEFAULTS, dictationInsertion } from "./voice-session.ts";
-import { voiceStripView } from "./voice-view.ts";
+import { voiceGhost, voiceStripView } from "./voice-view.ts";
 import { tryWake } from "./wake-gate.ts";
 
 export type { AutoAcceptFeed, AutoAcceptSharedFeed };
@@ -967,6 +967,8 @@ export function App({
     now: Date.now(),
     // The strip's contents, computed by the pure view-model; `null` = no rows.
     voiceStrip: voiceStripView(voice.model, { columns: size.columns }),
+    // The live partial, previewed after the cursor (never in the buffer).
+    voiceGhost: voiceGhost(voice.model),
   });
   const frame = { ...view, st };
   // The rows App itself still reads (the key path's snapshot, the mouse layer's
