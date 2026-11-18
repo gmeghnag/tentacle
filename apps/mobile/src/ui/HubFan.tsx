@@ -13,6 +13,7 @@
  */
 import { type JSX, useEffect, useRef, useState } from "react";
 import { Animated, StyleSheet, Text, View } from "react-native";
+import { Path, Svg } from "react-native-svg";
 import { type HubActionId, type HubItem, itemA11yLabel } from "../hub-actions.ts";
 import {
   type FanLayout,
@@ -22,6 +23,7 @@ import {
   fanItemLook,
   labelPlacement,
 } from "../hub-fan.ts";
+import { type Flash, pillIndex, pillText } from "../hub-flash.ts";
 import { type Palette, shadow, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
 import { RingArc } from "./RingArc.tsx";
@@ -35,6 +37,9 @@ const GLYPH: Readonly<Record<HubActionId, IconName>> = {
   sessions: "folder",
   info: "laptopcomputer",
   tools: "powerplug",
+  // Commands draws its own bare `>_` (`CommandsGlyph`): SF Symbols has no glyph
+  // for it that is not a framed window (owner Q1: glyph A, a bare `>_`).
+  commands: "terminal",
   scheduled: "clock",
   dictate: "mic",
   new: "square.and.pencil",
@@ -54,11 +59,20 @@ export interface HubFanProps {
   readonly hi: number | null;
   readonly motion: FanMotion;
   readonly band: { readonly width: number; readonly height: number };
+  /**
+   * The dimmed item whose reason is showing in place, with the clock reading at
+   * its tap (mobile-hub-commands C1 Design 7). The timer that ends it is the
+   * button's (`FloatingActivity`), which passes `now` back down; `hub-flash.ts`
+   * decides the text and the visibility.
+   */
+  readonly flash: Flash | null;
+  /** The clock, read at the tap and again when the flash timer fires. */
+  readonly now: number;
   readonly onTapOverlay: (p: Point) => void;
 }
 
 export function HubFan(props: HubFanProps): JSX.Element {
-  const { palette, layout, items, hi, motion, band } = props;
+  const { palette, layout, items, hi, motion, band, flash, now } = props;
   // One value per item, created at the open (this view mounts with the fan).
   const grow = useRef(layout.items.map(() => new Animated.Value(0))).current;
   useEffect(() => {
@@ -77,11 +91,15 @@ export function HubFan(props: HubFanProps): JSX.Element {
   }, [grow, motion]);
 
   const [labelSize, setLabelSize] = useState<{ width: number; height: number } | null>(null);
-  const label = hi === null ? null : items[hi];
+  // ONE pill: the finger's highlight, or the item that is flashing its reason
+  // (`hub-flash.ts`). Which text it says is that module's decision too.
+  const shown = pillIndex(hi, flash, now);
+  const label = shown === null ? null : (items[shown] ?? null);
+  const labelText = shown === null || label === null ? null : pillText(label, shown, flash, now);
   const labelAt =
-    hi === null || labelSize === null
+    shown === null || labelSize === null
       ? null
-      : labelPlacement(layout, hi, labelSize, {
+      : labelPlacement(layout, shown, labelSize, {
           left: 0,
           top: 0,
           right: band.width,
@@ -132,13 +150,24 @@ export function HubFan(props: HubFanProps): JSX.Element {
                 top: at.y - ITEM_SIZE / 2,
                 backgroundColor: palette[look.bg],
                 borderColor: palette.glassBorder,
+                // Dimmed: a DASHED hairline (owner Q3 A) — a shape, so the state
+                // is not carried by the grey alone.
+                borderStyle: look.dashed ? "dashed" : "solid",
                 shadowOpacity: palette.shadowOpacity,
                 opacity,
                 transform: [{ scale }],
               },
             ]}
           >
-            <Icon name={GLYPH[item.id]} color={palette[look.fg]} size={20} />
+            {/* The glyph at 38 % when dimmed (Q3 A): its own opacity, so the disc
+                stays solid and no transcript shows through. */}
+            <View style={{ opacity: look.glyphOpacity }}>
+              {item.id === "commands" ? (
+                <CommandsGlyph color={palette[look.fg]} />
+              ) : (
+                <Icon name={GLYPH[item.id]} color={palette[look.fg]} size={20} />
+              )}
+            </View>
             {/* The count as a shape (owner Q2 C): 36° per item, the hub's running
                 arc's own language. No track — the disc is the track. */}
             {look.rim === null ? null : (
@@ -154,7 +183,7 @@ export function HubFan(props: HubFanProps): JSX.Element {
           </Animated.View>
         );
       })}
-      {label === null || label === undefined ? null : (
+      {label === null || labelText === null ? null : (
         <View
           testID="hub-label"
           pointerEvents="none"
@@ -183,11 +212,33 @@ export function HubFan(props: HubFanProps): JSX.Element {
               { color: label.danger ? palette.red : palette.label, fontWeight: "600" },
             ]}
           >
-            {label.label}
+            {labelText}
           </Text>
         </View>
       )}
     </View>
+  );
+}
+
+/**
+ * The Commands item's glyph (owner Q1 glyph A): a bare `>_` — a chevron and an
+ * underscore, 1.5 stroke on a 24 grid, the same weight and silhouette as the
+ * plug and the paperclip, so it reads as "terminal" at 22 pt without a frame
+ * inside the disc. Drawn with `react-native-svg` (already a dependency, and the
+ * chart glyphs' renderer) because SF Symbols has no bare `>_`.
+ */
+function CommandsGlyph({ color }: { readonly color: string }): JSX.Element {
+  return (
+    <Svg width={20} height={20} viewBox="0 0 24 24">
+      <Path
+        d="M5 7.5l4.5 4.5L5 16.5M12 17h7"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+    </Svg>
   );
 }
 

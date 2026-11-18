@@ -410,6 +410,7 @@ describe("rimFraction + fanItemLook (mobile-hub-badges Design 6–7, 9)", () => 
     badge: null,
     danger: false,
     dimmed: false,
+    emptyLabel: null,
     ...over,
   });
 
@@ -435,6 +436,8 @@ describe("rimFraction + fanItemLook (mobile-hub-badges Design 6–7, 9)", () => 
       fg: "accent",
       rim: null,
       rimTone: "accent",
+      dashed: false,
+      glyphOpacity: 1,
     });
     expect(fanItemLook(item({ danger: true }), false)).toMatchObject({ bg: "card", fg: "red" });
   });
@@ -443,6 +446,10 @@ describe("rimFraction + fanItemLook (mobile-hub-badges Design 6–7, 9)", () => 
     const look = fanItemLook(item({ id: "activity", dimmed: true }), false);
     expect(look.bg).toBe("fill");
     expect(look.fg).toBe("sec");
+    // The shape cues of owner Q3 A: a dashed hairline and a 38 % glyph, so the
+    // state is not carried by the grey alone.
+    expect(look.dashed).toBe(true);
+    expect(look.glyphOpacity).toBeCloseTo(0.38, 2);
     // A dimmed item has nothing to show, so it never draws a rim.
     expect(
       fanItemLook(item({ dimmed: true, badge: { kind: "count", n: 3 } }), false).rim,
@@ -455,12 +462,16 @@ describe("rimFraction + fanItemLook (mobile-hub-badges Design 6–7, 9)", () => 
       fg: "onAccent",
       rim: 0.4,
       rimTone: "onAccent",
+      dashed: false,
+      glyphOpacity: 1,
     });
     expect(fanItemLook(item({ danger: true }), true)).toEqual({
       bg: "red",
       fg: "onAccent",
       rim: null,
       rimTone: "onAccent",
+      dashed: false,
+      glyphOpacity: 1,
     });
     // The highlight wins over dimmed: the disc is still lit while the finger is on it.
     expect(fanItemLook(item({ dimmed: true }), true).bg).toBe("accentFill");

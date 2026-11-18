@@ -74,7 +74,16 @@ export type GestureState =
       readonly moved: boolean;
       readonly hi: number | null;
     }
-  | { readonly kind: "fanSticky"; readonly menu: HubMenu };
+  | {
+      readonly kind: "fanSticky";
+      readonly menu: HubMenu;
+      /**
+       * The dimmed item whose reason is showing in place (mobile-hub-commands C1
+       * Design 5), with the time the tap reported it. Absent: nothing flashing.
+       * Closing the fan drops it with the state, so no stale label survives.
+       */
+      readonly flash?: { readonly index: number; readonly at: number };
+    };
 
 export type GestureEvent =
   | { readonly type: "down"; readonly p: Point; readonly t: number }
@@ -82,13 +91,19 @@ export type GestureEvent =
   | { readonly type: "timer"; readonly t: number }
   | { readonly type: "up"; readonly p: Point; readonly t: number }
   | { readonly type: "cancel" }
-  | { readonly type: "tapOverlay"; readonly p: Point };
+  | { readonly type: "tapOverlay"; readonly p: Point; readonly t: number };
 
 export type GestureEffect =
   | { readonly kind: "haptic"; readonly cue: HubCue }
   | { readonly kind: "open"; readonly layout: FanLayout }
   | { readonly kind: "highlight"; readonly index: number | null }
   | { readonly kind: "commit"; readonly id: string }
+  /**
+   * A dimmed item was tapped: its OWN pill shows its reason for `FLASH_MS`
+   * (mobile-hub-commands C1 Design 5, owner Q3 A). The fan stays open, nothing
+   * commits, nothing closes.
+   */
+  | { readonly kind: "flash"; readonly index: number }
   | { readonly kind: "close" }
   /** The button follows the finger: `delta` from the down point. */
   | { readonly kind: "dragTo"; readonly delta: Point }
@@ -156,17 +171,34 @@ function open(at: Point, solve: () => HubMenu, then: "tracking" | "sticky"): Ste
   return { state, effects };
 }
 
-function commit(menu: HubMenu, index: number): Step {
+function commit(menu: HubMenu, index: number, at: number): Step {
   const id = menu.ids[index];
   if (id === undefined) {
     return CLOSE;
   }
-  // A dimmed item still commits (the screen turns it into its notice): it only
-  // FEELS different — one haptic per release, never two (Design 3).
-  const cue: HubCue = menu.dimmed.includes(id) ? "light" : "commit";
+  // A dimmed item has nothing to show, so it CANNOT commit: it flashes its own
+  // reason in place and the fan stays open (mobile-hub-commands C1 Design 5,
+  // owner Q3 A/Q6). Closing on it — what used to happen — is exactly why an
+  // in-place label had nowhere to show. The VoiceOver / plain-menu path still
+  // reports the same words as a notice (`resolveCommit`).
+  if (menu.dimmed.includes(id)) {
+    return {
+      state: { kind: "fanSticky", menu, flash: { index, at } },
+      effects: [
+        { kind: "haptic", cue: "light" },
+        // A slide-release reaches this branch with the finger's highlight still
+        // on the dimmed item (`tracking` `up`). Left standing, that `hi`
+        // outranks the flash in `pillIndex`, so the reason never shows and the
+        // item keeps a highlighted look for good (fix round 1, finding 1). The
+        // flash is the only pill from here on.
+        { kind: "highlight", index: null },
+        { kind: "flash", index },
+      ],
+    };
+  }
   return {
     state: IDLE,
-    effects: [{ kind: "haptic", cue }, { kind: "commit", id }, { kind: "close" }],
+    effects: [{ kind: "haptic", cue: "commit" }, { kind: "commit", id }, { kind: "close" }],
   };
 }
 
@@ -240,7 +272,7 @@ function tracking(
     case "up": {
       const hi = pickItem(state.menu.layout, event.p, state.hi);
       if (hi !== null) {
-        return commit(state.menu, hi);
+        return commit(state.menu, hi, event.t);
       }
       if (state.moved || far(state.openAt, event.p)) {
         return CLOSE;
@@ -258,7 +290,7 @@ function sticky(state: Extract<GestureState, { kind: "fanSticky" }>, event: Gest
   switch (event.type) {
     case "tapOverlay": {
       const hit = pickItem(state.menu.layout, event.p, null, { sticky: true });
-      return hit === null ? CLOSE : commit(state.menu, hit);
+      return hit === null ? CLOSE : commit(state.menu, hit, event.t);
     }
     // A new touch on the button closes the fan; its own release then meets idle.
     case "down":

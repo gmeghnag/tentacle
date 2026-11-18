@@ -387,7 +387,7 @@ describe("every close path lands in `idle` (so the body returns to the setting)"
   test("an open fan closes on a tap on its overlay, on a commit, and on a cancel", () => {
     const sticky: GestureState = { kind: "fanSticky", menu };
     // An empty spot on the overlay closes it; a tap on an item commits (also idle).
-    expect(step(sticky, { type: "tapOverlay", p: { x: 0, y: 0 } }).state.kind).toBe("idle");
+    expect(step(sticky, { type: "tapOverlay", p: { x: 0, y: 0 }, t: 1 }).state.kind).toBe("idle");
     expect(step(sticky, { type: "cancel" }).state.kind).toBe("idle");
     // A new touch on the button closes it (`hub-gesture.ts:255`).
     expect(step(sticky, { type: "down", p, t: 1200 }).state.kind).toBe("idle");
