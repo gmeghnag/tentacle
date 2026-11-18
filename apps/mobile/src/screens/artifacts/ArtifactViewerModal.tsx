@@ -20,6 +20,7 @@ import type { AppLogField } from "../../app-log.ts";
 import { ARTIFACT_CACHE } from "../../artifact-cache-expo.ts";
 import { openTarget, viewerBody, viewerText } from "../../artifact-open.ts";
 import { viewerFor, viewerSubtitle } from "../../artifact-viewer.ts";
+import type { LabelMode } from "../../chart-layout-kit.ts";
 import { ROW_FALLBACK_TEXT, rowErrorFields } from "../../row-guard.ts";
 import { type Palette, typography } from "../../theme.ts";
 import { useReduceMotion } from "../../ui/chart/ChartAppear.tsx";
@@ -67,6 +68,13 @@ export interface ArtifactViewerModalProps {
   readonly onShare?: (fileUri: string) => void;
   /** The chart threw while drawing: its log fields (class only, never the message). */
   readonly onRenderError?: (fields: Record<string, AppLogField>) => void;
+  /**
+   * The Charts setting in force (docs/feat/mobile-chart-labels.md D7), for the
+   * full-screen chart a `chart` artifact opens: the gallery owns the subscription
+   * (nothing this deep imports the Keychain) and hands the mode down. Absent →
+   * the default, `inside`.
+   */
+  readonly chartLabels?: LabelMode;
 }
 
 export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Element {
@@ -206,6 +214,7 @@ export function ArtifactViewerModal(props: ArtifactViewerModalProps): JSX.Elemen
             locale={deviceLocale()}
             reduceMotion={reduceMotion === true}
             testID="artifact-chart"
+            {...(props.chartLabels === undefined ? {} : { labels: props.chartLabels })}
             onClose={props.onClose}
           />
         </RowGuard>

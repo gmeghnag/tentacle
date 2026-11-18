@@ -1,0 +1,399 @@
+# feat/queue-unqueue — Take a queued message back (cancel / edit) before the model reads it
+
+> **Status:** executed — awaiting fresh-context Review (Implementation approved 2026-11-18)
+> **Branch:** `feat/queue-unqueue`
+> **Size:** M · **Blast:** load-bearing (the steering queue/drain seam of a running turn, §7 "steering window") · **Suited:** Opus exec + mandatory fresh-context Opus review
+> **Changelog:** `changelog.d/queue-unqueue.added.md` — "**Cancel or edit a queued message.** A message queued while the model runs can be taken back before the model reads it."
+
+## Context
+
+*— claude-opus-5-5, 2026-11-17*
+
+A message typed while a turn runs is queued (`session/enqueue`) and injected at
+the next model-round boundary. Today it cannot be taken back: the only exits
+from `entries` are delivery (`steer`), a send-now that carries it, or its turn
+ending (→ `returned`) — `packages/protocol/src/session.ts:594-600` says so
+explicitly ("Nothing else removes one"). The owner picked, for the phone, mockup
+**E1**: tap the pending bubble → inline **Edit · Send now · Cancel**; Edit puts
+the text back in the field ("Editing pending message ×", ↑ re-queues, × restores)
+(`.tentacle/mockups/mobile-queued-compose/README.md`, "CHOSEN", owner 17/11).
+*Send now* exists (`session/send_now`); *Cancel* and *Edit* need a daemon
+operation that does not exist. This task adds it (protocol → daemon → client),
+so `feat/mobile-queued-compose` (TODO.md:31) only has to render it.
+
+**Repro (capability missing), verified 2026-11-17 by source, not run:**
+`rg -n 'Unqueue|unqueue' packages/ apps/` → no hits; the method table
+`packages/protocol/src/methods.ts:131-137` has `Enqueue`, `SendNow`, `Reclaim`
+and nothing that removes an `entries` row. The executor writes the runnable
+repro first (a `HostedSession` with a scripted model: enqueue during a turn,
+then assert there is no way to stop the row reaching the next request) in
+`.tentacle/tmp/queue-unqueue/` and pastes it here.
+
+## Implementation
+
+*— claude-opus-5-5, 2026-11-17*
+
+### Load-bearing assumption
+
+**"Still in the agent's own steering array" ⇔ "the model has not read it and
+never will in this turn"**, and removing it from that array is atomic with
+respect to the drain. Proven:
+
+- The agent loop takes queued texts ONLY through the `drain` callback, which is
+  `Session.drainSteering` — a synchronous `splice(0)` of `steering` and
+  `voiceMarks` together (`packages/agent/src/session.ts:314-323`, wired at
+  `:276`). Every injection site calls `drain()` then pushes and yields the texts
+  it returned (`packages/agent/src/agent.ts:1368-1376, 1410-1413, 1477-1480,
+  1712-1718, 1821-1824, 1901-1904`). A text not yet spliced cannot reach
+  `messages`.
+- JS is single-threaded and `HostedSession.enqueue` is synchronous
+  (`packages/daemon/src/hosted-session.ts:3667-3700`); an RPC handler for the new
+  method is likewise synchronous, so it runs strictly before or strictly after a
+  `splice(0)` — never inside it.
+
+Consequence for the design: the check must read the **agent's array**
+(`Session.steering`), NOT the daemon's id mirror `this.queue`. The mirror is
+shifted only when the `steer` EVENT reaches `drive`
+(`hosted-session.ts:3085-3093`), which is after the drain; with several texts in
+one drain, their `steer`s are yielded one by one, so the mirror can **lag** the
+agent (hold rows already drained) — it can never lead it. A check against the
+mirror alone would answer "removed" for a text the model is about to read.
+
+### Preconditions
+
+- Peer dispatches requests concurrently (`transport/peer.ts`, §7 "Don't
+  serialize the RPC peer"), so an unqueue is handled mid-turn exactly like an
+  enqueue (`daemon/src/connection.ts:420, 658-660`).
+- The queue is published as FULL state on every change (`queued` update,
+  display class `protocol/src/updates.ts:553`; `publishQueue`
+  `hosted-session.ts:1750-1761`); clients already converge on it
+  (`session.ts:590-592`). No new update kind is needed.
+- The queue is persisted from the mirror in the sidecar's `turn.steering` /
+  `steeringIds` (`hosted-session.ts:1687-1699`) and restored into both the agent
+  and the mirror (`:1102-1110`). `persist()` is the synchronous capture
+  (`SessionPersister.schedule`, §7).
+- A reserved send-now (`this.successor`) holds steers typed for it in memory
+  only (`hosted-session.ts:3671-3681`) and seeds them into the new turn's queue
+  at start (`:2780-2794`).
+- `session/reclaim` (`session.ts:1486-1501`, `hosted-session.ts:1859-1868`) is
+  the pattern to copy: keyed, idempotent, synchronous, persist then publish.
+
+### Design
+
+1. **Agent `Session` gets ids on its queue** (`packages/agent/src/session.ts`):
+   `enqueue(text, voice?, id?)` stores `id` in a third parallel array (or one
+   array of `{text, voice, id}` — executor's choice, `drainSteering` still
+   returns `string[]` so `agent.ts` is untouched). New
+   `unqueue(id): boolean` — synchronous; if `id` is in `steering`, splice it
+   from all parallel arrays at the same index and return `true`; else `false`.
+2. **`HostedSession.unqueue(ids): { removed: string[]; delivered: string[] }`**
+   (`packages/daemon/src/hosted-session.ts`), synchronous, per id:
+   - in the successor's `steers` (not yet started) → drop from `steers`, removed;
+   - `session.unqueue(id) === true` → also filter the row out of `this.queue`
+     **by id** (safe: an undrained row sits behind every drained one, so order
+     and the head-shift on `steer` stay correct), removed;
+   - otherwise (already drained / delivered / unknown / a send-now's own
+     `messages`) → `delivered` (the client keeps showing what really happened).
+   Then, if anything was removed: `persist()` then `publishQueue()` (the same
+   order as `enqueue`/`reclaim`). Never throws `NoTurnRunning`: an unqueue after
+   the turn ended is answered from the facts (the row is in `returned` → the
+   client should `reclaim`; else `delivered`). Pass the id at the two other
+   `session.enqueue` sites (restore `:1107`, successor seed `:2780-2794`) so
+   every queued text is removable.
+3. **Protocol** (`packages/protocol/src/session.ts`, `methods.ts`):
+   `session/unqueue` — params `{ sessionId, ids: string[1..] }`, result
+   `{ removed: string[]; delivered: string[] }`. Additive (a new method is free,
+   v10 rule) → **no `protocol.d/` note**. Update the queue comment at
+   `session.ts:594-600` ("Nothing else removes one" → "… or a
+   `session/unqueue` of it").
+4. **Client** (`packages/client/src/remote-client.ts`, `remote-session.ts`):
+   `unqueue(ids)` like `reclaim` (`remote-client.ts:1676`), "keyed" call class.
+   `MethodNotFound` from an older daemon → a typed "not supported" result, never
+   a silent success.
+5. **Edit = client composition**, not a daemon op: Edit tap → `unqueue([id])`;
+   on `removed` the text goes to the composer; on `delivered` a notice ("already
+   sent") and the field stays empty. ↑ = an ordinary `enqueue` (new id, tail of
+   the queue). × = re-enqueue the original text (tail) — see Q2.
+6. **UI scope**: see Q1. Logic in pure modules (`apps/mobile/src/compose-queue.ts`,
+   `packages/tui/src/queued.ts`), components only render (§7).
+
+### Files
+
+`packages/agent/src/session.ts` → `packages/protocol/src/session.ts`,
+`packages/protocol/src/methods.ts` (+ regenerated `schema/protocol.json` via
+`bun run protocol:bump`, never by hand) → `packages/daemon/src/hosted-session.ts`,
+`packages/daemon/src/connection.ts` → `packages/client/src/remote-client.ts`,
+`packages/client/src/remote-session.ts` → (per Q1) `packages/cli/src/local-runtime.ts`,
+`packages/tui/src/queued.ts` + key wiring, or none → `changelog.d/queue-unqueue.added.md`.
+Mobile UI stays in `feat/mobile-queued-compose`.
+
+### Failure modes
+
+- **Race with the drain** (the core one): unqueue lands after `splice(0)` but
+  before the `steer` event → `session.unqueue` is `false` → `delivered`; the
+  mirror row leaves on its `steer` as today. Pinned by test T2.
+- **Several texts in one drain, cancel the 2nd**: drained together → both
+  `delivered`. Not drained → the mirror filter by id keeps the head-shift
+  pairing right for the others (T3).
+- **Turn ends / is cancelled meanwhile**: row moved to `returned` → `delivered`
+  is wrong for it; answer it as a third bucket or let the client see it in
+  `returned` and `reclaim` (Q3).
+- **Reserved send-now**: a steer typed for it is removable until it starts; its
+  `messages` (the send-now prompt) are not (→ `delivered`).
+- **Retry / duplicate**: idempotent — a second unqueue of a removed id finds
+  nothing → `delivered` would be a lie. Keep a small `unqueued` id set (like
+  `enqueued`) so a retry answers `removed` again (T5).
+- **Re-enqueue of the same id after an unqueue**: `enqueued.has(id)` makes it a
+  silent no-op (`hosted-session.ts:3668`) — the client MUST use a fresh id for ↑
+  (pinned client-side) — or Q4.
+- **Restart between unqueue and next write**: `persist()` runs before return,
+  same window as `enqueue`; the restored queue never resurrects it (T6).
+- **Voice steer**: its voice mark is spliced with its text, so a cancelled voice
+  steer never re-marks the turn (T4).
+- **Multiple clients**: anyone holding the session token may unqueue any row (one
+  principal, as `reclaim`); the other client sees the row leave via `queued`.
+- **Older daemon**: `MethodNotFound` → UI says "this daemon can't cancel queued
+  messages", row stays.
+- **Pod daemon**: the pod is not trusted (§7) — unqueue only removes pending
+  input, it creates no laptop-side effect; no gate needed.
+
+### Tests
+
+Red first: each fails on today's code (method missing / `Session.unqueue`
+missing).
+- **T1** agent `Session`: enqueue a,b,c (+ voice on b); `unqueue(b)` → true; the
+  next drain returns `[a, c]` and no voice mark applies.
+- **T2** daemon, scripted model (existing `HostedSession` fakes): drain happens,
+  then unqueue before the `steer` reaches `drive` → `delivered`, and the next
+  model request DOES contain the text (prove the property, not a correlate).
+- **T3** enqueue a,b,c; unqueue b before the boundary → the next request has
+  `[a, c]` and the `steer` events carry ids a, c (mirror pairing intact).
+- **T4** voice steer cancelled → the turn stays a non-voice turn.
+- **T5** retry idempotence; unknown id; empty turn; successor steer removable,
+  successor `messages` not.
+- **T6** persistence: unqueue then reload the sidecar → the row is absent from
+  the restored queue.
+- **T7** connection: `session/unqueue` round trip over `RemoteClient`; older
+  daemon → `MethodNotFound` → typed unsupported.
+- Non-vacuity (§9): mutate `HostedSession.unqueue` to check the mirror instead
+  of `Session.steering` → T2 must fail.
+
+### Owner questions
+
+1. **UI scope of this branch** — protocol+daemon+client only, or also a TUI
+   gesture? *Rec:* protocol+daemon+client + TUI "↑ on an empty input pulls the
+   last queued message back to edit" (cheap parity, exercises the API end to
+   end); phone UI stays in `feat/mobile-queued-compose`.
+2. **Edit semantics** — unqueue at Edit tap (× re-queues at the tail, position
+   lost) or keep it queued while editing and replace atomically on ↑ (risk: the
+   old text is delivered while you edit)? *Rec:* unqueue at Edit tap — what you
+   are editing is guaranteed not to reach the model.
+3. **Unqueue of a row already moved to `returned`** (turn ended) — answer it as
+   removed (drop it from `returned`, like `reclaim`) or report `delivered`? *Rec:*
+   treat it as removed and drop it from `returned` — the person asked for it gone.
+4. **Re-queue after edit** — always a fresh id, or allow re-using the id? *Rec:*
+   fresh id (no change to the `enqueued` dedupe).
+5. **Cancel confirmation on the phone** — immediate or "Undo" toast? *Rec:*
+   immediate + a 5 s Undo that re-enqueues at the tail (client-only, no daemon
+   change).
+
+#### Orchestrator decisions (2026-11-18 00:12, owner delegated the night; none touches a persisted/critical entry)
+Q1–Q5: the recommendations (protocol+daemon+client + TUI "↑ on empty input pulls the last queued message back"; unqueue at Edit tap — already the owner's Q2 answer on mobile-queued-compose; unqueue of a `returned` row removes it; fresh id on re-queue; immediate cancel + 5 s client-only Undo — flagged for the owner's morning review since the mockup had no Undo). Implementation APPROVED.
+*— claude-opus-5-5 (orchestrator), 2026-11-18*
+
+## Execution
+
+*— claude-opus-5-5, 2026-11-18*
+
+**Load-bearing check re-run: holds.** `Session.drainSteering` is still a
+synchronous `splice(0)` of `steering` + `voiceMarks` (`agent/src/session.ts`),
+the loop's only intake (`agent.ts` drain sites unchanged); `HostedSession.enqueue`
+is synchronous. Line numbers drifted (successor seed is now ~`hosted-session.ts:2770-2830`).
+
+**Repro (capability missing, before any edit)** — `.tentacle/tmp/queue-unqueue/repro.ts`:
+```ts
+const methods = Object.values(Method).filter((m) => /unqueue/i.test(String(m)));
+console.log("methods removing a queued row:", methods);
+console.log("Session.unqueue:", typeof Reflect.get(Session.prototype, "unqueue"));
+console.log("HostedSession.unqueue:", typeof Reflect.get(HostedSession.prototype, "unqueue"));
+```
+```
+methods removing a queued row: []
+Session.unqueue: undefined
+HostedSession.unqueue: undefined
+```
+
+**As built, in order**
+1. *Agent* — `Session` keeps a third parallel array `steeringIds`; `enqueue(text, voice?, id?)`;
+   `unqueue(id): boolean` splices text + voice mark + id at one index; `drainSteering`
+   splices ids too; `SendOptions.steeringIds` keys a `send`'s seed. Test T1
+   (`agent/test/steering.test.ts`): red (`unqueue is not a function`) → green.
+2. *Protocol* — `session/unqueue` (`UnqueueParams{sessionId, ids[1..]}`,
+   `UnqueueResult{removed, delivered}`) in `session.ts` + `methods.ts`; queue
+   comment updated. Additive → no `protocol.d/` note. `protocol.json` regenerated
+   with `bun run schema:export` (NOT `protocol:bump`: that is the orchestrator's at
+   merge); fixtures added to `json-schema.test.ts` (its coverage test went red first).
+3. *Daemon* — `HostedSession.unqueue(ids)` (after `reclaim`): per id, removed if it
+   was a successor steer, still in the AGENT's array (`session.unqueue`, then the
+   mirror filtered by id) or in `returned` (Q3); a retry hits the new `unqueued`
+   set → removed again; else delivered. `persist()` then `publishQueue()` only if
+   something left. A dropped successor steer's id goes into `enqueued`, so a
+   retried enqueue of it stays a no-op. Ids passed at the restore site and the
+   successor seed (`steeringIds`). `Connection.unqueue`: lookup, call, await
+   `persisted()`, return the facts. Tests T2, T3, T4, T5, T5b, T5c, T7
+   (`daemon/test/queued.test.ts`) all red (`unqueue is not a function`) → green;
+   T6 (`daemon/test/persistence.test.ts`) written after the code, its red shown by
+   mutations M4/M5 below.
+4. *Client* — `RemoteClient.unqueue` ("keyed"; `MethodNotFound` → `"unsupported"`,
+   type `UnqueueOutcome`, notice text `UNQUEUE_OLD_DAEMON`); `RemoteSession.unqueue`
+   (drops removed ids from `mine`; no daemon session → all `delivered`). Tests T7/T7b
+   (`client/test/queued-broadcast.test.ts`).
+5. *CLI + TUI (Q1)* — runtime forwards `unqueue` (`local-runtime.ts`);
+   `SessionController.unqueue?`; pure `pullBackTarget` (newest ACKED `queued` row of
+   mine — an unacked enqueue could be overtaken) and `afterUnqueue` (removed → row
+   dropped, text to the field; delivered / unsupported → row stays + notice) in
+   `tui/src/queued.ts`; `line-layer.ts`: ↑ on an empty input at the history draft
+   slot with a target → effect `pullBackQueued` (before history recall); App only
+   calls and writes. Tests: `tui/test/queued.test.ts`, `keys-line-layer.test.ts`
+   (red first), `tui/test/queue-unqueue-app.test.tsx` (frames: removed / delivered /
+   no-`unqueue` controller → history).
+6. `changelog.d/queue-unqueue.added.md`.
+
+**Drift from Implementation**
+- Archived (non-live) session: `session/unqueue` uses `lookup` (no archived
+  path, unlike `reclaim`). Its rows are `returned`; the client drops those with
+  `session/reclaim`. Not in the plan's list; noted as debt.
+- `unqueued` (retry set) is memory only: a retry after a daemon restart answers
+  `delivered` for an id already removed (the row is still gone — the answer is
+  the conservative one).
+- Seed ids (`steeringIds`) are NOT pinned by a test: the seed is drained at the
+  top of the first round, in the same synchronous stretch as `send`'s first pull
+  when no hook awaits, so the window cannot be reached deterministically. Two
+  attempts (daemon T5d, agent T1b) failed on the precondition, i.e. vacuously —
+  dropped (AGENTS §0 two-strike). Kept as plan-mandated plumbing (it matters when
+  `turn_start` hooks await before the first drain).
+- Plan's T5 "empty turn" folded into T5 (idle unqueue answered from facts) and T5b.
+- `cli/test/subagent-panel-controller.test.ts` GUARD lists forwarded controller
+  members exactly: `"unqueue"` added (the full run caught it; its own comment says
+  a new member is a deliberate entry).
+- No mobile UI here (Q1); Q5's Undo is client-side in `feat/mobile-queued-compose`.
+
+**Mutations (each reverted, test green again)**
+| # | mutation | result |
+|---|---|---|
+| M1 | `Session.unqueue` leaves the voice mark | T1 red (`VOICE_SPOKEN_LINE` present) |
+| M2 | `HostedSession.unqueue` checks the mirror `this.queue`, not `Session.steering` (plan's target) | T2 red, only T2 |
+| M4 | restore site enqueues without the id | T6 red |
+| M5 | no `persist()` in `unqueue` | T6 red |
+| M6 | removed id not recorded in `unqueued` | T5 red |
+| M7 | `MethodNotFound` → silent success | T7b red |
+| M8 | App snapshot `pullBack: null` | App tests removed + delivered red |
+| M3 | successor `send` without `steeringIds` | vacuous (precondition failed on correct code too) — see drift |
+
+**Gate:** `bun run typecheck` clean · `bun run lint` clean (0/0) · `bun test`
+(one full run): 14904 pass, 5 skip, 1 fail → the GUARD above, fixed and its file
+re-run green (4/4). Unverified: the 5 skips vs the 3 opt-ins in AGENTS §6 — this
+diff adds no `skip`/`skipIf` (grep 0), so they predate this branch; check with
+`bun test 2>&1 | grep -i skip`.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-18*
+
+- **F1 (HIGH) — FIXED.** `HostedSession.unqueue` (`packages/daemon/src/hosted-session.ts:1888-1893`)
+  first answers `delivered` for an id in the reserved successor's `messages`
+  (`startSuccessor` sends them as the prompt even when they are still queued rows).
+  Test T5e (`daemon/test/queued.test.ts`): `enqueue a` → `sendNow(T2,[a])` →
+  `unqueue([a])`. Red on the old code (`removed:["a"]`, expected `delivered:["a"]`) →
+  green; also pins that the model read `A` exactly once.
+- **F2 (MEDIUM) — FIXED.** `afterUnqueue` (`packages/tui/src/queued.ts:187-196`): a
+  `removed` answer for a target no longer in `rows` returns `{rows, text: null,
+  notice: null}`, so a double ↑ restores the text once. Safe because `rowsRef` is
+  written synchronously by `setRows` (`App.tsx:292-294`), so the second answer sees
+  the first's drop. Pure test in `tui/test/queued.test.ts`: red (`text: "B"`) → green.
+
+**Mutations (each reverted, green again)**
+| # | mutation | result |
+|---|---|---|
+| M9 | F1 guard checks `next.steers` instead of `next.messages` | T5e + T5c red |
+| M10 | F2 guard weakened to `rows.length === 0` | F2 test red |
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (one `useOptionalChain` on
+the F1 guard, fixed to `next?.messages.some(...)`, re-run clean; the touched daemon
+file re-run 26/26) · `bun test` (one full run): 14907 pass, 5 skip, 0 fail.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-18*
+
+- **R2-1 (MEDIUM) — FIXED.** The double-↑ dedupe moved from row presence to the
+  call site. `afterUnqueue` (`packages/tui/src/queued.ts:187-192`) once again returns
+  the text for every `removed` answer, even when the row is already gone locally
+  (for example, the turn's end cleared it before the answer landed). `App.tsx` keeps
+  `pullingRef` (a `Set` of ids awaiting their answer, `:293-294`). `pullBackQueued`
+  (`:2138-2160`) sends nothing for an id already in it, and removes the id when the
+  answer arrives or the call fails. F2's protection holds: only one unqueue goes out,
+  so the text comes back once.
+  - Pure test (it replaces round 1's F2 test, which asserted the regressed behaviour):
+    `afterUnqueue([], {b,"B"}, removed:[b])` → `text: "B"`. Red on round-1 code
+    (`text: null`) → green.
+  - App test (`queue-unqueue-app.test.tsx`): the daemon answers `removed` to every
+    call, but late. Press ↑ twice, then let the answers settle. Exactly one unqueue
+    `[["bravo"]]` is sent and `bravo` appears once in the frame. Red on round-1 code
+    (two unqueues sent) → green.
+- Drift: the dedupe sits in `App.tsx`, not in a pure module. It is a single `Set`
+  check with no computation to project, and the App test covers it.
+
+**Mutations (each reverted, green again)**
+| # | mutation | result |
+|---|---|---|
+| M11 | drop `pullingRef.current.has(id)` from the guard | App test red (two unqueues) |
+| M12 | put back the round-1 row-presence guard in `afterUnqueue` | R2-1 pure test red |
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean · narrow TUI files 54/54 ·
+`bun test` (one full run): 14907 pass, 5 skip, 1 fail. The fail is
+`mcp/test/connect.test.ts` "…answers the probe with an error and then exits is
+respawned" (EPIPE, real processes). This branch has no diff in `packages/mcp`, and
+the file passed 8/8 on a re-run, so it is flaky and unrelated.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-18* (fresh context; SAME model as executor/planner — shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES**
+
+**Gate:** touched files 236 pass / 0 fail · full `bun test` 14905 pass, 5 skip, 0 fail · `bun run lint` clean · `bun run typecheck` clean.
+
+**Findings**
+1. **HIGH — `removed` is a lie for a row a reserved send-now carries** (`packages/daemon/src/hosted-session.ts:1886-1925` vs `startSuccessor` `:2822-2865`). Between `sendNow` reserving (abort issued) and the old turn settling, a cited queued row is still in `Session.steering` and the mirror; `session.unqueue(id)` succeeds → `removed`, but `startSuccessor` builds `prompt` from `next.messages` (filtered only by `isDelivered`) → the model reads it. Breaks the load-bearing property and the doc's own rule "a send-now's own `messages` → delivered". Reproduced (temporary test, reverted; tree clean): `enqueue a` → `sendNow(T2, [a])` → `unqueue([a])` = `{"removed":["a"]}`, model saw `A`: **true**. T5c misses it because its `a` was never enqueued first. Reachable from the phone's E1 (Send now then Cancel) or a second client. Fix: check `next.messages` ids first → `delivered`; add the test above.
+2. **MEDIUM — repeated ↑ duplicates the text in the field** (`packages/tui/src/App.tsx:2134-2147`, `packages/tui/src/queued.ts:afterUnqueue`). The row and the empty field change only when the async answer arrives, so ↑ autorepeat / a double press sends N unqueues for the same id; the daemon answers `removed` each time (idempotent `unqueued`), `afterUnqueue` returns `text` regardless of whether the row is still in `rows`, and `withRestored` (`send-now.ts:325`) APPENDS → `X\n\nX`. Fix: in-flight guard on the id, or return `text: null` when the target is no longer in `rows`; pin with a pure test.
+
+**Premise table (sampled):** drain is a sync `splice(0)` (`agent/src/session.ts:340-343`) TRUE · `enqueue` sync, ids now passed (`hosted-session.ts:3747`, `:1109`) TRUE · mirror lags agent (T2 proves it) TRUE · "successor `messages` not removable" — FALSE once they were enqueued (finding 1).
+
+**Attacks tried:** (a) reserved send-now + unqueue of its cited row → finding 1; (b) double ↑ before the answer → finding 2 (from code: `afterUnqueue` ignores `rows`); (c) drain race / mirror pairing — T2/T3 hold, executor's M2 mutation stands; (d) archived session, restart retry → documented debt, conservative answers, no silent resurrection; (e) §7 "don't serialize the peer": `Connection.unqueue` awaits only `persisted()` after the sync call — holds. (f) pod trust: unqueue causes no laptop-side effect — holds.
+
+**Mutation:** relied on executor's M1–M8 table; my own mutation-style probe was finding 1's test (red on current code for the property it should hold).
+
+**Executor behaviour:** disciplined, honest drift section (seed ids unpinned, `unqueued` memory-only) and mutation table; missed the cited-row case because its T5c used a non-enqueued message.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18* (fresh context, same model family as before)
+
+**Verdict: REQUEST-CHANGES**
+
+- **F1 fixed** (`hosted-session.ts:1888-1893`): a reserved send-now's own message is answered `delivered` first. Mutation (guard → `false`) turns T5e red; reverted, green.
+- **F2 fixed as reported** (`tui/src/queued.ts:188-193`): a second `removed` answer for a row no longer in `rows` writes nothing. Mutation turns the new test red; reverted, green. Tree byte-identical after both mutations (`git status` clean).
+- **R2-1 MEDIUM — regression from the F2 fix: the pulled-back text can be lost silently** (`tui/src/queued.ts:191`). The guard reads "row absent from local `rows`" as "a duplicate answer". But local rows are also cleared by the turn's end (`useTurnDriver.ts:763,767` `setRows(onTurnEnd)`). The daemon removes the row and publishes it synchronously, while the RPC answer waits on `persisted()` (`connection.ts` `unqueue`; on `serve` that is a disk write). If `turn_end` reaches the TUI in that window, the first and only answer finds no row and returns `text: null, notice: null`. The text is gone daemon-side (not in `returned`), never put back in the field, and nothing is shown. Round 1 code restored it. Fix: dedupe by in-flight id at the call site (a pending set in the key layer or App, so a second ↑ on the same id sends nothing), not by row presence. Pin it: an answer with the row already cleared still returns the text.
+- No other regression found in the diff. `bun run lint` clean · `bun run typecheck` clean · daemon + TUI queue tests 1445 pass / 0 fail (one earlier run of the same set showed 1 fail, 1 skip and could not be reproduced on two re-runs. It looks flaky and I could not attribute it to this diff).
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-18* (fresh context, same model family as before)
+
+**Verdict: PASS**
+
+- **R2-1 fixed** (`tui/src/queued.ts:187-191`): a `removed` answer gives the text back even when the turn's end already cleared the local rows. Mutation (row-presence guard reinstated) turns the new pure test red; reverted, green.
+- **F2 still fixed, now at the right layer** (`tui/src/App.tsx:2140-2157`): `pullingRef` allows one in-flight unqueue per id and is cleared on both the answer and the error. Mutation (drop the `pullingRef.has` check) turns the App test "↑ twice before the answer" red (2 unqueues, text twice); reverted, green. Tree byte-identical after both mutations.
+- No new HIGH/MEDIUM in the diff. Nit (not blocking): an unqueue that never settles keeps its id in `pullingRef`, so ↑ on that row does nothing until the next session. That needs a hung RPC, which the transport surfaces elsewhere anyway.
+- `bun run lint` clean · `bun run typecheck` clean · `packages/tui` + daemon `queued.test.ts` 2822 pass / 0 fail.

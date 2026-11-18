@@ -1,4 +1,4 @@
-import type { DocumentsInput } from "@tentacle/client";
+import type { DocumentsInput, SessionEvent } from "@tentacle/client";
 /**
  * The session screen's COMPOSE half (docs/feat/mobile-compose.md 13d): the queue
  * rows, the steer, Send now, Take, the photo chips, and the outbox's items.
@@ -56,6 +56,7 @@ import {
   ownIdList,
   queueRows,
   reclaimed,
+  sendNowAccepted,
   take,
 } from "./compose-state.ts";
 import { type ComposerAction, restoreAfterFailure, sendNowOffered } from "./composer.ts";
@@ -75,6 +76,31 @@ import type { PdfRefusal } from "./pdf-input.ts";
 import type { QueueTrace, TraceSource } from "./queue-trace.ts";
 import type { LocalPhoto } from "./transcript-rows.ts";
 /** The chat handle the compose acts use (a seam: tests pass a fake). */
+/** A send-now's successor turn as the request names it: its key, and its Stop. */
+export interface SendNowNext {
+  readonly turnId: string;
+  readonly signal: AbortSignal;
+}
+
+/** The send-now request, waiting for the successor's key (`followSendNow` mints it). */
+export type SendNowStart = (next: SendNowNext) => Promise<AsyncIterable<SessionEvent>>;
+
+/** With no screen to fold into (a unit harness): the successor's events are drained. */
+const drainSendNow =
+  (mint: () => string) =>
+  async (start: SendNowStart): Promise<void> => {
+    const events = await start({ turnId: mint(), signal: new AbortController().signal });
+    void (async () => {
+      try {
+        for await (const _event of events) {
+          // nobody shows it
+        }
+      } catch {
+        // its loss is nobody's here
+      }
+    })();
+  };
+
 export interface ComposeHandle {
   /** The session's id on this client (null until open). */
   readonly sessionId: string | null;
@@ -94,11 +120,16 @@ export interface ComposeHandle {
   send(text: string, attachments: readonly AttachmentRef[]): Promise<void>;
   /** One steer, bound to the turn it was typed during. */
   steer(text: string, id: string, turnId: string): Promise<void>;
-  /** `session/send_now`: cancel `turnId` and start a turn whose prompt is `messages`. */
+  /**
+   * `session/send_now`: cancel `turnId` and start a turn whose prompt is
+   * `messages`, keyed `next.turnId`. Resolves at the daemon's ACK with the new
+   * turn's events — which someone must fold (`followSendNow`).
+   */
   sendNow(
     messages: readonly { readonly id: string; readonly text: string }[],
     turnId: string,
-  ): Promise<void>;
+    next: SendNowNext,
+  ): Promise<AsyncIterable<SessionEvent>>;
   /** The daemon's queue as it reports it, live (every writer's rows). */
   onQueued(listener: (state: QueueState) => void): () => void;
   /**
@@ -203,6 +234,16 @@ export interface ComposeDeps {
     /** The attached PDFs' wire blocks (D7): the chip's own block, unbuilt here. */
     documents?: readonly DocumentContent[],
   ) => Promise<void>;
+  /**
+   * A send-now's SUCCESSOR turn, folded into the SCREEN's transcript as this
+   * phone's own — the same rule as `prompt` (docs/fix/mobile-queued-stuck.md
+   * (b): the handle used to drain it, so the phone never saw the turn start nor
+   * its answer). `start` runs the request with the new turn's key and the
+   * signal the composer's Stop aborts; this resolves at the daemon's ACK and
+   * rejects with its refusal, while the turn keeps folding. Absent (a unit
+   * harness): the events are drained.
+   */
+  readonly followSendNow?: (start: SendNowStart) => Promise<void>;
   /** Something the screen draws changed. */
   readonly onChange: () => void;
   /** A sentence to show (a refusal's reason), cleared by the next act. */
@@ -879,7 +920,17 @@ export function createCompose(deps: ComposeDeps): Compose {
       traceRows("after-send-now");
       await persistOwn();
       try {
-        await handle.sendNow(messages, turnId);
+        // Resolves at the daemon's ACK; the successor turn folds on the screen.
+        await (deps.followSendNow ?? drainSendNow(deps.mint))((next) =>
+          handle.sendNow(messages, turnId, next),
+        );
+        // The daemon holds every message now (in the new prompt, or still queued
+        // and so listed): no row of this send-now waits on anything local any
+        // more — a row no report ever listed must not stay for ever.
+        state = sendNowAccepted(
+          state,
+          messages.map((message) => message.id),
+        );
       } catch (error) {
         // F12, exactly as the TUI (`afterRefusal`): a text the daemon REPORTS it
         // still holds is queued — it will be delivered as a steer — so it is NOT

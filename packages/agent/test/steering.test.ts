@@ -6,6 +6,7 @@ import type {
   ModelProvider,
   StreamEvent,
 } from "@tentacle/core";
+import { VOICE_SPOKEN_LINE } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
 import { Agent } from "../src/agent.ts";
 import { Session } from "../src/session.ts";
@@ -152,5 +153,42 @@ describe("steering (enqueue mid-turn)", () => {
     }
     const next = model.seen[2] ?? [];
     expect(next.some((m) => m.role === "user" && m.content === "also Y")).toBe(true);
+  });
+});
+
+describe("unqueue (docs/feat/queue-unqueue.md)", () => {
+  test("T1 an undrained steer is taken back with its voice mark; a drained or unknown one is not", async () => {
+    const model = new RecordingProvider([
+      [{ type: "text", delta: "step one" }, { type: "done" }],
+      [{ type: "text", delta: "step two" }, { type: "done" }],
+    ]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv });
+    const session = new Session(agent);
+    const answers: boolean[] = [];
+    const steers: string[] = [];
+    for await (const event of session.send("start")) {
+      if (event.type === "text" && event.delta === "step one") {
+        session.enqueue("A", undefined, "a");
+        session.enqueue("B", { reasoning: "off" }, "b");
+        session.enqueue("C", undefined, "c");
+        answers.push(session.unqueue("b"), session.unqueue("b"), session.unqueue("nope"));
+        expect(session.pendingSteering()).toEqual(["A", "C"]);
+      }
+      if (event.type === "steer") {
+        steers.push(event.text);
+        // Drained: no longer in the queue, so no longer removable.
+        answers.push(session.unqueue("a"));
+      }
+    }
+    expect(answers).toEqual([true, false, false, false, false]);
+    expect(steers).toEqual(["A", "C"]);
+    const round2 = model.seen[1] ?? [];
+    expect(round2.filter((m) => m.role === "user").map((m) => m.content)).toEqual([
+      "start",
+      "A",
+      "C",
+    ]);
+    // The cancelled voice steer's mark went with it: round 2 is not a voice round.
+    expect(round2.some((m) => m.role === "system" && m.content === VOICE_SPOKEN_LINE)).toBe(false);
   });
 });

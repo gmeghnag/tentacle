@@ -27,10 +27,13 @@ import {
   chartUiWords,
   fullScreenKpis,
   fullScreenPlotSize,
+  highlightLayout,
   seriesChips,
   tableView,
+  toggleHighlight,
   toggleSeries,
 } from "../../chart-interact.ts";
+import type { LabelMode } from "../../chart-layout-kit.ts";
 import type { ScrubView } from "../../chart-layout.ts";
 import {
   type ChartRowView,
@@ -41,7 +44,7 @@ import {
 } from "../../chart-row.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, typography } from "../../theme.ts";
 import { ChartTable } from "./ChartTable.tsx";
-import { ChartHero, ChartPlot } from "./ChartView.tsx";
+import { ChartHero, ChartLegend, ChartPlot } from "./ChartView.tsx";
 import { useChartScrub } from "./useChartScrub.ts";
 
 /** Portrait and landscape: the app sets no `orientation` (P9). */
@@ -50,6 +53,9 @@ export const FULL_SCREEN_ORIENTATIONS = ["portrait", "landscape"] as const;
 export interface ChartFullScreenViewProps {
   readonly view: ChartRowView;
   readonly testID: string;
+  /** The series highlighted by a legend tap (D3), for the item's `selected`. */
+  readonly highlight?: number | null;
+  readonly onHighlight?: (series: number) => void;
   readonly words: ChartUiWords;
   readonly chips: readonly SeriesChip[];
   readonly kpis: readonly Kpi[];
@@ -100,6 +106,7 @@ export function ChartFullScreenView(p: ChartFullScreenViewProps): JSX.Element {
           },
         ]}
       >
+        {" "}
         <View style={styles.header}>
           <Pressable
             testID={`${testID}-close`}
@@ -205,6 +212,14 @@ export function ChartFullScreenView(p: ChartFullScreenViewProps): JSX.Element {
             ))}
           </View>
         )}
+        {p.mode === "table" || view.layout.legend === null ? null : (
+          <ChartLegend
+            view={view}
+            testID={testID}
+            {...(p.onHighlight === undefined ? {} : { onHighlight: p.onHighlight })}
+            highlight={p.highlight ?? null}
+          />
+        )}
         {p.mode === "table" ? (
           <ChartTable
             table={tableView(view.spec, view.layout.table, p.locale)}
@@ -240,27 +255,42 @@ export interface ChartFullScreenProps {
   readonly reduceMotion: boolean;
   readonly testID: string;
   readonly onClose: () => void;
+  /** `"legend"` → the labels live in the legend above, which is where a tap highlights (D3). */
+  readonly labels?: LabelMode;
 }
 
-/** The state: hidden series, table mode, the scrub. Laid out at the window's size. */
+/** The state: hidden series, the highlighted one, table mode, the scrub. Laid out at the window's size. */
 export function ChartFullScreen(props: ChartFullScreenProps): JSX.Element | null {
   const window = useWindowDimensions();
   const insets = useSafeAreaInsets();
+  // Full screen lays out exactly like the row it came from: the SCREEN owns the
+  // setting's subscription (`active-settings`' pattern) and hands the mode down,
+  // so this holds no listener and stays walkable by the render test.
+  const labels = props.labels ?? "inside";
   const [hidden, setHidden] = useState<ReadonlySet<number>>(new Set());
+  const [highlight, setHighlight] = useState<number | null>(null);
   const [mode, setMode] = useState<"chart" | "table">("chart");
   const spec = chartRowSpec(props.tool);
   const kpis = spec === null ? [] : fullScreenKpis(spec, hidden, props.locale);
   const size = fullScreenPlotSize(window, insets, kpis.length > 0);
-  const view = chartRowView(props.tool, {
+  const base = chartRowView(props.tool, {
     width: size.width,
     height: size.height,
     hidden,
     fontScale: window.fontScale,
     locale: props.locale,
     palette: props.palette,
+    labels,
   });
-  const { scrub, handlers } = useChartScrub(view?.layout ?? null, () => {});
-  if (view === null || spec === null) return null;
+  // D3: a highlight is a projection of the layout — only where a legend exists
+  // to produce one, and never a series the reader has just hidden.
+  const shown =
+    base === null || highlight === null || base.layout.legend === null
+      ? base
+      : { ...base, layout: highlightLayout(base.layout, base.spec, highlight, props.locale) };
+  const { scrub, handlers } = useChartScrub(shown?.layout ?? null, () => {});
+  if (shown === null || base === null || spec === null) return null;
+  const view = shown;
   const words = chartUiWords(props.locale);
   return (
     <ChartFullScreenView
@@ -277,8 +307,17 @@ export function ChartFullScreen(props: ChartFullScreenProps): JSX.Element | null
       palette={props.palette}
       insets={insets}
       tableHeight={size.height}
+      highlight={highlight}
+      {...(base.layout.legend === null
+        ? {}
+        : { onHighlight: (k: number) => setHighlight((h) => toggleHighlight(h, k)) })}
       onClose={props.onClose}
-      onToggle={(k) => setHidden((h) => toggleSeries(h, k, spec.datasets.length))}
+      onToggle={(k) => {
+        setHidden((h) => toggleSeries(h, k, spec.datasets.length));
+        // Hiding the highlighted series clears the highlight: it would otherwise
+        // keep the hero on a line that is no longer drawn.
+        setHighlight((h) => (h === k ? null : h));
+      }}
       onMode={setMode}
       onShare={() => {
         Share.share({ title: spec.title, message: chartCsv(spec) }).catch(() => undefined);

@@ -12,6 +12,7 @@ import { CHART_CAPS, type ChartSpec, seriesColor } from "@tentacle/core";
 import { type ArtifactMeta, artifactKindOf } from "@tentacle/protocol";
 import {
   type ChartLayout,
+  type LabelMode,
   type LayoutText,
   type Paint,
   chartLayout,
@@ -64,6 +65,11 @@ export interface ChartRowOptions {
   readonly height?: number;
   /** Full screen (C7): the series the reader switched off. */
   readonly hidden?: ReadonlySet<number>;
+  /**
+   * Where a line/area chart names its series (docs/feat/mobile-chart-labels.md
+   * D7): the reader's setting. Absent → `"inside"`, today's default.
+   */
+  readonly labels?: LabelMode;
 }
 
 /**
@@ -78,7 +84,8 @@ const CACHE_MAX = 32;
 export function chartRowView(tool: ChartToolRow, options: ChartRowOptions): ChartRowView | null {
   if (!(options.width > 0) || !drawsAsChart(tool)) return null;
   const hidden = [...(options.hidden ?? [])].sort((a, b) => a - b).join(",");
-  const key = `${options.width}|${options.height ?? ""}|${hidden}|${options.fontScale}|${options.locale}|${tool.args}`;
+  const labels: LabelMode = options.labels ?? "inside";
+  const key = `${options.width}|${options.height ?? ""}|${hidden}|${options.fontScale}|${options.locale}|${labels}|${tool.args}`;
   let hit = cache.get(key);
   if (hit === undefined) {
     const spec = chartSpecOf(tool.args);
@@ -89,6 +96,7 @@ export function chartRowView(tool: ChartToolRow, options: ChartRowOptions): Char
             width: options.width,
             fontScale: options.fontScale,
             locale: options.locale,
+            labels,
             ...(options.height === undefined ? {} : { height: options.height }),
             ...(options.hidden === undefined ? {} : { hidden: options.hidden }),
           });

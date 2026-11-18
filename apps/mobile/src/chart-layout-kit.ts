@@ -71,7 +71,12 @@ export interface LayoutDot {
   readonly halo?: { readonly r: number; readonly opacity: number };
   /** A surface-coloured ring around the dot, in pt. */
   readonly ring?: number;
+  /** The series' marker, for a colour-blind read (default `circle`). */
+  readonly shape?: DotShape;
 }
+
+/** A series marker: the mockup's solid ● / dashed ■ / dotted ▲ (three slots). */
+export type DotShape = "circle" | "square" | "triangle";
 
 export type TextRole =
   | "guide"
@@ -94,6 +99,10 @@ export interface LayoutText {
   readonly role: TextRole;
   readonly series?: number;
   readonly strong?: boolean;
+  /** Inside-plot label: the page-coloured halo that keeps it readable over the data. */
+  readonly halo?: boolean;
+  /** The marker glyph drawn beside an inside-plot label (docs/feat/mobile-chart-labels.md D2). */
+  readonly shape?: DotShape;
 }
 
 export interface GuideLine {
@@ -108,6 +117,9 @@ export interface LegendItem {
   readonly series: number;
   readonly label: string;
   readonly paint: Paint;
+  /** The series' last defined value, already formatted (`"148 k req"`); `""` when it has none. */
+  readonly value: string;
+  readonly shape: DotShape;
 }
 
 export interface ChartTable {
@@ -162,7 +174,15 @@ export interface LayoutOptions {
   readonly hidden?: ReadonlySet<number>;
   /** Text width in pt; defaults to the mono estimate. */
   readonly measure?: (text: string, size: number) => number;
+  /**
+   * Where a line/area chart names its series: inside the plot at each line's end
+   * (default, no gutter), or in a legend above it. Ignored by every other kind.
+   */
+  readonly labels?: LabelMode;
 }
+
+/** See `LayoutOptions.labels`. */
+export type LabelMode = "inside" | "legend";
 
 /** The resolved options every builder gets. */
 export interface Ctx {
@@ -172,6 +192,7 @@ export interface Ctx {
   readonly locale: string;
   readonly hidden: ReadonlySet<number>;
   readonly measure: (text: string, size: number) => number;
+  readonly labels: LabelMode;
 }
 
 /** SF Mono's advance, as a share of the point size. */

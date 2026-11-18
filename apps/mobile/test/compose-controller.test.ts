@@ -61,6 +61,8 @@ function fakeHandle(
     readonly refuseEnqueue?: unknown;
     readonly refuseSendNow?: unknown | ((messages: readonly { id: string }[]) => unknown);
     readonly refuseUpload?: unknown;
+    /** The send-now's ACK lands only when this resolves (the request still in flight). */
+    readonly holdSendNow?: Promise<void>;
     readonly facts?: { historyLength: number; runningTurnId: string | null };
   } = {},
 ): FakeHandle {
@@ -116,6 +118,9 @@ function fakeHandle(
       if (refusal !== undefined) {
         throw refusal;
       }
+      // The ACK: held by a test that needs the request still in flight.
+      await options.holdSendNow;
+      return (async function* () {})();
     },
     onQueued(listener) {
       listeners.add(listener);
@@ -810,6 +815,42 @@ describe("the queue-diagnosis trace (docs/fix/mobile-queued-stuck.md)", () => {
     expect(traceText(log)).toContain("ev=rows where=after-turn-end n=1 id0=r1");
     // No behaviour change: the row is still the view's.
     expect(h.compose.view().queued.map((row) => row.id)).toEqual(["r1"]);
+  });
+
+  test("the device capture, replayed: send-now row listed, turn cancelled, n=0 → the row leaves", async () => {
+    // capture-1 (build 680b4b8b), in order: send-now mints the field's row; the
+    // daemon lists it (n=1); the old turn ends cancelled; the next report is n=0
+    // — all WHILE `handle.sendNow` is still pending (it drains the new turn).
+    // Before the fix the last line was `rows where=after-queued-live n=1`.
+    const log = createAppLog({ now: () => 1_700_000_000_000, capacity: 200 });
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = await harness({ log, handle: fakeHandle({ holdSendNow: held }) });
+    h.setTurn("c5ad2a4a");
+    h.setField("now please");
+    const sending = h.compose.sendNow();
+    const row = h.compose.view().queued[0]?.id ?? "";
+    expect(row).not.toBe("");
+    h.handle.emitQueue({ entries: [{ id: row, text: "now please" }], returned: [] });
+    h.compose.turnClosed();
+    h.handle.emitQueue({ entries: [], returned: [] });
+    expect(h.compose.view().queued).toEqual([]);
+    expect(traceText(log).split("\n").at(-1)).toContain("ev=rows where=after-queued-live n=0");
+    release();
+    await sending;
+    expect(h.compose.view().queued).toEqual([]);
+  });
+
+  test("a send-now the daemon never LISTS converges when its request succeeds", async () => {
+    // Mutation: drop the `sendNowAccepted` call in `sendNow` → the row stays → red.
+    const h = await harness();
+    h.setTurn("t1");
+    h.setField("straight in");
+    await h.compose.sendNow();
+    h.handle.emitQueue({ entries: [], returned: [] });
+    expect(h.compose.view().queued).toEqual([]);
   });
 
   test("with no sink wired nothing is logged, and the acts still happen", async () => {

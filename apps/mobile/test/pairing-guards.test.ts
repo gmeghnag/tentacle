@@ -75,10 +75,12 @@ describe("no build-time computer, no build-time token (F-H4)", () => {
     // (docs/feat/mobile-chrome.md Design 6) adds a fourth, the same way; the
     // photo settings (fix/mobile-media-live item 5) a fifth, and the artifact seen
     // record (docs/feat/model-artifacts.md D9) a sixth — `artifact-seen-store.ts`
-    // decides and stays pure.
+    // decides and stays pure. The Charts setting (docs/feat/mobile-chart-labels.md
+    // D7) a seventh, the same way: `chart-settings-store.ts` decides.
     expect(importers.map((path) => path.slice(APP.length + 1)).sort()).toEqual([
       "src/activity-settings-expo.ts",
       "src/artifact-seen-expo.ts",
+      "src/chart-settings-expo.ts",
       "src/lock-settings-expo.ts",
       "src/photo-settings-expo.ts",
       "src/secure-kv.ts",

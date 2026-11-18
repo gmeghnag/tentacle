@@ -134,6 +134,8 @@ export type KeyEffect =
   | { readonly kind: "submit"; readonly text: string }
   /** Backspace on an empty input with chips: drop the last chip. */
   | { readonly kind: "removeLastChip" }
+  /** ↑ on an empty input: take this queued row back to edit (docs/feat/queue-unqueue.md). */
+  | { readonly kind: "pullBackQueued"; readonly id: string; readonly text: string }
   // --- voice dictation (docs/feat/voice-dictation.md). The key layer only
   // DECIDES; `useVoice` owns the child and the reducer does the rest.
   /** Start a dictation, or finish the running one (one key, two meanings). */

@@ -7,7 +7,7 @@
  */
 import { type ChartSpec, datasetValues, formatNumber, usesPoints, yFormat } from "@tentacle/core";
 import { type HeroDelta, chartLang, heroDelta, heroOf, isStacked, xTexts } from "./chart-hero.ts";
-import type { ChartTable, LayoutKind } from "./chart-layout-kit.ts";
+import type { ChartLayout, ChartTable, LayoutKind, Paint } from "./chart-layout-kit.ts";
 import { SCRUB_IDLE, type ScrubEvent, type ScrubState, reduceScrub } from "./chart-scrub.ts";
 
 const UI = {
@@ -412,5 +412,53 @@ export function createScrubDriver(ports: () => ScrubPorts): ScrubDriver {
     },
     holding: () => state.kind === "pressing" || state.kind === "scrubbing",
     scrubbing: () => state.kind === "scrubbing",
+  };
+}
+
+// ── A's tap-to-highlight (docs/feat/mobile-chart-labels.md D3) ─────────────
+
+export function toggleHighlight(current: number | null, tapped: number): number | null {
+  return current === tapped ? null : tapped;
+}
+
+/** How much a series that is not the highlighted one keeps. */
+const MUTE_LINE = 0.55;
+const MUTE_FILL = 0.6;
+
+/**
+ * The layout with `k` highlighted: every other series' line and fill takes
+ * `mutedLine` (the fills also lose most of their gradient), and the hero moves
+ * onto `k` — itself vs its own previous defined point (D6). Everything else is
+ * untouched, so this is a projection of the same layout, not a re-layout.
+ *
+ * A series index the chart does not have returns `layout` unchanged (a stale
+ * highlight after a series was hidden), and the scrub keeps winning while a
+ * finger is down: `ChartView` reads `scrub?.hero ?? layout.hero`, and the
+ * scrub's own `heroOf` is re-read here for `k`.
+ */
+export function highlightLayout(
+  layout: ChartLayout,
+  spec: ChartSpec,
+  k: number,
+  locale: string,
+): ChartLayout {
+  if (k < 0 || k >= spec.datasets.length) return layout;
+  const mute = (p: { paint: Paint; series: number; opacity: number }, factor: number) =>
+    p.series === k || p.series < 0
+      ? { paint: p.paint, opacity: p.opacity }
+      : { paint: { token: "mutedLine" } as Paint, opacity: p.opacity * factor };
+  return {
+    ...layout,
+    paths: layout.paths.map((p) =>
+      p.role === "line" || p.role === "fill"
+        ? { ...p, ...mute(p, p.role === "fill" ? MUTE_FILL : MUTE_LINE) }
+        : p,
+    ),
+    dots: layout.dots.map((d) => ({ ...d, ...mute(d, MUTE_LINE) })),
+    hero: heroOf(spec, undefined, locale, k),
+    scrubAt: (i: number) => {
+      const view = layout.scrubAt(i);
+      return view === null ? null : { ...view, hero: heroOf(spec, i, locale, k) };
+    },
   };
 }

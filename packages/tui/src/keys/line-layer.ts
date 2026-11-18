@@ -43,6 +43,8 @@ export interface LineSnapshot {
   readonly dockFocus: DockFocus;
   /** Chips on the attachment draft. */
   readonly chipCount: number;
+  /** The queued row ↑ on an empty input pulls back (`pullBackTarget`), if any. */
+  readonly pullBack: { readonly id: string; readonly text: string } | null;
 }
 
 /** One history move: the new position, the saved draft, and the text to show. */
@@ -100,6 +102,16 @@ export function resolveLineEffects(snap: LineSnapshot): readonly KeyEffect[] {
     case "moveVertical":
       return [{ kind: "fieldMoveVertical", dir: action.dir, extend: action.extend }];
     case "history": {
+      // ↑ on an EMPTY input at the draft slot, with a queued row of mine:
+      // pull it back to edit (docs/feat/queue-unqueue.md) — before history.
+      if (
+        action.dir === -1 &&
+        value === "" &&
+        snap.pullBack !== null &&
+        snap.history.index >= snap.history.items.length
+      ) {
+        return [{ kind: "pullBackQueued", id: snap.pullBack.id, text: snap.pullBack.text }];
+      }
       const move = historyStep(snap.history, action.dir, value);
       const cursorWrite: KeyEffect = {
         kind: "setHistoryCursor",

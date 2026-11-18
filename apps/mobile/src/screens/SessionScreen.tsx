@@ -54,6 +54,8 @@ import { activityView, agentCardTarget } from "../activity.ts";
 import type { AppLogField } from "../app-log.ts";
 import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
 import { seenFor } from "../artifact-seen-store.ts";
+import { CHART_SETTINGS } from "../chart-settings-expo.ts";
+import type { ChartSettings } from "../chart-settings-store.ts";
 import { chatStatus, titleLabel } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
@@ -710,6 +712,11 @@ export function SessionScreen({
     ACTIVITY_SETTINGS.current(),
   );
   useEffect(() => ACTIVITY_SETTINGS.subscribe(setActivitySettings), []);
+  // The Charts setting (docs/feat/mobile-chart-labels.md D7): read ONCE here and
+  // handed to every chart row, the `ACTIVITY_SETTINGS` pattern — one listener
+  // per screen, not per chart in the transcript.
+  const [chartSettings, setChartSettings] = useState<ChartSettings>(() => CHART_SETTINGS.current());
+  useEffect(() => CHART_SETTINGS.subscribe(setChartSettings), []);
   const a11yFlags = useAccessibilityFlags();
   const [band, setBand] = useState<FloatBounds | null>(null);
   const pillShown =
@@ -1031,6 +1038,7 @@ export function SessionScreen({
                         palette={palette}
                         onLink={onLink}
                         thumbnails={state.thumbnails}
+                        chartLabels={chartSettings.labels}
                         step={{
                           cell,
                           open: isOpen(openSteps, item.key),

@@ -94,6 +94,8 @@ import {
   SnapshotResultSchema,
   SubagentMessageParamsSchema,
   SubagentMessageResultSchema,
+  UnqueueParamsSchema,
+  UnqueueResultSchema,
   UpdateSettingsParamsSchema,
   UpdateSettingsResultSchema,
 } from "./session.ts";
@@ -135,6 +137,8 @@ export const Method = {
   /** Pin a session to the top of every device's list (docs/feat/mobile-session-actions.md). */
   Pin: "session/pin",
   Reclaim: "session/reclaim",
+  /** Take queued rows back before the model reads them (docs/feat/queue-unqueue.md). */
+  Unqueue: "session/unqueue",
   ResolvePermission: "session/resolve_permission",
   /** The user writes to a RUNNING background child (docs/feat/subagent-panel.md). */
   SubagentMessage: "session/subagent_message",
@@ -272,6 +276,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.Rename]: { params: RenameParamsSchema, result: RenameResultSchema },
   [Method.Pin]: { params: PinParamsSchema, result: PinResultSchema },
   [Method.Reclaim]: { params: ReclaimParamsSchema, result: ReclaimResultSchema },
+  [Method.Unqueue]: { params: UnqueueParamsSchema, result: UnqueueResultSchema },
   [Method.ResolvePermission]: {
     params: ResolvePermissionParamsSchema,
     result: ResolvePermissionResultSchema,

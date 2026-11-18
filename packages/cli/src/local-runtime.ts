@@ -308,6 +308,8 @@ export interface PersistingController extends SessionController {
   documentsInput: RemoteSession["documentsInput"];
   /** `RemoteSession.enqueue`: `id` is the caller's key for the text (a `sendNow` cites it). */
   enqueue(text: string, id?: string): Promise<void>;
+  /** `RemoteSession.unqueue`: take queued rows back (docs/feat/queue-unqueue.md). */
+  unqueue: RemoteSession["unqueue"];
   /** `RemoteSession.sendNow`; the new turn is saved once it settles, like `send`'s. */
   sendNow(...args: Parameters<RemoteSession["sendNow"]>): Promise<AsyncIterable<SessionEvent>>;
   /** `RemoteSession.rename`: the daemon's stored text; its `session_title` triggers a save. */
@@ -870,6 +872,10 @@ export function persistingController(
     // its optimistic entry on a delivery failure.
     enqueue(text, id) {
       return inner.enqueue(text, id);
+    },
+    // Nothing to save: the daemon's next `queued` (and the next round's save) carry it.
+    unqueue(ids) {
+      return inner.unqueue(ids);
     },
     skills() {
       return inner.skills();
