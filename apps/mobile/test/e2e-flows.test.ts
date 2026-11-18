@@ -145,9 +145,7 @@ describe("flow 33 asserts the hub state it actually sets up (mobile-hub-tap revi
     // dimmed, so a commit is `resolveCommit`'s no-op, not the sheet. Asserting
     // the sheet were VISIBLE here would fail on device — the round-1 finding.
     expect(flow.some((a) => a.id === "hub-notice" && a.kind === "assertVisible")).toBe(true);
-    expect(flow.some((a) => a.id === "activity-sheet-close" && a.kind === "assertVisible")).toBe(
-      false,
-    );
+    expect(flow.some((a) => a.id === "activity-sheet" && a.kind === "assertVisible")).toBe(false);
   });
 
   test("the tap really reached the fan's Activity item first", () => {

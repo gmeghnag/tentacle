@@ -176,22 +176,30 @@ No protocol, daemon, persistence or TUI change.
 
 ### Tests
 
-- `activity-panel.test.ts` (Bun, pure): detents for 1 / 3 / 9 rows and small vs
-  large screens (`low ≥ MIN_LOW`, `low ≤ tall`, no tall detent when content
-  fits); `panelRelease` table — downward flick closes from `low` AND `tall`,
-  upward flick → `tall`, slow drag below `0.6·low` → close, nearest otherwise;
-  `panelOpensFor` false on empty list, true on a focused detail;
-  `panelAutoClose` only on the list; `stopArm` arm → confirm fires, confirm
-  after 3 s does not, pruned row does not.
+- `activity-panel.test.ts` (Bun, pure): detents for 1 / 3 / 9 / 40 rows and
+  small vs large screens (`low ≥ MIN_LOW`, `low ≤ tall`, `low ≤ half the
+  screen`, no tall detent when content fits, `low` still ≤ `tall` when the
+  content outgrows even `tall`); a drag in flight clamps to `[0, tall]` and does
+  not move when there is one detent; `panelRelease` table — downward flick
+  closes from `low` AND `tall`, upward flick → `tall`, slow drag below
+  `0.6·low` → close, nearest otherwise; `panelFollowsContent` — a re-measured
+  content moves a sheet resting at `low` only, never one dragged to `tall` and
+  never a first measure; `panelOpensFor` false on empty list, true on a focused
+  detail; `panelAutoClose` only on the list; `stopArm` arm → confirm fires,
+  confirm after 3 s does not, pruned row does not.
 - `session-screen-activity-actions.test.ts` (extend): `stopRow("child", id)`
   calls `killSubagent(id)` WITHOUT `openChild`; `stopRow` on an unsupported
-  handle yields `ACTIVITY_UNSUPPORTED`.
+  handle yields `ACTIVITY_UNSUPPORTED`; a second Stop while the first is in
+  flight sends no second kill; the notice is cleared by the next update and an
+  open detail is left alone.
 - `activity-panel-wiring.test.ts` (source-pinned, the `hub-tap-wiring.test.ts`
   pattern): `ActivitySheet.tsx` has no `pageSheet`, uses `transparent`; the
-  PanResponder release calls `panelRelease`; `SessionScreen` gates
-  `openActivity` with `panelOpensFor`; every close path calls the one handler.
+  PanResponder release calls `panelRelease`; a re-measured content goes through
+  `panelFollowsContent`; the detail's `KeyboardAvoidingView` and detent are the
+  module's; `SessionScreen` gates `openActivity` with `panelOpensFor`; every
+  close path calls the one handler; the two opens write the same state.
 - Red first (§9): each new test is shown failing before its slice lands;
-  non-vacuity by mutation on `panelRelease` (flip `FLICK` sign → test fails).
+  non-vacuity by mutation (§ Execution's list).
 - **Simulator check (not automatable):** open with 1, 3, 9 rows; flick down
   from both detents; tap scrim; open an agent card's detail and type a
   message; light + dark. Screenshots into Execution.
@@ -223,7 +231,146 @@ No protocol, daemon, persistence or TUI change.
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— deepseek-v4-pro (DeepSeek), 2026-11-17*
+
+Built in the Implementation's order (the protocol → daemon → client → cli → tui
+order does not apply: this task touches only `apps/mobile`). Every slice was RED
+first — the test written and seen failing before its implementation.
+
+1. **`apps/mobile/src/activity-panel.ts` (new, pure, React-free).** The two
+   detents (`panelDetents`/`panelDrag`/`panelFollowsContent`/`panelRelease`),
+   the open/auto-close gates (`panelOpensFor`/`panelAutoClose`) and the detent a
+   sheet opens at (`panelDetentFor`), the inline two-tap Stop's arm
+   (`stopTap`/`stopArmed`/`pruneArm`), plus the constants (`PANEL_MIN_LOW` 140,
+   `PANEL_TOP_GAP` 44, `PANEL_HEADER` 62, `PANEL_LOW_CAP` 0.5, `PANEL_FLICK`
+   0.6, `PANEL_CLOSE_RATIO` 0.6, `STOP_ARM_MS` 3000, `STOP_IDLE`). Nothing in it
+   imports React or React Native (AGENTS §7).
+2. **`apps/mobile/test/activity-panel.test.ts` (new).** 30 pure tests: the
+   detents (1 / 3 / 9 / 40 rows, large and small screen, a content that outgrows
+   even `tall`), a drag in flight, the release table, `panelFollowsContent`, the
+   open/auto-close gates, the open detent, the two-tap Stop. RED first against a
+   stub module (18 assertions failing before the implementation); the
+   `panelFollowsContent` block came later and was shown red against the un-wired
+   effect (drift list, item 2).
+3. **`apps/mobile/src/session-screen-controller.ts`.** `ActivityState` gained
+   `stopNotices: Readonly<Record<string, string>>`; the interface gained
+   `stopRow(kind, id): Promise<void>`, implemented by REUSING
+   `killChildOutcome`/`killJobOutcome` (never `openChild`/`openJob`, so a row
+   Stop does not open a detail). A `rowStops` `Set` is the single flight per row;
+   both the `onSubagents` and `onJobs` subscriptions reset `stopNotices`, so a
+   notice never sticks past the next view.
+4. **`apps/mobile/test/session-screen-activity-actions.test.ts` (extended).** A
+   `Stop from a ROW…` describe with 8 tests: child and job kills by id with no
+   detail opened, a `{killed:false}` notice keyed by the row's id, a thrown kill
+   as a notice (never a throw at the UI), an unsupported handle refusing typed,
+   the single flight, the notice cleared by the next update, and an open detail
+   left alone. RED shown first (`stopRow is not a function`).
+5. **`apps/mobile/src/ui/ActivityRow.tsx` (new, render only).** One activity
+   row: the kind's glyph (an `ActivityIndicator` arc for a live sub-agent; the
+   terminal / clock / `doc.on.doc` icons), the title (mono when the row is mono,
+   bold when unread), one line of step, the meta, the notice line, and a trailing
+   ■ that becomes the "■ Stop" pill when armed (`onStop` only for a
+   subagent/job row) or `Open ›`/`›` for a finished/scheduled one.
+6. **`apps/mobile/src/screens/ActivitySheet.tsx` (rewritten).** `pageSheet` → a
+   transparent, motionless `Modal` (`animationType="none"`,
+   `statusBarTranslucent`) with a scrim `Pressable` (`testID activity-scrim`), an
+   `Animated.Value` height driven by a `PanResponder` on the HEADER only, the
+   detents from `panelDetents` over the measured content
+   (`onContentSizeChange`) and the screen (`onLayout`), a `close()` that animates
+   to 0 and only THEN calls `onClose` (guarded, so a double close cannot fire
+   twice), Reduce Motion honoured (a 150 ms `timing` instead of the spring),
+   opened at `low` (list) or `tall` (detail), the header reading `Activity · N`
+   (`view.count + view.unread`), and the detail (`JobDetail`/`SubagentDetail`)
+   inside a `KeyboardAvoidingView`. The old `Sheet`/`pageSheet`/close glyph are
+   gone.
+7. **`apps/mobile/src/screens/SessionScreen.tsx`.** `openActivity` is gated by
+   `panelOpensFor(activityVm, null)`; `closeActivity` (a `useCallback`) is the
+   ONE close — it clears `activityOpen`, `activityFocus`, the arm and the
+   controller's detail, so the four can never disagree (the scrim, the swipe,
+   Android's back and the auto-close all pass through it); an effect closes the
+   panel on `panelAutoClose(activityVm, activityFocus)`. The row Stop is the
+   two-tap arm (`stopTap` + `playHaptic("light"/"firm")` +
+   `controller.stopRow`), the arm is pruned by the current row ids (`pruneArm`)
+   and reverts on its own through one timer that bumps the panel's clock. The
+   sheet is handed `focus`, `now`, `onStopRow`, `arm`, `stopNotices`,
+   `onClose`, `reduceMotion`.
+8. **`apps/mobile/test/activity-panel-wiring.test.ts` (new).** 17 source-pinned
+   tests (the `hub-tap-wiring.test.ts` pattern) for what is `.tsx` and therefore
+   unimportable from Bun: no `pageSheet`/`transparent`/`Animated.Value`, Reduce
+   Motion, the release asking the pure module, the pan on the header only, every
+   close path on one handler, the `panelOpensFor` gate, the auto-close effect,
+   the `panelFollowsContent` re-settle, the `KeyboardAvoidingView` and the
+   detail's detent, `ActivityRow`, the header count, the two-tap arm, `stopRow`
+   killing without opening a detail, and the two opens writing the same state.
+   RED was proven by running the same 13 checks against the `HEAD` sources from a
+   scratch script (`.tentacle/tmp/mobile-activity-panel/red-wiring.ts`): 0 pass /
+   13 fail.
+9. **e2e + changelog.** `apps/mobile/e2e/flows/27-activity.yaml` taps the scrim
+   (twice) instead of `activity-sheet-close`, `33-hub.yaml` asserts
+   `activity-sheet` `notVisible`, `apps/mobile/test/e2e-flows.test.ts` matches; a
+   `changelog.d/mobile-activity-panel.changed.md` bullet states the change.
+
+### Drift from the Implementation (all deliberate)
+
+1. **The detent formula (`PANEL_LOW_CAP`).** The plan's
+   `low = clamp(content+header+bottomInset, MIN_LOW, tall)` made `tall`
+   UNREACHABLE: `low` was always the content's own height, so `tall` collapsed
+   onto it and B's "drag up to a taller detent" could never happen. Fixed as
+   `low = min(max(fits, PANEL_MIN_LOW), min(tall, max(round(screen·0.5),
+   PANEL_MIN_LOW)))`, with the second detent existing (`tall > low`,
+   `scrollable`) only when `fits > low`. Verified numbers: iPhone 844/47/34 —
+   1 row → low 146 / tall 146; 3 rows → 246 / 246; 9 rows → low 422
+   (`round(844/2)`), tall 753, scrollable; small screen 667/20/0 — 9 rows →
+   low 334, tall 579.
+2. **`panelFollowsContent` (found while covering the failure modes).** The
+   plan's failure mode says a changed content re-settles the sheet "if it sits
+   at `low`; at `tall` it stays", but the first implementation re-settled on any
+   `detents.low` change, including from `tall`. The rule is now a pure function
+   and the sheet asks it.
+3. **`ActivitySheet`'s props.** Gained `focus`, `now`, `onStopRow`, `arm`,
+   `stopNotices`, `reduceMotion`; lost only the close glyph (Design 5 has no
+   close button — the scrim, the swipe and Android's back are the doors).
+4. **The inline Stop's notice rides `ActivityState.stopNotices`.** The plan said
+   "shown on the row's meta"; a dedicated `Record<rowId, string>` keeps a failed
+   row Stop out of the row's own metadata, and the next activity update clears
+   it, so a notice is never sticky.
+5. **The e2e flows and their test** changed from `activity-sheet-close` to
+   `activity-scrim` (27) and `activity-sheet` (33): the close button those flows
+   tapped does not exist in Design 5.
+6. **The empty-list `Row` line and the group bands are unchanged.** The panel
+   never OPENS on an empty list (`panelOpensFor`) and auto-closes when the list
+   empties (`panelAutoClose`, Owner Q3), so `view.empty` only shows during the
+   moment before the sheet animates away; it was not redesigned.
+
+### Mutations run (each caught by a test, then reverted)
+
+| # | Mutation | Red |
+|---|----------|-----|
+| M1 | `panelRelease`: flip the flick sign | 4 tests |
+| M2 | `panelOpensFor`: ignore `focus` | 1 test |
+| M3 | remove `PANEL_LOW_CAP` (the plan's original formula) | 5 tests |
+| M4 | `stopTap`/`stopArmed`: the window never expires | 1 test |
+| M5 | the next activity update no longer clears `stopNotices` | 1 test |
+| M6 | drop the `rowStops` single-flight guard | 1 test |
+| M7 | `panelFollowsContent`: drop the `shown` check (re-settle from `tall`) | 1 test |
+| M8 | `panelFollowsContent` un-wired in the sheet (`false && …`) | 1 wiring test |
+| M9 | the hub's open path drops `setActivityOpen(true)` | 1 wiring test |
+
+### Validation
+
+- `bunx tsc --noEmit`, `bunx tsc -p apps/mobile`, `bunx tsc -p apps/relay` —
+  clean.
+- `bun run lint` — clean (0 errors, 0 warnings).
+- `bun test` (full suite, once at the end) — **14929 pass / 5 skip / 0 fail**
+  (14934 tests, 1068 files). The 5 skips are the opt-in ones (§6): live docker,
+  live k8s, the slow real-socket keepalive, and the CLI's own docker and k8s
+  live files — verified one by one, each `1 skip`, nothing else skipping.
+- No protocol, daemon, client, persistence or TUI change: **no `protocol.json`
+  regeneration and no `protocol.d/` note** (no `PROTOCOL_VERSION` move).
+- **Not verified here (not automatable):** the simulator pass — open with 1, 3
+  and 9 rows, flick down from both detents, tap the scrim, open an agent card's
+  detail and type a message, light and dark. That is the owner's check; nothing
+  on this branch was run on a device.
 
 ## Review
 

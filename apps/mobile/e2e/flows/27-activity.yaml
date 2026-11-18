@@ -89,7 +89,7 @@ appId: so.tentacle.app
 - assertVisible:
     text: "short child"
 - tapOn:
-    id: "activity-sheet-close"
+    id: "activity-scrim"
 # A background shell job: approve the ask, then its output and Stop (F19).
 - tapOn:
     id: "composer-input"
@@ -128,7 +128,7 @@ appId: so.tentacle.app
 - tapOn:
     id: "activity-detail-back"
 - tapOn:
-    id: "activity-sheet-close"
+    id: "activity-scrim"
 # Nothing runs and no report is unread: the pill is gone.
 - extendedWaitUntil:
     notVisible:

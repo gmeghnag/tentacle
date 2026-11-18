@@ -141,6 +141,12 @@ export interface ActivityState {
   readonly child: ChildAction | null;
   /** The open shell job's detail: its last output read (S9). */
   readonly job: JobAction | null;
+  /**
+   * The last ROW Stop's refusal/doubt, by row id (mobile-activity-panel Design 4):
+   * a stop fired from a row has no detail to show it in, so it rides the row's
+   * meta and is cleared by the next activity update (or a new stop).
+   */
+  readonly stopNotices: Readonly<Record<string, string>>;
 }
 
 export interface ChildAction {
@@ -478,6 +484,12 @@ export interface SessionScreenController {
   refreshJob(): Promise<void>;
   /** Stop the open job (after the confirm), then read how it ended (F19). */
   stopJob(): Promise<void>;
+  /**
+   * Stop a ROW's child or job without opening its detail (mobile-activity-panel
+   * Design 4): the row's two-tap arm IS the confirmation. Reuses the detail's
+   * kill path (same handling, same wording); the outcome lands on the row.
+   */
+  stopRow(kind: "child" | "job", id: string): Promise<void>;
   /** The detail closed (back to the list, or the sheet closed). */
   closeDetail(): void;
   /** The person's tap on a link: the sheet's confirmation is the screen's job. */
@@ -570,9 +582,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     sent: {},
     child: null,
     job: null,
+    stopNotices: {},
   };
   /** The last attached handle's `onSubagents`/`onJobs` subscriptions. */
   let activityWatch: (() => void) | undefined;
+  /** The rows whose kill is in flight (mobile-activity-panel Design 4): one per row. */
+  const rowStops = new Set<string>();
   /**
    * The daemon's wake table as last reported (docs/feat/cron-tool.md S6):
    * `undefined` = none reported yet, an older daemon, or an untrusted one (its
@@ -968,11 +983,22 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       const memory = onSubagents(activity.memory, rows, deps.now());
       // A child's messages live as long as it is live or Finished (bounded with it).
       const keep = new Set([...rows.map((r) => r.id), ...memory.finished.map((f) => f.row.id)]);
-      activity = { ...activity, subagents: rows, memory, sent: pruneSent(activity.sent, keep) };
+      activity = {
+        ...activity,
+        subagents: rows,
+        memory,
+        sent: pruneSent(activity.sent, keep),
+        stopNotices: {},
+      };
       emit();
     });
     const offJobs = session.onJobs?.((report) => {
-      activity = { ...activity, jobs: { rows: report.rows, count: report.count } };
+      // A replaced list is the newest truth: the row stops it spoke for are gone.
+      activity = {
+        ...activity,
+        jobs: { rows: report.rows, count: report.count },
+        stopNotices: {},
+      };
       emit();
     });
     // S9: the person's messages to a child, from the daemon's echo only (a
@@ -1595,6 +1621,31 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       setJob(open.id, { busy: false, notice });
       // How it ended (or that it already had): the detail shows it (F19).
       await readJob(open.id);
+    },
+    async stopRow(kind, id) {
+      // One in-flight stop per row: a second tap would overwrite a success with
+      // "already finished" (the detail's own `busy` rule, S9).
+      if (rowStops.has(id)) {
+        return;
+      }
+      rowStops.add(id);
+      const kill =
+        kind === "job" ? handle?.killJob?.bind(handle) : handle?.killSubagent?.bind(handle);
+      try {
+        const notice =
+          kill === undefined
+            ? ACTIVITY_UNSUPPORTED
+            : kind === "job"
+              ? killJobOutcome(id, await kill(id).catch((e: unknown) => asError(e)))
+              : killChildOutcome(id, await kill(id).catch((e: unknown) => asError(e)));
+        // A detail's own notice is its state's (S9): a row never writes there.
+        if (notice !== null) {
+          activity = { ...activity, stopNotices: { ...activity.stopNotices, [id]: notice } };
+          emit();
+        }
+      } finally {
+        rowStops.delete(id);
+      }
     },
     closeDetail() {
       if (activity.child !== null || activity.job !== null) {

@@ -48,6 +48,15 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { reportsOf } from "../activity-memory.ts";
+import {
+  STOP_ARM_MS,
+  STOP_IDLE,
+  type StopArm,
+  panelAutoClose,
+  panelOpensFor,
+  pruneArm,
+  stopTap,
+} from "../activity-panel.ts";
 import { ACTIVITY_SETTINGS } from "../activity-settings-expo.ts";
 import type { ActivitySettings } from "../activity-settings-store.ts";
 import { activityView, agentCardTarget } from "../activity.ts";
@@ -628,6 +637,54 @@ export function SessionScreen({
       { text: ask.confirm, style: "destructive", onPress: stop },
     ]);
   };
+  // The row Stop's two-tap arm (mobile-activity-panel Design 4). `stopTap` is
+  // pure: the first tap arms, the second within 3 s fires. The arm is pruned of
+  // rows the view no longer has, so a re-arriving row starts unarmed.
+  const [arm, setArm] = useState<StopArm>(STOP_IDLE);
+  const rowIds = useMemo(
+    () => activityVm.groups.flatMap((g) => g.rows.map((r) => r.id)),
+    [activityVm],
+  );
+  useEffect(() => {
+    setArm((prev) => pruneArm(prev, rowIds));
+  }, [rowIds]);
+  // The armed pill reverts on its own: one timer, only while something is armed
+  // (it bumps the panel's clock, which is what `stopArmed` reads).
+  useEffect(() => {
+    if (arm.id === null) {
+      return;
+    }
+    const timer = setTimeout(() => setActivityNow(Date.now()), STOP_ARM_MS + 20);
+    return () => clearTimeout(timer);
+  }, [arm]);
+  const stopRow = (kind: "child" | "job", id: string) => {
+    const tap = stopTap(arm, id, Date.now());
+    setArm(tap.state);
+    setActivityNow(Date.now());
+    if (tap.fire) {
+      playHaptic("firm");
+      void controller.stopRow(kind, id);
+    } else {
+      playHaptic("light");
+    }
+  };
+  // ONE close for the panel (Design 5): the scrim, the swipe, Android's back and
+  // the auto-close below all end here, so `activityOpen`/`activityFocus` and the
+  // controller's detail can never disagree.
+  const closeActivity = useCallback(() => {
+    setActivityOpen(false);
+    setActivityFocus(null);
+    setArm(STOP_IDLE);
+    controller.closeDetail();
+  }, [controller]);
+  // The panel never stays open on an empty list (Design 1, Owner Q3): the last
+  // row ending closes it — never out from under an open detail, whose child may
+  // just have flipped to its report (F14).
+  useEffect(() => {
+    if (activityOpen && panelAutoClose(activityVm, activityFocus)) {
+      closeActivity();
+    }
+  }, [activityOpen, activityVm, activityFocus, closeActivity]);
   // "Show in chat": the report's own row, scrolled to with the sheet closed; the
   // list stops following so the next delta does not pull it back (`shown`).
   const showIndex = showRow(rows, shownReport);
@@ -728,6 +785,12 @@ export function SessionScreen({
     fits: band !== null && fits(band),
   });
   const openActivity = () => {
+    // Never an empty panel (mobile-activity-panel Design 1): the hub already says
+    // "Nothing running", and a sheet with only that line is what the owner
+    // called "a huge sheet" for nothing.
+    if (!panelOpensFor(activityVm, null)) {
+      return;
+    }
     focusActivity(null);
     setActivityOpen(true);
   };
@@ -1418,12 +1481,17 @@ export function SessionScreen({
           visible={activityOpen}
           view={activityVm}
           detail={activityDetail}
+          focus={activityFocus}
+          now={activityNow}
           child={activity.child}
           job={activity.job}
           onFocus={focusActivity}
           onDraft={(text) => controller.setChildDraft(text)}
           onSend={() => void controller.messageChild()}
           onStop={confirmStop}
+          onStopRow={stopRow}
+          arm={arm}
+          stopNotices={activity.stopNotices}
           onRefreshJob={() => void controller.refreshJob()}
           onScheduled={() => {
             // One sheet at a time: leave Activity, then the ONE path into
@@ -1435,11 +1503,8 @@ export function SessionScreen({
           }}
           {...(showIndex === null ? {} : { onShow: showInChat })}
           onLink={onLink}
-          onClose={() => {
-            setActivityOpen(false);
-            setActivityFocus(null);
-            controller.closeDetail();
-          }}
+          onClose={closeActivity}
+          reduceMotion={a11yFlags.reduceMotion}
         />
         <RenameSheet
           palette={palette}
