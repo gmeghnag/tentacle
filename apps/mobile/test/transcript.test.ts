@@ -8,7 +8,9 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ChatMessage } from "@tentacle/core";
+import { NOTICE_GLYPHS, noticeLooks } from "../src/notice-group.ts";
 import {
+  type Row,
   type State,
   TURN_INTERRUPTED_NOTICE,
   TURN_LOST_NOTICE,
@@ -267,7 +269,7 @@ describe("a turn's stream", () => {
     expect(stopped?.kind === "notice" ? stopped.text : undefined).toBe(TURN_INTERRUPTED_NOTICE);
   });
 
-  test("a failed turn surfaces the daemon's words as a notice", () => {
+  test("a failed turn surfaces the daemon's words as a WARNING notice", () => {
     const state = fold([
       { type: "turn_started", turnId: "t", own: true },
       { type: "turn_ended", outcome: "failed", message: "the model refused" },
@@ -275,7 +277,10 @@ describe("a turn's stream", () => {
     expect(state.rows.at(-1)).toEqual({
       kind: "notice",
       key: state.rows.at(-1)?.key as string,
-      text: "⚠ the model refused",
+      // The daemon's words as they came; the WARNING marker is the `▲` glyph
+      // (Review round 1, finding 1 — `◇ ⚠ boom` mixed the two signals).
+      text: "the model refused",
+      level: "warn",
     });
   });
 
@@ -436,6 +441,91 @@ test("the daemon's explanations become notices, never silence", () => {
   expect(hook.rows).toHaveLength(1);
   const nudge = fold([{ type: "context_note", text: "keep going", reason: "continue" }]);
   expect(nudge.rows).toHaveLength(0);
+});
+
+/** A notice row's level, as the row carries it (`undefined` = info). */
+const levelOfRow = (row: Row | undefined): "warn" | undefined =>
+  row?.kind === "notice" ? row.level : undefined;
+
+describe("harness levels: the TUI's table, so the phone can draw `▲` vs `◇`", () => {
+  // docs/feat/mobile-harness-notices.md S1 / `packages/tui/src/state.ts:724`,`:730`.
+  // Mutation: drop a `"warn"` in `transcript.ts` → the matching case goes red.
+  test("a cut reply and an empty turn WARN; a repair, a leak and a hook note are info", () => {
+    const cut = fold([{ type: "truncated_reply", reason: "length", retrying: false }]);
+    expect(levelOfRow(cut.rows[0])).toBe("warn");
+    const empty = fold([{ type: "empty_turn" }]);
+    expect(levelOfRow(empty.rows[0])).toBe("warn");
+    // Info is the ABSENCE of the field, never a `level: "info"` (the TUI's shape).
+    const repaired = fold([
+      { type: "history_repaired", invalidArguments: 1, unansweredCalls: 0, orphanResults: 0 },
+    ]);
+    expect(repaired.rows[0]).toMatchObject({ kind: "notice" });
+    expect(levelOfRow(repaired.rows[0])).toBeUndefined();
+    const leak = fold([{ type: "dsml_leak", text: "the model leaked a tool call" }]);
+    expect(levelOfRow(leak.rows[0])).toBeUndefined();
+    const hook = fold([{ type: "context_note", text: "hook said so", reason: "hook" }]);
+    expect(levelOfRow(hook.rows[0])).toBeUndefined();
+  });
+
+  test("the phone-only notices: a LOST turn's stream warns, the rest are info (Owner Q3)", () => {
+    const lost = fold([{ type: "turn_started", turnId: "t1", own: false }]);
+    const ended = apply(lost, { type: "turn_ended", outcome: "lost" });
+    expect(levelOfRow(ended.rows[0])).toBe("warn");
+    const interrupted = apply(lost, { type: "turn_ended", outcome: "interrupted" });
+    expect(levelOfRow(interrupted.rows[0])).toBeUndefined();
+    const closed = fold([{ type: "closed", reason: "deleted" }]);
+    expect(levelOfRow(closed.rows[0])).toBeUndefined();
+    const unsupported = fold([{ type: "unsupported", kind: "brand_new_update" }]);
+    expect(levelOfRow(unsupported.rows[0])).toBeUndefined();
+    const failed = apply(lost, { type: "turn_ended", outcome: "failed", message: "boom" });
+    expect(failed.rows[0]?.kind === "notice" ? failed.rows[0].text : "").toBe("boom");
+    // ...and it is a fault, so it warns like a lost stream (Review round 1).
+    expect(levelOfRow(failed.rows[0])).toBe("warn");
+  });
+
+  test("the merged `again` line keeps the warn level AND its key (FlatList identity)", () => {
+    // Mutation: build the merged row from scratch (or default its level) → red on
+    // either assertion: the block would lose its `▲`, or the list its identity.
+    const s = fold([
+      { type: "turn_started", turnId: "t1", own: true },
+      text("part one"),
+      { type: "truncated_reply", reason: "length", retrying: true },
+      { type: "truncated_reply", reason: "length", retrying: false },
+    ]);
+    const notices = s.rows.filter((r) => r.kind === "notice");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ kind: "notice", level: "warn" });
+    expect(notices[0]?.text).toContain("cut again");
+    // The key is the FIRST line's: a re-ask rewrites in place, never re-keys.
+    const first = fold([
+      { type: "turn_started", turnId: "t1", own: true },
+      text("part one"),
+      { type: "truncated_reply", reason: "length", retrying: true },
+    ]);
+    const firstNotice = first.rows.find((r) => r.kind === "notice");
+    const mergedKey = notices[0]?.kind === "notice" ? notices[0].key : "";
+    expect(mergedKey).not.toBe("");
+    expect(firstNotice?.key).toBe(mergedKey);
+  });
+
+  test("a reloaded history groups EXACTLY as the live fold does, and carries no level", () => {
+    // The failure mode the plan names ("reload vs live"): a cut/empty warning is
+    // never persisted, so a reload has no `▲` — but NOTES from history are the
+    // same rows and must group the same, or the block re-opens on reopen.
+    const history: readonly ChatMessage[] = [
+      { role: "user", content: "go" },
+      { role: "user", content: "a job exited 0", note: { kind: "background" } },
+      { role: "user", content: "a sub-agent finished", note: { kind: "subagent", id: "sa-1" } },
+    ];
+    const reloaded = apply(initialState, { type: "history", messages: history, reason: null });
+    const notices = reloaded.rows.filter((r) => r.kind === "notice");
+    expect(notices).toHaveLength(2);
+    expect(notices.every((r) => r.level === undefined)).toBe(true);
+    // One block: the second note hangs under the first (no glyph of its own).
+    const looks = noticeLooks(reloaded.rows);
+    expect(looks.get(notices[0]?.key ?? "")).toEqual({ glyph: NOTICE_GLYPHS.info, joined: false });
+    expect(looks.get(notices[1]?.key ?? "")).toEqual({ glyph: null, joined: true });
+  });
 });
 
 describe("the truncation merge is scoped to the re-ask's OWN round (Review round 3 MEDIUM-1)", () => {
