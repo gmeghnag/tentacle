@@ -373,3 +373,30 @@ M1 drop the absorb branch → 5 fail ✔ · M2 `landingReveal` ignores `silent` 
 **Attacks tried with nothing found:** a re-attach while reading up (landingStep/landingReveal → `landingDone` with no command, so `contentGrew` still runs). `landingAwaiting` and `landingStart` cannot enter the absorb branch (`settling`/`awaiting` guards). A streaming turn is bounded by `LANDING_ROUNDS`. `withLiveCards` returns the same join on a no-op and dedups by id + version. No §7 invariant touched (mobile-only, no protocol or persistence change).
 
 **How the executor behaved:** honest about missing screenshots and the bug 2 park. But it overstated non-vacuity for the screen wiring, and its repro models only the phase it fixed.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, small fix). This reviews `git diff HEAD~1` (`629ff786`).
+
+**Gate:** the 4 touched test files → 108 pass / 0 fail; `bun run lint` → clean (2083 files); `bun run typecheck` → clean. The full `bun test` was not re-run.
+
+**Round-1 findings: both fixed, checked by mutation** (`.tentacle/tmp/mobile-qa-1118-fix/mut2.ts`; tree clean after). Every mutation turns at least one test red:
+R1 `land()` returns `next.step !== null` → 1 fail · R2 drop `owed ||` → 1 · R3 re-arm only on scroll → 1 · R4 drop the second `fire()` → 1 · R5 no post-reveal tail → 4 · R6 tail scrolls animated → 3 · R7 tail unbounded → 1 · R8 a repeated height does not end the tail → 2.
+Finding 1 is now pinned by source assertions in `session-screen-follow-wiring.test.ts`. That is regex over the source, the repo's existing pattern, and weaker than a render test. Finding 2's post-reveal tail is followed silently, bounded by `LANDING_ROUNDS`, and handed back by a second quiet reveal. The stale `landingQuiet` comment is fixed.
+
+**New finding**
+
+3. **MEDIUM: `owed ||` swallows the "new below" signal when the person scrolls up mid-landing** (`apps/mobile/src/screens/SessionScreen.tsx:483` and `:505`).
+   - Scenario: the app returns while the person is at the end, so `reattachLanding(true)` arms `landingQuiet`. While the resync is in flight (a network round trip), or during the absorb/tail window, they scroll up.
+   - The history that then arrives (new laptop messages) hits `landingStep`'s `!following` exit: `landingDone`, no step. `owed` is still `true`, so `land()` returns `true` and `contentGrew` never runs.
+   - `follow.unseen` is therefore never set (`follow.ts:87-91`), and the jump pill does not say new content arrived below.
+   - Round 1's code returned `false` there, so `contentGrew` marked it. This is a regression from this round. No test covers it: the reading-up tests arm `reattachLanding(false)`.
+   - Fix: count the measurement as consumed only when `following` (e.g. `owed && followRef.current.following`). Add a test that arms with `true`, flips `following` and measures. Show it red.
+
+**Attacks with nothing found:**
+- The opening landing and `landingAwaiting` cannot enter the tail (an `awaiting` reveal → `landingDone`, pinned).
+- The second `fire()` happens only after a scroll with the landing still owed, so the timer cannot loop.
+- A stream through the tail is bounded (R7).
+- `onListLayout` with unchanged content ends the tail early. That is benign: what follows is ordinary follow.
