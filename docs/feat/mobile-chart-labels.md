@@ -532,3 +532,20 @@ bars untouched (deep-equal test): holds. (d) point-form highlight scrub:
 finding 1. §7: mobile-only, no protocol/persistence/terminal path touched;
 "logic in pure modules" respected (decisions in `chart-layout`/`chart-interact`,
 components map). Executor's two plan drifts are documented and justified.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18*
+
+**Verdict: APPROVE.** Reviewed `git diff HEAD~1` (c1d76c73).
+
+- **Finding 1 — fixed.** `pointIndexAt` (`chart-hero.ts:137`) maps series 0's
+  scrub index to series k by x; no point there → empty hero. Review repro
+  (`rev.ts`) now: x=1,2 → `—`; x=3 → `300 "3 b"`; x=4 → `400 "4 b · vs 3"`.
+  Mutation (`usesPoints(spec)` → `false`): new `chart-highlight` test fails.
+- **Finding 2 — fixed.** New `chart-labels` band test; mutation (stacked
+  target → `end - 8`) now fails it.
+- Both mutations reverted; `git status` clean.
+- Gate: `bun test apps/mobile/test` 3290 pass / 0 fail; `bun run lint` clean;
+  `bun run typecheck` clean. No regression found in the diff (category-x and
+  non-highlight paths untouched: `at0 === at` unless `usesPoints`).
