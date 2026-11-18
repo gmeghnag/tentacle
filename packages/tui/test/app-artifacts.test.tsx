@@ -60,12 +60,22 @@ const DASHBOARD = meta({
   createdAt: 3_000,
 });
 
+/** DASHBOARD's row under its header (docs/feat/tui-present-row.md): the joined card's marker. */
+const DASH_ROW = "dashboard · HTML page · 14 KB · v2";
+
+/** A generated-content call, as the model sends it: the title AND the whole page. */
+const DASH_ARGS = JSON.stringify({
+  title: "Q3 revenue dashboard",
+  content: `<!DOCTYPE html><html><body>${"<p>row</p>".repeat(40)}</body></html>`,
+  id: "dashboard",
+});
+
 /** A session whose one turn runs a `present` call that returns `m` as its detail. */
-function presenting(m: ArtifactMeta): SessionController {
+function presenting(m: ArtifactMeta, args = '{"path":"x.png"}'): SessionController {
   return {
     ...inertSession(),
     async *send() {
-      yield { type: "tool_start", id: m.callId, name: "present", arguments: '{"path":"x.png"}' };
+      yield { type: "tool_start", id: m.callId, name: "present", arguments: args };
       yield {
         type: "tool_result",
         id: m.callId,
@@ -109,25 +119,24 @@ async function mount(
 const rowOf = (frame: string, needle: string): number =>
   frame.split("\n").findIndex((l) => l.includes(needle));
 
-describe("S6a: the card under a live `present` row", () => {
-  test("the frame shows the card's own glyph, title and meta, not the tool's text", async () => {
+describe("S6a / tui-present-row: the row of a live `present` call", () => {
+  test("the frame shows `<id> · <meta>`, not the tool's text", async () => {
     const t = await mount(presenting(meta()));
     await t.line("show me");
-    expect(t.frame()).toContain("▣ latency-p99.png");
-    expect(t.frame()).toContain("PNG · 1280×720 · 240 KB");
-    expect(t.frame()).toContain("^X^O open");
+    expect(t.frame()).toContain("latency-p99 · PNG · 1280×720 · 240 KB");
     expect(t.frame()).not.toContain("Presented.");
     t.app.unmount();
   });
 
-  test("the card sits directly under its call's header (one block, two rows)", async () => {
-    const t = await mount(presenting(DASHBOARD));
+  test("the header is `● Present <title>` and the short row sits directly under it", async () => {
+    const t = await mount(presenting(DASHBOARD, DASH_ARGS));
     await t.line("show me");
     const frame = t.frame();
-    const header = rowOf(frame, "Present");
-    const cardRow = rowOf(frame, "◈ Q3 revenue dashboard");
+    const header = rowOf(frame, "● Present Q3 revenue dashboard");
+    const cardRow = rowOf(frame, DASH_ROW);
     expect(header).toBeGreaterThanOrEqual(0);
     expect(cardRow).toBe(header + 1);
+    expect(frame).not.toContain("DOCTYPE");
     t.app.unmount();
   });
 });
@@ -146,16 +155,16 @@ describe("S6a: the card after a resume (joined from the daemon's list)", () => {
   test("a reloaded transcript shows the card when the list names its call", async () => {
     const items: DisplayItem[] = messagesToItems(HISTORY, new Map([["c2", DASHBOARD]]));
     const t = await mount(presenting(meta()), { initialItems: items });
-    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
-    expect(t.frame()).toContain("HTML page · 14 KB · v2");
+    expect(t.frame()).toContain(DASH_ROW);
     t.app.unmount();
   });
 
-  test("without the list the row stays plain (no invented card)", async () => {
+  test("without the list the row stays plain (no invented card, no receipt)", async () => {
     const items: DisplayItem[] = messagesToItems(HISTORY);
     const t = await mount(presenting(meta()), { initialItems: items });
-    expect(t.frame()).toContain("Presented.");
-    expect(t.frame()).not.toContain("◈ Q3 revenue dashboard");
+    expect(t.frame()).toContain("Present");
+    expect(t.frame()).not.toContain("Presented.");
+    expect(t.frame()).not.toContain(DASH_ROW);
     t.app.unmount();
   });
 });
@@ -405,7 +414,7 @@ describe("S6a review finding 2: a card survives every history REPLACE", () => {
     // Nothing on screen yet; the replace brings the `present` row in.
     f.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
     await delay(120);
-    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    expect(t.frame()).toContain(DASH_ROW);
     expect(t.frame()).toContain("HTML page · 14 KB · v2");
     t.app.unmount();
   });
@@ -415,12 +424,12 @@ describe("S6a review finding 2: a card survives every history REPLACE", () => {
     const t = await mount(f.session);
     f.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
     await delay(120);
-    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    expect(t.frame()).toContain(DASH_ROW);
     // Another resync (the link dropped again): the rows are rebuilt from
     // messages, so the join must run again — not "once per watched session".
     f.raise({ kind: "history", messages: RESYNC, reason: "clear" } as SessionActivity);
     await delay(120);
-    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    expect(t.frame()).toContain(DASH_ROW);
     t.app.unmount();
   });
 
@@ -443,7 +452,7 @@ describe("S6a review finding 2: a card survives every history REPLACE", () => {
     } as unknown as SessionController;
     const t = await mount(session);
     await t.line("go");
-    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    expect(t.frame()).toContain(DASH_ROW);
     expect(t.frame()).toContain("HTML page · 14 KB · v2");
     t.app.unmount();
   });
@@ -457,7 +466,7 @@ describe("S6a review finding 2: a card survives every history REPLACE", () => {
     f.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
     f.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
     await delay(150);
-    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    expect(t.frame()).toContain(DASH_ROW);
     expect(f.lists.length).toBe(1);
     t.app.unmount();
   });
@@ -491,7 +500,7 @@ describe("S6a review finding 2: a card survives every history REPLACE", () => {
     // A learns its own card first.
     a.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
     await delay(120);
-    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    expect(t.frame()).toContain(DASH_ROW);
     await t.line("/sessions");
     t.app.stdin.write(DOWN);
     await delay(30);
@@ -501,7 +510,8 @@ describe("S6a review finding 2: a card survives every history REPLACE", () => {
     await delay(150);
     // A `callId` is only unique WITHIN a session: keeping A's map across the
     // swap would attach A's dashboard to B's row (the silent wrong-card bug).
-    expect(t.frame()).toContain("payroll.png");
+    expect(t.frame()).toContain("payroll · PNG");
+    expect(t.frame()).not.toContain(DASH_ROW);
     expect(t.frame()).not.toContain("Q3 revenue dashboard");
     t.app.unmount();
   });
@@ -543,7 +553,7 @@ describe("S6a review finding 2: a card survives every history REPLACE", () => {
     // new session's own list must be joined or its cards never appear.
     b.raise({ kind: "history", messages: RESYNC, reason: null } as SessionActivity);
     await delay(120);
-    expect(t.frame()).toContain("◈ Q3 revenue dashboard");
+    expect(t.frame()).toContain(DASH_ROW);
     t.app.unmount();
   });
 });
@@ -620,6 +630,103 @@ describe("S6b: the panel's `s` and an `other` artifact", () => {
     await t.line("/artifacts");
     await t.line("", 80);
     expect(t.frame()).toContain("isn't opened (unknown type)");
+    expect(reads).toEqual([]);
+    expect(spy.opened).toEqual([]);
+    t.app.unmount();
+  });
+});
+
+// --- tui-present-row: a CLICK on the `present` header opens it ---------------
+
+describe("tui-present-row: clicking `● Present <title>` opens the artifact (same safe path)", () => {
+  /** An SGR left press + release on cell (3, y), as one coalesced chunk. */
+  const clickRow = async (t: Awaited<ReturnType<typeof mount>>, y: number): Promise<void> => {
+    t.app.stdin.write(`\u001B[<0;3;${y}M\u001B[<0;3;${y}m`);
+    await delay(100);
+  };
+  /** The 1-based screen row of the first frame row containing `needle`. */
+  const screenRow = (frame: string, needle: string): number => rowOf(frame, needle) + 1;
+
+  function clickable(m: ArtifactMeta, args: string) {
+    const reads: ArtifactMeta[] = [];
+    const session = {
+      ...presenting(m, args),
+      listArtifacts: () => Promise.resolve({ artifacts: [m] }),
+      readArtifact: (read: ArtifactMeta) => {
+        reads.push(read);
+        return Promise.resolve(new TextEncoder().encode("BYTES"));
+      },
+    } as unknown as SessionController;
+    return { session, reads };
+  }
+
+  test("inline HTML: read, CSP-wrapped, handed to the opener under OUR name", async () => {
+    const { session, reads } = clickable(DASHBOARD, DASH_ARGS);
+    const spy = spyOpener();
+    const t = await mount(session, { artifactOpener: spy.opener });
+    await t.line("show me");
+    await clickRow(t, screenRow(t.frame(), "● Present Q3 revenue dashboard"));
+    expect(reads.map((m) => m.artifactId)).toEqual(["dashboard"]);
+    expect(spy.opened.map((o) => [o.plan.file, o.plan.wrap, o.plan.network])).toEqual([
+      ["bbbbbbbb.html", "csp", false],
+    ]);
+    t.app.unmount();
+  });
+
+  test("a path artifact (an image) opens with its own extension, unwrapped", async () => {
+    const args = JSON.stringify({ title: "p99 latency", path: "charts/latency-p99.png" });
+    const { session } = clickable(meta(), args);
+    const spy = spyOpener();
+    const t = await mount(session, { artifactOpener: spy.opener });
+    await t.line("show me");
+    await clickRow(t, screenRow(t.frame(), "● Present p99 latency"));
+    expect(spy.opened.map((o) => [o.plan.file, o.plan.wrap])).toEqual([["aaaaaaaa.png", null]]);
+    t.app.unmount();
+  });
+
+  test("pod bytes ASK first: nothing read before `y`, and the click is not remembered", async () => {
+    const { session, reads } = clickable(DASHBOARD, DASH_ARGS);
+    const spy = spyOpener();
+    const t = await mount(session, { artifactOpener: spy.opener, daemonInPod: true });
+    await t.line("show me");
+    const y = screenRow(t.frame(), "● Present Q3 revenue dashboard");
+    await clickRow(t, y);
+    expect(t.frame()).toContain("from the pod) in your browser");
+    expect(reads).toEqual([]);
+    expect(spy.opened).toEqual([]);
+    t.app.stdin.write("y");
+    await delay(100);
+    expect(spy.opened.map((o) => o.plan.file)).toEqual(["bbbbbbbb.html"]);
+    await clickRow(t, screenRow(t.frame(), "● Present Q3 revenue dashboard"));
+    expect(t.frame()).toContain("from the pod) in your browser");
+    t.app.unmount();
+  });
+
+  test("kind `other` is never handed to the opener: one notice, nothing read", async () => {
+    const zip = meta({
+      artifactId: "build",
+      kind: "other",
+      mimeType: "application/zip",
+      title: "build.zip",
+      sha256: "d".repeat(64),
+    });
+    const { session, reads } = clickable(zip, JSON.stringify({ title: "build", path: "b.zip" }));
+    const spy = spyOpener();
+    const t = await mount(session, { artifactOpener: spy.opener });
+    await t.line("show me");
+    await clickRow(t, screenRow(t.frame(), "● Present build"));
+    expect(t.frame()).toContain("isn't opened (unknown type)");
+    expect(reads).toEqual([]);
+    expect(spy.opened).toEqual([]);
+    t.app.unmount();
+  });
+
+  test("a click on the grey row UNDER the header opens nothing (only the header is a control)", async () => {
+    const { session, reads } = clickable(DASHBOARD, DASH_ARGS);
+    const spy = spyOpener();
+    const t = await mount(session, { artifactOpener: spy.opener });
+    await t.line("show me");
+    await clickRow(t, screenRow(t.frame(), DASH_ROW));
     expect(reads).toEqual([]);
     expect(spy.opened).toEqual([]);
     t.app.unmount();

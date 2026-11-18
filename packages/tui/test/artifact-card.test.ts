@@ -1,12 +1,12 @@
 /**
- * docs/feat/model-artifacts.md S6a — the TUI CARD (T6a's first half), pure.
+ * The `present` tool ROW, pure (docs/feat/tui-present-row.md, which replaced
+ * docs/feat/model-artifacts.md S6a's `▣ <title> … ^X^O open` card).
  *
- * Under a `present` tool row the transcript shows ONE card row instead of the
- * generic tool body (chosen variant A: two lines total, the header plus this
- * row): `▣ <title>  <line2> · ^X^O open`. The view-model is `@tentacle/core`'s
- * `artifactCard`; this pins what `render-lines.ts` maps it to, the width fit at
- * 80 and 120, and the states that change the tail (`other` is save-only,
- * `unavailable` says so, `pod` is marked).
+ * `● Present <title>` (never the raw JSON args: they carry the whole HTML), and
+ * under it ONE grey row `<id> · <type> · <size>[ · vN][ · from the pod]` — the
+ * segment after the id is `@tentacle/core`'s `artifactCard().line2`. A row with
+ * no card shows no body (the result text is the model's receipt). Pins the
+ * width fit and the states that change the row (`vN`, `pod`).
  *
  * Also pins the RESUME join: a reloaded transcript has no `details` (they are
  * not in `ChatMessage`), so `messagesToItems` takes the daemon's list and
@@ -57,49 +57,86 @@ function presentRow(m: ArtifactMeta, over: Partial<ToolItem> = {}): ToolItem {
 const opts = (width: number, inPod = false) =>
   ({ expandAll: false, width, ...(inPod ? { spillInPod: true } : {}) }) as const;
 
-/** The card is the LAST row of the block (the header is the first). */
+/** The result row is the LAST row of the block (the header is the first). */
 const cardRow = (tool: ToolItem, width: number, inPod = false): string => {
   const lines = itemLines(tool, opts(width, inPod)).map(strip);
   return lines.at(-1) ?? "";
 };
 
-describe("S6a: a `present` row shows the card, not a generic tool body", () => {
-  test("two lines total: the header, then `▣ <title>  <meta> · ^X^O open`", () => {
-    const lines = itemLines(presentRow(meta()), opts(120)).map(strip);
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain("Present");
-    expect(lines[1]).toContain("▣");
-    expect(lines[1]).toContain("latency-p99.png");
-    expect(lines[1]).toContain("PNG · 1280×720 · 240 KB");
-    expect(lines[1]).toContain("^X^O open");
-    // The tool's own text is NOT repeated under the card.
-    expect(lines.join("\n")).not.toContain("Presented to the user.");
+/** A generated-content `present` (the case the owner hit): title + a whole HTML page. */
+const HTML_ARGS = JSON.stringify({
+  title: "Latency report",
+  content: `<!DOCTYPE html><html><body><h1>p99</h1>${"x".repeat(400)}</body></html>`,
+});
+const HTML = meta({
+  artifactId: "a3",
+  kind: "html",
+  mimeType: "text/html",
+  size: 593,
+  title: "Latency report",
+  width: undefined,
+  height: undefined,
+});
+const RECEIPT =
+  'Presented "Latency report" to the user as artifact a3 v1 (html, 593 B). They open it from the card in the transcript.';
+
+describe("tui-present-row: `● Present <title>`, then one short grey row", () => {
+  test("the header names the title, never the JSON args or the HTML content", () => {
+    const lines = itemLines(presentRow(HTML, { args: HTML_ARGS }), opts(80)).map(strip);
+    expect(lines[0]).toBe("● Present Latency report");
+    expect(lines.join("\n")).not.toContain("{");
+    expect(lines.join("\n")).not.toContain("DOCTYPE");
   });
 
-  test("the card fits the width at 80 and 120 (no row overflows)", () => {
-    for (const width of [80, 120]) {
-      const rows = itemLines(presentRow(meta()), opts(width)).map(strip);
+  test("two lines total: the header, then `<id> · <type> · <size>` (no glyph, no title again)", () => {
+    const lines = itemLines(presentRow(HTML, { args: HTML_ARGS, resultText: RECEIPT }), opts(80));
+    expect(lines.map(strip)).toEqual(["● Present Latency report", "⎿ a3 · HTML page · 593 B"]);
+    // The model's receipt is NOT repeated under it.
+    expect(lines.map(strip).join("\n")).not.toContain("Presented");
+  });
+
+  test("a path artifact (an image) carries its own type facts", () => {
+    const args = JSON.stringify({ title: "p99", path: "charts/latency-p99.png" });
+    expect(cardRow(presentRow(meta(), { args }), 120)).toBe(
+      "⎿ latency-p99 · PNG · 1280×720 · 240 KB",
+    );
+  });
+
+  test("a missing title falls back to the id, then the card's id, then the path — never JSON", () => {
+    const head = (args: string, m = meta()): string =>
+      strip(itemLines(presentRow(m, { args }), opts(120))[0] ?? "");
+    expect(head(JSON.stringify({ id: "report", path: "r.pdf" }))).toBe("● Present report");
+    expect(head(JSON.stringify({ path: "r.pdf" }))).toBe("● Present latency-p99");
+    expect(head(JSON.stringify({ path: "r.pdf" }), meta())).not.toContain("{");
+    const noCard = presentRow(meta(), {
+      args: JSON.stringify({ path: "r.pdf" }),
+      detail: undefined,
+    });
+    expect(strip(itemLines(noCard, opts(120))[0] ?? "")).toBe("● Present r.pdf");
+    // Streaming args (not JSON yet): an empty subtitle, not the raw fragment.
+    const partial = presentRow(meta(), { args: '{"title":"Lat', detail: undefined });
+    expect(strip(itemLines(partial, opts(120))[0] ?? "")).not.toContain("{");
+  });
+
+  test("a long title is cut to the width with `…` (no row overflows)", () => {
+    const title = "A very long artifact title that would otherwise eat the whole row and wrap";
+    const args = JSON.stringify({ title, content: "<p>x</p>" });
+    for (const width of [40, 80]) {
+      const rows = itemLines(presentRow(HTML, { args }), opts(width)).map(strip);
+      expect(rows).toHaveLength(2);
       for (const row of rows) {
         expect(stringWidth(row)).toBeLessThanOrEqual(width);
       }
-      // …and it really is a card at both widths (non-vacuity of the scan).
-      expect(cardRow(presentRow(meta()), width)).toContain("▣");
+      expect(rows[0]).toStartWith("● Present A very long");
+      expect(rows[0]).toEndWith("…");
     }
-  });
-
-  test("a long title loses the tail, never the name", () => {
-    const long = meta({ title: "a-very-long-artifact-title-that-would-eat-the-whole-row.png" });
-    const row = cardRow(presentRow(long), 80);
-    expect(row).toContain("▣");
-    expect(row).toContain("a-very-long-artifact-title");
-    expect(row).not.toContain("^X^O open");
   });
 
   test("a version past the first says `v2`", () => {
     expect(cardRow(presentRow(meta({ version: 2 })), 120)).toContain("v2");
   });
 
-  test("kind `other` offers save, never open (nothing executes)", () => {
+  test("kind `other` shows its type and size (a click only says how to save it)", () => {
     const zip = meta({
       artifactId: "build",
       title: "build-artifacts.zip",
@@ -107,20 +144,7 @@ describe("S6a: a `present` row shows the card, not a generic tool body", () => {
       mimeType: "application/zip",
       size: 3_400_000,
     });
-    const row = cardRow(presentRow(zip), 120);
-    expect(row).toContain("ZIP · 3.4 MB");
-    expect(row).toContain("save to ~/Downloads");
-    expect(row).not.toContain("open");
-  });
-
-  test("an artifact whose kind cannot be opened offers no open hint", () => {
-    // `unavailable` (evicted/unreadable) is reached by the OPEN path — a read
-    // refused with `evicted` establishes it (S6b) — so a card drawn from a LIST
-    // never invents it. What THIS slice owns is the tail: `other` offers save,
-    // and no action offers nothing at all.
-    const zip = meta({ kind: "other", mimeType: "application/zip", size: 3_400_000 });
-    expect(cardRow(presentRow(zip), 120)).not.toContain("^X^O open");
-    expect(cardRow(presentRow(zip), 120)).toContain("save to ~/Downloads");
+    expect(cardRow(presentRow(zip), 120)).toBe("⎿ build · ZIP · 3.4 MB");
   });
 
   test("a pod origin is marked, so nobody mistakes it for a local file", () => {
@@ -131,9 +155,19 @@ describe("S6a: a `present` row shows the card, not a generic tool body", () => {
     expect(cardRow(presentRow(meta()), 120)).not.toContain("from the pod");
   });
 
-  test("a `present` row with no artifact detail falls back to its text", () => {
-    const bare = presentRow(meta(), { detail: undefined, resultText: "Presented to the user." });
-    expect(itemLines(bare, opts(120)).map(strip).join("\n")).toContain("Presented to the user.");
+  test("a `present` row with no card shows NO body (the receipt is the model's)", () => {
+    const bare = presentRow(HTML, { args: HTML_ARGS, detail: undefined, resultText: RECEIPT });
+    expect(itemLines(bare, opts(120)).map(strip)).toEqual(["● Present Latency report"]);
+  });
+
+  test("a FAILED `present` still shows its error", () => {
+    const failed = presentRow(HTML, {
+      args: HTML_ARGS,
+      detail: undefined,
+      status: "error",
+      resultText: "give exactly one of `path` or `content`.",
+    });
+    expect(itemLines(failed, opts(120)).map(strip).join("\n")).toContain("give exactly one");
   });
 });
 

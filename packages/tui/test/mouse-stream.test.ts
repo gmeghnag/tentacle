@@ -171,6 +171,7 @@ const snapshot = (over: Partial<MouseSnapshot> = {}): MouseSnapshot => ({
   viewport: 3,
   visibleCount: 3,
   expandAll: false,
+  artifactOf: () => undefined,
   ...over,
 });
 
@@ -260,6 +261,55 @@ describe("S4 dispatchMouse: the per-event priority order", () => {
       armed.state,
       report(0, 3, 1, false),
       snapshot({ expandAll: true }),
+    );
+    expect(kinds(clicked.effects)).toEqual(["copySelection"]);
+  });
+
+  // docs/feat/tui-present-row.md: a `present` header with its card OPENS it.
+  const ART = {
+    artifactId: "a3",
+    version: 1,
+    sha256: "a".repeat(64),
+    size: 593,
+    mimeType: "text/html",
+    kind: "html",
+    title: "Latency report",
+    callId: "call-1",
+    createdAt: 1,
+  };
+  const click = (snap: MouseSnapshot, y = 1) => {
+    const armed = dispatchMouse(state(), report(0, 3, y), snap);
+    return dispatchMouse(armed.state, report(0, 3, y, false), snap);
+  };
+
+  test("a click on a header whose row carries an artifact opens THAT artifact, never toggles", () => {
+    const asked: string[] = [];
+    const snap = snapshot({
+      artifactOf: (id) => {
+        asked.push(id);
+        return id === "call-1" ? ART : undefined;
+      },
+    });
+    const clicked = click(snap);
+    expect(clicked.effects).toEqual([{ kind: "openArtifact", artifact: ART }]);
+    expect(clicked.state.selection).toBeNull();
+    expect(asked).toEqual(["call-1"]);
+  });
+
+  test("with Ctrl+O on, a `present` header click still opens (nothing to expand there)", () => {
+    const clicked = click(snapshot({ expandAll: true, artifactOf: () => ART }));
+    expect(kinds(clicked.effects)).toEqual(["openArtifact"]);
+  });
+
+  test("a non-header row of the same transcript never opens (body/text rows stay text)", () => {
+    // Row 3 is the plain item (`id: ""`): no call, so `artifactOf` is not asked.
+    const clicked = click(
+      snapshot({
+        artifactOf: () => {
+          throw new Error("asked for a non-call row");
+        },
+      }),
+      3,
     );
     expect(kinds(clicked.effects)).toEqual(["copySelection"]);
   });

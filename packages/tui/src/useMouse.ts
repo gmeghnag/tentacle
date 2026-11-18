@@ -17,6 +17,7 @@
  * `App` and arrives here as a field of the port — no use-site edit, no reorder.
  */
 
+import type { ArtifactMeta } from "@tentacle/protocol";
 import type { Key } from "ink";
 import { useCallback, useRef } from "react";
 import type { DockKeyResult, DockState } from "./background-focus.ts";
@@ -81,6 +82,8 @@ export interface MouseHost {
   readonly clampOffset: (offset: number, total: number, height: number) => number;
   /** Submit the prompt line (the restored `[`'s same-event path). */
   readonly submit: (text: string) => void;
+  /** Open an artifact through the App's one artifact path (a `present` header click). */
+  readonly openArtifact: (artifact: ArtifactMeta) => void;
 }
 
 export interface MouseLayer {
@@ -113,6 +116,7 @@ export function useMouse(host: MouseHost): MouseLayer {
     panelClick,
     clampOffset,
     submit,
+    openArtifact,
   } = host;
 
   // Partial SGR mouse report held across data chunks: some terminals/ptys split
@@ -203,6 +207,9 @@ export function useMouse(host: MouseHost): MouseLayer {
           case "toggleTool":
             setExpandedIds((ids) => toggleExpanded(ids, effect.id));
             break;
+          case "openArtifact":
+            openArtifact(effect.artifact);
+            break;
           case "copySelection":
             // Selection can span rows scrolled out of view, so assemble the whole
             // buffer HERE — only on release, never on the per-frame render path.
@@ -222,6 +229,7 @@ export function useMouse(host: MouseHost): MouseLayer {
       setDock,
       field,
       setExpandedIds,
+      openArtifact,
       finishSelection,
     ],
   );
