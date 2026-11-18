@@ -141,6 +141,15 @@ describe("StepNode replaces ToolRow", () => {
     // Reduce Motion stops both clocks (useLoop returns null when still).
     expect(node).toContain("useLoop(BREATHE_MS, !look.animate)");
     expect(node).toContain("useLoop(SHIMMER_MS, !look.animate)");
+    // ...and, while it is still the `overflow: "hidden"` window of
+    // docs/feat/mobile-thinking-images.md, it says so instead of describing the
+    // glyph-clipped sweep S2 will build (Review round 1, finding 2: the comment
+    // promised code that did not exist). The pair flips when S2 lands.
+    expect(node).toMatch(/band: \{ position: "absolute",[\s\S]{0,80}overflow: "hidden"/);
+    const fn = node.indexOf("function ShimmerWord(");
+    const sweep = node.slice(node.lastIndexOf("/**", fn), node.indexOf("function Node(", fn));
+    expect(sweep).toMatch(/is a visible RECTANGLE behind the word/);
+    expect(sweep).not.toMatch(/CLIPPED to the glyphs|there is no window to translate/);
   });
 
   test("the Thinking motion runs on the native driver, never a JS timer per frame", () => {

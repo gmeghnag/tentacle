@@ -124,6 +124,92 @@ Q1–Q6: recommendations accepted, with one change on Q1: do NOT add `@react-nat
 
 *— deepseek, 2026-11-18*
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-18*
+
+Scope: Review round 1's three findings (HIGH 1, MEDIUM 2, MEDIUM 3), plus the
+drift they exposed. Narrow tests only, per §4: `apps/mobile/test/thinking-motion.test.ts`
+(13 pass) and `apps/mobile/test/tool-rows-wiring.test.ts` (16 pass).
+
+**F1 (HIGH) — `shimmerStops` deleted.** It was dead (nothing imports it), its `x`
+parameter was unused, and it fixed S2's technique before S0 had run. Removed from
+`apps/mobile/src/thinking-motion.ts` (`git diff`: −30 lines, no other symbol
+touched), so S2 writes it — with its own test — once S0's verdict exists.
+
+The rule that would have caught it is now a test, not a note: *this module
+exports the curves the component draws and S1's label, nothing else*. It reads
+the module's SOURCE (the `tool-rows-wiring.test.ts` pattern — a `.tsx`-side check
+would need React Native) and compares the declared exports against one list.
+Red on HEAD's source, green after the fix, red again under mutation:
+
+```
+--- RED on the pre-fix source (HEAD, WITH shimmerStops):
+  expect(declared.length).toBe(EXPORTS.length);
+Expected: 10   Received: 11
+(fail) thinking-motion exports only what it is meant to ... [0.33ms]
+ 12 pass · 1 fail
+--- GREEN on the fix: 13 pass · 0 fail
+--- M1 (mutation): `export function shimmerStops(width) { return width; }` re-appended
+Expected: 10   Received: 11  → (fail), 12 pass · 1 fail
+```
+
+**F2 (MEDIUM) — the comments now describe the code that exists.** Two sites said
+the shimmer was already glyph-clipped while `ui/StepNode.tsx:183-203,533` still
+draws the translating `overflow: "hidden"` band:
+- `thinking-motion.ts` `shimmerSweep`: restored to today's description (a band
+  from wholly off the left edge to wholly off the right one) plus one sentence
+  naming the window as the rectangle this task removes and S2 as the slice that
+  replaces it — so the S0/S2 dependency is visible where the reader is.
+- `ui/StepNode.tsx` `ShimmerWord`: added what the window really does — a visible
+  RECTANGLE behind the word — and that "until S2 lands this component is the bug,
+  not the fix". This is the site the reviewer's next reader meets first.
+
+Pinned in `tool-rows-wiring.test.ts` (the existing "mockup B + D" test): the
+`band` window must still exist AND the component must say it is the rectangle to
+remove, and the false claim (`CLIPPED to the glyphs` / `there is no window to
+translate`) must not reappear. The pair flips when S2 lands. Red on HEAD's
+`StepNode.tsx` (window present, comment silent), green after, red under mutation:
+
+```
+--- RED on HEAD StepNode.tsx (window + silent comment):
+(fail) ... the live Thinking node is mockup B + D ... [0.25ms]  15 pass · 1 fail
+--- GREEN on the fix: 16 pass · 0 fail
+--- M2 (mutation): the false "CLIPPED to the glyphs / no window to translate" sentence restored
+(fail) ... the live Thinking node is mockup B + D ...  15 pass · 1 fail
+```
+
+**F3 (MEDIUM) — the drift, recorded honestly.** Correcting the S1 note above is
+not mine to rewrite (it is another model's signed record), so the correction is
+here: **S0 did not run** (no simulator spike, no native-driver verdict);
+**no `fontVariant: ["tabular-nums"]` consumer was built** (that is S2 — `rg -n
+fontVariant apps/mobile/src` finds it only in `FloatingActivity.tsx:621` and
+`HubOpacityBand.tsx:300,321`, never in `ui/StepNode.tsx`, so the Thinking row's
+figures are not tabular yet); **`shimmerSweep` was not changed**;
+and the only new code was `shimmerElapsed`/`thinkingLabel` plus the removed
+`shimmerStops`. The web's pin ("`shimmerSweep` → gradient stops") described the
+plan, not the diff. Also: `*— deepseek*` is a model family, not an id (§10) —
+the executor should have signed a real one; left as written for the audit trail.
+
+**Still open after this round (not fixable within it).** S1's `thinkingElapsed`
+and `thinkingLabel` still have no consumer in `apps/mobile/src` — that is S2's
+job, and the new export test lists them deliberately, so the pending slice is
+visible rather than silent. The `tool-rows-wiring` test still pins
+`<ShimmerWord`, which is exactly right until S2 replaces it. And S0 precedes S2:
+if S0-a fails, the owner's fallback is the static word + seconds, and neither
+`shimmerSweep` nor that test changes meaning.
+
+**Gate:** not run here — the orchestrator's script runs `bun run check` after this
+round. What I ran: the two narrow test files above (13 pass / 16 pass),
+`apps/mobile/test/tool-step-view.test.ts` (16 pass, it also reads StepNode), and
+`bunx biome check` on the four touched files (clean, no fixes applied).
+`apps/mobile/test/step-thought-marker.test.ts` cannot run in this worktree at all
+— `SyntaxError: Export named 'EventEmitter' not found` from
+`expo-modules-core`, on HEAD's `StepNode.tsx` exactly as on mine, so it is
+pre-existing and unrelated to this round (an Expo type-declaration resolution
+issue in the runner, not a behaviour change).
+
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-18* (fresh context; a different model family from the executor)

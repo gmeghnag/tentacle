@@ -6,6 +6,8 @@
  * tested here; `ui/StepNode.tsx` only feeds them to `Animated` (native driver).
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   BREATHE_MS,
   DOT_ORDER,
@@ -86,6 +88,44 @@ describe("the word shimmers (D)", () => {
 
   test("an unmeasured word (width 0) sweeps nothing", () => {
     expect(shimmerSweep(0).band).toBe(0);
+  });
+});
+
+/**
+ * Review round 1, finding 1: S1 shipped `shimmerStops`, which nothing imported
+ * and nothing tested — a peak-opacity mutation there survived the suite. The
+ * rule this pins is the one that would have caught it: this module exports the
+ * curves the component draws, what the row SAYS (`thinkingElapsed`,
+ * `thinkingLabel`), and nothing else. A symbol the plan has not justified is a
+ * symbol with no consumer — it waits for its own slice, with its own test.
+ */
+/**
+ * The ONE list of what `thinking-motion.ts` may export: the curves the component
+ * draws (mockup B + D), and what the row says (S1). Anything else is a symbol
+ * nothing declared a use for.
+ */
+const EXPORTS = [
+  "BREATHE_MS",
+  "SHIMMER_MS",
+  "DOT_ORDER",
+  "DotPos",
+  "Curve",
+  "breatheCurve",
+  "shimmerSweep",
+  "thinkingLook",
+  "thinkingElapsed",
+  "thinkingLabel",
+];
+
+describe("thinking-motion exports only what it is meant to", () => {
+  test("the module's source declares nothing beyond that list (mutation: add `shimmerStops` back → red)", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "src", "thinking-motion.ts"), "utf8");
+    const declared = [...src.matchAll(/^export (?:const|function|interface|type) (\w+)/gm)].map(
+      (m) => m[1] ?? "",
+    );
+    // Not vacuous: the regex must find this module's exports at all.
+    expect(declared.length).toBe(EXPORTS.length);
+    expect([...declared].sort()).toEqual([...EXPORTS].sort());
   });
 });
 
