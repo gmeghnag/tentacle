@@ -289,6 +289,8 @@ export function App({
   // The ref is the truth (a send-now reads it synchronously); the state renders.
   const [queued, setQueued] = useState<QueuedRows>([]);
   const rowsRef = useRef<QueuedRows>([]);
+  // Queued ids whose pull-back (↑) awaits its answer (docs/feat/queue-unqueue.md).
+  const pullingRef = useRef(new Set<string>());
   const setRows = useCallback((f: (rows: QueuedRows) => QueuedRows) => {
     rowsRef.current = f(rowsRef.current);
     setQueued(rowsRef.current);
@@ -2133,17 +2135,25 @@ export function App({
     removeLastChip: () => setAttach((draft) => removeLastChip(draft)),
     // ↑ on an empty input (docs/feat/queue-unqueue.md): what the answer does is
     // `afterUnqueue`'s; here only the call and its writes.
+    // One unqueue in flight per id: a second ↑ (autorepeat, double press) before
+    // the answer sends nothing, so the text comes back once (review F2/R2-1).
     pullBackQueued: (id, text) => {
-      sessionRef.current?.unqueue?.([id]).then(
+      const session = sessionRef.current;
+      if (session?.unqueue === undefined || pullingRef.current.has(id)) return;
+      pullingRef.current.add(id);
+      session.unqueue([id]).then(
         (answer) => {
+          pullingRef.current.delete(id);
           const res = afterUnqueue(rowsRef.current, { id, text }, answer);
           setRows(() => res.rows);
           const back = res.text;
           if (back !== null) field.update((draft) => withRestored(draft, back));
           if (res.notice !== null) pushNotice(res.notice);
         },
-        (error: unknown) =>
-          pushNotice(`_not taken back: ${error instanceof Error ? error.message : String(error)}_`),
+        (error: unknown) => {
+          pullingRef.current.delete(id);
+          pushNotice(`_not taken back: ${error instanceof Error ? error.message : String(error)}_`);
+        },
       );
     },
     // Voice dictation (docs/feat/voice-dictation.md): the hook owns the child and

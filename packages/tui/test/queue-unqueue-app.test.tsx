@@ -31,7 +31,7 @@ function fakeSession(answer?: (ids: readonly string[]) => UnqueueAnswer) {
       return Promise.resolve(answer(wanted));
     };
   }
-  return { ctrl, log };
+  return { ctrl, log, ids };
 }
 
 async function queued(ctrl: SessionController, rows: readonly string[]) {
@@ -68,6 +68,28 @@ describe("↑ pulls the last queued message back (docs/feat/queue-unqueue.md)", 
     expect(log.unqueues).toEqual([["alpha"]]);
     expect(app.frame()).toMatch(queuedRow("alpha"));
     expect(app.frame()).toContain("already sent to the model");
+    app.unmount();
+  });
+
+  test("↑ twice before the answer: one unqueue is sent, the text comes back once (review F2/R2-1)", async () => {
+    const { ctrl, log, ids } = fakeSession();
+    // The daemon answers `removed` to every call (idempotent), but only later.
+    const pending: (() => void)[] = [];
+    ctrl.unqueue = (wanted) => {
+      log.unqueues.push(wanted.map((id) => ids.get(id) ?? id));
+      return new Promise<UnqueueAnswer>((resolve) => {
+        pending.push(() => resolve({ removed: [...wanted], delivered: [] }));
+      });
+    };
+    const app = await queued(ctrl, ["alpha", "bravo"]);
+    app.stdin.write(UP);
+    await delay(20);
+    app.stdin.write(UP);
+    await delay(20);
+    for (const settle of pending) settle();
+    await delay(40);
+    expect(log.unqueues).toEqual([["bravo"]]);
+    expect(app.frame().split("bravo").length - 1).toBe(1); // in the field, once
     app.unmount();
   });
 

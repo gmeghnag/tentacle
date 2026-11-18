@@ -322,6 +322,40 @@ diff adds no `skip`/`skipIf` (grep 0), so they predate this branch; check with
 the F1 guard, fixed to `next?.messages.some(...)`, re-run clean; the touched daemon
 file re-run 26/26) · `bun test` (one full run): 14907 pass, 5 skip, 0 fail.
 
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-18*
+
+- **R2-1 (MEDIUM) — FIXED.** The double-↑ dedupe moved from row presence to the
+  call site. `afterUnqueue` (`packages/tui/src/queued.ts:187-192`) once again returns
+  the text for every `removed` answer, even when the row is already gone locally
+  (for example, the turn's end cleared it before the answer landed). `App.tsx` keeps
+  `pullingRef` (a `Set` of ids awaiting their answer, `:293-294`). `pullBackQueued`
+  (`:2138-2160`) sends nothing for an id already in it, and removes the id when the
+  answer arrives or the call fails. F2's protection holds: only one unqueue goes out,
+  so the text comes back once.
+  - Pure test (it replaces round 1's F2 test, which asserted the regressed behaviour):
+    `afterUnqueue([], {b,"B"}, removed:[b])` → `text: "B"`. Red on round-1 code
+    (`text: null`) → green.
+  - App test (`queue-unqueue-app.test.tsx`): the daemon answers `removed` to every
+    call, but late. Press ↑ twice, then let the answers settle. Exactly one unqueue
+    `[["bravo"]]` is sent and `bravo` appears once in the frame. Red on round-1 code
+    (two unqueues sent) → green.
+- Drift: the dedupe sits in `App.tsx`, not in a pure module. It is a single `Set`
+  check with no computation to project, and the App test covers it.
+
+**Mutations (each reverted, green again)**
+| # | mutation | result |
+|---|---|---|
+| M11 | drop `pullingRef.current.has(id)` from the guard | App test red (two unqueues) |
+| M12 | put back the round-1 row-presence guard in `afterUnqueue` | R2-1 pure test red |
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean · narrow TUI files 54/54 ·
+`bun test` (one full run): 14907 pass, 5 skip, 1 fail. The fail is
+`mcp/test/connect.test.ts` "…answers the probe with an error and then exits is
+respawned" (EPIPE, real processes). This branch has no diff in `packages/mcp`, and
+the file passed 8/8 on a re-run, so it is flaky and unrelated.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-18* (fresh context; SAME model as executor/planner — shared blind spots possible)

@@ -185,12 +185,9 @@ export function afterUnqueue(
     };
   }
   if (answer.removed.includes(target.id)) {
-    // A second ↑ before the first answer sent the same id again: the daemon
-    // answers `removed` both times, but only the answer that drops the row
-    // gives its text back (else the field gets it twice).
-    if (!rows.some((r) => r.id === target.id)) {
-      return { rows, text: null, notice: null };
-    }
+    // The text comes back even when the row is already gone locally (the turn's
+    // end can clear rows before this answer lands): the daemon dropped it, so
+    // this is its only way back. One answer per id is the caller's job (review R2-1).
     return { rows: dropIds(rows, [target.id]), text: target.text, notice: null };
   }
   return { rows, text: null, notice: "_already sent to the model — not taken back_" };

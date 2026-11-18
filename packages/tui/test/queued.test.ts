@@ -178,13 +178,10 @@ describe("pull a queued message back (docs/feat/queue-unqueue.md)", () => {
     expect(old.notice).toContain("can't cancel queued messages");
   });
 
-  test("a second answer for a row already pulled back writes nothing (review F2: double ↑)", () => {
-    const target = { id: "b", text: "B" };
-    const answer = { removed: ["b"], delivered: [] };
-    const first = afterUnqueue(three(), target, answer);
-    expect(first.text).toBe("B");
-    // ↑ pressed twice before the answer: the daemon answers `removed` again.
-    const second = afterUnqueue(first.rows, target, answer);
-    expect(second).toEqual({ rows: first.rows, text: null, notice: null });
+  test("removed with the row already cleared (turn end raced the answer) still gives the text back (review R2-1)", () => {
+    // The daemon dropped the row, then the turn ended before its answer arrived:
+    // local rows are already empty, and the text is in no `returned` — only here.
+    const res = afterUnqueue([], { id: "b", text: "B" }, { removed: ["b"], delivered: [] });
+    expect(res).toEqual({ rows: [], text: "B", notice: null });
   });
 });
