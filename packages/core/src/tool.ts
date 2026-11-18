@@ -5,6 +5,7 @@
  * with a typed handler. The registry validates arguments against `inputSchema`
  * before `execute` is ever called, so handlers receive already-valid input.
  */
+import type { ArtifactMeta } from "@tentacle/protocol";
 import type { z } from "zod";
 import type { ExecutionEnvironment } from "./execution.ts";
 import type { JobController } from "./jobs.ts";
@@ -19,14 +20,58 @@ export type PermissionLevel = "none" | "ask" | "deny";
  * frontend can render it specially (e.g. a file diff). Text-only frontends
  * ignore it and show `content`.
  */
-export type ToolResultDetail = {
-  readonly kind: "diff";
-  readonly path: string;
-  /** Unified-diff text (old → new). */
-  readonly patch: string;
-  readonly added: number;
-  readonly removed: number;
-};
+export type ToolResultDetail =
+  | {
+      readonly kind: "diff";
+      readonly path: string;
+      /** Unified-diff text (old → new). */
+      readonly patch: string;
+      readonly added: number;
+      readonly removed: number;
+    }
+  /**
+   * `present` showed the user an artifact (docs/feat/model-artifacts.md D2): the
+   * card's metadata. Nested, not spread: the meta has its own `kind` (the
+   * artifact's: `image`, `html`…), which must not clobber this discriminant.
+   */
+  | {
+      readonly kind: "artifact";
+      readonly artifact: ArtifactMeta;
+    };
+
+/** A file-diff detail (the `fs_*` write tools). */
+export type ToolDiffDetail = Extract<ToolResultDetail, { readonly kind: "diff" }>;
+
+/** What `present` hands the session's artifact store (D4). */
+export interface ArtifactPresentInput {
+  readonly title: string;
+  /** The SNAPSHOT: copied into the store; later workspace edits never change it. */
+  readonly bytes: Uint8Array;
+  readonly mimeType: string;
+  readonly kind: string;
+  /** The `present` call that made it (the card joins on it). */
+  readonly callId: string;
+  /** Workspace-relative path it was read from, display only. */
+  readonly source?: string;
+  /** Model-chosen artifact id: known → a new version of it. */
+  readonly id?: string;
+  readonly width?: number;
+  readonly height?: number;
+}
+
+/**
+ * The per-session artifact store as a tool sees it (D4). Implemented daemon-side;
+ * absent in a sub-agent's or a one-shot's context (no `present` there).
+ */
+export interface ArtifactSink {
+  present(input: ArtifactPresentInput): Promise<ArtifactMeta>;
+}
+
+/**
+ * The wire's artifact bounds, for `present`'s input schema: `@tentacle/tools`
+ * depends on core only, and must not keep a second copy of these numbers.
+ */
+export { ARTIFACT_ID_RE, ATTACHMENT_NAME_RE, MAX_ARTIFACT_BYTES } from "@tentacle/protocol";
 
 /**
  * A result too large for the context (`spillLargeOutput`), as data: what a
@@ -124,6 +169,11 @@ export interface ToolContext {
   /** Optional background-job registry; the shell tools use it when wired. */
   readonly jobs?: JobController;
   /**
+   * The session's artifact store, for `present` (docs/feat/model-artifacts.md
+   * D4). Absent for sub-agents and builds without one: `present` then errors.
+   */
+  readonly artifacts?: ArtifactSink;
+  /**
    * The conversation so far (read-only view of the live history), for a tool
    * whose answer depends on what is already in context — e.g. `skill` does
    * not load a skill twice. Absent outside the agent loop.
@@ -163,6 +213,26 @@ export interface Tool<Input = unknown> {
    * runtime guard.
    */
   readonly jsonSchema?: Record<string, unknown>;
+  /**
+   * A sentence to append to the registry's `invalid JSON arguments for <name>`
+   * when the RAW text could not be parsed, or `undefined` to say nothing
+   * (docs/feat/model-charts.md D3). A FUNCTION of the raw text, so a tool only
+   * speaks when it recognises its own offender — a wrong diagnosis costs more
+   * than silence.
+   *
+   * It exists for the mistake JSON cannot even express: a model writing `NaN`,
+   * `Infinity` or `undefined` for a missing value gets "invalid JSON arguments"
+   * and resends the same bytes, because that sentence names neither the cause
+   * nor the fix. The tool knows its own usual offender, so it says it.
+   */
+  readonly argumentsHint?: (rawArguments: string) => string | undefined;
+  /**
+   * The MCP server this tool came from (docs/feat/session-capabilities.md): it
+   * is what a session's per-server switch filters on. Tagged here rather than
+   * parsed from `name`, because a server name may itself contain `__`. Absent
+   * for every built-in tool.
+   */
+  readonly mcpServer?: string;
   readonly permission: PermissionLevel;
   /**
    * What a call touches, for the round executor (docs/feat/parallel-tools.md):

@@ -11,6 +11,8 @@
 import type { AskHooksTrust } from "@tentacle/agent";
 import {
   type AgentKillParams,
+  type ArtifactListParams,
+  type ArtifactReadParams,
   type AttachmentPutParams,
   type CancelParams,
   type ClearParams,
@@ -24,6 +26,12 @@ import {
   type DeleteResult,
   type DetachParams,
   type DetachResult,
+  type DeviceLiveActivityEndedParams,
+  type DeviceLiveActivityEndedResult,
+  type DeviceLiveActivityRegisterParams,
+  type DeviceLiveActivityRegisterResult,
+  type DeviceLiveActivityTokenParams,
+  type DeviceLiveActivityTokenResult,
   type DevicePairParams,
   type DevicePairResult,
   type DevicePushRegisterParams,
@@ -32,6 +40,7 @@ import {
   type DevicePushUnregisterResult,
   type EnqueueParams,
   type EnqueueResult,
+  type HooksTrustParams,
   type HooksTrustResult,
   type InitializeParams,
   type InitializeResult,
@@ -48,6 +57,8 @@ import {
   type OpenParams,
   type OpenResult,
   PROTOCOL_VERSION,
+  type PinParams,
+  type PinResult,
   type PromptParams,
   type PromptResult,
   type ReclaimParams,
@@ -56,6 +67,7 @@ import {
   type RenameResult,
   type ResolvePermissionParams,
   type ResolvePermissionResult,
+  type ScheduleDeleteParams,
   type SendNowParams,
   type SessionContextParams,
   type SessionContextResult,
@@ -64,10 +76,13 @@ import {
   type SessionSkillsResult,
   type SessionTtlParams,
   type SetAutoAcceptParams,
+  type SetCapabilityParams,
   type SnapshotParams,
   type SnapshotResult,
   type SubagentMessageParams,
   type SubagentMessageResult,
+  type UnqueueParams,
+  type UnqueueResult,
   type UnwatchParams,
   type UnwatchResult,
   type UpdateSettingsParams,
@@ -87,8 +102,10 @@ import {
   RpcError,
   RpcPeer,
 } from "@tentacle/transport";
+import { artifactListResult } from "./artifact-store.ts";
 import type { Attachment, HostedSession } from "./hosted-session.ts";
 import { type PairHandler, pairingRefusedError } from "./pairing-handler.ts";
+import { hasDocuments, resolvePromptDocuments } from "./prompt-documents.ts";
 import type { SessionHost } from "./session-host.ts";
 import { versionMismatch } from "./version-mismatch.ts";
 
@@ -125,7 +142,27 @@ export interface ConnectionOptions {
    * handler is per connection: the attempt cap belongs to the socket.
    */
   readonly principal?: ConnectionPrincipal;
+  /**
+   * The HOST's own answer for project hooks, checked BEFORE the prompting
+   * client is asked (docs/feat/serve-mcp.md S4): `trusted` = this folder and
+   * this hooks hash are already trusted on the machine the daemon runs on, so
+   * no client is bothered and no lasting approval is created from a remote's
+   * answer; `declined` = that machine's own explicit `never`, which is a
+   * decision about the FOLDER and is not overridable from a phone ("ask" is
+   * what the prompting client sees). Read-only: it answers early, it never
+   * grants (AGENTS §7, never let a pod-originated prompt create a lasting
+   * approval).
+   */
+  readonly hooksTrustPrecheck?: HooksTrustPrecheck;
 }
+
+/**
+ * A host's own project-hooks answer before any client is asked (S4):
+ * `trusted` / `declined` are the host's decisions, `ask` defers to the client.
+ */
+export type HooksTrustPrecheck = (
+  request: Pick<HooksTrustParams, "folder" | "hash">,
+) => "trusted" | "declined" | "ask";
 
 /**
  * A connection's authenticated role, decided once at the handshake — never
@@ -168,6 +205,8 @@ export class Connection {
   /** The `daemon/discovery` subscription of THIS connection (at most one, F13). */
   private discoveryUnsubscribe: (() => void) | undefined;
   private readonly servesModel: boolean;
+  /** The host's own project-hooks answer, before any client is asked (S4). */
+  private readonly hooksTrustPrecheck: HooksTrustPrecheck | undefined;
   private initialized = false;
   /** The update types the client declared at `initialize`; undefined = the v10 base set. */
   private updateTypes: readonly string[] | undefined;
@@ -200,6 +239,7 @@ export class Connection {
     this.host = host;
     this.servesModel = options.servesModel === true;
     this.principal = options.principal ?? { kind: "token" };
+    this.hooksTrustPrecheck = options.hooksTrustPrecheck;
     this.peer = new RpcPeer(channel, {
       onRequest: (method, params, context) => this.onRequest(method, params, context),
       onNotification: (method, params) => this.onNotification(method, params),
@@ -345,7 +385,7 @@ export class Connection {
       case Method.SessionDelete:
         return this.deleteSession(params as DeleteParams);
       case Method.Prompt:
-        return this.prompt(params as PromptParams);
+        return this.prompt(params as PromptParams, context?.signal);
       case Method.Compact:
         return this.compact(params as CompactParams, context?.signal);
       // Synchronous, holds no lock (AGENTS §7): `HostedSession.clear` never awaits.
@@ -362,6 +402,13 @@ export class Connection {
         const { sessionId, on } = params as SetAutoAcceptParams;
         return this.lookup(sessionId).setAutoAccept(on, this.autoAcceptBy);
       }
+      // Same shape (docs/feat/session-capabilities.md F4): synchronous, no lock,
+      // one total order. Every daemon holds it, a pod included: it only REMOVES
+      // what that daemon's own model is offered, so nothing is gated laptop-side.
+      case Method.SetCapability: {
+        const { sessionId, kind, name, enabled } = params as SetCapabilityParams;
+        return this.lookup(sessionId).setCapability({ kind, name, enabled }, this.autoAcceptBy);
+      }
       case Method.Snapshot:
         return this.snapshot(params as SnapshotParams);
       // Synchronous, served from the derived log: no lock, no await (AGENTS §7).
@@ -377,6 +424,8 @@ export class Connection {
         return this.sendNow(params as SendNowParams);
       case Method.Reclaim:
         return this.reclaim(params as ReclaimParams);
+      case Method.Unqueue:
+        return this.unqueue(params as UnqueueParams);
       case Method.ResolvePermission:
         return this.resolvePermission(params as ResolvePermissionParams);
       // Both synchronous, holding no lock (AGENTS §7): they never await a turn.
@@ -398,6 +447,11 @@ export class Connection {
         const { sessionId, jobId } = params as JobKillParams;
         return this.lookup(sessionId).jobKill(jobId);
       }
+      case Method.ScheduleDelete: {
+        // Synchronous (docs/feat/cron-tool.md D5): never waits on a turn.
+        const { sessionId, scheduleId } = params as ScheduleDeleteParams;
+        return this.lookup(sessionId).deleteSchedule(scheduleId);
+      }
       case Method.McpStatus:
         return this.mcpStatus();
       case Method.SessionSkills:
@@ -415,6 +469,17 @@ export class Connection {
         const { sessionId, ...chunk } = params as AttachmentPutParams;
         return this.lookup(sessionId).uploads.put(chunk);
       }
+      // The session's artifacts (docs/feat/model-artifacts.md D4). Only a session
+      // open on THIS connection (P8), never a lock: a 20 MiB read is many
+      // independent chunk requests, interleaving with prompts and answers.
+      case Method.ArtifactList: {
+        const { sessionId } = params as ArtifactListParams;
+        return artifactListResult(this.lookup(sessionId).artifacts.list());
+      }
+      case Method.ArtifactRead: {
+        const { sessionId, sha256, offset } = params as ArtifactReadParams;
+        return this.lookup(sessionId).artifacts.read(sha256, offset);
+      }
       // A read of the registry: does not attach this connection to anything.
       case Method.SessionList:
         return this.host.list(params as SessionListParams);
@@ -422,6 +487,11 @@ export class Connection {
       case Method.Rename: {
         const { sessionId, title } = params as RenameParams;
         return { title: this.host.rename(sessionId, title) } satisfies RenameResult;
+      }
+      // Host-level and synchronous, like `rename`: no `open`, live or archived.
+      case Method.Pin: {
+        const { sessionId, pinned } = params as PinParams;
+        return this.host.pin(sessionId, pinned) satisfies PinResult;
       }
       // Daemon-wide: reads/sets the reaper's TTL, attaches this connection to nothing.
       case Method.SessionTtl:
@@ -473,6 +543,47 @@ export class Connection {
         }
         this.host.unregisterPush(this.principal.id);
         return {} satisfies DevicePushUnregisterResult;
+      }
+      // Live Activities (docs/feat/mobile-live-activity.md Design 4, L7): the SAME
+      // device-principal rule as push, for the same reason — a `token`/`pairing`
+      // connection is refused above, so a pod-facing plain client can never place
+      // a token that lights up a lock screen. All three are synchronous and hold
+      // no lock (AGENTS §7 "don't serialize the RPC peer").
+      case Method.DeviceLiveActivityRegister: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may register for live activities",
+          );
+        }
+        return this.host.registerLiveActivity(
+          this.principal.id,
+          params as DeviceLiveActivityRegisterParams,
+        ) satisfies DeviceLiveActivityRegisterResult;
+      }
+      case Method.DeviceLiveActivityToken: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may report an activity token",
+          );
+        }
+        return this.host.setLiveActivityToken(
+          this.principal.id,
+          params as DeviceLiveActivityTokenParams,
+        ) satisfies DeviceLiveActivityTokenResult;
+      }
+      case Method.DeviceLiveActivityEnded: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may report an activity ended",
+          );
+        }
+        return this.host.endLiveActivity(
+          this.principal.id,
+          params as DeviceLiveActivityEndedParams,
+        ) satisfies DeviceLiveActivityEndedResult;
       }
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
@@ -550,7 +661,7 @@ export class Connection {
   // write does not fail the ack — the steer is queued; the daemon log has it.
   private async enqueue(params: EnqueueParams): Promise<EnqueueResult> {
     const hosted = this.lookup(params.sessionId);
-    hosted.enqueue(params.id, params.turnId, params.text);
+    hosted.enqueue(params.id, params.turnId, params.text, params.voice);
     await hosted.persisted();
     return {};
   }
@@ -570,6 +681,18 @@ export class Connection {
     hosted.reclaim(params.ids);
     await hosted.persisted();
     return {};
+  }
+
+  // Synchronous like `enqueue` (AGENTS §7: one step, no lock — it must land
+  // strictly before or after a drain); only the ACK waits, on `serve` until
+  // the removal is on disk (a removed row never comes back after a restart).
+  // A live session only: an archived one's rows are `returned`, which a
+  // `session/reclaim` drops (docs/feat/queue-unqueue.md).
+  private async unqueue(params: UnqueueParams): Promise<UnqueueResult> {
+    const hosted = this.lookup(params.sessionId);
+    const result = hosted.unqueue(params.ids);
+    await hosted.persisted();
+    return result;
   }
 
   // Synchronous and lock-free (AGENTS §7): `HostedSession.clear` never awaits.
@@ -675,6 +798,17 @@ export class Connection {
                 this.host.images.source === "store"
                   ? { input: "upload", maxBytes: this.host.images.maxBytes }
                   : { input: "client" },
+            }
+          : {}),
+        // What a client may attach as a document (docs/feat/pdf-read.md D4):
+        // absent when this daemon takes none; `client` on a pod, which takes
+        // text only (no PDF bytes into a pod, AGENTS §7).
+        ...(this.host.documents
+          ? {
+              documents:
+                this.host.documents.source === "store"
+                  ? { input: "upload", maxBytes: this.host.documents.maxBytes, kinds: ["pdf"] }
+                  : { input: "client", kinds: ["pdf"] },
             }
           : {}),
       },
@@ -836,6 +970,9 @@ export class Connection {
       // Present iff THIS daemon shares auto-accept (docs/feat/session-auto-accept.md
       // D2): a pod omits it, so no laptop client reads or sets it there.
       ...(this.host.sharedAutoAccept ? { autoAccept: hosted.autoAccept } : {}),
+      // The switches' snapshot on every open/attach (F5), read in the same
+      // synchronous segment as the attach: no update can fall between them.
+      capabilities: hosted.capabilities(),
       // Read in this same synchronous segment as the replay: omitted when 0.
       ...(hosted.unflushedExits > 0 ? { unflushedExits: hosted.unflushedExits } : {}),
     };
@@ -897,14 +1034,56 @@ export class Connection {
 
   // Acks at once: the turn runs daemon-side and ends with `turn_end` in the
   // stream, so its outcome survives a lost response.
-  private prompt(params: PromptParams): PromptResult {
+  private prompt(params: PromptParams, signal?: AbortSignal): PromptResult | Promise<PromptResult> {
     refuseWakeTurnId(params.turnId);
     const hosted = this.lookup(params.sessionId);
+    if (hasDocuments(params.content)) {
+      return this.promptWithDocuments(params, hosted, signal);
+    }
     // The PROMPTING connection is asked about project hooks: it is the client
     // with a human behind this turn (docs/feat/hooks-project-trust.md). The
     // laptop decides; a rejection (an old laptop's `MethodNotFound`, a drop)
     // is "declined" in the runner.
-    return hosted.prompt(params.turnId, params.content, params.skill, this.askHooksTrust);
+    return hosted.prompt(
+      params.turnId,
+      params.content,
+      params.skill,
+      this.askHooksTrust,
+      params.voice,
+    );
+  }
+
+  // Attached documents (docs/feat/pdf-read.md D4): extracted BEFORE the turn is
+  // accepted — `hosted.prompt` stays synchronous (its ack admits one turn) and
+  // gets plain `<file>` text. A failure refuses the prompt, nothing recorded.
+  // Holds no lock (AGENTS §7): requests stay concurrent while it extracts.
+  private async promptWithDocuments(
+    params: PromptParams,
+    hosted: HostedSession,
+    signal: AbortSignal | undefined,
+  ): Promise<PromptResult> {
+    // A retry of an accepted turn is answered BEFORE extracting: a fresh
+    // extraction could fail and refuse a turn that is live (review P4 #1).
+    const known = hosted.knownTurn(params.turnId);
+    if (known) {
+      return known;
+    }
+    const { content, media } = await resolvePromptDocuments(params.content, {
+      policy: this.host.documents,
+      store: hosted.uploads,
+      ...(signal ? { signal } : {}),
+    });
+    // Looked up AGAIN: the session may have been closed (or replaced) while
+    // the extraction ran — a closed one refuses here, never takes a turn.
+    return this.lookup(params.sessionId).prompt(
+      params.turnId,
+      content,
+      params.skill,
+      this.askHooksTrust,
+      params.voice,
+      undefined,
+      media,
+    );
   }
 
   // Acks at once, like `prompt`: the cancel and the new turn happen daemon-side
@@ -915,10 +1094,23 @@ export class Connection {
     return hosted.sendNow(params.turnId, params.interrupt, params.messages, this.askHooksTrust);
   }
 
-  private readonly askHooksTrust: AskHooksTrust = (request, signal) =>
-    this.peer
+  private readonly askHooksTrust: AskHooksTrust = (request, signal) => {
+    // The host's own store first (a `serve` on the machine the folder lives on):
+    // already trusted there = no prompt, and nothing to store from a remote. A
+    // `declined` is that host's own "never" — a decision about the FOLDER, so a
+    // remote does not get to re-ask it (S4 review 1, finding 2).
+    const mine = this.hooksTrustPrecheck?.(request);
+    if (mine === "trusted") {
+      return Promise.resolve(true);
+    }
+    if (mine === "declined") {
+      return Promise.resolve(false);
+    }
+    // Otherwise the PROMPTING client decides (it has the human behind this turn).
+    return this.peer
       .request(Method.HooksTrust, request, signal ? { signal } : undefined)
       .then((result) => (result as HooksTrustResult).trusted === true);
+  };
 
   private onNotification(method: string, params: unknown): void {
     if (method === Notification.Cancel) {

@@ -72,6 +72,13 @@ export const PAIRING_DIR = "pairing";
  * without importing the store that writes it (the dependency runs one way).
  */
 export const PUSH_DIR = "push";
+/**
+ * `<configDir>/devices/live` — one file per device's Live Activity registration
+ * (docs/feat/mobile-live-activity.md L5, written by `live-store.ts`). Declared
+ * here for the same reason as `PUSH_DIR`: `removeDevices` drops a revoked
+ * device's file without importing the store that writes it.
+ */
+export const LIVE_DIR = "live";
 /** `<configDir>/daemons` — one record per running `serve` (task 10 builds siblings on them). */
 export const DAEMONS_DIR = "daemons";
 /** A pairing window: five minutes, single use (F1, F6). */
@@ -642,9 +649,12 @@ export function removeDevices(configDir: string, ids: readonly string[]): Remove
     // "last seen" line behind that looks like a device (a re-pair re-creates it).
     // Its push registration goes too (mobile-push F14): a revoked phone must not
     // be pushed to, and the push-time authority check is the second half of that.
+    // Its LIVE registration goes with them (mobile-live-activity F12): an
+    // activity it can no longer open would only be junk on its lock screen.
     for (const device of removed) {
       rmSync(join(dir, SEEN_DIR, device.id), { force: true });
       rmSync(join(dir, PUSH_DIR, `${device.id}.json`), { force: true });
+      rmSync(join(dir, LIVE_DIR, `${device.id}.json`), { force: true });
     }
     return { ok: true, removed, registry };
   } catch (error) {

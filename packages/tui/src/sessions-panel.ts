@@ -23,6 +23,8 @@ export interface SessionsEntry {
   /** Clients attached right now (this TUI counts on the session it shows). */
   readonly attached: number;
   readonly archived: boolean;
+  /** Pinned (`session/pin`). Absent: not pinned, or an older daemon. */
+  readonly pinned?: boolean;
 }
 
 /** The first page of the list, as the daemon ordered it. */
@@ -30,6 +32,36 @@ export interface SessionsView {
   readonly sessions: readonly SessionsEntry[];
   /** The daemon has more than this page (a footer says so; paging is later). */
   readonly more: boolean;
+  /**
+   * The FIRST page's `pinned` array: every pinned session on the daemon, live or
+   * archived, in list order — so a pin older than this page still shows. Absent:
+   * none pinned, or an older daemon (docs/feat/mobile-session-actions.md).
+   */
+  readonly pinned?: readonly SessionsEntry[];
+}
+
+/** The pin marker before a pinned row's title: thin, no emoji (owner taste). */
+export const PIN_MARK = "·";
+
+/**
+ * The rows `/sessions` shows, in the order it shows them: the first page's pins
+ * first (deduped by id, so a pinned row on the page is not shown twice), then
+ * the page's own daemon order. With no pins this is exactly `data.sessions`,
+ * so the order, the cursor and the keys are today's.
+ */
+export function sessionRows(data: SessionsView | null): readonly SessionsEntry[] {
+  if (!data) {
+    return [];
+  }
+  const pins = data.pinned ?? [];
+  if (pins.length === 0) {
+    return data.sessions;
+  }
+  // Being IN the `pinned` array IS the pin: the flag is carried for the row's
+  // marker even if an older/other client filled the array without it.
+  const pinned = pins.map((p) => (p.pinned === true ? p : { ...p, pinned: true }));
+  const shown = new Set(pinned.map((p) => p.id));
+  return [...pinned, ...data.sessions.filter((s) => !shown.has(s.id))];
 }
 
 export interface SessionsState {
@@ -117,7 +149,8 @@ export function sessionsRowText(
     ...(others > 0 ? [`on ${others} ${others === 1 ? "device" : "devices"}`] : []),
     ...(entry.archived ? ["archived"] : []),
   ];
-  return `${oneLine(entry.title)}  ${marks.join(" · ")}`;
+  const title = `${entry.pinned === true ? `${PIN_MARK} ` : ""}${oneLine(entry.title)}`;
+  return `${title}  ${marks.join(" · ")}`;
 }
 
 /** The panel at `width` columns with at most `maxBody` body rows, windowed on the cursor. */
@@ -132,13 +165,14 @@ export function sessionsView(
   if (!data) {
     return noteView("Sessions · loading…", "Asking the daemon…", width);
   }
-  if (data.sessions.length === 0) {
+  const order = sessionRows(data);
+  if (order.length === 0) {
     return noteView("Sessions", "No sessions on this daemon.", width);
   }
-  const count = data.sessions.length;
+  const count = order.length;
   const cursor = clamp(state.cursor, count);
   const win = paletteWindow(count, cursor, Math.max(1, maxBody - (data.more ? 1 : 0)));
-  const rows = data.sessions.slice(win.start, win.end).map((entry, i) => {
+  const rows = order.slice(win.start, win.end).map((entry, i) => {
     const selected = win.start + i === cursor;
     const text = `${selected ? "❯ " : "  "}${sessionsRowText(entry, currentId, now)}`;
     return { text: fit(text, width), kind: "head" as const, selected };
@@ -146,13 +180,13 @@ export function sessionsView(
   const footer = data.more
     ? [
         {
-          text: fit(`  … more on the daemon (the newest ${count} shown)`, width),
+          text: fit(`  … more on the daemon (the newest ${data.sessions.length} shown)`, width),
           kind: "note" as const,
           selected: false,
         },
       ]
     : [];
-  const armed = data.sessions.find((s) => s.id === state.armed);
+  const armed = order.find((s) => s.id === state.armed);
   const hint = armed
     ? deleteConfirmHint(armed)
     : win.end - win.start < count
@@ -222,9 +256,8 @@ export function sessionsAt(
   data: SessionsView | null,
   state: SessionsState,
 ): SessionsEntry | undefined {
-  return data && data.sessions.length > 0
-    ? data.sessions[clamp(state.cursor, data.sessions.length)]
-    : undefined;
+  const order = sessionRows(data);
+  return order.length > 0 ? order[clamp(state.cursor, order.length)] : undefined;
 }
 
 /**
@@ -331,7 +364,7 @@ export function sessionsRefreshApplies(input: {
 
 /** The panel's state over a refreshed list: the cursor kept in range, any armed delete dropped. */
 export function refreshedSessions(state: SessionsState, view: SessionsView): SessionsState {
-  return { cursor: clamp(state.cursor, view.sessions.length), armed: null };
+  return { cursor: clamp(state.cursor, sessionRows(view).length), armed: null };
 }
 
 const clamp = (cursor: number, count: number): number =>

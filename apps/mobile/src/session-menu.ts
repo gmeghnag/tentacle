@@ -1,13 +1,15 @@
 /**
  * The chat header's "…" menu (owner feedback #3, mockup `Conversation`'s
- * "Session menu" button). Only phone-local actions — reading what is already on
- * screen; anything that needs the computer (rename, archive, new session) is a
- * separate task (owner decision 2). Pure and React-free (AGENTS §7):
- * `SessionScreen.tsx` draws the sheet and copies the returned text.
+ * "Session menu" button). It opens with **Session info** (docs/feat/
+ * mobile-session-info.md) — a READ of what the session is running, which owner
+ * decision 2 does not exclude — then the phone-local copy actions. Anything that
+ * needs the computer (archive, new session) is still a separate task. Pure and
+ * React-free (AGENTS §7): `SessionScreen.tsx` draws the sheet and copies the
+ * returned text.
  */
 import type { Row } from "./transcript-rows.ts";
 
-export type SessionMenuId = "copy-last" | "copy-all";
+export type SessionMenuId = "info" | "scheduled" | "copy-last" | "copy-all";
 
 export interface SessionMenuAction {
   readonly id: SessionMenuId;
@@ -27,10 +29,19 @@ function said(rows: readonly Row[]): readonly { who: "You" | "tentacle"; text: s
   return out;
 }
 
-/** The menu's actions, each only when it has something to copy. */
-export function sessionMenu(rows: readonly Row[]): readonly SessionMenuAction[] {
+/**
+ * The menu's actions: **Session info** always first (it needs nothing to be on
+ * screen), then **Scheduled wakes** when the daemon reports armed wakes
+ * (docs/feat/mobile-hub.md H4a: the one path to the wakes today — the hub's own
+ * Scheduled item lands on the same revealed sheet), then each copy action only
+ * when it has something to copy.
+ */
+export function sessionMenu(rows: readonly Row[], wakes = 0): readonly SessionMenuAction[] {
   const words = said(rows);
-  const actions: SessionMenuAction[] = [];
+  const actions: SessionMenuAction[] = [{ id: "info", label: "Session info", text: "" }];
+  if (wakes > 0) {
+    actions.push({ id: "scheduled", label: "Scheduled wakes", text: "" });
+  }
   const last = [...words].reverse().find((line) => line.who === "tentacle");
   if (last !== undefined) {
     actions.push({ id: "copy-last", label: "Copy last answer", text: last.text });

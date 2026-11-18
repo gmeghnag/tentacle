@@ -14,6 +14,8 @@ import { paletteWindow } from "./commands.ts";
 export interface TreeGroup {
   readonly head: string;
   readonly children: readonly string[];
+  /** Drawn dim: its item is off for the model (docs/feat/session-capabilities.md). */
+  readonly off?: boolean;
 }
 
 export interface TreeState {
@@ -31,7 +33,20 @@ export interface TreeRow {
   readonly child: number | null;
 }
 
-export type TreeAction = "up" | "down" | "toggle" | "expand" | "collapse" | "close" | "none";
+/**
+ * `switch` (Space): flip the selected row's on/off switch
+ * (docs/feat/session-capabilities.md) — the panel itself does not move; the
+ * App sends it. `toggle` (Enter) expands/collapses.
+ */
+export type TreeAction =
+  | "up"
+  | "down"
+  | "toggle"
+  | "expand"
+  | "collapse"
+  | "switch"
+  | "close"
+  | "none";
 
 /** The subset of Ink's `Key` a panel reads. */
 export interface PanelKeyState {
@@ -48,6 +63,8 @@ export interface PanelViewRow {
   readonly text: string;
   readonly kind: "head" | "child" | "note";
   readonly selected: boolean;
+  /** Its group is off for the model: drawn dim. */
+  readonly dim?: boolean;
 }
 
 export interface PanelView {
@@ -85,8 +102,11 @@ export function treeKey(input: string, key: PanelKeyState): TreeAction {
   if (key.downArrow) {
     return "down";
   }
-  if (key.return || input === " ") {
+  if (key.return) {
     return "toggle";
+  }
+  if (input === " ") {
+    return "switch";
   }
   if (key.rightArrow) {
     return "expand";
@@ -171,6 +191,7 @@ export function treeView(
   state: TreeState,
   width: number,
   maxBody: number,
+  hint: string = HINT,
 ): PanelView {
   const rows = treeRows(groups, state);
   const cursor = clampCursor(state.cursor, rows.length);
@@ -189,12 +210,17 @@ export function treeView(
       } else {
         text = `${marker}${CHILD_INDENT}${g?.children[row.child] ?? ""}`;
       }
-      return { text: fit(text, width), kind: row.child === null ? "head" : "child", selected };
+      return {
+        text: fit(text, width),
+        kind: row.child === null ? "head" : "child",
+        selected,
+        ...(g?.off === true ? { dim: true } : {}),
+      };
     }),
     hint:
       win.end - win.start < rows.length
-        ? `${HINT} · ${win.start + 1}–${win.end} of ${rows.length}`
-        : HINT,
+        ? `${hint} · ${win.start + 1}–${win.end} of ${rows.length}`
+        : hint,
     start: win.start,
   };
 }

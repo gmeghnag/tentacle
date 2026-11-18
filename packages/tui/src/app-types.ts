@@ -6,15 +6,27 @@
  */
 import type { Agent } from "@tentacle/agent";
 import type { AttachmentRef, JobController, PermissionBroker } from "@tentacle/core";
-import type { JobOutputResult, JobRow } from "@tentacle/protocol";
+import type {
+  ArtifactListResult,
+  ArtifactMeta,
+  CompactResult,
+  DocumentContent,
+  JobOutputResult,
+  JobRow,
+} from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
+import type { CapKind, CapsView } from "./capability-toggles.ts";
+import type { ChartGlyphs } from "./chart-lines.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
+import type { ArtifactOpener } from "./os-open.ts";
+import type { DocumentMode } from "./pdf-attach.ts";
 import type { AutoAcceptFeed, AutoAcceptSharedFeed } from "./permission-ui.ts";
-import type { DaemonQueue, QueuedMessage, ReturnedCause } from "./queued.ts";
+import type { DaemonQueue, QueuedMessage, ReturnedCause, UnqueueAnswer } from "./queued.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import type { SessionsView } from "./sessions-panel.ts";
 import type { SessionSkillsView } from "./skills-sync.ts";
 import type { DisplayItem, SessionEvent } from "./state.ts";
@@ -23,6 +35,8 @@ import type { SubagentNotifyView } from "./subagent-notify.ts";
 import type { TargetBadge } from "./target-view.ts";
 import type { SessionActivity } from "./turn-feed.ts";
 import type { RunQuit } from "./useQuitClear.ts";
+import type { VoiceConfig } from "./voice-session.ts";
+import type { VoiceSpawner } from "./voice-spawn.ts";
 
 /**
  * `RunQuit` left this file with S8: it is declared next to `useQuitClear`, the
@@ -43,6 +57,16 @@ export interface SettingsNoticeLine {
   readonly hint?: string;
 }
 
+/**
+ * How an artifact read is driven (structurally the client's
+ * `ArtifactReadOptions`): `signal` stops issuing chunks, `onProgress` reports
+ * `(have, size)` against the META's own size.
+ */
+export interface ArtifactOpenOptions {
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (have: number, size: number) => void;
+}
+
 export interface SessionController {
   /**
    * A remote session also yields the reconnect events (`history_reset`,
@@ -51,7 +75,15 @@ export interface SessionController {
   send(
     prompt: string,
     signal?: AbortSignal,
-    opts?: { readonly skill?: string; readonly attachments?: readonly AttachmentRef[] },
+    opts?: {
+      readonly skill?: string;
+      readonly attachments?: readonly AttachmentRef[];
+      /**
+       * Attached PDFs, already turned into wire blocks by `attachDocument`
+       * (docs/feat/pdf-read.md D6) — the TUI never builds one itself.
+       */
+      readonly documents?: readonly DocumentContent[];
+    },
   ): AsyncIterable<SessionEvent>;
   /**
    * Attach one image to this session and resolve its ref
@@ -73,8 +105,27 @@ export interface SessionController {
   ): Promise<AttachmentRef>;
   /** What this session may do with an image right now (structurally `ImageInput`). */
   imageInput(): AttachMode;
-  /** Compact the conversation (summarise + replace history); optional. */
-  compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
+  /**
+   * Attach one PDF to this session and resolve the wire block a prompt names
+   * (docs/feat/pdf-read.md D6): upload-then-`ref` when the daemon extracts, or
+   * the LAPTOP's own extraction as `text` for a pod (AGENTS §7). Rejects with
+   * a typed error (`DocumentsUnavailableError`, `RangeError`,
+   * `DocumentExtractError`) — never a silent drop. Required for the same reason
+   * as `attachImage`: a session that takes no PDFs says so THROUGH
+   * `documentsInput()` (`{kind: "off", reason}`).
+   */
+  attachDocument(
+    bytes: Uint8Array,
+    meta: { readonly name: string },
+    opts?: {
+      readonly signal?: AbortSignal;
+      readonly onProgress?: (sent: number, size: number) => void;
+    },
+  ): Promise<DocumentContent>;
+  /** What this session may do with a PDF right now (structurally `DocumentsInput`). */
+  documentsInput(): DocumentMode;
+  /** Compact the conversation (summarise + replace history); optional. The token sizes are optional (an older daemon omits them). */
+  compact?(signal?: AbortSignal): Promise<CompactResult>;
   /**
    * `/clear` (docs/feat/clear-keeps-jobs.md): reset the conversation inside the
    * session; background jobs and sub-agents keep running. Required: there is no
@@ -107,6 +158,11 @@ export interface SessionController {
    */
   enqueue?(text: string, id?: string): void | Promise<void>;
   /**
+   * Take queued rows back before the model reads them (docs/feat/queue-unqueue.md);
+   * optional (absent → ↑ never pulls a row back). `"unsupported"`: an older daemon.
+   */
+  unqueue?(ids: readonly string[]): Promise<UnqueueAnswer>;
+  /**
    * Send the queued messages now (`Ctrl+X Ctrl+S`, docs/feat/send-now-c.md):
    * cancel the running turn and start one whose prompt is `messages`, in one
    * daemon step. Resolves with the new turn's events (a `user_message` with
@@ -129,6 +185,44 @@ export interface SessionController {
    * no skills.
    */
   skills?(): Promise<SessionSkillsView>;
+  /**
+   * The session's MCP/skill switches as the daemon last reported them
+   * (docs/feat/session-capabilities.md S4): undefined until an open says it
+   * has them, and when the daemon has none (an older one). Optional with the
+   * two below: absent where no daemon owns the session.
+   */
+  capabilities?(): CapsView | undefined;
+  /**
+   * Follow the switches: the daemon's state on every snapshot and change (`by`
+   * only on a change: the device that made it, untrusted text), undefined when
+   * the daemon turns out not to have them. Returns an unsubscribe.
+   */
+  onCapabilities?(listener: (caps: CapsView | undefined, by?: string) => void): () => void;
+  /**
+   * `session/set_capability`: turn one MCP server or skill on/off for the
+   * model. The rows follow the daemon's echo (`onCapabilities`), never this
+   * answer. Rejects on a refusal.
+   */
+  setCapability?(kind: CapKind, name: string, enabled: boolean): Promise<unknown>;
+  /**
+   * The artifacts the model presented in this session
+   * (docs/feat/model-artifacts.md D6/D8), as the daemon's `artifact/list`
+   * answered — `truncated` passed on, never dropped. Optional: absent on an
+   * older daemon AND on a session whose runtime has no artifact store, and the
+   * `/artifacts` panel says so instead of opening empty.
+   */
+  listArtifacts?(): Promise<ArtifactListResult>;
+  /**
+   * One artifact version's bytes, verified against `meta` (every chunk's length,
+   * the answer's `size`, and the whole's sha256) — docs/feat/model-artifacts.md
+   * D6. The opener (S6b) reads through THIS; absent with `listArtifacts` above.
+   */
+  readArtifact?(meta: ArtifactMeta, options?: ArtifactOpenOptions): Promise<Uint8Array>;
+  /**
+   * The session is open daemon-side (a fresh or resumed one opens at its first
+   * message): no switches yet means "not started", not "not supported".
+   */
+  opened?(): boolean;
   /**
    * The context size the daemon counts at open (docs/feat/tui-target-badge.md):
    * exact where the provider can count without generating, else an estimate.
@@ -194,6 +288,29 @@ export interface SessionController {
   messageSubagent?(agentId: string, text: string): Promise<{ ok: boolean; reason?: string }>;
   /** Stop one background child (`session/agent_kill`); `{killed: false}` if it was not running. */
   killSubagent?(agentId: string): Promise<{ killed: boolean }>;
+  /**
+   * The session's ARMED scheduled wakes (`schedules`, docs/feat/cron-tool.md S5):
+   * the daemon's table, bounded and sanitized by the client (`spec`/`prompt` are
+   * a MODEL's text, D5). The current table, if any, is given at once; then every
+   * change (create, delete, fire, expiry, failure stop). The rows are MIRRORED
+   * structurally (`ScheduleDockRow`), never the protocol's type: the TUI does not
+   * depend on it (`background-view.ts`'s rule). Optional: absent on a pod's
+   * client and on an older daemon — where no table exists, and painting an empty
+   * one would claim there are no wakes.
+   */
+  onSchedules?(
+    listener: (report: {
+      readonly rows: readonly ScheduleDockRow[];
+      readonly count: number;
+    }) => void,
+  ): (() => void) | undefined;
+  /**
+   * Drop one scheduled wake (`session/schedule_delete`). A refusal is a typed
+   * RESULT with a `reason`, never a throw: an unknown id, an older daemon, or a
+   * client whose daemon is not trusted to schedule (`daemonWakes` off) each say
+   * their own. Optional with `onSchedules`.
+   */
+  deleteSchedule?(scheduleId: string): Promise<{ deleted: boolean; reason?: string }>;
   /**
    * Subscribe to this session's running background SHELL jobs as the daemon
    * reports them (bounded by the client; `count` is the daemon's own number).
@@ -441,6 +558,33 @@ export interface AppProps {
    */
   readonly jobRefreshMs?: number;
   /**
+   * Voice dictation settings (docs/feat/voice-dictation.md). Absent: the defaults
+   * in `voice-session.ts` (`VOICE_DEFAULTS`) — OFF, Ctrl+R, `auto` language,
+   * no auto-stop. A LOCAL input device: never carried to a pod, and the helper is
+   * only ever spawned when `voiceAvailability` says this is a local Mac terminal.
+   */
+  readonly voice?: VoiceConfig;
+  /**
+   * Where the helper's log and `<configDir>/voice/bin` live. The CLI passes the
+   * real config dir (Review round 1, MEDIUM 8: absent, the log path was
+   * `/voice/helper.log`). Absent in a test/host-less mount: no log file is opened.
+   */
+  readonly voiceConfigDir?: string;
+  /**
+   * TEST ONLY: the voice helper spawner. The real one is `Bun.spawn`; a test
+   * passes a fake so no child process (and no microphone) exists in `bun test`.
+   */
+  readonly voiceSpawner?: VoiceSpawner;
+  /**
+   * TEST ONLY: the platform/env `voiceAvailability` reads. Default: this
+   * process's. A test passes `{ platform: "darwin", env: {} }` so it does not
+   * fail on a Linux runner or over SSH (Review round 1, MEDIUM 6).
+   */
+  readonly voiceHost?: {
+    readonly platform: string;
+    readonly env: Readonly<Record<string, string | undefined>>;
+  };
+  /**
    * Auto-wake: when a background job exits while idle, start a continuation turn
    * so the agent reacts to it without a user prompt. Default: true.
    */
@@ -480,6 +624,15 @@ export interface AppProps {
    */
   readonly localCwd?: string;
   readonly saveFile?: (path: string, content: string) => Promise<void>;
+  /**
+   * The OS side of opening an artifact (docs/feat/model-artifacts.md D8, S6b):
+   * write the planned temp file and spawn the OS opener, or save a copy to
+   * `~/Downloads`. The DECISION (name, CSP wrap, a pod's confirm) is
+   * `artifact-open.ts`'s and the bytes come from `readArtifact` (verified); this
+   * port only executes. `startTui` passes `createArtifactOpener()`. Absent → the
+   * App says opening is not available here, and nothing is read or opened.
+   */
+  readonly artifactOpener?: ArtifactOpener;
   /** Transcript to seed on start (a resumed session); replaces the welcome line. */
   readonly initialItems?: readonly DisplayItem[];
   /**
@@ -529,4 +682,11 @@ export interface AppProps {
    * tier (the dock's 100/80/56, docs/feat/subagent-panel.md).
    */
   readonly columns?: number;
+  /**
+   * A chart's plot glyphs (`tui.chartGlyphs`, docs/feat/model-charts.md D5):
+   * absent → `braille` (2×4 dots per cell); `blocks` is for a font with no
+   * braille, which a terminal cannot report. A LAPTOP-ONLY display setting:
+   * constant for the App's lifetime, never carried to a pod.
+   */
+  readonly chartGlyphs?: ChartGlyphs;
 }

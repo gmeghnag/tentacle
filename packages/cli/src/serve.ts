@@ -8,16 +8,20 @@ import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
 import { DEFAULT_PUSH_GRACE_SECONDS } from "@tentacle/config";
-import type { AttachmentSource } from "@tentacle/core";
+import type { ArtifactSink, AttachmentSource, ScheduleLink } from "@tentacle/core";
 import {
   type AgentReuse,
   Connection,
+  DEFAULT_LA_START_AFTER_SECONDS,
   DEFAULT_MAX_DETACHED_SESSIONS,
   DEFAULT_MAX_SESSIONS,
   DEFAULT_SESSION_TTL_MS,
   type DaemonRecord,
   DeviceAuthority,
   HandshakeLimiter,
+  type HooksTrustPrecheck,
+  type LaRegistrationsSource,
+  type LiveActivityNotifier,
   LogSessionStore,
   type ModelLink,
   ProxyModelProvider,
@@ -29,15 +33,20 @@ import {
   SessionHost,
   type SessionHostOptions,
   SessionPersister,
+  type SessionPushObserver,
   type SessionTtlControl,
   TombstoneFile,
   acquireStoreLock,
   bunRelayDialer,
+  createLiveActivityNotifier,
   createPushNotifier,
+  deleteLiveRegistration,
   deletePushRegistration,
   isLoopbackHost,
   loadOrCreateIdentity,
   readIdentity,
+  readLiveRegistration,
+  readLiveRegistrations,
   readPushRegistration,
   readPushRegistrations,
   removeDaemonRecord,
@@ -54,9 +63,11 @@ import { relayIdOf } from "@tentacle/transport/relay-id";
 import { applyCarried } from "./carried-settings.ts";
 import { type DiscoveryDriver, startDiscovery } from "./discovery.ts";
 import type { ServeLimits } from "./flags.ts";
-import { daemonImagePolicy } from "./image-policy.ts";
+import { daemonDocumentPolicy, daemonImagePolicy } from "./image-policy.ts";
+import { type McpHub, capStderr, createMcpHub } from "./mcp-hub.ts";
 import type { ProviderFactory } from "./model-provider.ts";
 import { readRelaySecret } from "./relay-secret.ts";
+import { serveHooksTrustPrecheck } from "./serve-hooks-trust.ts";
 import { type RelayOptions, relayChoice } from "./serve-relay.ts";
 import { APP_VERSION } from "./version.ts";
 import {
@@ -64,6 +75,7 @@ import {
   type WiredAgent,
   buildAgent,
   createSkillScan,
+  scheduleLimitsOf,
   sweepToolOutput,
   toolOutputStore,
 } from "./wiring.ts";
@@ -193,9 +205,17 @@ export function createServeAgent(
   config: TentacleConfig,
   options: Pick<ServeOptions, "onError" | "onNotice" | "createProvider">,
   skillScan: SkillScan,
-  ctx: { readonly cwd: string; readonly attachments?: AttachmentSource },
+  ctx: {
+    readonly cwd: string;
+    readonly attachments?: AttachmentSource;
+    readonly artifacts?: ArtifactSink;
+    /** The session's scheduled wakes (docs/feat/cron-tool.md D1): `serve` schedules. */
+    readonly schedules?: () => ScheduleLink | null;
+  },
+  /** The daemon-wide MCP set: its tools join every registry this builds (S2). */
+  mcpHub?: Pick<McpHub, "onBuilt">,
 ): WiredAgent {
-  return buildAgent(
+  const wired = buildAgent(
     { ...config, cwd: ctx.cwd },
     // Hook failures: the daemon's error sink, like a turn error.
     {
@@ -207,12 +227,21 @@ export function createServeAgent(
       // The session's store, so the provider can read a ref's bytes
       // (docs/feat/attachments-prompt.md D4). Absent when images are off.
       ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+      // The session's artifact store: the model may `present` (model-artifacts D4).
+      ...(ctx.artifacts ? { artifacts: ctx.artifacts } : {}),
       // `workload_shell` (docs/feat/workload-shell.md D3): a `serve` daemon runs
       // on the user's own host, so it holds the credentials the tool dials with.
       // `tunnelledAgent` (the pod daemon) never passes this.
       workloadShell: { backend: new LaptopWorkloadShellBackend() },
+      // Scheduled wakes (docs/feat/cron-tool.md D1): `serve` keeps the table (in its
+      // sidecar) and fires it with nobody attached. `tunnelledAgent` never passes this.
+      ...(ctx.schedules ? { schedules: ctx.schedules } : {}),
     },
   );
+  // The MCP tools join THIS registry too — now, or at settle through the hub's
+  // `pending` set, so a session built during the handshake still gets them.
+  mcpHub?.onBuilt(wired.tools);
+  return wired;
 }
 
 /**
@@ -335,6 +364,156 @@ function buildPush(
 }
 
 /**
+ * The Live Activity wiring for a `serve` (docs/feat/mobile-live-activity.md
+ * Design 4, L8), or `undefined` when this daemon must not start one.
+ *
+ * The same three gates as push, for the same reasons (Design 4's statuses):
+ * `liveActivity.enabled` (default true), the relay being on (`relay-off`), and
+ * the relay carrying activities (`relay-no-la`). `unsupported` is the DEVICE's
+ * own answer and is decided on the phone, not here.
+ *
+ * One hook, two subscribers: the sessions' observer is a FAN-OUT of the push
+ * notifier and this one, so `HostedSession` still has exactly one observer and
+ * neither side can observe the other's absence (`SessionHostOptions.push`).
+ */
+/**
+ * F3's wiring, extracted so it is a thing a test can CALL rather than a pair of
+ * lines it has to re-implement: on every `ready` that carries `"liveactivity"`,
+ * the notifier resends the current state of each live slot (convergence by
+ * state, never by replaying the events the link missed).
+ *
+ * Mutation: delete the `bindLiveActivityReady` call → no resend ever happens, and
+ * an activity whose state changed during an outage stays wrong on the phone.
+ */
+export function bindLiveActivityResend(
+  link: { bindLiveActivityReady(callback: () => void): void } | undefined,
+  notifier: { resendAll(): void },
+): void {
+  link?.bindLiveActivityReady(() => notifier.resendAll());
+}
+
+interface ServeLiveActivity {
+  readonly hostOptions: SessionHostOptions["liveActivity"];
+  readonly notifier: LiveActivityNotifier;
+  /** Called by `listen` once the link exists (or not, when the relay is off). */
+  bindLink(link: RunningRelayLink | undefined): void;
+  /** Called by `listen` once the host exists: the title/cwd a content needs. */
+  bindHost(host: SessionHost): void;
+  /** Stop the notifier with the daemon (its timer must not outlive it). */
+  stop(): void;
+}
+
+function buildLiveActivity(
+  config: TentacleConfig,
+  options: ServeOptions,
+  devices: DeviceAuthority,
+): ServeLiveActivity | undefined {
+  const settings = config.liveActivity;
+  if (settings?.enabled === false) {
+    return undefined;
+  }
+  const relayEnabled =
+    relayChoice({
+      flagUrl: options.relay?.flagUrl,
+      noRelay: options.relay?.noRelay,
+      config: options.relay?.config ?? config.relay,
+    }).kind === "on";
+  const startAfterSeconds = settings?.startAfterSeconds ?? DEFAULT_LA_START_AFTER_SECONDS;
+  const storeDir = devices.configDir;
+  let link: RunningRelayLink | undefined;
+  let host: SessionHost | undefined;
+  const registrations: LaRegistrationsSource = {
+    registered: () =>
+      // The same double gate as push: a usable file AND the authority's snapshot,
+      // so a revoke that landed but whose file survived is never started for (F12).
+      [...readLiveRegistrations(storeDir).registrations.keys()].filter((id) => devices.knows(id)),
+    read: (deviceId) => {
+      const read = readLiveRegistration(storeDir, deviceId);
+      return read.ok ? read.registration : undefined;
+    },
+    pushKeyOf: (deviceId) => {
+      // The seal's recipient key is task 16's per-device push key: the SAME key
+      // the phone already opens a notification with, so the widget needs no
+      // second Keychain item. No banner registration → no key → the delivery is
+      // dropped with a line (never silently).
+      const read = readPushRegistration(storeDir, deviceId);
+      return read.ok ? read.registration.key : undefined;
+    },
+    forget: (deviceId, token) => {
+      deleteLiveRegistration(storeDir, deviceId, token);
+    },
+  };
+  const notifier = createLiveActivityNotifier({
+    now: Date.now,
+    startAfterSeconds,
+    registrations,
+    describe: (sessionId) => {
+      const live = host?.get(sessionId);
+      return live === undefined
+        ? undefined
+        : { title: live.summary(config.cwd).title, cwd: config.cwd };
+    },
+    computer: () => {
+      const identity = devices.identity();
+      return identity === undefined
+        ? undefined
+        : { privateKey: identity.privateKey, name: identity.name };
+    },
+    sink: (delivery) =>
+      link === undefined
+        ? Promise.resolve("unavailable")
+        : link.liveActivity({
+            token: delivery.token,
+            env: delivery.env,
+            priority: delivery.priority,
+            la: {
+              event: delivery.event,
+              // Apple's `aps.timestamp` is SECONDS; the rules carry ms.
+              timestamp: Math.floor(Date.now() / 1_000),
+              ...(delivery.staleDate === undefined ? {} : { staleDate: delivery.staleDate }),
+              ...(delivery.dismissalDate === undefined
+                ? {}
+                : { dismissalDate: delivery.dismissalDate }),
+              ...(delivery.contentState === undefined
+                ? {}
+                : { contentState: delivery.contentState }),
+              ...(delivery.attributes === undefined ? {} : { attributes: delivery.attributes }),
+            },
+          }),
+    ...(options.onAudit ? { onAudit: options.onAudit } : {}),
+  });
+  return {
+    hostOptions: {
+      // The observer is filled in by `reloadedHost` (the ONE fan-out of this and
+      // the push notifier): the two must share it, or a session would report to
+      // only one of them. Everything else here is this side's own.
+      observer: notifier,
+      storeDir,
+      notifier,
+      // `on`/`off` are the person's switch (the store holds it); this reports what
+      // the DAEMON cannot do, which the register result layers under it.
+      status: () =>
+        !relayEnabled || link === undefined
+          ? "relay-off"
+          : link.liveActivityStatus() === "on"
+            ? undefined
+            : "relay-no-la",
+    },
+    notifier,
+    bindLink(next) {
+      link = next;
+      bindLiveActivityResend(next, notifier);
+    },
+    bindHost(next) {
+      host = next;
+    },
+    stop() {
+      notifier.stop();
+    },
+  };
+}
+
+/**
  * The long-lived daemon: sessions outlive connections here, so this is where
  * they are bounded — daemon-wide limits on `SessionHost` and the idle-TTL
  * reaper, owned with the registry and stopped with the server — and where they
@@ -367,6 +546,32 @@ export async function startDaemon(
   }
   const lock = acquireStoreLock(dir);
   let persister: SessionPersister | undefined;
+  // The daemon-wide MCP connection set (docs/feat/serve-mcp.md S2): ONE set per
+  // daemon, because a `serve` hosts exactly one project — so one set per
+  // project. Errors, name clashes and a server's stderr become startup-fact
+  // notices (this process has no Ink, so its stderr is safe to write to).
+  // Never inherited: a chatty server cannot scribble over `connect`'s TUI.
+  const mcpHub = createMcpHub(config.mcpServers, {
+    ...(options.onNotice
+      ? {
+          onErrors: (errors) => {
+            for (const [name, message] of Object.entries(errors)) {
+              options.onNotice?.(`mcp server "${name}" failed to connect: ${message}`);
+            }
+          },
+          onClash: (line) => options.onNotice?.(line),
+          onStderr: capStderr((line) => options.onNotice?.(line)),
+          // A server that crashes on a daemon that runs for days comes back by
+          // itself (docs/feat/serve-mcp.md S3); each attempt is one notice line.
+          onRestart: (line) => options.onNotice?.(line),
+        }
+      : {}),
+  });
+  // A second Ctrl+C (`process.exit(130)`, docs/feat/serve-mcp.md) must not leave
+  // server processes behind. Synchronous by design, and removed in `stop()` so
+  // tests that start many daemons in one process do not leak listeners.
+  const exitDispose = (): void => mcpHub.dispose();
+  process.on("exit", exitDispose);
   try {
     // The laptop's log format (docs/feat/session-log-serve-store.md): `<uid>.jsonl`
     // + the daemon's state file. `keepSuperseded` from THIS host's config.
@@ -394,6 +599,9 @@ export async function startDaemon(
     // afterwards — so the sink reads a handle `listen` fills in. `push.enabled`
     // false, or no device route, means no notifier at all.
     const push = devices ? buildPush(config, options, devices) : undefined;
+    // Live Activities (docs/feat/mobile-live-activity.md L8): a SIBLING of push,
+    // fed by the same session hook (one observer, fanned out below).
+    const liveActivity = devices ? buildLiveActivity(config, options, devices) : undefined;
     const sessionHost = await reloadedHost(
       config,
       options,
@@ -402,14 +610,21 @@ export async function startDaemon(
       ttl,
       sameProject,
       tombstones,
+      mcpHub,
       push?.hostOptions,
+      liveActivity?.hostOptions,
     );
     return listen(
       sessionHost,
       options,
       ttl,
       async () => {
+        // Before anything else: a closed daemon's sessions must not call into a
+        // server process this process is about to lose (S2, T7).
+        mcpHub.dispose();
+        process.off("exit", exitDispose);
         push?.notifier.stop();
+        liveActivity?.stop();
         await persister?.stop();
         devices?.stop();
         lock.release();
@@ -418,8 +633,16 @@ export async function startDaemon(
       config.cwd,
       relay.kind === "on" ? { url: relay.url, storeDir: dir } : undefined,
       push,
+      liveActivity,
+      // The connect starts only once the listener exists: a start that fails
+      // spawns nothing (docs/feat/serve-mcp.md, "Per daemon, eager").
+      () => mcpHub.start(),
+      // Project hooks for every connection this daemon opens (S4).
+      serveHooksTrustPrecheck(config.configDir),
     );
   } catch (error) {
+    mcpHub.dispose();
+    process.off("exit", exitDispose);
     devices?.stop();
     await persister?.stop();
     lock.release();
@@ -477,14 +700,38 @@ async function reloadedHost(
   sessionTtl: SessionTtlControl,
   sameProject: (cwd: string) => boolean,
   tombstones: TombstoneFile,
+  /** The daemon-wide MCP set: every session's tools, and `/mcp`'s answer. */
+  mcpHub: McpHub,
   /** The push wiring (docs/feat/mobile-push.md P8), when this daemon has it. */
   push?: SessionHostOptions["push"],
+  /** The Live Activity wiring (docs/feat/mobile-live-activity.md L8), same shape. */
+  liveActivity?: SessionHostOptions["liveActivity"],
 ): Promise<SessionHost> {
   // One skill scan for every session and for a session not created yet
   // (docs/feat/skills-hot-reload.md).
   const skillScan = createSkillScan(config); // The lock is held: this is THE daemon of the store. Silent, not awaited.
   sweepToolOutput(config);
   const images = daemonImagePolicy(config);
+  /**
+   * The ONE hook every session reports to: the push notifier and the activity
+   * notifier, in that order, each isolated. A throw from either is already
+   * caught inside it (F23/F24); this wrapper is the second net and, more
+   * importantly, keeps ONE of them failing from starving the other.
+   */
+  const observer: SessionPushObserver = {
+    onPushEvent(sessionId, event, attached) {
+      for (const target of [push?.observer, liveActivity?.observer]) {
+        if (target === undefined) {
+          continue;
+        }
+        try {
+          target.onPushEvent(sessionId, event, attached);
+        } catch {
+          // Each notifier reports its own bugs; this only keeps the sibling fed.
+        }
+      }
+    },
+  };
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
     // A deleted session takes its spilled tool output with it.
@@ -493,8 +740,15 @@ async function reloadedHost(
     maxDetachedSessions: options.maxDetachedSessions ?? DEFAULT_MAX_DETACHED_SESSIONS,
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
     // Each session gets its own agent, confined to the daemon's cwd.
-    createAgent: (cwd, ctx) => createServeAgent(config, options, skillScan, { ...ctx, cwd }),
+    createAgent: (cwd, ctx) =>
+      createServeAgent(config, options, skillScan, { ...ctx, cwd }, mcpHub),
     newSessionSkills: () => skillScan.newSession(),
+    // `/mcp` (`mcp/status`): the connection set is daemon-wide, so this is the
+    // right answer for every session on it (docs/feat/serve-mcp.md S2).
+    mcpStatus: () => mcpHub.status(),
+    // A fresh session's context count lacks the MCP tools until they connect:
+    // shown as an estimate (`~`) till then, exactly as on the worker.
+    toolsReady: () => mcpHub.ready(),
     // A remote client gets an opaque turn error; the real one is logged here.
     ...(options.onError ? { onTurnError: options.onError } : {}),
     // ITS host is the user's own machine (AGENTS §7 — the only daemon that
@@ -507,6 +761,12 @@ async function reloadedHost(
     // Its host is the user's own machine, so the session's auto-accept is SHARED
     // with every device attached (docs/feat/session-auto-accept.md D1).
     sharedAutoAccept: true,
+    // And, for the same reason, the DAEMON answers an auto-accepted ask itself,
+    // so a session keeps running with no app or terminal attached
+    // (docs/fix/serve-autoaccept-unattended.md D1). Never set on a pod daemon,
+    // the worker or the relay: there a daemon-side "approval" is a check the
+    // workload controls (AGENTS §7).
+    answersAutoAccept: true,
     identity: { tentacle: APP_VERSION, kind: "serve" },
     modelInfo: { name: config.model, contextWindow: config.contextWindow },
     // ITS OWN model, told to a client for DISPLAY only (a `connect` TUI's ctx
@@ -520,14 +780,46 @@ async function reloadedHost(
     // is attached to wakes on a job exit (docs/feat/serve-autowake.md). The
     // stdio (pod) daemon and the worker never set it.
     wakeOnJobExit: config.autoWake,
+    // Scheduled wakes (docs/feat/cron-tool.md D1, owner Q4): a `serve` session keeps
+    // its table, persists it in the sidecar and fires it with nobody attached, with
+    // THIS host's `schedules.*` limits. The stdio (pod) daemon never sets it.
+    schedules: {
+      limits: scheduleLimitsOf(config),
+      ...(options.onAudit ? { onAudit: options.onAudit } : {}),
+    },
     // This daemon runs its own config's model, so it holds the bytes
     // (docs/feat/attachments-prompt.md D4); `undefined` = no image input at all.
     ...(images ? { images } : {}),
-    // Push (docs/feat/mobile-push.md P8): the OBSERVER every session gets, the
-    // store its registrations live in, and what the RPC answers. Absent = no push
-    // (a pod daemon never reaches here, and `push.enabled: false` removes it
-    // before this call) — structurally, nothing to observe.
-    ...(push ? { push } : {}),
+    documents: daemonDocumentPolicy("host"),
+    // Push (docs/feat/mobile-push.md P8) and Live Activities (task 18) both
+    // observe the SAME session hook. ONE observer is registered — a fan-out of
+    // whichever of the two exist — so `HostedSession.pushObserver` stays a single
+    // object, `offerPush` stays O(1) and synchronous (AGENTS §7's steering
+    // no-wait window), and neither side can observe the other's absence.
+    //
+    // Each option is passed ONLY when its own wiring exists: `push.enabled:
+    // false` must still answer `MethodNotFound` to `device/push_register` (task
+    // 16's contract), and a pod daemon passes neither.
+    ...(push === undefined
+      ? {}
+      : {
+          push: {
+            storeDir: push.storeDir,
+            graceSeconds: push.graceSeconds,
+            status: push.status,
+            observer,
+          },
+        }),
+    ...(liveActivity === undefined
+      ? {}
+      : {
+          liveActivity: {
+            storeDir: liveActivity.storeDir,
+            notifier: liveActivity.notifier,
+            status: liveActivity.status,
+            observer,
+          },
+        }),
   });
   const notice = options.onNotice ?? (() => {});
   let restored = 0;
@@ -642,6 +934,22 @@ function listen(
   relay?: { readonly url: string; readonly storeDir: string },
   /** The push wiring (docs/feat/mobile-push.md P8), when this daemon has it. */
   push?: ServePush,
+  /**
+   * The Live Activity wiring (docs/feat/mobile-live-activity.md L8), when this
+   * daemon has it. Its SINK is the same relay link, bound below.
+   */
+  liveActivity?: ServeLiveActivity,
+  /**
+   * Run once the listener is up (the MCP connect, docs/feat/serve-mcp.md): a
+   * start that fails inside `startWsServer` spawns no server process.
+   */
+  afterListen?: () => void,
+  /**
+   * This host's own project-hooks answer (S4): its trust file decides before any
+   * client is asked, so a phone turn in a folder trusted HERE runs the hooks —
+   * on BOTH remote paths, the direct route and the relay.
+   */
+  hooksTrustPrecheck?: HooksTrustPrecheck,
 ): ServeHandle {
   const server = startWsServer({
     host: options.host,
@@ -653,11 +961,13 @@ function listen(
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
     ...(devices ? { devices: { authority: devices } } : {}),
+    ...(hooksTrustPrecheck ? { hooksTrustPrecheck } : {}),
   });
   // The host exists now, and it must exist before the relay link does (the link
   // dials only while the authority wants reachability, and the notifier reads
   // titles through the host).
   push?.bindHost(sessionHost);
+  liveActivity?.bindHost(sessionHost);
   // The mobile relay's identity, BEFORE the record so the address can go in it:
   // `/d/<id>/e2e` is computed locally (`relayAddress`), so `pair` and the
   // announcement know it before any connection (Design §1). A store that cannot
@@ -715,6 +1025,9 @@ function listen(
           sessionHost,
           limiter: server.limiter,
           dial: bunRelayDialer(),
+          // S4 review 1 finding 1: the relay IS the usual remote path, so the
+          // host's own hooks-trust answer must reach the accept legs it builds.
+          ...(hooksTrustPrecheck ? { hooksTrustPrecheck } : {}),
           ...(options.onAudit ? { onAudit: options.onAudit } : {}),
           ...(options.onError ? { onError: options.onError } : {}),
         })
@@ -724,6 +1037,9 @@ function listen(
   // transport. With no link the sink answers `unavailable` and the register
   // result says `relay-off` — the app's honest answer, never a silent drop.
   push?.bindLink(relayLink);
+  // The activity notifier's sink IS the same link (one relay for streams and
+  // push, decision 2): bound now, and it also registers the `ready` resend (F3).
+  liveActivity?.bindLink(relayLink);
   // Sibling discovery (docs/feat/sibling-discovery.md): ONE driver per process,
   // started with the listener (it needs the BOUND port) and stopped with it,
   // before the record is removed — a stopping daemon must not heartbeat a file
@@ -810,6 +1126,9 @@ function listen(
     },
   });
   let stopping: Promise<void> | undefined;
+  // The listener is up and every sink is bound: NOW the background work a caller
+  // deferred for that reason can start (the MCP connect, docs/feat/serve-mcp.md).
+  afterListen?.();
   return {
     url: server.url,
     port: server.port,
@@ -853,6 +1172,8 @@ export function tunnelledAgent(
     readonly skillScan?: SkillScan;
     /** A live session's broker, jobs and approvals: a settings sync rebuilds its agent on them. */
     readonly reuse?: AgentReuse;
+    /** The session's artifact store: offered `present` (docs/feat/model-artifacts.md D4). */
+    readonly artifacts?: ArtifactSink;
     /**
      * Offer `move_session` (docs/feat/session-hop.md D9). Set by the pod DAEMON
      * only, never by a plain `serve` (which builds through `createServeAgent`):
@@ -917,6 +1238,7 @@ export function tunnelledAgent(
       : {}),
     // D9: only a pod daemon sets this (`podSessionHost`); a `serve` never does.
     ...(options.moveSession === true ? { moveSession: true as const } : {}),
+    ...(options.artifacts ? { artifacts: options.artifacts } : {}),
   });
   return { ...wired, ...(report ? { settingsReport: report } : {}), pinnedOver };
 }
@@ -969,6 +1291,8 @@ export function podSessionHost(
     defaultCwd: config.cwd,
     onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
     ...(images ? { images } : {}),
+    // A pod takes document TEXT only: the laptop extracts (AGENTS §7).
+    documents: daemonDocumentPolicy("pod"),
     // `run`/`attach`'s daemon: a skew is fixed by attaching again (it replaces it).
     identity: { tentacle: APP_VERSION, kind: "container" },
     // Only the model-proxy branch honours `settings`: a daemon the laptop does
@@ -981,7 +1305,7 @@ export function podSessionHost(
     // than it needs, and stays symmetric with `serve`); the real one goes to
     // the daemon's stderr log (piped + routed by the laptop, never inherited).
     ...(log ? { onTurnError: (error: Error) => log(`error: ${error.message}`) } : {}),
-    createAgent: (cwd, { modelLink, settings, reuse, attachments, hop }) => {
+    createAgent: (cwd, { modelLink, settings, reuse, attachments, artifacts, hop }) => {
       if (!options.modelProxy) {
         // It reports nothing: a settings sync answers `applied: false`.
         return buildAgent(
@@ -993,6 +1317,9 @@ export function podSessionHost(
             // A pod daemon without `--model-proxy` runs its OWN model, so it
             // holds the bytes (D4, Orchestrator decision 8).
             ...(attachments ? { attachments } : {}),
+            // The session's artifact store, in the POD: what it presents is
+            // pod-supplied, and the laptop treats it so (model-artifacts D8).
+            ...(artifacts ? { artifacts } : {}),
             // D8/D9: a pod daemon may PROPOSE a move — but only for a session
             // whose client declared it can ASK the owner (H5 review finding 1).
             // `run`/`attach` have no `/move` feed, so their model must never be
@@ -1006,6 +1333,7 @@ export function podSessionHost(
         ...(log ? { log } : {}),
         skillScan,
         ...(reuse ? { reuse } : {}),
+        ...(artifacts ? { artifacts } : {}),
         // The same rule as above: the pod daemon is hop-capable, this SESSION is
         // only if its client can put the proposal to its owner (D8/D9).
         ...(hop ? { moveSession: true as const } : {}),

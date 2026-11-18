@@ -19,8 +19,11 @@
  */
 import {
   type ChannelFactoryDeps,
+  type DialFailure,
+  type DialMemory,
   RemoteClient,
   type WebSocketCtor,
+  firstAnswering,
   webSocketChannelFactory,
 } from "@tentacle/client";
 import type { LinkStatus } from "@tentacle/client";
@@ -29,11 +32,11 @@ import { PermissionBroker } from "@tentacle/core";
 import { type InitializeResult, decodeBase64Url } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import type { Random } from "@tentacle/transport/noise";
-import { type DialFailure, type DialMemory, firstAnswering } from "./address-dial.ts";
 import { type AppLog, type AppLogField, createAppLog, errorShape } from "./app-log.ts";
 import type { StoredComputer } from "./computers.ts";
 import { createForegroundGate } from "./foreground-gate.ts";
 import { sha256Hex } from "./hash.ts";
+import { phoneHooksTrust } from "./hooks-trust.ts";
 import { type LinkDiagnoser, createLinkDiagnoser } from "./link-diagnosis.ts";
 import type { RNWebSocketCtor } from "./rn-websocket.ts";
 import { rnWebSocketCtor } from "./rn-websocket.ts";
@@ -56,6 +59,13 @@ export const APP_CLIENT_OPTIONS = {
   // bit a `connect` TUI sets (docs/feat/session-auto-accept.md D4/D6). A pod is
   // never reachable from here, and the bit fails closed anyway.
   sharedAutoAccept: true,
+  // The same argument, for the daemon's own turns (docs/feat/cron-tool.md D1,
+  // S6): a `serve` on the user's host starts scheduled-wake turns on its own
+  // clock, and only such a daemon may have its `schedules` table, its
+  // `turn_start.schedule` refs and its deletes acted on. `daemonWakes` is the
+  // bit that gates all three (`remote-client.ts`), set by `connect` and the
+  // worker already; a pod's daemon sets it nowhere and its claims are dropped.
+  daemonWakes: true,
 } as const;
 
 export interface OpenComputerDeps {
@@ -110,6 +120,13 @@ export interface ComputerLink {
   readonly address: () => string;
   /** Holds the redial and drops the live socket while the app is in the background (iOS suspends JS). */
   suspend(): void;
+  /**
+   * Let ONE dial through while the app is suspended, for up to `ms`
+   * (docs/feat/mobile-notifications.md Design 4: a notification's Deny/Reply).
+   * The SAME gate the app's own suspend/resume drives — never a second one, or a
+   * background answer would dial around the gate that exists to bound it.
+   */
+  hold(ms: number): () => void;
   /** The app is active again: let the client redial (its own re-attach does the rest). */
   resume(): void;
   /**
@@ -319,6 +336,13 @@ export async function openComputer(
   const broker = createLinkBroker();
   const client = new RemoteClient(channel, broker, undefined, {
     ...APP_CLIENT_OPTIONS,
+    // Project hooks (docs/feat/serve-mcp.md S4): a phone turn in a project with
+    // hooks must be able to run them. The ask goes through THIS link's broker to
+    // a person, never auto-accepted, and nothing is stored here — the folder is
+    // on the computer (`serve-hooks-trust.ts` checks its own trust file first).
+    // It is per link because it needs the broker, so it is not in
+    // `APP_CLIENT_OPTIONS` (which carries only broker-free bits).
+    hooksTrust: phoneHooksTrust(broker),
     // This phone's own label, so the daemon can stamp an ask's `askedOn` and an
     // `auto_accept` update's `by` with it (docs/feat/session-auto-accept.md
     // D7). The name this phone PAIRED under — what the computer lists it as, so
@@ -352,6 +376,7 @@ export async function openComputer(
       address: () => current,
       suspend: () => gate.suspend(),
       resume: () => gate.resume(),
+      hold: (ms: number) => gate.hold(ms),
       // DETACH, never close (12a.2; see `leaveComputer`).
       close: () => leaveComputer(client),
     };

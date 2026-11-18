@@ -11,12 +11,15 @@
  * taken upstream, in the effect's own `kind`.
  */
 import type { PermissionResponse } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ArtifactIntent } from "../artifact-open.ts";
 import type { DockState } from "../background-focus.ts";
 import type { ChordState } from "../chord.ts";
 import type { QuitConfirmFacts } from "../commands.ts";
 import type { OpenPanel } from "../panel.ts";
 import { applyPanel } from "../panel.ts";
 import type { ReplyMode } from "../permission-reply.ts";
+import type { SchedulesState } from "../schedule-view.ts";
 import type { SessionsState, SessionsView } from "../sessions-panel.ts";
 import {
   deleteFailedNotice,
@@ -60,14 +63,36 @@ export interface KeyHost {
   fieldReset(): void;
   cancelUpload(): void;
 
+  // --- voice dictation (docs/feat/voice-dictation.md): the hook's three intents
+  voiceToggle(): void;
+  voiceFinish(): void;
+  voiceCancel(): void;
+
   // --- panels, sessions, dock
   closePanel(): void;
   panelApply(action: TreeAction): void;
+  /** Flip the open panel's selected switch (`panelSwitchOp` on the live state). */
+  switchCapability(): void;
   setSessionsState(state: SessionsState): void;
+  /** Open the artifact a `/artifacts` row asks for (docs/feat/model-artifacts.md D8). */
+  openArtifact(artifact: ArtifactMeta, intent?: ArtifactIntent): void;
+  /** `Ctrl+X Ctrl+O`: the newest artifact in the transcript. */
+  openNewestArtifact(): void;
+  /**
+   * Preview a chart artifact inside `/artifacts` (docs/feat/model-charts.md C8),
+   * or (`null`) return to the tree its `esc`/`q` asked for.
+   */
+  previewArtifact(artifact: ArtifactMeta | null): void;
+  /** The artifact open confirm's answer (`y` opens; anything else drops it). */
+  answerArtifactConfirm(yes: boolean): void;
   switchTo(id: string, reopen: boolean): void;
   sessionsDelete(id: string, startedGen: number): void;
   killJob(id: string): void;
   killChild(id: string): void;
+  /** Delete one scheduled wake (`session/schedule_delete`, cron-tool S5). */
+  deleteSchedule(id: string): void;
+  /** Write the `/schedule` panel's own state (its arm/answer). */
+  setSchedulesState(state: SchedulesState): void;
   setDock(state: DockState): void;
   toggleAgents(): void;
   toggleExpandAll(): void;
@@ -91,6 +116,7 @@ export interface KeyHost {
   pasteClipboard(): void;
   submit(text: string): void;
   removeLastChip(): void;
+  pullBackQueued(id: string, text: string): void;
 }
 
 /** Apply ONE effect. Never returns a verdict: the router already decided. */
@@ -166,8 +192,23 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
     case "applyPanel":
       host.panelApply(effect.action);
       return;
+    case "switchCapability":
+      host.switchCapability();
+      return;
     case "setSessionsState":
       host.setSessionsState(effect.state);
+      return;
+    case "openArtifact":
+      host.openArtifact(effect.artifact, effect.intent);
+      return;
+    case "openNewestArtifact":
+      host.openNewestArtifact();
+      return;
+    case "previewArtifact":
+      host.previewArtifact(effect.artifact);
+      return;
+    case "answerArtifactConfirm":
+      host.answerArtifactConfirm(effect.yes);
       return;
     case "switchTo":
       host.switchTo(effect.id, effect.reopen);
@@ -180,6 +221,12 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "killChild":
       host.killChild(effect.id);
+      return;
+    case "deleteSchedule":
+      host.deleteSchedule(effect.id);
+      return;
+    case "setSchedulesState":
+      host.setSchedulesState(effect.state);
       return;
     case "setDock":
       host.setDock(effect.state);
@@ -201,6 +248,15 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "fieldInsert":
       host.fieldInsert(effect.text);
+      return;
+    case "voiceToggle":
+      host.voiceToggle();
+      return;
+    case "voiceFinish":
+      host.voiceFinish();
+      return;
+    case "voiceCancel":
+      host.voiceCancel();
       return;
     case "fieldDeleteBack":
       host.fieldDeleteBack();
@@ -237,6 +293,9 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "removeLastChip":
       host.removeLastChip();
+      return;
+    case "pullBackQueued":
+      host.pullBackQueued(effect.id, effect.text);
       return;
   }
 }

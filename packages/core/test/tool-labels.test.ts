@@ -13,6 +13,15 @@ describe("toolLabel", () => {
     expect(toolLabel("search")).toBe("Search");
     expect(toolLabel("agent_task")).toBe("Agent");
     expect(toolLabel("skill")).toBe("Skill");
+    // `present` (docs/feat/model-artifacts.md S6a): the card's header reads
+    // `Present`, so it has to be a label rather than the raw tool name.
+    expect(toolLabel("present")).toBe("Present");
+    expect(toolLabel("schedule_create")).toBe("Schedule");
+    expect(toolLabel("schedule_control")).toBe("Schedules");
+    // docs/feat/model-charts.md D3: the chart row reads `Chart`.
+    expect(toolLabel("chart")).toBe("Chart");
+    // docs/feat/model-diagrams.md D2: a diagram is shown, never acted on either.
+    expect(toolLabel("diagram")).toBe("Diagram");
   });
 
   test("an unknown name (MCP, future tool) displays as itself", () => {

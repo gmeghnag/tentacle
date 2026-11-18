@@ -18,7 +18,7 @@ Owner, real iPhone 12 Pro (iOS 18.3.1), build b97ff97b, 11:03 — screenshot `/U
 
 ## Execution
 
-*— claude-opus-5-5, 2026-11-15* — **STOPPED before any code change: both of the
+*— deepseek (tentacle --profile deepseek), 2026-11-15* *(signature corrected by claude-opus-5-5 on 2026-11-18, Review R1: the orchestrator's commit `f4012b45 exec (deepseek)` records the model; the section originally read `claude-opus-5-5`)* — **STOPPED before any code change: both of the
 Implementation's premises are false as written, and the load-bearing check the
 Context names (B10's "if the daemon has no read path for attachments, STOP and
 record it as a plan correction") fires.** No source file was modified; the tree
@@ -227,7 +227,7 @@ calls are `{type:"history_reset", messages:[photoMessage, reply]}` followed by
 
 ### Fix round 1
 
-*— claude-opus-5-5, 2026-11-15* — addressed the three Review findings. Signing
+*— deepseek (tentacle --profile deepseek), 2026-11-15* *(signature corrected by claude-opus-5-5 on 2026-11-18, Review R1: the orchestrator's commit `ab96fba2 review round 1 (deepseek)` records the model. The executor self-identified as `claude-opus-5-5` below, most likely from its harness's system prompt; the original text is left as written)* — addressed the three Review findings. Signing
 honestly this time: this round was executed by `claude-opus-5-5`, not DeepSeek
 (round 1's Execution below is signed `claude-opus-5-5` but its commit `f4012b45`
 and the doc metadata both say DeepSeek — finding 1 is about the original
@@ -325,7 +325,47 @@ and no other shape produced a misordered row.
 **10809 pass, 5 skip, 0 fail** (the 5 are the documented opt-ins). The >=3 new
 tests are in `apps/mobile/test/outbox-link.test.ts`.
 
+### Merge main + signatures (after Review round 2's APPROVE)
 
+*— claude-opus-5-5, 2026-11-18* — finished the two open items: Review R1 (the
+signatures) and the merge of `main` (`a3a25d84`, 3 days ahead).
+
+- **R1 is fixed.** Both sections are now signed `deepseek (tentacle --profile
+  deepseek)`: the round-1 Execution and Fix round 1. The orchestrator's commit
+  titles (`f4012b45`, `ab96fba2`) are the record of which model ran each round.
+  Each correction is marked inline, and the original wording is kept.
+- **Main had already fixed B9-a.** `fix/mobile-media-live` item 1
+  (`compose-handle.ts` `foldingOutboxSession`) solves the same bug in a different
+  way. `ComposeWiring.driver`'s prompt object carries a `handle` accessor. That
+  accessor is gated on `status.phase === "open"` and also passes
+  `photos`/`documents` through the prompt. `mobile-media-live-wiring.test.ts`
+  pins the change. The two approaches conflicted in `App.tsx`,
+  `session-screen-controller.ts` and `outbox-link.test.ts`. Keeping both would
+  leave two ports for one driver, so the merge **takes main's mechanism**. It
+  drops this branch's `screenSessionPortOf` (`outbox-session.ts`), the `own`
+  driver parameter and the `composeHandle` variable. It keeps everything else
+  from both sides, including main's copy pruning and its info/title/activity
+  teardown in `leave`/`dispose`.
+- **Both sides' tests are kept.** This branch's B9 and B9-b tests now use main's
+  `screenOn(phone, sid, [PHOTO])` helper, so the photo is `a.png`. Main's
+  ack-test and its item-1 test are unchanged. The B9 test now guards main's port.
+- **Drift:** after this merge, the branch's only changes against `main` are
+  these tests and this doc. `changelog.d/mobile-photo-row.fixed.md` now repeats
+  main's `changelog.d/mobile-media-live.fixed.md`, so it should be deleted
+  before merge. I could not delete it: `git rm` needs the owner's approval in
+  this session.
+- **Gate (partial):**
+  - `bun run lint`: clean.
+  - `bunx tsc -p apps/mobile --noEmit`: the only errors are TS2307/TS7006 for
+    modules this worktree has not installed (`@tentacle/config`,
+    `react-native-webview`, `react-native-svg`, `expo-document-picker`,
+    `linkedom`, `mermaid`). There is no other error.
+  - `bun test apps/mobile`: 3308 pass, 15 fail and 12 errors, all of them
+    module-resolution errors. `outbox-link.test.ts` cannot load at all because
+    of `@tentacle/config`.
+  - `bun install --frozen-lockfile` needs approval in this session. **Not
+    verified:** whether the merged tests pass. To check, run `bun install
+    --frozen-lockfile`, then `bun test apps/mobile/test/outbox-link.test.ts`.
 
 ## Review
 

@@ -38,7 +38,8 @@ import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 // give a row back once after a kill — the app never registers `onReturned`.
 import { handBack } from "../../../packages/client/src/hand-back.ts";
 import { SpyDaemonStore } from "../../../packages/daemon/test/support/daemon-store-spy.ts";
-import { composeHandleOf } from "../src/compose-handle.ts";
+import type { PickedPhoto } from "../src/compose-controller.ts";
+import { composeHandleOf, foldingOutboxSession } from "../src/compose-handle.ts";
 import { leaveComputer } from "../src/connection.ts";
 import {
   type OutboxDriver,
@@ -46,11 +47,7 @@ import {
   type OutboxSession,
   createOutboxDriver,
 } from "../src/outbox-driver.ts";
-import {
-  outboxSessionOf,
-  screenSessionPortOf,
-  unavailableSessionPort,
-} from "../src/outbox-session.ts";
+import { outboxSessionOf, unavailableSessionPort } from "../src/outbox-session.ts";
 import { type OutboxFs, createOutboxStore, outboxPaths } from "../src/outbox-store.ts";
 import type { ComposeInput, OutboxItem, SessionFacts } from "../src/outbox.ts";
 import { addOwnIds, pruneOwnIds } from "../src/outbox.ts";
@@ -58,6 +55,24 @@ import { createSessionController } from "../src/session-controller.ts";
 import { type SendableHandle, createSessionScreen } from "../src/session-screen-controller.ts";
 
 const CWD = "/tmp/mobile-outbox-link";
+
+/** A real 1×1 PNG: the daemon sniffs the type from the BYTES, so a fake header would be refused. */
+const PNG_BYTES = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+  0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+  0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+  0x42, 0x60, 0x82,
+]);
+
+/** One picked photo, as 13c's pipeline hands it to the compose half. */
+const PHOTO: PickedPhoto = {
+  kind: "ready",
+  file: "file:///o/photos/a.png",
+  mimeType: "image/png",
+  name: "a.png",
+  bytes: PNG_BYTES,
+};
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function until(check: () => boolean | Promise<boolean>, ms = 3000): Promise<void> {
@@ -888,15 +903,8 @@ function memoryFs(): OutboxFs {
  * `App.tsx`'s `composeWiring` wires it: the handle is the APP's own
  * `composeHandleOf`, given the screen's attach handle.
  */
-function screenOn(phone: App, sid: string, over: { readonly photo?: boolean } = {}) {
+function screenOn(phone: App, sid: string, photo: readonly PickedPhoto[] = []) {
   const store = createOutboxStore(memoryFs(), outboxPaths("file:///o", "phone"), () => 1);
-  const picked = {
-    kind: "ready" as const,
-    file: "file:///o/photos/a.jpg",
-    mimeType: "image/jpeg",
-    name: "a.jpg",
-    bytes: new Uint8Array([1, 2, 3]),
-  };
   return createSessionScreen({
     sessionId: sid,
     archived: false,
@@ -913,21 +921,18 @@ function screenOn(phone: App, sid: string, over: { readonly photo?: boolean } = 
     compose: {
       computerId: "phone",
       store,
-      driver: (folding, own) =>
-        createOutboxDriver(screenSessionPortOf(own, folding.prompt), {
+      driver: (folding) =>
+        createOutboxDriver(async () => foldingOutboxSession(folding.handle(), folding.prompt), {
           persistence: {
             items: () => store.data.items,
             save: (items) => store.setItems(items),
             finish: (itemId) => store.removeItem(itemId),
           },
-          readPhoto: async () => new Uint8Array(),
+          readPhoto: async () => PNG_BYTES,
           mint: () => crypto.randomUUID(),
           onDraft: folding.onDraft,
         }),
-      photos: {
-        pickFromLibrary: async () => (over.photo === true ? [picked] : []),
-        takePhoto: async () => (over.photo === true ? [picked] : []),
-      },
+      photos: { pickFromLibrary: async () => photo, takePhoto: async () => photo },
       handle: (session) =>
         composeHandleOf({
           sessionId: sid,
@@ -994,7 +999,7 @@ describe("owner B9: the photo's own row is drawn by the screen, above its reply"
     const laptop = await dial(d);
     const sid = await seeded(laptop);
     const phone = await dial(d);
-    const screen = screenOn(phone, sid, { photo: true });
+    const screen = screenOn(phone, sid, [PHOTO]);
     await screen.open();
     await until(() => screen.state().status.phase === "open");
     await screen.pickPhoto("library");
@@ -1023,7 +1028,7 @@ describe("owner B9: the photo's own row is drawn by the screen, above its reply"
     );
     // The image is on the row, as the ref the daemon holds (not a dropped one).
     const shown = rows[photo] as { readonly images?: readonly { readonly name?: string }[] };
-    expect(shown.images?.[0]?.name).toBe("a.jpg");
+    expect(shown.images?.[0]?.name).toBe("a.png");
     await screen.leave();
     screen.dispose();
     phone.close();
@@ -1054,7 +1059,7 @@ describe("owner B9-b: a mid-turn resync does not duplicate the prompt row", () =
     const laptop = await dial(d);
     const sid = await seeded(laptop);
     const phone = await dial(d);
-    const screen = screenOn(phone, sid, { photo: true });
+    const screen = screenOn(phone, sid, [PHOTO]);
     await screen.open();
     await until(() => screen.state().status.phase === "open");
     await screen.pickPhoto("library");
@@ -1078,6 +1083,98 @@ describe("owner B9-b: a mid-turn resync does not duplicate the prompt row", () =
     expect(mine).toHaveLength(1);
     const photo = rows.findIndex((row) => row.kind === "user" && row.text === "hold Cosa vedi?");
     expect(rows.slice(photo + 1).some((row) => row.kind === "assistant")).toBe(true);
+    await screen.leave();
+    screen.dispose();
+    phone.close();
+    laptop.close();
+  }, 20000);
+});
+
+describe("the port's prompt is done at the daemon's ACK (docs/fix/mobile-chat-glitches.md, bug 2)", () => {
+  test("resolves while the accepted turn still runs, and the daemon ran it ONCE (mutation: drain to the end → hung → red)", async () => {
+    const d = daemon();
+    const laptop = await dial(d);
+    const sid = await seeded(laptop);
+    const app = await dial(d);
+    const session = app.client.newSession(undefined, sid, undefined, { attach: {} });
+    await session.open();
+    const port = outboxSessionOf(session, app.client, () => null);
+    const outcome = await Promise.race([
+      port.prompt("hold me", crypto.randomUUID(), []).then(() => "accepted"),
+      sleep(2000).then(() => "hung"),
+    ]);
+    expect(outcome).toBe("accepted");
+    // The turn is still running on the daemon: the model is held at its gate.
+    expect(d.model.held).toBe(1);
+    d.model.open();
+    await until(async () => (await userTexts(d, sid)).includes("hold me"));
+    expect(await userTexts(d, sid)).toEqual(["hi", "hold me"]);
+    app.close();
+    laptop.close();
+  }, 20000);
+});
+
+describe("fix/mobile-media-live item 1: a photo message's turn folds into the screen", () => {
+  /**
+   * The owner's report: a photo message left the header on "Running" and showed
+   * no reply, while the daemon HAD finished the turn (leaving and re-entering
+   * showed it — the history was fine, the LIVE path was not).
+   *
+   * Root cause (verified in the plan's load-bearing check): `App.tsx`'s
+   * `outboxOf` built the outbox port over `client.newSession(...)` — a SECOND
+   * session handle for the same id. `RemoteClient.register` reassigns the
+   * entry's `listener` to whichever handle opened last
+   * (`remote-client.ts:3023-3026`), so the screen's own `watch` stopped
+   * receiving the turn: its `text`/`turn_end` never arrived and `transcript.turn`
+   * — the header's "Running" — was never cleared.
+   *
+   * Mutation: the driver's `getSession` opening its own handle again → the turn
+   * never ends → red.
+   */
+  test("a photo message: the reply arrives AND the running state ends (mutation: a second session handle → stuck Running)", async () => {
+    const d = daemon();
+    const laptop = await dial(d);
+    const sid = await seeded(laptop);
+    const phone = await dial(d);
+    const screen = screenOn(phone, sid, [PHOTO]);
+    await screen.open();
+    await until(() => screen.state().status.phase === "open");
+
+    screen.setDraft("look at this");
+    // A photo through the screen's own chips, as the button does (13c's pipeline
+    // is `photo-input.test.ts`'s subject; here the driver's UPLOAD and prompt are
+    // what must reach the daemon through the screen's handle).
+    await screen.pickPhoto("library");
+    screen.press();
+    // Wait for the ONE thing the bug prevented — the reply arriving — instead of
+    // for the turn to be absent (Review round 2: `until(() => !turn)` passes
+    // vacuously before the press, so the wait proved nothing). The reply can
+    // only be on this screen if the turn's own stream was folded, and the
+    // `toBeNull()` below then says that turn ended.
+    await until(() => userRows(screen).includes("look at this"));
+    await until(() =>
+      screen
+        .state()
+        .transcript.rows.some((row) => row.kind === "assistant" && row.text.includes("ok:")),
+    );
+
+    // The daemon finished it...
+    expect(await userTexts(d, sid)).toEqual(["hi", "look at this"]);
+    // ...and the PHONE shows the answer, with no turn running (the owner's symptom).
+    const rows = screen.state().transcript.rows;
+    expect(rows.some((row) => row.kind === "assistant" && row.text.includes("ok:"))).toBe(true);
+    expect(screen.state().transcript.turn).toBeNull();
+
+    // Item 2: the row this phone just sent carries the LOCAL file it uploaded, so
+    // the bubble draws the photo instead of `[image: a.png]` (mutation: drop
+    // `photos` from the prompt path → `localUri` undefined → red). The daemon has
+    // no read-back method, so nothing else could supply these pixels.
+    const sent = rows.find((row) => row.kind === "user" && row.text === "look at this");
+    if (sent?.kind !== "user") {
+      throw new Error("no sent row");
+    }
+    expect(sent.images[0]?.localUri).toBe("file:///o/photos/a.png");
+
     await screen.leave();
     screen.dispose();
     phone.close();

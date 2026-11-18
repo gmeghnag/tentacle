@@ -12,14 +12,16 @@ import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
 import type {
   AttachmentRef,
   ChatMessage,
+  ScheduledRef,
   ToolResult,
   ToolResultDetail,
   ToolResultSpill,
 } from "@tentacle/core";
 import { describeEmptyTurn, describeRepairs, describeTruncation } from "@tentacle/core";
 import { imageRowText } from "./attach-draft.ts";
+import { stripInlineMarkdown } from "./harness-text.ts";
 import { HOP_WAKE_ROW } from "./hop-wake.ts";
-import { messagesToItems } from "./resume.ts";
+import { type ArtifactCardMap, messagesToItems } from "./resume.ts";
 import { nextToolStatus } from "./tool-phase-view.ts";
 
 /**
@@ -32,12 +34,25 @@ export interface UserItem {
   readonly kind: "user";
   readonly text: string;
   /**
-   * The prompt's image rows, precomputed (`[image: name]`, docs/feat/attachments-tui.md
-   * D7): one line under the text, and for an image-only prompt the ONLY rows.
+   * The prompt's attachment rows, precomputed (`[image: name]`, docs/feat/attachments-tui.md
+   * D7): one line under the text, and for an attachment-only prompt the ONLY rows.
    */
   readonly images?: readonly string[];
+  /**
+   * The prompt's PDF rows (`[pdf: report.pdf · 2 pp]`, docs/feat/pdf-read.md D5):
+   * after the image rows, in the same slot — the block itself is never shown.
+   */
+  readonly documents?: readonly string[];
   /** The model's restart prompt after a context reset (labelled "restart prompt"). */
   readonly restart?: true;
+  /**
+   * The scheduled wake that started this turn (docs/feat/scheduled-fire-row.md):
+   * live, the `turn_start.schedule` ref; reloaded, `ChatMessage.scheduled` —
+   * the same record, so the row is the same. Absent for an ordinary turn and
+   * for an older daemon or log: the row then reads the durable
+   * `[scheduled sc-1 · …]` prefix in `text` (`firedRowLines`).
+   */
+  readonly schedule?: ScheduledRef;
 }
 
 export interface AssistantItem {
@@ -56,6 +71,13 @@ export interface AssistantItem {
 export interface NoticeItem {
   readonly kind: "notice";
   readonly text: string;
+  /**
+   * `warn` for something that went WRONG and the person should see (a reply cut
+   * at its output limit, an empty turn, a failed compaction); absent means info.
+   * It picks the glyph (`▲` vs `◇`, docs/feat/harness-notices.md S2) — the
+   * owner is colour-blind, so the SHAPE is the signal and amber only a cue.
+   */
+  readonly level?: "warn";
   /** A grey aside after the text (`(/settings sync to use this terminal's values, or /clear)`): its own field, never parsed from `text`. */
   readonly hint?: string;
   /** Identifies a background-job notice so the live + event paths dedupe. */
@@ -198,15 +220,36 @@ export function backgroundExitNotice(
 export function appendNotice(
   state: DisplayState,
   text: string,
-  opts: { readonly host?: true; readonly hint?: string } = {},
+  opts: {
+    readonly host?: true;
+    readonly hint?: string;
+    readonly level?: "warn";
+    /**
+     * Drawn as a full-width grey rule instead of a harness line: the context
+     * reset's separator and a compaction's (docs/feat/harness-notices.md S3).
+     */
+    readonly separator?: true;
+    /** The rule's body, shown only when expanded (a resumed compaction's brief). */
+    readonly body?: string;
+  } = {},
 ): DisplayState {
   const item: NoticeItem = {
     kind: "notice",
     text,
     ...(opts.hint ? { hint: opts.hint } : {}),
     ...(opts.host ? { host: true as const } : {}),
+    ...(opts.level ? { level: opts.level } : {}),
+    ...(opts.separator ? { separator: true as const } : {}),
+    ...(opts.body === undefined || opts.body === "" ? {} : { body: opts.body }),
   };
   return { ...state, items: append(state.items, item) };
+}
+
+/** This TURN's notices (after the last user item): the dedupe + merge scope. */
+function turnNotices(state: DisplayState): readonly NoticeItem[] {
+  const at = state.items.findLastIndex((item) => item.kind === "user");
+  const rest = state.items.slice(at + 1);
+  return rest.filter((item) => item.kind === "notice");
 }
 
 /**
@@ -216,8 +259,52 @@ export function appendNotice(
  * round (a re-asked round repeats its cause, docs/fix/truncated-reply-silent.md).
  */
 function noticeSeenThisTurn(state: DisplayState, text: string): boolean {
-  const at = state.items.findLastIndex((item) => item.kind === "user");
-  return state.items.slice(at + 1).some((item) => item.kind === "notice" && item.text === text);
+  return turnNotices(state).some((item) => item.text === text);
+}
+
+/** The shared `warn` option for `appendNotice`'s spread. */
+const WARN = { level: "warn" } as const;
+
+/**
+ * The index of THIS turn's "asked it to continue" notice when the cut being
+ * reported is the re-ask's OWN round — else `-1`, and the cut is a new line.
+ *
+ * Two conditions, because the re-ask budget is per TURN (`MAX_TRUNCATION_REASKS`)
+ * while the re-ask itself may run tools and further rounds afterwards
+ * (Review round 3 MEDIUM-1):
+ * - it is the turn's LAST notice, so nothing has been said since it;
+ * - nothing but the re-ask's own reply follows it: at most ONE answer item and
+ *   no other item. A tool row (or a second answer item) means a round ENDED in
+ *   between, so a cut now is a separate fact far below this line, and rewriting
+ *   the line in place would move it (and lose the first fact).
+ *
+ * "This turn's" falls out of the structure, no separate check: a new turn
+ * appends a `user` item, which is neither an answer item nor absent — so an
+ * earlier turn's line can never qualify.
+ */
+function reaskContinueAt(state: DisplayState): number {
+  const at = state.items.findLastIndex((item) => item.kind === "notice");
+  const notice = at < 0 ? undefined : state.items[at];
+  if (notice === undefined || notice.kind !== "notice") {
+    return -1;
+  }
+  if (!notice.text.endsWith("asking it to continue")) {
+    return -1;
+  }
+  const after = state.items.slice(at + 1);
+  const answers = after.filter((item) => item.kind === "assistant").length;
+  return after.length === answers && answers <= 1 ? at : -1;
+}
+
+/**
+ * Swap the turn's "asked it to continue" notice for the merged `again` sentence,
+ * IN PLACE: the block keeps its position in the transcript (above the reply that
+ * follows the cut) instead of a second line appearing below it.
+ */
+function mergeContinueNotice(state: DisplayState, at: number, text: string): DisplayState {
+  const prev = state.items[at] as NoticeItem;
+  const merged: NoticeItem = { ...prev, text };
+  return { ...state, items: [...state.items.slice(0, at), merged, ...state.items.slice(at + 1)] };
 }
 
 /**
@@ -316,6 +403,7 @@ export function startTurn(
   text: string,
   now: number,
   images?: readonly string[],
+  documents?: readonly string[],
 ): DisplayState {
   return {
     ...state,
@@ -323,6 +411,7 @@ export function startTurn(
       kind: "user",
       text,
       ...(images !== undefined && images.length > 0 ? { images } : {}),
+      ...(documents !== undefined && documents.length > 0 ? { documents } : {}),
     }),
     running: true,
     reasoning: false,
@@ -392,8 +481,45 @@ export function endWithoutOutcome(state: DisplayState): DisplayState {
   };
 }
 
+/**
+ * Whether a `pushNotice` text is a HARNESS line, and its text without the
+ * italics marks: ONE line wholly wrapped in `_…_` (the convention 40+ call sites
+ * use: `pushNotice("_Can't compact while a turn is running._")`).
+ *
+ * Everything else stays a command reply — the multi-line markdown of `/help`,
+ * `/model`, `/mcp`, `/tokens` keeps the model's styling (owner Q5) — and so does
+ * a bare text with no italics, or a half-wrapped one. The rule is deliberately
+ * syntactic and narrow: a misclassified reply would repaint a whole panel as a
+ * grey aside.
+ *
+ * `null` = not a harness line. An empty `__` is not one either: there is nothing
+ * to say, and an empty notice would draw a glyph with no text.
+ */
+export function harnessNoticeOf(text: string): string | null {
+  if (text.includes("\n") || text.length < 3) {
+    return null;
+  }
+  if (!text.startsWith("_") || !text.endsWith("_")) {
+    return null;
+  }
+  const inner = text.slice(1, -1);
+  // `__` (empty) and `___` (a bare mark left by an odd caller) say nothing; a
+  // lone `_` pair around real text is the shape we want.
+  if (inner === "" || inner.startsWith("_") || inner.endsWith("_")) {
+    return null;
+  }
+  // The source is markdown (the module this text used to be drawn by): a
+  // harness line is PLAIN, so the inline markers and escapes go
+  // (`harness-text.ts` — the `/attach` usage's backticks, the hop's `\_`).
+  return stripInlineMarkdown(inner);
+}
+
 /** Append a command's reply (see `AssistantItem.notice`). */
-export function pushNoticeItem(state: DisplayState, text: string): DisplayState {
+export function pushNoticeItem(state: DisplayState, text: string, level?: "warn"): DisplayState {
+  const harness = harnessNoticeOf(text);
+  if (harness !== null) {
+    return appendNotice(state, harness, level === "warn" ? { level: "warn" } : {});
+  }
   return { ...state, items: append(state.items, { kind: "assistant", text, notice: true }) };
 }
 
@@ -574,20 +700,34 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
     // App's own error path adds the failure line.
     case "truncated_reply": {
       // The loop says whether a re-ask is coming; the frontends no longer guess
-      // it from the reason (Review MEDIUM-2). So a re-ask that cuts again says
-      // "incomplete" WITHOUT promising a continuation, and the text-keyed
-      // dedupe lets that second, different sentence through.
+      // it from the reason (Review MEDIUM-2). A re-ask that cuts AGAIN is the
+      // same fact continued, not a second one: it REPLACES the line it belongs
+      // to (in place, so the block keeps its position above the reply) with the
+      // merged wording, instead of printing two near-identical lines
+      // (docs/feat/harness-notices.md S2.6).
+      //
+      // Only the re-ask's OWN round merges (`reaskContinueAt`): a cut LATER in
+      // the turn — after the re-asked reply ran tools or was followed by more
+      // text — is a separate fact and is appended at its own place, never
+      // rewritten onto the line near the top of the turn (Review round 3
+      // MEDIUM-1). A `cut` reason is a different fact too (the stream died, no
+      // re-ask follows), so it never merges either.
+      const at = event.reason === "length" ? reaskContinueAt(state) : -1;
       const text = describeTruncation(event.reason, {
         answered: turnHasAnswerText(state),
         retrying: event.retrying,
+        ...(at >= 0 ? { again: true } : {}),
       });
-      return noticeSeenThisTurn(state, text) ? state : appendNotice(state, text);
+      if (at >= 0) {
+        return mergeContinueNotice(state, at, text);
+      }
+      return noticeSeenThisTurn(state, text) ? state : appendNotice(state, text, WARN);
     }
 
     // The turn is ending with nothing produced: SAY so, never leave the screen
     // as it was (the reported "looks hung").
     case "empty_turn":
-      return appendNotice(state, describeEmptyTurn());
+      return appendNotice(state, describeEmptyTurn(), WARN);
 
     // The model was sent a repaired copy of the history (once per session;
     // docs/feat/history-validity-invariant.md). The saved session is unchanged.
@@ -629,6 +769,13 @@ export type SessionEvent =
       readonly text: string;
       /** The prompt's image refs, when it had any (docs/feat/attachments-tui.md D7). */
       readonly attachments?: readonly AttachmentRef[];
+      /**
+       * The scheduled wake that started this turn (`turn_start.schedule`,
+       * docs/feat/cron-tool.md S5 / D5): the daemon's own claim, already trusted
+       * and sanitized by the CLIENT (`firedScheduleRef`, which gates on
+       * `daemonWakes`), so this is display data and nothing here acts on it.
+       */
+      readonly schedule?: ScheduledRef;
     }
   /** A newer daemon's update type this client does not know (once per type per session). */
   | { readonly type: "unsupported"; readonly kind: string };
@@ -659,23 +806,39 @@ export function forgetContextFill(state: DisplayState): DisplayState {
  * A call with no result in a turn that is still running is running (or waiting
  * for approval), not done — `messagesToItems` marks every historical call `ok`.
  * The host's notices are kept, after the history.
+ *
+ * `byCall` is the card metadata this TUI already learned (`artifact/list`): the
+ * rebuilt rows carry no `detail`, so it is attached here — a resync must not
+ * blank the cards of a session that had them (docs S6a review finding 2).
  */
-export function resetHistory(state: DisplayState, messages: readonly ChatMessage[]): DisplayState {
+export function resetHistory(
+  state: DisplayState,
+  messages: readonly ChatMessage[],
+  byCall?: ArtifactCardMap,
+): DisplayState {
   const hosted = state.items.filter((item) => item.kind === "notice" && item.host === true);
-  return { ...state, items: [...historyItems(state, messages), ...hosted] };
+  return { ...state, items: [...historyItems(state, messages, byCall), ...hosted] };
 }
 
 /**
  * Append `messages` after the transcript (a context reset: the old transcript
  * stays on screen, decision 9 of docs/eval/context-reset.md), the turn's state
- * kept — the same item rules as `resetHistory`.
+ * kept — the same item rules as `resetHistory` (and the same `byCall` join).
  */
-export function appendHistory(state: DisplayState, messages: readonly ChatMessage[]): DisplayState {
-  return { ...state, items: [...state.items, ...historyItems(state, messages)] };
+export function appendHistory(
+  state: DisplayState,
+  messages: readonly ChatMessage[],
+  byCall?: ArtifactCardMap,
+): DisplayState {
+  return { ...state, items: [...state.items, ...historyItems(state, messages, byCall)] };
 }
 
-function historyItems(state: DisplayState, messages: readonly ChatMessage[]): DisplayItem[] {
-  return messagesToItems(messages).map((item) =>
+function historyItems(
+  state: DisplayState,
+  messages: readonly ChatMessage[],
+  byCall?: ArtifactCardMap,
+): DisplayItem[] {
+  return messagesToItems(messages, byCall).map((item) =>
     state.running && item.kind === "tool" && item.resultText === undefined
       ? { ...item, status: "running" as const }
       : item,
@@ -700,6 +863,14 @@ export function applySessionEvent(
         ...(event.attachments !== undefined && event.attachments.length > 0
           ? { images: event.attachments.map(imageRowText) }
           : {}),
+        // A PDF's chip is NOT on the wire (docs/feat/pdf-read.md D6): the daemon
+        // sends `media` into the message it persists, never into `turn_start`,
+        // so another device's PDF prompt shows its text here and its chip when
+        // the transcript is reloaded from the log (`resume.ts`, which reads
+        // `ChatMessage.media`). Said plainly rather than guessed at: naming a
+        // chip this build was never told about would be an invention.
+        // Its own row (cron-tool S5, M4 option B); absent paints option A.
+        ...(event.schedule === undefined ? {} : { schedule: event.schedule }),
       }),
     };
   }

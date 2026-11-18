@@ -39,6 +39,7 @@ import {
   publicKeyOf,
   systemRandom,
 } from "@tentacle/transport/noise";
+import { ChannelError } from "../src/link-machine.ts";
 import { PairingRefused, pairDevice } from "../src/pairing.ts";
 
 const CODE = "K7M2QX9AB3";
@@ -55,6 +56,20 @@ afterEach(() => {
 
 const key = (fill: number) => new Uint8Array(32).fill(fill);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/**
+ * A DIRECT address as a phone off the LAN sees it: a TCP listener that accepts
+ * the connection and never answers the upgrade, so the dial's promise never
+ * settles. What `ws://192.168.1.6:4000/e2e` does on 4G, minus the SYN timeout.
+ */
+function hang(): string {
+  const listener = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: { data() {}, open() {} },
+  });
+  servers.push({ stop: () => listener.stop(true) });
+  return `ws://127.0.0.1:${listener.port}/e2e`;
+}
 
 async function until(check: () => boolean, ms = 3_000): Promise<void> {
   const deadline = Date.now() + ms;
@@ -433,6 +448,128 @@ describe("pairDevice, the refusals", () => {
     expect(["rejected", "unreachable"]).toContain((failure as { kind?: string }).kind);
     expect(readClaim(configDir, opened.session.sid)).toBeUndefined();
   });
+});
+
+describe("pairDevice races the payload's addresses (docs/fix/relay-pairing.md)", () => {
+  test("a HANGING first address does not keep pairing from the next one (the 4G bug)", async () => {
+    // The bug: `pairDevice` dialled strictly in order with no deadline, so a LAN
+    // address that is not there (a phone on 4G) held the relay back forever —
+    // the app sat on "Connecting…" and the relay was never even dialled. The
+    // property: the relay address answers the race, and keeping it.
+    const { configDir, identity } = store();
+    const { url } = serve(configDir);
+    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    if (!opened.ok) throw new Error(opened.reason);
+    const dead = hang();
+    const compares: string[] = [];
+    const answering = human(configDir, opened.session.sid, { accept: true });
+    const result = await pairDevice({
+      payload: { ...payloadFor(identity, url), addresses: [dead, url] },
+      deviceKey: key(7),
+      name: "iPhone di Gabriel",
+      dial,
+      random: systemRandom,
+      onCompare: (sas) => {
+        compares.push(sas);
+      },
+      race: { staggerMs: 20 },
+    });
+    await answering;
+    expect(result.deviceId).toMatch(/^[0-9a-f]{16}$/);
+    expect(compares).toHaveLength(1);
+  }, 5_000);
+
+  test("every address hanging fails `unreachable` within the open deadline", async () => {
+    // The other half: "nothing answered at all" must not be a hang either. The
+    // deadline bounds the OPEN only (a winner's `device/pair` may wait on a
+    // human for minutes, F3).
+    const { identity } = store();
+    const failure = await pairDevice({
+      payload: {
+        ...payloadFor(identity, "ws://127.0.0.1:1/e2e"),
+        addresses: [hang(), hang()],
+      },
+      deviceKey: key(7),
+      name: "iPhone",
+      dial,
+      random: systemRandom,
+      race: { staggerMs: 10, openDeadlineMs: 100 },
+    }).catch((e) => e);
+    expect(failure).toBeInstanceOf(ChannelError);
+    expect((failure as ChannelError).kind).toBe("unreachable");
+  }, 5_000);
+
+  test("a refusal on the winner is NOT retried on another address (the code is not spent twice)", async () => {
+    // A refusal is the daemon's answer about the whole computer (the same key
+    // and the same claim on every address), so a `PairingRefused` must stop the
+    // race — `too_many_attempts` especially. Mutation: drop `isTerminal`'s
+    // `PairingRefused` arm → the second address is dialled, the daemon sees a
+    // second claim, and this test sees two `pairing-refused` lines.
+    const { configDir, identity } = store();
+    const { url, audit } = serve(configDir);
+    openPairing(configDir, { code: "ABCDEFGH23", now: Date.now(), pid: process.pid });
+    const failure = await pairDevice({
+      payload: {
+        ...payloadFor(identity, url),
+        // A dead direct address FIRST, then the same daemon twice: the winner
+        // is the one the dead address held back, and its refusal is the answer
+        // for the whole computer (one key, one claim).
+        addresses: [hang(), url, url],
+      },
+      deviceKey: key(7),
+      name: "iPhone",
+      dial,
+      random: systemRandom,
+      race: { staggerMs: 20 },
+    }).catch((e) => e);
+    expect(failure).toBeInstanceOf(PairingRefused);
+    expect((failure as PairingRefused).reason).toBe("invalid_code");
+    // Exactly ONE claim was made: the refusing answer was never re-asked.
+    expect(audit.filter((line) => line.startsWith("pairing-refused"))).toHaveLength(1);
+    expect(audit.filter((line) => line === "pairing-open")).toHaveLength(1);
+  }, 5_000);
+
+  test("a loser that opens after the winner is closed BEFORE any handshake", async () => {
+    // A raced pairing must leave no daemon-side pairing state on the path it did
+    // not use: the loser is closed pre-handshake, so the second daemon never
+    // sees `pairing-open` (its Noise responder never runs, and no slot is spent).
+    const { configDir, identity } = store();
+    const winner = serve(configDir);
+    const loser = serve(configDir);
+    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    if (!opened.ok) throw new Error(opened.reason);
+    const answering = human(configDir, opened.session.sid, { accept: true });
+    // The loser's socket is held back 200 ms, so it can only open AFTER the
+    // winner (whose daemon answers in a couple of ms).
+    const slow = (address: string) => () =>
+      new Promise<DuplexChannel>((resolve, reject) => {
+        setTimeout(() => {
+          dial(address)().then(resolve, reject);
+        }, 200);
+      });
+    const result = await pairDevice({
+      payload: {
+        ...payloadFor(identity, winner.url),
+        addresses: [hang(), winner.url, loser.url],
+      },
+      deviceKey: key(7),
+      name: "iPhone di Gabriel",
+      dial: slow,
+      random: systemRandom,
+      race: { staggerMs: 1 },
+    });
+    await answering;
+    expect(result.deviceId).toMatch(/^[0-9a-f]{16}$/);
+    await until(() => winner.audit.includes("connection-close"));
+    expect(winner.audit.filter((line) => line === "pairing-open")).toHaveLength(1);
+    // The path nobody used never HAND-SHAKED: no `pairing-open`, no device
+    // open, no `pair` handler — only the socket-level noise of a pre-handshake
+    // close (`connection-close`, `e2e-violation closed`), which spends no slot
+    // and leaves no daemon state (device-accept.ts closes before the responder
+    // sees a first frame).
+    expect(loser.audit.filter((line) => line === "pairing-open")).toEqual([]);
+    expect(loser.audit.filter((line) => line.startsWith("device-open"))).toEqual([]);
+  }, 5_000);
 });
 
 describe("pairDevice is a one-shot RPC, not a session (§7)", () => {

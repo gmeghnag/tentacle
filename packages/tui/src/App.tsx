@@ -6,10 +6,26 @@ import {
   initialWake,
   wakeStep,
 } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 import { useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { AppView } from "./AppView.tsx";
 import { frameLayout } from "./app-layout.ts";
+import {
+  type ArtifactJoin,
+  checkArtifacts,
+  forgetArtifacts,
+  newArtifactJoin,
+} from "./artifact-join.ts";
+import {
+  type ArtifactConfirm,
+  type ArtifactStep,
+  NO_ARTIFACT_IN_TRANSCRIPT,
+  artifactOpenError,
+  artifactStep,
+  newestArtifact,
+} from "./artifact-open.ts";
+import { NO_ARTIFACT_OPENER, joinKnownArtifacts } from "./artifacts-panel.ts";
 import { type AttachDraft, EMPTY_DRAFT, removeLastChip, uploadDone } from "./attach-draft.ts";
 import { type AttachedImage, type FileProbe, nodeFileProbe } from "./attach-files.ts";
 import {
@@ -28,6 +44,15 @@ import {
   blinkState,
   syncBlink,
 } from "./blink.ts";
+import {
+  type CapOp,
+  type CapsView,
+  noSwitchNotice,
+  remoteChangeNotices,
+  sessionCapsPhase,
+  settled,
+  switchFailedNotice,
+} from "./capability-toggles.ts";
 import { idleChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import { type QuitConfirmFacts, oneLine, paletteStep } from "./commands.ts";
@@ -44,7 +69,7 @@ import { resolveLineEffects } from "./keys/line-layer.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { localSession } from "./local-session.ts";
-import { type OpenPanel, panelClick } from "./panel.ts";
+import { type OpenPanel, panelClick, panelSwitchOp } from "./panel.ts";
 import { pasteTarget, sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
 import {
@@ -54,6 +79,7 @@ import {
   autoAcceptTest,
   usePermissionBroker,
 } from "./permission-ui.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import { useAttachments } from "./useAttachments.ts";
 import { useDock } from "./useDock.ts";
 import { useHop } from "./useHop.ts";
@@ -62,17 +88,27 @@ import { usePanels } from "./usePanels.ts";
 import { useQuitClear } from "./useQuitClear.ts";
 import { useSessionLink } from "./useSessionLink.ts";
 import { type HopTurnPort, useTurnDriver } from "./useTurnDriver.ts";
+import { useVoice } from "./useVoice.ts";
+import { VOICE_DEFAULTS, dictationInsertion } from "./voice-session.ts";
+import { voiceStripView } from "./voice-view.ts";
 import { tryWake } from "./wake-gate.ts";
 
 export type { AutoAcceptFeed, AutoAcceptSharedFeed };
 
-import { type DaemonQueue, type QueuedRows, handBackRows } from "./queued.ts";
+import {
+  type DaemonQueue,
+  type QueuedRows,
+  afterUnqueue,
+  handBackRows,
+  pullBackTarget,
+} from "./queued.ts";
 import { type RenderOptions, layoutTranscript, sliceLaid, warmRowsChunk } from "./render-lines.ts";
 import { runChunked } from "./run-chunked.ts";
 import { anchorOffset, applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import type { Selection } from "./selection.ts";
 import { withRestored } from "./send-now.ts";
 import { SkillsSync } from "./skills-sync.ts";
+import { COMPACTED_SHOWN_MS } from "./spinner-slot.ts";
 import {
   type DisplayItem,
   type DisplayState,
@@ -199,6 +235,7 @@ export function App({
   home = defaultHome(),
   localCwd = defaultLocalCwd(),
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
+  artifactOpener,
   initialItems,
   initialPrompt,
   daemonInPod = false,
@@ -210,7 +247,12 @@ export function App({
   hop,
   targetFeed,
   columns: fixedColumns,
+  chartGlyphs = "braille",
   jobRefreshMs,
+  voice: voiceConfig = VOICE_DEFAULTS,
+  voiceConfigDir,
+  voiceSpawner,
+  voiceHost,
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -247,6 +289,8 @@ export function App({
   // The ref is the truth (a send-now reads it synchronously); the state renders.
   const [queued, setQueued] = useState<QueuedRows>([]);
   const rowsRef = useRef<QueuedRows>([]);
+  // Queued ids whose pull-back (↑) awaits its answer (docs/feat/queue-unqueue.md).
+  const pullingRef = useRef(new Set<string>());
   const setRows = useCallback((f: (rows: QueuedRows) => QueuedRows) => {
     rowsRef.current = f(rowsRef.current);
     setQueued(rowsRef.current);
@@ -268,9 +312,19 @@ export function App({
   /** The session a `/settings sync` is in flight on (docs/feat/session-settings-apply.md F4). */
   const syncingRef = useRef<SessionController | null>(null);
   const [compacting, setCompactingState] = useState(false);
+  /**
+   * When this TUI's own `/compact` began (`null`: none runs), and when it last
+   * succeeded — the spinner slot's two figures (docs/feat/harness-notices.md S3).
+   * `setCompacting` keeps the first beside the latch (they are one fact), and a
+   * compaction starting replaces a lingering `Compacted ✓` at once.
+   */
+  const [compactingSince, setCompactingSince] = useState<number | null>(null);
+  const [compactedAt, setCompactedAt] = useState<number | null>(null);
   const setCompacting = useCallback((on: boolean) => {
     compactingRef.current = on;
     setCompactingState(on);
+    setCompactingSince(on ? Date.now() : null);
+    setCompactedAt(null);
   }, []);
   const compactionOwnedRef = useRef(false);
   // Interactive tool-approval dialog + auto-accept (Shift+Tab), all self-contained.
@@ -382,6 +436,20 @@ export function App({
     quitConfirmRef.current = facts;
     setQuitConfirmState(facts);
   }, []);
+  // The artifact open confirm (docs/feat/model-artifacts.md D8: a pod's bytes,
+  // or a page with the network): the line and what `y` opens, or null. The ref
+  // is the truth for the key handler; the state renders. Never remembered.
+  const [artifactConfirm, setArtifactConfirmState] = useState<ArtifactConfirm | null>(null);
+  const artifactConfirmRef = useRef<ArtifactConfirm | null>(null);
+  const setArtifactConfirm = useCallback((next: ArtifactConfirm | null) => {
+    artifactConfirmRef.current = next;
+    setArtifactConfirmState(next);
+  }, []);
+  // What this TUI has learned of the followed session's artifacts, by `present`
+  // call. It must outlive a transcript rebuild (S6a review finding 2: a resync
+  // or a `/sessions` swap rebuilds rows from `ChatMessage`s, which carry no
+  // card), so it is a ref, not a prop of the one frame that fetched it.
+  const artifactJoinRef = useRef<ArtifactJoin>(newArtifactJoin());
   // The controller of the FOREIGN turn being streamed (another device's), or
   // null: `/exit` leaves it running (docs/feat/tui-foreign-turns.md C4).
   const foreignRef = useRef<AbortController | null>(null);
@@ -394,10 +462,21 @@ export function App({
   const agentsSubRef = useRef<(() => void) | null>(null);
   /** The current session's `onJobs` subscription (replaced with it). */
   const jobsSubRef = useRef<(() => void) | null>(null);
+  /** This session's armed wake feed (cron-tool S5), replaced with the session. */
+  const schedulesSubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentNotify` subscription (replaced with it). */
   const notifySubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentMessage` subscription (replaced with it). */
   const dockMsgSubRef = useRef<(() => void) | null>(null);
+  /** The current session's `onCapabilities` subscription (replaced with it). */
+  const capsSubRef = useRef<(() => void) | null>(null);
+  // The session's MCP/skill switches as the daemon last reported them
+  // (docs/feat/session-capabilities.md S4): the state renders, the ref is what
+  // the key executor and the change handler read live.
+  const [caps, setCapsState] = useState<CapsView | undefined>(undefined);
+  const capsRef = useRef<CapsView | undefined>(undefined);
+  /** This TUI's own switch sets awaiting their answer: their echo is not news. */
+  const capsPendingRef = useRef<readonly CapOp[]>([]);
   // My `/compact`s whose history has not arrived yet: that compaction's notice
   // is mine ("Context compacted"), not "on another device" (C6).
   const ownCompactionsRef = useRef(0);
@@ -502,6 +581,8 @@ export function App({
   });
   const { subagents, subagentsRef, setAgents, dockLastRowsRef } = dockLayer;
   const { jobRows, jobRowsRef, setJobs, dockLastJobRowsRef } = dockLayer;
+  const { scheduleRows, schedulesRef, setSchedules, ownScheduleDeletesRef, deleteSchedule } =
+    dockLayer;
   const { dockOutcomeRef, dockFinishedRef, dockStoppedRef } = dockLayer;
   const { jobOutputRef, setJobOutputGen, jobReadAtRef } = dockLayer;
   const { dock, dockRef, setDock, dockIds, dockVisible } = dockLayer;
@@ -512,6 +593,7 @@ export function App({
     expandAll: false,
     width: 80,
     spillInPod: shownInPod,
+    chartGlyphs,
   });
   const lastUserRef = useRef<string | null>(null);
   const prevRowsRef = useRef(0);
@@ -584,6 +666,44 @@ export function App({
 
   // --- throttled rendering -------------------------------------------------
   const { scheduleFlush, flushNow } = usePaintScheduler(FRAME_MS);
+
+  /**
+   * A history that just landed, with the cards this TUI already knows attached
+   * (S6a review finding 2). Every path that rebuilds rows from `ChatMessage`s —
+   * a resync's `history_reset`, a `history` replace, a `/sessions` swap — runs
+   * it, so a resumed session's cards survive the rebuild instead of going plain
+   * (and `Ctrl+X Ctrl+O` finding nothing). The decision and the request are
+   * `artifact-join.ts`'s; this is the App's half: which session, which ref, and
+   * a repaint once an answer arrives.
+   */
+  const joinCards = useCallback(
+    (state: DisplayState): DisplayState => {
+      const session = sessionRef.current;
+      const items = checkArtifacts(artifactJoinRef.current, state.items, session, () => {
+        if (sessionRef.current !== session) {
+          return;
+        }
+        // The answer has just been folded into the join's map: attach it to the
+        // rows on screen NOW (they are the ones the request was made for).
+        const learned = joinKnownArtifacts(stateRef.current.items, artifactJoinRef.current.byCall);
+        if (learned !== stateRef.current.items) {
+          stateRef.current = { ...stateRef.current, items: [...learned] };
+        }
+        flushNow();
+      });
+      return items === state.items ? state : { ...state, items: [...items] };
+    },
+    [flushNow],
+  );
+
+  /**
+   * A session SWAP: the artifacts learned for the old session must not attach
+   * cards in the new one (a `callId` can repeat), so the store is emptied —
+   * `joinCards` then asks the new session's own list (S6a review finding 2).
+   */
+  const forgetJoinedArtifacts = useCallback(() => {
+    forgetArtifacts(artifactJoinRef.current);
+  }, []);
   const linkView = useLinkIndicator(link);
 
   // `wakeIfPending`, through a ref: the exit handler below is declared first.
@@ -751,7 +871,13 @@ export function App({
       const items = stateRef.current.items;
       // Including `expandedIds`: the warm must fill the slot the committing
       // render will ask for, a clicked call's expanded command too.
-      const opts = { expandAll, width: next.columns, spillInPod: shownInPod, expandedIds };
+      const opts = {
+        expandAll,
+        width: next.columns,
+        spillInPod: shownInPod,
+        expandedIds,
+        chartGlyphs,
+      };
       runChunked(items.length, (from, budgetMs) => warmRowsChunk(items, opts, from, budgetMs), {
         isStale: () => warmGenRef.current !== gen,
         onDone: () => setSize(next),
@@ -763,7 +889,7 @@ export function App({
       stdout.off?.("resize", onResize);
       warmGenRef.current += 1; // cancel any in-flight warm on unmount/resubscribe
     };
-  }, [stdout, size.columns, expandAll, shownInPod, expandedIds]);
+  }, [stdout, size.columns, expandAll, shownInPod, expandedIds, chartGlyphs]);
 
   // Reset the palette selection whenever the typed text changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on field.value
@@ -778,6 +904,32 @@ export function App({
   const dockNow = useDockClock(dock.focus.kind !== "input" || dockVisible());
   /** The transcript's state this frame paints (`stateRef` is the truth; this reads it). */
   const st = stateRef.current;
+  // Voice dictation (docs/feat/voice-dictation.md §5): the hook owns the helper
+  // child and drives the pure reducer; the App only gives it the two things it
+  // can do to the screen — insert text at the cursor, and say one thing. It is
+  // declared HERE, above `frameLayout`, because the strip's rows are part of the
+  // layout's row budget (`app-layout.ts` counts them once); `pushNotice` is
+  // declared below, so it travels as the ref every other late caller already
+  // uses (`pushNoticeRef`, set at its definition).
+  const voice = useVoice({
+    config: voiceConfig,
+    // The transcript is INSERTED at the cursor, so what goes to `field.insert` is
+    // the appended part only (Review round 1, HIGH 1: passing the WHOLE joined
+    // field duplicated everything already typed).
+    insert: (text: string) => field.insert(dictationInsertion(field.value, text)),
+    notice: (text: string) => pushNoticeRef.current(text),
+    // The world the availability check reads. Passed explicitly so a test pins it
+    // instead of inheriting the host's (Review MEDIUM 6: T7 failed over SSH).
+    platform: voiceHost?.platform ?? process.platform,
+    env: voiceHost?.env ?? process.env,
+    ...(voiceConfigDir === undefined ? {} : { configDir: voiceConfigDir }),
+    ...(voiceSpawner === undefined ? {} : { spawner: voiceSpawner }),
+  });
+  // The phase the key layer reads (`voice()`), as a ref so a key mid-dictation
+  // sees the LIVE phase, not this render's.
+  const voicePhaseRef = useRef(voice.model.phase);
+  voicePhaseRef.current = voice.model.phase;
+
   const view = frameLayout({
     state: st,
     permission,
@@ -787,13 +939,16 @@ export function App({
     subagentsRef,
     jobRows,
     jobRowsRef,
+    scheduleRows,
     drawerRow,
     drawerJob,
     jobOutput: jobOutputRef.current,
     dockFinished: dockFinishedRef.current,
     quitConfirm,
+    artifactConfirm,
     panel,
     sessionId: sessionRef.current?.sessionId ?? null,
+    capsPhase: sessionCapsPhase(sessionRef.current, caps),
     field,
     attach,
     skills: skills(),
@@ -805,6 +960,13 @@ export function App({
     daemonQueue,
     loading,
     compacting,
+    compactingSince,
+    compactedAt,
+    // The frame needs a clock for the slot's 3 s window; it is read ONCE per
+    // render (a `setCompactedAt(null)` from the timer is what re-renders).
+    now: Date.now(),
+    // The strip's contents, computed by the pure view-model; `null` = no rows.
+    voiceStrip: voiceStripView(voice.model, { columns: size.columns }),
   });
   const frame = { ...view, st };
   // The rows App itself still reads (the key path's snapshot, the mouse layer's
@@ -847,6 +1009,7 @@ export function App({
     spillInPod: shownInPod,
     blinkPhase: blinkPhase(blinkClock, blink),
     expandedIds,
+    chartGlyphs,
   });
   // ARM the ONE blink clock: `blink.running` is the whole gate (the turn runs AND
   // a call is unanswered), so an idle transcript has no timer at all and a dead
@@ -868,7 +1031,13 @@ export function App({
     setBlinkClock((c) => syncBlink(c, { calls: blinkCalls, running: blinkRuns }));
   }, [blinkRuns, blinkCalls]);
   // The layout options a history warm uses (read off the render thread).
-  layoutOptsRef.current = { expandAll, width: columns, spillInPod: shownInPod, expandedIds };
+  layoutOptsRef.current = {
+    expandAll,
+    width: columns,
+    spillInPod: shownInPod,
+    expandedIds,
+    chartGlyphs,
+  };
   // Once the transcript is quiet, fill the cache for the OTHER Ctrl+O view in
   // small chunks (idle-warm.ts) so the first toggle is a hit. Any change to the
   // deps (new items, a turn starting, a resize commit, Ctrl+O) cleans up and
@@ -880,14 +1049,14 @@ export function App({
     idleWarmCancelRef.current = startIdleWarm(
       {
         items: idleItems,
-        opts: { expandAll, width: columns, spillInPod: shownInPod, expandedIds },
+        opts: { expandAll, width: columns, spillInPod: shownInPod, expandedIds, chartGlyphs },
         running: idleRunning,
         busy: idleBusy,
       },
       { onError: (error) => warmErrorRef.current(error) },
     );
     return idleWarmCancelRef.current;
-  }, [idleItems, idleRunning, idleBusy, expandAll, columns, shownInPod, expandedIds]);
+  }, [idleItems, idleRunning, idleBusy, expandAll, columns, shownInPod, expandedIds, chartGlyphs]);
   const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
   const visible = sliceLaid(layout.laid, win.start, win.end);
@@ -918,14 +1087,68 @@ export function App({
   }, [total, viewport, scrollOffset]);
 
   const pushNotice = useCallback(
-    (text: string) => {
-      stateRef.current = pushNoticeItem(stateRef.current, text);
+    (text: string, level?: "warn") => {
+      stateRef.current = pushNoticeItem(stateRef.current, text, level);
       setScrollOffset(0);
       flushNow();
     },
     [flushNow],
   );
   pushNoticeRef.current = pushNotice;
+
+  /**
+   * The compaction's grey rule at the transcript's end (docs/feat/harness-notices.md
+   * S3): a `NoticeItem` with `separator: true`, so it takes no glyph and no place
+   * in a harness block. `markCompacted` starts the 3 s `Compacted ✓`.
+   */
+  const pushSeparator = useCallback(
+    (text: string) => {
+      stateRef.current = appendNotice(stateRef.current, text, { separator: true });
+      setScrollOffset(0);
+      flushNow();
+    },
+    [flushNow],
+  );
+  /**
+   * `Compacted ✓`'s one timer. A REF, not an effect: App's effect list is frozen
+   * at 22 in their order (H1, `app-structural-order`/`app-tidy-structure`), and
+   * this needs no render-time subscription — it clears the figure 3 s after it
+   * was set (owner: ~3 s). Any newer compaction (or a turn, `clearCompacted`)
+   * disarms it first, so a stale fire can never blank a fresh figure.
+   */
+  const compactedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearCompacted = useCallback(() => {
+    if (compactedTimerRef.current !== null) {
+      clearTimeout(compactedTimerRef.current);
+      compactedTimerRef.current = null;
+    }
+    setCompactedAt(null);
+  }, []);
+  const markCompacted = useCallback(() => {
+    clearCompacted();
+    setCompactedAt(Date.now());
+    compactedTimerRef.current = setTimeout(() => {
+      compactedTimerRef.current = null;
+      setCompactedAt(null);
+    }, COMPACTED_SHOWN_MS);
+  }, [clearCompacted]);
+
+  /**
+   * The daemon reported the session's switches (a snapshot, an echo, another
+   * device's change, or none: an older daemon). The rows follow it; another
+   * device's change earns a notice (`remoteChangeNotices` decides).
+   */
+  const onCapsChange = useCallback(
+    (next: CapsView | undefined, by?: string) => {
+      const notices = remoteChangeNotices(capsRef.current, next, by, capsPendingRef.current);
+      capsRef.current = next;
+      setCapsState(next);
+      for (const text of notices) {
+        pushNotice(text);
+      }
+    },
+    [pushNotice],
+  );
 
   // Rows changed: the dock keeps its selection BY ID, follows it when the row
   // leaves, and returns to the input when the list empties — `reconcile`'s
@@ -1065,22 +1288,30 @@ export function App({
   // Backspace edit it — the same shape S4 gave `selection`. The refs other layers
   // read (`probedTextRef`, `uploadCtrlRef`, `attachGenRef`) stay here too, so
   // effect 1 below keeps its index and every use-site keeps its identifier.
-  const { attachMode, restoreChips, routeAttach, attachCommand, convertToChips, sendWithImages } =
-    useAttachments({
-      field,
-      attachRef,
-      setAttach,
-      attachGenRef,
-      probedTextRef,
-      uploadCtrlRef,
-      sessionRef,
-      runRef,
-      pushNotice,
-      restoreInput,
-      fileProbe,
-      home,
-      localCwd,
-    });
+  const {
+    attachMode,
+    documentMode,
+    restoreChips,
+    restoreDocuments,
+    routeAttach,
+    attachCommand,
+    convertToChips,
+    sendWithImages,
+  } = useAttachments({
+    field,
+    attachRef,
+    setAttach,
+    attachGenRef,
+    probedTextRef,
+    uploadCtrlRef,
+    sessionRef,
+    runRef,
+    pushNotice,
+    restoreInput,
+    fileProbe,
+    home,
+    localCwd,
+  });
   routeAttachRef.current = routeAttach;
 
   /**
@@ -1158,6 +1389,11 @@ export function App({
     panelGenRef,
     panelApply,
     setSessionsState,
+    setSchedulesState,
+    setSchedulesData,
+    claimArtifactsPreview,
+    setArtifactsPreview,
+    deleteSchedule: deleteScheduleInPanel,
     touchPanel,
     closePanel,
     openPanel,
@@ -1169,7 +1405,25 @@ export function App({
     switchingRef,
     columns,
     pushNotice,
+    sessionRef,
+    ownScheduleDeletesRef,
   });
+
+  /**
+   * The daemon's `schedules` report, for EVERY surface at once (cron-tool fix
+   * round 1, finding 2): the dock's rows (its own `setSchedules`) and, if it is
+   * open, the `/schedule` panel — which otherwise stayed the snapshot it opened
+   * on, offering a delete for an id the daemon no longer has. This is the ONE
+   * feed the follow installs, so a wake created or deleted while the panel is
+   * open shows up there too.
+   */
+  const followSchedules = useCallback(
+    (rows: readonly ScheduleDockRow[] | undefined) => {
+      setSchedules(rows);
+      setSchedulesData(rows, Date.now());
+    },
+    [setSchedules, setSchedulesData],
+  );
 
   // `run "<prompt>"`: the first message, sent once at mount, like a typed one: a
   // failed send leaves it in the conversation with the error under it (it is
@@ -1243,6 +1497,9 @@ export function App({
       compactingRef,
       ownCompactionsRef,
       setCompacting,
+      pushSeparator,
+      markCompacted,
+      clearCompacted,
       field,
       historyRef,
       histIndexRef,
@@ -1265,8 +1522,11 @@ export function App({
       sendWithImages,
       submitToTarget,
       restoreChips,
+      documentMode,
+      restoreDocuments,
       model,
       skillsSync,
+      joinCards,
       askContext,
       wakeIfPending,
       exit,
@@ -1305,8 +1565,11 @@ export function App({
     queueSubRef,
     agentsSubRef,
     jobsSubRef,
+    schedulesSubRef,
     notifySubRef,
     dockMsgSubRef,
+    capsSubRef,
+    onCapsChange,
     heldRef,
     abortRef,
     streamCtrlRef,
@@ -1325,7 +1588,10 @@ export function App({
     onActivityRef,
     watchReturned,
     flushNow,
+    forgetArtifacts: forgetJoinedArtifacts,
+    joinCards,
     pushNotice,
+    pushSeparator,
     restoreInput,
     setCompacting,
     skillsSync,
@@ -1337,6 +1603,7 @@ export function App({
     drainHeld,
     setAgents,
     setJobs,
+    setSchedules: followSchedules,
     setDock,
     jobOutputRef,
     touchPanel,
@@ -1354,6 +1621,30 @@ export function App({
   useEffect(() => {
     watchSession(sessionRef.current);
     watchedRef.current = true;
+    // The session's artifacts, ONCE per watched session (docs/feat/model-artifacts.md
+    // D8): a resumed transcript holds no card metadata (it is not in a
+    // `ChatMessage`), so the daemon's list supplies it and the rows join on
+    // `callId`. Asked ONLY when a `present` row is still waiting for its card,
+    // so a fresh or card-less session says nothing on the wire. A failure (an
+    // older daemon: `ArtifactsUnsupportedError`) leaves the transcript exactly
+    // as it was — no notice, nothing invented.
+    // `checkArtifacts` is the SAME join every later history replace runs
+    // (S6a review finding 2), and it remembers what it learns in
+    // `artifactJoinRef`: a rebuild from `ChatMessage`s can attach the cards again.
+    const watched = sessionRef.current;
+    const joined = checkArtifacts(artifactJoinRef.current, stateRef.current.items, watched, () => {
+      if (sessionRef.current !== watched) {
+        return;
+      }
+      const learned = joinKnownArtifacts(stateRef.current.items, artifactJoinRef.current.byCall);
+      if (learned !== stateRef.current.items) {
+        stateRef.current = { ...stateRef.current, items: [...learned] };
+      }
+      flushNow();
+    });
+    if (joined !== stateRef.current.items) {
+      stateRef.current = { ...stateRef.current, items: [...joined] };
+    }
     return () => {
       activitySubRef.current?.();
       activitySubRef.current = null;
@@ -1363,10 +1654,14 @@ export function App({
       agentsSubRef.current = null;
       jobsSubRef.current?.();
       jobsSubRef.current = null;
+      schedulesSubRef.current?.();
+      schedulesSubRef.current = null;
       notifySubRef.current?.();
       notifySubRef.current = null;
+      capsSubRef.current?.();
+      capsSubRef.current = null;
     };
-  }, [watchSession]);
+  }, [watchSession, flushNow]);
 
   // --- quit and clear (S8) --------------------------------------------------
   // The three executors live in `useQuitClear.ts`. The hook owns no state and no
@@ -1389,6 +1684,7 @@ export function App({
     runClearRef,
     subagentsRef,
     jobRowsRef,
+    schedulesRef,
     setQuitConfirm,
     runQuit,
     detachOnQuit,
@@ -1463,6 +1759,7 @@ export function App({
           histIndexRef,
           draftRef,
           sessionRef,
+          schedulesRef,
           stateRef,
           busyCompacting: () => compactingRef.current,
           syncingRef,
@@ -1511,6 +1808,7 @@ export function App({
       restoreInput,
       run,
       saveFile,
+      schedulesRef,
       sessions,
       shownModel,
       skills,
@@ -1599,6 +1897,40 @@ export function App({
     return () => clearPasteTimeout();
   }, [clearPasteTimeout]);
 
+  /**
+   * Carry out one artifact decision (`artifactStep`, pure — docs/feat/model-artifacts.md
+   * D8): a notice, the confirm line, or a verified read handed to the runtime's
+   * OS opener. The origin is the RUNTIME's (`shownInPod`), never the meta's. No
+   * byte is read before the decision says go: a pod's confirm reads only on `y`.
+   */
+  const runArtifact = (artifact: ArtifactMeta, step: ArtifactStep): void => {
+    if (step.kind === "notice") {
+      pushNotice(step.text);
+      return;
+    }
+    if (step.kind === "confirm") {
+      setArtifactConfirm({ text: step.text, meta: artifact, plan: step.plan });
+      return;
+    }
+    const session = sessionRef.current;
+    if (artifactOpener === undefined || session?.readArtifact === undefined) {
+      pushNotice(NO_ARTIFACT_OPENER);
+      return;
+    }
+    const opener = artifactOpener;
+    void session
+      .readArtifact(artifact)
+      .then((bytes) =>
+        step.kind === "open"
+          ? opener.open(step.plan, bytes)
+          : opener
+              .save({ name: step.name, wrap: step.wrap }, bytes)
+              .then((path) => pushNotice(`Saved "${artifact.title}" to ${path}`)),
+      )
+      .catch((error: unknown) => pushNotice(artifactOpenError(artifact, error)));
+  };
+  const artifactOrigin = shownInPod ? "pod" : "local";
+
   // --- the key router's executor port (S3) ---------------------------------
   // The ONE place a routing decision becomes a call into the App. Every field is
   // an existing stable callback (the App's own `useCallback`s) or a decision
@@ -1664,9 +1996,99 @@ export function App({
     },
     closePanel,
     panelApply,
+    // Space in `/mcp` / `/skills` (docs/feat/session-capabilities.md S4): what it
+    // flips is decided on the LIVE panel and switches (`panelSwitchOp`); the row
+    // flips on the daemon's echo, never here.
+    switchCapability: () => {
+      const open = panelRef.current;
+      const session = sessionRef.current;
+      if (open === null) {
+        return;
+      }
+      const phase = sessionCapsPhase(session, capsRef.current);
+      const op = panelSwitchOp(open, columns, phase);
+      if (op === null || !session?.setCapability) {
+        const why = noSwitchNotice(phase);
+        if (why !== null) pushNotice(why);
+        return;
+      }
+      capsPendingRef.current = [...capsPendingRef.current, op];
+      const done = (): void => {
+        capsPendingRef.current = settled(capsPendingRef.current, op);
+      };
+      session.setCapability(op.kind, op.name, op.enabled).then(done, (error: unknown) => {
+        done();
+        pushNotice(switchFailedNotice(op, error));
+      });
+    },
     setSessionsState,
+    // `/artifacts`' Enter / `s` / `n`: the panel already decided WHICH version
+    // (`artifactAt`); `artifactStep` decides what happens to it. Absent seam
+    // (no opener or no read) says so, never a silent swallow.
+    openArtifact: (artifact, intent) =>
+      runArtifact(artifact, artifactStep(artifact, artifactOrigin, intent ?? "open")),
+    openNewestArtifact: () => {
+      const newest = newestArtifact(stateRef.current.items);
+      if (newest === undefined) {
+        pushNotice(NO_ARTIFACT_IN_TRANSCRIPT);
+        return;
+      }
+      runArtifact(newest, artifactStep(newest, artifactOrigin, "open"));
+    },
+    // Enter on a CHART artifact in `/artifacts` (docs/feat/model-charts.md C8):
+    // its bytes ARE the spec, so the panel draws them expanded instead of
+    // handing a temp file to an OS browser. `null` is the preview's esc/q: it
+    // closes the preview, not the panel (the tree is where they came from).
+    previewArtifact: (artifact) => {
+      // Every OPEN and every CLOSE claims the slot first, so a read that answers
+      // after the person left it (esc) — or after a second `enter` replaced it —
+      // is stale, even though the panel generation is unchanged (fix round 1, M1).
+      const claim = claimArtifactsPreview();
+      if (artifact === null) {
+        setArtifactsPreview(panelGenRef.current, claim, null);
+        return;
+      }
+      const read = sessionRef.current?.readArtifact;
+      if (read === undefined) {
+        pushNotice(NO_ARTIFACT_OPENER);
+        return;
+      }
+      // The generation the key landed in: a read answering after the panel
+      // closed (or another opened) is dropped, never painted elsewhere.
+      const gen = panelGenRef.current;
+      // The preview opens EMPTY and fills on the answer, so `esc` works at once
+      // and a slow read is visible rather than a frozen tree.
+      setArtifactsPreview(gen, claim, {});
+      void read.call(sessionRef.current, artifact).then(
+        (bytes) => {
+          setArtifactsPreview(gen, claim, { bytes: new TextDecoder().decode(bytes) });
+        },
+        (error: unknown) => {
+          setArtifactsPreview(gen, claim, { error: artifactOpenError(artifact, error) });
+        },
+      );
+    },
+    // `y` opens exactly what the line asked about, once; anything else drops it.
+    answerArtifactConfirm: (yes) => {
+      const asked = artifactConfirmRef.current;
+      setArtifactConfirm(null);
+      if (yes && asked !== null) {
+        runArtifact(asked.meta, { kind: "open", plan: asked.plan });
+      }
+    },
+    setSchedulesState,
     switchTo,
     sessionsDelete,
+    // A wake's delete is the DOCK's when it comes from the dropdown, and the
+    // PANEL's when it comes from `/schedule` (the generation gate: a reply that
+    // lands after the panel closed is dropped). Both go out as the same method.
+    deleteSchedule: (id) => {
+      if (panel !== null && panel.kind === "schedule") {
+        deleteScheduleInPanel(id, panelGenRef.current);
+        return;
+      }
+      deleteSchedule(id);
+    },
     killJob,
     killChild,
     setDock,
@@ -1711,6 +2133,34 @@ export function App({
     },
     submit: (text) => submit(text),
     removeLastChip: () => setAttach((draft) => removeLastChip(draft)),
+    // ↑ on an empty input (docs/feat/queue-unqueue.md): what the answer does is
+    // `afterUnqueue`'s; here only the call and its writes.
+    // One unqueue in flight per id: a second ↑ (autorepeat, double press) before
+    // the answer sends nothing, so the text comes back once (review F2/R2-1).
+    pullBackQueued: (id, text) => {
+      const session = sessionRef.current;
+      if (session?.unqueue === undefined || pullingRef.current.has(id)) return;
+      pullingRef.current.add(id);
+      session.unqueue([id]).then(
+        (answer) => {
+          pullingRef.current.delete(id);
+          const res = afterUnqueue(rowsRef.current, { id, text }, answer);
+          setRows(() => res.rows);
+          const back = res.text;
+          if (back !== null) field.update((draft) => withRestored(draft, back));
+          if (res.notice !== null) pushNotice(res.notice);
+        },
+        (error: unknown) => {
+          pullingRef.current.delete(id);
+          pushNotice(`_not taken back: ${error instanceof Error ? error.message : String(error)}_`);
+        },
+      );
+    },
+    // Voice dictation (docs/feat/voice-dictation.md): the hook owns the child and
+    // the reducer; the layer only decided WHICH intent this chunk was.
+    voiceToggle: voice.toggle,
+    voiceFinish: voice.finish,
+    voiceCancel: voice.cancel,
   };
 
   useInput((char, key) => {
@@ -1730,6 +2180,7 @@ export function App({
         char,
         key,
         quitConfirm: () => quitConfirmRef.current,
+        artifactConfirm: () => artifactConfirmRef.current,
         dock: () => dockRef.current,
         chord: () => chordRef.current,
         running: () => stateRef.current.running,
@@ -1760,6 +2211,9 @@ export function App({
         },
         sessions,
         detachOnQuit,
+        // Live reads: the phase can move between two chunks in one tick.
+        voice: () => voicePhaseRef.current,
+        voiceKey: () => voiceConfig.key,
       },
       PURE_LAYERS,
     );
@@ -1811,6 +2265,7 @@ export function App({
         dockVisible: dockVisible(),
         dockFocus: dockRef.current.focus,
         chipCount: attachRef.current.chips.length,
+        pullBack: sessionRef.current?.unqueue ? pullBackTarget(rowsRef.current) : null,
       }),
       keyHost,
     );
@@ -1841,6 +2296,7 @@ export function App({
         expandAll,
         selection,
         quitConfirm,
+        artifactConfirm,
         hopRow,
         loading,
         compacting,

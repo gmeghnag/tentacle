@@ -12,6 +12,7 @@ export type IconName =
   | "chevron.left"
   | "chevron.right"
   | "chevron.down"
+  | "line.3.horizontal"
   | "ellipsis"
   | "plus"
   | "xmark"
@@ -19,6 +20,7 @@ export type IconName =
   | "arrow.up"
   | "stop.fill"
   | "slider.horizontal.3"
+  | "gearshape"
   | "folder"
   | "laptopcomputer"
   | "terminal"
@@ -41,16 +43,30 @@ export type IconName =
   | "arrow.clockwise"
   | "arrow.down"
   | "photo"
+  | "square.and.arrow.up"
   | "hand.raised"
-  | "trash";
+  | "trash"
+  | "mic"
+  | "mic.fill"
+  | "waveform"
+  | "speaker.wave.2"
+  | "stop.circle"
+  /** A pinned session in the sessions list (docs/feat/mobile-session-actions.md). */
+  | "pin"
+  /** The hub's Tools item (docs/feat/mobile-hub-tools.md): what the sheet switches. */
+  | "powerplug";
 
 export interface IconProps {
   readonly name: IconName;
   readonly color: string;
   /** The glyph box, in points (SF Symbols' point size). */
   readonly size?: number;
-  /** The SF Symbol weight. */
-  readonly weight?: "regular" | "semibold" | "bold";
+  /**
+   * The SF Symbol weight. `thin`/`light` join the three heavier ones for the
+   * header's thin glyphs (docs/feat/mobile-chrome.md A1); `expo-symbols`'
+   * `SymbolWeight` carries both.
+   */
+  readonly weight?: "thin" | "light" | "regular" | "semibold" | "bold";
 }
 
 export function Icon({ name, color, size = 20, weight = "semibold" }: IconProps): JSX.Element {

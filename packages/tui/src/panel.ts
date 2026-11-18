@@ -14,6 +14,7 @@
  *
  * Pure; a tree panel's `data` is null while the request is in flight.
  */
+import type { CapOp, CapsPhase } from "./capability-toggles.ts";
 import { type PanelAt, kindOf } from "./panels/registry.ts";
 import type { OpenPanel, TreePanel } from "./panels/types.ts";
 import type { PanelView, TreeAction } from "./tree-panel.ts";
@@ -22,26 +23,46 @@ import type { PanelView, TreeAction } from "./tree-panel.ts";
 // and importing them from here would be a value cycle). Re-exported so every
 // pre-S7 import of `panel.ts` keeps working.
 export {
+  type ArtifactsPanel,
   type OpenPanel,
+  type SchedulesPanel,
   type SessionsPanel,
   type TreePanel,
+  artifactsPanel,
   mcpPanel,
+  schedulesPanel,
   sessionsPanel,
   skillsPanel,
 } from "./panels/types.ts";
 
 /**
  * `current`: the live session's id (the `/sessions` panel marks its row); null
- * when there is none. The panel projects through its own kind's `view`.
+ * when there is none. `caps`: the session's MCP/skill switches, read live
+ * (absent: no switch column). The panel projects through its own kind's `view`.
  */
 export function panelView(
   panel: OpenPanel,
   width: number,
   maxBody: number,
   current?: string | null,
+  caps?: CapsPhase,
 ): PanelView {
-  const at: PanelAt = { width, maxBody, current: current ?? null };
+  const at: PanelAt = {
+    width,
+    maxBody,
+    current: current ?? null,
+    ...(caps === undefined ? {} : { caps }),
+  };
   return kindOf(panel).view(panel, at);
+}
+
+/**
+ * What Space on the open panel's selected row asks the daemon
+ * (docs/feat/session-capabilities.md S4), at `width` (the projection the
+ * cursor walks wraps to it); null when that row has no switch.
+ */
+export function panelSwitchOp(panel: OpenPanel, width: number, caps: CapsPhase): CapOp | null {
+  return kindOf(panel).switchOp?.(panel, width, caps) ?? null;
 }
 
 /**

@@ -149,10 +149,14 @@ export interface TentacleConfig {
   readonly contextAwareness: ResolvedConfig["contextAwareness"];
   /** The model's `context_reset` tool and its cap (on a pod: its own env and file, else the laptop's, carried). */
   readonly contextReset: ResolvedConfig["contextReset"];
+  /** Smart compaction of the model's copy (on a pod: its own file, else the laptop's, carried). */
+  readonly contextPrune: ResolvedConfig["contextPrune"];
   /** Whether the agent is offered `move_session` (docs/feat/session-hop.md D9). */
   readonly sessionHop: ResolvedConfig["sessionHop"];
   /** Whether the agent is offered `workload_shell` (docs/fix/workload-shell-live.md). */
   readonly workloadShell: ResolvedConfig["workloadShell"];
+  /** This host's limits on the agent's scheduled wakes (docs/feat/cron-tool.md D3). */
+  readonly schedules: ResolvedConfig["schedules"];
   readonly maxTokens?: number;
   /**
    * `model.maxImageBytes`: raw bytes one image may have on this model's wire
@@ -222,10 +226,14 @@ export interface TentacleConfig {
   readonly tui?: ResolvedConfig["tui"];
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: ResolvedConfig["sessions"];
+  /** Voice dictation (file or profile); absent = the defaults in `voice-session.ts`. */
+  readonly voice?: ResolvedConfig["voice"];
   /** The mobile relay's settings (file or profile); absent = enabled, `DEFAULT_RELAY_URL`. */
   readonly relay?: ResolvedConfig["relay"];
   /** Push notifications (file or profile); absent = enabled, a 30 s grace. */
   readonly push?: ResolvedConfig["push"];
+  /** Live Activities (file or profile); absent = enabled, a 20 s threshold. */
+  readonly liveActivity?: ResolvedConfig["liveActivity"];
   /**
    * The configured `apiKeyCommand` (the command, never its output): the CLI
    * hides the key FILE it reads from a workspace mount.
@@ -868,8 +876,10 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     contextWindow: resolved.contextWindow,
     contextAwareness: resolved.contextAwareness,
     contextReset: resolved.contextReset,
+    contextPrune: resolved.contextPrune,
     sessionHop: resolved.sessionHop,
     workloadShell: resolved.workloadShell,
+    schedules: resolved.schedules,
     ...(resolved.maxTokens !== undefined ? { maxTokens: resolved.maxTokens } : {}),
     ...(resolved.maxImageBytes !== undefined ? { maxImageBytes: resolved.maxImageBytes } : {}),
     ...(resolved.images !== undefined ? { images: resolved.images } : {}),
@@ -903,8 +913,10 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.mount !== undefined ? { mount: resolved.mount } : {}),
     ...(resolved.tui !== undefined ? { tui: resolved.tui } : {}),
     ...(resolved.sessions !== undefined ? { sessions: resolved.sessions } : {}),
+    ...(resolved.voice !== undefined ? { voice: resolved.voice } : {}),
     ...(resolved.relay !== undefined ? { relay: resolved.relay } : {}),
     ...(resolved.push !== undefined ? { push: resolved.push } : {}),
+    ...(resolved.liveActivity !== undefined ? { liveActivity: resolved.liveActivity } : {}),
     ...(resolved.apiKeyCommand !== undefined ? { apiKeyCommand: resolved.apiKeyCommand } : {}),
     hooks: contributed.hooks,
     mcpServers: contributed.mcpServers,

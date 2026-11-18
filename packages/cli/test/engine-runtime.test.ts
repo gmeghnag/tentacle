@@ -294,6 +294,13 @@ function baseConfig(cwd: string): TentacleConfig {
     contextWindow: 128000,
     contextAwareness: { enabled: true, stepPercent: 1 },
     contextReset: { enabled: true, maxPerMessage: -1 },
+    contextPrune: {
+      enabled: false,
+      pruneAtPercent: 60,
+      minGainPercent: 15,
+      keepRecentRounds: 6,
+      pruneOutputChars: 2000,
+    },
     toolExecution: { mode: "read-only", maxParallel: 8 },
   } as unknown as TentacleConfig;
 }

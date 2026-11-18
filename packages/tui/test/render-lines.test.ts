@@ -20,6 +20,7 @@ import {
   wrapLines,
 } from "../src/render-lines.ts";
 import type { DisplayItem, ToolItem } from "../src/state.ts";
+import { FIXTURES } from "./chart-fixtures.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -1102,7 +1103,7 @@ describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => 
     expect(on).toHaveLength(off.length); // same row count: nothing re-flows
     const onRow = strip(on.find((r) => r.includes("cp a b")) ?? "");
     const offRow = strip(off.find((r) => r.includes("cp a b")) ?? "");
-    expect(onRow.startsWith("⏺ Bash")).toBe(true);
+    expect(onRow.startsWith(`${blink.BULLET} Bash`)).toBe(true);
     // THE property that kills the bug (fix/tui-blink-off-width): with the SGR
     // stripped, the OFF row is BYTE-IDENTICAL to the ON row — the same glyph in
     // the same cells, so the label cannot sit one column off in any terminal.
@@ -1161,8 +1162,11 @@ describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => 
     // differently ON vs OFF and the transcript jumped a row at 1 Hz. The OFF
     // phase now emits the SAME character, hidden, so no width function and no
     // terminal can disagree about it.
-    expect(stringWidth(blink.toolBullet("running", 0))).toBe(2);
-    expect(stringWidth(blink.toolBullet("running", 500))).toBe(2);
+    // The property is EQUALITY between the phases, not any particular number:
+    // the same character cannot be two widths. (The round-1 bullet happened to
+    // measure 2; the current one measures 1 — either way both halves agree.)
+    expect(stringWidth(blink.toolBullet("running", 0))).toBe(stringWidth(blink.BULLET));
+    expect(stringWidth(blink.toolBullet("running", 500))).toBe(stringWidth(blink.BULLET));
     expect(strip(blink.toolBullet("running", 500))).toBe(blink.BULLET);
     const long = {
       ...running,
@@ -1177,7 +1181,7 @@ describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => 
       const on = transcriptRows([{ ...long }], { expandAll: false, width, blinkPhase: 0 });
       const off = transcriptRows([{ ...long }], { expandAll: false, width, blinkPhase: 500 });
       expect([width, on.length]).toEqual([width, off.length]); // same row count
-      expect(strip(on[0] ?? "").startsWith("⏺ Bash")).toBe(true);
+      expect(strip(on[0] ?? "").startsWith(`${blink.BULLET} Bash`)).toBe(true);
       expect(off.map(strip)).toEqual(on.map(strip));
     }
     // Non-vacuity: the ON row really IS a wrapped row (the command's tail is
@@ -1210,7 +1214,7 @@ describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => 
       const cold = done.map((i) => ({ ...i }) as DisplayItem);
       const rows = transcriptRows(cold, { expandAll: false, width: 24, blinkPhase: phase });
       for (const row of rows.filter((r) => r.includes("Bash"))) {
-        expect(strip(row).startsWith("⏺ Bash")).toBe(true);
+        expect(strip(row).startsWith(`${blink.BULLET} Bash`)).toBe(true);
       }
     }
   });
@@ -1303,6 +1307,27 @@ describe("toolTitle labels", () => {
       label: "Search",
       subtitle: "*.ts in .",
     });
+  });
+
+  // docs/feat/model-charts.md D3: the row says the chart's title — the spec is
+  // hundreds of characters of JSON, and the title is what the user reads above
+  // the chart. A spec with no title falls back to the raw args like any other row.
+  test("chart shows its title, and the raw args when it has none", () => {
+    expect(
+      toolTitle(tool("chart", '{"type":"line","title":"Ricavi 2026","datasets":[{"label":"R"}]}')),
+    ).toEqual({ label: "Chart", subtitle: "Ricavi 2026" });
+    expect(toolTitle(tool("chart", '{"type":"line"}')).subtitle).toBe('{"type":"line"}');
+  });
+
+  // docs/feat/model-diagrams.md D2 (T2.8): the same for a diagram — its source is
+  // many lines of Mermaid, and the title is what the user reads above it.
+  test("diagram shows its title, and the raw args when it has none", () => {
+    expect(
+      toolTitle(
+        tool("diagram", '{"title":"Flusso di login","mermaid":"flowchart TD\\n  A --> B"}'),
+      ),
+    ).toEqual({ label: "Diagram", subtitle: "Flusso di login" });
+    expect(toolTitle(tool("diagram", '{"mermaid":"x"}')).subtitle).toBe('{"mermaid":"x"}');
   });
 
   test("an unlabelled (MCP) tool keeps its name and raw args", () => {
@@ -1730,7 +1755,7 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
       args: JSON.stringify({ command: `${COMMAND} | tail-second` }),
     };
     const rows = transcriptRows([longTool, second], { expandAll: true, width: 40 }).map(strip);
-    // Both calls contribute continuation rows: two `⏺ Bash` headers, each
+    // Both calls contribute continuation rows: two bullet headers, each
     // followed by at least one `  │ ` row, and both tails are visible.
     expect(rows.filter((r) => r.includes("Bash"))).toHaveLength(2);
     expect(rows.filter((r) => r.startsWith(CONT)).length).toBeGreaterThan(3);
@@ -1856,7 +1881,7 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
     });
     expect(on).toHaveLength(off.length); // the continuation block does not re-flow
     expect(on.length).toBeGreaterThan(2); // it really is expanded + wrapped
-    expect(strip(on[0] ?? "").startsWith("⏺ Bash")).toBe(true);
+    expect(strip(on[0] ?? "").startsWith(`${blink.BULLET} Bash`)).toBe(true);
     expect(strip(off[0] ?? "")).toBe(strip(on[0] ?? "")); // same glyph, same cells
     expect(off[0] ?? "").toContain("\x1b[8m"); // and really concealed
     // Only the glyph differs; every continuation and body row is identical.
@@ -2003,5 +2028,161 @@ describe("user prompt image rows", () => {
     expect(lines.indexOf("[image: a.png]")).toBeLessThan(
       lines.findIndex((l) => l.includes("a cat")),
     );
+  });
+});
+
+// docs/feat/model-charts.md C4 (T4): a `chart` tool call draws ITSELF in the
+// row's place — no bullet, no `● Chart …` header, no body connector — from the
+// call's own arguments, and is exempt from the generic body cut.
+describe("a chart in the transcript (C4)", () => {
+  const lineSpec = (): unknown => FIXTURES.line;
+  const specArgs = (raw: unknown = lineSpec()): string => JSON.stringify(raw);
+
+  const chartTool = (extra: Partial<ToolItem> = {}): ToolItem => ({
+    kind: "tool",
+    id: "c1",
+    name: "chart",
+    args: specArgs(),
+    status: "ok",
+    ...extra,
+  });
+
+  test("the row IS the chart: no tool chrome, and the title is its caption", () => {
+    // Mutation: drop the `chartRow` branch in `toolLines` → the row is
+    // `● Chart Ricavi…` + `⎿ <result text>` (the pre-C4 frame).
+    const rows = itemLines(chartTool(), { expandAll: false, width: 100 }).map(strip);
+    const text = rows.join("\n");
+    expect(text).not.toContain("●");
+    expect(text).not.toContain("⎿");
+    expect(rows[0]?.trimEnd()).toBe("Ricavi mensili 2025 vs 2026");
+    // A plot really is drawn: braille dots (the default glyphs).
+    expect(rows.some((r) => /[\u2800-\u28ff]/.test(r))).toBe(true);
+  });
+
+  test("the chart body is exempt from the generic cut", () => {
+    // Mutation: let `collapsedBody` see a chart body → the `… +N more lines`
+    // marker appears and the plot is truncated.
+    const rows = itemLines(chartTool(), {
+      expandAll: false,
+      width: 100,
+      collapseThreshold: 3,
+      previewLines: 2,
+    }).map(strip);
+    expect(rows.join("\n")).not.toContain("more lines");
+    expect(rows.length).toBeGreaterThan(3);
+    // …and the plot's last row (the x axis) survives.
+    expect(rows.join("\n")).toContain("└");
+  });
+
+  test("ctrl+o expands it (more rows, per-series stats and the data table)", () => {
+    const compact = itemLines(chartTool(), { expandAll: false, width: 120 }).map(strip);
+    const expanded = itemLines(chartTool(), { expandAll: true, width: 120 }).map(strip);
+    expect(expanded.length).toBeGreaterThan(compact.length);
+    // The data table is the expanded form's faithful fallback.
+    expect(expanded.join("\n")).toContain("gen");
+    expect(compact.join("\n")).not.toBe(expanded.join("\n"));
+  });
+
+  test("a click on its header expands it (expandedIds)", () => {
+    // The same per-id expand the other calls use: the chart's first row is its
+    // header (`tool-hit.ts`), so `expandedIds` must reach the renderer.
+    const clicked = itemLines(chartTool(), {
+      expandAll: false,
+      width: 120,
+      expandedIds: ["c1"],
+    }).map(strip);
+    const expanded = itemLines(chartTool(), { expandAll: true, width: 120 }).map(strip);
+    expect(clicked).toEqual(expanded);
+  });
+
+  test("`tui.chartGlyphs: blocks` draws quadrant blocks, never braille", () => {
+    // Mutation: ignore `chartGlyphs` (pass `braille` always) → braille appears.
+    const rows = itemLines(chartTool(), {
+      expandAll: false,
+      width: 100,
+      chartGlyphs: "blocks",
+    }).map(strip);
+    const text = rows.join("\n");
+    expect(/[\u2800-\u28ff]/.test(text)).toBe(false);
+    expect(/[▘▝▀▖▌▞▛▗▚▐▜▄▙▟█]/.test(text)).toBe(true);
+  });
+
+  test("an invalid (forged) spec falls back to the generic row, never a crash", () => {
+    // Mutation: draw without `validateChartSpec` → this throws / draws garbage.
+    for (const args of [
+      '{"type":"line","labels":["a"],"datasets":[]}',
+      '{"type":"line","labels":["a"],"datasets":[{"label":"x","data":["12.5"]}]}',
+      "not json",
+      "",
+    ]) {
+      const rows = itemLines(chartTool({ args }), { expandAll: false, width: 100 }).map(strip);
+      expect(rows[0]).toContain("●");
+      expect(rows.join("\n")).not.toContain("⣿");
+    }
+  });
+
+  test("a spec valid on the daemon but over THIS build's caps also falls back", () => {
+    const nine = Array.from({ length: 9 }, (_, i) => ({ label: `s${i}`, data: [1, 2, 3] }));
+    const raw = { type: "line", title: "t", labels: ["a", "b", "c"], datasets: nine };
+    const rows = itemLines(chartTool({ args: specArgs(raw) }), {
+      expandAll: false,
+      width: 100,
+    }).map(strip);
+    expect(rows[0]).toContain("●");
+  });
+
+  test("a running or queued chart keeps the generic row (no args yet to draw)", () => {
+    for (const status of ["running", "queued"] as const) {
+      const rows = itemLines(chartTool({ status }), { expandAll: false, width: 100 }).map(strip);
+      // The generic row, not a plot: no braille anywhere in it.
+      expect(rows.join("\n")).not.toMatch(/[\u2800-\u28ff]/);
+    }
+  });
+
+  test("every row fits the width, at every tier (CJK and narrow widths included)", () => {
+    for (const width of [120, 100, 80, 60, 50, 40, 30, 20]) {
+      const rows = itemLines(chartTool(), { expandAll: false, width }).map(strip);
+      for (const row of rows) {
+        expect(stringWidth(row)).toBeLessThanOrEqual(width);
+      }
+    }
+  });
+
+  test("another tool's row is untouched", () => {
+    const rows = itemLines(
+      { kind: "tool", id: "s1", name: "shell", args: '{"command":"ls"}', status: "ok" },
+      { expandAll: false, width: 100 },
+    ).map(strip);
+    expect(rows[0]).toContain("●");
+  });
+});
+
+describe("fired scheduled wake row — Ctrl+O through the row cache (docs/feat/scheduled-fire-row.md)", () => {
+  // The SAME item object is laid out twice: `itemRows` memoises on identity, so a
+  // slot keyed without `expandAll` would replay the first layout (review round 2).
+  const fired = (): DisplayItem => ({
+    kind: "user",
+    text: "[scheduled sc-1 · every 10m · fire 2] line one\nline two",
+  });
+  const rows = (items: DisplayItem[], expandAll: boolean): string[] =>
+    transcriptRows(items, { expandAll, width: 80 }).map(strip);
+  const collapsed = ["◷ Wake #2 · line one line two"];
+  const expanded = ["◷ Wake #2", "  line one", "  line two"];
+
+  test("collapsed, then Ctrl+O on, on one item: the row expands", () => {
+    const items = [fired()];
+    expect(rows(items, false)).toEqual(collapsed);
+    expect(rows(items, true)).toEqual(expanded);
+  });
+
+  test("painted with Ctrl+O on first, then off: the row collapses", () => {
+    const items = [fired()];
+    expect(rows(items, true)).toEqual(expanded);
+    expect(rows(items, false)).toEqual(collapsed);
+  });
+
+  test("a typed prompt is unaffected by Ctrl+O", () => {
+    const items: DisplayItem[] = [{ kind: "user", text: "hello" }];
+    expect(rows(items, true)).toEqual(rows(items, false));
   });
 });

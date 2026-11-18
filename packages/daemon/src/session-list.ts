@@ -12,6 +12,7 @@
  */
 import {
   JsonRpcErrorCode,
+  MAX_PINNED_SESSIONS,
   MAX_SESSION_LIST,
   MAX_SESSION_TITLE,
   type SessionListEntry,
@@ -36,6 +37,14 @@ export interface SessionSummary {
   readonly archived: boolean;
   /** Background jobs running now; absent for an archived entry. */
   readonly jobs?: number;
+  /**
+   * Armed scheduled wakes (docs/feat/cron-tool.md D5): a live session on a host
+   * that schedules. Absent for an archived entry (its wakes are frozen and do
+   * not fire) and where the host never schedules (a pod daemon).
+   */
+  readonly schedules?: number;
+  /** When it was pinned (`session/pin`); absent = not pinned. */
+  readonly pinnedAt?: number;
 }
 
 /** A position in the order: the sort key of one entry. */
@@ -75,6 +84,10 @@ export function toSessionList(
   const after = params.cursor !== undefined ? parseListCursor(params.cursor) : undefined;
   const limit = params.limit ?? MAX_SESSION_LIST;
   const entries: SessionListEntry[] = [];
+  // Every pinned session, whatever the cursor: the first page carries them all
+  // (docs/feat/mobile-session-actions.md), so a pin older than the loaded
+  // pages still shows. They ALSO stay in `entries`: paging is unchanged.
+  const pinned: SessionListEntry[] = [];
   for (const s of summaries) {
     const entry: SessionListEntry = {
       sessionId: s.id,
@@ -89,15 +102,26 @@ export function toSessionList(
       attached: s.attached,
       archived: s.archived,
       ...(s.jobs !== undefined ? { jobs: s.jobs } : {}),
+      ...(s.schedules !== undefined ? { schedules: s.schedules } : {}),
+      ...(s.pinnedAt !== undefined ? { pinned: true as const } : {}),
     };
     if (after === undefined || compare(entry, after) > 0) {
       entries.push(entry);
+    }
+    if (entry.pinned) {
+      pinned.push(entry);
     }
   }
   entries.sort(compare);
   const page = entries.slice(0, limit);
   const last = page[page.length - 1];
+  // The host caps pins at MAX_PINNED_SESSIONS; the slice keeps the page valid
+  // for the schema even if a store were to hold more.
+  const pins =
+    after === undefined && pinned.length > 0
+      ? { pinned: pinned.sort(compare).slice(0, MAX_PINNED_SESSIONS) }
+      : {};
   return entries.length > limit && last
-    ? { sessions: page, cursor: encodeListCursor(last) }
-    : { sessions: page };
+    ? { sessions: page, cursor: encodeListCursor(last), ...pins }
+    : { sessions: page, ...pins };
 }

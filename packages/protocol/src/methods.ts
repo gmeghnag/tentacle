@@ -5,6 +5,12 @@
  * place keeps client and daemon provably in sync.
  */
 import type { z } from "zod";
+import {
+  ArtifactListParamsSchema,
+  ArtifactListResultSchema,
+  ArtifactReadParamsSchema,
+  ArtifactReadResultSchema,
+} from "./artifact.ts";
 import { AttachmentPutParamsSchema, AttachmentPutResultSchema } from "./attachment-upload.ts";
 import {
   DaemonDiscoverParamsSchema,
@@ -14,6 +20,14 @@ import {
 } from "./daemon.ts";
 import { DevicePairParamsSchema, DevicePairResultSchema } from "./device.ts";
 import { HooksTrustParamsSchema, HooksTrustResultSchema } from "./hooks.ts";
+import {
+  DeviceLiveActivityEndedParamsSchema,
+  DeviceLiveActivityEndedResultSchema,
+  DeviceLiveActivityRegisterParamsSchema,
+  DeviceLiveActivityRegisterResultSchema,
+  DeviceLiveActivityTokenParamsSchema,
+  DeviceLiveActivityTokenResultSchema,
+} from "./live-activity.ts";
 import { McpStatusParamsSchema, McpStatusResultSchema } from "./mcp.ts";
 import {
   CancelRequestParamsSchema,
@@ -57,12 +71,16 @@ import {
   JobOutputResultSchema,
   OpenParamsSchema,
   OpenResultSchema,
+  PinParamsSchema,
+  PinResultSchema,
   PromptParamsSchema,
   PromptResultSchema,
   ReclaimParamsSchema,
   ReclaimResultSchema,
   RenameParamsSchema,
   RenameResultSchema,
+  ScheduleDeleteParamsSchema,
+  ScheduleDeleteResultSchema,
   SendNowParamsSchema,
   SessionContextParamsSchema,
   SessionContextResultSchema,
@@ -70,10 +88,14 @@ import {
   SessionListResultSchema,
   SetAutoAcceptParamsSchema,
   SetAutoAcceptResultSchema,
+  SetCapabilityParamsSchema,
+  SetCapabilityResultSchema,
   SnapshotParamsSchema,
   SnapshotResultSchema,
   SubagentMessageParamsSchema,
   SubagentMessageResultSchema,
+  UnqueueParamsSchema,
+  UnqueueResultSchema,
   UpdateSettingsParamsSchema,
   UpdateSettingsResultSchema,
 } from "./session.ts";
@@ -103,6 +125,8 @@ export const Method = {
   UpdateSettings: "session/update_settings",
   /** The session's auto-accept, on or off, for every client (docs/feat/session-auto-accept.md). */
   SetAutoAccept: "session/set_auto_accept",
+  /** Turn one MCP server or skill on/off for the model in this session (docs/feat/session-capabilities.md). */
+  SetCapability: "session/set_capability",
   Snapshot: "session/snapshot",
   /** The session's committed history as a typed event log, after a position (docs/feat/session-log.md). */
   Log: "session/log",
@@ -110,7 +134,11 @@ export const Method = {
   SendNow: "session/send_now",
   SessionList: "session/list",
   Rename: "session/rename",
+  /** Pin a session to the top of every device's list (docs/feat/mobile-session-actions.md). */
+  Pin: "session/pin",
   Reclaim: "session/reclaim",
+  /** Take queued rows back before the model reads them (docs/feat/queue-unqueue.md). */
+  Unqueue: "session/unqueue",
   ResolvePermission: "session/resolve_permission",
   /** The user writes to a RUNNING background child (docs/feat/subagent-panel.md). */
   SubagentMessage: "session/subagent_message",
@@ -120,6 +148,12 @@ export const Method = {
   JobOutput: "session/job_output",
   /** The user stops one (the same decision as the model's `shell_kill` tool). */
   JobKill: "session/job_kill",
+  /**
+   * The user drops one scheduled wake (docs/feat/cron-tool.md D5): the same
+   * decision as the model's `schedule_control{action:"delete"}`. Synchronous
+   * daemon-side (it is state, never a turn), so it never awaits the peer.
+   */
+  ScheduleDelete: "session/schedule_delete",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
   /** Daemon → client: the exact prompt size of a request, counted by the laptop's provider. */
@@ -149,6 +183,14 @@ export const Method = {
   /** Client → daemon: one chunk of an image's bytes into the session's store (docs/feat/attachments-upload.md). */
   AttachmentPut: "attachment/put",
   /**
+   * The artifacts the model PRESENTED in this session — every version, oldest
+   * first (docs/feat/model-artifacts.md). An older daemon answers
+   * `MethodNotFound`, which the client shows as "needs a newer tentacle".
+   */
+  ArtifactList: "artifact/list",
+  /** One chunk of an artifact version's bytes, content-addressed by `sha256`. */
+  ArtifactRead: "artifact/read",
+  /**
    * A NEW device proves a one-time pairing code inside the secure channel
    * (docs/feat/device-pairing.md 9c). Reachable only on a pairing connection.
    */
@@ -162,6 +204,25 @@ export const Method = {
   DevicePushRegister: "device/push_register",
   /** Withdraw that registration (the app's Notifications toggle off). */
   DevicePushUnregister: "device/push_unregister",
+  /**
+   * A paired device registers where to START Live Activities: its APNs
+   * push-to-start token, its environment and whether the person wants them
+   * (docs/feat/mobile-live-activity.md Design 4). Device principal only; the
+   * result says why an activity will or will not appear (`on`, `off`,
+   * `relay-off`, `relay-no-la`, `unsupported`).
+   */
+  DeviceLiveActivityRegister: "device/live_activity_register",
+  /**
+   * One activity's UPDATE token, keyed on the daemon-chosen `slot`. A slot this
+   * daemon never issued is `known:false`, never an error (F25) — the slot table
+   * is in memory only (Owner Q8).
+   */
+  DeviceLiveActivityToken: "device/live_activity_token",
+  /**
+   * The app reports an activity's end (`dismissed` / `ended` / `stale`) so it is
+   * never restarted for that turn, and so the daemon can forget the slot (F17).
+   */
+  DeviceLiveActivityEnded: "device/live_activity_ended",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -203,13 +264,19 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: SetAutoAcceptParamsSchema,
     result: SetAutoAcceptResultSchema,
   },
+  [Method.SetCapability]: {
+    params: SetCapabilityParamsSchema,
+    result: SetCapabilityResultSchema,
+  },
   [Method.Snapshot]: { params: SnapshotParamsSchema, result: SnapshotResultSchema },
   [Method.Log]: { params: LogParamsSchema, result: LogResultSchema },
   [Method.Enqueue]: { params: EnqueueParamsSchema, result: EnqueueResultSchema },
   [Method.SendNow]: { params: SendNowParamsSchema, result: PromptResultSchema },
   [Method.SessionList]: { params: SessionListParamsSchema, result: SessionListResultSchema },
   [Method.Rename]: { params: RenameParamsSchema, result: RenameResultSchema },
+  [Method.Pin]: { params: PinParamsSchema, result: PinResultSchema },
   [Method.Reclaim]: { params: ReclaimParamsSchema, result: ReclaimResultSchema },
+  [Method.Unqueue]: { params: UnqueueParamsSchema, result: UnqueueResultSchema },
   [Method.ResolvePermission]: {
     params: ResolvePermissionParamsSchema,
     result: ResolvePermissionResultSchema,
@@ -221,6 +288,10 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.AgentKill]: { params: AgentKillParamsSchema, result: AgentKillResultSchema },
   [Method.JobOutput]: { params: JobOutputParamsSchema, result: JobOutputResultSchema },
   [Method.JobKill]: { params: JobKillParamsSchema, result: JobKillResultSchema },
+  [Method.ScheduleDelete]: {
+    params: ScheduleDeleteParamsSchema,
+    result: ScheduleDeleteResultSchema,
+  },
   [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
   [Method.ModelStreamChunked]: {
     params: ModelStreamChunkedParamsSchema,
@@ -249,6 +320,8 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: AttachmentPutParamsSchema,
     result: AttachmentPutResultSchema,
   },
+  [Method.ArtifactList]: { params: ArtifactListParamsSchema, result: ArtifactListResultSchema },
+  [Method.ArtifactRead]: { params: ArtifactReadParamsSchema, result: ArtifactReadResultSchema },
   [Method.DevicePair]: { params: DevicePairParamsSchema, result: DevicePairResultSchema },
   [Method.DevicePushRegister]: {
     params: DevicePushRegisterParamsSchema,
@@ -257,6 +330,18 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.DevicePushUnregister]: {
     params: DevicePushUnregisterParamsSchema,
     result: DevicePushUnregisterResultSchema,
+  },
+  [Method.DeviceLiveActivityRegister]: {
+    params: DeviceLiveActivityRegisterParamsSchema,
+    result: DeviceLiveActivityRegisterResultSchema,
+  },
+  [Method.DeviceLiveActivityToken]: {
+    params: DeviceLiveActivityTokenParamsSchema,
+    result: DeviceLiveActivityTokenResultSchema,
+  },
+  [Method.DeviceLiveActivityEnded]: {
+    params: DeviceLiveActivityEndedParamsSchema,
+    result: DeviceLiveActivityEndedResultSchema,
   },
 };
 

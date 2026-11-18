@@ -8,7 +8,7 @@
  * same one, line by line: a line starting `+++`/`---` is a file header, never an
  * addition/removal (`diff-count.test.ts` pins both on one patch).
  */
-import type { ToolResultDetail } from "@tentacle/core";
+import type { ToolDiffDetail } from "@tentacle/core";
 
 /** A line's kind: an addition, a removal, or context (including hunk headers). */
 export type DiffLineKind = "add" | "del" | "ctx" | "hunk";
@@ -73,7 +73,7 @@ function hunkStart(line: string): { readonly oldNo: number; readonly newNo: numb
  * `DIFF_MAX_LINES` the hunks stop at the bound and `hidden` says how many
  * lines were held back.
  */
-export function diffView(detail: ToolResultDetail): DiffView {
+export function diffView(detail: ToolDiffDetail): DiffView {
   const { added, removed } = countDiff(detail.patch);
   const base = { path: detail.path, added, removed };
   if (detail.patch.length > DIFF_MAX_CHARS) {

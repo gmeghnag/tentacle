@@ -6,9 +6,11 @@
  * Each test names its mutation.
  */
 import { describe, expect, test } from "bun:test";
+import type { DocumentContent } from "@tentacle/protocol";
 import type { Draft } from "../src/drafts.ts";
 import {
   OUTBOX_SCHEMA_VERSION,
+  OUTBOX_SCHEMA_VERSION_DOCUMENTS,
   type OutboxFs,
   createOutboxStore,
   outboxPaths,
@@ -182,15 +184,16 @@ describe("the crash windows", () => {
 
 describe("what it refuses", () => {
   test("an unknown schemaVersion is refused and the file is NOT touched (mutation: overwrite → red)", async () => {
+    const unknown = OUTBOX_SCHEMA_VERSION_DOCUMENTS + 1;
     const newer = JSON.stringify({
-      schemaVersion: OUTBOX_SCHEMA_VERSION + 1,
+      schemaVersion: unknown,
       items: [],
       drafts: [],
       ownIds: [],
     });
     const fs = memoryFs({ [paths.state]: newer });
     const store = createOutboxStore(fs, paths);
-    expect(await store.load()).toEqual({ kind: "refused", version: OUTBOX_SCHEMA_VERSION + 1 });
+    expect(await store.load()).toEqual({ kind: "refused", version: unknown });
     // A write is refused too: a newer build's unsent text is not ours to destroy.
     expect(await store.setItems([item("a")])).toBe(false);
     expect(await store.removeItem("a")).toBe(false);
@@ -252,10 +255,68 @@ describe("what it refuses", () => {
     const store = createOutboxStore(fs, paths, () => 6);
     expect((await store.load()).kind).toBe("corrupt");
   });
+
+  test("a file with a DOCUMENT is written as v2, so an older build refuses it instead of dropping the PDF (mutation: always `OUTBOX_SCHEMA_VERSION` → red)", () => {
+    // The whole point of the bump: P6 review item 2. An older build's `isItem`
+    // does not know `documents`, so a v1 file naming one would load and send
+    // the item as text plus photos — the PDF gone, and a PDF-only item going
+    // out as an EMPTY prompt. Saying `2` makes it refuse the file untouched.
+    const withPdf = serializeOutbox({
+      items: [{ ...item("a"), documents: [{ file: "/c/a.pdf", name: "a.pdf" }] }],
+      drafts: [],
+      ownIds: [],
+    });
+    expect(JSON.parse(withPdf).schemaVersion).toBe(OUTBOX_SCHEMA_VERSION_DOCUMENTS);
+    // A file with no PDF stays v1: a downgrade keeps working for everyone it
+    // CAN work for, instead of refusing an outbox it reads perfectly.
+    const plain = serializeOutbox({ items: [item("a")], drafts: [], ownIds: [] });
+    expect(JSON.parse(plain).schemaVersion).toBe(OUTBOX_SCHEMA_VERSION);
+  });
+
+  test("a v2 file loads whole, its blocks intact (mutation: accept v1 only → red)", async () => {
+    const BLOCK: DocumentContent = {
+      type: "document",
+      kind: "pdf",
+      name: "report.pdf",
+      source: { type: "text", text: "page one", pages: 1 },
+    };
+    const items = [
+      { ...item("a"), documents: [{ file: "/c/a.pdf", name: "a.pdf", block: BLOCK }] },
+    ];
+    const fs = memoryFs({ [paths.state]: serializeOutbox({ items, drafts: [], ownIds: [] }) });
+    const loaded = await createOutboxStore(fs, paths).load();
+    expect(loaded.kind).toBe("loaded");
+    if (loaded.kind !== "loaded") return;
+    // The block is what a resume must NOT redo (it names an `attachment/put`
+    // already paid for, or text a pod's daemon awaits): losing it re-uploads.
+    expect(loaded.data.items[0]?.documents).toEqual([
+      { file: "/c/a.pdf", name: "a.pdf", block: BLOCK },
+    ]);
+  });
+
+  test("a v2 file whose stored block is not the wire's shape is corrupt (mutation: `isDocument` → accept anything → red)", async () => {
+    // The block is handed straight to `session/prompt`, so a garbage one would
+    // be refused by the daemon only AFTER the whole prompt was sent.
+    const text = JSON.stringify({
+      schemaVersion: OUTBOX_SCHEMA_VERSION_DOCUMENTS,
+      items: [
+        {
+          ...item("a"),
+          documents: [{ file: "/c/a.pdf", name: "a.pdf", block: { type: "document" } }],
+        },
+      ],
+      drafts: [],
+      ownIds: [],
+    });
+    const fs = memoryFs({ [paths.state]: text });
+    const store = createOutboxStore(fs, paths, () => 8);
+    expect((await store.load()).kind).toBe("corrupt");
+    expect(store.data.items).toEqual([]);
+  });
 });
 
 describe("finishing an item", () => {
-  test("removing it drops it from the file AND deletes its photo copies", async () => {
+  test("removing it drops it from the file but KEEPS its photo copies (Review round 2 R2-1: the transcript's own row draws them, and the row outlives the item — mutation: delete them again → red)", async () => {
     const fs = memoryFs();
     const store = createOutboxStore(fs, paths);
     await store.load();
@@ -263,25 +324,30 @@ describe("finishing an item", () => {
     fs.files.set("/copy/a/0.png", "bytes");
     expect(await store.removeItem("a")).toBe(true);
     expect(store.data.items.map((entry) => entry.itemId)).toEqual(["b"]);
-    expect(fs.files.has("/copy/a/0.png")).toBe(false); // the copy is gone
+    // The person's row on screen still names this file (`localPhotosOf` →
+    // `ImageRef.localUri`), and the daemon offers no read-back, so the copy is
+    // the only pixels there are: it must still be readable after the ack.
+    expect(fs.files.has("/copy/a/0.png")).toBe(true);
     // A relaunch agrees.
     const again = createOutboxStore(fs, paths);
     const loaded = await again.load();
     expect(loaded.kind === "loaded" ? loaded.data.items.map((e) => e.itemId) : []).toEqual(["b"]);
   });
 
-  test("a copy that cannot be removed does not make the removal fail (the item is what matters)", async () => {
+  test("the removal never touches the photo folder at all (mutation: any `fs.remove` here → red)", async () => {
     const fs = memoryFs();
     const store = createOutboxStore(fs, paths);
     await store.load();
     await store.setItems([item("a")]);
-    const reallyRemove = fs.remove.bind(fs);
-    fs.remove = async () => {
-      throw new Error("EBUSY");
+    const removed: string[] = [];
+    fs.remove = async (path) => {
+      removed.push(path);
     };
     expect(await store.removeItem("a")).toBe(true);
-    fs.remove = reallyRemove;
     expect(store.data.items).toEqual([]);
+    // Bounding the folder is `photo-copies.ts`'s decision, over a grace window
+    // and the copies still in use — never a delete at the ack.
+    expect(removed).toEqual([]);
   });
 });
 

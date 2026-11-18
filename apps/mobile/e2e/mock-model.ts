@@ -12,6 +12,10 @@
  * - `SLOW …` streams a few seconds and then ENDS (the running indicator is
  *   observable, and `turn-idle` follows);
  * - `SHOWCASE …` answers with `SHOWCASE_MD` (the screenshot flow's markdown);
+ * - `AGENTS27` / `SHELLJOB27` (flow 27) launch two background children and a
+ *   background shell job; a child (`CHILDSTEPS n`) takes n slow `fs_read` steps;
+ * - `TOOLROWS29` (flow 29) is a three-round turn with reasoning and four calls
+ *   (`TOOLROWS_PROMPT`);
  * - anything else answers in five chunks, fast.
  *
  * The tool call is streamed the way a real server streams one (a `tool_calls`
@@ -24,6 +28,10 @@
 export interface MockModelOptions {
   /** How long a `HOLD` stream keeps streaming (a rough total, ms). */
   readonly holdMs?: number;
+  /** The spacing of a flow-27 child's rounds (ms; `CHILD_STEP_MS` by default). */
+  readonly childStepMs?: number;
+  /** Flow 29's round-3 thinking spacing (ms; `TOOLROWS_THINK_MS` by default). */
+  readonly thinkMs?: number;
 }
 
 export interface MockModel {
@@ -183,8 +191,142 @@ export function editTarget(prompt: string): string | null {
   return null;
 }
 
+/**
+ * Flow 27 (docs/feat/mobile-chrome.md S9). `AGENTS27` on a line launches TWO
+ * background children with `agent_task{background}`: a LONG one (60 steps, so
+ * the flow can watch its steps, message it and Stop it) and a SHORT one (3 steps,
+ * it ends on its own and leaves a report). `SHELLJOB27` starts `sleep 30` as a
+ * background shell job (an `ask` tool: the flow approves it).
+ */
+export const AGENTS_PROMPT = "AGENTS27";
+export const SHELLJOB_PROMPT = "SHELLJOB27";
+/**
+ * Flow 30 (T8.1): `present` the escape fixture as artifact id `escape`, so the
+ * card is addressable as `artifact-card-escape`. The bytes are a WORKSPACE file
+ * (`present`'s `path`), which the harness writes with `__PROBE__` substituted for
+ * its own probe listener — the fixture itself stays a fixture.
+ */
+export const ESCAPE_PROMPT = "ESCAPE30";
+/** The artifact id the escape fixture is presented under (the flow's card id). */
+export const ESCAPE_ARTIFACT_ID = "escape";
+/** Flow 31 (docs/feat/model-charts.md T6): the model calls `chart` with `CHART_SPEC`. */
+export const CHART_PROMPT = "CHART31";
+export const CHART_SPEC = {
+  type: "line",
+  title: "Ricavi",
+  labels: ["gen", "feb", "mar", "apr", "mag", "giu"],
+  y: { unit: "€" },
+  datasets: [
+    { label: "2026", data: [11800, 12500, 13900, 14100, 15800, 16200] },
+    { label: "2025", data: [10200, 10900, 11500, 11800, 12600, 13100] },
+  ],
+} as const;
+/**
+ * Flow 29 (docs/feat/mobile-tool-rows.md S3): a turn of three rounds that draws
+ * the thread of steps. Round 1 thinks, says a line, then runs two `shell` calls
+ * (one ok, one failing); round 2 thinks (folded into the next step) and calls a
+ * ranged `fs_read` and an MCP tool the daemon does not have (an error row);
+ * round 3 thinks SLOWLY (the live `Thinking…` footer) and answers.
+ */
+export const TOOLROWS_PROMPT = "TOOLROWS29";
+/** Round 3's thinking spacing (ms): long enough for a flow to shoot the footer. */
+export const TOOLROWS_THINK_MS = 2500;
+/** A child's prompt: `CHILDSTEPS <n>` — it calls `fs_read` n times, one per round, then reports. */
+export const CHILD_MARK = "CHILDSTEPS";
+/** The spacing of a child's rounds (ms): slow enough for a flow to see its steps advance. */
+export const CHILD_STEP_MS = 2000;
+export const LONG_CHILD_STEPS = 60;
+export const SHORT_CHILD_STEPS = 3;
+
+/** One of the flow's prompts, matched on a LINE (the daemon adds its own `[context: …]` line). */
+export function promptLine(prompt: string, word: string): boolean {
+  return prompt.split("\n").some((line) => line.trim() === word);
+}
+
+/**
+ * `CALL <tool> <json args>` lines (the QA sweep, docs/fix/mobile-qa-sweep.md):
+ * the round calls each named tool with those arguments, in order. `[]`: none.
+ * A line whose JSON does not parse is not a call.
+ */
+export function callDirectives(prompt: string): { name: string; args: object }[] {
+  const calls: { name: string; args: object }[] = [];
+  for (const line of prompt.split("\n")) {
+    const match = /^CALL\s+(\S+)\s+(\{.*\})\s*$/.exec(line.trim());
+    if (match?.[1] === undefined || match[2] === undefined) {
+      continue;
+    }
+    try {
+      calls.push({ name: match[1], args: JSON.parse(match[2]) });
+    } catch {
+      // not a call
+    }
+  }
+  return calls;
+}
+
+/**
+ * A child's plan: how many steps its prompt asks for, from ANY of its user
+ * messages (the person's own message to it arrives as a later user message, like
+ * a steer, so the LAST one is not always the prompt). `null`: not a child.
+ */
+export function childSteps(body: unknown): number | null {
+  const messages = (body as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) {
+    return null;
+  }
+  for (const raw of messages) {
+    const m = raw as { role?: unknown; content?: unknown };
+    if (m.role !== "user" || typeof m.content !== "string") {
+      continue;
+    }
+    const match = new RegExp(`${CHILD_MARK} (\\d+)`).exec(m.content);
+    if (match?.[1] !== undefined) {
+      return Number(match[1]);
+    }
+  }
+  return null;
+}
+
+/** How many tool results the request carries: the steps a child already took. */
+export function toolResults(body: unknown): number {
+  const messages = (body as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) {
+    return 0;
+  }
+  return messages.filter((m) => (m as { role?: unknown }).role === "tool").length;
+}
+
+/** How many tool results follow the LAST user message: the rounds this turn already ran. */
+export function toolResultsThisTurn(body: unknown): number {
+  const messages = (body as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) {
+    return 0;
+  }
+  let count = 0;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const role = (messages[i] as { role?: unknown }).role;
+    if (role === "user") {
+      break;
+    }
+    if (role === "tool") {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/** One streamed tool call at `index` (id, name, then the arguments). */
+function toolCallFrames(index: number, id: string, name: string, args: object): string[] {
+  return [
+    frame({ tool_calls: [{ index, id, type: "function", function: { name, arguments: "" } }] }),
+    frame({ tool_calls: [{ index, function: { arguments: JSON.stringify(args) } }] }),
+  ];
+}
+
 export function startMockModel(options: MockModelOptions = {}): MockModel {
   const holdMs = options.holdMs ?? 60_000;
+  const childStepMs = options.childStepMs ?? CHILD_STEP_MS;
+  const thinkMs = options.thinkMs ?? TOOLROWS_THINK_MS;
   let holding = false;
   const prompts: string[] = [];
   const replies: string[] = [];
@@ -200,6 +342,8 @@ export function startMockModel(options: MockModelOptions = {}): MockModel {
       return new Response(
         stream(req, {
           holdMs,
+          childStepMs,
+          thinkMs,
           setHeld: (v) => {
             holding = v;
           },
@@ -230,6 +374,8 @@ function stream(
   req: Request,
   ctx: {
     readonly holdMs: number;
+    readonly childStepMs: number;
+    readonly thinkMs: number;
     readonly setHeld: (v: boolean) => void;
     readonly prompts: string[];
     readonly replies: string[];
@@ -253,6 +399,138 @@ function stream(
         }
       }
       const send = (chunk: string) => controller.enqueue(encoder.encode(chunk));
+      const mint = () => {
+        const id = `${TOOL_CALL_PREFIX}${ctx.calls.length + 1}`;
+        ctx.calls.push(id);
+        return id;
+      };
+      // Flow 27: a background child (before any other rule — its rounds end in
+      // tool results, and the person's message to it is a later user message).
+      const steps = childSteps(body);
+      if (steps !== null) {
+        const done = toolResults(body);
+        await Bun.sleep(ctx.childStepMs);
+        if (done < steps) {
+          for (const chunk of toolCallFrames(0, mint(), "fs_read", {
+            path: `project/step-${done + 1}.txt`,
+          })) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
+        } else {
+          send(frame({ content: `Child report: ${steps} steps done.` }));
+          send(frame({}, "stop"));
+        }
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      // Flow 29: the round is picked by how many of this turn's tools already ran.
+      if (promptLine(prompt, TOOLROWS_PROMPT)) {
+        const done = toolResultsThisTurn(body);
+        const think = (text: string) => send(frame({ reasoning_content: text }));
+        if (done === 0) {
+          think("The person wants a look at the workspace. ");
+          think("Make a notes file first, then check a folder that may not exist.");
+          send(frame({ content: "Checking the workspace first." }));
+          for (const chunk of [
+            ...toolCallFrames(0, mint(), "shell", {
+              command: "seq 1 40 > notes.txt && wc -l notes.txt",
+            }),
+            ...toolCallFrames(1, mint(), "shell", { command: "ls missing-dir" }),
+          ]) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
+        } else if (done < 4) {
+          think("notes.txt has 40 lines; read the first 20. ");
+          think("Then size the browser to a phone.");
+          for (const chunk of [
+            ...toolCallFrames(0, mint(), "fs_read", { path: "notes.txt", offset: 1, limit: 20 }),
+            ...toolCallFrames(1, mint(), "mcp__demo__browser_resize", { width: 430, height: 932 }),
+          ]) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
+        } else {
+          for (const part of [
+            "missing-dir does not exist, ",
+            "and there is no browser server here. ",
+            "The notes file is fine. ",
+            "Summarise that.",
+          ]) {
+            think(part);
+            await Bun.sleep(ctx.thinkMs);
+          }
+          send(frame({ content: "The workspace has **notes.txt** (40 lines). " }));
+          send(frame({ content: "`missing-dir` is not there, and no browser tool is set up." }));
+          send(frame({}, "stop"));
+        }
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      if (!followUp && promptLine(prompt, ESCAPE_PROMPT)) {
+        for (const chunk of toolCallFrames(0, mint(), "present", {
+          title: "escape probes",
+          // Relative to the session cwd (the run dir); the harness writes `project/`.
+          path: `project/${ESCAPE_ARTIFACT_ID}.html`,
+          id: ESCAPE_ARTIFACT_ID,
+        })) {
+          send(chunk);
+        }
+        send(frame({}, "tool_calls"));
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      if (!followUp && promptLine(prompt, AGENTS_PROMPT)) {
+        const long = { description: "long child", prompt: `${CHILD_MARK} ${LONG_CHILD_STEPS}` };
+        const short = { description: "short child", prompt: `${CHILD_MARK} ${SHORT_CHILD_STEPS}` };
+        for (const chunk of [
+          ...toolCallFrames(0, mint(), "agent_task", { ...long, background: true }),
+          ...toolCallFrames(1, mint(), "agent_task", { ...short, background: true }),
+        ]) {
+          send(chunk);
+        }
+        send(frame({}, "tool_calls"));
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      if (!followUp && promptLine(prompt, SHELLJOB_PROMPT)) {
+        for (const chunk of toolCallFrames(0, mint(), "shell", {
+          command: "sleep 30",
+          run_in_background: true,
+        })) {
+          send(chunk);
+        }
+        send(frame({}, "tool_calls"));
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      if (!followUp && promptLine(prompt, CHART_PROMPT)) {
+        for (const chunk of toolCallFrames(0, mint(), "chart", CHART_SPEC)) {
+          send(chunk);
+        }
+        send(frame({}, "tool_calls"));
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      const directed = followUp ? [] : callDirectives(prompt);
+      if (directed.length > 0) {
+        for (const [index, call] of directed.entries()) {
+          for (const chunk of toolCallFrames(index, mint(), call.name, call.args)) {
+            send(chunk);
+          }
+        }
+        send(frame({}, "tool_calls"));
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
       const edit = followUp ? null : editTarget(prompt);
       if (edit !== null) {
         // A real streamed tool call: the id, the name, the arguments, then the
@@ -301,6 +579,16 @@ function stream(
       const steady = !hold && !slow && prompt.includes("STEADY");
       if (hold) {
         ctx.setHeld(true);
+      }
+      // `THINKHOLD` (docs/feat/mobile-hub-native-driver.md): a HOLD turn that is
+      // all Thinking first — a reasoning delta every 40 ms for the hold — the
+      // load under which the owner saw the hub fan stutter.
+      if (hold && prompt.includes("THINKHOLD")) {
+        const until = Date.now() + ctx.holdMs;
+        for (let i = 0; Date.now() < until; i++) {
+          send(frame({ reasoning_content: `thinking step ${i}, weighing the next move. ` }));
+          await Bun.sleep(40);
+        }
       }
       // 13d's flow 18: the images reached the MODEL (not just the daemon's store),
       // so the answer says how many. `[context: …]` lines are the daemon's own.

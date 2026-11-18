@@ -108,6 +108,31 @@ const W: readonly {
     carried: 3,
   },
   {
+    key: "contextPruneEnabled",
+    file: (v) => ({ contextPrune: { enabled: v } }),
+    carried: true,
+  },
+  {
+    key: "contextPruneAtPercent",
+    file: (v) => ({ contextPrune: { pruneAtPercent: v } }),
+    carried: 70,
+  },
+  {
+    key: "contextPruneMinGainPercent",
+    file: (v) => ({ contextPrune: { minGainPercent: v } }),
+    carried: 20,
+  },
+  {
+    key: "contextPruneKeepRecentRounds",
+    file: (v) => ({ contextPrune: { keepRecentRounds: v } }),
+    carried: 9,
+  },
+  {
+    key: "contextPruneOutputChars",
+    file: (v) => ({ contextPrune: { pruneOutputChars: v } }),
+    carried: 4321,
+  },
+  {
     key: "maxInlineOutputChars",
     file: (v) => ({ tools: { maxInlineOutputChars: v } }),
     env: (v) => ({ TENTACLE_MAX_OUTPUT_CHARS: String(v) }),
@@ -213,6 +238,11 @@ const ALL_KEYS = [
   "autoTitle",
   "contextAwarenessEnabled",
   "contextAwarenessStepPercent",
+  "contextPruneAtPercent",
+  "contextPruneEnabled",
+  "contextPruneKeepRecentRounds",
+  "contextPruneMinGainPercent",
+  "contextPruneOutputChars",
   "contextResetEnabled",
   "contextResetMaxPerMessage",
   "contextWindow",
@@ -239,7 +269,7 @@ const read = (key: keyof SessionSettings, config: TentacleConfig): unknown =>
   CARRIED[key].read(config);
 
 describe("the table is complete", () => {
-  test("10 P + 14 W, and the two test tables cover each (publishedModels: its own describe)", () => {
+  test("10 P + 19 W, and the two test tables cover each (publishedModels: its own describe)", () => {
     expect(Object.keys(CARRIED).sort()).toEqual([...ALL_KEYS]);
     const classOf = (name: "P" | "W") =>
       Object.entries(CARRIED)
@@ -256,7 +286,7 @@ describe("the table is complete", () => {
 });
 
 describe("carriedSettings: an allowlist", () => {
-  test("exactly the 23 keys, and no secret or code, whatever the config holds", async () => {
+  test("exactly the 28 keys, and no secret or code, whatever the config holds", async () => {
     const laptop = await loadConfig({
       configDir: dir({
         "config.jsonc": JSON.stringify({
@@ -338,7 +368,7 @@ describe("carriedSettings: an allowlist", () => {
   test("no custom description: the key is absent, not undefined on the wire", () => {
     const carried = carriedSettings(UNSET);
     expect(Object.hasOwn(carried, "agentTaskDescription")).toBe(false);
-    expect(Object.keys(carried)).toHaveLength(22);
+    expect(Object.keys(carried)).toHaveLength(27);
   });
 });
 

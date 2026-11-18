@@ -16,6 +16,8 @@ export type HookName =
   | "laptop-prompt"
   | "laptop-answer"
   | "session-state"
+  /** Flow 25 (docs/feat/session-capabilities.md S5): the daemon's MCP/skill switches. */
+  | "session-capabilities"
   | "history"
   | "file-exists"
   | "model-prompts"
@@ -48,10 +50,49 @@ export type HookName =
    */
   | "relay-qr"
   /**
+   * docs/feat/mobile-push.md P10: hand the simulator the daemon's OWN sealed
+   * push, exactly as APNs would deliver it, so the banner the flow asserts is
+   * the real chain's output and not a hand-written payload.
+   */
+  | "push-payload"
+  /**
+   * docs/feat/mobile-push.md P10: register + push + place, in ONE step, so the
+   * flow does not have to orchestrate three hooks around a 30 s deadline.
+   */
+  | "push-place"
+  /**
    * Flip the simulator to `?name=light|dark` (mobile-ui-polish slice 6): flow 24
    * shoots every screen in both appearances in one walk.
    */
-  | "appearance";
+  | "appearance"
+  /**
+   * docs/feat/mobile-notifications.md N8: seal one `PushMessage` of the flow's
+   * choosing to the simulator's push key and place it (`simctl push`), so a flow
+   * can exercise an ask it can reply to — or a forged one — on cue.
+   * `?kind=ask|ask_resolved|turn_done|turn_failed&forged=1&reply=1&hostile-aps=1`.
+   */
+  | "seal-push"
+  /**
+   * docs/feat/mobile-notifications.md N8 (Owner Q7): inject a notification
+   * RESPONSE into the app's dispatcher (a dev-build-only hook — Maestro cannot
+   * long-press a system banner). `?action=approve|deny|reply|open&text=…&forged=1`
+   * acts on the LAST `seal-push` the flow placed; the app then runs the real
+   * path (Face ID prompt included).
+   */
+  | "notify-respond"
+  /**
+   * docs/feat/mobile-notifications.md N8: the asks the daemon has PENDING on a
+   * session (`?session=…`), read from the harness's own client. A notification
+   * flow names one of these so its injected action answers the daemon's real ask.
+   */
+  | "pending-ask"
+  /** docs/feat/mobile-notifications.md N8: the payload the last `seal-push` placed. */
+  | "notify-payload"
+  /**
+   * docs/feat/model-artifacts.md T8.1 (flow 30): the probe names that actually
+   * reached the e2e host's listener — the escape suite's only real evidence.
+   */
+  | "escape-hits";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -65,6 +106,18 @@ export interface HookQuery {
   readonly ttlMs?: string;
   /** `pair-revoke`'s device name (what `tentacle devices revoke` matches). */
   readonly name?: string;
+  /** `seal-push`: which plaintext to seal (`ask` by default). */
+  readonly kind?: string;
+  /** `seal-push`/`notify-respond`: seal with a NON-pinned sender key (F4/F5). */
+  readonly forged?: string;
+  /** `seal-push`: an ask that offers a reply (the reply flow). */
+  readonly reply?: string;
+  /** `seal-push`: a rewritten outer `aps` (F5). */
+  readonly "hostile-aps"?: string;
+  /** `notify-respond`: the action to inject (`approve`/`deny`/`reply`/`open`). */
+  readonly action?: string;
+  /** `seal-push`: the REAL pending ask's `requestId`. */
+  readonly request?: string;
 }
 
 export interface Hooks {
@@ -98,6 +151,13 @@ export interface HookActions {
     readonly attached: number;
     readonly running: boolean;
     readonly archived: boolean;
+    /** The daemon's title now (flow 25: the phone's rename reached the computer). */
+    readonly title: string;
+  } | null>;
+  /** The daemon's MCP/skill switches of a session, or `null` (it reported none). */
+  readonly capabilities: (sessionId: string) => Promise<{
+    readonly disabledMcp: readonly string[];
+    readonly disabledSkills: readonly string[];
   } | null>;
   /** Every message of the session, oldest first, with the refs each one names. */
   readonly history: (sessionId: string) => Promise<{
@@ -119,8 +179,10 @@ export interface HookActions {
       readonly cause: string;
     }[];
   }>;
-  /** A LAPTOP steer into the session's RUNNING turn (flow 15's another-device row). */
-  readonly laptopEnqueue: (sessionId: string, text: string) => Promise<{ readonly id: string }>;
+  /** A LAPTOP steer into the session's RUNNING turn (flow 15's another-device row). */ readonly laptopEnqueue: (
+    sessionId: string,
+    text: string,
+  ) => Promise<{ readonly id: string }>;
   /** The LAPTOP stops the running turn (flow 14: my queued row comes back). */
   readonly laptopCancel: (sessionId: string) => Promise<void>;
   /** The LAPTOP detaches (flow 15: the writer goes away, its row stays returned). */
@@ -163,8 +225,60 @@ export interface HookActions {
    * printed one yet, so a flow cannot read a stale run's line.
    */
   readonly relayQr: () => Promise<{ readonly payload: string }>;
+  /**
+   * The LAST push the daemon sent through the relay, as the APNs payload its
+   * delivery would carry — plus the alarm's `deviceToken`. `undefined` = no
+   * push has been sent yet, which a flow must distinguish from an empty one.
+   */
+  readonly pushPayload: () => Promise<{
+    readonly payload: { readonly aps: unknown; readonly tp: unknown };
+    readonly token: string;
+  }>;
+  /**
+   * Register a push key for the paired device, make the daemon push once and
+   * place that envelope on the simulator (docs/feat/mobile-push.md P10).
+   */
+  readonly pushPlace: () => Promise<{
+    readonly payload: { readonly aps: unknown; readonly tp: unknown };
+    readonly token: string;
+  }>;
   /** Set THIS simulator's appearance (`simctl ui <udid> appearance …`). */
   readonly appearance: (name: Appearance) => Promise<void>;
+  /**
+   * Seal one plaintext to the paired device's push key and place it
+   * (docs/feat/mobile-notifications.md N8). Returns the payload it placed.
+   */
+  readonly sealPush: (options: {
+    readonly kind: string;
+    readonly forged?: boolean;
+    readonly reply?: boolean;
+    readonly hostileAps?: boolean;
+    /** The REAL session the plaintext names (so an injected action answers it). */
+    readonly session?: string;
+    /** The REAL pending ask's `requestId` (from `laptop.pendingAsks`). */
+    readonly request?: string;
+  }) => Promise<{ readonly payload: { readonly aps: unknown; readonly tp: unknown } }>;
+  /**
+   * Inject a notification response for the last placed push (N8, Owner Q7). The
+   * app runs the real dispatcher: Face ID, the answer, the fallback.
+   */
+  /** What the last `seal-push` placed, so a flow can end on the real payload. */
+  readonly notifyPayload: () => Promise<{
+    readonly payload: { readonly aps: unknown; readonly tp: unknown };
+  }>;
+  /** The real pending asks on a session, oldest first (a flow names one). */
+  readonly pendingAsk: (sessionId: string) => Promise<readonly string[]>;
+  /**
+   * docs/feat/model-artifacts.md T8.1 (flow 30): the probe names that actually
+   * reached the e2e host's listener. A screen claim cannot prove an escape did
+   * not happen; the listener can — this is the escape suite's only real evidence.
+   */
+  readonly escapeHits: () => { readonly hits: readonly string[] };
+  readonly notifyRespond: (options: {
+    readonly action: string;
+    readonly text?: string;
+    readonly forged?: boolean;
+  }) => Promise<{ readonly accepted: boolean }>;
 }
 
 /** The simulator appearances the `appearance` hook sets. */
@@ -188,6 +302,7 @@ export function hookFor(path: string): HookName | undefined {
     case "laptop-prompt":
     case "laptop-answer":
     case "session-state":
+    case "session-capabilities":
     case "history":
     case "file-exists":
     case "model-prompts":
@@ -207,6 +322,20 @@ export function hookFor(path: string): HookName | undefined {
     case "log-file":
     case "relay-qr":
     case "appearance":
+      return name;
+    case "push-payload":
+      return name;
+    case "push-place":
+      return name;
+    case "seal-push":
+      return name;
+    case "notify-respond":
+      return name;
+    case "pending-ask":
+      return name;
+    case "notify-payload":
+      return name;
+    case "escape-hits":
       return name;
     default:
       return undefined;
@@ -295,6 +424,11 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             const state = await deps.actions.sessionState(session);
             return Response.json({ ok: true, hook, state });
           }
+          case "session-capabilities": {
+            const session = required(query.session, "session");
+            const capabilities = await deps.actions.capabilities(session);
+            return Response.json({ ok: true, hook, capabilities });
+          }
           case "history": {
             const session = required(query.session, "session");
             const history = await deps.actions.history(session);
@@ -377,6 +511,55 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             return Response.json({ ok: true, hook, text: await deps.actions.logFile() });
           case "relay-qr": {
             return Response.json({ ok: true, hook, ...(await deps.actions.relayQr()) });
+          }
+          case "push-payload": {
+            return Response.json({ ok: true, hook, ...(await deps.actions.pushPayload()) });
+          }
+          case "push-place": {
+            return Response.json({ ok: true, hook, ...(await deps.actions.pushPlace()) });
+          }
+          case "seal-push": {
+            const payload = await deps.actions.sealPush({
+              kind: query.kind ?? "ask",
+              ...(query.session !== undefined ? { session: query.session } : {}),
+              ...(query.request !== undefined ? { request: query.request } : {}),
+              ...(query.forged !== undefined ? { forged: query.forged !== "0" } : {}),
+              ...(query.reply !== undefined ? { reply: query.reply !== "0" } : {}),
+              ...(query["hostile-aps"] !== undefined
+                ? { hostileAps: query["hostile-aps"] !== "0" }
+                : {}),
+            });
+            return Response.json({ ok: true, hook, ...payload });
+          }
+          case "notify-payload":
+            return Response.json({ ok: true, hook, ...(await deps.actions.notifyPayload()) });
+          case "escape-hits":
+            return Response.json({ ok: true, hook, ...deps.actions.escapeHits() });
+          case "pending-ask": {
+            const session = query.session;
+            if (session === undefined) {
+              return Response.json({ ok: false, error: "session is required" }, { status: 400 });
+            }
+            return Response.json({
+              ok: true,
+              hook,
+              requests: await deps.actions.pendingAsk(session),
+            });
+          }
+          case "notify-respond": {
+            const action = query.action;
+            if (action === undefined) {
+              return Response.json(
+                { ok: false, error: "action is required (approve|deny|reply|open)" },
+                { status: 400 },
+              );
+            }
+            const result = await deps.actions.notifyRespond({
+              action,
+              ...(query.text !== undefined ? { text: query.text } : {}),
+              ...(query.forged !== undefined ? { forged: query.forged !== "0" } : {}),
+            });
+            return Response.json({ ok: true, hook, ...result });
           }
           case "appearance": {
             const name = appearanceOf(query.name);

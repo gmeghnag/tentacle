@@ -228,4 +228,35 @@ describe("waking a held poll", () => {
     queue.end("closed");
     expect(queue.revision).toBeGreaterThan(pushed);
   });
+
+  test("a `schedules` frame is DROPPABLE (docs/feat/cron-tool.md S2)", () => {
+    // Mutation: drop "schedules" from `DROPPABLE` → a full queue of schedule
+    // tables has nothing to drop, ends the watch with `overflow`, and the
+    // follower dies over a display-class list it could have skipped.
+    const queue = new WatchQueue();
+    const table = (i: number): SessionUpdate => ({
+      type: "schedules",
+      schedules: [
+        {
+          id: `sc-${i}`,
+          kind: "every",
+          spec: "every 10m",
+          prompt: "check CI",
+          nextAt: i,
+          fires: 0,
+          createdAt: 0,
+        },
+      ],
+    });
+    for (let i = 0; i < WATCH_QUEUE_MAX_COUNT + 5; i++) {
+      queue.push(frame(table(i)));
+    }
+    expect(queue.length).toBe(WATCH_QUEUE_MAX_COUNT);
+    expect(queue.dropped).toBe(5);
+    expect(queue.endReason).toBeUndefined();
+    // And it never wakes a held poll ahead of the coalescing window.
+    const fresh = new WatchQueue();
+    fresh.push(frame(table(1)), 1000);
+    expect(fresh.dueAt(1000, WATCH_COALESCE_MS)).toBe(1000 + WATCH_COALESCE_MS);
+  });
 });

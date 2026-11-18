@@ -127,6 +127,12 @@ export type StreamInput =
   | {
       readonly kind: "snapshot";
       readonly messages: readonly ChatMessage[];
+      /**
+       * Each message's arrival time, index-aligned (docs/fix/mobile-open-at-end.md,
+       * slice B); absent when the daemon does not report it or any page was
+       * unusable (`RemoteClient.readSnapshotPages`). Passed through untouched.
+       */
+      readonly times?: readonly number[];
       readonly since: HistoryCut;
       readonly turn: string | null;
       readonly now: number;
@@ -147,6 +153,8 @@ export type StreamOutput =
   | {
       readonly kind: "reset";
       readonly messages: readonly ChatMessage[];
+      /** As the snapshot's `times`: index-aligned with `messages`, display-only. */
+      readonly times?: readonly number[];
       readonly turn: string | null;
       readonly keepRequests: readonly string[];
     }
@@ -378,7 +386,13 @@ export function reduceStream(state: StreamState, input: StreamInput): StreamStep
         turn: input.turn,
         pending: [],
       });
-      s.out.push({ kind: "reset", messages: input.messages, turn: input.turn, keepRequests });
+      s.out.push({
+        kind: "reset",
+        messages: input.messages,
+        ...(input.times ? { times: input.times } : {}),
+        turn: input.turn,
+        keepRequests,
+      });
       s.drain(state.buffer, input.now);
       break;
     }

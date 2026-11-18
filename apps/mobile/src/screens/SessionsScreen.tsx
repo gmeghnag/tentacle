@@ -1,7 +1,8 @@
 /**
- * `Sessions` — one computer's sessions (mockup `Sessions`): a large title with a
- * glass back button, a search field, then Running / Idle / Archived in grouped
- * cards. A dumb renderer over `viewModel` and `session-groups.ts` (the logic
+ * `Sessions` — one computer's sessions (mockup `Sessions`, restyled to E2 bands by
+ * S4 of docs/feat/mobile-chrome.md): a large title with a thin back button, a
+ * search field, then Running / Idle / Archived — one full-width `BandSection` per
+ * section. A dumb renderer over `viewModel` and `session-groups.ts` (the logic
  * lives in `session-list.ts` / `session-list-controller.ts` / `session-groups.ts`,
  * AGENTS §7): it maps a precomputed view-model to elements and owns only the look.
  *
@@ -19,15 +20,14 @@ import { groupSessions, sessionLine, sessionMeta } from "../session-groups.ts";
 import type { viewModel } from "../session-list-controller.ts";
 import type { SessionRow } from "../session-list.ts";
 import { MONO, type Palette, radius, size, space, typography } from "../theme.ts";
+import { BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
-import { GlassButton } from "../ui/GlassButton.tsx";
-import { GroupedCard } from "../ui/GroupedCard.tsx";
+import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
-import { SectionHeader } from "../ui/SectionHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
 
 export interface SessionsScreenProps {
@@ -42,6 +42,8 @@ export interface SessionsScreenProps {
   readonly onOpen: (row: SessionRow) => void;
   /** Present only when the stack can go back. */
   readonly onBack?: () => void;
+  /** Opened from the drawer's magnifier: the search field takes focus when it appears. */
+  readonly focusSearch?: boolean;
 }
 
 function Section({
@@ -62,8 +64,7 @@ function Section({
   }
   return (
     <View testID={testID} style={styles.section}>
-      <SectionHeader palette={palette} title={title} />
-      <GroupedCard palette={palette}>
+      <BandSection palette={palette} title={title}>
         {rows.map((row, index) => (
           <Row
             key={row.sessionId}
@@ -91,7 +92,7 @@ function Section({
             </View>
           </Row>
         ))}
-      </GroupedCard>
+      </BandSection>
     </View>
   );
 }
@@ -106,6 +107,7 @@ export function SessionsScreen({
   onRetry,
   onOpen,
   onBack,
+  focusSearch,
 }: SessionsScreenProps): JSX.Element {
   const [query, setQuery] = useState("");
   const groups = groupSessions(view.sections, query);
@@ -135,7 +137,7 @@ export function SessionsScreen({
           title={title}
           left={
             onBack === undefined ? undefined : (
-              <GlassButton
+              <HeaderIcon
                 palette={palette}
                 testID="sessions-back"
                 icon="chevron.left"
@@ -160,6 +162,7 @@ export function SessionsScreen({
                 autoCapitalize="none"
                 clearButtonMode="while-editing"
                 returnKeyType="search"
+                autoFocus={focusSearch === true}
                 accessibilityLabel="Search sessions"
               />
             </View>
@@ -217,8 +220,15 @@ export function SessionsScreen({
               body={`Nothing called “${query.trim()}”.`}
             />
           ) : null}
-          {groups.running.length + groups.idle.length > 0 ? (
+          {groups.running.length + groups.idle.length > 0 || groups.pinned.length > 0 ? (
             <View testID="section-active" style={styles.sections}>
+              <Section
+                testID="section-pinned"
+                title="Pinned"
+                rows={groups.pinned}
+                palette={palette}
+                onOpen={onOpen}
+              />
               <Section title="Running" rows={groups.running} palette={palette} onOpen={onOpen} />
               <Section title="Idle" rows={groups.idle} palette={palette} onOpen={onOpen} />
             </View>
@@ -231,7 +241,7 @@ export function SessionsScreen({
             onOpen={onOpen}
           />
           {view.canLoadMore ? (
-            <GroupedCard palette={palette}>
+            <BandSection palette={palette}>
               <Row
                 testID="sessions-more"
                 palette={palette}
@@ -241,7 +251,7 @@ export function SessionsScreen({
                 title="Load more"
                 onPress={onLoadMore}
               />
-            </GroupedCard>
+            </BandSection>
           ) : null}
         </View>
       </ScrollView>
@@ -250,15 +260,17 @@ export function SessionsScreen({
   );
 }
 
-// ONE left edge (visual review V3): title, search field and cards all on the
-// page margin — the cards bring their own `marginHorizontal`, so the body adds
-// none (it used to, and the cards sat 31 pt in).
+// ONE left edge (visual review V3): each band is full-width with its own 20 pt
+// gutter, so the body adds none; the distance between two sections is the band's
+// own `space.sectionTop` (Design 4), not a wrapper gap on top of it.
 const styles = StyleSheet.create({
   root: { flex: 1 },
   content: { paddingBottom: 40 },
-  body: { gap: space.sectionSessions, paddingTop: 8 },
-  sections: { gap: space.sectionSessions },
-  section: { gap: 6 },
+  body: { paddingTop: 8 },
+  sections: { gap: 0 },
+  // BandSection owns the section rhythm; the only thing this wrapper adds is the
+  // id a flow asserts.
+  section: { gap: 0 },
   meta: { flexDirection: "row", alignItems: "center", gap: 6 },
   // The 44 pt pill (mockup `Sessions`: radius 22), on the page margin.
   search: {

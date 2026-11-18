@@ -382,6 +382,7 @@ describe("Agent cancel (post-stream / between-tools)", () => {
       role: "tool",
       content: c2.result.content,
       toolCallId: "c2",
+      isError: true,
     });
     // No dangling tool call: every id in the assistant message has a tool answer.
     const assistant = messages.find((m) => m.role === "assistant");
@@ -559,6 +560,8 @@ describe("history_commit (the snapshot cut)", () => {
               content: e.result.content,
               toolCallId: e.id,
               ...(e.durationMs !== undefined ? { durationMs: e.durationMs } : {}),
+              // …and its error flag: a reload draws what live drew (docs/fix/mobile-qa-1117.md).
+              ...(e.result.isError === true ? { isError: true } : {}),
             });
           } else if (e.type === "steer") {
             expect(messages.some((m) => m.role === "user" && m.content === e.text)).toBe(true);

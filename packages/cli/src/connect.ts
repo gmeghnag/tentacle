@@ -20,9 +20,18 @@ import {
 import { readFileConfig } from "@tentacle/config";
 import { PermissionBroker } from "@tentacle/core";
 import { MAX_SESSION_LIST } from "@tentacle/protocol";
-import type { InitializeResult } from "@tentacle/protocol";
+import type { InitializeResult, SessionListEntry, SessionListResult } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
-import { type SessionPick, type ThemeSetting, oneLine, startTui } from "@tentacle/tui";
+import {
+  type ChartGlyphs,
+  type SessionPick,
+  type SessionsView,
+  type ThemeSetting,
+  VOICE_DEFAULTS,
+  type VoiceConfig,
+  oneLine,
+  startTui,
+} from "@tentacle/tui";
 import {
   type ConnectResumeRequest,
   type ListOutcome,
@@ -37,6 +46,33 @@ import { remoteJobsView } from "./local-runtime.ts";
 import { routingAutoAccept } from "./session-auto-accept.ts";
 import { CLIENT_INFO } from "./version.ts";
 
+/**
+ * One `session/list` result as the `/sessions` view
+ * (docs/feat/mobile-session-actions.md S3): the page, and the first page's
+ * `pinned` array — EVERY pinned session on the daemon, so a pin older than the
+ * page still shows. A pod daemon is untrusted, but these are booleans and
+ * schema-bounded entries; `pinned: true` is carried only when the daemon said it.
+ */
+export function sessionsViewFrom(result: SessionListResult): SessionsView {
+  const rows = (
+    entries: readonly SessionListEntry[],
+  ): readonly SessionsView["sessions"][number][] =>
+    entries.map((s) => ({
+      id: s.sessionId,
+      title: s.title,
+      updatedAt: s.updatedAt,
+      running: s.running,
+      attached: s.attached,
+      archived: s.archived,
+      ...(s.pinned === true ? { pinned: true } : {}),
+    }));
+  return {
+    sessions: rows(result.sessions),
+    ...(result.pinned !== undefined ? { pinned: rows(result.pinned) } : {}),
+    more: result.cursor !== undefined,
+  };
+}
+
 export interface ConnectOptions {
   readonly url: string;
   readonly token?: string;
@@ -48,6 +84,11 @@ export interface ConnectOptions {
   readonly configDir?: string;
   /** An explicit `tui.theme` (beats the file); absent → the file's, else `auto`. */
   readonly theme?: ThemeSetting;
+  /**
+   * An explicit `tui.chartGlyphs` (beats the file); absent → the file's, else
+   * `braille` (docs/feat/model-charts.md D5).
+   */
+  readonly chartGlyphs?: ChartGlyphs;
 }
 
 /**
@@ -129,6 +170,68 @@ export async function connectTheme(
   }
 }
 
+/**
+ * A chart's plot glyphs for a `connect` session (`tui.chartGlyphs`,
+ * docs/feat/model-charts.md D5). Same rule as the palette: the config FILE, and
+ * a broken file never blocks the connection — `connectTheme`, called beside
+ * this one, already warned about it, so `braille` is used silently.
+ */
+export async function connectChartGlyphs(options: ConnectOptions): Promise<ChartGlyphs> {
+  if (options.chartGlyphs !== undefined) {
+    return options.chartGlyphs;
+  }
+  try {
+    const file = await readFileConfig({
+      ...(options.configDir !== undefined
+        ? {
+            configDir: options.configDir,
+            env: { ...process.env, TENTACLE_CONFIG_DIR: options.configDir },
+          }
+        : {}),
+    });
+    return file.tui?.chartGlyphs ?? "braille";
+  } catch {
+    return "braille";
+  }
+}
+
+/**
+ * `connect`'s voice settings (docs/feat/voice-dictation.md, Review round 1 HIGH
+ * 4). `connect` reads no model config, so — exactly like the palette — the voice
+ * settings come from the config FILE, and a broken file must never block a
+ * connection: those settings fall back to `VOICE_DEFAULTS` (docs/fix/
+ * tui-voice-off-despite-config, which is why that fallback is a NOTICE and not
+ * silence: it means OFF, so the person would otherwise see Ctrl+R answer "voice
+ * is off" with no clue that their file was unreadable).
+ */
+export async function connectVoice(
+  options: ConnectOptions,
+  write: (line: string) => void = () => {},
+): Promise<{ readonly config: VoiceConfig; readonly configDir?: string }> {
+  try {
+    const file = await readFileConfig({
+      ...(options.configDir !== undefined
+        ? {
+            configDir: options.configDir,
+            env: { ...process.env, TENTACLE_CONFIG_DIR: options.configDir },
+          }
+        : {}),
+    });
+    return {
+      config: { ...VOICE_DEFAULTS, ...(file.voice ?? {}) },
+      ...(options.configDir !== undefined ? { configDir: options.configDir } : {}),
+    };
+  } catch (error) {
+    write(
+      `[config] ${error instanceof Error ? error.message : String(error)} — using the voice defaults (off)\n`,
+    );
+    return {
+      config: VOICE_DEFAULTS,
+      ...(options.configDir !== undefined ? { configDir: options.configDir } : {}),
+    };
+  }
+}
+
 /** Injectable for tests; production uses the real socket and TUI. */
 export interface ConnectDeps {
   /** A channel factory for the daemon at `url` (rejects with a `ChannelError`). */
@@ -151,6 +254,13 @@ export async function connectTui(
   // The palette FIRST: it needs no daemon (a local file), Ink has not mounted, and
   // a broken config must warn before anything else can fail for another reason.
   const theme = await connectTheme(options, write);
+  // Voice dictation on the laptop the person is sitting at (Review HIGH 4): a
+  // LAPTOP-ONLY input setting read from the same file the palette comes from —
+  // and its unreadable-file fallback is said through the same pre-mount `write`
+  // (docs/fix/tui-voice-off-despite-config).
+  const voice = await connectVoice(options, write);
+  // A chart's glyphs: the same local file, same rule (docs/feat/model-charts.md D5).
+  const chartGlyphs = await connectChartGlyphs(options);
   // RPC path: hold a daemon's request until the TUI's prompt is mounted.
   const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
   const dial = deps.dial(options.url, {
@@ -183,10 +293,11 @@ export async function connectTui(
     // Asked through the same broker; never stored (the folder is on another host).
     hooksTrust: createHooksTrustResolver({ broker: permissions, interactive: true }),
     clientInfo: CLIENT_INFO,
-    // The ONE place this trust bit is set (AGENTS §7, docs/fix/autoaccept-wake-turns.md
-    // A3): a `serve` daemon is trusted and is the only one that starts its own
-    // wake turns, so its `wake-…` asks are this session's — auto-accept answers
-    // them. Every other runtime leaves it off: a pod's `wake-` id stays foreign.
+    // A TRUST bit (AGENTS §7, docs/fix/autoaccept-wake-turns.md A3): a `serve`
+    // daemon is trusted and starts its own wake turns, so its `wake-…` asks are
+    // this session's — auto-accept answers them. The only other runtime that
+    // sets it is the local worker (`WORKER_TRUST`, docs/feat/cron-tool.md D1); a
+    // pod's `wake-` id stays foreign.
     daemonWakes: true,
     // The other TRUST bit, and the same reasoning (AGENTS §7): a `serve` on the
     // user's own host shares the session's auto-accept, so this TUI reads and
@@ -245,11 +356,18 @@ export async function connectTui(
       ...(served.label !== undefined ? { modelLabel: served.label } : {}),
       ...(served.contextWindow !== undefined ? { contextWindow: served.contextWindow } : {}),
       cwd: options.url,
+      // The laptop's own `voice.*` (Review round 1, HIGH 4): without this the
+      // `connect` TUI got `VOICE_DEFAULTS`, so `voice.enabled: false` and the
+      // key/language/engine settings were ignored on this path.
+      voice: voice.config,
+      ...(voice.configDir === undefined ? {} : { voiceConfigDir: voice.configDir }),
       permissions,
       // The resumed session first (already attached), then fresh lazy ones (a `/clear`).
       createSession: () => {
         // A `/clear` fork carries the switch the person has now (`OpenParams.autoAccept`).
         previousSession?.seedAutoAccept(autoAccept.current());
+        // …and its MCP/skill switches (docs/feat/session-capabilities.md, owner Q5).
+        previousSession?.seedCapabilities();
         const session = pending ?? client.newSession(undefined, crypto.randomUUID());
         pending = null;
         const tracked = track(session);
@@ -273,21 +391,11 @@ export async function connectTui(
       mcpStatus: () => client.mcpStatus(),
       detachOnQuit: true,
       theme,
+      chartGlyphs,
       autoAccept,
       autoAcceptShared: autoAccept,
       sessions: {
-        list: () =>
-          client.sessionList({ limit: MAX_SESSION_LIST }).then((result) => ({
-            sessions: result.sessions.map((s) => ({
-              id: s.sessionId,
-              title: s.title,
-              updatedAt: s.updatedAt,
-              running: s.running,
-              attached: s.attached,
-              archived: s.archived,
-            })),
-            more: result.cursor !== undefined,
-          })),
+        list: () => client.sessionList({ limit: MAX_SESSION_LIST }).then(sessionsViewFrom),
         open: (id, reopen) => {
           const session = track(
             client.newSession(undefined, id, undefined, { attach: reopen ? { reopen } : {} }),

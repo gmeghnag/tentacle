@@ -44,6 +44,7 @@ import type { PermissionRequest } from "@tentacle/core";
  */
 import type { Key } from "ink";
 import type { SessionDirectory } from "../app-types.ts";
+import type { ArtifactConfirmView } from "../artifact-open.ts";
 import type { DockState } from "../background-focus.ts";
 import type { DockJobRow } from "../background-list.ts";
 import type { BackgroundAgentRow } from "../background-view.ts";
@@ -52,6 +53,7 @@ import type { QuitConfirmFacts } from "../commands.ts";
 import type { OpenPanel } from "../panel.ts";
 import type { ReplyMode } from "../permission-reply.ts";
 import type { PermissionChoice } from "../permission-ui.ts";
+import type { VoicePhase } from "../voice-session.ts";
 
 /** The permission dialog, as the router reads it (render values + a live mode). */
 export interface KeyPermission {
@@ -75,6 +77,8 @@ export interface KeySnapshot {
 
   // --- live reads (getters): a key must see what the last key in this tick wrote
   quitConfirm(): QuitConfirmFacts | null;
+  /** The artifact open confirm on screen, or null (`artifactConfirmRef.current`). */
+  artifactConfirm(): ArtifactConfirmView | null;
   dock(): DockState;
   chord(): ChordState;
   running(): boolean;
@@ -109,4 +113,11 @@ export interface KeySnapshot {
   /** Absent when the runtime has no session directory (`/sessions` unavailable). */
   readonly sessions: SessionDirectory | undefined;
   readonly detachOnQuit: boolean;
+  /**
+   * The dictation's phase, read live (an event between two chunks can move it):
+   * what the voice layer decides Esc/Enter/the key from (F6/F7).
+   */
+  voice(): VoicePhase;
+  /** The configured voice key (`voice.key`), a render value. */
+  voiceKey(): string;
 }

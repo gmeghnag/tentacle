@@ -107,6 +107,11 @@ export const ARGS = {
       "max-sessions": {},
       "max-detached-sessions": {},
       "ws-idle-timeout": {},
+      // `serve --push-grace <seconds>` (docs/feat/mobile-push.md Design 6): the
+      // push grace, 0 = at once. It belongs in THIS table or `parseArgs` refuses
+      // it as an unknown option before `parseServeLimits` can read it — the bug
+      // P10 found (the helper existed, was documented, and was unreachable).
+      "push-grace": {},
       // The pod's resident daemon socket (docs/feat/detached-runs.md S1); default in TMPDIR.
       socket: {},
       // `serve --relay <url>`: the mobile relay this daemon dials out to
@@ -223,6 +228,10 @@ export const ARGS = {
   // sub-command and its subject, so a permissions-shifted value is refused here
   // rather than guessed at in `devices-cmd.ts`.
   devices: { bools: { yes: { short: "y" } }, positional: { min: 0, max: 2 } },
+  // `tentacle voice setup [--yes] | status` (docs/feat/voice-dictation.md §6).
+  // The verb is the only word (plus `--yes` for setup), so a stray one is refused
+  // here rather than guessed at.
+  voice: { bools: { yes: { short: "y" } }, positional: { min: 1, max: 2 } },
   // `tentacle logs [<uid>] [--tail N] [--only …] [--json] [--summary] [-f]`
   // (docs/feat/logs-cmd.md). `-f` is `--follow`'s alias, as in `tail -f`; the
   // uid is the only word, so a second one is refused here, not guessed at.
@@ -234,6 +243,8 @@ export const ARGS = {
     bools: {
       json: {},
       summary: {},
+      // docs/feat/token-usage-log.md: the per-round token table + totals.
+      usage: {},
       follow: { short: "f" },
       "insecure-skip-tls-verify": {},
     },
@@ -746,6 +757,7 @@ export type CliMode =
   | "update"
   | "pair"
   | "devices"
+  | "voice"
   | "logs"
   | "plain"
   | "tui"
@@ -781,6 +793,8 @@ const USES_MODEL: Readonly<Record<CliMode, boolean>> = {
   devices: false,
   // `logs` reads the session log files: no daemon, no model, no session.
   logs: false,
+  // `voice` runs the local helper only: no daemon, no model, no session.
+  voice: false,
   // Everything that builds an agent or proxies to a model.
   serve: true,
   run: true,
@@ -822,6 +836,7 @@ export function cliMode(args: readonly string[]): CliMode {
     first === "update" ||
     first === "pair" ||
     first === "devices" ||
+    first === "voice" ||
     first === "logs"
   ) {
     return first;
@@ -854,6 +869,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   update: "tentacle update [--check] [--version vX.Y.Z]",
   pair: "tentacle pair [--address ws(s)://host:port/e2e]... [--name <name>]",
   devices: "tentacle devices | revoke <name|id-prefix> | reset [--yes]",
-  logs: "tentacle logs [<uid>|<run-name>] [--tail N] [--only ask,error,tool] [--json] [--summary] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
+  voice: "tentacle voice setup [--yes] | status",
+  logs: "tentacle logs [<uid>|<run-name>] [--tail N] [--only ask,error,tool] [--json] [--summary] [--usage] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--model <id>] [--profile <name>]",
 };

@@ -26,6 +26,7 @@
  * (a ref, written by `App`'s `onPillRange` callback). Those arrive as inputs or
  * leave as values.
  */
+import type { ArtifactConfirmView } from "./artifact-open.ts";
 import { type AttachDraft, attachRowRows, attachRowView } from "./attach-draft.ts";
 import type { DockState } from "./background-focus.ts";
 import {
@@ -37,6 +38,7 @@ import {
   listVisible,
 } from "./background-list.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
+import { type CapsPhase, capsMarker } from "./capability-toggles.ts";
 import {
   type QuitConfirmFacts,
   type SlashSkill,
@@ -45,6 +47,7 @@ import {
 } from "./commands.ts";
 import { permissionPromptRows } from "./components/PermissionPrompt.tsx";
 import { QUIT_CONFIRM_ROWS } from "./components/QuitConfirm.tsx";
+import { VOICE_STRIP_ROWS } from "./components/VoiceStrip.tsx";
 import { inputRowCount } from "./input-view.ts";
 import type { LinkIndicator } from "./link-status.ts";
 import type { OpenPanel } from "./panel.ts";
@@ -57,11 +60,14 @@ import {
 } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedRows } from "./queued.ts";
 import { shownRows } from "./queued.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import type { Selection } from "./selection.ts";
+import { slotView } from "./spinner-slot.ts";
 import type { DisplayState } from "./state.ts";
 import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
 import type { TargetBadge } from "./target-view.ts";
 import { panelHeight, panelMaxBody } from "./tree-panel.ts";
+import type { VoiceStripView } from "./voice-view.ts";
 
 /** Rows reserved below the transcript viewport: a blank spacer, the input/thinking
  * line, the status bar, plus one slack row so the frame never overflows the
@@ -90,6 +96,11 @@ export interface FrameInput {
   readonly subagentsRef: { current: readonly BackgroundAgentRow[] | undefined };
   readonly jobRows: readonly DockJobRow[] | undefined;
   readonly jobRowsRef: { current: readonly DockJobRow[] | undefined };
+  /**
+   * The session's ARMED scheduled wakes (cron-tool S5): they ride the same dock
+   * and pill as the children and jobs. `undefined` = no table to report.
+   */
+  readonly scheduleRows: readonly ScheduleDockRow[] | undefined;
   readonly drawerRow: BackgroundAgentRow | null;
   readonly drawerJob: DockJobRow | null;
   /** `jobOutputRef.current`: a job's cached output tail, keyed by its wire id. */
@@ -106,9 +117,16 @@ export interface FrameInput {
   /** `dockFinishedRef.current`: when the last child finished (for the pill). */
   readonly dockFinished: { readonly id: string; readonly at: number } | null;
   readonly quitConfirm: QuitConfirmFacts | null;
+  /** The artifact open confirm (model-artifacts D8): the quit dialog's slot. */
+  readonly artifactConfirm: ArtifactConfirmView | null;
   readonly panel: OpenPanel | null;
   /** The session's own id (`sessionRef.current?.sessionId ?? null`). */
   readonly sessionId: string | null;
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md S4):
+   * the panels' switch column and the status-line marker. Absent: none.
+   */
+  readonly capsPhase?: CapsPhase;
   readonly field: { readonly value: string; readonly cursor: number };
   readonly attach: AttachDraft;
   readonly skills: readonly SlashSkill[];
@@ -121,6 +139,22 @@ export interface FrameInput {
   readonly daemonQueue: DaemonQueue | undefined;
   readonly loading: { readonly done: number; readonly total: number } | null;
   readonly compacting: boolean;
+  /**
+   * When this TUI's own `/compact` began, and when it last succeeded — the
+   * spinner slot's two figures (`spinner-slot.ts`, docs/feat/harness-notices.md
+   * S3). `null`: none runs / nothing to celebrate.
+   */
+  readonly compactingSince: number | null;
+  readonly compactedAt: number | null;
+  /** The frame's clock for the slot's 3 s window (a test hands it a fake one). */
+  readonly now: number;
+  /**
+   * The dictation strip's view-model (`voice-view.ts`), or null when it draws
+   * nothing. Its rows are INSIDE the input box and counted HERE, once, so the
+   * frame's height never changes while a dictation runs (P8, same rule as the
+   * attach row above it).
+   */
+  readonly voiceStrip?: VoiceStripView | null;
 }
 
 /**
@@ -138,13 +172,16 @@ export function frameLayout(input: FrameInput) {
     subagentsRef,
     jobRows,
     jobRowsRef,
+    scheduleRows,
     drawerRow,
     drawerJob,
     jobOutput: jobOutputMap,
     dockFinished,
     quitConfirm,
+    artifactConfirm,
     panel,
     sessionId,
+    capsPhase,
     field,
     attach,
     skills,
@@ -156,6 +193,10 @@ export function frameLayout(input: FrameInput) {
     daemonQueue,
     loading,
     compacting,
+    compactingSince,
+    compactedAt,
+    now,
+    voiceStrip,
   } = input;
 
   const tokensShown = statusTokens(st);
@@ -166,6 +207,9 @@ export function frameLayout(input: FrameInput) {
   const paletteCommands =
     !permission.pending && !st.running && !panel ? matchCommands(field.value, skills) : [];
   const paletteOpen = paletteCommands.length > 0;
+  // The quit dialog OR the artifact open confirm: one row in the same slot, and
+  // either one owns the screen the same way (the dock and drawer step aside).
+  const confirmShown = quitConfirm !== null || artifactConfirm !== null;
   const commandSel = paletteOpen
     ? Math.min(Math.max(0, commandIndex), paletteCommands.length - 1)
     : 0;
@@ -180,15 +224,38 @@ export function frameLayout(input: FrameInput) {
   // INSIDE the input box and is counted HERE, once — so the viewport shrinks by
   // one and the frame's height never changes (P8).
   const attachRow = attachRowView(attach, Math.max(1, columns - 2));
-  const inputBoxRows = inputContentLines + 2 + attachRowRows(attach, Math.max(1, columns - 2));
-  const listView = panel ? panelView(panel, columns, panelMaxBody(termRows), sessionId) : null;
+  // The dictation strip is the same kind of row: inside the input box, counted
+  // once here, zero rows when it paints nothing.
+  const voiceRows = voiceStrip === null || voiceStrip === undefined ? 0 : VOICE_STRIP_ROWS;
+  const inputBoxRows =
+    inputContentLines + 2 + attachRowRows(attach, Math.max(1, columns - 2)) + voiceRows;
+  const listView = panel
+    ? panelView(panel, columns, panelMaxBody(termRows), sessionId, capsPhase)
+    : null;
+  // The status-line marker while something is off (owner Q2): null otherwise.
+  const capsShown = capsMarker(capsPhase?.kind === "on" ? capsPhase.caps : undefined);
   // Rows above the input/panel while a turn runs: the thinking line + the
   // queued-message lines (each one row: `wrap="truncate-end"`) + the send-now
   // hint row under them + one blank row between the hint and the thinking line.
   // The rows shown: the daemon's list (every writer's) + my rows not acked yet (C7).
   const shown = shownRows(queued, daemonQueue);
+  // The slot's ONE decision (docs/feat/harness-notices.md S3.1): the row above
+  // the input says `loading history`, `Thinking…`/`Working…`, `Compacting…` or
+  // `Compacted ✓`. BOTH the row budget below and `AppView` read THIS view — the
+  // second rule that used to hold ("a row exists while running or loading") is
+  // what left a compaction drawing transcript lines and the frame a row short.
+  const slot = slotView({
+    loading,
+    running: st.running,
+    reasoning: st.reasoning,
+    reasoningStartedAt: st.reasoningStartedAt,
+    turnStartedAt: st.turnStartedAt,
+    compactingSince,
+    compactedAt,
+    now,
+  });
   const runningRows =
-    (st.running || loading ? 1 : 0) +
+    (slot === null ? 0 : 1) +
     (st.running || compacting ? shown.length + (shown.length > 0 ? 1 : 0) : 0) +
     (st.running && shown.length > 0 ? 1 : 0);
   // Rows the bottom area occupies: the permission dialog; or the running rows,
@@ -205,11 +272,12 @@ export function frameLayout(input: FrameInput) {
   // and its row says `⚠ needs your permission` — hiding the list there made that
   // row unreachable (Review M1).
   const dockListVisible =
-    dock.focus.kind === "list" && listVisible(subagents, jobRows) && quitConfirm === null;
+    dock.focus.kind === "list" && listVisible(subagents, jobRows, scheduleRows) && !confirmShown;
   const dockView = dockListVisible
     ? backgroundListView({
         rows: subagentsRef.current,
         jobs: jobRowsRef.current,
+        schedules: scheduleRows ?? [],
         askingId: permission.pendingAgent?.id ?? null,
         focus: dock.focus,
         width: columns,
@@ -218,7 +286,7 @@ export function frameLayout(input: FrameInput) {
     : null;
   // The drawer: a child's (its tools and messages), or a job's (its output tail).
   const drawerOpen =
-    dock.focus.kind === "open" && quitConfirm === null && !permission.pending
+    dock.focus.kind === "open" && !confirmShown && !permission.pending
       ? { id: dock.focus.id, ended: dock.focus.ended }
       : null;
   const jobOutput = drawerOpen === null ? undefined : jobOutputMap[drawerOpen.id];
@@ -263,6 +331,7 @@ export function frameLayout(input: FrameInput) {
   const pill = pillView({
     agents: subagents?.length ?? 0,
     jobs: jobRows?.length ?? 0,
+    schedules: scheduleRows?.length ?? 0,
     askingId: permission.pendingAgent?.id ?? null,
     finished: dockFinished,
     now: dockNow,
@@ -282,20 +351,19 @@ export function frameLayout(input: FrameInput) {
     permission.pending && permission.mode.mode === "reply"
       ? replyView(permission.mode, columns, replyMax)
       : undefined;
-  const activeRows =
-    quitConfirm !== null
-      ? QUIT_CONFIRM_ROWS
-      : permission.pending
-        ? permissionPromptRows(
-            permission.choices.length,
-            permission.pending === null ? 0 : permissionDetailLines(permission.pending).length,
-            permission.pending !== null && permissionShowsCwd(permission.pending),
-            replyShown?.rows.length,
-            permission.pendingAgent !== null,
-          ) + dockHeight
-        : runningRows +
-          (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length) +
-          dockHeight;
+  const activeRows = confirmShown
+    ? QUIT_CONFIRM_ROWS
+    : permission.pending
+      ? permissionPromptRows(
+          permission.choices.length,
+          permission.pending === null ? 0 : permissionDetailLines(permission.pending).length,
+          permission.pending !== null && permissionShowsCwd(permission.pending),
+          replyShown?.rows.length,
+          permission.pendingAgent !== null,
+        ) + dockHeight
+      : runningRows +
+        (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length) +
+        dockHeight;
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
   // Terminal row (1-based) of the panel's first body row: the transcript
   // viewport, the bottom area's marginTop row, the running rows, the title rule.
@@ -311,7 +379,7 @@ export function frameLayout(input: FrameInput) {
    * slot instead, and none of them paints the dock.
    */
   const dockTop =
-    dockHeight === 0 || listView || paletteOpen || quitConfirm !== null || permission.pending
+    dockHeight === 0 || listView || paletteOpen || confirmShown || permission.pending
       ? null
       : viewport + 1 + runningRows + 1;
   /**
@@ -338,9 +406,13 @@ export function frameLayout(input: FrameInput) {
     paletteRows,
     inputContentLines,
     attachRow,
+    voiceStrip,
+    voiceRows,
     inputBoxRows,
     listView,
+    capsShown,
     shown,
+    slot,
     runningRows,
     dockListVisible,
     dockView,
@@ -390,6 +462,8 @@ export type AppViewModel = FrameLayout & {
   readonly expandAll: boolean;
   readonly selection: Selection | null;
   readonly quitConfirm: QuitConfirmFacts | null;
+  /** The artifact open confirm (model-artifacts D8): the quit dialog's slot. */
+  readonly artifactConfirm: ArtifactConfirmView | null;
   /** The hop's own status row (`null`: no hop runs — the normal bar paints). */
   readonly hopRow: string | null;
   readonly loading: { readonly done: number; readonly total: number } | null;

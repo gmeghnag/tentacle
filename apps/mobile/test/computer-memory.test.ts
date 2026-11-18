@@ -139,3 +139,109 @@ describe("forgetComputer", () => {
     expect(a.closed).toEqual([]);
   });
 });
+
+// docs/feat/model-artifacts.md D9 (Review round 2, MEDIUM): the artifacts that
+// came from a computer are not this app's to keep once the record is gone. The
+// bytes may hold workspace content and the feeds carried them, so both belong to
+// the pairing. The two hooks are OPTIONAL on `ComputerMemory`, so only a
+// behavioural pin here stops a later refactor from dropping the calls silently —
+// the store's own tests still pass while nothing calls its `forgetComputer`.
+describe("forgetComputer drops that computer's artifacts (D9)", () => {
+  /** The app's memory, plus recorders for the two artifact hooks. */
+  function withArtifacts(a: ReturnType<typeof app>) {
+    const forgotten: string[] = [];
+    const memory = {
+      ...a.memory,
+      artifactCache: {
+        forgetComputer: (id: string) => {
+          forgotten.push(`cache:${id}`);
+        },
+      },
+      feeds: {
+        forgetComputer: (id: string) => {
+          forgotten.push(`feeds:${id}`);
+        },
+      },
+    };
+    return { forgotten, memory };
+  }
+
+  test("a removed computer's cached bytes and feeds are forgotten, under its id (mutation: drop either call → red)", async () => {
+    const a = app({ id: "c1", deviceKey: "KEY-1" });
+    const { forgotten, memory } = withArtifacts(a);
+
+    await forgetComputer(memory, "c1");
+
+    expect(forgotten).toEqual(["cache:c1", "feeds:c1"]);
+  });
+
+  test("a re-pair forgets them before the caller re-reads the computer (withForgottenRecord)", async () => {
+    const a = app({ id: "c1", deviceKey: "KEY-1" });
+    const { forgotten, memory } = withArtifacts(a);
+
+    await withForgottenRecord(memory, "c1", async () => {
+      forgotten.push("then");
+      return undefined;
+    });
+
+    // Forgotten by the time the next step runs, not merely eventually.
+    expect(forgotten).toEqual(["cache:c1", "feeds:c1", "then"]);
+  });
+
+  test("another computer keeps its artifacts", async () => {
+    const a = app({ id: "c1", deviceKey: "KEY-1" });
+    const { forgotten, memory } = withArtifacts(a);
+
+    await forgetComputer(memory, "c1");
+
+    // Nothing for `c2`: the id passed is the one being forgotten, never "all".
+    expect(forgotten.some((entry) => entry.endsWith(":c2"))).toBe(false);
+  });
+
+  test("a memory without the two hooks is still a no-op (every other caller)", async () => {
+    const a = app({ id: "c1", deviceKey: "KEY-1" });
+    await forgetComputer(a.memory, "c1");
+    expect(a.records.has("c1")).toBe(false);
+  });
+});
+
+// docs/feat/mobile-notifications.md Design 6 / N4: the extension's copy of the
+// paired computers follows every store change.
+describe("the push directory follows the store (N4)", () => {
+  test("withForgottenRecord rewrites it once the record changed, BEFORE the caller re-reads", async () => {
+    // Mutation: drop the hook → the NSE keeps a peer whose pinned key is stale,
+    // so a re-paired computer's pushes render as unverifiable (F9).
+    const store = { id: "c1", deviceKey: "OLD-KEY" };
+    const a = app(store);
+    const steps: string[] = [];
+    const memory = {
+      ...a.memory,
+      pushDirectory: async () => {
+        steps.push("directory");
+        return "written";
+      },
+    };
+    await withForgottenRecord(memory, store.id, async () => {
+      steps.push("then");
+      return undefined;
+    });
+    expect(steps).toEqual(["directory", "then"]);
+  });
+
+  test("a failing rewrite never fails the pairing (the extension then shows placeholders)", async () => {
+    const store = { id: "c1", deviceKey: "OLD-KEY" };
+    const a = app(store);
+    const memory = {
+      ...a.memory,
+      pushDirectory: async () => {
+        throw new Error("keychain locked");
+      },
+    };
+    expect(await withForgottenRecord(memory, store.id, async () => "done")).toBe("done");
+  });
+
+  test("a memory without the hook is unchanged (every other caller)", async () => {
+    const a = app({ id: "c1", deviceKey: "KEY" });
+    expect(await withForgottenRecord(a.memory, "c1", async () => 1)).toBe(1);
+  });
+});

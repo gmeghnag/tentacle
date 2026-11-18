@@ -46,10 +46,12 @@ import type {
   AgentEvent,
   AskHooksTrust,
   BeforeRun,
+  CapabilityOp,
   Session,
+  SessionCapabilities,
   SessionGrants,
 } from "@tentacle/agent";
-import { EMPTY_TITLE, sessionTitle } from "@tentacle/agent";
+import { EMPTY_TITLE, NO_CAPABILITIES, applyCapabilityOp, sessionTitle } from "@tentacle/agent";
 import {
   AGENT_MESSAGE_MAX_CHARS,
   type AgentJob,
@@ -58,24 +60,41 @@ import {
   type ChatMessage,
   DISMISSED,
   type JobController,
+  type MessageMedia,
   type ModelProvider,
   NOTE_KIND,
   type PermissionBroker,
   type PermissionRequest,
   type PermissionRequestOptions,
   type PermissionResponse,
+  SCHEDULE_ID_PREFIX,
+  type ScheduleCreateResult,
+  type ScheduleLimits,
+  type ScheduleLink,
+  type ScheduleRequest,
+  type ScheduledFire,
+  type ScheduledJob,
   type SubagentBackgroundBody,
   type SubagentEndBody,
   anySignal,
   attachmentLabel,
+  autoApproves,
   checkAttachmentRefs,
   daemonWakeGate,
   formatBytes,
+  ownRequest,
+  scheduleCheckDelayMs,
+  scheduleCreate,
+  scheduleDelete,
+  schedulePromptText,
+  scheduleSettled,
+  scheduleStep,
   wakeDue,
 } from "@tentacle/core";
 import {
   type AttachmentRef,
   BLOCKING_UPDATE_TYPES,
+  type CompactResult,
   type HistoryCut,
   type JobOutputResult,
   type JobRow,
@@ -85,6 +104,7 @@ import {
   LOG_PAGE_MAX_CHARS,
   type LogCursor,
   type LogResult,
+  MAX_DISABLED_CAPABILITIES,
   MAX_SESSION_TITLE,
   type PermissionOutcome,
   type PermissionRequestUpdate,
@@ -93,20 +113,26 @@ import {
   type QueueState,
   type QueuedEntry,
   type ReturnedEntry,
+  SCHEDULE_LABEL_MAX,
+  type ScheduleDeleteResult,
+  type ScheduleRow,
   type SendNowMessage,
   type SendNowRefusal,
   type SendNowTarget,
+  type SessionCapabilitiesWire,
   type SessionContextResult,
   type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionTitle,
   type SessionUpdate,
   type SetAutoAcceptResult,
+  type SetCapabilityResult,
   type Sha256,
   type SnapshotResult,
   type SubagentRow,
   type TurnEnd,
   type TurnError,
+  type VoiceTurn,
   WAKE_TURN_PREFIX,
   type WatchCategory,
   type WatchNextResult,
@@ -115,6 +141,7 @@ import {
   watchAccepts,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import { ArtifactBudget, ArtifactStore } from "./artifact-store.ts";
 import { AttachmentStore, UploadBudget } from "./attachment-store.ts";
 import type { ModelLink } from "./connection.ts";
 import { jobRows, sameJobs } from "./jobs-view.ts";
@@ -126,6 +153,7 @@ import {
   stopReasonToProtocol,
   toSessionSkills,
   toUpdateParams,
+  toWireCapabilities,
   wireLine,
 } from "./mapping.ts";
 import { outcomeToResponse, toPermissionRequestUpdate } from "./permission-map.ts";
@@ -142,6 +170,12 @@ import {
 import type { PushAttached } from "./push-rules.ts";
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
+import {
+  sameScheduleRows,
+  scheduleEndOf,
+  scheduleRows,
+  scheduleSeqSeed,
+} from "./schedules-view.ts";
 import { forkableMessages } from "./session-fork.ts";
 import type { ImagePolicy, WorkloadShellsLike } from "./session-host.ts";
 import type { SessionSummary } from "./session-list.ts";
@@ -231,6 +265,16 @@ export interface Attachment {
 interface PendingAsk {
   /** The request as it was streamed: what a fresh watcher's `state.pending` repeats. */
   readonly update: PermissionRequestUpdate;
+  /**
+   * The request the ask was raised FOR, laptop-side (`autoAnswers` reads its
+   * `kind`/`hopAuto`, which the wire update does not carry).
+   */
+  readonly req: PermissionRequest;
+  /**
+   * The turn it was raised in (`this.activeTurnId`, or a background child's
+   * spawning turn): what auto-accept's own-turn test reads, at answer time.
+   */
+  readonly turnId?: string;
   readonly offered: ReadonlySet<string>;
   /**
    * The options a reply may come with (the `reject_*` kinds), when the ask
@@ -282,6 +326,8 @@ interface Cut {
   readonly subagents: readonly SubagentRow[];
   /** The running background SHELL jobs as of the cut: the last `jobs` list emitted. */
   readonly jobs: readonly JobRow[];
+  /** The scheduled wakes as of the cut: the last `schedules` list emitted (docs/feat/cron-tool.md D5). */
+  readonly schedules: readonly ScheduleRow[];
 }
 
 /**
@@ -315,6 +361,20 @@ export interface RestoredSessionState {
    * nothing is answered until a device attaches). Absent → off.
    */
   readonly autoAccept?: boolean;
+  /**
+   * The scheduled wakes at the restart or the reopen (`DaemonSessionRecord.schedules`,
+   * docs/feat/cron-tool.md D6): re-armed at once, so an overdue one fires ONCE
+   * at the first idle check (catch-up, D3). Absent → none.
+   */
+  readonly schedules?: readonly ScheduledJob[];
+  /** When the session was pinned (`DaemonSessionRecord.pinnedAt`): a restart and a reopen keep it. */
+  readonly pinnedAt?: number;
+  /**
+   * The session's MCP/skill switches at the restart, from its log's last
+   * `capabilities` entry (`DaemonSessionRecord.capabilities`,
+   * docs/feat/session-capabilities.md S3b). Absent → everything on.
+   */
+  readonly capabilities?: SessionCapabilities;
   /**
    * The record's installed head (`DaemonSessionRecord.head`: its index in the
    * reloaded history): the summary again, cut short or not. Absent: none.
@@ -373,6 +433,35 @@ export interface SessionWake {
 }
 
 /**
+ * `serve` and the in-process worker only (docs/feat/cron-tool.md D1): the
+ * session keeps the agent's scheduled wakes and fires each through `prompt()`
+ * under a `wake-` id when it is due and the slot is free. Present = on; absent
+ * on a pod daemon — no table, no link, so its factory never offers the tools
+ * (a pod must not decide when turns start on the laptop's model key, AGENTS §7).
+ */
+export interface SessionSchedules {
+  /** One line per fire and per job the session drops on its own (ids only — never a prompt). */
+  readonly onAudit?: (line: string) => void;
+  /**
+   * The HOST's own create limits (its `schedules.*` config, never carried —
+   * docs/feat/cron-tool.md D3, owner Q6). Absent = `DEFAULT_SCHEDULE_LIMITS`.
+   */
+  readonly limits?: ScheduleLimits;
+  /** The ONE timer's clock (tests inject it; default the globals). */
+  readonly setTimeout?: (fn: () => void, ms: number) => unknown;
+  readonly clearTimeout?: (handle: unknown) => void;
+}
+
+/** `unref`'d: a schedule never keeps a process alive on its own (the worker quits with its TUI). */
+const defaultSetTimeout = (fn: () => void, ms: number): unknown => {
+  const handle = setTimeout(fn, ms);
+  (handle as { unref?: () => void }).unref?.();
+  return handle;
+};
+const defaultClearTimeout = (handle: unknown): void =>
+  clearTimeout(handle as ReturnType<typeof setTimeout>);
+
+/**
  * The updates a push observer is given: exactly the four whose timing the push
  * rules decide on (docs/feat/mobile-push.md Design 1). Nothing else reaches it —
  * a `token`/`subagent_message`/`history_replaced` is not a notification.
@@ -382,7 +471,15 @@ export type PushWatchedUpdate =
   | UpdateOf<"permission_request">
   | UpdateOf<"permission_resolved">
   | UpdateOf<"turn_end">
-  | UpdateOf<"session_closed">;
+  | UpdateOf<"session_closed">
+  // Task 18's Live Activity needs three more (docs/feat/mobile-live-activity.md
+  // L7): a turn's start (the elapsed timer's origin and the 20 s threshold), each
+  // tool call (the current tool), and the title. Still display-class kinds only:
+  // a `tool_call_update` (high frequency, and its result rides `tool_call`) is
+  // deliberately NOT watched.
+  | UpdateOf<"turn_start">
+  | UpdateOf<"tool_call">
+  | UpdateOf<"session_title">;
 
 /**
  * What a push observer is told, when (`PushEvent` in `push-rules.ts` is the
@@ -429,10 +526,31 @@ export interface TurnErrorPolicy {
   readonly exposeTurnErrors?: boolean;
   /** Receives every turn failure, unredacted — never silent. */
   readonly onTurnError?: (error: Error) => void;
+  /**
+   * A TRUST bit: this daemon itself answers an auto-accepted ask
+   * (docs/fix/serve-autoaccept-unattended.md). Only `startDaemon` (the user's
+   * own host) sets it. It rides this bag because it must be known at
+   * CONSTRUCTION (a reload's resumed turn re-asks inside the constructor), and
+   * the policy bag is the constructor input every host already passes.
+   * Absent (a pod daemon, the worker, the relay, a hand-built session) →
+   * `false`: nobody answers on its own there.
+   */
+  readonly answersAutoAccept?: boolean;
 }
 
 /** The most of a failed turn's message the wire carries (it may be an upstream body). */
 export const TURN_ERROR_MAX = 400;
+
+/** A state from outside (a client's seed, a reloaded log entry): sorted and de-duplicated, like every applied op. */
+function normalizeCapabilities(state: SessionCapabilities): SessionCapabilities {
+  const norm = (names: readonly string[]) => [...new Set(names)].sort();
+  return { disabledMcp: norm(state.disabledMcp), disabledSkills: norm(state.disabledSkills) };
+}
+
+/** Something is turned off (else the state is the default, and the log says nothing). */
+function hasDisabled(state: SessionCapabilities): boolean {
+  return state.disabledMcp.length > 0 || state.disabledSkills.length > 0;
+}
 
 /** One line: every whitespace run and control character becomes a single space, and
  * the bidi/zero-width controls that could reorder or hide what follows are dropped. */
@@ -519,6 +637,12 @@ export class HostedSession {
    * detached-then-reattached client resumes where it stopped.
    */
   readonly uploads: AttachmentStore;
+  /**
+   * What `present` showed the user in this session (docs/feat/model-artifacts.md
+   * D4): `artifact/list` / `artifact/read` serve it. The SESSION's, like
+   * `uploads`, so a re-attach or a settings sync keeps it.
+   */
+  readonly artifacts: ArtifactStore;
   /** What the factory did with `session/open.settings`; told to whoever attaches. */
   settingsReport: SessionSettingsReport | undefined;
   /**
@@ -551,6 +675,19 @@ export class HostedSession {
    * Off at creation unless `session/open{autoAccept}` seeded it.
    */
   autoAccept = false;
+  /**
+   * When the session was pinned (`session/pin`, docs/feat/mobile-session-actions.md);
+   * undefined = not pinned. List metadata: never the conversation, never `lastChangeAt`.
+   */
+  pinnedAt: number | undefined;
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md): what
+   * the model is NOT offered. Held here, not only on the agent, because a
+   * settings sync builds a fresh agent (everything on) and `swapAgent`
+   * re-applies it. Everything on at creation unless `session/open{capabilities}`
+   * seeded it (`seedCapabilities`).
+   */
+  private caps: SessionCapabilities = NO_CAPABILITIES;
   private readonly session: Session;
   /** The factory's broker: its requester is this session's (installed once, below). */
   private readonly permissions: PermissionBroker;
@@ -568,6 +705,8 @@ export class HostedSession {
   private readonly sendNowTurns = new Set<string>();
   /** Every accepted `enqueue` id, for its lifetime (retries). */
   private readonly enqueued = new Set<string>();
+  /** Ids `unqueue` took back (memory only): a retry answers `removed` again. */
+  private readonly unqueued = new Set<string>();
   /**
    * The agent's steering queue, mirrored in order with each text's enqueue id
    * (a resumed turn's restored steer: its record's id, or one minted at the
@@ -603,7 +742,22 @@ export class HostedSession {
    * for a reload.
    */
   private compactionSummary: ChatMessage | undefined;
+  /**
+   * The main agent's last measured prompt tokens (its `usage` events; a
+   * sub-agent's are `subagent_usage`, never here): a compaction's "before"
+   * (docs/feat/harness-notices.md S1). Dropped at every history replacement —
+   * it described a history that is gone. Memory only.
+   */
+  private lastPromptTokens: number | undefined;
   private readonly errorPolicy: TurnErrorPolicy;
+  /**
+   * A TRUST bit (docs/fix/serve-autoaccept-unattended.md D1): this daemon
+   * answers an auto-accepted ask itself, so a `serve` session keeps running
+   * with nobody attached. Only `startDaemon` (the user's own host) sets it —
+   * never a pod daemon, the worker or the relay (AGENTS §7). Read at answer
+   * time, beside the session's live `autoAccept`.
+   */
+  private readonly answersAutoAccept: boolean;
   /**
    * A resumed turn's pending entries from the record, each until its call is
    * asked again (an ask for the same call replaces it) or answered without a
@@ -711,6 +865,22 @@ export class HostedSession {
    * client must not wake for them too).
    */
   private wakeUnflushed: string | null = null;
+  /** The scheduled wakes (`SessionSchedules`); absent = this runtime never schedules. */
+  private readonly scheduling: SessionSchedules | undefined;
+  /**
+   * The table (docs/feat/cron-tool.md D3): SESSION state, here and not on the
+   * agent, so a settings sync (which rebuilds the agent) keeps it, and `/clear`
+   * keeps it (owner Q7). Replaced, never mutated (the core rules return a new one).
+   */
+  private scheduleTable: readonly ScheduledJob[] = [];
+  /** The last `sc-N` handed out: ids are never reused in a session (D2). */
+  private scheduleSeq = 0;
+  /** The ONE schedule timer (a check at the next slot, ≤ 60 s; 0 after a turn's end). */
+  private scheduleTimer: unknown = null;
+  /** The last `schedules` list emitted (or the initial one): what the cut records. */
+  private lastSchedules: readonly ScheduleRow[] = [];
+  /** The fired turns that have not ended, by turnId → the job that fired each (its failure budget). */
+  private readonly firedTurns = new Map<string, string>();
   /** The committed history as a typed log (`session/log`), derived at the cut's own points. */
   private readonly log: SessionLog;
   private readonly logSha256: Sha256;
@@ -736,11 +906,15 @@ export class HostedSession {
     logOptions: SessionLogOptions = {},
     agentRuntime?: AgentJobs,
     uploads: AttachmentStore = new AttachmentStore(new UploadBudget()),
+    artifacts: ArtifactStore = new ArtifactStore(new ArtifactBudget()),
+    schedules?: SessionSchedules,
   ) {
     this.id = id;
     this.uploads = uploads;
+    this.artifacts = artifacts;
     this.now = now;
     this.wake = wake;
+    this.scheduling = schedules;
     const restored = persistence?.restored;
     this.persister = persistence?.persister ?? null;
     this.keepFork = persistence?.keepFork ?? null;
@@ -775,10 +949,18 @@ export class HostedSession {
     // `started in background as sa-N` result, a note) is never handed out again.
     this.agentJobs = AgentJobLedger.fromHistory(session.messages);
     this.errorPolicy = errorPolicy;
+    this.answersAutoAccept = errorPolicy.answersAutoAccept === true;
     this.ring = new SessionRing(ringBytes);
     this.watchers = new SessionWatchers(now);
     const resume = restored?.resume;
     this.autoAccept = restored?.autoAccept === true;
+    this.pinnedAt = restored?.pinnedAt;
+    // The switches a restart reloads (before the log's first segment, which
+    // states them again: `logSegmentFacts`).
+    if (restored?.capabilities !== undefined) {
+      this.caps = normalizeCapabilities(restored.capabilities);
+      session.currentAgent().setCapabilities(this.caps);
+    }
     // A fresh epoch per incarnation (decision D1): a `since` from a previous
     // session under the same id never matches. The seed (resume) is covered.
     // A resumed turn is running AT the cut: its prompt is already in the
@@ -794,7 +976,16 @@ export class HostedSession {
       // A session is built with an EMPTY registry (a `serve` reload starts with
       // no jobs), and every later job announces itself through `onStart`.
       jobs: [],
+      schedules: [],
     };
+    // The scheduled wakes a restart or a reopen brings back (D6), with the
+    // counter seeded from them and the history: no id the model saw is reused.
+    this.scheduleTable = restored?.schedules ?? [];
+    this.scheduleSeq = scheduleSeqSeed(session.messages, this.scheduleTable);
+    this.lastSchedules = scheduleRows(this.scheduleTable);
+    this.cut = { ...this.cut, schedules: this.lastSchedules };
+    // Re-armed at once: an overdue one fires at the first idle check (catch-up ONCE).
+    this.armSchedules();
     // The log's first segment: this incarnation's history at the cut (a
     // reload's after its repair; a resumed turn is open at it).
     this.logSha256 = logOptions.sha256 ?? nodeSha256;
@@ -916,7 +1107,7 @@ export class HostedSession {
         // A v4 record kept the id (its writer still knows it); an older one
         // did not: minted, nobody's. Queued again, so not in the history.
         const id = resume.steeringIds?.[i] ?? crypto.randomUUID();
-        session.enqueue(text);
+        session.enqueue(text, undefined, id);
         this.queue.push({ id, text });
         this.restoredIds.delete(id);
       });
@@ -983,8 +1174,16 @@ export class HostedSession {
     // A blocking update only to a session one of whose clients can answer it
     // (docs/feat/protocol-v10-forward-compat.md): otherwise refuse at once,
     // with the reason the model sees — never suspend on a client that cannot
-    // show it. Nobody attached: unchanged (held for a client to attach).
-    const unsupported = this.blockingUnsupported("permission_request");
+    // show it. Nobody attached: unchanged (held for a client to attach). An
+    // ask the DAEMON will answer needs no client at all, so it is never
+    // refused that way (docs/fix/serve-autoaccept-unattended.md OD5) — at raise
+    // (here) and, since `autoAccept` can move while the ask's write is in
+    // flight, AGAIN when it is shown (the `persisted().then` below: fix round 1,
+    // R1). Deciding only here left an ask shown to a client that cannot display
+    // it and this host no longer answers, waiting forever.
+    const unsupported = this.autoAnswers(req, this.activeTurnId ?? undefined)
+      ? undefined
+      : this.blockingUnsupported("permission_request");
     if (unsupported !== undefined) {
       return Promise.resolve({ allowed: false, reason: unsupported });
     }
@@ -1011,7 +1210,14 @@ export class HostedSession {
       requestedAt: this.now(),
       ...(groupStart !== undefined ? { groupStart } : {}),
     };
-    const decided = this.registerAsk(requestId, update, record, settleOn);
+    const decided = this.registerAsk(
+      requestId,
+      update,
+      record,
+      settleOn,
+      req,
+      this.activeTurnId ?? undefined,
+    );
     // The resumed call asked again: its live ask replaces the record's entry.
     if (toolCallId !== undefined) {
       this.carried = this.carried.filter((p) => p.toolCallId !== toolCallId);
@@ -1025,12 +1231,25 @@ export class HostedSession {
       if (!ask) {
         return;
       }
+      // The OD5 skip is decided AGAIN here, not only at raise: `autoAccept` can
+      // move while this ask's write is in flight, and the refusal must follow
+      // the value the ANSWER will read (`autoAnswers`, in `autoAnswer` below).
+      // Otherwise the ask is shown to a client that cannot display it — and this
+      // host no longer answers it — so it waits forever (fix round 1, R1).
+      if (!this.autoAnswers(ask.req, ask.turnId)) {
+        const reason = this.blockingUnsupported("permission_request");
+        if (reason !== undefined) {
+          this.settle(requestId, { outcome: "cancelled" }, reason);
+          return;
+        }
+      }
       ask.shown = true;
       try {
         this.emit(update);
       } catch (error) {
         this.reportTurnError(error);
       }
+      this.autoAnswer(requestId);
     });
     return decided.then(async ({ outcome, reason, message }) => {
       // `settle` already took this ask out of `asks`: write the record without
@@ -1077,12 +1296,16 @@ export class HostedSession {
     update: PermissionRequestUpdate,
     record: PendingPermission | null,
     signal: AbortSignal,
+    req: PermissionRequest,
+    turnId: string | undefined,
     reoffer?: PermissionRequestUpdate,
   ): Promise<{ outcome: PermissionOutcome; reason?: string; message?: string }> {
     return new Promise((resolve) => {
       const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
       this.asks.set(requestId, {
         update,
+        req,
+        ...(turnId !== undefined ? { turnId } : {}),
         offered: new Set(update.options.map((o) => o.optionId)),
         replyable: new Set(
           update.reply
@@ -1123,19 +1346,21 @@ export class HostedSession {
     if (this.closed || !signal || signal.aborted) {
       return Promise.resolve(outcomeToResponse({ outcome: "cancelled" }));
     }
-    const unsupported = this.blockingUnsupported("permission_request");
+    const requestId = crypto.randomUUID();
+    const spawnTurn = this.spawnTurns.get(agentId);
+    const unsupported = this.autoAnswers(req, spawnTurn)
+      ? undefined
+      : this.blockingUnsupported("permission_request");
     if (unsupported !== undefined) {
       return Promise.resolve({ allowed: false, reason: unsupported });
     }
-    const requestId = crypto.randomUUID();
-    const spawnTurn = this.spawnTurns.get(agentId);
     const asked = this.askedOn();
     const update: PermissionRequestUpdate = {
       ...toPermissionRequestUpdate(requestId, options.toolCallId || "pending", req, options.agent),
       ...(spawnTurn !== undefined ? { turnId: spawnTurn } : {}),
       ...(asked !== undefined ? { askedOn: asked } : {}),
     };
-    const decided = this.registerAsk(requestId, update, null, signal, update);
+    const decided = this.registerAsk(requestId, update, null, signal, req, spawnTurn, update);
     const ask = this.asks.get(requestId);
     if (ask) {
       ask.shown = true;
@@ -1145,6 +1370,7 @@ export class HostedSession {
     } catch (error) {
       this.reportTurnError(error);
     }
+    this.autoAnswer(requestId);
     return decided.then(({ outcome, reason, message }) => {
       if (reason !== undefined) {
         return { allowed: false, reason };
@@ -1220,8 +1446,55 @@ export class HostedSession {
       return;
     }
     for (const requestId of [...this.asks.keys()]) {
+      // An ask this host ANSWERS itself needs no client: `blockingUnsupported`
+      // is asked about the set, not about that one ask (docs/fix/
+      // serve-autoaccept-unattended.md OD5).
+      const ask = this.asks.get(requestId);
+      if (ask && this.autoAnswers(ask.req, ask.turnId)) continue;
       this.settle(requestId, { outcome: "cancelled" }, reason);
     }
+  }
+
+  /**
+   * The daemon answers this ask itself (docs/fix/serve-autoaccept-unattended.md
+   * D2): a trusted host (`answersAutoAccept`), the session's auto-accept ON,
+   * and the SAME rule a client's auto-accept applies. Every turn of the session
+   * is "own" on a trusted daemon (session-auto-accept Q2: the widest test
+   * counts, so a wake turn is answered too — docs/fix/autoaccept-wake-turns.md),
+   * and a request with NO turn is not known to be the session's (`ownRequest`),
+   * so a background child's ask without a spawn turn waits. Re-evaluated
+   * against the LIVE `this.autoAccept`, never cached (the toggle sweep, D4).
+   */
+  private autoAnswers(req: PermissionRequest, turnId: string | undefined): boolean {
+    return (
+      this.answersAutoAccept &&
+      this.autoAccept &&
+      autoApproves(
+        req,
+        ownRequest(turnId, () => true),
+      )
+    );
+  }
+
+  /**
+   * Answer `requestId` as the computer, when this host may and the session's
+   * auto-accept says so: `allow_once` — never a lasting rule (D3) — through
+   * `resolvePermission`, so the answer is REMEMBERED and a client's identical
+   * one stays the no-op success of `SettledAnswers`. Only an ask already SHOWN
+   * is answered (a cancel between the record's write and the emit leaves none),
+   * so every attached client sees the same request/resolved pair a client's own
+   * auto-answer produces. Synchronous (AGENTS §7): `resolvePermission` settles
+   * end to end in this tick.
+   */
+  private autoAnswer(requestId: string): void {
+    const ask = this.asks.get(requestId);
+    if (!ask || !ask.shown || !ask.offered.has("allow_once")) {
+      return;
+    }
+    if (!this.autoAnswers(ask.req, ask.turnId)) {
+      return;
+    }
+    this.resolvePermission(requestId, "allow_once");
   }
 
   /**
@@ -1410,6 +1683,9 @@ export class HostedSession {
       returned: this.returned.map((r) => ({ ...r })),
       ...(head >= 0 ? { head } : {}),
       autoAccept: this.autoAccept,
+      ...(this.pinnedAt !== undefined ? { pinnedAt: this.pinnedAt } : {}),
+      // The table as of NOW (D6): written only when non-empty (the sidecar's v3).
+      ...(this.scheduleTable.length > 0 ? { schedules: [...this.scheduleTable] } : {}),
       ...(withLog ? { log: this.logCapture(after) } : {}),
       // From the mirror (= the agent's queue in every stretch, the module's
       // load-bearing assumption), so texts and ids never disagree.
@@ -1594,6 +1870,66 @@ export class HostedSession {
     this.publishQueue();
   }
 
+  /**
+   * `session/unqueue` (docs/feat/queue-unqueue.md): take rows back before the
+   * model reads them. Synchronous, like `enqueue`, so it lands strictly before
+   * or after a drain's `splice(0)`. "Not read" is asked of the AGENT's array,
+   * never of the mirror: the mirror is shifted only when a `steer` reaches
+   * `drive`, so it can still hold a row already drained. Per id: a reserved
+   * send-now's steer, an undrained row, or a returned row (Q3) → removed;
+   * anything else (drained, a send-now's own message, unknown) → delivered.
+   * On disk (a capture), then streamed — only when something left.
+   */
+  unqueue(ids: readonly string[]): { removed: string[]; delivered: string[] } {
+    const removed: string[] = [];
+    const delivered: string[] = [];
+    let changed = false;
+    const next = this.successor;
+    for (const id of ids) {
+      // A reserved send-now's own message is its prompt, even when it is
+      // still a queued row too: `startSuccessor` sends `next.messages`.
+      if (next?.messages.some((m) => m.id === id)) {
+        delivered.push(id);
+        continue;
+      }
+      if (this.unqueued.has(id)) {
+        removed.push(id);
+        continue;
+      }
+      let gone = false;
+      const at = next === null ? -1 : next.steers.findIndex((s) => s.id === id);
+      if (next !== null && at >= 0) {
+        next.steers.splice(at, 1);
+        // A retried enqueue of it stays a no-op: it never comes back.
+        this.enqueued.add(id);
+        gone = true;
+      }
+      if (this.session.unqueue(id)) {
+        // An undrained row sits behind every drained one: dropping it by id
+        // keeps the head-shift pairing on `steer` right for the others.
+        this.queue = this.queue.filter((r) => r.id !== id);
+        gone = true;
+      }
+      const kept = this.returned.filter((r) => r.id !== id);
+      if (kept.length !== this.returned.length) {
+        this.returned = kept;
+        gone = true;
+      }
+      if (gone) {
+        this.unqueued.add(id);
+        removed.push(id);
+        changed = true;
+      } else {
+        delivered.push(id);
+      }
+    }
+    if (changed) {
+      this.persist();
+      this.publishQueue();
+    }
+    return { removed, delivered };
+  }
+
   /** A turn or a compaction is active. */
   get running(): boolean {
     return this.controller !== null;
@@ -1636,6 +1972,9 @@ export class HostedSession {
       jobs:
         (this.jobs?.list().filter((job) => job.status === "running").length ?? 0) +
         (this.agentRuntime?.list().length ?? 0),
+      // A count, only where the session schedules (docs/feat/cron-tool.md D5).
+      ...(this.scheduling ? { schedules: this.scheduleTable.length } : {}),
+      ...(this.pinnedAt !== undefined ? { pinnedAt: this.pinnedAt } : {}),
     };
   }
 
@@ -1646,7 +1985,13 @@ export class HostedSession {
       attached: this.attachments.size,
       // A running background sub-agent keeps the session busy (shell jobs do not:
       // a forgotten dev server is what the TTL frees). docs/feat/subagent-background.md H2.
-      busy: this.running || (this.agentRuntime?.list().length ?? 0) > 0,
+      // An ARMED scheduled wake too (owner Q5, docs/feat/cron-tool.md D7): a daily
+      // reminder must not be archived after a day of silence. Bounded by its
+      // 7-day expiry; the admin cap still applies (it ignores `busy`).
+      busy:
+        this.running ||
+        (this.agentRuntime?.list().length ?? 0) > 0 ||
+        (this.scheduling !== undefined && this.scheduleTable.length > 0),
       lastActiveAt: this.lastActiveAt,
       lastDetachAt: this.lastDetachAt,
     };
@@ -1768,6 +2113,9 @@ export class HostedSession {
     const messages = this.session.messages.slice(start, end) as SnapshotResult["messages"];
     return {
       messages,
+      // In step with `messages` by construction (`timesOf` is that same committed
+      // prefix), so a client may pair them by index (docs/fix/mobile-open-at-end.md).
+      times: this.log.timesOf(start, end),
       ...(cursor === undefined ? { since: { epoch: cut.epoch, seq: cut.seq } } : {}),
       ...(cursor === undefined && cut.turnId !== null ? { turn: { turnId: cut.turnId } } : {}),
       ...(start > 0 ? { cursor: `${cut.epoch}/${start}` } : {}),
@@ -1776,6 +2124,8 @@ export class HostedSession {
       ...(cursor === undefined ? { queued: cut.queued } : {}),
       ...(cursor === undefined ? { subagents: [...cut.subagents] } : {}),
       ...(cursor === undefined ? { jobs: [...cut.jobs] } : {}),
+      // Only where the session schedules (a pod daemon sends none, D5).
+      ...(cursor === undefined && this.scheduling ? { schedules: [...cut.schedules] } : {}),
     };
   }
 
@@ -1817,6 +2167,7 @@ export class HostedSession {
       queued: this.lastQueued,
       subagents: this.lastSubagents,
       jobs: this.lastJobs,
+      schedules: this.lastSchedules,
     };
     this.ring.evict(this.seq);
     // The committed prefix moved: its changes join the log (pointer compares only).
@@ -1843,6 +2194,12 @@ export class HostedSession {
    */
   private logSegmentFacts(): void {
     this.log.title(this.wireTitle());
+    // The switches too, when something is off (docs/feat/session-capabilities.md
+    // F12): a segment is self-contained even when the older ones are dropped.
+    // Everything on logs nothing — the fold's default.
+    if (hasDisabled(this.caps)) {
+      this.log.capabilities(this.caps);
+    }
     for (const fact of this.agentJobs.segmentFacts()) {
       if ("stopReason" in fact) {
         this.log.subagentEnd(fact);
@@ -2119,7 +2476,13 @@ export class HostedSession {
       update.type !== "permission_request" &&
       update.type !== "permission_resolved" &&
       update.type !== "turn_end" &&
-      update.type !== "session_closed"
+      update.type !== "session_closed" &&
+      // Task 18 (L7): the Live Activity's three extra kinds. Widening this filter
+      // is the WHOLE daemon change this task makes here — the observer stays out
+      // of `attachments`, stays synchronous, and is still never awaited.
+      update.type !== "turn_start" &&
+      update.type !== "tool_call" &&
+      update.type !== "session_title"
     ) {
       return;
     }
@@ -2172,7 +2535,9 @@ export class HostedSession {
    * shares the scan). Rejects when the scan does: nothing changes.
    */
   async skills(): Promise<SessionSkillsResult> {
-    return toSessionSkills(await this.session.refreshSkills());
+    const listing = await this.session.refreshSkills();
+    // Read after the scan: a toggle that landed during it is reported.
+    return toSessionSkills(listing, this.caps.disabledSkills);
   }
 
   /**
@@ -2235,6 +2600,19 @@ export class HostedSession {
   }
 
   /**
+   * The answer to a `turnId` this session already accepted (running or ended),
+   * else undefined. `prompt`'s dedupe — exposed so a caller with slow work
+   * before `prompt` (attached documents) answers a retry without redoing it.
+   */
+  knownTurn(turnId: string): PromptResult | undefined {
+    const known = this.turns.get(turnId);
+    if (!known) {
+      return undefined;
+    }
+    return known.end ? { turnId, ended: known.end } : { turnId };
+  }
+
+  /**
    * Accept a turn and ack at once; the turn itself runs in `drive` and ends
    * with a `turn_end` update. Synchronous up to the ack ON PURPOSE: two prompts
    * arriving together must see the first one's controller (an `await` before it
@@ -2249,11 +2627,19 @@ export class HostedSession {
     content: readonly PromptContentBlock[],
     skill?: string,
     askHooksTrust?: AskHooksTrust,
+    voice?: VoiceTurn,
+    /**
+     * The scheduled wake that fires this turn, stamped (`fireSchedule` only):
+     * display data for `turn_start` AND the user message it stores.
+     */
+    schedule?: ScheduledFire,
+    /** Attached documents' chips (`resolvePromptDocuments`); their text is already in `content`. */
+    media?: readonly MessageMedia[],
   ): PromptResult {
     // The key first: a retry is answered even while a turn runs, or after it ended.
-    const known = this.turns.get(turnId);
+    const known = this.knownTurn(turnId);
     if (known) {
-      return known.end ? { turnId, ended: known.end } : { turnId };
+      return known;
     }
     // Before the busy check: a rejected prompt starts and records nothing.
     const { text, refs } = splitPrompt(content);
@@ -2287,6 +2673,8 @@ export class HostedSession {
         // Another client's rows (docs/feat/attachments-tui.md D2): the refs the
         // prompt named, absent for a text-only turn (never `[]`).
         ...(refs.length > 0 ? { attachments: refs } : {}),
+        // A fired scheduled wake (D5, owner Q9 = B): the client styles the row.
+        ...(schedule !== undefined ? { schedule } : {}),
       });
     } catch (error) {
       // The turn is accepted (state above): a throwing sink must not strand it
@@ -2301,7 +2689,10 @@ export class HostedSession {
       this.session.send(text, controller.signal, {
         ...(skill !== undefined ? { skill } : {}),
         ...(refs.length > 0 ? { attachments: refs } : {}),
+        ...(media !== undefined && media.length > 0 ? { media } : {}),
+        ...(schedule !== undefined ? { scheduled: schedule } : {}),
         ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
+        ...(voice !== undefined ? { voice } : {}),
         beforeRun: this.beforeRunFn,
       }),
       controller,
@@ -2488,6 +2879,7 @@ export class HostedSession {
       next.turnId,
       this.session.send(prompt, controller.signal, {
         steering: seed,
+        steeringIds: seedRows.map((r) => r.id),
         ...(next.askHooksTrust !== undefined ? { askHooksTrust: next.askHooksTrust } : {}),
         beforeRun: this.beforeRunFn,
       }),
@@ -2548,6 +2940,8 @@ export class HostedSession {
       readonly id: string;
     },
   ): void {
+    // A fresh agent starts with everything on: the session's switches carry over.
+    next.setCapabilities(this.caps);
     const previous = this.session.replaceAgent(next);
     // The system head was replaced IN PLACE behind the cut (same length): the
     // one change no cut follows — derived here, or the log would miss it.
@@ -2580,8 +2974,96 @@ export class HostedSession {
       this.autoAccept = on;
       this.persist();
       this.emit({ type: "auto_accept", on, ...(by ? { by } : {}) });
+      // Switched ON with asks already pending: answer them now, as the computer
+      // (docs/fix/serve-autoaccept-unattended.md D4) — after the `auto_accept`
+      // emit, so every client sees the switch before the answers it causes. An
+      // ask not shown yet is answered by its own `autoAnswer` once it is
+      // (`autoAnswers` reads the live value). An ask a client wins in this same
+      // tick leaves none here and its own answer stands (first wins).
+      if (on) {
+        for (const requestId of [...this.asks.keys()]) {
+          this.autoAnswer(requestId);
+        }
+      }
     }
     return { on: this.autoAccept };
+  }
+
+  /**
+   * `session/pin` of this live session (a set; the cap is `SessionHost.pin`'s):
+   * stamped when it becomes pinned, cleared when unpinned, persisted only when
+   * it CHANGED (`serve`: the sidecar). Moves no `lastChangeAt` and emits
+   * nothing (list metadata, docs/feat/mobile-session-actions.md). Synchronous.
+   */
+  setPinned(on: boolean): boolean {
+    this.assertKnown();
+    if ((this.pinnedAt !== undefined) !== on) {
+      this.pinnedAt = on ? this.now() : undefined;
+      this.persist();
+    }
+    return this.pinnedAt !== undefined;
+  }
+
+  /** The session's switches now: the `OpenResult.capabilities` snapshot (F5). */
+  capabilities(): SessionCapabilitiesWire {
+    return toWireCapabilities(this.caps);
+  }
+
+  /**
+   * The switches of a session this open CREATED (`session/open{capabilities}`,
+   * exactly like `autoAccept`): applied to the agent before its first turn, no
+   * emit (no client is attached yet that has not read the snapshot).
+   */
+  seedCapabilities(seed: SessionCapabilities): void {
+    // Client-supplied: kept sorted and de-duplicated, like every applied op.
+    const state = normalizeCapabilities(seed);
+    this.caps = state;
+    this.session.currentAgent().setCapabilities(state);
+    // Recorded (S3b): the first segment was logged before the seed, so the
+    // carried state (a resume, a fork, a hop) follows it. Everything on: nothing.
+    if (hasDisabled(state)) {
+      this.log.capabilities(state);
+      // The create's first write was captured before this entry (`serve`):
+      // another one, or it lands only with the next change.
+      this.persist();
+    }
+  }
+
+  /**
+   * `session/set_capability` (docs/feat/session-capabilities.md): apply ONE
+   * delta to the session's switches, hand the result to the agent (from its
+   * next model call; a round in flight keeps its snapshot, F1/F2), and tell
+   * every attachment if it CHANGED. Idempotent: a set to the current value
+   * returns without an emit. Synchronous, no lock (AGENTS §7): two deltas are
+   * applied and emitted in one total order, so different items both land and
+   * every client converges on the last echo (F4). A new name past
+   * `MAX_DISABLED_CAPABILITIES` in its set is `InvalidParams` (F10).
+   */
+  setCapability(op: CapabilityOp, by?: string): SetCapabilityResult {
+    this.assertKnown();
+    const next = applyCapabilityOp(this.caps, op);
+    if (next !== this.caps) {
+      const set = op.kind === "mcp" ? next.disabledMcp : next.disabledSkills;
+      if (set.length > MAX_DISABLED_CAPABILITIES) {
+        throw new RpcError(
+          JsonRpcErrorCode.InvalidParams,
+          `at most ${MAX_DISABLED_CAPABILITIES} ${op.kind} names may be turned off`,
+        );
+      }
+      this.caps = next;
+      this.session.currentAgent().setCapabilities(next);
+      // The record is the log (S3b): the whole state after, then a write
+      // (`serve`; a no-op elsewhere). A crash before it lands loses this one
+      // change, and the reload says what it has (F6).
+      this.log.capabilities(next);
+      this.persist();
+      this.emit({
+        type: "capabilities",
+        capabilities: toWireCapabilities(next),
+        ...(by ? { by } : {}),
+      });
+    }
+    return { capabilities: toWireCapabilities(this.caps) };
   }
 
   /**
@@ -2682,6 +3164,29 @@ export class HostedSession {
         if (event.type === "tool_phase" && event.phase === "running") {
           this.log.callStarted(event.id);
         }
+        // One model round's spend, as the provider measured it
+        // (docs/feat/token-usage-log.md): a NON-critical log entry that projects
+        // nothing, so it rides the next committed boundary's capture like any
+        // other. No entry at all when the provider reported no usage.
+        if (event.type === "usage") {
+          // Providers default a missing prompt count to 0: that is unmeasured,
+          // never a size (nor a reason to keep an older round's figure).
+          this.lastPromptTokens =
+            event.usage.promptTokens > 0 ? event.usage.promptTokens : undefined;
+          const model = this.mainModelId();
+          this.log.usage({
+            turnId,
+            ...(event.round !== undefined ? { round: event.round } : {}),
+            ...(event.final === true ? { final: true as const } : {}),
+            ...(model !== undefined ? { model } : {}),
+            promptTokens: event.usage.promptTokens,
+            completionTokens: event.usage.completionTokens,
+            ...(event.usage.cachedPromptTokens !== undefined
+              ? { cachedPromptTokens: event.usage.cachedPromptTokens }
+              : {}),
+            ...(event.messages !== undefined ? { messages: event.messages } : {}),
+          });
+        }
         if (event.type === "history_repaired") {
           // Synchronous, no await: the drive-loop invariant holds. The user is
           // told ONCE per loaded session (a restart notifies again, once).
@@ -2765,6 +3270,13 @@ export class HostedSession {
         this.queue = [];
       }
     }
+    // A fired scheduled wake's end counts against its job (D3 failure stop):
+    // state first, like the rest — the capture below has it.
+    const firedBy = this.firedTurns.get(turnId);
+    if (firedBy !== undefined) {
+      this.firedTurns.delete(turnId);
+      this.settleFired(firedBy, end.stopReason);
+    }
     try {
       this.emit({ type: "turn_end", turnId, ...end });
     } finally {
@@ -2788,6 +3300,10 @@ export class HostedSession {
       // An exit the turn's start did not flush (it came later): the daemon
       // wakes for it. Scheduled too.
       this.kickWake();
+      // A failure stop's list, then a scheduled wake that came due while the
+      // turn held the slot: checked on the next macrotask (only a timer here).
+      this.publishSchedules();
+      this.kickSchedules();
     }
   }
 
@@ -2849,6 +3365,236 @@ export class HostedSession {
       this.wake?.onAudit?.(`wake: background job exit ${this.id}`);
     } catch {
       // The audit sink failed: the turn runs regardless.
+    }
+  }
+
+  // --- scheduled wakes (docs/feat/cron-tool.md S3) ----------------------------
+
+  /**
+   * The table as this session's tools see it (`AgentContext.schedules`, P1), or
+   * `null` where the session does not schedule (a pod daemon) or has ended.
+   * Looked up per call by the tool, never cached: the agent may be rebuilt.
+   */
+  scheduleLink(): ScheduleLink | null {
+    if (this.scheduling === undefined || this.closed) {
+      return null;
+    }
+    return {
+      now: () => this.now(),
+      create: (request) => this.createSchedule(request),
+      list: () => this.scheduleTable,
+      delete: (id) => this.removeSchedule(id),
+    };
+  }
+
+  /** The model's create (`schedule_create`, asked through the broker before it gets here). */
+  private createSchedule(request: ScheduleRequest): ScheduleCreateResult {
+    if (this.closed) {
+      return { ok: false, reason: "this session has ended" };
+    }
+    const result = scheduleCreate(this.scheduleTable, request, {
+      id: `${SCHEDULE_ID_PREFIX}${this.scheduleSeq + 1}`,
+      now: this.now(),
+      createdBy: this.activeTurnId ?? "",
+      ...(this.scheduling?.limits ? { limits: this.scheduling.limits } : {}),
+    });
+    if (result.ok) {
+      this.scheduleSeq += 1;
+      this.scheduleChanged(result.table);
+    }
+    return result;
+  }
+
+  /** Drop one job (the model's `schedule_control{delete}` or the user's method). */
+  private removeSchedule(id: string): boolean {
+    const { table, deleted } = scheduleDelete(this.scheduleTable, id);
+    if (deleted) {
+      this.scheduleChanged(table);
+    }
+    return deleted;
+  }
+
+  /**
+   * `session/schedule_delete` (D5): the user drops one wake by hand — the same
+   * decision as the model's delete. Synchronous (§7: never awaits a turn), and
+   * a refusal is an answer with its reason, never a throw.
+   */
+  deleteSchedule(scheduleId: string): ScheduleDeleteResult {
+    if (this.removeSchedule(scheduleId)) {
+      return { deleted: true };
+    }
+    return {
+      deleted: false,
+      reason:
+        this.scheduling === undefined && this.scheduleTable.length === 0
+          ? "this session has no scheduled wakes"
+          : `no scheduled wake ${wireLine(scheduleId, 64)} in this session`,
+    };
+  }
+
+  /** A new table: the write (synchronous capture), the list, the timer. */
+  private scheduleChanged(table: readonly ScheduledJob[]): void {
+    this.scheduleTable = table;
+    this.persist();
+    this.publishSchedules();
+    this.armSchedules();
+  }
+
+  /**
+   * ONE check of the table (the timer's body; tests call it directly): sweep
+   * expiry, and when the slot is free fire the ONE due job (D3). The job is
+   * advanced and the advance captured BEFORE `prompt()` (at-most-once: a crash
+   * mid-turn never fires that slot again). `lastEndBad` is NOT honoured: a
+   * user's Esc on some turn must not silence a reminder (the failure stop bounds
+   * a dead model instead). Re-arms the timer last, whatever happened.
+   */
+  checkSchedules(): void {
+    if (this.scheduling === undefined || this.closed) {
+      return;
+    }
+    // The same pure gate as the job-exit wake, with the slot as its only input
+    // besides `closed` (no `lastEndBad`, above).
+    const idle = wakeDue(
+      { pending: true },
+      { enabled: true, idle: !this.running, blocked: this.closed },
+    );
+    const step = scheduleStep(this.scheduleTable, this.now(), { idle });
+    const changed =
+      step.table.length !== this.scheduleTable.length ||
+      step.table.some((job, i) => job !== this.scheduleTable[i]);
+    for (const job of step.expired) {
+      this.scheduleAudit(`schedule: ${job.id} expired ${this.id}`);
+    }
+    if (step.due === null) {
+      if (changed) {
+        this.scheduleTable = step.table;
+        this.persist();
+        this.publishSchedules();
+      }
+      this.armSchedules();
+      return;
+    }
+    this.fireSchedule(step.due, step.table);
+  }
+
+  /** Fire `job` (already advanced in `table`): commit, capture, publish, THEN `prompt()`. */
+  private fireSchedule(job: ScheduledJob, table: readonly ScheduledJob[]): void {
+    this.scheduleTable = table;
+    // The advance is on disk-bound state BEFORE the turn exists (D3).
+    this.persist();
+    this.publishSchedules();
+    const turnId = `${WAKE_TURN_PREFIX}${crypto.randomUUID()}`;
+    // As the job-exit wake: the cut moves to "now", and the turn's start will
+    // flush every pending exit — so an attach meanwhile reads 0 (one turn).
+    this.recordCut(null);
+    this.wakeUnflushed = turnId;
+    this.firedTurns.set(turnId, job.id);
+    try {
+      this.prompt(
+        turnId,
+        [{ type: "text", text: schedulePromptText(job) }],
+        undefined,
+        undefined,
+        undefined,
+        {
+          id: job.id,
+          spec: job.spec.slice(0, SCHEDULE_LABEL_MAX),
+          // The fire itself, stamped now: stored on the user message (the row's
+          // time, live = reload) and sent on `turn_start` (scheduled-fire-row).
+          fire: job.fires,
+          at: this.now(),
+        },
+      );
+    } catch (error) {
+      // The slot was free in this same stretch: unexpected. The slot stays
+      // consumed (at-most-once), and the timer is re-armed below.
+      this.wakeUnflushed = null;
+      this.firedTurns.delete(turnId);
+      this.reportTurnError(error);
+    }
+    this.scheduleAudit(`wake: scheduled ${job.id} ${this.id}`);
+    this.armSchedules();
+  }
+
+  /** A fired turn ended: count it against its job (3 errors in a row → removed, D3). */
+  private settleFired(jobId: string, stopReason: string): void {
+    const { table, removed } = scheduleSettled(
+      this.scheduleTable,
+      jobId,
+      scheduleEndOf(stopReason),
+    );
+    this.scheduleTable = table;
+    if (removed) {
+      this.scheduleAudit(`schedule: ${jobId} stopped after failures ${this.id}`);
+    }
+  }
+
+  /**
+   * Arm the ONE timer for the next check: at the next slot, ≤ 60 s; a full
+   * interval while the slot is held (never a 0 ms spin — `kickSchedules` checks
+   * at the turn's end). Nothing armed for an empty table or a closed session.
+   */
+  private armSchedules(delayMs?: number): void {
+    this.disarmSchedules();
+    if (this.scheduling === undefined || this.closed) {
+      return;
+    }
+    const delay =
+      this.scheduleTable.length === 0
+        ? null
+        : (delayMs ??
+          scheduleCheckDelayMs(this.scheduleTable, this.now(), { idle: !this.running }));
+    if (delay === null) {
+      return;
+    }
+    const set = this.scheduling.setTimeout ?? defaultSetTimeout;
+    this.scheduleTimer = set(() => {
+      this.scheduleTimer = null;
+      this.checkSchedules();
+    }, delay);
+  }
+
+  private disarmSchedules(): void {
+    if (this.scheduleTimer !== null) {
+      (this.scheduling?.clearTimeout ?? defaultClearTimeout)(this.scheduleTimer);
+      this.scheduleTimer = null;
+    }
+  }
+
+  /** The slot was freed (a turn's or a compaction's end): check on the next macrotask. */
+  private kickSchedules(): void {
+    this.armSchedules(0);
+  }
+
+  /**
+   * Stream the table if it changed since the last `schedules` frame (full
+   * state; an unchanged list sends nothing). Never throws. Idle: the cut then
+   * moves to "now", like `publishJobs`.
+   */
+  private publishSchedules(): void {
+    if (this.closed || this.scheduling === undefined) {
+      return;
+    }
+    const rows = scheduleRows(this.scheduleTable);
+    if (sameScheduleRows(rows, this.lastSchedules)) {
+      return;
+    }
+    this.lastSchedules = rows;
+    try {
+      this.emit({ type: "schedules", schedules: [...rows] });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    if (this.controller === null) {
+      this.recordCut(null);
+    }
+  }
+
+  private scheduleAudit(line: string): void {
+    try {
+      this.scheduling?.onAudit?.(line);
+    } catch {
+      // The audit sink failed: the schedule goes on regardless.
     }
   }
 
@@ -2990,7 +3736,7 @@ export class HostedSession {
    * retry of an accepted id is a no-op success even after its turn ended (never
    * `NoTurnRunning`, never injected twice). A rejected attempt is not recorded.
    */
-  enqueue(id: string, turnId: string, text: string): void {
+  enqueue(id: string, turnId: string, text: string, voice?: VoiceTurn): void {
     if (this.enqueued.has(id)) {
       return;
     }
@@ -3013,7 +3759,7 @@ export class HostedSession {
       throw new RpcError(DomainErrorCode.NoTurnRunning, "no turn is running");
     }
     this.enqueued.add(id);
-    this.session.enqueue(text);
+    this.session.enqueue(text, voice, id);
     this.queue.push({ id, text });
     // A person wrote while a foreground child runs: it moves to the background
     // NOW, in this synchronous stretch, so the call it holds is answered in
@@ -3031,7 +3777,7 @@ export class HostedSession {
    * with a turn, and `cancel` — or `signal` (the request's own cancel) — aborts
    * it: it then rejects `Cancelled` and leaves the history untouched.
    */
-  async compact(signal?: AbortSignal): Promise<{ before: number; after: number }> {
+  async compact(signal?: AbortSignal): Promise<CompactResult> {
     this.assertIdle();
     // Cancelled before it started: no slot, no model call.
     if (signal?.aborted) {
@@ -3045,13 +3791,22 @@ export class HostedSession {
     const onAbort = (): void => controller.abort();
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      const { before, after } = await this.session.compact(controller.signal, () =>
-        this.historyReplaced("compact"),
+      const { before, after, fromTokens, toTokens, toExact } = await this.session.compact(
+        controller.signal,
+        () => this.historyReplaced("compact"),
+        // The status bar's figure, when a turn measured one since the last replacement.
+        this.lastPromptTokens !== undefined ? { fromTokens: this.lastPromptTokens } : {},
       );
       // Only a compaction that replaced the history is a conversation change:
       // a failed or cancelled one left it as it was (the `finally` writes it).
       this.lastChangeAt = this.now();
-      return { before, after };
+      return {
+        before,
+        after,
+        ...(fromTokens !== undefined ? { fromTokens } : {}),
+        ...(toTokens !== undefined ? { toTokens } : {}),
+        ...(toExact ? { toExact: true } : {}),
+      };
     } catch (error) {
       // Providers throw anything on abort; give the client one clean code.
       if (controller.signal.aborted) {
@@ -3074,6 +3829,8 @@ export class HostedSession {
       this.publishQueue();
       // An exit that came while the slot was the compaction's (scheduled).
       this.kickWake();
+      // A scheduled wake that came due during it, likewise.
+      this.kickSchedules();
     }
   }
 
@@ -3156,6 +3913,8 @@ export class HostedSession {
     // reset `[system, restart message, (skill call, result)*]`: their first
     // user message is the head this session installed.
     this.compactionSummary = this.session.messages.find((m) => m.role === "user");
+    // The measured prompt described the history just replaced.
+    this.lastPromptTokens = undefined;
     this.epochStart = this.seq + 1;
     this.cut = {
       epoch: crypto.randomUUID(),
@@ -3173,6 +3932,8 @@ export class HostedSession {
       subagents: this.lastSubagents,
       // Likewise the shell jobs (`/clear` keeps them).
       jobs: this.lastJobs,
+      // And the scheduled wakes (owner Q7: `/clear` keeps them; a compaction too).
+      schedules: this.lastSchedules,
     };
     // A new log segment: the SAME array was replaced in place, so it is never
     // diffed — the reference copy is reset (F3). Before the emit, like the cut.
@@ -3243,6 +4004,8 @@ export class HostedSession {
       clearTimeout(this.wakeKick);
       this.wakeKick = null;
     }
+    // The table itself stays (an archive keeps it frozen, D6); only the timer goes.
+    this.disarmSchedules();
     if (this.activeTurnId !== null) {
       try {
         this.finishTurn(this.activeTurnId, { stopReason: "cancelled" });
@@ -3275,6 +4038,8 @@ export class HostedSession {
     // The single END of a live session covers close, archive, the reaper, the
     // detached cap and delete (P4): the upload reservations go back here.
     this.uploads.dispose();
+    // Memory only: the artifact bytes go back to the daemon's budget.
+    this.artifacts.dispose();
     this.unsubscribeExit?.();
     this.unsubscribeStart?.();
     this.jobs?.dispose();

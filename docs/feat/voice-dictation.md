@@ -1,6 +1,6 @@
 # feat/voice-dictation — Dictation in the local TUI on the Mac (realtime-voice V1)
 
-> **Status:** implementation (plan written, NOT approved — see Owner questions)
+> **Status:** execution (S1 and S3 complete; S2's mic capture OPEN — see Execution and Review)
 > **Branch:** `feat/voice-dictation`
 > **Size:** L, split into four slices: S1 spike (S) · S2 helper (M) · S3 TUI integration (M) · S4 polish + live test (S) · **Blast:** cross-module (a new native helper binary, a new `voice` config key, one new key layer, a new `tentacle voice` subcommand). No protocol, daemon, persistence or relay change. · **Suited:** S1 by Opus with the owner at the Mac (it needs a real mic and ears); S2–S4 by DeepSeek. L ⇒ one **fresh-context Review** over S2+S3 (grouped, per the owner's fewer-reviews rule), and it must red-team the key-layer precedence (F7) and the never-write-raw-to-the-terminal rule (F10).
 > **Changelog:** `changelog.d/voice-dictation.added.md`: "- **Voice dictation on the Mac.** Press Ctrl+R in the TUI, speak, press it again: the text lands in the input field for you to edit and send. Speech is recognised on the Mac; no audio leaves it or is saved."
@@ -89,6 +89,8 @@ The threshold sweep that S1 runs is pasted in the Appendix (`sweep.py`). It coul
 | listening | Ctrl+R **or Enter** | finish: transcribe and insert. Enter here **never sends** (F6). |
 | listening or transcribing | **Esc** | cancel and discard; nothing is inserted |
 | listening | typing | allowed; the transcript is inserted at the cursor when it arrives |
+
+Voice ships **off by default** (`feat/voice-off-by-default`): the key is live only with `voice.enabled: true` in the config, and while off it shows `voice is off — set "voice": { "enabled": true } in the config` instead of opening the mic.
 
 While dictating, the field shows a one-line voice strip: `● listening 0:07 ▁▃▅ [it]` → `… transcribing`, plus the partial preview dimmed. Rendering it is presentation only (`voice-view.ts` computes it).
 
@@ -192,7 +194,7 @@ Not found → a notice naming the build command. A signed and notarised download
 
    ```ts
    voice: {
-     enabled?: boolean;          // default true on darwin
+     enabled?: boolean;          // default FALSE (feat/voice-off-by-default)
      key?: "ctrl+r" | …;
      language?: "auto" | "it" | "en";
      autoStop?: boolean;         // default false
@@ -318,11 +320,549 @@ Red first (§9). Each test runs first against a stub or the old constant and is 
 
 ## Execution
 
-*(empty — the plan is not yet approved)*
+*— deepseek-v4 (executor), 2026-11-15*
+
+### Load-bearing check: PASSED (do not skip this one)
+
+`.tentacle/tmp/voice-dictation/micprobe.swift`, `swiftc -O`, run from a shell in
+Apple Terminal:
+
+```
+tap_format=9ch @ 44100.0Hz          <- voice-processing tap, matches V0 e6-smoke.log
+engine_running=true voice_processing=on
+authorizationStatus=3               <- authorized
+frames=30 mean_dbfs=-74.0 peak_dbfs=0.0
+VERDICT=REAL_SIGNAL                 <- -74 dBFS ambient, not digital silence
+```
+
+A plain unbundled CLI child captures the mic from inside the user's terminal.
+No app bundle needed; the design stands.
+
+### S1 (spike) — measured, and it changed three plan claims
+
+Recorded in full in `.tentacle/tmp/voice-dictation/S1-RESULTS.md`; the numbers
+that matter:
+
+**Apple `SpeechAnalyzer` (owner decision 3, the V1 default) — works from a bare CLI child,**
+measured on all 30 V0 WAVs (`apple-bench.jsonl`):
+
+| | Apple (measured here) | V0 Parakeet |
+|---|---|---|
+| corpus WER | **0.082** | 0.101 endpointed / 0.027 perfect-endpoint |
+| STT p50 / p95 | **79 ms / 99 ms** | 50 ms / 65 ms |
+
+Worst cases are technical English (`Refactor`→"We factor", `re-run`→"rear on")
+and a truncated V0 file (`e05`). So Apple is a viable default: better WER than
+V0's endpointed Parakeet, and 29 ms of extra p50 is invisible next to a manual
+stop.
+
+**The comma floor (the plan's provisional 1000 ms), swept with the Appendix's
+`sweep.py` over the 30 files** — largest internal pause per utterance: e08 224 ms,
+e04/e14/e15 192 ms, e03/e11/e12 160 ms, e06 96 ms.
+
+```
+min_sil  thr    | truncated  ids
+200      none   | 4          e04,e08,e14,e15   <- V0's constants
+200      0.95   | 2          e08,e15  (+9 never stop)
+300      none   | 0          -
+500      none   | 0          -   (margin over 224 ms)
+```
+
+- **A threshold cannot fix it** (200 ms + 0.95 still truncates e08/e15) — V0's
+  finding reproduced independently.
+- **Shipped floor: 500 ms** (`ENDPOINT_DEFAULTS.autoStopSilenceMs`), not the
+  plan's provisional 1000: 300 is the smallest that truncates nothing here, 500
+  has margin, and 1000 doubled the wait for no measured benefit. The schema
+  REFUSES anything under 300 (T9), which is the guard that keeps the V0 bug out.
+
+**Three plan claims did not survive S1 — all corrected in code:**
+
+1. **"Apple's recogniser needs no download" is false for a non-English
+   language.** `it_IT` is *supported* but *not installed* on this Mac by default;
+   the asset took 8.3 s to install on first use, and a supported-but-uninstalled
+   locale transcribes to an EMPTY string (silent). The helper checks
+   `SpeechTranscriber.installedLocales` and reports `models_missing` naming the
+   locale; `tentacle voice setup` installs it; `voice status` prints both lists.
+2. **"`auto` lets the engine detect the language" is false for Apple.** It has no
+   per-utterance language ID in this API: an Italian utterance on this English Mac
+   came back as "Fai pasar el dipicate de voidimi cosa restaurant." `auto`
+   therefore means "the Mac's own language", and `voice.language: it|en` forces
+   one (verified: `trace --lang it` → "Fai passare il tipet e poi dimmi cosa
+   resta rotto."). Documented in the key-docs entry and in `Transcribe.localeId`.
+3. **`SpeechAnalyzer` needs macOS 26, not 14.** `Package.swift` targets
+   `macOS("26.0")`; macOS 14 has no on-device recogniser of this kind.
+
+**Apple also ships its own VAD** (`SpeechDetector`, with a sensitivity level), so
+Silero ONNX + Smart Turn ONNX are NOT needed for the default engine — one fewer
+dependency, one fewer licence to verify. The endpointing fold stayed in TypeScript
+as the plan required (T3), which is where the comma regression lives and what V2
+will reuse.
+
+### S3 (TUI) — built, T1–T10 red→green
+
+| Slice | Files |
+|---|---|
+| config | `config/src/schema.ts` (`voice` object, `.strict()`, `autoStopSilenceMs` ≥ 300), `resolve.ts`, `load.ts`, `key-docs.ts` (11 leaves), README table regenerated with `bun run docs:config` |
+| protocol | `tui/src/voice-protocol.ts` — one JSON line each way, 64 KiB byte cap, `ready.v` handshake decided once, unknown fields dropped, every malformed input an error VALUE |
+| endpointing | `tui/src/voice-endpoint.ts` — pure audio-time fold, 500 ms floor, Smart Turn gate, hard stop |
+| reducer | `tui/src/voice-session.ts` — `idle→starting→listening→transcribing→idle` + `error`/`off`; commands are data (`spawn/send/insert/notice/kill`); `voiceAvailability`, `joinDictation`, `errorNotice` |
+| view | `tui/src/voice-view.ts` + `components/VoiceStrip.tsx` (blank row as `" "`, §6 gotcha; `dimProps()`, not a bare `dimColor`) |
+| layer | `keys/layer-voice.ts`, `layers.ts` (15 names / 14 pure), `contract.ts`, `snapshot.ts` (`voice()`, `voiceKey()`, both live getters), `effects.ts`, `execute.ts` |
+| hook | `tui/src/useVoice.ts` (React) + `tui/src/voice-spawn.ts` (process edge, injectable `VoiceSpawner`) |
+| wiring | `App.tsx` (hook above `frameLayout` so the strip's rows are in the row budget; 3 host effects; 2 snapshot fields), `AppView.tsx`, `app-layout.ts` (`voiceStrip`/`voiceRows` counted once, like the attach row), `app-types.ts`, `run.tsx` |
+| CLI | `cli/src/voice-cmd.ts`, `flags.ts` (`CliMode`/`ARGS`/`USAGE`/model table), `main.ts` (dispatch + HELP), `tui/src/index.ts` exports |
+| build | `native/voice-mac/` (SwiftPM, 4 sources + tests), `scripts/voice-build.ts`, `voice:build`/`voice:test` scripts |
+
+`useVoice.ts` was split into the hook + `voice-spawn.ts` (drift from the plan's
+one "hook" file): the process edge has no React in it and T8's spawn-option
+assertions are cleaner against a module that is not a component boundary.
+
+**Tests** (13 new files): T1 protocol, T2 reducer + T6 availability, T3 comma
+regression, T4 view, T5 layer/`LAYER_ORDER`, T7 App end-to-end with a fake
+helper, T8 spawn options, T9 config schema, T10 CLI dispatch, plus 13 Swift
+tests. `key-snapshot.ts` was extracted from `keys-route.test.ts` so two suites
+share one builder (Biome forbids exporting from a `*.test.ts`).
+
+### Mutations (each shown RED, then reverted)
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `voice-protocol.ts`: drop the `ready.v` check | **RED** (version handshake) |
+| M2 | `voice-endpoint.ts`: shipped floor 500 → 200 | **RED** ("shipped default ≥ comma-safe floor") |
+| M3 | `voice-endpoint.ts`: drop the Smart Turn threshold gate | **RED** (e08/e15 still cut at thr 0.95) |
+| M4 | `voice-session.ts`: Enter falls through while listening | **RED** ×2 |
+| M5 | `voice-session.ts`: no `insert` on `final` | **RED** ×5 (incl. the F5 cap insert) |
+| M6 | `keys/layers.ts`: move `voice` after `escAbort` | **RED** ×3 (incl. F7's Esc-vs-turn) |
+| M7 | `voice-spawn.ts`: `stderr: "inherit"` | **RED** ×2 (F10) |
+| M8 | `schema.ts`: drop `min(300)` on `autoStopSilenceMs` | **RED** ×2 |
+| M9 | `schema.ts`: drop `.strict()` on `voice` | **RED** (unknown key accepted) |
+
+Two of my own tests were **vacuous on the first pass** and were fixed before
+being counted: T3 read the floor back from the constant under test (M2 passed —
+now a literal `COMMA_SAFE_FLOOR_MS` plus a pinned V0-bug case), and T2's
+"no submit" assertion is now a `@ts-expect-error` compile-time pin because
+`VoiceCommand` has no `submit` member at all.
+
+### S2 (the Swift helper) — `trace`/`setup`/`status` DONE; the mic path is PARTIAL
+
+**Works and is verified:** `swift build -c release`; `bun run voice:test` (13
+tests green); `tentacle-voice status` (45 supported locales, 11 installed,
+microphone `granted`); `trace` transcribing V0 WAVs end to end —
+`--lang it` → "A che punto sei?", "Aspetta un attimo, ci penso."; `--lang en` →
+"Run the tie check and tell me what is still broken."; the protocol handshake and
+full `start`→`listening`→`stop`→`final`→EOF-exit cycle against the real
+microphone, with the helper exiting 0 on stdin EOF (F13).
+
+**Three real bugs found and fixed on the way** (each caught by running it, not by
+reading):
+
+1. `AnalyzerInput.init(buffer:)` **traps** (SIGTRAP) unless the buffer is the
+   analyzer's own `bestAvailableAudioFormat` — the first `trace` crashed. Fixed by
+   asking for the format and converting into it.
+2. Reusing one `SpeechTranscriber` across analyzers traps; a fresh one per
+   transcription.
+3. `AssetInventory.status(forModules:)` answers for locales RESERVED IN THIS
+   PROCESS, so a healthy Mac reported "not installed". Now
+   `SpeechTranscriber.installedLocales` is the check and `reserve` comes first in
+   `setup`.
+
+**OPEN — the mic path under-captures, and this is the one thing a live debugger
+must finish.** With the protocol fix in place (below), a requested 3 s window
+yields **300–1300 ms**, varying run to run. Every isolated probe delivers
+95–105 % on the same Mac:
+
+```
+taprate.swift        main thread, Thread.sleep            100 %
+taprate-async.swift  Task.detached, Task.sleep            100 %
+bgread.swift         bg queue + blocked stdin read         95 %
+restart.swift        engine restarted per take, x3         95 % each
+bgthread.swift       engine on a background thread         95 %
+audiothread3.swift   engine on a DEDICATED Thread + run loop,
+                     16 pool-saturating tasks              105 %
+pool2.swift          engine on a COOPERATIVE thread,
+                     8 CPU-bound pool tasks                  0 %   <- the bug
+```
+
+So one true, proven bug was found and fixed: **an engine created on a cooperative
+pool thread loses its tap entirely when the pool is busy** (0 frames of 88 200) —
+which is exactly the helper's situation, because its transcription and asset
+checks run on that pool. `Capture` now owns a dedicated `Thread` with a pumped
+run loop, and the protocol loop moved off `Task.detached` onto a dedicated queue
+with a `LineSource` background stdin reader (`main.swift`) — the blocking
+`availableData` on the main thread was itself measured at 0 frames
+(`blocked2.swift`).
+
+The residual under-capture is NOT explained by any probe. The Thread/run-loop
+variations tried (bounded `run(before:)`, `RunLoop.run()`, a keep-alive timer on
+`.default`+`.common`, `CFRunLoopWakeUp` hops to start/stop on the audio thread)
+each moved the number without fixing it. Per AGENTS §0 I stopped rather than keep
+mutating, and **escalate**: the next step is an `lldb` session — breakpoint in
+`Capture.consume`, watch the audio thread's state and the tap callback rate
+during a real dictation — which this non-interactive session cannot drive.
+Everything else in the helper is exercised and green; the capture depends on
+nothing that is still unproven except this.
+
+Consequence for the user-visible feature: the TUI side is complete and tested
+against a fake helper, and `trace` proves transcription quality, but **a real
+dictation currently loses roughly two thirds of its audio**, so live check L3
+(ten dictations, nothing cut) cannot pass yet. L1/L2 (the permission prompt) and
+L6 (mic dot off on quit) are reachable now; L3–L5, L7–L9 need the capture fix.
+
+### Live checklist (S4) — not run
+
+The owner is not in the loop in this session, so L1–L10 are **untouched**. L1/L2
+are what S1's load-bearing check proves is possible; L3 onwards wait on the
+capture fix.
+
+### Fix round 1
+
+*— deepseek-v4 (executor), 2026-11-15*
+
+Fix round 1 of the Review below (6 HIGH/MEDIUM findings; the three LOW-ish
+notes — the F7 layer order, the `VoiceCommand` schema, the `min(300)` floor —
+found nothing and are untouched). Repros re-run first in
+`.tentacle/tmp/voice-dictation/review/` (`dup.ts`, `race.ts`, `yes.ts`), then
+each finding fixed test-first, with the mutation shown red.
+
+**H1 (the duplicate field).** Root cause: `joinDictation` returns the WHOLE
+field, and `App` fed it to `field.insert`, which inserts at the cursor. New pure
+`dictationInsertion(before, text)` (`voice-session.ts`) returns only the appended
+part (`" world"` / `"world"` / `""`), and `joinDictation` is now defined as
+`field + dictationInsertion(field, text)` — one source of truth, so the two can
+never drift (a test asserts that identity across nine cases).
+
+**H2 (id always 1).** Root cause: `begin` computed the id from the nullable live
+`id`, which `idle()` resets, so every dictation was id 1 and the stale guard was
+skipped entirely while `id === null`. The model gained `issued` (a monotonic,
+never-reset counter) and the guard now compares to the LIVE id unconditionally —
+an idle model holds none, so "no id at all" is stale, never a wildcard. Both
+review traces now hold: the cancelled dictation's late `final` is dropped, and a
+stale `listening` leaves an idle TUI idle (ids now 1, 2, 3 across dictations).
+
+**H3 (F4/F5/auto-stop unwired).** This was the largest gap — three of the
+review's "dead" paths, all now live:
+- `useVoice` emits `clock` on a 1 s interval (only while a dictation is live or a
+  child is held) and no longer needs a separate `elapsed` timer: `vad` carries
+  audio time, which is the clock `maxSeconds` counts. The reducer's `elapsed`
+  path is kept and still tested.
+- Swift: `Capture` now buffers one entry per tap window (its duration in AUDIO
+  time, plus its dBFS) and `drainWindows()` hands them out; `runProtocolSync`
+  pumps them on every loop pass into `vad` (with the cumulative `ms`) and a 10 Hz
+  `level`. The `turn` command answers with a real `turnp`. Silero is still not
+  wired (S2's open finding), so the probability comes from
+  `windowSpeechProbability(dbfs)` — one function, documented as the placeholder.
+- `voice.autoStop` / `voice.autoStopSilenceMs` are now READ: the reducer folds
+  each `vad`/`turnp` through `voice-endpoint.ts` (which had no production
+  caller), sending `turn` on a candidate and `stop` on a positive verdict. The
+  comma regression is re-pinned at reducer level (a 224 ms pause under the
+  500 ms floor never stops; auto-stop off never stops on silence).
+- The two timers the plan promised: a hung `stop` gives up after
+  `TRANSCRIBE_TIMEOUT_MS` (20 s) with a notice and a `kill`; an idle child is
+  ended after `IDLE_EXIT_MS` (10 min), so a forgotten TUI holds no mic.
+
+**H4 (the local TUI and `connect` ignored `voice`).** `runEngineTui` was the
+only caller passing it. The local TUI now passes `voice` + `voiceConfigDir` (and
+routes through the `io.startTui` seam, so the broker guard and the new voice
+guard pin the same call site), and `connect` gained `connectVoice` — the same
+shape as `connectTheme` beside it: read the config FILE, warn for nothing (the
+palette read already warned), fall back to `VOICE_DEFAULTS`. A broken file still
+never blocks a connection.
+
+**M5 (F10 pinned on the spec, not the spawn).** Real cause: the production
+spawner hardcoded `stdio` next to the spec, so the spec was decorative and
+`stderr: "inherit"` there stayed green. `bunSpawnOptions(spec, logFd)` is now the
+one thing the real spawner consumes (stdin/stdout from the spec, stderr the log
+FILE's fd, or a pipe when there is no config dir), plus `bunSpawnProc` for the
+Bun call itself; the log is opened in append mode and the child's stderr is
+drained into it, so a full pipe cannot block the helper.
+
+**M6 (T7 depended on the host).** `App` always read `process.platform`/`env`.
+New `voiceHost` prop (`{platform, env}`, TEST-ONLY like `voiceSpawner`); the
+suite pins `{platform: "darwin", env: {}}`, and a new case asserts that over SSH
+no helper spawns and the notice says why.
+
+**M7 (`setup --yes` dropped).** `parseArgs` puts it in `bools`; `voiceCommand`
+read only `positional`. `VoiceCmdDeps` gained `yes?: boolean`, `main` passes
+`parsed.bools.has("yes")`, and `voiceCommand` ORs it with a literal flag so a
+direct caller still works. Pinned twice: through the real parser, and as a
+text-guard on `main`'s call site (the only reachable pin — `voiceCommand` is
+called with positionals alone, so no hand-driven test can see the wiring).
+
+**M8 (dead settings + broken lookup).** `main.swift` gained `--input` and
+`--no-voice-processing`, parsed into `CaptureOptions` and used by `Capture.start`
+(no more hardcoded `true`/`"default"`); `useVoice` passes them from
+`voice.input`/`voice.voiceProcessing`. The spawn now picks the first candidate
+that EXISTS (`existsSync`) instead of `candidates[0]`, so the
+`<configDir>/voice/bin` fallback is reachable; and `App` gained `voiceConfigDir`,
+so the log path is no longer `/voice/helper.log` (no config dir → no file).
+
+**M9 (an exit orphaning the next child).** `child.exited` nulled `childRef`
+unconditionally. It now clears it only if it still holds THAT child, so a killed
+child's late exit cannot orphan its successor. `VoiceModel` gained
+`childAlive`/`lastActivityAt` — what the idle timer above reads.
+
+**Drift from the Implementation.** (a) No separate `elapsed` dispatch: `vad`
+already carries audio time, and a second timer would be a second clock to keep
+in step. The reducer's `elapsed` path stays (tested) for a helper that sends
+only `level`. (b) `dictationInsertion` was added rather than changing
+`joinDictation`'s signature: the plan names `joinDictation(field, cursor, text)`,
+but the review's fix is smaller and the identity test keeps the two in step.
+(c) The local TUI's `startTui` now goes through `io.startTui` — a test seam it
+did not use, needed to pin H4 at all (and it is the shape the review asked for).
+(d) The review's three LOW-ish "found nothing" items are untouched by design.
+
+**Not fixed / still open (unchanged from S2).** The mic path still
+under-captures (300–1300 ms of a 3 s take); this round did not touch the
+tap/run-loop shape, and the capture fix remains the `lldb` session the Execution
+above asks for. Silero/Smart Turn are still placeholders on the Swift side, so
+auto-stop's real quality is unmeasured; L1–L10 remain unrun. `defaultSpawner` is
+exercised by `bunSpawnOptions`' tests, not end-to-end: no test starts a real
+child (by design), so the `Bun.spawn` call itself is verified only by the
+`tentacle-voice` manual runs recorded in S2.
+
+**Mutations (each shown RED on the buggy code, then reverted).**
+
+| # | Mutation | Red on |
+|---|---|---|
+| 1 | `App`: `field.insert(joinDictation(...))` (H1) | T7 appends → `❯ hellohello world` |
+| 2 | `begin`: `id = (model.id ?? 0) + 1` (H2) | 3 reducer tests: fresh ids 1,2,3; the cancelled final; `issued` |
+| 3 | stale guard: `model.id !== null && …` (H2) | race trace (B): a stale `listening` revives the TUI |
+| 4 | fold: `autoStop: false` hardcoded (H3) | auto-stop ON asks Smart Turn and stops |
+| 5 | `vad`: `audioMs = model.audioMs` (H3) | the `maxSeconds` cap; the auto-stop candidate |
+| 6 | `transcribingAt` guard → `false` (H3) | a hung `stop` frees the phase |
+| 7 | idle-exit guard → `false` (H3) | an idle child is ended after 10 min |
+| 8 | `bunSpawnOptions`: `stderr: "inherit"` (M5) | both real-spawn tests (fd, no-fd) |
+| 9 | `useVoice`: `candidates[0]` without `existsSync` (M8) | the `<configDir>/voice/bin` helper is spawned |
+| 10 | `useVoice`: drop the `--input`/`--no-voice-processing` args (M8) | the same test's flag assertions |
+| 11 | `useVoice`: unconditional `childRef.current = null` on exit (M9) | unmount still ends child 2 after child 1's late exit |
+| 12 | `voiceCommand`: read only `rest.includes("--yes")` (M7) | the parser→deps test |
+| 13 | `main`: drop `parsed.bools.has("yes")` (M7) | the call-site text guard |
+| 14 | `main`: drop `voice`/`voiceConfigDir` from the local TUI (H4) | the local-TUI guard (scoped to the local block) |
+| 15 | `connect`: drop `voice`/`voiceConfigDir` from `startTui` (H4) | the connect guard |
+| 16 | `App`: read `process.platform`/`env` (M6) | over SSH no helper spawns |
+| 17 | Swift: `windowSpeechProbability` → `0.5` (H3) | 4 `WindowTests` failures |
+
+Two guards were rescued from vacuity while mutating: the local-TUI voice guard
+first matched the `run`/`attach` call above it (now scoped to the local block,
+which is what made #14 red), and the M9 test first resolved the killed child's
+exit too early to interleave (#11 was green until the fake delayed it, as a real
+SIGTERM's 500 ms grace does).
+
+**Gate (fix round 1).** `bunx tsc --noEmit` green · `bun run lint` green (0
+errors, 0 warnings; 7 formatting/import-order findings auto-fixed, tree clean
+after) · `bun test` **10957 pass, 0 fail, 5 skip** (the same 5 opt-in skips; the
+run count grew from 10927 by the 30 new tests) · `bun run voice:test` **17/17**
+(was 13; `WindowTests` added). No protocol/schema change; the existing
+`changelog.d/voice-dictation.added.md` still covers the user-visible impact (no
+new fragment: these are corrections to an unreleased feature).
+
+### Gate
+
+`bun run typecheck` green · `bun run lint` green (0 errors, 0 warnings — the
+baseline in AGENTS §6) · `bun test` **10927 pass, 0 fail, 5 skip** (the 5 are the
+documented opt-in gates: live-k8s ×2, live-docker ×2, real-socket keepalive, plus
+the root-only `test.skipIf(isRoot)` pair; `main` carries the same set).
+`bun run voice:test` 13/13. No protocol/schema change (`packages/protocol` is
+untouched, so no `protocol.d/` note and no `protocol.json` regeneration).
+Biome's ignore list gained `native/voice-mac/.build` (SwiftPM products) and
+`.gitignore` gained the same path.
+
+
+### Fix round 2
+
+*— claude-sonnet-4-5, 2026-11-15* (executor; round-2 review was claude-opus-5-5)
+
+Scope: the two HIGH findings NEW-1/NEW-2 and the surviving MEDIUM (M5) from
+Round 2 above. Round-1 HIGHs (H1–H4) and M6–M9 were re-verified as already
+fixed (M7's `--yes` call site at `main.ts:963` still reads `parsed.bools`, so
+nothing to redo).
+
+**NEW-1 (HIGH) — a 3 s pause ended every dictation with auto-stop OFF.**
+Root cause: one place decided two different rules. `foldEndpoint.step` checked
+`hardStopMs` **before** the `if (!input.autoStop)` gate, so the silence cap that
+exists for an *auto-stop-on* forgotten dictation also fired with auto-stop off —
+the shipped default. Fixed in the FOLD, not the caller
+(`voice-endpoint.ts:119-131`): the `!autoStop` return now comes first, and the
+hard stop is documented as belonging to the auto-stop branch. The reducer keeps
+passing `hardStopMs` unconditionally (`voice-session.ts:546`) so exactly ONE
+place gates it — my first attempt gated it in both, and the reducer-only mutation
+then stayed green, which is how the double gate was caught.
+
+**NEW-2 (HIGH) — voice failed wherever `<configDir>/voice/` did not exist.**
+Three separate defects behind one repro:
+1. no `mkdir` before `openSync` → `ENOENT` on a fresh config dir;
+2. the 1 MiB rotation the plan promises (`:108`) was absent;
+3. the throw was caught as a bare `notice`, so the reducer was never told and
+   the strip sat on `● starting` with no child and no mic — and the message
+   blamed a missing binary whatever the real cause.
+Fixed by a new `openVoiceLog(logPath, fs)` seam (`voice-spawn.ts:200-235`:
+`mkdir` → `size` → `rotate` → `open`) with the three fs operations injectable so
+the ORDER is pinnable without a 1 MiB file, plus a new `spawnFailed` reducer
+event (`voice-session.ts:466-475`) that the hook dispatches with the real error
+text (`useVoice.ts` spawn catch). `spawnFailed` deliberately does NOT count a
+crash: a missing binary is setup, not a crash loop.
+
+**M5 (MEDIUM) — the mutation still survived, twice.** Round 1 pinned
+`bunSpawnOptions`; my first round-2 attempt moved the spawner into
+`voice-spawn.ts` and pinned its injected `Bun.spawn`, and that mutation was
+still GREEN because the *production* `defaultSpawner` held its own hardcoded
+`Bun.spawn` with `stderr: "inherit"` — the same vacuity one level up. The
+production spawner is now built through `makeDefaultSpawner` at call time
+(`useVoice.ts:76-77`), so a test replaces `Bun.spawn`, drives the REAL exported
+`defaultSpawner`, and asserts the options it hands the call. Mutation
+`stderr: "inherit"` → red (`voice-spawn.test.ts`).
+
+**Mutations (each shown RED on the code with the fix reverted, then restored;
+no `git` command was used — the originals were copied to
+`.tentacle/tmp/voice-dictation/fix2-*.bak` and copied back).**
+
+| # | Mutation | Red on |
+|---|---|---|
+| 1 | fold: check `hardStopMs` before the `!autoStop` gate (NEW-1's original order) | `voice-endpoint.test.ts` "the hard stop is inert too" **and** `voice-session.test.ts` "a long thinking pause never ends the dictation" |
+| 2 | hook: `options.notice(...)` beside the catch, no `spawnFailed` (NEW-2's original shape) | `voice-app.test.tsx` — the strip stays `starting`, no `ENOENT` |
+| 3 | `openVoiceLog`: drop the `mkdir` line | the order test **and** the real-fs `voice/` creation test |
+| 4 | `openVoiceLog`: drop the rotation line | the order test |
+| 5 | production `defaultSpawner`: hardcode `stderr: "inherit"` (M5) | `voice-spawn.test.ts` "the PRODUCTION spawner hands Bun.spawn the spec's streams" |
+
+Mutation 1 also exposed that the old T3(c) test — "with autoStop off the fold
+never emits stop" — was vacuous for this bug: its traces never reach 3 s of
+trailing silence. It gained a 5 s trace that does.
+
+**Drift from the Implementation.** (a) The plan's endpointing defaults
+(`:138`) say "a hard stop after 3 s of continuous silence" without qualifying
+it; it is now, correctly, an auto-stop-only rule — with auto-stop off the cap is
+`voice.maxSeconds`, exactly as the review proposed. The line is left as-is
+because the code and its comment now carry the condition, and editing the
+approved Implementation retroactively would hide the change. (b) `elapsed` is
+still never dispatched; the `clock` interval added in round 1 and the `vad`
+audio clock cover both timers (unchanged from round 1's drift note).
+
+**Still open (unchanged):** S2's mic under-capture (the `lldb` session the S2
+Execution asks for) and L1–L10, which were never run. `bun run voice:test` was
+not run here either: it needs a mic-capable approval this session could not
+get, and no Swift file changed in this round — the two HIGHs and M5 are all TS.
+
+**Gate (fix round 2).** `bunx tsc --noEmit` green · `bun run lint` green (1518
+files, 0 errors, 0 warnings) · `bun test` **10967 pass, 0 fail, 5 skip** (the
+same five opt-in skips; up from 10957 by the 10 new tests). No protocol or
+schema change, and the existing `changelog.d/voice-dictation.added.md` still
+covers the user-visible impact — these are corrections to an unreleased feature,
+so no new fragment (AGENTS §10: internal work adds none, and this changes an
+unreleased feature's behaviour rather than adding one).
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-15* (fresh context; a different model family from the executor, deepseek-v4. The plan's author was also Opus 5.5.)
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff main...HEAD`. Gate run here: touched tests 207 pass / 0 fail across 13 files; `bun run lint` clean; `bun run typecheck` green. Repros are in `.tentacle/tmp/voice-dictation/review/` (`dup.ts`, `race.ts`, `yes.ts`). The tree was byte-identical after the mutation (`git status` empty).
+
+**HIGH**
+
+1. **The transcript duplicates the field** (`packages/tui/src/App.tsx:795`). `field.insert(joinDictation(field.value, text))` inserts the whole field plus the transcript at the cursor. Field `hello`, dictation `world` → `hellohello world` (`dup.ts`, real App, fake helper). T7 misses it: it types `r` first and only asserts `toContain` (`voice-app.test.tsx:128`).
+2. **Every dictation has id 1, so the stale-message guard never works** (`voice-session.ts:245-259`, `:414`). `idle()` resets `id` to `null`, so `begin` always produces `1`, and the guard is skipped while `id === null`. Two traces from `race.ts`:
+   - **(A)** Ctrl+R → stop → Esc during transcribing → Ctrl+R. The cancelled dictation's `final` is **inserted**, which breaks Esc = discard. The TUI then goes idle while the helper starts capturing for the new `start`: the mic is on behind an idle TUI.
+   - **(B)** Esc while `starting`. The in-flight `listening` line arrives afterwards and moves the TUI to `listening` with `id: null`, although the helper has already stopped. The next Enter is eaten and comes back as a `bad_request` notice.
+3. **F4, F5 and auto-stop are not wired at all.**
+   - `useVoice.ts` dispatches no `elapsed` or `clock` event and has no timer (no `final` timeout, no 10-min idle exit).
+   - The helper's loop never emits `vad` or `level` (`main.swift:166-273`), and `voice-endpoint.ts` has no production caller.
+   - Effects: `maxSeconds` never stops a forgotten dictation (the mic stays on and the buffer grows). A hung `stop` stays `transcribing` forever. `voice.autoStop` and `autoStopSilenceMs` are dead settings. The strip's elapsed time and meter stay at zero.
+   - M5's "F5 cap insert" is green only on an event that nothing produces.
+4. **The local `tentacle` TUI ignores the voice config.** `voice` is passed only by `runEngineTui` (`cli/src/main.ts:1404`, i.e. run/attach). The local TUI's `startTui` (`main.ts:2246`) and `connect` (`connect.ts:241`) never pass it, so they get `VOICE_DEFAULTS`. `voice.enabled: false` does not disable the mic, and `key`, `language` and `engine` are ignored on the main path.
+
+**MEDIUM**
+
+5. **F10 is pinned on the spec, not on the real spawn.** `defaultSpawner` (`useVoice.ts:63-69`) hardcodes the stdio and ignores `spec.stdio` and `spec.logPath`. stderr is piped and never drained, and `helper.log` is never written, yet notices point the user to it.
+   - Mutation `useVoice.ts:67` `stderr: "inherit"` → `voice-spawn.test.ts` and `voice-app.test.tsx` stay **GREEN**, so T8 is vacuous for the real path.
+6. **T7 depends on the host.** App never passes `platform`/`env` to `useVoice` (`App.tsx:792`). Under SSH (`dup.ts ssh`: no `start` is sent) or on Linux CI, `voice-app.test.tsx` fails.
+7. **`tentacle voice setup --yes` drops `--yes`.** `parseArgs` puts it in `bools`, and `voiceCommand` only reads `positional` (`main.ts:953`, `voice-cmd.ts:96`). `yes.ts` shows the helper args `["setup"]`. T10 bypasses the parser.
+8. **More dead settings and a broken lookup.**
+   - `main.swift:209` hardcodes `voiceProcessing: true` and `preferredInput: "default"`, so `voice.input` and `voice.voiceProcessing` do nothing (the plan says no dead setting).
+   - `useVoice.ts:139-144` spawns `candidates[0]` without checking it exists, so the `<configDir>/voice/bin` fallback is never reached. App also passes no `configDir`, so the log path becomes `/voice/helper.log`.
+9. **An exit can orphan the next child** (static, narrow). `useVoice.ts:225-227` sets `childRef` to null on every exit. If a protocol-error `kill` (`voice-session.ts:381`) is followed by a retry within the 500 ms grace, the old child's exit nulls the NEW child's ref. That child then holds the mic, untracked, until the TUI exits.
+
+**Attacks that found nothing:**
+- F7 order: `voice` sits before `escUpload`/`escAbort` in `LAYER_ORDER`, and idle Esc passes through.
+- Enter never submits: `VoiceCommand` has no `submit`.
+- The `.strict()` schema and its `min(300)` floor.
+- No `protocol` or persistence file is touched.
+
+**Still open (Execution says so too):** S2 mic capture under-captures audio, and none of L1–L10 was run.
+
+**Executor:** honest about the open capture bug and its own two vacuous tests. But the mutation table (M5, M7) and "T1–T10 red→green" overstate coverage of paths that production never drives.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15* (scope: `git diff HEAD~1` = `eefe8cd1`)
+
+**Verdict: REQUEST-CHANGES.**
+
+Gate: `bun run typecheck` green; `bun run lint` clean (1518 files); `bun test packages/{tui,cli,config}/test` 5304 pass / 2 skip / 0 fail. `bun run voice:test` was **not run**: it needed an approval this session could not get, so the Swift changes are unverified. After every mutation the tree was byte-identical (`git status` empty). Repro: `.tentacle/tmp/voice-dictation/review/r2.ts`.
+
+**Round-1 findings, re-checked by mutation**
+
+| # | Fix | Mutation | Result |
+|---|---|---|---|
+| H1 | `dictationInsertion` (`App.tsx:800`) | insert `field.value + …` | **RED** (voice-app 1 fail) — fixed |
+| H2 | monotonic `issued` (`voice-session.ts:304`) | id from `model.id ?? 0` | **RED** ×2 — fixed |
+| H2 | stale guard with no wildcard (`:510`) | re-add `model.id !== null &&` | **RED** ×1 — fixed |
+| H3 | helper `vad`/`level`; cap, timeout and idle exit via `clock` | (reducer tests) | wired, but see NEW-1 |
+| H4 | local TUI (`main.ts:2265`) | pass `VOICE_DEFAULTS` | **RED** (wiring ×2) — fixed |
+| H4 | `connect` (`connect.ts:292`) | pass `VOICE_DEFAULTS` | RED, but only through a source-text match on `connect.ts`. `connect-voice.test.ts` stays green. Weak but acceptable. |
+| M5 | `bunSpawnOptions` | real `Bun.spawn` `stderr: "inherit"` (`useVoice.ts:113`) | **GREEN — still vacuous.** `bunSpawnProc` ignores `options.stdin/stdout/stderr` and hardcodes them, contrary to its own comment. The real behaviour (log fd, drained pipe) is correct. |
+| M6 | `voiceHost` injection | — | T7 now pins darwin and no SSH — fixed |
+| M7 | `--yes` via `bools` (`main.ts:963`) | `false` | **RED** — fixed |
+| M8 | `existsSync` candidate; `--input`, `--no-voice-processing` | — | voice-app test pins both — fixed (Swift side unbuilt here) |
+| M9 | ref guard (`useVoice.ts:313`) | clear the ref blindly | **RED** — fixed |
+
+**New findings in this diff**
+
+- **NEW-1 (HIGH): a 3 s pause now ends every dictation, with auto-stop OFF.**
+  - Where: the reducer always passes `hardStopMs: ENDPOINT_DEFAULTS.hardStopMs` (3000) to `foldEndpoint.step` (`voice-session.ts` `vad` branch). The fold checks the hard stop *before* `if (!input.autoStop)` (`voice-endpoint.ts:119-123`).
+  - The helper's placeholder VAD makes this worse: anything below −45 dBFS counts as silence (`main.swift` `windowSpeechProbability`), and the measured ambient is −74.
+  - Repro (`r2.ts` (1)): default config, speech, then quiet → `stop` sent at 3069 ms.
+  - Why it matters: it contradicts owner decision 2 ("no auto-stop by default; the user ends with the key") and the Context's structural claim that "a pause can never end it". A user who stops to think gets cut off.
+  - The cap needs no hard stop: `maxSeconds` already ends a forgotten dictation.
+- **NEW-2 (HIGH): voice fails on any machine where `<configDir>/voice/` does not exist.**
+  - Where: `defaultSpawner` does `openSync(<configDir>/voice/helper.log, "a")` with no `mkdir`. The CLI now always passes `voiceConfigDir`, so this path is always taken. Nothing creates the dir, and Apple's engine needs no `setup` that would.
+  - The ENOENT is caught as a spawn failure, so the notice is wrong ("voice helper not found (/bin/cat) — build it…"), and the reducer is never told: the strip stays `● starting`.
+  - Repro: `r2.ts` (2) with a fresh config dir.
+  - The 1 MiB log rotation in the plan is also absent.
+- **MEDIUM:** M5's mutation still survives (see the table).
+
+**What holds:** H1, H2, H4, M6, M7, M8 and M9 are fixed, and each is pinned by a test shown red under mutation.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-15* (scope: `git diff HEAD~1` = `2ec27be2`)
+
+**Verdict: PASS** for the scope reviewed (the TS side and the round-2 findings). This verdict does not cover:
+- the open S2 mic under-capture;
+- the unrun live checklist L1–L10;
+- `bun run voice:test`, not run in this session (it needed an approval). The Swift side is unchanged in this diff, but the round-2 Swift edits have never been built by a reviewer.
+
+Gate: `bun run typecheck` green; `bun run lint` clean (1518 files); `bun test packages/{tui,cli,config}/test` 5314 pass / 2 skip / 0 fail. After every mutation the tree was byte-identical (`git status` empty).
+
+| Round-2 finding | Fix | Mutation | Result |
+|---|---|---|---|
+| NEW-1: a 3 s pause stops a dictation with auto-stop off | `voice-endpoint.ts:129`: the `autoStop` gate now comes before the hard stop | disable the gate | **RED** (4 fail). The `r2.ts` (1) repro now never sends `stop` with the default config. |
+| NEW-2: no `<configDir>/voice/` | `openVoiceLog`: `mkdir`, then 1 MiB rotation, then open | skip the `mkdir` | **RED** (2) |
+| | | skip the rotation | **RED** (1) |
+| | `spawnFailed` event: the strip goes back to idle | the reducer keeps `starting` | **RED** (1) |
+| | — | `r2.ts` (2) with a fresh config dir | `voice/helper.log` created; real `Bun.spawn` ran |
+| M5: the spawn options are never pinned | `makeDefaultSpawner` (`voice-spawn.ts`) + `bunSpawnOptions` | `stderr: "inherit"` in `bunSpawnOptions:135` | **RED** (4) |
+| | | `{...options, stderr: "inherit"}` in the production `Bun.spawn` call (`useVoice.ts:76`) | **RED** (1). This mutation survived two rounds and is now caught. |
+
+**Regressions looked for, none found:**
+- `spawnFailed` is dispatched from inside `runCommands`, so it re-enters the reducer. The outer `setModel` runs before it, and the queued `send` is a no-op because there is no child.
+- The test that replaces `Bun.spawn` restores it in a `finally` (`voice-spawn.test.ts:273`).
+
+**Still open (from before; not this round's scope):**
+- The S2 capture bug.
+- L1–L10 with the owner.
+- The `connect` voice pin is a source-text match.
+- The helper's VAD is a level-based placeholder (−45 dBFS), which only matters with auto-stop on.
+
+**Executor:** each fix is targeted and comes with a test shown red under its mutation. This round, no fix introduced a regression.
 
 ## Appendix — `sweep.py` (S1 runs it; written 2026-11-15, not yet run)
 

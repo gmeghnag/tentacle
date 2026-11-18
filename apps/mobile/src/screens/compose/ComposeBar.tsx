@@ -1,17 +1,20 @@
 /**
- * The compose bar's pieces (docs/feat/mobile-compose.md 13d): the queue rows, my
- * returned rows' banner, another device's returned rows with their Take, the
- * outbox's rows, the photo chips and the two secondary buttons (photo, Send now).
+ * The compose bar's pieces (docs/feat/mobile-compose.md 13d): the notices, another
+ * device's returned rows with their Take, the outbox's rows and the photo chips.
+ * The pending messages moved into the TRANSCRIPT (`PendingBubble.tsx`) and Send now
+ * into the composer's own field (`ui/Composer.tsx`) — docs/feat/mobile-queued-compose.md
+ * D1/D4, owner Q3.
  *
  * DUMB renderers (AGENTS §7): every value comes from `session-view.ts`'s
  * view-model, every decision from `composer.ts` / `compose-state.ts` /
  * `compose-chips.ts`. Only colours, glyphs and spacing live here.
  *
  * `testID`s are the flows' contract (RN shows XCUITest no text, plan P9):
- * `composer-queue`, `composer-send-now`, `composer-send-later`, `composer-photo`,
- * `photo-library`, `photo-camera`, `chip-<i>-<state>`, `queued-row-<id>-<mine|other>`,
- * `returned-banner`, `returned-other-<id>`, `take-<id>`, `outbox-row-<itemId>-<state>`,
- * `outbox-decision`, `outbox-send|steer|discard|edit`, `composer-filled`.
+ * `composer-queue`, `returned-banner`, `returned-other-<id>`, `take-<id>`,
+ * `photo-library`, `photo-camera`, `chip-<i>-<state>`,
+ * `outbox-row-<itemId>-<state>`, `outbox-decision`,
+ * `outbox-send|steer|discard|edit`. The composer's own ids are `ui/Composer.tsx`'s,
+ * and the pending bubbles' are `PendingBubble.tsx`'s.
  */
 import type { JSX } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -58,104 +61,56 @@ export function NoticeRow({
 }
 
 /**
- * The queue (mockup `Compose`): a `fill` card "Queued · the agent reads these at
- * its next step", one row per waiting message (every writer's, mine marked),
- * another device's returned rows with their Take, and **Send now** as a 44 pt
- * `accentFill` pill when `sendNowOffered` says so. `composer-queue` stays on the
- * rows alone, so a flow that waits for it still waits for an actual queued row.
+ * Another device's RETURNED rows with their Take (docs/feat/mobile-queued-compose.md
+ * D4, owner Q3). Mine are given back to MY field by themselves, and a pending
+ * message now lives in the transcript as a bubble (`PendingBubble.tsx`) — so what
+ * is left here is the one thing that needs an explicit act: someone else's words,
+ * waiting for a Take. `composer-queue` stays on the card, so a flow that waits for
+ * it still waits for an actual row.
  */
 export function QueueRows({
   view,
   palette,
   onTake,
-  sendNow,
-  onSendNow,
 }: {
-  readonly view: Pick<BarView, "queued" | "returnedOthers">;
+  readonly view: Pick<BarView, "returnedOthers">;
   readonly palette: Palette;
   onTake: (id: string) => void;
-  /** **Send now** offered (D1's secondary button, `sendNowOffered`). */
-  readonly sendNow: boolean;
-  onSendNow: () => void;
 }): JSX.Element | null {
-  const rows = view.queued.length + view.returnedOthers.length;
-  if (rows === 0 && !sendNow) {
+  if (view.returnedOthers.length === 0) {
     return null;
   }
   return (
     <View style={[styles.card, { backgroundColor: palette.fill }]}>
-      {rows === 0 ? null : (
-        <View testID="composer-queue" style={styles.rows}>
-          <Text
-            maxFontSizeMultiplier={DENSE_FONT_SCALE}
-            style={[typography.footnote, { color: palette.sec }]}
-          >
-            <Text style={{ fontWeight: "600", color: palette.label }}>Queued</Text>
-            {" · the agent reads these at its next step"}
-          </Text>
-          {view.queued.map((row) => (
-            <View
-              key={row.id}
-              testID={`queued-row-${row.id}-${row.mine ? "mine" : "other"}`}
-              style={styles.queueRow}
+      <View testID="composer-queue" style={styles.rows}>
+        {view.returnedOthers.map((row) => (
+          <View key={row.id} style={styles.queueRow}>
+            <Icon name="arrow.down" color={palette.sec} size={14} />
+            <Text
+              testID={`returned-other-${row.id}`}
+              numberOfLines={2}
+              style={[typography.subhead, styles.flex, { color: palette.sec }]}
             >
-              <Icon name="clock" color={palette.sec} size={14} />
-              <Text
-                numberOfLines={2}
-                style={[typography.subhead, styles.flex, { color: palette.label }]}
-              >
-                {row.text}
-                {row.mine ? null : (
-                  <Text style={{ color: palette.sec }}>{"  · another device"}</Text>
-                )}
-              </Text>
-            </View>
-          ))}
-          {view.returnedOthers.map((row) => (
-            <View key={row.id} style={styles.queueRow}>
-              <Icon name="arrow.down" color={palette.sec} size={14} />
-              <Text
-                testID={`returned-other-${row.id}`}
-                numberOfLines={2}
-                style={[typography.subhead, styles.flex, { color: palette.sec }]}
-              >
-                {row.text}
-                {"  · returned to another device"}
-              </Text>
-              <Pressable
-                testID={`take-${row.id}`}
-                accessibilityRole="button"
-                accessibilityLabel={`Take “${row.text}” into your field`}
-                hitSlop={10}
-                onPress={() => onTake(row.id)}
-              >
-                <Text style={[typography.subheadStrong, { color: palette.accent }]}>Take</Text>
-              </Pressable>
-            </View>
-          ))}
-        </View>
-      )}
-      {sendNow ? (
-        <Pressable
-          testID="composer-send-now"
-          accessibilityRole="button"
-          accessibilityLabel="Send now: stop the current step and send these"
-          onPress={onSendNow}
-          style={({ pressed }) => [
-            styles.sendNow,
-            { backgroundColor: palette.accentFill },
-            pressed ? { opacity: 0.7 } : undefined,
-          ]}
-        >
-          <Icon name="bolt.fill" color={palette.onAccent} size={15} />
-          <Text style={[typography.subheadStrong, { color: palette.onAccent }]}>Send now</Text>
-        </Pressable>
-      ) : null}
+              {row.text}
+              {"  · returned to another device"}
+            </Text>
+            <Pressable
+              testID={`take-${row.id}`}
+              accessibilityRole="button"
+              accessibilityLabel={`Take “${row.text}” into your field`}
+              hitSlop={10}
+              onPress={() => onTake(row.id)}
+            >
+              <Text style={[typography.subheadStrong, { color: palette.accent }]}>Take</Text>
+            </Pressable>
+          </View>
+        ))}
+      </View>
     </View>
   );
 }
 
-/** The photo chips (14 pt capsules): progress, or the refusal's reason (13c's decision). */
+/** The attachment chips (14 pt capsules): progress, or the refusal's reason (13c's decision). */
 export function Chips({
   chips,
   palette,
@@ -181,7 +136,7 @@ export function Chips({
           key={chip.key}
           testID={`chip-${index}-${chip.state}`}
           accessibilityRole="button"
-          accessibilityLabel={`Remove ${chip.name ?? "photo"}`}
+          accessibilityLabel={`Remove ${chip.name ?? (chip.kind === "document" ? "file" : "photo")}`}
           onPress={() => onRemove(chip.key)}
           style={[styles.chip, { backgroundColor: palette.fill }]}
         >
@@ -189,7 +144,16 @@ export function Chips({
             <ActivityIndicator size="small" color={palette.accent} />
           ) : (
             <Icon
-              name={chip.state === "ready" ? "photo" : "exclamationmark.triangle"}
+              // The KIND's glyph, never a guess from the name: a PDF the person
+              // picked from Files is a document chip even before it is named
+              // (docs/feat/pdf-read.md D7).
+              name={
+                chip.state === "refused"
+                  ? "exclamationmark.triangle"
+                  : chip.kind === "document"
+                    ? "doc.on.doc"
+                    : "photo"
+              }
               color={chip.state === "refused" ? palette.red : palette.accent}
               size={14}
             />
@@ -202,7 +166,9 @@ export function Chips({
               { color: chip.state === "refused" ? palette.red : palette.label },
             ]}
           >
-            {chip.state === "refused" ? (chip.detail ?? "refused") : (chip.name ?? "photo")}
+            {chip.state === "refused"
+              ? (chip.detail ?? "refused")
+              : (chip.name ?? (chip.kind === "document" ? "file" : "photo"))}
           </Text>
           <Icon name="xmark" color={palette.sec} size={11} />
         </Pressable>

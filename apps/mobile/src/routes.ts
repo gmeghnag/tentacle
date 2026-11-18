@@ -13,6 +13,8 @@ export interface ComputerRoute {
 export interface SessionsRoute {
   readonly computerId: string;
   readonly name: string;
+  /** Opened from the drawer's magnifier (mobile-chrome Design 3): the search field is focused. */
+  readonly search?: boolean;
 }
 
 export interface SessionRoute {
@@ -25,6 +27,14 @@ export interface SessionRoute {
    * `open{reopen}` (Owner Q4: browsing the list never revives a session).
    */
   readonly archived: boolean;
+  /** Just created by the drawer's New session (mobile-chrome S7): the composer is focused. */
+  readonly focus?: boolean;
+  /**
+   * The session's working folder, as the list row knew it (`session/list`
+   * `cwd`): the header shows it at once. Absent (a push, a new session) → the
+   * screen asks `session/list` once (docs/feat/mobile-header-status.md).
+   */
+  readonly cwd?: string;
 }
 
 /**
@@ -49,6 +59,22 @@ export interface PairRouteParam {
   readonly linkText?: string;
 }
 
+/**
+ * The artifacts gallery's route (docs/feat/model-artifacts.md D9). It carries the
+ * session it lists and how the person got there, so the screen can say "Reopen to
+ * view" on an archived session and a flow can tell the three entries apart.
+ */
+export interface ArtifactGalleryRoute {
+  readonly computerId: string;
+  readonly sessionId: string;
+  readonly title: string;
+  /** The session was in the Archived section: its bytes need an explicit reopen. */
+  readonly archived: boolean;
+  readonly from: "session-info" | "hub" | "card";
+  /** A card's artifact id: the gallery opens ITS viewer at once (`galleryItemFor`). */
+  readonly open?: string;
+}
+
 /** The stack's route table (`@react-navigation/native-stack` params). */
 export type RootStackParams = {
   Pair: PairRouteParam | undefined;
@@ -57,7 +83,29 @@ export type RootStackParams = {
   Session: SessionRoute;
   /** The Settings screen (docs/feat/mobile-lock.md D6): app lock + Export logs. No params. */
   Settings: undefined;
+  /** The artifacts gallery (docs/feat/model-artifacts.md D9): a session's artifacts. */
+  ArtifactGallery: ArtifactGalleryRoute;
 };
+
+/**
+ * The artifacts gallery's ONE entry (D9): Session info's row, a transcript card,
+ * and — in `feat/mobile-hub` — the hub's badge all call this, so the route's
+ * params are built in one place. Nothing is dialled here; the screen reads the
+ * feed the session screen already published.
+ */
+export function openArtifactGallery(
+  nav: { navigate(name: "ArtifactGallery", params: ArtifactGalleryRoute): void },
+  input: ArtifactGalleryRoute,
+): void {
+  nav.navigate("ArtifactGallery", {
+    computerId: input.computerId,
+    sessionId: input.sessionId,
+    title: input.title,
+    archived: input.archived,
+    from: input.from,
+    ...(input.open === undefined ? {} : { open: input.open }),
+  });
+}
 
 /**
  * Which screen the app opens on: `Pair` with no computer to show, else

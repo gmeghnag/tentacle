@@ -7,6 +7,7 @@
  * native Anthropic Messages API (`/v1/messages`). See ADR-003.
  */
 import type { AttachmentRef } from "@tentacle/protocol";
+import type { ScheduledFire } from "./scheduled-fire.ts";
 import type { ToolResultSpill } from "./tool.ts";
 
 export type { AttachmentRef };
@@ -54,6 +55,13 @@ export interface ChatMessage {
    */
   readonly denialReply?: string;
   /**
+   * On a `role: "tool"` message whose result was an error (`ToolResult.isError`):
+   * `true`, else absent (docs/fix/mobile-qa-1117.md, bug 2). Display only, like
+   * `durationMs`: the model reads the failure in `content`; a reload uses this to
+   * draw the step as failed, as the live `tool_result` did.
+   */
+  readonly isError?: true;
+  /**
    * On a `user` or `tool` message that crossed a new step of context fill: how
    * full the context was (docs/feat/context-awareness.md). NOT display-only,
    * unlike `spill`/`durationMs`: the agent loop renders it into `content` as a
@@ -76,6 +84,44 @@ export interface ChatMessage {
    * has no key (never `[]`), so it hashes and serialises as it always did.
    */
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * On a USER message: the files attached to it, for the chip
+   * (docs/feat/pdf-read.md D4). Display only for the renderers — the text is in
+   * `content` as `<file>` blocks; the agent loop adds one "this is data" line to
+   * the model's copy (`renderForModel`). Non-empty when present.
+   */
+  readonly media?: readonly MessageMedia[];
+  /**
+   * ONLY on the summary `user` message a compaction writes: the context size
+   * before and after it (docs/feat/harness-notices.md S1). Display only, like
+   * `spill`: the provider mappers copy field by field, so the model never sees
+   * it. Rides the critical `message` log entry fail-soft (a malformed value is
+   * dropped, the entry still loads), so every replay path draws the separator.
+   */
+  readonly compacted?: CompactionFact;
+  /**
+   * ONLY on the user message a fired scheduled wake writes: which wake, its
+   * ordinal and the instant it fired (docs/feat/scheduled-fire-row.md). Display
+   * only, like `compacted`: the model reads the `[scheduled …]` prefix in
+   * `content`, never this. Rides the critical `message` entry fail-soft, so a
+   * reload draws the same `Wake 15:54` row as live.
+   */
+  readonly scheduled?: ScheduledFire;
+}
+
+/** A compaction's context sizes, in tokens. `toExact` only when the provider counted. */
+export interface CompactionFact {
+  readonly fromTokens: number;
+  readonly toTokens: number;
+  readonly toExact?: true;
+}
+
+/** One attached file on a user message (the wire's `MessageMediaSchema`; `kind` is a free string). */
+export interface MessageMedia {
+  readonly kind: string;
+  readonly name: string;
+  readonly pages?: number;
+  readonly chars?: number;
 }
 
 /**
@@ -115,8 +161,30 @@ export interface ContextUsage {
 }
 
 export interface Usage {
+  /** The whole prompt, cache hits included (what the context count uses). */
   readonly promptTokens: number;
   readonly completionTokens: number;
+  /**
+   * The part of `promptTokens` the provider served from its prompt cache
+   * (Anthropic's `cache_read_input_tokens`, an OpenAI-compatible server's
+   * `prompt_tokens_details.cached_tokens`). Absent when the server does not
+   * report it — never 0, which would claim a full cache miss
+   * (docs/feat/token-usage-log.md).
+   */
+  readonly cachedPromptTokens?: number;
+}
+
+/**
+ * A token count from a provider's raw JSON, or `undefined` when it is not one.
+ * Providers must pass every usage field through this: the same field is
+ * `null` on some servers (LiteLLM-style proxies send
+ * `prompt_tokens_details: {cached_tokens: null}`; the Anthropic API types its
+ * cache counts nullable), and a `null` reaching the log writes an entry every
+ * reader REFUSES — which poisons the whole session log, not just that field
+ * (docs/feat/token-usage-log.md, fix round 1).
+ */
+export function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 /**
@@ -136,6 +204,14 @@ export type StreamEvent =
   | { readonly type: "tool_call"; readonly toolCall: ToolCall }
   | { readonly type: "done"; readonly usage?: Usage; readonly stopReason?: ModelStopReason };
 
+/**
+ * The voice-turn profile of one request (docs/feat/voice-conversation.md §4,
+ * C3). `off`: reason for no more than this turn's rounds BEFORE its first tool
+ * call (a spoken reply is wanted now, not a long think); `keep`: reason as
+ * configured. Both are a VOICE turn, which always gets the spoken-style line.
+ */
+export type VoiceReasoning = "off" | "keep";
+
 export interface ChatRequest {
   readonly messages: readonly ChatMessage[];
   readonly tools?: readonly ToolDefinition[];
@@ -148,6 +224,11 @@ export interface ChatRequest {
    * and the laptop's request carries whatever the laptop itself is allowed to read.
    */
   readonly attachments?: AttachmentSource;
+  /**
+   * `"off"`: do not reason on this request (a voice turn, C3). A provider that
+   * cannot honour it ignores it — never an error, never a failed turn.
+   */
+  readonly reasoning?: "off";
 }
 
 /**

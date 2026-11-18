@@ -30,6 +30,21 @@ export interface ComputerMemory<Link> {
   readonly diagnoses: Forgetful;
   /** The cached records (the sessions screen reads a computer's name from here). */
   readonly records: Forgetful;
+  /**
+   * The artifacts read from this computer: its cached bytes and the live feeds
+   * (a re-pair keeps the id, so a stale one would be taken for the new record's).
+   */
+  readonly artifactCache?: { forgetComputer(computerId: string): void };
+  /** The per-session artifact feeds published by the session screens. */
+  readonly feeds?: { forgetComputer(computerId: string): void };
+  /**
+   * Rebuild the push notification directory after a store change
+   * (docs/feat/mobile-notifications.md Design 6 / N4): the extension's copy of the
+   * paired computers and their PINNED keys must follow a pair, a re-pair and a
+   * removal — a stale peer lets the NSE render a push it can no longer
+   * authenticate (F9). Injected, so nothing here imports the Keychain.
+   */
+  readonly pushDirectory?: () => Promise<unknown>;
 }
 
 /**
@@ -50,6 +65,11 @@ export async function forgetComputer<Link>(
   await memory.links.release(id);
   memory.diagnoses.delete(id);
   memory.records.delete(id);
+  // The artifacts that came FROM this computer are not this app's to keep once
+  // the record is gone: the bytes (which may hold workspace content) and the
+  // feeds that carried them both belong to the pairing (model-artifacts D9).
+  memory.artifactCache?.forgetComputer(id);
+  memory.feeds?.forgetComputer(id);
 }
 
 /**
@@ -65,5 +85,9 @@ export async function withForgottenRecord<Link, R>(
   then: () => Promise<R>,
 ): Promise<R> {
   await forgetComputer(memory, id);
+  // The push directory follows the store (N4): after the record changed, and
+  // before the caller re-reads the computer — a failed rewrite is not a reason to
+  // fail the pairing (the extension then shows placeholders, which is safe).
+  await memory.pushDirectory?.().catch(() => undefined);
   return then();
 }

@@ -9,6 +9,15 @@ import { z } from "zod";
 import { modelRefIssues } from "./models.ts";
 
 /**
+ * The largest `liveActivity.startAfterSeconds` (one hour) and its default (20 s,
+ * the plan's Owner Q3). Copies of the rules module's own numbers, pinned by a
+ * test in `cli/test/live-activity-config.test.ts` (this package depends on zod
+ * alone, so it cannot import them).
+ */
+export const LIVE_ACTIVITY_START_AFTER_MAX_SECONDS = 3600;
+export const DEFAULT_LIVE_ACTIVITY_START_AFTER_SECONDS = 20;
+
+/**
  * The largest `push.graceSeconds` (one hour). The same NUMBER is
  * `@tentacle/protocol`'s `PUSH_GRACE_MAX_SECONDS`, which this package cannot
  * import (it depends on zod alone); `config/test/push-config.test.ts` pins the
@@ -373,6 +382,22 @@ const settingsShape = {
     })
     .strict()
     .optional(),
+  /** Smart compaction: lossless-first pruning of the model's copy (docs/feat/smart-compaction.md). */
+  contextPrune: z
+    .object({
+      /** Default: disabled. */
+      enabled: z.boolean().optional(),
+      /** A batch once the request reaches this percent of the window; 1..100, default 60. */
+      pruneAtPercent: z.number().int().min(1).max(100).optional(),
+      /** …and only if it saves at least this percent of the window; 1..100, default 15. */
+      minGainPercent: z.number().int().min(1).max(100).optional(),
+      /** The last this-many assistant rounds are never pruned; >= 1, default 6. */
+      keepRecentRounds: z.number().int().min(1).optional(),
+      /** A shell output over this many chars keeps its head and tail; >= 1, default 2000. */
+      pruneOutputChars: z.number().int().min(1).optional(),
+    })
+    .strict()
+    .optional(),
   /**
    * Session hop (docs/feat/session-hop.md D9): the agent may PROPOSE moving this
    * session with `move_session`. It never moves anything itself — the owner is
@@ -394,6 +419,26 @@ const settingsShape = {
     .object({
       /** Default: disabled. */
       tool: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
+  /**
+   * Scheduled wakes (docs/feat/cron-tool.md D3, owner Q6): THIS host's limits on
+   * the agent's `schedule_create`. File-only, never carried (a pod is never
+   * offered the tools). Every key is checked when a wake is created.
+   */
+  schedules: z
+    .object({
+      /** Live wakes per session; 1..100, default 10. */
+      maxJobs: z.number().int().min(1).max(100).optional(),
+      /** The shortest `every`, in minutes; 1..1440, default 1. */
+      minIntervalMinutes: z.number().int().min(1).max(1440).optional(),
+      /** A recurring wake's life (and the longest `every`), in days; 1..30, default 7. */
+      expiryDays: z.number().int().min(1).max(30).optional(),
+      /** How far ahead an `at` may point, in days; 1..30, default 7. */
+      maxAheadDays: z.number().int().min(1).max(30).optional(),
+      /** The longest prompt; 1..20000, default 2000. */
+      promptMaxChars: z.number().int().min(1).max(20_000).optional(),
     })
     .strict()
     .optional(),
@@ -423,7 +468,16 @@ const settingsShape = {
    * the query. A LAPTOP-ONLY display setting: never carried to a pod.
    */
   tui: z
-    .object({ theme: z.enum(["auto", "dark", "light"]).optional() })
+    .object({
+      theme: z.enum(["auto", "dark", "light"]).optional(),
+      /**
+       * The plot's glyphs (docs/feat/model-charts.md D5): `braille` (default,
+       * 2×4 dots per cell) or `blocks` (quadrant blocks, 2×2) for a font that
+       * has no braille. A terminal cannot report a missing glyph, so it is a
+       * setting. LAPTOP-ONLY display: never carried to a pod.
+       */
+      chartGlyphs: z.enum(["braille", "blocks"]).optional(),
+    })
     .strict()
     .optional(),
   /**
@@ -434,6 +488,51 @@ const settingsShape = {
    * never carried to a pod.
    */
   sessions: z.object({ keepSuperseded: z.boolean().optional() }).strict().optional(),
+  /**
+   * The voice dictation helper (docs/feat/voice-dictation.md): push-to-talk in
+   * the LOCAL TUI on the Mac. Speech is recognised on this machine (the default
+   * engine is Apple's built-in on-device recogniser; `parakeet` is the opt-in
+   * alternative and needs a one-time `tentacle voice setup` download). LAPTOP-ONLY
+   * and input-only: never carried to a pod, and no audio ever leaves the Mac or
+   * is written to disk. Absent: OFF, Ctrl+R, `auto` language, auto-stop off —
+   * `voice: { "enabled": true }` turns the terminal's voice features on.
+   */
+  voice: z
+    .object({
+      /**
+       * Off by DEFAULT (feat/voice-off-by-default): `true` turns the terminal's
+       * voice features on. While off the key is a one-line notice and the helper
+       * is never spawned.
+       */
+      enabled: z.boolean().optional(),
+      /** The toggle key, in the TUI's `ctrl+<letter>` spelling. */
+      key: z
+        .string()
+        .regex(/^ctrl\+[a-z]$/, "key must be `ctrl+<letter>`, e.g. ctrl+r")
+        .optional(),
+      /** `auto` lets the engine detect it; `it`/`en` force one. */
+      language: z.enum(["auto", "it", "en"]).optional(),
+      /** The on-device recogniser: Apple's is the default (no download). */
+      engine: z.enum(["apple", "parakeet"]).optional(),
+      /**
+       * Finish on a pause instead of on the key. Off by default: with the key
+       * the user ends the dictation, so a comma pause can never cut it (V0's
+       * 5/30 truncations). A floor below 300 ms is refused — that is inside the
+       * measured comma-pause range (docs/feat/voice-dictation.md Execution, S1).
+       */
+      autoStop: z.boolean().optional(),
+      autoStopSilenceMs: z.number().int().min(300).optional(),
+      /** A hard stop, so a forgotten dictation ends (its text IS inserted). */
+      maxSeconds: z.number().int().min(10).optional(),
+      /** `builtin` avoids the AirPods HFP downgrade of other audio. */
+      input: z.enum(["default", "builtin"]).optional(),
+      /** AEC/AGC on the capture tap; off is for measurement only. */
+      voiceProcessing: z.boolean().optional(),
+      modelsDir: z.string().optional(),
+      helperPath: z.string().optional(),
+    })
+    .strict()
+    .optional(),
   /**
    * The mobile relay (docs/feat/mobile-relay.md R5a): `enabled` (default true)
    * lets a `serve` with paired devices dial OUT to the relay so a phone reaches
@@ -462,6 +561,29 @@ const settingsShape = {
       // agreement is PINNED by a test (`config/test/push-config.test.ts`), not
       // left to two files to drift.
       graceSeconds: z.number().int().min(0).max(PUSH_GRACE_MAX_SECONDS).optional(),
+    })
+    .strict()
+    .optional(),
+  /**
+   * Live Activities (docs/feat/mobile-live-activity.md Design 3): `enabled`
+   * (default true) lets a `serve` start a lock-screen activity for a paired
+   * phone that is NOT attached to the session; `startAfterSeconds` (default 20,
+   * range 0–3600) is how long a turn must run before it may. LAPTOP-ONLY: never
+   * carried to a pod (a pod daemon holds no device route), and it needs the
+   * relay link — `--no-relay` / `relay.enabled: false` mean no activity at all.
+   */
+  liveActivity: z
+    .object({
+      enabled: z.boolean().optional(),
+      // The bounds are `@tentacle/daemon`'s rules module's own; this package
+      // depends on zod only, so the numbers are repeated here and the agreement is
+      // PINNED by a test (`cli/test/live-activity-config.test.ts`).
+      startAfterSeconds: z
+        .number()
+        .int()
+        .min(0)
+        .max(LIVE_ACTIVITY_START_AFTER_MAX_SECONDS)
+        .optional(),
     })
     .strict()
     .optional(),

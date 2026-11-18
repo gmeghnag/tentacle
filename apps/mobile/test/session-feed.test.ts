@@ -242,4 +242,114 @@ describe("owner B4: this phone's OWN prompt is a user row", () => {
     });
     expect(h.states().rows.filter((r) => r.kind === "user")).toHaveLength(1);
   });
+
+  /**
+   * Item 2 (fix/mobile-media-live): the bubble for a photo the phone JUST sent
+   * shows that photo. The daemon has no read-back method
+   * (`thumbnails.ts:19-25`), so an image's bytes cannot be fetched; the ONE
+   * copy the phone has is the local one it uploaded. It rides the send path as
+   * `OwnPrompt.photos` (ref id → local file URI) and lands on the row.
+   *
+   * Mutation: drop the mapping → the row keeps only the id and the bubble shows
+   * the placeholder for a photo the person is looking at.
+   */
+  test("the sent photo's row carries its LOCAL copy (item 2: the bubble shows what was sent)", async () => {
+    const h = harness();
+    await h.feed.ownTurn("t1", gen([{ type: "turn_end", reason: "end_turn" }] as SessionEvent[]), {
+      text: "Cosa vedi?",
+      attachments: [{ id: "blob-1", mimeType: "image/jpeg", size: 3, name: "IMG_4876.jpg" }],
+      photos: [{ id: "blob-1", uri: "file:///photos/1-1-IMG_4876.jpg", width: 2048, height: 1536 }],
+    });
+    const user = h.states().rows.find((r) => r.kind === "user");
+    if (user?.kind !== "user") {
+      throw new Error("no user row");
+    }
+    // The ref's own fields are unchanged (the wire's `ImageRef`)…
+    expect(user.images[0]).toMatchObject({ id: "blob-1", mimeType: "image/jpeg" });
+    // …and the local copy rides along, so the bubble can draw the photo.
+    expect(user.images[0]?.localUri).toBe("file:///photos/1-1-IMG_4876.jpg");
+    expect(user.images[0]?.aspectRatio).toBeCloseTo(4 / 3);
+  });
+
+  test("a ref with no local copy (a replay, another device's message) keeps today's placeholder", async () => {
+    const h = harness();
+    await h.feed.ownTurn("t1", gen([{ type: "turn_end", reason: "end_turn" }] as SessionEvent[]), {
+      text: "from the TUI",
+      attachments: [{ id: "blob-2", mimeType: "image/png", size: 3 }],
+    });
+    const user = h.states().rows.find((r) => r.kind === "user");
+    if (user?.kind !== "user") {
+      throw new Error("no user row");
+    }
+    expect(user.images[0]?.localUri).toBeUndefined();
+  });
+});
+
+describe("the own prompt is drawn at the daemon's ACK (docs/fix/mobile-chat-glitches.md, bug 2)", () => {
+  const userTexts = (state: State): readonly string[] =>
+    state.rows.flatMap((r) => (r.kind === "user" ? [(r as { text: string }).text] : []));
+
+  /** A stream that yields nothing until `release`, then `events`. */
+  function held(events: readonly SessionEvent[]) {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    async function* stream(): AsyncIterable<SessionEvent> {
+      await gate;
+      yield* events;
+    }
+    return { stream: stream(), release };
+  }
+
+  test("accepted while the stream has yielded nothing → the user row is already there", async () => {
+    const h = harness();
+    const s = held([{ type: "turn_end", reason: "end_turn" }] as SessionEvent[]);
+    const done = h.feed.ownTurn("t1", s.stream, { text: "Scrivi qualcosa" }, Promise.resolve());
+    await settle();
+    expect(userTexts(h.states())).toEqual(["Scrivi qualcosa"]);
+    s.release();
+    await done;
+    expect(userTexts(h.states())).toEqual(["Scrivi qualcosa"]);
+  });
+
+  test("no acceptance, then a refusal → no user row", async () => {
+    const h = harness();
+    const refusal = new Error("turn in progress");
+    const broken: AsyncIterable<SessionEvent> = {
+      [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(refusal) }),
+    };
+    const never = new Promise<void>(() => {});
+    await expect(h.feed.ownTurn("t1", broken, { text: "hello" }, never)).rejects.toBe(refusal);
+    await settle();
+    expect(userTexts(h.states())).toEqual([]);
+  });
+
+  test("a reset replay AFTER acceptance → exactly one user row", async () => {
+    const h = harness();
+    const s = held([
+      { type: "history_reset", messages: HISTORY },
+      { type: "user_message", text: "same" },
+      { type: "turn_end", reason: "end_turn" },
+    ] as SessionEvent[]);
+    const done = h.feed.ownTurn("t1", s.stream, { text: "same" }, Promise.resolve());
+    await settle();
+    expect(userTexts(h.states())).toEqual(["same"]);
+    s.release();
+    await done;
+    // The reset replaced the rows with HISTORY ("Alpha"), then the replay once.
+    expect(userTexts(h.states())).toEqual(["Alpha", "same"]);
+  });
+
+  test("an acceptance that lands after the stream already ended draws nothing late", async () => {
+    const h = harness();
+    let accept: () => void = () => {};
+    const accepted = new Promise<void>((r) => {
+      accept = r;
+    });
+    await h.feed.ownTurn("t1", gen([] as SessionEvent[]), { text: "late" }, accepted);
+    accept();
+    await settle();
+    expect(userTexts(h.states())).toEqual([]);
+  });
 });

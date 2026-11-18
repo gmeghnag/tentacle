@@ -8,18 +8,27 @@
  *
  * Pure and framework-free: no React, no Ink — just strings in, strings out.
  */
-import { type ToolResultDetail, type ToolResultSpill, toolLabel } from "@tentacle/core";
+import {
+  type ToolResultDetail,
+  type ToolResultSpill,
+  artifactCard,
+  toolLabel,
+} from "@tentacle/core";
 import chalk from "chalk";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import { BULLET, blinkOn, hiddenBullet } from "./blink.ts";
 import { truncateCells } from "./cells.ts";
+import { type ChartGlyphs, chartToolBody } from "./chart-lines.ts";
+import { diagramToolBody } from "./diagram-lines.ts";
 import { formatDurationMs } from "./format.ts";
+import { harnessLevel, isHarness, joinsPrevious, showsGlyph } from "./harness-group.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
 import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
+import { firedRowLines, isFiredWake } from "./schedule-view.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 import {
@@ -40,6 +49,13 @@ export interface RenderOptions {
   readonly expandAll: boolean;
   /** Display width in columns, used to size full-width diff bars. */
   readonly width?: number;
+  /**
+   * The clock a fired wake's time is read against (`15:54` today vs
+   * `17 Nov 15:54`, docs/feat/scheduled-fire-row.md). Default `Date.now()`;
+   * tests pin it. Not part of the row-cache key: it only moves a date prefix
+   * across midnight.
+   */
+  readonly now?: number;
   /** Collapse a tool body longer than this many lines (default 8). */
   readonly collapseThreshold?: number;
   /** Lines shown in a collapsed preview (default 6). */
@@ -63,6 +79,13 @@ export interface RenderOptions {
    * shows every call's command, which subsumes this set.
    */
   readonly expandedIds?: readonly string[];
+  /**
+   * A chart's plot glyphs (`tui.chartGlyphs`, docs/feat/model-charts.md D5):
+   * `braille` (default) or `blocks` for a font without braille. Constant for an
+   * App's lifetime (a display setting, decided at launch), so it is not part of
+   * the row-cache key.
+   */
+  readonly chartGlyphs?: ChartGlyphs;
 }
 
 const DEFAULT_THRESHOLD = 8;
@@ -72,8 +95,18 @@ const DEFAULT_WIDTH = 80;
 // that marks a tool's output block (Claude-Code style). Both are 2 columns so
 // bodies stay aligned whichever is used.
 const INDENT = "  ";
+/** The chord that opens the newest artifact (docs/feat/model-artifacts.md D8, S6b). */
+export const ARTIFACT_OPEN_HINT = "^X^O";
 /** Read at CALL time: a module-load capture would freeze the palette (and the mode). */
 const connector = (): string => `${theme.subtle("⎿")} `;
+/**
+ * The `chart` tool's name (`@tentacle/tools`' `CHART_TOOL_NAME`). A literal, not
+ * an import: the TUI never depends on the tools package (the same reason the
+ * `toolSubtitle` case spells it out), and the name is data on the wire anyway.
+ */
+const CHART_TOOL = "chart";
+/** The `diagram` tool's name, for the same reason (docs/feat/model-diagrams.md D4). */
+const DIAGRAM_TOOL = "diagram";
 // An expanded call's command, on the rows under its header (owner mockup):
 // 4 display columns, so the command never wraps under the bullet.
 const COMMAND_PREFIX = "  │ ";
@@ -101,7 +134,7 @@ function assistantLines(text: string): string[] {
   const rendered = renderMarkdown(text).replace(/\n+$/, "");
   const [first = "", ...rest] = rendered.split("\n");
   // A brand-accent bullet marks the reply; continuation lines hang under it.
-  return [`${theme.accent("⏺")} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
+  return [`${theme.accent(BULLET)} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
 }
 
 const HUNK_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
@@ -235,6 +268,42 @@ function renderBar(row: DiffRow, gutterW: number, width: number): string {
 function renderContext(row: DiffRow, gutterW: number): string {
   const numStr = (row.no !== null ? String(row.no) : "").padStart(gutterW);
   return theme.subtle(`${numStr}   ${row.text}`);
+}
+
+/**
+ * `present`'s card (docs/feat/model-artifacts.md D8, chosen variant A): ONE row
+ * under the tool header — `▣ <title>` then the card's own metadata and the open
+ * hint. Two lines total with the header, never a box; the view-model is
+ * `@tentacle/core`'s `artifactCard`, so the phone's band row and this row can
+ * never disagree about what an artifact IS.
+ *
+ * The `pod` origin comes from the RUNTIME (`RenderOptions.artifactsInPod`: a
+ * `run`/`attach` daemon's bytes are pod-supplied), never from the meta, and an
+ * evicted artifact shows `no longer available` from the card's own state.
+ */
+function artifactBody(tool: ToolItem, width: number, inPod: boolean): string[] {
+  const detail = tool.detail;
+  if (detail?.kind !== "artifact") {
+    return [];
+  }
+  const card = artifactCard(detail.artifact, inPod ? { origin: "pod" } : {});
+  const hint =
+    card.action === "open"
+      ? ` · ${ARTIFACT_OPEN_HINT} open`
+      : card.action === "save"
+        ? " · s save to ~/Downloads"
+        : "";
+  const tail = `${card.line2}${hint}`;
+  // ONE row (chosen variant A: two lines total with the header). The title keeps
+  // its room first — what the person recognises — and the metadata takes what is
+  // left: a narrow terminal loses the tail, never the name. Cut by CELLS, so the
+  // row cannot wrap into a second one and overflow the block's width.
+  const room = Math.max(1, width - stringWidth(card.glyph) - 2);
+  const title = truncateCells(card.title, Math.max(1, Math.min(room, Math.ceil(room * 0.6))));
+  const meta = truncateCells(tail, Math.max(0, room - stringWidth(title) - 1));
+  return [
+    `${theme.accent(card.glyph)} ${chalk.bold(title)}${meta === "" ? "" : ` ${theme.subtle(meta)}`}`,
+  ];
 }
 
 /**
@@ -461,6 +530,11 @@ function plainToolBody(tool: ToolItem, width: number, inPod: boolean, fit: BodyF
   if (tool.detail?.kind === "diff") {
     return diffBody(tool.detail, width);
   }
+  // `present`: the card, instead of the generic tool body (D8). Its two rows are
+  // what the block exists to show, so no top-collapse applies to them.
+  if (tool.detail?.kind === "artifact") {
+    return artifactBody(tool, width, inPod);
+  }
   const expanded = fit.expanded;
   // Sub-agent (`agent_task`): the rolling tail, then its report (when done).
   // The TREE is exempt from the generic top-collapse (`toolLines`, review H1):
@@ -604,6 +678,14 @@ function toolSubtitle(
       return str("agent_id") ?? "";
     case "skill":
       return str("name") ?? "";
+    // A chart's row names the chart, not its JSON: the title is what the user
+    // reads above it, and the spec itself is many hundred characters
+    // (docs/feat/model-charts.md D3). The phone mirrors this case for case.
+    case "chart":
+    // A diagram's row likewise names it, not its Mermaid source
+    // (docs/feat/model-diagrams.md D2).
+    case "diagram":
+      return str("title") ?? tool.args;
     default:
       return tool.args;
   }
@@ -660,8 +742,127 @@ interface BodyFit extends CollapseFit {
   readonly limit: number | undefined;
 }
 
+/**
+ * A `chart` call's rows, drawn from its own arguments — or `undefined` for every
+ * other call, and for a `chart` whose arguments are not a spec this build can
+ * draw (invalid JSON, a cap lowered since, another model's forgery): that one
+ * falls back to the generic tool row, never a crash and never an error in the
+ * transcript (docs/feat/model-charts.md C4/T4.3).
+ *
+ * Drawn ONCE per (item, width, expand, glyphs) by a tiny memo, like the other
+ * per-item caches: the layout runs on every blink tick and every frame.
+ */
+const chartCache = new WeakMap<ToolItem, Map<string, readonly string[] | null>>();
+
+function chartRow(
+  tool: ToolItem,
+  width: number,
+  opts: RenderOptions,
+): readonly string[] | undefined {
+  if (tool.name !== CHART_TOOL) {
+    return undefined;
+  }
+  // Only a settled call draws: a running chart has no args yet (the tool call is
+  // complete before it starts), and the generic row's spinner is the honest row.
+  if (tool.status === "running" || tool.status === "queued") {
+    return undefined;
+  }
+  const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
+  const glyphs = opts.chartGlyphs ?? "braille";
+  const key = `${width}|${expanded ? 1 : 0}|${glyphs}`;
+  let slots = chartCache.get(tool);
+  if (!slots) {
+    slots = new Map();
+    chartCache.set(tool, slots);
+  } else {
+    const hit = slots.get(key);
+    if (hit !== undefined) {
+      return hit ?? undefined;
+    }
+  }
+  const lines = chartToolBody(tool.args, { width, expanded, glyphs });
+  if (lines === undefined || lines.length === 0) {
+    slots.set(key, null);
+    return undefined;
+  }
+  const shown = [...lines];
+  slots.set(key, shown);
+  return shown;
+}
+
+/**
+ * A `diagram` call's rows, drawn from its own arguments — or `undefined` for
+ * every other call, and for a `diagram` whose arguments are not a source this
+ * build can draw (invalid JSON, a cap lowered since, another model's forgery):
+ * that one falls back to the generic tool row, never a crash and never an error
+ * in the transcript (docs/feat/model-diagrams.md D4/T4.3). The sibling of
+ * {@link chartRow}, memoised the same way (the layout runs every frame).
+ */
+const diagramCache = new WeakMap<ToolItem, Map<string, readonly string[] | null>>();
+
+function diagramRow(
+  tool: ToolItem,
+  width: number,
+  opts: RenderOptions,
+): readonly string[] | undefined {
+  if (tool.name !== DIAGRAM_TOOL) {
+    return undefined;
+  }
+  // Only a settled call draws: a running diagram has no args yet, and the
+  // generic row's spinner is the honest row.
+  if (tool.status === "running" || tool.status === "queued") {
+    return undefined;
+  }
+  // A FAILED call does not draw: OUR gate (below, `diagramToolBody` →
+  // `parseDiagramArgs`) is only `lintDiagram`, while the daemon runs mermaid's own
+  // parser (docs/feat/model-diagrams.md D4), and a denial lands here as `error`
+  // too. Drawing it would show a diagram the renderer refused as if it had
+  // worked, with the reason gone — the generic error row (`● Diagram …` + the
+  // tool's text) is the honest row.
+  if (tool.status === "error") {
+    return undefined;
+  }
+  const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
+  const key = `${width}|${expanded ? 1 : 0}`;
+  let slots = diagramCache.get(tool);
+  if (!slots) {
+    slots = new Map();
+    diagramCache.set(tool, slots);
+  } else {
+    const hit = slots.get(key);
+    if (hit !== undefined) {
+      return hit ?? undefined;
+    }
+  }
+  // `openHint` stays off until the artifacts chord can open a diagram (D7): a
+  // hint the key cannot honour would be a lie.
+  const lines = diagramToolBody(tool.args, { width, expanded });
+  if (lines === undefined || lines.length === 0) {
+    slots.set(key, null);
+    return undefined;
+  }
+  const shown = [...lines];
+  slots.set(key, shown);
+  return shown;
+}
+
 function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const cols = Math.max(1, Math.floor(opts.width ?? DEFAULT_WIDTH));
+  // A chart draws ITSELF in the row's place: no bullet, no `● Chart …` header, no
+  // body connector — the chart is part of the reply, not a tool block (owner
+  // requirement, docs/feat/model-charts.md D5). Its caption is its first row, so
+  // it is also the row a click toggles (`tool-hit.ts`: a header is row 0).
+  const chart = chartRow(tool, cols, opts);
+  if (chart !== undefined) {
+    return [...chart];
+  }
+  // A diagram draws itself in the row's place too, for the same reason: it is
+  // part of the reply, not a tool block. Its caption (the title · type) is row
+  // 0, so it is the row a click toggles.
+  const diagram = diagramRow(tool, cols, opts);
+  if (diagram !== undefined) {
+    return [...diagram];
+  }
   if (tool.status === "queued") {
     // Approved, not started: one dim row, no body, no spinner.
     const row = queuedRow(toolTitle(tool));
@@ -704,18 +905,58 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
 }
 
 /** A full-width grey rule with `text` in it: `── text ─────…`. */
-function separatorLines(text: string, width: number): string[] {
+function separatorLines(text: string, width: number, body?: string, expanded = false): string[] {
   const head = `── ${text} `;
-  const rest = Math.max(2, width - stringWidth(head));
-  return [theme.subtle(`${head}${"─".repeat(rest)}`)];
+  const hasBody = body !== undefined && body !== "";
+  // The collapsed `Ctrl+O` hint rides the rule's row, so its cells come OUT of
+  // the rule's fill (review S3 F1): a full-width rule with the hint appended
+  // wrapped onto a SECOND row on every resume/resync of a compacted session.
+  // It is budgeted in the expanded state too, so Ctrl+O does not re-flow the rule.
+  const hintText = ` ${EXPAND_HINT}`;
+  // Budgeted only when it FITS beside at least 2 rule cells: a hint that would
+  // wrap is dropped (a narrow terminal, where it could never be read whole),
+  // never truncated and never pushed onto a second row.
+  const hint = hasBody && width - stringWidth(head) - stringWidth(hintText) >= 2 ? hintText : "";
+  const rest = Math.max(2, width - stringWidth(head) - stringWidth(hint));
+  const rule = theme.subtle(`${head}${"─".repeat(rest)}`);
+  // `body` (docs/feat/harness-notices.md S3.4): what the rule stands for, shown
+  // only when expanded (Ctrl+O) — a resumed compaction's brief, which used to be
+  // a `›` user row carrying the whole thing. Hung two spaces under the rule, the
+  // same indent a harness line's continuation uses; `itemRows`' `expandMatters`
+  // already keys on `body`, so both slots are cached.
+  if (!hasBody) {
+    return [rule];
+  }
+  return expanded
+    ? [rule, ...body.split("\n").map((l) => `  ${theme.subtle(l)}`)]
+    : [`${rule}${theme.subtle(hint)}`];
 }
 
-function noticeLines(text: string, expanded: boolean, hint?: string, body?: string): string[] {
+/** The harness glyphs: info `◇`, warn `▲` (docs/feat/harness-notices.md S2). */
+export const HARNESS_GLYPHS = { info: "◇", warn: "▲" } as const;
+
+/**
+ * One harness line's rows (`NoticeItem`, docs/feat/harness-notices.md S2).
+ *
+ * `glyph` is what `harness-group.showsGlyph` decided for this item: the block's
+ * head carries `◇`/`▲` (a warn's glyph painted amber, the extra cue beside the
+ * SHAPE that carries the meaning — the owner is colour-blind), and every
+ * continuation row hangs two spaces under it. `glyph: false` (a run of the same
+ * level) keeps the cells OCCUPIED with two spaces, so nothing re-flows when the
+ * glyph appears or disappears: the swap is post-wrap, exactly like the tool
+ * bullet's OFF phase (`offPhaseRows`).
+ */
+function noticeLines(
+  text: string,
+  expanded: boolean,
+  hint?: string,
+  body?: string,
+  level: "info" | "warn" = "info",
+  glyph = true,
+): string[] {
   const [first = "", ...rest] = text.split("\n");
-  const lines = [
-    `${theme.notice("⏺")} ${theme.notice(first)}`,
-    ...rest.map((l) => `  ${theme.notice(l)}`),
-  ];
+  const head = glyph ? `${headGlyph(level)} ` : "  ";
+  const lines = [`${head}${theme.harness(first)}`, ...rest.map((l) => `  ${theme.harness(l)}`)];
   if (hint) {
     // The hint ends the last line, grey: a separate field, never cut out of the text.
     lines[lines.length - 1] += ` ${theme.subtle(hint)}`;
@@ -724,7 +965,7 @@ function noticeLines(text: string, expanded: boolean, hint?: string, body?: stri
     // A note's body (a finished sub-agent's report): shown when expanded (Ctrl+O),
     // else only hinted at, so a resume stays compact.
     if (expanded) {
-      lines.push(...body.split("\n").map((l) => `  ${theme.notice(l)}`));
+      lines.push(...body.split("\n").map((l) => `  ${theme.harness(l)}`));
     } else {
       lines[lines.length - 1] += ` ${theme.subtle(EXPAND_HINT)}`;
     }
@@ -732,19 +973,54 @@ function noticeLines(text: string, expanded: boolean, hint?: string, body?: stri
   return lines;
 }
 
+/** A harness line's glyph cell: the grey `◇`, or a warn's amber `▲`. */
+function headGlyph(level: "info" | "warn"): string {
+  const glyph = HARNESS_GLYPHS[level];
+  return level === "warn" ? theme.warn(glyph) : theme.harness(glyph);
+}
+
 /** Logical (pre-wrap) lines for a single display item. */
 export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
+  return itemLinesAt(item, opts, true);
+}
+
+/**
+ * `itemLines` with the harness glyph decided by the CALLER: a notice whose
+ * neighbour is a harness line of its own level hangs two spaces instead of
+ * opening with `◇` (`harness-group.showsGlyph`). The default `true` keeps
+ * `itemLines` the item-in-isolation view (a renamed body row, a single notice).
+ */
+export function itemLinesAt(item: DisplayItem, opts: RenderOptions, glyph: boolean): string[] {
   switch (item.kind) {
     case "user": {
-      // An image-only prompt has no text: its rows are the image lines alone
-      // (a blank text row would collapse — Ink measures an empty <Text> 0×0, P9).
-      const hasImages = (item.images ?? []).length > 0;
-      const rows =
-        item.text === "" && hasImages
-          ? []
-          : userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
+      // A fired scheduled wake is a harness-grey timeline row, not a `>` row the
+      // person typed (docs/feat/scheduled-fire-row.md) — the same rows live and
+      // reloaded, decided from the message itself.
+      const fired = firedRowLines(item.text, item.schedule, {
+        width: opts.width ?? DEFAULT_WIDTH,
+        expanded: opts.expandAll === true,
+        now: opts.now ?? Date.now(),
+      });
+      if (fired !== null) {
+        return fired.map((row) => theme.subtle(row));
+      }
+      // An attachment-only prompt has no text: its rows are the attachment lines
+      // alone (a blank text row would collapse — Ink measures an empty <Text> 0×0, P9).
+      const onlyAttachments =
+        item.text === "" && ((item.images ?? []).length > 0 || (item.documents ?? []).length > 0);
+      const rows = onlyAttachments
+        ? []
+        : userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
       const images = (item.images ?? []).map((row) => theme.subtle(row));
-      return [...(item.restart ? [theme.subtle("restart prompt")] : []), ...rows, ...images];
+      // A PDF's row (docs/feat/pdf-read.md D5) is the same subtle line, after the
+      // images: the user sees the file's name; the text lives with the model.
+      const documents = (item.documents ?? []).map((row) => theme.subtle(row));
+      return [
+        ...(item.restart ? [theme.subtle("restart prompt")] : []),
+        ...rows,
+        ...images,
+        ...documents,
+      ];
     }
     case "assistant":
       return assistantLines(item.text);
@@ -752,23 +1028,43 @@ export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
       return toolLines(item, opts);
     case "notice":
       return item.separator
-        ? separatorLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH))
-        : noticeLines(item.text, opts.expandAll === true, item.hint, item.body);
+        ? separatorLines(
+            item.text,
+            Math.floor(opts.width ?? DEFAULT_WIDTH),
+            item.body,
+            opts.expandAll === true,
+          )
+        : noticeLines(
+            item.text,
+            opts.expandAll === true,
+            item.hint,
+            item.body,
+            item.level === "warn" ? "warn" : "info",
+            glyph,
+          );
   }
 }
 
-/** Logical lines for the whole transcript, with a blank line between items. */
+/**
+ * Logical lines for the whole transcript: a blank row between items, EXCEPT
+ * between two harness lines, which group into one block
+ * (`harness-group.joinsPrevious`; docs/feat/harness-notices.md S2.5).
+ */
 export function transcriptLines(items: readonly DisplayItem[], opts: RenderOptions): string[] {
   const out: string[] = [];
+  // The last item that DREW rows: an item with none is not a neighbour (it is
+  // invisible), so grouping looks past it — and this stays one O(n) pass.
+  let prev: DisplayItem | undefined;
   for (const item of items) {
-    const lines = itemLines(item, opts);
+    const lines = itemLinesAt(item, opts, showsGlyph(prev, item));
     if (lines.length === 0) {
       continue;
     }
-    if (out.length > 0) {
+    if (out.length > 0 && !joinsPrevious(prev, item)) {
       out.push("");
     }
     out.push(...lines);
+    prev = item;
   }
   return out;
 }
@@ -860,14 +1156,15 @@ export function carryColor(rows: readonly string[]): string[] {
 // change invalidates all three (a fresh entry holds only the view just built).
 //
 // The blink glyph is NOT part of the cache: a row is always wrapped with the ON
-// glyph `⏺` and the OFF phase swaps in the SAME character under the SGR conceal
+// glyph `●` and the OFF phase swaps in the SAME character under the SGR conceal
 // attribute (`fix/tui-blink-off-width`), so a phase tick changes one equal-width
 // glyph in row 0 of an already-cached layout and re-wraps nothing at all
 // (docs/feat/tui-tool-blink.md, finding 1). Swapping before/inside the wrap was
 // the round-1 bug: the OFF glyph was 1 column, so the row wrapped differently
 // and the transcript jumped a row at 1 Hz. Counting spaces is wrong wherever a
-// terminal draws `⏺` narrower than `string-width` says — the same character is
-// width-identical by construction, so the row cannot move in ANY terminal.
+// terminal draws the bullet narrower than `string-width` says — the same
+// character is width-identical by construction, so the row cannot move in ANY
+// terminal.
 // The same property is what lets a CLICKED call keep blinking
 // (docs/feat/tui-tool-expand.md point 7): the command block is below row 0, so
 // it is untouched by the swap.
@@ -894,12 +1191,40 @@ function offPhaseRows(rows: readonly string[]): readonly string[] {
     return hit;
   }
   const [first = "", ...rest] = rows;
-  // The FIRST `⏺` of row 0 is the bullet: `toolLines` opens the header with it.
+  // The FIRST bullet of row 0 is the call's glyph: `toolLines` opens the header
+  // with it.
   // Replacing only that one keeps the SGR codes around it and the rest of the
   // row (label, subtitle, duration) byte-identical — the conceal closes at
   // `ESC[28m` immediately after the glyph, so nothing else on the row is hidden.
   const swapped = [first.replace(BULLET, hiddenBullet()), ...rest];
   offPhaseCache.set(rows, swapped);
+  return swapped;
+}
+
+/**
+ * The HANG variant of a harness line's wrapped rows: the head glyph cell (the
+ * glyph plus its one space) becomes two spaces, so a run of same-level lines
+ * reads as one block under a single `◇`. Memoised on the row array — which is
+ * itself cached per item + width + slot — exactly like `offPhaseCache`, so
+ * `itemRows`' cache key stays item identity while the glyph follows its
+ * NEIGHBOUR (docs/feat/harness-notices.md S2.5, the failure mode "cache
+ * staleness": the flag is computed per layout from `prev`, never stored on the
+ * item).
+ */
+const hangCache = new WeakMap<readonly string[], readonly string[]>();
+
+/** The same rows with the head glyph cell concealed (two spaces, same width). */
+function hangRows(rows: readonly string[], level: "info" | "warn"): readonly string[] {
+  const hit = hangCache.get(rows);
+  if (hit) {
+    return hit;
+  }
+  const [first = "", ...rest] = rows;
+  // The glyph is single-width and so is the cell it sits in (AGENTS §6: `◇` and
+  // `▲` measure 1), so this cannot re-flow a row: only the first cell's bytes
+  // change, and the swap is made after the wrap.
+  const swapped = [first.replace(`${headGlyph(level)} `, "  "), ...rest];
+  hangCache.set(rows, swapped);
   return swapped;
 }
 
@@ -913,8 +1238,12 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   // expand/threshold/preview/expandedIds; every other kind is a function of
   // width alone (always the `collapsed` slot) — except a notice with a BODY
   // (a sub-agent's report), whose body shows only when expanded.
-  // (docs/feat/subagent-ledger-log.md)
-  const expandMatters = item.kind === "tool" || (item.kind === "notice" && item.body !== undefined);
+  // (docs/feat/subagent-ledger-log.md) — and a fired scheduled wake, whose
+  // prompt lines show only when expanded (docs/feat/scheduled-fire-row.md).
+  const expandMatters =
+    item.kind === "tool" ||
+    (item.kind === "notice" && item.body !== undefined) ||
+    (item.kind === "user" && isFiredWake(item.text, item.schedule));
   const slot: "collapsed" | "expanded" | "command" = !expandMatters
     ? "collapsed"
     : expand
@@ -944,7 +1273,7 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
 /**
  * The cached ON layout, or its concealed OFF twin while a running call is in
  * the OFF half of the shared cycle. Only a RUNNING tool is ever affected: a
- * settled call's `toolBullet` is `⏺` at every phase, so its rows are returned
+ * settled call's `toolBullet` is `●` at every phase, so its rows are returned
  * as the very same array (the cache-hit identity the tests pin).
  */
 function withPhase(
@@ -969,12 +1298,18 @@ export interface LaidItem {
    * (`tool-hit.ts: toolCallAt`).
    */
   readonly id: string;
+  /**
+   * Whether a blank separator row sits just above this item's first row. An
+   * item that JOINS its predecessor (two harness lines, `harness-group.ts`) has
+   * none, so `sliceLaid` must not assume `start - 1` is one.
+   */
+  readonly gap: boolean;
 }
 
 /**
  * A positional index of the whole transcript: each non-empty item's cached rows
- * plus its global start offset (with one blank separator row between items), and
- * the grand `total` row count.
+ * plus its global start offset (with one blank separator row between items),
+ * and the grand `total` row count.
  *
  * This is the cheap half of the layout: it walks every item but only does O(1)
  * cache lookups (`itemRows`) and offset arithmetic — it never materialises the
@@ -994,16 +1329,24 @@ export function layoutTranscript(
 ): TranscriptLayout {
   const laid: LaidItem[] = [];
   let cursor = 0;
+  // The last item that DREW rows — the same neighbour rule `transcriptLines`
+  // uses (`harness-group.ts`), because the two must agree row for row (a parity
+  // test pins it): the scroll/selection maths reads THIS layout.
+  let prev: DisplayItem | undefined;
   for (const item of items) {
-    const rows = itemRows(item, opts);
+    const own = itemRows(item, opts);
+    const rows =
+      showsGlyph(prev, item) || !isHarness(item) ? own : hangRows(own, harnessLevel(item));
     if (rows.length === 0) {
       continue;
     }
-    if (laid.length > 0) {
+    const gap = laid.length > 0 && !joinsPrevious(prev, item);
+    if (gap) {
       cursor += 1; // blank separator row between items (matches transcriptLines)
     }
-    laid.push({ rows, start: cursor, id: item.kind === "tool" ? item.id : "" });
+    laid.push({ rows, start: cursor, id: item.kind === "tool" ? item.id : "", gap });
     cursor += rows.length;
+    prev = item;
   }
   return { laid, total: cursor };
 }
@@ -1016,10 +1359,9 @@ export function layoutTranscript(
  */
 export function sliceLaid(laid: readonly LaidItem[], start: number, end: number): string[] {
   const out: string[] = [];
-  let i = 0;
-  for (const { rows, start: s } of laid) {
-    if (i > 0) {
-      const sep = s - 1; // the separator row sits just before this item
+  for (const { rows, start: s, gap } of laid) {
+    if (gap) {
+      const sep = s - 1; // the separator row sits just above this item
       if (sep >= start && sep < end) {
         out.push("");
       }
@@ -1032,7 +1374,6 @@ export function sliceLaid(laid: readonly LaidItem[], start: number, end: number)
         out.push(row);
       }
     }
-    i += 1;
   }
   return out;
 }

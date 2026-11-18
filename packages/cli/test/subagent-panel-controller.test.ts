@@ -365,13 +365,28 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       // image-less controller with no reason shown.
       "attachImage",
       "imageInput",
+      // The same seam one kind over (docs/feat/pdf-read.md D6): a PDF's block
+      // comes from the session (it alone knows upload vs laptop-extraction).
+      "attachDocument",
+      "documentsInput",
       "compact",
       "clear",
       "openForReset",
       "enqueue",
+      // Take a queued row back (docs/feat/queue-unqueue.md): ↑ on an empty input.
+      "unqueue",
       "sendNow",
       "close",
       "skills",
+      // The `/mcp` / `/skills` switches (docs/feat/session-capabilities.md S4).
+      "capabilities",
+      "onCapabilities",
+      "setCapability",
+      // The artifacts the model presented (docs/feat/model-artifacts.md S6a): the
+      // panel's list and the opener's bytes, both through the session.
+      "listArtifacts",
+      "readArtifact",
+      "opened",
       "context",
       "rename",
       "onReturned",
@@ -383,6 +398,11 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       "onSubagentNotify",
       "messageSubagent",
       "killSubagent",
+      // The session's armed scheduled wakes (docs/feat/cron-tool.md S5): the
+      // dock's rows, the pill's count and `/schedule` all paint this feed, and a
+      // delete is the daemon's own method. Forwarded in `persistingController`.
+      "onSchedules",
+      "deleteSchedule",
       "onJobs",
       "jobOutput",
       "killJob",

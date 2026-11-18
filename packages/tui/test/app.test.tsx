@@ -9,7 +9,7 @@ import {
   type PermissionRequest,
   type StreamEvent,
 } from "@tentacle/core";
-import { ToolRegistry, shellTool } from "@tentacle/tools";
+import { ToolRegistry, chartTool, shellTool } from "@tentacle/tools";
 import chalk from "chalk";
 import { render } from "ink-testing-library";
 import stringWidth from "string-width";
@@ -34,7 +34,7 @@ const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
  * (`ESC[8m … ESC[28m`, `fix/tui-blink-off-width`). It is detected from the
  * CONCEAL code, not from "the bullet is missing": with the same character in
  * both phases the plain text of the two rows is identical by design, and with
- * colour off the OFF row is an ordinary `⏺`.
+ * colour off the OFF row is an ordinary `●`.
  */
 const concealed = (row: string): boolean => row.includes("\x1b[8m");
 /**
@@ -514,7 +514,7 @@ describe("App", () => {
     await delay(80);
     const frame = lastFrame() ?? "";
     expect(frame).toContain("abc");
-    expect(frame).toMatch(/⏺ abc\s*$/m); // exactly "abc": not "abcc", not "abc" + "abc"
+    expect(frame).toMatch(/● abc\s*$/m); // exactly "abc": not "abcc", not "abc" + "abc"
     expect(frame.match(/abc/g)?.length).toBe(1);
     expect(frame.match(/› hi/g)?.length).toBe(1); // the user bubble once
     unmount();
@@ -541,7 +541,13 @@ describe("App", () => {
     stdin.write("\r");
     await delay(80);
     expect(compacted).toBe(1);
-    expect(lastFrame() ?? "").toContain("8 → 2 messages");
+    // S3: success writes no transcript LINE — a separator rule at the
+    // compaction point, and `Compacted ✓` in the slot for ~3 s. An older
+    // daemon returns no sizes, so the rule has no figures (never a fake 0).
+    const frame = lastFrame() ?? "";
+    expect(frame).toMatch(/^── compacted /m);
+    expect(frame).not.toContain("Context compacted");
+    expect(frame).toContain("Compacted ✓");
     unmount();
   });
 
@@ -575,8 +581,10 @@ describe("App", () => {
     await delay(60);
     const shown = stripAnsi(lastFrame() ?? "");
     expect(shown).toContain('"maxIterations": 5 // this terminal: 3');
+    // A `NoticeItem` (multi-line, from `appendNotice`): the block hangs under
+    // one `◇`, its hint on the last row (docs/feat/harness-notices.md S2).
     expect(shown).toContain(
-      "⏺ 1 differs from this terminal (/settings sync to use this terminal's values)",
+      "  1 differs from this terminal (/settings sync to use this terminal's values)",
     );
     expect(synced).toBe(0);
     stdin.write("/settings sync");
@@ -584,7 +592,9 @@ describe("App", () => {
     stdin.write("\r");
     await delay(60);
     expect(synced).toBe(1);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Session settings synced.");
+    // The outcome joins the block above it (two harness lines group: no blank
+    // row, no second glyph — docs/feat/harness-notices.md S2.5).
+    expect(stripAnsi(lastFrame() ?? "")).toContain("  Session settings synced.");
     unmount();
   });
 
@@ -613,16 +623,17 @@ describe("App", () => {
     await delay(30);
     stdin.write("\r");
     await delay(60);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Syncing this terminal's settings…");
+    expect(stripAnsi(lastFrame() ?? "")).toContain("◇ Syncing this terminal's settings…");
     stdin.write("/settings sync");
     await delay(30);
     stdin.write("\r");
     await delay(60);
     expect(synced).toBe(1);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Already syncing this terminal's settings…");
+    expect(stripAnsi(lastFrame() ?? "")).toContain("  Already syncing this terminal's settings…");
     finish([{ text: "Session settings synced." }]);
     await delay(60);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Session settings synced.");
+    // Replaced IN ITS OWN ENTRY (round 3), so this item still opens the block.
+    expect(stripAnsi(lastFrame() ?? "")).toContain("◇ Session settings synced.");
     // Settled: another apply goes through.
     stdin.write("/settings sync");
     await delay(30);
@@ -662,10 +673,10 @@ describe("App", () => {
     stdin.write("\r");
     await delay(60);
     const rows = stripAnsi(lastFrame() ?? "").split("\n");
-    const start = rows.findIndex((row) => row.startsWith("⏺ Session settings:"));
+    const start = rows.findIndex((row) => row.startsWith("◇ Session settings:"));
     expect(start).toBeGreaterThanOrEqual(0);
     expect(rows.slice(start, start + 8).map((row) => row.trimEnd())).toEqual([
-      "⏺ Session settings:",
+      "◇ Session settings:",
       "  {",
       '    "model": {',
       '      "contextWindow": 1000 // this terminal: 2000',
@@ -712,9 +723,12 @@ describe("App", () => {
       await delay(60);
       const frame = stripAnsi(lastFrame() ?? "");
       expect(frame).not.toContain("Syncing this terminal's settings…");
-      expect(frame.match(/⏺/g)).toHaveLength(3); // ready, the outcome, the show
-      expect(frame.indexOf(`⏺ ${outcome}`)).toBeGreaterThan(-1);
-      expect(frame.indexOf(`⏺ ${outcome}`)).toBeLessThan(frame.indexOf("⏺ SHOWN MEANWHILE"));
+      // ONE glyph for the run: the outcome opens the block and `SHOWN MEANWHILE`
+      // hangs under it — two consecutive harness lines group
+      // (docs/feat/harness-notices.md S2.5). The ready line is the model's `●`.
+      expect(frame.match(/◇/g)).toHaveLength(1);
+      expect(frame.indexOf(`◇ ${outcome}`)).toBeGreaterThan(-1);
+      expect(frame.indexOf("  SHOWN MEANWHILE")).toBeGreaterThan(frame.indexOf(`◇ ${outcome}`));
       unmount();
     });
   }
@@ -1030,7 +1044,7 @@ describe("App", () => {
       />,
     );
     await delay(40);
-    // Row 1 is the welcome line, now "⏺ Tentacle ready. …" — the bullet
+    // Row 1 is the welcome line, now "● Tentacle ready. …" — the bullet
     // occupies columns 1–2, so "Tentacle" starts at column 3. Select 10 chars.
     stdin.write(press(3, 1));
     await delay(15);
@@ -1400,7 +1414,7 @@ describe("App robustness", () => {
     expect(frame).toContain("a"); // first line
     expect(frame).toContain("b"); // second line (after the inserted newline)
     expect(frame).not.toContain("Working…"); // the turn did NOT start
-    expect(frame).not.toContain("⏺ ok"); // and nothing was submitted
+    expect(frame).not.toContain("● ok"); // and nothing was submitted
     unmount();
   });
 
@@ -1707,7 +1721,8 @@ describe("/mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     const frame = lastFrame() ?? "";
     expect(asked).toBe(1);
     expect(frame).toContain("MCP servers · 1 of 2 reachable");
-    expect(frame).toContain("❯ ▸ github  ● connected · 2 tools · 4 ms");
+    // The state word and latency moved to the first expanded row (S4, quiet grammar).
+    expect(frame).toContain("❯ ▸ github  ● 2 tools");
     expect(frame).toContain("  ▸ db      ✗ failed");
     expect(frame).not.toContain("Type a task or /command"); // the panel replaces the input
     unmount();
@@ -2026,8 +2041,9 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     const frame = lastFrame() ?? "";
     expect(asked).toBe(2);
     expect(frame).toContain("Skills · 2 found · 1 problem");
-    expect(frame).toContain("❯ ▸ review    you + model  review a diff");
-    expect(frame).toContain("  ▸ lint-fix  model only   fix lint");
+    // Who may invoke it moved to the expanded rows (S4: `who()` removed).
+    expect(frame).toContain("❯ ▸ review    review a diff");
+    expect(frame).toContain("  ▸ lint-fix  fix lint");
     expect(frame).toContain("  ▸ ! 1 discovery problem");
     expect(frame).not.toContain("Type a task or /command");
     unmount();
@@ -2039,7 +2055,7 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     await delay(30);
     let frame = lastFrame() ?? "";
     expect(frame).toContain("❯ ▾ review");
-    expect(frame).toContain("/review · offered to the model");
+    expect(frame).toContain("/review · the model sees it too");
     expect(frame).toContain("project · /w/.agents/skills/review/SKILL.md");
     stdin.write("\u001B");
     await delay(60);
@@ -2976,8 +2992,8 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
 
   test("the bullet alternates while the call runs, and the label never moves column", async () => {
     // Mutation (red, verified): a static running bullet → one distinct row; an
-    // OFF glyph narrower than `⏺` → `positions` gets 2 entries and the row count
-    // changes at 1 Hz (round-1 finding 1).
+    // OFF glyph narrower than the bullet's ON glyph → `positions` gets 2 entries
+    // and the row count changes at 1 Hz (round-1 finding 1).
     //
     // The whole test runs on fake timers: a timer armed under real timers would
     // not be reachable by `advanceTimersByTime` (AGENTS §9: drive async
@@ -3014,9 +3030,10 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
             rawOn = row;
           }
         }
-        // The DISPLAY COLUMN of the label, not the string index: `⏺` is 2 wide
-        // in one phase and the raw index would differ by one even when the
-        // visible row has not moved (the round-1 test's weak correlate).
+        // The DISPLAY COLUMN of the label, not the string index: the round-1
+        // bullet was 2 wide in one phase, and the raw index would differ by one
+        // even when the visible row has not moved (the round-1 test's weak
+        // correlate).
         positions.add(stringWidth(stripAnsi(row).slice(0, stripAnsi(row).indexOf("Bash"))));
         clock.advanceTimersByTime(BLINK_HALF_MS);
         await settle();
@@ -3028,23 +3045,23 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       // THE property that kills the bug (fix/tui-blink-off-width): strip the
       // SGR off both phases and the rows are IDENTICAL — the same glyph in the
       // same cells — so the owner's terminal cannot draw them one column apart
-      // whichever width IT assigns to `⏺`. `seen`/`positions` above are the
+      // whichever width IT assigns to `●`. `seen`/`positions` above are the
       // weaker correlates; this is the exact one.
       expect(plainOff).toBe(plainOn);
-      expect(plainOff).toContain("⏺ Bash");
+      expect(plainOff).toContain("● Bash");
       // The conceal code survives Ink's output pipeline into the FRAME — the
       // load-bearing assumption, at the boundary the user actually sees — and it
       // is closed before the label, so nothing after the bullet is hidden.
-      expect(rawOff.indexOf("\x1b[8m⏺")).toBeGreaterThanOrEqual(0);
+      expect(rawOff.indexOf("\x1b[8m●")).toBeGreaterThanOrEqual(0);
       const close = rawOff.indexOf("\x1b[28m");
-      expect(close).toBeGreaterThan(rawOff.indexOf("⏺"));
+      expect(close).toBeGreaterThan(rawOff.indexOf("●"));
       expect(close).toBeLessThan(rawOff.indexOf("Bash"));
       // The call ends: the bullet is the ok one again, at whatever phase.
       clock.advanceTimersByTime(6000);
       await settle();
-      // Asserted on the SGR-stripped row: the test forces truecolour, so `⏺`
+      // Asserted on the SGR-stripped row: the test forces truecolour, so `●`
       // carries an SGR code and a raw `toMatch` would never match.
-      expect(stripAnsi(rowNow())).toMatch(/^⏺ Bash cp a b 5\.0s/);
+      expect(stripAnsi(rowNow())).toMatch(/^● Bash cp a b 5\.0s/);
       expect(concealed(rowNow())).toBe(false); // a settled row is never hidden
       app.unmount();
     } finally {
@@ -3085,12 +3102,12 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       }
       expect(raw).not.toBe(""); // non-vacuity: we really captured an OFF frame
       // The conceal pair, in the frame, hugging the glyph…
-      expect(raw).toContain("\x1b[8m⏺");
+      expect(raw).toContain("\x1b[8m●");
       expect(raw).toContain("\x1b[28m");
       // …closed before the label, so only the bullet is hidden…
       expect(raw.indexOf("\x1b[28m")).toBeLessThan(raw.indexOf("Bash"));
       // …and the plain row is the visible ON row byte for byte.
-      expect(stripAnsi(raw).trimEnd()).toBe("⏺ Bash cp a b");
+      expect(stripAnsi(raw).trimEnd()).toBe("● Bash cp a b");
       app.unmount();
     } finally {
       chalk.level = level;
@@ -3206,7 +3223,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       /** The row as the user SEES it: SGR stripped (the glyph is always there now). */
       const shown = (): string => stripAnsi(rowNow());
       // The call is alive, ON: the bullet is visible, and the timer exists.
-      expect(shown().startsWith("⏺ Bash")).toBe(true);
+      expect(shown().startsWith("● Bash")).toBe(true);
       const live = clock.getTimerCount();
       clock.advanceTimersByTime(BLINK_HALF_MS);
       await settle();
@@ -3219,7 +3236,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       // is SOLID now, and nothing re-arms it.
       const solid = rowNow();
       // Solid AND visible: the stale row is no longer concealed either.
-      expect(shown().startsWith("⏺ Bash")).toBe(true);
+      expect(shown().startsWith("● Bash")).toBe(true);
       expect(concealed(solid)).toBe(false);
       for (let i = 0; i < 4; i++) {
         clock.advanceTimersByTime(BLINK_HALF_MS);
@@ -3303,7 +3320,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
         const pair = rows();
         expect(pair).toHaveLength(2);
         for (const row of pair) {
-          expect(stripAnsi(row).startsWith("⏺ Bash")).toBe(true);
+          expect(stripAnsi(row).startsWith("● Bash")).toBe(true);
         }
         clock.advanceTimersByTime(50);
         await settle();
@@ -3316,19 +3333,22 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
   });
 
   test("at 79 columns no row moves between phases: the frame does not jump (finding 1)", async () => {
-    // The HIGH width finding, at FRAME level: `⏺` is 2 columns, the old OFF
-    // glyph was 1, so at 79 columns a long command's row re-wrapped and every
+    // The HIGH width finding, at FRAME level: the round-1 bullet measured 2
+    // columns by `string-width`, the old OFF glyph was 1, so at 79 columns a
+    // long command's row re-wrapped and every
     // row below it moved one line at 1 Hz. The review's captured symptom was
     // `bashRow=14 replyRow=10` ↔ `bashRow=15 replyRow=11`.
     // The command below is 85 columns, so at 79 columns the fitted header is CUT
-    // (71 columns of room) and the ellipsis makes it fill the row EXACTLY: the
-    // wrap sits on the boundary, and any phase whose glyph is not 2 columns
-    // either overflows (a wider OFF glyph) or leaves a column unused (a narrower
-    // one) — both are caught by the width assertion below.
+    // and fills the row to within the one column the per-character cut leaves
+    // spare: the wrap sits on the boundary, so any phase whose glyph is wider
+    // overflows or one whose glyph is narrower leaves a column unused — both are
+    // caught by the width assertion below.
     // Mutation (red, verified, on the STACKED tree): swap the OFF glyph for
-    // `"   "` (3 columns) → 80, or for `" "` (1 column) → 78. The OFF phase now
-    // emits the SAME glyph, concealed (`fix/tui-blink-off-width`), so no count of
-    // spaces — and no terminal's opinion about U+23FA's width — is involved.
+    // `"   "` (3 columns) → 80, or for `" "` (1 column) → 78 (78 ↔ 79 after
+    // `fix/tui-bullet-glyph` moved the bullet to a 1-column glyph). The OFF phase
+    // now emits the SAME glyph, concealed (`fix/tui-blink-off-width`), so no
+    // count of spaces — and no terminal's opinion about the bullet's width — is
+    // involved.
     const createSession = () => ({
       ...inertSession(),
       async *send() {
@@ -3402,9 +3422,15 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       expect(new Set(views.map((v) => v.rows)).size).toBe(1);
       expect(new Set(views.map((v) => v.bash)).size).toBe(1);
       expect(new Set(views.map((v) => v.reply)).size).toBe(1);
-      // Every phase's header fills the row exactly: a differently-widthed OFF
-      // glyph re-wraps it (the round-1 jump) and shows up here as 78 or 80.
-      expect(new Set(views.map((v) => v.width))).toEqual(new Set([79]));
+      // Every phase's header has the SAME width, and it fills the row to within
+      // the one column the per-character cut leaves spare: a differently-widthed
+      // OFF glyph re-wraps it (the round-1 jump) and shows up here as a second
+      // width in the set.
+      const widths = new Set(views.map((v) => v.width));
+      expect(widths.size).toBe(1);
+      const [headerWidth = 0] = [...widths];
+      expect(headerWidth).toBeGreaterThanOrEqual(78);
+      expect(headerWidth).toBeLessThanOrEqual(79);
       // The labelled property, at the width the review named.
       const first = views[0] as { rows: number; bash: number; reply: number };
       for (const v of views) {
@@ -3456,7 +3482,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       await settle();
       expect(clock.getTimerCount()).toBe(0); // G: a leaked interval pads this to 1
       const row = toolRows(app.lastFrame() ?? "").find((l) => l.includes("Bash")) ?? "";
-      expect(row).toMatch(/^⏺ Bash cp a b 0\.3s/);
+      expect(row).toMatch(/^● Bash cp a b 0\.3s/);
       for (let i = 0; i < 3; i++) {
         clock.advanceTimersByTime(BLINK_HALF_MS);
         await settle();
@@ -3487,14 +3513,14 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
         toolRows(app.lastFrame() ?? "").find((l) => l.includes("Bash")) ?? "";
       // Sample inside the call's 200 ms: never off.
       for (let i = 0; i < 4; i++) {
-        expect(rowNow().startsWith("⏺ Bash")).toBe(true);
+        expect(rowNow().startsWith("● Bash")).toBe(true);
         clock.advanceTimersByTime(50);
         await settle();
       }
       // It ends well inside the first half-period: solid ok bullet, no blink.
       clock.advanceTimersByTime(100);
       await settle();
-      expect(rowNow()).toMatch(/^⏺ Bash cp a b 0\.2s/);
+      expect(rowNow()).toMatch(/^● Bash cp a b 0\.2s/);
       app.unmount();
     } finally {
       clock.useRealTimers();
@@ -3642,7 +3668,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
     expect(cont(expanded).join(" ")).toContain(COMMAND);
     // The header keeps bullet + label + elapsed.
     const header = rowsOf(expanded)[headerRowOf(expanded) - 1] ?? "";
-    expect(header.startsWith("⏺ Bash")).toBe(true);
+    expect(header.startsWith("● Bash")).toBe(true);
     expect(header).toContain("1.7s");
     // A second click collapses it again.
     app.stdin.write(press(3, y));
@@ -4013,6 +4039,254 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
     } finally {
       chalk.level = level;
       clock.useRealTimers();
+    }
+  });
+});
+
+// docs/feat/model-charts.md C4/T4: a `chart` call DRAWS in the transcript — live
+// and after a resume, at every width, with no raw stdout write.
+describe("a chart in the App (C4/T4)", () => {
+  const SPEC = {
+    type: "line",
+    title: "Ricavi mensili 2025 vs 2026",
+    labels: ["gen", "feb", "mar", "apr", "mag", "giu"],
+    datasets: [
+      { label: "2026", data: [12500, 14100, 13800, 15200, 16900, 17400] },
+      { label: "2025", data: [11800, 12400, 13100, 12900, 14200, 15100] },
+    ],
+    y: { unit: "€", format: "compact" },
+  };
+  const ARGS = JSON.stringify(SPEC);
+  // Braille (the default glyphs) and the quadrant blocks (`tui.chartGlyphs`).
+  const BRAILLE = /[\u2800-\u28ff]/;
+  const BLOCKS = /[▘▝▀▖▌▞▛▗▚▐▜▄▙▟█]/;
+
+  /** A model that calls `chart` once, then answers. */
+  const liveAgent = () =>
+    new Agent({
+      model: new ScriptedProvider([
+        [
+          { type: "tool_call", toolCall: { id: "c1", name: "chart", arguments: ARGS } },
+          { type: "done" },
+        ],
+        [{ type: "text", delta: "Ecco il grafico." }, { type: "done" }],
+      ]),
+      tools: new ToolRegistry().register(chartTool),
+      env: noopEnv,
+    });
+
+  /** The same call, as a resumed conversation (`--resume`). */
+  const history: ChatMessage[] = [
+    { role: "user", content: "grafico dei ricavi" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c1", name: "chart", arguments: ARGS }],
+    },
+    { role: "tool", content: "line chart: 2 series", toolCallId: "c1" },
+  ];
+
+  test("live: the chart draws in place of the tool row", async () => {
+    // Mutation: drop the `chartRow` branch in `toolLines` → the frame shows
+    // `● Chart Ricavi mensili …` and no braille.
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={liveAgent()} model="qwen3" cwd="/tmp/work" />,
+    );
+    try {
+      await delay(30);
+      stdin.write("grafico dei ricavi");
+      await delay(30);
+      stdin.write("\r");
+      await delay(300);
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("Ricavi mensili 2025 vs 2026");
+      expect(BRAILLE.test(frame)).toBe(true);
+      // No tool chrome on that row: the bullet belongs to the reply, not the chart.
+      expect(frame).not.toContain("● Chart");
+      expect(frame).not.toContain("line chart: 2 series");
+    } finally {
+      unmount();
+    }
+  });
+
+  test("after a resume: the same chart, from the stored arguments", async () => {
+    // Mutation: draw only when a live `tool_start` set the item (i.e. read
+    // something other than `args`) → red: a resumed row has only `args`.
+    const { lastFrame, unmount } = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+      />,
+    );
+    try {
+      await delay(50);
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("Ricavi mensili 2025 vs 2026");
+      expect(BRAILLE.test(frame)).toBe(true);
+      expect(frame).not.toContain("● Chart");
+    } finally {
+      unmount();
+    }
+  });
+
+  test("ctrl+o expands it, and a second ctrl+o collapses it again", async () => {
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+      />,
+    );
+    try {
+      await delay(50);
+      const collapsed = (lastFrame() ?? "").split("\n").length;
+      stdin.write("\u000F"); // Ctrl+O
+      await delay(80);
+      const expandedLines = (lastFrame() ?? "").split("\n");
+      const expanded = expandedLines.length;
+      // The expanded form adds the per-series stats and the data table, so more
+      // rows and a table header the compact form does not have.
+      expect(expandedLines.join("\n")).toContain("gen");
+      expect(expanded).toBeGreaterThanOrEqual(collapsed);
+      stdin.write("\u000F");
+      await delay(80);
+      expect((lastFrame() ?? "").split("\n").length).toBe(collapsed);
+    } finally {
+      unmount();
+    }
+  });
+
+  test("`chartGlyphs: blocks` reaches the renderer through the App", async () => {
+    // Mutation: drop `chartGlyphs` from the App's layout options → braille again.
+    const { lastFrame, unmount } = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+        chartGlyphs="blocks"
+      />,
+    );
+    try {
+      await delay(50);
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("Ricavi mensili 2025 vs 2026");
+      expect(BLOCKS.test(frame)).toBe(true);
+      expect(BRAILLE.test(frame)).toBe(false);
+    } finally {
+      unmount();
+    }
+  });
+
+  test("a resize re-lays the chart out at the new width (form changes tier)", async () => {
+    // The renderer is a pure function of width: at ≥ 60 cols a line chart is the
+    // braille plot (with the `┤` y gutter), at 40–59 it is one sparkline row per
+    // series (D5, *Forms by width*). Mutation: memoise the chart on the item
+    // alone, or pass a fixed width to `chartToolBody` → the frame keeps the
+    // 100-column plot and the tier never changes (red).
+    const app = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+      />,
+    );
+    const widest = (frame: string): number =>
+      frame
+        .split("\n")
+        .filter((r) => BRAILLE.test(r) || r.includes("┤") || r.includes("▁"))
+        .reduce((w, r) => Math.max(w, stringWidth(stripAnsi(r))), 0);
+    try {
+      await delay(50);
+      const at100 = app.lastFrame() ?? "";
+      expect(at100).toContain("┤"); // the plot tier
+      expect(widest(at100)).toBeGreaterThan(60);
+
+      Object.defineProperty(app.stdout, "columns", { value: 50, configurable: true });
+      app.stdout.emit("resize");
+      await delay(150);
+      const at50 = app.lastFrame() ?? "";
+      // The narrow tier: sparklines, no y gutter, no braille plot anywhere.
+      expect(at50).toContain("▁");
+      expect(at50).not.toContain("┤");
+      expect(BRAILLE.test(at50)).toBe(false);
+      expect(widest(at50)).toBeLessThanOrEqual(50);
+
+      Object.defineProperty(app.stdout, "columns", { value: 100, configurable: true });
+      app.stdout.emit("resize");
+      await delay(150);
+      const back = app.lastFrame() ?? "";
+      // Back to the plot: no stale sparkline rows left behind.
+      expect(back).toContain("┤");
+      expect(BRAILLE.test(back)).toBe(true);
+      expect(widest(back)).toBeGreaterThan(60);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  test("an invalid (forged) spec at the daemon is a generic row, never a crash", async () => {
+    const forged: ChatMessage[] = [
+      { role: "user", content: "grafico" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "c9", name: "chart", arguments: '{"type":"line","labels":["a"],"datasets":[]}' },
+        ],
+      },
+    ];
+    const { lastFrame, unmount } = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(forged)}
+      />,
+    );
+    try {
+      await delay(50);
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("● Chart");
+      expect(BRAILLE.test(frame)).toBe(false);
+    } finally {
+      unmount();
+    }
+  });
+
+  test("nothing is written to process.stdout while a chart draws (AGENTS §7)", async () => {
+    const spy = spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { lastFrame, unmount } = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+      />,
+    );
+    try {
+      await delay(80);
+      expect(BRAILLE.test(lastFrame() ?? "")).toBe(true);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      unmount();
+      spy.mockRestore();
     }
   });
 });

@@ -1,0 +1,983 @@
+# feat/mobile-session-actions — Long-press row actions in the sessions drawer: Rename, Delete, Pin
+
+> **Status:** implementation APPROVED (orchestrator, night delegation 2026-11-17)
+> **Branch:** `feat/mobile-session-actions`
+> **Size:** M overall, split S1 (M) · S2 (M) · S3 (S) · **Blast:** S1 load-bearing (persisted sidecar + protocol, additive) · S2 contained (mobile) · S3 cross-module (TUI) · **Suited:** S1 strong model + mandatory fresh-context Review (red-team the persistence and protocol invariants of AGENTS §7); S2/S3 any model + standard Review
+> **Changelog:** `changelog.d/mobile-session-actions.added.md` (`- **Session actions on iPhone.** Long-press a session in the drawer to rename, pin to top or delete it; pins are stored on the computer, so the phone and the Mac see the same order.`)
+
+## Context
+
+*— claude-opus-5-5, 2026-11-17*
+
+Owner, 2026-11-17: in the iPhone sessions drawer
+(`apps/mobile/src/screens/SessionsDrawer.tsx`), a LONG-PRESS on a session row
+should give haptic feedback and a small native-feeling menu with **Rename**,
+**Delete** (confirmed) and **Pin to top** / **Unpin**. Pinned sessions sort
+first, are persisted, and are the SAME on every device that looks at that
+host (phone and Mac). Owner taste: minimal, thin glyphs, iOS action sheet; no
+mockups (autonomy). Reuse existing RPCs; protocol changes additive.
+
+What exists today (verified):
+
+- Long-press already opens a one-item action sheet: **Rename** only
+  (`SessionsDrawer.tsx:288-305`, `onLongPress` at `:454`, a11y hint "Long-press
+  to rename" at `:453`). Rename is fully built: `drawer-rename.ts` (pure
+  controller, `createDrawerRename`), `session-rename.ts` (`renamePlan`,
+  `renameErrorText`), `RenameSheet.tsx`, wired in `App.tsx:1050,1110,1207-1209`.
+  It calls `session/rename` by id, which needs no open and renames an archived
+  session in place (`packages/protocol/src/session.ts:1268-1279`).
+- No haptic on long-press (`playHaptic` is not used by the drawer;
+  `haptic-rules.ts:13` has kinds `light | firm | success | tick | commit`).
+- Delete exists on the wire and in the client: `session/delete`
+  (`protocol/src/session.ts:1248-1259`: ends a live session first,
+  `session_closed{deleted}` to every attached client, tombstone survives a
+  restart, idempotent) and `RemoteClient.deleteSession`
+  (`packages/client/src/remote-client.ts:1780`). The TUI `/sessions` panel
+  already deletes with a confirmation that warns about a running turn
+  (`packages/tui/src/sessions-panel.ts:170-185`, owner R3 2026-10-26) and
+  refuses the current session. The phone has no delete.
+- No pin anywhere: no method, no list field, no stored field (`rg -i pin`
+  over `protocol/src/methods.ts`, `daemon/src/daemon-state-file.ts`,
+  `daemon/src/session-list.ts` → only unrelated words).
+- `session/list` order is `updatedAt` desc, then `sessionId` asc, keyset
+  paged at most 200 per page (`protocol/src/session.ts:1438-1497`,
+  `daemon/src/session-list.ts:7-11,69-104`). The phone reads pages with a
+  cursor and "More" (`apps/mobile/src/session-list-controller.ts:27,70-73,153`).
+  So a client that only hoists pins from the pages it has loaded misses a pin
+  older than the first page.
+
+Scope of "every device": the phone only ever reaches a `serve` daemon (via the
+relay); the Mac sees the same sessions through `connect` (`/sessions` reads
+`session/list`, `packages/cli/src/connect-resume.ts`, and `connect` keeps no
+laptop copy, AGENTS §7). So the single source of truth for a pin is **that
+`serve` daemon**. Laptop-local sessions (plain `tentacle`, in-process worker,
+the laptop's own `<uid>.jsonl` store) are invisible to the phone; see Owner
+question 1.
+
+**Repro** (2026-11-17, worktree at `5885a501`, from
+`.tentacle/tmp/mobile-session-actions/`, i.e. the capability is missing):
+
+```
+$ rg -n 'label: "' apps/mobile/src/screens/SessionsDrawer.tsx
+295:            label: "Rename",
+418:            action={{ label: "Retry", onPress: props.onRetry, testID: "drawer-retry" }}
+$ rg -n -i 'pin' packages/protocol/src/methods.ts packages/daemon/src/daemon-state-file.ts packages/daemon/src/session-list.ts
+packages/daemon/src/session-list.ts:22:import { wireLine } from "./mapping.ts"
+packages/daemon/src/daemon-state-file.ts:56: *    would reload as a plain message — a half-load. Stamping 2 makes that
+packages/protocol/src/methods.ts:4: * before handling, and validates `result` before replying. Keeping this in one
+$ rg -n 'playHaptic' apps/mobile/src/screens/SessionsDrawer.tsx
+(no output)
+```
+
+The row menu has only Rename; nothing on the wire, on disk or in the list
+knows a pin; the long-press plays no haptic.
+
+## Implementation
+
+*— claude-opus-5-5, 2026-11-17*
+
+### Load-bearing assumption
+
+**A pin can live in the `serve` daemon's per-session state sidecar as one
+optional field, written for live AND archived sessions without touching the
+conversation log or `updatedAt`, and surfaced by `session/list`.** Evidence:
+
+- The sidecar is the daemon's non-conversation state and already carries
+  optional switches with the "absent = off, readable by an older build" rule:
+  `autoAccept?` (`daemon/src/daemon-state-file.ts:101-107`, written only when
+  true at `:145-147`, parsed fail-closed at `:416-419`) and `archivedAt?`
+  (`:99`). `parseSidecar` rebuilds the value from known fields only
+  (`:400-421`), so an unknown optional field is ignored by an older build, not
+  refused: no `DAEMON_STATE_VERSION` bump is needed for an optional field
+  whose loss is harmless.
+- A live switch persists itself with `this.persist()` and no lock
+  (`daemon/src/hosted-session.ts:2873-2891`, `setAutoAccept`).
+- An archived session is changed in place without reopening, rewriting only
+  its state file: `SessionHost.rename` → `rewriteArchived`
+  (`daemon/src/session-host.ts:1022-1044, 1067-1100`).
+- Rename does not move `updatedAt` (`protocol/src/session.ts:1276`), and
+  `toSessionList` keys on the stored `lastChangeAt`, never the clock
+  (`daemon/src/session-list.ts:89-94`). A pin must follow the same rule.
+- Every `session/list` entry comes from `SessionSummary`
+  (`daemon/src/session-list.ts:25-45`): the live one from
+  `HostedSession` (`hosted-session.ts:1650`), the archived one from
+  `ArchivedEntry` (`session-host.ts:435-467`). Adding `pinnedAt?` there is the
+  one place both kinds pass through.
+
+A pin is not conversation, so per AGENTS §7 ("persist only the
+conversation") it must NOT be a log entry. That also answers the brief's
+guard: **no new log entry, critical or not.**
+
+### Preconditions
+
+- Peer dispatch is concurrent and host-level handlers are synchronous
+  (`daemon/src/connection.ts:464-470`, the `Rename` case: "needs no `open`").
+  `session/pin` is the same shape, so two devices pinning are applied in one
+  total order with no lock (AGENTS §7 "Don't serialize the RPC peer").
+- Payloads are strip schemas (AGENTS §7 forward compat): a new optional entry
+  field and a new optional result field are dropped by an older client, and a
+  new method is `MethodNotFound` on an older daemon. Additive → **no
+  `protocol.d/` note**. `protocol.json` is regenerated by the orchestrator's
+  `bun run protocol:bump` at merge.
+- Only a `serve` daemon has a persister (`startDaemon`, AGENTS §7). On a pod
+  daemon or the in-process worker a pin lives in memory only and is lost with
+  the session. Nothing reaches those from the phone today.
+- `session/delete` and `session/rename` already exist with the error
+  vocabulary the phone maps (`SessionDeleted`, `UnknownSession`,
+  `MethodNotFound` → `renameErrorText`, `docs/feat/mobile-chrome.md` F7).
+- The deleted-session state already reaches the open session screen
+  (`apps/mobile/src/session-controller.ts:28,93` `"deleted"`).
+- **To verify first in S2 (not yet proven):** that the drawer re-reads its
+  computer's list each time it opens. If it does not, S2 adds that re-read,
+  because the other device's pin only shows after a re-read.
+
+### Design
+
+**Wire (S1).**
+
+- New method `session/pin` (`Method.Pin = "session/pin"`):
+  params `{ sessionId, pinned: boolean }`. Result `{ pinned: boolean }` (the
+  state after applying). It is a **set, not a toggle**: idempotent, and two
+  devices sending the same intent converge. Host-level, needs no `open`, works
+  on live and archived sessions. A deleted id → `SessionDeleted`; an unknown
+  id → `UnknownSession`. Pinning a new session past `MAX_PINNED_SESSIONS`
+  (20, Owner question 4) → `InvalidParams` with "at most 20 pinned sessions:
+  unpin one first". Re-pinning an already pinned session is a no-op success,
+  never a cap error. Does not move `updatedAt`. Emits no update (list
+  metadata: other devices see it at their next `session/list`, Owner
+  question 6).
+- `SessionListEntrySchema` gains `pinned: z.literal(true).optional()`
+  (absent = not pinned, the `autoAccept` rule).
+- `SessionListResultSchema` gains `pinned: z.array(SessionListEntrySchema)
+  .max(MAX_PINNED_SESSIONS).optional()`: present only on the FIRST page (no
+  `cursor`), every pinned session on the daemon, live or archived, in the same
+  `updatedAt`-desc order. Those entries ALSO stay in their normal place in
+  the recency pages (with `pinned: true`). So the keyset paging and its
+  cursor do not change, and an older client that drops both fields sees
+  exactly today's list. The client dedupes by `sessionId`.
+
+**Daemon (S1).**
+
+- `SessionSummary.pinnedAt?: number` (`daemon/src/session-list.ts:25`).
+  `toSessionList` sets `pinned: true` on the entry, and when
+  `params.cursor === undefined` builds the `pinned` array from every summary
+  with `pinnedAt` (not filtered by the cursor, sorted with `compare`).
+- `HostedSession.pinnedAt: number | undefined`: restored from the record,
+  carried in `summary`, in the persisted state (`session-persister.ts:545`
+  is where `autoAccept` joins), and `setPinned(on)` mirrors `setAutoAccept`:
+  if changed, set (`now()` when pinning) and `this.persist()`.
+- `ArchivedEntry.pinnedAt` (read from the sidecar when indexing, like
+  `title`). `SessionHost.pin(id, on)` mirrors `rename`: tombstone check →
+  live → archived (set `entry.pinnedAt` and mark it changed, then
+  `void this.rewriteArchived(entry, "pinned")`). `rewriteArchived`'s
+  "nothing changed" guard (`session-host.ts:1080-1083`) and both its write
+  paths (the resident record and the loaded state) must carry the pin.
+  Reopen: the record's `pinnedAt` flows into the live session (the
+  `withoutReclaimed(...)` site at `session-host.ts:924-930`).
+- The cap is counted over live + archived summaries inside the synchronous
+  handler (no await between count and set).
+- Sidecar: `DaemonSessionRecord`/`DaemonSidecar` gain `pinnedAt?: number`,
+  written only when set, parsed with `isWireStamp`. **A malformed value is
+  dropped, not refused** (like `autoAccept`: the conversation is intact and
+  a lost pin is harmless). No version bump.
+- `delete` needs nothing new: the record and its sidecar go, and with them
+  the pin.
+
+**Client (S1).** `RemoteClient.pinSession(sessionId, pinned): Promise<boolean>`
+beside `deleteSession`. The list mapping keeps `pinned` and the first page's
+`pinned` array (values validated by the schema; a pod daemon is untrusted,
+but these are booleans and bounded entries).
+
+**Mobile (S2).** Pure modules carry the logic; the components only render.
+
+- `drawer-row-menu.ts` (new, pure): `rowMenu(row): readonly RowMenuItem[]`
+  gives, in order, `Pin to top` | `Unpin` (by `row.pinned`), `Rename`,
+  `Delete` (destructive, last). It also builds the delete confirmation:
+  `deleteConfirm(row, { isOpen })` → `{ title, message, confirmLabel:
+  "Delete" }`, where the message says what is lost and adds "Its running turn
+  will stop." when `row.running` (the TUI's owner R3 wording,
+  `sessions-panel.ts:176-185`), "It is open on another device." when
+  `attached > 0`, and "This is the session you are in." when it is the open
+  one.
+- `drawer-row-actions.ts` (new, pure controller in the `drawer-rename.ts`
+  style): `pin(computerId, row)` and `confirmDelete(computerId, row)` →
+  `deleteNow()`. One action in flight per row (a second tap sends nothing).
+  The call goes to the computer that listed the row (as `drawer-rename.ts`
+  does: the drawer may list a computer other than the open session's). On
+  success it re-reads that computer's list. On failure it exposes an
+  `error` string for a `Banner` (reusing `renameErrorText`'s mapping:
+  offline, `MethodNotFound` → "Update tentacle on <computer> to pin
+  sessions", `SessionDeleted` → treated as success for delete). **Never
+  queued in the outbox**: a destructive or list action while offline fails
+  loudly at once.
+- Deleting the OPEN session (Owner question 2): on success the controller
+  emits `navigate(nextRow | null)`. `nextRow` is the first remaining
+  non-archived row of that computer, in drawer order. `null` → the existing
+  empty drawer state with the New session pill. The `session_closed{deleted}`
+  that the open screen also receives stays as it is.
+- `session-list.ts`: `SessionRow.pinned: boolean`. The list state keeps the
+  first page's `pinned` entries (replaced on every first-page read, so an
+  unpin on another device clears it). `rows()` returns `sections.pinned`
+  (the deduped union of the first-page `pinned` and any loaded entry with
+  `pinned: true`, minus archived when Owner question 3 says so), and removes
+  those ids from `active`.
+- `drawer-list.ts`: a **Pinned** section above Running
+  (`DrawerSection = "pinned" | ...`, label `"Pinned"`). Its rows keep their
+  tone (a running pinned row keeps its dot). `drawerItems` emits it only when
+  non-empty. `session-groups.ts` gets the same `pinned` group, so the full
+  Sessions screen agrees with the drawer (one projection, two renderers).
+- `haptic-rules.ts`: `rowMenuHaptic(): HapticKind` → `"firm"` (iOS context
+  menus use a medium impact). The drawer calls `playHaptic` in `onLongPress`
+  before opening the sheet.
+- `SessionsDrawer.tsx` (render only): the existing `ActionSheet` gets the
+  `rowMenu` items (`destructive: true` on Delete, which `ActionSheet` already
+  supports, `ui/ActionSheet.tsx:19`). A second `ActionSheet` shows the delete
+  confirmation (title, message, destructive "Delete"). A thin `pin` glyph
+  (SF Symbol `pin`, weight `light`, `palette.sec`, 11 pt) goes before the
+  meta of a pinned row. The a11y hint becomes "Long-press for actions".
+  New testIDs: `drawer-row-pin`, `drawer-row-unpin`, `drawer-row-delete`,
+  `drawer-delete-confirm`, `drawer-delete-cancel`, `drawer-pinned`,
+  `drawer-action-error`.
+- `App.tsx`: wire the controller (as `createDrawerRename` is wired at
+  `:1110`) with `link.client.pinSession` and `link.client.deleteSession`.
+
+**TUI parity (S3).** `connect`'s `/sessions` panel (`sessions-panel.ts`,
+`sessionsView`) shows pinned sessions first, from the same first-page
+`pinned` array and dedupe rule, with a thin `·` pin marker (Owner taste: no
+emoji). Pinning from the TUI is Owner question 5.
+
+### Files
+
+S1 (protocol → daemon → client):
+1. `packages/protocol/src/methods.ts`: `Pin: "session/pin"`.
+2. `packages/protocol/src/session.ts`: `PinParamsSchema`, `PinResultSchema`,
+   `MAX_PINNED_SESSIONS`, entry `pinned?`, result `pinned?`, and the method
+   table registration the other methods use.
+3. `packages/daemon/src/daemon-state-file.ts`: `pinnedAt?` in the record,
+   `sidecarOf`, `parseSidecar` (dropped if malformed), the loader
+   (`:515` area).
+4. `packages/daemon/src/session-persister.ts`: carry `pinnedAt` in the state
+   it captures (beside `autoAccept`, `:545`).
+5. `packages/daemon/src/hosted-session.ts`: field, restore, `summary`,
+   `setPinned`.
+6. `packages/daemon/src/session-list.ts`: `SessionSummary.pinnedAt?`, the
+   entry flag, the first-page `pinned` array.
+7. `packages/daemon/src/session-host.ts`: `pin()`, `ArchivedEntry.pinnedAt`,
+   index read, `rewriteArchived` guard + both paths, reopen carry, the cap.
+8. `packages/daemon/src/connection.ts`: `case Method.Pin`.
+9. `packages/client/src/remote-client.ts`: `pinSession`, the list mapping.
+
+S2 (mobile): `apps/mobile/src/drawer-row-menu.ts` (new),
+`drawer-row-actions.ts` (new), `session-list.ts`, `drawer-list.ts`,
+`session-groups.ts`, `haptic-rules.ts`, `screens/SessionsDrawer.tsx`,
+`screens/SessionsScreen.tsx` (Pinned group header only), `App.tsx`; tests
+under `apps/mobile/test/`.
+
+S3 (TUI): `packages/tui/src/sessions-panel.ts` (+ its test).
+
+Docs: this file; `changelog.d/mobile-session-actions.added.md`;
+`docs/feat/mobile-chrome.md` line ~225-227 ("Archive/Delete stay out") gets a
+pointer to this task.
+
+### Failure modes
+
+| Case | Behaviour / convergence |
+|---|---|
+| Row's computer offline / link down | Pin and Delete fail at once with "Not connected to <computer>" in a drawer banner. They are never queued: a delete replayed later, after the person changed their mind, is worse than an error. The row is unchanged. Rename keeps its F7 behaviour. |
+| Older daemon (`MethodNotFound` on `session/pin`) | Banner "Update tentacle on <computer> to pin sessions". There is no capability probe (pre-public, AGENTS §7). Delete and Rename still work. |
+| Older phone, newer daemon | Drops `pinned` fields: today's order, no menu items. |
+| Daemon downgraded after pinning | The older build ignores `pinnedAt` and drops it on its next sidecar write: pins are lost, nothing else is. Accepted, like `autoAccept` (documented here, not designed out). |
+| Delete the OPEN session | Confirmation says so. On success, navigate to the next row or the empty state (Owner question 2). The screen's own `session_closed{deleted}` is harmless if it lands first. |
+| Delete a RUNNING session | The confirmation warns that its turn stops (and that it is open on another device when `attached > 0`). The daemon aborts the turn and tells every client (`session_closed{deleted}`). |
+| Delete while the row was already deleted elsewhere | `session/delete` is idempotent: success, list re-read, row gone. |
+| Delete fails mid-way (link drops after send) | `endSession` rejects. The banner shows the error. The re-read on reconnect shows the truth (the tombstone means the session is never recreated). |
+| Rename empty / whitespace / unchanged / too long | Existing `renamePlan`: no-op or refused in the field. Server-side `InvalidParams` is mapped. |
+| Rename "collision" (same title as another session) | Allowed: titles are labels, sessions are addressed by id. No uniqueness check (Owner question 7). |
+| Two devices pin the same session at once | Same intent → idempotent. Opposite intents → the synchronous handler applies them in one order, last wins, and both devices converge at their next list read. |
+| Two devices pinning the 20th and 21st at once | The count and the set are in one synchronous handler: exactly one gets the cap error. |
+| Pin an ARCHIVED session | Allowed (sidecar rewrite, no reopen, `rewriteArchived`). Shown per Owner question 3. Reopen keeps the pin. Archiving keeps the pin. |
+| Pinned session deleted | Its record goes with its pin. The `pinned` array no longer lists it. |
+| Sidecar rewrite for an archived pin fails | As rename: kept in memory (listed), reported, retried by the sweeps (`session-host.ts:1067-1078`). |
+| Pin older than loaded pages | Shown anyway: the first page's `pinned` array carries every pin. |
+| Malicious/pod daemon | Booleans and schema-bounded entries only. Titles are already one line and control-free (`session-list.ts:1-5`). |
+
+### Tests
+
+Red before green for every new property (§9). Fakes: the daemon tests'
+in-memory persister and `SessionHost` harness. On mobile, pure tests of
+controllers with injected `pin`/`delete` fns, in the `drawer-rename.test.ts`
+pattern.
+
+S1:
+- `session-list.test.ts`: `pinned: true` on the entry. The first page
+  carries every pinned summary (also one that sorts past `limit`). A cursor
+  page carries no `pinned` array. The order and cursor of `sessions` are
+  identical with and without pins (the property that keeps paging intact).
+- `session-host` tests: pin live → listed pinned, `updatedAt` unchanged,
+  `persist` called. Pin archived → state file rewritten, log untouched, not
+  reopened. Reopen keeps the pin. Deleted → `SessionDeleted`. Unknown →
+  `UnknownSession`. The 21st pin → `InvalidParams`. Re-pin at the cap → ok.
+  Restart (reload from disk) keeps the pin.
+- `daemon-state-file.test.ts`: round-trip `pinnedAt`. Absent stays absent. A
+  malformed value loads with no pin (not refused). Unknown-field tolerance
+  pinned by test.
+- Protocol: schema accepts/rejects. A connection-level round-trip of
+  `session/pin`.
+- Mutation check: drop `pinnedAt` from `sidecarOf` → the restart test fails.
+
+S2:
+- `drawer-row-menu.test.ts`: item order and labels for pinned/unpinned. The
+  confirmation message for idle / running / attached / open.
+- `drawer-row-actions.test.ts`: goes to the row's computer. Re-reads on
+  success. Error string on reject (offline, `MethodNotFound`).
+  `SessionDeleted` on delete = success. A double tap sends once. Deleting the
+  open row navigates to the next row, or `null`.
+- `session-list.test.ts` / `drawer-list.test.ts` / `session-groups.test.ts`:
+  the Pinned section first, deduped, removed from Running/Recent. Replaced
+  (not merged) on a first-page re-read. Archived handling per Owner
+  question 3.
+- `haptic-rules.test.ts`: `rowMenuHaptic() === "firm"`.
+
+S3: `sessions-panel` test that pinned rows render first, with a marker.
+
+Gate per slice: narrow test files. Before done: `bun run check` (typecheck
+includes `tsc -p apps/mobile`).
+
+### Owner questions
+
+1. **Laptop-local sessions (not `serve`).** Should they be pinnable too? The
+   phone never sees them. *Rec: out of scope. A pin lives on the `serve`
+   daemon, the one store phone and `connect` share. A later per-host
+   `<configDir>/sessions/pins.json` index can cover the local TUI picker,
+   never a log entry.*
+2. **Deleting the session you are in.** The TUI refuses it. *Rec: allow on
+   the phone, with "This is the session you are in" in the confirmation, then
+   open the next session of that computer (or the empty drawer).*
+3. **Archived + pinned.** *Rec: Pin is offered on archived rows too. A
+   pinned archived row shows in Pinned (dimmed, archive glyph), and a tap
+   browses it without reviving (Q4 rule).*
+4. **Pin cap.** *Rec: 20 per daemon. Past that, a clear "unpin one first"
+   error. It bounds the first-page `pinned` array.*
+5. **Pin from the Mac TUI.** *Rec: S3 only SHOWS pins first (read parity). A
+   `p` key in `/sessions` comes as a follow-up S task if you want it.*
+6. **Live push of pin changes to other devices.** *Rec: none. Each device
+   sees the change at its next list read (drawer open / pull). No new update
+   kind.*
+7. **Duplicate titles on rename.** *Rec: allowed, no uniqueness check
+   (sessions are addressed by id).*
+8. **Order inside Pinned.** *Rec: same as the list (`updatedAt` desc). No
+   manual reordering.*
+
+**Answers (orchestrator, 2026-11-17, owner asleep — night delegation; owner said "vai in autonomia" for this task):** Q1–Q8 all as recommended. The owner may overrule on waking.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-17*
+
+## Execution
+
+*— claude-opus-5-5, 2026-11-17 (executor, slice S1 only)*
+
+**S1 — DONE.** S2 and S3 not started.
+
+**Load-bearing check (re-run first): holds.** Every cited site is as described:
+`autoAccept?`/`archivedAt?` in the sidecar (`daemon-state-file.ts`), written
+only when set, and `parseSidecar` rebuilds the value from known fields only, so
+an unknown optional field is ignored rather than refused. `setAutoAccept` →
+`this.persist()` (`hosted-session.ts`). `rename` → `rewriteArchived`, which
+rewrites only the state file when the record is not resident
+(`session-host.ts`). `toSessionList` keys on `lastChangeAt`. Live and archived
+summaries both pass through `SessionSummary`. The archive path is
+`persistedState` → `toRecord`, so a pin captured there survives archiving.
+The `serve` start path reads `loadState().meta` (archived) and
+`load().record` (live) (`cli/src/serve.ts:884,900`), so both now carry the pin.
+
+**As built (dependency order):**
+1. Protocol: `session.ts` adds `MAX_PINNED_SESSIONS = 20`,
+   `PinParamsSchema {sessionId, pinned: boolean}`, `PinResultSchema {pinned}`,
+   entry `pinned: z.literal(true).optional()`, and result
+   `pinned: SessionListEntry[] (max 20).optional()`. `methods.ts` adds
+   `Method.Pin` and registers it in `RequestSchemas`. Additive, so there is no
+   `protocol.d/` note. `protocol.json` was regenerated (`bun run schema:export`).
+2. Persistence: `pinnedAt?` on `DaemonSessionState`, `DaemonSessionRecord`,
+   `DaemonSidecar` and `ArchivedMeta`. It is written only when set
+   (`sidecarOf`, `toRecord`). `parseSidecar` keeps it only if `isWireStamp`;
+   anything else is dropped, never refused. It is carried by the loader and by
+   `loadState`'s meta. No `DAEMON_STATE_VERSION` bump. No log entry.
+3. `HostedSession`: `pinnedAt` field, restored from `RestoredSessionState`,
+   carried in `persistedState` and `summary`. `setPinned(on)` is a set:
+   it stamps `now()` only on a change and persists only on a change.
+   It moves no `lastChangeAt` and emits nothing.
+4. `session-list.ts`: `pinned: true` on the entry. On the first page only
+   (no cursor), `pinned` holds every pinned summary, sorted with `compare`
+   and sliced to the cap. `sessions` and `cursor` are untouched.
+5. `SessionHost.pin(id, on)`: tombstone → `SessionDeleted`; then live or
+   archived; else `UnknownSession`. The cap is counted over live + archived
+   in the same synchronous call, and is skipped when the session is already
+   pinned or the call unpins. An archived pin sets `entry.pinnedAt` +
+   `entry.pinChanged`, then `void rewriteArchived`. Both `rewriteArchived`
+   paths (resident record and loaded state file) and their "nothing
+   changed" guards now account for the pin (`withPin` helper). A reopen
+   restores with the ENTRY's pin. `restore` passes `record.pinnedAt` on
+   (restart and reopen).
+6. `Connection`: `case Method.Pin` → `host.pin` (host-level, no `open`).
+7. Client: `RemoteClient.pinSession(id, pinned): Promise<boolean>`, shaped
+   like `rename`: it rejects while down, and maps `MethodNotFound` to "this
+   daemon is too old to pin sessions — update tentacle".
+8. `changelog.d/mobile-session-actions.added.md` (the plan's bullet).
+
+**Drift from Implementation (and why):**
+- *Client "list mapping"*: no code. `sessionList` is a schema-validated
+  pass-through, so `pinned` (entry and array) reaches callers through the
+  schema alone. This is pinned by `packages/client/test/session-pin.test.ts`.
+- *`restore` also carries the pin*: the plan named only the reopen site, but a
+  `serve` restart goes through `restore(loaded.record)` too.
+- *`ArchivedEntry.pinChanged`* is the plan's "mark it changed". It is
+  sticky, like `renamed`, so every later rewrite of that entry keeps the pin.
+- *`json-schema.test.ts`* gained `session/pin` fixtures. The drift gate
+  requires one per method; the plan did not list it.
+- *Docs pointer in `docs/feat/mobile-chrome.md`*: left for S2, because it is
+  about the phone UI.
+- *Changelog fragment*: it describes the finished phone feature (S2). On its
+  own, S1 ships no user-visible change, so this branch must not be released
+  before S2 lands.
+
+**Red before green.** Before the implementation,
+`daemon/test/session-list.test.ts` P1/P2 and both
+`client/test/session-pin.test.ts` cases failed on their assertions.
+`daemon/test/session-pin.test.ts` and `protocol/test/session-pin.test.ts`
+failed at import (`MAX_PINNED_SESSIONS` / `PinParamsSchema` did not exist), so
+their non-vacuity is shown by mutation instead (below).
+
+**Mutation checks** (`.tentacle/tmp/mobile-session-actions/mutate.ts`: back
+up, replace one exact site, run the narrow file, restore; `git diff --stat`
+was unchanged afterwards):
+
+```
+M1 sidecarOf drops pinnedAt (the plan's named one): KILLED, 5 red, incl. "a restart keeps the pin (decoded from the files by the real decoders)"
+M2 setPinned without persist: KILLED, 3 red
+M3 loaded-path guard ignores pin: KILLED, 2 red
+M4 resident path ignores pin: KILLED, 1 red
+M5 persistedState drops pinnedAt: KILLED, 5 red (incl. "archiving a pinned session keeps the pin")
+M6 reopen uses the record's pin: KILLED, 1 red
+M7 loadState meta drops pinnedAt: KILLED, 1 red
+M8 cap counts live only: KILLED, 1 red
+M9 parse passes a malformed pin: KILLED, 1 red
+M10 pinned array from the page only: KILLED, 1 red (P2)
+M11 no case Method.Pin: KILLED, 1 red (wire test)
+M12 restart restore drops pin: KILLED, 3 red
+M13 pinned array on every page: KILLED, 1 red (P3)
+M14 pins hoisted out of sessions: KILLED, 3 red (P1, P2, P4)
+```
+
+(A first M10 variant survived because it was not a faithful mutation:
+`entries` holds every entry after the cursor, not the page. It was replaced by
+the version above.)
+
+**Tests added:** `packages/daemon/test/session-pin.test.ts` (15: live/archived/
+resident/reopen/restart/archived-restart/no persister/errors/cap/sidecar
+round-trip and malformed/wire), `daemon/test/session-list.test.ts` (+4, P1–P4),
+`protocol/test/session-pin.test.ts` (4), `client/test/session-pin.test.ts` (2),
+plus `json-schema.test.ts` fixtures.
+
+**Gate:** `bun run typecheck` clean (root + mobile + relay) · `bun run lint`
+clean (1840 files, 0 errors/warnings) · `bun test` 13390 pass / 5 skip / 0
+fail. The 5 skips come from pre-existing opt-in `skipIf` sites (live
+docker/k8s, slow keepalive). I did not match them name by name, but none of
+the new test files contains a skip.
+
+**Not verified:** a real `serve` restart on disk. It is covered only through
+the spy store's real decoders and `loadState`. To verify, pin a session over
+`connect`, restart `serve`, then run `session/list`.
+
+### S2 — Long-press row actions on the phone: Pin, Delete, the Pinned section
+
+*— claude-code 2.1.323 (model `opus`), 2026-11-17 (executor, slice S2 only)*
+
+**S2 — DONE.** S1 was already merged into this branch; S3 not started.
+
+**Load-bearing check (the plan's own "to verify first in S2"): holds, and S2
+needed no new re-read.** The drawer already re-reads the listed computer's list
+on EVERY open, and on a computer switch while open
+(`App.tsx:1081-1087`, `useEffect(() => { if (drawer.open) void controller.refresh() },
+[drawer.open, controller])`; the controller is rebuilt per `listed` computer at
+`App.tsx:1054-1066`). This is pinned by `drawer-seam.test.ts` ("a late page of a
+previous open is dropped (F3: refresh on every open)"). So the other device's pin
+shows at the drawer's next open, which is what Owner Q6 accepted — no live push,
+no new update kind, and nothing added here. The Context repro also re-ran on the
+branch as expected: the sheet had exactly one item (`label: "Rename"`), no
+`playHaptic` on the long-press, and nothing in the drawer knew a pin.
+
+**As built (dependency order), all inside the plan's S2 file list:**
+1. `session-list.ts`: `SessionRow.pinned`, `SessionSections.pinned`,
+   `SessionPage.pinned?`, `SessionListState.pinnedEntries`. The reducer REPLACES
+   `pinnedEntries` on a first page only and leaves it alone on a later page; a
+   `fail` keeps it (the pins last read stay, like the rows). `rows()` unions the
+   first-page list with any loaded entry flagged `pinned`, deduped by id in the
+   first-page order, and builds a row for a pin whose recency page is not loaded
+   (the daemon sends the whole entry on the first page). Pins ALSO stay in
+   `active`/`archived` — hoisting is the renderers' decision, not the
+   projector's, so paging and the daemon's order are untouched.
+2. `session-list-controller.ts`: `viewModel` passes `state.pinnedEntries`
+   through. One line; no new lifecycle.
+3. `drawer-list.ts`: `DrawerRow` gains `running`, `attached`, `pinned` (what the
+   menu words itself from); `DrawerList` gains `pinned`, `DrawerSection` gains
+   `"pinned"`, `nextAfterCurrent`, and the hoist (pinned rows are removed from
+   Running/Recent/Archived and keep their tone). `drawerItems` emits the
+   **Pinned** label first, only when non-empty.
+4. `session-groups.ts`: the same group for the full Sessions screen.
+5. `drawer-row-menu.ts` (new, pure): `rowMenu(row)` → Unpin|Pin to top, Rename,
+   Delete (destructive, last), with the plan's testIDs; `deleteConfirm(row,
+   {isOpen})` → `{title, message, confirmLabel}` with the TUI's R3 wording plus
+   the attached and open-yourself notes.
+6. `drawer-row-actions.ts` (new, pure controller): `pin` / `confirmDelete` on the
+   ROW's computer, never queued, one per row (busy set), re-read on success,
+   `SessionDeleted` on a delete = success, `navigate(next | null)` only for the
+   row that was open, and `rowActionErrorText` (class/code only).
+7. `haptic-rules.ts`: `rowMenuHaptic() === "firm"`.
+8. `SessionsDrawer.tsx` (render only): the menu is `rowMenu`'s items through
+   `menuActions`, a second `ActionSheet` is the confirmation, a `pin` glyph
+   (11 pt, `light`, `palette.sec`) marks a pinned row, the a11y hint is
+   "Long-press for actions", `playHaptic(rowMenuHaptic())` runs before the sheet,
+   and a failed action shows `drawer-action-error`.
+9. `SessionsScreen.tsx`: the `section-pinned` BandSection, above Running.
+10. `App.tsx`: the controller wired to `link.client.pinSession` /
+    `deleteSession`, `reread` to the listed computer's controller, `navigate` to
+    `drawerTarget` (and the drawer closes on a switch), with the drawer's
+    present order and `nextAfterCurrent` read through a ref so the controller is
+    built once (a re-created one would drop an in-flight action).
+11. `ui/Icon.tsx`: the `pin` SF Symbol name.
+12. `changelog.d/mobile-session-actions.added.md` (S1's bullet, unchanged);
+    `docs/feat/mobile-chrome.md` "Archive/Delete stay out" now points here;
+    `apps/mobile/e2e/flows/26-drawer.yaml` asserts the new menu before Rename.
+
+**Drift from Implementation (and why):**
+- *The delete confirmation is its own sheet testID (`drawer-delete-sheet`) plus
+  the plan's `drawer-delete-confirm` / `drawer-delete-cancel`.* The plan named
+  the two buttons only; a sheet needs an id a flow can assert visible.
+- *`DrawerRowActions.confirmDelete` takes `(computerId, row)`, and `pin` takes
+  `(computerId, {id, pinned})`.* Same shape as `drawer-rename.ts` (`begin(computerId,
+  row)`): the component never re-derives the computer or the wanted state.
+- *`rowActionErrorText` says "Update tentacle on this computer to pin sessions."
+  — no computer NAME.* The controller is pure and the plan's wording (`on
+  <computer>`) needs a name; the drawer's banner has the listed computer's name
+  on screen right beside it, so the name would be duplicated, and passing it in
+  would make the controller depend on the probe's result. Same sentence for
+  delete.
+- *`navigate(null)` leaves the drawer open rather than navigating away.* "The
+  existing empty drawer state with the New session pill" IS the drawer, so
+  closing it or inventing a route would be worse; the drawer re-reads on its own
+  next open and shows "No sessions yet".
+- *`App.tsx`'s `navigate` closes the drawer only when it lands on another
+  session* (a switch is a navigation; the empty case is not).
+- *`SessionListState.pinnedEntries` is a new field*, not a second map beside
+  `entries`: it is the first page's `pinned`, replaced wholesale, so an unpin on
+  another device clears it at the next read instead of lingering.
+- *A pinned row whose recency page is not loaded gets its own row built from the
+  first-page entry.* The plan says the `pinned` array carries every pin; without
+  this the row would be in `pinned` (ids) but nowhere renderable.
+- *No `Rename` prop left on the drawer*: rename is now one `onRowAction` kind, so
+  the sheet cannot offer an item with no handler.
+
+**Red before green.** New files (`drawer-row-menu.ts`, `drawer-row-actions.ts`)
+cannot be red as imports, so their non-vacuity is shown by mutation. The edits to
+existing modules were red first in the real sense: `drawer-list.test.ts`,
+`drawer-items.test.ts`, `session-groups.test.ts`, `session-list.test.ts` and
+`haptic-rules.test.ts` failed on their assertions against the pre-change code —
+`list.pinned` was `undefined` (`TypeError: undefined is not an object (evaluating
+'list.pinned.length')`), `rowMenuHaptic` was not exported, and `groupSessions`
+returned no `pinned` group. Those failures were the shape of the gap, not an
+import error in a test file that never ran.
+
+**Mutation checks.** `.tentacle/tmp/mobile-session-actions/mutate-s2.ts`
+(back up, replace one exact site, run the narrow files, restore; `git diff --stat`
+identical afterwards). 17/17 killed:
+
+```
+M1  drawerList does not hoist pins                        KILLED, 8 red
+M2  rows() ignores the first page's pinned list           KILLED, 4 red
+M3  a later page overwrites the pins                      KILLED, 2 red
+M4  session-groups does not hoist pins                    KILLED, 4 red
+M5  the menu offers Pin on an already pinned row          KILLED, 2 red
+M6  the confirmation drops the running-turn warning       KILLED, 4 red
+M7  the confirmation never says it is the open session    KILLED, 4 red
+M8  pin sends the row's current state, not its opposite   KILLED, 4 red
+M9  no re-read after a successful action                  KILLED, 6 red
+M10 the busy gate is dropped (double tap sends twice)     KILLED, 4 red
+M11 SessionDeleted on a delete is a failure               KILLED, 2 red
+M12 deleting the open session does not navigate           KILLED, 6 red
+M13 the row's own computer is ignored                     KILLED, 4 red
+M14 nextAfterCurrent may return an archived row           KILLED, 2 red
+M15 rowMenuHaptic is the hub's tick, not "firm"           KILLED, 2 red
+M16 a failed action's error is dropped (no banner)        KILLED, 10 red
+M17 the row's pinned flag never reaches the view-model    KILLED, 2 red
+```
+
+Two rounds were needed, honestly:
+- **M4 survived at first** and the TEST was wrong, not the code: my
+  `session-groups` case put the pinned row only in `pinned`, while the real
+  projector keeps it in `active` too (`session-list.ts:rows()`), so removing the
+  hoist filter changed nothing. The fixture now carries the same row in both
+  (the real shape), and M4 is killed.
+- **M3 and several early runs reported "SURVIVED as a crash"**: the harness ran
+  `bun test apps/mobile/test/<file>` with `cwd=apps/mobile` (no file matched, so
+  every run "failed") and then read only stdout, while bun writes the failure
+  report to stderr. Both are fixed (`cwd` = repo root; the report is read from
+  stderr and `(fail)` matched anywhere in the line, past the ANSI reset). Every
+  "KILLED" above is a real assertion failure.
+
+**Tests added:** `test/drawer-row-menu.test.ts` (8),
+`test/drawer-row-actions.test.ts` (16), `test/drawer-row-actions-wiring.test.ts`
+(9, source-pinned like `icon-weights.test.ts` — the `.tsx` seam Bun cannot
+import), plus new cases in `session-list.test.ts` (5), `drawer-list.test.ts`
+(10), `drawer-items.test.ts` (2), `session-groups.test.ts` (4) and
+`haptic-rules.test.ts` (1). Every line of the plan's S2 failure-mode table that
+is decidable without a simulator is a case: offline, `MethodNotFound`, an
+already-deleted row, a double tap, an archived pin, a pin older than the loaded
+pages, a replaced (not merged) pin list, and the open session's delete.
+
+**Gate:** `bun run typecheck` clean (root + mobile + relay) · `bun run lint`
+clean (1845 files, 0 errors/warnings) · `bun test` 13445 pass / 5 skip / 0 fail.
+The 5 skips are the pre-existing opt-in ones (live docker/k8s, slow keepalive);
+none of the new test files contains a skip. `packages/protocol/schema/protocol.json`
+was NOT regenerated: S2 changes no schema (it only consumes S1's `pinned` fields).
+
+**Not verified:** the drawer's long-press on a real device (haptic feel, the
+sheet's native look) and the delete confirmation's layout on a small screen —
+`26-drawer.yaml` now asserts the menu's items and the flow still needs a run on
+the simulator. To verify: run flow 26 against the harness `serve`.
+
+### Fix round 1
+
+*— claude-code 2.1.323 (model `opus`), 2026-11-17 (executor, S2 review findings 1–2)*
+
+Both MEDIUM findings from the S2 review are fixed; nothing else was touched.
+
+**Finding 1 (MEDIUM) — `session-groups.ts` `noMatch` ignored the Pinned group.**
+FIXED, `apps/mobile/src/session-groups.ts:44-53`. `noMatch` summed only
+`active.length + archived.length`, and both exclude the rows hoisted into
+`pinned`, so a query that only a pinned row matched said "No matches" directly
+above that row. It now sums the post-filter `pinned.length + active.length +
+archived.length` (one `matched` value), with `total > 0` and a non-empty query
+unchanged. The new case is in
+`apps/mobile/test/session-groups.test.ts` ("a search ONLY a pinned row matches is
+not 'no matches'"): the fixture's other titles do not contain "pinned spike", so
+`running`/`idle`/`archived` are all empty there and the pin is the only match.
+**RED first:** `expect(groups.noMatch).toBe(false)` → `Received: true`, 15 pass /
+1 fail, on the unpatched line.
+
+**Finding 2 (MEDIUM) — the "read `wasOpen` BEFORE the await" property was
+untested.** The code was already correct (`drawer-row-actions.ts:173`, read
+before `run`), so this is a test-only fix, per the review's own wording ("the
+mutation SURVIVED"). Two cases added to
+`apps/mobile/test/drawer-row-actions.test.ts`, both using a `remove` whose
+resolution flips `currentId()` in a microtask so the change lands strictly
+between the read and the success callback:
+- `currentId` moves away during the delete → `navigate(["next-1"])` is still
+  called (the reviewer's R2 scenario).
+- the mirror: `currentId()` BECOMES the deleted id during the delete → no
+  navigate (a late read would wrongly navigate).
+
+**Mutations (each file restored from a copy in
+`.tentacle/tmp/mobile-session-actions/`, `git status` back to the 3 expected
+files afterwards):**
+- M1 (finding 1): `matched` reverted to `active.length + archived.length` →
+  **KILLED, 15 pass / 1 fail** (the new `noMatch` case).
+- M2 (finding 2, the reviewer's R2 shape): `wasOpen` read after the await, in
+  the success callback → **KILLED, 16 pass / 2 fail** — both new timing cases
+  fail, the pre-existing 16 still pass, which is exactly why R2 had survived.
+
+**Gate (fix round, branch top):** `bunx tsc --noEmit` clean · `bunx tsc -p
+apps/mobile` clean · `bunx tsc -p apps/relay` clean · `bun run lint` clean (1845
+files, 0 errors/warnings) · `bun test` **13448 pass / 5 skip / 0 fail** (956
+files), the 5 skips being the pre-existing opt-in ones. No `skip`/`todo` added;
+fix round 1 adds no test file. No protocol, schema or persistence change, so no
+`protocol.d/` note and no `protocol:bump` needed beyond the merge-time run.
+
+**Drift from Implementation:** none. `noMatch` had no wording in the Design
+(it was not part of S2's list), so the fix only makes the existing predicate
+agree with the hoist the review found already in place; no design decision was
+reopened.
+
+**Not verified:** unchanged from S2 — the simulator run of `26-drawer.yaml`.
+The new `noMatch` case is pure and needs no device; the reviewer's point was a
+projection bug, so the unit test is the whole check.
+
+### S3 — TUI parity: `/sessions` shows pinned sessions first
+
+*— claude-opus-5-5 (claude-code 2.1.323, `settings.json` model `opus`), 2026-11-17 (executor, slice S3 only)*
+
+**S3 — DONE.**
+
+**Load-bearing check (re-run first, as asked): holds.** The plan's premise is
+that the first page's `pinned` array carries every pin, including one that sorts
+past `limit`, and that the TUI path drops it. Repro
+(`.tentacle/tmp/mobile-session-actions/s3-loadcheck.ts`, on the branch top
+`b10cb468` before any edit) builds the list with the daemon's real
+`toSessionList` — three sessions, `limit: 2`, the OLDEST pinned — then walks the
+`connect` mapping and `sessionsView`:
+
+```
+first page sessions: [ "new", "mid" ]
+first page pinned  : [ "old:true" ]
+cursor present     : true
+TUI rows           : ["❯ title new  just now · new","  title mid  just now · mid","  … more on the daemon (the newest 2 shown)"]
+TUI shows the pin  : false
+```
+
+So S1's `pinned` array does reach the client and the TUI loses it in two places:
+the `connect.ts` mapping (which rebuilds each entry field by field, so `pinned`
+and the whole `pinned` array were dropped) and `sessions-panel.ts` (which renders
+`data.sessions` only). Both are fixed; no plan step was contradicted.
+
+The same script over the fixed path
+(`.tentacle/tmp/mobile-session-actions/s3-after.ts`, `toSessionList` →
+`sessionsViewFrom` → `sessionsView`):
+
+```
+rows: ["❯ · title old  just now · old","  title new  just now · new","  title mid  just now · mid","  … more on the daemon (the newest 2 shown)"]
+```
+
+**As built, in order.**
+
+1. `packages/tui/src/sessions-panel.ts` — `SessionsEntry.pinned?: boolean`;
+   `SessionsView.pinned?: readonly SessionsEntry[]` (absent = none pinned, or an
+   older daemon); `PIN_MARK = "·"`; and the one new pure function
+   `sessionRows(view)`: the `pinned` array first (deduped by id against the
+   page, and flagging each entry it hoists, since being IN the array is the
+   pin), then the page's own order — and, with no pins, `data.sessions` **by
+   reference**, so today's order, cursor and keys are untouched. `sessionsRowText`
+   prefixes a pinned row's title with `· `; `sessionsView`, `sessionsAt` and
+   `refreshedSessions` read `sessionRows` instead of `data.sessions`, so the
+   cursor, the armed delete and a delete's refresh all follow the SHOWN order
+   (the wrong-session hazard of reordering). The `… more` footer still counts
+   `data.sessions.length`: `data.more` is a property of the page, not of the
+   hoisted pins.
+2. `packages/tui/src/panels/sessions.ts` — `apply` (a move's wrap count) and
+   `click` (the body index) use `sessionRows(panel.data).length`; the body index
+   already mapped 1:1 onto the rendered rows, which are now the hoisted ones.
+3. `packages/cli/src/connect.ts` — the mapping moved out of the inline
+   `list:` arrow into the exported pure `sessionsViewFrom(result)`
+   (`connect.ts:56-79`): each entry carries `pinned: true` only when the daemon
+   said so, and the first page's `pinned` array is passed through only when
+   present (so an older daemon's view is byte-identical to today's). Its `list:`
+   is now `client.sessionList({ limit: MAX_SESSION_LIST }).then(sessionsViewFrom)`.
+4. `changelog.d/mobile-session-actions.added.md` — the existing bullet (same
+   task slug) gained the one Mac-side sentence rather than a second file.
+5. Tests: `packages/tui/test/sessions-panel.test.ts` (a new `describe`, 4 cases)
+   and a new `packages/cli/test/connect-sessions-view.test.ts` (3 cases).
+
+**Drift from Implementation.** One, and it is additive: the plan named only
+`sessions-panel.ts` (+ its test) for S3, but the view it renders is built in
+`packages/cli/src/connect.ts`, and that mapping is where the entry flag and the
+`pinned` array were being dropped — a panel-only change would have rendered
+nothing. The plan's `sessionsView` wording ("from the same first-page `pinned`
+array") already presupposes those fields arrive, so this completes the stated
+design rather than changing it. The mapping also became a pure exported function
+instead of an inline arrow, per AGENTS §7 (computation in a testable module):
+`connectTui` is not importable in a unit test without a daemon.
+
+**RED first.** `packages/tui/test/sessions-panel.test.ts` was red before the
+panel change on the two marker cases (`Expected "❯ · title a …" / Received
+"❯ title a …"`, 17 pass / 2 fail) — the hoist and dedupe already worked, the
+marker did not, which is what located the flag question in step 1. The CLI test
+file was written after `sessionsViewFrom` existed, so its red proof is the
+mutation set below (M5/M6/M7), not a compile error.
+
+**Mutations** (each file restored from an in-memory copy; `git status` showed
+only the 6 intended paths afterwards):
+
+`packages/tui/src/sessions-panel.ts` (`.tentacle/tmp/mobile-session-actions/mut.py`):
+- M1 the view renders `data.sessions` (no hoist) → **KILLED, 17 pass / 2 fail**.
+- M2 no dedupe (`[...pinned, ...data.sessions]`) → **KILLED, 18 pass / 1 fail**.
+- M3 no pin marker (title unprefixed) → **KILLED, 17 pass / 2 fail**.
+- M4 `sessionsAt` reads `data.sessions` (cursor and armed delete on the page
+  order, not the shown one) → **KILLED, 18 pass / 1 fail**.
+- M8 `refreshedSessions` clamps to `view.sessions.length` (a delete's refresh
+  on the page order) → **KILLED, 18 pass / 1 fail**.
+
+`packages/cli/src/connect.ts` (`…/mut2.py`):
+- M5 the entry's `pinned` dropped (today's mapping) → **KILLED, 2 pass / 1 fail**.
+- M6 the first-page `pinned` array dropped → **KILLED, 2 pass / 1 fail**.
+- M7 `more` hard-wired to `false` → **KILLED, 2 pass / 1 fail**.
+
+All five panel and all three CLI mutations were killed by their own assertions
+(M4/M8 by the hoisted-cursor and refresh cases, M6 by the off-page pin), never
+by a compile error.
+
+**Gate (branch top, after S3):** `bun run typecheck` clean (root + `apps/mobile`
++ `apps/relay`) · `bun run lint` clean, 1846 files, 0 errors/warnings ·
+`bun test` **13455 pass / 5 skip / 0 fail** (957 files). The 5 skips are the
+pre-existing opt-in ones (live-k8s, live-docker, the real-socket keepalive); I
+added no `skip`, `skipIf` or `todo`. No protocol schema, wire or persistence
+change in S3 (`SessionListEntry.pinned` / `SessionListResult.pinned` were S1's),
+so `protocol.json` needed no regeneration and no `protocol.d/` note is implied;
+`packages/protocol/test/json-schema.test.ts` stays green.
+
+**Not verified:** the panel on a real terminal against a real `serve` daemon
+with 20+ pinned sessions. The width/window behaviour is inherited unchanged
+(`paletteWindow` over the hoisted count) and covered by unit tests, but the
+visual result (a `·` before the title) has only been read as text. To verify:
+`serve` with a pinned session, `tentacle connect`, `/sessions`.
+
+### Fix round 1
+
+*— claude-opus-5-5 (claude-code 2.1.323, `settings.json` model `opus`), 2026-11-17 (executor, S3 review finding 1)*
+
+One finding in this round (MEDIUM, S3), a test-gap one: the code was correct as
+built and nothing in `packages/tui/src` changed.
+
+**Finding 1 (MEDIUM) — `panels/sessions.ts` `apply` and `click` were unpinned.**
+FIXED, test only: `packages/tui/test/sessions-panel.test.ts` (new case "the
+panel's own MOVE and CLICK reach a row the page alone does not hold", in the S3
+`describe`). The review had already reproduced it: with the page `[a,b]` plus a
+hoisted pin `c`, replacing `sessionRows(panel.data).length` with
+`panel.data?.sessions.length ?? 0` at `:44` (M7) or `:53` (M8) left
+`sessions-panel` + `panels-registry` at 0 red. I confirmed that first, on the
+branch as it stood: **both mutations survived, 30 pass / 0 fail each**
+(`.tentacle/tmp/mobile-session-actions/fix1/mut.sh`).
+
+The case uses the off-page pin shape the review named (`pinned: [c]`, page
+`[a,b]`, so 3 rows shown against a 2-row page) and pins the two behaviours a
+page-length count would break: ↑ from row 0 reaches row 2 (not 1) and ↓ from row 1
+reaches row 2 (not 0), so no 2-row cycle; and `panelClick` on body row 2 (the
+last shown, index 2 = the page's row `b`) moves the cursor to 2. Both are read
+back through `applyPanel`/`panelClick` — the facades the TUI actually calls, not
+the descriptor directly — so the assertion is on the real seam.
+
+**RED/GREEN:** the code was already right, so red comes from the mutation (§9's
+non-vacuity requirement, the reviewer's own M7/M8):
+- **M7** `apply` → `panel.data?.sessions.length ?? 0` → **KILLED, 19 pass / 1
+  fail**; the failure is `toMatchObject` on `{ state: { cursor: 2 } }` (the
+  move wrapped at 2 rows instead of 3).
+- **M8** `click`'s `count` → the same expression → **KILLED, 19 pass / 1 fail**;
+  `expect(clicked.state.cursor).toBe(2)` → `Received: 0` (the click was
+  ignored, exactly the unreachable-row hazard).
+- Unmutated: 20 pass, 73 `expect()` calls. Both files restored from
+  `.tentacle/tmp/mobile-session-actions/fix1/`; `git status` shows only the one
+  test file modified afterwards.
+
+**Gate (fix round, branch top):** `bunx tsc --noEmit` clean · `bunx tsc -p
+apps/mobile` clean · `bunx tsc -p apps/relay` clean · `bun run lint` clean (1846
+files, 0 errors/warnings) · `bun test` **13455 pass / 5 skip / 1 fail** (13461
+tests, 957 files), the 5 skips the pre-existing opt-in ones. The 1 fail is NOT
+from this change: `packages/docker/test/ssh-dialer.test.ts:316` ("close() kills a
+child the ssh spawned"), a timing flake — its own 50×20 ms wait for the spawned
+child's pid file expired (`expect(childPid).toBeGreaterThan(0)` → `Received: 0`)
+under full-suite load. Re-run alone: **24 pass / 0 fail**; the whole
+`packages/docker` suite: **153 pass / 1 skip / 0 fail**. It is a pre-existing
+timing test this task does not touch: the branch changes no `packages/docker`
+file, and S3's own full run was green. No `skip`/`todo` added; the fix round
+adds no NEW test file (the case joins `sessions-panel.test.ts`).
+
+**Drift from Implementation:** none. The Design never said which module counts
+the rows; the fix pins the two call sites that must agree with `sessionRows`,
+which is the hoist S2/S3 already established, so no decision was reopened.
+
+**Not verified:** unchanged from S3 — the panel on a real terminal against a
+real `serve` daemon. The new case is pure (no Ink, no daemon) and is the whole
+check for the finding.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S1 only)*
+
+**Verdict: APPROVE (S1).** No HIGH or MEDIUM findings.
+
+**Gate:** I ran it myself. `bun test`: 13390 pass, 5 skip, 0 fail (953 files). The diff adds no `skip`, `skipIf` or `todo`. The touched files (`daemon/session-pin`, `daemon/session-list`, `protocol/session-pin`, `client/session-pin`, `protocol/json-schema`): 65 pass. `bun run lint`: clean (1840 files). `bun run typecheck`: clean (root + mobile + relay).
+
+**Mutations I added** (`.tentacle/tmp/mobile-session-actions/rv/mut.ts`; each file restored, `git status` clean afterwards). All 6 were KILLED:
+- R1: the loaded path writes no pin (`withPin` dropped). 2 red.
+- R2: the cap ignores `already`. 1 red.
+- R3: `setPinned` moves `lastChangeAt`. 1 red.
+- R4: the tombstone check is removed. 2 red.
+- R5: `parseSidecar` keeps any value. 1 red.
+- R6: an archived unpin is not rewritten. 1 red.
+
+**Attacks tried:**
+1. *A `/clear` fork inherits the pin* (it would duplicate the pin and break the cap). Holds: `SessionPersister.fork` builds its record by hand, with no `pinnedAt`.
+2. *A reopen races an archived pin rewrite.* Holds: the reopen uses `entry.pinnedAt` (`withPin`), and the loaded path skips once `archived.get(id) !== entry`.
+3. *An archived pin write fails.* Holds: `unwritten` stays set, and the sweep's guard includes `pinChanged`.
+4. *The cap is checked with an await before the set.* Holds: `pin()` is fully synchronous, and `Connection` returns it directly.
+5. *Paging changes when pins exist.* Holds: `sessions` and `cursor` are untouched. `pinned` appears only on the first page, sliced to the cap.
+6. *The relay blocks the new method on a method allowlist.* Holds: `apps/relay` has none.
+7. *Persisting a conversation fact (§7).* Holds: the pin is sidecar-only, with no log entry and no `DAEMON_STATE_VERSION` bump. A malformed value is dropped, not refused.
+8. *A protocol break.* Holds: the change is additive, strip schemas only, so no `protocol.d/` note is needed.
+
+**Not verified (as the Execution says):** a real `serve` restart on disk. It is covered only through the real decoders and `loadState` in tests.
+
+**Notes (not blocking):**
+- The changelog fragment describes the phone feature (S2). Do not release before S2 lands.
+- The branch also regenerates `protocol.json`. That is fine, but `bun run protocol:bump` must still run at merge.
+
+**Executor behaviour:** The Execution is accurate against the code. It records every drift with a reason, and it ran 14 mutations, including one honest correction (the M10 variant). The executor and I are the same model (claude-opus-5-5) with fresh context, so we may share blind spots.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S2 only)*
+
+**Verdict: REQUEST-CHANGES (S2).** There are 2 MEDIUM findings and no HIGH ones.
+
+**Gate:** The 8 touched mobile test files give 124 pass, 0 fail. `bun run lint` is clean (1845 files). `bun run typecheck` is clean (root + mobile + relay). I did not re-run the full `bun test`.
+
+**Findings:**
+1. **MEDIUM. `apps/mobile/src/session-groups.ts:47`: `noMatch` ignores the Pinned group.** `noMatch` is still computed as `active.length + archived.length === 0`, but both of those groups now exclude pinned rows. Failure scenario: on the Sessions screen, search for text that only a pinned session matches. The screen shows "No matches — Nothing called “deploy”" (`SessionsScreen.tsx:213`) and, below it, the Pinned section with the matching row. Repro (`.tentacle/tmp/mobile-session-actions/rv2/nomatch.ts`): `groupSessions({pinned:[a], active:[a,b], archived:[]}, "deploy")` returns `{pinned:["a"], noMatch:true}`. No test covers a query together with pins. Fix: add `pinned.length` to the `noMatch` sum, and add a test for it.
+2. **MEDIUM. `apps/mobile/src/drawer-row-actions.ts:173`: the "read `wasOpen` BEFORE the await" property is untested (§9).** Mutation R2 moved the read after the await (`if (deps.currentId() === row.id)`). All 16 tests in `drawer-row-actions.test.ts` still pass, so the mutation SURVIVED. Failure scenario this would let through: the open screen gets `session_closed{deleted}` during the delete call and moves away, so `currentId` changes. A late read then skips `navigate`, and the person lands wherever the screen sent them instead of on `nextAfterCurrent`, which is the Owner Q2 behaviour. Fix: add a test in which `currentId()` changes while `remove` is pending, and assert that `navigate` is still called.
+
+**Mutations I added** (each one restored; `git status` was clean afterwards):
+- R1: drop the wrap-around in `nextAfterCurrent`. KILLED, 1 red.
+- R2: as in finding 2. SURVIVED.
+
+**Attacks tried:**
+- *A stale `pinned` flag survives a first-page refresh through `newer()`.* Holds: a first page REPLACES `entries` (`merge` with mode `first`), and `pinnedEntries` is replaced only on a first page.
+- *The busy flag gets stuck on an offline delete.* Holds: every path in `run` clears it.
+- *The delete/pin goes to the open session's computer instead of the listed one.* Holds: `listed` is passed explicitly, and `reread` is guarded by the computer the drawer currently lists.
+- *An archived next row is opened after a delete.* Holds: `nextAfterCurrent` filters out archived rows.
+- *A pinned archived current row is hidden by the archive toggle.* Holds: it renders in Pinned.
+- *An outbox-queued destructive action.* Holds: it goes straight to `link.client`, on the same path rename uses.
+
+**What holds:** Logic sits in pure modules and the components only render (§7). There is no protocol or persistence change. The Execution's account matches the code.
+
+**Executor behaviour:** The Execution is thorough and honest (17 mutations, two corrected harness errors). Its mutation set missed the timing property in finding 2. The commit says deepseek, but the Execution is signed `opus`. I am claude-opus-5-5 with a fresh context, so if the executor was Opus, we may share blind spots.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context re-review of `7a23f2ff`, S2 only)*
+
+**Verdict: APPROVE (S2).** Both round-1 findings are fixed, and I found no regressions.
+
+- **Finding 1 is fixed.** `session-groups.ts:44` now counts `pinned` in `matched`. Mutation: I dropped `pinned.length` from that sum and the new test "a search ONLY a pinned row matches…" FAILED (KILLED, 1 red). The rest of the `noMatch` rule is unchanged: an empty query and `total > 0` work as before.
+- **Finding 2 is fixed.** There are two new tests, one where the session was open and one where it was not. Mutation R2 again: moving the `wasOpen` read to after the await now fails both of them (KILLED, 2 red).
+- I restored both mutations, and `git status` was clean afterwards. The commit changes no production code except `session-groups.ts`.
+- **Gate:** `session-groups` + `drawer-row-actions`: 34 pass, 0 fail. `bun run lint` is clean (1845 files). `bun run typecheck` is clean (root + mobile + relay). I did not run the full `bun test`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context adversarial review, slice S3 only, `git diff main...HEAD`)*
+
+**Verdict: REQUEST-CHANGES (S3).** There is one MEDIUM finding: a test gap. The code is correct as built.
+
+1. **MEDIUM — two changed code paths in `packages/tui/src/panels/sessions.ts:44` (`apply`) and `:53` (`click`) have no test that pins them.** Mutation M7: in the move, `sessionRows(panel.data).length` → `panel.data?.sessions.length ?? 0`. Mutation M8: the same change in `click`'s `count`. Both SURVIVE `sessions-panel`, `panels-registry` and `app-panels-structure` (0 red). Failure scenario if either line regresses: say the page is `[a,b]` and `pinned` holds one more session `[c]`. The panel shows 3 rows, but ↑↓ would wrap at 2 and a click on row 3 would be ignored. The last hoisted rows would become unreachable, and nothing would catch it. Fix: add a `panels-registry`-style test for `sessionsKind.apply` (down from the last page index reaches row 3) and for `click` on a row past `data.sessions.length`. §9: each changed behaviour needs a test that goes red on the bug.
+
+**Gate:** `sessions-panel` + `connect-sessions-view`: 22 pass, 0 fail. `bun run lint` is clean (1846 files). `bun run typecheck` is clean (root + mobile + relay). I did not run the full `bun test`.
+
+**Mutations** (`.tentacle/tmp/mobile-session-actions/mut.ts`): KILLED: M1 no dedupe (1 red), M2 `sessionsAt` reads the page (1), M3 `refreshedSessions` reads the page (1), M4 no marker (2), M5 `connect` drops the `pinned` array (1), M6 no flag normalisation (2). SURVIVED: M7 and M8 (finding 1). One run was killed by a timeout while M6 was still applied. I found it in `git status` and restored it by hand. The tree is clean now.
+
+**Attacks tried:**
+- Is a hoisted pin's delete armed on the wrong id? No: `sessionsAt` and `armed` both read `sessionRows`, and a test pins it.
+- An archived pin through `choose`: `sessionsChoose` already handles `archived` → reopen. OK.
+- A pod/untrusted daemon: `pinned` is a boolean, the array is bounded by `MAX_PINNED_SESSIONS`, and titles go through `oneLine`. OK.
+- An older daemon (no `pinned`): the view is unchanged, and the order is returned by reference. Tested.
+- The footer count stays on the page length. Correct.
+
+**Holds:** §7 "logic in pure modules": `sessionRows` and `sessionsViewFrom` are pure. There is no protocol or persistence change.
+
+**Executor:** The Execution is accurate, and its listed mutations are real. It did not mutate the two panel call sites. I am the same model family as the executor (fresh context only).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-17 (fresh-context re-review of `2ef03451`, S3 only)*
+
+**Verdict: APPROVE (S3).** Finding 1 is fixed, and I found no regressions.
+
+- **Finding 1 is fixed.** The new test "the panel's own MOVE and CLICK reach a row the page alone does not hold" (`sessions-panel.test.ts`) now kills both mutations. M7 (`apply` counts the page) → KILLED, 1 red. M8 (`click` counts the page) → KILLED, 1 red. M6 was re-run and is still KILLED (2 red). I restored every mutation, and `git status` was clean afterwards.
+- **No regressions:** the commit adds only a test and doc text. It changes no production code.
+- **Gate:** `sessions-panel` passes 20/20. `bun run lint` is clean (1846 files). `bun run typecheck` is clean (root + mobile + relay). I did not run the full `bun test`.

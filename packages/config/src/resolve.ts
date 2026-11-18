@@ -13,6 +13,11 @@ import {
   DEFAULT_AUTO_WAKE,
   DEFAULT_BASE_URL,
   DEFAULT_CONTEXT_AWARENESS,
+  DEFAULT_CONTEXT_PRUNE_AT_PERCENT,
+  DEFAULT_CONTEXT_PRUNE_ENABLED,
+  DEFAULT_CONTEXT_PRUNE_KEEP_RECENT_ROUNDS,
+  DEFAULT_CONTEXT_PRUNE_MIN_GAIN_PERCENT,
+  DEFAULT_CONTEXT_PRUNE_OUTPUT_CHARS,
   DEFAULT_CONTEXT_RESET_ENABLED,
   DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE,
   DEFAULT_CONTEXT_STEP_PERCENT,
@@ -23,6 +28,11 @@ import {
   DEFAULT_MODEL,
   DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
+  DEFAULT_SCHEDULES_EXPIRY_DAYS,
+  DEFAULT_SCHEDULES_MAX_AHEAD_DAYS,
+  DEFAULT_SCHEDULES_MAX_JOBS,
+  DEFAULT_SCHEDULES_MIN_INTERVAL_MINUTES,
+  DEFAULT_SCHEDULES_PROMPT_MAX_CHARS,
   DEFAULT_SESSION_HOP_TOOL,
   DEFAULT_SUBAGENTS_ENABLED,
   DEFAULT_SUBAGENTS_TWO_WAY,
@@ -63,6 +73,15 @@ export interface ContextResetConfig {
   readonly maxPerMessage: number;
 }
 
+/** `contextPrune`, resolved (docs/feat/smart-compaction.md): when `enabled`, the loop prunes the model's copy in batches. */
+export interface ContextPruneConfig {
+  readonly enabled: boolean;
+  readonly pruneAtPercent: number;
+  readonly minGainPercent: number;
+  readonly keepRecentRounds: number;
+  readonly pruneOutputChars: number;
+}
+
 /**
  * `sessionHop`, resolved: whether the agent is offered `move_session`
  * (docs/feat/session-hop.md D9). The tool only PROPOSES a move — the owner is
@@ -87,6 +106,19 @@ export interface WorkloadShellConfig {
   readonly tool: boolean;
 }
 
+/**
+ * `schedules`, resolved: THIS host's limits on the agent's scheduled wakes
+ * (docs/feat/cron-tool.md D3, owner Q6). File-only, never carried: the host
+ * that runs the timer decides.
+ */
+export interface SchedulesConfig {
+  readonly maxJobs: number;
+  readonly minIntervalMinutes: number;
+  readonly expiryDays: number;
+  readonly maxAheadDays: number;
+  readonly promptMaxChars: number;
+}
+
 /** How the API key will be obtained. */
 export type ApiKeySource = "env" | "file" | "command" | "none";
 
@@ -105,10 +137,14 @@ export interface ResolvedConfig {
   readonly contextAwareness: ContextAwarenessConfig;
   /** The model's `context_reset` tool and its anti-loop cap (docs/feat/context-reset.md). */
   readonly contextReset: ContextResetConfig;
+  /** Smart compaction of the model's copy (file-only, docs/feat/smart-compaction.md). */
+  readonly contextPrune: ContextPruneConfig;
   /** The agent's `move_session` proposal tool (docs/feat/session-hop.md D9). */
   readonly sessionHop: SessionHopConfig;
   /** The agent's `workload_shell` tool (docs/fix/workload-shell-live.md, owner decision 1). */
   readonly workloadShell: WorkloadShellConfig;
+  /** The host's limits on the agent's scheduled wakes (docs/feat/cron-tool.md D3). */
+  readonly schedules: SchedulesConfig;
   /** Max output tokens per response; unset → the provider's own default. */
   readonly maxTokens?: number;
   /**
@@ -184,9 +220,27 @@ export interface ResolvedConfig {
   /** The configured workspace-mount hide list (file or profile); absent = the CLI default list. */
   readonly mount?: MountConfig;
   /** The configured TUI palette (file or profile); absent = `auto` (the TUI probes). */
-  readonly tui?: { readonly theme?: "auto" | "dark" | "light" | undefined };
+  readonly tui?: {
+    readonly theme?: "auto" | "dark" | "light" | undefined;
+    /** A chart's plot glyphs (docs/feat/model-charts.md D5); absent = `braille`. */
+    readonly chartGlyphs?: "braille" | "blocks" | undefined;
+  };
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: { readonly keepSuperseded?: boolean | undefined };
+  /** Voice dictation (file or profile); absent = OFF, Ctrl+R, `auto`, no auto-stop. */
+  readonly voice?: {
+    readonly enabled?: boolean | undefined;
+    readonly key?: string | undefined;
+    readonly language?: "auto" | "it" | "en" | undefined;
+    readonly engine?: "apple" | "parakeet" | undefined;
+    readonly autoStop?: boolean | undefined;
+    readonly autoStopSilenceMs?: number | undefined;
+    readonly maxSeconds?: number | undefined;
+    readonly input?: "default" | "builtin" | undefined;
+    readonly voiceProcessing?: boolean | undefined;
+    readonly modelsDir?: string | undefined;
+    readonly helperPath?: string | undefined;
+  };
   /**
    * The mobile relay (docs/feat/mobile-relay.md R5a): `enabled` (default true)
    * and `url` (`DEFAULT_RELAY_URL` when unset). Absent when the file omits the
@@ -202,6 +256,16 @@ export interface ResolvedConfig {
   readonly push?: {
     readonly enabled?: boolean | undefined;
     readonly graceSeconds?: number | undefined;
+  };
+  /**
+   * Live Activities (docs/feat/mobile-live-activity.md Design 3): `enabled`
+   * (default true) and `startAfterSeconds` (default 20, range 0–3600 — `serve`
+   * applies both, so a value nobody reads never refuses a start). Absent when the
+   * file omits the section.
+   */
+  readonly liveActivity?: {
+    readonly enabled?: boolean | undefined;
+    readonly startAfterSeconds?: number | undefined;
   };
   /** User hooks (file-only, no env form); empty when unset. */
   readonly hooks: readonly HookSpecConfig[];
@@ -235,8 +299,18 @@ export interface ResolvedConfig {
     readonly contextAwarenessStepPercent: Source;
     readonly contextResetEnabled: Source;
     readonly contextResetMaxPerMessage: Source;
+    readonly contextPruneEnabled: Source;
+    readonly contextPruneAtPercent: Source;
+    readonly contextPruneMinGainPercent: Source;
+    readonly contextPruneKeepRecentRounds: Source;
+    readonly contextPruneOutputChars: Source;
     readonly sessionHopTool: Source;
     readonly workloadShellTool: Source;
+    readonly schedulesMaxJobs: Source;
+    readonly schedulesMinIntervalMinutes: Source;
+    readonly schedulesExpiryDays: Source;
+    readonly schedulesMaxAheadDays: Source;
+    readonly schedulesPromptMaxChars: Source;
     readonly maxInlineOutputChars: Source;
     readonly toolOutputRetentionDays: Source;
     readonly redactSecrets: Source;
@@ -535,6 +609,29 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.contextReset?.maxPerMessage,
     DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE,
   );
+  // File-only, like `contextAwareness`: no env form.
+  const prune = fileConfig.contextPrune;
+  const contextPruneEnabled = pick(undefined, prune?.enabled, DEFAULT_CONTEXT_PRUNE_ENABLED);
+  const contextPruneAtPercent = pick(
+    undefined,
+    prune?.pruneAtPercent,
+    DEFAULT_CONTEXT_PRUNE_AT_PERCENT,
+  );
+  const contextPruneMinGainPercent = pick(
+    undefined,
+    prune?.minGainPercent,
+    DEFAULT_CONTEXT_PRUNE_MIN_GAIN_PERCENT,
+  );
+  const contextPruneKeepRecentRounds = pick(
+    undefined,
+    prune?.keepRecentRounds,
+    DEFAULT_CONTEXT_PRUNE_KEEP_RECENT_ROUNDS,
+  );
+  const contextPruneOutputChars = pick(
+    undefined,
+    prune?.pruneOutputChars,
+    DEFAULT_CONTEXT_PRUNE_OUTPUT_CHARS,
+  );
   // Laptop-side (D9): it decides whether the agent is OFFERED `move_session`.
   // A pod reads its own value — the tool only proposes, and the owner's answer
   // still comes from the laptop's prompt. OFF by default (session-hop-ux OD8):
@@ -550,6 +647,32 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     parseBool(env.TENTACLE_WORKLOAD_SHELL_TOOL),
     fileConfig.workloadShell?.tool,
     DEFAULT_WORKLOAD_SHELL_TOOL,
+  );
+  // File-only, like `contextAwareness`: the host running the timer decides.
+  const schedulesMaxJobs = pick(
+    undefined,
+    fileConfig.schedules?.maxJobs,
+    DEFAULT_SCHEDULES_MAX_JOBS,
+  );
+  const schedulesMinIntervalMinutes = pick(
+    undefined,
+    fileConfig.schedules?.minIntervalMinutes,
+    DEFAULT_SCHEDULES_MIN_INTERVAL_MINUTES,
+  );
+  const schedulesExpiryDays = pick(
+    undefined,
+    fileConfig.schedules?.expiryDays,
+    DEFAULT_SCHEDULES_EXPIRY_DAYS,
+  );
+  const schedulesMaxAheadDays = pick(
+    undefined,
+    fileConfig.schedules?.maxAheadDays,
+    DEFAULT_SCHEDULES_MAX_AHEAD_DAYS,
+  );
+  const schedulesPromptMaxChars = pick(
+    undefined,
+    fileConfig.schedules?.promptMaxChars,
+    DEFAULT_SCHEDULES_PROMPT_MAX_CHARS,
   );
   const maxInlineOutputChars = pick(
     parseNonNegativeInt(env.TENTACLE_MAX_OUTPUT_CHARS),
@@ -654,8 +777,22 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       enabled: contextResetEnabled.value,
       maxPerMessage: contextResetMaxPerMessage.value,
     },
+    contextPrune: {
+      enabled: contextPruneEnabled.value,
+      pruneAtPercent: contextPruneAtPercent.value,
+      minGainPercent: contextPruneMinGainPercent.value,
+      keepRecentRounds: contextPruneKeepRecentRounds.value,
+      pruneOutputChars: contextPruneOutputChars.value,
+    },
     sessionHop: { tool: sessionHopTool.value },
     workloadShell: { tool: workloadShellTool.value },
+    schedules: {
+      maxJobs: schedulesMaxJobs.value,
+      minIntervalMinutes: schedulesMinIntervalMinutes.value,
+      expiryDays: schedulesExpiryDays.value,
+      maxAheadDays: schedulesMaxAheadDays.value,
+      promptMaxChars: schedulesPromptMaxChars.value,
+    },
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     ...(maxImageBytes !== undefined ? { maxImageBytes } : {}),
     ...(images !== undefined ? { images } : {}),
@@ -689,8 +826,10 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
     ...(fileConfig.tui !== undefined ? { tui: fileConfig.tui } : {}),
     ...(fileConfig.sessions !== undefined ? { sessions: fileConfig.sessions } : {}),
+    ...(fileConfig.voice !== undefined ? { voice: fileConfig.voice } : {}),
     ...(fileConfig.relay !== undefined ? { relay: fileConfig.relay } : {}),
     ...(fileConfig.push !== undefined ? { push: fileConfig.push } : {}),
+    ...(fileConfig.liveActivity !== undefined ? { liveActivity: fileConfig.liveActivity } : {}),
     ...(fileConfig.mount !== undefined ? { mount: fileConfig.mount } : {}),
     hooks: fileConfig.hooks ?? [],
     // MCP servers are file-only (no env form); empty when unset.
@@ -720,8 +859,18 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       contextAwarenessStepPercent: contextAwarenessStepPercent.source,
       contextResetEnabled: contextResetEnabled.source,
       contextResetMaxPerMessage: contextResetMaxPerMessage.source,
+      contextPruneEnabled: contextPruneEnabled.source,
+      contextPruneAtPercent: contextPruneAtPercent.source,
+      contextPruneMinGainPercent: contextPruneMinGainPercent.source,
+      contextPruneKeepRecentRounds: contextPruneKeepRecentRounds.source,
+      contextPruneOutputChars: contextPruneOutputChars.source,
       sessionHopTool: sessionHopTool.source,
       workloadShellTool: workloadShellTool.source,
+      schedulesMaxJobs: schedulesMaxJobs.source,
+      schedulesMinIntervalMinutes: schedulesMinIntervalMinutes.source,
+      schedulesExpiryDays: schedulesExpiryDays.source,
+      schedulesMaxAheadDays: schedulesMaxAheadDays.source,
+      schedulesPromptMaxChars: schedulesPromptMaxChars.source,
       maxInlineOutputChars: maxInlineOutputChars.source,
       toolOutputRetentionDays: toolOutputRetentionDays.source,
       redactSecrets: redactSecrets.source,

@@ -16,26 +16,55 @@
  * `messagePortChannel` ignores non-string frames, so they don't reach the RPC.
  */
 import type { TentacleConfig } from "@tentacle/config";
-import type { AttachmentSource, Tool } from "@tentacle/core";
-import { Connection, SessionHost } from "@tentacle/daemon";
+import type { ArtifactSink, AttachmentSource, ScheduleLink } from "@tentacle/core";
+import {
+  Connection,
+  LogSessionStore,
+  SessionHost,
+  type SessionHostOptions,
+} from "@tentacle/daemon";
 import { setGroupForwarder } from "@tentacle/exec";
-import { type McpServerStatus, McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
-import type { ToolRegistry } from "@tentacle/tools";
+import type { McpServerStatus } from "@tentacle/mcp";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
-import { daemonImagePolicy } from "./image-policy.ts";
+import "./pdf-worker-url.ts";
+import { daemonDocumentPolicy, daemonImagePolicy } from "./image-policy.ts";
+import { laptopArtifactSeed } from "./laptop-artifacts.ts";
+import { createMcpHub } from "./mcp-hub.ts";
 import type { ProviderFactory } from "./model-provider.ts";
 import {
   type SkillScan,
   type WiredAgent,
   buildAgent,
   createSkillScan,
+  scheduleLimitsOf,
   sweepToolOutput,
   toolOutputStore,
   workerSessionBuild,
 } from "./wiring.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
 import { LaptopWorkloadShellBackend } from "./workload-shell-backend.ts";
+
+/**
+ * D11's worker-side half: a seed that lists what THIS laptop kept beside the
+ * session's log and reads its blobs on demand. Read-only: the main thread owns
+ * that dir (§7), and only a version the manifest names is ever read.
+ *
+ * `LogSessionStore` here is a plain reader (it never writes: every write op is
+ * unused), which is why the daemon's own store type can be used for it.
+ */
+export function laptopSeedFrom(dir: string): SessionHostOptions["artifactSeed"] {
+  const store = new LogSessionStore(dir);
+  return (id) =>
+    laptopArtifactSeed(
+      {
+        artifacts: (uid) => store.artifactManifest(uid),
+        readArtifact: (uid, sha256, offset, length) =>
+          store.readArtifactBlob(uid, sha256, offset, length),
+      },
+      id,
+    );
+}
 
 /**
  * The worker's per-session wiring, exported so a test can drive it with an
@@ -45,7 +74,12 @@ import { LaptopWorkloadShellBackend } from "./workload-shell-backend.ts";
  */
 export function workerAgentFactory(
   config: TentacleConfig,
-  ctx: { readonly attachments?: AttachmentSource },
+  ctx: {
+    readonly attachments?: AttachmentSource;
+    readonly artifacts?: ArtifactSink;
+    /** The session's scheduled wakes (docs/feat/cron-tool.md D1): the worker schedules. */
+    readonly schedules?: () => ScheduleLink | null;
+  },
   options: { readonly skillScan?: SkillScan; readonly createProvider?: ProviderFactory } = {},
 ): WiredAgent {
   return buildAgent(
@@ -59,10 +93,15 @@ export function workerAgentFactory(
       // The session's store: this host runs the laptop's own model in this
       // process, so it holds an image's bytes (docs/feat/attachments-prompt.md D4).
       ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+      // The session's artifact store: the model may `present` (model-artifacts D4).
+      ...(ctx.artifacts ? { artifacts: ctx.artifacts } : {}),
       // A worker session may hop (docs/feat/session-hop.md D8/D9): this is one of
       // the two kinds that offers the model `move_session`, and the laptop's TUI
       // is right here to ask its owner about a proposal.
       moveSession: true,
+      // Scheduled wakes (docs/feat/cron-tool.md D1): this host keeps a table (in
+      // memory only — it lives as long as the TUI), so its agent is offered the tools.
+      ...(ctx.schedules ? { schedules: ctx.schedules } : {}),
       // `workload_shell` (docs/feat/workload-shell.md D3): the worker IS the
       // user's own host, so it holds the kubeconfig / docker endpoint the tool
       // dials. A pod daemon never passes this.
@@ -92,6 +131,13 @@ export function workerSessionHost(
     readonly onBuilt?: (wired: WiredAgent) => void;
     /** A test's provider recorder: a turn's `ChatRequest` then never leaves the machine. */
     readonly createProvider?: ProviderFactory;
+    /**
+     * A RESUMED session's artifacts, from THIS laptop's copy (docs/feat/
+     * model-artifacts.md D11): the worker keeps nothing on disk, so its gallery
+     * would be empty after `--resume`. Absent → memory-only, as before (and a
+     * pod daemon never passes one: AGENTS §7).
+     */
+    readonly artifactSeed?: SessionHostOptions["artifactSeed"];
   },
 ): SessionHost {
   const skillScan = deps.skillScan ?? createSkillScan(config);
@@ -104,6 +150,13 @@ export function workerSessionHost(
     // The laptop's own code in this process: the session's auto-accept is
     // shared with every TUI on it (docs/feat/session-auto-accept.md D1).
     sharedAutoAccept: true,
+    // D11: the RESUMED session's gallery comes back from the laptop's own copy
+    // (this daemon writes nothing). Only this host ever sets it.
+    ...(deps.artifactSeed ? { artifactSeed: deps.artifactSeed } : {}),
+    // Scheduled wakes (docs/feat/cron-tool.md D1, owner Q4): the worker keeps the
+    // session's table and fires it itself, with THIS laptop's `schedules.*` limits.
+    // Never persisted (pods and the worker never persist, AGENTS §7).
+    schedules: { limits: scheduleLimitsOf(config) },
     // The client's own build: no skew possible, named for completeness.
     identity: { tentacle: deps.version, kind: "worker" },
     newSessionSkills: () => skillScan.newSession(),
@@ -114,6 +167,7 @@ export function workerSessionHost(
     // The worker runs its own config's model on this machine, so it holds the
     // bytes (docs/feat/attachments-prompt.md D4). `undefined` = images off.
     ...(images ? { images } : {}),
+    documents: daemonDocumentPolicy("host"),
     // A failed turn now ends in the stream (`turn_end.error`), not as a handler
     // throw: same policy as below — the real message to this LOCAL client, the
     // full error (with stack) to the daemon error log.
@@ -159,45 +213,18 @@ port.addEventListener("message", (event: { data: unknown }) => {
   // The version comes from the main thread, NOT from `version.ts`: importing it
   // would inline the compile-time marker into this second bundle too (two
   // markers in the binary; scripts/build.ts demands exactly one).
-  const { config, version } = event.data as WorkerBootstrap;
+  const { config, version, artifactsDir } = event.data as WorkerBootstrap;
 
-  // Connect MCP once, in the background. Until it resolves, `mcpTools` is empty
-  // and we remember each freshly-built registry so we can register the tools
-  // into it the moment they arrive (the first session is created lazily, on the
-  // first prompt, so in practice MCP is ready well before then).
-  let mcpTools: readonly Tool[] = [];
-  let mcpReady = false;
-  const pending = new Set<ToolRegistry>();
-  const register = (registry: ToolRegistry): void => {
-    for (const tool of mcpTools) {
-      try {
-        registry.register(tool);
-      } catch {
-        // Name clash with a built-in / another server: skip the duplicate.
-      }
-    }
-  };
-  // What `/mcp` reports (`mcp/status`): `connecting` until this settles.
-  const mcpTracker = new McpStatusTracker(Object.keys(config.mcpServers));
-  connectMcpServers(config.mcpServers)
-    .then((result) => {
-      mcpTracker.settle(result);
-      mcpTools = result.tools;
-      mcpReady = true;
-      for (const registry of pending) {
-        register(registry);
-      }
-      pending.clear();
-      if (Object.keys(result.errors).length > 0) {
-        postObject({ type: "mcp-errors", errors: result.errors });
-      }
-    })
-    .catch((error) => {
-      mcpTracker.fail(String(error));
-      mcpReady = true;
-      pending.clear();
-      postObject({ type: "mcp-errors", errors: { "*": String(error) } });
-    });
+  // Connect MCP once, in the background. Until it resolves the hub keeps every
+  // freshly-built registry, so it can register the tools into them the moment
+  // they arrive (the first session is created lazily, on the first prompt, so in
+  // practice MCP is ready well before then). Connection errors go to the main
+  // thread for display — the same object-message path as the job groups above.
+  // The logic itself is `mcp-hub.ts`, shared with `serve` (docs/feat/serve-mcp.md).
+  const hub = createMcpHub(config.mcpServers, {
+    onErrors: (errors) => postObject({ type: "mcp-errors", errors }),
+  });
+  hub.start();
 
   // One skill scan for every session and for the `/name` list of a session
   // not created yet (docs/feat/skills-hot-reload.md).
@@ -206,15 +233,12 @@ port.addEventListener("message", (event: { data: unknown }) => {
   const host = workerSessionHost(config, {
     version,
     skillScan,
-    mcpStatus: () => mcpTracker.probe(),
-    toolsReady: () => mcpReady,
-    onBuilt: (wired) => {
-      register(wired.tools);
-      // If MCP hasn't resolved yet, register into this registry once it does.
-      if (!mcpReady) {
-        pending.add(wired.tools);
-      }
-    },
+    mcpStatus: () => hub.status(),
+    toolsReady: () => hub.ready(),
+    onBuilt: (wired) => hub.onBuilt(wired.tools),
+    // D11: a RESUMED session's gallery, from the copy the MAIN thread keeps
+    // beside the log. READ ONLY here — the main thread owns that dir (§7).
+    ...(artifactsDir ? { artifactSeed: laptopSeedFrom(artifactsDir) } : {}),
   });
   // Bind one Connection to this worker's port; the main thread is the client.
   // A handler crash (previously surfaced as a bare "RpcError: internal error"

@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import { PermissionBroker, type PermissionResponse } from "@tentacle/core";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
-import { FAILED_NOTICE, REFUSED_NOTICE } from "../src/composer.ts";
+import { FAILED_NOTICE, REFUSED_NOTICE, RESYNC_FAILED_NOTICE } from "../src/composer.ts";
 import { createSessionController } from "../src/session-controller.ts";
 import {
   type SendableHandle,
@@ -408,7 +408,154 @@ describe("sending and stopping (decision 15, F12, F13)", () => {
     expect(signals[0]?.aborted).toBe(true);
     expect(screen.state().transcript.turn).toBeNull(); // the bracket closed
   });
+});
 
+describe("stopTurn — the hub's Stop (docs/feat/mobile-hub.md P2)", () => {
+  /** A foreign turn whose stream never ends on its own, and a spy on its cancel. */
+  async function foreignRunning(h: ReturnType<typeof harness>) {
+    const cancelled = { value: false };
+    h.sessions[0]?.emitActivity({
+      kind: "turn",
+      turnId: "t-hub",
+      events: (async function* () {
+        yield { type: "text", delta: "streaming" } as SessionEvent;
+        await new Promise(() => {});
+      })(),
+      cancel: () => {
+        cancelled.value = true;
+      },
+    });
+    await settle();
+    return cancelled;
+  }
+
+  test("a draft in the field does not turn the hub's Stop into a steer: the foreign turn is cancelled", async () => {
+    // Mutation: `stopTurn` calling `act()` (the composer's tap) → red: with a
+    // draft the composer's action is `queue`, so nothing cancels the turn.
+    const h = harness();
+    const { screen } = h.make();
+    await screen.open();
+    const cancelled = await foreignRunning(h);
+    screen.setDraft("half-written steer");
+    expect(screen.state().view.composer.button).toBe("queue");
+    screen.stopTurn();
+    expect(cancelled.value).toBe(true);
+    expect(screen.state().draft).toBe("half-written steer");
+  });
+
+  test("an OWN turn with a draft stops through its own abort signal", async () => {
+    const signals: AbortSignal[] = [];
+    const handle: SendableHandle = {
+      open: () => Promise.resolve(),
+      detach: () => Promise.resolve(),
+      watch: () => () => {},
+      send: async function* (prompt: string, signal?: AbortSignal) {
+        yield { type: "user_message", text: prompt } as SessionEvent;
+        if (signal !== undefined) {
+          signals.push(signal);
+        }
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        yield { type: "turn_end", reason: "cancelled" } as SessionEvent;
+      },
+    };
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "e2e-mac",
+      controller: createSessionController<SendableHandle>({ newSession: () => handle }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    await screen.open();
+    screen.setDraft("a long turn");
+    screen.press();
+    await settle();
+    screen.setDraft("typed while it runs");
+    expect(signals[0]?.aborted).toBe(false);
+    screen.stopTurn();
+    await settle();
+    expect(signals[0]?.aborted).toBe(true);
+    expect(screen.state().transcript.turn).toBeNull();
+  });
+
+  test("link down (M8): nothing is cancelled — Stop travels the wire", async () => {
+    const h = harness();
+    const { screen } = h.make();
+    await screen.open();
+    const cancelled = await foreignRunning(h);
+    screen.link(false);
+    await settle();
+    expect(screen.state().transcript.link).toBe("down");
+    screen.stopTurn();
+    expect(cancelled.value).toBe(false);
+  });
+
+  test("no turn running: a no-op", async () => {
+    const h = harness();
+    const { screen } = h.make();
+    await screen.open();
+    expect(() => screen.stopTurn()).not.toThrow();
+    expect(screen.state().transcript.turn).toBeNull();
+  });
+
+  test("a session closed from another device: the hub's Stop aborts nothing", async () => {
+    // Review round 3's surviving mutation: `stopTurn` passing `ended: null` was
+    // 22/0, i.e. the ended guard of the hub's Stop was unpinned. With an OWN turn
+    // still streaming, a Stop that ignored `ended` would abort that stream — a
+    // local cancel of a turn the daemon has already closed the session under,
+    // which the composer's own truth table refuses (`ended` ⇒ nothing).
+    const signals: AbortSignal[] = [];
+    const listeners: ((activity: SessionActivity) => void)[] = [];
+    const handle: SendableHandle = {
+      open: () => Promise.resolve(),
+      detach: () => Promise.resolve(),
+      watch: (fn) => {
+        listeners[0] = fn;
+        return () => {
+          listeners.length = 0;
+        };
+      },
+      send: async function* (prompt: string, signal?: AbortSignal) {
+        yield { type: "user_message", text: prompt } as SessionEvent;
+        if (signal !== undefined) {
+          signals.push(signal);
+        }
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        yield { type: "turn_end", reason: "cancelled" } as SessionEvent;
+      },
+    };
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "e2e-mac",
+      controller: createSessionController<SendableHandle>({ newSession: () => handle }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    await screen.open();
+    screen.setDraft("a long turn");
+    screen.press();
+    await settle();
+    expect(signals.length).toBe(1);
+    expect(signals[0]?.aborted).toBe(false);
+    expect(screen.state().view.composer.button).toBe("stop");
+    // The close travels the same listener this screen folded its turn on.
+    listeners[0]?.({ kind: "closed", reason: "deleted" });
+    await settle();
+    expect(screen.state().view.editable).toBe(false);
+    screen.stopTurn();
+    await settle();
+    expect(signals[0]?.aborted).toBe(false);
+  });
+});
+
+describe("sending and stopping, continued", () => {
   test("a send refused before the ack puts the text BACK with a notice (F13)", async () => {
     const h = harness();
     const { screen } = h.make();
@@ -630,5 +777,379 @@ describe("the transcript's end and the thumbnails window", () => {
     expect(refs).toContain("near");
     // `far` is 40 rows above the window, past `PREFETCH_ROWS`: it is never fetched.
     expect(refs).not.toContain("far");
+  });
+});
+
+describe("pull-to-refresh (fix/mobile-media-live item 3)", () => {
+  /** A handle whose `open` answers with the daemon's history at attach time. */
+  function historySession(sessions: FakeSession[], id: string, history: () => SessionActivity) {
+    const base = fakeSession(sessions, id);
+    return {
+      ...base,
+      // The controller subscribes AFTER `open()` (`session-controller.ts:196-198`),
+      // and the real `watch` delivers what the attach buffered — so the history
+      // is handed over on SUBSCRIBE, exactly as a reopened session's is.
+      watch: (fn: (activity: SessionActivity) => void) => {
+        const off = base.watch(fn);
+        fn(history());
+        return off;
+      },
+    } satisfies FakeSession;
+  }
+
+  test("a resync REPLACES the rows from the daemon's history, never doubling them (mutation: append instead of replace → 2× the rows)", async () => {
+    const now = new Date().toISOString();
+    const message = (id: string, content: string) => ({
+      id,
+      role: "user" as const,
+      content,
+      createdAt: now,
+    });
+    let history = [message("m1", "first")];
+    const sessions: FakeSession[] = [];
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "mac",
+      controller: createSessionController<SendableHandle>({
+        newSession: (id) =>
+          historySession(sessions, id, () => ({
+            kind: "history",
+            messages: history as never,
+            reason: null,
+          })),
+      }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    await screen.open();
+    await settle();
+    expect(screen.state().transcript.rows.filter((r) => r.kind === "user")).toHaveLength(1);
+
+    // The daemon gained a message meanwhile (another device's turn): a pull must
+    // show it — and show it ONCE (the history is a snapshot, not a delta).
+    history = [message("m1", "first"), message("m2", "second")];
+    await screen.resync();
+    await settle();
+    const texts = screen
+      .state()
+      .transcript.rows.flatMap((r) => (r.kind === "user" ? [r.text] : []));
+    expect(texts).toEqual(["first", "second"]);
+    // The spinner is off again once the re-attach settled.
+    expect(screen.state().refreshing).toBe(false);
+  });
+
+  test("a resync that cannot re-attach KEEPS the rows and says so (mutation: drop the notice → a gesture that did nothing is silent)", async () => {
+    const sessions: FakeSession[] = [];
+    let fail = false;
+    const now = new Date().toISOString();
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "mac",
+      controller: createSessionController<SendableHandle>({
+        newSession: (id) => {
+          const base = historySession(sessions, id, () => ({
+            kind: "history",
+            reason: null,
+            messages: [{ id: "m1", role: "user", content: "kept", createdAt: now }] as never,
+          }));
+          if (!fail) {
+            return base;
+          }
+          // The realistic failure: the attach itself cannot be made (the link is
+          // down). `session-controller.ts:183-187` turns this into a typed
+          // `{ok:false, reason}`; a throw from `newSession` would escape instead.
+          return { ...base, open: () => Promise.reject(new Error("no link")) };
+        },
+      }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    await screen.open();
+    await settle();
+    expect(screen.state().transcript.rows).toHaveLength(1);
+
+    fail = true;
+    await screen.resync();
+    await settle();
+    // Never an empty transcript, and never a silent no-op.
+    expect(screen.state().transcript.rows).toHaveLength(1);
+    expect(screen.state().notice).toBe(RESYNC_FAILED_NOTICE);
+    expect(screen.state().refreshing).toBe(false);
+  });
+});
+
+describe("foreground resync (docs/fix/mobile-open-at-end.md, item 2)", () => {
+  /** A session whose opens are counted, and whose history the test rewrites. */
+  function countingHarness() {
+    const sessions: FakeSession[] = [];
+    let opens = 0;
+    let history: { id: string; role: "user"; content: string; createdAt: string }[] = [];
+    let offline = false;
+    const screen = createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "mac",
+      controller: createSessionController<SendableHandle>({
+        newSession: (id) => {
+          opens += 1;
+          const base = fakeSession(sessions, id);
+          return {
+            ...base,
+            open: offline ? () => Promise.reject(new Error("no link")) : base.open,
+            watch: (fn: (activity: SessionActivity) => void) => {
+              const off = base.watch(fn);
+              fn({ kind: "history", messages: history as never, reason: null });
+              return off;
+            },
+          } satisfies FakeSession;
+        },
+      }),
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    return {
+      screen,
+      sessions,
+      opens: () => opens,
+      setHistory: (texts: readonly string[]) => {
+        history = texts.map((text, i) => ({
+          id: `m${i}`,
+          role: "user" as const,
+          content: text,
+          createdAt: new Date().toISOString(),
+        }));
+      },
+      goOffline: () => {
+        offline = true;
+      },
+      goOnline: () => {
+        offline = false;
+      },
+    };
+  }
+
+  test("a return to `active` resyncs once, silently (no pull spinner) [mutation: emit it → a spinner nobody pulled]", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    expect(h.opens()).toBe(1);
+    h.setHistory(["first", "second"]);
+    // The app leaves and comes back: the mount's own `active` is not a return.
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(1);
+    h.screen.appState("background");
+    h.screen.appState("active");
+    // Silent: the state the screen renders never says "refreshing".
+    const seen: boolean[] = [];
+    h.screen.subscribe((s) => seen.push(s.refreshing));
+    await settle();
+    expect(h.opens()).toBe(2);
+    expect(seen.every((refreshing) => !refreshing)).toBe(true);
+    expect(h.screen.state().transcript.rows.filter((r) => r.kind === "user")).toHaveLength(2);
+  });
+
+  test("the `inactive` then `background` pair is ONE departure; a later duplicate `active` is no resync", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.appState("inactive");
+    h.screen.appState("background");
+    h.screen.appState("active");
+    await settle(); // the resync settled
+    expect(h.opens()).toBe(2); // the mount + ONE resync
+    // A duplicate `active` (iOS) is not a new return: the departure was consumed.
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(2);
+  });
+
+  test("an `inactive` → `active` pair is NOT a return (Control Center, a call banner, the Face ID prompt) [mutation: any non-active state sets appWasAway]", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    expect(h.opens()).toBe(1);
+    h.screen.appState("active"); // the mount's own `active`
+    // iOS reports `inactive` without the app ever leaving — the repo already
+    // decided this (`app-lock.ts`: "`inactive` is not leaving the app").
+    h.screen.appState("inactive");
+    expect(h.screen.appState("active")).toBe(false);
+    await settle();
+    expect(h.opens()).toBe(1); // no re-attach, no re-read of every snapshot page
+    // Repeated blips do not accumulate a departure either.
+    h.screen.appState("inactive");
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(1);
+    // A real departure still counts — even after an `inactive` that preceded it.
+    h.screen.appState("inactive");
+    h.screen.appState("background");
+    expect(h.screen.appState("active")).toBe(true);
+    await settle();
+    expect(h.opens()).toBe(2);
+  });
+
+  test("offline: no foreground resync (the redial re-attach owns the recovery)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.link(false);
+    h.screen.appState("background");
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(1);
+    expect(h.screen.state().notice).toBeNull();
+  });
+
+  test("docs/fix/mobile-queued-stuck.md (c): a return while OFFLINE is OWED — it resyncs at the next link up, once", async () => {
+    // Device capture 2: `app-state active` with the link down, then two `link
+    // up`s and no attach / history for 26 s — a stale queue row and a missing
+    // answer until the person left and re-entered. Mutation: drop the
+    // `resyncOnUp` branch in `link` → red (opens stays 1).
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.setHistory(["first", "the send-now's answer"]);
+    h.screen.link(false);
+    h.screen.appState("background");
+    expect(h.screen.appState("active")).toBe(false);
+    await settle();
+    expect(h.opens()).toBe(1);
+    h.screen.link(true);
+    await settle();
+    expect(h.opens()).toBe(2);
+    expect(h.screen.state().transcript.rows.filter((r) => r.kind === "user")).toHaveLength(2);
+    // Owed ONCE: a later blip of the link (no return in between) re-reads nothing.
+    h.screen.link(false);
+    h.screen.link(true);
+    await settle();
+    expect(h.opens()).toBe(2);
+  });
+
+  test("a link blip with NO return in between never resyncs (the redial owns it)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.link(false);
+    h.screen.link(true);
+    await settle();
+    expect(h.opens()).toBe(1);
+  });
+
+  test("a screen that never attached (a failed open) does not resync on foreground", async () => {
+    const h = countingHarness();
+    h.goOffline();
+    await h.screen.open();
+    await settle();
+    expect(h.screen.state().status.phase).toBe("failed");
+    h.goOnline();
+    h.screen.appState("active");
+    h.screen.appState("background");
+    h.screen.appState("active");
+    await settle();
+    // Never attached: the Retry row is what re-attaches, not a silent re-read.
+    expect(h.opens()).toBe(1);
+  });
+
+  test("a return to `active` reports that it STARTED the re-attach, so the screen can re-arm its silent landing (Review round 1, MEDIUM 3)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    // The mount's own `active`, then a duplicate: neither re-attaches.
+    expect(h.screen.appState("active")).toBe(false);
+    h.screen.appState("background");
+    // A real return: true, exactly once (the screen arms its landing on it).
+    expect(h.screen.appState("active")).toBe(true);
+    await settle();
+    expect(h.opens()).toBe(2);
+    // And a duplicate `active` after it reports nothing (no arming, no resync).
+    expect(h.screen.appState("active")).toBe(false);
+  });
+
+  test("a foreground that cannot re-attach reports false (offline, or no live attach)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.link(false);
+    h.screen.appState("background");
+    expect(h.screen.appState("active")).toBe(false); // the link is down: the redial owns recovery
+    h.screen.link(true);
+    // A screen that never attached (a failed open) has no live attach to re-read.
+    const failed = countingHarness();
+    failed.goOffline();
+    await failed.screen.open();
+    await settle();
+    failed.goOnline();
+    expect(failed.screen.state().status.phase).toBe("failed");
+    failed.screen.appState("background");
+    expect(failed.screen.appState("active")).toBe(false);
+  });
+
+  test("a foreground resync that appends nothing does not move or complain", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.appState("background");
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(2);
+    expect(h.screen.state().notice).toBeNull();
+    expect(h.screen.state().transcript.rows).toHaveLength(1);
+  });
+
+  test("a foreground resync WHILE A TURN STREAMS shows each row once (no duplicate rows)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    // Another device's turn is running (or this one's, read back by the re-attach).
+    h.sessions[0]?.emitActivity({
+      kind: "turn",
+      turnId: "t-live",
+      events: (async function* () {
+        yield { type: "user_message", text: "streaming" } as SessionEvent;
+        yield { type: "text", delta: "an answer" } as SessionEvent;
+      })(),
+      cancel: () => {},
+    });
+    await settle();
+    const users = () =>
+      h.screen.state().transcript.rows.flatMap((r) => (r.kind === "user" ? [r.text] : []));
+    expect(users()).toEqual(["first", "streaming"]);
+    // The daemon's snapshot already has the streaming prompt: the re-attach's
+    // history replaces the rows, so it must not appear a second time.
+    h.setHistory(["first", "streaming"]);
+    h.screen.appState("background");
+    h.screen.appState("active");
+    await settle();
+    expect(h.opens()).toBe(2);
+    expect(users()).toEqual(["first", "streaming"]);
+  });
+
+  test("an already-running pull makes the foreground resync a no-op (one re-read, not two)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    h.screen.appState("background");
+    h.screen.appState("active");
+    const pull = h.screen.resync();
+    await settle();
+    await pull;
+    expect(h.opens()).toBe(2); // one resync from the foreground edge, the pull's was refused
   });
 });

@@ -79,10 +79,17 @@ export function mapError(error: string | undefined): AuthResult {
 }
 
 /** One evaluation: the lock's own prompt copy, with the passcode fallback. */
-export async function authenticate(): Promise<AuthResult> {
+export async function authenticate(
+  /**
+   * The sentence the system sheet shows. Defaults to the lock's own
+   * (`UNLOCK_PROMPT`); a notification's Approve says WHAT it is approving
+   * (docs/feat/mobile-notifications.md decision 14 / N6).
+   */
+  prompt: string = UNLOCK_PROMPT,
+): Promise<AuthResult> {
   try {
     const result = await LocalAuthentication.authenticateAsync({
-      promptMessage: UNLOCK_PROMPT,
+      promptMessage: prompt,
       // Decision 14's fallback: Face ID, then the device passcode. Never `true`:
       // a device with no face enrolled would then be unlockable only by Face ID.
       disableDeviceFallback: false,

@@ -1,0 +1,1 @@
+- **Tool calls on iPhone read like steps.** One line per call on a thin thread, readable MCP names and arguments, thinking folded into a ∴ marker, and a live "Thinking…" node while the turn runs; tap a step for its thought, command and result. Design: `docs/feat/mobile-tool-rows.md`.

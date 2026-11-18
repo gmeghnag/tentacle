@@ -22,12 +22,33 @@
  * a computer's outbox is meaningless to another one, and one file keeps the
  * write atomic across the three collections.
  */
-import type { AttachmentRef } from "@tentacle/protocol";
+import {
+  type AttachmentRef,
+  type DocumentContent,
+  DocumentContentSchema,
+} from "@tentacle/protocol";
 import type { Draft } from "./drafts.ts";
-import type { Basis, OutboxItem, OutboxPhoto, OutboxState } from "./outbox.ts";
+import type { Basis, OutboxDocument, OutboxItem, OutboxPhoto, OutboxState } from "./outbox.ts";
 
-/** The on-disk schema this build writes; anything else is refused untouched. */
+/** The on-disk schema this build writes for an ordinary file (no item carries a document). */
 export const OUTBOX_SCHEMA_VERSION = 1;
+
+/**
+ * The on-disk schema for a file where at least one item carries a DOCUMENT
+ * (docs/feat/pdf-read.md D7, P6 review's HIGH-adjacent item).
+ *
+ * The number is bumped only for such a file, and that is the point: an OLDER
+ * build's `isItem` does not know `documents`, so it would load the item, drop
+ * the PDF without a word, and send the item as text (plus photos) — a
+ * PDF-only item going out as an empty prompt. Because the file says `2`, that
+ * build answers `refused` and leaves it untouched (AGENTS §7: "refuses loudly;
+ * never half-loads"). A file with no PDFs stays `1`, so a downgrade keeps
+ * working for everyone it can work for.
+ */
+export const OUTBOX_SCHEMA_VERSION_DOCUMENTS = 2;
+
+/** Every version this build can read whole (`1` has no `documents` at all). */
+const READABLE_VERSIONS: ReadonlySet<number> = new Set([1, OUTBOX_SCHEMA_VERSION_DOCUMENTS]);
 
 /**
  * The file-system port the app implements over `expo-file-system` (`outbox-fs-expo.ts`,
@@ -105,8 +126,12 @@ export function outboxPaths(root: string, computerId: string): OutboxPaths {
  * version. Kept explicit (not `OutboxData & {schemaVersion}`) so the parse below
  * is a real validation of what a previous build could have written.
  */
-interface OutboxFileV1 {
-  readonly schemaVersion: 1;
+interface OutboxFile {
+  /**
+   * `1`: no item carries a document (readable by every build). `2`: at least
+   * one does — see `OUTBOX_SCHEMA_VERSION_DOCUMENTS`.
+   */
+  readonly schemaVersion: 1 | 2;
   readonly items: readonly OutboxItem[];
   readonly drafts: readonly Draft[];
   readonly ownIds: readonly string[];
@@ -166,6 +191,22 @@ function isPhoto(value: unknown): value is OutboxPhoto {
   );
 }
 
+/**
+ * A document as a previous build wrote it (docs/feat/pdf-read.md D7). Its
+ * `block` is stored whole: a build that could not READ it would have to re-put
+ * bytes the daemon may already hold, so the block is checked by the protocol's
+ * own schema rather than restated here.
+ */
+function isDocument(value: unknown): value is OutboxDocument {
+  if (!isObject(value) || typeof value.file !== "string" || typeof value.name !== "string") {
+    return false;
+  }
+  if (value.block === undefined) {
+    return true;
+  }
+  return DocumentContentSchema.safeParse(value.block).success;
+}
+
 const isBasis = (value: unknown): value is Basis =>
   isObject(value) &&
   typeof value.historyLength === "number" &&
@@ -181,6 +222,8 @@ function isItem(value: unknown): value is OutboxItem {
     typeof value.text === "string" &&
     Array.isArray(value.photos) &&
     value.photos.every(isPhoto) &&
+    (value.documents === undefined ||
+      (Array.isArray(value.documents) && value.documents.every(isDocument))) &&
     typeof value.turnId === "string" &&
     typeof value.enqueueId === "string" &&
     (value.steerTurnId === null || typeof value.steerTurnId === "string") &&
@@ -203,7 +246,11 @@ function isDraft(value: unknown): value is Draft {
   );
 }
 
-function parseFile(text: string): OutboxFileV1 | "corrupt" | { readonly version: unknown } {
+/** Whether ANY item carries a document — what the file's version is chosen by. */
+const carriesDocuments = (items: readonly OutboxItem[]): boolean =>
+  items.some((item) => item.documents !== undefined && item.documents.length > 0);
+
+function parseFile(text: string): OutboxFile | "corrupt" | { readonly version: unknown } {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -213,11 +260,13 @@ function parseFile(text: string): OutboxFileV1 | "corrupt" | { readonly version:
   if (!isObject(raw)) {
     return "corrupt";
   }
-  if (raw.schemaVersion !== OUTBOX_SCHEMA_VERSION) {
+  if (typeof raw.schemaVersion !== "number" || !READABLE_VERSIONS.has(raw.schemaVersion)) {
     // A NEWER (or unrecognised) file: refused, never guessed at and never
     // overwritten — its person may have unsent text this build cannot read.
     return { version: raw.schemaVersion };
   }
+  const schemaVersion: 1 | 2 =
+    raw.schemaVersion === OUTBOX_SCHEMA_VERSION_DOCUMENTS ? OUTBOX_SCHEMA_VERSION_DOCUMENTS : 1;
   const items = raw.items;
   const drafts = raw.drafts;
   const ownIds = raw.ownIds;
@@ -231,6 +280,10 @@ function parseFile(text: string): OutboxFileV1 | "corrupt" | { readonly version:
   ) {
     return "corrupt";
   }
+  // The version is the writer's promise about whether an item carries a
+  // document (`OUTBOX_SCHEMA_VERSION_DOCUMENTS`), but it is NOT re-derived
+  // here: a `1` file with a document is fully readable by this build, and
+  // refusing it would set aside a person's pending message over a label.
   const ownTexts = raw.ownTexts;
   if (ownTexts !== undefined) {
     if (!isObject(ownTexts) || !Object.values(ownTexts).every((text) => typeof text === "string")) {
@@ -238,7 +291,7 @@ function parseFile(text: string): OutboxFileV1 | "corrupt" | { readonly version:
     }
   }
   return {
-    schemaVersion: OUTBOX_SCHEMA_VERSION,
+    schemaVersion,
     items,
     drafts,
     ownIds,
@@ -246,15 +299,24 @@ function parseFile(text: string): OutboxFileV1 | "corrupt" | { readonly version:
   };
 }
 
-/** The file's text for `data` (stable key order; one line so a diff of it reads). */
+/**
+ * The file's text for `data` (stable key order; one line so a diff of it reads).
+ *
+ * The version is chosen by the CONTENT, not by the build: a file with no
+ * documents stays readable by an older build (whose outbox would otherwise be
+ * refused for no reason), and one with a document says `2` so that build
+ * refuses it instead of silently dropping the PDF.
+ */
 export const serializeOutbox = (data: OutboxData): string =>
   JSON.stringify({
-    schemaVersion: OUTBOX_SCHEMA_VERSION,
+    schemaVersion: carriesDocuments(data.items)
+      ? OUTBOX_SCHEMA_VERSION_DOCUMENTS
+      : OUTBOX_SCHEMA_VERSION,
     items: data.items,
     drafts: data.drafts,
     ownIds: data.ownIds,
     ...(data.ownTexts === undefined ? {} : { ownTexts: data.ownTexts }),
-  } satisfies OutboxFileV1);
+  } satisfies OutboxFile);
 
 /**
  * The store over `fs`. `now` stamps the aside file's name (a `.corrupt-<ts>`);
@@ -377,20 +439,22 @@ export function createOutboxStore(
       });
     },
     async removeItem(itemId) {
-      const item = data.items.find((entry) => entry.itemId === itemId);
-      const saved = await write({
+      // The item goes; its photo copies STAY (fix round 2, Review round 2's
+      // R2-1). A copy is also the only pixels the transcript has for a photo
+      // this phone sent (`localPhotosOf` → `ImageRef.localUri`; the protocol has
+      // no read-back), and the ROW outlives the item — deleting the file at the
+      // ack left the bubble over an empty frame. The same delete also broke the
+      // person's own return path, `backToDraft`: it handed the item's photos
+      // back to the field through this very call.
+      //
+      // Bounding the folder is `photo-copies.ts`'s decision (a grace window +
+      // the newest copies + everything still named by an item or a draft),
+      // applied by the app on its own schedule — never here, where the store
+      // cannot see what a transcript (or another computer) is still showing.
+      return write({
         ...data,
         items: data.items.filter((entry) => entry.itemId !== itemId),
       });
-      if (item === undefined) {
-        return saved;
-      }
-      // Its photo copies go with it. A copy that cannot be removed is not a
-      // failed removal: the item is gone, and a stray file costs disk only.
-      for (const photo of item.photos) {
-        await fs.remove(photo.file).catch(() => {});
-      }
-      return saved;
     },
   };
 }

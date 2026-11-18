@@ -39,6 +39,7 @@ import {
   RelayControlFrameSchema,
   type RelayDaemonFrame,
   RelayDaemonFrameSchema,
+  RelayLiveActivityFrameSchema,
   RelayPushFrameSchema,
   RelayPushResultFrameSchema,
   RelayPushTokenSchema,
@@ -673,5 +674,154 @@ describe("push frames", () => {
     // "responses can arrive out of order") — nothing in the shape sequences them.
     expect(RelayPushResultFrameSchema.parse({ t: "push-result", n: 2, status: "sent" }).n).toBe(2);
     expect(RelayPushResultFrameSchema.parse({ t: "push-result", n: 1, status: "gone" }).n).toBe(1);
+  });
+});
+
+// --- Live Activity frames (docs/feat/mobile-live-activity.md Design 4, L3) ---
+/**
+ * The relay carries an activity exactly as it carries a push: one sealed blob
+ * plus the CLEAR fields ActivityKit needs. Three rules, each a test below:
+ *
+ *  - the `liveactivity` frame is gated by a feature name, so an older relay
+ *    never sees an unknown frame (R2 closes the socket on one);
+ *  - the CLEAR part (`la`) is a fixed, bounded template — event, timestamp,
+ *    dates, sealed state, attributes — with no field a daemon could turn into
+ *    content (F5);
+ *  - a push frame is still a push: the two cannot be confused, because `t`
+ *    discriminates them and neither schema accepts the other's shape.
+ */
+describe("live activity frames", () => {
+  const state = { v: 1 as const, e: "A".repeat(43), c: "B".repeat(704) };
+  const attributes = { v: 1 as const, k: "tzHqlSe8ME5A", slot: "00112233445566778899aabb" };
+
+  const start = (over: Record<string, unknown> = {}) => ({
+    t: "liveactivity" as const,
+    n: 1,
+    token: "a".repeat(64),
+    env: "sandbox" as const,
+    priority: 10 as const,
+    la: {
+      event: "start" as const,
+      timestamp: 1_731_000_000,
+      staleDate: 1_731_000_900,
+      contentState: state,
+      attributes,
+    },
+    ...over,
+  });
+
+  test('`"liveactivity"` is the feature that gates the frame (only with an APNs key)', () => {
+    expect(isRelayFeature("liveactivity")).toBe(true);
+    expect(knownRelayFeatures(["liveactivity"])).toEqual(["liveactivity"]);
+    // An older relay announces only "push": the daemon must send no LA frame then.
+    expect(knownRelayFeatures(["push"])).toEqual(["push"]);
+    expect(knownRelayFeatures(["push", "liveactivity"])).toEqual(["push", "liveactivity"]);
+  });
+
+  test("a start frame round-trips (the push-to-start: attributes + a sealed state)", () => {
+    const parsed = RelayLiveActivityFrameSchema.parse(start());
+    expect(parsed.la.event).toBe("start");
+    expect(parsed.la.attributes).toEqual(attributes);
+    expect(parsed.la.contentState).toEqual(state);
+    expect(parsed.priority).toBe(10);
+  });
+
+  test("an update frame needs no attributes (the activity already exists)", () => {
+    const update = start({
+      la: { event: "update", timestamp: 1_731_000_100, contentState: state },
+    });
+    const parsed = RelayLiveActivityFrameSchema.parse(update);
+    expect(parsed.la.attributes).toBeUndefined();
+    expect(parsed.la.event).toBe("update");
+  });
+
+  test("an end frame carries a dismissal date and no state", () => {
+    const end = start({
+      la: { event: "end", timestamp: 1_731_000_200, dismissalDate: 1_731_000_500 },
+    });
+    const parsed = RelayLiveActivityFrameSchema.parse(end);
+    expect(parsed.la.event).toBe("end");
+    expect(parsed.la.contentState).toBeUndefined();
+  });
+
+  test("every event is accepted, an unknown one is refused", () => {
+    for (const event of ["start", "update", "end"]) {
+      expect(
+        RelayLiveActivityFrameSchema.safeParse(start({ la: { event, timestamp: 1 } })).success,
+      ).toBe(true);
+    }
+    expect(
+      RelayLiveActivityFrameSchema.safeParse(start({ la: { event: "wake", timestamp: 1 } }))
+        .success,
+    ).toBe(false);
+  });
+
+  test("priority is only 5 or 10 — Apple's two, and nothing else", () => {
+    expect(RelayLiveActivityFrameSchema.safeParse(start({ priority: 5 })).success).toBe(true);
+    expect(RelayLiveActivityFrameSchema.safeParse(start({ priority: 10 })).success).toBe(true);
+    expect(RelayLiveActivityFrameSchema.safeParse(start({ priority: 9 })).success).toBe(false);
+    expect(RelayLiveActivityFrameSchema.safeParse(start({ priority: 0 })).success).toBe(false);
+  });
+
+  test("the clear part cannot carry content: an unknown `la` field is STRIPPED", () => {
+    // F5: a daemon (or anything downstream) must not be able to put a title in
+    // the clear fields the relay and Apple read.
+    const parsed = RelayLiveActivityFrameSchema.parse(
+      start({ la: { event: "update", timestamp: 1, contentState: state, title: "secret" } }),
+    );
+    expect(parsed.la).not.toHaveProperty("title");
+  });
+
+  test("a frame that is a push still parses as a push, and neither accepts the other", () => {
+    const la = start();
+    // A `liveactivity` frame is NOT a push: it has no `payload`/`collapse`/`ttl`.
+    expect(RelayPushFrameSchema.safeParse(la).success).toBe(false);
+    // And a push is not an LA frame: it has no `la` and `t` differs.
+    const push = {
+      t: "push",
+      n: 1,
+      token: "a".repeat(64),
+      env: "sandbox",
+      collapse: "abc",
+      ttl: 60,
+      payload: { tp: { v: 1, k: "tzHqlSe8ME5A", e: "A".repeat(43), c: "B".repeat(704) } },
+    };
+    expect(RelayPushFrameSchema.safeParse(push).success).toBe(true);
+    expect(RelayLiveActivityFrameSchema.safeParse(push).success).toBe(false);
+  });
+
+  test("both frames are in the daemon's union, so the relay parses them one way", () => {
+    const parsed = RelayDaemonFrameSchema.parse(start());
+    expect(parsed.t).toBe("liveactivity");
+    // An unknown `t` is still rejected (the union is not "anything goes").
+    expect(RelayDaemonFrameSchema.safeParse({ t: "liveactivityx", n: 1 }).success).toBe(false);
+  });
+
+  test("a bad token, slot, env or ciphertext length is refused (F25)", () => {
+    expect(RelayLiveActivityFrameSchema.safeParse(start({ token: "zz" })).success).toBe(false);
+    expect(RelayLiveActivityFrameSchema.safeParse(start({ env: "moon" })).success).toBe(false);
+    expect(
+      RelayLiveActivityFrameSchema.safeParse(
+        start({
+          la: {
+            event: "update",
+            timestamp: 1,
+            contentState: { v: 1, e: "A".repeat(43), c: "B".repeat(2752) },
+          },
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      RelayLiveActivityFrameSchema.safeParse(
+        start({
+          la: {
+            event: "start",
+            timestamp: 1,
+            contentState: state,
+            attributes: { v: 1, k: "short", slot: "00112233445566778899aabb" },
+          },
+        }),
+      ).success,
+    ).toBe(false);
   });
 });

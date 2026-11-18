@@ -1,3 +1,4 @@
+import type { SkillInfo } from "@tentacle/config";
 /**
  * The agent loop.
  *
@@ -18,6 +19,7 @@ import {
   type AgentJobExit,
   type AgentJobs,
   type AgentNotify,
+  type ArtifactSink,
   type AttachmentSource,
   type BackgroundJob,
   COUNT_TOKENS_CAP_MS,
@@ -38,13 +40,18 @@ import {
   type Tool,
   type ToolCall,
   type ToolContext,
+  type ToolDefinition,
   type ToolProgressEvent,
   type ToolResult,
   type Usage,
+  type VoiceReasoning,
+  type VoiceTurn,
   allowAll,
   answerOutstandingCalls,
   countTokensBounded,
   subagentReportNote,
+  voiceReasoning,
+  withSpokenLine,
 } from "@tentacle/core";
 import {
   CONTEXT_RESET_TOOL_NAME,
@@ -55,6 +62,14 @@ import {
   skillContentName,
   userSkillCall,
 } from "@tentacle/tools";
+import {
+  NO_CAPABILITIES,
+  type SessionCapabilities,
+  isHidden,
+  isSkillHidden,
+  projectSystem,
+  projectTools,
+} from "./capabilities.ts";
 import { type CarriedSkill, carryOverSkills, summarizeConversation } from "./compact.ts";
 import {
   type ContextAnchor,
@@ -74,6 +89,13 @@ import {
 import { EventQueue } from "./event-queue.ts";
 import { type AskHooksTrust, type HookRunner, hookNote } from "./hooks.ts";
 import { type GateOutcome, PermissionGate } from "./permission-gate.ts";
+import {
+  type PruneEntry,
+  type PruneSet,
+  applyPrune,
+  estimateGain,
+  pruneCandidates,
+} from "./prune.ts";
 import { type ResultTransform, applyResultTransforms } from "./result-pipeline.ts";
 import { suspendedCalls } from "./resume.ts";
 import {
@@ -175,6 +197,29 @@ export interface RunOptions {
    * nothing to persist.
    */
   readonly beforeResumedCall?: BeforeResumedCall;
+  /**
+   * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3):
+   * `off` reasons for no more than the rounds before the turn's first tool
+   * call. Present at all ⇒ every round also carries the transient spoken-style
+   * system line — on the REQUEST only, never in the history (F10).
+   */
+  readonly voice?: VoiceTurn;
+  /**
+   * The voice profile in force, CONSUMED per round (synchronous, never awaited):
+   * a voice steer accepted mid-turn lands here, so the rounds after it carry
+   * its own `reasoning`, and `restarted` reopens the reasoning-off window at
+   * that round (§4: "an enqueued voice steer marks the rest of its turn as a
+   * voice turn"). `undefined` → the turn's own `voice` alone applies. The
+   * caller owns the queue, so the caller owns the mark (`Session.takeVoice`).
+   */
+  readonly voiceMark?: () => VoiceMark | undefined;
+}
+
+/** What a voice turn asks of one round: see `@tentacle/core`'s `voiceReasoning`. */
+export interface VoiceMark {
+  readonly reasoning: "off" | "keep";
+  /** A voice steer landed since the last round: the reasoning-off window reopens here. */
+  readonly restarted: boolean;
 }
 
 /** `RunOptions.beforeRun`: resolves whether the group's in-flight set is durable. */
@@ -225,7 +270,8 @@ const TURN_STOPPED_INTERRUPTED_NOTE =
  * A finished call's history message. A spill rides with it, so a resume or a
  * snapshot shows the same note as the live row (docs/feat/tui-spill-note.md);
  * the model never sees it (providers copy field by field). So does the run's
- * measured duration, when the tool actually ran (docs/fix/tool-duration.md).
+ * measured duration, when the tool actually ran (docs/fix/tool-duration.md),
+ * and a failed result's error flag (docs/fix/mobile-qa-1117.md).
  */
 function toolMessage(callId: string, result: ToolResult, durationMs?: number): ChatMessage {
   return {
@@ -235,6 +281,9 @@ function toolMessage(callId: string, result: ToolResult, durationMs?: number): C
     ...(result.spill ? { spill: result.spill } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(result.denialReply !== undefined ? { denialReply: result.denialReply } : {}),
+    // A failed run says so in the history too: a reload projects the step red,
+    // as live did (docs/fix/mobile-qa-1117.md, bug 2). Display only.
+    ...(result.isError === true ? { isError: true as const } : {}),
   };
 }
 
@@ -358,7 +407,20 @@ export type AgentEvent =
   // the call starts (every executed call; never one that did not start).
   // Rendering-only: never persisted.
   | { readonly type: "tool_phase"; readonly id: string; readonly phase: "queued" | "running" }
-  | { readonly type: "usage"; readonly usage: Usage }
+  | {
+      readonly type: "usage";
+      readonly usage: Usage;
+      /**
+       * 0-based index of this model round inside the turn, and how many messages
+       * the request carried — the two facts the daemon cannot see, recorded per
+       * round in the session log (docs/feat/token-usage-log.md). Optional: an
+       * agent built elsewhere (tests) yields the provider's numbers alone.
+       */
+      readonly round?: number;
+      /** The ONE no-tools report a spent step budget forces, so it has no round. */
+      readonly final?: true;
+      readonly messages?: number;
+    }
   // Nested sub-agent progress (the `agent_task` tool), keyed by the parent tool-call id.
   | {
       readonly type: "subagent_start";
@@ -524,6 +586,12 @@ export interface AgentConfig {
    * wires one in this task: until a producer exists, every ref is a placeholder.
    */
   readonly attachments?: AttachmentSource;
+  /**
+   * The session's artifact store (docs/feat/model-artifacts.md D4): handed to
+   * every tool call's context for `present`. A sub-agent is built without one,
+   * so it cannot present.
+   */
+  readonly artifacts?: ArtifactSink;
   /** The trust asker when a turn brings none (the in-process TUI: no RPC). */
   readonly askHooksTrust?: AskHooksTrust;
   /** Background-job registry; when set, the shell tools can launch jobs and
@@ -545,6 +613,14 @@ export interface AgentConfig {
   readonly skills?: SkillActivator;
   /** The listing of the skill set at the start (`skills` and the `skill` tool's). Absent → empty. */
   readonly skillListing?: SkillListing;
+  /**
+   * The session's capability switches (docs/feat/session-capabilities.md):
+   * the MCP servers and skills hidden from the model. A value is the initial
+   * state (`setCapabilities` replaces it); a function is a LIVE source, read
+   * once per round — a sub-agent follows its parent's switches this way.
+   * Absent → everything on.
+   */
+  readonly capabilities?: SessionCapabilities | (() => SessionCapabilities);
   /**
    * Re-read the skill folders into a full fresh set (docs/feat/skills-hot-reload.md):
    * `refreshUserSkills` installs its activator and listing, never its tool.
@@ -568,6 +644,20 @@ export interface AgentConfig {
   readonly contextAwareness?: {
     readonly window: number;
     readonly stepPercent: number;
+    readonly counter?: TokenCounter;
+  };
+  /**
+   * Lossless-first pruning of the model's copy (docs/feat/smart-compaction.md):
+   * once the request reaches `pruneAtPercent` of `window` and the not-yet-pruned
+   * candidates would save `minGainPercent` of it, ONE batch stubs them all. The
+   * stored history is never touched; the set only grows. Absent → off.
+   */
+  readonly contextPrune?: {
+    readonly window: number;
+    readonly pruneAtPercent: number;
+    readonly minGainPercent: number;
+    readonly keepRecentRounds?: number;
+    readonly outputChars?: number;
     readonly counter?: TokenCounter;
   };
   /**
@@ -625,6 +715,12 @@ type RoundOutcome = "context_reset" | undefined;
 interface RoundHooks {
   readonly beforeRun?: BeforeRun | undefined;
   readonly beforeResumedCall?: BeforeResumedCall | undefined;
+  /**
+   * The capability snapshot the round's request was built from: a call to a
+   * tool or skill hidden in it is answered "turned off", never run. Absent (a
+   * resumed round: its calls were issued when they were visible) → no guard.
+   */
+  readonly capabilities?: SessionCapabilities | undefined;
 }
 
 /** What a group's phase 2 runs under: its lane's cap and dependency rule. */
@@ -727,6 +823,13 @@ export class Agent {
    * reload cannot resume a child's count.
    */
   private readonly spend = new WeakMap<ChatMessage[], { tokens: number }>();
+  /**
+   * Each conversation's prune set (keyed like `anchors`; docs/feat/smart-compaction.md).
+   * Memory only: a reload recomputes it in one batch. The history is replaced
+   * IN PLACE (`/compact`, `/clear`, `context_reset` reuse the array), so every
+   * replacement drops it explicitly (`forgetPrune`).
+   */
+  private readonly pruneState = new WeakMap<ChatMessage[], PruneSet>();
   /** Spill names already used on the env fallback path: see `spillId`. Memory only. */
   private readonly spillNames = new Set<string>();
   /**
@@ -736,11 +839,24 @@ export class Agent {
    */
   private resetsThisMessage = 0;
   private otherCallSinceReset = true;
+  /** Where the capability switches are read from (`capabilities()`), once per round. */
+  private readCapabilities: () => SessionCapabilities;
+  /**
+   * The descriptions the system prompt's skills catalog is re-rendered from
+   * when a skill is hidden: the listing's model-offered skills at the start
+   * and at every `installSkills` (a context reset) — the moments the prompt
+   * and the `skill` enum are composed — never at a user rescan, which leaves
+   * the model's catalog as it is.
+   */
+  private catalogSkills: readonly SkillInfo[];
 
   constructor(config: AgentConfig) {
     this.config = config;
     this.activator = config.skills;
     this.listing = config.skillListing ?? EMPTY_SKILL_LISTING;
+    const initial = config.capabilities ?? NO_CAPABILITIES;
+    this.readCapabilities = typeof initial === "function" ? initial : () => initial;
+    this.catalogSkills = catalogOf(this.listing);
     this.gate = new PermissionGate(
       config.requestPermission ?? allowAll,
       config.hooks,
@@ -845,12 +961,145 @@ export class Agent {
     this.config.tools.replace(SKILL_TOOL_NAME, skills.tool);
     this.activator = skills.activator;
     this.listing = skills.listing ?? EMPTY_SKILL_LISTING;
+    this.catalogSkills = catalogOf(this.listing);
     this.skillsGeneration++;
   }
 
   /** The installed skill set's listing: what `/name` may activate now, and who else may. */
   skillListing(): SkillListing {
     return this.listing;
+  }
+
+  /** The session's capability switches now (what the NEXT model call will be projected with). */
+  capabilities(): SessionCapabilities {
+    return this.readCapabilities();
+  }
+
+  /**
+   * Replace the session's capability switches. Synchronous and allowed
+   * mid-turn: it takes effect from the next model call — a round already
+   * streaming keeps the snapshot it was built with, and its calls are judged
+   * against that snapshot (F1/F2).
+   */
+  setCapabilities(state: SessionCapabilities): void {
+    this.readCapabilities = () => state;
+  }
+
+  /** A tool's MCP server, from the adapter's tag (never parsed from the name). */
+  private readonly serverOf = (toolName: string): string | undefined =>
+    this.config.tools.get(toolName)?.mcpServer;
+
+  /** The tool list a request built under `caps` advertises (the registry is never mutated). */
+  private projectedTools(caps: SessionCapabilities): readonly ToolDefinition[] {
+    return projectTools(this.config.tools.definitions(), this.serverOf, caps);
+  }
+
+  /**
+   * `messages` as a request built under `caps` sends them: the system message's
+   * skills catalog re-rendered without the hidden skills. A copy when it
+   * differs; the stored history is never touched. Every other message is the
+   * same object, so a context anchor still matches it.
+   */
+  private projectedHistory(
+    messages: readonly ChatMessage[],
+    caps: SessionCapabilities,
+  ): readonly ChatMessage[] {
+    const first = messages[0];
+    if (first?.role !== "system" || typeof first.content !== "string") {
+      return messages;
+    }
+    const content = projectSystem(first.content, this.catalogSkills, caps);
+    return content === first.content ? messages : [{ ...first, content }, ...messages.slice(1)];
+  }
+
+  /**
+   * What a request built under `caps` sends: the projection with the
+   * conversation's prune set applied. A copy when anything is stubbed; every
+   * other message keeps its identity (a context anchor still matches it).
+   */
+  private requestHistory(
+    messages: ChatMessage[],
+    caps: SessionCapabilities,
+  ): readonly ChatMessage[] {
+    const projected = this.projectedHistory(messages, caps);
+    const set = this.pruneState.get(messages);
+    return set === undefined ? projected : applyPrune(projected, set);
+  }
+
+  /**
+   * The batch trigger, at a round boundary: when the request would be at least
+   * `pruneAtPercent` of the window AND the candidates not yet pruned would save
+   * at least `minGainPercent` of it, add them ALL to the set (never removing an
+   * entry, never re-stubbing one: the earlier bytes stay) and drop the anchor,
+   * which measured the larger request. Otherwise nothing changes, so every
+   * request between two batches repeats the previous one's bytes.
+   */
+  private maybePrune(
+    messages: ChatMessage[],
+    tools: readonly ToolDefinition[],
+    caps: SessionCapabilities,
+  ): void {
+    const prune = this.config.contextPrune;
+    if (prune === undefined || !(prune.window > 0)) {
+      return;
+    }
+    const used = estimateUsed(
+      this.requestHistory(messages, caps),
+      tools,
+      this.anchors.get(messages),
+      prune.counter ?? DEFAULT_COUNTER,
+    );
+    if (used * 100 < prune.window * prune.pruneAtPercent) {
+      return;
+    }
+    const prior = this.pruneState.get(messages);
+    const fresh = new Map<number, PruneEntry>();
+    for (const [index, entry] of pruneCandidates(messages, {
+      ...(prune.keepRecentRounds !== undefined ? { keepRecentRounds: prune.keepRecentRounds } : {}),
+      ...(prune.outputChars !== undefined ? { outputChars: prune.outputChars } : {}),
+    })) {
+      if (prior?.get(index)?.original !== messages[index]) {
+        fresh.set(index, entry);
+      }
+    }
+    if (estimateGain(messages, fresh).tokens * 100 < prune.window * prune.minGainPercent) {
+      return;
+    }
+    const next = new Map<number, PruneEntry>();
+    for (const [index, entry] of prior ?? []) {
+      // Live entries only: a stale one (the history was replaced) fires on nothing.
+      if (messages[index] === entry.original) {
+        next.set(index, entry);
+      }
+    }
+    for (const [index, entry] of fresh) {
+      next.set(index, entry);
+    }
+    this.pruneState.set(messages, next);
+    this.anchors.delete(messages);
+  }
+
+  /**
+   * The conversation's history was replaced in place (`/compact`, `/clear`):
+   * its prune set describes the old one. The array is reused, so the
+   * `WeakMap` entry would otherwise survive the replacement.
+   */
+  forgetPrune(messages: ChatMessage[]): void {
+    this.pruneState.delete(messages);
+  }
+
+  /** Why a call is refused under the round's `caps`: a hidden server's tool or skill; else undefined. */
+  private hiddenCallRefusal(call: ToolCall, caps: SessionCapabilities): ToolResult | undefined {
+    if (isHidden(call.name, this.serverOf, caps)) {
+      return { content: `${call.name} is turned off for this session`, isError: true };
+    }
+    if (call.name === SKILL_TOOL_NAME) {
+      const name = (parseArguments(call.arguments) as { name?: unknown } | null)?.name;
+      if (typeof name === "string" && isSkillHidden(name, caps)) {
+        return { content: `skill "${name}" is turned off for this session`, isError: true };
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -1052,6 +1301,7 @@ export class Agent {
       signal: signal ?? new AbortController().signal,
       env: this.config.env,
       ...(this.config.jobs ? { jobs: this.config.jobs } : {}),
+      ...(this.config.artifacts ? { artifacts: this.config.artifacts } : {}),
       history: messages,
     };
 
@@ -1184,6 +1434,42 @@ export class Agent {
      * text is kept, owner Q1a), so the honest end is silence on that count.
      */
     let turnSaidSomething = false;
+    /**
+     * This turn's voice profile (docs/feat/voice-conversation.md §4, C3):
+     * `null` = not a voice turn, so no line and no `reasoning`. A voice steer
+     * accepted later re-marks the rest of the turn (`voiceMark`), with its own
+     * `reasoning` and a REOPENED reasoning-off window — the loop owns that
+     * window, because only it knows whether a tool call has run.
+     */
+    let voice: VoiceReasoning | null = opts.voice?.reasoning ?? null;
+    /** A tool call has run in this turn: the reasoning-off window is closed. */
+    let toolCalled = false;
+    const markVoice = (): void => {
+      const mark = opts.voiceMark?.();
+      if (mark === undefined) {
+        return;
+      }
+      voice = mark.reasoning;
+      // A voice steer REOPENS the window at this round: the person just spoke
+      // again, so its answer is wanted now, whatever ran before it.
+      if (mark.restarted) {
+        toolCalled = false;
+      }
+    };
+    /** The voice fields of the request about to be built (never in the history). */
+    const voiceRequest = (
+      messages: ChatMessage[],
+    ): { readonly messages: ChatMessage[]; readonly reasoning?: "off" } => {
+      markVoice();
+      if (voice === null) {
+        return { messages };
+      }
+      const reasoning = voiceReasoning({ reasoning: voice, toolCalled });
+      return {
+        messages: withSpokenLine(messages),
+        ...(reasoning !== undefined ? { reasoning } : {}),
+      };
+    };
     for (let iteration = 0; iteration - budgetFrom < maxIterations && !overBudget(); iteration++) {
       if (signal?.aborted) {
         this.notifyTurnEnd(sessionId, "cancelled");
@@ -1208,18 +1494,28 @@ export class Agent {
         }
       }
 
-      const tools = this.config.tools.definitions();
-      this.noteContextUsage(messages, unseen, tools);
+      // The round's capability snapshot (docs/feat/session-capabilities.md),
+      // read ONCE: the request is built from it and this round's calls are
+      // judged against it, so a toggle while it streams applies from the next
+      // round (F1/F2) and rapid toggles coalesce.
+      const caps = this.capabilities();
+      const tools = this.projectedTools(caps);
+      // A prune batch first (it changes what is sent), so the context line
+      // below reports the request the model actually gets.
+      this.maybePrune(messages, tools, caps);
+      this.noteContextUsage(messages, unseen, tools, caps);
       // The model's copy: stored context lines rendered into `content`, always
       // (enabled or not), so every request repeats the same bytes for a
       // message an earlier one sent — the provider's prompt cache holds.
-      const view = modelView(messages);
+      const view = modelView(this.requestHistory(messages, caps));
+      const voiceTurn = voiceRequest(view.messages);
       const request: ChatRequest = {
-        messages: view.messages,
+        messages: voiceTurn.messages,
         tools,
         ...(this.config.temperature !== undefined ? { temperature: this.config.temperature } : {}),
         ...(signal ? { signal } : {}),
         ...(this.config.attachments ? { attachments: this.config.attachments } : {}),
+        ...(voiceTurn.reasoning !== undefined ? { reasoning: voiceTurn.reasoning } : {}),
       };
       if (view.repairs !== null) {
         yield { type: "history_repaired", ...view.repairs };
@@ -1250,7 +1546,10 @@ export class Agent {
               if (event.usage) {
                 this.anchorContext(messages, sent, event.usage);
                 this.addSpend(messages, event.usage);
-                yield { type: "usage", usage: event.usage };
+                // `round`/`messages` ride the event too (docs/feat/token-usage-log.md):
+                // the daemon logs them per round; the provider's own numbers are
+                // `usage`, unchanged for every other consumer.
+                yield { type: "usage", usage: event.usage, round: iteration, messages: sent };
               }
               break;
           }
@@ -1357,6 +1656,12 @@ export class Agent {
       // Any real progress (text or a tool call) resets the stall counter.
       if (toolCalls.length > 0 || text.trim() !== "") {
         emptyRounds = 0;
+      }
+      // §4 (a): a voice turn's "answer fast" window closes at its FIRST tool
+      // call — the model asked for real work, so the rounds after it reason as
+      // configured, for the rest of the turn.
+      if (toolCalls.length > 0) {
+        toolCalled = true;
       }
       if (text.trim() !== "") {
         turnSaidSomething = true;
@@ -1477,6 +1782,7 @@ export class Agent {
       if (
         (yield* this.runToolCalls(toolCalls, messages, toolContext, signal, {
           beforeRun: opts.beforeRun,
+          capabilities: caps,
         })) === "context_reset"
       ) {
         budgetFrom = iteration + 1;
@@ -1520,13 +1826,18 @@ export class Agent {
         messages.push({ role: "user", content: text });
         yield { type: "steer", text };
       }
+      // That drain may have carried a voice steer, so this report is part of a
+      // voice turn: consume the mark here too. This is the ONE request the loop
+      // builds by hand, and skipping it answered a spoken person unspeakably.
+      markVoice();
       try {
-        const view = modelView(messages);
+        // No tools are sent, but the system prompt is: its catalog is projected.
+        const view = modelView(this.requestHistory(messages, this.capabilities()));
         if (view.repairs !== null) {
           yield { type: "history_repaired", ...view.repairs };
         }
         const finalMessages: ChatMessage[] = [
-          ...view.messages,
+          ...(voice === null ? view.messages : withSpokenLine(view.messages)),
           {
             role: "user",
             content: nudge,
@@ -1540,6 +1851,9 @@ export class Agent {
             : {}),
           ...(signal ? { signal } : {}),
           ...(this.config.attachments ? { attachments: this.config.attachments } : {}),
+          // No `reasoning`: this call exists because the turn SPENT its rounds on
+          // tool calls, so a voice turn's reasoning-off window is closed — only
+          // the spoken line still applies to it.
         };
         this.notifyModelRequest(sessionId, "final", finalRequest);
         for await (const event of this.config.model.stream(finalRequest)) {
@@ -1554,7 +1868,12 @@ export class Agent {
             // and the NEXT pass (a `twoWay` continuation) runs a productive
             // round it should have been refused.
             this.addSpend(messages, event.usage);
-            yield { type: "usage", usage: event.usage };
+            yield {
+              type: "usage",
+              usage: event.usage,
+              final: true,
+              messages: finalMessages.length,
+            };
           }
           // tool_call events are ignored: no tools were offered.
         }
@@ -1603,6 +1922,7 @@ export class Agent {
     messages: ChatMessage[],
     unseen: number,
     tools: NonNullable<ChatRequest["tools"]>,
+    caps: SessionCapabilities,
   ): void {
     const awareness = this.config.contextAwareness;
     if (!awareness) {
@@ -1622,7 +1942,7 @@ export class Agent {
     }
     const current: ContextUsage = {
       used: estimateUsed(
-        messages,
+        this.requestHistory(messages, caps),
         tools,
         this.anchors.get(messages),
         awareness.counter ?? DEFAULT_COUNTER,
@@ -1677,13 +1997,16 @@ export class Agent {
     signal?: AbortSignal,
     timeoutMs: number = CONTEXT_COUNT_TIMEOUT_MS,
   ): Promise<{ readonly used: number; readonly exact: boolean }> {
-    const tools = this.config.tools.definitions();
+    // What the next request would really send: the same projection as a round.
+    const caps = this.capabilities();
+    const tools = this.projectedTools(caps);
+    const sent = this.requestHistory(messages, caps);
     // Bounded and silent (`countTokensBounded`): a count that cannot, fails or
     // is slow falls through to the estimate.
     const exact = await countTokensBounded(
       this.config.model,
       {
-        messages: modelView(messages).messages,
+        messages: modelView(sent).messages,
         tools,
         ...(this.config.attachments ? { attachments: this.config.attachments } : {}),
       },
@@ -1694,7 +2017,9 @@ export class Agent {
       return { used: exact, exact: true };
     }
     return {
-      used: estimateUsed(messages, tools, this.anchors.get(messages), DEFAULT_COUNTER),
+      // `sent` keeps every stored message but the system one by identity, so
+      // the anchor (keyed by the stored array) still matches past index 0.
+      used: estimateUsed(sent, tools, this.anchors.get(messages), DEFAULT_COUNTER),
       exact: false,
     };
   }
@@ -1820,17 +2145,11 @@ export class Agent {
           // permission either (`authorizeCall` asks). Answer it
           // synthetically so the assistant's `toolCalls` stay valid in the
           // history; the next iteration top ends the turn as cancelled.
-          messages.push({
-            role: "tool",
-            content: CANCELLED_TOOL_NOTE,
-            toolCallId: call.id,
-          });
-          yield {
-            type: "tool_result",
-            id: call.id,
-            name: call.name,
-            result: { content: CANCELLED_TOOL_NOTE, isError: true },
-          };
+          // ONE result for the event and the history, so a reload shows the
+          // same failed step the live row did (docs/fix/mobile-qa-1117.md).
+          const cancelled: ToolResult = { content: CANCELLED_TOOL_NOTE, isError: true };
+          messages.push(toolMessage(call.id, cancelled));
+          yield { type: "tool_result", id: call.id, name: call.name, result: cancelled };
           yield { type: "history_commit" };
           continue;
         }
@@ -1848,6 +2167,7 @@ export class Agent {
         };
         const prepared = await this.authorizeCall(call, ctx, {
           beforeStart: hooks.beforeResumedCall,
+          capabilities: hooks.capabilities,
         });
         let run: ToolRun & { input: unknown };
         if (prepared.kind === "done") {
@@ -1983,6 +2303,7 @@ export class Agent {
         };
         const prepared = await this.authorizeCall(call, ctx, {
           ...(head !== undefined ? { groupStart: head } : {}),
+          capabilities: hooks.capabilities,
         });
         if (prepared.kind === "done") {
           yield answer(index, call, await this.finishCall(call, prepared, toolContext));
@@ -2297,6 +2618,9 @@ export class Agent {
           signal,
           fresh.skills.activator ?? null,
         ),
+        undefined,
+        // The fresh history must not re-introduce what the user hid (F12).
+        this.capabilities().disabledSkills,
       );
     } catch (error) {
       if (signal?.aborted) {
@@ -2340,6 +2664,7 @@ export class Agent {
     messages.push(...next);
     this.installSkills(fresh.skills);
     this.anchors.delete(messages);
+    this.forgetPrune(messages);
     this.config.hooks?.forgetModelRequestBaseline(toolContext.sessionId);
     this.resetsThisMessage++;
     this.otherCallSinceReset = false;
@@ -2676,10 +3001,20 @@ export class Agent {
   private async authorizeCall(
     call: ToolCall,
     ctx: ToolContext,
-    opts: { readonly groupStart?: string; readonly beforeStart?: BeforeResumedCall | undefined },
+    opts: {
+      readonly groupStart?: string;
+      readonly beforeStart?: BeforeResumedCall | undefined;
+      readonly capabilities?: SessionCapabilities | undefined;
+    },
   ): Promise<Prepared> {
     const tool = this.config.tools.get(call.name);
     const input = parseArguments(call.arguments);
+    // Hidden in the round's snapshot: the model called it from memory of older
+    // history. Refused before the gate — no prompt, never run (F3).
+    const hidden = opts.capabilities && this.hiddenCallRefusal(call, opts.capabilities);
+    if (hidden) {
+      return { kind: "done", result: hidden, input };
+    }
     if (!tool) {
       // Unknown: the registry answers it (an error result), timed like a run.
       return { kind: "run", call, args: call.arguments, input };
@@ -2819,6 +3154,28 @@ function keepDenialReply(raw: ToolResult, transformed: ToolResult): ToolResult {
 /** The line after a denial's reply: what the model should do with it. */
 const REPLY_GUIDANCE =
   "Answer the user or change your approach; request this tool again only if you still need it.";
+
+/**
+ * The skills a listing offers the model now, in the renderer's shape. Only
+ * `name` and `description` reach the catalog (`renderSkillsCatalog`); the
+ * rest is filler. `projectSystem` re-renders only names the composed catalog
+ * already holds, so this can never advertise a skill the `skill` tool lacks.
+ */
+function catalogOf(listing: SkillListing): readonly SkillInfo[] {
+  return listing.skills
+    .filter((s) => s.model)
+    .map((s) => ({
+      name: s.name,
+      description: s.description,
+      location: s.location,
+      dir: "",
+      scope: s.scope,
+      files: [],
+      filesTruncated: false,
+      modelInvocable: true,
+      userInvocable: s.user,
+    }));
+}
 
 /** A call's parsed arguments; `{}` when empty or malformed (the registry reports those). */
 function parseArguments(args: string): unknown {

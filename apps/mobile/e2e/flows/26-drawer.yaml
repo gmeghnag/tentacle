@@ -1,0 +1,111 @@
+appId: so.tentacle.app
+---
+# 26 (docs/feat/mobile-chrome.md slice S6): the sessions drawer. The hamburger
+# opens it over the session, the open session is the highlighted row, a long-
+# press renames a row BY ID (no open), and a tap on another row switches the
+# session screen to it.
+#
+# Assertions are by testID only (plan P9), and the flow ENDS on daemon truth:
+# `26-drawer.js` reads the drawer's rename through `session/list`, and that the
+# session the drawer switched AWAY from still exists (a switch only detaches,
+# never `session/close` — F6).
+#
+# Not driven here (stated, not hidden): the cross-computer switch and its back
+# stack (the harness runs ONE `serve`; `drawer-nav.test.ts` pins F4's stack),
+# and the edge back-swipe (Maestro has no iOS edge gesture). New session (S7)
+# is driven at the end; its offline refusal (F8) is pinned by
+# `drawer-new-session.test.ts` and `new-session-link.test.ts`.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${DRAWER_ID}"
+- assertVisible:
+    id: "session-view"
+# F1: the hamburger TAP is the only opener.
+- tapOn:
+    id: "session-drawer"
+- assertVisible:
+    id: "drawer"
+# F3: the open session is highlighted by id.
+- assertVisible:
+    id: "drawer-current-${DRAWER_ID}"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "26-drawer"
+# F7 + docs/feat/mobile-session-actions.md S2: long-press → the row menu (Pin to
+# top / Rename / Delete) → Rename → `session/rename` by id; the field closes on
+# success. The menu's full wording is pinned by `drawer-row-menu.test.ts`.
+- longPressOn:
+    id: "drawer-current-${DRAWER_ID}"
+- assertVisible:
+    id: "drawer-row-pin"
+- assertVisible:
+    id: "drawer-row-delete"
+- tapOn:
+    id: "drawer-row-rename"
+- assertVisible:
+    id: "session-rename-input"
+- tapOn:
+    id: "session-rename-input"
+- eraseText
+- inputText: "Renamed in drawer 26"
+- tapOn:
+    id: "session-rename-save"
+- waitForAnimationToEnd
+- assertNotVisible:
+    id: "session-rename-sheet"
+# The switch: another row of the same computer → the screen is THAT session
+# (re-opening the drawer highlights it, not the one we left).
+- tapOn:
+    id: "drawer-session-${ALPHA_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "session-drawer"
+- assertVisible:
+    id: "drawer-current-${ALPHA_ID}"
+- tapOn:
+    id: "drawer-scrim"
+- assertNotVisible:
+    id: "drawer"
+# S7: New session — created at the tap on the listed computer, opened EMPTY
+# with the composer focused (the text below goes in with no tap on the field),
+# and its first send runs a turn.
+- tapOn:
+    id: "session-drawer"
+- tapOn:
+    id: "drawer-new"
+- assertVisible:
+    id: "session-view"
+- assertVisible:
+    id: "transcript-empty"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 10000
+- inputText: "NEWSESSION flow twenty-six"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+# The drawer lists it as the open session (its id is minted on the phone, so
+# matched by pattern), and ALPHA is an ordinary row again.
+- tapOn:
+    id: "session-drawer"
+- assertVisible:
+    id: "drawer-current-.*"
+- assertVisible:
+    id: "drawer-session-${ALPHA_ID}"
+- tapOn:
+    id: "drawer-scrim"
+# The daemon truth: the rename landed, the left session is still there, and the
+# new session's first prompt reached the model.
+- runScript:
+    file: "26-drawer.js"

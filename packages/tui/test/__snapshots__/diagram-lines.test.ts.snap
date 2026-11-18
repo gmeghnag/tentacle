@@ -1,0 +1,461 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`T3 frames (snapshots) login 120 — colour off 1`] = `
+"                                                   Titolo · flowchart
+
+                                                       ╭───────────╮
+                                                       │ Richiesta │
+                                                       ╰─────┬─────╯
+                                                             ▼
+                                                    ╭─────────────────╮
+                                                    ◇  Token valido?  ◇
+                                                    ╰─┬─────────────┬─╯
+                                                      │ sì          │ no
+                                                    ╭─╯             ╰╮
+                                                    ▼                ▼
+                                           ╭─────────────────╮   ╭───────╮
+                                           │ Carica sessione │   │ Login │
+                                           ╰────────┬────────╯   ╰───┬───╯
+                                                    │                │
+                                                    ╰─╮            ╭─╯
+                                                      │            ▼
+                                                      │   ╭─────────────────╮
+                                                      │   ├─────────────────┤
+                                                      │   │ Database utenti │
+                                                      │   ╰────────┬────────╯
+                                                      │            │
+                                                      ╰───╮      ╭─╯
+                                                          ▼      ▼
+                                                        ╭──────────╮
+                                                        │ Risposta │
+                                                        ╰──────────╯"
+`;
+
+exports[`T3 frames (snapshots) login 80 — colour off 1`] = `
+"                               Titolo · flowchart
+
+                                   ╭───────────╮
+                                   │ Richiesta │
+                                   ╰─────┬─────╯
+                                         ▼
+                                ╭─────────────────╮
+                                ◇  Token valido?  ◇
+                                ╰─┬─────────────┬─╯
+                                  │ sì          │ no
+                                ╭─╯             ╰╮
+                                ▼                ▼
+                       ╭─────────────────╮   ╭───────╮
+                       │ Carica sessione │   │ Login │
+                       ╰────────┬────────╯   ╰───┬───╯
+                                │                │
+                                ╰─╮            ╭─╯
+                                  │            ▼
+                                  │   ╭─────────────────╮
+                                  │   ├─────────────────┤
+                                  │   │ Database utenti │
+                                  │   ╰────────┬────────╯
+                                  │            │
+                                  ╰───╮      ╭─╯
+                                      ▼      ▼
+                                    ╭──────────╮
+                                    │ Risposta │
+                                    ╰──────────╯"
+`;
+
+exports[`T3 frames (snapshots) login 50 — colour off 1`] = `
+"                Titolo · flowchart
+
+                    ╭───────────╮
+                    │ Richiesta │
+                    ╰─────┬─────╯
+                          ▼
+                 ╭─────────────────╮
+                 ◇  Token valido?  ◇
+                 ╰─┬─────────────┬─╯
+                   │ sì          │ no
+                 ╭─╯             ╰╮
+                 ▼                ▼
+        ╭─────────────────╮   ╭───────╮
+        │ Carica sessione │   │ Login │
+        ╰────────┬────────╯   ╰───┬───╯
+                 │                │
+                 ╰─╮            ╭─╯
+                   │            ▼
+                   │   ╭─────────────────╮
+                   │   ├─────────────────┤
+                   │   │ Database utenti │
+                   │   ╰────────┬────────╯
+                   │            │
+                   ╰───╮      ╭─╯
+                       ▼      ▼
+                     ╭──────────╮
+                     │ Risposta │
+                     ╰──────────╯"
+`;
+
+exports[`T3 frames (snapshots) login 80 expanded — colour off 1`] = `
+"                               Titolo · flowchart
+
+                                   ╭───────────╮
+                                   │ Richiesta │
+                                   ╰─────┬─────╯
+                                         ▼
+                                ╭─────────────────╮
+                                ◇  Token valido?  ◇
+                                ╰─┬─────────────┬─╯
+                                  │ sì          │ no
+                                ╭─╯             ╰╮
+                                ▼                ▼
+                       ╭─────────────────╮   ╭───────╮
+                       │ Carica sessione │   │ Login │
+                       ╰────────┬────────╯   ╰───┬───╯
+                                │                │
+                                ╰─╮            ╭─╯
+                                  │            ▼
+                                  │   ╭─────────────────╮
+                                  │   ├─────────────────┤
+                                  │   │ Database utenti │
+                                  │   ╰────────┬────────╯
+                                  │            │
+                                  ╰───╮      ╭─╯
+                                      ▼      ▼
+                                    ╭──────────╮
+                                    │ Risposta │
+                                    ╰──────────╯
+
+│ flowchart TD
+│   A[Richiesta] --> B{Token valido?}
+│   B -- sì --> C[Carica sessione]
+│   B -- no --> D[Login]
+│   D --> E[(Database utenti)]
+│   C --> F[Risposta]
+│   E --> F"
+`;
+
+exports[`T3 frames (snapshots) phone 120 — colour off 1`] = `
+"                                                Titolo · sequenceDiagram
+
+                                     ╭─────╮          ╭───────╮          ╭─────╮
+                                     │ App │          │ Relay │          │ Mac │
+                                     ╰──┬──╯          ╰───┬───╯          ╰──┬──╯
+                                        │                 │                 │
+                                        │ session/prompt  │                 │
+                                        ├────────────────►│                 │
+                                        │                 │ inoltra · E2E   │
+                                        │                 ├────────────────►│
+                                        │                 │            ╭─────────╮
+                                        │                 │            │ elabora │
+                                        │                 │            ╰─────────╯
+                                        │                 │ session/update  │
+                                        │                 │◄╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+                                        │ transcript      │                 │
+                                        │◄╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤                 │
+                                        ├──╮ ridisegna    │                 │
+                                        │◄─╯              │                 │
+                                        │                 │ perso           │
+                                        │                 ├────────────────×│
+                                        │                 │                 │"
+`;
+
+exports[`T3 frames (snapshots) phone 80 — colour off 1`] = `
+"                            Titolo · sequenceDiagram
+
+                 ╭─────╮          ╭───────╮          ╭─────╮
+                 │ App │          │ Relay │          │ Mac │
+                 ╰──┬──╯          ╰───┬───╯          ╰──┬──╯
+                    │                 │                 │
+                    │ session/prompt  │                 │
+                    ├────────────────►│                 │
+                    │                 │ inoltra · E2E   │
+                    │                 ├────────────────►│
+                    │                 │            ╭─────────╮
+                    │                 │            │ elabora │
+                    │                 │            ╰─────────╯
+                    │                 │ session/update  │
+                    │                 │◄╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+                    │ transcript      │                 │
+                    │◄╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤                 │
+                    ├──╮ ridisegna    │                 │
+                    │◄─╯              │                 │
+                    │                 │ perso           │
+                    │                 ├────────────────×│
+                    │                 │                 │"
+`;
+
+exports[`T3 frames (snapshots) phone 49 — colour off 1`] = `
+"            Titolo · sequenceDiagram
+
+  App   ── session/prompt ──► Relay
+  Relay ── inoltra · E2E ───► Mac
+  note Mac: elabora
+  Mac   ╌╌ session/update ╌╌► Relay
+  Relay ╌╌ transcript ╌╌╌╌╌╌► App
+  App   ── ridisegna ───────► App
+  Relay ── perso ───────────× Mac"
+`;
+
+exports[`T3 frames (snapshots) classes 80 — colour off 1`] = `
+"              Titolo · classDiagram · source only in the terminal
+
+│ classDiagram
+│   Session "1" *-- "n" ChatMessage
+│   Session o-- ArtifactStore
+│   class Session {
+│     +uid: string
+… +6 more lines · ctrl+o to expand"
+`;
+
+exports[`T3 frames (snapshots) loop 80 — colour off 1`] = `
+"                               Titolo · flowchart
+
+                   ╭───────╮       ╭───────╮        ╭──────╮
+                   │ Start ├──────►◇  Ok?  ◇─ yes ─►│ Done │
+                   │       ├◄ no ──┤       │        ╰──────╯
+                   ╰───────╯       ╰───────╯"
+`;
+
+exports[`T3 frames (snapshots) subgraph 80 — colour off 1`] = `
+"                               Titolo · flowchart
+
+                                 ╭────────╮
+                                 │ Client │
+                                 ╰───┬────╯
+                                     │
+                                ╭────│─ Server ─╮
+                                │    ▼          │
+                                │ ╭─────╮       │
+                                │ │ API │       │
+                                │ ╰──┬──╯       │
+                                │    │          │
+                                │    │          │
+                                │    ▼          │
+                                │  ╭────╮       │
+                                │  ├────┤       │
+                                │  │ DB │       │
+                                │  ╰────╯       │
+                                ╰───────────────╯"
+`;
+
+exports[`T3 frames (snapshots) login 80 — colour on 1`] = `
+"                               \x1B[1mTitolo\x1B[22m\x1B[38;2;140;140;140m · flowchart\x1B[39m
+
+                                   \x1B[2m╭───────────╮\x1B[22m
+                                   \x1B[2m│\x1B[22m Richiesta \x1B[2m│\x1B[22m
+                                   \x1B[2m╰─────┬─────╯\x1B[22m
+                                         \x1B[2m▼\x1B[22m
+                                \x1B[38;2;6;182;212m╭─────────────────╮\x1B[39m
+                                \x1B[38;2;6;182;212m◇\x1B[39m  Token valido?  \x1B[38;2;6;182;212m◇\x1B[39m
+                                \x1B[38;2;6;182;212m╰─\x1B[39m\x1B[2m┬\x1B[22m\x1B[38;2;6;182;212m─────────────\x1B[39m\x1B[2m┬\x1B[22m\x1B[38;2;6;182;212m─╯\x1B[39m
+                                  \x1B[2m│\x1B[22m \x1B[38;2;152;195;121msì\x1B[39m          \x1B[2m│\x1B[22m \x1B[38;2;152;195;121mno\x1B[39m
+                                \x1B[2m╭─╯\x1B[22m             \x1B[2m╰╮\x1B[22m
+                                \x1B[2m▼\x1B[22m                \x1B[2m▼\x1B[22m
+                       \x1B[2m╭─────────────────╮\x1B[22m   \x1B[2m╭───────╮\x1B[22m
+                       \x1B[2m│\x1B[22m Carica sessione \x1B[2m│\x1B[22m   \x1B[2m│\x1B[22m Login \x1B[2m│\x1B[22m
+                       \x1B[2m╰────────┬────────╯\x1B[22m   \x1B[2m╰───┬───╯\x1B[22m
+                                \x1B[2m│\x1B[22m                \x1B[2m│\x1B[22m
+                                \x1B[2m╰─╮\x1B[22m            \x1B[2m╭─╯\x1B[22m
+                                  \x1B[2m│\x1B[22m            \x1B[2m▼\x1B[22m
+                                  \x1B[2m│\x1B[22m   \x1B[2m╭─────────────────╮\x1B[22m
+                                  \x1B[2m│\x1B[22m   \x1B[2m├─────────────────┤\x1B[22m
+                                  \x1B[2m│\x1B[22m   \x1B[2m│\x1B[22m Database utenti \x1B[2m│\x1B[22m
+                                  \x1B[2m│\x1B[22m   \x1B[2m╰────────┬────────╯\x1B[22m
+                                  \x1B[2m│\x1B[22m            \x1B[2m│\x1B[22m
+                                  \x1B[2m╰───╮\x1B[22m      \x1B[2m╭─╯\x1B[22m
+                                      \x1B[2m▼\x1B[22m      \x1B[2m▼\x1B[22m
+                                    \x1B[2m╭──────────╮\x1B[22m
+                                    \x1B[2m│\x1B[22m Risposta \x1B[2m│\x1B[22m
+                                    \x1B[2m╰──────────╯\x1B[22m"
+`;
+
+exports[`T3 frames (snapshots) phone 80 — colour on 1`] = `
+"                            \x1B[1mTitolo\x1B[22m\x1B[38;2;140;140;140m · sequenceDiagram\x1B[39m
+
+                 \x1B[2m╭─────╮\x1B[22m          \x1B[2m╭───────╮\x1B[22m          \x1B[2m╭─────╮\x1B[22m
+                 \x1B[2m│\x1B[22m App \x1B[2m│\x1B[22m          \x1B[2m│\x1B[22m Relay \x1B[2m│\x1B[22m          \x1B[2m│\x1B[22m Mac \x1B[2m│\x1B[22m
+                 \x1B[2m╰──┬──╯\x1B[22m          \x1B[2m╰───┬───╯\x1B[22m          \x1B[2m╰──┬──╯\x1B[22m
+                    \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m
+                    \x1B[2m│\x1B[22m \x1B[38;2;152;195;121msession/prompt\x1B[39m  \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m
+                    \x1B[2m├────────────────►│\x1B[22m                 \x1B[2m│\x1B[22m
+                    \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m \x1B[38;2;152;195;121minoltra · E2E\x1B[39m   \x1B[2m│\x1B[22m
+                    \x1B[2m│\x1B[22m                 \x1B[2m├────────────────►│\x1B[22m
+                    \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m            \x1B[2m╭─────────╮\x1B[22m
+                    \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m            \x1B[2m│\x1B[22m \x1B[2melabora\x1B[22m \x1B[2m│\x1B[22m
+                    \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m            \x1B[2m╰─────────╯\x1B[22m
+                    \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m \x1B[38;2;152;195;121msession/update\x1B[39m  \x1B[2m│\x1B[22m
+                    \x1B[2m│\x1B[22m                 \x1B[2m│◄╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤\x1B[22m
+                    \x1B[2m│\x1B[22m \x1B[38;2;152;195;121mtranscript\x1B[39m      \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m
+                    \x1B[2m│◄╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤\x1B[22m                 \x1B[2m│\x1B[22m
+                    \x1B[2m├──╮\x1B[22m \x1B[38;2;152;195;121mridisegna\x1B[39m    \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m
+                    \x1B[2m│◄─╯\x1B[22m              \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m
+                    \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m \x1B[38;2;152;195;121mperso\x1B[39m           \x1B[2m│\x1B[22m
+                    \x1B[2m│\x1B[22m                 \x1B[2m├────────────────×│\x1B[22m
+                    \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m                 \x1B[2m│\x1B[22m"
+`;
+
+exports[`T3 frames (snapshots) transform 200 — colour off 1`] = `
+"                                                                                           Titolo · flowchart
+
+                                                                                            ╭───────────────────╮
+                                                                                            │ Token in ingresso │
+                                                                                            │   (es. 'ciao')    │
+                                                                                            ╰─┬───────────────┬─╯
+                                                                                              │               ▲
+                                                                                              │               ╎ re-iniettato come nuovo token
+                                                                                        ╭─────╯               ╰╌╌╌╌╌╮
+                                                                                        │                           ╎
+                                                                                        ▼                           ╎
+                                                                          ╭────────────────────────────╮            ╎
+                                                                          │       Tokenizzatore        │            ╎
+                                                                          │ testo » ID nel vocabolario │            ╎
+                                                                          ╰─────────────┬──────────────╯            ╎
+                                                                                        │                           ╎
+                                                                                        │                           ╎
+                                                                                        ▼                           ╎
+                                                                         ╭──────────────────────────────╮           ╎
+                                                                         │       Embedding lookup       │           ╎
+                                                                         │ ID » vettore di d dimensioni │           ╎
+                                                                         ╰──────────────┬───────────────╯           ╎
+                                                                                        │                           ╎
+                                                                                        │                           ╎
+                                                                                        ▼                           ╎
+                                                                          ╭───────────────────────────╮             ╎
+                                                                          │[ + Codifica di posizione ]│             ╎
+                                                                          │[(absolute / RoPE / ALiBi)]│             ╎
+                                                                          ╰─────────────┬─────────────╯             ╎
+                                                                                        │                           ╎
+                                                                                        │                           ╎
+                                                                                        ▼                           ╎
+                                                                                   ╭─────────╮                      ╎
+                                                                                   │ RMSNorm │                      ╎
+                                                                                   ╰─┬─────┬─╯                      ╎
+                                                                                     │     ▲                        ╎
+                                                                                     │     │ strati 1 .. N-1        ╎
+                                                                             ╭───────╯     ╰───────╮                ╎
+                                                           ╭─────────────────│─────────────────────│──────╮         ╎
+                                                           │                 ▼                     │      │         ╎
+                                                           │  ╭─────────────────────────────╮      │      │         ╎
+                                                           │  │ Proiezioni lineari: Q, K, V │      │      │         ╎
+                                                           │  ╰──────────────┬──────────────╯      │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 ▼                     │      │         ╎
+                                                           │       ╭────────────────────╮          │      │         ╎
+                                                           │       │ Split in H testate │          │      │         ╎
+                                                           │       ╰─────────┬──────────╯          │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 ▼                     │      │         ╎
+                                                           │       ╭────────────────────╮          │      │         ╎
+                                                           │       │ score = Q·Kᵀ / √dₖ │          │      │         ╎
+                                                           │       ╰─────────┬──────────╯          │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 ▼                     │      │         ╎
+                                                           │ ╭───────────────────────────────╮     │      │         ╎
+                                                           │ │       Maschera causale        │     │      │         ╎
+                                                           │ │ (nessun token vede il futuro) │     │      │         ╎
+                                                           │ ╰───────────────┬───────────────╯     │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 ▼                     │      │         ╎
+                                                           │     ╭───────────────────────╮         │      │         ╎
+                                                           │     │ softmax per ogni riga │         │      │         ╎
+                                                           │     ╰───────────┬───────────╯         │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 ▼                     │      │         ╎
+                                                           │         ╭────────────────╮            │      │         ╎
+                                                           │         │ output = P · V │            │      │         ╎
+                                                           │         ╰───────┬────────╯            │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 ▼                     │      │         ╎
+                                                           │  ╭──────────────────────────────╮     │      │         ╎
+                                                           │  │ Concatenazione testate + W_O │     │      │         ╎
+                                                           │  ╰──────────────┬───────────────╯     │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 │                     │      │         ╎
+                                                           │                 ╰╮                    │      │         ╎
+                                                           │                  │                    │      │         ╎
+                                                           │                  ▼                    │      │         ╎
+                                                           │   ╭─────────────────────────────╮     │      │         ╎
+                                                           │   │[+ residuo (skip connection)]│     │      │         ╎
+                                                           │   ╰──────────────┬──────────────╯     │      │         ╎
+                                                           │                  │                    │      │         ╎
+                                                           │                  │                    │      │         ╎
+                                                           │                  ╰─╮                ╭─╯      │         ╎
+                                                           │                    │                │        │         ╎
+                                                           │                    ▼                │        │         ╎
+                                                           │               ╭─────────╮           │        │         ╎
+                                                           │               │ RMSNorm │           │        │         ╎
+                                                           │               ╰────┬────╯           │        │         ╎
+                                                           │                    │                │        │         ╎
+                                                           │                    │                │        │         ╎
+                                                           │                    ▼                │        │         ╎
+                                                           │         ╭─────────────────────╮     │        │         ╎
+                                                           │         │ FFN: W₁ → GELU → W₂ │     │        │         ╎
+                                                           │         ╰──────────┬──────────╯     │        │         ╎
+                                                           │                    │                │        │         ╎
+                                                           │                    │                │        │         ╎
+                                                           │                ╭───╯                ╰────╮   │         ╎
+                                                           │                │                         │   │         ╎
+                                                           │                ▼                         │   │         ╎
+                                                           │              ╭───────────────────────────┴─╮ │         ╎
+                                                           │              │[+ residuo (skip connection)]│ │         ╎
+                                                           │              ╰──────────────┬──────────────╯ │         ╎
+                                                           ╰─ Blocco Transformer (ripe… ─│────────────────╯         ╎
+                                                                                         │ dopo lo strato N         ╎
+                                                                                         │                          ╎
+                                                                                         ▼                          ╎
+                                                                                 ╭────────────────╮                 ╎
+                                                                                 │ RMSNorm finale │                 ╎
+                                                                                 ╰───────┬────────╯                 ╎
+                                                                                         │                          ╎
+                                                                                         │                          ╎
+                                                                                         ▼                          ╎
+                                                                      ╭─────────────────────────────────────╮       ╎
+                                                                      │ Proiezione al vocabolario (lm_head) │       ╎
+                                                                      │   vettore » logit per ogni token    │       ╎
+                                                                      ╰──────────────────┬──────────────────╯       ╎
+                                                                                         │                          ╎
+                                                                                         │                          ╎
+                                                                                         ▼                          ╎
+                                                                           ╭───────────────────────────╮            ╎
+                                                                           │ Scaling della temperatura │            ╎
+                                                                           ╰─────────────┬─────────────╯            ╎
+                                                                                         │                          ╎
+                                                                                         │                          ╎
+                                                                                         ▼                          ╎
+                                                                     ╭────────────────────────────────────────╮     ╎
+                                                                     │ softmax » distribuzione di probabilità │     ╎
+                                                                     ╰───────────────────┬────────────────────╯     ╎
+                                                                                         │                          ╎
+                                                                                         │                          ╎
+                                                                                         ╰───╮                   ╭╌╌╯
+                                                                                             │                   ╎
+                                                                                             ▼                   ╎
+                                                                                ╭──────────────────────────╮     ╎
+                                                                                │      Campionamento       │     ╎
+                                                                                │ (greedy / top-k / top-p) │     ╎
+                                                                                ╰────────────┬─────────────╯     ╎
+                                                                                             │                   ╎
+                                                                                             │                   ╎
+                                                                                         ╭───╯                   ╰╌╌╌╌╮
+                                                                                         │                            ╎
+                                                                                         ▼                            ╎
+                                                                                       ╭──────────────────────────────┴─╮
+                                                                                       │ Probabilità del prossimo token │
+                                                                                       │   (es. 'mondo' con p = 0,6)    │
+                                                                                       ╰────────────────────────────────╯"
+`;
+
+exports[`T3 frames (snapshots) transform 80 — colour off 1`] = `
+"      Titolo · flowchart · too wide for 80 cols — widen the window or ^X^O
+
+│ flowchart TD
+│     IN["Token in ingresso<br/>(es. 'ciao')"] --> TOK["Tokenizzatore<br/>testo…
+│     TOK --> EMB["Embedding lookup<br/>ID » vettore di d dimensioni"]
+│     EMB --> POS[["+ Codifica di posizione<br/>(absolute / RoPE / ALiBi)"]]
+│     POS --> LN1
+… +23 more lines · ctrl+o to expand"
+`;

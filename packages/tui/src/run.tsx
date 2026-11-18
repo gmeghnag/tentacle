@@ -12,9 +12,12 @@ import {
   type SessionDirectory,
   type TargetFeed,
 } from "./App.tsx";
+import type { ChartGlyphs } from "./chart-lines.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
+import { createArtifactOpener } from "./os-open.ts";
 import { messagesToItems } from "./resume.ts";
+import { synchronizedStdout } from "./sync-output.ts";
 import type { TargetBadge } from "./target-view.ts";
 import { lateGuard, readThemeSetting } from "./terminal-background-probe.ts";
 import {
@@ -25,6 +28,7 @@ import {
   restoreTerminalOnExit,
 } from "./terminal.ts";
 import { type ThemeSetting, themeProbeWasLate } from "./theme.ts";
+import type { VoiceConfig } from "./voice-session.ts";
 
 export interface TuiOptions {
   readonly model: string;
@@ -67,6 +71,16 @@ export interface TuiOptions {
   readonly detachOnQuit?: boolean;
   /** The daemon's sessions for `/sessions` (`connect` only). */
   readonly sessions?: SessionDirectory;
+  /**
+   * Voice dictation settings (docs/feat/voice-dictation.md). Absent: the TUI's
+   * own defaults (`VOICE_DEFAULTS`) — OFF, Ctrl+R, no auto-stop.
+   */
+  readonly voice?: VoiceConfig;
+  /**
+   * Where the helper's log and `<configDir>/voice/bin` live. The CLI passes its
+   * config dir; absent, no log is opened and only the binary's sibling is tried.
+   */
+  readonly voiceConfigDir?: string;
   /** A detached run's TUI (`attach <name>`): `/quit` closes the session for all. */
   readonly runQuit?: RunQuit;
   /** The session's auto-accept feed: a detached run's shared file, or the routing feed (docs/feat/session-auto-accept.md D5). */
@@ -90,6 +104,11 @@ export interface TuiOptions {
    * `--resume` picker and the runtime share the answer.
    */
   readonly theme?: ThemeSetting;
+  /**
+   * A chart's plot glyphs (`tui.chartGlyphs`, docs/feat/model-charts.md D5):
+   * `braille` (default) or `blocks` for a font without braille. LAPTOP-ONLY.
+   */
+  readonly chartGlyphs?: ChartGlyphs;
 }
 
 /**
@@ -181,14 +200,27 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         {...(options.daemonInPod ? { daemonInPod: true } : {})}
         {...(options.detachOnQuit ? { detachOnQuit: true } : {})}
         {...(options.sessions ? { sessions: options.sessions } : {})}
+        {...(options.voice ? { voice: options.voice } : {})}
+        {...(options.voiceConfigDir ? { voiceConfigDir: options.voiceConfigDir } : {})}
         {...(options.runQuit ? { runQuit: options.runQuit } : {})}
         {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
         {...(options.autoAcceptShared ? { autoAcceptShared: options.autoAcceptShared } : {})}
         {...(options.hop ? { hop: options.hop } : {})}
         {...(options.targetFeed ? { targetFeed: options.targetFeed } : {})}
+        chartGlyphs={options.chartGlyphs ?? "braille"}
         {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
+        artifactOpener={createArtifactOpener()}
       />,
-      { stdin, exitOnCtrlC: false },
+      {
+        stdin,
+        // Each Ink frame as ONE synchronized update (DEC mode 2026), TTY only: the
+        // erase-all + redraw write can no longer be painted half-way
+        // (docs/fix/tui-redraw-flash.md).
+        stdout: fullscreen
+          ? (synchronizedStdout(process.stdout) as unknown as NodeJS.WriteStream)
+          : process.stdout,
+        exitOnCtrlC: false,
+      },
     );
     await instance.waitUntilExit();
   } finally {

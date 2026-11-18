@@ -287,6 +287,12 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "session_settings", settings: { carried: {}, overridden: {} }, id: "a1" },
     // docs/feat/session-auto-accept.md: the session's switch, every device.
     { type: "auto_accept", on: true, by: "laptop" },
+    // docs/feat/session-capabilities.md: the session's MCP/skill switches.
+    {
+      type: "capabilities",
+      capabilities: { disabledMcp: ["k8s"], disabledSkills: [] },
+      by: "phone",
+    },
     { type: "tool_call_phase", toolCallId: "t", phase: "running" },
     {
       type: "queued",
@@ -318,6 +324,21 @@ describe("toUpdateParams (the session/update frame)", () => {
       type: "jobs",
       jobs: [
         { id: "bg-1", command: "watch: grep -c Turno conv.md", startedAt: 1, status: "running" },
+      ],
+    },
+    // docs/feat/cron-tool.md S2: the session's scheduled wakes (on every change).
+    {
+      type: "schedules",
+      schedules: [
+        {
+          id: "sc-1",
+          kind: "every",
+          spec: "every 10m",
+          prompt: "check CI on PR #412",
+          nextAt: 1,
+          fires: 4,
+          createdAt: 0,
+        },
       ],
     },
   ];

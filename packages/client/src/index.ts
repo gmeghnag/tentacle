@@ -4,6 +4,7 @@
  * a local `Session`, plus the WebSocket channel adapter and the wire↔local
  * mappings.
  */
+export * from "./address-dial.ts";
 export * from "./constants.ts";
 export * from "./link-machine.ts";
 export * from "./mapping.ts";
@@ -17,8 +18,11 @@ export * from "./remote-session.ts";
 export * from "./session-reducer.ts";
 export * from "./version-mismatch.ts";
 export * from "./upload-window.ts";
+export * from "./read-window.ts";
 export * from "./watch.ts";
 export * from "./image-input.ts";
+export * from "./document-input.ts";
 export * from "./laptop-images.ts";
 export * from "./restore-images.ts";
 export * from "./discovery.ts";
+export * from "./schedules.ts";

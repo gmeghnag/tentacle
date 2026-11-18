@@ -31,6 +31,7 @@ import {
   type HopSpec,
   type HopWorkload,
   type SessionController,
+  VOICE_DEFAULTS,
   pickSession,
   startTui,
 } from "@tentacle/tui";
@@ -52,6 +53,7 @@ import {
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { logDaemonError } from "./daemon-log.ts";
+import "./pdf-worker-url.ts";
 import { detachedRunOf } from "./detached-run-of.ts";
 import { devicesCommand, resetCommand, revokeCommand } from "./devices-cmd.ts";
 import { type EngineHost, type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
@@ -152,6 +154,7 @@ import { localAutoAccept, styleInfo } from "./run-ui.ts";
 import { serveModelNotice } from "./serve-model-notice.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { autoAcceptOf, routingAutoAccept, seedAutoAcceptOf } from "./session-auto-accept.ts";
+import { seedCapabilitiesOf } from "./session-capabilities.ts";
 import { NOT_A_TERMINAL, dimIf, termOf } from "./streams.ts";
 import { startTerminal } from "./terminal.ts";
 import {
@@ -163,6 +166,7 @@ import {
 import { untrustedText } from "./untrusted-text.ts";
 import { runUpdate, spawnVersion } from "./update.ts";
 import { APP_BUILD, APP_RELEASE_VERSION, APP_VERSION } from "./version.ts";
+import { runHelperInherited, voiceCommand } from "./voice-cmd.ts";
 import { buildAgent, connectConfiguredMcp, loadUserAgentTypes } from "./wiring.ts";
 import {
   type WorkspacePlan,
@@ -334,6 +338,12 @@ Usage:
   tentacle devices reset [--yes]
                            new identity key and an empty registry: every phone
                            must pair again (the recovery from a leaked key)
+  tentacle voice status    the Mac's speech recogniser, the models, the
+                           microphone permission
+  tentacle voice setup [--yes]
+                           download the Parakeet model (only needed with
+                           voice.engine: parakeet); Apple's built-in
+                           recogniser needs no download
   tentacle <prompt...>     run a single task and exit
   tentacle -- <prompt...>  the same, for a prompt that starts with '-' or
                            with a subcommand word (tentacle -- explain how
@@ -397,6 +407,9 @@ Remote control:
                       [--relay <url> | --no-relay]
                       [--session-ttl 24h|never] [--session-admin-cap DUR] [--max-sessions 64]
                       [--max-detached-sessions 16] [--ws-idle-timeout 60s]
+                      [--push-grace 30]
+  --push-grace <seconds> is how long a permission request waits for a phone
+  before it is pushed to it (0 = at once; default push.graceSeconds, 30).
   With paired devices, serve dials OUT to the mobile relay (relay.tentacle.so by
   default, or relay.url / --relay <url>), so a phone reaches it from anywhere
   with no open port; --no-relay keeps it off. The relay sees only ciphertext.
@@ -936,6 +949,26 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     });
   }
 
+  // `tentacle voice setup|status` (docs/feat/voice-dictation.md §6): the local
+  // helper only — no model, no daemon, no session (`usesModel` is false, so no
+  // `apiKeyCommand` runs). Ink is not mounted here, so the helper keeps the
+  // terminal's stdio: that is exactly what lets macOS attribute the microphone
+  // prompt to the terminal the user is sitting in.
+  if (mode === "voice") {
+    return voiceCommand(parsed.positional, {
+      configDir: config.configDir,
+      execPath: process.execPath,
+      config: { ...VOICE_DEFAULTS, ...(config.voice ?? {}) },
+      out,
+      err,
+      runHelper: runHelperInherited,
+      // `--yes` is a BOOL in `ARGS.voice`, so the parser took it off the
+      // positionals; it must still reach the helper or `setup --yes` prompts
+      // (Review round 1, MEDIUM 7).
+      ...(parsed.bools.has("yes") ? { yes: true } : {}),
+    });
+  }
+
   // `tentacle hooks trust --list | --revoke <folder>` (P3): no TUI, plain output.
   if (mode === "hooks") {
     const revoke = parsed.flags.get("revoke");
@@ -991,6 +1024,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ...(categories?.ok === true ? { only: categories.categories } : {}),
         json: parsed.bools.has("json"),
         summary: parsed.bools.has("summary"),
+        // docs/feat/token-usage-log.md: per-round tokens instead of the event stream.
+        ...(parsed.bools.has("usage") ? { usage: true } : {}),
         follow: parsed.bools.has("follow"),
         ...(connect !== undefined ? { connect } : {}),
         ...(token !== undefined ? { token } : {}),
@@ -1375,6 +1410,13 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             model: config.model,
             // The palette (`tui.theme`): a LAPTOP-ONLY display setting.
             theme: config.tui?.theme ?? "auto",
+            // A chart's glyphs (`tui.chartGlyphs`): LAPTOP-ONLY too — the font is
+            // this terminal's.
+            chartGlyphs: config.tui?.chartGlyphs ?? "braille",
+            // Voice dictation (`voice.*`): a LAPTOP-ONLY input setting. The TUI
+            // itself decides whether this terminal can use it at all (F11).
+            voice: { ...VOICE_DEFAULTS, ...(config.voice ?? {}) },
+            voiceConfigDir: config.configDir,
             cwd: config.cwd,
             contextWindow: config.contextWindow,
             // The status bar's badge: from this laptop's engine host, never the pod.
@@ -2138,7 +2180,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     try {
       runtime = await (io.startWorkerRuntime ?? startWorkerRuntime)(
         config,
-        { permissions, saver, resume: resumeRecord },
+        {
+          permissions,
+          saver,
+          resume: resumeRecord,
+          // D11: the worker keeps nothing, so a resumed session's artifacts come
+          // back from the copy THIS main thread keeps beside its log. Only this
+          // runtime reads it: a pod's artifacts are pod-supplied.
+          artifactsDir: sessions.store.directory,
+        },
         err,
       );
     } catch (error) {
@@ -2216,9 +2266,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     let lastController: ReturnType<typeof created> | null = null;
     await runSessionTui(sessions, {
       start: (sessionOptions) =>
-        startTui(null, {
+        (io.startTui ?? startTui)(null, {
           model: config.model,
           theme: config.tui?.theme ?? "auto",
+          chartGlyphs: config.tui?.chartGlyphs ?? "braille",
           cwd: config.cwd,
           contextWindow: config.contextWindow,
           permissions,
@@ -2227,11 +2278,18 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           subagentsTwoWay: config.subagentsTwoWay,
           autoAccept: autoAcceptFeed,
           autoAcceptShared: autoAcceptFeed,
+          // Voice dictation (`voice.*`): the LOCAL TUI honours the same settings
+          // `run`/`attach` do (Review round 1, HIGH 4: it used to get the
+          // defaults, so `voice.enabled: false` did nothing on this path).
+          voice: { ...VOICE_DEFAULTS, ...(config.voice ?? {}) },
+          voiceConfigDir: config.configDir,
           createSession: () => {
             // A session this call CREATES (a `/clear` fork, a hop target)
             // starts with the switch the person has now: the open carries it
             // as `OpenParams.autoAccept` (D5), read by the SAME client.
             seedAutoAcceptOf(lastController, autoAcceptFeed.current());
+            // …and with its MCP/skill switches (docs/feat/session-capabilities.md, owner Q5).
+            seedCapabilitiesOf(lastController);
             const controller = created();
             // The session this TUI is on now: the feed adopts its value and
             // listens for another device's flips. A controller with no shared

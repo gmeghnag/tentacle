@@ -77,15 +77,17 @@ const base = (over: Partial<FrameInput> = {}): FrameInput => ({
   subagentsRef: { current: undefined },
   jobRows: undefined,
   jobRowsRef: { current: undefined },
+  scheduleRows: undefined,
   drawerRow: null,
   drawerJob: null,
   jobOutput: {},
   dockFinished: null,
   quitConfirm: null,
+  artifactConfirm: null,
   panel: null,
   sessionId: "s-1",
   field: { value: "", cursor: 0 },
-  attach: { chips: [], upload: null } as FrameInput["attach"],
+  attach: { chips: [], documents: [], upload: null } as FrameInput["attach"],
   skills: [],
   commandIndex: 0,
   sizeColumns: 80,
@@ -95,6 +97,11 @@ const base = (over: Partial<FrameInput> = {}): FrameInput => ({
   daemonQueue: undefined,
   loading: null,
   compacting: false,
+  // The slot's two compaction figures + its clock (docs/feat/harness-notices.md
+  // S3): at rest, nothing to show.
+  compactingSince: null,
+  compactedAt: null,
+  now: 1_000,
   ...over,
 });
 
@@ -164,6 +171,24 @@ describe("S10 app-layout: the frame's geometry, as the inline code computed it",
     const quitting = frameLayout(base({ quitConfirm: { running: 0, others: 0 } as never }));
     expect(quitting.activeRows).toBe(3); // QUIT_CONFIRM_ROWS (the dialog's rule+rows)
     expect(quitting.dockTop).toBe(null);
+  });
+
+  test("the artifact open confirm owns the same slot (model-artifacts S6b)", () => {
+    const ROW = { id: "sa-1", agentType: "explore", description: "d", state: "running" };
+    const withList = {
+      dock: {
+        ...IDLE_DOCK,
+        focus: { kind: "list", selected: "sa-1", armed: false, typing: false },
+      } as DockState,
+      subagents: [ROW] as never,
+      subagentsRef: { current: [ROW] as never },
+    };
+    // Non-vacuity: the same focused dock DOES paint while nothing asks.
+    expect(frameLayout(base(withList)).dockTop).not.toBe(null);
+    const asking = frameLayout(base({ ...withList, artifactConfirm: { text: "Open? (y/N)" } }));
+    expect(asking.activeRows).toBe(3);
+    expect(asking.dockTop).toBe(null);
+    expect(asking.dockView).toBe(null);
   });
 
   // The palette only opens while idle, on "/"-prefixed text, and it closes on an
@@ -236,7 +261,7 @@ describe("S10 app-layout: the frame's geometry, as the inline code computed it",
     expect(empty.inputBoxRows).toBe(3);
     const chipped = frameLayout(
       base({
-        attach: { chips: [CHIP], upload: null } as never,
+        attach: { chips: [CHIP], documents: [], upload: null } as never,
       }),
     );
     expect(chipped.attachRow).not.toBe(null);
@@ -263,7 +288,9 @@ describe("S10 app-layout: the frame's geometry, as the inline code computed it",
     // counting that row INSIDE the input box (P8): the viewport shrinks by one
     // exactly as the box grows by one, so the bar — and a click on the pill —
     // stays where it was while a chip appears or an upload starts.
-    const chipped = frameLayout(base({ attach: { chips: [CHIP], upload: null } as never }));
+    const chipped = frameLayout(
+      base({ attach: { chips: [CHIP], documents: [], upload: null } as never }),
+    );
     expect(chipped.inputBoxRows).toBe(at.inputBoxRows + 1);
     expect(chipped.viewport).toBe(at.viewport - 1);
     expect(chipped.statusRowY).toBe(at.statusRowY);

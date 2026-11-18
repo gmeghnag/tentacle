@@ -65,8 +65,8 @@ describe("the queue rows above the input (D2)", () => {
 
   test("Send now is derived from the SAME composer input as the button (one source)", () => {
     const running = { kind: "turn", key: "r1", turnId: "t", own: true } as const;
-    // A turn, one row of mine: offered. Mutation: ignore `ownQueue` → red.
-    expect(sessionView(input({ turn: running, ownQueue: 1 })).composer.sendNow).toBe(true);
+    // A turn, one row of mine: offered. Mutation: ignore `ownPending` → red.
+    expect(sessionView(input({ turn: running, ownPending: 1 })).composer.sendNow).toBe(true);
     expect(sessionView(input({ turn: running })).composer.sendNow).toBe(false);
   });
 });
@@ -163,8 +163,8 @@ describe("the photo chips (13c's states)", () => {
     const view = sessionView(
       input({
         photos: [
-          { key: "a", state: "uploading" },
-          { key: "b", state: "ready" },
+          { key: "a", kind: "image", state: "uploading" },
+          { key: "b", kind: "image", state: "ready" },
           { key: "c", state: "refused", detail: "too large" },
         ],
       }),

@@ -66,13 +66,33 @@ describe("onCompactionSettled (D3c)", () => {
   const idle = { rows, sendNowOwns: false, turnRunning: false };
 
   test("success or failure with rows and no send-now → ONE joined prompt, after the notice", () => {
+    // S3: success writes NO transcript line — the slot says `Compacted ✓` and
+    // the separator rule carries the figures; an older daemon's result has
+    // none, so the separator is the bare `compacted`, never a fake 0.
     expect(onCompactionSettled({ ...idle, result: ok })).toEqual({
-      notice: "_Context compacted — 9 → 2 messages._",
+      notice: null,
+      separator: "compacted",
       send: "A\n\nB",
       restore: null,
     });
+    expect(
+      onCompactionSettled({
+        ...idle,
+        result: {
+          ok: true,
+          before: 182_000,
+          after: 9_000,
+          fromTokens: 182_000,
+          toTokens: 9_000,
+          toExact: true,
+        },
+      }).separator,
+    ).toBe("compacted · ctx 182k → 9k");
+    // A failure is the ONE harness line the person must notice: `level: "warn"`
+    // (docs/feat/harness-notices.md S2.2). Success carries none.
     expect(onCompactionSettled({ ...idle, result: failed(new Error("down")) })).toEqual({
       notice: "_Compact failed: Error: down_",
+      level: "warn",
       send: "A\n\nB",
       restore: null,
     });
@@ -87,14 +107,16 @@ describe("onCompactionSettled (D3c)", () => {
 
   test("a send-now owns the rows → nothing sent here; its Cancelled reads as the send-now's", () => {
     const cancelled = failed(rpc(DomainErrorCode.Cancelled));
+    // A cancel is the person's own doing: info, never `warn` (S2.2).
     expect(onCompactionSettled({ ...idle, result: cancelled, sendNowOwns: true })).toEqual({
       notice: "_Compaction cancelled — sending now._",
       send: null,
       restore: null,
     });
-    // It ended before the cancel landed: its own notice, still nothing sent here.
+    // It ended before the cancel landed: the separator says it, nothing sent here.
     expect(onCompactionSettled({ ...idle, result: ok, sendNowOwns: true })).toEqual({
-      notice: "_Context compacted — 9 → 2 messages._",
+      notice: null,
+      separator: "compacted",
       send: null,
       restore: null,
     });

@@ -227,7 +227,7 @@ describe("rows", () => {
     expect(sections.archived.map((r) => r.sessionId)).toEqual(["old"]);
   });
 
-  test("badges: running, attached count, job count", () => {
+  test("badges: running, attached count, job count, then armed wakes (cron-tool S6)", () => {
     const [row] = rows(
       [entry({ sessionId: "a", running: true, attached: 2, jobs: 3, updatedAt: NOW })],
       NOW,
@@ -237,6 +237,21 @@ describe("rows", () => {
     expect(quiet?.badges).toEqual([]);
     const [one] = rows([entry({ sessionId: "c", attached: 1, jobs: 1 })], NOW).active;
     expect(one?.badges).toEqual(["attached", "1 job"]);
+    // A wake is the least urgent fact, so it comes last (the mockup's `◷ 2`).
+    const [wakes] = rows([entry({ sessionId: "d", jobs: 1, schedules: 2 })], NOW).active;
+    expect(wakes?.badges).toEqual(["1 job", "2 wakes"]);
+    const [single] = rows([entry({ sessionId: "e", schedules: 1 })], NOW).active;
+    expect(single?.badges).toEqual(["1 wake"]);
+    // A daemon that reports no table (an older one) says nothing, never "0 wakes".
+    const [none] = rows([entry({ sessionId: "f", schedules: 0 })], NOW).active;
+    expect(none?.badges).toEqual([]);
+  });
+
+  test("a row carries the wake count as its own fact (M8's `◷ 2`), 0 when unreported", () => {
+    const [two] = rows([entry({ sessionId: "a", schedules: 2 })], NOW).active;
+    expect(two?.wakes).toBe(2);
+    const [unreported] = rows([entry({ sessionId: "b" })], NOW).active;
+    expect(unreported?.wakes).toBe(0);
   });
 
   test("a future updatedAt is clamped to 'just now', never 'in 3 minutes'", () => {
@@ -350,5 +365,83 @@ describe("describeError", () => {
       "invalid result",
     );
     expect(describeError("a string").message).toBe("a string");
+  });
+});
+
+describe("pins (docs/feat/mobile-session-actions.md S2)", () => {
+  const PINNED = entry({ sessionId: "pin-old", updatedAt: NOW - 10 * 86_400_000, pinned: true });
+
+  test("a pinned entry carries `pinned: true` on its row; an absent field is not pinned", () => {
+    const sections = rows([PINNED, entry({ sessionId: "plain" })], NOW);
+    expect(sections.active.map((r) => [r.sessionId, r.pinned])).toEqual([
+      ["pin-old", true],
+      ["plain", false],
+    ]);
+  });
+
+  test("`pinned` unions the first-page list with the loaded entries, deduped, in its own order", () => {
+    const loadedOnly = entry({ sessionId: "pin-loaded", pinned: true, updatedAt: NOW });
+    const sections = rows([loadedOnly], NOW, [PINNED, entry({ sessionId: "unpinned-elsewhere" })]);
+    expect(sections.pinned.map((r) => r.sessionId)).toEqual(["pin-old", "pin-loaded"]);
+    // ...and the pins stay in `active` too: hoisting them is a renderer's job.
+    expect(sections.active.map((r) => r.sessionId)).toEqual(["pin-loaded"]);
+  });
+
+  test("a pin whose recency page is NOT loaded still shows (the first page carries it)", () => {
+    const sections = rows([entry({ sessionId: "recent" })], NOW, [PINNED]);
+    expect(sections.pinned.map((r) => [r.sessionId, r.pinned])).toEqual([["pin-old", true]]);
+    expect(sections.active.map((r) => r.sessionId)).toEqual(["recent"]);
+    // A pinned ARCHIVED session is in the pinned projection (Owner Q3).
+    const archivedPin = entry({ sessionId: "old", archived: true, pinned: true });
+    expect(rows([], NOW, [archivedPin]).pinned.map((r) => r.archived)).toEqual([true]);
+  });
+
+  test("the reducer keeps the first page's pins and REPLACES them on a re-read", () => {
+    const asking = refresh(initialSessionList);
+    const first = reduce(asking, {
+      type: "page",
+      page: { sessions: [PINNED], pinned: [PINNED] },
+      generation: asking.generation,
+    });
+    expect(first.pinnedEntries.map((e) => e.sessionId)).toEqual(["pin-old"]);
+    // Another device unpinned it: the next first page says so, so the pin goes.
+    const again = reduce(refresh(first), {
+      type: "page",
+      page: { sessions: [entry({ sessionId: "pin-old" })] },
+      generation: first.generation + 1,
+    });
+    expect(again.pinnedEntries).toEqual([]);
+  });
+
+  test("a later page carries no pins, so it never edits the pinned list", () => {
+    const asking = refresh(initialSessionList);
+    const first = reduce(asking, {
+      type: "page",
+      page: { sessions: [PINNED], cursor: `${NOW}:pin-old`, pinned: [PINNED] },
+      generation: asking.generation,
+    });
+    const more = reduce(first, { type: "more" });
+    const next = reduce(more, {
+      type: "page",
+      page: { sessions: [entry({ sessionId: "later" })] },
+      generation: more.generation,
+    });
+    expect(next.pinnedEntries.map((e) => e.sessionId)).toEqual(["pin-old"]);
+  });
+});
+
+describe("the row's working folder (docs/feat/mobile-header-status.md)", () => {
+  test("every row — active, archived, a first-page pin — carries its entry's cwd", () => {
+    const sections = rows(
+      [
+        entry({ sessionId: "a", cwd: "/Users/me/tentacle" }),
+        entry({ sessionId: "z", cwd: "/srv/old", archived: true }),
+      ],
+      NOW,
+      [entry({ sessionId: "p", cwd: "/workspace/pod", pinned: true })],
+    );
+    expect(sections.active.map((r) => r.cwd)).toEqual(["/Users/me/tentacle"]);
+    expect(sections.archived.map((r) => r.cwd)).toEqual(["/srv/old"]);
+    expect(sections.pinned.map((r) => r.cwd)).toEqual(["/workspace/pod"]);
   });
 });

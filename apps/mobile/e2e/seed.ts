@@ -185,6 +185,13 @@ export interface LaptopLink {
   ): Promise<{ turnId: string }>;
   /** Answer the pending ask if this peer was offered one (the first answer wins). */
   answer(sessionId: string, answer: LaptopAnswer): Promise<void>;
+  /**
+   * The asks the daemon has pending on a session, by `requestId` — what a
+   * notification flow must name so the action it injects answers THAT ask
+   * (docs/feat/mobile-notifications.md N8). Read from this peer's own router
+   * after it attached (the replayed `permission_request` is what put them there).
+   */
+  pendingAsks(sessionId: string): readonly string[];
   /** Steer the RUNNING turn of `sessionId` (13d's flow 15: another device's row). */
   enqueue(sessionId: string, text: string): Promise<{ id: string }>;
   /** Stop the running turn (`session/cancel{turnId}`): 13d's flow 14. */
@@ -251,6 +258,9 @@ export async function laptopLink(deps: {
 
   return {
     client,
+    pendingAsks(sessionId) {
+      return client.pendingPermissionsOf(sessionId);
+    },
     async prompt(sessionId, prompt, answer) {
       const session = await handle(sessionId);
       const turnId = crypto.randomUUID();
@@ -343,14 +353,19 @@ export async function laptopLink(deps: {
 export async function sessionStateOf(
   deps: { readonly url: string; readonly token: string },
   sessionId: string,
-): Promise<{ attached: number; running: boolean; archived: boolean } | null> {
+): Promise<{ attached: number; running: boolean; archived: boolean; title: string } | null> {
   const live = await attach(deps);
   try {
     const page = await live.sessionList({ limit: 50 });
     const entry = page.sessions.find((session) => session.sessionId === sessionId);
     return entry === undefined
       ? null
-      : { attached: entry.attached, running: entry.running, archived: entry.archived };
+      : {
+          attached: entry.attached,
+          running: entry.running,
+          archived: entry.archived,
+          title: entry.title,
+        };
   } finally {
     await live.drain().catch(() => {});
     live.close();
@@ -441,6 +456,35 @@ export async function queueStateOf(
         cause: row.cause,
       })),
     };
+  } finally {
+    await session.detach().catch(() => {});
+    await live.drain().catch(() => {});
+    live.close();
+  }
+}
+
+/**
+ * The daemon's MCP/skill switches of a session (flow 25, docs/feat/
+ * session-capabilities.md S5): the open's own snapshot, read through a client
+ * that attaches and detaches, so the flow asserts the DAEMON's state, not the
+ * phone's screen. `null`: the daemon reported none (unopenable, or too old).
+ */
+export async function capabilitiesOf(
+  deps: { readonly url: string; readonly token: string },
+  sessionId: string,
+): Promise<{ disabledMcp: readonly string[]; disabledSkills: readonly string[] } | null> {
+  const live = await attach(deps);
+  const session = live.newSession(undefined, sessionId, undefined, { attach: {} });
+  try {
+    try {
+      await session.open();
+    } catch {
+      // Unopenable: it reports no switches.
+    }
+    const state = session.capabilities();
+    return state === undefined
+      ? null
+      : { disabledMcp: [...state.disabledMcp], disabledSkills: [...state.disabledSkills] };
   } finally {
     await session.detach().catch(() => {});
     await live.drain().catch(() => {});

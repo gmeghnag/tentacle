@@ -12,7 +12,11 @@
  *   5. `session/close`  — end the session for every client (idempotent).
  */
 import { z } from "zod";
-import { AttachmentsSchema } from "./attachment.ts";
+import {
+  ATTACHMENT_NAME_RE,
+  AttachmentsSchema,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+} from "./attachment.ts";
 import { ContentBlockSchema, PromptContentBlockSchema } from "./content.ts";
 import { ModelNameSchema } from "./model.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
@@ -50,6 +54,41 @@ export const MessageNoteSchema = z.object({
 export type MessageNote = z.infer<typeof MessageNoteSchema>;
 
 /**
+ * A fired scheduled wake, as the daemon stamped it when it fired
+ * (docs/feat/scheduled-fire-row.md): which wake (`sc-N` + its spec), the
+ * fire's ordinal, and the instant (`at`, epoch ms). Display only. Its own
+ * schema because the field on `ChatMessageSchema` is FAIL-SOFT (the
+ * `MessageNote` reason); the live `turn_start.schedule` ref carries the same
+ * `fire`/`at`. The bounds mirror `ScheduleIdSchema` and `SCHEDULE_LABEL_MAX`.
+ */
+export const ScheduledFireSchema = z.object({
+  id: z.string().min(1).max(64),
+  spec: z.string().max(200),
+  fire: z.number().int().positive(),
+  at: z.number().int().nonnegative(),
+});
+export type WireScheduledFire = z.infer<typeof ScheduledFireSchema>;
+
+/**
+ * One file attached to a user message, for the chip (display only,
+ * docs/feat/pdf-read.md D4): the file's TEXT is in `content` (a `<file>`
+ * block); this only names it. `kind` is a bounded FREE string (`pdf` today,
+ * `audio` later) — never an enum, for the `MessageNote` reason. The field on
+ * `ChatMessageSchema` is FAIL-SOFT.
+ */
+export const MessageMediaSchema = z.object({
+  kind: z
+    .string()
+    .min(1)
+    .max(32)
+    .regex(/^[a-z][a-z0-9_]*$/),
+  name: z.string().min(1).max(255).regex(ATTACHMENT_NAME_RE),
+  pages: z.number().int().positive().optional(),
+  chars: z.number().int().nonnegative().optional(),
+});
+export type MessageMedia = z.infer<typeof MessageMediaSchema>;
+
+/**
  * Fresh instances per call (the `envelopeShape()` pattern in session-log.ts):
  * the JSON Schema export refuses a schema object reused by two named exports,
  * and the media entry below needs this shape with refs REQUIRED.
@@ -65,6 +104,13 @@ const chatMessageShape = () => ({
   durationMs: z.number().int().nonnegative().optional(),
   /** On a refused tool call: the person's reply with the refusal (display only, docs/feat/permission-reply.md). */
   denialReply: PermissionReplyTextSchema.optional(),
+  /**
+   * On a tool result that failed: `true` (display only, docs/fix/mobile-qa-1117.md),
+   * so a reload draws the step as failed, as live did. FAIL-SOFT like `note`: any
+   * other value is DROPPED and the message still loads (shown as a success, the
+   * pre-field look), never a refusal of the CRITICAL entry.
+   */
+  isError: z.literal(true).optional().catch(undefined),
   /**
    * On a user/tool message: the context fill the model was told about (NOT
    * display-only — rendered into the model's prompt; docs/feat/context-awareness.md).
@@ -82,6 +128,41 @@ const chatMessageShape = () => ({
    * applied to a display-only field. Never tighten into a lock-out (review M3).
    */
   note: MessageNoteSchema.optional().catch(undefined),
+  /**
+   * On a USER message: the files attached to it, for the chip
+   * (docs/feat/pdf-read.md D4). Display only — the text is in `content`.
+   * FAIL-SOFT like `note`: a value outside these bounds is DROPPED (the
+   * message still loads; an older build shows the raw block), never a refusal
+   * of the CRITICAL entry.
+   */
+  media: z
+    .array(MessageMediaSchema)
+    .min(1)
+    .max(MAX_ATTACHMENTS_PER_MESSAGE)
+    .optional()
+    .catch(undefined),
+  /**
+   * ONLY on a compaction's summary user message: the context size before and
+   * after it (display only, docs/feat/harness-notices.md S1). FAIL-SOFT like
+   * `note`: a value outside these bounds is DROPPED (the message still loads,
+   * shown without figures), never a refusal of the CRITICAL entry.
+   */
+  compacted: z
+    .object({
+      fromTokens: z.number().int().nonnegative(),
+      toTokens: z.number().int().nonnegative(),
+      toExact: z.literal(true).optional(),
+    })
+    .optional()
+    .catch(undefined),
+  /**
+   * ONLY on the user message a fired scheduled wake writes: the wake and the
+   * instant it fired (display only, docs/feat/scheduled-fire-row.md). FAIL-SOFT
+   * like `note`: a value outside these bounds is DROPPED (the message still
+   * loads and its row falls back to the `[scheduled …]` prefix), never a
+   * refusal of the CRITICAL entry.
+   */
+  scheduled: ScheduledFireSchema.optional().catch(undefined),
   /**
    * On a USER message: image refs to send with it (docs/feat/attachments-core.md).
    * Refs, never bytes — the bytes live behind an `AttachmentSource` on the side
@@ -175,6 +256,23 @@ export const AgentCapabilitiesSchema = z.object({
       maxBytes: z.number().int().positive().optional(),
     })
     .optional(),
+  /**
+   * What this daemon does with attached documents (docs/feat/pdf-read.md D4).
+   * Absent = it takes none (the client does not offer PDF attach). Free strings,
+   * the `images` rule: `input` `"upload"` (bytes by `attachment/put`, then a
+   * `document{ref}`; this daemon extracts) or `"client"` (a pod: the client
+   * extracts and sends `document{text}` — PDF bytes never enter it). FAIL-SOFT:
+   * a value this build cannot read is dropped, never a refused `initialize`.
+   */
+  documents: z
+    .object({
+      input: z.string().min(1).max(32),
+      /** Per-document byte cap for `"upload"`; absent = `MAX_IMAGE_BYTES`. */
+      maxBytes: z.number().int().positive().optional(),
+      kinds: z.array(z.string().min(1).max(32)).max(16),
+    })
+    .optional()
+    .catch(undefined),
 });
 export type AgentCapabilities = z.infer<typeof AgentCapabilitiesSchema>;
 
@@ -315,6 +413,24 @@ export function isWakeTurnId(id: string): boolean {
   return id.startsWith(WAKE_TURN_PREFIX);
 }
 
+/**
+ * The voice-turn profile (docs/feat/voice-conversation.md §4, C3): the edge
+ * that SENT this turn is a person who is listening, not reading.
+ *
+ * `reasoning` is that edge's OWN "reasoning off for spoken replies" setting,
+ * read at send time, so a phone and a TUI on the same session each send their
+ * own. The daemon keeps no switch of its own and stores nothing: the profile
+ * rides the request and is never written to the history or to disk.
+ *
+ * Present = a voice turn (it always gets the transient spoken-style line, see
+ * `@tentacle/core`'s `VOICE_SPOKEN_LINE`); `reasoning` decides the model's
+ * reasoning for the rounds before the turn's first tool call. Additive and
+ * optional — an older daemon drops it (a normal turn), an older client never
+ * sends it (AGENTS §7: forward-compatible, no `protocol.d` note).
+ */
+export const VoiceTurnSchema = z.object({ reasoning: z.enum(["off", "keep"]) });
+export type VoiceTurn = z.infer<typeof VoiceTurnSchema>;
+
 export const PromptParamsSchema = z.object({
   sessionId: SessionIdSchema,
   turnId: TurnIdSchema,
@@ -326,6 +442,8 @@ export const PromptParamsSchema = z.object({
    * parses the text. One the daemon cannot activate → `InvalidParams`.
    */
   skill: SkillNameSchema.optional(),
+  /** This turn came from voice mode (see `VoiceTurnSchema`). */
+  voice: VoiceTurnSchema.optional(),
 });
 export type PromptParams = z.infer<typeof PromptParamsSchema>;
 
@@ -397,6 +515,14 @@ export const CompactResultSchema = z.object({
   /** Message count before and after compaction. */
   before: z.number().int().nonnegative(),
   after: z.number().int().nonnegative(),
+  /**
+   * Context size in tokens before and after (docs/feat/harness-notices.md S1);
+   * `toExact` when the provider counted the after. Optional: an older daemon
+   * omits them and the client shows `compacted` without figures.
+   */
+  fromTokens: z.number().int().nonnegative().optional(),
+  toTokens: z.number().int().nonnegative().optional(),
+  toExact: z.boolean().optional(),
 });
 export type CompactResult = z.infer<typeof CompactResultSchema>;
 
@@ -500,9 +626,11 @@ export type SnapshotTurn = z.infer<typeof SnapshotTurnSchema>;
 // the send-now `turn_start` whose prompt carries it (sent now), or its turn's
 // `turn_end`: then it is in `returned` — back with its WRITER, never re-sent
 // by itself — or, the row of a send-now cancelled before it started, restored
-// by that send-now's own client (`delivered: false`). A row leaves `returned`
-// in the `queued` that follows a `session/reclaim` of it, or a send-now that
-// carries it in its prompt. Nothing else removes one: no expiry.
+// by that send-now's own client (`delivered: false`), or the `queued` that
+// follows a `session/unqueue` of it (taken back before the model read it). A
+// row leaves `returned` in the `queued` that follows a `session/reclaim` or a
+// `session/unqueue` of it, or a send-now that carries it in its prompt.
+// Nothing else removes one: no expiry.
 
 /** One queued row: its writer's key and text. */
 export const QueuedEntrySchema = z.object({
@@ -717,6 +845,74 @@ export const JobKillResultSchema = z.object({
 });
 export type JobKillResult = z.infer<typeof JobKillResultSchema>;
 
+// --- the session's scheduled wakes (docs/feat/cron-tool.md D5, S2) --------
+// The live table of the agent's own wake-ups: one full-state update
+// (`schedules`), sent only on a change (create, delete, fire, expiry, failure
+// stop), plus the first page's list. Lenient like `JobRow`: `spec` and `prompt`
+// are LABELS (the fired prompt's real text rides the conversation), so `kind`
+// and every string stay free/bounded-but-untrusted — the client sanitises
+// (§7: a pod's daemon is not trusted; a `serve` daemon writes these itself).
+
+/** How long a row's `spec`/`prompt` label may be on the wire (the client cuts for its own surface). */
+export const SCHEDULE_LABEL_MAX = 200;
+
+/** One scheduled wake, as the daemon reports it. */
+export const ScheduleRowSchema = z.object({
+  /** Its `sc-N` handle: what `session/schedule_delete` takes and the fired prompt names. */
+  id: z.string().min(1),
+  /**
+   * A free string (`every`, `at`, or a newer build's new kind): a client that
+   * does not know it paints `spec` and loses one word, not the whole list.
+   */
+  kind: z.string(),
+  /**
+   * The request as the model gave it (`every 10m`, `at 17:00`), a one-line
+   * label. NOT `line()`: a control character here must cost the CLIENT's
+   * sanitising, never the whole frame — a known update type failing its member
+   * is an ERROR the client reports (`mapping.ts` `classifyUpdate`), so one odd
+   * label would kill the list. Lenient like `JobRow.command`; the client is the
+   * gate (AGENTS §7). The daemon still cuts both to `SCHEDULE_LABEL_MAX`.
+   */
+  spec: z.string(),
+  /** What the fired turn is told, cut by the daemon: a label, never the truth (lenient, as `spec`). */
+  prompt: z.string(),
+  /** The next fire, in the DAEMON host's clock (a pod/user host skew is accepted, like `JobRow.startedAt`). */
+  nextAt: z.number().int().nonnegative(),
+  /** Absent for a one-shot (`at`): a recurring wake expires (`D3`), an `at` does not outlive its fire. */
+  expiresAt: z.number().int().nonnegative().optional(),
+  /** Fired turns so far: the ordinal the fired prompt quotes (`fire 5`). */
+  fires: z.number().int().nonnegative(),
+  createdAt: z.number().int().nonnegative(),
+});
+export type ScheduleRow = z.infer<typeof ScheduleRowSchema>;
+
+/** A schedule's id as the methods take it (`sc-N`): bounded, its own named export. */
+export const ScheduleIdSchema = z.string().min(1).max(64);
+
+/**
+ * `session/schedule_delete`: drop one scheduled wake by hand (the user's own
+ * handle, like `session/job_kill`). Read-only state, so the daemon answers it
+ * synchronously and never awaits a turn (§7 "Don't serialize the RPC peer").
+ * Additive: an older daemon answers `MethodNotFound`, shown as a notice.
+ */
+export const ScheduleDeleteParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  scheduleId: ScheduleIdSchema,
+});
+export type ScheduleDeleteParams = z.infer<typeof ScheduleDeleteParamsSchema>;
+
+export const ScheduleDeleteResultSchema = z.object({
+  /** `true` iff it existed and was removed (idempotent: an unknown id is `false`). */
+  deleted: z.boolean(),
+  /**
+   * Why nothing was deleted, when the daemon has something to say (an unknown
+   * id, a session with no table): shown as a notice, never thrown. A client that
+   * refused locally (its daemon is not trusted to schedule) says its own.
+   */
+  reason: z.string().optional(),
+});
+export type ScheduleDeleteResult = z.infer<typeof ScheduleDeleteResultSchema>;
+
 export const SnapshotResultSchema = z.object({
   /** Chronological slice of the history, ending at the cut (or at the cursor). */
   messages: z.array(ChatMessageSchema),
@@ -734,6 +930,22 @@ export const SnapshotResultSchema = z.object({
   subagents: z.array(SubagentRowSchema).optional(),
   /** The background shell jobs running at the cut (first page only; an older daemon sends none). */
   jobs: z.array(JobRowSchema).optional(),
+  /**
+   * The session's scheduled wakes at the cut, the FULL table (first page only;
+   * an older daemon sends none, and a pod daemon sends none either — it never
+   * holds one, AGENTS §7). Empty list vs. absent: absent means "this daemon does
+   * not report them", never "none left".
+   */
+  schedules: z.array(ScheduleRowSchema).optional(),
+  /**
+   * Each message's ARRIVAL time (docs/fix/mobile-open-at-end.md, slice B):
+   * epoch ms, same length and order as `messages`, `0` = not known (a message a
+   * reload/compaction re-logged was not received now). Display-only — a client
+   * that does not know the field drops it (§7 strip schemas), an older daemon
+   * sends none and every row simply shows no time. Never persisted on the
+   * laptop; never a `null` (the envelope convention for "no time").
+   */
+  times: z.array(z.number().int().min(0)).optional(),
 });
 export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 
@@ -846,6 +1058,12 @@ export const SessionSettingsSchema = z.object({
   contextAwarenessStepPercent: z.number().int().min(1).max(100).optional(),
   contextResetEnabled: z.boolean().optional(),
   contextResetMaxPerMessage: IterationLimitSchema.optional(),
+  /** Smart compaction (docs/feat/smart-compaction.md); an older pod drops them = pruning off. */
+  contextPruneEnabled: z.boolean().optional(),
+  contextPruneAtPercent: z.number().int().min(1).max(100).optional(),
+  contextPruneMinGainPercent: z.number().int().min(1).max(100).optional(),
+  contextPruneKeepRecentRounds: z.number().int().positive().optional(),
+  contextPruneOutputChars: z.number().int().positive().optional(),
   maxInlineOutputChars: z.number().int().nonnegative().optional(),
   redactSecrets: z.boolean().optional(),
   dedupOutput: z.boolean().optional(),
@@ -878,6 +1096,22 @@ export const SessionSettingsReportSchema = z.object({
   containerKeys: z.array(z.string().min(1).max(64)).max(64).optional(),
 });
 export type SessionSettingsReport = z.infer<typeof SessionSettingsReportSchema>;
+
+/** At most this many names in ONE disabled set (a flood is `InvalidParams`, F10). */
+export const MAX_DISABLED_CAPABILITIES = 256;
+/** One server or skill name a switch names. */
+export const CapabilityNameSchema = line(128);
+
+/**
+ * A session's MCP/skill switches (`session/set_capability`,
+ * docs/feat/session-capabilities.md): sorted, de-duplicated DISABLED names, so
+ * anything new (a server added, a skill created) is on.
+ */
+export const SessionCapabilitiesSchema = z.object({
+  disabledMcp: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
+  disabledSkills: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
+});
+export type SessionCapabilitiesWire = z.infer<typeof SessionCapabilitiesSchema>;
 
 export const OpenParamsSchema = z.object({
   /** Client-chosen id (so the client owns the persistence uid); absent → daemon-chosen. */
@@ -912,6 +1146,12 @@ export const OpenParamsSchema = z.object({
    * (docs/feat/session-auto-accept.md D2). Absent → off.
    */
   autoAccept: z.boolean().optional(),
+  /**
+   * The session's initial switches, for a session this open CREATES (ignored
+   * otherwise, exactly like `autoAccept`): how a resume from the laptop's copy,
+   * a `/clear` fork and a hop target carry them. Absent → everything on.
+   */
+  capabilities: SessionCapabilitiesSchema.optional(),
 });
 export type OpenParams = z.infer<typeof OpenParamsSchema>;
 
@@ -939,6 +1179,12 @@ export const OpenResultSchema = z.object({
    * it (`RemoteClientOptions.sharedAutoAccept`, AGENTS §7).
    */
   autoAccept: z.boolean().optional(),
+  /**
+   * The session's switches now (docs/feat/session-capabilities.md): the
+   * snapshot every open/attach/re-attach adopts (F5). Absent → an older
+   * daemon, which has none (the client hides its toggles).
+   */
+  capabilities: SessionCapabilitiesSchema.optional(),
 });
 export type OpenResult = z.infer<typeof OpenResultSchema>;
 
@@ -997,6 +1243,31 @@ export const SetAutoAcceptResultSchema = z.object({
   on: z.boolean(),
 });
 export type SetAutoAcceptResult = z.infer<typeof SetAutoAcceptResultSchema>;
+
+// --- session/set_capability ---------------------------------------------
+// Turn one MCP server or one skill on/off for the MODEL in this session
+// (docs/feat/session-capabilities.md): hidden from the tool list and the skills
+// catalog from the next model call, never uninstalled. A DELTA (one name), not
+// the whole state, so two clients toggling different items both land (F4).
+// Held by every daemon (a pod included: it only REMOVES what its own model is
+// offered, so there is nothing to gate on the laptop, AGENTS §7). Idempotent:
+// a set to the current value returns without an emit. Additive: an older
+// daemon answers `MethodNotFound`, and the client hides its toggles.
+
+export const SetCapabilityParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  kind: z.enum(["mcp", "skill"]),
+  /** A server name (`mcp`) or a skill name (`skill`); an unknown one is stored (F10). */
+  name: CapabilityNameSchema,
+  enabled: z.boolean(),
+});
+export type SetCapabilityParams = z.infer<typeof SetCapabilityParamsSchema>;
+
+export const SetCapabilityResultSchema = z.object({
+  /** The session's whole state AFTER applying (a losing race reads the winner's). */
+  capabilities: SessionCapabilitiesSchema,
+});
+export type SetCapabilityResult = z.infer<typeof SetCapabilityResultSchema>;
 
 // --- session/close ------------------------------------------------------
 // End the session for everyone: abort its turn, stop its background jobs, tell
@@ -1093,6 +1364,34 @@ export const RenameResultSchema = z.object({
 });
 export type RenameResult = z.infer<typeof RenameResultSchema>;
 
+// --- session/pin (docs/feat/mobile-session-actions.md) -------------------
+// Pin a session to the top of every device's list, or unpin it. A SET, not a
+// toggle: `pinned` is the state wanted, the result the state after applying
+// (idempotent, so two devices sending the same intent converge; opposite
+// intents: the last applied wins). Works on live and ARCHIVED sessions (an
+// archived one is changed in place, not reopened) and needs no prior `open`.
+// List metadata, not conversation: it does not move `updatedAt` and emits no
+// update (another device sees it at its next `session/list`). Kept by a
+// `serve` daemon across restarts; elsewhere in memory with the session. At
+// most MAX_PINNED_SESSIONS pinned per daemon: pinning one more →
+// `InvalidParams` (re-pinning a pinned one, or unpinning, always passes). A
+// deleted id → `SessionDeleted`; an unknown one → `UnknownSession`. Additive
+// (an older daemon answers `MethodNotFound`). Any authenticated client may pin.
+
+/** At most this many pinned sessions per daemon (bounds `SessionListResult.pinned`). */
+export const MAX_PINNED_SESSIONS = 20;
+
+export const PinParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  pinned: z.boolean(),
+});
+export type PinParams = z.infer<typeof PinParamsSchema>;
+
+export const PinResultSchema = z.object({
+  pinned: z.boolean(),
+});
+export type PinResult = z.infer<typeof PinResultSchema>;
+
 // --- session/context (docs/feat/tui-target-badge.md) ---------------------
 // The size of the context a session would send NOW (system prompt, tools and
 // history), for a client's meter before any turn measured it. Read-only,
@@ -1140,6 +1439,12 @@ export const EnqueueParamsSchema = z.object({
   id: z.string().min(1).max(128),
   turnId: TurnIdSchema,
   text: z.string().min(1),
+  /**
+   * A voice-mode steer (see `VoiceTurnSchema`): it marks the REST of its turn a
+   * voice turn, with the steer's own `reasoning` — the reasoning-off window
+   * restarts at this steer's round.
+   */
+  voice: VoiceTurnSchema.optional(),
 });
 export type EnqueueParams = z.infer<typeof EnqueueParamsSchema>;
 
@@ -1228,6 +1533,29 @@ export type ReclaimParams = z.infer<typeof ReclaimParamsSchema>;
 export const ReclaimResultSchema = z.object({});
 export type ReclaimResult = z.infer<typeof ReclaimResultSchema>;
 
+// --- session/unqueue -----------------------------------------------------
+// Take queued rows back before the model reads them (cancel, or edit = take
+// back then enqueue again under a NEW id; docs/feat/queue-unqueue.md). Per id:
+// `removed` — it was still undrained (or in `returned`, or a send-now waiting
+// for the slot held it as a steer), and now it never reaches the model; a
+// retry of a removed id answers `removed` again. `delivered` — anything else:
+// drained already, a send-now's own prompt, or unknown; the client shows what
+// really happened. Never `NoTurnRunning`. Not gated by who asks (one token,
+// one principal, as `session/reclaim`). Additive: an older daemon answers
+// `MethodNotFound`.
+
+export const UnqueueParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  ids: z.array(z.string().min(1).max(128)).min(1),
+});
+export type UnqueueParams = z.infer<typeof UnqueueParamsSchema>;
+
+export const UnqueueResultSchema = z.object({
+  removed: z.array(z.string()),
+  delivered: z.array(z.string()),
+});
+export type UnqueueResult = z.infer<typeof UnqueueResultSchema>;
+
 // --- session/list --------------------------------------------------------
 // The daemon's sessions, one page at a time (docs/feat/session-list.md). A
 // read: it does not attach, and it moves no session's TTL clock. Order:
@@ -1273,6 +1601,10 @@ export const SessionListEntrySchema = z.object({
   archived: z.boolean(),
   /** The session's background work running now: shell jobs and sub-agents. Absent: an archived session, or an older daemon. */
   jobs: z.number().int().nonnegative().optional(),
+  /** The session's armed scheduled wakes (a COUNT: the rows are the `schedules` list). Absent: an older daemon, or one that never holds a schedule. */
+  schedules: z.number().int().nonnegative().optional(),
+  /** Pinned (`session/pin`). Absent: not pinned, or an older daemon. */
+  pinned: z.literal(true).optional(),
 });
 export type SessionListEntry = z.infer<typeof SessionListEntrySchema>;
 
@@ -1281,5 +1613,13 @@ export const SessionListResultSchema = z.object({
   sessions: z.array(SessionListEntrySchema).max(MAX_SESSION_LIST),
   /** Present iff more entries follow: pass it back for the next page. */
   cursor: z.string().min(1).optional(),
+  /**
+   * The FIRST page only (no `cursor` asked): EVERY pinned session on the
+   * daemon, live or archived, in list order — so a pin older than the loaded
+   * pages still shows. Each also stays in its normal place in `sessions`
+   * (paging is unchanged): dedupe by `sessionId`. Absent: none pinned, a
+   * later page, or an older daemon.
+   */
+  pinned: z.array(SessionListEntrySchema).max(MAX_PINNED_SESSIONS).optional(),
 });
 export type SessionListResult = z.infer<typeof SessionListResultSchema>;

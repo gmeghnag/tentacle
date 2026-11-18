@@ -1,0 +1,572 @@
+{
+  "about": "push-render-v1 — docs/feat/mobile-notifications.md Design 1. (message, peer, now) -> Rendered. Asserted by apps/mobile/test/push-render.test.ts AND by the Swift Notification Service Extension's tests (apps/mobile/native-tests): one spec, two implementations, no drift (decision 20).",
+  "now": 1800000000000,
+  "cases": [
+    {
+      "name": "ask",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "ask",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test",
+        "ask": {
+          "requestId": "req-1",
+          "tool": "shell",
+          "title": "Run a shell command",
+          "preview": "rm -rf build",
+          "options": [
+            {
+              "optionId": "allow_once",
+              "name": "Allow once",
+              "kind": "allow_once"
+            },
+            {
+              "optionId": "reject_once",
+              "name": "Deny",
+              "kind": "reject_once"
+            }
+          ]
+        }
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Run a shell command: rm -rf build",
+        "category": "tentacle.ask",
+        "interruptionLevel": "timeSensitive",
+        "sound": true,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "ask",
+          "computerId": "computer-1",
+          "sessionId": "sess-1",
+          "requestId": "req-1"
+        },
+        "placeholder": false
+      }
+    },
+    {
+      "name": "ask-reply",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "ask",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test",
+        "ask": {
+          "requestId": "req-1",
+          "tool": "shell",
+          "title": "Run a shell command",
+          "preview": "rm -rf build",
+          "options": [
+            {
+              "optionId": "allow_once",
+              "name": "Allow once",
+              "kind": "allow_once"
+            },
+            {
+              "optionId": "reject_once",
+              "name": "Deny",
+              "kind": "reject_once"
+            }
+          ],
+          "reply": {
+            "maxChars": 2000
+          }
+        }
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Run a shell command: rm -rf build",
+        "category": "tentacle.ask.reply",
+        "interruptionLevel": "timeSensitive",
+        "sound": true,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "ask",
+          "computerId": "computer-1",
+          "sessionId": "sess-1",
+          "requestId": "req-1"
+        },
+        "placeholder": false
+      }
+    },
+    {
+      "name": "ask-more",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "ask",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test",
+        "ask": {
+          "requestId": "req-1",
+          "tool": "shell",
+          "title": "Run a shell command",
+          "preview": "rm -rf build",
+          "options": [
+            {
+              "optionId": "allow_once",
+              "name": "Allow once",
+              "kind": "allow_once"
+            },
+            {
+              "optionId": "reject_once",
+              "name": "Deny",
+              "kind": "reject_once"
+            }
+          ],
+          "more": 2
+        }
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Run a shell command: rm -rf build · +2 more waiting",
+        "category": "tentacle.ask",
+        "interruptionLevel": "timeSensitive",
+        "sound": true,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "ask",
+          "computerId": "computer-1",
+          "sessionId": "sess-1",
+          "requestId": "req-1"
+        },
+        "placeholder": false
+      }
+    },
+    {
+      "name": "ask-no-preview",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "ask",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test",
+        "ask": {
+          "requestId": "req-1",
+          "tool": "shell",
+          "title": "Run a shell command",
+          "options": [
+            {
+              "optionId": "allow_once",
+              "name": "Allow once",
+              "kind": "allow_once"
+            },
+            {
+              "optionId": "reject_once",
+              "name": "Deny",
+              "kind": "reject_once"
+            }
+          ]
+        }
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Run a shell command",
+        "category": "tentacle.ask",
+        "interruptionLevel": "timeSensitive",
+        "sound": true,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "ask",
+          "computerId": "computer-1",
+          "sessionId": "sess-1",
+          "requestId": "req-1"
+        },
+        "placeholder": false
+      }
+    },
+    {
+      "name": "ask-allow-always-only",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "ask",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test",
+        "ask": {
+          "requestId": "req-1",
+          "tool": "shell",
+          "title": "Run a shell command",
+          "preview": "rm -rf build",
+          "options": [
+            {
+              "optionId": "allow_always",
+              "name": "Allow always",
+              "kind": "allow_always"
+            }
+          ]
+        }
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Run a shell command: rm -rf build",
+        "category": "tentacle.open",
+        "interruptionLevel": "timeSensitive",
+        "sound": true,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "ask",
+          "computerId": "computer-1",
+          "sessionId": "sess-1",
+          "requestId": "req-1"
+        },
+        "placeholder": false
+      }
+    },
+    {
+      "name": "ask-no-reject",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "ask",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test",
+        "ask": {
+          "requestId": "req-1",
+          "tool": "shell",
+          "title": "Run a shell command",
+          "preview": "rm -rf build",
+          "options": [
+            {
+              "optionId": "allow_once",
+              "name": "Allow once",
+              "kind": "allow_once"
+            }
+          ]
+        }
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Run a shell command: rm -rf build",
+        "category": "tentacle.open",
+        "interruptionLevel": "timeSensitive",
+        "sound": true,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "ask",
+          "computerId": "computer-1",
+          "sessionId": "sess-1",
+          "requestId": "req-1"
+        },
+        "placeholder": false
+      }
+    },
+    {
+      "name": "ask-resolved",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "ask_resolved",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test"
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Answered on another device",
+        "category": "tentacle.open",
+        "interruptionLevel": "passive",
+        "sound": false,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "ask_resolved",
+          "computerId": "computer-1",
+          "sessionId": "sess-1"
+        },
+        "placeholder": false
+      }
+    },
+    {
+      "name": "turn-done",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "turn_done",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test"
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Turn finished",
+        "category": "tentacle.open",
+        "interruptionLevel": "passive",
+        "sound": false,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "turn_done",
+          "computerId": "computer-1",
+          "sessionId": "sess-1"
+        },
+        "placeholder": false
+      }
+    },
+    {
+      "name": "turn-failed",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "turn_failed",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test",
+        "turn": {
+          "turnId": "t1",
+          "error": "model 500"
+        }
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Turn failed: model 500",
+        "category": "tentacle.open",
+        "interruptionLevel": "passive",
+        "sound": false,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "turn_failed",
+          "computerId": "computer-1",
+          "sessionId": "sess-1"
+        },
+        "placeholder": false
+      }
+    },
+    {
+      "name": "turn-failed-bare",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "turn_failed",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test",
+        "turn": {
+          "turnId": "t1"
+        }
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Turn failed",
+        "category": "tentacle.open",
+        "interruptionLevel": "passive",
+        "sound": false,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "turn_failed",
+          "computerId": "computer-1",
+          "sessionId": "sess-1"
+        },
+        "placeholder": false
+      }
+    },
+    {
+      "name": "v2-placeholder",
+      "message": {
+        "v": 2,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "ask",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test",
+        "ask": {
+          "requestId": "req-1",
+          "tool": "shell",
+          "title": "Run a shell command",
+          "preview": "rm -rf build",
+          "options": [
+            {
+              "optionId": "allow_once",
+              "name": "Allow once",
+              "kind": "allow_once"
+            },
+            {
+              "optionId": "reject_once",
+              "name": "Deny",
+              "kind": "reject_once"
+            }
+          ]
+        }
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "",
+        "body": "Open tentacle to see what's new",
+        "category": "",
+        "interruptionLevel": "active",
+        "sound": false,
+        "threadIdentifier": "",
+        "placeholder": true
+      }
+    },
+    {
+      "name": "ask-kind-without-body",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "ask",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test"
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "",
+        "body": "Open tentacle to see what's new",
+        "category": "",
+        "interruptionLevel": "active",
+        "sound": false,
+        "threadIdentifier": "",
+        "placeholder": true
+      }
+    },
+    {
+      "name": "untrusted-text",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "ask",
+        "computer": "computer-1",
+        "cwd": "/home/me/\u0007repo",
+        "sessionId": "sess-1",
+        "title": "Fix\u001b[2Jit",
+        "ask": {
+          "requestId": "req-1",
+          "tool": "shell",
+          "title": "Run\u001b[31m",
+          "preview": "ls\u0007 -la",
+          "options": [
+            {
+              "optionId": "allow_once",
+              "name": "Allow once",
+              "kind": "allow_once"
+            },
+            {
+              "optionId": "reject_once",
+              "name": "Deny",
+              "kind": "reject_once"
+            }
+          ]
+        }
+      },
+      "peer": {
+        "computerName": "Mac\u001b[0mBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · repo",
+        "subtitle": "Fixit",
+        "body": "Run: ls -la",
+        "category": "tentacle.ask",
+        "interruptionLevel": "timeSensitive",
+        "sound": true,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "ask",
+          "computerId": "computer-1",
+          "sessionId": "sess-1",
+          "requestId": "req-1"
+        },
+        "placeholder": false
+      }
+    }
+  ]
+}

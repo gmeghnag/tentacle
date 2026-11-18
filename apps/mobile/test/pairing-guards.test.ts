@@ -69,10 +69,25 @@ describe("no build-time computer, no build-time token (F-H4)", () => {
     // Two adapters, one per store: the computer store (11b.1) and the app-lock
     // setting (docs/feat/mobile-lock.md D3). Both are five-line wiring files; the
     // modules that DECIDE anything (`computer-store.ts`, `lock-settings-store.ts`)
-    // stay free of the native import, which is what this guard protects.
-    expect(importers.map((path) => path.slice(APP.length + 1))).toEqual([
-      "src/secure-kv.ts",
+    // stay free of the native import, which is what this guard protects. The
+    // voice settings (docs/feat/mobile-voice.md Design §3) add a third wiring
+    // file; `voice-settings-store.ts` decides and stays pure. The Activity button
+    // (docs/feat/mobile-chrome.md Design 6) adds a fourth, the same way; the
+    // photo settings (fix/mobile-media-live item 5) a fifth, and the artifact seen
+    // record (docs/feat/model-artifacts.md D9) a sixth — `artifact-seen-store.ts`
+    // decides and stays pure. The Charts setting (docs/feat/mobile-chart-labels.md
+    // D7) a seventh, the same way: `chart-settings-store.ts` decides; and the
+    // diagram look (docs/fix/mobile-qa-1117.md) an eighth:
+    // `diagram-settings-store.ts` decides.
+    expect(importers.map((path) => path.slice(APP.length + 1)).sort()).toEqual([
+      "src/activity-settings-expo.ts",
+      "src/artifact-seen-expo.ts",
+      "src/chart-settings-expo.ts",
+      "src/diagram-settings-expo.ts",
       "src/lock-settings-expo.ts",
+      "src/photo-settings-expo.ts",
+      "src/secure-kv.ts",
+      "src/voice-settings-expo.ts",
     ]);
   });
 });
@@ -107,8 +122,12 @@ describe("the push entitlements and plugin are in app.json (P9: a plist entry is
   test("the shared keychain access group and the Time Sensitive entitlement are declared", () => {
     const entitlements = config.expo?.ios?.entitlements ?? {};
     // Task 17's extension must read the push key while the app is not running.
+    // TWO groups, the app's own FIRST (plan C1, fix round 1 #3): the separate
+    // `...push` group is the only one the extension may hold, so an item with no
+    // group (`deviceKey`) can never land in it.
     expect(entitlements["keychain-access-groups"]).toEqual([
       "$(AppIdentifierPrefix)so.tentacle.app",
+      "$(AppIdentifierPrefix)so.tentacle.app.push",
     ]);
     // Owner Q4: an `ask` is Time Sensitive, which the extension raises after
     // decrypting; the entitlement is what allows that at all.
@@ -156,14 +175,57 @@ describe("the camera stays behind ONE seam, and the scheme is registered (11b.2)
     expect(camera?.[1].cameraPermission ?? "").toContain("pairing code");
   });
 
-  test("the camera never brings a microphone permission with it (pairing records no audio)", () => {
+  test("the camera never records audio (the scanner and photos record nothing)", () => {
     const config = JSON.parse(readFileSync(join(APP, "app.json"), "utf8")) as {
       expo?: { plugins?: readonly unknown[] };
     };
     const camera = (config.expo?.plugins ?? []).find(
       (plugin) => Array.isArray(plugin) && plugin[0] === "expo-camera",
-    ) as readonly [string, { readonly microphonePermission?: unknown }] | undefined;
-    // `false` is expo-camera's "delete the key" (not "leave the default text").
-    expect(camera?.[1].microphonePermission).toBe(false);
+    ) as readonly [string, { readonly recordAudioAndroid?: unknown }] | undefined;
+    expect(camera?.[1].recordAudioAndroid).toBe(false);
+  });
+
+  // docs/feat/mobile-voice.md P4 / Design §6: dictation needs
+  // `NSMicrophoneUsageDescription`. Every plugin that writes that key must write
+  // the SAME dictation string — a `false` is "delete the key" in both plugins
+  // (`createPermissionsPlugin`), and config-plugin order is not something to
+  // rely on, so one plugin could delete what another adds (iOS then kills the
+  // app at the first mic access, F3).
+  test("every plugin that writes the microphone key writes the one dictation string", () => {
+    const config = JSON.parse(readFileSync(join(APP, "app.json"), "utf8")) as {
+      expo?: { plugins?: readonly unknown[] };
+    };
+    const writers = (config.expo?.plugins ?? []).flatMap((plugin) =>
+      Array.isArray(plugin) &&
+      typeof plugin[1] === "object" &&
+      plugin[1] !== null &&
+      "microphonePermission" in plugin[1]
+        ? [[plugin[0], (plugin[1] as { microphonePermission: unknown }).microphonePermission]]
+        : [],
+    );
+    expect(writers.map((w) => w[0]).sort()).toEqual(["expo-camera", "expo-image-picker"]);
+    const values = new Set(writers.map((w) => w[1]));
+    expect(values.size).toBe(1);
+    const [value] = [...values];
+    expect(typeof value).toBe("string");
+    expect(String(value)).toContain("dictate");
+  });
+
+  test("the speech plugin is registered and writes the speech-recognition string", async () => {
+    const config = JSON.parse(readFileSync(join(APP, "app.json"), "utf8")) as {
+      expo?: { plugins?: readonly unknown[] };
+    };
+    const path = "./modules/tentacle-speech/app.plugin.js";
+    expect(config.expo?.plugins ?? []).toContain(path);
+    const plugin = (await import(join(APP, path))).default as (c: {
+      ios?: { infoPlist?: Record<string, unknown> };
+    }) => { ios?: { infoPlist?: Record<string, unknown> } };
+    const out = plugin({ ios: { infoPlist: { Keep: 1 } } });
+    expect(out.ios?.infoPlist?.Keep).toBe(1);
+    expect(String(out.ios?.infoPlist?.NSSpeechRecognitionUsageDescription)).toContain(
+      "on this iPhone",
+    );
+    // The microphone key belongs to the two plugins above, never to this one.
+    expect(out.ios?.infoPlist?.NSMicrophoneUsageDescription).toBeUndefined();
   });
 });

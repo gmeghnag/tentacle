@@ -8,7 +8,10 @@
 import {
   type AttachmentRef,
   type ChatMessage,
+  type MessageMedia,
   NOTE_KIND,
+  type ScheduledFire,
+  type VoiceTurn,
   checkAttachmentRefs,
 } from "@tentacle/core";
 import {
@@ -17,6 +20,7 @@ import {
   type BeforeResumedCall,
   type BeforeRun,
   UnknownSkillError,
+  type VoiceMark,
 } from "./agent.ts";
 import {
   type CompactResult,
@@ -45,6 +49,8 @@ export interface SendOptions {
    * undrained steers over (docs/feat/send-now-a.md). Absent → empty.
    */
   readonly steering?: readonly string[];
+  /** Each `steering` text's caller key, by index (so `unqueue` can take it back). */
+  readonly steeringIds?: readonly string[];
   /** Makes a parallel group's start durable before it runs (see `RunOptions.beforeRun`). */
   readonly beforeRun?: BeforeRun;
   /**
@@ -54,6 +60,24 @@ export interface SendOptions {
    * prompt is a prompt, not a continuation).
    */
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * The files attached to this turn's user message (docs/feat/pdf-read.md D4):
+   * display chips only — their text is already in `text` as `<file>` blocks.
+   * Ignored when nothing is pushed.
+   */
+  readonly media?: readonly MessageMedia[];
+  /**
+   * The scheduled wake that fires this turn, stamped with its fire instant
+   * (docs/feat/scheduled-fire-row.md): stored on the user message for the row.
+   * Display only. Ignored when nothing is pushed.
+   */
+  readonly scheduled?: ScheduledFire;
+  /**
+   * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3);
+   * see `RunOptions.voice`. A voice `enqueue` (`enqueueVoice`) marks the rest of
+   * the turn too.
+   */
+  readonly voice?: VoiceTurn;
 }
 
 /** Per-turn options of `resume`. */
@@ -80,6 +104,23 @@ export class Session {
   private readonly onPersist?: (snapshot: SessionSnapshot) => void;
   /** User messages queued mid-turn, drained into the loop at each boundary. */
   private steering: string[] = [];
+  /**
+   * The voice profile a queued steer carries, if any (docs/feat/voice-conversation.md
+   * §4): `null` = the steer is not a voice one, so it never re-marks the turn.
+   * Drained in step with `steering` (the loop asks for it once per round).
+   */
+  private voiceMarks: (VoiceTurn | null)[] = [];
+  /**
+   * Each queued steer's caller key (`null` = none), in step with `steering`:
+   * what `unqueue` takes a steer back by (docs/feat/queue-unqueue.md).
+   */
+  private steeringIds: (string | null)[] = [];
+  /**
+   * The voice mark handed to the loop at the next round: `taken` at the turn's
+   * first round and again after every steer drain, then cleared by the loop's
+   * own read (`takeVoice` is idempotent per round).
+   */
+  private pendingVoice: VoiceMark | null = null;
 
   constructor(agent: Agent, id?: string, options: SessionOptions = {}) {
     this.agent = agent;
@@ -158,6 +199,9 @@ export class Session {
     // A fresh turn starts with its seed only (abort may have left undrained
     // items from a previous turn; a caller that keeps them passes them).
     this.steering = [...(opts.steering ?? [])];
+    this.voiceMarks = this.steering.map(() => null);
+    this.steeringIds = this.steering.map((_, i) => opts.steeringIds?.[i] ?? null);
+    this.pendingVoice = null;
     // What this turn adds starts here (its context line may ride on it).
     const newFrom = this.messages.length;
     if (pushed) {
@@ -165,15 +209,19 @@ export class Session {
         role: "user",
         content: text,
         ...(refs.length > 0 ? { attachments: [...refs] } : {}),
+        ...(opts.media !== undefined && opts.media.length > 0 ? { media: [...opts.media] } : {}),
+        ...(opts.scheduled !== undefined ? { scheduled: opts.scheduled } : {}),
       });
     }
     try {
-      yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0), {
+      yield* this.agent.runMessages(this.messages, this.id, signal, () => this.drainSteering(), {
         newFrom,
         userMessage: pushed,
         ...(opts.skill !== undefined ? { skill: opts.skill } : {}),
         ...(opts.askHooksTrust !== undefined ? { askHooksTrust: opts.askHooksTrust } : {}),
         ...(opts.beforeRun !== undefined ? { beforeRun: opts.beforeRun } : {}),
+        ...(opts.voice !== undefined ? { voice: opts.voice } : {}),
+        voiceMark: () => this.takeVoice(),
       });
     } finally {
       // Persist once the turn settles (normal end, error, or abort), so a
@@ -236,12 +284,18 @@ export class Session {
     opts: ResumeOptions = {},
   ): AsyncGenerator<AgentEvent> {
     try {
-      yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0), {
+      // As `send`: the steers a suspended turn had accepted come back through
+      // `enqueue`, so their voice marks must be drained in step with them. The
+      // TURN's own profile is not restored — nothing transient is stored
+      // (AGENTS §7), so a turn cut by a restart resumes as an ordinary one
+      // unless a voice steer re-marks it.
+      yield* this.agent.runMessages(this.messages, this.id, signal, () => this.drainSteering(), {
         resumeFrom: toolCallId,
         ...(opts.beforeRun !== undefined ? { beforeRun: opts.beforeRun } : {}),
         ...(opts.beforeResumedCall !== undefined
           ? { beforeResumedCall: opts.beforeResumedCall }
           : {}),
+        voiceMark: () => this.takeVoice(),
       });
     } finally {
       this.persist();
@@ -252,14 +306,66 @@ export class Session {
    * Queue a user message to be injected into the turn currently running, at the
    * next model-round boundary ("steering"). A no-op shape when nothing is
    * running — the message simply waits in the queue until the next `send`.
+   *
+   * `voice` (docs/feat/voice-conversation.md §4): a voice STEER, which marks the
+   * rest of its turn a voice turn with its own `reasoning`.
    */
-  enqueue(text: string): void {
+  enqueue(text: string, voice?: VoiceTurn, id?: string): void {
     this.steering.push(text);
+    this.voiceMarks.push(voice ?? null);
+    this.steeringIds.push(id ?? null);
+  }
+
+  /**
+   * Take back the queued steer keyed `id` (docs/feat/queue-unqueue.md):
+   * `true` iff it was still queued — then the model never reads it in this
+   * turn (the loop takes steers only through the drain's synchronous splice).
+   * Its voice mark goes with it. `false`: drained already, or unknown.
+   */
+  unqueue(id: string): boolean {
+    const at = this.steeringIds.indexOf(id);
+    if (at < 0) {
+      return false;
+    }
+    this.steering.splice(at, 1);
+    this.voiceMarks.splice(at, 1);
+    this.steeringIds.splice(at, 1);
+    return true;
   }
 
   /** The messages queued and not yet drained, in order (a copy, for persisting). */
   pendingSteering(): readonly string[] {
     return [...this.steering];
+  }
+
+  /**
+   * The loop's drain: takes the queued texts AND their voice marks, in order, so
+   * a mark can never be applied to a round that did not carry its steer. The
+   * mark in force is a voice steer's `reasoning` (the last one wins, as the
+   * history order does), and it REOPENS the reasoning-off window: the steer is
+   * the next thing the person said, out loud.
+   */
+  private drainSteering(): readonly string[] {
+    const marks = this.voiceMarks.splice(0);
+    this.steeringIds.splice(0);
+    const texts = this.steering.splice(0);
+    for (const mark of marks) {
+      if (mark !== null) {
+        this.pendingVoice = { reasoning: mark.reasoning, restarted: true };
+      }
+    }
+    return texts;
+  }
+
+  /**
+   * The voice mark the loop consumes at a round: what it must apply to THIS
+   * round's request, then forget. `undefined` → nothing changed since the last
+   * round (the loop keeps what it has).
+   */
+  private takeVoice(): VoiceMark | undefined {
+    const mark = this.pendingVoice;
+    this.pendingVoice = null;
+    return mark ?? undefined;
   }
 
   /**
@@ -274,25 +380,61 @@ export class Session {
    * where the history is new and an observer's view of it still old (the
    * daemon's stream barrier). It must not throw.
    */
-  async compact(signal?: AbortSignal, onReplaced?: () => void): Promise<CompactResult> {
+  async compact(
+    signal?: AbortSignal,
+    onReplaced?: () => void,
+    /** `fromTokens`: the context size the caller already measured (the last real prompt). */
+    opts: { readonly fromTokens?: number } = {},
+  ): Promise<CompactResult> {
     const before = this.messages.length;
-    const skills = carryOverSkills(await this.agent.reloadSkills(this.id, this.messages, signal));
+    // A skill hidden for this session is not carried into the compacted history (F12).
+    const skills = carryOverSkills(
+      await this.agent.reloadSkills(this.id, this.messages, signal),
+      undefined,
+      this.agent.capabilities().disabledSkills,
+    );
     signal?.throwIfAborted();
     const summary = await this.agent.summarize(this.messages, signal, skills.kept);
     signal?.throwIfAborted();
     const running = this.agent.runningBackground();
-    const next = compactedHistory(
+    const built = compactedHistory(
       this.messages,
       summary,
       skills,
       stillRunningNote(running.jobs, running.agents),
     );
+    // The sizes (docs/feat/harness-notices.md S1), counted together AFTER the
+    // summary call so a compaction's first model call is not delayed: BEFORE on
+    // the old history (still untouched here) unless the caller knows it, AFTER
+    // on the new one. Bounded, never throw (an estimate when the provider
+    // cannot count). Stamped on the summary (the only user message
+    // `compactedHistory` writes): display only, persisted with it so every
+    // replay draws the separator with figures.
+    const [fromTokens, to] = await Promise.all([
+      opts.fromTokens ?? this.contextUsage(signal).then((u) => u.used),
+      this.agent.contextUsage(built, signal),
+    ]);
+    signal?.throwIfAborted();
+    const compacted = {
+      fromTokens,
+      toTokens: to.used,
+      ...(to.exact ? { toExact: true as const } : {}),
+    };
+    const next = built.map((m) => (m.role === "user" ? { ...m, compacted } : m));
     this.messages.length = 0;
     this.messages.push(...next);
     this.agent.forgetModelRequestBaseline(this.id);
+    this.agent.forgetPrune(this.messages);
     onReplaced?.();
     this.persist();
-    return { summary, before, after: this.messages.length };
+    return {
+      summary,
+      before,
+      after: this.messages.length,
+      fromTokens,
+      toTokens: to.used,
+      ...(to.exact ? { toExact: true } : {}),
+    };
   }
 
   /**
@@ -314,6 +456,7 @@ export class Session {
     this.messages.length = 0;
     this.messages.push(...next);
     this.agent.forgetModelRequestBaseline(this.id);
+    this.agent.forgetPrune(this.messages);
     onReplaced?.();
     // The daemon's `HostedSession.clear` persists again after its own changes
     // (title, approvals): this one serves every other caller (nit9).

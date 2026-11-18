@@ -618,24 +618,56 @@ describe("prompt usage with prompt caching", () => {
   };
 
   test("promptTokens = input + cache creation + cache read", async () => {
-    expect(
-      await done({
-        input_tokens: 40,
-        cache_read_input_tokens: 11000,
-        cache_creation_input_tokens: 960,
-      }),
-    ).toEqual({
+    // The cache READ is a hit and is carried separately (docs/feat/token-usage-log.md);
+    // the CREATION count is a write, so it stays inside promptTokens only.
+    // Mutation: drop `cachedPromptTokens = start.cache_read_input_tokens` → the field vanishes.
+    const event = await done({
+      input_tokens: 40,
+      cache_read_input_tokens: 11000,
+      cache_creation_input_tokens: 960,
+    });
+    expect(event).toEqual({
       type: "done",
-      usage: { promptTokens: 12000, completionTokens: 30 },
+      usage: { promptTokens: 12000, completionTokens: 30, cachedPromptTokens: 11000 },
       stopReason: "stop",
     });
   });
 
-  test("absent cache counts add nothing", async () => {
-    expect(await done({ input_tokens: 40 })).toEqual({
+  test("a cache creation with no read carries no cached count", async () => {
+    // A write is not a hit: presuming `cachedPromptTokens = 0` would claim a full miss.
+    const event = await done({ input_tokens: 40, cache_creation_input_tokens: 960 });
+    expect(event).toEqual({
+      type: "done",
+      usage: { promptTokens: 1000, completionTokens: 30 },
+      stopReason: "stop",
+    });
+    const usage = event?.type === "done" ? event.usage : undefined;
+    expect(usage !== undefined && "cachedPromptTokens" in usage).toBe(false);
+  });
+
+  test("a null cache read (the API types it nullable) carries no cached count", async () => {
+    // Mutation: `start.cache_read_input_tokens !== undefined` alone → assigns `null`,
+    // which `LogUsageEntrySchema` refuses and poisons the session log (fix round 1).
+    const event = await done({ input_tokens: 40, cache_read_input_tokens: null });
+    expect(event).toEqual({
       type: "done",
       usage: { promptTokens: 40, completionTokens: 30 },
       stopReason: "stop",
     });
+    const usage = event?.type === "done" ? event.usage : undefined;
+    expect(usage !== undefined && "cachedPromptTokens" in usage).toBe(false);
+  });
+
+  test("absent cache counts add nothing", async () => {
+    const event = await done({ input_tokens: 40 });
+    expect(event).toEqual({
+      type: "done",
+      usage: { promptTokens: 40, completionTokens: 30 },
+      stopReason: "stop",
+    });
+    // Absent, not 0: an unmeasured cache hit is not a missed one.
+    // Mutation: `cachedPromptTokens = start.cache_read_input_tokens ?? 0` → `in` becomes true.
+    const usage = event?.type === "done" ? event.usage : undefined;
+    expect(usage !== undefined && "cachedPromptTokens" in usage).toBe(false);
   });
 });

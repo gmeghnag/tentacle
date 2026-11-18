@@ -19,6 +19,7 @@
  * 3.59:1) while the exact grey `#6b6b6b` lands on the ramp (5.25:1). Keep the
  * greys exactly grey.
  */
+import { CHART_PALETTE } from "@tentacle/core";
 import chalk from "chalk";
 import { type Rgb, type ThemeSetting, resolveMode } from "./terminal-background.ts";
 
@@ -61,6 +62,15 @@ interface MeterTokens {
   readonly high: Color;
 }
 
+/**
+ * The thinking-shimmer sweep's two highlight tones (docs/feat/tui-thinking-shimmer.md).
+ * `base` is `accent` — the label's colour today — so only the moving window is new.
+ */
+interface ShimmerTokens {
+  readonly mid: Color;
+  readonly peak: Color;
+}
+
 interface SyntaxTokens {
   readonly keyword: Color;
   readonly string: Color;
@@ -81,6 +91,15 @@ interface MarkdownTokens {
   readonly link: Color;
 }
 
+/**
+ * A chart's series colours: the shared, validated palette A (`@tentacle/core`
+ * `CHART_PALETTE`, docs/feat/model-charts.md D4/D5) — the SAME slots the phone
+ * paints, so a series is one colour on both. Colour follows the dataset index.
+ */
+interface ChartTokens {
+  readonly series: readonly Color[];
+}
+
 /** Every colour the TUI paints. Both modes hold exactly these keys. */
 export interface Tokens {
   readonly accent: Color;
@@ -91,6 +110,16 @@ export interface Tokens {
   /** `dim` as an Ink prop: dark keeps `dimColor`, light passes the measured grey. */
   readonly dimIsAttribute: boolean;
   readonly gutter: Color;
+  /**
+   * Harness lines — what the MACHINE says about the session (a cut reply, a job
+   * exit, a repair, "Can't compact…"), never the model's own text
+   * (docs/feat/harness-notices.md S2). ONE neutral grey: the owner is
+   * colour-blind, so a warning differs by GLYPH first (`◇`/`▲`) and only then
+   * by amber on the glyph. Exactly grey, so chalk's 256 downgrade takes the
+   * ramp (249 dark / 239 light), per this file's header rule.
+   */
+  readonly harness: Color;
+  /** The dock's `you → sa-1` label (docs/feat/subagent-panel.md); NOT a harness line. */
   readonly notice: Color;
   readonly hidden: Color;
   readonly success: Color;
@@ -100,10 +129,12 @@ export interface Tokens {
   readonly border: Color;
   readonly status: StatusTokens;
   readonly meter: MeterTokens;
+  readonly shimmer: ShimmerTokens;
   readonly diff: DiffTokens;
   readonly message: MessageTokens;
   readonly syntax: SyntaxTokens;
   readonly md: MarkdownTokens;
+  readonly chart: ChartTokens;
 }
 
 /**
@@ -119,6 +150,7 @@ const DARK: Tokens = {
   dim: "dim",
   dimIsAttribute: true,
   gutter: "gray",
+  harness: "#b2b2b2",
   notice: "#8caaee",
   hidden: "hidden",
   success: "#4ec974",
@@ -128,6 +160,8 @@ const DARK: Tokens = {
   border: "gray",
   status: { linkError: "red", linkWarn: "yellow", scrolled: "yellow" },
   meter: { low: "green", mid: "yellow", high: "red" },
+  // Brighter cyan on a dark terminal: the sweep lights the word up.
+  shimmer: { mid: "#22d3ee", peak: "#67e8f9" },
   diff: {
     addBg: "#022800",
     addFg: "#f8f8f2",
@@ -161,6 +195,7 @@ const DARK: Tokens = {
     del: "gray",
     link: "blue",
   },
+  chart: { series: CHART_PALETTE.dark },
 };
 
 /**
@@ -169,6 +204,10 @@ const DARK: Tokens = {
  * the owner accepted (Q3: no cyan-like 256 bucket reaches 4.5). `notice` was a
  * second for one round; the owner's fix-round answer settled it at `#2f4ba8`
  * (7.80 / 7.23 / 5.61), so the gate is "all but the accent" again.
+ *
+ * `harness` (`#4e4e4e`, docs/feat/harness-notices.md S2) is a harness line's one
+ * grey: exact grey, so the 256 downgrade takes the ramp (239) rather than the
+ * cube, and it clears the 4.5 gate there (`theme-contrast.test.ts`).
  */
 const LIGHT: Tokens = {
   accent: "#0e7490",
@@ -177,6 +216,7 @@ const LIGHT: Tokens = {
   dim: "#6b6b6b",
   dimIsAttribute: false,
   gutter: "#6b6b6b",
+  harness: "#4e4e4e",
   notice: "#2f4ba8",
   hidden: "hidden",
   success: "#084718",
@@ -186,6 +226,9 @@ const LIGHT: Tokens = {
   border: "#8c8c8c",
   status: { linkError: "#b21428", linkWarn: "#8f4c00", scrolled: "#8f4c00" },
   meter: { low: "#084718", mid: "#8f4c00", high: "#b21428" },
+  // Darker = "brighter" on paper. Measured 9.85 / 13.40 truecolor, 7.03 / 7.49 at
+  // chalk's 256 on white and Solarized Light (theme-contrast.test.ts).
+  shimmer: { mid: "#0b4a57", peak: "#083344" },
   diff: {
     addBg: "#dafbe1",
     addFg: "#1a1a1a",
@@ -218,6 +261,7 @@ const LIGHT: Tokens = {
     del: "#6b6b6b",
     link: "#1446c8",
   },
+  chart: { series: CHART_PALETTE.light },
 };
 
 export const tokens: Readonly<Record<ThemeMode, Tokens>> = { dark: DARK, light: LIGHT };
@@ -261,6 +305,50 @@ export type Styler = ReturnType<typeof chalk.hex>;
 /** A token colour value as a chalk styler — the export `read-highlight.ts` needs. */
 export const colorStyler = (color: Color): Styler => ink(color) as Styler;
 
+/**
+ * A diagram's roles (docs/feat/model-diagrams.md D8, mockup 5A) mapped onto
+ * EXISTING tokens — no new colour: boxes, edges and frames dim, a decision in
+ * the accent, edge labels and the source's labels as strings, the source's
+ * keywords/ids/arrows/comments as the syntax tokens. `undefined` = default fg.
+ */
+export type DiagramRole =
+  | "border"
+  | "decision"
+  | "label"
+  | "frame"
+  | "title"
+  | "subtle"
+  | "keyword"
+  | "id"
+  | "arrow"
+  | "string"
+  | "comment";
+
+export function diagramColor(role: DiagramRole, t: Tokens): Color | undefined {
+  switch (role) {
+    case "border":
+    case "frame":
+      return t.dim;
+    case "decision":
+      return t.accent;
+    case "label":
+    case "string":
+      return t.syntax.string;
+    case "subtle":
+      return t.subtle;
+    case "keyword":
+      return t.syntax.keyword;
+    case "id":
+      return t.syntax.title;
+    case "arrow":
+      return t.syntax.meta;
+    case "comment":
+      return t.syntax.comment;
+    default:
+      return undefined;
+  }
+}
+
 /** A message row's two stylers for a mode (what `theme.message` becomes). */
 export function messageStyle(mode: ThemeMode): MessageStyle {
   return { bg: bg(tokens[mode].message.bg), queuedFg: ink(tokens[mode].message.queuedFg) };
@@ -288,6 +376,7 @@ function buildTheme(t: Tokens) {
     autoAccept: fg(t.autoAccept),
     /** De-emphasised grey for metadata, context, hints. */
     subtle: fg(t.subtle),
+    harness: fg(t.harness),
     notice: fg(t.notice),
     /**
      * SGR conceal ("hidden"): draws the characters in the background colour, so

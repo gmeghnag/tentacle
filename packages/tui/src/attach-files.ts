@@ -26,6 +26,8 @@ import {
   type AttachmentRef,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_IMAGE_BYTES,
+  PDF_HEAD_BYTES,
+  isPdf,
   sanitizeAttachmentName,
 } from "@tentacle/core";
 import type { CandidateText } from "./attach-candidates.ts";
@@ -64,8 +66,28 @@ export interface AttachedImage {
   readonly bytes: Uint8Array;
 }
 
+/**
+ * A PDF that passed every check (docs/feat/pdf-read.md D6): its bytes stay here
+ * until the SESSION decides where they go — up by `attachment/put` (the daemon
+ * extracts) or through the laptop's own extractor (a pod: text only). It has no
+ * `AttachmentRef`: an `image/*` ref cannot carry `application/pdf`.
+ */
+export interface AttachedDocument {
+  readonly path: string;
+  /** The display name — a ref's own `sanitizeAttachmentName` rule, never a control char. */
+  readonly name: string;
+  readonly bytes: Uint8Array;
+  readonly size: number;
+}
+
+/**
+ * What one candidate is: an image, a document, or a refusal. `kind` is the
+ * discriminator because BOTH ok variants carry no shared field — a caller that
+ * forgets it would otherwise have to guess.
+ */
 export type InspectResult =
-  | { readonly ok: true; readonly image: AttachedImage }
+  | { readonly ok: true; readonly kind: "image"; readonly image: AttachedImage }
+  | { readonly ok: true; readonly kind: "document"; readonly document: AttachedDocument }
   | { readonly ok: false; readonly refusal: AttachRefusal };
 
 /** The last path segment, for a `/a/b.png`, `C:\a\b.png` and a `file:` decoded path alike. */
@@ -126,6 +148,23 @@ export async function inspectPath(probe: FileProbe, path: string): Promise<Inspe
   // The sniff comes BEFORE the cap so a refusal can say what it is about: an
   // image that is too large is `too-large`, and a 4 GB video is `not-image`
   // (the bytes decide, and only the first ones need to be right).
+  //
+  // A PDF is a DOCUMENT, not a refused image (docs/feat/pdf-read.md D6): the
+  // bytes decide, exactly as they do for an image, and the branch sits BEFORE
+  // the `not-image` refusal so a dragged `report.pdf` becomes a chip instead of
+  // "not a PNG". It is checked here (not from the extension) for the same
+  // reason: a `.pdf` that is really text stays text.
+  if (isPdf(bytes.subarray(0, PDF_HEAD_BYTES))) {
+    if (bytes.length > MAX_IMAGE_BYTES) {
+      return refuse({ reason: "too-large", path, size: Math.max(file.size, bytes.length) });
+    }
+    const name = refName(path);
+    return {
+      ok: true,
+      kind: "document",
+      document: { path, name: name ?? "document.pdf", bytes, size: bytes.length },
+    };
+  }
   const sniffed = sniffImageType(bytes);
   if (sniffed.kind === "heic") {
     // Only the flavours that need a conversion land here (sub-task 6 does it).
@@ -143,7 +182,7 @@ export async function inspectPath(probe: FileProbe, path: string): Promise<Inspe
     size: bytes.length,
     ...nameField(refName(path)),
   };
-  return { ok: true, image: { path, ref, bytes } };
+  return { ok: true, kind: "image", image: { path, ref, bytes } };
 }
 
 /** `{ name }` only when there is one: an absent key, never `name: undefined`. */
@@ -151,21 +190,27 @@ function nameField(name: string | undefined): { name?: string } {
   return name === undefined ? {} : { name };
 }
 
-/** Where a candidate ended up: an image, a refusal, or an image the cap left out. */
+/** Where a candidate ended up: an image, a document, a refusal, or one the cap left out. */
 export type CandidateOutcome =
   | { readonly kind: "image"; readonly image: AttachedImage }
+  | { readonly kind: "document"; readonly document: AttachedDocument }
   | { readonly kind: "refused"; readonly refusal: AttachRefusal }
-  /** A real image that the per-message cap left out (counted in the ONE `too-many`). */
+  /** A real attachment the per-message cap left out (counted in the ONE `too-many`). */
   | { readonly kind: "over-cap" };
 
-/** What a batch of candidates produced: the images that passed, and why the rest did not. */
+/** What a batch of candidates produced: what passed, and why the rest did not. */
 export interface CollectedAttachments {
   readonly images: readonly AttachedImage[];
+  /**
+   * PDFs that passed (docs/feat/pdf-read.md D6). In the order given, so a caller
+   * can zip them with `images` back into the paste's own order.
+   */
+  readonly documents: readonly AttachedDocument[];
   readonly refusals: readonly AttachRefusal[];
   /**
    * Every candidate in the order given, with its disposition — so a caller can
    * decide per candidate (3b turns the whole paste into text when none of them
-   * became an image).
+   * became an attachment).
    */
   readonly outcomes: readonly CandidateOutcome[];
 }
@@ -188,10 +233,21 @@ export interface CollectOptions {
    * two pastes of three images cannot reach `checkAttachmentRefs` with six.
    */
   readonly existing?: readonly AttachmentRef[];
+  /**
+   * The PDFs already attached to this message (docs/feat/pdf-read.md D6): they
+   * count toward the SAME per-message cap, and they have no `AttachmentRef` to
+   * be listed in `existing` — a count is all the cap needs.
+   */
+  readonly existingDocuments?: number;
 }
 
-/** Nothing to collect: no images, no refusals, no outcomes. */
-export const NOTHING_COLLECTED: CollectedAttachments = { images: [], refusals: [], outcomes: [] };
+/** Nothing to collect: no attachments, no refusals, no outcomes. */
+export const NOTHING_COLLECTED: CollectedAttachments = {
+  images: [],
+  documents: [],
+  refusals: [],
+  outcomes: [],
+};
 
 /**
  * Inspect every candidate, keeping the ones that pass.
@@ -202,6 +258,11 @@ export const NOTHING_COLLECTED: CollectedAttachments = { images: [], refusals: [
  * something `checkAttachmentRefs` accepts. A candidate over the cap is left out
  * and reported as ONE refusal for the whole paste (naming how many were
  * dropped), never one refusal per file.
+ *
+ * A DOCUMENT counts toward that cap too (docs/feat/pdf-read.md D6: the daemon
+ * refuses a prompt with more than `MAX_ATTACHMENTS_PER_MESSAGE` documents), so
+ * the count is over images + PDFs together — one number the composer shows,
+ * never a second cap.
  */
 export async function collectAttachments(
   probe: FileProbe,
@@ -209,9 +270,10 @@ export async function collectAttachments(
   options: CollectOptions = {},
 ): Promise<CollectedAttachments> {
   const existing = options.existing ?? [];
-  const kept = existing.length;
+  const kept = existing.length + (options.existingDocuments ?? 0);
   const ids = new Set(existing.map((ref) => ref.id));
   const images: AttachedImage[] = [];
+  const documents: AttachedDocument[] = [];
   const refusals: AttachRefusal[] = [];
   const outcomes: CandidateOutcome[] = [];
   let wouldHold = kept;
@@ -223,10 +285,13 @@ export async function collectAttachments(
       outcomes.push({ kind: "refused", refusal: result.refusal });
       continue;
     }
-    const duplicate = ids.has(result.image.ref.id);
-    if (duplicate) {
+    // One duplicate rule for both kinds: a PDF is identified by the bytes it
+    // will be uploaded (or extracted) from, an image by its ref's id.
+    const identity =
+      result.kind === "image" ? result.image.ref.id : sha256Hex(result.document.bytes);
+    if (ids.has(identity)) {
       // Its own sentence, and it does NOT count toward the message's total: a
-      // repeat of an attached image is a repeat, not a 6th image.
+      // repeat of an attached file is a repeat, not a 6th attachment.
       const refusal: AttachRefusal = { reason: "duplicate", path };
       refusals.push(refusal);
       outcomes.push({ kind: "refused", refusal });
@@ -241,14 +306,19 @@ export async function collectAttachments(
       continue;
     }
     wouldHold += 1;
-    ids.add(result.image.ref.id);
-    images.push(result.image);
-    outcomes.push({ kind: "image", image: result.image });
+    ids.add(identity);
+    if (result.kind === "image") {
+      images.push(result.image);
+      outcomes.push({ kind: "image", image: result.image });
+    } else {
+      documents.push(result.document);
+      outcomes.push({ kind: "document", document: result.document });
+    }
   }
   if (dropped > 0) {
     refusals.push({ reason: "too-many", count: wouldHold, dropped });
   }
-  return { images, refusals, outcomes };
+  return { images, documents, refusals, outcomes };
 }
 
 /**
@@ -274,6 +344,8 @@ export type AttachmentDecision =
       readonly kind: "attachments";
       readonly refs: readonly AttachmentRef[];
       readonly images: readonly AttachedImage[];
+      /** PDFs the paste attached (docs/feat/pdf-read.md D6), in the order given. */
+      readonly documents: readonly AttachedDocument[];
       readonly refusals: readonly AttachRefusal[];
     }
   | { readonly kind: "text" }
@@ -323,15 +395,17 @@ export async function attachPaths(
   if (options.explicit !== true && collected.refusals.some(refusalMeansText)) {
     return { kind: "text" };
   }
-  if (collected.images.length === 0) {
-    // Images were found (that is the only way not to be `text` by now: every
-    // candidate was an image, or `explicit` was set) and none could be attached.
+  if (collected.images.length === 0 && collected.documents.length === 0) {
+    // A real attachment was found (that is the only way not to be `text` by
+    // now: every candidate was one, or `explicit` was set) and none could be
+    // attached.
     return { kind: "refused", refusals: shown };
   }
   return {
     kind: "attachments",
     refs: refsOf(collected),
     images: collected.images,
+    documents: collected.documents,
     refusals: shown,
   };
 }

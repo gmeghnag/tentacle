@@ -1,4 +1,5 @@
 import { type AttachmentRef, DISMISSED, type WakeModel, wakeStep } from "@tentacle/core";
+import type { DocumentContent } from "@tentacle/protocol";
 /**
  * The TURN DRIVER (docs/feat/app-decomposition.md S9a): how one turn of the
  * session is started, streamed into the transcript, stopped, handed over to a
@@ -47,11 +48,13 @@ import { type MutableRefObject, useCallback, useRef } from "react";
 import type { HopProposalView, SessionController } from "./app-types.ts";
 import type { AttachDraft, AttachMode } from "./attach-draft.ts";
 import { attachErrorText, enterConvertsToChips, imageRowText, submitPlan } from "./attach-draft.ts";
-import type { AttachedImage } from "./attach-files.ts";
+import type { AttachedDocument, AttachedImage } from "./attach-files.ts";
 import { pushHistory } from "./history.ts";
 import type { LineEditor } from "./hooks.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import { modelErrorNotice } from "./model-error.ts";
+import type { DocumentMode } from "./pdf-attach.ts";
+import { documentRowText } from "./pdf-attach.ts";
 import type { PermissionController } from "./permission-ui.ts";
 import {
   addRow,
@@ -176,8 +179,12 @@ export interface StreamOpts {
     readonly item: DisplayItem | undefined;
     readonly text: string;
     readonly images?: readonly string[];
+    /** The prompt's PDF rows (`[pdf: report.pdf]`), drawn after the image rows. */
+    readonly documents?: readonly string[];
     /** The chips whose refs this prompt named: put back if the daemon refuses them. */
     readonly restoreChips?: readonly AttachedImage[];
+    /** The PDF chips this prompt attached (docs/feat/pdf-read.md D6), for the same restore. */
+    readonly restoreDocuments?: readonly AttachedDocument[];
     /**
      * This prompt consumed the hop's pending line (`hopTurn.takeLine`), so a
      * failure that means it never ran must hand the line back (docs/feat/
@@ -286,6 +293,16 @@ export interface TurnHost {
   readonly ownCompactionsRef: MutableRefObject<number>;
   /** Set the compaction flag: the latch and the state the frame renders together. */
   readonly setCompacting: (on: boolean) => void;
+  /**
+   * A compaction's grey separator rule at the transcript's end
+   * (docs/feat/harness-notices.md S3): the App appends `{kind:"notice",
+   * separator: true, text}` — never a harness line, so it takes no glyph.
+   */
+  readonly pushSeparator: (text: string) => void;
+  /** The slot's `Compacted ✓` for 3 s (S3): the App owns the figure and its timer. */
+  readonly markCompacted: () => void;
+  /** A new turn replaced the slot: a lingering `Compacted ✓` must not come back. */
+  readonly clearCompacted: () => void;
 
   // --- the input line and the prompt history (`submit` writes them)
   readonly field: LineEditor;
@@ -308,7 +325,8 @@ export interface TurnHost {
   /** A new turn starts at the bottom of the transcript. */
   readonly setScrollOffset: (offset: number) => void;
   readonly scheduleFlush: () => void;
-  readonly pushNotice: (text: string) => void;
+  /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
+  readonly pushNotice: (text: string, level?: "warn") => void;
   readonly restoreInput: (text: string, why: string) => void;
 
   // --- the neighbours a turn hands off to
@@ -322,9 +340,17 @@ export interface TurnHost {
   readonly permission: PermissionController;
   readonly attachMode: () => AttachMode;
   readonly convertToChips: (text: string) => void;
-  readonly sendWithImages: (text: string, chips: readonly AttachedImage[]) => void;
+  readonly sendWithImages: (
+    text: string,
+    chips: readonly AttachedImage[],
+    documents?: readonly AttachedDocument[],
+  ) => void;
   readonly submitToTarget: (value: string) => boolean;
   readonly restoreChips: (chips: readonly AttachedImage[] | undefined) => void;
+  /** What the session takes as a PDF (docs/feat/pdf-read.md D6): `submitPlan` reads it. */
+  readonly documentMode: () => DocumentMode;
+  /** A refused PDF prompt's chips come back with its text (the `restoreChips` rule). */
+  readonly restoreDocuments: (documents: readonly AttachedDocument[] | undefined) => void;
   /**
    * A hop's view of this TUI's turns (docs/feat/session-hop.md D9, slice H5): the
    * host folds each OWN turn's events for a `move_session` proposal and asks the
@@ -335,6 +361,13 @@ export interface TurnHost {
   readonly model: string;
   /** A `context_reset` re-reads the skills (`skills-sync.ts`'s one settle). */
   readonly skillsSync: SkillsSync;
+  /**
+   * A history that just replaced (or appended to) the transcript, with the
+   * cards this TUI already knows attached (S6a review finding 2). A rebuild
+   * from `ChatMessage`s carries no `present` detail, so the App's
+   * `ArtifactJoin` supplies it — and asks the daemon when it cannot.
+   */
+  readonly joinCards: (state: DisplayState) => DisplayState;
   /** Ask the daemon for the context figure (never awaited by render). */
   readonly askContext: (session: SessionController | null) => void;
   /** Fire a deferred autonomous wake (idle-gated; the settle asks again). */
@@ -400,6 +433,9 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     compactingRef,
     ownCompactionsRef,
     setCompacting,
+    pushSeparator,
+    markCompacted,
+    clearCompacted,
     field,
     historyRef,
     histIndexRef,
@@ -422,8 +458,11 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     sendWithImages,
     submitToTarget,
     restoreChips,
+    documentMode,
+    restoreDocuments,
     model,
     skillsSync,
+    joinCards,
     askContext,
     wakeIfPending,
     exit,
@@ -517,13 +556,13 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         setLoading(null);
         warmingRef.current = false;
       }
-      stateRef.current = {
+      stateRef.current = joinCards({
         ...next,
         items: commitWarmed(before, stateRef.current.items, next.items),
         running: stateRef.current.running,
-      };
+      });
     },
-    [layoutOptsRef, setLoading, stateRef, warmingRef],
+    [joinCards, layoutOptsRef, setLoading, stateRef, warmingRef],
   );
 
   /**
@@ -607,6 +646,12 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
           }
           if (event.type === "history_reset" && needsWarm(event.messages.length)) {
             await commitHistory((s) => applySessionEvent(s, event, Date.now()));
+          } else if (event.type === "history_reset" || event.type === "context_reset") {
+            // A resync's replace — and a context reset's APPENDED history —
+            // rebuilds rows from `ChatMessage`s: the cards this TUI knows are
+            // re-attached (S6a review finding 2). Gated on these two events so
+            // the streaming hot path pays nothing.
+            stateRef.current = joinCards(applySessionEvent(stateRef.current, event, Date.now()));
           } else {
             stateRef.current = applySessionEvent(stateRef.current, event, Date.now());
           }
@@ -659,6 +704,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
           if (opts.own.text !== "" || (opts.own.images?.length ?? 0) > 0) {
             restoreInput(opts.own.text, SLOT_LOST_NOTICE);
             restoreChips(opts.own.restoreChips);
+            restoreDocuments(opts.own.restoreDocuments);
           } else if (handedWakeRef.current) {
             // Once: `wakeIfPending` below fires it when the turn that won ends.
             handedWakeRef.current = false;
@@ -673,6 +719,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
           abortRef.current = null;
           restoreInput(opts.own.text, attachErrorText(error));
           restoreChips(opts.own.restoreChips);
+          restoreDocuments(opts.own.restoreDocuments);
         } else if (failed.kind === "restore") {
           for (const id of failed.ids) restoredRef.current.add(id);
           setRows(() => []);
@@ -782,9 +829,11 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       flushNow,
       foreignRef,
       handedWakeRef,
+      joinCards,
       model,
       pushNotice,
       restoreChips,
+      restoreDocuments,
       restoreInput,
       restoredRef,
       rowsRef,
@@ -815,6 +864,14 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         /** The chips whose refs those are: their `[image: …]` rows and a restore. */
         images?: readonly AttachedImage[];
         /**
+         * The prompt's attached PDFs, already wire blocks (docs/feat/pdf-read.md
+         * D6): `attachDocument` built each one, so this driver never decides where
+         * an extraction happens.
+         */
+        documents?: readonly DocumentContent[];
+        /** The PDF chips whose blocks those are: their `[pdf: …]` rows and a restore. */
+        documentChips?: readonly AttachedDocument[];
+        /**
          * docs/feat/session-hop-ux OD6: the turn is a hop's OWN wake — it carries
          * the pending hop line and paints the dim `↻ continuing after the move` row
          * instead of a user bubble, so the frame says why a turn started by itself.
@@ -842,6 +899,9 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         pushNotice(COMPACTING_NO_TURN);
         return;
       }
+      // A turn replaces the slot at once: a lingering `Compacted ✓` must not
+      // reappear after this turn ends (docs/feat/harness-notices.md S3).
+      clearCompacted();
       // OD6: a hop's wake is a REAL prompt (it carries the hop line, and it is saved
       // as conversation) that shows NO user bubble — the dim row below says why a
       // turn started by itself. It is not a continuation: a continuation takes no
@@ -856,6 +916,10 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         hopTurn?.onUserPrompt?.();
       }
       const images = (opts?.images ?? []).map((chip) => imageRowText(chip.ref));
+      // The PDF rows (docs/feat/pdf-read.md D5): the page count is the DAEMON's
+      // fact — the client never saw it on this turn (it extracted server-side, or
+      // this laptop did and kept only the block) — so the row says the name.
+      const documentRows = (opts?.documentChips ?? []).map((chip) => documentRowText(chip.name));
       const controller = new AbortController();
       abortRef.current = controller;
       stoppedHereRef.current = false;
@@ -863,7 +927,13 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         ? startContinuation(stateRef.current, Date.now())
         : hopWake
           ? startHopWake(stateRef.current, Date.now())
-          : startTurn(stateRef.current, text, Date.now(), images.length > 0 ? images : undefined);
+          : startTurn(
+              stateRef.current,
+              text,
+              Date.now(),
+              images.length > 0 ? images : undefined,
+              documentRows.length > 0 ? documentRows : undefined,
+            );
       setScrollOffset(0);
       flushNow();
       // The bubble `startTurn` appended (none for a continuation): withdrawn by
@@ -880,6 +950,9 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         ...(opts?.skill !== undefined ? { skill: opts.skill } : {}),
         ...(opts?.attachments !== undefined && opts.attachments.length > 0
           ? { attachments: opts.attachments }
+          : {}),
+        ...(opts?.documents !== undefined && opts.documents.length > 0
+          ? { documents: opts.documents }
           : {}),
       };
       await streamTurn(
@@ -898,8 +971,12 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
             item,
             text: continuation ? "" : text,
             ...(images.length > 0 ? { images } : {}),
+            ...(documentRows.length > 0 ? { documents: documentRows } : {}),
             ...(opts?.images !== undefined && opts.images.length > 0
               ? { restoreChips: opts.images }
+              : {}),
+            ...(opts?.documentChips !== undefined && opts.documentChips.length > 0
+              ? { restoreDocuments: opts.documentChips }
               : {}),
             // A line was CONSUMED for this prompt: if it never runs, it must go
             // back (see the driver's catch) rather than die with the send.
@@ -910,6 +987,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     },
     [
       abortRef,
+      clearCompacted,
       compactingRef,
       flushNow,
       lastHadImagesRef,
@@ -1105,7 +1183,6 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     if (!session) {
       return;
     }
-    pushNotice("_Compacting the conversation…_");
     setCompacting(true);
     compactionOwnedRef.current = false;
     // Whether THIS handler raised its own-compaction count: only then may
@@ -1129,7 +1206,18 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         sendNowOwns: compactionOwnedRef.current,
         turnRunning: stateRef.current.running,
       });
-      pushNotice(out.notice);
+      // The transcript says nothing while it runs or on success
+      // (docs/feat/harness-notices.md S3, owner decision 3): the slot says
+      // `Compacted ✓` and one grey rule marks the compaction point, which
+      // survives `--resume` (a replay builds the same rule from the history).
+      // A failure and a cancel keep their harness line.
+      if (out.notice !== null) {
+        pushNotice(out.notice, out.level);
+      }
+      if (out.separator !== undefined) {
+        pushSeparator(out.separator);
+        markCompacted();
+      }
       if (out.send !== null) {
         setRows(() => []);
         wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
@@ -1158,7 +1246,16 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         armed = true;
         void session.compact?.().then(
           (r) => {
-            settled({ ok: true, before: r.before, after: r.after });
+            settled({
+              ok: true,
+              before: r.before,
+              after: r.after,
+              // The sizes the daemon measured (S1): absent on an older daemon,
+              // and the separator then reads `compacted` with no figures.
+              ...(r.fromTokens === undefined ? {} : { fromTokens: r.fromTokens }),
+              ...(r.toTokens === undefined ? {} : { toTokens: r.toTokens }),
+              ...(r.toExact === true ? { toExact: true as const } : {}),
+            });
             // The history shrank: the open figure is stale until a turn measures.
             askContext(session);
           },
@@ -1169,8 +1266,10 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     );
   }, [
     askContext,
+    markCompacted,
     ownCompactionsRef,
     pushNotice,
+    pushSeparator,
     restoreInput,
     rowsRef,
     run,
@@ -1207,6 +1306,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         compacting: compactingRef.current,
         dockOpen: false, // `submitToTarget` already took a child-owned text
         mode: attachMode(),
+        documentMode: documentMode(),
         onlyPaths: enterConvertsToChips(text, probedText, home !== undefined ? { home } : {}),
       });
       if (plan.kind === "refuse") {
@@ -1226,7 +1326,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
           restoreInput(plan.text, refusedPrompt);
           return;
         }
-        sendWithImages(plan.text, plan.images);
+        sendWithImages(plan.text, plan.images, plan.documents);
         return;
       }
       if (plan.kind === "convert") {
@@ -1300,6 +1400,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       attachRef,
       compactingRef,
       convertToChips,
+      documentMode,
       draftRef,
       // `field.reset`, not `field`: the line editor's object is re-made every
       // render, its `reset` is a stable `useCallback` — the dep array `main` had,

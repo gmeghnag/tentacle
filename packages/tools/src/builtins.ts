@@ -8,15 +8,24 @@
  * so a rich frontend can render a git-style diff. Mutating tools default to
  * `permission: "ask"`.
  */
-import type { ExecOptions, Tool, ToolContext, ToolResultDetail } from "@tentacle/core";
-import { pathLocksFor } from "@tentacle/core";
+import type { ExecOptions, Tool, ToolContext, ToolDiffDetail } from "@tentacle/core";
+import {
+  MAX_PDF_BYTES,
+  PDF_HEAD_BYTES,
+  formatPdfText,
+  isPdf,
+  looksLikeTextBytes,
+  pathLocksFor,
+  pdfVerdict,
+} from "@tentacle/core";
 import { createTwoFilesPatch } from "diff";
 import { z } from "zod";
 import { shellKillTool, shellOutputTool } from "./background.ts";
 import { pathConcurrency } from "./concurrency.ts";
+import { extractPdf } from "./pdf/extract.ts";
 
 /** Build a unified-diff detail and count changed lines. */
-function makeDiff(path: string, before: string, after: string): ToolResultDetail {
+function makeDiff(path: string, before: string, after: string): ToolDiffDetail {
   const patch = createTwoFilesPatch(path, path, before, after, "", "");
   let added = 0;
   let removed = 0;
@@ -57,7 +66,18 @@ const fsReadInput = z.object({
     ),
   offset: z.number().int().positive().optional().describe("1-based first line to read."),
   limit: z.number().int().positive().optional().describe("Number of lines to read from offset."),
+  pages: z
+    .string()
+    .optional()
+    .describe("PDF only: pages to read, e.g. `1-5`, `3`, `2,7-9` (default: the first 100)."),
 });
+
+/** The last path segment, as a name for a message (`path.basename`, kept local so
+ * this module imports no `node:` built-in above its own docblock). */
+function displayName(path: string): string {
+  const segments = path.split("/").filter((part) => part !== "");
+  return segments[segments.length - 1] ?? path;
+}
 
 /** Parse a trailing `:start` / `:start:end` line range off a path (unix paths
  * rarely end in `:<digits>`, so this is safe). Returns the bare path + range. */
@@ -78,7 +98,7 @@ function parsePathRange(path: string): { path: string; offset?: number; limit?: 
 export const fsReadTool: Tool<z.infer<typeof fsReadInput>> = {
   name: "fs_read",
   description:
-    "Read a UTF-8 text file. By default returns the whole file; pass `offset`/`limit` (or a `path:start:end` range) to read only a slice — preferred for large files, then edit precisely. A ranged read is prefixed with a `[path lines A-B of N]` header.",
+    "Read a UTF-8 text file. By default returns the whole file; pass `offset`/`limit` (or a `path:start:end` range) to read only a slice — preferred for large files, then edit precisely. A ranged read is prefixed with a `[path lines A-B of N]` header. A PDF is detected by content and returned as extracted text with `--- page N / M ---` markers; use `pages` for large documents; scanned PDFs have no text.",
   inputSchema: fsReadInput,
   permission: "none",
   concurrency: pathConcurrency("read", (path) => parsePathRange(path).path),
@@ -91,6 +111,16 @@ export const fsReadTool: Tool<z.infer<typeof fsReadInput>> = {
     const path = fromPath.path;
     const offset = fromPath.offset;
     const limit = fromPath.limit;
+
+    // A PDF is decided by its BYTES, never its name (D3): `notes.pdf` that is
+    // text stays text, a `download` that is a PDF is parsed.
+    const pdf = await readPdf(path, input.pages, { offset, limit }, ctx);
+    if (pdf !== undefined) {
+      return pdf;
+    }
+    if (input.pages !== undefined) {
+      throw new Error(`\`pages\` applies only to PDFs: ${path} is not a PDF`);
+    }
 
     const content = await ctx.env.readFile(path);
     if (offset === undefined && limit === undefined) {
@@ -106,6 +136,104 @@ export const fsReadTool: Tool<z.infer<typeof fsReadInput>> = {
   },
 };
 
+/**
+ * The PDF branch of `fs_read` (D3): `undefined` when the file is not a PDF —
+ * the caller then runs today's text path unchanged. Throws a tool error for
+ * every failure (encrypted, corrupt, too large, scanned, a bad range), so the
+ * model gets the rule it broke instead of an empty read.
+ */
+async function readPdf(
+  path: string,
+  pages: string | undefined,
+  range: { offset?: number | undefined; limit?: number | undefined },
+  ctx: ToolContext,
+): Promise<{ content: string } | undefined> {
+  const readBytes = ctx.env.readBytes?.bind(ctx.env);
+  if (readBytes === undefined) {
+    // No byte read available: a PDF cannot be read at all, so `pages` is a
+    // refusal naming the capability rather than a silently ignored argument.
+    if (pages !== undefined) {
+      throw new Error(
+        `\`pages\` applies only to PDFs, and this environment (${ctx.env.id}) cannot read file bytes, so PDFs cannot be read in this build`,
+      );
+    }
+    return undefined;
+  }
+  // One bounded sniff: 1 KiB is enough for `%PDF-` (it may sit past a binary
+  // comment or a leading whitespace run).
+  const head = await readBytes(path, { readLimitBytes: PDF_HEAD_BYTES });
+  if (!isPdf(head)) {
+    return undefined;
+  }
+  const name = displayName(path);
+  const ranged = range.offset !== undefined || range.limit !== undefined;
+  // A head that is not even text-decoded is a real PDF: refuse the range now,
+  // without reading or parsing the body (fix round 1 keeps this cheap path).
+  if (ranged && !looksLikeTextBytes(head)) {
+    throw new Error(`${path} is a PDF: use pages (e.g. "1-5"), not line ranges`);
+  }
+  const bytes = await readBytes(path, { maxBytes: MAX_PDF_BYTES });
+  const extraction = await extractPdf(bytes, {
+    ...(pages !== undefined ? { pages } : {}),
+    signal: ctx.signal,
+  });
+  if (!extraction.ok) {
+    // A text file whose head *looked* like a PDF (prose quoting the header, a
+    // `.pdf` that is really text) must still read as text: `corrupt` on valid
+    // UTF-8 is not a broken PDF, it is the text path — which also gives `pages`
+    // on it the honest "applies only to PDFs" refusal. Only `corrupt`: an
+    // encrypted, oversized or timed-out document is a real PDF whatever its
+    // bytes decode to, so those stay errors.
+    if (extraction.reason === "corrupt" && looksLikeTextBytes(bytes)) {
+      return undefined;
+    }
+    throw new Error(`${name}: ${extraction.message}`);
+  }
+  if (ranged) {
+    throw new Error(`${path} is a PDF: use pages (e.g. "1-5"), not line ranges`);
+  }
+  const verdict = pdfVerdict({
+    name,
+    numPages: extraction.numPages,
+    pages: extraction.pages,
+  });
+  if (verdict.kind === "no-text") {
+    throw new Error(verdict.message);
+  }
+  const text = formatPdfText({
+    pages: extraction.pages,
+    numPages: extraction.numPages,
+    name,
+  });
+  return { content: verdict.kind === "partial" ? `${text}\n${verdict.message}` : text };
+}
+
+/**
+ * The marker every smart-compaction stub starts with (docs/feat/smart-compaction.md;
+ * `PRUNE_MARKER` in `@tentacle/agent` is this value). A stub is the marker, a
+ * colon, then what was there — `⟪pruned by tentacle: …⟫`.
+ */
+export const PRUNE_SENTINEL = "⟪pruned by tentacle";
+
+/**
+ * Text a write would put on disk that carries a stub: the model copied a
+ * placeholder, not file content. Refused before the file is read or written,
+ * so nothing changes. Only the marker WITH the stub's colon counts: source
+ * that merely names the marker stays writable.
+ */
+function prunedPlaceholderRefusal(
+  path: string,
+  written: readonly string[],
+): { content: string; isError: true } | undefined {
+  if (!written.some((text) => text.includes(`${PRUNE_SENTINEL}:`))) {
+    return undefined;
+  }
+  return {
+    content: `refused: the text to write contains a pruned placeholder ("${PRUNE_SENTINEL}: …⟫"), which is not file content — fs_read ${path} first and write the real text (nothing was written)`,
+    isError: true,
+  };
+}
+
 const fsWriteInput = z.object({
   path: z.string().min(1).describe("Path to the file to write (created or overwritten)."),
   content: z.string().describe("Full UTF-8 contents to write."),
@@ -118,6 +246,10 @@ export const fsWriteTool: Tool<z.infer<typeof fsWriteInput>> = {
   permission: "ask",
   concurrency: pathConcurrency("write"),
   execute(input, ctx) {
+    const refused = prunedPlaceholderRefusal(input.path, [input.content]);
+    if (refused) {
+      return Promise.resolve(refused);
+    }
     return lockPath(ctx, input.path, async () => {
       let before = "";
       try {
@@ -192,6 +324,10 @@ export const fsEditTool: Tool<z.infer<typeof fsEditInput>> = {
   permission: "ask",
   concurrency: pathConcurrency("write"),
   execute(input, ctx) {
+    const refused = prunedPlaceholderRefusal(input.path, [input.new_string]);
+    if (refused) {
+      return Promise.resolve(refused);
+    }
     return lockPath(ctx, input.path, async () => {
       const before = await ctx.env.readFile(input.path);
       const result = applyOneEdit(before, input);
@@ -229,6 +365,13 @@ export const fsMultiEditTool: Tool<z.infer<typeof fsMultiEditInput>> = {
   permission: "ask",
   concurrency: pathConcurrency("write"),
   execute(input, ctx) {
+    const refused = prunedPlaceholderRefusal(
+      input.path,
+      input.edits.map((e) => e.new_string),
+    );
+    if (refused) {
+      return Promise.resolve(refused);
+    }
     return lockPath(ctx, input.path, async () => {
       const before = await ctx.env.readFile(input.path);
       let current = before;

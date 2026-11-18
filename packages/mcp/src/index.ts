@@ -8,4 +8,5 @@ export * from "./http-transport.ts";
 export * from "./client.ts";
 export * from "./tool-adapter.ts";
 export * from "./connect.ts";
+export * from "./supervisor.ts";
 export * from "./status.ts";

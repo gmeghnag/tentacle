@@ -4,7 +4,7 @@
  * failure into a `ConfigError`.
  *
  * Rules: a top-level setting in the profile wins; `subagents`/`tools`/
- * `contextAwareness`/`contextReset`/`mount`/`detach`/`tui` merge per key; `model` merges per key EXCEPT the connection group (provider, baseURL,
+ * `contextAwareness`/`contextReset`/`contextPrune`/`schedules`/`mount`/`detach`/`tui` merge per key; `model` merges per key EXCEPT the connection group (provider, baseURL,
  * apiKey, apiKeyCommand), which moves as a unit, so a key is never sent to an
  * endpoint it was not configured for; `mcpServers` merge by name (a definition
  * is replaced whole, `null` removes it); `models` and `subagents.types` merge by
@@ -71,8 +71,10 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
     tools,
     contextAwareness,
     contextReset,
+    contextPrune,
     sessionHop,
     workloadShell,
+    schedules,
     mcpServers,
     mount,
     detach,
@@ -119,11 +121,17 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
   if (contextReset) {
     config.contextReset = { ...base.contextReset, ...contextReset };
   }
+  if (contextPrune) {
+    config.contextPrune = { ...base.contextPrune, ...contextPrune };
+  }
   if (sessionHop) {
     config.sessionHop = { ...base.sessionHop, ...sessionHop };
   }
   if (workloadShell) {
     config.workloadShell = { ...base.workloadShell, ...workloadShell };
+  }
+  if (schedules) {
+    config.schedules = { ...base.schedules, ...schedules };
   }
   if (tools) {
     config.tools = { ...base.tools, ...tools };

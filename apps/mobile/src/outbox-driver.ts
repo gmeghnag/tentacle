@@ -19,7 +19,7 @@
  * - a prompt goes out only when the person's view is unchanged; anything else
  *   is `needs-decision`, and the sheet's Send reuses the same key.
  */
-import type { AttachmentRef } from "@tentacle/protocol";
+import type { AttachmentRef, DocumentContent } from "@tentacle/protocol";
 import {
   type Decision,
   type OutboxItem,
@@ -29,14 +29,20 @@ import {
   asSteer,
   createItem,
   decide,
+  documentBlocksOf,
+  documentsOf,
+  localPhotosOf,
   notOpenRefusal,
+  pendingDocuments,
   pendingUploads,
   refsOf,
   refusalOf,
   reuploaded,
+  withDocumentBlock,
   withRef,
   withState,
 } from "./outbox.ts";
+import type { LocalPhoto } from "./transcript-rows.ts";
 
 /**
  * The session as the driver sees it: the four acts it performs, and the facts
@@ -56,8 +62,28 @@ export interface OutboxSession {
     bytes: Uint8Array,
     meta: { readonly mimeType: string; readonly name?: string },
   ): Promise<AttachmentRef>;
-  /** One prompt, with the key it carries. */
-  prompt(text: string, turnId: string, attachments: readonly AttachmentRef[]): Promise<void>;
+  /**
+   * One prompt, with the key it carries. Resolves at the daemon's ACK (it holds
+   * the key: F3), NOT at the turn's end — the turn keeps streaming elsewhere
+   * (`untilAccepted`, docs/fix/mobile-chat-glitches.md bug 2). Rejects with a
+   * refusal before the ack, or `SessionNotOpenError("link")` when unanswered.
+   */
+  prompt(
+    text: string,
+    turnId: string,
+    attachments: readonly AttachmentRef[],
+    /** The LOCAL copies of those refs, for the transcript's own row (item 2). */
+    photos?: readonly LocalPhoto[],
+    /** The attached PDFs, already turned into wire blocks by `attachDocument` (D7). */
+    documents?: readonly DocumentContent[],
+  ): Promise<void>;
+  /**
+   * Turn one attached PDF's bytes into the wire block a prompt names
+   * (docs/feat/pdf-read.md D6/D7). `RemoteSession.attachDocument` decides
+   * upload-vs-laptop-extract from the daemon's capability — the SAME session
+   * path a TUI uses, never a frame built here; this port only names it.
+   */
+  attachDocument(bytes: Uint8Array, meta: { readonly name: string }): Promise<DocumentContent>;
   /** One steer, with the key it carries, bound to the turn it was typed during. */
   steer(text: string, id: string, turnId: string): Promise<void>;
   /** The daemon's state now (after `open()`): history length, the running turn, availability. */
@@ -225,6 +251,40 @@ export function createOutboxDriver(
     return { item: current, refusal: null };
   };
 
+  /**
+   * Hand the item's pending PDFs to the session, one at a time, recording each
+   * wire block (docs/feat/pdf-read.md D7). AFTER the photos, never beside them:
+   * one set of bytes in memory at a time, and a kill mid-way resumes from what
+   * the item already records (`pendingDocuments`).
+   *
+   * `attachDocument` does the uploading itself (or the laptop-side extraction,
+   * for a pod daemon) — so there is no `upload` call here and no ref to mint:
+   * the answer IS the block the prompt names.
+   */
+  const attachDocuments = async (
+    session: OutboxSession,
+    item: OutboxItem,
+  ): Promise<{ item: OutboxItem; refusal: Refusal | null }> => {
+    let current = item;
+    for (const index of pendingDocuments(current)) {
+      const document = documentsOf(current)[index];
+      if (document === undefined) {
+        continue;
+      }
+      try {
+        const bytes = await deps.readPhoto(document.file);
+        const block = await session.attachDocument(bytes, { name: document.name });
+        current = withDocumentBlock(current, index, block);
+        // Persisted before the NEXT file: a resume must not re-put bytes the
+        // daemon already holds (the block names them).
+        await save(replace(deps.persistence.items(), current));
+      } catch (error) {
+        return { item: current, refusal: refusalOf(error, "prompt") };
+      }
+    }
+    return { item: current, refusal: null };
+  };
+
   /** Carry out one `send` decision (the key is the item's own). */
   const perform = async (session: OutboxSession, item: OutboxItem): Promise<void> => {
     const sending = withState(item, "sending");
@@ -247,7 +307,19 @@ export function createOutboxDriver(
           await refuse(uploaded.item, uploaded.refusal);
           return;
         }
-        await session.prompt(uploaded.item.text, uploaded.item.turnId, refsOf(uploaded.item));
+        const attached = await attachDocuments(session, uploaded.item);
+        current = attached.item;
+        if (attached.refusal !== null) {
+          await refuse(attached.item, attached.refusal);
+          return;
+        }
+        await session.prompt(
+          attached.item.text,
+          attached.item.turnId,
+          refsOf(attached.item),
+          localPhotosOf(attached.item),
+          documentBlocksOf(attached.item),
+        );
       }
     } catch (error) {
       // `current`, not `sending`: an upload that landed recorded its ref, and
@@ -278,8 +350,12 @@ export function createOutboxDriver(
         return;
       case "reupload": {
         // `not_uploaded`: the daemon evicted the partial. ONE re-upload, then
-        // refuse visibly (F18) — retrying again would loop.
-        if (item.reuploaded === true || item.photos.every((photo) => photo.ref === undefined)) {
+        // refuse visibly (F18) — retrying again would loop. A document counts
+        // too: its block may name a `document{ref}` blob the daemon dropped.
+        const nothingToReupload =
+          item.photos.every((photo) => photo.ref === undefined) &&
+          documentsOf(item).every((document) => document.block === undefined);
+        if (item.reuploaded === true || nothingToReupload) {
           await settleDecision(item, { kind: "decide", why: "refused" });
           return;
         }

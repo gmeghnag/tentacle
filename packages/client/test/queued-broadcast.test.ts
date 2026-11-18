@@ -151,6 +151,38 @@ async function twoClients(ringBytes?: number) {
   return { gated, host, a, b, session, sid, turnDone, returned };
 }
 
+describe("RemoteSession.unqueue (docs/feat/queue-unqueue.md)", () => {
+  test("T7 round trip: the row leaves for every client; a drained/unknown id is delivered", async () => {
+    const t = await twoClients();
+    await t.session.enqueue("X", "x");
+    await t.session.enqueue("Y", "y");
+    expect(await t.session.unqueue(["x", "nope"])).toEqual({ removed: ["x"], delivered: ["nope"] });
+    await until(() => (t.b.client.queuedOf(t.sid)?.entries.length ?? 0) === 1);
+    expect(t.b.client.queuedOf(t.sid)?.entries).toEqual([{ id: "y", text: "Y" }]);
+    expect(t.session.queued?.entries).toEqual([{ id: "y", text: "Y" }]);
+    t.gated.release();
+    await t.turnDone;
+  });
+
+  test("T7b an older daemon (MethodNotFound) → unsupported, never a silent success", async () => {
+    const gated = gatedEnv();
+    const host = daemon(gated.env);
+    const a = connect(host, (frame) =>
+      typeof frame.result === "object" && frame.result !== null && "removed" in frame.result
+        ? { jsonrpc: "2.0", id: frame.id, error: { code: -32601, message: "Method not found" } }
+        : frame,
+    );
+    await a.client.initialize();
+    const session = a.client.newSession();
+    const turnDone = drain(session.send("go"));
+    await until(() => gated.running() === 1);
+    await session.enqueue("X", "x");
+    expect(await session.unqueue(["x"])).toBe("unsupported");
+    gated.release();
+    await turnDone;
+  });
+});
+
 describe("RemoteSession / RemoteClient: the queue (docs/feat/queued-broadcast.md)", () => {
   test("C1 B sees A's rows; A's session reports the same state", async () => {
     const t = await twoClients();

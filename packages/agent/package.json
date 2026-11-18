@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@tentacle/config": "workspace:*",
     "@tentacle/core": "workspace:*",
     "@tentacle/tools": "workspace:*"
   },

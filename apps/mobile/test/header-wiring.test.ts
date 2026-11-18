@@ -1,0 +1,212 @@
+/**
+ * S2 of docs/feat/mobile-chrome.md — the header (A1): thin bare glyphs, no glass
+ * circles, a context ring, one hairline.
+ *
+ * The primitives are `.tsx` (unimportable from Bun: React Native's sources are
+ * Flow), so this pins the wiring from the source, like `icon-glass-wiring.test.ts`.
+ * Every assertion here is about the *look contract* the mockup row D fixes:
+ *  - every screen header button is `HeaderIcon` (no `BlurView`, no shadow);
+ *  - `GlassButton` survives ONLY over the camera (its dark chrome);
+ *  - the chat header draws `ContextRing` and no longer the flat bar;
+ *  - the compact header ends in a `sepChat` hairline;
+ *  - the ring needs no `react-native-svg` (Design 2: no native rebuild).
+ */
+import { describe, expect, test } from "bun:test";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+
+const APP = join(import.meta.dir, "..");
+const read = (...p: string[]) => readFileSync(join(APP, ...p), "utf8");
+const pkg = JSON.parse(read("package.json")) as { dependencies: Record<string, string> };
+
+const HEADER_ICON = read("src", "ui", "HeaderIcon.tsx");
+const RING = read("src", "ui", "ContextRing.tsx");
+// The arc's GEOMETRY lives in the shared renderer since docs/feat/mobile-hub-badges.md
+// Design 8 (a fan item's count rim draws it too); the ring keeps the reading.
+const RING_ARC = read("src", "ui", "RingArc.tsx");
+const SCREEN_HEADER = read("src", "ui", "ScreenHeader.tsx");
+const SESSION_SCREEN = read("src", "screens", "SessionScreen.tsx");
+
+const screens = readdirSync(join(APP, "src", "screens")).filter((f) => f.endsWith(".tsx"));
+
+/** Every screen source, by name (the header buttons live in these). */
+const screenSource = (file: string) => read("src", "screens", file);
+
+/** The `<ContextRing …/>` element exactly as the chat header writes it. */
+function ringCallSite(): string {
+  const start = SESSION_SCREEN.indexOf("<ContextRing");
+  expect(start).toBeGreaterThan(-1);
+  const end = SESSION_SCREEN.indexOf("/>", start);
+  expect(end).toBeGreaterThan(start);
+  return SESSION_SCREEN.slice(start, end);
+}
+
+describe("S2 · one thin header button for the whole app (A1)", () => {
+  test("`HeaderIcon` is a bare glyph: a 44 pt pressable, no blur, no shadow, no fill", () => {
+    expect(HEADER_ICON).toMatch(/<Pressable\b/);
+    expect(HEADER_ICON).toMatch(/SIZE\.touch/);
+    expect(HEADER_ICON).toMatch(/<Icon\b/);
+    // The whole point of A1: the circles are gone from the chrome.
+    expect(HEADER_ICON).not.toMatch(/BlurView/);
+    expect(HEADER_ICON).not.toMatch(/shadow\.glass/);
+    expect(HEADER_ICON).not.toMatch(/borderRadius/);
+  });
+
+  test("its default weight is `light` (A1's thin glyphs, at 22 pt)", () => {
+    expect(HEADER_ICON).toMatch(/weight = "light"/);
+    expect(HEADER_ICON).toMatch(/size = 22/);
+  });
+
+  test("a text header button is the same seam (`Cancel` on Pair)", () => {
+    expect(HEADER_ICON).toMatch(/label\?: string/);
+  });
+
+  test("no screen keeps a glass circle in its header — only the over-camera chrome", () => {
+    const offenders = screens
+      .filter((file) => screenSource(file).includes("<GlassButton"))
+      // The camera's own dark chrome is the one intentional survivor (Design 2).
+      .filter((file) => {
+        const src = screenSource(file);
+        const sites = src.split("<GlassButton").length - 1;
+        const onDark = src.split("onDark").length - 1;
+        return sites > onDark;
+      });
+    expect(offenders).toEqual([]);
+  });
+
+  test("the chat, Sessions, Settings, Computers and Pair headers use `HeaderIcon`", () => {
+    for (const file of [
+      "SessionScreen.tsx",
+      "SessionsScreen.tsx",
+      "SettingsScreen.tsx",
+      "ComputersScreen.tsx",
+      "PairScreen.tsx",
+    ]) {
+      expect({ file, has: screenSource(file).includes("<HeaderIcon") }).toEqual({
+        file,
+        has: true,
+      });
+    }
+  });
+});
+
+describe("S2 · the context ring (A1 + F11)", () => {
+  test("the chat header draws `ContextRing`, not the flat bar", () => {
+    // The ring is drawn ONLY when there is a reading (never a fake 0, the old
+    // bar's rule), so the guard and the draw are asserted together — a `null`
+    // ring or an always-null guard both fail here.
+    const guard = SESSION_SCREEN.indexOf("state.view.headerContext === null ? null : (");
+    expect(guard).toBeGreaterThan(-1);
+    const afterGuard = SESSION_SCREEN.slice(guard, guard + 400);
+    expect(afterGuard).toContain("<ContextRing");
+    expect(afterGuard).toContain("percent={state.view.headerContext.percent}");
+    expect(SESSION_SCREEN).toContain('testID="session-header-context"');
+    // The old 64 × 2 bar is gone, and so is its style entry.
+    expect(SESSION_SCREEN).not.toMatch(/contextBar:/);
+    expect(SESSION_SCREEN).not.toMatch(/session-header-context[\s\S]{0,200}height: 2/);
+  });
+
+  test("the ring is plain Views — it does not use `react-native-svg` (Design 2)", () => {
+    // The package itself IS a dependency since docs/feat/model-charts.md C6 (the
+    // chart, owner Q8); what Design 2 pins is that the RING does not need it.
+    expect(RING).toMatch(/from "react-native"/);
+    // No IMPORT of it, in either half of the renderer (the files name it in prose
+    // to say why it is absent).
+    expect(RING).not.toMatch(/from "react-native-svg"/);
+    expect(RING_ARC).not.toMatch(/from "react-native-svg"/);
+    // Its geometry comes from the pure module, not from numbers in the component.
+    expect(RING_ARC).toMatch(/ringHalfRotation\(/);
+    expect(RING).toMatch(/ringLabel\(/);
+  });
+
+  test("the ring is tappable to Session info and says its reading (F11)", () => {
+    expect(RING).toMatch(/onPress\?: \(\) => void/);
+    expect(RING).toMatch(/accessibilityLabel=\{label\}/);
+  });
+
+  test("the chat header PASSES the tap through, opening Session info (F11)", () => {
+    // Declaring `onPress?` is not the feature: an unwired ring falls into the
+    // `onPress === undefined` branch and renders as a non-interactive
+    // progressbar, losing Design 2 / F11's tap target without a type error.
+    //
+    // H4a (docs/feat/mobile-hub.md) turned the ring's tap into the SAME opening
+    // path as the hub's Scheduled item: `openInfo()`, which is the one place that
+    // sets `infoOpen` and starts the pulls. The guard pins the seam, not the
+    // literal setter, so a second way into the sheet still fails it.
+    const call = ringCallSite();
+    expect(call).toMatch(/onPress=\{/);
+    expect(call).toMatch(/openInfo\(\)/);
+    // …and `openInfo` still is what opens it, with no reveal by default.
+    expect(SESSION_SCREEN).toMatch(
+      /const openInfo = \(revealTo: SectionId \| null = null\) => \{[\s\S]{0,200}setInfoOpen\(true\);/,
+    );
+  });
+
+  test("the arc stays the `borderTop`+`borderLeft` half the rotation bases assume", () => {
+    // `ringHalfRotation`'s 315/135 bases place a `borderTop`+`borderLeft` arc —
+    // centred at 10:30 — so each half starts empty at 0% and sweeps exactly its
+    // own degrees. Swap a side (top+right is centred at 1:30) and neither half
+    // starts empty: the ring shows a phantom 90° at 0% and a wrong sweep
+    // everywhere. The bases are tested in chat-header.test.ts; this is the other
+    // half of that coupling, which lives in the component.
+    expect(RING_ARC).toMatch(/borderTopColor: tone/);
+    expect(RING_ARC).toMatch(/borderLeftColor: tone/);
+    expect(RING_ARC).not.toMatch(/borderRightColor/);
+    expect(RING_ARC).not.toMatch(/borderBottomColor/);
+  });
+});
+
+describe("mobile-header-status · the dot before the title, `<folder> · <model>` under it", () => {
+  const HEADER_DOT = read("src", "ui", "HeaderDot.tsx");
+  const DRAWER = read("src", "screens", "SessionsDrawer.tsx");
+
+  test("no status WORD and no StatusDot in the subtitle any more", () => {
+    expect(SESSION_SCREEN).not.toMatch(/status\.text/);
+    expect(SESSION_SCREEN).not.toMatch(/<StatusDot\b/);
+  });
+
+  test("the dot is the pure module's: the ask fact is wired, the title gets lead/dim/label", () => {
+    expect(SESSION_SCREEN).toMatch(/asking: state\.sheet\.kind === "asking"/);
+    expect(SESSION_SCREEN).toMatch(/titleLead=\{status\.dot === null \? null : <HeaderDot/);
+    expect(SESSION_SCREEN).toMatch(/titleDim=\{status\.dimTitle\}/);
+    expect(SESSION_SCREEN).toMatch(/titleLabel=\{titleLabel\(state\.view\.title, status\)\}/);
+    // The look comes from `dotLook`, the pulse is native and Reduce Motion holds it.
+    expect(HEADER_DOT).toMatch(/dotLook\(dot\)/);
+    expect(HEADER_DOT).toMatch(/useNativeDriver: true/);
+    expect(HEADER_DOT).toMatch(/look\.pulse && !reduce/);
+    // ScreenHeader reads the label and dims the title.
+    expect(SCREEN_HEADER).toMatch(/accessibilityLabel=\{spoken\}/);
+    expect(SCREEN_HEADER).toMatch(/titleDim \? palette\.sec : palette\.label/);
+  });
+
+  test("the subtitle's folder is mono, middle-cut, and the tap opens Session info", () => {
+    const at = SESSION_SCREEN.indexOf('testID="session-header-folder"');
+    expect(at).toBeGreaterThan(-1);
+    expect(SESSION_SCREEN.slice(at, at + 400)).toMatch(/ellipsizeMode="middle"/);
+    expect(SESSION_SCREEN).toMatch(/headerFolder: \{ fontFamily: MONO/);
+    const press = SESSION_SCREEN.indexOf('testID="session-header-status"');
+    expect(SESSION_SCREEN.slice(press, press + 600)).toMatch(/onPress=\{\(\) => openInfo\(\)\}/);
+  });
+
+  test("the drawer row draws its folder under the title, mono, middle-cut", () => {
+    const at = DRAWER.indexOf("drawer-folder-");
+    expect(at).toBeGreaterThan(-1);
+    expect(DRAWER.slice(at, at + 300)).toMatch(/ellipsizeMode="middle"/);
+    expect(DRAWER).toMatch(/rowFolder: \{ fontFamily: MONO/);
+  });
+});
+
+describe("S2 · the compact header's hairline (A1)", () => {
+  test("the compact row ends in a `sepChat` hairline; the large variant does not", () => {
+    // The hairline reads the palette, not a hard-coded colour (tokens are the
+    // single source, AGENTS §6).
+    expect(SCREEN_HEADER).toMatch(/palette\.sepChat/);
+    expect(SCREEN_HEADER).toMatch(/hairlineWidth/);
+    // Applied on the compact branch only: a list screen's title scrolls under
+    // its own bar, so a line there would cross the content.
+    const compact = SCREEN_HEADER.slice(SCREEN_HEADER.indexOf('variant === "compact"'));
+    expect(compact).toMatch(/borderBottomWidth/);
+    const large = SCREEN_HEADER.slice(0, SCREEN_HEADER.indexOf('variant === "compact"'));
+    expect(large).not.toMatch(/borderBottomWidth/);
+  });
+});

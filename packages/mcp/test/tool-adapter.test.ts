@@ -36,6 +36,16 @@ describe("mcp tool adapter", () => {
     expect(tool.permission).toBe("ask");
   });
 
+  test("tags the server on the tool, so the name is never parsed (server `a__b`)", () => {
+    // A server name may itself contain `__`, so splitting `mcp__<server>__<tool>`
+    // gives the wrong server. The tag is the source of truth
+    // (docs/feat/session-capabilities.md, Design).
+    const { client } = fakeClient({ content: [] });
+    const tool = mcpToolToTool("a__b", client, { name: "echo", inputSchema: {} });
+    expect(tool.name).toBe("mcp__a__b__echo");
+    expect(tool.mcpServer).toBe("a__b");
+  });
+
   test("execute forwards arguments and flattens text content", async () => {
     const { client, calls } = fakeClient({ content: [{ type: "text", text: "result text" }] });
     const tool = mcpToolToTool("srv", client, { name: "do", inputSchema: { type: "object" } });

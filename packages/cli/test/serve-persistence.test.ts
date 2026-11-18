@@ -423,8 +423,9 @@ describe("serve persistence (end to end, real disk)", () => {
         log: logFor("client-shaped"),
         state: stateFor("client-shaped", { format: "tentacle.daemon-session" }),
       },
-      // 3: past this build's DAEMON_STATE_VERSIONS {1, 2} — 2 is the image-refs version now.
-      newer: { log: logFor("newer"), state: stateFor("newer", { schemaVersion: 3 }) },
+      // 4: past this build's DAEMON_STATE_VERSIONS {1, 2, 3} — 2 is the image-refs
+      // version, 3 the scheduled-wakes one (docs/feat/cron-tool.md D6).
+      newer: { log: logFor("newer"), state: stateFor("newer", { schemaVersion: 4 }) },
       "newer-log": { log: logFor("newer-log", { schemaVersion: 2 }), state: stateFor("newer-log") },
       foreign: { log: logFor("foreign", { cwd: "/another/project" }), state: stateFor("foreign") },
       "corrupt-log": {
@@ -443,7 +444,7 @@ describe("serve persistence (end to end, real disk)", () => {
       const skipped = notices.filter((l) => l.startsWith("skipped "));
       expect(skipped).toHaveLength(6);
       const about = (id: string) => skipped.find((l) => l.includes(`/${id}.jsonl`));
-      expect(about("newer")).toMatch(/state file schemaVersion 3 is not 1 or 2/);
+      expect(about("newer")).toMatch(/state file schemaVersion 4 is not 1 or 2 or 3/);
       expect(about("newer-log")).toMatch(/session log schemaVersion 2 is not 1/);
       expect(about("foreign")).toMatch(/another project/);
       expect(about("client-shaped")).toMatch(/not a tentacle daemon state file/);

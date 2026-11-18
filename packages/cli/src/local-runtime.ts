@@ -44,16 +44,21 @@ import type {
 import { forkWrite, forkableMessages } from "@tentacle/daemon";
 import { applyGroupMessage } from "@tentacle/exec";
 import {
+  type ArtifactListResult,
+  type ArtifactMeta,
+  type DocumentContent,
   DomainErrorCode,
   type McpServerStatus,
   type SessionSettings,
   type SessionTitle,
 } from "@tentacle/protocol";
+import { extractPdf } from "@tentacle/tools";
 import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import type { SessionController } from "@tentacle/tui";
 import { createSettingsNotifier } from "./carried-settings.ts";
 import { logDaemonError } from "./daemon-log.ts";
 import { type HooksTrustStore, createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
+import { artifactsToKeep } from "./laptop-artifacts.ts";
 import {
   type DurableImages,
   LaptopKeeper,
@@ -63,6 +68,7 @@ import {
   restoreNotice,
 } from "./laptop-blobs.ts";
 import { type OwnUse, type ResidentUse, ownUseOf, residentUseOf } from "./relay-state.ts";
+import { wireCapabilities } from "./session-capabilities.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import {
   type SettingsLine,
@@ -288,14 +294,22 @@ export interface PersistingController extends SessionController {
       readonly skill?: string;
       readonly turnId?: string;
       readonly attachments?: readonly AttachmentRef[];
+      /** The prompt's attached PDFs (docs/feat/pdf-read.md D6). */
+      readonly documents?: readonly DocumentContent[];
     },
   ): AsyncIterable<SessionEvent>;
   /** `RemoteSession.attachImage`: the ref a prompt then names (docs/feat/attachments-tui.md D4). */
   attachImage: RemoteSession["attachImage"];
   /** `RemoteSession.imageInput`: what this session may do with an image right now. */
   imageInput: RemoteSession["imageInput"];
+  /** `RemoteSession.attachDocument`: the wire block a prompt then names (docs/feat/pdf-read.md D6). */
+  attachDocument: RemoteSession["attachDocument"];
+  /** `RemoteSession.documentsInput`: what this session may do with a PDF right now. */
+  documentsInput: RemoteSession["documentsInput"];
   /** `RemoteSession.enqueue`: `id` is the caller's key for the text (a `sendNow` cites it). */
   enqueue(text: string, id?: string): Promise<void>;
+  /** `RemoteSession.unqueue`: take queued rows back (docs/feat/queue-unqueue.md). */
+  unqueue: RemoteSession["unqueue"];
   /** `RemoteSession.sendNow`; the new turn is saved once it settles, like `send`'s. */
   sendNow(...args: Parameters<RemoteSession["sendNow"]>): Promise<AsyncIterable<SessionEvent>>;
   /** `RemoteSession.rename`: the daemon's stored text; its `session_title` triggers a save. */
@@ -322,6 +336,16 @@ export interface PersistingController extends SessionController {
   readonly autoAccept: RemoteSession["autoAccept"];
   /** `RemoteClient.seedAutoAcceptOnCreate`: the value the NEXT created session starts with. */
   seedAutoAccept(on: boolean): void;
+  /** `RemoteSession.capabilities`: the session's MCP/skill switches as the daemon last reported them. */
+  capabilities: RemoteSession["capabilities"];
+  /** `RemoteSession.onCapabilities`: the switches' snapshots and changes (the `/mcp` / `/skills` rows). */
+  onCapabilities: RemoteSession["onCapabilities"];
+  /** `RemoteSession.setCapability`: Space in `/mcp` / `/skills` (S4). */
+  setCapability: RemoteSession["setCapability"];
+  /** `RemoteSession.opened`: open daemon-side (no switches yet ⇒ "not started", not "unsupported"). */
+  opened(): boolean;
+  /** `RemoteSession.seedCapabilities`: the NEXT created session starts with this one's switches. */
+  seedCapabilities(): void;
   /** `RemoteSession.watch`; a foreign turn is saved at its end, a `history` at once. */
   watch: RemoteSession["watch"];
   /** `RemoteSession.open` (the eager attach of an `attach` session; else a no-op). */
@@ -330,7 +354,17 @@ export interface PersistingController extends SessionController {
   openSeeded: RemoteSession["openSeeded"];
   /** `RemoteSession.openForReset`: the open a reset needs (else a no-op). */
   openForReset: RemoteSession["openForReset"];
+  /** `RemoteSession.listArtifacts`: the session's presented artifacts (docs/feat/model-artifacts.md D8). */
+  listArtifacts: RemoteSession["listArtifacts"];
+  /** `RemoteSession.readArtifact`: one version's verified bytes (`/artifacts`' opener, S6b). */
+  readArtifact: RemoteSession["readArtifact"];
   ownsTurn: RemoteSession["ownsTurn"];
+  /**
+   * `RemoteSession.autoAcceptsTurn`: own turns, plus the daemon's `wake-` turns
+   * where the runtime trusts its daemon (`daemonWakes`: the worker, `connect`).
+   * The TUI's auto-accept prefers it over `ownsTurn` (docs/feat/cron-tool.md D1).
+   */
+  autoAcceptsTurn: RemoteSession["autoAcceptsTurn"];
   onQueued: RemoteSession["onQueued"];
   /** `RemoteSession.onSubagents`: the live list of this session's background sub-agents. */
   onSubagents?: RemoteSession["onSubagents"];
@@ -340,6 +374,10 @@ export interface PersistingController extends SessionController {
   jobOutput?: RemoteSession["jobOutput"];
   /** `RemoteSession.killJob`: stop one background shell job. */
   killJob?: RemoteSession["killJob"];
+  /** `RemoteSession.onSchedules`: this session's armed scheduled wakes (cron-tool S5). */
+  onSchedules?: RemoteSession["onSchedules"];
+  /** `RemoteSession.deleteSchedule`: drop one armed wake. */
+  deleteSchedule?: RemoteSession["deleteSchedule"];
   /** `RemoteSession.onSubagentNotify`: a running child's message to this session's agent. */
   onSubagentNotify?: RemoteSession["onSubagentNotify"];
   /** `RemoteSession.messageSubagent`: the user's text into a running background child. */
@@ -375,6 +413,95 @@ const clearRefused = (error: unknown): boolean =>
 /** The daemon's wire title as the store's `TitleState`. */
 function titleState(title: SessionTitle): TitleState {
   return title.source === "auto" ? { source: "auto" } : { source: title.source, text: title.text };
+}
+
+/**
+ * Keeps the artifacts a session presents beside its log, on this laptop
+ * (docs/feat/model-artifacts.md D11): a worker daemon persists nothing, and its
+ * gallery would otherwise be empty after `--resume`.
+ *
+ * The work happens AROUND a save, never inside it: the daemon's own list is read
+ * first, each version this laptop lacks is fetched (`readArtifact`, already
+ * verified against its meta by the client) and written under the session's
+ * queue, so a `remove` queued after it leaves no orphan dir. One blob is fetched
+ * once however many versions name it. Never throws: a failed fetch or write is
+ * one notice, and the conversation goes on (an artifact the laptop could not
+ * keep is a smaller loss than a turn that cannot be saved).
+ */
+export class LaptopArtifacts {
+  private readonly notice: (text: string) => void;
+  /** The ONE notice this session shows (a disk that stays full must not print after every turn). */
+  private warned = false;
+
+  constructor(opts: {
+    /** The versions on disk now (`LogSessionStore.artifactManifest`); `"refused"` → keep nothing. */
+    readonly kept: () => readonly ArtifactMeta[] | "refused";
+    /** The daemon's own list for this session (verified: `RemoteClient.listArtifacts`). */
+    readonly list: () => Promise<ArtifactListResult>;
+    /** One version's bytes, verified against its meta (`RemoteClient.readArtifact`). */
+    readonly read: (meta: ArtifactMeta) => Promise<Uint8Array>;
+    /** `LogSessionStore.putArtifact`'s bound half: rejects when the write failed. */
+    readonly write: (meta: ArtifactMeta, bytes: Uint8Array) => Promise<void>;
+    readonly notice: (text: string) => void;
+    /**
+     * Whether this session's copy is still ours to write: a hand-over
+     * (`stopSaving`), a session deleted elsewhere, an older daemon with no
+     * `artifact/list` at all, a pod runtime.
+     */
+    readonly saving: () => boolean;
+  }) {
+    this.opts = opts;
+    this.notice = opts.notice;
+  }
+
+  private readonly opts: {
+    readonly kept: () => readonly ArtifactMeta[] | "refused";
+    readonly list: () => Promise<ArtifactListResult>;
+    readonly read: (meta: ArtifactMeta) => Promise<Uint8Array>;
+    readonly write: (meta: ArtifactMeta, bytes: Uint8Array) => Promise<void>;
+    readonly notice: (text: string) => void;
+    readonly saving: () => boolean;
+  };
+
+  /**
+   * Fetch and keep whatever the daemon lists and this laptop lacks. Called
+   * fire-and-forget from a save point (the turn does not wait on a disk);
+   * resolves when done and never rejects.
+   */
+  async save(): Promise<void> {
+    if (!this.opts.saving()) return;
+    const kept = this.opts.kept();
+    if (kept === "refused") return; // a newer tentacle wrote this dir: never write it
+    let list: ArtifactListResult;
+    try {
+      list = await this.opts.list();
+    } catch {
+      // An older daemon (`ArtifactsUnsupportedError`), a link gone for good, a
+      // session that ended, a pod that never listed one where we may not read:
+      // nothing to keep, and nothing worth a notice — the cards still render.
+      return;
+    }
+    for (const meta of artifactsToKeep(kept, list)) {
+      if (!this.opts.saving()) return;
+      try {
+        const bytes = await this.opts.read(meta);
+        await this.opts.write(meta, bytes);
+      } catch (error) {
+        this.warn(error);
+        return;
+      }
+    }
+  }
+
+  private warn(error: unknown): void {
+    if (this.warned) return;
+    this.warned = true;
+    this.notice(
+      `⚠ the artifacts this session presents are not being saved on this laptop (${
+        error instanceof Error ? error.message : String(error)
+      }), so after a restart they will read as unavailable`,
+    );
+  }
 }
 
 /**
@@ -421,6 +548,13 @@ export function persistingController(
    * nothing is restored (`connect`, unit fakes, a store with no blobs).
    */
   durable?: DurableImages,
+  /**
+   * This session's artifacts on THIS laptop's disk (docs/feat/model-artifacts.md
+   * D11). Absent → nothing is kept and nothing is restored (`connect`, a pod
+   * runtime, unit fakes). Run at the same save points as the log, DETACHED like
+   * it: a fetch never holds the turn open.
+   */
+  artifacts?: LaptopArtifacts,
 ): PersistingController {
   /** The newest read held (what `/clear` forks) and the read head already forked. */
   let lastRead: {
@@ -497,6 +631,10 @@ export function persistingController(
     if (sealed) {
       return;
     }
+    // D11: the artifacts ride the SAME save points (a round, a turn end, a
+    // title, the switches, idle), detached and coalesced on their own — the
+    // turn never waits on a fetch.
+    keepArtifacts();
     if (running) {
       again = true;
       return;
@@ -505,7 +643,33 @@ export function persistingController(
       running = null;
     });
   };
-  const flushed = (): Promise<void> => running ?? Promise.resolve();
+  const flushed = (): Promise<void> =>
+    Promise.all([running ?? Promise.resolve(), keeping ?? Promise.resolve()]).then(() => undefined);
+  /**
+   * D11: the artifacts are kept at the SAME save points, DETACHED (a fetch must
+   * not hold the turn open, §6's rule for the log read). One in flight at a
+   * time, coalesced like the save: a burst of rounds fetches each new version
+   * once, because the next pass reads the daemon's list afresh.
+   */
+  let keeping: Promise<void> | null = null;
+  let keepAgain = false;
+  const keepArtifacts = (): void => {
+    if (!artifacts || sealed) return;
+    if (keeping) {
+      keepAgain = true;
+      return;
+    }
+    keeping = (async () => {
+      do {
+        keepAgain = false;
+        await artifacts.save();
+      } while (keepAgain);
+    })().finally(() => {
+      keeping = null;
+    });
+  };
+  const keptArtifacts = (): Promise<void> => keeping ?? Promise.resolve();
+
   /**
    * Q4: an opened session's state goes to the laptop now and the read-back is
    * waited for (bounded), so a TUI with no turn since counts as saved. A read
@@ -517,6 +681,20 @@ export function persistingController(
     await bounded(flushed(), FLUSH_ON_EXIT_TIMEOUT_MS);
   };
   const unsubscribeTitle = inner.onTitle(() => flush());
+  // The switches changed (any client, idle too: docs/feat/session-capabilities.md
+  // S3b): only a save puts their log entry on the laptop before the next turn.
+  // Not the first state seen (the open's snapshot: `saveOnOpen` saves it) —
+  // nor one already known when this subscribes.
+  const capsNow = inner.capabilities?.();
+  let capsSeen: string | undefined = capsNow === undefined ? undefined : JSON.stringify(capsNow);
+  const unsubscribeCaps = inner.onCapabilities?.((state) => {
+    const key = state === undefined ? undefined : JSON.stringify(state);
+    const changed = capsSeen !== undefined && key !== undefined && key !== capsSeen;
+    capsSeen = key ?? capsSeen;
+    if (changed) {
+      flush();
+    }
+  });
   // A background sub-agent's report can land while nobody streams (the session
   // is idle): only this save puts its `end` on the laptop's log (M5,
   // docs/feat/subagent-background.md). `?.`: unit-test fakes of a session.
@@ -636,6 +814,17 @@ export function persistingController(
     imageInput() {
       return inner.imageInput();
     },
+    // The document seam, the same way (docs/feat/pdf-read.md D6): the session
+    // decides upload vs laptop-extraction and builds the wire block; nothing
+    // here needs saving (the block only becomes history at the prompt, where
+    // the daemon persists its TEXT, never a PDF ref).
+    async attachDocument(bytes, meta, options) {
+      await restored();
+      return inner.attachDocument(bytes, meta, options);
+    },
+    documentsInput() {
+      return inner.documentsInput();
+    },
     async compact() {
       const result = await inner.compact();
       flush();
@@ -684,6 +873,10 @@ export function persistingController(
     enqueue(text, id) {
       return inner.enqueue(text, id);
     },
+    // Nothing to save: the daemon's next `queued` (and the next round's save) carry it.
+    unqueue(ids) {
+      return inner.unqueue(ids);
+    },
     skills() {
       return inner.skills();
     },
@@ -728,8 +921,17 @@ export function persistingController(
     openForReset() {
       return inner.openForReset();
     },
+    // The artifacts the model presented here (docs/feat/model-artifacts.md D8):
+    // the PANEL's list, and the bytes its opener reads. Both are the daemon's
+    // (a pod's are pod-supplied and the TUI labels them so), and neither is
+    // persisted on this laptop in S6a.
+    listArtifacts: () => inner.listArtifacts(),
+    readArtifact: (meta, options) => inner.readArtifact(meta, options),
     ownsTurn(turnId) {
       return turnId === adoptedTurn || inner.ownsTurn(turnId);
+    },
+    autoAcceptsTurn(turnId) {
+      return turnId === adoptedTurn || inner.autoAcceptsTurn(turnId);
     },
     onQueued(listener) {
       return inner.onQueued(listener);
@@ -745,6 +947,15 @@ export function persistingController(
     },
     killJob(jobId) {
       return inner.killJob(jobId);
+    },
+    // docs/feat/cron-tool.md S5: the dock's rows, the pill's count and
+    // `/schedule` all paint this ONE per-session feed, and a delete is the
+    // daemon's (its `schedules` frame is what removes the row).
+    onSchedules(listener) {
+      return inner.onSchedules(listener);
+    },
+    deleteSchedule(scheduleId) {
+      return inner.deleteSchedule(scheduleId);
     },
     onSubagentNotify(listener) {
       return inner.onSubagentNotify(listener);
@@ -763,6 +974,7 @@ export function persistingController(
     close() {
       closed = true;
       unsubscribeTitle();
+      unsubscribeCaps?.();
       unsubscribeAgentExit?.();
       unsubscribeIdle?.();
       void flushed().then(() => inner.close());
@@ -789,6 +1001,16 @@ export function persistingController(
     // `/clear` fork and a hop target start with the switch the person has now.
     seedAutoAccept(on: boolean) {
       inner.seedAutoAccept(on);
+    },
+    capabilities: () => inner.capabilities(),
+    // The `/mcp` / `/skills` switches (S4). A change is saved by the
+    // subscription above (`capsSeen`): nothing to flush here.
+    onCapabilities: (listener) => inner.onCapabilities(listener),
+    setCapability: (kind, name, enabled) => inner.setCapability(kind, name, enabled),
+    opened: () => inner.opened(),
+    // A `/clear` close-and-replace keeps the switches (owner Q5, S3b).
+    seedCapabilities() {
+      inner.seedCapabilities();
     },
     ...(carried
       ? {
@@ -826,6 +1048,15 @@ export function persistingController(
 
 export interface LocalRuntimeDeps {
   readonly channel: DuplexChannel;
+  /**
+   * Where THIS laptop keeps the session's artifacts beside its log
+   * (docs/feat/model-artifacts.md D11): set → the session's own store is kept on
+   * disk at each save point, and a resumed one is re-seeded from it. ONLY a
+   * `local` runtime (the in-process worker: the laptop's own code, its own
+   * store) sets it — a pod's artifacts are pod-supplied and are never written on
+   * the laptop (§7), and `connect` keeps no copy (the serve daemon's is truth).
+   */
+  readonly keepArtifacts?: true;
   /**
    * Opens a fresh channel to the same daemon after a drop (a pod's new exec, a
    * WebSocket redial): present → the client reconnects and resumes; absent
@@ -875,6 +1106,13 @@ export interface LocalRuntimeDeps {
    * nothing a pod claims can turn auto-accept on.
    */
   readonly sharedAutoAccept?: boolean;
+  /**
+   * This daemon mints its OWN `wake-` turns — the session's scheduled wakes
+   * (docs/feat/cron-tool.md D1) — so their asks are the session's own for
+   * auto-accept. A TRUST bit (AGENTS §7), so it fails closed: set by the worker
+   * path alone (`WORKER_TRUST`); a pod `run`/`attach` and the relay NEVER say it.
+   */
+  readonly daemonWakes?: boolean;
   /**
    * This client can put a `move_session` proposal to its owner (docs/feat/session-hop.md
    * D8/D9): declared in `initialize` as `clientCapabilities.hop`, so a POD daemon
@@ -945,6 +1183,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     clientInfo: CLIENT_INFO,
     ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
     ...(deps.sharedAutoAccept ? { sharedAutoAccept: true } : {}),
+    ...(deps.daemonWakes ? { daemonWakes: true } : {}),
     // The label a shared session's asks and flips carry (`ClientInfo.host`,
     // docs/feat/session-auto-accept.md D7). `node:os` lives HERE, not in
     // `@tentacle/client`: that package is in the phone's bundle, where a Node
@@ -957,6 +1196,12 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     // Only beside a model provider: a client that serves no model cannot hold a
     // pod's image bytes (docs/feat/attachments-prompt.md D5's table).
     ...(deps.modelProvider && deps.localImages ? { localImages: deps.localImages } : {}),
+    // The PDF extractor for a `client`-mode daemon (docs/feat/pdf-read.md D6):
+    // a pod takes TEXT only, so the laptop that serves its model reads the PDF.
+    // Injected — `@tentacle/client` has no dependency on `@tentacle/tools` (it is
+    // in the phone's bundle). Only where a model link exists: without one, no
+    // daemon may ask this client to extract.
+    ...(deps.modelProvider ? { extractDocument: extractPdf } : {}),
     // The name a "model's config has images off" reason repeats, and the PLACE
     // it points at (docs/feat/images-off-reason.md): `modelName` is only ever
     // this laptop's own model id, and `modelScope` says whether the daemon runs
@@ -1036,7 +1281,14 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
           record?.messages,
           uid,
           title.source === "auto" ? undefined : { text: title.text, source: title.source },
-          { closeIfLast },
+          // The record's switches seed the open that recreates it: `--resume`
+          // and a hop (its seed is this record) keep them (S3b, owner Q5).
+          {
+            closeIfLast,
+            ...(record?.capabilities
+              ? { capabilities: wireCapabilities(record.capabilities) }
+              : {}),
+          },
         );
     const controller = persistingController(
       session,
@@ -1105,6 +1357,23 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
           notify: (text) => deps.notify?.(text),
         };
       })(),
+      // D11: this session's artifacts on THIS laptop's disk. Absent
+      // (`keepArtifacts` unset: a pod `run`/`attach`, `connect`) nothing is kept
+      // — a pod's artifacts are pod-supplied and never written here (§7).
+      deps.keepArtifacts === true
+        ? new LaptopArtifacts({
+            // The main thread owns the dir: `"refused"` (a newer tentacle's
+            // format) means never write it.
+            kept: () => deps.saver.artifactManifest(uid),
+            list: () => session.listArtifacts(),
+            read: (meta) => session.readArtifact(meta),
+            // A hand-over (`stopSaving`): whoever saves the log owns the copy.
+            write: (meta, bytes) =>
+              saving ? deps.saver.putArtifact(uid, meta, bytes) : Promise.resolve(),
+            notice: (text) => deps.notify?.(text),
+            saving: () => saving && !deps.saver.isRemoved(uid),
+          })
+        : undefined,
     );
     controllers.add(controller);
     return controller;
@@ -1401,9 +1670,30 @@ export function workerStartFailureText(error: unknown, logPath: string): string 
  * "TUI always over RPC — one session path"), so a worker problem is an error the
  * caller reports, never a silently degraded TUI.
  */
+/**
+ * The worker call site's TRUST bits (AGENTS §7): its daemon is THIS laptop's own
+ * code, so the session's auto-accept is shared (docs/feat/session-auto-accept.md
+ * D1) and its daemon-minted `wake-` turns — the session's scheduled wakes — are
+ * the session's own (docs/feat/cron-tool.md D1). Exported so a test pins it; a
+ * pod `run`/`attach` and the relay never pass either.
+ */
+export const WORKER_TRUST = { sharedAutoAccept: true, daemonWakes: true } as const;
+
 export async function startWorkerRuntime(
   config: TentacleConfig,
-  deps: { permissions: PermissionBroker; saver: SessionSaver; resume: SessionRecord | null },
+  deps: {
+    permissions: PermissionBroker;
+    saver: SessionSaver;
+    resume: SessionRecord | null;
+    /**
+     * The laptop store dir holding this project's sessions (docs/feat/
+     * model-artifacts.md D11). A worker keeps nothing, so a RESUMED session's
+     * gallery must come back from the copy the MAIN thread wrote beside the log:
+     * this is the ONE dir the worker may READ (never write) for it. Absent →
+     * nothing is restored.
+     */
+    artifactsDir?: string;
+  },
   log: (line: string) => void,
   opts: {
     /** Test seam: how the worker is constructed (default: the URL form below). */
@@ -1437,7 +1727,11 @@ export async function startWorkerRuntime(
       failHandshake?.(new Error(workerError));
     });
     // Object bootstrap (structured-cloned); the worker takes its version from it.
-    worker.postMessage({ config, version: APP_VERSION } satisfies WorkerBootstrap);
+    worker.postMessage({
+      config,
+      version: APP_VERSION,
+      ...(deps.artifactsDir ? { artifactsDir: deps.artifactsDir } : {}),
+    } satisfies WorkerBootstrap);
   } catch (error) {
     throw new WorkerStartError("spawn", reasonOf(error));
   }
@@ -1478,9 +1772,14 @@ export async function startWorkerRuntime(
           // images-off-reason.md).
           modelScope: "laptop" as const,
           resume: deps.resume,
-          // The daemon here is THIS laptop's own code, so the session's
-          // auto-accept is shared by every TUI on it (docs/feat/session-auto-accept.md D1).
-          sharedAutoAccept: true,
+          // D11: this session's artifacts are kept on THIS laptop's disk (its own
+          // code, its own store) and a resumed one is re-seeded from that copy.
+          // The ONE place that decides: a pod `run`/`attach` and `connect` never
+          // reach here, so nothing a pod presents is ever written on the laptop.
+          keepArtifacts: true,
+          // The daemon here is THIS laptop's own code: the session's auto-accept
+          // is shared by every TUI on it, and its wakes are the session's own.
+          ...WORKER_TRUST,
           hooksTrustStore: fileTrustStore(config.configDir, (message) => {
             logDaemonError(config.configDir, new Error(message));
           }),

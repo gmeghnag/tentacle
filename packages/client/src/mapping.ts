@@ -8,7 +8,13 @@
  * diff render identical to a local one. Pure and unit-tested.
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
-import type { AttachmentRef, ChatMessage, ToolResult, ToolResultDetail } from "@tentacle/core";
+import type {
+  AttachmentRef,
+  ChatMessage,
+  ScheduledRef,
+  ToolResult,
+  ToolResultDetail,
+} from "@tentacle/core";
 import {
   type ContentBlock,
   type SessionUpdate,
@@ -28,7 +34,16 @@ import { DIFF_SCHEME, HOOK_SCHEME } from "./constants.ts";
  */
 export type SessionEvent =
   | AgentEvent
-  | { readonly type: "history_reset"; readonly messages: readonly ChatMessage[] }
+  | {
+      readonly type: "history_reset";
+      readonly messages: readonly ChatMessage[];
+      /**
+       * Each message's arrival time, index-aligned (docs/fix/mobile-open-at-end.md,
+       * slice B); absent for an older daemon or a page that could not be paired.
+       * Display-only: the TUI ignores it, nothing is written to disk (§7).
+       */
+      readonly times?: readonly number[];
+    }
   /**
    * The turn's prompt, re-delivered after a reset (or another device's, on a
    * turn this client attached to). `attachments`: the image refs it named
@@ -38,6 +53,16 @@ export type SessionEvent =
       readonly type: "user_message";
       readonly text: string;
       readonly attachments?: readonly AttachmentRef[];
+      /**
+       * The scheduled wake that started this turn (`turn_start.schedule`,
+       * docs/feat/cron-tool.md D5, owner Q9 = B): display data for a styled
+       * fired row. Absent for an ordinary turn, for an older daemon, and on a
+       * reload (the durable `[scheduled sc-1 · …]` prefix in `text` is then the
+       * only truth, M4 option A). With `fire`/`at` from a current daemon
+       * (docs/feat/scheduled-fire-row.md), the same record the stored message
+       * carries in `ChatMessage.scheduled`.
+       */
+      readonly schedule?: ScheduledRef;
     }
   /**
    * The daemon sent an update type this client does not know (a newer
@@ -269,6 +294,12 @@ export function updateToEvent(
         name: toolNames.get(update.toolCallId) ?? "tool",
         result: {
           ...toolResultFromContent(update.content, update.status === "failed"),
+          // `present`'s card: the free field only, NESTED (the meta has its own
+          // `kind`), never parsed from the "Presented …" text
+          // (docs/feat/model-artifacts.md D6). An older daemon sends no field.
+          ...(update.artifact
+            ? { details: { kind: "artifact" as const, artifact: update.artifact } }
+            : {}),
           // The field only, never derived from the banner text (docs/feat/tui-spill-note.md).
           ...(update.spill ? { spill: update.spill } : {}),
           // Likewise: the field only, never parsed from the denial text (docs/feat/permission-reply.md).
@@ -339,7 +370,8 @@ export function updateToEvent(
     // `session_title` by its title listeners (it is not turn-scoped), and
     // `queued` by its queue listeners (`RemoteClient`, not turn-scoped either),
     // `subagents` by its own (likewise), `jobs` by its own (a shell job's list,
-    // likewise), `subagent_notify` by its notify
+    // likewise), `schedules` by its own (a scheduled wake's table, likewise),
+    // `subagent_notify` by its notify
     // listeners (a child's message to the agent, likewise), `subagent_message`
     // by its own (the USER's message to a child, likewise), `session_settings`
     // by its settings-change listeners (likewise).
@@ -347,10 +379,13 @@ export function updateToEvent(
     case "queued":
     case "subagents":
     case "jobs":
+    case "schedules":
     case "subagent_notify":
     case "subagent_message":
     case "session_settings":
     case "auto_accept":
+    // `capabilities` by the session's capability listeners (`RemoteClient`, likewise).
+    case "capabilities":
     case "plan":
     case "turn_start":
     case "turn_end":

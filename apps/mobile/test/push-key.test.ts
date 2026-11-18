@@ -18,6 +18,7 @@
 import { describe, expect, test } from "bun:test";
 import { decodeBase64Url } from "@tentacle/protocol";
 import { publicKeyOf } from "@tentacle/transport/push";
+import { PUSH_GROUP, TEAM_ID } from "../src/push-access-group.ts";
 import {
   PUSH_KEY_ACCESS_GROUP,
   PUSH_KEY_ITEM,
@@ -119,11 +120,16 @@ describe("ensurePushKeypair", () => {
     expect(store.calls.filter((one) => one.op === "set").length).toBe(1);
   });
 
-  test("the default group is the bundle id the app.json entitlement names", async () => {
+  test("the default group is the SHARED (push) group, TEAMID-prefixed", async () => {
+    // Fix round 1, findings #3/#4: the extension is entitled to the separate
+    // `...so.tentacle.app.push` group and the value must be the BUILT
+    // entitlement, i.e. the team id in front of it (`kSecAttrAccessGroup`
+    // matches nothing else). Mutation: the bare bundle id → no match on a device.
     const store = fakeStore();
     await ensurePushKeypair({ store, random, keychainAccessible: THIS_DEVICE_ONLY });
     expect(store.calls[0]?.options?.accessGroup).toBe(PUSH_KEY_ACCESS_GROUP);
-    expect(PUSH_KEY_ACCESS_GROUP).toBe("so.tentacle.app");
+    expect(PUSH_KEY_ACCESS_GROUP).toBe(`${TEAM_ID}.${PUSH_GROUP}`);
+    expect(PUSH_GROUP).toBe("so.tentacle.app.push");
   });
 
   test("it is a SEPARATE item from the computers' (never `tentacle.computer.*`)", async () => {

@@ -31,12 +31,18 @@ import {
   AGENT_MESSAGE_TOOL_NAME,
   AGENT_NOTIFY_TOOL_NAME,
   AGENT_STATUS_TOOL_NAME,
+  CHART_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
+  DIAGRAM_TOOL_NAME,
   MOVE_SESSION_TOOL_NAME,
+  PRESENT_TOOL_NAME,
+  SCHEDULE_CONTROL_TOOL_NAME,
+  SCHEDULE_CREATE_TOOL_NAME,
   ToolRegistry,
   createAgentNotifyTool,
 } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
+import type { SessionCapabilities } from "./capabilities.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
 import { classOf, isReadClass } from "./round-plan.ts";
@@ -308,6 +314,8 @@ export interface SubagentDeps {
   readonly hooks?: HookRunner;
   /** Each child's own context lines over its own history (the parent's window). */
   readonly contextAwareness?: AgentConfig["contextAwareness"];
+  /** Each child prunes its own history the same way (docs/feat/smart-compaction.md; the parent's window). */
+  readonly contextPrune?: AgentConfig["contextPrune"];
   /**
    * The session tree's approvals and ask lane: one "always" covers the parent
    * and every child (docs/feat/parallel-agents.md, Design 3). Absent → one
@@ -329,6 +337,12 @@ export interface SubagentDeps {
    * Absent (`subagents.twoWay` off) → no child is offered `agent_notify`.
    */
   readonly notify?: (agentId: string, text: string) => AgentNotifyResult;
+  /**
+   * The parent session's capability switches, LIVE (docs/feat/session-capabilities.md):
+   * each child round reads them, so a server or skill the user hides is hidden
+   * from every child too, from its next model call. Absent → everything on.
+   */
+  readonly capabilities?: () => SessionCapabilities;
 }
 
 /** Build a sub-agent runner plus the agent types it exposes. */
@@ -389,6 +403,19 @@ export function createSubagentRunner(deps: SubagentDeps): {
         tool.name === spawnToolName ||
         tool.name === CONTEXT_RESET_TOOL_NAME ||
         tool.name === MOVE_SESSION_TOOL_NAME ||
+        // `present` shows the USER an artifact: a child's output is its report
+        // to the parent, one origin per card (docs/feat/model-artifacts.md Q13).
+        tool.name === PRESENT_TOOL_NAME ||
+        // A chart is drawn in the USER's transcript, and a child's steps are not
+        // rows there: the parent can chart the report it is given
+        // (docs/feat/model-charts.md D3, Owner Q7).
+        tool.name === CHART_TOOL_NAME ||
+        // A diagram likewise (docs/feat/model-diagrams.md D2, P6).
+        tool.name === DIAGRAM_TOOL_NAME ||
+        // The schedule table is the SESSION's, and a fire starts a MAIN-agent
+        // turn (docs/feat/cron-tool.md P4): a child may neither arm nor drop one.
+        tool.name === SCHEDULE_CREATE_TOOL_NAME ||
+        tool.name === SCHEDULE_CONTROL_TOOL_NAME ||
         tool.name === AGENT_CONTROL_TOOL_NAME ||
         tool.name === AGENT_KILL_TOOL_NAME ||
         tool.name === AGENT_MESSAGE_TOOL_NAME ||
@@ -419,11 +446,16 @@ export function createSubagentRunner(deps: SubagentDeps): {
       deps.contextAwareness && window !== undefined
         ? { ...deps.contextAwareness, window }
         : deps.contextAwareness;
+    const contextPrune =
+      deps.contextPrune && window !== undefined
+        ? { ...deps.contextPrune, window }
+        : deps.contextPrune;
     const child = new Agent({
       model,
       tools: childTools,
       env: deps.env,
       systemPrompt: type.prompt,
+      ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
       ...(deps.maxTokens !== undefined ? { maxTokens: deps.maxTokens } : {}),
       ...(deps.requestPermission
@@ -456,6 +488,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
       ...(deps.toolExecution ? { toolExecution: deps.toolExecution } : {}),
       ...(deps.resultTransforms ? { resultTransforms: deps.resultTransforms } : {}),
       ...(contextAwareness ? { contextAwareness } : {}),
+      ...(contextPrune ? { contextPrune } : {}),
       ...(deps.hooks
         ? {
             hooks: deps.hooks.forAgent(
@@ -617,6 +650,9 @@ export function createSubagentRunner(deps: SubagentDeps): {
         toolName === spawnToolName ||
         toolName === CONTEXT_RESET_TOOL_NAME ||
         toolName === MOVE_SESSION_TOOL_NAME ||
+        toolName === PRESENT_TOOL_NAME ||
+        toolName === CHART_TOOL_NAME ||
+        toolName === DIAGRAM_TOOL_NAME ||
         toolName === AGENT_CONTROL_TOOL_NAME ||
         toolName === AGENT_KILL_TOOL_NAME ||
         toolName === AGENT_MESSAGE_TOOL_NAME ||

@@ -673,7 +673,10 @@ describe("RemoteSession over an in-memory channel", () => {
 
   test("compact round-trips and shrinks the remote conversation", async () => {
     const model = new ScriptedProvider([
-      [{ type: "text", delta: "hello" }, { type: "done" }],
+      [
+        { type: "text", delta: "hello" },
+        { type: "done", usage: { promptTokens: 1234, completionTokens: 1 } },
+      ],
       [{ type: "text", delta: "a brief" }, { type: "done" }], // the summary turn
     ]);
     const [daemonCh, clientCh] = createChannelPair();
@@ -686,6 +689,10 @@ describe("RemoteSession over an in-memory channel", () => {
     const result = await session.compact();
     expect(result.before).toBe(2);
     expect(result.after).toBe(1); // no system prompt in the test agent → just the summary
+    // docs/feat/harness-notices.md S1: the sizes cross the wire (no counter → estimated after).
+    expect(result.fromTokens).toBe(1234);
+    expect(result.toTokens).toBeGreaterThan(0);
+    expect(result.toExact).toBeUndefined();
     client.close();
   });
 

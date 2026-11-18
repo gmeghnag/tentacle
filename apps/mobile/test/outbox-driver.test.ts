@@ -8,7 +8,7 @@
  * Each test names its mutation.
  */
 import { describe, expect, test } from "bun:test";
-import type { AttachmentRef } from "@tentacle/protocol";
+import type { AttachmentRef, DocumentContent } from "@tentacle/protocol";
 import { type OutboxDriver, createOutboxDriver } from "../src/outbox-driver.ts";
 import { unavailableSessionPort } from "../src/outbox-session.ts";
 import type { ComposeInput, OutboxItem, OutboxPhoto, SessionFacts } from "../src/outbox.ts";
@@ -17,8 +17,15 @@ import type { ComposeInput, OutboxItem, OutboxPhoto, SessionFacts } from "../src
 interface FakeSession {
   readonly acts: string[];
   readonly uploads: { readonly bytes: number; readonly name: string }[];
-  readonly prompts: { readonly text: string; readonly turnId: string; readonly refs: string[] }[];
+  readonly prompts: {
+    readonly text: string;
+    readonly turnId: string;
+    readonly refs: string[];
+    readonly documents: readonly DocumentContent[];
+  }[];
   readonly steers: { readonly text: string; readonly id: string; readonly turnId: string }[];
+  /** The documents `attachDocument` answered, in call order (`docs/feat/pdf-read.md D7`). */
+  readonly attached: { readonly bytes: number; readonly name: string }[];
   facts: SessionFacts;
   /** The next upload throws this. */
   refuseUpload: unknown;
@@ -26,6 +33,8 @@ interface FakeSession {
   refusePrompt: unknown;
   /** The next steer throws this. */
   refuseSteer: unknown;
+  /** The next `attachDocument` throws this (a refusal the driver must land as one). */
+  refuseDocument: unknown;
   /** The daemon's `have` per upload attempt, so a resume is observable. */
   upload: (bytes: Uint8Array, meta: { mimeType: string; name?: string }) => Promise<AttachmentRef>;
 }
@@ -43,10 +52,12 @@ function fakeSession(facts: Partial<SessionFacts> = {}): FakeSession {
     uploads: [],
     prompts: [],
     steers: [],
+    attached: [],
     facts: { availability: "open", historyLength: 2, runningTurnId: null, ...facts },
     refuseUpload: undefined,
     refusePrompt: undefined,
     refuseSteer: undefined,
+    refuseDocument: undefined,
     async upload(bytes, meta) {
       session.refuseUpload = undefined;
       session.uploads.push({ bytes: bytes.length, name: meta.name ?? "" });
@@ -68,14 +79,40 @@ const portOf = (session: FakeSession) => ({
     }
     return session.upload(bytes, meta);
   },
-  async prompt(text: string, turnId: string, refs: readonly AttachmentRef[]) {
+  async prompt(
+    text: string,
+    turnId: string,
+    refs: readonly AttachmentRef[],
+    _photos?: readonly unknown[],
+    documents?: readonly DocumentContent[],
+  ) {
     session.acts.push("prompt");
     const refusal = session.refusePrompt;
     if (refusal !== undefined) {
       session.refusePrompt = undefined;
       throw refusal;
     }
-    session.prompts.push({ text, turnId, refs: refs.map((r) => r.name ?? "") });
+    session.prompts.push({
+      text,
+      turnId,
+      refs: refs.map((r) => r.name ?? ""),
+      documents: documents ?? [],
+    });
+  },
+  async attachDocument(bytes: Uint8Array, meta: { readonly name: string }) {
+    session.acts.push("attachDocument");
+    const refusal = session.refuseDocument;
+    if (refusal !== undefined) {
+      session.refuseDocument = undefined;
+      throw refusal;
+    }
+    session.attached.push({ bytes: bytes.length, name: meta.name });
+    return {
+      type: "document",
+      kind: "pdf",
+      name: meta.name,
+      source: { type: "ref", id: "a".repeat(64), size: bytes.length },
+    } satisfies DocumentContent;
   },
   async steer(text: string, id: string, turnId: string) {
     session.acts.push("steer");
@@ -243,7 +280,9 @@ describe("a run", () => {
     const h = harness();
     const item = (await h.driver.enqueue(portOf(h.session), compose())) as OutboxItem;
     expect(await h.driver.run("s1")).toBe(1);
-    expect(h.session.prompts).toEqual([{ text: "hello", turnId: item.turnId, refs: [] }]);
+    expect(h.session.prompts).toEqual([
+      { text: "hello", turnId: item.turnId, refs: [], documents: [] },
+    ]);
     expect(h.persistence.items()).toEqual([]);
     expect(h.persistence.finished).toEqual([item.itemId]);
   });
@@ -449,7 +488,9 @@ describe("the sheet's acts", () => {
     const item = (await h.driver.enqueue(portOf(h.session), compose())) as OutboxItem;
     h.session.facts = { availability: "open", historyLength: 8, runningTurnId: null };
     await h.driver.sendNow(item);
-    expect(h.session.prompts).toEqual([{ text: "hello", turnId: item.turnId, refs: [] }]);
+    expect(h.session.prompts).toEqual([
+      { text: "hello", turnId: item.turnId, refs: [], documents: [] },
+    ]);
   });
 
   test("Queue as steer binds to the turn running NOW, with a fresh id", async () => {
@@ -582,5 +623,96 @@ describe("a disk that stops writing", () => {
     h.persistence.failSave = true;
     await h.driver.run("s1");
     expect(h.notices).toContain("not-saved");
+  });
+});
+
+describe("a prompt with a PDF (docs/feat/pdf-read.md D7)", () => {
+  const pdfDocument = (file: string) => ({ file, name: "report.pdf" });
+
+  test("the document is attached ONCE and its block is what the prompt names", async () => {
+    // Mutation M4's neighbour: a driver that prompts without `documentBlocksOf`
+    // sends `documents: []` → red.
+    const h = harness();
+    const item = (await h.driver.enqueue(
+      portOf(h.session),
+      compose({ documents: [pdfDocument("/c/report.pdf")] }),
+    )) as OutboxItem;
+    await h.driver.sendNow(item);
+    expect(h.session.attached).toHaveLength(1);
+    expect(h.session.attached[0]?.name).toBe("report.pdf");
+    expect(h.session.acts).toEqual(["attachDocument", "prompt"]);
+    expect(h.session.prompts[0]?.documents).toEqual([
+      {
+        type: "document",
+        kind: "pdf",
+        name: "report.pdf",
+        // The fake `readPhoto` encodes the path itself, so the size is its length.
+        source: { type: "ref", id: "a".repeat(64), size: "/c/report.pdf".length },
+      },
+    ]);
+  });
+
+  test("after the photos, never before: one set of bytes in memory at a time", async () => {
+    const h = harness();
+    const item = (await h.driver.enqueue(
+      portOf(h.session),
+      compose({ photos: [photo("/c/0.png")], documents: [pdfDocument("/c/report.pdf")] }),
+    )) as OutboxItem;
+    await h.driver.sendNow(item);
+    expect(h.session.acts).toEqual(["upload", "attachDocument", "prompt"]);
+  });
+
+  test("the block is persisted before the prompt, and a resume does not re-attach it", async () => {
+    // Mutation: record the block only in memory → the second run re-attaches → red.
+    const h = harness();
+    const item = (await h.driver.enqueue(
+      portOf(h.session),
+      compose({ documents: [pdfDocument("/c/report.pdf")] }),
+    )) as OutboxItem;
+    await h.driver.sendNow(item);
+    expect(h.persistence.items().length).toBe(0); // sent, so gone
+    const stored = harness({
+      initial: [
+        {
+          ...item,
+          state: "waiting",
+          documents: [
+            {
+              file: "/c/report.pdf",
+              name: "report.pdf",
+              block: {
+                type: "document",
+                kind: "pdf",
+                name: "report.pdf",
+                source: { type: "ref", id: "b".repeat(64), size: 12 },
+              },
+            },
+          ],
+        },
+      ],
+    });
+    await stored.driver.run("s1");
+    expect(stored.session.attached).toEqual([]);
+    expect(stored.session.prompts[0]?.documents).toHaveLength(1);
+  });
+
+  test("attachDocument's refusal lands as a refusal, and nothing is prompted", async () => {
+    const h = harness();
+    const item = (await h.driver.enqueue(
+      portOf(h.session),
+      compose({ documents: [pdfDocument("/c/report.pdf")] }),
+    )) as OutboxItem;
+    h.session.refuseDocument = rpcError(-32016, { reason: "too_large" });
+    await h.driver.sendNow(item);
+    expect(h.session.prompts).toEqual([]);
+    expect(h.decisions[0]?.why).toBe("refused");
+  });
+
+  test("an item composed before D7 (no documents field) prompts with none", async () => {
+    const h = harness();
+    const item = (await h.driver.enqueue(portOf(h.session), compose())) as OutboxItem;
+    await h.driver.sendNow(item);
+    expect(h.session.attached).toEqual([]);
+    expect(h.session.prompts[0]?.documents).toEqual([]);
   });
 });

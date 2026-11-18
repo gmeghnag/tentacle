@@ -122,6 +122,7 @@ const TEXT_ROWS: readonly Row[] = [
   { name: "accent", value: tokens.light.accent },
   { name: "autoAccept", value: tokens.light.autoAccept },
   { name: "subtle", value: tokens.light.subtle },
+  { name: "harness", value: tokens.light.harness },
   { name: "dim", value: tokens.light.dim },
   { name: "gutter", value: tokens.light.gutter },
   { name: "notice", value: tokens.light.notice },
@@ -135,6 +136,11 @@ const TEXT_ROWS: readonly Row[] = [
   { name: "meter.low", value: tokens.light.meter.low },
   { name: "meter.mid", value: tokens.light.meter.mid },
   { name: "meter.high", value: tokens.light.meter.high },
+  // The thinking shimmer's sweep (docs/feat/tui-thinking-shimmer.md): a highlight
+  // that dimmed the word would be unreadable on paper, so both tones are gated
+  // exactly like text. `base` is `accent`, already a row above.
+  { name: "shimmer.mid", value: tokens.light.shimmer.mid },
+  { name: "shimmer.peak", value: tokens.light.shimmer.peak },
   { name: "syntax.keyword", value: tokens.light.syntax.keyword },
   { name: "syntax.string", value: tokens.light.syntax.string },
   { name: "syntax.number", value: tokens.light.syntax.number },
@@ -231,6 +237,7 @@ describe("the light palette is readable", () => {
       accent: tokens.dark.accent,
       autoAccept: tokens.dark.autoAccept,
       subtle: tokens.dark.subtle,
+      harness: tokens.dark.harness,
       notice: tokens.dark.notice,
       success: tokens.dark.success,
       error: tokens.dark.error,

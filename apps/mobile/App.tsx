@@ -21,13 +21,28 @@ import {
 } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { type RemoteClient, type RemoteSession, webSocketChannelFactory } from "@tentacle/client";
-import { type AttachmentRef, encodeBase64Url, parsePairingPayload } from "@tentacle/protocol";
+import {
+  type AttachmentRef,
+  type ScheduleRow,
+  encodeBase64Url,
+  parsePairingPayload,
+} from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import { getRandomBytes } from "expo-crypto";
 import { File } from "expo-file-system";
-import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type JSX,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
+  Alert,
   AppState,
   Linking,
   Platform,
@@ -38,6 +53,8 @@ import {
   useColorScheme,
 } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { ACTIVITY_SETTINGS } from "./src/activity-settings-expo.ts";
+import type { ActivitySettings } from "./src/activity-settings-store.ts";
 import {
   type AppLock,
   type AppLockEvent,
@@ -49,10 +66,20 @@ import { APP_LOG_FILES } from "./src/app-log-fs-expo.ts";
 import { createAppLogFile } from "./src/app-log-fs.ts";
 import { type AppLog, createAppLog, errorShape } from "./src/app-log.ts";
 import { exportFileName, exportText } from "./src/app-log.ts";
-import type { PickedPhoto } from "./src/compose-controller.ts";
-import { composeHandleOf } from "./src/compose-handle.ts";
+import { ARTIFACT_CACHE, shareCachedCopy } from "./src/artifact-cache-expo.ts";
+import { ARTIFACT_FEEDS } from "./src/artifact-feed.ts";
+import { sessionKey } from "./src/artifact-seen-store.ts";
+import { CHART_SETTINGS } from "./src/chart-settings-expo.ts";
+import type { ChartSettings } from "./src/chart-settings-store.ts";
+import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
+import { composeHandleOf, foldingOutboxSession } from "./src/compose-handle.ts";
 import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
-import { type ComputerRow, computerRows, probeComputer } from "./src/computer-rows.ts";
+import {
+  type ComputerRecordLike,
+  type ComputerRow,
+  computerRows,
+  probeComputer,
+} from "./src/computer-rows.ts";
 import {
   type ComputerEntry,
   type ComputerSource,
@@ -61,16 +88,43 @@ import {
 } from "./src/computers.ts";
 import { type ComputerLink, openComputer } from "./src/connection.ts";
 import { pairingTextFromUrl } from "./src/deep-link.ts";
+import { DIAGRAM_SETTINGS } from "./src/diagram-settings-expo.ts";
+import type { DiagramSettings, DiagramStyle } from "./src/diagram-settings-store.ts";
 import { createDraftScheduler } from "./src/drafts.ts";
+import {
+  type DrawerRow,
+  drawerComputers,
+  drawerItems,
+  drawerList,
+  drawerTitle,
+} from "./src/drawer-list.ts";
+import {
+  type DrawerNav,
+  type DrawerStackRoute,
+  drawerCurrentId,
+  drawerReducer,
+  drawerSearchTarget,
+  drawerTarget,
+  initialDrawer,
+} from "./src/drawer-nav.ts";
+import {
+  NEW_SESSION_TITLE,
+  createDrawerNewSession,
+  newSessionPill,
+} from "./src/drawer-new-session.ts";
+import { createDrawerRename } from "./src/drawer-rename.ts";
+import { createDrawerRowActions } from "./src/drawer-row-actions.ts";
+import type { ActivityButtonMode } from "./src/floating-button.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
+import { tapLink } from "./src/links.ts";
 import { authenticate, biometry, capability } from "./src/lock-auth.ts";
 import { LOCK_SETTING_STORE } from "./src/lock-settings-expo.ts";
+import { MemoryAnswers } from "./src/notification-dispatch.ts";
 import { createDraftStore } from "./src/outbox-drafts.ts";
-import { type OutboxSession, createOutboxDriver } from "./src/outbox-driver.ts";
+import { createOutboxDriver } from "./src/outbox-driver.ts";
 import { createExpoOutboxFs, outboxRoot } from "./src/outbox-fs-expo.ts";
-import { screenSessionPortOf } from "./src/outbox-session.ts";
 import { type OutboxStore, createOutboxStore, outboxPaths } from "./src/outbox-store.ts";
 import type { OutboxItem } from "./src/outbox.ts";
 import {
@@ -81,22 +135,43 @@ import {
   reduce,
   runPairing,
 } from "./src/pairing-flow.ts";
+import { pdfsRoot, pickPdf } from "./src/pdf-source.ts";
 import { handlePairingText, takePendingLink } from "./src/pending-link.ts";
-import { pickFromLibrary, takePhoto } from "./src/photo-source.ts";
+import { inUseCopies, prunePhotoCopies } from "./src/photo-copies.ts";
+import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
+import type { PhotoSettings } from "./src/photo-settings-store.ts";
+import { photosRoot, pickFromLibrary, takePhoto } from "./src/photo-source.ts";
+import { rewritePushDirectory } from "./src/push-directory-expo.ts";
 import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
 import { createPushManager } from "./src/push-manager.ts";
 import type { PushPermission } from "./src/push-registration.ts";
 import { createPushToggleStore } from "./src/push-toggle-store.ts";
-import { type RootStackParams, initialRoute } from "./src/routes.ts";
+import { queueTrace } from "./src/queue-trace.ts";
+import {
+  type ArtifactGalleryRoute,
+  type RootStackParams,
+  type SessionRoute as SessionRouteParams,
+  initialRoute,
+  openArtifactGallery,
+} from "./src/routes.ts";
 import { QrScanner, usePairingCamera } from "./src/scanner.tsx";
+import { ArtifactGalleryScreen } from "./src/screens/ArtifactGallery.tsx";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
 import { LockGate } from "./src/screens/LockGate.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
+import { SessionsDrawer } from "./src/screens/SessionsDrawer.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
-import { KEYCHAIN_ACCESSIBLE, KEYCHAIN_STORE, keychainKV } from "./src/secure-kv.ts";
-import { createSessionController } from "./src/session-controller.ts";
+import {
+  KEYCHAIN_ACCESSIBLE,
+  KEYCHAIN_STORE,
+  NOTIFICATION_DIRECTORY_STORE,
+  keychainKV,
+  pushKeychain,
+} from "./src/secure-kv.ts";
+import { createFreshSession, createSessionController } from "./src/session-controller.ts";
+import type { InfoPort } from "./src/session-info-controller.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
 import { type SessionListState, type SessionRow, initialSessionList } from "./src/session-list.ts";
 import { createSessionRuntimes } from "./src/session-runtimes.ts";
@@ -108,8 +183,10 @@ import {
 } from "./src/session-screen-controller.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
 import { type Palette, paletteFor } from "./src/theme.ts";
-import { GlassButton } from "./src/ui/GlassButton.tsx";
+import { HeaderIcon } from "./src/ui/HeaderIcon.tsx";
 import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
+import { VOICE_SETTINGS } from "./src/voice-settings-expo.ts";
+import type { VoiceSettings } from "./src/voice-settings-store.ts";
 
 const Stack = createNativeStackNavigator<RootStackParams>();
 
@@ -160,6 +237,15 @@ function diagnoserFor(id: string): ReturnType<typeof createLinkDiagnoser> {
   DIAGNOSES.set(id, created);
   return created;
 }
+
+/**
+ * The asks this app has already TRIED to answer (docs/feat/mobile-notifications.md
+ * Design 3 step 3): a duplicate tap is refused here instead of sending twice.
+ * Process-lifetime on purpose — the daemon's first-wins is the durable net (a
+ * stale banner then gets `not-pending` → "Already answered", F18), so nothing
+ * needs to survive a launch.
+ */
+const PUSH_ANSWERS = new MemoryAnswers();
 
 /** Every link currently open: what the `AppState` effect suspends and resumes. */
 const LIVE_LINKS = new Set<ComputerLink>();
@@ -229,6 +315,15 @@ type FoldingPrompt = {
   readonly prompt: (text: string, turnId: string, refs: readonly AttachmentRef[]) => Promise<void>;
   /** 13b's hand-back (F7/F20): the item's text is the field's again. */
   readonly onDraft?: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
+  /**
+   * The screen's OWN compose handle (fix/mobile-media-live item 1). The driver's
+   * port is built from it — never from a fresh `client.newSession(...)`, which is
+   * a SECOND session handle for the same id: `RemoteClient.register` reassigns the
+   * entry's listener to it (`remote-client.ts:3023-3026`), so the screen stops
+   * receiving the turn it started (a photo message stayed "Running" for ever over
+   * a turn the daemon had finished).
+   */
+  readonly handle?: () => ComposeHandle | null;
 };
 
 interface OutboxRuntime {
@@ -238,10 +333,7 @@ interface OutboxRuntime {
    * transcript: the outbox keeps the item and the key, and the turn it starts is
    * shown (13d's flow 07/18 — a drained stream shows nothing).
    */
-  readonly driver: (
-    prompt: FoldingPrompt,
-    own: () => OutboxSession | null,
-  ) => ReturnType<typeof createOutboxDriver>;
+  readonly driver: (prompt: FoldingPrompt) => ReturnType<typeof createOutboxDriver>;
   readonly drafts: ReturnType<typeof createDraftStore>;
 }
 const OUTBOXES = new Map<string, OutboxRuntime>();
@@ -252,13 +344,35 @@ function outboxOf(computerId: string): OutboxRuntime {
     return known;
   }
   const store = createOutboxStore(createExpoOutboxFs(), outboxPaths(outboxRoot(), computerId));
-  const driver = (folding: FoldingPrompt, own: () => OutboxSession | null) =>
+  // Bounding the two COPY folders is THIS store's job now, not `removeItem`'s
+  // (fix round 2, R2-1): a copy outlives its item because the transcript's row
+  // draws it, so what may go is decided by `photo-copies.ts` — its grace window,
+  // its newest-copies tail, and everything this store still names. The PDF
+  // copies (`pdfsRoot`, docs/feat/pdf-read.md D7) are swept by the SAME rule, in
+  // their own folder. Once, at start, after the load (the items and drafts it
+  // keeps are what must not be touched).
+  void store.load().then((loaded) => {
+    if (loaded.kind === "refused") {
+      // A newer build's file: its items are unreadable, so NOTHING here knows
+      // which copies are in use. The tail and the grace are the only guard, and
+      // a wrong guess would delete a photo that build still needs: skip it.
+      return null;
+    }
+    const inUse = inUseCopies(store.data);
+    const now = Date.now();
+    return Promise.all([
+      prunePhotoCopies(createExpoOutboxFs(), photosRoot(), { now, inUse }),
+      prunePhotoCopies(createExpoOutboxFs(), pdfsRoot(), { now, inUse }),
+    ]);
+  });
+  const driver = (folding: FoldingPrompt) =>
     createOutboxDriver(
-      // The port is the SCREEN's own attach handle (`screenSessionPortOf`), so a
-      // photo send can never open a second handle of the same id — that would
-      // replace the client's stream listener and starve the very transcript the
-      // turn draws into (owner B9: the photo row below its reply).
-      screenSessionPortOf(own, folding.prompt),
+      // The port is the SCREEN's own handle's (fix/mobile-media-live item 1):
+      // a second `RemoteSession` for the same id replaces the client's stream
+      // listener, so the driver would steal the very turn it starts. A handle
+      // that is not there yet (the attach has not answered) gives null: the item
+      // stays `waiting` with its key and goes at the next run.
+      async () => foldingOutboxSession(folding.handle?.() ?? null, folding.prompt),
       {
         persistence: {
           items: () => store.data.items,
@@ -299,8 +413,17 @@ function composeWiring(computerId: string, sessionId: string, link: ComputerLink
     store: outbox.store,
     driver: outbox.driver,
     photos: {
-      pickFromLibrary: async (taken) => adaptPick(await pickFromLibrary(taken)),
-      takePhoto: async (taken) => adaptPick(await takePhoto(taken)),
+      pickFromLibrary: async (taken, sendOriginal) =>
+        adaptPick(await pickFromLibrary(taken, sendOriginal)),
+      takePhoto: async (taken, sendOriginal) => adaptPick(await takePhoto(taken, sendOriginal)),
+    },
+    // The PDF adapter (docs/feat/pdf-read.md D7): the picker is the phone's own,
+    // and WHERE an attached PDF's bytes may go is the client's decision
+    // (`documentsInput()` over the daemon's capability) — never re-derived here.
+    documents: {
+      pickPdf: async (taken, maxBytes) =>
+        maxBytes === undefined ? pickPdf(taken) : pickPdf(taken, maxBytes),
+      documentsInput: () => link.client.documentsInput(),
     },
     // The screen's OWN attach handle (owner B4): the port reads its facts, and no
     // second handle of this id is ever opened (it would steal the screen's stream).
@@ -316,7 +439,91 @@ function composeWiring(computerId: string, sessionId: string, link: ComputerLink
       outbox.drafts.force(computerId, sessionId, { text, photos: photoFiles });
     },
     mint: () => crypto.randomUUID(),
+    // Item 5's switch, read at every pick (so a Settings flip applies to the next
+    // photo without a remount).
+    sendPhotoOriginalSize: () => PHOTO_SETTINGS.current().sendOriginal,
   };
+}
+
+/**
+ * Session info's port (docs/feat/mobile-session-info.md slice 4): every pull is a
+ * method the ONE client stack already has — `link.client.mcpStatus()` /
+ * `sessionList()`, the handshake's `daemonInfo()`, and the OPEN handle's own
+ * `skills()` / `context()` / `autoAccept`. No frame is built here (AGENTS §7).
+ */
+function infoWiring(
+  computerId: string,
+  sessionId: string,
+  title: string,
+  link: ComputerLink,
+): (handle: () => SendableHandle | null) => InfoPort {
+  return (handle) => ({
+    // Re-read every time the sheet opens: a `serve` restarted with another model
+    // must not show the model the app handshook at pair time (F7).
+    daemon: () => link.client.daemonInfo(),
+    // The clock the scheduled wakes' times are worded against (cron-tool S6): the
+    // phone's own, read at each paint so a sheet left open does not freeze it.
+    now: () => Date.now(),
+    computerName: () => RECORDS.get(computerId)?.name ?? "",
+    title: () => title,
+    phase: () => (handle() === null ? "failed" : "open"),
+    sessionId,
+    // This wiring reads the session's armed wakes (cron-tool S6): one flag, so a
+    // sheet opened before any attach can say `not-open` instead of hiding.
+    offersSchedules: true,
+    mcpStatus: () => link.client.mcpStatus(),
+    sessionList: () => link.client.sessionList({ limit: 200 }),
+    // The handle is the screen's OWN attach (`RemoteSession`, cast): a second
+    // handle of this id would steal its stream (the compose half's B4 rule).
+    session: () => {
+      const live = handle();
+      if (live === null) {
+        return null;
+      }
+      const remote = live as unknown as RemoteSession;
+      return {
+        skills: () => remote.skills(),
+        context: () => remote.context(),
+        ...(live.autoAccept === undefined ? {} : { autoAccept: live.autoAccept }),
+        // The session's armed wakes (cron-tool S6, M7): the SAME handle's
+        // `onSchedules`/`deleteSchedule`, so the phone follows the one client
+        // stack. No second reader: the client already bounded and sanitized the
+        // rows, and `onSchedules` reports the current table at install.
+        ...(typeof remote.deleteSchedule !== "function"
+          ? {}
+          : {
+              schedules: {
+                current: () => remote.schedules,
+                // `onSchedules` reports the table it already knows at install,
+                // then every change: one feed, no polling.
+                onChange: (listener: (rows: readonly ScheduleRow[] | undefined) => void) =>
+                  remote.onSchedules((report) => listener(report.rows)),
+                remove: (scheduleId: string) => remote.deleteSchedule(scheduleId),
+              },
+            }),
+        // The MCP/skill switches (docs/feat/session-capabilities.md S5): the same
+        // handle's `capabilities()` / `onCapabilities` / `setCapability`, so the
+        // phone toggles through the one client stack like the TUI does.
+        ...(typeof remote.setCapability !== "function"
+          ? {}
+          : {
+              capabilities: {
+                current: () => remote.capabilities(),
+                onChange: (listener: Parameters<RemoteSession["onCapabilities"]>[0]) =>
+                  remote.onCapabilities(listener),
+                set: (kind: "mcp" | "skill", name: string, enabled: boolean) =>
+                  remote.setCapability(kind, name, enabled),
+              },
+            }),
+      };
+    },
+    onLink: (listener: (status: "up" | "down") => void) =>
+      link.onStatus((status) => listener(status.state === "up" ? "up" : "down")),
+    // Item 9a (docs/fix/mobile-chat-glitches.md): a "Couldn't load" section names
+    // its failing layer in Settings → Export logs — class + code, never text.
+    onPullError: (section, failure) =>
+      APP_LOG.log("warn", "client-error", { source: "session-info", section, ...failure }),
+  });
 }
 
 /** 13c's picked photos, as the compose half's own shape (their bytes read once). */
@@ -398,6 +605,21 @@ const MEMORY: ComputerMemory<ComputerLink> = {
   links: LINKS,
   diagnoses: DIAGNOSES,
   records: RECORDS,
+  // The artifacts that came from that computer go with it (model-artifacts D9 /
+  // Review round 3, finding 1): the cached bytes may hold workspace content, and
+  // a live feed would outlive the record it was published from.
+  artifactCache: ARTIFACT_CACHE,
+  feeds: ARTIFACT_FEEDS,
+  // The extension's copy of the paired computers and their pinned keys follows
+  // every store change (docs/feat/mobile-notifications.md Design 6 / N4).
+  pushDirectory: () =>
+    rewritePushDirectory({
+      store: KEYCHAIN_STORE,
+      directory: NOTIFICATION_DIRECTORY_STORE,
+      keys: pushKeychain,
+      keychainAccessible: KEYCHAIN_ACCESSIBLE,
+      random: getRandomBytes,
+    }),
 };
 
 /** The phone's randomness for the Noise handshake (`expo-crypto`: Hermes has no WebCrypto). */
@@ -731,12 +953,14 @@ function SessionsRoute({
   title,
   onOpen,
   onBack,
+  focusSearch,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
   readonly title: string;
   readonly onOpen: (row: SessionRow) => void;
   readonly onBack?: () => void;
+  readonly focusSearch?: boolean;
 }): JSX.Element {
   const [snapshot, setSnapshot] = useState<SessionListState>(initialSessionList);
   const [now, setNow] = useState(() => Date.now());
@@ -821,8 +1045,318 @@ function SessionsRoute({
       onRetry={() => void controller.refresh()}
       onOpen={onOpen}
       {...(onBack === undefined ? {} : { onBack })}
+      {...(focusSearch === undefined ? {} : { focusSearch })}
     />
   );
+}
+
+/**
+ * The sessions drawer over one Session route (docs/feat/mobile-chrome.md Design
+ * 3, slice S6). Wiring only: the list is the Sessions screen's own controller
+ * over the SAME link registry (no new client call — the plan's load-bearing
+ * assumption); every decision is `drawer-list.ts` / `drawer-nav.ts` /
+ * `drawer-rename.ts`; a pick leaves through `onNavigate`. A switch only
+ * unmounts the session screen, which DETACHES (never `session/close`, F6).
+ */
+function SessionDrawerHost({
+  palette,
+  from,
+  records,
+  onNavigate,
+  onSettings,
+  onPair,
+  children,
+}: {
+  readonly palette: Palette;
+  readonly from: SessionRouteParams;
+  readonly records: readonly ComputerRecordLike[];
+  readonly onNavigate: (nav: DrawerNav) => void;
+  readonly onSettings: () => void;
+  readonly onPair: () => void;
+  readonly children: (
+    openDrawer: () => void,
+    drawerOpen: boolean,
+    newSession: () => void,
+  ) => ReactNode;
+}): JSX.Element {
+  const [drawer, dispatch] = useReducer(drawerReducer, from.computerId, initialDrawer);
+  const [rows, setRows] = useState<readonly ComputerRow[]>([]);
+  const [snapshot, setSnapshot] = useState<SessionListState>(initialSessionList);
+  const [now, setNow] = useState(() => Date.now());
+  const [rowMenu, setRowMenu] = useState<DrawerRow | null>(null);
+  const listed = drawer.computerId;
+  // One controller per LISTED computer (`SessionsRoute`'s `load`); a computer
+  // picked in the menu gets a fresh one, so the previous list never shows
+  // under the new title, and a late page of the old one is dropped (F3).
+  const controller = useMemo(
+    () =>
+      createSessionListController({
+        load: async (params) => {
+          const link = await LINKS.get(listed);
+          return link.client.sessionList(
+            params.cursor === undefined ? { limit: 50 } : { limit: 50, cursor: params.cursor },
+          );
+        },
+        now: () => Date.now(),
+      }),
+    [listed],
+  );
+  const controllerRef = useRef(controller);
+  controllerRef.current = controller;
+  useEffect(() => {
+    setSnapshot(initialSessionList);
+    const unsubscribe = controller.subscribe((state) => {
+      setSnapshot(state);
+      setNow(Date.now());
+    });
+    return () => {
+      unsubscribe();
+      controller.dispose();
+    };
+  }, [controller]);
+  // F3: the list (and the title's status) is re-read on every open, and when a
+  // computer is picked while open.
+  useEffect(() => {
+    if (drawer.open) {
+      void controller.refresh();
+    }
+  }, [drawer.open, controller]);
+  useEffect(() => {
+    if (!drawer.open) {
+      return;
+    }
+    let live = true;
+    // A failed probe keeps the last rows: the title then says what it last
+    // knew (or "Connecting…"); the list below reports its own failure (F2).
+    void loadRows().then(
+      (built) => {
+        if (live) {
+          setRows(built);
+        }
+      },
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [drawer.open]);
+  // Rename by id on the ROW's computer (F7); a success re-reads that list.
+  const rename = useMemo(
+    () =>
+      createDrawerRename({
+        rename: async (computerId, sessionId, title) => {
+          const link = await LINKS.get(computerId);
+          return (await link.client.rename(sessionId, title)).text;
+        },
+        renamed: () => void controllerRef.current.refresh(),
+      }),
+    [],
+  );
+  const [renaming, setRenaming] = useState(() => rename.state());
+  useEffect(() => rename.subscribe(() => setRenaming(rename.state())), [rename]);
+  // Row actions — Pin/Unpin and Delete — on the ROW's computer
+  // (docs/feat/mobile-session-actions.md S2): never queued, one per row, a
+  // success re-reads that computer's list, and deleting the OPEN session
+  // navigates to the next row the drawer chose (`DrawerList.nextAfterCurrent`).
+  const [deleteTarget, setDeleteTarget] = useState<DrawerRow | null>(null);
+  // In a ref: the controller is built ONCE (a re-created one would drop an
+  // in-flight action), so it reads the drawer's CURRENT state through this.
+  const rowActionsRef = useRef({
+    currentId: null as string | null,
+    next: null as string | null,
+    listed: "",
+    name: "",
+    rows: [] as readonly DrawerRow[],
+  });
+  const rowActions = useMemo(
+    () =>
+      createDrawerRowActions({
+        pin: async (computerId, sessionId, pinned) => {
+          const link = await LINKS.get(computerId);
+          // The daemon's state after applying (a SET): the list re-read below is
+          // still the authority, so the answer is not applied locally.
+          return await link.client.pinSession(sessionId, pinned);
+        },
+        remove: async (computerId, sessionId) => {
+          const link = await LINKS.get(computerId);
+          await link.client.deleteSession(sessionId);
+        },
+        // That computer's list, never a local guess — and only while the drawer
+        // still lists it (a switch already replaced the controller).
+        reread: (computerId) => {
+          if (computerId === rowActionsRef.current.listed) {
+            void controllerRef.current.refresh();
+          }
+        },
+        navigate: (nextRowId) => {
+          setDeleteTarget(null);
+          const at = rowActionsRef.current;
+          const next = at.rows.find((row) => row.id === nextRowId);
+          if (next === undefined) {
+            // Nothing left to open: the drawer stays where it is, its list now
+            // empty, with its New session pill (Owner Q2's `null`).
+            return;
+          }
+          dispatch({ type: "close" });
+          navigateRef.current.onNavigate(
+            drawerTarget(navigateRef.current.from, {
+              computerId: at.listed,
+              computerName: at.name,
+              sessionId: next.id,
+              title: next.title,
+              archived: next.archived,
+            }),
+          );
+        },
+        currentId: () => rowActionsRef.current.currentId,
+        nextAfterCurrent: () => rowActionsRef.current.next,
+      }),
+    [],
+  );
+  const [rowActionState, setRowActionState] = useState(() => rowActions.state());
+  useEffect(() => rowActions.subscribe(() => setRowActionState(rowActions.state())), [rowActions]);
+  // New session (S7): created at the tap on the LISTED computer (the phone's
+  // open and outbox attach only), then opened like a row, composer focused.
+  const navigateRef = useRef({ from, onNavigate, names: new Map<string, string>() });
+  navigateRef.current.from = from;
+  navigateRef.current.onNavigate = onNavigate;
+  const fresh = useMemo(
+    () =>
+      createDrawerNewSession({
+        mint: () => crypto.randomUUID(),
+        create: async (computerId, sessionId) => {
+          let link: Awaited<ReturnType<typeof LINKS.get>>;
+          try {
+            link = await LINKS.get(computerId);
+          } catch {
+            return { ok: false, reason: "link" } as const;
+          }
+          return createFreshSession(link.client.newSession(undefined, sessionId));
+        },
+        opened: (computerId, sessionId) => {
+          const at = navigateRef.current;
+          dispatch({ type: "close" });
+          at.onNavigate(
+            drawerTarget(at.from, {
+              computerId,
+              computerName: at.names.get(computerId) ?? computerId,
+              sessionId,
+              title: NEW_SESSION_TITLE,
+              archived: false,
+              focus: true,
+            }),
+          );
+        },
+      }),
+    [],
+  );
+  const [freshState, setFreshState] = useState(() => fresh.state());
+  useEffect(() => fresh.subscribe(() => setFreshState(fresh.state())), [fresh]);
+  const openDrawer = useCallback(
+    () => dispatch({ type: "open", computerId: from.computerId }),
+    [from.computerId],
+  );
+
+  const list = drawerList(viewModel(snapshot, now), {
+    currentId: drawerCurrentId(drawer, from),
+    archivedOpen: drawer.archivedOpen,
+  });
+  const title = drawerTitle(records, rows, listed);
+  const name = title?.name ?? listed;
+  navigateRef.current.names.set(listed, name);
+  // What the row actions read at call time: the drawer's present truth.
+  rowActionsRef.current = {
+    currentId: drawerCurrentId(drawer, from),
+    next: list.nextAfterCurrent?.id ?? null,
+    listed,
+    name,
+    rows: [...list.pinned, ...list.running, ...list.recent, ...(list.archived.rows ?? [])],
+  };
+  const canCreate = title?.canCreate === true;
+  const close = (): void => dispatch({ type: "close" });
+  return (
+    <SessionsDrawer
+      palette={palette}
+      open={drawer.open}
+      title={title}
+      menuOpen={drawer.menuOpen}
+      computers={drawerComputers(records, rows, listed)}
+      items={drawerItems(list)}
+      onClose={close}
+      onTitle={() => dispatch({ type: "menu", open: !drawer.menuOpen })}
+      onPickComputer={(computerId) => dispatch({ type: "select-computer", computerId })}
+      onPair={() => {
+        close();
+        onPair();
+      }}
+      onSearch={() => {
+        close();
+        onNavigate({ kind: "reset", routes: drawerSearchTarget(listed, name) });
+      }}
+      onSettings={() => {
+        close();
+        onSettings();
+      }}
+      onOpenRow={(row) => {
+        close();
+        onNavigate(
+          drawerTarget(from, {
+            computerId: listed,
+            computerName: name,
+            sessionId: row.id,
+            title: row.title,
+            archived: row.archived,
+            cwd: row.cwd,
+          }),
+        );
+      }}
+      onRowMenu={setRowMenu}
+      rowMenu={rowMenu}
+      onRowMenuClosed={() => setRowMenu(null)}
+      onRowAction={(row, kind) => {
+        setRowMenu(null);
+        if (kind === "rename") {
+          rename.begin(listed, row);
+          return;
+        }
+        if (kind === "delete") {
+          // The confirmation first (Owner Q2: the open session is allowed, said).
+          setDeleteTarget(row);
+          return;
+        }
+        // Pin / Unpin: a SET, sent at once on the row's computer.
+        void rowActions.pin(listed, { id: row.id, pinned: row.pinned });
+      }}
+      deleteTarget={deleteTarget}
+      onDeleteConfirmed={() => {
+        const row = deleteTarget;
+        setDeleteTarget(null);
+        if (row !== null) {
+          void rowActions.confirmDelete(listed, { id: row.id });
+        }
+      }}
+      onDeleteCancelled={() => setDeleteTarget(null)}
+      actionError={rowActionState.error}
+      onDismissActionError={() => rowActions.dismiss()}
+      rename={renaming?.field ?? null}
+      onRenameText={(text) => rename.setText(text)}
+      onRenameSave={() => void rename.submit()}
+      onRenameCancel={() => rename.cancel()}
+      onToggleArchived={(shown) => dispatch({ type: "toggle-archived", shown })}
+      onMore={() => void controller.more()}
+      onRetry={() => void controller.refresh()}
+      newSession={newSessionPill(canCreate, freshState)}
+      onNewSession={() => void fresh.start(listed, canCreate)}
+      onNewSessionDismiss={() => fresh.dismiss()}
+    >
+      {children(openDrawer, drawer.open, () => void fresh.start(listed, canCreate))}
+    </SessionsDrawer>
+  );
+}
+
+/** The drawer's stack as the navigator's `reset` takes it. */
+function stackRoutes(routes: readonly DrawerStackRoute[]): DrawerStackRoute[] {
+  return [...routes];
 }
 
 /**
@@ -837,14 +1371,27 @@ function SessionRoute({
   sessionId,
   title,
   archived,
-  onBack,
+  focus,
+  cwd,
+  onOpenDrawer,
+  drawerOpen,
+  onOpenArtifacts,
+  onNewSession,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
   readonly sessionId: string;
   readonly title: string;
   readonly archived: boolean;
-  readonly onBack?: () => void;
+  readonly focus: boolean;
+  /** The tapped row's working folder (`SessionRoute.cwd`), for the header. */
+  readonly cwd: string | undefined;
+  readonly onOpenDrawer: () => void;
+  readonly drawerOpen: boolean;
+  /** The artifacts gallery's ONE entry (docs/feat/model-artifacts.md D9). */
+  readonly onOpenArtifacts: (from: ArtifactGalleryRoute["from"], open?: string) => void;
+  /** The drawer's New session, reached from the hub too (docs/feat/mobile-hub.md H3). */
+  readonly onNewSession: () => void;
 }): JSX.Element {
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -871,10 +1418,16 @@ function SessionRoute({
         archived,
         title,
         project: RECORDS.get(computerId)?.name ?? "",
+        ...(cwd === undefined ? {} : { cwd }),
         // This phone's own label, for an ask's "also asked on" note never naming
         // the device it is shown on (docs/feat/session-auto-accept.md D7): the
         // name this phone paired under. Absent on a record an older build wrote.
         phoneName: () => RECORDS.get(computerId)?.thisDeviceName,
+        // The queue-diagnosis trace (docs/fix/mobile-queued-stuck.md): every
+        // `queued` report, turn bracket, attach and compose act this session sees,
+        // into the ONE exported log (`Settings → Export logs`, `grep qtrace`).
+        // Diagnostic only: nothing here changes a behaviour.
+        trace: queueTrace(sessionId, APP_LOG),
         controller: RUNTIMES.controller(link.client),
         broker: link.permissions,
         now: () => Date.now(),
@@ -882,6 +1435,13 @@ function SessionRoute({
         // drafts shared for the app's lifetime), and the session's own client
         // methods — no frame built here (AGENTS §7 "one session path").
         compose: composeWiring(computerId, sessionId, link),
+        // Session info (docs/feat/mobile-session-info.md): the sheet's pulls, over
+        // the same client and the screen's own handle.
+        info: infoWiring(computerId, sessionId, title, link),
+        // The artifacts gallery's feed (docs/feat/model-artifacts.md D9): this
+        // screen publishes its list and its own reader, the gallery screen —
+        // which holds no handle of its own — reads both.
+        artifacts: { feed: ARTIFACT_FEEDS.feed(computerId, sessionId) },
       });
       // The link's own status: the banner's `reconnecting` (F8/F9).
       unsubscribe = link.onStatus((status) => created?.link(status.state === "up"));
@@ -892,7 +1452,8 @@ function SessionRoute({
       unsubscribe?.();
       created?.dispose();
     };
-  }, [computerId, sessionId, archived, title]);
+    // `cwd` is a route param like `title`: fixed for the route's life.
+  }, [computerId, sessionId, archived, title, cwd]);
 
   if (controller === null) {
     // Dialling the computer: the screen's own id is present, so a flow (and a
@@ -904,15 +1465,13 @@ function SessionRoute({
           variant="compact"
           title={title}
           left={
-            onBack === undefined ? undefined : (
-              <GlassButton
-                palette={palette}
-                testID="session-back"
-                icon="chevron.left"
-                accessibilityLabel="Back"
-                onPress={onBack}
-              />
-            )
+            <HeaderIcon
+              palette={palette}
+              testID="session-drawer"
+              icon="line.3.horizontal"
+              accessibilityLabel="Sessions"
+              onPress={onOpenDrawer}
+            />
           }
         />
         <View style={styles.connecting}>
@@ -935,9 +1494,31 @@ function SessionRoute({
       palette={palette}
       controller={controller}
       title={title}
-      {...(onBack === undefined ? {} : { onBack })}
+      onOpenDrawer={onOpenDrawer}
+      focusComposer={focus}
+      drawerOpen={drawerOpen}
+      onOpenArtifacts={onOpenArtifacts}
+      onNewSession={onNewSession}
+      artifactsSeenKey={sessionKey(computerId, sessionId)}
+      onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
     />
   );
+}
+
+/**
+ * A link tapped inside a gallery viewer (plan F22, Owner Q7): the whole URL is
+ * confirmed first, then Safari — the same rule the transcript's rows follow, and
+ * `links.ts` owns it.
+ */
+function openConfirmedLink(href: string): void {
+  tapLink(href, {
+    confirm: (prompt, onConfirm) =>
+      Alert.alert(prompt.title, prompt.message, [
+        { text: prompt.cancel, style: "cancel" },
+        { text: prompt.confirm, onPress: onConfirm },
+      ]),
+    open: (url) => void Linking.openURL(url),
+  });
 }
 
 /**
@@ -1021,6 +1602,106 @@ function AppShell(): JSX.Element {
     void LOCK_SETTING_STORE.read().then((read) => {
       setLockSetting(read.delay);
     });
+  }, []);
+
+  // Voice settings (docs/feat/mobile-voice.md Design §3): one in-memory copy,
+  // loaded once; a write that did not land leaves it unchanged and says so.
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(() => VOICE_SETTINGS.current());
+  const [voiceError, setVoiceError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = VOICE_SETTINGS.subscribe(setVoiceSettings);
+    void VOICE_SETTINGS.load();
+    return unsubscribe;
+  }, []);
+  const selectVoice = useCallback((next: VoiceSettings) => {
+    setVoiceError(undefined);
+    VOICE_SETTINGS.set(next).catch(() => setVoiceError("That voice setting didn't save"));
+  }, []);
+
+  // The Activity button (docs/feat/mobile-chrome.md Design 6, F22): loaded once;
+  // a failed write keeps the pick for this run and says so; a newer build's
+  // record is never written over (the row says it cannot be changed here).
+  const [activitySettings, setActivitySettings] = useState<ActivitySettings>(() =>
+    ACTIVITY_SETTINGS.current(),
+  );
+  const [activityWritable, setActivityWritable] = useState(true);
+  const [activityError, setActivityError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = ACTIVITY_SETTINGS.subscribe(setActivitySettings);
+    void ACTIVITY_SETTINGS.load().then(() => setActivityWritable(ACTIVITY_SETTINGS.writable()));
+    return unsubscribe;
+  }, []);
+  const selectActivityMode = useCallback((mode: ActivityButtonMode) => {
+    setActivityError(undefined);
+    ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), mode }).catch(() =>
+      setActivityError("That Activity button setting didn't save"),
+    );
+  }, []);
+  /**
+   * docs/feat/mobile-hub-opacity.md: ONE write per slider gesture (on release),
+   * spreading the current settings so the mode and the spot survive it. A failed
+   * write reuses the existing banner.
+   */
+  const selectActivityOpacity = useCallback((opacity: number) => {
+    setActivityError(undefined);
+    ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), opacity }).catch(() =>
+      setActivityError("That Activity button setting didn't save"),
+    );
+  }, []);
+
+  // Diagrams (docs/fix/mobile-qa-1117.md, bug 3): outline | filled, loaded once;
+  // the transcript reads the holder itself (`useDiagramStyle`), Settings shows it.
+  const [diagramSettings, setDiagramSettings] = useState<DiagramSettings>(() =>
+    DIAGRAM_SETTINGS.current(),
+  );
+  const [diagramWritable, setDiagramWritable] = useState(true);
+  const [diagramError, setDiagramError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = DIAGRAM_SETTINGS.subscribe(setDiagramSettings);
+    void DIAGRAM_SETTINGS.load().then(() => setDiagramWritable(DIAGRAM_SETTINGS.writable()));
+    return unsubscribe;
+  }, []);
+  const selectDiagramStyle = useCallback((style: DiagramStyle) => {
+    setDiagramError(undefined);
+    DIAGRAM_SETTINGS.set({ style }).catch(() =>
+      setDiagramError("That diagram setting didn't save"),
+    );
+  }, []);
+
+  // The Charts setting (docs/feat/mobile-chart-labels.md D7): loaded once, next
+  // to the Activity button's; a failed write keeps the pick for this run and
+  // says so, and a newer build's record is never written over.
+  const [chartSettings, setChartSettings] = useState<ChartSettings>(() => CHART_SETTINGS.current());
+  const [chartWritable, setChartWritable] = useState(true);
+  const [chartError, setChartError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = CHART_SETTINGS.subscribe(setChartSettings);
+    void CHART_SETTINGS.load().then(() => setChartWritable(CHART_SETTINGS.writable()));
+    return unsubscribe;
+  }, []);
+  const selectChartLabels = useCallback((labels: ChartSettings["labels"]) => {
+    setChartError(undefined);
+    CHART_SETTINGS.set({ ...CHART_SETTINGS.current(), labels }).catch(() =>
+      setChartError("That Charts setting didn't save"),
+    );
+  }, []);
+
+  // Photos (fix/mobile-media-live item 5): the "Send photos at original size"
+  // switch, loaded once. A failed write leaves the copy unchanged and says so;
+  // a newer build's record is never written over.
+  const [photoSettings, setPhotoSettings] = useState<PhotoSettings>(() => PHOTO_SETTINGS.current());
+  const [photoWritable, setPhotoWritable] = useState(true);
+  const [photoError, setPhotoError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    void PHOTO_SETTINGS.load().then(() => {
+      setPhotoSettings(PHOTO_SETTINGS.current());
+      setPhotoWritable(PHOTO_SETTINGS.writable());
+    });
+  }, []);
+  const selectPhotoSettings = useCallback((next: PhotoSettings) => {
+    setPhotoError(undefined);
+    setPhotoSettings(next);
+    PHOTO_SETTINGS.set(next).catch(() => setPhotoError("That photo setting didn't save"));
   }, []);
 
   // The switcher cover follows the setting (Owner Q2): on for everything but
@@ -1122,6 +1803,112 @@ function AppShell(): JSX.Element {
     });
     return () => subscription.remove();
   }, []);
+
+  // The notification path (docs/feat/mobile-notifications.md Design 7 / N7):
+  // register the categories, listen for a response (an action or a plain tap) and
+  // drain the one that LAUNCHED the app. Everything it decides lives in pure
+  // modules (`notification-*.ts`); this is the binding of the app's own objects.
+  useEffect(() => {
+    let started: { stop(): void } | undefined;
+    let stopped = false;
+    let devInjectTicker: ReturnType<typeof setInterval> | undefined;
+    void (async () => {
+      const { readAnswerMaterial } = await import("./src/push-directory-expo.ts");
+      const { startNotifications } = await import("./src/notification-wiring.ts");
+      const material = async () => readAnswerMaterial(NOTIFICATION_DIRECTORY_STORE);
+      const wiring = {
+        link: async (computerId: string) => {
+          const link = await LINKS.get(computerId);
+          return { client: link.client, hold: link.hold };
+        },
+        computers: async () => (await material()).peers,
+        pushKeys: async () => (await material()).pushKeys,
+        answered: PUSH_ANSWERS,
+        authenticate,
+        // One Face ID success also clears the app lock (Owner Q2): the SAME
+        // reducer the Lock screen drives, so there is one lock, not two.
+        unlockApp: () => lock.current?.dispatch({ type: "authResult", result: "success" }),
+        inForeground: () => AppState.currentState === "active",
+        computerName: (computerId: string) => RECORDS.get(computerId)?.name ?? "your computer",
+        navigate: (route: unknown) => {
+          if (route === "computers") {
+            navigationRef.navigate("Computers");
+            return;
+          }
+          const to = route as {
+            computerId: string;
+            sessionId: string;
+            title: string;
+            archived: boolean;
+          };
+          if (!navigationRef.isReady()) {
+            return;
+          }
+          navigationRef.navigate("Session", to);
+        },
+        refuse: (why: string) => {
+          // One line, never the notification's text (decision 19 / task 14).
+          APP_LOG.log("warn", "notify", { line: `refused ${why}` });
+        },
+        log: (line: string) => APP_LOG.log("info", "notify", { line }),
+        notice: (notice: { kind: string; text: string }) => {
+          APP_LOG.log("info", "notify", { line: `notice ${notice.kind}` });
+        },
+      };
+      const handle = await startNotifications(wiring);
+      if (stopped) {
+        handle.stop();
+        return;
+      }
+      started = handle;
+      // The E2E harness's `notify-respond` hook (Owner Q7), DEV BUILDS ONLY: a
+      // response it writes into the app's container is fed to the SAME
+      // dispatcher a real tap uses, so a forged one is refused like any other.
+      if (__DEV__) {
+        const { NOTIFY_RESPONSE_NAME, takeInjectedResponse } = await import(
+          "./src/notification-dev-inject.ts"
+        );
+        const { File, Paths } = await import("expo-file-system");
+        // `Paths.cache` IS the app's `Library/Caches` (the directory the harness
+        // writes into), so the join is the file-system module's, not string work.
+        const responseFile = new File(Paths.cache, NOTIFY_RESPONSE_NAME);
+        const io = {
+          read: (path: string): string | undefined => {
+            try {
+              const file = new File(path);
+              return file.exists ? file.textSync() : undefined;
+            } catch {
+              return undefined;
+            }
+          },
+          remove: (path: string): void => {
+            try {
+              const file = new File(path);
+              if (file.exists) file.delete();
+            } catch {
+              // Already gone: the response was consumed.
+            }
+          },
+        };
+        devInjectTicker = setInterval(() => {
+          const injected = takeInjectedResponse(responseFile.uri, io);
+          if (injected) {
+            void handle.handle(injected).catch(() => undefined);
+          }
+        }, 500);
+      }
+    })().catch((error: unknown) => {
+      APP_LOG.log("error", "notify", { line: `start failed: ${errorText(error)}` });
+    });
+    return () => {
+      stopped = true;
+      if (devInjectTicker !== undefined) {
+        clearInterval(devInjectTicker);
+        devInjectTicker = undefined;
+      }
+      started?.stop();
+    };
+  }, [navigationRef]);
 
   // The lock's ONE instance, created lazily on this render (a `useRef` initial
   // value would run on every render — `createAppLock` is cheap but its state is
@@ -1407,6 +2194,31 @@ function AppShell(): JSX.Element {
                 onSelectDelay={selectDelay}
                 onExportLogs={exportLogs}
                 canExport={!exporting}
+                voice={voiceSettings}
+                {...(voiceError === undefined ? {} : { voiceError })}
+                onVoice={selectVoice}
+                activityMode={activitySettings.mode}
+                activityWritable={activityWritable}
+                {...(activityError === undefined ? {} : { activityError })}
+                onActivityMode={selectActivityMode}
+                {...(activitySettings.opacity === undefined
+                  ? {}
+                  : { activityOpacity: activitySettings.opacity })}
+                onActivityOpacity={selectActivityOpacity}
+                chartLabels={chartSettings.labels}
+                chartWritable={chartWritable}
+                {...(chartError === undefined ? {} : { chartError })}
+                onChartLabels={selectChartLabels}
+                diagramStyle={diagramSettings.style}
+                diagramWritable={diagramWritable}
+                {...(diagramError === undefined ? {} : { diagramError })}
+                onDiagramStyle={selectDiagramStyle}
+                // Item 5's switch (fix/mobile-media-live): the downscale is the
+                // default, and a newer build's record is never written over.
+                photoSettings={photoSettings}
+                photoWritable={photoWritable}
+                {...(photoError === undefined ? {} : { photoError })}
+                onPhotoSettings={selectPhotoSettings}
                 // P9: ONE row for the phone, over every paired computer. A
                 // computer that cannot deliver outranks one that can — it is the
                 // reason nothing arrives — and the toggle reaches all of them.
@@ -1435,6 +2247,7 @@ function AppShell(): JSX.Element {
                 palette={palette}
                 computerId={route.params.computerId}
                 title={route.params.name}
+                {...(route.params.search === true ? { focusSearch: true } : {})}
                 {...(navigation.canGoBack() ? { onBack: () => navigation.goBack() } : {})}
                 onOpen={(row) =>
                   navigation.navigate("Session", {
@@ -1445,6 +2258,7 @@ function AppShell(): JSX.Element {
                     // banner and a Reopen button, and taps open WITHOUT reopening
                     // (Owner Q4: browsing never revives a session).
                     archived: row.archived,
+                    ...(row.cwd === "" ? {} : { cwd: row.cwd }),
                   })
                 }
               />
@@ -1458,13 +2272,76 @@ function AppShell(): JSX.Element {
             options={({ route }) => ({ title: route.params.title, headerShown: false })}
           >
             {({ navigation, route }) => (
-              <SessionRoute
+              <SessionDrawerHost
                 palette={palette}
-                {...(navigation.canGoBack() ? { onBack: () => navigation.goBack() } : {})}
+                from={route.params}
+                records={pairedComputers}
+                // F4: same computer → replace (no stack growth); another computer
+                // → the whole stack, so back lands on THAT computer's list.
+                onNavigate={(nav) => {
+                  if (nav.kind === "replace") {
+                    navigation.replace("Session", nav.route.params);
+                  } else if (nav.kind === "reset") {
+                    navigation.reset({
+                      index: nav.routes.length - 1,
+                      routes: stackRoutes(nav.routes),
+                    });
+                  }
+                }}
+                onSettings={() => navigation.navigate("Settings")}
+                onPair={() => navigation.navigate("Pair", undefined)}
+              >
+                {(openDrawer, drawerOpen, newSession) => (
+                  <SessionRoute
+                    palette={palette}
+                    onOpenDrawer={openDrawer}
+                    drawerOpen={drawerOpen}
+                    onNewSession={newSession}
+                    computerId={route.params.computerId}
+                    sessionId={route.params.sessionId}
+                    title={route.params.title}
+                    archived={route.params.archived}
+                    focus={route.params.focus === true}
+                    cwd={route.params.cwd}
+                    onOpenArtifacts={(from, open) =>
+                      openArtifactGallery(navigation, {
+                        computerId: route.params.computerId,
+                        sessionId: route.params.sessionId,
+                        title: route.params.title,
+                        archived: route.params.archived,
+                        from,
+                        ...(open === undefined ? {} : { open }),
+                      })
+                    }
+                  />
+                )}
+              </SessionDrawerHost>
+            )}
+          </Stack.Screen>
+          {/* The artifacts gallery (docs/feat/model-artifacts.md D9): a session's
+              artifacts, reached by Session info's row or a transcript card. It
+              holds no handle — it reads the feed the session screen published. */}
+          <Stack.Screen
+            name="ArtifactGallery"
+            options={({ route }) => ({ title: "Artifacts", headerShown: false })}
+          >
+            {({ navigation, route }) => (
+              <ArtifactGalleryScreen
+                palette={palette}
                 computerId={route.params.computerId}
                 sessionId={route.params.sessionId}
                 title={route.params.title}
                 archived={route.params.archived}
+                {...(route.params.open === undefined ? {} : { open: route.params.open })}
+                onBack={() => navigation.goBack()}
+                onLink={openConfirmedLink}
+                onShare={(fileUri) => {
+                  // A NAMED copy handed over, then removed once the sheet closes
+                  // (D9, finding 2): the file a person saves or AirDrops is
+                  // `report.zip`, never `3f2a…e9`.
+                  void shareCachedCopy(fileUri);
+                }}
+                onRenderError={(fields) => APP_LOG.log("error", "client-error", fields)}
               />
             )}
           </Stack.Screen>

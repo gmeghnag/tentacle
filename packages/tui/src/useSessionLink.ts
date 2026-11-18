@@ -53,10 +53,12 @@ import { type WakeModel, wakeStep } from "@tentacle/core";
 import { type MutableRefObject, useCallback, useRef } from "react";
 import type { SessionController, SessionDirectory } from "./app-types.ts";
 import { noteSent, resetDock } from "./background-focus.ts";
+import type { CapsView } from "./capability-toggles.ts";
 import { CLEARED_ELSEWHERE_NOTICE, CLEARED_NOTICE } from "./clear-command.ts";
 import type { QuitConfirmFacts } from "./commands.ts";
 import { type DaemonQueue, handBackRows, takeAll } from "./queued.ts";
 import type { QueuedRows } from "./queued.ts";
+import type { ScheduleDockRow } from "./schedule-view.ts";
 import { openFailedNotice, stayingNotice, switchRefusedNotice } from "./sessions-panel.ts";
 import type { SkillsSync } from "./skills-sync.ts";
 import {
@@ -71,9 +73,9 @@ import {
 import type { ContextOpen } from "./status-view.ts";
 import { subagentNotifyNotice, userToSubagentNotice } from "./subagent-notify.ts";
 import {
-  FOREIGN_COMPACTED_NOTICE,
   type SessionActivity,
   closedNotice,
+  compactionSeparatorOf,
   historyAction,
   nextStep,
 } from "./turn-feed.ts";
@@ -108,8 +110,14 @@ export interface SessionLinkHost {
   readonly queueSubRef: MutableRefObject<(() => void) | null>;
   readonly agentsSubRef: MutableRefObject<(() => void) | null>;
   readonly jobsSubRef: MutableRefObject<(() => void) | null>;
+  /** The session's armed scheduled wakes (`schedules`, cron-tool S5). */
+  readonly schedulesSubRef: MutableRefObject<(() => void) | null>;
   readonly notifySubRef: MutableRefObject<(() => void) | null>;
   readonly dockMsgSubRef: MutableRefObject<(() => void) | null>;
+  /** The session's MCP/skill switches (docs/feat/session-capabilities.md S4). */
+  readonly capsSubRef: MutableRefObject<(() => void) | null>;
+  /** The switches the daemon reported (`App`'s: it renders them). */
+  readonly onCapsChange: (caps: CapsView | undefined, by?: string) => void;
 
   // --- the latches of the turn driver and of a follow (all shared)
   /** Activities held while a run of mine streamed (`onActivity` pushes them). */
@@ -140,7 +148,17 @@ export interface SessionLinkHost {
 
   // --- painting, the notice sink and the input line
   readonly flushNow: () => void;
-  readonly pushNotice: (text: string) => void;
+  /**
+   * A history that just rebuilt the transcript, cards attached (S6a review
+   * finding 2) — and, on a session SWAP, the per-session join forgotten so the
+   * new session's own list is asked (`forgetArtifacts`).
+   */
+  readonly joinCards: (state: DisplayState) => DisplayState;
+  readonly forgetArtifacts: () => void;
+  /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
+  readonly pushNotice: (text: string, level?: "warn") => void;
+  /** A compaction's grey rule (S3); `pushNotice` cannot draw one. */
+  readonly pushSeparator: (text: string) => void;
   readonly restoreInput: (text: string, why: string) => void;
   readonly setCompacting: (on: boolean) => void;
 
@@ -158,6 +176,8 @@ export interface SessionLinkHost {
   /** The dock's rows reset and a child's sent message (`S5`). */
   readonly setAgents: DockLayer["setAgents"];
   readonly setJobs: DockLayer["setJobs"];
+  /** The session's armed wake table (`useDock`'s `setSchedules`, cron-tool S5). */
+  readonly setSchedules: DockLayer["setSchedules"];
   readonly setDock: DockLayer["setDock"];
   readonly jobOutputRef: DockLayer["jobOutputRef"];
   /** An open `/sessions` panel re-read at the next render (`S7`). */
@@ -213,8 +233,11 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
     queueSubRef,
     agentsSubRef,
     jobsSubRef,
+    schedulesSubRef,
     notifySubRef,
     dockMsgSubRef,
+    capsSubRef,
+    onCapsChange,
     heldRef,
     abortRef,
     streamCtrlRef,
@@ -233,7 +256,10 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
     onActivityRef,
     watchReturned,
     flushNow,
+    forgetArtifacts,
+    joinCards,
     pushNotice,
+    pushSeparator,
     restoreInput,
     setCompacting,
     skillsSync,
@@ -245,6 +271,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
     drainHeld,
     setAgents,
     setJobs,
+    setSchedules,
     setDock,
     jobOutputRef,
     touchPanel,
@@ -327,10 +354,17 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
         if (activity.reason === null) {
           ownClearsRef.current = 0;
         }
-        if (action === "notice") {
-          pushNotice(FOREIGN_COMPACTED_NOTICE);
+        if (action === "separator") {
+          // Another device compacted (owner Q6: the SAME rule as my own, never a
+          // device-blaming notice). The figures come from the new history's
+          // summary message: a legacy one gives `compacted` alone.
+          pushSeparator(compactionSeparatorOf(activity.messages));
         } else if (action === "replace" || action === "append") {
           const apply = action === "append" ? appendHistory : resetHistory;
+          // `joinCards` inside the compute: the repo's cards are attached BEFORE
+          // the rows are warmed, so the screenshot-in-progress frame already has
+          // them (S6a review finding 2). The commit's own tail joins again,
+          // which is a no-op once the map is filled.
           void commitHistory((s) => apply(s, activity.messages)).then(() => {
             setScrollOffset(0);
             if (cleared) {
@@ -380,6 +414,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       ownClearsRef,
       ownCompactionsRef,
       pushNotice,
+      pushSeparator,
       runQuit,
       sendNowRef,
       sessionRef,
@@ -410,12 +445,15 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       queueSubRef.current?.();
       agentsSubRef.current?.();
       jobsSubRef.current?.();
+      schedulesSubRef.current?.();
       notifySubRef.current?.();
       dockMsgSubRef.current?.();
+      capsSubRef.current?.();
       heldRef.current = [];
       setDaemonQueue(undefined);
       setAgents(undefined);
       setJobs(undefined);
+      setSchedules(undefined);
       jobOutputRef.current = {};
       // The dock belongs to a session: a switch starts it over (its drafts and
       // its `sent` are per session, docs/feat/subagent-panel.md).
@@ -430,6 +468,11 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       queueSubRef.current = session?.onQueued?.((q) => setDaemonQueue(q)) ?? null;
       agentsSubRef.current = session?.onSubagents?.((rows) => setAgents(rows)) ?? null;
       jobsSubRef.current = session?.onJobs?.((report) => setJobs(report.rows)) ?? null;
+      // The session's armed scheduled wakes (cron-tool S5): the SAME per-session
+      // feed the dock and `/schedule` paint. `undefined` when this session has no
+      // table to report (a pod, an older daemon), never an empty claim.
+      schedulesSubRef.current =
+        session?.onSchedules?.((report) => setSchedules(report.rows)) ?? null;
       // A RUNNING background child's message to the agent
       // (docs/feat/agent-message-two-way.md): the notice at once, and — when it
       // asks for one and this laptop allows two-way — the same wake an exit arms.
@@ -452,6 +495,11 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
           flushNow();
           setDock((prev) => noteSent(prev, m.agentId, m.text, m.n));
         }) ?? null;
+      // The session's MCP/skill switches (docs/feat/session-capabilities.md
+      // S4): its current state at once (never news: no `by`), then every
+      // snapshot and change the daemon reports.
+      onCapsChange(session?.capabilities?.());
+      capsSubRef.current = session?.onCapabilities?.((caps, by) => onCapsChange(caps, by)) ?? null;
       const opening = session?.open?.();
       if (!opening) {
         onOpened?.(true); // nothing to open (a local session)
@@ -472,13 +520,16 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       agentsSubRef,
       armWake,
       askContext,
+      capsSubRef,
       dockMsgSubRef,
       flushNow,
       heldRef,
       jobOutputRef,
       jobsSubRef,
+      schedulesSubRef,
       notifySubRef,
       onActivityRef,
+      onCapsChange,
       pushNotice,
       queueSubRef,
       sessionRef,
@@ -487,6 +538,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       setDaemonQueue,
       setDock,
       setJobs,
+      setSchedules,
       setScrollOffset,
       skillsSync,
       stateRef,
@@ -516,6 +568,11 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       opts: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void } = {},
     ): void => {
       sessionRef.current = next;
+      // The NEW session's artifacts are not the old one's: forget what was
+      // learned (a `callId` from another session must never attach a card here),
+      // and re-join what the new transcript already holds — for a kept
+      // transcript, and for whatever its eager open brings (S6a review finding 2).
+      forgetArtifacts();
       // An open `/sessions` panel marks the live session as current, and must be
       // re-read at the next render: its "current" row is read live (Review R2-1,
       // R3-1). The rule is the `/sessions` kind's own (`panels/sessions.ts`).
@@ -546,6 +603,10 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
         restoreInput(takeAll(rowsRef.current).text, "_your queued messages are back in the input_");
         setRows(() => []);
       }
+      // Whatever the new view holds NOW is joined against the new session's list
+      // (a kept transcript: its `present` rows have no card either). The history
+      // its eager open brings joins at its own commit.
+      stateRef.current = joinCards(stateRef.current);
       flushNow();
     },
     [
@@ -553,7 +614,9 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       clearingRef,
       fallbackNoticedRef,
       flushNow,
+      forgetArtifacts,
       handedWakeRef,
+      joinCards,
       ownClearsRef,
       ownCompactionsRef,
       restoreInput,

@@ -21,7 +21,7 @@
  */
 import type { RecordTitle } from "@tentacle/agent";
 import { RECORD_TITLE_MAX } from "@tentacle/agent";
-import { type ChatMessage, subagentLoadNotes } from "@tentacle/core";
+import { type ChatMessage, type ScheduledJob, subagentLoadNotes } from "@tentacle/core";
 import {
   ChatMessageSchema,
   type LogCursor,
@@ -34,11 +34,13 @@ import type {
   PersistedTurn,
   PersistedTurnKey,
 } from "./persisted-session.ts";
+import { parseScheduleRecords } from "./schedules-view.ts";
 import {
   type ParsedLogFile,
   currentSegment,
   entriesThrough,
   foldThrough,
+  lastCapabilities,
 } from "./session-log-file.ts";
 
 /** The state file's `format` tag. */
@@ -58,10 +60,19 @@ export const DAEMON_STATE_FORMAT = "tentacle-daemon-state";
 export const DAEMON_STATE_VERSION = 2;
 /** The version a state file without image refs is written as (readable by every build). */
 export const DAEMON_STATE_VERSION_NO_MEDIA = 1;
+/**
+ * 3: the file carries `schedules` (docs/feat/cron-tool.md D6, owner Q8), written
+ * only when it does; it may carry image refs too. Same reason as 2: an older
+ * build would DROP the table silently and rewrite the file without it — losing
+ * the user's wake-ups. Stamped 3, that build refuses the one session loudly and
+ * leaves its files untouched; every session without schedules stays 1 or 2.
+ */
+export const DAEMON_STATE_VERSION_SCHEDULES = 3;
 /** The versions this build READS (a tail without refs is equally valid as either). */
 export const DAEMON_STATE_VERSIONS: readonly number[] = [
   DAEMON_STATE_VERSION_NO_MEDIA,
   DAEMON_STATE_VERSION,
+  DAEMON_STATE_VERSION_SCHEDULES,
 ];
 
 /** The state file, as written (compact JSON, one object). */
@@ -94,6 +105,14 @@ export interface DaemonSidecar {
    * fail-closed rule as the laptop's shared-auto-accept file).
    */
   readonly autoAccept?: boolean;
+  /**
+   * When the session was pinned (docs/feat/mobile-session-actions.md), present
+   * ONLY when pinned: an older build ignores it (a lost pin, nothing else), and
+   * a malformed value loads as not pinned — never a refusal.
+   */
+  readonly pinnedAt?: number;
+  /** The scheduled wakes, present ONLY when there is one (and then the file is v3). */
+  readonly schedules?: readonly ScheduledJob[];
 }
 
 /** The length of the prefix `a` and `b` share BY REFERENCE (messages are immutable values). */
@@ -108,11 +127,17 @@ export function sharedPrefix(a: readonly ChatMessage[], b: readonly ChatMessage[
 export function sidecarOf(record: DaemonSessionRecord): DaemonSidecar {
   const k = sharedPrefix(record.logged, record.messages);
   const tail = record.messages.slice(k);
+  const schedules = record.schedules !== undefined && record.schedules.length > 0;
   return {
     format: DAEMON_STATE_FORMAT,
-    // v2 exactly when a tail message carries refs: a file that does not is
-    // readable by every build, which is the whole point of the split.
-    schemaVersion: tail.some(hasAttachments) ? DAEMON_STATE_VERSION : DAEMON_STATE_VERSION_NO_MEDIA,
+    // v3 exactly when it carries schedules, else v2 exactly when a tail message
+    // carries refs: a file with neither is readable by every build, which is
+    // the whole point of the split.
+    schemaVersion: schedules
+      ? DAEMON_STATE_VERSION_SCHEDULES
+      : tail.some(hasAttachments)
+        ? DAEMON_STATE_VERSION
+        : DAEMON_STATE_VERSION_NO_MEDIA,
     id: record.id,
     logHead: { seq: record.logHead.seq, id: record.logHead.id },
     k,
@@ -127,6 +152,8 @@ export function sidecarOf(record: DaemonSessionRecord): DaemonSidecar {
     ...(record.archivedAt !== undefined ? { archivedAt: record.archivedAt } : {}),
     ...(record.head !== undefined ? { head: record.head } : {}),
     ...(record.autoAccept === true ? { autoAccept: true } : {}),
+    ...(record.pinnedAt !== undefined ? { pinnedAt: record.pinnedAt } : {}),
+    ...(schedules ? { schedules: record.schedules } : {}),
   };
 }
 
@@ -357,6 +384,22 @@ export function parseSidecar(text: string, id: string): Result<DaemonSidecar> {
   if (value.head !== undefined && !Number.isInteger(value.head)) {
     return { ok: false, reason: '"head" is malformed' };
   }
+  // v1/v2 PROMISE no schedules (the version an older build reads): a file
+  // that has them is not this build's own, refused like refs in a v1 tail.
+  let schedules: ScheduledJob[] | undefined;
+  if (value.schedules !== undefined) {
+    if (version !== DAEMON_STATE_VERSION_SCHEDULES) {
+      return {
+        ok: false,
+        reason: `a schemaVersion ${version} state file carries "schedules" (it must be ${DAEMON_STATE_VERSION_SCHEDULES})`,
+      };
+    }
+    const parsed = parseScheduleRecords(value.schedules);
+    if (parsed === null) {
+      return { ok: false, reason: '"schedules" is malformed' };
+    }
+    schedules = parsed;
+  }
   return {
     ok: true,
     value: {
@@ -379,6 +422,10 @@ export function parseSidecar(text: string, id: string): Result<DaemonSidecar> {
       // auto-accept ON). Never a refusal: the conversation is intact, and the
       // value is one switch nobody depends on to be preserved.
       ...(value.autoAccept === true ? { autoAccept: true } : {}),
+      // A stamp is a pin; anything else is none (dropped, like `autoAccept`:
+      // the conversation is intact and a lost pin is harmless).
+      ...(isWireStamp(value.pinnedAt) ? { pinnedAt: value.pinnedAt } : {}),
+      ...(schedules !== undefined && schedules.length > 0 ? { schedules } : {}),
     },
   };
 }
@@ -456,6 +503,10 @@ export function rebuild(
   // messages: a note delivered after the last log write is in the sidecar's
   // tail, and closes its id. `reconcileOnReload` appends them.
   const loadNotes = subagentLoadNotes(derivedFrom, messages);
+  // The switches (docs/feat/session-capabilities.md S3b): from the SAME
+  // entries, so a change logged after `logHead` (its write never paired) is
+  // ignored like the rest of that tail (F6).
+  const capabilities = lastCapabilities(derivedFrom);
   return {
     ok: true,
     value: {
@@ -474,6 +525,9 @@ export function rebuild(
       ...(sidecar.archivedAt !== undefined ? { archivedAt: sidecar.archivedAt } : {}),
       ...(head !== undefined ? { head } : {}),
       ...(sidecar.autoAccept === true ? { autoAccept: true } : {}),
+      ...(sidecar.pinnedAt !== undefined ? { pinnedAt: sidecar.pinnedAt } : {}),
+      ...(sidecar.schedules !== undefined ? { schedules: sidecar.schedules } : {}),
+      ...(capabilities !== undefined ? { capabilities } : {}),
       logged,
       logHead: sidecar.logHead,
       paired: through !== null,

@@ -22,7 +22,7 @@
  */
 import type { DuplexChannel } from "@tentacle/transport";
 import { type AuthorizeVerdict, noiseResponder, systemRandom } from "@tentacle/transport/noise";
-import { Connection, type ConnectionPrincipal } from "./connection.ts";
+import { Connection, type ConnectionPrincipal, type HooksTrustPrecheck } from "./connection.ts";
 import type { DeviceAllow, DeviceAuthority, DeviceClose } from "./device-authority.ts";
 import { hasLivePairing, touchSeen } from "./device-store.ts";
 import { PairHandler } from "./pairing-handler.ts";
@@ -49,6 +49,11 @@ export interface AcceptDeviceDeps {
   /** One line per handshake outcome, for the operator. */
   readonly onAudit?: (line: string) => void;
   readonly maxFrameBytes?: number;
+  /**
+   * The host's own project-hooks answer, before the prompting client is asked
+   * (docs/feat/serve-mcp.md S4): a phone turn asks the HOST's trust first.
+   */
+  readonly hooksTrustPrecheck?: HooksTrustPrecheck;
   /** How often a pairing-only connection re-checks its window (`PAIRING_CHECK_MS`). */
   readonly pairingCheckMs?: number;
   /**
@@ -181,6 +186,7 @@ export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): De
       const connection = new Connection(secure, deps.sessionHost, deps.onError, {
         maxFrameBytes: deps.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
         principal,
+        ...(deps.hooksTrustPrecheck ? { hooksTrustPrecheck: deps.hooksTrustPrecheck } : {}),
       });
       // ONE handle for this connection: the authority holds it for a revoke,
       // and every teardown path unregisters this same object, so a revoke's

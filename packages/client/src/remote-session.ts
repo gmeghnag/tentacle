@@ -9,22 +9,30 @@
  * it). It is its session's stream listener: `RemoteClient` hands it the
  * ordered outputs of the pure reducer.
  */
-import type { AttachmentRef, ChatMessage } from "@tentacle/core";
+import type { AttachmentRef, ChatMessage, ScheduledRef } from "@tentacle/core";
 import {
+  type ArtifactListResult,
+  type ArtifactMeta,
+  type CompactResult,
+  type DocumentContent,
   DomainErrorCode,
   type JobOutputResult,
   type JobRow,
   JsonRpcErrorCode,
   type QueueState,
+  type ScheduleDeleteResult,
+  type ScheduleRow,
   type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
+  type SessionCapabilitiesWire,
   type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionUpdate,
   type SubagentRow,
   type TurnEnd,
   type UpdateSettingsResult,
+  type VoiceTurn,
   isWakeTurnId,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
@@ -33,19 +41,24 @@ import {
   type AutoAcceptLink,
   createAutoAcceptHandle,
 } from "./auto-accept-link.ts";
+import type { DocumentsInput } from "./document-input.ts";
 import { type ReturnedRow, handBack, restoredByRefusal, stayingRows } from "./hand-back.ts";
 import type { ImageInput } from "./image-input.ts";
 import { turnRecovery } from "./link-machine.ts";
 import { type SessionEvent, stopReasonFromProtocol, updateToEvent } from "./mapping.ts";
 import { AsyncQueue } from "./queue.ts";
 import {
+  type ArtifactReadOptions,
+  DocumentsUnavailableError,
   ImagesUnavailableError,
   type ReadBack,
   type RemoteClient,
   type SessionStreamListener,
   type SessionTitleNotice,
+  type UnqueueOutcome,
   type UploadOptions,
 } from "./remote-client.ts";
+import { SCHEDULE_UNTRUSTED_DAEMON, firedScheduleRef } from "./schedules.ts";
 import type { StreamOutput } from "./session-reducer.ts";
 import type { SubagentNotify } from "./subagents.ts";
 
@@ -69,6 +82,21 @@ interface ActiveTurn {
    * whose images vanished would be a different turn.
    */
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * The attached PDFs this prompt names (docs/feat/pdf-read.md D6): a
+   * `document{ref}` after an upload, or `document{text}` this laptop extracted
+   * for a pod. Stored on the TURN for the same reason as `attachments`: every
+   * keyed re-send after a drop carries the same documents under the same
+   * `turnId`.
+   */
+  readonly documents?: readonly DocumentContent[];
+  /**
+   * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3).
+   * Stored on the TURN for the same reason as `attachments`: every keyed
+   * re-send after a drop carries it under the same `turnId`. Never on a foreign
+   * turn — a turn this session did not send has no profile here.
+   */
+  readonly voice?: VoiceTurn;
   readonly queue: AsyncQueue<SessionEvent>;
   /** Tool names by call id (a `tool_call_update` omits it). */
   readonly toolNames: Map<string, string>;
@@ -79,6 +107,12 @@ interface ActiveTurn {
   ended: boolean;
   /** The daemon acknowledged `prompt{turnId}`. */
   acked: boolean;
+  /**
+   * The caller's `send` `opts.onAccepted`: called once, at the first ack
+   * (the daemon holds the turn's key), then cleared — a re-sent prompt's
+   * second ack does not call it again. Never called on a refusal.
+   */
+  onAccepted?: (() => void) | undefined;
   /** `prompt{turnId}` was written to a channel: a daemon may have run it. */
   sent: boolean;
   /** The user cancelled; re-sent on the prompt's ack (a cancel can beat the prompt, or be lost). */
@@ -122,6 +156,14 @@ export type SessionActivity =
   | {
       readonly kind: "history";
       readonly messages: readonly ChatMessage[];
+      /**
+       * Each message's arrival time, index-aligned with `messages`
+       * (docs/fix/mobile-open-at-end.md, slice B). Absent when the daemon does not
+       * report it, or when a page of the snapshot was unusable — a frontend then
+       * shows no times at all, never a mispaired one. Display-only: nothing is
+       * persisted from it (§7).
+       */
+      readonly times?: readonly number[];
       readonly reason: "compact" | "context_reset" | "clear" | null;
     }
   /** The session ended daemon-side (another device's close / delete, the reaper). */
@@ -140,6 +182,11 @@ export class RemoteSession implements SessionStreamListener {
   private readonly desiredId?: string;
   /** The resumed record's chosen title: seeds the open that creates the session daemon-side. */
   private readonly seedTitle: SeedTitle | undefined;
+  /**
+   * The resumed record's MCP/skill switches (docs/feat/session-capabilities.md
+   * S3b): seed the open that creates the session daemon-side (a resume, a hop).
+   */
+  private readonly seedCaps: SessionCapabilitiesWire | undefined;
   private id: string | null = null;
   /** The in-flight `session/open` of the first `send`, until `id` is known. */
   private opening: Promise<string> | null = null;
@@ -185,7 +232,8 @@ export class RemoteSession implements SessionStreamListener {
   /**
    * The daemon is a trusted `serve` host that starts its own wake turns: their
    * asks count as this session's for auto-accept (`autoAcceptsTurn`). From
-   * `RemoteClientOptions.daemonWakes`; FALSE everywhere but `connect`.
+   * `RemoteClientOptions.daemonWakes`; FALSE everywhere but `connect` and the
+   * local worker (docs/feat/cron-tool.md D1).
    */
   private readonly daemonWakes: boolean;
   /**
@@ -196,6 +244,11 @@ export class RemoteSession implements SessionStreamListener {
    * it keeps a local, in-memory value (AGENTS §7, "a pod is not trusted").
    */
   readonly autoAcceptHandle: AutoAcceptHandle;
+  /** The daemon's switches (`capabilities()`); undefined → it has none (yet). */
+  private capabilityState: SessionCapabilitiesWire | undefined;
+  private readonly capabilityListeners = new Set<
+    (state: SessionCapabilitiesWire | undefined, by?: string) => void
+  >();
   /**
    * The session's auto-accept as a consumer sees it (a TUI's feed, the phone's
    * sheet): `current()`, `set()`, `onChange()`, `shared()` — never `receive`.
@@ -277,11 +330,13 @@ export class RemoteSession implements SessionStreamListener {
     attach?: { readonly reopen?: boolean },
     closeIfLast = false,
     daemonWakes = false,
+    seedCapabilities?: SessionCapabilitiesWire,
   ) {
     this.client = client;
     this.seedMessages = seedMessages;
     this.desiredId = desiredId;
     this.seedTitle = seedTitle;
+    this.seedCaps = seedCapabilities;
     this.attach = attach;
     this.closeIfLast = closeIfLast;
     this.daemonWakes = daemonWakes;
@@ -321,6 +376,84 @@ export class RemoteSession implements SessionStreamListener {
     this.autoAcceptHandle.receive(on, by);
   }
 
+  /**
+   * The session's MCP/skill switches (docs/feat/session-capabilities.md), as
+   * the daemon last reported them: undefined until an open says it has them,
+   * and again after an older daemon answers `MethodNotFound` — a surface then
+   * hides its toggles ("not supported by this computer").
+   */
+  capabilities(): SessionCapabilitiesWire | undefined {
+    return this.capabilityState;
+  }
+
+  /**
+   * Follow the switches: called with the daemon's state on every snapshot and
+   * change (`by` set only on a change: another client's label, untrusted
+   * display text), and with undefined when the daemon turns out not to have
+   * them. Returns the unsubscribe.
+   */
+  onCapabilities(
+    listener: (state: SessionCapabilitiesWire | undefined, by?: string) => void,
+  ): () => void {
+    this.capabilityListeners.add(listener);
+    return () => {
+      this.capabilityListeners.delete(listener);
+    };
+  }
+
+  /**
+   * `session/set_capability`: turn one MCP server or skill on/off for the model.
+   * The state is NOT taken from the answer but from the daemon's echo (the
+   * `capabilities` update, emitted before it answers): with two clients racing,
+   * a late answer must not undo the other's later change (F4). Resolves with the
+   * daemon's state after applying. Rejects on a refusal; `MethodNotFound` (an
+   * older daemon) also clears the state, so the toggles hide (F7).
+   */
+  async setCapability(
+    kind: "mcp" | "skill",
+    name: string,
+    enabled: boolean,
+  ): Promise<SessionCapabilitiesWire> {
+    try {
+      const result = await this.client.setSessionCapability(this, kind, name, enabled);
+      return result.capabilities;
+    } catch (error) {
+      if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+        this.noteCapabilities(undefined);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The NEXT session this client creates starts with this one's switches
+   * (`OpenParams.capabilities`, S3b): a `/clear` close-and-replace keeps them
+   * (owner Q5). A no-op while the daemon has reported none (unknown or an older
+   * daemon): nothing to carry.
+   */
+  seedCapabilities(): void {
+    if (this.capabilityState !== undefined) {
+      this.client.seedCapabilitiesOnCreate(this.capabilityState);
+    }
+  }
+
+  /** `SessionStreamListener`: the daemon's switches on an open/re-attach (F5). */
+  capabilitiesSnapshot(state: SessionCapabilitiesWire): void {
+    this.noteCapabilities(state);
+  }
+
+  /** A `capabilities` update from any client (own echoes included). */
+  capabilitiesChanged(state: SessionCapabilitiesWire, by?: string): void {
+    this.noteCapabilities(state, by);
+  }
+
+  private noteCapabilities(state: SessionCapabilitiesWire | undefined, by?: string): void {
+    this.capabilityState = state;
+    for (const listener of [...this.capabilityListeners]) {
+      listener(state, by);
+    }
+  }
+
   /** The link went away: a set still in flight is unacknowledged from here on. */
   autoAcceptDropped(): void {
     this.autoAcceptHandle.dropped();
@@ -354,7 +487,7 @@ export class RemoteSession implements SessionStreamListener {
 
   /**
    * Auto-accept may answer an ask of this turn: one I minted, or — on a trusted
-   * `serve` daemon that wakes on its own (`daemonWakes`, set by `connect`) — the
+   * daemon that wakes on its own (`daemonWakes`: `connect`, the worker) — the
    * SESSION's own wake turn (docs/fix/autoaccept-wake-turns.md A4).
    *
    * The prefix test is stateless on purpose: a wake turn that ended, and a
@@ -453,7 +586,14 @@ export class RemoteSession implements SessionStreamListener {
       // The id is set INSIDE `opening`: whoever awaits it (an enqueue, a
       // send-now racing the first send) finds the session open.
       const opening = this.client
-        .openSession(undefined, this.seedMessages, this.desiredId, this, this.seedTitle)
+        .openSession(
+          undefined,
+          this.seedMessages,
+          this.desiredId,
+          this,
+          this.seedTitle,
+          this.seedCaps,
+        )
         .then(
           (sessionId) => {
             this.id = sessionId;
@@ -517,6 +657,81 @@ export class RemoteSession implements SessionStreamListener {
   /** What this session may do with an image right now (the daemon's capability, D5). */
   imageInput(): ImageInput {
     return this.client.imageInput();
+  }
+
+  /**
+   * The artifacts the model presented in this session
+   * (docs/feat/model-artifacts.md D6/D8): the daemon's `artifact/list`, in its
+   * own order (oldest first), `truncated` passed on. Like `skills()`/
+   * `context()`, it needs a daemon-side id — one that is still opening waits for
+   * it; a session nothing has opened yet (a `--resume` before its first prompt)
+   * has none, and the answer is the empty list, not a spurious open.
+   *
+   * An older daemon → `ArtifactsUnsupportedError` (caught by the `/artifacts`
+   * panel, which says "needs a newer tentacle").
+   */
+  async listArtifacts(): Promise<ArtifactListResult> {
+    const id = this.id ?? (this.opening ? await this.opening : null);
+    if (id === null) {
+      return { artifacts: [] };
+    }
+    return this.client.listArtifacts(id);
+  }
+
+  /**
+   * One version's bytes, VERIFIED against `meta` (`RemoteClient.readArtifact`:
+   * every chunk's length, the answer's `size`, and the whole's sha256). Same
+   * lazy-id rule as `listArtifacts`: nothing is open ⇒ there is nothing to read.
+   */
+  async readArtifact(meta: ArtifactMeta, options: ArtifactReadOptions = {}): Promise<Uint8Array> {
+    const id = this.id ?? (this.opening ? await this.opening : null);
+    if (id === null) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "the session is not open");
+    }
+    return this.client.readArtifact(id, meta, options);
+  }
+
+  /**
+   * Turn one attached PDF into the wire block a prompt names (docs/feat/pdf-read.md
+   * D6) — the SESSION does it, because a fresh one is LAZY (an upload's
+   * `attachment/put` only knows a session opened on this connection, and only
+   * the session can await its own open). It delegates to
+   * `RemoteClient.attachDocument`, which alone decides upload vs laptop-extract
+   * from the daemon's capability — no second session path (AGENTS §7).
+   *
+   * Rejects with `DocumentsUnavailableError` (off, zero frames — not even an
+   * open), `RangeError` (size, not a PDF), `DocumentExtractError` (encrypted,
+   * scanned, corrupt), upload errors.
+   */
+  async attachDocument(
+    bytes: Uint8Array,
+    meta: { readonly name: string },
+    options: UploadOptions = {},
+  ): Promise<DocumentContent> {
+    if (this.closed) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "this session was closed");
+    }
+    this.refuseIfRemoteClosed();
+    const mode = this.client.documentsInput();
+    if (mode.kind === "off") {
+      // Nothing is sent at all — not even an open.
+      throw new DocumentsUnavailableError(mode.reason);
+    }
+    if (this.attach) {
+      await this.open();
+    } else {
+      await this.createOrAttach();
+    }
+    const id = this.id;
+    if (id === null) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "the session is not open");
+    }
+    return this.client.attachDocument(id, bytes, meta, options);
+  }
+
+  /** What this session may do with an attached PDF right now (docs/feat/pdf-read.md D6). */
+  documentsInput(): DocumentsInput {
+    return this.client.documentsInput();
   }
 
   private raise(activity: SessionActivity): void {
@@ -594,6 +809,15 @@ export class RemoteSession implements SessionStreamListener {
    */
   get jobs(): readonly JobRow[] | undefined {
     return this.id ? this.client.jobsOf(this.id) : undefined;
+  }
+
+  /**
+   * The session's scheduled wakes as the daemon last reported them (bounded
+   * here). Undefined: no report yet, an older daemon, or a client whose daemon
+   * is not trusted to start its own turns (a pod's table is dropped, AGENTS §7).
+   */
+  get schedules(): readonly ScheduleRow[] | undefined {
+    return this.id ? this.client.schedulesOf(this.id) : undefined;
   }
 
   /**
@@ -736,6 +960,50 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * Subscribe to this session's scheduled wakes as the daemon reports them
+   * (bounded and sanitized by the client); the current table, if any, is given
+   * at once. A wake fires between turns, so this fires while idle. The notice
+   * carries the daemon's own count beside the rows (it caps 10, this client 32).
+   * Returns an unsubscribe (docs/feat/cron-tool.md D5).
+   */
+  onSchedules(
+    listener: (report: { rows: readonly ScheduleRow[]; count: number }) => void,
+  ): () => void {
+    const unsubscribe = this.client.onSessionSchedules((notice) => {
+      if (notice.sessionId === this.id) {
+        listener({ rows: notice.rows, count: notice.count });
+      }
+    });
+    const now = this.schedules;
+    if (now) {
+      // A table already reported: the count is its length (the client's bound is
+      // 32 against the daemon's 10, so nothing was cut — H1's reasoning).
+      listener({ rows: now, count: now.length });
+    }
+    return unsubscribe;
+  }
+
+  /**
+   * Drop one scheduled wake (`session/schedule_delete`, docs/feat/cron-tool.md
+   * D5). A refusal (unknown id, an older daemon) is a RESULT with a `reason`,
+   * never a throw at the TUI. A client whose daemon is not trusted to schedule
+   * wakes (a pod, `run`/`attach`) answers its own refusal and sends nothing: a
+   * pod can neither claim nor cancel a wake on the laptop's behalf (AGENTS §7).
+   */
+  deleteSchedule(scheduleId: string): Promise<ScheduleDeleteResult> {
+    if (!this.id) {
+      return Promise.resolve({ deleted: false, reason: "this session is not open yet" });
+    }
+    if (!this.daemonWakes) {
+      return Promise.resolve({
+        deleted: false,
+        reason: SCHEDULE_UNTRUSTED_DAEMON,
+      });
+    }
+    return this.client.deleteSchedule(this.id, scheduleId);
+  }
+
+  /**
    * Subscribe to MY rows coming back (docs/feat/queued-broadcast.md): a row I
    * queued that its turn left undrained, which no send-now carried on. Each
    * row is given once, with the text I typed (never the daemon's), then
@@ -845,6 +1113,16 @@ export class RemoteSession implements SessionStreamListener {
 
   get sessionId(): string | null {
     return this.id ?? this.desiredId ?? null;
+  }
+
+  /**
+   * The session is open daemon-side (`sessionId` already names the id it WILL
+   * open): a surface tells "not started yet" from "the daemon has no switches"
+   * (docs/feat/session-capabilities.md S4). A method, not a getter: `connect`
+   * hands this session to the TUI as its `SessionController` as is.
+   */
+  opened(): boolean {
+    return this.id !== null;
   }
 
   /** How many of my queued rows stay on the daemon if this session stops being followed now (QN2). */
@@ -979,7 +1257,7 @@ export class RemoteSession implements SessionStreamListener {
    * answering a hollow `{0, 0}` (review M2). A fresh session stays the plain
    * no-op: a compaction never CREATES one.
    */
-  async compact(): Promise<{ before: number; after: number }> {
+  async compact(): Promise<CompactResult> {
     await this.openForReset();
     if (!this.id) {
       return { before: 0, after: 0 };
@@ -1022,7 +1300,7 @@ export class RemoteSession implements SessionStreamListener {
    * a no-op (resolved) before any send. `id`: the caller's key for this text
    * (a later `sendNow` cites it); a fresh one when omitted.
    */
-  enqueue(text: string, id?: string): Promise<void> {
+  enqueue(text: string, id?: string, voice?: VoiceTurn): Promise<void> {
     // The turn the daemon runs (a foreign one: any device can steer it); an
     // own turn not started yet keeps its own id.
     const turnId = this.streaming ?? this.turnId;
@@ -1035,12 +1313,30 @@ export class RemoteSession implements SessionStreamListener {
       this.mine.set(key, text);
     }
     if (this.id) {
-      return this.client.enqueue(this.id, key, turnId, text);
+      return this.client.enqueue(this.id, key, turnId, text, voice);
     }
     if (this.opening) {
-      return this.opening.then((id) => this.client.enqueue(id, key, turnId, text));
+      return this.opening.then((id) => this.client.enqueue(id, key, turnId, text, voice));
     }
     return Promise.resolve();
+  }
+
+  /**
+   * Take queued rows back before the model reads them (docs/feat/queue-unqueue.md).
+   * A removed row of mine is mine no more (the daemon never returns it). With
+   * no daemon session, nothing was queued there to take back: every id
+   * answers `delivered` ("not taken back"), never a fake `removed`.
+   */
+  async unqueue(ids: readonly string[]): Promise<UnqueueOutcome> {
+    const id = this.id ?? (this.opening ? await this.opening : undefined);
+    if (!id) {
+      return { removed: [], delivered: [...ids] };
+    }
+    const outcome = await this.client.unqueue(id, ids);
+    if (outcome !== "unsupported") {
+      for (const key of outcome.removed) this.mine.delete(key);
+    }
+    return outcome;
   }
 
   /**
@@ -1048,6 +1344,11 @@ export class RemoteSession implements SessionStreamListener {
    * `opts.turnId`: the turn's id, minted by the caller (a detached run's relay
    * records it so the TUIs that take the run over own its turn,
    * docs/fix/detach-live.md B2); else a fresh one.
+   * `opts.onAccepted`: called once when the daemon ACKS the prompt (it holds
+   * the turn under its key: a retry is answered from its ledger, never run
+   * twice), also for a retry of a turn that already ended; never on a
+   * refusal. The ack can come long before the turn's first event
+   * (docs/fix/mobile-chat-glitches.md, bug 2).
    */
   async *send(
     prompt: string,
@@ -1056,6 +1357,15 @@ export class RemoteSession implements SessionStreamListener {
       readonly skill?: string;
       readonly turnId?: string;
       readonly attachments?: readonly AttachmentRef[];
+      /** The prompt's attached PDFs (docs/feat/pdf-read.md D6); see `ActiveTurn.documents`. */
+      readonly documents?: readonly DocumentContent[];
+      /**
+       * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3):
+       * the edge's own reasoning setting, read at send time. Absent → an
+       * ordinary turn, whose frame carries no `voice` at all.
+       */
+      readonly voice?: VoiceTurn;
+      readonly onAccepted?: () => void;
     } = {},
   ): AsyncGenerator<SessionEvent> {
     // Known before the first `await`, so a steer typed while the session is
@@ -1085,11 +1395,16 @@ export class RemoteSession implements SessionStreamListener {
    * the texts it did not get, a continuation, or `NoTurnRunning`. While the
    * first `send` is still opening the session it waits for the id. Refused
    * locally only when there is no daemon-side session or turn at all.
+   *
+   * `turnId`: the new turn's key, when the caller must name it before the ack
+   * (the phone folds the turn under it — docs/fix/mobile-queued-stuck.md); a
+   * fresh one when omitted.
    */
   async sendNow(
     messages: readonly SendNowMessage[],
     target: "turn" | "compaction",
     signal?: AbortSignal,
+    turnId?: string,
   ): Promise<AsyncIterable<SessionEvent>> {
     if (messages.length === 0) {
       throw new RpcError(JsonRpcErrorCode.InvalidParams, "send-now needs at least one message");
@@ -1123,7 +1438,7 @@ export class RemoteSession implements SessionStreamListener {
         ? { kind: "turn", turnId: bound }
         : { kind: "compaction" };
     const turn: ActiveTurn = {
-      turnId: crypto.randomUUID(),
+      turnId: turnId ?? crypto.randomUUID(),
       prompt: "",
       queue: new AsyncQueue<SessionEvent>(),
       toolNames: new Map(),
@@ -1244,6 +1559,15 @@ export class RemoteSession implements SessionStreamListener {
     opts: {
       readonly skill?: string;
       readonly attachments?: readonly AttachmentRef[];
+      /** The prompt's attached PDFs (docs/feat/pdf-read.md D6); see `ActiveTurn.documents`. */
+      readonly documents?: readonly DocumentContent[];
+      /**
+       * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3):
+       * the edge's own reasoning setting, read at send time. Absent → an
+       * ordinary turn, whose frame carries no `voice` at all.
+       */
+      readonly voice?: VoiceTurn;
+      readonly onAccepted?: () => void;
     } = {},
   ): AsyncGenerator<SessionEvent> {
     if (this.closed) {
@@ -1276,12 +1600,17 @@ export class RemoteSession implements SessionStreamListener {
       ...(opts.attachments !== undefined && opts.attachments.length > 0
         ? { attachments: opts.attachments }
         : {}),
+      ...(opts.documents !== undefined && opts.documents.length > 0
+        ? { documents: opts.documents }
+        : {}),
+      ...(opts.voice !== undefined ? { voice: opts.voice } : {}),
       queue: new AsyncQueue<SessionEvent>(),
       toolNames: new Map(),
       shownTools: new Set(),
       reset: false,
       ended: false,
       acked: false,
+      onAccepted: opts.onAccepted,
       sent: false,
       abortWanted: false,
       started: false,
@@ -1317,13 +1646,27 @@ export class RemoteSession implements SessionStreamListener {
     };
     const request = turn.sendNow
       ? this.client.sendNow(id, turn.turnId, turn.sendNow.interrupt, turn.sendNow.messages, sent)
-      : this.client.prompt(id, turn.turnId, turn.prompt, sent, turn.skill, turn.attachments);
+      : this.client.prompt(
+          id,
+          turn.turnId,
+          turn.prompt,
+          sent,
+          turn.skill,
+          turn.attachments,
+          turn.voice,
+          turn.documents,
+        );
     request.then(
       // A plain ack: the stream ends the turn. `ended` (a retried turn that
       // already finished — also while this client was away) ends it from the
       // ack; a no-op if the stream did.
       (ack) => {
         turn.acked = true;
+        // Before `finish` (an `ended` ack): the caller learns "the daemon has
+        // it" before the turn's end. Once only: a re-send's ack is the same key.
+        const onAccepted = turn.onAccepted;
+        turn.onAccepted = undefined;
+        onAccepted?.();
         if (ack.ended) {
           this.finish(turn, ack.ended);
         } else if (turn.abortWanted) {
@@ -1459,6 +1802,7 @@ export class RemoteSession implements SessionStreamListener {
     turnId: string,
     prompt: string,
     attachments?: readonly AttachmentRef[],
+    schedule?: ScheduledRef,
   ): ActiveTurn {
     const turn: ActiveTurn = {
       turnId,
@@ -1486,6 +1830,9 @@ export class RemoteSession implements SessionStreamListener {
         type: "user_message",
         text: prompt,
         ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
+        // The scheduled wake that started it (S2 Review 1): one gate for both
+        // doors (`firedScheduleRef`), never sanitizing in a component.
+        ...firedScheduleRef(schedule, this.daemonWakes),
       });
     }
     this.raise({
@@ -1546,6 +1893,7 @@ export class RemoteSession implements SessionStreamListener {
       this.raise({
         kind: "history",
         messages: out.messages,
+        ...(out.times ? { times: out.times } : {}),
         reason: replaced !== null ? replaced.reason : null,
       });
       return;
@@ -1560,7 +1908,11 @@ export class RemoteSession implements SessionStreamListener {
     for (const m of out.messages) {
       for (const call of m.toolCalls ?? []) turn.toolNames.set(call.id, call.name);
     }
-    turn.queue.push({ type: "history_reset", messages: out.messages });
+    turn.queue.push({
+      type: "history_reset",
+      messages: out.messages,
+      ...(out.times ? { times: out.times } : {}),
+    });
   }
 
   /**
@@ -1600,7 +1952,12 @@ export class RemoteSession implements SessionStreamListener {
         this.endedBehindCut(turn);
       }
     } else {
-      this.raise({ kind: "history", messages: out.messages, reason: "context_reset" });
+      this.raise({
+        kind: "history",
+        messages: out.messages,
+        ...(out.times ? { times: out.times } : {}),
+        reason: "context_reset",
+      });
     }
     if (shown && !shown.ended && shown.turnId !== out.turn) {
       this.closeWithoutOutcome(shown);
@@ -1655,7 +2012,7 @@ export class RemoteSession implements SessionStreamListener {
           if (!own.ended) this.onUpdate(own, update);
           return;
         }
-        this.startForeign(update.turnId, update.prompt, update.attachments);
+        this.startForeign(update.turnId, update.prompt, update.attachments, update.schedule);
         return;
       }
       case "turn_end": {
@@ -1683,6 +2040,7 @@ export class RemoteSession implements SessionStreamListener {
       case "queued":
       case "subagents":
       case "jobs":
+      case "schedules":
       case "subagent_notify":
       case "subagent_message":
         return;
@@ -1768,6 +2126,9 @@ export class RemoteSession implements SessionStreamListener {
             type: "user_message",
             text: update.prompt,
             ...(hasRefs(update.attachments) ? { attachments: update.attachments } : {}),
+            // Same gate as `startForeign` (a wake turn this session DID start,
+            // re-delivered after a reset).
+            ...firedScheduleRef(update.schedule, this.daemonWakes),
           });
         }
       }
@@ -1789,6 +2150,7 @@ export class RemoteSession implements SessionStreamListener {
       update.type === "queued" ||
       update.type === "subagents" ||
       update.type === "jobs" ||
+      update.type === "schedules" ||
       update.type === "subagent_notify" ||
       update.type === "subagent_message"
     ) {

@@ -19,6 +19,11 @@ import {
   DEFAULT_AUTO_WAKE,
   DEFAULT_BASE_URL,
   DEFAULT_CONTEXT_AWARENESS,
+  DEFAULT_CONTEXT_PRUNE_AT_PERCENT,
+  DEFAULT_CONTEXT_PRUNE_ENABLED,
+  DEFAULT_CONTEXT_PRUNE_KEEP_RECENT_ROUNDS,
+  DEFAULT_CONTEXT_PRUNE_MIN_GAIN_PERCENT,
+  DEFAULT_CONTEXT_PRUNE_OUTPUT_CHARS,
   DEFAULT_CONTEXT_RESET_ENABLED,
   DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE,
   DEFAULT_CONTEXT_STEP_PERCENT,
@@ -29,6 +34,11 @@ import {
   DEFAULT_MODEL,
   DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
+  DEFAULT_SCHEDULES_EXPIRY_DAYS,
+  DEFAULT_SCHEDULES_MAX_AHEAD_DAYS,
+  DEFAULT_SCHEDULES_MAX_JOBS,
+  DEFAULT_SCHEDULES_MIN_INTERVAL_MINUTES,
+  DEFAULT_SCHEDULES_PROMPT_MAX_CHARS,
   DEFAULT_SESSION_HOP_TOOL,
   DEFAULT_SUBAGENTS_ENABLED,
   DEFAULT_SUBAGENTS_TWO_WAY,
@@ -128,6 +138,7 @@ export interface KeyDoc {
 const PROVIDER_VALUES = ["openai", "anthropic"] as const;
 const EXECUTION_VALUES = ["sequential", "read-only", "parallel"] as const;
 const THEME_VALUES = ["auto", "dark", "light"] as const;
+const CHART_GLYPH_VALUES = ["braille", "blocks"] as const;
 const ENGINE_VALUES = ["kubernetes", "docker", "podman"] as const;
 
 /**
@@ -731,6 +742,72 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     sample: "2",
     example: "-1",
   },
+  contextPrune: {
+    summary:
+      "Smart compaction: prune what later rounds superseded from the model's copy, before any summarising compaction.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "contextPrune.enabled": {
+    summary: "Whether the model's copy of the history is pruned in batches.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "workspace",
+    default: () => DEFAULT_CONTEXT_PRUNE_ENABLED,
+    resolved: (c) => c.contextPrune.enabled,
+    sourceKey: "contextPruneEnabled",
+    details:
+      "Old file reads a later read or edit superseded, write/edit payloads already on disk, long shell output, spill previews and duplicates are replaced by a short `⟪pruned by tentacle: …⟫` stub saying how to get them back. Conversation text and the last `keepRecentRounds` rounds are never touched; the stored history and the session log never change. The window is `model.contextWindow`.",
+    example: "true",
+  },
+  "contextPrune.pruneAtPercent": {
+    summary: "A batch starts once the request reaches this percent of the window (1–100).",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "workspace",
+    default: () => DEFAULT_CONTEXT_PRUNE_AT_PERCENT,
+    resolved: (c) => c.contextPrune.pruneAtPercent,
+    sourceKey: "contextPruneAtPercent",
+    example: "70",
+  },
+  "contextPrune.minGainPercent": {
+    summary: "…and only if it saves at least this percent of the window (1–100).",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "workspace",
+    default: () => DEFAULT_CONTEXT_PRUNE_MIN_GAIN_PERCENT,
+    resolved: (c) => c.contextPrune.minGainPercent,
+    sourceKey: "contextPruneMinGainPercent",
+    details:
+      "A batch re-sends the request from the first pruned message uncached once; few large batches pay that back, many small ones would not.",
+    example: "20",
+  },
+  "contextPrune.keepRecentRounds": {
+    summary: "The last this-many assistant rounds are never pruned.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "workspace",
+    default: () => DEFAULT_CONTEXT_PRUNE_KEEP_RECENT_ROUNDS,
+    resolved: (c) => c.contextPrune.keepRecentRounds,
+    sourceKey: "contextPruneKeepRecentRounds",
+    example: "10",
+  },
+  "contextPrune.pruneOutputChars": {
+    summary: "A shell output longer than this keeps only its head and tail once pruned.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "workspace",
+    default: () => DEFAULT_CONTEXT_PRUNE_OUTPUT_CHARS,
+    resolved: (c) => c.contextPrune.pruneOutputChars,
+    sourceKey: "contextPruneOutputChars",
+    example: "4000",
+  },
   sessionHop: {
     summary: "The agent may PROPOSE moving this session to another target.",
     kind: "section",
@@ -774,6 +851,67 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "It dials with YOUR kubeconfig / docker endpoint and runs commands on another workload, so it is OFF unless you turn it on. You are still asked before the first command on each target (and with `always` for the rest of the session). Offered only where tentacle runs on your own host — the local worker and `serve` — never to a pod daemon, which already has its own shell inside its workload.",
     example: "true",
+  },
+  schedules: {
+    summary: "This host's limits on the agent's scheduled wakes (`schedule_create`).",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "schedules.maxJobs": {
+    summary: "Live scheduled wakes per session (1–100).",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_SCHEDULES_MAX_JOBS,
+    resolved: (c) => c.schedules.maxJobs,
+    sourceKey: "schedulesMaxJobs",
+    example: "5",
+  },
+  "schedules.minIntervalMinutes": {
+    summary: "The shortest recurring interval, in minutes (1–1440).",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_SCHEDULES_MIN_INTERVAL_MINUTES,
+    resolved: (c) => c.schedules.minIntervalMinutes,
+    sourceKey: "schedulesMinIntervalMinutes",
+    example: "15",
+  },
+  "schedules.expiryDays": {
+    summary: "A recurring wake's life, and its longest interval, in days (1–30).",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_SCHEDULES_EXPIRY_DAYS,
+    resolved: (c) => c.schedules.expiryDays,
+    sourceKey: "schedulesExpiryDays",
+    example: "3",
+  },
+  "schedules.maxAheadDays": {
+    summary: "How far ahead a one-shot wake may point, in days (1–30).",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_SCHEDULES_MAX_AHEAD_DAYS,
+    resolved: (c) => c.schedules.maxAheadDays,
+    sourceKey: "schedulesMaxAheadDays",
+    example: "2",
+  },
+  "schedules.promptMaxChars": {
+    summary: "The longest prompt a scheduled wake may carry (1–20000).",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_SCHEDULES_PROMPT_MAX_CHARS,
+    resolved: (c) => c.schedules.promptMaxChars,
+    sourceKey: "schedulesPromptMaxChars",
+    example: "500",
   },
   autoWake: {
     summary: "Start a continuation turn when a background job exits while idle.",
@@ -853,6 +991,19 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "`auto` reads the terminal's background before the first frame and picks a light or dark palette; the others skip that query (useful on a slow link, or when the guess is wrong). A display setting of this laptop — never carried to a pod.",
     example: '"dark"',
   },
+  "tui.chartGlyphs": {
+    summary:
+      "A chart's plot glyphs: `braille` (2×4 dots per cell) or `blocks` for a font with no braille.",
+    kind: "leaf",
+    type: "enum",
+    values: [...CHART_GLYPH_VALUES],
+    scope: "both",
+    carried: "no",
+    default: () => "braille",
+    details:
+      "A terminal cannot report that its font lacks the braille patterns, so a chart would draw as boxes; `blocks` uses the quadrant blocks instead (2×2 dots per cell, less detail but present in most fonts). A display setting of this laptop — never carried to a pod.",
+    example: '"blocks"',
+  },
   sessions: {
     summary: "The laptop's session logs: what they keep of a history that was replaced.",
     kind: "section",
@@ -868,6 +1019,136 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "Unset: off — a compaction or a `context_reset` rewrites `<uid>.jsonl`, so the history it replaced is not kept (`--resume` shows the current context either way). On, the replaced segments stay in the file. A LAPTOP-ONLY setting: never carried to a pod.",
     example: "true",
+  },
+  voice: {
+    summary: "Voice dictation in the local TUI on the Mac: speak instead of typing.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "voice.enabled": {
+    summary:
+      "Whether the terminal's voice features (Ctrl+R dictation; conversation mode later) are on. Off by default.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => false,
+    details:
+      'Off by default: set `voice: { "enabled": true }` to turn it on, and the key (Ctrl+R unless rebound) dictates. While off the key shows a one-line notice and the helper is never spawned (no mic is opened). A local input device of this Mac — never carried to a pod.',
+    example: "true",
+  },
+  "voice.key": {
+    summary: "The key that starts and finishes a dictation.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    default: () => "ctrl+r",
+    details:
+      "`ctrl+<letter>`, and it must be free in the TUI. Ctrl+R starts a dictation; while it is running the same key (or Enter) finishes it and Esc throws it away. Enter never sends.",
+    example: '"ctrl+r"',
+  },
+  "voice.language": {
+    summary: "The spoken language.",
+    kind: "leaf",
+    type: "enum",
+    values: ["auto", "it", "en"],
+    scope: "both",
+    carried: "no",
+    default: () => "auto",
+    details:
+      "`auto` lets the recogniser decide; `it`/`en` force one. Apple's recogniser works per locale, so `auto` follows the engine's detection and `it`/`en` pick the matching locale.",
+    example: '"it"',
+  },
+  "voice.engine": {
+    summary: "Which on-device recogniser transcribes the dictation.",
+    kind: "leaf",
+    type: "enum",
+    values: ["apple", "parakeet"],
+    scope: "both",
+    carried: "no",
+    default: () => "apple",
+    details:
+      "`apple` is macOS's built-in on-device recogniser: nothing to download, and on the V0 set it measured WER 0.082 / 79 ms p50. A language other than the Mac's own installs a small Apple asset on first use (8 s measured). `parakeet` needs a one-time `tentacle voice setup` (≈ 0.6 GB) and measured WER 0.027 / 50 ms. Speech never leaves the Mac either way.",
+    example: '"parakeet"',
+  },
+  "voice.autoStop": {
+    summary: "Finish the dictation on a pause instead of on the key.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => false,
+    details:
+      "Off by default: you end the dictation with the key, so a pause after a comma can never cut it off. On, a pause of `voice.autoStopSilenceMs` ends it. Either way a hard stop at `voice.maxSeconds` ends a forgotten dictation and its text IS inserted.",
+    example: "true",
+  },
+  "voice.autoStopSilenceMs": {
+    summary: "The pause that ends a dictation when `voice.autoStop` is on.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    default: () => 500,
+    details:
+      "Milliseconds, minimum 300 (a shorter floor sits inside the measured comma pauses, 96–224 ms on the V0 set, and truncates dictated text). 500 ms leaves margin over the longest comma pause measured.",
+    example: "800",
+  },
+  "voice.maxSeconds": {
+    summary: "The hard cap on one dictation.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    default: () => 300,
+    details:
+      "Seconds, minimum 10. Reached, the dictation finishes and its text is inserted with a notice — never dropped. 5 minutes of 16 kHz mono audio is about 19 MB.",
+    example: "120",
+  },
+  "voice.input": {
+    summary: "Which microphone the dictation captures from.",
+    kind: "leaf",
+    type: "enum",
+    values: ["default", "builtin"],
+    scope: "both",
+    carried: "no",
+    default: () => "default",
+    details:
+      "`default` follows the macOS input setting; `builtin` forces the built-in mic. With an AirPods mic the call profile (HFP) is negotiated, so other audio drops to call quality while dictating — `builtin` avoids that.",
+    example: '"builtin"',
+  },
+  "voice.voiceProcessing": {
+    summary:
+      "Apple's voice processing (echo cancellation, noise suppression, gain) on the capture.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => true,
+    details:
+      "On by default: it suppresses steady background noise (≈ 74 dB of AEC measured in V0). Off exists for measurement; it is not a quality improvement for normal use.",
+    example: "false",
+  },
+  "voice.modelsDir": {
+    summary: "Where the Parakeet models live.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details:
+      "Default `<configDir>/voice/models`. `tentacle voice setup` downloads there; the helper loads from there and nowhere else (it never downloads at run time).",
+    example: '"~/models/voice"',
+  },
+  "voice.helperPath": {
+    summary: "The voice helper binary, when it is not next to `tentacle`.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details:
+      "Searched first. Otherwise the TUI looks next to the running `tentacle` binary, then in `<configDir>/voice/bin/`. Not found: a notice naming the build command, never a silent no-op.",
+    example: '"/usr/local/bin/tentacle-voice"',
   },
   relay: {
     summary: "The mobile relay a `serve` with paired devices dials out to.",
@@ -927,6 +1208,38 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "0 pushes at once; the maximum is 3600 (one hour). At the desk you answer and the phone stays silent: the timer is cancelled the moment the ask settles. Expressed as whole seconds; `serve --push-grace <seconds>` beats this key. Read by the pure rules module, so it is table-tested (`docs/feat/mobile-push.md` Design 1).",
     example: "60",
+  },
+  liveActivity: {
+    summary: "Whether this `serve` shows a live activity for a running turn on a paired phone.",
+    kind: "section",
+    type: "object",
+    scope: "both",
+    carried: "no",
+    details:
+      'A lock-screen / Dynamic Island banner for a turn your phone is NOT currently showing: the project, the current tool and a running timer, an approval waiting with Approve / Deny, and "done" for a few minutes after. The content is sealed end-to-end to each phone, so Apple and the relay carry only opaque bytes. LAPTOP-ONLY, and it needs the relay. Absent, both keys take their defaults.',
+    example: '{ "startAfterSeconds": 30 }',
+  },
+  "liveActivity.enabled": {
+    summary: "Whether a `serve` starts a live activity at all.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    defaultText: "`true`",
+    details:
+      "Off, `device/live_activity_register` answers `off` and no activity is ever started — the person's own switch on the phone is a second, independent control (Settings on the device). It needs the relay: `--no-relay` / `relay.enabled: false` answer `relay-off`, and a relay deployed without Live Activity support answers `relay-no-la`. A LAPTOP-ONLY setting: never carried to a pod.",
+    example: "false",
+  },
+  "liveActivity.startAfterSeconds": {
+    summary: "How long a turn must run before a phone that is not watching it gets an activity.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    defaultText: "`20`",
+    details:
+      "0 starts one at once; the maximum is 3600 (one hour). The threshold is what keeps short Q&A from lighting a phone at your desk; a permission request starts one immediately whatever this says, because an approval waiting is the one thing worth a lock-screen light. A device already attached to the session is never started for. Read by the pure rules module, so it is table-tested (`docs/feat/mobile-live-activity.md` Design 3).",
+    example: "30",
   },
   mount: {
     summary: "What a docker/podman run hides from the container's workspace mount.",
@@ -1226,7 +1539,7 @@ const CONTAINER_KEYS: Readonly<Record<string, KeyDoc>> = {
     scope: "user",
     carried: "no",
     details:
-      "Applied with `--profile <name>` on the command that starts the session, or `TENTACLE_PROFILE` (`--profile` wins). A profile holds every setting the file does except `$schema` and `profiles`. Merge rules: `model` per key, but provider/baseURL/apiKey/apiKeyCommand move as one unit; `subagents`, `tools`, `contextAwareness`, `contextReset` merge per key; every other setting replaces the base one; `mcpServers` merge by name, where `null` REMOVES a base server for that profile; `models` and `subagents.types` merge by name, a profile's entry replacing the base one whole.",
+      "Applied with `--profile <name>` on the command that starts the session, or `TENTACLE_PROFILE` (`--profile` wins). A profile holds every setting the file does except `$schema` and `profiles`. Merge rules: `model` per key, but provider/baseURL/apiKey/apiKeyCommand move as one unit; `subagents`, `tools`, `contextAwareness`, `contextReset`, `contextPrune` merge per key; every other setting replaces the base one; `mcpServers` merge by name, where `null` REMOVES a base server for that profile; `models` and `subagents.types` merge by name, a profile's entry replacing the base one whole.",
   },
   "profiles.*": {
     summary: "One named profile's settings.",

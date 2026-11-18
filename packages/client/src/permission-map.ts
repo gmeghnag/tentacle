@@ -39,6 +39,25 @@ export function answerLostCause(error: unknown): AnswerLostCause {
   return "failed";
 }
 
+/**
+ * What a failed keyed `session/resolve_permission` means to a decision made
+ * outside the prompt — an iPhone notification's Approve / Deny / Reply
+ * (docs/feat/mobile-notifications.md Design 5, F2). Same three cases as
+ * {@link answerLostCause}, said in that path's vocabulary: another answer won
+ * (`not-pending`, nothing to do), the session was recreated mid-send
+ * (`session-lost`: it MAY have arrived), or it was not delivered (`failed`).
+ * Pure, so the mapping is pinned without a live link.
+ */
+export function notificationAnswerOutcome(
+  error: unknown,
+): "not-pending" | "session-lost" | "failed" {
+  const cause = answerLostCause(error);
+  if (cause === "settled") {
+    return "not-pending";
+  }
+  return cause === "session-lost" ? "session-lost" : "failed";
+}
+
 export function responseToOutcome(response: PermissionResponse): PermissionOutcome {
   if (!response.allowed) {
     return { outcome: "selected", optionId: "reject_once" };

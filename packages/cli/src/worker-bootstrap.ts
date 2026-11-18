@@ -9,4 +9,10 @@ import type { TentacleConfig } from "./config.ts";
 export interface WorkerBootstrap {
   readonly config: TentacleConfig;
   readonly version: string;
+  /**
+   * The laptop store dir holding this project's sessions, which the worker may
+   * READ (never write) for a RESUMED session's artifacts
+   * (docs/feat/model-artifacts.md D11). Absent → nothing is restored.
+   */
+  readonly artifactsDir?: string;
 }

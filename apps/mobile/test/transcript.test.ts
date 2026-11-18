@@ -9,7 +9,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatMessage } from "@tentacle/core";
 import {
-  FOREIGN_COMPACTED_NOTICE,
   type State,
   TURN_INTERRUPTED_NOTICE,
   TURN_LOST_NOTICE,
@@ -217,6 +216,42 @@ describe("a turn's stream", () => {
     expect(tool.diff?.removed).toBe(1);
   });
 
+  test("an artifact detail is never taken as a diff (model-artifacts S2)", () => {
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      { type: "tool_start", id: "c1", name: "present", arguments: "{}" },
+      {
+        type: "tool_result",
+        id: "c1",
+        name: "present",
+        result: {
+          content: "Presented",
+          details: {
+            kind: "artifact",
+            artifact: {
+              artifactId: "a1",
+              version: 1,
+              sha256: "a".repeat(64),
+              size: 10,
+              mimeType: "text/plain",
+              kind: "text",
+              title: "notes",
+              callId: "c1",
+              createdAt: 0,
+            },
+          },
+        },
+      },
+    ]);
+    const tool = state.rows[0] as ToolRow;
+    expect(tool.status).toBe("ok");
+    expect(tool.diff).toBeUndefined();
+    // It is the row's CARD instead (S9, T9.1): the live `present` result's own
+    // meta, which the band row draws — never a reload's guess.
+    expect(tool.artifact?.artifactId).toBe("a1");
+    expect(tool.artifact?.callId).toBe("c1");
+  });
+
   test("the turn bracket: started → ended, and a lost turn says so", () => {
     const running = fold([{ type: "turn_started", turnId: "t9", own: true }]);
     expect(running.turn?.turnId).toBe("t9");
@@ -261,7 +296,8 @@ describe("history events", () => {
     ]);
     const after = apply(before, { type: "history", messages: [], reason: "compact" });
     expect(after.rows).toHaveLength(2);
-    expect(after.rows[1]?.kind === "notice" && after.rows[1].text).toBe(FOREIGN_COMPACTED_NOTICE);
+    // One wording whatever device compacted (harness-notices Q6): the separator.
+    expect(after.rows[1]).toMatchObject({ kind: "notice", text: "compacted", separator: true });
   });
 
   test("this client's OWN compaction says nothing (the screen already showed it)", () => {
@@ -330,6 +366,43 @@ test("a prompt's images are carried on its row (the owner's requirement)", () =>
   ]);
 });
 
+test("a fired turn's ref is carried on its row; an ordinary prompt's row has none (cron-tool S6)", () => {
+  const state = fold([
+    {
+      type: "user_message",
+      text: "[scheduled sc-1 · every 10m · fire 5] check CI",
+      schedule: { id: "sc-1", spec: "every 10m" },
+    },
+    { type: "user_message", text: "and now something else" },
+  ]);
+  const fired = state.rows[0];
+  expect(fired?.kind === "user" && fired.schedule).toEqual({ id: "sc-1", spec: "every 10m" });
+  // Absence is the normal case (an ordinary prompt, an older daemon, a RELOAD):
+  // never an empty object, which a renderer would have to second-guess.
+  const plain = state.rows[1];
+  expect(plain?.kind === "user" && "schedule" in plain).toBe(false);
+});
+
+test("a fired turn's row is the SAME live and reloaded from the stored message (scheduled-fire-row)", () => {
+  // Mutation: drop `schedule: m.scheduled` in transcript-history.ts → the reloaded
+  // row has no record (its node would say `#5`, not the fire time) → red.
+  const record = { id: "sc-1", spec: "every 10m", fire: 5, at: 1_763_394_840_000 };
+  const text = "[scheduled sc-1 · every 10m · fire 5] check CI";
+  const live = fold([{ type: "user_message", text, schedule: record }]).rows[0];
+  const stored: ChatMessage = { role: "user", content: text, scheduled: record };
+  const reloaded = fold([{ type: "history", messages: [stored], reason: null }]).rows[0];
+  const shape = (row: typeof live) =>
+    row?.kind === "user"
+      ? { text: row.text, images: row.images, schedule: row.schedule }
+      : "not a user row";
+  expect(shape(reloaded)).toEqual(shape(live));
+  expect(shape(live)).toEqual({ text, images: [], schedule: record });
+  // An older log (no field): no record, the node falls back to the text prefix.
+  const old = fold([{ type: "history", messages: [{ role: "user", content: text }], reason: null }])
+    .rows[0];
+  expect(old?.kind === "user" && "schedule" in old).toBe(false);
+});
+
 test("a closed session keeps the transcript and adds one notice", () => {
   const before = fold([
     { type: "history", messages: [{ role: "user", content: "hi" }], reason: null },
@@ -363,4 +436,140 @@ test("the daemon's explanations become notices, never silence", () => {
   expect(hook.rows).toHaveLength(1);
   const nudge = fold([{ type: "context_note", text: "keep going", reason: "continue" }]);
   expect(nudge.rows).toHaveLength(0);
+});
+
+describe("the truncation merge is scoped to the re-ask's OWN round (Review round 3 MEDIUM-1)", () => {
+  const noticeTexts = (s: State) => s.rows.flatMap((r) => (r.kind === "notice" ? [r.text] : []));
+
+  test("a LATER cut of the same turn appends a new line, it does not rewrite the first", () => {
+    // The re-ask's round ended normally (it ran a tool), so what follows is a
+    // second, separate cut. Mutation: merge on any turn notice → one line, the
+    // first one rewritten far above the tool row.
+    const s = fold([
+      { type: "turn_started", turnId: "t1", own: true },
+      text("part one"),
+      { type: "truncated_reply", reason: "length", retrying: true },
+      text(" continued"),
+      { type: "tool_start", id: "t1", name: "fs_read", arguments: '{"path":"a"}' },
+      { type: "tool_result", id: "t1", name: "fs_read", result: { content: "hi" } },
+      text("final round"),
+      { type: "truncated_reply", reason: "length", retrying: false },
+    ]);
+    expect(noticeTexts(s)).toEqual([
+      "the reply was cut at the model's output limit — this answer is incomplete; asking it to continue",
+      "the reply was cut at the model's output limit — this answer is incomplete",
+    ]);
+    expect(s.rows.at(-1)?.kind).toBe("notice");
+  });
+
+  test("a NEW turn's cut never merges into the previous turn's line", () => {
+    // The new turn's `user` row is not an answer row, so the structural rule
+    // rejects the earlier line with no separate per-turn check. Mutation: merge
+    // on any turn notice text (the round-3 rule) → the old line is rewritten.
+    const s = fold([
+      { type: "turn_started", turnId: "t1", own: true },
+      text("part one"),
+      { type: "truncated_reply", reason: "length", retrying: true },
+      { type: "turn_ended", outcome: "ended" },
+      { type: "user_message", text: "another question" },
+      { type: "turn_started", turnId: "t2", own: true },
+      { type: "truncated_reply", reason: "length", retrying: false },
+    ]);
+    expect(noticeTexts(s)).toEqual([
+      "the reply was cut at the model's output limit — this answer is incomplete; asking it to continue",
+      "the model returned nothing: it hit its output limit before writing anything",
+    ]);
+  });
+
+  test("a `cut` never merges: the output-limit line stays, the stream-cut one is appended", () => {
+    const s = fold([
+      { type: "turn_started", turnId: "t1", own: true },
+      text("part one"),
+      { type: "truncated_reply", reason: "length", retrying: true },
+      text(" and more"),
+      { type: "truncated_reply", reason: "cut", retrying: false },
+    ]);
+    expect(noticeTexts(s)).toEqual([
+      "the reply was cut at the model's output limit — this answer is incomplete; asking it to continue",
+      "the model's stream was cut before it finished — this answer is incomplete",
+    ]);
+  });
+});
+
+describe("a foreground sub-agent's progress lands on its Agent row (docs/fix/mobile-chat-glitches.md, item 10)", () => {
+  // The owner's "stuck on Running": every `subagent_*` event fell into the fold's
+  // `default` and changed nothing, so a minutes-long legitimate wait looked like
+  // a hang. Mutation: route the four kinds back to `default` → red.
+  const start = { type: "tool_start", id: "call-1", name: "agent_task", arguments: "{}" } as const;
+  const sub = (s: State) => (s.rows.find((r) => r.kind === "tool") as ToolRow | undefined)?.sub;
+
+  test("the repro, made an assertion: tools counted, the latest activity, tokens", () => {
+    const s = fold([
+      { type: "turn_started", turnId: "t1", own: true },
+      start,
+      {
+        type: "subagent_start",
+        id: "call-1",
+        agentType: "general",
+        description: "Task lungo in background",
+      },
+      { type: "subagent_tool", id: "call-1", label: "shell: sleep 10" },
+      { type: "subagent_usage", id: "call-1", promptTokens: 900, completionTokens: 40 },
+      { type: "subagent_tool", id: "call-1", label: "agent_notify" },
+      { type: "subagent_tool", id: "call-1", label: "shell: sleep 10" },
+    ]);
+    expect(sub(s)?.toolUses).toBe(3);
+    expect(sub(s)?.activities.at(-1)).toBe("shell: sleep 10");
+    expect(sub(s)?.tokens).toBe(940);
+    expect(sub(s)?.done).toBe(false);
+  });
+
+  test("`subagent_end` → done, with the child's own tool count and stop reason", () => {
+    const s = fold([
+      start,
+      { type: "subagent_tool", id: "call-1", label: "Read a.ts" },
+      { type: "subagent_end", id: "call-1", toolUses: 2, stopReason: "end_turn" },
+    ]);
+    expect(sub(s)).toMatchObject({ done: true, toolUses: 2, stopReason: "end_turn" });
+    expect(sub(s)?.movedTo).toBeUndefined();
+  });
+
+  test("a child MOVED to the background → done + movedTo", () => {
+    const s = fold([
+      start,
+      {
+        type: "subagent_end",
+        id: "call-1",
+        toolUses: 1,
+        stopReason: "background",
+        agentId: "sa-3",
+      },
+    ]);
+    expect(sub(s)).toMatchObject({ done: true, stopReason: "background", movedTo: "sa-3" });
+  });
+
+  test("progress for a call id the fold never saw → the state is identical", () => {
+    const before = fold([start]);
+    const after = apply(before, { type: "subagent_tool", id: "other", label: "x" });
+    expect(after).toBe(before);
+  });
+
+  test("a flood of activities keeps only the last 3; the count keeps growing", () => {
+    const s = fold([
+      start,
+      ...Array.from({ length: 10 }, (_, i) => ({
+        type: "subagent_tool" as const,
+        id: "call-1",
+        label: `step ${i + 1}`,
+      })),
+    ]);
+    expect(sub(s)?.activities).toEqual(["step 8", "step 9", "step 10"]);
+    expect(sub(s)?.toolUses).toBe(10);
+  });
+
+  test("an over-long label is capped by the fold too", () => {
+    const s = fold([start, { type: "subagent_tool", id: "call-1", label: "x".repeat(1000) }]);
+    expect(sub(s)?.activities).toHaveLength(1);
+    expect((sub(s)?.activities[0] ?? "").length).toBeLessThanOrEqual(120);
+  });
 });

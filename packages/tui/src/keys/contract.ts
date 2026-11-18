@@ -60,10 +60,12 @@ export function passThrough(...effects: readonly KeyEffect[]): LayerStep {
 export type KeyLayerName =
   | "shiftTab"
   | "quitConfirm"
+  | "artifactConfirm"
   | "chord"
   | "permission"
   | "ctrlC"
   | "paste"
+  | "voice"
   | "sessions"
   | "tree"
   | "dock"

@@ -4,8 +4,13 @@
  * screen only reports what happened.
  */
 import { type ComposerAction, returnKeyAction } from "./composer.ts";
+import type { GestureEffect } from "./hub-gesture.ts";
 
-export type HapticKind = "light" | "firm" | "success";
+/**
+ * `tick` = the selection click (a new highlighted hub item), `commit` = a crisp
+ * rigid impact (a hub item chosen) — docs/feat/mobile-hub.md Design 2.
+ */
+export type HapticKind = "light" | "firm" | "success" | "tick" | "commit";
 
 /**
  * The composer's press: light when words leave (send / queue / send later),
@@ -32,4 +37,34 @@ export function pressHaptic(action: ComposerAction, via: "button" | "return"): H
 /** A turn that was running and is not any more: success (own or another device's). */
 export function turnEndHaptic(wasRunning: boolean, running: boolean): HapticKind | null {
   return wasRunning && !running ? "success" : null;
+}
+
+/**
+ * News arriving on the hub while it is on screen (mobile-hub-badges Design 3,
+ * owner Q1 C + Q4): a light tap with the glow. `turnEnded` is the SAME render's
+ * `turnEndHaptic` verdict — news usually lands exactly when a turn ends — so the
+ * moment plays one haptic, the turn's success, never two (§F4).
+ */
+export function pulseHaptic(pulse: boolean, turnEnded: boolean): HapticKind | null {
+  return pulse && !turnEnded ? "light" : null;
+}
+
+/**
+ * The hub machine's effect → the haptic it plays (docs/feat/mobile-hub.md
+ * Design 2): open = firm (the lift), a new highlight = tick, commit = commit.
+ * The machine already decides WHEN (no tick on a cleared highlight, silence on
+ * cancel / sticky / drag); every other effect is silent here.
+ */
+export function hubHaptic(effect: GestureEffect): HapticKind | null {
+  return effect.kind === "haptic" ? effect.cue : null;
+}
+
+/**
+ * A drawer row's long-press (docs/feat/mobile-session-actions.md S2): the row
+ * menu's feedback. `firm` is a medium impact — the weight iOS uses to lift a
+ * context menu — so it is distinguishable from the selection `tick` of a hub
+ * highlight without a new `HapticKind`.
+ */
+export function rowMenuHaptic(): HapticKind {
+  return "firm";
 }

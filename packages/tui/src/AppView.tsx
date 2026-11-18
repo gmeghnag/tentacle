@@ -39,6 +39,7 @@ import { QueuedMessages } from "./components/QueuedMessages.tsx";
 import { QuitConfirm } from "./components/QuitConfirm.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
+import { VoiceStrip } from "./components/VoiceStrip.tsx";
 import { permissionAgentLine } from "./permission-ui.ts";
 import { rowTexts } from "./queued.ts";
 import { stripAnsi } from "./render-lines.ts";
@@ -67,8 +68,9 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
     expandAll,
     selection,
     quitConfirm,
+    artifactConfirm,
     hopRow,
-    loading,
+    slot,
     compacting,
     columns,
     tokensShown,
@@ -78,6 +80,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
     paletteWin,
     paletteRows,
     listView,
+    capsShown,
     shown,
     dockView,
     drawer,
@@ -89,6 +92,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
     scrolledUp,
     hiddenAbove,
     attachRow,
+    voiceStrip,
     onPillRange,
   } = model;
 
@@ -125,6 +129,8 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
       <Box marginTop={1}>
         {quitConfirm !== null ? (
           <QuitConfirm text={quitConfirmText(quitConfirm)} columns={columns} />
+        ) : artifactConfirm !== null ? (
+          <QuitConfirm text={artifactConfirm.text} columns={columns} />
         ) : permission.pending ? (
           <PermissionPrompt
             req={permission.pending}
@@ -148,18 +154,25 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
             ) : null}
             {/* One blank row between the send-now hint and the thinking line. */}
             {st.running && shown.length > 0 ? <Text> </Text> : null}
-            {loading ? (
-              <Text {...dimProps()}>{loadingLabel(loading.done, loading.total)}</Text>
-            ) : st.running ? (
+            {/* The slot: ONE row, decided by `spinner-slot.ts` (S3) — never
+                re-decided here, or the row budget above it and this paint drift
+                apart. */}
+            {slot === null ? null : slot.kind === "loading" ? (
+              <Text {...dimProps()}>{loadingLabel(slot.done, slot.total)}</Text>
+            ) : slot.kind === "compacted" ? (
+              <Text color={palette().subtle}>Compacted ✓</Text>
+            ) : (
               <Thinking
-                since={
-                  st.reasoning && st.reasoningStartedAt !== null
-                    ? st.reasoningStartedAt
-                    : (st.turnStartedAt ?? Date.now())
+                since={slot.since}
+                label={
+                  slot.kind === "thinking"
+                    ? "Thinking…"
+                    : slot.kind === "working"
+                      ? "Working…"
+                      : "Compacting…"
                 }
-                label={st.reasoning ? "Thinking…" : "Working…"}
               />
-            ) : null}
+            )}
             {listView ? (
               <ListPanel view={listView} columns={columns} />
             ) : (
@@ -221,6 +234,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
                   borderRight={false}
                   flexDirection="column"
                 >
+                  <VoiceStrip view={voiceStrip ?? null} columns={columns} />
                   {attachRow === null ? null : (
                     // ONE row, above the input: the chips (`name size`, +N) or
                     // the upload in flight. Colours and the glyph only — the
@@ -259,6 +273,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
           hiddenAbove={hiddenAbove}
           expandAll={expandAll}
           autoApprove={permission.autoApprove}
+          capsMarker={capsShown}
           pill={pill}
           onPillRange={onPillRange}
           link={linkView}

@@ -58,6 +58,11 @@ Two of the TUI's transitive dependencies don't bundle cleanly on their own, so
 Both are build-time concerns only; running from source (`bun run
 packages/cli/src/main.ts`) needs neither.
 
+Every module spawned as a `Worker` is its own build entrypoint
+(`BINARY_ENTRYPOINTS` in `packages/cli/src/pod-binary-build.ts`): `main.ts`,
+the daemon `worker.ts`, and the PDF parser `pdf-worker.ts`. All three sit in
+`packages/cli/src`, so they are embedded at one `$bunfs` root.
+
 ## macOS code signing (Apple Silicon)
 
 `bun build --compile` appends the JS payload *after* the linker ad-hoc-signs the
@@ -73,3 +78,12 @@ or re-sign it in place:
 ```sh
 codesign --sign - --force ~/bin/yaha
 ```
+
+## The iPhone app: a new dev build after a native module lands
+
+`apps/mobile` is an Expo **dev build**: a JS-only change reaches the phone over
+Metro, but a new NATIVE module needs the app rebuilt and reinstalled
+(`cd apps/mobile && bunx expo run:ios`) — and, since a module's `app.plugin.js`
+only edits the generated project at prebuild, a clean
+`bunx expo prebuild --platform ios` first. `expo-document-picker` (attaching a
+PDF from the phone, `docs/feat/pdf-read.md` D7) is the latest such addition.

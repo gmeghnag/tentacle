@@ -11,15 +11,24 @@
 import type { LayerStep } from "../keys/contract.ts";
 import { consumed } from "../keys/contract.ts";
 import type { KeySnapshot } from "../keys/snapshot.ts";
-import { type TreeGroup, type TreeState, applyTree, treeClick, treeKey } from "../tree-panel.ts";
+import {
+  type TreeGroup,
+  type TreeState,
+  applyTree,
+  treeClick,
+  treeKey,
+  treeRows,
+} from "../tree-panel.ts";
 import type { PanelView } from "../tree-panel.ts";
 import type { TreePanel } from "./types.ts";
 
 /**
  * `panel` with `tree` — the SAME object when nothing moved, so a no-op action
- * cannot re-render the App.
+ * cannot re-render the App. Generic over any panel that HAS a `tree` (the tree
+ * kinds and `/artifacts`), not just `TreePanel`: the `kind` discriminant is the
+ * caller's.
  */
-export function withTree<P extends TreePanel>(panel: P, tree: TreeState): P {
+export function withTree<P extends { readonly tree: TreeState }>(panel: P, tree: TreeState): P {
   return tree === panel.tree ? panel : { ...panel, tree };
 }
 
@@ -42,11 +51,30 @@ export function clickTreeBody<P extends TreePanel>(
   return groups === null ? panel : withTree(panel, treeClick(groups, panel.tree, view, bodyIndex));
 }
 
-/** The tree panels' key decision: Esc closes, a claimed action applies, else pass. */
+/** The group index the cursor is on (null: no rows, or still loading). */
+export function cursorGroup(groups: readonly TreeGroup[] | null, state: TreeState): number | null {
+  if (groups === null) {
+    return null;
+  }
+  const rows = treeRows(groups, state);
+  if (rows.length === 0) {
+    return null;
+  }
+  return rows[Math.min(Math.max(0, state.cursor), rows.length - 1)]?.group ?? null;
+}
+
+/**
+ * The tree panels' key decision: Esc closes, Space asks for the selected row's
+ * on/off switch (the App decides what it flips, `panelSwitchOp`), a claimed
+ * action applies, else pass.
+ */
 export function treeStep(snap: KeySnapshot): LayerStep {
   const action = treeKey(snap.char, snap.key);
   if (action === "close") {
     return consumed({ kind: "closePanel" });
+  }
+  if (action === "switch") {
+    return consumed({ kind: "switchCapability" });
   }
   if (action === "none") {
     // Not this panel's key: the layers below decide (the mouse layer swallows it).

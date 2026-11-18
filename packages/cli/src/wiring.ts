@@ -48,10 +48,12 @@ import {
 } from "@tentacle/config";
 import {
   AgentJobs,
+  type ArtifactSink,
   type AttachmentSource,
   type JobController,
   type ModelProvider,
   PermissionBroker,
+  type ScheduleLimits,
 } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
@@ -62,13 +64,18 @@ import {
   ToolRegistry,
   WorkloadShells,
   builtinTools,
+  chartTool,
   createAgentControlTool,
   createContextResetTool,
   createMoveSessionTool,
+  createScheduleControlTool,
+  createScheduleCreateTool,
   createSkillActivator,
   createSkillTool,
   createTaskTool,
   createWorkloadShellTool,
+  diagramTool,
+  presentTool,
   subagentExtraTools,
 } from "@tentacle/tools";
 import { logDaemonError } from "./daemon-log.ts";
@@ -393,6 +400,13 @@ export interface BuildAgentOptions {
    */
   readonly attachments?: AttachmentSource;
   /**
+   * The session's artifact store (docs/feat/model-artifacts.md D2/D4): set ⇒
+   * the agent is offered `present`, writing into it. Every SESSION-hosting
+   * build passes `AgentContext.artifacts` (the worker, `serve`, both pod
+   * branches); a one-shot or a child agent never does, so they never offer it.
+   */
+  readonly artifacts?: ArtifactSink;
+  /**
    * Offer this agent `move_session` (docs/feat/session-hop.md D9): the model may
    * PROPOSE moving its session, and nothing more — the laptop asks the owner at
    * the turn's end. Set by the runtimes that own a hoppable session (the local
@@ -419,9 +433,34 @@ export interface BuildAgentOptions {
    * reaching other workloads would need cluster credentials inside the pod
    * (AGENTS §7, "a pod is not trusted").
    */
+  /**
+   * The session's scheduled wakes (docs/feat/cron-tool.md D1/D2): the LAZY link
+   * `AgentContext.schedules` hands the factory. Present → the agent is offered
+   * `schedule_create` (asks) and `schedule_control`. The host passes it ONLY
+   * where it schedules — `serve` and the local worker; a pod daemon's host has
+   * no table, so no link and no tools (owner Q4, AGENTS §7).
+   */
+  readonly schedules?: (() => import("@tentacle/core").ScheduleLink | null) | undefined;
   readonly workloadShell?:
     | { readonly backend: import("@tentacle/tools").WorkloadShellBackend }
     | undefined;
+}
+
+/**
+ * A host's `schedules.*` config → the core's create limits (docs/feat/cron-tool.md
+ * D3, owner Q6). Read from the HOST's own config (never carried): `serve` and the
+ * worker pass the result as `SessionHostOptions.schedules.limits`.
+ */
+export function scheduleLimitsOf(config: TentacleConfig): ScheduleLimits {
+  const minute = 60_000;
+  const day = 86_400_000;
+  return {
+    maxJobs: config.schedules.maxJobs,
+    minIntervalMs: config.schedules.minIntervalMinutes * minute,
+    ttlMs: config.schedules.expiryDays * day,
+    maxAheadMs: config.schedules.maxAheadDays * day,
+    promptMaxChars: config.schedules.promptMaxChars,
+  };
 }
 
 /** `agent_task`'s model list over the tunnel: the laptop's selectable names, with their text. */
@@ -547,6 +586,17 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   const contextAwareness = config.contextAwareness.enabled
     ? { window: config.contextWindow, stepPercent: config.contextAwareness.stepPercent }
     : undefined;
+  // Smart compaction (docs/feat/smart-compaction.md) on the same window; each
+  // sub-agent prunes its own history. Off unless `contextPrune.enabled`.
+  const contextPrune = config.contextPrune.enabled
+    ? {
+        window: config.contextWindow,
+        pruneAtPercent: config.contextPrune.pruneAtPercent,
+        minGainPercent: config.contextPrune.minGainPercent,
+        keepRecentRounds: config.contextPrune.keepRecentRounds,
+        outputChars: config.contextPrune.pruneOutputChars,
+      }
+    : undefined;
 
   // One store of approvals and one ask at a time for this session's whole tree
   // (docs/feat/parallel-agents.md, Design 3). The ONE broker is still the only
@@ -597,6 +647,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       resultTransforms,
       ...(hooks ? { hooks } : {}),
       ...(contextAwareness ? { contextAwareness } : {}),
+      ...(contextPrune ? { contextPrune } : {}),
       grants,
       // A child's own rounds follow `tools.*` (task 7, owner decision 4).
       toolExecution: config.toolExecution,
@@ -604,6 +655,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       // Two-way (docs/feat/agent-message-two-way.md): the ONLY switch — with it
       // off, no runner gets a `notify`, so no child is offered `agent_notify`.
       ...(config.subagentsTwoWay ? { notify: (id, text) => agentJobs.notify(id, text) } : {}),
+      // A child follows this session's capability switches LIVE
+      // (docs/feat/session-capabilities.md): read at each child round, so
+      // `agent` (built below) is always set by the time a child runs.
+      capabilities: () => agent.capabilities(),
     });
     if (published) {
       // Said here because only the pod knows its own types (the laptop cannot).
@@ -662,6 +717,16 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   if (contextReset) {
     tools.register(createContextResetTool());
   }
+  // The model's chart (docs/feat/model-charts.md D3): a spec that rides the tool
+  // call's own arguments, so every client draws it inline with no wire change
+  // and no `artifacts` sink. Offered in every session-hosting build beside
+  // `context_reset`; never to a child agent (its steps are not transcript rows —
+  // `subagent.ts`'s "never a child" list, pinned by T2.5).
+  tools.register(chartTool);
+  // The model's Mermaid diagram (docs/feat/model-diagrams.md D2): chart's path —
+  // the source rides the call's arguments; mermaid parses it daemon-side, loaded
+  // on first use. Same scope as `chart`: every session-hosting build, never a child.
+  tools.register(diagramTool);
   // Session hop (docs/feat/session-hop.md D9): the model's ONE way to ask for
   // its session to move. It has no daemon-side effect at all — the laptop watches
   // the turn's events and asks the owner at its end — so `serve`, one-shot and
@@ -669,6 +734,11 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // (nobody would ask, and a pod's own claim must never be enough).
   if (options.moveSession === true && config.sessionHop.tool) {
     tools.register(createMoveSessionTool());
+  }
+  // `present` (docs/feat/model-artifacts.md D2): only where a session store
+  // exists to receive it. A sub-agent's registry drops it by name (subagent.ts).
+  if (options.artifacts) {
+    tools.register(presentTool);
   }
   // `workload_shell` (docs/feat/workload-shell.md D3): a stateful, non-interactive
   // `sh` reached through the LAPTOP's engine credentials. Offered only when the
@@ -684,6 +754,14 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   if (workloadShells !== undefined) {
     tools.register(createWorkloadShellTool(workloadShells));
   }
+  // Scheduled wakes (docs/feat/cron-tool.md D1/D2): only with the host's link —
+  // `serve` and the worker. Never a pod daemon (no link), never a child agent
+  // (`subagent.ts`'s filter). The link is looked up per call: the table is the
+  // SESSION's, so a settings sync that rebuilds this agent keeps it.
+  if (options.schedules !== undefined) {
+    tools.register(createScheduleCreateTool(options.schedules));
+    tools.register(createScheduleControlTool(options.schedules));
+  }
 
   const agent = new Agent({
     model,
@@ -697,6 +775,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     agentJobs,
     // The session's bytes, where this side holds them (docs/feat/attachments-prompt.md D4).
     ...(options.attachments ? { attachments: options.attachments } : {}),
+    ...(options.artifacts ? { artifacts: options.artifacts } : {}),
     resultTransforms,
     toolOutput,
     systemPrompt: config.systemPrompt,
@@ -708,6 +787,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     ...(hooks ? { hooks } : {}),
     ...(options.askHooksTrust ? { askHooksTrust: options.askHooksTrust } : {}),
     ...(contextAwareness ? { contextAwareness } : {}),
+    ...(contextPrune ? { contextPrune } : {}),
     ...(contextReset ? { contextReset } : {}),
     grants,
     toolExecution: config.toolExecution,

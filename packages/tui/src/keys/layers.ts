@@ -16,8 +16,8 @@
  * today. It therefore runs after `executeEffects`, exactly where the inline
  * handler had its mouse block: last, and only when nothing above consumed.
  *
- * `LAYER_ORDER` still names all 14 — it is the documented precedence, the thing a
- * review reads and a test pins; `PURE_LAYERS` is the walkable 13.
+ * `LAYER_ORDER` still names all 15 — it is the documented precedence, the thing a
+ * review reads and a test pins; `PURE_LAYERS` is the walkable 14.
  */
 import type { KeyLayer, KeyLayerName, KeySnapshot } from "./contract.ts";
 import { ctrlCLayer, pasteLayer, permissionLayer } from "./layer-dialog.ts";
@@ -29,22 +29,30 @@ import {
   paletteLayer,
 } from "./layer-dock.ts";
 import { sessionsLayer, treeLayer } from "./layer-panels.ts";
-import { chordLayer, quitConfirmLayer, shiftTabLayer } from "./layer-precedence.ts";
+import {
+  artifactConfirmLayer,
+  chordLayer,
+  quitConfirmLayer,
+  shiftTabLayer,
+} from "./layer-precedence.ts";
+import { voiceKeyLayer } from "./layer-voice.ts";
 
 /** The mouse layer's verdict, as `useMouse.handleChunk` already returns it. */
 export type MouseRun = (snap: KeySnapshot) => "consumed" | "pass";
 
 /**
- * The thirteen PURE layers, in precedence order (1–13 of 14). This array IS the
+ * The fifteen PURE layers, in precedence order (1–15 of 16). This array IS the
  * precedence: `routeKey` walks it in order and stops at the first `consumed`.
  */
 export const PURE_LAYERS: readonly KeyLayer[] = [
   shiftTabLayer,
   quitConfirmLayer,
+  artifactConfirmLayer,
   chordLayer,
   permissionLayer,
   ctrlCLayer,
   pasteLayer,
+  voiceKeyLayer,
   sessionsLayer,
   treeLayer,
   dockLayer,
@@ -55,17 +63,19 @@ export const PURE_LAYERS: readonly KeyLayer[] = [
 ];
 
 /**
- * The documented order of all 14 layers, as names: what a review reads and what
+ * The documented order of all 16 layers, as names: what a review reads and what
  * `route.test.ts` pins (a test asserts `PURE_LAYERS` is this list minus the last
  * entry, so the two can never drift apart).
  */
 export const LAYER_ORDER: readonly KeyLayerName[] = [
   "shiftTab",
   "quitConfirm",
+  "artifactConfirm",
   "chord",
   "permission",
   "ctrlC",
   "paste",
+  "voice",
   "sessions",
   "tree",
   "dock",

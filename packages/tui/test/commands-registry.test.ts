@@ -119,9 +119,10 @@ describe("S2 registry: the ONE list, and the vocabulary derived from it", () => 
     expect(new Set(names).size).toBe(names.length);
   });
 
-  test("the registry is the 18 built-ins the docs and the palette promise", () => {
+  test("the registry is the 19 built-ins the docs and the palette promise", () => {
     // Deliberately literal: this is the list a user reads in /help. A new
-    // command is a decision, so it must be added here too.
+    // command is a decision, so it must be added here too. `/artifacts`
+    // (docs/feat/model-artifacts.md S6a) is the 19th.
     expect(BUILT_INS.map((c) => c.name)).toEqual([
       "/help",
       "/clear",
@@ -138,6 +139,8 @@ describe("S2 registry: the ONE list, and the vocabulary derived from it", () => 
       "/tokens",
       "/mcp",
       "/skills",
+      "/artifacts",
+      "/schedule",
       "/agents",
       "/settings",
       "/exit",

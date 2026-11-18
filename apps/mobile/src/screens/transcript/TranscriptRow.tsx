@@ -1,11 +1,14 @@
+import { type ArtifactCardView, artifactCard } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 /**
  * One transcript row (docs/feat/mobile-session-view.md 12c): a DUMB renderer per
  * row kind (AGENTS §7). Every string is daemon-supplied data — plain `Text`,
  * never executed, never a link unless the markdown tree says so.
  *
  * Look (mockup `Conversation`): the person's message is a right-aligned `fill`
- * bubble; the answer is full-width text on the page; reasoning is one collapsed
- * line; a tool call is a `ToolRow` whose output opens below it.
+ * bubble; the answer is full-width text on the page; a tool call — and a thought
+ * — is a `StepNode` on a thread of steps (docs/feat/mobile-tool-rows.md, mockup
+ * C) whose body opens below it.
  *
  * The `testID`s are the contract the Maestro flows assert on (text is invisible
  * to XCUITest under RN's new architecture, plan P9):
@@ -13,21 +16,43 @@
  * `tool-<callId>-reply`, `diff-<callId>`, `image-<imageId>`.
  */
 import { type JSX, type ReactNode, useState } from "react";
-import { Image, Pressable, StyleSheet, Text, View } from "react-native";
+import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import type { LabelMode } from "../../chart-layout-kit.ts";
+import { CHART_TOOL, chartRowView } from "../../chart-row.ts";
+import { DIAGRAM_TOOL, diagramRowView } from "../../diagram-row.ts";
+import type { DiagramStyle } from "../../diagram-settings-store.ts";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
+import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
+import { ROW_FALLBACK_TEXT } from "../../row-guard.ts";
+import { type FiredRow, firedRowView } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
-import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
-import { toolMeta, toolSummary } from "../../tool-summary.ts";
+import { type Thumbnail, type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
+import { type StepCell, type ThreadPos, stepRowView, thoughtRowView } from "../../tool-steps.ts";
+import { subAgentLine } from "../../tool-summary.ts";
 import { type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
-import { ToolRow } from "../../ui/ToolRow.tsx";
-import { animateNextLayout } from "../../ui/animate.ts";
+import { StepBody, StepNode } from "../../ui/StepNode.tsx";
+import { ChartBlock } from "../../ui/chart/ChartBlock.tsx";
+import { DiagramBlock } from "../../ui/diagram/DiagramBlock.tsx";
 import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
+import { MediaViewer } from "./MediaViewer.tsx";
 
-/** Lines of a tool's output shown before "show more" (plan F21's bound on screen). */
-export const OUTPUT_PREVIEW_LINES = 12;
+/**
+ * The width a bubble's media is laid out at, in points (item 4). The bubble caps
+ * at 77% of the page (see `styles.bubble`), and the phone's narrowest supported
+ * width is 320 pt: 0.77 × 320 − 2 × 14 (the bubble's own padding) ≈ 218. A fixed
+ * figure is what keeps this a pure decision — the real width would need an
+ * `onLayout` round-trip, and the photo is drawn `cover` in a box of the right
+ * SHAPE, so a few points either way crop rather than distort.
+ */
+export const MEDIA_BUBBLE_WIDTH = 218;
+
+/** The image's own box, from the pure layout (`mediaBox`). */
+function boxStyle(box: MediaBox): { width: number; height: number } {
+  return { width: box.width, height: box.height };
+}
 
 export interface RowProps {
   readonly row: Row;
@@ -35,6 +60,80 @@ export interface RowProps {
   readonly onLink: (href: string) => void;
   /** The loaded thumbnails (the driver's state): a ref with no bytes draws its label. */
   readonly thumbnails: ThumbnailState;
+  /**
+   * The Charts setting in force (docs/feat/mobile-chart-labels.md D7): where a
+   * line/area chart names its series. The SESSION SCREEN owns the subscription
+   * (`ACTIVITY_SETTINGS`'s pattern) so one chart row is not one listener, and
+   * absent = the default (`inside`).
+   */
+  readonly chartLabels?: LabelMode;
+  /**
+   * The read-aloud button under an assistant row (docs/feat/mobile-voice.md
+   * Design §5): `readAloudOffered` / `speakingRowKey` decide it; absent = none.
+   */
+  readonly speak?: "offered" | "speaking";
+  readonly onSpeak?: (row: { readonly key: string; readonly text: string }) => void;
+  /**
+   * An `agent_task` card's child in the Activity sheet (`activity.ts`
+   * `agentCardTarget`, docs/feat/mobile-chrome.md S8): its id and the tap.
+   * Absent: a plain tool row.
+   */
+  readonly agent?: { readonly id: string; readonly onOpen: () => void };
+  /**
+   * A `present` row's card was tapped (docs/feat/model-artifacts.md D9): its
+   * version's meta, which the screen routes to the gallery/viewer. Absent: the
+   * card is still drawn, just not pressable (a test with no router).
+   */
+  readonly onArtifact?: (meta: ArtifactMeta) => void;
+  /**
+   * How a tool or reasoning row draws on the thread of steps
+   * (docs/feat/mobile-tool-rows.md S2). Absent: a lone, closed step.
+   */
+  readonly step?: StepProps;
+  /** The diagram look picked in Settings (docs/fix/mobile-qa-1117.md, bug 3); absent → outline. */
+  readonly diagramStyle?: DiagramStyle;
+}
+
+/**
+ * The screen-owned half of a step: its cell from `stepLayout` and the open /
+ * show-all state, which lives in the SCREEN so a virtualised cell that unmounts
+ * does not lose it.
+ */
+export interface StepProps {
+  readonly cell: StepCell | undefined;
+  readonly open: boolean;
+  /** Every output line (the "… +N more lines" row was tapped). */
+  readonly full: boolean;
+  readonly reduceMotion: boolean;
+  readonly onToggle: () => void;
+  readonly onShowAll: () => void;
+}
+
+/** A step with no neighbour on its thread: just the node. */
+const LONE: ThreadPos = { up: false, down: false };
+
+/**
+ * A step's cell: no vertical padding, so the thread touches the next cell; the
+ * run's 12 pt margin is split at its two ends (6 above its first node, 6 below
+ * its last).
+ */
+function StepShell({
+  row,
+  thread,
+  children,
+}: { readonly row: Row; readonly thread: ThreadPos; readonly children: ReactNode }): JSX.Element {
+  return (
+    <View
+      testID={`row-${row.key}`}
+      style={[
+        styles.step,
+        thread.up ? undefined : styles.runStart,
+        thread.down ? undefined : styles.runEnd,
+      ]}
+    >
+      {children}
+    </View>
+  );
 }
 
 function Shell({
@@ -55,151 +154,460 @@ function parsedOf(text: string): Parsed {
 
 function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Element {
   const user = row as Extract<Row, { kind: "user" }>;
+  /** Item 4's geometry: media boxes at the bubble's width, caption below iff there are words. */
+  const layout = layoutMedia(user.images, {
+    width: MEDIA_BUBBLE_WIDTH,
+    hasText: user.text !== "",
+  });
+  const captionBelow = layout.captionBelow;
+  /** The photo open full screen (item 4). One state: null = closed. */
+  const [viewing, setViewing] = useState<{ uri: string; label: string } | null>(null);
+  /**
+   * URIs whose `<Image>` has reported a load failure (Review round 2, R2-1): a
+   * file can vanish under a row that outlives it (the app trims old copies, a
+   * person can wipe the phone's data), and the bubble must then draw its label
+   * rather than an empty frame. `displayUri` decides; this only remembers.
+   */
+  const [broken, setBroken] = useState<readonly string[]>([]);
   return (
     <Shell row={user}>
       <View style={[styles.bubble, { backgroundColor: palette.fill }]}>
         {user.restart === true ? (
           <Text style={[typography.caption, { color: palette.sec }]}>restart prompt</Text>
         ) : null}
-        {/* The bubble is `fill`; code inside it is `code`, which differs (B4). */}
-        <Markdown
-          parsed={parsedOf(user.text)}
-          palette={palette}
-          onLink={onLink}
-          codeBackground={palette.code}
-        />
-        {user.images.length > 0 ? (
+        {/* Item 4 (the owner's WhatsApp shape): the media FIRST, full bubble
+            width; the caption BELOW it, inside the same bubble. */}
+        {user.images.length === 0 ? null : (
           <View style={styles.images}>
             {user.images.map((image) => {
               const thumb = thumbnailFor(thumbnails, image.id);
+              // The LOCAL copy wins: it is the only pixels that exist for a photo
+              // this phone just sent (`thumbnails.ts:19-25` — no read-back), and a
+              // loaded thumbnail is the only source for any other. A URI already
+              // known to be unloadable is no answer at all: the label is.
+              const uri = displayUri(image.localUri ?? thumb?.uri, broken);
+              const box = mediaBox(image, MEDIA_BUBBLE_WIDTH);
+              const label = imageRowText(image);
               return (
                 <View
                   key={image.id}
                   testID={`image-${image.id}`}
-                  style={[styles.image, { backgroundColor: palette.code }]}
+                  style={[styles.image, { backgroundColor: palette.code }, boxStyle(box)]}
                 >
-                  {thumb === undefined ? (
-                    // No bytes reachable yet (no read-back method exists): the
-                    // label is what this build can honestly show (12b Drift 1).
+                  {uri === undefined ? (
+                    // No bytes reachable at all (a history row, another device's
+                    // message): the label is what this build can honestly show.
                     <View style={styles.imageLabel}>
                       <Icon name="photo" color={palette.sec} size={18} />
                       <Text numberOfLines={2} style={[typography.caption, { color: palette.sec }]}>
-                        {imageRowText(image)}
+                        {label}
                       </Text>
                     </View>
                   ) : (
-                    <Image
-                      source={{ uri: thumb.uri }}
-                      style={styles.thumb}
-                      accessibilityIgnoresInvertColors
-                    />
+                    <Pressable
+                      testID={`image-${image.id}-open`}
+                      accessibilityRole="imagebutton"
+                      accessibilityLabel={`Open ${label}`}
+                      onPress={() => setViewing({ uri, label })}
+                    >
+                      <Image
+                        source={{ uri }}
+                        style={styles.imageFill}
+                        // A file that cannot be read (trimmed, wiped, moved) turns
+                        // the bubble back into its label instead of an empty frame.
+                        onError={() =>
+                          setBroken((had) => (had.includes(uri) ? had : [...had, uri]))
+                        }
+                        // The box is the photo's own shape (or the clamp), so `cover`
+                        // crops at the clamp instead of squashing the photo.
+                        resizeMode="cover"
+                        accessibilityIgnoresInvertColors
+                      />
+                    </Pressable>
                   )}
                 </View>
               );
             })}
           </View>
-        ) : null}
+        )}
+        {/* The attached files, one line each (docs/feat/pdf-read.md D5/D7), under
+            the media and inside the same bubble: the `<file>` block they became
+            is the model's, so the file is named, never quoted. */}
+        {user.documents === undefined || user.documents.length === 0 ? null : (
+          <View testID="row-documents" style={styles.documents}>
+            {user.documents.map((line) => (
+              <View key={line} style={styles.document}>
+                <Icon name="doc.on.doc" color={palette.sec} size={14} />
+                <Text
+                  numberOfLines={2}
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  style={[typography.caption, { color: palette.sec }]}
+                >
+                  {line}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
+        {/* The caption, BELOW the media and inside the same bubble — and never an
+            empty block: a photo-only bubble has no text area at all (item 4).
+            `hasText` is the words' own presence; the markdown source is its truth. */}
+        {!captionBelow ? null : (
+          // The bubble is `fill`; code inside it is `code`, which differs (B4).
+          <Markdown
+            parsed={parsedOf(user.text)}
+            palette={palette}
+            onLink={onLink}
+            codeBackground={palette.code}
+          />
+        )}
       </View>
+      <MediaViewer open={viewing} palette={palette} onClose={() => setViewing(null)} />
     </Shell>
   );
 }
 
-function AssistantRowView({ row, palette, onLink }: RowProps): JSX.Element {
+function AssistantRowView({ row, palette, onLink, speak, onSpeak }: RowProps): JSX.Element {
   const assistant = row as Extract<Row, { kind: "assistant" }>;
+  const speaking = speak === "speaking";
   return (
     <Shell row={assistant}>
       <Markdown parsed={parsedOf(assistant.text)} palette={palette} onLink={onLink} />
+      {speak === undefined || onSpeak === undefined ? null : (
+        <Pressable
+          testID={speaking ? "assistant-speak-stop" : "assistant-speak"}
+          accessibilityRole="button"
+          accessibilityLabel={speaking ? "Stop reading" : "Read aloud"}
+          onPress={() => onSpeak({ key: assistant.key, text: assistant.text })}
+          hitSlop={8}
+          style={styles.speak}
+        >
+          <Icon
+            name={speaking ? "stop.circle" : "speaker.wave.2"}
+            color={speaking ? palette.accent : palette.sec}
+            size={16}
+          />
+        </Pressable>
+      )}
     </Shell>
   );
 }
 
-/** Reasoning: one collapsed `sec` line that opens on tap (presentation state). */
-function ReasoningRowView({ row, palette, onLink }: RowProps): JSX.Element {
-  const reasoning = row as Extract<Row, { kind: "reasoning" }>;
+/**
+ * Reasoning: nothing when it is folded into a step or the live footer
+ * (`hidden`), else a `Thought` node — ∴ in the dot's place, its first line in
+ * italic, the whole thought on tap (Owner Q1).
+ */
+/**
+ * A fired scheduled wake (docs/feat/scheduled-fire-row.md): the tool/thought
+ * rows' timeline node with a `◷`, `Wake 15:54` and the prompt on one line —
+ * collapsed until tapped, then the prompt in full under it. No bubble.
+ */
+function FiredRowView({
+  row,
+  palette,
+  step,
+  fired,
+}: RowProps & { readonly fired: FiredRow }): JSX.Element {
   const [open, setOpen] = useState(false);
   return (
-    <Shell row={reasoning}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityState={{ expanded: open }}
-        onPress={() => {
-          animateNextLayout();
-          setOpen((was) => !was);
-        }}
-        hitSlop={8}
-        style={styles.reasoningHead}
-      >
-        <Text
-          maxFontSizeMultiplier={DENSE_FONT_SCALE}
-          style={[typography.subhead, { color: palette.sec }]}
-        >
-          Thinking
-        </Text>
-        <Icon name={open ? "chevron.down" : "chevron.right"} color={palette.sec} size={12} />
-      </Pressable>
-      {open ? (
-        <View style={[styles.reasoning, { borderLeftColor: palette.sep }]}>
-          <Markdown parsed={parsedOf(reasoning.text)} palette={palette} onLink={onLink} />
-        </View>
-      ) : null}
-    </Shell>
+    <StepShell row={row} thread={LONE}>
+      <StepNode
+        palette={palette}
+        node="wake"
+        reduceMotion={step?.reduceMotion ?? false}
+        name={{ tool: fired.name }}
+        subtitle={fired.subtitle}
+        subtitleItalic
+        trailing=""
+        trailingRed={false}
+        thread={LONE}
+        open={open}
+        {...(fired.body.trim() === "" ? {} : { onToggle: () => setOpen((was) => !was) })}
+        a11yLabel={fired.a11yLabel}
+        labelTestID="row-fired-wake"
+        body={
+          <Text selectable style={[typography.body, styles.firedBody, { color: palette.sec }]}>
+            {fired.body}
+          </Text>
+        }
+      />
+    </StepShell>
   );
 }
 
-function ToolRowView({ row, palette }: RowProps): JSX.Element {
-  const tool = row as Extract<Row, { kind: "tool" }>;
-  const [open, setOpen] = useState(false);
-  const [all, setAll] = useState(false);
-  const summary = toolSummary(tool);
-  const meta = toolMeta(tool);
-  const lines = summary.output === "" ? [] : summary.output.split("\n");
-  const hidden = Math.max(0, lines.length - OUTPUT_PREVIEW_LINES);
-  const shown = all ? lines : lines.slice(0, OUTPUT_PREVIEW_LINES);
-  const view = tool.diff === undefined ? null : diffView(tool.diff);
+function ReasoningRowView({ row, palette, step }: RowProps): JSX.Element | null {
+  const reasoning = row as Extract<Row, { kind: "reasoning" }>;
+  const cell = step?.cell;
+  if (cell?.kind === "hidden") {
+    return null;
+  }
+  const text = cell?.kind === "thought" ? cell.text : reasoning.text;
+  const thread = cell?.kind === "thought" ? cell.thread : LONE;
+  const view = thoughtRowView(text);
+  return (
+    <StepShell row={reasoning} thread={thread}>
+      <StepNode
+        palette={palette}
+        node="thought"
+        reduceMotion={step?.reduceMotion ?? false}
+        name={{ tool: "Thought" }}
+        subtitle={view.subtitle}
+        subtitleItalic
+        trailing=""
+        trailingRed={false}
+        thread={thread}
+        open={step?.open ?? false}
+        {...(step === undefined || text.trim() === "" ? {} : { onToggle: step.onToggle })}
+        a11yLabel={view.a11yLabel}
+        body={<StepBody palette={palette} thought={text} command={[]} output={null} />}
+      />
+    </StepShell>
+  );
+}
+
+/** The device's language, for the chart's numbers and dates (Hermes' Intl reads the device). */
+function deviceLocale(): string {
+  return Intl.DateTimeFormat().resolvedOptions().locale;
+}
+
+/**
+ * A `chart` call (docs/feat/model-charts.md slice C6): the chart itself takes the
+ * row's place, full width on the page — no tool chrome (owner rule). A spec that
+ * does not re-validate, or a failed / refused call, is the generic tool row.
+ */
+function ChartRowView(props: RowProps): JSX.Element {
+  const tool = props.row as Extract<Row, { kind: "tool" }>;
+  const screen = useWindowDimensions();
+  const labels = props.chartLabels ?? "inside";
+  const view = chartRowView(tool, {
+    width: screen.width - 2 * space.inset,
+    fontScale: screen.fontScale,
+    locale: deviceLocale(),
+    palette: props.palette,
+    labels,
+  });
+  if (view === null) {
+    return <ToolRowView {...props} />;
+  }
   return (
     <Shell row={tool}>
-      <View style={styles.tool}>
-        <ToolRow
-          palette={palette}
-          label={summary.label}
-          subtitle={summary.subtitle}
-          trailing={meta.trailing}
-          tone={meta.tone}
-          expandable={lines.length > 0}
-          expanded={open}
-          onPress={() => {
-            animateNextLayout();
-            setOpen((was) => !was);
-          }}
-          labelTestID={`tool-${tool.id}-${tool.status}`}
-        />
-        {tool.denialReply !== undefined ? (
-          <Text
-            testID={`tool-${tool.id}-reply`}
-            style={[typography.footnote, { color: palette.red }]}
-          >
-            {`Your reply: ${tool.denialReply}`}
-          </Text>
-        ) : null}
-        {view === null ? null : <DiffView view={view} palette={palette} callId={tool.id} />}
-        {open && shown.length > 0 ? (
-          <Pressable
-            testID={`tool-${tool.id}-output`}
-            accessibilityRole="button"
-            disabled={hidden === 0}
-            onPress={() => setAll((was) => !was)}
-            style={[styles.output, { backgroundColor: palette.code }]}
-          >
-            <Text style={[typography.monoCode, { color: palette.label }]}>{shown.join("\n")}</Text>
-            {hidden > 0 && !all ? (
-              <Text style={[typography.footnote, { color: palette.accent }]}>
-                {`Show ${hidden} more lines`}
-              </Text>
-            ) : null}
-          </Pressable>
-        ) : null}
-      </View>
+      <ChartBlock
+        view={view}
+        tool={tool}
+        palette={props.palette}
+        locale={deviceLocale()}
+        testID={`chart-${tool.id}`}
+        labels={labels}
+      />
     </Shell>
+  );
+}
+
+/**
+ * A `diagram` call (docs/feat/model-diagrams.md D6): the diagram takes the row's
+ * place, like a chart. A call that is running, failed, refused after a reopen,
+ * or does not re-lint is the generic tool row (`diagramRowView` → `null`).
+ */
+function DiagramRowView(props: RowProps): JSX.Element {
+  const tool = props.row as Extract<Row, { kind: "tool" }>;
+  const screen = useWindowDimensions();
+  const view = diagramRowView(tool, {
+    palette: props.palette,
+    fontScale: screen.fontScale,
+    ...(props.diagramStyle === undefined ? {} : { style: props.diagramStyle }),
+  });
+  if (view === null) {
+    return <ToolRowView {...props} />;
+  }
+  return (
+    <Shell row={tool}>
+      <DiagramBlock
+        view={view}
+        palette={props.palette}
+        width={screen.width - 2 * space.inset}
+        locale={deviceLocale()}
+        testID={`diagram-${tool.id}`}
+      />
+    </Shell>
+  );
+}
+
+/**
+ * A tool call: one `StepNode` on the thread (its cell from the screen's
+ * `stepLayout`), the thought, command, result, diff and reply in its open body;
+ * the sub-agent progress and Activity link always under the line. A presented
+ * artifact is its card instead (a block: `isBlockRow`, no thread).
+ */
+function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowProps): JSX.Element {
+  const tool = row as Extract<Row, { kind: "tool" }>;
+  const cell = step?.cell;
+  const thread = cell?.kind === "step" ? cell.thread : LONE;
+  const view = stepRowView(tool, cell?.kind === "step" ? cell.thought : null, step?.full ?? false);
+  const diff = tool.diff === undefined ? null : diffView(tool.diff);
+  const progress = subAgentLine(tool.sub);
+  // A presented artifact IS this row's visible body (docs/feat/model-artifacts.md
+  // D9): a band row, not a tool call with a blob of text under it.
+  const card = tool.artifact === undefined ? null : artifactCard(tool.artifact);
+  const artifact = tool.artifact;
+  const below =
+    progress === null && agent === undefined ? null : (
+      <View style={styles.below}>
+        {progress === null ? null : (
+          // Item 10: a foreground sub-agent's latest activity, so a long child
+          // does not look like a hang.
+          <Text
+            testID={`tool-${tool.id}-progress`}
+            numberOfLines={1}
+            maxFontSizeMultiplier={DENSE_FONT_SCALE}
+            style={[typography.footnote, { color: palette.sec }]}
+          >
+            {progress}
+          </Text>
+        )}
+        {agent === undefined ? null : (
+          // S8: the card's second entry into Activity (the header pill is the first).
+          <Pressable
+            testID={`tool-${tool.id}-activity`}
+            accessibilityRole="button"
+            accessibilityLabel={`Open ${agent.id} in Activity`}
+            hitSlop={6}
+            onPress={agent.onOpen}
+          >
+            <Text
+              maxFontSizeMultiplier={DENSE_FONT_SCALE}
+              style={[typography.footnote, { color: palette.accent }]}
+            >
+              {`${agent.id} · Activity ›`}
+            </Text>
+          </Pressable>
+        )}
+      </View>
+    );
+  if (card !== null && artifact !== undefined) {
+    return (
+      <Shell row={tool}>
+        <View style={styles.tool}>
+          <ArtifactCardRow
+            card={card}
+            artifactId={artifact.artifactId}
+            palette={palette}
+            thumbnail={thumbnailFor(thumbnails, artifact.sha256)}
+            {...(onArtifact === undefined ? {} : { onPress: () => onArtifact(artifact) })}
+          />
+          {below}
+        </View>
+      </Shell>
+    );
+  }
+  return (
+    <StepShell row={tool} thread={thread}>
+      <StepNode
+        palette={palette}
+        node={view.dot}
+        reduceMotion={step?.reduceMotion ?? false}
+        name={view.name}
+        subtitle={view.subtitle}
+        trailing={view.trailing}
+        trailingRed={view.trailingRed}
+        {...(view.live && tool.at !== undefined ? { liveFrom: tool.at } : {})}
+        thread={thread}
+        open={step?.open ?? false}
+        {...(view.tappable && step !== undefined ? { onToggle: step.onToggle } : {})}
+        a11yLabel={view.a11yLabel}
+        labelTestID={`tool-${tool.id}-${tool.status}`}
+        below={below}
+        body={
+          <StepBody
+            palette={palette}
+            thought={view.thought}
+            command={view.command}
+            output={view.output}
+            outputTestID={`tool-${tool.id}-output`}
+            {...(step === undefined ? {} : { onShowAll: step.onShowAll })}
+            diff={
+              diff === null ? null : <DiffView view={diff} palette={palette} callId={tool.id} />
+            }
+            {...(tool.denialReply === undefined
+              ? {}
+              : { reply: tool.denialReply, replyTestID: `tool-${tool.id}-reply` })}
+          />
+        }
+      />
+    </StepShell>
+  );
+}
+
+/**
+ * The artifact card, as a minimal BAND row (docs/feat/model-artifacts.md D9,
+ * owner choice A): a 40 pt tile — the image's thumbnail when this phone has its
+ * bytes, else the kind's glyph — the title, the card's type-and-size line, and a
+ * chevron. No rounded inset card, no border: it sits in the transcript like any
+ * other band row.
+ *
+ * Everything shown is `@tentacle/core`'s card (`artifactCard`): the kind narrowed
+ * once, the words the Mac uses too. A `save` card (`other`: a .zip, an extension
+ * this build does not know) shows the Share glyph instead of a chevron, because
+ * tapping it SHARES — it never opens a viewer.
+ */
+function ArtifactCardRow({
+  card,
+  artifactId,
+  palette,
+  thumbnail,
+  onPress,
+}: {
+  readonly card: ArtifactCardView;
+  /** The artifact's id: the e2e flow's own handle (`artifact-card-<artifactId>`). */
+  readonly artifactId: string;
+  readonly palette: Palette;
+  readonly thumbnail: Thumbnail | undefined;
+  readonly onPress?: () => void;
+}): JSX.Element {
+  return (
+    <Pressable
+      testID={`artifact-card-${artifactId}`}
+      accessibilityRole="button"
+      accessibilityLabel={`${card.title}, ${card.line2}`}
+      disabled={onPress === undefined}
+      onPress={onPress}
+      style={[styles.card, { borderColor: palette.sep }]}
+    >
+      <View style={[styles.cardTile, { backgroundColor: palette.code }]}>
+        {thumbnail === undefined ? (
+          <Text style={[typography.subhead, { color: palette.sec }]}>{card.glyph}</Text>
+        ) : (
+          <Image
+            testID="artifact-card-thumbnail"
+            source={{ uri: thumbnail.uri }}
+            style={styles.cardThumb}
+            resizeMode="cover"
+          />
+        )}
+      </View>
+      <View style={styles.cardBody}>
+        <Text
+          numberOfLines={1}
+          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+          style={[typography.subhead, { color: palette.label }]}
+        >
+          {card.title}
+        </Text>
+        <Text
+          numberOfLines={1}
+          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+          style={[typography.footnote, { color: palette.sec }]}
+        >
+          {card.line2}
+        </Text>
+      </View>
+      <Icon
+        name={card.action === "save" ? "square.and.arrow.up" : "chevron.right"}
+        color={palette.sec}
+        size={14}
+        weight="bold"
+      />
+    </Pressable>
   );
 }
 
@@ -225,16 +633,40 @@ function NoticeRowView({ row, palette }: RowProps): JSX.Element {
   );
 }
 
+/**
+ * What a row that threw while drawing reads as (`RowGuard`,
+ * docs/fix/mobile-crash-ibm-chart.md): a quiet notice in the row's place.
+ */
+export function RowFallback({ palette }: { readonly palette: Palette }): JSX.Element {
+  return (
+    <View testID="row-fallback" style={styles.row}>
+      <Text style={[typography.footnote, styles.notice, styles.fallback, { color: palette.sec }]}>
+        {ROW_FALLBACK_TEXT}
+      </Text>
+    </View>
+  );
+}
+
 /** One row, by kind. A missing kind renders nothing (never a crash on new data). */
 export function TranscriptRow(props: RowProps): JSX.Element | null {
   switch (props.row.kind) {
-    case "user":
-      return <UserRowView {...props} />;
+    case "user": {
+      // A fired scheduled wake is a timeline node, not a bubble the person typed
+      // (docs/feat/scheduled-fire-row.md): decided in `firedRowView`, live = reload.
+      const fired = firedRowView(props.row.text, props.row.schedule, Date.now());
+      return fired === null ? (
+        <UserRowView {...props} />
+      ) : (
+        <FiredRowView {...props} fired={fired} />
+      );
+    }
     case "assistant":
       return <AssistantRowView {...props} />;
     case "reasoning":
       return <ReasoningRowView {...props} />;
     case "tool":
+      if (props.row.name === CHART_TOOL) return <ChartRowView {...props} />;
+      if (props.row.name === DIAGRAM_TOOL) return <DiagramRowView {...props} />;
       return <ToolRowView {...props} />;
     case "notice":
       return <NoticeRowView {...props} />;
@@ -245,6 +677,23 @@ export function TranscriptRow(props: RowProps): JSX.Element | null {
 
 const styles = StyleSheet.create({
   row: { paddingHorizontal: space.inset, paddingVertical: space.transcript / 2 },
+  // A fired wake's prompt, opened under its node (scheduled-fire-row).
+  firedBody: { paddingTop: 2, paddingBottom: space.transcript / 2 },
+  // The artifact card (D9): a band row — a 40 pt tile, the title and its type
+  // line, a chevron. No inset card and no border of its own: it sits in the
+  // transcript like any other row, which is the owner's choice A.
+  card: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 8 },
+  cardTile: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.tile,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  cardThumb: { width: "100%", height: "100%" },
+  cardBody: { flex: 1, gap: 2 },
+  speak: { alignSelf: "flex-start", paddingTop: 4, paddingRight: 8 },
   bubble: {
     alignSelf: "flex-end",
     maxWidth: "77%",
@@ -254,7 +703,14 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   images: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
-  image: { borderRadius: 12, overflow: "hidden" },
+  // The attached files' rows (docs/feat/pdf-read.md D5): a glyph and one line
+  // each, `sec`-coloured so they read as facts about the message, not prose.
+  documents: { gap: 2 },
+  document: { flexDirection: "row", alignItems: "center", gap: 6 },
+  // The image fills its own box (whose shape `mediaBox` decided): full bubble
+  // width, rounded to the bubble (item 4).
+  image: { borderRadius: radius.bubble, overflow: "hidden" },
+  imageFill: { width: "100%", height: "100%" },
   imageLabel: {
     width: 96,
     height: 96,
@@ -263,11 +719,15 @@ const styles = StyleSheet.create({
     gap: 4,
     padding: 6,
   },
-  thumb: { width: 96, height: 96 },
-  reasoningHead: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 28 },
-  reasoning: { borderLeftWidth: 2, paddingLeft: 12, marginTop: 4 },
+  // A step's cell (docs/feat/mobile-tool-rows.md): no vertical padding, so the
+  // thread touches its neighbour; 6 pt at each end of a run.
+  step: { paddingHorizontal: space.inset },
+  runStart: { marginTop: 6 },
+  runEnd: { marginBottom: 6 },
+  // The sub-agent progress line and Activity link, under the step's line.
+  below: { gap: 4, paddingBottom: 6 },
   tool: { gap: 8 },
-  output: { borderRadius: radius.tile, padding: 12, gap: 6 },
   notice: { textAlign: "center" },
+  fallback: { fontStyle: "italic" },
   rule: { height: StyleSheet.hairlineWidth, marginVertical: 6 },
 });

@@ -60,8 +60,8 @@ export interface ComposerInput {
    * its uploads complete (D1's last row). It never blocks the button.
    */
   readonly uploading?: boolean;
-  /** How many waiting rows of MINE the queue shows (Send now's other trigger). */
-  readonly ownQueue?: number;
+  /** How many WAITING rows of MINE the queue shows (`queued`, never `sending`). */
+  readonly ownPending?: number;
 }
 
 /** The notice beside a disabled queue: what happens to the chips (D1 row 4). */
@@ -121,18 +121,43 @@ export function returnKeyAction(action: ComposerAction): ComposerAction | null {
 }
 
 /**
- * Whether **Send now** is offered (D1's secondary button): a turn runs on a live
- * link, and there is a row of mine to take or a text to take with it. A message
- * carrying photos never offers it (P4) unless the QUEUE (text only) does.
+ * Whether **Send now** is offered (owner Q2, docs/feat/mobile-queued-compose.md
+ * D3): a turn runs on a live link and a message of MINE is pending. The typed
+ * text no longer offers it — during a turn, typing is a queued message, and the
+ * small ⇥ appears only once one is actually waiting. A `sending` row does not
+ * count either (once tapped the message is in flight, out of the composer), and
+ * photos are irrelevant: the action carries only the pending rows.
  */
 export function sendNowOffered(input: ComposerInput): boolean {
   if (input.ended !== null || input.link !== "up" || input.turn === null) {
     return false;
   }
-  if ((input.ownQueue ?? 0) > 0) {
-    return true;
+  return (input.ownPending ?? 0) > 0;
+}
+
+/** The send slot's face (D4): the four glyphs the one button can draw. */
+export type SendSlot = "up" | "up-dim" | "stop" | "clock";
+
+/**
+ * The send slot's glyph (docs/feat/mobile-queued-compose.md D4): ONE slot at the
+ * field's bottom right, which is ↑ when something would be sent or queued, a
+ * dimmed ↑ when there is nothing to send, ■ while a turn runs on an empty field,
+ * and a clock when the text goes to the outbox. It is a TOTAL map of
+ * `composerAction` — no new branch on state, so the truth table above stays the
+ * single source of what a tap does (Q5: ↑ when text is typed, ■ only when empty).
+ */
+export function sendSlot(action: ComposerAction): SendSlot {
+  switch (action.kind) {
+    case "send":
+    case "queue":
+      return "up";
+    case "send-later":
+      return "clock";
+    case "stop":
+      return "stop";
+    default:
+      return "up-dim";
   }
-  return (input.photos ?? 0) === 0 && input.text.trim() !== "";
 }
 
 /** A send refused before the daemon's ack: said plainly (F13's notice). */
@@ -140,6 +165,14 @@ export const REFUSED_NOTICE = "another device started a turn — your message is
 
 /** A send that failed for another reason (a dropped link): the same restore, other words. */
 export const FAILED_NOTICE = "that message did not go through — it is back in the field";
+
+/**
+ * A pull-to-refresh whose re-attach failed (item 3): the rows on screen are what
+ * it already had, and nothing was re-read. Never silent — a gesture that changed
+ * nothing must say why.
+ */
+export const RESYNC_FAILED_NOTICE =
+  "could not re-read this session — showing what was already loaded";
 
 /**
  * The field's text after a refused send: the person's words go back, unless

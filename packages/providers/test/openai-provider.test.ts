@@ -95,3 +95,66 @@ describe("OpenAIProvider.stream", () => {
     await expect(run()).rejects.toBeInstanceOf(ModelRequestError);
   });
 });
+
+// docs/feat/token-usage-log.md: the server's prompt-cache split is carried, and
+// only when the server reports one — a 0 would claim a full cache miss.
+describe("OpenAIProvider.stream prompt-cache usage", () => {
+  const doneOf = async (usage: unknown): Promise<StreamEvent | undefined> => {
+    const provider = new OpenAIProvider({
+      baseURL,
+      model: "test-model",
+      fetch: (async () =>
+        new Response(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: "ok" } }] })}\n\n` +
+            `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n` +
+            `data: ${JSON.stringify({ choices: [], usage })}\n\ndata: [DONE]\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        )) as unknown as typeof fetch,
+    });
+    let last: StreamEvent | undefined;
+    for await (const e of provider.stream({ messages: [{ role: "user", content: "hi" }] })) {
+      last = e;
+    }
+    return last;
+  };
+
+  test("prompt_tokens_details.cached_tokens is carried as cachedPromptTokens", async () => {
+    // Mutation: drop the `prompt_tokens_details` spread in openai-provider.ts → the field vanishes.
+    expect(
+      await doneOf({
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        prompt_tokens_details: { cached_tokens: 4 },
+      }),
+    ).toEqual({
+      type: "done",
+      usage: { promptTokens: 10, completionTokens: 5, cachedPromptTokens: 4 },
+      stopReason: "stop",
+    });
+  });
+
+  test("a null cached_tokens (LiteLLM-style proxy) ⇒ the field is absent, never null", async () => {
+    // Mutation: back to `!== undefined` at the spread → `cachedPromptTokens: null`,
+    // which `LogUsageEntrySchema` refuses and so poisons the session log (fix round 1).
+    const done = await doneOf({
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      prompt_tokens_details: { cached_tokens: null },
+    });
+    expect(done).toEqual({
+      type: "done",
+      usage: { promptTokens: 10, completionTokens: 5 },
+      stopReason: "stop",
+    });
+    const usage = done?.type === "done" ? done.usage : undefined;
+    expect(usage !== undefined && "cachedPromptTokens" in usage).toBe(false);
+  });
+
+  test("no cache split ⇒ the field is absent, not 0", async () => {
+    // Mutation: `cached_tokens … ?? 0` → `in` becomes true.
+    const done = await doneOf({ prompt_tokens: 10, completion_tokens: 5 });
+    const usage = done?.type === "done" ? done.usage : undefined;
+    expect(usage?.promptTokens).toBe(10);
+    expect(usage !== undefined && "cachedPromptTokens" in usage).toBe(false);
+  });
+});

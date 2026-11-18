@@ -55,6 +55,10 @@ appId: so.tentacle.app
     file: "08-call-id.js"
 - assertVisible:
     id: "tool-${output.callId}-ok"
+# The diff lives in the step's open body (docs/feat/mobile-tool-rows.md, Owner
+# Q7): one line per step, `+n −m` on it, the diff on tap.
+- tapOn:
+    id: "tool-${output.callId}-ok"
 - assertVisible:
     id: "diff-${output.callId}"
 - runFlow:

@@ -12,7 +12,7 @@ import type {
   ModelStopReason,
   ToolCall,
 } from "@tentacle/core";
-import { attachmentLabel } from "@tentacle/core";
+import { COMPACTION_SUMMARY_HEAD, attachmentLabel } from "@tentacle/core";
 
 const COMPACT_SYSTEM =
   "You compress a coding-assistant conversation into a dense briefing for the " +
@@ -180,6 +180,11 @@ export interface CompactResult {
   readonly summary: string;
   readonly before: number;
   readonly after: number;
+  /** Context size in tokens before and after (docs/feat/harness-notices.md S1). */
+  readonly fromTokens?: number;
+  readonly toTokens?: number;
+  /** The after was counted by the provider (else an estimate). */
+  readonly toExact?: boolean;
 }
 
 /**
@@ -221,12 +226,16 @@ const NO_SKILLS: SkillCarryOver = { kept: [], dropped: [] };
 /**
  * Split the active skills (activation order) into kept and dropped: keep the
  * most recent ones while their contents fit in `budget`; the first that does
- * not fit, and every older one, is dropped.
+ * not fit, and every older one, is dropped. A skill in `disabled` (hidden
+ * for this session, docs/feat/session-capabilities.md) is neither kept nor
+ * named as dropped: the rebuilt history must not re-introduce what the user hid.
  */
 export function carryOverSkills(
-  skills: readonly CarriedSkill[],
+  all: readonly CarriedSkill[],
   budget = MAX_KEPT_SKILL_CHARS,
+  disabled: readonly string[] = [],
 ): SkillCarryOver {
+  const skills = disabled.length === 0 ? all : all.filter((s) => !disabled.includes(s.name));
   let used = 0;
   let firstKept = skills.length;
   for (let i = skills.length - 1; i >= 0; i--) {
@@ -330,7 +339,7 @@ export function compactedHistory(
   const note = skillsNote(skills);
   next.push({
     role: "user",
-    content: `Summary of the earlier conversation (compacted to save context):\n\n${summary}${running === "" ? "" : `\n\n${running}`}${note === "" ? "" : `\n\n${note}`}`,
+    content: `${COMPACTION_SUMMARY_HEAD}\n\n${summary}${running === "" ? "" : `\n\n${running}`}${note === "" ? "" : `\n\n${note}`}`,
   });
   for (const skill of skills.kept) {
     next.push({ role: "assistant", content: "", toolCalls: [skill.call] });

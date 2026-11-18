@@ -24,7 +24,14 @@
  */
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import type { AttachmentRef } from "@tentacle/protocol";
-import { type State, type TranscriptInput, type TurnOutcome, apply } from "./transcript.ts";
+import type { QueueTrace } from "./queue-trace.ts";
+import {
+  type LocalPhoto,
+  type State,
+  type TranscriptInput,
+  type TurnOutcome,
+  apply,
+} from "./transcript.ts";
 
 /**
  * A turn end's reason, derived from the client's OWN union rather than by naming
@@ -68,18 +75,67 @@ export interface SessionFeedDeps {
   readonly put: (next: State) => void;
   /** The foreign turn now stoppable (the composer's Stop), or null when none runs. */
   readonly setForeign: (turn: ForeignTurn | null) => void;
+  /**
+   * The history was REPLACED (a `/clear`, a resync, a `history_reset`): what the
+   * fold just dropped took the measured context fill with it, and the figure the
+   * daemon counted at open described that same chat — so it must be asked
+   * again, not left on the header's bar (the TUI's `forgetContextFill` +
+   * `askContext`, `packages/tui/src/useSessionLink.ts:350-353`; Review round 1,
+   * MEDIUM 2). The fold owns the RULE, the caller owns the request.
+   */
+  readonly onHistoryReplaced?: () => void;
+  /**
+   * The turn bracket CLOSED (any outcome). The TUI clears its rows there
+   * (`packages/tui/src/queued.ts` `onTurnEnd`) because it has no daemon list;
+   * this frontend's rows ARE the daemon's full `queued` report, which the turn's
+   * end already re-sends, so nothing is cleared here
+   * (docs/fix/mobile-queued-stuck.md) — only the DIAGNOSTIC reads it: the rows
+   * the composer still shows the moment the turn is over.
+   */
+  readonly onTurnClosed?: () => void;
+  /**
+   * The queue-diagnosis trace (docs/fix/mobile-queued-stuck.md). This module is
+   * the one place a TURN BRACKET opens and closes, so the turn's own lines are
+   * emitted here — a screen-side diff of the folded state would have to guess
+   * the outcome the bracket already decided.
+   */
+  readonly trace?: QueueTrace;
+  /**
+   * The RECEIPT clock of a live row (epoch ms; docs/fix/mobile-open-at-end.md,
+   * slice B). Called when the fold CREATES a row — a prompt, the first delta of
+   * a message, a tool call — and never on an upsert, so a streaming message's
+   * time is when it started arriving. Absent (a unit fold): no live row carries a
+   * time; history rows always take the daemon's.
+   */
+  readonly now?: () => number;
 }
 
 /**
  * This phone's own prompt (owner B4). The client never re-delivers the
  * sender's prompt ("our own prompt is already on screen", `remote-session.ts`),
- * so the feed draws it — at the stream's FIRST event, i.e. once the daemon took
- * it: a refusal before the ack gives the words back to the field and leaves no
- * row. A stream whose first event IS that prompt (a reset replay) is not doubled.
+ * so the feed draws it once the daemon took it: at its ACK (`accepted`), else at
+ * the stream's FIRST event — the ack can come long before the first event (a
+ * model still thinking: docs/fix/mobile-chat-glitches.md, bug 2). A refusal
+ * before the ack gives the words back to the field and leaves no row. A stream
+ * whose first event IS that prompt (a reset replay) is not doubled.
  */
 export interface OwnPrompt {
   readonly text: string;
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * The LOCAL copy of each ref this phone just uploaded (fix/mobile-media-live
+   * item 2): the only pixels that exist for a fresh send — the daemon has no
+   * read-back method (`thumbnails.ts:19-25`). Absent for a text-only prompt, an
+   * outbox retry whose copies are gone, and any ref from another device.
+   */
+  readonly photos?: readonly LocalPhoto[];
+  /**
+   * The attached files' row labels (`[pdf: report.pdf]`), docs/feat/pdf-read.md
+   * D7: the compose half knows their NAMES, and that is all it knows — the page
+   * count is the daemon's fact and never travels back on the turn. A PDF-only
+   * prompt ("" + these) IS a row: the labels alone say what was asked.
+   */
+  readonly documents?: readonly string[];
 }
 
 export interface SessionFeed {
@@ -87,8 +143,24 @@ export interface SessionFeed {
   activity(activity: SessionActivity): void;
   /** Open an OWN bracket, feed `events`, and close the bracket with its outcome.
    * Rejects with the stream's error once its LOST outcome is folded: a caller
-   * that owns the turn must see a refusal (12c F13 / 13d F7). */
-  ownTurn(turnId: string, events: AsyncIterable<SessionEvent>, prompt?: OwnPrompt): Promise<void>;
+   * that owns the turn must see a refusal (12c F13 / 13d F7). `accepted`
+   * resolves at the daemon's ack: the prompt is drawn then (once). */
+  ownTurn(
+    turnId: string,
+    events: AsyncIterable<SessionEvent>,
+    prompt?: OwnPrompt,
+    accepted?: Promise<void>,
+  ): Promise<void>;
+  /**
+   * A send-now's SUCCESSOR turn (own; its prompt is the daemon's `user_message`,
+   * never drawn here). Its bracket opens only once every stream this feed is
+   * folding has closed: the request is acked while the cancelled turn still
+   * streams its end, and one transcript holds ONE turn bracket at a time — the
+   * old turn's `turn_ended` must never close the new one
+   * (docs/fix/mobile-queued-stuck.md (b)). The events wait, buffered, in the
+   * client meanwhile.
+   */
+  successorTurn(turnId: string, events: AsyncIterable<SessionEvent>): Promise<void>;
   /** A stream this feed already folded ended (`link` drops flush nothing: events are immediate). */
   link(up: boolean): void;
 }
@@ -107,11 +179,22 @@ function foldStream(
   own: boolean,
   stream: AsyncIterable<SessionEvent>,
   prompt?: OwnPrompt,
+  accepted?: Promise<void>,
 ): Promise<void> {
   deps.put(apply(deps.state(), { type: "turn_started", turnId, own }));
-  /** The own prompt, drawn once at the first event (null once drawn or skipped). */
+  deps.trace?.({ kind: "turn-start", turnId, own });
+  /**
+   * The receipt time of a row this fold CREATES (slice B). `apply` only stamps a
+   * row it creates, so an upsert (a later delta of the same message) keeps the
+   * time it first had — the whole point of passing it per input.
+   */
+  const now = (): number | undefined =>
+    deps.now?.(); /** The own prompt, drawn once at the ack or the first event (null once drawn or skipped). */
   let pending: OwnPrompt | null =
-    prompt !== undefined && (prompt.text !== "" || (prompt.attachments?.length ?? 0) > 0)
+    prompt !== undefined &&
+    (prompt.text !== "" ||
+      (prompt.attachments?.length ?? 0) > 0 ||
+      (prompt.documents?.length ?? 0) > 0)
       ? prompt
       : null;
   const drawPrompt = (first: SessionEvent | null): void => {
@@ -124,17 +207,38 @@ function foldStream(
       return;
     }
     deps.put(
-      apply(deps.state(), {
-        type: "user_message",
-        text: own.text,
-        ...(own.attachments !== undefined && own.attachments.length > 0
-          ? { attachments: own.attachments }
-          : {}),
-      } as TranscriptInput),
+      apply(
+        deps.state(),
+        {
+          // `own_prompt`, not `user_message`: this one carries the phone's LOCAL
+          // files too, so the bubble draws the photo it just sent (item 2).
+          type: "own_prompt",
+          text: own.text,
+          ...(own.attachments !== undefined && own.attachments.length > 0
+            ? { attachments: own.attachments }
+            : {}),
+          ...(own.photos !== undefined && own.photos.length > 0 ? { photos: own.photos } : {}),
+          ...(own.documents !== undefined && own.documents.length > 0
+            ? { documents: own.documents }
+            : {}),
+        } as TranscriptInput,
+        now(),
+      ),
     );
   };
+  /** The bracket closed: a late ack draws nothing after the turn's end. */
+  let closed = false;
+  void accepted?.then(() => {
+    if (!closed) {
+      drawPrompt(null);
+    }
+  });
   const finish = (facts: TurnEndFacts): void => {
-    deps.put(apply(deps.state(), { type: "turn_ended", outcome: turnOutcome(facts) }));
+    closed = true;
+    const outcome = turnOutcome(facts);
+    deps.put(apply(deps.state(), { type: "turn_ended", outcome }));
+    deps.trace?.({ kind: "turn-end", turnId, outcome });
+    deps.onTurnClosed?.();
     if (!own) {
       deps.setForeign(null);
     }
@@ -149,7 +253,14 @@ function foldStream(
           ended = true;
           reason = event.reason;
         }
-        deps.put(apply(deps.state(), event as TranscriptInput));
+        // The receipt clock: a row this event CREATES takes it (a delta that only
+        // extends an existing row keeps that row's own time). A `history_reset`
+        // ignores it — its rows take the daemon's `times`.
+        deps.put(apply(deps.state(), event as TranscriptInput, now()));
+        if (event.type === "history_reset") {
+          // The reset REPLACED the history mid-turn: its fill is gone with it.
+          deps.onHistoryReplaced?.();
+        }
       }
     } catch (error) {
       // The stream threw: its outcome can never arrive (`remote-session.ts`
@@ -164,17 +275,41 @@ function foldStream(
 }
 
 export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
+  /** Every stream being folded now, settled either way (`successorTurn` waits on them). */
+  const folding = new Set<Promise<void>>();
+  const track = (fold: Promise<void>): Promise<void> => {
+    const settled = fold.then(
+      () => {},
+      () => {},
+    );
+    folding.add(settled);
+    void settled.then(() => folding.delete(settled));
+    return fold;
+  };
   return {
     activity(activity) {
       switch (activity.kind) {
         case "history":
+          deps.trace?.({
+            kind: "history",
+            reason: activity.reason,
+            messages: activity.messages.length,
+          });
           deps.put(
             apply(deps.state(), {
               type: "history",
               messages: activity.messages,
+              ...(activity.times ? { times: activity.times } : {}),
               reason: activity.reason,
             }),
           );
+          // `context_reset` APPENDS (the chat those figures described is still
+          // on screen) and `compact` keeps it, saying so once. Anything else
+          // (null, `clear`) REPLACED what was shown, so the context figure is
+          // about a conversation that no longer exists.
+          if (activity.reason === null || activity.reason === "clear") {
+            deps.onHistoryReplaced?.();
+          }
           return;
         case "closed":
           deps.put(apply(deps.state(), { type: "closed", reason: activity.reason }));
@@ -186,13 +321,17 @@ export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
           deps.setForeign(turn);
           // Its failure is folded as LOST inside `foldStream`; nothing of OURS
           // comes back to the field, so the rejection is not for a caller here.
-          void foldStream(deps, activity.turnId, false, activity.events).catch(() => {});
+          void track(foldStream(deps, activity.turnId, false, activity.events)).catch(() => {});
           return;
         }
       }
     },
-    ownTurn: (turnId, events, prompt) => foldStream(deps, turnId, true, events, prompt),
+    ownTurn: (turnId, events, prompt, accepted) =>
+      track(foldStream(deps, turnId, true, events, prompt, accepted)),
+    successorTurn: (turnId, events) =>
+      track(Promise.all([...folding]).then(() => foldStream(deps, turnId, true, events))),
     link(up) {
+      deps.trace?.({ kind: "link", state: up ? "up" : "down" });
       deps.put(apply(deps.state(), { type: "link", status: up ? "up" : "down" }));
     },
   };

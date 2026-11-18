@@ -303,9 +303,13 @@ describe("sshDialer: process-group kill on close", () => {
 setInterval(() => {}, 1000);`,
     );
     const duplex = await dial();
-    // Wait for the grandchild to record its pid and be running.
+    // Wait for the grandchild to record its pid and be running. The bound is a
+    // generous dead-man switch, not the assertion: under a loaded gate bun's own
+    // boot (the ssh child, then the grandchild) is what takes the time, so
+    // waiting on a fixed short duration made this test fail by scheduling luck.
+    const pidDeadline = Date.now() + 8_000;
     let childPid = 0;
-    for (let i = 0; i < 50 && childPid === 0; i++) {
+    while (childPid === 0 && Date.now() < pidDeadline) {
       await Bun.sleep(20);
       try {
         childPid = Number(await Bun.file(pidFile).text());
@@ -334,7 +338,7 @@ setInterval(() => {}, 1000);`,
       if (Date.now() > deadline) break;
     }
     expect(stillAlive).toBe(false); // the group kill reached the grandchild
-  }, 10_000);
+  }, 30_000);
 });
 
 describe("sshDialer: early-exit classification", () => {
@@ -484,9 +488,15 @@ describe("sshDialer: a broken pipe", () => {
       for (let i = 0; i < 16; i++) {
         duplex.write(mib);
       }
-      await Bun.sleep(1000);
+      // Wait on the EVENT (the child died and every pending write failed), never on
+      // a duration: 16 MiB of writes to a dead child take however long the machine
+      // takes, so a fixed 1 s fence failed by scheduling luck under a loaded gate.
+      const deadline = Date.now() + 8_000;
+      while ((ends === 0 || duplex.buffered !== 0) && Date.now() < deadline) {
+        await Bun.sleep(20);
+      }
       expect(unhandled).toEqual([]);
-      expect(ends).toBe(1);
+      expect(ends).toBe(1); // exactly once, not "at least once"
       expect(duplex.buffered).toBe(0);
     } finally {
       process.off("unhandledRejection", onUnhandled);

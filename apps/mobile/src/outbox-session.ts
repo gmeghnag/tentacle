@@ -44,6 +44,66 @@ export class SessionNotOpenError extends Error {
 }
 
 /**
+ * An own prompt whose CALLER is done at the daemon's ack, while its turn keeps
+ * streaming into `consume` (docs/fix/mobile-chat-glitches.md, bug 2). The
+ * outbox item must leave at the ack — the daemon then holds its key, so F3
+ * holds — not at the turn's end, which a model thinking for minutes (or a turn
+ * waiting on an ask) puts arbitrarily far away.
+ *
+ * `start(onAccepted)` opens the stream; the client calls `onAccepted` at the
+ * ack. The stream's first event counts too (the old proxy, kept as a fallback:
+ * an event of our own turn means the daemon took it). `accepted`:
+ * - resolves at the first of those two;
+ * - rejects with the stream's error if it failed before either (a refusal: the
+ *   words go back, F7);
+ * - rejects `SessionNotOpenError("link")` if the stream ENDED before either —
+ *   no answer is not a send: the item stays `waiting` with its key, and the
+ *   reconnect asks the daemon (`decide`).
+ * An error after acceptance is the turn's (the transcript folds it as LOST).
+ * `done` settles once `consume` finished (never rejects).
+ */
+export function untilAccepted<T>(
+  start: (onAccepted: () => void) => AsyncIterable<T>,
+  consume: (events: AsyncIterable<T>, accepted: Promise<void>) => Promise<void>,
+): { readonly accepted: Promise<void>; readonly done: Promise<void> } {
+  let took = false;
+  let failure: unknown;
+  let markTook: () => void = () => {};
+  const tookSignal = new Promise<void>((resolve) => {
+    markTook = resolve;
+  });
+  const onAccepted = (): void => {
+    if (!took) {
+      took = true;
+      markTook();
+    }
+  };
+  const events = (async function* guarded(): AsyncIterable<T> {
+    try {
+      for await (const event of start(onAccepted)) {
+        onAccepted();
+        yield event;
+      }
+    } catch (error) {
+      failure = error;
+      throw error;
+    }
+  })();
+  const done = consume(events, tookSignal).catch(() => {
+    // The stream's error: `failure` carries it to `accepted` below.
+  });
+  const accepted = new Promise<void>((resolve, reject) => {
+    void tookSignal.then(resolve);
+    void done.then(() => {
+      if (!took) {
+        reject(failure ?? new SessionNotOpenError("link"));
+      }
+    });
+  });
+  return { accepted, done };
+}
+
+/**
  * The port for an OPENED session.
  *
  * `runningTurn` is the turn the app is watching (`SessionActivity{kind:"turn"}`,
@@ -59,11 +119,25 @@ export function outboxSessionOf(
 ): OutboxSession {
   return {
     upload: (bytes, meta) => session.attachImage(bytes, meta),
-    prompt: async (text, turnId, attachments) => {
-      for await (const _event of session.send(text, undefined, { turnId, attachments })) {
-        // drain: the daemon's ack is all the driver needs
-      }
-    },
+    // Done at the daemon's ack; the turn keeps draining detached (no screen folds it).
+    prompt: (text, turnId, attachments, _photos, documents) =>
+      untilAccepted(
+        (onAccepted) =>
+          session.send(text, undefined, {
+            turnId,
+            attachments,
+            ...(documents === undefined || documents.length === 0 ? {} : { documents }),
+            onAccepted,
+          }),
+        async (events) => {
+          for await (const _event of events) {
+            // drain: the daemon's ack is all the driver needs
+          }
+        },
+      ).accepted,
+    // ONE session path (AGENTS §7): the client's own method decides upload vs
+    // laptop-extract from the daemon's capability — nothing is built here.
+    attachDocument: (bytes, meta) => session.attachDocument(bytes, meta),
     steer: (text, id, turnId) => {
       const sessionId = session.sessionId;
       if (sessionId === null) {
@@ -83,34 +157,6 @@ export function outboxSessionOf(
 }
 
 /**
- * The driver's `getSession`, over the SCREEN's own handle — never a second
- * `newSession` of the same id.
- *
- * A second handle of one id replaces the client's stream listener
- * (`remote-client.ts`'s `register`: `if (listener) existing.listener = listener`),
- * so the screen stops receiving that session's updates: the photo's own turn,
- * and every later one, streams to the outbox's handle instead and the transcript
- * freezes on stale rows. That is owner B9: the photo row then lands out of order
- * (or never), while the daemon's history is correct. `compose-handle.ts` states
- * the same rule for its own port.
- *
- * `own` is the screen's live port (`ComposeHandle.port`), null until it has
- * attached — an item then stays `waiting` (13b's `decide`), exactly as for a
- * link that is down. `prompt` is the screen's FOLDING one: the turn it starts
- * must stream into the screen's transcript, not a drained stream (13d's flow
- * 07/18).
- */
-export function screenSessionPortOf(
-  own: () => OutboxSession | null,
-  prompt: OutboxSession["prompt"],
-): (sessionId: string) => Promise<OutboxSession | null> {
-  return async () => {
-    const port = own();
-    return port === null ? null : { ...port, prompt };
-  };
-}
-
-/**
  * The port for a session that could not be opened (archived, deleted, gone, or
  * no answer): its acts cannot run, but its FACTS carry the reason, so `decide`
  * puts the item back in the field (F20 — and never reopens it).
@@ -124,6 +170,7 @@ export function unavailableSessionPort(
   return {
     upload: refuse,
     prompt: refuse,
+    attachDocument: refuse,
     steer: refuse,
     facts: () => Promise.resolve({ availability, historyLength: 0, runningTurnId: null }),
   };

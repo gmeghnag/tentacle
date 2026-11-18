@@ -5,6 +5,9 @@
  * picks a palette by `useColorScheme`; every primitive takes it as a prop.
  * (The pre-restyle alias names — `groupedBackground`, `secondaryLabel`, … — were
  * removed in Slice 6: every screen now reads the tokens.)
+ *
+ * The dark ramp, `drawer`, the E2 `band`/`bandOnSheet` surfaces and the radii are
+ * docs/feat/mobile-chrome.md (S1, Owner Q-B/E2).
  */
 
 export interface Palette {
@@ -14,6 +17,18 @@ export interface Palette {
   readonly page: string;
   readonly card: string;
   readonly sheet: string;
+  /**
+   * The sessions drawer's panel, one step BELOW `page` so the drawer reads as a
+   * layer with no shadow (docs/feat/mobile-chrome.md Design 3).
+   */
+  readonly drawer: string;
+  /**
+   * The E2 section band: ONE full-width surface per section, always one step
+   * above the ground it sits on (docs/feat/mobile-chrome.md Design 4).
+   */
+  readonly band: string;
+  /** The band inside a sheet, whose own ground becomes `page` (Design 4). */
+  readonly bandOnSheet: string;
   /** Secondary fill: user bubble, neutral button, text field. */
   readonly fill: string;
   /** Code block / inline code background (on a page or card). */
@@ -70,6 +85,9 @@ const light: Palette = {
   page: "#FFFFFF",
   card: "#FFFFFF",
   sheet: "#FFFFFF",
+  drawer: "#F7F7F8",
+  band: "#FFFFFF",
+  bandOnSheet: "#FFFFFF",
   fill: "#EFEFF4",
   code: "#F2F2F7",
   codeOnSheet: "#F2F2F7",
@@ -106,31 +124,37 @@ const light: Palette = {
 };
 
 const dark: Palette = {
-  bg: "#000000",
-  page: "#000000",
-  card: "#1C1C1E",
-  sheet: "#1C1C1E",
-  fill: "#2C2C2E",
-  code: "#1C1C1E",
-  codeOnSheet: "#2C2C2E",
-  label: "#FFFFFF",
-  sec: "#AEAEB2",
-  sep: "#38383A",
-  sepChat: "#38383A",
-  sepSheet: "#48484A",
+  bg: "#1E1F21",
+  page: "#1E1F21",
+  card: "#28292C",
+  sheet: "#28292C",
+  drawer: "#19191B",
+  band: "#242528",
+  bandOnSheet: "#28292C",
+  fill: "#313236",
+  code: "#28292C",
+  codeOnSheet: "#313236",
+  label: "#EDEEF0",
+  sec: "#A0A3A8",
+  sep: "#37383C",
+  sepChat: "#313236",
+  sepSheet: "#3D3E42",
   accent: "#22D3EE",
   accentFill: "#06B6D4",
   onAccent: "#00191F",
   tint: "#0B2E36",
   green: "#30D158",
   orange: "#FF9F0A",
-  red: "#FF6961",
+  // `#FF6961` measures 4.4977:1 on B1's `fill` (#33332F) — under the 4.5 floor
+  // F9 pins — so the red is lifted to #FF6D65 (4.61:1 on `fill`, 5.23 on `card`).
+  // B3's lighter `fill` (#313236) keeps it above the floor.
+  red: "#FF6D65",
   warnBg: "#3A2A0C",
   warnText: "#FFD08A",
-  glass: "rgba(44,44,46,0.82)",
-  glassBorder: "rgba(255,255,255,0.12)",
-  shadowOpacity: 0.5,
-  scrim: "rgba(0,0,0,0.6)",
+  glass: "rgba(40,41,44,0.86)",
+  glassBorder: "rgba(255,255,255,0.07)",
+  shadowOpacity: 0.35,
+  scrim: "rgba(0,0,0,0.45)",
   camera: "#000000",
   cameraAccent: "#22D3EE",
   kw: "#FF7AB2",
@@ -142,7 +166,7 @@ const dark: Palette = {
   delStrong: "#64222B",
   delText: "#FFA3A8",
   dash: "#636366",
-  switchOff: "#39393D",
+  switchOff: "#434448",
 };
 
 /** The palette for a scheme; an unknown/null scheme is the light one. */
@@ -152,6 +176,59 @@ export function paletteFor(scheme: "light" | "dark" | null | undefined): Palette
 
 export const lightPalette: Palette = light;
 export const darkPalette: Palette = dark;
+
+/**
+ * The chart's own tokens (docs/feat/model-charts.md, *iPhone visual language
+ * (rev 2)*): the picked mockup's chrome values per mode (`modern-manifest.json`),
+ * plus the app's own text colours and the page the chart sits on (no card: the
+ * dot rings cut out of `page`). Series colours are core's `CHART_PALETTE`.
+ */
+export interface ChartTokens {
+  readonly guide: string;
+  readonly guideStrong: string;
+  readonly track: string;
+  readonly mutedBar: string;
+  readonly mutedLine: string;
+  /** Slot 1 at 12 % (light) / 20 % (dark). */
+  readonly seriesSoft: string;
+  readonly label: string;
+  readonly secondary: string;
+  readonly surface: string;
+  /** The hero pill's rise / fall. */
+  readonly up: string;
+  readonly down: string;
+}
+
+const chartLight = {
+  guide: "rgba(60,60,67,0.22)",
+  guideStrong: "rgba(60,60,67,0.35)",
+  track: "#F0F0F3",
+  mutedBar: "#D5D5DA",
+  mutedLine: "#AEAEB2",
+  seriesSoft: "rgba(7,134,166,0.12)",
+} as const;
+
+const chartDark = {
+  guide: "rgba(242,241,236,0.16)",
+  guideStrong: "rgba(242,241,236,0.28)",
+  track: "#2B2B29",
+  mutedBar: "#4A4945",
+  mutedLine: "#77756F",
+  seriesSoft: "rgba(15,160,189,0.2)",
+} as const;
+
+/** The chart tokens for the palette's mode. */
+export function chartTokensFor(palette: Palette): ChartTokens {
+  const chrome = palette === dark ? chartDark : chartLight;
+  return {
+    ...chrome,
+    label: palette.label,
+    secondary: palette.sec,
+    surface: palette.page,
+    up: palette.green,
+    down: palette.red,
+  };
+}
 
 /** One iOS text style: size / line height / weight (+ tracking). */
 export interface TextStyleToken {
@@ -188,6 +265,9 @@ export const typography = {
   monoCode: { fontSize: 12.5, lineHeight: 19, fontFamily: MONO },
   monoDiff: { fontSize: 12, lineHeight: 21, fontFamily: MONO },
   monoInline: { fontSize: 14, lineHeight: 20, fontFamily: MONO },
+  /** A step's name and its one mono line (docs/feat/mobile-tool-rows.md, mockup C). */
+  step: { fontSize: 14, lineHeight: 20, fontWeight: "500" },
+  stepMono: { fontSize: 12.5, lineHeight: 18, fontFamily: MONO },
   sas: { fontSize: 40, lineHeight: 48, fontWeight: "600", letterSpacing: 6, fontFamily: MONO },
 } as const satisfies Record<string, TextStyleToken>;
 
@@ -195,12 +275,27 @@ export const typography = {
 export const DENSE_FONT_SCALE = 1.4;
 
 export const radius = {
-  card: 26,
-  sheet: 38,
+  /** E2: bands are square (docs/feat/mobile-chrome.md Design 1 keeps the token). */
+  card: 0,
+  /**
+   * The centred alert-style dialog (`RenameSheet`), NOT a band: it floats over a
+   * scrim at maxWidth 340, so squaring it was an accident of sharing `radius.card`
+   * with the bands. Kept at its pre-restyle 26 pt (review round 1).
+   */
+  dialog: 26,
+  /** A sheet's top corners: 38 → 14 (Design 1; the mockups' `14px 14px 0 0`). */
+  sheet: 14,
   bubble: 20,
   tile: 14,
   banner: 18,
   queue: 20,
+  /**
+   * The composer's ONE field (docs/feat/mobile-queued-compose.md D4, Q3): a 22 pt
+   * rect holding the input and the 36 pt row under it. Its own token because the
+   * field is not a bubble, a card or a sheet, and `size.composer / 2` (24) drew
+   * the old glass capsule.
+   */
+  composer: 22,
   iconTile: 8,
   iconTileLarge: 12,
   pill: 11,
@@ -211,8 +306,9 @@ export const size = {
   touch: 44,
   composer: 48,
   fab: 56,
-  rowProject: 60,
   rowSession: 64,
+  /** An E2 row in a band (Settings, Session info, Computers). */
+  rowList: 50,
   rowAction: 52,
   rowSetting: 44,
   bigButton: 50,
@@ -220,7 +316,8 @@ export const size = {
   iconTile: 32,
   iconTileLarge: 44,
   headerList: 52,
-  headerChat: 56,
+  /** The chat header: 56 → 50 (A1's thin row). `headerList` is untouched. */
+  headerChat: 50,
   grabberWidth: 36,
   grabberHeight: 5,
   viewfinder: 240,
@@ -236,11 +333,9 @@ export const shadow = {
 
 export const space = {
   inset: 16,
-  cardInner: 16,
-  sectionComputers: 28,
-  sectionSessions: 22,
+  /** The E2 band's horizontal inset: label and row content align on it. */
+  rowX: 20,
+  /** Above a section's small uppercase label (Design 4: 22 pt). */
+  sectionTop: 22,
   transcript: 14,
-  /** Separator inset after a 32 pt icon tile (16 + 32 + 12). */
-  separatorAfterTile: 60,
-  separatorPlain: 16,
 } as const;

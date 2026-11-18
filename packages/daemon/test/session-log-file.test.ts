@@ -88,6 +88,32 @@ describe("parseLogFile", () => {
     );
   });
 
+  test("docs/feat/token-usage-log.md: a `usage` entry is KNOWN, non-critical, and folds to NOTHING", () => {
+    // The property the whole feature rides on: recording a round must not
+    // touch the projection, and must not be treated as an unknown line (which
+    // a later replace would set aside instead of carrying over).
+    // Mutation: `...critical()` in LogUsageEntrySchema → the entry is refused as
+    // a critical one and the whole log stops loading → red.
+    const log = new FakeLog("D1");
+    const entries = log.base([user("a")]);
+    const usage = log.usage({
+      round: 0,
+      model: "m1",
+      promptTokens: 100,
+      completionTokens: 7,
+      messages: 1,
+    });
+    const text = `${header}${entryLines([...entries, usage])}`;
+    const ok = parsed(text);
+    expect(ok.skipped).toBe(0);
+    expect(currentSegment(ok).unknown).toBe(0);
+    expect(currentSegment(ok).messages).toEqual([user("a")]);
+    expect(ok.lastId).toBe(usage.id);
+    expect(currentSegment(ok).entries.at(-1)?.type).toBe("usage");
+    // The folded messages are what a reload would resume with: unchanged.
+    expect(foldThrough(ok, { seq: usage.seq, id: usage.id })).toEqual([user("a")]);
+  });
+
   test("a note this build cannot read does not refuse the file: the message loads without it (M3)", () => {
     // RED on round 1's build: `message` is CRITICAL, so the unreadable note made
     // the entry malformed and the WHOLE log unloadable (review M3).

@@ -1,0 +1,137 @@
+appId: so.tentacle.app
+---
+# 27 (docs/feat/mobile-chrome.md slice S9): the Activity actions. The mock
+# model's `AGENTS27` launches two BACKGROUND children (`long child`, 60 slow
+# steps; `short child`, 3 steps, it ends on its own); `SHELLJOB27` starts a
+# background `sleep 30` (an ask tool: approved here).
+#
+# Driven: the pill → the sheet → the long child's detail; its steps advance; a
+# message to it is marked "read"; Stop → confirm → the detail flips to its
+# Finished half; the short child sits under Finished; the shell job's output
+# opens, Stop → confirm → "killed"; the pill is gone at zero.
+#
+# Assertions are by testID (rows by their description: `sa-N` numbering is the
+# daemon's), and the flow ENDS on daemon truth (`27-activity.js`): the message
+# reached the CHILD's model, and the short child's report reached the parent.
+#
+# Not driven here (stated, not hidden): the short child's report CONTENT on the
+# phone. The report is a background note the reducer does not draw live (only
+# a hook's `context_note` is shown), so it reaches the phone with the next
+# history read (an attach): the row says "report pending" until then
+# (S8 drift 4). The Finished memory is per screen, so a re-open cannot show it
+# either; `subagent-detail.test.ts` pins the report half.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${ACTIVITY_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "AGENTS27"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+# F13: the pill shows while a child runs.
+- extendedWaitUntil:
+    visible:
+      id: "session-activity"
+    timeout: 30000
+- tapOn:
+    id: "session-activity"
+- assertVisible:
+    id: "activity-subagents"
+- tapOn:
+    text: "long child"
+- assertVisible:
+    id: "activity-detail-sa-.*"
+- assertVisible:
+    id: "activity-steps"
+# Its steps advance (one per 2 s round).
+- extendedWaitUntil:
+    visible:
+      text: ".*step-4.*"
+    timeout: 30000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "27-activity-detail"
+# Message: the field is the child's; "read" once its `userRead` reaches it.
+- tapOn:
+    id: "activity-message-input"
+- inputText: "salta i test"
+- tapOn:
+    id: "activity-message-send"
+- extendedWaitUntil:
+    visible:
+      id: "activity-mark-sent-.*"
+      text: "read"
+    timeout: 20000
+# Stop: one confirm (F17), then the detail flips to its Finished half (F14).
+- tapOn:
+    id: "activity-stop"
+- tapOn:
+    text: "Stop agent"
+- extendedWaitUntil:
+    visible:
+      id: "activity-report"
+    timeout: 20000
+- tapOn:
+    id: "activity-detail-back"
+# The short child ended on its own: under Finished (its report pending, above).
+- extendedWaitUntil:
+    visible:
+      id: "activity-finished"
+    timeout: 30000
+- assertVisible:
+    text: "short child"
+- tapOn:
+    id: "activity-scrim"
+# A background shell job: approve the ask, then its output and Stop (F19).
+- tapOn:
+    id: "composer-input"
+- inputText: "SHELLJOB27"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "session-activity"
+    timeout: 20000
+- tapOn:
+    id: "session-activity"
+- assertVisible:
+    id: "activity-jobs"
+- tapOn:
+    text: "sleep 30"
+- assertVisible:
+    id: "activity-job-bg-.*"
+- assertVisible:
+    id: "activity-job-output"
+- tapOn:
+    id: "activity-job-stop"
+- tapOn:
+    text: "Stop job"
+- extendedWaitUntil:
+    visible:
+      id: "activity-job-ended"
+    timeout: 20000
+- tapOn:
+    id: "activity-detail-back"
+- tapOn:
+    id: "activity-scrim"
+# Nothing runs and no report is unread: the pill is gone.
+- extendedWaitUntil:
+    notVisible:
+      id: "session-activity"
+    timeout: 20000
+- runScript: 27-activity.js

@@ -135,6 +135,34 @@ function scriptBody(file: string): string {
   return readFileSync(join(FLOWS_DIR, file), "utf8");
 }
 
+describe("flow 33 asserts the hub state it actually sets up (mobile-hub-tap review round 1)", () => {
+  const body = readFileSync(join(FLOWS_DIR, "33-hub.yaml"), "utf8");
+  const flow = readFlow("33-hub");
+
+  test("tapping Activity asserts the inline notice, never a sheet it cannot open", () => {
+    // By this point the `HOLD hub` turn has been STOPPED and nothing else runs
+    // (no sub-agent, job, schedule or finished report in this flow): Activity is
+    // dimmed, so a commit is `resolveCommit`'s no-op, not the sheet. Asserting
+    // the sheet were VISIBLE here would fail on device — the round-1 finding.
+    expect(flow.some((a) => a.id === "hub-notice" && a.kind === "assertVisible")).toBe(true);
+    expect(flow.some((a) => a.id === "activity-sheet" && a.kind === "assertVisible")).toBe(false);
+  });
+
+  test("the tap really reached the fan's Activity item first", () => {
+    // The notice can only come from committing it: a flow that never taps the
+    // item proves nothing about the dimmed commit.
+    expect(body).toContain('id: "hub-item-activity"');
+    expect(body.indexOf('id: "hub-item-activity"')).toBeLessThan(body.indexOf('id: "hub-notice"'));
+  });
+
+  test("no comment still claims a tap opens Activity", () => {
+    // The header said "a tap is still Activity", which this task makes false.
+    expect(body).not.toContain("tap is still Activity");
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    expect(runner).not.toContain("tap = Activity");
+  });
+});
+
 describe("flow 05: the daemon-down recovery is actually asserted", () => {
   const flow = readFlow("05-daemon-down");
   const afterRestart = flow.filter((a) => a.afterScript === "05-start-serve.js");
@@ -237,7 +265,7 @@ describe("13d's compose flows (docs/feat/mobile-compose.md)", () => {
     const inside = (id: string): boolean =>
       id.startsWith("composer-") ||
       id.startsWith("chip-") ||
-      id.startsWith("queued-row-") ||
+      id.startsWith("pending-") ||
       id.startsWith("returned-") ||
       id.startsWith("take-") ||
       id.startsWith("outbox-") ||
@@ -255,9 +283,30 @@ describe("13d's compose flows (docs/feat/mobile-compose.md)", () => {
     // tap must not queue twice). The first run asserted `composer-filled` here and
     // failed — correctly, because queueing empties the field. Mutation: flip this
     // assertion back → red.
+    //
+    // docs/feat/mobile-queued-compose.md D4 moved the row out of the card above the
+    // field and into the transcript as a pending bubble: `composer-queue` is now
+    // another device's RETURNED rows only, so a queued steer waits for
+    // `pending-bubbles` — the footer, and the bubble inside it.
     const ids = readFlow("12-steer").map((a) => `${a.kind}:${a.id}`);
-    expect(ids).toContain("assertVisible:composer-queue");
+    expect(ids).toContain("assertVisible:pending-bubbles");
+    expect(ids).toContain("assertVisible:pending-.*-mine");
     expect(ids).toContain("assertNotVisible:composer-filled");
+    // The bubble carries the daemon's key, so no flow may pin a literal id.
+    expect(ids).not.toContain("assertVisible:composer-queue");
+  });
+
+  test("the pending bubble's ids are the ones the renderer sets (D1)", () => {
+    // A rename on one side only would be a flow that silently never matches.
+    const src = readFileSync(
+      join(import.meta.dir, "..", "src", "screens", "compose", "PendingBubble.tsx"),
+      "utf8",
+    );
+    expect(src).toContain('`pending-${bubble.id}-${bubble.mine ? "mine" : "other"}`');
+    expect(src).toContain('testID="pending-bubbles"');
+    for (const action of ["edit", "send-now", "cancel"]) {
+      expect(src).toContain("`pending-${bubble.id}-${action}`");
+    }
   });
 
   test("each uses its OWN session, created for it just before it runs", () => {
@@ -426,5 +475,194 @@ describe("R6's relay-only flow (docs/feat/mobile-relay.md)", () => {
     // The design of `relayOnly` is the ABSENCE of the harness's own address: a
     // future edit that always injects one again would quietly un-prove the flow.
     expect(pairing).toContain("relayOnly === true ? {} : { extraAddresses: [deps.address] }");
+  });
+});
+
+describe("P10's push flow (docs/feat/mobile-push.md)", () => {
+  // The flow's WHOLE value is that what it places is the daemon's own sealed
+  // envelope, and that it says out loud what a simulator cannot prove. A flow
+  // that hand-wrote a payload, or that claimed to have exercised APNs, would be
+  // worse than none: it would read as coverage of Apple's path.
+  const PUSH_FLOW = "push-placeholder";
+  const body = readFileSync(join(FLOWS_DIR, `${PUSH_FLOW}.yaml`), "utf8");
+
+  test("it is run, and every file it names exists", () => {
+    expect(FLOWS).toContain(PUSH_FLOW);
+    for (const file of scripts(PUSH_FLOW)) {
+      expect(() => scriptBody(file)).not.toThrow();
+    }
+  });
+
+  test("its payload comes from the daemon, never from the flow", () => {
+    // The one hook that does the work, and the assertion that it produced a
+    // sealed envelope: `push-place` is the harness's register + push + place.
+    expect(scripts(PUSH_FLOW)).toContain("push-place.js");
+    const place = scriptBody("push-place.js");
+    expect(place).toContain("${MAESTRO_HOOKS}/push-place");
+    // A hand-written payload would need `aps` in the flow's own files: assert the
+    // alert text NEVER appears in a script (it may appear in the yaml as the
+    // banner's text to tap, which is the OS's own drawing).
+    for (const file of scripts(PUSH_FLOW)) {
+      expect(scriptBody(file)).not.toContain("mutable-content");
+      expect(scriptBody(file)).not.toMatch(/aps\s*:/);
+    }
+  });
+
+  test("it ends on DAEMON truth: the envelope's key id, enc and padding bucket", () => {
+    const files = scripts(PUSH_FLOW);
+    expect(files[files.length - 1]).toBe("push-assert.js");
+    const last = scriptBody("push-assert.js");
+    expect(last).toContain("http.get");
+    expect(last).toMatch(/throw new Error/);
+    // The three properties: a 12-char key id, a 43-char enc, and ONE OF THE THREE
+    // padded ciphertext lengths (Design 2's metadata claim). Asserting the numbers
+    // rather than `c.length > 0` is the difference between a real check and a
+    // vacuous one.
+    expect(last).toContain("!== 12");
+    expect(last).toContain("!== 43");
+    expect(last).toContain("704");
+    expect(last).toContain("2752");
+  });
+
+  test("the harness pushes through the REAL chain, on a local fake APNs", () => {
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    // A local h2c APNs (never Apple), the relay pointed at it with the `origins`
+    // override, and `push` in `ready.features` because an `apns` client is passed.
+    expect(runner).toContain("startFakeApns");
+    expect(runner).toContain("origins: { sandbox: apns.origin, production: apns.origin }");
+    expect(runner).toContain("apns: {");
+    // The grace is 0 for the run, or the flow would sit out 30 s (and the ask
+    // would have to stay unanswered the whole time).
+    expect(runner).toContain('"--push-grace"');
+    // The payload is placed with `simctl push`, which is the ONLY way a simulator
+    // draws a banner — and it is what makes the flow unable to prove APNs.
+    expect(runner).toContain('"simctl", "push"');
+  });
+
+  test("it registers the phone's device in the daemon's own store, not the app", () => {
+    // A simulator has no APNs token, so the APP cannot register itself. The
+    // harness registers the paired device through the DAEMON'S OWN STORE.
+    //
+    // Review round 1, finding 2: it used to hand-build `{v:1,…,at}` under
+    // `devices/push/`, which is a SECOND writer for a persisted format — a change
+    // to `push-store.ts` would leave the flow failing with the misleading "the
+    // relay must announce push" error. So the assertion is now on the import that
+    // makes the reuse true, and against the hand-built record coming back.
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    expect(runner).toMatch(
+      /import \{\s*writePushRegistration as daemonWritePushRegistration\s*\} from "@tentacle\/daemon"/,
+    );
+    // The single writer, called once and checked: a refused record is thrown, not
+    // swallowed (a silent failure here would surface as the wrong error later).
+    expect(runner).toContain("daemonWritePushRegistration(configDir, {");
+    expect(runner).toContain("if (!written.ok)");
+    // And the format itself is NOT reproduced here any more — no version literal,
+    // no `at:` timestamp key, no hand-built path. That is the whole finding. The
+    // comment above the writer explains the old shape, so this looks for the
+    // STATEMENTS (`JSON.stringify({ v: 1` → a record built here) rather than any
+    // mention of them.
+    expect(runner).not.toMatch(/JSON\.stringify\(\{\s*v:\s*1/);
+    expect(runner).not.toContain('"devices", "push"');
+    expect(runner).not.toMatch(/\bat: Date\.now\(\)/);
+  });
+
+  test("the hooks it reads are the ones the harness serves", () => {
+    const served = readFileSync(join(import.meta.dir, "..", "e2e", "hooks.ts"), "utf8");
+    for (const file of scripts(PUSH_FLOW)) {
+      for (const match of scriptBody(file).matchAll(/\$\{MAESTRO_HOOKS\}\/([a-z-]+)/g)) {
+        expect(served).toContain(`"${match[1]}"`);
+      }
+    }
+  });
+
+  test("the flow STATES what a simulator cannot prove (Apple's delivery)", () => {
+    // The honesty half. A green run of this flow proves the entitlement, the
+    // plugin wiring and the sealed payload — never APNs, which needs D2a + a
+    // device (docs/ops/relay-deploy.md §6.4).
+    expect(body).toMatch(/simctl push/);
+    expect(body).toMatch(/D2a/);
+    expect(body).toMatch(/does \*\*NOT\*\* prove/i);
+  });
+});
+
+describe("N8's notification flows (docs/feat/mobile-notifications.md)", () => {
+  // The flows' whole value is three things: what is placed is a REALLY sealed
+  // payload (so the app's decrypt path is what runs), what is injected goes
+  // through the app's real dispatcher, and the last step reads the DAEMON — never
+  // a screen. A flow that hand-wrote a payload or asserted a banner would read as
+  // coverage of work it never touched.
+  const NOTIFY_FLOWS = [
+    "22-notify-render",
+    "22-notify-approve",
+    "22-notify-deny",
+    "22-notify-reply",
+    "22-notify-forged",
+  ] as const;
+
+  test("every one is run, and every file it names exists", () => {
+    for (const flow of NOTIFY_FLOWS) {
+      expect(FLOWS).toContain(flow);
+      for (const file of scripts(flow)) {
+        expect(() => scriptBody(file)).not.toThrow();
+      }
+    }
+  });
+
+  test("each answer flow names the daemon's REAL pending ask, never a synthetic one", () => {
+    // Mutation: seal a made-up `requestId` → the answer gets PermissionNotPending
+    // and the "daemon truth: answered" step could never pass. So the sealing step
+    // must READ the daemon first.
+    for (const flow of [
+      "22-notify-approve",
+      "22-notify-deny",
+      "22-notify-reply",
+      "22-notify-forged",
+    ]) {
+      const files = scripts(flow);
+      const seal = files.find((f) => f.startsWith("22-notify-seal"));
+      expect(seal).toBeDefined();
+      const body = scriptBody(seal ?? "");
+      expect(body).toContain("pending-ask?session=");
+      expect(body).toContain("&request=");
+    }
+  });
+
+  test("the answer flows end on DAEMON truth, and the negative one expects PENDING", () => {
+    // A flow asserting "nothing happened" by looking at a screen passes on a
+    // stale frame; the forged case MUST read the daemon's pending list.
+    const forged = readFileSync(join(FLOWS_DIR, "22-notify-forged.yaml"), "utf8");
+    expect(forged).toContain('MAESTRO_NOTIFY_EXPECT: "pending"');
+    for (const flow of ["22-notify-approve", "22-notify-deny", "22-notify-reply"]) {
+      const body = readFileSync(join(FLOWS_DIR, `${flow}.yaml`), "utf8");
+      expect(body).toContain('MAESTRO_NOTIFY_EXPECT: "answered"');
+      const files = scripts(flow);
+      // The reply flow's last step is its own model assertion; the others end on
+      // the daemon's pending list. Both are DAEMON truth, never a screen.
+      const last = files[files.length - 1] ?? "";
+      expect(last === "22-notify-assert.js" || last === "22-notify-reply-assert.js").toBe(true);
+    }
+  });
+
+  test("the flows say what a simulator CANNOT prove (the NSE needs a device build)", () => {
+    // D3a is an owner step: until it exists there is no extension in the app, so
+    // no flow may claim to have exercised it.
+    for (const flow of NOTIFY_FLOWS) {
+      const body = readFileSync(join(FLOWS_DIR, `${flow}.yaml`), "utf8");
+      expect(body).toMatch(/CANNOT|placeholder|device build/);
+    }
+  });
+
+  test("no flow CONSTRUCTS a payload (it is sealed by the harness, from the real keys)", () => {
+    // Reading a placed payload back is fine (that is the assertion); BUILDING one
+    // in a script is not — a hand-written `aps`/`tp` would prove nothing about
+    // the app's decrypt path. So: no object literal with `tp:`/`aps:` keys, and
+    // every script goes through a hook.
+    for (const flow of NOTIFY_FLOWS) {
+      for (const file of scripts(flow)) {
+        const body = scriptBody(file);
+        expect(body).not.toMatch(/\b(aps|tp)\s*:\s*\{/);
+        expect(body).toMatch(/MAESTRO_HOOKS/);
+      }
+    }
   });
 });

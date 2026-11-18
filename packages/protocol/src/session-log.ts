@@ -35,14 +35,19 @@
  * report, capped). A build that does not know them skips them; the LOAD
  * derivation (`subagentLoadNotes`, core) turns what they leave open into a
  * history note, so a restart is honest without them.
+ *
+ * `capabilities` (docs/feat/session-capabilities.md, owner Q2) is NON-critical
+ * too: the session's MCP/skill switches; an older build skips it and shows the
+ * model everything.
  */
-import { z } from "zod";
+import { type ZodTypeAny, z } from "zod";
 import {
   ChatMessageSchema,
   type MessageWithAttachments,
   MessageWithAttachmentsSchema,
   type MessageWithoutAttachments,
   MessageWithoutAttachmentsSchema,
+  SessionCapabilitiesSchema,
   SessionIdSchema,
   SessionTitleSchema,
   StopReasonSchema,
@@ -80,6 +85,8 @@ export const SUBAGENT_REPORT_MAX_CHARS = 64 * 1024;
 export const SUBAGENT_AGENT_TYPE_MAX_CHARS = 128;
 export const SUBAGENT_CALL_ID_MAX_CHARS = 256;
 export const SUBAGENT_STOP_REASON_MAX_CHARS = 64;
+/** One `usage` entry's model id (docs/feat/token-usage-log.md). */
+export const USAGE_MODEL_ID_MAX_CHARS = 200;
 
 /** A position in a log: the last entry a reader holds. Both must match (a seq alone is ambiguous across lineages). */
 export const LogCursorSchema = z.object({
@@ -187,6 +194,21 @@ export const LogTitleEntrySchema = z.object({
   title: SessionTitleSchema,
 });
 
+/**
+ * The session's MCP/skill switches (docs/feat/session-capabilities.md S3b): the
+ * WHOLE state after a change, the last one of a segment wins (none = everything
+ * on). Logged on every change and again after a `base` when something is off,
+ * so a segment is self-contained. NOT critical (owner Q2): an older build skips
+ * it and loads the session with everything visible — fail-open on visibility
+ * only, permissions still gate every call. Not security: a pod writes it.
+ */
+export const LogCapabilitiesEntrySchema = z.object({
+  ...envelopeShape(),
+  ...skippable(),
+  type: z.literal("capabilities"),
+  capabilities: SessionCapabilitiesSchema,
+});
+
 /** The projection here has `count` messages and `projectionDigest` `digest` (F2: derivation drift). Not security: a pod writes it. */
 export const LogCheckpointEntrySchema = z.object({
   ...envelopeShape(),
@@ -248,6 +270,75 @@ export const LogSubagentEndEntrySchema = z.object({
   report: z.string().max(SUBAGENT_REPORT_MAX_CHARS).optional(),
 });
 
+/**
+ * One model round's measured token usage (docs/feat/token-usage-log.md), so a
+ * run's spend can be analysed afterwards: which round, on which model, how big
+ * the context it sent, how much of it the provider served from cache. NOT
+ * critical: it projects nothing (a build that does not know it skips it and the
+ * history is intact), so `PROTOCOL_VERSION` does not move. An unmeasured value
+ * is OMITTED, never 0 — a 0 would read as a measured zero.
+ */
+export const LogUsageEntrySchema = z.object({
+  ...envelopeShape(),
+  ...skippable(),
+  type: z.literal("usage"),
+  /** The turn it belongs to, when the emitter knows it. */
+  turnId: TurnIdSchema.optional(),
+  /** 0-based round index inside the turn (absent on the forced final report). */
+  round: z.number().int().nonnegative().optional(),
+  /** The ONE no-tools report a spent step budget forces, so it has no round. */
+  final: z.literal(true).optional(),
+  /** The model id, only where this process can know it (never over the pod tunnel). */
+  model: z.string().min(1).max(USAGE_MODEL_ID_MAX_CHARS).optional(),
+  promptTokens: z.number().int().nonnegative(),
+  completionTokens: z.number().int().nonnegative(),
+  /** The served-from-cache part of `promptTokens`, when the provider reports it. */
+  cachedPromptTokens: z.number().int().nonnegative().optional(),
+  /** How many messages the request carried: the context this round sent. */
+  messages: z.number().int().nonnegative().optional(),
+});
+export type LogUsageEntry = z.infer<typeof LogUsageEntrySchema>;
+/** A `usage` entry's body: what it says, without the envelope (the emitter fills that in). */
+export type UsageEntryBody = Omit<
+  LogUsageEntry,
+  "type" | "critical" | "seq" | "id" | "prev" | "ts"
+>;
+
+/**
+ * The emitter's own guard: the `usage` fields its schema ACCEPTS, from a body
+ * that may carry anything (a provider's raw JSON), or `null` when nothing
+ * measurable is left.
+ *
+ * A malformed KNOWN entry is fatal to a reader — it refuses the whole file
+ * (`session-log-file.ts`) — so a single unexpected number from a server would
+ * poison that session's log for good (docs/feat/token-usage-log.md, fix round
+ * 1). Providers guard their own numbers (`core`'s `tokenCount`); this is the
+ * second net, at the ONE place an entry is built, and it judges with the schema
+ * itself so there is no second copy of the rules. A field it refuses is
+ * dropped, never replaced by a 0 (an unmeasured value stays absent).
+ */
+export function sanitizeUsageBody(body: Readonly<Record<string, unknown>>): UsageEntryBody | null {
+  const shape = LogUsageEntrySchema.shape as unknown as Readonly<Record<string, ZodTypeAny>>;
+  const envelope = new Set(Object.keys(envelopeShape()));
+  const kept: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(shape)) {
+    // The envelope is the emitter's: a body never sets it, and a stray
+    // `critical: true` must not survive the spread below.
+    if (envelope.has(key)) {
+      continue;
+    }
+    const value = body[key];
+    if (value !== undefined && field.safeParse(value).success) {
+      kept[key] = value;
+    }
+  }
+  // The two counts ARE the row: without both there is nothing to record (never a 0/0 row).
+  if (typeof kept.promptTokens !== "number" || typeof kept.completionTokens !== "number") {
+    return null;
+  }
+  return kept as UsageEntryBody;
+}
+
 /** Every entry type this protocol version knows, parsed strictly by its own schema (strip). */
 export const KnownLogEntrySchema = z.discriminatedUnion("type", [
   LogBaseEntrySchema,
@@ -263,6 +354,8 @@ export const KnownLogEntrySchema = z.discriminatedUnion("type", [
   LogCallStartedEntrySchema,
   LogSubagentBackgroundEntrySchema,
   LogSubagentEndEntrySchema,
+  LogCapabilitiesEntrySchema,
+  LogUsageEntrySchema,
 ]);
 export type KnownLogEntry = z.infer<typeof KnownLogEntrySchema>;
 export type LogMessageEntry = z.infer<typeof LogMessageEntrySchema>;
@@ -286,6 +379,8 @@ export const LOG_ENTRY_CRITICAL: Readonly<Record<LogEntryType, boolean>> = {
   call_started: false,
   subagent_background: false,
   subagent_end: false,
+  usage: false,
+  capabilities: false,
 };
 
 /**
@@ -309,7 +404,10 @@ export function replaceEntryType(m: object): "replace" | "media_replace" {
 }
 
 /** A message as an emitter holds it: core's readonly one, or the wire's parsed one. */
-export type AppendableMessage = Readonly<Omit<WireChatMessage, "attachments" | "toolCalls">> & {
+export type AppendableMessage = Readonly<
+  Omit<WireChatMessage, "attachments" | "toolCalls" | "media">
+> & {
+  readonly media?: ReadonlyArray<Readonly<NonNullable<WireChatMessage["media"]>[number]>>;
   readonly toolCalls?: ReadonlyArray<{
     readonly id: string;
     readonly name: string;
@@ -441,7 +539,11 @@ export type LogResult = z.infer<typeof LogResultSchema>;
 export type Sha256 = (text: string) => string;
 
 /** A message as both ends hold it (the wire's parsed object, or core's readonly one). */
-export type DigestibleMessage = Readonly<Omit<WireChatMessage, "toolCalls" | "attachments">> & {
+export type DigestibleMessage = Readonly<
+  Omit<WireChatMessage, "toolCalls" | "attachments" | "media">
+> & {
+  /** Display only, never hashed (like `note`): core's readonly array is accepted. */
+  readonly media?: ReadonlyArray<Readonly<NonNullable<WireChatMessage["media"]>[number]>>;
   readonly toolCalls?: readonly {
     readonly id: string;
     readonly name: string;

@@ -106,6 +106,8 @@ function snap(over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}
     },
     sessions: undefined,
     detachOnQuit: false,
+    voice: () => "idle",
+    voiceKey: () => "ctrl+r",
     ...over,
   } as KeySnapshot;
 }
@@ -141,7 +143,9 @@ const fake = (n = 1): FakePanel => ({ kind: "fake", n });
 describe("S7: a panel kind is described by its OWN descriptor, found by lookup", () => {
   test("every real kind has exactly one descriptor, claiming its own `kind`", () => {
     const kinds = PANEL_KINDS.map((k) => k.kind);
-    expect(kinds.slice().sort()).toEqual(["mcp", "sessions", "skills"]);
+    // `/artifacts` (docs/feat/model-artifacts.md S6a) and `/schedule`
+    // (docs/feat/cron-tool.md S5) joined the original three.
+    expect(kinds.slice().sort()).toEqual(["artifacts", "mcp", "schedule", "sessions", "skills"]);
     for (const desc of PANEL_KINDS) {
       // A descriptor whose `kind` field disagreed with its body would hand a
       // panel to another kind's projection.
@@ -178,11 +182,14 @@ describe("S7: a panel kind is described by its OWN descriptor, found by lookup",
         WITH_FAKE as unknown as readonly PanelKind<OpenPanel>[],
       ),
     ).toEqual(NOTHING);
-    // Every real kind names the layer it takes keys on: sessions is its own
-    // layer, both tree panels share the tree layer (the 14-name order is
-    // untouched: `keys/layers.ts` still lists sessions then tree).
+    // Every real kind names the layer it takes keys on: the two CURSOR lists
+    // (`/sessions`, `/schedule`) share the flat-list layer, the three tree kinds
+    // (`/mcp`, `/skills`, `/artifacts`) the tree layer (the 14-name order is
+    // untouched: `keys/layers.ts` still lists sessions then tree — `/schedule`
+    // rides the same one).
     for (const desc of PANEL_KINDS) {
-      expect(desc.layer).toBe(desc.kind === "sessions" ? "sessions" : "tree");
+      const flat = desc.kind === "sessions" || desc.kind === "schedule";
+      expect(desc.layer).toBe(flat ? "sessions" : "tree");
     }
   });
 

@@ -8,9 +8,15 @@
  * Pure and React-free (AGENTS §7): a regroup of `session-list.ts`'s rows, no new
  * data. Titles are daemon strings: matched as plain text, never interpreted.
  */
+import { wakesMeta } from "./schedule-view.ts";
 import type { SessionRow, SessionSections } from "./session-list.ts";
 
 export interface SessionGroups {
+  /**
+   * The daemon's pins, first, and removed from the three sections below
+   * (docs/feat/mobile-session-actions.md: one projection, two renderers).
+   */
+  readonly pinned: readonly SessionRow[];
   readonly running: readonly SessionRow[];
   readonly idle: readonly SessionRow[];
   readonly archived: readonly SessionRow[];
@@ -25,25 +31,38 @@ function matcher(query: string): (row: SessionRow) => boolean {
 
 export function groupSessions(sections: SessionSections, query: string): SessionGroups {
   const keep = matcher(query);
-  const active = sections.active.filter(keep);
+  const pinned = sections.pinned.filter(keep);
+  const isPinned = new Set(pinned.map((row) => row.sessionId));
+  const active = sections.active.filter((row) => keep(row) && !isPinned.has(row.sessionId));
   const running = active.filter((row) => row.running);
   const idle = active.filter((row) => !row.running);
-  const archived = sections.archived.filter(keep);
+  const archived = sections.archived.filter((row) => keep(row) && !isPinned.has(row.sessionId));
   const total = sections.active.length + sections.archived.length;
+  // Pinned rows are hoisted OUT of `active`/`archived` above, so a query only a
+  // pin matches must count it: otherwise the screen says "No matches" above the
+  // very row that matched (review finding 1).
+  const matched = pinned.length + active.length + archived.length;
   return {
+    pinned,
     running,
     idle,
     archived,
-    noMatch: query.trim() !== "" && total > 0 && active.length + archived.length === 0,
+    noMatch: query.trim() !== "" && total > 0 && matched === 0,
   };
 }
 
-/** The line under a row's title: state, who is attached, and how long ago. */
+/** The line under a row's title: state, who is attached, armed wakes, and how long ago. */
 export function sessionMeta(row: SessionRow): string {
   const state = row.archived ? "Archived" : row.running ? "Running" : "Idle";
   const parts = [state];
   if (!row.archived && row.attached > 0) {
     parts.push(`${row.attached} attached`);
+  }
+  // Armed wakes (docs/feat/cron-tool.md S6, M8's `◷ 2`): an archived session's
+  // are frozen and never fire, so they earn no word there.
+  const wakes = row.archived ? "" : wakesMeta(row.wakes);
+  if (wakes !== "") {
+    parts.push(wakes);
   }
   parts.push(row.subtitle);
   return parts.join(" · ");

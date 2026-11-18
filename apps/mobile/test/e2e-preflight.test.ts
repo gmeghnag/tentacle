@@ -150,6 +150,11 @@ describe("parseArgs (--ios)", () => {
     expect(parseArgs(["--ios", "18"])).toEqual({ only: 18 });
     expect(() => parseArgs(["--ios", "17"])).toThrow();
     expect(() => parseArgs(["--ios"])).toThrow();
+    // `--udid`: a dedicated simulator (E2E_SIM_UDID's flag form).
+    expect(parseArgs(["--ios", "26", "--udid", "AF01"])).toEqual({ only: 26, udid: "AF01" });
+    expect(parseArgs(["--udid", "AF01"])).toEqual({ udid: "AF01" });
+    expect(() => parseArgs(["--udid"])).toThrow();
+    expect(() => parseArgs(["--udid", "--ios", "26"])).toThrow();
   });
 });
 
@@ -171,6 +176,17 @@ describe("parseArgs (--only)", () => {
   test("--only with no value, or with another flag as its value, throws", () => {
     expect(() => parseArgs(["--only"])).toThrow("--only needs");
     expect(() => parseArgs(["--only", "--ios", "26"])).toThrow("--only needs");
+  });
+
+  test("--hold keeps the run up, the env-free form of E2E_HOLD=1", () => {
+    expect(parseArgs(["--ios", "26", "--udid", "0B43D716", "--hold"])).toEqual({
+      only: 26,
+      udid: "0B43D716",
+      hold: true,
+    });
+    expect(parseArgs(["--ios", "26"])).toEqual({ only: 26 });
+    // One flag picks the simulator: `--device` (a branch-local duplicate) is gone.
+    expect(parseArgs(["--device", "0B43D716"])).toEqual({});
   });
 
   test("main loops over the SELECTED flow names (a shadowing string iterated its chars)", () => {
@@ -232,6 +248,23 @@ describe("firstDevice", () => {
       },
     });
     expect(firstDevice(json, 26)).toBe("usable");
+  });
+
+  test("a preferred udid (E2E_SIM_UDID) wins only inside the wanted major and when available", () => {
+    const json = JSON.stringify({
+      devices: {
+        "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
+          { udid: "booted", isAvailable: true },
+          { udid: "own", isAvailable: true },
+          { udid: "broken", isAvailable: false },
+        ],
+        "com.apple.CoreSimulator.SimRuntime.iOS-18-6": [{ udid: "iphone-18", isAvailable: true }],
+      },
+    });
+    expect(firstDevice(json, 26, "own")).toBe("own");
+    expect(firstDevice(json, 18, "own")).toBe("iphone-18");
+    expect(firstDevice(json, 26, "broken")).toBe("booted");
+    expect(firstDevice(json, 26, "missing")).toBe("booted");
   });
 });
 

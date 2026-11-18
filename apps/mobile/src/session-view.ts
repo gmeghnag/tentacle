@@ -10,16 +10,22 @@
  * button does — each named by the plan's failure-mode table (F12–F16, F24).
  */
 import type { EndReason } from "@tentacle/client";
-import type { ShownRow } from "./compose-queue.ts";
+import type { AttachSheet } from "./attach-sheet.ts";
+import type { PendingBubble, ShownRow } from "./compose-queue.ts";
+import type { Editing } from "./compose-state.ts";
 import {
   type ComposerAction,
   type ComposerBlocker,
   PHOTOS_NEXT_PROMPT,
+  type SendSlot,
   composerAction,
   sendNowOffered,
+  sendSlot,
 } from "./composer.ts";
+import { folderLabel } from "./folder-label.ts";
 import type { OutboxItem } from "./outbox.ts";
 import type { SessionOpenFailure } from "./session-controller.ts";
+import { headerContext, shortModel } from "./session-info.ts";
 import type { Row, TurnRow } from "./transcript-rows.ts";
 
 /**
@@ -76,6 +82,23 @@ export interface SessionViewInput {
    * never makes the first attach pass `reopen`.
    */
   readonly archived: boolean;
+  /**
+   * The header's model and context bar (Owner 2/4): the daemon's handshake facts
+   * and THIS session's measured fill. Absent → the header shows the status word
+   * only (an older daemon, or a build without the info port).
+   */
+  readonly header?: {
+    readonly model: string | undefined;
+    /** The last measured fill, else the daemon's count at open. */
+    readonly measured: number | null;
+    readonly open: { readonly used: number; readonly exact: boolean } | null;
+    readonly window: number | undefined;
+  };
+  /**
+   * The session's working folder (`session/list` `cwd`), as the route or the
+   * screen's own lookup found it. Absent/empty → no folder in the header.
+   */
+  readonly cwd?: string;
   /** The queue rows above the input (13a's `shownRows`): mine and other devices'. */
   readonly queued?: readonly ShownRow[];
   /** Other devices' returned rows, each with an explicit Take (D3, F11). */
@@ -86,18 +109,37 @@ export interface SessionViewInput {
   readonly outbox?: readonly OutboxItem[];
   /** An outbox write did not land: the `not-saved` banner (F21). */
   readonly notSaved?: boolean;
-  /** The photo chips (13c's pipeline states, in pick order). */
+  /** The attachment chips (13c's pipeline states, in pick order). */
   readonly photos?: readonly ChipView[];
-  /** How many waiting rows of MINE the queue holds (Send now's other trigger). */
-  readonly ownQueue?: number;
+  /** How many `queued` rows of MINE the queue holds (Send now's only trigger). */
+  readonly ownPending?: number;
+  /**
+   * The pending messages as the TRANSCRIPT draws them (docs/feat/mobile-queued-compose.md
+   * D1): one bubble per queued row, in delivery order. Optional in (a build with
+   * no compose half has none), required out.
+   */
+  readonly pending?: readonly PendingBubble[];
+  /** The pending message being EDITED (D6), or null. */
+  readonly editing?: Editing | null;
+  /** The daemon cannot take a queued message back (an older one): Hide Edit/Cancel. */
+  readonly unqueueOff?: boolean;
 }
 
 /** One photo chip: what it is doing, and why it was refused (13c's states). */
 export interface ChipView {
   /** Stable per pick, so a flow can name `chip-<index>-<state>`. */
   readonly key: string;
+  /**
+   * What the chip IS (docs/feat/pdf-read.md D7): its glyph, never guessed from
+   * the name's extension (a picked `report.pdf` is a document even when the
+   * filesystem called it something else, and vice versa). ABSENT on a chip
+   * refused before anything said what the pick was (a cap refusal, a pick the
+   * adapter rejected): the chip draws its refusal glyph, and nothing here
+   * invents the kind it never learned.
+   */
+  readonly kind?: "image" | "document";
   readonly state: "uploading" | "ready" | "refused";
-  /** The photo's name, for the chip's own label (13c sanitised it). */
+  /** The file's name, for the chip's own label (13c sanitised it). */
   readonly name?: string;
   /** `refused` only: the person-facing reason (13c's `detail`). */
   readonly detail?: string;
@@ -122,8 +164,16 @@ export interface ComposeBarView {
   readonly outbox: readonly OutboxRowView[];
   readonly notSaved: boolean;
   readonly chips: readonly ChipView[];
-  readonly ownQueue: number;
+  /**
+   * The `+` sheet's offer (docs/feat/pdf-read.md D7): the rows it shows and,
+   * when the PDF row is absent, the sentence that says why. Pure `attachSheet`.
+   */
+  readonly attach: AttachSheet;
+  readonly ownPending: number;
   readonly sendNow: boolean;
+  readonly pending: readonly PendingBubble[];
+  readonly editing: Editing | null;
+  readonly unqueueOff: boolean;
 }
 
 /** One outbox row: what the person wrote and where it is (D4's states). */
@@ -141,6 +191,8 @@ export interface ComposerView {
   readonly action: ComposerAction;
   /** The button's face: Send, Queue (steer), Send later, Stop, or a disabled Send. */
   readonly button: "send" | "queue" | "send-later" | "stop" | "disabled";
+  /** The slot's GLYPH (D4): a total map of `action`, so the screen never re-decides. */
+  readonly slot: SendSlot;
   /** Why the button does nothing (the screen dims it); null when it does something. */
   readonly blockedBy: ComposerBlocker | null;
   /** A turn runs: the indicator under the transcript (`turn-running` / `turn-idle`). */
@@ -154,6 +206,19 @@ export interface ComposerView {
 export interface SessionView {
   readonly title: string;
   readonly project: string;
+  /**
+   * The header's subtitle (docs/feat/mobile-header-status.md): the folder, then
+   * the model — shortened, and dropped when the daemon reports none. No status
+   * word: the state is the dot before the title (`chat-header.ts`).
+   */
+  readonly headerModel: string | null;
+  /** The folder run: `label` (mono, `folderLabel`) and the full `path` (VoiceOver). */
+  readonly headerFolder: { readonly label: string; readonly path: string } | null;
+  /**
+   * The header's thin context bar (Owner decision 4): a FILL only, no text. `null`
+   * → no bar is drawn (nothing measured yet, or no window to divide by).
+   */
+  readonly headerContext: { readonly percent: number; readonly approx: boolean } | null;
   /** The header's state line: `Loading…`, `Live`, `Reconnecting…`, or the end. */
   readonly state: string;
   readonly banner: Banner | null;
@@ -172,10 +237,16 @@ export interface SessionView {
   readonly returnedOthers: readonly { readonly id: string; readonly text: string }[];
   /** This session's outbox rows (13b's items). */
   readonly outbox: readonly OutboxRowView[];
-  /** The photo chips, in pick order (13c). */
+  /** The attachment chips, in pick order (13c, extended by D7). */
   readonly photos: readonly ChipView[];
   /** The notices above the input, in the order the person must read them. */
   readonly notices: readonly ComposeNotice[];
+  /** The pending messages the transcript's footer draws (D1), in delivery order. */
+  readonly pending: readonly PendingBubble[];
+  /** The pending message being edited (D6): the field's banner, or null. */
+  readonly editing: Editing | null;
+  /** The daemon takes no queued message back (an older one): Edit/Cancel hidden. */
+  readonly unqueueOff: boolean;
 }
 
 const FAILURE_TEXT: Readonly<Record<SessionOpenFailure, string>> = {
@@ -221,6 +292,12 @@ function endedBanner(reason: EndReason): Banner {
   }
 }
 
+/** The header's folder run, or null when no folder is known. */
+function headerFolder(cwd: string | undefined): SessionView["headerFolder"] {
+  const label = folderLabel(cwd ?? "");
+  return label === "" || cwd === undefined ? null : { label, path: cwd };
+}
+
 /**
  * The whole screen as a value. Precedence, in this order (each step is a case a
  * flow asserts):
@@ -232,14 +309,26 @@ function endedBanner(reason: EndReason): Banner {
  */
 export function sessionView(input: SessionViewInput): SessionView {
   const composer = composerOf(input);
+  const measured = input.header?.measured ?? null;
+  const bar = headerContext({
+    measured,
+    open: input.header?.open ?? null,
+    window: input.header?.window,
+  });
   const base = {
     title: input.title,
     project: input.project,
+    headerModel: shortModel(input.header?.model),
+    headerFolder: headerFolder(input.cwd),
+    headerContext: bar.percent === null ? null : { percent: bar.percent, approx: bar.approx },
     rows: input.rows,
     turn: input.turn,
     composer,
     queued: input.queued ?? [],
     returnedOthers: input.returnedOthers ?? [],
+    pending: input.pending ?? [],
+    editing: input.editing ?? null,
+    unqueueOff: input.unqueueOff === true,
     outbox: outboxRowsOf(input.outbox ?? []),
     photos: input.photos ?? [],
     // Nothing to say until the session is reachable (the failure/ended branches
@@ -330,7 +419,7 @@ function composerOf(input: SessionViewInput): ComposerView {
     ended: input.ended,
     photos: ready,
     ...(uploading ? { uploading: true } : {}),
-    ownQueue: input.ownQueue ?? 0,
+    ownPending: input.ownPending ?? 0,
   });
   const button =
     action.kind === "send"
@@ -346,6 +435,7 @@ function composerOf(input: SessionViewInput): ComposerView {
     text: input.draft,
     action,
     button,
+    slot: sendSlot(action),
     blockedBy: action.kind === "none" ? action.why : null,
     running: input.turn !== null,
     sendNow: sendNowOffered({
@@ -354,7 +444,7 @@ function composerOf(input: SessionViewInput): ComposerView {
       turn: input.turn,
       ended: input.ended,
       photos: ready,
-      ownQueue: input.ownQueue ?? 0,
+      ownPending: input.ownPending ?? 0,
     }),
     photosNotice: action.kind === "none" && action.why === "photos" ? PHOTOS_NEXT_PROMPT : null,
   };

@@ -19,12 +19,15 @@ import { encodeBase64Url } from "@tentacle/protocol";
  *    `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`: the extension runs while the phone is
  *    locked, so `WHEN_UNLOCKED` would fail exactly when a push arrives, and
  *    iCloud-syncing it would let a restored backup decrypt another phone's
- *    notifications (decision 3's spirit).
+ *    notifications (decision 3's spirit). The group is the SEPARATE
+ *    `...so.tentacle.app.push` one (`push-access-group.ts`), never the app's own:
+ *    the extension is entitled to that and nothing else.
  *
  * Pure: the Keychain and the randomness are injected, so the rules are tested
  * without a simulator.
  */
 import { publicKeyOf } from "@tentacle/transport/push";
+import { PUSH_ACCESS_GROUP } from "./push-access-group.ts";
 
 /** What the Keychain needs to FIND an item too: the access group is part of its key. */
 export interface PushKeyLookup {
@@ -51,12 +54,14 @@ export interface PushKeySetOptions extends PushKeyLookup {
 export const PUSH_KEY_ITEM = "tentacle.push-key";
 
 /**
- * The access group the app and the extension share. It must match `app.json`'s
- * `keychain-access-groups` entry (`$(AppIdentifierPrefix)so.tentacle.app`), so
- * it is the bundle id — the `$(AppIdentifierPrefix)` half is resolved by the
- * build, not by JS (a JS-side prefix would be a second source of truth for it).
+ * The access group the app and the extension share, as `kSecAttrAccessGroup`
+ * takes it at RUNTIME: the TEAMID-prefixed built entitlement (fix round 1,
+ * finding #4). It is the SHARED group, not the app's own, so this key is
+ * readable by the extension while `tentacle.computer.*` (the Noise device key,
+ * written with no group) stays in the app's own group and is not.
+ * Derived in `push-access-group.ts`, where the one Team ID lives.
  */
-export const PUSH_KEY_ACCESS_GROUP = "so.tentacle.app";
+export const PUSH_KEY_ACCESS_GROUP = PUSH_ACCESS_GROUP;
 
 /** The record this build writes AND reads; anything else is "no key" (never guessed). */
 export const PUSH_KEY_VERSION = 1;

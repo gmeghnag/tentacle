@@ -24,6 +24,7 @@
 
 import { resolve } from "node:path";
 import type { AttachmentRef } from "@tentacle/core";
+import type { DocumentContent } from "@tentacle/protocol";
 import { type MutableRefObject, type RefObject, useCallback, useRef } from "react";
 import type { SessionController } from "./app-types.ts";
 import { attachmentCandidateText, parseAttachCommand } from "./attach-candidates.ts";
@@ -39,12 +40,19 @@ import {
   uploadDone,
   uploadProgress,
   withChips,
+  withDocuments,
 } from "./attach-draft.ts";
-import { type AttachedImage, type FileProbe, decideAttachment } from "./attach-files.ts";
+import {
+  type AttachedDocument,
+  type AttachedImage,
+  type FileProbe,
+  decideAttachment,
+} from "./attach-files.ts";
 import type { LineEditor } from "./hooks.ts";
+import { type DocumentMode, NO_DOCUMENT_SEAM } from "./pdf-attach.ts";
 
 /**
- * What this slice asks of the App's `run` — the two fields that carry an image
+ * What this slice asks of the App's `run` — the fields that carry an attachment
  * prompt. The turn driver's own options are wider, and a wider-parameter
  * function is assignable here, so the App's `runRef` is passed unchanged.
  */
@@ -53,6 +61,9 @@ export type AttachRun = (
   opts?: {
     readonly attachments?: readonly AttachmentRef[];
     readonly images?: readonly AttachedImage[];
+    /** The PDF chips whose wire blocks `documents` holds (docs/feat/pdf-read.md D6). */
+    readonly documents?: readonly DocumentContent[];
+    readonly documentChips?: readonly AttachedDocument[];
   },
 ) => void;
 
@@ -75,7 +86,8 @@ export interface AttachHost {
   readonly uploadCtrlRef: MutableRefObject<AbortController | null>;
   readonly sessionRef: RefObject<SessionController | null>;
   readonly runRef: RefObject<AttachRun | null>;
-  readonly pushNotice: (text: string) => void;
+  /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
+  readonly pushNotice: (text: string, level?: "warn") => void;
   readonly restoreInput: (text: string, why: string) => void;
   readonly fileProbe: FileProbe;
   /** `~` expansion for a pasted path (`undefined` on a host that cannot answer). */
@@ -88,16 +100,24 @@ export interface AttachHost {
 export interface AttachLayer {
   /** What the CURRENT session takes: its own answer, or the no-seam reason. */
   attachMode(): AttachMode;
+  /** What the CURRENT session takes as a PDF (`documentsInput`, docs/feat/pdf-read.md D6). */
+  documentMode(): DocumentMode;
   /** Put a refused prompt's chips back (decision 15). */
   restoreChips(chips: readonly AttachedImage[] | undefined): void;
-  /** A pasted/dropped text: prose inserts, image paths become chips, a refusal is said. */
+  /** Put a refused prompt's PDF chips back (the same rule, docs/feat/pdf-read.md D6). */
+  restoreDocuments(documents: readonly AttachedDocument[] | undefined): void;
+  /** A pasted/dropped text: prose inserts, attachment paths become chips, a refusal is said. */
   routeAttach(text: string): void;
   /** `/attach <path…>`, the explicit form (every failure a refusal). */
   attachCommand(raw: string): void;
   /** An unbracketed drop + Enter: paths become chips and NOTHING is sent (decision 5). */
   convertToChips(text: string): void;
   /** Upload the draft's chips through the session's own seam, then run the prompt. */
-  sendWithImages(text: string, chips: readonly AttachedImage[]): void;
+  sendWithImages(
+    text: string,
+    chips: readonly AttachedImage[],
+    documents?: readonly AttachedDocument[],
+  ): void;
 }
 
 export function useAttachments(host: AttachHost): AttachLayer {
@@ -128,6 +148,14 @@ export function useAttachments(host: AttachHost): AttachLayer {
     [sessionRef],
   );
   /**
+   * What the CURRENT session takes as a PDF (docs/feat/pdf-read.md D6): its own
+   * answer, exactly as `attachMode` reads the image one.
+   */
+  const documentMode = useCallback(
+    (): DocumentMode => sessionRef.current?.documentsInput() ?? NO_DOCUMENT_SEAM,
+    [sessionRef],
+  );
+  /**
    * Put a refused prompt's chips back (docs/feat/attachments-tui.md D8): the
    * bytes are still in them, so Enter uploads them again. Appended, never
    * replacing what the user attached meanwhile.
@@ -138,6 +166,16 @@ export function useAttachments(host: AttachHost): AttachLayer {
         return;
       }
       setAttach((draft) => ({ ...withChips(draft, chips).draft, upload: null }));
+    },
+    [setAttach],
+  );
+  /** The same for a refused prompt's PDF chips (docs/feat/pdf-read.md D6). */
+  const restoreDocuments = useCallback(
+    (documents: readonly AttachedDocument[] | undefined) => {
+      if (documents === undefined || documents.length === 0) {
+        return;
+      }
+      setAttach((draft) => ({ ...withDocuments(draft, documents).draft, upload: null }));
     },
     [setAttach],
   );
@@ -171,6 +209,7 @@ export function useAttachments(host: AttachHost): AttachLayer {
       attachChainRef.current = attachChainRef.current.then(async () => {
         const decision = await decideAttachment(fileProbe, candidate, {
           existing: draftRefs(attachRef.current),
+          existingDocuments: attachRef.current.documents.length,
         });
         if (gen !== attachGenRef.current) {
           return; // unmounted while the disk was read
@@ -179,7 +218,13 @@ export function useAttachments(host: AttachHost): AttachLayer {
         // path, a directory, a source file): the 3a rule is that the WHOLE paste
         // stays text, and dropping it silently would lose what was pasted
         // (review round 1, finding 1).
-        const routed = routeDecision(attachRef.current, decision, attachMode(), text);
+        const routed = routeDecision(
+          attachRef.current,
+          decision,
+          attachMode(),
+          text,
+          documentMode(),
+        );
         setAttach(routed.draft);
         if (routed.insert !== undefined) {
           field.insert(routed.insert);
@@ -187,7 +232,17 @@ export function useAttachments(host: AttachHost): AttachLayer {
         showNotices(routed.notices);
       });
     },
-    [attachGenRef, attachMode, attachRef, field, fileProbe, home, setAttach, showNotices],
+    [
+      attachGenRef,
+      attachMode,
+      attachRef,
+      documentMode,
+      field,
+      fileProbe,
+      home,
+      setAttach,
+      showNotices,
+    ],
   );
   /**
    * `/attach <path…>`: the explicit form (every failure a refusal). A relative
@@ -206,12 +261,16 @@ export function useAttachments(host: AttachHost): AttachLayer {
         const decision = await decideAttachment(
           fileProbe,
           { kind: "paths", paths },
-          { existing: draftRefs(attachRef.current), explicit: true },
+          {
+            existing: draftRefs(attachRef.current),
+            existingDocuments: attachRef.current.documents.length,
+            explicit: true,
+          },
         );
         if (gen !== attachGenRef.current) {
           return;
         }
-        const routed = routeDecision(attachRef.current, decision, attachMode());
+        const routed = routeDecision(attachRef.current, decision, attachMode(), "", documentMode());
         setAttach(routed.draft);
         if (routed.insert !== undefined) {
           field.insert(routed.insert);
@@ -223,6 +282,7 @@ export function useAttachments(host: AttachHost): AttachLayer {
       attachGenRef,
       attachMode,
       attachRef,
+      documentMode,
       field,
       fileProbe,
       home,
@@ -243,11 +303,12 @@ export function useAttachments(host: AttachHost): AttachLayer {
       attachChainRef.current = attachChainRef.current.then(async () => {
         const decision = await decideAttachment(fileProbe, candidate, {
           existing: draftRefs(attachRef.current),
+          existingDocuments: attachRef.current.documents.length,
         });
         if (gen !== attachGenRef.current) {
           return;
         }
-        const routed = routeDecision(attachRef.current, decision, attachMode());
+        const routed = routeDecision(attachRef.current, decision, attachMode(), "", documentMode());
         setAttach(routed.draft);
         showNotices(routed.notices);
         // A typed drag whose bytes are NOT an image: the text goes back and says
@@ -272,6 +333,7 @@ export function useAttachments(host: AttachHost): AttachLayer {
       attachGenRef,
       attachMode,
       attachRef,
+      documentMode,
       fileProbe,
       home,
       probedTextRef,
@@ -282,13 +344,24 @@ export function useAttachments(host: AttachHost): AttachLayer {
     ],
   );
   /**
-   * Send the prompt with the draft's chips: every chip goes through the
-   * SESSION's own `attachImage` (one upload at a time, progress on the chip
-   * row), then the prompt names the refs. A failure restores the text, keeps
-   * the chips and says why — Enter retries, and the store's put is idempotent.
+   * Send the prompt with the draft's attachments: every image goes through the
+   * SESSION's own `attachImage`, every PDF through its `attachDocument` (ONE at
+   * a time, progress on the same row), then the prompt names the refs and the
+   * wire blocks. A failure restores the text, keeps the chips and says why —
+   * Enter retries, and the store's put is idempotent.
+   *
+   * The document seam is the SESSION's on purpose (docs/feat/pdf-read.md D6):
+   * only it knows whether this daemon takes an upload (`ref`, the daemon
+   * extracts) or needs this laptop's own extraction (`text`, a pod — no PDF
+   * bytes into it, AGENTS §7). This hook never decides that, and never sends
+   * bytes itself.
    */
   const sendWithImages = useCallback(
-    (text: string, chips: readonly AttachedImage[]): void => {
+    (
+      text: string,
+      chips: readonly AttachedImage[],
+      documents: readonly AttachedDocument[] = [],
+    ): void => {
       const session = sessionRef.current;
       if (session === null) {
         restoreInput(text, "_images are off: this session does not take images_");
@@ -298,15 +371,19 @@ export function useAttachments(host: AttachHost): AttachLayer {
       // that does not take images answers `imageInput()` with `{kind:"off"}`,
       // which is why no chips of one ever get here.
       const seam = session.attachImage;
+      const documentSeam = session.attachDocument;
       const gen = attachGenRef.current;
       const controller = new AbortController();
       uploadCtrlRef.current = controller;
+      // ONE row for everything in flight: the images first, then the PDFs, so
+      // `index`/`count` still mean something to a reader (`2/3`).
+      const count = chips.length + documents.length;
       const upload = async (): Promise<void> => {
         const refs: AttachmentRef[] = [];
         for (const [index, chip] of chips.entries()) {
           const name =
             chip.ref.name !== undefined && chip.ref.name !== "" ? chip.ref.name : chip.ref.mimeType;
-          setAttach((draft) => uploadProgress(draft, index, chips.length, name, 0, chip.ref.size));
+          setAttach((draft) => uploadProgress(draft, index, count, name, 0, chip.ref.size));
           refs.push(
             await seam.call(
               session,
@@ -318,8 +395,28 @@ export function useAttachments(host: AttachHost): AttachLayer {
               {
                 signal: controller.signal,
                 onProgress: (sent, size) =>
+                  setAttach((draft) => uploadProgress(draft, index, count, name, sent, size)),
+              },
+            ),
+          );
+        }
+        const blocks: DocumentContent[] = [];
+        for (const [offset, document] of documents.entries()) {
+          const index = chips.length + offset;
+          setAttach((draft) =>
+            uploadProgress(draft, index, count, document.name, 0, document.size),
+          );
+          blocks.push(
+            await documentSeam.call(
+              session,
+              document.bytes,
+              { name: document.name },
+              {
+                signal: controller.signal,
+                // An extraction reports no bytes: one jump to 100% when done.
+                onProgress: (sent, size) =>
                   setAttach((draft) =>
-                    uploadProgress(draft, index, chips.length, name, sent, size),
+                    uploadProgress(draft, index, count, document.name, sent, size),
                   ),
               },
             ),
@@ -333,8 +430,13 @@ export function useAttachments(host: AttachHost): AttachLayer {
         if (uploadCtrlRef.current === controller) {
           uploadCtrlRef.current = null;
         }
-        setAttach((draft) => uploadDone({ ...draft, chips: [] }));
-        await runRef.current?.(text, { attachments: refs, images: chips });
+        setAttach((draft) => uploadDone({ ...draft, chips: [], documents: [] }));
+        await runRef.current?.(text, {
+          attachments: refs,
+          images: chips,
+          documents: blocks,
+          documentChips: documents,
+        });
       };
       upload().catch((error: unknown) => {
         if (gen !== attachGenRef.current) {
@@ -351,5 +453,14 @@ export function useAttachments(host: AttachHost): AttachLayer {
     [attachGenRef, restoreInput, runRef, sessionRef, setAttach, uploadCtrlRef],
   );
 
-  return { attachMode, restoreChips, routeAttach, attachCommand, convertToChips, sendWithImages };
+  return {
+    attachMode,
+    documentMode,
+    restoreChips,
+    restoreDocuments,
+    routeAttach,
+    attachCommand,
+    convertToChips,
+    sendWithImages,
+  };
 }

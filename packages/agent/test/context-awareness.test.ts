@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { type ChatMessage, HeuristicTokenCounter } from "@tentacle/core";
 import {
+  ATTACHED_FILES_NOTE,
   contextLine,
   estimateUsed,
   lastEmitted,
@@ -85,6 +86,18 @@ describe("renderForModel", () => {
   test("a message without the field is returned as is (same object)", () => {
     const m: ChatMessage = { role: "user", content: "hi" };
     expect(renderForModel(m)).toBe(m);
+  });
+  test("a message with attached files gets the data-not-instructions note, media dropped (pdf-read D4)", () => {
+    const m: ChatMessage = {
+      role: "user",
+      content: 'see\n<file name="r.pdf" kind="pdf" pages="1">\nx\n</file>',
+      media: [{ kind: "pdf", name: "r.pdf", pages: 1, chars: 1 }],
+      contextUsage: { used: 82000, window: 128000 },
+    };
+    expect(renderForModel(m)).toEqual({
+      role: "user",
+      content: `${m.content}\n\n${ATTACHED_FILES_NOTE}\n\n[context: 82k / 128k tokens (64%)]`,
+    });
   });
 });
 

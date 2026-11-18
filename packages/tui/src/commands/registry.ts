@@ -10,6 +10,7 @@ import type { SlashCommand } from "../commands.ts";
  * always the one the user typed (`dispatchCommand` looks it up by name).
  */
 import { command as agents } from "./agents.ts";
+import { command as artifacts } from "./artifacts.ts";
 import { command as attach } from "./attach.ts";
 import { command as clear } from "./clear.ts";
 import { command as close } from "./close.ts";
@@ -24,6 +25,7 @@ import { command as move } from "./move.ts";
 import { command as rename } from "./rename.ts";
 import { command as retry } from "./retry.ts";
 import { command as save } from "./save.ts";
+import { command as schedule } from "./schedule.ts";
 import { command as sessions } from "./sessions.ts";
 import { command as settings } from "./settings.ts";
 import { command as skills } from "./skills.ts";
@@ -61,13 +63,18 @@ export const BUILT_INS: readonly Command[] = [
   tokens,
   mcp,
   skills,
+  artifacts,
+  schedule,
   agents,
   settings,
   exit,
 ];
 
 /** Names the built-ins own, spelled as the user types them (`/quit` is `/exit`). */
-export const ALIASES: Readonly<Record<string, string>> = { "/quit": "/exit" };
+export const ALIASES: Readonly<Record<string, string>> = {
+  "/quit": "/exit",
+  "/schedules": "/schedule",
+};
 
 /** `name` resolved through the aliases (what a lookup should find). */
 export function canonicalName(name: string): string {

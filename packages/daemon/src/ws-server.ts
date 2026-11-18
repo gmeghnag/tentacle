@@ -9,7 +9,7 @@
  */
 import { timingSafeEqual } from "node:crypto";
 import type { DuplexChannel } from "@tentacle/transport";
-import { Connection } from "./connection.ts";
+import { Connection, type HooksTrustPrecheck } from "./connection.ts";
 import { DEFAULT_MAX_FRAME_BYTES, acceptDevice } from "./device-accept.ts";
 import type { DeviceAuthority } from "./device-authority.ts";
 import { type HandshakeLimitOptions, HandshakeLimiter } from "./handshake-limit.ts";
@@ -37,6 +37,11 @@ export interface WsServerOptions {
   readonly idleTimeoutSec?: number;
   /** Max inbound frame size (bytes) accepted before parsing. */
   readonly maxFrameBytes?: number;
+  /**
+   * The host's own project-hooks answer, checked before the prompting client is
+   * asked (docs/feat/serve-mcp.md S4). Every connection this server opens gets it.
+   */
+  readonly hooksTrustPrecheck?: HooksTrustPrecheck;
   /**
    * Bytes queued for one socket before the server CLOSES it (default 16 MiB).
    * Bun would otherwise drop frames silently and keep a frozen client's socket
@@ -340,6 +345,9 @@ export function startWsServer(options: WsServerOptions): RunningServer {
           ws,
           new Connection(channel, options.sessionHost, options.onError, {
             maxFrameBytes: options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
+            ...(options.hooksTrustPrecheck
+              ? { hooksTrustPrecheck: options.hooksTrustPrecheck }
+              : {}),
           }),
         );
         options.onAudit?.("connection-open");
@@ -395,6 +403,7 @@ export function startWsServer(options: WsServerOptions): RunningServer {
       ...(options.onError ? { onError: options.onError } : {}),
       ...(options.onAudit ? { onAudit: options.onAudit } : {}),
       ...(options.maxFrameBytes !== undefined ? { maxFrameBytes: options.maxFrameBytes } : {}),
+      ...(options.hooksTrustPrecheck ? { hooksTrustPrecheck: options.hooksTrustPrecheck } : {}),
       ...(route.pairingCheckMs !== undefined ? { pairingCheckMs: route.pairingCheckMs } : {}),
       onSettled: endSlot,
       onConnection: (connection) => connections.set(ws, connection),
