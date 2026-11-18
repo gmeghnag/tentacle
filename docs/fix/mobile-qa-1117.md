@@ -232,4 +232,36 @@ reopen stay missing (PARKED, needs an owner decision on persisting reasoning).
 
 ## Review
 
-*(pending — fresh-context Opus review with the screenshots.)*
+*— claude-opus-5-5, 2026-11-18* (fresh context, SAME model as the executor: shared blind spots possible)
+
+**Verdict: APPROVE** — no HIGH/MEDIUM finding. Screenshots not re-inspected; code + tests only.
+
+**Gate (narrow + static):** touched suites (agent ×3, protocol permission-reply + json-schema,
+daemon persistence, tui resume, all `apps/mobile/test`) **3492 pass · 0 fail**; `bun run lint`
+clean (2053 files); `bun run typecheck` clean (root + mobile + relay). Full `bun test` not re-run.
+
+**Premises:** `toolMessage` dropped `isError` (TRUE, diff of `agent.ts:275`); `ChatMessageSchema` is
+the session log's message schema (`session-log.ts:45`), so the laptop log, the `serve` log and the
+wire all carry the field with no extra mapping (TRUE); `canonicalMessage` (`session-log.ts:570`)
+does not list it, so checkpoints stay valid (TRUE); no provider spreads a `ChatMessage`
+(`rg '\.\.\.(m|msg|message)\b' packages/providers/src` → none), so the flag never reaches a model API (TRUE).
+
+**Mutations (each reverted, `git status` clean after):** `settleStep` without its `following`
+guard → follow.test red; settle timer without the drag skip → wiring test red; TUI resume
+ignores `isError` → resume test red; live foreign compaction built from `[]` → transcript-reload red.
+
+**Attacks tried:** (1) §7 pod not trusted: a pod could set `isError` on a message, but it only
+changes how the step looks (red or green), with no effect on the laptop: OK. (2) Protocol: strip field with
+`.catch(undefined)`, no `PROTOCOL_VERSION` note needed (it is shown only, and an older peer
+drops it): OK. (3) Settle loop: the timer is armed only by content/viewport changes, never by its
+own scroll, so it cannot keep re-arming itself: OK. (4) `overFullScreen`: both modals have an opaque `palette.page` root,
+so nothing shows through: OK. (5) Cancelled path now goes through `toolMessage`, so its history
+message matches the live event: OK.
+
+**Non-blocking notes:** `App.tsx` comment still names a `useDiagramStyle` hook that no longer
+exists (it moved to `SessionScreen`). A compaction this phone caused itself (`own === true`, e.g.
+an auto-compaction inside its own turn) still shows no separator live, but does after a reopen.
+This live/reload gap is older than this branch and outside the six bugs.
+
+**Executor behaviour:** honest. Every change from the plan is listed with its reason, the mutation claims
+reproduced, and Thought rows are clearly marked PARKED rather than half-done.
