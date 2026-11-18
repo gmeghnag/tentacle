@@ -371,3 +371,16 @@ Tests' "Manual" line still stands.
 5. **MEDIUM — no Execution section.** No as-built, no red-before-green evidence, no mutation record (§9/§10). Plan Tests also asked for a `theme` opacity property test (card/fill `#RRGGBB`) — not present on the branch.
 
 Attacks tried: haptic F4 (one effect, `ended !== null`) — holds; `rimFraction` clamp/NaN/≤0 — holds; `fanItemLook` never `glass` — holds; ContextRing pixel parity (20/1.8, track `sep`) — holds; glow on native driver (opacity + transform only) — holds. Mutation not run beyond reading: the gate is already red, so non-vacuity is moot until fixed.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18* (fresh context; reviewed `git diff HEAD~1` = `271ddbd1`)
+
+**Verdict: APPROVE.** Findings 1–5 resolved: wiring test green; lint clean (0 errors); typecheck green; `pulseStep` (`hub-actions.ts`) folds the session switch and the link drop into the same step that compares, so neither reset can be overwritten or swallow the next increase; Execution exists with red-before-green; `theme.test.ts` pins `card`/`fill` as `#RRGGBB`. Touched files 165 pass / 0 fail; `apps/mobile` 3512 pass / 0 fail.
+
+Mutations (each reverted; `git status` clean afterwards):
+- M1, keep the reading while the link is down (`prev: input.news`) → 2 F2 tests fail.
+- M2, a fresh baseline is `null` (the old swallow) → 5 F1/F2/F3 tests fail.
+- M3, drop the `sessionKey !==` check → the F1 session-switch test fails.
+
+Regressions checked: `PULSE_START` vs an `undefined` `artifactsSeenKey` on first render is still fresh (prev `null`) — no pulse; the effect's dep list now includes `artifactsSeenKey`, and lint confirms it is exhaustive; the haptic order (`ended` then `pulseHaptic(…, ended !== null)`) is unchanged. No HIGH/MEDIUM left.
