@@ -285,7 +285,251 @@ Q1–Q6: all recommendations accepted (split `feat/queue-unqueue`, Opus exec, la
 
 ## Execution
 
-*(empty — awaiting approval)*
+*— deepseek-v4, 2026-11-18*
+
+### Step 0 — preconditions re-checked (before any edit)
+
+**Slice A (D5, unqueue) is already merged** on `main` as `feat/queue-unqueue`
+(`d06bc873`), with a **different shape than D5 describes** — reconciled, not
+rewritten (drift, see below). `fix/mobile-queued-stuck` (Owner Q6's gate) is also
+already in this branch (`cde193a9`, `39db0e52` — ancestors of HEAD), so the
+dependency holds.
+
+**Load-bearing check — PASSES** (`.tentacle/tmp/mobile-queued-compose/lb-check.ts`,
+run on this branch):
+
+```
+listed   : e1:true
+drained  : (none) → pending: 0
+in-flight: x1:false
+order    : o1:false m1:true
+```
+
+So a row listed while a turn runs is projected with `mine` right, leaves on the
+first `queued` that drops it (→ zero pending bubbles), and the daemon's `entries`
+order is kept. The check's own property holds.
+
+### Step 0b — a PRECONDITION of the Design does NOT hold (recorded, then amended)
+
+The Preconditions' *"'Mine' is the PERSISTED `own` map"* is true as a statement
+of where `mine` comes from, but `own` **loses an id that is still in flight**:
+`settleOwn` (`compose-queue.ts:373-392`) keeps only ids the report lists
+(`entries`, `returned`) or `keep` names, and `onQueued`
+(`compose-state.ts:99`) passes `keep` = a send-now's `carried` only. A `queued`
+report that lands between the local mint and the daemon's `enqueue` therefore
+drops the id from `own` — and `shownRows` derives `mine` from `own.has(id)`, so
+the row then renders as *"from another device"* forever, even after the daemon
+lists it.
+
+Evidence (`.tentacle/tmp/mobile-queued-compose/lb-mine.ts`, `lb-reach.ts`):
+
+```
+minted        : e1:true
+after report 1: e1:false      ← a report not listing it yet
+after report 2: e1:false      ← the daemon lists it: still wrong
+own still has e1?      : false
+```
+
+Reachable: the mint happens at the tap, the enqueue's round-trip is ≥1 RTT, and
+the daemon publishes `queued` on every drain / turn end / another device's
+enqueue (`hosted-session.ts:3762` and the `publishQueue` sites). This is a
+pre-existing defect (it mislabels today's card too), but the feat multiplies it:
+`mine` also decides `ownPending` (D3, so **Send now is not offered**) and
+`bubbleActions` (D2, so **Edit/Cancel are hidden**). Shipping D1–D3 over it would
+make the feature visibly broken for a message the person just sent.
+
+**Amendment (executor, minimal — `settleOwn` already supports it):** `onQueued`
+keeps in-flight local ids as `own` entries, exactly as a send-now's `carried`
+already does:
+
+```ts
+const inflight = state.local.filter((r) => r.acked !== true).map((r) => r.id);
+const step = onQueued(state, queue, { stoppedHere, keep: [...carried, ...inflight] });
+```
+
+Converges: a rejected enqueue still drops the id (`enqueueRejected`), an acked
+row the report drops still leaves `own` (the stuck fix's rule). Pinned by a test
+in the D1 slice, shown red first. **Review must check this amendment** it is the
+one line of this task not in the approved Design.
+
+### Step 1 — D1/D2, D3, D4, D6 as pure modules (in that order)
+
+*— deepseek-v4, 2026-11-18*
+
+**D3 — Send now's rule** (`composer.ts`). `sendNowOffered` = *a turn is running ∧
+the link is up ∧ the session has not ended ∧ `ownPending > 0`*, and
+`ComposerInput.ownQueue` was **renamed `ownPending`** (the number of MY rows, not
+the number of rows): the count's two producers are `session-view.ts` (from
+`ownPending`, and from its own default in the no-compose fallback) and
+`compose-controller.ts` (`ComposeView.ownPending`, computed as
+`rows.filter((row) => row.mine && row.state === "queued").length`). Drift from
+D3 as written: the Design says "`ownQueue > 0` is MINE"; the field carried the
+whole queue's length, which would have offered Send now for *another device's*
+message. Tests in `composer-compose.test.ts` (+ every `ComposerInput` literal).
+
+**D4 — `sendSlot` (pure)** (`composer.ts`):
+`sendSlot(action: ComposerAction): SendSlot` with
+`type SendSlot = "up" | "up-dim" | "stop" | "clock"` — the field's trailing slot
+as ONE value, so the composer decides nothing (owner Q5: ↑ while text is typed,
+■ only on an empty field while running). 2 tests in `composer-compose.test.ts`.
+
+**D1/D2 — the bubbles and their menu (pure)** (`compose-queue.ts`):
+`PendingBubble {id,text,mine,phase}`, `pendingBubbles(rows)` (a projection of the
+SAME `shownRows` the card drew — no new state, no timer), `BubbleAction =
+"edit"|"send-now"|"cancel"`, `BubbleContext {link,turn,sendNow,unqueue}`, and
+`bubbleActions(bubble, ctx)` (empty unless MINE ∧ `pending` ∧ link ∧ turn; Edit
+and Cancel need `unqueue`, Send now reuses D3's flag — so owner Q3's "another
+device" and a `sending` bubble are shown, never acted on). 9 tests in
+`compose-queue.test.ts`.
+
+**D6 — the edit/cancel state machine (pure)** (`compose-state.ts`):
+`Editing {id,text,prior}`, `ComposeState.editing` (dropped from the queue while it
+stands — owner Q2) and `.unqueueOff`, `UnqueueReply = {removed} | "unsupported" |
+"failed"`, `unqueueFor(state,{what,id,field,reply}) → {state,draft,notice}`,
+`dropPending` (the row, my id, and the daemon's listed entry — the answer IS the
+fact), `editingCleared`, and the three notices `UNQUEUE_READ_CANCEL` /
+`UNQUEUE_READ_EDIT` / `UNQUEUE_KEPT`; `UNQUEUE_OLD_DAEMON` is imported from
+`@tentacle/client` (Slice A's own string). `enqueueStarted` clears `editing` (the
+words are queued again). The edit's text is always `own`'s, never the daemon's
+(AGENTS §7: a pod is not trusted). 10 tests appended to `compose-state.test.ts`
+under *"Edit and Cancel on a pending message (D6)"*, all red first.
+
+### Step 2 — D5's port and the controller half (mobile)
+
+*— deepseek-v4, 2026-11-18*
+
+`compose-handle.ts` gained `unqueue: (ids) => client.unqueue(sessionId, ids)`,
+`ComposeHandle.unqueue(ids): Promise<UnqueueReply>` in `compose-controller.ts`,
+plus `unqueueNow` (a throw → `"failed"`), `unqueueApplied(what,id)` and the public
+`edit(id)` / `cancel(id)` / `editCanceled()`, and `ComposeView.pending` /
+`.editing` / `.unqueueOff`. `editCanceled` re-enqueues `editing.text` under a
+**NEW** id when a turn runs (the old one is gone daemon-side), restoring
+`editing.prior` only when the field is still what the edit left there; with no
+turn the edit merely ends and the words stay in the field; a refused steer goes
+through `enqueueRejected` and the words come back (never both places). 10 tests
+appended to `compose-controller.test.ts` under *"Edit and Cancel through the
+controller (D6)"*; every fake handle in the suite gained `unqueue`.
+
+### Step 3 — the render (D1's footer, D4's one-field composer, D6's banner)
+
+*— deepseek-v4, 2026-11-18*
+
+**`screens/compose/PendingBubble.tsx`** (new): `PendingBubbles({bubbles,palette,
+ctx,onAction})` — the transcript's footer, one right-aligned dimmed user-bubble
+shape per queued row with a clock (or bolt, when `sending`) and the footnote
+"Pending · next step" / "Sending now · stopping the step", plus " · another
+device" when it is not mine; a tap on one of MINE opens the E1 menu (Edit · Send
+now · Cancel, `bubbleActions`' items verbatim; Cancel red). It is a DUMB renderer
+— the only state it owns is which menu is open (presentation: one at a time).
+`testID`s are the flows' contract: `pending-bubbles`, `pending-<id>-<mine|other>`
+(a `Pressable` only when it has actions), `pending-<id>-edit|send-now|cancel`.
+
+**Wiring**: `session-view.ts` `SessionViewInput`/`SessionView`/`ComposeBarView`
+gained `pending`, `editing`, `unqueueOff`, and `ComposerView.slot` (from
+`sendSlot`); `session-screen-controller.ts` passes them through and exposes
+`edit`/`cancel`/`editCanceled`. `SessionScreen.tsx` mounts `PendingBubbles` as the
+FlatList's `ListFooterComponent`, **after** `ThinkingNode` (the footer is
+`undefined` at `layout.tail === null && pending.length === 0`), with ctx
+`{link: state.view.state === "Live", turn: composer.running, sendNow, unqueue:
+!unqueueOff}`, and renders a `composer-editing` banner (+ `composer-editing-cancel`
+×) above the field when `editing !== null`.
+
+**D4's card trim (drift)**: the Design says the rows leave the card; the SHAPE it
+left behind differs from the plan's letter. `ComposeBar.tsx`'s `QueueRows` now
+takes only `{view:{returnedOthers},palette,onTake}` — no queued rows, no Send-now
+pill — and `SessionScreen.tsx` renders it from `{returnedOthers:
+compose.returnedOthers}`, so another device's RETURNED row keeps its small Take
+card above the field (owner Q3). The `queued-row-` testIDs are gone with the rows.
+
+**D4's composer re-layout**: `ui/Composer.tsx` rewritten as ONE `styles.field`
+(`palette.fill`, a 1 pt `palette.sep` border, the new `radius.composer = 22`,
+`shadow.glass`) holding the `TextInput` and a 36 pt row: `composer-photo` (`+` →
+`onPhoto`), a spacer, the `composer-send-now` pill when `sendNow`, the mic, and a
+36 pt `styles.slot` painted from `slot`. New props `slot: SendSlot`, `sendNow:
+boolean`, `onSendNow: () => void`; every existing `testID` kept. The Send-now pill
+thus moved from the card into the field (drift from D4's wording — the mockup's
+place, and it is where the value it acts on lives).
+
+**`compose-motion.ts`**: `shape()` also carries `editing === null ? "" :
+"editing"`, so the banner's appearance/removal is animated by the same rule the
+rows are.
+
+### Step 4 — tests
+
+*— deepseek-v4, 2026-11-18*
+
+- `apps/mobile/test/composer-field-layout.test.ts` (new, 14 tests): one
+  `TextInput` inside the one field; the 36 pt row and slot; fill/sep/1 pt/
+  `radius.composer`; every testID kept; `composer-send-now` in the Composer and
+  NOT in `ComposeBar`; `queued-row-` gone from `ComposeBar`; `slot: SendSlot` +
+  `sendSlot` in `session-view.ts`.
+- `compose-motion.test.ts` +1: the editing banner counts as a move.
+- `session-screen-compose.test.ts` +4 (*"the pending bubbles on the screen"*):
+  `view.pending` carries one bubble per queued row with `mine` right; Edit
+  withdraws through the screen (`session/unqueue`, the banner, MY words in the
+  field) and the bubble leaves; Cancel withdraws and never touches the field; the
+  banner's × queues the words again under a new id. The block needed a turn that
+  STAYS running (the harness's own turn drains after one `settle`), so it drives
+  `session.activity` with a never-resolving stream — the act, not the fixture.
+- `tool-rows-wiring.test.ts`: the footer guard updated, plus a test that
+  `ThinkingNode` precedes `PendingBubbles`.
+- e2e: `12-steer.yaml` waits `pending-bubbles` and asserts `pending-.*-mine`
+  (it asserted `composer-queue`); `13-send-now.yaml` / `14-returned-mine.yaml`
+  wait `pending-bubbles`. `e2e-flows.test.ts`'s `inside()` accepts `pending-`, the
+  flow-12 test asserts the pending ids and that `composer-queue` is NOT asserted,
+  and a new test pins the id strings `PendingBubble.tsx` must keep.
+
+### Step 5 — mutation checks (red before green, per slice)
+
+*— deepseek-v4, 2026-11-18*
+
+| Mutation | Result |
+| --- | --- |
+| B0: drop the in-flight ids from `onQueued`'s `keep` | red ("an in-flight row stays MINE across a report that does not list it yet") |
+| D6: `unqueueFor` reads the daemon's listed text instead of `own`'s | red ("Edit is never a DAEMON's words") |
+| D6: `dropPending` keeps the local row | red (the withdrawn row stays a bubble) |
+| D1/D6: `compose-motion.shape` drops the `editing` term | red (*"the editing banner appears and leaves"*) — re-checked, reverted |
+| Screen: `pending: []` in the view wiring, `edit` not forwarded | 3 red (*"one bubble per queued row"*, both Edit tests) — re-checked, reverted |
+
+### Step 6 — drift from the Implementation, in one list
+
+*— deepseek-v4, 2026-11-18*
+
+1. **B0 amendment** (Step 0b): one line, not in the approved Design, pinned by a
+   test. `onQueued` keeps in-flight local ids in `own`.
+2. **`ownQueue` → `ownPending`** (D3): the field was the whole queue's length;
+   Send now must count only MINE.
+3. **Rows → bubbles** (D1): the pending messages are the transcript's footer, not
+   an extension of the card; `pendingBubbles` projects the same `shownRows`.
+4. **Send now moved into the field** (D4's mockup, not its prose), and the card's
+   `QueueRows` keeps only another device's RETURNED rows + Take.
+5. **`radius.composer = 22`** — new theme token (the field is one rounded box).
+6. **`compose-motion`'s `shape`** also watches the editing banner.
+7. **The e2e id rename** (`composer-queue` → `pending-bubbles`/`pending-<id>-*`):
+   the flows assert the bubbles now, because that is what the person sees.
+8. **Slice A (D5) landed with a different shape than D5 describes** (Step 0): the
+   client's `unqueue` + `UNQUEUE_OLD_DAEMON` already existed, so D5 became a port
+   (`ComposeHandle.unqueue`) and a reuse of Slice A's string — no new protocol,
+   no `protocol.d/` note, no schema regeneration.
+
+*— deepseek-v4, 2026-11-18*
+
+### Step 7 — the gate, and what it said
+
+*— deepseek-v4, 2026-11-18*
+
+```
+bunx tsc --noEmit        → no output (green)
+bun run lint             → Checked 2066 files. No fixes applied. (0 errors, 0 warnings)
+bun test                 → 15066 pass, 5 skip, 0 fail (1078 files, 494 s)
+```
+
+The 5 skips are all `skipIf` opt-ins — live-k8s (×2, `TENTACLE_K8S_SERVER`),
+live-docker (×2, `TENTACLE_DOCKER_TESTS`), the real-socket keepalive
+(`TENTACLE_SLOW_TESTS`) — i.e. the documented baseline; nothing skipped on its
+own. `bun test apps/mobile/test` alone: **3393 pass / 0 fail**. No schema and no
+wire type changed (Step 6, drift 8), so `bun run protocol:bump` was **not** run
+and no `protocol.d/` note was added.
 
 ## Review
 

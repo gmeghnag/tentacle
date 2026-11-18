@@ -13,6 +13,8 @@ function shape(view: ComposeBarView): string {
     view.outbox.map((row) => `${row.itemId}:${row.state}`).join(","),
     view.chips.map((chip) => `${chip.key}:${chip.state}`).join(","),
     view.sendNow ? "now" : "",
+    // The editing banner appears and leaves right above the field (D6).
+    view.editing === null ? "" : "editing",
   ].join("|");
 }
 

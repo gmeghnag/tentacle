@@ -267,7 +267,7 @@ describe("13d's compose flows (docs/feat/mobile-compose.md)", () => {
     const inside = (id: string): boolean =>
       id.startsWith("composer-") ||
       id.startsWith("chip-") ||
-      id.startsWith("queued-row-") ||
+      id.startsWith("pending-") ||
       id.startsWith("returned-") ||
       id.startsWith("take-") ||
       id.startsWith("outbox-") ||
@@ -285,9 +285,30 @@ describe("13d's compose flows (docs/feat/mobile-compose.md)", () => {
     // tap must not queue twice). The first run asserted `composer-filled` here and
     // failed — correctly, because queueing empties the field. Mutation: flip this
     // assertion back → red.
+    //
+    // docs/feat/mobile-queued-compose.md D4 moved the row out of the card above the
+    // field and into the transcript as a pending bubble: `composer-queue` is now
+    // another device's RETURNED rows only, so a queued steer waits for
+    // `pending-bubbles` — the footer, and the bubble inside it.
     const ids = readFlow("12-steer").map((a) => `${a.kind}:${a.id}`);
-    expect(ids).toContain("assertVisible:composer-queue");
+    expect(ids).toContain("assertVisible:pending-bubbles");
+    expect(ids).toContain("assertVisible:pending-.*-mine");
     expect(ids).toContain("assertNotVisible:composer-filled");
+    // The bubble carries the daemon's key, so no flow may pin a literal id.
+    expect(ids).not.toContain("assertVisible:composer-queue");
+  });
+
+  test("the pending bubble's ids are the ones the renderer sets (D1)", () => {
+    // A rename on one side only would be a flow that silently never matches.
+    const src = readFileSync(
+      join(import.meta.dir, "..", "src", "screens", "compose", "PendingBubble.tsx"),
+      "utf8",
+    );
+    expect(src).toContain('`pending-${bubble.id}-${bubble.mine ? "mine" : "other"}`');
+    expect(src).toContain('testID="pending-bubbles"');
+    for (const action of ["edit", "send-now", "cancel"]) {
+      expect(src).toContain("`pending-${bubble.id}-${action}`");
+    }
   });
 
   test("each uses its OWN session, created for it just before it runs", () => {

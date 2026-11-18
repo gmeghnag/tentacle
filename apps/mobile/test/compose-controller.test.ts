@@ -64,6 +64,12 @@ function fakeHandle(
     /** The send-now's ACK lands only when this resolves (the request still in flight). */
     readonly holdSendNow?: Promise<void>;
     readonly facts?: { historyLength: number; runningTurnId: string | null };
+    /** The ids `session/unqueue` answers `removed` with (default: every id asked). */
+    readonly unqueueRemoved?: readonly string[];
+    /** `session/unqueue` throws (a dropped link). */
+    readonly refuseUnqueue?: unknown;
+    /** An older daemon: `MethodNotFound` → the client's `"unsupported"`. */
+    readonly unqueueUnsupported?: boolean;
   } = {},
 ): FakeHandle {
   const listeners = new Set<(state: QueueState) => void>();
@@ -137,6 +143,17 @@ function fakeHandle(
     },
     async reclaim(ids) {
       acts.push(`reclaim:${ids.join(",")}`);
+    },
+    async unqueue(ids) {
+      acts.push(`unqueue:${ids.join(",")}`);
+      if (options.unqueueUnsupported === true) {
+        return "unsupported" as const;
+      }
+      if (options.refuseUnqueue !== undefined) {
+        throw options.refuseUnqueue;
+      }
+      const removed = options.unqueueRemoved ?? ids;
+      return { removed: [...removed], delivered: ids.filter((id) => !removed.includes(id)) };
     },
     emitQueue(state) {
       sessionQueue = state;
@@ -560,13 +577,15 @@ describe("Send now (D1's secondary button)", () => {
     expect(h.compose.view().queued).toEqual([]);
   });
 
-  test("not offered while idle, or with nothing of mine to take", async () => {
+  test("not offered while idle, nor for a typed text: only a pending message of mine", async () => {
+    // Owner Q2 / D3: the typed text no longer offers it (during a turn, typing
+    // IS a queued message — the ⇥ appears once one is waiting).
     const h = await harness({ draft: "typed" });
     expect(h.compose.view().sendNow).toBe(false); // no turn runs
     h.setTurn("t-run");
-    expect(h.compose.view().sendNow).toBe(true); // the field is enough
-    h.setField("");
-    expect(h.compose.view().sendNow).toBe(false); // nothing to take
+    expect(h.compose.view().sendNow).toBe(false); // the field is NOT enough
+    await h.compose.press({ kind: "queue", text: "typed" });
+    expect(h.compose.view().sendNow).toBe(true); // a message of mine is pending
   });
 });
 
@@ -861,5 +880,144 @@ describe("the queue-diagnosis trace (docs/fix/mobile-queued-stuck.md)", () => {
     h.setField("steer me");
     await h.compose.press({ kind: "queue", text: "steer me" });
     expect(h.compose.view().queued).toHaveLength(1);
+  });
+});
+
+describe("Edit and Cancel through the controller (D6)", () => {
+  /** The id of the row a queueing tap minted. */
+  const queuedId = (h: Awaited<ReturnType<typeof harness>>): string =>
+    h.handle.enqueued[0]?.id ?? "";
+
+  test("Cancel: the daemon takes it back, the row goes, the field is untouched", async () => {
+    const h = await harness({ draft: "cancel me" });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "cancel me" });
+    const id = queuedId(h);
+    h.setField("typed");
+    await h.compose.cancel(id);
+    expect(h.handle.acts).toContain(`unqueue:${id}`);
+    expect(h.compose.view().queued).toEqual([]);
+    expect(h.field()).toBe("typed");
+  });
+
+  test("Cancel of a row the agent already read: kept, and the person is told", async () => {
+    // Mutation: drop the row on any answer → red (a message the model HAS would
+    // vanish from the transcript's own row AND be delivered anyway).
+    const h = await harness({
+      draft: "too late",
+      handle: fakeHandle({ unqueueRemoved: [] }),
+    });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "too late" });
+    const id = queuedId(h);
+    await h.compose.cancel(id);
+    expect(h.compose.view().queued.map((row) => row.id)).toEqual([id]);
+    expect(h.notices.at(-1)).toContain("already read by the agent");
+  });
+
+  test("Cancel with no answer (a dropped link): the row stays and says why", async () => {
+    const h = await harness({
+      draft: "kept",
+      handle: fakeHandle({ refuseUnqueue: new Error("socket died") }),
+    });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "kept" });
+    const id = queuedId(h);
+    await h.compose.cancel(id);
+    expect(h.compose.view().queued.map((row) => row.id)).toEqual([id]);
+    expect(h.notices.at(-1)).toBeTruthy();
+    expect(h.field()).toBe("");
+  });
+
+  test("Edit: MY text comes into the field and the editing banner stands", async () => {
+    const h = await harness({ draft: "fix me" });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "fix me" });
+    const id = queuedId(h);
+    await h.compose.edit(id);
+    expect(h.field()).toBe("fix me");
+    expect(h.compose.view().editing?.text).toBe("fix me");
+    expect(h.compose.view().queued).toEqual([]);
+    // It is on disk too: a kill right after must keep the words.
+    expect(h.drafts.some((draft) => draft.text === "fix me")).toBe(true);
+  });
+
+  test("Edit is never a DAEMON's words: the field shows what I typed", async () => {
+    // Mutation: read the listed entry's text → red.
+    const h = await harness({ draft: "my words" });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "my words" });
+    const id = queuedId(h);
+    // The daemon lists it with different words (a pod daemon is not trusted).
+    h.handle.emitQueue({ entries: [{ id, text: "daemon words" }], returned: [] });
+    await h.compose.edit(id);
+    expect(h.field()).toBe("my words");
+  });
+
+  test("× with a turn: the words are queued again under a NEW id, the field restored", async () => {
+    const h = await harness({ draft: "again please" });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "again please" });
+    const first = queuedId(h);
+    await h.compose.edit(first);
+    await h.compose.editCanceled();
+    expect(h.handle.enqueued).toHaveLength(2);
+    expect(h.handle.enqueued[1]?.text).toBe("again please");
+    expect(h.handle.enqueued[1]?.id).not.toBe(first);
+    expect(h.field()).toBe("");
+    expect(h.compose.view().editing).toBeNull();
+    expect(h.compose.view().queued.map((row) => row.text)).toEqual(["again please"]);
+    expect(h.compose.view().queued[0]?.mine).toBe(true);
+  });
+
+  test("× with NO turn: the edit only ends and the words stay in the field", async () => {
+    // Never a silent drop (D6's failure mode): with nothing to queue into, the
+    // text stays where the person can act on it.
+    const h = await harness({ draft: "no turn" });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "no turn" });
+    const id = queuedId(h);
+    await h.compose.edit(id);
+    h.setTurn(null);
+    await h.compose.editCanceled();
+    expect(h.field()).toBe("no turn");
+    expect(h.handle.enqueued).toHaveLength(1);
+    expect(h.compose.view().editing).toBeNull();
+  });
+
+  test("an older daemon: unsupported once, Edit/Cancel hidden, the row kept", async () => {
+    const h = await harness({
+      draft: "old daemon",
+      handle: fakeHandle({ unqueueUnsupported: true }),
+    });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "old daemon" });
+    const id = queuedId(h);
+    expect(h.compose.view().unqueueOff).toBe(false);
+    await h.compose.edit(id);
+    expect(h.compose.view().unqueueOff).toBe(true);
+    expect(h.compose.view().queued.map((row) => row.id)).toEqual([id]);
+    expect(h.notices.at(-1)).toContain("older version");
+    // Nothing was withdrawn, so nothing may reach the field: the row still holds
+    // the words (an older daemon cannot take them back).
+    expect(h.field()).toBe("");
+  });
+
+  test("the bubbles follow the rows: one per pending message, mine marked", async () => {
+    const h = await harness({ draft: "mine" });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "mine" });
+    const id = queuedId(h);
+    h.handle.emitQueue({
+      entries: [
+        { id, text: "mine" },
+        { id: "theirs", text: "their words" },
+      ],
+      returned: [],
+    });
+    expect(h.compose.view().pending.map((b) => `${b.id}:${b.mine}:${b.phase}`)).toEqual([
+      `${id}:true:pending`,
+      "theirs:false:pending",
+    ]);
   });
 });

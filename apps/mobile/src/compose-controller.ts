@@ -44,9 +44,12 @@ import {
   splitTaken,
   takeChips,
 } from "./compose-chips.ts";
-import { restoredByRefusal } from "./compose-queue.ts";
+import { pendingBubbles, restoredByRefusal } from "./compose-queue.ts";
 import {
   type ComposeState,
+  type Editing,
+  type UnqueueReply,
+  editingCleared,
   enqueueAcked,
   enqueueRejected,
   enqueueStarted,
@@ -58,6 +61,7 @@ import {
   reclaimed,
   sendNowAccepted,
   take,
+  unqueueFor,
 } from "./compose-state.ts";
 import { type ComposerAction, restoreAfterFailure, sendNowOffered } from "./composer.ts";
 import type { OutboxDriver, OutboxSession } from "./outbox-driver.ts";
@@ -142,6 +146,12 @@ export interface ComposeHandle {
   queued(): QueueState | undefined;
   /** A returned row of mine is reclaimed (`session/reclaim`). */
   reclaim(ids: readonly string[]): Promise<void>;
+  /**
+   * Take queued rows back before the model reads them (`session/unqueue`, D5).
+   * The client's own answer, `"unsupported"` included: an older daemon must be
+   * shown as such, never thrown (docs/feat/queue-unqueue.md).
+   */
+  unqueue(ids: readonly string[]): Promise<UnqueueReply>;
   /** The outbox driver's own port for this session (13b's `outboxSessionOf`). */
   readonly port: OutboxSession;
 }
@@ -269,10 +279,16 @@ export interface ComposeView {
    * `attachSheet`; the screen only renders it.
    */
   readonly attach: ReturnType<typeof attachSheet>;
-  /** How many waiting rows of MINE the queue shows (Send now's other trigger). */
-  readonly ownQueue: number;
+  /** How many `queued` rows of MINE the queue shows (Send now's only trigger). */
+  readonly ownPending: number;
   /** **Send now** offered right now (D1's secondary button). */
   readonly sendNow: boolean;
+  /** The pending messages, as the TRANSCRIPT draws them (D1's bubbles, in order). */
+  readonly pending: readonly PendingBubble[];
+  /** The pending message being EDITED (D6), or null: the field's banner. */
+  readonly editing: Editing | null;
+  /** The daemon cannot take a queued message back (an older one): Edit/Cancel are hidden. */
+  readonly unqueueOff: boolean;
 }
 
 export interface Compose {
@@ -290,6 +306,23 @@ export interface Compose {
   turnClosed(): void;
   /** **Send now**: my queued rows + the field, as ONE prompt (the TUI's chord). */
   sendNow(): Promise<void>;
+  /**
+   * **Edit** a pending message (D6): withdraw it (`session/unqueue`) and put MY
+   * words in the field, after anything typed since. Not removed (the agent has
+   * it), unsupported (an older daemon) or no answer → the row stays, and the
+   * person is told why.
+   */
+  edit(id: string): Promise<void>;
+  /** **Cancel** a pending message (D6): withdraw it; never touches the field. */
+  cancel(id: string): Promise<void>;
+  /**
+   * The edit is over without queueing (the banner's ×, D6): with a turn running
+   * MY withdrawn words are queued again under a NEW id (the old one is gone) and
+   * the field goes back to what the edit found; with no turn there is nothing to
+   * queue into, so the edit only ends and the words STAY in the field (never a
+   * silent drop).
+   */
+  editCanceled(): Promise<void>;
   /** Take another device's returned row into my field (an explicit act). */
   take(id: string): Promise<void>;
   pickLibrary(): Promise<void>;
@@ -351,6 +384,43 @@ export function createCompose(deps: ComposeDeps): Compose {
   /** The rows the UI SHOWS, as the pure view function answers for the state now. */
   const traceRows = (where: string): void => {
     deps.trace?.({ kind: "rows", where, ids: queueRows(state).map((row) => row.id) });
+  };
+
+  /**
+   * `session/unqueue`, through the client (never a frame built here, D5). A
+   * throw is `"failed"`: a dropped link withdrew nothing, so nothing may change
+   * on screen — an edit whose answer was lost leaves the bubble and no field
+   * copy (D6's failure mode).
+   */
+  const unqueueNow = async (ids: readonly string[]): Promise<UnqueueReply> => {
+    const handle = deps.handle();
+    if (handle === null) {
+      return "failed";
+    }
+    try {
+      return await handle.unqueue(ids);
+    } catch {
+      return "failed";
+    }
+  };
+
+  /** One Edit/Cancel's answer applied: state, field, banner (all pure, D6). */
+  const unqueueApplied = async (what: "edit" | "cancel", id: string): Promise<void> => {
+    const field = deps.draft();
+    const step = unqueueFor(state, { what, id, field, reply: await unqueueNow([id]) });
+    state = step.state;
+    deps.trace?.({ kind: "compose", act: "unqueue", row: id });
+    if (step.draft !== field) {
+      // The edit's own words: MY text, from `own` (never the daemon's).
+      deps.setDraft(step.draft);
+      saveDraft(step.draft);
+    }
+    await persistOwn();
+    refresh();
+    traceRows(`after-unqueue-${what}`);
+    if (step.notice !== "") {
+      deps.notify(step.notice);
+    }
   };
 
   /** The queue, applied: rows, hand-backs, and the reclaims it asks for. */
@@ -680,9 +750,15 @@ export function createCompose(deps: ComposeDeps): Compose {
     view(): ComposeView {
       const rows = queueRows(state);
       const ready = chips.filter((chip) => chip.state === "ready").length;
+      // Pending = mine and still WAITING: a `sending` row is the send-now's own,
+      // already in flight and out of the composer (D3).
+      const ownPending = rows.filter((row) => row.mine && row.state === "queued").length;
       const turnId = deps.turnId();
       return {
         queued: rows,
+        pending: pendingBubbles(rows),
+        editing: state.editing,
+        unqueueOff: state.unqueueOff,
         returnedOthers: othersReturned(state),
         returnedNotice: state.notice,
         outbox: items(),
@@ -694,14 +770,14 @@ export function createCompose(deps: ComposeDeps): Compose {
             reason: "this build cannot pick a file",
           },
         ),
-        ownQueue: rows.filter((row) => row.mine).length,
+        ownPending,
         sendNow: sendNowOffered({
           link: deps.handle() === null ? "down" : "up",
           text: deps.draft(),
           turn: turnId === null ? null : { kind: "turn", key: "t", turnId, own: false },
           ended: null,
           photos: ready,
-          ownQueue: rows.filter((row) => row.mine).length,
+          ownPending,
         }),
       };
     },
@@ -969,6 +1045,55 @@ export function createCompose(deps: ComposeDeps): Compose {
       if (plan.reclaim.length > 0) {
         await reclaim(plan.reclaim);
       }
+    },
+    async edit(id) {
+      await unqueueApplied("edit", id);
+    },
+    async cancel(id) {
+      await unqueueApplied("cancel", id);
+    },
+    async editCanceled() {
+      const editing = state.editing;
+      if (editing === null) {
+        return;
+      }
+      state = editingCleared(state);
+      const turnId = deps.turnId();
+      if (turnId === null) {
+        // Nothing to queue into: the edit ends and MY words stay in the field
+        // (the person decides; never a silent drop, D6's failure mode).
+        refresh();
+        return;
+      }
+      // The message was withdrawn, so × puts it BACK IN THE QUEUE — a new id,
+      // because the old one is gone daemon-side. The field returns to what the
+      // edit found, unless something was typed since (that is kept: never a
+      // silent drop).
+      const id = deps.mint();
+      const fieldNow = deps.draft();
+      state = enqueueStarted(state, id, editing.text);
+      if (fieldNow === restoreAfterFailure(editing.prior, editing.text)) {
+        deps.setDraft(editing.prior);
+        saveDraft(editing.prior);
+      }
+      refresh();
+      const handle = deps.handle();
+      if (handle === null) {
+        return;
+      }
+      try {
+        await handle.steer(editing.text, id, turnId);
+        state = enqueueAcked(state, id);
+      } catch {
+        // Never both places: the row goes and the words are the field's again
+        // (the existing steer-refusal rule — a kept row would deliver it too).
+        state = enqueueRejected(state, id, new Set()).state;
+        deps.setDraft(restoreAfterFailure(deps.draft(), editing.text));
+        saveDraft(deps.draft());
+        deps.notify("that message could not be queued again — it is in your field");
+      }
+      await persistOwn();
+      refresh();
     },
     // B8: the adapters take what is ALREADY attached (`taken`) and derive the
     // picker's limit from it; passing the room (5 on an empty composer) made

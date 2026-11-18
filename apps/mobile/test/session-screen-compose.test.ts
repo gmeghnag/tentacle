@@ -79,6 +79,8 @@ function harness(
   const session = {
     queue: null as QueueState | null,
     queueListener: (_state: QueueState) => {},
+    /** Each `session/unqueue`, as the compose half asked for it. */
+    unqueued: [] as (readonly string[])[],
     sent: [] as string[],
     steers: [] as { readonly text: string; readonly id: string; readonly turnId: string }[],
     /** A turn starts running: fed as the session's own `turn` activity (what the
@@ -136,6 +138,10 @@ function harness(
     },
     queued: () => session.queue ?? undefined,
     reclaim: async () => {},
+    unqueue: async (ids) => {
+      session.unqueued.push(ids);
+      return { removed: [...ids], delivered: [] };
+    },
     port: {
       upload: async (_bytes, meta) =>
         ({ id: "port", mimeType: meta.mimeType, size: 3 }) as AttachmentRef,
@@ -471,6 +477,137 @@ describe("the compose half on the screen", () => {
     expect(h.session.sent).toEqual([]);
     expect(h.session.steers.map((s) => s.text)).toEqual(["steer me"]);
     expect(screen.state().draft).toBe("");
+  });
+});
+
+describe("the pending bubbles on the screen (docs/feat/mobile-queued-compose.md D1/D6)", () => {
+  /**
+   * A turn that STAYS running: `session.turn`'s own stream is empty, so it drains
+   * (and the turn ends) after a `settle`. A queue act needs a live turn, and Edit's
+   * × re-queues through `turnId()`.
+   */
+  const runningTurn = (h: ReturnType<typeof harness>): void => {
+    const never = new Promise<void>(() => {});
+    h.session.activity?.({
+      kind: "turn",
+      turnId: "t-run",
+      events: (async function* () {
+        await never;
+        yield null as never;
+      })() as never,
+      cancel: () => {},
+    });
+  };
+
+  test("the view's pending carries one bubble per queued row, mine marked", async () => {
+    // The transcript's footer draws `pending` (D1): a projection of the SAME rows
+    // the card used to show, so nothing new can drift. Mutation: drop `pending`
+    // from the screen's view wiring → red (no bubble at all).
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    runningTurn(h);
+    screen.setDraft("my words");
+    screen.press();
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    expect(h.session.steers.map((s) => s.text)).toEqual(["my words"]);
+    const id = screen.state().view.pending[0]?.id ?? "";
+    expect(id).not.toBe("");
+    // Another device's message arrives in the same report: shown, not mine.
+    h.session.queueListener({
+      entries: [
+        { id, text: "my words" },
+        { id: "theirs", text: "their words" },
+      ],
+      returned: [],
+    });
+    expect(screen.state().view.pending.map((b) => `${b.id}:${b.mine}:${b.phase}`)).toEqual([
+      `${id}:true:pending`,
+      "theirs:false:pending",
+    ]);
+    // And the bubbles are what the TRANSCRIPT half reads, not a second list.
+    expect(screen.state().view.queued.map((row) => row.id)).toEqual([id, "theirs"]);
+  });
+
+  test("Edit withdraws through the screen: the banner stands and MY words reach the field", async () => {
+    // Mutation: forward `edit` without the compose half (`compose?.edit`) → red
+    // (no unqueue, no banner).
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    runningTurn(h);
+    screen.setDraft("fix me");
+    screen.press();
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    const id = screen.state().view.pending[0]?.id ?? "";
+    screen.setDraft("");
+    await screen.edit(id);
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    expect(h.session.unqueued).toEqual([[id]]);
+    expect(screen.state().view.editing?.id).toBe(id);
+    expect(screen.state().view.editing?.text).toBe("fix me");
+    expect(screen.state().draft).toBe("fix me");
+    // Withdrawn (owner Q2): it is no longer a pending bubble.
+    expect(screen.state().view.pending).toEqual([]);
+  });
+
+  test("Cancel withdraws through the screen and never touches the field", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    runningTurn(h);
+    screen.setDraft("cancel me");
+    screen.press();
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    const id = screen.state().view.pending[0]?.id ?? "";
+    screen.setDraft("typed since");
+    await screen.cancel(id);
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    expect(h.session.unqueued).toEqual([[id]]);
+    expect(screen.state().view.pending).toEqual([]);
+    expect(screen.state().view.editing).toBeNull();
+    expect(screen.state().draft).toBe("typed since");
+  });
+
+  test("the banner's × queues the words again (a NEW id) and ends the edit", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    runningTurn(h);
+    screen.setDraft("again please");
+    screen.press();
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    const first = screen.state().view.pending[0]?.id ?? "";
+    await screen.edit(first);
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    await screen.editCanceled();
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    expect(screen.state().view.editing).toBeNull();
+    expect(h.session.steers.map((s) => s.text)).toEqual(["again please", "again please"]);
+    const rows = screen.state().view.pending;
+    expect(rows.map((row) => row.text)).toEqual(["again please"]);
+    expect(rows[0]?.id).not.toBe(first);
+    expect(rows[0]?.mine).toBe(true);
   });
 });
 
