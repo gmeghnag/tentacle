@@ -6,12 +6,16 @@
  * tested here; `ui/StepNode.tsx` only feeds them to `Animated` (native driver).
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   BREATHE_MS,
   DOT_ORDER,
   SHIMMER_MS,
   breatheCurve,
   shimmerSweep,
+  thinkingElapsed,
+  thinkingLabel,
   thinkingLook,
 } from "../src/thinking-motion.ts";
 
@@ -87,9 +91,110 @@ describe("the word shimmers (D)", () => {
   });
 });
 
+/**
+ * Review round 1, finding 1: S1 shipped `shimmerStops`, which nothing imported
+ * and nothing tested — a peak-opacity mutation there survived the suite. The
+ * rule this pins is the one that would have caught it: this module exports the
+ * curves the component draws, what the row SAYS (`thinkingElapsed`,
+ * `thinkingLabel`), and nothing else. A symbol the plan has not justified is a
+ * symbol with no consumer — it waits for its own slice, with its own test.
+ */
+/**
+ * The ONE list of what `thinking-motion.ts` may export: the curves the component
+ * draws (mockup B + D), and what the row says (S1). Anything else is a symbol
+ * nothing declared a use for.
+ */
+const EXPORTS = [
+  "BREATHE_MS",
+  "SHIMMER_MS",
+  "DOT_ORDER",
+  "DotPos",
+  "Curve",
+  "breatheCurve",
+  "shimmerSweep",
+  "thinkingLook",
+  "thinkingElapsed",
+  "thinkingLabel",
+];
+
+describe("thinking-motion exports only what it is meant to", () => {
+  test("the module's source declares nothing beyond that list (mutation: add `shimmerStops` back → red)", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "src", "thinking-motion.ts"), "utf8");
+    const declared = [...src.matchAll(/^export (?:const|function|interface|type) (\w+)/gm)].map(
+      (m) => m[1] ?? "",
+    );
+    // Not vacuous: the regex must find this module's exports at all.
+    expect(declared.length).toBe(EXPORTS.length);
+    expect([...declared].sort()).toEqual([...EXPORTS].sort());
+  });
+});
+
 describe("Reduce Motion", () => {
   test("off: animated dots + shimmer; on: a static ∴ in accent, dots solid, plain grey word", () => {
     expect(thinkingLook(false)).toEqual({ animate: true, glyph: "accent", word: "sec" });
     expect(thinkingLook(true)).toEqual({ animate: false, glyph: "accent", word: "sec" });
+  });
+});
+
+/**
+ * docs/feat/mobile-thinking-images.md S1 (Owner Q1 = "B + seconds"): the word
+ * loses its "…" — the seconds say it is moving — and they are written with a
+ * STEADY width (zero-padded, drawn in tabular figures), so the trailing text
+ * never jumps as it counts. `liveElapsed` keeps its own shape for tool rows.
+ */
+describe("thinkingElapsed — the seconds beside the word", () => {
+  test("under a minute: whole seconds, no padding needed", () => {
+    expect(thinkingElapsed(0)).toBe("0 s");
+    expect(thinkingElapsed(-5)).toBe("0 s");
+    expect(thinkingElapsed(999)).toBe("0 s");
+    expect(thinkingElapsed(1000)).toBe("1 s");
+    expect(thinkingElapsed(59_999)).toBe("59 s");
+  });
+
+  test("minutes: the seconds are zero-padded, so the width holds (mutation: `${s}` → “1 min 5 s” is a char shorter and the row twitches)", () => {
+    expect(thinkingElapsed(60_000)).toBe("1 min 00 s");
+    expect(thinkingElapsed(65_000)).toBe("1 min 05 s");
+    expect(thinkingElapsed(125_400)).toBe("2 min 05 s");
+    expect(thinkingElapsed(3_599_000)).toBe("59 min 59 s");
+  });
+
+  test("an hour and beyond: hours + padded minutes — never “120 min” (mutation: reuse `liveElapsed` → 2 h reads “120 min 0 s”)", () => {
+    expect(thinkingElapsed(3_600_000)).toBe("1 h 00 min");
+    expect(thinkingElapsed(7_320_000)).toBe("2 h 02 min");
+  });
+
+  test("the width holds until a unit gains a digit (the padding is what tabular figures hold)", () => {
+    const width = (ms: number) => thinkingElapsed(ms).length;
+    // 9 s → 10 s is the one place the digits grow under a minute: padding
+    // cannot help a two-digit count start at one digit, so 0..9 s is drawn as
+    // `N s` and the width steps up once, at 10 s.
+    expect(width(5_000)).toBe(1 + " s".length);
+    expect(width(10_000)).toBe(2 + " s".length);
+    // From a minute on the seconds are zero-padded, so the width is constant
+    // while the minute count keeps its digits (mutation: `${sec}` instead of
+    // the padding → "1 min 5 s" is a char shorter than "1 min 00 s").
+    const oneDigitMinutes = [60_000, 65_000, 599_000];
+    expect(new Set(oneDigitMinutes.map(width)).size).toBe(1);
+    const twoDigitMinutes = [600_000, 3_599_000];
+    expect(new Set(twoDigitMinutes.map(width)).size).toBe(1);
+    // A second minute digit is the honest exception: tabular figures steady the
+    // digits, they cannot remove one.
+    expect(width(600_000)).toBe(width(60_000) + 1);
+    // Hours + padded minutes, same rule.
+    const oneDigitHours = [3_600_000, 7_320_000];
+    expect(new Set(oneDigitHours.map(width)).size).toBe(1);
+  });
+});
+
+describe("thinkingLabel — the word and its clock, one call", () => {
+  test("the word is “Thinking”, with no ellipsis (mutation: keep “Thinking…” → the mockup's word plus a dangling …)", () => {
+    expect(thinkingLabel(0).word).toBe("Thinking");
+    expect(thinkingLabel(12_900).word).toBe("Thinking");
+  });
+
+  test("the seconds are the same clock `thinkingElapsed` writes", () => {
+    expect(thinkingLabel(0).seconds).toBe("0 s");
+    expect(thinkingLabel(12_900).seconds).toBe("12 s");
+    expect(thinkingLabel(125_000).seconds).toBe("2 min 05 s");
   });
 });

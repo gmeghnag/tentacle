@@ -165,6 +165,11 @@ function BreathingTherefore({ palette, still }: { palette: Palette; still: boole
  * The band is a clipping window moving right while its copy of the word moves
  * left by the same amount, so the bright copy stays on the grey one — two
  * transforms of one native-driver clock. Plain grey under Reduce Motion.
+ *
+ * The window has hard edges, so the sweep is a visible RECTANGLE behind the word
+ * — exactly what docs/feat/mobile-thinking-images.md (Owner Q1 = "B") replaces
+ * with a shimmer clipped to the glyphs (S2, after S0's verdict). Until S2 lands
+ * this component is the bug, not the fix.
  */
 function ShimmerWord({
   palette,
