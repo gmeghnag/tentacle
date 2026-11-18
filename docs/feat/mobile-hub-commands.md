@@ -557,3 +557,23 @@ Mutations (each reverted; `git status` clean after):
 Attacks tried: (a) dimmed slide-release → second dimmed tap — **found Finding 1**; (b) flash timer surviving fan close / unmount — held (pinned, mutation red); (c) menu/VoiceOver path still gets the notice line — held (`resolveCommit` unchanged, verification round's `noop` notice); (d) UNKNOWN artifacts list dims Artifacts — held (`hub-session.ts:121`). §7 "logic in pure modules": held — text/visibility decisions in `hub-flash.ts`, the `.tsx` only times. No protocol/persistence/broker invariant touched.
 
 Note (not a finding, interim by plan): `commandsOpen` (`SessionScreen.tsx:840`) is set but never read until C3 mounts the sheet, so in C1 alone the Commands disc is a silent no-op tap — C1 must not ship without C3.
+
+## Review
+
+### Slice C1 — adversarial re-review after fix round 1 (fresh context)
+
+*— claude-opus-5-5, 2026-11-18*
+
+**Verdict: APPROVE** (no HIGH/MEDIUM). Same model family as the executor of fix round 1 and the earlier reviews; only the context is fresh, so blind spots they share may survive.
+
+Gate (narrow, as scoped): the 7 touched `hub-*` test files 246 pass / 0 fail; `bun run lint` clean (2091 files); `bun run typecheck` clean. Full `bun test` not run (out of scope).
+
+Mutations (each one reverted from a scratch copy; `git status` clean afterwards):
+| mutation | result |
+|---|---|
+| drop the dimmed branch's `{ kind: "highlight", index: null }` (`hub-gesture.ts`) | red: 3 in `hub-gesture.test.ts`, including the fix-round-1 case |
+| `artifactsEmpty` treats an UNKNOWN list as empty (`(list ?? []).length === 0`, `hub-session.ts:121`) | red: 5 across `hub-session`/`hub-actions` |
+
+Attacks tried: (a) Finding 1 (dimmed slide-release, then a second dimmed tap): fixed at the source. `commit` now clears `hi` before `flash` (`hub-gesture.ts:184-197`), and the test is bound to the real `pillIndex`. (b) Every way out of a sticky fan (`tapOverlay` miss, `down`, `cancel`) goes through `CLOSE`, which calls `disarmFlash`, and unmount clears the timer too. Held. (c) `moving.current` is left true after a dimmed slide-release turns the fan sticky. That is the same as an ordinary sticky open, and the later `close` resets it. Held. (d) §7 "logic in pure modules": the text, visibility and index decisions are in `hub-flash.ts`; the `.tsx` only runs the one timer. Held. C1 touches no protocol, persistence, broker or terminal invariant.
+
+Carried over, not findings: the two clocks for one flash (Low, left on purpose in fix round 1), and the `commandsOpen` no-op until C3 mounts the sheet. C1 must not ship without C3.
