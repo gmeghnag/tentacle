@@ -248,13 +248,14 @@ must leave an empty transcript + the one `◇` line (C2 Tests).
 16. `screens/CommandsSheet.tsx` (render only), the existing sheet chrome (the
     Tools/Activity sheet's): one row per `CommandRow` — title, one-line
     `explain` in `sec`, the state at the trailing edge (spinner + `Stop` while
-    running; `✓ ctx A → B` from the separator's own core text,
-    `compactionSeparatorText`; `▲` + `Retry` on failure; a switch for
-    Auto-accept). Clear's `confirming` expands the row in place into the question
-    + `Cancel` / `Clear` (Clear in `palette.red` + the word, never hue alone).
-    Rename closes the sheet and calls `controller.beginRename()`. The sheet stays
-    open while Compact runs (the row is its live state) and a closed sheet
-    leaves the footer slot as the only state.
+    running; `Compacted ✓` — the view-model's own `done` text, whose `✓` is
+    already in it; the figures `ctx A → B` stay the transcript separator's, since
+    `CommandRow` carries none: amended in Execution, see drift; `▲` + `Retry` on
+    failure; a switch for Auto-accept). Clear's `confirming` expands the row in
+    place into the question + `Cancel` / `Clear` (Clear in `palette.red` + the
+    word, never hue alone). Rename closes the sheet and calls
+    `controller.beginRename()`. The sheet stays open while Compact runs (the row
+    is its live state) and a closed sheet leaves the footer slot as the only state.
 
 ### Files
 
@@ -547,6 +548,56 @@ Mutations (each reverted; `rg MUTATION` empty afterwards):
 Drift: the reviewer's list plus the request timeout (same unknown outcome). A link that the client gives up on (`remote-client.ts:3374`, `stopped` with a free-form reason) now reads `▲ Compact failed: <reason>` rather than the unknown line. Unverified: whether a call can still be in flight when that rejection reaches it (I expect the earlier drop to have rejected it with `DROPPED_NOT_RETRIED` first); to check, drive a `RemoteClient` link to `stopped` with a `session/compact` pending.
 
 Gate (narrow): `compact-slot`, `session-screen-commands`, `transcript-parity` 43 pass / 0 fail; `bunx biome check` on the 3 touched files clean; `tsc -p apps/mobile` clean. Full `bun run check` is the orchestrator's.
+
+### Slice C3 — the Commands sheet. DONE
+
+*— claude-opus-5-5 (executor, C3), 2026-11-18*
+
+**Load-bearing check re-run first** (`.tentacle/tmp/mobile-hub-commands/c3-check.ts`, real `session-commands.ts` + the branch's source):
+
+```
+HEAD  commandsOpen lines: 1        <- written, never read (C1's no-op tap)
+HEAD  sheet file exists: true      <- worktree probe, not HEAD; see the note below
+NOW   commandsOpen lines: 3
+NOW   mounts <CommandsSheet: true
+rows: compact=ready clear=ready rename=ready retry=ready autoAccept=toggle
+arm  : {"armed":true,"run":false}   confl: {"armed":false,"run":true}
+```
+
+The premise held: C2's engine (`commandRows`, `clearConfirm`, `state.commands`, the controller's seven actions) is present and correct on the branch, and C3's missing piece was exactly the sheet plus its mount — nothing had to be re-derived. The `commandsOpen` lines are read from `git show HEAD:apps/mobile/src/screens/SessionScreen.tsx`, i.e. the branch WITHOUT this slice; the `sheet file exists` lines are an `existsSync` on the worktree, so they read `true` both times (the real HEAD probe is `git show HEAD:apps/mobile/src/screens/CommandsSheet.tsx`, which exits 128 — the file is not on HEAD).
+
+**Built in dependency order, red first (on the assertions, not imports):**
+
+1. `apps/mobile/src/screens/CommandsSheet.tsx` (new, render only): one `Row` per `CommandRow` inside the Tools/Session-info `pageSheet` chrome (`Sheet` + `BandSection`, everything `onSheet`), the state at the trailing edge. `tapFor` maps a `ready` row's own tap to its handler; `edgeFor` maps the state (`dimmed` → its reason in `sec`; `running` → `ActivityIndicator` + `Compacting…`/`Clearing…` + `Stop` for compaction; `done` → the view-model's `Compacted ✓`; `failed` → `▲` + the words + `Retry`; `toggle` → the `Switch`). Clear's `confirming` replaces the row's title with `CLEAR_QUESTION` and puts `Cancel` / `Clear` at its edge (`Clear` in `palette.red` + the word). Every action is a prop; the file computes nothing (§7).
+2. `apps/mobile/src/screens/SessionScreen.tsx`: `closeCommands`, the `<CommandsSheet>` mount right before `<ActivitySheet>` with `rows={state.commands}` and every handler the controller's own (`compact`, `cancelCompaction`, `armClear`, `cancelClear`, `clear`, `retryLast`, `setAutoAccept`), `renameFromCommands` (closes the sheet, then `controller.beginRename()` — the header title's ONE path), and `commandsOpen ||` in `floatShown`'s `covered` list so the floating button hides under the sheet like every other one. C1's dangling `commandsOpen` is now read — the no-op tap is gone.
+3. `apps/mobile/test/commands-sheet.test.ts` (new, 17 tests): the host-stub render walk of `notice-row.test.ts` (string element types, so nothing is silently called-and-dropped) over the real component, plus the screen's mount pinned from source (the `hub-commands-wiring.test.ts` pattern, since `SessionScreen.tsx` is unimportable from Bun).
+
+Red first: the module's absence made the first run fail on the import (a new file, so there is no "old" version to be red against), and — the part that matters (§9) — every property this slice is actually about was then shown **red on the assertion** by the mutations below, on the finished code.
+
+**Drift from the Implementation (and why):**
+
+- **`✓ ctx A → B` became `Compacted ✓`.** The plan's item 16 wanted the figures from `compactionSeparatorText`'s own core text, but `CommandRow.state` of kind `done` carries only `text` (`session-commands.ts:85-90`, C2's `COMPACTED_DONE`), and the separator's figures live in the transcript row, not in the sheet's view-model. Reading them here would mean a second compaction-figures rule in a `.tsx` — exactly what §7 forbids. The row therefore shows the footer's own words. Plan item 16 amended in place (the one step that contradicted the code; per §8 the plan was fixed, not the code forced). Promoting the figures into `CommandRow` is a `session-commands.ts` + controller change, i.e. C2's module — left as debt, not smuggled into a renderer.
+- **The `Stop` is drawn only on Compact's running row.** The view-model has one `running` kind for both commands; `Clearing…` has no cancel action on the controller (there is no clear abort), so drawing a Stop on it would be a dead control.
+- **`Retry` and the other edge actions are `Pressable`s with a `testID`, not `Row` props.** `Row`'s `trailing` slot takes any node and its `onPress` is the ROW's; a trailing button must not fire the row's own action, so the words are their own small pressables (`command-<id>-retry`, `command-clear-cancel`, `command-clear-confirm`, `command-compact-stop`).
+- **A `ready` row's tap is the row; every other state's is the edge.** A `dimmed`, `running`, `done` or `failed` row is not tappable as a whole (Retry is its own word), which is what keeps "the row's state is the truth" from being bypassed by a stray tap.
+- **`floatShown` gained `commandsOpen`** — not in the plan's item 16, but a sheet that leaves the floating button on top of itself is the Tools D6 bug this file already avoids for every other sheet.
+
+**Mutations** (each reverted; `git status` shows only the two source/test paths afterwards — the third changed path is this doc; the named test red while broken, green restored):
+
+| # | mutation | red |
+|---|---|---|
+| 1 | drop the `state.kind === "confirming"` branch (Clear never opens the question) | 2 — both Clear-confirm tests (`CLEAR_QUESTION` absent, no `Clear` control) |
+| 2 | drop the failure's `Retry` `Action` | 1 — "a failure renders `▲`, its words AND a Retry" |
+| 3 | drop `dimmed={state.kind === "dimmed"}` from the row | 1 — "a dimmed row renders its reason in place" |
+| 4 | mount `rows={[]}` instead of `rows={state.commands}` | 1 — the mount test (`rows={state.commands}` absent) |
+
+Mutation 1 is the plan's own named mutation, red on the property (the question and the two controls), not on a compile error.
+
+**Tests / gate (narrow):** `commands-sheet` 17 pass / 0 fail. The neighbouring/covering files, re-run on the final tree: `commands-sheet` + `session-commands` + `compact-slot` + `session-screen-commands` + `hub-commands-wiring` + `hub-tools-wiring` + `session-screen` = **119 pass / 0 fail**; all 30 `*wiring*.test.ts` files **302 pass / 0 fail** (re-run earlier, before the last doc-comment-only edits to the sheet). `bunx tsc -p apps/mobile` clean; `bunx biome check` clean on the three touched files (`CommandsSheet.tsx`, `SessionScreen.tsx`, `commands-sheet.test.ts`). The full `bun run check` gate is the orchestrator's (token budget) — not run here.
+
+**No protocol, schema, daemon, persistence, TUI or client change**, so no `protocol.d/` note and no `packages/protocol/schema/protocol.json` regeneration. Changelog: the task's ONE fragment `changelog.d/mobile-hub-commands.added.md` already carries the Commands sheet in its wording (the hub item, Compact, Clear, Rename, Retry, Auto-accept); no second fragment was added and `CHANGELOG.md` was not touched.
+
+**Unverified:** the light/dark simulator screenshots the plan's Tests section asks the executor to attach — no simulator in this run; the visual state is pinned by `commands-sheet.test.ts` (the trailing-edge states, Clear's inline pair and its red) and by the source-pinned mount instead.
 
 ## Review
 

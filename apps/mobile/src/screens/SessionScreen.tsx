@@ -156,6 +156,7 @@ import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
 import type { VoiceSettings } from "../voice-settings-store.ts";
 import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
 import { ActivitySheet } from "./ActivitySheet.tsx";
+import { CommandsSheet } from "./CommandsSheet.tsx";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
@@ -896,6 +897,7 @@ export function SessionScreen({
       infoOpen ||
       // Tools is a sheet like any other: the button hides under it (D6).
       toolsOpen ||
+      commandsOpen ||
       menuOpen ||
       hubMenu !== null ||
       renaming !== null ||
@@ -947,6 +949,13 @@ export function SessionScreen({
     controller.closeInfo();
   };
   const openCommands = () => setCommandsOpen(true);
+  const closeCommands = () => setCommandsOpen(false);
+  // Rename is the header title's OWN path (Owner decision 5): the sheet closes and
+  // the one field opens, so there is never a second rename surface.
+  const renameFromCommands = () => {
+    setCommandsOpen(false);
+    controller.beginRename();
+  };
   /** A pull-to-refresh or a Retry: the same `refreshInfo` Session info uses. */
   const refreshTools = () => {
     setToolsRefreshing(true);
@@ -1777,6 +1786,20 @@ export function SessionScreen({
             onClose={closeTools}
           />
         )}
+        <CommandsSheet
+          palette={palette}
+          visible={commandsOpen}
+          rows={state.commands}
+          onCompact={() => void controller.compact()}
+          onStopCompact={() => controller.cancelCompaction()}
+          onArmClear={() => controller.armClear()}
+          onCancelClear={() => controller.cancelClear()}
+          onClear={() => void controller.clear()}
+          onRename={renameFromCommands}
+          onRetry={() => controller.retryLast()}
+          onAutoAccept={(on) => void controller.setAutoAccept(on)}
+          onClose={closeCommands}
+        />
         <ActivitySheet
           palette={palette}
           visible={activityOpen}
