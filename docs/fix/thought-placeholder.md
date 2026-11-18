@@ -280,3 +280,15 @@ the row starts at 1000 ⇒ `· 8 s` (the pre-fix reading).
 scope — `biome check` on the 3 touched files clean; `bunx tsc -p
 apps/mobile --noEmit` ✓; `bun test apps/mobile/test` → 3688 pass / 0 fail (252
 files, 16.6 s), which also shows the `step-thought-marker` stub holds in-file.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18* (fresh context; same model family caveat as round 1)
+
+**Verdict: PASS.** MEDIUM-1 fixed: `apps/mobile/src/transcript.ts:464-469` drops a blank
+reasoning delta that would OPEN a row (blank deltas after real text still extend it), so live
+neither draws a whitespace `Thought` row nor starts the clock before the first non-blank delta —
+the agent's edges. Mutation (guard → `if (false)`): `thought-placeholder.test.ts` 2 fail
+(whitespace-only; starts-blank timing), reverted, tree clean. Isolation gap closed:
+`step-thought-marker.test.ts` alone 6/6. Regressions: `apps/mobile/test/` 3688 pass / 0 fail
+(incl. transcript-parity); `bun run lint` clean (2095 files); `bun run typecheck` ✓.
