@@ -374,4 +374,51 @@ first — the test written and seen failing before its implementation.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-18* (fresh context; same family as the planner,
+different from the executor)
+
+**Verdict: REQUEST-CHANGES** (one HIGH; the pure module, controller and wiring
+otherwise hold).
+
+**Findings**
+
+1. **HIGH — a close interrupted mid-animation leaves the sheet unclosable.**
+   `ActivitySheet.tsx:236-246`: `close()` sets `closing.current = true` and
+   clears it only in the spring's `done`, which runs only when
+   `finished === true` (`:224-228`). Any other `animateTo`/`setValue` on the
+   same `Animated.Value` stops the spring with `{finished:false}` (RN
+   `SpringAnimation.stop()` → `__notifyAnimationEnd({finished:false})`), so
+   `closing` stays `true` and `onClose` never fires. Triggers during the
+   ~0.5 s close: the open effect (`:256-262`, deps `detents.low`/`wanted`)
+   re-runs when a row arrives/ends (content re-measure) or the person taps a
+   row (`focus` → `wanted`), and a re-grab of the header calls
+   `height.setValue` (`:286`). Result: the sheet springs back open and the
+   scrim, a flick and Android back (`onRequestClose={close}`) all return early
+   at `:237` — a modal overlay the person cannot dismiss until something else
+   flips `visible`. (Reduce Motion's `timing` path calls `done` regardless, so
+   it is not affected.) Fix: reset `closing` on any non-finished end too, or
+   make the open/follow effects skip while closing; add a wiring pin.
+   Not unit-testable in Bun (RN is Flow); verified from source of the effect
+   deps + RN 0.88 `SpringAnimation.js:367-374`.
+
+**Gate:** touched tests (`activity-panel`, `activity-panel-wiring`,
+`session-screen-activity-actions`, `e2e-flows`) 112 pass / 0 fail;
+`bun run lint` clean; `bun run typecheck` clean. Full `bun test` not re-run.
+
+**Mutations (reverted, tree byte-identical by `git status`):**
+`panelAutoClose` ignoring `focus` → 1 fail; `stopTap` window never expiring →
+1 fail. Executor's M1–M9 table is consistent with what was spot-checked.
+
+**Attacks tried:** (a) interrupted close → finding 1; (b) open effect vs
+`panelFollowsContent` at `tall` — the open effect re-animates on any
+`detents.low` change, but with scrollable content `low` is the cap constant,
+so a dragged-tall sheet is not pulled down in practice (no finding);
+(c) row Stop single-flight / notice lifetime / detail untouched — holds
+(`session-screen-controller.ts:1625-1648`); (d) §7 invariants: no protocol,
+persistence, broker or transport change; logic in `activity-panel.ts`,
+component renders — holds except the close-guard state machine, which lives
+in the component and is exactly where the bug is (another argument for §7).
+
+**Executor behaviour:** honest drift list and mutation table; the detent-cap
+drift is a real fix of a plan error. It missed the animation-interruption path
+of its own "one close door".
