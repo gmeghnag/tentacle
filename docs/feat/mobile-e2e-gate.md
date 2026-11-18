@@ -121,4 +121,17 @@ The e2e evidence is the full run in Execution (the known-bug `34-hub-*` red on `
 
 ## Review
 
-*(fresh-context reviewer)*
+*— claude-opus-5-5, 2026-11-18* (fresh context; same model as the executor: shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES**
+
+Gate: `bun test apps/mobile/test/e2e-gate.test.ts apps/mobile/test/e2e-flows.test.ts` → 65 pass, **1 fail**; `bun run lint` clean; `bun run typecheck` clean. Full `bun run check` not run (this branch's own test is already red).
+
+1. **HIGH — the branch's own test is red.** `apps/mobile/test/e2e-gate.test.ts:231` fails: `34-hub-commands` is tagged `known-bug` (`flows/34-hub-commands.yaml:2-4`) but `TODO.md` has no ``e2e flow `34-hub-commands` `` line — `TODO.md` is in the plan's Files list but not in the diff. `bun run check` fails.
+2. **MEDIUM — `--ios N --udid X` drives an unvalidated device.** `run.ts` validates the UDID only when `args.only === undefined`; the loop then uses `udid ?? firstDevice(...)`. A typo'd UDID gives a build/install exit code instead of exit 2 (doc's failure mode "wrong/unknown UDID → exit 2"), and a valid UDID of the other major is driven and reported as iOS N. Validate `majorOfDevice(...) === args.only` too.
+3. **MEDIUM (plausible, not reproduced) — timeout kills only Maestro's direct process.** `spawnFlow` `child.kill("SIGKILL")` hits the `maestro` launcher/JVM; it is not spawned in its own process group, so an orphaned XCTest driver / `xcodebuild` can survive and hold the simulator's driver port for the next flow — the very hang the timeout is meant to bound. Verify with `pgrep -fl xctest` after a forced timeout; kill the group if it survives.
+4. **MEDIUM — Execution is empty** ("pending the first full run") while code comments cite "the first/second gate run"; the evidence the Tests section promises (full run, `34-hub-*` red on `main`, `STEADY_MS` change) is not in the doc.
+
+Mutations (each reverted, tree byte-identical, `git status` clean): `shouldRetry` `=== 1`→`<= 2` → caught; `verdictOf` ignoring `known-bug` → caught (4 tests).
+Attacks with no finding: tag parsing (block/inline/reason-without-tag), `quarantine`+other exclusivity, last-attempt-decides, port 4000 guard, hooks routing (pinned by a union-vs-`hookFor` test). §7 invariants: none touched (harness/tooling only).
+Executor: careful pure-module split and tests, but declared done-able with its own test red and Execution unwritten.
