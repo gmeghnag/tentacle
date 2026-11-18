@@ -14,6 +14,7 @@ import {
   artifactCard,
   toolLabel,
 } from "@tentacle/core";
+import type { ArtifactMeta } from "@tentacle/protocol";
 import chalk from "chalk";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
@@ -95,8 +96,8 @@ const DEFAULT_WIDTH = 80;
 // that marks a tool's output block (Claude-Code style). Both are 2 columns so
 // bodies stay aligned whichever is used.
 const INDENT = "  ";
-/** The chord that opens the newest artifact (docs/feat/model-artifacts.md D8, S6b). */
-export const ARTIFACT_OPEN_HINT = "^X^O";
+/** The `present` tool's wire name (`@tentacle/tools`' `present.ts`). */
+const PRESENT_TOOL = "present";
 /** Read at CALL time: a module-load capture would freeze the palette (and the mode). */
 const connector = (): string => `${theme.subtle("⎿")} `;
 /**
@@ -271,39 +272,29 @@ function renderContext(row: DiffRow, gutterW: number): string {
 }
 
 /**
- * `present`'s card (docs/feat/model-artifacts.md D8, chosen variant A): ONE row
- * under the tool header — `▣ <title>` then the card's own metadata and the open
- * hint. Two lines total with the header, never a box; the view-model is
- * `@tentacle/core`'s `artifactCard`, so the phone's band row and this row can
- * never disagree about what an artifact IS.
+ * `present`'s result row (docs/feat/tui-present-row.md, superseding
+ * docs/feat/model-artifacts.md D8's `▣ <title> … ^X^O open` card): the header
+ * already names the artifact (`● Present <title>`, `toolSubtitle`), so the ONE
+ * row under it is the short fact in grey —
+ * `<id> · <type> · <size>[ · vN][ · from the pod][ · no longer available]`.
+ * Everything after the id is `@tentacle/core`'s `artifactCard().line2`, so the
+ * phone's band row and this row can never disagree about what an artifact IS.
+ * A click on the header opens it (`mouse-stream.ts` + `artifactOfCall`).
  *
- * The `pod` origin comes from the RUNTIME (`RenderOptions.artifactsInPod`: a
- * `run`/`attach` daemon's bytes are pod-supplied), never from the meta, and an
- * evicted artifact shows `no longer available` from the card's own state.
+ * The `pod` origin comes from the RUNTIME (`RenderOptions.spillInPod`: a
+ * `run`/`attach` daemon's bytes are pod-supplied), never from the meta.
  */
+export function presentResultLine(meta: ArtifactMeta, inPod: boolean): string {
+  return `${meta.artifactId} · ${artifactCard(meta, inPod ? { origin: "pod" } : {}).line2}`;
+}
+
 function artifactBody(tool: ToolItem, width: number, inPod: boolean): string[] {
   const detail = tool.detail;
   if (detail?.kind !== "artifact") {
     return [];
   }
-  const card = artifactCard(detail.artifact, inPod ? { origin: "pod" } : {});
-  const hint =
-    card.action === "open"
-      ? ` · ${ARTIFACT_OPEN_HINT} open`
-      : card.action === "save"
-        ? " · s save to ~/Downloads"
-        : "";
-  const tail = `${card.line2}${hint}`;
-  // ONE row (chosen variant A: two lines total with the header). The title keeps
-  // its room first — what the person recognises — and the metadata takes what is
-  // left: a narrow terminal loses the tail, never the name. Cut by CELLS, so the
-  // row cannot wrap into a second one and overflow the block's width.
-  const room = Math.max(1, width - stringWidth(card.glyph) - 2);
-  const title = truncateCells(card.title, Math.max(1, Math.min(room, Math.ceil(room * 0.6))));
-  const meta = truncateCells(tail, Math.max(0, room - stringWidth(title) - 1));
-  return [
-    `${theme.accent(card.glyph)} ${chalk.bold(title)}${meta === "" ? "" : ` ${theme.subtle(meta)}`}`,
-  ];
+  // Cut by CELLS, so the row cannot wrap into a second one.
+  return [theme.subtle(truncateCells(presentResultLine(detail.artifact, inPod), width))];
 }
 
 /**
@@ -575,6 +566,13 @@ function plainToolBody(tool: ToolItem, width: number, inPod: boolean, fit: BodyF
   if (tool.status === "queued") {
     return [];
   }
+  // A `present` with no card (a resume the daemon's list did not join, an older
+  // daemon): its result text is the MODEL's receipt ("Presented … They open it
+  // from the card…"), not the person's — the header already names the artifact.
+  // An error still shows (below).
+  if (tool.name === PRESENT_TOOL && tool.status === "ok") {
+    return [];
+  }
   // Spilled: the structured fact, never the model's banner (docs/feat/tui-spill-note.md).
   if (tool.spill) {
     return spillBody(tool, tool.spill, expanded, inPod);
@@ -686,6 +684,17 @@ function toolSubtitle(
     // (docs/feat/model-diagrams.md D2).
     case "diagram":
       return str("title") ?? tool.args;
+    // `present` names the artifact, never its JSON (the args carry the whole
+    // HTML/Markdown `content`): its title, else its id, else the path
+    // (docs/feat/tui-present-row.md). Never the raw args.
+    case PRESENT_TOOL:
+      return (
+        str("title") ??
+        str("id") ??
+        (tool.detail?.kind === "artifact" ? tool.detail.artifact.artifactId : undefined) ??
+        str("path") ??
+        ""
+      );
     default:
       return tool.args;
   }

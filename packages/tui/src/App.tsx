@@ -21,6 +21,7 @@ import {
   type ArtifactConfirm,
   type ArtifactStep,
   NO_ARTIFACT_IN_TRANSCRIPT,
+  artifactOfCall,
   artifactOpenError,
   artifactStep,
   newestArtifact,
@@ -1840,6 +1841,14 @@ export function App({
   // (pure); this hook owns their state and executes the effects. The RENDER
   // SNAPSHOT each event reads is built at the call site in `useInput` below, so
   // a coalesced chunk's reports all see the frame they landed on (Fable M2).
+  // A `present` header click opens through `runArtifact` (declared below, a plain
+  // render-scope function): a ref-backed stable callback, so the hook's deps keep
+  // their identities (Fable H2). Set where `runArtifact` is defined.
+  const openArtifactRef = useRef<(artifact: ArtifactMeta) => void>(() => {});
+  const openClickedArtifact = useCallback(
+    (artifact: ArtifactMeta) => openArtifactRef.current(artifact),
+    [],
+  );
   const mouse = useMouse({
     panelRef,
     dockRef,
@@ -1857,6 +1866,7 @@ export function App({
     panelClick,
     clampOffset,
     submit,
+    openArtifact: openClickedArtifact,
   });
   // The hold's unmount cleanup keeps its place in App's ordered effect list
   // (Fable H1); the hook itself declares no effect.
@@ -1932,6 +1942,9 @@ export function App({
       .catch((error: unknown) => pushNotice(artifactOpenError(artifact, error)));
   };
   const artifactOrigin = shownInPod ? "pod" : "local";
+  // A `present` header click: the SAME decision as `^X^O` / `/artifacts` Enter.
+  openArtifactRef.current = (artifact) =>
+    runArtifact(artifact, artifactStep(artifact, artifactOrigin, "open"));
 
   // --- the key router's executor port (S3) ---------------------------------
   // The ONE place a routing decision becomes a call into the App. Every field is
@@ -2242,6 +2255,8 @@ export function App({
       viewport,
       visibleCount: visible.length,
       expandAll,
+      // The items the laid frame was built from (`layoutTranscript(st.items)`).
+      artifactOf: (id) => artifactOfCall(st.items, id),
     });
     if (mouseStep === "consumed") {
       return;

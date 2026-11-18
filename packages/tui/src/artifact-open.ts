@@ -222,6 +222,24 @@ export function newestArtifact(items: readonly DisplayItem[]): ArtifactMeta | un
   return best;
 }
 
+/**
+ * The artifact a click on call `callId`'s header opens (docs/feat/tui-present-row.md):
+ * the card meta that call's row carries, or undefined — any other call, or a
+ * `present` row with no card yet (still running, failed, or a resume the
+ * daemon's list did not join), keeps the plain header click (expand).
+ */
+export function artifactOfCall(
+  items: readonly DisplayItem[],
+  callId: string,
+): ArtifactMeta | undefined {
+  for (const item of items) {
+    if (item.kind === "tool" && item.id === callId) {
+      return item.detail?.kind === "artifact" ? item.detail.artifact : undefined;
+    }
+  }
+  return undefined;
+}
+
 /** Nothing to open for the chord: said once, pointing at the panel. */
 export const NO_ARTIFACT_IN_TRANSCRIPT =
   "No artifact in this transcript — /artifacts lists the session's.";

@@ -24,6 +24,7 @@
  * has separated (docs/feat/app-decomposition.md, Fable H3's freshness rule).
  */
 
+import type { ArtifactMeta } from "@tentacle/protocol";
 import type { Key } from "ink";
 import type { BackgroundListView } from "./background-list.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
@@ -205,6 +206,11 @@ export interface MouseSnapshot {
   readonly visibleCount: number;
   /** Ctrl+O: every call's command already shows, so a click has nothing to reveal. */
   readonly expandAll: boolean;
+  /**
+   * The artifact call `id`'s row carries (`artifact-open.ts: artifactOfCall`), or
+   * undefined. A click on such a header OPENS it (docs/feat/tui-present-row.md).
+   */
+  readonly artifactOf: (id: string) => ArtifactMeta | undefined;
 }
 
 /**
@@ -229,6 +235,12 @@ export type MouseEffect =
   | { readonly kind: "dockRow"; readonly id: string }
   /** A completed click on a tool call's header row: toggle its expansion. */
   | { readonly kind: "toggleTool"; readonly id: string }
+  /**
+   * A completed click on a `present` call's header: open its artifact through the
+   * App's ONE artifact path (`artifactStep` → confirm / open / notice), exactly
+   * what `^X^O` and `/artifacts`' Enter do.
+   */
+  | { readonly kind: "openArtifact"; readonly artifact: ArtifactMeta }
   /** Copy the current selection (the App assembles the whole buffer) and clear it. */
   | { readonly kind: "copySelection" };
 
@@ -305,12 +317,16 @@ export function dispatchMouse(
     // The call under the cursor's SCREEN row, or null when the row is outside
     // the transcript viewport (the prompt rule, the input box, the status bar)
     // — `tool-hit.ts` owns the whole rule, window included.
-    const id = snapshot.expandAll
-      ? null
-      : toolCallAtViewport(snapshot.laid, snapshot.win, step.click.y);
+    const id = toolCallAtViewport(snapshot.laid, snapshot.win, step.click.y);
+    // A `present` header with its card OPENS the artifact (Ctrl+O or not: there
+    // is nothing to expand on it, its args are not a command).
+    const artifact = id === null ? undefined : snapshot.artifactOf(id);
+    if (artifact !== undefined) {
+      return { state: { click, selection: null }, effects: [{ kind: "openArtifact", artifact }] };
+    }
     // Only a tool call's HEADER row is a control; anywhere else the click stays
     // what it is today (a zero-length selection, i.e. nothing).
-    if (id !== null) {
+    if (id !== null && !snapshot.expandAll) {
       return { state: { click, selection: null }, effects: [{ kind: "toggleTool", id }] };
     }
   }
