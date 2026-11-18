@@ -120,7 +120,9 @@ Q1–Q6: recommendations accepted, with one change on Q1: do NOT add `@react-nat
 
 ## Execution
 
-*(empty — starts after approval)*
+**S1 (DeepSeek).** `thinkingElapsed` / `thinkingLabel` in `thinking-motion.ts`, `fontVariant: ["tabular-nums"]` consumers per S2; `shimmerSweep` → gradient stops. Gate fix (as-built drift): the S1 test's last case asserted that *every* minute-range value has one width, which the approved spec (`Implementation` § S1: `"1 min 05 s"`, `"59 min 59 s"`) never promises — a second minute digit is one char wider, and tabular figures steady digits, they cannot remove one. The test now asserts the property the padding actually buys: constant width while a unit keeps its digit count, one honest step per extra digit (`test/thinking-motion.test.ts`, "the width holds until a unit gains a digit"); non-vacuity confirmed by mutation — dropping the seconds padding (`${sec}`) fails 3 cases.
+
+*— deepseek, 2026-11-18*
 
 ## Review
 

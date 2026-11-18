@@ -123,14 +123,26 @@ describe("thinkingElapsed — the seconds beside the word", () => {
     expect(thinkingElapsed(7_320_000)).toBe("2 h 02 min");
   });
 
-  test("every value keeps a length the next one keeps too (tabular figures have something to hold)", () => {
-    // 9 s → 10 s is the one place the digits grow: padding cannot help a
-    // two-digit second count start at one digit, so 0..9 s is drawn as `N s`.
-    expect(thinkingElapsed(9_000)).toBe("9 s");
-    expect(thinkingElapsed(10_000)).toBe("10 s");
-    // From a minute on, every value is exactly this wide.
-    const widths = [60_000, 65_000, 3_599_000].map((ms) => thinkingElapsed(ms).length);
-    expect(new Set(widths).size).toBe(1);
+  test("the width holds until a unit gains a digit (the padding is what tabular figures hold)", () => {
+    const width = (ms: number) => thinkingElapsed(ms).length;
+    // 9 s → 10 s is the one place the digits grow under a minute: padding
+    // cannot help a two-digit count start at one digit, so 0..9 s is drawn as
+    // `N s` and the width steps up once, at 10 s.
+    expect(width(5_000)).toBe(1 + " s".length);
+    expect(width(10_000)).toBe(2 + " s".length);
+    // From a minute on the seconds are zero-padded, so the width is constant
+    // while the minute count keeps its digits (mutation: `${sec}` instead of
+    // the padding → "1 min 5 s" is a char shorter than "1 min 00 s").
+    const oneDigitMinutes = [60_000, 65_000, 599_000];
+    expect(new Set(oneDigitMinutes.map(width)).size).toBe(1);
+    const twoDigitMinutes = [600_000, 3_599_000];
+    expect(new Set(twoDigitMinutes.map(width)).size).toBe(1);
+    // A second minute digit is the honest exception: tabular figures steady the
+    // digits, they cannot remove one.
+    expect(width(600_000)).toBe(width(60_000) + 1);
+    // Hours + padded minutes, same rule.
+    const oneDigitHours = [3_600_000, 7_320_000];
+    expect(new Set(oneDigitHours.map(width)).size).toBe(1);
   });
 });
 
