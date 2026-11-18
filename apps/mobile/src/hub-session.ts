@@ -116,6 +116,9 @@ export function hubContextOf(input: {
         ? 0
         : unseenArtifacts(input.artifacts.list, input.artifacts.seen),
     activityEmpty: input.activityEmpty ?? false,
+    // A KNOWN empty list is empty; a list never seen yet is unknown, and an
+    // unknown count must not dim the item whose tap fetches it (the Tools D3 rule).
+    artifactsEmpty: input.artifacts?.list !== undefined && input.artifacts.list.length === 0,
     // Unknown counts are NOT empty: a dimmed Tools item never opens the sheet
     // that would learn them, so its own tap is the one that can (D4).
     toolsEmpty: input.tools?.known === true && input.tools.total === 0,
@@ -321,7 +324,7 @@ export function createHubDriver(deps: {
     move: (p, t) => feed({ type: "move", p, t }),
     up: (p, t) => feed({ type: "up", p, t }),
     cancel: () => feed({ type: "cancel" }),
-    tapOverlay: (p) => feed({ type: "tapOverlay", p }),
+    tapOverlay: (p) => feed({ type: "tapOverlay", p, t: deps.now() }),
     dispose: () => {
       clear();
       if (state.kind !== "idle") {

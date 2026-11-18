@@ -310,6 +310,14 @@ export interface FanItemLook {
    */
   readonly rim: number | null;
   readonly rimTone: "accent" | "onAccent";
+  /**
+   * A DASHED hairline instead of a solid one: the dimmed item's shape cue
+   * (mobile-hub-commands Q3 A). A shape, never a hue alone, so the state survives
+   * a colour-blind eye and a greyscale screenshot.
+   */
+  readonly dashed: boolean;
+  /** The glyph's own opacity: 0.38 when dimmed (Q3 A), 1 otherwise. */
+  readonly glyphOpacity: number;
 }
 
 /** The figure an item's rim draws: its own (`item.rim`), else its badge's. */
@@ -325,16 +333,27 @@ export function fanItemLook(item: HubItem, lit: boolean): FanItemLook {
       fg: "onAccent",
       rim: itemRim(item),
       rimTone: "onAccent",
+      dashed: false,
+      glyphOpacity: 1,
     };
   }
   if (item.dimmed) {
-    return { bg: "fill", fg: "sec", rim: null, rimTone: "accent" };
+    return {
+      bg: "fill",
+      fg: "sec",
+      rim: null,
+      rimTone: "accent",
+      dashed: true,
+      glyphOpacity: 0.38,
+    };
   }
   return {
     bg: "card",
     fg: item.danger ? "red" : "accent",
     rim: itemRim(item),
     rimTone: "accent",
+    dashed: false,
+    glyphOpacity: 1,
   };
 }
 

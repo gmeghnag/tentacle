@@ -111,14 +111,14 @@ describe("tap and drag", () => {
   test("a tap then a tap on an item commits it; a tap elsewhere closes", () => {
     const tapped = run([down(ANCHOR), up(at(-2), 120)]).state;
     expect(tapped.kind).toBe("fanSticky");
-    const hit = run([{ type: "tapOverlay", p: item(1) }], tapped);
+    const hit = run([{ type: "tapOverlay", p: item(1), t: 700 }], tapped);
     expect(hit.effects).toEqual([
       { kind: "haptic", cue: "commit" },
       { kind: "commit", id: "steer" },
       { kind: "close" },
     ]);
     expect(hit.state).toEqual(IDLE);
-    const miss = run([{ type: "tapOverlay", p: { x: 40, y: 80 } }], tapped);
+    const miss = run([{ type: "tapOverlay", p: { x: 40, y: 80 }, t: 700 }], tapped);
     expect(miss.effects).toEqual([{ kind: "close" }]);
     expect(miss.state).toEqual(IDLE);
   });
@@ -260,14 +260,17 @@ describe("long-press → fan", () => {
 
   test("sticky: tapOverlay on an item → commit; elsewhere → close", () => {
     const sticky = run([...OPEN, up(ANCHOR, 600)]).state;
-    const hit = run([{ type: "tapOverlay", p: { x: item(2).x + 20, y: item(2).y } }], sticky);
+    const hit = run(
+      [{ type: "tapOverlay", p: { x: item(2).x + 20, y: item(2).y }, t: 700 }],
+      sticky,
+    );
     expect(hit.effects).toEqual([
       { kind: "haptic", cue: "commit" },
       { kind: "commit", id: "activity" },
       { kind: "close" },
     ]);
     expect(hit.state).toEqual(IDLE);
-    const miss = run([{ type: "tapOverlay", p: { x: 40, y: 80 } }], sticky);
+    const miss = run([{ type: "tapOverlay", p: { x: 40, y: 80 }, t: 700 }], sticky);
     expect(miss.effects).toEqual([{ kind: "close" }]);
     expect(miss.state).toEqual(IDLE);
   });
@@ -306,32 +309,68 @@ describe("long-press → fan", () => {
   });
 });
 
-describe("a dimmed item still commits, with the light cue (Design 3)", () => {
-  /** Activity is dimmed (nothing running): it keeps its slot and its commit. */
+describe("a dimmed item flashes its own label in place (owner Q3 A + Q6)", () => {
+  /** Activity is dimmed (nothing running): it keeps its slot and its label shows why. */
   const DIMMED: HubMenu = { ...MENU, dimmed: ["activity"] };
   const dim = () => DIMMED;
 
-  test("commit of a dimmed id → light + commit + close, never the commit cue", () => {
+  test("a sticky tap on a dimmed id → light + flash, and the fan STAYS open", () => {
     const r = run([...OPEN, up(ANCHOR, 600)], IDLE, dim);
-    const hit = run([{ type: "tapOverlay", p: { x: item(2).x + 20, y: item(2).y } }], r.state);
+    const hit = run([{ type: "tapOverlay", p: item(2), t: 700 }], r.state, dim);
     expect(hit.effects).toEqual([
       { kind: "haptic", cue: "light" },
-      { kind: "commit", id: "activity" },
-      { kind: "close" },
+      { kind: "flash", index: 2 },
     ]);
-    expect(hit.state).toEqual(IDLE);
+    expect(hit.state.kind).toBe("fanSticky");
+    // The old behaviour (commit + close) is what made an in-place label impossible.
+    expect(hit.effects.some((e) => e.kind === "commit")).toBe(false);
+    expect(hit.effects.some((e) => e.kind === "close")).toBe(false);
   });
 
-  test("a lifted-on commit of a dimmed item is also light (the slide path)", () => {
+  test("a slide-release on a dimmed id flashes too, and the fan turns sticky (the pill needs it open)", () => {
     const r = run([...OPEN, move(item(2), 500), up(item(2), 600)], IDLE, dim);
     expect(haptics(r.effects)).toEqual(["firm", "tick", "light"]);
-    expect(r.effects.slice(-2)).toEqual([{ kind: "commit", id: "activity" }, { kind: "close" }]);
+    expect(r.effects.slice(-1)).toEqual([{ kind: "flash", index: 2 }]);
+    // The release's own time is the flash's origin.
+    expect(r.state).toMatchObject({ kind: "fanSticky", flash: { index: 2, at: 600 } });
   });
 
-  test("a live id next to it keeps the commit cue", () => {
+  test("a second dimmed tap on the SAME fan restarts the flash at the new time", () => {
+    const sticky = run([...OPEN, up(ANCHOR, 600)], IDLE, dim).state;
+    const first = run([{ type: "tapOverlay", p: item(2), t: 700 }], sticky, dim);
+    expect(first.state).toMatchObject({ kind: "fanSticky", flash: { index: 2, at: 700 } });
+    const again = run([{ type: "tapOverlay", p: item(2), t: 2500 }], first.state, dim);
+    expect(again.effects).toEqual([
+      { kind: "haptic", cue: "light" },
+      { kind: "flash", index: 2 },
+    ]);
+    // The wait is measured from the LATEST tap: `hub-flash.ts` reads `at`.
+    expect(again.state).toMatchObject({ kind: "fanSticky", flash: { index: 2, at: 2500 } });
+  });
+
+  test("a live id next to it commits and closes exactly as before", () => {
     const r = run([...OPEN, move(item(1), 500), up(item(1), 600)], IDLE, dim);
     expect(haptics(r.effects)).toEqual(["firm", "tick", "commit"]);
-    expect(r.effects.at(-2)).toEqual({ kind: "commit", id: "steer" });
+    expect(r.effects.slice(-2)).toEqual([{ kind: "commit", id: "steer" }, { kind: "close" }]);
+    const tap = run(
+      [{ type: "tapOverlay", p: item(1), t: 700 }],
+      run([...OPEN, up(ANCHOR, 600)], IDLE, dim).state,
+      dim,
+    );
+    expect(tap.state).toEqual(IDLE);
+  });
+
+  test("closing the fan drops the flash (no stale label on the next open)", () => {
+    const flashed = run(
+      [{ type: "tapOverlay", p: item(2), t: 700 }],
+      run([...OPEN, up(ANCHOR, 600)], IDLE, dim).state,
+      dim,
+    );
+    const closed = run([down(ANCHOR, 900)], flashed.state, dim);
+    expect(closed.state).toEqual(IDLE);
+    const reopened = run([...OPEN, up(ANCHOR, 1200)], closed.state, dim);
+    expect(reopened.state.kind).toBe("fanSticky");
+    expect(reopened.state).not.toHaveProperty("flash");
   });
 });
 
@@ -371,7 +410,7 @@ describe("timers, extra touches and cancels", () => {
     for (const e of [move(ANCHOR, 1), up(ANCHOR, 1), timer(LONG_MS), { type: "cancel" } as const]) {
       expect(reduce(IDLE, e, solve)).toEqual({ state: IDLE, effects: [] });
     }
-    expect(reduce(IDLE, { type: "tapOverlay", p: ANCHOR }, solve)).toEqual({
+    expect(reduce(IDLE, { type: "tapOverlay", p: ANCHOR, t: 1 }, solve)).toEqual({
       state: IDLE,
       effects: [],
     });

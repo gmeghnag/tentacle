@@ -46,6 +46,8 @@ describe("hubContextOf", () => {
       nextWakeInMs: null,
       unseenArtifacts: 0,
       activityEmpty: false,
+      // A list never seen yet is not an empty one: no dim (mobile-hub-commands C1).
+      artifactsEmpty: false,
       // Unknown counts: no dim, no arc (docs/feat/mobile-hub-tools.md D3).
       toolsEmpty: false,
       toolsRim: null,
@@ -111,7 +113,7 @@ describe("wakeContext — the daemon's wake table, as the hub reads it (H4a)", (
     expect(soon).toMatchObject({ schedules: 1, nextWakeInMs: DUE_SOON_MS - 1_000 });
     // End to end: the daemon's table alone makes the item appear, badged, first.
     const a = hubActions(soon, { ...ENTRIES, scheduled: noop });
-    expect(a.all.map((i) => i.id)).toEqual(["scheduled", "attach", "activity", "info", "sessions"]);
+    expect(a.all.map((i) => i.id)).toEqual(["scheduled", "attach", "activity", "sessions", "info"]);
     expect(a.all[0]?.badge).toEqual({ kind: "dot" });
     expect(a.all[0]?.label).toBe("Scheduled");
   });
@@ -144,6 +146,19 @@ describe("hubContextOf — the session's artifacts, as the hub reads them (H4b)"
     expect(withArtifacts([]).unseenArtifacts).toBe(0);
     const a = hubActions(withArtifacts([]), { ...ENTRIES, artifacts: noop });
     expect(a.all.find((i) => i.id === "artifacts")?.badge).toBeNull();
+  });
+
+  test("an UNKNOWN list is not an empty one; a known empty list is (mobile-hub-commands C1)", () => {
+    // The Tools D3 rule: an item whose tap is what fetches the list must not be
+    // dimmed for not having fetched it yet.
+    expect(withArtifacts(undefined).artifactsEmpty).toBe(false);
+    expect(withArtifacts([]).artifactsEmpty).toBe(true);
+    expect(withArtifacts([art("a", 1, NOW)]).artifactsEmpty).toBe(false);
+    const empty = hubActions(withArtifacts([]), { ...ENTRIES, artifacts: noop });
+    expect(empty.all.find((i) => i.id === "artifacts")).toMatchObject({
+      dimmed: true,
+      emptyLabel: "No artifacts yet",
+    });
   });
 
   test("the count is ARTIFACTS with something new (the gallery's own rule), not versions", () => {
@@ -182,7 +197,7 @@ describe("solveHub — the fan solved at the open", () => {
 
   test("anchored on the button's centre, in band coordinates, one id per item in fan order", () => {
     const menu = solveHub({ bounds: BAND, position: undefined, items });
-    expect(menu.ids).toEqual(["attach", "activity", "info", "sessions"]);
+    expect(menu.ids).toEqual(["attach", "activity", "sessions", "info"]);
     expect(menu.dimmed).toEqual([]);
     expect(menu.layout.kind).toBe("fan");
     const at = place(undefined, BAND);

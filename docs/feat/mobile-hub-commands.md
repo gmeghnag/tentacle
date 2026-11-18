@@ -403,4 +403,46 @@ Q1–Q8: all recommendations accepted (absorb harness-notices S2; Retry text-onl
 
 ## Execution
 
+*— DeepSeek executor (the plan's Q8 C1 assignment; the exact model id is not exposed inside the run), 2026-11-18*
+
+### Slice C1 — the fan. DONE
+
+**Load-bearing check re-run first** (`.tentacle/tmp/mobile-hub-commands/repro.ts`): unchanged from Context — the fan has no Commands, Session info is 4th, an empty Artifacts is not dimmed, and a dimmed sticky tap emits `[haptic light, commit, close]`. Every part held, so C1's premise (the daemon already has the commands; C1 is hub composition + the in-place label) stands.
+
+Red first, on the assertions (not imports):
+- `hub-actions.test.ts` — `NO_ARTIFACTS` missing (import), then after the source: `artifactsEmpty`, `emptyLabel`, the per-item a11y wording.
+- `hub-gesture.test.ts` — 4 failures on a dimmed tap (old `commit`+`close`), printed before the fix.
+- `hub-flash.test.ts` (new) — module absent, then green.
+
+As built, in dependency order:
+1. `hub-actions.ts` — `HubEntryId` gains `"commands"` (`LABELS` `Commands`); `CANONICAL` becomes `attach, activity, artifacts, tools, commands, sessions, info, scheduled, dictate, new`, so the idle fan is exactly O1 and More starts Sessions · Session info. `holds("commands") = ctx.ended === null`. `HubContext.artifactsEmpty`; `NO_ARTIFACTS = "No artifacts yet"` in `dimmedBecause`. `HubItem.emptyLabel: string | null` replaces reading `dimmed` alone (`dimmed` is now derived: `emptyLabel !== null`), and `itemA11yLabel` speaks `${label}, ${emptyLabel}` — the Tools "nothing running" misread is gone.
+2. `hub-session.ts` — `hubContextOf` computes `artifactsEmpty` as `list !== undefined && list.length === 0` (UNKNOWN is never empty; the Tools D3 rule). `tapOverlay` now carries the driver's clock (`t: deps.now()`).
+3. `hub-gesture.ts` — `commit` takes `at` and, for a dimmed id, returns `fanSticky + flash {index, at}` with effects exactly `[haptic light, flash]`; `GestureEffect` gains `flash`; `GestureState.fanSticky` gains an optional `flash`. Closing the fan drops it with the state.
+4. `hub-flash.ts` (new) — `FLASH_MS = 1600`, `pillText(item, index, flash, now)`, `pillVisible`, `pillIndex` (one pill: the highlight wins, a live flash keeps its own). Window is half-open and rejects a backwards clock.
+5. `hub-fan.ts` — `FanItemLook` gains `dashed` and `glyphOpacity`; a dimmed item is dashed + 0.38, the highlight and the resting look are solid + 1.
+6. `ui/HubFan.tsx` — the dashed hairline, the glyph at `look.glyphOpacity`, the pill from `pillIndex`/`pillText`, and `CommandsGlyph` (a bare `>_`, 1.5 stroke on a 24 grid, `react-native-svg`). `npx`-free: `Svg`/`Path` are already used by the chart glyphs.
+7. `ui/FloatingActivity.tsx` — the `flash` effect arms ONE `FLASH_MS` timer on an `OpenFan.flash/now`, cleared on a re-tap, on `close`, and at unmount; it plays no haptic of its own (the machine already emitted `light`). A dimmed fan tap calls a new `onFlash(id)`.
+8. `screens/SessionScreen.tsx` — `commands: openCommands` in `hubEntries` (`commandsOpen`, the sheet itself is C3), and `flashHub(id)` = the Tools re-pull only (hub-tools D4), so the D4 behaviour survives on the new path.
+
+Drift from the Implementation (and why):
+- **`session-feed`/`hubContextOf` shape**: the plan says `artifactsEmpty` is "computed in `hub-session.ts` `hubContextOf`" — done — but its step-1 wording lists `HubContext.artifactsEmpty` as a field the screen sets. The screen passes the LIST only; `hubContextOf` is the single decider. No second rule, and the wiring test pins that the screen never mentions `artifactsEmpty`.
+- **`tapOverlay` gained a timestamp.** The plan's `flash { index, at: t }` needs a clock, and `tapOverlay` carried none; adding `t` (from the driver's injected `now`) keeps the reducer pure rather than making it read `Date.now()`.
+- **`FloatingActivity` keeps `now` in `OpenFan`** and re-reads it only when the timer fires: `pillText` needs a clock and a `Date.now()` in render would be a new value every frame.
+- **`hub-flash.ts` also exports `pillIndex`** — one pill means "which item", and `pillVisible(index, …)` alone cannot answer it for a renderer.
+- **The Tools re-pull on a dimmed fan tap went to a new `onFlash` prop** rather than the commit path: the plan (item 8) says a dimmed commit now comes only from the menu/VoiceOver fallback, so the fan path needed its own, sheet-free hook.
+
+Mutations (each reverted; the test named was red with the code broken, green restored):
+| mutation | red |
+|---|---|
+| restore the old `commit`+`close` on a dimmed id | 4 in `hub-gesture.test.ts` (sticky tap, slide-release, re-tap, drop-on-close) |
+| `itemA11yLabel` back to the generic "nothing running" | 2 (dimmed a11y wording, per-item reason) |
+| drop the `artifacts` branch of `dimmedBecause` | 6 across `hub-actions`/`hub-session` |
+| `FLASH_MS` window made inclusive (`<=`) | 4 (`pillText` 1600 ms, `pillVisible`, `pillIndex`) |
+
+Tests: `apps/mobile/test/` — 3678 pass, 0 fail (the three opt-in skips are the repo baseline). `tsc -p apps/mobile` clean; `biome check` on the 25 touched files clean. The full `bun run check` gate is the orchestrator's (not run here, per the token budget).
+
+Changelog: `changelog.d/mobile-hub-commands.added.md`. No protocol, daemon, persistence, TUI or client change in C1, so no `protocol.d/` note and no schema regeneration.
+
+Unverified: the light/dark simulator screenshots the plan asks the executor to attach (no simulator in this run) — the visual state is pinned by `hub-fan.test.ts` (dashed + 0.38, glyph path) and `hub-commands-wiring.test.ts` (the wiring) instead.
+
 ## Review

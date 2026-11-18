@@ -18,6 +18,9 @@ export type HubEntryId =
   | "sessions"
   | "info"
   | "tools"
+  // The session's own commands (docs/feat/mobile-hub-commands.md C1): Compact,
+  // Clear, Rename, Retry, Auto-accept — one sheet, not five fan discs.
+  | "commands"
   | "scheduled"
   | "dictate"
   | "new";
@@ -41,6 +44,12 @@ export interface HubItem {
    * — never hidden, so the order never shifts under the finger (owner Q-H5).
    */
   readonly dimmed: boolean;
+  /**
+   * WHY it is dimmed, in the words the pill and VoiceOver say (mobile-hub-commands
+   * C1 Design 4): the fan's in-place label swaps to it for a moment. `dimmed` is
+   * exactly `emptyLabel !== null`, so the two can never disagree.
+   */
+  readonly emptyLabel: string | null;
   /**
    * The rim arc, when the item's own figure is not a badge count
    * (docs/feat/mobile-hub-tools.md: the Tools item's share switched off). Absent:
@@ -67,6 +76,13 @@ export interface HubContext {
   /** `activityView(...).groups.length === 0`: Activity has nothing to open (mobile-hub-tap Design 2). */
   readonly activityEmpty: boolean;
   /**
+   * `state.artifacts.list` is KNOWN and empty: Artifacts has nothing to open
+   * (mobile-hub-commands C1 Design 3). UNKNOWN is never empty — the Tools rule
+   * D3: an item whose tap is what fetches a list must not be dimmed for not
+   * having fetched it yet.
+   */
+  readonly artifactsEmpty: boolean;
+  /**
    * `toolsSummary(...).known && total === 0`: there is nothing to switch, so the
    * Tools item is dimmed. UNKNOWN is never empty: a count not seen yet must not
    * dim an item whose tap is what fetches it (docs/feat/mobile-hub-tools.md D3).
@@ -92,6 +108,8 @@ export const ALREADY_FINISHED = "Already finished";
 export const NO_CONNECTION = "Not connected — the turn keeps running";
 /** A commit of an empty Activity says so inline; the modal never opens (mobile-hub-tap Design 2). */
 export const NOTHING_RUNNING = "Nothing running";
+/** The same rule for Artifacts: an empty gallery never opens its sheet (mobile-hub-commands Q3). */
+export const NO_ARTIFACTS = "No artifacts yet";
 /** The same rule for Tools: nothing to switch, so the sheet would be two empty lists. */
 export const NO_TOOLS = "No MCP servers or skills in this session";
 
@@ -104,6 +122,7 @@ const LABELS: Readonly<Record<HubActionId, string>> = {
   sessions: "Sessions",
   info: "Session info",
   tools: "Tools",
+  commands: "Commands",
   scheduled: "Scheduled",
   dictate: "Dictate (Beta)",
   new: "New session",
@@ -112,14 +131,20 @@ const LABELS: Readonly<Record<HubActionId, string>> = {
 
 /** Prepended while a turn runs; never passed by a badge. */
 const TURN_PAIR: readonly HubEntryId[] = ["stop", "steer"];
-/** The stable order (owner Q-H5): identities keep their relative order in every context. */
+/**
+ * The stable order (owner Q-H5): identities keep their relative order in every
+ * context. O1 (mobile-hub-commands Q1): Commands takes the sixth candidate slot,
+ * so the idle fan is exactly O1 and Session info falls into More, next to
+ * Sessions.
+ */
 const CANONICAL: readonly HubEntryId[] = [
   "attach",
   "activity",
   "artifacts",
-  "info",
   "tools",
+  "commands",
   "sessions",
+  "info",
   "scheduled",
   "dictate",
   "new",
@@ -155,6 +180,11 @@ function holds(id: HubEntryId, ctx: HubContext): boolean {
     case "tools":
     case "new":
       return true;
+    // The commands sheet reuses what the screen already has (rename, auto-accept
+    // from Session info), but an ended session has nothing to run — and Rename
+    // stays reachable from the title (C1 Design 2).
+    case "commands":
+      return ctx.ended === null;
   }
 }
 
@@ -175,7 +205,7 @@ function present(id: HubEntryId, ctx: HubContext, entries: HubEntries): boolean 
 function item(
   id: HubActionId,
   badge: HubBadge | null,
-  dimmed = false,
+  emptyLabel: string | null = null,
   rim?: number | null,
 ): HubItem {
   return {
@@ -183,18 +213,23 @@ function item(
     label: LABELS[id],
     badge,
     danger: id === "stop",
-    dimmed,
+    dimmed: emptyLabel !== null,
+    emptyLabel,
     ...(rim === undefined ? {} : { rim }),
   };
 }
 
 /**
  * Why this entry has nothing to show RIGHT NOW, or null when it does: an empty
- * Activity (owner Q3), and Tools with nothing to switch (hub-tools D3).
+ * Activity (owner Q3), Artifacts with nothing listed yet (mobile-hub-commands
+ * Q3), and Tools with nothing to switch (hub-tools D3).
  */
 function dimmedBecause(id: HubEntryId, ctx: HubContext): string | null {
   if (id === "activity") {
     return ctx.activityEmpty ? NOTHING_RUNNING : null;
+  }
+  if (id === "artifacts") {
+    return ctx.artifactsEmpty ? NO_ARTIFACTS : null;
   }
   if (id === "tools") {
     return ctx.toolsEmpty ? NO_TOOLS : null;
@@ -213,7 +248,7 @@ function rimOf(id: HubEntryId, ctx: HubContext): number | null | undefined {
 export function hubActions(ctx: HubContext, entries: HubEntries): HubActions {
   const pair = TURN_PAIR.filter((id) => present(id, ctx, entries)).map((id) => item(id, null));
   const canonical = CANONICAL.filter((id) => present(id, ctx, entries)).map((id) =>
-    item(id, badgeOf(id, ctx), dimmedBecause(id, ctx) !== null, rimOf(id, ctx)),
+    item(id, badgeOf(id, ctx), dimmedBecause(id, ctx), rimOf(id, ctx)),
   );
   // Badge promotion: a badged item moves up to the first unbadged canonical
   // slot (a stable partition), so new things are reachable — after the pair.
@@ -399,8 +434,8 @@ export function pulseStep(
  * nothing to show, and that wins — it is what its commit would report.
  */
 export function itemA11yLabel(item: HubItem): string {
-  if (item.dimmed) {
-    return `${item.label}, nothing running`;
+  if (item.emptyLabel !== null) {
+    return `${item.label}, ${item.emptyLabel}`;
   }
   if (item.badge === null) {
     return item.label;

@@ -4,6 +4,8 @@
  * promotion, the six-slot rule, the commit re-validation, the button's badge.
  */
 import { describe, expect, test } from "bun:test";
+import type { ArtifactMeta } from "@tentacle/protocol";
+import { NOTHING_SEEN } from "../src/artifact-seen-store.ts";
 import {
   ALREADY_FINISHED,
   type ButtonBadgeInput,
@@ -14,6 +16,7 @@ import {
   type HubItem,
   type HubOpen,
   NOTHING_RUNNING,
+  NO_ARTIFACTS,
   NO_CONNECTION,
   NO_TOOLS,
   PULSE_START,
@@ -51,7 +54,21 @@ const EVERY: HubEntries = {
   scheduled: noop,
   dictate: noop,
   tools: noop,
+  commands: noop,
 };
+
+const art = (artifactId: string, version = 1): ArtifactMeta => ({
+  artifactId,
+  version,
+  sha256: `${artifactId}${version}`.padEnd(64, "a"),
+  size: 1_000,
+  mimeType: "image/png",
+  kind: "image",
+  title: artifactId,
+  callId: `c-${artifactId}-${version}`,
+  createdAt: 0,
+});
+const ARTIFACT = art("a1");
 
 const IDLE_CTX: HubContext = {
   link: "up",
@@ -63,6 +80,7 @@ const IDLE_CTX: HubContext = {
   nextWakeInMs: null,
   unseenArtifacts: 0,
   activityEmpty: false,
+  artifactsEmpty: false,
   toolsEmpty: false,
   toolsRim: null,
 };
@@ -89,14 +107,14 @@ const ids = (items: readonly { id: string }[]): string[] => items.map((i) => i.i
 describe("hubActions: order and presence", () => {
   test("idle: the canonical order, no More while it fits in six", () => {
     const a = hubActions(IDLE_CTX, MAIN);
-    expect(ids(a.fan)).toEqual(["attach", "activity", "info", "sessions", "new"]);
+    expect(ids(a.fan)).toEqual(["attach", "activity", "sessions", "info", "new"]);
     expect(a.more).toEqual([]);
     expect(ids(a.all)).toEqual(ids(a.fan));
   });
 
   test("running: Stop, Steer first, then the canonical list; Stop is the only red item", () => {
     const a = hubActions(RUNNING, MAIN);
-    expect(ids(a.all)).toEqual(["stop", "steer", "attach", "activity", "info", "sessions", "new"]);
+    expect(ids(a.all)).toEqual(["stop", "steer", "attach", "activity", "sessions", "info", "new"]);
     expect(a.all.filter((i) => i.danger).map((i) => i.id)).toEqual(["stop"]);
     expect(a.all[0]?.label).toBe("Stop");
   });
@@ -114,7 +132,7 @@ describe("hubActions: order and presence", () => {
 
   test("an ended session: no turn pair, no Attach", () => {
     const a = hubActions({ ...RUNNING, ended: "closed", editable: false }, MAIN);
-    expect(ids(a.all)).toEqual(["activity", "info", "sessions", "new"]);
+    expect(ids(a.all)).toEqual(["activity", "sessions", "info", "new"]);
   });
 
   test("Attach only while the session is editable", () => {
@@ -161,9 +179,10 @@ describe("hubActions: badges and promotion", () => {
       "scheduled",
       "attach",
       "activity",
-      "info",
       "tools",
+      "commands",
       "sessions",
+      "info",
       "new",
     ]);
   });
@@ -179,9 +198,10 @@ describe("hubActions: badges and promotion", () => {
       "attach",
       "activity",
       "artifacts",
-      "info",
       "tools",
+      "commands",
       "sessions",
+      "info",
       "scheduled",
       "dictate",
       "new",
@@ -197,11 +217,11 @@ describe("hubActions: six slots (M14)", () => {
     expect(a.more).toEqual([]);
   });
 
-  test("ten candidates: the first five + More, and the five others in More in canonical order", () => {
+  test("eleven candidates: the first five + More, and the six others in More in canonical order", () => {
     const a = hubActions({ ...RUNNING, schedules: 1 }, EVERY);
-    expect(a.all.length).toBe(10);
+    expect(a.all.length).toBe(11);
     expect(ids(a.fan)).toEqual(["stop", "steer", "attach", "activity", "artifacts", "more"]);
-    expect(ids(a.more)).toEqual(["info", "tools", "sessions", "scheduled", "new"]);
+    expect(ids(a.more)).toEqual(["tools", "commands", "sessions", "info", "scheduled", "new"]);
     expect(a.fan[5]?.label).toBe("More");
     expect(ids(a.all)).not.toContain("more");
   });
@@ -516,6 +536,7 @@ describe("itemA11yLabel (mobile-hub-badges Design 10: the rim is spoken)", () =>
     badge,
     danger: false,
     dimmed,
+    emptyLabel: dimmed ? NOTHING_RUNNING : null,
   });
 
   test("a count says how many are new (the bubble's number, now in words)", () => {
@@ -528,8 +549,8 @@ describe("itemA11yLabel (mobile-hub-badges Design 10: the rim is spoken)", () =>
   });
 
   test("a dimmed item says why, and that wins over a badge (it has nothing to show)", () => {
-    expect(itemA11yLabel(item(null, true))).toBe("Artifacts, nothing running");
-    expect(itemA11yLabel(item({ kind: "count", n: 2 }, true))).toBe("Artifacts, nothing running");
+    expect(itemA11yLabel(item(null, true))).toBe("Artifacts, Nothing running");
+    expect(itemA11yLabel(item({ kind: "count", n: 2 }, true))).toBe("Artifacts, Nothing running");
   });
 
   test("otherwise the plain label", () => {
@@ -548,16 +569,15 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
   test("its slot is between Session info and Sessions, and the label is Tools", () => {
     const a = hubActions(IDLE_CTX, EVERY);
     const at = ids(a.all).indexOf("tools");
-    expect(ids(a.all).slice(at - 1, at + 2)).toEqual(["info", "tools", "sessions"]);
+    expect(ids(a.all).slice(at - 1, at + 2)).toEqual(["artifacts", "tools", "commands"]);
     expect(a.all[at]?.label).toBe("Tools");
   });
 
-  test("the idle fan is Attach · Activity · Artifacts · Session info · Tools · More", () => {
-    // What the screen wires once Session info exists (artifacts + tools): six
-    // candidates, so the SIXTH slot is More and the rest go into it.
-    const a = hubActions(IDLE_CTX, { ...EVERY, sessions: noop, new: noop });
-    expect(ids(a.fan)).toEqual(["attach", "activity", "artifacts", "info", "tools", "more"]);
-    expect(ids(a.more)).toEqual(["sessions", "new"]);
+  test("the idle fan is Attach · Activity · Artifacts · Tools · Commands · More (owner Q1 O1)", () => {
+    // Six candidates, so the SIXTH slot is More and Session info goes into it.
+    const a = hubActions(IDLE_CTX, EVERY);
+    expect(ids(a.fan)).toEqual(["attach", "activity", "artifacts", "tools", "commands", "more"]);
+    expect(ids(a.more)).toEqual(["sessions", "info", "new"]);
     expect(a.fan[5]?.label).toBe("More");
   });
 
@@ -674,5 +694,134 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
     const artifacts = a.all.find((i) => i.id === "artifacts");
     expect(artifacts?.rim).toBeUndefined();
     expect(fanItemLook(artifacts as HubItem, false).rim).toBe(0.3);
+  });
+});
+
+describe("the Commands item (docs/feat/mobile-hub-commands.md C1, owner Q1 O1)", () => {
+  test("the idle fan is exactly O1: Attach · Activity · Artifacts · Tools · Commands · More", () => {
+    const a = hubActions(IDLE_CTX, EVERY);
+    expect(ids(a.fan)).toEqual(["attach", "activity", "artifacts", "tools", "commands", "more"]);
+    expect(a.all.find((i) => i.id === "commands")?.label).toBe("Commands");
+  });
+
+  test("More starts Sessions · Session info, and no Commands (it is in the fan)", () => {
+    const a = hubActions(IDLE_CTX, EVERY);
+    expect(ids(a.more).slice(0, 2)).toEqual(["sessions", "info"]);
+    expect(ids(a.more)).not.toContain("commands");
+  });
+
+  test("during a turn Stop · Steer push Tools and Commands into More (README Q1)", () => {
+    const a = hubActions(RUNNING, EVERY);
+    expect(ids(a.fan)).toEqual(["stop", "steer", "attach", "activity", "artifacts", "more"]);
+    expect(ids(a.more)).toEqual(["tools", "commands", "sessions", "info", "new"]);
+  });
+
+  test("an ended session has no Commands: nothing to run, Rename stays on the title", () => {
+    const a = hubActions({ ...IDLE_CTX, ended: "closed" }, EVERY);
+    expect(ids(a.all)).not.toContain("commands");
+    expect(ids(hubActions(IDLE_CTX, EVERY).all)).toContain("commands");
+  });
+
+  test("a missing callback is a missing item, as every other entry (P6)", () => {
+    expect(ids(hubActions(IDLE_CTX, MAIN).all)).not.toContain("commands");
+    expect(resolveCommit("commands", IDLE_CTX, MAIN, hubOpen(IDLE_CTX))).toEqual({
+      kind: "noop",
+      notice: null,
+    });
+  });
+
+  test("a live Commands commits to the screen's sheet", () => {
+    expect(resolveCommit("commands", IDLE_CTX, EVERY, hubOpen(IDLE_CTX))).toEqual({
+      kind: "run",
+      id: "commands",
+    });
+  });
+});
+
+describe("an empty Artifacts is dimmed too (owner Q3 A)", () => {
+  const dimmedIds = (items: readonly HubItem[]) => items.filter((i) => i.dimmed).map((i) => i.id);
+
+  test("a KNOWN empty list dims it, with the mockup's words", () => {
+    const empty: HubContext = { ...IDLE_CTX, artifactsEmpty: true };
+    expect(dimmedIds(hubActions(empty, EVERY).all)).toEqual(["artifacts"]);
+    expect(NO_ARTIFACTS).toBe("No artifacts yet");
+    expect(hubActions(empty, EVERY).all.find((i) => i.id === "artifacts")?.emptyLabel).toBe(
+      NO_ARTIFACTS,
+    );
+    expect(resolveCommit("artifacts", empty, EVERY, hubOpen(empty))).toEqual({
+      kind: "noop",
+      notice: NO_ARTIFACTS,
+    });
+  });
+
+  test("UNKNOWN is never empty: a list not seen yet must not dim (the Tools D3 rule)", () => {
+    const unknown = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+    });
+    expect(unknown.artifactsEmpty).toBe(false);
+    expect(dimmedIds(hubActions(unknown, EVERY).all)).toEqual([]);
+    // ...and an empty list the gallery knows about does.
+    const known = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      artifacts: { list: [], seen: NOTHING_SEEN },
+    });
+    expect(known.artifactsEmpty).toBe(true);
+    expect(dimmedIds(hubActions(known, EVERY).all)).toEqual(["artifacts"]);
+  });
+
+  test("a non-empty list is not dimmed, and a dimmed Artifacts keeps its slot", () => {
+    const some = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      artifacts: { list: [ARTIFACT], seen: NOTHING_SEEN },
+    });
+    expect(some.artifactsEmpty).toBe(false);
+    const a = hubActions({ ...IDLE_CTX, artifactsEmpty: true }, EVERY);
+    expect(ids(a.all)).toEqual(ids(hubActions(IDLE_CTX, EVERY).all));
+  });
+});
+
+describe("emptyLabel: a dimmed item carries WHY it is dimmed (owner Q3 A)", () => {
+  test("dimmed ⇔ emptyLabel is not null, and it is the notice's own words", () => {
+    const empty: HubContext = { ...IDLE_CTX, activityEmpty: true, toolsEmpty: true };
+    const empty2: HubContext = { ...empty, artifactsEmpty: true };
+    const byId = (ctx: HubContext) =>
+      Object.fromEntries(hubActions(ctx, EVERY).all.map((i) => [i.id, i.emptyLabel]));
+    expect(byId(IDLE_CTX).activity).toBeNull();
+    expect(byId(empty2)).toMatchObject({
+      activity: NOTHING_RUNNING,
+      artifacts: NO_ARTIFACTS,
+      tools: NO_TOOLS,
+    });
+    for (const item of hubActions(empty2, EVERY).all) {
+      expect(item.dimmed).toBe(item.emptyLabel !== null);
+    }
+  });
+
+  test("the VoiceOver label speaks the empty reason, per item — Tools never says 'nothing running'", () => {
+    const empty: HubContext = {
+      ...IDLE_CTX,
+      activityEmpty: true,
+      toolsEmpty: true,
+      artifactsEmpty: true,
+    };
+    const at = (id: string) =>
+      itemA11yLabel(hubActions(empty, EVERY).all.find((i) => i.id === id) as HubItem);
+    expect(at("activity")).toBe("Activity, Nothing running");
+    expect(at("artifacts")).toBe("Artifacts, No artifacts yet");
+    // Today's bug: the generic "nothing running" was spoken for Tools too.
+    expect(at("tools")).toBe(`Tools, ${NO_TOOLS}`);
+    expect(at("tools")).not.toContain("nothing running");
   });
 });
