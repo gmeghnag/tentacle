@@ -244,7 +244,6 @@ func runProtocolSync() -> Int32 {
             // does, and returns the moment a line arrives.
             _ = source.waitForLine(timeout: 0.05)
             continue poll
-            continue poll
         }
         for line in batch {
             switch decodeCommand(line) {
