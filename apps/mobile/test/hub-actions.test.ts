@@ -28,6 +28,7 @@ import {
   pulseStep,
   resolveCommit,
 } from "../src/hub-actions.ts";
+import { toolsSummary } from "../src/tools-view.ts";
 import { fanItemLook } from "../src/hub-fan.ts";
 import { commitPlan, hubContextOf } from "../src/hub-session.ts";
 
@@ -572,6 +573,23 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
     expect(unknown.toolsEmpty).toBe(false);
     expect(unknown.toolsRim).toBeNull();
     expect(dimmedIds(hubActions(unknown, EVERY).all)).toEqual([]);
+
+    // The attach state itself: both pulls still `loading`, so the summary is
+    // `{known:false,total:0}`. Without the `known` guard that reads as empty
+    // and dims Tools from attach until a dimmed tap's own pull lands (D4).
+    expect(toolsSummary({ ...loadingTools }).known).toBe(false);
+    expect(toolsSummary({ ...loadingTools }).total).toBe(0);
+    const loading = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      tools: toolsSummary({ ...loadingTools }),
+    });
+    expect(loading.toolsEmpty).toBe(false);
+    expect(loading.toolsRim).toBeNull();
+    expect(dimmedIds(hubActions(loading, EVERY).all)).toEqual([]);
 
     // Known and non-empty is not dimmed either.
     const some = hubContextOf({
