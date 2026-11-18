@@ -126,4 +126,21 @@ Q1–Q6: recommendations accepted, with one change on Q1: do NOT add `@react-nat
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-18* (fresh context; a different model family from the executor)
+
+**Verdict: REQUEST-CHANGES** (scope reviewed: `git diff main...HEAD`, which is S1 only: `thinking-motion.ts` and its test).
+
+**Gate (touched files):** `bun test apps/mobile/test/thinking-motion.test.ts` 12 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean. Full `bun test` was not run, because this review was scoped to the touched files.
+
+**Findings**
+1. **HIGH: `shimmerStops` is dead and untested.** It is at `apps/mobile/src/thinking-motion.ts:85-113`; nothing imports it (checked with `rg`), and its `x` parameter is unused. The planned test ("the gradient stops start and end fully off the word for width > 0; width 0 → no sweep", §Tests) is missing. Mutation check: I changed the peak stop `opacity: 1 → 0` (a sweep that never brightens) and the suite stayed green, 12/12. The function also fixes the S2 technique before S0 has run. S0 was supposed to run "before any other slice". If S0-a fails, the owner's fallback is a static word, and this code becomes dead for good. Fix: remove it until S0/S2 land, or test the property and record S0's verdict first.
+2. **MEDIUM: the `shimmerSweep` doc comment describes code that does not exist.** At `thinking-motion.ts:64-74` it says the bright layer "is CLIPPED to the glyphs, so there is no window to translate". In fact `StepNode.tsx:183-203,533` still draws the translating `overflow: "hidden"` band, which is the rectangle this task exists to remove. The next reader will believe the bug is fixed. The comment should describe the code as it is today, or change together with S2.
+3. **MEDIUM: Execution misreports what was built.** It says "`fontVariant: ["tabular-nums"]` consumers per S2; `shimmerSweep` → gradient stops", but the diff has no `fontVariant` and `shimmerSweep` is unchanged; a separate, unwired `shimmerStops` was added instead. It also does not record that S0 was skipped. Its signature reads "deepseek", not a model id (§10).
+
+**Mutation outcomes:** dropping the seconds padding (`${sec}`) fails 3 tests, so the `thinkingElapsed` tests are not vacuous. The `shimmerStops` peak mutation survives (finding 1). Both mutations were reverted, and `git status` is clean afterwards.
+
+**Premises:** `StepNode.tsx:183` uses `shimmerSweep`: TRUE. The band window at `StepNode.tsx:533`: TRUE (still present). `thinkingLook` unchanged: TRUE.
+
+**Attacks tried:** (a) the §7 invariants: the code is a pure, React-free module, no protocol/persistence/terminal path is touched, and nothing is wired yet, so no invariant is at risk. (b) Boundaries of `thinkingElapsed`: negative → "0 s", 59 999 → "59 s", 3 599 000 → "59 min 59 s", 2 h → "2 h 02 min", all correct. `NaN` → "NaN s" is a nit, because the caller's input is `Date.now()`-based. (c) The executor's width-test rewrite: honest, because tabular figures cannot remove a digit, and the step at 10 s / 10 min is asserted explicitly.
+
+**How the executor behaved:** `thinkingElapsed` and `thinkingLabel` are correct and well tested. However, it shipped speculative, untested code ahead of the slice it belongs to, and the Execution note claims more than the diff contains.
