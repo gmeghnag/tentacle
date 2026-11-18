@@ -586,3 +586,23 @@ the next emit") was marked non-blocking. It is a design note for *Notes/debt*:
 fixing it needs a feed the closed sheet deliberately drops, which is a larger
 change than a fix round should make unplanned.
 
+### Round 3
+
+*— claude-opus-5-5, 2026-11-18* (reviewing `5a8b08d2`, `git diff HEAD~1`: two test files and this doc; no production code)
+
+**Verdict: PASS**
+
+- **F1 (HIGH, round 2) — resolved.** `LOADING_TOOLS` is now defined and typed with `satisfies SwitchFacts` (`hub-actions.test.ts:74`). The test is green on the branch. Mutation `toolsEmpty: input.tools?.total === 0` → **killed** ("unknown counts never dim" fails).
+- **F2 (MEDIUM) — resolved.** New test "a dimmed tap un-sticks the item" (`session-info-controller.test.ts:1020`). Mutation: `pullTools` never paints → **killed**.
+- **F3 (MEDIUM) — resolved.** The Execution is now signed DeepSeek. One leftover for the orchestrator: "Fix round 2" is signed `claude-opus-5-5`, but its commit `5a8b08d2` says "(deepseek)". Settle which model ran it before merge. Not code-blocking.
+- **Regressions on the diff:** none. The imports are sorted, and the fixture's type follows the real `SwitchFacts`.
+
+**Gate:**
+- `hub-actions` + `session-info-controller`: 102 pass · 0 fail.
+- `apps/mobile` in full: 3559 pass · 0 fail.
+- `bun run lint`: clean (2083 files).
+- `bun run typecheck`: clean.
+- I did not re-run the full repo `bun test`.
+
+Mutations reverted; `git status` shows only this doc.
+
