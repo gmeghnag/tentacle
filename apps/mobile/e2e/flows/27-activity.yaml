@@ -21,6 +21,18 @@ appId: so.tentacle.app
 # (S8 drift 4). The Finished memory is per screen, so a re-open cannot show it
 # either; `subagent-detail.test.ts` pins the report half.
 - runFlow: _pair.yaml
+# The header pill is this flow's subject: a fresh install is Floating since
+# docs/feat/mobile-hub-defaults.md, so pick Header first (flow 28 drives Floating).
+- extendedWaitUntil:
+    visible:
+      id: "computers-list"
+    timeout: 30000
+- tapOn:
+    id: "open-settings"
+- tapOn:
+    id: "activity-button-header"
+- tapOn:
+    id: "settings-back"
 - tapOn:
     id: "computer-${output.computerId}"
 - assertVisible:

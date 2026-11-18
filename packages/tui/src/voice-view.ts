@@ -8,8 +8,12 @@
  * §6 gotcha respected by the component, not here: a blank row is rendered `" "`.
  */
 
-/** Rows the strip occupies when it is drawn (`App` sizes the viewport). */
-export const VOICE_STRIP_ROWS = 2;
+/**
+ * Rows the strip occupies when it is drawn (`App` sizes the viewport). One: the
+ * live partial is no longer a second strip row, it is previewed in the input
+ * itself, after the cursor (`voiceGhost`, docs/feat/voice-live-transcript.md).
+ */
+export const VOICE_STRIP_ROWS = 1;
 
 /** The meter's glyph ladder, quiet → loud. */
 const BARS = ["", "▁", "▁▃", "▁▃▅", "▁▃▅▇"] as const;
@@ -53,8 +57,6 @@ export function meterFor(dbfs: number | null): string {
 export interface VoiceStripView {
   /** The one status line, already clipped to the terminal width. */
   readonly text: string;
-  /** The dimmed partial preview, already clipped; `""` when there is none. */
-  readonly partial: string;
   /** The meter's bars; `""` outside `listening`. */
   readonly meter: string;
   /** The language tag incl. brackets, e.g. `[it]`; `""` when unknown. */
@@ -93,9 +95,22 @@ export function voiceStripView(
   if (langTag !== "") parts.push(langTag);
 
   const text = clip(parts.join(" "), columns);
-  // The partial gets whatever is left below the status line; a blank preview is
-  // `""` and the COMPONENT renders it as `" "` (never an empty <Text>).
-  const partial = model.partial === "" ? "" : clip(model.partial, columns);
+  return { text, meter, langTag };
+}
 
-  return { text, partial, meter, langTag };
+/**
+ * The live partial to preview greyed after the input's cursor, or `""`
+ * (docs/feat/voice-live-transcript.md). Shown while the dictation listens AND
+ * while its final is computed — the final then replaces it in one frame, so
+ * the words never blink out between the stop and the insert. Never shown idle:
+ * a preview of a dictation that ended (final, error, cancel) is gone.
+ */
+export function voiceGhost(model: {
+  readonly phase: "idle" | "starting" | "listening" | "transcribing" | "off";
+  readonly partial: string;
+}): string {
+  if (model.phase !== "listening" && model.phase !== "starting" && model.phase !== "transcribing") {
+    return "";
+  }
+  return model.partial;
 }

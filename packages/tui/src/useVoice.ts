@@ -171,7 +171,7 @@ export function useVoice(options: UseVoiceOptions): VoiceHandle {
             kind: "spawnFailed",
             message: `voice helper could not start (${helperPath}): ${
               error instanceof Error ? error.message : String(error)
-            } — build it with: bun run voice:build`,
+            } — install it with: curl -fsSL tentacle.so/install | sh`,
           });
           continue;
         }

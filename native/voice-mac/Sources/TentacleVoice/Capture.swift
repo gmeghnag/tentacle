@@ -30,6 +30,10 @@ public final class Capture {
         public let samples: [Float]
         public let sampleRate: Double
         public let device: String
+        /// The take at the DEVICE's rate, as captured: the live path feeds its
+        /// unfed tail to the analyzer (docs/feat/voice-live-transcript.md).
+        public let native: [Float]
+        public let nativeRate: Double
     }
 
     private let lock = NSLock()
@@ -67,6 +71,23 @@ public final class Capture {
         let out = windows
         windows = []
         return out
+    }
+
+    /// The device rate of the take in progress (the live resampler's source).
+    public var currentNativeRate: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return nativeRate
+    }
+
+    /// The take's native samples from `index` on — what the live analyzer has
+    /// not been fed yet. A copy of the NEW part only, so a long take is not
+    /// re-copied on every pass of the protocol loop.
+    public func nativeSince(_ index: Int) -> [Float] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard index < native.count else { return [] }
+        return Array(native[max(0, index)...])
     }
 
     /// The input device's name, for `listening{device}`.
@@ -227,7 +248,9 @@ public final class Capture {
         return Result(
             samples: Self.resample(captured, from: rate, to: 16000),
             sampleRate: 16000,
-            device: deviceName
+            device: deviceName,
+            native: captured,
+            nativeRate: rate
         )
     }
 

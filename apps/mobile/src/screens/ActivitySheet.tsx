@@ -35,6 +35,8 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
+  PANEL_HEIGHT,
+  PANEL_SPRING,
   type PanelDetents,
   type StopArm,
   panelDetentFor,
@@ -197,6 +199,9 @@ export function ActivitySheet({
   // frame, so it is the one measurement that needs no dimension API.
   const [screen, setScreen] = useState(0);
   const height = useRef(new Animated.Value(0)).current;
+  // What is DRAWN: the value, never below 0 (`PANEL_HEIGHT` — a close's spring
+  // undershoots 0, and a negative height lays the sheet out at full size).
+  const drawn = useMemo(() => height.interpolate(PANEL_HEIGHT), [height]);
   const detents: PanelDetents = useMemo(
     () =>
       panelDetents({
@@ -224,9 +229,7 @@ export function ActivitySheet({
       Animated.spring(height, {
         toValue: to,
         useNativeDriver: false,
-        damping: 26,
-        stiffness: 260,
-        mass: 0.8,
+        ...PANEL_SPRING,
         // ANY end runs the continuation, not only a `finished` spring: an
         // interrupted one ends with `{finished:false}` (anything else touching
         // this `Animated.Value` stops it — a re-measure, a re-grab, a retarget),
@@ -336,7 +339,7 @@ export function ActivitySheet({
             testID="activity-sheet"
             style={[
               styles.panel,
-              { height, backgroundColor: palette.bg, paddingBottom: insets.bottom },
+              { height: drawn, backgroundColor: palette.bg, paddingBottom: insets.bottom },
             ]}
           >
             <Header palette={palette} label={label} pan={pan.panHandlers} />

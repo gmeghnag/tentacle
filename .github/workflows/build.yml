@@ -4,7 +4,7 @@
 #   artifacts (`tentacle-<bun target>`, the same name the pod-binary lookup uses
 #   under `<configDir>/bin/`).
 # - push of a `v*` tag: same build, then publish a GitHub Release with the
-#   binaries + SHA256SUMS. The tag must match packages/cli/package.json.
+#   binaries, the macOS voice helper (`tentacle-voice-darwin`) + SHA256SUMS. The tag must match packages/cli/package.json.
 #
 # Linux targets cross-compile on Ubuntu. macOS targets build on a macOS runner
 # because scripts/build.ts re-signs them ad-hoc with `codesign` (without it the
@@ -73,9 +73,47 @@ jobs:
           path: dist/tentacle-${{ matrix.target }}
           if-no-files-found: error
 
+  # The macOS voice-dictation helper (native/voice-mac, docs/feat/voice-release.md):
+  # ONE universal binary (arm64 + x86_64) `tentacle-voice-darwin`, so both macOS
+  # CLI targets — and an x64 shell under Rosetta — install the same asset.
+  # Pinned to macos-26, not macos-latest: the package targets macOS 26
+  # (SpeechTranscriber), so it needs the macOS 26 SDK (Xcode 26).
+  voice:
+    name: tentacle-voice-darwin
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      # scripts/voice-build.ts imports only bun builtins: no `bun install` needed.
+      - name: Build (universal, ad-hoc signed)
+        run: |
+          bun run voice:build --universal
+          mv dist/tentacle-voice dist/tentacle-voice-darwin
+
+      - name: Check slices, signature and smoke
+        run: |
+          archs="$(lipo -archs dist/tentacle-voice-darwin)"
+          echo "archs: ${archs}"
+          case " ${archs} " in *" arm64 "*) ;; *) echo "::error::no arm64 slice"; exit 1 ;; esac
+          case " ${archs} " in *" x86_64 "*) ;; *) echo "::error::no x86_64 slice"; exit 1 ;; esac
+          codesign --verify --verbose dist/tentacle-voice-darwin
+          out="$(./dist/tentacle-voice-darwin --version)"
+          echo "${out}"
+          case "${out}" in "tentacle-voice "*) ;; *) echo "::error::unexpected --version: ${out}"; exit 1 ;; esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tentacle-voice-darwin
+          path: dist/tentacle-voice-darwin
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, voice]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -99,6 +137,11 @@ jobs:
       - name: Checksums
         working-directory: release
         run: |
+          # Every asset install.sh / `tentacle update` fetch must be here.
+          for f in tentacle-bun-linux-x64 tentacle-bun-linux-arm64 tentacle-bun-darwin-arm64 \
+            tentacle-bun-darwin-x64 tentacle-voice-darwin; do
+            [ -f "$f" ] || { echo "::error::missing release asset $f"; exit 1; }
+          done
           chmod +x tentacle-*
           sha256sum tentacle-* > SHA256SUMS
           cat SHA256SUMS

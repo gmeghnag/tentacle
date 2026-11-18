@@ -4,8 +4,9 @@
  * this returns and decides nothing itself.
  *
  * The owner's rules (mockup variant B, 2026-11-17):
- *  - at rest the BODY renders at the setting; the floor is 30 %, so the button is
- *    never invisible;
+ *  - at rest the BODY renders at the setting; the floor is 20 %, so the button is
+ *    never invisible. The setting is one of FIVE steps, 20 · 40 · 60 · 80 · 100
+ *    (docs/feat/mobile-hub-defaults.md, owner 2026-11-18: was continuous 30–100);
  *  - it goes to 100 % while it is touched (a finger down already counts: a press
  *    emits no effect on down, `hub-gesture.ts:108`), while the fan is open, and
  *    while iOS Reduce Transparency is on;
@@ -21,10 +22,21 @@
 import type { GestureState } from "./hub-gesture.ts";
 
 /** The slider's floor: below this the button would be invisible (owner Q). */
-export const OPACITY_MIN = 30;
+export const OPACITY_MIN = 20;
 export const OPACITY_MAX = 100;
-/** Today's look: nothing changes until the user moves the slider (owner Q2). */
+/** The distance between two steps, in percentage points: also one VoiceOver step. */
+export const OPACITY_STEP = 20;
+/** Every value the setting can take: 20 · 40 · 60 · 80 · 100. */
+export const OPACITY_STEPS: readonly number[] = [20, 40, 60, 80, 100];
+/**
+ * A record that HAS no opacity (a pick made before the slider existed, or before
+ * the user moved it): solid, as it always was (owner Q2 of mobile-hub-opacity).
+ * A phone with NO record gets `OPACITY_FIRST_RUN` instead, through
+ * `DEFAULT_ACTIVITY_SETTINGS` (docs/feat/mobile-hub-defaults.md).
+ */
 export const OPACITY_DEFAULT = 100;
+/** A fresh install's level (owner 2026-11-18): see `DEFAULT_ACTIVITY_SETTINGS`. */
+export const OPACITY_FIRST_RUN = 80;
 
 /**
  * The preview's sample: two lines of an ordinary reply under the button, so the
@@ -38,18 +50,19 @@ export const PREVIEW_SAMPLE =
 const ARC_FAINT_BELOW = 0.75;
 const ARC_WIDTH = 2;
 const ARC_WIDTH_FAINT = 3;
-/** One VoiceOver adjustable step, in percentage points. */
-const STEP = 5;
-
 /**
- * A stored or dragged value as the setting really is: a whole percentage inside
- * the floor and the ceiling. Never NaN (a junk value reads as the floor).
+ * A stored or dragged value as the setting really is: the NEAREST of the five
+ * steps, a tie going UP (30 → 40, 50 → 60, 10 → 20), clamped to the floor and
+ * the ceiling. Never NaN (a junk value reads as the floor). An off-step record —
+ * written by the continuous slider of mobile-hub-opacity, e.g. 35 — is snapped
+ * on READ; it is not rewritten until the user changes the setting.
  */
-export function clampOpacity(n: number): number {
-  if (!Number.isFinite(n) || n <= OPACITY_MIN) {
-    return n === Number.POSITIVE_INFINITY ? OPACITY_MAX : OPACITY_MIN;
+export function snapOpacity(n: number): number {
+  if (Number.isNaN(n)) {
+    return OPACITY_MIN;
   }
-  return Math.min(OPACITY_MAX, Math.max(OPACITY_MIN, Math.round(n)));
+  const step = Math.floor((n + OPACITY_STEP / 2) / OPACITY_STEP) * OPACITY_STEP;
+  return Math.min(OPACITY_MAX, Math.max(OPACITY_MIN, step));
 }
 
 export interface HubArc {
@@ -74,7 +87,7 @@ export function hubOpacity(input: {
   readonly reduceTransparency: boolean;
 }): HubOpacity {
   const engaged = input.gesture !== "idle" || input.fanOpen || input.reduceTransparency;
-  const body = engaged ? 1 : clampOpacity(input.setting ?? OPACITY_DEFAULT) / 100;
+  const body = engaged ? 1 : snapOpacity(input.setting ?? OPACITY_DEFAULT) / 100;
   const faint = body < ARC_FAINT_BELOW;
   return { body, arc: { width: faint ? ARC_WIDTH_FAINT : ARC_WIDTH, halo: faint } };
 }
@@ -91,7 +104,7 @@ export function opacityAt(x: number, width: number): number {
   if (!(width > 0)) {
     return OPACITY_MIN;
   }
-  return clampOpacity(OPACITY_MIN + (x / width) * (OPACITY_MAX - OPACITY_MIN));
+  return snapOpacity(OPACITY_MIN + (x / width) * (OPACITY_MAX - OPACITY_MIN));
 }
 
 /**
@@ -109,9 +122,9 @@ export function opacityAt(x: number, width: number): number {
  */
 export function shownOpacity(released: number | null, stored: number | undefined): number {
   if (released !== null) {
-    return clampOpacity(released);
+    return snapOpacity(released);
   }
-  return clampOpacity(stored ?? OPACITY_DEFAULT);
+  return snapOpacity(stored ?? OPACITY_DEFAULT);
 }
 
 /**
@@ -130,12 +143,12 @@ export function settledReleased(
   released: number | null,
   stored: number | undefined,
 ): number | null {
-  return released === null || clampOpacity(stored ?? OPACITY_DEFAULT) !== clampOpacity(released)
+  return released === null || snapOpacity(stored ?? OPACITY_DEFAULT) !== snapOpacity(released)
     ? released
     : null;
 }
 
 /** VoiceOver's `adjustable`: one step up (+1) or down (−1), clamped. */
 export function stepOpacity(v: number, dir: 1 | -1): number {
-  return clampOpacity(clampOpacity(v) + dir * STEP);
+  return snapOpacity(snapOpacity(v) + dir * OPACITY_STEP);
 }

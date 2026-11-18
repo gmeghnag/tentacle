@@ -217,3 +217,69 @@ describe("soft-wrap (width 20 → 18 content cells per row)", () => {
     expect(inputView("x".repeat(100), 100, 10).lines).toHaveLength(1);
   });
 });
+
+describe("dictation ghost (feat/voice-live-transcript)", () => {
+  const cells = (row: InputRow | undefined) =>
+    (row?.segments ?? []).map((s) => ({
+      text: s.text,
+      inverse: s.inverse,
+      ghost: s.ghost ?? false,
+    }));
+
+  test("at EOL: the text, ONE cursor cell, then the ghost dim — and no trailing cursor", () => {
+    const { rows } = inputRender("hello", 5, null, 10, Number.POSITIVE_INFINITY, "wor");
+    expect(rows).toHaveLength(1);
+    expect(cells(rows[0])).toEqual([
+      { text: "hello", inverse: false, ghost: false },
+      { text: " ", inverse: true, ghost: false },
+      { text: "wor", inverse: false, ghost: true },
+    ]);
+  });
+
+  test("in an empty field the ghost follows the cursor cell", () => {
+    const { rows } = inputRender("", 0, null, 10, Number.POSITIVE_INFINITY, "ciao");
+    expect(cells(rows[0])).toEqual([
+      { text: " ", inverse: true, ghost: false },
+      { text: "ciao", inverse: false, ghost: true },
+    ]);
+  });
+
+  test("mid-line: the ghost sits at the cursor and the rest of the line follows it", () => {
+    const { rows } = inputRender("ab", 1, null, 10, Number.POSITIVE_INFINITY, "X");
+    expect(cells(rows[0])).toEqual([
+      { text: "a", inverse: false, ghost: false },
+      { text: " ", inverse: true, ghost: false },
+      { text: "X", inverse: false, ghost: true },
+      { text: "b", inverse: false, ghost: false },
+    ]);
+  });
+
+  test("an empty ghost renders exactly as no ghost", () => {
+    expect(inputRender("hello", 5, null, 10, 20, "")).toEqual(
+      inputRender("hello", 5, null, 10, 20),
+    );
+  });
+
+  test("a selection suppresses the ghost (its offsets would shift)", () => {
+    expect(inputRender("hello", 5, 2, 10, 20, "wor")).toEqual(inputRender("hello", 5, 2, 10, 20));
+  });
+
+  test("a newline in the ghost is a space: one row, never a fake line", () => {
+    const { rows } = inputRender("", 0, null, 10, Number.POSITIVE_INFINITY, "a\nb");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.segments.map((s) => s.text).join("")).toBe(" a b");
+  });
+
+  test("a long ghost soft-wraps, its rows stay dim, and the row count includes them", () => {
+    const W = 20; // 18 content cells
+    const ghost = "x".repeat(30);
+    const { rows } = inputRender("hi", 2, null, 10, W, ghost);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]?.segments.every((s) => s.ghost === true)).toBe(true);
+    // The layout budgets the box from inputRowCount: it must agree, or the
+    // frame would be a row short while the ghost wraps.
+    expect(inputRowCount("hi", 2, W, 10, { ghost })).toBe(2);
+    expect(inputRowCount("hi", 2, W, 10)).toBe(1);
+    expect(inputRowCount("hi", 2, W, 10, { ghost, anchor: 0 })).toBe(1);
+  });
+});

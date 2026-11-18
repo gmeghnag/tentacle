@@ -16,6 +16,15 @@ export const FLOAT_SIZE = 54;
 export const EDGE_INSET = 10;
 /** The gap kept to the header above and the composer below. */
 export const BAND_MARGIN = 8;
+/**
+ * The column the button OCCUPIES at its edge (its inset plus its diameter).
+ * Anything tappable at the transcript's foot — the pending bubbles and their
+ * inline Edit · Send now · Cancel (`screens/compose/PendingBubble.tsx`) — keeps
+ * this clear at BOTH edges, so an action stays reachable whichever side the hub
+ * rests on (QA bug 1: the pending row ran to the screen edge and Cancel sat
+ * exactly under the hub, where a tap opened the fan instead).
+ */
+export const HUB_COLUMN = EDGE_INSET + FLOAT_SIZE;
 /** The fade when it appears / disappears, and Reduce Motion's placement. */
 export const FADE_MS = 150;
 
@@ -136,4 +145,16 @@ export function headerPill(input: {
   readonly voiceOver: boolean;
 }): boolean {
   return input.mode === "header" || input.voiceOver;
+}
+
+/**
+ * The transcript's foot clearance (QA bug 1): how far the pending bubbles and
+ * their inline actions must stay from the screen's edges so a tap never lands on
+ * the floating hub. The button can rest at EITHER edge (`snap`), so both are
+ * reserved — an action under the fan is a tap that opens Activity instead of
+ * cancelling a message, which is the bug. With no floating button drawn (the
+ * header mode, a covered sheet, a band too short) there is nothing to clear.
+ */
+export function footClearance(drawn: boolean): number {
+  return drawn ? HUB_COLUMN : 0;
 }

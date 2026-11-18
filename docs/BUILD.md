@@ -79,6 +79,13 @@ or re-sign it in place:
 codesign --sign - --force ~/bin/yaha
 ```
 
+## The macOS voice helper
+
+`bun run voice:build [--universal]` builds `native/voice-mac` → `dist/tentacle-voice`
+(ad-hoc signed the same way); CI builds it `--universal` on a `macos-26` runner and
+ships it as the release asset `tentacle-voice-darwin`, which `install.sh` puts next to
+`tentacle` on macOS (`docs/feat/voice-release.md`).
+
 ## The iPhone app: a new dev build after a native module lands
 
 `apps/mobile` is an Expo **dev build**: a JS-only change reaches the phone over

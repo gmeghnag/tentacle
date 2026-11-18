@@ -124,15 +124,57 @@ export function inputView(
   };
 }
 
+/**
+ * A dictation's live partial, shown in the box as a GHOST
+ * (docs/feat/voice-live-transcript.md): display-only text that is never part of
+ * the buffer. It sits right after the cursor — the cursor keeps its own cell —
+ * so `hello` + ghost `wor` reads `hello█wor`, and the final, once inserted,
+ * lands where the ghost was.
+ *
+ * Returns the DISPLAY buffer (the real text with one cursor cell and the ghost
+ * spliced in at the cursor), the cursor in it, and the ghost's `[from, to)`
+ * span; or null when there is nothing to show — an empty ghost, or an active
+ * selection (whose highlight is the feedback then, and whose offsets a splice
+ * would shift). The ghost is one line: a newline or a TAB in it reads as a space.
+ */
+export interface GhostLayout {
+  readonly value: string;
+  readonly cursor: number;
+  readonly from: number;
+  readonly to: number;
+}
+
+export function withGhost(
+  value: string,
+  cursor: number,
+  anchor: number | null,
+  ghost: string,
+): GhostLayout | null {
+  const text = ghost.replace(/[\r\n\t]+/g, " ");
+  if (text === "") return null;
+  const at = Math.max(0, Math.min(value.length, cursor));
+  if (anchor !== null && anchor !== at && anchor >= 0 && anchor <= value.length) return null;
+  return {
+    value: `${value.slice(0, at)} ${text}${value.slice(at)}`,
+    cursor: at,
+    from: at + 1,
+    to: at + 1 + text.length,
+  };
+}
+
 /** Rows the input box occupies (content only, no border): visual rows, capped at `maxRows`. */
 export function inputRowCount(
   value: string,
   cursor: number,
   width: number,
   maxRows: number,
+  overlay: { readonly ghost?: string; readonly anchor?: number | null } = {},
 ): number {
-  const clampedCursor = Math.max(0, Math.min(value.length, cursor));
-  return Math.min(wrapRows(value, clampedCursor, width).length, Math.max(1, Math.floor(maxRows)));
+  const g = withGhost(value, cursor, overlay.anchor ?? null, overlay.ghost ?? "");
+  const shown = g === null ? value : g.value;
+  const at = g === null ? cursor : g.cursor;
+  const clampedCursor = Math.max(0, Math.min(shown.length, at));
+  return Math.min(wrapRows(shown, clampedCursor, width).length, Math.max(1, Math.floor(maxRows)));
 }
 
 /**
@@ -143,6 +185,8 @@ export function inputRowCount(
 export interface InputSegment {
   readonly text: string;
   readonly inverse: boolean;
+  /** A dictation ghost cell (`withGhost`): set only when true, rendered dim. */
+  readonly ghost?: true;
 }
 
 /** One rendered row of the input box: a gutter prefix plus content segments. */
@@ -164,16 +208,26 @@ export interface InputRender {
 
 /** Group a line into inverse/non-inverse segments given the set of inverse
  * columns, plus an optional trailing inverse cell (the block cursor at EOL). */
-function toSegments(line: string, inverse: boolean[], trailingCursor: boolean): InputSegment[] {
+function toSegments(
+  line: string,
+  inverse: boolean[],
+  trailingCursor: boolean,
+  ghost: boolean[] = [],
+): InputSegment[] {
   const segs: InputSegment[] = [];
   let i = 0;
   while (i < line.length) {
     const inv = inverse[i] ?? false;
+    const dim = ghost[i] ?? false;
     let j = i + 1;
-    while (j < line.length && (inverse[j] ?? false) === inv) {
+    while (j < line.length && (inverse[j] ?? false) === inv && (ghost[j] ?? false) === dim) {
       j++;
     }
-    segs.push({ text: line.slice(i, j), inverse: inv });
+    segs.push(
+      dim
+        ? { text: line.slice(i, j), inverse: inv, ghost: true }
+        : { text: line.slice(i, j), inverse: inv },
+    );
     i = j;
   }
   if (trailingCursor) {
@@ -208,16 +262,25 @@ function graphemeSpan(line: string, col: number): [number, number] {
  * When a selection is active the highlight is the feedback — no separate cursor
  * cell is drawn (it sits at a selection edge, already inverse).
  *
+ * A dictation `ghost` (`withGhost`) is spliced in after the cursor cell and its
+ * segments are flagged `ghost`; the buffer itself is untouched.
+ *
  * @param anchor selection anchor, or `null` for none.
  * @param width  box width in cells for soft-wrapping (default: no wrapping).
+ * @param ghost  a live dictation partial to preview, `""` for none.
  */
 export function inputRender(
-  value: string,
-  cursor: number,
-  anchor: number | null,
+  realValue: string,
+  realCursor: number,
+  realAnchor: number | null,
   maxRows: number,
   width: number = Number.POSITIVE_INFINITY,
+  ghost = "",
 ): InputRender {
+  const g = withGhost(realValue, realCursor, realAnchor, ghost);
+  const value = g === null ? realValue : g.value;
+  const cursor = g === null ? realCursor : g.cursor;
+  const anchor = g === null ? realAnchor : null;
   const view = inputView(value, cursor, maxRows, width);
   const clampedCursor = Math.max(0, Math.min(value.length, cursor));
   const hasSel =
@@ -266,18 +329,23 @@ export function inputRender(
     // Expand each tab to TAB_WIDTH spaces for display.
     let shown = "";
     const inverse: boolean[] = [];
+    const dim: boolean[] = [];
+    const rowAt = view.starts[r] ?? 0;
     for (let c = 0; c < line.length; c++) {
+      const isGhost = g !== null && rowAt + c >= g.from && rowAt + c < g.to;
       if (line[c] === "\t") {
         shown += " ".repeat(TAB_WIDTH);
         for (let k = 0; k < TAB_WIDTH; k++) {
           inverse.push((selected[c] ?? false) || (k === 0 && (cursorCell[c] ?? false)));
+          dim.push(isGhost);
         }
       } else {
         shown += line[c];
         inverse.push((selected[c] ?? false) || (cursorCell[c] ?? false));
+        dim.push(isGhost);
       }
     }
-    return { prefix, gutter, segments: toSegments(shown, inverse, trailingCursor) };
+    return { prefix, gutter, segments: toSegments(shown, inverse, trailingCursor, dim) };
   });
 
   return { rows };

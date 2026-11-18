@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
  * §7). It is a SEPARATE step from `bun run check` on purpose: the helper is a
  * Swift/SwiftPM build for macOS only, and the gate has to stay green on Linux CI.
  *
- * Usage: `bun run voice:build` (and `bun run voice:test` for its own tests).
+ * Usage: `bun run voice:build [--universal]` (and `bun run voice:test` for its own tests).
  * Output: `dist/tentacle-voice`, ad-hoc signed like `dist/tentacle`.
  */
 import { $ } from "bun";
@@ -21,10 +21,16 @@ if (process.platform !== "darwin") {
   process.exit(0);
 }
 
-console.log("voice:build: swift build -c release");
-await $`swift build -c release --package-path ${pkg}`;
+// `--universal`: one arm64 + x86_64 binary — what CI ships as the release asset
+// `tentacle-voice-darwin` (docs/feat/voice-release.md). Default: this Mac's arch.
+const arch = process.argv.includes("--universal") ? ["--arch", "arm64", "--arch", "x86_64"] : [];
 
-const binPath = (await $`swift build -c release --show-bin-path --package-path ${pkg}`).stdout
+console.log(`voice:build: swift build -c release ${arch.join(" ")}`.trimEnd());
+await $`swift build -c release ${arch} --package-path ${pkg}`;
+
+const binPath = (
+  await $`swift build -c release ${arch} --show-bin-path --package-path ${pkg}`
+).stdout
   .toString()
   .trim();
 const built = join(binPath, "tentacle-voice");
