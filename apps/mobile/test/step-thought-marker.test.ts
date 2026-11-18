@@ -65,6 +65,11 @@ beforeAll(async () => {
     useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
   }));
   mock.module("expo-symbols", () => ({ SymbolView: "SymbolView" }));
+  // `expo-file-system` is reached through the row's imports (diagram/artifact
+  // cells); without the stub this file only passed inside the full suite, where
+  // an earlier file's mock leaked in (Review round 1, isolation gap from
+  // `b7b6de2b`) — `notice-row.test.ts` carries the same line.
+  mock.module("expo-file-system", () => ({ File: class {}, Paths: { cache: "" } }));
   mock.module("expo-clipboard", () => ({ setStringAsync: async () => true }));
   mock.module("../src/haptics.ts", () => ({ playHaptic: () => {} }));
   mock.module("react-native-svg", () => ({
@@ -183,10 +188,13 @@ describe("a tool step's line carries no ∴ (owner 17/11)", () => {
       kind: "reasoning" as const,
       key: "r1",
       text: "Weighing the options\nand the cost",
+      ms: 12_000,
     };
     const props = stepNodeOf(reasoning);
     expect(props.node).toBe("thought");
-    expect(props.subtitle).toBe("Weighing the options");
+    // docs/fix/thought-placeholder.md: the duration, never the text; no toggle.
+    expect(props.subtitle).toBe("· 12 s");
+    expect("onToggle" in props).toBe(false);
     expect("marker" in props).toBe(false);
   });
 });

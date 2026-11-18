@@ -13,6 +13,7 @@ import {
   type ToolNameParts,
   type ToolTone,
   bodyCommand,
+  liveElapsed,
   outputView,
   rowSubtitle,
   spokenDuration,
@@ -30,10 +31,23 @@ export interface ThreadPos {
 export type StepCell =
   /** A reasoning row folded into a step, or into the live tail. */
   | { readonly kind: "hidden" }
-  /** A tool row; `thought` = the reasoning folded into it, if any. */
-  | { readonly kind: "step"; readonly thought: string | null; readonly thread: ThreadPos }
-  /** An orphan thought: reasoning with no tool to fold into (Owner Q1). */
-  | { readonly kind: "thought"; readonly text: string; readonly thread: ThreadPos };
+  /**
+   * A tool row; `thought` = the reasoning text folded into it, if any (live
+   * only); `thoughtFirst` = a thought preceded it, text or stored placeholder
+   * (docs/fix/thought-placeholder.md — "thought first" in its label).
+   */
+  | {
+      readonly kind: "step";
+      readonly thought: string | null;
+      readonly thoughtFirst: boolean;
+      readonly thread: ThreadPos;
+    }
+  /**
+   * An orphan thought: reasoning with no tool to fold into (Owner Q1), drawn
+   * `Thought · 12 s`, collapsed and not expandable (owner decision 2,
+   * docs/fix/thought-placeholder.md). `ms` absent = not measured (no clock).
+   */
+  | { readonly kind: "thought"; readonly ms: number | undefined; readonly thread: ThreadPos };
 
 export interface StepLayout {
   /** By row key. A row absent from the map (user, text, notice) draws as today. */
@@ -53,6 +67,17 @@ const HIDDEN: StepCell = { kind: "hidden" };
 function joined(rows: readonly ReasoningRow[]): string | null {
   const texts = rows.map((r) => r.text.trim()).filter((t) => t !== "");
   return texts.length === 0 ? null : texts.join("\n\n");
+}
+
+/** A stored placeholder (a reload's reasoning row: no text, a duration). */
+function placeheld(rows: readonly ReasoningRow[]): boolean {
+  return rows.some((r) => r.ms !== undefined);
+}
+
+/** The runs' total duration, or undefined when none was measured. */
+function totalMs(rows: readonly ReasoningRow[]): number | undefined {
+  const measured = rows.flatMap((r) => (r.ms === undefined ? [] : [r.ms]));
+  return measured.length === 0 ? undefined : measured.reduce((a, b) => a + b, 0);
 }
 
 /**
@@ -84,8 +109,8 @@ function isThinking(rows: readonly Row[], running: boolean): boolean {
 }
 
 type Node = { key: string } & (
-  | { kind: "step"; thought: string | null }
-  | { kind: "thought"; text: string }
+  | { kind: "step"; thought: string | null; thoughtFirst: boolean }
+  | { kind: "thought"; ms: number | undefined }
 );
 
 /**
@@ -120,9 +145,8 @@ export function stepLayout(
       for (const r of pending) {
         cells.set(r.key, HIDDEN);
       }
-      const text = joined(pending);
-      if (text !== null) {
-        node({ key: first.key, kind: "thought", text });
+      if (joined(pending) !== null || placeheld(pending)) {
+        node({ key: first.key, kind: "thought", ms: totalMs(pending) });
       }
     }
     pending = [];
@@ -137,14 +161,21 @@ export function stepLayout(
     }
     if (row.kind === "tool" && !isBlock(row)) {
       let thought: string | null = null;
+      let thoughtFirst = false;
       if (pending.length > 0) {
         for (const r of pending) {
           cells.set(r.key, HIDDEN);
         }
         thought = joined(pending);
+        thoughtFirst = thought !== null || placeheld(pending);
         pending = [];
       }
-      node({ key: row.key, kind: "step", thought: batchOpen ? null : thought });
+      node({
+        key: row.key,
+        kind: "step",
+        thought: batchOpen ? null : thought,
+        thoughtFirst: !batchOpen && thoughtFirst,
+      });
       batchOpen = true;
       continue;
     }
@@ -178,8 +209,8 @@ export function stepLayout(
       cells.set(
         n.key,
         n.kind === "step"
-          ? { kind: "step", thought: n.thought, thread }
-          : { kind: "thought", text: n.text, thread },
+          ? { kind: "step", thought: n.thought, thoughtFirst: n.thoughtFirst, thread }
+          : { kind: "thought", ms: n.ms, thread },
       );
     });
   }
@@ -273,7 +304,12 @@ export interface StepRowView {
 }
 
 /** A tool row as its step node draws it; `full` = every output line (the screen's show-all set). */
-export function stepRowView(row: ToolRow, thought: string | null, full: boolean): StepRowView {
+export function stepRowView(
+  row: ToolRow,
+  thought: string | null,
+  full: boolean,
+  thoughtFirst: boolean = thought !== null,
+): StepRowView {
   const meta = toolMeta(row);
   const dot = DOT[meta.tone];
   const command = bodyCommand(row.name, row.args);
@@ -302,22 +338,39 @@ export function stepRowView(row: ToolRow, thought: string | null, full: boolean)
       output !== null ||
       row.diff !== undefined ||
       row.denialReply !== undefined,
-    a11yLabel: stepA11yLabel(row, thought !== null),
+    a11yLabel: stepA11yLabel(row, thoughtFirst),
   };
 }
 
-/** An orphan thought's line: its first non-empty line, italic after "Thought". */
-export function thoughtRowView(text: string): {
+/**
+ * An orphan thought's line (docs/fix/thought-placeholder.md, owner decision 2):
+ * `Thought · 12 s`, collapsed and NOT expandable, live and after a reload alike
+ * — only the duration is ever stored, so live shows no more than a reload can.
+ */
+export function thoughtRowView(cell: { readonly ms: number | undefined }): {
   readonly subtitle: string;
+  readonly expandable: false;
   readonly a11yLabel: string;
 } {
-  const subtitle =
-    text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find((line) => line !== "") ?? "";
-  return { subtitle, a11yLabel: subtitle === "" ? "Thought" : `Thought, ${subtitle}` };
+  const ms = cell.ms;
+  if (ms === undefined) {
+    return { subtitle: "", expandable: false, a11yLabel: `Thought. ${NOT_KEPT}` };
+  }
+  const seconds = Math.floor(ms / 1000);
+  return {
+    subtitle: `· ${seconds < 1 ? "<1 s" : liveElapsed(ms)}`,
+    expandable: false,
+    a11yLabel: `Thought for ${
+      seconds < 1
+        ? "under a second"
+        : seconds < 60
+          ? `${seconds} ${seconds === 1 ? "second" : "seconds"}`
+          : spokenDuration(seconds * 1000)
+    }. ${NOT_KEPT}`,
+  };
 }
+
+const NOT_KEPT = "The thinking itself is not kept.";
 
 /** The footer's VoiceOver label: `Thinking`, then `Thinking, 12 seconds`. */
 export function thinkingA11yLabel(ms: number): string {

@@ -1,0 +1,1 @@
+- **A reopened session on the phone keeps its Thought rows.** Only how long the model thought is stored (never the reasoning text), so a thought before an answer reads `Thought · 12 s` live and after a reload alike — collapsed, not expandable — and a thought before a tool stays folded into that step ("thought first"). The Mac TUI is unchanged.

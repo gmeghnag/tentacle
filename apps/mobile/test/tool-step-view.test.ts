@@ -142,10 +142,26 @@ describe("stepRowView: one step's line and body", () => {
 });
 
 describe("thoughtRowView / thinkingA11yLabel", () => {
-  test("an orphan thought reads its first non-empty line", () => {
-    expect(thoughtRowView("\n  first idea  \nsecond")).toEqual({
-      subtitle: "first idea",
-      a11yLabel: "Thought, first idea",
+  test("an orphan thought reads `Thought · N s`, not expandable (thought-placeholder)", () => {
+    expect(thoughtRowView({ ms: 12_900 })).toEqual({
+      subtitle: "· 12 s",
+      expandable: false,
+      a11yLabel: "Thought for 12 seconds. The thinking itself is not kept.",
+    });
+    expect(thoughtRowView({ ms: 400 }).subtitle).toBe("· <1 s");
+    expect(thoughtRowView({ ms: 400 }).a11yLabel).toBe(
+      "Thought for under a second. The thinking itself is not kept.",
+    );
+    expect(thoughtRowView({ ms: 1000 }).a11yLabel).toContain("for 1 second.");
+    expect(thoughtRowView({ ms: 125_000 })).toMatchObject({
+      subtitle: "· 2 min 5 s",
+      a11yLabel: "Thought for 2 minutes 5 seconds. The thinking itself is not kept.",
+    });
+    // Not measured (a fold with no clock): the word alone, never a guessed time.
+    expect(thoughtRowView({ ms: undefined })).toEqual({
+      subtitle: "",
+      expandable: false,
+      a11yLabel: "Thought. The thinking itself is not kept.",
     });
   });
 
@@ -180,7 +196,7 @@ describe("isBlock: a row drawn as a block (chart, artifact card) ends the thread
 
   test("a thought before a block does not fold into it: it is a Thought node", () => {
     const { cells } = stepLayout([think("r"), chart("c")], false, isChart);
-    expect(cells.get("r")).toMatchObject({ kind: "thought", text: "thinking r" });
+    expect(cells.get("r")).toMatchObject({ kind: "thought", ms: undefined });
     expect(cells.has("c")).toBe(false);
   });
 

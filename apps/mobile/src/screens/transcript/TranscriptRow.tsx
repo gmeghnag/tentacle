@@ -301,11 +301,6 @@ function AssistantRowView({ row, palette, onLink, speak, onSpeak }: RowProps): J
 }
 
 /**
- * Reasoning: nothing when it is folded into a step or the live footer
- * (`hidden`), else a `Thought` node — ∴ in the dot's place, its first line in
- * italic, the whole thought on tap (Owner Q1).
- */
-/**
  * A fired scheduled wake (docs/feat/scheduled-fire-row.md): the tool/thought
  * rows' timeline node with a `◷`, `Wake 15:54` and the prompt on one line —
  * collapsed until tapped, then the prompt in full under it. No bubble.
@@ -343,15 +338,21 @@ function FiredRowView({
   );
 }
 
+/**
+ * Reasoning: nothing when it is folded into a step or the live footer
+ * (`hidden`), else a `Thought · 12 s` node — ∴ in the dot's place (Owner Q1),
+ * collapsed and not expandable (docs/fix/thought-placeholder.md).
+ */
 function ReasoningRowView({ row, palette, step }: RowProps): JSX.Element | null {
   const reasoning = row as Extract<Row, { kind: "reasoning" }>;
   const cell = step?.cell;
   if (cell?.kind === "hidden") {
     return null;
   }
-  const text = cell?.kind === "thought" ? cell.text : reasoning.text;
   const thread = cell?.kind === "thought" ? cell.thread : LONE;
-  const view = thoughtRowView(text);
+  const view = thoughtRowView(cell?.kind === "thought" ? cell : { ms: reasoning.ms });
+  // Collapsed and never expandable (docs/fix/thought-placeholder.md): no toggle,
+  // no body — only the duration is ever stored, so live shows what a reload can.
   return (
     <StepShell row={reasoning} thread={thread}>
       <StepNode
@@ -364,10 +365,9 @@ function ReasoningRowView({ row, palette, step }: RowProps): JSX.Element | null 
         trailing=""
         trailingRed={false}
         thread={thread}
-        open={step?.open ?? false}
-        {...(step === undefined || text.trim() === "" ? {} : { onToggle: step.onToggle })}
+        open={false}
         a11yLabel={view.a11yLabel}
-        body={<StepBody palette={palette} thought={text} command={[]} output={null} />}
+        labelTestID={`thought-${reasoning.key}`}
       />
     </StepShell>
   );
@@ -450,7 +450,12 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
   const tool = row as Extract<Row, { kind: "tool" }>;
   const cell = step?.cell;
   const thread = cell?.kind === "step" ? cell.thread : LONE;
-  const view = stepRowView(tool, cell?.kind === "step" ? cell.thought : null, step?.full ?? false);
+  const view = stepRowView(
+    tool,
+    cell?.kind === "step" ? cell.thought : null,
+    step?.full ?? false,
+    cell?.kind === "step" && cell.thoughtFirst,
+  );
   const diff = tool.diff === undefined ? null : diffView(tool.diff);
   const progress = subAgentLine(tool.sub);
   // A presented artifact IS this row's visible body (docs/feat/model-artifacts.md

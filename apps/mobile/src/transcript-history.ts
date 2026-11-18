@@ -142,6 +142,13 @@ export function historyRows(
         });
       }
     } else if (m.role === "assistant") {
+      // The round's thinking, as stored: a placeholder with its duration only
+      // (docs/fix/thought-placeholder.md). Before the text it is its own
+      // `Thought · 12 s` row; before a call it folds into that step — the
+      // layout decides, as for a live reasoning row.
+      if (m.thought !== undefined) {
+        rows.push({ kind: "reasoning", key: nextKey(), text: "", version: 0, ms: m.thought.ms });
+      }
       if (m.content.trim() !== "") {
         rows.push({
           kind: "assistant",

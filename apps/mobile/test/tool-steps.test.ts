@@ -48,7 +48,7 @@ describe("fold: a thought joins the NEXT tool across thought-only gaps", () => {
 
   test("NO fold across assistant text (Owner Q3): the reasoning is an orphan thought", () => {
     const { cells } = stepLayout([think("r1"), text("a1"), tool("t1")], false);
-    expect(cells.get("r1")).toMatchObject({ kind: "thought", text: "thinking r1" });
+    expect(cells.get("r1")).toMatchObject({ kind: "thought", ms: undefined });
     expect(cells.get("t1")).toMatchObject({ kind: "step", thought: null });
   });
 
@@ -79,7 +79,7 @@ describe("orphan: a thought with no tool to fold into (Owner Q1)", () => {
     const { cells, tail } = stepLayout([tool("t1"), think("r1"), text("a1")], false);
     expect(cells.get("r1")).toEqual({
       kind: "thought",
-      text: "thinking r1",
+      ms: undefined,
       thread: UP_DOWN(true, false),
     });
     expect(tail).toBeNull();

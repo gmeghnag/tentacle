@@ -84,9 +84,18 @@ export interface AssistantRow {
 export interface ReasoningRow {
   readonly kind: "reasoning";
   readonly key: string;
+  /** The live reasoning; `""` on a reload (only a placeholder is stored, docs/fix/thought-placeholder.md). */
   readonly text: string;
   /** As `AssistantRow.version`: the text's length (append-only). */
   readonly version: number;
+  /** Live: the receipt time of its first delta, which its duration is measured from. */
+  readonly at?: number;
+  /**
+   * How long the model thought (ms): live, first delta → the next input's
+   * receipt; on a reload, the stored `ChatMessage.thought.ms`. Absent while it
+   * still streams (or with no clock).
+   */
+  readonly ms?: number;
 }
 
 export interface ToolRow {

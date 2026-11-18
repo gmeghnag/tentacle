@@ -164,6 +164,17 @@ const chatMessageShape = () => ({
    */
   scheduled: ScheduledFireSchema.optional().catch(undefined),
   /**
+   * ONLY on an assistant message whose round streamed reasoning: how long the
+   * model thought, in ms — a placeholder, never the reasoning text (display
+   * only, docs/fix/thought-placeholder.md). FAIL-SOFT like `scheduled`: a value
+   * outside these bounds is DROPPED (the message still loads, with no Thought
+   * row — the pre-field look), never a refusal of the CRITICAL entry.
+   */
+  thought: z
+    .object({ ms: z.number().int().nonnegative().max(86_400_000) })
+    .optional()
+    .catch(undefined),
+  /**
    * On a USER message: image refs to send with it (docs/feat/attachments-core.md).
    * Refs, never bytes — the bytes live behind an `AttachmentSource` on the side
    * that may read them (a pod's refs read nothing on the laptop).
