@@ -404,3 +404,7 @@ usage data until B5 lands); real wall time (only an upper bound); the 400's trig
 the deepseek profile's `maxIterations`; scope creep beyond the reviewed examples.
 Recommended order: A1 + A2 + A5 (brief and `ds()` only, same day) → the measurement in
 Q6 → B1 + B2 + B5 → A3 tuning → B3/B4 only if the re-runs still show tails.
+
+### Owner answers (2026-11-18)
+- **Q1:** DeepSeek costs the owner TIME, not money (free to use) — plus the moral cost of a model looping and wasting energy/resources: efficiency matters for both. Consequence: optimise wall time and wasted calls; prefer one whole read over many slices (fewer round trips) → A4 adopted; A2 (script-run gate) is the top time saver.
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-18*
