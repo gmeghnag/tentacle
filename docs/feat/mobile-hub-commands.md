@@ -446,3 +446,49 @@ Changelog: `changelog.d/mobile-hub-commands.added.md`. No protocol, daemon, pers
 Unverified: the light/dark simulator screenshots the plan asks the executor to attach (no simulator in this run) — the visual state is pinned by `hub-fan.test.ts` (dashed + 0.38, glyph path) and `hub-commands-wiring.test.ts` (the wiring) instead.
 
 ## Review
+
+### Slice C1 — verification round (a second executor, same slice, no behaviour change)
+
+*— claude-opus-5-5, 2026-11-18*
+
+`0ede9563` was already on the branch, so this round re-verified it against the plan instead of re-implementing it; the only source edit is a doc-comment.
+
+**Load-bearing check re-run on the current branch** (`.tentacle/tmp/mobile-hub-commands/repro.ts`, plus `c1-check.ts` for the plan's own C1 assertions):
+
+```
+fan : attach · activity(dim) · artifacts · tools · sessions · more      <- the Context repro, now STALE
+sticky tap on dimmed activity -> state: fanSticky effects: [haptic light, flash {index:1}]
+idle fan : attach · activity · artifacts · tools · commands · more       <- c1-check.ts
+idle more: sessions · info · dictate · new
+turn fan : stop · steer · attach · activity · artifacts · more
+turn more: tools · commands · sessions · info · dictate · new
+ended cmds: false
+artifacts: "No artifacts yet" == NO_ARTIFACTS
+tools dim: "No MCP servers or skills in this session"
+a11y     : Activity, Nothing running | Tools
+tools a11y: Tools, No MCP servers or skills in this session
+unknown artifactsEmpty: false
+menu commit on dimmed artifacts: {"kind":"noop","notice":"No artifacts yet"}
+```
+
+Read as expected: the Context **Repro** is now stale — the fan holds `commands`, `tools` and no `info`, More starts `sessions · info`, and a dimmed tap emits `flash` instead of `commit`+`close` — i.e. the capability Context says is missing IS present. Every C1 claim in Implementation/C1 holds.
+
+**The load-bearing assumption itself, re-verified in source** (C1 rests on the daemon, not the phone): `session/compact`, `session/clear`, `session/rename`, `session/set_auto_accept` at `packages/protocol/src/methods.ts:121-136`; `RemoteSession.clear()` `packages/client/src/remote-session.ts:1217`, `compact()` `:1260` (still **no** signal parameter — C2 item 9 remains the one client change), `rename()` `:755`.
+
+**Mutations, all re-run** (each reverted; the named test red while broken, green restored):
+
+| mutation | red |
+|---|---|
+| restore the old `commit`+`close` on a dimmed id (`hub-gesture.ts`) | 4 in `hub-gesture.test.ts` |
+| `itemA11yLabel` back to the generic "nothing running" | 2 in `hub-actions.test.ts` |
+| drop `dimmedBecause`'s `artifacts` branch | 5 across `hub-actions`/`hub-session` |
+| `FLASH_MS` window made inclusive (`<=`) in `hub-flash.ts` | 4 in `hub-flash.test.ts` |
+| drop the `onFlash` call from the button's `flash` effect | **0** — nothing pinned it |
+
+The last is a gap in this slice's tests, not in the plan: C1 Design 8 gives the fan tap its own sheet-free hook, and nothing held the button to calling it. Closed by a new assertion in `hub-commands-wiring.test.ts` ("the `flash` effect tells the screen once, with the fan's OWN snapshot id"), shown **red on the mutated source first**, then green on the restored one.
+
+**The one source edit:** `HubItem.dimmed`'s doc-comment still said a dimmed commit "uses the notice line", which C1 replaced for the fan path; it now names the flash and leaves the notice line to the menu/VoiceOver answer (`hub-actions.ts:39-46`). No behaviour change.
+
+Tests: `apps/mobile/test/hub-*.test.ts` 336 pass / 0 fail; the 36 files importing `FloatingActivity`/`HubFan`/`SessionScreen` 508 pass / 0 fail. `tsc -p apps/mobile` clean; `biome check` on the touched files clean. The full gate is the orchestrator's (§4, token budget) — not run here.
+
+Still unverified, as above: the simulator screenshots (no simulator in this run).

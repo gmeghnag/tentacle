@@ -40,8 +40,11 @@ export interface HubItem {
   readonly danger: boolean;
   /**
    * Offered but with nothing to show (docs/feat/mobile-hub-tap.md Design 2): it
-   * KEEPS its slot, a commit says why in the notice line, and the cue is `light`
-   * — never hidden, so the order never shifts under the finger (owner Q-H5).
+   * KEEPS its slot and the cue is `light` — never hidden, so the order never
+   * shifts under the finger (owner Q-H5). Since mobile-hub-commands C1 a FAN tap
+   * on it flashes its own `emptyLabel` in place (`hub-flash.ts`) instead of
+   * committing; the notice line is the menu / VoiceOver path's answer
+   * (`resolveCommit`).
    */
   readonly dimmed: boolean;
   /**

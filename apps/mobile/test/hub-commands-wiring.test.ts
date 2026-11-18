@@ -92,6 +92,17 @@ describe("the flash's one timer lives on the button", () => {
     expect(teardown.slice(0, 300)).toContain("clearTimeout(flashTimer.current)");
   });
 
+  test("the `flash` effect tells the screen once, with the fan's OWN snapshot id", () => {
+    const effect = BUTTON.slice(
+      BUTTON.indexOf('case "flash": {'),
+      BUTTON.indexOf('case "commit":'),
+    );
+    // The id is the menu the fan opened with, as a commit's is — never the item
+    // under the finger at the release.
+    expect(effect).toContain("press.current.menu?.ids[effect.index]");
+    expect(effect.match(/onFlash\(/g)?.length).toBe(1);
+  });
+
   test("the effect carries no haptic of its own (the machine already emitted `light`)", () => {
     // `hubHaptic` answers `haptic` effects only, so a `flash` plays nothing twice.
     const effect = BUTTON.slice(
