@@ -11,13 +11,16 @@
  */
 import type { EndReason } from "@tentacle/client";
 import type { AttachSheet } from "./attach-sheet.ts";
-import type { ShownRow } from "./compose-queue.ts";
+import type { PendingBubble, ShownRow } from "./compose-queue.ts";
+import type { Editing } from "./compose-state.ts";
 import {
   type ComposerAction,
   type ComposerBlocker,
   PHOTOS_NEXT_PROMPT,
+  type SendSlot,
   composerAction,
   sendNowOffered,
+  sendSlot,
 } from "./composer.ts";
 import { folderLabel } from "./folder-label.ts";
 import type { OutboxItem } from "./outbox.ts";
@@ -108,8 +111,18 @@ export interface SessionViewInput {
   readonly notSaved?: boolean;
   /** The attachment chips (13c's pipeline states, in pick order). */
   readonly photos?: readonly ChipView[];
-  /** How many waiting rows of MINE the queue holds (Send now's other trigger). */
-  readonly ownQueue?: number;
+  /** How many `queued` rows of MINE the queue holds (Send now's only trigger). */
+  readonly ownPending?: number;
+  /**
+   * The pending messages as the TRANSCRIPT draws them (docs/feat/mobile-queued-compose.md
+   * D1): one bubble per queued row, in delivery order. Optional in (a build with
+   * no compose half has none), required out.
+   */
+  readonly pending?: readonly PendingBubble[];
+  /** The pending message being EDITED (D6), or null. */
+  readonly editing?: Editing | null;
+  /** The daemon cannot take a queued message back (an older one): Hide Edit/Cancel. */
+  readonly unqueueOff?: boolean;
 }
 
 /** One photo chip: what it is doing, and why it was refused (13c's states). */
@@ -156,8 +169,11 @@ export interface ComposeBarView {
    * when the PDF row is absent, the sentence that says why. Pure `attachSheet`.
    */
   readonly attach: AttachSheet;
-  readonly ownQueue: number;
+  readonly ownPending: number;
   readonly sendNow: boolean;
+  readonly pending: readonly PendingBubble[];
+  readonly editing: Editing | null;
+  readonly unqueueOff: boolean;
 }
 
 /** One outbox row: what the person wrote and where it is (D4's states). */
@@ -175,6 +191,8 @@ export interface ComposerView {
   readonly action: ComposerAction;
   /** The button's face: Send, Queue (steer), Send later, Stop, or a disabled Send. */
   readonly button: "send" | "queue" | "send-later" | "stop" | "disabled";
+  /** The slot's GLYPH (D4): a total map of `action`, so the screen never re-decides. */
+  readonly slot: SendSlot;
   /** Why the button does nothing (the screen dims it); null when it does something. */
   readonly blockedBy: ComposerBlocker | null;
   /** A turn runs: the indicator under the transcript (`turn-running` / `turn-idle`). */
@@ -223,6 +241,12 @@ export interface SessionView {
   readonly photos: readonly ChipView[];
   /** The notices above the input, in the order the person must read them. */
   readonly notices: readonly ComposeNotice[];
+  /** The pending messages the transcript's footer draws (D1), in delivery order. */
+  readonly pending: readonly PendingBubble[];
+  /** The pending message being edited (D6): the field's banner, or null. */
+  readonly editing: Editing | null;
+  /** The daemon takes no queued message back (an older one): Edit/Cancel hidden. */
+  readonly unqueueOff: boolean;
 }
 
 const FAILURE_TEXT: Readonly<Record<SessionOpenFailure, string>> = {
@@ -302,6 +326,9 @@ export function sessionView(input: SessionViewInput): SessionView {
     composer,
     queued: input.queued ?? [],
     returnedOthers: input.returnedOthers ?? [],
+    pending: input.pending ?? [],
+    editing: input.editing ?? null,
+    unqueueOff: input.unqueueOff === true,
     outbox: outboxRowsOf(input.outbox ?? []),
     photos: input.photos ?? [],
     // Nothing to say until the session is reachable (the failure/ended branches
@@ -392,7 +419,7 @@ function composerOf(input: SessionViewInput): ComposerView {
     ended: input.ended,
     photos: ready,
     ...(uploading ? { uploading: true } : {}),
-    ownQueue: input.ownQueue ?? 0,
+    ownPending: input.ownPending ?? 0,
   });
   const button =
     action.kind === "send"
@@ -408,6 +435,7 @@ function composerOf(input: SessionViewInput): ComposerView {
     text: input.draft,
     action,
     button,
+    slot: sendSlot(action),
     blockedBy: action.kind === "none" ? action.why : null,
     running: input.turn !== null,
     sendNow: sendNowOffered({
@@ -416,7 +444,7 @@ function composerOf(input: SessionViewInput): ComposerView {
       turn: input.turn,
       ended: input.ended,
       photos: ready,
-      ownQueue: input.ownQueue ?? 0,
+      ownPending: input.ownPending ?? 0,
     }),
     photosNotice: action.kind === "none" && action.why === "photos" ? PHOTOS_NEXT_PROMPT : null,
   };

@@ -28,7 +28,7 @@ appId: so.tentacle.app
     id: "composer-send"
 - extendedWaitUntil:
     visible:
-      id: "composer-queue"
+      id: "pending-bubbles"
     timeout: 20000
 # My app is GONE while the turn is stopped: the row must come back on relaunch.
 - stopApp

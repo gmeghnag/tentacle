@@ -580,6 +580,16 @@ function stream(
       if (hold) {
         ctx.setHeld(true);
       }
+      // `THINKHOLD` (docs/feat/mobile-hub-native-driver.md): a HOLD turn that is
+      // all Thinking first — a reasoning delta every 40 ms for the hold — the
+      // load under which the owner saw the hub fan stutter.
+      if (hold && prompt.includes("THINKHOLD")) {
+        const until = Date.now() + ctx.holdMs;
+        for (let i = 0; Date.now() < until; i++) {
+          send(frame({ reasoning_content: `thinking step ${i}, weighing the next move. ` }));
+          await Bun.sleep(40);
+        }
+      }
       // 13d's flow 18: the images reached the MODEL (not just the daemon's store),
       // so the answer says how many. `[context: …]` lines are the daemon's own.
       const images = lastUserImages(body);
