@@ -114,6 +114,10 @@ None: the owner decides, see below.
 5. **Copy language.** The mockup says "Invio… 62%", "Non inviata", "Riprova", "Immagine non disponibile"; the app is English ("Sending…", `outbox-look.ts:27`). **Rec:** English ("Sending… 62%", "Not sent", "Retry", "Image not available"), matching the rest of the app.
 6. **Viewer share + pinch scope.** Native RN only (`Share.share`, `ScrollView` zoom, iOS-first; Android pinch is weaker) vs a gesture library. **Rec:** RN only now; a gesture library only if the owner finds pinch lacking on device.
 
+### Owner answers (2026-11-18 ~09:40)
+Q1–Q6: recommendations accepted, with one change on Q1: do NOT add `@react-native-masked-view/masked-view` in this task. Ship the svg-native glyph-clipped shimmer (S0-a); if S0-a fails, fall back to the static "Thinking" + seconds (no JS-driven 30 Hz gradient) and record it — the masked-view option is a separate TODO entry (feat/mobile-masked-view-shimmer). Q2 F + "Image not available" tile now, feat/attachment-get later (TODO). Q3 merge fix/mobile-photo-row first, then rebase. Q4 wire onProgress. Q5 English copy. Q6 RN-only viewer. Implementation APPROVED.
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-18*
+
 ## Execution
 
 *(empty — starts after approval)*
