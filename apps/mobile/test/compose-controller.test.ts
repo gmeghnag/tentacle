@@ -1079,6 +1079,33 @@ describe("Edit and Cancel through the controller (D6)", () => {
     expect(h.field()).toBe("typed during rtt\nmine");
   });
 
+  test("Edit keeps my words when the daemon's queue report lands BEFORE its reply", async () => {
+    // Review round 2, finding 5 (HIGH, a regression of round 1's fix): the
+    // daemon publishes the new queue synchronously, so "queued WITHOUT the id"
+    // always reaches the phone BEFORE the `removed` reply; `onQueued` drops the
+    // acked id from `own`, and `unqueueFor` then read the edit's text from an
+    // `own` that no longer had it → the message was withdrawn AND the words were
+    // gone (a silent loss on every successful Edit). Mutation: read the text
+    // from the POST-report `state.own` → red (field "", editing.text "").
+    const h = await harness({ draft: "mine" });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "mine" });
+    const id = queuedId(h);
+    h.setField("");
+    const handle = h.handle;
+    const unqueue = handle.unqueue.bind(handle);
+    // The daemon's real order: publish the report, then answer the request.
+    handle.unqueue = async (ids) => {
+      const reply = await unqueue(ids);
+      handle.emitQueue({ entries: [], returned: [] });
+      return reply;
+    };
+    await h.compose.edit(id);
+    expect(h.compose.view().editing?.text).toBe("mine");
+    expect(h.field()).toBe("mine");
+    expect(h.compose.view().pending).toEqual([]);
+  });
+
   test("× with the link down: the words stay in the field, no bubble is left behind", async () => {
     // Review round 1, finding 3: the × marked the row enqueued and cleared the
     // field before noticing there was no handle — a "mine" bubble that could

@@ -355,6 +355,15 @@ export function createCompose(deps: ComposeDeps): Compose {
   let unsubscribe: (() => void) | null = null;
   /** Ids of mine a live send-now carries: they stay in `own` whatever the queue says. */
   let carried = new Set<string>();
+  /**
+   * Ids whose Edit/Cancel request is in flight: they stay in `own` whatever the
+   * queue says (review round 2). The daemon publishes the new queue BEFORE it
+   * answers `session/unqueue`, so the report that no longer lists the id always
+   * lands first; without this the withdrawn message's own words were already
+   * gone from `own` when the reply arrived, and every successful Edit lost them
+   * (the row left, the field stayed empty). Same rule as B0's enqueues.
+   */
+  const withdrawing = new Set<string>();
   let busy = false;
   let started = false;
 
@@ -416,7 +425,15 @@ export function createCompose(deps: ComposeDeps): Compose {
     // landing during the unqueue RTT, and anything typed meanwhile, are what the
     // answer must apply to. Read before it, `state = step.state` overwrote the
     // report (another device's row vanished) and the field lost the typed words.
-    const reply = await unqueueNow([id]);
+    withdrawing.add(id);
+    let reply: UnqueueReply;
+    try {
+      reply = await unqueueNow([id]);
+    } finally {
+      // The answer is in: from here the label is `own`'s (removed → dropped by
+      // the step; kept → still mine, so a retry is possible).
+      withdrawing.delete(id);
+    }
     const field = deps.draft();
     const step = unqueueFor(state, { what, id, field, reply });
     state = step.state;
@@ -445,7 +462,10 @@ export function createCompose(deps: ComposeDeps): Compose {
       entries: queue.entries.map((entry) => entry.id),
       returned: queue.returned.length,
     });
-    const step = onQueued(state, queue, { stoppedHere, keep: carried });
+    const step = onQueued(state, queue, {
+      stoppedHere,
+      keep: [...carried, ...withdrawing],
+    });
     state = step.state;
     if (step.give !== "") {
       // My own words go back into the field and to disk AT ONCE: a kill right

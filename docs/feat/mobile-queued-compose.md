@@ -670,3 +670,50 @@ loss on every successful Edit** (Cancel is unaffected). No test emits the daemon
 real order (a report without the id, then the reply). Fix direction: capture `own.get(id)` before the await (or keep the id in
 `own` while its unqueue is in flight, as B0 does for enqueues), and pin it with
 a test that emits `{entries: []}` before the reply.
+
+### Fix round 2
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (the `deepseek` profile), 2026-11-18* (executor of the fixes; same branch)
+
+**F5 (HIGH) — round 1's fix regressed into a silent loss on every successful
+Edit.** Root cause, in one sentence: `unqueueApplied` reads `state` after the
+await (round 1's fix, and correct), but the daemon publishes the new queue
+SYNCHRONOUSLY before it answers — `HostedSession.unqueue` calls
+`publishQueue()` at `packages/daemon/src/hosted-session.ts:1925-1927`, then
+returns — so the `queued` report WITHOUT the id always lands first; `onQueued`
+drops the acked id from `own` (the stuck fix's rule) and `unqueueFor` then read
+the edit's text as `state.own.get(id) ?? ""` (`compose-state.ts:247`) → empty.
+The daemon had withdrawn the message and the phone no longer held the words.
+
+Fix: the id stays labelled mine while its unqueue is in flight — a
+`withdrawing` set (`compose-controller.ts:366-373`) added before the request
+and removed in a `finally` (so a throw releases it too), passed to `onQueued`
+as `keep` alongside the send-now's `carried` (`:465-468`). This is B0's own
+rule for enqueues (an unacked id stays mine), applied to the withdrawal, and
+it keeps the round-1 property intact (state/field still read AFTER the await):
+the QUEUE facts are the post-report ones, only the row's TEXT comes from before
+it — which is the phone's, never the daemon's (AGENTS §7).
+
+*Red before green (§9):* `compose-controller.test.ts` "Edit keeps my words when
+the daemon's queue report lands BEFORE its reply" — a fake handle that emits
+`{entries: [], returned: []}` *before* returning its reply, i.e. the daemon's
+real order. Red on the round-1 code (`editing.text` `""`, field `""`); green
+now (`"mine"`, `"mine"`, no row left). Cancel is unaffected by the loss itself
+but shares the path, so it is covered by the same set.
+
+**Mutation checks (§9 non-vacuity), each reverted immediately from a backup:**
+- `keep: carried` (drop `withdrawing` from the fold) → red: F5's test
+  (`48 pass, 1 fail`).
+- `withdrawing.add(id); withdrawing.delete(id);` before the await (i.e. add
+  nothing across the RTT) → red: F5's test (`48 pass, 1 fail`).
+
+**No drift beyond the above:** mobile only; no protocol, schema or persisted
+format touched; the `own` file is still written from the post-step state
+(`persistOwn` after the fold), so a withdrawn message's text never lingers on
+disk after it is gone.
+
+**Gate:** `bunx tsc --noEmit` → clean; `tsc -p apps/mobile --noEmit` → clean;
+`bun run lint` → Checked 2066 files, 0 errors; `bun test apps/mobile/test` →
+3397 pass / 0 fail; full `bun test` → **15070 pass, 5 skip, 0 fail** (1078
+files; the 5 skips are the documented `skipIf` opt-ins — live-k8s ×2,
+live-docker ×2, the real-socket keepalive).
