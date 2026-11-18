@@ -131,6 +131,55 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
   });
 });
 
+/**
+ * Review round 1, finding 1: the SCREEN half of bug 4's fix had no test of its
+ * own — `follow.test.ts` copies the screen's routing instead of asserting it — so
+ * putting back the pre-fix `return next.step !== null` (and re-arming the reveal
+ * only when the measurement scrolled) stayed green while restoring the loop.
+ */
+describe("the screen routes a landing through `landingPending`, not 'did it scroll?' (bug 4)", () => {
+  const src = read("screens", "SessionScreen.tsx");
+
+  test("`land()` returns the landing's verdict AND re-arms the reveal whenever one is owed", () => {
+    // A re-attach ABSORBS its measurements without scrolling, so "did this one
+    // scroll?" is `false` for it: that verdict sent the next measurement through
+    // `contentGrew` — ANIMATED, the owner's loop — and never re-armed the timer
+    // that lands the absorbed landing.
+    expect(src).toMatch(/if \(landingPending\(next\.state\)\) \{\s*armReveal\(\);\s*\}/);
+    // The consumed measurement is the landing's too: the one that ENDS it repeats
+    // the height its own silent scroll already reached (an animated scroll to that
+    // offset is the loop's echo).
+    expect(src).toMatch(/const owed = landingPending\(landing\.current\);/);
+    expect(src).toMatch(/return owed \|\| landingPending\(next\.state\);/);
+    // The pre-fix line, and any equivalent of it, is gone for good.
+    expect(src).not.toMatch(/return next\.step !== null;/);
+    expect(src).not.toMatch(/if \(next\.step !== null\) \{\s*armReveal\(\);/);
+    expect(src).toMatch(/landingPending,[\s\S]{0,200}\} from "\.\.\/follow\.ts"/);
+  });
+
+  test("the reveal re-arms itself while the landing it landed is still owed (the hand-over after a re-attach)", () => {
+    // A re-attach whose scroll caused NO re-measure gets no further `land()` call:
+    // without this second, quiet fire the landing stayed owed for ever, and the
+    // next row a stream appended was absorbed (silent) instead of followed.
+    expect(src).toMatch(
+      /if \(next\.step !== null && landingPending\(next\.state\)\) \{\s*fire\(\);\s*\}/,
+    );
+    expect(src).toMatch(/const fire: \(\) => void = \(\) => \{\s*reveal\.current = setTimeout/);
+    expect(src).toMatch(/reveal\.current = null;[\s\S]{0,300}landingReveal\(/);
+  });
+
+  test("both measurements ask `land()` first and RETURN when it owns the list (no fall-through to the animated follow)", () => {
+    expect(src).toMatch(
+      /onContentSize = useCallback\([\s\S]{0,500}if \(land\(\)\) \{\s*return;\s*\}/,
+    );
+    expect(src).toMatch(
+      /onListLayout = useCallback\([\s\S]{0,400}if \(land\(\)\) \{\s*return;\s*\}/,
+    );
+    // The builder's own `next.state` is what is asked, before it is dropped.
+    expect(src).toMatch(/const next = landingStep\([\s\S]{0,300}landing\.current = next\.state;/);
+  });
+});
+
 describe("the settle re-check (docs/fix/mobile-qa-1117.md, bug 5)", () => {
   const src = read("screens", "SessionScreen.tsx");
 

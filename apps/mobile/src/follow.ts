@@ -153,6 +153,16 @@ export interface Landing {
   readonly settling: boolean;
   /** The next scroll is not animated (a re-attach, whose rows are already shown). */
   readonly silent: boolean;
+  /**
+   * The silent landing has LANDED once (`landingReveal`): what is owed now is the
+   * growth that scroll itself causes — a `FlatList` renders new end cells, so the
+   * content height moves again — followed SILENTLY (one non-animated scroll per
+   * new end) until a height REPEATS or `LANDING_ROUNDS` runs out (Review round 1,
+   * finding 2: handing the list back at the reveal sent those measurements to
+   * `contentGrew`, ANIMATED — the same loop, one step later). Never set on an
+   * opening landing.
+   */
+  readonly revealed: boolean;
   /** The content height of the previous measurement (0: none yet). */
   readonly last: number;
   /** How many measurements this landing has taken. */
@@ -169,6 +179,7 @@ export interface Landing {
 export const landingStart: Landing = {
   settling: true,
   silent: true,
+  revealed: false,
   last: 0,
   rounds: 0,
   awaiting: false,
@@ -179,15 +190,17 @@ export const landingStart: Landing = {
  * shown, so nothing is hidden — but the jump to the end must not be animated
  * either, or the person watches the transcript scroll past again.
  *
- * `last` is the content height measured BEFORE the re-attach: the re-attach
- * REPLACES the rows (`transcript.ts` `withHistory`), which re-keys them, so the
- * list unmounts its cells and reports a sequence of heights (dropped, grown
- * back, repeated). The return to the height it had is the signal that the
- * re-measure is over — see `reattachLanding`.
+ * Its measurements are ABSORBED (`landingStep`) until the screen's reveal timer
+ * lands it once, silently: the re-attach REPLACES the rows (`transcript.ts`
+ * `withHistory`), which re-keys them, so the list unmounts its cells and reports
+ * a sequence of heights (dropped, grown back, repeated) — scrolling on each of
+ * them is the owner's loop. `last` starts at 0 and is only set by the first
+ * measurement (`reattachLanding` sets nothing else).
  */
 export const landingQuiet: Landing = {
   settling: false,
   silent: true,
+  revealed: false,
   last: 0,
   rounds: 0,
   awaiting: false,
@@ -197,6 +210,7 @@ export const landingQuiet: Landing = {
 export const landingDone: Landing = {
   settling: false,
   silent: false,
+  revealed: false,
   last: 0,
   rounds: 0,
   awaiting: false,
@@ -210,6 +224,7 @@ export const landingDone: Landing = {
 export const landingAwaiting: Landing = {
   settling: false,
   silent: true,
+  revealed: false,
   last: 0,
   rounds: 0,
   awaiting: true,
@@ -269,6 +284,18 @@ export function landingStep(
   // list for ever: past the bound it lands now, silently, and follow resumes.
   if (state.silent && !state.settling && !state.awaiting) {
     const bounded = rounds >= LANDING_ROUNDS;
+    if (state.revealed) {
+      // The TAIL (Review round 1, finding 2): the reveal's silent scroll rendered
+      // the end's cells, so the content height moved AGAIN. A changed height is
+      // followed SILENTLY; a REPEATED one means the re-measure is over and there
+      // is nothing to scroll — the last silent scroll already reached this end.
+      return m.content === state.last
+        ? { state: landingDone, step: null }
+        : {
+            state: bounded ? landingDone : { ...state, last: m.content, rounds },
+            step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
+          };
+    }
     return {
       state: bounded ? landingDone : { ...state, last: m.content, rounds, awaiting: false },
       step: bounded ? { state: initialFollow, scrollTo: endOffset(m), animated: false } : null,
@@ -278,6 +305,7 @@ export function landingStep(
     settling:
       (state.settling || state.awaiting) && m.content !== state.last && rounds < LANDING_ROUNDS,
     silent: false,
+    revealed: false,
     last: m.content,
     rounds,
     awaiting: false,
@@ -344,12 +372,26 @@ export function landingReveal(
     // than the timer): show the empty state, and hide again when the rows arrive.
     return { state: landingAwaiting, step: null };
   }
-  // Either a hidden OPENING landing or a RE-ATTACH's silent one: one silent
-  // scroll to the end. A re-attach's replace re-keys every row, so the height it
-  // settles on may never REPEAT the one before (a short session) — the timer is
-  // what lands it, never animated, and the ordinary follow rules resume with it
-  // (bug 4: a one-shot `silent` flag let the rest through ANIMATED, and a
-  // re-attach issues several measurements in a row — the owner's scroll loop).
+  if (state.silent && !state.settling && !state.awaiting) {
+    // A RE-ATTACH: one silent scroll to the end known now, and the landing STAYS
+    // owed — still silent — for the growth that scroll causes (Review round 1,
+    // finding 2). A second reveal (nothing re-armed it, so the sizes are quiet)
+    // is the hand-over: the last scroll already reached this end, no command.
+    // An `awaiting` landing is NOT this case: its rows have not been seen yet, and
+    // they must still HIDE the list for their own landing (Review round 2, HIGH).
+    return state.revealed
+      ? { state: landingDone, step: null }
+      : {
+          state: { ...state, revealed: true, last: m.content, awaiting: false },
+          step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
+        };
+  }
+  // A hidden OPENING landing: one silent scroll to the end. A re-attach's replace
+  // re-keys every row, so the height it settles on may never REPEAT the one
+  // before (a short session) — the timer is what lands it, never animated, and
+  // the ordinary follow rules resume with it (bug 4: a one-shot `silent` flag let
+  // the rest through ANIMATED, and a re-attach issues several measurements in a
+  // row — the owner's scroll loop).
   return {
     state: landingDone,
     step: { state: initialFollow, scrollTo: endOffset(m), animated: false },

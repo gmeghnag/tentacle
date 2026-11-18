@@ -218,6 +218,88 @@ pass, 0 fail · `bun test apps/mobile` → 3573 pass, 0 fail · **full `bun test
 Round 0's 1222 environmental failures (disk full, `mkdtemp`) are gone: the disk
 recovered during the round, and the suite is green.
 
+### Fix round 1
+
+*— deepseek-v4.1-flash (tentacle --profile deepseek), 2026-11-18*
+
+Scope: the fresh-context Review's **2 MEDIUM** (its findings 1 and 2). Neither its
+premises nor its LOWs changed the code beyond the two fixes below; the stale
+`landingQuiet` comment (premise, FALSE) is corrected, the repro is pasted here
+(AGENTS §6), and the changelog bullet says what the fix now covers.
+
+**M1 → FIXED — the screen half of bug 4 had no test** (`SessionScreen.tsx:473-505`).
+New describe in `session-screen-follow-wiring.test.ts`, "the screen routes a
+landing through `landingPending`, not 'did it scroll?'": it asserts the screen's
+own source — the `landingPending(...)` re-arm, the verdict, the both-measurements
+return, and the two pre-fix shapes are gone. Red first: on the pre-fix source the
+new describe fails 2 of 4; `M3`/`M4` below are red only against it, which is
+exactly what the Review found missing.
+
+**M2 → FIXED — the measurements after the reveal still scrolled ANIMATED**
+(`follow.ts:156-166` `revealed`, `:285-303` the tail, `:375-386` reveal keeps a
+re-attach owed; `SessionScreen.tsx:445-470` the reveal re-arms once for the
+hand-over, `:473-505` `owed`). `landingReveal` no longer hands the list back at the
+reveal for a re-attach: it marks the landing `revealed`, `landingStep` follows any
+height change silently and ends the landing when a height REPEATS (bounded by
+`LANDING_ROUNDS`), and `land()` now answers "did a landing own this measurement?"
+(`owed || landingPending`) — the measurement that ENDS the landing repeats the
+height its own silent scroll reached, and an animated scroll to that offset is the
+same loop's echo. Two pre-existing `follow.test.ts` tests asserted the hand-over at
+the reveal; they now assert the tail (they were part of the bug, not relaxations),
+and four new tests pin the tail, its bound, the hand-over, and `awaiting` staying
+on the OPENING path (`follow.test.ts`, "a slow attach still lands silently …").
+
+**The replay was extended past the reveal** (`.tentacle/tmp/mobile-qa-1118-fix/bug4-repro.ts`
+— the Review's LOW "models only the phase it fixed"). It now presses the growth the
+reveal's own scroll causes, then a quiet repeat, then the 450 ms settle:
+
+```
+== BEFORE (branch HEAD's follow.ts)
+AT THE END : 3 scroll(s), 2 ANIMATED
+   -> 41200 silent
+   -> 42000 animated (SEEN)
+   -> 42000 animated (SEEN)
+READING UP : 0 scroll(s), 0 ANIMATED
+== AFTER (fix round 1)
+AT THE END : 2 scroll(s), 0 ANIMATED
+   -> 41200 silent
+   -> 42000 silent
+READING UP : 0 scroll(s), 0 ANIMATED
+```
+
+**Mutations** (`.tentacle/tmp/mobile-qa-1118-fix/mut-r1.ts`; each applied to the
+tree, run, restored byte-identically — verified in the script):
+
+| | mutation | result |
+|---|---|---|
+| M1 | drop the post-reveal tail (`if (state.revealed)` → `if (false)`) | **3 fail** ✔ |
+| M2 | `land()` without the `owed` half (`return landingPending(next.state);`) | 1 fail ✔ |
+| M3 | `land()` → `return next.step !== null;` (the exact pre-fix line) | **1 fail** ✔ (was 0) |
+| M4 | re-arm the reveal only when the measurement scrolled | **1 fail** ✔ (was 0) |
+| M7 | the reveal never re-arms for its hand-over | 1 fail ✔ |
+| M5 | drop the absorb branch (round 0's fix) | 6 fail ✔ |
+| M6 | the reveal hands the list back at once (its re-attach branch gone) | 4 fail ✔ |
+
+**Red before green** (`.tentacle/tmp/mobile-qa-1118-fix/red.ts`, which puts the
+branch HEAD's two sources in place, runs, restores): PRE-FIX **62 pass · 6 fail**
+(the 6 named above) → AFTER **68 pass · 0 fail**.
+
+**Gate (files this round touched).** `bunx tsc -p apps/mobile --noEmit` → clean ·
+`bunx biome check <the 4 files>` → clean · `bun test apps/mobile/test/follow.test.ts
+apps/mobile/test/session-screen-follow-wiring.test.ts` → **68 pass, 0 fail** ·
+`bun test apps/mobile` → **3580 pass, 0 fail** (245 files).
+
+**Drift from Implementation.** The Design did not anticipate that the reveal's own
+silent scroll moves the content height again (the Review's finding 2); the tail and
+the `revealed` flag are that gap, and they are the smallest shape that keeps the
+fix in `follow.ts`'s pure decisions plus one re-arm in the screen. Everything else
+is as planned.
+
+**Still open, unchanged:** bug 2 stays PARKED; there is still no simulator
+evidence (the review's item 1), so the owner's real-iPhone loop is argued from the
+replay, not seen fixed on a phone; report row 15 remains NOT VERIFIED.
+
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-18*

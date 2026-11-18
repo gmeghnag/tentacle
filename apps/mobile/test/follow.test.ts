@@ -8,6 +8,7 @@ import {
   type Follow,
   LANDING_REVEAL_MS,
   LANDING_ROUNDS,
+  type Landing,
   NEAR_BOTTOM_PT,
   contentGrew,
   endOffset,
@@ -177,7 +178,11 @@ describe("the initial landing (docs/fix/mobile-open-at-end.md, item 1)", () => {
     expect(landingPending(step.state)).toBe(true); // still owed
     const landed = landingReveal(step.state, LONG, true, ROWS);
     expect(landed.step).toEqual({ state: initialFollow, scrollTo: 39200, animated: false });
-    expect(landingPending(landed.state)).toBe(false);
+    // Still owed — silently — for the growth that scroll causes: the reveal hands
+    // the list back only when a height repeats (Review round 1, finding 2).
+    expect(landingPending(landed.state)).toBe(true);
+    expect(landed.state.settling).toBe(false); // never hidden
+    expect(landingReveal(landed.state, LONG, true, ROWS).state).toEqual(landingDone);
   });
 
   test("a foreground resync while the person reads further up does NOT yank them to the end", () => {
@@ -277,6 +282,11 @@ describe("a RE-ATTACH arms the landing the same way the pull does (Review round 
     const settled = landingStep(first.state, { content: 900, viewport: 800 }, true, ROWS);
     expect(settled.state.settling).toBe(false);
     expect(settled.state.awaiting).toBe(false);
+    // A reveal that fires while still `awaiting` (the rows arrived, the sizes are
+    // quiet) behaves like the OPENING landing — one silent scroll, the landing
+    // DONE. Never a re-attach's tail (`revealed`), which would silence the next
+    // real row a stream appends.
+    expect(landingReveal(shown.state, LONG, true, ROWS).state).toEqual(landingDone);
   });
 
   test("a foreground resync's content change lands silently, not through the animated follow", () => {
@@ -320,43 +330,50 @@ describe("a RE-ATTACH lands in ONE silent scroll, never the foreground loop (bug
   const replay = (following: boolean): { scrollTo: number; animated: boolean }[] => {
     let landing = reattachLanding(following);
     const commands: { scrollTo: number; animated: boolean }[] = [];
+    // `SessionScreen.land()` exactly: a measurement the landing CONSUMES — scrolled,
+    // absorbed, or the one that ENDS it — never reaches the animated follow below.
+    const absorb = (size: { content: number; viewport: number }): boolean => {
+      const owed = landingPending(landing);
+      const stepped = landingStep(landing, size, following, ROWS);
+      landing = stepped.state;
+      if (stepped.step?.scrollTo != null) {
+        commands.push({ scrollTo: stepped.step.scrollTo, animated: stepped.step.animated });
+      }
+      return owed || landingPending(landing);
+    };
     for (const size of RETURN) {
-      const landed = landingStep(landing, size, following, ROWS);
-      landing = landed.state;
-      if (landed.step?.scrollTo != null) {
-        commands.push({ scrollTo: landed.step.scrollTo, animated: landed.step.animated });
-        continue;
-      }
-      if (landed.step !== null) {
-        continue; // a landing step that scrolls nowhere is still the landing's own
-      }
-      // The landing OWNS the measurements while it is owed: the screen never falls
-      // through to the animated follow (that is the bug this pins).
-      if (landingPending(landing)) {
-        continue;
+      if (absorb(size)) {
+        continue; // the landing OWNS this measurement (that is the bug this pins)
       }
       const step = contentGrew({ following, unseen: false }, size);
       if (step.scrollTo !== null) {
         commands.push({ scrollTo: step.scrollTo, animated: step.animated });
       }
     }
-    // The reveal timer, once the sizes go quiet: the ONE silent scroll.
+    // The reveal timer, once the sizes go quiet: the ONE silent scroll — and the
+    // growth it CAUSES (a FlatList renders the end's cells), which the landing
+    // still owns and follows silently (Review round 1, finding 2), then a repeat
+    // that ends it. Neither may reach the animated follow.
     const last = RETURN[RETURN.length - 1];
     if (last !== undefined) {
       const revealed = landingReveal(landing, last, following, ROWS);
+      landing = revealed.state;
       if (revealed.step?.scrollTo != null) {
         commands.push({ scrollTo: revealed.step.scrollTo, animated: revealed.step.animated });
       }
+      absorb({ content: last.content + 800, viewport: last.viewport }); // the cells it rendered
+      absorb({ content: last.content + 800, viewport: last.viewport }); // quiet: over
     }
     return commands;
   };
 
-  test("at the end: one silent scroll to the true end, nothing seen moving", () => {
+  test("at the end: silent scrolls only, to the true end — nothing is ever seen moving", () => {
     const commands = replay(true);
-    // The bug: 1 silent then 5 ANIMATED (0 → 11200 → 39200 → 41200 …), the loop.
+    // The bug: 1 silent then 5 ANIMATED (0 → 11200 → 39200 → 41200 …), the loop —
+    // and the reveal's own scroll rendered the end's cells, so the growth after it
+    // is the same loop one step later (Review round 1, finding 2).
     expect(commands.filter((c) => c.animated)).toEqual([]);
-    expect(commands).toHaveLength(1);
-    expect(commands[0]?.scrollTo).toBe(41200); // the height it settled on
+    expect(commands.map((c) => c.scrollTo)).toEqual([41200, 42000]);
   });
 
   test("reading further up: not a single scroll command (they are never yanked)", () => {
@@ -373,15 +390,92 @@ describe("a RE-ATTACH lands in ONE silent scroll, never the foreground loop (bug
       landing = step.state;
     }
     expect(landingPending(landing)).toBe(true);
-    // The sizes went quiet → ONE silent scroll, and the landing is done.
+    // The sizes went quiet → ONE silent scroll; the landing keeps the list for the
+    // growth that scroll causes (Review round 1, finding 2), and the next quiet
+    // fire hands it back.
     const landed = landingReveal(landing, RETURN[RETURN.length - 1] ?? LONG, true, ROWS);
     expect(landed.step?.animated).toBe(false);
-    expect(landingPending(landed.state)).toBe(false);
+    expect(
+      landingPending(
+        landingReveal(landed.state, RETURN[RETURN.length - 1] ?? LONG, true, ROWS).state,
+      ),
+    ).toBe(false);
+    expect(landingStep(landed.state, LONG, true, ROWS).step?.animated).toBe(false);
     // From here a NEW row is the ordinary animated follow, once.
     expect(contentGrew(initialFollow, { content: 42060, viewport: 800 })).toEqual({
       state: initialFollow,
       scrollTo: 41260,
       animated: true,
+    });
+  });
+
+  test("the measurements that arrive AFTER the reveal still land silently — no animated scroll, ever (Review round 1, finding 2)", () => {
+    // The reveal's silent scroll renders the END's cells, so a FlatList reports a
+    // NEW content height right after it (`follow.ts:143-146` documents exactly
+    // that for the opening landing). Handing the list back at the reveal sent each
+    // of those through `contentGrew` — ANIMATED: the same loop, one step later.
+    let landing = reattachLanding(true);
+    const absorbed = landingStep(landing, { content: 41200, viewport: 800 }, true, ROWS);
+    expect(absorbed.step).toBeNull();
+    const revealed = landingReveal(absorbed.state, { content: 41200, viewport: 800 }, true, ROWS);
+    expect(revealed.step).toEqual({ state: initialFollow, scrollTo: 40400, animated: false });
+    // The landing is STILL owed (silently) for the growth its own scroll causes.
+    expect(landingPending(revealed.state)).toBe(true);
+    expect(revealed.state.settling).toBe(false); // never hidden: the rows are up
+    landing = revealed.state;
+    const moved = landingStep(landing, { content: 42000, viewport: 800 }, true, ROWS);
+    expect(moved.step).toEqual({ state: initialFollow, scrollTo: 41200, animated: false });
+    expect(landingPending(moved.state)).toBe(true);
+    // A REPEATED height: the re-measure is over, and the scroll already got there.
+    const quiet = landingStep(moved.state, { content: 42000, viewport: 800 }, true, ROWS);
+    expect(quiet.step).toBeNull();
+    expect(landingPending(quiet.state)).toBe(false);
+    // From here a NEW row is the ordinary animated follow, once — the landing is
+    // gone for good, it does not silence the stream.
+    expect(contentGrew(initialFollow, { content: 42060, viewport: 800 })).toEqual({
+      state: initialFollow,
+      scrollTo: 41260,
+      animated: true,
+    });
+  });
+
+  test("a second reveal that lands nothing hands the list back (the timer is not a loop of its own)", () => {
+    const revealed = landingReveal(reattachLanding(true), LONG, true, ROWS);
+    expect(revealed.step?.animated).toBe(false);
+    const again = landingReveal(revealed.state, LONG, true, ROWS);
+    expect(again).toEqual({ state: landingDone, step: null }); // quiet → done, no command
+    expect(landingPending(again.state)).toBe(false);
+  });
+
+  test("the post-reveal tail is BOUNDED too (a turn streaming through the return is not silenced for ever)", () => {
+    let landing: Landing = landingReveal(
+      reattachLanding(true),
+      { content: 1000, viewport: 800 },
+      true,
+      ROWS,
+    ).state;
+    let rounds = 0;
+    for (; rounds < 100; rounds += 1) {
+      landing = landingStep(
+        landing,
+        { content: 2000 + rounds * 7, viewport: 800 },
+        true,
+        ROWS,
+      ).state;
+      if (!landing.silent) {
+        break;
+      }
+    }
+    expect(landing.silent).toBe(false);
+    expect(rounds).toBeLessThan(100);
+  });
+
+  test("reading further up: the reveal never arms a tail in the first place (nothing is owed)", () => {
+    const step = landingStep(reattachLanding(true), LONG, false, ROWS);
+    expect(step.state.silent).toBe(false);
+    expect(landingReveal(step.state, LONG, false, ROWS)).toEqual({
+      state: landingDone,
+      step: null,
     });
   });
 
