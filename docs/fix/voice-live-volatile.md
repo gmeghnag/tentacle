@@ -122,3 +122,15 @@ and equal to batch; stop latency (`sttMs`) unchanged (95–136 ms vs 180 before)
 Gate: `bunx tsc --noEmit` clean · `bun run lint` (`biome check .`, 2088 files, no fixes) ·
 `bun test` 15369 pass / 5 skip / 0 fail (no TS touched: the skips are the opt-in ones) ·
 `swift test --package-path native/voice-mac` 29 tests, 0 failures.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-18* (same model as the executor, fresh context only — shared blind spots possible)
+
+**Verdict: APPROVE** — no HIGH/MEDIUM findings.
+
+- **Gate:** `bun run lint` clean (2088 files); `bun run typecheck` clean. `swift test` was NOT run by this reviewer (the command needed an approval this session lacked), so the red→green mutations M-red/M2 are taken from Execution, not re-proven. Verify with `swift test --package-path native/voice-mac --filter LiveTests`.
+- **Premises (static):** final lane keeps `[.volatileResults]` (`Live.swift:279`) — TRUE; `finish()` returns only `finalLane.finish()` (`Live.swift:322-329`) — TRUE; `current` reads only the partial lane (`Live.swift:310`), consumed by `LiveFeed.pump` (`Live.swift:362`) — TRUE; public API unchanged, no remaining reference to the removed `reportingOptions` (grep) — TRUE; batch `makeTranscriber` untouched (`Transcribe.swift:216`) — TRUE.
+- **Attacks tried:** (1) partial-lane open failure → final lane cancelled, throws (`Live.swift:293-298`): holds. (2) sample-rate mismatch → both cancelled, throws: holds. (3) `finish` when the final lane throws → the `async let` partial cancel is implicitly awaited at scope exit, no leak: holds. (4) partial-lane mid-take error → preview freezes silently, final unaffected: acceptable (preview only, documented). (5) §7: Swift helper only, no protocol/persistence/terminal path touched — no invariant in reach. (6) Test non-vacuity: removing `.fastResults` from the partial lane is caught by the cadence assertions (`LiveTests.swift:216-219`), returning partial text from `finish()` by the batch-equality test — per Execution's M-red/M2.
+- **Nit (not blocking):** the doc header still says `Status: execution`; `partialReportingOptions` has no direct pin (only the cadence test guards it).
+- **Executor behaviour:** root cause shown with a raw-result probe instead of the guessed `makeTranscriber` cause; scope stayed tight.
