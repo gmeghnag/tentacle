@@ -450,4 +450,34 @@ is untouched; no `protocol.d/` note is needed (no wire change).
 
 ## Review
 
-*(empty — after Execution)*
+*— claude-opus-5-5, 2026-11-18* (fresh context; scope: S1 only, `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM).
+
+1. **MEDIUM — a failed turn is drawn as an INFO harness line.** `apps/mobile/src/transcript.ts:334-336`
+   pushes `failed` as a `kind: "notice"` row with no level, so `isHarness` is
+   true and `noticeLooks` gives it `◇`. Repro (`.tentacle/tmp/mobile-harness-notices/review-failed.ts`):
+   `turn_ended{failed,"boom"}` then `{lost}` → `{"text":"⚠ boom"} -> ◇ joined:false`,
+   `lost -> ▲ joined:true`. So a failure gets the info shape (`◇ ⚠ boom`), and the
+   colour-blind owner sees a mixed signal. Execution's drift note says it is "not a harness line"; that is
+   false on the phone (in the TUI it is assistant text, `state.ts:393`, so outside the
+   grouping). Fix: either make it `level: "warn"` (and say whether `⚠` stays) or keep
+   it out of `isHarness`. Then add a test.
+
+Gate (narrow, per the brief): touched tests `notice-group`, `notice-row`, `transcript`,
+`transcript-parity`: 66 pass / 0 fail. `bun run lint`: clean (2088 files). `bun run typecheck`: clean.
+Full `bun test` not run by this review.
+
+Mutation: `harnessLevel` forced to `info` → 4 fails across `notice-group` + parity. Reverted and
+`git status` is clean.
+
+Attacks tried: the failed-turn level (finding 1). Hidden-cell transparency (holds, pinned by a test).
+Merged `again` line keeps its key and level (holds, `{...prev, text}`). The separator path is untouched
+(holds). The `look` re-render: `looks` is in `rowExtraData`, and `TranscriptRow` has no memo
+comparator (holds). §7 "logic in pure modules" holds: the decisions are in `notice-group.ts`. No
+protocol/persistence/TUI file is touched.
+
+Not a finding (LOW): `joined` drops only the row's `paddingTop`. The row above keeps its
+`paddingBottom` (`styles.row` `paddingVertical`), so a block shows half the gap, not none.
+
+Executor: scoped to S1 and disclosed its drift honestly. One drift claim (the `failed` one) is wrong.
