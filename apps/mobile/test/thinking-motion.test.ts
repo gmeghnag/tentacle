@@ -12,6 +12,8 @@ import {
   SHIMMER_MS,
   breatheCurve,
   shimmerSweep,
+  thinkingElapsed,
+  thinkingLabel,
   thinkingLook,
 } from "../src/thinking-motion.ts";
 
@@ -91,5 +93,56 @@ describe("Reduce Motion", () => {
   test("off: animated dots + shimmer; on: a static ∴ in accent, dots solid, plain grey word", () => {
     expect(thinkingLook(false)).toEqual({ animate: true, glyph: "accent", word: "sec" });
     expect(thinkingLook(true)).toEqual({ animate: false, glyph: "accent", word: "sec" });
+  });
+});
+
+/**
+ * docs/feat/mobile-thinking-images.md S1 (Owner Q1 = "B + seconds"): the word
+ * loses its "…" — the seconds say it is moving — and they are written with a
+ * STEADY width (zero-padded, drawn in tabular figures), so the trailing text
+ * never jumps as it counts. `liveElapsed` keeps its own shape for tool rows.
+ */
+describe("thinkingElapsed — the seconds beside the word", () => {
+  test("under a minute: whole seconds, no padding needed", () => {
+    expect(thinkingElapsed(0)).toBe("0 s");
+    expect(thinkingElapsed(-5)).toBe("0 s");
+    expect(thinkingElapsed(999)).toBe("0 s");
+    expect(thinkingElapsed(1000)).toBe("1 s");
+    expect(thinkingElapsed(59_999)).toBe("59 s");
+  });
+
+  test("minutes: the seconds are zero-padded, so the width holds (mutation: `${s}` → “1 min 5 s” is a char shorter and the row twitches)", () => {
+    expect(thinkingElapsed(60_000)).toBe("1 min 00 s");
+    expect(thinkingElapsed(65_000)).toBe("1 min 05 s");
+    expect(thinkingElapsed(125_400)).toBe("2 min 05 s");
+    expect(thinkingElapsed(3_599_000)).toBe("59 min 59 s");
+  });
+
+  test("an hour and beyond: hours + padded minutes — never “120 min” (mutation: reuse `liveElapsed` → 2 h reads “120 min 0 s”)", () => {
+    expect(thinkingElapsed(3_600_000)).toBe("1 h 00 min");
+    expect(thinkingElapsed(7_320_000)).toBe("2 h 02 min");
+  });
+
+  test("every value keeps a length the next one keeps too (tabular figures have something to hold)", () => {
+    // 9 s → 10 s is the one place the digits grow: padding cannot help a
+    // two-digit second count start at one digit, so 0..9 s is drawn as `N s`.
+    expect(thinkingElapsed(9_000)).toBe("9 s");
+    expect(thinkingElapsed(10_000)).toBe("10 s");
+    // From a minute on, every value is exactly this wide.
+    const widths = [60_000, 65_000, 3_599_000].map((ms) => thinkingElapsed(ms).length);
+    expect(new Set(widths).size).toBe(1);
+  });
+});
+
+describe("thinkingLabel — the word and its clock, one call", () => {
+  test("the word is “Thinking”, with no ellipsis (mutation: keep “Thinking…” → the mockup's word plus a dangling …)", () => {
+    expect(thinkingLabel(0).word).toBe("Thinking");
+    expect(thinkingLabel(12_900).word).toBe("Thinking");
+  });
+
+  test("the seconds are the same clock `thinkingElapsed` writes", () => {
+    expect(thinkingLabel(0).seconds).toBe("0 s");
+    expect(thinkingLabel(12_900).seconds).toBe("12 s");
+    expect(thinkingLabel(125_000).seconds).toBe("2 min 05 s");
   });
 });

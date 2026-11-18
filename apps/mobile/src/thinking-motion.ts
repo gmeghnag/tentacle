@@ -61,9 +61,17 @@ export function breatheCurve(dot: number): Curve {
 }
 
 /**
- * The shimmer's bright band over a word `width` pt wide: it starts wholly off
- * the word's left edge and ends wholly off its right one. Width 0 (not measured
- * yet) sweeps nothing.
+ * The shimmer's bright band over a word `width` pt wide.
+ *
+ * Since docs/feat/mobile-thinking-images.md (Owner Q1 = "B") the bright layer is
+ * CLIPPED to the glyphs, so there is no window to translate: what moves is the
+ * gradient's own stops, `x1`/`x2` running from wholly off the left edge to
+ * wholly off the right one (`from`/`to`). `band` — the soft 0 → peak → 0 alpha
+ * span, ≈ 40 % of the word — is what those stops carry with them; a frame with a
+ * hard edge would be the rectangle this task removed.
+ *
+ * Width 0 (not measured yet) sweeps nothing: every stop sits at 0, so the
+ * gradient is flat and the word is just its base colour.
  */
 export function shimmerSweep(width: number): {
   readonly band: number;
@@ -72,6 +80,69 @@ export function shimmerSweep(width: number): {
 } {
   const band = width > 0 ? Math.round(width * 0.4) : 0;
   return { band, from: -band, to: width };
+}
+
+/**
+ * The gradient's stops for a sweep at `x` (the animated `x1`/`x2`, one number:
+ * the band's left edge), over a word `width` pt wide. Three stops — clear, the
+ * bright peak, clear again — so the bright copy FADES INTO the grey one at both
+ * ends instead of ending on an edge.
+ *
+ * Pure, and the only place the softness is decided (§7): the component feeds the
+ * numbers to `Animated` and draws them.
+ */
+export function shimmerStops(
+  width: number,
+  x: number,
+): readonly { readonly offset: number; readonly opacity: number }[] {
+  const band = shimmerSweep(width).band;
+  if (band === 0) {
+    // Nothing measured: a flat, fully clear gradient (no sweep at all).
+    return [
+      { offset: 0, opacity: 0 },
+      { offset: 0.5, opacity: 0 },
+      { offset: 1, opacity: 0 },
+    ];
+  }
+  // The stops are fractions of the band's own box, which spans `x .. x + band`.
+  return [
+    { offset: 0, opacity: 0 },
+    { offset: 0.5, opacity: 1 },
+    { offset: 1, opacity: 0 },
+  ];
+}
+
+/**
+ * The elapsed clock beside the word, written with a STEADY width so the row does
+ * not jump as it counts (drawn in tabular figures): `0 s` … `59 s`, then
+ * `1 min 05 s` (the seconds zero-padded), then `1 h 02 min` from the first hour.
+ *
+ * `liveElapsed` (`tool-summary.ts`) stays as it is for a tool row's duration —
+ * that one is NOT tabular, does not pad, and reads `120 min` after two hours;
+ * the live Thinking row is the one place the width has to hold.
+ */
+export function thinkingElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) {
+    return `${seconds} s`;
+  }
+  if (seconds < 3600) {
+    const sec = seconds % 60;
+    return `${Math.floor(seconds / 60)} min ${sec < 10 ? `0${sec}` : `${sec}`} s`;
+  }
+  const min = Math.floor((seconds % 3600) / 60);
+  return `${Math.floor(seconds / 3600)} h ${min < 10 ? `0${min}` : `${min}`} min`;
+}
+
+/**
+ * What the live row says: the word (no ellipsis — the clock is what says "still
+ * going") and the elapsed time beside it, in `palette.sec` and tabular figures.
+ */
+export function thinkingLabel(ms: number): {
+  readonly word: "Thinking";
+  readonly seconds: string;
+} {
+  return { word: "Thinking", seconds: thinkingElapsed(ms) };
 }
 
 /**
