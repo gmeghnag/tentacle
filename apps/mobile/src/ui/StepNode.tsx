@@ -10,6 +10,7 @@
  */
 import { type JSX, type ReactNode, useEffect, useRef, useState } from "react";
 import { Animated, Easing, Pressable, StyleSheet, Text, View } from "react-native";
+import type { SlotView } from "../compact-slot.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, size, space, typography } from "../theme.ts";
 import {
   BREATHE_MS,
@@ -508,6 +509,42 @@ export function ThinkingNode({
             })}
         a11yLabel={thinkingA11yLabel(ms)}
         body={<StepBody palette={palette} thought={thought} command={[]} output={null} />}
+      />
+    </View>
+  );
+}
+
+/**
+ * The compaction slot in the Thinking node's place (docs/feat/mobile-hub-commands.md
+ * C2 item 15): `Compacting…` with the same breathing ∴ (static under Reduce
+ * Motion) and its live seconds, or a static `Compacted ✓`. `compact-slot.ts`
+ * decides which; this only draws it.
+ */
+export function CompactSlotNode({
+  palette,
+  slot,
+  reduceMotion,
+}: {
+  readonly palette: Palette;
+  readonly slot: SlotView;
+  readonly reduceMotion: boolean;
+}): JSX.Element {
+  const running = slot.kind === "compacting";
+  return (
+    <View testID={`compact-slot-${slot.kind}`} style={[styles.footer, styles.runStart]}>
+      <StepNode
+        palette={palette}
+        node={running ? "thinking" : "ok"}
+        reduceMotion={reduceMotion}
+        name={{ tool: running ? "Compacting…" : "Compacted ✓" }}
+        nameItalic={running}
+        subtitle=""
+        trailing=""
+        trailingRed={false}
+        {...(running ? { liveFrom: slot.since } : {})}
+        thread={{ up: false, down: false }}
+        open={false}
+        a11yLabel={running ? "Compacting" : "Compacted"}
       />
     </View>
   );

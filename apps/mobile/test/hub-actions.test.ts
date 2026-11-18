@@ -159,6 +159,36 @@ describe("hubActions: order and presence", () => {
   });
 });
 
+describe("Stop while the phone compacts (mobile-hub-commands C2 item 14)", () => {
+  const COMPACTING: HubContext = { ...IDLE_CTX, compacting: true };
+  test("Stop is offered with no turn while my compaction runs; Steer is not", () => {
+    const a = hubActions(COMPACTING, EVERY);
+    expect(ids(a.all).slice(0, 2)).toEqual(["stop", "attach"]);
+    expect(ids(a.all)).not.toContain("steer");
+    expect(resolveCommit("stop", COMPACTING, EVERY, hubOpen(COMPACTING))).toEqual({
+      kind: "run",
+      id: "stop",
+    });
+  });
+  test("a dead link offers no Stop (the cancel would be lost)", () => {
+    expect(ids(hubActions({ ...COMPACTING, link: "down" }, EVERY).all)).not.toContain("stop");
+  });
+  test("an idle session without a compaction offers no Stop", () => {
+    expect(ids(hubActions(IDLE_CTX, EVERY).all)).not.toContain("stop");
+  });
+  test("hubContextOf carries the screen's compacting fact", () => {
+    const ctx = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      compacting: true,
+    });
+    expect(ctx.compacting).toBe(true);
+  });
+});
+
 describe("hubActions: badges and promotion", () => {
   test("Artifacts carries the unseen count; Scheduled a dot only when due within 10 min", () => {
     const a = hubActions(

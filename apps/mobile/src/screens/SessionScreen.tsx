@@ -144,7 +144,7 @@ import { HeaderDot } from "../ui/HeaderDot.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
-import { ThinkingNode } from "../ui/StepNode.tsx";
+import { CompactSlotNode, ThinkingNode } from "../ui/StepNode.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
 import { DiagramRenderer } from "../ui/diagram/DiagramRenderer.tsx";
 import {
@@ -975,6 +975,8 @@ export function SessionScreen({
     editable: state.view.editable,
     dictation: voiceSettings.dictation,
     activityEmpty: activityVm.groups.length === 0,
+    // My compaction runs: the hub's Stop cancels it (mobile-hub-commands C2 14).
+    compacting: state.slot?.kind === "compacting",
     schedules: { rows: state.schedules, now: activityNow },
     // The Tools item's own figures, from the sheet's OWN summary (one source,
     // D1/D3): unknown until the controller has pulled both lists.
@@ -1340,8 +1342,19 @@ export function SessionScreen({
               // a queued message is read at the next step, so it IS the thread's last
               // node — and it leaves in the `queued` that drops its row.
               ListFooterComponent={
-                layout.tail === null && state.view.pending.length === 0 ? undefined : (
+                layout.tail === null &&
+                state.slot === null &&
+                state.view.pending.length === 0 ? undefined : (
                   <>
+                    {/* The compaction slot (mobile-hub-commands C2 item 15): in the
+                        Thinking node's place; `slotView` already yields to a turn. */}
+                    {state.slot === null ? null : (
+                      <CompactSlotNode
+                        palette={palette}
+                        slot={state.slot}
+                        reduceMotion={a11yFlags.reduceMotion}
+                      />
+                    )}
                     {layout.tail === null ? null : (
                       <ThinkingNode
                         palette={palette}

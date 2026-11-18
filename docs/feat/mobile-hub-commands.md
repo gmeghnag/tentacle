@@ -484,6 +484,47 @@ The second mutation is the non-vacuity check the fix needs: the new test binds t
 
 `apps/mobile/test` 3680 pass / 0 fail; `biome check` clean on the two touched files; `tsc -p apps/mobile` clean. The full `bun run check` gate is the orchestrator's, per the token budget — not run here.
 
+### Slice C2 — the commands engine. DONE
+
+*— claude-opus-5-5 (executor), 2026-11-18*
+
+**Load-bearing check re-run first.** Source: `session/compact|clear|rename|set_auto_accept` exist; `HostedSession.compact` takes `assertIdle` then rejects `Cancelled` on abort (`hosted-session.ts:3780-3813`); `compact`/`clear` go `"once"` (`remote-client.ts:2996`, `:3003`), a drop rejecting `RpcError(InternalError, DROPPED_NOT_RETRIED)` (`:4239-4240`); `RemoteSession.compact()` had no signal. Empirical (the plan's own check): `session-screen-commands.test.ts` "history{clear} then resolve → an empty transcript + ONE ◇ chat cleared line" — a fake `clear()` that raises `history{clear, [system]}` before resolving leaves exactly `["◇ chat cleared — the earlier chat is kept as an archived session"]`. Holds. Preconditions also held: thinking-images and harness-notices S1 are merged (`NoticeRow.level`, `pushNotice(state, text, level)` at `transcript.ts:578`).
+
+Built in dependency order, red first each time (new APIs/modules were red on their absence, then each property was proven by the mutations below):
+1. `packages/client/src/remote-session.ts` `compact(signal?)` — already aborted → rejects `Cancelled`, nothing sent; an abort in flight → `client.cancel(id)` (no `turnId`); the listener is removed when it settles. Test `packages/client/test/compact-signal.test.ts` (real `SessionHost` behind a frame-recording channel). Red before: the abort test got no `Cancelled` and the pre-aborted one hung (5 s timeout).
+2. `apps/mobile/src/compact-slot.ts` (new) — `slotView` (running turn > my compaction > `Compacted ✓` < 3000 ms > null), `compactOutcome`, `clearOutcome(…, forkKept)`, `isTransportLoss`. Test `compact-slot.test.ts` (14).
+3. `apps/mobile/src/session-commands.ts` (new) — `commandRows`, `clearConfirm`. Test `session-commands.test.ts` (14).
+4. `transcript.ts` — `local_notice` → `pushNotice` (red: 1 fail in `transcript.test.ts`, then green).
+5. `hub-actions.ts` / `hub-session.ts` — `HubContext.compacting?`; `stop` holds while compacting with the link up (Steer does not). Red: 2 fails in `hub-actions.test.ts`; `hub-session.test.ts`'s whole-object expectation gained `compacting: false`.
+6. `session-screen-controller.ts` — `SendableHandle.compact?(signal?)`/`clear?()`; state `slot` + `commands`; actions `compact`, `cancelCompaction`, `armClear`, `cancelClear`, `clear`, `retryLast`; `stopTurn` cancels my compaction first; the feed's `put` drops `Compacted ✓` and disarms Clear on a turn start, and disarms on a link drop; one 3 s timer, cleared on dispose; late answers after dispose (or a replaced try) are ignored. Test `session-screen-commands.test.ts` (16).
+7. Footer — `ui/StepNode.tsx` `CompactSlotNode` (the Thinking node's look and live seconds; static `Compacted ✓`); `SessionScreen.tsx` draws it in the list footer and passes `compacting` to `hubContextOf`. `tool-rows-wiring.test.ts`'s footer-gate regex updated (+ an assertion for the slot node).
+8. Parity — `transcript-parity.test.ts`: the failure line shares `Compact failed: ` and the daemon's words with the TUI's `onCompactionSettled`, same `warn`; neither writes a success line.
+
+Drift from the Implementation (and why):
+- **Failure text is the daemon's message, not `String(error)`.** The TUI writes `_Compact failed: RpcError: …_`; the phone writes `Compact failed: …` (no class name). The parity test pins the shared prefix + message + level rather than string equality.
+- **Retry is dimmed "The message field is not empty"** (a new input, `fieldBusy`). The composer's send path takes the FIELD (text + ready chips, `compose-controller.ts:666-679`), so retrying into a non-empty field would merge the two or send the person's photos with the old text. With the field empty, `retryLast` puts the text there and runs the composer's own `act()` — outbox, queue and refusal handling unchanged, as planned.
+- **`clearOutcome` and the clear wording live in `compact-slot.ts`**, and `forkKept` is the controller's `FORK_KEPT = true` constant passed there, not an input of `session-commands.ts` (the line is an outcome, not a row state). The `false` wording is pinned in `compact-slot.test.ts`.
+- **Clear and Compact exclude each other on the phone** ("Clearing…" dims Compact/Retry), not in the plan's table; the daemon would refuse it anyway.
+- **A files-only last prompt** says "the files were not re-sent" instead of the photos wording.
+- **The hub's `stop` entry is unchanged** (`controller.stopTurn()`); `stopTurn` itself routes to the compaction's abort, so there is one Stop path.
+
+Mutations (each reverted; `grep MUTATION` empty afterwards; the named tests red while broken):
+
+| mutation | red |
+|---|---|
+| `compact` keeps its abort listener after settling (`remote-session.ts`) | 1 in `compact-signal.test.ts` (abort after settle sends a cancel) |
+| `stopTurn` ignores my compaction | 1 in `session-screen-commands.test.ts` (Stop during it — times out, no abort) |
+| a turn start no longer drops `Compacted ✓` | 1 (the lingering-slot test) |
+| no `disposed` guard on a late compaction answer | 1 (resolution after dispose) |
+| no Clear disarm on a link drop | 1 (link drop disarms) |
+| `isTransportLoss` → always false | 3 across `compact-slot`/`session-screen-commands` (transport → ▲) |
+| hub `stop` not held while compacting | 1 in `hub-actions.test.ts` |
+| `Compacted ✓` window inclusive (`<=`) | 2 (`compact-slot` boundary, controller 3 s test) |
+
+Tests: `apps/mobile/test` 3735 pass / 1 fail before the footer-regex update (`tool-rows-wiring`, a source-shape assertion of the footer gate this slice changes), then that file 16/0; the touched files re-run green after the mutations (102/0). `tsc -p apps/mobile` clean; `tsc --noEmit` shows nothing for the client files; `biome check` clean on the 17 touched files. No protocol/schema change (an optional client parameter): no `protocol.d/` note, no `protocol.json` regeneration. Changelog: the task's one fragment `changelog.d/mobile-hub-commands.added.md` extended with C2's commands. The full `bun run check` gate is the orchestrator's — not run here.
+
+Unverified: the footer slot's rendering on a device (no simulator; `CompactSlotNode` is presentation only, its decision is `slotView`'s and tested); the real client raising `history{compact}` for the phone's own compaction is the plan's cited assumption (TUI `useSessionLink.ts:332-338`), exercised here only through the fake handle. The sheet itself (C3) is not built: until it is, nothing on screen calls the new actions.
+
 ## Review
 
 ### Slice C1 — verification round (a second executor, same slice, no behaviour change)

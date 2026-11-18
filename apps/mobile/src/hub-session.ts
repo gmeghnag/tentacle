@@ -101,6 +101,8 @@ export function hubContextOf(input: {
     readonly list: readonly ArtifactMeta[] | undefined;
     readonly seen: ArtifactSeen;
   };
+  /** THIS phone's compaction is in flight: Stop cancels it (mobile-hub-commands C2). */
+  readonly compacting?: boolean;
 }): HubContext {
   const wakes = wakeContext(input.schedules?.rows, input.schedules?.now ?? 0);
   return {
@@ -123,6 +125,7 @@ export function hubContextOf(input: {
     // that would learn them, so its own tap is the one that can (D4).
     toolsEmpty: input.tools?.known === true && input.tools.total === 0,
     toolsRim: input.tools === undefined ? null : toolsRim(input.tools),
+    compacting: input.compacting === true,
   };
 }
 

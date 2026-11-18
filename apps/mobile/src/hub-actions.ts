@@ -93,6 +93,11 @@ export interface HubContext {
   readonly toolsEmpty: boolean;
   /** The Tools item's rim: the share switched OFF, or null for no arc (all on). */
   readonly toolsRim: number | null;
+  /**
+   * THIS phone's own compaction is in flight (mobile-hub-commands C2 item 14):
+   * Stop is offered with no turn and cancels it. Absent = false.
+   */
+  readonly compacting?: boolean;
 }
 
 export interface HubActions {
@@ -166,7 +171,10 @@ function turnStoppable(ctx: HubContext): boolean {
 /** Whether the context lets this entry show (its callback is checked apart, P6). */
 function holds(id: HubEntryId, ctx: HubContext): boolean {
   switch (id) {
+    // Stop also ends this phone's own compaction (harness-notices Q7): no turn
+    // runs then, but the link must be up or the cancel is lost.
     case "stop":
+      return turnStoppable(ctx) || (ctx.compacting === true && ctx.link === "up");
     case "steer":
       return turnStoppable(ctx);
     case "attach":

@@ -663,3 +663,18 @@ describe("a foreground sub-agent's progress lands on its Agent row (docs/fix/mob
     expect((sub(s)?.activities[0] ?? "").length).toBeLessThanOrEqual(120);
   });
 });
+
+describe("local_notice (docs/feat/mobile-hub-commands.md C2 item 12)", () => {
+  test("a command's outcome is ONE notice row with its level, outside any turn", () => {
+    const s = fold([
+      { type: "local_notice", text: "Compact failed: a turn is already running", level: "warn" },
+      { type: "local_notice", text: "compaction cancelled" },
+    ]);
+    const shown = s.rows.map((r) => (r.kind === "notice" ? [r.text, r.level ?? "info"] : r.kind));
+    expect(shown).toEqual([
+      ["Compact failed: a turn is already running", "warn"],
+      ["compaction cancelled", "info"],
+    ]);
+    expect(s.turn).toBeNull();
+  });
+});

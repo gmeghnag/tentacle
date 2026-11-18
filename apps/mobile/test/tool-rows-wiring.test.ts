@@ -45,10 +45,12 @@ describe("SessionScreen: one layout, the open state, the footer", () => {
     // docs/feat/mobile-queued-compose.md D1 added the pending bubbles to the same
     // footer (a queued message is read at the next step, so it is the thread's last
     // node): the tail is still drawn only when there IS one, under the rows.
+    // mobile-hub-commands C2 item 15: the compaction slot rides the same footer.
     expect(src).toMatch(
-      /ListFooterComponent=\{\s*layout\.tail === null && state\.view\.pending\.length === 0\s*\? undefined/,
+      /ListFooterComponent=\{\s*layout\.tail === null &&\s*state\.slot === null &&\s*state\.view\.pending\.length === 0\s*\? undefined/,
     );
     expect(src).toMatch(/\{layout\.tail === null \? null : \(\s*<ThinkingNode/);
+    expect(src).toMatch(/\{state\.slot === null \? null : \(\s*<CompactSlotNode/);
   });
 
   test("the pending bubbles ride the same footer, after the tail (D1)", () => {

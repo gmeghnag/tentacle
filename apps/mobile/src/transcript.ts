@@ -112,7 +112,13 @@ export type TranscriptInput =
       readonly message?: string;
     }
   | { readonly type: "closed"; readonly reason: EndReason }
-  | { readonly type: "link"; readonly status: "up" | "down" };
+  | { readonly type: "link"; readonly status: "up" | "down" }
+  /**
+   * A line THIS phone's own command leaves (docs/feat/mobile-hub-commands.md C2
+   * item 12): a compaction's or a clear's outcome, Retry's "photos not re-sent".
+   * Never from the daemon; `warn` draws `▲`, absent draws `◇`.
+   */
+  | { readonly type: "local_notice"; readonly text: string; readonly level?: "warn" };
 
 /** A turn's token figures (the TUI's shape, `state.ts`'s `TokenTotals`). */
 export interface TokenTotals {
@@ -244,6 +250,8 @@ export function apply(state: State, input: TranscriptInput, now?: number): State
       }));
     case "link":
       return state.link === input.status ? state : { ...state, link: input.status };
+    case "local_notice":
+      return pushNotice(state, input.text, input.level);
     case "history_reset":
       // A reset REPLACED the history (the branch below appends): the measured
       // fill goes with it, the session's totals stay.

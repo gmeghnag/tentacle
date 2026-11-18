@@ -41,6 +41,14 @@ import {
   withLiveCards,
   withPhase,
 } from "./artifact-join.ts";
+import {
+  COMPACTED_SHOWN_MS,
+  type OutcomeLine,
+  type SlotView,
+  clearOutcome,
+  compactOutcome,
+  slotView,
+} from "./compact-slot.ts";
 import type {
   Compose,
   ComposeHandle,
@@ -68,6 +76,7 @@ import {
   createPermissionSheet,
 } from "./permission-sheet.ts";
 import type { QueueTrace } from "./queue-trace.ts";
+import { type CommandRow, clearConfirm, commandRows } from "./session-commands.ts";
 import type { SessionController, SessionHandle, SessionOpenFailure } from "./session-controller.ts";
 import { type ForeignTurn, createSessionFeed } from "./session-feed.ts";
 import {
@@ -103,7 +112,7 @@ import {
   initialThumbnails,
 } from "./thumbnails.ts";
 import { type LocalPhoto, documentLabels } from "./transcript-rows.ts";
-import { type State, initialState } from "./transcript.ts";
+import { type State, apply, initialState } from "./transcript.ts";
 
 /**
  * The background-work members of `RemoteSession` the Activity sheet uses
@@ -212,6 +221,13 @@ export interface SendableHandle extends SessionHandle, ActivityHandle, WakeHandl
   /** Rename it (`session/rename`, the TUI's `/rename` path). */
   rename?(title: string): Promise<string>;
   /**
+   * Compact it (`RemoteSession.compact`, docs/feat/mobile-hub-commands.md C2): an
+   * abort of `signal` cancels it daemon-side. Absent → no Compact row (P6).
+   */
+  compact?(signal?: AbortSignal): Promise<{ readonly before: number; readonly after: number }>;
+  /** Clear it (`RemoteSession.clear`); the daemon keeps the dropped chat archived. Absent → no row. */
+  clear?(): Promise<{ readonly before: number; readonly after: number }>;
+  /**
    * The artifacts presented in this session (`RemoteSession.listArtifacts`,
    * docs/feat/model-artifacts.md D9): what puts a card under a resumed
    * transcript's `present` row and fills the gallery. Absent on a fake handle —
@@ -286,6 +302,10 @@ export interface SessionScreenState {
    * when it cannot have them (an older daemon, a dropped link).
    */
   readonly artifacts: ArtifactJoin;
+  /** The footer's compaction slot (`compact-slot.ts`), null when none shows. */
+  readonly slot: SlotView | null;
+  /** The Commands sheet's rows (`session-commands.ts`), always computed. */
+  readonly commands: readonly CommandRow[];
 }
 
 /**
@@ -544,7 +564,34 @@ export interface SessionScreenController {
   resync(silent?: boolean): Promise<void>;
   /** Unsubscribe everything (the screen's cleanup, after `leave`). */
   dispose(): void;
+  /**
+   * The Commands sheet (docs/feat/mobile-hub-commands.md C2 item 13). Compact:
+   * refused unless the link is up, idle and nothing else runs; its outcome is a
+   * line, its success the separator + `Compacted ✓`.
+   */
+  compact(): Promise<void>;
+  /** Stop this phone's compaction (the hub's Stop routes here while it runs). */
+  cancelCompaction(): void;
+  /** Clear's row tapped: the row opens into Cancel / Clear. */
+  armClear(): void;
+  /** Its Cancel. */
+  cancelClear(): void;
+  /** Its Clear: runs only when armed (`clearConfirm`), then folds the line. */
+  clear(): Promise<void>;
+  /** Re-send the last prompt's TEXT through the composer's own send path. */
+  retryLast(): void;
 }
+
+/**
+ * Whether the daemon keeps a cleared chat as an archived session: the phone
+ * reaches only `serve` sessions, and `serve` is the daemon with a persister
+ * (the plan's load-bearing assumption). A pod path would make this false
+ * (eval container-sessions-mobile owns that answer).
+ */
+const FORK_KEPT = true;
+/** Retry re-sends text only (the TUI's `/retry`, decision 8). */
+export const RETRY_PHOTOS_NOT_SENT = "the photos were not re-sent";
+export const RETRY_FILES_NOT_SENT = "the files were not re-sent";
 
 /** The outbox's rows, from `session-view.ts`'s own projection (never built here). */
 function outboxRows(
@@ -654,6 +701,36 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   /** This phone's own turn's abort (Stop, for `own: true`). */
   let ownControl: AbortController | null = null;
   let disposed = false;
+  /** THIS phone's compaction in flight (C2 item 13): its abort is the Stop. */
+  let compaction: { readonly control: AbortController; readonly since: number } | null = null;
+  /** When it last succeeded (the slot's 3 s); a turn start or a clear drops it. */
+  let compactedAt: number | null = null;
+  /** The ONE timer that re-renders when `Compacted ✓` goes. */
+  let compactedTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The last compaction's `▲` text, until the next try. */
+  let compactFailed: string | null = null;
+  let clearing = false;
+  /** Clear's armed inline confirm (`clearConfirm`). */
+  let clearArmed = false;
+  function dropCompacted(): void {
+    compactedAt = null;
+    if (compactedTimer !== null) {
+      clearTimeout(compactedTimer);
+      compactedTimer = null;
+    }
+  }
+  /** Fold a command's own outcome line (`local_notice`). */
+  function pushLine(line: OutcomeLine): void {
+    transcript = apply(
+      transcript,
+      {
+        type: "local_notice",
+        text: line.text,
+        ...(line.level === undefined ? {} : { level: line.level }),
+      },
+      deps.now(),
+    );
+  }
   const unmount = new AbortController();
   /**
    * The controller object itself, held here because the `appState` method below
@@ -708,6 +785,16 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       // tool details: the cards this screen already knows are joined back on HERE,
       // the one place every folded state passes, so a resync never loses them.
       transcript = joinedRows(next);
+      // A turn replaces the slot: a lingering `Compacted ✓` must not come back
+      // after it, and Clear's armed question is no longer the one on screen
+      // (mobile-hub-commands C2). A link drop disarms the confirm too.
+      if (transcript.turn !== null) {
+        dropCompacted();
+        clearArmed = clearConfirm(clearArmed, "turn_started").armed;
+      }
+      if (transcript.link === "down") {
+        clearArmed = clearConfirm(clearArmed, "link_down").armed;
+      }
       // A card that arrived LIVE joins the list too: the list is the hub's count
       // (rim + glow) and the gallery's source, and it is only ASKED at the attach
       // (docs/fix/mobile-qa-1118.md, bug 3). De-duplicated by id + version.
@@ -993,8 +1080,55 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    */
   let resyncOnUp = false;
 
+  /** The footer slot NOW (`compact-slot.ts` decides; the clock is the screen's). */
+  function slot(): SlotView | null {
+    return slotView({
+      running: transcript.turn !== null,
+      compactingSince: compaction?.since ?? null,
+      compactedAt,
+      now: deps.now(),
+    });
+  }
+
+  /** The last user row: what Retry re-sends (its text) and what it cannot (its files). */
+  function lastUserRow(): Extract<State["rows"][number], { kind: "user" }> | undefined {
+    for (let i = transcript.rows.length - 1; i >= 0; i -= 1) {
+      const row = transcript.rows[i];
+      if (row?.kind === "user") {
+        return row;
+      }
+    }
+    return undefined;
+  }
+
+  function commands(): readonly CommandRow[] {
+    return commandRows({
+      link: transcript.link,
+      turnRunning: transcript.turn !== null,
+      ended: transcript.closed !== null,
+      compacting: compaction !== null,
+      compacted: slot()?.kind === "compacted",
+      compactFailed,
+      clearing,
+      confirmClear: clearArmed,
+      lastPrompt: lastUserRow()?.text ?? null,
+      fieldBusy: draft.trim() !== "" || composeView().bar.chips.length > 0,
+      autoAccept: info?.autoAcceptOn() ?? false,
+      canCompact: typeof handle?.compact === "function",
+      canClear: typeof handle?.clear === "function",
+    });
+  }
+
+  /** Whether a command's row says it can run now (one rule: `commandRows`). */
+  function rowReady(id: CommandRow["id"]): boolean {
+    const state = commands().find((row) => row.id === id)?.state.kind;
+    return state === "ready" || state === "failed" || state === "done" || state === "confirming";
+  }
+
   function state(): SessionScreenState {
     return {
+      slot: slot(),
+      commands: commands(),
       status,
       transcript,
       draft,
@@ -1529,6 +1663,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
 
   /** The hub's Stop: the composer's truth table with nothing to send (P2). */
   function stopTurn(): void {
+    // My own compaction holds the session's one slot (no turn can run): the
+    // hub's Stop is its cancel (harness-notices Q7, mobile-hub-commands C2 14).
+    if (compaction !== null) {
+      compaction.control.abort();
+      return;
+    }
     stop(
       composerAction({
         link: transcript.link,
@@ -1944,8 +2084,104 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         emit();
       }
     },
+    async compact() {
+      const session = handle;
+      if (session?.compact === undefined || status.phase !== "open" || !rowReady("compact")) {
+        return;
+      }
+      const control = new AbortController();
+      const mine = { control, since: deps.now() };
+      compaction = mine;
+      compactFailed = null;
+      dropCompacted();
+      emit();
+      let line: OutcomeLine | null;
+      try {
+        await session.compact(control.signal);
+        line = compactOutcome({ ok: true });
+      } catch (error) {
+        line = compactOutcome({ ok: false, error });
+      }
+      // A late answer (the screen left, or another try replaced it): the daemon
+      // keeps its result, and this screen has nothing left to say about it.
+      if (disposed || compaction !== mine) {
+        return;
+      }
+      compaction = null;
+      if (line === null) {
+        compactedAt = deps.now();
+        compactedTimer = setTimeout(() => {
+          compactedTimer = null;
+          emit();
+        }, COMPACTED_SHOWN_MS);
+      } else {
+        pushLine(line);
+        compactFailed = line.level === "warn" ? line.text : null;
+      }
+      emit();
+    },
+    cancelCompaction() {
+      compaction?.control.abort();
+    },
+    armClear() {
+      if (!rowReady("clear")) {
+        return;
+      }
+      clearArmed = clearConfirm(clearArmed, "arm").armed;
+      emit();
+    },
+    cancelClear() {
+      clearArmed = clearConfirm(clearArmed, "cancel").armed;
+      emit();
+    },
+    async clear() {
+      const ready = rowReady("clear");
+      const step = clearConfirm(clearArmed, "confirm");
+      clearArmed = step.armed;
+      const session = handle;
+      if (!step.run || !ready || session?.clear === undefined || status.phase !== "open") {
+        emit();
+        return;
+      }
+      clearing = true;
+      emit();
+      let line: OutcomeLine;
+      try {
+        const result = await session.clear();
+        line = clearOutcome({ ok: true, ...result }, FORK_KEPT);
+      } catch (error) {
+        line = clearOutcome({ ok: false, error }, FORK_KEPT);
+      }
+      if (disposed) {
+        return;
+      }
+      clearing = false;
+      // The `history{clear}` already replaced the rows; the line follows them.
+      pushLine(line);
+      dropCompacted();
+      compactFailed = null;
+      emit();
+    },
+    retryLast() {
+      const last = lastUserRow();
+      if (last === undefined || !rowReady("retry")) {
+        return;
+      }
+      // The composer's OWN path: the text goes into the (empty — `fieldBusy`)
+      // field and the one tap decides wire, queue or outbox, refusal handling
+      // unchanged. Files are not re-sent (TUI `/retry`), and a line says so.
+      draft = last.text;
+      act();
+      if (last.images.length > 0 || (last.documents?.length ?? 0) > 0) {
+        pushLine({
+          text: last.images.length > 0 ? RETRY_PHOTOS_NOT_SENT : RETRY_FILES_NOT_SENT,
+        });
+      }
+      emit();
+    },
     dispose() {
       disposed = true;
+      dropCompacted();
       listeners.clear();
       unwatchInfo();
       unwatchRefresh?.();
