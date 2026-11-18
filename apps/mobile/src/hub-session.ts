@@ -33,6 +33,7 @@ import {
   LONG_MS,
   reduce,
 } from "./hub-gesture.ts";
+import { toolsRim } from "./tools-view.ts";
 import type { TurnRow } from "./transcript-rows.ts";
 
 /**
@@ -80,6 +81,16 @@ export function hubContextOf(input: {
   readonly dictation: boolean;
   /** `activityView(...).groups.length === 0`: nothing for Activity to show (mobile-hub-tap). */
   readonly activityEmpty?: boolean;
+  /**
+   * The session's servers and skills, as the Tools sheet's own summary reads them
+   * (`toolsSummary`, docs/feat/mobile-hub-tools.md D3). Absent: nothing is known
+   * yet, which reads as unknown — never as empty (an unknown count must not dim).
+   */
+  readonly tools?: {
+    readonly known: boolean;
+    readonly total: number;
+    readonly on: number;
+  };
   /** The session's wake feed and the clock to measure it against (H4a). */
   readonly schedules?: {
     readonly rows: readonly ScheduleRow[] | undefined;
@@ -105,6 +116,10 @@ export function hubContextOf(input: {
         ? 0
         : unseenArtifacts(input.artifacts.list, input.artifacts.seen),
     activityEmpty: input.activityEmpty ?? false,
+    // Unknown counts are NOT empty: a dimmed Tools item never opens the sheet
+    // that would learn them, so its own tap is the one that can (D4).
+    toolsEmpty: input.tools?.known === true && input.tools.total === 0,
+    toolsRim: input.tools === undefined ? null : toolsRim(input.tools),
   };
 }
 
@@ -222,6 +237,7 @@ const ENTRY_IDS: readonly string[] = [
   "artifacts",
   "sessions",
   "info",
+  "tools",
   "scheduled",
   "dictate",
   "new",

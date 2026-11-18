@@ -122,6 +122,7 @@ import { SPEECH_PORT } from "../speech-native-expo.ts";
 import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, typography } from "../theme.ts";
 import { isBlockRow, isOpen, stepLayout, toggleOpen } from "../tool-steps.ts";
+import { type ToolsSegmentId, toolsSummary, toolsView } from "../tools-view.ts";
 import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
 import { ActivityBadge } from "../ui/ActivityBadge.tsx";
@@ -149,6 +150,7 @@ import { ActivitySheet } from "./ActivitySheet.tsx";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
+import { ToolsSheet } from "./ToolsSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
 import { PendingBubbles } from "./compose/PendingBubble.tsx";
@@ -800,6 +802,14 @@ export function SessionScreen({
   const [infoOpen, setInfoOpen] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const info = state.info;
+  // The Tools sheet (docs/feat/mobile-hub-tools.md D5/D6): its own surface, its
+  // own controls. Every value it draws is decided in `tools-view.ts` (from the
+  // SAME controller facts Session info reads: one source, two projections).
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [toolsSegment, setToolsSegment] = useState<ToolsSegmentId>("mcp");
+  const [toolsQuery, setToolsQuery] = useState("");
+  const [toolsExpanded, setToolsExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [toolsRefreshing, setToolsRefreshing] = useState(false);
   // A reveal in flight (docs/feat/mobile-hub.md H4a): the hub's Scheduled item
   // opens this sheet scrolled to SCHEDULED WAKES. The rule is `session-info.ts`'s
   // (`revealStart`/`revealStep`) and the fold is `reveal-report.ts`'s; the screen
@@ -839,6 +849,8 @@ export function SessionScreen({
       drawerOpen ||
       activityOpen ||
       infoOpen ||
+      // Tools is a sheet like any other: the button hides under it (D6).
+      toolsOpen ||
       menuOpen ||
       hubMenu !== null ||
       renaming !== null ||
@@ -871,6 +883,29 @@ export function SessionScreen({
   // place the wakes live and can be deleted, so the hub reaches it rather than
   // growing a second wakes screen.
   const openScheduled = () => openInfo(scheduledSection(info?.view ?? null));
+  /**
+   * Tools opened (D6): its controls always start fresh (a segment, a search and
+   * an accordion are about the visit, not the session), and the controller is
+   * told, so the counts the sheet draws are asked for. It is the SAME
+   * `openInfo` pull: the two surfaces never run two.
+   */
+  const openTools = () => {
+    setToolsSegment("mcp");
+    setToolsQuery("");
+    setToolsExpanded(new Set());
+    setToolsOpen(true);
+    void controller.openInfo();
+  };
+  const closeTools = () => {
+    setToolsOpen(false);
+    setToolsExpanded(new Set());
+    controller.closeInfo();
+  };
+  /** A pull-to-refresh or a Retry: the same `refreshInfo` Session info uses. */
+  const refreshTools = () => {
+    setToolsRefreshing(true);
+    void controller.refreshInfo().finally(() => setToolsRefreshing(false));
+  };
   // The hub (docs/feat/mobile-hub.md H3): the attach chooser, shared with the
   // composer's photo button — one path, not two.
   const openAttach = () =>
@@ -895,6 +930,9 @@ export function SessionScreen({
     dictation: voiceSettings.dictation,
     activityEmpty: activityVm.groups.length === 0,
     schedules: { rows: state.schedules, now: activityNow },
+    // The Tools item's own figures, from the sheet's OWN summary (one source,
+    // D1/D3): unknown until the controller has pulled both lists.
+    ...(info === null ? {} : { tools: toolsSummary(info.tools) }),
     ...(artifactsSeenKey === undefined
       ? {}
       : {
@@ -910,6 +948,8 @@ export function SessionScreen({
     attach: openAttach,
     activity: () => openActivity(),
     info: () => openInfo(),
+    // No info port, no Tools: a missing callback is a missing item (P6).
+    ...(info === null ? {} : { tools: openTools }),
     scheduled: openScheduled,
     ...(onOpenDrawer === undefined ? {} : { sessions: onOpenDrawer }),
     ...(onNewSession === undefined ? {} : { new: onNewSession }),
@@ -937,6 +977,12 @@ export function SessionScreen({
       setHubMenu("more");
     } else if (plan.kind === "run") {
       hubEntries[plan.id]?.();
+    }
+    // A dimmed Tools is dimmed by counts it last SAW, and it never opens the
+    // sheet that would refresh them — so its own tap does (D4), or a server
+    // added on the laptop would keep it dimmed forever.
+    if (id === "tools" && plan.kind === "notice") {
+      void controller.pullTools();
     }
   };
   const hubMenuItems = hubMenu === "more" ? hub.more : hubMenu === "all" ? hub.all : [];
@@ -1621,6 +1667,34 @@ export function SessionScreen({
               setExpanded(null);
               controller.closeInfo();
             }}
+          />
+        )}
+        {info === null ? null : (
+          <ToolsSheet
+            palette={palette}
+            visible={toolsOpen}
+            view={toolsView(info.tools, {
+              segment: toolsSegment,
+              query: toolsQuery,
+              open: toolsExpanded,
+            })}
+            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
+            onSegment={setToolsSegment}
+            onQuery={setToolsQuery}
+            onToggle={(key, open) =>
+              setToolsExpanded((prev) => {
+                const next = new Set(prev);
+                if (open) {
+                  next.add(key);
+                } else {
+                  next.delete(key);
+                }
+                return next;
+              })
+            }
+            onRefresh={refreshTools}
+            refreshing={toolsRefreshing}
+            onClose={closeTools}
           />
         )}
         <ActivitySheet

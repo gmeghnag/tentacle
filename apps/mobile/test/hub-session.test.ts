@@ -46,6 +46,9 @@ describe("hubContextOf", () => {
       nextWakeInMs: null,
       unseenArtifacts: 0,
       activityEmpty: false,
+      // Unknown counts: no dim, no arc (docs/feat/mobile-hub-tools.md D3).
+      toolsEmpty: false,
+      toolsRim: null,
     });
   });
 
@@ -108,7 +111,7 @@ describe("wakeContext — the daemon's wake table, as the hub reads it (H4a)", (
     expect(soon).toMatchObject({ schedules: 1, nextWakeInMs: DUE_SOON_MS - 1_000 });
     // End to end: the daemon's table alone makes the item appear, badged, first.
     const a = hubActions(soon, { ...ENTRIES, scheduled: noop });
-    expect(a.all.map((i) => i.id)).toEqual(["scheduled", "attach", "activity", "sessions", "info"]);
+    expect(a.all.map((i) => i.id)).toEqual(["scheduled", "attach", "activity", "info", "sessions"]);
     expect(a.all[0]?.badge).toEqual({ kind: "dot" });
     expect(a.all[0]?.label).toBe("Scheduled");
   });
@@ -179,7 +182,7 @@ describe("solveHub — the fan solved at the open", () => {
 
   test("anchored on the button's centre, in band coordinates, one id per item in fan order", () => {
     const menu = solveHub({ bounds: BAND, position: undefined, items });
-    expect(menu.ids).toEqual(["attach", "activity", "sessions", "info"]);
+    expect(menu.ids).toEqual(["attach", "activity", "info", "sessions"]);
     expect(menu.dimmed).toEqual([]);
     expect(menu.layout.kind).toBe("fan");
     const at = place(undefined, BAND);

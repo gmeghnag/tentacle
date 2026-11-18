@@ -34,6 +34,7 @@ const GLYPH: Readonly<Record<HubActionId, IconName>> = {
   artifacts: "doc.on.doc",
   sessions: "folder",
   info: "laptopcomputer",
+  tools: "powerplug",
   scheduled: "clock",
   dictate: "mic",
   new: "square.and.pencil",

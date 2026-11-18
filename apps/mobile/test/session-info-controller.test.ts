@@ -53,14 +53,19 @@ const settle = async (): Promise<void> => {
 };
 
 interface Port extends InfoPort {
-  readonly calls: { readonly mcp: number; readonly skills: number; readonly context: number };
+  readonly calls: {
+    readonly mcp: number;
+    readonly skills: number;
+    readonly context: number;
+    readonly list: number;
+  };
 }
 
 function port(over: Partial<InfoPort> = {}): {
   readonly port: InfoPort;
-  readonly calls: { mcp: number; skills: number; context: number };
+  readonly calls: { mcp: number; skills: number; context: number; list: number };
 } {
-  const calls = { mcp: 0, skills: 0, context: 0 };
+  const calls = { mcp: 0, skills: 0, context: 0, list: 0 };
   const base: InfoPort = {
     daemon: () => ({ version: "1.4.0", model: "claude-sonnet-4-5", contextWindow: 200_000 }),
     now: () => NOW,
@@ -72,8 +77,9 @@ function port(over: Partial<InfoPort> = {}): {
       calls.mcp += 1;
       return Promise.resolve([] satisfies readonly McpServerStatus[]);
     },
-    sessionList: () =>
-      Promise.resolve({
+    sessionList: () => {
+      calls.list += 1;
+      return Promise.resolve({
         sessions: [
           {
             sessionId: "s-1",
@@ -87,7 +93,8 @@ function port(over: Partial<InfoPort> = {}): {
             jobs: 0,
           },
         ],
-      }),
+      });
+    },
     session: () => ({
       skills: () => {
         calls.skills += 1;
@@ -922,5 +929,108 @@ describe("the scheduled wakes feed (cron-tool S6, M7)", () => {
     );
     await info.open();
     expect(sectionOf(info.state())?.phase).toBe("unsupported");
+  });
+});
+
+describe("state().tools is the SAME source Session info draws (docs/feat/mobile-hub-tools.md D1)", () => {
+  const SERVER: McpServerStatus = {
+    name: "fs",
+    state: "connected",
+    tools: ["read_file"],
+    moreTools: 0,
+  };
+
+  test("it carries the pulls the view does, never a second read", async () => {
+    const { port: p, calls } = port({
+      mcpStatus: () => {
+        calls.mcp += 1;
+        return Promise.resolve([SERVER]);
+      },
+    });
+    const info = createSessionInfo(p);
+    await info.open();
+    const state = info.state();
+    const mcp = state.view.sections.find((s) => s.id === "mcp");
+    expect(state.tools.mcp.state).toBe("ready");
+    expect(state.tools.mcp.state === "ready" ? state.tools.mcp.value.servers : []).toEqual([
+      SERVER,
+    ]);
+    expect(mcp?.phase).toBe("ready");
+    expect(state.tools.skills.state).toBe("ready");
+    expect(state.tools.computerName).toBe("MacBook Pro");
+    expect(state.tools.link).toBe("up");
+    expect(calls.mcp).toBe(1);
+  });
+
+  test("it is still there after the close (the hub reads it with no sheet open)", async () => {
+    const { port: p } = port();
+    const info = createSessionInfo(p);
+    await info.open();
+    info.close();
+    expect(info.state().tools.mcp.state).toBe("ready");
+    expect(info.state().tools.skills.state).toBe("ready");
+  });
+});
+
+describe("pullTools re-runs ONLY the MCP and skill pulls (D4)", () => {
+  test("it asks mcp and skills again, and leaves context/entry alone", async () => {
+    const { port: p, calls } = port();
+    const info = createSessionInfo(p);
+    await info.open();
+    const after = { ...calls };
+    await info.pullTools();
+    expect(calls.mcp).toBe(after.mcp + 1);
+    expect(calls.skills).toBe(after.skills + 1);
+    expect(calls.context).toBe(after.context);
+    expect(calls.list).toBe(after.list);
+  });
+
+  test("an answer for an older generation is dropped (close then open)", async () => {
+    const stale = deferred<readonly McpServerStatus[]>();
+    let served = 0;
+    const { port: p } = port({
+      mcpStatus: () => {
+        served += 1;
+        // The second ask is the pullTools one; it answers after the reopen.
+        return served === 2
+          ? stale.promise
+          : Promise.resolve([
+              { name: `served-${served}`, state: "connected", tools: [], moreTools: 0 },
+            ] satisfies readonly McpServerStatus[]);
+      },
+    });
+    const info = createSessionInfo(p);
+    await info.open();
+    const slow = info.pullTools();
+    await settle();
+    info.close();
+    await info.open();
+    stale.resolve([
+      { name: "late", state: "connected", tools: [], moreTools: 0 },
+    ] satisfies readonly McpServerStatus[]);
+    await slow;
+    const servers = info.state().tools.mcp;
+    const names = servers.state === "ready" ? servers.value.servers.map((s) => s.name) : [];
+    // The reopen's own answer (served-3) is painted; the stale one is not.
+    expect(names).toEqual(["served-3"]);
+  });
+
+  test("not attached: the skill pull reads `not-open` and nothing is sent", async () => {
+    let skillsAsked = 0;
+    const { port: p } = port({
+      phase: () => "failed",
+      session: () => ({
+        skills: () => {
+          skillsAsked += 1;
+          return Promise.resolve(emptySkills);
+        },
+        context: () => Promise.resolve({ used: 0, exact: true }),
+        autoAccept: undefined,
+      }),
+    });
+    const info = createSessionInfo(p);
+    await info.pullTools();
+    expect(info.state().tools.skills.state).toBe("error");
+    expect(skillsAsked).toBe(0);
   });
 });

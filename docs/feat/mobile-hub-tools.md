@@ -324,7 +324,127 @@ in `session-info-controller.test.ts` and `hub-tap-wiring.test.ts`.
 
 ## Execution
 
-*— <model-id>, <date>*
+*— claude-sonnet-4-5, 2026-11-18*
+
+### As built, in order (dependency order, red before green per slice)
+
+**0. Load-bearing check (before any code).** `.tentacle/tmp/mobile-hub-tools/repro.ts`
+built the idle fan from this branch's `hubActions` with the entries the screen
+wires today, and printed:
+
+```
+fan : attach · activity · artifacts · sessions · info · new
+more: (none)
+tools offered: false
+```
+
+Matches the doc's Repro: the capability is missing, the work is real, and the
+idle fan is full at six. Nothing else was derived from it.
+
+**1. `session-info.ts` — the words, exported (no behaviour change).** The two
+section builders' row loops were EXTRACTED, not copied, so `tools-view.ts` reuses
+one set of sentences: `mcpRow` (`:868`), `serverTools` (`:858`), `skillRow`
+(`:978`), `skillLocked` (`:973`), and the builders themselves are now exported
+(`mcpSection` `:903`, `skillsSection` `:1009`). The private helpers the sheet
+needs are exported too: `listOf` (`:446`), `changedSuffix` (`:525`), `rowSwitch`
+(`:534`), `switchNote` (`:554`), `serverLook` (`:582`), `errorWords` (`:605`).
+Two new types: `SwitchFacts` (`:168`, the fields those builders actually read)
+and `ToolsFacts` (`:177`, `SwitchFacts & Pick<InfoFacts,"phase">`).
+`SessionInfoSheet.tsx` renders byte-identically: the extraction moved the same
+expressions into functions, and its own 149 tests stayed green.
+
+**2. `session-info-controller.ts` — D1 and D4.** `SessionInfoState.tools:
+ToolsFacts` (`:178`) is built in `state()` from the SAME `facts()` call the view
+gets (`:414-430`), so the two projections can never disagree and the sheet's
+counts survive `close()` (nothing resets `mcp`/`skills`). `pullTools()` (`:606`)
+re-runs only `mcp` and `skills`, stamped with the current generation, installing
+no follows and touching no other pull.
+
+**3. `tools-view.ts` (new) + its test.** `toolsView(facts, ui)`, `toolsSummary`,
+`toolsRim`. The segment's phase, empty/error words and retry come from
+`mcpSection`/`skillsSection`; each band from `mcpRow`/`skillRow`; only what
+Session info's projection loses is new: the full lists (no `MAX_SKILL_ROWS`), a
+per-tool accordion, and a search that also matches tool names.
+
+**4. The hub item.** `hub-actions.ts`: `"tools"` in `HubEntryId`, `LABELS.tools`,
+`NO_TOOLS` (`:96`), `holds`/`dimmedBecause`/`CANONICAL` (`:121`, between `info`
+and `sessions`) and the optional `HubItem.rim` (`:49`). `hub-session.ts`:
+`hubContextOf` takes `tools?: {known,total,on}`, derives `toolsEmpty` and
+`toolsRim`, and `ENTRY_IDS` gains `"tools"`.
+
+**5. Glyph + arc.** `IconName` gains `"powerplug"`; `GLYPH.tools = "powerplug"`;
+`hub-fan.ts`'s `itemRim` (`:316`) is `item.rim ?? rimFraction(item.badge)`.
+
+**6. `session-screen-controller.ts`** exposes `pullTools()` beside
+`openInfo`/`closeInfo`/`refreshInfo` (`:456`, `:1615`).
+
+**7. `screens/ToolsSheet.tsx` (new, render-only) + `SessionScreen.tsx` wiring.**
+The screen owns `toolsOpen`/`toolsSegment`/`toolsQuery`/`toolsExpanded`/
+`toolsRefreshing`, wires `tools` only when `state.info !== null`, passes
+`toolsSummary(info.tools)` into `hubContextOf`, joins `toolsOpen` to `covered`,
+and calls `pullTools()` on the dimmed (notice) commit path.
+
+**8. `changelog.d/mobile-hub-tools.added.md`** — the doc's one bullet, verbatim.
+
+### Drift from Implementation (and why)
+
+1. **The arc shipped with this task, not with hub-badges.** The orchestrator
+   decided it (Q1: hub-badges merged first; the Tools arc is this task's). Since
+   hub-badges' rim primitive is already in the tree (`RingArc` +
+   `rimFraction` + `FanItemLook.rim`), no new drawing code was needed.
+2. **`HubItem.rim?: number | null` instead of a new `HubBadge` kind.** A badge
+   would also trigger badge-promotion reordering and would have to answer a
+   count-shaped a11y label; `rim` is a figure, not news.
+3. **`HubContext.toolsEmpty` + `toolsRim`, from ONE input.** The doc says
+   `hubContextOf` takes `tools: {known,total}`; it takes `{known,total,on}` and
+   derives both fields, so the arc's figure and the dim rule come from one
+   argument and one summary (`toolsSummary`) rather than two call sites.
+4. **`ToolsView.query` was added.** The sheet draws the search field, so the
+   view-model reports back the text the person typed — the screen owns the
+   state, the view-model owns what it means.
+5. **`pullTools()` keeps the last counts painted while it re-asks** (no reset to
+   `loading`): resetting would make the hub's own item briefly "unknown"
+   (undimmed) exactly while the person is looking at it. Only the `not-open`
+   branch paints (F4), because there is then nothing to keep.
+6. **The sheet's note is a plain `footnote`, not a nested `BandNote`.** The first
+   draft wrapped it in `BandNote` (a `<Text>`), which `BandSection`'s `footnote`
+   lays out INLINE — the documented S4 review finding 1. Caught while re-reading
+   the sheet against `SessionInfoSheet.tsx`'s pattern, fixed before the gate.
+
+### Notes from the gate run (not drift)
+
+- The 499 s whole-repo `bun test` left `packages/tui/test/__snapshots__/
+  diagram-lines.test.ts.snap` with its header line corrupted (`// Bun Snapshot
+  v1` replaced by a stray cursor-show escape) — a pre-existing artefact of
+  running the TUI snapshot suite, not of this change (which touches no TUI
+  file). The header was restored by hand and `git status` shows no change under
+  `packages/tui`.
+
+### Evidence
+
+- **The repro** (above) — capability missing before, and after the change the
+  same fan is `attach · activity · artifacts · info · tools · more` with
+  `sessions · new` in More (`hub-actions.test.ts`, "the idle fan is Attach ·
+  Activity · Artifacts · Session info · Tools · More").
+- **Mutation 1 — `onSwitch` → a no-op** (`onSwitch={() => undefined}` in
+  `SessionScreen.tsx`): `test/hub-tools-wiring.test.ts` went RED
+  (`the switch is the ONE write the controller already owns`, 8 pass / 1 fail),
+  then green after reverting (9 pass).
+- **Mutation 2 — `toolsEmpty` true while the counts are unknown**
+  (`input.tools === undefined || (…known && total === 0)` in `hub-session.ts`):
+  `test/hub-actions.test.ts` went RED ("unknown counts never dim") and
+  `test/hub-session.test.ts` too (2 fail), then green after reverting (87 pass).
+- **Gate:** `bunx tsc --noEmit` in `apps/mobile` — clean; `bun run typecheck`
+  from the root — clean (`tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay`);
+  `bun run lint` — `Checked 2083 files … No fixes applied`, 0 errors / 0 warnings
+  (the §6 baseline).
+- **`bun test` (whole repo), once:** `15252 pass · 5 skip · 2 fail · Ran 15259
+  tests across 1088 files [499.05s]`. The 5 skips are the documented opt-ins.
+  **Both failures are in `packages/daemon/test/serve-log-store.test.ts`, which
+  this branch does not touch** (`git status` shows no file under
+  `packages/daemon`), and both are load flakes from the 499 s run: one is a
+  `timed out: () => c.ended("T1")` after 20 s, the other its follow-on. Re-run in
+  isolation: **`22 pass · 0 fail`**. `apps/mobile` alone: **`3558 pass · 0 fail`**.
 
 ## Review
 

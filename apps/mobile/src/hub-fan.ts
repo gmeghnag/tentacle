@@ -304,9 +304,17 @@ export function rimFraction(badge: HubBadge | null): number | null {
 export interface FanItemLook {
   readonly bg: "card" | "fill" | "accentFill" | "red";
   readonly fg: "accent" | "red" | "onAccent" | "sec";
-  /** 0–1 from `rimFraction`; null → draw no rim. */
+  /**
+   * 0–1, or null → draw no rim. `item.rim` is an item's OWN figure (the Tools
+   * item's share switched off); every other item's rim is its badge's.
+   */
   readonly rim: number | null;
   readonly rimTone: "accent" | "onAccent";
+}
+
+/** The figure an item's rim draws: its own (`item.rim`), else its badge's. */
+function itemRim(item: HubItem): number | null {
+  return item.rim === undefined ? rimFraction(item.badge) : item.rim;
 }
 
 /** The look of one item; `lit` is the finger's highlight (the only state that grows). */
@@ -315,7 +323,7 @@ export function fanItemLook(item: HubItem, lit: boolean): FanItemLook {
     return {
       bg: item.danger ? "red" : "accentFill",
       fg: "onAccent",
-      rim: rimFraction(item.badge),
+      rim: itemRim(item),
       rimTone: "onAccent",
     };
   }
@@ -325,7 +333,7 @@ export function fanItemLook(item: HubItem, lit: boolean): FanItemLook {
   return {
     bg: "card",
     fg: item.danger ? "red" : "accent",
-    rim: rimFraction(item.badge),
+    rim: itemRim(item),
     rimTone: "accent",
   };
 }

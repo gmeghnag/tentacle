@@ -15,6 +15,7 @@ import {
   type HubOpen,
   NOTHING_RUNNING,
   NO_CONNECTION,
+  NO_TOOLS,
   PULSE_START,
   type PulseInput,
   type PulseState,
@@ -27,7 +28,8 @@ import {
   pulseStep,
   resolveCommit,
 } from "../src/hub-actions.ts";
-import { commitPlan } from "../src/hub-session.ts";
+import { fanItemLook } from "../src/hub-fan.ts";
+import { commitPlan, hubContextOf } from "../src/hub-session.ts";
 
 const noop = (): void => undefined;
 const TURN = { kind: "turn", key: "t1", turnId: "t1", own: true } as const;
@@ -42,7 +44,13 @@ const MAIN: HubEntries = {
   info: noop,
   new: noop,
 };
-const EVERY: HubEntries = { ...MAIN, artifacts: noop, scheduled: noop, dictate: noop };
+const EVERY: HubEntries = {
+  ...MAIN,
+  artifacts: noop,
+  scheduled: noop,
+  dictate: noop,
+  tools: noop,
+};
 
 const IDLE_CTX: HubContext = {
   link: "up",
@@ -54,6 +62,8 @@ const IDLE_CTX: HubContext = {
   nextWakeInMs: null,
   unseenArtifacts: 0,
   activityEmpty: false,
+  toolsEmpty: false,
+  toolsRim: null,
 };
 const RUNNING: HubContext = { ...IDLE_CTX, turn: TURN };
 /** The snapshot a fan opened while `TURN` ran carries (H3 passes the `HubMenu` itself). */
@@ -65,14 +75,14 @@ const ids = (items: readonly { id: string }[]): string[] => items.map((i) => i.i
 describe("hubActions: order and presence", () => {
   test("idle: the canonical order, no More while it fits in six", () => {
     const a = hubActions(IDLE_CTX, MAIN);
-    expect(ids(a.fan)).toEqual(["attach", "activity", "sessions", "info", "new"]);
+    expect(ids(a.fan)).toEqual(["attach", "activity", "info", "sessions", "new"]);
     expect(a.more).toEqual([]);
     expect(ids(a.all)).toEqual(ids(a.fan));
   });
 
   test("running: Stop, Steer first, then the canonical list; Stop is the only red item", () => {
     const a = hubActions(RUNNING, MAIN);
-    expect(ids(a.all)).toEqual(["stop", "steer", "attach", "activity", "sessions", "info", "new"]);
+    expect(ids(a.all)).toEqual(["stop", "steer", "attach", "activity", "info", "sessions", "new"]);
     expect(a.all.filter((i) => i.danger).map((i) => i.id)).toEqual(["stop"]);
     expect(a.all[0]?.label).toBe("Stop");
   });
@@ -90,7 +100,7 @@ describe("hubActions: order and presence", () => {
 
   test("an ended session: no turn pair, no Attach", () => {
     const a = hubActions({ ...RUNNING, ended: "closed", editable: false }, MAIN);
-    expect(ids(a.all)).toEqual(["activity", "sessions", "info", "new"]);
+    expect(ids(a.all)).toEqual(["activity", "info", "sessions", "new"]);
   });
 
   test("Attach only while the session is editable", () => {
@@ -137,8 +147,9 @@ describe("hubActions: badges and promotion", () => {
       "scheduled",
       "attach",
       "activity",
-      "sessions",
       "info",
+      "tools",
+      "sessions",
       "new",
     ]);
   });
@@ -154,8 +165,9 @@ describe("hubActions: badges and promotion", () => {
       "attach",
       "activity",
       "artifacts",
-      "sessions",
       "info",
+      "tools",
+      "sessions",
       "scheduled",
       "dictate",
       "new",
@@ -171,11 +183,11 @@ describe("hubActions: six slots (M14)", () => {
     expect(a.more).toEqual([]);
   });
 
-  test("nine candidates: the first five + More, and the four others in More in canonical order", () => {
-    const a = hubActions({ ...RUNNING, schedules: 1 }, { ...EVERY, dictate: undefined });
-    expect(a.all.length).toBe(9);
+  test("ten candidates: the first five + More, and the five others in More in canonical order", () => {
+    const a = hubActions({ ...RUNNING, schedules: 1 }, EVERY);
+    expect(a.all.length).toBe(10);
     expect(ids(a.fan)).toEqual(["stop", "steer", "attach", "activity", "artifacts", "more"]);
-    expect(ids(a.more)).toEqual(["sessions", "info", "scheduled", "new"]);
+    expect(ids(a.more)).toEqual(["info", "tools", "sessions", "scheduled", "new"]);
     expect(a.fan[5]?.label).toBe("More");
     expect(ids(a.all)).not.toContain("more");
   });
@@ -508,5 +520,128 @@ describe("itemA11yLabel (mobile-hub-badges Design 10: the rim is spoken)", () =>
 
   test("otherwise the plain label", () => {
     expect(itemA11yLabel(item(null))).toBe("Artifacts");
+  });
+});
+
+describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
+  const dimmedIds = (items: readonly HubItem[]) => items.filter((i) => i.dimmed).map((i) => i.id);
+
+  test("it is offered only with a callback (P6: a missing one is a missing action)", () => {
+    expect(ids(hubActions(IDLE_CTX, EVERY).all)).toContain("tools");
+    expect(ids(hubActions(IDLE_CTX, { ...MAIN, tools: undefined }).all)).not.toContain("tools");
+  });
+
+  test("its slot is between Session info and Sessions, and the label is Tools", () => {
+    const a = hubActions(IDLE_CTX, EVERY);
+    const at = ids(a.all).indexOf("tools");
+    expect(ids(a.all).slice(at - 1, at + 2)).toEqual(["info", "tools", "sessions"]);
+    expect(a.all[at]?.label).toBe("Tools");
+  });
+
+  test("the idle fan is Attach · Activity · Artifacts · Session info · Tools · More", () => {
+    // What the screen wires once Session info exists (artifacts + tools): six
+    // candidates, so the SIXTH slot is More and the rest go into it.
+    const a = hubActions(IDLE_CTX, { ...EVERY, sessions: noop, new: noop });
+    expect(ids(a.fan)).toEqual(["attach", "activity", "artifacts", "info", "tools", "more"]);
+    expect(ids(a.more)).toEqual(["sessions", "new"]);
+    expect(a.fan[5]?.label).toBe("More");
+  });
+
+  test("nothing to switch dims it, and a commit says why and opens nothing", () => {
+    const empty: HubContext = { ...IDLE_CTX, toolsEmpty: true };
+    expect(dimmedIds(hubActions(empty, EVERY).all)).toEqual(["tools"]);
+    expect(resolveCommit("tools", empty, EVERY, OPENED_IDLE)).toEqual({
+      kind: "noop",
+      notice: NO_TOOLS,
+    });
+    expect(commitPlan("tools", empty, EVERY, hubOpen(empty))).toEqual({
+      kind: "notice",
+      text: NO_TOOLS,
+    });
+  });
+
+  test("unknown counts never dim: a count not seen yet is not zero", () => {
+    // The wiring's default (`hubContextOf` with no `tools` input) says unknown.
+    const unknown = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+    });
+    expect(unknown.toolsEmpty).toBe(false);
+    expect(unknown.toolsRim).toBeNull();
+    expect(dimmedIds(hubActions(unknown, EVERY).all)).toEqual([]);
+
+    // Known and non-empty is not dimmed either.
+    const some = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      tools: { known: true, total: 2, on: 2 },
+    });
+    expect(some.toolsEmpty).toBe(false);
+  });
+
+  test("a known empty result IS dimmed (one source with the sheet's summary)", () => {
+    const empty = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      tools: { known: true, total: 0, on: 0 },
+    });
+    expect(empty.toolsEmpty).toBe(true);
+    expect(dimmedIds(hubActions(empty, EVERY).all)).toEqual(["tools"]);
+  });
+
+  test("its rim is the share switched OFF, and no arc while everything is on (owner Q2)", () => {
+    const allOn = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      tools: { known: true, total: 4, on: 4 },
+    });
+    expect(allOn.toolsRim).toBeNull();
+    expect(hubActions(allOn, EVERY).all.find((i) => i.id === "tools")?.rim).toBeNull();
+
+    const someOff = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      tools: { known: true, total: 4, on: 3 },
+    });
+    expect(someOff.toolsRim).toBe(0.25);
+    expect(hubActions(someOff, EVERY).all.find((i) => i.id === "tools")?.rim).toBe(0.25);
+  });
+
+  test("the arc is the item's OWN: it never leaks onto another item, and a dimmed item keeps none", () => {
+    const ctx = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      tools: { known: true, total: 4, on: 1 },
+    });
+    const all = hubActions({ ...ctx, activityEmpty: true }, EVERY).all;
+    expect(all.find((i) => i.id === "activity")?.rim).toBeUndefined();
+    // A dimmed item draws no rim whatever its figure (`fanItemLook`).
+    expect(fanItemLook(all.find((i) => i.id === "activity") as HubItem, false).rim).toBeNull();
+    expect(fanItemLook(all.find((i) => i.id === "tools") as HubItem, false).rim).toBe(0.75);
+  });
+
+  test("a badge-bearing item still takes its rim from its badge (no regression)", () => {
+    const a = hubActions({ ...IDLE_CTX, unseenArtifacts: 3 }, EVERY);
+    const artifacts = a.all.find((i) => i.id === "artifacts");
+    expect(artifacts?.rim).toBeUndefined();
+    expect(fanItemLook(artifacts as HubItem, false).rim).toBe(0.3);
   });
 });

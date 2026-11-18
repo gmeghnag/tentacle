@@ -21,6 +21,7 @@ import type {
   SessionContextResult,
   SessionListEntry,
   SessionSkillsResult,
+  SkillListEntry,
 } from "@tentacle/protocol";
 import { unseenArtifacts } from "./artifact-gallery.ts";
 import type { ArtifactSeen } from "./artifact-seen-store.ts";
@@ -160,6 +161,21 @@ export interface RowSwitch {
  * state, what this device has already seen, and the clock the seen rule reads.
  * One bundle, so the section's phases are decided in one place.
  */
+/**
+ * What the switch-bearing sections read: the MCP and skill pulls, this
+ * session's switches, the link and the paired computer's name.
+ */
+export type SwitchFacts = Pick<
+  InfoFacts,
+  "computerName" | "mcp" | "skills" | "capabilities" | "link"
+>;
+
+/**
+ * What the Tools sheet reads (docs/feat/mobile-hub-tools.md D1): the same facts
+ * as Session info's switch sections, plus the screen's attach phase.
+ */
+export type ToolsFacts = SwitchFacts & Pick<InfoFacts, "phase">;
+
 export interface ArtifactFacts {
   /** Every version `artifact/list` answered, oldest first. */
   readonly pull: Pull<readonly ArtifactMeta[]>;
@@ -427,7 +443,7 @@ export function switchPhase(input: {
   return input.state === undefined ? "unsupported" : "on";
 }
 
-function listOf(state: SessionCapabilitiesWire | undefined, kind: CapabilityKind): string[] {
+export function listOf(state: SessionCapabilitiesWire | undefined, kind: CapabilityKind): string[] {
   if (state === undefined) {
     return [];
   }
@@ -506,7 +522,7 @@ export function settledOp(
 }
 
 /** The ` · changed on <device>` suffix of a row another device switched. */
-function changedSuffix(switches: CapabilitySwitches, key: string): string {
+export function changedSuffix(switches: CapabilitySwitches, key: string): string {
   const by = switches.changedBy[key];
   if (by === undefined) {
     return "";
@@ -515,7 +531,7 @@ function changedSuffix(switches: CapabilitySwitches, key: string): string {
 }
 
 /** A row's trailing switch. A `locked` skill is a ghost switch, off (Owner Q5). */
-function rowSwitch(
+export function rowSwitch(
   switches: CapabilitySwitches,
   kind: CapabilityKind,
   name: string,
@@ -535,7 +551,7 @@ function rowSwitch(
  * The note under a section's rows: a refused set wins; then why the switches
  * cannot be used; then (for the first section that has switches) what Off does.
  */
-function switchNote(
+export function switchNote(
   switches: CapabilitySwitches | undefined,
   kind: CapabilityKind,
   computer: string,
@@ -563,7 +579,7 @@ function switchNote(
 }
 
 /** The MCP server's dot and value (a state word for anything not connected). */
-function serverLook(
+export function serverLook(
   server: McpServerStatus,
 ): Pick<InfoRow, "tone" | "glyph" | "value" | "subtitle"> {
   switch (server.state) {
@@ -586,7 +602,7 @@ function serverLook(
   }
 }
 
-function errorWords(kind: "unsupported", computer: string): string {
+export function errorWords(kind: "unsupported", computer: string): string {
   return kind === "unsupported" ? `Needs a newer tentacle on ${computer}` : "";
 }
 
@@ -838,8 +854,53 @@ function schedulesSection(facts: InfoFacts): InfoSection | null {
   };
 }
 
+/** An MCP server's tools, for the accordion and the row's `expand`; null: no list. */
+export function serverTools(
+  server: McpServerStatus,
+): { readonly names: readonly string[]; readonly more: number } | null {
+  if (server.state !== "connected" || server.tools.length === 0) {
+    return null;
+  }
+  return { names: server.tools, more: server.moreTools };
+}
+
+/** One MCP server as a row: its state, its switch, and its tool list (flattened). */
+export function mcpRow(server: McpServerStatus, switches: CapabilitySwitches | undefined): InfoRow {
+  const look = serverLook(server);
+  const error = server.error === undefined ? undefined : sanitizeDisplay(server.error);
+  const shownError = server.state === "connected" ? undefined : error;
+  const toggle =
+    switches === undefined ? undefined : rowSwitch(switches, "mcp", server.name, false);
+  const changed =
+    switches === undefined ? "" : changedSuffix(switches, capabilityKey("mcp", server.name));
+  // Off: the row says so first (the mockup's "Off · hidden from the model");
+  // another device's change is appended; a server's own error stays readable.
+  const note =
+    toggle !== undefined && !toggle.on
+      ? `Off · hidden from the model${changed}`
+      : changed === ""
+        ? undefined
+        : `On${changed}`;
+  const subtitle = [note, shownError].filter((part) => part !== undefined).join(" — ");
+  const tools = serverTools(server);
+  return {
+    title: sanitizeDisplay(server.name),
+    ...look,
+    ...(subtitle === "" ? {} : { subtitle }),
+    ...(toggle === undefined ? {} : { switch: toggle, ...(toggle.on ? {} : { dim: true }) }),
+    ...(tools === null
+      ? {}
+      : {
+          expand: [
+            tools.names.map(sanitizeDisplay).join(", "),
+            ...(tools.more > 0 ? [`+${tools.more} more`] : []),
+          ].join(", "),
+        }),
+  };
+}
+
 /** The MCP section: the daemon's servers (`/mcp`'s own order, daemon-wide). */
-function mcpSection(facts: InfoFacts): InfoSection {
+export function mcpSection(facts: SwitchFacts): InfoSection {
   const title = `MCP servers · on ${sanitizeDisplay(facts.computerName)}`;
   if (facts.mcp.state === "loading") {
     return { id: "mcp", title, phase: "loading", rows: [] };
@@ -887,38 +948,7 @@ function mcpSection(facts: InfoFacts): InfoSection {
     };
   }
   const switches = facts.capabilities;
-  const rows: InfoRow[] = servers.map((server) => {
-    const look = serverLook(server);
-    const error = server.error === undefined ? undefined : sanitizeDisplay(server.error);
-    const shownError = server.state === "connected" ? undefined : error;
-    const toggle =
-      switches === undefined ? undefined : rowSwitch(switches, "mcp", server.name, false);
-    const changed =
-      switches === undefined ? "" : changedSuffix(switches, capabilityKey("mcp", server.name));
-    // Off: the row says so first (the mockup's "Off · hidden from the model");
-    // another device's change is appended; a server's own error stays readable.
-    const note =
-      toggle !== undefined && !toggle.on
-        ? `Off · hidden from the model${changed}`
-        : changed === ""
-          ? undefined
-          : `On${changed}`;
-    const subtitle = [note, shownError].filter((part) => part !== undefined).join(" — ");
-    return {
-      title: sanitizeDisplay(server.name),
-      ...look,
-      ...(subtitle === "" ? {} : { subtitle }),
-      ...(toggle === undefined ? {} : { switch: toggle, ...(toggle.on ? {} : { dim: true }) }),
-      ...(server.state === "connected" && server.tools.length > 0
-        ? {
-            expand: [
-              server.tools.map(sanitizeDisplay).join(", "),
-              ...(server.moreTools > 0 ? [`+${server.moreTools} more`] : []),
-            ].join(", "),
-          }
-        : {}),
-    };
-  });
+  const rows: InfoRow[] = servers.map((server) => mcpRow(server, switches));
   const connected = servers.filter((server) => server.state === "connected").length;
   return {
     id: "mcp",
@@ -935,8 +965,48 @@ function optionalNote(note: string | undefined): { switchNote?: string } {
   return note === undefined ? {} : { switchNote: note };
 }
 
+/**
+ * A skill is LOCKED when the model can never be offered it (its own SKILL.md sets
+ * `disable-model-invocation`): neither offered now nor after a reset. Not this
+ * session's choice, so it draws a ghost switch, dim, with no words (Owner Q5).
+ */
+export function skillLocked(skill: SkillListEntry): boolean {
+  return !skill.model && skill.modelAfterReset !== true;
+}
+
+/** One skill as a row: its switch, its Off note, and a locked skill's ghost. */
+export function skillRow(skill: SkillListEntry, switches: CapabilitySwitches | undefined): InfoRow {
+  const name = sanitizeDisplay(skill.name);
+  const off = !skill.user && !skill.model;
+  const description = sanitizeDisplay(skill.description);
+  if (switches === undefined) {
+    return {
+      title: skill.user ? `/${name}` : name,
+      subtitle: description,
+      chip: skill.scope,
+      ...(off ? { value: "off", dim: true } : {}),
+    };
+  }
+  const locked = skillLocked(skill);
+  const toggle = rowSwitch(switches, "skill", skill.name, locked);
+  const changed = changedSuffix(switches, capabilityKey("skill", skill.name));
+  const subtitle =
+    !locked && !toggle.on
+      ? `Off${skill.user ? ` · you can still run /${name}` : " · hidden from the model"}${changed}`
+      : changed === ""
+        ? description
+        : `On${changed}`;
+  return {
+    title: skill.user ? `/${name}` : name,
+    subtitle,
+    chip: skill.scope,
+    switch: toggle,
+    ...(toggle.on ? {} : { dim: true }),
+  };
+}
+
 /** The SKILLS section: what the session can do, in the daemon's precedence order. */
-function skillsSection(facts: InfoFacts): InfoSection {
+export function skillsSection(facts: SwitchFacts): InfoSection {
   if (facts.skills.state === "loading") {
     return { id: "skills", title: "Skills", phase: "loading", rows: [] };
   }
@@ -996,38 +1066,9 @@ function skillsSection(facts: InfoFacts): InfoSection {
     };
   }
   const switches = facts.capabilities;
-  const rows: InfoRow[] = value.skills.slice(0, MAX_SKILL_ROWS).map((skill) => {
-    const name = sanitizeDisplay(skill.name);
-    const off = !skill.user && !skill.model;
-    const description = sanitizeDisplay(skill.description);
-    if (switches === undefined) {
-      return {
-        title: skill.user ? `/${name}` : name,
-        subtitle: description,
-        chip: skill.scope,
-        ...(off ? { value: "off", dim: true } : {}),
-      };
-    }
-    // Locked: the model can never be offered it (its own SKILL.md sets
-    // `disable-model-invocation`): neither offered now nor after a reset. Not
-    // this session's choice, so a ghost switch, dim, no words (Owner Q5).
-    const locked = !skill.model && skill.modelAfterReset !== true;
-    const toggle = rowSwitch(switches, "skill", skill.name, locked);
-    const changed = changedSuffix(switches, capabilityKey("skill", skill.name));
-    const subtitle =
-      !locked && !toggle.on
-        ? `Off${skill.user ? ` · you can still run /${name}` : " · hidden from the model"}${changed}`
-        : changed === ""
-          ? description
-          : `On${changed}`;
-    return {
-      title: skill.user ? `/${name}` : name,
-      subtitle,
-      chip: skill.scope,
-      switch: toggle,
-      ...(toggle.on ? {} : { dim: true }),
-    };
-  });
+  const rows: InfoRow[] = value.skills
+    .slice(0, MAX_SKILL_ROWS)
+    .map((skill) => skillRow(skill, switches));
   const skipped = value.problems.length + value.moreProblems;
   const more = value.skills.length - rows.length;
   return {
