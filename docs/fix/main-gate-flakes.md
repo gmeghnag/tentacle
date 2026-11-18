@@ -73,6 +73,15 @@ the title gate holds". After the revert both pass (110/110 with
 | `serve-log-store` S11 | blind 5–125 ms kill after spawn: under load the child had not booted, so too few loads | 3 of 4 kills wait for the child's existing `ready` line, then a random 0–60 ms; floor `loads ≥ 0.9·N` |
 | `session-titles` D5 | `until` 2 s default | default 20 s; every negative wait in the file passes an explicit 500 ms, so none is lengthened |
 
+**Correction — D5 was NOT a timeout (round 3).** The gate hit it again with
+`title.calls` **3** (`1` expected `2`), i.e. a real ordering bug in the test, in
+26 ms. The `tick(5)` fence after each turn end could expire while that turn's
+title attempt was still in flight; the next `prompt` then ABORTED it — an abort
+is deliberately not a failure (D3) — so the failure cap stayed at 1 and a third
+attempt was allowed. Fixed in `daemon/test/session-titles.test.ts` by waiting on
+each attempt's own outcome (`r.errors.length === 2`) instead of the fence. Red
+5/5 without that wait, green 5/5 with it; also green under 6 busy-loop CPUs.
+
 **Reviewer changes to the kept work (S11).** (1) The executor's 20 s dead-man was
 broken: after `Promise.race([ready, tick(20 s)])` it did `if (await ready.promise)`,
 which blocks until the child exits, so a never-ready child hung until the 120 s

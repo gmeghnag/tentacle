@@ -70,7 +70,13 @@ import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
 import { DIAGRAM_SETTINGS } from "../diagram-settings-expo.ts";
 import type { DiagramStyle } from "../diagram-settings-store.ts";
-import { type FloatBounds, fits, visible as floatVisible, headerPill } from "../floating-button.ts";
+import {
+  type FloatBounds,
+  fits,
+  visible as floatVisible,
+  footClearance,
+  headerPill,
+} from "../floating-button.ts";
 import {
   type Follow,
   type FollowStep,
@@ -84,6 +90,8 @@ import {
   jumpPill,
   jumped,
   landingDone,
+  landingOwns,
+  landingPending,
   landingQuiet,
   landingReveal,
   landingStart,
@@ -431,23 +439,35 @@ export function SessionScreen({
   }, []);
   const armReveal = useCallback(() => {
     disarmReveal();
-    reveal.current = setTimeout(() => {
-      reveal.current = null;
-      const next = landingReveal(
-        landing.current,
-        size.current,
-        followRef.current.following,
-        hasRows.current,
-      );
-      const changed = next.state.settling !== landing.current.settling;
-      landing.current = next.state;
-      if (next.step !== null) {
-        perform(next.step);
-      }
-      if (changed) {
-        setSettling(next.state.settling);
-      }
-    }, LANDING_REVEAL_MS);
+    // The reveal can fire TWICE for one re-attach (Review round 1, finding 2): the
+    // first lands the silent scroll, which renders the end's cells and so moves the
+    // content height again — those re-measures stay with the landing, silently. This
+    // re-arm is what HANDS IT BACK when none of them arrive: the second quiet fire
+    // finds the landing already revealed and ends it, so a row a stream appends
+    // after the return is the ordinary animated follow, not an absorbed one.
+    const fire: () => void = () => {
+      reveal.current = setTimeout(() => {
+        reveal.current = null;
+        const next = landingReveal(
+          landing.current,
+          size.current,
+          followRef.current.following,
+          hasRows.current,
+        );
+        const changed = next.state.settling !== landing.current.settling;
+        landing.current = next.state;
+        if (next.step !== null) {
+          perform(next.step);
+        }
+        if (next.step !== null && landingPending(next.state)) {
+          fire();
+        }
+        if (changed) {
+          setSettling(next.state.settling);
+        }
+      }, LANDING_REVEAL_MS);
+    };
+    fire();
   }, [disarmReveal, perform]);
   useEffect(() => disarmReveal, [disarmReveal]);
   // The opening landing is armed at the MOUNT too: a list whose size never
@@ -457,6 +477,13 @@ export function SessionScreen({
     armReveal();
   }, [armReveal]);
   const land = useCallback((): boolean => {
+    // A measurement a pending landing CONSUMES — whether it scrolls, is absorbed, or
+    // ENDS the landing — must never reach the animated follow below: the ending one
+    // repeats the height the landing's own silent scroll already reached, and an
+    // animated scroll to the offset the list is already at is the same loop's echo.
+    // `landingOwns` decides it, `following` included: scrolled up mid-landing, the
+    // history that arrives IS news for the pill (Review round 2, finding 3).
+    const before = landing.current;
     const next = landingStep(
       landing.current,
       size.current,
@@ -467,13 +494,18 @@ export function SessionScreen({
     landing.current = next.state;
     if (next.step !== null) {
       perform(next.step);
-      // More measurements may follow this scroll: wait for them to go quiet.
+    }
+    // A landing OWNS the list until it is done: `landingPending`, never "did it
+    // scroll?". A re-attach absorbs its measurements without scrolling (bug 4),
+    // and one that fell through to `contentGrew` here would be scrolled ANIMATED —
+    // the owner's foreground loop. `armReveal` is what lands it once, silently.
+    if (landingPending(next.state)) {
       armReveal();
     }
     if (changed) {
       setSettling(next.state.settling);
     }
-    return next.step !== null;
+    return landingOwns(before, next.state, followRef.current.following);
   }, [perform, armReveal]);
   // Bug 5 (docs/fix/mobile-qa-1117.md): where the list really is, and the settle
   // re-check armed by every size change — `follow.ts`'s `settleStep` decides.
@@ -1297,6 +1329,10 @@ export function SessionScreen({
                         sendNow: compose.sendNow,
                         unqueue: !compose.unqueueOff,
                       }}
+                      // The hub can rest at either edge (`floating-button.ts`
+                      // `snap`), and a pending action under the fan is a tap that
+                      // opens Activity instead of cancelling the message (QA bug 1).
+                      clearance={footClearance(floatShown)}
                       onAction={(id, action) => {
                         switch (action) {
                           case "edit":

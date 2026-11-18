@@ -66,6 +66,8 @@ function harness(
     readonly withArtifacts?: boolean;
     /** Absent: the screen is built without a feed (the unit-test default). */
     readonly withFeed?: boolean;
+    /** What an own send streams before its `turn_end` (a live `present`). */
+    readonly sendEvents?: readonly unknown[];
   } = {},
 ) {
   const registry = createFeedRegistry();
@@ -87,6 +89,9 @@ function harness(
       };
     },
     async *send() {
+      for (const event of options.sendEvents ?? []) {
+        yield event as never;
+      }
       yield { type: "turn_end", reason: "end_turn" } as never;
     },
     ...(options.withArtifacts === false
@@ -182,6 +187,47 @@ describe("the session screen's artifacts", () => {
     // What the gallery reads: the SAME feed the screen published on.
     expect(h.feed?.current().list.map((m) => m.artifactId)).toEqual(["a", "b"]);
     expect(h.feed?.current().phase).toBe("ready");
+  });
+
+  /**
+   * docs/fix/mobile-qa-1118.md, bug 3: an artifact `present`ed LIVE reached its
+   * row's card but never the list — the hub's count source — so the Artifacts rim
+   * and the glow stayed silent until a re-entry relisted it.
+   */
+  test("a LIVE present grows the list (the hub's count) once, and a relist keeps it once", async () => {
+    const live = meta({ artifactId: "b", callId: "call-b" });
+    let listed: ArtifactMeta[] = [meta({ artifactId: "a" })];
+    const h = harness({
+      withFeed: true,
+      list: () => Promise.resolve({ artifacts: listed }),
+      sendEvents: [
+        { type: "tool_start", id: "call-b", name: "present", arguments: "{}" },
+        {
+          type: "tool_result",
+          id: "call-b",
+          result: { content: "Presented b.png", details: { kind: "artifact", artifact: live } },
+        },
+      ],
+    });
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    expect(screen.state().artifacts.list.map((m) => m.artifactId)).toEqual(["a"]);
+    screen.setDraft("present b");
+    screen.press();
+    await settle();
+    // The live card is in the list the hub counts and the gallery reads.
+    expect(screen.state().artifacts.list.map((m) => m.artifactId)).toEqual(["a", "b"]);
+    expect(h.feed?.current().list.map((m) => m.artifactId)).toEqual(["a", "b"]);
+    // A replayed fold / later delta does not add it again.
+    h.deliverHistory(history);
+    await settle();
+    expect(screen.state().artifacts.list.filter((m) => m.artifactId === "b")).toHaveLength(1);
+    // The reconnect's relist (the daemon now knows b) counts it once.
+    listed = [meta({ artifactId: "a" }), live];
+    await screen.refreshArtifacts();
+    await settle();
+    expect(screen.state().artifacts.list.map((m) => m.artifactId)).toEqual(["a", "b"]);
   });
 
   test("the gallery's refresh request lands on the screen that owns the handle", async () => {
