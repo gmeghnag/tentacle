@@ -7,6 +7,42 @@ export function spec(raw: unknown): ChartSpec {
   return result.spec;
 }
 
+/**
+ * The mockup's two real charts (docs/feat/mobile-chart-labels.md): a 3-series
+ * stacked area (gutter-hungry) and a 3-series line with a gap in series 1.
+ */
+export const TRAFFIC = spec({
+  type: "area",
+  stacked: true,
+  title: "Composizione traffico per canale",
+  y: { unit: "k req" },
+  labels: [
+    "settimana 1",
+    "settimana 2",
+    "settimana 3",
+    "settimana 4",
+    "settimana 5",
+    "settimana 6",
+  ],
+  datasets: [
+    { label: "web", data: [380, 400, 420, 440, 452, 455] },
+    { label: "mobile", data: [350, 370, 395, 410, 433, 430] },
+    { label: "api", data: [110, 120, 130, 140, 152, 148] },
+  ],
+});
+
+export const LATENCY = spec({
+  type: "line",
+  title: "Latenza p95 per endpoint",
+  y: { unit: "ms" },
+  labels: ["Nov 10", "Nov 11", "Nov 12", "Nov 13", "Nov 14", "Nov 15", "Nov 16"],
+  datasets: [
+    { label: "storage", data: [120, 115, 130, 125, 140, 135, 128] },
+    { label: "auth", data: [85, 90, null, null, 78, 82, 90] },
+    { label: "api", data: [70, 75, 82, 88, 95, 90, 49] },
+  ],
+});
+
 const MONTHS = [
   "gennaio",
   "febbraio",

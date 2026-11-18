@@ -82,6 +82,20 @@ describe("chartRowView", () => {
     expect(chartRowView(row(), { ...opts, width: 0 })).toBeNull();
     expect(chartRowView(row({ name: "shell" }), opts)).toBeNull();
   });
+
+  test("the label mode is part of the cache key: two modes, two layouts", () => {
+    // Same arguments, same width — only the mode differs, so a cache key without
+    // it would serve the first layout for both (docs/feat/mobile-chart-labels.md D1).
+    const inside = chartRowView(row(), { ...opts, labels: "inside" });
+    const legend = chartRowView(row(), { ...opts, labels: "legend" });
+    expect(inside?.layout.plot.right).toBe(358);
+    expect(legend?.layout.plot.right).toBe(358);
+    expect(inside?.layout.texts.filter((t) => t.role === "direct").length).toBe(2);
+    expect(legend?.layout.texts.filter((t) => t.role === "direct")).toHaveLength(0);
+    expect(legend?.layout.legend?.map((i) => i.series)).toEqual([0, 1]);
+    // And the default is C, so an omitted option is the SAME cache entry as `inside`.
+    expect(chartRowView(row(), opts)?.layout.legend).toBeNull();
+  });
 });
 
 describe("chart tokens and colours", () => {

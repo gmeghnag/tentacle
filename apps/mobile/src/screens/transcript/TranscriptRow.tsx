@@ -17,8 +17,10 @@ import type { ArtifactMeta } from "@tentacle/protocol";
  */
 import { type JSX, type ReactNode, useState } from "react";
 import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import type { LabelMode } from "../../chart-layout-kit.ts";
 import { CHART_TOOL, chartRowView } from "../../chart-row.ts";
 import { DIAGRAM_TOOL, diagramRowView } from "../../diagram-row.ts";
+import type { DiagramStyle } from "../../diagram-settings-store.ts";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
@@ -59,6 +61,13 @@ export interface RowProps {
   /** The loaded thumbnails (the driver's state): a ref with no bytes draws its label. */
   readonly thumbnails: ThumbnailState;
   /**
+   * The Charts setting in force (docs/feat/mobile-chart-labels.md D7): where a
+   * line/area chart names its series. The SESSION SCREEN owns the subscription
+   * (`ACTIVITY_SETTINGS`'s pattern) so one chart row is not one listener, and
+   * absent = the default (`inside`).
+   */
+  readonly chartLabels?: LabelMode;
+  /**
    * The read-aloud button under an assistant row (docs/feat/mobile-voice.md
    * Design §5): `readAloudOffered` / `speakingRowKey` decide it; absent = none.
    */
@@ -81,6 +90,8 @@ export interface RowProps {
    * (docs/feat/mobile-tool-rows.md S2). Absent: a lone, closed step.
    */
   readonly step?: StepProps;
+  /** The diagram look picked in Settings (docs/fix/mobile-qa-1117.md, bug 3); absent → outline. */
+  readonly diagramStyle?: DiagramStyle;
 }
 
 /**
@@ -345,11 +356,13 @@ function deviceLocale(): string {
 function ChartRowView(props: RowProps): JSX.Element {
   const tool = props.row as Extract<Row, { kind: "tool" }>;
   const screen = useWindowDimensions();
+  const labels = props.chartLabels ?? "inside";
   const view = chartRowView(tool, {
     width: screen.width - 2 * space.inset,
     fontScale: screen.fontScale,
     locale: deviceLocale(),
     palette: props.palette,
+    labels,
   });
   if (view === null) {
     return <ToolRowView {...props} />;
@@ -362,6 +375,7 @@ function ChartRowView(props: RowProps): JSX.Element {
         palette={props.palette}
         locale={deviceLocale()}
         testID={`chart-${tool.id}`}
+        labels={labels}
       />
     </Shell>
   );
@@ -375,7 +389,11 @@ function ChartRowView(props: RowProps): JSX.Element {
 function DiagramRowView(props: RowProps): JSX.Element {
   const tool = props.row as Extract<Row, { kind: "tool" }>;
   const screen = useWindowDimensions();
-  const view = diagramRowView(tool, { palette: props.palette, fontScale: screen.fontScale });
+  const view = diagramRowView(tool, {
+    palette: props.palette,
+    fontScale: screen.fontScale,
+    ...(props.diagramStyle === undefined ? {} : { style: props.diagramStyle }),
+  });
   if (view === null) {
     return <ToolRowView {...props} />;
   }

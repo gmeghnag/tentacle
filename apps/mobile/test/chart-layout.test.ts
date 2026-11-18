@@ -95,12 +95,19 @@ describe("T5.1 fixtures per type (the owner's picks)", () => {
     expect(l.guides.map((g) => g.value)).toEqual([10000, 15000, 20000]);
     expect(l.guides.every((g) => g.style === "dotted")).toBe(true);
     expect(texts(l, "guide").map((t) => [t.text, t.anchor])).toEqual([
-      ["10k €", "end"],
-      ["20k €", "end"],
+      ["10k €", "start"],
+      ["20k €", "start"],
     ]);
     expect(texts(l, "x").map((t) => t.text)).toEqual(["gennaio", "luglio", "dicembre"]);
-    expect(l.dots).toHaveLength(1);
+    // The end dot, plus one marker per inside label (docs/feat/mobile-chart-labels.md D2).
+    expect(l.dots).toHaveLength(3);
     expect(l.dots[0]).toMatchObject({ series: 0, r: 3.75, halo: { r: 7.5, opacity: 0.18 } });
+    expect(
+      l.dots
+        .filter((d) => d.ring !== undefined && d.r === 3.2)
+        .map((d) => d.series)
+        .sort(),
+    ).toEqual([0, 1]);
     expect(
       texts(l, "direct")
         .map((t) => t.text)
@@ -124,7 +131,7 @@ describe("T5.1 fixtures per type (the owner's picks)", () => {
       texts(l, "direct")
         .map((t) => t.text)
         .sort(),
-    ).toEqual(["app 120", "web 210"]);
+    ).toEqual(["app", "web"]);
     expect(l.dots[0]?.hollow).toBe(true);
   });
 
@@ -338,6 +345,7 @@ describe("T5.9 guide labels", () => {
       locale: "it",
       hidden: new Set(),
       measure: monoWidth,
+      labels: "inside",
     };
     const y = (v: number): number => 150 - v;
     const spec = chartSpecOf(REVENUE);

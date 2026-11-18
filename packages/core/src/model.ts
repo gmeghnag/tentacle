@@ -54,6 +54,13 @@ export interface ChatMessage {
    */
   readonly denialReply?: string;
   /**
+   * On a `role: "tool"` message whose result was an error (`ToolResult.isError`):
+   * `true`, else absent (docs/fix/mobile-qa-1117.md, bug 2). Display only, like
+   * `durationMs`: the model reads the failure in `content`; a reload uses this to
+   * draw the step as failed, as the live `tool_result` did.
+   */
+  readonly isError?: true;
+  /**
    * On a `user` or `tool` message that crossed a new step of context fill: how
    * full the context was (docs/feat/context-awareness.md). NOT display-only,
    * unlike `spill`/`durationMs`: the agent loop renders it into `content` as a

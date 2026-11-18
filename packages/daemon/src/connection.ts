@@ -81,6 +81,8 @@ import {
   type SnapshotResult,
   type SubagentMessageParams,
   type SubagentMessageResult,
+  type UnqueueParams,
+  type UnqueueResult,
   type UnwatchParams,
   type UnwatchResult,
   type UpdateSettingsParams,
@@ -422,6 +424,8 @@ export class Connection {
         return this.sendNow(params as SendNowParams);
       case Method.Reclaim:
         return this.reclaim(params as ReclaimParams);
+      case Method.Unqueue:
+        return this.unqueue(params as UnqueueParams);
       case Method.ResolvePermission:
         return this.resolvePermission(params as ResolvePermissionParams);
       // Both synchronous, holding no lock (AGENTS §7): they never await a turn.
@@ -677,6 +681,18 @@ export class Connection {
     hosted.reclaim(params.ids);
     await hosted.persisted();
     return {};
+  }
+
+  // Synchronous like `enqueue` (AGENTS §7: one step, no lock — it must land
+  // strictly before or after a drain); only the ACK waits, on `serve` until
+  // the removal is on disk (a removed row never comes back after a restart).
+  // A live session only: an archived one's rows are `returned`, which a
+  // `session/reclaim` drops (docs/feat/queue-unqueue.md).
+  private async unqueue(params: UnqueueParams): Promise<UnqueueResult> {
+    const hosted = this.lookup(params.sessionId);
+    const result = hosted.unqueue(params.ids);
+    await hosted.persisted();
+    return result;
   }
 
   // Synchronous and lock-free (AGENTS §7): `HostedSession.clear` never awaits.

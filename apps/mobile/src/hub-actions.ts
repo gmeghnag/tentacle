@@ -34,6 +34,12 @@ export interface HubItem {
   readonly badge: HubBadge | null;
   /** Stop is the only red item (Design 8). */
   readonly danger: boolean;
+  /**
+   * Offered but with nothing to show (docs/feat/mobile-hub-tap.md Design 2): it
+   * KEEPS its slot, a commit says why in the notice line, and the cue is `light`
+   * — never hidden, so the order never shifts under the finger (owner Q-H5).
+   */
+  readonly dimmed: boolean;
 }
 
 export interface HubContext {
@@ -51,6 +57,8 @@ export interface HubContext {
   readonly nextWakeInMs: number | null;
   /** Artifacts the person has not opened yet. */
   readonly unseenArtifacts: number;
+  /** `activityView(...).groups.length === 0`: Activity has nothing to open (mobile-hub-tap Design 2). */
+  readonly activityEmpty: boolean;
 }
 
 export interface HubActions {
@@ -67,6 +75,8 @@ export const FAN_MAX = 6;
 export const DUE_SOON_MS = 10 * 60 * 1000;
 export const ALREADY_FINISHED = "Already finished";
 export const NO_CONNECTION = "Not connected — the turn keeps running";
+/** A commit of an empty Activity says so inline; the modal never opens (mobile-hub-tap Design 2). */
+export const NOTHING_RUNNING = "Nothing running";
 
 const LABELS: Readonly<Record<HubActionId, string>> = {
   stop: "Stop",
@@ -141,14 +151,19 @@ function present(id: HubEntryId, ctx: HubContext, entries: HubEntries): boolean 
   return entries[id] !== undefined && holds(id, ctx);
 }
 
-function item(id: HubActionId, badge: HubBadge | null): HubItem {
-  return { id, label: LABELS[id], badge, danger: id === "stop" };
+function item(id: HubActionId, badge: HubBadge | null, dimmed = false): HubItem {
+  return { id, label: LABELS[id], badge, danger: id === "stop", dimmed };
+}
+
+/** Why this entry has nothing to show RIGHT NOW, or null when it does (today: only an empty Activity, owner Q3). */
+function dimmedBecause(id: HubEntryId, ctx: HubContext): string | null {
+  return id === "activity" && ctx.activityEmpty ? NOTHING_RUNNING : null;
 }
 
 export function hubActions(ctx: HubContext, entries: HubEntries): HubActions {
   const pair = TURN_PAIR.filter((id) => present(id, ctx, entries)).map((id) => item(id, null));
   const canonical = CANONICAL.filter((id) => present(id, ctx, entries)).map((id) =>
-    item(id, badgeOf(id, ctx)),
+    item(id, badgeOf(id, ctx), dimmedBecause(id, ctx) !== null),
   );
   // Badge promotion: a badged item moves up to the first unbadged canonical
   // slot (a stable partition), so new things are reachable — after the pair.
@@ -205,7 +220,16 @@ export function resolveCommit(
   entries: HubEntries,
   open: HubOpen,
 ): HubCommit {
-  if (id === "more" || (present(id, ctx, entries) && sameTurn(id, ctx, open))) {
+  if (id === "more") {
+    return { kind: "run", id };
+  }
+  const live = present(id, ctx, entries) && sameTurn(id, ctx, open);
+  // A dimmed entry has nothing to show: its notice replaces the modal (Design 2).
+  const dimmed = live ? dimmedBecause(id, ctx) : null;
+  if (dimmed !== null) {
+    return { kind: "noop", notice: dimmed };
+  }
+  if (live) {
     return { kind: "run", id };
   }
   if (id === "stop" || id === "steer") {

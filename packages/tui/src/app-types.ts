@@ -25,7 +25,7 @@ import type { McpServerView } from "./mcp-panel.ts";
 import type { ArtifactOpener } from "./os-open.ts";
 import type { DocumentMode } from "./pdf-attach.ts";
 import type { AutoAcceptFeed, AutoAcceptSharedFeed } from "./permission-ui.ts";
-import type { DaemonQueue, QueuedMessage, ReturnedCause } from "./queued.ts";
+import type { DaemonQueue, QueuedMessage, ReturnedCause, UnqueueAnswer } from "./queued.ts";
 import type { ScheduleDockRow } from "./schedule-view.ts";
 import type { SessionsView } from "./sessions-panel.ts";
 import type { SessionSkillsView } from "./skills-sync.ts";
@@ -157,6 +157,11 @@ export interface SessionController {
    * Promise. `id`: the TUI's key for the text, which a `sendNow` cites.
    */
   enqueue?(text: string, id?: string): void | Promise<void>;
+  /**
+   * Take queued rows back before the model reads them (docs/feat/queue-unqueue.md);
+   * optional (absent → ↑ never pulls a row back). `"unsupported"`: an older daemon.
+   */
+  unqueue?(ids: readonly string[]): Promise<UnqueueAnswer>;
   /**
    * Send the queued messages now (`Ctrl+X Ctrl+S`, docs/feat/send-now-c.md):
    * cancel the running turn and start one whose prompt is `messages`, in one

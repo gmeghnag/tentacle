@@ -1269,7 +1269,8 @@ export const FLOWS: readonly string[] = [
   // (series chip, table, close) — on a session of its own.
   "32-chart-interact",
   // docs/feat/mobile-hub.md H3: the floating button as the hub (sticky fan,
-  // Attach, Stop on a HOLD turn, tap = Activity) — on a session of its own.
+  // Attach, Stop on a HOLD turn, a tapped empty Activity saying "Nothing
+  // running") — on a session of its own.
   "33-hub",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`

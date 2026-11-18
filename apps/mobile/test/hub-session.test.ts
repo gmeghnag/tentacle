@@ -45,6 +45,7 @@ describe("hubContextOf", () => {
       schedules: 0,
       nextWakeInMs: null,
       unseenArtifacts: 0,
+      activityEmpty: false,
     });
   });
 
@@ -174,10 +175,12 @@ describe("hubContextOf — the session's artifacts, as the hub reads them (H4b)"
 
 describe("solveHub — the fan solved at the open", () => {
   const items = hubActions(idle, ENTRIES).fan;
+  const ids = (list: readonly { id: string }[]) => list.map((i) => i.id);
 
   test("anchored on the button's centre, in band coordinates, one id per item in fan order", () => {
     const menu = solveHub({ bounds: BAND, position: undefined, items });
     expect(menu.ids).toEqual(["attach", "activity", "sessions", "info"]);
+    expect(menu.dimmed).toEqual([]);
     expect(menu.layout.kind).toBe("fan");
     const at = place(undefined, BAND);
     if (menu.layout.kind !== "fan" || at === null) {
@@ -210,6 +213,18 @@ describe("solveHub — the fan solved at the open", () => {
     expect(
       solveHub({ bounds: { width: 390, height: 80 }, position: undefined, items }).layout.kind,
     ).toBe("menu");
+  });
+
+  test("the dimmed snapshot is carried: the open decides the cue, the release the action", () => {
+    const dimmed = hubActions({ ...idle, activityEmpty: true }, ENTRIES).fan;
+    // The fan layout carries it, and the item keeps its slot (same ids, same order).
+    const menu = solveHub({ bounds: BAND, position: undefined, items: dimmed });
+    expect(menu.ids).toEqual(ids(hubActions(idle, ENTRIES).fan));
+    expect(menu.dimmed).toEqual(["activity"]);
+    // No band: the menu layout carries it too (a dimmed commit plays `light` there).
+    expect(solveHub({ bounds: null, position: undefined, items: dimmed }).dimmed).toEqual([
+      "activity",
+    ]);
   });
 });
 
@@ -303,11 +318,14 @@ describe("hub accessibility actions (Design 7) — never the fan under VoiceOver
     ]);
     expect(actions.at(-1)?.label).toBe("Show all actions");
   });
-  test("activate = tap (Activity); long-press and Show all = the menu; an item = its commit", () => {
-    expect(hubA11yRoute("activate")).toEqual({ kind: "tap" });
+  test("activate and long-press both open the actions menu; an item = its commit (Q2 = B)", () => {
+    // A sighted tap opens the hub; under VoiceOver that is the plain menu (the
+    // fan never opens there). The rotor still reaches Activity directly.
+    expect(hubA11yRoute("activate")).toEqual({ kind: "menu" });
     expect(hubA11yRoute("longpress")).toEqual({ kind: "menu" });
     expect(hubA11yRoute("show-all")).toEqual({ kind: "menu" });
     expect(hubA11yRoute("hub-attach")).toEqual({ kind: "commit", id: "attach" });
+    expect(hubA11yRoute("hub-activity")).toEqual({ kind: "commit", id: "activity" });
     expect(hubA11yRoute("hub-bogus")).toEqual({ kind: "none" });
     expect(hubA11yRoute("magicTap")).toEqual({ kind: "none" });
   });
@@ -380,12 +398,16 @@ describe("createHubDriver — the 400 ms timer and the machine, wired (M12, M13,
     expect(isFanOpen(r.driver.state())).toBe(true);
   });
 
-  test("a release before 400 ms clears the timer: a tap, never a late open (M13)", () => {
+  test("a release before 400 ms clears the timer and opens the fan sticky, never a late re-open (M13)", () => {
     const r = rig();
     r.driver.down(p, 0);
     r.driver.up(p, 120);
     expect(r.timers.size).toBe(0);
-    expect(r.effects).toEqual(["tap"]);
+    expect(r.effects).toEqual(["haptic", "open"]);
+    expect(r.driver.state().kind).toBe("fanSticky");
+    // And the timer that never fired cannot open a second fan later.
+    const before = r.driver.state();
+    expect(before.kind).toBe("fanSticky");
   });
 
   test("a drag clears the timer (M4)", () => {

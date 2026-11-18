@@ -249,6 +249,11 @@ const FIXTURES: Record<string, Json[]> = {
   ],
   "methods/session~1reclaim/params": [{ sessionId: "s", ids: ["a", "b"] }],
   "methods/session~1reclaim/result": [{}],
+  "methods/session~1unqueue/params": [{ sessionId: "s", ids: ["a"] }],
+  "methods/session~1unqueue/result": [
+    { removed: ["a"], delivered: [] },
+    { removed: [], delivered: ["b", "c"] },
+  ],
   "methods/session~1rename/params": [{ sessionId: "s", title: " Fix\tlogin " }],
   "methods/session~1rename/result": [{ title: { text: "Fix login", source: "user" } }],
   "methods/session~1pin/params": [

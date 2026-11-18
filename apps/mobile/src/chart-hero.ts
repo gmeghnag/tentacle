@@ -128,6 +128,67 @@ function heroNumber(spec: ChartSpec, value: number, locale: string): Omit<Hero, 
 
 const EMPTY: Hero = { num: "—", unit: "", unitBefore: false, context: "" };
 
+/**
+ * The index at which a point-form series has the same x as series 0's point
+ * `at`, or `-1` when it has none there. A scrub index is an index into series
+ * 0's points (`chart-layout.ts` `pos0`), so reading series k at that raw index
+ * would show the value of a different x (review round 1, finding 1).
+ */
+function pointIndexAt(spec: ChartSpec, series: number, at: number): number {
+  const xOf = (k: number, i: number): string | null => {
+    const p = spec.datasets[k]?.data[i];
+    return typeof p === "object" && p !== null ? String(p.x) : null;
+  };
+  const x = xOf(0, at);
+  if (x === null) return -1;
+  const data = spec.datasets[series]?.data ?? [];
+  for (let i = 0; i < data.length; i++) {
+    if (xOf(series, i) === x) return i;
+  }
+  return -1;
+}
+
+/**
+ * One series' hero: its value at `at` (or at its last defined point) against its
+ * own previous DEFINED point — the mockup's "a series vs itself" rule, used for
+ * a highlighted series in A and for a 3+-series line/area
+ * (docs/feat/mobile-chart-labels.md D6). A gap is skipped, never bridged.
+ */
+function ownSeriesHero(
+  spec: ChartSpec,
+  series: number,
+  at: number | undefined,
+  locale: string,
+  xs: readonly (readonly string[])[],
+): Hero {
+  const values = datasetValues(spec, series);
+  // A point-form series is indexed by x, not by series 0's index: it may have
+  // more, fewer or differently spaced points.
+  const at0 = at !== undefined && at >= 0 && usesPoints(spec) ? pointIndexAt(spec, series, at) : at;
+  if (at0 !== undefined && at0 < 0) return EMPTY;
+  const i = at0 !== undefined && at0 < values.length ? at0 : lastIndex(values);
+  const cur = values[i];
+  if (i < 0 || typeof cur !== "number") return EMPTY;
+  let p = -1;
+  for (let j = i - 1; j >= 0; j--) {
+    if (typeof values[j] === "number") {
+      p = j;
+      break;
+    }
+  }
+  const prev = p >= 0 ? (values[p] as number) : null;
+  const delta = heroDelta(cur, prev, locale);
+  const label = xs[series]?.[i] ?? xs[0]?.[i] ?? "";
+  const name = spec.datasets[series]?.label ?? "";
+  const head = name === "" ? label : `${label} ${name}`;
+  const context = prev === null ? head : `${head} · vs ${xs[series]?.[p] ?? ""}`;
+  return {
+    ...heroNumber(spec, cur, locale),
+    ...(delta ? { delta } : {}),
+    context,
+  };
+}
+
 /** Whether this chart stacks its series (bars and areas only). */
 export function isStacked(spec: ChartSpec): boolean {
   return (
@@ -161,7 +222,12 @@ export function stackTotals(spec: ChartSpec): (number | null)[] {
  * for lines/areas/stacks, the max for bars, the total for donuts, the trend for
  * scatters.
  */
-export function heroOf(spec: ChartSpec, at: number | undefined, locale: string): Hero {
+export function heroOf(
+  spec: ChartSpec,
+  at: number | undefined,
+  locale: string,
+  series?: number,
+): Hero {
   const words = chartWords(locale);
   const xs = xTexts(spec, locale);
   if (spec.type === "pie" || spec.type === "doughnut") {
@@ -207,11 +273,14 @@ export function heroOf(spec: ChartSpec, at: number | undefined, locale: string):
     };
   }
   // line / area
+  // A highlighted series (A, docs/feat/mobile-chart-labels.md D6): itself vs its
+  // own previous DEFINED point — never against a different series.
+  if (series !== undefined) return ownSeriesHero(spec, series, at, locale, xs);
   const i = at ?? lastIndex(v0);
   const cur = v0[i];
   if (typeof cur !== "number") return EMPTY;
   const label = xs[0]?.[i] ?? "";
-  const second = spec.datasets[1];
+  const second = spec.datasets.length === 2 ? spec.datasets[1] : undefined;
   if (second) {
     const j = usesPoints(spec) ? (xs[1] ?? []).indexOf(label) : i;
     const ref = j >= 0 ? (datasetValues(spec, 1)[j] ?? null) : null;
@@ -225,6 +294,10 @@ export function heroOf(spec: ChartSpec, at: number | undefined, locale: string):
       };
     }
   }
+  // 3+ series is not a comparison of one against another (the mockup's complaint:
+  // "Nov 16 storage · vs Nov 16 auth" compares unrelated scales), so series 0
+  // refers to itself. A single series keeps its "since the first point" read.
+  if (spec.datasets.length >= 3) return ownSeriesHero(spec, 0, at, locale, xs);
   const f = firstIndex(v0);
   const delta = f === i ? undefined : heroDelta(cur, v0[f] ?? null, locale);
   return {

@@ -9,7 +9,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatMessage } from "@tentacle/core";
 import {
-  FOREIGN_COMPACTED_NOTICE,
   type State,
   TURN_INTERRUPTED_NOTICE,
   TURN_LOST_NOTICE,
@@ -297,7 +296,8 @@ describe("history events", () => {
     ]);
     const after = apply(before, { type: "history", messages: [], reason: "compact" });
     expect(after.rows).toHaveLength(2);
-    expect(after.rows[1]?.kind === "notice" && after.rows[1].text).toBe(FOREIGN_COMPACTED_NOTICE);
+    // One wording whatever device compacted (harness-notices Q6): the separator.
+    expect(after.rows[1]).toMatchObject({ kind: "notice", text: "compacted", separator: true });
   });
 
   test("this client's OWN compaction says nothing (the screen already showed it)", () => {

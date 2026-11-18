@@ -10,9 +10,10 @@
  */
 import type { JSX } from "react";
 import { StyleSheet, View } from "react-native";
-import Svg, { Circle, G, Line, Path } from "react-native-svg";
+import Svg, { G, Line, Path } from "react-native-svg";
 import type { LayoutDot, LayoutPath } from "../../chart-layout.ts";
 import { type ChartRowView, paintColor } from "../../chart-row.ts";
+import { SeriesGlyph } from "./SeriesGlyph.tsx";
 
 export interface ChartThumbnailProps {
   readonly view: ChartRowView;
@@ -66,15 +67,17 @@ export function ChartThumbnail({ view, testID }: ChartThumbnailProps): JSX.Eleme
             ),
           )}
           {layout.dots.map((d) => (
-            <Circle
-              key={`dot${d.series}:${d.x}:${d.y}`}
-              cx={d.x}
-              cy={d.y}
-              r={d.r}
-              fill={d.hollow === true ? "none" : color(d)}
-              stroke={d.hollow === true ? color(d) : undefined}
-              opacity={d.opacity}
-            />
+            <G key={`dot${d.series}:${d.x}:${d.y}`}>
+              <SeriesGlyph
+                shape={d.shape ?? "circle"}
+                x={d.x}
+                y={d.y}
+                r={d.r}
+                fill={d.hollow === true ? "none" : color(d)}
+                {...(d.hollow === true ? { outline: color(d) } : {})}
+                opacity={d.opacity}
+              />
+            </G>
           ))}
         </G>
       </Svg>

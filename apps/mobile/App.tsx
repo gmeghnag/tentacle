@@ -69,6 +69,8 @@ import { exportFileName, exportText } from "./src/app-log.ts";
 import { ARTIFACT_CACHE, shareCachedCopy } from "./src/artifact-cache-expo.ts";
 import { ARTIFACT_FEEDS } from "./src/artifact-feed.ts";
 import { sessionKey } from "./src/artifact-seen-store.ts";
+import { CHART_SETTINGS } from "./src/chart-settings-expo.ts";
+import type { ChartSettings } from "./src/chart-settings-store.ts";
 import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
 import { composeHandleOf, foldingOutboxSession } from "./src/compose-handle.ts";
 import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
@@ -86,6 +88,8 @@ import {
 } from "./src/computers.ts";
 import { type ComputerLink, openComputer } from "./src/connection.ts";
 import { pairingTextFromUrl } from "./src/deep-link.ts";
+import { DIAGRAM_SETTINGS } from "./src/diagram-settings-expo.ts";
+import type { DiagramSettings, DiagramStyle } from "./src/diagram-settings-store.ts";
 import { createDraftScheduler } from "./src/drafts.ts";
 import {
   type DrawerRow,
@@ -142,6 +146,7 @@ import { readAsked, readPermission, readPushFacts, requestPermission } from "./s
 import { createPushManager } from "./src/push-manager.ts";
 import type { PushPermission } from "./src/push-registration.ts";
 import { createPushToggleStore } from "./src/push-toggle-store.ts";
+import { queueTrace } from "./src/queue-trace.ts";
 import {
   type ArtifactGalleryRoute,
   type RootStackParams,
@@ -1418,6 +1423,11 @@ function SessionRoute({
         // the device it is shown on (docs/feat/session-auto-accept.md D7): the
         // name this phone paired under. Absent on a record an older build wrote.
         phoneName: () => RECORDS.get(computerId)?.thisDeviceName,
+        // The queue-diagnosis trace (docs/fix/mobile-queued-stuck.md): every
+        // `queued` report, turn bracket, attach and compose act this session sees,
+        // into the ONE exported log (`Settings → Export logs`, `grep qtrace`).
+        // Diagnostic only: nothing here changes a behaviour.
+        trace: queueTrace(sessionId, APP_LOG),
         controller: RUNTIMES.controller(link.client),
         broker: link.permissions,
         now: () => Date.now(),
@@ -1636,6 +1646,43 @@ function AppShell(): JSX.Element {
     setActivityError(undefined);
     ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), opacity }).catch(() =>
       setActivityError("That Activity button setting didn't save"),
+    );
+  }, []);
+
+  // Diagrams (docs/fix/mobile-qa-1117.md, bug 3): outline | filled, loaded once;
+  // the transcript reads the holder itself (`useDiagramStyle`), Settings shows it.
+  const [diagramSettings, setDiagramSettings] = useState<DiagramSettings>(() =>
+    DIAGRAM_SETTINGS.current(),
+  );
+  const [diagramWritable, setDiagramWritable] = useState(true);
+  const [diagramError, setDiagramError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = DIAGRAM_SETTINGS.subscribe(setDiagramSettings);
+    void DIAGRAM_SETTINGS.load().then(() => setDiagramWritable(DIAGRAM_SETTINGS.writable()));
+    return unsubscribe;
+  }, []);
+  const selectDiagramStyle = useCallback((style: DiagramStyle) => {
+    setDiagramError(undefined);
+    DIAGRAM_SETTINGS.set({ style }).catch(() =>
+      setDiagramError("That diagram setting didn't save"),
+    );
+  }, []);
+
+  // The Charts setting (docs/feat/mobile-chart-labels.md D7): loaded once, next
+  // to the Activity button's; a failed write keeps the pick for this run and
+  // says so, and a newer build's record is never written over.
+  const [chartSettings, setChartSettings] = useState<ChartSettings>(() => CHART_SETTINGS.current());
+  const [chartWritable, setChartWritable] = useState(true);
+  const [chartError, setChartError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = CHART_SETTINGS.subscribe(setChartSettings);
+    void CHART_SETTINGS.load().then(() => setChartWritable(CHART_SETTINGS.writable()));
+    return unsubscribe;
+  }, []);
+  const selectChartLabels = useCallback((labels: ChartSettings["labels"]) => {
+    setChartError(undefined);
+    CHART_SETTINGS.set({ ...CHART_SETTINGS.current(), labels }).catch(() =>
+      setChartError("That Charts setting didn't save"),
     );
   }, []);
 
@@ -2158,6 +2205,14 @@ function AppShell(): JSX.Element {
                   ? {}
                   : { activityOpacity: activitySettings.opacity })}
                 onActivityOpacity={selectActivityOpacity}
+                chartLabels={chartSettings.labels}
+                chartWritable={chartWritable}
+                {...(chartError === undefined ? {} : { chartError })}
+                onChartLabels={selectChartLabels}
+                diagramStyle={diagramSettings.style}
+                diagramWritable={diagramWritable}
+                {...(diagramError === undefined ? {} : { diagramError })}
+                onDiagramStyle={selectDiagramStyle}
                 // Item 5's switch (fix/mobile-media-live): the downscale is the
                 // default, and a newer build's record is never written over.
                 photoSettings={photoSettings}

@@ -13,7 +13,7 @@ import { type DiagramUiWords, diagramCaption, diagramShare } from "../../diagram
 import type { DiagramRowView } from "../../diagram-row.ts";
 import { MONO, type Palette, typography } from "../../theme.ts";
 import { CodeBlock } from "../CodeBlock.tsx";
-import { FULL_SCREEN_ORIENTATIONS } from "../chart/ChartFullScreen.tsx";
+import { FULL_SCREEN_ORIENTATIONS, FULL_SCREEN_PRESENTATION } from "../chart/ChartFullScreen.tsx";
 import { DiagramView } from "./DiagramView.tsx";
 
 export interface DiagramFullScreenProps {
@@ -59,7 +59,7 @@ export function DiagramFullScreen(p: DiagramFullScreenProps): JSX.Element {
       visible
       testID={testID}
       animationType={p.reduceMotion ? "none" : "fade"}
-      presentationStyle="fullScreen"
+      presentationStyle={FULL_SCREEN_PRESENTATION}
       supportedOrientations={[...FULL_SCREEN_ORIENTATIONS]}
       onRequestClose={p.onClose}
     >

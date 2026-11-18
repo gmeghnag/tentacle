@@ -15,7 +15,7 @@ import type { EndReason, SessionEvent } from "@tentacle/client";
 import type { AttachmentRef, ChatMessage, ToolDiffDetail } from "@tentacle/core";
 import { describeEmptyTurn, describeRepairs, describeTruncation, toolLabel } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
-import { historyRows, restartPromptOf } from "./transcript-history.ts";
+import { compactionSeparatorRow, historyRows, restartPromptOf } from "./transcript-history.ts";
 import {
   type ImageRef,
   type LocalPhoto,
@@ -166,23 +166,20 @@ export function unsupportedNotice(kind: string): string {
   return `the daemon uses features newer than this client (\`${kind}\`): update tentacle`;
 }
 
-/** Another device compacted the conversation: said once, the transcript kept. */
-export const FOREIGN_COMPACTED_NOTICE = "_the conversation was compacted on another device_";
-
 /** A turn whose stream ended with no outcome: unknown here, never guessed. */
-export const TURN_INTERRUPTED_NOTICE = "_that turn was interrupted before it finished_";
+export const TURN_INTERRUPTED_NOTICE = "that turn was interrupted before it finished";
 
 /** A turn whose stream vanished (a cut link): what arrived is what is shown. */
-export const TURN_LOST_NOTICE = "_that turn's stream was lost — what reached the phone is shown_";
+export const TURN_LOST_NOTICE = "that turn's stream was lost — what reached the phone is shown";
 
 /** How a session that ended elsewhere reads (the screen's banner carries the state). */
 export function closedNotice(reason: EndReason): string {
   if (reason === "gone") {
-    return "_this session ended on the daemon while the link was down_";
+    return "this session ended on the daemon while the link was down";
   }
   return reason === "deleted"
-    ? "_this session was deleted on another device_"
-    : "_this session was closed on another device_";
+    ? "this session was deleted on another device"
+    : "this session was closed on another device";
 }
 
 /** A tool row's status after a phase signal: a settled row never moves (the TUI's rule). */
@@ -366,10 +363,12 @@ function applyHistory(state: State, input: Extract<TranscriptInput, { type: "his
     return appendHistory(state, input.messages, input.times);
   }
   if (input.reason === "compact") {
-    // The transcript stays; another device's compaction says so once.
+    // The transcript stays; another device's compaction says so once — as the
+    // SAME separator a reopen draws from its summary (docs/fix/mobile-qa-1117.md,
+    // bug 4), so live and reload agree.
     return input.own === true
       ? state
-      : push(state, (key) => ({ kind: "notice", key, text: FOREIGN_COMPACTED_NOTICE }));
+      : push(state, (key) => compactionSeparatorRow(key, input.messages));
   }
   return withHistory(state, input.messages, input.times);
 }

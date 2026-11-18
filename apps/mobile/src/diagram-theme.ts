@@ -13,6 +13,7 @@
  */
 import { seriesColor } from "@tentacle/core";
 import { type ChartScheme, chartScheme } from "./chart-row.ts";
+import type { DiagramStyle } from "./diagram-settings-store.ts";
 import { type ChartTokens, MONO, type Palette, chartTokensFor } from "./theme.ts";
 
 /** Mermaid's `themeVariables` as the driver receives them: a flat string map. */
@@ -36,7 +37,43 @@ const FONT_SIZE = "13px";
  * chart's guide/label roles, and its accents are chart palette slots 1 and 2 —
  * never a new colour, and never a pure black in the dark scheme.
  */
-export function diagramThemeVariables(palette: Palette): DiagramThemeVariables {
+export function diagramThemeVariables(
+  palette: Palette,
+  style: DiagramStyle = "outline",
+): DiagramThemeVariables {
+  const outline = outlineVariables(palette);
+  return style === "filled" ? { ...outline, ...filledVariables(palette) } : outline;
+}
+
+/**
+ * The B look (mockups 1B/2B, the owner's setting, docs/fix/mobile-qa-1117.md
+ * bug 3): nodes and participants soft-filled with chart slot 1's tint, their
+ * borders, the edges and the messages in slot 1 itself. Only what differs from
+ * the outline look; still no colour that is not a chart token or a slot.
+ */
+function filledVariables(palette: Palette): DiagramThemeVariables {
+  const scheme: ChartScheme = chartScheme(palette);
+  const t: ChartTokens = chartTokensFor(palette);
+  const accent = seriesColor(0, scheme);
+  return {
+    primaryColor: t.seriesSoft,
+    mainBkg: t.seriesSoft,
+    secondaryColor: t.seriesSoft,
+    tertiaryColor: t.seriesSoft,
+    primaryBorderColor: accent,
+    nodeBorder: accent,
+    lineColor: accent,
+    actorBkg: t.seriesSoft,
+    actorLineColor: accent,
+    signalColor: accent,
+    labelBoxBkgColor: t.seriesSoft,
+    // Left to mermaid, an edge label's box is derived from the translucent fill
+    // and drawn as a darker teal patch: the label sits on the page instead.
+    edgeLabelBackground: palette.page,
+  };
+}
+
+function outlineVariables(palette: Palette): DiagramThemeVariables {
   const scheme: ChartScheme = chartScheme(palette);
   const t: ChartTokens = chartTokensFor(palette);
   const accent = seriesColor(0, scheme);
@@ -91,15 +128,15 @@ export function diagramThemeVariables(palette: Palette): DiagramThemeVariables {
 }
 
 /** Everything the renderer needs to draw in this mode (`base` + its variables). */
-export function diagramTheme(palette: Palette): DiagramTheme {
+export function diagramTheme(palette: Palette, style: DiagramStyle = "outline"): DiagramTheme {
   return {
     theme: "base",
-    variables: diagramThemeVariables(palette),
-    key: diagramThemeKey(palette),
+    variables: diagramThemeVariables(palette, style),
+    key: diagramThemeKey(palette, style),
   };
 }
 
-/** The scheme half of a render's cache key (D5's `diagramCacheKey` adds hash + scale). */
-export function diagramThemeKey(palette: Palette): string {
-  return `base|${chartScheme(palette)}`;
+/** The scheme (and look) half of a render's cache key (`diagramCacheKey` adds hash + scale). */
+export function diagramThemeKey(palette: Palette, style: DiagramStyle = "outline"): string {
+  return `${style === "filled" ? "base+filled" : "base"}|${chartScheme(palette)}`;
 }

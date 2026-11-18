@@ -40,7 +40,13 @@ import {
   withList,
   withPhase,
 } from "./artifact-join.ts";
-import type { Compose, ComposeHandle, DocumentPort, PhotoPort } from "./compose-controller.ts";
+import type {
+  Compose,
+  ComposeHandle,
+  DocumentPort,
+  PhotoPort,
+  SendNowStart,
+} from "./compose-controller.ts";
 import { createCompose } from "./compose-controller.ts";
 import {
   type ComposerAction,
@@ -60,6 +66,7 @@ import {
   type SheetState,
   createPermissionSheet,
 } from "./permission-sheet.ts";
+import type { QueueTrace } from "./queue-trace.ts";
 import type { SessionController, SessionHandle, SessionOpenFailure } from "./session-controller.ts";
 import { type ForeignTurn, createSessionFeed } from "./session-feed.ts";
 import {
@@ -352,6 +359,12 @@ export interface SessionScreenDeps {
    */
   readonly broker: Pick<PermissionBroker, "setRequester" | "reset">;
   readonly now: () => number;
+  /**
+   * The queue-diagnosis trace (docs/fix/mobile-queued-stuck.md): the app's ONE
+   * app-log sink, already bound to this session's id. Absent: nothing is traced
+   * and no behaviour changes (every test that predates it passes it not at all).
+   */
+  readonly trace?: QueueTrace;
   /** Injectable for tests: the sheet's clock/arm window and the thumbnail port. */
   readonly sheet?: (deps: { readonly now: () => number }) => PermissionSheet;
   readonly thumbnails?: ThumbnailSource;
@@ -684,6 +697,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     // A live row's arrival time (docs/fix/mobile-open-at-end.md, slice B): the
     // stamp a swipe shows. Taken when the fold CREATES the row, never on upsert.
     now: () => deps.now(),
+    ...(deps.trace === undefined ? {} : { trace: deps.trace }),
+    // The turn is over: the DIAGNOSTIC asks the composer what it still shows.
+    // Nothing is cleared here — mobile has no turn-end reconciliation yet, and
+    // inventing one before the capture would hide the very frame it hunts
+    // (docs/fix/mobile-queued-stuck.md).
+    onTurnClosed: () => compose?.turnClosed(),
   });
 
   /**
@@ -745,6 +764,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           },
           mint: deps.compose.mint,
           prompt: promptWithRefs,
+          followSendNow,
           draft: () => draft,
           setDraft: (text) => {
             draft = text;
@@ -758,6 +778,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
             notice = text;
             emit();
           },
+          ...(deps.trace === undefined ? {} : { trace: deps.trace }),
         });
 
   /**
@@ -914,6 +935,14 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    * on a single return with the app lock on (Review round 5, MEDIUM 1).
    */
   let appWasAway = false;
+  /**
+   * A return came while the link was DOWN: the resync it owed runs at the next
+   * `up`. The redial alone re-reads nothing on this screen — the device capture
+   * (docs/fix/mobile-queued-stuck.md (c)) shows two link-ups after a return with
+   * no attach, no history, a stale queue row and a missing answer for 26 s, until
+   * the person left and re-entered the session.
+   */
+  let resyncOnUp = false;
 
   function state(): SessionScreenState {
     return {
@@ -1163,6 +1192,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     }
     attaching = true;
     status = { phase: "opening", ...(reopen ? { reopenRequested: true as const } : {}) };
+    deps.trace?.({ kind: "attach", state: "start", reopen });
     emit();
     const result = await deps.controller.open(deps.sessionId, {
       ...(reopen ? { reopen: true } : {}),
@@ -1173,6 +1203,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       return;
     }
     if (!result.ok) {
+      deps.trace?.({ kind: "attach", state: "fail", reopen, reason: result.reason });
       status = {
         phase: "failed",
         failure: result.reason,
@@ -1189,6 +1220,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     }
     queuedReopen = false;
     handle = result.session;
+    deps.trace?.({ kind: "attach", state: "ok", reopen });
     status = { phase: "open" };
     // The daemon's title can move while this screen is open (another device's
     // rename, or this one's): the header follows it, never the route's copy.
@@ -1276,6 +1308,40 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       notice = FAILED_NOTICE;
       emit();
     }
+  }
+
+  /**
+   * A send-now's successor turn, folded here as the phone's OWN (the composer's
+   * Stop aborts it: `ownControl`). Resolves at the daemon's ack; a refusal
+   * rejects and leaves nothing behind. Before docs/fix/mobile-queued-stuck.md
+   * (b) the handle drained it: the turn ran on the daemon and the phone saw no
+   * `turn-start`, no answer, until a re-entry read the history.
+   */
+  async function followSendNow(start: SendNowStart): Promise<void> {
+    const turnId = crypto.randomUUID();
+    const control = new AbortController();
+    const before = ownControl;
+    ownControl = control;
+    let events: AsyncIterable<SessionEvent>;
+    try {
+      events = await start({ turnId, signal: control.signal });
+    } catch (error) {
+      if (ownControl === control) {
+        ownControl = before;
+      }
+      throw error;
+    }
+    void feed
+      .successorTurn(turnId, events)
+      .catch(() => {
+        // Folded as LOST by the feed; nothing of the field's comes back after an ack.
+      })
+      .then(() => {
+        if (ownControl === control) {
+          ownControl = null;
+        }
+        emit();
+      });
   }
 
   /**
@@ -1444,6 +1510,13 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     link(up) {
       feed.link(up);
+      if (!up || !resyncOnUp) {
+        return;
+      }
+      resyncOnUp = false;
+      if (!disposed && !refreshing && !attaching && status.phase === "open") {
+        void holder.current?.resync(true);
+      }
     },
     appState(name) {
       // The app's foreground gate (item 2). The FIRST `active` is the mount, not
@@ -1469,6 +1542,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         return false; // a pull is already re-reading, or there is no live attach
       }
       if (transcript.link === "down") {
+        // Owed, not dropped: it runs at the next `up` (see `resyncOnUp`).
+        resyncOnUp = true;
         return false;
       }
       void holder.current?.resync(true);
@@ -1726,6 +1801,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       if (refreshing || disposed) {
         return;
       }
+      deps.trace?.({ kind: "resync", state: "start" });
       refreshing = true;
       // A FOREGROUND resync (item 2) is silent: no pull spinner, because the
       // person made no gesture and nothing is left to look ignored.
@@ -1748,10 +1824,14 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           // KEPT (never an empty transcript) and the failure is honest — the
           // banner already shows its reason, so this only says why nothing moved.
           notice = RESYNC_FAILED_NOTICE;
+          deps.trace?.({ kind: "resync", state: "failed" });
         } else if (transcript.rows.length === before && before > 0) {
           // The daemon answered with exactly what is shown: worth saying only
           // when there was something to compare, so a fresh empty session is quiet.
           notice = null;
+          deps.trace?.({ kind: "resync", state: "kept" });
+        } else {
+          deps.trace?.({ kind: "resync", state: "done" });
         }
       } finally {
         refreshing = false;

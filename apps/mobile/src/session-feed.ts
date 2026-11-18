@@ -24,6 +24,7 @@
  */
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import type { AttachmentRef } from "@tentacle/protocol";
+import type { QueueTrace } from "./queue-trace.ts";
 import {
   type LocalPhoto,
   type State,
@@ -84,6 +85,22 @@ export interface SessionFeedDeps {
    */
   readonly onHistoryReplaced?: () => void;
   /**
+   * The turn bracket CLOSED (any outcome). The TUI clears its rows there
+   * (`packages/tui/src/queued.ts` `onTurnEnd`) because it has no daemon list;
+   * this frontend's rows ARE the daemon's full `queued` report, which the turn's
+   * end already re-sends, so nothing is cleared here
+   * (docs/fix/mobile-queued-stuck.md) — only the DIAGNOSTIC reads it: the rows
+   * the composer still shows the moment the turn is over.
+   */
+  readonly onTurnClosed?: () => void;
+  /**
+   * The queue-diagnosis trace (docs/fix/mobile-queued-stuck.md). This module is
+   * the one place a TURN BRACKET opens and closes, so the turn's own lines are
+   * emitted here — a screen-side diff of the folded state would have to guess
+   * the outcome the bracket already decided.
+   */
+  readonly trace?: QueueTrace;
+  /**
    * The RECEIPT clock of a live row (epoch ms; docs/fix/mobile-open-at-end.md,
    * slice B). Called when the fold CREATES a row — a prompt, the first delta of
    * a message, a tool call — and never on an upsert, so a streaming message's
@@ -134,6 +151,16 @@ export interface SessionFeed {
     prompt?: OwnPrompt,
     accepted?: Promise<void>,
   ): Promise<void>;
+  /**
+   * A send-now's SUCCESSOR turn (own; its prompt is the daemon's `user_message`,
+   * never drawn here). Its bracket opens only once every stream this feed is
+   * folding has closed: the request is acked while the cancelled turn still
+   * streams its end, and one transcript holds ONE turn bracket at a time — the
+   * old turn's `turn_ended` must never close the new one
+   * (docs/fix/mobile-queued-stuck.md (b)). The events wait, buffered, in the
+   * client meanwhile.
+   */
+  successorTurn(turnId: string, events: AsyncIterable<SessionEvent>): Promise<void>;
   /** A stream this feed already folded ended (`link` drops flush nothing: events are immediate). */
   link(up: boolean): void;
 }
@@ -155,6 +182,7 @@ function foldStream(
   accepted?: Promise<void>,
 ): Promise<void> {
   deps.put(apply(deps.state(), { type: "turn_started", turnId, own }));
+  deps.trace?.({ kind: "turn-start", turnId, own });
   /**
    * The receipt time of a row this fold CREATES (slice B). `apply` only stamps a
    * row it creates, so an upsert (a later delta of the same message) keeps the
@@ -207,7 +235,10 @@ function foldStream(
   });
   const finish = (facts: TurnEndFacts): void => {
     closed = true;
-    deps.put(apply(deps.state(), { type: "turn_ended", outcome: turnOutcome(facts) }));
+    const outcome = turnOutcome(facts);
+    deps.put(apply(deps.state(), { type: "turn_ended", outcome }));
+    deps.trace?.({ kind: "turn-end", turnId, outcome });
+    deps.onTurnClosed?.();
     if (!own) {
       deps.setForeign(null);
     }
@@ -244,10 +275,26 @@ function foldStream(
 }
 
 export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
+  /** Every stream being folded now, settled either way (`successorTurn` waits on them). */
+  const folding = new Set<Promise<void>>();
+  const track = (fold: Promise<void>): Promise<void> => {
+    const settled = fold.then(
+      () => {},
+      () => {},
+    );
+    folding.add(settled);
+    void settled.then(() => folding.delete(settled));
+    return fold;
+  };
   return {
     activity(activity) {
       switch (activity.kind) {
         case "history":
+          deps.trace?.({
+            kind: "history",
+            reason: activity.reason,
+            messages: activity.messages.length,
+          });
           deps.put(
             apply(deps.state(), {
               type: "history",
@@ -274,14 +321,17 @@ export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
           deps.setForeign(turn);
           // Its failure is folded as LOST inside `foldStream`; nothing of OURS
           // comes back to the field, so the rejection is not for a caller here.
-          void foldStream(deps, activity.turnId, false, activity.events).catch(() => {});
+          void track(foldStream(deps, activity.turnId, false, activity.events)).catch(() => {});
           return;
         }
       }
     },
     ownTurn: (turnId, events, prompt, accepted) =>
-      foldStream(deps, turnId, true, events, prompt, accepted),
+      track(foldStream(deps, turnId, true, events, prompt, accepted)),
+    successorTurn: (turnId, events) =>
+      track(Promise.all([...folding]).then(() => foldStream(deps, turnId, true, events))),
     link(up) {
+      deps.trace?.({ kind: "link", state: up ? "up" : "down" });
       deps.put(apply(deps.state(), { type: "link", status: up ? "up" : "down" }));
     },
   };

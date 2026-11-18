@@ -55,6 +55,7 @@ import {
   type RemoteClient,
   type SessionStreamListener,
   type SessionTitleNotice,
+  type UnqueueOutcome,
   type UploadOptions,
 } from "./remote-client.ts";
 import { SCHEDULE_UNTRUSTED_DAEMON, firedScheduleRef } from "./schedules.ts";
@@ -1321,6 +1322,24 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * Take queued rows back before the model reads them (docs/feat/queue-unqueue.md).
+   * A removed row of mine is mine no more (the daemon never returns it). With
+   * no daemon session, nothing was queued there to take back: every id
+   * answers `delivered` ("not taken back"), never a fake `removed`.
+   */
+  async unqueue(ids: readonly string[]): Promise<UnqueueOutcome> {
+    const id = this.id ?? (this.opening ? await this.opening : undefined);
+    if (!id) {
+      return { removed: [], delivered: [...ids] };
+    }
+    const outcome = await this.client.unqueue(id, ids);
+    if (outcome !== "unsupported") {
+      for (const key of outcome.removed) this.mine.delete(key);
+    }
+    return outcome;
+  }
+
+  /**
    * `opts.skill`: the user activates that skill (`/name`) with this prompt.
    * `opts.turnId`: the turn's id, minted by the caller (a detached run's relay
    * records it so the TUIs that take the run over own its turn,
@@ -1376,11 +1395,16 @@ export class RemoteSession implements SessionStreamListener {
    * the texts it did not get, a continuation, or `NoTurnRunning`. While the
    * first `send` is still opening the session it waits for the id. Refused
    * locally only when there is no daemon-side session or turn at all.
+   *
+   * `turnId`: the new turn's key, when the caller must name it before the ack
+   * (the phone folds the turn under it — docs/fix/mobile-queued-stuck.md); a
+   * fresh one when omitted.
    */
   async sendNow(
     messages: readonly SendNowMessage[],
     target: "turn" | "compaction",
     signal?: AbortSignal,
+    turnId?: string,
   ): Promise<AsyncIterable<SessionEvent>> {
     if (messages.length === 0) {
       throw new RpcError(JsonRpcErrorCode.InvalidParams, "send-now needs at least one message");
@@ -1414,7 +1438,7 @@ export class RemoteSession implements SessionStreamListener {
         ? { kind: "turn", turnId: bound }
         : { kind: "compaction" };
     const turn: ActiveTurn = {
-      turnId: crypto.randomUUID(),
+      turnId: turnId ?? crypto.randomUUID(),
       prompt: "",
       queue: new AsyncQueue<SessionEvent>(),
       toolNames: new Map(),

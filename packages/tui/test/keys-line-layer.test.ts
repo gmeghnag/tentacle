@@ -43,6 +43,7 @@ function snap(
     dockVisible: false,
     dockFocus: { kind: "input" },
     chipCount: 0,
+    pullBack: null,
     ...rest,
     key: { ...NO_KEY, ...key },
   };
@@ -271,5 +272,27 @@ describe("resolveLineEffects — DOWN's walk into the dock (downEntersList)", ()
         ),
       ),
     ).toEqual(["setHistoryCursor"]);
+  });
+});
+
+describe("↑ pulls the last queued message back (docs/feat/queue-unqueue.md)", () => {
+  const row = { id: "q", text: "Q" };
+
+  test("empty input, draft slot, a row to take: pull it back (no history move)", () => {
+    expect(resolveLineEffects(snap({ key: { upArrow: true }, pullBack: row }))).toEqual([
+      { kind: "pullBackQueued", id: "q", text: "Q" },
+    ]);
+  });
+
+  test("text in the field, a history walk under way, Shift, or nothing to take: ↑ keeps its meaning", () => {
+    const history = { items: ["old"], index: 0, draft: "" };
+    for (const s of [
+      snap({ key: { upArrow: true }, pullBack: row, value: "x", cursor: 1 }),
+      snap({ key: { upArrow: true }, pullBack: row, history }),
+      snap({ key: { upArrow: true, shift: true }, pullBack: row }),
+      snap({ key: { upArrow: true }, history: { items: ["old"], index: 1, draft: "" } }),
+    ]) {
+      expect(kinds(resolveLineEffects(s))).not.toContain("pullBackQueued");
+    }
   });
 });

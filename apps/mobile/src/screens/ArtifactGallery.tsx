@@ -38,6 +38,7 @@ import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../th
 import { Icon } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { ChartThumbnail } from "../ui/chart/ChartThumbnail.tsx";
+import { useChartLabels } from "../ui/chart/useChartLabels.ts";
 import { ArtifactViewerModal, type ReadBytes } from "./artifacts/ArtifactViewerModal.tsx";
 
 /** The tile's own box: a thumbnail's size, never the row's height (the tile is 40×40). */
@@ -88,6 +89,9 @@ function emptyWords(snapshot: ArtifactSnapshot, archived: boolean): string {
 export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.Element {
   const { palette, computerId, sessionId, archived } = props;
   const insets = useSafeAreaInsets();
+  // The Charts setting (docs/feat/mobile-chart-labels.md D7): the viewer's
+  // full-screen chart lays out the way the transcript does. One listener, here.
+  const chartLabels = useChartLabels();
   const feed = useMemo(() => ARTIFACT_FEEDS.feed(computerId, sessionId), [computerId, sessionId]);
   // The bytes come from the OWNER of the handle, published on the same feed (a
   // second `RemoteSession` of one id would steal its stream). Absent (the
@@ -330,6 +334,7 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
           meta={open.meta}
           versions={open.versions}
           readBytes={readBytes}
+          chartLabels={chartLabels}
           onClose={() =>
             viewerCloseTarget({ fromCard: fromCard.current }) === "back"
               ? props.onBack()

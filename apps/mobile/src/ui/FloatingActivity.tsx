@@ -1,8 +1,9 @@
 /**
  * The floating hub button (docs/feat/mobile-chrome.md Design 6, F2 opt-in;
  * docs/feat/mobile-hub.md H3): a 54 pt glass circle on an edge of the band
- * between the header and the composer. Tap = Activity; hold 400 ms = the radial
- * fan; drag = move it. Render + gesture plumbing only: the press machine and its
+ * between the header and the composer. Tap = the hub fan (as does the 400 ms
+ * hold, which adds slide-to-select); drag = move it. Render + gesture plumbing
+ * only: the press machine and its
  * timer are `hub-session.ts`'s `createHubDriver` (over `hub-gesture.reduce`),
  * the fan's geometry `hub-fan.ts`'s, where it rests and when it shows
  * `floating-button.ts`'s. `PanResponder` (core RN, no gesture library) feeds raw
@@ -114,7 +115,6 @@ export interface FloatingActivityProps {
   readonly allItems: readonly HubItem[];
   /** `hub-session.ts` `solveHub` for the current band, spot and items. */
   readonly solve: () => HubMenu;
-  readonly onPress: () => void;
   readonly onDrop: (position: FloatPosition) => void;
   /** The fan opened (true) or closed by any path (false): the screen guards the back-swipe (M2). */
   readonly onFanChange: (open: boolean) => void;
@@ -274,10 +274,6 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
           setFan(null);
           moving.current = false;
           break;
-        case "tap":
-          back();
-          latest.current.onPress();
-          break;
         case "dragTo":
           xy.setValue({
             x: press.current.start.x + effect.delta.x,
@@ -412,9 +408,7 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
   const { arc } = level;
   const onAccessibilityAction = (event: AccessibilityActionEvent) => {
     const route = hubA11yRoute(event.nativeEvent.actionName);
-    if (route.kind === "tap") {
-      props.onPress();
-    } else if (route.kind === "menu") {
+    if (route.kind === "menu") {
       props.onMenu();
     } else if (route.kind === "commit") {
       props.onCommit(route.id);
@@ -442,11 +436,10 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
         accessibilityRole="button"
         accessibilityLabel={props.accessibilityLabel}
         accessibilityHint={
-          voiceOver ? "Double-tap for Activity. Swipe up or down for more actions." : undefined
+          voiceOver ? "Double-tap for actions. Swipe up or down for more actions." : undefined
         }
         accessibilityActions={hubA11yActions(props.allItems).map((action) => ({ ...action }))}
         onAccessibilityAction={onAccessibilityAction}
-        onAccessibilityTap={props.onPress}
         pointerEvents={shown ? "auto" : "none"}
         style={[
           styles.circle,
