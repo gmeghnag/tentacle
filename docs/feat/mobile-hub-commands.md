@@ -484,6 +484,70 @@ The second mutation is the non-vacuity check the fix needs: the new test binds t
 
 `apps/mobile/test` 3680 pass / 0 fail; `biome check` clean on the two touched files; `tsc -p apps/mobile` clean. The full `bun run check` gate is the orchestrator's, per the token budget — not run here.
 
+### Slice C2 — the commands engine. DONE
+
+*— claude-opus-5-5 (executor), 2026-11-18*
+
+**Load-bearing check re-run first.** Source: `session/compact|clear|rename|set_auto_accept` exist; `HostedSession.compact` takes `assertIdle` then rejects `Cancelled` on abort (`hosted-session.ts:3780-3813`); `compact`/`clear` go `"once"` (`remote-client.ts:2996`, `:3003`), a drop rejecting `RpcError(InternalError, DROPPED_NOT_RETRIED)` (`:4239-4240`); `RemoteSession.compact()` had no signal. Empirical (the plan's own check): `session-screen-commands.test.ts` "history{clear} then resolve → an empty transcript + ONE ◇ chat cleared line" — a fake `clear()` that raises `history{clear, [system]}` before resolving leaves exactly `["◇ chat cleared — the earlier chat is kept as an archived session"]`. Holds. Preconditions also held: thinking-images and harness-notices S1 are merged (`NoticeRow.level`, `pushNotice(state, text, level)` at `transcript.ts:578`).
+
+Built in dependency order, red first each time (new APIs/modules were red on their absence, then each property was proven by the mutations below):
+1. `packages/client/src/remote-session.ts` `compact(signal?)` — already aborted → rejects `Cancelled`, nothing sent; an abort in flight → `client.cancel(id)` (no `turnId`); the listener is removed when it settles. Test `packages/client/test/compact-signal.test.ts` (real `SessionHost` behind a frame-recording channel). Red before: the abort test got no `Cancelled` and the pre-aborted one hung (5 s timeout).
+2. `apps/mobile/src/compact-slot.ts` (new) — `slotView` (running turn > my compaction > `Compacted ✓` < 3000 ms > null), `compactOutcome`, `clearOutcome(…, forkKept)`, `isTransportLoss`. Test `compact-slot.test.ts` (14).
+3. `apps/mobile/src/session-commands.ts` (new) — `commandRows`, `clearConfirm`. Test `session-commands.test.ts` (14).
+4. `transcript.ts` — `local_notice` → `pushNotice` (red: 1 fail in `transcript.test.ts`, then green).
+5. `hub-actions.ts` / `hub-session.ts` — `HubContext.compacting?`; `stop` holds while compacting with the link up (Steer does not). Red: 2 fails in `hub-actions.test.ts`; `hub-session.test.ts`'s whole-object expectation gained `compacting: false`.
+6. `session-screen-controller.ts` — `SendableHandle.compact?(signal?)`/`clear?()`; state `slot` + `commands`; actions `compact`, `cancelCompaction`, `armClear`, `cancelClear`, `clear`, `retryLast`; `stopTurn` cancels my compaction first; the feed's `put` drops `Compacted ✓` and disarms Clear on a turn start, and disarms on a link drop; one 3 s timer, cleared on dispose; late answers after dispose (or a replaced try) are ignored. Test `session-screen-commands.test.ts` (16).
+7. Footer — `ui/StepNode.tsx` `CompactSlotNode` (the Thinking node's look and live seconds; static `Compacted ✓`); `SessionScreen.tsx` draws it in the list footer and passes `compacting` to `hubContextOf`. `tool-rows-wiring.test.ts`'s footer-gate regex updated (+ an assertion for the slot node).
+8. Parity — `transcript-parity.test.ts`: the failure line shares `Compact failed: ` and the daemon's words with the TUI's `onCompactionSettled`, same `warn`; neither writes a success line.
+
+Drift from the Implementation (and why):
+- **Failure text is the daemon's message, not `String(error)`.** The TUI writes `_Compact failed: RpcError: …_`; the phone writes `Compact failed: …` (no class name). The parity test pins the shared prefix + message + level rather than string equality.
+- **Retry is dimmed "The message field is not empty"** (a new input, `fieldBusy`). The composer's send path takes the FIELD (text + ready chips, `compose-controller.ts:666-679`), so retrying into a non-empty field would merge the two or send the person's photos with the old text. With the field empty, `retryLast` puts the text there and runs the composer's own `act()` — outbox, queue and refusal handling unchanged, as planned.
+- **`clearOutcome` and the clear wording live in `compact-slot.ts`**, and `forkKept` is the controller's `FORK_KEPT = true` constant passed there, not an input of `session-commands.ts` (the line is an outcome, not a row state). The `false` wording is pinned in `compact-slot.test.ts`.
+- **Clear and Compact exclude each other on the phone** ("Clearing…" dims Compact/Retry), not in the plan's table; the daemon would refuse it anyway.
+- **A files-only last prompt** says "the files were not re-sent" instead of the photos wording.
+- **The hub's `stop` entry is unchanged** (`controller.stopTurn()`); `stopTurn` itself routes to the compaction's abort, so there is one Stop path.
+
+Mutations (each reverted; `grep MUTATION` empty afterwards; the named tests red while broken):
+
+| mutation | red |
+|---|---|
+| `compact` keeps its abort listener after settling (`remote-session.ts`) | 1 in `compact-signal.test.ts` (abort after settle sends a cancel) |
+| `stopTurn` ignores my compaction | 1 in `session-screen-commands.test.ts` (Stop during it — times out, no abort) |
+| a turn start no longer drops `Compacted ✓` | 1 (the lingering-slot test) |
+| no `disposed` guard on a late compaction answer | 1 (resolution after dispose) |
+| no Clear disarm on a link drop | 1 (link drop disarms) |
+| `isTransportLoss` → always false | 3 across `compact-slot`/`session-screen-commands` (transport → ▲) |
+| hub `stop` not held while compacting | 1 in `hub-actions.test.ts` |
+| `Compacted ✓` window inclusive (`<=`) | 2 (`compact-slot` boundary, controller 3 s test) |
+
+Tests: `apps/mobile/test` 3735 pass / 1 fail before the footer-regex update (`tool-rows-wiring`, a source-shape assertion of the footer gate this slice changes), then that file 16/0; the touched files re-run green after the mutations (102/0). `tsc -p apps/mobile` clean; `tsc --noEmit` shows nothing for the client files; `biome check` clean on the 17 touched files. No protocol/schema change (an optional client parameter): no `protocol.d/` note, no `protocol.json` regeneration. Changelog: the task's one fragment `changelog.d/mobile-hub-commands.added.md` extended with C2's commands. The full `bun run check` gate is the orchestrator's — not run here.
+
+Unverified: the footer slot's rendering on a device (no simulator; `CompactSlotNode` is presentation only, its decision is `slotView`'s and tested); the real client raising `history{compact}` for the phone's own compaction is the plan's cited assumption (TUI `useSessionLink.ts:332-338`), exercised here only through the fake handle. The sheet itself (C3) is not built: until it is, nothing on screen calls the new actions.
+
+### Fix round 1
+
+*— claude-opus-5-5 (executor), 2026-11-18* — fixes the Slice C2 fresh-context review (one MEDIUM).
+
+**Finding 1 (MEDIUM, daemon-side `InternalError` read as a dropped link) — FIXED.** `apps/mobile/src/compact-slot.ts` `isTransportLoss` no longer treats every `InternalError` as a link loss: only a non-`RpcError`, or an `InternalError` whose message is one the transport/client raises for a lost link — `DROPPED_NOT_RETRIED` (`remote-client.ts:305`/`:4240`), `"connection closed"` (`peer.ts:254`, `remote-client.ts:3096`/`:3344`), `"peer is closed"` (`peer.ts:148`), `request <method> timed out` (`peer.ts:166`, outcome unknown too). Any other `InternalError` — the peer's opaque `"internal error"` for a handler throw, a model failure the client maps (`remote-client.ts:4410`/`:4427`) — falls through to `▲ Compact failed: …` / `▲ Couldn't clear: …`, so `compactFailed` is set and the row reaches `failed` (Retry).
+
+Tests (red first: 2 fail on the old rule, then 33/0):
+- `compact-slot.test.ts` "a daemon-side failure (the peer's opaque InternalError) is a ▲, not a dropped link" — `"internal error"` and a model-endpoint message, for both `compactOutcome` and `clearOutcome`.
+- `compact-slot.test.ts` "every way the link itself is lost stays UNKNOWN" — `"peer is closed"` and a request timeout (green on both old and new code by design: it pins the boundary the narrowing must keep; its non-vacuity is the M2/M3 mutations).
+- `session-screen-commands.test.ts` "a daemon-side failure (opaque InternalError, link up) is ▲ with Retry" — the controller's notice line and `row("compact") = failed`.
+
+Mutations (each reverted; `rg MUTATION` empty afterwards):
+
+| mutation | red |
+|---|---|
+| any `InternalError` is a link loss again (`&&` → `\|\|`) | 2 (both daemon-side tests) |
+| drop the timeout rule | 1 ("every way the link itself is lost") |
+| drop `"peer is closed"` from the set | 1 (same) |
+
+Drift: the reviewer's list plus the request timeout (same unknown outcome). A link that the client gives up on (`remote-client.ts:3374`, `stopped` with a free-form reason) now reads `▲ Compact failed: <reason>` rather than the unknown line. Unverified: whether a call can still be in flight when that rejection reaches it (I expect the earlier drop to have rejected it with `DROPPED_NOT_RETRIED` first); to check, drive a `RemoteClient` link to `stopped` with a `session/compact` pending.
+
+Gate (narrow): `compact-slot`, `session-screen-commands`, `transcript-parity` 43 pass / 0 fail; `bunx biome check` on the 3 touched files clean; `tsc -p apps/mobile` clean. Full `bun run check` is the orchestrator's.
+
 ## Review
 
 ### Slice C1 — verification round (a second executor, same slice, no behaviour change)
@@ -588,3 +652,53 @@ Carried over, not findings: the two clocks for one flash (Low, left on purpose i
 - **Mutation:** with that line removed, 3 tests in `hub-gesture.test.ts` fail, including the new "slide-release then a tap on ANOTHER dimmed item" test, which checks the pill through `pillIndex`. The mutation was reverted and the tree is clean.
 - **Regressions:** `FloatingActivity.tsx:284` is the only place that reads `highlight`, and it only sets `hi`, so the change adds no haptic and no announcement. A sticky tap already had `hi === null`, so the extra effect does nothing there. `apps/mobile/test` passes, 3680 / 0. `bun run lint` and `bun run typecheck` are clean.
 - Round 1's low note (the machine's `flash.at` is never read by the renderer) and the interim `commandsOpen` note still stand, and neither blocks.
+
+### Slice C2 — fresh-context adversarial review
+
+*— claude-opus-5-5, 2026-11-18* (a fresh context, but the same model as the C2 executor: our blind spots may overlap, so a review by a different model family would add coverage.)
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM).
+
+1. **MEDIUM — a compaction or clear that FAILS on the daemon is reported as a dropped link.** `isTransportLoss` (`apps/mobile/src/compact-slot.ts:72-77`) treats every `JsonRpcErrorCode.InternalError` as a lost link. But a failure inside the daemon arrives with that same code. `HostedSession.compact` rethrows a provider or model error unchanged (`packages/daemon/src/hosted-session.ts:3810-3814`), and the peer turns any non-`RpcError` into `InternalError "internal error"` (`packages/transport/src/peer.ts:357-376`). Repro (`.tentacle/tmp/mobile-hub-commands/c2-internal.ts`): `compactOutcome({ok:false, error: new RpcError(InternalError, "internal error")})` returns `{"text":"the link dropped during the compaction — the history after reconnect shows whether it ran"}` with no `warn`. `clearOutcome` returns the same kind of line.
+   - **What the person sees:** the model call fails (a 5xx or a rate limit) while the link stays up. The phone shows a `◇` news line about a reconnect that will never come. `compactFailed` stays null, so the row never reaches `failed` and C3 never offers Retry. A failure that should be loud becomes a false, quiet message.
+   - **Fix:** match only real link losses — `DROPPED_NOT_RETRIED`, `"connection closed"`, `"peer is closed"` (or a typed marker) — or an error that is not an `RpcError` at all. Let any other `InternalError` fall through to `▲ Compact failed: …` / `▲ Couldn't clear: …`.
+   - **Missing test:** none of the existing tests feed a daemon-side `InternalError`. Add a red test for it in `compact-slot.test.ts` and in the controller's file.
+
+**Gate (the touched files):** 9 files, 217 pass / 0 fail. `bun run lint`: clean (2097 files). `bun run typecheck`: clean. I did not run the full `bun test`.
+
+**Mutation:** in `remote-session.ts`, the abort's `client.cancel(id)` was changed to `client.cancel(id, "MUTATION")` (it now names a turn). `compact-signal.test.ts` went red, 1 fail ("…WITHOUT a turnId…"). The change was reverted and `git status` is clean.
+
+**Attacks tried:**
+- (a) Daemon-side failure misclassified → **finding 1**.
+- (b) Is the phone's OWN compaction separator dropped by `transcript.ts:399` (`own === true ? state`)? No: no producer ever sets `own` (`session-feed.ts:298-304`), so the separator is drawn. This holds.
+- (c) Does the abort listener leak, or does an abort after settling send a stray cancel? `finally` removes the listener (`remote-session.ts:1279-1281`). This holds.
+- (d) Can a second compact or clear start while one runs? `rowReady` sees `running`, and Clear and Compact dim each other. This holds.
+- (e) Stop with the link down: the hub hides `stop` unless `link === "up"` (`hub-actions.ts:177`). This holds.
+- (f) The §7 "don't serialize the RPC peer" rule: the cancel is a separate notification, and nothing awaits it. This holds.
+- (g) Protocol: only an optional client parameter was added, with no wire change. Correctly, there is no `protocol.d/` note.
+
+**How the executor behaved:**
+- It recorded its drift honestly (the Retry `fieldBusy` input, the clear wording module, mutual exclusion).
+- Its mutation table is real. I re-checked one row of it.
+- It named the unverified device rendering.
+- It missed that `InternalError` is also the daemon's opaque failure code.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-18* (the same model as the C2 executor, in a fresh context)
+
+**Verdict: PASS.**
+
+- **Finding 1 is fixed.** `isTransportLoss` (`apps/mobile/src/compact-slot.ts:73-89`) now treats an `InternalError` as a lost link only when its message is a link-loss message: `DROPPED_NOT_RETRIED`, `connection closed`, `peer is closed`, or `request … timed out`.
+  - The repro `c2-internal.ts` now prints `{"text":"Compact failed: internal error","level":"warn"}` and `{"text":"Couldn't clear: internal error","level":"warn"}`.
+- **Mutations (each reverted; `git status` clean):**
+  - Restoring the old `code === InternalError ||` rule makes 2 tests fail: the `compact-slot` daemon-failure test and the controller test that expects `▲` and a `failed` row.
+  - Removing the `TIMED_OUT` match makes 1 test fail: the "link itself is lost" test.
+- **Regressions, checked against every `InternalError` the client and transport can raise:**
+  - An in-flight `"once"` call cut by a drop always becomes `DROPPED_NOT_RETRIED` (`remote-client.ts:4236-4240`), so it is still reported as a lost link.
+  - `invalid response/result for …` (`peer.ts:304`, `:453`) and the model-error texts (`remote-client.ts:4410`, `:4427`) now show as `▲`. That is correct, because the daemon did answer.
+- **Not blocking (Low):** the reconnect give-up error carries a free-form `step.status.reason` (`remote-client.ts:3372-3376`), so it would show as `▲` if it ever reached an in-flight compact. The `DROPPED` path normally catches it first.
+- **Gate:**
+  - The 6 related test files pass, 129 / 0.
+  - `bun run lint` is clean (2097 files).
+  - `bun run typecheck` is clean.

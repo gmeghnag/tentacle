@@ -12,17 +12,21 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { DomainErrorCode } from "@tentacle/protocol";
+import { RpcError } from "@tentacle/transport";
 import {
   harnessLevel,
   isHarness,
   joinsPrevious,
   showsGlyph,
 } from "../../../packages/tui/src/harness-group.ts";
+import { onCompactionSettled } from "../../../packages/tui/src/send-now.ts";
 import {
   type DisplayState,
   applySessionEvent,
   initialState as tuiInitial,
 } from "../../../packages/tui/src/state.ts";
+import { COMPACT_FAILED_PREFIX, compactOutcome } from "../src/compact-slot.ts";
 import { noticeLooks } from "../src/notice-group.ts";
 import { type State, apply, imageRowText, initialState } from "../src/transcript.ts";
 
@@ -325,5 +329,38 @@ describe("harness looks: the phone groups exactly as the TUI does (S1)", () => {
     expect(all.some((look) => look.level === "info")).toBe(true);
     expect(all.some((look) => look.joined)).toBe(true);
     expect(all.some((look) => look.glyph)).toBe(true);
+  });
+});
+
+describe("compaction outcome wording (mobile-hub-commands C2, harness-notices Q4)", () => {
+  // The TUI writes `_Compact failed: ${String(error)}_` (send-now.ts); the phone
+  // writes the daemon's message after the SAME prefix (no `RpcError:` class
+  // name, no markdown) — pinned here so the two never drift apart.
+  test("a failure: the same prefix and the daemon's words, the same ▲ level", () => {
+    const error = new RpcError(DomainErrorCode.TurnInProgress, "a turn is already running");
+    const tui = onCompactionSettled({
+      result: { ok: false, error },
+      rows: [],
+      sendNowOwns: false,
+      turnRunning: false,
+    });
+    const phone = compactOutcome({ ok: false, error });
+    const tuiText = (tui.notice ?? "").replace(/^_|_$/g, "");
+    expect(tuiText.startsWith(COMPACT_FAILED_PREFIX)).toBe(true);
+    expect(phone?.text.startsWith(COMPACT_FAILED_PREFIX)).toBe(true);
+    expect(tuiText.endsWith(error.message)).toBe(true);
+    expect(phone?.text.endsWith(error.message)).toBe(true);
+    expect(tui.level).toBe("warn");
+    expect(phone?.level).toBe("warn");
+  });
+  test("a success: neither writes a line (the slot and the separator say it)", () => {
+    const tui = onCompactionSettled({
+      result: { ok: true, before: 3, after: 2 },
+      rows: [],
+      sendNowOwns: false,
+      turnRunning: false,
+    });
+    expect(tui.notice).toBeNull();
+    expect(compactOutcome({ ok: true })).toBeNull();
   });
 });

@@ -51,6 +51,8 @@ describe("hubContextOf", () => {
       // Unknown counts: no dim, no arc (docs/feat/mobile-hub-tools.md D3).
       toolsEmpty: false,
       toolsRim: null,
+      // No compaction of this phone's runs (mobile-hub-commands C2).
+      compacting: false,
     });
   });
 

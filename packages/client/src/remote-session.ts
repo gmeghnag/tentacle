@@ -1256,13 +1256,29 @@ export class RemoteSession implements SessionStreamListener {
    * `/clear`'s does, so a compaction reaches the real conversation instead of
    * answering a hollow `{0, 0}` (review M2). A fresh session stays the plain
    * no-op: a compaction never CREATES one.
+   *
+   * `signal` (docs/feat/mobile-hub-commands.md C2, the TUI port's
+   * `compact?(signal?)`): an abort sends `session/cancel` with NO `turnId` —
+   * "whatever runs", a compaction included — and the daemon rejects it
+   * `Cancelled` with the history untouched. Already aborted before the request:
+   * nothing is sent, rejected `Cancelled` the same way. After it settled: nothing.
    */
-  async compact(): Promise<CompactResult> {
+  async compact(signal?: AbortSignal): Promise<CompactResult> {
     await this.openForReset();
     if (!this.id) {
       return { before: 0, after: 0 };
     }
-    return this.client.compact(this.id);
+    if (signal?.aborted) {
+      throw new RpcError(DomainErrorCode.Cancelled, "compaction cancelled");
+    }
+    const id = this.id;
+    const onAbort = (): void => this.client.cancel(id);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      return await this.client.compact(id);
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   /**
