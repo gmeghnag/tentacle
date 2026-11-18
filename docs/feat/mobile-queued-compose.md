@@ -533,4 +533,52 @@ and no `protocol.d/` note was added.
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-18* (fresh context; different model family from the executor)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Findings (HIGH/MEDIUM only):**
+
+1. **HIGH — gate red: `bun run typecheck` fails** (Execution ran only root
+   `tsc --noEmit`, which skips `tsc -p apps/mobile`):
+   `compose-controller.ts:287` `PendingBubble` not imported;
+   `compose-controller.ts:412` trace `act: "unqueue"` not in the trace union;
+   `SessionScreen.tsx:1331`/`:1335` `styles.editBanner` / `styles.flex` do not
+   exist, so the editing banner renders with no row layout at runtime.
+2. **HIGH — Edit/Cancel apply a STALE state and a STALE field**
+   (`compose-controller.ts:409-411`): `unqueueFor(state, { field, reply: await … })`
+   evaluates `state` and `field` BEFORE the await. Any `queued` report landing
+   during the unqueue RTT (the daemon publishes one on every unqueue) is
+   overwritten by `state = step.state`, and text typed during the RTT is
+   replaced by `restoreAfterFailure(oldField, text)`. Repro
+   (`.tentacle/tmp/mobile-queued-compose/race-tail.ts`, appended to a copy of
+   `compose-controller.test.ts`): during unqueue the daemon reports another
+   device's row `other-1` and the person types "typed during rtt" → after
+   `edit`: `rows []`, `field "mine"` (the row and the typed words are both
+   lost). The docstring at `compose-state.ts:226` says "read fresh"; it is not.
+3. **MEDIUM — × with the link down silently drops the words**
+   (`compose-controller.ts:1072-1082`): `enqueueStarted` + the field reset to
+   `prior` happen before `handle === null → return`. The row is local, never
+   sent, and the B0 amendment (`compose-state.ts:129`) keeps unacked ids in
+   `own` indefinitely ⇒ a "mine" pending bubble that never delivers, words
+   gone from the field. The × path also bypasses the outbox driver the normal
+   queue path uses (`:883-900`).
+4. **MEDIUM — bubble "Send now" violates owner Q4** (`SessionScreen.tsx:1163`):
+   it calls `controller.sendNow()`, which carries the field's text
+   (`compose-controller.ts:974-977`); Q4 (accepted) says the bubble's Send now
+   sends only the message, not the field.
+
+**Gate:** `bun test apps/mobile/test` 3393 pass / 0 fail; `bun run lint` clean
+(2066 files); `bun run typecheck` **FAILS** (finding 1). Full `bun test` not re-run.
+
+**Mutation:** `bubbleActions` without the `!bubble.mine` guard → red ("another
+writer's words are shown, never acted on"); reverted, tree clean.
+
+**Attacks tried:** stale-state race on Edit (found #2); × with link down (#3);
+bubble Send now vs Q4 (#4); §7 "pod not trusted" — the edit text comes from
+`own`, never the daemon (holds, `compose-state.ts:247`); B0 amendment
+convergence on reject (holds via `enqueueRejected`), not on a never-sent row (#3).
+
+**Executor behaviour:** thorough doc and drift list, honest about the B0
+amendment; but claimed a green gate without running the repo's `typecheck`
+script, and its D6 tests never interleave a report with the unqueue await.
