@@ -13,10 +13,17 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
+  harnessLevel,
+  isHarness,
+  joinsPrevious,
+  showsGlyph,
+} from "../../../packages/tui/src/harness-group.ts";
+import {
   type DisplayState,
   applySessionEvent,
   initialState as tuiInitial,
 } from "../../../packages/tui/src/state.ts";
+import { noticeLooks } from "../src/notice-group.ts";
 import { type State, apply, imageRowText, initialState } from "../src/transcript.ts";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "transcript");
@@ -230,5 +237,93 @@ describe("the app's fold agrees with the TUI's on shared fixtures", () => {
       movedTo: tuiSub?.movedTo,
       last: tuiSub?.activities.at(-1),
     });
+  });
+});
+
+describe("harness looks: the phone groups exactly as the TUI does (S1)", () => {
+  /**
+   * One row's `(text, level, glyph-shown, joined)` as BOTH sides see it. The app
+   * gives the look directly (`noticeLooks`); the TUI's is its own four functions
+   * over the items — so a divergence in either the level table or the grouping
+   * rule shows up here, not in a screenshot.
+   */
+  interface Look {
+    readonly text: string;
+    readonly level: "info" | "warn";
+    readonly glyph: boolean;
+    readonly joined: boolean;
+  }
+
+  function appLooks(state: State): readonly Look[] {
+    const looks = noticeLooks(state.rows);
+    return state.rows.flatMap((row): Look[] => {
+      const look = looks.get(row.key);
+      if (look === undefined || row.kind !== "notice") {
+        return [];
+      }
+      // A `null` glyph from the projection IS "no glyph shown".
+      return [
+        {
+          text: row.text,
+          level: harnessLevel(row),
+          glyph: look.glyph !== null,
+          joined: look.joined,
+        },
+      ];
+    });
+  }
+
+  function tuiLooks(state: DisplayState): readonly Look[] {
+    const out: Look[] = [];
+    let prev: DisplayState["items"][number] | undefined;
+    for (const item of state.items) {
+      if (isHarness(item)) {
+        out.push({
+          text: item.text,
+          level: harnessLevel(item),
+          glyph: showsGlyph(prev, item),
+          joined: joinsPrevious(prev, item),
+        });
+      }
+      prev = item;
+    }
+    return out;
+  }
+
+  for (const fixture of load()) {
+    test(fixture.name, () => {
+      let app = initialState;
+      for (const event of fixture.events) {
+        app = apply(app, event as never);
+      }
+      let tui = tuiInitial;
+      let now = 0;
+      for (const event of toTui(fixture.events, fixture.name)) {
+        now += 1;
+        tui = applySessionEvent(tui, event as never, now);
+      }
+      // Not vacuous: every fixture here says something (a cut, a repair, an empty
+      // turn), so an empty sequence on both sides would hide a lost notice.
+      expect(appLooks(app).length).toBeGreaterThan(0);
+      expect(appLooks(app)).toEqual(tuiLooks(tui));
+    });
+  }
+
+  test("the fixture set really does exercise a warn, an info and a block", () => {
+    // Guards the loop above from passing on an empty or info-only set (AGENTS §9
+    // non-vacuity): a level change AND a continuation must both occur.
+    const all = load().flatMap((fixture) => {
+      let tui = tuiInitial;
+      let now = 0;
+      for (const event of toTui(fixture.events, fixture.name)) {
+        now += 1;
+        tui = applySessionEvent(tui, event as never, now);
+      }
+      return tuiLooks(tui);
+    });
+    expect(all.some((look) => look.level === "warn")).toBe(true);
+    expect(all.some((look) => look.level === "info")).toBe(true);
+    expect(all.some((look) => look.joined)).toBe(true);
+    expect(all.some((look) => look.glyph)).toBe(true);
   });
 });

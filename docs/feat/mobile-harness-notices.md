@@ -334,7 +334,119 @@ Q1–Q7: all recommendations accepted (Compact action in the hub overflow; left-
 
 ## Execution
 
-*(empty — after approval)*
+*— deepseek-v4-pro (executor), 2026-11-18*
+
+**Scope: S1 only.** S2 was not started (it waits for `feat/mobile-thinking-images`
+to merge, Owner Q6).
+
+### Load-bearing check, re-run first
+
+The plan's load-bearing assumption is S2's (the client raises `history{reason:
+"compact"}` for every compaction, own included), so it is untouched by S1 — but
+the S1 gap itself was re-confirmed on this worktree:
+
+- `.tentacle/tmp/mobile-harness-notices/repro-s1.ts` (the Context Repro, with the
+  two extra probes appended) printed the three notices with **no `level` field on
+  any of them** and `NO notice-group.ts`. Both gaps still present. The separator
+  row reprinted as before, so nothing else drifted.
+- After the change, `repro-s1-after.ts` on the same event sequence:
+
+```
+{"key":"r2",…,"level":"warn"}  -> {"glyph":"▲","joined":false}
+{"key":"r3",…}                 -> {"glyph":"◇","joined":true}
+{"key":"r4",…,"level":"warn"}  -> {"glyph":"▲","joined":true}
+```
+
+### As built (dependency order)
+
+1. `apps/mobile/src/transcript-rows.ts` — `NoticeRow.level?: "warn"` (absent =
+   info), the TUI's shape (`packages/tui/src/state.ts:71-81`).
+2. `apps/mobile/src/transcript.ts` — `pushNotice(state, text, level?)`;
+   `truncated_reply` and `empty_turn` pass `"warn"` (the TUI's table,
+   `state.ts:724`,`:730`); `mergeContinueNotice` now keeps the row's key AND its
+   level (it spreads the previous row; the no-row fallback pushes warn);
+   `endTurn`/`outcomeNotice` return `{text, warn?}` — `lost` is `▲`
+   (Owner Q3), `interrupted` is info, `failed` keeps its `⚠ …` text line as before.
+   Phone-only notices: `closed`, `unsupported`, hook `context_note`, notes and an
+   orphan tool result carry no level (info).
+3. `apps/mobile/src/notice-group.ts` (new) — `NOTICE_GLYPHS`, `NoticeLook`,
+   `isHarness`/`harnessLevel`/`joinsPrevious`/`showsGlyph` mirroring
+   `packages/tui/src/harness-group.ts`, plus `noticeLooks(rows, cells?)`, which
+   walks the VISIBLE rows (`cells` = `stepLayout`'s map; a `hidden` cell is
+   skipped, so it is neither given a look nor breaks a block — Owner Q5).
+4. `apps/mobile/src/screens/transcript/TranscriptRow.tsx` — `RowProps.look?`;
+   `NoticeRowView` splits: a `separator` keeps the centred, ruled `Shell`
+   untouched, every other notice is left-aligned in a `harness` row with a fixed
+   12 pt glyph column (`◇` `palette.sec`, `▲` `palette.orange`), `joined` rows
+   dropping their top padding, and a `▲` text carrying
+   `accessibilityLabel: "Warning: …"`. With no `look` it falls back to the row's
+   own level's glyph (a lone row / a component test).
+5. `apps/mobile/src/screens/SessionScreen.tsx` — `looks = useMemo(() =>
+   noticeLooks(rows, layout.cells), [rows, layout])`, added to `rowExtraData`,
+   passed as `look` to a notice row only.
+6. Tests: `apps/mobile/test/notice-group.test.ts` (new, pure),
+   `apps/mobile/test/notice-row.test.ts` (new: the render half via the
+   `chart-view.test.ts` host-stub walk + a source pin on the screen wiring),
+   `apps/mobile/test/transcript.test.ts` (levels, the merged line, reload), and
+   `apps/mobile/test/transcript-parity.test.ts` (a new `harness looks` block that
+   runs every fixture through BOTH folds and compares
+   `(text, level, glyph-shown, joined)`, plus a non-vacuity guard).
+7. `changelog.d/mobile-harness-notices.changed.md`.
+
+### Drift from the Implementation
+
+- **`NoticeRowView` was split rather than generalised.** The plan said "renders
+  the look (presentation only)"; keeping one JSX tree with the separator's rules
+  inside the glyph row would have centred a separator in a glyph column. The
+  separator path is now a separate early return, verbatim from before.
+- **A `look`-less fallback was added** (not in the plan): the row uses its own
+  `level` when no look is given. Without it a `NoticeRowView` rendered outside
+  `SessionScreen` (every component test) would draw an empty glyph column.
+- **An extra test file exists** (`notice-row.test.ts`) beyond the plan's three:
+  the plan's S1 has no render coverage, and the level/group decisions are only
+  half the feature — the glyph and the hanging alignment are the other half.
+  It also carries the screen's wiring pin (`noticeLooks(rows, layout.cells)`,
+  the prop, `extraData`) in `tool-rows-wiring.test.ts`'s source-assertion style.
+- **A phone-only notice is NOT warned that the plan left open**: `failed` keeps
+  its `⚠ …` line as a plain assistant text (the TUI's own shape, `state.ts:393`),
+  not a harness line, so no `▲` is added on top of a `⚠`.
+
+### Red before green (§9)
+
+Every new assertion was shown failing before the code that satisfies it existed
+(the first run of each file), and every plan-named target was mutation-checked
+afterwards — each mutation reverted immediately:
+
+| mutation | failed test(s) |
+|---|---|
+| `empty_turn` → no level (`transcript.ts`) | `transcript.test.ts`: "a cut reply and an empty turn WARN…" + parity `notice-producing-events` |
+| `history_repaired` → `"warn"` (`transcript.ts`) | parity `notice-producing-events` (the phone would warn where the TUI does not) |
+| merged line rebuilt as `{kind,key,text}` (drop the spread) | `transcript.test.ts`: "the merged `again` line keeps the warn level AND its key" |
+| `noticeLooks` ignores `cells` (raw neighbour) | `notice-group.test.ts`: "a hidden cell is transparent: `◇ [hidden] ◇` stays ONE block" |
+| `showsGlyph` always true | `notice-group.test.ts`: the S1 acceptance sequence + the level-change case + the hidden-cell case |
+| glyph colour/`accessibilityLabel` warn branch removed | `notice-row.test.ts`: "a warning draws `▲` in amber and speaks its level" |
+| `look` prop dropped from `TranscriptRow` in the screen | `notice-row.test.ts`: "renderItem passes it to a notice row only" |
+
+### Narrow verification run
+
+```
+bun test apps/mobile/test/{notice-group,notice-row,transcript,transcript-parity}.test.ts   66 pass, 0 fail
+bun test apps/mobile/test/{transcript,transcript-parity,transcript-reload,notice-group,
+  notice-row,session-feed,stream-batch,row-times,session-view,hub-session}.test.ts        169 pass, 0 fail
+bun test apps/mobile/test/{session-screen,session-screen-info,row-times,transcript-pdf}.test.ts  84 pass, 0 fail
+bunx tsc -p apps/mobile                                                                   clean
+bunx biome check <changed files>                                                          clean
+```
+
+One pre-existing, unrelated failure observed and NOT caused by this change:
+`apps/mobile/test/step-thought-marker.test.ts` fails to load on this worktree
+(`Export named 'EventEmitter' not found in expo-modules-core`) **with the
+untouched `HEAD` copy of `TranscriptRow.tsx` restored**, so it is an environment
+issue of that one file's mocks, not this slice.
+
+Gate: not run by the executor (the orchestrator's script runs `bun run check`
+after this). No protocol schema change, so `packages/protocol/schema/protocol.json`
+is untouched; no `protocol.d/` note is needed (no wire change).
 
 ## Review
 

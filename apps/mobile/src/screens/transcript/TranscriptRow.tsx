@@ -24,6 +24,7 @@ import type { DiagramStyle } from "../../diagram-settings-store.ts";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
+import { NOTICE_GLYPHS, type NoticeLook } from "../../notice-group.ts";
 import { ROW_FALLBACK_TEXT } from "../../row-guard.ts";
 import { type FiredRow, firedRowView } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
@@ -92,6 +93,12 @@ export interface RowProps {
   readonly step?: StepProps;
   /** The diagram look picked in Settings (docs/fix/mobile-qa-1117.md, bug 3); absent → outline. */
   readonly diagramStyle?: DiagramStyle;
+  /**
+   * A notice row's drawn shape from `noticeLooks` (docs/feat/mobile-harness-notices.md
+   * S1): its glyph and whether it joins the block above. Absent (a test, a row
+   * drawn on its own): it draws as a block of its own WITH its own level's glyph.
+   */
+  readonly look?: NoticeLook;
 }
 
 /**
@@ -611,25 +618,73 @@ function ArtifactCardRow({
   );
 }
 
-function NoticeRowView({ row, palette }: RowProps): JSX.Element {
+/**
+ * A harness line (docs/feat/mobile-harness-notices.md S1, Owner Q2): left-aligned
+ * with a fixed-width glyph column, like the TUI — `◇` grey, `▲` amber (the SHAPE
+ * is the signal, the colour only a cue). A row whose look says `joined` drops its
+ * top padding so consecutive lines read as ONE block, and a continuation keeps the
+ * glyph column EMPTY so its text hangs aligned under the block's head.
+ *
+ * A `separator` notice is a different thing (a full-width rule across the
+ * transcript): it stays centred and ruled, and takes no glyph.
+ */
+function NoticeRowView({ row, palette, look: given }: RowProps): JSX.Element {
   const notice = row as Extract<Row, { kind: "notice" }>;
-  return (
-    <Shell row={notice}>
-      {notice.separator === true ? (
+  if (notice.separator === true) {
+    return (
+      <Shell row={notice}>
         <View style={[styles.rule, { backgroundColor: palette.sep }]} />
-      ) : null}
-      <Text style={[typography.footnote, styles.notice, { color: palette.sec }]}>
-        {notice.text}
-      </Text>
-      {notice.body === undefined ? null : (
         <Text style={[typography.footnote, styles.notice, { color: palette.sec }]}>
-          {notice.body}
+          {notice.text}
         </Text>
-      )}
-      {notice.separator === true ? (
+        {notice.body === undefined ? null : (
+          <Text style={[typography.footnote, styles.notice, { color: palette.sec }]}>
+            {notice.body}
+          </Text>
+        )}
         <View style={[styles.rule, { backgroundColor: palette.sep }]} />
-      ) : null}
-    </Shell>
+      </Shell>
+    );
+  }
+  // No look (a test, a row drawn on its own): a block of its own, WITH its glyph
+  // — which is what a notice outside any block reads as.
+  const look: NoticeLook = given ?? {
+    glyph: notice.level === "warn" ? NOTICE_GLYPHS.warn : NOTICE_GLYPHS.info,
+    joined: false,
+  };
+  const warn = look.glyph === NOTICE_GLYPHS.warn;
+  return (
+    <View
+      testID={`row-${notice.key}`}
+      style={[styles.row, look.joined ? styles.joined : undefined]}
+    >
+      <View style={styles.harness}>
+        {/* The column is always there (`harnessGlyph` is a fixed width), so a
+            continuation's text hangs under the block's head instead of shifting. */}
+        <Text
+          style={[
+            typography.footnote,
+            styles.harnessGlyph,
+            { color: warn ? palette.orange : palette.sec },
+          ]}
+        >
+          {look.glyph ?? ""}
+        </Text>
+        <View style={styles.harnessBody}>
+          <Text
+            style={[typography.footnote, { color: palette.sec }]}
+            // The glyph is not read reliably (VoiceOver skips it or says "up
+            // pointing triangle"): the level is spoken in words instead.
+            {...(warn ? { accessibilityLabel: `Warning: ${notice.text}` } : {})}
+          >
+            {notice.text}
+          </Text>
+          {notice.body === undefined ? null : (
+            <Text style={[typography.footnote, { color: palette.sec }]}>{notice.body}</Text>
+          )}
+        </View>
+      </View>
+    </View>
   );
 }
 
@@ -728,6 +783,12 @@ const styles = StyleSheet.create({
   below: { gap: 4, paddingBottom: 6 },
   tool: { gap: 8 },
   notice: { textAlign: "center" },
+  // A harness line (S1): a glyph column and the text beside it, hanging under
+  // the head. `joined` drops the row's own top padding so a block reads as one.
+  joined: { paddingTop: 0 },
+  harness: { flexDirection: "row", gap: 6 },
+  harnessGlyph: { width: 12, textAlign: "center" },
+  harnessBody: { flex: 1, gap: 2 },
   fallback: { fontStyle: "italic" },
   rule: { height: StyleSheet.hairlineWidth, marginVertical: 6 },
 });

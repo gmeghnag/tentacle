@@ -150,6 +150,14 @@ export interface NoticeRow {
   /** A full-width rule around the text (a context reset's separator). */
   readonly separator?: true;
   /**
+   * `warn` for something that went WRONG and the person should see (a reply cut
+   * at its output limit, an empty turn — the TUI's own table,
+   * `packages/tui/src/state.ts`): it picks the glyph (`▲` vs `◇`,
+   * docs/feat/mobile-harness-notices.md S1), and the owner is colour-blind, so
+   * the SHAPE is the signal. Absent means info.
+   */
+  readonly level?: "warn";
+  /**
    * The tentacle note it was drawn from (`ChatMessage.note`): the Activity
    * sheet joins a sub-agent's report by its `id` (`activity-memory.ts`).
    */
