@@ -148,13 +148,17 @@ describe("the screen routes a landing through `landingPending`, not 'did it scro
     expect(src).toMatch(/if \(landingPending\(next\.state\)\) \{\s*armReveal\(\);\s*\}/);
     // The consumed measurement is the landing's too: the one that ENDS it repeats
     // the height its own silent scroll already reached (an animated scroll to that
-    // offset is the loop's echo).
-    expect(src).toMatch(/const owed = landingPending\(landing\.current\);/);
-    expect(src).toMatch(/return owed \|\| landingPending\(next\.state\);/);
+    // offset is the loop's echo) — decided by `follow.ts`, `following` included
+    // (Review round 2, finding 3: a bare `owed ||` swallowed the "new below" pill).
+    expect(src).toMatch(/const before = landing\.current;/);
+    expect(src).toMatch(
+      /return landingOwns\(before, next\.state, followRef\.current\.following\);/,
+    );
+    expect(src).not.toMatch(/return owed \|\|/);
     // The pre-fix line, and any equivalent of it, is gone for good.
     expect(src).not.toMatch(/return next\.step !== null;/);
     expect(src).not.toMatch(/if \(next\.step !== null\) \{\s*armReveal\(\);/);
-    expect(src).toMatch(/landingPending,[\s\S]{0,200}\} from "\.\.\/follow\.ts"/);
+    expect(src).toMatch(/landingOwns,[\s\S]{0,200}\} from "\.\.\/follow\.ts"/);
   });
 
   test("the reveal re-arms itself while the landing it landed is still owed (the hand-over after a re-attach)", () => {

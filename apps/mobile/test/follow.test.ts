@@ -17,6 +17,7 @@ import {
   jumped,
   landingAwaiting,
   landingDone,
+  landingOwns,
   landingPending,
   landingQuiet,
   landingReveal,
@@ -569,6 +570,51 @@ describe("the follow TARGET is the true end (docs/fix/mobile-chat-glitches.md, b
     const step = viewportChanged(up, { content: 2000, viewport: 520 });
     expect(step.scrollTo).toBeNull();
     expect(step.state).toBe(up);
+  });
+});
+
+describe("landingOwns — a landing debt belongs to a person still at the end (Review round 2, finding 3)", () => {
+  test("nothing was pending and nothing is owed → the ordinary follow runs", () => {
+    expect(landingOwns(landingDone, landingDone, true)).toBe(false);
+  });
+
+  test("a measurement the landing absorbs or ends is consumed while following", () => {
+    expect(landingOwns(landingQuiet, landingQuiet, true)).toBe(true);
+    // The one that ENDS it repeats the height its own silent scroll reached.
+    expect(landingOwns(landingQuiet, landingDone, true)).toBe(true);
+    // A hidden opening landing is never the person's to break out of.
+    expect(landingOwns(landingStart, landingStart, true)).toBe(true);
+  });
+
+  test("a landing still OWED after it owns the list whether or not the person follows", () => {
+    // The opening landing's rows arrive while they read further up: `settling`
+    // still hides them, so the follow must not scroll a hidden list.
+    expect(landingOwns(landingStart, landingStart, false)).toBe(true);
+    expect(landingOwns(landingAwaiting, landingStart, false)).toBe(true);
+  });
+
+  test("scrolled up MID-landing, the history that arrives is NEWS for the pill, not consumed", () => {
+    // The regression: `landingQuiet` armed at the end, the person scrolls up while
+    // the resync is in flight, `landingStep`'s `!following` exit ends the landing
+    // with no step — and "pending before" alone still said "consumed", so
+    // `contentGrew` never ran and `unseen` stayed false: a whole laptop turn
+    // arrived with the "Jump to latest" pill still silent.
+    const ended = landingStep(landingQuiet, LONG, false, ROWS);
+    expect(ended.step).toBeNull();
+    expect(ended.state).toEqual(landingDone);
+    expect(landingOwns(landingQuiet, ended.state, false)).toBe(false);
+    // So the screen falls through to `contentGrew`, which marks it.
+    expect(contentGrew({ following: false, unseen: false }, LONG)).toEqual({
+      state: { following: false, unseen: true },
+      scrollTo: null,
+      animated: true,
+    });
+  });
+
+  test("...and the same person still at the END keeps the silent landing (bug 4 unbroken)", () => {
+    expect(landingOwns(landingQuiet, landingStep(landingQuiet, LONG, true, ROWS).state, true)).toBe(
+      true,
+    );
   });
 });
 

@@ -90,6 +90,7 @@ import {
   jumpPill,
   jumped,
   landingDone,
+  landingOwns,
   landingPending,
   landingQuiet,
   landingReveal,
@@ -480,7 +481,9 @@ export function SessionScreen({
     // ENDS the landing — must never reach the animated follow below: the ending one
     // repeats the height the landing's own silent scroll already reached, and an
     // animated scroll to the offset the list is already at is the same loop's echo.
-    const owed = landingPending(landing.current);
+    // `landingOwns` decides it, `following` included: scrolled up mid-landing, the
+    // history that arrives IS news for the pill (Review round 2, finding 3).
+    const before = landing.current;
     const next = landingStep(
       landing.current,
       size.current,
@@ -502,7 +505,7 @@ export function SessionScreen({
     if (changed) {
       setSettling(next.state.settling);
     }
-    return owed || landingPending(next.state);
+    return landingOwns(before, next.state, followRef.current.following);
   }, [perform, armReveal]);
   // Bug 5 (docs/fix/mobile-qa-1117.md): where the list really is, and the settle
   // re-check armed by every size change — `follow.ts`'s `settleStep` decides.

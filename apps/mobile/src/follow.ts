@@ -329,6 +329,25 @@ export function landingPending(state: Landing): boolean {
 }
 
 /**
+ * Whether ONE measurement while a landing is pending belongs to the LANDING, so it
+ * must never reach the animated follow. Two halves:
+ *
+ * - the measurement that ENDS a landing repeats the height its own silent scroll
+ *   already reached, and an animated scroll to the offset the list is already at is
+ *   the loop's echo (`before` pending);
+ * - a landing still owed AFTER it owns the list outright (`after` pending).
+ *
+ * `following` qualifies the first half only (Review round 2, finding 3): a landing
+ * debt is owed to a person still AT THE END. Scrolled up mid-landing, `landingStep`
+ * ends the landing with no scroll — and the history that then arrives must fall
+ * through to `contentGrew`, which is what sets `unseen`. Swallowing it left the
+ * "new content below" pill silent about a whole laptop turn.
+ */
+export function landingOwns(before: Landing, after: Landing, following: boolean): boolean {
+  return (landingPending(before) && following) || landingPending(after);
+}
+
+/**
  * How long a hidden landing waits after its last scroll before it is REVEALED
  * (Review round 1, HIGH 1). `settling` used to end only on a REPEATED content
  * height, and React Native fires `onContentSizeChange`/`onLayout` only when a

@@ -299,6 +299,79 @@ is as planned.
 evidence (the review's item 1), so the owner's real-iPhone loop is argued from the
 replay, not seen fixed on a phone; report row 15 remains NOT VERIFIED.
 
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-18*
+
+Scope: the Review's **one MEDIUM** (finding 3 — `owed ||` swallowing the "new
+below" signal when the person scrolls up mid-landing). One finding, one fix.
+
+**MEDIUM → FIXED.** The verdict moved out of the screen and into the pure module,
+because the property is `follow.ts`'s (AGENTS §7), and because an inline
+`owed || pending-after` in a `.tsx` can only be tested by regexing its source —
+the weakness the Review flagged in round 1. `follow.ts:346` `landingOwns(before,
+after, following)` is `(pending(before) && following) || pending(after)`:
+the debt of the measurement that ENDS a landing is owed to a person still at the
+end; a landing still owed AFTER it owns the list regardless (an opening landing
+whose rows arrive while they read further up still hides them, so no animated
+scroll may reach a hidden list). `SessionScreen.tsx:484/508` keeps `before` and
+returns `landingOwns(before, next.state, followRef.current.following)` — the
+`following` read is the one `landingStep` was already given, so the two cannot
+disagree.
+
+**Red before green.** The pre-fix tree is red, but a missing export is not an
+assertion (§9), so the *behaviour* is pinned by mutation against the fixed tree
+(`.tentacle/tmp/mobile-qa-1118-fix/mut-r2.sh`, each mutant applied, run,
+restored, tree byte-identical after):
+
+| | mutation | result |
+|---|---|---|
+| M3 | `landingOwns` drops `&& following` (round 1's bare `pending(before)`) | **1 fail** ✔ |
+| M4 | `landingOwns` drops `\|\| pending(after)` | **1 fail** ✔ |
+| M5 | the screen goes back to `return landingPending(before) \|\| landingPending(next.state)` | **1 fail** ✔ |
+
+M3 is the Review's exact regression and M5 its exact shape; both are caught. The
+whole-file red/green (`red-r2.sh`: branch HEAD's two sources → 21 pass · **2 fail**,
+restored → 73 pass · 0 fail, tree byte-identical) is kept for the record — its
+second failure is the wiring regex, its first the missing export.
+
+**Repro extended past the fixed phase** (`.tentacle/tmp/mobile-qa-1118-fix/bug4-repro.ts`
+— the Review's LOW "models only the phase it fixed" in round 1, and its new
+scenario here). Both halves of the pre-fix verdict are now EXECUTED, not asserted
+in prose:
+
+```
+AT THE END : 2 scroll(s), 0 ANIMATED
+   -> 41200 silent
+   -> 42000 silent
+READING UP : 0 scroll(s), 0 ANIMATED
+SCROLLED UP MID-LANDING: pre-fix consumed=true unseen=false | now consumed=false unseen=true
+```
+
+**Tests.** `follow.test.ts` — new describe "landingOwns — a landing debt belongs to
+a person still at the end" (5 tests): nothing pending → the follow runs; an
+absorbed/ending measurement is consumed while following; a landing still owed
+after it owns the list even when not following (a hidden list must never be
+scrolled); the Review's scenario end-to-end (`landingStep` with `following:
+false` ends the landing, `landingOwns` says NOT consumed, and `contentGrew` then
+marks `unseen`); and the same person still at the end keeps the silent landing, so
+bug 4 is unbroken. `session-screen-follow-wiring.test.ts` — the wiring test now
+asserts `landingOwns(before, next.state, followRef.current.following)`, that
+`before` is captured, and that `return owed ||` is gone.
+
+**Gate (files this round touched).** `bunx tsc -p apps/mobile --noEmit` → clean ·
+`bunx biome check` on the 4 files → clean (no fixes needed) ·
+`bun test apps/mobile/test/follow.test.ts apps/mobile/test/session-screen-follow-wiring.test.ts`
+→ **73 pass, 0 fail**. The full suite and the repo-wide typecheck/lint are the
+orchestrator's gate, not run here.
+
+**Drift from Implementation.** One, in the direction the Implementation's own
+split line asks for: the `land()` verdict is no longer an expression inside
+`SessionScreen.tsx` but a pure `follow.ts` function (`landingOwns`, :346, +20
+lines) that the screen calls. The Design put the decision in the screen; the
+Review's finding showed it is a branch worth testing, which is the pure module's
+job. No other change.
+
 
 ## Review
 
