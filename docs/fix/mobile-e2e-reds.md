@@ -55,11 +55,13 @@ Product (pure modules + tests, §7/§9):
 - `src/drawer-new-session.ts` `newSessionFromHub` + `App.tsx` wiring — hub New session.
 - `src/compose-controller.ts` `offlineBasis`/`primeBasis` — Send later never waits on the link.
 - `src/session-screen-controller.ts` `link(up)` → `compose.runOutbox()` — the outbox runs at `up`.
-- `src/row-value.ts` `rowGroupsForAccessibility` + `src/ui/Row.tsx` — a trailing switch is its own element.
+- `src/session-screen-controller.ts` `link(up)` already listed; `src/row-value.ts` `rowAccessibility` + `src/ui/Row.tsx` — a trailing control is always its own element, a pressable row's action rides on its label.
+- `src/activity.ts` `nothingRunning` + `SessionScreen.tsx` `activityEmpty` — an Activity holding only Scheduled's empty state is "Nothing running".
 
-Harness: `e2e/mock-model.ts` (`GATED`), `e2e/hooks.ts` (`model-release`, `idleTimeout: 0`,
-complete `queryOf`), `e2e/run.ts` (push token), `e2e/seed.ts` (`pendingAsks` attaches),
-`e2e/escape-probes.ts` (unnamed hit says what it was). Flows: see the table.
+Harness: `e2e/mock-model.ts` (`GATED`), `e2e/hooks.ts` (`model-release`, `laptop-offline-turn`,
+`idleTimeout: 0`, complete `queryOf`), `e2e/run.ts` (push token, side `serve` on a free port),
+`e2e/seed.ts` (`pendingAsks` attaches, `turnOnce`), `e2e/escape-probes.ts` (nameless hits
+need a WebKit agent; strays reported). Flows: see the table.
 
 ### Failure modes
 
@@ -98,8 +100,14 @@ Each red first on the buggy code, then green (Execution lists them).
 | `22-relay-only`, `22-notify-*`, every `session-${…}` tap | in the full suite every earlier flow's session sits above the seeded one (newest first) → below the fold (passes alone) | FLOW (state carried across the suite — the "05 passes alone" class) | `scrollUntilVisible` before every list tap on `session-${…}` (46 places) |
 | `push-placeholder` | `push-place` → 500 "the daemon answered 401 to the token": `promptOnce` dialled `serve` without the token | HARNESS | pass the seed's `endpoint` (url + token) |
 | `22-notify-approve/-deny/-reply/-forged` | `pending-ask` → "no pending ask" with the sheet up: the laptop peer reads its router, but nothing attached it to `ASK1`; then `notify-respond` → 400 "action is required": `queryOf` read 7 of 13 declared params | HARNESS | `pendingAsks` attaches first (bounded wait for the replay); `queryOf` reads every `HookQuery` key (one list + a compile-time completeness check, mutation-checked); `e2e-hooks-query.test.ts` (red first) |
+| `22-notify-approve/-deny/-reply/-forged` (after the above, run ALONE) | the injected response never reaches the app: no Face ID sheet, the ask stays pending (screenshot), then deny/reply/forged open onto that leftover sheet. `notify-respond` writes a file the app reads only `if (__DEV__)` (`App.tsx`, Owner Q7: never in the shipped build); the gate installs the Release | FLOW cannot work against the gate's Release build (by design) | **quarantined** ×4 (reason + TODO lines) — needs a dev-build lane |
+| `17-outbox-changed` (run 2) | with the outbox now running at `up`, the phone reconnected (full-jitter backoff from 500 ms, `link-machine.ts`) BEFORE the laptop's turn and sent the item as unchanged — correct behaviour, racy flow | FLOW (race) | the laptop's turn runs on a SIDE `serve` (same store, a port the phone does not know) while the phone is offline: new `laptop-offline-turn` hook + `turnOnce` |
+| `25-session-info` (run 2) | `session-info-mcp-demo-switch` never found; `scrollUntilVisible UP` then swiped the sheet closed. The MCP row is pressable (opens its tools) AND has a switch: grouped, the switch was unreachable | **PRODUCT** (VoiceOver could not switch a server in Session info) | `rowAccessibility`: a trailing control is always its own element; a pressable row with one keeps its action on the label column (`onAccessibilityTap`). `row-value.test.ts` |
+| `33-hub` (run 2) | Activity tapped with nothing running → a sheet with only "Scheduled · No scheduled wakes" instead of "Nothing running" inline. `activityEmpty = groups.length === 0`, and the wake feed (mobile-qa-sweep) always adds an empty Scheduled group | **PRODUCT** (mobile-hub-tap Design 2 regression) | `ActivityView.nothingRunning` (no group has rows) → the hub's `activityEmpty`. `activity.test.ts` (red first); `hub-tap-wiring.test.ts` updated |
+| `19-deep-link` (run 2) | iOS's `Open in "tentacle"?` did not appear on the second run on the same simulator (it kept the answer); the review opened directly | FLOW (simulator state) | the `Open` tap is `optional`; the review is the assertion |
+| `22-relay-only` (run 2) | after `pressKey: home` + `launchApp` (a cold start) the lock is up, `computers-list` under it | FLOW | `_unlock` after the relaunch |
 | `push-placeholder`, `22-notify-render` | the banner was never found. Probe: a PLAIN `simctl push` banner, on screen (screenshots `bg.png`/`fg.png`: shown foreground and background) during a 20 s `extendedWaitUntil`, was not found by Maestro either | FLOW cannot work (Maestro does not read SpringBoard banners on iOS 26) | **quarantined** (reason + TODO lines); the banner stays on README's device checklist (D3) |
-| `30-artifact-escape` | suite only: `ESCAPED: ["unnamed"]` with scripts OFF (no fixture request lacks `?p=`); alone: PASS | UNDECIDED in run 1 | the listener now records `unnamed <METHOD> <path>`; see runs 2–3 |
+| `30-artifact-escape` | suite only: `ESCAPED: ["unnamed"]` with scripts OFF; alone: PASS. With the path recorded, run 2 said `unnamed POST /mcp` — an MCP-over-HTTP client, which a scripts-off WebView cannot be and the harness never configures: another local process probing ports | HARNESS (noise on an ephemeral port) | a nameless request counts only with a WebKit user agent (every WebView request has one); others are `strays`, reported, never counted. `e2e-escape-probes.test.ts` (red first). A NAMED probe counts whatever its agent |
 | `05-daemon-down` | PASSED in the suite in run 1 (reported red in-suite before) | — | covered by the list-scroll fix; see runs 2–3 |
 | `34-hub-commands` | PASS (tagged `known-bug`) | — | tag + TODO sub-line dropped |
 

@@ -1,4 +1,7 @@
 appId: so.tentacle.app
+tags:
+  - quarantine
+# quarantine: `notify-respond` injects the response through a file the app reads in DEV builds only (App.tsx `if (__DEV__)`, Owner Q7: never in the shipped build), and the gate installs the shippable Release, so the injected action never reaches the app (docs/fix/mobile-e2e-reds.md); run it against a dev build, or on a device (README D3)
 ---
 # `22-notify-reply` (docs/feat/mobile-notifications.md N8): Reply sends the
 # person's words with a refusal, and the MODEL gets them — the plan's F21 case

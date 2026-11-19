@@ -83,6 +83,9 @@ appId: so.tentacle.app
 # `launchApp` relaunches onto `Computers`, so the flow walks back in.
 - pressKey: home
 - launchApp
+# A relaunch is a cold start, and a cold start is LOCKED (docs/feat/mobile-lock.md
+# Owner Q1): get past it as every relaunching flow does (docs/fix/mobile-e2e-reds.md).
+- runFlow: _unlock.yaml
 - extendedWaitUntil:
     visible:
       id: "computers-list"

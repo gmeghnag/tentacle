@@ -29,7 +29,7 @@ describe("the screen tells the hub whether Activity has anything to show", () =>
     const at = SCREEN.indexOf("const hubCtx = hubContextOf({");
     expect(at).toBeGreaterThan(-1);
     const call = SCREEN.slice(at, SCREEN.indexOf("});", at));
-    expect(call).toContain("activityEmpty: activityVm.groups.length === 0");
+    expect(call).toContain("activityEmpty: activityVm.nothingRunning");
     // `activityView(...)` is the one truth for "is the sheet empty" — the same
     // field the sheet draws its dimmed line from (`activity.ts`).
     expect(SCREEN).toContain("const activityVm = activityView(");
