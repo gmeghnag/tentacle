@@ -551,3 +551,21 @@ All three tests are non-vacuous. The executor's own M1–M5 claims match the cod
 - (f) §7 "logic in pure modules": the new decisions are all pure and React-free. No component touched. No protocol, persistence or terminal path touched.
 
 **How the executor behaved:** it stayed in scope (S3 only). It recorded the four drifts with reasons; the 64 pt floor and the cropped-rounding fix are both sound. Its red → green and mutation evidence reproduces. It slipped on the two artifact-level points above.
+
+### Round 2 (S3 re-review: round 4's findings, commit `d283ef13`)
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; scope: `git diff HEAD~1`; a different model family from the executor)
+
+**Verdict: PASS.** Both MEDIUM findings from round 4 are fixed, the guard catches each one when it is put back, and nothing regressed. No HIGH or MEDIUM findings.
+
+1. **Finding 1 (changelog claimed an unbuilt layout) — FIXED.** The fragment is back to the shimmer-only bullet. The doc's own `**Changelog:**` metadata line was corrected with it. Mutation: putting back "A photo-only message has no bubble at all." turns `mobile-thinking-images-artifacts.test.ts` RED (the orphaned-claim test).
+2. **Finding 2 (wrong S3 signature) — FIXED.** The section is now signed `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`. Mutation: re-signing it `claude-sonnet-4-5` turns the guard RED (the S3-id test). Both mutations were reverted and the tree is clean.
+
+**Gate:** the new test → 6 pass / 0 fail. With `changelog-guard` and `task-doc-signatures` → 15 / 0. `bun run lint` is clean (2115 files). `bun run typecheck` is clean (root, mobile, relay).
+
+**Nits (not blocking):**
+- (a) The claim guard matches the exact wording. A reworded claim ("Photos now appear above the bubble, and a message with only photos draws no bubble") passes it, which I confirmed by mutation. What really stops this is the S4 rule "the photo sentence lands with its consumer", not the regex.
+- (b) `"the reason is quoted from the run record"` is a tautology: `expect(DEEPSEEK).toBe(<same literal>)`. It can never fail.
+- (c) The guard's comment cites `~/.config/tentacle/config.jsonc` and `runs/night-*.log`, which are files outside the repo, so a reader cannot check them.
+
+**How the executor behaved:** it went straight at both findings and also fixed a second site of finding 1 (the metadata line). It recorded the walker drift honestly. Its mutation table reproduces.
