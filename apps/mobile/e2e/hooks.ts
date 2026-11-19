@@ -308,6 +308,11 @@ export function hookFor(path: string): HookName | undefined {
     case "model-prompts":
     case "model-replies":
     case "edit-calls":
+    // Handled below but never routed until the first gate run found flows 13–15
+    // dying on `404 unknown hook` (docs/feat/mobile-e2e-gate.md).
+    case "queue-state":
+    case "laptop-enqueue":
+    case "laptop-cancel":
     case "laptop-detach":
     case "pair-start":
     case "pair-confirm":

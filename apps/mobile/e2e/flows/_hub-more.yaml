@@ -1,0 +1,16 @@
+appId: so.tentacle.app
+---
+# `_hub-more` (docs/feat/mobile-e2e-gate.md): the fan's last disc is More; it
+# opens the plain menu (`hub-menu-sheet`), where `ITEM` is a row. The caller taps it.
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "more"
+- tapOn:
+    id: "hub-item-more"
+- extendedWaitUntil:
+    visible:
+      id: "hub-menu-sheet"
+    timeout: 5000
+- assertVisible:
+    id: "hub-menu-${ITEM}"

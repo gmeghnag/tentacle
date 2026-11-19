@@ -1,0 +1,32 @@
+appId: so.tentacle.app
+---
+# 34-hub-info (docs/feat/mobile-e2e-gate.md): More → Session info opens the
+# Session info sheet, with its model row.
+# The shared prefix: pair, open this flow's own session, wait for the hub.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${HUBITEM_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- runFlow:
+    file: _hub-more.yaml
+    env:
+      ITEM: "info"
+- tapOn:
+    id: "hub-menu-info"
+- extendedWaitUntil:
+    visible:
+      id: "session-info-sheet"
+    timeout: 10000
+- extendedWaitUntil:
+    visible:
+      id: "session-info-model-Model"
+    timeout: 15000

@@ -9,7 +9,7 @@ if (!response.ok) {
   throw new Error(`history failed: ${response.status} ${response.body}`);
 }
 const history = json(response.body).history;
-if (history.user !== "SLOW flow seven prompt") {
+if (history.user !== "STEADY flow seven prompt") {
   throw new Error(`the daemon's last user message is ${JSON.stringify(history.user)}`);
 }
 if (typeof history.assistant !== "string" || !history.assistant.includes("mock model")) {
@@ -17,7 +17,7 @@ if (typeof history.assistant !== "string" || !history.assistant.includes("mock m
 }
 const prompts = http.get(`http://${MAESTRO_HOOKS}/model-prompts`);
 // Matched on what was typed: context awareness appends "\n\n[context: …]".
-const asked = (p) => p === "SLOW flow seven prompt" || p.startsWith("SLOW flow seven prompt\n");
+const asked = (p) => p === "STEADY flow seven prompt" || p.startsWith("STEADY flow seven prompt\n");
 if (!json(prompts.body).prompts.some(asked)) {
   throw new Error("the mock model was never asked the prompt the flow typed");
 }

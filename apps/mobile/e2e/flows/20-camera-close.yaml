@@ -12,8 +12,12 @@ appId: so.tentacle.app
     file: "pair-start.js"
 - launchApp:
     clearState: true
+    # Naming ANY permission drops Maestro's default "all allowed", so the
+    # notification prompt (asked after pairing) would cover the app on a clean
+    # install (the second gate run, docs/feat/mobile-e2e-gate.md).
     permissions:
       camera: allow
+      notifications: allow
 - clearKeychain
 # docs/feat/mobile-lock.md: locked at cold start (Owner Q1).
 - runFlow: _unlock.yaml
@@ -48,8 +52,16 @@ appId: so.tentacle.app
     id: "pair-paste-input"
 - inputText: ${output.payload}
 - hideKeyboard
-- tapOn:
-    id: "pair-paste-submit"
+# On iOS 26 `hideKeyboard` sends Return, which SUBMITS a valid paste: the review
+# is then already up (the first gate run, docs/feat/mobile-e2e-gate.md). Tap
+# submit only when it has not.
+- runFlow:
+    when:
+      notVisible:
+        id: "pair-review"
+    commands:
+      - tapOn:
+          id: "pair-paste-submit"
 - assertVisible:
     id: "pair-review"
 - tapOn:
