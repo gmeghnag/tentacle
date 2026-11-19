@@ -342,6 +342,72 @@ describe("runAttempt: a timeout kills the whole attempt tree (review round 1 F3)
   });
 });
 
+describe("Ctrl+C reaps the attempt's tree (review round 2 R1)", () => {
+  // `detached: true` (F3) takes the attempt OUT of the terminal's process group,
+  // so the terminal's own SIGINT no longer reaches it: without a handler the
+  // harness dies without its `finally`, and the Maestro JVM + XCTest driver keep
+  // driving the simulator. A child `bun` stands in for the harness (killing THIS
+  // process would kill the test run) — it starts one attempt and is SIGINTed.
+  const alive = (m: string) =>
+    Bun.spawnSync(["pgrep", "-f", `sleep ${m}`])
+      .stdout.toString()
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+
+  test("nothing of the attempt outlives the harness", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "e2e-sigint-"));
+    const m = `9${Math.floor(Math.random() * 900000 + 100000)}`;
+    const script = join(dir, "harness.ts");
+    const runTs = join(import.meta.dir, "..", "e2e", "run.ts");
+    await Bun.write(
+      script,
+      `import { runAttempt } from ${JSON.stringify(runTs)};\nawait runAttempt(["sh", "-c", "sleep ${m} & sleep ${m}"], {\n  cwd: ${JSON.stringify(dir)}, env: {},\n  stdoutPath: ${JSON.stringify(join(dir, "out.log"))},\n  stderrPath: ${JSON.stringify(join(dir, "err.log"))},\n  timeoutMs: 120000,\n});\n`,
+    );
+    const child = Bun.spawn(["bun", script], { stdout: "ignore", stderr: "ignore" });
+    // Long enough for the attempt to lead its group and start both sleeps.
+    await Bun.sleep(1500);
+    child.kill("SIGINT");
+    await child.exited;
+    await Bun.sleep(500);
+    const left = alive(m);
+    if (left.length > 0) {
+      Bun.spawnSync(["pkill", "-9", "-f", `sleep ${m}`]);
+    }
+    expect({ survived: left }).toEqual({ survived: [] });
+    await rm(dir, { recursive: true, force: true });
+  }, 30_000);
+
+  test("the reap handler lives only while an attempt runs (`--hold` keeps its own Ctrl+C)", async () => {
+    // `E2E_HOLD` waits on SIGINT AFTER the flows, then writes the summary: a
+    // reap handler left installed would exit 130 first and lose the summary.
+    const before = {
+      int: process.listenerCount("SIGINT"),
+      term: process.listenerCount("SIGTERM"),
+    };
+    const dir = await mkdtemp(join(tmpdir(), "e2e-sigint-"));
+    let during = { int: -1, term: -1 };
+    const pending = runAttempt(["sh", "-c", "sleep 0.3"], {
+      cwd: dir,
+      env: {},
+      stdoutPath: join(dir, "out.log"),
+      stderrPath: join(dir, "err.log"),
+      timeoutMs: 5000,
+    });
+    during = { int: process.listenerCount("SIGINT"), term: process.listenerCount("SIGTERM") };
+    await pending;
+    const after = {
+      int: process.listenerCount("SIGINT"),
+      term: process.listenerCount("SIGTERM"),
+    };
+    expect({ during, after }).toEqual({
+      during: { int: before.int + 1, term: before.term + 1 },
+      after: before,
+    });
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
 describe("the hook server routes every hook it declares (the first gate run)", () => {
   // `14-returned-mine` / `15-returned-other` died on `404 unknown hook`: the
   // handlers for `queue-state`, `laptop-enqueue`, `laptop-cancel` existed but

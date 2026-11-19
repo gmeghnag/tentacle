@@ -162,6 +162,39 @@ Narrow gate: `bun test apps/mobile/test/e2e-gate.test.ts apps/mobile/test/e2e-fl
 → 73 pass, 0 fail; `bunx biome check` on the 3 changed TS files → clean; `tsc -p apps/mobile`
 → clean.
 
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-19* (resumed a stopped DeepSeek attempt: kept its `reapAll` + `installSignalReap` shape, fixed its lifetime)
+
+- **R1 (MEDIUM) — FIXED.** `runAttempt` (`run.ts`) now installs a SIGINT/SIGTERM handler
+  (`installSignalReap`) for the attempt's life only: it runs `reapAll` (every child, each
+  with the group it leads) then exits 130/143; the attempt adds and removes ITSELF in
+  `children` (no more `onSpawn`). DeepSeek's draft installed the handler once, for good,
+  with `process.once` — after the flows it would pre-empt `E2E_HOLD`'s own SIGINT wait
+  (`run.ts` HOLD block) and exit 130 before `summary.txt` is written; now `runAttempt`
+  removes it in a `finally`. Tests (`Ctrl+C reaps the attempt's tree`): `nothing of the
+  attempt outlives the harness` (a child `bun` runs one attempt `sh -c "sleep & sleep"`, is
+  SIGINTed, then `pgrep` → `[]`) and `the reap handler lives only while an attempt runs`
+  (listener counts +1 during, back to baseline after). Red: the second test on DeepSeek's
+  draft → `after: {int: 1, term: 1}`, expected `0/0`. Mutations: (a) the handler without
+  `reapAll()` (= the pre-round behaviour: Bun dies, the group lives) → `survived: [...]`,
+  fails; (b) the `finally` without `removeSignalReap()` → the listener test fails. Both
+  reverted (`rg MUTATION` → none).
+- **F4 (MEDIUM, blocker) — NOT FIXED (escalated).** Needs a ~65 min full simulator run plus
+  triage of 32 reds — outside a fix round and this session's budget (no foreground job
+  over 10 min, no polling). New evidence on disk since round 1 (DeepSeek, this worktree,
+  2026-11-19): `1795044940371` — `05-daemon-down` alone → `GATE PASS — 1 passed` (71 s),
+  though it FAILED in the full run, which points at cross-flow state leaking in a full run
+  rather than per-flow breakage (hypothesis, not verified); `1795045041132` — the
+  `33-hub` + `34-hub-*` six alone → `GATE FAIL — 0 passed, 6 failed` (496 s), so the hub
+  reds are real per-flow failures, not ordering. Not triaged. Decision needed from the owner: run
+  `scripts/e2e-gate.sh <udid>` and triage in a dedicated round (or split it into its own
+  task), since nothing in the code can close F4 without that run.
+
+Narrow gate: `bun test apps/mobile/test/e2e-gate.test.ts apps/mobile/test/e2e-flows.test.ts`
+→ 75 pass, 0 fail; `bunx biome check` on the 2 changed TS files → clean; `tsc -p apps/mobile`
+→ clean.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-18* (fresh context; same model as the executor: shared blind spots possible)

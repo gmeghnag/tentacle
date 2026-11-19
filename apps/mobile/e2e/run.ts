@@ -55,7 +55,7 @@ const RUNS_DIR = join(REPO, ".tentacle", "tmp", "e2e-mobile");
 
 type Child = Subprocess<"ignore", "inherit", "inherit">;
 
-/** Every child the run started, killed in `finally`. */
+/** Every child the run started, killed in `finally` (and on a signal, `reapAll`). */
 const children = new Set<Child>();
 
 /**
@@ -827,13 +827,7 @@ async function main(): Promise<number> {
     console.log(`\n${summary}\nresults in ${runDir}`);
     return verdictOf(allResults).exitCode;
   } finally {
-    for (const child of children) {
-      child.kill();
-      // A flow attempt leads its own group (`runAttempt`, detached): reap the
-      // JVM/driver it started too. A no-op for a child that leads no group.
-      killFlowTree(child.pid);
-    }
-    children.clear();
+    reapAll();
     mock.stop();
     // The fake APNs is in THIS process too (an h2c server keeps the loop alive).
     apns.stop();
@@ -1515,8 +1509,6 @@ export interface AttemptOptions {
   readonly stderrPath: string;
   /** The attempt is killed after this long. */
   readonly timeoutMs: number;
-  /** Called with the live child, so the caller can tear it down in `finally`. */
-  readonly onSpawn?: (child: Child) => void;
 }
 
 /**
@@ -1530,6 +1522,22 @@ export async function runAttempt(
   argv: readonly string[],
   opts: AttemptOptions,
 ): Promise<{ readonly code: number | null; readonly timedOut: boolean }> {
+  // Ctrl+C must reach the tree this spawns, which the terminal's own SIGINT no
+  // longer does (review round 2 R1). Installed here because THIS is what
+  // detaches, and only for the attempt's life: `E2E_HOLD` waits on its own
+  // SIGINT after the flows, then writes the summary.
+  const removeSignalReap = installSignalReap();
+  try {
+    return await attemptOnce(argv, opts);
+  } finally {
+    removeSignalReap();
+  }
+}
+
+async function attemptOnce(
+  argv: readonly string[],
+  opts: AttemptOptions,
+): Promise<{ readonly code: number | null; readonly timedOut: boolean }> {
   const child = Bun.spawn([...argv], {
     cwd: opts.cwd,
     env: opts.env,
@@ -1539,13 +1547,15 @@ export async function runAttempt(
     // reaches the JVM and the driver too (without it, `-pid` names no group).
     detached: true,
   }) as unknown as Child;
-  opts.onSpawn?.(child);
+  // In the reap set for as long as it lives, so a signal takes it too.
+  children.add(child);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
     killFlowTree(child.pid);
   }, opts.timeoutMs);
   const code = await child.exited;
+  children.delete(child);
   clearTimeout(timer);
   if (timedOut) {
     // The leader may be gone while what it started is not.
@@ -1565,6 +1575,45 @@ export function killFlowTree(pid: number | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+/** Kill every child this run started, each with the group it leads. */
+export function reapAll(): void {
+  for (const child of children) {
+    child.kill();
+    // A flow attempt leads its own group (`runAttempt`, detached): reap the
+    // JVM/driver it started too. A no-op for a child that leads no group.
+    killFlowTree(child.pid);
+  }
+  children.clear();
+}
+
+/**
+ * Ctrl+C (or SIGTERM) must take the attempt's tree with it (review round 2 R1).
+ * `runAttempt` spawns detached, so the terminal's own SIGINT never reaches the
+ * Maestro JVM and the XCTest driver: without this, a signal ends Bun without its
+ * `finally` (`reapAll`) and an orphaned driver holds the simulator's driver
+ * port for the next run. Reap, then exit with the conventional code. Returns
+ * the remover (`runAttempt` installs it per attempt).
+ */
+export function installSignalReap(): () => void {
+  const signals = [
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const;
+  const handlers = signals.map(([signal, code]) => {
+    const handler = () => {
+      reapAll();
+      process.exit(code);
+    };
+    process.on(signal, handler);
+    return [signal, handler] as const;
+  });
+  return () => {
+    for (const [signal, handler] of handlers) {
+      process.off(signal, handler);
+    }
+  };
 }
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */
@@ -1598,7 +1647,6 @@ async function spawnFlow(
         ?.replace(/\.yaml$/, "") ?? ""
     ];
   const fresh = compose === undefined ? {} : { [compose]: await newComposeSession() };
-  let attempt: Child | undefined;
   const { code, timedOut } = await runAttempt(
     [
       "maestro",
@@ -1636,16 +1684,8 @@ async function spawnFlow(
       stdoutPath: join(outDir, "maestro.log"),
       stderrPath: join(outDir, "maestro.err.log"),
       timeoutMs,
-      onSpawn: (child) => {
-        attempt = child;
-        children.add(child);
-      },
     },
   );
-  // Only THIS attempt: the set also holds `serve`, which must still be reaped.
-  if (attempt !== undefined) {
-    children.delete(attempt);
-  }
   if (timedOut) {
     await writeFile(
       join(outDir, "timeout.txt"),
