@@ -1,0 +1,90 @@
+/**
+ * When a transcript cell must redraw (docs/fix/mobile-fan-jank-device.md).
+ *
+ * The session screen re-renders on every state change, and its list re-renders
+ * every visible cell with it — each one re-parsing its markdown — although
+ * during a stream only the LAST row changed. A cell is memoized on the data it
+ * draws; this module is the one place that says what "the same data" means, so
+ * the decision is tested here, not buried in a component (AGENTS §7).
+ *
+ * Identity for everything, except two values the screen rebuilds on each
+ * layout pass for EVERY row (`stepLayout`'s cell, `noticeLooks`' look): those
+ * are compared by content, or no cell would ever be skipped. The callbacks a
+ * cell fires are NOT data: they go through one stable handle that always
+ * reaches the screen's latest closures (`TranscriptCell.tsx`).
+ */
+import type { NoticeLook } from "./notice-group.ts";
+import type { StepCell } from "./tool-steps.ts";
+
+/** What a cell draws; every field is compared (see `sameCellData`). */
+export interface CellData<RowT = unknown, PaletteT = unknown, ThumbsT = unknown> {
+  readonly row: RowT;
+  readonly cell: StepCell | undefined;
+  readonly look: NoticeLook | undefined;
+  readonly open: boolean;
+  readonly full: boolean;
+  readonly reduceMotion: boolean;
+  readonly speak: "offered" | "speaking" | undefined;
+  /** The sub-agent the card opens, or null. */
+  readonly child: string | null;
+  /** Whether the speaker / the artifact card are wired at all. */
+  readonly voice: boolean;
+  readonly artifacts: boolean;
+  readonly palette: PaletteT;
+  readonly thumbnails: ThumbsT;
+  readonly diagramStyle: unknown;
+  readonly chartLabels: unknown;
+}
+
+export function sameStepCell(a: StepCell | undefined, b: StepCell | undefined): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (a === undefined || b === undefined || a.kind !== b.kind) {
+    return false;
+  }
+  switch (a.kind) {
+    case "hidden":
+      return true;
+    case "step": {
+      const o = b as Extract<StepCell, { kind: "step" }>;
+      return (
+        a.thought === o.thought &&
+        a.thoughtFirst === o.thoughtFirst &&
+        a.thread.up === o.thread.up &&
+        a.thread.down === o.thread.down
+      );
+    }
+    case "thought": {
+      const o = b as Extract<StepCell, { kind: "thought" }>;
+      return a.ms === o.ms && a.thread.up === o.thread.up && a.thread.down === o.thread.down;
+    }
+  }
+}
+
+export function sameLook(a: NoticeLook | undefined, b: NoticeLook | undefined): boolean {
+  if (a === b) {
+    return true;
+  }
+  return a !== undefined && b !== undefined && a.glyph === b.glyph && a.joined === b.joined;
+}
+
+/** Whether a cell drawn from `a` would draw the same from `b` (so it may be skipped). */
+export function sameCellData(a: CellData, b: CellData): boolean {
+  return (
+    a.row === b.row &&
+    a.open === b.open &&
+    a.full === b.full &&
+    a.reduceMotion === b.reduceMotion &&
+    a.speak === b.speak &&
+    a.child === b.child &&
+    a.voice === b.voice &&
+    a.artifacts === b.artifacts &&
+    a.palette === b.palette &&
+    a.thumbnails === b.thumbnails &&
+    a.diagramStyle === b.diagramStyle &&
+    a.chartLabels === b.chartLabels &&
+    sameStepCell(a.cell, b.cell) &&
+    sameLook(a.look, b.look)
+  );
+}

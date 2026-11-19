@@ -13,15 +13,19 @@ const read = (...parts: string[]): string => readFileSync(join(ROOT, ...parts), 
 
 describe("every transcript row is guarded", () => {
   const screen = read("src", "screens", "SessionScreen.tsx");
+  // The row is drawn by the memoized cell (docs/fix/mobile-fan-jank-device.md).
+  const cell = read("src", "screens", "transcript", "TranscriptCell.tsx");
 
   test("renderItem wraps the whole row (SwipeTime + TranscriptRow) in RowGuard", () => {
-    expect(screen).toMatch(
+    expect(screen).toMatch(/return \(\s*<TranscriptCell/);
+    expect(cell).toMatch(
       /<RowGuard[\s\S]{0,300}fallback=\{<RowFallback palette=\{palette\} \/>\}[\s\S]{0,300}>\s*<SwipeTime[\s\S]*<TranscriptRow[\s\S]*<\/SwipeTime>\s*<\/RowGuard>/,
     );
   });
 
   test("a failed row retries when its row object changes (resetKey is the row itself)", () => {
-    expect(screen).toMatch(/<RowGuard[\s\S]{0,300}resetKey=\{item\}[\s\S]{0,300}>\s*<SwipeTime/);
+    expect(screen).toMatch(/<TranscriptCell\s+row=\{item\}/);
+    expect(cell).toMatch(/<RowGuard[\s\S]{0,300}resetKey=\{row\}[\s\S]{0,300}>\s*<SwipeTime/);
   });
 
   test("the artifact viewer's full-screen chart is guarded too, and logs a client-error", () => {
@@ -40,9 +44,10 @@ describe("every transcript row is guarded", () => {
   });
 
   test("a caught row error is reported with the row's kind", () => {
-    expect(screen).toMatch(
-      /onError=\{\(error\) => onRowError\?\.\(rowErrorFields\(item\.kind, error\)\)\}/,
+    expect(cell).toMatch(
+      /onError=\{\(error\) => actions\.current\.onRowError\(rowErrorFields\(row\.kind, error\)\)\}/,
     );
+    expect(screen).toMatch(/onRowError: \(fields\) => onRowError\?\.\(fields\)/);
   });
 
   test("the fallback is a TranscriptRow-side notice row", () => {

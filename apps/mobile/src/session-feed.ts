@@ -71,8 +71,13 @@ export interface ForeignTurn {
 export interface SessionFeedDeps {
   /** The fold state, read fresh at each input (a captured copy loses an update). */
   readonly state: () => State;
-  /** One folded input: hand back the new state. */
-  readonly put: (next: State) => void;
+  /**
+   * One folded input: hand back the new state. `cause` is `"stream"` when the
+   * input was a streamed text/reasoning delta — the screen may coalesce the
+   * re-render those cause (docs/fix/mobile-fan-jank-device.md); every other
+   * input is shown at once.
+   */
+  readonly put: (next: State, cause?: "stream") => void;
   /** The foreign turn now stoppable (the composer's Stop), or null when none runs. */
   readonly setForeign: (turn: ForeignTurn | null) => void;
   /**
@@ -256,7 +261,10 @@ function foldStream(
         // The receipt clock: a row this event CREATES takes it (a delta that only
         // extends an existing row keeps that row's own time). A `history_reset`
         // ignores it — its rows take the daemon's `times`.
-        deps.put(apply(deps.state(), event as TranscriptInput, now()));
+        deps.put(
+          apply(deps.state(), event as TranscriptInput, now()),
+          event.type === "text" || event.type === "reasoning" ? "stream" : undefined,
+        );
         if (event.type === "history_reset") {
           // The reset REPLACED the history mid-turn: its fill is gone with it.
           deps.onHistoryReplaced?.();

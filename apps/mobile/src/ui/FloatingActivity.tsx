@@ -12,7 +12,7 @@
  * released, never terminated).
  */
 import { BlurView } from "expo-blur";
-import { type JSX, useEffect, useMemo, useRef, useState } from "react";
+import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type AccessibilityActionEvent,
   AccessibilityInfo,
@@ -47,6 +47,7 @@ import {
   hubA11yRoute,
   mustCancel,
 } from "../hub-session.ts";
+import { PERF } from "../perf-probe.ts";
 import { DENSE_FONT_SCALE, type Palette, shadow, typography } from "../theme.ts";
 import { HubFan } from "./HubFan.tsx";
 
@@ -274,6 +275,7 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
           if (effect.layout.kind === "fan" && menu !== null) {
             const byId = new Map(latest.current.fanItems.map((item) => [item.id, item]));
             const items = menu.ids.flatMap((id) => byId.get(id as HubActionId) ?? []);
+            PERF.fanOpen();
             setFan({ layout: effect.layout, items, hi: null, flash: null, now: Date.now() });
           } else {
             moving.current = false;
@@ -357,6 +359,9 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
   // back-swipe is restored on every close path).
   const fanOpen = fan !== null;
   useEffect(() => {
+    if (!fanOpen) {
+      PERF.fanClose();
+    }
     latest.current.onFanChange(fanOpen);
   }, [fanOpen]);
   useEffect(
@@ -409,11 +414,13 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
           local = { x: event.nativeEvent.locationX, y: event.nativeEvent.locationY };
           moving.current = true;
         }
+        PERF.touch(event.nativeEvent.timestamp);
         driver.down(pointOf({ dx: 0, dy: 0 }), Date.now());
         setEngaged(driver.state().kind);
       },
       onPanResponderMove: (_event, g) => driver.move(pointOf(g), Date.now()),
-      onPanResponderRelease: (_event, g) => {
+      onPanResponderRelease: (event, g) => {
+        PERF.touch(event.nativeEvent.timestamp);
         driver.up(pointOf(g), Date.now());
         setEngaged(driver.state().kind);
       },
@@ -426,6 +433,15 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
       },
     });
   }, [driver]);
+
+  // Stable, so the memoized fan is not redrawn by a streaming screen's re-render.
+  const onTapOverlay = useCallback(
+    (p: Point) => {
+      driver.tapOverlay(p);
+      setEngaged(driver.state().kind);
+    },
+    [driver],
+  );
 
   // The running-turn arc: one turn per 1.2 s; still under Reduce Motion.
   const spin = useRef(new Animated.Value(0)).current;
@@ -493,10 +509,7 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
           band={bounds}
           flash={fan.flash}
           now={fan.now}
-          onTapOverlay={(p) => {
-            driver.tapOverlay(p);
-            setEngaged(driver.state().kind);
-          }}
+          onTapOverlay={onTapOverlay}
         />
       )}
       <Animated.View

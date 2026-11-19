@@ -19,7 +19,10 @@ describe("the Charts setting reaches every chart, and only the screen subscribes
     expect(screen).toMatch(
       /useState<ChartSettings>\(\(\) => CHART_SETTINGS\.current\(\)\)[\s\S]{0,120}CHART_SETTINGS\.subscribe\(setChartSettings\)/,
     );
-    expect(screen).toMatch(/<TranscriptRow[\s\S]{0,400}chartLabels=\{chartSettings\.labels\}/);
+    // Through the memoized cell (docs/fix/mobile-fan-jank-device.md).
+    expect(screen).toMatch(/<TranscriptCell[\s\S]{0,800}chartLabels=\{chartSettings\.labels\}/);
+    const cell = read("screens", "transcript", "TranscriptCell.tsx");
+    expect(cell).toMatch(/<TranscriptRow[\s\S]{0,400}chartLabels=\{props\.chartLabels\}/);
   });
 
   test("a transcript chart row takes the mode as a prop (no listener of its own)", () => {

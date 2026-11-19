@@ -137,6 +137,7 @@ import {
 } from "./src/pairing-flow.ts";
 import { pdfsRoot, pickPdf } from "./src/pdf-source.ts";
 import { handlePairingText, takePendingLink } from "./src/pending-link.ts";
+import { PERF } from "./src/perf-probe.ts";
 import { inUseCopies, prunePhotoCopies } from "./src/photo-copies.ts";
 import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
 import type { PhotoSettings } from "./src/photo-settings-store.ts";
@@ -261,6 +262,8 @@ const CLIENTS = new Map<string, RemoteClient>();
  */
 const APP_LOG: AppLog = createAppLog({ now: Date.now, capacity: 500 });
 const APP_LOG_FILE = createAppLogFile(APP_LOG_FILES);
+// The perf trace (docs/fix/mobile-fan-jank-device.md): `grep ptrace` in an export.
+PERF.attach(APP_LOG);
 
 /**
  * The app-switcher cover (D4, Owner Q2/Q3): the stock native blur Step 0 proved
@@ -1428,6 +1431,8 @@ function SessionRoute({
         // into the ONE exported log (`Settings → Export logs`, `grep qtrace`).
         // Diagnostic only: nothing here changes a behaviour.
         trace: queueTrace(sessionId, APP_LOG),
+        // The perf trace's stream-fold count (diagnostic only).
+        onStreamFold: () => PERF.fold(),
         controller: RUNTIMES.controller(link.client),
         broker: link.permissions,
         now: () => Date.now(),

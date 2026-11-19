@@ -30,7 +30,8 @@ describe("SessionScreen: one layout, the open state, the footer", () => {
 
   test("renderItem reads the row's cell, and a hidden cell is null BEFORE SwipeTime wraps it", () => {
     expect(src).toContain("layout.cells.get(item.key)");
-    expect(src).toMatch(/cell\?\.kind === "hidden"\)\s*\{?\s*return null;[\s\S]*<SwipeTime/);
+    // The memoized cell (docs/fix/mobile-fan-jank-device.md) wraps SwipeTime.
+    expect(src).toMatch(/cell\?\.kind === "hidden"\)\s*\{?\s*return null;[\s\S]*<TranscriptCell/);
   });
 
   test("the open and show-all sets live in the screen and reach every cell through extraData", () => {

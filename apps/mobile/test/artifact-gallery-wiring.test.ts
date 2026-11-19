@@ -48,7 +48,7 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     );
     expect(calls[0]?.params.open).toBe("page");
     const screen = read("src", "screens", "SessionScreen.tsx");
-    expect(screen).toContain('onOpenArtifacts("card", meta.artifactId)');
+    expect(screen).toContain('onOpenArtifacts?.("card", meta.artifactId)');
     const app = read("App.tsx");
     expect(app).toMatch(/onOpenArtifacts=\{\(from, open\) =>/);
     expect(app).toContain("open: route.params.open");
@@ -95,7 +95,11 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
       /onOpenArtifacts=\{\(from, open\) =>[\s\S]{0,300}openArtifactGallery\(navigation/,
     );
     const session = read("src", "screens", "SessionScreen.tsx");
-    expect(session).toMatch(/onArtifact: \(meta\) => onOpenArtifacts\("card", meta\.artifactId\)/);
+    expect(session).toMatch(
+      /onArtifact: \(meta\) => onOpenArtifacts\?\.\("card", meta\.artifactId\)/,
+    );
+    // The cell offers the card only when the screen has a gallery to open.
+    expect(session).toMatch(/artifacts=\{onOpenArtifacts !== undefined\}/);
   });
 
   test("the sheet calls it for a row whose `opens` is `artifacts`", () => {

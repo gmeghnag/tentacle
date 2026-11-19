@@ -583,11 +583,14 @@ function stream(
       // `THINKHOLD` (docs/feat/mobile-hub-native-driver.md): a HOLD turn that is
       // all Thinking first — a reasoning delta every 40 ms for the hold — the
       // load under which the owner saw the hub fan stutter.
+      // `THINKHOLD FAST` (docs/fix/mobile-fan-jank-device.md): the same, a delta
+      // every 10 ms — a real model's token rate, not a slow trickle.
       if (hold && prompt.includes("THINKHOLD")) {
         const until = Date.now() + ctx.holdMs;
+        const every = prompt.includes("FAST") ? 10 : 40;
         for (let i = 0; Date.now() < until; i++) {
           send(frame({ reasoning_content: `thinking step ${i}, weighing the next move. ` }));
-          await Bun.sleep(40);
+          await Bun.sleep(every);
         }
       }
       // 13d's flow 18: the images reached the MODEL (not just the daemon's store),

@@ -375,9 +375,34 @@ export interface FanMotion {
  * rest dim. Reduce Motion (read per open, M11): one 120 ms fade, no spring, no
  * stagger, no growth — the highlight is the accent fill alone.
  */
+const SHARED_MOTION = {
+  damping: 18,
+  stiffness: 260,
+  dimOpacity: 0.55,
+  fadeMs: 120,
+  collapseMs: 120,
+} as const;
+const STILL_MOTION: FanMotion = Object.freeze({
+  ...SHARED_MOTION,
+  spring: false,
+  staggerMs: 0,
+  fromScale: 1,
+  highlightScale: 1,
+});
+const SPRING_MOTION: FanMotion = Object.freeze({
+  ...SHARED_MOTION,
+  spring: true,
+  staggerMs: 18,
+  fromScale: 0.4,
+  highlightScale: 1.3,
+});
+
+/**
+ * ONE object per mode, never a fresh one (docs/fix/mobile-fan-jank-device.md):
+ * the fan starts its opening animation from an effect keyed on this value, so a
+ * fresh object per render restarted every item's spring — and its stagger
+ * delay — on every re-render of the screen, i.e. on every streamed delta.
+ */
 export function fanMotion(reduceMotion: boolean): FanMotion {
-  const shared = { damping: 18, stiffness: 260, dimOpacity: 0.55, fadeMs: 120, collapseMs: 120 };
-  return reduceMotion
-    ? { ...shared, spring: false, staggerMs: 0, fromScale: 1, highlightScale: 1 }
-    : { ...shared, spring: true, staggerMs: 18, fromScale: 0.4, highlightScale: 1.3 };
+  return reduceMotion ? STILL_MOTION : SPRING_MOTION;
 }
