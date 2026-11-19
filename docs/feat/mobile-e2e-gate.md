@@ -227,3 +227,15 @@ Gate: `bun test apps/mobile/test/e2e-gate.test.ts apps/mobile/test/e2e-flows.tes
 - **R1 (MEDIUM, new regression) — Ctrl+C now leaves Maestro running.** `detached: true` takes the attempt out of the terminal's process group, and `run.ts` installs no SIGINT handler (the only one is for `E2E_HOLD`, `run.ts:817`). Ctrl+C therefore ends Bun without its `finally`, so `killFlowTree` never runs. The Maestro JVM and XCTest driver keep driving the simulator. Before this round they got the terminal's SIGINT. Fix: on SIGINT/SIGTERM, kill each attempt's group (e.g. through the `finally`) before exiting.
 
 What holds: `killFlowTree` refuses pid ≤ 1 and its own pid. The `finally` group-kill is harmless for `serve`: it leads no group, so the kill gets ESRCH, which is caught. `children.delete(attempt)` keeps `serve` in the reap set.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; same model family as the round-2 fixer)
+
+**Verdict: REQUEST-CHANGES** (the code findings are closed; only F4 is left, and it needs the owner's decision)
+
+Gate: `bun test apps/mobile/test/e2e-gate.test.ts apps/mobile/test/e2e-flows.test.ts` → 75 pass, 0 fail; `bun run lint` clean; `bun run typecheck` clean.
+
+- **R1 — FIXED.** `installSignalReap` (`run.ts`) is installed only while an attempt runs, and its handler is `reapAll` then exit 130/143. Mutations, each reverted: (a) handler without `reapAll()` → `nothing of the attempt outlives the harness` fails; (b) `finally` without `removeSignalReap()` → `the reap handler lives only while an attempt runs` fails. Afterwards: `git status` clean, and `pgrep` finds no stray `sleep 9…`.
+- **Regressions checked, none found.** (1) Between attempts (build, setup) no handler is installed; Ctrl+C then reaches `serve` and the other non-detached children through the terminal's process group, as before. (2) `E2E_HOLD`'s own SIGINT wait is no longer pre-empted (the listener count is back to its baseline after each attempt). (3) A SIGTERM during an attempt now also reaps `serve`, which it did not before (an improvement). (4) The attempt adds and removes itself in `children`, and `serve` stays in it.
+- **F4 — still OPEN, escalated.** No triaged full run exists. New data: `05-daemon-down` passes alone but fails in the full run (likely state leaking between flows, unverified), and `33-hub` + the five `34-hub-*` flows run → all 6 fail even alone. Until the reds are triaged, the gate cannot be the iOS publish gate. Owner's decision: triage in a dedicated round, or merge the harness as is (no gate wired to the iOS publish yet) and split the triage into its own task (`fix/mobile-e2e-reds`) — I recommend the split, since the harness code itself now reviews clean.
