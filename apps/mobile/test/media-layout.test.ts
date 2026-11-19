@@ -1,12 +1,217 @@
 /**
- * `media-layout` (fix/mobile-media-live item 4): the owner's WhatsApp-shaped
- * bubble — image on top at full bubble width, caption BELOW it, no empty text
- * area when there are no words.
+ * `media-layout` S3 of feat/mobile-thinking-images: `photoBlock` (mockup F) and
+ * `userRowParts`.
  *
  * Each test names the mutation it is red on (AGENTS §9).
  */
 import { describe, expect, test } from "bun:test";
-import { MEDIA_MAX_RATIO, displayUri, layoutMedia, mediaBox } from "../src/media-layout.ts";
+import {
+  MEDIA_MAX_RATIO,
+  displayUri,
+  layoutMedia,
+  mediaBox,
+  photoBlock,
+  userRowParts,
+} from "../src/media-layout.ts";
+
+const ratio = (aspectRatio: number | undefined) =>
+  aspectRatio === undefined ? {} : { aspectRatio };
+
+/** One tile by index, asserted present first (never a `!` — AGENTS §9). */
+function tileAt<T>(block: { readonly tiles: readonly T[] }, index: number): T {
+  const tile = block.tiles[index];
+  if (tile === undefined) {
+    throw new Error(`no tile at ${index} (the block has ${block.tiles.length})`);
+  }
+  return tile;
+}
+
+describe("photoBlock — 1 photo keeps its own shape inside the cap", () => {
+  test("a landscape photo is 200 × 150 at the cap (mutation: a fixed square → the photo is cropped for nothing)", () => {
+    expect(photoBlock([ratio(4 / 3)])).toEqual({
+      tiles: [{ ref: { aspectRatio: 4 / 3 }, box: { width: 200, height: 150, cropped: false } }],
+      width: 200,
+      height: 150,
+    });
+  });
+
+  test("a portrait 3:4 photo is NOT cropped (mutation: clamp to the width → the normal iPhone photo loses a third)", () => {
+    expect(tileAt(photoBlock([ratio(0.75)]), 0).box).toEqual({
+      width: 200,
+      height: 267,
+      cropped: false,
+    });
+  });
+
+  test("a panorama is capped at 200 wide and floored at 64 tall, cropped (mutation: no floor → a 6:1 photo is a 33 pt strip that shows nothing)", () => {
+    expect(tileAt(photoBlock([ratio(6)]), 0).box).toEqual({
+      width: 200,
+      height: 64,
+      cropped: true,
+    });
+  });
+
+  test("a taller-than-clamp photo is clamped to 4/3 and cropped (mediaBox's rule still holds)", () => {
+    expect(tileAt(photoBlock([ratio(0.4)]), 0).box).toEqual({
+      width: 200,
+      height: 267,
+      cropped: true,
+    });
+  });
+
+  test("a missing or nonsense ratio is a 200 square — the one shape an unknown image may take (mutation: divide by it → a 0-height tile)", () => {
+    for (const bad of [undefined, 0, -2, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(tileAt(photoBlock([ratio(bad)]), 0).box).toEqual({
+        width: 200,
+        height: 200,
+        cropped: false,
+      });
+    }
+  });
+
+  test("a custom maxWidth is honoured, and the tile still fits in it (mutation: a hard 200 → an overflow in a narrower container)", () => {
+    const block = photoBlock([ratio(1)], { maxWidth: 120 });
+    expect(block.width).toBe(120);
+    expect(tileAt(block, 0).box.width).toBeLessThanOrEqual(120);
+  });
+});
+
+describe("photoBlock — 2 photos are squares side by side", () => {
+  test("two equal tiles, a 4 pt gap, 200 pt of block (mutation: the old full-bubble stack → not the owner's side-by-side)", () => {
+    const block = photoBlock([ratio(1), ratio(0.5)]);
+    expect(block.tiles.map((tile) => tile.box)).toEqual([
+      { width: 98, height: 98, cropped: false },
+      { width: 98, height: 98, cropped: false },
+    ]);
+    expect(block.width).toBe(200);
+    expect(block.height).toBe(98);
+  });
+
+  test("the photo's OWN ratio does not change a grid cell (the layout is the grid's, not the photo's)", () => {
+    const tall = photoBlock([ratio(0.5), ratio(6)]);
+    expect(tileAt(tall, 0).box).toEqual(tileAt(tall, 1).box);
+  });
+});
+
+describe("photoBlock — 3 photos is a tall tile beside two stacked", () => {
+  test("the first tile runs the whole height, the other two are squares (mutation: a plain 2 × 2 → an empty cell)", () => {
+    const block = photoBlock([ratio(1), ratio(1), ratio(1)]);
+    expect(block.tiles.map((tile) => tile.box)).toEqual([
+      { width: 98, height: 200, cropped: false },
+      { width: 98, height: 98, cropped: false },
+      { width: 98, height: 98, cropped: false },
+    ]);
+    expect(block.width).toBe(200);
+    expect(block.height).toBe(200);
+  });
+});
+
+describe("photoBlock — 4 photos is a 2 × 2 grid", () => {
+  test("four equal squares, no overflow (mutation: a tall first tile → the grid is lopsided)", () => {
+    const block = photoBlock([ratio(1), ratio(1), ratio(1), ratio(1)]);
+    expect(block.tiles.map((tile) => tile.box)).toEqual(
+      Array.from({ length: 4 }, () => ({ width: 98, height: 98, cropped: false })),
+    );
+    expect(block.tiles.every((tile) => tile.overflow === undefined)).toBe(true);
+    expect(block.width).toBe(200);
+    expect(block.height).toBe(200);
+  });
+
+  test("the tiles are in reading order: 4 refs keep their own order", () => {
+    const refs = ["a", "b", "c", "d"].map((id) => ({ id, ...ratio(1) }));
+    expect(photoBlock(refs).tiles.map((tile) => tile.ref.id)).toEqual(["a", "b", "c", "d"]);
+  });
+});
+
+describe("photoBlock — more than 4 photos: the last tile carries +N", () => {
+  test('5 photos draw 4 tiles and the last says +2 — itself and the hidden one (mutation: `refs.length - shown` → "+1", which is the tile itself)', () => {
+    const block = photoBlock([ratio(1), ratio(1), ratio(1), ratio(1), ratio(1)]);
+    expect(block.tiles).toHaveLength(4);
+    expect(tileAt(block, 3).overflow).toBe(2);
+    expect(block.tiles.slice(0, 3).every((tile) => tile.overflow === undefined)).toBe(true);
+  });
+
+  test("10 photos draw 4 tiles, the last says +7 (mutation: overflow counted from `maxTiles` → an off-by-one count)", () => {
+    const block = photoBlock(Array.from({ length: 10 }, () => ratio(1)));
+    expect(block.tiles).toHaveLength(4);
+    expect(tileAt(block, 3).overflow).toBe(7);
+  });
+
+  test("a custom maxTiles hides the rest behind the last tile it draws", () => {
+    const block = photoBlock([ratio(1), ratio(1), ratio(1), ratio(1)], { maxTiles: 2 });
+    expect(block.tiles).toHaveLength(2);
+    expect(tileAt(block, 1).overflow).toBe(3);
+  });
+});
+
+describe("photoBlock — the empty and odd inputs", () => {
+  test("no photos is an empty block, never a 0-size tile (mutation: a placeholder tile → an empty frame on every text row)", () => {
+    expect(photoBlock([])).toEqual({ tiles: [], width: 0, height: 0 });
+  });
+
+  test("nothing 0-height, at any count or ratio (mutation: any floor removed → a box that renders as nothing)", () => {
+    const counts = [1, 2, 3, 4, 5, 10];
+    const ratios = [4 / 3, 0.75, 6, 0.4, undefined, 0];
+    for (const count of counts) {
+      for (const r of ratios) {
+        const block = photoBlock(Array.from({ length: count }, () => ratio(r)));
+        expect(block.height).toBeGreaterThan(0);
+        expect(block.width).toBeGreaterThan(0);
+        for (const tile of block.tiles) {
+          expect(tile.box.width).toBeGreaterThan(0);
+          expect(tile.box.height).toBeGreaterThan(0);
+        }
+      }
+    }
+  });
+
+  test("no tile is wider than the cap, at any count (the owner's 200 pt limit)", () => {
+    for (const count of [1, 2, 3, 4, 10]) {
+      expect(photoBlock(Array.from({ length: count }, () => ratio(1))).width).toBeLessThanOrEqual(
+        200,
+      );
+    }
+  });
+});
+
+describe("userRowParts — a photo-only message has no bubble", () => {
+  const user = (over: Partial<Parameters<typeof userRowParts>[0]>) => ({
+    text: "",
+    images: [],
+    ...over,
+  });
+  const photo = { id: "a", mimeType: "image/png", size: 1 };
+
+  test("photo-only: photos, no bubble (mutation: always a bubble → an empty fill block under the photo)", () => {
+    expect(userRowParts(user({ images: [photo] }))).toEqual({ photos: true, bubble: false });
+  });
+
+  test("text-only: a bubble, no photos", () => {
+    expect(userRowParts(user({ text: "ciao" }))).toEqual({ photos: false, bubble: true });
+  });
+
+  test("both: a photo block above a bubble that holds the caption", () => {
+    expect(userRowParts(user({ text: "ciao", images: [photo] }))).toEqual({
+      photos: true,
+      bubble: true,
+    });
+  });
+
+  test("a document line alone keeps the bubble (the files are named inside it)", () => {
+    expect(userRowParts(user({ documents: ["report.pdf · 3 pp"] }))).toEqual({
+      photos: false,
+      bubble: true,
+    });
+  });
+
+  test("a restart caption alone keeps the bubble (it is drawn inside it)", () => {
+    expect(userRowParts(user({ restart: true }))).toEqual({ photos: false, bubble: true });
+  });
+
+  test("an entirely empty message draws nothing at all", () => {
+    expect(userRowParts(user({}))).toEqual({ photos: false, bubble: false });
+  });
+});
 
 describe("mediaBox — the image's shape follows the photo, bounded", () => {
   test("a landscape photo keeps its ratio at the full width", () => {

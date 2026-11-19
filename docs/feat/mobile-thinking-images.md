@@ -303,6 +303,86 @@ check` on the 4 touched files clean. Full gate: left to the orchestrator's scrip
 **Not done here:** the light/dark/Reduce-Motion screenshot set of §Tests (only
 the light-mode spike shots exist), and S1/S3/S4 were out of this run's scope.
 
+### S3 (photo block layout, pure) — as built
+
+*— claude-sonnet-4-5, 2026-11-19*
+
+Scope: **S3 only** (`Implementation` § "S3 — pure: photo block layout"). Nothing of
+S4, S1 or S2 was touched.
+
+**Load-bearing check, re-run first.** S3 stands on "the photo geometry is already
+pure and unit-tested, and `TranscriptRow` is its only consumer" (`Implementation`
+§ Preconditions). Verified before editing: `apps/mobile/src/media-layout.ts` is a
+pure module with no React import; `rg -n "media-layout|layoutMedia|captionBelow|
+mediaBox|displayUri|MEDIA_MAX_RATIO" apps/mobile/src apps/mobile/test` finds one
+importer (`screens/transcript/TranscriptRow.tsx:26`) plus `test/media-layout.test.ts`
+and `test/mobile-media-live-wiring.test.ts`; `MEDIA_BUBBLE_WIDTH = 218`
+(`TranscriptRow.tsx:51`) is the only width the row passes. **Holds** — so S3 is a
+pure addition and the old path stays valid until S4 rewires it.
+
+**As built** (`apps/mobile/src/media-layout.ts`):
+- `photoBlock(refs, { maxWidth = 200, gap = 4, maxTiles = 4 })` → `{ tiles, width,
+  height }`, `tiles: { ref, box, overflow? }[]` (`:116-228`). 0 → an empty
+  block; 1 → its own shape inside the cap; 2 → two squares side by side; 3 → one
+  tall tile running the block's height + two stacked; 4+ → a 2 × 2 grid whose
+  LAST tile carries `overflow = refs.length - (maxTiles - 1)` (i.e. itself plus
+  the hidden ones, so 5 → "+2", 10 → "+7").
+- `userRowParts(row)` → `{ photos, bubble }` (`:232-240`): the bubble exists iff
+  the row has text, document lines, or the restart caption.
+- `usableRatio()` (`:39-42`) extracted so `mediaBox` and `photoBlock` share the
+  one "is this ratio usable" rule.
+- `MEDIA_BUBBLE_WIDTH`/`mediaBox`/`layoutMedia`/`displayUri` all kept and
+  unchanged in behaviour: `TranscriptRow` still draws the old in-bubble shape, so
+  removing them now would break S4's starting point (the plan says "removed once
+  nothing uses it").
+
+**Drift from the Implementation (and why):**
+1. **`photoBlock` also has a `PHOTO_MIN_HEIGHT = 64` floor on a LONE photo.** The
+   plan's § Failure modes promises "nothing 0-height" and a panorama is the case
+   that bites: 200 pt wide at 6:1 is 33 pt tall. `mediaBox` has no floor, so the
+   block adds one and marks the tile `cropped` when it bit. The grid cells are
+   unaffected (they are squares by construction).
+2. **`cropped` on the lone photo is computed from the photo's own ideal height,
+   not copied from `mediaBox`.** `mediaBox` rounds to whole points before it
+   compares against the clamp, so a 3:4 photo at 200 pt (266.67) came back
+   `cropped: true` even though nothing was cropped. The block compares the
+   rounded height with the unrounded ideal (>0.5 pt = a real crop), which keeps
+   `mediaBox`'s own contract intact for its existing callers.
+3. **Tiles carry no `x`/`y`.** The plan's shape sketched them; the block is
+   `flexDirection: "row"` + `flexWrap` in the row (S4), so absolute offsets would
+   be a second, unused geometry. The 4 pt gap and the tile order are the layout.
+4. **The changelog fragment's one bullet now covers both halves.** The plan's S2
+   note asked S3/S4 to "add the photo half to the same bullet", and the guard
+   (`scripts/test/changelog-guard.test.ts`) enforces one bullet per fragment, so
+   the photo sentence went INSIDE S2's bullet rather than beside it.
+
+**Red → green** (`bun test apps/mobile/test/media-layout.test.ts`, narrow):
+- Red first: with `photoBlock`/`userRowParts` newly written, the suite ran 35
+  pass / 1 fail (`cropped: false` expected, `true` received) — a real assertion
+  failure on drift 2 above, not an import error. After the fix: **36 pass / 0
+  fail** (349 `expect`s), the 13 pre-existing cases included.
+- `mobile-media-live-wiring.test.ts` (it pins `layoutMedia(`/`mediaBox(`/
+  `displayUri(` in `TranscriptRow`) still passes: 45 pass / 0 fail over both files.
+
+**Mutations** (applied together on a scratch copy, reverted; base saved at
+`.tentacle/tmp/mobile-thinking-images/base2.ts`):
+```
+M1 overflow: hidden + 1  → hidden              (an off-by-one "+N")
+M2 Math.max(PHOTO_MIN_HEIGHT, capped) → capped (no panorama floor)
+M3 shown === 3 && index === 0 → false          (a plain 2 × 2 for 3 photos)
+M4 cell = floor((maxWidth-gap)/2) → maxWidth   (a 200 pt half)
+M5 bubble: <the real rule> → true              (a bubble on a photo-only row)
+→ 26 pass · 10 fail, each mutation failing its own named test
+→ after revert: 36 pass · 0 fail
+```
+
+**Checked here:** `bun test media-layout.test.ts mobile-media-live-wiring.test.ts`
+→ 45 pass / 0 fail; `npx tsc -p apps/mobile --noEmit` clean; `bunx biome check`
+on the two touched files clean. Full gate: left to the orchestrator's script.
+**Not done here:** S4 (the `TranscriptRow` rewire, the states, the viewer) and the
+screenshot set are out of this slice's scope; the light/dark/Reduce-Motion shots
+of §Tests remain owed.
+
 
 ## Review
 
