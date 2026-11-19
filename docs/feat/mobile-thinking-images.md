@@ -3,7 +3,7 @@
 > **Status:** implementation (awaiting owner answers — NOT approved)
 > **Branch:** `feat/mobile-thinking-images`
 > **Type:** feat · **Size:** M · **Blast:** contained (apps/mobile only; no protocol, no persisted format, no client package change) · **Suited:** Opus plan; slices S1/S3/S4 DeepSeek exec, S0 (spike) + S2 (shimmer component) Opus exec; standard Review, plus a simulator screenshot pass
-> **Changelog:** `changelog.d/mobile-thinking-images.changed.md` (one bullet: the Thinking row's shimmer stays inside the letters and shows seconds; photos sit above the message bubble)
+> **Changelog:** `changelog.d/mobile-thinking-images.changed.md` (one bullet: the Thinking row's shimmer stays inside the letters and shows seconds; the photo half joins it with S4, when the layout it describes is actually drawn)
 
 ## Context
 
@@ -305,7 +305,7 @@ the light-mode spike shots exist), and S1/S3/S4 were out of this run's scope.
 
 ### S3 (photo block layout, pure) — as built
 
-*— claude-sonnet-4-5, 2026-11-19*
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-19*
 
 Scope: **S3 only** (`Implementation` § "S3 — pure: photo block layout"). Nothing of
 S4, S1 or S2 was touched.
@@ -382,6 +382,78 @@ on the two touched files clean. Full gate: left to the orchestrator's script.
 **Not done here:** S4 (the `TranscriptRow` rewire, the states, the viewer) and the
 screenshot set are out of this slice's scope; the light/dark/Reduce-Motion shots
 of §Tests remain owed.
+
+### Fix round 1 (round 4's findings)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-19*
+
+Scope: Review round 4's two MEDIUM findings. Both are artifact defects, and both
+were pinned with a doc-local regression test first — `scripts/test/mobile-thinking-images-artifacts.test.ts`
+(new), the pattern `task-doc-signatures.test.ts` and
+`session-auto-accept-signatures.test.ts` already use for the sibling docs.
+
+**Finding 1 (MEDIUM) — FIXED: the changelog promised an unbuilt layout.**
+`changelog.d/mobile-thinking-images.changed.md:1` said a message's photos "now sit
+ABOVE the text bubble" and "a photo-only message has no bubble at all", while
+`TranscriptRow.tsx:165` still calls `layoutMedia` inside the bubble and neither
+`photoBlock` nor `userRowParts` has a consumer (S4 is unbuilt; this branch merges
+slice by slice, so a release between S3 and S4 would have promised it). The
+fragment is back to the shimmer-only bullet it had before `b10be3fa`; the photo
+sentence returns with S4, in the same commit that adds the consumer.
+
+The guard is per claim, not a blanket ban: each photo sentence is paired with the
+export that renders it (`PHOTO_CLAIMS`, `:51`), and a sentence is legal exactly
+when its own export has an importer/caller anywhere in `apps/mobile/src` outside
+`media-layout.ts` (`hasConsumer`, `:112`). Red-first on the buggy state, then:
+
+| Mutation | Result |
+| --- | --- |
+| M1 put the photo sentences back, no consumer | RED: both claims listed as orphaned (1 fail) |
+| M3d wire `photoBlock` only, both sentences kept | RED on `userRowParts` alone — the pairing is per export, not all-or-nothing |
+| M3b both consumers + the sentences (S4's legal shape) | GREEN — the guard does not block the slice it exists to protect |
+| revert | 6 pass / 0 fail |
+
+Non-vacuity of the scan itself is pinned on two controls whose answer cannot
+drift (`:138-139`): `layoutMedia` (has a consumer) → true, an invented name →
+false. An earlier draft asserted "both S3 exports are unwired" instead; M3b showed
+that reddens on S4's legitimate landing, so it was replaced rather than left as a
+test S4 would have to delete.
+
+**Finding 2 (MEDIUM) — FIXED: the S3 section was signed by a model that never ran it.**
+`docs/feat/mobile-thinking-images.md:308` read `claude-sonnet-4-5`; the slice ran
+on the deepseek executor (`runs/night-mobile-thinking-images.log`: `03:58 deepseek
+done:`, commit `b10be3fa feat(mobile-thinking-images): exec (deepseek)`), and the
+plan assigns S3 to DeepSeek. Now signed
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` — the id `config.jsonc`'s `deepseek`
+profile names, and the one `device-pairing.md`, `app-decomposition.md` and
+`session-auto-accept.md` sign that executor with (not the family name `deepseek`,
+which round 1 of `session-auto-accept` was caught using).
+
+The same test also walks every recorded `Execution` / `Fix round` / `Review` /
+`Round` / `S<n>` section and requires a real model id, so the class — this task's
+**third** attribution mismatch (round 2 nit 3, round 3 nit 2) — is now pinned
+rather than trusted. Mutation: re-signing S3 `claude-sonnet-4-5` → RED on its own
+assertion (1 fail); revert → GREEN.
+
+One drift recorded honestly: the section walker reads a signature anywhere inside
+a section, not just its first line. A first-line-only rule (as
+`task-doc-signatures.test.ts` uses) went red on `## Execution:121`, which signs at
+the END of its lead prose (`:125`) — correct as written, so the walker was fixed
+rather than the doc.
+
+**Checked here (narrow, per §4):** the new file alone → 6 pass / 0 fail;
+`scripts/test/mobile-thinking-images-artifacts.test.ts` +
+`changelog-guard.test.ts` + `changelog.test.ts` + `apps/mobile/test/media-layout.test.ts`
+→ 63 pass / 0 fail; `task-doc-signatures` + `session-auto-accept-signatures` +
+`release` → 44 pass / 0 fail; `bunx tsc --noEmit -p .` clean; `bunx biome check`
+on the new file clean. Full gate: left to the orchestrator's script.
+
+**Same finding, second site:** the doc's own metadata line 6 (`**Changelog:**`) also
+said the fragment covers "photos sit above the message bubble". It describes the
+same not-yet-built layout, so it was corrected with it.
+
+**Not done here:** no production code was touched (both findings are artifacts).
+S4 and the light/dark/Reduce-Motion screenshots remain owed, as before.
 
 
 ## Review
