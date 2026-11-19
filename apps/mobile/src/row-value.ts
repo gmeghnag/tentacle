@@ -109,3 +109,17 @@ export function rowLayout(
   }
   return description ? WITH_DESCRIPTION_AND_VALUE : WITH_VALUE;
 }
+
+/**
+ * Whether the row is ONE accessibility element (fix/mobile-e2e-reds). A row with
+ * its own action is one button; a read-only row (label + value) is read as one.
+ * But a row whose only control is a trailing one (a Settings switch) must NOT
+ * group: grouped, it was a disabled element ("Dictation, Dictation") that hid the
+ * switch from VoiceOver and from XCUITest alike (flow 34-hub-dictate).
+ */
+export function rowGroupsForAccessibility(row: {
+  readonly pressable: boolean;
+  readonly control: boolean;
+}): boolean {
+  return row.pressable || !row.control;
+}

@@ -1,13 +1,19 @@
 appId: so.tentacle.app
 ---
 # 16 (docs/feat/mobile-compose.md 13d): the OFFLINE OUTBOX. The daemon is stopped, the
-# phone composes anyway (Send later), the app is killed and relaunched — the row is
-# still there — and when the daemon comes back the item goes out EXACTLY ONCE.
+# phone composes anyway (Send later) — the outbox row shows at once — the app is
+# killed and relaunched, and when the daemon comes back the item goes out EXACTLY ONCE.
 - runFlow: _pair.yaml
 - tapOn:
     id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${OUTBOX_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${OUTBOX_ID}"
 - assertVisible:
@@ -40,18 +46,25 @@ appId: so.tentacle.app
 - stopApp
 - launchApp
 # The relaunch starts LOCKED (docs/feat/mobile-lock.md Owner Q1); the Keychain
-# record made by `_pair` survives, so the offline item is reachable again.
+# record made by `_pair` survives.
 - runFlow: _unlock.yaml
-- tapOn:
-    id: "computer-${output.computerId}"
-- tapOn:
-    id: "session-${OUTBOX_ID}"
-- extendedWaitUntil:
-    visible:
-      id: "waiting-network"
-    timeout: 30000
+# The daemon comes back BEFORE the session is opened: the phone keeps no session
+# LIST across a relaunch, so offline it cannot reach the session at all ("Couldn't
+# load the sessions", docs/fix/mobile-e2e-reds.md). What this flow proves is that
+# the kill did not lose the item: the ONLY copy of the text was the outbox's file,
+# so the daemon receiving it exactly once (`16-once.js`) is that proof.
 - runScript:
     file: "16-start-serve.js"
+- tapOn:
+    id: "computer-${output.computerId}"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${OUTBOX_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${OUTBOX_ID}"
 - extendedWaitUntil:
     notVisible:
       id: "waiting-network"

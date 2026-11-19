@@ -11,7 +11,8 @@
  *
  * Pure and injectable: a flow test drives it over real HTTP on loopback, and the
  * harness starts it once per run. A probe whose name is empty is recorded as
- * `"unnamed"` — never dropped, or a silent probe would read as "blocked".
+ * `"unnamed <METHOD> <path>"` — never dropped, or a silent probe would read as
+ * "blocked"; the method and path say WHAT reached it (docs/fix/mobile-e2e-reds.md).
  */
 export interface ProbeListener {
   /** `http://127.0.0.1:<port>`: what the fixture's `__PROBE__` is replaced with. */
@@ -34,7 +35,7 @@ export function startProbeListener(): ProbeListener {
       // A WebSocket upgrade and an ordinary GET both land here, and both ARE the
       // escape: recording the REQUEST is the whole point (nothing is answered
       // with a WebSocket, so a page cannot use this to talk back).
-      seen = [...seen, url.searchParams.get("p") ?? "unnamed"];
+      seen = [...seen, url.searchParams.get("p") ?? `unnamed ${req.method} ${url.pathname}`];
       return new Response("probe", { headers: { "content-type": "text/plain" } });
     },
   });

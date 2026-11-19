@@ -15,6 +15,7 @@ import {
   NEW_SESSION_TITLE,
   createDrawerNewSession,
   newSessionErrorText,
+  newSessionFromHub,
   newSessionPill,
 } from "../src/drawer-new-session.ts";
 import { type FreshHandle, createFreshSession } from "../src/session-controller.ts";
@@ -165,5 +166,64 @@ describe("createDrawerNewSession", () => {
     }
     expect(newSessionErrorText("too-many")).not.toBe(newSessionErrorText("link"));
     expect(NEW_SESSION_TITLE).toBe("(new)");
+  });
+});
+
+/**
+ * New session from the HUB (fix/mobile-hub-new-session, flow 34-hub-new). The
+ * drawer's gate is the drawer TITLE's online probe, which runs only while the
+ * drawer is open — so from the hub (drawer never opened) it read "not known" as
+ * "offline" and the tap did nothing at all. The hub path probes NOW.
+ */
+describe("newSessionFromHub", () => {
+  function setup(options: { online: boolean | Error; create?: "ok" | "link" }) {
+    const log: string[] = [];
+    const session = createDrawerNewSession({
+      mint: () => "fresh-1",
+      create: async (computerId, sessionId) => {
+        log.push(`create:${computerId}:${sessionId}`);
+        return options.create === "link" ? { ok: false, reason: "link" } : { ok: true };
+      },
+      opened: (computerId, sessionId) => log.push(`opened:${computerId}:${sessionId}`),
+    });
+    const run = () =>
+      newSessionFromHub({
+        computerId: "c1",
+        probe: async () => {
+          log.push("probe");
+          if (options.online instanceof Error) {
+            throw options.online;
+          }
+          return options.online;
+        },
+        session,
+        showDrawer: () => log.push("drawer"),
+      });
+    return { log, run, session };
+  }
+
+  test("online: probes, creates on the listed computer and opens it — no drawer", async () => {
+    const h = setup({ online: true });
+    await h.run();
+    expect(h.log).toEqual(["probe", "create:c1:fresh-1", "opened:c1:fresh-1"]);
+  });
+
+  test("offline: nothing is created, and the drawer opens to say why (never a silent no-op)", async () => {
+    const h = setup({ online: false });
+    await h.run();
+    expect(h.log).toEqual(["probe", "drawer"]);
+  });
+
+  test("a probe that throws reads as offline (the drawer shows it), never a throw", async () => {
+    const h = setup({ online: new Error("no link") });
+    await h.run();
+    expect(h.log).toEqual(["probe", "drawer"]);
+  });
+
+  test("a create that fails opens the drawer, where its error is drawn", async () => {
+    const h = setup({ online: true, create: "link" });
+    await h.run();
+    expect(h.log).toEqual(["probe", "create:c1:fresh-1", "drawer"]);
+    expect(h.session.state().error).toBe(newSessionErrorText("link"));
   });
 });

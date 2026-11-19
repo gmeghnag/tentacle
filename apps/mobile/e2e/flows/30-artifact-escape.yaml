@@ -22,6 +22,12 @@ appId: so.tentacle.app
 - runFlow: _pair.yaml
 - tapOn:
     id: "computer-${output.computerId}"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${ESCAPE_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${ESCAPE_ID}"
 - assertVisible:

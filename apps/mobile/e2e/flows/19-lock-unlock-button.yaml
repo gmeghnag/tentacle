@@ -1,4 +1,7 @@
 appId: so.tentacle.app
+tags:
+  - quarantine
+# quarantine: a resume with the lock up auto-prompts Face ID by design (app-lock.ts `resumed`), so the system sheet always covers `lock-unlock`, and a nomatch cannot be scripted on the simulator (it never resolves, Step 0) — the button cannot be reached here; its logic is app-lock.test.ts's (docs/fix/mobile-e2e-reds.md)
 ---
 # 07 (docs/feat/mobile-lock.md F5): a failed/cancelled evaluation keeps the lock
 # UP and shows the Unlock button, and a second attempt succeeds.
@@ -21,9 +24,15 @@ appId: so.tentacle.app
     id: "lock-delay-immediately"
 - tapOn:
     id: "lock-delay-immediately"
-- back
+# Maestro's `back` is Android's key: a no-op on iOS, which left this on Settings.
+- tapOn:
+    id: "settings-back"
 - pressKey: Home
-- launchApp
+# A RESUME, not a relaunch: Maestro's `launchApp` stops the app first by default,
+# and a cold start auto-prompts Face ID OVER the lock (Owner Q1) — the system
+# sheet then hides `lock-unlock` (docs/fix/mobile-e2e-reds.md).
+- launchApp:
+    stopApp: false
 - extendedWaitUntil:
     visible:
       id: "lock-screen"

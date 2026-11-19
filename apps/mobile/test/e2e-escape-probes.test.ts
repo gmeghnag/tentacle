@@ -38,7 +38,7 @@ describe("the probe listener is the evidence (T8.1)", () => {
   test("a nameless probe is still recorded (dropping it would read as blocked)", async () => {
     probes.reset();
     await fetch(probes.url);
-    expect(probes.hits()).toEqual(["unnamed"]);
+    expect(probes.hits()).toEqual(["unnamed GET /"]);
   });
 
   test("reset forgets what an earlier open saw (each open is its own)", async () => {

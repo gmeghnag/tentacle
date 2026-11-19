@@ -21,6 +21,8 @@ export type HookName =
   | "history"
   | "file-exists"
   | "model-prompts"
+  /** Ends the mock's waiting `GATED` turn (flow 12, docs/fix/mobile-e2e-reds.md). */
+  | "model-release"
   | "model-replies"
   | "edit-calls"
   | "queue-state"
@@ -168,6 +170,8 @@ export interface HookActions {
   }>;
   readonly fileExists: (file: string) => Promise<boolean>;
   readonly modelPrompts: () => readonly string[];
+  /** Release the mock's `GATED` turn; false when none was waiting. */
+  readonly modelRelease: () => boolean;
   readonly modelReplies: () => readonly string[];
   readonly editCalls: () => readonly string[];
   /** The daemon's queue for a session (flow 12/14/15): every writer's rows. */
@@ -306,6 +310,7 @@ export function hookFor(path: string): HookName | undefined {
     case "history":
     case "file-exists":
     case "model-prompts":
+    case "model-release":
     case "model-replies":
     case "edit-calls":
     // Handled below but never routed until the first gate run found flows 13–15
@@ -386,6 +391,11 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
+    // A hook may wait longer than Bun's 10 s default: `laptop-prompt` right after
+    // `start-serve` waits for the laptop client to reconnect, and Bun then closed
+    // the socket mid-request (flow 17: "unexpected end of stream",
+    // docs/fix/mobile-e2e-reds.md). The flow timeout bounds a hung hook.
+    idleTimeout: 0,
     async fetch(req) {
       const url = new URL(req.url);
       const hook = hookFor(url.pathname);
@@ -445,6 +455,8 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
           }
           case "model-prompts":
             return Response.json({ ok: true, hook, prompts: deps.actions.modelPrompts() });
+          case "model-release":
+            return Response.json({ ok: true, hook, released: deps.actions.modelRelease() });
           case "model-replies":
             return Response.json({ ok: true, hook, replies: deps.actions.modelReplies() });
           case "edit-calls":

@@ -15,6 +15,12 @@ appId: so.tentacle.app
     id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${ASK5_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${ASK5_ID}"
 - assertVisible:
@@ -51,6 +57,12 @@ appId: so.tentacle.app
     id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${ASK5_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${ASK5_ID}"
 - extendedWaitUntil:

@@ -16,11 +16,18 @@ appId: so.tentacle.app
     id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
-- back
+# Maestro's `back` is Android's key (a no-op on iOS): the list's own back button.
+- tapOn:
+    id: "sessions-back"
 - tapOn:
     id: "open-settings"
 - assertVisible:
     id: "settings"
+# Below the fold since the hub's opacity band grew Settings (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "export-logs"
+    direction: DOWN
 - tapOn:
     id: "export-logs"
 # The share sheet opens; close it without choosing anything (F18: a cancel still

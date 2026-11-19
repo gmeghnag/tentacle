@@ -7,7 +7,13 @@
  * are Flow), which is exactly why §7 puts the branching here (F10).
  */
 import { describe, expect, test } from "bun:test";
-import { ROW_WRAP_AT, type RowValueKind, rowLayout, valueEllipsis } from "../src/row-value.ts";
+import {
+  ROW_WRAP_AT,
+  type RowValueKind,
+  rowGroupsForAccessibility,
+  rowLayout,
+  valueEllipsis,
+} from "../src/row-value.ts";
 
 const KINDS: readonly RowValueKind[] = ["text", "path", "model"];
 const RN_MODES = ["head", "middle", "tail"] as const;
@@ -123,5 +129,22 @@ describe("S3 · the label column's SIZING (fix round 1: `flexShrink: 0` overflow
       expect(rowLayout(bad).labelSizing).toBe("fill");
       expect(rowLayout(bad, { hasValue: true }).labelSizing).toBe("capped");
     }
+  });
+});
+
+describe("rowGroupsForAccessibility (fix/mobile-e2e-reds, flow 34-hub-dictate)", () => {
+  test("a row with its own action is ONE element (VoiceOver reads it as one button)", () => {
+    expect(rowGroupsForAccessibility({ pressable: true, control: false })).toBe(true);
+    expect(rowGroupsForAccessibility({ pressable: true, control: true })).toBe(true);
+  });
+
+  test("a row whose only control is a trailing switch never swallows it", () => {
+    // Grouped, the row was a DISABLED element ("Dictation, Dictation") and the
+    // switch inside it was unreachable to VoiceOver and to XCUITest alike.
+    expect(rowGroupsForAccessibility({ pressable: false, control: true })).toBe(false);
+  });
+
+  test("a read-only row (label + value) stays one element, read together", () => {
+    expect(rowGroupsForAccessibility({ pressable: false, control: false })).toBe(true);
   });
 });

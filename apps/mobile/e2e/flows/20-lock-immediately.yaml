@@ -13,7 +13,9 @@ appId: so.tentacle.app
     id: "lock-delay-immediately"
 - tapOn:
     id: "lock-delay-immediately"
-- back
+# Maestro's `back` is Android's key: a no-op on iOS, which left this on Settings.
+- tapOn:
+    id: "settings-back"
 # The row for the computer the pairing registered is on screen before we leave:
 # the flow then proves the SAME content comes back after the unlock.
 - assertVisible:
@@ -22,8 +24,11 @@ appId: so.tentacle.app
     id: "computers-list"
 - pressKey: Home
 # `launchApp` WITHOUT `clearState`: the record must survive (flow 08's whole
-# point is the locked-return, not a fresh install).
-- launchApp
+# point is the locked-return, not a fresh install) — and WITHOUT a stop: Maestro
+# stops the app first by default, and a cold start is not "back where they were"
+# (docs/fix/mobile-e2e-reds.md).
+- launchApp:
+    stopApp: false
 - extendedWaitUntil:
     visible:
       id: "lock-screen"

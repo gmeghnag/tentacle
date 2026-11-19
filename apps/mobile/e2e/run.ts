@@ -553,6 +553,11 @@ async function main(): Promise<number> {
         laptopDetach: (session) => laptop.detach(session),
         fileExists: (file) => fileExists({ cwd: runDir }, file),
         modelPrompts: () => mock.prompts,
+        modelRelease: () => {
+          const waiting = mock.gated();
+          mock.release();
+          return waiting;
+        },
         modelReplies: () => mock.replies,
         editCalls: () => mock.calls,
         pairStart: async (options) => {

@@ -58,6 +58,12 @@ appId: so.tentacle.app
     timeout: 30000
 # A session, a prompt, and the mock model's answer: a full round trip whose bytes
 # only ever went through the relay.
+# In the full suite every earlier flow's session sits ABOVE Alpha (newest
+# first), so it is below the fold: scroll to it (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${ALPHA_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${ALPHA_ID}"
 - assertVisible:

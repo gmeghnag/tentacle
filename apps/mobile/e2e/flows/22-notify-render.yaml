@@ -26,7 +26,9 @@ appId: so.tentacle.app
     visible:
       id: "sessions-list"
     timeout: 30000
-- back
+# Maestro's `back` is Android's key (a no-op on iOS): the screen's own back button.
+- tapOn:
+    id: "sessions-back"
 # The harness seals an ASK it chose (with a reply offered) to this phone's push
 # key and hands the exact payload to `simctl push`. The sealing decision is
 # `e2e-notify-steps.test.ts`'s (`bun test` opens it with the device key).

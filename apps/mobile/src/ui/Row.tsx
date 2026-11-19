@@ -28,7 +28,12 @@
  */
 import type { JSX, ReactNode } from "react";
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
-import { type RowValueKind, rowLayout, valueEllipsis } from "../row-value.ts";
+import {
+  type RowValueKind,
+  rowGroupsForAccessibility,
+  rowLayout,
+  valueEllipsis,
+} from "../row-value.ts";
 import {
   DENSE_FONT_SCALE,
   MONO,
@@ -147,6 +152,11 @@ export function Row({
   return (
     <Pressable
       testID={testID}
+      // A trailing switch on a row with no action of its own is its OWN element.
+      accessible={rowGroupsForAccessibility({
+        pressable: onPress !== undefined || onLongPress !== undefined,
+        control: trailing !== undefined,
+      })}
       accessibilityRole={onPress === undefined ? undefined : "button"}
       accessibilityLabel={accessibilityLabel}
       accessibilityHint={accessibilityHint}

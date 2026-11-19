@@ -25,7 +25,9 @@ appId: so.tentacle.app
     visible:
       id: "sessions-list"
     timeout: 30000
-- back
+# Maestro's `back` is Android's key (a no-op on iOS): the screen's own back button.
+- tapOn:
+    id: "sessions-back"
 # The Settings row is where the phone says what it decided, and it is the only
 # screen that reads the registrar's state: `notifications-toggle` exists, and its
 # detail line is drawn from `pushPhaseText`. (Whether iOS GRANTED the permission
@@ -40,7 +42,9 @@ appId: so.tentacle.app
     id: "notifications-toggle"
 - assertVisible:
     id: "notifications-detail"
-- back
+# Maestro's `back` is Android's key (a no-op on iOS): the screen's own back button.
+- tapOn:
+    id: "settings-back"
 - assertVisible:
     id: "computers-list"
 # Register + push + place, in ONE hook: register a push key for the paired

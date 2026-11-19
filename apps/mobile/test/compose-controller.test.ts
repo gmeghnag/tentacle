@@ -64,6 +64,12 @@ function fakeHandle(
     /** The send-now's ACK lands only when this resolves (the request still in flight). */
     readonly holdSendNow?: Promise<void>;
     readonly facts?: { historyLength: number; runningTurnId: string | null };
+    /**
+     * The link is down while the handle is still the screen's (a reconnect): the
+     * real `facts()` reads `client.snapshot`, which WAITS for the link
+     * (`whenLive`) — so it never answers while `down.now` is true.
+     */
+    readonly down?: { now: boolean };
     /** The ids `session/unqueue` answers `removed` with (default: every id asked). */
     readonly unqueueRemoved?: readonly string[];
     /** `session/unqueue` throws (a dropped link). */
@@ -181,7 +187,10 @@ function fakeHandle(
         void text;
         void turnId;
       },
-      facts: () => Promise.resolve({ availability: "open", ...facts }),
+      facts: () =>
+        options.down?.now === true
+          ? new Promise<never>(() => undefined)
+          : Promise.resolve({ availability: "open", ...facts }),
     },
   };
 }
@@ -516,6 +525,28 @@ describe("offline: the outbox owns the message (F1, decision 16)", () => {
     expect(h.field()).toBe("");
     // The item's keys exist NOW (the load-bearing assumption): a kill cannot lose them.
     expect(h.fs.files.get(PATHS.state)).toContain(h.items()[0]?.turnId ?? "missing");
+  });
+
+  test("Send later while the link is down never waits on it: the item is written at the tap, with the basis read before the drop (fix/mobile-e2e-reds, flows 16/17)", async () => {
+    // The real port's `facts()` waits for the link to come back, and the field is
+    // already cleared: awaiting it left the text in NO place (not the field, not
+    // the outbox) until a reconnect — and a kill in between lost it.
+    const down = { now: false };
+    const facts = { historyLength: 4, runningTurnId: null };
+    const h = await harness({ draft: "offline words", handle: fakeHandle({ down, facts }) });
+    down.now = true;
+    const pressed = h.compose.press({ kind: "send-later", text: "offline words" });
+    const settled = await Promise.race([
+      pressed.then(() => "done"),
+      new Promise((resolve) => setTimeout(() => resolve("hung"), 200)),
+    ]);
+    expect(settled).toBe("done");
+    expect(h.items().map((item) => [item.text, item.state])).toEqual([
+      ["offline words", "waiting"],
+    ]);
+    // The basis the person wrote against: read while the link was up (at start).
+    expect(h.items()[0]?.basis).toEqual({ historyLength: 4, runningTurnId: null });
+    expect(h.field()).toBe("");
   });
 
   test("a double tap creates ONE item (the field is cleared synchronously)", async () => {

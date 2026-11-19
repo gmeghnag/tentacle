@@ -110,6 +110,7 @@ import {
 import {
   NEW_SESSION_TITLE,
   createDrawerNewSession,
+  newSessionFromHub,
   newSessionPill,
 } from "./src/drawer-new-session.ts";
 import { createDrawerRename } from "./src/drawer-rename.ts";
@@ -1359,7 +1360,25 @@ function SessionDrawerHost({
       onNewSession={() => void fresh.start(listed, canCreate)}
       onNewSessionDismiss={() => fresh.dismiss()}
     >
-      {children(openDrawer, drawer.open, () => void fresh.start(listed, canCreate))}
+      {children(
+        openDrawer,
+        drawer.open,
+        // The hub's New session (fix/mobile-hub-new-session): `canCreate` above is
+        // the drawer's probe, which runs only while it is open — from the hub it
+        // was never read, and the tap did nothing. Probe now; a failure opens the
+        // drawer, which says why.
+        () =>
+          void newSessionFromHub({
+            computerId: listed,
+            probe: async () => {
+              const built = await loadRows();
+              setRows(built);
+              return drawerTitle(records, built, listed)?.canCreate === true;
+            },
+            session: fresh,
+            showDrawer: openDrawer,
+          }),
+      )}
     </SessionsDrawer>
   );
 }
