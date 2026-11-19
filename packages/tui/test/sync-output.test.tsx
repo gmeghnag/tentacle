@@ -8,7 +8,8 @@
  *
  * Non-vacuity (mutation-checked, see the doc's Execution): T1 red with an
  * identity `write`; T2 red with `rows` copied at wrap time; T3 red with the wrap
- * dropped from `run.tsx`.
+ * dropped from `run.tsx` (and, since tui-line-diff-render, with `lineDiffStdout`
+ * dropped or composed in the wrong order).
  */
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
@@ -128,7 +129,11 @@ describe("synchronized output around Ink frames", () => {
   test("T3: startTui hands Ink the wrapped stdout under the fullscreen gate", () => {
     const src = readFileSync(join(import.meta.dir, "..", "src", "run.tsx"), "utf8");
     const options = /\{\s*stdin,[\s\S]*?exitOnCtrlC: false,\s*\}/.exec(src)?.[0] ?? "";
-    expect(options).toMatch(/stdout:\s*fullscreen\s*\?\s*\(?synchronizedStdout\(process\.stdout\)/);
+    // docs/fix/tui-line-diff-render.md: Ink writes to the row diff, which writes to
+    // the synchronized-output wrapper; the kill switch keeps only the latter.
+    expect(options).toMatch(
+      /stdout:\s*fullscreen\s*\?\s*\(+lineDiffEnabled\(process\.env\)\s*\?\s*lineDiffStdout\(synchronizedStdout\(process\.stdout\)\)\s*:\s*synchronizedStdout\(process\.stdout\)\)/,
+    );
   });
 });
 
