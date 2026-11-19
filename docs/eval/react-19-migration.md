@@ -283,3 +283,19 @@ drop. Keep the whole migration on its own branch so main is never half-migrated.
   upstream), but only as a deliberate follow-up — the workaround is harmless.
 - Not in scope: adopting React 19 features (Actions, `use`, `ref` as prop). This
   migration is version-currency only; feature adoption is separate.
+
+## Addendum (2026-11-19): `incrementalRendering` already in Ink 6.8
+
+Checked in the published packages (`npm pack ink@6.8.0 / 7.0.0 / 8.0.0`): the
+`render()` option `incrementalRendering` ("only updates changed lines instead of
+redrawing the entire output", default off) already exists in **Ink 6.8.0**, not
+only in Ink 8 — `build/log-update.js` compares each next line with the previous
+one and skips identical ones. Ink 6.8 peers on React ≥ 19. So the migration
+target could be **Ink 6.8 + React 19**, which may keep our mouse stack (the
+mouse-report drop is documented for Ink 8, #1014) — UNVERIFIED for 6.8: check
+`useInput` delivery of SGR 1006 reports on 6.8 before choosing. Context: the
+TUI flash on terminals without DEC 2026 (`docs/fix/tui-line-diff-render.md`)
+is fixed now by a row-diff stdout wrapper that this migration would delete.
+
+*— claude-opus-5-5, 2026-11-19*
+
