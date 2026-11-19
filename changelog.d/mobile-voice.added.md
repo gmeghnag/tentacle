@@ -1,1 +1,0 @@
-- **Voice on the iPhone.** Dictate a message with the mic button, on device and never sent to the cloud. Have a reply read aloud with the speaker button.

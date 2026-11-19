@@ -1,1 +1,0 @@
-- **TUI: panels are pluggable.** Each list panel (`/mcp`, `/skills`, `/sessions`) now describes itself — its rows, its keys, its clicks — in its own file under `panels/`, registered by one line; previously every panel kind was a branch inside the panel and key-routing code. Behaviour is unchanged.

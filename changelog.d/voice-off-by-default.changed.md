@@ -1,1 +1,0 @@
-- **Voice in the terminal is off by default.** Turn it on with `voice.enabled: true` in the config; Ctrl+R then dictates as before. While off, Ctrl+R shows `voice is off — set "voice": { "enabled": true } in the config`, `tentacle voice status` prints the same hint, and the helper is never spawned (no mic is opened).

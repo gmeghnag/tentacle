@@ -1,1 +1,0 @@
-- **Pairing over the encrypted channel.** A new device proves a one-time code inside the channel and is added only after the computer's owner confirms, comparing a 6-digit code shown on both screens (`device/pair`, additive — no protocol bump). Design: `docs/feat/device-pairing.md`.

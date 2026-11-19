@@ -1,1 +1,0 @@
-- **`workload_shell` is off until you turn it on** (`workloadShell.tool`, or `TENTACLE_WORKLOAD_SHELL_TOOL=true`). It runs commands on another workload with your own kubeconfig / docker endpoint, so it is opt-in rather than opt-out; `tentacle config list` documents the key, and it is never offered inside a pod.

@@ -8,6 +8,742 @@ those.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-19
+
+### Added
+
+- **The agent can schedule its own wake-ups.** Ask it to "check the build every 10 minutes" or "remind me at 17:00": it registers a scheduled wake (recurring or one-shot) that starts a turn with a short prompt when it is due. You are asked before each one is created, and the host's `schedules.*` config sets the limits (by default 10 per session, at least 1 minute apart, recurring ones expire after 7 days). `/schedule` (alias `/schedules`) is a panel listing each wake with its quoted prompt, next fire and fire count; in the terminal the pill carries `2 sched` and the background dropdown their rows (`ctrl+x` twice deletes one), a fired turn is styled `◷ scheduled · sc-1 every 10m · fire 5` (falling back to the plain `[scheduled …]` prefix after a reload), quitting a session with armed wakes asks first, and a wake that leaves the table says so in the transcript (a deliberate delete says that instead, and an expired wake names its expiry). On the iPhone, Session info has an "Scheduled wakes" section listing each wake with its next fire and a Delete, the session list says `2 wakes` beside its jobs count, and a fired turn shows the same styled `◷ Scheduled` head. On `serve` they survive a daemon restart, in a local session they last until you quit. Design: `docs/feat/cron-tool.md`.
+- **`serve` accepts paired devices on an end-to-end encrypted route.** `/e2e` authenticates by the device's own key over the Noise channel, so a phone needs no token and its `Origin` header is accepted there only; a revoked device is disconnected within a second. A non-loopback `serve` without `--token` now starts and admits paired devices only. Design: `docs/feat/device-pairing.md`.
+- **Pairing over the encrypted channel.** A new device proves a one-time code inside the channel and is added only after the computer's owner confirms, comparing a 6-digit code shown on both screens (`device/pair`, additive — no protocol bump). Design: `docs/feat/device-pairing.md`.
+- **`tentacle pair`, `tentacle devices`, `devices revoke`, `devices reset`.** Pair a phone by QR (or pasted text) with a confirmation on the computer that compares a 6-digit code shown on both screens; one pairing covers every `tentacle` on that computer, `devices` lists them with when they were last seen, `revoke` removes one at once, and `reset` rotates this computer's identity.
+- **`tentacle logs [-f] <run-name>`.** A detached run is now readable by its name: `-f` finds it in the kept index and follows its pod's resident daemon through the engine exec bridge as a read-only watcher (no model link, no broker, no attachment, no exit net), while `--tail <run-name>` reads the copy the relay saved on this laptop; an ended run is never dialled, and a name live at two places is refused rather than guessed. Design: `docs/feat/logs-cmd.md`.
+- **`tentacle logs` reads a session's log without a TUI or a shell redirect.** It prints the newest session of the current folder (or the `<uid>` given) as one line per event — turns, messages, tool calls and results, the title, sub-agent markers — with `--tail N`, `--only <categories>`, `--json` (NDJSON, versioned) and `--summary` (tools used, files touched, turns, last outcome). Read-only and lock-free: a corrupt log is refused with the parser's reason and path, and a `serve` session is shown only up to the entry its state file marks. `-f` follows the file (committed events only). Design: `docs/feat/logs-cmd.md`.
+- **`tentacle logs -f <uid> --connect <url>` follows a live session, and a follower never counts as a client.** A read-only watch (`session/watch`, `watch_next`, `unwatch`) delivers the stream by long-poll: a per-watcher queue bounded in bytes and count, adjacent streamed text coalesced, a `--only ask,error,turn` filter applied before anything is stored, and an exact "N events lost" when it overflows. A watcher is never an attachment — it takes no model call, answers no ask, and leaves `ps`/`session/list` untouched — and holding a poll blocks no other request. `--tail --connect` reads a `serve` daemon's committed log the same way without opening (or attaching to) anything. Ctrl+C unwatches and exits 0. Design: `docs/feat/logs-cmd.md`.
+- **The app has its icon.** The tentacle octopus from tentacle.so on a white background, on the iPhone home screen.
+- **New session from the phone, and background work you can see and steer.** The sessions
+  drawer gains a "New session" pill: it creates an empty session on the computer
+  the drawer lists (that computer's own project), opens it with the keyboard up,
+  and the first message starts it. The pill is offered only while that computer
+  is online; a create that fails says why under it and opens nothing. The chat
+  header also gains an **Activity** pill — a spinner and the count of background
+  sub-agents and shell jobs still running (or "n new" for a report not yet
+  read), shown only when there is something — that opens one Activity sheet:
+  Sub-agents (description, `sa-N` · type · steps · elapsed, the latest step),
+  Shell jobs (the command, `bg-N` · status · elapsed), Finished (the children
+  that ended while you watched, each opening its report, with Copy) and a greyed
+  Scheduled for later. An `agent_task` card in the conversation links to its
+  child in that sheet. Every row opens: a running child shows its latest steps,
+  your messages to it (marked "read" once it has taken them in), a "Message
+  sa-N…" field and Stop; a shell job shows its output (pull to refresh) and
+  Stop; a finished child's report adds "Show in chat". Stop asks once first,
+  and a message or Stop the computer refuses (the child just ended, an older
+  computer) says why and keeps what you typed. Settings → Activity button can
+  swap the header pill for a floating button (off by default): drag it to
+  either edge, it stays there across launches, and it keeps out of the way of
+  the composer, the keyboard and open sheets; with VoiceOver it stays put and
+  the header pill is shown too.
+- **Mobile composer queue model (task 13a).** The Expo app gains its own pure,
+  React-free decision module for the rows above the session input: the daemon's
+  queue merged with the phone's own not-yet-acked rows, whose row belongs to
+  which writer, the send-now take and its refusal restore, and the hand-back
+  that puts a returned row back into the field once — banner included — before
+  reclaiming it, keyed on a persisted own-id set so a row queued by a killed
+  earlier app still finds its way home, while another device's returned row is
+  offered with an explicit Take. Pinned to the TUI's and the client's rules by
+  parity tests. No screen change yet: this is the model the composer (13d)
+  renders.
+- **One image sniffer, and the phone can now upload a photo.** The rule that an
+  image's type comes from its BYTES rather than its name or the picker's claim
+  moved from the TUI into `@tentacle/core` (the TUI file is a re-export, so its
+  behaviour and tests are unchanged), and the Expo app gained the pure photo
+  pipeline that uses it: a HEIC is converted to JPEG once and re-sniffed, a
+  photo over the 15 MiB cap is shrunk once (a GIF over it is refused, never
+  re-encoded), the 5-photo limit and an attachment name's control characters are
+  enforced before a single byte goes out, and the app now supplies the binary
+  sha-256 the client needs — without it every upload from the phone threw, since
+  Bun's hasher is absent under Hermes. The composer itself is task 13d.
+- **Compose from the phone: steer, send now, queue and returned rows, an offline outbox, photos.** The mobile session screen's input bar now does what the TUI does — typing while a turn runs **queues** the text as a steer (Send now sends the queue plus the field as one prompt, Stop stays the same button), a queued row whose turn ends comes back into the field with a banner, another device's returned row is listed with an explicit **Take**, an offline tap becomes a persisted outbox item that goes out exactly once when the link returns (a changed conversation asks first: Send / Queue as steer / Edit / Discard), and photos from the library or the camera are uploaded with their progress and refusals on a chip.
+- **The floating button is now a hub.** On the iPhone, with Settings → Activity
+  button → Floating, long-press the button: a fan of actions opens around it
+  (Stop, Steer, Activity, Artifacts, Attach, Sessions…). Slide to one and let
+  go, or let go first and tap. Artifacts carries the count of new artifacts
+  and opens the gallery. Tap still opens Activity. VoiceOver gets the
+  same actions from the rotor.
+- **Mobile: a Commands item in the hub, and empty items that say why.** The iPhone hub gains a **Commands** fan item (a bare `>_`) opening the session's own commands — **Compact** (`Compacting…` in the footer, stoppable from the hub's Stop, then `Compacted ✓`; a failure or a dropped link says so in the chat), **Clear** (confirmed inline in its own row — the cleared chat is kept as an archived session), Rename, **Retry last prompt** (text only, like the Mac's `/retry`) and Auto-accept — with Session info moving under More; an empty Activity, Artifacts or Tools item now shows its reason in place ("Nothing running", "No artifacts yet") with a light haptic instead of closing the fan — and the VoiceOver label speaks each item's own reason rather than always "nothing running".
+- **The floating Activity button can be see-through.** Settings → "Button opacity" is a 30–100 % slider (a live preview above chat text) shown whenever the Activity button is set to Floating; the button then rests at that level, goes solid while you touch it or while its fan is open, and always goes back to the level you chose. The running-turn arc never dims — below 75 % it thickens and gains a page-coloured halo so it still reads — and iOS Reduce Transparency forces the solid look. Nothing changes for anyone who leaves the slider at 100 %, which is the default. Design: `docs/feat/mobile-hub-opacity.md`.
+- **Session info can now be opened on its scheduled wakes.** On the iPhone's
+  session screen, the "…" menu gains a **Scheduled wakes** entry while the
+  session has wakes armed: it opens Session info scrolled straight to that band,
+  the one place a wake can be read and deleted.
+- **Tools in the hub.** On the iPhone, the floating button's fan has a Tools item (a plug) that opens a sheet listing the session's MCP servers and skills, with a switch on each to show or hide it from the model in this session. Each server's tools open in a collapsed list.
+- **Live Activity and Dynamic Island on iPhone.** A running turn shows on the
+  lock screen and in the Dynamic Island (project, session, current tool, elapsed
+  time), an approval waiting shows Approve / Deny, and a finished turn stays for
+  a few minutes. Turns started on another device start it by themselves. Updates
+  are end-to-end encrypted: Apple and the relay see only opaque bytes.
+- **Face ID app lock, app-switcher privacy cover, and Settings → Export logs (mobile).** The iOS app now locks at cold start and after the delay you choose (immediately / 5 min / 1 hour / never; the device passcode is the fallback when Face ID is unavailable), hides its content in the app switcher, hides it from VoiceOver while locked, and can write a locally-redacted diagnostic log — connection state, errors and timings, never message content, titles or keys — that you choose where to share.
+- **Answer a permission request from the notification.** On iPhone a push about a
+  waiting ask now carries its content end-to-end encrypted and decrypted on the
+  phone by a Notification Service Extension (Apple and the relay see only an
+  opaque blob): the banner names the computer, the project, the session's title
+  and the command's first line, grouped per session. **Approve** always asks Face
+  ID (even with the app unlocked) and only ever grants that one request — a
+  lasting rule still needs the in-app sheet; **Deny** works straight from the lock
+  screen with no prompt, because it grants nothing; **Reply…** takes the phone's
+  passcode and sends the words with a refusal; **Open** jumps to the session. If a
+  background answer cannot reach the computer within the iOS budget, a "Couldn't
+  reach <computer> — tap to answer" notice fires instead, so an answer is never
+  silently lost. A notification that cannot be verified against the paired
+  computer's key answers nothing at all — the app opens and says so, and the ask
+  is still waiting. Turn-finished and turn-failed notices are quiet and grouped
+  per session. The extension's own logic is pinned to the same cross-language
+  vectors as the phone's (`bun run test:swift`).
+- **Scan the pairing QR, or open a `tentacle://pair` link.** The app scans `tentacle pair`'s QR with the camera — asked only when you tap Scan, closable again with one tap, and the paste field still works when camera access is off — and a `tentacle://pair` link opens the app on a confirmation card, never pairing by itself. Design: `docs/feat/mobile-pairing-screen.md`.
+- **Pair the app with a computer.** Paste the code from `tentacle pair`, compare the 6-digit code on both screens and confirm on the computer; paired computers (several) are kept in this iPhone's Keychain only, can be removed, and a revoked or reset computer says so. The app now connects only over the end-to-end encrypted `/e2e` route. Design: `docs/feat/mobile-pairing-screen.md`.
+- **Push notification content is sealed end-to-end before it leaves the computer,
+  and every push is exactly one of three sizes.** `@tentacle/transport/push` gains
+  `sealPush` / `openPush` — HPKE (RFC 9180) **Auth mode**, DHKEM(X25519,
+  HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305, single shot. The sender key is
+  the computer's static key, so a relay or Apple cannot forge a push that opens;
+  the recipient key is a per-device push key generated at registration, separate
+  from the device's Noise key. The plaintext is padded to the next
+  512/1024/2048 bucket behind an explicit `u16` length prefix, so the envelope's
+  size says nothing about its kind, and the envelope's key id is the AEAD's
+  associated data, so a ciphertext cannot be moved to another paired computer.
+  The envelope is a plain HPKE Auth single-shot, so the app can open it with
+  CryptoKit's own `HPKE.Recipient(…authenticatedBy:)` and no hand-written Swift
+  crypto — the extension that does so is the app-side task, not this one. Pinned
+  by RFC 9180 Appendix A.2.3's published vectors plus our own envelope vectors,
+  both produced by an implementation independent of the code under test
+  (`packages/transport/test/vectors/push-v1.json`).
+- **The app side of notifications: a phone registers itself with the computer it
+  is paired to, and its push key is the one secret the future Notification
+  Service Extension will read.** A paired iPhone now asks for notification
+  permission **once**, right after its first successful pairing, with an
+  explanatory line — never at launch, never again after a denial — and from then
+  on registers itself on every successful connect through a new
+  `RemoteClient.pushRegister` / `pushUnregister` (the same Noise channel as
+  everything else, so no new transport and no second session path). Registration
+  is decided by a fingerprint of `(raw APNs token, environment, push key)` kept
+  in the computer's own Keychain record: a reconnect, a remount, an app relaunch
+  or a daemon restart sends **nothing**, while a token iOS rotated or a
+  regenerated push key sends exactly one — and a status the daemon refused
+  (`off` / `relay-off` / `relay-no-push`) is deliberately *not* remembered, so a
+  relay that later gets its APNs key starts working on the next connect. The
+  raw APNs token comes from `expo-notifications`' `getDevicePushTokenAsync`
+  (never Expo's push service, decision 19), the environment (`sandbox` /
+  `production`) follows the build, and an older computer's `MethodNotFound` is
+  terminal: Settings says "update tentacle on <computer>" instead of retrying in
+  a loop. The per-device X25519 push key is generated once, stored
+  `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY` in the **shared Keychain access group**
+  (so task 17's extension can open a push while the phone is locked) and is a
+  separate secret from the Noise device key, so an extension that reads
+  notifications still cannot act as the phone. Settings gains one
+  "Notifications" row for the phone — the toggle reaches every paired computer,
+  and its detail line is the most informative status among them (a computer
+  whose relay cannot deliver is the reason nothing arrives) — and `app.json`
+  gains the `expo-notifications` plugin, the time-sensitive entitlement and the
+  keychain access group. No notification UI beyond the OS's own placeholder
+  banner: the extension, actions and Face ID are task 17. Design:
+  `docs/feat/mobile-push.md` (slice P9).
+- **A notification's delivery path can be verified without an Apple account, and the relay host can hold the APNs key without ever putting it in a command line.** The mobile E2E harness grows `push-placeholder`: it pairs a simulator, grants notifications, then hands iOS a push payload that came out of the daemon's **own** sealing chain — registered for the paired device, pushed through the relay to a local fake APNs, and placed with `xcrun simctl push` — and asserts the placeholder banner. It proves the `expo-notifications` wiring, the `aps-environment` / time-sensitive entitlements and the sealed envelope's shape (a 12-character key id, a 43-character encapsulated key, and one of the three padded ciphertext lengths), and it says plainly that it does **not** prove Apple's delivery: a simulator issues no APNs token, so that half stays on the real-device checklist. The deploy side gains the one secret the relay ever holds: the APNs `.p8` arrives as a systemd `LoadCredential` (root-owned, mode `0400`, so the `relay` user cannot read it), `ExecStart` names only `${CREDENTIALS_DIRECTORY}/apns-key`, and the relay still starts **without** push when the key is missing — logging one `push off:` line and announcing no `push` feature, so phone reachability never depends on Apple's key being installed. `docs/ops/relay-deploy.md` documents installing it, rotating it (two keys can coexist, so a rotation needs no app reinstall and no downtime), rolling it back, and what the journal lines mean. Design: `docs/feat/mobile-push.md` (slices P8, P9, P10).
+- **A permission request nobody answers, or a turn that ends while nobody is
+  watching, now reaches your phone — through the relay and Apple, which carry
+  only a sealed blob.** A `serve` daemon observes its own sessions (an observer
+  that is deliberately *not* an attachment, so it neither counts as a watching
+  client nor silences the notifications it exists to send) and, once an ask has
+  waited `push.graceSeconds` (default 30, `0`–`3600`, `serve --push-grace <s>`)
+  with no client attached to that session, pushes every paired phone that
+  registered for notifications: `ask` for the request, `ask_resolved` under the
+  same collapse id once it is answered anywhere (so a stale banner is replaced,
+  and a folded pair stays actionable until its last ask is answered), `turn_done`
+  / `turn_failed` only when nothing at all is attached, and never for a
+  cancellation. The exclusion is read at the *deadline*, so a phone locked
+  during the grace is pushed to — that needed a real detach on the relay path,
+  where a closed leg now drops its connection. Content is sealed per device
+  (HPKE Auth, sender = the computer's static key), so Apple and the relay see an
+  opaque envelope and can neither read nor forge a notification. New device
+  methods `device/push_register` (raw APNs token, environment, per-device push
+  key → the grace and an honest `on` / `relay-off` / `relay-no-push` status) and
+  `device/push_unregister`; a registration is `<configDir>/devices/push/<id>.json`
+  (0600, atomic), `gone` from Apple is a **compare-and-delete** so a phone that
+  re-registered is never muted, and a revoked device is filtered at push time
+  even if its file survives. The relay link holds a push for up to 60 s while it
+  reconnects and drops it (audited) after that, and it never sends a `push` frame
+  to a relay that did not announce `"push"` — an older relay closes the control
+  socket on an unknown frame. Config: `push.enabled`, `push.graceSeconds`.
+  Design: `docs/feat/mobile-push.md` (slices P7, P8).
+- **The wire for push notifications: one sealed plaintext, one envelope, two
+  device methods.** `@tentacle/protocol` gains `PushMessageSchema` (the sealed
+  plaintext: `v`, a dedupe `id`, `at`, the four kinds `ask` / `ask_resolved` /
+  `turn_done` / `turn_failed`, the computer, project and session it belongs to,
+  and an ask's options) with `fitPushMessage`, the one producer-side gate that
+  clips its text to the 2046 bytes a sealed push can carry — walking code points,
+  so a clip never splits a surrogate pair — and `pushCollapseIdOf`, the opaque
+  `apns-collapse-id` that lets a resolved ask replace its own banner;
+  `PushEnvelopeSchema` / `PushPayloadSchema`, where the payload is `{tp}` and
+  nothing else, so the notification's visible `aps` stays the relay's own fixed
+  template and no content reaches a banner without the seal being opened. New
+  methods `device/push_register` (raw APNs token, environment, per-device X25519
+  push key → `{graceSeconds, push}` so Settings can say why notifications will
+  not arrive) and `device/push_unregister`, plus `DEFAULT_PUSH_GRACE_SECONDS`
+  (30). The relay's control wire gains `push` / `push-result`
+  (`RELAY_PROTOCOL_VERSION` unchanged: sending one is gated on the relay
+  announcing `"push"` in `ready.features`, which an unknown name never breaks).
+  Additive on the wire — an older daemon answers `MethodNotFound` — so no
+  `PROTOCOL_VERSION` change.
+- **The relay delivers push to Apple, and only when it holds a key.** `apps/relay`
+  gains the APNs path: a pure `apns.ts` (the one fixed banner every push shows, the
+  HTTP/2 request, the ES256 provider JWT with its 40-minute cache, and Apple's
+  status table — `410` / `400 BadDeviceToken` → `gone`, `429` → `throttled`, a
+  `403 ExpiredProviderToken` → a fresh token and exactly one retry) and an
+  `apns-client.ts` that keeps one HTTP/2 session per environment, reconnects when
+  Apple retires it, and gives every request a 10-second deadline. A daemon's
+  `push` frame is answered with `push-result` (`sent` / `gone` / `rejected` /
+  `throttled` / `unavailable`); a socket that has not completed `hello` cannot
+  push at all, and per-id (120/min) and per-token (30/min) limits refuse the rest
+  with a status, never silently. `ready.features` announces `"push"` **only** when
+  the relay was started with a readable APNs key (`--apns-key-file`,
+  `--apns-key-id`, `--apns-team-id`, `--apns-topic`, or the matching
+  `TENTACLE_RELAY_APNS_*` variables), so an unconfigured relay never swallows a
+  push; the key is read once, never logged. Design: `docs/feat/mobile-push.md`.
+- **A phone's push registration is stored, revoked and shown, and the daemon's
+  push rules are pure.** `<configDir>/devices/push/<id>.json` holds one device's
+  APNs token, environment and per-device push key (mode 0600, written through a
+  temp file); an unreadable or unknown-version record is skipped with one audit
+  line and left byte-for-byte alone, and a `gone` from Apple is a
+  **compare-and-delete** — a phone that re-registered in the meantime keeps its
+  fresh token instead of being silently muted. `tentacle devices revoke` and
+  `devices reset` remove the file with the device, and `tentacle devices` gains a
+  `PUSH` column (`on` / `off`) that reports what the daemon will do rather than
+  what the phone believes. The when-to-buzz decisions are a pure, clock-injected
+  module (`push-rules.ts`): a grace before an unanswered permission is pushed, no
+  push to the device already showing the sheet (as it is showing it at the
+  deadline — a phone locked mid-grace still gets the buzz), an `ask_resolved`
+  under the same collapse id to replace the banner once the last ask sharing that
+  banner is answered elsewhere (an earlier settle of a folded pair stays silent,
+  so the banner never claims a still-blocking turn is answered), turn-end
+  notifications only when nobody is watching (and never for a cancellation), and
+  a per-session ask window plus a 60/minute cap that fold extra asks into "+N
+  more waiting" instead of a storm — every refusal audited, never silent.
+  Design: `docs/feat/mobile-push.md` (slices P5, P6).
+- **Phones reach `serve` through a relay, end-to-end encrypted.** A `serve` with paired devices dials out to `relay.tentacle.so` (or `relay.url` / `serve --relay`; `--no-relay` to opt out), so a phone reaches it from anywhere with no open port; the relay sees only ciphertext. `pair` puts that address in the QR after the direct ones, so even a default loopback `serve` can be paired from another network, and `tentacle devices reset` rotates it along with the computer's key. The relay is a small self-hostable service in `apps/relay`. Design: `docs/feat/mobile-relay.md`.
+- **Deploying the relay is now a one-page runbook, not a guesswork session.** `apps/relay/deploy/` carries the compile script (`bun apps/relay/deploy/build.ts` → a Linux x64 `dist/tentacle-relay`), a hardened systemd unit (dedicated `relay` user, loopback-only bind, `Restart=always`, no capability, and the three per-IP abuse limits sized for the single shared source address a TLS proxy in front produces) and the Caddy site block with `stream_close_delay 5m`, which turns a config reload from one instant drop of every live relay socket into a staggered one over 5 minutes; `docs/ops/relay-deploy.md` walks install, TLS, smoke test, upgrade and rollback. Nothing is applied by the repo: running it on the host stays the owner's step. Design: `docs/feat/mobile-relay.md`.
+- **Session actions on iPhone.** Long-press a session in the drawer to rename,
+  pin to top or delete it; pins are stored on the computer, so the phone and
+  the Mac see the same order. In `connect`'s `/sessions` panel the pinned
+  sessions are listed first, marked with a `·`.
+- **The iPhone app can tell you what a session is running: model, context, MCP servers and skills.** The chat header's "…" menu now opens **Session info** — a grouped sheet with the daemon's model (and, under the title, `● Idle · <model>`, shortened to the last `/` segment) plus a thin live context bar from the turn's own measurement; the session's project, attached devices and running background jobs; the computer's MCP servers with state, tool counts and errors; and its skills with scope chips and skipped-skill notes. Each section loads, fails, is unsupported by an older daemon, or is offline INDEPENDENTLY, so one bad pull never blanks the rest; a session that is not attached is never asked for skills or context. The sheet also carries the session's shared auto-accept switch, and tapping the title renames the session through the existing `session/rename`, visible on every client (empty or unchanged is a no-op). Design: `docs/feat/mobile-session-info.md`.
+- **Mobile transcript model (task 12b).** The Expo app now has its own pure,
+  React-free transcript fold — a session's history plus live updates (own and
+  foreign turns alike) become renderable rows with markdown, highlighted code,
+  tool rows with their diffs and a `denied` state, and the daemon's notices —
+  pinned to the TUI's fold by a parity test on shared fixtures, with stream
+  batching, bounded parsing and bounded diff rendering so a huge message or a
+  fast stream cannot stall the JS thread. Image attachments ride the rows as
+  `[image: name]` with a thumbnail policy that only ever fetches the visible
+  rows. No screen change yet: this is the model the session screen (12c) renders.
+- **A phone can now open a session and read its transcript.** Tapping a session attaches to it (never a create), shows the daemon's history as rows — markdown, highlighted code, diffs, the model's reasoning, image prompts — and streams a live turn in as it runs, the phone's own or another device's. Prompts are typed in a bottom bar, a running turn gets a **Stop** that cancels *that* turn, and a refused send puts the text back. Permission asks arrive as a sheet with the options the daemon offered (allow once / allow for this session / deny / "No, let's talk about it" with words), guarded against a stray tap in the instant the ask appears; an ask answered on another device closes the sheet without answering, and the chat is never ended by leaving the screen — going back only detaches. Banners say what happened when a link drops, a session is archived (with an explicit **Reopen**), deleted, or a computer's tentacle is too old. Image prompts are labelled and their thumbnails are only ever requested for the rows on screen.
+- **Swipe a row left to see when it arrived.** A person's message, an answer and
+  a tool call each carry the time the daemon received it; swiping the row left
+  reveals it, and the row springs back on release. Rows with no known arrival
+  (an older daemon, a message restored from a reload) do not move at all, and the
+  time is display-only — it is never persisted.
+- **Voice on the iPhone.** Dictate a message with the mic button, on device and never sent to the cloud. Have a reply read aloud with the speaker button.
+- **The model can present artifacts — images, HTML pages, PDFs, Markdown and files — on the Mac and the iPhone.** A new `present` tool snapshots a workspace file (confined to the workspace, secret-looking names refused) or generated text into the session's artifact store, versioned per artifact and content-addressed; the transcript shows a card under the tool row and a gallery lists every version. The bytes travel back over the existing session connection in resumable 256 KiB chunks (`artifact/list`, `artifact/read`, additive — no version bump), verified against the announced sha256 so a pod cannot hand the laptop other bytes, and every viewer treats the content as untrusted: HTML/SVG is CSP-wrapped with no network, and an `other` kind is only ever saved, never opened. On the iPhone, images open in a pinch-to-zoom viewer, Markdown and text render natively, PDFs render in a script-less view of the verified cached file, and HTML/SVG open **inert** in an isolated web view — scripts and network both off, each switched on for that one open by an explicit tap and never remembered — with no cookies or storage kept, no bridge to the app, and no navigation or link — not even `sms:` or another app's link — leaving the page; any other file can only be shared. Its bytes land in a 200 MB cache per computer that drops the least recently used copy first (never the one on screen) and is deleted when the computer is unpaired, and Share hands over a copy named after the artifact — `report.zip`, not a content hash. A local session's versions are also kept on the laptop beside its log, so `--resume` shows the gallery again — a pod's are never written there. Design: `docs/feat/model-artifacts.md`.
+- **Charts in the conversation — the shared spec, the math, and the model's `chart` tool.** The agent can draw the numbers it talks about instead of only quoting them. A chart is a small, strict spec in the shape of Chart.js (line, bar, area, pie, doughnut, scatter; per-axis unit, `compact`/`full` format and decimals; ISO dates kept honestly apart as calendar, instant and floating) which rides the tool call's own arguments — so it survives a reload and needs no round trip — and styling is never in it: colours, widths and fonts are the client's. A validation error is a plain sentence carrying the fix (`datasets[0].data[0] is the string "12.5" — write the number 12.5 (no quotes)`), every error at once, so a small model repairs it in one retry; the caps are named with their advice (8 series, 1 000 points, 60 bar categories, 64 KiB). Axis ticks, number formatting (our own `k`/`M`/`G` — CLDR's Italian compact form loses the digits), date handling across DST, LTTB downsampling that keeps a single spike among 1 000 points, the summary line the model and VoiceOver read, and a CVD-validated 8-slot palette are one shared, unit-tested module in `@tentacle/core`, so the Mac and the iPhone draw the same numbers in the same colours. The `chart` tool itself runs with `permission: "none"` (a chart shows, never acts) and touches no resource, so two charts never conflict; it is never offered to a sub-agent. A `NaN`/`Infinity` — which JSON cannot express — gets the `use null for a missing value` hint instead of a bare parse error, and Chart.js styling keys the model adds out of habit (`backgroundColor`, `tension`, …) are dropped and said in the result rather than refused, because a refusal costs a retry and draws nothing differently. Design: `docs/feat/model-charts.md`. A chart is also registered as a `chart` artifact, so it survives a compaction and appears in the artifacts gallery with a drawn thumbnail and a `Grafici` filter chip, opening there as the same full-screen chart; in the Mac's `/artifacts` a chart opens as an expanded chart in the panel (`esc` back to the list) and a saved copy is the spec's own `<title>.json`.
+- **The model can draw Mermaid diagrams.** A new `diagram` tool takes a title and a Mermaid source (flowchart, sequence, class, state, ER, gantt, mindmap, timeline, journey, gitGraph; numbers stay with `chart`). The daemon checks it with Mermaid's own parser (loaded on first use; about 3.8 MiB more in the binary), and every mistake comes back as one sentence with the model's own line and the fix — a bracketed label, `->` for `-->`, a message without its colon, a misspelt type — so a small model repairs it in one retry. A Markdown fence, `%%{init}%%` and hard-coded styling are dropped with a note instead of a refusal. The row shows the diagram's title; in the terminal the diagram is drawn inline in ASCII — flowchart boxes and decisions, sequence lifelines — with `ctrl+o` (or a click on its caption) adding the highlighted source, and a type the terminal cannot draw falling back to that source. On the iPhone the diagram is drawn in the conversation by a bundled Mermaid (offline, in the app's colours and mono font, light and dark), shown with scripts off; a tall one is cut at about half a screen with "tap to zoom", and a tap opens it full screen with pinch-zoom, a `Diagramma | Sorgente` switch, Share and "Copia sorgente". A diagram that cannot be drawn shows its source. Not offered to sub-agents.
+- **Read PDFs.** `fs_read` extracts a PDF's text natively (page markers,
+  `pages` ranges, a clear "scanned, no OCR" verdict); attach a PDF from the TUI
+  or the iPhone — the `+` sheet's **File (PDF)** — and the model reads it as
+  delimited `<file …>` data, while the message itself shows the file's name
+  instead of its text.
+- **Take back a queued message.** A message queued while the model works can be taken back before the model reads it: in the TUI, ↑ on an empty input pulls the last queued message back into the field to edit or drop (`session/unqueue`; if the model already read it, you are told so).
+- **A `serve` session has the MCP tools of the machine it runs on.** A phone or
+  `connect` session is hosted by `tentacle serve`, which connected no MCP server
+  before this: a phone turn had none of the configured tools and `/mcp` answered
+  with an empty list. The daemon now connects the host's `mcpServers` once, in
+  the background (one connection set per daemon, which is one per project — a
+  `serve` hosts exactly one), registers their tools into every session it builds
+  — including one restored from the store, or built while the handshake is still
+  in flight — and answers `mcp/status`, so `connect`'s `/mcp` lists them. Each
+  tool keeps `permission: "ask"`: a deny reaches no server (pinned by a test with
+  a mutation on the gate). A server that crashes is respawned with backoff (1 s,
+  2 s, 4 s … up to 60 s, giving up after five consecutive failures, and a spawn
+  that stays up ten minutes resets the count) on both hosts, and the tools it
+  contributed keep working across the respawn, so a long-lived daemon — which
+  nobody can restart from a phone — heals itself. A server's stderr is capped at
+  50 lines then one "further stderr suppressed", a name clash with a built-in is
+  reported instead of silently skipped, and a connect failure names the server.
+- **Turn MCP servers and skills off for one session.** `/mcp` and `/skills` (and
+  Session info on the iPhone) can hide a server or a skill from the model for the
+  current session: Space flips a row's `[✓]`/`[ ]` switch (`[–]` marks a
+  skill the model can never invoke), and the status line shows `⊘ … off` while
+  something is hidden. On the iPhone every MCP server and skill row in Session
+  info has its own switch, and a change made on another device reads "changed on
+  <device>". It takes effect on the next model call and is kept with the
+  session. In `/skills`, who may invoke a skill moved into its expanded rows.
+- **A live session can move between your machine and a container.** `/move container [<image>]` hands the running conversation to a new docker/podman container with your folder bind-mounted at the same path, `/move local` brings it back, and `/move attach <engine>:<name>[/<container>]` joins a workload nobody else is in; the model can propose the same move with a `move_session` call, which only ever asks you through the usual permission prompt at the end of the turn, and never carries a lasting approval. The session uid, history and scrollback stay the same, a move waits for the turn to end (and for the queued messages to run) and is refused, with one line, while a background job, a sub-agent, a compaction or a broken link is in flight; the workload a move creates is kept and listed by `tentacle ps`, and is deleted only on `--rm` and only if that move created it. Design: `docs/feat/session-hop.md`.
+- **`serve --address` and sibling discovery.** A `serve` daemon tells a paired client which other `serve` daemons run on the same computer and the addresses it can reach each one on, live (`daemon/discover` + a `daemon/discovery` notification); `--address <url>` (repeatable) adds a URL the host's interfaces cannot show (a tailnet name, a tunnel), also put in `tentacle pair`'s QR. Liveness is a 10 s heartbeat, so a crashed daemon whose pid a stranger now holds is no longer reported as a live sibling.
+- **Smart compaction (opt-in): the model's copy of a long session drops what later rounds superseded.** With `contextPrune.enabled`, once a request reaches `pruneAtPercent` of the window (default 60 %) and the gain is at least `minGainPercent` (default 15 %), one batch replaces old file reads a later read or edit superseded, write/edit payloads already on disk, long shell output (head and tail kept), spill previews and duplicates with a short `⟪pruned by tentacle: …⟫` stub saying how to get each back. Conversation text and the last `keepRecentRounds` rounds (default 6) are never touched, and the stored history and the session log never change. Batches are rare on purpose, so the provider's prompt cache holds between them. The write tools now refuse text containing such a stub ("not file content — fs_read the file first"), so a model cannot copy a placeholder into a file. Off by default until it has been measured.
+- **Per-round token usage log.** Every model round's spend (input, output, the cached
+  part of the input when the provider reports it, the model id, and how many
+  messages the request carried) is recorded as a non-critical `usage` entry in the
+  session log, and `tentacle logs <uid> --usage` prints it as a per-round table with
+  totals — plain text, no colour, `—` for anything the provider did not measure.
+- **Voice dictation on the Mac.** Press Ctrl+R in the TUI, speak, press it again: the text lands in the input field for you to edit and send. Speech is recognised on the Mac; no audio leaves it or is saved.
+- **Live dictation on the Mac.** With the Apple engine, the words you dictate now appear in the input while you speak — greyed after the cursor, never in your draft until you stop — and the second Ctrl+R replaces them with the final transcript, which arrives faster because the audio was already analysed. Ctrl+R works as before; the Parakeet engine still transcribes on stop. Design: `docs/feat/voice-live-transcript.md`.
+- **Voice helper ships with every release.** On macOS, `curl -fsSL tentacle.so/install | sh` now also installs the dictation helper `tentacle-voice` next to `tentacle` (checked against `SHA256SUMS`), so voice dictation works without building it by hand; an older release without it, or a Mac older than macOS 26, just skips it with one line.
+- **`workload_shell`: a stateful shell on a workload.** The model can now run commands through a persistent, non-interactive `sh` inside a Kubernetes pod or a docker/podman container without moving its session, so `cd`, `export` and shell variables carry over between calls. It opens on first use, one shell per workload (at most four per session), asks permission per command with "always" scoped to that single workload — never to a bare command, so a dev-container approval cannot carry over to a prod pod — and shows the exit code and current directory in every result. Commands get no TTY and no stdin; output is capped, each command has a timeout (60 s default, 600 s max) whose processes are then stopped, and the session closes its shells (EOF plus a kill tree) when it ends, leaving nothing behind in the workload. It is offered only where the daemon runs on your own host (the local runtime and `serve`), never from inside a pod.
+- **A reopened shell returns to the working directory it was in.** When a dead shell is reopened (an idle close, a dropped link, an `exit`), the tool `cd`s back to the last known directory and says so. Environment variables are not replayed — they may hold secrets — and every reopen notice now states that.
+- **`workload_shell` is off until you turn it on** (`workloadShell.tool`, or `TENTACLE_WORKLOAD_SHELL_TOOL=true`). It runs commands on another workload with your own kubeconfig / docker endpoint, so it is opt-in rather than opt-out; `tentacle config list` documents the key, and it is never offered inside a pod.
+
+### Changed
+
+- **The TUI's frame left `App.tsx`: the derived rows are one pure view-model and
+  the tree is one dumb component.** Everything the frame is computed from — the
+  palette's window, the input box's height, the panel/dock/drawer/pill/reply
+  views, the transcript's viewport and the row a pill click lands on — is now
+  `packages/tui/src/app-layout.ts`'s `frameLayout(input)`, a React-free function
+  with its own unit test, and the JSX itself is `packages/tui/src/AppView.tsx`,
+  which owns no state, no ref, no effect and no geometry: it paints the model it
+  is handed. The decisions stay the existing pure modules' (`statusTokens`,
+  `panelView`, `backgroundListView`, `pillView`, `windowFor`, …); the hook that
+  owns an effect (`useDockClock`) and the transcript layout whose consumers are
+  App's effects stayed where they were, so the effect list keeps its order. The
+  JSX moved verbatim (the frame set and the SGR/pill-click pins are unchanged),
+  the blank-row rule that keeps Ink from collapsing rows moved with it, and
+  `App.tsx` loses 317 lines. No user-visible behaviour changes.
+- **The TUI's `/move` execution left `App.tsx`, and the turn boundary is one
+  rule.** `startHop` (the one place the view moves: the switching latch, the
+  phase row, the `keepTranscript` swap), `requestHop` (a typed `/move`: the
+  grammar, the boundary, then start it or leave it queued) and `hopIfQueued` (the
+  queued hop's start at the first true idle) — plus the state they own — are now
+  `packages/tui/src/useHop.ts`, a hook that declares no effect, so the App's
+  effect list keeps its order, and the idle effect that starts a queued hop stays
+  where its trigger is. "May a hop start now?" is ONE named pure rule,
+  `hopReady` (`hop-command.ts`), used by both paths: it was written out twice,
+  inside `hopStep` and inline in `hopIfQueued`, which is how the typed and queued
+  paths drift into disagreeing. `App.tsx` loses 107 lines and no longer reads the
+  daemon's queue to decide it. No user-visible behaviour changes.
+- **The TUI's last inline decisions are pure modules with their own tests.** Five
+  rules that `App.tsx` decided inside effects and callbacks are now named,
+  React-free functions: `anchorOffset` (`scroll.ts`, the rows-changed scroll
+  anchor), `pasteTarget` (`paste.ts`, where a paste lands — reply, panel, or an
+  attachment), `exitOutcome` and `jobOutputEntry` (`job-drawer.ts`, a job exit's
+  dock outcome and the one cache entry a `job_output` read produces, which the
+  App had been building in two places), and `tryWake` (`wake-gate.ts`, the
+  autonomous-wake gate the App derived twice). The effects and callbacks stay
+  where they were, so the effect list keeps its order; only the decisions moved,
+  each pinned by its failure modes. No user-visible behaviour changes.
+- **The slash commands are one file each, with a registry behind them.** Every
+  built-in command (`/help`, `/clear`, `/compact`, `/rename`, `/sessions`,
+  `/close`, `/model`, `/retry`, `/attach`, `/copy`, `/save`, `/tokens`, `/mcp`,
+  `/skills`, `/agents`, `/settings`, `/exit`) now lives in its own
+  `packages/tui/src/commands/<name>.ts` and declares only the slice of the
+  command context it uses; `commands/registry.ts` is the one list they are
+  derived from, so the palette, `/help` and the code that runs a command can no
+  longer disagree. `dispatchCommand` keeps the shared guards (a skill activation
+  mid-turn, a latched session switch, a session-mutating command mid-turn), and
+  `/compact`/`/clear`'s machinery stayed in `App` as driver functions so the
+  compaction and clear state keeps one owner. No user-visible behaviour changes.
+- **The input's image attachments moved out of `App.tsx` into one hook.** The
+  paste/`/attach`/drop decisions and the upload loop now live in
+  `packages/tui/src/useAttachments.ts`, which owns the one-decision-at-a-time
+  chain the feature needs; the draft state and the unmount abort stay in `App` so
+  the render, `submit`, Backspace and Esc keep their identifiers. No user-visible
+  behaviour changes.
+- **TUI: panels are pluggable.** Each list panel (`/mcp`, `/skills`, `/sessions`) now describes itself — its rows, its keys, its clicks — in its own file under `panels/`, registered by one line; previously every panel kind was a branch inside the panel and key-routing code. Behaviour is unchanged.
+- **The TUI's quit and clear executors moved out of `App.tsx` into one hook.**
+  `/quit` (`/exit`) and `/clear` now execute through
+  `packages/tui/src/useQuitClear.ts`, which owns the wiring but no state of its
+  own: every latch it reads (`exitPendingRef`, `clearingRef`, `ownClearsRef`,
+  `clearAfterTurnRef`, `runClearRef`) stays in `App` because the turn's settle,
+  the session `watch` and `swapSession` also read or write it. The decisions
+  remain the existing pure modules' (`quitCommandStep`, `clearCommandStep`,
+  `clearNoopNotice`), and `RunQuit` moved next to the hook that reads it, so the
+  package surface is unchanged. No user-visible behaviour changes.
+- **The TUI's turn driver moved out of `App.tsx` into one hook.** `run`, the
+  single `streamTurn` loop, its settle, the send-now chord, Enter's `submit`,
+  the warm-chunked history commit and `/compact` now execute through
+  `packages/tui/src/useTurnDriver.ts`, which owns only its own latches: every
+  ref another driver also reads or writes (`sendNowRef`, `streamCtrlRef`,
+  `warmingRef`, `wakeRef`, `exitPendingRef`, the clear's arm, …) still lives in
+  `App` and is passed in, so each read keeps its source and two keys with no
+  render between them behave as before. The decisions remain the existing pure
+  modules' (`planSendNow`, `planTurnStart`, `submitPlan`, `afterOldTurn`,
+  `onCompactionSettled`, the queue's and `state.ts`'s), and `runRef` keeps its
+  late binding. `App.tsx` loses 674 lines. No user-visible behaviour changes.
+- **The TUI's session link moved out of `App.tsx` into one hook.** How the TUI
+  follows a session — the activity feed it streams into the transcript, the
+  subscription set a follow installs and tears down, the single way the view
+  moves to another session, and a `/sessions` switch — now executes through
+  `packages/tui/src/useSessionLink.ts`, which owns no state and no effect: every
+  ref another driver also reads or writes (`heldRef`, `streamCtrlRef`,
+  `sendNowRef`, `warmingRef`, the clear's latches, the wake model, `switchingRef`,
+  `onActivityRef`) still lives in `App` and is passed in, so each read keeps its
+  source and two keys with no render between them behave as before. The
+  decisions remain the existing pure modules' (`nextStep`, `historyAction`,
+  `closedNotice`, `openFailedNotice`, `stayingNotice`, `switchRefusedNotice`,
+  `resetDock`, `noteSent`, the notice builders, `state.ts`'s and `wakeStep`), and
+  the `onActivity` ↔ `swapSession` cycle keeps its late binding.
+  `App.tsx` loses 261 lines. No user-visible behaviour changes.
+- **Larger app icon.** The octopus now fills ~80% of the iPhone app icon (was ~65%), so it reads at home-screen size.
+- **Harness lines speak in one quiet voice, and they group.** What the machine says about a session — a reply cut at its output limit, an empty turn, a failed compaction, a job exit, a repair — now shares ONE grey with a `◇` (info) or `▲` (warning) glyph instead of two unrelated blue/italic styles behind the assistant's own `●`, and consecutive harness lines form one block: a glyph at the head, the rest hanging two spaces under it, no blank row between. A reply cut twice by the output limit reads as one merged line (`asked it to continue, cut again`) rather than two near-identical ones.
+- **A compaction takes the spinner slot, and leaves a rule behind.** `/compact` no longer writes two transcript lines of its own: while it runs the row above the input says `Compacting…`, and for a few seconds after it succeeds `Compacted ✓`. The transcript instead gets one grey rule at the compaction point — `compacted · ctx 182k → 9k`, the same wording whichever device compacted — so the conversation shows where it was summarised, including on `--resume`, and the rule's brief is one Ctrl+O away.
+- **Activity in the mobile app is a low-detent bottom sheet.** It opens at the height of its rows (a short list cannot scroll), drags up to a tall detent only when the rows overflow, and closes on a downward flick from either detent, on a tap on the light scrim, or by itself when the last item ends — no page sheet, no dismiss resistance, and no panel at all when nothing is running. Its rows now carry a glyph per kind (spinning arc, terminal, clock, report) with the live step, and a running row's thin ■ stops it in two taps without opening its detail.
+- **Chart labels on the phone, inside the plot or in a legend above it.** A
+  line/area chart no longer spends a gutter of its width on line-end labels: the
+  series name sits just above each line's end (a haloed name-only label, inside
+  its own band for a stacked area), and a new **Charts** setting switches to a
+  compact legend above the chart whose items you tap to single a series out. The
+  stacked area's y axis now reaches a ceiling above the total, each series gets
+  its own stroke and marker (● solid, ■ dashed, ▲ dotted) so colour is not the
+  only cue, and the hero compares a series with its own previous point instead of
+  a different series.
+- **The phone's dark theme is soft warm graphite, not black, and its chrome
+  is thin and hairline-quiet.** The dark palette's neutral ramp is the
+  owner-approved B1 "grafite calda" (`#1F1F1E` page, `#2A2A28` card/sheet,
+  `#33332F` fill) with a one-step-below drawer surface and two new section-band
+  surfaces; the dark red was lifted to `#FF6D65` so it still clears 4.5:1 on the
+  new fill. Sheets lose their heavy 38 pt corners for 14 pt, cards go square for
+  the new banded lists, and `Icon` now accepts the `thin`/`light` SF Symbol
+  weights plus the hamburger and gear glyphs the restyle needs. Every screen
+  header drops its blurred glass circles for bare thin glyphs on the same 44 pt
+  touch target (`GlassButton` survives only over the camera), the chat header
+  ends in a single hairline and reads its context fraction as a small ring next
+  to "…" instead of a flat 2 pt bar — the ring is plain `View`s, so no
+  `react-native-svg` and no native rebuild — and the chat header itself is
+  50 pt instead of 56. The rename dialog keeps its 26 pt alert corners and the
+  light palette is otherwise untouched. Grouped lists become full-width bands:
+  one edge-to-edge surface per section, with a small uppercase label above it,
+  a hairline on its top and bottom edges, and the section's footnote beneath —
+  the band always one step above the surface it sits on, so a sheet's own
+  ground moves down a step to keep its bands separate. In a banded row the
+  label never truncates: a long value shortens instead, keeping the end that
+  tells values apart (a path its tail, a model id both ends), and at the
+  largest text sizes the value drops under its label rather than squeezing it.
+  Settings, Computers, Sessions, Pair and Session info all draw their sections
+  that way now — one band per section, with the section's notes on the band's
+  own margin and each note still a paragraph of its own — and the old inset
+  grouped card and its separate section header are gone. The chat's back chevron becomes a
+  hamburger that opens a **sessions drawer** over the conversation: the
+  computer as its title (tap to list another paired computer's sessions, or
+  pair one), Running / Recent / a collapsed Archived · n, the open session
+  highlighted, long-press → Rename (by id, no open), a magnifier into the
+  Sessions screen's search, and Settings at the bottom. Tapping a row switches
+  session — detaching only, never closing it — and after a switch to another
+  computer the back swipe lands on THAT computer's list. A list that cannot be
+  read says so with Retry, never "no sessions"; with Reduce Motion the drawer
+  fades instead of sliding.
+- **The mobile app's dark theme is now "Ardesia neutra" (B3).** The dark
+  palette moved from B1's warm graphite to the owner's cool-neutral slate —
+  page `#1E1F21`, card/sheet `#28292C`, fill `#313236`, label `#EDEEF0`, sec
+  `#A0A3A8`, sep `#37383C`, with the matching band (`#242528`), drawer
+  (`#19191B`), sheet separators (`#3D3E42`), glass and switch tokens — so the
+  dark UI sits next to the cyan accent instead of against it. The light theme
+  is unchanged.
+- **The iPhone's harness lines read like the Mac's.** On a session's transcript, the lines the machine says about the session itself now carry a glyph — `◇` for information, `▲` for a warning (a reply cut at its output limit, an empty turn, a failed turn, a lost turn stream) — and consecutive ones are drawn as ONE block: no blank row between them, the glyph re-opening only where the level changes. The shape is the signal, the amber only a cue; VoiceOver speaks "Warning:" before such a line. Separators (`compacted · ctx A → B`, a context reset) stay centred and ruled, and a warning keeps its level (and its place) when the re-ask's merged "cut again" line replaces it.
+- **Mobile: the session's state is a small dot before its title, and the working folder shows.** The chat header no longer says "Idle"/"Running": a 6 pt dot before the title pulses while a turn runs, turns amber while an approval waits, and is a hollow ring when offline, connecting or not connected (idle: no dot; an ended session dims its title). Under the title the subtitle reads `<folder> · <model>`, the folder in mono with home as `~`, and a tap opens Session info. The sessions drawer shows each session's folder under its title.
+- **Mobile hub: no badge dot, no count bubble, solid fan discs.** News arriving while the hub is on screen now plays a one-shot glow and a light haptic on the floating button instead of a persistent dot; a fan item's count is a rim arc (36° per item, full at 10) instead of a number bubble, and the fan's discs and label pill are opaque so the transcript no longer bleeds through them. VoiceOver reads the rim's meaning ("Artifacts, 3 new").
+- **Mobile: the floating hub button is on by default, at 80 %, and its opacity
+  slider moves in five steps.** A fresh install (no Activity button setting
+  stored) now gets the floating hub at 80 % opacity instead of the header pill;
+  a phone that already stored a choice keeps it (Header stays Header — switch in
+  Settings › Activity button › Floating). The Button opacity slider snaps to
+  20 · 40 · 60 · 80 · 100 % (the floor drops from 30 % to 20 %), with a light
+  selection tick each time it lands on a step; an older in-between value (e.g.
+  35 %) shows as its nearest step (ties go up: 30 → 40). The button stays solid
+  while it is touched and while the fan is open.
+- **Mobile: the floating hub button animates on the native driver.** Its
+  show/hide fade, the rest-opacity fade (30–100 %, solid while touched or with
+  the fan open) and the spring after a drag now run on the UI thread, like the
+  fan itself and the running-turn arc already did, so a JS thread busy with a
+  streaming turn can no longer stutter them. Behaviour is unchanged: tap opens
+  the fan, hold-and-slide selects, drag moves it, Reduce Motion still places it
+  at once and fades it in.
+- **A tap on the floating button opens the hub.** On the iPhone, with the Floating Activity button, a single tap now opens the fan of actions (with a haptic) instead of the full-screen Activity sheet; Activity is one of the fan's items, and it stays dimmed and says "Nothing running" when there is nothing to show.
+- **Queued messages show in the conversation.** A message queued while a turn
+  runs now appears as a dimmed user bubble at the end of the transcript, where it
+  will land, instead of a card above the input — with a footnote saying it is
+  pending (or "Sending now · stopping the step", or "another device" for a
+  message written elsewhere). Tapping one of your own opens **Edit · Send now ·
+  Cancel**: Edit withdraws it (the agent can no longer read a half-edited text)
+  and puts your own words back in the field under an "Editing a queued message"
+  banner whose × queues them again; Cancel withdraws it and never touches the
+  field. Both are silent no-ops with an honest notice when the agent already read
+  the message, when the link is down, or on a computer too old to take a queued
+  message back (which also hides them). **Send now** moved into the field, beside
+  the send button, and only appears while your own message is actually queued;
+  the field's card no longer lists the rows.
+- **The phone stops waiting on dead addresses, so the relay is actually reached.** A dial now races the computer's addresses with a 750 ms stagger (RFC 8305 style) instead of trying them strictly in order: the first socket to open wins and goes on to the Noise handshake, while every loser is closed before any handshake, and `unauthorized` still stops everything. On cellular a LAN address that hangs in TCP connect no longer eats the 15 s dial deadline before the relay is tried, and the "can't reach it" message now names the relay as a path. Design: `docs/feat/mobile-relay.md`.
+- **Mobile: the "Thinking" shimmer stays inside the letters, and photos sit outside the bubble.** The live row's bright sweep is clipped to the word's glyphs (no rectangle behind it) and runs on the native driver, and the elapsed time sits beside it in steady-width figures ("Thinking 12 s"); Reduce Motion shows a still grey word. A message's photos now sit ABOVE the text bubble as their own block (side by side, a grid, "+N" past four), and a photo-only message has no bubble at all; a photo still uploading from the outbox shows its percentage and a failed one offers Retry; tapping a photo opens a full-screen viewer that pages through all of them, with pinch-to-zoom, the caption and Share; a photo whose file is gone reads "Image not available".
+- **Tool calls on iPhone read like steps.** One line per call on a thin thread, readable MCP names and arguments, thinking folded into a ∴ marker, and a live "Thinking…" node while the turn runs; tap a step for its thought, command and result. Design: `docs/feat/mobile-tool-rows.md`.
+- **iPhone app: a new look on every screen.** One set of colours, type sizes and spacing, taken from the approved mockups, in light and dark mode, with Apple's SF Symbols icons, frosted-glass round buttons and haptics (a light tap when a message leaves, a firmer one for Stop, a success tap when a turn ends). Computers has a large title with round Settings and "+" buttons, each computer gets a bold header with a status dot (Online, Offline, or what needs your attention) above a rounded card with its project, and a "Pair a computer" card sits at the bottom. Pair again and Remove now live in a menu: long-press the project or tap "…". A computer that needs a new pairing (including a revoked one) shows "Pair again" right in its card. Pairing shows the camera full screen with a viewfinder, and the review, the code check (the 6 digits in two large boxes) and the result appear in a bottom sheet. The chat has a compact header with a status line and a "…" menu (copy the last answer or the whole conversation), your messages in bubbles, answers full width with SF Mono code: short inline code as small rounded chips, code blocks with a language header, a Copy button and sideways scrolling, tables as real grids. Tool calls are compact rows that open their output, diffs open on tap with line numbers and coloured rows, and the queue, tool output and diffs open and close with a smooth animation. Messages waiting for the network show as dashed bubbles with a "…" button when they need your answer, and that choice is a bottom sheet with large buttons. Sessions are grouped Running, Idle and Archived with a search field, the permission sheet has large answer buttons, and Settings uses the same rounded cards. Design: `docs/feat/mobile-ui-polish.md`.
+- **Voice moves to Beta in the iPhone app.** Dictation and read-aloud are off by default; turn them on in Settings → Beta.
+- **The Mac shows what the model presented: a card in the transcript and an `/artifacts` panel, and it opens them safely.** A `present` tool call now renders ONE card row under its header (`▣ <title>`, the type, the dimensions or size, the version, and `^X^O open`) instead of the tool's text, and a resumed session's cards are joined back from the daemon's `artifact/list`, so they survive a `--resume`. `Ctrl+X Ctrl+O` opens the newest artifact; `/artifacts` lists every presented artifact newest-first with its older versions folded under it (`→` unfolds, `enter` opens the version under the cursor, `s` saves a copy to `~/Downloads` without overwriting, `n` opens a page with the network after a confirm, `esc` closes). Opening writes a verified copy named `<sha>.<type>` (never the model's name) to a private temp folder removed at exit and hands it to the system opener with no output on the terminal; HTML and SVG are wrapped in a no-network CSP, and a kind this build cannot view is only ever saved, never opened. Cards from a pod daemon say `from the pod`, every open of pod bytes asks first (`y/N`, never remembered, no network option), and nothing is ever opened without a key. An older daemon says it needs a newer tentacle rather than opening an empty panel. Design: `docs/feat/model-artifacts.md`.
+- **Charts now draw in the Mac TUI and on the iPhone.** A `chart` tool call renders its chart in the conversation's own place — the braille plot, the ⅛-cell bars, the stacked rows, the 100 % pie bar and the sparkline rows (one per series at 40–59 columns; the data table below 40), centred to the transcript width — instead of a generic `● Chart …` tool row and its one-line result: the chart is part of the reply, not a tool block (it keeps no bullet, no connector, and is exempt from the generic body cut). It is drawn from the call's own arguments, re-validated by the client with the same caps as the daemon, so a resumed session shows the same chart and a forged or unreadable spec falls back to the plain tool row rather than crashing. Ctrl+O — or a click on the chart's caption — expands it to 16 plot rows with per-series min/max/last and the data table. A new `tui.chartGlyphs` setting (`braille`, the default, or `blocks`) draws quadrant blocks for a font that has no braille patterns, which a terminal cannot report on its own. On the iPhone the same call draws a vector chart (`react-native-svg`, so the app needs a new dev build) full width on the conversation background, with no card and no tool chrome: the title, a monospace hero number with its change pill, then smooth monotone lines with a soft gradient, rounded bars and a gapped donut in the shared palette, in light and dark. It too is drawn from the re-validated arguments, live and after a reload, and VoiceOver reads it as one element whose label is the chart's summary; a failed, refused or invalid call keeps the plain tool row. Press and hold to scrub, as in Stocks: a rule and a dot follow the finger, the hero number shows the values under it, the rest of the curve dims, and every new category gives a selection tick. A `Grafico | Tabella` switch under the chart swaps in the data table (tabular figures, with a Δ column for a two-series comparison), and VoiceOver has the same thing as a "Show data table" action. A tap opens the chart full screen, in portrait or landscape: series chips switch series on and off (colours stay put), a strip shows last · mean · max, and Share sends the data as CSV. A new chart draws itself in once when it arrives (a line traces left to right, bars grow, the donut pops); with Reduce Motion it only fades in, and charts reloaded from history appear without animating. Design: `docs/feat/model-charts.md`.
+- **The TUI's "in-process fallback" branches are gone with it.** A session's
+  `/clear` is always an in-place reset (no more close-and-replace), `Ctrl+X
+  Ctrl+S` only ever falls back when the daemon has no `sendNow` (not when the
+  session has none), and images are off through the session's own answer rather
+  than a missing seam — so those controller members are required instead of
+  optional, and a controller that omits one no longer compiles.
+- **A fired scheduled wake reads as a timeline event, not a message you typed.** On the phone and in the terminal, a wake that fires now shows as one quiet grey row — `◷ Wake 15:54 · <its prompt…>` — collapsed until you tap it (phone) or press Ctrl+O (terminal), instead of a user bubble holding the raw `[scheduled sc-1 · at 2026-11-17T15:54 · fire 1]` text. The time is the moment it actually fired, for one-shot and recurring wakes alike, and the row looks the same live, after a reload and on every device; a conversation saved before this change shows the one-shot's scheduled time, or `#N` for a recurring wake.
+- **Auto-accept is per session, on every device.** Shift+Tab in a terminal or the switch on the phone's approval sheet turns auto-accept on or off for the whole session; every terminal and phone attached to it follows at once, and a `serve` session keeps it across a daemon restart. Approvals it gives are one-time only; a pod session (`run`/`attach`) keeps it on the laptop as before.
+- **`sessionHop.tool` turns the agent's `move_session` proposal off.** New setting (default on) and its env form `TENTACLE_SESSION_HOP_TOOL`: with it off the agent is never offered the tool that proposes moving its session to another target, so the only way to move is a `/move` you type. The tool itself never moves anything — it raises one prompt in your terminal at the end of the turn, which auto-accept never answers and nothing remembers. On a `run`/`attach` session it is never offered at all: only a hop-capable terminal can put the proposal to you, so the model is never told to propose a move nobody is asked about. Design: `docs/feat/session-hop.md`.
+- **With auto-accept on, a move needs no prompt — except toward your own machine.**
+  A model's `move_session` proposal is answered by auto-accept like any other
+  tool, logged allow-once (the outcome line says `(auto-accepted)`), with ONE
+  exception kept for safety: a move TOWARD LOCAL proposed from a pod or container
+  always asks on the laptop. A typed `/move`'s mount gate still asks.
+- **The `move_session` description is rewritten for the model** (≤ 600
+  characters): when to use it (multi-step work that needs the workload's tools or
+  files; a one-off check stays a `kubectl`/`oc exec`), the target shapes including
+  the namespace form, that it applies at the end of the turn, that a message
+  arrives in the new place, and what resets — the stale "auto-accept is turned
+  off" is gone.
+- **A hop names its Kubernetes namespace, and one rule decides the default.**
+  `kubernetes:<namespace>/<pod>[/<container>]` in `/move attach` (one segment =
+  the pod, two = `<ns>/<pod>`, three = `<ns>/<pod>/<container>` — the old
+  `pod/container` reading is GONE), and the same namespace as a structured
+  `workload.namespace` on the `move_session` tool. One function, `kubeNamespace`,
+  now decides it for `run`, `attach` and every hop: explicit >
+  `TENTACLE_POD_NAMESPACE` > (a server override ? `default` : the kubeconfig
+  context's, else `default`) — the hop used to ignore the env entirely, which is
+  why a live test attached to `namespace default`. A proposal's namespace is
+  resolved at the turn's end, so what the prompt shows is what is dialled; the
+  prompt and the failure line carry the provenance (`namespace ns1 (from context;
+  context c, ~/.kube/config)`); a k8s 404 says `/move attach
+  kubernetes:<namespace>/<pod>` instead of a `--namespace` flag a hop does not
+  have; and every label prints `kubernetes:<ns>/<pod>[/<container>]` from ONE
+  function.
+- **Auto-accept now survives a move.** It used to be turned off at every hop; it
+  stays exactly as it was, and the moved notice states the mode it is in.
+- **`move_session` is now OFF by default.** `sessionHop.tool` (env
+  `TENTACLE_SESSION_HOP_TOOL`) used to default to on, so a fresh install offered
+  the model a tool that proposes moving your session. It is now an opt-in: set
+  `sessionHop.tool: true` (or `TENTACLE_SESSION_HOP_TOOL=1`) to offer it. A
+  `/move` you type is unaffected — it never needed the setting. `config list` and
+  the config reference now say so, and no longer claim a proposed move is "never
+  answered by auto-accept" (it is, except toward your own machine).
+- **The session continues by itself after a move.** When a model-proposed move
+  (or a `/move` typed mid-task) settles, one short message tells the model where
+  it now is, whether your folder is shared and what was reset, and the turn goes
+  on — no typing needed. A `/move` typed at rest still waits for your next
+  message, and after three consecutive self-continues it pauses and asks you.
+- **A presented artifact's row is one title and one click.** The `present` tool row now reads `● Present <title>` (never the call's raw JSON or the page it carries) with one grey line under it — `<id> · <type> · <size>` — instead of the `▣` card and the model's "Presented … They open it from the card" receipt. Clicking the row's header opens the artifact with the Mac's default app through the same safe path as `Ctrl+X Ctrl+O` and `/artifacts` (our file names, CSP-wrapped HTML/SVG, unknown types never opened, a pod's bytes always asked first). Design: `docs/feat/tui-present-row.md`.
+- **The TUI's turn indicator shimmers.** `Thinking…` / `Working…` now carries a
+  soft highlight that sweeps left to right across the word and rests for a moment
+  before repeating, matching the phone's mockup, instead of sitting in one flat
+  accent colour. The sweep rides the spinner's existing 80 ms re-render — no new
+  timer — and is computed by a pure module (`packages/tui/src/shimmer.ts`) that
+  only ever returns runs of the label's own text, so the row cannot shift by a
+  cell. The two highlight tones are per-mode palette tokens, gated by the light
+  palette's contrast test, and with colour off (`NO_COLOR`, no TTY) the row is
+  exactly the plain label it was before.
+- **The voice conversation core, shared by the Mac and the iPhone
+  (`@tentacle/core`'s `voice/`).** Both edges of hands-free voice mode now run
+  the same pure, React-free modules instead of each growing its own loop: the
+  end-of-turn fold (a comma-safe silence floor, Smart Turn on the Mac, "no new
+  recognised text" on the phone, an injected audio clock so every trace is
+  testable), the conversation reducer (states and the ordered `speak`/`hush`/
+  `listen`/`prompt`/`enqueue` commands; an ask pending suspends every send, a
+  phone call never re-opens the mic by itself, a link drop hushes and pauses,
+  barge-in stops speech and steers but never cancels, and only the edge that
+  started or steered a turn speaks it), the streaming chunker (a ≤ 4-word first
+  chunk so speech starts fast, never a cut inside a word or a number, identical
+  chunks at any delta split), speakable text (code fences, tables and hrefs
+  never read out), tool narration from the tool name only, the ask template,
+  and spoken-language resolution. Nothing is user-visible yet: the Mac TUI and
+  the iPhone app are wired to these modules in later slices of the same task.
+- **Voice in the terminal is off by default.** Turn it on with `voice.enabled: true` in the config; Ctrl+R then dictates as before. While off, Ctrl+R shows `voice is off — set "voice": { "enabled": true } in the config`, `tentacle voice status` prints the same hint, and the helper is never spawned (no mic is opened).
+- **Voice turns answer sooner, and are written to be heard.** A prompt or a
+  mid-turn steer can now say it came from voice mode, carrying that edge's own
+  "reasoning off for spoken replies" setting. The turn then reasons off for the
+  rounds before its first tool call — a spoken reply wants an answer now, while
+  real work still reasons as configured once the model asks for a tool — and its
+  requests carry one short instruction that the person is listening, not
+  reading. Both live on the outgoing request alone: the stored conversation,
+  `session/log` and a `serve` daemon's files never contain them. The setting is
+  per edge and read at send time, so a phone and a terminal on one session each
+  send their own. On OpenAI-compatible endpoints it asks for
+  `reasoning_effort: none` with `enable_thinking: false`, retrying once without
+  them (and remembering) if the endpoint rejects them; Anthropic is unchanged,
+  and a pod's tunneled model call carries the wish back to the laptop that owns
+  the model. A turn that is not a voice one is untouched.
+
+### Removed
+
+- **Removed `--in-process` / `--no-worker`, and the silent fallback.** The local
+  TUI has one session path now — the agent always runs in a worker thread over
+  RPC (AGENTS §7). A flag that still passes either option is refused as an
+  unknown option, and a worker that cannot start is a clear error naming the
+  phase and reason (`tentacle runs its agent in a worker thread and has no
+  fallback`, with the Bun version and reinstall hints and the daemon error log),
+  exiting 1 before Ink mounts instead of silently degrading the TUI.
+
+### Fixed
+
+- **An image the session cannot take now says which of the two causes it is — and where to fix it — instead of always telling you to update.** Pasting an image path into a session whose model has no vision on the current build said `this daemon does not take images (its model has no vision, or it predates images — update it)` — two unrelated causes merged into one sentence, advising an update of software that was already up to date and never naming the setting that would fix it. The client holds the facts to tell them apart: `initialize` enforces protocol equality, so a daemon that handshook at the version that introduced images and advertises no image input simply has a model whose config is off. So a current daemon now names the model AND whose config it is: for the in-process worker and a `--model-proxy` pod (both run this laptop's model) `<model> is configured without images — set model.images true in your config if this model takes images (tentacle config set model.images true)`, and for a `serve` host or a pod daemon running its own model `<model> is configured without images — set model.images true in the daemon's config if that model takes images (tentacle config set model.images true, on the daemon's host)` — because the key lives wherever the model runs, so a command run on the wrong machine changes nothing. A model name from the wire is stripped of control characters and bounded (whole code points, an ellipsis, never a split character) before it reaches a terminal, and a daemon that reports its own model outranks any caller's claim about it. Only a daemon that really predates images — an older protocol, or one that answers `attachment/put` with `MethodNotFound` — says `this daemon predates images — update it`, from one shared constant. An unreadable model name invents nothing, and a handshake that has not answered yet is never treated as evidence of age.
+- **The iOS build works again: the Live Activity target compiles `PushCore`.** `xcodebuild archive` had failed since the Live Activity target landed — `LACore.swift:23: error: Unable to resolve module dependency: 'PushCore'` — because `PushCore` is a module only in the SwiftPM test package, and the generated Xcode project has none: `swift test` stayed green while no installable build could be produced. The widget target now compiles the same sources as the Notification Service Extension, linked file-by-file (Xcode's synchronized root group does not follow a folder symlink, but does follow per-file ones — no copy, one source of truth), and `LACore.swift` guards the import with `#if canImport(PushCore)` so one source builds both ways.
+- **Mobile: closing the Activity sheet no longer flashes it back open.** One close now closes it once: the sheet slides down and is gone. Before, it came back for a moment and then disappeared.
+- **Mobile chat glitches.** A sent message no longer sits beside the transcript as a dashed "Sending…" bubble for its whole turn: the outbox row leaves, and the message appears in the transcript, as soon as the daemon accepts it (`RemoteSession.send` gains an `onAccepted` callback for the daemon's ack). A send now puts the keyboard down, and the emptied field shrinks back to one line. Opening a chat lands at the true end (RN's `scrollToEnd` stopped 16 pt short), and the list follows the end when the header or a notice shrinks it. The Rename dialog sits above the keyboard with a proper top inset. A foreground sub-agent's Agent card now shows its latest activity and tool count (`Done · N tool uses`, `Moved to background · sa-N`) instead of looking stuck on "Running". A Session info section that says "Couldn't load" now logs its error class and code (never the message) for Settings → Export logs.
+- **One chat item that cannot be drawn no longer crashes the iPhone app.** A
+  transcript row that fails while rendering is replaced by a small "couldn't
+  display this item" note and the failure's error class is written to the app
+  log, instead of aborting the app — which, since a session reopens on the same
+  rows, used to crash it again on every launch.
+- **The hub's fan opens smoothly while the model is thinking or answering.** On
+  a phone, the fan opened in jerks during a streaming turn: every streamed chunk
+  re-rendered the whole chat, and each re-render restarted the fan's opening
+  animation (on the simulator, about 400 restarts in one open, so the fan never
+  finished opening while the turn streamed). Now the fan starts its animation
+  once per open. The chat re-renders at most about 10 times a second while text
+  streams, and only the row that changed is redrawn. Turn ends, tool cards and
+  permission prompts still show at once. Exported logs now include `ptrace`
+  lines: JS frame gaps, whether a turn was streaming, and how long the fan took
+  to open. Use them to diagnose jank on a real device.
+- **Coming back to the app no longer moves a long conversation or shows a false "New messages".** On the first return from another app, a long session read further up jumped once and its "Jump to latest" pill turned into "New messages" although nothing new had arrived. The resync that runs on return rebuilt every row with a new identity, so the list forgot the sizes it had measured above the screen; rows that are already shown now keep their identity, and the conversation stays exactly where you left it.
+- **A photo message on the phone now shows its reply, its picture, and a WhatsApp-shaped bubble — and photos go out
+  smaller.** A message with a photo no longer leaves the header on "Running" with no answer: the outbox opened a
+  second session handle for the same id, and the client hands the stream to whichever handle opened last, so the
+  finished turn's reply and its `turn_end` never reached the transcript (the reply was in the history all along). A
+  photo the phone just sent now draws the picture it sent — full bubble width with the bubble's radius, its caption
+  below it and no empty text area — and tapping it opens it full screen. The transcript also pulls to refresh, re-reading
+  the session from the daemon and replacing the rows: the recovery that used to mean leaving and re-entering. And a photo
+  is downscaled to a 2048 px long edge at JPEG 0.8 before upload (a few hundred KB instead of several MB), with a new
+  Settings switch, **Send photos at original size**, off by default. The resize names one edge only, so a rotated
+  portrait photo is never squashed. The phone's copy of a sent photo is now kept (the transcript's own row draws it) and
+  the folder is trimmed on a weekly grace window instead of deleted the moment the daemon accepted the message, so a
+  photo that goes bad on disk turns the bubble back into its label rather than an empty frame.
+- **A chat opens at its end, without scrolling through it.** A long session now
+  lands on its newest message on the first frame: the list is laid out and
+  scrolled while hidden (never animated on the initial landing), then shown once
+  the end stops moving, so a reopen no longer flies through the whole history.
+  Coming back to the app also resyncs silently — no spinner, no jump for someone
+  reading further up — and pull-to-refresh, Retry and Reopen all re-arm the same
+  silent landing.
+- **Turning notifications off on the phone now stays off, and really stops the
+  pushes.** The Notifications switch is the phone's decision and is persisted in
+  its own Keychain record, so a relaunch no longer re-registers the phone with
+  every computer; turning it off while a computer is not connected leaves a debt
+  that the next connection settles before anything else (an unregister that could
+  not be sent is never treated as sent); turning it back on registers immediately
+  with the computers that are connected instead of waiting for a reconnect; and
+  one outdated computer no longer makes the switch inoperable, so notifications
+  can still be turned off for the computers that do deliver. The unregister is
+  also remembered across an app relaunch (it lives in the computer's own stored
+  record) and a switch record left by a different app version is never
+  overwritten.
+- **`serve --push-grace` now actually works.** The flag was validated and consumed by the daemon, but it was missing from `serve`'s accepted-argument table, so `serve --push-grace 30` — the documented way to tune how long a permission request waits before the phone is notified — was refused as an unknown option. It now parses, refuses anything outside 0–3600 before the daemon binds, and appears in `serve --help`.
+- **The relay starts — and keeps serving every phone — whether or not Apple's push key is installed.** The APNs wiring moved out of `relay.service` into a systemd drop-in (`apps/relay/deploy/relay.service.d/apns.conf`), installed only together with the `.p8`. Both of its lines used to make the *base* unit unable to start on a host without the key: `LoadCredential=` with an absolute path fails the unit's start (243/CREDENTIALS) rather than skipping the credential, and an unset `${VAR}` is expanded by systemd to an EMPTY argument (`--apns-key-id ""`), which the relay refused. With `Restart=always` that was a crash loop — a routine redeploy, or a rollback that removed the key, took every phone off the relay. The base unit now carries no push wiring at all and boots with push off (one `push off:` line, no `"push"` in `ready.features`), and the relay additionally treats a blank `--apns-*` value as "not set" instead of a refusal, so a half-installed drop-in still boots. The drop-in is also a systemd-legal override of a `Type=simple` unit: it clears the inherited command line with an empty `ExecStart=` before restating it, so installing push no longer leaves the unit with two command lines (which systemd refuses outright) — the install step itself used to be the crash loop. `docs/ops/relay-deploy.md` §6.1 documents the drop-in and §6.3 reverts it in the same step as the key, with one stated outcome for a key-less drop-in: 243/CREDENTIALS, never "fine".
+- **iPhone: a reopened session keeps its failed steps red, a compaction reads the same live and after a reopen, diagrams get their outline | filled setting, and the opacity slider's thumb is visible.** A failed tool call is now stored with its error flag (`isError` on the tool message — additive, display only), so reopening a session on the phone or resuming it in the TUI no longer turns a failed step green. Another device's compaction no longer shows a literal `_…_` notice: live and after a reopen it is the one `compacted · ctx A → B` separator, and the summary is no longer shown as a message you typed; the phone's other notices lost their stray underscores too. Settings gains a **Diagrams** section (Outline, the default, or Filled: soft-filled shapes, caption below). A full-screen diagram or chart now follows a light↔dark switch while it is open. The "Button opacity" slider's thumb is drawn in the accent colour with its shadow (it was white on white in light mode), and its preview shows ordinary chat text.
+- **Coming back to the app no longer scrolls the transcript up and down, and a queued message can be cancelled again with the hub on the right.** A foreground return re-attaches the session, which REPLACES the rows and re-keys them all: a virtualised list unmounts its cells and reports a sequence of content heights. The "land at the end without animating" landing armed by that return was one-shot — it released on the FIRST measurement — so every later height was followed with an animated scroll, which is the loop the owner saw on a real iPhone after switching apps and back. The landing now absorbs the whole re-measure and lands in ONE silent scroll when the sizes go quiet (bounded, so a turn streaming through the return still gets the list back), keeps that silent hold through the growth its own landing scroll causes (a list renders the end's cells, so the height moves again right after it), and never scrolls at all if the person was reading further up — including when they scroll up while the return is still landing, where the history that arrives is still news and the "jump to latest" pill says so. Separately, the pending message's bubble reserved no space for the floating hub: on a 440 pt screen the hub spans x 376–430 while Cancel sat at x 384–434, entirely under it, so a tap there opened the hub fan instead of cancelling — a queued message could not be cancelled at all with the hub on its default right edge. The bubble and its Edit · Send now · Cancel row now keep the hub's whole column clear at BOTH edges (the hub can be dragged to either) and the actions wrap rather than run off, with nothing reserved when no floating button is drawn.
+- **Artifacts open properly on the phone.** An HTML page, a Markdown document,
+  an SVG or a text artifact now opens in its viewer instead of saying "Couldn't
+  keep this file"; the viewer covers the whole screen instead of opening as a
+  half sheet under the gallery; and the gallery's close button no longer sits
+  on the status-bar clock. A chart with a currency unit or a long date axis no
+  longer fails on iOS (whose Intl lacks `formatToParts`, or returns no parts),
+  and the ∴ thought glyph is a little larger. The live "Thinking…" node now
+  breathes (its ∴ dots light up in turn, and a shimmer crosses the word; still
+  under Reduce Motion), and the Activity sheet's Scheduled group shows the
+  session's real wakes (how many, and the next one; a tap opens them in
+  Session info) instead of a greyed "soon". Tapping an artifact's card in the
+  conversation now opens that artifact (closing it returns to the
+  conversation) instead of the artifacts list.
+- **iPhone: a "Send now" no longer leaves its message stuck in the queue, and its turn now shows live.** After tapping Send now during a turn, the message stayed shown as "Queued" for ever, even though it had been sent and answered. The row now leaves as soon as the daemon stops listing it. The new turn now streams into the open session (the running state, the answer, and Stop), where before it only appeared after leaving and re-entering. Coming back to the app while offline now refreshes the session once the connection is back.
+- **Mobile: a tool step's line no longer carries a ∴ beside its duration.** The
+  ∴ sat between the command's subtitle and its elapsed time (`Bash ls ∴ 22 ms`)
+  and read as part of it. A step's line is now name + subtitle + duration only;
+  the ∴ belongs to reasoning — a Thought row's node and the live `Thinking…`
+  footer — and a thought folded into a step is still the open body's first line,
+  so nothing it stood for is lost.
+- **A write to a hard-linked file inside the workspace is no longer refused as "outside the workspace".** macOS's `realpath` intermittently answers with a *different* name of a file that has several, so the confinement check could see a legitimate in-root path as outside (or replace the wrong name); a file with several names is now resolved from its directory, keeping the name asked about.
+- **iPhone app: messages you send arrive, and the chat reads right.** A message sent from the phone now reaches the computer and shows in the conversation — before, the app cleared the field and then failed silently, so nothing was sent and nothing appeared; if a send cannot even start, your words now come back to the field with a notice. The chat follows the answer as it streams, unless you scroll up (then a "Jump to latest" button appears), and code blocks keep each line whole and scroll sideways instead of wrapping. The composer clears the home indicator and stays above the keyboard; Return sends — the key reads "Send"; while a turn runs it queues, and it never stops a turn. Answers no longer show `&#39;`, `&quot;`, `&amp;` or `&lt;` (nor `&#x27;` inside a highlighted code block), a tool row shows its command or path instead of the raw JSON arguments, terminal colour codes are stripped from tool output, and in dark mode answers are no longer black on black. Design: `docs/feat/mobile-ui-polish.md`.
+- **A permission dialog that appears while you are still typing no longer eats your next approving key.** Typing `/quit` and pressing Enter as an ask opened — or, worse, typing the `a` in an ordinary word, which granted a standing **session-scope** approval — used to answer the dialog you had not read yet: the dialog claimed every key the moment it was in the frame, Enter picked the highlighted "Yes", and `y`/`a` were the allow shortcuts. Approving keys are now swallowed for the first 500 ms after a request's dialog is first drawn (Enter on a "Yes"-style choice, `y`, `a`); the dialog stays up, nothing is approved and nothing is run. Refusals stay immediate (`n`, Esc, Enter on "No", and on a hooks-trust ask with no stored decisions `a` — an accidental refusal is recoverable, an accidental approval is not), as do the arrows, `t` (open the reply field, whose Enter can only refuse or send) and Ctrl+C. The window is measured from when the dialog is actually drawn, so a slow render cannot shorten it, it restarts for each new request (a second ask opening right behind the first is guarded too), and a clock that jumps backwards can only keep it disarmed — it never grants. Denying or answering deliberately is unchanged once the window has passed.
+- **Pairing from a phone off the computer's network works.** The app races the
+  pairing QR's addresses like it already races a paired computer's, so a dead LAN
+  or Tailscale address no longer leaves pairing on "Connecting…" before the relay
+  is ever tried. The race lives in `@tentacle/client` now (the mobile app imports
+  `firstAnswering` from there), and it gained two options the link never needed:
+  a caller-supplied "this failure is the computer's verdict" rule (pairing's
+  refusal, so a spent code is never re-tried on another address) and an
+  open-only deadline (15 s, after which "nothing answered" is an honest
+  `unreachable` instead of a hang — the exchange itself still waits on a human).
+  Cancel now closes every socket the race opened, not just the last one.
+- **A `serve` session with auto-accept on keeps running with no app or terminal
+  attached.** The computer answers its permission asks itself (allow once only),
+  as a device would; pod sessions are unchanged.
+- **Project hooks run in a phone turn.** They silently never did: the daemon
+  asked the prompting client and the phone had no answer for that question, so
+  every turn in a project with hooks ran without them and said nothing. The
+  serve host's own `hooks-trust.json`, the file this machine's TUI writes, is
+  now checked first, read-only, so a folder trusted once on that computer runs
+  its hooks for every client's turns; a folder it does not trust is asked about
+  by the phone, through the permission sheet, which always reaches a person and
+  is never answered by auto-accept. Nothing is stored from a phone's answer.
+- **`/move attach` joins a workload only when nobody else is in it.** Moving into an existing docker/podman container or k8s pod is refused, with one line and nothing dialled, when a `tentacle run --detach` of yours owns that workload, when another session is already attached to or running in its resident agent, or when it still holds an older copy of the session you are moving that is running, has background jobs, or has another terminal attached to it — and the refusal happens before any session is opened there, so the workload's current client is never disturbed. Idle older copies are closed and reseeded from your laptop's history, never joined. A workload you joined is never deleted on the way back, `--rm` included, and a hop's own container now really bind-mounts the folder it names — the agent works on your files at the same path instead of the image's own filesystem. Design: `docs/feat/session-hop.md`.
+- **`/move` keeps the conversation.** After a hop the model sees the whole history, on the same session file — no more "this session was closed on another device" followed by an empty session. The hop's outcome is said once (an engine's text renders literally), the footer and tool asks show the target's own working directory, and a container whose arch probe fails takes the engine's arch instead of guessing x64.
+- **Moving a session is one live line, not fourteen transcript notices.** A hop's
+  provisioning now takes the engine runtime's interactive single-line contract
+  without needing a TTY: the hop hands it a throttled `liveLine`
+  (≤ 1 update per 100 ms, the latest text always landing) that paints its own
+  status row. One attach used to print `resolving…`, `injecting…`, ten
+  `transfer ▓▓░ 10%…100%` lines and `verifying…` — each a separate transcript
+  notice. The transcript now keeps only the engine's warnings and the one outcome
+  line (`Moved to …` / `not moved: …`).
+- **A reopened session on the phone keeps its Thought rows.** Only how long the model thought is stored (never the reasoning text), so a thought before an answer reads `Thought · 12 s` live and after a reload alike — collapsed, not expandable — and a thought before a tool stays folded into that step ("thought first"). The Mac TUI is unchanged.
+- **The TUI's row bullet no longer turns into an emoji.** The bullet that opens a
+  tool call, a reply and a notice was `⏺` (U+23FA, the record symbol), which is
+  emoji-capable: on a terminal whose monospace font lacks it — Windows Terminal
+  under WSL, Safari on iOS — the OS substituted its colour-emoji font and drew a
+  "record button", sometimes two cells wide. It is now `●` (U+25CF BLACK
+  CIRCLE), which has no emoji form and is present in practically every monospace
+  font. The blink's ON and OFF halves are still the SAME character (OFF under the
+  SGR conceal attribute), so the row keeps its exact cells and nothing moves at
+  1 Hz.
+- **A real flowchart draws in the TUI instead of falling back to "source only".**
+  The owner's transformer diagram (`subgraph id ["a long title"]`, 22 boxes,
+  `<br/>` labels, `[[ … ]]` subroutines, back edges) came back as highlighted
+  source because the renderer refused it. Now: a subgraph's title is read without
+  its id (and a too-long title is shortened with `…` on whichever border has room
+  instead of dropping the whole frame), a label's `<br/>` breaks are drawn as
+  several rows in one box and a long label is wrapped to the terminal width, and
+  `[[ … ]]` is a subroutine shape. When a diagram genuinely cannot be drawn, the
+  caption says why — `too wide for 80 cols — widen the window or ^X^O`, `too many
+  boxes to draw`, `cannot draw faithfully in a terminal` — instead of a bare
+  "source only in the terminal".
+- **No more flashes while the agent works.** While a turn ran ("Thinking…"), the TUI could flash now and then, as if the whole screen re-rendered. Each spinner tick (about 13 per second) repaints the whole screen as one erase-everything-then-redraw write, and the terminal could paint it half-way. Each frame is now sent as one synchronized update (DEC mode 2026), so iTerm2, Ghostty, kitty, WezTerm, recent tmux and other terminals that support it show only complete frames. Terminals without mode 2026 (e.g. Terminal.app) ignore it: no change there, and no stray characters on screen.
+- **`voice.enabled: true` in the config now actually reaches the TUI.** `loadConfig` never projected the resolved `voice` block into the object it returns, so every `startTui` site read `config.voice === undefined` and fell back to `VOICE_DEFAULTS` — Ctrl+R answered "voice is off — set `"voice": { "enabled": true }` in the config" although the config said exactly that. The block is projected like `tui`/`sessions`, and `connect` no longer degrades to the voice defaults *silently*: an unreadable config file now says so in one `[config] …` line before connecting.
+- **Live dictation now shows your words while you speak, not only at the end.** On a Mac the live preview stayed empty for most of a take: Apple's recogniser, opened in its accurate mode, holds every in-progress result until the input ends, so a 5 s Italian take showed nothing until the final. A second, fast recogniser now runs on the same audio for the preview only — a partial about every second, the first after ~1.2 s — while the text that lands in your draft still comes from the accurate one, identical to before.
+- **A fresh shell no longer hands its own framing to the first command.** The bytes that arrive after a shell's readiness marker are now passed to the first command instead of being discarded, so a pod's startup banner survives. The sentinel scanner also agrees with the ready parser about where the marker ends, so a pod that prints `__TNT__E` itself can no longer put the delimiter into a command's output.
+- **`workload_shell` works on a multi-container pod, and says which container it used.** A pod with more than one container used to fail every call in under a second with `exec channel errored`: no container was named, so the apiserver refused the exec, and the refusal's reason never survived the trip back. The container is now picked on your machine with kubectl's own rule — the pod's `kubectl.kubernetes.io/default-container` annotation, else its first container — and the first result names it, lists the others and points at `target.container` to choose a different one. The `container` and `namespace` fields now carry a description in the tool's schema, and a container the pod does not have is refused up front with the pod's container list instead of being left to fail. When the apiserver still refuses, the error now carries its own message (RBAC, SCC, admission) rather than a constant, with a bounded 5 s wait so a silent apiserver can never hang the report.
+
+### Security
+
+- **The mobile relay is hardened against the flooding an internet-facing
+  service actually gets.** Four availability holes are closed and its log stops
+  being a lever. Bun now refuses an oversized frame *before* allocating it
+  (`maxPayloadLength` 96 KiB, above the largest legitimate Noise frame) instead
+  of after a 16 MiB string existed; a `/v1/daemon` or `/v1/accept` socket that
+  has not said `hello`/`accept` is capped per address and closed after 10 s
+  instead of living forever on pings; `ping` is allowed only after `ready` and
+  rate-limited; and a new `--max-ids-per-ip` (32) bounds how many computers one
+  address may register. Behind Caddy the per-IP limits were **one global
+  bucket** keyed on 127.0.0.1 — a new `--trust-proxy` makes them per client by
+  reading `X-Forwarded-For` only from a loopback peer and only the right-most
+  untrusted hop, with an IPv6 client collapsed to its `/64`
+  (`apps/relay/src/client-ip.ts`). The deploy artefacts follow: the unit runs
+  `--trust-proxy` and drops the fleet-sized overrides, and the Caddy site block
+  adds HSTS, drops the `Server` banner, 404s every non-relay path and sets the
+  header the relay reads. Logs are capped at 20 lines per kind per 10 s with an
+  honest `log-suppressed` summary, IPs are never logged, stream-token prefixes
+  are dropped and Apple's `reason` is bounded. The runbook's Caddy steps are the
+  podman ones this host actually runs. Doc:
+  `docs/fix/relay-hardening.md`.
+
 ## [0.6.0] - 2026-11-13
 
 ### Added

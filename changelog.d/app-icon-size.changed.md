@@ -1,1 +1,0 @@
-- **Larger app icon.** The octopus now fills ~80% of the iPhone app icon (was ~65%), so it reads at home-screen size.

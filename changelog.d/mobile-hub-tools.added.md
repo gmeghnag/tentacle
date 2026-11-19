@@ -1,1 +1,0 @@
-- **Tools in the hub.** On the iPhone, the floating button's fan has a Tools item (a plug) that opens a sheet listing the session's MCP servers and skills, with a switch on each to show or hide it from the model in this session. Each server's tools open in a collapsed list.
