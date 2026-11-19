@@ -1,1 +1,0 @@
-- **The macOS voice helper ships with the release again.** v0.7.0 went out without `tentacle-voice`: the helper's entry file was named `main.swift` while using `@main`, which the release builder's Swift rejects (a newer local Swift accepted it). The file is renamed; `tentacle update` and the install script fetch the helper again on macOS.
