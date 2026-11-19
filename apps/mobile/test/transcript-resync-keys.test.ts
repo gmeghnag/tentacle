@@ -127,6 +127,43 @@ describe("what really changed still gets fresh keys", () => {
     expect(new Set(keys(after)).size).toBe(after.rows.length);
   });
 
+  test("after a mismatch no later row reuses an old key, even where the kinds line up", () => {
+    // A turn that answered in two consecutive assistant messages (a round with no
+    // tool, then another): two `assistant` rows side by side. The resync's history
+    // gained a user line early, so the two lists are misaligned from index 1 on —
+    // yet indices 2 and 3 hold an `assistant` row on BOTH sides. `sameSlot`
+    // matches an answer by KIND alone, so without the leading-prefix rule the row
+    // named "one" would inherit the key of the different answer named "two" (and
+    // the screen state keyed by it: `openSteps`/`fullSteps`, read-aloud).
+    const was: readonly ChatMessage[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "one" },
+      { role: "assistant", content: "two" },
+    ];
+    const before = fold([history(was)]);
+    const after = apply(
+      before,
+      history([
+        { role: "user", content: "hi" },
+        { role: "user", content: "wait" },
+        { role: "assistant", content: "one" },
+        { role: "assistant", content: "two" },
+      ]),
+    );
+    // Non-vacuous: a same-kind pair really does sit past the first mismatch.
+    expect(before.rows.map((row) => row.kind)).toEqual(["user", "assistant", "assistant"]);
+    expect(after.rows.map((row) => row.kind)).toEqual(["user", "user", "assistant", "assistant"]);
+    expect(keys(after)[0]).toBe(keys(before)[0]);
+    // The property: only the leading run keeps a key. Past the first mismatch
+    // (index 1) nothing may carry a key from ANY position of the old list.
+    expect(
+      keys(after)
+        .slice(1)
+        .filter((key) => keys(before).includes(key)),
+    ).toEqual([]);
+    expect(new Set(keys(after)).size).toBe(after.rows.length);
+  });
+
   test("a changed row in the shared prefix keeps its key but shows the NEW content", () => {
     const before = fold([history(messages)]);
     const changed = messages.map((m, i) =>

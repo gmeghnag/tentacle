@@ -243,3 +243,43 @@ object) accepted on the doc's word.
 
 **Executor behaviour:** red → green shown, simulator frames before/after, honest
 "Not verified" line. The one gap is the unpinned `same` guard.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-19*
+
+Review finding 1 (MEDIUM, unpinned prefix rule) — **fixed**, test only, no
+production change (`apps/mobile/src/transcript.ts` untouched: the rule was
+right, only unpinned).
+
+The reviewer's suggestion ("drop a user line early → an assistant/reasoning row
+lands at an old index of that kind") needs the kinds to line up *after* the
+shift. With a dropped line they do not (the row counts differ per message), so
+the test shifts the OTHER way: the resync history GAINS a user line at index 1,
+over a turn that answered in two consecutive `assistant` messages. Projected:
+old `user, assistant, assistant` vs new `user, user, assistant, assistant` —
+indices 2/3 are `assistant` on both sides, past a mismatch at index 1.
+
+**Mutation (red on the property, then reverted):** drop `!same ||` from
+`keepKeys` (`apps/mobile/src/transcript.ts:426`) →
+
+```
+error: expect(received).toEqual(expected)
+- []
++ [ "r3" ]
+(fail) what really changed still gets fresh keys > after a mismatch no later row
+reuses an old key, even where the kinds line up
+ 7 pass · 1 fail
+```
+
+`r3` is the key of the OLD answer "two" landing on the NEW row "one" — exactly
+the wrong-turn carry-over the finding names. Reverted (`cp` back from the
+scratch backup, `git diff apps/mobile/src/transcript.ts` empty) → `8 pass · 0
+fail`.
+
+**Green:** `bun test apps/mobile/test/transcript-resync-keys.test.ts` 8 pass ·
+0 fail; with `transcript.test.ts` + `transcript-parity.test.ts`: 59 pass · 0
+fail. `bunx biome check --write` on the touched test file: clean.
+
+**Gate:** run by the orchestrator's script after this round (not run here, per
+the brief).
