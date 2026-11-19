@@ -38,6 +38,23 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dir, "..", "..");
 const DOC = join(ROOT, "docs", "feat", "mobile-thinking-images.md");
 const FRAGMENT = join(ROOT, "changelog.d", "mobile-thinking-images.changed.md");
+const CHANGELOG = join(ROOT, "CHANGELOG.md");
+/** The bullet's headline: how it is found in CHANGELOG.md once a release consumed the fragment. */
+const HEADLINE = '- **Mobile: the "Thinking" shimmer stays inside the letters';
+
+/**
+ * The bullet's text: the fragment while it is unreleased, else the line
+ * `bun run release` assembled from it into CHANGELOG.md (v0.7.0 consumed it).
+ */
+function bulletText(): string {
+  if (existsSync(FRAGMENT)) {
+    return readFileSync(FRAGMENT, "utf8");
+  }
+  const line = readFileSync(CHANGELOG, "utf8")
+    .split("\n")
+    .find((l) => l.startsWith(HEADLINE));
+  return line === undefined ? "" : `${line}\n`;
+}
 const MOBILE_SRC = join(ROOT, "apps", "mobile", "src");
 
 /** The id `~/.config/tentacle/config.jsonc`'s `deepseek` profile names. */
@@ -116,11 +133,11 @@ function hasConsumer(name: string, definingFile: string): boolean {
   );
 }
 
-describe("the changelog fragment promises only what the branch builds", () => {
-  const text = readFileSync(FRAGMENT, "utf8");
+describe("the changelog bullet promises only what the branch builds", () => {
+  const text = bulletText();
 
-  test("the fragment is there and parses as one bullet (non-vacuity of the check below)", () => {
-    expect(existsSync(FRAGMENT)).toBe(true);
+  test("the bullet is there (fragment, or released into CHANGELOG.md) and parses as one bullet (non-vacuity of the check below)", () => {
+    expect(text.startsWith(HEADLINE)).toBe(true);
     expect(
       text
         .trim()
