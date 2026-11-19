@@ -13,6 +13,7 @@ import {
   type TargetFeed,
 } from "./App.tsx";
 import type { ChartGlyphs } from "./chart-lines.ts";
+import { lineDiffEnabled, lineDiffStdout } from "./line-diff.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { createArtifactOpener } from "./os-open.ts";
@@ -215,9 +216,13 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         stdin,
         // Each Ink frame as ONE synchronized update (DEC mode 2026), TTY only: the
         // erase-all + redraw write can no longer be painted half-way
-        // (docs/fix/tui-redraw-flash.md).
+        // (docs/fix/tui-redraw-flash.md). Before that, Ink's frame is cut down to the
+        // rows that changed (docs/fix/tui-line-diff-render.md) — the cure where mode
+        // 2026 is ignored; `TENTACLE_TUI_FULL_REDRAW=1` turns that off.
         stdout: fullscreen
-          ? (synchronizedStdout(process.stdout) as unknown as NodeJS.WriteStream)
+          ? ((lineDiffEnabled(process.env)
+              ? lineDiffStdout(synchronizedStdout(process.stdout))
+              : synchronizedStdout(process.stdout)) as unknown as NodeJS.WriteStream)
           : process.stdout,
         exitOnCtrlC: false,
       },
