@@ -403,8 +403,68 @@ function withHistory(
   // The measured fill described the chat this replace just dropped: forgotten,
   // or the header's bar would sit at the old conversation's figure for ever
   // (the TUI's `forgetContextFill`, `packages/tui/src/state.ts:645-654`).
-  return append({ ...state, rows: [], lastTurnTokens: null }, (nextKey) =>
+  const next = append({ ...state, rows: [], lastTurnTokens: null }, (nextKey) =>
     historyRows(messages, nextKey, times),
+  );
+  return { ...next, rows: keepKeys(state.rows, next.rows) };
+}
+
+/**
+ * A replace re-projects rows that are mostly ALREADY on screen (a foreground
+ * return, a pull, a Retry): those keep their keys — and, unchanged, the very
+ * same row objects (docs/fix/mobile-foreground-jump.md). The list measures its
+ * virtualised cells per key, so fresh keys threw away every measurement above
+ * the viewport: the estimated spacer moved the visible rows, and the content
+ * height change read as "New messages". Only the leading run of rows that are
+ * the same SLOT keeps its keys; from the first mismatch on, every row is fresh
+ * (minted by `append`, so never a key in use).
+ */
+function keepKeys(old: readonly Row[], fresh: readonly Row[]): readonly Row[] {
+  let same = true;
+  const rows = fresh.map((row, i) => {
+    const prior = old[i];
+    if (!same || prior === undefined || !sameSlot(prior, row)) {
+      same = false;
+      return row;
+    }
+    const kept = { ...row, key: prior.key } as Row;
+    return rowEqual(prior, kept) ? prior : kept;
+  });
+  return rows.length === old.length && rows.every((row, i) => row === old[i]) ? old : rows;
+}
+
+/** The same place in the conversation: its kind, and what identifies it there. */
+function sameSlot(a: Row, b: Row): boolean {
+  switch (a.kind) {
+    case "user":
+    case "notice":
+      return b.kind === a.kind && b.text === a.text;
+    case "tool":
+      return b.kind === "tool" && b.id === a.id;
+    default:
+      // An answer or a thought of a turn whose earlier rows all matched: its text
+      // may differ (a live reasoning body is never stored; a cut stream), its
+      // place does not.
+      return b.kind === a.kind;
+  }
+}
+
+/** Deep equality of two plain rows (JSON-shaped data, no functions or cycles). */
+function rowEqual(a: unknown, b: unknown): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) {
+    return false;
+  }
+  if (Array.isArray(a) !== Array.isArray(b)) {
+    return false;
+  }
+  const ka = Object.keys(a).filter((k) => (a as Record<string, unknown>)[k] !== undefined);
+  const kb = Object.keys(b).filter((k) => (b as Record<string, unknown>)[k] !== undefined);
+  return (
+    ka.length === kb.length &&
+    ka.every((k) => rowEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
   );
 }
 
