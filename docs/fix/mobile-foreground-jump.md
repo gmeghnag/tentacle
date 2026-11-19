@@ -197,3 +197,49 @@ then say "New messages") — covered only by the pure test "a longer history"
 **Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
 `bun run lint` clean (2104 files) · `bun test`: **15510 pass · 5 skip · 0 fail**
 (the skips are opt-in suites; this task adds none).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-19* (fresh context, SAME model as the executor: shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES** (one test gap; the code holds).
+
+**Findings**
+
+1. **MEDIUM — the prefix rule is unpinned (§9 non-vacuity).** Mutation: drop
+   `!same ||` at `apps/mobile/src/transcript.ts:426` → all 7 tests still pass.
+   Without the rule, after a misalignment an `assistant`/`reasoning` row (matched
+   by kind only, `sameSlot`) inherits the key of whatever row of that kind sat at
+   the same index in the OLD list — a different turn's answer/thought. Row-keyed
+   screen state (`openSteps`/`fullSteps`, `SessionScreen.tsx:1313-1322`; the
+   thought node key `tool-steps.ts:149`; read-aloud `speakingRowKey`) would then
+   carry over to the wrong turn. The test "a row that is gone in the middle"
+   (`transcript-resync-keys.test.ts:104`) only exercises tool-id mismatches, which
+   `sameSlot` rejects on its own. Fix: a test where, after a mismatch, a later
+   assistant/reasoning row lands at an index the old list also had of that kind
+   (e.g. drop a user line early), asserting no key from that index on survives.
+
+**Gate (reviewer-run):** touched files `transcript-resync-keys.test.ts` +
+`transcript.test.ts`: 48 pass · 0 fail. `bun run lint`: clean (2104 files).
+`bun run typecheck`: clean (root, mobile, relay). Full `bun test` not re-run.
+
+**Mutations** (each reverted; tree `cmp`-identical, `git status` clean):
+tool slot ignores call id → 1 fail ("gone in the middle") ✔; drop prefix rule →
+0 fail ✘ (finding 1). Executor's two mutations (never match / never reuse
+object) accepted on the doc's word.
+
+**Attacks tried**
+- Duplicate keys: reused keys are old keys at distinct indices; fresh keys come
+  from `seq`, which still advances for every row (`append`) — no collision. Holds.
+- `turn.key` (`startTurn`, minted from `seq`): `withHistory` keeps `seq` growing,
+  so the turn bracket's key never equals a kept row key. Holds.
+- Local-only rows (unsupported/closed/local notices) in the old list: they
+  mismatch → fresh keys from there on (conservative; the jump can reappear below
+  such a notice, no wrong state). Acceptable.
+- A `/clear` whose new first user line equals the old one: keys kept for the
+  matching prefix with the new content — harmless (cells re-render in place).
+- §7: no protocol, persistence, or terminal path touched; pure module, logic not
+  in a component. Holds.
+
+**Executor behaviour:** red → green shown, simulator frames before/after, honest
+"Not verified" line. The one gap is the unpinned `same` guard.
