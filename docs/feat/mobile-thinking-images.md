@@ -732,3 +732,28 @@ the merge. Recorded upstream in `docs/library-bugs.md`
 - (c) The guard's comment cites `~/.config/tentacle/config.jsonc` and `runs/night-*.log`, which are files outside the repo, so a reader cannot check them.
 
 **How the executor behaved:** it went straight at both findings and also fixed a second site of finding 1 (the metadata line). It recorded the walker drift honestly. Its mutation table reproduces.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; scope: S4 in `git diff main...HEAD`. The executor's S4 section is signed by the same model, so this review shares its blind spots.)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Gate:** the 7 touched mobile test files → 127 pass / 0 fail. All of `apps/mobile/test` → 3851 pass / 0 fail. `bun run lint` is clean (2116 files). `bun run typecheck` is clean (root, mobile, relay). The full `bun test` was not run (scoped review).
+
+**Findings**
+1. **HIGH: the 3-photo block does not draw as "one tall tile + two stacked on the right".** See `TranscriptRow.tsx` `styles.photos` (`flexDirection: "row"`, `flexWrap: "wrap"`) and the same style in `ComposeBar.tsx` `styles.outboxPhotos`, drawing `photoBlock`'s position-free tiles (`media-layout.ts`, `tall` branch). A wrap line is as tall as its tallest item, so the third tile wraps to a new line BELOW the tall tile instead of going under the second tile. Proof: I ran Yoga, the layout engine RN uses (`yoga-wasm-web`, scratch `yoga3.ts`), with cell 98, gap 4 and a 200-wide row. It gives tile 0 at (0,0) 98×200, tile 1 at (102,0) and tile 2 at **(0,204)**. The block comes out **302 pt tall where `photoBlock.height` = 200**, and the bottom-right slot is empty. This happens for every 3-photo message, in both the sent row and the outbox row. The tests assert only the boxes and never the drawn placement, so nothing catches it. Fix: give the tiles `x/y` in the pure module (S3 drift 3 dropped them on exactly this assumption) or draw a column for the stacked pair. Then add a test that pins the placement.
+2. **MEDIUM: the progress wiring that puts the percent on screen has no test.** Two mutations each left all 3851 mobile tests green, and both were reverted (the tree is byte-clean):
+   - (a) `session-screen-controller.ts` `onProgress`: I dropped `outboxProgress.set(...)`, so the row stays indeterminate forever.
+   - (b) `outbox-session.ts:123`: I passed `{}` instead of `options`, so the client is never asked for progress.
+   The driver and the look are tested, but the two joints between them are not. This is the "`onProgress` reaches the row" test that §Tests asks for.
+3. **MEDIUM: the percent is per photo, but it is shown as the message's.** In `outbox-driver.ts`, `report` runs once for each `session.upload`. For a 3-photo item the status goes "Sending… 100%" → "Sending… 0%" three times, and every tile's veil shows that same ring, including tiles that are already uploaded (`ComposeBar.tsx`, "A veil per tile, all showing the ONE item-wide progress"). The fix is either to aggregate over the photos (`(done + have/size) / n`) or to veil only the tile that is uploading.
+
+**Attacks that found nothing:**
+- Retry is a second send path: no. `onRetry` → `controller.outbox("send")` → `compose.outboxSend`, the same path the sheet uses.
+- `unsentPhotos` gives a false "Not sent" after a prompt or document refusal: no. The photos already carry refs by then, so the row shows "Needs your answer".
+- The percent is persisted: no. It lives only in the map, and `finally` resets it.
+- The viewer index after skipped tiles: correct (`viewerPages` filters the tiles first).
+- The §7 invariants: no protocol, persistence or client change. Logic is in the pure modules, apart from the layout finding above.
+
+**How the executor behaved:** it caught and fixed real bugs in the resumed partial edits (the viewer paging only the drawn tiles, the stale count) and recorded the drift honestly. But it claimed that the mockup layout is drawn without ever checking a 3-tile placement, and the screenshot pass, which would have shown finding 1, was skipped.
