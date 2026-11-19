@@ -1,6 +1,6 @@
 # feat/mobile-e2e-gate — a deterministic, AI-free mobile e2e gate
 
-> **Status:** execution
+> **Status:** done — merged unwired (owner 19/11); reds → fix/mobile-e2e-reds
 > **Branch:** `feat/mobile-e2e-gate`
 > **Type:** feat · **Size:** M · **Blast:** contained (tests/tooling) · **Suited:** Opus
 > **Changelog:** none (dev-only tooling)
@@ -239,3 +239,9 @@ Gate: `bun test apps/mobile/test/e2e-gate.test.ts apps/mobile/test/e2e-flows.tes
 - **R1 — FIXED.** `installSignalReap` (`run.ts`) is installed only while an attempt runs, and its handler is `reapAll` then exit 130/143. Mutations, each reverted: (a) handler without `reapAll()` → `nothing of the attempt outlives the harness` fails; (b) `finally` without `removeSignalReap()` → `the reap handler lives only while an attempt runs` fails. Afterwards: `git status` clean, and `pgrep` finds no stray `sleep 9…`.
 - **Regressions checked, none found.** (1) Between attempts (build, setup) no handler is installed; Ctrl+C then reaches `serve` and the other non-detached children through the terminal's process group, as before. (2) `E2E_HOLD`'s own SIGINT wait is no longer pre-empted (the listener count is back to its baseline after each attempt). (3) A SIGTERM during an attempt now also reaps `serve`, which it did not before (an improvement). (4) The attempt adds and removes itself in `children`, and `serve` stays in it.
 - **F4 — still OPEN, escalated.** No triaged full run exists. New data: `05-daemon-down` passes alone but fails in the full run (likely state leaking between flows, unverified), and `33-hub` + the five `34-hub-*` flows run → all 6 fail even alone. Until the reds are triaged, the gate cannot be the iOS publish gate. Owner's decision: triage in a dedicated round, or merge the harness as is (no gate wired to the iOS publish yet) and split the triage into its own task (`fix/mobile-e2e-reds`) — I recommend the split, since the harness code itself now reviews clean.
+
+### Owner decision (2026-11-19)
+
+Option 1 of Round 3: merge the harness **not yet wired** as the iOS-publish gate. Nothing in the repo calls it from a publish; the orchestrator's build procedure keeps the existing QA sweep and does NOT require a green `scripts/e2e-gate.sh` until the reds are triaged. F4 (the full run's reds: `05-daemon-down` in-suite only, `33-hub` + `34-hub-*` even alone) moves to its own task, `fix/mobile-e2e-reds` (TODO.md). Wiring the gate to publish is that task's exit criterion.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-19*
