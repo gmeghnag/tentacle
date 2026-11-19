@@ -153,7 +153,8 @@ describe("what really changed still gets fresh keys", () => {
     // Non-vacuous: a same-kind pair really does sit past the first mismatch.
     expect(before.rows.map((row) => row.kind)).toEqual(["user", "assistant", "assistant"]);
     expect(after.rows.map((row) => row.kind)).toEqual(["user", "user", "assistant", "assistant"]);
-    expect(keys(after)[0]).toBe(keys(before)[0]);
+    // The leading (matching) row keeps its key.
+    expect(keys(after).slice(0, 1)).toEqual(keys(before).slice(0, 1));
     // The property: only the leading run keeps a key. Past the first mismatch
     // (index 1) nothing may carry a key from ANY position of the old list.
     expect(
