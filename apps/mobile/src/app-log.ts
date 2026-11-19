@@ -56,7 +56,13 @@ export type AppLogKind =
    * short enums only, built by the pure `queue-trace.ts`. A DIAGNOSTIC kind — it
    * records where a `queued` update goes, not what the app did about it.
    */
-  | "qtrace";
+  | "qtrace"
+  /**
+   * The perf trace (docs/fix/mobile-fan-jank-device.md): JS frame gaps, what the
+   * session screen did meanwhile, and the hub fan's open latencies — numbers
+   * and short enums only, built by the pure `perf-trace.ts`.
+   */
+  | "ptrace";
 
 /** What a field may hold: a number, a boolean, or a short enum/id-shaped string. */
 export type AppLogField = number | boolean | string;

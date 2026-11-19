@@ -281,9 +281,7 @@ describe("SessionScreen hands each notice its look", () => {
   });
 
   test("renderItem passes it to a notice row only", () => {
-    expect(src).toMatch(
-      /item\.kind === "notice" && looks\.has\(item\.key\)[\s\S]{0,60}\{ look: looks\.get\(item\.key\) \}/,
-    );
+    expect(src).toMatch(/look=\{item\.kind === "notice" \? looks\.get\(item\.key\) : undefined\}/);
   });
 
   test("`looks` is in extraData, so a block's head re-renders when a neighbour arrives", () => {

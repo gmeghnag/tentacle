@@ -159,7 +159,8 @@ describe("never an empty panel (Design 1 / Owner Q3)", () => {
     expect(hubBody).toContain("setActivityOpen(true)");
     // ...and an agent card's open sets ITS focus, then opens: both paths write
     // the same two state cells, so there is no second panel state to disagree.
-    const card = SCREEN.indexOf("onOpen: () => {");
+    // Through the memoized cell's actions handle (docs/fix/mobile-fan-jank-device.md).
+    const card = SCREEN.indexOf("onAgent: (child) => {");
     expect(card).toBeGreaterThan(-1);
     const cardBody = SCREEN.slice(card, SCREEN.indexOf("},", card));
     expect(cardBody).toContain('focusActivity({ kind: "child", id: child })');

@@ -11,7 +11,7 @@
  * the scrim, which hands its point to the machine (`tapOverlay`): an item within
  * reach commits, anywhere else closes.
  */
-import { type JSX, useEffect, useRef, useState } from "react";
+import { type JSX, memo, useEffect, useRef, useState } from "react";
 import { Animated, StyleSheet, Text, View } from "react-native";
 import { Path, Svg } from "react-native-svg";
 import { type HubActionId, type HubItem, itemA11yLabel } from "../hub-actions.ts";
@@ -24,6 +24,7 @@ import {
   labelPlacement,
 } from "../hub-fan.ts";
 import { type Flash, pillIndex, pillText } from "../hub-flash.ts";
+import { PERF } from "../perf-probe.ts";
 import { type Palette, shadow, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
 import { RingArc } from "./RingArc.tsx";
@@ -71,10 +72,21 @@ export interface HubFanProps {
   readonly onTapOverlay: (p: Point) => void;
 }
 
-export function HubFan(props: HubFanProps): JSX.Element {
+/**
+ * Memoized (docs/fix/mobile-fan-jank-device.md): the session screen re-renders
+ * while a turn streams, and the open fan — a dozen discs, their glyphs and rims
+ * — has nothing to redraw unless its own props change. The button hands it
+ * stable values (the fan's state, one `motion` object, a stable tap handler).
+ */
+export const HubFan = memo(HubFanView);
+
+function HubFanView(props: HubFanProps): JSX.Element {
   const { palette, layout, items, hi, motion, band, flash, now } = props;
   // One value per item, created at the open (this view mounts with the fan).
   const grow = useRef(layout.items.map(() => new Animated.Value(0))).current;
+  // Started ONCE per open: `grow` is per mount and `motion` is one object per
+  // mode (`fanMotion`), so a re-render never restarts the springs mid-flight
+  // (the device jank: a restart per streamed delta also re-ran the stagger).
   useEffect(() => {
     const anims = grow.map((value, i) =>
       motion.spring
@@ -87,7 +99,9 @@ export function HubFan(props: HubFanProps): JSX.Element {
           })
         : Animated.timing(value, { toValue: 1, duration: motion.fadeMs, useNativeDriver: true }),
     );
-    Animated.parallel(anims).start();
+    // The perf trace (docs/fix/mobile-fan-jank-device.md): each start, and the end.
+    PERF.fanStart();
+    Animated.parallel(anims).start(({ finished }) => PERF.fanSettle(finished));
   }, [grow, motion]);
 
   const [labelSize, setLabelSize] = useState<{ width: number; height: number } | null>(null);

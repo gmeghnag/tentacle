@@ -375,6 +375,15 @@ describe("fanMotion (Design 4; Reduce Motion is read per open, M11)", () => {
     expect(m.highlightScale).toBe(1);
     expect(m.fadeMs).toBe(120);
   });
+
+  test("ONE object per mode: a re-render never hands the fan a new motion (docs/fix/mobile-fan-jank-device.md)", () => {
+    // The fan starts its springs from an effect keyed on `motion`: a fresh object
+    // per call restarted every item's spring (and its stagger) on every re-render
+    // of the screen — every streamed delta on a phone.
+    expect(fanMotion(false)).toBe(fanMotion(false));
+    expect(fanMotion(true)).toBe(fanMotion(true));
+    expect(fanMotion(true)).not.toBe(fanMotion(false));
+  });
 });
 
 describe("rimFraction + fanItemLook (mobile-hub-badges Design 6–7, 9)", () => {

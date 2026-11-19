@@ -30,6 +30,12 @@ describe("THINKHOLD", () => {
     expect(firstText).toBeGreaterThan(seen.lastIndexOf("reasoning"));
   });
 
+  test("FAST streams the reasoning about 4x as often (docs/fix/mobile-fan-jank-device.md)", async () => {
+    const slow = (await kinds("THINKHOLD hub")).filter((k) => k === "reasoning").length;
+    const fast = (await kinds("THINKHOLD FAST hub")).filter((k) => k === "reasoning").length;
+    expect(fast).toBeGreaterThan(slow * 2);
+  });
+
   test("a plain HOLD has no reasoning", async () => {
     expect(await kinds("HOLD hub")).not.toContain("reasoning");
   });

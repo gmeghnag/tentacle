@@ -24,6 +24,7 @@ import {
   type JSX,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -119,6 +120,7 @@ import {
 import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
 import { noticeLooks } from "../notice-group.ts";
+import { PERF } from "../perf-probe.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
 import type { ArtifactGalleryRoute } from "../routes.ts";
 import { rowErrorFields } from "../row-guard.ts";
@@ -164,9 +166,7 @@ import { ToolsSheet } from "./ToolsSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
 import { PendingBubbles } from "./compose/PendingBubble.tsx";
-import { RowGuard } from "./transcript/RowGuard.tsx";
-import { SwipeTime } from "./transcript/SwipeTime.tsx";
-import { RowFallback, TranscriptRow } from "./transcript/TranscriptRow.tsx";
+import { type CellActions, TranscriptCell } from "./transcript/TranscriptCell.tsx";
 
 export interface SessionScreenProps {
   readonly palette: Palette;
@@ -238,6 +238,11 @@ export function SessionScreen({
   artifactsSeenKey,
   onRowError,
 }: SessionScreenProps): JSX.Element {
+  // The perf trace (docs/fix/mobile-fan-jank-device.md): render start → commit.
+  const renderStart = PERF.now();
+  useLayoutEffect(() => {
+    PERF.render(PERF.now() - renderStart);
+  });
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
 
@@ -253,6 +258,7 @@ export function SessionScreen({
         animateNextLayout();
       }
       shown = next.compose;
+      PERF.notify();
       setState(next);
     });
     void controller.open();
@@ -619,6 +625,11 @@ export function SessionScreen({
   const banner = state.view.banner;
   const rows = state.view.rows;
   const running = state.view.composer.running;
+  // The perf trace's loop runs only while a turn streams on this screen.
+  useEffect(() => {
+    PERF.streaming(running);
+    return () => PERF.streaming(false);
+  }, [running]);
   // The thread of steps (docs/feat/mobile-tool-rows.md S2): how each row draws and
   // the live "Thinking…" footer. Still ONE cell per row: keys, "Show in chat"
   // indices and open-at-end's follow read `rows` unchanged.
@@ -628,6 +639,29 @@ export function SessionScreen({
   // step layout hides (`layout.cells`) is transparent, so a hidden reasoning row
   // never re-opens a glyph mid-block.
   const looks = useMemo(() => noticeLooks(rows, layout.cells), [rows, layout]);
+  // What a memoized transcript cell can ask of the screen: ONE stable handle,
+  // refreshed every render, so a skipped cell's tap still sees the latest state
+  // (`TranscriptCell.tsx`).
+  const cellActions = useRef<CellActions>(null as unknown as CellActions);
+  cellActions.current = {
+    onLink,
+    onToggle: (key) => {
+      animateNextLayout(a11yFlags.reduceMotion);
+      setOpenSteps((ids) => toggleOpen(ids, key));
+    },
+    onShowAll: (key) => setFullSteps((ids) => (isOpen(ids, key) ? ids : toggleOpen(ids, key))),
+    onAgent: (child) => {
+      focusActivity({ kind: "child", id: child });
+      setActivityOpen(true);
+    },
+    onSpeak: (row) => {
+      if (voice !== null) {
+        void voice.tapSpeak(row);
+      }
+    },
+    onArtifact: (meta) => onOpenArtifacts?.("card", meta.artifactId),
+    onRowError: (fields) => onRowError?.(fields),
+  };
   // The open steps and the steps showing every output line, by row key. In the
   // SCREEN: a virtualised cell that scrolls out of the window unmounts, and its
   // own state would die with it.
@@ -1288,60 +1322,27 @@ export function SessionScreen({
                       )
                     : null;
                 // One row that throws while drawing is its fallback, never an
-                // app abort (docs/fix/mobile-crash-ibm-chart.md).
+                // app abort (docs/fix/mobile-crash-ibm-chart.md). Memoized on
+                // its data (docs/fix/mobile-fan-jank-device.md): a streaming
+                // turn redraws its last row, not every visible one.
                 return (
-                  <RowGuard
-                    // A row object is replaced only when its content changes
-                    // (transcript.ts keeps unchanged rows): that one retries.
-                    resetKey={item}
-                    fallback={<RowFallback palette={palette} />}
-                    onError={(error) => onRowError?.(rowErrorFields(item.kind, error))}
-                  >
-                    <SwipeTime row={item} palette={palette} label={rowTimeLabel(item)}>
-                      <TranscriptRow
-                        row={item}
-                        palette={palette}
-                        diagramStyle={diagramStyle}
-                        onLink={onLink}
-                        thumbnails={state.thumbnails}
-                        chartLabels={chartSettings.labels}
-                        {...(item.kind === "notice" && looks.has(item.key)
-                          ? { look: looks.get(item.key) }
-                          : {})}
-                        step={{
-                          cell,
-                          open: isOpen(openSteps, item.key),
-                          full: isOpen(fullSteps, item.key),
-                          reduceMotion: a11yFlags.reduceMotion,
-                          onToggle: () => {
-                            animateNextLayout(a11yFlags.reduceMotion);
-                            setOpenSteps((ids) => toggleOpen(ids, item.key));
-                          },
-                          onShowAll: () =>
-                            setFullSteps((ids) =>
-                              isOpen(ids, item.key) ? ids : toggleOpen(ids, item.key),
-                            ),
-                        }}
-                        {...(child === null
-                          ? {}
-                          : {
-                              agent: {
-                                id: child,
-                                onOpen: () => {
-                                  focusActivity({ kind: "child", id: child });
-                                  setActivityOpen(true);
-                                },
-                              },
-                            })}
-                        {...(speak === undefined || voice === null
-                          ? {}
-                          : { speak, onSpeak: (row) => void voice.tapSpeak(row) })}
-                        {...(onOpenArtifacts === undefined
-                          ? {}
-                          : { onArtifact: (meta) => onOpenArtifacts("card", meta.artifactId) })}
-                      />
-                    </SwipeTime>
-                  </RowGuard>
+                  <TranscriptCell
+                    row={item}
+                    cell={cell}
+                    look={item.kind === "notice" ? looks.get(item.key) : undefined}
+                    open={isOpen(openSteps, item.key)}
+                    full={isOpen(fullSteps, item.key)}
+                    reduceMotion={a11yFlags.reduceMotion}
+                    speak={speak}
+                    child={child}
+                    voice={voice !== null}
+                    artifacts={onOpenArtifacts !== undefined}
+                    palette={palette}
+                    thumbnails={state.thumbnails}
+                    diagramStyle={diagramStyle}
+                    chartLabels={chartSettings.labels}
+                    actions={cellActions}
+                  />
                 );
               }}
               extraData={rowExtraData}

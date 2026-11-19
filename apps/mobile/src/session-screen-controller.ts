@@ -76,6 +76,7 @@ import {
   createPermissionSheet,
 } from "./permission-sheet.ts";
 import type { QueueTrace } from "./queue-trace.ts";
+import { createRenderCoalescer } from "./render-coalesce.ts";
 import { type CommandRow, clearConfirm, commandRows } from "./session-commands.ts";
 import type { SessionController, SessionHandle, SessionOpenFailure } from "./session-controller.ts";
 import { type ForeignTurn, createSessionFeed } from "./session-feed.ts";
@@ -403,6 +404,16 @@ export interface SessionScreenDeps {
   readonly phoneName?: () => string | undefined;
   /** Told whenever the state changes (a React setState in the screen). */
   readonly onChange?: (state: SessionScreenState) => void;
+  /**
+   * The coalescing timer (docs/fix/mobile-fan-jank-device.md): a streamed
+   * delta's re-render is armed on it. Injectable for tests; `setTimeout` by default.
+   */
+  readonly schedule?: (fn: () => void, ms: number) => () => void;
+  /**
+   * Told once per streamed delta folded (the perf trace's `folds`,
+   * docs/fix/mobile-fan-jank-device.md). Diagnostic only.
+   */
+  readonly onStreamFold?: () => void;
   /** The compose half (13d). Absent: a screen with no queue and no photos (12c's tests). */
   readonly compose?: ComposeWiring;
   /**
@@ -780,7 +791,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
 
   const feed = createSessionFeed({
     state: () => transcript,
-    put: (next) => {
+    put: (next, cause) => {
+      if (cause === "stream") {
+        deps.onStreamFold?.();
+      }
       // A REPLACED history rebuilds every row from `ChatMessage`s, which carry no
       // tool details: the cards this screen already knows are joined back on HERE,
       // the one place every folded state passes, so a resync never loses them.
@@ -803,7 +817,13 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         join = live;
         publishJoin();
       }
-      emit();
+      // A streamed delta re-renders at most once per window; anything else at
+      // once (and that absorbs a pending delta's render: `render-coalesce.ts`).
+      if (cause === "stream") {
+        render.soon();
+      } else {
+        emit();
+      }
     },
     setForeign: (turn) => {
       foreign = turn;
@@ -1340,7 +1360,25 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           void refreshArtifacts();
         });
 
+  /**
+   * Every state change reaches the screen through here (docs/fix/
+   * mobile-fan-jank-device.md): `emit` is immediate, a streamed delta's
+   * `render.soon()` is coalesced to one notification per `STREAM_RENDER_MS`.
+   */
+  const render = createRenderCoalescer({
+    fire: notifyListeners,
+    clock: () => deps.now(),
+    schedule:
+      deps.schedule ??
+      ((fn, ms) => {
+        const timer = setTimeout(fn, ms);
+        return () => clearTimeout(timer);
+      }),
+  });
   function emit(): void {
+    render.now();
+  }
+  function notifyListeners(): void {
     if (disposed) {
       return;
     }
@@ -2181,6 +2219,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     dispose() {
       disposed = true;
+      render.dispose();
       dropCompacted();
       listeners.clear();
       unwatchInfo();
