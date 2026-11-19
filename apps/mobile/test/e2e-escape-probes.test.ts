@@ -35,10 +35,28 @@ describe("the probe listener is the evidence (T8.1)", () => {
     expect(probes.hits()).toEqual(["fetch", "img"]);
   });
 
-  test("a nameless probe is still recorded (dropping it would read as blocked)", async () => {
+  const WEBKIT = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15";
+
+  test("a nameless probe FROM A BROWSER ENGINE is still recorded (dropping it would read as blocked)", async () => {
     probes.reset();
-    await fetch(probes.url);
+    await fetch(probes.url, { headers: { "user-agent": WEBKIT } });
     expect(probes.hits()).toEqual(["unnamed GET /"]);
+  });
+
+  test("a nameless request from a NON-browser local client is a stray, never an escape (run 2: `POST /mcp`)", async () => {
+    // Another process on the Mac probing localhost ports (an MCP client) reached
+    // the listener's ephemeral port in the full suite: a scripts-off WebView cannot
+    // send `POST /mcp`, and every WebView request carries WebKit's user agent.
+    probes.reset();
+    await fetch(`${probes.url}/mcp`, { method: "POST", headers: { "user-agent": "node" } });
+    expect(probes.hits()).toEqual([]);
+    expect(probes.strays()).toEqual(["POST /mcp ua=node"]);
+  });
+
+  test("a NAMED probe counts whatever its user agent (the fixture's own probes)", async () => {
+    probes.reset();
+    await fetch(`${probes.url}?p=img`, { headers: { "user-agent": "node" } });
+    expect(probes.hits()).toEqual(["img"]);
   });
 
   test("reset forgets what an earlier open saw (each open is its own)", async () => {

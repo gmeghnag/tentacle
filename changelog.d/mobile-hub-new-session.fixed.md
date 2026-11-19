@@ -1,0 +1,1 @@
+- **New session from the hub opens a new session again.** On the iPhone, the floating button's More → New session did nothing unless the sessions drawer had been opened first; it now checks the computer at the tap, creates and opens the new session, and when the computer is offline (or the create fails) opens the drawer, which says why.

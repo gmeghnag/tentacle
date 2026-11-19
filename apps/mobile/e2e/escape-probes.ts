@@ -19,6 +19,12 @@ export interface ProbeListener {
   readonly url: string;
   /** Every probe that arrived, in order, by its `?p=<name>`. */
   readonly hits: () => readonly string[];
+  /**
+   * Nameless requests from a NON-browser client (no WebKit user agent): another
+   * local process probing ports, never the artifact — kept, reported, not counted
+   * (docs/fix/mobile-e2e-reds.md: a `POST /mcp` hit the full suite).
+   */
+  readonly strays: () => readonly string[];
   /** A flow ended or restarted: forget what was seen (each open has its own). */
   reset(): void;
   stop(): void;
@@ -26,6 +32,7 @@ export interface ProbeListener {
 
 export function startProbeListener(): ProbeListener {
   let seen: string[] = [];
+  let strays: string[] = [];
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -35,15 +42,26 @@ export function startProbeListener(): ProbeListener {
       // A WebSocket upgrade and an ordinary GET both land here, and both ARE the
       // escape: recording the REQUEST is the whole point (nothing is answered
       // with a WebSocket, so a page cannot use this to talk back).
-      seen = [...seen, url.searchParams.get("p") ?? `unnamed ${req.method} ${url.pathname}`];
+      const name = url.searchParams.get("p");
+      const agent = req.headers.get("user-agent") ?? "";
+      if (name !== null) {
+        seen = [...seen, name];
+      } else if (agent.includes("AppleWebKit")) {
+        // Every WebView request carries WebKit's agent: a nameless one is still an escape.
+        seen = [...seen, `unnamed ${req.method} ${url.pathname}`];
+      } else {
+        strays = [...strays, `${req.method} ${url.pathname} ua=${agent === "" ? "-" : agent}`];
+      }
       return new Response("probe", { headers: { "content-type": "text/plain" } });
     },
   });
   return {
     url: `http://127.0.0.1:${server.port}`,
     hits: () => seen,
+    strays: () => strays,
     reset: () => {
       seen = [];
+      strays = [];
     },
     stop: () => server.stop(true),
   };

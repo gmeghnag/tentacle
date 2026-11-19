@@ -1780,6 +1780,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     link(up) {
       feed.link(up);
+      if (up && compose !== null && !disposed && status.phase === "open") {
+        // 13b's design: an outbox run happens at `up` (its `decide` reads the
+        // re-synced facts). Only the attach ran it, so an item written offline on
+        // this OPEN screen waited for a reopen (fix/mobile-e2e-reds, flow 17).
+        void compose.runOutbox();
+      }
       if (!up || !resyncOnUp) {
         return;
       }

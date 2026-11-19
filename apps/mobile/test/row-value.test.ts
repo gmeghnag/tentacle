@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 import {
   ROW_WRAP_AT,
   type RowValueKind,
-  rowGroupsForAccessibility,
+  rowAccessibility,
   rowLayout,
   valueEllipsis,
 } from "../src/row-value.ts";
@@ -132,19 +132,36 @@ describe("S3 · the label column's SIZING (fix round 1: `flexShrink: 0` overflow
   });
 });
 
-describe("rowGroupsForAccessibility (fix/mobile-e2e-reds, flow 34-hub-dictate)", () => {
-  test("a row with its own action is ONE element (VoiceOver reads it as one button)", () => {
-    expect(rowGroupsForAccessibility({ pressable: true, control: false })).toBe(true);
-    expect(rowGroupsForAccessibility({ pressable: true, control: true })).toBe(true);
+describe("rowAccessibility (fix/mobile-e2e-reds, flows 34-hub-dictate / 25-session-info)", () => {
+  test("a row with its own action and no control is ONE element (one button)", () => {
+    expect(rowAccessibility({ pressable: true, control: false })).toEqual({
+      group: true,
+      textButton: false,
+    });
   });
 
   test("a row whose only control is a trailing switch never swallows it", () => {
     // Grouped, the row was a DISABLED element ("Dictation, Dictation") and the
     // switch inside it was unreachable to VoiceOver and to XCUITest alike.
-    expect(rowGroupsForAccessibility({ pressable: false, control: true })).toBe(false);
+    expect(rowAccessibility({ pressable: false, control: true })).toEqual({
+      group: false,
+      textButton: false,
+    });
+  });
+
+  test("a row with BOTH an action and a switch keeps both reachable: the switch its own element, the label the button", () => {
+    // Session info's MCP row (opens its tools AND switches the server): grouped,
+    // its switch could not be reached at all (flow 25).
+    expect(rowAccessibility({ pressable: true, control: true })).toEqual({
+      group: false,
+      textButton: true,
+    });
   });
 
   test("a read-only row (label + value) stays one element, read together", () => {
-    expect(rowGroupsForAccessibility({ pressable: false, control: false })).toBe(true);
+    expect(rowAccessibility({ pressable: false, control: false })).toEqual({
+      group: true,
+      textButton: false,
+    });
   });
 });

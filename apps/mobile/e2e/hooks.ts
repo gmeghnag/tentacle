@@ -14,6 +14,8 @@ export type HookName =
   | "stop-serve"
   | "start-serve"
   | "laptop-prompt"
+  /** Flow 17: one laptop turn on a SIDE `serve` while the phone's is down. */
+  | "laptop-offline-turn"
   | "laptop-answer"
   | "session-state"
   /** Flow 25 (docs/feat/session-capabilities.md S5): the daemon's MCP/skill switches. */
@@ -143,6 +145,7 @@ export interface HookActions {
   readonly addDelta: () => Promise<string>;
   readonly stopServe: () => Promise<void>;
   readonly startServe: () => Promise<void>;
+  readonly laptopOfflineTurn: (sessionId: string, prompt: string) => Promise<void>;
   readonly laptopPrompt: (
     sessionId: string,
     prompt: string,
@@ -277,7 +280,10 @@ export interface HookActions {
    * reached the e2e host's listener. A screen claim cannot prove an escape did
    * not happen; the listener can — this is the escape suite's only real evidence.
    */
-  readonly escapeHits: () => { readonly hits: readonly string[] };
+  readonly escapeHits: () => {
+    readonly hits: readonly string[];
+    readonly strays?: readonly string[];
+  };
   readonly notifyRespond: (options: {
     readonly action: string;
     readonly text?: string;
@@ -304,6 +310,7 @@ export function hookFor(path: string): HookName | undefined {
     case "stop-serve":
     case "start-serve":
     case "laptop-prompt":
+    case "laptop-offline-turn":
     case "laptop-answer":
     case "session-state":
     case "session-capabilities":
@@ -353,18 +360,41 @@ export function hookFor(path: string): HookName | undefined {
 }
 
 /** The query parameters a hook reads (`?session=…&prompt=…&text=…`). */
+/**
+ * Every parameter `HookQuery` declares, by name — ONE list, so a new hook
+ * parameter cannot be declared and silently never read (it was: six of them,
+ * docs/fix/mobile-e2e-reds.md).
+ */
+const HOOK_QUERY_KEYS = [
+  "session",
+  "prompt",
+  "answer",
+  "file",
+  "text",
+  "ttlMs",
+  "name",
+  "kind",
+  "forged",
+  "reply",
+  "hostile-aps",
+  "action",
+  "request",
+] as const satisfies readonly (keyof HookQuery)[];
+/** Compile-time: a `HookQuery` key missing from the list above fails `tsc`. */
+const HOOK_QUERY_COMPLETE: Exclude<keyof HookQuery, (typeof HOOK_QUERY_KEYS)[number]> extends never
+  ? true
+  : never = true;
+void HOOK_QUERY_COMPLETE;
+
 export function queryOf(url: URL): HookQuery {
-  const read = (name: string): string | undefined =>
-    url.searchParams.get(name) === null ? undefined : (url.searchParams.get(name) as string);
-  return {
-    ...(read("session") === undefined ? {} : { session: read("session") }),
-    ...(read("prompt") === undefined ? {} : { prompt: read("prompt") }),
-    ...(read("answer") === undefined ? {} : { answer: read("answer") }),
-    ...(read("file") === undefined ? {} : { file: read("file") }),
-    ...(read("text") === undefined ? {} : { text: read("text") }),
-    ...(read("ttlMs") === undefined ? {} : { ttlMs: read("ttlMs") }),
-    ...(read("name") === undefined ? {} : { name: read("name") }),
-  };
+  const query: Record<string, string> = {};
+  for (const key of HOOK_QUERY_KEYS) {
+    const value = url.searchParams.get(key);
+    if (value !== null) {
+      query[key] = value;
+    }
+  }
+  return query as HookQuery;
 }
 
 /** A required parameter, or a 400 the flow's script surfaces. */
@@ -424,6 +454,12 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
               answerOf(query.answer),
             );
             return Response.json({ ok: true, hook, turnId: started.turnId });
+          }
+          case "laptop-offline-turn": {
+            const session = required(query.session, "session");
+            const prompt = required(query.prompt, "prompt");
+            await deps.actions.laptopOfflineTurn(session, prompt);
+            return Response.json({ ok: true, hook });
           }
           case "laptop-answer": {
             const session = required(query.session, "session");

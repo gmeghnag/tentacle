@@ -21,10 +21,13 @@ appId: so.tentacle.app
 - openLink: "${output.payload}"
 # iOS asks before it hands a custom-scheme link to the app: `Open in "tentacle"?`
 # (found by OCR-ing the simulator's screen; the app had NOT received anything
-# yet). `launchApp` clears the "always allow" state each run (F-H2's clearState),
-# so the dialog is always there.
+# yet). It is NOT always there: a second gate run on the same simulator went
+# straight to the review (iOS kept the answer across the reinstall,
+# docs/fix/mobile-e2e-reds.md) — so the tap is optional, and the review below is
+# the assertion either way.
 - tapOn:
     text: "Open"
+    optional: true
 - extendedWaitUntil:
     visible:
       id: "pair-review"

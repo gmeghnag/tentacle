@@ -36,10 +36,14 @@ appId: so.tentacle.app
     timeout: 20000
 # The laptop composes into the SAME session while the phone is offline (the turn is
 # recorded daemon-side and replayed on the phone's re-attach), so the basis changes.
+# The laptop moves FIRST, while the phone is still offline: a side `serve` (same
+# store, a port the phone does not know) runs one turn and stops. Done after the
+# restart, it raced the phone's redial: the outbox now runs at `up`, and a phone
+# back first sent the item as unchanged (docs/fix/mobile-e2e-reds.md).
+- runScript:
+    file: "17-laptop-offline.js"
 - runScript:
     file: "17-start-serve.js"
-- runScript:
-    file: "17-laptop-prompt.js"
 - extendedWaitUntil:
     visible:
       id: "outbox-decision"

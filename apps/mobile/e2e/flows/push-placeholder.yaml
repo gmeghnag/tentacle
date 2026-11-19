@@ -1,4 +1,7 @@
 appId: so.tentacle.app
+tags:
+  - quarantine
+# quarantine: Maestro cannot see a SpringBoard notification banner on the iOS 26 simulator — a plain `simctl push` banner, on screen during a 20 s `extendedWaitUntil`, was never found (docs/fix/mobile-e2e-reds.md); the banner is checked by hand (README D3) until Maestro can read it
 ---
 # `push-placeholder` (docs/feat/mobile-push.md P10, decision 20): the end-to-end
 # half of task 16 that a simulator CAN prove — the app's push entitlement, its

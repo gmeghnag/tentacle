@@ -28,12 +28,7 @@
  */
 import type { JSX, ReactNode } from "react";
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
-import {
-  type RowValueKind,
-  rowGroupsForAccessibility,
-  rowLayout,
-  valueEllipsis,
-} from "../row-value.ts";
+import { type RowValueKind, rowAccessibility, rowLayout, valueEllipsis } from "../row-value.ts";
 import {
   DENSE_FONT_SCALE,
   MONO,
@@ -149,14 +144,16 @@ export function Row({
         {value ?? ""}
       </Text>
     );
+  // A trailing control is always its OWN element; the row's action, if any, then
+  // rides on the label column (`rowAccessibility`).
+  const a11y = rowAccessibility({
+    pressable: onPress !== undefined || onLongPress !== undefined,
+    control: trailing !== undefined,
+  });
   return (
     <Pressable
       testID={testID}
-      // A trailing switch on a row with no action of its own is its OWN element.
-      accessible={rowGroupsForAccessibility({
-        pressable: onPress !== undefined || onLongPress !== undefined,
-        control: trailing !== undefined,
-      })}
+      accessible={a11y.group}
       accessibilityRole={onPress === undefined ? undefined : "button"}
       accessibilityLabel={accessibilityLabel}
       accessibilityHint={accessibilityHint}
@@ -193,6 +190,15 @@ export function Row({
         </View>
       )}
       <View
+        {...(a11y.textButton
+          ? {
+              accessible: true,
+              accessibilityRole: "button" as const,
+              accessibilityLabel: accessibilityLabel ?? title,
+              ...(accessibilityHint === undefined ? {} : { accessibilityHint }),
+              ...(onPress === undefined ? {} : { onAccessibilityTap: onPress }),
+            }
+          : {})}
         style={[
           styles.text,
           // Where `rowLayout` puts the label's width: the whole row when nothing
