@@ -3,7 +3,7 @@
 > **Status:** implementation (awaiting owner answers — NOT approved)
 > **Branch:** `feat/mobile-thinking-images`
 > **Type:** feat · **Size:** M · **Blast:** contained (apps/mobile only; no protocol, no persisted format, no client package change) · **Suited:** Opus plan; slices S1/S3/S4 DeepSeek exec, S0 (spike) + S2 (shimmer component) Opus exec; standard Review, plus a simulator screenshot pass
-> **Changelog:** `changelog.d/mobile-thinking-images.changed.md` (one bullet: the Thinking row's shimmer stays inside the letters and shows seconds; photos sit above the message bubble)
+> **Changelog:** `changelog.d/mobile-thinking-images.changed.md` (one bullet: the Thinking row's shimmer stays inside the letters and shows seconds; the photo half joins it with S4, when the layout it describes is actually drawn)
 
 ## Context
 
@@ -303,6 +303,158 @@ check` on the 4 touched files clean. Full gate: left to the orchestrator's scrip
 **Not done here:** the light/dark/Reduce-Motion screenshot set of §Tests (only
 the light-mode spike shots exist), and S1/S3/S4 were out of this run's scope.
 
+### S3 (photo block layout, pure) — as built
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-19*
+
+Scope: **S3 only** (`Implementation` § "S3 — pure: photo block layout"). Nothing of
+S4, S1 or S2 was touched.
+
+**Load-bearing check, re-run first.** S3 stands on "the photo geometry is already
+pure and unit-tested, and `TranscriptRow` is its only consumer" (`Implementation`
+§ Preconditions). Verified before editing: `apps/mobile/src/media-layout.ts` is a
+pure module with no React import; `rg -n "media-layout|layoutMedia|captionBelow|
+mediaBox|displayUri|MEDIA_MAX_RATIO" apps/mobile/src apps/mobile/test` finds one
+importer (`screens/transcript/TranscriptRow.tsx:26`) plus `test/media-layout.test.ts`
+and `test/mobile-media-live-wiring.test.ts`; `MEDIA_BUBBLE_WIDTH = 218`
+(`TranscriptRow.tsx:51`) is the only width the row passes. **Holds** — so S3 is a
+pure addition and the old path stays valid until S4 rewires it.
+
+**As built** (`apps/mobile/src/media-layout.ts`):
+- `photoBlock(refs, { maxWidth = 200, gap = 4, maxTiles = 4 })` → `{ tiles, width,
+  height }`, `tiles: { ref, box, overflow? }[]` (`:116-228`). 0 → an empty
+  block; 1 → its own shape inside the cap; 2 → two squares side by side; 3 → one
+  tall tile running the block's height + two stacked; 4+ → a 2 × 2 grid whose
+  LAST tile carries `overflow = refs.length - (maxTiles - 1)` (i.e. itself plus
+  the hidden ones, so 5 → "+2", 10 → "+7").
+- `userRowParts(row)` → `{ photos, bubble }` (`:232-240`): the bubble exists iff
+  the row has text, document lines, or the restart caption.
+- `usableRatio()` (`:39-42`) extracted so `mediaBox` and `photoBlock` share the
+  one "is this ratio usable" rule.
+- `MEDIA_BUBBLE_WIDTH`/`mediaBox`/`layoutMedia`/`displayUri` all kept and
+  unchanged in behaviour: `TranscriptRow` still draws the old in-bubble shape, so
+  removing them now would break S4's starting point (the plan says "removed once
+  nothing uses it").
+
+**Drift from the Implementation (and why):**
+1. **`photoBlock` also has a `PHOTO_MIN_HEIGHT = 64` floor on a LONE photo.** The
+   plan's § Failure modes promises "nothing 0-height" and a panorama is the case
+   that bites: 200 pt wide at 6:1 is 33 pt tall. `mediaBox` has no floor, so the
+   block adds one and marks the tile `cropped` when it bit. The grid cells are
+   unaffected (they are squares by construction).
+2. **`cropped` on the lone photo is computed from the photo's own ideal height,
+   not copied from `mediaBox`.** `mediaBox` rounds to whole points before it
+   compares against the clamp, so a 3:4 photo at 200 pt (266.67) came back
+   `cropped: true` even though nothing was cropped. The block compares the
+   rounded height with the unrounded ideal (>0.5 pt = a real crop), which keeps
+   `mediaBox`'s own contract intact for its existing callers.
+3. **Tiles carry no `x`/`y`.** The plan's shape sketched them; the block is
+   `flexDirection: "row"` + `flexWrap` in the row (S4), so absolute offsets would
+   be a second, unused geometry. The 4 pt gap and the tile order are the layout.
+4. **The changelog fragment's one bullet now covers both halves.** The plan's S2
+   note asked S3/S4 to "add the photo half to the same bullet", and the guard
+   (`scripts/test/changelog-guard.test.ts`) enforces one bullet per fragment, so
+   the photo sentence went INSIDE S2's bullet rather than beside it.
+
+**Red → green** (`bun test apps/mobile/test/media-layout.test.ts`, narrow):
+- Red first: with `photoBlock`/`userRowParts` newly written, the suite ran 35
+  pass / 1 fail (`cropped: false` expected, `true` received) — a real assertion
+  failure on drift 2 above, not an import error. After the fix: **36 pass / 0
+  fail** (349 `expect`s), the 13 pre-existing cases included.
+- `mobile-media-live-wiring.test.ts` (it pins `layoutMedia(`/`mediaBox(`/
+  `displayUri(` in `TranscriptRow`) still passes: 45 pass / 0 fail over both files.
+
+**Mutations** (applied together on a scratch copy, reverted; base saved at
+`.tentacle/tmp/mobile-thinking-images/base2.ts`):
+```
+M1 overflow: hidden + 1  → hidden              (an off-by-one "+N")
+M2 Math.max(PHOTO_MIN_HEIGHT, capped) → capped (no panorama floor)
+M3 shown === 3 && index === 0 → false          (a plain 2 × 2 for 3 photos)
+M4 cell = floor((maxWidth-gap)/2) → maxWidth   (a 200 pt half)
+M5 bubble: <the real rule> → true              (a bubble on a photo-only row)
+→ 26 pass · 10 fail, each mutation failing its own named test
+→ after revert: 36 pass · 0 fail
+```
+
+**Checked here:** `bun test media-layout.test.ts mobile-media-live-wiring.test.ts`
+→ 45 pass / 0 fail; `npx tsc -p apps/mobile --noEmit` clean; `bunx biome check`
+on the two touched files clean. Full gate: left to the orchestrator's script.
+**Not done here:** S4 (the `TranscriptRow` rewire, the states, the viewer) and the
+screenshot set are out of this slice's scope; the light/dark/Reduce-Motion shots
+of §Tests remain owed.
+
+### Fix round 1 (round 4's findings)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-19*
+
+Scope: Review round 4's two MEDIUM findings. Both are artifact defects, and both
+were pinned with a doc-local regression test first — `scripts/test/mobile-thinking-images-artifacts.test.ts`
+(new), the pattern `task-doc-signatures.test.ts` and
+`session-auto-accept-signatures.test.ts` already use for the sibling docs.
+
+**Finding 1 (MEDIUM) — FIXED: the changelog promised an unbuilt layout.**
+`changelog.d/mobile-thinking-images.changed.md:1` said a message's photos "now sit
+ABOVE the text bubble" and "a photo-only message has no bubble at all", while
+`TranscriptRow.tsx:165` still calls `layoutMedia` inside the bubble and neither
+`photoBlock` nor `userRowParts` has a consumer (S4 is unbuilt; this branch merges
+slice by slice, so a release between S3 and S4 would have promised it). The
+fragment is back to the shimmer-only bullet it had before `b10be3fa`; the photo
+sentence returns with S4, in the same commit that adds the consumer.
+
+The guard is per claim, not a blanket ban: each photo sentence is paired with the
+export that renders it (`PHOTO_CLAIMS`, `:51`), and a sentence is legal exactly
+when its own export has an importer/caller anywhere in `apps/mobile/src` outside
+`media-layout.ts` (`hasConsumer`, `:112`). Red-first on the buggy state, then:
+
+| Mutation | Result |
+| --- | --- |
+| M1 put the photo sentences back, no consumer | RED: both claims listed as orphaned (1 fail) |
+| M3d wire `photoBlock` only, both sentences kept | RED on `userRowParts` alone — the pairing is per export, not all-or-nothing |
+| M3b both consumers + the sentences (S4's legal shape) | GREEN — the guard does not block the slice it exists to protect |
+| revert | 6 pass / 0 fail |
+
+Non-vacuity of the scan itself is pinned on two controls whose answer cannot
+drift (`:138-139`): `layoutMedia` (has a consumer) → true, an invented name →
+false. An earlier draft asserted "both S3 exports are unwired" instead; M3b showed
+that reddens on S4's legitimate landing, so it was replaced rather than left as a
+test S4 would have to delete.
+
+**Finding 2 (MEDIUM) — FIXED: the S3 section was signed by a model that never ran it.**
+`docs/feat/mobile-thinking-images.md:308` read `claude-sonnet-4-5`; the slice ran
+on the deepseek executor (`runs/night-mobile-thinking-images.log`: `03:58 deepseek
+done:`, commit `b10be3fa feat(mobile-thinking-images): exec (deepseek)`), and the
+plan assigns S3 to DeepSeek. Now signed
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` — the id `config.jsonc`'s `deepseek`
+profile names, and the one `device-pairing.md`, `app-decomposition.md` and
+`session-auto-accept.md` sign that executor with (not the family name `deepseek`,
+which round 1 of `session-auto-accept` was caught using).
+
+The same test also walks every recorded `Execution` / `Fix round` / `Review` /
+`Round` / `S<n>` section and requires a real model id, so the class — this task's
+**third** attribution mismatch (round 2 nit 3, round 3 nit 2) — is now pinned
+rather than trusted. Mutation: re-signing S3 `claude-sonnet-4-5` → RED on its own
+assertion (1 fail); revert → GREEN.
+
+One drift recorded honestly: the section walker reads a signature anywhere inside
+a section, not just its first line. A first-line-only rule (as
+`task-doc-signatures.test.ts` uses) went red on `## Execution:121`, which signs at
+the END of its lead prose (`:125`) — correct as written, so the walker was fixed
+rather than the doc.
+
+**Checked here (narrow, per §4):** the new file alone → 6 pass / 0 fail;
+`scripts/test/mobile-thinking-images-artifacts.test.ts` +
+`changelog-guard.test.ts` + `changelog.test.ts` + `apps/mobile/test/media-layout.test.ts`
+→ 63 pass / 0 fail; `task-doc-signatures` + `session-auto-accept-signatures` +
+`release` → 44 pass / 0 fail; `bunx tsc --noEmit -p .` clean; `bunx biome check`
+on the new file clean. Full gate: left to the orchestrator's script.
+
+**Same finding, second site:** the doc's own metadata line 6 (`**Changelog:**`) also
+said the fragment covers "photos sit above the message bubble". It describes the
+same not-yet-built layout, so it was corrected with it.
+
+**Not done here:** no production code was touched (both findings are artifacts).
+S4 and the light/dark/Reduce-Motion screenshots remain owed, as before.
+
 
 ## Review
 
@@ -368,3 +520,52 @@ the light-mode spike shots exist), and S1/S3/S4 were out of this run's scope.
 2. Both branch commits are labelled "(deepseek)", but the S0/S2 Execution is signed `claude-opus-5-5`. This is the same attribution mismatch as round 2's nit 3.
 
 **How the executor behaved:** the spike was done properly. It removed its temporary code, re-ran with a longer capture after an inconclusive first run, and recorded the drift (baseline approximation, source-pin test) honestly. Its mutation claims reproduce exactly (30/3).
+
+### Round 4 — S3 (photo block layout, pure)
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; scope: `git diff main...HEAD`, commit `b10be3fa`; a different model family from the executor)
+
+**Verdict: REQUEST-CHANGES.** The code is correct. Two MEDIUM process/artifact findings remain, and no HIGH.
+
+**Findings:**
+1. **MEDIUM — the changelog says something the build does not do yet** (`changelog.d/mobile-thinking-images.changed.md:1`). The fragment now says photos "sit ABOVE the text bubble… a photo-only message has no bubble at all". But `TranscriptRow.tsx` still draws the old in-bubble `layoutMedia` shape, and `photoBlock`/`userRowParts` have no consumer yet, because S4 is unbuilt. This branch has already been merged slice by slice (`1a2548e6`). If S3 merges and `bun run release` runs before S4 lands, the release notes promise a layout users do not get. Fix: keep the photo sentence out of the fragment until S4, or do not merge S3 ahead of S4.
+2. **MEDIUM — the S3 Execution signature is wrong** (`docs/feat/mobile-thinking-images.md:308`). The section is signed `claude-sonnet-4-5`, but commit `b10be3fa` is "exec (deepseek)" and the plan assigns S3 to DeepSeek. §10 relies on these signatures to track model behaviour, and this is the third attribution mismatch on this task (round 2 nit 3, round 3 nit 2). Fix: sign with the model that actually wrote the section.
+
+**Gate (narrow, as instructed):** `bun test media-layout.test.ts mobile-media-live-wiring.test.ts` → 45 pass / 0 fail (384 expects). `bun run lint` is clean (2114 files). `bun run typecheck` is clean (root, mobile, relay). The full `bun test` was not run: it was not in this review's brief.
+
+**Premises:** `media-layout.ts` is pure (no React import) — TRUE. `MEDIA_MAX_RATIO = 4/3` (`:28`) matches the plan's 200·(4/3) cap — TRUE. `mediaBox`/`layoutMedia`/`displayUri` keep their behaviour; `usableRatio` is a pure extraction — TRUE (`mobile-media-live-wiring` is green). `userRowParts` uses `text !== ""`, the same rule as `TranscriptRow.tsx:167` `hasText` — TRUE.
+
+**Mutations** (each applied in place, reverted, then `git status` confirmed clean):
+- Drop `restart` from the bubble rule → 1 fail.
+- `cropped = height !== ideal` → 1 fail (3:4 portrait).
+- `overflow: hidden` (no +1) → 3 fail.
+
+All three tests are non-vacuous. The executor's own M1–M5 claims match the code.
+
+**Attacks tried:**
+- (a) 3 photos: the tall tile's height = 2·cell + gap = 200, the block height. Holds.
+- (b) An odd `maxWidth − gap`: `floor` keeps the block ≤ `maxWidth`. Holds.
+- (c) `maxTiles: 1` with several refs: one cell carrying `+n`, no crash. Holds.
+- (d) A panorama floor case: 6:1 → 64, cropped; 3:1 → 67, not floored. Matches the "> 2.5" intent.
+- (e) A `gap` larger than `maxWidth` (test-only options): the block can come out wider than `maxWidth`. This is unreachable with the defaults, so it is not a finding.
+- (f) §7 "logic in pure modules": the new decisions are all pure and React-free. No component touched. No protocol, persistence or terminal path touched.
+
+**How the executor behaved:** it stayed in scope (S3 only). It recorded the four drifts with reasons; the 64 pt floor and the cropped-rounding fix are both sound. Its red → green and mutation evidence reproduces. It slipped on the two artifact-level points above.
+
+### Round 2 (S3 re-review: round 4's findings, commit `d283ef13`)
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; scope: `git diff HEAD~1`; a different model family from the executor)
+
+**Verdict: PASS.** Both MEDIUM findings from round 4 are fixed, the guard catches each one when it is put back, and nothing regressed. No HIGH or MEDIUM findings.
+
+1. **Finding 1 (changelog claimed an unbuilt layout) — FIXED.** The fragment is back to the shimmer-only bullet. The doc's own `**Changelog:**` metadata line was corrected with it. Mutation: putting back "A photo-only message has no bubble at all." turns `mobile-thinking-images-artifacts.test.ts` RED (the orphaned-claim test).
+2. **Finding 2 (wrong S3 signature) — FIXED.** The section is now signed `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`. Mutation: re-signing it `claude-sonnet-4-5` turns the guard RED (the S3-id test). Both mutations were reverted and the tree is clean.
+
+**Gate:** the new test → 6 pass / 0 fail. With `changelog-guard` and `task-doc-signatures` → 15 / 0. `bun run lint` is clean (2115 files). `bun run typecheck` is clean (root, mobile, relay).
+
+**Nits (not blocking):**
+- (a) The claim guard matches the exact wording. A reworded claim ("Photos now appear above the bubble, and a message with only photos draws no bubble") passes it, which I confirmed by mutation. What really stops this is the S4 rule "the photo sentence lands with its consumer", not the regex.
+- (b) `"the reason is quoted from the run record"` is a tautology: `expect(DEEPSEEK).toBe(<same literal>)`. It can never fail.
+- (c) The guard's comment cites `~/.config/tentacle/config.jsonc` and `runs/night-*.log`, which are files outside the repo, so a reader cannot check them.
+
+**How the executor behaved:** it went straight at both findings and also fixed a second site of finding 1 (the metadata line). It recorded the walker drift honestly. Its mutation table reproduces.
