@@ -448,3 +448,34 @@ of §Tests remain owed.
 2. Both branch commits are labelled "(deepseek)", but the S0/S2 Execution is signed `claude-opus-5-5`. This is the same attribution mismatch as round 2's nit 3.
 
 **How the executor behaved:** the spike was done properly. It removed its temporary code, re-ran with a longer capture after an inconclusive first run, and recorded the drift (baseline approximation, source-pin test) honestly. Its mutation claims reproduce exactly (30/3).
+
+### Round 4 — S3 (photo block layout, pure)
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; scope: `git diff main...HEAD`, commit `b10be3fa`; a different model family from the executor)
+
+**Verdict: REQUEST-CHANGES.** The code is correct. Two MEDIUM process/artifact findings remain, and no HIGH.
+
+**Findings:**
+1. **MEDIUM — the changelog says something the build does not do yet** (`changelog.d/mobile-thinking-images.changed.md:1`). The fragment now says photos "sit ABOVE the text bubble… a photo-only message has no bubble at all". But `TranscriptRow.tsx` still draws the old in-bubble `layoutMedia` shape, and `photoBlock`/`userRowParts` have no consumer yet, because S4 is unbuilt. This branch has already been merged slice by slice (`1a2548e6`). If S3 merges and `bun run release` runs before S4 lands, the release notes promise a layout users do not get. Fix: keep the photo sentence out of the fragment until S4, or do not merge S3 ahead of S4.
+2. **MEDIUM — the S3 Execution signature is wrong** (`docs/feat/mobile-thinking-images.md:308`). The section is signed `claude-sonnet-4-5`, but commit `b10be3fa` is "exec (deepseek)" and the plan assigns S3 to DeepSeek. §10 relies on these signatures to track model behaviour, and this is the third attribution mismatch on this task (round 2 nit 3, round 3 nit 2). Fix: sign with the model that actually wrote the section.
+
+**Gate (narrow, as instructed):** `bun test media-layout.test.ts mobile-media-live-wiring.test.ts` → 45 pass / 0 fail (384 expects). `bun run lint` is clean (2114 files). `bun run typecheck` is clean (root, mobile, relay). The full `bun test` was not run: it was not in this review's brief.
+
+**Premises:** `media-layout.ts` is pure (no React import) — TRUE. `MEDIA_MAX_RATIO = 4/3` (`:28`) matches the plan's 200·(4/3) cap — TRUE. `mediaBox`/`layoutMedia`/`displayUri` keep their behaviour; `usableRatio` is a pure extraction — TRUE (`mobile-media-live-wiring` is green). `userRowParts` uses `text !== ""`, the same rule as `TranscriptRow.tsx:167` `hasText` — TRUE.
+
+**Mutations** (each applied in place, reverted, then `git status` confirmed clean):
+- Drop `restart` from the bubble rule → 1 fail.
+- `cropped = height !== ideal` → 1 fail (3:4 portrait).
+- `overflow: hidden` (no +1) → 3 fail.
+
+All three tests are non-vacuous. The executor's own M1–M5 claims match the code.
+
+**Attacks tried:**
+- (a) 3 photos: the tall tile's height = 2·cell + gap = 200, the block height. Holds.
+- (b) An odd `maxWidth − gap`: `floor` keeps the block ≤ `maxWidth`. Holds.
+- (c) `maxTiles: 1` with several refs: one cell carrying `+n`, no crash. Holds.
+- (d) A panorama floor case: 6:1 → 64, cropped; 3:1 → 67, not floored. Matches the "> 2.5" intent.
+- (e) A `gap` larger than `maxWidth` (test-only options): the block can come out wider than `maxWidth`. This is unreachable with the defaults, so it is not a finding.
+- (f) §7 "logic in pure modules": the new decisions are all pure and React-free. No component touched. No protocol, persistence or terminal path touched.
+
+**How the executor behaved:** it stayed in scope (S3 only). It recorded the four drifts with reasons; the 64 pt floor and the cropped-rounding fix are both sound. Its red → green and mutation evidence reproduces. It slipped on the two artifact-level points above.
