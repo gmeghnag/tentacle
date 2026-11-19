@@ -209,6 +209,100 @@ round. What I ran: the two narrow test files above (13 pass / 16 pass),
 pre-existing and unrelated to this round (an Expo type-declaration resolution
 issue in the runner, not a behaviour change).
 
+### S0 (spike) + S2 (ThinkingWord)
+
+*— claude-opus-5-5, 2026-11-19*
+
+**S0 verdict: S0-a PASSES — the svg glyph clip runs on the native driver.** So S2
+is built as svg-native; the owner's static fallback is not needed.
+
+Spike (temporary code, all removed afterwards — `rg "SPIKE|spike-js"
+apps/mobile` is empty, `e2e/run.ts` has no diff): S2's `ThinkingWord` plus, in
+`ThinkingNode`, a red `JS <n>` counter (`setInterval` 100 ms) and a busy loop
+blocking the JS thread for 2.5 s every 4 s. A throwaway flow `90-spike-shimmer`
+(pair → Alpha → send `THINKHOLD spike` → 70 `takeScreenshot`, ~66 ms apart per
+the Maestro log) on `bun run e2e:mobile --ios 26` (iPhone 17 Pro, Release build).
+`analyze.ts` (scratch, a PNG decoder) prints per shot a hash of the counter's
+pixels and the word's darkness in 15 column bins (light mode: the bright layer is
+`palette.label`, black, so "brighter" = darker):
+
+```
+spike-22.png 8e522ba3 35 260 228 212 185 181 225 449 249 361 185 238 296 67 0
+spike-23.png 9b654c4a 35 260 228 212 185 179 197 405 245 401 210 244 296 67 0   ← JS frozen from here
+spike-27.png 9b654c4a 35 260 228 212 185 179 180 292 161 354 283 364 373 75 0
+spike-31.png 9b654c4a 35 260 228 212 185 179 180 292 149 262 184 311 465 116 0   (band leaves right)
+spike-36.png 9b654c4a 35 260 228 212 185 179 180 292 149 262 172 238 296 68 0    (rest profile)
+spike-41.png 9b654c4a 52 336 231 212 185 179 180 292 149 262 172 238 296 67 0    (re-enters left)
+spike-48.png 9b654c4a 36 299 343 348 262 212 181 292 149 262 172 238 296 67 0
+spike-55.png 9b654c4a 35 260 228 212 192 223 273 478 210 291 172 238 296 67 0
+spike-62.png 9b654c4a 35 260 228 212 185 179 180 292 157 344 278 374 385 77 0
+spike-63.png bd3b17d5 35 260 228 212 185 179 180 292 149 304 252 393 429 88 0   ← JS runs again
+```
+
+40 shots (23–62, ≈ 2.6 s) carry one identical counter hash — the JS thread is
+blocked — while the band crosses the whole word, leaves, re-enters and crosses
+again (a full 2.2 s loop and more). No error, no frozen sweep. The visual check
+(`spike-45.png`): only the glyphs "Th" are darker; no box shows. A first run
+with 12 shots (0.8 s) fell outside a block window (the counter kept moving) and
+was not decisive, hence the 70-shot run.
+
+**S2, as built** (TDD; narrow tests only):
+- `thinking-motion.ts:78` `shimmerSweep(width)` also returns `stops` (0 → 1 → 0
+  opacity at offsets 0 / 0.5 / 1; `[]` for width 0). The doc comments now
+  describe the built code (no more "no caller exists yet").
+- `ui/StepNode.tsx:183-282` `ThinkingWord` replaces `ShimmerWord`: an `Svg`
+  over the RN `Text`, with a `ClipPath id="thinking-glyphs"` made of an `SvgText`
+  of the word, the grey word drawn by the SAME `SvgText` props (`glyph`, so the
+  base and the clip cannot drift apart), and `<G clipPath>` around an
+  `AnimatedRect` (`Animated.createAnimatedComponent(Rect)`) whose `x` is the
+  existing native-driver `useLoop(SHIMMER_MS)` clock, filled with the
+  `LinearGradient` from `sweep.stops` in `palette.label`. The RN `Text` stays
+  for layout, `testID` and Dynamic Type, and turns `transparent` only while the
+  svg draws the word; under Reduce Motion or before measurement it is the plain
+  `sec` word. The svg font size follows `fontScale` capped at
+  `DENSE_FONT_SCALE`. The `band` style (`overflow: "hidden"`) and the
+  `Animated.multiply` counter-transform are deleted.
+- `ThinkingNode` (`:544`): `thinkingLabel(ms)` → name `Thinking` (no "…"),
+  `trailing` = `thinkingElapsed` seconds; the trailing `Text` gets
+  `styles.tabular` (`fontVariant: ["tabular-nums"]`, `:442,639`) for
+  `node === "thinking"` (so `Compacting…`'s clock is tabular too). The 1 Hz clock,
+  the breathing ∴, `thinking-footer` / `thinking-therefore` / `labelTestID` are
+  unchanged.
+
+**Drift from the Implementation (and why):**
+1. The baseline of the svg text is approximated (`GLYPH_BASELINE = 0.35` em
+   below the line box's centre), not read from `onTextLayout`. Since the svg
+   draws the grey word itself (the RN text is transparent), a 1 pt error moves
+   the whole word, never a bright copy off the grey one. Simpler and
+   self-aligned by construction.
+2. The plan's "component test (`tool-rows-wiring` / `session-screen-compose`
+   harness pattern)" is a SOURCE pin, like the rest of `tool-rows-wiring.test.ts`
+   (StepNode imports RN + svg and cannot render under bun). The old test that
+   pinned the rectangle (Fix round 1's "the pair flips when S2 lands") is
+   flipped into "the shimmer is CLIPPED to the glyphs" + "the live node says
+   'Thinking' and its seconds in tabular figures". The native-driver test also
+   forbids animating any svg `width/height/offset/stopOpacity` from the clock.
+3. The changelog fragment covers S2 only; S3/S4 add the photo half to the same
+   bullet when they land.
+
+**Red → green and mutations** (`bun test thinking-motion.test.ts
+tool-rows-wiring.test.ts`):
+- Red first: the new `stops` test failed on the assertion (`Expected: true
+  Received: false`, `Array.isArray(stops)`), 14 pass / 1 fail; green after.
+- Mutations, applied together, reverted (`git diff` back to the as-built):
+  M1 `<G clipPath="url(#thinking-glyphs)">` → `<G>` (the box returns) → "the
+  shimmer is CLIPPED to the glyphs" fails; M2 first stop opacity 0 → 1 (a hard
+  left edge) → "the band is a SOFT gradient" fails; M3 `trailing={label.seconds}`
+  → `trailing={liveElapsed(ms)}` → "the live node says 'Thinking'…" fails.
+  Result: 30 pass / 3 fail; after revert 49 pass / 0 fail (plus
+  `tool-step-view.test.ts`).
+
+**Checked here:** `thinking-motion` (15), `tool-rows-wiring` (18),
+`tool-step-view` → 49 pass / 0 fail; `tsc -p apps/mobile` clean; `bunx biome
+check` on the 4 touched files clean. Full gate: left to the orchestrator's script.
+**Not done here:** the light/dark/Reduce-Motion screenshot set of §Tests (only
+the light-mode spike shots exist), and S1/S3/S4 were out of this run's scope.
+
 
 ## Review
 
