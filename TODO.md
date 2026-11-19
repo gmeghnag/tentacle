@@ -1274,6 +1274,22 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 
 ## Roadmap (ordered)
 
+- [ ] **feat/tool-toggles** (owner 2026-11-20: work it TOMORROW, before
+  feat/tui-btw — on qwen3.8 the built-in tools eat a lot of context) — switch
+  built-in tools on/off like MCP servers and packages. Today only per-feature
+  toggles exist (`subagents.enabled`, `contextReset.enabled`,
+  `sessionHop.tool`, `workloadShell`, …); `fs_*`, `shell*`, `search` are always
+  loaded. Owner shape: the skills TOOL is always there (individual skills can
+  be switched off, not the mechanism); every other optional tool — sub-agents,
+  context reset, session hop, etc. — can be disabled. Proposal to verify in the
+  plan: `tools.enabled: { "<name>": false }` (same shape as `packages`), usable
+  in a PROFILE (e.g. a lean qwen profile via `--profile`); a TUI `/tools`
+  listing each tool with its definition's token cost, toggling for the
+  session. Invariants: a disabled tool never reaches the model (pods too);
+  a sub-agent never re-enables a tool its parent has off; phone parity.
+  Type: feat · Size: M · Blast: load-bearing (the tool list the agent loop
+  sends) · Suited: Opus plan + fresh-context review.
+
 - [ ] **feat/tui-btw** (owner 2026-11-20: "magari domani ci lavoriamo"; after the
   stabilization week unless the owner makes an exception) — `/btw <question>` in
   the TUI: a side question answered from the current conversation WHILE a turn
