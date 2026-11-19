@@ -6,24 +6,28 @@
  * aligned, capped at 200 pt: 1 photo keeps its own shape, 2 sit side by side, 3
  * are one tall tile plus two stacked, 4+ are a 2 × 2 grid whose last tile
  * carries "+N". That is `photoBlock`; `userRowParts` decides whether the bubble
- * exists beside them (a photo-only message has none).
+ * exists beside them (a photo-only message has none). `viewerPages` is the same
+ * block seen full screen: which pages the viewer holds, and which one a tap on a
+ * tile opens.
  *
- * The older in-bubble shape — an image spanning the bubble at full width, the
- * caption below it, inside the same bubble (`fix/mobile-media-live` item 4,
- * `mediaBox`/`layoutMedia`) — is still here because `TranscriptRow` still draws
- * it; it goes when S4 wires the photo block in and nothing calls it.
+ * The older in-bubble shape (an image spanning the bubble at full width, the
+ * caption below it, inside the same bubble — `fix/mobile-media-live` item 4) is
+ * GONE since S4: `layoutMedia`/`mediaBox` had no consumer left once
+ * `TranscriptRow` drew the block, and a second geometry beside `photoBlock`
+ * would only drift from it.
  *
  * Pure, and the only place the geometry is decided (AGENTS §7): `TranscriptRow`
- * maps this to elements and owns nothing but colours and glyphs.
+ * maps this to elements and owns nothing but colours and glyphs — including the
+ * tiles' place, which `photoTileStyle` spells as the absolute style they take.
  */
 import type { ImageRef, UserRow } from "./transcript-rows.ts";
 
 /**
- * The tallest a bubble's media block may be, as a multiple of its width. A
- * portrait photo is the normal case (an iPhone shoots 3:4), so the clamp cannot
- * be square: a tall photo would be cropped away, which is the opposite of
- * showing the person what they sent. 4/3 lets a 3:4 photo through untrimmed and
- * only bites on panoramas-of-verticals and the missing-ratio fallback.
+ * The tallest a lone photo's box may be, as a multiple of its width. A portrait
+ * photo is the normal case (an iPhone shoots 3:4), so the clamp cannot be
+ * square: a tall photo would be cropped away, which is the opposite of showing
+ * the person what they sent. 4/3 lets a 3:4 photo through untrimmed and only
+ * bites on panoramas-of-verticals and the missing-ratio fallback.
  */
 export const MEDIA_MAX_RATIO = 4 / 3;
 
@@ -39,52 +43,6 @@ export interface MediaBox {
 function usableRatio(ref: Pick<ImageRef, "aspectRatio">): number | undefined {
   const ratio = ref.aspectRatio;
   return ratio !== undefined && Number.isFinite(ratio) && ratio > 0 ? ratio : undefined;
-}
-
-/**
- * The box for one image at the bubble's `width`.
- *
- * The ratio comes from the ref (its LOCAL copy's measured size); a ref with no
- * ratio — a history row, another device's message, a picker that reported no
- * dimensions — is a square tile, the shape this screen has always drawn for an
- * unknown image and a safe default for one whose bytes it cannot fetch.
- *
- * Never upscales its own height past the clamp and never divides by zero: a
- * nonsense ratio (0, negative, NaN) is treated as missing, because a 0-height
- * box renders as nothing at all.
- */
-export function mediaBox(ref: Pick<ImageRef, "aspectRatio">, width: number): MediaBox {
-  const safeWidth = Math.max(1, width);
-  const wanted = safeWidth / (usableRatio(ref) ?? 1);
-  const max = safeWidth * MEDIA_MAX_RATIO;
-  if (wanted <= max) {
-    return { width: safeWidth, height: Math.max(1, Math.round(wanted)), cropped: false };
-  }
-  return { width: safeWidth, height: Math.round(max), cropped: true };
-}
-
-/** What a bubble draws, in order: its media first, its caption below. */
-export interface MediaLayout {
-  readonly boxes: readonly MediaBox[];
-  /** A caption is drawn only when there is text: never an empty block. */
-  readonly captionBelow: boolean;
-}
-
-/**
- * The bubble's layout for `refs` at the bubble's `width`.
- *
- * `hasText` is the caller's own "the bubble has words" (it holds the markdown
- * source): with media and no words the bubble is pure image, and the caption
- * slot does not exist — that is the owner's "no empty text area".
- */
-export function layoutMedia(
-  refs: readonly Pick<ImageRef, "aspectRatio">[],
-  options: { readonly width: number; readonly hasText: boolean },
-): MediaLayout {
-  return {
-    boxes: refs.map((ref) => mediaBox(ref, options.width)),
-    captionBelow: options.hasText,
-  };
 }
 
 /**
@@ -112,11 +70,23 @@ export function displayUri(
   return broken.includes(candidate) ? undefined : candidate;
 }
 
-/** One tile of a photo block: the photo it draws and the box it fills. */
+/** One tile of a photo block: the photo it draws, the box it fills and where. */
 export interface PhotoTile<T extends Pick<ImageRef, "aspectRatio">> {
   readonly ref: T;
   /** Drawn `cover`, so a box shorter than the photo crops instead of distorting. */
   readonly box: MediaBox;
+  /**
+   * The tile's offset inside the block, in points (Review round 5, finding 1).
+   *
+   * The block's shape is NOT a wrapping row of equal cells: with 3 photos the
+   * tall left tile runs the block's whole height, so a `flexWrap` line would
+   * push the third tile BELOW it (a line is as tall as its tallest item) and
+   * leave the bottom-right slot empty — a 302 pt block where `height` says 200.
+   * Yoga, the engine RN lays out with, does exactly that. The place is therefore
+   * decided HERE, with the sizes, and the component only pins each tile to it.
+   */
+  readonly x: number;
+  readonly y: number;
   /**
    * The tile stands for this many photos — itself and the ones the block hides —
    * drawn as "+N" over it (mockup F: ">4 → +N"). Absent when nothing is hidden,
@@ -160,8 +130,8 @@ const PHOTO_MIN_HEIGHT = 64;
  * one tall tile beside two stacked; 4+ is a 2 × 2 grid whose LAST tile carries
  * `overflow` for the photos it hides. Every box is at least 1 pt and no tile is
  * wider than `maxWidth`, so nothing collapses and nothing is upscaled past the
- * owner's cap. The ratio rules are `mediaBox`'s: a missing or nonsense ratio is
- * a square, a too-tall photo is clamped to `MEDIA_MAX_RATIO` and cropped.
+ * owner's cap. A missing or nonsense ratio is a square, and a too-tall lone
+ * photo is clamped to `MEDIA_MAX_RATIO` and cropped.
  *
  * Pure (§7): `TranscriptRow` maps the tiles to views and owns only colours and
  * glyphs, including the 16 pt radius, which belongs on the block's OUTER corners
@@ -192,7 +162,11 @@ export function photoBlock<T extends Pick<ImageRef, "aspectRatio">>(
     // photo's own shape, not a crop.
     const cropped = Math.abs(height - ideal) > 0.5;
     const box: MediaBox = { width: maxWidth, height, cropped };
-    return { tiles: [{ ref: only, box }], width: box.width, height: box.height };
+    return {
+      tiles: [{ ref: only, box, x: 0, y: 0 }],
+      width: box.width,
+      height: box.height,
+    };
   }
 
   // Two or more: equal square cells, `gap` apart, two per row.
@@ -210,15 +184,47 @@ export function photoBlock<T extends Pick<ImageRef, "aspectRatio">>(
     }
     const isLast = index === shown - 1;
     // 3 photos: the first tile is one tall tile running the block's whole height,
-    // the other two stack beside it (mockup F).
+    // the other two stack BESIDE it (mockup F) — hence their own `x`, never a
+    // wrapping row's line.
     const tall = shown === 3 && index === 0;
+    const tileHeight = tall ? height : cell;
     tiles.push({
       ref,
-      box: { width: cell, height: tall ? height : cell, cropped: false },
+      box: { width: cell, height: tileHeight, cropped: false },
+      // The tall tile owns the whole left column; the other two stack in the
+      // right one (mockup F). Any other count is a 2 × 2 grid in reading order.
+      x: shown === 3 && index > 0 ? cell + gap : (index % 2) * (cell + gap),
+      y: shown === 3 ? (index > 1 ? cell + gap : 0) : Math.floor(index / 2) * (cell + gap),
       ...(isLast && hidden > 0 ? { overflow: hidden + 1 } : {}),
     });
   }
   return { tiles, width, height };
+}
+
+/**
+ * One tile as the style it is DRAWN in: pinned to its place inside the block
+ * (`PhotoTile.x`/`y`), so the block's shape is the one `photoBlock` decided and
+ * never a wrapping row's (Review round 5, finding 1).
+ *
+ * The parent must therefore be a positioned box of the block's own
+ * `width` × `height`; both the sent row and the outbox row do that.
+ */
+export function photoTileStyle(
+  tile: Pick<PhotoTile<{ aspectRatio?: number }>, "box" | "x" | "y">,
+): {
+  position: "absolute";
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+} {
+  return {
+    position: "absolute",
+    left: tile.x,
+    top: tile.y,
+    width: tile.box.width,
+    height: tile.box.height,
+  };
 }
 
 /**
@@ -237,4 +243,62 @@ export function userRowParts(row: Pick<UserRow, "text" | "images" | "documents" 
     photos: row.images.length > 0,
     bubble: row.text !== "" || (row.documents?.length ?? 0) > 0 || row.restart === true,
   };
+}
+
+/** One page of the full-screen viewer: the pixels to draw, and what they are. */
+export interface ViewerItem {
+  readonly uri: string;
+  readonly label: string;
+}
+
+/** A tile as the viewer sees it: its pixels when the row has any, else only a label. */
+export interface ViewerTile {
+  /** The URI `displayUri` answered for this tile — absent: no pixels to pull up. */
+  readonly uri: string | undefined;
+  readonly label: string;
+}
+
+/** The viewer's pages, and which one it opens on. */
+export interface ViewerPages {
+  readonly pages: readonly ViewerItem[];
+  /** The page the tap opened, or `-1` when there is nothing to show (viewer closed). */
+  readonly index: number;
+}
+
+/**
+ * What the full-screen viewer holds when a person taps tile `tapped` (mockup F:
+ * tap → full screen, "2 of 5", swipe, pinch, caption, share).
+ *
+ * A tile the row is drawing a label for has NO pixels (a history row, another
+ * device's message, a file trimmed under the row), so it is skipped rather than
+ * opened as an empty page — the same answer `displayUri` gave the tile itself.
+ * The index is the tapped photo's own page in the FILTERED list, so a skipped
+ * tile before it never shifts the count the header reads. `-1` means "nothing to
+ * open": one state, the viewer's own `visible` test, never a parallel flag.
+ */
+export function viewerPages(tiles: readonly ViewerTile[], tapped: number): ViewerPages {
+  const pages: ViewerItem[] = [];
+  let index = -1;
+  for (const [position, tile] of tiles.entries()) {
+    if (tile.uri === undefined) {
+      continue;
+    }
+    if (position === tapped) {
+      index = pages.length;
+    }
+    pages.push({ uri: tile.uri, label: tile.label });
+  }
+  return { pages, index };
+}
+
+/**
+ * The page a horizontal pager rests on after a swipe: the nearest whole page to
+ * its offset, clamped into `0…count-1` (an iOS bounce reads past either end).
+ * `-1` when there is no page at all; the first page while the width is unknown.
+ */
+export function viewerPageAt(offsetX: number, pageWidth: number, count: number): number {
+  if (count <= 0 || !(pageWidth > 0) || !Number.isFinite(offsetX)) {
+    return count <= 0 ? -1 : 0;
+  }
+  return Math.min(count - 1, Math.max(0, Math.round(offsetX / pageWidth)));
 }

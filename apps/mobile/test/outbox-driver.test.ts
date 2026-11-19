@@ -37,6 +37,11 @@ interface FakeSession {
   refuseDocument: unknown;
   /** The daemon's `have` per upload attempt, so a resume is observable. */
   upload: (bytes: Uint8Array, meta: { mimeType: string; name?: string }) => Promise<AttachmentRef>;
+  /**
+   * The `(have, size)` pairs an upload reports through `options.onProgress`, in
+   * order (feat/mobile-thinking-images S4). Absent: the upload reports nothing.
+   */
+  reports?: readonly (readonly [number, number])[];
 }
 
 const refOf = (name: string): AttachmentRef => ({
@@ -70,8 +75,17 @@ function fakeSession(facts: Partial<SessionFacts> = {}): FakeSession {
 
 /** The driver's view of a `FakeSession` (the four acts + `facts`). */
 const portOf = (session: FakeSession) => ({
-  async upload(bytes: Uint8Array, meta: { mimeType: string; name?: string }) {
+  async upload(
+    bytes: Uint8Array,
+    meta: { mimeType: string; name?: string },
+    options?: { readonly onProgress?: (have: number, size: number) => void },
+  ) {
     session.acts.push("upload");
+    // The client's own progress callback, reported as the daemon confirms bytes
+    // (BEFORE any refusal: an aborted upload did report what it had).
+    for (const [have, size] of session.reports ?? []) {
+      options?.onProgress?.(have, size);
+    }
     const refusal = session.refuseUpload;
     if (refusal !== undefined) {
       session.refuseUpload = undefined;
@@ -189,6 +203,8 @@ interface Harness {
   readonly notices: string[];
   readonly decisions: { item: OutboxItem; why: string }[];
   readonly drafts: { item: OutboxItem; why: string }[];
+  /** Every progress report the driver made, in order (S4). */
+  readonly progress: { itemId: string; fraction: number | null }[];
   readonly readPhoto: (file: string) => Promise<Uint8Array>;
 }
 
@@ -211,6 +227,7 @@ function harness(
   const notices: string[] = [];
   const decisions: { item: OutboxItem; why: string }[] = [];
   const drafts: { item: OutboxItem; why: string }[] = [];
+  const progress: { itemId: string; fraction: number | null }[] = [];
   const reads: Record<string, number> = o.reads ?? {};
   let minted = 0;
   const unavailable = o.unavailable;
@@ -231,6 +248,7 @@ function harness(
       onNotice: (notice) => notices.push(notice.kind),
       onDecision: (item, why) => decisions.push({ item, why }),
       onDraft: (item, why) => drafts.push({ item, why }),
+      onProgress: (itemId, fraction) => progress.push({ itemId, fraction }),
     },
   );
   return {
@@ -240,6 +258,7 @@ function harness(
     notices,
     decisions,
     drafts,
+    progress,
     readPhoto: async (file) => new TextEncoder().encode(file),
   };
 }
@@ -441,6 +460,95 @@ describe("photos", () => {
     // The same item resumed (its id never changed) and is now finished.
     expect(again.persistence.finished).toEqual([item?.itemId ?? ""]);
     expect(again.persistence.items()).toEqual([]);
+  });
+
+  test("an upload's progress reaches the row as whole percents, and is cleared when the upload ends (S4; mutation: never reset → a stale 62 % on a row that is done)", async () => {
+    const h = harness();
+    const item = await h.driver.enqueue(
+      portOf(h.session),
+      compose({ photos: [photo("/c/0.png")] }),
+    );
+    h.session.reports = [
+      [0, 0],
+      [1, 4],
+      [2, 4],
+      [2, 4], // a repeated window: one report, not two
+      [4, 4],
+    ];
+    await h.driver.run("s1");
+    expect(h.progress).toEqual([
+      { itemId: item.itemId, fraction: 0.25 },
+      { itemId: item.itemId, fraction: 0.5 },
+      { itemId: item.itemId, fraction: 1 },
+      // Cleared when the upload is over (sent here): memory only.
+      { itemId: item.itemId, fraction: null },
+    ]);
+  });
+
+  test("the percent is the MESSAGE's, not one photo's: 3 photos go 17 % → 50 % → 83 %, never back to 0 (Review round 5, finding 3; mutation: report the photo's own `have/size` → 'Sending… 100 %' then 'Sending… 0 %' twice)", async () => {
+    const h = harness();
+    const item = await h.driver.enqueue(
+      portOf(h.session),
+      compose({ photos: [photo("/c/0.png"), photo("/c/1.png"), photo("/c/2.png")] }),
+    );
+    // Each of the three uploads reports half of ITSELF (2 of 4 bytes).
+    h.session.reports = [[2, 4]];
+    await h.driver.run("s1");
+    expect(h.progress).toEqual([
+      // (0 done + 0.5 in flight) / 3, then (1 + 0.5) / 3, then (2 + 0.5) / 3.
+      { itemId: item.itemId, fraction: 1 / 6 },
+      { itemId: item.itemId, fraction: 0.5 },
+      { itemId: item.itemId, fraction: 2.5 / 3 },
+      { itemId: item.itemId, fraction: null },
+    ]);
+    // The property that shape buys: a row's ring only ever fills.
+    const seen = h.progress.flatMap((entry) => (entry.fraction === null ? [] : [entry.fraction]));
+    expect(seen).toEqual([...seen].sort((a, b) => a - b));
+  });
+
+  test("a photo the item already holds is counted as done, so a resumed item starts where it left off (mutation: count from 0 → a resume jumps back to a low percent)", async () => {
+    const held = {
+      ...photo("/c/0.png"),
+      ref: { id: "id-0.png", mimeType: "image/png", size: 4, name: "0.png" },
+    };
+    const h = harness();
+    const item = await h.driver.enqueue(
+      portOf(h.session),
+      compose({ photos: [held, photo("/c/1.png")] }),
+    );
+    h.session.reports = [[2, 4]];
+    await h.driver.run("s1");
+    // One of two photos is already up: the remaining one's half is 3/4 of the message.
+    expect(h.progress).toEqual([
+      { itemId: item.itemId, fraction: 0.75 },
+      { itemId: item.itemId, fraction: null },
+    ]);
+  });
+
+  test("an upload that never reports stays indeterminate: no progress, then one reset (mutation: report a fake 0 → a ring that claims a measurement that never happened)", async () => {
+    const h = harness();
+    const item = await h.driver.enqueue(
+      portOf(h.session),
+      compose({ photos: [photo("/c/0.png")] }),
+    );
+    // `reports` absent: the port calls `onProgress` never.
+    await h.driver.run("s1");
+    expect(h.progress).toEqual([{ itemId: item.itemId, fraction: null }]);
+  });
+
+  test("a cancelled or refused upload resets the percent too (mutation: reset only on success → the row keeps a percent for bytes that never arrived)", async () => {
+    const h = harness();
+    const item = await h.driver.enqueue(
+      portOf(h.session),
+      compose({ photos: [photo("/c/0.png")] }),
+    );
+    h.session.reports = [[1, 4]];
+    h.session.refuseUpload = namedError("UploadAbortedError");
+    await h.driver.run("s1");
+    expect(h.progress).toEqual([
+      { itemId: item.itemId, fraction: 0.25 },
+      { itemId: item.itemId, fraction: null },
+    ]);
   });
 
   test("`not_uploaded` clears the refs for ONE re-upload, then a refusal is the person's (F18)", async () => {

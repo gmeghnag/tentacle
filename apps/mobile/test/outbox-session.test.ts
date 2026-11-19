@@ -27,11 +27,28 @@ interface Sent {
 }
 
 /** A `RemoteSession` that records the one call this port makes, and acks at once. */
-function fakeSession(): { session: RemoteSession; client: RemoteClient; sent: Sent[] } {
+function fakeSession(): {
+  session: RemoteSession;
+  client: RemoteClient;
+  sent: Sent[];
+  /** The options `attachImage` got, in call order (the upload percent's joint). */
+  attachOptions: { readonly onProgress?: (have: number, size: number) => void }[];
+} {
   const sent: Sent[] = [];
+  const attachOptions: { readonly onProgress?: (have: number, size: number) => void }[] = [];
   const session = {
     sessionId: "s1",
     busy: false,
+    async attachImage(
+      _bytes: Uint8Array,
+      meta: { readonly mimeType: string; readonly name?: string },
+      options?: { readonly onProgress?: (have: number, size: number) => void },
+    ): Promise<AttachmentRef> {
+      attachOptions.push(options ?? {});
+      // The client reports as the daemon confirms bytes: BEFORE any refusal.
+      options?.onProgress?.(2, 4);
+      return { id: "blob", mimeType: meta.mimeType, size: 4, name: meta.name ?? "a.png" };
+    },
     // The driver's port drains the stream; the daemon's ack is all it waits for.
     async *send(
       text: string,
@@ -50,6 +67,7 @@ function fakeSession(): { session: RemoteSession; client: RemoteClient; sent: Se
     session: session as unknown as RemoteSession,
     client: {} as unknown as RemoteClient,
     sent,
+    attachOptions,
   };
 }
 
@@ -60,6 +78,32 @@ const BLOCK: DocumentContent = {
   name: "report.pdf",
   source: { type: "ref", id: "c".repeat(64), size: 2048 },
 };
+
+describe("the port's `upload`: the client's own `onProgress` is passed through (Review round 5, finding 2b)", () => {
+  test("the driver's callback reaches `RemoteSession.attachImage` (mutation: pass `{}` → the client is never asked, the row stays indeterminate for ever)", async () => {
+    const { session, client, attachOptions } = fakeSession();
+    const port = outboxSessionOf(session, client, () => null);
+    const reports: (readonly [number, number])[] = [];
+    const ref = await port.upload(
+      new Uint8Array([1, 2, 3, 4]),
+      { mimeType: "image/png", name: "a.png" },
+      { onProgress: (have, size) => reports.push([have, size]) },
+    );
+    expect(ref.id).toBe("blob");
+    // The upload really reported (the fake calls what it was given)...
+    expect(reports).toEqual([[2, 4]]);
+    // ...because the SAME function arrived at the client.
+    expect(attachOptions).toHaveLength(1);
+    expect(typeof attachOptions[0]?.onProgress).toBe("function");
+  });
+
+  test("no callback from the driver: nothing is passed (an older caller sees the same options it always did)", async () => {
+    const { session, client, attachOptions } = fakeSession();
+    const port = outboxSessionOf(session, client, () => null);
+    await port.upload(new Uint8Array([1]), { mimeType: "image/png" });
+    expect(attachOptions[0]?.onProgress).toBeUndefined();
+  });
+});
 
 describe("the port's `prompt`", () => {
   test("an item's documents reach `session.send` (mutation: `documents.length === 0` → `>= 0` → red)", async () => {

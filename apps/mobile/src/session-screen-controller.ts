@@ -335,6 +335,12 @@ export interface ComposeWiring {
     /** 13b's hand-back: an item whose text belongs in the field (F7/F20). */
     readonly onDraft: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
     /**
+     * How much of an item's photo upload the daemon has confirmed, 0–1, or null
+     * when nothing is in flight (feat/mobile-thinking-images S4). The screen keeps
+     * it in memory and the row draws it; the outbox file never does.
+     */
+    readonly onProgress: (itemId: string, fraction: number | null) => void;
+    /**
      * This screen's OWN compose handle, once the attach answered — what the
      * driver's port must be built over (fix/mobile-media-live item 1). A second
      * `RemoteSession` for the same id replaces the client's stream listener, so
@@ -608,8 +614,10 @@ export const RETRY_FILES_NOT_SENT = "the files were not re-sent";
 function outboxRows(
   items: readonly OutboxItem[],
   base: Omit<SessionViewInput, "outbox">,
+  /** The in-memory upload percentages (feat/mobile-thinking-images S4). */
+  progress: ReadonlyMap<string, number>,
 ): readonly OutboxRowView[] {
-  return sessionView({ ...base, outbox: items }).outbox;
+  return sessionView({ ...base, outbox: items, outboxProgress: progress }).outbox;
 }
 
 /** A send refused before the ack is given back, not failed (F13). */
@@ -640,6 +648,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   /** The `artifact/list` call in flight: one at a time (a gallery mount + a resync). */
   let joinPending: Promise<void> | null = null;
   let draft = "";
+  /**
+   * The outbox's upload percentages, by item id (feat/mobile-thinking-images S4):
+   * the driver's `onProgress`, kept here because it is SCREEN state and memory
+   * only — the outbox file never carries it, so no stale "62 %" survives a restart.
+   */
+  const outboxProgress = new Map<string, number>();
   /** Presses that sent the field (`SessionScreenState.sends`). */
   let sends = 0;
   let notice: string | null = null;
@@ -883,6 +897,17 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
               status.phase === "open" && handle !== null
                 ? (deps.compose?.handle(handle) ?? null)
                 : null,
+            // The upload percent the outbox row shows (S4): memory only, and the
+            // driver already coalesces it to whole percentages. `emit` is what
+            // redraws the row; a `null` clears it when the upload ends.
+            onProgress: (itemId, fraction) => {
+              if (fraction === null) {
+                outboxProgress.delete(itemId);
+              } else {
+                outboxProgress.set(itemId, fraction);
+              }
+              emit();
+            },
           }),
           photos: deps.compose.photos,
           ...(deps.compose.documents === undefined ? {} : { documents: deps.compose.documents }),
@@ -991,17 +1016,21 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         queued: value.queued,
         returnedOthers: value.returnedOthers,
         returnedNotice: value.returnedNotice,
-        outbox: outboxRows(value.outbox, {
-          title: shownTitle,
-          project: deps.project,
-          status,
-          rows: [],
-          turn: transcript.turn,
-          link: transcript.link,
-          ended: transcript.closed,
-          draft,
-          archived: deps.archived,
-        }),
+        outbox: outboxRows(
+          value.outbox,
+          {
+            title: shownTitle,
+            project: deps.project,
+            status,
+            rows: [],
+            turn: transcript.turn,
+            link: transcript.link,
+            ended: transcript.closed,
+            draft,
+            archived: deps.archived,
+          },
+          outboxProgress,
+        ),
         notSaved: value.notSaved,
         chips: value.chips,
         attach: value.attach,
@@ -1047,6 +1076,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         ? {}
         : { returnedNotice: composeState.returnedNotice }),
       outbox: composeView().items,
+      // The SAME map the bar's rows read (Review round 5, finding 2a): two
+      // projections of one list, so a percent must not reach only one of them.
+      outboxProgress,
       notSaved: composeState.notSaved,
       photos: composeState.chips.map((chip) => ({
         key: chip.key,

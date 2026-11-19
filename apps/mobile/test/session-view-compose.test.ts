@@ -156,6 +156,61 @@ describe("the outbox's rows (F1, F3, F5, F21)", () => {
     expect(view.outbox[0]?.decide).toBe(true);
     expect(sessionView(input({ outbox: [item()] })).outbox[0]?.decide).toBe(false);
   });
+
+  test("a row carries the item's photos as LOCAL copies, never the daemon's refs (S4: an uploading photo has no ref yet)", () => {
+    const view = sessionView(
+      input({
+        outbox: [
+          item({
+            photos: [
+              { file: "file:///p/a.png", mimeType: "image/png", name: "a.png" },
+              {
+                file: "file:///p/b.png",
+                mimeType: "image/png",
+                name: "b.png",
+                ref: { id: "id-b", mimeType: "image/png", size: 4, name: "b.png" },
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+    expect(view.outbox[0]?.photos).toEqual([
+      { file: "file:///p/a.png", name: "a.png" },
+      { file: "file:///p/b.png", name: "b.png" },
+    ]);
+    // One photo without a ref is the "Not sent" case (the look reads this).
+    expect(view.outbox[0]?.unsentPhotos).toBe(true);
+    expect(
+      sessionView(
+        input({
+          outbox: [
+            item({
+              photos: [
+                {
+                  file: "file:///p/b.png",
+                  mimeType: "image/png",
+                  name: "b.png",
+                  ref: { id: "id-b", mimeType: "image/png", size: 4, name: "b.png" },
+                },
+              ],
+            }),
+          ],
+        }),
+      ).outbox[0]?.unsentPhotos,
+    ).toBe(false);
+  });
+
+  test("a row's percent comes from the screen's in-memory map, and is null without one (S4; mutation: read it from the item → a stale 62 % after a restart)", () => {
+    const items = [item({ itemId: "i1" }), item({ itemId: "i2" })];
+    const view = sessionView(input({ outbox: items, outboxProgress: new Map([["i1", 0.62]]) }));
+    expect(view.outbox.map((r) => r.progress)).toEqual([0.62, null]);
+    // No map at all (a build without the driver's progress): nothing claims one.
+    expect(sessionView(input({ outbox: items })).outbox.map((r) => r.progress)).toEqual([
+      null,
+      null,
+    ]);
+  });
 });
 
 describe("the photo chips (13c's states)", () => {

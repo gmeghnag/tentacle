@@ -455,6 +455,111 @@ same not-yet-built layout, so it was corrected with it.
 **Not done here:** no production code was touched (both findings are artifacts).
 S4 and the light/dark/Reduce-Motion screenshots remain owed, as before.
 
+### S4 (component + states + viewer) — as built
+
+*— claude-opus-5-5, 2026-11-19* (resumed a DeepSeek run stopped by the watchdog;
+its partial working-tree edits were reviewed line by line, kept where right,
+corrected below)
+
+**Load-bearing check, re-run first.** S4's progress plumbing stands on "the
+client already accepts `onProgress`, no client change": `UploadOptions.onProgress`
+at `packages/client/src/remote-client.ts:257`, called at `:2220,2350` from
+`attachImage` (`:2311`). **Holds.** The photo half stands on S3's pure
+`photoBlock`/`userRowParts` (present, tested). Retry's "no new path" stands on
+`controller.outbox("send", itemId)` (`session-screen-controller.ts:570`) — the
+decision sheet's own call. Holds.
+
+**As built (in dependency order):**
+- `media-layout.ts`: `layoutMedia`/`mediaBox`/`MediaLayout` removed (no consumer
+  left). New pure `viewerPages(tiles, tapped)` (the plan's `viewerIndex`: skips
+  tiles without pixels, index in the filtered list, `-1` = closed) and
+  `viewerPageAt(offsetX, pageWidth, count)` (the page a swipe rests on, rounded
+  and clamped).
+- `session-view.ts`: `OutboxRowView` gains `photos` (local copies), `progress`
+  (from the screen's in-memory `outboxProgress` map, never the item) and
+  `unsentPhotos` (some photo has no `ref`).
+- `outbox-look.ts`: `uploading` → `"Sending… N%"` + `percent` (clamped whole
+  number), `"Uploading photos…"` + indeterminate when nothing reported;
+  `needs-decision` with `unsentPhotos` → `"Not sent"` + `retry: true`.
+- `outbox-driver.ts`: `upload(bytes, meta, { onProgress })`; `onProgress` dep
+  reported per whole-percent change, and reset to `null` in a `finally` (sent,
+  refused or cancelled). `outbox-session.ts:121` passes it to `attachImage`.
+  `session-screen-controller.ts` keeps the map and redraws; `App.tsx` forwards
+  the callback into the driver.
+- `ComposeBar.tsx` `OutboxRows`: the item's photos in `photoBlock` geometry above
+  the dashed row, an uploading veil with `RingArc` (percent) or spinner, and a
+  `Retry` button calling `onRetry` → `controller.outbox("send", …)`
+  (`SessionScreen.tsx`).
+- `TranscriptRow.tsx`: `UserRowView` (state: `broken`, the viewer) wraps a
+  hook-free exported `UserRowBody` (photo block, then the bubble iff
+  `userRowParts().bubble`) and `PhotoTiles` (tiles, light-mode-only `sep`
+  hairline via `theme.isDark`, `"+N"` overlay, `"Image not available"` tile).
+- `MediaViewer.tsx`: `{ items, index, caption }`; horizontal `pagingEnabled`
+  pager, per-page zooming `ScrollView` (`maximumZoomScale={4}`), `"2 of 5"`,
+  caption, `Share.share({ url })`.
+
+**Corrections to the resumed partial edits (bugs found, fixed, tested):**
+1. **The viewer paged only the 4 DRAWN tiles**: a 5-photo message opened as
+   "… of 4" and the "+N"-hidden photos were unreachable. Now the row resolves
+   every image (`shown`) and the viewer pages all of them. Test: "a tap on a
+   tile pages EVERY photo …" — RED on the resumed code (`viewerPages(tiles, …)`,
+   M2 below), green after.
+2. **The count and Share never followed a swipe** (both read the tapped `index`).
+   Now `onMomentumScrollEnd` → `viewerPageAt` → `page` state; count and Share use
+   it.
+3. **The dark tile still got `borderColor: sep`** (only the width was
+   light-only); the hairline test was red. Both now light-only.
+4. **The component test could not run** (it called `TranscriptRow`, whose user
+   row has hooks: 11 × `resolveDispatcher().useState`), and its placement
+   assertion was vacuous (`find(style[0] === undefined)`). Rewritten against the
+   hook-free `UserRowBody`: the body's top level is exactly `[block, bubble]`
+   and the bubble holds no `Image`. Its `thumbnails: {}` fixture was invalid
+   (crashed `thumbnailFor`).
+5. `"+N"` rendered as two children (`+`, `2`); now one string.
+6. Tidy: `PhotoTile` type import was missing (tsc error), dead `images`/`image*`
+   styles removed, and the ComposeBar veil comment said "one veil over the
+   block" while drawing one per tile — corrected.
+
+**Drift from the Implementation (and why):**
+1. **Radius 16 is on every tile's corners**, not only the block's outer ones:
+   `photoBlock` tiles carry no position (S3 drift 3), so the component cannot
+   tell outer from inner. A follow-up can add per-tile corner flags in the pure
+   module if the owner wants the exact mockup corners.
+2. The "component test" asserts on `UserRowBody` (walkable) + a source pin for
+   the viewer (it has hooks and cannot be walked under bun), as S2 did.
+3. `mobile-media-live-wiring.test.ts` pinned `layoutMedia(`/`mediaBox(`; now
+   pins `photoBlock(`/`userRowParts(`. The artifacts guard's positive control
+   `layoutMedia` → `displayUri` (its own comment foresaw S4 changing it).
+4. Changelog: the photo sentences return to the one bullet now that
+   `photoBlock` and `userRowParts` have their consumer (the guard is green).
+
+**Mutations** (applied with backups in `.tentacle/tmp/mobile-thinking-images/s4bak/`,
+restored with `cp`, re-run green):
+```
+M1 bubble always drawn ({!parts.bubble → {false)      → "photo-only message has NO bubble" fails
+M2 viewerPages(shown → viewerPages(tiles (resumed code) → "pages EVERY photo …" fails
+M3 dark hairline (isDark → false)                       → "light-mode hairline … dark has none" fails
+M4 viewerPageAt Math.round → Math.floor                 → "nearest whole page" fails
+M5 driver finally reset removed                         → 3 outbox-driver progress tests fail
+M6 "Not sent" retry: true → false                       → outbox-look "Not sent and offers Retry" fails
+   M1–M6 together: 89 pass / 8 fail
+M7 photo block moved INSIDE the bubble (WhatsApp shape) → placement test + 9 others fail (2 pass / 10 fail)
+after restore: 97 pass / 0 fail
+```
+
+**Checked here (narrow, §4):** media-layout, outbox-look, outbox-driver,
+session-view-compose, compose-motion, transcript-row-photos,
+mobile-media-live-wiring, mobile-thinking-images-artifacts, changelog-guard →
+138 pass / 0 fail; outbox-session, outbox-link, outbox, session-screen(-compose,
+-documents), compose-bar-layout, composer-field-layout, transcript-pdf,
+notice-row, row-guard-wiring, node-builtins-guard (+ the outbox three) → 223 /
+0; changelog.test + guards → 57 / 0. `tsc -p apps/mobile --noEmit` clean;
+`bunx biome check` on all 20 touched files clean. Full gate: the orchestrator's
+script. **Not done:** the simulator screenshot set (§Tests: 1/2/3/5 photos,
+photo-only, upload in progress, failed upload, viewer "2 of 5", light/dark,
+Reduce Motion) — no simulator run in this session; pinch/swipe/Share are
+verified only by source pin, not on device.
+
 
 ## Review
 
@@ -552,6 +657,64 @@ All three tests are non-vacuous. The executor's own M1–M5 claims match the cod
 
 **How the executor behaved:** it stayed in scope (S3 only). It recorded the four drifts with reasons; the 64 pt floor and the cropped-rounding fix are both sound. Its red → green and mutation evidence reproduces. It slipped on the two artifact-level points above.
 
+### Gate fix 1 (orchestrator's gate on `feat/mobile-thinking-images`)
+
+*— claude-sonnet-5-5, 2026-11-19*
+
+Scope: the ONE failing test the orchestrator's full gate reported —
+`packages/exec/test/confinement.test.ts` → "F2: a hard link to a file outside
+every root never changes the outside file". Nothing else was touched; the
+branch's own subject (mobile thinking/images) is not involved.
+
+**Root cause (reproduced, not inferred).** That test loops over a writable dir
+and the project, and failed intermittently (~1 run in 60; reproduced at
+rerun-each runs #2, #52, #74, #81 with
+`--rerun-each 300`). Both symptom shapes come from ONE cause: Bun's
+`realpathSync` on a file with SEVERAL names answers with the canonical path of
+the INODE, which on macOS is intermittently a DIFFERENT one of its names — not
+the name it was asked about. Measured on this machine: 3 wrong answers in 20 000
+calls for one hard link (`repro-determinism.ts`), and 30/4000 in the
+host-execution loop before the fix. `HostExecution.confineWrite` adopted that
+answer as the write target, so a legitimate in-root name was refused as
+`refusing to write outside the workspace` (35/4000), or the other in-root name
+was the one replaced, leaving the asked-for name holding its old bytes (28/4000
+— the `R2-4` shape, which also failed on the gate-free rerun).
+
+**Fix.** `realEntryPath` (`packages/exec/src/host-execution.ts`) resolves the
+one entry `realTarget` canonicalises: a single-named file and a directory keep
+the kernel's answer (which also canonicalises case); a several-named file is
+resolved from its PARENT — the directory is unambiguous, the last component is
+kept as asked; a symlink at that component is followed by name (`readlinkSync`,
+never ambiguous), so a hard link behind a link is corrected too. A loop-bounded
+(40 hops) walk; any lstat/readlink failure falls back to the kernel answer,
+as before. `writableRootsOf`, the constructor's `root`, `confineWrite` and
+`confineRead` all go through it.
+
+New TEST SEAM (`HostExecutionConfig.realpath`, documented TEST SEAM ONLY like
+its siblings) so the misnaming is reproducible deterministically instead of by
+a 1-in-60 flake: `realEntryPath`'s kernel call is injected.
+
+**Evidence.** Red before green by mutation (the fix's line reverted to
+`resolvePath(existing)`, seam kept): the 3 new/strengthened cases fail —
+"a hard link whose realpath names its OTHER name is still the in-root name",
+"a hard link reached through a symlink keeps the name asked about",
+"R2-4: a hard-linked file INSIDE the root is writable again". Restored:
+48 pass / 0 fail. Real-driver proof that the cause is closed, not just mocked:
+`repro-both.ts` (4000 iterations, no mock) went from
+`{misnamed: 47, refused: 35, wrongName: 28}` to `{misnamed: 30, refused: 0,
+wrongName: 0}` — the OS still misnames, the write no longer cares.
+`--rerun-each 150` on the file: 7200 pass / 0 fail (the pre-fix code failed
+inside 60 runs).
+
+**Checked here:** `packages/exec` → 129 pass / 0 fail; `bunx biome check` on the
+two touched files clean; `bun run typecheck` clean (includes
+`packages/exec`). Full gate: left to the orchestrator's script.
+
+**Drift from Implementation:** none in substance (this is not an S-slice); the
+work is outside the task's planned scope by necessity, since the gate blocked
+the merge. Recorded upstream in `docs/library-bugs.md`
+("Bun — `realpathSync` of a hard link answers with a different name").
+
 ### Round 2 (S3 re-review: round 4's findings, commit `d283ef13`)
 
 *— claude-opus-5-5, 2026-11-19* (fresh context; scope: `git diff HEAD~1`; a different model family from the executor)
@@ -569,3 +732,138 @@ All three tests are non-vacuous. The executor's own M1–M5 claims match the cod
 - (c) The guard's comment cites `~/.config/tentacle/config.jsonc` and `runs/night-*.log`, which are files outside the repo, so a reader cannot check them.
 
 **How the executor behaved:** it went straight at both findings and also fixed a second site of finding 1 (the metadata line). It recorded the walker drift honestly. Its mutation table reproduces.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; scope: S4 in `git diff main...HEAD`. The executor's S4 section is signed by the same model, so this review shares its blind spots.)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Gate:** the 7 touched mobile test files → 127 pass / 0 fail. All of `apps/mobile/test` → 3851 pass / 0 fail. `bun run lint` is clean (2116 files). `bun run typecheck` is clean (root, mobile, relay). The full `bun test` was not run (scoped review).
+
+**Findings**
+1. **HIGH: the 3-photo block does not draw as "one tall tile + two stacked on the right".** See `TranscriptRow.tsx` `styles.photos` (`flexDirection: "row"`, `flexWrap: "wrap"`) and the same style in `ComposeBar.tsx` `styles.outboxPhotos`, drawing `photoBlock`'s position-free tiles (`media-layout.ts`, `tall` branch). A wrap line is as tall as its tallest item, so the third tile wraps to a new line BELOW the tall tile instead of going under the second tile. Proof: I ran Yoga, the layout engine RN uses (`yoga-wasm-web`, scratch `yoga3.ts`), with cell 98, gap 4 and a 200-wide row. It gives tile 0 at (0,0) 98×200, tile 1 at (102,0) and tile 2 at **(0,204)**. The block comes out **302 pt tall where `photoBlock.height` = 200**, and the bottom-right slot is empty. This happens for every 3-photo message, in both the sent row and the outbox row. The tests assert only the boxes and never the drawn placement, so nothing catches it. Fix: give the tiles `x/y` in the pure module (S3 drift 3 dropped them on exactly this assumption) or draw a column for the stacked pair. Then add a test that pins the placement.
+2. **MEDIUM: the progress wiring that puts the percent on screen has no test.** Two mutations each left all 3851 mobile tests green, and both were reverted (the tree is byte-clean):
+   - (a) `session-screen-controller.ts` `onProgress`: I dropped `outboxProgress.set(...)`, so the row stays indeterminate forever.
+   - (b) `outbox-session.ts:123`: I passed `{}` instead of `options`, so the client is never asked for progress.
+   The driver and the look are tested, but the two joints between them are not. This is the "`onProgress` reaches the row" test that §Tests asks for.
+3. **MEDIUM: the percent is per photo, but it is shown as the message's.** In `outbox-driver.ts`, `report` runs once for each `session.upload`. For a 3-photo item the status goes "Sending… 100%" → "Sending… 0%" three times, and every tile's veil shows that same ring, including tiles that are already uploaded (`ComposeBar.tsx`, "A veil per tile, all showing the ONE item-wide progress"). The fix is either to aggregate over the photos (`(done + have/size) / n`) or to veil only the tile that is uploading.
+
+**Attacks that found nothing:**
+- Retry is a second send path: no. `onRetry` → `controller.outbox("send")` → `compose.outboxSend`, the same path the sheet uses.
+- `unsentPhotos` gives a false "Not sent" after a prompt or document refusal: no. The photos already carry refs by then, so the row shows "Needs your answer".
+- The percent is persisted: no. It lives only in the map, and `finally` resets it.
+- The viewer index after skipped tiles: correct (`viewerPages` filters the tiles first).
+- The §7 invariants: no protocol, persistence or client change. Logic is in the pure modules, apart from the layout finding above.
+
+**How the executor behaved:** it caught and fixed real bugs in the resumed partial edits (the viewer paging only the drawn tiles, the stale count) and recorded the drift honestly. But it claimed that the mockup layout is drawn without ever checking a 3-tile placement, and the screenshot pass, which would have shown finding 1, was skipped.
+
+### Fix round 1 (round 5's findings — S4)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-19*
+
+Scope: the three findings of the `## Review` above (verdict REQUEST-CHANGES), all
+in the S4 photo/progress path. No protocol, persistence or client change.
+
+**Finding 1 (HIGH) — FIXED: the 3-photo block drew as a wrapping flex row.**
+Root cause: `photoBlock` returned position-FREE boxes and both rows drew them in a
+`flexDirection:"row"` / `flexWrap:"wrap"` container, so Yoga wrapped the third tile
+onto a new line under the tall tile — (0,204), a 302 pt block in a 200 pt box.
+Fixed pure-first (§7), so the shape is decided in one tested place:
+
+- `media-layout.ts:88-89` — `PhotoTile` now carries its place, `x`/`y`.
+- `media-layout.ts:140` — `photoBlock` sets it: 3 photos put the tall tile in its
+  own left column and stack the other two in the right one; every other count is
+  the 2-per-row grid.
+- `media-layout.ts:212` — new `photoTileStyle(tile)` →
+  `{position:"absolute", left, top, width, height}`: the ONE spelling of "drawn
+  where the block said", so a component cannot re-decide the geometry.
+- `TranscriptRow.tsx:53` — `boxStyle` is `photoTileStyle`; `:194` the block itself
+  is a positioned `width`×`height` box with `alignSelf:"flex-end"` and no
+  `flexDirection`/`flexWrap` at all.
+- `ComposeBar.tsx:228`, `:233` — the outbox row draws the identical geometry
+  (`styles.outboxPhotos:392`), so a photo does not move when it goes out.
+
+Tests (red before green): `media-layout.test.ts:186` (new) — every tile carries
+its PLACE: the 3-photo rects, the 2/4 grid, and no overlap/no escape of the block
+at 1, 2, 3, 4, 5 and 10 photos; `transcript-row-photos.test.ts:180` — the block's
+own style has no `flexDirection`/`flexWrap` and is exactly `{width:200,
+height:200}`; `:204` — the 3 tiles are pinned at (0,0) / (102,0) / (102,102), i.e.
+the tall tile's column beside the stacked pair, never above it. This is exactly the
+shape S3 drift 3 dropped by assuming a wrap row would lay the tiles out as drawn.
+
+**Finding 3 (MEDIUM) — FIXED by the aggregate route; the per-tile veil is PARTIAL,
+recorded as debt.** `outbox-driver.ts:256-275`: `total = photos.length`, `done` =
+the photos the item already holds (incremented after each successful upload), the
+reported fraction is `(done + have/size) / total`. A `size <= 0` reply still
+reports nothing, so the old "no fake 0 %" rule holds. Tests:
+`outbox-driver.test.ts:488` — a 3-photo item goes 17 % → 50 % → 83 % (and never
+backwards); `:509` — a photo the item already holds counts as done (75 %, then
+null), so a resumed item starts where it left off.
+
+Debt, stated plainly: the veil is still drawn on EVERY tile
+(`ComposeBar.tsx:245`). It now shows the MESSAGE's percent, which is honest for one
+message-level ring, but it says "still going" over tiles that are already
+uploaded. Veiling only the tile in flight needs the uploading tile's index on the
+row view — `onProgress(itemId, fraction)` → `(itemId, fraction, index)` through
+`outbox-session.ts:123`, `session-screen-controller.ts:903` and
+`session-view.ts:184`'s `OutboxRowView` — which is more than the small edit this
+finding allowed, so it is left for a follow-up rather than half-built.
+
+**Finding 2 (MEDIUM) — FIXED: both joints now have a test, and 2a exposed a REAL
+bug.**
+(b) `outbox-session.ts:123` — `outbox-session.test.ts:83` (the driver's callback
+reaches `RemoteSession.attachImage`: the fake records `attachOptions` and calls
+`options.onProgress(2,4)`) and `:100` (no driver callback ⇒ `onProgress`
+undefined, so an older caller sees the options it always did).
+(a) Investigating the mutation found more than a missing test: `view()` in
+`session-screen-controller.ts` never passed `outboxProgress` into `sessionView(...)`
+at all, so `view.outbox[].progress` was always null — only `composeView()`'s own
+rows (`:620`) carried it. Now passed at `:1032`, beside `outbox`. The test
+(`session-screen-compose.test.ts:409`) seeds a queued item with a pending photo,
+holds the port's upload in flight after `onProgress(2,4)`, and asserts BOTH
+`state().compose.outbox[0].progress` and `state().view.outbox[0].progress` are
+0.5, then null once the upload ends. The harness forwards `folding.onProgress`
+into `createOutboxDriver` and its `port.upload` reports `options.onProgress(1,4)`.
+
+**Mutations (each applied, run, and reverted — the tree carries none of them)**
+
+| # | Mutation | Result |
+| --- | --- | --- |
+| M1 | restore the wrapping row + position-free tiles (`TranscriptRow.tsx`) | RED: 3 fail, the pinned-placement and block-style tests of `transcript-row-photos.test.ts`; reverted → green |
+| M2 | `outbox-driver.ts` reports the photo's own `have/size` again | RED: 2 fail (percent tests `:488`, `:509`); reverted → green |
+| M3 | `outbox-session.ts:123` passes `{}` instead of `options` | RED: 1 fail (`:83`); reverted → green |
+| M4 | empty `onProgress` body in the controller's outbox handle | RED: `session-screen-compose.test.ts:409`; reverted → green |
+| M5 | drop `outboxProgress` from `view()`'s `sessionView(...)` call | RED: the same test; reverted → green |
+
+**Gate (narrow, per §4 — the full gate is the orchestrator's script).** The 8
+touched/neighbouring mobile files (`media-layout`, `transcript-row-photos`,
+`outbox-driver`, `outbox-session`, `session-screen-compose`, `session-view-compose`,
+`outbox-look`, `mobile-media-live-wiring`) → **165 pass / 0 fail** (765 `expect()`
+calls). `bunx biome check` on the 11 touched files → clean (6 needed formatting /
+import order, applied with `--write`). `scripts/test/mobile-thinking-images-artifacts.test.ts`
+(the section-signature pin, this section included) → **6 pass / 0 fail**. Full
+`bun test`, `typecheck` and `lint` were not run here.
+
+**Not done here:** the per-tile veil (debt above); the light/dark/Reduce-Motion
+screenshot pass S4 still owes. No changelog fragment: this is an internal fix to
+unreleased code, and the fragment already covers the feature.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; scope: `git diff HEAD~1`, commit `e7cb53a7`; the same model family reviewed round 1)
+
+**Verdict: PASS.** All three findings from round 1 are fixed, and each fix is pinned by a test that fails under mutation. I found no regressions and no HIGH or MEDIUM issues.
+
+1. **Finding 1 (3-photo layout) — FIXED.** `photoBlock` tiles now carry `x`/`y`, and `photoTileStyle` turns them into an absolute style inside a block of exactly `width` × `height`. This is used in both `TranscriptRow` and `ComposeBar`, and the flex-wrap is gone. Mutation: setting the 3-photo `x` back to `(index % 2)·(cell+gap)` fails 3 tests (the media-layout place test, the overlap test and the transcript-row pinned test).
+2. **Finding 2 (progress joints untested) — FIXED.** (a) Dropping `outboxProgress.set` in the controller fails the new `session-screen-compose` test. (b) Passing `{}` instead of `options` in `outbox-session.ts` fails the new `outbox-session` passthrough test. The fix also wires `outboxProgress` into the second projection (`session-screen-controller.ts:1079`), which round 1 had missed.
+3. **Finding 3 (per-photo percent) — FIXED.** The percent is now `(done + have/size) / total`, `done` is counted from the refs already present (so it is right on a resume), and a report with `size <= 0` is ignored. Mutation: `done += 1` → `+= 0` fails the "17 % → 50 % → 83 %" test.
+
+I reverted all four mutations and the tree is byte-clean (`git status` is empty). **Gate:** `apps/mobile/test` → 3860 pass / 0 fail. `bun run lint` is clean (2116 files). `bun run typecheck` is clean (root, mobile, relay).
+
+**Nits (not blocking):**
+- (a) The `TranscriptRow.tsx` `styles.tile` comment still says "the tiles carry no position", which is now false. Since the tiles do carry a position, putting the radius on the outer corners only is possible again.
+- (b) The `ComposeBar` veil comment says the driver reports "the item's current upload". It now reports the whole message.
+- (c) The per-tile veil on tiles that are already uploaded remains (recorded as debt), and the screenshot pass is still owed.
+
+**How the executor behaved:** it fixed each finding at its root, not just the symptom: it put the placement into the pure module, which is the S3 drift round 1 named. It named the mutation for each new test in the test title, and every one of those mutations reproduces. It recorded the remaining debt honestly.

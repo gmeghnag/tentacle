@@ -1,6 +1,7 @@
 /**
- * `media-layout` S3 of feat/mobile-thinking-images: `photoBlock` (mockup F) and
- * `userRowParts`.
+ * `media-layout` S3/S4 of feat/mobile-thinking-images: `photoBlock` and
+ * `userRowParts` (S3, mockup F), `viewerPages` (S4: which photos the full-screen
+ * viewer holds and which page a tap opens) and `displayUri`.
  *
  * Each test names the mutation it is red on (AGENTS §9).
  */
@@ -8,10 +9,10 @@ import { describe, expect, test } from "bun:test";
 import {
   MEDIA_MAX_RATIO,
   displayUri,
-  layoutMedia,
-  mediaBox,
   photoBlock,
   userRowParts,
+  viewerPageAt,
+  viewerPages,
 } from "../src/media-layout.ts";
 
 const ratio = (aspectRatio: number | undefined) =>
@@ -29,7 +30,14 @@ function tileAt<T>(block: { readonly tiles: readonly T[] }, index: number): T {
 describe("photoBlock — 1 photo keeps its own shape inside the cap", () => {
   test("a landscape photo is 200 × 150 at the cap (mutation: a fixed square → the photo is cropped for nothing)", () => {
     expect(photoBlock([ratio(4 / 3)])).toEqual({
-      tiles: [{ ref: { aspectRatio: 4 / 3 }, box: { width: 200, height: 150, cropped: false } }],
+      tiles: [
+        {
+          ref: { aspectRatio: 4 / 3 },
+          box: { width: 200, height: 150, cropped: false },
+          x: 0,
+          y: 0,
+        },
+      ],
       width: 200,
       height: 150,
     });
@@ -51,12 +59,13 @@ describe("photoBlock — 1 photo keeps its own shape inside the cap", () => {
     });
   });
 
-  test("a taller-than-clamp photo is clamped to 4/3 and cropped (mediaBox's rule still holds)", () => {
+  test("a taller-than-clamp photo is clamped to 4/3 and cropped (the lone photo keeps the clamp)", () => {
     expect(tileAt(photoBlock([ratio(0.4)]), 0).box).toEqual({
       width: 200,
       height: 267,
       cropped: true,
     });
+    expect(MEDIA_MAX_RATIO).toBeCloseTo(4 / 3);
   });
 
   test("a missing or nonsense ratio is a 200 square — the one shape an unknown image may take (mutation: divide by it → a 0-height tile)", () => {
@@ -174,6 +183,63 @@ describe("photoBlock — the empty and odd inputs", () => {
   });
 });
 
+describe("photoBlock — every tile carries its PLACE, so the block draws as decided (Review round 5, finding 1)", () => {
+  /** The rectangle a tile covers inside the block: what Yoga would lay out. */
+  const rect = (tile: { box: { width: number; height: number }; x: number; y: number }) => ({
+    x: tile.x,
+    y: tile.y,
+    width: tile.box.width,
+    height: tile.box.height,
+    right: tile.x + tile.box.width,
+    bottom: tile.y + tile.box.height,
+  });
+
+  test("3 photos: one tall tile on the left and TWO STACKED on the right — no tile below the tall one (mutation: a position-free tile in a wrapping row → the third tile lands at (0,204) and the block is 302 pt tall)", () => {
+    const block = photoBlock([ratio(1), ratio(1), ratio(1)]);
+    // The owner's mockup: cell 98, gap 4, a 200 × 200 block.
+    expect(block.tiles.map(rect)).toEqual([
+      { x: 0, y: 0, width: 98, height: 200, right: 98, bottom: 200 },
+      { x: 102, y: 0, width: 98, height: 98, right: 200, bottom: 98 },
+      { x: 102, y: 102, width: 98, height: 98, right: 200, bottom: 200 },
+    ]);
+    // The drawn block is exactly the declared extent: nothing spills below it.
+    for (const tile of block.tiles.map(rect)) {
+      expect(tile.bottom).toBeLessThanOrEqual(block.height);
+      expect(tile.right).toBeLessThanOrEqual(block.width);
+    }
+  });
+
+  test("2 photos are one row, 4 are a 2 × 2 grid in reading order (mutation: a single column → the second photo under the first)", () => {
+    const two = photoBlock([ratio(1), ratio(1)]);
+    expect(two.tiles.map(rect)).toEqual([
+      { x: 0, y: 0, width: 98, height: 98, right: 98, bottom: 98 },
+      { x: 102, y: 0, width: 98, height: 98, right: 200, bottom: 98 },
+    ]);
+    const four = photoBlock(Array.from({ length: 4 }, () => ratio(1)));
+    expect(four.tiles.map((tile) => [tile.x, tile.y])).toEqual([
+      [0, 0],
+      [102, 0],
+      [0, 102],
+      [102, 102],
+    ]);
+  });
+
+  test("every count: no tile overlaps another and none leaves the block (mutation: a shared origin → every tile stacks on the first)", () => {
+    for (const count of [1, 2, 3, 4, 5, 10]) {
+      const block = photoBlock(Array.from({ length: count }, () => ratio(1)));
+      const boxes = block.tiles.map(rect);
+      for (const [at, a] of boxes.entries()) {
+        for (const b of boxes.slice(at + 1)) {
+          const apart = a.right <= b.x || b.right <= a.x || a.bottom <= b.y || b.bottom <= a.y;
+          expect({ count, apart }).toEqual({ count, apart: true });
+        }
+        expect(a.right).toBeLessThanOrEqual(block.width);
+        expect(a.bottom).toBeLessThanOrEqual(block.height);
+      }
+    }
+  });
+});
+
 describe("userRowParts — a photo-only message has no bubble", () => {
   const user = (over: Partial<Parameters<typeof userRowParts>[0]>) => ({
     text: "",
@@ -213,83 +279,6 @@ describe("userRowParts — a photo-only message has no bubble", () => {
   });
 });
 
-describe("mediaBox — the image's shape follows the photo, bounded", () => {
-  test("a landscape photo keeps its ratio at the full width", () => {
-    // 4032×3024 → 4:3. At 300pt the box is 300×225.
-    expect(mediaBox({ aspectRatio: 4 / 3 }, 300)).toEqual({
-      width: 300,
-      height: 225,
-      cropped: false,
-    });
-  });
-
-  test("a portrait photo is NOT cropped to square (mutation: clamp to `width` → a 3:4 photo loses a third of itself)", () => {
-    // 3024×4032 → 0.75. 300 / 0.75 = 400, and 400 > 300 × 4/3 = 400? No: 400 is
-    // exactly the clamp, so it fits exactly — the common iPhone portrait is the
-    // case the clamp is sized for.
-    expect(mediaBox({ aspectRatio: 0.75 }, 300)).toEqual({
-      width: 300,
-      height: 400,
-      cropped: false,
-    });
-  });
-
-  test("a taller-than-clamp photo IS clamped, and says it is cropped (never stretched)", () => {
-    // 1:2 at 300pt wants 600pt; the clamp is 400pt.
-    expect(mediaBox({ aspectRatio: 0.5 }, 300)).toEqual({
-      width: 300,
-      height: 400,
-      cropped: true,
-    });
-  });
-
-  test("a missing ratio is a square tile — the one shape an unknown image may take", () => {
-    expect(mediaBox({}, 300)).toEqual({ width: 300, height: 300, cropped: false });
-  });
-
-  test("a nonsense ratio is treated as missing, never a zero-height box (mutation: divide by any number → height 0 → the image vanishes)", () => {
-    for (const bad of [0, -2, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(mediaBox({ aspectRatio: bad }, 300)).toEqual({
-        width: 300,
-        height: 300,
-        cropped: false,
-      });
-    }
-  });
-
-  test("a zero width still gives a drawable box (a layout pass before the measurement)", () => {
-    expect(mediaBox({ aspectRatio: 1 }, 0).width).toBe(1);
-  });
-
-  test("MEDIA_MAX_RATIO is the 4/3 the portrait case needs", () => {
-    expect(MEDIA_MAX_RATIO).toBeCloseTo(4 / 3);
-  });
-});
-
-describe("layoutMedia — media first, caption below, nothing empty", () => {
-  test("with text, the caption goes BELOW the media (mutation: caption above → the text-then-squeezed-image layout the owner rejected)", () => {
-    const layout = layoutMedia([{ aspectRatio: 4 / 3 }, { aspectRatio: 1 }], {
-      width: 200,
-      hasText: true,
-    });
-    expect(layout.captionBelow).toBe(true);
-    expect(layout.boxes).toHaveLength(2);
-  });
-
-  test("with no text, there is no caption slot at all (mutation: always `true` → an empty block under the photo)", () => {
-    expect(layoutMedia([{ aspectRatio: 1 }], { width: 200, hasText: false }).captionBelow).toBe(
-      false,
-    );
-  });
-
-  test("a text-only message has no media boxes and keeps its caption", () => {
-    expect(layoutMedia([], { width: 200, hasText: true })).toEqual({
-      boxes: [],
-      captionBelow: true,
-    });
-  });
-});
-
 describe("displayUri — a file that is gone falls back to the label (Review round 2, R2-1)", () => {
   test("an untried URI is drawn (mutation: always undefined → no photo is ever shown)", () => {
     expect(displayUri("file:///o/photos/a.png", [])).toBe("file:///o/photos/a.png");
@@ -306,5 +295,60 @@ describe("displayUri — a file that is gone falls back to the label (Review rou
   test("no candidate at all is still no candidate (a history row, another device's message)", () => {
     expect(displayUri(undefined, [])).toBeUndefined();
     expect(displayUri(undefined, ["file:///o/photos/a.png"])).toBeUndefined();
+  });
+});
+
+describe("viewerPages — which photos the full screen holds, and which page a tap opens (S4)", () => {
+  const tile = (uri: string | undefined, label = "photo") => ({ uri, label });
+
+  test("every photo with pixels is a page, and the tapped one is its index (mutation: open the tile's position → a skipped tile shifts every count)", () => {
+    const pages = viewerPages([tile("a"), tile("b"), tile("c")], 1);
+    expect(pages.pages.map((page) => page.uri)).toEqual(["a", "b", "c"]);
+    expect(pages.index).toBe(1);
+    expect(pages.pages[1]?.label).toBe("photo");
+  });
+
+  test("a tile with no pixels is SKIPPED, not opened as an empty page (mutation: keep it → the viewer pages onto a blank screen)", () => {
+    // b has no bytes (a history row, another device's message): 2 of 3, not 2 of 4.
+    const pages = viewerPages([tile("a"), tile(undefined), tile("c")], 2);
+    expect(pages.pages.map((page) => page.uri)).toEqual(["a", "c"]);
+    // The tapped tile's page in the FILTERED list: the second page, not the third.
+    expect(pages.index).toBe(1);
+  });
+
+  test("tapping a tile that has no pixels opens nothing at all (mutation: index 0 → the viewer opens the wrong photo)", () => {
+    expect(viewerPages([tile(undefined), tile("b")], 0).index).toBe(-1);
+    expect(viewerPages([tile(undefined), tile("b")], 0).pages).toHaveLength(1);
+  });
+
+  test("no photos, or a tap out of range: an empty viewer (-1 = closed)", () => {
+    expect(viewerPages([], 0)).toEqual({ pages: [], index: -1 });
+    expect(viewerPages([tile("a")], 3).index).toBe(-1);
+  });
+
+  test("the count the header reads is the photos with pixels, never the row's own list", () => {
+    const pages = viewerPages([tile(undefined), tile(undefined), tile("c")], 2);
+    expect(pages.pages).toHaveLength(1);
+    expect(pages.index).toBe(0);
+  });
+});
+
+describe("viewerPageAt: the page a swipe rests on (S4: the count and Share follow it)", () => {
+  test("the nearest whole page to the offset (mutation: floor → a half-swiped page reads as the one before)", () => {
+    expect(viewerPageAt(0, 390, 5)).toBe(0);
+    expect(viewerPageAt(390, 390, 5)).toBe(1);
+    expect(viewerPageAt(390 * 1.6, 390, 5)).toBe(2);
+    expect(viewerPageAt(390 * 1.4, 390, 5)).toBe(1);
+  });
+
+  test("an iOS bounce past either end stays on a real page (mutation: no clamp → '6 of 5', '0 of 5')", () => {
+    expect(viewerPageAt(-80, 390, 5)).toBe(0);
+    expect(viewerPageAt(390 * 4 + 120, 390, 5)).toBe(4);
+  });
+
+  test("no pages → -1; an unknown width or a nonsense offset → the first page, never NaN", () => {
+    expect(viewerPageAt(0, 390, 0)).toBe(-1);
+    expect(viewerPageAt(390, 0, 3)).toBe(0);
+    expect(viewerPageAt(Number.NaN, 390, 3)).toBe(0);
   });
 });

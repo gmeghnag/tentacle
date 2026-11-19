@@ -61,6 +61,12 @@ export interface OutboxSession {
   upload(
     bytes: Uint8Array,
     meta: { readonly mimeType: string; readonly name?: string },
+    /**
+     * How much of this upload the daemon has confirmed (feat/mobile-thinking-images
+     * S4): the client's own `UploadOptions.onProgress`, passed straight through —
+     * no client change, and the mobile app simply did not pass one before.
+     */
+    options?: { readonly onProgress?: (have: number, size: number) => void },
   ): Promise<AttachmentRef>;
   /**
    * One prompt, with the key it carries. Resolves at the daemon's ACK (it holds
@@ -131,6 +137,14 @@ export interface OutboxDriverDeps {
   ) => void;
   /** An item whose session is gone (or whose door was busy): its text belongs back in the field (F7/F20). */
   readonly onDraft?: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
+  /**
+   * How much of an item's photo upload the daemon has confirmed, 0–1, or null when
+   * nothing is in flight any more (feat/mobile-thinking-images S4). IN MEMORY ONLY —
+   * the screen keeps it, never the outbox file: a persisted "62 %" would be a lie
+   * after a restart. Called on a whole-percent change and on the reset, so a long
+   * upload does not re-render the screen per byte.
+   */
+  readonly onProgress?: (itemId: string, fraction: number | null) => void;
 }
 
 export interface OutboxDriver {
@@ -232,23 +246,66 @@ export function createOutboxDriver(
   ): Promise<{ item: OutboxItem; refusal: Refusal | null }> => {
     let current = withState(item, "uploading");
     await save(replace(deps.persistence.items(), current));
-    for (const index of pendingUploads(current)) {
-      const photo = current.photos[index];
-      if (photo === undefined) {
-        continue;
+    /**
+     * The percent is the MESSAGE's, never one photo's (Review round 5, finding 3):
+     * a 3-photo item reports each of its three uploads, so a per-photo fraction
+     * would read "Sending… 100 %" then "Sending… 0 %" twice, and the row's one
+     * ring would claim a measurement of the wrong thing. `done` counts the photos
+     * the daemon already holds; the photo in flight adds its own share of 1/n.
+     */
+    const total = current.photos.length;
+    let done = current.photos.filter((photo) => photo.ref !== undefined).length;
+    /** The last percent reported for THIS run, so a row re-renders per whole percent. */
+    let reported: number | null = null;
+    const report =
+      deps.onProgress === undefined
+        ? undefined
+        : (have: number, size: number): void => {
+            // No size is no measurement: the row stays indeterminate rather than
+            // reporting a 0 % nobody confirmed (the S4 rule, kept).
+            if (size <= 0) {
+              return;
+            }
+            const inFlight = Math.min(1, Math.max(0, have / size));
+            const fraction =
+              total === 0 ? null : Math.min(1, Math.max(0, (done + inFlight) / total));
+            const percent = fraction === null ? null : Math.round(fraction * 100);
+            if (percent === reported) {
+              return;
+            }
+            reported = percent;
+            deps.onProgress?.(item.itemId, fraction);
+          };
+    try {
+      for (const index of pendingUploads(current)) {
+        const photo = current.photos[index];
+        if (photo === undefined) {
+          continue;
+        }
+        try {
+          const bytes = await deps.readPhoto(photo.file);
+          const ref = await session.upload(
+            bytes,
+            { mimeType: photo.mimeType, name: photo.name },
+            report === undefined ? undefined : { onProgress: report },
+          );
+          current = withRef(current, index, ref);
+          // One more photo the daemon holds: the next upload's reports start from
+          // its own share of the message, not from zero.
+          done += 1;
+          // Persisted before the NEXT photo: a kill mid-upload resumes from what
+          // the daemon's probe says it holds (F5).
+          await save(replace(deps.persistence.items(), current));
+        } catch (error) {
+          return { item: current, refusal: refusalOf(error, "prompt") };
+        }
       }
-      try {
-        const bytes = await deps.readPhoto(photo.file);
-        const ref = await session.upload(bytes, { mimeType: photo.mimeType, name: photo.name });
-        current = withRef(current, index, ref);
-        // Persisted before the NEXT photo: a kill mid-upload resumes from what
-        // the daemon's probe says it holds (F5).
-        await save(replace(deps.persistence.items(), current));
-      } catch (error) {
-        return { item: current, refusal: refusalOf(error, "prompt") };
-      }
+      return { item: current, refusal: null };
+    } finally {
+      // The upload is over either way (sent, refused, cancelled): the row's
+      // percent must not outlive it, and it is memory only.
+      deps.onProgress?.(item.itemId, null);
     }
-    return { item: current, refusal: null };
   };
 
   /**

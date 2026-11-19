@@ -1583,7 +1583,13 @@ export function SessionScreen({
             </Pressable>
           </View>
         )}
-        <OutboxRows rows={compose.outbox} palette={palette} onDecide={setDeciding} />
+        <OutboxRows
+          rows={compose.outbox}
+          palette={palette}
+          onDecide={setDeciding}
+          // Retry is the decision sheet's Send (S4): the SAME act, one path.
+          onRetry={(itemId) => void controller.outbox("send", itemId)}
+        />
         <Chips
           chips={compose.chips}
           palette={palette}
