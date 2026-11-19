@@ -1,6 +1,6 @@
 # fix/tui-line-diff-render — repaint only the rows that changed (the flash on terminals without mode 2026)
 
-> **Status:** implementation (awaiting owner approval)
+> **Status:** implementation APPROVED by the owner (2026-11-19)
 > **Branch:** `fix/tui-line-diff-render`
 > **Type:** fix · **Size:** S–M · **Blast:** cross-module (terminal I/O path: every byte Ink writes) · **Suited:** strong model executes (one slice `all`; a byte-level renderer, the `fs_edit`-corruption class if it goes wrong); fresh-context Review + owner live check in a terminal WITHOUT mode 2026
 > **Changelog:** `changelog.d/tui-line-diff-render.fixed.md`
@@ -288,3 +288,14 @@ Execution), then the real diff makes it green.
 5. **Intra-row diff** (rewrite only the spinner glyph + timer, not the whole row)?
    *Recommendation: no — row granularity already cuts ~97 % of the repaint, and
    splitting rows reopens wide-char/SGR edge cases.*
+
+#### Owner answers (2026-11-19)
+
+1. Yes — the flash is visible: the demo terminal answers the DECRQM 2026 probe with nothing (Terminal.app-like). Build it.
+2. The wrapper now; it is deleted by the React 19 / Ink migration when that lands (`docs/eval/react-19-migration.md` now notes Ink ≥ 6.8 ships `incrementalRendering`).
+3. Yes — `TENTACLE_TUI_FULL_REDRAW=1`, env only, undocumented in README.
+4. No Ctrl+L in this task (follow-up only if needed).
+5. No intra-row diff — row granularity.
+Stream render cap (the triage's 10–15 fps): left out; add only if Terminal.app still shows a flash after the row diff.
+
+*— claude-opus-5-5 (orchestrator, recording the owner's answers), 2026-11-19*
