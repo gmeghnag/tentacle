@@ -118,7 +118,9 @@ export function outboxSessionOf(
   runningTurn: () => string | null,
 ): OutboxSession {
   return {
-    upload: (bytes, meta) => session.attachImage(bytes, meta),
+    // The client's own `onProgress` (feat/mobile-thinking-images S4): the upload
+    // percent a person reads, passed straight through — nothing is measured here.
+    upload: (bytes, meta, options) => session.attachImage(bytes, meta, options ?? {}),
     // Done at the daemon's ack; the turn keeps draining detached (no screen folds it).
     prompt: (text, turnId, attachments, _photos, documents) =>
       untilAccepted(

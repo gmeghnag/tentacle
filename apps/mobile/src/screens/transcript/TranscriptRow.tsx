@@ -23,15 +23,22 @@ import { DIAGRAM_TOOL, diagramRowView } from "../../diagram-row.ts";
 import type { DiagramStyle } from "../../diagram-settings-store.ts";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
-import { type MediaBox, displayUri, layoutMedia, mediaBox } from "../../media-layout.ts";
+import {
+  type PhotoTile,
+  type ViewerPages,
+  displayUri,
+  photoBlock,
+  userRowParts,
+  viewerPages,
+} from "../../media-layout.ts";
 import { NOTICE_GLYPHS, type NoticeLook } from "../../notice-group.ts";
 import { ROW_FALLBACK_TEXT } from "../../row-guard.ts";
 import { type FiredRow, firedRowView } from "../../schedule-view.ts";
-import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
+import { DENSE_FONT_SCALE, type Palette, isDark, radius, space, typography } from "../../theme.ts";
 import { type Thumbnail, type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
 import { type StepCell, type ThreadPos, stepRowView, thoughtRowView } from "../../tool-steps.ts";
 import { subAgentLine } from "../../tool-summary.ts";
-import { type Row, imageRowText } from "../../transcript-rows.ts";
+import { type ImageRef, type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { StepBody, StepNode } from "../../ui/StepNode.tsx";
 import { ChartBlock } from "../../ui/chart/ChartBlock.tsx";
@@ -40,18 +47,11 @@ import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MediaViewer } from "./MediaViewer.tsx";
 
-/**
- * The width a bubble's media is laid out at, in points (item 4). The bubble caps
- * at 77% of the page (see `styles.bubble`), and the phone's narrowest supported
- * width is 320 pt: 0.77 × 320 − 2 × 14 (the bubble's own padding) ≈ 218. A fixed
- * figure is what keeps this a pure decision — the real width would need an
- * `onLayout` round-trip, and the photo is drawn `cover` in a box of the right
- * SHAPE, so a few points either way crop rather than distort.
- */
-export const MEDIA_BUBBLE_WIDTH = 218;
-
-/** The image's own box, from the pure layout (`mediaBox`). */
-function boxStyle(box: MediaBox): { width: number; height: number } {
+/** A tile's box as the style it is drawn in (the shape `photoBlock` decided). */
+function boxStyle(box: { readonly width: number; readonly height: number }): {
+  width: number;
+  height: number;
+} {
   return { width: box.width, height: box.height };
 }
 
@@ -159,118 +159,234 @@ function parsedOf(text: string): Parsed {
   return parse(text);
 }
 
+/** A tile as this row resolved it: its box, its pixels (if any) and its label. */
+export interface ShownTile {
+  readonly tile: PhotoTile<ImageRef>;
+  readonly uri: string | undefined;
+  readonly label: string;
+}
+
+/**
+ * The photo block's RENDER half (mockup F): the tiles `photoBlock` placed, the
+ * hairline, the "+N" overlay and the "Image not available" fallback. Hook-free
+ * on purpose — the caller owns `broken` and the viewer, so this maps values to
+ * elements and nothing else (AGENTS §7), which is also what makes it walkable in
+ * a test (`chart-view.test.ts`'s rule: a component with hooks cannot be called).
+ */
+export function PhotoTiles({
+  tiles,
+  blockWidth,
+  palette,
+  onOpen,
+  onBroken,
+}: {
+  readonly tiles: readonly ShownTile[];
+  readonly blockWidth: number;
+  readonly palette: Palette;
+  readonly onOpen: (position: number) => void;
+  /** A tile's `<Image>` could not load its file (Review round 2, R2-1). */
+  readonly onBroken: (uri: string) => void;
+}): JSX.Element {
+  return (
+    <View testID="row-photos" style={[styles.photos, { width: blockWidth }]}>
+      {tiles.map(({ tile, uri, label }, position) => (
+        <View
+          key={tile.ref.id}
+          testID={`image-${tile.ref.id}`}
+          style={[
+            styles.tile,
+            // The mockup's "filo sep": a hairline that reads on white and would be
+            // a light seam on black, so it is the light mode's only.
+            isDark(palette)
+              ? null
+              : { borderWidth: StyleSheet.hairlineWidth, borderColor: palette.sep },
+            { backgroundColor: palette.code },
+            boxStyle(tile.box),
+          ]}
+        >
+          {uri === undefined ? (
+            // No bytes reachable at all (a history row, another device's message,
+            // a file trimmed under the row): the label is what this build can
+            // honestly show.
+            <View style={styles.tileLabel}>
+              <Icon name="photo" color={palette.sec} size={18} />
+              <Text
+                numberOfLines={2}
+                style={[typography.caption, styles.tileLabelText, { color: palette.sec }]}
+              >
+                Image not available
+              </Text>
+            </View>
+          ) : (
+            <Pressable
+              testID={`image-${tile.ref.id}-open`}
+              accessibilityRole="imagebutton"
+              accessibilityLabel={`Open ${label}`}
+              onPress={() => onOpen(position)}
+            >
+              <Image
+                source={{ uri }}
+                style={styles.tileFill}
+                // A file that cannot be read (trimmed, wiped, moved) turns the tile
+                // back into its label instead of an empty frame.
+                onError={() => onBroken(uri)}
+                // The box is the photo's own shape (its clamp when it has one), so
+                // `cover` crops at a bound instead of squashing the photo.
+                resizeMode="cover"
+                accessibilityIgnoresInvertColors
+              />
+            </Pressable>
+          )}
+          {tile.overflow === undefined ? null : (
+            // "+N": this tile stands for itself and the photos the block hides
+            // (mockup F), so the count is over the photo it draws.
+            <View style={styles.more} pointerEvents="none">
+              <Text style={[typography.headline, styles.moreText]}>{`+${tile.overflow}`}</Text>
+            </View>
+          )}
+        </View>
+      ))}
+    </View>
+  );
+}
+
 function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Element {
+  /**
+   * Item 4 / mockup F (feat/mobile-thinking-images S4): the photos are their OWN
+   * element ABOVE the bubble, and a photo-only message has no bubble at all
+   * (`UserRowBody`, from the pure `userRowParts` + `photoBlock`).
+   */
   const user = row as Extract<Row, { kind: "user" }>;
-  /** Item 4's geometry: media boxes at the bubble's width, caption below iff there are words. */
-  const layout = layoutMedia(user.images, {
-    width: MEDIA_BUBBLE_WIDTH,
-    hasText: user.text !== "",
-  });
-  const captionBelow = layout.captionBelow;
-  /** The photo open full screen (item 4). One state: null = closed. */
-  const [viewing, setViewing] = useState<{ uri: string; label: string } | null>(null);
+  /**
+   * The viewer's pages and the one a tap opened (mockup F: tap → full screen,
+   * "2 of 5"). `index` `-1` = closed: one state, never a parallel flag.
+   * `viewerPages` skips a tile with no pixels, so the pager never holds an empty
+   * page and the header's count is the photos a person can actually see.
+   */
+  const [viewing, setViewing] = useState<ViewerPages>({ pages: [], index: -1 });
   /**
    * URIs whose `<Image>` has reported a load failure (Review round 2, R2-1): a
    * file can vanish under a row that outlives it (the app trims old copies, a
-   * person can wipe the phone's data), and the bubble must then draw its label
+   * person can wipe the phone's data), and the tile must then draw its label
    * rather than an empty frame. `displayUri` decides; this only remembers.
    */
   const [broken, setBroken] = useState<readonly string[]>([]);
   return (
     <Shell row={user}>
-      <View style={[styles.bubble, { backgroundColor: palette.fill }]}>
-        {user.restart === true ? (
-          <Text style={[typography.caption, { color: palette.sec }]}>restart prompt</Text>
-        ) : null}
-        {/* Item 4 (the owner's WhatsApp shape): the media FIRST, full bubble
-            width; the caption BELOW it, inside the same bubble. */}
-        {user.images.length === 0 ? null : (
-          <View style={styles.images}>
-            {user.images.map((image) => {
-              const thumb = thumbnailFor(thumbnails, image.id);
-              // The LOCAL copy wins: it is the only pixels that exist for a photo
-              // this phone just sent (`thumbnails.ts:19-25` — no read-back), and a
-              // loaded thumbnail is the only source for any other. A URI already
-              // known to be unloadable is no answer at all: the label is.
-              const uri = displayUri(image.localUri ?? thumb?.uri, broken);
-              const box = mediaBox(image, MEDIA_BUBBLE_WIDTH);
-              const label = imageRowText(image);
-              return (
-                <View
-                  key={image.id}
-                  testID={`image-${image.id}`}
-                  style={[styles.image, { backgroundColor: palette.code }, boxStyle(box)]}
-                >
-                  {uri === undefined ? (
-                    // No bytes reachable at all (a history row, another device's
-                    // message): the label is what this build can honestly show.
-                    <View style={styles.imageLabel}>
-                      <Icon name="photo" color={palette.sec} size={18} />
-                      <Text numberOfLines={2} style={[typography.caption, { color: palette.sec }]}>
-                        {label}
-                      </Text>
-                    </View>
-                  ) : (
-                    <Pressable
-                      testID={`image-${image.id}-open`}
-                      accessibilityRole="imagebutton"
-                      accessibilityLabel={`Open ${label}`}
-                      onPress={() => setViewing({ uri, label })}
-                    >
-                      <Image
-                        source={{ uri }}
-                        style={styles.imageFill}
-                        // A file that cannot be read (trimmed, wiped, moved) turns
-                        // the bubble back into its label instead of an empty frame.
-                        onError={() =>
-                          setBroken((had) => (had.includes(uri) ? had : [...had, uri]))
-                        }
-                        // The box is the photo's own shape (or the clamp), so `cover`
-                        // crops at the clamp instead of squashing the photo.
-                        resizeMode="cover"
-                        accessibilityIgnoresInvertColors
-                      />
-                    </Pressable>
-                  )}
-                </View>
-              );
-            })}
-          </View>
-        )}
-        {/* The attached files, one line each (docs/feat/pdf-read.md D5/D7), under
-            the media and inside the same bubble: the `<file>` block they became
-            is the model's, so the file is named, never quoted. */}
-        {user.documents === undefined || user.documents.length === 0 ? null : (
-          <View testID="row-documents" style={styles.documents}>
-            {user.documents.map((line) => (
-              <View key={line} style={styles.document}>
-                <Icon name="doc.on.doc" color={palette.sec} size={14} />
-                <Text
-                  numberOfLines={2}
-                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                  style={[typography.caption, { color: palette.sec }]}
-                >
-                  {line}
-                </Text>
-              </View>
-            ))}
-          </View>
-        )}
-        {/* The caption, BELOW the media and inside the same bubble — and never an
-            empty block: a photo-only bubble has no text area at all (item 4).
-            `hasText` is the words' own presence; the markdown source is its truth. */}
-        {!captionBelow ? null : (
-          // The bubble is `fill`; code inside it is `code`, which differs (B4).
-          <Markdown
-            parsed={parsedOf(user.text)}
-            palette={palette}
-            onLink={onLink}
-            codeBackground={palette.code}
-          />
-        )}
-      </View>
-      <MediaViewer open={viewing} palette={palette} onClose={() => setViewing(null)} />
+      <UserRowBody
+        user={user}
+        palette={palette}
+        onLink={onLink}
+        thumbnails={thumbnails}
+        broken={broken}
+        onOpen={setViewing}
+        onBroken={(uri) => setBroken((had) => (had.includes(uri) ? had : [...had, uri]))}
+      />
+      <MediaViewer
+        items={viewing.pages}
+        index={viewing.index}
+        caption={user.text}
+        palette={palette}
+        onClose={() => setViewing({ pages: [], index: -1 })}
+      />
     </Shell>
+  );
+}
+
+/**
+ * The user row's DRAWN half: the photo block above, the bubble below (or none).
+ * Hook-free, so a test can walk it (the state — `broken`, the viewer — is
+ * `UserRowView`'s).
+ */
+export function UserRowBody({
+  user,
+  palette,
+  onLink,
+  thumbnails,
+  broken,
+  onOpen,
+  onBroken,
+}: {
+  readonly user: Extract<Row, { kind: "user" }>;
+  readonly palette: Palette;
+  readonly onLink: RowProps["onLink"];
+  readonly thumbnails: RowProps["thumbnails"];
+  readonly broken: readonly string[];
+  /** A tile with pixels was tapped: the viewer's pages, opened on it. */
+  readonly onOpen: (pages: ViewerPages) => void;
+  readonly onBroken: (uri: string) => void;
+}): JSX.Element {
+  const parts = userRowParts(user);
+  const block = photoBlock(user.images);
+  /**
+   * EVERY photo's pixels as the row may draw them, in message order — the viewer
+   * pages all of them, including the ones a "+N" tile hides ("2 of 5").
+   */
+  const shown = user.images.map((ref) => ({
+    // The LOCAL copy wins: it is the only pixels that exist for a photo this
+    // phone just sent (`thumbnails.ts:19-25` — no read-back), and a loaded
+    // thumbnail is the only source for any other. A URI already known to be
+    // unloadable is no answer at all: the label is.
+    uri: displayUri(ref.localUri ?? thumbnailFor(thumbnails, ref.id)?.uri, broken),
+    label: imageRowText(ref),
+  }));
+  /** The block's tiles are its first photos, in order: tile `i` is photo `i`. */
+  const tiles = block.tiles.map((tile, position) => ({
+    tile,
+    uri: shown[position]?.uri,
+    label: shown[position]?.label ?? imageRowText(tile.ref),
+  }));
+  return (
+    <>
+      {!parts.photos ? null : (
+        // Right-aligned, capped at the block's own 200 pt: the photos are a
+        // message element of their own, never the bubble's content.
+        <PhotoTiles
+          tiles={tiles}
+          blockWidth={block.width}
+          palette={palette}
+          onOpen={(position) => onOpen(viewerPages(shown, position))}
+          onBroken={onBroken}
+        />
+      )}
+      {!parts.bubble ? null : (
+        <View style={[styles.bubble, { backgroundColor: palette.fill }]}>
+          {user.restart === true ? (
+            <Text style={[typography.caption, { color: palette.sec }]}>restart prompt</Text>
+          ) : null}
+          {/* The attached files, one line each (docs/feat/pdf-read.md D5/D7), inside
+              the bubble: the `<file>` block they became is the model's, so the file
+              is named, never quoted. */}
+          {user.documents === undefined || user.documents.length === 0 ? null : (
+            <View testID="row-documents" style={styles.documents}>
+              {user.documents.map((line) => (
+                <View key={line} style={styles.document}>
+                  <Icon name="doc.on.doc" color={palette.sec} size={14} />
+                  <Text
+                    numberOfLines={2}
+                    maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                    style={[typography.caption, { color: palette.sec }]}
+                  >
+                    {line}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+          {/* The caption, inside the bubble — and never an empty block: the bubble
+              exists only when it has something to say (`userRowParts`). */}
+          {user.text === "" ? null : (
+            // The bubble is `fill`; code inside it is `code`, which differs (B4).
+            <Markdown
+              parsed={parsedOf(user.text)}
+              palette={palette}
+              onLink={onLink}
+              codeBackground={palette.code}
+            />
+          )}
+        </View>
+      )}
+    </>
   );
 }
 
@@ -762,23 +878,39 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     gap: 6,
   },
-  images: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  // The photo block (mockup F): its OWN element, right-aligned above the bubble,
+  // tiles 4 pt apart in reading order. Its width is `photoBlock`'s (a second
+  // measurement here would drift from the boxes).
+  photos: {
+    alignSelf: "flex-end",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 4,
+    marginBottom: 4,
+  },
+  // The 16 pt radius (mockup F), on EVERY tile's corners: the tiles carry no
+  // position, so the block cannot tell an outer corner from an inner one (drift
+  // recorded in the task doc). A tile is clipped to it.
+  tile: { borderRadius: 16, overflow: "hidden" },
+  tileFill: { width: "100%", height: "100%" },
+  tileLabel: { flex: 1, alignItems: "center", justifyContent: "center", gap: 4, padding: 6 },
+  tileLabelText: { textAlign: "center" },
+  // "+N": the hidden photos' count, over a scrim on the tile that stands for them.
+  more: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.45)",
+  },
+  moreText: { color: "#FFFFFF" },
   // The attached files' rows (docs/feat/pdf-read.md D5): a glyph and one line
   // each, `sec`-coloured so they read as facts about the message, not prose.
   documents: { gap: 2 },
   document: { flexDirection: "row", alignItems: "center", gap: 6 },
-  // The image fills its own box (whose shape `mediaBox` decided): full bubble
-  // width, rounded to the bubble (item 4).
-  image: { borderRadius: radius.bubble, overflow: "hidden" },
-  imageFill: { width: "100%", height: "100%" },
-  imageLabel: {
-    width: 96,
-    height: 96,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 4,
-    padding: 6,
-  },
   // A step's cell (docs/feat/mobile-tool-rows.md): no vertical padding, so the
   // thread touches its neighbour; 6 pt at each end of a run.
   step: { paddingHorizontal: space.inset },

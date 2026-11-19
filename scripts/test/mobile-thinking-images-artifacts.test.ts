@@ -135,7 +135,8 @@ describe("the changelog fragment promises only what the branch builds", () => {
     // fixed: an export WITH a consumer must read true, an invented name false.
     // (Not "both S3 exports are unwired" — S4 legitimately ends that, and a
     // premise that reddens on the slice this task is FOR would only be deleted.)
-    expect(hasConsumer("layoutMedia", "media-layout.ts")).toBe(true);
+    // (`layoutMedia` was the first control; S4 removed it with its last consumer.)
+    expect(hasConsumer("displayUri", "media-layout.ts")).toBe(true);
     expect(hasConsumer("photoBlockButNotYet", "media-layout.ts")).toBe(false);
     // Nothing may promise what nothing renders. When S4 lands it adds the consumer
     // for each export, and that export's own sentence becomes legal in the same

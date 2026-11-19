@@ -455,6 +455,111 @@ same not-yet-built layout, so it was corrected with it.
 **Not done here:** no production code was touched (both findings are artifacts).
 S4 and the light/dark/Reduce-Motion screenshots remain owed, as before.
 
+### S4 (component + states + viewer) — as built
+
+*— claude-opus-5-5, 2026-11-19* (resumed a DeepSeek run stopped by the watchdog;
+its partial working-tree edits were reviewed line by line, kept where right,
+corrected below)
+
+**Load-bearing check, re-run first.** S4's progress plumbing stands on "the
+client already accepts `onProgress`, no client change": `UploadOptions.onProgress`
+at `packages/client/src/remote-client.ts:257`, called at `:2220,2350` from
+`attachImage` (`:2311`). **Holds.** The photo half stands on S3's pure
+`photoBlock`/`userRowParts` (present, tested). Retry's "no new path" stands on
+`controller.outbox("send", itemId)` (`session-screen-controller.ts:570`) — the
+decision sheet's own call. Holds.
+
+**As built (in dependency order):**
+- `media-layout.ts`: `layoutMedia`/`mediaBox`/`MediaLayout` removed (no consumer
+  left). New pure `viewerPages(tiles, tapped)` (the plan's `viewerIndex`: skips
+  tiles without pixels, index in the filtered list, `-1` = closed) and
+  `viewerPageAt(offsetX, pageWidth, count)` (the page a swipe rests on, rounded
+  and clamped).
+- `session-view.ts`: `OutboxRowView` gains `photos` (local copies), `progress`
+  (from the screen's in-memory `outboxProgress` map, never the item) and
+  `unsentPhotos` (some photo has no `ref`).
+- `outbox-look.ts`: `uploading` → `"Sending… N%"` + `percent` (clamped whole
+  number), `"Uploading photos…"` + indeterminate when nothing reported;
+  `needs-decision` with `unsentPhotos` → `"Not sent"` + `retry: true`.
+- `outbox-driver.ts`: `upload(bytes, meta, { onProgress })`; `onProgress` dep
+  reported per whole-percent change, and reset to `null` in a `finally` (sent,
+  refused or cancelled). `outbox-session.ts:121` passes it to `attachImage`.
+  `session-screen-controller.ts` keeps the map and redraws; `App.tsx` forwards
+  the callback into the driver.
+- `ComposeBar.tsx` `OutboxRows`: the item's photos in `photoBlock` geometry above
+  the dashed row, an uploading veil with `RingArc` (percent) or spinner, and a
+  `Retry` button calling `onRetry` → `controller.outbox("send", …)`
+  (`SessionScreen.tsx`).
+- `TranscriptRow.tsx`: `UserRowView` (state: `broken`, the viewer) wraps a
+  hook-free exported `UserRowBody` (photo block, then the bubble iff
+  `userRowParts().bubble`) and `PhotoTiles` (tiles, light-mode-only `sep`
+  hairline via `theme.isDark`, `"+N"` overlay, `"Image not available"` tile).
+- `MediaViewer.tsx`: `{ items, index, caption }`; horizontal `pagingEnabled`
+  pager, per-page zooming `ScrollView` (`maximumZoomScale={4}`), `"2 of 5"`,
+  caption, `Share.share({ url })`.
+
+**Corrections to the resumed partial edits (bugs found, fixed, tested):**
+1. **The viewer paged only the 4 DRAWN tiles**: a 5-photo message opened as
+   "… of 4" and the "+N"-hidden photos were unreachable. Now the row resolves
+   every image (`shown`) and the viewer pages all of them. Test: "a tap on a
+   tile pages EVERY photo …" — RED on the resumed code (`viewerPages(tiles, …)`,
+   M2 below), green after.
+2. **The count and Share never followed a swipe** (both read the tapped `index`).
+   Now `onMomentumScrollEnd` → `viewerPageAt` → `page` state; count and Share use
+   it.
+3. **The dark tile still got `borderColor: sep`** (only the width was
+   light-only); the hairline test was red. Both now light-only.
+4. **The component test could not run** (it called `TranscriptRow`, whose user
+   row has hooks: 11 × `resolveDispatcher().useState`), and its placement
+   assertion was vacuous (`find(style[0] === undefined)`). Rewritten against the
+   hook-free `UserRowBody`: the body's top level is exactly `[block, bubble]`
+   and the bubble holds no `Image`. Its `thumbnails: {}` fixture was invalid
+   (crashed `thumbnailFor`).
+5. `"+N"` rendered as two children (`+`, `2`); now one string.
+6. Tidy: `PhotoTile` type import was missing (tsc error), dead `images`/`image*`
+   styles removed, and the ComposeBar veil comment said "one veil over the
+   block" while drawing one per tile — corrected.
+
+**Drift from the Implementation (and why):**
+1. **Radius 16 is on every tile's corners**, not only the block's outer ones:
+   `photoBlock` tiles carry no position (S3 drift 3), so the component cannot
+   tell outer from inner. A follow-up can add per-tile corner flags in the pure
+   module if the owner wants the exact mockup corners.
+2. The "component test" asserts on `UserRowBody` (walkable) + a source pin for
+   the viewer (it has hooks and cannot be walked under bun), as S2 did.
+3. `mobile-media-live-wiring.test.ts` pinned `layoutMedia(`/`mediaBox(`; now
+   pins `photoBlock(`/`userRowParts(`. The artifacts guard's positive control
+   `layoutMedia` → `displayUri` (its own comment foresaw S4 changing it).
+4. Changelog: the photo sentences return to the one bullet now that
+   `photoBlock` and `userRowParts` have their consumer (the guard is green).
+
+**Mutations** (applied with backups in `.tentacle/tmp/mobile-thinking-images/s4bak/`,
+restored with `cp`, re-run green):
+```
+M1 bubble always drawn ({!parts.bubble → {false)      → "photo-only message has NO bubble" fails
+M2 viewerPages(shown → viewerPages(tiles (resumed code) → "pages EVERY photo …" fails
+M3 dark hairline (isDark → false)                       → "light-mode hairline … dark has none" fails
+M4 viewerPageAt Math.round → Math.floor                 → "nearest whole page" fails
+M5 driver finally reset removed                         → 3 outbox-driver progress tests fail
+M6 "Not sent" retry: true → false                       → outbox-look "Not sent and offers Retry" fails
+   M1–M6 together: 89 pass / 8 fail
+M7 photo block moved INSIDE the bubble (WhatsApp shape) → placement test + 9 others fail (2 pass / 10 fail)
+after restore: 97 pass / 0 fail
+```
+
+**Checked here (narrow, §4):** media-layout, outbox-look, outbox-driver,
+session-view-compose, compose-motion, transcript-row-photos,
+mobile-media-live-wiring, mobile-thinking-images-artifacts, changelog-guard →
+138 pass / 0 fail; outbox-session, outbox-link, outbox, session-screen(-compose,
+-documents), compose-bar-layout, composer-field-layout, transcript-pdf,
+notice-row, row-guard-wiring, node-builtins-guard (+ the outbox three) → 223 /
+0; changelog.test + guards → 57 / 0. `tsc -p apps/mobile --noEmit` clean;
+`bunx biome check` on all 20 touched files clean. Full gate: the orchestrator's
+script. **Not done:** the simulator screenshot set (§Tests: 1/2/3/5 photos,
+photo-only, upload in progress, failed upload, viewer "2 of 5", light/dark,
+Reduce Motion) — no simulator run in this session; pinch/swipe/Share are
+verified only by source pin, not on device.
+
 
 ## Review
 

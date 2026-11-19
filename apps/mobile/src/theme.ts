@@ -174,6 +174,14 @@ export function paletteFor(scheme: "light" | "dark" | null | undefined): Palette
   return scheme === "dark" ? dark : light;
 }
 
+/**
+ * Whether a palette is the dark one — for the few drawing decisions that are
+ * about the GROUND rather than a token (a hairline that reads on white and must
+ * vanish on black). One comparison, in one place, so a component never re-derives
+ * it (`chart-row.ts` does the same for its own chrome).
+ */
+export const isDark = (palette: Palette): boolean => palette === dark;
+
 export const lightPalette: Palette = light;
 export const darkPalette: Palette = dark;
 

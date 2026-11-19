@@ -107,6 +107,11 @@ export interface SessionViewInput {
   readonly returnedNotice?: string;
   /** This session's outbox items (13b), in the order they were written. */
   readonly outbox?: readonly OutboxItem[];
+  /**
+   * The upload progress of the outbox items, by item id (feat/mobile-thinking-images
+   * S4): 0–1, in MEMORY only. Absent → every uploading row is indeterminate.
+   */
+  readonly outboxProgress?: ReadonlyMap<string, number>;
   /** An outbox write did not land: the `not-saved` banner (F21). */
   readonly notSaved?: boolean;
   /** The attachment chips (13c's pipeline states, in pick order). */
@@ -183,6 +188,31 @@ export interface OutboxRowView {
   readonly state: OutboxItem["state"];
   /** A person must settle it: the row opens the decision sheet (F3, F17, F18). */
   readonly decide: boolean;
+  /**
+   * The item's photos, as the row draws them (feat/mobile-thinking-images S4):
+   * the local copies only, because that IS this row's window — an `uploading`
+   * photo has no daemon ref yet. `photoBlock` reads `file`/`name`; `aspectRatio`
+   * is absent today (an item's copy is a file the picker wrote, and nothing
+   * measured it), so every tile is the block's documented square fallback.
+   */
+  readonly photos: readonly {
+    readonly file: string;
+    readonly name: string;
+    readonly aspectRatio?: number;
+  }[];
+  /**
+   * How much of the current upload the daemon has confirmed, 0–1, or null when
+   * nothing has reported (indeterminate). IN MEMORY ONLY (the screen's map): a
+   * persisted percentage would be a stale "62 %" after a restart, so it never
+   * touches the outbox file.
+   */
+  readonly progress: number | null;
+  /**
+   * At least one photo has not reached the daemon yet (`ref` absent on the item).
+   * With `needs-decision` that is the upload that did not land: "Not sent" +
+   * Retry (S4). Derived here so the component never reads the item.
+   */
+  readonly unsentPhotos: boolean;
 }
 
 /** The composer as the screen draws it. */
@@ -329,7 +359,7 @@ export function sessionView(input: SessionViewInput): SessionView {
     pending: input.pending ?? [],
     editing: input.editing ?? null,
     unqueueOff: input.unqueueOff === true,
-    outbox: outboxRowsOf(input.outbox ?? []),
+    outbox: outboxRowsOf(input.outbox ?? [], input.outboxProgress),
     photos: input.photos ?? [],
     // Nothing to say until the session is reachable (the failure/ended branches
     // below keep it empty: there is nothing to compose into).
@@ -451,12 +481,18 @@ function composerOf(input: SessionViewInput): ComposerView {
 }
 
 /** This session's outbox items as rows (a `needs-decision` one opens the sheet). */
-function outboxRowsOf(items: readonly OutboxItem[]): readonly OutboxRowView[] {
+function outboxRowsOf(
+  items: readonly OutboxItem[],
+  progress: ReadonlyMap<string, number> | undefined,
+): readonly OutboxRowView[] {
   return items.map((item) => ({
     itemId: item.itemId,
     text: item.text,
     state: item.state,
     decide: item.state === "needs-decision",
+    photos: item.photos.map((photo) => ({ file: photo.file, name: photo.name })),
+    progress: progress?.get(item.itemId) ?? null,
+    unsentPhotos: item.photos.some((photo) => photo.ref === undefined),
   }));
 }
 

@@ -17,11 +17,29 @@
  * and the pending bubbles' are `PendingBubble.tsx`'s.
  */
 import type { JSX } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Image,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
+import { photoBlock } from "../../media-layout.ts";
 import { outboxCaption, outboxRowLook } from "../../outbox-look.ts";
 import type { ChipView, ComposeNotice, OutboxRowView } from "../../session-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, size, typography } from "../../theme.ts";
 import { Icon } from "../../ui/Icon.tsx";
+import { RingArc } from "../../ui/RingArc.tsx";
+
+/** A tile's box as the style it is drawn in (the shape `photoBlock` decided). */
+function boxStyle(box: { readonly width: number; readonly height: number }): {
+  width: number;
+  height: number;
+} {
+  return { width: box.width, height: box.height };
+}
 
 /** The pieces of the screen's view the bar draws (a subset of `session-view.ts`). */
 export interface BarView {
@@ -182,10 +200,13 @@ export function OutboxRows({
   rows,
   palette,
   onDecide,
+  onRetry,
 }: {
   readonly rows: BarView["outbox"];
   readonly palette: Palette;
   onDecide: (itemId: string) => void;
+  /** The "Retry" under a row whose photo upload did not land (S4). */
+  onRetry: (itemId: string) => void;
 }): JSX.Element | null {
   if (rows.length === 0) {
     return null;
@@ -196,8 +217,52 @@ export function OutboxRows({
       {rows.map((row) => {
         const look = outboxRowLook(row);
         const border = look.cue === "attention" ? palette.orange : palette.dash;
+        const uploading = row.state === "uploading";
+        // The block is `photoBlock`'s (S4): the outbox row draws the SAME layout
+        // the sent row does, so a photo does not move when it goes out. An item's
+        // photo carries no measured ratio (it is a file the picker wrote), so
+        // every tile is the documented square fallback.
+        const block = photoBlock(row.photos);
         return (
           <View key={row.itemId} style={styles.outboxItem}>
+            {block.tiles.length === 0 ? null : (
+              <View
+                testID={`outbox-photos-${row.itemId}`}
+                style={[styles.outboxPhotos, { width: block.width }]}
+              >
+                {block.tiles.map((tile) => (
+                  <View
+                    key={tile.ref.file}
+                    style={[styles.outboxTile, boxStyle(tile.box)]}
+                    // A veil per tile, all showing the ONE item-wide progress:
+                    // the driver reports the item's current upload, not a tile's.
+                    pointerEvents="none"
+                  >
+                    <Image
+                      source={{ uri: tile.ref.file }}
+                      style={styles.outboxTileFill}
+                      resizeMode="cover"
+                      accessibilityIgnoresInvertColors
+                    />
+                    {!uploading ? null : (
+                      <View style={styles.outboxVeil}>
+                        {look.percent === null ? (
+                          <ActivityIndicator size="small" color={palette.label} />
+                        ) : (
+                          <RingArc
+                            diameter={28}
+                            stroke={3}
+                            fraction={look.percent / 100}
+                            tone={palette.onAccent}
+                            track="rgba(255,255,255,0.35)"
+                          />
+                        )}
+                      </View>
+                    )}
+                  </View>
+                ))}
+              </View>
+            )}
             <View style={styles.outboxLine}>
               {look.options ? (
                 <Pressable
@@ -238,6 +303,24 @@ export function OutboxRows({
                 >
                   {look.status}
                 </Text>
+                {!look.retry ? null : (
+                  // The SAME act the decision sheet's Send performs (S4): one
+                  // path, so a retried photo message cannot go twice.
+                  <Pressable
+                    testID={`outbox-retry-${row.itemId}`}
+                    accessibilityRole="button"
+                    accessibilityLabel="Send this message again"
+                    hitSlop={8}
+                    onPress={() => onRetry(row.itemId)}
+                  >
+                    <Text
+                      style={[typography.footnote, { color: palette.accent }]}
+                      maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                    >
+                      Retry
+                    </Text>
+                  </Pressable>
+                )}
               </View>
             )}
           </View>
@@ -306,6 +389,23 @@ const styles = StyleSheet.create({
     borderStyle: "dashed",
   },
   outboxStatus: { flexDirection: "row", alignItems: "center", gap: 6, paddingRight: 4 },
+  // The outbox row's photo block (S4): `photoBlock`'s geometry, right-aligned above
+  // the dashed bubble, tiles 4 pt apart — the sent row's own shape.
+  outboxPhotos: { flexDirection: "row", flexWrap: "wrap", gap: 4 },
+  outboxTile: { borderRadius: 16, overflow: "hidden", backgroundColor: "#000000" },
+  outboxTileFill: { width: "100%", height: "100%" },
+  // The uploading veil (mockup F): the photo dimmed under one ring, never a
+  // second animation loop.
+  outboxVeil: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.35)",
+  },
   // A ScrollView's base style GROWS (`flexGrow: 1`): in the screen's column the
   // chip row took half the transcript's height (slice 6, flow 18). It is as
   // tall as its chips.

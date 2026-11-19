@@ -319,6 +319,11 @@ type FoldingPrompt = {
   /** 13b's hand-back (F7/F20): the item's text is the field's again. */
   readonly onDraft?: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
   /**
+   * The current photo upload's progress, 0–1 or null (feat/mobile-thinking-images
+   * S4): the screen keeps it in memory and draws it on the outbox row.
+   */
+  readonly onProgress?: (itemId: string, fraction: number | null) => void;
+  /**
    * The screen's OWN compose handle (fix/mobile-media-live item 1). The driver's
    * port is built from it — never from a fresh `client.newSession(...)`, which is
    * a SECOND session handle for the same id: `RemoteClient.register` reassigns the
@@ -388,6 +393,8 @@ function outboxOf(computerId: string): OutboxRuntime {
         // The screen owning the field receives the hand-back (`onDraft`), which is
         // the only place the text may go (13d: a driver-side write would race it).
         ...(folding.onDraft === undefined ? {} : { onDraft: folding.onDraft }),
+        // Its upload percent is the screen's too (S4): memory only, drawn by the row.
+        ...(folding.onProgress === undefined ? {} : { onProgress: folding.onProgress }),
       },
     );
   const drafts = createDraftStore(store, () => Date.now(), {

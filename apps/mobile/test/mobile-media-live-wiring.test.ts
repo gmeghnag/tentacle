@@ -95,11 +95,13 @@ describe("item 4: the media bubble is laid out, not hand-placed", () => {
       join(APP, "src", "screens", "transcript", "TranscriptRow.tsx"),
       "utf8",
     );
-    expect(row).toContain("layoutMedia(");
-    expect(row).toContain("mediaBox(");
+    // Since feat/mobile-thinking-images S4 the geometry is `photoBlock`'s (the
+    // block above the bubble) and the bubble's existence is `userRowParts`'.
+    expect(row).toContain("photoBlock(");
+    expect(row).toContain("userRowParts(");
     // The local copy wins over a fetched thumbnail: it is the only pixels a
     // fresh send has.
-    expect(row).toContain("image.localUri ?? thumb?.uri");
+    expect(row).toContain("ref.localUri ?? thumbnailFor(thumbnails, ref.id)?.uri");
   });
 
   test("tapping an image opens the full-screen viewer", () => {

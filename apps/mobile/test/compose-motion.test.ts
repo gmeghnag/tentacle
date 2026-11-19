@@ -48,7 +48,15 @@ describe("composeRowsMoved", () => {
   });
 
   test("outbox rows, returned rows, chips and Send now count too", () => {
-    const outbox = { itemId: "o1", text: "t", state: "waiting", decide: false } as const;
+    const outbox = {
+      itemId: "o1",
+      text: "t",
+      state: "waiting",
+      decide: false,
+      photos: [],
+      progress: null,
+      unsentPhotos: false,
+    } as const;
     expect(composeRowsMoved(empty, { ...empty, outbox: [outbox] })).toBe(true);
     expect(composeRowsMoved(empty, { ...empty, returnedOthers: [{ id: "r", text: "t" }] })).toBe(
       true,
