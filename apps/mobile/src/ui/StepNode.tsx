@@ -9,7 +9,24 @@
  * `tool-summary.ts`; this file owns only the look, the 1 s clock and the spin.
  */
 import { type JSX, type ReactNode, useEffect, useRef, useState } from "react";
-import { Animated, Easing, Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  Animated,
+  Easing,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+} from "react-native";
+import Svg, {
+  ClipPath,
+  Defs,
+  G,
+  LinearGradient,
+  Rect,
+  Stop,
+  Text as SvgText,
+} from "react-native-svg";
 import type { SlotView } from "../compact-slot.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, size, space, typography } from "../theme.ts";
 import {
@@ -19,6 +36,7 @@ import {
   SHIMMER_MS,
   breatheCurve,
   shimmerSweep,
+  thinkingLabel,
   thinkingLook,
 } from "../thinking-motion.ts";
 import { type StepDot, type ThreadPos, thinkingA11yLabel } from "../tool-steps.ts";
@@ -161,18 +179,21 @@ function BreathingTherefore({ palette, still }: { palette: Palette; still: boole
   );
 }
 
+/** An svg `Rect` the native driver can move (S0 of docs/feat/mobile-thinking-images.md). */
+const AnimatedRect = Animated.createAnimatedComponent(Rect);
+/** The baseline sits this many font sizes below the line box's centre (half of ascent − descent). */
+const GLYPH_BASELINE = 0.35;
+
 /**
- * The word "Thinking…" (mockup D): grey, with a brighter band sweeping across it.
- * The band is a clipping window moving right while its copy of the word moves
- * left by the same amount, so the bright copy stays on the grey one — two
- * transforms of one native-driver clock. Plain grey under Reduce Motion.
- *
- * The window has hard edges, so the sweep is a visible RECTANGLE behind the word
- * — exactly what docs/feat/mobile-thinking-images.md (Owner Q1 = "B") replaces
- * with a shimmer clipped to the glyphs (S2, after S0's verdict). Until S2 lands
- * this component is the bug, not the fix.
+ * The word "Thinking" (Owner Q1 = "B", docs/feat/mobile-thinking-images.md): grey,
+ * with a soft bright gradient sweeping across it that is CLIPPED to the glyphs —
+ * an svg `ClipPath` made of the word itself, so no box can ever show. The grey
+ * word and the clip are the same svg text, so the two cannot drift apart; the RN
+ * `Text` under them is transparent and only lays out (width, testID, Dynamic
+ * Type). The gradient's `x` is one native-driver clock (S0's verdict). Plain grey
+ * RN text under Reduce Motion or before it is measured.
  */
-function ShimmerWord({
+function ThinkingWord({
   palette,
   word,
   reduceMotion,
@@ -185,9 +206,19 @@ function ShimmerWord({
 }) {
   const look = thinkingLook(reduceMotion);
   const [width, setWidth] = useState(0);
+  const [height, setHeight] = useState(0);
   const clock = useLoop(SHIMMER_MS, !look.animate);
   const sweep = shimmerSweep(width);
-  const textStyle = [typography.step, styles.italic, { color: palette[look.word] }];
+  const { fontScale } = useWindowDimensions();
+  const glyphs = clock !== null && sweep.band > 0 && height > 0;
+  const fontSize = typography.step.fontSize * Math.min(fontScale, DENSE_FONT_SCALE);
+  const glyph = {
+    x: 0,
+    y: height / 2 + fontSize * GLYPH_BASELINE,
+    fontSize,
+    fontWeight: typography.step.fontWeight,
+    fontStyle: "italic" as const,
+  };
   const x =
     clock === null
       ? null
@@ -198,28 +229,48 @@ function ShimmerWord({
         testID={testID}
         numberOfLines={1}
         maxFontSizeMultiplier={DENSE_FONT_SCALE}
-        style={textStyle}
-        onLayout={(e) => setWidth(Math.round(e.nativeEvent.layout.width))}
+        style={[
+          typography.step,
+          styles.italic,
+          { color: glyphs ? "transparent" : palette[look.word] },
+        ]}
+        onLayout={(e) => {
+          setWidth(Math.round(e.nativeEvent.layout.width));
+          setHeight(Math.round(e.nativeEvent.layout.height));
+        }}
       >
         {word}
       </Text>
-      {x === null || sweep.band === 0 ? null : (
-        <Animated.View
-          pointerEvents="none"
-          style={[styles.band, { width: sweep.band, transform: [{ translateX: x }] }]}
-        >
-          <Animated.Text
-            numberOfLines={1}
-            maxFontSizeMultiplier={DENSE_FONT_SCALE}
-            style={[
-              textStyle,
-              { color: palette.label, width },
-              { transform: [{ translateX: Animated.multiply(x, -1) }] },
-            ]}
-          >
+      {!glyphs || x === null ? null : (
+        <Svg pointerEvents="none" width={width} height={height} style={styles.glyphs}>
+          <Defs>
+            <LinearGradient id="thinking-shine" x1="0" y1="0" x2="1" y2="0">
+              {sweep.stops.map((s) => (
+                <Stop
+                  key={s.offset}
+                  offset={s.offset}
+                  stopColor={palette.label}
+                  stopOpacity={s.opacity}
+                />
+              ))}
+            </LinearGradient>
+            <ClipPath id="thinking-glyphs">
+              <SvgText {...glyph}>{word}</SvgText>
+            </ClipPath>
+          </Defs>
+          <SvgText {...glyph} fill={palette[look.word]}>
             {word}
-          </Animated.Text>
-        </Animated.View>
+          </SvgText>
+          <G clipPath="url(#thinking-glyphs)">
+            <AnimatedRect
+              x={x}
+              y={0}
+              width={sweep.band}
+              height={height}
+              fill="url(#thinking-shine)"
+            />
+          </G>
+        </Svg>
       )}
     </View>
   );
@@ -345,7 +396,7 @@ export function StepNode({
           style={({ pressed }) => [styles.line, pressed ? styles.pressed : undefined]}
         >
           {node === "thinking" ? (
-            <ShimmerWord
+            <ThinkingWord
               palette={palette}
               word={name.tool}
               reduceMotion={reduceMotion}
@@ -384,7 +435,12 @@ export function StepNode({
             <Text
               numberOfLines={1}
               maxFontSizeMultiplier={DENSE_FONT_SCALE}
-              style={[typography.caption, { color: trailingRed ? palette.red : palette.sec }]}
+              style={[
+                typography.caption,
+                { color: trailingRed ? palette.red : palette.sec },
+                // The live clock's figures hold one width as they count (S2).
+                node === "thinking" ? styles.tabular : undefined,
+              ]}
             >
               {shown}
             </Text>
@@ -485,6 +541,7 @@ export function ThinkingNode({
 }): JSX.Element {
   const start = useRef(Date.now()).current;
   const ms = useElapsed(start) ?? 0;
+  const label = thinkingLabel(ms);
   const [open, setOpen] = useState(false);
   return (
     <View testID="thinking-footer" style={[styles.footer, up ? undefined : styles.runStart]}>
@@ -492,10 +549,10 @@ export function ThinkingNode({
         palette={palette}
         node="thinking"
         reduceMotion={reduceMotion}
-        name={{ tool: "Thinking…" }}
+        name={{ tool: label.word }}
         nameItalic
         subtitle=""
-        trailing={liveElapsed(ms)}
+        trailing={label.seconds}
         trailingRed={false}
         thread={{ up, down: false }}
         open={open}
@@ -572,13 +629,14 @@ const styles = StyleSheet.create({
   // The live ∴ (B): the glyph's size (`THEREFORE_SIZE`), drawn as three thin dots.
   dotBox: { width: THEREFORE_SIZE, height: THEREFORE_SIZE },
   breathDot: { position: "absolute", width: 3, height: 3, borderRadius: 1.5 },
-  band: { position: "absolute", top: 0, bottom: 0, left: 0, overflow: "hidden" },
+  glyphs: { position: "absolute", top: 0, left: 0 },
   column: { flex: 1, marginLeft: GUTTER },
   line: { minHeight: size.touch, flexDirection: "row", alignItems: "center", gap: 6 },
   pressed: { opacity: 0.6 },
   name: { flexShrink: 0, maxWidth: "45%" },
   server: { fontWeight: "400" },
   italic: { fontStyle: "italic" },
+  tabular: { fontVariant: ["tabular-nums"] },
   subtitle: { flex: 1 },
   thoughtLine: { fontStyle: "italic", fontWeight: "400" },
   body: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 8, paddingBottom: 10, gap: 8 },

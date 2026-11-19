@@ -89,6 +89,8 @@ beforeAll(async () => {
     },
     Animated: {
       View: "Animated.View",
+      createAnimatedComponent: (c: unknown) => c,
+      loop: () => ({ start: () => {}, stop: () => {} }),
       Value: class {
         interpolate() {
           return this;
@@ -112,6 +114,7 @@ beforeAll(async () => {
     default: "Svg",
     Svg: "Svg",
     Circle: "Circle",
+    ClipPath: "ClipPath",
     Defs: "Defs",
     G: "G",
     Line: "Line",

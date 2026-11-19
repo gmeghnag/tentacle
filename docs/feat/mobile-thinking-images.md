@@ -209,6 +209,100 @@ round. What I ran: the two narrow test files above (13 pass / 16 pass),
 pre-existing and unrelated to this round (an Expo type-declaration resolution
 issue in the runner, not a behaviour change).
 
+### S0 (spike) + S2 (ThinkingWord)
+
+*— claude-opus-5-5, 2026-11-19*
+
+**S0 verdict: S0-a PASSES — the svg glyph clip runs on the native driver.** So S2
+is built as svg-native; the owner's static fallback is not needed.
+
+Spike (temporary code, all removed afterwards — `rg "SPIKE|spike-js"
+apps/mobile` is empty, `e2e/run.ts` has no diff): S2's `ThinkingWord` plus, in
+`ThinkingNode`, a red `JS <n>` counter (`setInterval` 100 ms) and a busy loop
+blocking the JS thread for 2.5 s every 4 s. A throwaway flow `90-spike-shimmer`
+(pair → Alpha → send `THINKHOLD spike` → 70 `takeScreenshot`, ~66 ms apart per
+the Maestro log) on `bun run e2e:mobile --ios 26` (iPhone 17 Pro, Release build).
+`analyze.ts` (scratch, a PNG decoder) prints per shot a hash of the counter's
+pixels and the word's darkness in 15 column bins (light mode: the bright layer is
+`palette.label`, black, so "brighter" = darker):
+
+```
+spike-22.png 8e522ba3 35 260 228 212 185 181 225 449 249 361 185 238 296 67 0
+spike-23.png 9b654c4a 35 260 228 212 185 179 197 405 245 401 210 244 296 67 0   ← JS frozen from here
+spike-27.png 9b654c4a 35 260 228 212 185 179 180 292 161 354 283 364 373 75 0
+spike-31.png 9b654c4a 35 260 228 212 185 179 180 292 149 262 184 311 465 116 0   (band leaves right)
+spike-36.png 9b654c4a 35 260 228 212 185 179 180 292 149 262 172 238 296 68 0    (rest profile)
+spike-41.png 9b654c4a 52 336 231 212 185 179 180 292 149 262 172 238 296 67 0    (re-enters left)
+spike-48.png 9b654c4a 36 299 343 348 262 212 181 292 149 262 172 238 296 67 0
+spike-55.png 9b654c4a 35 260 228 212 192 223 273 478 210 291 172 238 296 67 0
+spike-62.png 9b654c4a 35 260 228 212 185 179 180 292 157 344 278 374 385 77 0
+spike-63.png bd3b17d5 35 260 228 212 185 179 180 292 149 304 252 393 429 88 0   ← JS runs again
+```
+
+40 shots (23–62, ≈ 2.6 s) carry one identical counter hash — the JS thread is
+blocked — while the band crosses the whole word, leaves, re-enters and crosses
+again (a full 2.2 s loop and more). No error, no frozen sweep. The visual check
+(`spike-45.png`): only the glyphs "Th" are darker; no box shows. A first run
+with 12 shots (0.8 s) fell outside a block window (the counter kept moving) and
+was not decisive, hence the 70-shot run.
+
+**S2, as built** (TDD; narrow tests only):
+- `thinking-motion.ts:78` `shimmerSweep(width)` also returns `stops` (0 → 1 → 0
+  opacity at offsets 0 / 0.5 / 1; `[]` for width 0). The doc comments now
+  describe the built code (no more "no caller exists yet").
+- `ui/StepNode.tsx:183-282` `ThinkingWord` replaces `ShimmerWord`: an `Svg`
+  over the RN `Text`, with a `ClipPath id="thinking-glyphs"` made of an `SvgText`
+  of the word, the grey word drawn by the SAME `SvgText` props (`glyph`, so the
+  base and the clip cannot drift apart), and `<G clipPath>` around an
+  `AnimatedRect` (`Animated.createAnimatedComponent(Rect)`) whose `x` is the
+  existing native-driver `useLoop(SHIMMER_MS)` clock, filled with the
+  `LinearGradient` from `sweep.stops` in `palette.label`. The RN `Text` stays
+  for layout, `testID` and Dynamic Type, and turns `transparent` only while the
+  svg draws the word; under Reduce Motion or before measurement it is the plain
+  `sec` word. The svg font size follows `fontScale` capped at
+  `DENSE_FONT_SCALE`. The `band` style (`overflow: "hidden"`) and the
+  `Animated.multiply` counter-transform are deleted.
+- `ThinkingNode` (`:544`): `thinkingLabel(ms)` → name `Thinking` (no "…"),
+  `trailing` = `thinkingElapsed` seconds; the trailing `Text` gets
+  `styles.tabular` (`fontVariant: ["tabular-nums"]`, `:442,639`) for
+  `node === "thinking"` (so `Compacting…`'s clock is tabular too). The 1 Hz clock,
+  the breathing ∴, `thinking-footer` / `thinking-therefore` / `labelTestID` are
+  unchanged.
+
+**Drift from the Implementation (and why):**
+1. The baseline of the svg text is approximated (`GLYPH_BASELINE = 0.35` em
+   below the line box's centre), not read from `onTextLayout`. Since the svg
+   draws the grey word itself (the RN text is transparent), a 1 pt error moves
+   the whole word, never a bright copy off the grey one. Simpler and
+   self-aligned by construction.
+2. The plan's "component test (`tool-rows-wiring` / `session-screen-compose`
+   harness pattern)" is a SOURCE pin, like the rest of `tool-rows-wiring.test.ts`
+   (StepNode imports RN + svg and cannot render under bun). The old test that
+   pinned the rectangle (Fix round 1's "the pair flips when S2 lands") is
+   flipped into "the shimmer is CLIPPED to the glyphs" + "the live node says
+   'Thinking' and its seconds in tabular figures". The native-driver test also
+   forbids animating any svg `width/height/offset/stopOpacity` from the clock.
+3. The changelog fragment covers S2 only; S3/S4 add the photo half to the same
+   bullet when they land.
+
+**Red → green and mutations** (`bun test thinking-motion.test.ts
+tool-rows-wiring.test.ts`):
+- Red first: the new `stops` test failed on the assertion (`Expected: true
+  Received: false`, `Array.isArray(stops)`), 14 pass / 1 fail; green after.
+- Mutations, applied together, reverted (`git diff` back to the as-built):
+  M1 `<G clipPath="url(#thinking-glyphs)">` → `<G>` (the box returns) → "the
+  shimmer is CLIPPED to the glyphs" fails; M2 first stop opacity 0 → 1 (a hard
+  left edge) → "the band is a SOFT gradient" fails; M3 `trailing={label.seconds}`
+  → `trailing={liveElapsed(ms)}` → "the live node says 'Thinking'…" fails.
+  Result: 30 pass / 3 fail; after revert 49 pass / 0 fail (plus
+  `tool-step-view.test.ts`).
+
+**Checked here:** `thinking-motion` (15), `tool-rows-wiring` (18),
+`tool-step-view` → 49 pass / 0 fail; `tsc -p apps/mobile` clean; `bunx biome
+check` on the 4 touched files clean. Full gate: left to the orchestrator's script.
+**Not done here:** the light/dark/Reduce-Motion screenshot set of §Tests (only
+the light-mode spike shots exist), and S1/S3/S4 were out of this run's scope.
+
 
 ## Review
 
@@ -248,3 +342,29 @@ issue in the runner, not a behaviour change).
   1. The export-list regex (`thinking-motion.test.ts`) does not see `export class`, `export let`, `export enum`, `export { … }` or `export default`.
   2. Fix round 1 writes `shimmerElapsed` where it means `thinkingElapsed`, and "The web's pin" is unclear.
   3. Commit `72a0caed` is labelled "(deepseek)", but its doc section is signed `claude-opus-5-5`. One of the two is wrong, and §10 attribution depends on it.
+
+### Round 3 — S0 (spike) + S2 (ThinkingWord)
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; **same model** as the S0/S2 section's signature, so shared blind spots may survive both passes)
+
+**Verdict: PASS** (APPROVE-WITH-NITS for S0 + S2; S3/S4 still unbuilt). No HIGH/MEDIUM findings.
+
+**S0 verdict (pasted from Execution):** "S0-a PASSES — the svg glyph clip runs on the native driver." Evidence: 40 consecutive frames (~2.6 s) with one frozen JS-counter hash while the word's per-column darkness profile moves across, out and back in. Not re-run here (no simulator in this pass). The numbers are consistent with a native-driven `x` on `AnimatedRect`. S2 is built svg-native, as the owner's Q1 answer requires. No masked-view and no JS-driven gradient: `package.json` is untouched.
+
+**Gate (touched files):** `bun test` over thinking-motion, tool-rows-wiring, chart-labels-render, chart-thumbnail-render, chart-view, notice-row and step-thought-marker → **84 pass / 0 fail**. step-thought-marker runs here, despite Fix round 1's note. `bun run lint`: clean (2114 files). `bun run typecheck`: clean (root + mobile + relay). The full `bun test` was not run in this pass.
+
+**Mutations** (applied together, then restored from a scratch copy; `git status` clean afterwards): M1 `<G clipPath=…>` → `<G>`; M2 `width={sweep.band}` → `width={x}` (animating a JS-thread svg prop); M3 first stop opacity 0 → 1. Result: **30 pass / 3 fail**. Each mutation fails its own test: "CLIPPED to the glyphs", "native driver", "SOFT gradient".
+
+**Attacks tried:**
+1. *Font drift between the transparent RN `Text` (layout) and the svg glyphs.* `typography.step` has no `fontFamily`. react-native-svg resolves an empty family through `RCTFont updateFont:nil` (`RNSVGGlyphContext.mm:117-121`), so it uses the same system font as RN. Weight, italic and scale cap match (`Math.min(fontScale, DENSE_FONT_SCALE)` vs `maxFontSizeMultiplier`). Holds.
+2. *Box reappearing.* No `overflow: "hidden"` is left in StepNode. The only bright paint is the gradient inside `<G clipPath>`, which is pinned by a test and by M1. Both gradient ends are opacity 0, and the band starts and ends wholly off the word (tests). Holds.
+3. *JS-thread work per frame (the load-bearing assumption).* The only animated prop is `x`, from the `useNativeDriver: true` loop. Width, height and stops are static, and the test forbids clock-driven `width/height/offset/stopOpacity` (M2). Holds.
+4. *Reduce Motion / unmeasured / toggled mid-turn.* `glyphs` requires `clock !== null && band > 0 && height > 0`. Otherwise the svg unmounts and the RN text gets its `sec` colour back, so no transparent-text state is left without the svg. Holds.
+5. *Duplicate svg ids* (`thinking-glyphs`, `thinking-shine`) across mounted footers. On iOS, defs are scoped per `Svg` root. Holds.
+6. *§7 invariants.* Only presentation is in the component. The decisions (stops, band, label, elapsed) live in the pure `thinking-motion.ts`, which is tested. No protocol, persistence or terminal path is touched. Holds.
+
+**Nits (not blocking):**
+1. `GLYPH_BASELINE = 0.35` em is an approximation. A baseline error moves the svg word as a whole relative to the RN layout box, never relative to its own shine. Only the light-mode spike shots show it. The dark and Reduce Motion screenshots from §Tests are still owed.
+2. Both branch commits are labelled "(deepseek)", but the S0/S2 Execution is signed `claude-opus-5-5`. This is the same attribution mismatch as round 2's nit 3.
+
+**How the executor behaved:** the spike was done properly. It removed its temporary code, re-ran with a longer capture after an inconclusive first run, and recorded the drift (baseline approximation, source-pin test) honestly. Its mutation claims reproduce exactly (30/3).

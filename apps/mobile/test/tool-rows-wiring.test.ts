@@ -142,20 +142,44 @@ describe("StepNode replaces ToolRow", () => {
     expect(node).toMatch(/case "thinking":\s*return <BreathingTherefore /);
     expect(node).toContain("clock.interpolate(breatheCurve(i))");
     // D: the footer's word is the shimmer, fed by the pure sweep.
-    expect(node).toMatch(/node === "thinking" \? \(\s*<ShimmerWord/);
+    expect(node).toMatch(/node === "thinking" \? \(\s*<ThinkingWord/);
     expect(node).toContain("shimmerSweep(width)");
     // Reduce Motion stops both clocks (useLoop returns null when still).
     expect(node).toContain("useLoop(BREATHE_MS, !look.animate)");
     expect(node).toContain("useLoop(SHIMMER_MS, !look.animate)");
-    // ...and, while it is still the `overflow: "hidden"` window of
-    // docs/feat/mobile-thinking-images.md, it says so instead of describing the
-    // glyph-clipped sweep S2 will build (Review round 1, finding 2: the comment
-    // promised code that did not exist). The pair flips when S2 lands.
-    expect(node).toMatch(/band: \{ position: "absolute",[\s\S]{0,80}overflow: "hidden"/);
-    const fn = node.indexOf("function ShimmerWord(");
-    const sweep = node.slice(node.lastIndexOf("/**", fn), node.indexOf("function Node(", fn));
-    expect(sweep).toMatch(/is a visible RECTANGLE behind the word/);
-    expect(sweep).not.toMatch(/CLIPPED to the glyphs|there is no window to translate/);
+  });
+
+  test("the shimmer is CLIPPED to the glyphs: no overflow window, no counter-transform (docs/feat/mobile-thinking-images.md S2)", () => {
+    const node = read("ui", "StepNode.tsx");
+    const word = fnBody(node, "ThinkingWord");
+    // The rectangle is gone: no clipping window, no copy of the word moved back.
+    expect(node).not.toMatch(/overflow: "hidden"/);
+    expect(node).not.toContain("<ShimmerWord");
+    expect(word).not.toContain("Animated.multiply");
+    expect(word).not.toContain("<Animated.View");
+    // The bright layer is the gradient, inside a clip made of the word itself,
+    // and the grey word is the SAME svg text (they cannot drift apart).
+    expect(word).toMatch(
+      /<ClipPath id="thinking-glyphs">\s*<SvgText \{\.\.\.glyph\}>\{word\}<\/SvgText>/,
+    );
+    expect(word).toMatch(/<SvgText \{\.\.\.glyph\} fill=\{palette\[look\.word\]\}>/);
+    expect(word).toMatch(
+      /<G clipPath="url\(#thinking-glyphs\)">\s*<AnimatedRect\s+x=\{x\}[\s\S]{0,120}fill="url\(#thinking-shine\)"/,
+    );
+    expect(word).toContain("sweep.stops.map(");
+    // The RN text only lays out while the svg draws the word.
+    expect(word).toContain('color: glyphs ? "transparent" : palette[look.word]');
+  });
+
+  test("the live node says “Thinking” and its seconds in tabular figures (S2)", () => {
+    const node = read("ui", "StepNode.tsx");
+    const live = fnBody(node, "ThinkingNode");
+    expect(live).toContain("thinkingLabel(ms)");
+    expect(live).toContain("name={{ tool: label.word }}");
+    expect(live).toContain("trailing={label.seconds}");
+    expect(live).not.toContain("Thinking…");
+    expect(node).toMatch(/node === "thinking" \? styles\.tabular : undefined/);
+    expect(node).toContain('tabular: { fontVariant: ["tabular-nums"] }');
   });
 
   test("the Thinking motion runs on the native driver, never a JS timer per frame", () => {
@@ -164,7 +188,9 @@ describe("StepNode replaces ToolRow", () => {
     expect(loop).toContain("useNativeDriver: true");
     const motion = node.slice(node.indexOf("function useLoop("), node.indexOf("function Node("));
     expect(motion).not.toMatch(/setInterval|requestAnimationFrame|setTimeout/);
-    // Only transform + opacity are animated (both native-driver properties).
+    // Only transform + opacity (views) and the svg gradient's `x` (S0's verdict)
+    // are animated — all on the native driver.
     expect(motion).not.toMatch(/(left|top|width|color): (clock|x)\b/);
+    expect(motion).not.toMatch(/(width|height|offset|stopOpacity)=\{(clock|x)\}/);
   });
 });

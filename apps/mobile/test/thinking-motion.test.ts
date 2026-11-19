@@ -89,6 +89,25 @@ describe("the word shimmers (D)", () => {
   test("an unmeasured word (width 0) sweeps nothing", () => {
     expect(shimmerSweep(0).band).toBe(0);
   });
+
+  test("the band is a SOFT gradient: transparent at both edges, full at the centre — no hard edge to show (mutation: edge opacity 1 → red)", () => {
+    const { stops, band } = shimmerSweep(120);
+    expect(band).toBe(48); // ≈ 40 % of the word
+    expect(Array.isArray(stops)).toBe(true);
+    expect(stops.map((s) => s.offset)).toEqual([0, 0.5, 1]);
+    expect(stops[0]?.opacity).toBe(0);
+    expect(stops[stops.length - 1]?.opacity).toBe(0);
+    expect(Math.max(...stops.map((s) => s.opacity))).toBe(1);
+    expect(stops[1]?.opacity).toBe(1);
+  });
+
+  test("at both ends of the loop the band lies wholly off the glyphs (no bright sliver at a loop restart)", () => {
+    for (const width of [1, 37, 120, 400]) {
+      const s = shimmerSweep(width);
+      expect(s.from + s.band).toBeLessThanOrEqual(0);
+      expect(s.to).toBeGreaterThanOrEqual(width);
+    }
+  });
 });
 
 /**

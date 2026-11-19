@@ -2,7 +2,7 @@
  * The live "Thinking…" node's motion (docs/fix/mobile-qa-sweep.md, addendum
  * 09:36 — mockup B + D, `.tentacle/mockups/mobile-thinking-anim/`): the ∴'s
  * three dots breathe one after another (top → right → left, ~1.5 s, accent) and
- * a shimmer sweeps the word "Thinking…" (~2.2 s). Reduce Motion: a static ∴ in
+ * a shimmer clipped to its glyphs sweeps the word "Thinking" (~2.2 s). Reduce Motion: a static ∴ in
  * accent and a plain grey word.
  *
  * Pure, React-free (AGENTS §7): the curves are numbers `ui/StepNode.tsx` hands
@@ -60,32 +60,36 @@ export function breatheCurve(dot: number): Curve {
   return { inputRange, outputRange: inputRange.map((x) => breath(wrap(x - delay))) };
 }
 
+/** The gradient across the band: transparent → full → transparent (no hard edge). */
+const SHINE_STOPS: readonly { readonly offset: number; readonly opacity: number }[] = [
+  { offset: 0, opacity: 0 },
+  { offset: 0.5, opacity: 1 },
+  { offset: 1, opacity: 0 },
+];
+
 /**
- * The shimmer's bright band over a word `width` pt wide: it starts wholly off
- * the word's left edge and ends wholly off its right one. Width 0 (not measured
- * yet) sweeps nothing.
- *
- * Still the `overflow: "hidden"` window of `ui/StepNode.tsx` today — which is
- * the rectangle docs/feat/mobile-thinking-images.md (Owner Q1 = "B") removes.
- * S2 replaces this with the glyph-clipped sweep; until S0's verdict and S2 land,
- * this comment describes the code as it IS, not as the plan wants it.
+ * The shimmer over a word `width` pt wide (docs/feat/mobile-thinking-images.md
+ * S2): a band ≈ 40 % of the word whose `x` runs from wholly off the word's left
+ * edge to wholly off its right one, filled with a soft gradient (`stops`, as
+ * `offset` 0..1 across the band and `opacity` of the bright colour).
+ * `ui/StepNode.tsx` clips it to the word's glyphs, so only the letters brighten.
+ * Width 0 (not measured yet) sweeps nothing.
  */
 export function shimmerSweep(width: number): {
   readonly band: number;
   readonly from: number;
   readonly to: number;
+  readonly stops: readonly { readonly offset: number; readonly opacity: number }[];
 } {
   const band = width > 0 ? Math.round(width * 0.4) : 0;
-  return { band, from: -band, to: width };
+  return { band, from: -band, to: width, stops: band > 0 ? SHINE_STOPS : [] };
 }
 
 /**
  * The elapsed clock beside the word, written with a STEADY width so the row does
  * not jump as it counts: `0 s` … `59 s`, then `1 min 05 s` (the seconds
- * zero-padded), then `1 h 02 min` from the first hour. The consumer that draws
- * it in `palette.sec` and tabular figures is S2 of
- * docs/feat/mobile-thinking-images.md — not built yet, so the text here is what
- * the row passes to it, and nothing renders it today.
+ * zero-padded), then `1 h 02 min` from the first hour. `ui/StepNode.tsx`
+ * (`ThinkingNode`) draws it in `palette.sec` with tabular figures.
  *
  * `liveElapsed` (`tool-summary.ts`) stays as it is for a tool row's duration —
  * that one is NOT tabular, does not pad, and reads `120 min` after two hours;
@@ -106,8 +110,8 @@ export function thinkingElapsed(ms: number): string {
 
 /**
  * What the live row says: the word (no ellipsis — the clock is what says "still
- * going") and the elapsed time to set beside it. S2 wires both into
- * `ui/StepNode.tsx`; no caller exists yet.
+ * going") and the elapsed time to set beside it; `ThinkingNode`
+ * (`ui/StepNode.tsx`) draws both.
  */
 export function thinkingLabel(ms: number): {
   readonly word: "Thinking";

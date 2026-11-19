@@ -60,6 +60,7 @@ beforeAll(async () => {
     default: "Svg",
     Svg: "Svg",
     Circle: "Circle",
+    ClipPath: "ClipPath",
     G: "G",
     Line: "Line",
     Path: "Path",

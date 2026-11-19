@@ -1,0 +1,1 @@
+- **Mobile: the "Thinking" shimmer stays inside the letters and shows the seconds.** The live row's bright sweep is clipped to the word's glyphs (no rectangle behind it) and runs on the native driver, and the elapsed time sits beside it in steady-width figures ("Thinking 12 s"); Reduce Motion shows a still grey word.
