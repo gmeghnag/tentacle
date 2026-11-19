@@ -377,3 +377,28 @@ Executor behaviour: measured before diagnosing, showed red→green at the
 boundaries, and reported its drift from the brief honestly. Its mutation claim
 ("`speak` dropped from `sameCellData`") covered the pure module, not the
 component wiring that finding 1 shows unpinned.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-19* (fresh context, same model family as the round-1 executor; the round-2 fix is deepseek's)
+
+**Verdict: APPROVE.** Finding 1 is closed. No regression in `git diff HEAD~1`.
+
+- **Finding 1, closed.** The comparator is now the pure
+  `sameCellProps` (`transcript-cell.ts:99-104`), wired as
+  `memo(TranscriptCellView, sameCellProps)` (`TranscriptCell.tsx:82`). Two
+  mutations, each reverted with `git status` clean afterwards:
+  - **A:** `sameCellProps` returns `a.actions === b.actions` only. Caught by 2
+    tests: the behavioural "a streamed delta redraws the cell" test and the
+    source pin.
+  - **B:** the component is wired with an inline lambda
+    `a.actions === b.actions || sameCellProps(a, b)`, a lambda that never
+    redraws. Caught by the source pin `fan-jank-wiring` "memo comparator is the
+    pure one".
+- **The cosmetic note is fixed.** The `session-screen-controller.ts` module
+  header is back at the top of the file. The change only moves a comment
+  (diff: 15 lines out, the same 15 lines in).
+- **Gate:** `bun run lint` clean (2113 files), and `bun run typecheck` clean
+  (root, mobile, relay). The touched test files (`transcript-cell`,
+  `fan-jank-wiring`, `session-screen-stream-render`, `render-coalesce`) give 25
+  pass, 0 fail. The full `bun test` was not re-run.
