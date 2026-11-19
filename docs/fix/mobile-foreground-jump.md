@@ -283,3 +283,17 @@ fail. `bunx biome check --write` on the touched test file: clean.
 
 **Gate:** run by the orchestrator's script after this round (not run here, per
 the brief).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-19* (fresh context, same model as the round-1 reviewer)
+
+**Verdict: APPROVE.** Finding 1 is resolved. The new test "after a mismatch no later row
+reuses an old key, even where the kinds line up" passes on the code and fails
+under the round-1 mutation (dropping `!same ||` at `transcript.ts:426`: 7 pass ·
+1 fail, that test). After the revert, `git status` is clean. Since round 1,
+`apps/` changed only in the test file (`git diff 1ba98a21 HEAD -- apps`), and
+`transcript.ts` is the same, so there is no new code to regress. The test checks
+that both kind sequences really line up (it does not pass vacuously) and that the keys
+are unique. Gate: the touched files pass (49 pass · 0 fail); `bun run lint` is
+clean (2104 files); `bun run typecheck` is clean. Full `bun test` was not re-run.
