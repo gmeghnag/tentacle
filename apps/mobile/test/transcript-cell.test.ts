@@ -4,7 +4,13 @@
  * redraw; the per-pass rebuilt cell/look objects compare by content.
  */
 import { describe, expect, test } from "bun:test";
-import { type CellData, sameCellData, sameLook, sameStepCell } from "../src/transcript-cell.ts";
+import {
+  type CellData,
+  sameCellData,
+  sameCellProps,
+  sameLook,
+  sameStepCell,
+} from "../src/transcript-cell.ts";
 
 const row = { kind: "assistant", key: "a1", text: "hi" };
 const palette = { page: "#fff" };
@@ -29,6 +35,28 @@ function data(over: Partial<CellData> = {}): CellData {
     ...over,
   };
 }
+
+describe("sameCellProps (the component's memo comparator)", () => {
+  const actions = { current: {} };
+  const props = (over: Partial<CellData> = {}, handle: unknown = actions) => ({
+    ...data(over),
+    actions: handle,
+  });
+
+  test("a stable handle and the same data skips the redraw", () => {
+    expect(sameCellProps(props(), props())).toBe(true);
+  });
+
+  test("a streamed delta redraws the cell even though the handle is unchanged", () => {
+    // The handle is ONE ref for the screen's life: if it were allowed to decide
+    // alone, this row would freeze on its first delta (Review round 1, MEDIUM 1).
+    expect(sameCellProps(props(), props({ row: { ...row, text: "hi there" } }))).toBe(false);
+  });
+
+  test("a fresh handle redraws even when the data is identical", () => {
+    expect(sameCellProps(props(), props({}, { current: {} }))).toBe(false);
+  });
+});
 
 describe("sameCellData", () => {
   test("a fresh layout pass (new cell/look objects, same content) skips", () => {

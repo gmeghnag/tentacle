@@ -1,3 +1,18 @@
+/**
+ * The session screen's wiring (docs/feat/mobile-session-view.md 12c): open/
+ * attach, the transcript feed, the composer's taps, the permission sheet, and
+ * the thumbnails window — pure and injected, so `SessionScreen.tsx` maps a state
+ * to elements and owns nothing but looks (AGENTS §7).
+ *
+ * The invariants it keeps, all of them the plan's:
+ * - **ONE broker.** The sheet's requester is set on the client's own broker on
+ *   open and `reset()` on leave — never a second `PermissionBroker` (AGENTS §7
+ *   "single broker"): with no requester set, a daemon-side ask WAITS.
+ * - **Leaving detaches.** `leave` is `RemoteSession.detach` (via the controller),
+ *   never `close()`: the session keeps running for every device (decision 4).
+ * - **Nothing is lost.** A send the daemon refused before the ack puts its text
+ *   back (F13); a link that drops keeps the rows and the draft (F8, F12).
+ */
 import type { RemoteSession, SessionEvent } from "@tentacle/client";
 import type { PermissionBroker, PermissionRequester } from "@tentacle/core";
 import type {
@@ -61,21 +76,6 @@ import {
   createPermissionSheet,
 } from "./permission-sheet.ts";
 import type { QueueTrace } from "./queue-trace.ts";
-/**
- * The session screen's wiring (docs/feat/mobile-session-view.md 12c): open/
- * attach, the transcript feed, the composer's taps, the permission sheet, and
- * the thumbnails window — pure and injected, so `SessionScreen.tsx` maps a state
- * to elements and owns nothing but looks (AGENTS §7).
- *
- * The invariants it keeps, all of them the plan's:
- * - **ONE broker.** The sheet's requester is set on the client's own broker on
- *   open and `reset()` on leave — never a second `PermissionBroker` (AGENTS §7
- *   "single broker"): with no requester set, a daemon-side ask WAITS.
- * - **Leaving detaches.** `leave` is `RemoteSession.detach` (via the controller),
- *   never `close()`: the session keeps running for every device (decision 4).
- * - **Nothing is lost.** A send the daemon refused before the ack puts its text
- *   back (F13); a link that drops keeps the rows and the draft (F8, F12).
- */
 import { createRenderCoalescer } from "./render-coalesce.ts";
 import { type CommandRow, clearConfirm, commandRows } from "./session-commands.ts";
 import type { SessionController, SessionHandle, SessionOpenFailure } from "./session-controller.ts";

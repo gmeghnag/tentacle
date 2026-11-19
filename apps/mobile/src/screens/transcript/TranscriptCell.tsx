@@ -16,7 +16,7 @@ import { rowErrorFields } from "../../row-guard.ts";
 import { rowTimeLabel } from "../../row-swipe.ts";
 import type { Palette } from "../../theme.ts";
 import type { ThumbnailState } from "../../thumbnails.ts";
-import { type CellData, sameCellData } from "../../transcript-cell.ts";
+import { type CellData, sameCellProps } from "../../transcript-cell.ts";
 import type { Row } from "../../transcript-rows.ts";
 import { RowGuard } from "./RowGuard.tsx";
 import { SwipeTime } from "./SwipeTime.tsx";
@@ -79,7 +79,4 @@ function TranscriptCellView(props: TranscriptCellProps): JSX.Element {
   );
 }
 
-export const TranscriptCell = memo(
-  TranscriptCellView,
-  (a, b) => a.actions === b.actions && sameCellData(a, b),
-);
+export const TranscriptCell = memo(TranscriptCellView, sameCellProps);

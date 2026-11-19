@@ -263,6 +263,68 @@ clean · `bun run lint` clean (2113 files) · `bun test`: 15537 pass, 5 skip, 0 
    - `ev=jank` lines mean the JS thread missed frames in that second, with
      `renders`/`renderMs` saying how much of it was the session screen.
 
+### Fix round 1
+
+*— claude-sonnet-4-5-20250929, 2026-11-19 (round-1 executor)*
+
+**MEDIUM 1 — the cell memo's comparator is now decided by the pure module,
+and both halves are tested behaviourally. FIXED.**
+
+The finding was that `TranscriptCell.tsx`'s inline
+`(a, b) => a.actions === b.actions && sameCellData(a, b)` lost `sameCellData`
+under mutation and no test noticed: `transcript-cell.test.ts` tested only the
+pure predicate, `fan-jank-wiring.test.ts` only the screen side.
+
+Two changes, because a source pin alone would pin text, not behaviour, and it
+would leave the very decision the review worried about buried in the `.tsx`
+(AGENTS §7: computation you'd want to test → pure module):
+1. The comparator moved into `transcript-cell.ts` as
+   `sameCellProps(a, b) = a.actions === b.actions && sameCellData(a, b)`;
+   `TranscriptCell.tsx` is now `memo(TranscriptCellView, sameCellProps)` and
+   imports nothing else from the module for it.
+2. `transcript-cell.test.ts` gained a `sameCellProps` block (3 tests) driven by
+   the same `data()` fixture: a stable handle + same data skips; **a streamed
+   delta (a new `row`) redraws even though the handle is unchanged**; a fresh
+   handle redraws. The middle one is the exact failure the review described (a
+   streamed row freezing on its first delta).
+3. `fan-jank-wiring.test.ts` pins the wiring — the component uses that ONE
+   pure comparator, and that comparator asks `sameCellData` — so neither half
+   can be dropped in silence.
+
+Red before green: with `sameCellProps` reduced to `a.actions === b.actions`
+(the review's mutation), `transcript-cell.test.ts` failed on exactly the
+streamed-delta assertion: `Expected: false, Received: true`, 5 pass / 1 fail.
+With the component itself mutated back to the inline single-field lambda,
+`fan-jank-wiring.test.ts` failed on the comparator pin (7 pass / 1 fail). A
+third variant, dropping the handle half instead (`return sameCellData(a, b);`),
+failed that same pin. All reverted; the suite is green again.
+
+Second mutation, non-vacuity of the coalescer's window (mine, not a finding):
+`STREAM_RENDER_MS` 100 → 1000 was caught by `render-coalesce.test.ts`
+(`Expected: >= 10, Received: 2`). Reverted.
+
+**Cosmetic note in the review. FIXED.** `session-screen-controller.ts`'s module
+header is back at the top of the file, above the imports; `createRenderCoalescer`
+now sits in its alphabetical slot in the import list. No code moved.
+
+Drift from the Implementation (and why): Design 3 said the cell is memoized
+"with `sameCellData` (pure, `transcript-cell.ts`)". Taking that literally left
+the comparator — the half that actually gates the redraw — in the component,
+which is the gap the review found. The comparator is now that pure module's too.
+Nothing else in Design 1–4 changed.
+
+Harness: the reviewer's `transcript-cell.test.ts` "both halves" claim is now
+literal — `sameCellData` (4 tests) and `sameCellProps` (3 tests) in one file.
+
+Gate: the orchestrator's script runs `bun run check` after this round. Run here
+for my own slice: `bunx tsc -p apps/mobile --noEmit` clean · `bunx biome check`
+clean on the 5 changed files · the tests that touch or cover this change: 611
+pass, 0 fail across 49 mobile files (every `transcript*`, `session-screen*`,
+`*wiring` source pin, plus `render-coalesce`, `hub-fan`, `perf-trace`).
+
+Unverified here (as requested): the full `bun test`, the root `tsc --noEmit`
+and the whole-repo lint — the script's gate covers those.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-19* (fresh context, SAME model family as the executor: shared blind spots possible)

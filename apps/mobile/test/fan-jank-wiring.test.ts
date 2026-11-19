@@ -19,6 +19,8 @@ const code = (...p: string[]) =>
 const BUTTON = code("src", "ui", "FloatingActivity.tsx");
 const FAN = code("src", "ui", "HubFan.tsx");
 const SCREEN = code("src", "screens", "SessionScreen.tsx");
+const CELL_MODULE = code("src", "transcript-cell.ts");
+const CELL_TSX = code("src", "screens", "transcript", "TranscriptCell.tsx");
 const CONTROLLER = code("src", "session-screen-controller.ts");
 const FEED = code("src", "session-feed.ts");
 const APP = code("App.tsx");
@@ -58,6 +60,20 @@ describe("transcript cells are memoized", () => {
     expect(SCREEN).toMatch(/<TranscriptCell[\s\S]*?actions=\{cellActions\}/);
     expect(SCREEN).toMatch(/const cellActions = useRef<CellActions>/);
     expect(SCREEN).not.toMatch(/<TranscriptRow\b/);
+  });
+
+  test("the cell's memo comparator is the pure one, not an inline lambda", () => {
+    // `actions` is ONE ref for the screen's whole life, so a comparator that only
+    // compares it never redraws a cell: a streamed row would freeze on its first
+    // delta. The skip must also ask `sameCellData` — held behaviourally in
+    // `transcript-cell.test.ts`; here: the component uses that ONE function
+    // (Review round 1, MEDIUM 1).
+    expect(CELL_TSX).toMatch(
+      /export const TranscriptCell = memo\(TranscriptCellView, sameCellProps\)/,
+    );
+    expect(CELL_MODULE).toMatch(
+      /export function sameCellProps\([\s\S]*?a\.actions === b\.actions && sameCellData\(a, b\)/,
+    );
   });
 });
 

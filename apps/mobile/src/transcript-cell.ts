@@ -88,3 +88,17 @@ export function sameCellData(a: CellData, b: CellData): boolean {
     sameLook(a.look, b.look)
   );
 }
+
+/**
+ * `TranscriptCell`'s `memo` comparator: the ONE handle it receives plus the data
+ * it draws. `actions` is a ref the screen keeps for its whole life, so it never
+ * decides anything — which is why the data comparison must not be dropped from
+ * here (a cell that only compared the handle would freeze on a streamed row's
+ * first delta; `transcript-cell.test.ts` holds both halves).
+ */
+export function sameCellProps(
+  a: CellData & { readonly actions: unknown },
+  b: CellData & { readonly actions: unknown },
+): boolean {
+  return a.actions === b.actions && sameCellData(a, b);
+}
