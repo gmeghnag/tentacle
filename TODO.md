@@ -1274,6 +1274,21 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 
 ## Roadmap (ordered)
 
+- [ ] **feat/tui-btw** (owner 2026-11-20: "magari domani ci lavoriamo"; after the
+  stabilization week unless the owner makes an exception) — `/btw <question>` in
+  the TUI: a side question answered from the current conversation WHILE a turn
+  runs, never added to the session history. Shape (to verify in the plan): new
+  request method `session/side_question` (added method: no `PROTOCOL_VERSION`
+  bump) → daemon takes a snapshot of the session messages, ONE model call with
+  no tools, streams the answer back (pods: through `ProxyModelProvider`, key
+  stays on the laptop); TUI slash command + a dismissable answer panel, its
+  state in a pure module. Concurrent with `session/prompt` (peer dispatch is
+  concurrent by design). Not persisted. Phone parity (mobile `/btw`) = a
+  separate sub-task. Was parked by option A in `docs/eval/subagent-live.md:76`
+  — owner wants it anyway. Estimate ~half a day (Opus plan → DeepSeek exec →
+  different-family review). Type: feat · Size: M · Blast: cross-module ·
+  Suited: DeepSeek exec, Opus plan + review.
+
 > **Owner queue (2026-10-25, updated 2026-10-26), next code tasks in this order:**
 > 1. ~~task 7 `connect-sessions`~~ DONE, merged `6319beb` (2026-10-26; `docs/feat/connect-sessions.md`);
 > 2. ~~`context-awareness`~~ DONE, merged `867a4d0` (2026-10-26; `docs/feat/context-awareness.md`; record v7);
