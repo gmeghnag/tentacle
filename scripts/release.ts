@@ -88,10 +88,14 @@ export async function runRelease(argv: readonly string[], deps: ReleaseDeps): Pr
     }
 
     // 2) The version: every package.json agrees on the current one.
-    const files = [
-      "package.json",
-      ...[...new Bun.Glob("packages/*/package.json").scanSync({ cwd: root })].sort(),
-    ];
+    // An app (apps/*) is released with the rest only when it carries a version
+    // (apps/relay does; apps/mobile, versioned by Expo, does not): bun.lock lists
+    // a workspace version for exactly those.
+    const scan = (glob: string) => [...new Bun.Glob(glob).scanSync({ cwd: root })].sort();
+    const apps = scan("apps/*/package.json").filter(
+      (f) => versionOf(readFileSync(join(root, f), "utf8")) !== undefined,
+    );
+    const files = ["package.json", ...scan("packages/*/package.json"), ...apps];
     const texts = new Map(files.map((f) => [f, readFileSync(join(root, f), "utf8")]));
     const current = versionOf(texts.get("packages/cli/package.json") ?? "");
     if (!current) {

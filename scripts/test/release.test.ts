@@ -110,7 +110,8 @@ describe("file rewrites", () => {
 const PKG = (name: string, version: string) =>
   `{\n  "name": "${name}",\n  "version": "${version}",\n  "private": true,\n  "license": "MIT"\n}\n`;
 const LOCK = (version: string) =>
-  `{\n  "lockfileVersion": 1,\n  "workspaces": {\n    "": {\n      "name": "root",\n    },\n    "packages/a": {\n      "name": "@x/a",\n      "version": "${version}",\n    },\n    "packages/cli": {\n      "name": "@x/cli",\n      "version": "${version}",\n    },\n  },\n  "packages": {}\n}\n`;
+  `{\n  "lockfileVersion": 1,\n  "workspaces": {\n    "": {\n      "name": "root",\n    },\n    "apps/r": {\n      "name": "@x/r",\n      "version": "${version}",\n    },\n    "packages/a": {\n      "name": "@x/a",\n      "version": "${version}",\n    },\n    "packages/cli": {\n      "name": "@x/cli",\n      "version": "${version}",\n    },\n  },\n  "packages": {}\n}\n`;
+const APP_NO_VERSION = `{\n  "name": "@x/m",\n  "private": true\n}\n`;
 const CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n## [0.1.0-beta.1] - 2026-10-21\n\nFirst.\n";
 /** The fragment the fixture repo ships: an empty [Unreleased] means the entry lives here. */
 const FRAGMENT = "- Everything.\n";
@@ -145,10 +146,14 @@ beforeEach(async () => {
   mkdirSync(join(repo, "packages/a"), { recursive: true });
   mkdirSync(join(repo, "packages/cli"), { recursive: true });
   mkdirSync(join(repo, "stubs/s"), { recursive: true });
+  mkdirSync(join(repo, "apps/r"), { recursive: true }); // a versioned app (like apps/relay): bumped
+  mkdirSync(join(repo, "apps/m"), { recursive: true }); // an unversioned app (like apps/mobile): untouched
   writeFileSync(join(repo, "package.json"), PKG("root", "0.1.0-beta.1"));
   writeFileSync(join(repo, "packages/a/package.json"), PKG("@x/a", "0.1.0-beta.1"));
   writeFileSync(join(repo, "packages/cli/package.json"), PKG("@x/cli", "0.1.0-beta.1"));
   writeFileSync(join(repo, "stubs/s/package.json"), PKG("stub", "0.0.0"));
+  writeFileSync(join(repo, "apps/r/package.json"), PKG("@x/r", "0.1.0-beta.1"));
+  writeFileSync(join(repo, "apps/m/package.json"), APP_NO_VERSION);
   writeFileSync(join(repo, "bun.lock"), LOCK("0.1.0-beta.1"));
   writeFileSync(join(repo, "CHANGELOG.md"), CHANGELOG);
   mkdirSync(join(repo, "changelog.d"), { recursive: true });
@@ -203,9 +208,11 @@ describe("runRelease", () => {
       ["package.json", "root"],
       ["packages/a/package.json", "@x/a"],
       ["packages/cli/package.json", "@x/cli"],
+      ["apps/r/package.json", "@x/r"],
     ] as const) {
       expect(read(p)).toBe(PKG(name, "0.1.0")); // formatting intact
     }
+    expect(read("apps/m/package.json")).toBe(APP_NO_VERSION);
     expect(read("stubs/s/package.json")).toBe(PKG("stub", "0.0.0"));
     expect(read("bun.lock")).toBe(LOCK("0.1.0"));
     expect(read("CHANGELOG.md")).toBe(
