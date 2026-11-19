@@ -342,3 +342,29 @@ the light-mode spike shots exist), and S1/S3/S4 were out of this run's scope.
   1. The export-list regex (`thinking-motion.test.ts`) does not see `export class`, `export let`, `export enum`, `export { … }` or `export default`.
   2. Fix round 1 writes `shimmerElapsed` where it means `thinkingElapsed`, and "The web's pin" is unclear.
   3. Commit `72a0caed` is labelled "(deepseek)", but its doc section is signed `claude-opus-5-5`. One of the two is wrong, and §10 attribution depends on it.
+
+### Round 3 — S0 (spike) + S2 (ThinkingWord)
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; **same model** as the S0/S2 section's signature, so shared blind spots may survive both passes)
+
+**Verdict: PASS** (APPROVE-WITH-NITS for S0 + S2; S3/S4 still unbuilt). No HIGH/MEDIUM findings.
+
+**S0 verdict (pasted from Execution):** "S0-a PASSES — the svg glyph clip runs on the native driver." Evidence: 40 consecutive frames (~2.6 s) with one frozen JS-counter hash while the word's per-column darkness profile moves across, out and back in. Not re-run here (no simulator in this pass). The numbers are consistent with a native-driven `x` on `AnimatedRect`. S2 is built svg-native, as the owner's Q1 answer requires. No masked-view and no JS-driven gradient: `package.json` is untouched.
+
+**Gate (touched files):** `bun test` over thinking-motion, tool-rows-wiring, chart-labels-render, chart-thumbnail-render, chart-view, notice-row and step-thought-marker → **84 pass / 0 fail**. step-thought-marker runs here, despite Fix round 1's note. `bun run lint`: clean (2114 files). `bun run typecheck`: clean (root + mobile + relay). The full `bun test` was not run in this pass.
+
+**Mutations** (applied together, then restored from a scratch copy; `git status` clean afterwards): M1 `<G clipPath=…>` → `<G>`; M2 `width={sweep.band}` → `width={x}` (animating a JS-thread svg prop); M3 first stop opacity 0 → 1. Result: **30 pass / 3 fail**. Each mutation fails its own test: "CLIPPED to the glyphs", "native driver", "SOFT gradient".
+
+**Attacks tried:**
+1. *Font drift between the transparent RN `Text` (layout) and the svg glyphs.* `typography.step` has no `fontFamily`. react-native-svg resolves an empty family through `RCTFont updateFont:nil` (`RNSVGGlyphContext.mm:117-121`), so it uses the same system font as RN. Weight, italic and scale cap match (`Math.min(fontScale, DENSE_FONT_SCALE)` vs `maxFontSizeMultiplier`). Holds.
+2. *Box reappearing.* No `overflow: "hidden"` is left in StepNode. The only bright paint is the gradient inside `<G clipPath>`, which is pinned by a test and by M1. Both gradient ends are opacity 0, and the band starts and ends wholly off the word (tests). Holds.
+3. *JS-thread work per frame (the load-bearing assumption).* The only animated prop is `x`, from the `useNativeDriver: true` loop. Width, height and stops are static, and the test forbids clock-driven `width/height/offset/stopOpacity` (M2). Holds.
+4. *Reduce Motion / unmeasured / toggled mid-turn.* `glyphs` requires `clock !== null && band > 0 && height > 0`. Otherwise the svg unmounts and the RN text gets its `sec` colour back, so no transparent-text state is left without the svg. Holds.
+5. *Duplicate svg ids* (`thinking-glyphs`, `thinking-shine`) across mounted footers. On iOS, defs are scoped per `Svg` root. Holds.
+6. *§7 invariants.* Only presentation is in the component. The decisions (stops, band, label, elapsed) live in the pure `thinking-motion.ts`, which is tested. No protocol, persistence or terminal path is touched. Holds.
+
+**Nits (not blocking):**
+1. `GLYPH_BASELINE = 0.35` em is an approximation. A baseline error moves the svg word as a whole relative to the RN layout box, never relative to its own shine. Only the light-mode spike shots show it. The dark and Reduce Motion screenshots from §Tests are still owed.
+2. Both branch commits are labelled "(deepseek)", but the S0/S2 Execution is signed `claude-opus-5-5`. This is the same attribution mismatch as round 2's nit 3.
+
+**How the executor behaved:** the spike was done properly. It removed its temporary code, re-ran with a longer capture after an inconclusive first run, and recorded the drift (baseline approximation, source-pin test) honestly. Its mutation claims reproduce exactly (30/3).
