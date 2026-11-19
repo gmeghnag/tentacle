@@ -87,7 +87,9 @@ describe("T2: diffFrame", () => {
   });
 
   test("a row cleared to empty is erased", () => {
-    expect(diffFrame(prev, ["r0", "", "r2", "r3", ""])).toBe(`\x1b[${L - 1}A\r\x1b[2K\x1b[${L - 1}B\r`);
+    expect(diffFrame(prev, ["r0", "", "r2", "r3", ""])).toBe(
+      `\x1b[${L - 1}A\r\x1b[2K\x1b[${L - 1}B\r`,
+    );
   });
 
   test("no change ⇒ empty string; height change ⇒ null", () => {
@@ -150,7 +152,12 @@ describe("T4: lineDiffStdout fallbacks", () => {
     w.write(clear);
     w.write(inkWrite(4, B));
     w.write(inkWrite(4, A));
-    expect(tty.chunks).toEqual([inkWrite(0, A), clear, inkWrite(4, B), "\x1b[2A\r\x1b[2Ka1\x1b[2B\r"]);
+    expect(tty.chunks).toEqual([
+      inkWrite(0, A),
+      clear,
+      inkWrite(4, B),
+      "\x1b[2A\r\x1b[2Ka1\x1b[2B\r",
+    ]);
   });
 
   test("log.clear() (bare eraseLines) verbatim; the following eraseLines(0)+body is recognized", () => {
@@ -160,7 +167,12 @@ describe("T4: lineDiffStdout fallbacks", () => {
     w.write(eraseLines(4));
     w.write(inkWrite(0, A));
     w.write(inkWrite(4, B));
-    expect(tty.chunks).toEqual([inkWrite(0, A), eraseLines(4), inkWrite(0, A), "\x1b[2A\r\x1b[2KB1\x1b[2B\r"]);
+    expect(tty.chunks).toEqual([
+      inkWrite(0, A),
+      eraseLines(4),
+      inkWrite(0, A),
+      "\x1b[2A\r\x1b[2KB1\x1b[2B\r",
+    ]);
   });
 
   test("an erase count that is not the recorded frame's height ⇒ verbatim", () => {

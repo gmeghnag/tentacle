@@ -104,7 +104,7 @@ Evidence:
 
 - The TUI's Ink stdout is already an injected wrapper at one call site
   (`run.tsx:219-221`, `fullscreen ? synchronizedStdout(process.stdout) : process.stdout`).
-  The new wrapper composes inside it: `synchronizedStdout(lineDiffStdout(process.stdout))`,
+  The new wrapper composes with it (Ink → row diff → BSU/ESU; order corrected in Execution, drift 1): `lineDiffStdout(synchronizedStdout(process.stdout))`,
   so a diffed write is still one BSU…ESU update.
 - The frame never moves: alt screen entered with `ESC[H` before mount
   (`terminal.ts:20`, `run.tsx:137`); the frame is always `rows − 1` rows
@@ -163,7 +163,7 @@ Evidence:
      module comment: **when in doubt, emit Ink's bytes and forget `prev`** — the
      worst case is exactly today's behaviour for one frame.
 3. **Wire once** in `run.tsx:219-221`:
-   `synchronizedStdout(lineDiffStdout(process.stdout))`, same `fullscreen` gate.
+   `lineDiffStdout(synchronizedStdout(process.stdout))`, same `fullscreen` gate.
    Kill switch per Owner question 3.
 4. Not in scope: intra-row diffing; a periodic or Ctrl+L full repaint (Owner
    question 4); the session picker (no animation, as in redraw-flash Q5); the
@@ -232,7 +232,7 @@ Execution), then the real diff makes it green.
 
 - **T1 (the bug's property, red today): a Thinking tick repaints only the changed
   row.** Real `App`, Ink's real non-debug `render`, fake TTY 100×30 through
-  `synchronizedStdout(lineDiffStdout(fake))`, hanging `send()`, `FORCE_COLOR`-style
+  `lineDiffStdout(synchronizedStdout(fake))`, hanging `send()`, `FORCE_COLOR`-style
   colour forced in the test (chalk level set explicitly). After ~400 ms of ticks,
   every write after the first frame contains **no** `ESC[2J` and **at most 1**
   `ESC[2K` (one changed row), and ≥ 3 such writes were recorded (non-vacuous).
@@ -260,7 +260,7 @@ Execution), then the real diff makes it green.
 - **T5 (pin):** our `eraseLines(n)` === `ansi-escapes`' `eraseLines(n)` for
   n ∈ {0, 1, 2, 30} (imported from Ink's resolved copy).
 - **Structure:** `sync-output.test.tsx` T3 asserts `run.tsx` passes
-  `synchronizedStdout(lineDiffStdout(process.stdout))` under the `fullscreen`
+  `lineDiffStdout(synchronizedStdout(process.stdout))` under the `fullscreen`
   gate. Mutation: drop `lineDiffStdout` ⇒ red.
 - **T7 (manual, the visible property):** owner, in the terminal named in Q1
   (and one 2026 terminal), a long Thinking turn: no flash, no stale/garbled
@@ -299,3 +299,110 @@ Execution), then the real diff makes it green.
 Stream render cap (the triage's 10–15 fps): left out; add only if Terminal.app still shows a flash after the row diff.
 
 *— claude-opus-5-5 (orchestrator, recording the owner's answers), 2026-11-19*
+
+## Execution
+
+*— claude-opus-5-5, 2026-11-19*
+
+**Load-bearing check (re-run first, holds).** `repro.ts` on this branch: every
+Thinking/typing frame rewrites 29 rows and changes exactly 1; 0 of 975 styled rows
+leave SGR open. Ink 5.0.1 `log-update.js` writes `eraseLines(previousLineCount) + str + "\n"`;
+the `ansi-escapes` Ink resolves is 7.3.0 (`eraseLines` = n×`ESC[2K` with `ESC[1A`
+between, then `ESC[G`).
+
+**Built** (order of the plan):
+1. `packages/tui/src/line-diff.ts` — pure `eraseLines` (pinned copy), `parseFrameWrite`,
+   `sgrOpenAtEnd`, `diffFrame`; the stateful shell `lineDiffStdout` (state: `prev` rows +
+   the `colsxrows` it was drawn at, read live at every write); `lineDiffEnabled(env)` /
+   `FULL_REDRAW_ENV` (the kill switch, a pure function).
+2. `packages/tui/src/run.tsx:219-227` — under the same `fullscreen` gate:
+   `lineDiffEnabled(process.env) ? lineDiffStdout(synchronizedStdout(process.stdout)) : synchronizedStdout(process.stdout)`.
+3. Tests: `test/line-diff.test.ts` (T2–T5 + kill switch, 24 tests),
+   `test/line-diff-render.test.tsx` (T1, T6 with a VT screen model in the test, colour
+   forced via `chalk.level = 3`), `test/sync-output.test.tsx` T3 updated to the composed
+   expression.
+4. `changelog.d/tui-line-diff-render.fixed.md`.
+
+**Drift from Implementation (and why).**
+1. **Composition order was inverted in the plan.** `synchronizedStdout(lineDiffStdout(x))`
+   makes Ink write to the BSU/ESU wrapper first, so the row diff only ever sees
+   `BSU + frame + ESU`, never parses it, and passes everything through (found by T1:
+   30 `ESC[2K` per write). The order that matches the plan's intent ("a diffed write is
+   still one BSU…ESU update") is `lineDiffStdout(synchronizedStdout(x))`: Ink → diff →
+   bracket. Fixed in code, tests and the plan text above.
+2. **No `prevCount` tracking.** `parseFrameWrite(chunk)` returns `{ erased, rows }` and
+   the shell diffs only when `erased === prev.length` (same size, nothing unrecognized
+   in between). The safety condition is read from Ink's own bytes instead of mirroring
+   Ink's private counter — which matters: Ink's `clearTerminal` branch (`ink.js:121-124`)
+   does NOT update `log-update`'s `previousLineCount`, so the plan's "a clearTerminal
+   write sets it from its body" would have mirrored it wrongly (harmless — it falls back
+   — but needless). Any `eraseLines(k)+body` re-seeds `prev` (verbatim write).
+3. **SGR guard: fall back instead of appending `ESC[0m`.** If any row of `prev` or `next`
+   leaves an attribute open, `diffFrame` returns `null` ⇒ Ink's full write. A reset after
+   the rewritten row would stop it tinting its own `ESC[2K`, but not reproduce a
+   neighbour's colour that Ink's full repaint lets a row inherit — so the screen could
+   differ from Ink's. Falling back is the plan's own "when in doubt, Ink's bytes" rule.
+   T3 asserts this shape (open ⇒ `null`; closed ⇒ diffed, no extra reset). Never hit
+   today (0 open rows).
+4. `parseFrameWrite` also rejects control bytes other than `\t`/`\n` in the body (a
+   `\r` or a cursor CSI would break the per-row model).
+5. Red-before-green done by mutation of the finished wrapper (identity `write`) rather
+   than wiring an identity stub first — the same check.
+
+**Red before green / non-vacuity (each mutation applied alone, then restored):**
+
+| mutation | result |
+|---|---|
+| M1 wrapper identity (`if (false)` for the diff branch) | T1 red (30 `ESC[2K` per write), T6 red (non-vacuity guard) |
+| M2 off-by-one up-move (`up(cursor - i - 1)`) | T6 red |
+| M3 final move-down dropped | T6 red |
+| M4 size cached at first write | T4 "size change" red |
+| M5 SGR guard removed | T3 red |
+| M6 `erased === prev.length` check removed | T4 "erase count" red |
+| M7 `lineDiffStdout` dropped from `run.tsx` | sync-output T3 red |
+| M8 composition order inverted in `run.tsx` | sync-output T3 red |
+
+**Measurement 1 — fake TTY 120×40, triage harness** (`tui-flash-1119/capture.ts` adapted:
+`FULL=1` = before = `synchronizedStdout` only; after = `lineDiffStdout(synchronizedStdout(…))`;
+"lines rewritten" = `ESC[2K` per write; `FORCE_COLOR=3`):
+
+| scenario | writes/s | lines rewritten/write before → after | bytes/s before → after | clearTerminal |
+|---|---|---|---|---|
+| A idle 3 s | 0 | – | 0 → 0 | 0 |
+| B Thinking 5 s | 13 | 40 → **1** | 15 253 → **1 519** | 0 |
+| B2 Thinking, long transcript | 13 | 40 → **1** | 44 412 → **1 538** | 0 |
+| C streaming (token/15 ms), long transcript | 33 | 40 → **5.9** | 108 529 → **15 995** | 0 |
+| D tool running | 14.3 | 40 → **1** | 18 630 → **1 735** | 0 |
+| E resize shrink 120×40 → 80×24 | 6.7 | 20 → 20 (verbatim, by design) | 4 680 → 4 680 | 1/1 |
+| F palette `/` open+close | 5 | 40 → 24.5 | 5 733 → 3 848 | 0 |
+| G Thinking, tiny 120×8 | 14 | 0 → 0 (clearTerminal path, verbatim) | 11 709 → 11 709 | 42/42 |
+
+**Measurement 2 — real pty 120×40, the CLI from this branch** (`bun packages/cli/src/main.ts`,
+triage `pty.py` + `mock.ts` copied to `.tentacle/tmp/tui-line-diff-render/`, isolated HOME,
+mock: 1.5 s silent then a token every 15 ms; `FULL=1` sets `TENTACLE_TUI_FULL_REDRAW=1`;
+windows measured from the moment "hi⏎" is typed):
+
+| run | Thinking (0.4–1.4 s) | streaming (2–7 s) |
+|---|---|---|
+| before (kill switch on) | 14.0 upd/s · 40.0 lines/upd · 24 278 B/s | 33.0 upd/s · 40.0 lines/upd · 95 445 B/s |
+| after (row diff) | 14.0 upd/s · **1.0** lines/upd · **1 654** B/s | 32.6 upd/s · **1.1** lines/upd · **3 380** B/s |
+
+(Streaming here starts from an empty transcript, so text does not scroll yet: 1.1 rows
+change per update; once it scrolls, measurement 1 C applies, ~6 rows.) The kill switch
+is thereby also verified end to end: with it, the bytes are exactly the old full repaint.
+
+**Gate (2026-11-19):** `bunx tsc --noEmit` → 0 errors · `bun run lint` → `Checked 2122 files … No fixes applied` (clean) · full `bun test` → `15675 pass · 5 skip · 0 fail` (`Ran 15680 tests across 1113 files`); the new tests contain no skip, so the skips are the pre-existing opt-in ones. The full run left a stray `{"resident":false}` first line in `packages/tui/test/__snapshots__/diagram-lines.test.ts.snap` (a write by some other test, unrelated to this task); removed by hand — a pre-existing test-isolation leak worth its own fix.
+
+**Owner check in Terminal.app (T7)** — from the repo, on this branch:
+1. `bun packages/cli/src/main.ts` (or a build of this branch), send a prompt that thinks
+   for a while: the screen must not flash; only the spinner row moves. Let it stream a
+   long answer (scrolling): no flash, no stale or garbled rows. Open/close the palette
+   (`/`, then Backspace), resize the window, Cmd+K.
+2. Quit, then `TENTACLE_TUI_FULL_REDRAW=1 bun packages/cli/src/main.ts`, same prompt:
+   that is the old renderer (the flash should be back) — the side-by-side difference.
+3. Repeat step 1 once in iTerm2/Ghostty (mode 2026): must look exactly as before.
+If anything garbles, `TENTACLE_TUI_FULL_REDRAW=1` is the workaround while it is fixed.
+
+**Unverified:** a terminal whose glyph widths disagree with Ink's measurement (wrapped
+row corrupting an unchanged neighbour, plan failure modes) — only the owner's T7 / the
+Review can show it.

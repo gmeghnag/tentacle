@@ -44,9 +44,12 @@ export interface FrameWrite {
   rows: string[];
 }
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: escape bytes are what we parse
 const ERASE_PREFIX = /^(?:(?:\x1b\[2K\x1b\[1A)*\x1b\[2K\x1b\[G)?/;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: escape bytes are what we parse
 const SGR = /\x1b\[([0-9;:]*)m/g;
 // Any control byte except "\t" and "\n", once SGR sequences are removed.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: escape bytes are what we parse
 const FORBIDDEN = /[\x00-\x08\x0b-\x1f\x7f]/;
 
 /**

@@ -13,11 +13,11 @@ import {
   type TargetFeed,
 } from "./App.tsx";
 import type { ChartGlyphs } from "./chart-lines.ts";
+import { lineDiffEnabled, lineDiffStdout } from "./line-diff.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { createArtifactOpener } from "./os-open.ts";
 import { messagesToItems } from "./resume.ts";
-import { lineDiffEnabled, lineDiffStdout } from "./line-diff.ts";
 import { synchronizedStdout } from "./sync-output.ts";
 import type { TargetBadge } from "./target-view.ts";
 import { lateGuard, readThemeSetting } from "./terminal-background-probe.ts";

@@ -87,6 +87,7 @@ class Screen {
     for (let i = 0; i < s.length; ) {
       const ch = s[i] ?? "";
       if (ch === "\x1b") {
+        // biome-ignore lint/suspicious/noControlCharactersInRegex: escape bytes are what we parse
         const m = /^\x1b\[([?0-9;:]*)([A-Za-z])/.exec(s.slice(i));
         if (!m) throw new Error(`unmodelled escape at ${JSON.stringify(s.slice(i, i + 12))}`);
         const [all, arg = "", op] = m;
@@ -96,7 +97,8 @@ class Screen {
         else if (op === "G") this.c = n - 1;
         else if (op === "H") [this.r, this.c] = [0, 0];
         else if (op === "K" && arg === "2") this.grid[this.r] = this.blank();
-        else if (op === "J" && arg === "2") this.grid = Array.from({ length: this.rows }, () => this.blank());
+        else if (op === "J" && arg === "2")
+          this.grid = Array.from({ length: this.rows }, () => this.blank());
         else if (!(op === "m" || (op === "J" && arg === "3") || arg.startsWith("?")))
           throw new Error(`unmodelled CSI ${JSON.stringify(all)}`);
         i += all.length;
@@ -128,7 +130,8 @@ class Screen {
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const count = (s: string, needle: string): number => s.split(needle).length - 1;
-const unwrap = (w: string): string => (w.startsWith(BSU) && w.endsWith(ESU) ? w.slice(BSU.length, -ESU.length) : w);
+const unwrap = (w: string): string =>
+  w.startsWith(BSU) && w.endsWith(ESU) ? w.slice(BSU.length, -ESU.length) : w;
 
 type Send = () => AsyncGenerator<unknown>;
 const hang: Send = async function* () {
@@ -238,6 +241,7 @@ describe("row diff on the real renderer", () => {
     expect(n).toBeGreaterThanOrEqual(10);
     // Non-vacuous: most writes went through the diff, and colour is on.
     expect(diffedWrites).toBeGreaterThanOrEqual(n / 2);
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: escape bytes are what we parse
     expect(fake.writes.some((w) => /\x1b\[[0-9;]*m/.test(w))).toBe(true);
     expect(mismatches).toEqual([]);
   });
