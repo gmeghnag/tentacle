@@ -262,3 +262,56 @@ clean · `bun run lint` clean (2113 files) · `bun test`: 15537 pass, 5 skip, 0 
    - A large `wait`/`start` means the tap waited on a busy JS thread.
    - `ev=jank` lines mean the JS thread missed frames in that second, with
      `renders`/`renderMs` saying how much of it was the session screen.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-19* (fresh context, SAME model family as the executor: shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM test gap; the fix itself holds).
+
+Gate (reviewer-run): `bun run lint` clean (2113 files) · `bun run typecheck` clean
+(root + mobile + relay) · the 14 touched test files: 150 pass, 0 fail. Full
+`bun test` not re-run in this pass.
+
+Findings:
+1. **MEDIUM — the cell memo's comparator is not pinned.**
+   `apps/mobile/src/screens/transcript/TranscriptCell.tsx:84`: mutating
+   `(a, b) => a.actions === b.actions && sameCellData(a, b)` to
+   `(a, b) => a.actions === b.actions` passes every test (the 4 failures in the
+   mutation run below are all from the other two mutations). In that state a
+   streaming assistant row freezes on its first delta, because `actions` is a
+   stable ref, so the cell is never redrawn. `transcript-cell.test.ts` tests only
+   the pure `sameCellData`. `fan-jank-wiring.test.ts:56-61` pins only the screen
+   side. Fix: a source pin that the memo comparator calls `sameCellData(a, b)`,
+   shown red under this mutation.
+
+Mutations (each reverted; `git status` clean afterwards):
+- `render-coalesce.ts` `fireNow` no longer cancels a pending `soon()`: caught
+  (3 tests: the coalescer absorb test and 2 stream-render tests).
+- `HubFan` not memoized: caught (`fan-jank-wiring`).
+- `TranscriptCell` comparator without `sameCellData`: **NOT caught** (finding 1).
+
+Attacks tried:
+- `HubFan` memo prop stability. `band` is `useState` (`SessionScreen.tsx:923`),
+  `onTapOverlay` is a `useCallback` on `driver`, and `motion` is now a frozen
+  constant. Holds; it matches the measured `starts=1`.
+- A cell prop that is drawn but not in `CellData`. `rowTimeLabel` depends only
+  on `row`. Callbacks go through `actions.current`. `TranscriptRow.tsx:716`
+  `firedRowView(..., Date.now())` now re-evaluates only when the cell redraws,
+  not on every screen render. LOW: it already only moved on unrelated
+  re-renders.
+- Coalescer convergence. A pending `soon()` fires within one window. `now()`
+  absorbs it. `dispose()` cancels it, and `notifyListeners` checks `disposed`.
+  The load-bearing claim (a notification carries no data) holds: the listener
+  reads `controller.state()`.
+- §7 invariants. There is no protocol, persistence, broker or terminal change.
+  `ptrace` writes into the ONE app log, numbers and enums only.
+
+Note (cosmetic, not blocking): `session-screen-controller.ts` moved its module
+header comment from the file top to between the imports (above
+`render-coalesce`).
+
+Executor behaviour: measured before diagnosing, showed red→green at the
+boundaries, and reported its drift from the brief honestly. Its mutation claim
+("`speak` dropped from `sameCellData`") covered the pure module, not the
+component wiring that finding 1 shows unpinned.
