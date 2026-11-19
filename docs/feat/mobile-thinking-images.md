@@ -848,3 +848,22 @@ import order, applied with `--write`). `scripts/test/mobile-thinking-images-arti
 **Not done here:** the per-tile veil (debt above); the light/dark/Reduce-Motion
 screenshot pass S4 still owes. No changelog fragment: this is an internal fix to
 unreleased code, and the fragment already covers the feature.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-19* (fresh context; scope: `git diff HEAD~1`, commit `e7cb53a7`; the same model family reviewed round 1)
+
+**Verdict: PASS.** All three findings from round 1 are fixed, and each fix is pinned by a test that fails under mutation. I found no regressions and no HIGH or MEDIUM issues.
+
+1. **Finding 1 (3-photo layout) — FIXED.** `photoBlock` tiles now carry `x`/`y`, and `photoTileStyle` turns them into an absolute style inside a block of exactly `width` × `height`. This is used in both `TranscriptRow` and `ComposeBar`, and the flex-wrap is gone. Mutation: setting the 3-photo `x` back to `(index % 2)·(cell+gap)` fails 3 tests (the media-layout place test, the overlap test and the transcript-row pinned test).
+2. **Finding 2 (progress joints untested) — FIXED.** (a) Dropping `outboxProgress.set` in the controller fails the new `session-screen-compose` test. (b) Passing `{}` instead of `options` in `outbox-session.ts` fails the new `outbox-session` passthrough test. The fix also wires `outboxProgress` into the second projection (`session-screen-controller.ts:1079`), which round 1 had missed.
+3. **Finding 3 (per-photo percent) — FIXED.** The percent is now `(done + have/size) / total`, `done` is counted from the refs already present (so it is right on a resume), and a report with `size <= 0` is ignored. Mutation: `done += 1` → `+= 0` fails the "17 % → 50 % → 83 %" test.
+
+I reverted all four mutations and the tree is byte-clean (`git status` is empty). **Gate:** `apps/mobile/test` → 3860 pass / 0 fail. `bun run lint` is clean (2116 files). `bun run typecheck` is clean (root, mobile, relay).
+
+**Nits (not blocking):**
+- (a) The `TranscriptRow.tsx` `styles.tile` comment still says "the tiles carry no position", which is now false. Since the tiles do carry a position, putting the radius on the outer corners only is possible again.
+- (b) The `ComposeBar` veil comment says the driver reports "the item's current upload". It now reports the whole message.
+- (c) The per-tile veil on tiles that are already uploaded remains (recorded as debt), and the screenshot pass is still owed.
+
+**How the executor behaved:** it fixed each finding at its root, not just the symptom: it put the placement into the pure module, which is the S3 drift round 1 named. It named the mutation for each new test in the test title, and every one of those mutations reproduces. It recorded the remaining debt honestly.
