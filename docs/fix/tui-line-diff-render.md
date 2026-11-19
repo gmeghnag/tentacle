@@ -406,3 +406,45 @@ If anything garbles, `TENTACLE_TUI_FULL_REDRAW=1` is the workaround while it is 
 **Unverified:** a terminal whose glyph widths disagree with Ink's measurement (wrapped
 row corrupting an unchanged neighbour, plan failure modes) — only the owner's T7 / the
 Review can show it.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-19* (fresh context, SAME model as the executor: shared blind spots possible)
+
+**Verdict: APPROVE** — no HIGH/MEDIUM findings on `git diff main...HEAD`.
+
+**Gate (touched scope):** `bun test` on `line-diff.test.ts`, `line-diff-render.test.tsx`,
+`sync-output.test.tsx` → 32 pass · 0 fail · `bun run lint` clean (2122 files) ·
+`bun run typecheck` 0 errors. Full `bun test` not re-run by this reviewer.
+
+**Premises checked (TRUE):** `log-update.js:17` writes `eraseLines(previousLineCount) + output`;
+`ink.js:121-122` clearTerminal branch does not update log-update's count (drift 2 is correct);
+`ink.js:128-130`/`log.clear()` writes are erase-only (body lacks `"\n"` ⇒ unrecognized ⇒ `prev = null`);
+`App.tsx:854-890` / `QueuedMessages.tsx` use `useStdout` only for size/resize, never `write`;
+the only raw `process.stdout.write`s (`run.tsx:134,138,157`) are pre-mount/post-unmount.
+
+**Mutations (own, each alone, tree restored byte-identical via `cmp` + clean `git status`):**
+- `FORBIDDEN` guard disabled → `parseFrameWrite > rejects anything else` red.
+- `prev = null` on an unrecognized write removed → 3 T4 fallback tests red.
+The executor's M1–M8 table was not re-run in full (a batch script was not permitted).
+
+**Attacks tried:**
+1. useStdout/patched-console path (`log.clear` + data + `log(lastOutput)`): data ending `"\n"` is
+   *recognized* and seeds `prev`, but the following `log()` erases 0 ≠ `prev.length ≥ 2` ⇒ verbatim.
+   Holds.
+2. Coincidental `erased === prev.length` after a non-Ink write: every non-frame Ink write is
+   preceded by `log.clear()` (reset to 0), so the next erase is 0. Holds.
+3. Resize races with the throttled log: size read live at each write; any write at a new size is
+   verbatim; identical-output frames are skipped by log-update itself. Holds.
+4. Full-width row + `CSI n B`/`CSI n A`: cursor moves clamp, never LF-scroll; ends at Ink's
+   anchor via `\r`. T6 VT model pins screen+cursor equality. Holds.
+5. SGR across rows: `diffFrame` falls back on any open attribute (drift 3) — stricter than plan.
+   Holds.
+6. Width disagreement (emoji measured 1, painted 2): diff can leave a neighbour corrupted until it
+   changes — documented failure mode, kill switch `TENTACLE_TUI_FULL_REDRAW=1`; not a code defect.
+
+**Nits (not blocking):** Failure-modes bullet "SGR leak" still describes the appended `ESC[0m`
+design that Execution drift 3 replaced with a fallback — doc text is stale.
+
+**Executor behaviour:** plan drift reported honestly (composition order, no prevCount mirror,
+SGR fallback), mutation table and real-pty measurements included, unverified part named.
