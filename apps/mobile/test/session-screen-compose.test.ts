@@ -16,6 +16,7 @@ import type { ComposeHandle, PickedPhoto } from "../src/compose-controller.ts";
 import { createOutboxDriver } from "../src/outbox-driver.ts";
 import type { OutboxFs } from "../src/outbox-store.ts";
 import { createOutboxStore, outboxPaths } from "../src/outbox-store.ts";
+import { createItem } from "../src/outbox.ts";
 import { createSessionController } from "../src/session-controller.ts";
 import {
   type ComposeWiring,
@@ -143,8 +144,13 @@ function harness(
       return { removed: [...ids], delivered: [] };
     },
     port: {
-      upload: async (_bytes, meta) =>
-        ({ id: "port", mimeType: meta.mimeType, size: 3 }) as AttachmentRef,
+      // The client's own `onProgress`, reported as the daemon confirms bytes: this
+      // is the joint `session-screen-controller.ts` passes the driver's callback
+      // through (Review round 5, finding 2).
+      upload: async (_bytes, meta, options) => {
+        options?.onProgress?.(1, 4);
+        return { id: "port", mimeType: meta.mimeType, size: 3 } as AttachmentRef;
+      },
       prompt: async (text) => {
         session.sent.push(text);
       },
@@ -174,6 +180,9 @@ function harness(
       mint: () => "k",
       // 13b's hand-back (F7/F20): the words are the field's again.
       onDraft: folding.onDraft,
+      // The upload percent, wired as the APP wires it (`App.tsx`'s `outboxOf`): the
+      // screen keeps the map, the driver reports into it (S4).
+      ...(folding.onProgress === undefined ? {} : { onProgress: folding.onProgress }),
     });
   // The one driver the screen built, for a test that runs the outbox itself.
   let built: ReturnType<typeof driver> | null = null;
@@ -395,6 +404,75 @@ describe("the compose half on the screen", () => {
     expect(screen.state().draft).toBe("my words");
     // And it is SAID, not just restored (a silent restore looks like a lost send).
     expect(screen.state().notice).not.toBeNull();
+  });
+
+  test("an upload's percent reaches the ROW the screen draws, and is cleared when it ends (Review round 5, finding 2a; mutation: drop `outboxProgress.set` in the controller → the row stays indeterminate for ever)", async () => {
+    // The meeting point round 5 found untested is TWO joints of one property: the
+    // driver reports `onProgress`, the SCREEN keeps the map (`outboxProgress`), and
+    // `sessionView` reads it into the row's `progress` — which is what
+    // `outbox-look.ts` turns into "Sending… N%". Removing EITHER joint (the app's
+    // `onProgress` from the driver factory, or the map's write in the controller)
+    // leaves the row indeterminate: the driver and the look were each tested, the
+    // wire between them was not.
+    const h = harness();
+    // The upload is held in flight BEFORE the driver is built: its port is a COPY
+    // of the handle's (`{ ...handle.port, prompt }`), so a later patch is unseen.
+    const original = h.handle.port.upload;
+    let releaseUpload: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseUpload = resolve;
+    });
+    Object.assign(h.handle.port, {
+      upload: async (
+        bytes: Uint8Array,
+        meta: { readonly mimeType: string; readonly name?: string },
+        options?: { readonly onProgress?: (have: number, size: number) => void },
+      ) => {
+        options?.onProgress?.(2, 4);
+        await held;
+        return original(bytes, meta, options);
+      },
+    });
+    const screen = h.screen();
+    await screen.open();
+    // A queued photo message, as 13b's `enqueue` leaves it on disk.
+    await h.store.setItems([
+      createItem(
+        {
+          computerId: "c1",
+          sessionId: "s1",
+          kind: "prompt",
+          text: "with a photo",
+          photos: [{ file: "file:///o/photos/a.jpg", mimeType: "image/jpeg", name: "a.jpg" }],
+          basis: { historyLength: 0, runningTurnId: null },
+        },
+        () => "i1",
+      ),
+    ]);
+    const built = h.composeDriver();
+    if (built === null) {
+      throw new Error("no driver");
+    }
+    const running = built.run("s1");
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    // HALF of the one photo is up: the row is mid-upload and its percent is the
+    // map's value (0.5), reached through BOTH joints — and by BOTH projections of
+    // the same list (`compose.outbox` is what ComposeBar draws,
+    // `view.outbox` the view-model's own; round 5 found the second one missing
+    // the map entirely).
+    expect(screen.state().compose.outbox[0]?.state).toBe("uploading");
+    expect(screen.state().compose.outbox[0]?.progress).toBe(0.5);
+    expect(screen.state().view.outbox[0]?.progress).toBe(0.5);
+    releaseUpload();
+    await running;
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    // The upload is over: the map's entry is gone, so no stale percent is read.
+    expect(screen.state().compose.outbox[0]?.progress ?? null).toBeNull();
+    expect(screen.state().view.outbox[0]?.progress ?? null).toBeNull();
   });
 
   test("an item whose session is GONE hands its text back into the field (F20)", async () => {

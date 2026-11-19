@@ -24,10 +24,12 @@ import type { DiagramStyle } from "../../diagram-settings-store.ts";
 import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import {
+  type PhotoBlock,
   type PhotoTile,
   type ViewerPages,
   displayUri,
   photoBlock,
+  photoTileStyle,
   userRowParts,
   viewerPages,
 } from "../../media-layout.ts";
@@ -47,12 +49,11 @@ import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MediaViewer } from "./MediaViewer.tsx";
 
-/** A tile's box as the style it is drawn in (the shape `photoBlock` decided). */
-function boxStyle(box: { readonly width: number; readonly height: number }): {
-  width: number;
-  height: number;
-} {
-  return { width: box.width, height: box.height };
+/** A tile as the style it is drawn in: pinned to the place `photoBlock` decided. */
+function boxStyle(tile: PhotoTile<ImageRef>): ReturnType<typeof photoTileStyle> {
+  // The tiles carry their place (Review round 5, finding 1): a wrapping row
+  // cannot draw the 3-photo shape (a line is as tall as its tallest item).
+  return photoTileStyle(tile);
 }
 
 export interface RowProps {
@@ -176,19 +177,21 @@ export interface ShownTile {
 export function PhotoTiles({
   tiles,
   blockWidth,
+  blockHeight,
   palette,
   onOpen,
   onBroken,
 }: {
   readonly tiles: readonly ShownTile[];
   readonly blockWidth: number;
+  readonly blockHeight: number;
   readonly palette: Palette;
   readonly onOpen: (position: number) => void;
   /** A tile's `<Image>` could not load its file (Review round 2, R2-1). */
   readonly onBroken: (uri: string) => void;
 }): JSX.Element {
   return (
-    <View testID="row-photos" style={[styles.photos, { width: blockWidth }]}>
+    <View testID="row-photos" style={[styles.photos, { width: blockWidth, height: blockHeight }]}>
       {tiles.map(({ tile, uri, label }, position) => (
         <View
           key={tile.ref.id}
@@ -201,7 +204,7 @@ export function PhotoTiles({
               ? null
               : { borderWidth: StyleSheet.hairlineWidth, borderColor: palette.sep },
             { backgroundColor: palette.code },
-            boxStyle(tile.box),
+            boxStyle(tile),
           ]}
         >
           {uri === undefined ? (
@@ -344,6 +347,7 @@ export function UserRowBody({
         <PhotoTiles
           tiles={tiles}
           blockWidth={block.width}
+          blockHeight={block.height}
           palette={palette}
           onOpen={(position) => onOpen(viewerPages(shown, position))}
           onBroken={onBroken}
@@ -878,14 +882,13 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     gap: 6,
   },
-  // The photo block (mockup F): its OWN element, right-aligned above the bubble,
-  // tiles 4 pt apart in reading order. Its width is `photoBlock`'s (a second
-  // measurement here would drift from the boxes).
+  // The photo block (mockup F): its OWN element, right-aligned above the bubble.
+  // Its width and height are `photoBlock`'s, and each tile is pinned to its own
+  // `x`/`y` inside it (Review round 5, finding 1) — a wrapping row cannot draw
+  // the 3-photo shape: its line is as tall as the tall tile, so the third tile
+  // would land BELOW it and leave the bottom-right slot empty.
   photos: {
     alignSelf: "flex-end",
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 4,
     marginBottom: 4,
   },
   // The 16 pt radius (mockup F), on EVERY tile's corners: the tiles carry no

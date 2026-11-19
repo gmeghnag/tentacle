@@ -26,19 +26,16 @@ import {
   Text,
   View,
 } from "react-native";
-import { photoBlock } from "../../media-layout.ts";
+import { photoBlock, photoTileStyle } from "../../media-layout.ts";
 import { outboxCaption, outboxRowLook } from "../../outbox-look.ts";
 import type { ChipView, ComposeNotice, OutboxRowView } from "../../session-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, size, typography } from "../../theme.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { RingArc } from "../../ui/RingArc.tsx";
 
-/** A tile's box as the style it is drawn in (the shape `photoBlock` decided). */
-function boxStyle(box: { readonly width: number; readonly height: number }): {
-  width: number;
-  height: number;
-} {
-  return { width: box.width, height: box.height };
+/** A tile as the style it is drawn in: pinned to the place `photoBlock` decided. */
+function boxStyle(tile: ReturnType<typeof photoBlock>["tiles"][number]) {
+  return photoTileStyle(tile);
 }
 
 /** The pieces of the screen's view the bar draws (a subset of `session-view.ts`). */
@@ -228,12 +225,12 @@ export function OutboxRows({
             {block.tiles.length === 0 ? null : (
               <View
                 testID={`outbox-photos-${row.itemId}`}
-                style={[styles.outboxPhotos, { width: block.width }]}
+                style={[styles.outboxPhotos, { width: block.width, height: block.height }]}
               >
                 {block.tiles.map((tile) => (
                   <View
                     key={tile.ref.file}
-                    style={[styles.outboxTile, boxStyle(tile.box)]}
+                    style={[styles.outboxTile, boxStyle(tile)]}
                     // A veil per tile, all showing the ONE item-wide progress:
                     // the driver reports the item's current upload, not a tile's.
                     pointerEvents="none"
@@ -390,8 +387,9 @@ const styles = StyleSheet.create({
   },
   outboxStatus: { flexDirection: "row", alignItems: "center", gap: 6, paddingRight: 4 },
   // The outbox row's photo block (S4): `photoBlock`'s geometry, right-aligned above
-  // the dashed bubble, tiles 4 pt apart — the sent row's own shape.
-  outboxPhotos: { flexDirection: "row", flexWrap: "wrap", gap: 4 },
+  // the dashed bubble — the sent row's own shape, each tile pinned to its own
+  // `x`/`y` (Review round 5, finding 1: a wrapping row cannot draw 3 photos).
+  outboxPhotos: { alignSelf: "flex-end" },
   outboxTile: { borderRadius: 16, overflow: "hidden", backgroundColor: "#000000" },
   outboxTileFill: { width: "100%", height: "100%" },
   // The uploading veil (mockup F): the photo dimmed under one ring, never a

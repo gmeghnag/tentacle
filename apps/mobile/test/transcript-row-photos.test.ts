@@ -177,7 +177,7 @@ function draw(
 }
 
 describe("the photos are their own element ABOVE the bubble (mockup F)", () => {
-  test("a text + photo message draws the block, then the bubble (mutation: keep the photos inside the `fill` bubble → the owner's rejected WhatsApp shape)", () => {
+  test("the block's own style: right-aligned, `photoBlock`'s width and height, and NOT a wrapping row (Review round 5, finding 1: a wrap line is as tall as the tall tile, so the 3rd photo lands below it)", () => {
     const nodes = draw(
       [ref("a", { localUri: "file:///p/a.png", aspectRatio: 1 })],
       "this is the text",
@@ -186,15 +186,42 @@ describe("the photos are their own element ABOVE the bubble (mockup F)", () => {
     expect(nodes).toHaveLength(2);
     const [photos, bubble] = nodes;
     expect(photos?.props.testID).toBe("row-photos");
-    // The block's own style: right-aligned, `photoBlock`'s width.
     expect((photos?.props.style as readonly unknown[])[0]).toEqual(
-      expect.objectContaining({ alignSelf: "flex-end", flexDirection: "row", flexWrap: "wrap" }),
+      expect.objectContaining({ alignSelf: "flex-end" }),
     );
-    expect((photos?.props.style as readonly unknown[])[1]).toEqual({ width: 200 });
+    const blockStyle = JSON.stringify((photos?.props.style as readonly unknown[])[0] ?? {});
+    // The rectangle is `photoBlock`'s, and the tiles are placed inside it — a
+    // flex row would re-measure the block instead.
+    expect(blockStyle).not.toContain("flexWrap");
+    expect(blockStyle).not.toContain("flexDirection");
+    expect((photos?.props.style as readonly unknown[])[1]).toEqual({ width: 200, height: 200 });
     // The second sibling is the `fill` bubble, and no photo is inside it.
     expect(JSON.stringify(bubble?.props.style)).toContain(theme.lightPalette.fill);
     expect(all(bubble?.children ?? [], "Image")).toEqual([]);
     expect(byTestId(bubble?.children ?? [], "image-a")).toEqual([]);
+  });
+
+  test("3 photos: each tile is PINNED to its own place, so the tall tile's column is drawn beside the stacked pair and not above it (mutation: position-free tiles in a wrapping row → Yoga puts the third at (0,204), a 302 pt block for a 200 pt height)", () => {
+    const nodes = draw(["a", "b", "c"].map((id) => ref(id, { localUri: `file:///p/${id}.png` })));
+    const block = layout.photoBlock([1, 1, 1].map(() => ref("x", { aspectRatio: 1 })));
+    // The drawn places are `photoBlock`'s, tile for tile.
+    const places = ["a", "b", "c"].map((id) => {
+      const tile = byTestId(nodes, `image-${id}`)[0];
+      const style = (tile?.props.style as readonly Record<string, unknown>[]).at(-1);
+      return { position: style?.position, left: style?.left, top: style?.top };
+    });
+    expect(places).toEqual([
+      { position: "absolute", left: 0, top: 0 },
+      { position: "absolute", left: 102, top: 0 },
+      { position: "absolute", left: 102, top: 102 },
+    ]);
+    // And they are the pure module's own answer (no second geometry here).
+    expect(block.tiles.map((tile) => [tile.x, tile.y])).toEqual([
+      [0, 0],
+      [102, 0],
+      [102, 102],
+    ]);
+    expect(block.height).toBe(200);
   });
 
   test("a photo-only message has NO bubble (mutation: always a bubble → an empty `fill` block under the photo)", () => {
@@ -223,7 +250,7 @@ describe("the photos are their own element ABOVE the bubble (mockup F)", () => {
     const tiles = byTestId(nodes, "image-a").concat(byTestId(nodes, "image-b"));
     expect(tiles).toHaveLength(2);
     const style = tiles[0]?.props.style as readonly Record<string, unknown>[];
-    expect(style.at(-1)).toEqual({ width: 98, height: 98 });
+    expect(style.at(-1)).toEqual({ width: 98, height: 98, position: "absolute", left: 0, top: 0 });
   });
 });
 

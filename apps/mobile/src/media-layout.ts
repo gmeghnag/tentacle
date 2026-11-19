@@ -17,7 +17,8 @@
  * would only drift from it.
  *
  * Pure, and the only place the geometry is decided (AGENTS §7): `TranscriptRow`
- * maps this to elements and owns nothing but colours and glyphs.
+ * maps this to elements and owns nothing but colours and glyphs — including the
+ * tiles' place, which `photoTileStyle` spells as the absolute style they take.
  */
 import type { ImageRef, UserRow } from "./transcript-rows.ts";
 
@@ -69,11 +70,23 @@ export function displayUri(
   return broken.includes(candidate) ? undefined : candidate;
 }
 
-/** One tile of a photo block: the photo it draws and the box it fills. */
+/** One tile of a photo block: the photo it draws, the box it fills and where. */
 export interface PhotoTile<T extends Pick<ImageRef, "aspectRatio">> {
   readonly ref: T;
   /** Drawn `cover`, so a box shorter than the photo crops instead of distorting. */
   readonly box: MediaBox;
+  /**
+   * The tile's offset inside the block, in points (Review round 5, finding 1).
+   *
+   * The block's shape is NOT a wrapping row of equal cells: with 3 photos the
+   * tall left tile runs the block's whole height, so a `flexWrap` line would
+   * push the third tile BELOW it (a line is as tall as its tallest item) and
+   * leave the bottom-right slot empty — a 302 pt block where `height` says 200.
+   * Yoga, the engine RN lays out with, does exactly that. The place is therefore
+   * decided HERE, with the sizes, and the component only pins each tile to it.
+   */
+  readonly x: number;
+  readonly y: number;
   /**
    * The tile stands for this many photos — itself and the ones the block hides —
    * drawn as "+N" over it (mockup F: ">4 → +N"). Absent when nothing is hidden,
@@ -149,7 +162,11 @@ export function photoBlock<T extends Pick<ImageRef, "aspectRatio">>(
     // photo's own shape, not a crop.
     const cropped = Math.abs(height - ideal) > 0.5;
     const box: MediaBox = { width: maxWidth, height, cropped };
-    return { tiles: [{ ref: only, box }], width: box.width, height: box.height };
+    return {
+      tiles: [{ ref: only, box, x: 0, y: 0 }],
+      width: box.width,
+      height: box.height,
+    };
   }
 
   // Two or more: equal square cells, `gap` apart, two per row.
@@ -167,15 +184,47 @@ export function photoBlock<T extends Pick<ImageRef, "aspectRatio">>(
     }
     const isLast = index === shown - 1;
     // 3 photos: the first tile is one tall tile running the block's whole height,
-    // the other two stack beside it (mockup F).
+    // the other two stack BESIDE it (mockup F) — hence their own `x`, never a
+    // wrapping row's line.
     const tall = shown === 3 && index === 0;
+    const tileHeight = tall ? height : cell;
     tiles.push({
       ref,
-      box: { width: cell, height: tall ? height : cell, cropped: false },
+      box: { width: cell, height: tileHeight, cropped: false },
+      // The tall tile owns the whole left column; the other two stack in the
+      // right one (mockup F). Any other count is a 2 × 2 grid in reading order.
+      x: shown === 3 && index > 0 ? cell + gap : (index % 2) * (cell + gap),
+      y: shown === 3 ? (index > 1 ? cell + gap : 0) : Math.floor(index / 2) * (cell + gap),
       ...(isLast && hidden > 0 ? { overflow: hidden + 1 } : {}),
     });
   }
   return { tiles, width, height };
+}
+
+/**
+ * One tile as the style it is DRAWN in: pinned to its place inside the block
+ * (`PhotoTile.x`/`y`), so the block's shape is the one `photoBlock` decided and
+ * never a wrapping row's (Review round 5, finding 1).
+ *
+ * The parent must therefore be a positioned box of the block's own
+ * `width` × `height`; both the sent row and the outbox row do that.
+ */
+export function photoTileStyle(
+  tile: Pick<PhotoTile<{ aspectRatio?: number }>, "box" | "x" | "y">,
+): {
+  position: "absolute";
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+} {
+  return {
+    position: "absolute",
+    left: tile.x,
+    top: tile.y,
+    width: tile.box.width,
+    height: tile.box.height,
+  };
 }
 
 /**

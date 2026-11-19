@@ -30,7 +30,14 @@ function tileAt<T>(block: { readonly tiles: readonly T[] }, index: number): T {
 describe("photoBlock — 1 photo keeps its own shape inside the cap", () => {
   test("a landscape photo is 200 × 150 at the cap (mutation: a fixed square → the photo is cropped for nothing)", () => {
     expect(photoBlock([ratio(4 / 3)])).toEqual({
-      tiles: [{ ref: { aspectRatio: 4 / 3 }, box: { width: 200, height: 150, cropped: false } }],
+      tiles: [
+        {
+          ref: { aspectRatio: 4 / 3 },
+          box: { width: 200, height: 150, cropped: false },
+          x: 0,
+          y: 0,
+        },
+      ],
       width: 200,
       height: 150,
     });
@@ -172,6 +179,63 @@ describe("photoBlock — the empty and odd inputs", () => {
       expect(photoBlock(Array.from({ length: count }, () => ratio(1))).width).toBeLessThanOrEqual(
         200,
       );
+    }
+  });
+});
+
+describe("photoBlock — every tile carries its PLACE, so the block draws as decided (Review round 5, finding 1)", () => {
+  /** The rectangle a tile covers inside the block: what Yoga would lay out. */
+  const rect = (tile: { box: { width: number; height: number }; x: number; y: number }) => ({
+    x: tile.x,
+    y: tile.y,
+    width: tile.box.width,
+    height: tile.box.height,
+    right: tile.x + tile.box.width,
+    bottom: tile.y + tile.box.height,
+  });
+
+  test("3 photos: one tall tile on the left and TWO STACKED on the right — no tile below the tall one (mutation: a position-free tile in a wrapping row → the third tile lands at (0,204) and the block is 302 pt tall)", () => {
+    const block = photoBlock([ratio(1), ratio(1), ratio(1)]);
+    // The owner's mockup: cell 98, gap 4, a 200 × 200 block.
+    expect(block.tiles.map(rect)).toEqual([
+      { x: 0, y: 0, width: 98, height: 200, right: 98, bottom: 200 },
+      { x: 102, y: 0, width: 98, height: 98, right: 200, bottom: 98 },
+      { x: 102, y: 102, width: 98, height: 98, right: 200, bottom: 200 },
+    ]);
+    // The drawn block is exactly the declared extent: nothing spills below it.
+    for (const tile of block.tiles.map(rect)) {
+      expect(tile.bottom).toBeLessThanOrEqual(block.height);
+      expect(tile.right).toBeLessThanOrEqual(block.width);
+    }
+  });
+
+  test("2 photos are one row, 4 are a 2 × 2 grid in reading order (mutation: a single column → the second photo under the first)", () => {
+    const two = photoBlock([ratio(1), ratio(1)]);
+    expect(two.tiles.map(rect)).toEqual([
+      { x: 0, y: 0, width: 98, height: 98, right: 98, bottom: 98 },
+      { x: 102, y: 0, width: 98, height: 98, right: 200, bottom: 98 },
+    ]);
+    const four = photoBlock(Array.from({ length: 4 }, () => ratio(1)));
+    expect(four.tiles.map((tile) => [tile.x, tile.y])).toEqual([
+      [0, 0],
+      [102, 0],
+      [0, 102],
+      [102, 102],
+    ]);
+  });
+
+  test("every count: no tile overlaps another and none leaves the block (mutation: a shared origin → every tile stacks on the first)", () => {
+    for (const count of [1, 2, 3, 4, 5, 10]) {
+      const block = photoBlock(Array.from({ length: count }, () => ratio(1)));
+      const boxes = block.tiles.map(rect);
+      for (const [at, a] of boxes.entries()) {
+        for (const b of boxes.slice(at + 1)) {
+          const apart = a.right <= b.x || b.right <= a.x || a.bottom <= b.y || b.bottom <= a.y;
+          expect({ count, apart }).toEqual({ count, apart: true });
+        }
+        expect(a.right).toBeLessThanOrEqual(block.width);
+        expect(a.bottom).toBeLessThanOrEqual(block.height);
+      }
     }
   });
 });

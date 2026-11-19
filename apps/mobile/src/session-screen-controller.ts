@@ -1076,6 +1076,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         ? {}
         : { returnedNotice: composeState.returnedNotice }),
       outbox: composeView().items,
+      // The SAME map the bar's rows read (Review round 5, finding 2a): two
+      // projections of one list, so a percent must not reach only one of them.
+      outboxProgress,
       notSaved: composeState.notSaved,
       photos: composeState.chips.map((chip) => ({
         key: chip.key,

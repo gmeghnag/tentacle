@@ -246,13 +246,29 @@ export function createOutboxDriver(
   ): Promise<{ item: OutboxItem; refusal: Refusal | null }> => {
     let current = withState(item, "uploading");
     await save(replace(deps.persistence.items(), current));
+    /**
+     * The percent is the MESSAGE's, never one photo's (Review round 5, finding 3):
+     * a 3-photo item reports each of its three uploads, so a per-photo fraction
+     * would read "Sending… 100 %" then "Sending… 0 %" twice, and the row's one
+     * ring would claim a measurement of the wrong thing. `done` counts the photos
+     * the daemon already holds; the photo in flight adds its own share of 1/n.
+     */
+    const total = current.photos.length;
+    let done = current.photos.filter((photo) => photo.ref !== undefined).length;
     /** The last percent reported for THIS run, so a row re-renders per whole percent. */
     let reported: number | null = null;
     const report =
       deps.onProgress === undefined
         ? undefined
         : (have: number, size: number): void => {
-            const fraction = size <= 0 ? null : Math.min(1, Math.max(0, have / size));
+            // No size is no measurement: the row stays indeterminate rather than
+            // reporting a 0 % nobody confirmed (the S4 rule, kept).
+            if (size <= 0) {
+              return;
+            }
+            const inFlight = Math.min(1, Math.max(0, have / size));
+            const fraction =
+              total === 0 ? null : Math.min(1, Math.max(0, (done + inFlight) / total));
             const percent = fraction === null ? null : Math.round(fraction * 100);
             if (percent === reported) {
               return;
@@ -274,6 +290,9 @@ export function createOutboxDriver(
             report === undefined ? undefined : { onProgress: report },
           );
           current = withRef(current, index, ref);
+          // One more photo the daemon holds: the next upload's reports start from
+          // its own share of the message, not from zero.
+          done += 1;
           // Persisted before the NEXT photo: a kill mid-upload resumes from what
           // the daemon's probe says it holds (F5).
           await save(replace(deps.persistence.items(), current));
